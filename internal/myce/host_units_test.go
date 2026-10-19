@@ -177,7 +177,7 @@ func TestInstallInstanceTargetsItsOwnUnit(t *testing.T) {
 	if err = Install(context.Background(), c, executable, "private-fixture", command); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(strings.Join(calls, "\n"), "enable --now myce-worker@gpu1.service") {
+	if !strings.Contains(strings.Join(calls, "\n"), "enable myce-worker@gpu1.service") {
 		t.Fatal(calls)
 	}
 	text, err := os.ReadFile(c.Service)

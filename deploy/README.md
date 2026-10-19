@@ -14,10 +14,15 @@ binaries, state, or services. Service definitions contain no real credentials.
 Queue and worker NAS mount paths may differ while mapping the same shared root.
 A checkpoint-root directory probe is not verification of the remote mount's identity.
 
-The worker template is batch-only. For model serving add `--model-config`,
-`--model-listen`, and `--model-advertise` with the matching catalog and reachable
-proxy address; see the [model guide](../docs/guide-model-calls.md). Installing a
-worker is not authorization to compete with an existing GPU owner.
+The Linux worker templates invoke the same installed binary's `service --config`
+entry and `_host-start-check`, matching generated units. Replace the binary,
+config, host-state and GPU-environment placeholders from the versioned installed
+config. The three worker templates share this contract; device and memory policy
+belong in config. Install/upgrade requires CLOSED intent, registers workers
+without starting them, preserves custom settings and does not require `--force`.
+Reconcile and explicitly open the host before starting eligible work. Root host
+control uses only the separate protected `/usr/local/libexec/myce/myce` copy;
+worker install never writes it. See the [native identity checklist](../docs/probe-s11-worker-identity.md).
 
 The Linux user queue uses `PrivateDevices=no`, `NoNewPrivileges=yes`, one Go CPU,
 and initial limits of 25% CPU and 512 MiB RAM. Device namespaces (even with
@@ -26,18 +31,13 @@ The queue never opens GPU devices and refuses inherited GPU descriptors at
 startup; this is not an OS device-access sandbox. Verify it holds no GPU
 descriptors before accepting a queue. Worker units retain GPU access and
 `Delegate=memory`.
-B70 is queue-only at `192.168.0.153:7331` for the first Spark acceptance test;
-never enable a B70 worker as part of that test.
 CUDA dedicated/auto inventory requires one selected device (or one device in
-unselected output); use `join --device ID` and unique worker names on multi-GPU
-hosts. Spark unsupported memory fields select
-Linux `MemAvailable` automatically; missing/invalid OS telemetry blocks work.
-[myce-spark-worker.service](myce-spark-worker.service) is the Spark example with
-`--memory-mode auto --reserve-memory-gb 16`. Its zero cap uses the live reading;
-choose a positive cap if the admitted workload needs a stricter allowance.
+unselected output); use a configured device and unique worker names on multi-GPU
+hosts. Unified-memory workers use OS telemetry; missing/invalid telemetry blocks
+work. Qualify memory policy independently of installation.
 See [the production test plan](../docs/production-test-plan.md).
 
-Linux manual worker templates load `worker.env`. Include only the GPU runtime
+Linux manual worker templates load the selected `gpu.env` file. Include only the GPU runtime
 variables your foreground detection needs (for example `LD_LIBRARY_PATH` and
 recognized Level Zero/oneAPI/SYCL controls), and qualify detection under the user
 manager before starting. `myce install worker` automates the separate private

@@ -206,7 +206,7 @@ func TestInstallWorkerDeploymentFlags(t *testing.T) {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(out.Name())
-	for _, want := range []string{"b70-gpu1", "--host-id", `"b70"`, "myce-worker@gpu1.service", "--device", `"1"`, "--gpu", `"xpu"`, "--memory-mode", `"fixed"`, "--memory-gb", `"16"`, "--reserve-memory-gb", `"2"`, "--reserve-host-memory-gb", `"4"`, "--host-memory-budget-gb", `"5"`, "--memory-ceiling-slack-gb", `"0"`, "--memory-swap-max-bytes", "--state-dir", home + "/spool", "--host-state-dir", home + "/control", "--checkpoint-root", home + "/cp", "--model-root", home + "/models", "--environment-root", home + "/envs", "--model-cache", home + "/mc", "--model-cache-bytes", "1111", "--environment-cache", home + "/ec", "--environment-cache-bytes", "2222", "--heartbeat", "2s", "--log-retention", "24h0m0s", "--require-memory-ceilings", "RestartPreventExitStatus=78", "disabled"} {
+	for _, want := range []string{"b70-gpu1", "--host-id", `"b70"`, "myce-worker@gpu1.service", "--device", `"1"`, "--gpu", `"xpu"`, "--memory-mode", `"fixed"`, "--memory-gb", `"16"`, "--reserve-memory-gb", `"2"`, "--reserve-host-memory-gb", `"4"`, "--host-memory-budget-gb", `"5"`, "--memory-ceiling-slack-gb", `"0"`, "--memory-swap-max-bytes", "--state-dir", home + "/spool", "--host-state-dir", home + "/control", "--checkpoint-root", home + "/cp", "--model-root", home + "/models", "--environment-root", home + "/envs", "--model-cache", home + "/mc", "--model-cache-bytes", "1111", "--environment-cache", home + "/ec", "--environment-cache-bytes", "2222", "--heartbeat", "2s", "--log-retention", "24h0m0s", "--require-memory-ceilings", "RestartPreventExitStatus=78", "closed"} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("missing %q", want)
 		}

@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 )
@@ -16,18 +15,6 @@ func (c ServiceConfig) HostReconcileServiceText() string {
 
 const hostReconcileTimerText = "[Unit]\nDescription=Converge Mycelium host intent with its queues\n\n[Timer]\nOnBootSec=5s\nOnUnitInactiveSec=5s\nUnit=myce-host-reconcile.service\n\n[Install]\nWantedBy=timers.target\n"
 
-func installHostReconcileTimer(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error)) error {
-	for name, body := range map[string]string{"myce-host-reconcile.service": c.HostReconcileServiceText(), "myce-host-reconcile.timer": hostReconcileTimerText} {
-		if err := atomicServiceText(filepath.Join(filepath.Dir(c.Service), name), body); err != nil {
-			return err
-		}
-	}
-	if _, err := command(ctx, "systemctl", "--user", "daemon-reload"); err != nil {
-		return err
-	}
-	_, err := command(ctx, "systemctl", "--user", "enable", "--now", "myce-host-reconcile.timer")
-	return err
-}
 func atomicServiceText(path, body string) error {
 	f, err := os.CreateTemp(filepath.Dir(path), ".reconcile-unit-")
 	if err != nil {
