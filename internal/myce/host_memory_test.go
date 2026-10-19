@@ -315,6 +315,10 @@ func TestHostMemoryAllowanceAggregatePreparationsAndSidecars(t *testing.T) {
 			q, clock := fixture(t)
 			a, b := machine("card-a", "fake"), machine("card-b", "fake")
 			for _, m := range []*Machine{&a, &b} {
+				if docker {
+					m.Capabilities = []string{"docker"}
+					m.CapabilityProfile.OS = "linux"
+				}
 				m.HostID = "host"
 				m.HostMemoryMeasured = true
 				m.HostAvailableMemoryGB = 64

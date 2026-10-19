@@ -630,6 +630,8 @@ func TestDockerExplicitSwapAndHiddenNetworkCustody(t *testing.T) {
 func TestDockerGroupAdmissionUsesSimultaneousJobMemory(t *testing.T) {
 	q, _ := fixture(t)
 	m := machine("group", "fake")
+	m.Capabilities = []string{"docker"}
+	m.CapabilityProfile.OS = "linux"
 	m.HostID = "group-host"
 	m.HostMemoryMeasured = true
 	m.HostAvailableMemoryGB = 32

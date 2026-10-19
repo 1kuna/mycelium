@@ -1,0 +1,29 @@
+package myce
+
+// An endpoint is an explicit opt-in, not a health check. Missing advertisement
+// never implies Docker support, including for workers predating this contract.
+func dockerRuntimeFits(j *Job, m *Machine) bool {
+	return !j.Spec.Run.Docker || contains(m.Capabilities, "docker") && m.CapabilityProfile != nil && m.CapabilityProfile.OS == "linux"
+}
+
+func dockerRuntimeWaitingReason(j *Job, machines map[string]*Machine) string {
+	if !j.Spec.Run.Docker {
+		return ""
+	}
+	enabled := false
+	for _, m := range machines {
+		if m.Gone || m.Leaving || !machineAllowed(j.Spec.AllowedMachines, m.ID) {
+			continue
+		}
+		if contains(m.Capabilities, "docker") {
+			enabled = true
+		}
+		if dockerRuntimeFits(j, m) {
+			return ""
+		}
+	}
+	if enabled {
+		return "needs docker runtime on Linux; no worker supports it"
+	}
+	return "needs docker runtime; no worker has it enabled"
+}

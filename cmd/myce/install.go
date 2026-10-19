@@ -51,7 +51,7 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 	}
 	hostname, _ := os.Hostname()
 	values := myce.ServiceConfig{NAS: nasDefault, Queue: env("MYCE_QUEUE", "http://127.0.0.1:7331"), Name: hostname,
-		DockerEndpoint: env("DOCKER_HOST", "unix:///var/run/docker.sock"), HostStateDir: os.Getenv("MYCE_HOST_STATE_DIR"),
+		HostStateDir:    os.Getenv("MYCE_HOST_STATE_DIR"),
 		EnvironmentFile: filepath.Join(home, ".config", "myce", "fleet.env"), RequireMountedNAS: probe.OS == "linux",
 		Detection: myce.Detection{MemoryMode: "auto"}}
 	defaults := values

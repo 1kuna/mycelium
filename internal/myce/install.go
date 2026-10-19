@@ -287,7 +287,6 @@ func PlanInstall(role, home, root, nas, queue, name string, d Detection, account
 	c.ModelRoot = filepath.Join(nas, "mycelium", "models")
 	c.DB = filepath.Join(c.State, "myce.db")
 	c.HostStateDir = filepath.Join(home, ".local", "share", "myce")
-	c.DockerEndpoint = defaultDockerEndpoint(os.Getenv("DOCKER_HOST"))
 	c.HostID, _ = os.Hostname()
 	c.ReserveHostMemoryGB = 4
 	c.MemoryCeilingSlackGB = .125
@@ -790,7 +789,10 @@ func (c ServiceConfig) Args() []string {
 		args = []string{"join", "--host-memory-budget-gb", strconv.FormatFloat(c.HostMemoryBudgetGB, 'f', -1, 64), "--memory-ceiling-slack-gb", strconv.FormatFloat(c.MemoryCeilingSlackGB, 'f', -1, 64), "--memory-swap-max-bytes", strconv.FormatInt(c.MemorySwapMaxBytes, 10), "--name", c.Name, "--gpu", c.Detection.Platform, "--memory-mode", c.Detection.MemoryMode, "--memory-gb", strconv.FormatFloat(c.Detection.MemoryGB, 'f', -1, 64), "--reserve-memory-gb", strconv.FormatFloat(c.Detection.ReserveGB, 'f', -1, 64), "--state-dir", c.State, "--checkpoint-root", c.Checkpoints, "--model-root", c.ModelRoot, "--model-cache", c.ModelCache, "--model-cache-bytes", strconv.FormatInt(c.ModelCacheBytes, 10), "--environment-root", c.EnvironmentRoot, "--environment-cache", c.EnvironmentCache, "--environment-cache-bytes", strconv.FormatInt(c.EnvironmentCacheBytes, 10)}
 	}
 	if c.Role == "worker" {
-		args = append(args, "--service-config", c.Config, "--docker-host", c.DockerEndpoint)
+		args = append(args, "--service-config", c.Config)
+		if c.DockerEndpoint != "" {
+			args = append(args, "--docker-host", c.DockerEndpoint)
+		}
 		if c.OnboardingBenchmark {
 			args = append(args, "--onboarding-benchmark")
 		}
