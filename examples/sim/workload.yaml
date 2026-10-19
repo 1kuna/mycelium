@@ -1,49 +1,25 @@
-# Aggregate-demand proxy, not a production trace replay. Every arrival rate,
-# count, duration, deadline, weight, checkpoint interval, and platform portability
-# below is a GUESS unless explicitly attributed. Durations vary +/-20% by seed.
-# GUESS: all compatible workers have model files pre-staged and unlimited
-# simulated disk cache; no NAS copying or environment setup cost is modeled.
-# Model identities and sizes: .reports/non-llm-models-2026-10-11.md and
-# .reports/verso-b70-investigation-2026-10-09.md. File sizes are not GPU budgets.
+# Illustrative synthetic workload; identities and numbers are invented.
+# Durations vary +/-20% by seed. Arrivals are independent, not a trace replay.
+# Compatible workers have model files pre-staged and unlimited simulated cache;
+# no NAS copying or environment setup cost is modeled. Portability is assumed.
 projects:
-  verso: {weight: 3} # GUESS
-  atlas: {weight: 2} # GUESS
-  theia: {weight: 1} # GUESS: secondary synthetic Metal batch project
+  project-a: {weight: 3}
+  project-b: {weight: 2}
+  project-c: {weight: 1}
 models:
-  # Observed Cohere cache ~4.1345 GB; observed median XPU load 3.63 s.
-  # GUESS: 8 GiB GPU, 6 GiB host, rounded bundle size; platform XPU from report.
-  - {name: cohere-transcribe, size_bytes: 4134500000, memory_gb: 8, host_memory_gb: 6, load_seconds: 3.63, platforms: [xpu]}
-  # Observed pyannote median XPU load 1.44 s. Bundle size unknown: omit (0).
-  # GUESS: 4 GiB GPU, 2 GiB host.
-  - {name: pyannote31, memory_gb: 4, host_memory_gb: 2, load_seconds: 1.44, platforms: [xpu]}
-  # Observed exact naming GGUF bytes and median cold startup 44.62 s.
-  # GUESS: 24 GiB GPU incl KV, 4 GiB host; Metal/CUDA batch portability unqualified.
-  - {name: qwen38-27b-q4, size_bytes: 18973870432, memory_gb: 24, host_memory_gb: 4, load_seconds: 44.62, platforms: [xpu, cuda, metal]}
-  # Observed GLM-OCR directory 2.657 GB. GUESS: rounded size, 8 GiB GPU,
-  # 4 GiB host, 25 s startup (not measured), CUDA only.
-  - {name: glm-ocr, size_bytes: 2657000000, memory_gb: 8, host_memory_gb: 4, load_seconds: 25, platforms: [cuda]}
-  # Observed Ornith FP8 directory 37.711 GB and 35.75 GiB KV config.
-  # GUESS: rounded bundle size, 76 GiB GPU total, 8 GiB host, 90 s startup.
-  - {name: ornith35-fp8, size_bytes: 37711000000, memory_gb: 76, host_memory_gb: 8, load_seconds: 90, platforms: [cuda]}
-  # Theia model identity from report. GUESS: all sizes/memory/load numbers.
-  - {name: parakeet-mlx, size_bytes: 1200000000, memory_gb: 4, host_memory_gb: 2, load_seconds: 8, platforms: [metal]}
-# Production evidence: .reports/verso-trace-and-start-here-2026-10-11.md.
-# MEASURED: 585 retained arrivals / 167 calendar days; successful whole-pipeline
-# median 257.4763 s. This includes initialization and non-GPU work.
-# The real consumer processes one recording at a time: diarization -> ASR
-# (including optional refinement) -> naming, with irregular multi-recording bursts.
-# LIMIT: sim has no dependencies, serial consumer, trace arrivals or duration CDF.
-# Below is only a smoothed aggregate-demand sensitivity check, NOT that pattern.
-# GUESS: uniform spacing, count 1, first hour 9, +/-20% duration jitter, and
-# whole-pipeline 24 GiB GPU / 6 GiB host reservation; no extra model load timer.
-# Other streams remain GUESSES. No cross-platform equivalence is qualified.
+  - {name: model-a, size_bytes: 4000000000, memory_gb: 10, host_memory_gb: 5, load_seconds: 5, platforms: [xpu, cuda]}
+  # Omitted size_bytes illustrates an unknown bundle size (defaults to zero).
+  - {name: model-b, memory_gb: 5, host_memory_gb: 5, load_seconds: 5, platforms: [xpu]}
+  - {name: model-c, size_bytes: 20000000000, memory_gb: 30, host_memory_gb: 5, load_seconds: 40, platforms: [xpu, cuda, metal]}
+  - {name: model-d, size_bytes: 3000000000, memory_gb: 10, host_memory_gb: 5, load_seconds: 20, platforms: [cuda]}
+  - {name: model-e, size_bytes: 40000000000, memory_gb: 60, host_memory_gb: 10, load_seconds: 100, platforms: [cuda]}
+  - {name: model-f, size_bytes: 1000000000, memory_gb: 5, host_memory_gb: 5, load_seconds: 10, platforms: [metal]}
 streams:
-  - {name: recordings-pipeline-proxy, project: verso, priority: production, platforms: [xpu], memory_gb: 24, host_memory_gb: 6, duration_seconds: 257.4763, every_hours: 6.85128205, start_hour: 9, count: 1}
-  - {name: verso-experiments, project: verso, priority: experiment, model: qwen38-27b-q4, platforms: [xpu, cuda, metal], memory_gb: 24, host_memory_gb: 4, duration_seconds: 3600, checkpoint_seconds: 180, every_hours: 1, start_hour: 0, count: 4}
-  - {name: atlas-ocr, project: atlas, priority: experiment, model: glm-ocr, platforms: [cuda], memory_gb: 8, host_memory_gb: 4, duration_seconds: 900, checkpoint_seconds: 120, every_hours: 1, start_hour: 0, count: 4}
-  - {name: atlas-judge, project: atlas, priority: experiment, model: ornith35-fp8, call: true, duration_seconds: 120, every_hours: 2, start_hour: 0.5, count: 4}
-  - {name: atlas-deadline, project: atlas, priority: deadline, model: glm-ocr, platforms: [cuda], memory_gb: 8, host_memory_gb: 4, duration_seconds: 1800, checkpoint_seconds: 120, every_hours: 24, start_hour: 14, count: 1, deadline_seconds: 2400}
-  - {name: theia-files, project: theia, priority: experiment, model: parakeet-mlx, platforms: [metal], memory_gb: 4, host_memory_gb: 2, duration_seconds: 900, checkpoint_seconds: 120, every_hours: 1, start_hour: 0, count: 2}
-  # Built-in what-if: identical 12-file work, one serial job vs 12 queue jobs.
-  # GUESS: CUDA/XPU port of transcription batch and 5 min/file runtime.
-  - {name: transcription-batch, project: verso, priority: experiment, model: cohere-transcribe, platforms: [xpu, cuda], memory_gb: 8, host_memory_gb: 6, duration_seconds: 300, checkpoint_seconds: 180, every_hours: 24, start_hour: 8, count: 1, batch_files: 12}
+  - {name: stream-a, project: project-a, priority: production, platforms: [xpu], memory_gb: 30, host_memory_gb: 5, duration_seconds: 300, every_hours: 6, start_hour: 8, count: 1}
+  - {name: stream-b, project: project-a, priority: experiment, model: model-c, platforms: [xpu, cuda, metal], memory_gb: 30, host_memory_gb: 5, duration_seconds: 3600, checkpoint_seconds: 180, every_hours: 1, start_hour: 0, count: 4}
+  - {name: stream-c, project: project-b, priority: experiment, model: model-d, platforms: [cuda], memory_gb: 10, host_memory_gb: 5, duration_seconds: 900, checkpoint_seconds: 120, every_hours: 1, start_hour: 0, count: 4}
+  - {name: stream-d, project: project-b, priority: experiment, model: model-e, call: true, duration_seconds: 120, every_hours: 2, start_hour: 1, count: 4}
+  - {name: stream-e, project: project-b, priority: deadline, model: model-d, platforms: [cuda], memory_gb: 10, host_memory_gb: 5, duration_seconds: 1800, checkpoint_seconds: 120, every_hours: 24, start_hour: 14, count: 1, deadline_seconds: 2400}
+  - {name: stream-f, project: project-c, priority: experiment, model: model-f, platforms: [metal], memory_gb: 5, host_memory_gb: 5, duration_seconds: 900, checkpoint_seconds: 120, every_hours: 1, start_hour: 0, count: 2}
+  # Identical illustrative 12-file work, one serial job versus 12 queue jobs.
+  - {name: stream-g, project: project-a, priority: experiment, model: model-a, platforms: [xpu, cuda], memory_gb: 10, host_memory_gb: 5, duration_seconds: 300, checkpoint_seconds: 180, every_hours: 24, start_hour: 8, count: 1, batch_files: 12}
