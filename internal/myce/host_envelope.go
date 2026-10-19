@@ -207,7 +207,7 @@ func HostSnapshot(ctx context.Context, v HostInvocation, clock Clock) (HostEnvel
 	// Stored acknowledgements are history, never current queue observations.
 	queues, err := (HostControl{Dir: v.StateDir}).Queues()
 	if err != nil {
-		return e, ErrHostState
+		return e, errors.Join(ErrHostState, err)
 	}
 	for _, p := range s.Pending {
 		if !slices.Contains(queues, p.Queue) {
