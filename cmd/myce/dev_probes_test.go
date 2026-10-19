@@ -17,6 +17,29 @@ import (
 )
 
 func TestDevProbeInstallUpgrade(t *testing.T) {
+	// The composed fixtures include synchronous install calls and subprocesses
+	// without contexts. Isolate them so one deadline bounds the entire probe,
+	// including fixture cleanup, without changing the production installer.
+	const childEnv = "MYCE_TEST_INSTALL_PROBE_CHILD"
+	if os.Getenv(childEnv) != "1" {
+		const bound = 60 * time.Second
+		started := time.Now()
+		ctx, cancel := context.WithTimeout(context.Background(), bound)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestDevProbeInstallUpgrade$", "-test.count=1", "-test.v")
+		cmd.Env = append(os.Environ(), childEnv+"=1")
+		cmd.WaitDelay = time.Second
+		out, err := cmd.CombinedOutput()
+		elapsed := time.Since(started)
+		t.Logf("install probe child (%s):\n%s", elapsed, out)
+		if ctx.Err() != nil || elapsed >= bound {
+			t.Fatalf("install probe exceeded %s bound: elapsed=%s, deadline=%v", bound, elapsed, ctx.Err())
+		}
+		if err != nil {
+			t.Fatal("install probe child:", err)
+		}
+		return
+	}
 	for _, tc := range []struct {
 		name string
 		run  func(*testing.T)
