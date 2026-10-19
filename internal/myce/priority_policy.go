@@ -58,16 +58,16 @@ func validateProjectIdentifier(project string) error {
 }
 func normalizeJobClass(s *Spec) error {
 	if err := validateProjectIdentifier(s.Project); err != nil {
-		return err
+		return reject("job_project_invalid", err)
 	}
 	if strings.Contains(s.Class, "/") {
-		return errors.New("class cannot contain slash")
+		return reject("job_class_invalid", errors.New("class cannot contain slash"))
 	}
 	if s.Priority != "" && legacyRank(s.Priority) == 3 {
-		return errors.New("priority must be production, deadline or experiment")
+		return reject("job_priority_invalid", errors.New("priority must be production, deadline or experiment"))
 	}
 	if s.Class != "" && s.Priority != "" && s.Class != s.Priority {
-		return errors.New("class and legacy priority must agree")
+		return reject("job_class_invalid", errors.New("class and legacy priority must agree"))
 	}
 	s.Class = jobClass(*s)
 	// Priority retains legacy reliability/deadline semantics, independent of tiers.
