@@ -507,6 +507,21 @@ func (q *Queue) stop(j *Job, why string) {
 	j.State = "stopping"
 	j.Reason = why
 }
+func (q *Queue) fleetQuiet(now time.Time) bool {
+	active, healthy := 0, 0
+	for _, m := range q.s.Machines {
+		if !m.Gone && !m.Leaving && m.Disabled == "" {
+			active++
+			if now.Sub(m.LastSeen) < min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2])) {
+				healthy++
+			}
+		}
+	}
+	// Cached contact can identify a continuously reporting minority, but cannot
+	// replace a currently healthy worker when the entire active fleet is quiet.
+	return q.s.NetworkRecoveryAt.IsZero() && active > 0 && (healthy == 0 || healthy*2 < active && now.Sub(q.s.LastWorkerContact) >= min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2])))
+}
+
 func (q *Queue) maintain() {
 	q.maintainSubmissions()
 	now := q.clock.Now()
@@ -533,18 +548,7 @@ func (q *Queue) maintain() {
 			delete(q.s.BatchReleases, machine)
 		}
 	}
-	active, healthy := 0, 0
-	for _, m := range q.s.Machines {
-		if !m.Gone && !m.Leaving && m.Disabled == "" {
-			active++
-			if now.Sub(m.LastSeen) < min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2])) {
-				healthy++
-			}
-		}
-	}
-	// Cached contact can identify a continuously reporting minority, but cannot
-	// replace a currently healthy worker when the entire active fleet is quiet.
-	q.networkQuiet = q.s.NetworkRecoveryAt.IsZero() && active > 0 && (healthy == 0 || healthy*2 < active && now.Sub(q.s.LastWorkerContact) >= min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2])))
+	q.networkQuiet = q.fleetQuiet(now)
 	for _, m := range q.s.Machines {
 		unreported := q.unreported[m.ID]
 		outageGrace := !q.s.NetworkRecoveryAt.IsZero() && m.LastSeen.Before(q.s.NetworkRecoveryAt) && now.Before(q.s.NetworkRecoveryAt.Add(q.machineLossTimeout(m.ID)))
@@ -738,16 +742,18 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 				}
 			}
 		}
-		// Give peers one reconnect window without changing their actual heartbeat.
-		// Subsequent reports cannot renew this outage epoch.
-		if q.networkQuiet && old != nil && !old.Gone && !q.clock.Now().Before(q.restartUntil) && q.s.NetworkRecoveryAt.IsZero() {
-			q.s.NetworkRecoveryAt = q.clock.Now()
-		}
 		delete(q.unreported, m.ID)
 		m.Gone = false
 		m.LastSeen = q.clock.Now()
-		q.s.LastWorkerContact = m.LastSeen
 		q.s.Machines[m.ID] = &m
+		// Count this worker as healthy, but detect majority silence before
+		// replacing the previous fleet contact. Otherwise the first reconnect
+		// looks like a continuously reporting survivor and expires its peers.
+		// Keep actual peer heartbeats and the active recovery deadline unchanged.
+		if (q.networkQuiet || q.fleetQuiet(m.LastSeen)) && old != nil && !old.Gone && !m.LastSeen.Before(q.restartUntil) && q.s.NetworkRecoveryAt.IsZero() {
+			q.s.NetworkRecoveryAt = m.LastSeen
+		}
+		q.s.LastWorkerContact = m.LastSeen
 		delete(q.s.BatchReleases, m.ID) // This report supersedes acknowledgement credit.
 		q.reconcileModels(&m, c.ModelReports)
 		if e := q.reconcileEnvironments(&m); e != nil {

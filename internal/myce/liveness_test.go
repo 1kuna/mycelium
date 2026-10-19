@@ -155,3 +155,40 @@ func TestFleetRecoveryEpochSurvivesQueueRestart(t *testing.T) {
 		t.Fatal("outage epoch extended queue restart grace")
 	}
 }
+
+func TestFleetReconnectBeforeTickPreservesRunningAttempt(t *testing.T) {
+	q, c := fixture(t)
+	runner := machine("runner", "fake")
+	s := spec("experiment")
+	s.AllowedMachines = []string{runner.ID}
+	j := submit(t, q, s)
+	assigned := check(t, q, runner, nil).Job
+	if err := q.Started(result(assigned, true)); err != nil {
+		t.Fatal(err)
+	}
+	peer := machine("peer", "fake")
+	check(t, q, peer, nil)
+	check(t, q, machine("other", "fake"), nil)
+	last := q.s.Machines[runner.ID].LastSeen
+
+	// The first request after fleet silence can be a heartbeat, without a Tick
+	// or status request having detected the outage first.
+	c.Advance(10 * time.Minute)
+	check(t, q, peer, nil)
+	if got := q.s.Jobs[j.ID]; got.State != "running" || got.Losses != 0 {
+		t.Fatalf("first reconnect charged healthy attempt: state=%s losses=%d", got.State, got.Losses)
+	}
+	if !q.s.Machines[runner.ID].LastSeen.Equal(last) {
+		t.Fatal("peer reconnect rewrote actual heartbeat")
+	}
+	check(t, q, runner, assigned)
+
+	// A later isolated worker still expires once, despite the earlier outage.
+	for elapsed := time.Second; elapsed <= LossAfter; elapsed += time.Second {
+		c.Advance(time.Second)
+		check(t, q, peer, nil)
+	}
+	if got := q.s.Jobs[j.ID]; got.State != "queued" || got.Losses != 1 {
+		t.Fatalf("single isolation: state=%s losses=%d, want queued with one loss", got.State, got.Losses)
+	}
+}
