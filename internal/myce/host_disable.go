@@ -200,7 +200,14 @@ func (h HostControl) workers() ([]HostWorker, error) {
 				r.Session = st.Session
 			}
 			if st.Job != nil {
-				r.Executions = []Result{{Machine: r.Name, Session: st.Session, Execution: Execution{ID: st.Job.ID, Attempt: st.Job.Attempt}}}
+				current := Result{Machine: r.Name, Session: st.Session, Execution: Execution{ID: st.Job.ID, Attempt: st.Job.Attempt}}
+				found := false
+				for _, saved := range r.Executions {
+					found = found || saved.Machine == current.Machine && saved.Session == current.Session && saved.Execution == current.Execution
+				}
+				if !found {
+					r.Executions = append(r.Executions, current)
+				}
 			}
 		} else if !errors.Is(e, os.ErrNotExist) {
 			return nil, e

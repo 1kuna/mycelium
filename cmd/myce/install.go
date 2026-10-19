@@ -303,6 +303,9 @@ func serviceCommand(args []string) error {
 				return errors.New("invalid worker unit")
 			}
 		}
+		if err := myce.RegisterInstalledWorker(c); err != nil {
+			return err
+		}
 		reason, err := myce.HostDisabled(dir)
 		if err != nil {
 			return err

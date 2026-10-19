@@ -1,44 +1,38 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"io"
-	"strings"
-
 	"mycelium/internal/myce"
+	"os"
 )
 
-// S04 adds only the offline conversion entry point. S08 owns the host CLI and
-// its versioned command envelope; conversion outputs a private inventory.
 func hostConvertCommand(args []string, out io.Writer) error {
+	return hostConvertCommandWithProbe(args, myce.LocalMachineProbe(), out)
+}
+func hostConvertCommandWithProbe(args []string, probe myce.MachineProbe, out io.Writer) error {
 	f := flag.NewFlagSet("host convert", flag.ContinueOnError)
-	dir := f.String("host-state-dir", "", "offline shared host state directory")
-	host := f.String("host-id", "", "explicit physical host mapping")
-	dry := f.Bool("dry-run", false, "inventory only; do not publish state")
-	apply := f.Bool("apply", false, "preserve originals and publish validated state offline")
-	queues := map[string]string{}
-	f.Func("queue-db", "repeat QUEUE_URL=OFFLINE_DB for every referenced or forgotten queue", func(value string) error {
-		queue, path, ok := strings.Cut(value, "=")
-		if !ok || queue == "" || path == "" {
-			return errors.New("queue-db requires QUEUE_URL=OFFLINE_DB")
-		}
-		if _, ok := queues[queue]; ok {
-			return errors.New("duplicate queue mapping")
-		}
-		queues[queue] = path
-		return nil
-	})
-	if err := f.Parse(args); err != nil {
-		return err
-	}
-	if f.NArg() != 0 || *dry == *apply || *dir == "" || *host == "" {
-		return errors.New("usage: myce host convert --host-state-dir DIR --host-id ID --dry-run|--apply [--queue-db URL=DB]")
-	}
-	m, err := myce.ConvertHostControl(myce.HostConversionOptions{Dir: *dir, Host: *host, QueueDatabases: queues, Clock: myce.RealClock{}, Apply: *apply})
-	if e := json.NewEncoder(out).Encode(m); e != nil {
+	local := f.Bool("local", false, "convert the stopped installation in place, as its worker user")
+	config := f.String("config", "", "an existing config selecting the installation root")
+	dry := f.Bool("dry-run", false, "read-only inventory; no files or services changed")
+	if e := f.Parse(args); e != nil {
 		return e
 	}
-	return err
+	if !*local || f.NArg() != 0 {
+		return errors.New("usage: myce host convert --local [--config FILE] [--dry-run]")
+	}
+	home, e := os.UserHomeDir()
+	if e != nil {
+		return e
+	}
+	ctx, cancel := myce.SetupTimeout(context.Background())
+	defer cancel()
+	r, e := myce.ConvertLocalInstallation(ctx, myce.LocalConversionOptions{Home: home, Config: *config, Probe: probe, Clock: myce.RealClock{}, DryRun: *dry})
+	if we := json.NewEncoder(out).Encode(r); we != nil {
+		return we
+	}
+	return e
 }

@@ -1,82 +1,101 @@
-# Offline persisted-state conversion
+# In-place persisted-state conversion
 
-The current binary refuses old queue/spool formats and old worker protocol
-clients. Upgrade the queue and every worker together; HTTP 426 means the worker
-must be upgraded. This procedure prepares a **CLOSED** conversion bundle. It
-never stops services, contacts queues/Docker, starts work, or installs the bundle.
-Live inventory and deployment require their own authorization.
+Upgrade the queue and every worker together. The current binary refuses old
+queue/spool formats and returns HTTP 426 for old or missing worker/report
+protocols, including checkpoint publication.
 
-Use a stopped, private local copy, with the old processes and service restart
-sources stopped by their owner. Keep the original binary/configuration and a
-WAL-consistent backup. Do not copy a running SQLite database without its WAL:
-use SQLite's backup facility, or copy the database and its sidecars after the
-writer has stopped. Existing queue, worker and controller lock files are checked,
-but locks cannot prove that an omitted service or external daemon is stopped.
-
-The source directory has these explicit locations:
-
-- `queue.db`, with any `queue.db-wal`/`queue.db-shm` and lock files;
-- `workers/<label>/`, one complete spool per worker, including results, logs,
-  process records, Docker custody and local checkpoint payloads;
-- `host/`, the complete shared host-control directory, including per-unit state;
-- `checkpoints/<job>/attempt-<n>/`, any NAS checkpoint copies being qualified;
-- optional install directories containing paired `config.json` and old JSON
-  `credentials.json` files.
-
-Include every referenced spool and custody record. Do not include unrelated
-caches or filesystem trees. No symlinks, devices or sockets are accepted. The
-converter never follows absolute paths found inside records. A registry maps to
-exactly one included spool through its saved session; missing, conflicting or
-ambiguous mappings block publication. Missing owner/session/engine attempt or
-load deadline, unsupported schema and unsequenced saves also block publication.
-No timestamp, filename ordering or invented generation resolves these blockers.
-
-Run as the intended service account, with an explicit physical host identity and a new target directory. Its
-parent must exist on storage with room for staging and preserved originals:
+Run conversion as the worker account on a stopped Linux/systemd installation:
 
 ```sh
-myce state convert --source ./offline-source --target ./converted \
-  --host-id example-host --dry-run
-myce state convert --source ./offline-source --target ./converted \
-  --host-id example-host --apply
+"$NEW" host convert --local --config "$W0" --dry-run
+"$NEW" host convert --local --config "$W0"
 ```
 
-These commands run before credential loading. JSON output is private operational
-evidence: retain it locally, including blockers, table counts and hashes. It is
-not suitable for posting publicly. Source files are never edited. The target
-retains their original bytes under `.conversion/originals/`, with original modes
-recorded in `.conversion/manifest.json`; backup permissions are restricted.
-The copied SQLite database is integrity-checked, updated transactionally, fully
-checkpointed, then closed. Logs, usage, jobs, attempts, charges and results stay
-intact. Retired control maps remain historical JSON, and retired receipts and
-registries remain under `.conversion/retired-host/`. Exact receipt executions
-become pending obligations. No historical receipt becomes local release proof.
+`NEW` is the reviewed new executable outside the installed binary paths. `W0`
+is an existing worker config. Without `--config`, discovery uses
+`$HOME/.local/share/mycelium/*/config.json`. All sibling queue and worker configs
+must describe the same host. Configs select the existing DB, spools, host state,
+credentials, environment custody, binaries and units. No target, path rebinding,
+or hand-edited registry is needed. Both `myce-worker@gpu0.service` and
+`myce-worker@gpu1.service` retain their names. External EnvironmentFile/joining
+credentials are preserved; conversion does not read them or contact Docker.
 
-Every saved queue host and the local host are fenced CLOSED with new revisions.
-The local revision exceeds the saved counters. Local release and queue settlement
-start unconfirmed. Registry spool paths point inside the published target;
-old commands, installed-config pointers and cache pointers stay inert in backup.
-Current installer/worker registration must restore the installed configuration
-bindings before rest/ready can pass. Queue and worker binaries must use this same
-protocol. An explicit open operation after fresh reconciliation is required.
+Stop the queue, workers, reconcile service and reconcile timer before conversion,
+and coordinate other restart sources with their owners. Conversion refuses active
+units, held runtime/controller locks and a live SQLite writer. It does not stop
+services. Saved native processes or Docker operations can still own executions;
+stopped units and SQLite writers do not establish their release.
 
-The final publication is one same-filesystem directory rename after file and
-directory syncs and a complete source recheck. A sibling `.conversion.lock`
-serializes converters. Dry runs and failures retain private `.myce-convert-*`
-staging directories beside the target; they are unpublished evidence, not active
-state. Keep them until their owner has verified they are unused and disposable.
-To recover from interruption, rerun the same command with the same immutable
-source and target. Before publication it builds another stage; after publication
-it verifies source, original and converted hashes plus CLOSED state and returns
-the completed manifest. A modified/used target is refused, never overwritten.
+Dry-run opens SQLite read-only, includes saved WAL transactions in the job/copy
+counts, lists the inspected file hashes and intended actions, and writes nothing.
+It does not qualify local exclusion or promise successful reconciliation.
+Operational JSON contains private installation paths: retain it privately.
 
-The target is a validated bundle, not an installation switch. Before starting
-services, the install owner must bind the queue DB, host-state directory, every
-worker spool, credentials, checkpoint roots and required-worker configuration to
-the intended converted locations. Keep NAS-relative job assignments and each
-worker's configured NAS root consistent. Do not start a second queue or restart
-an old worker against either copy. Confirm counts and exact release custody from
-the native stopped backup, then start the matching queue CLOSED and reconcile.
-A blocked conversion leaves the original version's state intact; do not reset,
-cancel jobs, edit rows, or delete checkpoints to bypass it. Preserve the source
-and bring the blocker to its owner.
+Apply checksum-verifies an exact pre-conversion backup before modifying any
+active file. SQLite checkpoints the verified private DB/WAL copy, then conversion
+validates queue/spool formats and custody identities. Publication uses atomic
+file replacement under a durable runtime fence. Only removing that fence commits
+the complete installation. Jobs, attempts, copies, logs, auxiliary tables,
+checkpoints and saved Docker endpoints stay intact. Only known installed
+credential files can change from old JSON into EnvironmentFile syntax. Job and
+checkpoint payloads, including files named `credentials.json`, `config.json` or
+`state.json`, are opaque.
+
+Backups, modes, timestamps, checksums, staged files and journals remain in
+`<host-state>/.host-conversion/run-*`. Returned errors restore the original files;
+a process crash keeps the installation fenced. Rerun the same command to verify
+and restore its backup (`phase: restored`), then run it again to convert. A damaged
+backup is refused and the fence remains. Preserve all evidence and the old binary.
+An already converted installation returns `phase: unchanged` without writes.
+A blocker is a stop condition: do not reset jobs, edit rows or delete custody to
+bypass it.
+
+Conversion preserves registry config, command, unit, spool, environment cache,
+sessions and executions. RC registries omitted the current session: the exact
+bound spool supplies it; receipt executions keep their own sessions. Conversion
+never invents release. A provably idle installation starts CLOSED with confirmed
+previous-close settlement. Saved execution, copy, model or daemon custody leaves
+settlement pending; open returns `previous_close_unsettled` until normal CLOSED
+reconciliation confirms release. An unresolved accepted Docker create remains
+pending even if an empty daemon listing cannot find it.
+
+After conversion, use preserving upgrades and start the existing units:
+
+```sh
+"$NEW" install worker --config "$W0"
+"$NEW" install worker --config "$W1"
+"$NEW" install queue --config "$QC"
+systemctl --user start myce-queue.service
+systemctl --user start myce-worker@gpu0.service myce-worker@gpu1.service
+systemctl --user start myce-host-reconcile.timer
+```
+
+`QC`, `W0` and `W1` are the existing config paths. Worker installs enable the
+reconcile timer; queue install starts/restarts the queue. Preserve the reviewed
+configuration, including its secret mechanism and Docker endpoint. Workers
+register while CLOSED and exit fenced successfully; they do not check in or
+launch work. The queue serves while admission stays fenced. An explicit open
+later starts those same units normally.
+
+Use the separately installed, reviewed root-owned CLI (`ROOT_MYCE`) for privileged
+exclusion observation and settlement. `WORKER_USER` is the installed account:
+
+```sh
+sudo -n "$ROOT_MYCE" host reconcile --local --worker-user "$WORKER_USER" --config "$W0" --timeout 30s
+sudo -n "$ROOT_MYCE" host status --local --worker-user "$WORKER_USER" --config "$W0" --expect closed --verdict --wait --timeout 30s --json
+```
+
+Repeat reconcile/status until `host_settlement` is `confirmed`; a CLOSED exclusion
+PASS alone does not imply settlement. Keep the installation CLOSED at the end of
+the upgrade window. Opening requires its separate workload-owner authorization;
+for a shared application host this follows the application's transition away
+from its legacy GPU workload. With that authorization, take revision `R` from the
+fresh CLOSED status and run:
+
+```sh
+sudo -n "$ROOT_MYCE" host open --local --worker-user "$WORKER_USER" --config "$W0" --expect-revision "$R"
+```
+
+Laptop tests use release-writer fixtures, fake services/process evidence and local
+HTTP. Native systemd, Docker, privileged exclusion and consumer cutover acceptance
+remain separate operational gates.

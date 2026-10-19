@@ -2,6 +2,9 @@ package myce
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -200,4 +203,60 @@ func (tx *installTransaction) restoreFiles() error {
 		}
 	}
 	return result
+}
+
+// installedHostWorker refreshes installation bindings without rotating a session
+// or dropping saved executions. It is safe while CLOSED; it admits no work.
+func installedHostWorker(c ServiceConfig) (string, HostWorker, error) {
+	state, err := filepath.Abs(c.State)
+	if err != nil {
+		return "", HostWorker{}, err
+	}
+	sum := sha256.Sum256([]byte(state))
+	path := filepath.Join(c.HostStateDir, "worker-"+hex.EncodeToString(sum[:16])+".json")
+	var w HostWorker
+	if b, e := os.ReadFile(path); e == nil {
+		if e = json.Unmarshal(b, &w); e != nil {
+			return "", w, e
+		}
+		if w.Host != c.HostID || w.Name != c.Name || w.State != c.State {
+			return "", w, ErrHostIdentity
+		}
+	} else if !errors.Is(e, os.ErrNotExist) {
+		return "", w, e
+	}
+	if b, e := os.ReadFile(filepath.Join(c.State, "state.json")); e == nil {
+		var st workerState
+		if e = decodeWorkerState(b, &st); e != nil {
+			return "", w, e
+		}
+		if w.Session == "" {
+			w.Session = st.Session
+		}
+	} else if !errors.Is(e, os.ErrNotExist) {
+		return "", w, e
+	}
+	w.Host, w.Name, w.State, w.Config, w.Unit, w.Queue, w.Environments = c.HostID, c.Name, c.State, c.Config, filepath.Base(c.Service), c.Queue, c.EnvironmentCache
+	w.Command = []string{c.Binary, "service", "--config", c.Config}
+	return path, w, nil
+}
+
+func RegisterInstalledWorker(c ServiceConfig) error {
+	unlock, err := hostOperationLock(c.HostStateDir, "intake.lock", true)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	s, err := ReadHostIntent(c.HostStateDir)
+	if err != nil {
+		return err
+	}
+	if s.Host != c.HostID {
+		return ErrHostIdentity
+	}
+	path, w, err := installedHostWorker(c)
+	if err != nil {
+		return err
+	}
+	return saveWorkerJSON(filepath.Dir(path), filepath.Base(path), w)
 }

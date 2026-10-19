@@ -63,7 +63,8 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if f.NArg() != 0 {
 			return errors.New("unexpected start-check arguments")
 		}
-		return myce.CheckHostRevision(*dir, myce.HostRevision{})
+		_, err := myce.ReadHostIntent(*dir)
+		return err
 	}
 	if args[0] == "dev" && len(args) > 1 && args[1] == "clock" {
 		return devClockCommand(args[2:], os.Stdout)
@@ -80,11 +81,8 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if args[0] == "extension" {
 		return extensionCommand(args[1:])
 	}
-	if args[0] == "state" && len(args) > 1 && args[1] == "convert" {
-		return stateConvertCommand(args[2:], os.Stdout)
-	}
 	if args[0] == "host" && len(args) > 1 && args[1] == "convert" {
-		return hostConvertCommand(args[2:], os.Stdout)
+		return hostConvertCommandWithProbe(args[2:], probe, os.Stdout)
 	}
 	if args[0] == "host" && len(args) > 1 {
 		return hostLocalCommand(args[1:], probe, os.Stdout)

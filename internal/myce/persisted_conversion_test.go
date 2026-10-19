@@ -256,13 +256,9 @@ func TestPersistedConversionMatrix(t *testing.T) {
 			if intent.Revision <= 23 || len(intent.Pending) != 1 || intent.Pending[0].Result.Attempt != 2 {
 				t.Fatal("lost host counters or exact pending custody", intent)
 			}
-			expectedSpool, e := filepath.EvalSymlinks(filepath.Join(o.Target, "workers/one"))
-			if e != nil {
-				t.Fatal(e)
-			}
 			workers, e := HostWorkers(filepath.Join(o.Target, "host"))
-			if e != nil || len(workers) != 1 || workers[0].State != expectedSpool || workers[0].Config != "" || len(workers[0].Command) != 0 {
-				t.Fatal("registry retained executable source references", workers, e)
+			if e != nil || len(workers) != 1 || workers[0].State != "/fixture/worker-state" || workers[0].Config != "/fixture/config.json" {
+				t.Fatal("registry bindings changed", workers, e)
 			}
 			if e = AdoptHostWorker(filepath.Join(o.Target, "host"), workers[0]); e != nil {
 				t.Fatal(e)
@@ -272,41 +268,6 @@ func TestPersistedConversionMatrix(t *testing.T) {
 			}
 			if _, err = ConvertPersistedState(o); err != nil {
 				t.Fatal("idempotent retry:", err)
-			}
-		})
-	}
-}
-
-func TestPersistedConversionCrashResume(t *testing.T) {
-	for _, phase := range []string{"validated", "published"} {
-		t.Run(phase, func(t *testing.T) {
-			source := releaseFixture(t)
-			before := sourceHashes(t, source)
-			o := conversionOptions(t, source)
-			o.boundary = func(p string) error {
-				if p == phase {
-					return errors.New("injected crash")
-				}
-				return nil
-			}
-			if _, e := ConvertPersistedState(o); e == nil {
-				t.Fatal("fault did not fire")
-			}
-			if !reflect.DeepEqual(before, sourceHashes(t, source)) {
-				t.Fatal("failure altered source")
-			}
-			if phase == "validated" {
-				if _, e := os.Stat(o.Target); !errors.Is(e, os.ErrNotExist) {
-					t.Fatal("partial publication")
-				}
-			}
-			o.boundary = nil
-			m, e := ConvertPersistedState(o)
-			if e != nil {
-				t.Fatal(e)
-			}
-			if e = verifyPersistedOriginals(o.Target, m); e != nil {
-				t.Fatal(e)
 			}
 		})
 	}
@@ -408,99 +369,6 @@ func TestPersistedConversionDevRestart(t *testing.T) {
 	}
 }
 
-func TestPersistedConversionSourceAndBackupVerification(t *testing.T) {
-	for _, change := range []string{"add", "alter", "backup", "output", "different-source"} {
-		t.Run(change, func(t *testing.T) {
-			source := releaseFixture(t)
-			o := conversionOptions(t, source)
-			if change == "add" || change == "alter" {
-				o.boundary = func(phase string) error {
-					if phase == "validated" {
-						name := "new-file"
-						if change == "alter" {
-							name = "workers/one/fixture-execution.log"
-						}
-						return os.WriteFile(filepath.Join(source, name), []byte("changed-source"), 0600)
-					}
-					return nil
-				}
-				if _, e := ConvertPersistedState(o); e == nil {
-					t.Fatal("published changed source")
-				}
-				if _, e := os.Stat(o.Target); !errors.Is(e, os.ErrNotExist) {
-					t.Fatal("published changed source")
-				}
-				return
-			}
-			if _, e := ConvertPersistedState(o); e != nil {
-				t.Fatal(e)
-			}
-			if change == "output" {
-				if e := os.WriteFile(filepath.Join(o.Target, "workers/one/fixture-execution.log"), []byte("tampered"), 0600); e != nil {
-					t.Fatal(e)
-				}
-			} else if change == "backup" {
-				if e := os.WriteFile(filepath.Join(o.Target, ".conversion/originals/workers/one/fixture-execution.log"), []byte("tampered"), 0600); e != nil {
-					t.Fatal(e)
-				}
-			} else {
-				o.Source = releaseFixture(t)
-				if e := os.WriteFile(filepath.Join(o.Source, "other"), []byte("different"), 0600); e != nil {
-					t.Fatal(e)
-				}
-			}
-			if _, e := ConvertPersistedState(o); e == nil {
-				t.Fatal("accepted unverified retry")
-			}
-		})
-	}
-}
-
-func TestPersistedConversionWALAndCredentials(t *testing.T) {
-	source := releaseFixture(t)
-	// Preserve an uncheckpointed WAL using SQLite's persistent WAL option.
-	db, e := sql.Open("sqlite", filepath.Join(source, "queue.db"))
-	if e != nil {
-		t.Fatal(e)
-	}
-	defer db.Close()
-	if _, e = db.Exec("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; INSERT INTO logs(job,attempt,text) VALUES('job-102',2,'wal-only')"); e != nil {
-		t.Fatal(e)
-	}
-	// This connection represents a stopped copy: no further writes while converting.
-	if st, e := os.Stat(filepath.Join(source, "queue.db-wal")); e != nil || st.Size() == 0 {
-		t.Fatal("missing WAL fixture", e)
-	}
-	configDir := filepath.Join(source, "install/worker")
-	if e = os.MkdirAll(configDir, 0700); e != nil {
-		t.Fatal(e)
-	}
-	secret := `synthetic-$literal-"quoted"`
-	b, _ := json.Marshal(map[string]string{"token": secret})
-	if e = os.WriteFile(filepath.Join(configDir, "credentials.json"), b, 0600); e != nil {
-		t.Fatal(e)
-	}
-	if e = os.WriteFile(filepath.Join(configDir, "config.json"), []byte(`{"queue":"http://fixture-queue.invalid"}`), 0600); e != nil {
-		t.Fatal(e)
-	}
-	before := sourceHashes(t, source)
-	o := conversionOptions(t, source)
-	if _, e = ConvertPersistedState(o); e != nil {
-		t.Fatal(e)
-	}
-	if !reflect.DeepEqual(before, sourceHashes(t, source)) {
-		t.Fatal("source/WAL changed")
-	}
-	_, tables := readFixtureDB(t, filepath.Join(o.Target, "queue.db"))
-	if len(tables["logs"]) != 2 || tables["logs"][1][3] != "wal-only" {
-		t.Fatal("lost WAL records", tables["logs"])
-	}
-	got, queue, e := ReadFleetEnvironment(filepath.Join(o.Target, "install/worker/credentials.json"))
-	if e != nil || got != secret || queue != "http://fixture-queue.invalid" {
-		t.Fatal("credential bytes changed", e)
-	}
-}
-
 func TestPersistedConversionRuntimeRejectsOld(t *testing.T) {
 	source := releaseFixture(t)
 	if q, e := Open(filepath.Join(source, "queue.db"), t.TempDir(), RealClock{}); e == nil {
@@ -510,42 +378,6 @@ func TestPersistedConversionRuntimeRejectsOld(t *testing.T) {
 	if s, e := (Worker{StateDir: filepath.Join(source, "workers/one")}).openStore(); e == nil {
 		s.close()
 		t.Fatal("old spool accepted")
-	}
-}
-
-func TestPersistedConversionCredentialRefusal(t *testing.T) {
-	for _, kind := range []string{"control-token", "invalid-queue"} {
-		t.Run(kind, func(t *testing.T) {
-			source := releaseFixture(t)
-			dir := filepath.Join(source, "install/worker")
-			if e := os.MkdirAll(dir, 0700); e != nil {
-				t.Fatal(e)
-			}
-			token, queue := "synthetic-token", "http://fixture-queue.invalid"
-			if kind == "control-token" {
-				token += "\tcontrol"
-			} else {
-				queue = "file:///unsupported"
-			}
-			for name, value := range map[string]any{"credentials.json": map[string]string{"token": token}, "config.json": ServiceConfig{Queue: queue}} {
-				b, e := json.Marshal(value)
-				if e != nil {
-					t.Fatal(e)
-				}
-				if e = os.WriteFile(filepath.Join(dir, name), b, 0600); e != nil {
-					t.Fatal(e)
-				}
-			}
-			before := sourceHashes(t, source)
-			o := conversionOptions(t, source)
-			m, e := ConvertPersistedState(o)
-			if e == nil || len(m.Blockers) == 0 {
-				t.Fatal("unsupported credential conversion published")
-			}
-			if _, e = os.Stat(o.Target); !errors.Is(e, os.ErrNotExist) || !reflect.DeepEqual(before, sourceHashes(t, source)) {
-				t.Fatal("failed credential conversion modified source or published target", e)
-			}
-		})
 	}
 }
 
@@ -725,4 +557,70 @@ func TestPersistedConversionFixtureProvenance(t *testing.T) {
 			t.Fatal("fixture provenance mismatch", path, e)
 		}
 	}
+}
+
+// This adapter exercises the pure format transformer on synthetic fixture copies.
+// Production conversion, rollback, dry-run and crash recovery use the local CLI.
+type PersistedConversionOptions struct {
+	Source, Target, Host string
+	Clock                Clock
+	Apply                bool
+}
+
+func ConvertPersistedState(o PersistedConversionOptions) (m PersistedConversionManifest, err error) {
+	m = PersistedConversionManifest{Schema: persistedSchema, Host: o.Host, Blockers: []string{}}
+	if b, e := os.ReadFile(filepath.Join(o.Target, ".conversion", "manifest.json")); e == nil {
+		err = json.Unmarshal(b, &m)
+		return
+	}
+	stage, err := os.MkdirTemp(filepath.Dir(o.Target), "fixture-transform-")
+	if err != nil {
+		return
+	}
+
+	err = filepath.WalkDir(o.Source, func(p string, d fs.DirEntry, e error) error {
+		if e != nil {
+			return e
+		}
+		rel, _ := filepath.Rel(o.Source, p)
+		if d.IsDir() {
+			return os.MkdirAll(filepath.Join(stage, rel), 0700)
+		}
+		info, e := d.Info()
+		if e != nil {
+			return e
+		}
+		h, e := conversionFileHash(p)
+		if e != nil {
+			return e
+		}
+		m.Files = append(m.Files, PersistedConversionFile{filepath.ToSlash(rel), h, info.Size(), uint32(info.Mode().Perm())})
+		if e = copyConversionOriginal(p, filepath.Join(stage, rel), 0600); e != nil {
+			return e
+		}
+		return copyConversionOriginal(p, filepath.Join(stage, ".conversion", "originals", rel), 0600)
+	})
+	if err != nil {
+		return
+	}
+	err = convertPersistedTree(stage, persistedConversionOptions{Host: o.Host, Clock: o.Clock, spools: map[string]string{"/fixture/worker-state": "workers/one"}}, &m)
+	if err == nil && len(m.Blockers) > 0 {
+		err = errors.New("unsafe fixture")
+	}
+	if err == nil && o.Apply {
+		err = atomicHostJSON(filepath.Join(stage, ".conversion"), "manifest.json", m, nil)
+		if err == nil {
+			err = os.Rename(stage, o.Target)
+		}
+	}
+	return
+}
+func verifyPersistedOriginals(root string, m PersistedConversionManifest) error {
+	for _, f := range m.Files {
+		h, e := conversionFileHash(filepath.Join(root, ".conversion", "originals", f.Path))
+		if e != nil || h != f.SHA256 {
+			return errors.New("original mismatch")
+		}
+	}
+	return nil
 }

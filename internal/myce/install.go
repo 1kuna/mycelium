@@ -429,6 +429,13 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 		}
 	}
 	var extraPaths []string
+	if c.Role == "worker" {
+		path, _, e := installedHostWorker(c)
+		if e != nil {
+			return e
+		}
+		extraPaths = append(extraPaths, path)
+	}
 	if invitation != nil {
 		extraPaths = append(extraPaths, c.JoiningFile)
 	}
@@ -504,6 +511,19 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 	}
 	if err = tx.put(c.Service, []byte(c.ServiceText()), 0600); err != nil {
 		return err
+	}
+	if c.Role == "worker" {
+		path, w, e := installedHostWorker(c)
+		if e != nil {
+			return e
+		}
+		b, e := json.Marshal(w)
+		if e != nil {
+			return e
+		}
+		if err = tx.put(path, b, 0600); err != nil {
+			return err
+		}
 	}
 	if c.Detection.OS == "linux" {
 		if _, err = command(ctx, "systemctl", "--user", "daemon-reload"); err != nil {

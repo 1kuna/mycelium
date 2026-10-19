@@ -10,7 +10,13 @@ custody), 206 copies, a release charge, a loading model slot, a pin, usage/log
 rows, a saved worker result, a pending Docker create, an engine process record,
 a sequenced checkpoint and a check-in report. Nonzero retired enable/memory
 counters and production-idle fields exercise their archival conversion. Host
-receipts and registry records carry exact outstanding custody.
+receipts carry exact outstanding custody. The registry is written by the actual
+RC `Worker.registerHost` method and deliberately has no Session field. Its bound
+spool and the independently saved receipt supply session evidence.
+`release-7285a88-native` retains the same queue/native custody without the pending
+Docker create, so CLOSED reconciliation can exercise a confirmed native release.
+`release-7285a88-idle` is written through the same RC writers with no saved
+execution/copy/model custody; conversion can confirm its idle previous close.
 The smaller `release-7285a88-dev` fixture has two jobs and no queue model/release
 obligations, so the real dev API/worker can execute its queued command and
 restart without terminal replay. Its checkpoint-root placeholder is bound to

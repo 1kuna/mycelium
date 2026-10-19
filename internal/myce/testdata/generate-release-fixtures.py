@@ -25,7 +25,7 @@ for name in ("queue.go", "types.go", "worker_recovery.go", "models.go", "docker.
     assert (args.scratch / "internal/myce" / name).read_bytes() == data
     writers[name] = hashlib.sha256(data).hexdigest()
 (args.scratch / "internal/myce/wp8_fixture_test.go").write_bytes((Path(__file__).parent / "release-writer_test.go.txt").read_bytes())
-for kind, dev in (("release-7285a88", ""), ("release-7285a88-dev", "1")):
-    env = dict(os.environ, WP8_FIXTURE_OUTPUT=str((args.output / kind).resolve()), WP8_FIXTURE_DEV=dev)
+for kind, dev, native, idle in (("release-7285a88", "", "", ""), ("release-7285a88-dev", "1", "", ""), ("release-7285a88-native", "", "1", ""), ("release-7285a88-idle", "", "", "1")):
+    env = dict(os.environ, WP8_FIXTURE_OUTPUT=str((args.output / kind).resolve()), WP8_FIXTURE_DEV=dev, WP8_FIXTURE_NATIVE=native, WP8_FIXTURE_IDLE=idle)
     subprocess.run(["go", "test", "-C", str(args.scratch), "./internal/myce", "-run", "^TestWriteWP8ReleaseFixture$", "-count=1"], env=env, check=True)
 (args.output / "writers.json").write_text(json.dumps({"commit": subprocess.check_output(["git", "rev-parse", "7285a88"], text=True).strip(), "sha256": writers}, indent=2) + "\n")
