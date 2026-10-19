@@ -40,3 +40,11 @@ func TestDockerStandaloneKillDiagnostic(t *testing.T) {
 		t.Fatal(r)
 	}
 }
+
+func TestDockerKnownMemoryFailureIsNotAmbiguous(t *testing.T) {
+	const failure = "Docker memory ceiling not enforced"
+	r := dockerOutcome(dockerExecution{ExitCode: 137, MemoryFailure: failure}, Result{}, nil)
+	if r.Success || r.Interrupted || r.Error != failure {
+		t.Fatal(r)
+	}
+}

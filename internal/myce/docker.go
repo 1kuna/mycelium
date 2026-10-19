@@ -982,7 +982,7 @@ func dockerOutcome(state dockerExecution, owner Result, e error) Result {
 		Infrastructure: infrastructure,
 		StageFailure:   state.Failure != "" || state.MemoryFailure != "" || state.MainFinished && state.ExitCode != 0 || e != nil && !infrastructure,
 		OutOfMemory:    state.OOMKilled,
-		AmbiguousKill:  state.AmbiguousKill || state.ExitCode == 137,
+		AmbiguousKill:  state.MemoryFailure == "" && (state.AmbiguousKill || state.Failure == "" && state.ExitCode == 137),
 	})
 	if result.Interrupted {
 		result.Success = false
