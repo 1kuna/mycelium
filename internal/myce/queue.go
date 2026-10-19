@@ -40,6 +40,11 @@ type batchRelease struct {
 }
 
 type state struct {
+	// Actual fleet contact and the first reconnect after silence are separate
+	// from each worker's LastSeen. Reconnects never renew an active outage epoch.
+	LastWorkerContact time.Time `json:"last_worker_contact,omitempty"`
+	NetworkRecoveryAt time.Time `json:"network_recovery_at,omitempty"`
+
 	Schema           int                          `json:"schema_version"`
 	HostIntents      map[string]QueueHostIntent   `json:"host_intents,omitempty"`
 	Submissions      map[string]*submissionRecord `json:"submissions,omitempty"`
@@ -537,10 +542,11 @@ func (q *Queue) maintain() {
 			}
 		}
 	}
-	q.networkQuiet = active > 0 && (healthy == 0 || healthy*2 < active)
+	q.networkQuiet = q.s.NetworkRecoveryAt.IsZero() && active > 0 && (healthy == 0 || healthy*2 < active) && now.Sub(q.s.LastWorkerContact) >= min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2]))
 	for _, m := range q.s.Machines {
 		unreported := q.unreported[m.ID]
-		grace := unreported && now.Before(q.restartUntil)
+		outageGrace := !q.s.NetworkRecoveryAt.IsZero() && m.LastSeen.Before(q.s.NetworkRecoveryAt) && now.Before(q.s.NetworkRecoveryAt.Add(q.machineLossTimeout(m.ID)))
+		grace := !unreported && outageGrace || unreported && now.Before(q.restartUntil)
 		restartExpired := unreported && !grace
 		if m.Disabled == "" && !m.Gone && !grace && (restartExpired || (!q.networkQuiet && now.Sub(m.LastSeen) >= q.machineLossTimeout(m.ID))) {
 			m.Gone = true
@@ -567,6 +573,19 @@ func (q *Queue) maintain() {
 			}
 		}
 	}
+	if !q.s.NetworkRecoveryAt.IsZero() {
+		pending := false
+		for _, m := range q.s.Machines {
+			if !m.Gone && !m.Leaving && m.Disabled == "" && m.LastSeen.Before(q.s.NetworkRecoveryAt) {
+				pending = true
+				break
+			}
+		}
+		if !pending {
+			q.s.NetworkRecoveryAt = time.Time{}
+		}
+	}
+
 	for _, j := range q.s.Jobs {
 		if q.hostClosedReason(q.executionHost(j.Machine)) == "" && !q.networkQuiet && !q.unreported[j.Machine] && j.State == "stopping" && !j.Spec.Run.Docker && expired(j.StopAt, now) {
 			if cancelled(j) {
@@ -717,17 +736,15 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 				}
 			}
 		}
-		// After fleet silence, give the other workers a full reconnect window.
-		if q.networkQuiet && old != nil && !old.Gone {
-			for _, other := range q.s.Machines {
-				if !other.Gone {
-					other.LastSeen = q.clock.Now()
-				}
-			}
+		// Give peers one reconnect window without changing their actual heartbeat.
+		// Subsequent reports cannot renew this outage epoch.
+		if q.networkQuiet && old != nil && !old.Gone && !q.clock.Now().Before(q.restartUntil) && q.s.NetworkRecoveryAt.IsZero() {
+			q.s.NetworkRecoveryAt = q.clock.Now()
 		}
 		delete(q.unreported, m.ID)
 		m.Gone = false
 		m.LastSeen = q.clock.Now()
+		q.s.LastWorkerContact = m.LastSeen
 		q.s.Machines[m.ID] = &m
 		delete(q.s.BatchReleases, m.ID) // This report supersedes acknowledgement credit.
 		q.reconcileModels(&m, c.ModelReports)
