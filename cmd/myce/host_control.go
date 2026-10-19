@@ -107,6 +107,16 @@ func hostEnvelopeCommandWithTiming(args []string, probe myce.MachineProbe, out i
 		if retErr != nil {
 			envelope.Errors = append(envelope.Errors, myce.HostEnvelopeError(retErr))
 		}
+		// A revision fence can fail after durable acceptance. Preserve that
+		// acceptance, but reserve revision_mismatch for rejected CAS requests.
+		if envelope.Accepted != nil {
+			for i := range envelope.Errors {
+				failure := &envelope.Errors[i]
+				if failure.Component == "host_intent" && failure.Code == "revision_mismatch" {
+					failure.Code, failure.Message = "revision_superseded", "revision_superseded"
+				}
+			}
+		}
 		if jsonOutput {
 			if err := json.NewEncoder(out).Encode(envelope); err != nil {
 				retErr = err

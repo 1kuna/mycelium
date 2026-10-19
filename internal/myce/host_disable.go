@@ -183,7 +183,7 @@ func (h HostControl) workers() ([]HostWorker, error) {
 	}
 	var out []HostWorker
 	for _, p := range paths {
-		b, err := os.ReadFile(p)
+		b, err := readHostRegular(p, uint32(os.Geteuid()), 1<<20)
 		if err != nil {
 			return nil, err
 		}
@@ -191,7 +191,7 @@ func (h HostControl) workers() ([]HostWorker, error) {
 		if err = json.Unmarshal(b, &r); err != nil {
 			return nil, fmt.Errorf("worker registry %s: %w", p, err)
 		}
-		if b, e := os.ReadFile(filepath.Join(r.State, "state.json")); e == nil {
+		if b, e := readHostRegular(filepath.Join(r.State, "state.json"), uint32(os.Geteuid()), 1<<20); e == nil {
 			var st workerState
 			if e = json.Unmarshal(b, &st); e != nil {
 				return nil, e
@@ -202,6 +202,8 @@ func (h HostControl) workers() ([]HostWorker, error) {
 			if st.Job != nil {
 				r.Executions = []Result{{Machine: r.Name, Session: st.Session, Execution: Execution{ID: st.Job.ID, Attempt: st.Job.Attempt}}}
 			}
+		} else if !errors.Is(e, os.ErrNotExist) {
+			return nil, e
 		}
 		out = append(out, r)
 	}
