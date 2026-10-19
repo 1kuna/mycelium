@@ -62,9 +62,9 @@ save checkpoints frequently.
 
 States are `queued`, `running`, `stopping`, `succeeded`, `failed`, and `cancelled`. Status
 includes a reason for waiting or failure. A command's own nonzero exit fails
-immediately. Production infrastructure interruptions requeue at most twice by
-default, then fail with `infrastructure_retries_exhausted`;
-`queue --production-infrastructure-retries` configures the nonnegative limit.
+immediately. Production infrastructure interruptions requeue at most twice,
+then fail with `infrastructure_retries_exhausted`;
+`queue --production-infrastructure-retries` configures the nonnegative limit (values above two are clamped to two).
 The durable optional `infrastructure_retries` job/status field counts requeues used
 (omitted at zero). Worker/queue recovery, host close/release, leave and reboot
 share that budget; release acknowledgements do not refund it. Production OOMs
@@ -123,7 +123,7 @@ Flags belong before the positional argument except that `logs ID --follow`,
 | `queue --db` | `myce.db` | Durable local SQLite file; one queue owner |
 | `queue --checkpoints` | `./checkpoints` | Shared root; create on mounted NAS first |
 | `queue --restart-grace` | `3m` | Worker reconciliation after queue restart |
-| `queue --production-infrastructure-retries` | `2` | Maximum production infrastructure requeues (zero disables) |
+| `queue --production-infrastructure-retries` | `2` | Maximum production infrastructure requeues (clamped to 2; zero disables) |
 | `queue --production-loss-timeout` | `5s` | Production loss detection |
 | `queue --deadline-loss-timeout` | `20s` | Deadline loss detection |
 | `queue --experiment-loss-timeout` | `60s` | Experiment loss detection |

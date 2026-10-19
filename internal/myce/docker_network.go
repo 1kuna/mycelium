@@ -230,6 +230,7 @@ func (d *dockerAttempt) observeGroup(containers []dockerInspection) error {
 	if d.state.Network != "" && !stopped {
 		nets, e := d.networks()
 		if e != nil {
+			d.stop(d.clock.Now(), 0, true)
 			return e
 		}
 		if len(nets) != 1 || nets[0].Name != d.state.Network || nets[0].Driver != "bridge" || !nets[0].Internal {
@@ -256,6 +257,7 @@ func (d *dockerAttempt) observeGroup(containers []dockerInspection) error {
 			if c.ID == d.state.Container && !*c.State.Running {
 				d.state.MainFinished = true
 				d.state.ExitCode = c.State.ExitCode
+				d.state.AmbiguousKill = c.State.ExitCode == 137 && !c.State.OOMKilled
 				d.state.Stopped = true
 				deadline := d.clock.Now().Add(StopGrace)
 				d.state.StopAt = &deadline
@@ -268,13 +270,18 @@ func (d *dockerAttempt) observeGroup(containers []dockerInspection) error {
 					continue
 				}
 				alive := false
+				ambiguousKill := false
 				for _, c := range containers {
 					if c.ID == id && *c.State.Running {
 						alive = true
 					}
+					if c.ID == id && !*c.State.Running && c.State.ExitCode == 137 && !c.State.OOMKilled {
+						ambiguousKill = true
+					}
 				}
 				if !alive {
 					d.state.Failure = "Docker sidecar " + m.Name + " exited before main"
+					d.state.AmbiguousKill = ambiguousKill
 					d.state.Stopped = true
 					d.state.Forced = true
 					break

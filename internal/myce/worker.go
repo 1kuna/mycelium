@@ -492,14 +492,15 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 			defer release()
 		}
 		waitErr := cmd.Wait()
+		p.mu.Lock()
+		infrastructureStop := p.stopped || p.killed
+		result.Forced = p.killed
+		p.mu.Unlock()
 		// Descendants must not outlive the command or append to delivered output.
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		oomErr := memoryAttempt.failure()
 		groupErr := errors.Join(waitWorkerGroup(cmd.Process.Pid, w.Clock), memoryAttempt.cleanup(w.Clock))
 		result.ReleasePending = groupErr != nil
-		p.mu.Lock()
-		result.Forced = p.killed
-		p.mu.Unlock()
 		syncErr := syncCommandOutput(output)
 		closeErr := output.Close()
 		result.Success = oomErr == nil && launchErr == nil && waitErr == nil && groupErr == nil && syncErr == nil && closeErr == nil
@@ -527,12 +528,19 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 			}
 		}
 		p.mu.Lock()
-		result.Interrupted = p.stopped || p.killed
 		result.PoliteStop = p.polite
-		if oomErr != nil && ceilingDiagnostic(oomErr.Error(), "") != "" {
-			result.Interrupted = false
-			result.Forced = false
+		ambiguousKill := false
+		if cmd.ProcessState != nil {
+			if status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok {
+				ambiguousKill = status.Signaled() && status.Signal() == syscall.SIGKILL && oomErr == nil
+			}
 		}
+		result = classifyAttemptOutcome(result, attemptCause{
+			Infrastructure: infrastructureStop,
+			StageFailure:   launchErr != nil || waitErr != nil && !infrastructureStop || oomErr != nil,
+			OutOfMemory:    result.OutOfMemory || oomErr != nil && strings.HasPrefix(ceilingDiagnostic(oomErr.Error(), ""), "exceeded its "),
+			AmbiguousKill:  ambiguousKill,
+		})
 		p.mu.Unlock()
 		// Persist independently of the reconnect loop, which may be in a network
 		// request when the command finishes. Restart replays this exact session.

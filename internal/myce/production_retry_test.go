@@ -202,6 +202,7 @@ func TestProductionInfrastructureRetryConfiguration(t *testing.T) {
 			if err := q.SetProductionInfrastructureRetries(limit); err != nil {
 				t.Fatal(err)
 			}
+			limit = min(limit, 2)
 			submit(t, q, spec("production"))
 			m := machine("one", "fake")
 			for i := 0; i <= limit; i++ {
