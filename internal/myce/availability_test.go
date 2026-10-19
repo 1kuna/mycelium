@@ -334,8 +334,7 @@ func TestPoliteWorkerCheckpointResumesElsewhere(t *testing.T) {
 }
 
 func TestMachineLimitIncludesModelCalls(t *testing.T) {
-	q, clock, m := modelFixture(t)
-	m.HostID = "shared"
+	q, clock, m := modelFixture(t, "shared")
 	m.MaxJobs = 1
 	check(t, q, m, nil)
 	first := addModelCall(t, q, "experiment")

@@ -1,10 +1,8 @@
 package myce
 
 import (
-	"context"
 	"errors"
 	"net/http"
-	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -86,6 +84,9 @@ func (q *Queue) registerMaintenanceHost(m *Machine) error {
 		if err != nil {
 			return err
 		}
+		// Preserve the reported admission precision; Bytes uses the existing
+		// floor conversion for kernel enforcement and status.
+		budget.GiB = m.HostMemoryBudgetGB
 		policy.MemoryBudget = &budget
 		policy.UpdatedAt = q.clock.Now()
 	}
@@ -258,17 +259,4 @@ func (a API) registerHostMaintenance(mux *http.ServeMux) {
 		status, err := a.Queue.ChangeHostMaintenance(r.PathValue("id"), request)
 		respond(w, status, err)
 	})
-}
-func (w *Worker) loadQueueMemoryPolicy(ctx context.Context) error {
-	var status HostMaintenanceStatus
-	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	if err := w.Client.Call(ctx, "GET", "/api/hosts/"+url.PathEscape(hostID(&w.Machine))+"/maintenance", nil, &status); err != nil {
-		return err
-	}
-	if status.Policy.MemoryBudget != nil {
-		w.Machine.HostMemoryBudgetGB = status.Policy.MemoryBudget.GiB
-		w.Machine.queueMemoryPolicy = true
-	}
-	return nil
 }

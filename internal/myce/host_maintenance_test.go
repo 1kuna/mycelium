@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -527,9 +528,12 @@ func TestMaintenanceLateDockerCreateAndPolicyDelivery(t *testing.T) {
 	defer server.Close()
 	w.Client = Client{URL: server.URL, Token: "test"}
 	w.Machine = m
-	if err := w.loadQueueMemoryPolicy(context.Background()); err != nil {
+	var policyReply Reply
+	if err := w.Client.Call(context.Background(), "POST", "/api/workers/checkin", Checkin{Machine: m}, &policyReply); err != nil {
 		t.Fatal(err)
 	}
+	w.Machine.HostMemoryBudgetGB = policyReply.HostMemoryBudget.GiB
+	w.Machine.queueMemoryPolicy = true
 	if w.Machine.HostMemoryBudgetGB != 4 || !w.Machine.queueMemoryPolicy {
 		t.Fatal("queue allowance not delivered")
 	}
@@ -636,5 +640,72 @@ func TestMaintenanceCauseDoesNotExemptNextAttempt(t *testing.T) {
 	got = job(t, q, j.ID)
 	if got.State != "failed" || got.Reason != "infrastructure_retries_exhausted" {
 		t.Fatal("planned cause leaked to later attempt", got)
+	}
+}
+
+// Policy converges through ordinary checkins, even when local bootstrap input
+// differs. Maintenance must not add a startup endpoint dependency.
+func TestMaintenanceWorkerCheckinPolicy(t *testing.T) {
+	q, _ := fixture(t)
+	value := 4.0
+	if _, err := q.ChangeHostMaintenance("test-host", HostMaintenanceRequest{Action: "drain", MemoryBudgetGB: &value}); err != nil {
+		t.Fatal(err)
+	}
+	handler := API{Queue: q, Token: "test"}.Handler()
+	server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if r.Method == "GET" && strings.HasSuffix(r.URL.Path, "/maintenance") {
+			t.Error("unexpected startup policy GET")
+			http.NotFound(rw, r)
+			return
+		}
+		handler.ServeHTTP(rw, r)
+	}))
+	defer server.Close()
+	w := recoveryWorker(t)
+	w.Client = Client{URL: server.URL, Token: "test"}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- w.Run(ctx) }()
+	defer func() {
+		cancel()
+		if err := <-done; err != nil {
+			t.Error(err)
+		}
+	}()
+	await(t, func() bool {
+		snapshot, err := q.Snapshot()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range snapshot.Machines {
+			if m.ID == w.Machine.ID && m.HostMemoryBudgetGB == value && !m.HostMemoryPolicyMismatch {
+				return true
+			}
+		}
+		return false
+	})
+	r := check(t, q, machine("policy-observer", "fake", "test-host"), nil)
+	if r.HostMaintenance != "drained" || !r.AdmissionBlocked || r.HostMemoryBudget == nil || r.HostMemoryBudget.GiB != value {
+		t.Fatal(r)
+	}
+}
+
+func TestMaintenanceFractionalBudgetDelivery(t *testing.T) {
+	q, _ := fixture(t)
+	m := machine("fractional", "fake", "fractional-host")
+	m.HostMemoryMeasured = true
+	m.HostAvailableMemoryGB = 1
+	m.HostMemoryBudgetGB = 131071.5 / (1 << 30)
+	reply := check(t, q, m, nil)
+	if reply.HostMemoryBudget.GiB != m.HostMemoryBudgetGB || reply.HostMemoryBudget.Bytes != 131071 {
+		t.Fatal(reply.HostMemoryBudget)
+	}
+	w := Worker{Machine: m}
+	w.Machine.queueMemoryPolicy = true
+	if err := w.checkHostMemoryBudget(0, m.HostMemoryBudgetGB); err != nil {
+		t.Fatal("fitting fractional allowance refused", err)
+	}
+	if err := w.checkHostMemoryBudget(0, 131072.0/(1<<30)); !errors.Is(err, errWorkerMemory) {
+		t.Fatal("over-budget allocation accepted", err)
 	}
 }

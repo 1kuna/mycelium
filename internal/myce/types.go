@@ -342,6 +342,7 @@ type Checkin struct {
 	Running         *Execution    `json:"running,omitempty"`
 }
 type Reply struct {
+	HostMaintenance  string              `json:"host_maintenance,omitempty"`
 	HostMemoryBudget *HostMemoryBudget   `json:"host_memory_budget,omitempty"`
 	FileCheckpoints  bool                `json:"file_checkpoints,omitempty"`
 	AdmissionBlocked bool                `json:"admission_blocked,omitempty"`

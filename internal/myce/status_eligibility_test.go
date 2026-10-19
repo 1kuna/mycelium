@@ -309,8 +309,7 @@ func TestStatusEligibleHostsRetainActiveAssignment(t *testing.T) {
 func TestStatusEligibleHostsRetainInflightModelCall(t *testing.T) {
 	for _, restricted := range []bool{false, true} {
 		t.Run(stringBool(restricted), func(t *testing.T) {
-			q, _, m := modelFixture(t)
-			m.HostID = "host-current"
+			q, _, m := modelFixture(t, "host-current")
 			check(t, q, m, nil)
 			other := machine("other", "fake")
 			other.HostID = "host-other"

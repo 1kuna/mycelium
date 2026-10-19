@@ -15,8 +15,7 @@ import (
 
 func entryHoldFixture(t *testing.T, fence string) (*Queue, *fakeClock, Machine, Machine) {
 	t.Helper()
-	q, clock, a := modelFixture(t)
-	a.HostID = "ha"
+	q, clock, a := modelFixture(t, "ha")
 	b := a
 	b.ID, b.Session, b.HostID = "two", "session-two", "hb"
 	model := &q.models.Models[0]

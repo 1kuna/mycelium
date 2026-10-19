@@ -30,8 +30,7 @@
           "type": "string"
         },
         "stop_cause": {
-          "type": "string",
-          "description": "Exact-attempt planned stop cause. planned_host_maintenance requeues without spending infrastructure retries; never transfers to a newer attempt."
+          "type": "string"
         }
       },
       "required": [

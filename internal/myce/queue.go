@@ -666,6 +666,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		}
 		budget := *q.s.HostMaintenance[hostID(&m)].MemoryBudget
 		reply.HostMemoryBudget = &budget
+		reply.HostMaintenance = q.s.HostMaintenance[hostID(&m)].Mode
 		if old != nil && old.Session != m.Session && !(c.Fresh && c.PreviousSession == old.Session) {
 			if h := q.s.Hosts[hostID(old)]; q.maintenanceKnown(hostID(old)) || old.HostMemoryBudgetGB > 0 || old.hostBudgetGB > 0 || h != nil && h.Policy.ProductionHold {
 				for _, slot := range q.s.ModelSlots {

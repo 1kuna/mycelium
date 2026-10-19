@@ -657,9 +657,6 @@ func (w Worker) Run(stop context.Context) error {
 		}
 		return err
 	}
-	if err = w.loadQueueMemoryPolicy(stop); err != nil {
-		return err
-	}
 	if err = w.refreshHostMemoryBudget(); err != nil {
 		return err
 	}
