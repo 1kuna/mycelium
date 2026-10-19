@@ -38,7 +38,9 @@ func (q *Queue) weight(project string) float64 {
 	return 1
 }
 func (q *Queue) fairBefore(a, b *Job, m *Machine) bool {
-	// Production and deadlines retain their established order.
+	if n := q.comparePriority(a.Spec, b.Spec); n != 0 {
+		return n < 0
+	}
 	if a.Spec.Priority == "experiment" && b.Spec.Priority == "experiment" && a.Spec.Project != b.Spec.Project {
 		x := q.fairScore(a, m)
 		y := q.fairScore(b, m)
@@ -46,7 +48,7 @@ func (q *Queue) fairBefore(a, b *Job, m *Machine) bool {
 			return x < y
 		}
 	}
-	return before(a, b, m)
+	return q.before(a, b, m)
 }
 func ReadProjectPolicies(path string) (map[string]ProjectPolicy, error) {
 	if path == "" {
@@ -69,7 +71,7 @@ func ReadProjectPolicies(path string) (map[string]ProjectPolicy, error) {
 	}
 	return p, e
 }
-func (q *Queue) ConfigureProjects(p map[string]ProjectPolicy) error {
+func validateProjectPolicies(p map[string]ProjectPolicy) error {
 	for name, v := range p {
 		if v.DefaultCallPriority != "" && v.DefaultCallPriority != "experiment" && v.DefaultCallPriority != "production" {
 			return errors.New("default_call_priority must be experiment or production")
@@ -80,9 +82,15 @@ func (q *Queue) ConfigureProjects(p map[string]ProjectPolicy) error {
 				return errors.New("project allowed_machines must contain nonempty machine names")
 			}
 		}
-		if name == "" || !validMemoryValue(v.Weight) || v.Weight <= 0 || v.MaxConcurrentExperiments < 0 || !validMemoryValue(v.MaxMemoryShare) || v.MaxMemoryShare > 1 {
+		if name == "" || strings.Contains(name, "/") || !validMemoryValue(v.Weight) || v.Weight <= 0 || v.MaxConcurrentExperiments < 0 || !validMemoryValue(v.MaxMemoryShare) || v.MaxMemoryShare > 1 {
 			return errors.New("project requires positive finite weight, nonnegative experiment cap, and memory share in [0,1]")
 		}
+	}
+	return nil
+}
+func (q *Queue) ConfigureProjects(p map[string]ProjectPolicy) error {
+	if err := validateProjectPolicies(p); err != nil {
+		return err
 	}
 	return q.update(func() error {
 		copy := map[string]ProjectPolicy{}
@@ -90,6 +98,11 @@ func (q *Queue) ConfigureProjects(p map[string]ProjectPolicy) error {
 			v.AllowedMachines = slices.Clone(v.AllowedMachines)
 			copy[k] = v
 		}
+		if q.policyRevision() == ^uint64(0) {
+			return errors.New("policy revision exhausted")
+		}
+		policy := q.effectivePriorityPolicy()
+		q.s.PriorityPolicy = &PriorityPolicyRecord{Revision: q.policyRevision() + 1, Policy: policy}
 		q.s.Policies = copy
 		return nil
 	})
@@ -155,7 +168,7 @@ func (q *Queue) candidate(m *Machine, excluded map[string]bool) *Job {
 	for _, j := range q.s.Jobs {
 		if !excluded[j.ID] && j.State == "queued" && q.placementAllowed(j, m) && q.checkpointReady(j, m) && fits(j, m, m.FreeMemoryGB) && q.capReason(j) == "" {
 			old := byProject[j.Spec.Project]
-			if old == nil || before(j, old, m) {
+			if old == nil || q.before(j, old, m) {
 				byProject[j.Spec.Project] = j
 			}
 		}
@@ -266,8 +279,8 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 			continue
 		}
 		ahead := winner.Spec.Name + " goes first"
-		if rank(winner.Spec.Priority) < rank(best.Spec.Priority) {
-			ahead = winner.Spec.Priority + " work goes first"
+		if q.comparePriority(winner.Spec, best.Spec) < 0 {
+			ahead = q.priorityMatch(winner.Spec).Tier + " work goes first"
 		} else if best.Spec.Priority == "experiment" && winner.Spec.Project != best.Spec.Project && q.fairScore(winner, target) < q.fairScore(best, target)-1e-6 {
 			ahead = fmt.Sprintf("%s goes first (%s is ahead of its fair share)", winner.Spec.Project, best.Spec.Project)
 		}

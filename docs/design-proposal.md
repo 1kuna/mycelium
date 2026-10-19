@@ -28,7 +28,7 @@ One shared queue of GPU jobs for production, research and future projects. **GPU
 ```yaml
 name: example-reindex
 project: example
-priority: experiment        # production | deadline | experiment
+class: experiment           # arbitrary job class; legacy priority is accepted
 deadline: null              # a time, required when priority is "deadline"
 run:
   command: ["python", "reindex.py", "--batch", "7"]
@@ -48,7 +48,7 @@ The queue gives every job its job id, `MYCE_CHECKPOINT_DIR` and attempt number. 
 
 When a worker asks for work, the queue picks, from the jobs that fit this machine's free memory and GPU type:
 
-1. the highest priority first: production, then deadline, then experiment;
+1. the highest owner-configured project/class tier first; without a configured policy, production, then deadline, then the catchall (experiment);
 2. within the same priority, a model already loaded, then cached locally, then needing a NAS copy;
 3. then the earliest deadline;
 4. then the job that has waited longest.
@@ -67,6 +67,20 @@ at any moment, and a power cut offers no grace at all. Status reports production
 submission-to-start acknowledgement latency; the laptop dev test exercises the actual process
 start under 15 seconds, excluding model load time.
 
+
+**Owner priority tiers (P1, #98).** The durable SQLite policy contains ordered,
+uniquely named tiers of `project/class` selectors using Go `path.Match` globs.
+First match wins; the final tier includes `*/*`. One comparator replaces legacy
+rank decisions in placement and existing preemption. `myce policy get [--yaml]`
+and `myce policy set policy.yaml --if-revision N` expose an atomic revision CAS;
+HTTP conflicts return 409. Jobs declare immutable `class` (default experiment),
+legacy priority normalizes at admission, and conflicting declarations fail.
+Project/class identifiers cannot contain `/`. Status shows current tier,
+selector and policy revision. Policy changes rerank existing jobs on subsequent
+planning decisions without changing keyed replay or legacy reliability behavior.
+P2 generalized fairness and P3 expanded preemption/retry semantics remain later
+slices; current eligibility and stop/retry rules still apply. See
+[the policy guide](guide-priority-policy.md) for format and API details.
 
 **Optional physical-host takeover.** A queue host policy may opt into whole-machine production takeover, default off. Production selects one eligible physical host; all lower-priority work on that host stops safely, regardless of how much room the request needs. Stopped experiments rejoin the shared queue and resume on any compatible machine, without an infrastructure retry. Production admission waits for all lower-priority cleanup acknowledgements. Unknown cleanup survives loss and restart; elapsed stop grace never proves release. Pins remain protected.
 

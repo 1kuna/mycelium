@@ -146,21 +146,21 @@ func (q *Queue) maintainPins() {
 				continue
 			}
 			if m.FreeMemoryGB >= model.MemoryGB && hostFits(m, model.MemoryGB, model.HostMemoryGB) {
-				q.s.ModelSlots[key] = &ModelSlot{Model: p.Model, Machine: m.ID, Session: m.Session, State: "loading", LoadUntil: q.engineLoadDeadline(), Attempt: ID(), Priority: "production", LastUsed: now}
+				q.s.ModelSlots[key] = &ModelSlot{Project: p.Project, Model: p.Model, Machine: m.ID, Session: m.Session, State: "loading", LoadUntil: q.engineLoadDeadline(), Attempt: ID(), Priority: "production", LastUsed: now}
 				m.FreeMemoryGB -= model.MemoryGB
 				q.refreshHostMemory()
 				p.Assigned = m.ID
 				break
 			}
-			if q.reclaimableGPUMemory(m, "production") < model.MemoryGB {
+			if q.reclaimableGPUMemory(m, "production", Spec{Project: p.Project, Priority: "production"}) < model.MemoryGB {
 				continue
 			}
-			if !q.reclaimHost(m, model.MemoryGB, model.HostMemoryGB, "production", "pin") {
+			if !q.reclaimHost(m, model.MemoryGB, model.HostMemoryGB, "production", "pin", Spec{Project: p.Project, Priority: "production"}) {
 				continue
 			}
-			q.makeModelRoom(m, model.MemoryGB, "production")
+			q.makeModelRoom(m, model.MemoryGB, "production", Spec{Project: p.Project, Priority: "production"})
 			for _, j := range q.s.Jobs {
-				if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") && rank(j.Spec.Priority) > 0 && m.FreeMemoryGB+j.Spec.Needs.MemoryGB >= model.MemoryGB {
+				if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") && q.comparePriority(j.Spec, Spec{Project: p.Project, Priority: "production"}) > 0 && m.FreeMemoryGB+j.Spec.Needs.MemoryGB >= model.MemoryGB {
 					q.stopFor(j, "production", "pin")
 				}
 			}
@@ -177,6 +177,7 @@ func (q *Queue) SetProductionGrace(d time.Duration) error {
 	return nil
 }
 func (q *Queue) stopFor(j *Job, priority, kind string) {
+	j.PriorityPolicy = q.priorityMatch(j.Spec)
 	if j.State == "running" {
 		q.s.Preemptions = append(q.s.Preemptions, Preemption{At: q.clock.Now(), Job: j.ID, Project: j.Spec.Project, For: priority})
 	}

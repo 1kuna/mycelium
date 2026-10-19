@@ -26,10 +26,7 @@ func affinity(j *Job, m *Machine) int {
 	}
 	return n
 }
-func before(a, b *Job, m *Machine) bool {
-	if rank(a.Spec.Priority) != rank(b.Spec.Priority) {
-		return rank(a.Spec.Priority) < rank(b.Spec.Priority)
-	}
+func beforeWithinTier(a, b *Job, m *Machine) bool {
 	if affinity(a, m) != affinity(b, m) {
 		return affinity(a, m) > affinity(b, m)
 	}
@@ -56,7 +53,7 @@ func before(a, b *Job, m *Machine) bool {
 func pick(jobs map[string]*Job, m *Machine) *Job {
 	var best *Job
 	for _, j := range jobs {
-		if j.State == "queued" && fits(j, m, m.FreeMemoryGB) && (best == nil || before(j, best, m)) {
+		if j.State == "queued" && fits(j, m, m.FreeMemoryGB) && (best == nil || (&Queue{}).before(j, best, m)) {
 			best = j
 		}
 	}

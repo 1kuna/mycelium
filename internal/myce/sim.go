@@ -224,7 +224,7 @@ func validateSim(f SimFleet, w SimWorkload, o SimOptions) error {
 	}
 	seen = map[string]bool{}
 	for _, s := range w.Streams {
-		if s.Name == "" || seen[s.Name] || s.Project == "" || rank(s.Priority) == 3 || !validSimNumber(s.Duration) || s.Duration <= 0 || !validSimNumber(s.Every) || s.Every <= 0 || !validSimNumber(s.Start) || !validSimNumber(s.MemoryGB) || !validSimNumber(s.HostGB) || !validSimNumber(s.Checkpoint) || !validSimNumber(s.Deadline) || s.Count < 1 || s.Batch < 0 {
+		if s.Name == "" || seen[s.Name] || s.Project == "" || legacyRank(s.Priority) == 3 || !validSimNumber(s.Duration) || s.Duration <= 0 || !validSimNumber(s.Every) || s.Every <= 0 || !validSimNumber(s.Start) || !validSimNumber(s.MemoryGB) || !validSimNumber(s.HostGB) || !validSimNumber(s.Checkpoint) || !validSimNumber(s.Deadline) || s.Count < 1 || s.Batch < 0 {
 			return errors.New("invalid stream: require unique name, project, priority, positive duration/every/count")
 		}
 		seen[s.Name] = true

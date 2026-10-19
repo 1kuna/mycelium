@@ -210,7 +210,7 @@ func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
 			jobs = append(jobs, j)
 		}
 	}
-	sort.Slice(jobs, func(i, k int) bool { return before(jobs[i], jobs[k], m) })
+	sort.Slice(jobs, func(i, k int) bool { return q.before(jobs[i], jobs[k], m) })
 	if len(jobs) == 0 {
 		return nil
 	}
