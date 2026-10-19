@@ -90,7 +90,7 @@ an already untrusted executable safe: establish trust before invocation.
    executing
    inode. Use a trusted test fixture to exercise rejection; **never execute
    worker-writable code as root to test the guard**. Verify every other root
-   command (`install`, `service`, `host convert`, `resolve-docker`, etc.) refuses.
+   command (`install`, `service`, `resolve-docker`, etc.) refuses.
    Open a harmless inherited fd ≥3 before invocation and verify it is absent
    from child processes (both close_range and the older-kernel fd fallback).
 6. Inject a slow close and cancellation at the deadline: the child gets the

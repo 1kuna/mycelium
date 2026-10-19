@@ -33,6 +33,7 @@ func HostStateDirectory() (string, error) {
 }
 
 type HostWorker struct {
+	Schema       int      `json:"schema_version"`
 	Session      string   `json:"session,omitempty"`
 	Config       string   `json:"config,omitempty"`
 	Unit         string   `json:"unit,omitempty"`
@@ -54,6 +55,9 @@ func (w *Worker) registerHost(s *workerStore) error {
 		if err != nil {
 			return err
 		}
+	}
+	if err := refuseLegacyHost(w.HostStateDir); err != nil {
+		return err
 	}
 	if err := os.MkdirAll(w.HostStateDir, 0700); err != nil {
 		return err
@@ -174,9 +178,15 @@ func (h *HostControl) defaults() error {
 		}
 		pause(d)
 	}
+	if err := refuseLegacyHost(h.Dir); err != nil {
+		return err
+	}
 	return os.MkdirAll(h.Dir, 0700)
 }
 func (h HostControl) workers() ([]HostWorker, error) {
+	if err := refuseLegacyHost(h.Dir); err != nil {
+		return nil, err
+	}
 	paths, err := filepath.Glob(filepath.Join(h.Dir, "worker-*.json"))
 	if err != nil {
 		return nil, err
@@ -190,6 +200,9 @@ func (h HostControl) workers() ([]HostWorker, error) {
 		var r HostWorker
 		if err = json.Unmarshal(b, &r); err != nil {
 			return nil, fmt.Errorf("worker registry %s: %w", p, err)
+		}
+		if err := refuseLegacyWorker(r.State, r.Environments); err != nil {
+			return nil, err
 		}
 		if b, e := readHostRegular(filepath.Join(r.State, "state.json"), uint32(os.Geteuid()), 1<<20); e == nil {
 			var st workerState
@@ -770,6 +783,9 @@ func (h HostControl) Enable(ctx context.Context) error {
 }
 
 func AdoptHostWorker(dir string, w HostWorker) error {
+	if err := refuseLegacyHost(dir); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return err
 	}

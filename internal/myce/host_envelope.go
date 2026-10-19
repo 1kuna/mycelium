@@ -391,6 +391,8 @@ func (e *HostEnvelope) ApplyExclusion(r *HostExclusionReport, now time.Time) {
 func HostEnvelopeError(err error) ExclusionError {
 	code, component := "observation_unavailable", "local_intent"
 	switch {
+	case errors.Is(err, ErrLegacyState):
+		code = "legacy_state_present"
 	case errors.Is(err, ErrHostStateUninitialized):
 		code = "state_uninitialized"
 	case errors.Is(err, ErrHostStateCorrupt):
@@ -407,7 +409,11 @@ func HostEnvelopeError(err error) ExclusionError {
 			component, code = "invocation", invocation.Code
 		}
 	}
-	return ExclusionError{Component: component, Code: code, Message: code}
+	message := code
+	if errors.Is(err, ErrLegacyState) {
+		message = err.Error()
+	}
+	return ExclusionError{Component: component, Code: code, Message: message}
 }
 
 // FinishObservation projects the same centralized normalization into the public

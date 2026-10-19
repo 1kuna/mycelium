@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -35,7 +36,31 @@ func prepareClosedWorkerInstall(c ServiceConfig) error {
 	var s HostIntent
 	_, err := os.Lstat(filepath.Join(c.HostStateDir, hostStateFile))
 	if errors.Is(err, os.ErrNotExist) {
+		// No previous close exists on an empty installation. Do not infer this
+		// from a missing host record when any configured spool/cache survives.
+		for _, path := range []string{c.State, c.ModelCache, c.EnvironmentCache} {
+			f, e := os.Open(path)
+			if errors.Is(e, os.ErrNotExist) {
+				continue
+			}
+			if e != nil {
+				return e
+			}
+			_, e = f.Readdirnames(1)
+			f.Close()
+			if e != io.EOF {
+				return fmt.Errorf("%w: archive surviving worker data %s before a fresh install", ErrHostState, path)
+			}
+		}
 		s, err = InitializeHostIntent(c.HostStateDir, c.HostID, RealClock{})
+		if err == nil {
+			err = mutateHostIntent(c.HostStateDir, s.HostRevision, func(intent *HostIntent) error {
+				now := intent.AcceptedAt.UTC()
+				intent.LastClose.Settlement = "confirmed"
+				intent.LastClose.SettledAt = &now
+				return nil
+			})
+		}
 	} else if err == nil {
 		s, err = ReadHostIntent(c.HostStateDir)
 	}

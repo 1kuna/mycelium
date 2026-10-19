@@ -40,6 +40,7 @@ func (r *workerRetry) succeeded(now time.Time, interval time.Duration) {
 }
 
 type workerState struct {
+	Schema          int                    `json:"schema_version"`
 	OperatorStopped bool                   `json:"operator_stopped,omitempty"`
 	Groups          map[int]map[int]string `json:"-"`
 	LaunchPending   bool                   `json:"launch_pending,omitempty"`
@@ -87,6 +88,9 @@ func (w Worker) openStore() (*workerStore, error) {
 	dir, err := filepath.Abs(dir)
 	if err != nil {
 		return nil, err
+	}
+	if err := refuseLegacyWorker(dir, w.EnvironmentRoot); err != nil {
+		return nil, fmt.Errorf("read worker state: %w", err)
 	}
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, err
@@ -194,6 +198,14 @@ func (s *workerStore) close() {
 func (s *workerStore) save() error              { return saveWorkerJSON(s.dir, "state.json", s.state) }
 func decodeWorkerJSON(data []byte, v any) error { return json.Unmarshal(data, v) }
 func saveWorkerJSON(dir, name string, v any) error {
+	switch value := v.(type) {
+	case workerState:
+		value.Schema = persistedSchema
+		v = value
+	case HostWorker:
+		value.Schema = persistedSchema
+		v = value
+	}
 	data, err := json.Marshal(v)
 	if err != nil {
 		return err

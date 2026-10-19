@@ -19,7 +19,7 @@ func TestHostEnvelopeStatusUnsafeWorkerFiles(t *testing.T) {
 			t.Run(target+"/"+kind, func(t *testing.T) {
 				r, c := envelopeFixture(t)
 				registry := filepath.Join(c.HostStateDir, "worker-fixture.json")
-				b, err := json.Marshal(myce.HostWorker{State: c.State, Host: c.HostID, Name: "fixture"})
+				b, err := json.Marshal(myce.HostWorker{Schema: 3, State: c.State, Host: c.HostID, Name: "fixture"})
 				if err != nil {
 					t.Fatal(err)
 				}

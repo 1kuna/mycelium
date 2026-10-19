@@ -140,7 +140,9 @@ func TestEnvironmentPlacementAndFiltering(t *testing.T) {
 	j.Spec.Needs.Platform.Any = true
 	j.Spec.Needs.MemoryGB = 1
 	j.Spec.Needs.Model = "model"
-	m := &Machine{GPU: "cuda", FreeMemoryGB: 8, EnvironmentBuilder: true}
+	profile := machine("builder", "cuda")
+	m := &profile
+	m.EnvironmentBuilder = true
 	if !fits(j, m, 8) || environmentReady(j, m) {
 		t.Fatal("cold builder excluded or ready")
 	}

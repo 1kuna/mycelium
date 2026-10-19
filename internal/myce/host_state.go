@@ -19,10 +19,6 @@ var ErrHostStateUninitialized = errors.New("state_uninitialized")
 var ErrHostStateCorrupt = errors.New("state_corrupt")
 var ErrHostRevision = errors.New("stale host revision")
 
-func legacyHostStateError() error {
-	return fmt.Errorf("%w: legacy host control state; run myce host convert offline", ErrHostState)
-}
-
 // HostRevision binds asynchronous work to one accepted operation, including across reopen.
 type HostRevision struct {
 	Revision  uint64 `json:"revision"`
@@ -36,8 +32,7 @@ type HostObservation struct {
 	At    time.Time `json:"observed_at"`
 }
 
-// HostObligation is exact custody, never a claim of physical release. Conversion
-// imports historical releases as pending; S05 owns their queue reconciliation.
+// HostObligation is exact custody, never a claim of physical release.
 type HostEngineExecution struct {
 	Machine string `json:"machine"`
 	Session string `json:"session"`
@@ -99,16 +94,15 @@ func hostRoot(dir string) (string, error) {
 		return HostStateDirectory()
 	}
 	if legacyUnitParent(dir) != "" {
-		return "", legacyHostStateError()
+		return "", errors.Join(ErrHostState, legacyState(legacyUnitParent(dir)))
 	}
 	return dir, nil
 }
 
-// Inspect active lookup paths only. Preserved conversion originals live under
-// .host-conversion and cannot accidentally become runtime receipts again.
+// Inspect marker names only; the operator archives the entire host directory.
 func legacyHostPaths(dir string) ([]string, error) {
 	var paths []string
-	for _, pattern := range []string{"DISABLED", "control-generation.json", "disable-receipt.json", "enable-pending.json", "forgotten-queues.json", "units/*"} {
+	for _, pattern := range []string{"DISABLED", "control-generation.json", "disable-receipt.json", "enable-pending.json", "forgotten-queues.json", "units", ".host-conversion", ".install-conversion"} {
 		matches, err := filepath.Glob(filepath.Join(dir, pattern))
 		if err != nil {
 			return nil, err
@@ -160,17 +154,8 @@ func ReadHostIntent(dir string) (HostIntent, error) {
 	if err != nil {
 		return s, err
 	}
-	if _, err = os.Stat(filepath.Join(dir, ".host-conversion", "IN_PROGRESS")); err == nil {
-		return s, fmt.Errorf("%w: conversion incomplete; resume myce host convert offline", ErrHostState)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return s, errors.Join(ErrHostState, err)
-	}
-	paths, err := legacyHostPaths(dir)
-	if err != nil {
-		return s, errors.Join(ErrHostState, err)
-	}
-	if len(paths) > 0 {
-		return s, legacyHostStateError()
+	if err := refuseLegacyHost(dir); err != nil {
+		return s, err
 	}
 	b, err := readHostRegular(filepath.Join(dir, hostStateFile), uint32(os.Geteuid()), 16<<20)
 	if errors.Is(err, os.ErrNotExist) {
@@ -179,7 +164,7 @@ func ReadHostIntent(dir string) (HostIntent, error) {
 			return s, errors.Join(ErrHostState, e)
 		}
 		if len(registries) > 0 {
-			return s, legacyHostStateError()
+			return s, errors.Join(ErrHostState, legacyState(dir))
 		}
 		return s, fmt.Errorf("%w: this host has no Mycelium host state yet; provision it with `myce host open` or `myce dev`", errors.Join(ErrHostState, ErrHostStateUninitialized))
 	}
@@ -253,6 +238,16 @@ func InitializeHostIntent(dir, host string, clock Clock) (HostIntent, error) {
 	if err != nil {
 		return s, err
 	}
+	if err := refuseLegacyHost(dir); err != nil {
+		return s, err
+	}
+	registries, e := filepath.Glob(filepath.Join(dir, "worker-*.json"))
+	if e != nil {
+		return s, e
+	}
+	if len(registries) > 0 {
+		return s, fmt.Errorf("%w: existing worker registry requires its original host state", ErrHostState)
+	}
 	if err = os.MkdirAll(dir, 0700); err != nil {
 		return s, err
 	}
@@ -263,17 +258,6 @@ func InitializeHostIntent(dir, host string, clock Clock) (HostIntent, error) {
 	defer unlock()
 	if _, err = os.Stat(filepath.Join(dir, hostStateFile)); !errors.Is(err, os.ErrNotExist) {
 		return s, errors.New("host state already exists or is unreadable")
-	}
-	paths, err := legacyHostPaths(dir)
-	if err != nil || len(paths) > 0 {
-		return s, errors.Join(legacyHostStateError(), err)
-	}
-	registries, err := filepath.Glob(filepath.Join(dir, "worker-*.json"))
-	if err != nil || len(registries) > 0 {
-		return s, errors.Join(legacyHostStateError(), err)
-	}
-	if _, err = os.Lstat(filepath.Join(dir, ".host-conversion", "IN_PROGRESS")); !errors.Is(err, os.ErrNotExist) {
-		return s, fmt.Errorf("%w: conversion incomplete; resume myce host convert offline", ErrHostState)
 	}
 	now := clock.Now()
 	s = HostIntent{Schema: hostStateVersion, Host: host, HostRevision: HostRevision{Revision: 1, Operation: ID()}, Desired: "closed", Reason: "initial provisioning", AcceptedAt: now, StopDeadline: &now, PreviousClose: 1}

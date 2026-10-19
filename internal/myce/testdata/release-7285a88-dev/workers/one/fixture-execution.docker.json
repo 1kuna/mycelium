@@ -1,0 +1,1 @@
+{"owner":{"machine":"fixture-worker","session":"fixture-session","id":"job-102","attempt":2,"success":true},"identity":"fixture-execution","endpoint":"unix:///run/fixture-docker.sock","operation":"create","pending":true,"exit_code":0}

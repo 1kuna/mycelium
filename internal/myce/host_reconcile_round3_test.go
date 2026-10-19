@@ -115,7 +115,18 @@ func TestHostReconcileRotatedWorkerSessionSettles(t *testing.T) {
 			stop = startReconcileWorker(t, server.URL, spool, hostDir)
 			await(t, func() bool {
 				got := job(t, q, assigned.ID)
-				return got.Session != "" && got.Session != previous && got.State == "running" && got.StartedAt != nil
+				if got.Session == "" || got.Session == previous || got.State != "running" || got.StartedAt == nil {
+					return false
+				}
+				// Started authorizes the payload before releasing its launch gate.
+				// Crash an executing payload, not the in-flight authorization call.
+				logs, _ := q.Logs(assigned.ID, 0)
+				for _, line := range logs {
+					if line.Attempt == got.Attempt {
+						return true
+					}
+				}
+				return false
 			})
 			before := job(t, q, assigned.ID)
 			stop()

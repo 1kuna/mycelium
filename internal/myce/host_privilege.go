@@ -148,6 +148,9 @@ func (r HostIdentityResolver) Resolve(workerUser, configPath, stateDir string) (
 	}
 	c, e := r.ReadConfig(configPath)
 	if e != nil {
+		if errors.Is(e, ErrLegacyState) {
+			return HostInvocation{}, e
+		}
 		return HostInvocation{}, hostProtocolError(hostProtocolCode(e))
 	}
 	if c.Role != "worker" || c.HostID == "" || (c.Config != "" && c.Config != configPath) || (c.WorkerUser != "" && c.WorkerUser != a.Name) || (c.WorkerHome != "" && c.WorkerHome != a.Home) {
@@ -169,6 +172,9 @@ func (r HostIdentityResolver) Resolve(workerUser, configPath, stateDir string) (
 	}
 	s, e := ReadHostIntent(stateDir)
 	if e != nil {
+		if errors.Is(e, ErrLegacyState) {
+			return HostInvocation{}, e
+		}
 		return HostInvocation{}, hostProtocolError(hostProtocolCode(e))
 	}
 	if s.Host != c.HostID {
@@ -329,10 +335,11 @@ type HostMutationResult struct {
 	CleanupConfirmed bool `json:"cleanup_confirmed"`
 }
 type hostChildResponse struct {
-	Version   int                `json:"version"`
-	Operation string             `json:"operation"`
-	Result    HostMutationResult `json:"result"`
-	Code      string             `json:"code,omitempty"`
+	LegacyPaths []string           `json:"legacy_paths,omitempty"`
+	Version     int                `json:"version"`
+	Operation   string             `json:"operation"`
+	Result      HostMutationResult `json:"result"`
+	Code        string             `json:"code,omitempty"`
 }
 type HostMutationHandler func(context.Context, HostInvocation, HostMutation) (HostMutationResult, error)
 type HostChildLaunch struct {
@@ -386,6 +393,9 @@ func (v HostInvocation) Mutate(ctx context.Context, m HostMutation, launch HostC
 		r.Result.CleanupConfirmed = false
 	}
 	if r.Code != "" {
+		if r.Code == "legacy_state_present" && len(r.LegacyPaths) > 0 {
+			return HostMutationResult{}, errors.Join(ErrHostState, legacyState(r.LegacyPaths...))
+		}
 		if r.Code == "deadline" && r.Result.Partial && !r.Result.CleanupConfirmed {
 			return r.Result, ErrHostDeadline
 		}
@@ -412,6 +422,8 @@ func hostProtocolError(code string) error {
 		return errors.Join(ErrHostState, ErrHostStateUninitialized)
 	case "state_corrupt":
 		return errors.Join(ErrHostState, ErrHostStateCorrupt)
+	case "legacy_state_present":
+		return errors.Join(ErrHostState, legacyState("the configured RC data/state directories"))
 	case "state":
 		return ErrHostState
 	case "identity":
@@ -429,6 +441,8 @@ func hostProtocolError(code string) error {
 }
 func hostProtocolCode(e error) string {
 	switch {
+	case errors.Is(e, ErrLegacyState):
+		return "legacy_state_present"
 	case errors.Is(e, ErrPreviousCloseUnsettled):
 		return "unsettled"
 	case errors.Is(e, ErrHostRevision):
@@ -513,7 +527,12 @@ func ServeHostWorkerChild(ctx context.Context, in io.Reader, out io.Writer, r Ho
 	} else if e != nil && !result.Partial {
 		result = HostMutationResult{}
 	}
-	return json.NewEncoder(out).Encode(hostChildResponse{Version: 1, Operation: m.Operation, Result: result, Code: code})
+	var legacy *LegacyStateError
+	var paths []string
+	if errors.As(e, &legacy) {
+		paths = legacy.Paths
+	}
+	return json.NewEncoder(out).Encode(hostChildResponse{Version: 1, Operation: m.Operation, Result: result, Code: code, LegacyPaths: paths})
 }
 
 func executeResolvedHost(ctx context.Context, v HostInvocation, m HostMutation, handle HostMutationHandler) (HostMutationResult, error) {
@@ -523,6 +542,9 @@ func executeResolvedHost(ctx context.Context, v HostInvocation, m HostMutation, 
 	}
 	s, e := ReadHostIntent(v.StateDir)
 	if e != nil {
+		if errors.Is(e, ErrLegacyState) {
+			return zero, e
+		}
 		return zero, hostProtocolError(hostProtocolCode(e))
 	}
 	if m.Expected.Revision != 0 && m.Expected.Operation == "" {

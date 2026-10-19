@@ -385,6 +385,17 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 		return errors.New("refusing non-Mycelium service unit")
 	}
 
+	if c.Role == "queue" {
+		if err := refuseLegacyQueue(c.DB); err != nil {
+			return err
+		}
+	}
+	if err := refuseLegacyHost(c.HostStateDir); err != nil {
+		return err
+	}
+	if err := refuseLegacyWorker(c.State, c.EnvironmentCache); err != nil {
+		return err
+	}
 	if command == nil {
 		return errors.New("service runner unavailable")
 	}
@@ -762,7 +773,7 @@ func ReadServiceToken(c ServiceConfig) (string, error) {
 	}
 	token, _, err := ReadFleetEnvironment(c.Credentials)
 	if err != nil {
-		return "", errors.New("service credentials require a literal EnvironmentFile; convert old JSON credentials offline or reinstall")
+		return "", errors.New("service credentials require a literal EnvironmentFile; preserve the secret reference and do a fresh install")
 	}
 	return token, nil
 }

@@ -33,7 +33,7 @@ func sharedHostDirectory(dir string) (string, error) {
 		return HostStateDirectory()
 	}
 	if legacyUnitParent(dir) != "" {
-		return "", legacyHostStateError()
+		return "", errors.Join(ErrHostState, legacyState(legacyUnitParent(dir)))
 	}
 	return dir, nil
 }

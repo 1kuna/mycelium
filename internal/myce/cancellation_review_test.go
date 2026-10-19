@@ -2,6 +2,7 @@ package myce
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -333,30 +334,35 @@ func TestCancellationWorkerPreparing(t *testing.T) {
 			defer store.close()
 			store.state.Session = assigned.Session
 			p, err := w.start(store, *assigned)
-			if err != nil || p == nil {
-				t.Fatalf("start: %v", err)
+			var completed Result
+			if err != nil {
+				if !stale(err) || errors.Is(err, errWorkerReleasePending) || p != nil {
+					t.Fatalf("start refusal: %v", err)
+				}
+				completed = result(assigned, false)
+				completed.Error = err.Error()
+			} else {
+				if p == nil {
+					t.Fatal("start returned neither process nor refusal")
+				}
+				select {
+				case done := <-p.done:
+					completed = done.result
+				case <-time.After(testWaitTimeout):
+					t.Fatal("worker preparation stalled")
+				}
 			}
-			select {
-			case done := <-p.done:
-				_, statErr := os.Stat(marker)
-				if priority == "production" {
-					if done.result.Success || !os.IsNotExist(statErr) {
-						t.Fatal("cancelled gated command launched", done)
-					}
-				} else if !done.result.Success || statErr != nil {
-					t.Fatal("expected documented preassigned, ungated launch window", done, statErr)
-				}
-				if a := cancelAck(t, q, j.ID); ackRelease(a) != "pending" {
-					t.Fatal(a)
-				}
-				if err := q.Complete(done.result); err != nil {
-					t.Fatal(err)
-				}
-				if a := cancelAck(t, q, j.ID); ackRelease(a) != "confirmed" {
-					t.Fatal(a)
-				}
-			case <-time.After(testWaitTimeout):
-				t.Fatal("worker preparation stalled")
+			if _, statErr := os.Stat(marker); completed.Success || !os.IsNotExist(statErr) {
+				t.Fatal("cancelled gated command launched", completed, statErr)
+			}
+			if a := cancelAck(t, q, j.ID); ackRelease(a) != "pending" {
+				t.Fatal(a)
+			}
+			if err := q.Complete(completed); err != nil {
+				t.Fatal(err)
+			}
+			if a := cancelAck(t, q, j.ID); ackRelease(a) != "confirmed" {
+				t.Fatal(a)
 			}
 			assertNoCancellationAttempt(t, q, assigned)
 		})

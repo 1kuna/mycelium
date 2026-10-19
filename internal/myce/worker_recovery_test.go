@@ -47,11 +47,19 @@ func TestWorkerRetryFakeClockBoundaries(t *testing.T) {
 }
 func recoveryWorker(t *testing.T) Worker {
 	t.Helper()
-	server := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := workerTestHandler(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "start_gate": startGateProtocol})
 	}))
-	t.Cleanup(server.Close)
-	return Worker{Client: Client{URL: server.URL}, Machine: machine("recovery-worker", "fake"), StateDir: t.TempDir(), Interval: time.Millisecond, Clock: RealClock{}}
+	// A real listener prevents synctest's virtual time from advancing.
+	client := &http.Client{Transport: fetchTransport(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host != "worker-test.invalid" {
+			return http.DefaultTransport.RoundTrip(r)
+		}
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, r)
+		return w.Result(), nil
+	})}
+	return Worker{Client: Client{URL: "http://worker-test.invalid", HTTP: client}, Machine: machine("recovery-worker", "fake"), StateDir: t.TempDir(), Interval: time.Millisecond, Clock: RealClock{}}
 }
 func recoveryJob(t *testing.T, command []string) Job {
 	t.Helper()
@@ -123,8 +131,8 @@ func TestWorkerStateRejectsForeignDocuments(t *testing.T) {
 
 func TestWorkerStateAcceptsExistingSchema(t *testing.T) {
 	for _, data := range []string{
-		`{"session":"old","fresh":false,"offset":0}`,
-		`{"session":"old","previous_session":"previous","fresh":true,"offset":17,"pid":42,"identity":"owned","launch_pending":true,"birth":"birth","pending":2,"checkpoint_root":"/local","log":"owned.log"}`,
+		`{"schema_version":3,"session":"old","fresh":false,"offset":0}`,
+		`{"schema_version":3,"session":"old","previous_session":"previous","fresh":true,"offset":17,"pid":42,"identity":"owned","launch_pending":true,"birth":"birth","pending":2,"checkpoint_root":"/local","log":"owned.log"}`,
 	} {
 		w := recoveryWorker(t)
 		if err := os.WriteFile(filepath.Join(w.StateDir, "state.json"), []byte(data), 0600); err != nil {
@@ -151,7 +159,6 @@ func TestWorkerStateAcceptsExistingSchema(t *testing.T) {
 
 func TestWorkerOfflineLargeOutputIsDurable(t *testing.T) {
 	w := recoveryWorker(t)
-	w.Client.URL = "http://127.0.0.1:1"
 	s, err := w.openStore()
 	if err != nil {
 		t.Fatal(err)
@@ -164,6 +171,9 @@ func TestWorkerOfflineLargeOutputIsDurable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The current protocol requires an online Started acknowledgement. Losing
+	// the queue after that handoff must not block output or result durability.
+	w.Client.URL = "http://127.0.0.1:1"
 	var finish workerFinish
 	select {
 	case finish = <-p.done:

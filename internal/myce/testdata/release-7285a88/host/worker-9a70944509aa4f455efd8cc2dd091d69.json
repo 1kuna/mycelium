@@ -1,0 +1,1 @@
+{"config":"/fixture/config.json","unit":"myce-worker@gpu0.service","command":["myce","service","--config","/fixture/config.json"],"state_dir":"/fixture/worker-state","environment_cache":"/fixture/environment-cache","host_id":"fixture-host","name":"fixture-worker","queue":"http://fixture-queue.invalid"}

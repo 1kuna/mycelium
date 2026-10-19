@@ -1,7 +1,7 @@
 # Current worker protocol
 
 Queue and workers use `X-Myce-Start-Gate: host-attempt-v3` for worker
-requests, including completion and log reports. An old or missing protocol
+requests, including completion, log and checkpoint reports and worker events. An old or missing protocol
 gets HTTP 426 with `worker_protocol_mismatch`. Upgrade queue and workers
 together while the host is closed. There is no preparation-only permit route.
 
@@ -20,5 +20,9 @@ release another attempt's custody.
 
 New programmatic installs store literal `MYCE_TOKEN` and `MYCE_QUEUE`
 assignments in their private credential file, using the same EnvironmentFile
-parser as externally provisioned secrets. Old JSON credential files require
-explicit offline conversion. No token is passed in argv, logs, or job environments.
+parser as externally provisioned secrets. Old JSON credential files are not
+converted; provision current credentials through the secret mechanism when
+installing fresh. No token is passed in argv, logs, or job environments.
+
+Old persisted formats return `legacy_state_present`; operators archive and
+install fresh as described in [Retiring RC state](guide-fresh-install.md).
