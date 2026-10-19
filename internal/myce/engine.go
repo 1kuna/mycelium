@@ -369,7 +369,11 @@ func (l *LlamaEngine) runStopCommand(grace context.Context) error {
 }
 
 func cleanupEngines(dir string, clock Clock) error {
-	files, e := filepath.Glob(filepath.Join(dir, "engine-*.json"))
+	return cleanupRecordedProcesses(dir, "engine-*.json", clock)
+}
+
+func cleanupRecordedProcesses(dir, pattern string, clock Clock) error {
+	files, e := filepath.Glob(filepath.Join(dir, pattern))
 	if e != nil {
 		return e
 	}
@@ -614,8 +618,12 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 		if s.State != "loading" || s.Session != rt.session {
 			continue
 		}
-		if m := rt.models[s.Model]; m != nil && m.state != "unloaded" && m.state != "failed" {
-			continue
+		if m := rt.models[s.Model]; m != nil {
+			// A delayed loading reply may race with local failure/cleanup.
+			// Only a fresh queue attempt can authorize another engine load.
+			if m.attempt == s.Attempt || m.state != "unloaded" && m.state != "failed" {
+				continue
+			}
 		}
 		var model Model
 		for _, m := range rt.config.Models {

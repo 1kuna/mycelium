@@ -254,6 +254,9 @@ func (q *Queue) machineJobLimit(m *Machine) int {
 	return limit
 }
 func (q *Queue) machineLimitReason(m *Machine) string {
+	if q.hostBenchmarkPending(hostID(m)) {
+		return "host onboarding benchmark pending"
+	}
 	limit := q.machineJobLimit(m)
 	if limit == 0 {
 		return ""

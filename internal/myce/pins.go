@@ -120,6 +120,13 @@ func (q *Queue) maintainPins() {
 		model, _ := q.model(p.Model)
 		candidates := []*Machine{}
 		for _, m := range q.s.Machines {
+			if q.hostBenchmarkPending(hostID(m)) {
+				// Keep an existing pin's engine protected while onboarding waits
+				// for an idle host. Do not plan a new engine alongside a benchmark.
+				if s := q.s.ModelSlots[slotKey(m.ID, p.Model)]; s == nil || s.State == "failed" {
+					continue
+				}
+			}
 			if !availabilityBlocked(m) && q.projectAllows(p.Project, m.ID) && !m.Gone && !m.Leaving && m.MemoryError == "" && m.ModelURL != "" && !q.unreported[m.ID] && q.modelUsableMachine(model, m) && (p.Machine == "" || p.Machine == m.ID) && (p.Platform == "" || p.Platform == m.GPU) {
 				candidates = append(candidates, m)
 			}

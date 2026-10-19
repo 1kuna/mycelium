@@ -157,6 +157,9 @@
         "key": {
           "type": "string"
         },
+        "launch": {
+          "$ref": "#/$defs/HostLaunch"
+        },
         "lock_file": {
           "type": "string"
         },
@@ -541,6 +544,36 @@
       "required": [
         "sha256",
         "size_bytes"
+      ],
+      "type": "object"
+    },
+    "HostLaunch": {
+      "properties": {
+        "attempt": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "started": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "machine",
+        "session",
+        "kind",
+        "key",
+        "attempt"
       ],
       "type": "object"
     },

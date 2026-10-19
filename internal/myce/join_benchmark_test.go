@@ -29,7 +29,7 @@ func TestJoinBenchmarkOptIn(t *testing.T) {
 			server := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				handler.ServeHTTP(w, r)
 				snap, err := q.Snapshot()
-				if err == nil && len(snap.Machines) > 0 {
+				if err == nil && len(snap.Machines) > 0 && !snap.Machines[0].BenchmarkPending {
 					once.Do(func() { close(admitted) })
 				}
 			}))
@@ -48,8 +48,8 @@ func TestJoinBenchmarkOptIn(t *testing.T) {
 				Benchmark: func(_ context.Context, _ BenchmarkConfig, p *CapabilityProfile) error {
 					calls.Add(1)
 					snap, _ := q.Snapshot()
-					if len(snap.Machines) != 0 {
-						t.Error("benchmark ran after admission")
+					if len(snap.Machines) != 1 || !snap.Machines[0].BenchmarkPending {
+						t.Error("benchmark ran without queue registration")
 					}
 					p.Benchmark = &BenchmarkResult{State: "partial"}
 					return saveWorkerJSON(root, "capability-profile.json", p)

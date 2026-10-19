@@ -804,7 +804,7 @@ func (w Worker) Run(stop context.Context) error {
 	// Benchmark before any model load or admission, and never over a recovered job.
 	// Fake inventory keeps dev/tests light; measured fake runners are tested separately.
 	if w.OnboardingBenchmark && w.Benchmark != nil && w.Machine.GPU != "fake" && s.state.Job == nil {
-		if err = w.Benchmark(stop, BenchmarkConfig{Clock: w.Clock, Machine: w.Machine, StateDir: s.dir, ExtensionRoot: w.ExtensionRoot, Client: w.Client, DailyUse: w.DailyUse, Laptop: w.Laptop, Desktop: w.Desktop, OwnerSignals: w.OwnerSignals}, w.Machine.CapabilityProfile); err != nil {
+		if err = w.runBenchmark(stop, s); err != nil {
 			return err
 		}
 	} else if w.OnboardingBenchmark {

@@ -103,6 +103,8 @@ func (q *Queue) reconcilePreparationPlans(c Checkin) {
 					done = true
 				}
 			}
+		} else if l.Kind == "benchmark" {
+			done = c.BenchmarkDone == l.Attempt
 		}
 		if done {
 			delete(q.s.PreparationPlans, id)
@@ -145,6 +147,9 @@ func checkLaunchGate(ctx context.Context) error {
 
 func (q *Queue) cancelUnofferedPreparations(m *Machine, reply Reply) {
 	offered := map[string]bool{}
+	if reply.BenchmarkPlan != nil {
+		offered[reply.BenchmarkPlan.Attempt] = true
+	}
 	for _, r := range reply.EnvironmentPlan {
 		offered[launchAttempt(r.Launch)] = true
 	}

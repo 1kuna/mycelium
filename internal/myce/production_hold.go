@@ -522,6 +522,9 @@ func (q *Queue) maintainHolds() {
 }
 
 func (q *Queue) backgroundPreparing(m *Machine) bool {
+	if m.BenchmarkPending {
+		return true
+	}
 	for _, r := range m.EnvironmentReports {
 		if r.State == "building" {
 			production := false

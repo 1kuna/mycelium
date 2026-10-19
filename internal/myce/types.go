@@ -335,7 +335,8 @@ type Job struct {
 	Checkpoint            string                       `json:"checkpoint"`
 }
 type Machine struct {
-	DockerCause *RuntimeCause `json:"docker_cause,omitempty"`
+	DockerCause      *RuntimeCause `json:"docker_cause,omitempty"`
+	BenchmarkPending bool          `json:"benchmark_pending,omitempty"`
 
 	Capabilities                []string            `json:"capabilities,omitempty"`
 	MaxJobs                     int                 `json:"max_jobs,omitempty"`
@@ -400,6 +401,7 @@ type Execution struct {
 	Attempt  int    `json:"attempt"`
 }
 type Checkin struct {
+	BenchmarkDone   string        `json:"benchmark_done,omitempty"` // Exact preparation attempt, after process cleanup.
 	Started         bool          `json:"started,omitempty"`
 	ModelReports    []ModelReport `json:"model_reports,omitempty"`
 	PreviousSession string        `json:"previous_session,omitempty"`
@@ -408,6 +410,7 @@ type Checkin struct {
 	Running         *Execution    `json:"running,omitempty"`
 }
 type Reply struct {
+	BenchmarkPlan     *HostLaunch         `json:"benchmark_plan,omitempty"`
 	PreparationStopAt *time.Time          `json:"preparation_stop_at,omitempty"`
 	HostMaintenance   string              `json:"host_maintenance,omitempty"`
 	HostMemoryBudget  *HostMemoryBudget   `json:"host_memory_budget,omitempty"`

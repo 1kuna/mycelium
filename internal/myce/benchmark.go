@@ -111,14 +111,12 @@ func RunOnboardingBenchmark(ctx context.Context, c BenchmarkConfig, p *Capabilit
 	fingerprint := hex.EncodeToString(sum[:])
 	var saved CapabilityProfile
 	if b, e := os.ReadFile(filepath.Join(c.StateDir, "capability-profile.json")); e == nil && json.Unmarshal(b, &saved) == nil && identityErr == nil && saved.Benchmark != nil && saved.Benchmark.Fingerprint == fingerprint && saved.Benchmark.State == "complete" {
-		p.Version = 1
 		p.Benchmark = saved.Benchmark
 		p.Onboarding = "measured; qualified reference replay"
 		return nil
 	}
 	start := c.Clock.Now()
 	result := &BenchmarkResult{Fingerprint: fingerprint, RecordedAt: start, State: "partial"}
-	p.Version = 1
 	p.Benchmark = result
 	p.Onboarding = "measured; qualified reference replay"
 	monitor := newAvailabilityMonitor(c.Clock, c.DailyUse, c.Laptop, c.Desktop)
@@ -173,6 +171,9 @@ func RunOnboardingBenchmark(ctx context.Context, c BenchmarkConfig, p *Capabilit
 		if work.Err() != nil {
 			result.Measurements = append(result.Measurements, Throughput{Resource: resource, Reason: "benchmark interrupted; retry on next join"})
 			continue
+		}
+		if err := checkLaunchGate(work); err != nil {
+			return err
 		}
 		bounded, stop := context.WithTimeout(work, 60*time.Second)
 		measurements, e := measure(bounded, resource)

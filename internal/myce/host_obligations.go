@@ -126,6 +126,9 @@ func (q *Queue) obligationCall(e *HostCallExecution) *ModelCall {
 }
 
 func hostPreparing(m *Machine) bool {
+	if m.BenchmarkPending {
+		return true
+	}
 	for _, r := range m.EnvironmentReports {
 		if r.State == "building" {
 			return true

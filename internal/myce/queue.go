@@ -769,12 +769,25 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 					}
 				}
 			}
+			// Onboarding reports health and exact custody before any ordinary
+			// admission. Do not return offers that this startup phase cannot run.
+			if m.BenchmarkPending || c.BenchmarkDone != "" {
+				if m.BenchmarkPending && q.hostLaunchAllowed(&m, m.Session) && q.benchmarkIdle(&m) {
+					l := q.issuePreparation(&m, "benchmark", "onboarding")
+					reply.BenchmarkPlan = &l
+				}
+				q.cancelUnofferedPreparations(&m, reply)
+				return
+			}
 			reply.EnvironmentPlan = q.environmentPlan(&m)
 			reply.ModelPlan = q.modelPlan(m.ID)
 			reply.CopyPlan, reply.CacheUsage, reply.CachePins = q.copyPlan(&m)
 			q.cancelUnofferedPreparations(&m, reply)
 		}()
 		reply.Leave = m.Leaving
+		if m.BenchmarkPending || c.BenchmarkDone != "" {
+			return nil
+		}
 		if m.Leaving {
 			for _, j := range q.s.Jobs {
 				if j.Machine == m.ID && j.Session == m.Session && j.Spec.Resumable {

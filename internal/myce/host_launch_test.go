@@ -128,7 +128,7 @@ func TestMaintenancePreparationExactCompletion(t *testing.T) {
 	q, _ := fixture(t)
 	m := machine("builder", "fake", "host")
 	check(t, q, m, nil)
-	for _, kind := range []string{"environment", "copy"} {
+	for _, kind := range []string{"environment", "copy", "benchmark"} {
 		l := q.issuePreparation(&m, kind, "fixture")
 		if err := q.AuthorizeLaunch(l); err != nil {
 			t.Fatal(err)
@@ -139,14 +139,18 @@ func TestMaintenancePreparationExactCompletion(t *testing.T) {
 		}
 		m.EnvironmentReports = []EnvironmentReport{{Key: l.Key, Attempt: "wrong", State: "ready"}}
 		m.CopyReports = []CopyReport{{Model: l.Key, Attempt: "wrong", State: "ready"}}
-		check(t, q, m, nil)
+		if _, err := q.Checkin(Checkin{Machine: m, BenchmarkDone: "wrong"}); err != nil {
+			t.Fatal(err)
+		}
 		st, _ = q.HostMaintenanceStatus("host")
 		if st.Quiescent {
 			t.Fatal("wrong attempt discharged preparation")
 		}
 		m.EnvironmentReports[0].Attempt = l.Attempt
 		m.CopyReports[0].Attempt = l.Attempt
-		check(t, q, m, nil)
+		if _, err := q.Checkin(Checkin{Machine: m, BenchmarkDone: l.Attempt}); err != nil {
+			t.Fatal(err)
+		}
 		st, _ = q.HostMaintenanceStatus("host")
 		if !st.Quiescent {
 			t.Fatal("exact completion did not discharge", st)

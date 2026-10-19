@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"errors"
 	"log"
 	"path/filepath"
 )
@@ -73,6 +74,7 @@ func (rt *modelRuntime) syncCopies(plan, usage []CopyTask, pins []string, busy b
 		rt.wg.Add(1)
 		go func(score int) {
 			defer rt.wg.Done()
+			defer cancel()
 			err := checkLaunchGate(ctx)
 			if err == nil {
 				_, err = rt.cache.Precopy(ctx, model, score)
@@ -85,6 +87,9 @@ func (rt *modelRuntime) syncCopies(plan, usage []CopyTask, pins []string, busy b
 			report.State = "ready"
 			if err != nil {
 				report.State = "failed"
+				if errors.Is(err, context.Canceled) {
+					report.State = "paused"
+				}
 				report.Error = err.Error()
 			}
 			rt.copyResults[model.Name] = report

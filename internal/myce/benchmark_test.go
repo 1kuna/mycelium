@@ -82,7 +82,7 @@ func TestBenchmarkSerialPersistenceAndHardwareInvalidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	var disk CapabilityProfile
-	if json.Unmarshal(data, &disk) != nil || disk.Benchmark.State != "complete" || disk.Benchmark.Seconds != .005 {
+	if json.Unmarshal(data, &disk) != nil || disk.Version != 0 || disk.Benchmark.State != "complete" || disk.Benchmark.Seconds != .005 {
 		t.Fatal(string(data))
 	}
 	calls = nil

@@ -25,6 +25,14 @@ acceptance. `--wait` requires drained/disabled state, fresh consistent known
 workers and zero work, preparations, engines or pending cleanup. Timeout and
 missing reports leave custody unresolved. Resume does not discharge old work.
 
+Opt-in onboarding benchmarks register before measuring and count as preparations
+until their exact attempt finishes and process cleanup is confirmed. They share
+the queue launch check with jobs, builds and engines, including the final shell
+gate for qualified reference commands. Heartbeats continue during measurement;
+drain/disable preserve a running command, and disable-stop cancels it. If
+maintenance or existing host work withholds onboarding, the worker continues
+checking in without benchmarking; a later join can retry it.
+
 During queue outage, no maintenance mutation or new Started authorization can
 succeed. Inspect owned work before using separately authorized service/container
 tools. Preserve results and custody for reconnect; there is no offline release
