@@ -14,6 +14,8 @@ const HostObservationWindow = 10 * time.Second
 // HostEnvelope is the shared wire result. Pointers preserve unknown evidence.
 // Expectation verdicts and placement accounting are supplied by the rest layer.
 type HostEnvelope struct {
+	*HostRestVerdict
+	RestEvidence   HostRestEvidence      `json:"rest_evidence"`
 	Schema         int                   `json:"schema_version"`
 	Command        string                `json:"command"`
 	Host           *string               `json:"host_id"`
@@ -70,7 +72,8 @@ func freshHostSource(at, now time.Time) bool {
 // ReadHostObservation copies only control evidence under the queue mutex. No
 // update/snapshot/maintenance, local file reads, reconciliation or persistence.
 type HostQueueObservation struct {
-	Host string `json:"host_id"`
+	Placement *HostPlacementObservation `json:"placement"`
+	Host      string                    `json:"host_id"`
 	HostRevision
 	Boot      string            `json:"boot_id"`
 	Desired   string            `json:"desired"`
@@ -106,6 +109,7 @@ func (q *Queue) ReadHostObservation(ctx context.Context, host string) (HostQueue
 	}
 	s := q.s.HostIntents[host]
 	v := HostQueueObservation{Host: host, HostRevision: s.HostRevision, Boot: s.Boot, Desired: s.Desired, At: q.clock.Now().UTC(), Workers: []HostReadyWorker{}, Pending: q.hostObligations(host)}
+	v.Placement = q.hostPlacementObservation(host)
 	// Open readiness permits current work. Only release obligations, rather than
 	// all active custody that a future close would discharge, withhold ready.
 	if s.Desired == "open" {
@@ -190,6 +194,7 @@ func HostSnapshot(ctx context.Context, v HostInvocation, clock Clock) (HostEnvel
 	e.Host, e.Operation, e.Boot = hostPtr(s.Host), hostPtr(s.Operation), hostPtr(boot)
 	e.Desired = HostEnvelopeState{hostPtr(s.Desired), hostPtr(s.Revision)}
 	e.LastClose, e.Settlement = s.LastClose, s.HostSettlement()
+	e.RestEvidence.MemoryAllowance = hostPtr(s.MemoryAllowanceBytes)
 	captured := clock.Now().UTC()
 	e.Sources["local_intent"] = &captured
 	if o := s.Observation(boot); o != nil && freshHostSource(o.At, captured) {
@@ -216,12 +221,17 @@ func HostSnapshot(ctx context.Context, v HostInvocation, clock Clock) (HostEnvel
 	// Saved Pending is custody from reconciliation, including legitimate current
 	// work. The fresh queue observation below distinguishes unresolved release
 	// from active custody; a cached inventory must not withhold open readiness.
-	ready := s.Desired == "open" && len(required) > 0 && !blockingHostHolds(s.Holds)
+	ready := s.Desired == "open" && len(required) > 0
 	active, preparing, stopping, unsettled := 0, 0, 0, 0
 	attempts := []HostEnvelopeAttempt{}
 	queueTime := clock.Now().UTC()
 	queueOK := len(queues) > 0
 	foundWorkers := map[string]bool{}
+	placement := HostPlacementObservation{}
+	placementOK := true
+	if len(queues) > 0 {
+		e.RestEvidence.QueueReachable = hostPtr(true)
+	}
 	client := HostQueueClient([]HostWorker{{Config: v.ConfigPath, Queue: v.Config.Queue}}, os.Getenv("MYCE_TOKEN"))
 	for _, endpoint := range queues {
 		c, ce := client(endpoint)
@@ -231,6 +241,9 @@ func HostSnapshot(ctx context.Context, v HostInvocation, clock Clock) (HostEnvel
 		}
 		now := clock.Now()
 		if ce != nil || q.Host != s.Host || !freshHostSource(q.At, now) {
+			if ce != nil {
+				e.RestEvidence.QueueReachable = hostPtr(false)
+			}
 			queueOK = false
 			ready = false
 			continue
@@ -238,15 +251,40 @@ func HostSnapshot(ctx context.Context, v HostInvocation, clock Clock) (HostEnvel
 		if q.At.Before(queueTime) {
 			queueTime = q.At
 		}
+		if e.RestEvidence.QueueAt == nil || q.At.Before(*e.RestEvidence.QueueAt) {
+			e.RestEvidence.QueueAt = hostPtr(q.At)
+		}
+		if s.Desired == "closed" && q.Desired == "open" {
+			e.RestEvidence.OpenAdmission = true
+		}
 		if q.HostRevision != s.HostRevision || q.Boot != boot || q.Desired != s.Desired {
 			queueOK = false
 			ready = false
 			continue
 		}
 		active += q.Active
+		for _, fact := range []struct {
+			n    int
+			code string
+		}{{q.Active, "active_attempts"}, {q.Preparing, "preparing_attempts"}, {q.Stopping, "stopping_attempts"}, {len(q.Pending), "release_pending"}} {
+			if fact.n > 0 {
+				e.RestEvidence.ClosedViolations = append(e.RestEvidence.ClosedViolations, fact.code)
+			}
+		}
+		if q.Placement != nil && q.Placement.Unfenced > 0 {
+			e.RestEvidence.ClosedViolations = append(e.RestEvidence.ClosedViolations, "eligible_unfenced_work")
+		}
 		preparing += q.Preparing
 		stopping += q.Stopping
 		unsettled += len(q.Pending)
+		if q.Placement == nil {
+			placementOK = false
+		} else {
+			placement.Queued += q.Placement.Queued
+			placement.Fenced += q.Placement.Fenced
+			placement.Unresolved += q.Placement.Unresolved
+			placement.Unfenced += q.Placement.Unfenced
+		}
 		for _, p := range q.Pending {
 			if p.Engine == nil && !p.Preparation && p.Result.Attempt > 0 {
 				attempts = append(attempts, HostEnvelopeAttempt{p.Result.ID, p.Result.Machine, p.Result.Session, p.Result.Attempt, "pending"})
@@ -255,6 +293,9 @@ func HostSnapshot(ctx context.Context, v HostInvocation, clock Clock) (HostEnvel
 		for _, name := range required {
 			found := false
 			for _, w := range q.Workers {
+				if w.Name == name && w.HostRevision == s.HostRevision && w.Boot == boot && freshHostSource(w.At, now) && !w.Healthy {
+					e.RestEvidence.ReadyViolation = true
+				}
 				if w.Name == name && w.HostRevision == s.HostRevision && w.Boot == boot && w.Healthy && freshHostSource(w.At, now) {
 					found = true
 				}
@@ -266,6 +307,12 @@ func HostSnapshot(ctx context.Context, v HostInvocation, clock Clock) (HostEnvel
 		ready = ready && foundWorkers[name]
 	}
 	if queueOK {
+		if placementOK {
+			e.Counts.Queued = &placement.Queued
+			e.Counts.FencedQueued = &placement.Fenced
+			e.Counts.UnresolvedPlacement = &placement.Unresolved
+			e.RestEvidence.UnfencedQueued = &placement.Unfenced
+		}
 		e.QueueRevision = hostPtr(s.Revision)
 		e.Sources["queue"] = hostPtr(queueTime.UTC())
 		e.Counts.Active = &active
@@ -376,6 +423,10 @@ func (e *HostEnvelope) FinishObservation(now time.Time) {
 		e.Counts.Preparing = nil
 		e.Counts.Stopping = nil
 		e.Counts.Unsettled = nil
+		e.Counts.Queued = nil
+		e.Counts.FencedQueued = nil
+		e.Counts.UnresolvedPlacement = nil
+		e.RestEvidence.UnfencedQueued = nil
 		e.Attempts = nil
 		e.Sources["queue"] = nil
 	}
@@ -397,6 +448,7 @@ func (e *HostEnvelope) FinishObservation(now time.Time) {
 			e.Counts.GPUHolders = nil
 		case "local_intent":
 			e.Ready = nil
+			e.RestEvidence.MemoryAllowance = nil
 		}
 	}
 	e.At = now.UTC()
