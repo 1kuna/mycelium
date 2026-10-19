@@ -314,6 +314,9 @@ func (q *Queue) resolveExtensions(s *Spec) ([]Extension, error) {
 		if !e.handles(*s) {
 			continue
 		}
+		if len(e.Variants) > 0 && len(s.Run.Env) > 0 {
+			return nil, errors.New("variant jobs use extension-owned execution env")
+		}
 		out = append(out, e)
 		for _, v := range e.Variants {
 			s.Needs.MemoryGB = max(s.Needs.MemoryGB, v.Needs.MemoryGB)
@@ -376,8 +379,12 @@ func extensionWaitingReason(j *Job, machines map[string]*Machine) string {
 		if !m.Gone && !m.Leaving && qualifiedExtension(j, m) != nil {
 			return ""
 		}
-		for _, r := range m.ExtensionReports {
-			for _, e := range j.Extensions {
+		for _, e := range j.Extensions {
+			if reason := e.targetUnavailableReason(machineTarget(m)); reason != "" {
+				reasons = append(reasons, extensionKey(e)+": "+reason)
+				continue
+			}
+			for _, r := range m.ExtensionReports {
 				if r.Digest == e.Digest && r.Work == j.Spec.workType() && r.Reason != "" {
 					reasons = append(reasons, extensionKey(e)+": "+r.Reason)
 				}

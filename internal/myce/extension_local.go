@@ -260,7 +260,7 @@ func LocalExtensionReports(root, platform, fingerprint string) []ExtensionReport
 	}
 	out := []ExtensionReport{}
 	for _, e := range extensions {
-		if !slices.Contains(e.platforms(), platform) {
+		if len(e.Variants) == 0 && !slices.Contains(e.platforms(), platform) {
 			continue
 		}
 		records := readExtensionReports(root, e, platform)
@@ -269,6 +269,11 @@ func LocalExtensionReports(root, platform, fingerprint string) []ExtensionReport
 			if len(e.Variants) > 0 {
 				t := ExecutionTarget{OS: runtime.GOOS, Arch: runtime.GOARCH, Platform: platform}
 				r.Target = &t
+				if reason := e.targetUnavailableReason(t); reason != "" {
+					r.Reason = reason
+					out = append(out, r)
+					continue
+				}
 			}
 			for _, old := range records {
 				if old.Work == work && old.Digest == e.Digest {
@@ -315,6 +320,10 @@ func runExtensionCommand(ctx context.Context, args []string, dir string, env map
 // Setup/check are explicit local operations, never background services. Their
 // detailed logs stay local; only fixed reasons enter reports/status.
 func PrepareExtension(ctx context.Context, root string, e Extension, platform, device string, check bool, log io.Writer, caches ...*EnvironmentCache) ([]ExtensionReport, error) {
+	local := Machine{GPU: platform, CapabilityProfile: &CapabilityProfile{OS: runtime.GOOS, Arch: runtime.GOARCH}}
+	if reason := e.targetUnavailableReason(machineTarget(&local)); reason != "" {
+		return nil, errors.New(reason)
+	}
 	if !slices.Contains(e.platforms(), platform) {
 		return nil, errors.New("extension does not support this platform; no CPU fallback")
 	}
@@ -342,7 +351,6 @@ func PrepareExtension(ctx context.Context, root string, e Extension, platform, d
 	if err != nil {
 		return nil, err
 	}
-	local := Machine{GPU: platform, CapabilityProfile: &CapabilityProfile{OS: runtime.GOOS, Arch: runtime.GOARCH}}
 	view, ok := e.forMachine(&local)
 	if !ok {
 		return nil, errors.New("extension target unsupported; native groups require D4")

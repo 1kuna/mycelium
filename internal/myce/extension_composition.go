@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"path"
 	"slices"
 	"strings"
@@ -154,6 +155,9 @@ func (q *Queue) resolveExplicitExtension(s *Spec) ([]Extension, error) {
 		return nil, errors.New("extension reference must resolve to one registered version; use name@version or extension_digest")
 	}
 	e := matches[0]
+	if len(e.Variants) > 0 && len(s.Run.Env) > 0 {
+		return nil, errors.New("variant jobs use extension-owned execution env")
+	}
 	s.Extension = extensionKey(e)
 	s.ExtensionDigest = e.Digest
 	if s.Class == "" && s.Priority == "" {
@@ -188,18 +192,28 @@ func (e Extension) variant(t ExecutionTarget) *ExtensionVariant {
 func (e Extension) matchesTarget(m *Machine) bool {
 	return len(e.Variants) == 0 || e.variant(machineTarget(m)) != nil
 }
+func (e Extension) targetUnavailableReason(t ExecutionTarget) string {
+	if len(e.Variants) == 0 {
+		return ""
+	}
+	v := e.variant(t)
+	if v == nil {
+		return fmt.Sprintf("no variant matches this host's OS/arch/backend: missing target %s/%s/%s", t.OS, t.Arch, t.Platform)
+	}
+	if len(v.Execution.Sidecars) > 0 || v.Execution.Main.MemoryGB > 0 {
+		return "native sidecars and member RAM caps require D4"
+	}
+	return ""
+}
 func (e Extension) forMachine(m *Machine) (Extension, bool) {
 	if len(e.Variants) == 0 {
 		return e, true
 	}
-	v := e.variant(machineTarget(m))
-	if v == nil {
-		return e, false
-	}
 	// D4 owns group lifecycle, so E1 never admits a group it cannot contain.
-	if len(v.Execution.Sidecars) > 0 || v.Execution.Main.MemoryGB > 0 {
+	if e.targetUnavailableReason(machineTarget(m)) != "" {
 		return e, false
 	}
+	v := e.variant(machineTarget(m))
 	e.Run = slices.Clone(v.Execution.Main.Command)
 	e.Setup = v.Setup
 	e.Check = v.Check
@@ -208,9 +222,13 @@ func (e Extension) forMachine(m *Machine) (Extension, bool) {
 	return e, true
 }
 func (e Extension) lower(s *Spec, m *Machine) error {
+	legacyEnv := s.Run.Env
 	if len(e.Variants) == 0 {
 		s.Execution = &ExecutionSpec{Main: ExecutionMember{Command: slices.Clone(e.Run)}}
 	} else {
+		if len(legacyEnv) > 0 {
+			return errors.New("variant jobs use extension-owned execution env")
+		}
 		v := e.variant(machineTarget(m))
 		if v == nil {
 			return errors.New("no extension variant for worker target")
@@ -221,7 +239,15 @@ func (e Extension) lower(s *Spec, m *Machine) error {
 		s.Execution = &execution
 	}
 	s.Run = RunSpec{} // A worker copy may already contain a staged workdir.
-	return lowerExecution(s)
+	if err := lowerExecution(s); err != nil {
+		return err
+	}
+	if len(e.Variants) == 0 {
+		// Legacy caller configuration is not authored member env. Keep the
+		// existing worker's authoritative identity/device/usage overrides.
+		s.Run.Env = maps.Clone(legacyEnv)
+	}
+	return nil
 }
 func extensionRecipe(e Extension, m *Machine) (EnvironmentRecipe, bool) {
 	v := e.variant(machineTarget(m))

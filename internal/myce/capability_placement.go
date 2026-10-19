@@ -112,7 +112,7 @@ func (q *Queue) applyLearnedNeeds(j *Job) {
 		return
 	}
 	for _, e := range j.Extensions {
-		for _, p := range e.Platforms {
+		for _, p := range e.platforms() {
 			if needs, ok := q.s.ProgramNeeds[programNeedsKey(j, e, p)]; ok {
 				j.Spec.Needs.MemoryGB = max(j.Spec.Needs.MemoryGB, needs.MemoryGB)
 				j.Spec.Needs.HostMemoryGB = max(j.Spec.Needs.HostMemoryGB, needs.HostMemoryGB)
