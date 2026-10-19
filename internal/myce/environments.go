@@ -329,7 +329,7 @@ type EnvironmentCache struct {
 	Limit   int64
 	Clock   Clock
 	Fetch   func(context.Context, FileRef, string) error
-	Run     func(context.Context, []string, string, []string, io.Writer) error
+	Run     func(context.Context, []string, string, []string, io.Writer, io.Writer) error
 }
 
 func (c *EnvironmentCache) init() error {
@@ -601,17 +601,17 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) erro
 			env = append(env, v)
 		}
 	}
-	env = append(env, "PIXI_CACHE_DIR="+filepath.Join(partial, "pixi-cache"), "PIXI_NO_PROGRESS=1", "UV_CACHE_DIR="+filepath.Join(partial, "uv-cache"), "UV_PYTHON_INSTALL_DIR="+filepath.Join(partial, "python"), "UV_PROJECT_ENVIRONMENT="+filepath.Join(partial, "venv"))
+	env = append(env, "PIXI_CACHE_DIR="+filepath.Join(partial, "pixi-cache"), "PIXI_NO_PROGRESS=true", "UV_CACHE_DIR="+filepath.Join(partial, "uv-cache"), "UV_PYTHON_INSTALL_DIR="+filepath.Join(partial, "python"), "UV_PROJECT_ENVIRONMENT="+filepath.Join(partial, "venv"))
 	run := c.Run
 	if run == nil {
 		run = c.runBuild
 	} else {
 		custom := run
-		run = func(ctx context.Context, argv []string, dir string, env []string, out io.Writer) error {
+		run = func(ctx context.Context, argv []string, dir string, env []string, stdout, stderr io.Writer) error {
 			if err := checkLaunchGate(ctx); err != nil {
 				return err
 			}
-			return custom(ctx, argv, dir, env, out)
+			return custom(ctx, argv, dir, env, stdout, stderr)
 		}
 	}
 
@@ -696,11 +696,11 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) erro
 		} else if r.Backend == "pixi" {
 			e = c.installPixi(buildCtx, r, partial, env, output, run)
 		} else if _, ok := r.Files["uv.lock"]; ok {
-			e = run(buildCtx, []string{"uv", "sync", "--frozen", "--no-dev", "--no-install-project", "--no-editable", "--python", r.Python}, partial, env, output)
+			e = run(buildCtx, []string{"uv", "sync", "--frozen", "--no-dev", "--no-install-project", "--no-editable", "--python", r.Python}, partial, env, output, output)
 		} else {
-			e = run(buildCtx, []string{"uv", "venv", "--python", r.Python, filepath.Join(partial, "venv")}, partial, env, output)
+			e = run(buildCtx, []string{"uv", "venv", "--python", r.Python, filepath.Join(partial, "venv")}, partial, env, output, output)
 			if e == nil {
-				e = run(buildCtx, []string{"uv", "pip", "sync", "--python", filepath.Join(partial, "venv", "bin", "python"), "requirements.txt"}, partial, env, output)
+				e = run(buildCtx, []string{"uv", "pip", "sync", "--python", filepath.Join(partial, "venv", "bin", "python"), "requirements.txt"}, partial, env, output, output)
 			}
 		}
 	}
@@ -727,7 +727,7 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) erro
 			buildEnv[k] = v
 		}
 		bindEnvironment(buildEnv, partial)
-		e = run(buildCtx, argv, partial, cleanExtensionEnv(buildEnv), output)
+		e = run(buildCtx, argv, partial, cleanExtensionEnv(buildEnv), output, output)
 	}
 	if e == nil && r.prepare != nil {
 		e = r.prepare(buildCtx, partial, output)
@@ -788,8 +788,8 @@ func (c *EnvironmentCache) cleanupBuild(path string) error {
 	store := workerStore{state: state}
 	return store.cleanupOrphan(c.Clock)
 }
-func (c *EnvironmentCache) runBuild(ctx context.Context, argv []string, dir string, env []string, out io.Writer) error {
-	return runRecordedCommand(ctx, argv, dir, env, out, commandScope{StateDir: dir, Clock: c.Clock}, "build-state.json")
+func (c *EnvironmentCache) runBuild(ctx context.Context, argv []string, dir string, env []string, stdout, stderr io.Writer) error {
+	return runRecordedCommand(ctx, argv, dir, env, stdout, commandScope{StateDir: dir, Clock: c.Clock, Stderr: stderr}, "build-state.json")
 }
 
 type environmentRuntime struct {

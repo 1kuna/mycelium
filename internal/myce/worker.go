@@ -56,7 +56,7 @@ type Worker struct {
 	EnvironmentRoot       string
 	EnvironmentLimit      int64
 	environmentCache      *EnvironmentCache
-	environmentRun        func(context.Context, []string, string, []string, io.Writer) error
+	environmentRun        func(context.Context, []string, string, []string, io.Writer, io.Writer) error
 	// Test seams for deterministic filesystem faults and audited fake engines.
 	beforeModelCopy             func(context.Context)
 	modelEngine                 func(Model) Engine

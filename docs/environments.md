@@ -178,9 +178,11 @@ variants:
 ```
 
 `manifest` is optional and defaults to `pixi.toml` beside `pixi.lock`.
-`environment` defaults to pixi's `default` environment. Both input files are
-snapshotted; pixi owns mixed conda/PyPI dependencies. The extension owns every
-version, channel, platform and variant. Mycelium supplies mechanisms and
+`environment` defaults to pixi's `default` environment. The complete extension
+folder is snapshotted and verified by digest, preserving the workspace's relative
+paths for activation scripts and other bundled inputs. Pixi owns mixed conda/PyPI
+dependencies. The extension owns every version, channel, platform and variant.
+Mycelium supplies mechanisms and
 **guarantees no packages**. Existing uv recipes remain supported.
 
 The worker requires pixi on PATH; it never installs pixi automatically. A host
@@ -194,6 +196,14 @@ cache Trash after exact process cleanup. Pixi's package cache lives inside the
 entry and counts against its budget. Builds can optionally run argv under
 `build` with `{root}` and frozen bundled `{extension}` inputs, inside the prepared
 environment. There is no implicit shell or Docker requirement.
+
+Real-pixi integration tests run automatically when pixi is on PATH, or when
+`MYCE_PIXI_BIN` points to a binary. They use empty locked environments without
+package downloads or a GPU, and cover bundled activation through a worker job:
+
+```sh
+MYCE_PIXI_BIN=/path/to/pixi go test ./internal/myce -race -run '^TestPixiReal' -v
+```
 
 Small wrapper files belong in the extension folder. Large immutable files use
 `assets: {model: {sha256: '<64 hex digits>', size_bytes: 123}}` at extension scope,

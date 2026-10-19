@@ -38,7 +38,7 @@ func TestExtensionAutomaticPrepareTwoJobsOneBuildAndPlacement(t *testing.T) {
 	q, w := prepareTestWorker(t, e)
 	// Real HTTP/worker loop starts without a local extension, environment or qualification.
 	var builds atomic.Int32
-	w.environmentRun = func(_ context.Context, _ []string, dir string, _ []string, _ io.Writer) error {
+	w.environmentRun = func(_ context.Context, _ []string, dir string, _ []string, _, _ io.Writer) error {
 		builds.Add(1)
 		return os.MkdirAll(filepath.Join(dir, "venv", "bin"), 0700)
 	}
@@ -284,6 +284,26 @@ func TestExtensionPixiPreparedQualifiedExecution(t *testing.T) {
 	e.Files["env/pixi.lock"] = []byte("locked")
 	e.Files["env/pixi.toml"] = []byte("[workspace]")
 	e = freezeComposition(t, e)
+	_, logs := runPreparedExtensionJob(t, e)
+	found := false
+	for _, l := range logs {
+		if strings.Contains(l.Text, "activated:yes") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("pixi job did not receive activation", logs)
+	}
+	b, err := os.ReadFile(builds)
+	if err != nil || string(b) != "install\n" {
+		t.Fatal("execution rebuilt pixi", string(b), err)
+	}
+}
+
+// E3 owns the check itself; this helper supplies an exact successful record and
+// exercises preparation, placement and execution through the ordinary worker.
+func runPreparedExtensionJob(t *testing.T, e Extension) (Worker, []Log) {
+	t.Helper()
 	q, w := prepareTestWorker(t, e)
 	j := submit(t, q, Spec{Name: "pixi", Project: "test", Extension: extensionKey(e)})
 	plan := check(t, q, w.Machine, nil).EnvironmentPlan[0]
@@ -328,17 +348,5 @@ func TestExtensionPixiPreparedQualifiedExecution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	found := false
-	for _, l := range logs {
-		if strings.Contains(l.Text, "activated:yes") {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatal("pixi job did not receive activation", logs)
-	}
-	b, err := os.ReadFile(builds)
-	if err != nil || string(b) != "install\n" {
-		t.Fatal("execution rebuilt pixi", string(b), err)
-	}
+	return w, logs
 }

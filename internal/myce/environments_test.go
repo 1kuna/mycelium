@@ -62,7 +62,7 @@ func TestEnvironmentBuildLockReuseAndCleanup(t *testing.T) {
 	r.Build = []string{"pretend-build"}
 	r.Key = strings.Repeat("a", 64)
 	var count atomic.Int32
-	c := &EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: RealClock{}, Run: func(ctx context.Context, args []string, dir string, env []string, out io.Writer) error {
+	c := &EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: RealClock{}, Run: func(ctx context.Context, args []string, dir string, env []string, out, _ io.Writer) error {
 		count.Add(1)
 		time.Sleep(20 * time.Millisecond)
 		return nil
@@ -425,7 +425,7 @@ func TestBuildOnlyLauncherRelocation(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	c := &EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: RealClock{}, Run: func(_ context.Context, _ []string, dir string, _ []string, _ io.Writer) error {
+	c := &EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: RealClock{}, Run: func(_ context.Context, _ []string, dir string, _ []string, _, _ io.Writer) error {
 		// A local build can emit a launcher whose interpreter lives in its own bin.
 		if e := os.Symlink("/bin/sh", filepath.Join(dir, "bin", "interpreter")); e != nil {
 			return e

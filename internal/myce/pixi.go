@@ -13,7 +13,7 @@ import (
 )
 
 // Pixi owns the mixed conda/PyPI solve. Workers never solve or install pixi.
-func (c *EnvironmentCache) installPixi(ctx context.Context, r EnvironmentRecipe, dir string, env []string, out io.Writer, run func(context.Context, []string, string, []string, io.Writer) error) error {
+func (c *EnvironmentCache) installPixi(ctx context.Context, r EnvironmentRecipe, dir string, env []string, out io.Writer, run func(context.Context, []string, string, []string, io.Writer, io.Writer) error) error {
 	name := r.Environment
 	if name == "" {
 		name = "default"
@@ -21,13 +21,18 @@ func (c *EnvironmentCache) installPixi(ctx context.Context, r EnvironmentRecipe,
 	if !extensionName.MatchString(name) {
 		return errors.New("invalid pixi environment name")
 	}
-	args := []string{"pixi", "install", "--locked", "--environment", name, "--no-config", "--manifest-path", filepath.Join(dir, "pixi.toml")}
-	if err := run(ctx, args, dir, env, out); err != nil {
+	manifest := filepath.Join(dir, "pixi.toml")
+	if r.InputDigest != "" {
+		// Bundled workspaces keep the extension's complete relative layout.
+		manifest = filepath.Join(dir, "extension", filepath.Dir(r.LockFile), "pixi.toml")
+	}
+	args := []string{"pixi", "install", "--locked", "--environment", name, "--no-config", "--manifest-path", manifest}
+	if err := run(ctx, args, dir, env, out, out); err != nil {
 		return err
 	}
 	var activation bytes.Buffer
-	args = []string{"pixi", "shell-hook", "--json", "--locked", "--environment", name, "--no-config", "--manifest-path", filepath.Join(dir, "pixi.toml")}
-	if err := run(ctx, args, dir, env, &activation); err != nil {
+	args = []string{"pixi", "shell-hook", "--json", "--locked", "--environment", name, "--no-config", "--manifest-path", manifest}
+	if err := run(ctx, args, dir, env, &activation, out); err != nil {
 		fmt.Fprintln(out, activation.String())
 		return err
 	}

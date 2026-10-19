@@ -119,10 +119,13 @@ func (e *Extension) snapshotVariantEnvironments() error {
 				if !ok {
 					return fmt.Errorf("environment %s: missing bundled %s", name, file)
 				}
-				r.Files[file] = slices.Clone(b)
+				if r.Backend != "pixi" {
+					r.Files[file] = slices.Clone(b)
+				}
 			}
-			// Build hooks consume frozen bundled files, including scripts/config.
-			if len(r.Build) > 0 {
+			// Pixi activation and build hooks can reference any bundled file.
+			// Preserve the full digest-verified folder, including relative paths.
+			if r.Backend == "pixi" || len(r.Build) > 0 {
 				for file, b := range e.Files {
 					r.Files["extension/"+file] = slices.Clone(b)
 				}

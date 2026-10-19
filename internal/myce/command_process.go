@@ -14,6 +14,7 @@ import (
 type commandScope struct {
 	StateDir string
 	Clock    Clock
+	Stderr   io.Writer // nil combines diagnostics with stdout
 }
 
 func (s *commandScope) prepare() error {
@@ -44,6 +45,9 @@ func runRecordedCommand(ctx context.Context, argv []string, dir string, env []st
 	cmd.Env = append(env, "MYCE_PROCESS_ID="+identity)
 	cmd.Stdout = out
 	cmd.Stderr = out
+	if scope.Stderr != nil {
+		cmd.Stderr = scope.Stderr
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		if cmd.Process != nil {

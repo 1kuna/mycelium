@@ -329,7 +329,7 @@ func TestCompositionEnvironmentWorkerEndToEnd(t *testing.T) {
 	if err := InstallExtension(root, e); err != nil {
 		t.Fatal(err)
 	}
-	cache := &EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Run: func(_ context.Context, args []string, dir string, env []string, _ io.Writer) error {
+	cache := &EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Run: func(_ context.Context, args []string, dir string, env []string, _, _ io.Writer) error {
 		for _, v := range env {
 			if strings.HasPrefix(v, "MYCE_TOKEN=") {
 				t.Error("builder inherited token")
