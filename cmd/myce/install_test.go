@@ -33,7 +33,7 @@ func TestInstallCLIDryRunFakeDetection(t *testing.T) {
 					if platform == "xpu" {
 						return []byte("[level_zero:gpu] Intel UHD Integrated GPU"), nil
 					}
-				case "system_profiler":
+				case "/usr/sbin/system_profiler":
 					if platform == "metal" {
 						return []byte("Metal Support: Metal 3"), nil
 					}
