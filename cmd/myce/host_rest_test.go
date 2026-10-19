@@ -156,6 +156,14 @@ func TestHostRestDevExpectations(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, "late")); !os.IsNotExist(err) {
 		t.Fatal("closed queued command executed", err)
 	}
+	report, err = (myce.HostControl{Dir: c.HostStateDir, Clock: myce.RealClock{}, FreshClose: true, Service: envelopeService{}, Observe: envelopeHardware}).Disable(ctx, "rest probe finally", 0)
+	if err != nil || !report.Confirmed {
+		t.Fatal("final close", report, err)
+	}
+	wait(func() bool {
+		e, err := invoke("status", "--expect", "closed", "--verdict")
+		return err == nil && e.Verdict == "PASS"
+	})
 }
 
 func TestHostRestCommandErrorsAndDeadline(t *testing.T) {
