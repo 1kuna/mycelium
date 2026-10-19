@@ -155,7 +155,10 @@ func TestInstallSettingsOverlayMatrix(t *testing.T) {
 							t.Fatalf("overlay changed omitted/unrelated fields or ignored explicit input (%s)", kind)
 						}
 						validationErr := want.ValidateInstall()
-						if (overlayErr == nil) != (validationErr == nil) {
+						// Empty saved references are valid, but explicitly clearing
+						// this flag must fail before credential provisioning.
+						invalidExplicitEmpty := setting.Flag == "environment-file" && kind == "empty-zero-false"
+						if (overlayErr != nil) != (validationErr != nil || invalidExplicitEmpty) {
 							t.Fatalf("validation did not run after overlay: overlay=%v validation=%v", overlayErr, validationErr)
 						}
 						if overlayErr != nil && !strings.HasPrefix(overlayErr.Error(), "usage:") {

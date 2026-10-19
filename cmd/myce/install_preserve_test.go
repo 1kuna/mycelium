@@ -258,6 +258,59 @@ func TestInstallExplicitEmptyPaths(t *testing.T) {
 	}
 }
 
+func TestInstallExplicitEmptyEnvironmentFile(t *testing.T) {
+	for _, role := range []string{"queue", "worker"} {
+		for _, withToken := range []bool{false, true} {
+			name := role + "/without-token"
+			if withToken {
+				name = role + "/with-token"
+			}
+			t.Run(name, func(t *testing.T) {
+				c, probe := savedInstallFixture(t, role)
+				// Only the reference is needed: never read an environment file.
+				c.EnvironmentFile = filepath.Join(c.NAS, "absent-private-reference")
+				before, err := json.Marshal(c)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(c.Config, before, 0600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(c.Credentials); err != nil {
+					t.Fatal(err)
+				}
+				serviceBefore, err := os.ReadFile(c.Service)
+				if err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("MYCE_TOKEN", "")
+				if withToken {
+					t.Setenv("MYCE_TOKEN", "synthetic-empty-environment-test")
+				}
+				probe.Command = func(context.Context, string, ...string) ([]byte, error) {
+					t.Fatal("invalid environment file reached a service command")
+					return nil, nil
+				}
+				err = setupCommandWithProbe([]string{"install", role, "--config", c.Config, "--environment-file="}, probe, c.NAS)
+				if err == nil || !strings.HasPrefix(err.Error(), "usage:") || !strings.Contains(err.Error(), "--environment-file") {
+					t.Fatal("empty environment file was not a flag-specific usage error")
+				}
+				after, err := os.ReadFile(c.Config)
+				if err != nil || string(after) != string(before) {
+					t.Fatal("rejected install changed saved config")
+				}
+				serviceAfter, err := os.ReadFile(c.Service)
+				if err != nil || string(serviceAfter) != string(serviceBefore) {
+					t.Fatal("rejected install changed service definition")
+				}
+				if _, err := os.Lstat(c.Credentials); !os.IsNotExist(err) {
+					t.Fatal("rejected install created credentials")
+				}
+			})
+		}
+	}
+}
+
 func TestInstallOmittedEmptyEnvironmentRoot(t *testing.T) {
 	c, probe := savedInstallFixture(t)
 	c.EnvironmentRoot = ""
@@ -275,7 +328,7 @@ func TestInstallOmittedEmptyEnvironmentRoot(t *testing.T) {
 }
 
 func TestInstallFreshEmptyRequiredValuesAreUsageErrors(t *testing.T) {
-	for _, name := range []string{"nas", "queue", "name", "state-dir", "host-state-dir", "config"} {
+	for _, name := range []string{"nas", "queue", "name", "state-dir", "host-state-dir", "config", "environment-file"} {
 		t.Run(name, func(t *testing.T) {
 			home := t.TempDir()
 			probe := myce.MachineProbe{OS: "linux", Arch: "amd64", Command: func(context.Context, string, ...string) ([]byte, error) {

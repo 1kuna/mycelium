@@ -193,7 +193,7 @@ func InstallSettings() []InstallSetting {
 		installSetting("production-loss-timeout", "ProductionLossTimeout", "production quiet timeout", func(c *ServiceConfig) *time.Duration { return &c.ProductionLossTimeout }, installPositiveDuration),
 		installSetting("deadline-loss-timeout", "DeadlineLossTimeout", "deadline quiet timeout", func(c *ServiceConfig) *time.Duration { return &c.DeadlineLossTimeout }, installPositiveDuration),
 		installSetting("experiment-loss-timeout", "ExperimentLossTimeout", "experiment quiet timeout", func(c *ServiceConfig) *time.Duration { return &c.ExperimentLossTimeout }, installPositiveDuration),
-		installContext(installPath("environment-file", "EnvironmentFile", "private fleet EnvironmentFile reference", func(c *ServiceConfig) *string { return &c.EnvironmentFile }, false), func(c ServiceConfig) error { return validateInstallDirective(c, c.EnvironmentFile, false) }),
+		installEnvironmentFileSetting(),
 		installContext(installSetting("private-devices", "PrivateDevices", "queue private device namespace", func(c *ServiceConfig) *bool { return &c.PrivateDevices }, installAny[bool]), func(c ServiceConfig) error {
 			if c.Detection.OS == "linux" && c.Role == "queue" && c.PrivateDevices {
 				return errors.New("PrivateDevices is unsupported for portable systemd user queues; use --private-devices=false")
@@ -296,6 +296,19 @@ func installStateSetting() InstallSetting {
 			c.UploadSpoolDir = filepath.Join(state, "uploads")
 		}
 		return nil
+	}
+	return s
+}
+func installEnvironmentFileSetting() InstallSetting {
+	s := installContext(installPath("environment-file", "EnvironmentFile", "private fleet EnvironmentFile reference", func(c *ServiceConfig) *string { return &c.EnvironmentFile }, false), func(c ServiceConfig) error { return validateInstallDirective(c, c.EnvironmentFile, false) })
+	normalize := s.normalize
+	s.normalize = func(c *ServiceConfig) error {
+		// An omitted empty reference uses credentials.json. Explicitly clearing
+		// the reference cannot provision those credentials on an upgrade.
+		if c.EnvironmentFile == "" {
+			return errors.New("path must not be empty; omit --environment-file to preserve the credential source")
+		}
+		return normalize(c)
 	}
 	return s
 }
