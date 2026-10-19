@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 )
 
@@ -32,15 +33,19 @@ func ValidateInstallIdentity(old, next ServiceConfig) error {
 }
 
 func prepareClosedWorkerInstall(c ServiceConfig) error {
-	if err := PrepareStateRoots(c.StateRoots()...); err != nil {
+	roots, err := c.StateRoots()
+	if err != nil {
+		return err
+	}
+	if err := PrepareStateRoots(roots...); err != nil {
 		return err
 	}
 	var s HostIntent
-	_, err := os.Lstat(filepath.Join(c.HostStateDir, hostStateFile))
+	_, err = os.Lstat(filepath.Join(c.HostStateDir, hostStateFile))
 	if errors.Is(err, os.ErrNotExist) {
 		// A marked root can still contain custody from an interrupted current
 		// install. Only marker-only roots qualify as a genuinely empty install.
-		for _, path := range []string{c.HostStateDir, c.State, c.ModelCache, c.EnvironmentCache} {
+		for _, path := range roots {
 			entries, e := os.ReadDir(path)
 			if e != nil {
 				return e
@@ -50,14 +55,9 @@ func prepareClosedWorkerInstall(c ServiceConfig) error {
 					continue
 				}
 				child := filepath.Join(path, entry.Name())
-				if child == c.ModelCache || child == c.EnvironmentCache {
-					nested, e := os.ReadDir(child)
-					if e != nil {
-						return e
-					}
-					if len(nested) == 1 && nested[0].Name() == FormatMarker {
-						continue
-					}
+				if slices.Contains(roots, child) {
+					// Each nested root is checked separately by this loop.
+					continue
 				}
 				return fmt.Errorf("%w: archive surviving worker data %s before a fresh install", ErrHostState, path)
 			}
@@ -237,17 +237,13 @@ func (tx *installTransaction) restoreFiles() error {
 	return result
 }
 
-// StateRoots includes independently configured caches, which can hold build custody.
-func (c ServiceConfig) StateRoots() []string {
-	roots := []string{c.State, c.HostStateDir}
-	if c.Role == "queue" {
-		roots = append(roots, c.UploadSpoolDir)
-		if c.DB != "" {
-			roots = append(roots, filepath.Dir(c.DB), c.DB+".uploads", c.DB+".files", c.DB+".joining")
-		}
-	}
+// StateRoots uses the runtime registries, including their effective cache defaults.
+func (c ServiceConfig) StateRoots() ([]string, error) {
 	if c.Role == "worker" {
-		roots = append(roots, c.ModelCache, c.EnvironmentCache)
+		return (Worker{StateDir: c.State, HostStateDir: c.HostStateDir, CacheRoot: c.ModelCache, EnvironmentRoot: c.EnvironmentCache}).StateRoots()
 	}
-	return roots
+	if c.Role == "queue" {
+		return append([]string{c.State}, QueueStateRoots(c.DB, c.HostStateDir, c.UploadSpoolDir, "", "", true)...), nil
+	}
+	return []string{c.State, c.HostStateDir}, nil
 }

@@ -23,7 +23,11 @@ func (x HostMutationExecutor) Execute(ctx context.Context, v HostInvocation, m H
 	if v.Privileged || !validHostMutation(m) {
 		return result, ErrHostChild
 	}
-	roots := append([]string{v.StateDir}, v.Config.StateRoots()...)
+	roots, err := v.Config.StateRoots()
+	if err != nil {
+		return result, err
+	}
+	roots = append([]string{v.StateDir}, roots...)
 	if err := CheckStateRoots(roots...); err != nil {
 		return result, err
 	}

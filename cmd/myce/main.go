@@ -13,7 +13,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -337,19 +336,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 				return err
 			}
 		}
-		spoolRoot := *uploadSpoolDir
-		if spoolRoot == "" {
-			spoolRoot = *db + ".uploads"
-		}
-		filesRoot := *fileStore
-		if filesRoot == "" {
-			filesRoot = *db + ".files"
-		}
-		joiningRoot := *identityDir
-		if *discovery && joiningRoot == "" {
-			joiningRoot = *db + ".joining"
-		}
-		if err := myce.PrepareStateRoots(filepath.Dir(*db), hostRoot, *db+".uploads", spoolRoot, filesRoot, joiningRoot); err != nil {
+		if err := myce.PrepareStateRoots(myce.QueueStateRoots(*db, hostRoot, *uploadSpoolDir, *fileStore, *identityDir, *discovery)...); err != nil {
 			return err
 		}
 
