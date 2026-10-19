@@ -127,15 +127,37 @@ func TestDevProbeOwnerSwitch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	openCtx, cancel := context.WithCancel(ctx)
+	defer func() {
+		if unlock != nil {
+			unlock()
+		}
+	}()
+	openCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
 	done := make(chan error, 1)
 	go func() {
 		done <- (HostControl{Dir: c.HostStateDir, Clock: d.Queue.clock, Expected: closed.HostRevision}).Enable(openCtx)
 	}()
+	// Keep a valid, live open pending before changing its expected revision.
+	// Otherwise close/cancellation can mask an Enable that ignores the lock.
+	select {
+	case openErr := <-done:
+		t.Fatal("open completed while external owner held reconcile.lock:", openErr)
+	case <-openCtx.Done():
+		t.Fatal("open context expired before owner contention check")
+	case <-time.After(250 * time.Millisecond):
+	}
+	stillClosed, err := ReadHostIntent(c.HostStateDir)
+	if err != nil || stillClosed.HostRevision != closed.HostRevision || stillClosed.Desired != "closed" {
+		t.Fatal("competing open changed intent under owner lock", stillClosed, err)
+	}
 	newClose, err := changeHostIntent(c.HostStateDir, d.Queue.clock, hostIntentChange{Desired: "closed", FreshClose: true})
-	cancel()
-	openErr := <-done
 	unlock()
+	unlock = nil
+	openErr := <-done
+	if openCtx.Err() != nil {
+		t.Fatal("open was cancelled instead of fenced by concurrent close:", openCtx.Err())
+	}
 	if err != nil || openErr == nil || newClose.Revision <= closed.Revision {
 		t.Fatal("concurrent owner fence failed", err, openErr)
 	}
