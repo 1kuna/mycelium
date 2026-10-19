@@ -226,7 +226,7 @@ func HostSnapshot(ctx context.Context, v HostInvocation, clock Clock) (HostEnvel
 	attempts := []HostEnvelopeAttempt{}
 	queueTime := clock.Now().UTC()
 	queueOK := len(queues) > 0
-	foundWorkers := map[string]bool{}
+	foundWorkers := map[string]time.Time{}
 	placement := HostPlacementObservation{}
 	placementOK := true
 	if len(queues) > 0 {
@@ -291,20 +291,27 @@ func HostSnapshot(ctx context.Context, v HostInvocation, clock Clock) (HostEnvel
 			}
 		}
 		for _, name := range required {
-			found := false
 			for _, w := range q.Workers {
 				if w.Name == name && w.HostRevision == s.HostRevision && w.Boot == boot && freshHostSource(w.At, now) && !w.Healthy {
 					e.RestEvidence.ReadyViolation = true
 				}
 				if w.Name == name && w.HostRevision == s.HostRevision && w.Boot == boot && w.Healthy && freshHostSource(w.At, now) {
-					found = true
+					if w.At.After(foundWorkers[name]) {
+						foundWorkers[name] = w.At
+					}
 				}
 			}
-			foundWorkers[name] = foundWorkers[name] || found
 		}
 	}
+	// Keep the oldest required heartbeat after choosing each worker's latest
+	// qualifying observation. Its freshness must survive subsequent collection
+	// and the dropped-child wire boundary, rather than becoming a cached boolean.
 	for _, name := range required {
-		ready = ready && foundWorkers[name]
+		at := foundWorkers[name]
+		ready = ready && !at.IsZero()
+		if !at.IsZero() && (e.Sources["required_workers"] == nil || at.Before(*e.Sources["required_workers"])) {
+			e.Sources["required_workers"] = hostPtr(at.UTC())
+		}
 	}
 	if queueOK {
 		if placementOK {
@@ -325,11 +332,11 @@ func HostSnapshot(ctx context.Context, v HostInvocation, clock Clock) (HostEnvel
 			e.Observed = HostEnvelopeState{hostPtr("open"), hostPtr(s.Revision)}
 		}
 	}
-	e.At = clock.Now().UTC()
 	// Re-read without taking any mutation lock; a collection crossing an operation
 	// or boot fence cannot certify either operation.
 	after, err := ReadHostIntent(v.StateDir)
 	currentBoot, be := HostBootID()
+	e.FinishObservation(clock.Now())
 	if err != nil || be != nil || after.HostRevision != s.HostRevision || currentBoot != boot || !freshHostSource(captured, e.At) {
 		return UnknownHostEnvelope("status", clock), ErrHostRevision
 	}
@@ -416,6 +423,10 @@ func HostEnvelopeError(err error) ExclusionError {
 
 // FinishObservation applies the same freshness bound after privileged reads.
 func (e *HostEnvelope) FinishObservation(now time.Time) {
+	if at := e.Sources["required_workers"]; at != nil && !freshHostSource(*at, now) {
+		e.Ready = nil
+		e.Sources["required_workers"] = nil
+	}
 	if at := e.Sources["queue"]; at != nil && !freshHostSource(*at, now) {
 		e.QueueRevision = nil
 		e.Ready = nil

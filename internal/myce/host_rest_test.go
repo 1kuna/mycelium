@@ -27,6 +27,7 @@ func restEnvelope(clock Clock, expect string) HostEnvelope {
 	for key := range e.Sources {
 		e.Sources[key] = hostPtr(clock.Now())
 	}
+	e.Sources["required_workers"] = hostPtr(clock.Now())
 	e.Counts = HostEnvelopeCounts{Active: hostPtr(0), Preparing: hostPtr(0), Stopping: hostPtr(0), PendingDaemon: hostPtr(0), Containers: hostPtr(0), GPUHolders: hostPtr(0), Unsettled: hostPtr(0), Queued: hostPtr(0), FencedQueued: hostPtr(0), UnresolvedPlacement: hostPtr(0)}
 	e.Ready, e.RestartSafe = hostPtr(true), hostPtr(true)
 	e.Units, e.Attempts = []ExclusionUnit{}, []HostEnvelopeAttempt{}
@@ -321,5 +322,64 @@ func TestHostRestCollectorEvidence(t *testing.T) {
 				t.Fatalf("got %+v", e.HostRestVerdict)
 			}
 		})
+	}
+}
+
+func TestHostRestRequiredHeartbeatExpiresDuringCollection(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "host")
+	clock := &envelopeClock{time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	s, err := InitializeHostIntent(dir, "fixture-host", clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Desired = "open"
+	s.Revision++
+	s.Operation = "open-operation"
+	if err := atomicHostJSON(dir, hostStateFile, s, nil); err != nil {
+		t.Fatal(err)
+	}
+	boot, err := HostBootID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	heartbeat := clock.Now().Add(-HostObservationWindow + time.Millisecond)
+	observation := HostQueueObservation{Host: s.Host, HostRevision: s.HostRevision, Boot: boot, Desired: "open", At: clock.Now(), Workers: []HostReadyWorker{{Name: "fixture-worker", HostRevision: s.HostRevision, Boot: boot, At: heartbeat, Healthy: true}}, Placement: &HostPlacementObservation{}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(observation)
+	}))
+	defer server.Close()
+	if err := AdoptHostWorker(dir, HostWorker{State: root, Host: s.Host, Name: "fixture-worker", Queue: server.URL, Session: "fixture-session"}); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("MYCE_TOKEN", "fixture-token")
+	e, err := HostSnapshot(context.Background(), HostInvocation{StateDir: dir, Config: ServiceConfig{Name: "fixture-worker"}}, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.ApplyRestVerdict("ready", clock.Now())
+	if e.Ready == nil || !*e.Ready || e.Verdict != "PASS" {
+		t.Fatalf("fresh heartbeat not ready: %+v", e.HostRestVerdict)
+	}
+	// Preserve the evidence through the real dropped-child serialization boundary.
+	data, err := json.Marshal(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var final HostEnvelope
+	if err := json.Unmarshal(data, &final); err != nil {
+		t.Fatal(err)
+	}
+	clock.at = clock.at.Add(2 * time.Millisecond)
+	// A caller evaluating later than FinishObservation must also use that later
+	// instant for the heartbeat, even while the queue observation is still fresh.
+	e.ApplyRestVerdict("ready", clock.Now())
+	if e.Verdict != "UNKNOWN" || !slices.Contains(e.Reasons, "required_workers_not_ready") {
+		t.Fatalf("later evaluation accepted expired heartbeat: %+v", e.HostRestVerdict)
+	}
+	final.FinishObservation(clock.Now())
+	final.ApplyRestVerdict("ready", clock.Now())
+	if final.Ready != nil && *final.Ready || final.Verdict != "UNKNOWN" || !slices.Contains(final.Reasons, "required_workers_not_ready") {
+		t.Fatalf("heartbeat age %v accepted: ready=%v verdict=%+v", clock.Now().Sub(heartbeat), final.Ready, final.HostRestVerdict)
 	}
 }
