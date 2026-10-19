@@ -47,10 +47,21 @@ func captureJoiningOutput(t *testing.T, run func() error) string {
 	}
 	os.Stdout = w
 	defer func() { os.Stdout = old }()
+	// Drain concurrently: output larger than the pipe buffer would block run.
+	type readResult struct {
+		data []byte
+		err  error
+	}
+	read := make(chan readResult, 1)
+	go func() {
+		data, err := io.ReadAll(r)
+		read <- readResult{data, err}
+	}()
 	err = run()
 	w.Close()
 	os.Stdout = old
-	data, readErr := io.ReadAll(r)
+	got := <-read
+	data, readErr := got.data, got.err
 	r.Close()
 	if err != nil || readErr != nil {
 		t.Fatal("command failed", err, readErr)
