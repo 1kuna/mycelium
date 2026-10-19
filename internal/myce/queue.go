@@ -542,7 +542,9 @@ func (q *Queue) maintain() {
 			}
 		}
 	}
-	q.networkQuiet = q.s.NetworkRecoveryAt.IsZero() && active > 0 && (healthy == 0 || healthy*2 < active) && now.Sub(q.s.LastWorkerContact) >= min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2]))
+	// Cached contact can identify a continuously reporting minority, but cannot
+	// replace a currently healthy worker when the entire active fleet is quiet.
+	q.networkQuiet = q.s.NetworkRecoveryAt.IsZero() && active > 0 && (healthy == 0 || healthy*2 < active && now.Sub(q.s.LastWorkerContact) >= min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2])))
 	for _, m := range q.s.Machines {
 		unreported := q.unreported[m.ID]
 		outageGrace := !q.s.NetworkRecoveryAt.IsZero() && m.LastSeen.Before(q.s.NetworkRecoveryAt) && now.Before(q.s.NetworkRecoveryAt.Add(q.machineLossTimeout(m.ID)))
