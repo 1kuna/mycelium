@@ -67,8 +67,19 @@ Only explicit flags change configurable values; even explicit false/zero/empty
 values are deliberate overlays. `--force` is deprecated and unnecessary.
 Installed role, account, host, device, unit, binary and state identity cannot be
 relocated over an existing installation. Preserve custody and install separately.
-An old config missing `docker_endpoint` retains its empty value unless
-`--docker-host` explicitly selects an endpoint.
+Docker is disabled on fresh installs and foreground `join`; ambient
+`DOCKER_HOST` is not adopted. Native jobs need no Docker CLI, daemon or socket.
+To enable image jobs on Linux, pass `--docker-host unix:///var/run/docker.sock`
+or save a nonempty `docker_endpoint` in the worker config. Saved endpoints survive
+upgrades. An old config missing `docker_endpoint` retains its empty value unless
+`--docker-host` explicitly selects an endpoint. An explicit `--docker-host=`
+disables new Docker execution and background container retention, preserving
+custody records. Re-enable the runtime to recover an outstanding Docker execution.
+Image jobs wait for an enabled Linux worker; native placement is unaffected.
+
+Host close/reconcile/release applicability on native-only hosts is separate
+follow-up work; the existing exclusion requirements still apply. Disabling
+Docker does not retire historical daemon scope or prove release.
 
 Worker installation requires CLOSED intent. It preserves the revision and never
 opens the host. A genuinely empty installation starts revision 1 CLOSED with

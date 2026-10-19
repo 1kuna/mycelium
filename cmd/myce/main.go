@@ -156,7 +156,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	address := f.String("listen", "127.0.0.1:7331", "queue listen address")
 	db := f.String("db", "myce-state/myce.db", "SQLite database file")
 	uploadSpoolDir := f.String("upload-spool-dir", "", "queue model-upload directory (default private directory beside DB)")
-	dockerHost := f.String("docker-host", env("DOCKER_HOST", "unix:///var/run/docker.sock"), "managed Docker endpoint")
+	dockerHost := f.String("docker-host", "", "opt in to managed Docker at this endpoint (empty disables Docker)")
 	containerRetention := f.Duration("container-retention", myce.DefaultContainerRetention, "acknowledged stopped Docker container retention (0 removes immediately)")
 	logRetention := f.Duration("log-retention", myce.DefaultLogRetention, "retention of completed batch and inactive model-server logs")
 	uploadSpoolBytes := f.Int64("upload-spool-bytes", myce.DefaultUploadSpoolBytes, "total bytes held in the queue model-upload spool")

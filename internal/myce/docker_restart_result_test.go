@@ -402,7 +402,7 @@ func TestDockerRestartRejectsMismatchedResults(t *testing.T) {
 
 func TestDockerRestartLateSuccessOnlySettlesExactCustody(t *testing.T) {
 	q, _ := fixture(t)
-	a := machine("old", "fake")
+	a := dockerMachine("old", "fake")
 	check(t, q, a, nil)
 	j := submit(t, q, dockerJob().Spec)
 	running := check(t, q, a, nil).Job

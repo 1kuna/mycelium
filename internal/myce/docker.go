@@ -702,6 +702,9 @@ func (d *dockerAttempt) retainEvidence(containers []dockerInspection) error {
 }
 
 func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release func()) (*process, error) {
+	if w.DockerEndpoint == "" {
+		return nil, errors.New("Docker runtime disabled; configure --docker-host to run image jobs")
+	}
 	unlock, err := hostLaunchGate(w.HostStateDir, w.hostRevision)
 	if err != nil {
 		return nil, err
@@ -738,11 +741,8 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 	}
 	identity := ID()
 	endpoint := w.DockerEndpoint
-	if endpoint == "" {
-		endpoint = defaultDockerEndpoint(os.Getenv("DOCKER_HOST"))
-	}
 	if os.Getenv("DOCKER_CONTEXT") != "" {
-		return nil, errors.New("managed Docker requires DOCKER_HOST, not DOCKER_CONTEXT")
+		return nil, errors.New("managed Docker requires --docker-host, not DOCKER_CONTEXT")
 	}
 	d := &dockerAttempt{admit: func() error { return w.checkHostMemoryBudget(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) }, closed: make(chan struct{}), halt: make(chan struct{}), dir: s.dir, hostDir: w.HostStateDir, hostRevision: w.hostRevision, workdir: j.Spec.Run.Workdir, binary: binary, clock: w.Clock, timeout: w.dockerCallTimeout, state: dockerExecution{HostRevision: w.hostRevision, Identity: identity, Endpoint: endpoint, MemoryLimitBytes: ceilingBytes, MemorySwapBytes: 0}}
 	d.state.Owner = &Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
@@ -1028,6 +1028,9 @@ func (w Worker) restoreDocker(s *workerStore) (*process, error) {
 			s.state.Result = &r
 		}
 		return nil, nil
+	}
+	if w.DockerEndpoint == "" {
+		return nil, errors.New("Docker runtime disabled; restore --docker-host to recover saved Docker execution; custody remains pending")
 	}
 	binary, err := exec.LookPath("docker")
 	if err != nil {
