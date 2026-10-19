@@ -15,8 +15,8 @@ import (
 
 func TestCurrentProtocolRejectsMissingIdentity(t *testing.T) {
 	q, _ := fixture(t)
-	for _, path := range []string{"/api/workers/checkin", "/api/workers/started", "/api/workers/complete", "/api/workers/log", "/api/workers/environment-log", "/api/workers/one/leave", "/api/files/checkpoint", "/api/workers/one/events"} {
-		for _, protocol := range []string{"", "durable-start-v1"} {
+	for _, path := range []string{"/api/workers/checkin", "/api/workers/launch", "/api/workers/started", "/api/workers/complete", "/api/workers/log", "/api/workers/environment-log", "/api/workers/one/leave", "/api/files/checkpoint", "/api/workers/one/events"} {
+		for _, protocol := range []string{"", "durable-start-v1", "host-attempt-v3"} {
 			method := "POST"
 			if strings.HasSuffix(path, "/events") {
 				method = "GET"
@@ -192,7 +192,7 @@ func TestCurrentProtocolCheckpointCannotPersistWithoutHeader(t *testing.T) {
 	}
 	save := checkpointPublication{Result: Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: j.ID, Attempt: a.Attempt}}, Checkpoint: FileCheckpoint{7, FileManifest{"checkpoint.json": ref}}}
 	b, _ := json.Marshal(save)
-	for _, header := range []string{"", "durable-start-v1"} {
+	for _, header := range []string{"", "durable-start-v1", "host-attempt-v3"} {
 		r := httptest.NewRequest("POST", "/api/files/checkpoint", bytes.NewReader(b))
 		r.Header.Set("Authorization", "Bearer test")
 		r.Header.Set("X-Myce-Start-Gate", header)

@@ -9,9 +9,9 @@ Stop old services and prevent their restart before archiving whole data roots
 outside active lookup paths. Inventory saved database, worker state and cache
 paths, including custom roots. Preserve old configuration, credentials and GPU
 environment. An old shared host-control directory and reconcile timer are retired
-assets: preserve the directory and explicitly retire old units during the
-separately authorized upgrade. Deleting source files does not change installed
-units. Do not start old binaries against new data or fabricate format markers.
+assets: preserve the directory. A worker installer upgrade stops, disables and
+retires the obsolete user reconcile service/timer and `_host-start-check`
+drop-ins, retaining backups and restoring their prior state if the upgrade fails. Do not start old binaries against new data or fabricate format markers.
 
 Default data lives under `~/.local/share/mycelium/queue/state/` and
 `~/.local/share/mycelium/worker[-INSTANCE]/state/`. Keep checkpoints and archives;

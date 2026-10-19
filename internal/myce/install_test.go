@@ -88,6 +88,9 @@ func TestInstallAndUninstallTempOnly(t *testing.T) {
 	commands := []string{}
 	runner := func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		commands = append(commands, name+" "+strings.Join(args, " "))
+		if name == "systemctl" && len(args) > 1 && args[1] == "is-active" {
+			return nil, installTestExit(3)
+		}
 		if name == "systemd-run" {
 			return json.Marshal(c.Detection)
 		}
@@ -96,7 +99,8 @@ func TestInstallAndUninstallTempOnly(t *testing.T) {
 	if e = Install(context.Background(), c, executable, "private-test-secret", runner); e != nil {
 		t.Fatal(e)
 	}
-	if len(commands) != 6 {
+	// Snapshot the current unit, both obsolete units and effective drop-ins.
+	if len(commands) != 11 {
 		t.Fatal(commands)
 	}
 	if commands[1] != "systemctl --user is-active --quiet myce-worker.service" {

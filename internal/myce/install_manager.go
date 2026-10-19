@@ -168,6 +168,11 @@ func (m installManager) activity(ctx context.Context, u installUnit, active bool
 
 func installUnitPaths(c ServiceConfig) []string {
 	paths := []string{c.Service}
+	if c.Detection.OS == "linux" && c.Role == "worker" {
+		for _, name := range []string{"myce-host-reconcile.timer", "myce-host-reconcile.service"} {
+			paths = append(paths, filepath.Join(filepath.Dir(c.Service), name))
+		}
+	}
 	return paths
 }
 func snapshotInstall(ctx context.Context, c ServiceConfig, files installFiles, command func(context.Context, string, ...string) ([]byte, error), extraPaths ...string) (*installTransaction, error) {
@@ -190,6 +195,12 @@ func snapshotInstall(ctx context.Context, c ServiceConfig, files installFiles, c
 		tx.units = append(tx.units, u)
 		paths = append(paths, path)
 	}
+	retired, err := obsoleteStartDropIns(ctx, c, command)
+	if err != nil {
+		return nil, err
+	}
+	tx.retired = retired
+	paths = append(paths, retired...)
 	// Snapshot every possible destination before the first write, including
 	// absent files. put cannot introduce a destination outside this snapshot.
 	for _, path := range paths {
@@ -315,4 +326,66 @@ func (m installManager) stop(ctx context.Context, u installUnit) error {
 		return nil
 	}
 	return err
+}
+
+func obsoleteStartDropIns(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error)) ([]string, error) {
+	if c.Detection.OS != "linux" || c.Role != "worker" {
+		return nil, nil
+	}
+	paths, err := filepath.Glob(filepath.Join(filepath.Dir(c.Service), "myce-*.service.d", "*.conf"))
+	if err != nil {
+		return nil, err
+	}
+	effective, err := command(ctx, "systemctl", "--user", "show", filepath.Base(c.Service), "--property=DropInPaths", "--value")
+	if err != nil {
+		return nil, errors.New("cannot inspect effective service drop-ins")
+	}
+	paths = append(paths, strings.Fields(string(effective))...)
+	seen := map[string]bool{}
+	var retired []string
+	for _, path := range paths {
+		if seen[path] {
+			continue
+		}
+		seen[path] = true
+		if !filepath.IsAbs(path) {
+			return nil, errors.New("cannot inspect effective service drop-ins")
+		}
+		st, err := os.Lstat(path)
+		if err != nil || !st.Mode().IsRegular() || st.Size() > 1<<20 {
+			return nil, errors.New("cannot inspect effective service drop-ins")
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		if bytes.Contains(data, []byte("_host-start-check")) {
+			retired = append(retired, path)
+		}
+	}
+	return retired, nil
+}
+func (tx *installTransaction) retireObsolete(ctx context.Context) error {
+	for _, u := range tx.units[1:] {
+		if u.state.enabled == "not-found" && !u.state.active && !tx.originals[u.path].existed {
+			continue
+		}
+		if err := tx.manager.activity(ctx, u, false, false); err != nil {
+			return err
+		}
+		if u.state.enabled != "not-found" {
+			if _, err := tx.manager.command(ctx, "systemctl", "--user", "disable", u.name()); err != nil {
+				return err
+			}
+		}
+		if err := tx.retire(u.path); err != nil {
+			return err
+		}
+	}
+	for _, path := range tx.retired {
+		if err := tx.retire(path); err != nil {
+			return err
+		}
+	}
+	return nil
 }

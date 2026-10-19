@@ -45,8 +45,9 @@ type state struct {
 	LastWorkerContact time.Time `json:"last_worker_contact,omitempty"`
 	NetworkRecoveryAt time.Time `json:"network_recovery_at,omitempty"`
 
-	Schema          int                        `json:"schema_version"`
-	HostMaintenance map[string]HostMaintenance `json:"host_maintenance,omitempty"`
+	Schema           int                        `json:"schema_version"`
+	PreparationPlans map[string]HostLaunch      `json:"preparation_plans,omitempty"`
+	HostMaintenance  map[string]HostMaintenance `json:"host_maintenance,omitempty"`
 
 	Submissions      map[string]*submissionRecord `json:"submissions,omitempty"`
 	ProgramNeeds     map[string]SizeHint          `json:"program_needs,omitempty"`
@@ -725,6 +726,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		delete(q.unreported, m.ID)
 		m.Gone = false
 		m.LastSeen = q.clock.Now()
+		q.reconcilePreparationPlans(c)
 		q.s.Machines[m.ID] = &m
 		// Count this worker as healthy, but detect majority silence before
 		// replacing the previous fleet contact. Otherwise the first reconnect
@@ -761,6 +763,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			reply.EnvironmentPlan = q.environmentPlan(&m)
 			reply.ModelPlan = q.modelPlan(m.ID)
 			reply.CopyPlan, reply.CacheUsage, reply.CachePins = q.copyPlan(&m)
+			q.cancelUnofferedPreparations(&m, reply)
 		}()
 		reply.Leave = m.Leaving
 		if m.Leaving {
@@ -1513,7 +1516,7 @@ func (q *Queue) Started(r Result) error {
 		}
 		m := q.s.Machines[r.Machine]
 		q.refreshHostMemory()
-		if m == nil || m.Gone || m.Session != r.Session || q.unreported[m.ID] || !q.startPlacementAllowed(j) {
+		if !q.hostLaunchAllowed(m, r.Session) || !q.startPlacementAllowed(j) {
 			rejected = ErrStale
 			return nil
 		}

@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-const startGateProtocol = "host-attempt-v3"
+const startGateProtocol = "host-launch-v3"
 
 type API struct {
 	Queue *Queue
@@ -147,6 +147,13 @@ func (a API) Handler() http.Handler {
 		v, err := a.Queue.Checkin(c)
 		respond(w, v, err)
 	})
+	mux.HandleFunc("POST /api/workers/launch", func(w http.ResponseWriter, r *http.Request) {
+		var l HostLaunch
+		if !decode(w, r, &l) {
+			return
+		}
+		respond(w, map[string]any{"ok": true, "start_gate": startGateProtocol}, a.Queue.AuthorizeLaunch(l))
+	})
 	mux.HandleFunc("POST /api/workers/started", func(w http.ResponseWriter, r *http.Request) {
 		var c Result
 		if !decode(w, r, &c) {
@@ -201,7 +208,7 @@ func (a API) Handler() http.Handler {
 		if workerProtocolEndpoint(r.URL.Path) && (r.Method == http.MethodPost || r.Method == http.MethodGet) && r.Header.Get("X-Myce-Start-Gate") != startGateProtocol {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUpgradeRequired)
-			_ = json.NewEncoder(w).Encode(map[string]string{"code": "worker_protocol_mismatch", "error": "current host-attempt-v3 worker/report protocol required; upgrade queue and workers together"})
+			_ = json.NewEncoder(w).Encode(map[string]string{"code": "worker_protocol_mismatch", "error": "current host-launch-v3 worker/report protocol required; upgrade queue and workers together"})
 			return
 		}
 		if r.URL.Path == "/api/jobs" && r.Method != http.MethodPost {

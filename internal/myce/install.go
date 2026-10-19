@@ -503,6 +503,9 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 		return err
 	}
 	if c.Detection.OS == "linux" {
+		if err = tx.retireObsolete(ctx); err != nil {
+			return err
+		}
 		if _, err = command(ctx, "systemctl", "--user", "daemon-reload"); err != nil {
 			return err
 		}

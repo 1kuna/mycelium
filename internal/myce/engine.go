@@ -199,7 +199,11 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 		_ = l.Unload()
 		return e
 	}
-	if _, e = writer.Write([]byte("start\n")); e != nil {
+	e = checkLaunchGate(ctx)
+	if e == nil {
+		_, e = writer.Write([]byte("start\n"))
+	}
+	if e != nil {
 		_ = l.Unload()
 		return e
 	}
@@ -405,6 +409,8 @@ type workerModel struct {
 	drainRequested     bool
 }
 type modelRuntime struct {
+	authorize             func(HostLaunch) error
+	copyResults           map[string]CopyReport
 	localApprovals        map[string]string
 	localApprovalStates   map[string]ModelApprovalState
 	availability          *availabilityMonitor
@@ -454,7 +460,7 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 	if e != nil {
 		return nil, e
 	}
-	rt := &modelRuntime{availability: w.availability, copies: map[string]*workerCopy{}, copyParallel: max(1, w.CopyParallel), models: map[string]*workerModel{}, config: w.ModelConfig, session: w.Machine.Session, token: w.Client.Token, dir: dir, clock: w.Clock, url: "http://" + ln.Addr().String()}
+	rt := &modelRuntime{copyResults: map[string]CopyReport{}, availability: w.availability, copies: map[string]*workerCopy{}, copyParallel: max(1, w.CopyParallel), models: map[string]*workerModel{}, config: w.ModelConfig, session: w.Machine.Session, token: w.Client.Token, dir: dir, clock: w.Clock, url: "http://" + ln.Addr().String()}
 	root := w.CacheRoot
 	if root == "" {
 		root = filepath.Join(dir, "model-cache")
@@ -658,6 +664,11 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 }
 
 func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
+	if rt.authorize != nil {
+		ctx = withLaunchGate(ctx, func() error {
+			return rt.authorize(HostLaunch{Machine: rt.machine, Session: rt.session, Kind: "engine", Key: m.model.Name, Attempt: m.attempt})
+		})
+	}
 	if e := rt.checkLoadMemory(ctx, m); e != nil {
 		m.cancel()
 		rt.mu.Lock()
@@ -671,6 +682,9 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 	var e error
 	if rt.device != "" {
 		model, e = WithModelDevice(model, rt.platform, rt.device)
+	}
+	if e == nil {
+		e = checkLaunchGate(ctx)
 	}
 	if e == nil && model.Environment != "" {
 		if m.recipe == nil {
@@ -688,6 +702,9 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 	}
 	if e == nil {
 		e = rt.checkLoadMemory(ctx, m)
+	}
+	if e == nil {
+		e = checkLaunchGate(ctx)
 	}
 	if e == nil {
 		e = m.engine.Load(ctx, model)

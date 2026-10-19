@@ -207,13 +207,17 @@ func TestInstallFailureRecoveryAndFilesystems(t *testing.T) {
 				}
 				return os.Rename(source, destination)
 			}}
+			dropInInspections := 0
 			manager := func(_ context.Context, name string, args ...string) ([]byte, error) {
 				call := strings.Join(args, " ")
+				if strings.Contains(call, "--property=DropInPaths") {
+					dropInInspections++
+				}
 				if call == "--user is-active --quiet myce-worker.service" {
 					return nil, inactiveInstallUnit{}
 				}
 
-				if failure == "reload" && strings.Contains(call, "daemon-reload") || failure == "preactivation" && strings.Contains(call, "--property=DropInPaths") || failure == "enable" && call == "--user enable --now myce-worker.service" {
+				if failure == "reload" && strings.Contains(call, "daemon-reload") || failure == "preactivation" && strings.Contains(call, "--property=DropInPaths") && dropInInspections == 2 || failure == "enable" && call == "--user enable --now myce-worker.service" {
 					fired = true
 					return nil, injected
 				}

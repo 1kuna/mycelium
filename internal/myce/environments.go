@@ -25,6 +25,7 @@ import (
 // EnvironmentRecipe is an immutable submission-time snapshot. Only the cache
 // destination is substituted in binary build arguments; no implicit shell.
 type EnvironmentRecipe struct {
+	Launch         *HostLaunch       `json:"launch,omitempty" yaml:"-"`
 	Python         string            `json:"python,omitempty" yaml:"python,omitempty"`
 	LockFile       string            `json:"lock_file,omitempty" yaml:"lock_file,omitempty"`
 	Binary         string            `json:"binary,omitempty" yaml:"binary,omitempty"`
@@ -130,6 +131,7 @@ func snapshotEnvironment(r EnvironmentRecipe, platform string) (EnvironmentRecip
 	identity.Binary = ""
 	identity.BinaryRelative = ""
 	identity.Key = ""
+	identity.Launch = nil
 	b, e := json.Marshal(identity)
 	if e != nil {
 		return r, e
@@ -193,6 +195,7 @@ func environmentCanRun(j *Job, m *Machine) bool {
 }
 
 type EnvironmentReport struct {
+	Attempt      string  `json:"attempt,omitempty"`
 	Key          string  `json:"key"`
 	State        string  `json:"state"`
 	Error        string  `json:"error,omitempty"`
@@ -223,7 +226,10 @@ func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
 			return nil
 		}
 	}
-	return []EnvironmentRecipe{j.EnvironmentRecipes[m.GPU]}
+	r := j.EnvironmentRecipes[m.GPU]
+	l := q.issuePreparation(m, "environment", r.Key)
+	r.Launch = &l
+	return []EnvironmentRecipe{r}
 }
 func environmentSeconds(j *Job, m *Machine) float64 {
 	if environmentReady(j, m) {
@@ -508,6 +514,14 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) erro
 	run := c.Run
 	if run == nil {
 		run = c.runBuild
+	} else {
+		custom := run
+		run = func(ctx context.Context, argv []string, dir string, env []string, out io.Writer) error {
+			if err := checkLaunchGate(ctx); err != nil {
+				return err
+			}
+			return custom(ctx, argv, dir, env, out)
+		}
 	}
 
 	buildCtx, cancelBuild := context.WithCancel(ctx)
@@ -710,14 +724,15 @@ func (c *EnvironmentCache) runBuild(ctx context.Context, argv []string, dir stri
 }
 
 type environmentRuntime struct {
-	dir     string
-	cache   *EnvironmentCache
-	mu      sync.Mutex
-	reports map[string]EnvironmentReport
-	offsets map[string]int64
-	cancel  context.CancelFunc
-	done    chan struct{}
-	key     string
+	authorize func(HostLaunch) error
+	dir       string
+	cache     *EnvironmentCache
+	mu        sync.Mutex
+	reports   map[string]EnvironmentReport
+	offsets   map[string]int64
+	cancel    context.CancelFunc
+	done      chan struct{}
+	key       string
 }
 
 func (rt *environmentRuntime) sync(plan []EnvironmentRecipe, busy bool, keepActive ...bool) {
@@ -744,15 +759,27 @@ func (rt *environmentRuntime) sync(plan []EnvironmentRecipe, busy bool, keepActi
 	}
 	r := plan[0]
 	ctx, cancel := context.WithCancel(context.Background())
+	if rt.authorize != nil {
+		ctx = withLaunchGate(ctx, func() error {
+			if r.Launch == nil {
+				return ErrStale
+			}
+			return rt.authorize(*r.Launch)
+		})
+	}
 	rt.cancel = cancel
 	rt.done = make(chan struct{})
 	rt.key = r.Key
-	rt.reports[r.Key] = EnvironmentReport{Key: r.Key, State: "building"}
+	rt.reports[r.Key] = EnvironmentReport{Key: r.Key, State: "building", Attempt: launchAttempt(r.Launch)}
 	if e := saveWorkerJSON(rt.dir, "environment-reports.json", rt.reports); e != nil {
 		log.Printf("persist environment build intent: %v", e)
 	}
 	go func() {
-		_, release, e := rt.cache.Acquire(ctx, r)
+		var release func()
+		e := checkLaunchGate(ctx)
+		if e == nil {
+			_, release, e = rt.cache.Acquire(ctx, r)
+		}
 		if release != nil {
 			release()
 		}
@@ -773,6 +800,10 @@ func (rt *environmentRuntime) sync(plan []EnvironmentRecipe, busy bool, keepActi
 		if e == nil {
 			b, _ := os.ReadFile(filepath.Join(rt.cache.Root, r.Key, "ready.json"))
 			_ = json.Unmarshal(b, &report)
+		}
+		report.Attempt = launchAttempt(r.Launch)
+		if errors.Is(e, errWorkerStartAuthorization) {
+			report.State, report.Error = "paused", ""
 		}
 		rt.mu.Lock()
 		rt.reports[r.Key] = report

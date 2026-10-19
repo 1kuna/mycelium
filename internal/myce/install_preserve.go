@@ -88,6 +88,7 @@ type installTransaction struct {
 	published []installedFile
 	originals map[string]installedFile
 	manager   installManager
+	retired   []string
 	units     []installUnit
 }
 
@@ -189,4 +190,29 @@ func (c ServiceConfig) StateRoots() ([]string, error) {
 		return append([]string{c.State}, QueueStateRoots(c.DB, c.UploadSpoolDir, "", "", true)...), nil
 	}
 	return []string{c.State}, nil
+}
+
+// retire preserves obsolete owned artifacts beside the existing install backups.
+// It shares the publication journal, so failures use the same exact restore path.
+func (tx *installTransaction) retire(path string) error {
+	old, ok := tx.originals[path]
+	if !ok {
+		return errors.New("artifact missing from install snapshot")
+	}
+	if !old.existed {
+		return nil
+	}
+	trash := filepath.Join(filepath.Dir(path), ".Trash")
+	if err := os.MkdirAll(trash, 0700); err != nil {
+		return err
+	}
+	old.backup = filepath.Join(trash, ID()+"-"+filepath.Base(path))
+	if err := tx.files.check("retire", path); err != nil {
+		return err
+	}
+	if err := os.Rename(path, old.backup); err != nil {
+		return err
+	}
+	tx.published = append(tx.published, old)
+	return syncWorkerDir(filepath.Dir(path))
 }

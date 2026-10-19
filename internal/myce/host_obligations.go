@@ -19,6 +19,7 @@ type HostCallExecution struct {
 }
 
 type HostObligation struct {
+	Launch      *HostLaunch          `json:"launch,omitempty"`
 	Call        *HostCallExecution   `json:"call,omitempty"`
 	Engine      *HostEngineExecution `json:"engine,omitempty"`
 	Preparation bool                 `json:"preparation,omitempty"`
@@ -26,6 +27,9 @@ type HostObligation struct {
 }
 
 func obligationKey(p HostObligation) string {
+	if p.Launch != nil {
+		return "preparation/" + p.Launch.Attempt
+	}
 	if p.Call != nil {
 		c := p.Call
 		return fmt.Sprintf("call/%s/%s/%s/%s/%s", c.Machine, c.Session, c.Model, c.Attempt, c.ID)
@@ -78,8 +82,14 @@ func (q *Queue) hostObligations(host string) []HostObligation {
 			add(HostObligation{Call: &HostCallExecution{HostEngineExecution: HostEngineExecution{Machine: c.Machine, Session: c.Session, Model: c.Model, Attempt: c.Attempt}, ID: c.ID}})
 		}
 	}
+	for _, l := range q.s.PreparationPlans {
+		if q.executionHost(l.Machine) == host {
+			copy := l
+			add(HostObligation{Launch: &copy, Preparation: true, Result: Result{Machine: l.Machine, Session: l.Session, Execution: Execution{ID: "preparation"}}})
+		}
+	}
 	for _, m := range q.s.Machines {
-		if hostID(m) == host && hostPreparing(m) {
+		if hostID(m) == host && q.untrackedPreparations(m) > 0 {
 			add(HostObligation{Preparation: true, Result: Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: "preparation"}}})
 		}
 	}
@@ -95,6 +105,9 @@ func (q *Queue) hostObligations(host string) []HostObligation {
 	return out
 }
 func obligationSession(p HostObligation) (string, string) {
+	if p.Launch != nil {
+		return p.Launch.Machine, p.Launch.Session
+	}
 	if p.Call != nil {
 		return p.Call.Machine, p.Call.Session
 	}

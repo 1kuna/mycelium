@@ -223,7 +223,9 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		if w.environmentCache == nil {
 			return nil, errors.New("environment builder unavailable")
 		}
-		environmentPath, release, err = w.environmentCache.Acquire(context.Background(), r)
+		environmentPath, release, err = w.environmentCache.Acquire(withLaunchGate(context.Background(), func() error {
+			return w.authorizeLaunch(HostLaunch{Machine: w.Machine.ID, Session: s.state.Session, Kind: "batch", Key: j.ID, Attempt: fmt.Sprint(j.Attempt)})
+		}), r)
 		if err != nil {
 			return nil, err
 		}
@@ -645,7 +647,7 @@ func (w Worker) Run(stop context.Context) error {
 	if err = w.environmentCache.Cleanup(context.Background()); err != nil {
 		return err
 	}
-	environments := &environmentRuntime{dir: s.dir, cache: w.environmentCache, reports: map[string]EnvironmentReport{}}
+	environments := &environmentRuntime{authorize: w.authorizeLaunch, dir: s.dir, cache: w.environmentCache, reports: map[string]EnvironmentReport{}}
 	if err = environments.restore(); err != nil {
 		return err
 	}
@@ -805,6 +807,7 @@ func (w Worker) Run(stop context.Context) error {
 	if err != nil {
 		return err
 	}
+	rt.authorize = w.authorizeLaunch
 	modelAvailabilityDone := make(chan struct{})
 	go func() {
 		defer close(modelAvailabilityDone)

@@ -9,7 +9,7 @@ import (
 // Every host work kind crosses the same maintenance and wait boundary. Sidecars
 // share their parent execution's exact release, including pending Docker creates.
 func TestMaintenanceEveryWorkKind(t *testing.T) {
-	for _, kind := range []string{"batch-production", "batch-experiment", "model-production", "model-experiment", "engine", "engine-load", "engine-failed-pinned", "environment-build", "preparation", "sidecar"} {
+	for _, kind := range []string{"batch-production", "batch-experiment", "model-production", "model-experiment", "engine", "engine-load", "engine-failed-pinned", "environment-build", "environment-plan-pending", "preparation", "sidecar"} {
 		for _, action := range []struct {
 			name, action string
 			stop         bool
@@ -75,6 +75,16 @@ func TestMaintenanceEveryWorkKind(t *testing.T) {
 					slot = q.s.ModelSlots[slotKey(m.ID, "test")]
 					recoveryReport(t, q, m, slot, "ready")
 					recoveryReport(t, q, m, slot, "failed")
+				case "environment-plan-pending":
+					env := spec("experiment")
+					env.Environment.Name = "pending"
+					submit(t, q, env)
+					if len(check(t, q, m, nil).EnvironmentPlan) != 1 {
+						t.Fatal("no pending plan")
+					}
+					if len(q.hostObligations("host")) == 0 {
+						t.Fatal("pending plan not enumerated")
+					}
 				case "environment-build":
 					m.EnvironmentReports = []EnvironmentReport{{Key: "build", State: "building"}}
 					check(t, q, m, nil)
@@ -106,6 +116,15 @@ func TestMaintenanceEveryWorkKind(t *testing.T) {
 					return r
 				}
 				status := maintenanceChange(t, q, action.action, action.stop)
+				if kind == "environment-plan-pending" {
+					if !status.Quiescent || status.Preparations != 0 {
+						t.Fatal("unstarted plan not cancelled", status)
+					}
+					if reply := pulse(); !reply.AdmissionBlocked || len(reply.EnvironmentPlan) != 0 {
+						t.Fatal("maintenance restarted pending plan", reply)
+					}
+					return
+				}
 				if kind == "engine-failed-pinned" {
 					attempt := slot.Attempt
 					if !status.Quiescent || status.Sidecars != 0 || len(q.hostObligations("host")) != 0 {

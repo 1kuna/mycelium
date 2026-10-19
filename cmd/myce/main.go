@@ -160,7 +160,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	productionGrace := f.Duration("production-stop-grace", 10*time.Second, "production checkpoint grace")
 	heartbeat := f.Duration("heartbeat", time.Second, "worker check-in interval")
 	memoryMode := f.String("memory-mode", "auto", "memory source: auto, unified, dedicated, or fixed")
-	hostBudget := f.Float64("host-memory-budget-gb", 0, "UNQUALIFIED allowance migration input; configure the host allowance explicitly while CLOSED")
+	hostBudget := f.Float64("host-memory-budget-gb", 0, "initial host RAM allowance in GiB; change with myce host budget while drained or disabled")
 	memorySlack := f.Float64("memory-ceiling-slack-gb", .125, "extra GiB per declared RAM ceiling (counts against host budget)")
 	requireCeilings := f.Bool("require-memory-ceilings", false, "refuse startup unless per-attempt cgroup v2 memory ceilings are enforceable; require host_memory_gb")
 	memorySwap := f.Int64("memory-swap-max-bytes", 0, "swap allowance per memory ceiling in bytes")

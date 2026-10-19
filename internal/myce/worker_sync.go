@@ -55,16 +55,39 @@ func (rt *modelRuntime) syncCopies(plan, usage []CopyTask, pins []string, busy b
 			continue
 		}
 		ctx, cancel := context.WithCancel(context.Background())
+		launch := task.Launch
+		if rt.authorize != nil {
+			ctx = withLaunchGate(ctx, func() error {
+				if launch == nil {
+					return ErrStale
+				}
+				return rt.authorize(*launch)
+			})
+		}
+		if rt.copyResults == nil {
+			rt.copyResults = map[string]CopyReport{}
+		}
+		rt.copyResults[model.Name] = CopyReport{Model: model.Name, Attempt: launchAttempt(launch), State: "copying"}
 		copy := &workerCopy{cancel: cancel, done: make(chan struct{})}
 		rt.copies[model.Name] = copy
 		rt.wg.Add(1)
 		go func(score int) {
 			defer rt.wg.Done()
-			_, err := rt.cache.Precopy(ctx, model, score)
+			err := checkLaunchGate(ctx)
+			if err == nil {
+				_, err = rt.cache.Precopy(ctx, model, score)
+			}
 			if err != nil {
 				rt.cache.noteCopyError(model, err)
 			}
 			rt.mu.Lock()
+			report := rt.copyResults[model.Name]
+			report.State = "ready"
+			if err != nil {
+				report.State = "failed"
+				report.Error = err.Error()
+			}
+			rt.copyResults[model.Name] = report
 			delete(rt.copies, model.Name)
 			close(copy.done)
 			rt.mu.Unlock()
@@ -101,6 +124,22 @@ func (rt *modelRuntime) copyTelemetry() ([]CopyReport, float64) {
 			rt.lastSavedSpeed = speed
 		}
 	}
+	rt.mu.Lock()
+	for _, r := range rt.copyResults {
+		found := false
+		for i := range reports {
+			if reports[i].Model == r.Model {
+				reports[i].Attempt = r.Attempt
+				reports[i].State = r.State
+				found = true
+				break
+			}
+		}
+		if !found {
+			reports = append(reports, r)
+		}
+	}
+	rt.mu.Unlock()
 	return reports, speed
 }
 func (rt *modelRuntime) cacheProtected(key string) bool {

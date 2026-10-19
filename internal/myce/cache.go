@@ -425,6 +425,11 @@ func (c *ModelCache) prepare(ctx context.Context, m Model, background bool, scor
 	r := CopyReport{Model: m.Name, State: "copying", Bytes: offset, Total: m.SizeBytes}
 	c.progress.Store(key, r)
 	c.mu.Unlock()
+	if err := checkLaunchGate(ctx); err != nil {
+		r.State, r.Error = "paused", err.Error()
+		c.progress.Store(key, r)
+		return "", err
+	}
 	started := c.Clock.Now()
 	copied := int64(0)
 	defer func() {

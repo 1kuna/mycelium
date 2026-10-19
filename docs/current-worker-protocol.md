@@ -1,9 +1,9 @@
 # Current worker protocol
 
-Queue and workers use `X-Myce-Start-Gate: host-attempt-v3` for worker
+Queue and workers use `X-Myce-Start-Gate: host-launch-v3` for worker
 requests, including completion, log and checkpoint reports and worker events. An old or missing protocol
 gets HTTP 426 with `worker_protocol_mismatch`. Upgrade queue and workers
-together while queue host admission is disabled. There is no preparation-only permit route.
+together while queue host admission is disabled.
 
 Every worker reports a capability profile. Profile version 0 is valid;
 unknown capacity withholds admission. Dedicated participation and explicit
@@ -26,3 +26,9 @@ installing fresh. No token is passed in argv, logs, or job environments.
 
 Old persisted formats return `legacy_state_present`; operators archive and
 install fresh as described in [Archive plus fresh install](guide-fresh-install.md).
+
+Environment-build and model-copy offers carry exact queue preparation attempts.
+The queue retains issued offers before delivery; workers recheck `/api/workers/launch`
+at launch, including after cache waits and at command supervisor gates. The same
+queue admission check protects batch Started and engine launches. Drain cancels
+unstarted offers and retains started custody until an exact terminal report.

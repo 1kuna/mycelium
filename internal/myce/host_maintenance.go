@@ -204,18 +204,13 @@ func (q *Queue) hostMaintenanceStatus(host string) HostMaintenanceStatus {
 			out.Sidecars++
 			continue
 		}
+		if obligation.Launch != nil {
+			out.Preparations++
+			continue
+		}
 		if obligation.Preparation {
 			if m := q.s.Machines[obligation.Result.Machine]; m != nil && m.Session == obligation.Result.Session {
-				for _, r := range m.EnvironmentReports {
-					if r.State == "building" {
-						out.Preparations++
-					}
-				}
-				for _, r := range m.CopyReports {
-					if r.State == "copying" {
-						out.Preparations++
-					}
-				}
+				out.Preparations += q.untrackedPreparations(m)
 			}
 			continue
 		}
@@ -284,6 +279,8 @@ func boundStop(at **time.Time, deadline time.Time) {
 
 func (q *Queue) maintainHostObligation(p HostObligation, deadline *time.Time) {
 	switch {
+	case p.Launch != nil && !p.Launch.Started:
+		delete(q.s.PreparationPlans, p.Launch.Attempt)
 	case p.Call != nil:
 		c := q.obligationCall(p.Call)
 		if c == nil || deadline == nil {

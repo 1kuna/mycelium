@@ -8,6 +8,7 @@ import (
 )
 
 type CopyReport struct {
+	Attempt        string  `json:"attempt,omitempty"`
 	BytesPerSecond float64 `json:"bytes_per_second,omitempty"`
 	Model          string  `json:"model"`
 	State          string  `json:"state"`
@@ -16,8 +17,9 @@ type CopyReport struct {
 	Error          string  `json:"error,omitempty"`
 }
 type CopyTask struct {
-	Model string `json:"model"`
-	Score int    `json:"score"`
+	Launch *HostLaunch `json:"launch,omitempty"`
+	Model  string      `json:"model"`
+	Score  int         `json:"score"`
 }
 type SyncRequest struct {
 	Model  string `json:"model"`
@@ -124,7 +126,7 @@ func (q *Queue) copyPlan(m *Machine) ([]CopyTask, []CopyTask, []string) {
 	}
 	usage := []CopyTask{}
 	for _, model := range q.models.Models {
-		usage = append(usage, CopyTask{model.Name, scores[model.Name]})
+		usage = append(usage, CopyTask{Model: model.Name, Score: scores[model.Name]})
 	}
 	sort.Slice(usage, func(i, j int) bool { return usage[i].Model < usage[j].Model })
 	plan := []CopyTask{}
@@ -143,7 +145,8 @@ func (q *Queue) copyPlan(m *Machine) ([]CopyTask, []CopyTask, []string) {
 		for name := range wanted {
 			model, ok := q.model(name)
 			if ok && !cancelled[name] && model.SizeBytes > 0 && !model.DirectNAS && q.modelFitsMachine(model, m) && !contains(m.CachedModels, name) {
-				plan = append(plan, CopyTask{name, scores[name]})
+				l := q.issuePreparation(m, "copy", name)
+				plan = append(plan, CopyTask{Model: name, Score: scores[name], Launch: &l})
 			}
 		}
 	}

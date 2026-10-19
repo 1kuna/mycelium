@@ -15,7 +15,10 @@ myce host resume HOST
 ```
 
 Drain preserves Started work. Disable with `--stop` requests bounded stops of
-exact current attempts, preparations and engines. Planned maintenance does not
+exact current attempts, preparations and engines. Issued preparation plans count
+as work before delivery. Every launch rechecks queue authorization; drain cancels
+unstarted plans, and started preparations retain custody until exact completion.
+Upgrade queue and workers together for the current launch-gate protocol. Planned maintenance does not
 consume infrastructure retries; cancellation and independently observed stage
 failures still take precedence. A successful mutation is durable policy
 acceptance. `--wait` requires drained/disabled state, fresh consistent known

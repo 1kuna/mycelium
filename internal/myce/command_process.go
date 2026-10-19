@@ -69,7 +69,11 @@ func runRecordedCommand(ctx context.Context, argv []string, dir string, env []st
 		_ = cmd.Wait()
 		return e
 	}
-	if _, e = writer.Write([]byte("start\n")); e != nil {
+	e = checkLaunchGate(ctx)
+	if e == nil {
+		_, e = writer.Write([]byte("start\n"))
+	}
+	if e != nil {
 		_ = syscall.Kill(-state.PID, syscall.SIGKILL)
 	}
 	waitErr := cmd.Wait()
