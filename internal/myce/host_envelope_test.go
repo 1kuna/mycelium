@@ -182,14 +182,21 @@ func TestHostEnvelopeDevLifecycle(t *testing.T) {
 	}()
 	t.Setenv("MYCE_TOKEN", "fixture-token")
 	marker := filepath.Join(root, "finished")
+	readyMarker := filepath.Join(root, "ready")
 	s := spec("experiment")
 	s.Resumable = false
-	s.Run.Command = []string{"/bin/sh", "-c", `echo started; sleep 2; printf done > "$1"`, "fixture", marker}
+	s.SubmissionKey = "offline-consumer"
+	s.Run.Command = []string{"/bin/sh", "-c", `printf ready > "$2"; sleep 2; printf done > "$1"`, "fixture", marker, readyMarker}
 	var job Job
 	if err = d.Client().Call(ctx, "POST", "/api/jobs", s, &job); err != nil {
 		t.Fatal(err)
 	}
-	await(t, func() bool { logs, e := d.Queue.Logs(job.ID, 0); return e == nil && len(logs) > 0 })
+	probeWait(t, ctx, func() bool { b, e := os.ReadFile(readyMarker); return e == nil && string(b) == "ready" })
+	consumer := probeConsumer{project: s.Project, key: s.SubmissionKey, execution: Execution{ID: job.ID, Attempt: 1}}
+	if !consumer.publish(consumer.execution) || consumer.publish(Execution{ID: job.ID, Attempt: 2}) {
+		t.Fatal("consumer did not enforce current attempt publication")
+	}
+	consumer.cancelPending = true
 	clock := d.Queue.clock
 	d.stopQueue()
 	if err = d.server.Close(); err != nil {
@@ -241,6 +248,16 @@ func TestHostEnvelopeDevLifecycle(t *testing.T) {
 	if err != nil || settled.HostSettlement() != "confirmed" {
 		t.Fatal(settled, err)
 	}
+	if consumer.mayOpen(settled) {
+		t.Fatal("host settlement completed consumer cancellation")
+	}
+	ack, err := d.Client().CancelSubmission(ctx, s.Project, s.SubmissionKey)
+	if err != nil || !consumer.completeCancellation(ack) || !consumer.mayOpen(settled) {
+		t.Fatal("consumer cancellation incomplete", ack, err)
+	}
+	if consumer.publish(consumer.execution) || consumer.publish(Execution{ID: job.ID, Attempt: 2}) {
+		t.Fatal("consumer accepted late attempt publication")
+	}
 	if err = (HostControl{Dir: dir, Clock: clock, Expected: settled.HostRevision}).Enable(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -277,10 +294,14 @@ func TestHostEnvelopeDevLifecycle(t *testing.T) {
 		}
 	}
 	var second Job
+	s.SubmissionKey = "second-consumer"
+	if err = os.Remove(readyMarker); err != nil {
+		t.Fatal(err)
+	}
 	if err = d.Client().Call(ctx, "POST", "/api/jobs", s, &second); err != nil {
 		t.Fatal(err)
 	}
-	await(t, func() bool { logs, e := q.Logs(second.ID, 0); return e == nil && len(logs) > 0 })
+	probeWait(t, ctx, func() bool { b, e := os.ReadFile(readyMarker); return e == nil && string(b) == "ready" })
 	active, err := HostSnapshot(ctx, v, clock)
 	if err != nil {
 		t.Fatal("active snapshot", err)
