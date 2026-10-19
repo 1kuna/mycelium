@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,9 +15,13 @@ import (
 
 func TestCurrentProtocolRejectsMissingIdentity(t *testing.T) {
 	q, _ := fixture(t)
-	for _, path := range []string{"checkin", "started", "complete", "log", "environment-log", "one/leave"} {
+	for _, path := range []string{"/api/workers/checkin", "/api/workers/started", "/api/workers/complete", "/api/workers/log", "/api/workers/environment-log", "/api/workers/one/leave", "/api/files/checkpoint", "/api/workers/one/events"} {
 		for _, protocol := range []string{"", "durable-start-v1"} {
-			r := httptest.NewRequest("POST", "/api/workers/"+path, strings.NewReader(`{}`))
+			method := "POST"
+			if strings.HasSuffix(path, "/events") {
+				method = "GET"
+			}
+			r := httptest.NewRequest(method, path, strings.NewReader(`{}`))
 			r.Header.Set("Authorization", "Bearer test")
 			r.Header.Set("X-Myce-Start-Gate", protocol)
 			w := httptest.NewRecorder()
@@ -165,5 +170,53 @@ func TestCurrentProtocolCredentials(t *testing.T) {
 	}
 	if token, err := ReadServiceToken(c); err != nil || token != "synthetic-secret" {
 		t.Fatal("literal credential mechanism refused")
+	}
+}
+
+func TestCurrentProtocolCheckpointCannotPersistWithoutHeader(t *testing.T) {
+	q, _ := fixture(t)
+	if e := q.ConfigureFileStore(t.TempDir(), 1<<20, true); e != nil {
+		t.Fatal(e)
+	}
+	server := httptest.NewServer(API{q, "test"}.Handler())
+	defer server.Close()
+	c := Client{URL: server.URL, Token: "test"}
+	j := submit(t, q, spec("experiment"))
+	m := machine("checkpoint", "fake")
+	a := check(t, q, m, nil).Job
+	if a == nil {
+		t.Fatal("assignment")
+	}
+	src := filepath.Join(t.TempDir(), "save.json")
+	if e := os.WriteFile(src, []byte(`{"myce_checkpoint":{"generation":7},"value":5}`), 0600); e != nil {
+		t.Fatal(e)
+	}
+	ref, e := IdentifyFile(src)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = c.UploadFile(context.Background(), src, ref); e != nil {
+		t.Fatal(e)
+	}
+	save := checkpointPublication{Result: Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: j.ID, Attempt: a.Attempt}}, Checkpoint: FileCheckpoint{7, FileManifest{"checkpoint.json": ref}}}
+	b, _ := json.Marshal(save)
+	for _, header := range []string{"", "durable-start-v1"} {
+		r := httptest.NewRequest("POST", "/api/files/checkpoint", bytes.NewReader(b))
+		r.Header.Set("Authorization", "Bearer test")
+		r.Header.Set("X-Myce-Start-Gate", header)
+		w := httptest.NewRecorder()
+		API{q, "test"}.Handler().ServeHTTP(w, r)
+		if w.Code != 426 {
+			t.Fatal(header, w.Code)
+		}
+		if len(job(t, q, j.ID).FileCheckpoints) != 0 {
+			t.Fatal("old protocol persisted checkpoint")
+		}
+	}
+	if e = c.Call(context.Background(), "POST", "/api/files/checkpoint", save, nil); e != nil {
+		t.Fatal(e)
+	}
+	if len(job(t, q, j.ID).FileCheckpoints) != 1 {
+		t.Fatal("current protocol did not persist checkpoint")
 	}
 }

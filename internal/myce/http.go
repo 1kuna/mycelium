@@ -211,7 +211,7 @@ func (a API) Handler() http.Handler {
 			http.Error(w, "invalid fleet token", 401)
 			return
 		}
-		if strings.HasPrefix(r.URL.Path, "/api/workers/") && r.Method == http.MethodPost && r.Header.Get("X-Myce-Start-Gate") != startGateProtocol {
+		if workerProtocolEndpoint(r.URL.Path) && (r.Method == http.MethodPost || r.Method == http.MethodGet) && r.Header.Get("X-Myce-Start-Gate") != startGateProtocol {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUpgradeRequired)
 			_ = json.NewEncoder(w).Encode(map[string]string{"code": "worker_protocol_mismatch", "error": "current host-attempt-v3 worker/report protocol required; upgrade queue and workers together"})
@@ -305,7 +305,7 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	req.Header.Set("Content-Type", "application/json")
-	if strings.HasPrefix(path, "/api/workers/") {
+	if workerProtocolEndpoint(path) {
 		req.Header.Set("X-Myce-Start-Gate", startGateProtocol)
 	}
 	hc := c.HTTP
@@ -353,4 +353,10 @@ func (e *HTTPError) Error() string {
 func stale(err error) bool {
 	var e *HTTPError
 	return errors.As(err, &e) && e.Status == http.StatusConflict
+}
+
+// Checkpoint publication is a worker report too; GET event streams also bind
+// to the current worker protocol. Authentication always runs before this gate.
+func workerProtocolEndpoint(path string) bool {
+	return strings.HasPrefix(path, "/api/workers/") || path == "/api/files/checkpoint"
 }
