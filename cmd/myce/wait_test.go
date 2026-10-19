@@ -61,7 +61,7 @@ func waitFinish(t *testing.T, q *myce.Queue, success bool) {
 	var reply myce.Reply
 	wait(t, ctx, func() bool {
 		var err error
-		reply, err = q.Checkin(myce.Checkin{Machine: myce.Machine{ID: "fake", Session: "session", GPU: "fake", FreeMemoryGB: 8}})
+		reply, err = q.Checkin(myce.Checkin{Machine: myce.Machine{CapabilityProfile: &myce.CapabilityProfile{Version: 0, MemoryLayout: "separate", SystemMemoryBytes: 64 << 30, Accelerators: []myce.AcceleratorProfile{{Type: "fake", MemoryBytes: 64 << 30}}}, ID: "fake", Session: "session", GPU: "fake", FreeMemoryGB: 8}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -302,7 +302,7 @@ func TestWaitDeadlineCancelsInFlightRequest(t *testing.T) {
 func TestWaitCancellationWaitsForWorkerAcknowledgement(t *testing.T) {
 	q, clock, _, _ := waitQueue(t)
 	j := waitSubmit(t, q)
-	reply, err := q.Checkin(myce.Checkin{Machine: myce.Machine{ID: "fake", Session: "session", GPU: "fake", FreeMemoryGB: 8}})
+	reply, err := q.Checkin(myce.Checkin{Machine: myce.Machine{CapabilityProfile: &myce.CapabilityProfile{Version: 0, MemoryLayout: "separate", SystemMemoryBytes: 64 << 30, Accelerators: []myce.AcceleratorProfile{{Type: "fake", MemoryBytes: 64 << 30}}}, ID: "fake", Session: "session", GPU: "fake", FreeMemoryGB: 8}})
 	if err != nil || reply.Job == nil {
 		t.Fatalf("%v %+v", err, reply)
 	}

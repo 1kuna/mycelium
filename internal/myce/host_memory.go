@@ -1,6 +1,9 @@
 package myce
 
-import "sort"
+import (
+	"sort"
+	"strings"
+)
 
 func hostID(m *Machine) string {
 	if m.HostID != "" {
@@ -15,7 +18,7 @@ func hostID(m *Machine) string {
 const minimumHostMemoryGB = 65536.0 / (1 << 30)
 
 // CPU allocations are additional to GPU allocations on unified machines.
-// Legacy workers/requests keep the GPU-only contract.
+// Unenforced laptop workers support explicit admission-only operation.
 func hostNeed(m *Machine, gpu, host float64) float64 {
 	need := host
 	if m.UnifiedMemory && m.HostMemoryMeasured {
@@ -31,7 +34,7 @@ func hostFits(m *Machine, gpu, host float64) bool {
 		return false
 	}
 	if host == 0 {
-		return m.HostMemoryBudgetGB == 0 && m.hostBudgetGB == 0
+		return !strings.HasPrefix(m.MemoryEnforcement, "memory ceilings enforced") && m.HostMemoryBudgetGB == 0 && m.hostBudgetGB == 0
 	}
 	return m.HostMemoryMeasured && m.HostMemoryError == "" && m.FreeHostMemoryGB >= hostNeed(m, gpu, host)
 }
@@ -108,7 +111,7 @@ func (q *Queue) hostReleases(m *Machine, gpu, host float64, priority string) ([]
 	if m.HostMemoryBudgetStatus() != "" {
 		return nil, nil, false
 	}
-	if host == 0 && (m.HostMemoryBudgetGB > 0 || m.hostBudgetGB > 0) {
+	if host == 0 && (strings.HasPrefix(m.MemoryEnforcement, "memory ceilings enforced") || m.HostMemoryBudgetGB > 0 || m.hostBudgetGB > 0) {
 		return nil, nil, false
 	}
 	if host == 0 || hostFits(m, gpu, host) {

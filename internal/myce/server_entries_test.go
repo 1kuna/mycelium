@@ -93,6 +93,7 @@ func TestEntryPlacementWorkerAndLocalIdentity(t *testing.T) {
 		t.Fatal("unapproved source eligible")
 	}
 	m.ApprovedModels = map[string]string{"approved": model.SHA256}
+	m.ModelApprovalStates = map[string]ModelApprovalState{"approved": approvalVerified}
 	if !modelFitsMachine(model, &m) {
 		t.Fatal("approved source ineligible")
 	}
@@ -101,7 +102,7 @@ func TestEntryPlacementWorkerAndLocalIdentity(t *testing.T) {
 		t.Fatal("entry fence ignored")
 	}
 	rt := &modelRuntime{models: map[string]*workerModel{}, config: ModelConfig{Models: []Model{model}}, session: "session", machine: "excluded"}
-	rt.sync([]ModelSlot{{Model: "test", State: "loading", Session: "session", Placement: &ModelPlacement{AllowedMachines: []string{"eligible"}}}})
+	rt.sync([]ModelSlot{{Attempt: "test-engine", Model: "test", State: "loading", Session: "session", Placement: &ModelPlacement{AllowedMachines: []string{"eligible"}}}})
 	if rt.models["test"].state != "failed" {
 		t.Fatal("worker accepted excluded load")
 	}
@@ -398,8 +399,9 @@ func TestEntryWorkerLoadsApprovedSourceWithLocalSecrets(t *testing.T) {
 			t.Error(err)
 		}
 	})
-	rt.setLocalApprovals(rt.cache.ApprovedModels([]Model{model}), nil)
-	rt.sync([]ModelSlot{{Model: model.Name, State: "loading", Session: "entry-session", Placement: &ModelPlacement{AllowedMachines: []string{"eligible"}}}})
+	approved, states := rt.cache.modelApprovals([]Model{model})
+	rt.setLocalApprovals(approved, states)
+	rt.sync([]ModelSlot{{Attempt: "test-engine", Model: model.Name, State: "loading", Session: "entry-session", Placement: &ModelPlacement{AllowedMachines: []string{"eligible"}}}})
 	await(t, func() bool { reports, _ := rt.report(); return len(reports) == 1 && reports[0].State == "ready" })
 	path, err := rt.cache.Prepare(context.Background(), model)
 	if err != nil || path != original {
@@ -409,7 +411,7 @@ func TestEntryWorkerLoadsApprovedSourceWithLocalSecrets(t *testing.T) {
 		t.Fatal("local readiness missing", err)
 	}
 	// A fresh fence in the load plan drains an already-ready worker copy.
-	rt.sync([]ModelSlot{{Model: model.Name, State: "ready", Session: "entry-session", Placement: &ModelPlacement{AllowedMachines: []string{"excluded"}}}})
+	rt.sync([]ModelSlot{{Attempt: "test-engine", Model: model.Name, State: "ready", Session: "entry-session", Placement: &ModelPlacement{AllowedMachines: []string{"excluded"}}}})
 	await(t, func() bool { reports, _ := rt.report(); return len(reports) == 1 && reports[0].State == "unloaded" })
 }
 

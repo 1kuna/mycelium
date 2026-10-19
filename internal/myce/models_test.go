@@ -39,7 +39,7 @@ func addModelCall(t *testing.T, q *Queue, priority string) *ModelCall {
 }
 func reportModel(t *testing.T, q *Queue, m Machine, state string) Reply {
 	t.Helper()
-	r, e := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", State: state}}})
+	r, e := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", Attempt: currentTestReportAttempt(q, m, "test"), State: state}}})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -380,7 +380,7 @@ func TestModelUnloadFailureKeepsMemory(t *testing.T) {
 	reportModel(t, q, m, "ready")
 	q.finishCall(c.ID)
 	submit(t, q, spec("production"))
-	if _, e := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", State: "unload_failed", Error: "process survived"}}}); e != nil {
+	if _, e := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", Attempt: currentTestReportAttempt(q, m, "test"), State: "unload_failed", Error: "process survived"}}}); e != nil {
 		t.Fatal(e)
 	}
 	s := q.s.ModelSlots[slotKey(m.ID, "test")]
@@ -510,14 +510,14 @@ func TestModelCallNotBlockedByBatchThatCannotReclaimMemory(t *testing.T) {
 func TestModelReservationMeasuredMemory(t *testing.T) {
 	q, _, m := modelFixture(t)
 	for _, state := range []string{"loading", "ready", "draining", "unloading", "unload_failed"} {
-		q.s.ModelSlots[slotKey(m.ID, "test")] = &ModelSlot{Model: "test", Machine: m.ID, Session: m.Session, State: state}
+		q.s.ModelSlots[slotKey(m.ID, "test")] = &ModelSlot{Model: "test", Machine: m.ID, Session: m.Session, Attempt: "engine-attempt", State: state}
 		for _, measured := range []bool{false, true} {
 			m.MemoryMeasured = measured
 			want := 8.0
 			if measured && state != "loading" {
 				want = 0
 			}
-			if got := q.modelReservation(&m, []ModelReport{{Name: "test", State: state}}); got != want {
+			if got := q.modelReservation(&m, []ModelReport{{Name: "test", Attempt: currentTestReportAttempt(q, m, "test"), State: state}}); got != want {
 				t.Fatalf("%s measured=%v: got %v want %v", state, measured, got, want)
 			}
 		}
@@ -527,7 +527,7 @@ func TestModelReservationMeasuredMemory(t *testing.T) {
 	if q.modelReservation(&m, nil) != 8 {
 		t.Fatal("unreported loading memory not reserved")
 	}
-	if q.modelReservation(&m, []ModelReport{{Name: "test", State: "ready"}}) != 0 {
+	if q.modelReservation(&m, []ModelReport{{Name: "test", Attempt: currentTestReportAttempt(q, m, "test"), State: "ready"}}) != 0 {
 		t.Fatal("readiness counted both measured usage and reservation")
 	}
 }
@@ -783,7 +783,7 @@ func TestBatchReclamationStopsLeastWork(t *testing.T) {
 				if err := q.addCall(c); err != nil {
 					t.Fatal(err)
 				}
-				if _, err := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "large", State: "ready"}, {Name: "idle", State: "ready"}}}); err != nil {
+				if _, err := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "large", Attempt: currentTestReportAttempt(q, m, "large"), State: "ready"}, {Name: "idle", Attempt: currentTestReportAttempt(q, m, "idle"), State: "ready"}}}); err != nil {
 					t.Fatal(err)
 				}
 				if name == "idle" {
@@ -806,4 +806,11 @@ func TestBatchReclamationStopsLeastWork(t *testing.T) {
 			}
 		})
 	}
+}
+
+func currentTestReportAttempt(q *Queue, m Machine, name string) string {
+	if s := q.s.ModelSlots[slotKey(m.ID, name)]; s != nil {
+		return s.Attempt
+	}
+	return "no-assigned-engine"
 }

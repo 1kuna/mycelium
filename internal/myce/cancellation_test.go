@@ -93,7 +93,7 @@ func TestCancellationStates(t *testing.T) {
 				if len(q.s.HostReleases) == 0 {
 					t.Fatal("release uncharged")
 				}
-				if _, err := q.PermitStart(result(j, true)); !errors.Is(err, ErrStale) {
+				if err := q.Started(result(j, true)); !errors.Is(err, ErrStale) {
 					t.Fatalf("permit = %v", err)
 				}
 				if err := q.Started(result(j, true)); !errors.Is(err, ErrStale) {
@@ -410,7 +410,7 @@ func TestCancellationNoFutureExecution(t *testing.T) {
 				t.Fatal("terminal state changed")
 			}
 			assertNoCancellationAttempt(t, q, j)
-			if _, err := q.PermitStart(result(j, true)); !errors.Is(err, ErrStale) {
+			if err := q.Started(result(j, true)); !errors.Is(err, ErrStale) {
 				t.Fatalf("permit: %v", err)
 			}
 			if err := q.Started(result(j, true)); !errors.Is(err, ErrStale) {

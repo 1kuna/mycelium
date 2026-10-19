@@ -251,7 +251,7 @@ func TestPinnedLoadFailureVisible(t *testing.T) {
 	if e := q.Pin(ModelPin{Project: "test", Model: "test", Machine: m.ID}); e != nil {
 		t.Fatal(e)
 	}
-	if _, e := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", State: "failed", Error: "disk full"}}}); e != nil {
+	if _, e := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", Attempt: currentTestReportAttempt(q, m, "test"), State: "failed", Error: "disk full"}}}); e != nil {
 		t.Fatal(e)
 	}
 	s := q.s.ModelSlots[slotKey(m.ID, "test")]

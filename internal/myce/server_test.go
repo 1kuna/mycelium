@@ -293,7 +293,7 @@ func TestGeneralServerUsesCatalogEnvironment(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer rt.close()
-	rt.sync([]ModelSlot{{Model: m.Name, Session: "session", State: "loading", EnvironmentRecipe: &recipe}})
+	rt.sync([]ModelSlot{{Attempt: "test-engine", Model: m.Name, Session: "session", State: "loading", EnvironmentRecipe: &recipe}})
 	deadline := time.Now().Add(testWaitTimeout)
 	for {
 		reports, _ := rt.report()

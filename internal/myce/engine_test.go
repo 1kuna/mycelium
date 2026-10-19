@@ -92,7 +92,7 @@ func TestLlamaAdapterAndOrphanCleanup(t *testing.T) {
 }
 func TestRuntimeKeepsAdmittedCallsWhileDraining(t *testing.T) {
 	rt := &modelRuntime{models: map[string]*workerModel{"test": {model: Model{Name: "test"}, engine: &FakeEngine{Model: "test"}, state: "ready"}}, session: "session", token: "test"}
-	rt.sync([]ModelSlot{{Model: "test", Session: "session", State: "draining", InFlight: 1}})
+	rt.sync([]ModelSlot{{Attempt: "test-engine", Model: "test", Session: "session", State: "draining", InFlight: 1}})
 	rt.mu.Lock()
 	state := rt.models["test"].state
 	rt.mu.Unlock()
@@ -107,7 +107,7 @@ func TestRuntimeKeepsAdmittedCallsWhileDraining(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatal("admitted call rejected while draining")
 	}
-	rt.sync([]ModelSlot{{Model: "test", Session: "session", State: "draining", InFlight: 0}})
+	rt.sync([]ModelSlot{{Attempt: "test-engine", Model: "test", Session: "session", State: "draining", InFlight: 0}})
 	rt.wg.Wait()
 	rt.mu.Lock()
 	state = rt.models["test"].state
@@ -151,7 +151,7 @@ func TestRuntimeLoadReadinessRacingWithDrain(t *testing.T) {
 	rt.wg.Add(1)
 	go func() { defer rt.wg.Done(); rt.load(ctx, m) }()
 	<-e.started
-	rt.sync([]ModelSlot{{Model: "test", Session: "session", State: "draining"}})
+	rt.sync([]ModelSlot{{Attempt: "test-engine", Model: "test", Session: "session", State: "draining"}})
 	close(e.release)
 	rt.wg.Wait()
 	if m.state != "unloaded" || e.unloads.Load() != 1 {

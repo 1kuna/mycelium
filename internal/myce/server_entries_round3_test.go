@@ -31,6 +31,7 @@ func entryHoldFixture(t *testing.T, fence string) (*Queue, *fakeClock, Machine, 
 	case "approval":
 		model.LocalSource = "approved"
 		b.ApprovedModels = map[string]string{"approved": model.SHA256}
+		b.ModelApprovalStates = map[string]ModelApprovalState{"approved": approvalVerified}
 	}
 	a.ModelConfigHash, b.ModelConfigHash = modelConfigHash(q.models), modelConfigHash(q.models)
 	if err := q.ConfigureHosts(map[string]HostPolicy{"ha": {ProductionHold: true}, "hb": {ProductionHold: true}}); err != nil {
@@ -244,7 +245,7 @@ func TestEntryUnverifiableApprovalWithholdsLoadsAndRoutingKeepsCustody(t *testin
 	c, model, _, _ := localApprovalFixture(t)
 	rt := &modelRuntime{cache: c, config: ModelConfig{Models: []Model{model}}, models: map[string]*workerModel{}, session: "session", token: "test"}
 	rt.setLocalApprovals(nil, nil)
-	rt.sync([]ModelSlot{{Model: model.Name, State: "loading", Session: rt.session}})
+	rt.sync([]ModelSlot{{Attempt: "test-engine", Model: model.Name, State: "loading", Session: rt.session}})
 	if len(rt.models) != 0 {
 		t.Fatal("unverified source started a load")
 	}
@@ -268,6 +269,7 @@ func TestEntryUnverifiableApprovalWithholdsLoadsAndRoutingKeepsCustody(t *testin
 	q.models.Models[0].SHA256 = model.SHA256
 	m.ModelConfigHash = modelConfigHash(q.models)
 	m.ApprovedModels = map[string]string{model.LocalSource: model.SHA256}
+	m.ModelApprovalStates = map[string]ModelApprovalState{model.LocalSource: approvalVerified}
 	check(t, q, m, nil)
 	if err := q.Pin(ModelPin{Project: "test", Model: "test", Platform: "fake"}); err != nil {
 		t.Fatal(err)

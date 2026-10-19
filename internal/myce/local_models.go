@@ -226,7 +226,7 @@ func (c *ModelCache) checkLocalMetadata(ctx context.Context, approval localModel
 const localApprovalTimeout = 250 * time.Millisecond
 
 // ModelApprovalState describes the last bounded check of a local source.
-// An omitted state retains the legacy approved_models-only behavior.
+// Omitted states cannot authorize local-source use.
 type ModelApprovalState string
 
 const (
