@@ -567,18 +567,28 @@ func (q *Queue) maintainModels() {
 
 	}
 
-	// Release room only for the shared planner's batch winner on each device.
+	// Each worker release covers one batch. Remove both that worker and its
+	// winner before selecting the next release through the shared planner.
 	planned := map[string]bool{}
 	handled := map[string]bool{}
-	for _, m := range q.plannerMachines() {
-		j := q.candidate(m, nil)
-		if j == nil || q.calls[j.ID] != nil || handled[j.ID] {
-			continue
+	for {
+		var j *Job
+		for _, m := range q.plannerMachines() {
+			if planned[m.ID] {
+				continue
+			}
+			winner := q.candidate(m, handled)
+			if winner != nil && q.calls[winner.ID] == nil && (j == nil || q.before(winner, j, m)) {
+				j = winner
+			}
 		}
-		handled[j.ID] = true
-		if machine := q.makeBatchRoom(j, planned); machine != "" {
+		if j == nil {
+			break
+		}
+		if machine := q.makeBatchRoom(j, planned, handled); machine != "" {
 			planned[machine] = true
 		}
+		handled[j.ID] = true
 	}
 }
 func callJob(c *ModelCall) *Job {
@@ -1128,7 +1138,7 @@ func modelConfigHash(c ModelConfig) string {
 
 // Batch workers run one command at a time. Plan its release together with
 // resident models, rather than requiring either allocation alone to suffice.
-func (q *Queue) makeBatchRoom(j *Job, planned map[string]bool) string {
+func (q *Queue) makeBatchRoom(j *Job, planned, handled map[string]bool) string {
 	type plan struct {
 		machine string
 		batch   *Job
@@ -1141,7 +1151,7 @@ func (q *Queue) makeBatchRoom(j *Job, planned map[string]bool) string {
 		if !q.placementAllowed(j, m) || q.unreported[m.ID] || planned[m.ID] {
 			continue
 		}
-		if winner := q.candidate(m, nil); winner == nil || winner.ID != j.ID {
+		if winner := q.candidate(m, handled); winner == nil || winner.ID != j.ID {
 			continue
 		}
 		p := &plan{machine: m.ID}

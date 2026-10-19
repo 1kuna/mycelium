@@ -186,6 +186,9 @@ func TestStatusEligibilityKeepsRequestPrivate(t *testing.T) {
 	s.AllowedMachines = []string{m.ID}
 	s.Run.Command = []string{"private-command"}
 	s.Run.Env = map[string]string{"SECRET": "private-env"}
+	// Exercise a queued batch's private fields without competing for the idle
+	// model's memory: same-tier demand is allowed to reclaim that residency.
+	s.Needs.MemoryGB = 16
 	j := submit(t, q, s)
 	if err := q.update(func() error { q.s.Jobs[j.ID].Checkpoint = "private-checkpoint"; return nil }); err != nil {
 		t.Fatal(err)

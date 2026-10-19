@@ -199,6 +199,12 @@ echo FINISHED
 		stopped      bool
 	}
 	workers := map[string]*liveWorker{}
+	// Reserve the first CUDA model only after the deadline request has made
+	// room for its load. The checkpoint-ordering phase below deliberately keeps
+	// the experiment queued; idle warmth alone no longer reserves that card.
+	initialQueue := q
+	var reserveModel sync.Once
+	modelReserved := make(chan error, 1)
 	for _, gpu := range []string{"cuda", "xpu", "metal"} {
 		alias := filepath.Join(base, gpu+"-mount")
 		must(os.Symlink(nas, alias))
@@ -207,6 +213,14 @@ echo FINISHED
 		lw := &liveWorker{transport: transport, cancel: cancel, done: make(chan error, 1), alias: alias, state: filepath.Join(base, gpu+"-state")}
 		workers[gpu] = lw
 		w := Worker{CheckpointRoot: alias, ModelConfig: config, StateDir: lw.state, Clock: workerClocks[gpu], Interval: 5 * time.Millisecond,
+			modelEngine: func(model Model) Engine {
+				if model.Name == "cuda-model" {
+					reserveModel.Do(func() {
+						modelReserved <- initialQueue.Pin(ModelPin{Project: "predeploy", Model: model.Name, Machine: "cuda"})
+					})
+				}
+				return &FakeEngine{}
+			},
 			Machine: machine(gpu, gpu), Client: Client{URL: server.URL, Token: "predeploy-token", HTTP: &http.Client{Transport: transport, Timeout: testWaitTimeout}}}
 		go func() { lw.done <- w.Run(ctx) }()
 	}
@@ -302,6 +316,7 @@ echo FINISHED
 		return nil
 	}
 	must(modelCall("cuda-model", "deadline", testWaitTimeout))
+	must(<-modelReserved)
 	if !strings.Contains(logs(experiment.ID), "PAUSED") || get(experiment.ID).State != "queued" {
 		t.Fatal("deadline model did not checkpoint/preempt experiment")
 	}
@@ -325,6 +340,7 @@ echo FINISHED
 	}
 	later := submitAPI(short("later-experiment", "experiment", []string{"cuda"}))
 	production := submitAPI(short("urgent-batch", "production", []string{"cuda"}))
+	must(q.Unpin("predeploy", "cuda-model"))
 	wait("production then checkpoint resume", func() bool {
 		return get(production.ID).State == "succeeded" && get(experiment.ID).Attempt == 2 && strings.Contains(logs(experiment.ID), "attempt=2 resume=1")
 	})
