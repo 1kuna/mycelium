@@ -27,7 +27,8 @@ func TestCommandUsageDoesNotExposeSecrets(t *testing.T) {
 		"invite", "benchmark", "sim", "install worker", "install queue", "uninstall", "doctor",
 		"file put", "file get", "model fetch", "model approve-local", "model sync", "model pin", "model unpin",
 		"extension add", "extension list", "extension setup", "extension check",
-		"host close", "host open", "host status", "host reconcile", "_host-start-check", "host-memory-budget show", "host-memory-budget configure 8",
+		"host close", "host open", "host status --local", "host reconcile",
+		"host drain", "host disable", "host resume", "host status", "host budget", "_host-start-check", "host-memory-budget show", "host-memory-budget configure 8",
 	}
 	for _, command := range commands {
 		for _, option := range []string{"-h", "--help", "--unknown-flag"} {
@@ -36,7 +37,7 @@ func TestCommandUsageDoesNotExposeSecrets(t *testing.T) {
 				stdout, stderr, err := captureUsageOutput(t, args)
 				waitHelp := command == "wait" && option != "--unknown-flag"
 				retired := command == "disable" || command == "enable"
-				envelope := command == "host close" || command == "host open" || command == "host status"
+				envelope := command == "host close" || command == "host open" || command == "host status --local"
 				if err == nil && !waitHelp {
 					t.Fatal("expected help or flag error")
 				}

@@ -151,7 +151,7 @@ func (q *Queue) applyEngineReport(key string, s *ModelSlot, r ModelReport) {
 			}
 		}
 	case "unloaded":
-		if s.State == "draining" && s.InFlight == 0 {
+		if (s.State == "draining" || s.State == "unloading") && (s.InFlight == 0 || r.CallsMeasured && r.InFlight == 0) {
 			delete(q.s.ModelSlots, key)
 		}
 	}

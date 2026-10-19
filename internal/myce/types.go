@@ -274,6 +274,7 @@ func legacyRank(p string) int {
 }
 
 type Copy struct {
+	StopCause   string              `json:"stop_cause,omitempty"`
 	Extension   *ExtensionSelection `json:"extension,omitempty"`
 	LossCharged bool                `json:"loss_charged,omitempty"`
 	Recoverable bool                `json:"recoverable"`
@@ -340,6 +341,8 @@ type Job struct {
 	Checkpoint            string                       `json:"checkpoint"`
 }
 type Machine struct {
+	queueMemoryPolicy bool // Worker-only: allowance came from the authenticated queue.
+
 	DockerCause                 *RuntimeCause       `json:"docker_cause,omitempty"`
 	HostRevision                HostRevision        `json:"host_revision"`
 	HostBoot                    string              `json:"host_boot_id,omitempty"`
@@ -354,7 +357,7 @@ type Machine struct {
 	HostMemoryPolicyMismatch    bool                `json:"host_memory_policy_mismatch,omitempty"`
 	EffectiveHostMemoryBudgetGB float64             `json:"effective_host_memory_budget_gb,omitempty"`
 	HostMemoryInUseGB           float64             `json:"host_memory_in_use_gb,omitempty"`
-	hostBudgetGB                float64             // Effective shared-host budget, rebuilt from worker reports.
+	hostBudgetGB                float64             // Effective shared-host queue allowance; compared against every device report.
 	modelReservationDebtGB      float64             // Reservation deficit hidden by clamping scheduler free GPU memory to zero.
 	hostReservationDebtGB       float64             // Same deficit for the shared host allowance.
 	MemoryEnforcement           string              `json:"memory_enforcement,omitempty"`
@@ -414,20 +417,23 @@ type Checkin struct {
 	Running         *Execution    `json:"running,omitempty"`
 }
 type Reply struct {
-	FileCheckpoints  bool                `json:"file_checkpoints,omitempty"`
-	AdmissionBlocked bool                `json:"admission_blocked,omitempty"`
-	EnvironmentPlan  []EnvironmentRecipe `json:"environment_plan,omitempty"`
-	CopyPlan         []CopyTask          `json:"copy_plan,omitempty"`
-	CacheUsage       []CopyTask          `json:"cache_usage,omitempty"`
-	CachePins        []string            `json:"cache_pins,omitempty"`
-	ModelPlan        []ModelSlot         `json:"model_plan,omitempty"`
-	Hold             bool                `json:"hold"`
-	CheckpointRoot   string              `json:"checkpoint_root"`
-	Job              *Job                `json:"job,omitempty"`
-	Stop             bool                `json:"stop"`
-	Kill             bool                `json:"kill"`
-	Leave            bool                `json:"leave"`
-	GraceSeconds     float64             `json:"grace_seconds"`
+	PreparationStopAt *time.Time          `json:"preparation_stop_at,omitempty"`
+	HostMaintenance   string              `json:"host_maintenance,omitempty"`
+	HostMemoryBudget  *HostMemoryBudget   `json:"host_memory_budget,omitempty"`
+	FileCheckpoints   bool                `json:"file_checkpoints,omitempty"`
+	AdmissionBlocked  bool                `json:"admission_blocked,omitempty"`
+	EnvironmentPlan   []EnvironmentRecipe `json:"environment_plan,omitempty"`
+	CopyPlan          []CopyTask          `json:"copy_plan,omitempty"`
+	CacheUsage        []CopyTask          `json:"cache_usage,omitempty"`
+	CachePins         []string            `json:"cache_pins,omitempty"`
+	ModelPlan         []ModelSlot         `json:"model_plan,omitempty"`
+	Hold              bool                `json:"hold"`
+	CheckpointRoot    string              `json:"checkpoint_root"`
+	Job               *Job                `json:"job,omitempty"`
+	Stop              bool                `json:"stop"`
+	Kill              bool                `json:"kill"`
+	Leave             bool                `json:"leave"`
+	GraceSeconds      float64             `json:"grace_seconds"`
 }
 type Result struct {
 	ExecutionCause       *RuntimeCause `json:"execution_cause,omitempty"`

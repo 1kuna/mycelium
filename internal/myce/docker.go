@@ -969,7 +969,7 @@ func (state dockerExecution) completedMain() bool {
 func dockerOutcome(state dockerExecution, owner Result, e error) Result {
 	result := owner
 	result.CleanupCause = safeRuntimeCause(state.CleanupCause)
-	infrastructure := state.InfrastructureStop
+	infrastructure := state.InfrastructureStop || errors.Is(e, errWorkerStartAuthorization)
 	if e != nil {
 		infrastructure = infrastructure || e.Error() == "worker restarted; Docker cleanup required" || errors.Is(e, context.DeadlineExceeded) || errors.Is(e, context.Canceled)
 		result.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("launch", e))

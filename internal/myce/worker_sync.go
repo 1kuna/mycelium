@@ -12,7 +12,7 @@ type workerCopy struct {
 }
 
 // Real work wins; foreground loads wait for paused copies to release reservations.
-func (rt *modelRuntime) syncCopies(plan, usage []CopyTask, pins []string, busy bool) {
+func (rt *modelRuntime) syncCopies(plan, usage []CopyTask, pins []string, busy bool, keepActive ...bool) {
 	rt.mu.Lock()
 	rt.cachePins = map[string]bool{}
 	for _, name := range pins {
@@ -29,7 +29,7 @@ func (rt *modelRuntime) syncCopies(plan, usage []CopyTask, pins []string, busy b
 		}
 	}
 	for name, c := range rt.copies {
-		if !wanted[name] {
+		if !wanted[name] && !(len(keepActive) > 0 && keepActive[0]) {
 			c.cancel()
 		}
 	}

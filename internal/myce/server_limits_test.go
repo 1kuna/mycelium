@@ -68,7 +68,7 @@ func TestModelLimitOrdersWaitingCallsAndReleasesCapacity(t *testing.T) {
 	}
 }
 
-func TestModelLimitUsesFreeCopyAndWorkerLossClearsCapacity(t *testing.T) {
+func TestModelLimitUsesFreeCopyAndFreshCleanupClearsLostCapacity(t *testing.T) {
 	q, clock, m := limitedModelFixture(t, 2)
 	active := addModelCall(t, q, "production")
 	reportModel(t, q, m, "ready")
@@ -89,12 +89,16 @@ func TestModelLimitUsesFreeCopyAndWorkerLossClearsCapacity(t *testing.T) {
 	}
 	clock.Advance(ProductionLossAfter)
 	reportModel(t, q, other, "ready")
-	if q.s.ModelSlots[slotKey(m.ID, "test")] != nil {
-		t.Fatal("lost worker retained slots")
+	if q.s.ModelSlots[slotKey(m.ID, "test")] == nil {
+		t.Fatal("loss released unknown engine custody")
 	}
-	// Rejoin with a fresh session: the old call must not spend its capacity.
+	// Exact previous-session cleanup retires custody; old calls cannot spend
+	// the new session's capacity or release its slots later.
+	previous := m.Session
 	m.Session = ID()
-	check(t, q, m, nil)
+	if _, err := q.Checkin(Checkin{Machine: m, Fresh: true, PreviousSession: previous}); err != nil {
+		t.Fatal(err)
+	}
 	reportModel(t, q, m, "ready")
 	if waiting.Machine != m.ID {
 		t.Fatal("lost copy capacity was not released on rejoin")

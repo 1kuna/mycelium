@@ -10,8 +10,8 @@ import (
 	"time"
 )
 
-// A lost worker can rejoin with a live old attempt. The replacement must
-// become ready after the old process is cleaned, within the same session.
+// A partition does not release a known engine. A same-session worker can
+// resume its exact live engine without inventing a replacement attempt.
 func TestEngineRecoveryRejoinSameSessionLiveEngine(t *testing.T) {
 	for _, pinned := range []bool{false, true} {
 		t.Run(fmt.Sprintf("pinned=%v", pinned), func(t *testing.T) {
@@ -85,8 +85,8 @@ func TestEngineRecoveryRejoinSameSessionLiveEngine(t *testing.T) {
 			if !q.s.Machines[m.ID].Gone {
 				t.Fatal("not gone")
 			}
-			if q.s.ModelSlots[slotKey(m.ID, model.Name)] != nil {
-				t.Fatal("lost unbudgeted slot was retained")
+			if q.s.ModelSlots[slotKey(m.ID, model.Name)] == nil {
+				t.Fatal("loss discarded exact engine custody")
 			}
 			second := &ModelCall{Model: model.Name, Project: "test", Priority: "experiment"}
 			if err := q.addCall(second); err != nil {
@@ -97,8 +97,8 @@ func TestEngineRecoveryRejoinSameSessionLiveEngine(t *testing.T) {
 			await(t, func() bool { heartbeat(); return second.Machine != "" })
 			s := q.s.ModelSlots[slotKey(m.ID, model.Name)]
 			reports, _ := rt.report()
-			if s.Attempt == oldAttempt || reports[0].Attempt != s.Attempt {
-				t.Fatal("replacement attempt was not adopted")
+			if s.Attempt != oldAttempt || reports[0].Attempt != s.Attempt {
+				t.Fatal("same-session rejoin replaced a retained engine identity")
 			}
 			if second.Machine == "" {
 				t.Fatalf("call never dispatched; slot state %s attempt %s, worker reports %+v", s.State, s.Attempt, reports)

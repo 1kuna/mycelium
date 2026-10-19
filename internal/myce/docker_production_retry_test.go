@@ -14,7 +14,7 @@ import (
 
 // Exercise the real adapter, durable custody and queue through the fake daemon.
 func TestDockerProductionOutcomeCause(t *testing.T) {
-	for _, cause := range []string{"stop-main", "stop-sidecar", "stop-readiness", "exit-one", "oom", "oom-with-stop", "sidecar-readiness-exit", "readiness-timeout", "ambiguous-main", "ambiguous-sidecar", "worker-recovery", "daemon-recovery", "exhaustion"} {
+	for _, cause := range []string{"maintenance-main", "maintenance-sidecar", "maintenance-readiness", "stop-main", "stop-sidecar", "stop-readiness", "exit-one", "oom", "oom-with-stop", "sidecar-readiness-exit", "readiness-timeout", "ambiguous-main", "ambiguous-sidecar", "worker-recovery", "daemon-recovery", "exhaustion"} {
 		t.Run(cause, func(t *testing.T) {
 			w, store, clock, root := dockerFixture(t)
 			q, _ := fixture(t)
@@ -81,10 +81,15 @@ func TestDockerProductionOutcomeCause(t *testing.T) {
 					}
 				}
 				switch cause {
-				case "stop-main", "stop-sidecar", "exhaustion":
+				case "maintenance-main", "maintenance-sidecar", "stop-main", "stop-sidecar", "exhaustion":
+					if strings.HasPrefix(cause, "maintenance-") {
+						if _, err := q.ChangeHostMaintenance(hostID(&m), HostMaintenanceRequest{Action: "disable", Stop: true}); err != nil {
+							t.Fatal(err)
+						}
+					}
 					// Record intent first; the daemon then reports a killed member.
 					p.stop(clock.Now(), StopGrace, false)
-					if cause == "stop-sidecar" {
+					if cause == "stop-sidecar" || cause == "maintenance-sidecar" {
 						writeMode("sidecar-killed")
 						exitContainer("running-sidecar-sortformer")
 					} else {
@@ -92,7 +97,12 @@ func TestDockerProductionOutcomeCause(t *testing.T) {
 						exitContainer("running")
 					}
 					clock.advance(StopGrace)
-				case "stop-readiness":
+				case "maintenance-readiness", "stop-readiness":
+					if cause == "maintenance-readiness" {
+						if _, err := q.ChangeHostMaintenance(hostID(&m), HostMaintenanceRequest{Action: "disable", Stop: true}); err != nil {
+							t.Fatal(err)
+						}
+					}
 					if err := q.Leave(m.ID, true); err != nil {
 						t.Fatal(err)
 					}
@@ -136,13 +146,16 @@ func TestDockerProductionOutcomeCause(t *testing.T) {
 						t.Fatal(err)
 					}
 					got := job(t, q, submitted.ID)
-					infra := strings.HasPrefix(cause, "stop-") || cause == "exhaustion" || strings.HasSuffix(cause, "recovery")
+					infra := strings.HasPrefix(cause, "maintenance-") || strings.HasPrefix(cause, "stop-") || cause == "exhaustion" || strings.HasSuffix(cause, "recovery")
 					want, retries := "failed", 0
 					if infra {
 						want, retries = "queued", min(attempt, 2)
 						if attempt == 3 {
 							want = "failed"
 						}
+					}
+					if strings.HasPrefix(cause, "maintenance-") {
+						retries = 0
 					}
 					if got.State != want || got.InfrastructureRetries != retries || finish.result.Interrupted != infra {
 						t.Fatalf("result=%+v state=%s retries=%d, want %s/%d", finish.result, got.State, got.InfrastructureRetries, want, retries)

@@ -722,7 +722,7 @@ type environmentRuntime struct {
 	key     string
 }
 
-func (rt *environmentRuntime) sync(plan []EnvironmentRecipe, busy bool) {
+func (rt *environmentRuntime) sync(plan []EnvironmentRecipe, busy bool, keepActive ...bool) {
 	rt.mu.Lock()
 	defer rt.mu.Unlock()
 	wanted := ""
@@ -730,6 +730,9 @@ func (rt *environmentRuntime) sync(plan []EnvironmentRecipe, busy bool) {
 		wanted = plan[0].Key
 	}
 	if rt.cancel != nil {
+		if len(keepActive) > 0 && keepActive[0] {
+			return
+		}
 		if wanted != rt.key {
 			rt.cancel()
 		}

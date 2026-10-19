@@ -6,6 +6,29 @@ and recovery. The [approved design](design-proposal.md) is the product spec;
 These instructions describe the implementation. Laptop checks do not qualify
 native GPU, systemd, Docker, boot or consumer behavior.
 
+## Queue maintenance
+
+For ordinary maintenance use `myce host drain HOST`, `disable HOST [--stop]`,
+`resume HOST` and `status HOST`. Set `MYCE_QUEUE` and the private `MYCE_TOKEN`.
+These commands are unprivileged, host-wide and durable across rejoin. Use
+`--wait --timeout 30s` with drain/disable/status to wait for fresh workers and
+zero known execution/cleanup custody; nonzero exit leaves all custody intact.
+Drain finishes active work; disable only stops it when `--stop` is supplied.
+Unstarted assignments are withdrawn through the existing stop protocol.
+
+Use `myce host budget HOST --memory-budget-gb GiB` while drained or disabled.
+The queue owns the allowance after its first worker report. Worker report
+agreement, aggregate RAM/debt and per-attempt main/sidecar limits still apply.
+Planned queue maintenance stops do not spend production infrastructure retries;
+independent stage failures still fail immediately.
+
+See the [maintenance contract](design-proposal.md#queue-owned-host-maintenance-s5)
+for JSON fields, deadlines and bootstrap behavior. S5 still enforces the local
+fence below: queue resume cannot override a local close. Local close/open and
+`host-memory-budget configure` are transitional controls pending S6; the latter
+cannot change an established queue allowance. Queue quiescence is not local
+exclusion or an offline release guarantee.
+
 ## Paths and prerequisites
 
 Use one queue, one local SQLite database and one worker per selected GPU.
@@ -352,7 +375,10 @@ still stops the worker **and every attempt child**, and its parent
 
 - `--host-memory-budget-gb`: UNQUALIFIED migration input; default `0` keeps
   uncapped admission-only operation. A positive install-time input requires
-  explicit `host-memory-budget configure` while CLOSED before runtime use.
+  explicit `host-memory-budget configure` while CLOSED before first-report
+  bootstrap, or configure the queue with `host disable HOST --memory-budget-gb
+  GiB` before starting the worker. Established queue policy is changed with
+  `host budget`, not the local configurator.
   All cards read the same allowance from the host intent; differing worker
   reports fence admission. Retain aggregate attempt/model charges, including
   slack and unconfirmed releases, until exact release proof. Do not reduce

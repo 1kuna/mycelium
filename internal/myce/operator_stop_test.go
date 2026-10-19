@@ -122,7 +122,7 @@ func TestOperatorStopMarkerReconcilesWorkerWithQueue(t *testing.T) {
 	for _, success := range []bool{false, true} {
 		t.Run(fmt.Sprint(success), func(t *testing.T) {
 			q, c := fixture(t)
-			m := machine("operator", "fake")
+			m := machine("operator", "fake", "test-host")
 			check(t, q, m, nil)
 			j := submit(t, q, spec("experiment"))
 			old := check(t, q, m, nil).Job

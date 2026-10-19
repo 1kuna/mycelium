@@ -231,7 +231,7 @@ func TestProductionStartGateExecutionAndReplay(t *testing.T) {
 	s.Resumable = false
 	s.Run.Command = []string{"/bin/sh", "-c", "echo ran >> " + marker}
 	submit(t, q, s)
-	a := check(t, q, machine("b70", "xpu"), nil).Job
+	a := check(t, q, machine("b70", "xpu", "test-host"), nil).Job
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var mu sync.Mutex
@@ -256,7 +256,7 @@ func TestProductionStartGateExecutionAndReplay(t *testing.T) {
 	}))
 	defer server.Close()
 	w := recoveryWorker(t)
-	w.Machine = machine("b70", "xpu")
+	w.Machine = machine("b70", "xpu", "test-host")
 	w.Client = Client{URL: server.URL, Token: "test"}
 	store, e := w.openStore()
 	if e != nil {

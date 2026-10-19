@@ -28,6 +28,9 @@
         },
         "session": {
           "type": "string"
+        },
+        "stop_cause": {
+          "type": "string"
         }
       },
       "required": [

@@ -13,13 +13,13 @@ import (
 	"time"
 )
 
-func modelFixture(t *testing.T) (*Queue, *fakeClock, Machine) {
+func modelFixture(t *testing.T, host ...string) (*Queue, *fakeClock, Machine) {
 	t.Helper()
 	q, clock := fixture(t)
 	if err := q.ConfigureModels(ModelConfig{Idle: 10 * time.Minute, Wait: time.Minute, Models: []Model{{Name: "test", Engine: "server", StartCommand: []string{"unused-test-server"}, HealthURL: "http://127.0.0.1:{port}/health", SizeBytes: 1, SHA256: strings.Repeat("0", 64), Path: "fake", MemoryGB: 8, Platforms: []string{"fake"}}}}); err != nil {
 		t.Fatal(err)
 	}
-	m := machine("one", "fake")
+	m := machine("one", "fake", host...)
 	m.ModelURL = "http://127.0.0.1:1234"
 	m.ModelConfigHash = modelConfigHash(q.models)
 	check(t, q, m, nil)
@@ -148,8 +148,8 @@ func TestModelLossAndFreshSession(t *testing.T) {
 	check(t, q, other, nil)
 	clock.Advance(LossAfter)
 	check(t, q, other, nil)
-	if !q.s.Machines[m.ID].Gone || len(q.s.ModelSlots) != 0 {
-		t.Fatal("lost worker still has model")
+	if !q.s.Machines[m.ID].Gone || q.s.ModelSlots[slotKey(m.ID, "test")] == nil {
+		t.Fatal("lost worker released unknown engine custody")
 	}
 	q.finishCall(c.ID)
 	m.Session = "new"
@@ -454,8 +454,8 @@ func TestModelLostWorkerRetriesInFlightCall(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("lost request was not cancelled")
 	}
-	if !q.s.Machines[m.ID].Gone || q.s.ModelSlots[slotKey(m.ID, "test")] != nil {
-		t.Fatal("lost inventory remained")
+	if !q.s.Machines[m.ID].Gone || q.s.ModelSlots[slotKey(m.ID, "test")] == nil {
+		t.Fatal("loss erased pending engine custody")
 	}
 }
 

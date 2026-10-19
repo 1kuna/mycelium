@@ -117,6 +117,76 @@ Classification uses the cause for both native and Docker attempts. A Mycelium st
 
 A production attempt that had started gets its original-length start window from interruption detection, including a host close/release. Planned leave keeps its original start deadline. A requeued job may wait for its closed host to reopen within that window; a new production submission to only closed eligible hosts still fails immediately. Unstarted attempts do not renew their start deadline.
 
+## Queue-owned host maintenance (S5)
+
+Maintenance is a durable queue record keyed by the physical `host_id`, shared by
+all of its GPU workers. It survives checkin, queue restart and worker rejoin.
+It is independent of the worker's `disabled` report and project/job allowlists.
+
+```sh
+myce host drain HOST [--wait] [--timeout 30s]
+myce host disable HOST [--stop] [--wait] [--timeout 30s]
+myce host resume HOST
+myce host status HOST [--wait] [--timeout 30s]
+myce host budget HOST --memory-budget-gb 64
+```
+
+These commands use the authenticated queue (`MYCE_QUEUE`, `MYCE_TOKEN`, or
+`--queue`/`--token`), run as an ordinary account and print JSON. They require no
+local exclusion proof or consumer-specific integration. Drain and disable both
+block new placement, preparation and Started authorization across the host.
+Drain lets already-authorized attempts finish. An assigned attempt that has not
+passed Started is withdrawn through the existing stop channel; it retains its
+preparation/create custody until exact cleanup. `disable --stop` additionally
+stops every kind of host work through the same obligation enumeration used by
+wait: batch attempts and their sidecars, exact model calls and engines, and
+session-owned environment builds and model preparations. They share a persisted
+stop deadline of two minutes, which repeated stop requests cannot extend.
+Engine unload is forced at that deadline even with in-flight calls. Drain and
+disable without stop let existing preparations finish while admitting no new
+ones. Admission acceptance or deadline expiry is not evidence of physical
+release; wait still requires exact cleanup. Resume restores eligibility
+transactionally.
+
+Queue-requested stops carry `planned_host_maintenance` on the exact copy. They
+requeue the same job without consuming production infrastructure retries or
+infrastructure losses, including when cleanup, loss detection or restart happens
+later. The cause never transfers to the next attempt. Cancellation still wins;
+observed independent command failure, OOM or sidecar/readiness failure still
+fails production immediately. Started attempts get their original-length start
+window on requeue; an unstarted attempt keeps its deadline. Retries can wait on
+the maintained host or use another eligible host, subject to ordinary deadlines.
+The earlier two-infrastructure-retry contract still applies to other causes.
+
+The queue bootstraps the memory allowance once from the first worker report,
+including zero for an uncapped laptop. Subsequent reports cannot change it.
+`host budget` or `drain|disable --memory-budget-gb GiB` sets a positive allowance
+only while drained/disabled. Both device workers receive the policy and must
+report it consistently before new work starts. Lowering it keeps existing
+attempt charges and exposes aggregate RAM debt; it does not resize a running
+attempt's ceiling or release resources. Qualification remains `UNQUALIFIED`
+until separately authorized native measurement. Docker main/sidecar ceilings
+and total per-attempt charges are unchanged.
+
+Status reports policy, local fence, known worker freshness/device identities,
+allowance/mismatch, aggregate RAM/debt, attempt identities, preparations,
+sidecars/engines and pending releases/daemon cleanup. All previously known
+workers remain required after loss or restart; a never-reported host has unknown
+health. Plain status prints the snapshot and exits nonzero for incomplete health. `--wait` exits zero only while drained/disabled with fresh, consistent
+worker evidence and zero known attempts, preparations, sidecars, releases and
+cleanup. Queue outage, missing/stale reports and timeout cannot satisfy it or
+discharge custody. This is queue-observed quiescence, not an offline hardware
+handoff guarantee. Offline intervention uses separately authorized service and
+container tools after inspecting owned work.
+
+S5 retains the old local close/open/reconcile fence as an additional gate.
+`host status --local` still selects that interface. Queue resume cannot override
+it. The old local allowance configurator remains only as bootstrap input; once
+a queue policy exists, use `host budget`. S6 must remove the local intent,
+registry, revisions/CAS, last-close, exclusion/discharge, root copy/child, rest
+verdicts and timer, plus their installer/start conditions and runtime callers,
+while retaining queue policy, Started and exact release custody.
+
 ## Using it
 
 ```

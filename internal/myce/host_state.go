@@ -40,7 +40,13 @@ type HostEngineExecution struct {
 	Attempt string `json:"attempt"`
 }
 
+type HostCallExecution struct {
+	HostEngineExecution
+	ID string `json:"id"`
+}
+
 type HostObligation struct {
+	Call        *HostCallExecution   `json:"call,omitempty"`
 	Engine      *HostEngineExecution `json:"engine,omitempty"`
 	Preparation bool                 `json:"preparation,omitempty"`
 	Queue       string               `json:"queue"`
@@ -116,6 +122,13 @@ func validateHostIntent(s HostIntent) error {
 		}
 	}
 	for _, p := range s.Pending {
+		if p.Call != nil {
+			c := p.Call
+			if p.Queue == "" || c.ID == "" || c.Machine == "" || c.Session == "" || c.Model == "" || c.Attempt == "" {
+				return fmt.Errorf("%w: incomplete call custody", ErrHostState)
+			}
+			continue
+		}
 		if p.Engine != nil {
 			if p.Queue == "" || p.Engine.Machine == "" || p.Engine.Session == "" || p.Engine.Model == "" || p.Engine.Attempt == "" {
 				return fmt.Errorf("%w: incomplete engine custody", ErrHostState)

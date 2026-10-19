@@ -47,6 +47,7 @@ type state struct {
 	NetworkRecoveryAt time.Time `json:"network_recovery_at,omitempty"`
 
 	Schema           int                          `json:"schema_version"`
+	HostMaintenance  map[string]HostMaintenance   `json:"host_maintenance,omitempty"`
 	HostIntents      map[string]QueueHostIntent   `json:"host_intents,omitempty"`
 	Submissions      map[string]*submissionRecord `json:"submissions,omitempty"`
 	ProgramNeeds     map[string]SizeHint          `json:"program_needs,omitempty"`
@@ -471,12 +472,13 @@ func (q *Queue) retry(j *Job, why string) {
 		}
 		return
 	}
+	planned := plannedMaintenanceStop(j)
 	if j.Spec.Priority == "production" {
 		// Fence every old copy, including a lost copy that later reports newer progress.
 		for i := range j.Copies {
 			j.Copies[i].Recoverable = false
 		}
-		if j.InfrastructureRetries >= q.productionInfrastructureRetries {
+		if !planned && j.InfrastructureRetries >= q.productionInfrastructureRetries {
 			j.State, j.Reason = "failed", "infrastructure_retries_exhausted"
 			j.StopAt = nil
 			now := q.clock.Now()
@@ -484,7 +486,9 @@ func (q *Queue) retry(j *Job, why string) {
 			return
 		}
 		q.renewRecoveryStartWindow(j)
-		j.InfrastructureRetries++
+		if !planned {
+			j.InfrastructureRetries++
+		}
 	}
 	j.Machine = ""
 	j.Session = ""
@@ -492,7 +496,7 @@ func (q *Queue) retry(j *Job, why string) {
 	j.StartedAt = nil
 	j.FinishedAt = nil
 	j.Reason = why
-	if j.Spec.Priority != "production" && j.Losses >= 3 {
+	if !planned && j.Spec.Priority != "production" && j.Losses >= 3 {
 		j.State = "failed"
 		j.Reason = "failed after 3 infrastructure losses: " + why
 		return
@@ -527,6 +531,7 @@ func (q *Queue) fleetQuiet(now time.Time) bool {
 }
 
 func (q *Queue) maintain() {
+	q.maintainHostMaintenance()
 	q.maintainSubmissions()
 	now := q.clock.Now()
 	for _, j := range q.s.Jobs {
@@ -683,8 +688,17 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			return errors.New("worker model config does not match queue")
 		}
 		old := q.s.Machines[m.ID]
+		if old != nil && hostID(old) != hostID(&m) {
+			return errors.New("machine physical host identity changed")
+		}
+		if err := q.registerMaintenanceHost(&m); err != nil {
+			return err
+		}
+		budget := *q.s.HostMaintenance[hostID(&m)].MemoryBudget
+		reply.HostMemoryBudget = &budget
+		reply.HostMaintenance = q.s.HostMaintenance[hostID(&m)].Mode
 		if old != nil && old.Session != m.Session && !(c.Fresh && c.PreviousSession == old.Session) {
-			if h := q.s.Hosts[hostID(old)]; old.HostMemoryBudgetGB > 0 || old.hostBudgetGB > 0 || h != nil && h.Policy.ProductionHold {
+			if h := q.s.Hosts[hostID(old)]; q.maintenanceKnown(hostID(old)) || old.HostMemoryBudgetGB > 0 || old.hostBudgetGB > 0 || h != nil && h.Policy.ProductionHold {
 				for _, slot := range q.s.ModelSlots {
 					if slot.Machine == m.ID && slot.Session == old.Session {
 						return errors.New("previous model execution release unknown; prior-session cleanup required")
@@ -774,10 +788,17 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 				m.AdmissionReason = a.Reason
 			}
 			localBlocked := hostID(&m) == q.localHostID && q.localHostErr != nil
-			reply.AdmissionBlocked = availabilityBlocked(&m) || m.HostMemoryBudgetStatus() != "" || localBlocked
+			reply.AdmissionBlocked = availabilityBlocked(&m) || m.HostMemoryBudgetStatus() != "" || localBlocked || q.maintenanceBlocked(hostID(&m))
 			if localBlocked {
 				reply.Job = nil
 				return
+			}
+			for _, p := range q.hostObligations(hostID(&m)) {
+				if p.Preparation && p.Result.Machine == m.ID && p.Result.Session == m.Session {
+					if r, ok := q.s.HostReleases[releaseKey(HostRelease{Job: p.Result.ID, Machine: m.ID, Session: m.Session})]; ok && !r.Until.IsZero() {
+						boundStop(&reply.PreparationStopAt, r.Until)
+					}
+				}
 			}
 			reply.EnvironmentPlan = q.environmentPlan(&m)
 			reply.ModelPlan = q.modelPlan(m.ID)
@@ -827,7 +848,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 				reply.Kill = true
 				return nil
 			}
-			if c.Started && j.Spec.StartBy == nil && j.StartedAt == nil && j.State == "running" {
+			if c.Started && j.Spec.StartBy == nil && j.StartedAt == nil && j.State == "running" && q.startPlacementAllowed(j) {
 				q.markStarted(j)
 			}
 			j.Progress = c.Running.Progress
@@ -854,7 +875,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 					}
 					break
 				}
-				if !logPolicyFits(j.Spec.Logs, &m) || !q.checkpointReady(j, &m) {
+				if q.maintenanceBlocked(hostID(&m)) || !logPolicyFits(j.Spec.Logs, &m) || !q.checkpointReady(j, &m) {
 					return nil
 				}
 				out := cloneJob(j)
@@ -1537,7 +1558,9 @@ func (q *Queue) Started(r Result) error {
 			rejected = ErrStale
 			return nil
 		}
-		if !q.startPlacementAllowed(j) {
+		m := q.s.Machines[r.Machine]
+		q.refreshHostMemory()
+		if m == nil || m.Gone || m.Session != r.Session || q.unreported[m.ID] || !q.startPlacementAllowed(j) {
 			rejected = ErrStale
 			return nil
 		}
@@ -1553,7 +1576,7 @@ func (q *Queue) Started(r Result) error {
 func (q *Queue) renewRecoveryStartWindow(j *Job) {
 	// Planned leave keeps its original start deadline. A confirmed host close
 	// interrupts even an undelivered completed attempt and needs a recovery window.
-	recovering := j.State == "running" || j.State == "stopping" && q.hostClosedReason(q.executionHost(j.Machine)) != ""
+	recovering := j.State == "running" || j.State == "stopping" && (plannedMaintenanceStop(j) || q.hostClosedReason(q.executionHost(j.Machine)) != "")
 	if j.Spec.Priority == "production" && recovering && j.StartedAt != nil && j.Spec.StartBy != nil {
 		// Recovery is bounded from loss detection, using the original first-start window.
 		if j.StartWindow == 0 {

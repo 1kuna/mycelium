@@ -252,7 +252,7 @@ func TestHostMemoryUnifiedDoesNotChargeGPUtwice(t *testing.T) {
 		t.Fatal("8 GPU + 2 CPU should fit 12 GiB unified pool")
 	}
 }
-func TestHostMemoryLossReleasesReservation(t *testing.T) {
+func TestHostMemoryLossRetainsReservationUntilExactRelease(t *testing.T) {
 	q, c := fixture(t)
 	a, b := machine("a", "fake"), machine("b", "fake")
 	other := machine("other", "fake")
@@ -277,10 +277,18 @@ func TestHostMemoryLossReleasesReservation(t *testing.T) {
 		check(t, q, other, nil)
 		r = check(t, q, b, nil)
 	}
-	if r.Job == nil || r.Job.ID != second.ID {
-		t.Fatal("lost worker RAM reservation not reconciled")
+	if r.Job != nil {
+		t.Fatal("loss freed RAM without exact release", r.Job)
 	}
 	requireState(t, q, running.ID, "queued")
+	receipt := result(running, false)
+	receipt.ReleaseOnly = true
+	if err := q.Complete(receipt); err != nil {
+		t.Fatal(err)
+	}
+	if r = check(t, q, b, nil); r.Job == nil || r.Job.ID != second.ID {
+		t.Fatal("exact release did not refund RAM")
+	}
 }
 func TestHostMemoryProductionUsesFreeHostBeforeReclaim(t *testing.T) {
 	q, _ := fixture(t)
@@ -338,9 +346,17 @@ func TestHostMemoryAllowanceAggregatePreparationsAndSidecars(t *testing.T) {
 			if preparing != nil {
 				t.Fatal("slack exceeded host allowance")
 			}
+			maintenanceChange(t, q, "drain", false)
+			value := 7.0
+			if _, err := q.ChangeHostMaintenance("host", HostMaintenanceRequest{Action: "budget", MemoryBudgetGB: &value}); err != nil {
+				t.Fatal(err)
+			}
 			for _, m := range []*Machine{&a, &b} {
 				m.HostMemoryBudgetGB = 7
 			}
+			check(t, q, a, nil)
+			check(t, q, b, nil)
+			maintenanceChange(t, q, "resume", false)
 			check(t, q, b, nil)
 			preparing = check(t, q, a, nil).Job
 			if preparing == nil || preparing.ID != submitted.ID || preparing.StartedAt != nil {

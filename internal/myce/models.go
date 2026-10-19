@@ -387,7 +387,7 @@ func (q *Queue) maintainModels() {
 	for k, s := range q.s.ModelSlots {
 		m := q.s.Machines[s.Machine]
 		if m == nil || m.Gone || m.Session != s.Session {
-			if m != nil && (q.hostClosedReason(hostID(m)) != "" || m.Session == s.Session && (m.HostMemoryBudgetGB > 0 || m.hostBudgetGB > 0 || q.s.Hosts[hostID(m)] != nil && q.s.Hosts[hostID(m)].Policy.ProductionHold)) {
+			if m != nil && (q.maintenanceKnown(hostID(m)) || q.hostClosedReason(hostID(m)) != "" || m.Session == s.Session && (m.HostMemoryBudgetGB > 0 || m.hostBudgetGB > 0 || q.s.Hosts[hostID(m)] != nil && q.s.Hosts[hostID(m)].Policy.ProductionHold)) {
 				continue
 			}
 			delete(q.s.ModelSlots, k)

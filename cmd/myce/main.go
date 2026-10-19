@@ -84,6 +84,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		return extensionCommand(args[1:])
 	}
 	if args[0] == "host" && len(args) > 1 {
+		if args[1] == "drain" || args[1] == "disable" || args[1] == "resume" || args[1] == "budget" || args[1] == "status" && !containsLocalFlag(args[2:]) {
+			return hostMaintenanceCommand(context.Background(), args[1:], os.Stdout)
+		}
 		return hostLocalCommand(args[1:], probe, os.Stdout)
 	}
 	if args[0] == "host-memory-budget" {

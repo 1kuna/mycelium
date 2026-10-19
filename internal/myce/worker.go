@@ -1146,6 +1146,13 @@ func (w Worker) Run(stop context.Context) error {
 				err = w.Client.Call(ctx, "POST", "/api/workers/checkin", Checkin{Started: p != nil && (p.docker == nil || p.docker.status() == "running"), Machine: m, Running: running, Fresh: fresh, PreviousSession: s.state.PreviousSession, ModelReports: reports}, &reply)
 			}
 			if err == nil {
+				if reply.HostMemoryBudget != nil {
+					w.Machine.HostMemoryBudgetGB = reply.HostMemoryBudget.GiB
+					w.Machine.queueMemoryPolicy = true
+					rt.mu.Lock()
+					rt.memoryMachine = w.Machine
+					rt.mu.Unlock()
+				}
 				if e := CheckHostRevision(w.HostStateDir, w.hostRevision); e != nil {
 					disableCancel()
 					continue
@@ -1169,8 +1176,9 @@ func (w Worker) Run(stop context.Context) error {
 						r.Binary = filepath.Join(w.EnvironmentSourceRoot, r.BinaryRelative)
 					}
 				}
-				environments.sync(reply.EnvironmentPlan, busy)
-				rt.syncCopies(reply.CopyPlan, reply.CacheUsage, reply.CachePins, busy)
+				keepPreparations := (reply.HostMaintenance == "drained" || reply.HostMaintenance == "disabled") && reply.PreparationStopAt == nil
+				environments.sync(reply.EnvironmentPlan, busy, keepPreparations)
+				rt.syncCopies(reply.CopyPlan, reply.CacheUsage, reply.CachePins, busy, keepPreparations)
 				// syncCopies cancels immediately; do not block heartbeats behind an
 				// outstanding filesystem syscall on an unavailable NAS. Loads share
 				// the cache admission gate and wait for the reservation to release.
@@ -1217,7 +1225,7 @@ func (w Worker) Run(stop context.Context) error {
 							if errors.Is(err, errWorkerCheckpoint) || errors.Is(err, errWorkerMemory) || errors.Is(err, errWorkerUnavailable) {
 								log.Printf("retry pending start: %v", err)
 							} else {
-								r := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Error: err.Error(), ExtensionUnavailable: errors.Is(err, errExtensionUnavailable), ReleasePending: errors.Is(err, errWorkerReleasePending)}
+								r := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Error: err.Error(), Interrupted: errors.Is(err, errWorkerStartAuthorization), ExtensionUnavailable: errors.Is(err, errExtensionUnavailable), ReleasePending: errors.Is(err, errWorkerReleasePending)}
 								s.state.Result = &r
 								if !r.ReleasePending {
 									s.state.PID = 0
@@ -1366,7 +1374,7 @@ func (w Worker) Run(stop context.Context) error {
 							p, err = w.start(s, j)
 						}
 						if err != nil && !(errors.Is(err, errWorkerCheckpoint) || errors.Is(err, errWorkerMemory) || errors.Is(err, errWorkerUnavailable)) {
-							r := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Error: err.Error(), ExtensionUnavailable: errors.Is(err, errExtensionUnavailable), ReleasePending: errors.Is(err, errWorkerReleasePending)}
+							r := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Error: err.Error(), Interrupted: errors.Is(err, errWorkerStartAuthorization), ExtensionUnavailable: errors.Is(err, errExtensionUnavailable), ReleasePending: errors.Is(err, errWorkerReleasePending)}
 							s.state.Job = &j
 							if w.batchMemory != nil {
 								w.batchMemory.Store(math.Float64bits(j.Spec.Needs.MemoryGB))

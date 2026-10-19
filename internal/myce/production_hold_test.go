@@ -275,8 +275,7 @@ func (q *Queue) dbPathForTest(t *testing.T) string {
 }
 
 func TestProductionHoldModelPathsAndResidency(t *testing.T) {
-	q, c, a := modelFixture(t)
-	a.HostID = "b70"
+	q, c, a := modelFixture(t, "b70")
 	check(t, q, a, nil)
 	b := a
 	b.ID = "two"
@@ -331,8 +330,7 @@ func TestProductionHoldModelPathsAndResidency(t *testing.T) {
 
 }
 func TestProductionHoldPinProtected(t *testing.T) {
-	q, _, a := modelFixture(t)
-	a.HostID = "b70"
+	q, _, a := modelFixture(t, "b70")
 	check(t, q, a, nil)
 	b := machine("two", "fake")
 	b.HostID = "b70"
@@ -418,8 +416,7 @@ func TestProductionHoldFailedCleanupIsNotRelease(t *testing.T) {
 }
 
 func TestProductionHoldReportsPinnedConflict(t *testing.T) {
-	q, _, a := modelFixture(t)
-	a.HostID = "b70"
+	q, _, a := modelFixture(t, "b70")
 	check(t, q, a, nil)
 	if e := q.Pin(ModelPin{Project: "test", Model: "test", Machine: a.ID}); e != nil {
 		t.Fatal(e)
@@ -435,8 +432,7 @@ func TestProductionHoldReportsPinnedConflict(t *testing.T) {
 }
 
 func TestProductionHoldRestartReconcilesModelInference(t *testing.T) {
-	q, c, a := modelFixture(t)
-	a.HostID = "b70"
+	q, c, a := modelFixture(t, "b70")
 	check(t, q, a, nil)
 	if e := q.ConfigureHosts(map[string]HostPolicy{"b70": {ProductionHold: true}}); e != nil {
 		t.Fatal(e)
@@ -477,8 +473,7 @@ func TestProductionHoldRestartReconcilesModelInference(t *testing.T) {
 }
 
 func TestProductionHoldWaitsForExperimentCallOnPinnedModel(t *testing.T) {
-	q, c, a := modelFixture(t)
-	a.HostID = "b70"
+	q, c, a := modelFixture(t, "b70")
 	check(t, q, a, nil)
 	b := machine("two", "fake")
 	b.HostID = "b70"
@@ -606,8 +601,7 @@ func TestProductionHoldKeepsProductionEnvironmentBuild(t *testing.T) {
 }
 
 func TestProductionHoldLostModelNeedsPriorSessionCleanup(t *testing.T) {
-	q, c, a := modelFixture(t)
-	a.HostID = "b70"
+	q, c, a := modelFixture(t, "b70")
 	check(t, q, a, nil)
 	b := machine("two", "fake")
 	b.HostID = "b70"
@@ -650,13 +644,12 @@ func TestProductionHoldLostModelNeedsPriorSessionCleanup(t *testing.T) {
 }
 
 func TestProductionHoldResidentCallUsesReservedHostMemory(t *testing.T) {
-	q, _, a := modelFixture(t)
+	q, _, a := modelFixture(t, "b70")
 	config := q.models
 	config.Models[0].HostMemoryGB = 1
 	if err := q.ConfigureModels(config); err != nil {
 		t.Fatal(err)
 	}
-	a.HostID = "b70"
 	a.HostMemoryMeasured = true
 	a.HostAvailableMemoryGB = 1
 	a.ModelConfigHash = modelConfigHash(config)
@@ -693,8 +686,7 @@ func TestProductionHoldResidentCallUsesReservedHostMemory(t *testing.T) {
 }
 
 func TestProductionHoldReportsModelUnloadFailure(t *testing.T) {
-	q, _, a := modelFixture(t)
-	a.HostID = "b70"
+	q, _, a := modelFixture(t, "b70")
 	check(t, q, a, nil)
 	b := machine("two", "fake")
 	b.HostID = "b70"
