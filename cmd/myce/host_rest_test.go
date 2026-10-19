@@ -185,3 +185,83 @@ func TestHostRestCommandErrorsAndDeadline(t *testing.T) {
 		t.Fatal(out.String(), err)
 	}
 }
+
+type restEvaluationClock struct {
+	at   time.Time
+	step time.Duration
+}
+
+func (c *restEvaluationClock) Now() time.Time {
+	at := c.at
+	c.at = c.at.Add(c.step)
+	return at
+}
+
+func TestHostRestVerdictAndExitUseOneInstant(t *testing.T) {
+	for _, expect := range []string{"closed", "ready"} {
+		for _, jsonOutput := range []bool{false, true} {
+			t.Run(expect+"/json="+strconv.FormatBool(jsonOutput), func(t *testing.T) {
+				r, _, c := localIdentityFixture(t)
+				clock := &restEvaluationClock{at: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+				at := clock.at.Add(-myce.HostObservationWindow + time.Millisecond)
+				revision := myce.HostRevision{Revision: 1, Operation: "fixture-operation"}
+				host, boot, state := "fixture-host", "fixture-boot", "closed"
+				if expect == "ready" {
+					state = "open"
+				}
+				zero, yes := 0, true
+				e := myce.UnknownHostEnvelope("status", clock)
+				e.Host, e.Boot, e.Operation = &host, &boot, &revision.Operation
+				e.Desired = myce.HostEnvelopeState{State: &state, Revision: &revision.Revision}
+				e.Observed = e.Desired
+				e.QueueRevision, e.Ready = &revision.Revision, &yes
+				e.Settlement = "confirmed"
+				e.LastClose = &myce.HostClose{HostRevision: revision, Settlement: "confirmed", SettledAt: &at}
+				for key := range e.Sources {
+					e.Sources[key] = &at
+				}
+				e.Sources["required_workers"] = &at
+				e.RestEvidence = myce.HostRestEvidence{QueueReachable: &yes, QueueAt: &at, UnfencedQueued: &zero}
+				e.Counts = myce.HostEnvelopeCounts{Active: &zero, Preparing: &zero, Stopping: &zero, Unsettled: &zero, Queued: &zero, FencedQueued: &zero, UnresolvedPlacement: &zero}
+				launch := func(_ context.Context, s myce.HostChildLaunch) ([]byte, error) {
+					result := myce.HostMutationResult{HostRevision: revision}
+					switch s.Request.Operation {
+					case "status":
+						result.Envelope = &e
+					case "resolve":
+						// Collection has finished. Advancing reads expose any later
+						// reevaluation across the evidence freshness boundary.
+						clock.step = 500 * time.Microsecond
+						if expect == "closed" {
+							clock.step = 300 * time.Microsecond
+						}
+					default:
+						t.Fatal("unexpected child operation", s.Request.Operation)
+					}
+					return json.Marshal(struct {
+						Version   int                     `json:"version"`
+						Operation string                  `json:"operation"`
+						Result    myce.HostMutationResult `json:"result"`
+					}{1, s.Request.Operation, result})
+				}
+				observe := func(context.Context, myce.HostInvocation) (myce.HostExclusionReport, error) {
+					return myce.HostExclusionReport{HostRevision: revision, Boot: boot, At: at, Verdict: "PASS", RestartSafe: &yes, Units: []myce.ExclusionUnit{{Unit: "myce-worker.service", Populated: new(bool)}}, RunningContainers: &zero, GPUHolders: &zero, PendingOperations: &zero, Sources: e.Sources}, nil
+				}
+				args := []string{"status", "--local", "--worker-user", "worker", "--config", c.Config, "--expect", expect, "--verdict"}
+				if jsonOutput {
+					args = append(args, "--json")
+				}
+				var out bytes.Buffer
+				err := hostEnvelopeCommandWithTiming(args, myce.MachineProbe{}, &out, r, launch, nil, observe, clock, func(context.Context, time.Duration) error { t.Fatal("unexpected pause"); return nil })
+				if jsonOutput {
+					got := validateEnvelopeOutput(t, out.Bytes())
+					if got.Verdict != "PASS" || exitCode(err) != 0 {
+						t.Fatalf("printed verdict=%s exit=%d error=%v", got.Verdict, exitCode(err), err)
+					}
+				} else if !strings.Contains(out.String(), expect+": PASS (") || exitCode(err) != 0 {
+					t.Fatalf("output=%q exit=%d error=%v", out.String(), exitCode(err), err)
+				}
+			})
+		}
+	}
+}
