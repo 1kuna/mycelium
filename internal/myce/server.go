@@ -130,12 +130,10 @@ func serverCommand(m Model, port int) ([]string, string, []string, []string, err
 		delete(env, "ZE_AFFINITY_MASK")
 	}
 	if m.EnvironmentPath != "" {
-		env["PATH"] = filepath.Join(m.EnvironmentPath, "venv", "bin") + string(os.PathListSeparator) + filepath.Join(m.EnvironmentPath, "bin") + string(os.PathListSeparator) + env["PATH"]
-		env["VIRTUAL_ENV"] = filepath.Join(m.EnvironmentPath, "venv")
-		env["MYCE_ENVIRONMENT_DIR"] = m.EnvironmentPath
+		bindEnvironment(env, m.EnvironmentPath)
 		if !strings.Contains(argv[0], "/") {
-			for _, dir := range []string{"venv/bin", "bin"} {
-				path := filepath.Join(m.EnvironmentPath, dir, argv[0])
+			for _, dir := range environmentBins(m.EnvironmentPath) {
+				path := filepath.Join(dir, argv[0])
 				if st, e := os.Stat(path); e == nil && st.Mode()&0111 != 0 {
 					argv[0] = path
 					break
@@ -155,8 +153,8 @@ func serverCommand(m Model, port int) ([]string, string, []string, []string, err
 	}
 	stop := expand(m.StopCommand)
 	if len(stop) > 0 && !strings.Contains(stop[0], "/") && m.EnvironmentPath != "" {
-		for _, dir := range []string{"venv/bin", "bin"} {
-			path := filepath.Join(m.EnvironmentPath, dir, stop[0])
+		for _, dir := range environmentBins(m.EnvironmentPath) {
+			path := filepath.Join(dir, stop[0])
 			if st, e := os.Stat(path); e == nil && st.Mode()&0111 != 0 {
 				stop[0] = path
 				break

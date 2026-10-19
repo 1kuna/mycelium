@@ -26,17 +26,24 @@ import (
 // EnvironmentRecipe is an immutable submission-time snapshot. Only the cache
 // destination is substituted in binary build arguments; no implicit shell.
 type EnvironmentRecipe struct {
-	Launch         *HostLaunch       `json:"launch,omitempty" yaml:"-"`
-	Backend        string            `json:"backend,omitempty" yaml:"backend,omitempty"`
-	Target         *ExecutionTarget  `json:"target,omitempty" yaml:"-"`
-	Python         string            `json:"python,omitempty" yaml:"python,omitempty"`
-	LockFile       string            `json:"lock_file,omitempty" yaml:"lock_file,omitempty"`
-	Binary         string            `json:"binary,omitempty" yaml:"binary,omitempty"`
-	BinaryRelative string            `json:"binary_relative,omitempty" yaml:"-"`
-	Build          []string          `json:"build,omitempty" yaml:"build,omitempty"`
-	Files          map[string][]byte `json:"files,omitempty" yaml:"-"`
-	Key            string            `json:"key" yaml:"-"`
-	Platform       string            `json:"platform" yaml:"-"`
+	prepare        func(context.Context, string, io.Writer) error
+	readyOnly      bool
+	Launch         *HostLaunch         `json:"launch,omitempty" yaml:"-"`
+	Preparation    *ExtensionSelection `json:"preparation,omitempty" yaml:"-"`
+	Assets         FileManifest        `json:"assets,omitempty" yaml:"-"`
+	InputDigest    string              `json:"input_digest,omitempty" yaml:"-"`
+	Manifest       string              `json:"manifest,omitempty" yaml:"manifest,omitempty"`
+	Environment    string              `json:"environment,omitempty" yaml:"environment,omitempty"`
+	Backend        string              `json:"backend,omitempty" yaml:"backend,omitempty"`
+	Target         *ExecutionTarget    `json:"target,omitempty" yaml:"-"`
+	Python         string              `json:"python,omitempty" yaml:"python,omitempty"`
+	LockFile       string              `json:"lock_file,omitempty" yaml:"lock_file,omitempty"`
+	Binary         string              `json:"binary,omitempty" yaml:"binary,omitempty"`
+	BinaryRelative string              `json:"binary_relative,omitempty" yaml:"-"`
+	Build          []string            `json:"build,omitempty" yaml:"build,omitempty"`
+	Files          map[string][]byte   `json:"files,omitempty" yaml:"-"`
+	Key            string              `json:"key" yaml:"-"`
+	Platform       string              `json:"platform" yaml:"-"`
 }
 type EnvironmentCatalog struct {
 	Environments map[string]map[string]EnvironmentRecipe `json:"environments" yaml:"environments"`
@@ -72,6 +79,9 @@ func ReadEnvironments(path string) (EnvironmentCatalog, error) {
 			if r.LockFile != "" && !filepath.IsAbs(r.LockFile) {
 				r.LockFile = filepath.Join(filepath.Dir(path), r.LockFile)
 			}
+			if r.Manifest != "" && !filepath.IsAbs(r.Manifest) {
+				r.Manifest = filepath.Join(filepath.Dir(path), r.Manifest)
+			}
 			if r.Binary != "" && !filepath.IsAbs(r.Binary) {
 				r.BinaryRelative = r.Binary
 				r.Binary = filepath.Join(filepath.Dir(path), r.Binary)
@@ -86,8 +96,8 @@ func ReadEnvironments(path string) (EnvironmentCatalog, error) {
 	return c, nil
 }
 func snapshotEnvironment(r EnvironmentRecipe, platform string) (EnvironmentRecipe, error) {
-	if r.Backend != "" && r.Backend != "uv" {
-		return r, errors.New("unsupported environment backend; E1 supports uv")
+	if r.Backend != "" && r.Backend != "uv" && r.Backend != "pixi" {
+		return r, errors.New("unsupported environment backend")
 	}
 	r.Platform = platform
 	r.Key = ""
@@ -96,16 +106,26 @@ func snapshotEnvironment(r EnvironmentRecipe, platform string) (EnvironmentRecip
 	}
 	r.Files = map[string][]byte{}
 	if r.LockFile != "" {
-		if r.Python == "" {
+		if r.Backend != "pixi" && r.Python == "" {
 			return r, errors.New("Python lock file requires python version")
 		}
 		name := filepath.Base(r.LockFile)
-		if name != "uv.lock" && name != "pyproject.toml" && name != "requirements.txt" {
+		if r.Backend == "pixi" {
+			if name != "pixi.lock" {
+				return r, errors.New("pixi requires pixi.lock")
+			}
+		} else if name != "uv.lock" && name != "pyproject.toml" && name != "requirements.txt" {
 			return r, errors.New("lock_file must be uv.lock, pyproject.toml, or requirements.txt")
 		}
 		names := []string{"requirements.txt"}
 		if name != "requirements.txt" {
 			names = []string{"uv.lock", "pyproject.toml"}
+		}
+		if r.Backend == "pixi" {
+			names = []string{"pixi.lock", "pixi.toml"}
+			if r.Manifest != "" && filepath.Clean(r.Manifest) != filepath.Join(filepath.Dir(r.LockFile), "pixi.toml") {
+				return r, errors.New("pixi manifest must be pixi.toml beside pixi.lock")
+			}
 		}
 		for _, n := range names {
 			b, e := os.ReadFile(filepath.Join(filepath.Dir(r.LockFile), n))
@@ -134,6 +154,7 @@ func snapshotEnvironment(r EnvironmentRecipe, platform string) (EnvironmentRecip
 	}
 	identity := r
 	identity.LockFile = ""
+	identity.Manifest = ""
 	identity.Binary = ""
 	identity.BinaryRelative = ""
 	identity.Key = ""
@@ -192,7 +213,35 @@ func environmentKey(j *Job, m *Machine) string {
 	}
 	return j.Spec.Environment.Key()
 }
+func extensionEnvironmentRecipes(j *Job, m *Machine) []EnvironmentRecipe {
+	e := qualifiedExtension(j, m)
+	if e == nil {
+		return nil
+	}
+	v := e.variant(machineTarget(m))
+	if v == nil {
+		return nil
+	}
+	names := make([]string, 0, len(v.Environments))
+	for n := range v.Environments {
+		names = append(names, n)
+	}
+	slices.Sort(names)
+	out := []EnvironmentRecipe{}
+	for _, n := range names {
+		out = append(out, v.Environments[n])
+	}
+	if len(e.Assets) > 0 {
+		out = append(out, EnvironmentRecipe{Key: extensionPreparationKey(*e, m)})
+	}
+	return out
+}
 func environmentReady(j *Job, m *Machine) bool {
+	for _, r := range extensionEnvironmentRecipes(j, m) {
+		if !slices.Contains(m.Environments, r.Key) {
+			return false
+		}
+	}
 	k := environmentKey(j, m)
 	return k == "" && j.Spec.Environment.Key() == "" || k != "" && slices.Contains(m.Environments, k)
 }
@@ -229,8 +278,13 @@ func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
 		return nil
 	}
 	j := q.candidate(m, nil)
+	if j != nil && j.Spec.extensionJob() && !environmentReady(j, m) {
+		if e := qualifiedExtension(j, m); e != nil {
+			return q.extensionPreparationOffer(*e, m)
+		}
+	}
 	if j == nil || environmentReady(j, m) {
-		return nil
+		return q.extensionPreparationPlan(m)
 	}
 	for _, other := range q.s.Machines {
 		if other.ID == m.ID || !q.workerIdle(other) || !q.placementAllowed(j, other) || !fits(j, other, other.FreeMemoryGB) {
@@ -241,11 +295,6 @@ func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
 		}
 	}
 	r := j.EnvironmentRecipes[m.GPU]
-	if e := qualifiedExtension(j, m); e != nil {
-		if recipe, ok := extensionRecipe(*e, m); ok {
-			r = recipe
-		}
-	}
 	l := q.issuePreparation(m, "environment", r.Key)
 	r.Launch = &l
 	return []EnvironmentRecipe{r}
@@ -279,6 +328,7 @@ type EnvironmentCache struct {
 	Root    string
 	Limit   int64
 	Clock   Clock
+	Fetch   func(context.Context, FileRef, string) error
 	Run     func(context.Context, []string, string, []string, io.Writer) error
 }
 
@@ -377,8 +427,9 @@ func environmentSize(path string) (int64, error) {
 	return size, e
 }
 func (c *EnvironmentCache) ready(key string) bool {
-	_, e := os.Stat(filepath.Join(c.Root, key, "ready.json"))
-	return e == nil
+	var r EnvironmentReport
+	b, e := os.ReadFile(filepath.Join(c.Root, key, "ready.json"))
+	return e == nil && json.Unmarshal(b, &r) == nil && r.Key == key && r.State == "ready"
 }
 func (c *EnvironmentCache) Cleanup(ctx context.Context) error {
 	if e := c.init(); e != nil {
@@ -389,7 +440,7 @@ func (c *EnvironmentCache) Cleanup(ctx context.Context) error {
 		return e
 	}
 	for _, d := range entries {
-		if !strings.HasSuffix(d.Name(), ".partial") {
+		if !strings.HasSuffix(d.Name(), ".partial") && (len(d.Name()) != 64 || c.ready(d.Name())) {
 			continue
 		}
 		key := strings.TrimSuffix(d.Name(), ".partial")
@@ -442,6 +493,10 @@ func (c *EnvironmentCache) admit(key string, size int64) error {
 			return e
 		}
 		s, e := os.Stat(filepath.Join(path, "ready.json"))
+		if errors.Is(e, os.ErrNotExist) {
+			total += n // unready stable prefixes are builds, never eviction candidates
+			continue
+		}
 		if e != nil {
 			return e
 		}
@@ -474,13 +529,13 @@ func (c *EnvironmentCache) admit(key string, size int64) error {
 	return nil
 }
 func (c *EnvironmentCache) Acquire(ctx context.Context, r EnvironmentRecipe) (string, func(), error) {
-	if r.Backend != "" && r.Backend != "uv" {
-		return "", nil, errors.New("unsupported environment backend; E1 supports uv")
+	if r.Backend != "" && r.Backend != "uv" && r.Backend != "pixi" {
+		return "", nil, errors.New("unsupported environment backend")
 	}
 	if r.Target != nil && (r.Target.OS != runtime.GOOS || r.Target.Arch != runtime.GOARCH) {
 		return "", nil, errors.New("environment target does not match this host")
 	}
-	if len(r.Key) != 64 {
+	if (FileRef{SHA256: r.Key}).validate() != nil {
 		return "", nil, errors.New("invalid environment hash")
 	}
 	if e := c.init(); e != nil {
@@ -492,6 +547,10 @@ func (c *EnvironmentCache) Acquire(ctx context.Context, r EnvironmentRecipe) (st
 		return "", nil, e
 	}
 	release := func() { unlockEnvironment(use) }
+	if r.readyOnly && !c.ready(r.Key) {
+		release()
+		return "", nil, fmt.Errorf("%w: environment preparation required", errExtensionUnavailable)
+	}
 	if e = c.ensure(ctx, r); e != nil {
 		release()
 		return "", nil, e
@@ -513,13 +572,20 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) erro
 	if c.ready(r.Key) {
 		return nil
 	}
-	partial := filepath.Join(c.Root, r.Key+".partial")
+	// Install at the final prefix: conda and managed Python can embed it in binaries.
+	// Readiness alone is atomically published after every build step succeeds.
+	partial := filepath.Join(c.Root, r.Key)
 	if e = c.cleanupBuild(partial); e != nil {
 		return e
 	}
 	if e = c.trash(partial); e != nil {
 		return e
 	}
+	defer func() {
+		if !c.ready(r.Key) && c.cleanupBuild(partial) == nil {
+			_ = c.trash(partial)
+		}
+	}()
 	if e = os.MkdirAll(filepath.Join(partial, "bin"), 0700); e != nil {
 		return e
 	}
@@ -531,11 +597,11 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) erro
 	start := c.Clock.Now()
 	env := []string{}
 	for _, v := range os.Environ() {
-		if !strings.HasPrefix(v, "MYCE_TOKEN=") && !strings.HasPrefix(v, "UV_CACHE_DIR=") && !strings.HasPrefix(v, "UV_PYTHON_INSTALL_DIR=") && !strings.HasPrefix(v, "UV_PROJECT_ENVIRONMENT=") {
+		if !strings.HasPrefix(v, "MYCE_TOKEN=") && !strings.HasPrefix(v, "PIXI_") && !strings.HasPrefix(v, "UV_CACHE_DIR=") && !strings.HasPrefix(v, "UV_PYTHON_INSTALL_DIR=") && !strings.HasPrefix(v, "UV_PROJECT_ENVIRONMENT=") {
 			env = append(env, v)
 		}
 	}
-	env = append(env, "UV_CACHE_DIR="+filepath.Join(partial, "uv-cache"), "UV_PYTHON_INSTALL_DIR="+filepath.Join(partial, "python"), "UV_PROJECT_ENVIRONMENT="+filepath.Join(partial, "venv"))
+	env = append(env, "PIXI_CACHE_DIR="+filepath.Join(partial, "pixi-cache"), "PIXI_NO_PROGRESS=1", "UV_CACHE_DIR="+filepath.Join(partial, "uv-cache"), "UV_PYTHON_INSTALL_DIR="+filepath.Join(partial, "python"), "UV_PROJECT_ENVIRONMENT="+filepath.Join(partial, "venv"))
 	run := c.Run
 	if run == nil {
 		run = c.runBuild
@@ -599,16 +665,37 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) erro
 		cancelBuild()
 	}
 	defer stopMonitor()
-	if r.LockFile != "" {
+	for name, ref := range r.Assets {
+		if !safeRelative(name) || c.Fetch == nil {
+			return errors.New("asset transport unavailable or invalid asset name")
+		}
+		if e = checkLaunchGate(buildCtx); e != nil {
+			return e
+		}
+		if e = c.Fetch(buildCtx, ref, filepath.Join(partial, "assets", name)); e != nil {
+			return e
+		}
+	}
+	{
 		for n, b := range r.Files {
-			if n != "uv.lock" && n != "pyproject.toml" && n != "requirements.txt" {
+			if r.Binary != "" {
+				continue
+			}
+			if !safeRelative(n) || (n != "uv.lock" && n != "pyproject.toml" && n != "requirements.txt" && n != "pixi.toml" && n != "pixi.lock" && !strings.HasPrefix(n, "extension/")) {
 				return errors.New("invalid environment input name")
+			}
+			if e = os.MkdirAll(filepath.Dir(filepath.Join(partial, n)), 0700); e != nil {
+				return e
 			}
 			if e = os.WriteFile(filepath.Join(partial, n), b, 0600); e != nil {
 				return e
 			}
 		}
-		if _, ok := r.Files["uv.lock"]; ok {
+		if r.LockFile == "" {
+			// Binary/build-only and asset recipes have no package installer.
+		} else if r.Backend == "pixi" {
+			e = c.installPixi(buildCtx, r, partial, env, output, run)
+		} else if _, ok := r.Files["uv.lock"]; ok {
 			e = run(buildCtx, []string{"uv", "sync", "--frozen", "--no-dev", "--no-install-project", "--no-editable", "--python", r.Python}, partial, env, output)
 		} else {
 			e = run(buildCtx, []string{"uv", "venv", "--python", r.Python, filepath.Join(partial, "venv")}, partial, env, output)
@@ -616,7 +703,8 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) erro
 				e = run(buildCtx, []string{"uv", "pip", "sync", "--python", filepath.Join(partial, "venv", "bin", "python"), "requirements.txt"}, partial, env, output)
 			}
 		}
-	} else if r.Binary != "" {
+	}
+	if r.Binary != "" {
 		var b []byte
 		b, e = os.ReadFile(r.Binary)
 		if e == nil {
@@ -631,9 +719,18 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) erro
 	if e == nil && len(r.Build) > 0 {
 		argv := slices.Clone(r.Build)
 		for i, a := range argv {
-			argv[i] = strings.ReplaceAll(a, "{root}", partial)
+			argv[i] = strings.NewReplacer("{root}", partial, "{extension}", filepath.Join(partial, "extension")).Replace(a)
 		}
-		e = run(buildCtx, argv, partial, env, output)
+		buildEnv := map[string]string{}
+		for _, entry := range env {
+			k, v, _ := strings.Cut(entry, "=")
+			buildEnv[k] = v
+		}
+		bindEnvironment(buildEnv, partial)
+		e = run(buildCtx, argv, partial, cleanExtensionEnv(buildEnv), output)
+	}
+	if e == nil && r.prepare != nil {
+		e = r.prepare(buildCtx, partial, output)
 	}
 	stopMonitor()
 	e = errors.Join(e, budgetErr)
@@ -642,20 +739,13 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) erro
 		fmt.Fprintln(output, "environment build failed:", e)
 		return fmt.Errorf("environment %s build failed: %w (log %s)", r.Key, e, output.Name())
 	}
-	// Virtualenv scripts contain absolute paths. Build in a stable path via a
-	// temporary symlink is unsafe; rewrite textual launchers before publication.
-	final := filepath.Join(c.Root, r.Key)
-	if e = relocateEnvironment(partial, final); e != nil {
-		return e
-	}
 	report := EnvironmentReport{Key: r.Key, State: "ready", BuildSeconds: c.Clock.Now().Sub(start).Seconds()}
-	if e = saveWorkerJSON(partial, "ready.json", report); e != nil {
-		return e
-	}
 	size, e := environmentSize(partial)
 	if e != nil {
 		return e
 	}
+	metadata, _ := json.Marshal(report)
+	size += int64(len(metadata))
 	gate, e := c.lock(ctx, "admission", syscall.LOCK_EX)
 	if e != nil {
 		return e
@@ -667,7 +757,10 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) erro
 	if e = syncEnvironmentFiles(partial); e != nil {
 		return e
 	}
-	if e = os.Rename(partial, final); e != nil {
+	if e = checkLaunchGate(ctx); e != nil {
+		return e
+	}
+	if e = saveWorkerJSON(partial, "ready.json", report); e != nil {
 		return e
 	}
 	dir, e := os.Open(c.Root)
@@ -676,55 +769,6 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) erro
 	}
 	defer dir.Close()
 	return dir.Sync()
-}
-func relocateEnvironment(from, to string) error {
-	return filepath.WalkDir(from, func(p string, d os.DirEntry, e error) error {
-		if e != nil {
-			return e
-		}
-		if d.IsDir() {
-			return nil
-		}
-		if d.Type()&os.ModeSymlink != 0 {
-			target, e := os.Readlink(p)
-			if e != nil {
-				return e
-			}
-			if strings.HasPrefix(target, from+string(filepath.Separator)) { // preserve original link in Trash before replacing it
-				trash := filepath.Join(from, "link-trash")
-				if e = os.MkdirAll(trash, 0700); e != nil {
-					return e
-				}
-				if e = os.Rename(p, filepath.Join(trash, ID())); e != nil {
-					return e
-				}
-				return os.Symlink(to+strings.TrimPrefix(target, from), p)
-			}
-			return nil
-		}
-		rel, e := filepath.Rel(from, p)
-		if e != nil {
-			return e
-		}
-		if !strings.HasPrefix(rel, "venv"+string(filepath.Separator)+"bin"+string(filepath.Separator)) && !strings.HasPrefix(rel, "bin"+string(filepath.Separator)) && rel != "venv/pyvenv.cfg" {
-			return nil
-		}
-		st, e := d.Info()
-		if e != nil {
-			return e
-		}
-		if st.Size() > 1<<20 {
-			return nil
-		}
-		b, e := os.ReadFile(p)
-		if e != nil {
-			return e
-		}
-		if strings.Contains(string(b), from) && !strings.ContainsRune(string(b), '\x00') {
-			return os.WriteFile(p, []byte(strings.ReplaceAll(string(b), from, to)), st.Mode())
-		}
-		return nil
-	})
 }
 func (c *EnvironmentCache) cleanupBuild(path string) error {
 	if err := CheckStateRoots(c.Root); err != nil {
@@ -752,6 +796,7 @@ type environmentRuntime struct {
 	authorize func(HostLaunch) error
 	dir       string
 	cache     *EnvironmentCache
+	prepare   func(context.Context, EnvironmentRecipe) error
 	mu        sync.Mutex
 	reports   map[string]EnvironmentReport
 	offsets   map[string]int64
@@ -783,6 +828,7 @@ func (rt *environmentRuntime) sync(plan []EnvironmentRecipe, busy bool, keepActi
 		return
 	}
 	r := plan[0]
+	prepare := rt.prepare
 	ctx, cancel := context.WithCancel(context.Background())
 	if rt.authorize != nil {
 		ctx = withLaunchGate(ctx, func() error {
@@ -803,7 +849,15 @@ func (rt *environmentRuntime) sync(plan []EnvironmentRecipe, busy bool, keepActi
 		var release func()
 		e := checkLaunchGate(ctx)
 		if e == nil {
-			_, release, e = rt.cache.Acquire(ctx, r)
+			if r.Preparation != nil {
+				if prepare == nil {
+					e = errors.New("extension preparation unavailable")
+				} else {
+					e = prepare(ctx, r)
+				}
+			} else {
+				_, release, e = rt.cache.Acquire(ctx, r)
+			}
 		}
 		if release != nil {
 			release()
@@ -1089,7 +1143,7 @@ func (rt *environmentRuntime) restore() error {
 		}
 	}
 	for key, r := range rt.reports {
-		if r.State == "building" || r.State == "failed" || r.State == "uploading" {
+		if r.State == "building" {
 			r.State = "paused"
 			r.Error = ""
 			rt.reports[key] = r

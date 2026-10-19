@@ -37,7 +37,7 @@ Each entry is a map from platform (`cuda`, `xpu`, `metal`; `fake` for laptop
 acceptance tests) to a build recipe. Python recipes require `python` and
 `lock_file`. Use `requirements.txt`, or `uv.lock` together with the adjacent
 `pyproject.toml` (either file may be named as `lock_file`). Pin requirements;
-uv's frozen sync refuses to repair a mismatched lock. Project installation is
+uv's frozen sync consumes the snapshotted lock without updating it. Project installation is
 excluded: job source stays in `run.workdir`, while the environment installs the
 locked dependencies. Local path/workspace dependencies must be made available
 as installable packages; a lock snapshot does not copy a project tree.
@@ -126,7 +126,7 @@ protects builds and running jobs against eviction.
 A failed builder fails affected waiting jobs with a clear reason. Its full log
 is uploaded in bounded, deduplicated chunks and is readable with `myce logs ID`;
 local `HASH.build.log` and worker report/upload offsets survive restart. Cache
-publication follows file sync and an atomic rename. Job environment variables
+publication follows file sync and an atomic ready-marker rename. Job environment variables
 include `VIRTUAL_ENV` for Python environments and `MYCE_ENVIRONMENT_DIR` for the
 cache root. Jobs and builders never receive `MYCE_TOKEN`.
 
@@ -148,3 +148,64 @@ For existing installations without an environment catalog, explicit
 `join --environments NAME,...` remains a preinstalled-environment compatibility
 mode. It does not build anything or provide content-based identity. With a
 catalog, unknown named environments are rejected.
+
+## Extension preparation and pixi
+
+Compatible demand automatically fetches a registered extension's exact SHA-256
+folder and prepares its named environments and immutable assets. This is trusted
+native execution as the worker user, under the same queue launch authorization,
+maintenance/cancellation custody and cache budget as existing builds. No GPU job
+is assigned merely to install dependencies. Preparation is single-flight per
+cache key on the worker, and failures remain visible without a rebuild loop.
+A new content or host fingerprint permits a fresh preparation attempt.
+
+An extension variant can wrap an existing pixi workspace:
+
+```yaml
+variants:
+  - target: {os: linux, arch: amd64, platform: cuda}
+    environments:
+      main:
+        backend: pixi
+        manifest: env/pixi.toml
+        lock_file: env/pixi.lock
+        environment: default
+      helper:
+        backend: uv
+        python: '3.12'
+        lock_file: helper/requirements.txt
+    # needs, execution and check retain the existing variant contract.
+```
+
+`manifest` is optional and defaults to `pixi.toml` beside `pixi.lock`.
+`environment` defaults to pixi's `default` environment. Both input files are
+snapshotted; pixi owns mixed conda/PyPI dependencies. The extension owns every
+version, channel, platform and variant. Mycelium supplies mechanisms and
+**guarantees no packages**. Existing uv recipes remain supported.
+
+The worker requires pixi on PATH; it never installs pixi automatically. A host
+without it is unqualified with a missing-prerequisite reason. Automatic pixi
+installation is a follow-up. Workers run `pixi install --locked`, which rejects a
+manifest/lock mismatch without re-solving, then `pixi shell-hook --json --locked`
+for activation. `--frozen` permits mismatched inputs and is deliberately not used.
+Pixi and uv install into stable cache prefixes; only the final ready marker is
+atomically published. Cancelled/crashed unready prefixes move recoverably to
+cache Trash after exact process cleanup. Pixi's package cache lives inside the
+entry and counts against its budget. Builds can optionally run argv under
+`build` with `{root}` and frozen bundled `{extension}` inputs, inside the prepared
+environment. There is no implicit shell or Docker requirement.
+
+Small wrapper files belong in the extension folder. Large immutable files use
+`assets: {model: {sha256: '<64 hex digits>', size_bytes: 123}}` at extension scope,
+backed by the existing queue file store. `{assets.model}` resolves to the verified
+worker cache copy in setup, main and sidecar argv/env/workdir. Assets are plain
+files; this slice does not add archive extraction. Environment and asset use
+locks remain held until the whole native process group, including sidecars, is
+gone. Cache Trash is retained evidence, not reclaimed disk space.
+
+Preparation alone never qualifies a host. Variant qualification records bind
+host, exact OS/arch/backend, extension digest, host fingerprint, all environment
+keys, check contract digest and successful check invocation ID. Placement rejects
+missing or stale identities. E3's `myce extension check` flow will populate these
+records; E2 does not automatically run qualification checks. Legacy extension
+checks retain their existing compatibility contract.

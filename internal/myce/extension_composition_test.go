@@ -174,7 +174,12 @@ func TestCompositionTargetValidationAndQualification(t *testing.T) {
 	m := machine("target", "fake")
 	m.CapabilityProfile = &CapabilityProfile{OS: target.OS, Arch: target.Arch}
 	j := Job{Spec: Spec{Extension: extensionKey(e)}, Extensions: []Extension{e}}
-	m.ExtensionReports = []ExtensionReport{{Digest: e.Digest, Platform: "fake", Work: "extension:" + e.Name, Qualified: true, Target: &target}}
+	m.ExtensionFingerprint = "test-fingerprint"
+	r := newExtensionReport(e, &m, "extension:"+e.Name)
+	r.Setup = true
+	r.Qualified = true
+	r.CheckID = "test-check"
+	m.ExtensionReports = []ExtensionReport{r}
 	if qualifiedExtension(&j, &m) == nil {
 		t.Fatal("matching target not selected")
 	}
@@ -240,6 +245,7 @@ func TestCompositionEnvironmentSnapshotsAndBackend(t *testing.T) {
 		t.Fatal("pixi silently accepted")
 	}
 	c := &EnvironmentCache{}
+	r.Backend = "unsupported"
 	if _, _, err := c.Acquire(context.Background(), r); err == nil || !strings.Contains(err.Error(), "backend") {
 		t.Fatal("unsupported backend used uv", err)
 	}

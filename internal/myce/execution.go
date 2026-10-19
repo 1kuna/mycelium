@@ -149,10 +149,7 @@ func positiveDuration(s string) bool { d, e := time.ParseDuration(s); return e =
 func executionReplacer(work, root, reference string, target ExecutionTarget) *strings.Replacer {
 	pairs := []string{"{work}", work}
 	if root != "" && reference != "" {
-		python := filepath.Join(root, "venv", "bin", "python")
-		if target.OS == "windows" {
-			python = filepath.Join(root, "venv", "Scripts", "python.exe")
-		}
+		python := environmentPython(root, target)
 		pairs = append(pairs, "{env."+reference+".python}", python, "{env."+reference+".root}", root)
 	}
 	return strings.NewReplacer(pairs...)
@@ -182,8 +179,27 @@ func expandExecution(s *Spec, work, root string, target ExecutionTarget) {
 	}
 }
 func bindEnvironment(env map[string]string, root string) {
+	// Switching a member's environment must not inherit main's conda activation.
+	if previous := env["MYCE_ENVIRONMENT_DIR"]; previous != "" && previous != root {
+		for k, v := range environmentActivation(previous) {
+			if !reservedActivation(k) && env[k] == v {
+				delete(env, k)
+			}
+		}
+		if env["PATH"] == "" {
+			env["PATH"] = os.Getenv("PATH")
+		}
+	}
 	env["PATH"] = filepath.Join(root, "venv", "bin") + string(os.PathListSeparator) + filepath.Join(root, "bin") + string(os.PathListSeparator) + env["PATH"]
 	env["VIRTUAL_ENV"] = filepath.Join(root, "venv")
+	if activation := environmentActivation(root); activation != nil {
+		delete(env, "VIRTUAL_ENV")
+		for k, v := range activation {
+			if !reservedActivation(k) {
+				env[k] = v
+			}
+		}
+	}
 	env["MYCE_ENVIRONMENT_DIR"] = root
 }
 

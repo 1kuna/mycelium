@@ -3,6 +3,7 @@ package myce
 import (
 	"errors"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,18 @@ func placementMachine(id, layout string, ram, accelerator float64, e Extension) 
 	m.UnifiedMemory = layout == "unified"
 	m.CapabilityProfile = &CapabilityProfile{MemoryLayout: layout, SystemMemoryBytes: uint64(ram * (1 << 30)), LogicalCPUs: 8, Accelerators: []AcceleratorProfile{{Type: "fake", MemoryBytes: uint64(accelerator * (1 << 30))}}}
 	m.ExtensionReports = []ExtensionReport{{Digest: e.Digest, Work: "kind:sample", Platform: "fake", Qualified: true}, {Digest: e.Digest, Work: "program:sample-script", Platform: "fake", Qualified: true}}
+	if len(e.Variants) > 0 {
+		m.CapabilityProfile.OS, m.CapabilityProfile.Arch = runtime.GOOS, runtime.GOARCH
+		m.ExtensionFingerprint = "test-fingerprint"
+		for i := range m.ExtensionReports {
+			old := m.ExtensionReports[i]
+			r := newExtensionReport(e, &m, old.Work)
+			r.Setup = true
+			r.Qualified = true
+			r.CheckID = "test-check"
+			m.ExtensionReports[i] = r
+		}
+	}
 	return m
 }
 

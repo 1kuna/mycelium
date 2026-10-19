@@ -126,6 +126,9 @@
     },
     "EnvironmentRecipe": {
       "properties": {
+        "assets": {
+          "$ref": "#/$defs/FileManifest"
+        },
         "backend": {
           "type": "string"
         },
@@ -144,6 +147,9 @@
             "null"
           ]
         },
+        "environment": {
+          "type": "string"
+        },
         "files": {
           "additionalProperties": {
             "contentEncoding": "base64",
@@ -154,6 +160,9 @@
             "null"
           ]
         },
+        "input_digest": {
+          "type": "string"
+        },
         "key": {
           "type": "string"
         },
@@ -163,8 +172,14 @@
         "lock_file": {
           "type": "string"
         },
+        "manifest": {
+          "type": "string"
+        },
         "platform": {
           "type": "string"
+        },
+        "preparation": {
+          "$ref": "#/$defs/ExtensionSelection"
         },
         "python": {
           "type": "string"
@@ -255,6 +270,9 @@
     },
     "Extension": {
       "properties": {
+        "assets": {
+          "$ref": "#/$defs/FileManifest"
+        },
         "baselines": {
           "additionalProperties": {
             "$ref": "#/$defs/ExtensionBaseline"

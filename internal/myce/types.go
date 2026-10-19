@@ -345,6 +345,7 @@ type Machine struct {
 	AdmissionReason             string              `json:"admission_reason,omitempty"`
 	FileTransferError           string              `json:"file_transfer_error,omitempty"`
 	CapabilityProfile           *CapabilityProfile  `json:"capability_profile,omitempty"`
+	ExtensionFingerprint        string              `json:"extension_fingerprint,omitempty"`
 	ExtensionReports            []ExtensionReport   `json:"extension_reports,omitempty"`
 	HostMemoryAllowanceBytes    int64               `json:"memory_allowance_bytes,omitempty"`
 	HostMemoryQualification     string              `json:"memory_allowance_qualification,omitempty"`

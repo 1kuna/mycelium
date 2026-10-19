@@ -86,16 +86,32 @@ func (e *Extension) snapshotVariantEnvironments() error {
 	for i := range e.Variants {
 		v := &e.Variants[i]
 		for name, r := range v.Environments {
-			if (r.Backend != "" && r.Backend != "uv") || r.Python == "" || !safeRelative(r.LockFile) || r.Binary != "" || len(r.Build) > 0 {
-				return errors.New("E1 environments require backend uv, python and a bundled lock_file")
+			if r.Backend == "" {
+				r.Backend = "uv"
+			}
+			if r.Backend != "uv" && r.Backend != "pixi" {
+				return errors.New("unsupported environment backend")
+			}
+			if !safeRelative(r.LockFile) || r.Binary != "" {
+				return errors.New("environment requires a bundled lock_file")
 			}
 			filenames := []string{"requirements.txt"}
-			switch path.Base(r.LockFile) {
-			case "uv.lock", "pyproject.toml":
-				filenames = []string{"uv.lock", "pyproject.toml"}
-			case "requirements.txt":
-			default:
-				return errors.New("unsupported uv lock file")
+			if r.Backend == "pixi" {
+				if path.Base(r.LockFile) != "pixi.lock" || (r.Manifest != "" && r.Manifest != path.Join(path.Dir(r.LockFile), "pixi.toml")) {
+					return errors.New("pixi requires pixi.toml beside pixi.lock")
+				}
+				filenames = []string{"pixi.toml", "pixi.lock"}
+			} else {
+				if r.Python == "" {
+					return errors.New("uv requires python version")
+				}
+				switch path.Base(r.LockFile) {
+				case "uv.lock", "pyproject.toml":
+					filenames = []string{"uv.lock", "pyproject.toml"}
+				case "requirements.txt":
+				default:
+					return errors.New("unsupported uv lock file")
+				}
 			}
 			r.Files = map[string][]byte{}
 			for _, file := range filenames {
@@ -105,12 +121,20 @@ func (e *Extension) snapshotVariantEnvironments() error {
 				}
 				r.Files[file] = slices.Clone(b)
 			}
+			// Build hooks consume frozen bundled files, including scripts/config.
+			if len(r.Build) > 0 {
+				for file, b := range e.Files {
+					r.Files["extension/"+file] = slices.Clone(b)
+				}
+			}
+			r.InputDigest = e.Digest
 			target := v.Target
 			r.Target = &target
 			r.Platform = target.Platform
 			r.Key = ""
 			identity := r
 			identity.LockFile = ""
+			identity.Manifest = ""
 			b, err := json.Marshal(identity)
 			if err != nil {
 				return err

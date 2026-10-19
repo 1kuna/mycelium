@@ -27,6 +27,7 @@ var extensionName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 // Extension is one small folder. Files and Digest are immutable transport data,
 // not extra authoring fields in extension.yaml. Downloads live in its cache.
 type Extension struct {
+	Assets            FileManifest                            `json:"assets,omitempty" yaml:"assets,omitempty"`
 	DefaultClass      string                                  `json:"default_class,omitempty" yaml:"default_class,omitempty"`
 	Variants          []ExtensionVariant                      `json:"variants,omitempty" yaml:"variants,omitempty"`
 	Name              string                                  `json:"name" yaml:"name"`
@@ -109,6 +110,9 @@ func (e Extension) handles(s Spec) bool {
 	return slices.Contains(e.Kinds, s.Kind)
 }
 func (e Extension) validate() error {
+	if err := e.Assets.validate(); err != nil {
+		return err
+	}
 	if strings.Contains(e.DefaultClass, "/") {
 		return errors.New("default_class cannot contain slash")
 	}
@@ -357,7 +361,7 @@ func qualifiedExtension(j *Job, m *Machine) *Extension {
 			if len(e.Variants) > 0 && (r.Target == nil || *r.Target != machineTarget(m)) {
 				continue
 			}
-			if r.Digest == e.Digest && r.Work == j.Spec.workType() && r.Qualified && r.Platform == m.GPU {
+			if r.Digest == e.Digest && r.Work == j.Spec.workType() && r.Qualified && r.Platform == m.GPU && currentExtensionQualification(*e, r, m) {
 				return e
 			}
 		}
@@ -383,6 +387,16 @@ func extensionWaitingReason(j *Job, machines map[string]*Machine) string {
 			if reason := e.targetUnavailableReason(machineTarget(m)); reason != "" {
 				reasons = append(reasons, extensionKey(e)+": "+reason)
 				continue
+			}
+			for _, r := range m.EnvironmentReports {
+				if r.Key == extensionPreparationKey(e, m) {
+					if r.State == "failed" || r.State == "uploading" {
+						reasons = append(reasons, extensionKey(e)+": environment build failed: "+r.Error)
+					}
+					if r.State == "building" {
+						reasons = append(reasons, extensionKey(e)+": preparing environment")
+					}
+				}
 			}
 			for _, r := range m.ExtensionReports {
 				if r.Digest == e.Digest && r.Work == j.Spec.workType() && r.Reason != "" {

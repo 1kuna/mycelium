@@ -238,6 +238,7 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		if w.environmentCache == nil {
 			return nil, errors.New("environment builder unavailable")
 		}
+		r.readyOnly = j.Spec.extensionJob()
 		environmentPath, release, err = w.environmentCache.Acquire(withLaunchGate(context.Background(), func() error {
 			return w.authorizeLaunch(HostLaunch{Machine: w.Machine.ID, Session: s.state.Session, Kind: "batch", Key: j.ID, Attempt: fmt.Sprint(j.Attempt)})
 		}), r)
@@ -267,7 +268,7 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		}
 	}
 	if environmentPath != "" && !strings.Contains(command, "/") {
-		for _, bin := range []string{filepath.Join(environmentPath, "venv", "bin"), filepath.Join(environmentPath, "bin")} {
+		for _, bin := range environmentBins(environmentPath) {
 			candidate := filepath.Join(bin, command)
 			if st, e := os.Stat(candidate); e == nil && st.Mode()&0111 != 0 {
 				command = candidate
@@ -885,11 +886,16 @@ func (w Worker) Run(stop context.Context) error {
 	leaving := stop.Err() != nil
 	leaveSent := false
 	stopCh := stop.Done()
+	if w.ExtensionRoot == "" {
+		w.ExtensionRoot = filepath.Join(s.dir, "extensions")
+	}
 	if w.ExtensionRoot != "" {
 		probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		w.extensionFingerprint, _ = ExtensionFingerprint(probeCtx, w.Machine.GPU, w.Machine.Device)
 		cancel()
 	}
+	w.Machine.ExtensionFingerprint = w.extensionFingerprint
+	w.environmentCache.Fetch = w.fileCache.copyTo
 	base := w.Machine.FreeMemoryGB
 	fresh := !recovering && s.state.Fresh
 	eventCtx, eventCancel := context.WithCancel(context.Background())
@@ -973,7 +979,7 @@ func (w Worker) Run(stop context.Context) error {
 			m := w.Machine
 			m.FileTransferError = s.fileError
 			if w.ExtensionRoot != "" {
-				m.ExtensionReports = LocalExtensionReports(w.ExtensionRoot, m.GPU, w.extensionFingerprint)
+				m.ExtensionReports = LocalExtensionReports(w.ExtensionRoot, m.GPU, w.extensionFingerprint, &m)
 				w.Machine.ExtensionReports = m.ExtensionReports
 			}
 			if m.CapabilityProfile != nil {
@@ -1113,6 +1119,10 @@ func (w Worker) Run(stop context.Context) error {
 					}
 				}
 				keepPreparations := (reply.HostMaintenance == "drained" || reply.HostMaintenance == "disabled") && reply.PreparationStopAt == nil
+				prepareWorker := w
+				environments.mu.Lock()
+				environments.prepare = prepareWorker.prepareRegisteredExtension
+				environments.mu.Unlock()
 				environments.sync(reply.EnvironmentPlan, busy, keepPreparations)
 				rt.syncCopies(reply.CopyPlan, reply.CacheUsage, reply.CachePins, busy, keepPreparations)
 				// syncCopies cancels immediately; do not block heartbeats behind an

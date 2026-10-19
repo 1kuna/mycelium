@@ -34,6 +34,10 @@ func (a API) Handler() http.Handler {
 		}
 		respond(w, map[string]bool{"ok": true}, a.Queue.AddExtension(e))
 	})
+	mux.HandleFunc("GET /api/extensions/{digest}", func(w http.ResponseWriter, r *http.Request) {
+		e, err := a.Queue.extensionByDigest(r.PathValue("digest"))
+		respond(w, e, err)
+	})
 	mux.HandleFunc("GET /api/extensions", func(w http.ResponseWriter, r *http.Request) { respond(w, a.Queue.Extensions(), nil) })
 	mux.HandleFunc("GET /api/usage", func(w http.ResponseWriter, r *http.Request) {
 		d, e := time.ParseDuration(r.URL.Query().Get("since"))

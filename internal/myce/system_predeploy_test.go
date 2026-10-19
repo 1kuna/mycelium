@@ -972,10 +972,14 @@ func TestPreDeployEnvironmentBuildRestart(t *testing.T) {
 	if e = <-done; e != nil {
 		t.Fatal(e)
 	}
-	partial := filepath.Join(state, "environment-cache", r.Key+".partial")
-	if _, e = os.Stat(filepath.Join(partial, "interrupted-input")); e != nil {
-		t.Fatal("lost interrupted build evidence", e)
+	evidence, err := filepath.Glob(filepath.Join(state, "environment-cache", ".Trash", "*-"+r.Key, "interrupted-input"))
+	if err != nil || len(evidence) != 1 {
+		t.Fatal("lost interrupted build evidence", evidence, err)
 	}
+	if _, err := os.Stat(filepath.Join(state, "environment-cache", r.Key, "ready.json")); !os.IsNotExist(err) {
+		t.Fatal("cancelled prefix published", err)
+	}
+
 	if job(t, q, j.ID).State != "queued" {
 		t.Fatal("interrupted build consumed execution")
 	}
