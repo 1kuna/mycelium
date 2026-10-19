@@ -500,10 +500,23 @@ func TestPersistenceAndAssignmentRedelivery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer q.Close()
 	j := submit(t, q, spec("experiment"))
 	m := machine("one", "fake")
-	r := check(t, q, m, nil).Job
-	if retry := check(t, q, m, nil).Job; retry == nil || retry.ID != r.ID || retry.Attempt != 1 {
+	// A slow checkpoint probe can temporarily withhold either assignment response.
+	assignment := func() *Job {
+		var assigned *Job
+		await(t, func() bool {
+			assigned = check(t, q, m, nil).Job
+			return assigned != nil
+		})
+		return assigned
+	}
+	r := assignment()
+	if r.ID != j.ID || r.Attempt != 1 {
+		t.Fatalf("assignment %+v want job %s attempt 1", r, j.ID)
+	}
+	if retry := assignment(); retry.ID != r.ID || retry.Attempt != 1 {
 		t.Fatal("assignment response lost")
 	}
 	if err := q.AppendLog(LogChunk{Result: result(r, true), Text: "hello"}); err != nil {
