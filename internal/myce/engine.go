@@ -652,6 +652,11 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 		if rt.availability != nil {
 			parent = rt.availability.workContext()
 		}
+		if authorize := rt.authorize; authorize != nil {
+			// Capture the exact plan under rt.mu; heartbeats update rt.session.
+			launch := HostLaunch{Machine: rt.machine, Session: s.Session, Kind: "engine", Key: s.Model, Attempt: s.Attempt}
+			parent = withLaunchGate(parent, func() error { return authorize(launch) })
+		}
 		ctx, cancel := context.WithTimeout(parent, rt.config.Wait)
 		m := &workerModel{model: model, engine: engine, attempt: s.Attempt, state: "loading", cancel: cancel, recipe: s.EnvironmentRecipe}
 		rt.models[s.Model] = m
@@ -664,11 +669,6 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 }
 
 func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
-	if rt.authorize != nil {
-		ctx = withLaunchGate(ctx, func() error {
-			return rt.authorize(HostLaunch{Machine: rt.machine, Session: rt.session, Kind: "engine", Key: m.model.Name, Attempt: m.attempt})
-		})
-	}
 	if e := rt.checkLoadMemory(ctx, m); e != nil {
 		m.cancel()
 		rt.mu.Lock()
