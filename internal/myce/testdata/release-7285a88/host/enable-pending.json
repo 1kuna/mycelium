@@ -1,0 +1,1 @@
+{"generation":21,"workers":[{"session":"fixture-session","config":"/fixture/config.json","generation":21,"executions":[{"machine":"fixture-worker","session":"fixture-session","id":"job-102","attempt":2,"success":true}],"state_dir":"/fixture/worker-state","host_id":"fixture-host","name":"fixture-worker","queue":"http://fixture-queue.invalid"}],"enable_generation":22}

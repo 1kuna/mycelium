@@ -95,7 +95,7 @@ func dockerRunArgs(command []string) ([]string, error) {
 type dockerExecution struct {
 	HostRevision      HostRevision            `json:"host_revision"`
 	LogsNone          bool                    `json:"logs_none,omitempty"`
-	Owner             *Result                 `json:"owner,omitempty"` // Saved job/attempt/machine/session binding; legacy custody uses opaque identity.
+	Owner             *Result                 `json:"owner,omitempty"` // Required saved job/attempt/machine/session binding.
 	EvidenceSaved     bool                    `json:"evidence_saved,omitempty"`
 	NetworkID         string                  `json:"network_id,omitempty"`
 	NetworkRemoved    bool                    `json:"network_removed,omitempty"`
@@ -980,7 +980,7 @@ func (w Worker) restoreDocker(s *workerStore) (*process, error) {
 	if err = json.Unmarshal(data, &state); err != nil {
 		return nil, err
 	}
-	if state.Identity != s.state.Identity || state.Endpoint == "" || (state.Owner != nil && !s.matchesResult(*state.Owner, w.Machine.ID)) {
+	if state.Identity != s.state.Identity || state.Endpoint == "" || (state.Owner == nil || !s.matchesResult(*state.Owner, w.Machine.ID)) {
 		return nil, errors.New("invalid Docker custody record")
 	}
 	if state.OperatorConfirmed {
@@ -1065,7 +1065,7 @@ func ReconcileDockerAttempt(ctx context.Context, hostDir, dir, identity string) 
 		return err
 	}
 	var state dockerExecution
-	if json.Unmarshal(b, &state) != nil || state.Identity != identity || state.Endpoint == "" {
+	if json.Unmarshal(b, &state) != nil || state.Owner == nil || state.Owner.ID == "" || state.Owner.Machine == "" || state.Owner.Session == "" || state.Owner.Attempt <= 0 || state.Identity != identity || state.Endpoint == "" {
 		return errors.New("invalid Docker custody record")
 	}
 	d := &dockerAttempt{ctx: ctx, dir: dir, binary: "docker", clock: RealClock{}, timeout: 2 * time.Second, state: state, env: dockerClientEnvironment()}

@@ -66,6 +66,7 @@ func TestCompletionVerificationDoesNotHoldQueueLock(t *testing.T) {
 			defer cancel()
 			request := httptest.NewRequest("POST", "/api/workers/complete", bytes.NewReader(body)).WithContext(ctx)
 			request.Header.Set("Authorization", "Bearer test")
+			request.Header.Set("X-Myce-Start-Gate", startGateProtocol)
 			response := httptest.NewRecorder()
 			done := make(chan struct{})
 			go func() {

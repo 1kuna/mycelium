@@ -59,15 +59,14 @@ func (q *Queue) verifyManifest(ctx context.Context, m FileManifest) error {
 	return ctx.Err()
 }
 func (q *Queue) publishCheckpoint(ctx context.Context, p checkpointPublication) error {
-	if p.Checkpoint.Generation < 0 || len(p.Checkpoint.Files) == 0 {
-		return errors.New("checkpoint requires a complete save")
+	if p.Checkpoint.Generation <= 0 || len(p.Checkpoint.Files) == 0 {
+		return errors.New("checkpoint requires a positive generation and complete save")
 	}
 	if err := q.verifyManifest(ctx, p.Checkpoint.Files); err != nil {
 		return err
 	}
 	generation := int64(-1)
 	for name, ref := range p.Checkpoint.Files {
-		generation = max(generation, 0)
 		if strings.HasSuffix(name, ".json") {
 			if ref.SizeBytes > 1<<20 {
 				return errors.New("checkpoint JSON metadata exceeds 1 MiB")
@@ -121,6 +120,15 @@ func (q *Queue) publishCheckpoint(ctx context.Context, p checkpointPublication) 
 		j.FileCheckpoints[p.Attempt] = p.Checkpoint
 		return nil
 	})
+}
+
+func validCheckpointGenerations(j *Job) bool {
+	for _, save := range j.FileCheckpoints {
+		if save.Generation <= 0 || len(save.Files) == 0 {
+			return false
+		}
+	}
+	return j.ResumeFiles == nil || j.ResumeFiles.Generation > 0 && len(j.ResumeFiles.Files) > 0
 }
 func (a API) checkpointHandler(w http.ResponseWriter, r *http.Request) {
 	var p checkpointPublication

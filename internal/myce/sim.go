@@ -407,6 +407,12 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 	machineReport := func(worker *simWorker) Machine {
 		m := worker.spec
 		report := Machine{ID: m.Name, HostID: m.Host, Session: fmt.Sprint(worker.session), GPU: m.Platform, TotalMemoryGB: m.MemoryGB, FreeMemoryGB: m.MemoryGB, HostMemoryMeasured: true, HostAvailableMemoryGB: m.HostGB, UnifiedMemory: m.Unified, ModelURL: "http://sim.invalid", ModelConfigHash: modelConfigHash(mc), CacheFreeBytes: 1 << 50, CopyBytesPerSecond: 40e6}
+		layout := "separate"
+		if m.Unified {
+			layout = "unified"
+		}
+		report.CapabilityProfile = &CapabilityProfile{Version: 0, MemoryLayout: layout, SystemMemoryBytes: uint64(m.HostGB * (1 << 30)), Accelerators: []AcceleratorProfile{{Type: m.Platform, MemoryBytes: uint64(m.MemoryGB * (1 << 30))}}}
+
 		if worker.task != nil {
 			report.FreeMemoryGB = max(0, report.FreeMemoryGB-worker.task.stream.MemoryGB)
 		}
@@ -518,7 +524,7 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 				// One final empty check-in acknowledges departure and model unloads.
 				reports := []ModelReport{}
 				for _, slot := range q.modelPlan(worker.spec.Name) {
-					reports = append(reports, ModelReport{Name: slot.Model, State: "unloaded"})
+					reports = append(reports, ModelReport{Name: slot.Model, Attempt: slot.Attempt, State: "unloaded"})
 				}
 				if _, e = q.Checkin(Checkin{Machine: machineReport(worker), ModelReports: reports}); e != nil {
 					return r, e
@@ -627,7 +633,7 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 				for _, slot := range q.modelPlan(worker.spec.Name) {
 					load := worker.loads[slot.Model]
 					if slot.State == "draining" && slot.InFlight == 0 {
-						reports = append(reports, ModelReport{Name: slot.Model, State: "unloaded"})
+						reports = append(reports, ModelReport{Name: slot.Model, Attempt: slot.Attempt, State: "unloaded"})
 						delete(worker.loads, slot.Model)
 						changed = true
 					} else if slot.State == "loading" {
@@ -644,7 +650,7 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 							changed = true
 						}
 						if load.until <= now && !load.seen {
-							reports = append(reports, ModelReport{Name: slot.Model, State: "ready"})
+							reports = append(reports, ModelReport{Name: slot.Model, Attempt: slot.Attempt, State: "ready"})
 							load.seen = true
 							changed = true
 						}

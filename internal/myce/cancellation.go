@@ -183,45 +183,6 @@ func (q *Queue) confirmCopyRelease(r Result) {
 	}
 }
 
-// Import only copies without S03 evidence. New copies carry an explicit pending
-// reason, so reopening cannot mistake an untracked modern copy for legacy data.
-// The old runtime's retained records were its source of outstanding custody.
-func (q *Queue) importCancellationEvidence() bool {
-	changed := false
-	jobs := map[string]*Job{}
-	for id, j := range q.s.Jobs {
-		jobs[id] = j
-	}
-	for _, record := range q.s.Submissions {
-		if record.Job != nil && jobs[record.JobID] == nil {
-			jobs[record.JobID] = record.Job
-		}
-	}
-	for _, j := range jobs {
-		if j.CancelledAt == nil && (j.Reason == "cancel requested" || j.State == "cancelled") {
-			now := q.clock.Now()
-			j.CancelledAt = &now
-			changed = true
-		}
-		for i := range j.Copies {
-			c := &j.Copies[i]
-			if c.ReleaseConfirmed || c.ReleaseReason != "" {
-				continue
-			}
-			current := c.Machine == j.Machine && c.Session == j.Session && c.Attempt == j.Attempt
-			_, retained := q.s.HostReleases[releaseKey(HostRelease{Job: j.ID, Machine: c.Machine, Session: c.Session, Attempt: c.Attempt})]
-			c.ReleaseReason = "awaiting_release"
-			if current && j.ReleaseConfirmed {
-				c.ReleaseConfirmed, c.ReleaseReason = true, "current_release_confirmed"
-			} else if !current && !retained {
-				c.ReleaseConfirmed, c.ReleaseReason = true, "legacy_no_retained_custody"
-			}
-			changed = true
-		}
-	}
-	return changed
-}
-
 func (q *Queue) confirmPreviousCopies(c Checkin) {
 	old := q.s.Machines[c.Machine.ID]
 	if !c.Fresh || old == nil || c.PreviousSession != old.Session || c.Machine.Session == old.Session {

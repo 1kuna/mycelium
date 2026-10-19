@@ -88,7 +88,7 @@ func pruneWorkerLogs(dir, pending string, now time.Time, age time.Duration) erro
 			}
 			if err == nil {
 				var st workerState
-				if err := decodeWorkerJSON(data, &st); err != nil {
+				if err := decodeWorkerState(data, &st); err != nil {
 					return err
 				}
 				if st.PID != 0 || st.LaunchPending {

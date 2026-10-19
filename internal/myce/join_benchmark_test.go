@@ -88,12 +88,10 @@ func TestJoinBenchmarkOptIn(t *testing.T) {
 }
 
 func TestPlacementWithoutBenchmark(t *testing.T) {
-	for _, profile := range []bool{false, true} {
+	for _, cpus := range []int{0, 8} {
 		q, clock := fixture(t)
 		m := machine("dedicated", "fake")
-		if profile {
-			m.CapabilityProfile = &CapabilityProfile{LogicalCPUs: 8}
-		}
+		m.CapabilityProfile.LogicalCPUs = cpus
 		check(t, q, m, nil)
 		j := submit(t, q, spec("experiment"))
 		clock.Advance(time.Second)

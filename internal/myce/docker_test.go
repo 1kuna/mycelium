@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
@@ -307,7 +308,7 @@ func dockerFixture(t *testing.T) (Worker, *workerStore, *dockerTestClock, string
 	t.Setenv("MYCE_HOST_STATE_DIR", hostDir)
 	clock := &dockerTestClock{now: time.Date(2026, 10, 11, 0, 0, 0, 0, time.UTC)}
 	ensureTestHost(t, hostDir, clock)
-	w := Worker{HostStateDir: hostDir, Machine: machine("docker-worker", "fake"), StateDir: t.TempDir(), Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return 32, nil }}
+	w := Worker{Client: Client{URL: "http://fixture-queue.invalid", HTTP: &http.Client{Transport: recoveryStartTransport{}}}, HostStateDir: hostDir, Machine: machine("docker-worker", "fake"), StateDir: t.TempDir(), Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return 32, nil }}
 	s, e := w.openStore()
 	if e != nil {
 		t.Fatal(e)

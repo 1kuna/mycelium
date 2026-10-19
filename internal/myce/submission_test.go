@@ -353,7 +353,15 @@ func TestSubmissionLegacyState(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := &fakeClock{now: time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)}
-	q, err := Open(path, t.TempDir(), c)
+	if old, err := Open(path, t.TempDir(), c); err == nil {
+		old.Close()
+		t.Fatal("old queue accepted without conversion")
+	}
+	converted := filepath.Join(t.TempDir(), "converted")
+	if _, err = ConvertPersistedState(PersistedConversionOptions{Source: filepath.Dir(path), Target: converted, Host: "fixture-host", Clock: c, Apply: true}); err != nil {
+		t.Fatal(err)
+	}
+	q, err := Open(filepath.Join(converted, "queue.db"), t.TempDir(), c)
 	if err != nil {
 		t.Fatal(err)
 	}

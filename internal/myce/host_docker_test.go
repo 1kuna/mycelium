@@ -28,7 +28,7 @@ func TestDisableDocker(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			st := dockerExecution{Identity: "owned", Endpoint: os.Getenv("DOCKER_HOST"), Container: "id1", Operation: "start"}
+			st := dockerExecution{Owner: &Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: "job", Attempt: 1}}, Identity: "owned", Endpoint: os.Getenv("DOCKER_HOST"), Container: "id1", Operation: "start"}
 			if mode == "late" {
 				if err := os.Rename(filepath.Join(root, "running"), filepath.Join(root, "waiting")); err != nil {
 					t.Fatal(err)

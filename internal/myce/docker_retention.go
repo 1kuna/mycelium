@@ -28,6 +28,9 @@ func acknowledgeDocker(s *workerStore, worker string, now time.Time) error {
 	if err = json.Unmarshal(b, &st); err != nil {
 		return err
 	}
+	if st.Owner == nil || st.Owner.ID == "" || st.Owner.Session == "" || st.Owner.Attempt <= 0 || st.Owner.Machine != worker {
+		return errors.New("invalid Docker custody owner")
+	}
 	if st.Identity != s.state.Identity || !st.Released || st.Pending || st.OperatorConfirmed {
 		return nil
 	}
@@ -78,6 +81,9 @@ func pruneStoppedDocker(ctx context.Context, dir, worker, active string, now tim
 			var st dockerExecution
 			if err = json.Unmarshal(b, &st); err != nil {
 				return err
+			}
+			if st.Owner == nil || st.Owner.ID == "" || st.Owner.Session == "" || st.Owner.Attempt <= 0 || st.Owner.Machine != worker {
+				return errors.New("invalid Docker custody owner; evidence retained")
 			}
 			if st.Identity != identity || st.Endpoint == "" || !st.Released || st.Pending || st.OperatorConfirmed {
 				return nil

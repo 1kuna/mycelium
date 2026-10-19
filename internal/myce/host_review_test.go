@@ -67,7 +67,7 @@ func TestHostRevisionInitializeRefusesLegacyAndConversion(t *testing.T) {
 
 func TestHostConversionCustodyOnlyAndMissingSpool(t *testing.T) {
 	o := oldHostFixture(t)
-	workers, err := HostWorkers(o.Dir)
+	workers, err := offlineHostFixtureWorkers(o.Dir)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func TestHostConversionCustodyOnlyAndMissingSpool(t *testing.T) {
 		t.Fatal("preserved cache pointers missing")
 	}
 	o = oldHostFixture(t)
-	workers, err = HostWorkers(o.Dir)
+	workers, err = offlineHostFixtureWorkers(o.Dir)
 	if err != nil {
 		t.Fatal(err)
 	}

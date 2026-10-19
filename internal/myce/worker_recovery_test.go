@@ -47,11 +47,18 @@ func TestWorkerRetryFakeClockBoundaries(t *testing.T) {
 }
 func recoveryWorker(t *testing.T) Worker {
 	t.Helper()
-	server := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "start_gate": startGateProtocol})
-	}))
-	t.Cleanup(server.Close)
-	return Worker{Client: Client{URL: server.URL}, Machine: machine("recovery-worker", "fake"), StateDir: t.TempDir(), Interval: time.Millisecond, Clock: RealClock{}}
+	// No listener inside testing/synctest: network accept prevents its fake
+	// timers from advancing. Transport behavior is covered by real API dev tests.
+	return Worker{Client: Client{URL: "http://fixture-queue.invalid", HTTP: &http.Client{Transport: recoveryStartTransport{}}}, Machine: machine("recovery-worker", "fake"), StateDir: t.TempDir(), Interval: time.Millisecond, Clock: RealClock{}}
+}
+
+type recoveryStartTransport struct{}
+
+func (recoveryStartTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	if r.Method != "POST" || r.URL.Path != "/api/workers/started" || r.Header.Get("X-Myce-Start-Gate") != startGateProtocol {
+		return nil, errors.New("unexpected recovery fixture request")
+	}
+	return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"ok":true,"start_gate":"` + startGateProtocol + `"}`)), Request: r}, nil
 }
 func recoveryJob(t *testing.T, command []string) Job {
 	t.Helper()
@@ -121,10 +128,10 @@ func TestWorkerStateRejectsForeignDocuments(t *testing.T) {
 	}
 }
 
-func TestWorkerStateAcceptsExistingSchema(t *testing.T) {
+func TestWorkerStateAcceptsCurrentSchema(t *testing.T) {
 	for _, data := range []string{
-		`{"session":"old","fresh":false,"offset":0}`,
-		`{"session":"old","previous_session":"previous","fresh":true,"offset":17,"pid":42,"identity":"owned","launch_pending":true,"birth":"birth","pending":2,"checkpoint_root":"/local","log":"owned.log"}`,
+		`{"schema_version":3,"session":"old","fresh":false,"offset":0}`,
+		`{"schema_version":3,"session":"old","previous_session":"previous","fresh":true,"offset":17,"pid":42,"identity":"owned","launch_pending":true,"birth":"birth","pending":2,"checkpoint_root":"/local","log":"owned.log"}`,
 	} {
 		w := recoveryWorker(t)
 		if err := os.WriteFile(filepath.Join(w.StateDir, "state.json"), []byte(data), 0600); err != nil {
@@ -202,6 +209,8 @@ func TestWorkerAttemptCheckpointIsolation(t *testing.T) {
 	if err := os.WriteFile(latest, []byte("new"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	os.WriteFile(filepath.Join(j.Checkpoint, "attempt-1", "generation.json"), []byte(`{"myce_checkpoint":{"generation":4}}`), 0600)
+	os.WriteFile(filepath.Join(j.Checkpoint, "attempt-2", "generation.json"), []byte(`{"myce_checkpoint":{"generation":7}}`), 0600)
 	clock := &fakeClock{now: time.Unix(100, 0)}
 	older := clock.Now()
 	clock.Advance(100*time.Second + 123*time.Nanosecond)
@@ -222,7 +231,7 @@ func TestWorkerAttemptCheckpointIsolation(t *testing.T) {
 		t.Fatal("copied incomplete checkpoint")
 	}
 	progress, err := checkpointProgress(dest)
-	if err != nil || progress != 0 {
+	if err != nil || progress != 7 {
 		t.Fatalf("progress %d: %v", progress, err)
 	}
 	if err = os.WriteFile(filepath.Join(dest, "nested", "saved"), []byte("attempt 3"), 0600); err != nil {
@@ -350,7 +359,7 @@ func TestWorkerPersistedResultReconcilesThenReplaysBeforeFresh(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	w.Client.URL = server.URL
+	w.Client = Client{URL: server.URL}
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
 	select {
@@ -396,7 +405,7 @@ func TestWorkerReplayRetriesIdenticalChunkAfterLostAck(t *testing.T) {
 		rw.Write([]byte(`{}`))
 	}))
 	defer server.Close()
-	w.Client.URL = server.URL
+	w.Client = Client{URL: server.URL}
 	if err = w.replay(context.Background(), s); err == nil {
 		t.Fatal("missing replay failure")
 	}
@@ -462,11 +471,12 @@ func TestWorkerRelativeCommandUsesJobWorkdir(t *testing.T) {
 		t.Fatalf("output %q: %v", data, err)
 	}
 }
-func TestWorkerLegacyRootCheckpointAndSymlink(t *testing.T) {
+func TestWorkerSequencedRootCheckpointAndSymlink(t *testing.T) {
 	j := recoveryJob(t, []string{"true"})
 	os.MkdirAll(j.Checkpoint, 0700)
 	legacy := filepath.Join(j.Checkpoint, "saved")
 	os.WriteFile(legacy, []byte("legacy"), 0600)
+	os.WriteFile(filepath.Join(j.Checkpoint, "generation.json"), []byte(`{"myce_checkpoint":{"generation":3}}`), 0600)
 	os.WriteFile(filepath.Join(j.Checkpoint, "partial.tmp"), []byte("partial"), 0600)
 	dest, err := prepareCheckpoint(j)
 	if err != nil {

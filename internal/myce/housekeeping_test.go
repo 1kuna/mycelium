@@ -22,6 +22,7 @@ func TestStoppedContainerRetention(t *testing.T) {
 		remove                 bool
 	}{
 		{name: "expired", released: true, ack: true, age: 24 * time.Hour, worker: "owner", remove: true},
+		{name: "opaque", released: true, ack: true, age: 24 * time.Hour, worker: "owner"},
 		{name: "young", released: true, ack: true, age: 23 * time.Hour, worker: "owner"},
 		{name: "unconfirmed", ack: true, age: 48 * time.Hour, worker: "owner"},
 		{name: "pending", released: true, pending: true, ack: true, age: 48 * time.Hour, worker: "owner"},
@@ -34,6 +35,9 @@ func TestStoppedContainerRetention(t *testing.T) {
 			dir := t.TempDir()
 			now := time.Unix(1000000, 0)
 			st := dockerExecution{Identity: "attempt", Endpoint: "fake", Released: tc.released, Pending: tc.pending, Stopped: tc.released, Containers: map[string]dockerMember{"side": {}}}
+			if tc.name != "opaque" {
+				st.Owner = &Result{Machine: "owner", Session: "session", Execution: Execution{ID: "job", Attempt: 1}}
+			}
 			if err := saveWorkerJSON(dir, "attempt.docker.json", st); err != nil {
 				t.Fatal(err)
 			}
@@ -49,6 +53,9 @@ func TestStoppedContainerRetention(t *testing.T) {
 			}
 			removed := false
 			call := func(args ...string) ([]byte, error) {
+				if tc.name == "opaque" {
+					t.Fatal("opaque custody reached daemon")
+				}
 				switch args[0] {
 				case "ps":
 					if removed {
@@ -104,7 +111,7 @@ func TestStoppedContainerRetention(t *testing.T) {
 func TestDockerAcknowledgementSurvivesRestart(t *testing.T) {
 	dir := t.TempDir()
 	s := &workerStore{dir: dir, state: workerState{Identity: "attempt"}}
-	st := dockerExecution{Identity: "attempt", Endpoint: "fake", Released: true}
+	st := dockerExecution{Owner: &Result{Machine: "owner", Session: "session", Execution: Execution{ID: "job", Attempt: 1}}, Identity: "attempt", Endpoint: "fake", Released: true}
 	if err := saveWorkerJSON(dir, "attempt.docker.json", st); err != nil {
 		t.Fatal(err)
 	}

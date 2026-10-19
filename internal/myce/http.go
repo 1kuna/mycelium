@@ -254,7 +254,7 @@ func respond(w http.ResponseWriter, v any, err error) {
 			body = map[string]any{"error": "host reconciliation rejected; retry", "code": rejected.code, "queue_revision": rejected.revision}
 		}
 		var apiError *HTTPError
-		if errors.As(err, &apiError) && (apiError.Code == "submission_key_conflict" || apiError.Code == "submission_key_expired" || apiError.Code == "submission_key_invalid" || apiError.Code == "job_unknown") {
+		if errors.As(err, &apiError) && (apiError.Code == "worker_protocol_invalid" || apiError.Code == "submission_key_conflict" || apiError.Code == "submission_key_expired" || apiError.Code == "submission_key_invalid" || apiError.Code == "job_unknown") {
 			status = apiError.Status
 			body = map[string]any{"error": apiError.Message, "code": apiError.Code}
 			if apiError.Code == "job_unknown" {
@@ -324,7 +324,7 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 			Code          string       `json:"code"`
 			Error         string       `json:"error"`
 		}
-		if json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&body) == nil && (body.Code == "worker_protocol_mismatch" || body.Code == "submission_key_conflict" || body.Code == "submission_key_expired" || body.Code == "job_unknown" || body.Code == "host_reconcile_rejected" || body.Code == "host_revision_behind_queue") {
+		if json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&body) == nil && (body.Code == "worker_protocol_mismatch" || body.Code == "worker_protocol_invalid" || body.Code == "submission_key_conflict" || body.Code == "submission_key_expired" || body.Code == "job_unknown" || body.Code == "host_reconcile_rejected" || body.Code == "host_revision_behind_queue") {
 			e.Code, e.Message, e.QueueRevision = body.Code, body.Error, body.QueueRevision
 		}
 		return e

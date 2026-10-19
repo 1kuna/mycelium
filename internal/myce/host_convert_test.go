@@ -60,6 +60,28 @@ func oldFlag(t *testing.T, dir string) {
 		t.Fatal(err)
 	}
 }
+
+// Offline fixture inspection must not call the current runtime reader on an
+// unconverted spool. This helper never grants work or release authority.
+func offlineHostFixtureWorkers(dir string) ([]HostWorker, error) {
+	paths, err := filepath.Glob(filepath.Join(dir, "worker-*.json"))
+	if err != nil {
+		return nil, err
+	}
+	var workers []HostWorker
+	for _, path := range paths {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		var w HostWorker
+		if err = json.Unmarshal(b, &w); err != nil {
+			return nil, err
+		}
+		workers = append(workers, w)
+	}
+	return workers, nil
+}
 func TestHostConversionFlagMatrix(t *testing.T) {
 	for mask := 0; mask < 8; mask++ {
 		t.Run(string(rune('0'+mask)), func(t *testing.T) {
@@ -124,7 +146,10 @@ func TestHostConversionMalformedAndPartialReceipts(t *testing.T) {
 	for _, receipt := range []string{`{`, `null`, `{}`, `{"generation":29}`, `{"generation":29,"workers":[]}`, `{"generation":29,"workers":[{"host_id":"test-host","name":"card-a","state_dir":"STATE","queue":"http://offline","executions":[{"machine":"card-a","session":"session-a","id":"job-a","attempt":2}]}]}`} {
 		t.Run(receipt, func(t *testing.T) {
 			o := oldHostFixture(t)
-			workers, _ := HostWorkers(o.Dir)
+			workers, err := offlineHostFixtureWorkers(o.Dir)
+			if err != nil || len(workers) != 1 {
+				t.Fatal(workers, err)
+			}
 			receipt = strings.ReplaceAll(receipt, "STATE", workers[0].State)
 			if err := os.WriteFile(filepath.Join(o.Dir, "disable-receipt.json"), []byte(receipt), 0600); err != nil {
 				t.Fatal(err)
@@ -196,7 +221,10 @@ func TestHostConversionRefusesUnknownIdentityOverflowAndChangedOriginal(t *testi
 			case "corrupt-counter":
 				os.WriteFile(filepath.Join(o.Dir, "control-generation.json"), []byte(`{}`), 0600)
 			case "busy-worker":
-				workers, _ := HostWorkers(o.Dir)
+				workers, err := offlineHostFixtureWorkers(o.Dir)
+				if err != nil || len(workers) != 1 {
+					t.Fatal(workers, err)
+				}
 				unlock, err := hostOperationLock(workers[0].State, "worker.lock", false)
 				if err != nil {
 					t.Fatal(err)
@@ -306,9 +334,12 @@ func TestHostConversionUnitOnlyRegistryPreserved(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	workers, err := HostWorkers(o.Dir)
+	workers, err := offlineHostFixtureWorkers(o.Dir)
 	if err != nil || len(workers) != 1 || workers[0].Name != "card-a" {
 		t.Fatal(workers, err)
+	}
+	if _, err = HostWorkers(o.Dir); err == nil {
+		t.Fatal("host-only conversion admitted an old worker spool")
 	}
 	if _, err = ConvertHostControl(o); err != nil {
 		t.Fatal(err)
@@ -324,7 +355,7 @@ func TestHostConversionArchivedCountersAndReceipts(t *testing.T) {
 	for _, exhausted := range []bool{false, true} {
 		t.Run(fmt.Sprint(exhausted), func(t *testing.T) {
 			o := oldHostFixture(t)
-			workers, err := HostWorkers(o.Dir)
+			workers, err := offlineHostFixtureWorkers(o.Dir)
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -1,0 +1,31 @@
+package myce
+import("testing";"os";"path/filepath";"encoding/json";"time";"fmt")
+func TestWriteWP8ReleaseFixture(t *testing.T){
+ root:=os.Getenv("WP8_FIXTURE_OUTPUT");if root==""{t.Fatal("destination required")};dir:=filepath.Join(root,"workers","one");os.MkdirAll(dir,0700)
+ c:=&fakeClock{now:time.Date(2026,10,8,12,0,0,0,time.UTC)};q,e:=Open(filepath.Join(root,"queue.db"),"/fixture/checkpoints",c);if e!=nil{t.Fatal(e)}
+ m:=Machine{ID:"fixture-worker",Session:"fixture-session",HostID:"fixture-host",EnablePending:true,HostMemoryBudgetGeneration:23,GPU:"fake",FreeMemoryGB:8};q.s.Machines[m.ID]=&m
+ for n:=0;n<103;n++{id:=fmt.Sprintf("job-%03d",n);s:=spec("experiment");s.Run.Command=[]string{"sh","-c","printf once"};s.Resumable=false;q.s.Jobs[id]=&Job{ID:id,Spec:s,State:"queued",Attempt:2,Starts:2,Losses:1,Front:int64(-n),Queued:c.Now(),Checkpoint:"/fixture/checkpoints/"+id,Copies:[]Copy{{Machine:m.ID,Session:m.Session,Attempt:1,Progress:4},{Machine:m.ID,Session:m.Session,Attempt:2,Progress:7}}}}
+ j:=q.s.Jobs["job-102"];j.State="succeeded";j.Machine=m.ID;j.Session=m.Session;j.OutputFiles=map[string]string{"output":"sha256-fixture"};j.StopAt=&c.now
+ q.s.HostReleases=map[string]HostRelease{"custody":{Host:m.HostID,Job:j.ID,Machine:m.ID,Session:m.Session,Attempt:2,HostChargeGB:3,MemoryGB:8}}
+ q.s.ModelSlots=map[string]*ModelSlot{slotKey(m.ID,"model"):{Machine:m.ID,Session:m.Session,Model:"model",Attempt:"engine-attempt",State:"loading",LoadUntil:&c.now,InFlight:1}}
+ q.s.Hosts=map[string]*HostState{m.HostID:{Policy:HostPolicy{ProductionHold:true,ProductionIdle:"3m"},IdleSince:&c.now,Active:true}}
+ q.s.Pins=[]ModelPin{{Model:"model",Project:"test"}};q.s.Front=-103
+ if os.Getenv("WP8_FIXTURE_DEV")=="1" {
+ q.s.Jobs=map[string]*Job{"job-000":q.s.Jobs["job-000"],"job-102":j};q.s.Jobs["job-000"].Attempt=0;q.s.Jobs["job-000"].Starts=0;q.s.Jobs["job-000"].Copies=nil
+ q.s.Machines=map[string]*Machine{};q.s.Hosts=nil;q.s.ModelSlots=nil;q.s.HostReleases=nil;q.s.Pins=nil
+ }
+ if e=q.update(func()error{return nil});e!=nil{t.Fatal(e)}
+ for _,stmt:=range []string{`INSERT INTO logs(job,attempt,text) VALUES('job-102',2,'fixture-log')`,`INSERT INTO log_offsets VALUES('job-102',2,12)`,`INSERT INTO usage_samples VALUES(1,2,'fixture-worker','device','test','job-102','',1,2,3,4,5)`}{if _,e=q.db.Exec(stmt);e!=nil{t.Fatal(e)}}
+ if e=q.Close();e!=nil{t.Fatal(e)}
+ result:=Result{Machine:m.ID,Session:m.Session,Execution:Execution{ID:j.ID,Attempt:j.Attempt},Success:true}
+ st:=workerState{Session:m.Session,Fresh:false,Job:j,Result:&result,Identity:"fixture-execution",Offset:12,CheckpointRoot:"checkpoints",Log:"fixture-execution.log"};if e=saveWorkerJSON(dir,"state.json",st);e!=nil{t.Fatal(e)}
+ for name,v:=range map[string]any{"fixture-execution.result.json":result,"fixture-execution.docker.json":dockerExecution{Identity:st.Identity,Endpoint:"unix:///run/fixture-docker.sock",Owner:&result,Pending:true,Operation:"create"},"checkin-report.json":Checkin{Machine:m,ModelReports:[]ModelReport{{Name:"model",Attempt:"engine-attempt",State:"loading"}}}}{b,_:=json.Marshal(v);if e=os.WriteFile(filepath.Join(dir,name),b,0600);e!=nil{t.Fatal(e)}}
+ os.WriteFile(filepath.Join(dir,"fixture-execution.log"),[]byte("fixture-log"),0600)
+ if e=saveWorkerJSON(dir,"engine-engine-attempt.json",workerState{Identity:"engine-attempt"});e!=nil{t.Fatal(e)}
+ checkpoint:=filepath.Join(root,"checkpoints",j.ID,"attempt-2");os.MkdirAll(checkpoint,0700);if e=os.WriteFile(filepath.Join(checkpoint,"save.json"),[]byte(`{"myce_checkpoint":{"generation":7},"value":"fixture"}`),0600);e!=nil{t.Fatal(e)}
+ if os.Getenv("WP8_FIXTURE_DEV")!="1" {
+ host:=filepath.Join(root,"host");os.MkdirAll(host,0700)
+ w:=HostWorker{Host:m.HostID,Name:m.ID,Session:m.Session,Queue:"http://fixture-queue.invalid",State:"/fixture/worker-state",Config:"/fixture/config.json",Generation:21,Executions:[]Result{result}}
+ for name,v:=range map[string]any{"control-generation.json":uint64(22),"worker-fixture.json":w,"enable-pending.json":hostReceipt{Generation:21,EnableGeneration:22,Workers:[]HostWorker{w}}}{if e=saveWorkerJSON(host,name,v);e!=nil{t.Fatal(e)}}
+ }
+}

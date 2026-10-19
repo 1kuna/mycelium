@@ -274,7 +274,7 @@ func TestExclusionExactDockerReconciliationVerifiesRelease(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := saveWorkerJSON(s.dir, "owned.docker.json", dockerExecution{Identity: "owned", Endpoint: "unix:///example.sock", Container: "id1", Operation: "start"}); err != nil {
+	if err := saveWorkerJSON(s.dir, "owned.docker.json", dockerExecution{Owner: &Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}, Identity: "owned", Endpoint: "unix:///example.sock", Container: "id1", Operation: "start"}); err != nil {
 		t.Fatal(err)
 	}
 	invocation := HostInvocation{StateDir: w.HostStateDir, Config: ServiceConfig{State: w.StateDir}, Account: WorkerAccount{UID: uint32(os.Geteuid())}}
@@ -303,7 +303,7 @@ func TestExclusionDisabledRetentionUsesScopedInventory(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := saveWorkerJSON(s.dir, "owned.docker.json", dockerExecution{Identity: "owned", Endpoint: "unix:///example.sock", Released: true}); err != nil {
+	if err := saveWorkerJSON(s.dir, "owned.docker.json", dockerExecution{Owner: &Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: "job", Attempt: 1}}, Identity: "owned", Endpoint: "unix:///example.sock", Released: true}); err != nil {
 		t.Fatal(err)
 	}
 	retention := time.Duration(0)

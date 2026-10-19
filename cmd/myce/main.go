@@ -80,6 +80,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if args[0] == "extension" {
 		return extensionCommand(args[1:])
 	}
+	if args[0] == "state" && len(args) > 1 && args[1] == "convert" {
+		return stateConvertCommand(args[2:], os.Stdout)
+	}
 	if args[0] == "host" && len(args) > 1 && args[1] == "convert" {
 		return hostConvertCommand(args[2:], os.Stdout)
 	}

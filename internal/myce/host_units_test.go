@@ -137,7 +137,7 @@ func TestInstanceDockerUsesOnlySavedAttemptLabels(t *testing.T) {
 		os.WriteFile(filepath.Join(root, name), []byte(value), 0600)
 	}
 	// Released custody still supplies ownership if its container was restarted later.
-	saveWorkerJSON(s.dir, "owned.docker.json", dockerExecution{Identity: "owned", Endpoint: "unix:///var/run/docker.sock", Container: "id1", Released: true})
+	saveWorkerJSON(s.dir, "owned.docker.json", dockerExecution{Owner: &Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: "job", Attempt: 1}}, Identity: "owned", Endpoint: "unix:///var/run/docker.sock", Container: "id1", Released: true})
 	if err := AdoptHostWorker(scoped, HostWorker{State: s.dir, Unit: "myce-worker@gpu1.service"}); err != nil {
 		t.Fatal(err)
 	}

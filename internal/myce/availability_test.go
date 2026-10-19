@@ -127,7 +127,9 @@ func TestDedicatedAvailabilityAndStaleness(t *testing.T) {
 	}
 }
 func profileAvailability(m Machine, a Availability) Machine {
-	m.CapabilityProfile = &CapabilityProfile{Availability: &a}
+	profile := *m.CapabilityProfile
+	profile.Availability = &a
+	m.CapabilityProfile = &profile
 	return m
 }
 func TestPoliteQueueStopAndResume(t *testing.T) {
@@ -260,7 +262,7 @@ func TestPoliteWorkerCheckpointResumesElsewhere(t *testing.T) {
   echo "resumed=$MYCE_MACHINE"; exit 0
  fi
  exec 3<> "$GATE"
- trap 'echo saved > "$MYCE_CHECKPOINT_DIR/saved"; exit 0' TERM
+ save() { echo saved > "$MYCE_CHECKPOINT_DIR/saved"; printf '{"myce_checkpoint":{"generation":%s}}\n' "$MYCE_ATTEMPT" > "$MYCE_CHECKPOINT_DIR/generation.json.tmp"; mv "$MYCE_CHECKPOINT_DIR/generation.json.tmp" "$MYCE_CHECKPOINT_DIR/generation.json"; exit 0; }; trap save TERM
  echo ready
  while :; do read line <&3; done`}
 	j := submit(t, q, s)
@@ -403,7 +405,7 @@ func TestPoliteOwnerStopDuringBlockedCheckin(t *testing.T) {
 	defer gate.Close()
 	s := spec("experiment")
 	s.Run.Env = map[string]string{"GATE": fifo}
-	s.Run.Command = []string{"sh", "-c", `exec 3<> "$GATE"; trap 'echo saved > "$MYCE_CHECKPOINT_DIR/saved"; exit 0' TERM; echo ready; while :; do read line <&3; done`}
+	s.Run.Command = []string{"sh", "-c", `exec 3<> "$GATE"; save() { echo saved > "$MYCE_CHECKPOINT_DIR/saved"; printf '{"myce_checkpoint":{"generation":%s}}\n' "$MYCE_ATTEMPT" > "$MYCE_CHECKPOINT_DIR/generation.json.tmp"; mv "$MYCE_CHECKPOINT_DIR/generation.json.tmp" "$MYCE_CHECKPOINT_DIR/generation.json"; exit 0; }; trap save TERM; echo ready; while :; do read line <&3; done`}
 	j := submit(t, q, s)
 	var active atomic.Bool
 	state := t.TempDir()

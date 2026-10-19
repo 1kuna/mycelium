@@ -40,6 +40,7 @@ func (r *workerRetry) succeeded(now time.Time, interval time.Duration) {
 }
 
 type workerState struct {
+	Schema          int                    `json:"schema_version"`
 	OperatorStopped bool                   `json:"operator_stopped,omitempty"`
 	Groups          map[int]map[int]string `json:"-"`
 	LaunchPending   bool                   `json:"launch_pending,omitempty"`
@@ -143,6 +144,12 @@ func (s *workerStore) readOperatorStop() error {
 
 // Existing spools always include these fields, even when their values are zero.
 func decodeWorkerState(data []byte, state *workerState) error {
+	var header struct {
+		Schema int `json:"schema_version"`
+	}
+	if json.Unmarshal(data, &header) != nil || header.Schema != persistedSchema {
+		return errPersistedFormat
+	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(state); err != nil {
@@ -194,6 +201,10 @@ func (s *workerStore) close() {
 func (s *workerStore) save() error              { return saveWorkerJSON(s.dir, "state.json", s.state) }
 func decodeWorkerJSON(data []byte, v any) error { return json.Unmarshal(data, v) }
 func saveWorkerJSON(dir, name string, v any) error {
+	if state, ok := v.(workerState); ok {
+		state.Schema = persistedSchema
+		v = state
+	}
 	data, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -329,6 +340,7 @@ func checkpointProgress(dir string) (int64, error) {
 }
 func scanCheckpointProgress(dir string, jobRoot bool) (int64, error) {
 	latest := int64(-1)
+	hasData := false
 	err := filepath.WalkDir(dir, func(path string, e os.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -350,7 +362,7 @@ func scanCheckpointProgress(dir string, jobRoot bool) (int64, error) {
 			return err
 		}
 		if info.Mode().IsRegular() {
-			latest = max(latest, 0) // Unsequenced legacy saves rank below every generation.
+			hasData = true
 			if strings.HasSuffix(e.Name(), ".json") {
 				data, err := os.ReadFile(path)
 				if err != nil {
@@ -371,6 +383,9 @@ func scanCheckpointProgress(dir string, jobRoot bool) (int64, error) {
 		}
 		return nil
 	})
+	if err == nil && hasData && latest < 0 {
+		err = errors.New("unsequenced checkpoint requires offline conversion or an inert hold")
+	}
 	return latest, err
 }
 func prepareCheckpoint(j Job) (string, error) {

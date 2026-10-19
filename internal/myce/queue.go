@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"database/sql"
@@ -40,19 +41,21 @@ type batchRelease struct {
 }
 
 type state struct {
-	HostIntents      map[string]QueueHostIntent   `json:"host_intents,omitempty"`
-	Submissions      map[string]*submissionRecord `json:"submissions,omitempty"`
-	ProgramNeeds     map[string]SizeHint          `json:"program_needs,omitempty"`
-	Extensions       map[string]Extension         `json:"extensions,omitempty"`
-	Hosts            map[string]*HostState        `json:"hosts,omitempty"`
-	HostReleases     map[string]HostRelease       `json:"host_releases,omitempty"`
-	BatchReleases    map[string]batchRelease      `json:"batch_releases,omitempty"`
-	UsageMaintenance time.Time                    `json:"usage_maintenance,omitempty"`
-	ProductionStarts []ProductionStart            `json:"production_starts,omitempty"`
-	Policies         map[string]ProjectPolicy     `json:"project_policies,omitempty"`
-	FairUsage        map[string]FairUsage         `json:"fair_usage,omitempty"`
-	UsageAt          time.Time                    `json:"usage_at,omitempty"`
-	Preemptions      []Preemption                 `json:"preemptions,omitempty"`
+	Schema            int                          `json:"schema_version"`
+	ConversionHistory json.RawMessage              `json:"conversion_history,omitempty"`
+	HostIntents       map[string]QueueHostIntent   `json:"host_intents,omitempty"`
+	Submissions       map[string]*submissionRecord `json:"submissions,omitempty"`
+	ProgramNeeds      map[string]SizeHint          `json:"program_needs,omitempty"`
+	Extensions        map[string]Extension         `json:"extensions,omitempty"`
+	Hosts             map[string]*HostState        `json:"hosts,omitempty"`
+	HostReleases      map[string]HostRelease       `json:"host_releases,omitempty"`
+	BatchReleases     map[string]batchRelease      `json:"batch_releases,omitempty"`
+	UsageMaintenance  time.Time                    `json:"usage_maintenance,omitempty"`
+	ProductionStarts  []ProductionStart            `json:"production_starts,omitempty"`
+	Policies          map[string]ProjectPolicy     `json:"project_policies,omitempty"`
+	FairUsage         map[string]FairUsage         `json:"fair_usage,omitempty"`
+	UsageAt           time.Time                    `json:"usage_at,omitempty"`
+	Preemptions       []Preemption                 `json:"preemptions,omitempty"`
 
 	SyncRequests []SyncRequest         `json:"sync_requests,omitempty"`
 	ModelUses    map[string]ModelUse   `json:"model_uses,omitempty"`
@@ -137,41 +140,68 @@ func Open(path, root string, clock Clock) (*Queue, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	q := &Queue{logRetention: DefaultLogRetention, uploadSpool: uploadSpool{limit: DefaultUploadSpoolBytes, defaultDir: path + ".uploads"}, productionGrace: 10 * time.Second, wake: make(chan struct{}), lossTimeouts: [3]time.Duration{ProductionLossAfter, DeadlineLossAfter, LossAfter}, lock: lock, db: db, clock: clock, root: abs, s: state{Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
-	if _, err = db.Exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS queue (id INTEGER PRIMARY KEY CHECK(id=1), data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS logs (seq INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL, attempt INTEGER NOT NULL, text TEXT NOT NULL); CREATE TABLE IF NOT EXISTS log_offsets (job TEXT, attempt INTEGER, offset INTEGER, PRIMARY KEY(job,attempt,offset)); CREATE TABLE IF NOT EXISTS environment_log_offsets (job TEXT, machine TEXT, session TEXT, key TEXT, offset INTEGER, PRIMARY KEY(job,machine,session,key,offset)); CREATE TABLE IF NOT EXISTS environment_build_logs (machine TEXT, session TEXT, key TEXT, offset INTEGER, text TEXT, PRIMARY KEY(machine,session,key,offset)); CREATE INDEX IF NOT EXISTS logs_job ON logs(job,seq); CREATE TABLE IF NOT EXISTS usage_samples (at INTEGER NOT NULL, span INTEGER NOT NULL, machine TEXT NOT NULL, device TEXT NOT NULL, project TEXT NOT NULL, job TEXT NOT NULL, model TEXT NOT NULL, busy REAL NOT NULL, idle REAL NOT NULL, pinned REAL NOT NULL, memory_seconds REAL NOT NULL, observed REAL NOT NULL, PRIMARY KEY(at,span,machine,device,project,job,model));`); err != nil {
+	// Inspect before schema/PRAGMA writes: an old queue is conversion input only.
+	var version int
+	if err = db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		db.Close()
 		return nil, err
 	}
+	var queueExists int
+	if err = db.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='queue'").Scan(&queueExists); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if (queueExists > 0 && version != persistedSchema) || (version != 0 && version != persistedSchema) {
+		db.Close()
+		return nil, errPersistedFormat
+	}
+
+	q := &Queue{logRetention: DefaultLogRetention, uploadSpool: uploadSpool{limit: DefaultUploadSpoolBytes, defaultDir: path + ".uploads"}, productionGrace: 10 * time.Second, wake: make(chan struct{}), lossTimeouts: [3]time.Duration{ProductionLossAfter, DeadlineLossAfter, LossAfter}, lock: lock, db: db, clock: clock, root: abs, s: state{Schema: persistedSchema, Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
+
 	var data []byte
-	err = db.QueryRow("SELECT data FROM queue WHERE id=1").Scan(&data)
+	if queueExists > 0 {
+		err = db.QueryRow("SELECT data FROM queue WHERE id=1").Scan(&data)
+	} else {
+		err = sql.ErrNoRows
+	}
 	if err == nil {
-		var legacy map[string]json.RawMessage
-		err = json.Unmarshal(data, &legacy)
+		var fields map[string]json.RawMessage
+		err = json.Unmarshal(data, &fields)
 		if err == nil {
-			for _, name := range []string{"host_controls", "machine_controls", "disabled_hosts"} {
-				if value := legacy[name]; len(value) > 0 && string(value) != "{}" && string(value) != "null" {
-					err = errors.New("legacy queue host controls require offline conversion")
-					break
+			var schema int
+			if json.Unmarshal(fields["schema_version"], &schema) != nil || schema != persistedSchema {
+				err = errPersistedFormat
+			} else {
+				decoder := json.NewDecoder(bytes.NewReader(data))
+				decoder.DisallowUnknownFields()
+				err = decoder.Decode(&q.s)
+				if err == nil {
+					for _, j := range q.s.Jobs {
+						if j == nil || !validCheckpointGenerations(j) || j.CancelledAt == nil && (j.Reason == "cancel requested" || j.State == "cancelled") {
+							err = errPersistedFormat
+							break
+						}
+					}
 				}
 			}
-		}
-		if err == nil {
-			err = json.Unmarshal(data, &q.s)
+			for _, name := range []string{"host_controls", "machine_controls", "disabled_hosts"} {
+				if _, ok := fields[name]; ok {
+					err = errPersistedFormat
+				}
+			}
 		}
 	}
 	if err != nil && err != sql.ErrNoRows {
 		db.Close()
 		return nil, err
 	}
+	if _, err = db.Exec(`PRAGMA user_version=3; PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS queue (id INTEGER PRIMARY KEY CHECK(id=1), data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS logs (seq INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL, attempt INTEGER NOT NULL, text TEXT NOT NULL); CREATE TABLE IF NOT EXISTS log_offsets (job TEXT, attempt INTEGER, offset INTEGER, PRIMARY KEY(job,attempt,offset)); CREATE TABLE IF NOT EXISTS environment_log_offsets (job TEXT, machine TEXT, session TEXT, key TEXT, offset INTEGER, PRIMARY KEY(job,machine,session,key,offset)); CREATE TABLE IF NOT EXISTS environment_build_logs (machine TEXT, session TEXT, key TEXT, offset INTEGER, text TEXT, PRIMARY KEY(machine,session,key,offset)); CREATE INDEX IF NOT EXISTS logs_job ON logs(job,seq); CREATE TABLE IF NOT EXISTS usage_samples (at INTEGER NOT NULL, span INTEGER NOT NULL, machine TEXT NOT NULL, device TEXT NOT NULL, project TEXT NOT NULL, job TEXT NOT NULL, model TEXT NOT NULL, busy REAL NOT NULL, idle REAL NOT NULL, pinned REAL NOT NULL, memory_seconds REAL NOT NULL, observed REAL NOT NULL, PRIMARY KEY(at,span,machine,device,project,job,model));`); err != nil {
+		db.Close()
+		return nil, err
+	}
 	q.unreported = map[string]bool{}
 	if len(data) > 0 {
 		q.restartUntil = clock.Now().Add(RestartGrace)
-		for _, j := range q.s.Jobs {
-			if j.Attempt > 0 && len(j.Copies) == 0 && j.Machine != "" {
-				j.Starts = j.Attempt
-				j.Copies = append(j.Copies, Copy{Machine: j.Machine, Session: j.Session, Attempt: j.Attempt})
-			}
-		}
 		for id, m := range q.s.Machines {
 			if !m.Gone {
 				q.unreported[id] = true
@@ -185,12 +215,6 @@ func Open(path, root string, clock Clock) (*Queue, error) {
 	if err = q.ConfigureUploadSpool("", DefaultUploadSpoolBytes); err != nil {
 		db.Close()
 		return nil, err
-	}
-	if q.importCancellationEvidence() {
-		if err = q.update(func() error { return nil }); err != nil {
-			db.Close()
-			return nil, err
-		}
 	}
 	success = true
 	return q, nil

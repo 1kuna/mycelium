@@ -228,40 +228,22 @@ func legacyCancellationFixture(t *testing.T, retained bool) (*Queue, *fakeClock,
 	return q, c, q.s.Jobs[j.ID], one
 }
 
-func TestCancellationLegacyCopies(t *testing.T) {
+func TestCancellationMissingCopyEvidenceStaysPending(t *testing.T) {
 	for _, retained := range []bool{false, true} {
-		t.Run(map[bool]string{false: "released", true: "retained"}[retained], func(t *testing.T) {
+		t.Run(map[bool]string{false: "no-release-row", true: "retained"}[retained], func(t *testing.T) {
 			q, _, j, one := legacyCancellationFixture(t, retained)
-			want := "confirmed"
-			if retained {
-				want = "pending"
+			if a := cancelAck(t, q, j.ID); ackRelease(a) != "pending" {
+				t.Fatal("missing copy evidence inferred release", a)
 			}
-			if a := cancelAck(t, q, j.ID); ackRelease(a) != want {
-				t.Fatal("legacy release", a)
+			if q.s.Jobs[j.ID].Copies[0].ReleaseConfirmed {
+				t.Fatal("reopen discharged unconfirmed copy")
 			}
-			if retained {
-				r := Result{Execution: Execution{ID: j.ID, Attempt: 1}, Machine: one.ID, Session: "old-one", ReleaseOnly: true}
-				if err := q.Complete(r); err != nil {
-					t.Fatal(err)
-				}
-				if a := cancelAck(t, q, j.ID); ackRelease(a) != "confirmed" {
-					t.Fatal(a)
-				}
-			} else {
-				data, _ := json.Marshal(j.Copies[0])
-				if !strings.Contains(string(data), "legacy_no_retained_custody") {
-					t.Fatal("missing legacy diagnostic", string(data))
-				}
-				if blocker := q.startupReleaseBlocker(one.ID); blocker != "" {
-					t.Fatal(blocker)
-				}
-				s := spec("production")
-				s.AllowedMachines = []string{one.ID}
-				s.Needs.HostMemoryGB = 4
-				next := submit(t, q, s)
-				if got := check(t, q, one, nil).Job; got == nil || got.ID != next.ID {
-					t.Fatal("terminal cancellation blocked unrelated placement", got)
-				}
+			r := Result{Execution: Execution{ID: j.ID, Attempt: 1}, Machine: one.ID, Session: "old-one", ReleaseOnly: true}
+			if err := q.Complete(r); err != nil {
+				t.Fatal(err)
+			}
+			if a := cancelAck(t, q, j.ID); ackRelease(a) != "confirmed" {
+				t.Fatal(a)
 			}
 		})
 	}
@@ -292,26 +274,29 @@ func TestCancellationAcknowledgementTime(t *testing.T) {
 	}
 }
 
-func TestCancellationLegacyIntentPersistsOnOpen(t *testing.T) {
+func TestCancellationLegacyIntentRequiresConversion(t *testing.T) {
 	q, c := fixture(t)
 	j := submit(t, q, spec("experiment"))
 	if err := q.update(func() error { q.s.Jobs[j.ID].Reason = "cancel requested"; return nil }); err != nil {
 		t.Fatal(err)
 	}
-	q = reopenCancellationQueue(t, q, c)
-	first := *q.s.Jobs[j.ID].CancelledAt
-	var saved []byte
-	if err := q.db.QueryRow("SELECT data FROM queue WHERE id=1").Scan(&saved); err != nil {
+	var path string
+	if err := q.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&path); err != nil {
 		t.Fatal(err)
 	}
-	var persisted state
-	if err := json.Unmarshal(saved, &persisted); err != nil || persisted.Jobs[j.ID].CancelledAt == nil {
-		t.Fatal("Open did not persist cancellation import", err)
+	if err := q.Close(); err != nil {
+		t.Fatal(err)
 	}
-	c.Advance(time.Second)
-	q = reopenCancellationQueue(t, q, c)
-	if !q.s.Jobs[j.ID].CancelledAt.Equal(first) {
-		t.Fatal("legacy cancellation time moved on reopen")
+	before, err := conversionFileHash(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reopened, err := Open(path, q.root, c); err == nil {
+		reopened.Close()
+		t.Fatal("runtime imported an old cancellation marker")
+	}
+	if after, err := conversionFileHash(path); err != nil || after != before {
+		t.Fatal("refusal changed source", err)
 	}
 }
 
@@ -333,30 +318,38 @@ func TestCancellationWorkerPreparing(t *testing.T) {
 			defer store.close()
 			store.state.Session = assigned.Session
 			p, err := w.start(store, *assigned)
-			if err != nil || p == nil {
-				t.Fatalf("start: %v", err)
+			var completed Result
+			if err != nil {
+				if p != nil {
+					t.Fatal("process returned with refused start", err)
+				}
+				if members, e := workerGroupMembers(store.state.PID); e != nil || len(members) != 0 {
+					t.Fatal("refused supervisor not released", members, e)
+				}
+				completed = result(assigned, false)
+				completed.Error = err.Error()
+			} else {
+				if p == nil {
+					t.Fatal("missing gated process")
+				}
+				select {
+				case done := <-p.done:
+					completed = done.result
+				case <-time.After(testWaitTimeout):
+					t.Fatal("worker preparation stalled")
+				}
 			}
-			select {
-			case done := <-p.done:
-				_, statErr := os.Stat(marker)
-				if priority == "production" {
-					if done.result.Success || !os.IsNotExist(statErr) {
-						t.Fatal("cancelled gated command launched", done)
-					}
-				} else if !done.result.Success || statErr != nil {
-					t.Fatal("expected documented preassigned, ungated launch window", done, statErr)
-				}
-				if a := cancelAck(t, q, j.ID); ackRelease(a) != "pending" {
-					t.Fatal(a)
-				}
-				if err := q.Complete(done.result); err != nil {
-					t.Fatal(err)
-				}
-				if a := cancelAck(t, q, j.ID); ackRelease(a) != "confirmed" {
-					t.Fatal(a)
-				}
-			case <-time.After(testWaitTimeout):
-				t.Fatal("worker preparation stalled")
+			if _, e := os.Stat(marker); completed.Success || !os.IsNotExist(e) {
+				t.Fatal("cancelled payload crossed prelaunch gate", completed, e)
+			}
+			if a := cancelAck(t, q, j.ID); ackRelease(a) != "pending" {
+				t.Fatal(a)
+			}
+			if e := q.Complete(completed); e != nil {
+				t.Fatal(e)
+			}
+			if a := cancelAck(t, q, j.ID); ackRelease(a) != "confirmed" {
+				t.Fatal(a)
 			}
 			assertNoCancellationAttempt(t, q, assigned)
 		})

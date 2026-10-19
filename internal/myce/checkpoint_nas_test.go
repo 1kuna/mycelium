@@ -30,7 +30,7 @@ func TestVersoPressureCheckpointSkew(t *testing.T) {
 					t.Fatal(err)
 				}
 				p := filepath.Join(dir, "checkpoint.json")
-				if err := os.WriteFile(p, []byte(unit), 0600); err != nil {
+				if err := os.WriteFile(p, []byte(fmt.Sprintf(`{"myce_checkpoint":{"generation":%s},"value":%s}`, unit, unit)), 0600); err != nil {
 					t.Fatal(err)
 				}
 				stamp := now
@@ -49,8 +49,14 @@ func TestVersoPressureCheckpointSkew(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if string(data) != "9" {
+			var save struct {
+				Value int `json:"value"`
+			}
+			if json.Unmarshal(data, &save) != nil || save.Value != 9 {
 				t.Fatalf("completed progress regressed: resumed=%s want=9 skew_seconds=%d", data, offset)
+			}
+			if generation, e := checkpointProgress(dest); e != nil || generation != 9 {
+				t.Fatal("generation changed", generation, e)
 			}
 		})
 	}
@@ -337,7 +343,7 @@ func TestLegacyCachedTimestampCannotOverrideGeneration(t *testing.T) {
 	}
 }
 
-func TestLegacyMetadataWithoutGenerationLoads(t *testing.T) {
+func TestWorkerRejectsUnsequencedMetadata(t *testing.T) {
 	j := recoveryJob(t, []string{"true"})
 	if err := os.MkdirAll(j.Checkpoint, 0700); err != nil {
 		t.Fatal(err)
@@ -346,13 +352,12 @@ func TestLegacyMetadataWithoutGenerationLoads(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(j.Checkpoint, "checkpoint.json"), data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	dest, err := prepareCheckpoint(j)
-	if err != nil {
-		t.Fatalf("unsequenced legacy checkpoint rejected: %v", err)
+	if _, err := prepareCheckpoint(j); err == nil {
+		t.Fatal("unsequenced checkpoint accepted")
 	}
-	loaded, err := os.ReadFile(filepath.Join(dest, "checkpoint.json"))
+	loaded, err := os.ReadFile(filepath.Join(j.Checkpoint, "checkpoint.json"))
 	if err != nil || string(loaded) != string(data) {
-		t.Fatalf("legacy bytes changed: %v", err)
+		t.Fatal("rejection changed original checkpoint", err)
 	}
 }
 

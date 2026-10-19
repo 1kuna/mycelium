@@ -43,6 +43,18 @@ func TestCheckpointCommand(t *testing.T) {
 		if err := os.Rename(tmp, path); err != nil {
 			t.Fatal(err)
 		}
+		// The current resume contract requires a durable monotonic generation.
+		manifest, err := json.Marshal(map[string]any{"myce_checkpoint": map[string]int{"generation": n}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = os.WriteFile(filepath.Join(folder, "generation.json.tmp"), manifest, 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err = os.Rename(filepath.Join(folder, "generation.json.tmp"), filepath.Join(folder, "generation.json")); err != nil {
+			t.Fatal(err)
+		}
+
 	}
 	if attempt != "1" {
 		if n == 0 {

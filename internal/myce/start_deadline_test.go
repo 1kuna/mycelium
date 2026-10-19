@@ -165,7 +165,7 @@ func TestProductionStartDeadlineRestart(t *testing.T) {
 	requireState(t, reopened, j.ID, "failed")
 }
 
-func TestProductionStartDeadlinePermit(t *testing.T) {
+func TestProductionStartDeadlineAcknowledgedExecution(t *testing.T) {
 	q, c := fixture(t)
 	j := submit(t, q, spec("production"))
 	assigned := check(t, q, machine("b70", "xpu"), nil).Job
@@ -187,7 +187,12 @@ func TestProductionStartDeadlinePermit(t *testing.T) {
 	if err == nil {
 		t.Fatal("late permit granted")
 	}
-	requireState(t, q, j.ID, "failed")
+	// The first acknowledgement already committed the start. A later refused
+	// prelaunch authorization must not time out an execution that started in time.
+	requireState(t, q, j.ID, "running")
+	if got := job(t, q, j.ID); got.StartedAt == nil || got.Starts != 1 {
+		t.Fatal("start acknowledgement lost or duplicated", got)
+	}
 }
 
 func TestProductionStartDeadlineWorkerPreparationCannotLaunchLate(t *testing.T) {
@@ -484,7 +489,7 @@ func TestProductionStartDeadlineWorkerSendsRejectedResultCleanup(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	w.Client.URL = server.URL
+	w.Client = Client{URL: server.URL}
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
 	select {

@@ -94,7 +94,7 @@ func (h HostControl) confirmDocker(ctx context.Context, workers []HostWorker, st
 			if err = json.Unmarshal(data, &st); err != nil {
 				return fmt.Errorf("Docker custody %s: %w", filepath.Base(path), err)
 			}
-			if st.Identity == "" || filepath.Base(st.Identity) != st.Identity || filepath.Base(path) != st.Identity+".docker.json" || st.Endpoint == "" {
+			if st.Owner == nil || st.Owner.ID == "" || st.Owner.Machine == "" || st.Owner.Session == "" || st.Owner.Attempt <= 0 || st.Identity == "" || filepath.Base(st.Identity) != st.Identity || filepath.Base(path) != st.Identity+".docker.json" || st.Endpoint == "" {
 				return errors.New("invalid Docker custody")
 			}
 			if !slices.Contains(endpoints, st.Endpoint) {

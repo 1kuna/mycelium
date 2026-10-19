@@ -167,7 +167,7 @@ func TestDockerSidecarEvidenceSurvivesRetention(t *testing.T) {
 			dir := t.TempDir()
 			now := time.Unix(10000, 0)
 			code := 143
-			st := dockerExecution{Identity: "owned", Endpoint: "fake", Released: true, EvidenceSaved: true, Containers: map[string]dockerMember{"sidecar": {Name: "server", ExitCode: &code, StderrTail: "private fixture stderr"}}}
+			st := dockerExecution{Owner: &Result{Machine: "worker", Session: "session", Execution: Execution{ID: "job", Attempt: 1}}, Identity: "owned", Endpoint: "fake", Released: true, EvidenceSaved: true, Containers: map[string]dockerMember{"sidecar": {Name: "server", ExitCode: &code, StderrTail: "private fixture stderr"}}}
 			if err := saveWorkerJSON(dir, "owned.docker.json", st); err != nil {
 				t.Fatal(err)
 			}

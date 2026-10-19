@@ -96,6 +96,9 @@ func TestDifferentWorkerCheckpointRoots(t *testing.T) {
 	if e = os.WriteFile(filepath.Join(dir, "saved"), []byte("progress"), 0600); e != nil {
 		t.Fatal(e)
 	}
+	if e = os.WriteFile(filepath.Join(dir, "generation.json"), []byte(`{"myce_checkpoint":{"generation":1}}`), 0600); e != nil {
+		t.Fatal(e)
+	}
 	if e = q.Leave("linux", true); e != nil {
 		t.Fatal(e)
 	}

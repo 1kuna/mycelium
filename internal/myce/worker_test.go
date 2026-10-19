@@ -148,7 +148,7 @@ if [ "$MYCE_ATTEMPT" -gt 1 ]; then
   exit 0
 fi
 exec 3<> "$SAVE_FIFO"
-trap 'echo term > "$STOP_FILE"; read gate <&3; echo saved > "$MYCE_CHECKPOINT_DIR/saved"; exit 0' TERM
+trap 'echo term > "$STOP_FILE"; read gate <&3; echo saved > "$MYCE_CHECKPOINT_DIR/saved"; echo "{\"myce_checkpoint\":{\"generation\":$MYCE_ATTEMPT}}" > "$MYCE_CHECKPOINT_DIR/generation.json.tmp"; mv "$MYCE_CHECKPOINT_DIR/generation.json.tmp" "$MYCE_CHECKPOINT_DIR/generation.json"; exit 0' TERM
 echo ready
 while :; do read line <&3; done`}
 	s.Run.Env = map[string]string{"SAVE_FIFO": fifo, "STOP_FILE": stopping}

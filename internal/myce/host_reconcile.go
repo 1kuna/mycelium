@@ -112,7 +112,7 @@ func hostCustody(workers []HostWorker) ([]HostObligation, []Result, []string, er
 		var st workerState
 		b, err := os.ReadFile(filepath.Join(w.State, "state.json"))
 		if err == nil {
-			err = json.Unmarshal(b, &st)
+			err = decodeWorkerState(b, &st)
 		}
 		if err != nil && !errors.Is(err, os.ErrNotExist) {
 			return nil, nil, nil, err

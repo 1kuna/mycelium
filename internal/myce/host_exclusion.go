@@ -155,7 +155,7 @@ func readHostExclusionInput(v HostInvocation) (*HostExclusionInput, error) {
 			}
 			b, e := readHostRegular(filepath.Join(w.State, entry.Name()), v.Account.UID, 1<<20)
 			var st dockerExecution
-			if e != nil || json.Unmarshal(b, &st) != nil || st.Identity == "" || entry.Name() != st.Identity+".docker.json" || st.Endpoint == "" {
+			if e != nil || json.Unmarshal(b, &st) != nil || st.Owner == nil || st.Owner.ID == "" || st.Owner.Machine == "" || st.Owner.Session == "" || st.Owner.Attempt <= 0 || st.Identity == "" || entry.Name() != st.Identity+".docker.json" || st.Endpoint == "" {
 				problem("custody", "docker_custody_unreadable")
 				continue
 			}
@@ -169,7 +169,7 @@ func readHostExclusionInput(v HostInvocation) (*HostExclusionInput, error) {
 	addRecord := func(path string) {
 		b, e := readHostRegular(path, v.Account.UID, 1<<20)
 		var st workerState
-		if e != nil || json.Unmarshal(b, &st) != nil {
+		if e != nil || decodeWorkerState(b, &st) != nil {
 			problem("custody", "native_custody_unreadable")
 			return
 		}

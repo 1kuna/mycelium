@@ -29,10 +29,9 @@ func (q *Queue) expireEngineLoad(s *ModelSlot) {
 	if s.State != "loading" {
 		return
 	}
+	// Missing durable deadlines are conversion blockers; never invent one here.
 	if s.LoadUntil == nil {
-		// Upgrade persisted slots conservatively: initialize once, never extend
-		// this deadline on subsequent heartbeats or queue restarts.
-		s.LoadUntil = q.engineLoadDeadline()
+		return
 	}
 	if q.clock.Now().Before(*s.LoadUntil) {
 		return

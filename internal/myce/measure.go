@@ -134,7 +134,7 @@ func Measure(ctx context.Context, o MeasureOptions) (report Measurement, err err
 				return report, err
 			}
 			var saved workerState
-			if err = decodeWorkerJSON(data, &saved); err != nil {
+			if err = decodeWorkerState(data, &saved); err != nil {
 				return report, err
 			}
 			if saved.PID != 0 {

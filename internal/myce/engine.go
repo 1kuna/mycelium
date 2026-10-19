@@ -393,7 +393,7 @@ func cleanupEngines(dir string, clock Clock) error {
 			return e
 		}
 		var st workerState
-		if e = decodeWorkerJSON(data, &st); e != nil {
+		if e = decodeWorkerState(data, &st); e != nil {
 			return e
 		}
 		s := workerStore{dir: dir, state: st}

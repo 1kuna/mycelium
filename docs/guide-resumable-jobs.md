@@ -49,11 +49,11 @@ The Python `Checkpoint` helper does this automatically and returns only `value`
 when loading. Keep a single writer per attempt. For non-JSON payloads, atomically
 publish one JSON manifest with the same `myce_checkpoint` metadata referencing
 immutable payload files; publish the manifest only after its payload is durable.
-Temporary `.tmp` files never count. Unsequenced legacy saves still load at
-generation zero: Python chooses the lexicographically greatest JSON filename on
-a tie; worker resume chooses the greatest numeric prior attempt (direct job-folder
-saves lose a tie). Reconciliation retains the current execution on a tie. These
-are deterministic compatibility rules, not estimates of legacy progress.
+Temporary `.tmp` files never count. A nonempty checkpoint without a positive
+generation blocks worker resume and offline conversion. Preserve it inertly until
+the job owner can establish an exact generation or finish that attempt under its
+original version. Neither the worker nor converter ranks it using mtime, filename
+order or attempt number. See [offline conversion](guide-state-conversion.md).
 Invalid generation metadata fails visibly instead of using timestamps. A job must also make its output writes safe to retry.
 
 On Linux CIFS/SMB mounts, the Go checkpoint-copy path and Python helper skip

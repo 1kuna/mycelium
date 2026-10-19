@@ -193,7 +193,7 @@ func (h HostControl) workers() ([]HostWorker, error) {
 		}
 		if b, e := readHostRegular(filepath.Join(r.State, "state.json"), uint32(os.Geteuid()), 1<<20); e == nil {
 			var st workerState
-			if e = json.Unmarshal(b, &st); e != nil {
+			if e = decodeWorkerState(b, &st); e != nil {
 				return nil, e
 			}
 			if r.Session == "" {
@@ -617,7 +617,7 @@ func hostProcessRecords(workers []HostWorker, commandDirs ...string) ([]workerSt
 			return
 		}
 		var st workerState
-		if err = json.Unmarshal(b, &st); err != nil {
+		if err = decodeWorkerState(b, &st); err != nil {
 			errs = append(errs, fmt.Errorf("process record %s: %w", path, err))
 			return
 		}
