@@ -77,6 +77,7 @@ func TestHostMemoryUnifiedPool(t *testing.T) {
 	m.FreeMemoryGB = 32
 	m.HostID = "mac"
 	m.UnifiedMemory = true
+	m.CapabilityProfile.MemoryLayout = "unified"
 	m.HostMemoryMeasured = true
 	m.HostAvailableMemoryGB = 12
 	check(t, q, m, nil)
@@ -239,6 +240,7 @@ func TestHostMemoryUnifiedDoesNotChargeGPUtwice(t *testing.T) {
 	m.FreeMemoryGB = 12
 	m.HostID = "mac"
 	m.UnifiedMemory = true
+	m.CapabilityProfile.MemoryLayout = "unified"
 	m.HostMemoryMeasured = true
 	m.HostAvailableMemoryGB = 12
 	check(t, q, m, nil)

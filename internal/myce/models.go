@@ -309,7 +309,7 @@ func (q *Queue) modelReservation(m *Machine, reports []ModelReport) float64 {
 	}
 	resident := map[string]bool{}
 	for _, r := range reports {
-		if slot := q.s.ModelSlots[slotKey(m.ID, r.Name)]; slot != nil && r.Attempt != "" && slot.Attempt != r.Attempt {
+		if slot := q.s.ModelSlots[slotKey(m.ID, r.Name)]; slot != nil && (r.Attempt == "" || slot.Attempt != r.Attempt) {
 			continue
 		}
 		if contains([]string{"ready", "draining", "unloading", "unload_failed"}, r.State) {
@@ -339,7 +339,7 @@ func (q *Queue) reconcileModels(m *Machine, reports []ModelReport) {
 		}
 		for _, r := range reports {
 			if r.Name == s.Model {
-				if r.Attempt != "" && r.Attempt != s.Attempt {
+				if r.Attempt == "" || r.Attempt != s.Attempt {
 					continue
 				}
 				if r.CallsMeasured && r.InFlight == 0 {

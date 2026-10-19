@@ -179,7 +179,7 @@ func TestEnvironmentFailedBuildLogs(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	_, e = q.Checkin(Checkin{Machine: Machine{ID: "worker", Session: "session", GPU: "fake", FreeMemoryGB: 64, EnvironmentBuilder: true, EnvironmentReports: []EnvironmentReport{{Key: r.Key, State: "failed", Error: "build exit 9", Log: "compiler output\n"}}}})
+	_, e = q.Checkin(Checkin{Machine: Machine{CapabilityProfile: machine("profile", "fake").CapabilityProfile, ID: "worker", Session: "session", GPU: "fake", FreeMemoryGB: 64, EnvironmentBuilder: true, EnvironmentReports: []EnvironmentReport{{Key: r.Key, State: "failed", Error: "build exit 9", Log: "compiler output\n"}}}})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -210,7 +210,7 @@ func TestEnvironmentWorkerBuildAndExecute(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
-	w := Worker{StateDir: t.TempDir(), Client: Client{URL: server, Token: "test"}, Machine: Machine{ID: "env-worker", GPU: "fake", FreeMemoryGB: 64}, Interval: 10 * time.Millisecond}
+	w := Worker{StateDir: t.TempDir(), Client: Client{URL: server, Token: "test"}, Machine: Machine{CapabilityProfile: machine("profile", "fake").CapabilityProfile, ID: "env-worker", GPU: "fake", FreeMemoryGB: 64}, Interval: 10 * time.Millisecond}
 	go func() { done <- w.Run(ctx) }()
 	deadline := time.Now().Add(10 * time.Second)
 	for {

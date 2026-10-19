@@ -224,12 +224,16 @@ func (w Worker) checkAvailability() error {
 func machineAvailability(m *Machine) *Availability {
 	if m == nil || m.CapabilityProfile == nil {
 		return nil
-	} // V2/dedicated legacy contract.
+	}
 	return m.CapabilityProfile.Availability
 }
 func availabilityBlocked(m *Machine) bool {
 	a := machineAvailability(m)
-	return a != nil && !a.Available
+	if m == nil {
+		return true
+	}
+	_, _, capacityKnown := capabilityCapacity(m)
+	return !capacityKnown || a != nil && !a.Available
 }
 
 // Limits are admission-only and shared by all resource workers on this host.

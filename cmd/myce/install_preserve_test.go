@@ -81,7 +81,7 @@ func savedInstallFixture(t *testing.T, roles ...string) (myce.ServiceConfig, myc
 	if err = os.WriteFile(c.Config, data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	data, _ = json.Marshal(map[string]string{"token": "synthetic-install-fixture"})
+	data = []byte("MYCE_TOKEN=synthetic-install-fixture\nMYCE_QUEUE=" + c.Queue + "\n")
 	os.WriteFile(c.Credentials, data, 0600)
 	os.WriteFile(c.Binary, []byte("old binary"), 0700)
 	os.MkdirAll(filepath.Dir(c.Service), 0700)

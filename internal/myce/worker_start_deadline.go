@@ -14,9 +14,6 @@ func (w Worker) authorizeStart(j Job, session string) error {
 	if err := w.checkAvailability(); err != nil {
 		return err
 	}
-	if j.Spec.StartBy == nil {
-		return nil
-	}
 	if reason, err := HostDisabled(w.HostStateDir); err != nil {
 		return err
 	} else if reason != "" {

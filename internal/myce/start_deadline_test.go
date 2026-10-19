@@ -176,14 +176,14 @@ func TestProductionStartDeadlinePermit(t *testing.T) {
 	defer server.Close()
 	var permit map[string]any
 	client := Client{URL: server.URL, Token: "test"}
-	if err := client.Call(context.Background(), "POST", "/api/workers/start-permit", result(assigned, true), &permit); err != nil {
+	if err := client.Call(context.Background(), "POST", "/api/workers/started", result(assigned, true), &permit); err != nil {
 		t.Fatalf("in-time permit: %v", err)
 	}
-	if permit["remaining_seconds"] != float64(150) {
+	if permit["start_gate"] != startGateProtocol {
 		t.Fatalf("permit: %+v", permit)
 	}
 	c.Advance(ProductionStartTimeout)
-	err := (Client{URL: server.URL, Token: "test"}).Call(context.Background(), "POST", "/api/workers/start-permit", result(assigned, true), &permit)
+	err := (Client{URL: server.URL, Token: "test"}).Call(context.Background(), "POST", "/api/workers/started", result(assigned, true), &permit)
 	if err == nil {
 		t.Fatal("late permit granted")
 	}
@@ -432,14 +432,14 @@ func TestProductionStartDeadlineOwnDockerPreparationPermit(t *testing.T) {
 	}
 	m.DockerCleanup = "creating"
 	check(t, q, m, assigned)
-	if _, err := q.PermitStart(result(assigned, true)); err != nil {
+	if err := q.Started(result(assigned, true)); err != nil {
 		t.Fatalf("own preparation rejected: %v", err)
 	}
 	sibling := machine("sibling", "xpu")
 	sibling.HostID = "b70"
 	sibling.DockerCleanup = "cleanup unconfirmed"
 	check(t, q, sibling, nil)
-	if _, err := q.PermitStart(result(assigned, true)); err == nil {
+	if err := q.Started(result(assigned, true)); err == nil {
 		t.Fatal("unknown sibling cleanup ignored")
 	}
 }

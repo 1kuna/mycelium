@@ -12,8 +12,7 @@ import (
 func capabilityCapacity(m *Machine) (accelerator, system float64, ok bool) {
 	p := m.CapabilityProfile
 	if p == nil {
-		// V2 workers keep their existing contract.
-		return m.TotalMemoryGB, m.HostAvailableMemoryGB, true
+		return 0, 0, false
 	}
 	if p.MemoryLayout != "unified" && p.MemoryLayout != "separate" {
 		return 0, 0, false

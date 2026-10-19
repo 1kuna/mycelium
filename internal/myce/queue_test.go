@@ -55,7 +55,7 @@ func submit(t *testing.T, q *Queue, s Spec) *Job {
 	return j
 }
 func machine(id, gpu string) Machine {
-	return Machine{ID: id, Session: "session-" + id, GPU: gpu, FreeMemoryGB: 8}
+	return Machine{ID: id, Session: "session-" + id, GPU: gpu, FreeMemoryGB: 8, CapabilityProfile: &CapabilityProfile{Version: 0, MemoryLayout: "separate", SystemMemoryBytes: 64 << 30, Accelerators: []AcceleratorProfile{{Type: gpu, MemoryBytes: 64 << 30}}}}
 }
 func check(t *testing.T, q *Queue, m Machine, r *Job) Reply {
 	t.Helper()

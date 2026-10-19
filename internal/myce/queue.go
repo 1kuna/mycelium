@@ -583,6 +583,9 @@ func (q *Queue) Tick() error {
 	return q.pruneBatchLogs()
 }
 func (q *Queue) Checkin(c Checkin) (Reply, error) {
+	if err := validateCurrentCheckin(c); err != nil {
+		return Reply{}, err
+	}
 	reply := Reply{FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
 	var durableProgress int64
 	var progressErr error
@@ -1471,7 +1474,7 @@ func (q *Queue) Started(r Result) error {
 			rejected = ErrStale
 			return nil
 		}
-		if j.Spec.StartBy != nil && !q.startPlacementAllowed(j) {
+		if !q.startPlacementAllowed(j) {
 			rejected = ErrStale
 			return nil
 		}

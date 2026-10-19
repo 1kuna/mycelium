@@ -203,7 +203,7 @@ func TestPrivacyPinnedFailureBackoffAndStatus(t *testing.T) {
 	}
 	fail := func() Reply {
 		t.Helper()
-		r, err := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", State: "failed", Error: "synthetic-secret"}}})
+		r, err := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", Attempt: currentTestReportAttempt(q, m, "test"), State: "failed", Error: "synthetic-secret"}}})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -248,7 +248,7 @@ func TestPrivacyPinnedFailureBackoffAndStatus(t *testing.T) {
 		t.Fatal("successful retry retained failure")
 	}
 	// Cleanup failures must never be retried as though memory were free.
-	_, err := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", State: "unload_failed", Error: "synthetic-secret"}}})
+	_, err := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", Attempt: currentTestReportAttempt(q, m, "test"), State: "unload_failed", Error: "synthetic-secret"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -284,7 +284,7 @@ func TestPrivacyWorkerRetriesCleanedFailedModel(t *testing.T) {
 	rt.load(ctx, wm)
 	rt.config = ModelConfig{Wait: time.Minute, Models: []Model{{Name: "test", Engine: "fake", MemoryGB: 8}}}
 	rt.engineFactory = func(Model) Engine { return &lifecycleEngine{} }
-	rt.sync([]ModelSlot{{Model: "test", Session: "session", State: "loading"}})
+	rt.sync([]ModelSlot{{Attempt: "test-engine", Model: "test", Session: "session", State: "loading"}})
 	rt.wg.Wait()
 	reports, _ := rt.report()
 	if len(reports) != 1 || reports[0].State != "ready" || old.unloads.Load() != 1 {
@@ -420,7 +420,7 @@ func TestPrivacyStatusScrubsWorkerErrors(t *testing.T) {
 		t.Fatal(err)
 	}
 	m.CacheError = strings.Repeat("synthetic-secret", 1000)
-	if _, err := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", State: "failed", Error: m.CacheError}}}); err != nil {
+	if _, err := q.Checkin(Checkin{Machine: m, ModelReports: []ModelReport{{Name: "test", Attempt: currentTestReportAttempt(q, m, "test"), State: "failed", Error: m.CacheError}}}); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{"/", "/api/status"} {

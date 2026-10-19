@@ -321,7 +321,7 @@ type Machine struct {
 	Leaving                     bool                `json:"leaving"`
 	Gone                        bool                `json:"gone"`
 
-	// Per-local_source tri-state; omission preserves legacy approved_models semantics.
+	// Explicit per-local_source tri-state; omission never authorizes use.
 	ModelApprovalStates map[string]ModelApprovalState `json:"model_approval_states,omitempty"`
 }
 type Execution struct {

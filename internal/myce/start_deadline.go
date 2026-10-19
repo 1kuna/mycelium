@@ -112,36 +112,6 @@ func (q *Queue) startupReleaseDetail(host string) HoldDetail {
 	return detail
 }
 
-type StartPermit struct {
-	RemainingSeconds float64 `json:"remaining_seconds"`
-}
-
-// Legacy preparation probe; only Started commits the execution hand-off.
-func (q *Queue) PermitStart(r Result) (StartPermit, error) {
-	var permit StartPermit
-	var rejected error
-	err := q.updateMachine(r.Machine, func() error {
-		q.maintainStartDeadlines()
-		j, e := q.current(r)
-		if e != nil {
-			rejected = e
-			return nil
-		}
-		if cancelled(j) || j.State != "running" || !q.startPlacementAllowed(j) {
-			rejected = ErrStale
-			return nil
-		}
-		if j.Spec.StartBy != nil {
-			permit.RemainingSeconds = max(0, j.Spec.StartBy.Sub(q.clock.Now()).Seconds())
-		}
-		return nil
-	})
-	if err != nil {
-		return permit, err
-	}
-	return permit, rejected
-}
-
 func (q *Queue) startStatusReason(j *Job) string {
 	return q.startWaitingReason(j) + fmt.Sprintf("; %.0fs left to start", max(0, j.Spec.StartBy.Sub(q.clock.Now()).Seconds()))
 }

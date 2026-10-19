@@ -482,7 +482,7 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 		if token == "" {
 			return errors.New("set MYCE_TOKEN before installing")
 		}
-		credentialData, _ := json.Marshal(map[string]string{"token": token})
+		credentialData := []byte("MYCE_TOKEN=" + strconv.Quote(token) + "\nMYCE_QUEUE=" + strconv.Quote(c.Queue) + "\n")
 		if err = tx.put(c.Credentials, credentialData, 0600); err != nil {
 			return err
 		}
@@ -760,27 +760,11 @@ func ReadServiceToken(c ServiceConfig) (string, error) {
 		token, _, err := ReadFleetEnvironment(c.EnvironmentFile)
 		return token, err
 	}
-	st, e := os.Stat(c.Credentials)
-	if e != nil {
-		return "", e
+	token, _, err := ReadFleetEnvironment(c.Credentials)
+	if err != nil {
+		return "", errors.New("service credentials require a literal EnvironmentFile; convert old JSON credentials offline or reinstall")
 	}
-	if st.Mode().Perm()&0077 != 0 {
-		return "", errors.New("credentials file must be private (0600)")
-	}
-	b, e := os.ReadFile(c.Credentials)
-	if e != nil {
-		return "", e
-	}
-	var secret struct {
-		Token string `json:"token"`
-	}
-	if e = json.Unmarshal(b, &secret); e != nil {
-		return "", e
-	}
-	if secret.Token == "" {
-		return "", errors.New("missing service token")
-	}
-	return secret.Token, nil
+	return token, nil
 }
 func (c ServiceConfig) Args() []string {
 	args := []string{}

@@ -459,14 +459,14 @@ func TestProductionHoldRestartReconcilesModelInference(t *testing.T) {
 	p.AllowedMachines = []string{a.ID}
 	prod := submit(t, restarted, p)
 	a.FreeMemoryGB = 0
-	r, e := restarted.Checkin(Checkin{Machine: a, ModelReports: []ModelReport{{Name: "test", State: "ready", InFlight: 1, CallsMeasured: true}}})
+	r, e := restarted.Checkin(Checkin{Machine: a, ModelReports: []ModelReport{{Name: "test", Attempt: currentTestReportAttempt(restarted, a, "test"), State: "ready", InFlight: 1, CallsMeasured: true}}})
 	if e != nil {
 		t.Fatal(e)
 	}
 	if r.Job != nil || !strings.Contains(job(t, restarted, prod.ID).Reason, "release unknown") {
 		t.Fatal("restart inferred idle model")
 	}
-	r, e = restarted.Checkin(Checkin{Machine: a, ModelReports: []ModelReport{{Name: "test", State: "unloaded", CallsMeasured: true}}})
+	r, e = restarted.Checkin(Checkin{Machine: a, ModelReports: []ModelReport{{Name: "test", Attempt: currentTestReportAttempt(restarted, a, "test"), State: "unloaded", CallsMeasured: true}}})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -513,7 +513,7 @@ func TestProductionHoldWaitsForExperimentCallOnPinnedModel(t *testing.T) {
 	if check(t, q, b, nil).Job != nil {
 		t.Fatal("proxy completion is not a worker inference-release receipt")
 	}
-	if _, err := q.Checkin(Checkin{Machine: a, ModelReports: []ModelReport{{Name: "test", State: "ready", CallsMeasured: true}}}); err != nil {
+	if _, err := q.Checkin(Checkin{Machine: a, ModelReports: []ModelReport{{Name: "test", Attempt: currentTestReportAttempt(q, a, "test"), State: "ready", CallsMeasured: true}}}); err != nil {
 		t.Fatal(err)
 	}
 	if got := check(t, q, b, nil).Job; got == nil || got.ID != prod.ID {
