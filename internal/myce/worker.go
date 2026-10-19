@@ -1098,6 +1098,8 @@ func (w Worker) Run(stop context.Context) error {
 				}
 				running = &Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt, Progress: progress}
 			}
+			m.HostRevision = w.hostRevision
+			m.HostBoot, _ = HostBootID()
 			var reply Reply
 			if e := CheckHostRevision(w.HostStateDir, w.hostRevision); e != nil {
 				disableCancel()

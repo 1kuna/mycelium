@@ -2,250 +2,22 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"mycelium/internal/myce"
 	"os"
 	"path/filepath"
-	"slices"
 	"strconv"
 	"strings"
 	"time"
-
-	"mycelium/internal/myce"
 )
 
+// Retired forms have no production dispatch; retained only for a migration diagnostic.
 func hostCommand(args []string, probe myce.MachineProbe, out io.Writer) error {
-	f := flag.NewFlagSet(args[0], flag.ContinueOnError)
-	unit := f.String("unit", "", "target one registered Mycelium worker unit (Linux only)")
-	dir := f.String("host-state-dir", "", "shared local host control directory (default ~/.local/share/myce)")
-	config := f.String("config", "", "installed worker config (auto-detected by default)")
-	state := f.String("state-dir", "", "worker spool to adopt from before this upgrade")
-	hostname, _ := os.Hostname()
-	host := f.String("host-id", hostname, "physical host identity (for adopted worker state)")
-	name := f.String("name", hostname, "worker name (for adopted worker state)")
-	queue := f.String("queue", env("MYCE_QUEUE", "http://127.0.0.1:7331"), "queue address")
-	reason := f.String("reason", "disabled by operator", "operator reason")
-	grace := f.Duration("grace", 10*time.Second, "checkpoint grace, from 0 to 1m")
-	timeout := f.Duration("timeout", 0, "overall disable deadline (default grace + 20s)")
-	now := f.Bool("now", false, "kill owned work immediately")
-	if err := f.Parse(args[1:]); err != nil {
-		return err
-	}
-	if f.NArg() != 0 {
-		return errors.New("unexpected host-control arguments")
-	}
-	if len(args) > 0 && args[0] == "enable" {
-		return errors.New("myce enable is retired; use myce host open --expect-revision with the v3 host CLI (S08)")
-	}
-	if os.Geteuid() == 0 {
-		return myce.ErrHostIdentity
-	}
-	if *now {
-		*grace = 0
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return err
-	}
-	if *dir == "" {
-		*dir, err = myce.HostStateDirectory()
-		if err != nil {
-			return err
-		}
-	}
-
-	if *config != "" {
-		installed, e := myce.ReadServiceConfig(*config)
-		// A broken config must not delay disable's durable local fence.
-		if e != nil && args[0] != "disable" {
-			return e
-		}
-		explicitDir, explicitHost := false, false
-		f.Visit(func(v *flag.Flag) {
-			if v.Name == "host-state-dir" {
-				explicitDir = true
-			}
-			if v.Name == "host-id" {
-				explicitHost = true
-			}
-		})
-		if !explicitDir && installed.HostStateDir != "" {
-			*dir = installed.HostStateDir
-		}
-		if !explicitHost && installed.HostID != "" {
-			*host = installed.HostID
-		}
-	}
-	if *unit != "" {
-		return errors.New("unit selection is diagnostic only; control the whole host")
-	}
-	token := env("MYCE_TOKEN", "")
-	var c myce.ServiceConfig
-	service := ""
-	prepare := func() error {
-		if *config == "" {
-			candidate := filepath.Join(home, ".local", "share", "mycelium", "worker", "config.json")
-			if _, e := os.Stat(candidate); e == nil {
-				*config = candidate
-			} else if !errors.Is(e, os.ErrNotExist) {
-				return e
-			}
-		}
-		if *config != "" {
-			c, err = myce.ReadServiceConfig(*config)
-			if err != nil {
-				return err
-			}
-			if c.Role != "worker" {
-				return errors.New("host control requires a worker config")
-			}
-			if token == "" {
-				token, _ = myce.ReadServiceToken(c)
-			}
-			*state, *name, *queue = c.State, c.Name, c.Queue
-			if c.EnvironmentFile != "" {
-				_, address, e := myce.ReadFleetEnvironment(c.EnvironmentFile)
-				if e != nil {
-					return e
-				}
-				*queue = address
-			}
-		}
-		if *state == "" {
-			candidate := filepath.Join(home, ".local", "share", "myce", "worker")
-			if _, e := os.Stat(filepath.Join(candidate, "state.json")); e == nil {
-				*state = candidate
-			}
-		}
-		if *state != "" && c.State == "" {
-			return errors.New("legacy adoption is retired; run myce host convert offline")
-		}
-		service = c.Service
-		if service == "" {
-			if probe.OS == "linux" {
-				service = filepath.Join(home, ".config", "systemd", "user", "myce-worker.service")
-			} else {
-				service = filepath.Join(home, "Library", "LaunchAgents", "local.myce.worker.plist")
-			}
-			if _, e := os.Stat(service); errors.Is(e, os.ErrNotExist) {
-				service = ""
-			} else if e != nil {
-				return e
-			}
-		}
-		return nil
-	}
-	units := []string{}
-	resolveUnits := func() error {
-		if probe.OS != "linux" {
-			return nil
-		}
-		var e error
-		units, e = myce.WorkerUnits(*dir, *unit)
-		if e != nil {
-			return e
-		}
-		if len(units) == 0 && service != "" {
-			candidate := filepath.Base(service)
-			if !myce.ValidWorkerUnit(candidate) {
-				return errors.New("refusing non-Mycelium worker unit")
-			}
-			units = []string{candidate}
-		}
-		return nil
-	}
-	ctx := context.Background()
-	if *timeout < 0 {
-		return errors.New("timeout must be positive")
-	}
-	h := myce.HostControl{Docker: true, Timeout: *timeout, Dir: *dir, Prepare: prepare}
-	if args[0] == "disable" {
-		h.ResolveServices = func() (map[string]myce.HostService, error) {
-			if err := resolveUnits(); err != nil {
-				return nil, err
-			}
-			services := map[string]myce.HostService{}
-			for _, u := range units {
-				services[u] = &myce.SystemdHostService{Unit: u, Command: probe.Command}
-			}
-			return services, nil
-		}
-		h.StopSecondary = func(ctx context.Context) error {
-			if probe.OS != "linux" {
-				return hostService(ctx, probe, service, false)
-			}
-			return nil
-		}
-		r, cleanupErr := h.Disable(ctx, *reason, *grace)
-
-		reportedUnits := []string{}
-		for u := range r.Units {
-			reportedUnits = append(reportedUnits, u)
-		}
-		slices.Sort(reportedUnits)
-		for _, u := range reportedUnits {
-			result := r.Units[u]
-			if result == "" {
-				result = "unconfirmed (overall cleanup did not finish)"
-			}
-			fmt.Fprintf(out, "Unit %s: %s\n", u, result)
-		}
-		if r.BestEffort {
-			fmt.Fprintln(out, "Not running under the systemd service; ownership is best-effort.")
-		}
-		if r.Confirmed {
-			fmt.Fprintln(out, "Host cleanup confirmed: empty systemd worker cgroup and Mycelium Docker execution gone (or Docker not applicable).")
-		}
-		if r.Docker != "" {
-			fmt.Fprintln(out, "Docker:", r.Docker)
-		}
-		err = cleanupErr
-		confirmation := "none"
-		if err != nil {
-			confirmation = err.Error()
-		}
-		fmt.Fprintf(out, "Disabled: stopped %d owned process groups; unconfirmed: %s. State: %s.\n", r.Stopped, confirmation, filepath.Join(*dir, "host-state.json"))
-		return err
-	}
-	if err = prepare(); err != nil {
-		return err
-	}
-	if err = h.Enable(ctx); err != nil {
-		return err
-	}
-	if err = resolveUnits(); err != nil {
-		return err
-	}
-	if probe.OS != "linux" {
-		units = []string{service}
-	}
-	var startErrors []error
-	for _, u := range units {
-		if e := hostService(ctx, probe, u, true); e != nil {
-			startErrors = append(startErrors, e)
-		}
-	}
-	if err = errors.Join(startErrors...); err != nil {
-		fmt.Fprintf(out, "Enabled locally. Start worker: %s\n", hostServiceCommand(probe.OS, service, true))
-		return err
-	}
-	if service == "" && len(units) == 0 {
-		commands, e := myce.HostResumeCommands(*dir)
-		if e != nil {
-			return e
-		}
-		if len(commands) == 0 {
-			fmt.Fprintln(out, "Enabled locally. Start worker: myce join (with the original worker options).")
-		}
-		for _, cmd := range commands {
-			fmt.Fprintln(out, "Enabled locally. Start worker:", shellCommand(cmd))
-		}
-	} else {
-		fmt.Fprintln(out, "Enabled: worker service start requested; verify myce status shows joined.")
-	}
-	return nil
+	return errors.New("myce disable/enable is retired; use myce host open --expect-revision or myce host close --local")
 }
 
 func hostService(ctx context.Context, p myce.MachineProbe, path string, start bool) error {
@@ -302,4 +74,220 @@ func safeJoinCommand(args []string) []string {
 		out = append(out, args[i])
 	}
 	return out
+}
+
+func hostEnvelopeCommand(args []string, probe myce.MachineProbe, out io.Writer, resolver myce.HostIdentityResolver, launch myce.HostChildLauncher) error {
+	return hostEnvelopeCommandWithHandler(args, probe, out, resolver, launch, hostMutationExecutor(probe).Execute)
+}
+
+func hostEnvelopeCommandWithHandler(args []string, probe myce.MachineProbe, out io.Writer, resolver myce.HostIdentityResolver, launch myce.HostChildLauncher, handler myce.HostMutationHandler) error {
+	return hostEnvelopeCommandWithObservation(args, probe, out, resolver, launch, handler, nil)
+}
+
+func hostEnvelopeCommandWithObservation(args []string, probe myce.MachineProbe, out io.Writer, resolver myce.HostIdentityResolver, launch myce.HostChildLauncher, handler myce.HostMutationHandler, observe func(context.Context, myce.HostInvocation) (myce.HostExclusionReport, error)) (retErr error) {
+	return hostEnvelopeCommandWithTiming(args, probe, out, resolver, launch, handler, observe, myce.RealClock{}, waitPause)
+}
+
+// As with waitJobs, Clock decides the deadline and pause only paces polling.
+// Context deadlines bound external I/O to the remaining command budget.
+func hostEnvelopeCommandWithTiming(args []string, probe myce.MachineProbe, out io.Writer, resolver myce.HostIdentityResolver, launch myce.HostChildLauncher, handler myce.HostMutationHandler, observe func(context.Context, myce.HostInvocation) (myce.HostExclusionReport, error), clock myce.Clock, pause func(context.Context, time.Duration) error) (retErr error) {
+	op := "status"
+	if len(args) > 0 && (args[0] == "close" || args[0] == "open" || args[0] == "status") {
+		op = args[0]
+	}
+	envelope := myce.UnknownHostEnvelope(op, clock)
+	jsonOutput := false
+	// Parse errors must still honor --json, even if it follows a bad flag.
+	for _, arg := range args {
+		if arg == "--json" || arg == "--json=true" {
+			jsonOutput = true
+		}
+	}
+	defer func() {
+		if retErr != nil {
+			envelope.Errors = append(envelope.Errors, myce.HostEnvelopeError(retErr))
+		}
+		if jsonOutput {
+			if err := json.NewEncoder(out).Encode(envelope); err != nil {
+				retErr = err
+			}
+		} else {
+			state := "unknown"
+			if envelope.Desired.State != nil {
+				state = *envelope.Desired.State
+			}
+			_, err := fmt.Fprintf(out, "Host %s: local exclusion %s; settlement %s\n", state, envelope.LocalExclusion, envelope.Settlement)
+			if err != nil {
+				retErr = err
+			}
+		}
+	}()
+	if len(args) == 0 || args[0] != op {
+		return waitError(2, "usage: myce host close|open|status --local")
+	}
+	f := flag.NewFlagSet("host "+op, flag.ContinueOnError)
+	f.SetOutput(io.Discard)
+	local := f.Bool("local", false, "control this host")
+	user := f.String("worker-user", "", "installed worker account")
+	config := f.String("config", "", "installed worker config")
+	state := f.String("state-dir", "", "existing worker-owned host directory")
+	reason := f.String("reason", "closed by operator", "close reason")
+	grace := f.Duration("grace", 10*time.Second, "checkpoint grace")
+	timeout := f.Duration("timeout", 30*time.Second, "total command budget")
+	revision := f.Uint64("expect-revision", 0, "durable desired revision")
+	waitReleased := f.Bool("wait-released", false, "wait for local exclusion")
+	expect := f.String("expect", "", "closed or ready")
+	wait := f.Bool("wait", false, "wait for expectation")
+	f.BoolVar(&jsonOutput, "json", jsonOutput, "JSON envelope")
+	if err := f.Parse(args[1:]); err != nil {
+		return waitError(2, "invalid host command flags")
+	}
+	hasRevision := false
+	f.Visit(func(v *flag.Flag) {
+		if v.Name == "expect-revision" {
+			hasRevision = true
+		}
+	})
+	if !*local || f.NArg() != 0 || *timeout <= 0 || *grace < 0 || *grace > time.Minute || op == "open" && !hasRevision || op != "close" && *waitReleased || op != "status" && (*wait || *expect != "") || *wait && *expect == "" || *expect != "" && *expect != "closed" && *expect != "ready" {
+		return waitError(2, "invalid host command arguments")
+	}
+	// This deadline is created once, before identity/config resolution.
+	deadline := clock.Now().Add(*timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
+	defer cancel()
+	v, err := resolver.Resolve(*user, *config, *state)
+	if err != nil {
+		return err
+	}
+	mutate := func(m myce.HostMutation) (myce.HostMutationResult, error) {
+		remaining := deadline.Sub(clock.Now())
+		if remaining <= 0 || ctx.Err() != nil {
+			return myce.HostMutationResult{}, myce.ErrHostDeadline
+		}
+		callCtx, callCancel := context.WithTimeout(ctx, remaining)
+		defer callCancel()
+		return v.Mutate(callCtx, m, launch, handler)
+	}
+	accepted := (*uint64)(nil)
+	if op != "status" {
+		m := myce.HostMutation{Operation: op, Reason: *reason, Grace: *grace, Timeout: *timeout, Expected: myce.HostRevision{Revision: *revision}}
+		if op == "close" {
+			m.Expected = myce.HostRevision{}
+			if hasRevision {
+				m.CloseExpected = &myce.HostRevision{Revision: *revision}
+			}
+		}
+		r, mutationErr := mutate(m)
+		if r.Revision > 0 {
+			accepted = &r.Revision
+		}
+		if v.Privileged && op == "close" && mutationErr == nil {
+			observation, oe := v.InspectExclusion(ctx, launch, handler, myce.LocalHostKernelReaders())
+			if oe == nil {
+				_, oe = mutate(myce.HostMutation{Operation: "record-exclusion", Evidence: &observation})
+			}
+			if oe != nil {
+				mutationErr = oe
+			}
+		}
+		if mutationErr != nil {
+			// Read current durable state on CAS rejection; this accessor has no writes.
+			if ctx.Err() == nil && (errors.Is(mutationErr, myce.ErrHostRevision) || errors.Is(mutationErr, myce.ErrPreviousCloseUnsettled) || accepted != nil) {
+				if snapshot, se := mutate(myce.HostMutation{Operation: "status"}); se == nil && snapshot.Envelope != nil {
+					envelope = *snapshot.Envelope
+					if v.Privileged {
+						envelope.ClearExclusion()
+					}
+				}
+			}
+			envelope.Command = op
+			envelope.Accepted = accepted
+			if errors.Is(mutationErr, myce.ErrHostRevision) && accepted == nil {
+				envelope.Accepted = nil
+				return &exitError{3, mutationErr}
+			}
+			if accepted != nil && !*waitReleased && !errors.Is(mutationErr, myce.ErrHostDeadline) && ctx.Err() == nil {
+				envelope.Errors = append(envelope.Errors, myce.HostEnvelopeError(mutationErr))
+				return nil
+			}
+			return mutationErr
+		}
+	}
+	for {
+		remaining := deadline.Sub(clock.Now())
+		if remaining <= 0 || ctx.Err() != nil {
+			return myce.ErrHostDeadline
+		}
+		readCtx, readCancel := context.WithTimeout(ctx, min(remaining, myce.HostObservationWindow))
+		r, se := v.Mutate(readCtx, myce.HostMutation{Operation: "status"}, launch, handler)
+		readCancel()
+		if se != nil {
+			envelope.Command = op
+			envelope.Accepted = accepted
+			return se
+		}
+		if r.Envelope == nil {
+			return myce.ErrHostChild
+		}
+		envelope = *r.Envelope
+		envelope.Command = op
+		envelope.Accepted = accepted
+		if v.Privileged || observe != nil {
+			envelope.ClearExclusion()
+			observationBudget := min(deadline.Sub(clock.Now()), envelope.At.Add(myce.HostObservationWindow).Sub(clock.Now()))
+			if observationBudget <= 0 {
+				return myce.ErrHostDeadline
+			}
+			observeCtx, observeCancel := context.WithTimeout(ctx, observationBudget)
+			var observation myce.HostExclusionReport
+			var oe error
+			if observe != nil {
+				observation, oe = observe(observeCtx, v)
+			} else {
+				observation, oe = v.InspectExclusion(observeCtx, launch, handler, myce.LocalHostKernelReaders())
+			}
+			observeCancel()
+			if oe != nil {
+				envelope.Errors = append(envelope.Errors, myce.HostEnvelopeError(oe))
+			} else {
+				envelope.ApplyExclusion(&observation, clock.Now())
+			}
+		}
+		if v.Privileged || observe != nil {
+			fence, err := mutate(myce.HostMutation{Operation: "resolve"})
+			if err != nil {
+				envelope.ClearExclusion()
+				return err
+			}
+			if envelope.Desired.Revision == nil || fence.Revision != *envelope.Desired.Revision || envelope.Operation == nil || fence.Operation != *envelope.Operation {
+				envelope.ClearExclusion()
+				return myce.ErrHostRevision
+			}
+		}
+		envelope.FinishObservation(clock.Now())
+		if ctx.Err() != nil || !clock.Now().Before(deadline) {
+			return myce.ErrHostDeadline
+		}
+		satisfied := true
+		if *waitReleased {
+			satisfied = envelope.LocalExclusion == "PASS"
+		}
+		if *expect == "ready" {
+			satisfied = envelope.Ready != nil && *envelope.Ready
+		}
+		// WP4 supplies the complete closed rest verdict. This local readiness seam
+		// never promotes local exclusion plus a cached acknowledgement to rest PASS.
+		if *expect == "closed" {
+			satisfied = envelope.Desired.State != nil && *envelope.Desired.State == "closed" && envelope.Observed.State != nil && *envelope.Observed.State == "closed" && envelope.LocalExclusion == "PASS" && envelope.Settlement == "confirmed" && envelope.QueueRevision != nil && envelope.Desired.Revision != nil && *envelope.QueueRevision == *envelope.Desired.Revision
+		}
+		if satisfied {
+			return nil
+		}
+		if !*wait && !*waitReleased {
+			return waitError(1, "host expectation not satisfied")
+		}
+		if err := pause(ctx, min(25*time.Millisecond, deadline.Sub(clock.Now()))); err != nil {
+			return myce.ErrHostDeadline
+		}
+	}
 }

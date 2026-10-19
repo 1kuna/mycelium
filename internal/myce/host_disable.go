@@ -114,7 +114,8 @@ type HostControl struct {
 	Services           map[string]HostService
 	ResolveService     func() HostService
 	Service            HostService
-	Expected           HostRevision  // Open only.
+	Expected           HostRevision // Open only.
+	FreshClose         bool
 	CloseExpected      *HostRevision // Explicit close CAS; nil always accepts close.
 	Settled            func(HostIntent) error
 	accepted           HostRevision
@@ -246,7 +247,7 @@ func (h HostControl) disable(ctx context.Context, reason string, grace time.Dura
 	if reason == "" {
 		reason = "disabled by operator"
 	}
-	intent, err := changeHostIntent(h.Dir, h.Clock, hostIntentChange{Desired: "closed", CloseExpected: h.CloseExpected, Reason: reason, Grace: grace})
+	intent, err := changeHostIntentContext(ctx, h.Dir, h.Clock, hostIntentChange{Desired: "closed", FreshClose: h.FreshClose, CloseExpected: h.CloseExpected, Reason: reason, Grace: grace})
 	if err != nil {
 		return r, err
 	}
@@ -757,12 +758,12 @@ func (h HostControl) Enable(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	unlock, err := HostOpenReconcileLock(h.Dir)
+	unlock, err := hostOperationLockContext(ctx, h.Dir, "reconcile.lock")
 	if err != nil {
 		return err
 	}
 	defer unlock()
-	_, err = changeHostIntent(h.Dir, h.Clock, hostIntentChange{Desired: "open", Expected: h.Expected, Settled: h.Settled})
+	_, err = changeHostIntentContext(ctx, h.Dir, h.Clock, hostIntentChange{Desired: "open", Expected: h.Expected, Settled: h.Settled})
 	return err
 }
 
@@ -975,8 +976,15 @@ func (h HostControl) closedAction(fn func() error) error {
 }
 func hostOperationLockContext(ctx context.Context, dir, name string) (func(), error) {
 	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		unlock, err := hostOperationLock(dir, name, false)
 		if err == nil {
+			if err := ctx.Err(); err != nil {
+				unlock()
+				return nil, err
+			}
 			return unlock, nil
 		}
 		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {

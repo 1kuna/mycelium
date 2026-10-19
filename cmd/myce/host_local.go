@@ -32,6 +32,13 @@ func hostLocalCommand(args []string, probe myce.MachineProbe, out io.Writer) err
 	return hostLocalCommandWithIdentity(args, probe, out, myce.LocalHostIdentityResolver(), nil)
 }
 func hostLocalCommandWithIdentity(args []string, probe myce.MachineProbe, out io.Writer, resolver myce.HostIdentityResolver, launch myce.HostChildLauncher) error {
+	if len(args) > 0 && args[0] == "reconcile" {
+		return hostReconcileCommand(args, probe, out, resolver, launch)
+	}
+	return hostEnvelopeCommand(args, probe, out, resolver, launch)
+}
+
+func hostReconcileCommand(args []string, probe myce.MachineProbe, out io.Writer, resolver myce.HostIdentityResolver, launch myce.HostChildLauncher) error {
 	if len(args) == 0 {
 		return errors.New("usage: myce host close|open|status|reconcile --local --worker-user <user>")
 	}

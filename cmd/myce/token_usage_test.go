@@ -27,7 +27,7 @@ func TestCommandUsageDoesNotExposeSecrets(t *testing.T) {
 		"invite", "benchmark", "sim", "install worker", "install queue", "uninstall", "doctor",
 		"file put", "file get", "model fetch", "model approve-local", "model sync", "model pin", "model unpin",
 		"extension add", "extension list", "extension setup", "extension check",
-		"host reconcile", "host convert", "_host-start-check", "host-memory-budget show", "host-memory-budget configure 8", "host-memory-budget import",
+		"host close", "host open", "host status", "host reconcile", "host convert", "_host-start-check", "host-memory-budget show", "host-memory-budget configure 8", "host-memory-budget import",
 	}
 	for _, command := range commands {
 		for _, option := range []string{"-h", "--help", "--unknown-flag"} {
@@ -35,10 +35,12 @@ func TestCommandUsageDoesNotExposeSecrets(t *testing.T) {
 				args := append(strings.Fields(command), option)
 				stdout, stderr, err := captureUsageOutput(t, args)
 				waitHelp := command == "wait" && option != "--unknown-flag"
+				retired := command == "disable" || command == "enable"
+				envelope := command == "host close" || command == "host open" || command == "host status"
 				if err == nil && !waitHelp {
 					t.Fatal("expected help or flag error")
 				}
-				if option != "--unknown-flag" && !waitHelp && !errors.Is(err, flag.ErrHelp) {
+				if option != "--unknown-flag" && !waitHelp && !retired && !envelope && !errors.Is(err, flag.ErrHelp) {
 					t.Fatalf("expected ErrHelp, got %T", err)
 				}
 				for _, output := range []string{stdout, stderr} {
@@ -46,7 +48,15 @@ func TestCommandUsageDoesNotExposeSecrets(t *testing.T) {
 						t.Fatal("credential exposed in command output")
 					}
 				}
-				if !strings.Contains(stdout+stderr, "Usage of ") && !strings.Contains(stdout+stderr, "Usage: myce wait ") {
+				if retired {
+					if !strings.Contains(stdout+stderr, "retired host control; use myce host close|open --local") {
+						t.Fatal("missing retired-command diagnostic")
+					}
+				} else if envelope {
+					if exitCode(err) != 2 || !strings.Contains(stdout, "Host unknown:") {
+						t.Fatal("missing typed host usage failure")
+					}
+				} else if !strings.Contains(stdout+stderr, "Usage of ") && !strings.Contains(stdout+stderr, "Usage: myce wait ") {
 					t.Fatal("command did not render flag usage")
 				}
 			})

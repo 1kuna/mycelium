@@ -88,7 +88,7 @@ func TestHostRealLauncherAndEntryEnvironment(t *testing.T) {
 		t.Fatal(resolved, e)
 	}
 	result, e = v.Mutate(context.Background(), HostMutation{Operation: "status"}, nil, nil)
-	if e != nil || result.Desired != "closed" || result.Revision != 2 {
+	if e != nil || result.Envelope == nil || result.Envelope.Desired.State == nil || *result.Envelope.Desired.State != "closed" || result.Revision != 2 {
 		t.Fatal(result, e)
 	}
 	if !reflect.DeepEqual(before, snapshotHostSecurityFiles(t, v.StateDir)) {

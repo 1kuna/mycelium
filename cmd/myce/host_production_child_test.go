@@ -62,7 +62,8 @@ func TestHostProductionChildEntryReadOnlyAndFailedClose(t *testing.T) {
 				t.Fatal("wrong protocol envelope")
 			}
 			if operation == "status" {
-				if response.Code != "" || response.Result.Revision != 1 || response.Result.Desired != "closed" || response.Result.StateDir != config.HostStateDir {
+				e := response.Result.Envelope
+				if response.Code != "" || response.Result.Revision != 1 || e == nil || e.Desired.State == nil || *e.Desired.State != "closed" || e.Desired.Revision == nil || *e.Desired.Revision != 1 || e.Accepted != nil {
 					t.Fatal(response)
 				}
 			} else if response.Code != "revision" || response.Result.Revision != 0 || response.Result.CleanupConfirmed {
