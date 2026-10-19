@@ -65,7 +65,7 @@ func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detectio
 		return d, errors.New("GPU detection command runner missing")
 	}
 	if p.OS == "darwin" && p.Arch == "arm64" {
-		b, e := p.Command(ctx, "system_profiler", "SPDisplaysDataType")
+		b, e := p.Command(ctx, "/usr/sbin/system_profiler", "SPDisplaysDataType")
 		if e != nil || !strings.Contains(string(b), "Metal") {
 			return d, errors.New("Apple GPU/Metal not visible")
 		}
