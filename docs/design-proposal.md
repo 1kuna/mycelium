@@ -533,12 +533,34 @@ across candidate variants plus caller size hints; target-specific resource
 admission is left to the resource slices. This may withhold a smaller host,
 but never lowers a reservation below the selected recipe's floor.
 
-The shared schema reserves `execution.sidecars` and `run.sidecars` for D4:
-name, command, optional environment/env, member host-RAM cap, optional port and
-HTTP readiness path/timeout. An absent port means a plain helper; zero requests
-an allocated loopback port. Main may declare a member RAM cap as well. E1
-round-trips these declarations but does not launch them: direct jobs reject
-native sidecars/member caps, and extensions requiring them remain unqualified
-for execution until D4. Docker sidecars retain their existing behavior. CPU
-admission, multi-GPU vectors, native group supervision, assets/archive expansion
-and native Windows execution are not enabled by this schema amendment.
+Native job groups use `execution.sidecars` or `run.sidecars`: name, command,
+optional environment/env, positive finite member host-RAM declaration, optional
+port and HTTP readiness path/timeout. An absent port means a plain helper;
+zero allocates a loopback port and a positive port reserves that explicit port.
+Members inherit main's workdir and environment when no environment is named.
+All environments are acquired before payload launch and retained through cleanup.
+Member RAM declarations must fit `needs.host_memory_gb`, the whole simultaneous
+host reservation; they are not added as separate reservations. D4 accounts for
+these bounds but does not enforce child caps. Main member RAM caps remain
+rejected until D5. Docker sidecars retain their existing behavior.
+
+The worker records a process-group anchor and gated member intent/PID/birth
+before exec, authorizes every member through the shared exact-attempt launch
+fence, waits for sidecars in declaration order, then obtains main's Started
+acknowledgement. Preparation never renews the queue start window. Heartbeats
+continue during readiness and report Started only after main's handoff.
+Member exit (including code zero) before main finishes or readiness timeout is
+an attempt stage failure; infrastructure stops use the existing cause classifier
+and requeue policy. Cancellation during preparation closes subsequent launch
+gates. Main receives checkpoint grace while helpers remain available, then the
+whole group is killed, reaped and verified empty before completion. Unconfirmed
+cleanup retains release custody. Restart reuses the existing attempt group scan.
+
+Ports bind `127.0.0.1`; readiness accepts HTTP 2xx, without proxies or redirects,
+and verifies listening-process group ownership (Linux procfs, macOS lsof).
+An occupied port or unverifiable listener fails preparation. Loopback is not a
+private-network sandbox. Endpoint env and literal substitutions, examples and
+platform limits are described in [Native sidecars](native-sidecars.md).
+All members share worker-selected GPU masks, receive no `MYCE_TOKEN`, and honor
+`logs: none`. CPU admission, multi-GPU vectors, child cgroups, assets/archive
+expansion and native Windows execution remain separate slices.

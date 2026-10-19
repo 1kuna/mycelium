@@ -516,6 +516,7 @@ func (w Worker) prepareExtensionExecution(j *Job) (envOut map[string]string, rel
 		}
 	}
 	j.Spec.Run.Command = argv
+	expandNativeExtension(&j.Spec, env)
 	for k, v := range j.Spec.Run.Env {
 		j.Spec.Run.Env[k] = strings.ReplaceAll(strings.ReplaceAll(v, "{extension}", env["MYCE_EXTENSION_DIR"]), "{cache}", env["MYCE_EXTENSION_CACHE"])
 	}

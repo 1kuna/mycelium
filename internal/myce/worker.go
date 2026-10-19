@@ -86,6 +86,7 @@ type workerFinish struct {
 type process struct {
 	machine string
 	docker  *dockerAttempt
+	native  *nativeGroup
 	mu      sync.Mutex
 	job     Job
 	cmd     *exec.Cmd
@@ -109,6 +110,10 @@ func (p *process) enforceGrace(now time.Time) {
 	}
 }
 func (p *process) stopLocked(now time.Time, grace time.Duration, kill bool) {
+	if p.native != nil {
+		p.native.stopLocked(now, grace, kill)
+		return
+	}
 	if p.docker != nil {
 		p.docker.stop(now, grace, kill)
 		return
@@ -345,6 +350,9 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		bindEnvironment(env, environmentPath)
 	}
 	if w.Machine.Device != "" {
+		delete(env, "CUDA_VISIBLE_DEVICES")
+		delete(env, "ONEAPI_DEVICE_SELECTOR")
+		delete(env, "ZE_AFFINITY_MASK")
 		bound, e := WithModelDevice(Model{}, w.Machine.GPU, w.Machine.Device)
 		if e != nil {
 			return nil, e
@@ -374,6 +382,16 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		delete(env, "MYCE_USAGE_FILE")
 	}
 	delete(env, "MYCE_TOKEN")
+	if len(j.Spec.Run.Sidecars) > 0 {
+		if w.batchMemory != nil {
+			w.batchMemory.Store(math.Float64bits(j.Spec.Needs.MemoryGB))
+		}
+		p, e := w.startNativeGroup(s, j, identity, memoryAttempt, env, environmentPath, extensionRelease, release)
+		if e == nil {
+			environmentStarted, extensionStarted, started = true, true, true
+		}
+		return p, e
+	}
 	keys := make([]string, 0, len(env))
 	for k := range env {
 		keys = append(keys, k)
@@ -1067,7 +1085,7 @@ func (w Worker) Run(stop context.Context) error {
 				running = &Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt, Progress: progress}
 			}
 			var reply Reply
-			err = w.Client.Call(ctx, "POST", "/api/workers/checkin", Checkin{Started: p != nil && (p.docker == nil || p.docker.status() == "running"), Machine: m, Running: running, Fresh: fresh, PreviousSession: s.state.PreviousSession, ModelReports: reports}, &reply)
+			err = w.Client.Call(ctx, "POST", "/api/workers/checkin", Checkin{Started: p != nil && (p.docker == nil || p.docker.status() == "running") && (p.native == nil || p.native.started()), Machine: m, Running: running, Fresh: fresh, PreviousSession: s.state.PreviousSession, ModelReports: reports}, &reply)
 			if err == nil {
 				if reply.HostMemoryBudget != nil {
 					w.Machine.HostMemoryBudgetGB = reply.HostMemoryBudget.GiB

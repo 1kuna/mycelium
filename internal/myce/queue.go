@@ -414,6 +414,10 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (*Job, error) {
 		if e != nil {
 			return reject("job_environment_invalid", e)
 		}
+		sidecarRecipes, e := q.resolveSidecarEnvironments(s)
+		if e != nil {
+			return reject("job_environment_invalid", e)
+		}
 		var id string
 		if q.simulation {
 			q.simID++
@@ -425,7 +429,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (*Job, error) {
 			deadline := q.clock.Now().Add(ProductionStartTimeout)
 			s.StartBy = &deadline
 		}
-		j := &Job{PriorityPolicy: q.priorityMatch(s), FileTransport: q.fileCheckpoints, Extensions: extensions, EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: filepath.Join(q.root, id)}
+		j := &Job{PriorityPolicy: q.priorityMatch(s), FileTransport: q.fileCheckpoints, Extensions: extensions, SidecarEnvironmentRecipes: sidecarRecipes, EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: filepath.Join(q.root, id)}
 		q.applyLearnedNeeds(j)
 		if e := q.validateProjectCapacity(j); e != nil {
 			return reject("job_capacity_invalid", e)

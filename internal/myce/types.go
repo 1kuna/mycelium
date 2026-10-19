@@ -294,6 +294,8 @@ type Job struct {
 	EligibleUnknownMachines []string  `json:"eligible_unknown_machines,omitempty"`
 	EligibleUnrestricted    bool      `json:"eligible_unrestricted,omitempty"`
 
+	SidecarEnvironmentRecipes map[string]map[string]EnvironmentRecipe `json:"sidecar_environment_recipes,omitempty"`
+
 	FileTransport         bool                         `json:"file_transport,omitempty"`
 	FileCheckpoints       map[int]FileCheckpoint       `json:"file_checkpoints,omitempty"`
 	ResumeFiles           *FileCheckpoint              `json:"resume_files,omitempty"`

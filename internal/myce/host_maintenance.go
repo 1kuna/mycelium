@@ -217,7 +217,7 @@ func (q *Queue) hostMaintenanceStatus(host string) HostMaintenanceStatus {
 		r := obligation.Result
 		attempt := MaintenanceAttempt{Execution: r.Execution, Machine: r.Machine, Session: r.Session, State: "release_pending"}
 		if j := q.s.Jobs[r.ID]; j != nil {
-			out.Sidecars += len(j.Spec.Run.DockerSidecars)
+			out.Sidecars += len(j.Spec.Run.DockerSidecars) + nativeSidecarCount(j, q.s.Machines[r.Machine])
 			if j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
 				attempt.State = j.State
 				attempt.Started = j.StartedAt != nil
