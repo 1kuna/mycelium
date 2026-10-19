@@ -68,9 +68,10 @@ func TestHostRestClosedMatrix(t *testing.T) {
 		{"preparing", "FAIL", "preparing_attempts", func(e *HostEnvelope) { e.Counts.Preparing = hostPtr(1) }},
 		{"stopping", "FAIL", "stopping_attempts", func(e *HostEnvelope) { e.Counts.Stopping = hostPtr(1) }},
 		{"terminal-unreleased", "UNKNOWN", "release_pending", func(e *HostEnvelope) { e.Counts.Unsettled = hostPtr(1) }},
-		{"pending-daemon", "FAIL", "daemon_operations_pending", func(e *HostEnvelope) { e.Counts.PendingDaemon = hostPtr(1) }},
-		{"gpu-holder", "FAIL", "owned_gpu_holders", func(e *HostEnvelope) { e.Counts.GPUHolders = hostPtr(1) }},
-		{"restart", "FAIL", "restart_unsafe", func(e *HostEnvelope) { e.RestartSafe = hostPtr(false) }},
+
+		{"unresolved-daemon-disposition", "UNKNOWN", "local_exclusion_unknown", func(e *HostEnvelope) { e.LocalExclusion = "UNKNOWN"; e.Counts.PendingDaemon = hostPtr(1) }},
+		{"gpu-holder", "FAIL", "local_exclusion_failed", func(e *HostEnvelope) { e.LocalExclusion = "FAIL"; e.Counts.GPUHolders = hostPtr(1) }},
+		{"restart", "FAIL", "local_exclusion_failed", func(e *HostEnvelope) { e.LocalExclusion = "FAIL"; e.RestartSafe = hostPtr(false) }},
 		{"local-fail-and-queue-unknown", "FAIL", "queue_acknowledgement_unknown", func(e *HostEnvelope) { e.LocalExclusion = "FAIL"; e.Sources["queue"] = nil }},
 		{"partial-active-and-unknown", "FAIL", "active_attempts", func(e *HostEnvelope) {
 			e.Sources["queue"] = nil
