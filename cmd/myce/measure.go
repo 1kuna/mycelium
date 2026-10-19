@@ -101,7 +101,14 @@ func runMeasure(ctx context.Context, args []string, stdout, stderr io.Writer) er
 			}
 		}
 	}
-	w := myce.Worker{StateDir: *state, Client: myce.Client{URL: *queue, Token: env("MYCE_TOKEN", "")}, Machine: myce.Machine{ID: *worker, GPU: *platform}, Clock: myce.RealClock{}}
+	w := myce.Worker{StateDir: *state, CacheRoot: *cache, EnvironmentRoot: *envCache, Client: myce.Client{URL: *queue, Token: env("MYCE_TOKEN", "")}, Machine: myce.Machine{ID: *worker, GPU: *platform}, Clock: myce.RealClock{}}
+	roots, err := w.StateRoots()
+	if err != nil {
+		return err
+	}
+	if err := myce.PrepareStateRoots(roots...); err != nil {
+		return err
+	}
 	// Cache defaults are resolved from join's store by Prepare below; opening it
 	// separately here would make a race between lock acquisition and preparation.
 	var mc *myce.ModelCache

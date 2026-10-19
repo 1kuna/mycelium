@@ -1,0 +1,24 @@
+package myce
+
+import (
+ "os"
+ "path/filepath"
+ "testing"
+ "time"
+)
+
+func TestWriteReviewPartialArtifacts(t *testing.T) {
+ root := os.Getenv("WP8_REVIEW_PARTIALS")
+ if root == "" { t.Fatal("isolated output required") }
+ if err := os.MkdirAll(root, 0700); err != nil { t.Fatal(err) }
+ source := filepath.Join(t.TempDir(), "queue.db")
+ q, err := Open(source, "/fixture/checkpoints", &fakeClock{now: time.Unix(1000, 0)})
+ if err != nil { t.Fatal(err) }
+ defer q.Close()
+ submit(t, q, spec("experiment"))
+ for _, suffix := range []string{"", "-wal", "-shm", ".lock"} {
+  b, err := os.ReadFile(source+suffix); if err != nil { t.Fatal(err) }
+  if err = os.WriteFile(filepath.Join(root, "queue.db"+suffix), b, 0600); err != nil { t.Fatal(err) }
+ }
+ if _, err = SetHostMemoryBudget(filepath.Join(root, "host"), 3); err != nil { t.Fatal(err) }
+}

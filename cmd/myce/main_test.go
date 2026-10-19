@@ -76,7 +76,7 @@ func TestCheckpointCommand(t *testing.T) {
 }
 
 func TestDevCheckpointEndToEnd(t *testing.T) {
-	dir := t.TempDir()
+	dir := currentTestStateRoot(t)
 	binary := filepath.Join(dir, "myce")
 	build := exec.Command("go", "build", "-race", "-o", binary, ".")
 	if output, err := build.CombinedOutput(); err != nil {
@@ -318,7 +318,7 @@ func readLogs(t *testing.T, ctx context.Context, c myce.Client, id string) strin
 }
 
 func TestDevModelEndToEnd(t *testing.T) {
-	dir := t.TempDir()
+	dir := currentTestStateRoot(t)
 	binary := filepath.Join(dir, "myce")
 	if out, e := exec.Command("go", "build", "-race", "-o", binary, ".").CombinedOutput(); e != nil {
 		t.Fatalf("build: %v %s", e, out)

@@ -385,15 +385,8 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 		return errors.New("refusing non-Mycelium service unit")
 	}
 
-	if c.Role == "queue" {
-		if err := refuseLegacyQueue(c.DB); err != nil {
-			return err
-		}
-	}
-	if err := refuseLegacyHost(c.HostStateDir); err != nil {
-		return err
-	}
-	if err := refuseLegacyWorker(c.State, c.EnvironmentCache); err != nil {
+	roots := c.StateRoots()
+	if err := CheckStateRoots(roots...); err != nil {
 		return err
 	}
 	if command == nil {
@@ -452,6 +445,9 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 			result = errors.Join(result, tx.restore(ctx))
 		}
 	}()
+	if err := PrepareStateRoots(roots...); err != nil {
+		return err
+	}
 	if c.Role == "worker" {
 		if err := prepareClosedWorkerInstall(c); err != nil {
 			return err

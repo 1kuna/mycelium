@@ -93,23 +93,7 @@ func hostRoot(dir string) (string, error) {
 	if dir == "" {
 		return HostStateDirectory()
 	}
-	if legacyUnitParent(dir) != "" {
-		return "", errors.Join(ErrHostState, legacyState(legacyUnitParent(dir)))
-	}
 	return dir, nil
-}
-
-// Inspect marker names only; the operator archives the entire host directory.
-func legacyHostPaths(dir string) ([]string, error) {
-	var paths []string
-	for _, pattern := range []string{"DISABLED", "control-generation.json", "disable-receipt.json", "enable-pending.json", "forgotten-queues.json", "units", ".host-conversion", ".install-conversion"} {
-		matches, err := filepath.Glob(filepath.Join(dir, pattern))
-		if err != nil {
-			return nil, err
-		}
-		paths = append(paths, matches...)
-	}
-	return paths, nil
 }
 
 func validateHostIntent(s HostIntent) error {
@@ -154,8 +138,8 @@ func ReadHostIntent(dir string) (HostIntent, error) {
 	if err != nil {
 		return s, err
 	}
-	if err := refuseLegacyHost(dir); err != nil {
-		return s, err
+	if err := CheckStateRoots(dir); err != nil {
+		return s, errors.Join(ErrHostState, err)
 	}
 	b, err := readHostRegular(filepath.Join(dir, hostStateFile), uint32(os.Geteuid()), 16<<20)
 	if errors.Is(err, os.ErrNotExist) {
@@ -164,7 +148,7 @@ func ReadHostIntent(dir string) (HostIntent, error) {
 			return s, errors.Join(ErrHostState, e)
 		}
 		if len(registries) > 0 {
-			return s, errors.Join(ErrHostState, legacyState(dir))
+			return s, fmt.Errorf("%w: existing worker registry requires its original host state", ErrHostState)
 		}
 		return s, fmt.Errorf("%w: this host has no Mycelium host state yet; provision it with `myce host open` or `myce dev`", errors.Join(ErrHostState, ErrHostStateUninitialized))
 	}
@@ -238,7 +222,7 @@ func InitializeHostIntent(dir, host string, clock Clock) (HostIntent, error) {
 	if err != nil {
 		return s, err
 	}
-	if err := refuseLegacyHost(dir); err != nil {
+	if err := PrepareStateRoots(dir); err != nil {
 		return s, err
 	}
 	registries, e := filepath.Glob(filepath.Join(dir, "worker-*.json"))

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -151,7 +152,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	// DefValue is only help text; keep the actual environment default private.
 	f.Lookup("token").DefValue = ""
 	address := f.String("listen", "127.0.0.1:7331", "queue listen address")
-	db := f.String("db", "myce.db", "SQLite database file")
+	db := f.String("db", "myce-state/myce.db", "SQLite database file")
 	uploadSpoolDir := f.String("upload-spool-dir", "", "queue model-upload directory (default private directory beside DB)")
 	dockerHost := f.String("docker-host", env("DOCKER_HOST", "unix:///var/run/docker.sock"), "managed Docker endpoint")
 	containerRetention := f.Duration("container-retention", myce.DefaultContainerRetention, "acknowledged stopped Docker container retention (0 removes immediately)")
@@ -328,6 +329,30 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if err := myce.CheckQueueGPUDescriptors(); err != nil {
 			return err
 		}
+		hostRoot := *hostStateDir
+		if hostRoot == "" {
+			var err error
+			hostRoot, err = myce.HostStateDirectory()
+			if err != nil {
+				return err
+			}
+		}
+		spoolRoot := *uploadSpoolDir
+		if spoolRoot == "" {
+			spoolRoot = *db + ".uploads"
+		}
+		filesRoot := *fileStore
+		if filesRoot == "" {
+			filesRoot = *db + ".files"
+		}
+		joiningRoot := *identityDir
+		if *discovery && joiningRoot == "" {
+			joiningRoot = *db + ".joining"
+		}
+		if err := myce.PrepareStateRoots(filepath.Dir(*db), hostRoot, *db+".uploads", spoolRoot, filesRoot, joiningRoot); err != nil {
+			return err
+		}
+
 		q, err := myce.Open(*db, *checkpoint, myce.RealClock{})
 		if err != nil {
 			return err

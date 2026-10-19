@@ -307,7 +307,7 @@ func dockerFixture(t *testing.T) (Worker, *workerStore, *dockerTestClock, string
 	t.Setenv("MYCE_HOST_STATE_DIR", hostDir)
 	clock := &dockerTestClock{now: time.Date(2026, 10, 11, 0, 0, 0, 0, time.UTC)}
 	ensureTestHost(t, hostDir, clock)
-	w := Worker{HostStateDir: hostDir, Machine: machine("docker-worker", "fake"), StateDir: t.TempDir(), Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return 32, nil }}
+	w := Worker{Client: recoveryWorker(t).Client, HostStateDir: hostDir, Machine: machine("docker-worker", "fake"), StateDir: newTestStateRoot(t), Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return 32, nil }}
 	s, e := w.openStore()
 	if e != nil {
 		t.Fatal(e)
@@ -722,7 +722,7 @@ func TestDockerRealCheckpointResume(t *testing.T) {
 	if e := cmd.Run(); e != nil {
 		t.Skip("Docker daemon or local image unavailable; no pull")
 	}
-	w := Worker{Machine: machine("real-docker-test", "fake"), StateDir: t.TempDir(), Clock: RealClock{}}
+	w := Worker{Client: recoveryWorker(t).Client, Machine: machine("real-docker-test", "fake"), StateDir: newTestStateRoot(t), Clock: RealClock{}}
 	s, e := w.openStore()
 	if e != nil {
 		t.Fatal(e)

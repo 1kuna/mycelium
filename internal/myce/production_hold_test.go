@@ -291,7 +291,7 @@ func TestProductionHoldModelPathsAndResidency(t *testing.T) {
 		t.Fatal("experiment not dispatched")
 	}
 	// A loading sibling allocation must drain too.
-	q.s.ModelSlots[slotKey(b.ID, "test")] = &ModelSlot{Model: "test", Machine: b.ID, Session: b.Session, State: "loading", Priority: "experiment"}
+	q.s.ModelSlots[slotKey(b.ID, "test")] = &ModelSlot{Model: "test", Machine: b.ID, Session: b.Session, Attempt: "sibling-loading-attempt", State: "loading", Priority: "experiment"}
 	prod := addModelCall(t, q, "production")
 	if prod.Machine != "" {
 		t.Fatal("production bypassed release")

@@ -119,7 +119,7 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 	if err != nil {
 		return err
 	}
-	if err = os.MkdirAll(root, 0700); err != nil {
+	if err = PrepareStateRoots(root); err != nil {
 		return err
 	}
 	root, err = filepath.EvalSymlinks(root)

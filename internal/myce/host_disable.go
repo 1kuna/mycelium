@@ -56,7 +56,7 @@ func (w *Worker) registerHost(s *workerStore) error {
 			return err
 		}
 	}
-	if err := refuseLegacyHost(w.HostStateDir); err != nil {
+	if err := PrepareStateRoots(w.HostStateDir); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(w.HostStateDir, 0700); err != nil {
@@ -178,13 +178,19 @@ func (h *HostControl) defaults() error {
 		}
 		pause(d)
 	}
-	if err := refuseLegacyHost(h.Dir); err != nil {
+	if err := CheckStateRoots(h.Dir); err != nil {
 		return err
 	}
-	return os.MkdirAll(h.Dir, 0700)
+	// Current registry corruption must not prevent fencing/stopping services.
+	// workers still checks every discoverable root before returning errors, so
+	// an unmarked root remains a strict no-write refusal even beside corruption.
+	if _, err := h.workers(); errors.Is(err, ErrLegacyState) {
+		return err
+	}
+	return PrepareStateRoots(h.Dir)
 }
 func (h HostControl) workers() ([]HostWorker, error) {
-	if err := refuseLegacyHost(h.Dir); err != nil {
+	if err := CheckStateRoots(h.Dir); err != nil {
 		return nil, err
 	}
 	paths, err := filepath.Glob(filepath.Join(h.Dir, "worker-*.json"))
@@ -192,22 +198,27 @@ func (h HostControl) workers() ([]HostWorker, error) {
 		return nil, err
 	}
 	var out []HostWorker
+	var errs []error
 	for _, p := range paths {
 		b, err := readHostRegular(p, uint32(os.Geteuid()), 1<<20)
 		if err != nil {
-			return nil, err
+			errs = append(errs, err)
+			continue
 		}
 		var r HostWorker
 		if err = json.Unmarshal(b, &r); err != nil {
-			return nil, fmt.Errorf("worker registry %s: %w", p, err)
+			errs = append(errs, fmt.Errorf("worker registry %s: %w", p, err))
+			continue
 		}
-		if err := refuseLegacyWorker(r.State, r.Environments); err != nil {
-			return nil, err
+		if err := CheckStateRoots(r.State, r.Environments); err != nil {
+			errs = append(errs, err)
+			continue
 		}
 		if b, e := readHostRegular(filepath.Join(r.State, "state.json"), uint32(os.Geteuid()), 1<<20); e == nil {
 			var st workerState
 			if e = json.Unmarshal(b, &st); e != nil {
-				return nil, e
+				errs = append(errs, e)
+				continue
 			}
 			if r.Session == "" {
 				r.Session = st.Session
@@ -216,9 +227,13 @@ func (h HostControl) workers() ([]HostWorker, error) {
 				r.Executions = []Result{{Machine: r.Name, Session: st.Session, Execution: Execution{ID: st.Job.ID, Attempt: st.Job.Attempt}}}
 			}
 		} else if !errors.Is(e, os.ErrNotExist) {
-			return nil, e
+			errs = append(errs, e)
+			continue
 		}
 		out = append(out, r)
+	}
+	if len(errs) > 0 {
+		return nil, errors.Join(errs...)
 	}
 	return out, nil
 }
@@ -783,7 +798,7 @@ func (h HostControl) Enable(ctx context.Context) error {
 }
 
 func AdoptHostWorker(dir string, w HostWorker) error {
-	if err := refuseLegacyHost(dir); err != nil {
+	if err := PrepareStateRoots(dir, w.State, w.Environments); err != nil {
 		return err
 	}
 	if err := os.MkdirAll(dir, 0700); err != nil {
@@ -951,6 +966,9 @@ func hostPS(args ...string) ([]byte, error) {
 }
 
 func hostOperationLock(dir, name string, wait bool) (func(), error) {
+	if err := PrepareStateRoots(dir); err != nil {
+		return nil, err
+	}
 	f, err := os.OpenFile(filepath.Join(dir, name), os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		return nil, err

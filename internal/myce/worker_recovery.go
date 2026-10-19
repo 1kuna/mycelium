@@ -72,7 +72,8 @@ type workerStore struct {
 	state                 workerState
 }
 
-func (w Worker) openStore() (*workerStore, error) {
+// StateRoots resolves the worker spool and all effective local cache roots without writing.
+func (w Worker) StateRoots() ([]string, error) {
 	dir := w.StateDir
 	if dir == "" {
 		cache, err := os.UserCacheDir()
@@ -89,7 +90,35 @@ func (w Worker) openStore() (*workerStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := refuseLegacyWorker(dir, w.EnvironmentRoot); err != nil {
+	environment := w.EnvironmentRoot
+	if environment == "" {
+		environment = filepath.Join(dir, "environment-cache")
+	}
+	modelCache := w.CacheRoot
+	if modelCache == "" {
+		modelCache = filepath.Join(dir, "model-cache")
+	}
+	fileCache := w.FileCacheRoot
+	if fileCache == "" {
+		fileCache = filepath.Join(dir, "file-cache")
+	}
+	host := w.HostStateDir
+	if host == "" {
+		host, err = HostStateDirectory()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return []string{dir, host, environment, modelCache, fileCache}, nil
+}
+
+func (w Worker) openStore() (*workerStore, error) {
+	roots, err := w.StateRoots()
+	if err != nil {
+		return nil, err
+	}
+	dir := roots[0]
+	if err := PrepareStateRoots(roots...); err != nil {
 		return nil, fmt.Errorf("read worker state: %w", err)
 	}
 	if err := os.MkdirAll(dir, 0700); err != nil {

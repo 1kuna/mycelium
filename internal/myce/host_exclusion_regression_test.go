@@ -421,7 +421,7 @@ func TestExclusionReadsEveryRegisteredEndpointInChild(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	spool := t.TempDir()
+	spool := newTestStateRoot(t)
 	configPath := filepath.Join(t.TempDir(), "config.json")
 	config := ServiceConfig{Role: "worker", HostID: state.Host, State: spool, DockerEndpoint: "unix:///secondary.sock"}
 	b, _ := json.Marshal(config)

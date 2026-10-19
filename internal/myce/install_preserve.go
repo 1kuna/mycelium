@@ -5,7 +5,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,22 +32,33 @@ func ValidateInstallIdentity(old, next ServiceConfig) error {
 }
 
 func prepareClosedWorkerInstall(c ServiceConfig) error {
+	if err := PrepareStateRoots(c.StateRoots()...); err != nil {
+		return err
+	}
 	var s HostIntent
 	_, err := os.Lstat(filepath.Join(c.HostStateDir, hostStateFile))
 	if errors.Is(err, os.ErrNotExist) {
-		// No previous close exists on an empty installation. Do not infer this
-		// from a missing host record when any configured spool/cache survives.
-		for _, path := range []string{c.State, c.ModelCache, c.EnvironmentCache} {
-			f, e := os.Open(path)
-			if errors.Is(e, os.ErrNotExist) {
-				continue
-			}
+		// A marked root can still contain custody from an interrupted current
+		// install. Only marker-only roots qualify as a genuinely empty install.
+		for _, path := range []string{c.HostStateDir, c.State, c.ModelCache, c.EnvironmentCache} {
+			entries, e := os.ReadDir(path)
 			if e != nil {
 				return e
 			}
-			_, e = f.Readdirnames(1)
-			f.Close()
-			if e != io.EOF {
+			for _, entry := range entries {
+				if entry.Name() == FormatMarker {
+					continue
+				}
+				child := filepath.Join(path, entry.Name())
+				if child == c.ModelCache || child == c.EnvironmentCache {
+					nested, e := os.ReadDir(child)
+					if e != nil {
+						return e
+					}
+					if len(nested) == 1 && nested[0].Name() == FormatMarker {
+						continue
+					}
+				}
 				return fmt.Errorf("%w: archive surviving worker data %s before a fresh install", ErrHostState, path)
 			}
 		}
@@ -225,4 +235,19 @@ func (tx *installTransaction) restoreFiles() error {
 		}
 	}
 	return result
+}
+
+// StateRoots includes independently configured caches, which can hold build custody.
+func (c ServiceConfig) StateRoots() []string {
+	roots := []string{c.State, c.HostStateDir}
+	if c.Role == "queue" {
+		roots = append(roots, c.UploadSpoolDir)
+		if c.DB != "" {
+			roots = append(roots, filepath.Dir(c.DB), c.DB+".uploads", c.DB+".files", c.DB+".joining")
+		}
+	}
+	if c.Role == "worker" {
+		roots = append(roots, c.ModelCache, c.EnvironmentCache)
+	}
+	return roots
 }

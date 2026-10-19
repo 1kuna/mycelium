@@ -203,6 +203,9 @@ func (i JoiningIdentity) Fingerprint() string {
 	return hex.EncodeToString(h[:])
 }
 func LoadJoiningIdentity(dir string) (JoiningIdentity, error) {
+	if err := PrepareStateRoots(dir); err != nil {
+		return JoiningIdentity{}, err
+	}
 	var i JoiningIdentity
 	path := filepath.Join(dir, "identity.json")
 	b, err := os.ReadFile(path)

@@ -162,11 +162,11 @@ func TestDockerConfirmationHookKeepsFlag(t *testing.T) {
 }
 
 func TestSystemdRegistryFailureDoesNotGateStop(t *testing.T) {
-	dir := t.TempDir()
+	dir := readyTestHost(t, t.TempDir())
 	os.WriteFile(filepath.Join(dir, "worker-broken.json"), []byte("broken"), 0600)
 	s := &fakeHostService{}
-	r, e := (HostControl{Observe: testHostExclusion, Dir: readyTestHost(t, dir), Service: s}).Disable(context.Background(), "test", 0)
-	if e == nil || r.Confirmed || len(r.Unconfirmed) == 0 {
+	r, e := (HostControl{Observe: testHostExclusion, Dir: dir, Service: s}).Disable(context.Background(), "test", 0)
+	if e == nil || r.Confirmed || len(r.Unconfirmed) == 0 || !s.now.Load() {
 		t.Fatal(r, e)
 	}
 }

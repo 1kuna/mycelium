@@ -28,6 +28,9 @@ func TestHostMemoryBudgetCLIWorksOffline(t *testing.T) {
 	if err := run([]string{"host-memory-budget", "set", "3"}); err == nil {
 		t.Fatal("retired per-run command accepted")
 	}
+	if err := run([]string{"host-memory-budget", "import"}); err == nil {
+		t.Fatal("removed converter command accepted")
+	}
 	if err := run([]string{"host-memory-budget", "configure", "3"}); err != nil {
 		t.Fatal(err)
 	}

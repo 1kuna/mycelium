@@ -34,7 +34,14 @@ func benchmarkCommand(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := os.MkdirAll(*state, 0700); err != nil {
+	if *hostDir == "" {
+		var err error
+		*hostDir, err = myce.HostStateDirectory()
+		if err != nil {
+			return err
+		}
+	}
+	if err := myce.PrepareStateRoots(*state, *hostDir); err != nil {
 		return err
 	}
 	m := myce.Machine{GPU: *gpu, Device: *device}

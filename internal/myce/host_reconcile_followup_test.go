@@ -21,7 +21,7 @@ func TestHostReconcileSessionDischargeWithoutAssignmentFile(t *testing.T) {
 	for _, unregistered := range []bool{false, true} {
 		t.Run(stringBool(unregistered), func(t *testing.T) {
 			q, clock := fixture(t)
-			dir, spool := t.TempDir(), t.TempDir()
+			dir, spool := newTestStateRoot(t), t.TempDir()
 			s := testHostOpen(t, dir, clock)
 			m := machine("registered", "fake")
 			m.HostID = s.Host
@@ -75,7 +75,7 @@ func TestHostReconcileSessionDischargeWithoutAssignmentFile(t *testing.T) {
 
 func TestHostReconcileUnknownCurrentCustodyIsDiagnostic(t *testing.T) {
 	q, clock := fixture(t)
-	dir, spool := t.TempDir(), t.TempDir()
+	dir, spool := newTestStateRoot(t), t.TempDir()
 	s := testHostOpen(t, dir, clock)
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer server.Close()
@@ -226,7 +226,7 @@ func TestHostReconcileRejectionKeepsRunningWorkerAlive(t *testing.T) {
 	j := submit(t, q, spec)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	w := Worker{Machine: machine("remote", "fake"), HostStateDir: remoteDir, StateDir: t.TempDir(), Clock: RealClock{}, Interval: 5 * time.Millisecond, Client: Client{URL: server.URL, Token: "test"}}
+	w := Worker{Machine: machine("remote", "fake"), HostStateDir: remoteDir, StateDir: newTestStateRoot(t), Clock: RealClock{}, Interval: 5 * time.Millisecond, Client: Client{URL: server.URL, Token: "test"}}
 	go func() { done <- w.Run(ctx) }()
 	defer func() {
 		reject.Store(false)
@@ -389,7 +389,7 @@ func TestHostReconcileRepeatedCloseDuringStopReturnsAccepted(t *testing.T) {
 }
 
 func TestHostReconcileDockerClearanceWaitsForCleanupLock(t *testing.T) {
-	hostDir, spool := t.TempDir(), t.TempDir()
+	hostDir, spool := newTestStateRoot(t), t.TempDir()
 	ensureTestHost(t, hostDir, RealClock{})
 	if err := closeTestHost(hostDir); err != nil {
 		t.Fatal(err)

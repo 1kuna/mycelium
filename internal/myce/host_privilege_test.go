@@ -16,14 +16,14 @@ import (
 
 func hostIdentityFixture(t *testing.T) (HostIdentityResolver, HostInvocation) {
 	t.Helper()
-	home, e := filepath.EvalSymlinks(t.TempDir())
+	home, e := filepath.EvalSymlinks(newTestStateRoot(t))
 	if e != nil {
 		t.Fatal(e)
 	}
 	state := filepath.Join(home, "host")
 	spool := filepath.Join(home, "spool")
 	for _, p := range []string{state, spool} {
-		if e = os.Mkdir(p, 0700); e != nil {
+		if e = PrepareStateRoots(p); e != nil {
 			t.Fatal(e)
 		}
 	}

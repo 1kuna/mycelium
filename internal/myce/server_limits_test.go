@@ -260,7 +260,7 @@ func TestUploadSpoolBudgetHTTPAdmissionAndCleanup(t *testing.T) {
 		}
 	}
 	files, err := os.ReadDir(dir)
-	if err != nil || len(files) != 2 {
+	if err != nil || len(files) != 3 { // Two uploads plus the durable format marker.
 		t.Fatalf("two held uploads: %d files, %v", len(files), err)
 	}
 	for _, length := range []int64{1, -1} {
@@ -285,7 +285,7 @@ func TestUploadSpoolBudgetHTTPAdmissionAndCleanup(t *testing.T) {
 	assertEmpty := func() {
 		t.Helper()
 		files, err := os.ReadDir(dir)
-		if err != nil || len(files) != 0 {
+		if err != nil || len(files) != 1 || files[0].Name() != FormatMarker {
 			t.Fatalf("leftover spool files: %v %v", files, err)
 		}
 	}

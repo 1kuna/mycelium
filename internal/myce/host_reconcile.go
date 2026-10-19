@@ -284,7 +284,7 @@ func saveHostAck(dir, queue string, c HostExchange, a HostAcknowledgement, clock
 // ReconcileHostLocal is shared by the timer, workers and co-located admission.
 // Cleanup is supplied by the host control path, independently of queue reachability.
 // Each queue returns its exact obligations before any release is offered.
-func ReconcileHostLocal(ctx context.Context, dir string, clock Clock, client func(string) (Client, error)) error {
+func ReconcileHostLocal(ctx context.Context, dir string, clock Clock, client func(string) (Client, error), configuredQueues ...string) error {
 	s, err := ReadHostIntent(dir)
 	if err != nil {
 		return err
@@ -306,6 +306,11 @@ func ReconcileHostLocal(ctx context.Context, dir string, clock Clock, client fun
 	queues, err := (HostControl{Dir: dir}).Queues()
 	if err != nil {
 		return err
+	}
+	for _, endpoint := range configuredQueues {
+		if endpoint != "" && !slices.Contains(queues, endpoint) {
+			queues = append(queues, endpoint)
+		}
 	}
 	s, err = ReadHostIntent(dir)
 	if err != nil {
@@ -393,7 +398,7 @@ func (q *Queue) ConfigureLocalHost(dir, endpoint string) error {
 			return err
 		}
 	}
-	if err := refuseLegacyHost(dir); err != nil {
+	if err := PrepareStateRoots(dir); err != nil {
 		return err
 	}
 	q.mu.Lock()
@@ -410,13 +415,9 @@ func (q *Queue) reconcileLocalAdmission() (func() error, error) {
 	}
 	s, err := ReadHostIntent(q.localHostDir)
 	if err != nil {
-		// Absence is valid only for queue-only hosts, with no legacy registries.
-		paths, e := legacyHostPaths(q.localHostDir)
-		workers, _ := filepath.Glob(filepath.Join(q.localHostDir, "worker-*.json"))
-		if errors.Is(err, ErrHostState) && len(paths) == 0 && len(workers) == 0 && e == nil {
-			if _, e = os.Stat(filepath.Join(q.localHostDir, hostStateFile)); errors.Is(e, os.ErrNotExist) {
-				return nil, nil
-			}
+		// Only an explicitly uninitialized current root is a queue-only host.
+		if errors.Is(err, ErrHostStateUninitialized) {
+			return nil, nil
 		}
 		return nil, err
 	}

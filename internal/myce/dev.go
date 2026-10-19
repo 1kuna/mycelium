@@ -54,9 +54,6 @@ func StartDev(c DevConfig) (*Dev, error) {
 	if c.Workers < 1 || c.MemoryGB <= 0 || c.Token == "" {
 		return nil, errors.New("dev requires workers, positive memory, and a token")
 	}
-	if err := os.MkdirAll(c.Checkpoints, 0700); err != nil {
-		return nil, err
-	}
 	clock := &devClock{}
 	freshHost := false
 	if c.HostID == "" {
@@ -65,6 +62,17 @@ func StartDev(c DevConfig) (*Dev, error) {
 	// Dev owns its isolated fake host; real runtimes never initialize missing state.
 	if c.HostStateDir == "" {
 		c.HostStateDir = filepath.Join(filepath.Dir(c.Database), "dev-host")
+	}
+	roots := []string{filepath.Dir(c.Database), c.HostStateDir, c.FileStore, c.Database + ".uploads"}
+	for i := 0; i < c.Workers; i++ {
+		dir := filepath.Join(filepath.Dir(c.Database), "workers", fmt.Sprintf("fake-%d", i+1))
+		roots = append(roots, dir, filepath.Join(dir, "environment-cache"), filepath.Join(dir, "model-cache"), filepath.Join(dir, "file-cache"))
+	}
+	if err := PrepareStateRoots(roots...); err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(c.Checkpoints, 0700); err != nil {
+		return nil, err
 	}
 	if _, e := os.Stat(filepath.Join(c.HostStateDir, hostStateFile)); errors.Is(e, os.ErrNotExist) {
 		_, e := InitializeHostIntent(c.HostStateDir, c.HostID, clock)

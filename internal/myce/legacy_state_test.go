@@ -60,7 +60,7 @@ func TestLegacyReleaseRefusal(t *testing.T) {
 			if q != nil {
 				q.Close()
 			}
-			check(e, db)
+			check(e, root)
 			dir := filepath.Join(root, "workers", "one")
 			s, e := (Worker{StateDir: dir}).openStore()
 			if s != nil {
@@ -166,6 +166,13 @@ func TestCurrentQueueWALRestart(t *testing.T) {
 		if e = os.WriteFile(target+suffix, b, 0600); e != nil {
 			t.Fatal(e)
 		}
+	}
+	marker, e := os.ReadFile(filepath.Join(filepath.Dir(source), FormatMarker))
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = os.WriteFile(filepath.Join(filepath.Dir(target), FormatMarker), marker, 0600); e != nil {
+		t.Fatal(e)
 	}
 	restarted, e := Open(target, t.TempDir(), RealClock{})
 	if e != nil {

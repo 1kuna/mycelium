@@ -207,6 +207,11 @@ func HostSnapshot(ctx context.Context, v HostInvocation, clock Clock) (HostEnvel
 	if err != nil {
 		return e, errors.Join(ErrHostState, err)
 	}
+	// Installed queue membership exists before the first worker session. Never
+	// infer queue release from an empty runtime registry: query this endpoint too.
+	if v.Config.Queue != "" && !slices.Contains(queues, v.Config.Queue) {
+		queues = append(queues, v.Config.Queue)
+	}
 	for _, p := range s.Pending {
 		if !slices.Contains(queues, p.Queue) {
 			queues = append(queues, p.Queue)

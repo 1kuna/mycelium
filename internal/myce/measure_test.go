@@ -23,7 +23,7 @@ func (e *measurementEngine) Call(c context.Context, p string, b []byte) (*http.R
 	return e.call(c, p, b)
 }
 func measureTestOptions(t *testing.T) MeasureOptions {
-	return MeasureOptions{Worker: Worker{StateDir: t.TempDir(), Machine: Machine{ID: "local"}, Clock: RealClock{}}, Platform: "cuda", Device: "0", BudgetGB: 10, Models: []Model{{Name: "one", Platforms: []string{"cuda"}}, {Name: "two", Platforms: []string{"cuda"}}}, ReadMemory: func(context.Context) (MemoryReading, error) { return MemoryReading{1, 2}, nil }, Status: func(context.Context) (Snapshot, error) { return Snapshot{}, nil }}
+	return MeasureOptions{Worker: Worker{StateDir: newTestStateRoot(t), Machine: Machine{ID: "local"}, Clock: RealClock{}}, Platform: "cuda", Device: "0", BudgetGB: 10, Models: []Model{{Name: "one", Platforms: []string{"cuda"}}, {Name: "two", Platforms: []string{"cuda"}}}, ReadMemory: func(context.Context) (MemoryReading, error) { return MemoryReading{1, 2}, nil }, Status: func(context.Context) (Snapshot, error) { return Snapshot{}, nil }}
 }
 func TestMeasureSimultaneousResidencyAndDeltas(t *testing.T) {
 	o := measureTestOptions(t)

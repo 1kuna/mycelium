@@ -252,8 +252,8 @@ func TestOperatorStopMarkerRejectsForeignDocuments(t *testing.T) {
 					store.close()
 					t.Fatal("invalid marker accepted")
 				}
-				if !errors.Is(err, ErrLegacyState) {
-					t.Fatal(err)
+				if errors.Is(err, ErrLegacyState) || !strings.Contains(err.Error(), "read operator-stop marker") {
+					t.Fatal("expected ordinary current-state decode refusal", err)
 				}
 			}
 			after, err := os.ReadFile(statePath)

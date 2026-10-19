@@ -29,7 +29,7 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) error 
 	if c.Limit <= 0 || ref.SizeBytes > c.Limit {
 		return errors.New("file exceeds local cache limit")
 	}
-	if err := os.MkdirAll(c.Root, 0700); err != nil {
+	if err := PrepareStateRoots(c.Root); err != nil {
 		return err
 	}
 	root, err := filepath.EvalSymlinks(c.Root)
@@ -68,6 +68,9 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) error 
 	used := int64(0)
 	prefix := int64(0)
 	for _, entry := range entries {
+		if entry.Name() == FormatMarker {
+			continue
+		}
 		info, e := entry.Info()
 		if e != nil {
 			return e

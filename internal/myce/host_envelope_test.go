@@ -69,7 +69,7 @@ func TestHostEnvelopeCASAndLastClose(t *testing.T) {
 }
 
 func TestHostEnvelopeStatusReadOnlyAndFreshness(t *testing.T) {
-	root := t.TempDir()
+	root := newTestStateRoot(t)
 	clock := &envelopeClock{RealClock{}.Now().UTC()}
 	dir := filepath.Join(root, "host")
 	initial, err := InitializeHostIntent(dir, "fixture-host", clock)
@@ -164,7 +164,7 @@ func TestHostEnvelopeStatusReadOnlyAndFreshness(t *testing.T) {
 }
 
 func TestHostEnvelopeDevLifecycle(t *testing.T) {
-	root := t.TempDir()
+	root := newTestStateRoot(t)
 	dir := filepath.Join(root, "host")
 	db := filepath.Join(root, "queue.db")
 	cp := filepath.Join(root, "cp")
@@ -392,7 +392,7 @@ func TestHostEnvelopeOpenLockContention(t *testing.T) {
 }
 
 func TestHostEnvelopeReadyRequiredWorkers(t *testing.T) {
-	root := t.TempDir()
+	root := newTestStateRoot(t)
 	dir := filepath.Join(root, "host")
 	clock := &envelopeClock{RealClock{}.Now().UTC()}
 	initial, err := InitializeHostIntent(dir, "fixture-host", clock)

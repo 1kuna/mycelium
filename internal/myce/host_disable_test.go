@@ -18,7 +18,7 @@ import (
 
 func TestDisableOfflineFlagAndOwnedProcessGrace(t *testing.T) {
 	clock := &fakeClock{now: time.Unix(1000, 0)}
-	root, state := t.TempDir(), t.TempDir()
+	root, state := newTestStateRoot(t), newTestStateRoot(t)
 	if err := saveWorkerJSON(root, "worker-test.json", HostWorker{State: state, Host: "b70", Queue: "http://offline"}); err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +75,7 @@ func TestDisableOfflineFlagAndOwnedProcessGrace(t *testing.T) {
 func TestDisableNowNeverSignalsUnownedAndReportsSurvivor(t *testing.T) {
 	for _, survives := range []bool{false, true} {
 		t.Run(fmt.Sprint(survives), func(t *testing.T) {
-			root, state := t.TempDir(), t.TempDir()
+			root, state := newTestStateRoot(t), newTestStateRoot(t)
 			clock := &fakeClock{now: time.Unix(1000, 0)}
 			saveWorkerJSON(root, "worker-test.json", HostWorker{State: state})
 			saveWorkerJSON(state, "state.json", workerState{PID: 42, Identity: "owned"})
@@ -103,7 +103,7 @@ func TestDisableNowNeverSignalsUnownedAndReportsSurvivor(t *testing.T) {
 }
 
 func TestDisableRealOwnedGroupsAndSimilarUnownedProcess(t *testing.T) {
-	root, state, env := t.TempDir(), t.TempDir(), t.TempDir()
+	root, state, env := newTestStateRoot(t), newTestStateRoot(t), newTestStateRoot(t)
 	saveWorkerJSON(root, "worker-test.json", HostWorker{State: state, Environments: env, Host: "test"})
 	start := func(identity string) *exec.Cmd {
 		cmd := exec.Command("sh", "-c", `trap '' TERM; echo ready; while :; do sleep 1; done`, "myce-supervisor-"+identity)

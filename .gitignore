@@ -31,3 +31,5 @@ ops/private/
 clients/python/src/*.egg-info/
 
 /myce.db.files/
+
+/myce-state/

@@ -26,14 +26,17 @@ type rcFixtureExit int
 func (e rcFixtureExit) Error() string { return "inactive synthetic unit" }
 func (e rcFixtureExit) ExitCode() int { return int(e) }
 
-type rcFixtureTransport struct{ target string }
+type rcFixtureTransport struct {
+	target string
+	base   http.RoundTripper
+}
 
 func (x rcFixtureTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	r = r.Clone(r.Context())
 	u, _ := url.Parse(x.target)
 	r.URL.Scheme = u.Scheme
 	r.URL.Host = u.Host
-	return http.DefaultTransport.RoundTrip(r)
+	return x.base.RoundTrip(r)
 }
 
 func TestLegacyInstallArchiveFresh(t *testing.T) {
@@ -189,9 +192,9 @@ func TestLegacyInstallArchiveFresh(t *testing.T) {
 	}
 	server := httptest.NewServer(myce.API{Queue: q, Token: "synthetic-fresh-install"}.Handler())
 	defer server.Close()
-	savedClient := http.DefaultClient
-	http.DefaultClient = &http.Client{Transport: rcFixtureTransport{server.URL}}
-	defer func() { http.DefaultClient = savedClient }()
+	savedTransport := http.DefaultTransport
+	http.DefaultTransport = rcFixtureTransport{server.URL, savedTransport}
+	defer func() { http.DefaultTransport = savedTransport }()
 	resolver := myce.LocalHostIdentityResolver()
 	resolver.OS = "linux"
 	resolver.Lookup = func(string) (myce.WorkerAccount, error) {
@@ -206,6 +209,45 @@ func TestLegacyInstallArchiveFresh(t *testing.T) {
 		t.Fatal("invalid fresh CLOSED envelope", e, out.String())
 	}
 	validateEnvelopeOutput(t, out.Bytes())
+	// Fresh install has never created a worker session. Exercise the same close
+	// and status command adapters as FULL apply, with only hardware/service fakes.
+	executionProbe := probe
+	executionProbe.Command = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if name == "systemctl" && strings.Contains(strings.Join(args, " "), "-p LoadState") {
+			return []byte("LoadState=loaded\nActiveState=inactive\nControlGroup=\nKillMode=control-group\nSendSIGKILL=yes\n"), nil
+		}
+		return probe.Command(ctx, name, args...)
+	}
+	executor := hostMutationExecutor(executionProbe)
+	executor.Observe = envelopeHardware
+	handler := func(ctx context.Context, v myce.HostInvocation, m myce.HostMutation) (myce.HostMutationResult, error) {
+		r, e := executor.Execute(ctx, v, m)
+		if e != nil {
+			t.Logf("mutation %s: %v", m.Operation, e)
+		}
+		return r, e
+	}
+	observe := func(ctx context.Context, v myce.HostInvocation) (myce.HostExclusionReport, error) {
+		state, err := myce.ReadHostIntent(v.StateDir)
+		return envelopeHardware(ctx, state), err
+	}
+	out.Reset()
+	if e := hostEnvelopeCommandWithObservation([]string{"close", "--local", "--config", w.Config, "--grace", "0", "--json"}, probe, &out, resolver, nil, handler, observe); e != nil {
+		t.Fatal("never-started close", e, out.String())
+	}
+	out.Reset()
+	if e := hostEnvelopeCommandWithObservation([]string{"status", "--local", "--config", w.Config, "--expect", "closed", "--verdict", "--json"}, probe, &out, resolver, nil, handler, observe); e != nil {
+		t.Fatal("never-started closed verdict", e, out.String())
+	}
+	envelope = validateEnvelopeOutput(t, out.Bytes())
+	if envelope.Verdict != "PASS" || envelope.QueueRevision == nil || envelope.Counts.Active == nil || *envelope.Counts.Active != 0 || envelope.Counts.Unsettled == nil || *envelope.Counts.Unsettled != 0 {
+		t.Fatal("fresh host lacks positive queue release evidence", out.String())
+	}
+	var freshSnapshot myce.Snapshot
+	if e := (myce.Client{URL: server.URL, Token: "synthetic-fresh-install"}).Call(context.Background(), "GET", "/api/status", nil, &freshSnapshot); e != nil || len(freshSnapshot.Machines) != 0 {
+		t.Fatal("test created a session before closed PASS", e)
+	}
+	t.Log("fresh install -> CLOSED -> host close --local -> closed PASS with zero registered sessions and explicit queue acknowledgement")
 	t.Log("empty fresh install: CLOSED/confirmed; status desired.revision is present; accepted_revision is null; both template instances fenced")
 	spec := myce.Spec{Name: "fresh-job", Project: "fixture", Priority: "experiment"}
 	spec.Needs.Platform.Any = true
@@ -251,4 +293,66 @@ func TestLegacyInstallArchiveFresh(t *testing.T) {
 		t.Fatal("fresh install/open modified archived RC state")
 	}
 	t.Log("real RC PlanInstall/Install/registerHost layout archived by operator; queue/NAS/name/Docker/environment reference preserved; work admitted only after explicit open using status desired.revision")
+}
+
+func TestQueueStartupRefusalNoWrites(t *testing.T) {
+	for _, refused := range []string{"queue", "host", "upload-spool", "file-store", "identity"} {
+		t.Run(refused, func(t *testing.T) {
+			parent := t.TempDir()
+			roots := map[string]string{}
+			for _, name := range []string{"queue", "host", "upload-spool", "file-store", "identity"} {
+				roots[name] = filepath.Join(parent, name)
+			}
+			if err := os.Mkdir(roots[refused], 0700); err != nil {
+				t.Fatal(err)
+			}
+			old, err := os.ReadFile("../../internal/myce/testdata/release-7285a88/host/control-generation.json")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err = os.WriteFile(filepath.Join(roots[refused], "arbitrary"), old, 0600); err != nil {
+				t.Fatal(err)
+			}
+			snapshot := func() map[string]string {
+				t.Helper()
+				tree := map[string]string{}
+				if err := filepath.WalkDir(parent, func(path string, d fs.DirEntry, err error) error {
+					if err != nil {
+						return err
+					}
+					if d.IsDir() {
+						tree[path] = "directory"
+						return nil
+					}
+					data, err := os.ReadFile(path)
+					if err == nil {
+						tree[path] = string(data)
+					}
+					return err
+				}); err != nil {
+					t.Fatal(err)
+				}
+				return tree
+			}
+			before := snapshot()
+			t.Setenv("MYCE_TOKEN", "synthetic-fixture-token")
+			err = run([]string{"queue", "--db", filepath.Join(roots["queue"], "queue.db"), "--host-state-dir", roots["host"], "--upload-spool-dir", roots["upload-spool"], "--file-store", roots["file-store"], "--identity-dir", roots["identity"], "--listen", "127.0.0.1:0", "--discovery=false"})
+			expected := "legacy_state_present: stop the old services, archive " + roots[refused] + ", then do a fresh install (preserve config and secret references)"
+			if err == nil || err.Error() != expected {
+				t.Fatalf("refusal: %v; want %s", err, expected)
+			}
+			if !reflect.DeepEqual(before, snapshot()) {
+				t.Fatal("queue startup changed filesystem before refusal")
+			}
+		})
+	}
+}
+
+func currentTestStateRoot(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	if err := myce.PrepareStateRoots(root); err != nil {
+		t.Fatal(err)
+	}
+	return root
 }

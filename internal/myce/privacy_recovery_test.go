@@ -22,6 +22,9 @@ func TestPrivacySpoolStartupPermissionsAndErrors(t *testing.T) {
 	if err := os.Mkdir(dir, 0755); err != nil {
 		t.Fatal(err)
 	}
+	if err := PrepareStateRoots(dir); err != nil {
+		t.Fatal(err)
+	}
 	orphan := filepath.Join(dir, "myce-model-request-orphan")
 	if err := os.WriteFile(orphan, []byte("synthetic"), 0644); err != nil {
 		t.Fatal(err)

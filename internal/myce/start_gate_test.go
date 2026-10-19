@@ -132,7 +132,7 @@ func TestProductionStartGateUnreachableDoesNotExecute(t *testing.T) {
 	a := check(t, q, machine("b70", "xpu"), nil).Job
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	server.Close()
-	w := Worker{StateDir: t.TempDir(), Machine: machine("b70", "xpu"), Clock: c, Client: Client{URL: server.URL, Token: "test"}}
+	w := Worker{StateDir: newTestStateRoot(t), Machine: machine("b70", "xpu"), Clock: c, Client: Client{URL: server.URL, Token: "test"}}
 	store, e := w.openStore()
 	if e != nil {
 		t.Fatal(e)
@@ -358,7 +358,7 @@ func TestProductionStartGateStorageFailureDoesNotExecute(t *testing.T) {
 	}
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer server.Close()
-	w := Worker{StateDir: t.TempDir(), Machine: machine("b70", "xpu"), Clock: c, Client: Client{URL: server.URL, Token: "test"}}
+	w := Worker{StateDir: newTestStateRoot(t), Machine: machine("b70", "xpu"), Clock: c, Client: Client{URL: server.URL, Token: "test"}}
 	store, e := w.openStore()
 	if e != nil {
 		t.Fatal(e)

@@ -59,7 +59,7 @@ func recoveryWorker(t *testing.T) Worker {
 		handler.ServeHTTP(w, r)
 		return w.Result(), nil
 	})}
-	return Worker{Client: Client{URL: "http://worker-test.invalid", HTTP: client}, Machine: machine("recovery-worker", "fake"), StateDir: t.TempDir(), Interval: time.Millisecond, Clock: RealClock{}}
+	return Worker{Client: Client{URL: "http://worker-test.invalid", HTTP: client}, Machine: machine("recovery-worker", "fake"), StateDir: newTestStateRoot(t), Interval: time.Millisecond, Clock: RealClock{}}
 }
 func recoveryJob(t *testing.T, command []string) Job {
 	t.Helper()

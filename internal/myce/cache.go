@@ -66,7 +66,7 @@ func (c *ModelCache) init() error {
 	if c.Limit <= 0 {
 		return errors.New("model cache size limit must be positive")
 	}
-	if err := os.MkdirAll(c.Root, 0700); err != nil {
+	if err := PrepareStateRoots(c.Root); err != nil {
 		return err
 	}
 	// Partial files carry the immutable model hash in their names and survive restart.
