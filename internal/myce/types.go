@@ -85,6 +85,7 @@ type Spec struct {
 	Name     string            `json:"name" yaml:"name"`
 	Project  string            `json:"project" yaml:"project"`
 	Priority string            `json:"priority" yaml:"priority"`
+	Class    string            `json:"class,omitempty" yaml:"class,omitempty"`
 	Logs     string            `json:"logs,omitempty" yaml:"logs,omitempty"`
 	Deadline *time.Time        `json:"deadline,omitempty" yaml:"deadline,omitempty"`
 	Run      struct {
@@ -112,13 +113,16 @@ type Spec struct {
 }
 
 func (s Spec) Validate() error {
+	if err := normalizeJobClass(&s); err != nil {
+		return err
+	}
 	if s.Logs != "" && s.Logs != "keep" && s.Logs != "none" {
 		return errors.New("logs must be keep or none")
 	}
 	if s.Name == "" || s.Project == "" || (!s.extensionJob() && (len(s.Run.Command) == 0 || s.Run.Command[0] == "")) {
 		return errors.New("name, project and run.command are required")
 	}
-	if rank(s.Priority) == 3 {
+	if s.Priority != "" && legacyRank(s.Priority) == 3 {
 		return errors.New("priority must be production, deadline or experiment")
 	}
 	if s.StartBy != nil && s.Priority != "production" {
@@ -190,7 +194,7 @@ func (s Spec) Validate() error {
 	}
 	return nil
 }
-func rank(p string) int {
+func legacyRank(p string) int {
 	switch p {
 	case "production":
 		return 0
@@ -217,6 +221,7 @@ type Copy struct {
 }
 
 type Job struct {
+	PriorityPolicy PriorityMatch `json:"priority_policy"`
 	// Durable cancellation fence, independent of diagnostic reason text.
 	CancelledAt *time.Time `json:"cancelled_at,omitempty"`
 
@@ -388,16 +393,17 @@ type HoldDetail struct {
 }
 
 type Snapshot struct {
-	HoldsDetail  []HoldDetail  `json:"holds_detail"`
-	HostHolds    []string      `json:"host_holds,omitempty"`
-	Now          time.Time     `json:"now"`
-	Usage        UsageReport   `json:"usage"`
-	SyncRequests []SyncRequest `json:"sync_requests"`
-	Pins         []ModelPin    `json:"pins"`
-	LoadedModels []ModelSlot   `json:"loaded_models"`
-	Warning      string        `json:"warning,omitempty"`
-	Jobs         []*Job        `json:"jobs"`
-	Machines     []*Machine    `json:"machines"`
+	PriorityPolicy PriorityPolicyRecord `json:"priority_policy"`
+	HoldsDetail    []HoldDetail         `json:"holds_detail"`
+	HostHolds      []string             `json:"host_holds,omitempty"`
+	Now            time.Time            `json:"now"`
+	Usage          UsageReport          `json:"usage"`
+	SyncRequests   []SyncRequest        `json:"sync_requests"`
+	Pins           []ModelPin           `json:"pins"`
+	LoadedModels   []ModelSlot          `json:"loaded_models"`
+	Warning        string               `json:"warning,omitempty"`
+	Jobs           []*Job               `json:"jobs"`
+	Machines       []*Machine           `json:"machines"`
 }
 
 func terminal(s string) bool { return s == "succeeded" || s == "failed" || s == "cancelled" }

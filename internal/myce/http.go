@@ -23,6 +23,7 @@ type API struct {
 func (a API) Handler() http.Handler {
 	mux := http.NewServeMux()
 	a.registerDevClock(mux)
+	a.registerPriorityPolicy(mux)
 	mux.HandleFunc("GET /api/hosts/{id}/observation", func(w http.ResponseWriter, r *http.Request) {
 		v, err := a.Queue.ReadHostObservation(r.Context(), r.PathValue("id"))
 		respond(w, v, err)

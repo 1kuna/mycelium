@@ -1,4 +1,10 @@
 {
+  "priority_policy": {
+    "tier": "",
+    "index": 0,
+    "selector": "",
+    "revision": 0
+  },
   "release_confirmed": true,
   "waiting_since": "0001-01-01T00:00:00Z",
   "assigned_at": "2026-10-17T12:00:00Z",

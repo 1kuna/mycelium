@@ -62,7 +62,7 @@ func (q *Queue) publicSnapshot() (Snapshot, error) {
 	for _, j := range s.Jobs {
 		// Status is a summary, never a copy of a submitted command, environment,
 		// program arguments, extension files, or local filesystem paths.
-		spec := Spec{AllowedMachines: j.Spec.AllowedMachines, Name: j.Spec.Name, Project: j.Spec.Project, Priority: j.Spec.Priority, Kind: j.Spec.Kind, Resumable: j.Spec.Resumable, Deadline: j.Spec.Deadline, StartBy: j.Spec.StartBy}
+		spec := Spec{AllowedMachines: j.Spec.AllowedMachines, Name: j.Spec.Name, Project: j.Spec.Project, Priority: j.Spec.Priority, Class: j.Spec.Class, Kind: j.Spec.Kind, Resumable: j.Spec.Resumable, Deadline: j.Spec.Deadline, StartBy: j.Spec.StartBy}
 		if j.Spec.Program != nil {
 			spec.Program = &Program{Type: j.Spec.Program.Type}
 		}
