@@ -20,15 +20,16 @@ import (
 var errExtensionUnavailable = errors.New("extension qualification unavailable")
 
 type ExtensionReport struct {
-	Name        string `json:"name"`
-	Version     string `json:"version"`
-	Digest      string `json:"digest"`
-	Platform    string `json:"platform"`
-	Work        string `json:"work"`
-	Fingerprint string `json:"fingerprint"`
-	Setup       bool   `json:"setup"`
-	Qualified   bool   `json:"qualified"`
-	Reason      string `json:"reason,omitempty"`
+	Target      *ExecutionTarget `json:"target,omitempty"`
+	Name        string           `json:"name"`
+	Version     string           `json:"version"`
+	Digest      string           `json:"digest"`
+	Platform    string           `json:"platform"`
+	Work        string           `json:"work"`
+	Fingerprint string           `json:"fingerprint"`
+	Setup       bool             `json:"setup"`
+	Qualified   bool             `json:"qualified"`
+	Reason      string           `json:"reason,omitempty"`
 }
 
 func DefaultExtensionRoot() string {
@@ -241,6 +242,9 @@ func readExtensionReports(root string, e Extension, platform string) []Extension
 }
 func extensionWorks(e Extension) []string {
 	out := []string{}
+	if len(e.Variants) > 0 {
+		out = append(out, "extension:"+e.Name)
+	}
 	for _, k := range e.Kinds {
 		out = append(out, "kind:"+k)
 	}
@@ -256,12 +260,21 @@ func LocalExtensionReports(root, platform, fingerprint string) []ExtensionReport
 	}
 	out := []ExtensionReport{}
 	for _, e := range extensions {
-		if !slices.Contains(e.Platforms, platform) {
+		if len(e.Variants) == 0 && !slices.Contains(e.platforms(), platform) {
 			continue
 		}
 		records := readExtensionReports(root, e, platform)
 		for _, work := range extensionWorks(e) {
 			r := ExtensionReport{Name: e.Name, Version: e.Version, Digest: e.Digest, Platform: platform, Work: work, Reason: "setup and check required"}
+			if len(e.Variants) > 0 {
+				t := ExecutionTarget{OS: runtime.GOOS, Arch: runtime.GOARCH, Platform: platform}
+				r.Target = &t
+				if reason := e.targetUnavailableReason(t); reason != "" {
+					r.Reason = reason
+					out = append(out, r)
+					continue
+				}
+			}
 			for _, old := range records {
 				if old.Work == work && old.Digest == e.Digest {
 					r = old
@@ -306,8 +319,12 @@ func runExtensionCommand(ctx context.Context, args []string, dir string, env map
 
 // Setup/check are explicit local operations, never background services. Their
 // detailed logs stay local; only fixed reasons enter reports/status.
-func PrepareExtension(ctx context.Context, root string, e Extension, platform, device string, check bool, log io.Writer) ([]ExtensionReport, error) {
-	if !slices.Contains(e.Platforms, platform) {
+func PrepareExtension(ctx context.Context, root string, e Extension, platform, device string, check bool, log io.Writer, caches ...*EnvironmentCache) ([]ExtensionReport, error) {
+	local := Machine{GPU: platform, CapabilityProfile: &CapabilityProfile{OS: runtime.GOOS, Arch: runtime.GOARCH}}
+	if reason := e.targetUnavailableReason(machineTarget(&local)); reason != "" {
+		return nil, errors.New(reason)
+	}
+	if !slices.Contains(e.platforms(), platform) {
 		return nil, errors.New("extension does not support this platform; no CPU fallback")
 	}
 	actual, err := ReadExtension(extensionFolder(root, e))
@@ -334,11 +351,20 @@ func PrepareExtension(ctx context.Context, root string, e Extension, platform, d
 	if err != nil {
 		return nil, err
 	}
+	view, ok := e.forMachine(&local)
+	if !ok {
+		return nil, errors.New("extension target unsupported; native groups require D4")
+	}
+	e = view
 	dir := env["MYCE_EXTENSION_DIR"]
 	old := readExtensionReports(root, e, platform)
 	reports := []ExtensionReport{}
 	for _, work := range extensionWorks(e) {
 		r := ExtensionReport{Name: e.Name, Version: e.Version, Digest: e.Digest, Platform: platform, Work: work, Fingerprint: fingerprint, Reason: "setup required"}
+		if len(e.Variants) > 0 {
+			t := machineTarget(&local)
+			r.Target = &t
+		}
 		if check {
 			for _, o := range old {
 				if o.Work == work && o.Digest == e.Digest && o.Fingerprint == fingerprint {
@@ -352,6 +378,24 @@ func PrepareExtension(ctx context.Context, root string, e Extension, platform, d
 	if err := writeExtensionReports(root, e, platform, reports); err != nil {
 		return nil, err
 	}
+	if r, ok := extensionRecipe(e, &local); ok {
+		if len(caches) == 0 || caches[0] == nil {
+			return nil, errors.New("variant environments require an explicit environment cache")
+		}
+		envRoot, release, err := caches[0].Acquire(ctx, r)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+		bindEnvironment(env, envRoot)
+		ref := e.variant(machineTarget(&local)).Execution.Main.Environment
+		expand := executionReplacer(dir, envRoot, ref, machineTarget(&local))
+		e.Setup = expandArgs(e.Setup, expand)
+		e.Check = expandArgs(e.Check, expand)
+	}
+	replacePaths := strings.NewReplacer("{extension}", dir, "{cache}", env["MYCE_EXTENSION_CACHE"])
+	e.Setup = expandArgs(e.Setup, replacePaths)
+	e.Check = expandArgs(e.Check, replacePaths)
 	if !check {
 		err = runExtensionCommand(ctx, e.Setup, dir, env, log)
 		for i := range reports {
@@ -443,7 +487,14 @@ func (w Worker) prepareExtensionExecution(j *Job) (envOut map[string]string, rel
 		unlock()
 		return nil, nil, err
 	}
-	argv := slices.Clone(e.Run)
+	if err := e.lower(&j.Spec, &w.Machine); err != nil {
+		unlock()
+		return nil, nil, err
+	}
+	if r, ok := extensionRecipe(*e, &w.Machine); ok {
+		j.EnvironmentRecipes = map[string]EnvironmentRecipe{w.Machine.GPU: r}
+	}
+	argv := slices.Clone(j.Spec.Run.Command)
 	for i, arg := range argv {
 		arg = strings.ReplaceAll(arg, "{extension}", env["MYCE_EXTENSION_DIR"])
 		arg = strings.ReplaceAll(arg, "{cache}", env["MYCE_EXTENSION_CACHE"])
@@ -455,7 +506,7 @@ func (w Worker) prepareExtensionExecution(j *Job) (envOut map[string]string, rel
 	} else {
 		argv = append(argv, j.Spec.Args...)
 	}
-	if !strings.Contains(argv[0], "/") {
+	if len(e.Variants) == 0 && !strings.Contains(argv[0], "/") {
 		for _, bin := range []string{filepath.Join(env["MYCE_EXTENSION_CACHE"], "venv", "bin"), filepath.Join(env["MYCE_EXTENSION_CACHE"], "bin")} {
 			candidate := filepath.Join(bin, argv[0])
 			if st, err := os.Stat(candidate); err == nil && st.Mode().IsRegular() && st.Mode()&0111 != 0 {
@@ -465,6 +516,10 @@ func (w Worker) prepareExtensionExecution(j *Job) (envOut map[string]string, rel
 		}
 	}
 	j.Spec.Run.Command = argv
+	for k, v := range j.Spec.Run.Env {
+		j.Spec.Run.Env[k] = strings.ReplaceAll(strings.ReplaceAll(v, "{extension}", env["MYCE_EXTENSION_DIR"]), "{cache}", env["MYCE_EXTENSION_CACHE"])
+	}
+	j.Spec.Run.Workdir = strings.ReplaceAll(strings.ReplaceAll(j.Spec.Run.Workdir, "{extension}", env["MYCE_EXTENSION_DIR"]), "{cache}", env["MYCE_EXTENSION_CACHE"])
 	env["MYCE_WORK"] = j.Spec.workType()
 	env["MYCE_EXTENSION_NAME"] = e.Name
 	env["MYCE_EXTENSION_VERSION"] = e.Version

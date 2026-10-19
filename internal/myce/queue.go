@@ -388,18 +388,27 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (*Job, error) {
 		if len(s.Files) > 0 && (q.files != store || q.fileCheckpoints != fileCheckpoints) {
 			return ErrStale
 		}
-		if err := s.Validate(); err != nil {
-			return err
+		submitted := s
+		extensions, e := q.resolveExtensions(&s)
+		if e != nil {
+			return reject("job_program_invalid", e)
 		}
-		if err := normalizeJobClass(&s); err != nil {
+		// Validate the original execution/needs, with the resolved class default.
+		// Resolution must not hide forbidden overrides or bypass deadline rules.
+		submitted.Class = s.Class
+		if err := submitted.Validate(); err != nil {
 			return err
 		}
 		if e := q.validateProjectPlacement(s.Project, s.AllowedMachines); e != nil {
 			return reject("job_placement_invalid", e)
 		}
-		extensions, e := q.resolveExtensions(&s)
-		if e != nil {
-			return reject("job_program_invalid", e)
+		if err := normalizeJobClass(&s); err != nil {
+			return err
+		}
+		if !s.extensionJob() {
+			if err := lowerExecution(&s); err != nil {
+				return reject("job_execution_invalid", err)
+			}
 		}
 		recipes, e := q.resolveEnvironment(s.Environment)
 		if e != nil {
