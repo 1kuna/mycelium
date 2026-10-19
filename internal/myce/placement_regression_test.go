@@ -49,15 +49,11 @@ func TestPlacementUnknownCapacityReason(t *testing.T) {
 func TestPlacementLinuxFreshHostAllowance(t *testing.T) {
 	q, clock := fixture(t)
 	dir := filepath.Join(newTestStateRoot(t), "host")
-	state, err := InitializeHostIntent(dir, "host", clock)
-	if err != nil || state.Desired != "closed" {
-		t.Fatal("fresh host not CLOSED", err)
-	}
-	if _, err := SetHostMemoryBudget(dir, 24); err != nil {
+	budget := 24.0
+	if _, err := q.ChangeHostMaintenance("host", HostMaintenanceRequest{Action: "drain", MemoryBudgetGB: &budget}); err != nil {
 		t.Fatal(err)
 	}
-	testConfirmClose(t, dir)
-	if _, err := changeHostIntent(dir, clock, hostIntentChange{Desired: "open", Expected: state.HostRevision}); err != nil {
+	if err := setMaintenance(t, q, "host", "resume"); err != nil {
 		t.Fatal(err)
 	}
 	probe := ProfileProbe{
@@ -87,11 +83,7 @@ func TestPlacementLinuxFreshHostAllowance(t *testing.T) {
 		if profile.SystemMemoryBytes != 32<<30 || len(profile.Unavailable) != 0 || availabilityBlocked(&m) {
 			t.Fatal("Linux capacity probe failed", profile)
 		}
-		w := Worker{HostStateDir: dir, Machine: m}
-		if err := w.refreshHostMemoryBudget(); err != nil || w.Machine.HostMemoryBudgetGB != 24 {
-			t.Fatal("explicit allowance not reported", err)
-		}
-		m = w.Machine
+		m.HostMemoryBudgetGB = 24
 		source, err := newHostMemorySource(4, "linux", probe.ReadFile, nil)
 		if err != nil {
 			t.Fatal(err)

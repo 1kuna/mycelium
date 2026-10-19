@@ -201,7 +201,7 @@ func TestBenchmarkPreferenceRespectsEligibility(t *testing.T) {
 			check(t, q, slow, nil)
 			check(t, q, fast, nil)
 			if why == "disabled" {
-				if err := closeQueueHost(q, fast.ID, "test", nil); err != nil {
+				if err := setMaintenance(t, q, fast.ID, "disable"); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -249,7 +249,7 @@ printf '%s' '{"units":8,"seconds":2,"unit":"references/s","reference_units":1}' 
 				t.Fatal(err)
 			}
 			t.Setenv("MYCE_TOKEN", "must-not-inherit")
-			measured, err := measureReferences(context.Background(), BenchmarkConfig{Clock: RealClock{}, ExtensionRoot: root, Machine: Machine{GPU: "fake"}}, []Extension{e}, fingerprint)
+			measured, err := measureReferences(context.Background(), BenchmarkConfig{Clock: RealClock{}, StateDir: newTestStateRoot(t), ExtensionRoot: root, Machine: Machine{GPU: "fake"}}, []Extension{e}, fingerprint)
 			if err != nil {
 				t.Fatal(err)
 			}

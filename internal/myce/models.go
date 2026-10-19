@@ -387,7 +387,7 @@ func (q *Queue) maintainModels() {
 	for k, s := range q.s.ModelSlots {
 		m := q.s.Machines[s.Machine]
 		if m == nil || m.Gone || m.Session != s.Session {
-			if m != nil && (q.maintenanceKnown(hostID(m)) || q.hostClosedReason(hostID(m)) != "" || m.Session == s.Session && (m.HostMemoryBudgetGB > 0 || m.hostBudgetGB > 0 || q.s.Hosts[hostID(m)] != nil && q.s.Hosts[hostID(m)].Policy.ProductionHold)) {
+			if m != nil && (q.maintenanceKnown(hostID(m)) || m.Session == s.Session && (m.HostMemoryBudgetGB > 0 || m.hostBudgetGB > 0 || q.s.Hosts[hostID(m)] != nil && q.s.Hosts[hostID(m)].Policy.ProductionHold)) {
 				continue
 			}
 			delete(q.s.ModelSlots, k)
@@ -690,7 +690,7 @@ func (q *Queue) addCall(c *ModelCall) error {
 	if err := validateProjectIdentifier(c.Project); err != nil {
 		return err
 	}
-	return q.updateScoped(nil, true, func() error {
+	return q.update(func() error {
 		if _, ok := q.model(c.Model); !ok {
 			return errors.New("unknown model")
 		}
@@ -847,7 +847,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 		var call ModelCall
 		var target string
 		var timedOut, requestExpired, engineLost bool
-		e = a.Queue.updateScoped(nil, true, func() error {
+		e = a.Queue.update(func() error {
 			a.Queue.maintain()
 			call = *a.Queue.calls[c.ID]
 			timedOut = a.Queue.clock.Now().Sub(call.Queued) >= a.Queue.models.Wait
@@ -1104,7 +1104,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 }
 
 func (q *Queue) retryCall(id string) error {
-	return q.updateScoped(nil, true, func() error {
+	return q.update(func() error {
 		live := q.calls[id]
 		if live == nil {
 			return errors.New("model call no longer active")

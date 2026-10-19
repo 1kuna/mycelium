@@ -1,6 +1,6 @@
 # Mycelium v3: approved design
 
-Approved design, revised 2026-10-17 by the maintainer decisions in [#80](https://github.com/1kuna/mycelium/issues/80). The host-control, rest, keyed-submission, cancellation and installer contracts below are implemented. This is the only product spec; native qualification and deployment remain separate from laptop implementation evidence.
+Approved design, revised 2026-10-19 by the maintainer decisions in [#80](https://github.com/1kuna/mycelium/issues/80). Queue maintenance, keyed submission, cancellation and installer contracts below are implemented. This is the only product spec; native qualification and deployment remain separate from laptop implementation evidence.
 
 ## Why a redesign
 
@@ -18,7 +18,7 @@ One shared queue of GPU jobs for production, research and future projects. **GPU
 | Worker | Every GPU machine that is in the fleet right now | Reports its free memory, GPU type and loaded models. Asks for work, runs jobs, sends back logs and results. |
 | `myce` command | Anywhere | Submit, watch, cancel and read logs. `myce join` starts a worker on this machine. |
 
-- **Dedicated machines** offer their GPUs whenever available. **Shared machines** can close host admission when another owner needs them; that owner controls its own work and checks release before reopening Mycelium.
+- **Dedicated machines** offer their GPUs whenever available. **Shared machines** can drain or disable queue admission when another owner needs them; that owner controls its own work and checks release before reopening Mycelium.
 - **Machines that come and go:** running `myce join` adds a machine; stopping the worker removes it. Daily-use participation can wait for owner inactivity, safe heat and external power.
 - All machines are on one local network. Workers use a configured queue address or authenticated joining; discovery finds addresses but does not establish trust. A privately provisioned join credential keeps strangers out.
 - Single Go binary, as in v1. There is no peer network, no leader election and no replicated state. If the queue service restarts, queued and running batch jobs survive in its database file, and workers wait and reconnect. Model calls that were in flight are not replayed and fail; callers must retry them.
@@ -90,7 +90,7 @@ slices; current eligibility and stop/retry rules still apply. See
 
 There is **no idle production cooldown** after the final demand and cleanup settle. Lower-priority work can run again; new production preempts through the queue. Production takeover covers submitted GPU work, not CPU publication. Project machine allow-lists apply at every priority and to model calls; commands and servers receive their placement in worker-owned environment variables.
 
-One measured physical-host memory allowance covers simultaneous production demand, other admitted work, sidecars, launch overhead and headroom. Its numeric value comes from component measurements, not this spec. Keep aggregate accounting and cgroup/Docker enforcement. Do not rewrite budgets on every ownership switch: closed admission excludes work while another owner uses the host.
+One measured physical-host memory allowance covers simultaneous production demand, other admitted work, sidecars, launch overhead and headroom. Its numeric value comes from component measurements, not this spec. Keep aggregate accounting and cgroup/Docker enforcement. Do not rewrite budgets on every ownership switch: queue maintenance excludes new work while another owner uses the host.
 
 **Machines leaving.** Workers pull jobs, so a job is never tied to a machine until it starts. That means there is no list of waiting jobs per machine to clean up. Leaving works like this:
 
@@ -111,13 +111,13 @@ One measured physical-host memory allowance covers simultaneous production deman
 
 **Data stays local.** Every machine in the fleet is on-premises, so job data never leaves our machines. A job can also list the specific machines it is allowed to run on.
 
-**Production infrastructure retries (#80, agreed with Verso 2026-10-19).** An interrupted production batch job requeues at the front of its priority line under the same job ID and `submission_key`, at most **2** times (`queue --production-infrastructure-retries`, a nonnegative limit clamped to two; zero disables requeue). Worker restart or loss, an unreported attempt after queue restart, undelivered/lost results, host close/release, planned leave and reboot all use the existing requeue path. A queue restart that reconnects a still-current running command or its buffered result does not interrupt it. The third interruption fails with `infrastructure_retries_exhausted` and a terminal timestamp. The durable job counter `infrastructure_retries` records requeues used and is an additive optional integer in status and job-v1 (omitted at zero). It survives restart; release evidence cannot refund or revive an exhausted production budget.
+**Production infrastructure retries (#80, agreed with Verso 2026-10-19).** An interrupted production batch job requeues at the front of its priority line under the same job ID and `submission_key`, at most **2** times (`queue --production-infrastructure-retries`, a nonnegative limit clamped to two; zero disables requeue). Worker restart or loss, an unreported attempt after queue restart, undelivered/lost results, worker interruption/release, planned leave and reboot all use the existing requeue path. A queue restart that reconnects a still-current running command or its buffered result does not interrupt it. The third interruption fails with `infrastructure_retries_exhausted` and a terminal timestamp. The durable job counter `infrastructure_retries` records requeues used and is an additive optional integer in status and job-v1 (omitted at zero). It survives restart; release evidence cannot refund or revive an exhausted production budget.
 
-Classification uses the cause for both native and Docker attempts. A Mycelium stop (host close/release, planned leave, worker shutdown or stop event), worker/daemon loss with an unobserved outcome, or a readiness wait aborted by that infrastructure interruption uses the retry budget. A container killed or missing during an issued stop or recovery is infrastructure. An observed independent nonzero exit, OOM (including an extension job), sidecar self-exit during readiness, or readiness timeout without an infrastructure stop fails production immediately and consumes no infrastructure retry. A SIGKILL without stop/recovery evidence is a stage failure, with the ambiguity recorded in status. Cancellation takes precedence: once `will_not_run: true` is acknowledged, no interruption can requeue the job. Superseded production attempts cannot recover ownership or publish a late result; exact release evidence can still discharge their custody. At most one attempt's result is published. Commands and output writes must still be safe to repeat; external side effects are not exactly-once. Experiments retain their existing retry, checkpoint recovery and planned-stop behavior.
+Classification uses the cause for both native and Docker attempts. A Mycelium stop (worker interruption/release, planned leave, worker shutdown or stop event), worker/daemon loss with an unobserved outcome, or a readiness wait aborted by that infrastructure interruption uses the retry budget. A container killed or missing during an issued stop or recovery is infrastructure. An observed independent nonzero exit, OOM (including an extension job), sidecar self-exit during readiness, or readiness timeout without an infrastructure stop fails production immediately and consumes no infrastructure retry. A SIGKILL without stop/recovery evidence is a stage failure, with the ambiguity recorded in status. Cancellation takes precedence: once `will_not_run: true` is acknowledged, no interruption can requeue the job. Superseded production attempts cannot recover ownership or publish a late result; exact release evidence can still discharge their custody. At most one attempt's result is published. Commands and output writes must still be safe to repeat; external side effects are not exactly-once. Experiments retain their existing retry, checkpoint recovery and planned-stop behavior.
 
-A production attempt that had started gets its original-length start window from interruption detection, including a host close/release. Planned leave keeps its original start deadline. A requeued job may wait for its closed host to reopen within that window; a new production submission to only closed eligible hosts still fails immediately. Unstarted attempts do not renew their start deadline.
+A production attempt that had started gets its original-length start window from interruption detection, including a worker interruption/release. Planned leave keeps its original start deadline. A requeued job may wait for its maintained host to resume within that window; a new production submission to only disabled eligible hosts still fails immediately. Unstarted attempts do not renew their start deadline.
 
-## Queue-owned host maintenance (S5)
+## Queue-owned host maintenance
 
 Maintenance is a durable queue record keyed by the physical `host_id`, shared by
 all of its GPU workers. It survives checkin, queue restart and worker rejoin.
@@ -168,7 +168,7 @@ attempt's ceiling or release resources. Qualification remains `UNQUALIFIED`
 until separately authorized native measurement. Docker main/sidecar ceilings
 and total per-attempt charges are unchanged.
 
-Status reports policy, local fence, known worker freshness/device identities,
+Status reports policy, known worker freshness/device identities,
 allowance/mismatch, aggregate RAM/debt, attempt identities, preparations,
 sidecars/engines and pending releases/daemon cleanup. All previously known
 workers remain required after loss or restart; a never-reported host has unknown
@@ -179,13 +179,13 @@ discharge custody. This is queue-observed quiescence, not an offline hardware
 handoff guarantee. Offline intervention uses separately authorized service and
 container tools after inspecting owned work.
 
-S5 retains the old local close/open/reconcile fence as an additional gate.
-`host status --local` still selects that interface. Queue resume cannot override
-it. The old local allowance configurator remains only as bootstrap input; once
-a queue policy exists, use `host budget`. S6 must remove the local intent,
-registry, revisions/CAS, last-close, exclusion/discharge, root copy/child, rest
-verdicts and timer, plus their installer/start conditions and runtime callers,
-while retaining queue policy, Started and exact release custody.
+Queue maintenance is the sole host admission authority. There is no local intent,
+worker registry, host revision/CAS, last-close, exclusion observer, session-wide
+discharge, privileged controller, rest envelope or reconcile timer. Ordinary
+binary execution as root is refused before reading flags, configuration or secrets.
+Each worker uses its own spool and reports exact session/attempt custody. Queue
+policy reaches workers through the existing authenticated checkin reply. There
+is no local allowance configurator or local-budget fallback.
 
 ## Using it
 
@@ -210,95 +210,23 @@ These GPU-work and setup features are implemented now:
 
 ## Host admission and release (#80)
 
-One durable desired-state record controls the whole physical host. A serialized local controller allocates monotonically increasing revisions; every action and retry binds to its accepted revision. Desired state is durable intent. Observed state is what has been applied and verified on this boot. Queue acknowledgement is separate. Recheck the revision before every native/Docker create, start and admission; stale actions cannot reopen a newer close. Device selection is diagnostic only, not staged per-device enable.
+Queue maintenance serializes placement and Started with cancellation and durable
+queue state. Every batch payload needs the current exact-attempt Started response.
+A grant already accepted can race a later drain/disable; it retains its charge and
+stops through the ordinary queue protocol when requested. No offline file or root
+proof can supersede that queue transaction.
 
-```sh
-myce host close --local [--expect-revision <R>] --worker-user <user> --wait-released --timeout 30s --json
-myce host open --local --expect-revision <R> --worker-user <user> --timeout 30s --json
-myce host status --local --worker-user <user> --expect closed --verdict --timeout 10s --json
-myce host status --local --worker-user <user> --expect ready --wait --timeout 30s --json
-```
+Known executions, preparations, model engines/calls and pending daemon operations
+remain visible through `host status HOST`. `HostRelease` and the work enumeration
+retain unknown custody after loss, stale reports or restart. Only exact completion,
+release acknowledgement or cleanup of the immediately previous worker session
+settles that custody. Timeouts, an empty inventory and service exit alone do not.
+The same cleanup handles native groups and Docker main/sidecar/network resources.
 
-`close` durably records closed intent before discovery or network calls, fences all launches and stops all Mycelium work on the host. Save stop intent and its deadline before TERM; a restart or bounded KILL never renews grace. Keep resource charges until release is proven. Queued jobs stay durable and fenced here; eligible work elsewhere is unaffected. A reboot invalidates observations, never closed intent.
-
-One installed standard systemd user timer per host runs `myce host reconcile --local`, using the installed worker binary and reconciliation function, even when all GPU workers are stopped. It runs on a timer; no-op when settled. It converges on reconnect. A co-located queue also reconciles before admission. The timer is lifecycle plumbing, not another authority. There is no notify-versus-local-receipt choice. Use systemd startup gates, `Restart=on-failure`, `KillMode=control-group` and bounded stop timeouts; Docker labels, inspect, stop and wait; atomic replace/fsync for local intent; SQLite transactions for queue changes. Reconciliation bridges accepted daemon operations and queue custody, which unit state alone cannot prove.
-
-### Revision selection
-
-`open` requires `--expect-revision <R>`. `close` accepts it optionally. HTTP/API equivalents use the request field `expect_revision`. Compare-and-set compares that selector with the **durable** `desired.revision` before allocating anything. A mismatch changes nothing, exits **3**, and returns the current `desired.state` and `desired.revision`, `accepted_revision: null`, and an error with `component: "host_intent"`, `code: "revision_mismatch"`. It never reports acceptance of the rejected operation. Missing the required open selector is a usage error.
-
-An accepted operation allocates `desired.revision = previous + 1` and a fresh `operation_id`. Close **without** a selector always wins admission to closing: it does not lose a race to a newer revision, an open or an unsettled prior close. The ordinary durable-write and revision-overflow failure rules still apply; no failed write is acceptance. Close with a selector must match it. Open additionally requires `last_close.settlement == "confirmed"` and, before allocation, `R == last_close.revision == desired.revision`. An unsettled or missing previous close is rejected with `component: "host_intent"`, `code: "previous_close_unsettled"`; a stale selector/previous-close revision is rejected with `revision_mismatch`. Rejections allocate neither a revision nor an operation ID. Revision-mismatch exit 3 is distinct from usage, persistence, observation and wait failures.
-
-An accepted operation can be superseded by a newer accepted revision before it finishes, e.g. two concurrent closes. It keeps its `accepted_revision` and reports `component: "host_intent"`, `code: "revision_superseded"` with the current `desired.revision`. This is not a CAS rejection and never exits 3. Without `--wait-released` the command still exits 0, because its own acceptance stands. With `--wait-released` it fails as a wait failure, because the revision it was waiting on is no longer current. Consumers follow the newer revision.
-
-A close creates `last_close` with its new operation ID/revision, `settlement: "pending"` and `settled_at: null`; reconciliation updates its settlement and records the UTC RFC3339 completion time when confirmed. Missing or unverified settlement evidence is `unknown`, never confirmed. A subsequent accepted close replaces that object. Open changes the current desired operation/revision, but **does not change `last_close`**: the confirmed close remains bound to its original ID/revision as history until the next close. Read-only status returns that same history and never creates or repairs it. In every envelope `host_settlement == last_close.settlement`; when `last_close` is null, `host_settlement` is `unknown`. Previous-close confirmation does not mean that an accepted open is ready on this boot.
-
-### Local exclusion
-
-Local PASS needs fresh current-boot evidence for every row:
-
-| Required fact | Evidence |
-| --- | --- |
-| Closed intent and launch fencing | Durable current revision; every native/Docker create/start gate closed. |
-| Native release | Worker, engine and native descendant cgroups empty. |
-| Daemon release | Complete owned-label inventory at every known endpoint, including orphan attempts and sidecars; none running, paused or restarting. Every accepted create/start has a known terminal disposition, with no late operation pending. |
-| GPU release | No Mycelium-owned holder on affected devices. The generic observer matches processes in Mycelium cgroups/containers against GPU device nodes. Unrelated display or other-owner processes are outside its scope. |
-| Restart safety | Service/container automatic restart cannot launch owned work while closed. Exited evidence containers may remain with restart disabled and no pending start. A competing manual launch is a failure. |
-
-Positive contrary evidence is **FAIL**. Missing daemon access, unreadable custody, unknown operation disposition, missing GPU-holder evidence, stale observations or incomplete inventory is **UNKNOWN**. FAIL beats UNKNOWN, retaining both causes in errors. Null evidence means unknown, never zero or empty. Neither FAIL nor UNKNOWN proves exclusion. A stopped unit, elapsed grace, dead Docker client or old receipt alone never proves release; accepted daemon operations survive client/unit death.
-
-Host-local commands are supported under **root** with `--worker-user <user>`. Root must invoke a **separate root-owned copy** at `/usr/local/libexec/myce/myce`, mode 0755, with every ancestor root-owned and not group/other-writable. Invoke this copy by absolute path in sudoers, units and controllers. On Linux, the executing binary and all its ancestors must have no access ACL (`system.posix_acl_access` xattr); ACL presence or an unreadable ACL check is a typed unsafe-target error. A root installer or operator deploys that copy from a trusted artifact and verifies its SHA-256; the worker's `myce install` and upgrade never write it. The worker-owned installed binary must never be executed as root. At EUID 0, startup verifies the executing inode via `/proc/self/exe`, its resolved path and ancestors, refuses an untrusted copy with `host_target_unsafe`/`root_binary_untrusted`, makes inherited descriptors ≥3 close-on-exec, and permits only `host close|open|status|reconcile --local` and the internal child entry. This startup check is defense in depth: the operator must establish trust before executing any binary. See [the S11 identity probe](probe-s11-worker-identity.md) for the exact root deployment and verification steps.
-
-Root resolves only the OS account (UID/GID, supplementary groups and home) and checks path strings. All worker-file reads, including config, state resolution, tree validation and read-only status, run in a dropped child. Installed config selects that user's state directory; `--state-dir` overrides only the shared host-control directory and must already contain current-format state for the installed host. It does not change the account, worker spool or service, or adopt legacy state. Targets must be worker-owned, regular files/directories and not group/other-writable. Linux host-control targets and every ancestor must have no access ACL. Root-owned writable ancestors require the sticky bit; non-root-owned ancestors must be owned by the worker and not group/other-writable. Worker-owned symlinks are rejected; root-owned symlinked ancestors such as `/home -> /var/home` are permitted, with the resolved target checked. Config/state reads validate opened regular-file inodes, reject FIFOs/devices/symlinks, bound their size, and return typed errors without raw paths or read errors. No caller HOME or user-bus inference selects privileged identity; unknown trees are never recursively chowned.
-
-Root collects read-only cgroup, Docker, restart-policy and complete GPU-holder `/proc` FD/executable observations; `systemctl --user --machine=<user>@.host show` selects the worker's user manager. Every Mycelium state write, lock creation, user-unit or Docker mutation runs in a re-executed child of the same trusted binary via `/proc/self/exe`, with worker UID/GID, supplementary groups, HOME and `XDG_RUNTIME_DIR=/run/user/<uid>`. Fixed JSON requests/results travel over pipes with a scrubbed environment and no fleet token. The command deadline starts before resolution; the child gets the remaining timeout minus two seconds, and SIGTERM cancellation plus a bounded wait preserves a typed partial intent revision with release unconfirmed. The launcher sends SIGTERM no later than the overall deadline minus its one-second `WaitDelay`, reserving forced-exit time inside `--timeout`. Status writes nothing. Non-Linux root control is unsupported. Submission and HTTP clients retain their ordinary unprivileged identity. Non-root commands run in-process, but real GPU-holder evidence is UNKNOWN with `gpu_holders/permission_denied`. Laptop dev uses fakes. The user timer performs worker-owned convergence; it cannot manufacture a privileged exclusion PASS. The installer preserves the worker's configured Docker endpoint for observation and mutation.
-
-### Host settlement and reopening
-
-`host_settlement` covers only Mycelium's host/release obligations, bound to `last_close`. Confirmed means the queue durably acknowledged that close revision, every execution covered by that close is settled as released, and placement was fenced for its closed period. After open this remains historical confirmation of the previous close; current admission/readiness uses the newer open revision. Pending reconciliation keeps unknown releases charged. For a confirmed current-boot/current-close local exclusion, discharge every queue obligation of the host's registered machine/session pairs, including job copies, engines, preparations and sidecars. Local files are undelivered state/results, not required inventory matches; unmatched local evidence is a diagnostic Hold that does not block settlement. Unregistered machines/sessions remain charged. Reconcile revision before local admission after reconnect/restart; omitted obligations remain fenced and charged, and stale acknowledgements/results are rejected. Planned displacement requeues resumable experiments without an infrastructure retry. A queue revision ahead of local state is reported as `host_revision_behind_queue`; the worker retries without terminating its job. After inspecting the mismatch, an operator issues a new local close, which allocates `max(local, queue_observed) + 1` and requires fresh exclusion and queue acknowledgement.
-
-**Host settlement never covers consumer cancellation.** Closing a host cannot cancel jobs that may run elsewhere. Consumers close their own operation, fence late publication, cancel its exact jobs/keys through the API, and persist their own completion. No consumer operation, mode or completion state belongs in the generic queue. Queue-independent local PASS can permit another owner's local recovery while settlement is pending; it is not full rest PASS and cannot attest remote execution. Never repair queue custody by editing SQLite offline.
-
-Every worker session, including startup, idle-restart and recovery rotations, is durably registered under the host admission fence before its first queue check-in. Release never waits for result delivery: a confirmed exclusion discharges the registered sessions even if results or outputs were never delivered. An undelivered attempt is interrupted by the close: eligible experiments requeue without a loss charge, production uses its bounded infrastructure retry budget, and cancellation wins. Preserve the local result and outputs in place as a nonblocking diagnostic Hold; reject a later replay of that superseded attempt as stale without publishing it. Work completed during a queue outage can therefore run again after close (resumable work uses its checkpoint).
-
-`open` checks only Mycelium's previous-close `host_settlement=confirmed` and that the request is bound to the current revision. The consumer checks its own cancellation completion and other-owner release **before** calling open. A manual root open is an operator action, not proof of consumer safety. Opening restores eligibility; queued jobs follow ordinary placement, never an old assignment. Acceptance is not readiness. The installed config defines the required workers, not the last-seen registry. Ready needs all of them fresh and healthy, acknowledging the same current-boot desired/observed revision, current queue acknowledgement and no unresolved release. Host ready does not certify model load or application health. Report previous-close settlement separately from current-open queue acknowledgement.
-
-### Shared JSON envelope, schema v1
-
-Close, open and read-only status with `--json` emit one envelope, including on error. The machine-readable contract is [JSON Schema draft 2020-12](schemas/host-envelope-v1.schema.json), with [closed PASS](schemas/examples/host-closed-pass.json), [UNKNOWN with nulls](schemas/examples/host-unknown-nulls.json), [FAIL with errors](schemas/examples/host-fail-errors.json), [open accepted](schemas/examples/host-open-accepted.json) and [revision mismatch](schemas/examples/host-revision-mismatch.json) examples. All fields below are required; nullable fields stay present. Status never initializes state. Unknown identity is not a fabricated operation, revision or zero.
-
-| Field | Type / meaning |
-| --- | --- |
-| `schema_version`, `command` | Integer `1`; `close`, `open` or `status`. |
-| `host_id`, `operation_id`, `boot_id` | Stable physical-host ID, accepted control-operation ID, current OS boot ID; each string or null if unavailable/unverified. |
-| `accepted_revision` | Accepted uint64 command revision, or null when no command was accepted; read-only status uses null. |
-| `desired` | `{state: "open" or "closed" or null, revision: uint64 or null}`; only verified durable intent. |
-| `observed` | `{state: "open", "closed", "releasing" or "unknown", revision: uint64 or null}`; verified on this boot. |
-| `local_exclusion` | `PASS`, `FAIL` or `UNKNOWN` under the complete local predicate. |
-| `host_settlement` | Exactly `last_close.settlement`; `unknown` when `last_close` is null. Covers the close/previous-close obligation, never consumer coverage. |
-| `last_close` | Required nullable object `{operation_id, revision, settlement, settled_at}`. Nonempty close operation ID, uint64 revision, `confirmed` / `pending` / `unknown`, and UTC RFC3339 settlement time or null. Created/replaced by close, updated by reconciliation, unchanged by open and status. |
-| `queue_observed_revision` | Queue-acknowledged revision, or null if unavailable/unverified; current open acknowledgement is distinct from previous-close settlement. Historical acknowledgement alone is not fresh evidence. |
-| `counts` | Nullable nonnegative `active_attempts`, `preparing_attempts`, `stopping_attempts`, `pending_daemon_operations`, `running_containers`, `owned_gpu_holders`, `unsettled_attempts`, `queued_jobs`, `fenced_queued_jobs`, `unresolved_placement`. Null means unknown. |
-| `units`, `attempts` | Units: `{unit, cgroup, populated}`; unit is a nonempty string, cgroup a nonempty string or null, populated boolean or null. Attempts: `{job_id, machine_id, session_id, attempt, release_state}`; exact identity/release-state strings are nonempty and attempt is a positive integer. Null arrays mean unreadable/incomplete; empty arrays mean complete empty inventory. |
-| `restart_safe` | Boolean or null if policy/startup gates cannot be verified. |
-| `observed_at`, `source_observed_at` | UTC RFC3339 completion time (ending in `Z`); per-source times keyed by `local_intent`, `cgroups`, `docker`, `gpu_holders`, `queue`. Unavailable source times are null. |
-| `errors` | Array of `{component, code, message}`; stable codes and secret-free diagnostics. |
-
-Uninitialized/corrupt state gives UNKNOWN with stable `state_uninitialized` / `state_corrupt` errors and nullable unverified identity/desired fields. Close allocates an operation/revision only after worker-owned durable persistence succeeds. Status cannot repair or invent it. Collect observations within a bounded window (10 seconds default); queue evidence older than 10 seconds is unknown. For every rest-verdict evidence item, age equal to its freshness bound is fresh (`age <= bound`); an item just past the bound, missing its observation time, or dated in the future is absent. Normalize positive and negative facts at one evaluation instant before applying verdict rules: absent evidence gives UNKNOWN, and FAIL requires fresh negative evidence. Evaluate only after collection and the final revision fence; a collection or fence error gives UNKNOWN with `collection_failed`. Printed verdict and exit status use that same result (exit zero if and only if PASS). A boot/revision change during collection requires a fresh observation.
-
-Revision mismatch exits 3 with the unchanged desired state and null accepted revision. Otherwise, without a verdict/wait request, close/open exit zero on durable acceptance and status on a successful snapshot; acceptance/snapshot success alone is not PASS. `close --wait-released` exits zero only on local PASS, even with queue settlement pending. `status --expect ready --wait` exits zero only on ready PASS. Errors, timeouts and non-PASS waits exit nonzero and retain the JSON result.
-
-### Rest verdict
-
-`host status --local --expect closed|ready --verdict` computes a product verdict. It adds `expectation`, `verdict`, `reasons` (an array of unique stable-code strings), `queue_reachable` (boolean or null) and `memory_allowance_bytes` (nonnegative integer or null) to the envelope. These five fields occur together or are all absent; additive diagnostic fields are permitted. Schema validation checks structure, not evidence freshness or release safety. Callers must not reconstruct the verdict from human hold strings, external producers or receipts. With `--verdict`, exit zero means PASS only.
-
-| Verdict | Closed expectation | Ready expectation |
-| --- | --- | --- |
-| PASS | Local exclusion PASS, fresh queue acknowledgement of the current close and confirmed settlement; no relevant active/preparing/stopping work, pending release or unresolved placement risk. | Current-boot open revision applied and queue-acknowledged; every installed required worker fresh and healthy at that revision; no unresolved release. Empty cgroups are not required. |
-| FAIL | Proven open/stale admission, owned live work/GPU holder, unsafe restart or positively eligible unfenced work. | Proven violation of the required open revision or required-worker health. |
-| UNKNOWN | No proven violation, but required queue/local/placement/custody evidence is missing, stale or ambiguous. Local PASS with queue pending is not rest PASS. | No proven violation, but required boot/revision/worker/queue/release evidence is missing, stale or ambiguous. |
-
-FAIL beats UNKNOWN; retain all reasons. Fenced queued jobs do **not** fail rest: count them and explain their exclusion. Positively foreign-only placement is outside this host's scope; unknown placement is never assumed foreign or harmless. Timeout is non-PASS, never release evidence. Consumers compose their own cancellation and application identity/health checks with this verdict. No external rest producer, cue/ACK watcher, reference-file equality or idle settle timer is a prerequisite.
+Drain before an upgrade; use `disable --stop --wait` when active work must stop.
+Resume explicitly when ready. There is no offline handoff certification: during
+queue outage use separately authorized service/container tools after inspecting
+owned work, preserve pending results, then reconnect for exact reconciliation.
 
 ## Submission identity and cancellation (#80)
 
@@ -323,7 +251,7 @@ Schemas describe wire shape, not proof of physical release or permission to cons
 
 ### Cancellation acknowledgement
 
-Cancel by ID with `POST /api/jobs/{id}/cancel`, or by key with `POST /api/jobs/cancel` and `{project, submission_key}`. Both are idempotent and return `{job_id, project, submission_key, state, will_not_run, release, acknowledged_at}`. `job_id` and `submission_key` may be null where no binding exists. `acknowledged_at` echoes the stored first `cancelled_at` (or reservation cancellation time) in UTC RFC3339; retries, reopen and reservation binding preserve it. It is null for an expired digest marker with no retained timestamp. `will_not_run: true` durably means no **new** attempt is created or assigned after the acknowledgement. An attempt already assigned before the acknowledgement may still begin briefly; the worker stops it at its next check, and `release` stays `pending` until release is proven. Consumers that need execution exclusion wait for `release: "confirmed"` (or `not_applicable` when never attempted). Every batch command requires the current attempt-fenced Started acknowledgement before its payload executes; Docker and engines retain their host revision gates. `release` is `not_applicable`, `pending` or `confirmed`, or null when no release fact can be established. For a retained job, release always covers **every known attempt**, regardless of whether the job is queued, active, terminal or removed: `not_applicable` only when it never had an attempt; `pending` while any known attempt has unproven release (its charge remains); `confirmed` once all known attempts are proven released. In particular, a requeued job can still have a lost, unreleased attempt; cancelling it returns `pending`, then a repeated cancellation returns `confirmed` after that exact release is proven. Cancellation never creates release custody or placement blockers; runtime tracking owns charges. Fresh rejoin records release only for copies from the immediately previous session (`PreviousSession`, matching the recorded old session), even without a retained release record; older sessions remain unresolved. Pre-v3 persisted queue state is refused and never contributes inferred release evidence.
+Cancel by ID with `POST /api/jobs/{id}/cancel`, or by key with `POST /api/jobs/cancel` and `{project, submission_key}`. Both are idempotent and return `{job_id, project, submission_key, state, will_not_run, release, acknowledged_at}`. `job_id` and `submission_key` may be null where no binding exists. `acknowledged_at` echoes the stored first `cancelled_at` (or reservation cancellation time) in UTC RFC3339; retries, reopen and reservation binding preserve it. It is null for an expired digest marker with no retained timestamp. `will_not_run: true` durably means no **new** attempt is created or assigned after the acknowledgement. An attempt already assigned before the acknowledgement may still begin briefly; the worker stops it at its next check, and `release` stays `pending` until release is proven. Consumers that need execution exclusion wait for `release: "confirmed"` (or `not_applicable` when never attempted). Every batch command requires the current attempt-fenced Started acknowledgement before its payload executes; Docker and engines retain exact execution custody and queue-authorized plans. `release` is `not_applicable`, `pending` or `confirmed`, or null when no release fact can be established. For a retained job, release always covers **every known attempt**, regardless of whether the job is queued, active, terminal or removed: `not_applicable` only when it never had an attempt; `pending` while any known attempt has unproven release (its charge remains); `confirmed` once all known attempts are proven released. In particular, a requeued job can still have a lost, unreleased attempt; cancelling it returns `pending`, then a repeated cancellation returns `confirmed` after that exact release is proven. Cancellation never creates release custody or placement blockers; runtime tracking owns charges. Fresh rejoin records release only for copies from the immediately previous session (`PreviousSession`, matching the recorded old session), even without a retained release record; older sessions remain unresolved. Pre-v3 persisted queue state is refused and never contributes inferred release evidence.
 
 | State at cancellation | Acknowledgement |
 | --- | --- |
@@ -337,37 +265,37 @@ Cancel by ID with `POST /api/jobs/{id}/cancel`, or by key with `POST /api/jobs/c
 
 The [cancellation acknowledgement schema](schemas/cancel-ack-v1.schema.json) covers successful replies; the [HTTP error body schema](schemas/error-v1.schema.json) covers 404 `job_unknown`, 400 `submission_key_invalid`, 409 `submission_key_conflict` and 410 `submission_key_expired`. HTTP status is outside the body. The 404 body contains `code` and sanitized `error` plus the non-acknowledging nullable cancellation fields above; 400/409/410 contain `code` and sanitized `error`. All ack fields remain present, including null release for expired coverage. Examples under `docs/schemas/examples/` cover every acknowledgement row and each error.
 
-Reservations, tombstones and markers follow the retention table. Accept a key reservation only when the exact project/key is echoed. During queue outage, persist host close and exact local attempt/release evidence; consumers persist pending cancellation intents and drain them through the API on reconnect. Host settlement cannot substitute for those acknowledgements.
+Reservations, tombstones and markers follow the retention table. Accept a key reservation only when the exact project/key is echoed. During queue outage, preserve exact local attempt/release evidence and pending cancellation intents; send them through the API on reconnect. Queue maintenance cannot substitute for cancellation acknowledgements.
 
 ## Upgrade and migration (#80)
 
 v3 is the only runtime; no old worker-report, capability/profile, empty-attempt or broad host-cleared fallback. Queue and workers must upgrade together. Old or missing worker/report protocol headers, including checkpoint reports and worker events, receive HTTP 426. Exact execution ownership and release evidence remain mandatory across restart/loss; a new report never silently clears omitted obligations.
 
-**Old formats are refused; operators archive and install fresh.** Old queue state is not imported. Stop the old services and prevent their restart, archive their queue/worker data directories and shared host-control directory, preserve configuration and secret references, then install matching current binaries and units. All queue, worker and shared host-control state roots carry `.myce-format` with `v3` and a newline. One startup gate checks every root before any filesystem write: absent or empty roots receive a fsynced marker first; non-empty roots without that exact marker return `legacy_state_present` naming the root. No content-specific legacy detection or migration of pre-marker development state is supported. There is no in-place or offline converter and no dual runtime decoder. Preserve archives, checkpoints and unique evidence; this rule does not authorize deleting them or changing production outside the queue.
+**Old formats are refused; operators archive and install fresh.** Old queue state is not imported. Stop the old services and prevent their restart, archive their queue/worker data directories and shared host-control directory, preserve configuration and secret references, then install matching current binaries and units. All current queue, worker and cache state roots carry `.myce-format` with `v3` and a newline. One startup gate checks every root before any filesystem write: absent or empty roots receive a fsynced marker first; non-empty roots without that exact marker return `legacy_state_present` naming the root. No content-specific legacy detection or migration of pre-marker development state is supported. There is no in-place or offline converter and no dual runtime decoder. Preserve archives, checkpoints and unique evidence; this rule does not authorize deleting them or changing production outside the queue.
 
-Installation reads existing config before defaults and overlays only explicit options, preserving queue address, NAS, names, Docker endpoint and secret references. RC worker template instance names remain valid and their unit definitions are replaced in place with current startup gates. An empty fresh installation starts CLOSED with no previous custody to settle; surviving worker data blocks empty-install confirmation. Current closed upgrades never open or renew their revision. Opening requires explicit revision-bound authorization using status `desired.revision` (status `accepted_revision` is null). Settlement of an empty install is separate from privileged exclusion and readiness. Conflicting effective startup gates block activation instead of rewriting consumer-owned configuration. Installation snapshots artifacts and manager state; failure restores previous bytes, modes and enablement/activity under a bounded recovery context. Incomplete rollback is explicit and keeps convergence fenced; it never opens or renews host intent. The root-owned control copy is deployed separately. See [operations](operations.md#installer-overlay-and-rollback) and [archive plus fresh install](guide-fresh-install.md).
-
-Native activation and release promotion require their own evidence and authorization. Preserve old state archives, checkpoints and unique evidence until their owners release dependencies.
+Installation overlays explicit options on saved current configuration, preserving
+queue address, NAS, names, Docker endpoint, GPU environment and secret references.
+Matching binaries and service definitions replace each selected installation.
+There is no local start condition, stage-only host gate or timer installation.
+Linux workers start as ordinary-account services with `Restart=on-failure`,
+`Delegate=memory`, `KillMode=control-group` and bounded stop. Installer rollback
+restores files, modes and actual manager registration/activity, and reports any
+incomplete restoration. Use queue maintenance to keep admission disabled across
+an upgrade. Saved configurations containing removed local-control fields must
+be rendered in the current schema; preserve the old config and secret references.
 
 ## Testing
 
-- `myce dev` runs the queue and fake workers in one process on a laptop. Fake workers pretend to have any GPU and run jobs as ordinary processes.
-- The scheduling rules are plain functions with a fake clock. Each rule above gets a test that runs in milliseconds.
-- One end-to-end test submits a resumable job, stops it to make room, and checks that it resumes from its checkpoint.
-- Real hardware is tested by running `myce join` on a real machine. There is no separate hardware test framework.
+Keep laptop tests for queue policy across both device workers, Started/cancel
+races, queue and worker restart, stale/missing reports, unknown release custody,
+RAM/debt and sidecar limits, exact Docker stop/recovery/result, files and privacy.
+Use injected clocks for queue decisions. `myce dev` runs the real API and command
+runner with fake GPU inventory; standalone e2e checks a command effect, exact
+release, queue maintenance and complete process/listener teardown.
 
-Verification covers these six bounded component cases. The table defines the required evidence; laptop results alone do not qualify the native remainder:
-
-| Case | Laptop evidence and native remainder |
-| --- | --- |
-| Install/upgrade | Config preservation, read-only old-format refusal, archived-state fresh installation, closed startup and worker-owned writes with filesystem/service fakes; native user-manager, delegation and identity access still need proof. |
-| Ownership switch | Real dev API and a short command with a fake other owner; concurrent/stale operations never admit two owners. Native GPU/daemon release is separate. |
-| Local recovery | Queue absent, exact custody and late-daemon-operation fakes; PASS permits local handoff, FAIL/UNKNOWN refuses it. Repeat no-op and interrupt/resume. Native proves the same release predicate. |
-| Reboot resume | Saved close and fake Clock; fresh boot observations and reconciliation before admission, no duplicate execution or renewed stop grace. Real reboot needs separate authorization. |
-| Queue stop/start | Real dev reconnect, lost-response identity replay, 409 conflict, reserved-key precedence and submit/cancel races in both orders. Fake-clock job/reservation expiry proves submit 410 versus cancel unknown and genuinely unseen absent. Completed results never rerun. |
-| Rest verdict | Complete closed/ready matrix: missing queue/custody/telemetry, FAIL plus UNKNOWN precedence, fenced queued work, foreign/unknown placement, required workers and terminal-but-unreleased work. Native validates cgroup/daemon/GPU/restart observations; consumers validate their own health/cancellation. |
-
-Use one fixture, owner and deadline per case. Native bounds are 60 seconds for install/upgrade and queue stop/start (at most 30 seconds outage plus 30 seconds observation), 30 seconds for control/health switches and recovery, and 10 seconds per rest observation. Declare cold model/component or application-delivery cases separately, at most 300 seconds including teardown. Reboot cases declare an overall deadline including downtime and at most 120 seconds after return. Never stack or renew deadlines. Stop on the first failure, preserve evidence and finish through the same recovery path; failed cleanup remains failed/unknown. Component proof precedes full qualification, and production activation remains separate.
+Linux daemon, GPU, memory-enforcement, manager and reboot checks are separately
+authorized native acceptance; laptop fakes do not qualify hardware. See
+[component probes](guide-component-probes.md) and [native checks](production-test-plan.md).
 
 ## Scope and later work
 
@@ -470,7 +398,7 @@ and [operations](operations.md#docker-cleanup-custody).
 
 Declared batch/model host RAM is enforced on Linux cgroup v2 workers with
 systemd memory delegation. Each execution remains inside its worker service's
-cgroup, so host close still contains every native descendant.
+cgroup, so ordinary service stop still contains every native descendant.
 Workers report unsupported enforcement plainly and keep laptop admission-only
 execution. An optional physical-host budget caps the sum of declared ceilings,
 including configurable slack, and retains unconfirmed allocations after loss.

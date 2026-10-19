@@ -3,7 +3,7 @@
 Queue and workers use `X-Myce-Start-Gate: host-attempt-v3` for worker
 requests, including completion, log and checkpoint reports and worker events. An old or missing protocol
 gets HTTP 426 with `worker_protocol_mismatch`. Upgrade queue and workers
-together while the host is closed. There is no preparation-only permit route.
+together while queue host admission is disabled. There is no preparation-only permit route.
 
 Every worker reports a capability profile. Profile version 0 is valid;
 unknown capacity withholds admission. Dedicated participation and explicit
@@ -13,9 +13,9 @@ attempt. Local sources report `verified`, `invalid` or `unknown`; only explicit
 UNKNOWN gets the existing bounded ready-routing grace.
 
 Every batch command, including non-production work, obtains the durable Started
-acknowledgement for its current execution before its payload executes. The host
-revision and current placement are checked at that handoff. Docker and engine
-launches retain their host revision gates. A rejected or stale report does not
+acknowledgement for its current execution before its payload executes. Current queue maintenance, placement, cancellation and exact attempt/session
+bindings are checked at that handoff. Docker, engine and preparation plans use
+queue maintenance and retain their exact cleanup custody. A rejected or stale report does not
 release another attempt's custody.
 
 New programmatic installs store literal `MYCE_TOKEN` and `MYCE_QUEUE`

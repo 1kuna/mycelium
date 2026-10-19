@@ -42,7 +42,7 @@ func (q *Queue) Pin(p ModelPin) error {
 	if err := validateProjectIdentifier(p.Project); err != nil {
 		return err
 	}
-	return q.updateScoped(nil, true, func() error {
+	return q.update(func() error {
 		model, ok := q.model(p.Model)
 		if !ok {
 			return errors.New("unknown model")

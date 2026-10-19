@@ -160,7 +160,7 @@ are subtracted by the queue. XPU/fake and explicit `--memory-mode fixed` use
 a configured budget minus reserve and account for our batch/model reservations
 once. Fixed budgets cannot observe external allocations: choose and maintain a
 conservative allowance. Live probe failures block new work and appear in status;
-see [memory modes and sources](operations.md#inventory-and-foreground-startstop).
+see [memory modes and sources](operations.md#host-ram-admission-and-ceilings).
 Workers recheck before every command or
 model load. Each worker runs at most one batch, alongside models that fit.
 

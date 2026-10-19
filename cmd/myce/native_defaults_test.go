@@ -56,9 +56,6 @@ func TestInstallDockerUpgrade(t *testing.T) {
 		t.Run(endpoint, func(t *testing.T) {
 			c, probe := savedInstallFixture(t, "worker")
 			c.DockerEndpoint = endpoint
-			if _, err := myce.InitializeHostIntent(c.HostStateDir, c.HostID, myce.RealClock{}); err != nil {
-				t.Fatal(err)
-			}
 			b, _ := json.Marshal(c)
 			if endpoint == "missing" {
 				var fields map[string]json.RawMessage

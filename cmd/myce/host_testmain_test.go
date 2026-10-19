@@ -1,7 +1,6 @@
 package main
 
 import (
-	"encoding/json"
 	"mycelium/internal/myce"
 	"os"
 	"path/filepath"
@@ -15,25 +14,9 @@ func TestMain(m *testing.M) {
 		}
 		return
 	}
-	dir, err := os.MkdirTemp("", "myce-cli-host-tests-")
+	dir, err := os.MkdirTemp("", "myce-cli-docker-tests-")
 	if err != nil {
 		panic(err)
-	}
-	if err = os.Setenv("MYCE_HOST_STATE_DIR", dir); err != nil {
-		panic(err)
-	}
-	s, e := myce.InitializeHostIntent(dir, "test-host", myce.RealClock{})
-	if e != nil {
-		panic(e)
-	}
-	s.Desired = "open"
-	s.HostRevision = myce.HostRevision{Revision: s.Revision + 1, Operation: myce.ID()}
-	b, e := json.Marshal(s)
-	if e != nil {
-		panic(e)
-	}
-	if e = os.WriteFile(filepath.Join(dir, "host-state.json"), b, 0600); e != nil {
-		panic(e)
 	}
 
 	// Keep ordinary laptop tests off any installed daemon; Docker fault fixtures override this CLI.
@@ -43,5 +26,7 @@ func TestMain(m *testing.M) {
 	if err = os.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH")); err != nil {
 		panic(err)
 	}
-	os.Exit(m.Run())
+	code := m.Run()
+	_ = os.RemoveAll(dir) // Owned fake Docker executable; all tests and children have joined.
+	os.Exit(code)
 }

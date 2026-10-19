@@ -21,7 +21,7 @@ func TestStateRootFormats(t *testing.T) {
 	// queue data locations. All use exactly the same gate, regardless of contents.
 	for _, relative := range []string{
 		"queue/state", "worker/state", "worker-gpu0/state", "worker-gpu1/state",
-		"host-control", ".local/share/myce", "environment-cache", "model-cache",
+		"environment-cache", "model-cache",
 		"file-cache", "upload-spool", "file-store", "joining-identity", "benchmark-state",
 	} {
 		t.Run(relative, func(t *testing.T) {
@@ -101,7 +101,7 @@ func TestStateRootInvalidMarker(t *testing.T) {
 }
 
 func TestStateStartupRefusalNoWrites(t *testing.T) {
-	for _, entry := range []string{"queue", "worker", "host-init", "host-control", "install", "benchmark", "docker-reconcile"} {
+	for _, entry := range []string{"queue", "worker", "install", "benchmark", "docker-reconcile"} {
 		for name, data := range refusedStateFiles() {
 			t.Run(entry+"/"+name, func(t *testing.T) {
 				parent := t.TempDir()
@@ -122,25 +122,21 @@ func TestStateStartupRefusalNoWrites(t *testing.T) {
 						q.Close()
 					}
 				case "worker":
-					s, e := (Worker{StateDir: root, HostStateDir: filepath.Join(parent, "fresh-host")}).openStore()
+					s, e := (Worker{StateDir: root}).openStore()
 					err = e
 					if s != nil {
 						s.close()
 					}
 				case "docker-reconcile":
-					err = ReconcileDockerAttempt(context.Background(), filepath.Join(parent, "fresh-host"), root, "fixture-attempt")
+					err = ReconcileDockerAttempt(context.Background(), root, "fixture-attempt")
 				case "benchmark":
 					err = RunOnboardingBenchmark(context.Background(), BenchmarkConfig{StateDir: root}, &CapabilityProfile{})
-				case "host-init":
-					_, err = InitializeHostIntent(root, "fixture-host", RealClock{})
-				case "host-control":
-					_, err = (HostControl{Dir: root}).Disable(context.Background(), "test", 0)
 				case "install":
 					c, e := PlanInstall("worker", parent, "", parent, "http://fixture.invalid", "fixture", Detection{OS: "linux", Platform: "fake"})
 					if e != nil {
 						t.Fatal(e)
 					}
-					c.HostStateDir = root
+					c.State = root
 					err = Install(context.Background(), c, "unused", "", func(context.Context, string, ...string) ([]byte, error) {
 						t.Fatal("refusal called manager")
 						return nil, nil
@@ -191,69 +187,6 @@ func TestDevStartupRefusalNoWrites(t *testing.T) {
 			}
 			if !reflect.DeepEqual(before, stateTree(t, parent)) {
 				t.Fatal("dev refusal changed filesystem")
-			}
-		})
-	}
-}
-
-func TestHostRefusalChecksRootsBesideCorruptRegistry(t *testing.T) {
-	for _, corruptFirst := range []bool{true, false} {
-		t.Run(map[bool]string{true: "corrupt-first", false: "corrupt-last"}[corruptFirst], func(t *testing.T) {
-			parent := t.TempDir()
-			dir := readyTestHost(t, filepath.Join(parent, "host"), "fixture-host")
-			oldRoot := filepath.Join(parent, "unmarked-worker")
-			if err := os.Mkdir(oldRoot, 0700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(oldRoot, "orphan.result.json"), []byte("surviving data"), 0600); err != nil {
-				t.Fatal(err)
-			}
-			corrupt, current := "worker-a.json", "worker-z.json"
-			if !corruptFirst {
-				corrupt, current = current, corrupt
-			}
-			if err := os.WriteFile(filepath.Join(dir, corrupt), []byte("{"), 0600); err != nil {
-				t.Fatal(err)
-			}
-			if err := saveWorkerJSON(dir, current, HostWorker{State: oldRoot, Host: "fixture-host", Name: "fixture-worker"}); err != nil {
-				t.Fatal(err)
-			}
-			before := stateTree(t, parent)
-			service := &fakeHostService{}
-			_, err := (HostControl{Dir: dir, Service: service}).Disable(context.Background(), "test", 0)
-			if !errors.Is(err, ErrLegacyState) || !strings.Contains(err.Error(), oldRoot) {
-				t.Fatal("corruption hid an unmarked root", err)
-			}
-			if service.now.Load() || !reflect.DeepEqual(before, stateTree(t, parent)) {
-				t.Fatal("refusal performed cleanup or changed the filesystem")
-			}
-		})
-	}
-}
-
-func TestHostMutationChecksUnregisteredConfiguredRoots(t *testing.T) {
-	for _, selected := range []string{"state", "model-cache", "environment-cache"} {
-		t.Run(selected, func(t *testing.T) {
-			parent := t.TempDir()
-			dir := readyTestHost(t, filepath.Join(parent, "host"), "fixture-host")
-			config := ServiceConfig{Role: "worker", State: filepath.Join(parent, "worker"), ModelCache: filepath.Join(parent, "model-cache"), EnvironmentCache: filepath.Join(parent, "environment-cache")}
-			root := map[string]string{"state": config.State, "model-cache": config.ModelCache, "environment-cache": config.EnvironmentCache}[selected]
-			if err := os.Mkdir(root, 0700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(root, "arbitrary"), []byte("surviving state"), 0600); err != nil {
-				t.Fatal(err)
-			}
-			before := stateTree(t, parent)
-			executor := HostMutationExecutor{Probe: MachineProbe{OS: "linux", Command: func(context.Context, string, ...string) ([]byte, error) {
-				return nil, errors.New("unexpected service-manager call")
-			}}}
-			_, err := executor.Execute(context.Background(), HostInvocation{StateDir: dir, Config: config}, HostMutation{Operation: "close"})
-			if !errors.Is(err, ErrLegacyState) || !strings.Contains(err.Error(), root) {
-				t.Fatal(err)
-			}
-			if !reflect.DeepEqual(before, stateTree(t, parent)) {
-				t.Fatal("unregistered root refusal changed tree")
 			}
 		})
 	}

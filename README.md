@@ -54,33 +54,12 @@ working directory for a new independent demo.
 
 ## Host ownership and installation
 
-[Operations](docs/operations.md) is the canonical install/close/open/reconcile
-runbook. `myce host close --local` persists whole-host CLOSED intent before
-network access. `--wait-released` requires local exclusion PASS; full rest also
-requires queue settlement. `host open --local --expect-revision REVISION`
-requires the current confirmed close and allocates a new revision. An accepted
-operation overtaken by another reports `revision_superseded`; a rejected
-compare-and-set reports `revision_mismatch` with no accepted revision.
-
-`host status --local --json` is read-only. Its [versioned envelope](docs/guide-status-v3.md#host-control-envelope)
-separates desired state, current-boot observation, accepted revision, previous
-close settlement and queue acknowledgement. `--expect closed|ready --verdict`
-returns PASS, FAIL or UNKNOWN; exit zero means PASS only. Missing evidence stays
-unknown and fresh contrary evidence wins. `host reconcile --local` retries the
-same durable intent; the installed timer also runs while workers are stopped.
-
-Root control uses a **separate root-owned** `/usr/local/libexec/myce/myce` copy
-and `--worker-user WORKER_USER`. Never execute the worker-owned installed binary
-as root. See [protected control](docs/operations.md#protected-root-owned-copy).
-
-`myce install` reads saved config first and overlays only explicit flags, preserving
-omitted settings and secret references. Workers install CLOSED without starting
-or opening; failed publication rolls artifacts and manager state back, with an
-explicit error if rollback is incomplete. Root control is deployed separately.
-Every queue/worker/host state root carries `.myce-format` containing `v3` plus a
-newline. Nonempty unmarked/old roots return `legacy_state_present`: stop old
-services, archive whole data roots, preserve config/secrets, then install fresh.
-There is no in-place conversion. See [fresh installation](docs/guide-fresh-install.md).
+[Operations](docs/operations.md) covers installation and queue-owned maintenance.
+`myce host drain HOST` pauses admission, `host disable HOST --stop --wait`
+requests exact cleanup, and `host resume HOST` restores admission. `host status
+HOST` reports worker freshness, RAM/debt and pending custody. Missing reports or
+queue outage cannot prove quiescence. All commands run as an ordinary account;
+there is no privileged local controller or offline rest certificate.
 
 ## Models, files and workers
 

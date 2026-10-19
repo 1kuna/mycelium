@@ -102,14 +102,7 @@ func (w Worker) StateRoots() ([]string, error) {
 	if fileCache == "" {
 		fileCache = filepath.Join(dir, "file-cache")
 	}
-	host := w.HostStateDir
-	if host == "" {
-		host, err = HostStateDirectory()
-		if err != nil {
-			return nil, err
-		}
-	}
-	return []string{dir, host, environment, modelCache, fileCache}, nil
+	return []string{dir, environment, modelCache, fileCache}, nil
 }
 
 func (w Worker) openStore() (*workerStore, error) {
@@ -231,9 +224,6 @@ func saveWorkerJSON(dir, name string, v any) error {
 	case workerState:
 		value.Schema = persistedSchema
 		v = value
-	case HostWorker:
-		value.Schema = persistedSchema
-		v = value
 	}
 	data, err := json.Marshal(v)
 	if err != nil {
@@ -268,7 +258,7 @@ func saveWorkerJSON(dir, name string, v any) error {
 // Inspect both the leader and surviving descendants. The per-execution
 // marker prevents PID/PGID reuse from targeting an unrelated process group.
 func workerGroupMembers(group int) ([]int, error) {
-	out, err := hostPS("-ax", "-o", "pid=,pgid=,stat=")
+	out, err := processPS("-ax", "-o", "pid=,pgid=,stat=")
 	if err != nil {
 		return nil, fmt.Errorf("inspect process groups: %w", err)
 	}

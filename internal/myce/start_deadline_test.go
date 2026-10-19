@@ -108,7 +108,7 @@ func TestProductionStartDeadlineBlockers(t *testing.T) {
 				}
 				submit(t, q, s)
 				experiment = check(t, q, m, nil).Job
-			} else if err := closeQueueHost(q, "b70", "disabled by operator", nil); err != nil {
+			} else if err := setMaintenance(t, q, "b70", "disable"); err != nil {
 				t.Fatal(err)
 			}
 			s := spec("production")
@@ -420,7 +420,7 @@ func TestProductionStartDeadlineDisabledFleetFailsPromptly(t *testing.T) {
 			if alternate != "" {
 				check(t, q, machine("other", alternate), nil)
 			}
-			if err := closeQueueHost(q, "b70", "maintenance", nil); err != nil {
+			if err := setMaintenance(t, q, "b70", "disable"); err != nil {
 				t.Fatal(err)
 			}
 			s := spec("production")
@@ -464,7 +464,7 @@ func TestProductionStartDeadlineOwnDockerPreparationPermit(t *testing.T) {
 
 func TestProductionStartDeadlineWorkerSendsRejectedResultCleanup(t *testing.T) {
 	w := recoveryWorker(t)
-	w.HostStateDir = readyTestHost(t, t.TempDir())
+
 	store, err := w.openStore()
 	if err != nil {
 		t.Fatal(err)

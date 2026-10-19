@@ -72,11 +72,10 @@ type LlamaEngine struct {
 	memoryAttempt      *memoryAttempt
 	memoryMachine      Machine
 	memorySwapMaxBytes int64
-	HostStateDir       string
-	hostRevision       HostRevision
-	stopCommand        []string
-	stopTimeout        time.Duration
-	env                []string
+
+	stopCommand []string
+	stopTimeout time.Duration
+	env         []string
 
 	Dir      string
 	Clock    Clock
@@ -97,9 +96,6 @@ type LlamaEngine struct {
 }
 
 func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
-	if err := bindHostRevision(l.HostStateDir, &l.hostRevision); err != nil {
-		return err
-	}
 	for _, v := range os.Environ() {
 		if strings.HasPrefix(v, "LLAMA_ARG_HF_") {
 			return errors.New("remote llama-server model environment is forbidden; use myce model fetch")
@@ -145,16 +141,7 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 		ctx, cancel = context.WithTimeout(ctx, m.ReadyTimeout)
 		defer cancel()
 	}
-	unlock, gateErr := hostLaunchGate(l.HostStateDir, l.hostRevision)
-	if gateErr != nil {
-		return gateErr
-	}
-	defer func() {
-		if unlock != nil {
-			unlock()
-		}
-	}()
-	if err := (Worker{HostStateDir: l.HostStateDir, Machine: l.memoryMachine}).checkHostMemoryBudget(m.MemoryGB, m.HostMemoryGB); err != nil {
+	if err := (Worker{Machine: l.memoryMachine}).checkHostMemoryBudget(m.MemoryGB, m.HostMemoryGB); err != nil {
 		return err
 	}
 	l.identity = ID()
@@ -197,7 +184,7 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 		l.log.Close()
 		return e
 	}
-	if e = hostDispatch(l.HostStateDir, l.hostRevision, l.cmd.Start); e != nil {
+	if e = l.cmd.Start(); e != nil {
 		_ = l.memoryAttempt.cleanup(l.Clock)
 		l.log.Close()
 		return e
@@ -212,12 +199,10 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 		_ = l.Unload()
 		return e
 	}
-	if e = hostDispatch(l.HostStateDir, l.hostRevision, func() error { _, e := writer.Write([]byte("start\n")); return e }); e != nil {
+	if _, e = writer.Write([]byte("start\n")); e != nil {
 		_ = l.Unload()
 		return e
 	}
-	unlock()
-	unlock = nil
 	l.url = "http://127.0.0.1:" + strconv.Itoa(port)
 	tick := time.NewTicker(serverProbeInterval)
 	defer tick.Stop()
@@ -318,9 +303,6 @@ func (l *LlamaEngine) Unload() error {
 	return e
 }
 func (l *LlamaEngine) runStopCommand(grace context.Context) error {
-	if err := CheckHostRevision(l.HostStateDir, l.hostRevision); err != nil {
-		return nil
-	}
 	if len(l.stopCommand) > 0 {
 		identity := ID()
 		name := "engine-stop-" + identity
@@ -342,7 +324,7 @@ func (l *LlamaEngine) runStopCommand(grace context.Context) error {
 		if err := saveWorkerJSON(l.Dir, name+".json", workerState{Identity: identity}); err != nil {
 			return err
 		}
-		if err := hostDispatch(l.HostStateDir, l.hostRevision, cmd.Start); err != nil {
+		if err := cmd.Start(); err != nil {
 			// The shared stop grace may expire while persisting the helper's
 			// recovery record, before Start. That is normal escalation: no
 			// helper started, and Unload must still stop the server group.
@@ -361,7 +343,7 @@ func (l *LlamaEngine) runStopCommand(grace context.Context) error {
 			_ = cmd.Wait()
 			return fmt.Errorf("stop helper memory ceiling attach: %w", err)
 		}
-		gateErr := hostDispatch(l.HostStateDir, l.hostRevision, func() error { _, e := writer.Write([]byte("start\n")); return e })
+		_, gateErr := writer.Write([]byte("start\n"))
 		// A helper killed at the grace deadline can close its gate first.
 		// Still inspect its group below; a broken pipe alone is expected.
 		if grace.Err() != nil && errors.Is(gateErr, syscall.EPIPE) {
@@ -431,8 +413,7 @@ type modelRuntime struct {
 	memoryCeilings        *memoryCeilings
 	memoryMachine         Machine
 	memorySwapMaxBytes    int64
-	hostStateDir          string
-	hostRevision          HostRevision
+
 	lastSavedSpeed        float64
 	copies                map[string]*workerCopy
 	copyParallel          int
@@ -473,7 +454,7 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 	if e != nil {
 		return nil, e
 	}
-	rt := &modelRuntime{availability: w.availability, hostStateDir: w.HostStateDir, hostRevision: w.hostRevision, copies: map[string]*workerCopy{}, copyParallel: max(1, w.CopyParallel), models: map[string]*workerModel{}, config: w.ModelConfig, session: w.Machine.Session, token: w.Client.Token, dir: dir, clock: w.Clock, url: "http://" + ln.Addr().String()}
+	rt := &modelRuntime{availability: w.availability, copies: map[string]*workerCopy{}, copyParallel: max(1, w.CopyParallel), models: map[string]*workerModel{}, config: w.ModelConfig, session: w.Machine.Session, token: w.Client.Token, dir: dir, clock: w.Clock, url: "http://" + ln.Addr().String()}
 	root := w.CacheRoot
 	if root == "" {
 		root = filepath.Join(dir, "model-cache")
@@ -658,8 +639,6 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 		} else {
 			engine = NewModelEngine(model, rt.dir, rt.clock)
 			if owned, ok := engine.(*LlamaEngine); ok {
-				owned.HostStateDir = rt.hostStateDir
-				owned.hostRevision = rt.hostRevision
 				owned.memoryCeilings, owned.memoryMachine, owned.memorySwapMaxBytes = rt.memoryCeilings, rt.memoryMachine, rt.memorySwapMaxBytes
 			}
 		}
@@ -713,9 +692,6 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 	if e == nil {
 		e = m.engine.Load(ctx, model)
 	}
-	if e == nil {
-		e = CheckHostRevision(rt.hostStateDir, rt.hostRevision)
-	}
 	m.cancel()
 	// A failed load may have started a process. Keep its memory reserved unless
 	// cleanup actually succeeds, even when the engine's own load cleanup failed.
@@ -749,16 +725,13 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 }
 
 func (rt *modelRuntime) checkLoadMemory(ctx context.Context, loading *workerModel) error {
-	if err := CheckHostRevision(rt.hostStateDir, rt.hostRevision); err != nil {
-		return err
-	}
 	if rt.availability != nil && !rt.availability.snapshot().Available {
 		return errWorkerUnavailable
 	}
 	rt.mu.Lock()
 	machine := rt.memoryMachine
 	rt.mu.Unlock()
-	if err := (Worker{HostStateDir: rt.hostStateDir, Machine: machine}).checkHostMemoryBudget(loading.model.MemoryGB, loading.model.HostMemoryGB); err != nil {
+	if err := (Worker{Machine: machine}).checkHostMemoryBudget(loading.model.MemoryGB, loading.model.HostMemoryGB); err != nil {
 		return err
 	}
 	if rt.requireMemoryCeilings && loading.model.HostMemoryGB <= 0 {
@@ -865,10 +838,6 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 		modelError(w, 401, "invalid worker session or token")
 		return
 	}
-	if reason, err := HostDisabled(rt.hostStateDir); err != nil || reason != "" {
-		modelError(w, 503, "host disabled or local admission unavailable")
-		return
-	}
 	generic := strings.HasPrefix(r.URL.Path, "/models/")
 	endpoint := r.URL.RequestURI()
 	if !generic && (r.Method != "POST" || !contains([]string{"/v1/chat/completions", "/v1/completions", "/v1/embeddings"}, r.URL.Path)) {
@@ -907,23 +876,16 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 		modelError(w, 400, "invalid JSON")
 		return
 	}
-	unlock, err := hostLaunchGate(rt.hostStateDir, rt.hostRevision)
-	if err != nil {
-		modelError(w, 503, "host disabled or local admission unavailable")
-		return
-	}
 	rt.mu.Lock()
 	m := rt.models[req.Model]
 	if attempt := r.Header.Get("X-Myce-Engine-Attempt"); attempt != "" && m != nil && m.attempt != "" && attempt != m.attempt {
 		rt.mu.Unlock()
-		unlock()
 		w.Header().Set("X-Myce-Engine-Rejected", attempt)
 		modelError(w, 503, "engine attempt is no longer ready")
 		return
 	}
 	if rt.availability != nil && !rt.availability.snapshot().Available {
 		rt.mu.Unlock()
-		unlock()
 		modelError(w, 503, "hypha availability withdrawn")
 		return
 	}
@@ -931,7 +893,6 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 	if m == nil || m.runtimeFailed || !(rt.localApprovalAvailable(m.model) || rt.localApprovalStates[m.model.LocalSource] == approvalUnknown) || (m.state != "ready" && !(m.state == "draining" && m.queueFlight > 0)) {
 		w.Header().Set("X-Myce-Engine-Rejected", r.Header.Get("X-Myce-Engine-Attempt"))
 		rt.mu.Unlock()
-		unlock()
 		modelError(w, 503, "model is not ready")
 		return
 	}
@@ -942,7 +903,6 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 		copy.cancel()
 	}
 	rt.mu.Unlock()
-	unlock()
 	defer func() {
 		rt.mu.Lock()
 		defer rt.mu.Unlock()

@@ -92,7 +92,7 @@ func (q *Queue) modelScores(m *Machine) map[string]int {
 	return scores
 }
 func (q *Queue) copyPlan(m *Machine) ([]CopyTask, []CopyTask, []string) {
-	if q.maintenanceBlocked(hostID(m)) || m.Disabled != "" || m.Leaving || availabilityBlocked(m) || q.machineLimitReason(m) != "" {
+	if q.maintenanceBlocked(hostID(m)) || m.Leaving || availabilityBlocked(m) || q.machineLimitReason(m) != "" {
 		return nil, nil, nil
 	}
 	scores := q.modelScores(m)

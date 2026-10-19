@@ -49,8 +49,9 @@ its tolerance.
 Daily use follows the existing owner, power, heat and fresh-signal policy:
 five idle minutes, external power for laptops and known safe heat. Owner return
 or unsafe/unknown signals cancel a running measurement. The benchmark runs before
-job admission and model loads, never over a recovered attempt. Per-host benchmark
-locks serialize resource workers sharing a host-control folder. A missing resource
+job admission and model loads, never over a recovered attempt. A per-spool benchmark lock prevents duplicate measurements in one worker
+spool. Coordinate explicit measurements across device workers through ordinary
+operator scheduling. A missing resource
 or interruption is reported as partial, with a reason; retry on the next join with `--onboarding-benchmark`.
 Complete results are reused when hardware/driver identity, CPU count, memory,
 extension digests and file-store address are unchanged. Changed identities trigger

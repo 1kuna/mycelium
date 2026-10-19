@@ -11,16 +11,8 @@ var errWorkerStartAuthorization = errors.New("queue start authorization unavaila
 
 // A positive reply means this exact attempt is durably started, before execution.
 func (w Worker) authorizeStart(j Job, session string) error {
-	if err := CheckHostRevision(w.HostStateDir, w.hostRevision); err != nil {
-		return err
-	}
 	if err := w.checkAvailability(); err != nil {
 		return err
-	}
-	if reason, err := HostDisabled(w.HostStateDir); err != nil {
-		return err
-	} else if reason != "" {
-		return fmt.Errorf("worker start refused: %s", reason)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -33,14 +25,6 @@ func (w Worker) authorizeStart(j Job, session string) error {
 	}
 	if !reply.OK || reply.StartGate != startGateProtocol {
 		return fmt.Errorf("queue start-gate protocol mismatch: upgrade queue and workers together")
-	}
-	if reason, err := HostDisabled(w.HostStateDir); err != nil {
-		return err
-	} else if reason != "" {
-		return fmt.Errorf("worker start refused: %s", reason)
-	}
-	if err := CheckHostRevision(w.HostStateDir, w.hostRevision); err != nil {
-		return err
 	}
 	return w.checkAvailability()
 }

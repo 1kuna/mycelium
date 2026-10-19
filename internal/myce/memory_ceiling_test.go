@@ -251,38 +251,6 @@ func TestMemoryCeilingInstallerDelegation(t *testing.T) {
 		t.Fatal(status)
 	}
 }
-func TestDisableSeesMemoryAttemptChildren(t *testing.T) {
-	c := fakeCeilings(t)
-	a, err := c.create("attempt-live", 5<<30, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = a.attach(99); err != nil {
-		t.Fatal(err)
-	}
-	populated := "1"
-	s := &SystemdHostService{Unit: "myce-worker.service", group: "/user.slice/myce-worker.service", stopped: true,
-		Command: func(context.Context, string, ...string) ([]byte, error) {
-			return []byte("LoadState=loaded\nKillMode=control-group\nSendSIGKILL=yes\nActiveState=inactive\nControlGroup=/user.slice/myce-worker.service\n"), nil
-		},
-		ReadFile: func(p string) ([]byte, error) {
-			if filepath.Base(p) == "cgroup.events" {
-				return []byte("populated " + populated + "\n"), nil
-			}
-			return []byte(""), nil
-		}}
-	if empty, err := s.Empty(context.Background()); err != nil || empty {
-		t.Fatalf("live child certified empty: %v %v", empty, err)
-	}
-	if err = a.cleanup(RealClock{}); err != nil {
-		t.Fatal(err)
-	}
-	populated = "0"
-	if empty, err := s.Empty(context.Background()); err != nil || !empty {
-		t.Fatalf("released child not empty: %v %v", empty, err)
-	}
-}
-
 func TestMemoryCeilingFinalLiveRAMGate(t *testing.T) {
 	w := recoveryWorker(t)
 	calls := 0
@@ -769,14 +737,14 @@ func TestMemoryCeilingTinyRequestReservation(t *testing.T) {
 			if charge*(1<<30) < float64(page) {
 				t.Fatal("reservation smaller than one page")
 			}
-			w := Worker{HostStateDir: readyTestHost(t, t.TempDir()), Machine: b}
+			w := Worker{Machine: b}
 			w.Machine.HostMemoryBudgetGB = float64(page/2) / (1 << 30)
-			configureTestHostMemoryAllowance(t, w.HostStateDir, w.Machine.HostMemoryBudgetGB)
+
 			if err := w.checkHostMemoryBudget(s.Needs.MemoryGB, s.Needs.HostMemoryGB); !errors.Is(err, errWorkerMemory) {
 				t.Fatal("worker accepted budget below minimum reservation", err)
 			}
 			w.Machine.HostMemoryBudgetGB = charge
-			configureTestHostMemoryAllowance(t, w.HostStateDir, charge)
+
 			if err := w.checkHostMemoryBudget(s.Needs.MemoryGB, s.Needs.HostMemoryGB); err != nil {
 				t.Fatal("worker rejected minimum reservation", err)
 			}

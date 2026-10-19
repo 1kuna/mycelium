@@ -13,11 +13,11 @@ import (
 )
 
 type DevConfig struct {
-	ProductionInfrastructureRetries       *int
-	FileStore                             string
-	FileStoreLimit                        int64
-	ExtensionRoot, JobFileRoot            string
-	HostStateDir                          string
+	ProductionInfrastructureRetries *int
+	FileStore                       string
+	FileStoreLimit                  int64
+	ExtensionRoot, JobFileRoot      string
+
 	HostPolicies                          map[string]HostPolicy
 	HostID                                string
 	ProjectPolicies                       map[string]ProjectPolicy
@@ -56,15 +56,11 @@ func StartDev(c DevConfig) (*Dev, error) {
 		return nil, errors.New("dev requires workers, positive memory, and a token")
 	}
 	clock := &devClock{}
-	freshHost := false
 	if c.HostID == "" {
 		c.HostID = "dev-host"
 	}
-	// Dev owns its isolated fake host; real runtimes never initialize missing state.
-	if c.HostStateDir == "" {
-		c.HostStateDir = filepath.Join(filepath.Dir(c.Database), "dev-host")
-	}
-	roots := []string{filepath.Dir(c.Database), c.HostStateDir, c.FileStore, c.Database + ".uploads"}
+	// Dev owns isolated fake worker spools and uses the ordinary state-root gate.
+	roots := []string{filepath.Dir(c.Database), c.FileStore, c.Database + ".uploads"}
 	for i := 0; i < c.Workers; i++ {
 		dir := filepath.Join(filepath.Dir(c.Database), "workers", fmt.Sprintf("fake-%d", i+1))
 		roots = append(roots, dir, filepath.Join(dir, "environment-cache"), filepath.Join(dir, "model-cache"), filepath.Join(dir, "file-cache"))
@@ -74,16 +70,6 @@ func StartDev(c DevConfig) (*Dev, error) {
 	}
 	if err := os.MkdirAll(c.Checkpoints, 0700); err != nil {
 		return nil, err
-	}
-	if _, e := os.Stat(filepath.Join(c.HostStateDir, hostStateFile)); errors.Is(e, os.ErrNotExist) {
-		_, e := InitializeHostIntent(c.HostStateDir, c.HostID, clock)
-		if e != nil {
-			return nil, e
-		}
-		freshHost = true
-	}
-	if _, e := ReadHostIntent(c.HostStateDir); e != nil {
-		return nil, e
 	}
 	q, err := Open(c.Database, c.Checkpoints, clock)
 	if err != nil {
@@ -148,43 +134,6 @@ func StartDev(c DevConfig) (*Dev, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	d := &Dev{Queue: q, URL: "http://" + listener.Addr().String(), cancel: cancel, errors: make(chan error, c.Workers+2)}
 	d.client = Client{URL: d.URL, Token: c.Token}
-	if err = q.ConfigureLocalHost(c.HostStateDir, d.URL); err != nil {
-		listener.Close()
-		q.Close()
-		cancel()
-		return nil, err
-	}
-	if freshHost {
-		s, e := ReadHostIntent(c.HostStateDir)
-		if e != nil {
-			listener.Close()
-			q.Close()
-			cancel()
-			return nil, e
-		}
-		boot, e := HostBootID()
-		if e == nil {
-			e = mutateHostIntent(c.HostStateDir, s.HostRevision, func(current *HostIntent) error {
-				current.LocalExclusion = &HostLocalExclusion{Simulated: true, HostObservation: HostObservation{HostRevision: s.HostRevision, Boot: boot, State: "closed", At: q.clock.Now()}, Confirmed: true}
-				return nil
-			})
-		}
-		// Dev has just provisioned an empty isolated fake host; the real queue
-		// transaction still must acknowledge it before opening.
-		if e == nil {
-			e = q.Tick()
-		}
-		if e == nil {
-			_, e = changeHostIntent(c.HostStateDir, q.clock, hostIntentChange{Desired: "open", Expected: s.HostRevision})
-		}
-		if e != nil {
-			listener.Close()
-			q.Close()
-			cancel()
-			return nil, e
-		}
-	}
-
 	d.server = &http.Server{Handler: API{Queue: q, Token: c.Token}.Handler(), ReadHeaderTimeout: 5 * time.Second}
 	queueCtx, stopQueue := context.WithCancel(context.Background())
 	d.stopQueue = stopQueue
@@ -202,31 +151,14 @@ func StartDev(c DevConfig) (*Dev, error) {
 		}
 	}()
 	for i := 0; i < c.Workers; i++ {
-		w := Worker{ExtensionRoot: c.ExtensionRoot, JobFileRoot: c.JobFileRoot, HostStateDir: c.HostStateDir, ModelConfig: c.ModelConfig, StateDir: filepath.Join(filepath.Dir(c.Database), "workers", fmt.Sprintf("fake-%d", i+1)), Client: d.client, Machine: Machine{HostID: c.HostID, Device: "0", ID: fmt.Sprintf("fake-%d", i+1), GPU: c.GPU, FreeMemoryGB: c.MemoryGB, Environments: c.Environments, Models: c.Models}, Interval: c.Interval}
+		w := Worker{ExtensionRoot: c.ExtensionRoot, JobFileRoot: c.JobFileRoot, ModelConfig: c.ModelConfig, StateDir: filepath.Join(filepath.Dir(c.Database), "workers", fmt.Sprintf("fake-%d", i+1)), Client: d.client, Machine: Machine{HostID: c.HostID, Device: "0", ID: fmt.Sprintf("fake-%d", i+1), GPU: c.GPU, FreeMemoryGB: c.MemoryGB, Environments: c.Environments, Models: c.Models}, Interval: c.Interval}
 		d.workerWG.Add(1)
 		go func() {
 			defer d.workerWG.Done()
-			for ctx.Err() == nil {
-				if err := w.Run(ctx); err != nil {
-					d.errors <- err
-					return
-				}
-				for ctx.Err() == nil {
-					reason, err := HostDisabled(w.HostStateDir)
-					if err != nil {
-						d.errors <- err
-						return
-					}
-					if reason == "" {
-						break
-					}
-					select {
-					case <-ctx.Done():
-						return
-					case <-time.After(50 * time.Millisecond):
-					}
-				}
+			if err := w.Run(ctx); err != nil {
+				d.errors <- err
 			}
+
 		}()
 	}
 	return d, nil

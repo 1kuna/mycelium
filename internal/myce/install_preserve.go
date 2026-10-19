@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 )
 
@@ -26,70 +25,14 @@ func (c ServiceConfig) InstallFlags() map[string]string {
 }
 
 func ValidateInstallIdentity(old, next ServiceConfig) error {
-	if old.Role != next.Role || old.Service != next.Service || old.Binary != next.Binary || old.State != next.State || old.Config != next.Config || old.Credentials != next.Credentials || old.HostStateDir != next.HostStateDir || old.HostID != next.HostID || old.WorkerUser != next.WorkerUser || old.WorkerHome != next.WorkerHome || old.Device != next.Device || old.Detection.OS != next.Detection.OS || old.Detection.Arch != next.Detection.Arch {
+	if old.Role != next.Role || old.Service != next.Service || old.Binary != next.Binary || old.State != next.State || old.Config != next.Config || old.Credentials != next.Credentials || old.HostID != next.HostID || old.WorkerUser != next.WorkerUser || old.WorkerHome != next.WorkerHome || old.Device != next.Device || old.Detection.OS != next.Detection.OS || old.Detection.Arch != next.Detection.Arch {
 		return errors.New("installed role, account, host, device, unit and state identity cannot change; preserve custody and install separately")
 	}
 	return nil
 }
 
-func prepareClosedWorkerInstall(c ServiceConfig) error {
-	roots, err := c.StateRoots()
-	if err != nil {
-		return err
-	}
-	if err := PrepareStateRoots(roots...); err != nil {
-		return err
-	}
-	var s HostIntent
-	_, err = os.Lstat(filepath.Join(c.HostStateDir, hostStateFile))
-	if errors.Is(err, os.ErrNotExist) {
-		// A marked root can still contain custody from an interrupted current
-		// install. Only marker-only roots qualify as a genuinely empty install.
-		for _, path := range roots {
-			entries, e := os.ReadDir(path)
-			if e != nil {
-				return e
-			}
-			for _, entry := range entries {
-				if entry.Name() == FormatMarker {
-					continue
-				}
-				child := filepath.Join(path, entry.Name())
-				if slices.Contains(roots, child) {
-					// Each nested root is checked separately by this loop.
-					continue
-				}
-				return fmt.Errorf("%w: archive surviving worker data %s before a fresh install", ErrHostState, path)
-			}
-		}
-		s, err = InitializeHostIntent(c.HostStateDir, c.HostID, RealClock{})
-		if err == nil {
-			err = mutateHostIntent(c.HostStateDir, s.HostRevision, func(intent *HostIntent) error {
-				now := intent.AcceptedAt.UTC()
-				intent.LastClose.Settlement = "confirmed"
-				intent.LastClose.SettledAt = &now
-				return nil
-			})
-		}
-	} else if err == nil {
-		s, err = ReadHostIntent(c.HostStateDir)
-	}
-	if err != nil {
-		return err
-	}
-	if s.Host != c.HostID || s.Desired != "closed" {
-		return errors.New("close the installed host before installing or upgrading workers")
-	}
-	// Neither an install nor a failed install may allocate/renew a host revision,
-	// open a sibling device, or treat old custody as released.
-	return nil
-}
-
-// The manager supplies the effective list, including system and runtime drop-ins.
-// Consumer files remain untouched. Refuse overrides of the generated execution
-// and fencing contract; unrelated settings (e.g. resource limits) are preserved.
 func validateInstallDropIns(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error)) error {
-	for _, unit := range []string{filepath.Base(c.Service), "myce-host-reconcile.service", "myce-host-reconcile.timer"} {
+	for _, unit := range []string{filepath.Base(c.Service)} {
 		b, err := command(ctx, "systemctl", "--user", "show", unit, "--property=DropInPaths", "--value")
 		if err != nil {
 			return errors.New("cannot inspect effective service drop-ins")
@@ -112,8 +55,8 @@ func validateInstallDropIns(ctx context.Context, c ServiceConfig, command func(c
 					continue
 				}
 				key = strings.TrimSpace(key)
-				if strings.HasPrefix(key, "Exec") || strings.HasPrefix(key, "Condition") || strings.HasPrefix(key, "Assert") || strings.HasPrefix(key, "Environment") || strings.HasPrefix(key, "On") || key == "Unit" || key == "User" || key == "Group" || key == "WorkingDirectory" || key == "RootDirectory" || key == "RootImage" || key == "KillMode" || key == "SendSIGKILL" || key == "Delegate" || key == "Restart" || key == "TimeoutStopSec" {
-					return errors.New("effective service drop-in conflicts with installed startup gates; preserve it and resolve before activation")
+				if strings.HasPrefix(key, "Exec") || strings.HasPrefix(key, "Condition") || strings.HasPrefix(key, "Assert") || strings.HasPrefix(key, "Environment") || key == "User" || key == "Group" || key == "WorkingDirectory" || key == "RootDirectory" || key == "RootImage" || key == "KillMode" || key == "SendSIGKILL" || key == "Delegate" || key == "Restart" || key == "TimeoutStopSec" {
+					return errors.New("effective service drop-in conflicts with installed service contract; preserve it and resolve before activation")
 				}
 			}
 		}
@@ -240,10 +183,10 @@ func (tx *installTransaction) restoreFiles() error {
 // StateRoots uses the runtime registries, including their effective cache defaults.
 func (c ServiceConfig) StateRoots() ([]string, error) {
 	if c.Role == "worker" {
-		return (Worker{StateDir: c.State, HostStateDir: c.HostStateDir, CacheRoot: c.ModelCache, EnvironmentRoot: c.EnvironmentCache}).StateRoots()
+		return (Worker{StateDir: c.State, CacheRoot: c.ModelCache, EnvironmentRoot: c.EnvironmentCache}).StateRoots()
 	}
 	if c.Role == "queue" {
-		return append([]string{c.State}, QueueStateRoots(c.DB, c.HostStateDir, c.UploadSpoolDir, "", "", true)...), nil
+		return append([]string{c.State}, QueueStateRoots(c.DB, c.UploadSpoolDir, "", "", true)...), nil
 	}
-	return []string{c.State, c.HostStateDir}, nil
+	return []string{c.State}, nil
 }

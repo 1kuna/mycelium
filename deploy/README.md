@@ -10,8 +10,8 @@ For a generated install, role binary/config/state default to
 Manual templates require explicit substituted paths and use `local.myce.*`
 macOS labels. Pick one definition per role; never run both against the same
 state. Service definitions contain placeholders, not credentials.
-[Installer overlay and rollback](../docs/operations.md#installer-overlay-and-rollback)
-preserve omitted settings, artifacts and service/timer state. Nonempty old state
+[Installer overlay and rollback](../docs/operations.md#install-and-upgrade)
+preserve omitted settings, artifacts and service state. Nonempty old state
 without `.myce-format` returns `legacy_state_present`: follow
 [archive plus fresh install](../docs/guide-fresh-install.md), preserving local data.
 
@@ -19,14 +19,9 @@ Queue and worker NAS mount paths may differ while mapping the same shared root.
 A checkpoint-root directory probe is not verification of the remote mount's identity.
 
 The Linux worker templates invoke the same installed binary's `service --config`
-entry and `_host-start-check`, matching generated units. Replace the binary,
-config, host-state and GPU-environment placeholders from the versioned installed
-config. The three worker templates share this contract; device and memory policy
-belong in config. Install/upgrade requires CLOSED intent, registers workers
-without starting them, preserves custom settings and does not require `--force`.
-Reconcile and explicitly open the host before starting eligible work. Root host
-control uses only the separate protected `/usr/local/libexec/myce/myce` copy;
-worker install never writes it. See the [native identity checklist](../docs/probe-s11-worker-identity.md).
+entry, matching generated units. Replace binary and config placeholders before
+use. Queue maintenance controls admission. There is no local start condition or
+reconciliation timer; native service activation remains an authorized operation.
 
 The Linux user queue uses `PrivateDevices=no`, `NoNewPrivileges=yes`, one Go CPU,
 and initial limits of 25% CPU and 512 MiB RAM. Device namespaces (even with

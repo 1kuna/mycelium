@@ -40,8 +40,7 @@ mounted-storage prerequisites. Add the usual `--nas` option when that mount is
 not at the installer's default location. Automatic joining supplies the address
 and trust; it does not mount storage or install GPU drivers. The installer
 copies the invitation into its private installation directory, and the service
-uses that copy on future starts. CLOSED host intent takes
-precedence over joining. Foreground joining is also available:
+uses that copy on future starts. Queue host maintenance remains effective across joining and rejoin. Foreground joining is also available:
 
 ```sh
 myce join --joining-file invitation.json

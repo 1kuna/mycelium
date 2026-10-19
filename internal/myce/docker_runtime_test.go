@@ -105,6 +105,7 @@ func TestDockerRuntimeDisabledWorkerMakesNoCalls(t *testing.T) {
 		t.Fatal(err)
 	}
 	w := Worker{StateDir: state, Clock: q.clock, Client: Client{URL: server.URL, Token: "test"}, Machine: machine("native", "fake"), Interval: time.Millisecond}
+	w.Machine.HostID = "test-host"
 	// A stale caller-supplied capability cannot enable an unconfigured runtime.
 	w.Machine.Capabilities = []string{"docker"}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -140,8 +141,8 @@ func TestDockerRuntimeDisabledWorkerMakesNoCalls(t *testing.T) {
 		return job(t, q, j.ID).State == "succeeded"
 	})
 	// Real API health and status reads must remain Docker-free too.
-	var observation HostQueueObservation
-	if err := w.Client.Call(context.Background(), "GET", "/api/hosts/test-host/observation", nil, &observation); err != nil || len(observation.Workers) != 1 || !observation.Workers[0].Healthy {
+	var observation HostMaintenanceStatus
+	if err := w.Client.Call(context.Background(), "GET", "/api/hosts/"+hostID(&w.Machine)+"/maintenance", nil, &observation); err != nil || len(observation.Workers) != 1 || !observation.Healthy {
 		t.Fatal("native worker unhealthy", err, observation.Workers)
 	}
 	for _, path := range []string{"/api/status"} {

@@ -341,11 +341,8 @@ type Job struct {
 	Checkpoint            string                       `json:"checkpoint"`
 }
 type Machine struct {
-	queueMemoryPolicy bool // Worker-only: allowance came from the authenticated queue.
+	DockerCause *RuntimeCause `json:"docker_cause,omitempty"`
 
-	DockerCause                 *RuntimeCause       `json:"docker_cause,omitempty"`
-	HostRevision                HostRevision        `json:"host_revision"`
-	HostBoot                    string              `json:"host_boot_id,omitempty"`
 	Capabilities                []string            `json:"capabilities,omitempty"`
 	MaxJobs                     int                 `json:"max_jobs,omitempty"`
 	AdmissionReason             string              `json:"admission_reason,omitempty"`
@@ -364,7 +361,7 @@ type Machine struct {
 	HostMemoryBudgetGB          float64             `json:"host_memory_budget_gb,omitempty"`
 	MemoryCeilingSlackGB        float64             `json:"memory_ceiling_slack_gb,omitempty"`
 	DockerCleanup               string              `json:"docker_cleanup,omitempty"`
-	Disabled                    string              `json:"disabled,omitempty"`
+	Disabled                    string              `json:"disabled,omitempty"` // Status-only queue maintenance projection.
 	HostID                      string              `json:"host_id,omitempty"`
 	HostAvailableMemoryGB       float64             `json:"host_available_memory_gb"`
 	FreeHostMemoryGB            float64             `json:"free_host_memory_gb"`

@@ -19,7 +19,7 @@ import (
 func TestProductionDevQueueCrash(t *testing.T) {
 	const childRoot = "MYCE_TEST_PRODUCTION_DEV_ROOT"
 	if root := os.Getenv(childRoot); root != "" {
-		if err := run([]string{"dev", "--listen", "127.0.0.1:0", "--db", filepath.Join(root, "state", "queue.db"), "--checkpoints", filepath.Join(root, "checkpoints"), "--host-state-dir", filepath.Join(root, "host"), "--host-id", "retry-host", "--workers", "1", "--memory-gb", "8"}); err != nil {
+		if err := run([]string{"dev", "--listen", "127.0.0.1:0", "--db", filepath.Join(root, "state", "queue.db"), "--checkpoints", filepath.Join(root, "checkpoints"), "--host-id", "retry-host", "--workers", "1", "--memory-gb", "8"}); err != nil {
 			t.Fatal(err)
 		}
 		return

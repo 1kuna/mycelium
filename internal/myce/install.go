@@ -180,8 +180,8 @@ func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detectio
 type ServiceConfig struct {
 	ProductionInfrastructureRetries int `json:"production_infrastructure_retries"`
 
-	Version               int            `json:"version"`
-	RequiredWorkers       []string       `json:"required_workers"`
+	Version int `json:"version"`
+
 	DockerEndpoint        string         `json:"docker_endpoint"`
 	WorkerUser            string         `json:"worker_user"`
 	WorkerHome            string         `json:"worker_home"`
@@ -209,37 +209,37 @@ type ServiceConfig struct {
 	CPUQuota              string         `json:"cpu_quota"`
 	MemoryMax             string         `json:"memory_max"`
 	TasksMax              string         `json:"tasks_max"`
-	StartDisabled         bool           `json:"start_disabled"`
-	RequireMemoryCeilings bool           `json:"require_memory_ceilings"`
-	RequireMountedNAS     bool           `json:"require_mounted_nas"`
-	Force                 bool           `json:"-"`
-	HostMemoryBudgetGB    float64        `json:"host_memory_budget_gb"`
-	MemoryCeilingSlackGB  float64        `json:"memory_ceiling_slack_gb"`
-	MemorySwapMaxBytes    int64          `json:"memory_swap_max_bytes"`
-	AllowDeviceless       bool           `json:"allow_deviceless"`
-	Device                string         `json:"device"`
-	HostStateDir          string         `json:"host_state_dir"`
-	Path                  string         `json:"path"`
-	EnvironmentRoot       string         `json:"environment_root"`
-	Role                  string         `json:"role"`
-	Detection             Detection      `json:"detection"`
-	Name                  string         `json:"name"`
-	Queue                 string         `json:"queue"`
-	Listen                string         `json:"listen"`
-	NAS                   string         `json:"nas"`
-	Checkpoints           string         `json:"checkpoint_root"`
-	ModelRoot             string         `json:"model_root"`
-	ModelCatalog          string         `json:"model_catalog"`
-	EnvironmentCatalog    string         `json:"environment_catalog"`
-	State                 string         `json:"state_dir"`
-	ModelCache            string         `json:"model_cache"`
-	EnvironmentCache      string         `json:"environment_cache"`
-	ModelCacheBytes       int64          `json:"model_cache_bytes"`
-	EnvironmentCacheBytes int64          `json:"environment_cache_bytes"`
-	Binary                string         `json:"binary"`
-	Credentials           string         `json:"credentials"`
-	Service               string         `json:"service"`
-	Config                string         `json:"config"`
+
+	RequireMemoryCeilings bool    `json:"require_memory_ceilings"`
+	RequireMountedNAS     bool    `json:"require_mounted_nas"`
+	Force                 bool    `json:"-"`
+	HostMemoryBudgetGB    float64 `json:"host_memory_budget_gb"`
+	MemoryCeilingSlackGB  float64 `json:"memory_ceiling_slack_gb"`
+	MemorySwapMaxBytes    int64   `json:"memory_swap_max_bytes"`
+	AllowDeviceless       bool    `json:"allow_deviceless"`
+	Device                string  `json:"device"`
+
+	Path                  string    `json:"path"`
+	EnvironmentRoot       string    `json:"environment_root"`
+	Role                  string    `json:"role"`
+	Detection             Detection `json:"detection"`
+	Name                  string    `json:"name"`
+	Queue                 string    `json:"queue"`
+	Listen                string    `json:"listen"`
+	NAS                   string    `json:"nas"`
+	Checkpoints           string    `json:"checkpoint_root"`
+	ModelRoot             string    `json:"model_root"`
+	ModelCatalog          string    `json:"model_catalog"`
+	EnvironmentCatalog    string    `json:"environment_catalog"`
+	State                 string    `json:"state_dir"`
+	ModelCache            string    `json:"model_cache"`
+	EnvironmentCache      string    `json:"environment_cache"`
+	ModelCacheBytes       int64     `json:"model_cache_bytes"`
+	EnvironmentCacheBytes int64     `json:"environment_cache_bytes"`
+	Binary                string    `json:"binary"`
+	Credentials           string    `json:"credentials"`
+	Service               string    `json:"service"`
+	Config                string    `json:"config"`
 }
 
 // PlanInstall is pure. The command boundary supplies the OS account; omitted
@@ -286,7 +286,7 @@ func PlanInstall(role, home, root, nas, queue, name string, d Detection, account
 	c.Checkpoints = filepath.Join(nas, "mycelium", "checkpoints")
 	c.ModelRoot = filepath.Join(nas, "mycelium", "models")
 	c.DB = filepath.Join(c.State, "myce.db")
-	c.HostStateDir = filepath.Join(home, ".local", "share", "myce")
+
 	c.HostID, _ = os.Hostname()
 	c.ReserveHostMemoryGB = 4
 	c.MemoryCeilingSlackGB = .125
@@ -333,14 +333,8 @@ func unitConditionPath(v string) string {
 }
 func (c ServiceConfig) ServiceText() string {
 	if c.Detection.OS == "linux" {
-		condition := ""
 		stopSettings := ""
 		if c.Role == "worker" {
-			dir := c.HostStateDir
-			if dir == "" {
-				dir, _ = HostStateDirectory()
-			}
-			condition = "ExecCondition=" + unitQuote(c.Binary) + " _host-start-check --host-state-dir " + unitQuote(dir) + "\n"
 			stopSettings = "EnvironmentFile=" + unitConditionPath(c.GPUEnvironmentFile()) + "\nDelegate=memory\nKillMode=control-group\nSendSIGKILL=yes\nTimeoutStopSec=10s\n"
 		}
 		settings := ""
@@ -363,7 +357,7 @@ func (c ServiceConfig) ServiceText() string {
 		for _, arg := range c.Args() {
 			argv += " " + unitQuote(arg)
 		}
-		return "[Unit]\nDescription=Mycelium " + c.Role + "\nAfter=network-online.target\n\n[Service]\n" + condition + "ExecStart=:" + unitQuote(c.Binary) + " service --config " + unitQuote(c.Config) + " --" + argv + "\n" + settings + stopSettings + "Restart=on-failure\nRestartSec=3\nUMask=0077\n\n[Install]\nWantedBy=default.target\n"
+		return "[Unit]\nDescription=Mycelium " + c.Role + "\nAfter=network-online.target\n\n[Service]\n" + "ExecStart=:" + unitQuote(c.Binary) + " service --config " + unitQuote(c.Config) + " --" + argv + "\n" + settings + stopSettings + "Restart=on-failure\nRestartSec=3\nUMask=0077\n\n[Install]\nWantedBy=default.target\n"
 	}
 	vals := []string{c.Binary, "service", "--config", c.Config}
 	args := ""
@@ -453,11 +447,6 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 	if err := PrepareStateRoots(roots...); err != nil {
 		return err
 	}
-	if c.Role == "worker" {
-		if err := prepareClosedWorkerInstall(c); err != nil {
-			return err
-		}
-	}
 	if err := prepareInstallNAS(ctx, c, command); err != nil {
 		return err
 	}
@@ -508,11 +497,7 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 		} else if err != nil {
 			return err
 		}
-		for _, unit := range []struct{ name, body string }{{"myce-host-reconcile.service", c.HostReconcileServiceText()}, {"myce-host-reconcile.timer", hostReconcileTimerText}} {
-			if err = tx.put(filepath.Join(filepath.Dir(c.Service), unit.name), []byte(unit.body), 0600); err != nil {
-				return err
-			}
-		}
+
 	}
 	if err = tx.put(c.Service, []byte(c.ServiceText()), 0600); err != nil {
 		return err
@@ -530,13 +515,6 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 			if err = validateInstallDropIns(ctx, c, command); err != nil {
 				return err
 			}
-			if _, err = command(ctx, "systemctl", "--user", "enable", "--now", "myce-host-reconcile.timer"); err != nil {
-				return err
-			}
-		}
-		if c.Role == "worker" {
-			_, err = command(ctx, "systemctl", "--user", "enable", filepath.Base(c.Service))
-			return err
 		}
 		if _, err = command(ctx, "systemctl", "--user", "enable", "--now", filepath.Base(c.Service)); err != nil {
 			return err
@@ -545,9 +523,6 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 			_, err = command(ctx, "systemctl", "--user", "restart", filepath.Base(c.Service))
 		}
 	} else {
-		if c.Role == "worker" {
-			return nil
-		} // stage only; host open is a separate operation
 		if tx.units[0].state.loaded {
 			if _, err = command(ctx, "launchctl", "bootout", tx.units[0].target()); err != nil {
 				return err
@@ -569,7 +544,15 @@ func ReadServiceConfig(path string) (ServiceConfig, error) {
 	}
 	decoder := json.NewDecoder(bytes.NewReader(b))
 	decoder.DisallowUnknownFields()
-	e = decoder.Decode(&c)
+	// Decode only known retired settings for saved-config overlays. They have no
+	// runtime representation and disappear when the current config is written.
+	legacy := struct {
+		*ServiceConfig
+		HostStateDir    json.RawMessage `json:"host_state_dir"`
+		StartDisabled   json.RawMessage `json:"start_disabled"`
+		RequiredWorkers json.RawMessage `json:"required_workers"`
+	}{ServiceConfig: &c}
+	e = decoder.Decode(&legacy)
 	if e == nil && (c.Version < 0 || c.Version > 1) {
 		return c, errors.New("unsupported installed config version")
 	}
@@ -782,14 +765,11 @@ func (c ServiceConfig) Args() []string {
 	args := []string{}
 	if c.Role == "queue" {
 		args = []string{"queue", "--listen", c.Listen, "--db", c.DB, "--checkpoints", c.Checkpoints, "--queue", c.Queue}
-		if c.HostStateDir != "" {
-			args = append(args, "--host-state-dir", c.HostStateDir)
-		}
 	} else {
 		args = []string{"join", "--host-memory-budget-gb", strconv.FormatFloat(c.HostMemoryBudgetGB, 'f', -1, 64), "--memory-ceiling-slack-gb", strconv.FormatFloat(c.MemoryCeilingSlackGB, 'f', -1, 64), "--memory-swap-max-bytes", strconv.FormatInt(c.MemorySwapMaxBytes, 10), "--name", c.Name, "--gpu", c.Detection.Platform, "--memory-mode", c.Detection.MemoryMode, "--memory-gb", strconv.FormatFloat(c.Detection.MemoryGB, 'f', -1, 64), "--reserve-memory-gb", strconv.FormatFloat(c.Detection.ReserveGB, 'f', -1, 64), "--state-dir", c.State, "--checkpoint-root", c.Checkpoints, "--model-root", c.ModelRoot, "--model-cache", c.ModelCache, "--model-cache-bytes", strconv.FormatInt(c.ModelCacheBytes, 10), "--environment-root", c.EnvironmentRoot, "--environment-cache", c.EnvironmentCache, "--environment-cache-bytes", strconv.FormatInt(c.EnvironmentCacheBytes, 10)}
 	}
 	if c.Role == "worker" {
-		args = append(args, "--service-config", c.Config)
+
 		if c.DockerEndpoint != "" {
 			args = append(args, "--docker-host", c.DockerEndpoint)
 		}
@@ -820,9 +800,6 @@ func (c ServiceConfig) Args() []string {
 		args = append(args, "--host-id", c.HostID, "--reserve-host-memory-gb", strconv.FormatFloat(c.ReserveHostMemoryGB, 'f', -1, 64), "--heartbeat", c.Heartbeat.String())
 		if c.RequireMemoryCeilings {
 			args = append(args, "--require-memory-ceilings")
-		}
-		if c.HostStateDir != "" {
-			args = append(args, "--host-state-dir", c.HostStateDir)
 		}
 		if c.Device != "" {
 			args = append(args, "--device", c.Device)

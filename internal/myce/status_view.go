@@ -63,6 +63,9 @@ func availabilityWords(reason string) string {
 	}
 }
 func admissionWords(reason string) string {
+	if reason == "planned host maintenance" {
+		return reason
+	}
 	if strings.HasPrefix(reason, "maximum simultaneous jobs reached") {
 		return "hypha is busy; its simultaneous job limit has been reached"
 	}
@@ -201,8 +204,8 @@ func (q *Queue) statusWaitingReason(j *Job) string {
 			}
 			possible++
 			state := HyphaAvailability(m)
-			if q.hostClosedReason(hostID(m)) != "" {
-				state = "disabled by operator"
+			if q.maintenanceBlocked(hostID(m)) {
+				state = "planned host maintenance"
 			}
 			if state == "available for work" && q.machineLimitReason(m) != "" {
 				state = admissionWords(q.machineLimitReason(m))

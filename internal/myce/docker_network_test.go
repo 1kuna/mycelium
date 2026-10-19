@@ -12,7 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
-	"syscall"
+
 	"testing"
 	"time"
 )
@@ -330,57 +330,6 @@ func TestDockerGroupInspectsEachDeclaredMemoryLimit(t *testing.T) {
 	}
 }
 
-func TestDockerGroupPolicyMismatchDuringReadiness(t *testing.T) {
-	w, s, _, root := dockerFixture(t)
-	w.Machine.HostMemoryBudgetGB = 6
-	w.hostRevision = configureTestHostMemoryAllowance(t, w.HostStateDir, 6)
-	j := dockerGroupJob(t)
-	var ready, probed atomic.Bool
-	server := workerTestServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-		probed.Store(true)
-		if !ready.Load() {
-			rw.WriteHeader(503)
-		}
-	}))
-	defer server.Close()
-	u, _ := url.Parse(server.URL)
-	port, _ := strconv.Atoi(u.Port())
-	j.Spec.Run.DockerSidecars[0].Readiness = &DockerReadiness{Port: port, Path: "/ready", Timeout: "10s"}
-	p, e := startDockerFixture(w, s, j)
-	if e != nil {
-		t.Fatal(e)
-	}
-	t.Cleanup(p.docker.close)
-	await(t, probed.Load)
-	if _, e := SetHostMemoryBudget(w.HostStateDir, 3); e == nil {
-		t.Fatal("OPEN reconfiguration accepted")
-	}
-	// Simulate corrupted/stale admission, not an authorized live policy switch.
-	state, e := ReadHostIntent(w.HostStateDir)
-	if e != nil {
-		t.Fatal(e)
-	}
-	state.MemoryAllowanceBytes = 3 << 30
-	if e := atomicHostJSON(w.HostStateDir, hostStateFile, state, nil); e != nil {
-		t.Fatal(e)
-	}
-	ready.Store(true)
-	select {
-	case f := <-p.done:
-		if f.result.Success || !strings.Contains(f.result.Error, "allowance changed since queue admission") {
-			t.Fatalf("stale admission accepted: %+v", f.result)
-		}
-	case <-time.After(4 * time.Second):
-		t.Fatal("stale budget did not settle")
-	}
-	if _, e := os.Stat(filepath.Join(root, "created")); !os.IsNotExist(e) {
-		t.Fatal("main created with mismatched allowance")
-	}
-	if _, e := os.Stat(filepath.Join(root, "network-removed")); e != nil {
-		t.Fatal("network not released after stale admission")
-	}
-}
-
 func TestDockerRequiresHostMemoryDeclaration(t *testing.T) {
 	w, s, _, root := dockerFixture(t)
 	w.RequireMemoryCeilings = true
@@ -513,46 +462,6 @@ func TestDockerNetworkViolationsAndRemovalHold(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-func TestDisableDockerPrivateNetwork(t *testing.T) {
-	w, s, c, root := dockerFixture(t)
-	j := dockerGroupJob(t)
-	p, e := startDockerFixture(w, s, j)
-	if e != nil {
-		t.Fatal(e)
-	}
-	await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
-	p.docker.close() // worker disappeared; daemon and spool survive
-	s.close()
-	if e = saveWorkerJSON(w.HostStateDir, "worker-test.json", HostWorker{State: s.dir, Host: "docker-host", Name: w.Machine.ID}); e != nil {
-		t.Fatal(e)
-	}
-	ensureTestHost(t, w.HostStateDir, c)
-	h := HostControl{Observe: testHostExclusion, Dir: w.HostStateDir, Clock: c, Docker: true, Processes: HostProcesses{Owned: func(workerState) (bool, error) { return false, nil }, Signal: func(workerState, syscall.Signal) error { return nil }, Pause: func(d time.Duration) { c.advance(d) }}}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	report, e := h.Disable(ctx, "network test", 0)
-	if e != nil || len(report.Unconfirmed) > 0 {
-		t.Fatalf("disable: %+v %v", report, e)
-	}
-	if _, e := os.Stat(filepath.Join(root, "network-removed")); e != nil {
-		t.Fatal("disable left network")
-	}
-}
-
-func TestDisableOrphanNetworkWithoutContainer(t *testing.T) {
-	w, s, c, root := dockerFixture(t)
-	s.close()
-	fakeDockerNetwork(root, []string{"network", "create", "--label", "myce.attempt=orphan", "myce-orphan"}, "")
-	ensureTestHost(t, w.HostStateDir, c)
-	h := HostControl{Observe: testHostExclusion, Dir: w.HostStateDir, Clock: c, Docker: true, Service: &fakeHostService{}, Timeout: 2 * time.Second}
-	report, e := h.Disable(context.Background(), "orphan network", 0)
-	if e != nil || !report.Confirmed {
-		t.Fatalf("disable: %+v %v", report, e)
-	}
-	if _, e := os.Stat(filepath.Join(root, "network-removed")); e != nil {
-		t.Fatal("labeled orphan network survived disable")
 	}
 }
 func TestDockerReadinessTimeoutAndStop(t *testing.T) {
@@ -764,7 +673,7 @@ func TestDockerNetworkRemovalEscalatesThroughQueue(t *testing.T) {
 	w.Client = Client{URL: server.URL, Token: "test"}
 	w.Interval = time.Millisecond
 	w.Machine.HostID = "network-host"
-	testHostOpen(t, w.HostStateDir, c, "network-host")
+
 	w.CheckpointRoot = q.root
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

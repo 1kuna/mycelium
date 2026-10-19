@@ -4,7 +4,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 )
 
@@ -27,29 +26,6 @@ func ValidWorkerUnit(unit string) bool {
 	return true
 }
 
-func HostWorkers(dir string) ([]HostWorker, error) { return (HostControl{Dir: dir}).workers() }
-func WorkerUnits(dir, target string) ([]string, error) {
-	if target != "" && !ValidWorkerUnit(target) {
-		return nil, errors.New("refusing non-Mycelium worker unit")
-	}
-	workers, err := HostWorkers(dir)
-	if err != nil {
-		return nil, err
-	}
-	var units []string
-	for _, w := range workers {
-		if ValidWorkerUnit(w.Unit) && !slices.Contains(units, w.Unit) && (target == "" || target == w.Unit) {
-			units = append(units, w.Unit)
-		}
-	}
-	if target != "" && len(units) == 0 {
-		return nil, errors.New("worker unit is not registered in this host control directory")
-	}
-	slices.Sort(units)
-	return units, nil
-}
-
-// A systemd invocation's kernel cgroup supplies custody even for manually installed units.
 func CurrentWorkerUnit() (string, error) {
 	if os.Getenv("INVOCATION_ID") == "" {
 		return "", nil

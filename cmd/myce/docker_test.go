@@ -1,8 +1,6 @@
 package main
 
 import (
-	"context"
-	"mycelium/internal/myce"
 	"strings"
 	"testing"
 )
@@ -21,20 +19,5 @@ func TestResolveDockerCLIRejectsAssertionAndRequiresCustody(t *testing.T) {
 		if err := run([]string{mode, "--simulated"}); err == nil || !strings.Contains(err.Error(), "flag provided but not defined") {
 			t.Fatal("production exposes simulation flag", mode, err)
 		}
-	}
-}
-
-func TestResolveDockerUsesWorkerMutationExecutor(t *testing.T) {
-	r, a, c := localIdentityFixture(t)
-	calls := 0
-	err := resolveDockerCommand([]string{"--state-dir", c.State, "--attempt-id", "owned", "--worker-user", a.Name, "--config", c.Config}, myce.MachineProbe{}, r, func(_ context.Context, launch myce.HostChildLaunch) ([]byte, error) {
-		calls++
-		if launch.Request.Operation != "resolve-docker" || launch.Request.SpoolDir != c.State || launch.Request.AttemptID != "owned" || launch.Account.UID != a.UID {
-			t.Fatal(launch.Request)
-		}
-		return []byte(`{"version":1,"operation":"resolve-docker","result":{"revision":1,"operation_id":"close"}}`), nil
-	})
-	if err != nil || calls != 1 {
-		t.Fatal(err, calls)
 	}
 }

@@ -586,7 +586,7 @@ func TestCancellationQueuedLostCopyRelease(t *testing.T) {
 	assertNoCancellationAttempt(t, q, j)
 }
 
-func TestCancellationHostClearKeepsOmittedCustody(t *testing.T) {
+func TestCancellationMaintenanceKeepsExactCustody(t *testing.T) {
 	q, _ := fixture(t)
 	j := submit(t, q, spec("experiment"))
 	m := machine("one", "fake")
@@ -596,16 +596,16 @@ func TestCancellationHostClearKeepsOmittedCustody(t *testing.T) {
 		t.Fatal(err)
 	}
 	cancelAck(t, q, j.ID)
-	if err := closeQueueHost(q, m.ID, "test", nil); err != nil {
+	if err := setMaintenance(t, q, m.ID, "disable"); err != nil {
 		t.Fatal(err)
 	}
 	if len(q.s.HostReleases) != 1 {
-		t.Fatal("blanket host clear discharged cancelled execution without exact evidence")
+		t.Fatal("maintenance discharged cancelled execution without exact evidence")
 	}
 	if a := cancelAck(t, q, j.ID); ackRelease(a) != "pending" {
 		t.Fatal(a)
 	}
-	if err := closeQueueHost(q, m.ID, "test", []Result{result(j, false)}); err != nil {
+	if err := q.Complete(Result{Machine: j.Machine, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, ReleaseOnly: true}); err != nil {
 		t.Fatal(err)
 	}
 	if a := cancelAck(t, q, j.ID); ackRelease(a) != "confirmed" {

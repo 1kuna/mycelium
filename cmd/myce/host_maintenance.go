@@ -129,12 +129,3 @@ func waitHostMaintenance(ctx context.Context, c myce.Client, host string, timeou
 		}
 	}
 }
-
-func containsLocalFlag(args []string) bool {
-	for _, arg := range args {
-		if arg == "--local" || arg == "--local=true" {
-			return true
-		}
-	}
-	return false
-}

@@ -158,7 +158,7 @@ func newInstallMatrixFixture(t *testing.T, platform, role string, prior int) ins
 	c.HostID = "fixture-host"
 	c.RequireMountedNAS = platform == "linux"
 	if role == "worker" {
-		if err := prepareClosedWorkerInstall(c); err != nil {
+		if err := PrepareStateRoots(c.State); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -272,9 +272,6 @@ func (f installMatrixFixture) assertRestored(t *testing.T) {
 		}
 	}
 	if f.c.Role == "worker" {
-		if reason, err := HostDisabled(f.c.HostStateDir); err != nil || reason == "" {
-			t.Fatal("worker admission opened", err)
-		}
 	}
 }
 
@@ -440,9 +437,6 @@ func TestInstallSnapshotRecoveryFailureMatrix(t *testing.T) {
 							}
 						}
 						if role == "worker" {
-							if reason, err := HostDisabled(f.c.HostStateDir); err != nil || reason == "" {
-								t.Fatal("failed recovery opened host", err)
-							}
 						}
 					})
 				}
@@ -473,7 +467,7 @@ func (f installMatrixFixture) assertRecoveryOrder(t *testing.T, event string, re
 	}
 }
 
-func TestInstallSnapshotUnknownRecoveryStaysClosed(t *testing.T) {
+func TestInstallSnapshotUnknownRecoveryStaysStopped(t *testing.T) {
 	for _, platform := range []string{"linux", "darwin"} {
 		t.Run(platform, func(t *testing.T) {
 			f := newInstallMatrixFixture(t, platform, "worker", 2)
@@ -504,9 +498,6 @@ func TestInstallSnapshotUnknownRecoveryStaysClosed(t *testing.T) {
 				if state.active || !strings.Contains(err.Error(), unit) {
 					t.Fatal("uncertain worker was not stopped/reported", unit)
 				}
-			}
-			if reason, err := HostDisabled(f.c.HostStateDir); err != nil || reason == "" {
-				t.Fatal("uncertain recovery opened host", err)
 			}
 		})
 	}

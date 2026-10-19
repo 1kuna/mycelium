@@ -6,8 +6,7 @@ import (
 )
 
 func TestHoldsReviewHostDisableScope(t *testing.T) {
-	q, _, a, b, _ := holdFleet(t, false)
-	q.s.Machines[a.ID].Disabled = "deliberate"
+	q, _, _, _, _ := holdFleet(t, false)
 	assert := func(want bool) {
 		t.Helper()
 		s, err := q.Snapshot()
@@ -27,12 +26,15 @@ func TestHoldsReviewHostDisableScope(t *testing.T) {
 			t.Fatalf("host disable=%v want=%v: %+v", found, want, s.HoldsDetail)
 		}
 	}
-	assert(false) // One disabled unit must not label its healthy sibling disabled.
-	q.s.Machines[b.ID].Disabled = "deliberate"
+	assert(false)
+	if err := setMaintenance(t, q, "b70", "disable"); err != nil {
+		t.Fatal(err)
+	}
 	assert(true)
-	q.s.Machines[b.ID].Disabled = ""
-	closeQueueHost(q, "b70", "deliberate", nil)
-	assert(true)
+	if err := setMaintenance(t, q, "b70", "resume"); err != nil {
+		t.Fatal(err)
+	}
+	assert(false)
 }
 
 func TestHoldsReviewProductionReleaseAttention(t *testing.T) {

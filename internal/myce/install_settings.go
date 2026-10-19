@@ -114,7 +114,7 @@ func InstallSettings() []InstallSetting {
 		installSetting("allow-deviceless", "AllowDeviceless", "allow CPU/fake test worker", func(c *ServiceConfig) *bool { return &c.AllowDeviceless }, installAny[bool]),
 		installSetting("device", "Device", "physical GPU selector", func(c *ServiceConfig) *string { return &c.Device }, installAny[string]),
 		installSetting("docker-host", "DockerEndpoint", "opt in to managed Docker at this endpoint (empty disables Docker)", func(c *ServiceConfig) *string { return &c.DockerEndpoint }, installAny[string]),
-		installContext(installPath("host-state-dir", "HostStateDir", "shared local host control directory", func(c *ServiceConfig) *string { return &c.HostStateDir }, true), func(c ServiceConfig) error { return validateInstallDirective(c, c.HostStateDir, true) }),
+
 		installPath("joining-file", "JoiningFile", "private joining invitation", func(c *ServiceConfig) *string { return &c.JoiningFile }, false),
 		installNASSetting(),
 		installSetting("queue", "Queue", "queue address", func(c *ServiceConfig) *string { return &c.Queue }, func(v string) error {
@@ -141,7 +141,7 @@ func InstallSettings() []InstallSetting {
 		}),
 		installSetting("memory-gb", "Detection.MemoryGB", "GPU memory budget", func(c *ServiceConfig) *float64 { return &c.Detection.MemoryGB }, installNonnegative),
 		installSetting("reserve-memory-gb", "Detection.ReserveGB", "GPU memory reserve", func(c *ServiceConfig) *float64 { return &c.Detection.ReserveGB }, installNonnegative),
-		installContext(installSetting("host-memory-budget-gb", "HostMemoryBudgetGB", "unqualified host allowance migration input", func(c *ServiceConfig) *float64 { return &c.HostMemoryBudgetGB }, installNonnegative), func(c ServiceConfig) error {
+		installContext(installSetting("host-memory-budget-gb", "HostMemoryBudgetGB", "initial queue host RAM allowance", func(c *ServiceConfig) *float64 { return &c.HostMemoryBudgetGB }, installNonnegative), func(c ServiceConfig) error {
 			_, err := MemoryCeilingConfig(c.HostMemoryBudgetGB, c.MemoryCeilingSlackGB, c.MemorySwapMaxBytes)
 			return err
 		}),
@@ -164,12 +164,7 @@ func InstallSettings() []InstallSetting {
 		installPath("environment-cache", "EnvironmentCache", "local environment cache", func(c *ServiceConfig) *string { return &c.EnvironmentCache }, false),
 		installSetting("environment-cache-bytes", "EnvironmentCacheBytes", "local environment cache bytes", func(c *ServiceConfig) *int64 { return &c.EnvironmentCacheBytes }, installBytes),
 		installSetting("heartbeat", "Heartbeat", "worker check-in interval", func(c *ServiceConfig) *time.Duration { return &c.Heartbeat }, installPositiveDuration),
-		installContext(installSetting("start-disabled", "StartDisabled", "stage a closed worker", func(c *ServiceConfig) *bool { return &c.StartDisabled }, installAny[bool]), func(c ServiceConfig) error {
-			if c.StartDisabled && (c.Role != "worker" || c.Detection.OS != "linux") {
-				return errors.New("requires a Linux worker")
-			}
-			return nil
-		}),
+
 		installContext(installSetting("require-memory-ceilings", "RequireMemoryCeilings", "require tested cgroup v2 ceilings", func(c *ServiceConfig) *bool { return &c.RequireMemoryCeilings }, installAny[bool]), func(c ServiceConfig) error {
 			if c.RequireMemoryCeilings && c.Role != "worker" {
 				return errors.New("requires a worker")
@@ -224,7 +219,7 @@ func InstallSettings() []InstallSetting {
 				return errors.New("unsupported installed config version")
 			}
 			return nil
-		}}, {Field: "RequiredWorkers"}, {Field: "WorkerUser"}, {Field: "WorkerHome"},
+		}}, {Field: "WorkerUser"}, {Field: "WorkerHome"},
 		{Field: "LocalDisableReceipts", validate: func(c ServiceConfig) error {
 			if c.LocalDisableReceipts {
 				return ErrLegacyLocalDisableReceipts

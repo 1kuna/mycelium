@@ -22,10 +22,10 @@
 ## Map
 
 - `cmd/myce`: CLI and executable dev end-to-end test.
-- `internal/myce`: queue/HTTP API, scheduler, worker, host controller, installer, dev.
+- `internal/myce`: queue/HTTP API, scheduler, worker, queue maintenance, installer, dev.
 - `clients/python`: submission/cancellation and checkpoint client.
-- `docs/operations.md`: canonical install, host close/open/reconcile and recovery.
-- `docs/guide-status-v3.md`: envelope, rest verdicts and status fields.
+- `docs/operations.md`: canonical install, queue maintenance and recovery.
+- `docs/guide-status-v3.md`: worker freshness, maintenance and status fields.
 - `deploy`: manual service templates; `docs/guide-fresh-install.md`: old-state archives.
 - `docs/guide-resumable-jobs.md`: checkpoint contract and Python example.
 

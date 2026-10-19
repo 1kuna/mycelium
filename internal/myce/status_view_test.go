@@ -70,7 +70,9 @@ func TestStatusViewPrivacyAndQualification(t *testing.T) {
 	m := placementMachine("test-hypha", "unified", 16, 16, e)
 	m.ExtensionReports = []ExtensionReport{{Name: e.Name, Version: e.Version, Digest: e.Digest, Work: "kind:sample", Platform: "fake", Reason: "synthetic-private-secret /private/example"}}
 	m.LastSeen = c.Now()
-	m.Disabled = "synthetic-private-secret /private/example"
+	if err := setMaintenance(t, q, hostID(&m), "disable"); err != nil {
+		t.Fatal(err)
+	}
 	m.CapabilityProfile.Availability = &Availability{Reason: "synthetic-private-secret", CheckedAt: c.Now()}
 	if err := q.update(func() error { q.s.Machines[m.ID] = &m; return nil }); err != nil {
 		t.Fatal(err)
@@ -207,7 +209,7 @@ func TestStatusViewDisabledAndResourceConstraints(t *testing.T) {
 		change func(*Machine)
 		want   string
 	}{
-		{"disabled", func(m *Machine) { m.Disabled = "operator supplied text" }, "disabled by operator"},
+		{"maintenance", func(m *Machine) {}, "planned host maintenance"},
 		{"offline", func(m *Machine) { m.Gone = true }, "offline"},
 		{"leaving", func(m *Machine) { m.Leaving = true }, "leaving; no new work"},
 		{"memory", func(m *Machine) { m.TotalMemoryGB = 4; m.FreeMemoryGB = 4 }, "8.0 GiB free accelerator memory"},
@@ -221,6 +223,11 @@ func TestStatusViewDisabledAndResourceConstraints(t *testing.T) {
 			tc.change(&m)
 			if err := q.update(func() error { q.s.Machines[m.ID] = &m; return nil }); err != nil {
 				t.Fatal(err)
+			}
+			if tc.name == "maintenance" {
+				if err := setMaintenance(t, q, hostID(&m), "disable"); err != nil {
+					t.Fatal(err)
+				}
 			}
 			s := spec("experiment")
 			s.Needs.Platform = Platform{Required: []string{"cuda"}}

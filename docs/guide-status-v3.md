@@ -80,13 +80,13 @@ have several holds at once. Do not match English text to choose an action.
 | `docker_cleanup_waiting` | false | omitted | Retained Docker custody or a `cleanup unconfirmed:`-prefixed status awaits confirmation, before escalation. |
 | `docker_cleanup_operator_action` | true | omitted | Docker custody reached the cleanup escalation bound (`myce resolve-docker`). |
 | `startup_release` | conditional | omitted | Failed startup awaits exact execution release; true when any corresponding worker is gone/missing. |
-| `host_disabled` | false | omitted | `DisabledHosts[host]` is set, or every known worker on the host is disabled. Does not clear by itself; not a fault. Partial unit disables are omitted from hold details; check each machine's disabled state. |
+| `host_disabled` | false | omitted | Queue host maintenance is drained/disabled. Does not clear by itself; not a fault. A machine's `disabled` field is a status projection of this queue policy. |
 | `unclassified` | true | omitted | A production host blocker has no recognized explicit classification, or a worker reports an unrecognized Docker status (for example, `pull pending`). Never treated as self-clearing. |
 
 There is no idle production cooldown. `clears_at` is optional; refresh before acting. A false
 operator flag means no fault currently demands operator attention, not that
 release is proven or that recovery has a deadline. In particular, deliberate
-CLOSED admission persists until revision-bound open. Cleanup acknowledgements may clear an
+Queue admission stays drained/disabled until explicit resume. Cleanup acknowledgements may clear an
 escalated hold without an operator override; custody remains fenced until proven.
 
 Docker summaries choose deterministically by severity: escalation, unclassified
@@ -119,85 +119,10 @@ fence messages and appear only in `holds_detail`.
 
 The CLI and page label the effective host allowance **last reported**, including
 stopped workers, with `memory_allowance_bytes` and UNQUALIFIED qualification.
-The queue derives it from the host's worker reports and fences admission when
-their policy values disagree. It is not a live read of an offline host's intent.
-Check locally with `myce host-memory-budget show --host-state-dir DIR` for the
-current value. Changes require explicit CLOSED host reconfiguration; open/close
-preserve the allowance. Native measurement and qualification remain separate.
-
-## Host-control envelope
-
-`myce host close|open|status --local --json` emits the same schema-v1 envelope,
-including on error. `reconcile --local` performs convergence; use read-only status
-for this public envelope and rest verdict. See [operations](operations.md#close-reconcile-and-reopen-a-host)
-for invocation and the [schema](schemas/host-envelope-v1.schema.json) for exact types.
-
-| Fields | Interpretation |
-| --- | --- |
-| `schema_version`, `command` | Version 1; close, open or status. |
-| `host_id`, `operation_id`, `boot_id` | Verified host, desired operation and current boot; nullable if unknown. |
-| `accepted_revision` | This command's durably accepted revision; null for rejection and read-only status. |
-| `desired`, `observed` | State/revision pairs. Desired is durable intent; observed applies to this boot. Unknown revisions stay null. |
-| `last_close`, `host_settlement` | Last close's ID/revision, settlement and UTC settlement time. Open preserves it. Settlement equals the close history, or unknown when null. |
-| `queue_observed_revision` | Queue acknowledgement, separate from previous-close settlement and current readiness. |
-| `local_exclusion`, `restart_safe` | PASS/FAIL/UNKNOWN physical exclusion; nullable restart-policy evidence. |
-| `counts` | Nullable active, preparing, stopping, unsettled, pending-daemon, running-container, GPU-holder, queued, fenced-queued and unresolved-placement counts. Null never means zero. |
-| `units`, `attempts` | Exact unit/cgroup and execution/release evidence. Null means incomplete; empty arrays mean complete empty inventory. |
-| `observed_at`, `source_observed_at` | UTC completion and per-source timestamps. Freshness is checked against the current boot/revision. |
-| `errors` | Sanitized component/code/message objects; stable codes, not English parsing. |
-
-Status never initializes or repairs state. `state_uninitialized`/`state_corrupt`
-keep unverified fields null. A stale compare-and-set returns exit 3,
-`revision_mismatch`, unchanged desired state and no accepted revision. An accepted
-operation overtaken by another retains its accepted revision with
-`revision_superseded` and the newer desired revision. Without a release wait
-its acceptance exits 0; with a release wait it fails nonzero, never exit 3.
-Open requires a selector matching the current confirmed close; otherwise it
-rejects with mismatch or `previous_close_unsettled` without allocation.
-
-Without wait/verdict, exit zero means acceptance or successful snapshot only.
-`close --wait-released` needs local exclusion PASS, even if queue settlement is
-pending. `status --expect ready --wait` needs ready PASS. With
-`--expect closed|ready --verdict`, zero exit means the requested **rest PASS** only.
-
-### Rest verdicts
-
-A verdict adds `expectation`, `verdict`, unique stable `reasons`, nullable
-`queue_reachable` and nullable `memory_allowance_bytes` together. The schema checks
-shape, not physical truth. Use the product verdict rather than reconstructing it
-from holds or external receipts.
-
-| Verdict | Closed | Ready |
-| --- | --- | --- |
-| PASS | Current CLOSED fence, complete local exclusion, fresh queue acknowledgement/confirmed settlement and no relevant active or unresolved release/placement. | Current-boot open revision applied and queue-acknowledged, all installed required workers fresh/healthy at that revision, no unresolved release. |
-| FAIL | Fresh proof of open/stale admission, owned live work/GPU holders, unsafe restart or unfenced eligible work. | Fresh proof of wrong required revision or required-worker health violation. |
-| UNKNOWN | No proven violation, but required evidence missing, stale or ambiguous. Local PASS with queue pending is not rest PASS. | Required boot/revision/worker/queue/release evidence is missing, stale or ambiguous. |
-
-FAIL takes precedence over UNKNOWN; retain both causes. Fenced queued jobs are
-counted and allowed. Positively foreign-only work is outside the host; unknown
-placement stays unresolved. Ready does not require empty cgroups and does not
-certify a model or application. Consumer cancellation completion stays separate.
-
-Evaluate after collection and the final revision fence at one instant. Age equal
-to its freshness bound is fresh; just past it, missing time or a future timestamp
-makes evidence absent. Default collection/queue freshness is 10 seconds.
-Collection or fence error gives UNKNOWN with `collection_failed`. Printed verdict
-and exit status use that same result; a timeout is non-PASS, never release proof.
-
-### Rejection and runtime diagnostics
-
-Job API rejections return a stable `code` and a fixed `error` naming the field or
-rule. Codes distinguish JSON/body, required fields, priority/deadline, files,
-program, memory, platform, Docker, environment, placement and capacity rules.
-The queue logs the status and code, without the request body or credentials.
-The Go client retains these codes as `HTTPError.Code`.
-
-Optional `execution_cause` and `cleanup_cause` on results/jobs, and `docker_cause`
-on workers, retain safe operation/error-class pairs (plus a command exit code
-when available). A transient cleanup failure remains diagnostic evidence after
-release; it does not replace the execution outcome or prove release. Raw daemon
-stderr, arguments, paths and environment values are excluded. Unknown worker
-cause values are removed from public status.
+The durable queue policy supplies it; worker reports must agree before admission.
+Worker memory availability and usage remain last-reported facts.
+Read the queue-owned allowance with `myce host status HOST`. Configure it while
+drained/disabled with `myce host budget HOST --memory-budget-gb GiB`.
 
 ## Queue host maintenance status
 
@@ -221,4 +146,4 @@ local-exclusion verdict.
 
 The optional wait reads this status until quiescent or the injected deadline.
 Timeout and queue outage fail without changing policy or release custody.
-`host status --local` continues to print the old local envelope until S6.
+Every host command uses queue evidence; there is no local envelope or rest verdict.

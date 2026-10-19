@@ -298,7 +298,7 @@ func TestCapabilityPreferenceRespectsEligibility(t *testing.T) {
 			check(t, q, small, nil)
 			check(t, q, big, nil)
 			if reason == "disabled" {
-				if err := closeQueueHost(q, big.ID, "operator disabled", nil); err != nil {
+				if err := setMaintenance(t, q, big.ID, "disable"); err != nil {
 					t.Fatal(err)
 				}
 			}

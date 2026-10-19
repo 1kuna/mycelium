@@ -217,7 +217,7 @@ func TestWireSchemas(t *testing.T) {
 		t.Fatal("Job/Spec schema drift: regenerate with MYCE_UPDATE_SCHEMAS=1 go test ./internal/myce -run '^TestWireSchemas$'")
 	}
 	schemas := map[string]*validate.Schema{}
-	for _, name := range []string{"job-v1.schema.json", "cancel-ack-v1.schema.json", "error-v1.schema.json", "host-envelope-v1.schema.json"} {
+	for _, name := range []string{"job-v1.schema.json", "cancel-ack-v1.schema.json", "error-v1.schema.json"} {
 		schemas[name] = compileWireSchema(t, name)
 	}
 	for name, value := range wireExamples(t) {
@@ -286,7 +286,7 @@ func TestWireSchemas(t *testing.T) {
 			t.Fatal(err)
 		}
 		prefix := strings.SplitN(filepath.Base(path), "-", 2)[0]
-		schemaName := map[string]string{"job": "job-v1.schema.json", "cancel": "cancel-ack-v1.schema.json", "error": "error-v1.schema.json", "host": "host-envelope-v1.schema.json"}[prefix]
+		schemaName := map[string]string{"job": "job-v1.schema.json", "cancel": "cancel-ack-v1.schema.json", "error": "error-v1.schema.json"}[prefix]
 		if schemaName == "" {
 			t.Fatalf("example has no schema: %s", path)
 		}
@@ -317,39 +317,6 @@ func TestWireSchemaRejectsMalformedReplies(t *testing.T) {
 			value[tc.field] = tc.value
 			if err := compileWireSchema(t, tc.schema).Validate(value); err == nil {
 				t.Fatal("malformed reply accepted")
-			}
-		})
-	}
-}
-
-func TestHostSchemaCloseBinding(t *testing.T) {
-	schema := compileWireSchema(t, "host-envelope-v1.schema.json")
-	for _, change := range []string{"missing-history", "null-history-confirmed", "settlement-mismatch", "accepted-rejection"} {
-		t.Run(change, func(t *testing.T) {
-			name := "host-closed-pass.json"
-			if change == "accepted-rejection" {
-				name = "host-revision-mismatch.json"
-			}
-			data, err := os.ReadFile(filepath.Join(schemaRoot, "examples", name))
-			if err != nil {
-				t.Fatal(err)
-			}
-			var value map[string]any
-			if err = json.Unmarshal(data, &value); err != nil {
-				t.Fatal(err)
-			}
-			switch change {
-			case "missing-history":
-				delete(value, "last_close")
-			case "null-history-confirmed":
-				value["last_close"] = nil
-			case "settlement-mismatch":
-				value["host_settlement"] = "pending"
-			case "accepted-rejection":
-				value["accepted_revision"] = 7.0
-			}
-			if err := schema.Validate(value); err == nil {
-				t.Fatal("invalid close binding accepted")
 			}
 		})
 	}

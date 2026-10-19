@@ -51,7 +51,7 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 	}
 	hostname, _ := os.Hostname()
 	values := myce.ServiceConfig{NAS: nasDefault, Queue: env("MYCE_QUEUE", "http://127.0.0.1:7331"), Name: hostname,
-		HostStateDir:    os.Getenv("MYCE_HOST_STATE_DIR"),
+
 		EnvironmentFile: filepath.Join(home, ".config", "myce", "fleet.env"), RequireMountedNAS: probe.OS == "linux",
 		Detection: myce.Detection{MemoryMode: "auto"}}
 	defaults := values
@@ -179,9 +179,6 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 			}
 		}
 		c.DockerEndpoint, c.EnvironmentFile, c.RequireMountedNAS = defaults.DockerEndpoint, defaults.EnvironmentFile, defaults.RequireMountedNAS
-		if defaults.HostStateDir != "" {
-			c.HostStateDir = defaults.HostStateDir
-		}
 		if path := os.Getenv("PATH"); path != "" {
 			c.Path = path
 		}
@@ -248,7 +245,7 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 	}
 	fmt.Printf("Command: myce %s\n", strings.Join(c.Args(), " "))
 	if c.Role == "worker" {
-		fmt.Println("Worker stays closed; reconcile and use myce host open explicitly.")
+		fmt.Println("Worker installed; queue maintenance controls admission.")
 	}
 	if *dry {
 		fmt.Println("Dry run: no files written, packages installed, or services changed.")
@@ -288,29 +285,6 @@ func serviceCommand(args []string) error {
 	}
 	if c.LocalDisableReceipts {
 		return myce.ErrLegacyLocalDisableReceipts
-	}
-	if c.Role == "worker" {
-		dir := c.HostStateDir
-		unit, err := myce.CurrentWorkerUnit()
-		if err != nil {
-			return err
-		}
-		if unit == "" && myce.ValidWorkerUnit(filepath.Base(c.Service)) {
-			unit = filepath.Base(c.Service)
-		}
-		if unit != "" {
-			if !myce.ValidWorkerUnit(unit) {
-				return errors.New("invalid worker unit")
-			}
-		}
-		reason, err := myce.HostDisabled(dir)
-		if err != nil {
-			return err
-		}
-		if reason != "" {
-			fmt.Println("Worker disabled by operator:", reason)
-			return nil
-		}
 	}
 	if c.EnvironmentFile != "" {
 		_, queue, err := myce.ReadFleetEnvironment(c.EnvironmentFile)

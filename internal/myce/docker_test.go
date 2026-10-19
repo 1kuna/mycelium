@@ -312,11 +312,9 @@ func dockerFixture(t *testing.T) (Worker, *workerStore, *dockerTestClock, string
 	t.Setenv("GORACE", "atexit_sleep_ms=0")
 	t.Setenv("MYCE_TEST_DOCKER_ROOT", root)
 	t.Setenv("MYCE_TOKEN", "must-not-leak")
-	hostDir := t.TempDir()
-	t.Setenv("MYCE_HOST_STATE_DIR", hostDir)
 	clock := &dockerTestClock{now: time.Date(2026, 10, 11, 0, 0, 0, 0, time.UTC)}
-	ensureTestHost(t, hostDir, clock)
-	w := Worker{DockerEndpoint: "unix:///fake.sock", Client: recoveryWorker(t).Client, HostStateDir: hostDir, Machine: dockerMachine("docker-worker", "fake"), StateDir: newTestStateRoot(t), Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return 32, nil }}
+
+	w := Worker{DockerEndpoint: "unix:///fake.sock", Client: recoveryWorker(t).Client, Machine: dockerMachine("docker-worker", "fake"), StateDir: newTestStateRoot(t), Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return 32, nil }}
 	s, e := w.openStore()
 	if e != nil {
 		t.Fatal(e)
@@ -628,7 +626,7 @@ func TestDockerWorkerPublishesUnconfirmedCleanupWhileDaemonHangs(t *testing.T) {
 	w.Client = Client{URL: server.URL, Token: "test"}
 	w.Interval = time.Millisecond
 	w.Machine.HostID = "docker-host"
-	testHostOpen(t, w.HostStateDir, c, "docker-host")
+
 	w.MemorySource = func(context.Context) (float64, error) { return 8, nil }
 	w.HostMemorySource = func(context.Context) (float64, error) { return 32, nil }
 	w.CheckpointRoot = q.root
@@ -1064,15 +1062,12 @@ func TestDockerOperatorResolutionIsOfflineAndExact(t *testing.T) {
 	if err := saveWorkerJSON(s.dir, "owned.docker.json", state); err != nil {
 		t.Fatal(err)
 	}
-	if err := closeTestHost(w.HostStateDir); err != nil {
-		t.Fatal(err)
-	}
-	if err := ReconcileDockerAttempt(context.Background(), w.HostStateDir, w.StateDir, "owned"); err == nil {
+	if err := ReconcileDockerAttempt(context.Background(), w.StateDir, "owned"); err == nil {
 		t.Fatal("accepted live worker lock")
 	}
 	s.close()
 	for _, id := range []string{"owned", "other", "../owned"} {
-		if err := ReconcileDockerAttempt(context.Background(), w.HostStateDir, w.StateDir, id); err == nil {
+		if err := ReconcileDockerAttempt(context.Background(), w.StateDir, id); err == nil {
 			t.Fatal("accepted unknown or wrong attempt")
 		}
 	}

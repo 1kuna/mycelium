@@ -14,7 +14,7 @@ func TestContainerRetentionInstallArgs(t *testing.T) {
 	zero := time.Duration(0)
 	c.ContainerRetention = &zero
 	args := strings.Join(c.Args(), " ")
-	if !strings.Contains(args, "--container-retention 0s") || !strings.Contains(args, "--service-config /config") {
+	if !strings.Contains(args, "--container-retention 0s") {
 		t.Fatal("installer dropped retention or config custody")
 	}
 	negative := -time.Second

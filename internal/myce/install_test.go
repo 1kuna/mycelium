@@ -96,11 +96,11 @@ func TestInstallAndUninstallTempOnly(t *testing.T) {
 	if e = Install(context.Background(), c, executable, "private-test-secret", runner); e != nil {
 		t.Fatal(e)
 	}
-	if len(commands) != 13 {
+	if len(commands) != 6 {
 		t.Fatal(commands)
 	}
-	if commands[5] != "systemctl --user is-active --quiet myce-host-reconcile.timer" {
-		t.Fatal("did not inspect prior timer state before activation", commands)
+	if commands[1] != "systemctl --user is-active --quiet myce-worker.service" {
+		t.Fatal("did not inspect prior worker state before activation", commands)
 	}
 	token, e := ReadServiceToken(c)
 	if e != nil || token != "private-test-secret" {
@@ -366,59 +366,6 @@ func TestInstallDeploymentNASAndUpgrade(t *testing.T) {
 	}
 }
 
-func TestInstallStartDisabledPreservesHostGate(t *testing.T) {
-	home := t.TempDir()
-	nas := filepath.Join(home, "nas")
-	os.Mkdir(nas, 0700)
-	c, _ := PlanInstall("worker", home, "", nas, "http://queue:7331", "card", Detection{OS: "linux", Arch: "amd64", Platform: "fake", MemoryMode: "fixed", MemoryGB: 2})
-	c.HostStateDir = filepath.Join(home, "host-control")
-	c.AllowDeviceless = true
-	c.StartDisabled = true
-	c.WorkerInstance("gpu0")
-	os.MkdirAll(c.HostStateDir, 0700)
-	initial, e := InitializeHostIntent(c.HostStateDir, c.HostID, RealClock{})
-	if e != nil {
-		t.Fatal(e)
-	}
-	executable := filepath.Join(home, "binary")
-	os.WriteFile(executable, []byte("test"), 0700)
-	runner := func(_ context.Context, n string, a ...string) ([]byte, error) {
-		text := strings.Join(a, " ")
-		if strings.HasSuffix(text, filepath.Base(c.Service)) && (strings.Contains(text, "enable --now") || strings.Contains(text, "restart ")) {
-			t.Fatal("started disabled worker")
-		}
-		if strings.Contains(text, "--property=UnitFileState") {
-			return []byte("disabled"), nil
-		}
-		if strings.Contains(text, "--property=DropInPaths") {
-			return nil, nil
-		}
-		if strings.Contains(text, "show ") {
-			return []byte("LoadState=loaded\nActiveState=inactive\nControlGroup=\nKillMode=control-group\nSendSIGKILL=yes\n"), nil
-		}
-		return nil, nil
-	}
-	if err := Install(context.Background(), c, executable, "test-token", runner); err != nil {
-		t.Fatal(err)
-	}
-	unitDir := c.HostStateDir
-	current, e := ReadHostIntent(unitDir)
-	if e != nil || current.Desired != "closed" || current.HostRevision != initial.HostRevision {
-		t.Fatal(current, e)
-	}
-	if current.Reason != initial.Reason || !current.AcceptedAt.Equal(initial.AcceptedAt) || !current.StopDeadline.Equal(*initial.StopDeadline) {
-		t.Fatal("install changed accepted close or renewed its deadline", current)
-	}
-	scoped := c
-	scoped.HostStateDir = unitDir
-	if err := (Worker{HostStateDir: unitDir}).Run(context.Background()); err != nil {
-		t.Fatal(err)
-	}
-	if err := Install(context.Background(), c, executable, "test-token", runner); err != nil {
-		t.Fatal("disabled rerun", err)
-	}
-}
-
 func TestInstallDeploymentDefaultUnitAndNASBoundary(t *testing.T) {
 	home := t.TempDir()
 	nas := filepath.Join(home, "nas")
@@ -494,7 +441,7 @@ func TestUserUnitLiteralPaths(t *testing.T) {
 			t.Fatal("worker device access/delegation changed")
 		}
 		for _, bad := range []string{" ", "\t", "'", "\"", "\\", "\n", "\r", "\u00a0"} {
-			for _, field := range []string{"environment", "config", "host"} {
+			for _, field := range []string{"environment", "config"} {
 				broken := c
 				switch field {
 				case "environment":
@@ -504,11 +451,6 @@ func TestUserUnitLiteralPaths(t *testing.T) {
 						continue
 					}
 					broken.Config = filepath.Join(filepath.Dir(c.Config)+bad, "config.json")
-				case "host":
-					if role == "queue" {
-						continue
-					}
-					broken.HostStateDir += bad
 				}
 				if err := broken.ValidateInstall(); err == nil {
 					t.Errorf("accepted unsafe %s path %q", field, bad)
@@ -556,7 +498,7 @@ func TestQueueLocalDisableReceiptsServiceArgs(t *testing.T) {
 	}
 	c.LocalDisableReceipts = true
 	c.HostID = "local-host"
-	c.HostStateDir = filepath.Join(t.TempDir(), "host-state")
+
 	if strings.Contains(strings.Join(c.Args(), " "), "--local-disable-receipts") || strings.Contains(c.ServiceText(), "--local-disable-receipts") {
 		t.Fatal("retired receipt option emitted")
 	}

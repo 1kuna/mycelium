@@ -93,8 +93,8 @@ func dockerRunArgs(command []string) ([]string, error) {
 
 // dockerExecution is durable custody, separate from the worker's heartbeat state.
 type dockerExecution struct {
-	CleanupCause       *RuntimeCause           `json:"cleanup_cause,omitempty"`
-	HostRevision       HostRevision            `json:"host_revision"`
+	CleanupCause *RuntimeCause `json:"cleanup_cause,omitempty"`
+
 	LogsNone           bool                    `json:"logs_none,omitempty"`
 	Owner              *Result                 `json:"owner,omitempty"` // Saved job/attempt/machine/session binding; legacy custody uses opaque identity.
 	EvidenceSaved      bool                    `json:"evidence_saved,omitempty"`
@@ -127,24 +127,23 @@ type dockerExecution struct {
 	ExitCode           int                     `json:"exit_code"`
 }
 type dockerAttempt struct {
-	command      func(context.Context, ...string) ([]byte, error) // Injectable daemon boundary.
-	persist      func(dockerExecution) error                      // Optional custody store for fault injection.
-	admit        func() error
-	dirty        bool
-	closed       chan struct{}
-	halt         chan struct{}
-	haltOnce     sync.Once
-	mu           sync.Mutex
-	state        dockerExecution
-	dir, binary  string
-	hostDir      string
-	hostRevision HostRevision
-	ctx          context.Context
-	inventory    func([]string)
-	workdir      string
-	env          []string
-	clock        Clock
-	timeout      time.Duration
+	command     func(context.Context, ...string) ([]byte, error) // Injectable daemon boundary.
+	persist     func(dockerExecution) error                      // Optional custody store for fault injection.
+	admit       func() error
+	dirty       bool
+	closed      chan struct{}
+	halt        chan struct{}
+	haltOnce    sync.Once
+	mu          sync.Mutex
+	state       dockerExecution
+	dir, binary string
+
+	ctx       context.Context
+	inventory func([]string)
+	workdir   string
+	env       []string
+	clock     Clock
+	timeout   time.Duration
 }
 
 func (d *dockerAttempt) saveLocked() error {
@@ -248,17 +247,6 @@ func (d *dockerAttempt) callWithTimeout(timeout time.Duration, args ...string) (
 	return out, err
 }
 func (d *dockerAttempt) operation(kind string, args ...string) ([]byte, error) {
-	if d.hostRevision.Revision == 0 {
-		if err := bindHostRevision(d.hostDir, &d.hostRevision); err != nil {
-			return nil, err
-		}
-	}
-	unlock, err := hostLaunchGate(d.hostDir, d.hostRevision)
-	if err != nil {
-		d.stop(d.clock.Now(), 0, true)
-		return nil, err
-	}
-	defer unlock()
 	if d.admit != nil {
 		if err := d.admit(); err != nil {
 			d.stop(d.clock.Now(), 0, true)
@@ -283,13 +271,9 @@ func (d *dockerAttempt) operation(kind string, args ...string) ([]byte, error) {
 	}
 	at := d.clock.Now().UTC()
 	d.state.DispatchedAt = &at
-	err = d.saveLocked()
+	err := d.saveLocked()
 	d.mu.Unlock()
 	if err != nil {
-		return nil, err
-	}
-	if err := CheckHostRevision(d.hostDir, d.hostRevision); err != nil {
-		d.stop(d.clock.Now(), 0, true)
 		return nil, err
 	}
 	out, err := d.call(args...)
@@ -462,7 +446,7 @@ func (d *dockerAttempt) reconcile() (done bool, err error) {
 			if d.state.PendingName != "" && c.Name == "/"+d.state.PendingName {
 				d.state.Pending, pending = false, false
 				d.state.Error = ""
-				if err = d.saveLocked(); err != nil {
+				if err := d.saveLocked(); err != nil {
 					d.mu.Unlock()
 					return false, err
 				}
@@ -479,7 +463,7 @@ func (d *dockerAttempt) reconcile() (done bool, err error) {
 				d.state.InfrastructureStop = true
 				d.state.Forced = true
 				d.state.Error = ""
-				if err = d.saveLocked(); err != nil && !killDue {
+				if err := d.saveLocked(); err != nil && !killDue {
 					d.mu.Unlock()
 					return false, err
 				}
@@ -493,7 +477,7 @@ func (d *dockerAttempt) reconcile() (done bool, err error) {
 	if (pending || (stopped && d.state.StopAt != nil && !d.clock.Now().Before(*d.state.StopAt))) && !forced {
 		d.state.Forced = true
 		forced = true
-		if err = d.saveLocked(); err != nil && !killDue {
+		if err := d.saveLocked(); err != nil && !killDue {
 			d.mu.Unlock()
 			return false, err
 		}
@@ -511,7 +495,7 @@ func (d *dockerAttempt) reconcile() (done bool, err error) {
 		if limit > 0 && (c.HostConfig.Memory != limit || (swap > 0 && c.HostConfig.MemorySwap != swap)) {
 			d.mu.Lock()
 			d.state.MemoryFailure = "Docker memory ceiling not enforced"
-			err = d.saveLocked()
+			err := d.saveLocked()
 			d.mu.Unlock()
 			if err != nil && !killDue {
 				return false, err
@@ -716,11 +700,6 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 	if w.DockerEndpoint == "" {
 		return nil, errors.New("Docker runtime disabled; configure --docker-host to run image jobs")
 	}
-	unlock, err := hostLaunchGate(w.HostStateDir, w.hostRevision)
-	if err != nil {
-		return nil, err
-	}
-	defer unlock()
 	if err := w.checkHostMemoryBudget(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB); err != nil {
 		return nil, err
 	}
@@ -755,7 +734,7 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 	if os.Getenv("DOCKER_CONTEXT") != "" {
 		return nil, errors.New("managed Docker requires --docker-host, not DOCKER_CONTEXT")
 	}
-	d := &dockerAttempt{admit: func() error { return w.checkHostMemoryBudget(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) }, closed: make(chan struct{}), halt: make(chan struct{}), dir: s.dir, hostDir: w.HostStateDir, hostRevision: w.hostRevision, workdir: j.Spec.Run.Workdir, binary: binary, clock: w.Clock, timeout: w.dockerCallTimeout, state: dockerExecution{HostRevision: w.hostRevision, Identity: identity, Endpoint: endpoint, MemoryLimitBytes: ceilingBytes, MemorySwapBytes: 0}}
+	d := &dockerAttempt{admit: func() error { return w.checkHostMemoryBudget(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) }, closed: make(chan struct{}), halt: make(chan struct{}), dir: s.dir, workdir: j.Spec.Run.Workdir, binary: binary, clock: w.Clock, timeout: w.dockerCallTimeout, state: dockerExecution{Identity: identity, Endpoint: endpoint, MemoryLimitBytes: ceilingBytes, MemorySwapBytes: 0}}
 	d.state.Owner = &Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
 	d.state.LogsNone = j.Spec.Logs == "none"
 	if j.Spec.Run.DockerNetwork == "private" {
@@ -1095,37 +1074,17 @@ func (w Worker) restoreDocker(s *workerStore) (*process, error) {
 }
 
 // ReconcileDockerAttempt never replaces unknown disposition with an assertion.
-func ReconcileDockerAttempt(ctx context.Context, hostDir, dir, identity string) error {
+func ReconcileDockerAttempt(ctx context.Context, dir, identity string) error {
 	if os.Geteuid() == 0 {
 		return ErrHostIdentity
 	}
 	if dir == "" || identity == "" || filepath.Base(identity) != identity {
 		return errors.New("resolve-docker requires exact worker state and attempt identity")
 	}
-	if hostDir == "" {
-		var err error
-		hostDir, err = HostStateDirectory()
-		if err != nil {
-			return err
-		}
-	}
-	roots, err := (Worker{StateDir: dir, HostStateDir: hostDir}).StateRoots()
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if err := CheckStateRoots(roots...); err != nil {
-		return err
-	}
-	unlock, err := hostOperationLockContext(ctx, hostDir, "reconcile.lock")
-	if err != nil {
-		return err
-	}
-	defer unlock()
-	intent, err := ReadHostIntent(hostDir)
-	if err != nil || intent.Desired != "closed" {
-		return errors.New("Docker reconciliation requires a closed host")
-	}
-	store, err := (Worker{StateDir: dir, HostStateDir: hostDir}).openStore()
+	store, err := (Worker{StateDir: dir}).openStore()
 	if err != nil {
 		return err
 	}
@@ -1133,7 +1092,7 @@ func ReconcileDockerAttempt(ctx context.Context, hostDir, dir, identity string) 
 	if store.state.Identity != identity || store.state.Job == nil || !store.state.Job.Spec.Run.Docker {
 		return errors.New("Docker attempt does not match current worker custody")
 	}
-	b, err := readHostRegular(filepath.Join(dir, identity+".docker.json"), uint32(os.Geteuid()), 1<<20)
+	b, err := os.ReadFile(filepath.Join(dir, identity+".docker.json"))
 	if err != nil {
 		return err
 	}
@@ -1142,7 +1101,7 @@ func ReconcileDockerAttempt(ctx context.Context, hostDir, dir, identity string) 
 		return errors.New("invalid Docker custody record")
 	}
 	d := &dockerAttempt{ctx: ctx, dir: dir, binary: "docker", clock: RealClock{}, timeout: 2 * time.Second, state: state, env: dockerClientEnvironment()}
-	d.stop(d.clock.Now(), hostDisableGrace(hostDir, d.clock), false)
+	d.stop(d.clock.Now(), StopGrace, false)
 	released, err := d.reconcile()
 	if err != nil {
 		return err

@@ -168,11 +168,6 @@ func (m installManager) activity(ctx context.Context, u installUnit, active bool
 
 func installUnitPaths(c ServiceConfig) []string {
 	paths := []string{c.Service}
-	if c.Detection.OS == "linux" && c.Role == "worker" {
-		for _, name := range []string{"myce-host-reconcile.service", "myce-host-reconcile.timer"} {
-			paths = append(paths, filepath.Join(filepath.Dir(c.Service), name))
-		}
-	}
 	return paths
 }
 func snapshotInstall(ctx context.Context, c ServiceConfig, files installFiles, command func(context.Context, string, ...string) ([]byte, error), extraPaths ...string) (*installTransaction, error) {
@@ -242,7 +237,7 @@ func (tx *installTransaction) restore(ctx context.Context) error {
 		return nil
 	}
 	// A failed recovery never opens admission or leaves an attempted activation
-	// running on uncertain artifacts. Worker intent was checked CLOSED on entry.
+	// running on uncertain artifacts. Queue policy controls admission independently.
 	for _, u := range tx.units {
 		if err := tx.manager.stop(recovery, u); err != nil {
 			result = errors.Join(result, fmt.Errorf("%s keep stopped: %w", u.name(), err))
@@ -254,7 +249,7 @@ func (tx *installTransaction) restore(ctx context.Context) error {
 	if len(differences) > 0 {
 		detail = strings.Join(differences, "; ")
 	}
-	return fmt.Errorf("install rollback incomplete; keep host closed; snapshot differences: %s: %w", detail, errors.Join(result, errors.New("snapshot restoration failed")))
+	return fmt.Errorf("install rollback incomplete; keep affected services stopped; snapshot differences: %s: %w", detail, errors.Join(result, errors.New("snapshot restoration failed")))
 }
 func (tx *installTransaction) differences(ctx context.Context) []string {
 	var differences []string

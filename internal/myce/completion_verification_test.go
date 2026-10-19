@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
+
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,9 +16,9 @@ import (
 )
 
 func TestCompletionVerificationDoesNotHoldQueueLock(t *testing.T) {
-	for _, fence := range []string{"cancel", "close", "interrupt", "request-cancel", "accept"} {
+	for _, fence := range []string{"cancel", "maintenance", "interrupt", "request-cancel", "accept"} {
 		t.Run(fence, func(t *testing.T) {
-			q, clock := fixture(t)
+			q, _ := fixture(t)
 			if err := q.ConfigureFileStore(t.TempDir(), 1<<20, true); err != nil {
 				t.Fatal(err)
 			}
@@ -91,14 +91,10 @@ func TestCompletionVerificationDoesNotHoldQueueLock(t *testing.T) {
 					t.Fatalf("%s blocked behind output verification", name)
 				}
 			}
-			progress("other host discharge", func() error {
-				c := closeExchange(b.HostID, clock)
-				c.Sessions = []HostSession{{Machine: b.ID, Session: b.Session}}
-				ack, err := q.ReconcileHost(c)
-				if err == nil && len(ack.Pending) != 0 {
-					return fmt.Errorf("discharge still pending: %v", ack.Pending)
-				}
-				return err
+			progress("other host exact release", func() error {
+				r := result(other, false)
+				r.ReleaseOnly = true
+				return q.Complete(r)
 			})
 			progress("cancellation", func() error { return q.Cancel(other.ID) })
 			progress("check-in", func() error {
@@ -108,11 +104,9 @@ func TestCompletionVerificationDoesNotHoldQueueLock(t *testing.T) {
 			switch fence {
 			case "cancel":
 				progress("publisher cancellation", func() error { return q.Cancel(publishing.ID) })
-			case "close":
-				progress("publisher close", func() error {
-					c := closeExchange(a.HostID, clock)
-					c.Sessions = []HostSession{{Machine: a.ID, Session: a.Session}}
-					_, err := q.ReconcileHost(c)
+			case "maintenance":
+				progress("publisher maintenance", func() error {
+					_, err := q.ChangeHostMaintenance(a.HostID, HostMaintenanceRequest{Action: "disable", Stop: true})
 					return err
 				})
 			case "request-cancel":
@@ -151,9 +145,20 @@ func TestCompletionVerificationDoesNotHoldQueueLock(t *testing.T) {
 			}
 			// Neither the stale replay nor the cancellation acknowledgement may
 			// enter the verifier again (its injected barrier is single-use).
-			if fence == "close" || fence == "interrupt" {
+			if fence == "maintenance" {
+				// A verified completion fenced by maintenance is still an exact
+				// stop acknowledgement on replay; it releases and requeues without
+				// publishing the rejected outputs or entering verification again.
+				if err := q.Complete(r); err != nil {
+					t.Fatalf("maintenance stop acknowledgement: %v", err)
+				}
+				got = job(t, q, publishing.ID)
+				if got.State != "queued" || !got.ReleaseConfirmed || len(got.OutputRefs) != 0 {
+					t.Fatal("maintenance stop did not retain retry and exact release", got)
+				}
+			} else if fence == "interrupt" {
 				if err := q.Complete(r); !errors.Is(err, ErrStale) {
-					t.Fatalf("closed attempt replay: %v", err)
+					t.Fatalf("stopped attempt replay: %v", err)
 				}
 			} else if fence == "cancel" {
 				if err := q.Complete(r); err != nil {

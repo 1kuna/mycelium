@@ -12,7 +12,7 @@ import (
 
 func TestStatusFullIDsAndOneBasedAttempts(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"machines":[{"id":"b70-gpu1","disabled":"host closed"}],"jobs":[{"id":"12345678abcdef","state":"running","attempt":1,"spec":{"name":"work","priority":"production"}},{"id":"abcdefgh123456","state":"queued","attempt":0,"spec":{"name":"waiting","priority":"experiment"}}]}`)
+		fmt.Fprint(w, `{"machines":[{"id":"b70-gpu1","disabled":"planned host maintenance"}],"jobs":[{"id":"12345678abcdef","state":"running","attempt":1,"spec":{"name":"work","priority":"production"}},{"id":"abcdefgh123456","state":"queued","attempt":0,"spec":{"name":"waiting","priority":"experiment"}}]}`)
 	}))
 	defer server.Close()
 	saved := os.Stdout

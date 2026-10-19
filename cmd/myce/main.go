@@ -41,11 +41,8 @@ func run(args []string) error {
 	return runWithProbe(args, myce.LocalMachineProbe())
 }
 func runWithProbe(args []string, probe myce.MachineProbe) error {
-	if err := myce.CheckRootCommand(args, os.Geteuid()); err != nil {
+	if err := myce.GuardRootStartup(); err != nil {
 		return err
-	}
-	if len(args) == 1 && args[0] == "_host-worker-mutation" {
-		return myce.HostWorkerChildEntry(context.Background(), os.Stdin, os.Stdout, myce.LocalHostIdentityResolver(), hostMutationExecutor(probe).Execute)
 	}
 	if len(args) > 0 && args[0] == "_command-exec" {
 		return myce.CommandExec(args[1:])
@@ -53,17 +50,6 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 
 	if len(args) == 0 {
 		return errors.New("usage: myce queue|join|leave|host|submit|policy|status|logs|wait|cancel|resolve-docker|dev")
-	}
-	if args[0] == "_host-start-check" {
-		f := flag.NewFlagSet("_host-start-check", flag.ContinueOnError)
-		dir := f.String("host-state-dir", "", "shared host state")
-		if err := f.Parse(args[1:]); err != nil {
-			return err
-		}
-		if f.NArg() != 0 {
-			return errors.New("unexpected start-check arguments")
-		}
-		return myce.CheckHostRevision(*dir, myce.HostRevision{})
 	}
 	if args[0] == "dev" && len(args) > 1 && args[1] == "clock" {
 		return devClockCommand(args[2:], os.Stdout)
@@ -83,21 +69,14 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if args[0] == "extension" {
 		return extensionCommand(args[1:])
 	}
-	if args[0] == "host" && len(args) > 1 {
-		if args[1] == "drain" || args[1] == "disable" || args[1] == "resume" || args[1] == "budget" || args[1] == "status" && !containsLocalFlag(args[2:]) {
-			return hostMaintenanceCommand(context.Background(), args[1:], os.Stdout)
-		}
-		return hostLocalCommand(args[1:], probe, os.Stdout)
-	}
-	if args[0] == "host-memory-budget" {
-		return hostMemoryBudgetCommand(args[1:])
+	if args[0] == "host" {
+		return hostMaintenanceCommand(context.Background(), args[1:], os.Stdout)
 	}
 	if args[0] == "resolve-docker" {
-		return resolveDockerCommand(args[1:], probe, myce.LocalHostIdentityResolver(), nil)
+		return resolveDockerCommand(args[1:])
 	}
-
 	if args[0] == "disable" || args[0] == "enable" {
-		return errors.New("retired host control; use myce host close|open --local")
+		return errors.New("retired host control; use myce host drain|disable|resume HOST")
 	}
 	if args[0] == "sim" {
 		return simCommand(args[1:], os.Stdout)
@@ -192,8 +171,6 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	deadlineLoss := f.Duration("deadline-loss-timeout", myce.DeadlineLossAfter, "quiet timeout for deadline work")
 	experimentLoss := f.Duration("experiment-loss-timeout", myce.LossAfter, "quiet timeout for experiment work")
 	restartGrace := f.Duration("restart-grace", myce.RestartGrace, "worker recovery grace after queue restart")
-	hostStateDir := f.String("host-state-dir", "", "shared local host control directory")
-	serviceConfig := f.String("service-config", "", "installed worker configuration path")
 	stateDir := f.String("state-dir", "", "durable local worker spool directory")
 	hostname, _ := os.Hostname()
 	name := f.String("name", hostname, "unique machine name")
@@ -247,14 +224,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 				return errors.New("invalid worker unit")
 			}
 		}
-		reason, e := myce.HostDisabled(*hostStateDir)
-		if e != nil {
-			return e
-		}
-		if reason != "" {
-			fmt.Println("Worker disabled by operator:", reason)
-			return nil
-		}
+
 	}
 	var invitation *myce.Invitation
 	if *joiningFile != "" {
@@ -317,7 +287,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if e != nil {
 			return e
 		}
-		d, err := myce.StartDev(myce.DevConfig{ProductionInfrastructureRetries: productionRetries, FileStore: *fileStore, FileStoreLimit: *fileStoreLimit, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, HostStateDir: *hostStateDir, HostPolicies: hosts, HostID: *hostID, ProjectPolicies: policies, EnvironmentConfig: ec, ModelConfig: mc, Address: *address, Database: *db, Checkpoints: *checkpoint, Token: *token, GPU: *gpu, Environments: split(*environments), Models: split(*models), Workers: *workers, MemoryGB: *memory})
+		d, err := myce.StartDev(myce.DevConfig{ProductionInfrastructureRetries: productionRetries, FileStore: *fileStore, FileStoreLimit: *fileStoreLimit, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, HostPolicies: hosts, HostID: *hostID, ProjectPolicies: policies, EnvironmentConfig: ec, ModelConfig: mc, Address: *address, Database: *db, Checkpoints: *checkpoint, Token: *token, GPU: *gpu, Environments: split(*environments), Models: split(*models), Workers: *workers, MemoryGB: *memory})
 		if err != nil {
 			return err
 		}
@@ -335,15 +305,8 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if err := myce.CheckQueueGPUDescriptors(); err != nil {
 			return err
 		}
-		hostRoot := *hostStateDir
-		if hostRoot == "" {
-			var err error
-			hostRoot, err = myce.HostStateDirectory()
-			if err != nil {
-				return err
-			}
-		}
-		if err := myce.PrepareStateRoots(myce.QueueStateRoots(*db, hostRoot, *uploadSpoolDir, *fileStore, *identityDir, *discovery)...); err != nil {
+
+		if err := myce.PrepareStateRoots(myce.QueueStateRoots(*db, *uploadSpoolDir, *fileStore, *identityDir, *discovery)...); err != nil {
 			return err
 		}
 
@@ -415,22 +378,6 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			return err
 		}
 
-		endpoint := "http://" + listener.Addr().String()
-		// Match the configured worker endpoint, which may name this listener
-		// through a hostname rather than its wildcard/bind address.
-		explicitQueue := os.Getenv("MYCE_QUEUE") != ""
-		f.Visit(func(value *flag.Flag) {
-			if value.Name == "queue" {
-				explicitQueue = true
-			}
-		})
-		if explicitQueue {
-			endpoint = *url
-		}
-		if err = q.ConfigureLocalHost(*hostStateDir, endpoint); err != nil {
-			listener.Close()
-			return err
-		}
 		if err = q.Tick(); err != nil {
 			listener.Close()
 			return err
@@ -549,7 +496,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 				return err
 			}
 		}
-		w := myce.Worker{OnboardingBenchmark: *onboardingBenchmark, Benchmark: myce.RunOnboardingBenchmark, FileCacheRoot: *fileCache, FileCacheLimit: *fileCacheLimit, DailyUse: *dailyUse, Laptop: *laptop, Desktop: *desktop, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, DockerEndpoint: *dockerHost, ServiceConfig: *serviceConfig, ContainerRetention: containerRetention, RequireMemoryCeilings: *requireCeilings, MemorySwapMaxBytes: *memorySwap, LogRetention: *logRetention, Unit: workerUnit, SuperviseProcess: true, HostStateDir: *hostStateDir, ResumeCommand: safeJoinCommand(args), HostMemorySource: hostSource, DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, SecretRoot: *secretRoot, ModelApprovalRoot: *modelApprovalRoot, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{MaxJobs: *maxJobs, HostMemoryBudgetGB: *hostBudget, MemoryCeilingSlackGB: *memorySlack, HostID: *hostID, UnifiedMemory: unified, HostMemoryMeasured: true, ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
+		w := myce.Worker{OnboardingBenchmark: *onboardingBenchmark, Benchmark: myce.RunOnboardingBenchmark, FileCacheRoot: *fileCache, FileCacheLimit: *fileCacheLimit, DailyUse: *dailyUse, Laptop: *laptop, Desktop: *desktop, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, DockerEndpoint: *dockerHost, ContainerRetention: containerRetention, RequireMemoryCeilings: *requireCeilings, MemorySwapMaxBytes: *memorySwap, LogRetention: *logRetention, Unit: workerUnit, SuperviseProcess: true, HostMemorySource: hostSource, DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, SecretRoot: *secretRoot, ModelApprovalRoot: *modelApprovalRoot, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{MaxJobs: *maxJobs, HostMemoryBudgetGB: *hostBudget, MemoryCeilingSlackGB: *memorySlack, HostID: *hostID, UnifiedMemory: unified, HostMemoryMeasured: true, ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
 		fmt.Printf("Joining as %s\n", w)
 		return w.Run(ctx)
 	case "submit":

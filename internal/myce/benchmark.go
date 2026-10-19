@@ -54,11 +54,10 @@ func (b *BenchmarkResult) Summary() string {
 func validRate(v float64) bool { return v > 0 && !math.IsNaN(v) && !math.IsInf(v, 0) }
 
 type BenchmarkConfig struct {
-	Clock                     Clock
-	Machine                   Machine
-	StateDir, ExtensionRoot   string
-	HostStateDir              string
-	hostRevision              HostRevision
+	Clock                   Clock
+	Machine                 Machine
+	StateDir, ExtensionRoot string
+
 	Client                    Client
 	DailyUse, Laptop, Desktop bool
 	OwnerSignals              OwnerSignalSource
@@ -71,30 +70,20 @@ type BenchmarkConfig struct {
 // A repeat on unchanged hardware, drivers, extensions and store reuses results.
 func RunOnboardingBenchmark(ctx context.Context, c BenchmarkConfig, p *CapabilityProfile) error {
 	var err error
-	c.HostStateDir, err = hostRoot(c.HostStateDir)
-	if err != nil {
-		return err
-	}
-	if err = bindHostRevision(c.HostStateDir, &c.hostRevision); err != nil {
-		return err
-	}
 	if c.Clock == nil {
 		c.Clock = RealClock{}
 	}
 	if c.OwnerSignals == nil {
 		c.OwnerSignals = LocalOwnerSignals
 	}
-	if err := PrepareStateRoots(c.StateDir, c.HostStateDir); err != nil {
+	if err := PrepareStateRoots(c.StateDir); err != nil {
 		return err
 	}
-	lockDir := c.HostStateDir
-	if lockDir == "" {
-		lockDir = c.StateDir
-	}
+	lockDir := c.StateDir
 	if err := os.MkdirAll(lockDir, 0700); err != nil {
 		return err
 	}
-	unlock, err := hostOperationLock(lockDir, "benchmark.lock", false)
+	unlock, err := commandLock(lockDir, "benchmark.lock", false)
 	if err != nil {
 		return err
 	}
@@ -166,7 +155,7 @@ func RunOnboardingBenchmark(ctx context.Context, c BenchmarkConfig, p *Capabilit
 			case <-work.Done():
 				return
 			case <-tick.C:
-				if !monitor.snapshot().Available || CheckHostRevision(c.HostStateDir, c.hostRevision) != nil {
+				if !monitor.snapshot().Available {
 					cancelWork()
 					return
 				}
@@ -181,7 +170,7 @@ func RunOnboardingBenchmark(ctx context.Context, c BenchmarkConfig, p *Capabilit
 		}
 	}
 	for _, resource := range []string{"cpu", "memory", "disk", "network", "accelerator"} {
-		if work.Err() != nil || CheckHostRevision(c.HostStateDir, c.hostRevision) != nil {
+		if work.Err() != nil {
 			result.Measurements = append(result.Measurements, Throughput{Resource: resource, Reason: "benchmark interrupted; retry on next join"})
 			continue
 		}
@@ -364,7 +353,7 @@ func measureReferences(ctx context.Context, c BenchmarkConfig, extensions []Exte
 				env["MYCE_CHECK_OUTPUT"] = filepath.Join(tmp, "actual")
 				env["MYCE_CHECK_WORK"] = r.Work
 				env["MYCE_BENCHMARK_OUTPUT"] = filepath.Join(tmp, "timing.json")
-				if err = runExtensionCommand(ctx, e.Benchmark, env["MYCE_EXTENSION_DIR"], env, io.Discard, hostCommandScope{HostDir: c.HostStateDir, StateDir: c.StateDir, Revision: c.hostRevision, Clock: c.Clock}); err != nil {
+				if err = runExtensionCommand(ctx, e.Benchmark, env["MYCE_EXTENSION_DIR"], env, io.Discard, commandScope{StateDir: c.StateDir, Clock: c.Clock}); err != nil {
 					return err
 				}
 				data, err := os.ReadFile(env["MYCE_CHECK_OUTPUT"])

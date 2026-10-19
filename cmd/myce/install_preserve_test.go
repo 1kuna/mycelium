@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
-	"os/exec"
+
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -31,7 +31,7 @@ func savedInstallFixture(t *testing.T, roles ...string) (myce.ServiceConfig, myc
 		f := v.Field(i)
 		name := v.Type().Field(i).Name
 		switch name {
-		case "Version", "Force", "LocalDisableReceipts", "PrivateDevices", "RequireMemoryCeilings", "StartDisabled", "Detection", "Role", "Config", "Binary", "Credentials", "State", "Service", "HostID", "Name", "Queue", "NAS":
+		case "Version", "Force", "LocalDisableReceipts", "PrivateDevices", "RequireMemoryCeilings", "Detection", "Role", "Config", "Binary", "Credentials", "State", "Service", "HostID", "Name", "Queue", "NAS":
 			continue
 		}
 		switch f.Kind() {
@@ -65,7 +65,7 @@ func savedInstallFixture(t *testing.T, roles ...string) (myce.ServiceConfig, myc
 	c.HostID = "fixture-host"
 	if role == "worker" {
 		c.RequireMemoryCeilings = true
-		c.StartDisabled = true
+
 		c.WorkerUser = "fixture-worker"
 		c.WorkerHome = home
 		c.Device = "selected-device"
@@ -73,7 +73,7 @@ func savedInstallFixture(t *testing.T, roles ...string) (myce.ServiceConfig, myc
 	c.RequireMountedNAS = false
 	c.EnvironmentFile = "" // synthetic credential file; no real fleet file is read
 	c.JoiningFile = ""
-	c.RequiredWorkers = []string{"fixture-one", "fixture-two"}
+
 	retention := 3 * time.Hour
 	c.ContainerRetention = &retention
 	os.MkdirAll(filepath.Dir(c.Config), 0700)
@@ -97,9 +97,6 @@ func TestInstallPreservesEveryConfigField(t *testing.T) {
 				c.JoiningFile = filepath.Join(c.NAS, "private-invitation.json")
 				invitation := myce.Invitation{Version: 1, Fingerprint: strings.Repeat("ab", 32), Token: "synthetic-install-fixture", Address: "https://queue.invalid"}
 				if err := myce.WriteInvitation(c.JoiningFile, invitation); err != nil {
-					t.Fatal(err)
-				}
-				if _, err := myce.InitializeHostIntent(c.HostStateDir, c.HostID, myce.RealClock{}); err != nil {
 					t.Fatal(err)
 				}
 			} else {
@@ -188,11 +185,8 @@ func TestInstallExplicitQueueNASName(t *testing.T) {
 
 func TestInstallWorkerExplicitOverlayAndIdentity(t *testing.T) {
 	c, p := savedInstallFixture(t, "worker")
-	if _, err := myce.InitializeHostIntent(c.HostStateDir, c.HostID, myce.RealClock{}); err != nil {
-		t.Fatal(err)
-	}
 	checkpoint := filepath.Join(c.NAS, "new-checkpoints")
-	args := []string{"install", "worker", "--config", c.Config, "--memory-gb=7", "--reserve-memory-gb=0", "--container-retention=0", "--require-memory-ceilings=false", "--start-disabled=false", "--checkpoint-root", checkpoint}
+	args := []string{"install", "worker", "--config", c.Config, "--memory-gb=7", "--reserve-memory-gb=0", "--container-retention=0", "--require-memory-ceilings=false", "--checkpoint-root", checkpoint}
 	if err := setupCommandWithProbe(args, p, c.NAS); err != nil {
 		t.Fatal(err)
 	}
@@ -200,43 +194,13 @@ func TestInstallWorkerExplicitOverlayAndIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Detection.MemoryGB != 7 || got.Detection.ReserveGB != 0 || got.ContainerRetention == nil || *got.ContainerRetention != 0 || got.RequireMemoryCeilings || got.StartDisabled || got.Checkpoints != checkpoint {
+	if got.Detection.MemoryGB != 7 || got.Detection.ReserveGB != 0 || got.ContainerRetention == nil || *got.ContainerRetention != 0 || got.RequireMemoryCeilings || got.Checkpoints != checkpoint {
 		t.Fatal("worker explicit overlay ignored")
 	}
-	for _, flag := range []string{"--state-dir", "--host-state-dir", "--host-id", "--device"} {
+	for _, flag := range []string{"--state-dir", "--host-id", "--device"} {
 		if err = setupCommandWithProbe([]string{"install", "worker", "--config", c.Config, flag, "different"}, p, c.NAS); err == nil {
 			t.Fatal("changed immutable identity", flag)
 		}
-	}
-}
-
-func TestInstallProductionServiceEntryStaysClosed(t *testing.T) {
-	binary := filepath.Join(t.TempDir(), "myce")
-	if out, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
-		t.Fatalf("build: %v, output bytes=%d", err, len(out))
-	}
-	c, p := savedInstallFixture(t, "worker")
-	// Missing credentials are intentional: a closed service must exit before
-	// reading any secret or attempting discovery, GPU access or queue admission.
-	c.EnvironmentFile = filepath.Join(c.NAS, "absent-private-reference")
-	data, _ := json.Marshal(c)
-	os.WriteFile(c.Config, data, 0600)
-	if _, err := myce.InitializeHostIntent(c.HostStateDir, c.HostID, myce.RealClock{}); err != nil {
-		t.Fatal(err)
-	}
-	if err := myce.Install(context.Background(), c, binary, "", p.Command); err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, c.Binary, "service", "--config", c.Config)
-	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=" + c.NAS}
-	out, err := cmd.CombinedOutput()
-	if err != nil || !strings.Contains(string(out), "Worker disabled by operator") {
-		t.Fatalf("closed service entry failed: %v, output bytes=%d", err, len(out))
-	}
-	if reason, err := myce.HostDisabled(c.HostStateDir); err != nil || reason == "" {
-		t.Fatal("service entry opened host", err)
 	}
 }
 
@@ -328,7 +292,7 @@ func TestInstallOmittedEmptyEnvironmentRoot(t *testing.T) {
 }
 
 func TestInstallFreshEmptyRequiredValuesAreUsageErrors(t *testing.T) {
-	for _, name := range []string{"nas", "queue", "name", "state-dir", "host-state-dir", "config", "environment-file"} {
+	for _, name := range []string{"nas", "queue", "name", "state-dir", "config", "environment-file"} {
 		t.Run(name, func(t *testing.T) {
 			home := currentTestStateRoot(t)
 			probe := myce.MachineProbe{OS: "linux", Arch: "amd64", Command: func(context.Context, string, ...string) ([]byte, error) {

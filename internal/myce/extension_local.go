@@ -278,7 +278,7 @@ func LocalExtensionReports(root, platform, fingerprint string) []ExtensionReport
 	}
 	return out
 }
-func runExtensionCommand(ctx context.Context, args []string, dir string, env map[string]string, log io.Writer, scopes ...hostCommandScope) error {
+func runExtensionCommand(ctx context.Context, args []string, dir string, env map[string]string, log io.Writer, scopes ...commandScope) error {
 	if len(args) == 0 {
 		return nil
 	}
@@ -293,7 +293,7 @@ func runExtensionCommand(ctx context.Context, args []string, dir string, env map
 			break
 		}
 	}
-	scope := hostCommandScope{}
+	scope := commandScope{StateDir: filepath.Join(dir, ".myce-commands")}
 	if len(scopes) > 0 {
 		scope = scopes[0]
 	}
@@ -301,7 +301,7 @@ func runExtensionCommand(ctx context.Context, args []string, dir string, env map
 		return err
 	}
 	argv := append([]string{command}, args[1:]...)
-	return runRecordedHostCommand(ctx, argv, dir, cleanExtensionEnv(env), log, scope, "attempt-command-"+ID()+".json")
+	return runRecordedCommand(ctx, argv, dir, cleanExtensionEnv(env), log, scope, "attempt-command-"+ID()+".json")
 }
 
 // Setup/check are explicit local operations, never background services. Their

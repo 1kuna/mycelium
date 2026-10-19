@@ -41,15 +41,14 @@ type Worker struct {
 	memoryCeilings        *memoryCeilings
 	MemorySwapMaxBytes    int64
 	DockerEndpoint        string
-	ServiceConfig         string
-	ContainerRetention    *time.Duration
-	LogRetention          time.Duration
-	dockerCallTimeout     time.Duration
-	Unit                  string
-	hostRevision          HostRevision
-	HostStateDir          string
-	SuperviseProcess      bool
-	ResumeCommand         []string
+
+	ContainerRetention *time.Duration
+	LogRetention       time.Duration
+	dockerCallTimeout  time.Duration
+	Unit               string
+
+	SuperviseProcess bool
+
 	checkpointPrepare     func(Job) (string, error) // Filesystem fault seam.
 	control               *processControl
 	DeviceBinding         string
@@ -143,9 +142,6 @@ var errWorkerCheckpoint = errors.New("checkpoint storage unavailable")
 var errWorkerReleasePending = errors.New("command release unconfirmed")
 
 func (w Worker) start(s *workerStore, j Job) (*process, error) {
-	if err := bindHostRevision(w.HostStateDir, &w.hostRevision); err != nil {
-		return nil, err
-	}
 	if err := w.checkAvailability(); err != nil {
 		return nil, err
 	}
@@ -271,11 +267,6 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 			return nil, err
 		}
 	}
-	unlock, err := hostLaunchGate(w.HostStateDir, w.hostRevision)
-	if err != nil {
-		return nil, err
-	}
-	defer unlock()
 	if err := w.checkAvailability(); err != nil {
 		return nil, err
 	}
@@ -417,7 +408,7 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		output.Close()
 		return nil, err
 	}
-	if err = hostDispatch(w.HostStateDir, w.hostRevision, cmd.Start); err != nil {
+	if err = cmd.Start(); err != nil {
 		output.Close()
 		return nil, err
 	}
@@ -453,7 +444,7 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 			return nil, abort(err)
 		}
 	}
-	if err = hostDispatch(w.HostStateDir, w.hostRevision, func() error { _, e := gateWriter.Write([]byte("start\n")); return e }); err != nil {
+	if _, err = gateWriter.Write([]byte("start\n")); err != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
 	if readyReader != nil {
@@ -465,7 +456,7 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		}
 		err = w.authorizeStart(j, s.state.Session)
 		if err == nil {
-			err = hostDispatch(w.HostStateDir, w.hostRevision, func() error { _, e := approvalWriter.Write([]byte("S")); return e })
+			_, err = approvalWriter.Write([]byte("S"))
 		}
 		approvalWriter.Close()
 		// A refused hand-off is an ordinary failed attempt; the payload remains gated.
@@ -606,20 +597,6 @@ func (w Worker) replay(ctx context.Context, s *workerStore) error {
 	return nil
 }
 func (w Worker) Run(stop context.Context) error {
-	if err := bindHostRevision(w.HostStateDir, &w.hostRevision); err != nil {
-		if errors.Is(err, errHostDisabled) {
-			return nil
-		}
-		return err
-	}
-	reason, disableErr := HostDisabled(w.HostStateDir)
-	if disableErr != nil {
-		return disableErr
-	}
-	if reason != "" {
-		log.Printf("worker disabled by operator: %s", reason)
-		return nil
-	}
 	if w.Interval <= 0 {
 		w.Interval = time.Second
 	}
@@ -664,16 +641,7 @@ func (w Worker) Run(stop context.Context) error {
 	if w.EnvironmentLimit == 0 {
 		w.EnvironmentLimit = 20 * 1024 * 1024 * 1024
 	}
-	if err = w.registerHost(s); err != nil {
-		if errors.Is(err, errHostDisabled) {
-			return nil
-		}
-		return err
-	}
-	if err = w.refreshHostMemoryBudget(); err != nil {
-		return err
-	}
-	w.environmentCache = &EnvironmentCache{hostRevision: w.hostRevision, HostStateDir: w.HostStateDir, Root: w.EnvironmentRoot, Limit: w.EnvironmentLimit, Clock: w.Clock, Run: w.environmentRun}
+	w.environmentCache = &EnvironmentCache{Root: w.EnvironmentRoot, Limit: w.EnvironmentLimit, Clock: w.Clock, Run: w.environmentRun}
 	if err = w.environmentCache.Cleanup(context.Background()); err != nil {
 		return err
 	}
@@ -734,14 +702,8 @@ func (w Worker) Run(stop context.Context) error {
 	if err = s.save(); err != nil {
 		return err
 	}
-	// Startup may rotate an idle session after orphan recovery. Persist that
-	// exact session under the admission fence before its first queue check-in.
-	if err = w.registerHost(s); err != nil {
-		if errors.Is(err, errHostDisabled) {
-			return nil
-		}
-		return err
-	}
+	// Startup may rotate an idle session after exact orphan recovery. The first
+	// queue checkin binds the recovered session before admission.
 	if w.ModelConfig.Idle <= 0 {
 		w.ModelConfig.Idle = 10 * time.Minute
 	}
@@ -831,10 +793,7 @@ func (w Worker) Run(stop context.Context) error {
 	// Benchmark before any model load or admission, and never over a recovered job.
 	// Fake inventory keeps dev/tests light; measured fake runners are tested separately.
 	if w.OnboardingBenchmark && w.Benchmark != nil && w.Machine.GPU != "fake" && s.state.Job == nil {
-		if err = CheckHostRevision(w.HostStateDir, w.hostRevision); err != nil {
-			return err
-		}
-		if err = w.Benchmark(stop, BenchmarkConfig{hostRevision: w.hostRevision, Clock: w.Clock, Machine: w.Machine, StateDir: s.dir, HostStateDir: w.HostStateDir, ExtensionRoot: w.ExtensionRoot, Client: w.Client, DailyUse: w.DailyUse, Laptop: w.Laptop, Desktop: w.Desktop, OwnerSignals: w.OwnerSignals}, w.Machine.CapabilityProfile); err != nil {
+		if err = w.Benchmark(stop, BenchmarkConfig{Clock: w.Clock, Machine: w.Machine, StateDir: s.dir, ExtensionRoot: w.ExtensionRoot, Client: w.Client, DailyUse: w.DailyUse, Laptop: w.Laptop, Desktop: w.Desktop, OwnerSignals: w.OwnerSignals}, w.Machine.CapabilityProfile); err != nil {
 			return err
 		}
 	} else if w.OnboardingBenchmark {
@@ -889,24 +848,7 @@ func (w Worker) Run(stop context.Context) error {
 		free = max(0, free-used)
 		return free, e
 	}
-	ctx, disableCancel := context.WithCancel(context.Background())
-	defer disableCancel()
-	go func() {
-		tick := time.NewTicker(50 * time.Millisecond)
-		defer tick.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-tick.C:
-				e := CheckHostRevision(w.HostStateDir, w.hostRevision)
-				if e != nil {
-					disableCancel()
-					return
-				}
-			}
-		}
-	}()
+	ctx := context.Background()
 	ticker := time.NewTicker(min(w.Interval, 100*time.Millisecond))
 	defer ticker.Stop()
 	p := recoveringProcess
@@ -947,23 +889,6 @@ func (w Worker) Run(stop context.Context) error {
 		}
 	}()
 	for {
-		if ctx.Err() != nil {
-			if p != nil {
-				grace := hostDisableGrace(w.HostStateDir, w.Clock)
-				p.stop(w.Clock.Now(), grace, false)
-				for {
-					p.enforceGrace(w.Clock.Now())
-					select {
-					case <-p.done:
-						p = nil
-						goto disabledExit
-					case <-ticker.C:
-					}
-				}
-			}
-		disabledExit:
-			return nil
-		}
 		now := w.Clock.Now()
 		if !now.Before(nextLogCleanup) {
 			if err = pruneWorkerLogs(s.dir, s.state.Log, now, w.LogRetention); err != nil {
@@ -1012,7 +937,6 @@ func (w Worker) Run(stop context.Context) error {
 		}
 		if retry.ready(now) {
 			rt.mu.Lock()
-			budgetErr := w.refreshHostMemoryBudget()
 			rt.memoryMachine = w.Machine
 			rt.session = w.Machine.Session
 			rt.mu.Unlock()
@@ -1086,9 +1010,6 @@ func (w Worker) Run(stop context.Context) error {
 				m.MemoryMeasured = w.MemoryMeasured
 			}
 			hostFree, hostErr := w.HostMemorySource(ctx)
-			if budgetErr != nil {
-				hostErr = budgetErr
-			}
 			m.HostAvailableMemoryGB = hostFree
 			if hostErr != nil || !validMemoryValue(hostFree) {
 				m.HostAvailableMemoryGB = 0
@@ -1133,29 +1054,14 @@ func (w Worker) Run(stop context.Context) error {
 				}
 				running = &Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt, Progress: progress}
 			}
-			m.HostRevision = w.hostRevision
-			m.HostBoot, _ = HostBootID()
 			var reply Reply
-			if e := CheckHostRevision(w.HostStateDir, w.hostRevision); e != nil {
-				disableCancel()
-				continue
-			}
-			reconcileErr := reconcileWorkerHost(ctx, w.HostStateDir, w.Clock, w.Client)
-			err = reconcileErr
-			if err == nil {
-				err = w.Client.Call(ctx, "POST", "/api/workers/checkin", Checkin{Started: p != nil && (p.docker == nil || p.docker.status() == "running"), Machine: m, Running: running, Fresh: fresh, PreviousSession: s.state.PreviousSession, ModelReports: reports}, &reply)
-			}
+			err = w.Client.Call(ctx, "POST", "/api/workers/checkin", Checkin{Started: p != nil && (p.docker == nil || p.docker.status() == "running"), Machine: m, Running: running, Fresh: fresh, PreviousSession: s.state.PreviousSession, ModelReports: reports}, &reply)
 			if err == nil {
 				if reply.HostMemoryBudget != nil {
 					w.Machine.HostMemoryBudgetGB = reply.HostMemoryBudget.GiB
-					w.Machine.queueMemoryPolicy = true
 					rt.mu.Lock()
 					rt.memoryMachine = w.Machine
 					rt.mu.Unlock()
-				}
-				if e := CheckHostRevision(w.HostStateDir, w.hostRevision); e != nil {
-					disableCancel()
-					continue
 				}
 				if s.state.Job != nil && s.state.Job.Spec.Run.Docker && s.state.Result != nil {
 					ack := *s.state.Result
@@ -1183,7 +1089,7 @@ func (w Worker) Run(stop context.Context) error {
 				// outstanding filesystem syscall on an unavailable NAS. Loads share
 				// the cache admission gate and wait for the reservation to release.
 				rt.mu.Lock()
-				rt.admissionBlocked = reply.AdmissionBlocked || budgetErr != nil
+				rt.admissionBlocked = reply.AdmissionBlocked
 				rt.mu.Unlock()
 				rt.sync(reply.ModelPlan)
 				fresh = false
@@ -1219,7 +1125,7 @@ func (w Worker) Run(stop context.Context) error {
 						if e := s.save(); e != nil {
 							return e
 						}
-					} else if !reply.AdmissionBlocked && budgetErr == nil && (!needsCheckpoint(s.state.Job) || available) {
+					} else if !reply.AdmissionBlocked && (!needsCheckpoint(s.state.Job) || available) {
 						p, err = w.start(s, *s.state.Job)
 						if err != nil {
 							if errors.Is(err, errWorkerCheckpoint) || errors.Is(err, errWorkerMemory) || errors.Is(err, errWorkerUnavailable) {
@@ -1311,12 +1217,6 @@ func (w Worker) Run(stop context.Context) error {
 							if e := s.save(); e != nil {
 								return e
 							}
-							if e := w.registerHost(s); e != nil {
-								if errors.Is(e, errHostDisabled) {
-									return nil
-								}
-								return e
-							}
 							eventCancel()
 							sessionCtx, sessionCancel := context.WithCancel(context.Background())
 							defer sessionCancel()
@@ -1397,7 +1297,7 @@ func (w Worker) Run(stop context.Context) error {
 				environments.sync(nil, true)
 				rt.cancelCopies()
 				var he *HTTPError
-				if reconcileErr == nil && errors.As(err, &he) && (he.Status == 400 || he.Status == 401) {
+				if errors.As(err, &he) && (he.Status == 400 || he.Status == 401) {
 					return err
 				}
 				log.Printf("worker %s reconnecting: %v", m.ID, err)

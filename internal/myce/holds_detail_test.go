@@ -79,7 +79,7 @@ func TestHoldsDetailKindsAndLegacyCompatibility(t *testing.T) {
 		}
 	}
 	q.s.Machines[m.ID].DockerCleanup = ""
-	closeQueueHost(q, "host", "private reason", nil)
+	setMaintenance(t, q, "host", "disable")
 	deadline := c.Now()
 	q.s.Jobs["startup"] = &Job{ID: "startup", State: "failed", Spec: Spec{StartBy: &deadline}}
 	r := HostRelease{Host: "host", Job: "startup", Machine: m.ID, Session: m.Session, Attempt: 1}

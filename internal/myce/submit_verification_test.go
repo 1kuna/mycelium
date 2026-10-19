@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
+
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -114,7 +114,7 @@ func submitVerificationProgress(t *testing.T, name string, fn func() error) {
 }
 
 func TestSubmitVerificationDoesNotBlockQueue(t *testing.T) {
-	q, clock := fixture(t)
+	q, _ := fixture(t)
 	s := submitVerificationInput(t, q)
 	m := machine("other", "fake")
 	m.HostID = "other-host"
@@ -140,14 +140,8 @@ func TestSubmitVerificationDoesNotBlockQueue(t *testing.T) {
 		return err
 	})
 	submitVerificationProgress(t, "cancellation", func() error { return q.Cancel(active.ID) })
-	submitVerificationProgress(t, "other-host reconciliation", func() error {
-		exchange := closeExchange(m.HostID, clock)
-		exchange.Sessions = []HostSession{{Machine: m.ID, Session: m.Session}}
-		ack, err := q.ReconcileHost(exchange)
-		if err == nil && len(ack.Pending) != 0 {
-			return fmt.Errorf("session discharge remains pending: %v", ack.Pending)
-		}
-		return err
+	submitVerificationProgress(t, "other-host cancellation acknowledgement", func() error {
+		return q.Complete(result(active, false))
 	})
 	unblock()
 	if err := submitVerificationWait(t, "HTTP submission", done); err != nil {
@@ -157,7 +151,7 @@ func TestSubmitVerificationDoesNotBlockQueue(t *testing.T) {
 		t.Fatal("verified submission was not committed", submitted)
 	}
 	if got := job(t, q, active.ID); got.State != "cancelled" || !got.ReleaseConfirmed {
-		t.Fatal("other-host cancellation/reconciliation did not settle", got)
+		t.Fatal("other-host cancellation acknowledgement did not settle", got)
 	}
 }
 
@@ -254,9 +248,9 @@ func TestSubmitVerificationCancellationAndRecheck(t *testing.T) {
 			requireNoSubmission(t, q)
 		})
 	})
-	for _, change := range []string{"client-inputs", "file-store", "checkpoint-mode", "placement", "host-close", "queue-close"} {
+	for _, change := range []string{"client-inputs", "file-store", "checkpoint-mode", "placement", "host-maintenance", "queue-close"} {
 		t.Run(change, func(t *testing.T) {
-			q, clock := fixture(t)
+			q, _ := fixture(t)
 			s := submitVerificationInput(t, q)
 			s.AllowedMachines = []string{"target"}
 			s.Run.Env = map[string]string{"VALUE": "original"}
@@ -288,10 +282,8 @@ func TestSubmitVerificationCancellationAndRecheck(t *testing.T) {
 				}); err != nil {
 					t.Fatal(err)
 				}
-			case "host-close":
-				exchange := closeExchange(m.HostID, clock)
-				exchange.Sessions = []HostSession{{Machine: m.ID, Session: m.Session}}
-				if _, err := q.ReconcileHost(exchange); err != nil {
+			case "host-maintenance":
+				if err := setMaintenance(t, q, m.HostID, "disable"); err != nil {
 					t.Fatal(err)
 				}
 			case "queue-close":
@@ -301,7 +293,7 @@ func TestSubmitVerificationCancellationAndRecheck(t *testing.T) {
 			}
 			unblock()
 			got := submitVerificationWait(t, "submission recheck", done)
-			if change != "client-inputs" && change != "host-close" {
+			if change != "client-inputs" && change != "host-maintenance" {
 				if got.err == nil {
 					t.Fatal("changed custody/placement was accepted", got)
 				}
@@ -314,12 +306,12 @@ func TestSubmitVerificationCancellationAndRecheck(t *testing.T) {
 			if replay := submit(t, q, original); replay.ID != got.job.ID {
 				t.Fatal("snapshot fingerprint changed", replay)
 			}
-			if change == "host-close" {
-				if reply := check(t, q, m, nil); reply.Job != nil || !reply.Leave {
-					t.Fatal("closed host admitted verified submission", reply)
+			if change == "host-maintenance" {
+				if reply := check(t, q, m, nil); reply.Job != nil || !reply.AdmissionBlocked {
+					t.Fatal("maintenance admitted verified submission", reply)
 				}
 				if j := job(t, q, got.job.ID); j.Attempt != 0 || j.State != "queued" {
-					t.Fatal("close defeated by in-flight submit", j)
+					t.Fatal("maintenance defeated by in-flight submit", j)
 				}
 			}
 		})

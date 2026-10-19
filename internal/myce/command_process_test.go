@@ -10,10 +10,10 @@ import (
 	"testing"
 )
 
-func TestHostCommandRecordCleanup(t *testing.T) {
+func TestCommandRecordCleanup(t *testing.T) {
 	for _, inspectionFails := range []bool{false, true} {
 		t.Run(map[bool]string{false: "confirmed", true: "unconfirmed"}[inspectionFails], func(t *testing.T) {
-			scope := hostCommandScope{HostDir: readyTestHost(t, t.TempDir()), Clock: RealClock{}}
+			scope := commandScope{StateDir: t.TempDir(), Clock: RealClock{}}
 			if err := scope.prepare(); err != nil {
 				t.Fatal(err)
 			}
@@ -25,7 +25,7 @@ func TestHostCommandRecordCleanup(t *testing.T) {
 				t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 			}
 			const record = "attempt-command-test.json"
-			err := runRecordedHostCommand(context.Background(), []string{"/bin/sh", "-c", "exit 0"}, t.TempDir(), []string{"PATH=" + os.Getenv("PATH")}, io.Discard, scope, record)
+			err := runRecordedCommand(context.Background(), []string{"/bin/sh", "-c", "exit 0"}, t.TempDir(), []string{"PATH=" + os.Getenv("PATH")}, io.Discard, scope, record)
 			if inspectionFails {
 				if err == nil || !strings.Contains(err.Error(), "inspect process groups") {
 					t.Fatal("missing custody confirmation failure", err)
@@ -42,28 +42,5 @@ func TestHostCommandRecordCleanup(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestHostCommandsDoNotRegisterWorkers(t *testing.T) {
-	dir := readyTestHost(t, t.TempDir())
-	scope := hostCommandScope{HostDir: dir}
-	if err := scope.prepare(); err != nil {
-		t.Fatal(err)
-	}
-	workers, err := HostWorkers(dir)
-	if err != nil || len(workers) != 0 {
-		t.Fatal("command custody registered as a worker", workers, err)
-	}
-	if err := runExtensionCommand(context.Background(), []string{"/bin/sh", "-c", "exit 0"}, t.TempDir(), nil, io.Discard, scope); err != nil {
-		t.Fatal(err)
-	}
-	workers, err = HostWorkers(dir)
-	if err != nil || len(workers) != 0 {
-		t.Fatal("completed command registered as a worker", workers, err)
-	}
-	queues, err := (HostControl{Observe: testHostExclusion, Dir: dir}).Queues()
-	if err != nil || len(queues) != 0 {
-		t.Fatal("command created queue custody", queues, err)
 	}
 }

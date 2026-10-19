@@ -271,7 +271,7 @@ if not stopping: pathlib.Path('output').write_text(str(n))
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
 		root := newTestStateRoot(t)
-		worker := Worker{Client: c, StateDir: root, Interval: 20 * time.Millisecond, Clock: RealClock{}, Machine: Machine{CapabilityProfile: machine("profile", "fake").CapabilityProfile, ID: name, HostID: name, Session: name, GPU: "fake", FreeMemoryGB: 8}, HostStateDir: readyTestHost(t, filepath.Join(root, "host"), name), HostMemorySource: func(context.Context) (float64, error) { return 16, nil }}
+		worker := Worker{Client: c, StateDir: root, Interval: 20 * time.Millisecond, Clock: RealClock{}, Machine: Machine{CapabilityProfile: machine("profile", "fake").CapabilityProfile, ID: name, HostID: name, Session: name, GPU: "fake", FreeMemoryGB: 8}, HostMemorySource: func(context.Context) (float64, error) { return 16, nil }}
 		go func() { done <- worker.Run(ctx) }()
 		return cancel, done, root
 	}
@@ -481,7 +481,7 @@ func TestStoredExtensionInputAndOutput(t *testing.T) {
 	done := make(chan error, 1)
 	defer cancel()
 	state := newTestStateRoot(t)
-	w := Worker{Client: c, ExtensionRoot: root, StateDir: state, Clock: RealClock{}, Interval: 20 * time.Millisecond, HostStateDir: readyTestHost(t, filepath.Join(state, "host"), "extension"), HostMemorySource: func(context.Context) (float64, error) { return 16, nil }, Machine: Machine{CapabilityProfile: machine("profile", "fake").CapabilityProfile, ID: "extension", HostID: "extension", GPU: "fake", FreeMemoryGB: 8, ExtensionReports: reports}}
+	w := Worker{Client: c, ExtensionRoot: root, StateDir: state, Clock: RealClock{}, Interval: 20 * time.Millisecond, HostMemorySource: func(context.Context) (float64, error) { return 16, nil }, Machine: Machine{CapabilityProfile: machine("profile", "fake").CapabilityProfile, ID: "extension", HostID: "extension", GPU: "fake", FreeMemoryGB: 8, ExtensionReports: reports}}
 	go func() { done <- w.Run(ctx) }()
 	await(t, func() bool {
 		snap, _ := q.Snapshot()

@@ -66,7 +66,7 @@ immediately. Production infrastructure interruptions requeue at most twice,
 then fail with `infrastructure_retries_exhausted`;
 `queue --production-infrastructure-retries` configures the nonnegative limit (values above two are clamped to two).
 The durable optional `infrastructure_retries` job/status field counts requeues used
-(omitted at zero). Worker/queue recovery, host close/release, leave and reboot
+(omitted at zero). Worker/queue recovery, worker interruption/release, leave and reboot
 share that budget; release acknowledgements do not refund it. Production OOMs
 and job-caused command/container failures fail without retry. Experiments and
 deadline work keep the three-loss limit; their planned pauses do not consume it. Resumable work restarts from the latest
@@ -129,7 +129,7 @@ Flags belong before the positional argument except that `logs ID --follow`,
 | `queue --experiment-loss-timeout` | `60s` | Experiment loss detection |
 | `join --name` | Hostname | Unique stable worker name |
 | `join --host-id` | OS hostname | Physical host identity; every per-card worker on the same machine must use the same stable value |
-| `join/install worker --host-memory-budget-gb` | `0` | UNQUALIFIED migration input; a positive value requires explicit CLOSED host allowance configuration before runtime use |
+| `join/install worker --host-memory-budget-gb` | `0` | initial queue allowance input; subsequent changes use `host budget HOST` while drained/disabled |
 | `join/install worker --memory-ceiling-slack-gb` | `0.125` | Extra GiB per declared ceiling; included in host admission |
 | `join/install worker --memory-swap-max-bytes` | `0` | Swap allowance per native attempt; managed Docker uses optional run-spec total RAM-plus-swap values |
 | `join --reserve-host-memory-gb` | `4` | RAM withheld from observed available memory; configure OS/other-workload headroom; unified uses the larger host/GPU reserve once |
@@ -153,7 +153,7 @@ Flags belong before the positional argument except that `logs ID --follow`,
 | `join --model-listen` | `127.0.0.1:0` | Authenticated worker proxy bind; engines stay loopback |
 | `join --model-advertise` | Local proxy URL | Explicit URL reachable by queue for LAN workers |
 | `leave --name` | Hostname | Stop assigning work; ask wait/stop for non-resumable jobs |
-| `resolve-docker --state-dir DIR --attempt-id ID [--worker-user USER] [--config FILE]` | Verified offline reconciliation | Reconcile exact registered custody through the worker executor; unknown operation disposition stays charged; see [operator recovery](operations.md#docker-cleanup-custody) |
+| `resolve-docker --state-dir DIR --attempt-id ID` | Verified offline reconciliation | Reconcile exact registered custody under the worker spool lock; unknown operation disposition stays charged; see [operator recovery](operations.md#docker-cleanup-custody) |
 | `leave --now` | `false` | Signal all jobs, still allowing checkpoint grace |
 | `wait ID [ID...] --timeout DURATION` | Unlimited | Wait for every final state; timeout never cancels jobs |
 | `logs ID --follow` | `false` | Follow until terminal and drain final logs |
@@ -270,7 +270,7 @@ is still batch metadata: commands must use a local model path themselves.
 
 `myce install worker --nas DIR --queue URL [--dry-run]` detects OS, CPU and
 GPU, writes private configuration/credentials, copies this binary, and enables a
-Linux systemd user service or macOS launchd agent. Workers are installed CLOSED and never started by install; explicit revision-bound open follows reconciliation. See [installer overlay/rollback](operations.md#installer-overlay-and-rollback). `myce install queue --nas DIR
+Linux systemd user service or macOS launchd agent. Installation starts workers under queue-owned maintenance policy; disable admission on the queue before upgrading. See [installer overlay/rollback](operations.md#install-and-upgrade). `myce install queue --nas DIR
 --listen ADDRESS [--dry-run]` creates the queue service. No dry run writes files
 or invokes service managers. Use `--environment-config FILE` and `--model-config
 FILE` for shared catalogs. `--root DIR` changes the local installation root.
@@ -337,7 +337,7 @@ loss time plus the original `start_by` minus submission time. That original wind
 length is durable and does not grow across repeated losses. Brief outages can
 resume; a recovery attempt that does not start within its window fails with
 `production start deadline exceeded: <blocker>` so the caller can run fallback.
-Production host close/release uses the same bounded recovery window. Planned
+Production worker interruption/release uses the same bounded recovery window. Planned
 leave keeps its original start deadline; both use the infrastructure retry budget.
 `start_by` covers production **batch jobs only**. Model HTTP calls rely on their
 own request timeouts and the separate `max_wait` contract; they do not honor
@@ -368,8 +368,8 @@ attempt started in the queue but unexecuted; reconciliation handles recovery.
 Deploy the matching queue and workers together. Check-in requires the durable-start
 protocol marker; older workers receive HTTP 426 before assignment. Production
 workers also require an explicit matching durable-start answer and `start_by`,
-so an older queue cannot authorize execution. Whole-host CLOSED intent
-is checked before and after the start request; cleanup retains attempt custody.
+so an older queue cannot authorize execution. Current queue maintenance is checked at Started; cleanup retains exact attempt
+custody across later maintenance changes.
 Late result messages cannot
 revive failure. Assigned expiry sends an attempt-specific kill and retains release custody and memory accounting;
 status says `release pending` until the matching cleanup acknowledgement.
@@ -403,8 +403,8 @@ proves release. Pins remain protected and can prevent placement.
 There is **no idle production cooldown**. Once the final production demand and
 cleanup settle, ordinary admission resumes. Displaced experiments rejoin the
 shared queue and can run on any eligible machine; they do not inherit production's
-host pin. Whole-host admission close/open and consumer cancellation are separate
-contracts, described in [operations](operations.md#close-reconcile-and-reopen-a-host).
+host pin. Queue host maintenance and consumer cancellation are separate
+contracts, described in [operations](operations.md#queue-maintenance).
 No CPU publication/session lock is implied by a GPU production hold.
 
 ## Attempt placement environment
@@ -628,7 +628,7 @@ must match the exact job, attempt, machine and session.
 See [Docker cleanup custody](operations.md#docker-cleanup-custody) for delivery
 outcomes, private-evidence review and recovery.
 
-Stop, restart, loss reconciliation and `myce host close --local` stop all labeled containers, confirm
+Stop, restart, loss reconciliation and queue disable-stop stop all labeled containers, confirm
 nonrunning/absent execution, disconnect owned stopped endpoints, remove labeled
 networks, and confirm network absence. Stopped containers remain evidence;
 networks do not. RAM custody stays held until both proofs succeed. Late containers

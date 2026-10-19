@@ -15,7 +15,6 @@ import (
 func benchmarkCommand(args []string) error {
 	f := flag.NewFlagSet("benchmark", flag.ContinueOnError)
 	state := f.String("state-dir", "", "own local state/scratch folder (required)")
-	hostDir := f.String("host-state-dir", "", "shared host state directory")
 	root := f.String("extension-root", "", "prepared local extension library/cache")
 	queue := f.String("queue", env("MYCE_QUEUE", "http://127.0.0.1:7331"), "file-store queue")
 	gpu := f.String("gpu", "", "accelerator platform (required)")
@@ -34,21 +33,14 @@ func benchmarkCommand(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if *hostDir == "" {
-		var err error
-		*hostDir, err = myce.HostStateDirectory()
-		if err != nil {
-			return err
-		}
-	}
-	if err := myce.PrepareStateRoots(*state, *hostDir); err != nil {
+	if err := myce.PrepareStateRoots(*state); err != nil {
 		return err
 	}
 	m := myce.Machine{GPU: *gpu, Device: *device}
 	probe, cancel := context.WithTimeout(ctx, 5*time.Second)
 	profile := myce.LocalProfileProbe().Detect(probe, m, *state, myce.RealClock{}.Now())
 	cancel()
-	err := myce.RunOnboardingBenchmark(ctx, myce.BenchmarkConfig{HostStateDir: *hostDir, Clock: myce.RealClock{}, Machine: m, StateDir: *state, ExtensionRoot: *root, Client: myce.Client{URL: *queue, Token: env("MYCE_TOKEN", "")}, DailyUse: *daily, Laptop: *laptop, Desktop: *desktop}, &profile)
+	err := myce.RunOnboardingBenchmark(ctx, myce.BenchmarkConfig{Clock: myce.RealClock{}, Machine: m, StateDir: *state, ExtensionRoot: *root, Client: myce.Client{URL: *queue, Token: env("MYCE_TOKEN", "")}, DailyUse: *daily, Laptop: *laptop, Desktop: *desktop}, &profile)
 	if err != nil {
 		return err
 	}

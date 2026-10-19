@@ -14,7 +14,7 @@ func TestStatusPageRendersSnapshot(t *testing.T) {
 	job.Spec.Priority = "experiment"
 	machine := &Machine{
 		ID:                 "spark",
-		Disabled:           "host closed",
+		Disabled:           "planned host maintenance",
 		MemoryEnforcement:  "memory ceiling not enforced on this host (requires Linux cgroup v2)",
 		HostMemoryBudgetGB: 5,
 		DockerCleanup:      "cleanup unconfirmed: start",

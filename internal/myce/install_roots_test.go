@@ -13,9 +13,9 @@ import (
 func installRuntimeRoots(t *testing.T, c ServiceConfig) []string {
 	t.Helper()
 	if c.Role == "queue" {
-		return QueueStateRoots(c.DB, c.HostStateDir, c.UploadSpoolDir, "", "", true)
+		return QueueStateRoots(c.DB, c.UploadSpoolDir, "", "", true)
 	}
-	roots, err := (Worker{StateDir: c.State, HostStateDir: c.HostStateDir, CacheRoot: c.ModelCache, EnvironmentRoot: c.EnvironmentCache}).StateRoots()
+	roots, err := (Worker{StateDir: c.State, CacheRoot: c.ModelCache, EnvironmentRoot: c.EnvironmentCache}).StateRoots()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,29 +121,6 @@ func TestInstallFileCachePreflight(t *testing.T) {
 			}
 			c.Heartbeat *= 2
 			assertInstallRootRefusal(t, c, source, root)
-		})
-	}
-}
-
-func TestFreshInstallMarkedRootCustodyRefused(t *testing.T) {
-	sample, _ := preserveWorkerFixture(t)
-	for index, sampleRoot := range installRuntimeRoots(t, sample) {
-		t.Run(filepath.Base(sampleRoot), func(t *testing.T) {
-			c, source := preserveWorkerFixture(t)
-			roots := installRuntimeRoots(t, c)
-			if err := PrepareStateRoots(roots...); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(roots[index], "surviving-custody"), []byte("current data"), 0600); err != nil {
-				t.Fatal(err)
-			}
-			before := stateTree(t, filepath.Dir(source))
-			if err := prepareClosedWorkerInstall(c); !errors.Is(err, ErrHostState) {
-				t.Fatalf("surviving marked root was not refused: %v", err)
-			}
-			if !reflect.DeepEqual(before, stateTree(t, filepath.Dir(source))) {
-				t.Fatal("surviving custody was changed or host state was initialized")
-			}
 		})
 	}
 }

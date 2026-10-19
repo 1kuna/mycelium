@@ -3,8 +3,7 @@ package myce
 import (
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
+
 	"strings"
 	"testing"
 	"time"
@@ -28,7 +27,7 @@ func TestProductionStartGateMixedVersions(t *testing.T) {
 			}))
 			defer server.Close()
 			w := recoveryWorker(t)
-			w.HostStateDir = readyTestHost(t, t.TempDir())
+
 			w.Client = Client{URL: server.URL}
 			now := time.Now()
 			j := Job{ID: "test", Spec: spec("production")}
@@ -44,79 +43,11 @@ func TestProductionStartGateMixedVersions(t *testing.T) {
 	}
 }
 
-func TestProductionStartGateDisableInFlight(t *testing.T) {
-	for _, scope := range []string{"host", "instance"} {
-		t.Run(scope, func(t *testing.T) {
-			q, _ := fixture(t)
-			s := spec("production")
-			s.Resumable = false
-			marker := filepath.Join(t.TempDir(), "ran")
-			s.Run.Command = []string{"/bin/sh", "-c", "echo ran > " + marker}
-			submit(t, q, s)
-			a := check(t, q, machine("b70", "xpu"), nil).Job
-			root := readyTestHost(t, t.TempDir())
-			unit, err := root, error(nil)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err = os.MkdirAll(unit, 0700); err != nil {
-				t.Fatal(err)
-			}
-			flagDir := root
-			if scope == "instance" {
-				flagDir = unit
-			}
-			handler := API{Queue: q, Token: "test"}.Handler()
-			server := workerTestServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-				handler.ServeHTTP(rw, r)
-				if r.URL.Path == "/api/workers/started" {
-					// The durable answer is accepted, but disable wins before it reaches the worker.
-					if e := closeTestHost(flagDir); e != nil {
-						t.Error(e)
-					}
-				}
-			}))
-			defer server.Close()
-			w := recoveryWorker(t)
-			w.HostStateDir = unit
-			w.Machine = machine("b70", "xpu")
-			w.Client = Client{URL: server.URL, Token: "test"}
-			store, err := w.openStore()
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer store.close()
-			store.state.Session = a.Session
-			p, err := w.start(store, *a)
-			if err != nil {
-				t.Fatal(err)
-			}
-			select {
-			case f := <-p.done:
-				if f.result.Success || f.result.ReleasePending || f.err != nil {
-					t.Fatalf("unsafe finish: %+v", f)
-				}
-			case <-time.After(testWaitTimeout):
-				t.Fatal("start cleanup stalled")
-			}
-			if _, err = os.Stat(marker); !os.IsNotExist(err) {
-				t.Fatalf("disabled payload executed: %v", err)
-			}
-			if job(t, q, a.ID).StartedAt == nil {
-				t.Fatal("accepted start lost custody")
-			}
-			if err = w.authorizeStart(*a, a.Session); err == nil {
-				t.Fatal("disabled worker requested another gate")
-			}
-		})
-	}
-}
-
 func TestProductionStartGateQueueHostDisable(t *testing.T) {
 	q, _ := fixture(t)
 	submit(t, q, spec("production"))
 	a := check(t, q, machine("b70", "xpu"), nil).Job
-	if err := closeQueueHost(q, "b70", "test disable", nil); err != nil {
+	if err := setMaintenance(t, q, "b70", "disable"); err != nil {
 		t.Fatal(err)
 	}
 	if err := q.Started(result(a, true)); err == nil {

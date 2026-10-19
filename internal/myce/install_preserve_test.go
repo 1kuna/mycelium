@@ -3,11 +3,13 @@ package myce
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+
 	"strings"
 	"syscall"
 	"testing"
@@ -40,9 +42,6 @@ func TestInstallManagerRollback(t *testing.T) {
 	for _, role := range []string{"worker", "queue"} {
 		for _, active := range []bool{false, true} {
 			for _, failure := range []string{"reload", "enable", "restart"} {
-				if role == "worker" && failure == "restart" {
-					continue // Workers are never started or restarted by install.
-				}
 				t.Run(fmt.Sprintf("%s/active=%t/%s", role, active, failure), func(t *testing.T) {
 					c, source := preserveWorkerFixture(t)
 					if role == "queue" {
@@ -57,10 +56,6 @@ func TestInstallManagerRollback(t *testing.T) {
 					}
 					paths := []string{c.Binary, c.Config, c.Service}
 					unit := filepath.Base(c.Service)
-					if role == "worker" {
-						unit = "myce-host-reconcile.timer"
-						paths = append(paths, filepath.Join(filepath.Dir(c.Service), "myce-host-reconcile.service"), filepath.Join(filepath.Dir(c.Service), unit))
-					}
 					before, loaded := map[string][]byte{}, map[string][]byte{}
 					for _, path := range paths {
 						data, err := os.ReadFile(path)
@@ -92,7 +87,7 @@ func TestInstallManagerRollback(t *testing.T) {
 						if call == "--user enable --now "+unit || call == "--user restart "+unit {
 							currentActive = true // Even a failing command can partially activate.
 						}
-						if !fired && (failure == "reload" && call == "--user daemon-reload" || failure == "enable" && call == "--user enable "+filepath.Base(c.Service) || role == "queue" && failure == "enable" && call == "--user enable --now "+unit || failure == "restart" && call == "--user restart "+unit) {
+						if !fired && (failure == "reload" && call == "--user daemon-reload" || failure == "enable" && call == "--user enable --now "+unit || failure == "restart" && call == "--user restart "+unit) {
 							fired = true
 							return nil, injected
 						}
@@ -119,11 +114,6 @@ func TestInstallManagerRollback(t *testing.T) {
 					if reloads != 2 || currentActive != active {
 						t.Fatalf("rollback: reloads=%d active=%t; want 2 and %t", reloads, currentActive, active)
 					}
-					if role == "worker" {
-						if reason, err := HostDisabled(c.HostStateDir); err != nil || reason == "" {
-							t.Fatal("rollback opened host", err)
-						}
-					}
 				})
 			}
 		}
@@ -143,7 +133,7 @@ func TestInstallManagerRollbackRecoveryFailure(t *testing.T) {
 			failed, stopped, recovered := false, false, false
 			manager := func(ctx context.Context, name string, args ...string) ([]byte, error) {
 				call := strings.Join(args, " ")
-				if call == "--user enable myce-worker.service" {
+				if call == "--user enable --now myce-worker.service" {
 					failed = true
 					cancel()
 					return nil, injected
@@ -152,11 +142,11 @@ func TestInstallManagerRollbackRecoveryFailure(t *testing.T) {
 					if ctx.Err() != nil {
 						t.Fatal("rollback reused canceled install context")
 					}
-					if failure == "reload" && call == "--user daemon-reload" || failure == "restart" && call == "--user restart myce-host-reconcile.timer" {
+					if failure == "reload" && call == "--user daemon-reload" || failure == "restart" && call == "--user restart myce-worker.service" {
 						return nil, recoveryFailure
 					}
-					stopped = stopped || call == "--user stop myce-host-reconcile.timer"
-					recovered = recovered || call == "--user restart myce-host-reconcile.timer"
+					stopped = stopped || call == "--user stop myce-worker.service"
+					recovered = recovered || call == "--user restart myce-worker.service"
 				}
 				return fakeInstallManager(ctx, name, args...)
 			}
@@ -167,13 +157,10 @@ func TestInstallManagerRollbackRecoveryFailure(t *testing.T) {
 			}
 			if failure == "canceled" {
 				if !recovered || stopped {
-					t.Fatal("canceled install did not recover prior active timer")
+					t.Fatal("canceled install did not recover prior active worker")
 				}
 			} else if !errors.Is(err, recoveryFailure) || !stopped || !strings.Contains(err.Error(), "rollback incomplete") {
-				t.Fatal("failed rollback did not stop timer and report recovery failure", err)
-			}
-			if reason, err := HostDisabled(c.HostStateDir); err != nil || reason == "" {
-				t.Fatal("failed recovery opened host", err)
+				t.Fatal("failed rollback did not stop worker and report recovery failure", err)
 			}
 		})
 	}
@@ -189,7 +176,7 @@ func TestInstallFailureRecoveryAndFilesystems(t *testing.T) {
 			if err := Install(context.Background(), c, source, "synthetic-fixture", fakeInstallManager); err != nil {
 				t.Fatal(err)
 			}
-			paths := []string{c.Binary, c.Config, c.Service, c.GPUEnvironmentFile(), filepath.Join(filepath.Dir(c.Service), "myce-host-reconcile.service"), filepath.Join(filepath.Dir(c.Service), "myce-host-reconcile.timer")}
+			paths := []string{c.Binary, c.Config, c.Service, c.GPUEnvironmentFile()}
 			before := map[string][]byte{}
 			for _, path := range paths {
 				data, err := os.ReadFile(path)
@@ -197,10 +184,6 @@ func TestInstallFailureRecoveryAndFilesystems(t *testing.T) {
 					t.Fatal(err)
 				}
 				before[path] = data
-			}
-			intent, err := os.ReadFile(filepath.Join(c.HostStateDir, hostStateFile))
-			if err != nil {
-				t.Fatal(err)
 			}
 			custody := filepath.Join(c.State, "custody-fixture")
 			os.WriteFile(custody, []byte("unique custody"), 0600)
@@ -226,22 +209,20 @@ func TestInstallFailureRecoveryAndFilesystems(t *testing.T) {
 			}}
 			manager := func(_ context.Context, name string, args ...string) ([]byte, error) {
 				call := strings.Join(args, " ")
-				if call == "--user is-active --quiet myce-worker.service" || call == "--user is-active --quiet myce-host-reconcile.service" {
+				if call == "--user is-active --quiet myce-worker.service" {
 					return nil, inactiveInstallUnit{}
 				}
 
-				if failure == "reload" && strings.Contains(call, "daemon-reload") || failure == "preactivation" && strings.Contains(call, "--property=DropInPaths") || failure == "enable" && call == "--user enable myce-worker.service" {
+				if failure == "reload" && strings.Contains(call, "daemon-reload") || failure == "preactivation" && strings.Contains(call, "--property=DropInPaths") || failure == "enable" && call == "--user enable --now myce-worker.service" {
 					fired = true
 					return nil, injected
 				}
-				if strings.Contains(call, "enable --now myce-worker") || strings.Contains(call, "restart myce-worker") {
-					t.Fatal("activated worker during install")
-				}
+
 				return nil, nil
 			}
 			changed := c
 			changed.Nice = 0
-			if err = installWithFiles(context.Background(), changed, source, "", manager, files); err == nil || !fired {
+			if err := installWithFiles(context.Background(), changed, source, "", manager, files); err == nil || !fired {
 				t.Fatal("fault was not exercised", err)
 			}
 			for path, want := range before {
@@ -249,10 +230,6 @@ func TestInstallFailureRecoveryAndFilesystems(t *testing.T) {
 				if err != nil || !bytes.Equal(got, want) {
 					t.Fatalf("original artifact not restored: %s", filepath.Base(path))
 				}
-			}
-			after, _ := os.ReadFile(filepath.Join(c.HostStateDir, hostStateFile))
-			if !bytes.Equal(intent, after) {
-				t.Fatal("host intent changed")
 			}
 			if got, _ := os.ReadFile(custody); string(got) != "unique custody" {
 				t.Fatal("custody changed")
@@ -277,9 +254,9 @@ func TestInstallFailureRecoveryAndFilesystems(t *testing.T) {
 		c, source := preserveWorkerFixture(t)
 		c.Binary = filepath.Join(t.TempDir(), "runtime-myce")
 		c.Service = filepath.Join(t.TempDir(), "myce-worker.service")
-		renames := 0
+		renames := map[string]bool{}
 		files := installFiles{rename: func(source, destination string) error {
-			renames++
+			renames[destination] = true
 			if filepath.Dir(source) != filepath.Dir(destination) {
 				return syscall.EXDEV
 			}
@@ -288,93 +265,16 @@ func TestInstallFailureRecoveryAndFilesystems(t *testing.T) {
 		if err := installWithFiles(context.Background(), c, source, "synthetic-fixture", fakeInstallManager, files); err != nil {
 			t.Fatal(err)
 		}
-		if renames < 6 {
-			t.Fatal("artifact publication was not exercised")
+		for _, path := range []string{c.Binary, c.Config, c.Credentials, c.GPUEnvironmentFile(), c.Service} {
+			if !renames[path] {
+				t.Fatal("artifact publication was not exercised", filepath.Base(path))
+			}
 		}
 	})
-}
-
-func TestInstallClosedSiblingAndChildOwnership(t *testing.T) {
-	c, source := preserveWorkerFixture(t)
-	if err := c.WorkerInstance("device-one"); err != nil {
-		t.Fatal(err)
-	}
-	sibling := c
-	if err := sibling.WorkerInstance("device-two"); err != nil {
-		t.Fatal(err)
-	}
-	if err := Install(context.Background(), c, source, "synthetic-fixture", fakeInstallManager); err != nil {
-		t.Fatal(err)
-	}
-	if err := Install(context.Background(), sibling, source, "synthetic-fixture", fakeInstallManager); err != nil {
-		t.Fatal(err)
-	}
-	before, err := ReadHostIntent(c.HostStateDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	registry := filepath.Join(c.HostStateDir, "worker-sibling.json")
-	if err = os.WriteFile(registry, []byte(`{"schema_version":3,"name":"preserved sibling registry"}`), 0600); err != nil {
-		t.Fatal(err)
-	}
-	manager := func(_ context.Context, _ string, args ...string) ([]byte, error) {
-		if strings.Contains(strings.Join(args, " "), "enable --now myce-worker") || strings.Contains(strings.Join(args, " "), "restart myce-worker") {
-			t.Fatal("worker activated")
-		}
-		return nil, nil
-	}
-	c.StartDisabled = false // explicit false is never an open operation
-	if err = Install(context.Background(), c, source, "", manager); err != nil {
-		t.Fatal(err)
-	}
-	after, err := ReadHostIntent(c.HostStateDir)
-	if err != nil || !reflect.DeepEqual(before, after) || after.Desired != "closed" {
-		t.Fatal("sibling gate or revision changed", err)
-	}
-	if data, _ := os.ReadFile(registry); string(data) != `{"schema_version":3,"name":"preserved sibling registry"}` {
-		t.Fatal("sibling registry changed")
-	}
-	for _, worker := range []ServiceConfig{c, sibling} {
-		if reason, err := HostDisabled(worker.HostStateDir); err != nil || reason == "" {
-			t.Fatal("sibling gate open", err)
-		}
-	}
-	// These writes occur as the worker; the production child tests separately
-	// prove the same-binary dispatch. Actual Linux credential changes stay native.
-	err = filepath.WalkDir(c.HostStateDir, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		st, err := os.Lstat(path)
-		if err != nil {
-			return err
-		}
-		owner, ok := st.Sys().(*syscall.Stat_t)
-		if !ok || owner.Uid != uint32(os.Geteuid()) {
-			t.Fatal("non-worker-owned host artifact")
-		}
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	// An open host is refused before changing any installed file.
-	open := after
-	open.Desired = "open"
-	if err = atomicHostJSON(c.HostStateDir, hostStateFile, open, nil); err != nil {
-		t.Fatal(err)
-	}
-	binary, _ := os.ReadFile(c.Binary)
-	if err = Install(context.Background(), c, source, "", manager); err == nil {
-		t.Fatal("upgraded an open host")
-	}
-	if got, _ := os.ReadFile(c.Binary); !bytes.Equal(got, binary) {
-		t.Fatal("refused upgrade changed binary")
-	}
 }
 
 func TestInstallDropInsPreservedAndConflictsBlock(t *testing.T) {
-	for _, body := range []string{"[Service]\nCPUQuota=45%\n", "[Service]\nExecCondition=\nExecCondition=/usr/bin/true\n", "[Service]\nEnvironment=MYCE_HOST_STATE_DIR=other\n", "[Timer]\nOnUnitInactiveSec=0\n"} {
+	for _, body := range []string{"[Service]\nCPUQuota=45%\n", "[Service]\nExecStart=\nExecStart=/usr/bin/true\n", "[Service]\nEnvironment=MYCE_TOKEN=other\n"} {
 		t.Run(strings.Fields(body)[1], func(t *testing.T) {
 			c, source := preserveWorkerFixture(t)
 			path := filepath.Join(t.TempDir(), "override.conf")
@@ -392,26 +292,12 @@ func TestInstallDropInsPreservedAndConflictsBlock(t *testing.T) {
 			err := Install(context.Background(), c, source, "synthetic-fixture", manager)
 			safe := strings.Contains(body, "CPUQuota=")
 			if (err == nil) != safe || enabled != safe {
-				t.Fatal("wrong effective-gate decision", err)
+				t.Fatal("wrong service-contract decision", err)
 			}
 			if data, _ := os.ReadFile(path); !bytes.Equal(data, []byte(body)) {
 				t.Fatal("consumer drop-in changed")
 			}
-			if reason, err := HostDisabled(c.HostStateDir); err != nil || reason == "" {
-				t.Fatal("failure reopened admission", err)
-			}
 		})
-	}
-}
-
-func TestInstallProtectedRootEntry(t *testing.T) {
-	c, source := preserveWorkerFixture(t)
-	c.Binary = RootHostExecutable
-	if err := Install(context.Background(), c, source, "synthetic-fixture", func(context.Context, string, ...string) ([]byte, error) {
-		t.Fatal("root tree plan reached service runner")
-		return nil, nil
-	}); err == nil {
-		t.Fatal("worker could install protected root copy")
 	}
 }
 
@@ -437,6 +323,44 @@ func TestServiceConfigVersionAndSanitizedDiff(t *testing.T) {
 		}
 		if _, err := ReadServiceConfig(c.Config); err == nil {
 			t.Fatal("unsupported config was accepted")
+		}
+	}
+}
+
+func TestServiceConfigRetiredHostSettingsOverlay(t *testing.T) {
+	c, _ := preserveWorkerFixture(t)
+	data, err := json.Marshal(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved map[string]json.RawMessage
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatal(err)
+	}
+	saved["host_state_dir"] = json.RawMessage(`"/fixture/retired-control"`)
+	saved["start_disabled"] = json.RawMessage(`true`)
+	saved["required_workers"] = json.RawMessage(`["gpu0","gpu1"]`)
+	data, err = json.Marshal(saved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.MkdirAll(filepath.Dir(c.Config), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(c.Config, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadServiceConfig(c.Config)
+	if err != nil || !reflect.DeepEqual(got, c) {
+		t.Fatal("saved settings lost during retired-field overlay", err)
+	}
+	current, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"host_state_dir", "start_disabled", "required_workers"} {
+		if bytes.Contains(current, []byte(key)) {
+			t.Fatal("retired setting written", key)
 		}
 	}
 }

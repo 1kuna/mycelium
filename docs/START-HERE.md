@@ -79,11 +79,9 @@ IDs and arrange another single wait if necessary. See [wait flags](job-reference
    conflicting keys, cancellation release, stale results and failure reporting.
    Assert that executed commands cannot read the fleet token. Fake model answers
    prove transport mechanics only.
-8. For ownership switches, close consumer intent and fence late publication;
-   persist cancellation completion independently of Mycelium host settlement.
-   Use [revision-bound close/open](integrating.md#owner-switch), then check ready
-   and the application's own identity/health. A local exclusion PASS during queue
-   outage does not prove remote cancellation coverage.
+8. Persist consumer cancellation and late-publication fences independently.
+   Use [queue maintenance](integrating.md#maintenance) and exact release status,
+   then verify the application's own identity/health before routing traffic.
 9. Record the commands, result identities, complete outputs, checkpoint behavior
    and remaining native checks. Keep deployment approval and hardware qualification
    separate from laptop implementation proof.

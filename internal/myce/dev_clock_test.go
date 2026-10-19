@@ -129,7 +129,7 @@ func TestDevClockRestartReset(t *testing.T) {
 	if response.Code != 200 {
 		t.Fatal(response.Code, response.Body.String())
 	}
-	// Reopen the same SQLite and host state at the same queue endpoint.
+	// Reopen the same SQLite queue at the same queue endpoint.
 	config.Address = strings.TrimPrefix(d.URL, "http://")
 	before := RealClock{}.Now()
 	d, err = StartDev(config)

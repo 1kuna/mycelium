@@ -8,7 +8,7 @@ import (
 )
 
 func TestProductionInfrastructureRetryLimit(t *testing.T) {
-	for _, mode := range []string{"interrupted", "lost", "worker-restart", "queue-restart", "host-close", "leave", "operator", "polite"} {
+	for _, mode := range []string{"interrupted", "lost", "worker-restart", "queue-restart", "leave", "operator", "polite"} {
 		t.Run(mode, func(t *testing.T) {
 			q, clock := fixture(t)
 			m := machine("one", "fake")
@@ -57,26 +57,6 @@ func TestProductionInfrastructureRetryLimit(t *testing.T) {
 					if _, err := q.Checkin(Checkin{Machine: m, Fresh: true, PreviousSession: old, Running: &Execution{ID: running.ID, Attempt: running.Attempt}}); err != nil {
 						t.Fatal(err)
 					}
-				case "host-close":
-					request := closeExchange(m.HostID, clock)
-					request.HostRevision.Revision = uint64(attempt*2 - 1)
-					request.Sessions = []HostSession{{Machine: m.ID, Session: m.Session}}
-					ack, err := q.ReconcileHost(request)
-					if err != nil || len(ack.Pending) != 0 {
-						t.Fatal(ack, err)
-					}
-					// Release confirmation must be idempotent and cannot consume another retry.
-					if _, err := q.ReconcileHost(request); err != nil {
-						t.Fatal(err)
-					}
-					if attempt < 3 {
-						request.LastClose = &HostClose{HostRevision: request.HostRevision, Settlement: "confirmed"}
-						request.HostRevision = HostRevision{Revision: uint64(attempt * 2), Operation: ID()}
-						request.Desired, request.Sessions = "open", nil
-						if _, err := q.ReconcileHost(request); err != nil {
-							t.Fatal(err)
-						}
-					}
 				default:
 					if mode == "leave" {
 						if err := q.Leave(m.ID, true); err != nil {
@@ -122,9 +102,9 @@ func TestProductionInfrastructureRetryLimit(t *testing.T) {
 }
 
 func TestProductionStageFailureDoesNotRetry(t *testing.T) {
-	for _, mode := range []string{"exit", "oom", "container", "oom-interrupted", "closed-oom", "closed-exit"} {
+	for _, mode := range []string{"exit", "oom", "container", "oom-interrupted", "maintenance-oom", "maintenance-exit"} {
 		t.Run(mode, func(t *testing.T) {
-			q, clock := fixture(t)
+			q, _ := fixture(t)
 			m := machine("one", "fake")
 			m.HostID = "host"
 			submit(t, q, spec("production"))
@@ -132,8 +112,8 @@ func TestProductionStageFailureDoesNotRetry(t *testing.T) {
 			if err := q.Started(result(running, false)); err != nil {
 				t.Fatal(err)
 			}
-			if mode == "closed-oom" || mode == "closed-exit" {
-				if _, err := q.ReconcileHost(closeExchange(m.HostID, clock)); err != nil {
+			if mode == "maintenance-oom" || mode == "maintenance-exit" {
+				if err := setMaintenance(t, q, m.HostID, "disable"); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -142,7 +122,7 @@ func TestProductionStageFailureDoesNotRetry(t *testing.T) {
 			if mode == "container" {
 				r.Error = "container command failed"
 			}
-			r.OutOfMemory = mode == "oom" || mode == "oom-interrupted" || mode == "closed-oom"
+			r.OutOfMemory = mode == "oom" || mode == "oom-interrupted" || mode == "maintenance-oom"
 			r.Interrupted = mode == "oom-interrupted"
 			if err := q.Complete(r); err != nil {
 				t.Fatal(err)
@@ -172,17 +152,14 @@ func TestProductionCancelPendingPreventsRetry(t *testing.T) {
 			}
 			clock.Advance(time.Second)
 			if hostClose {
-				request := closeExchange(m.HostID, clock)
-				request.Sessions = []HostSession{{Machine: m.ID, Session: m.Session}}
-				if _, err := q.ReconcileHost(request); err != nil {
+				if err := setMaintenance(t, q, m.HostID, "disable"); err != nil {
 					t.Fatal(err)
 				}
-			} else {
-				r := result(running, false)
-				r.Interrupted = true
-				if err := q.Complete(r); err != nil {
-					t.Fatal(err)
-				}
+			}
+			r := result(running, false)
+			r.Interrupted = true
+			if err := q.Complete(r); err != nil {
+				t.Fatal(err)
 			}
 			assertNoCancellationAttempt(t, q, running)
 			if job(t, q, running.ID).InfrastructureRetries != 0 {

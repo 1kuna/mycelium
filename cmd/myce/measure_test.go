@@ -39,11 +39,11 @@ func TestRunMeasureRejectsInvalidConcurrencyAndTimeout(t *testing.T) {
 }
 
 func TestMeasureStartupRefusalNoWrites(t *testing.T) {
-	for _, refused := range []string{"state", "host", "model-cache", "environment-cache", "file-cache"} {
+	for _, refused := range []string{"state", "model-cache", "environment-cache", "file-cache"} {
 		t.Run(refused, func(t *testing.T) {
 			parent := t.TempDir()
 			roots := map[string]string{}
-			for _, name := range []string{"state", "host", "model-cache", "environment-cache"} {
+			for _, name := range []string{"state", "model-cache", "environment-cache"} {
 				roots[name] = filepath.Join(parent, name)
 			}
 			roots["file-cache"] = filepath.Join(roots["state"], "file-cache")
@@ -62,7 +62,6 @@ func TestMeasureStartupRefusalNoWrites(t *testing.T) {
 			if err := os.WriteFile(catalog, []byte("models:\n  - name: fixture-model\n    engine: fake\n    path: fake\n    memory_gb: 1\n    platforms: [fake]\n"), 0600); err != nil {
 				t.Fatal(err)
 			}
-			t.Setenv("MYCE_HOST_STATE_DIR", roots["host"])
 			snapshot := func() map[string]string {
 				t.Helper()
 				out := map[string]string{}

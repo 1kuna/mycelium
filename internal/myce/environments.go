@@ -249,14 +249,12 @@ func environmentSeconds(j *Job, m *Machine) float64 {
 // EnvironmentCache uses OS file locks, atomic publication and shared use leases.
 // Partial builds and evictions are moved to recoverable local Trash, never deleted.
 type EnvironmentCache struct {
-	HostStateDir string
-	hostRevision HostRevision
-	once         sync.Once
-	initErr      error
-	Root         string
-	Limit        int64
-	Clock        Clock
-	Run          func(context.Context, []string, string, []string, io.Writer) error
+	once    sync.Once
+	initErr error
+	Root    string
+	Limit   int64
+	Clock   Clock
+	Run     func(context.Context, []string, string, []string, io.Writer) error
 }
 
 func (c *EnvironmentCache) init() error {
@@ -272,7 +270,7 @@ func (c *EnvironmentCache) init() error {
 			c.initErr = errors.New("environment cache root is required")
 			return
 		}
-		if e := PrepareStateRoots(c.Root, c.HostStateDir); e != nil {
+		if e := PrepareStateRoots(c.Root); e != nil {
 			c.initErr = e
 			return
 		}
@@ -708,7 +706,7 @@ func (c *EnvironmentCache) cleanupBuild(path string) error {
 	return store.cleanupOrphan(c.Clock)
 }
 func (c *EnvironmentCache) runBuild(ctx context.Context, argv []string, dir string, env []string, out io.Writer) error {
-	return runRecordedHostCommand(ctx, argv, dir, env, out, hostCommandScope{HostDir: c.HostStateDir, StateDir: dir, Revision: c.hostRevision, Clock: c.Clock}, "build-state.json")
+	return runRecordedCommand(ctx, argv, dir, env, out, commandScope{StateDir: dir, Clock: c.Clock}, "build-state.json")
 }
 
 type environmentRuntime struct {

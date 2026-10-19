@@ -406,7 +406,7 @@ func TestMaintenancePendingDockerCreateRetainsExactCustody(t *testing.T) {
 		t.Fatal(status)
 	}
 }
-func TestMaintenanceQueueOutageAndLocalFence(t *testing.T) {
+func TestMaintenanceQueueOutageAndWithdrawnStart(t *testing.T) {
 	q, _ := fixture(t)
 	a, _ := maintenanceMachines()
 	j := maintenanceAssign(t, q, a, "experiment")
@@ -416,12 +416,10 @@ func TestMaintenanceQueueOutageAndLocalFence(t *testing.T) {
 	if err := w.authorizeStart(*j, a.Session); err == nil {
 		t.Fatal("queue outage authorized payload")
 	}
-	if _, err := q.ReconcileHost(closeExchange("host", &fakeClock{now: q.clock.Now()})); err != nil {
-		t.Fatal(err)
-	}
+	maintenanceChange(t, q, "disable", true)
 	maintenanceChange(t, q, "resume", false)
 	if err := q.Started(result(j, false)); !errors.Is(err, ErrStale) {
-		t.Fatal("resume bypassed old local fence", err)
+		t.Fatal("resume authorized withdrawn attempt", err)
 	}
 	if err := q.Close(); err != nil {
 		t.Fatal(err)
@@ -535,8 +533,7 @@ func TestMaintenanceLateDockerCreateAndPolicyDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	w.Machine.HostMemoryBudgetGB = policyReply.HostMemoryBudget.GiB
-	w.Machine.queueMemoryPolicy = true
-	if w.Machine.HostMemoryBudgetGB != 4 || !w.Machine.queueMemoryPolicy {
+	if w.Machine.HostMemoryBudgetGB != 4 {
 		t.Fatal("queue allowance not delivered")
 	}
 	if err := w.checkHostMemoryBudget(0, 5); !errors.Is(err, errWorkerMemory) {
@@ -664,6 +661,7 @@ func TestMaintenanceWorkerCheckinPolicy(t *testing.T) {
 	}))
 	defer server.Close()
 	w := recoveryWorker(t)
+	w.Machine.HostID = "test-host"
 	w.Client = Client{URL: server.URL, Token: "test"}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -703,7 +701,6 @@ func TestMaintenanceFractionalBudgetDelivery(t *testing.T) {
 		t.Fatal(reply.HostMemoryBudget)
 	}
 	w := Worker{Machine: m}
-	w.Machine.queueMemoryPolicy = true
 	if err := w.checkHostMemoryBudget(0, m.HostMemoryBudgetGB); err != nil {
 		t.Fatal("fitting fractional allowance refused", err)
 	}

@@ -46,20 +46,13 @@ func TestDevProbeInstallUpgrade(t *testing.T) {
 	}{
 		{"configuration-failure", TestInstallCLIDevicelessNeedsExplicitFlagAndBudget},
 		{"preserve-config", TestInstallPreservesEveryConfigField},
-		{"archive-refuse-fresh-closed", TestLegacyInstallArchiveFresh},
+		{"archive-refuse-fresh", TestLegacyInstallArchiveFresh},
 	} {
 		if !t.Run(tc.name, tc.run) {
 			return
 		}
 	}
-	t.Log("PASS: invalid config refused, upgrade preserves config, legacy refusal read-only, archived fresh install CLOSED")
-}
-
-func TestDevProbeRestVerdicts(t *testing.T) {
-	if !t.Run("real-dev-ready-active-closed-fenced", TestHostRestDevExpectations) {
-		return
-	}
-	t.Log("PASS: real dev API/CLI READY with active work, CLOSED with fenced queue, reopen and final CLOSED")
+	t.Log("PASS: invalid config refused, upgrade preserves config, legacy refusal read-only, archived fresh install")
 }
 
 func TestDevStandaloneSmoke(t *testing.T) {
@@ -77,13 +70,12 @@ func TestDevStandaloneSmoke(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	host := filepath.Join(root, "host")
 	const token = "standalone-smoke-fixture"
 	// Neither the child nor its jobs can see ambient MYCE_* values or user config.
 	// Fresh services and integration clients need not have /usr/sbin in PATH.
 	env := []string{"PATH=/usr/bin:/bin", "HOME=" + root, "TMPDIR=" + root, "MYCE_TOKEN=" + token}
-	t.Setenv("MYCE_TOKEN", token) // HostControl's local queue reconciliation only.
-	cmd := exec.CommandContext(ctx, binary, "dev", "--listen", "127.0.0.1:0", "--db", filepath.Join(root, "state", "queue.db"), "--checkpoints", filepath.Join(root, "checkpoints"), "--host-state-dir", host, "--host-id", "smoke-host", "--file-store", filepath.Join(root, "files"), "--workers", "1", "--memory-gb", "8")
+	t.Setenv("MYCE_TOKEN", token)
+	cmd := exec.CommandContext(ctx, binary, "dev", "--listen", "127.0.0.1:0", "--db", filepath.Join(root, "state", "queue.db"), "--checkpoints", filepath.Join(root, "checkpoints"), "--host-id", "smoke-host", "--file-store", filepath.Join(root, "files"), "--workers", "1", "--memory-gb", "8")
 	cmd.Dir, cmd.Env = root, env
 	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
 	cmd.WaitDelay = time.Second
@@ -106,12 +98,6 @@ func TestDevStandaloneSmoke(t *testing.T) {
 	// Registered before any assertion: even a failing readiness/effect check must
 	// fence and join this exact child. No host service manager is invoked.
 	defer func() {
-		if client.URL != "" {
-			report, err := (myce.HostControl{Dir: host, Clock: myce.RealClock{}, Service: envelopeService{}, Observe: envelopeHardware}).Disable(ctx, "smoke finally", 0)
-			if err != nil || !report.Confirmed {
-				t.Errorf("finally close: %v, confirmed=%v", err, report.Confirmed)
-			}
-		}
 		_ = cmd.Process.Signal(os.Interrupt)
 		select {
 		case err := <-done:
@@ -208,13 +194,12 @@ func TestDevStandaloneSmoke(t *testing.T) {
 	if effect, err := os.ReadFile(marker); err != nil || string(effect) != "done" {
 		t.Fatal("short command effect missing", err)
 	}
-	report, err := (myce.HostControl{Dir: host, Clock: myce.RealClock{}, Service: envelopeService{}, Observe: envelopeHardware}).Disable(ctx, "smoke close", 0)
-	if err != nil || !report.Confirmed {
-		t.Fatal("close", report, err)
+	var maintenance myce.HostMaintenanceStatus
+	if err := client.Call(ctx, "POST", "/api/hosts/smoke-host/maintenance", myce.HostMaintenanceRequest{Action: "drain"}, &maintenance); err != nil {
+		t.Fatal(err)
 	}
 	waitFor(func() bool {
-		state, err := myce.ReadHostIntent(host)
-		return err == nil && state.Desired == "closed" && state.HostSettlement() == "confirmed"
+		return client.Call(ctx, "GET", "/api/hosts/smoke-host/maintenance", nil, &maintenance) == nil && maintenance.Quiescent
 	})
-	t.Log("PASS: exact standalone binary, isolated HOME/state/env, authenticated API, short command effect/release, CLOSED/settled; owned child/listener joined by teardown")
+	t.Log("PASS: standalone binary, authenticated API, command effect/exact release, queue maintenance; child and listener joined")
 }

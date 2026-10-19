@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"maps"
 	"math"
 	"os"
@@ -46,9 +45,9 @@ type state struct {
 	LastWorkerContact time.Time `json:"last_worker_contact,omitempty"`
 	NetworkRecoveryAt time.Time `json:"network_recovery_at,omitempty"`
 
-	Schema           int                          `json:"schema_version"`
-	HostMaintenance  map[string]HostMaintenance   `json:"host_maintenance,omitempty"`
-	HostIntents      map[string]QueueHostIntent   `json:"host_intents,omitempty"`
+	Schema          int                        `json:"schema_version"`
+	HostMaintenance map[string]HostMaintenance `json:"host_maintenance,omitempty"`
+
 	Submissions      map[string]*submissionRecord `json:"submissions,omitempty"`
 	ProgramNeeds     map[string]SizeHint          `json:"program_needs,omitempty"`
 	Extensions       map[string]Extension         `json:"extensions,omitempty"`
@@ -73,10 +72,6 @@ type state struct {
 type Queue struct {
 	productionInfrastructureRetries int
 
-	localHostID            string
-	localHostErr           error
-	localHostDir           string
-	localHostQueue         string
 	files                  *FileStore
 	fileCheckpoints        bool
 	submitVerificationSlot chan struct{}
@@ -281,11 +276,7 @@ func (q *Queue) Close() error {
 }
 
 // Every mutation is atomic and durable; failed writes restore the previous state.
-func (q *Queue) update(fn func() error) error { return q.updateScoped(nil, false, fn) }
-func (q *Queue) updateMachine(machine string, fn func() error) error {
-	return q.updateScoped(func() string { return q.executionHost(machine) }, false, fn)
-}
-func (q *Queue) updateScoped(host func() string, admission bool, fn func() error) error {
+func (q *Queue) update(fn func() error) error {
 	available := true
 	if !q.simulation {
 		available, _ = q.nasProbe.run(q.root, func() (bool, error) {
@@ -316,23 +307,7 @@ func (q *Queue) updateScoped(host func() string, admission bool, fn func() error
 	oldQuiet := q.networkQuiet
 	q.usageWrites = nil
 	q.accountUsage(q.clock.Now())
-	var afterCommit func() error
-	var err error
-	if admission || host != nil && q.localHostID != "" && host() == q.localHostID {
-		localState, _ := json.Marshal(q.s)
-		afterCommit, err = q.reconcileLocalAdmission()
-		q.localHostErr = err
-		if err != nil {
-			log.Printf("local host admission fenced; retry on Tick: %v", err)
-			q.s = state{}
-			_ = json.Unmarshal(localState, &q.s)
-			q.calls, q.unreported, q.networkQuiet = oldCalls, oldUnreported, oldQuiet
-			err = nil
-		}
-	}
-	if err == nil {
-		err = fn()
-	}
+	err := fn()
 	if err == nil {
 		var data []byte
 		q.maintainSubmissions()
@@ -352,11 +327,7 @@ func (q *Queue) updateScoped(host func() string, admission bool, fn func() error
 		q.s = state{}
 		_ = json.Unmarshal(old, &q.s)
 	}
-	if err == nil && afterCommit != nil {
-		if ackErr := afterCommit(); ackErr != nil {
-			log.Printf("local host acknowledgement pending; retry on Tick: %v", ackErr)
-		}
-	}
+
 	return err
 }
 func (q *Queue) Submit(s Spec) (*Job, error) {
@@ -396,7 +367,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (*Job, error) {
 		}
 	}
 	var out Job
-	err = q.updateScoped(nil, true, func() error {
+	err = q.update(func() error {
 		q.maintainSubmissions()
 		existing, err := q.existingSubmission(s, fingerprint)
 		if err != nil {
@@ -518,7 +489,7 @@ func (q *Queue) stop(j *Job, why string) {
 func (q *Queue) fleetQuiet(now time.Time) bool {
 	active, healthy := 0, 0
 	for _, m := range q.s.Machines {
-		if !m.Gone && !m.Leaving && m.Disabled == "" {
+		if !m.Gone && !m.Leaving {
 			active++
 			if now.Sub(m.LastSeen) < min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2])) {
 				healthy++
@@ -563,7 +534,7 @@ func (q *Queue) maintain() {
 		outageGrace := !q.s.NetworkRecoveryAt.IsZero() && m.LastSeen.Before(q.s.NetworkRecoveryAt) && now.Before(q.s.NetworkRecoveryAt.Add(q.machineLossTimeout(m.ID)))
 		grace := !unreported && outageGrace || unreported && now.Before(q.restartUntil)
 		restartExpired := unreported && !grace
-		if m.Disabled == "" && !m.Gone && !grace && (restartExpired || (!q.networkQuiet && now.Sub(m.LastSeen) >= q.machineLossTimeout(m.ID))) {
+		if !m.Gone && !grace && (restartExpired || (!q.networkQuiet && now.Sub(m.LastSeen) >= q.machineLossTimeout(m.ID))) {
 			m.Gone = true
 			delete(q.unreported, m.ID)
 			m.Models = nil
@@ -591,7 +562,7 @@ func (q *Queue) maintain() {
 	if !q.s.NetworkRecoveryAt.IsZero() {
 		pending := false
 		for _, m := range q.s.Machines {
-			if !m.Gone && !m.Leaving && m.Disabled == "" && m.LastSeen.Before(q.s.NetworkRecoveryAt) {
+			if !m.Gone && !m.Leaving && m.LastSeen.Before(q.s.NetworkRecoveryAt) {
 				pending = true
 				break
 			}
@@ -602,7 +573,7 @@ func (q *Queue) maintain() {
 	}
 
 	for _, j := range q.s.Jobs {
-		if q.hostClosedReason(q.executionHost(j.Machine)) == "" && !q.networkQuiet && !q.unreported[j.Machine] && j.State == "stopping" && !j.Spec.Run.Docker && expired(j.StopAt, now) {
+		if !q.networkQuiet && !q.unreported[j.Machine] && j.State == "stopping" && !j.Spec.Run.Docker && expired(j.StopAt, now) {
 			if cancelled(j) {
 				j.State = "cancelled"
 				j.StopAt = nil
@@ -629,7 +600,7 @@ func (q *Queue) maintain() {
 	}
 }
 func (q *Queue) Tick() error {
-	if err := q.updateScoped(nil, true, func() error { q.maintain(); return nil }); err != nil {
+	if err := q.update(func() error { q.maintain(); return nil }); err != nil {
 		return err
 	}
 	return q.pruneBatchLogs()
@@ -666,9 +637,9 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			})
 		}
 	}
-	err := q.updateScoped(func() string { return hostID(&c.Machine) }, false, func() error {
+	err := q.update(func() error {
 		m := cloneMachine(&c.Machine)
-		m.Disabled = q.hostClosedReason(hostID(&m))
+		m.Disabled = ""
 		if progressErr != nil {
 			m.CheckpointUnavailable = true
 		}
@@ -718,15 +689,6 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 					}
 				}
 			}
-		}
-		if m.Disabled != "" {
-			m.Leaving = true
-			m.LastSeen = q.clock.Now()
-			q.s.Machines[m.ID] = &m
-			reply.Leave = true
-			reply.Stop = c.Running != nil && old != nil && old.Gone
-			reply.Kill = reply.Stop
-			return nil
 		}
 		q.reconcileHostReleases(c)
 		if m.TotalMemoryGB == 0 {
@@ -787,12 +749,8 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			if a := machineAvailability(&m); a != nil && !a.Available {
 				m.AdmissionReason = a.Reason
 			}
-			localBlocked := hostID(&m) == q.localHostID && q.localHostErr != nil
-			reply.AdmissionBlocked = availabilityBlocked(&m) || m.HostMemoryBudgetStatus() != "" || localBlocked || q.maintenanceBlocked(hostID(&m))
-			if localBlocked {
-				reply.Job = nil
-				return
-			}
+
+			reply.AdmissionBlocked = availabilityBlocked(&m) || m.HostMemoryBudgetStatus() != "" || q.maintenanceBlocked(hostID(&m))
 			for _, p := range q.hostObligations(hostID(&m)) {
 				if p.Preparation && p.Result.Machine == m.ID && p.Result.Session == m.Session {
 					if r, ok := q.s.HostReleases[releaseKey(HostRelease{Job: p.Result.ID, Machine: m.ID, Session: m.Session})]; ok && !r.Until.IsZero() {
@@ -986,13 +944,11 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 	verify := err == nil && j.FileTransport && j.State == "running" && !cancelled(j) && r.Success && !r.Interrupted && !r.ReleaseOnly
 	var outputs map[string]string
 	var host string
-	var revision HostRevision
 	if verify {
 		host = q.executionHost(r.Machine)
-		verify = q.hostClosedReason(host) == "" && q.s.Machines[r.Machine] != nil && q.s.Machines[r.Machine].Session == r.Session
+		verify = q.s.Machines[r.Machine] != nil && q.s.Machines[r.Machine].Session == r.Session
 		if verify {
 			outputs = maps.Clone(j.Spec.Outputs)
-			revision = q.s.HostIntents[host].HostRevision
 			r.OutputRefs = maps.Clone(r.OutputRefs)
 		}
 	}
@@ -1014,13 +970,13 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 		ctx = verificationCtx
 	}
 	var rejected error
-	err = q.updateMachine(r.Machine, func() error {
+	err = q.update(func() error {
 		if verify {
 			q.maintainStartDeadlines()
 			j, err := q.current(r)
 			m := q.s.Machines[r.Machine]
 			if err != nil || j.State != "running" || cancelled(j) || m == nil || m.Session != r.Session ||
-				q.executionHost(r.Machine) != host || q.s.HostIntents[host].HostRevision != revision || q.hostClosedReason(host) != "" || !maps.Equal(j.Spec.Outputs, outputs) {
+				q.executionHost(r.Machine) != host || !maps.Equal(j.Spec.Outputs, outputs) {
 				return ErrStale
 			}
 			if err := ctx.Err(); err != nil {
@@ -1257,11 +1213,13 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 				hosts[r.Host] = false
 			}
 		}
-		for host := range q.s.HostIntents {
+
+		for host := range q.s.HostMaintenance {
 			if _, ok := hosts[host]; !ok {
 				hosts[host] = false
 			}
 		}
+
 		for host, hasMachine := range hosts {
 			if !hasMachine {
 				if detail := q.dockerHoldDetail(host); detail.Text != "" {
@@ -1271,16 +1229,7 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 			if detail := q.startupReleaseDetail(host); detail.Text != "" {
 				out.HoldsDetail = append(out.HoldsDetail, detail)
 			}
-			workers, disabledWorkers := 0, 0
-			for _, m := range q.s.Machines {
-				if hostID(m) == host {
-					workers++
-					if m.Disabled != "" {
-						disabledWorkers++
-					}
-				}
-			}
-			if q.hostClosedReason(host) != "" || workers > 0 && disabledWorkers == workers {
+			if q.maintenanceBlocked(host) {
 				out.HoldsDetail = append(out.HoldsDetail, HoldDetail{Host: host, Kind: "host_disabled", Text: "host " + host + " disabled by operator"})
 			}
 		}
@@ -1386,6 +1335,10 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 		for _, m := range q.s.Machines {
 			copy := cloneMachine(m)
 			copy.AdmissionReason = q.machineLimitReason(m)
+			copy.Disabled = ""
+			if q.maintenanceBlocked(hostID(m)) {
+				copy.Disabled = "planned host maintenance"
+			}
 			if a := machineAvailability(m); a != nil && !a.Available {
 				copy.AdmissionReason = a.Reason
 			}
@@ -1547,7 +1500,7 @@ func (q *Queue) markStarted(j *Job) {
 }
 func (q *Queue) Started(r Result) error {
 	var rejected error
-	err := q.updateMachine(r.Machine, func() error {
+	err := q.update(func() error {
 		q.maintainStartDeadlines()
 		j, e := q.current(r)
 		if e != nil {
@@ -1574,9 +1527,9 @@ func (q *Queue) Started(r Result) error {
 }
 
 func (q *Queue) renewRecoveryStartWindow(j *Job) {
-	// Planned leave keeps its original start deadline. A confirmed host close
-	// interrupts even an undelivered completed attempt and needs a recovery window.
-	recovering := j.State == "running" || j.State == "stopping" && (plannedMaintenanceStop(j) || q.hostClosedReason(q.executionHost(j.Machine)) != "")
+	// Planned leave keeps its original deadline; queue maintenance stops retain
+	// the recovery window for already-started attempts.
+	recovering := j.State == "running" || j.State == "stopping" && plannedMaintenanceStop(j)
 	if j.Spec.Priority == "production" && recovering && j.StartedAt != nil && j.Spec.StartBy != nil {
 		// Recovery is bounded from loss detection, using the original first-start window.
 		if j.StartWindow == 0 {

@@ -4,19 +4,15 @@ import (
 	"context"
 	"errors"
 	"flag"
-	"time"
-
 	"mycelium/internal/myce"
+	"time"
 )
 
-// Exact offline custody reconciliation shares the host worker mutation boundary.
-func resolveDockerCommand(args []string, probe myce.MachineProbe, resolver myce.HostIdentityResolver, launch myce.HostChildLauncher) error {
+// Reconciliation takes the worker spool's exclusive lock and releases only this attempt.
+func resolveDockerCommand(args []string) error {
 	f := flag.NewFlagSet("resolve-docker", flag.ContinueOnError)
-	dir := f.String("state-dir", "", "offline registered worker spool")
-	hostDir := f.String("host-state-dir", "", "shared local host control directory")
+	dir := f.String("state-dir", "", "offline worker spool")
 	identity := f.String("attempt-id", "", "exact attempt identity from worker custody")
-	user := f.String("worker-user", "", "installed worker account (required under root)")
-	config := f.String("config", "", "installed worker config")
 	timeout := f.Duration("timeout", 10*time.Second, "exact-custody reconciliation deadline")
 	if err := f.Parse(args); err != nil {
 		return err
@@ -26,10 +22,5 @@ func resolveDockerCommand(args []string, probe myce.MachineProbe, resolver myce.
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	v, err := resolver.Resolve(*user, *config, *hostDir)
-	if err != nil {
-		return err
-	}
-	_, err = v.Mutate(ctx, myce.HostMutation{Operation: "resolve-docker", SpoolDir: *dir, AttemptID: *identity, Timeout: *timeout}, launch, hostMutationExecutor(probe).Execute)
-	return err
+	return myce.ReconcileDockerAttempt(ctx, *dir, *identity)
 }

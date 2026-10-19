@@ -41,9 +41,9 @@ type MaintenanceAttempt struct {
 }
 
 type HostMaintenanceStatus struct {
-	Host            string               `json:"host"`
-	Policy          HostMaintenance      `json:"policy"`
-	LocalFence      string               `json:"local_fence,omitempty"`
+	Host   string          `json:"host"`
+	Policy HostMaintenance `json:"policy"`
+
 	Workers         []MaintenanceWorker  `json:"workers"`
 	Attempts        []MaintenanceAttempt `json:"attempts"`
 	Calls           int                  `json:"calls"`
@@ -167,7 +167,7 @@ func (q *Queue) HostMaintenanceStatus(host string) (HostMaintenanceStatus, error
 	return q.hostMaintenanceStatus(host), nil
 }
 func (q *Queue) hostMaintenanceStatus(host string) HostMaintenanceStatus {
-	out := HostMaintenanceStatus{Host: host, Policy: q.s.HostMaintenance[host], LocalFence: q.hostClosedReason(host), Workers: []MaintenanceWorker{}, Attempts: []MaintenanceAttempt{}, PendingReleases: []HostRelease{}, PendingCleanup: []string{}}
+	out := HostMaintenanceStatus{Host: host, Policy: q.s.HostMaintenance[host], Workers: []MaintenanceWorker{}, Attempts: []MaintenanceAttempt{}, PendingReleases: []HostRelease{}, PendingCleanup: []string{}}
 	if out.Policy.Mode == "" {
 		out.Policy.Mode = "enabled"
 	}

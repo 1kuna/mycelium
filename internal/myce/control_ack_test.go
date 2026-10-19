@@ -4,12 +4,11 @@ import (
 	"testing"
 )
 
-func TestClosedHostFencesBatchModelsAndPreparation(t *testing.T) {
+func TestMaintenanceFencesBatchModelsAndPreparation(t *testing.T) {
 	q, _, m := syncFixture(t)
-	if err := closeQueueHost(q, hostID(&m), "test", nil); err != nil {
+	if err := setMaintenance(t, q, hostID(&m), "disable"); err != nil {
 		t.Fatal(err)
 	}
-	m.Disabled = "test"
 	m.Leaving = true
 	m.EnvironmentBuilder = true
 	if err := q.SyncModel(SyncRequest{Model: "a", To: m.ID}); err != nil {
@@ -20,17 +19,17 @@ func TestClosedHostFencesBatchModelsAndPreparation(t *testing.T) {
 	}
 	j := submit(t, q, spec("experiment"))
 	reply := check(t, q, m, nil)
-	if !reply.Leave || reply.Job != nil || len(reply.ModelPlan) != 0 || len(reply.CopyPlan) != 0 || len(reply.EnvironmentPlan) != 0 {
+	if !reply.AdmissionBlocked || reply.Job != nil || len(reply.ModelPlan) != 0 || len(reply.CopyPlan) != 0 || len(reply.EnvironmentPlan) != 0 {
 		t.Fatalf("held admission: %+v", reply)
 	}
 	requireState(t, q, j.ID, "queued")
-	if q.placementAllowed(job(t, q, j.ID), &m) || modelFitsMachine(q.models.Models[0], &m) {
+	if q.placementAllowed(job(t, q, j.ID), &m) {
 		t.Fatal("held worker eligible for placement")
 	}
-	q.s.HostIntents = nil
-	m.Disabled = ""
+	if err := setMaintenance(t, q, hostID(&m), "resume"); err != nil {
+		t.Fatal(err)
+	}
 	m.Leaving = false
-	q.s.Machines[m.ID].Disabled = ""
 	q.s.Machines[m.ID].Leaving = false
 	reply = check(t, q, m, nil)
 	if reply.AdmissionBlocked {

@@ -60,7 +60,7 @@ printf useful-result > output
 	s.Run.Env = map[string]string{"MYCE_USAGE_FILE": "payload-must-not-choose-report"}
 	j := submit(t, q, s)
 	ctx, cancel := context.WithCancel(context.Background())
-	w := Worker{Client: Client{URL: server.URL, Token: "throwaway"}, Machine: machine("fake-hypha", "fake"), ExtensionRoot: root, JobFileRoot: shared, StateDir: newTestStateRoot(t), HostStateDir: readyTestHost(t, t.TempDir()), Interval: 5 * time.Millisecond}
+	w := Worker{Client: Client{URL: server.URL, Token: "throwaway"}, Machine: machine("fake-hypha", "fake"), ExtensionRoot: root, JobFileRoot: shared, StateDir: newTestStateRoot(t), Interval: 5 * time.Millisecond}
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
 	t.Cleanup(func() {
@@ -143,7 +143,7 @@ printf useful-result > output
 	if err != nil {
 		t.Fatal(err)
 	}
-	w := Worker{Client: c, Machine: machine("relative-state", "fake"), ExtensionRoot: root, StateDir: state, HostStateDir: readyTestHost(t, t.TempDir()), Interval: 5 * time.Millisecond}
+	w := Worker{Client: c, Machine: machine("relative-state", "fake"), ExtensionRoot: root, StateDir: state, Interval: 5 * time.Millisecond}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()

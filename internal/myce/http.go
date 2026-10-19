@@ -26,10 +26,6 @@ func (a API) Handler() http.Handler {
 	a.registerDevClock(mux)
 	a.registerHostMaintenance(mux)
 	a.registerPriorityPolicy(mux)
-	mux.HandleFunc("GET /api/hosts/{id}/observation", func(w http.ResponseWriter, r *http.Request) {
-		v, err := a.Queue.ReadHostObservation(r.Context(), r.PathValue("id"))
-		respond(w, v, err)
-	})
 	a.registerFiles(mux)
 	mux.HandleFunc("POST /api/extensions", func(w http.ResponseWriter, r *http.Request) {
 		var e Extension
@@ -179,18 +175,6 @@ func (a API) Handler() http.Handler {
 		}
 		respond(w, map[string]bool{"ok": true}, a.Queue.AppendLog(c))
 	})
-	mux.HandleFunc("POST /api/hosts/{id}/reconcile", func(w http.ResponseWriter, r *http.Request) {
-		var c HostExchange
-		if !decode(w, r, &c) {
-			return
-		}
-		if c.Host != r.PathValue("id") {
-			respond(w, nil, &hostReconcileError{cause: errors.New("host identity mismatch"), code: "host_reconcile_rejected"})
-			return
-		}
-		v, err := a.Queue.ReconcileHost(c)
-		respond(w, v, err)
-	})
 	mux.HandleFunc("POST /api/workers/{id}/leave", func(w http.ResponseWriter, r *http.Request) {
 		var c struct {
 			Now bool `json:"now"`
@@ -268,11 +252,6 @@ func respond(w http.ResponseWriter, v any, err error) {
 			code = rule.code
 		}
 		body := map[string]any{"error": rejectionMessages[code], "code": code}
-		var rejected *hostReconcileError
-		if errors.As(err, &rejected) {
-			status = http.StatusConflict
-			body = map[string]any{"error": "host reconciliation rejected; retry", "code": rejected.code, "queue_revision": rejected.revision}
-		}
 		var apiError *HTTPError
 		if errors.As(err, &apiError) && (rejectionMessages[apiError.Code] != "" || apiError.Code == "worker_protocol_invalid" || apiError.Code == "submission_key_conflict" || apiError.Code == "submission_key_expired" || apiError.Code == "submission_key_invalid" || apiError.Code == "job_unknown") {
 			status = apiError.Status
@@ -341,12 +320,11 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 	if res.StatusCode >= 300 {
 		e := &HTTPError{Status: res.StatusCode, Message: "request failed"}
 		var body struct {
-			QueueRevision HostRevision `json:"queue_revision"`
-			Code          string       `json:"code"`
-			Error         string       `json:"error"`
+			Code  string `json:"code"`
+			Error string `json:"error"`
 		}
-		if json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&body) == nil && (rejectionMessages[body.Code] != "" || body.Code == "submission_key_invalid" || body.Code == "worker_protocol_mismatch" || body.Code == "worker_protocol_invalid" || body.Code == "submission_key_conflict" || body.Code == "submission_key_expired" || body.Code == "job_unknown" || body.Code == "host_reconcile_rejected" || body.Code == "host_revision_behind_queue") {
-			e.Code, e.Message, e.QueueRevision = body.Code, body.Error, body.QueueRevision
+		if json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&body) == nil && (rejectionMessages[body.Code] != "" || body.Code == "submission_key_invalid" || body.Code == "worker_protocol_mismatch" || body.Code == "worker_protocol_invalid" || body.Code == "submission_key_conflict" || body.Code == "submission_key_expired" || body.Code == "job_unknown") {
+			e.Code, e.Message = body.Code, body.Error
 			if message := rejectionMessages[body.Code]; message != "" {
 				e.Message = message
 			}
@@ -361,11 +339,10 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 }
 
 type HTTPError struct {
-	QueueRevision HostRevision
-	JobID         string // Only job_unknown carries the requested cancellation identity.
-	Code          string
-	Status        int
-	Message       string
+	JobID   string // Only job_unknown carries the requested cancellation identity.
+	Code    string
+	Status  int
+	Message string
 }
 
 func (e *HTTPError) Error() string {

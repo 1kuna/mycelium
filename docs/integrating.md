@@ -57,38 +57,15 @@ For isolated dev expiry tests use `myce dev clock advance 30d`; it has no produc
 route. See the [full submission/cancellation contract](design-proposal.md#submission-identity-and-cancellation-80)
 and [wire schemas](schemas/job-v1.schema.json).
 
-## Owner switch
+## Maintenance
 
-The consumer owns its operation intent, cancellation completion, output fence
-and other-owner checks. Mycelium owns only its host admission/release obligations.
-Do not put consumer state in the queue or infer completion from a host verdict.
-
-1. Close consumer intent, reject late attempt publication, and cancel exact IDs/keys.
-2. On the worker host, close Mycelium, preserving the returned accepted revision:
-
-   ```sh
-   myce host close --local --config WORKER_CONFIG --wait-released --timeout 30s --json
-   myce host status --local --config WORKER_CONFIG --expect closed --verdict --timeout 10s --json
-   ```
-
-   Real Linux privileged release uses the [protected root copy](operations.md#protected-root-owned-copy)
-   with `--worker-user WORKER_USER`. Local exclusion can pass offline while
-   queue settlement remains pending; that is not full rest or remote cancellation proof.
-3. Persist consumer cancellation completion independently and verify the other
-   owner has released the host before reopening. Require confirmed previous-close
-   settlement. Read status and use its current `desired.revision`:
-
-   ```sh
-   myce host status --local --config WORKER_CONFIG --json
-   myce host open --local --config WORKER_CONFIG --expect-revision REVISION --timeout 30s --json
-   myce host status --local --config WORKER_CONFIG --expect ready --wait --timeout 30s --json
-   ```
-
-4. Require ready PASS, then verify the application's own runtime/model identity
-   and complete health/result. Acceptance is not readiness or application health.
-   `revision_mismatch` rejects without acceptance; `revision_superseded` preserves
-   the earlier acceptance and directs the caller to the newer intent. Never
-   bypass an unsettled close, stale revision or UNKNOWN observation.
+Close consumer publication intent and persist exact cancellation acknowledgements
+independently. Use `myce host drain HOST` or `host disable HOST --stop --wait` for
+queue maintenance. Inspect exact pending cleanup and worker freshness, then use
+`host resume HOST` when authorized. Queue outage leaves maintenance unavailable;
+ordinary service tools have no queue release guarantee. Check the application's
+own runtime/model identity and health before directing traffic to it. Integrate
+through the submission API; no local host-control client is required.
 
 For a Python caller use [Client](../clients/python/README.md); resumable commands
 use [the checkpoint contract](guide-resumable-jobs.md). Dependency recipes,

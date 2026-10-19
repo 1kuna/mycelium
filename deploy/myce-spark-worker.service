@@ -1,11 +1,10 @@
 # Generic worker template; provision a versioned config with myce install.
-# Install as the worker, initially CLOSED. Never run this binary as root.
+# Install as the worker with queue admission disabled. Never run this binary as root.
 [Unit]
 Description=Mycelium worker
 After=network-online.target
 
 [Service]
-ExecCondition=REPLACE_WORKER_BINARY _host-start-check --host-state-dir REPLACE_HOST_STATE_DIR
 ExecStart=:REPLACE_WORKER_BINARY service --config REPLACE_CONFIG
 EnvironmentFile=REPLACE_GPU_ENVIRONMENT_FILE
 Restart=on-failure

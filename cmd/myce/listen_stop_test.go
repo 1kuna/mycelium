@@ -19,7 +19,7 @@ func TestQueueBindStopHelper(t *testing.T) {
 		return
 	}
 	dir := os.Getenv("MYCE_TEST_BIND_DIR")
-	args := []string{"queue", "--token", "bind-test-only", "--db", filepath.Join(dir, "queue.db"), "--checkpoints", filepath.Join(dir, "checkpoints"), "--identity-dir", filepath.Join(dir, "identity"), "--host-state-dir", filepath.Join(dir, "host-state")}
+	args := []string{"queue", "--token", "bind-test-only", "--db", filepath.Join(dir, "queue.db"), "--checkpoints", filepath.Join(dir, "checkpoints"), "--identity-dir", filepath.Join(dir, "identity")}
 	if os.Getenv("MYCE_TEST_BIND_LISTENER") == "joining" {
 		args = append(args, "--listen", "127.0.0.1:0", "--discovery-listen", "192.0.2.1:0")
 	} else {
