@@ -633,6 +633,18 @@ func TestExclusionStagedInstallKeepsUnknownProof(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Installation preserves an existing UNKNOWN observation; it no longer
+	// performs a new close/observation merely to stage a binary. Fresh null
+	// observations are separately covered by the install-preservation tests.
+	report := testUnknownExclusion(context.Background(), initial)
+	initial.LocalExclusion = &HostLocalExclusion{Evidence: &report, HostObservation: HostObservation{HostRevision: initial.HostRevision, Boot: report.Boot}}
+	if err = atomicHostJSON(c.HostStateDir, hostStateFile, initial, nil); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(filepath.Join(c.HostStateDir, hostStateFile))
+	if err != nil {
+		t.Fatal(err)
+	}
 	binary := filepath.Join(home, "binary")
 	if err = os.WriteFile(binary, []byte("fixture"), 0700); err != nil {
 		t.Fatal(err)
@@ -642,6 +654,12 @@ func TestExclusionStagedInstallKeepsUnknownProof(t *testing.T) {
 		if strings.HasSuffix(text, filepath.Base(c.Service)) && (strings.Contains(text, "enable --now ") || strings.Contains(text, "restart ")) {
 			t.Fatal("staged install activated worker", args)
 		}
+		if strings.Contains(text, "--property=UnitFileState") {
+			return []byte("disabled"), nil
+		}
+		if strings.Contains(text, "--property=DropInPaths") {
+			return nil, nil
+		}
 		if strings.Contains(text, "show ") {
 			return []byte("LoadState=loaded\nActiveState=inactive\nControlGroup=\nKillMode=control-group\nSendSIGKILL=yes\n"), nil
 		}
@@ -650,6 +668,10 @@ func TestExclusionStagedInstallKeepsUnknownProof(t *testing.T) {
 	for i := 0; i < 2; i++ {
 		if err = Install(context.Background(), c, binary, "fixture-token", command); err != nil {
 			t.Fatal("disabled install/rerun", i, err)
+		}
+		after, err := os.ReadFile(filepath.Join(c.HostStateDir, hostStateFile))
+		if err != nil || string(before) != string(after) {
+			t.Fatal("install changed stored exclusion evidence", err)
 		}
 		state, err := ReadHostIntent(c.HostStateDir)
 		if err != nil || state.Desired != "closed" || state.HostRevision != initial.HostRevision || !state.StopDeadline.Equal(*initial.StopDeadline) {
