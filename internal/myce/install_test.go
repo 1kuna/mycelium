@@ -96,7 +96,7 @@ func TestInstallAndUninstallTempOnly(t *testing.T) {
 	if e = Install(context.Background(), c, executable, "private-test-secret", runner); e != nil {
 		t.Fatal(e)
 	}
-	if len(commands) != 5 {
+	if len(commands) != 7 {
 		t.Fatal(commands)
 	}
 	token, e := ReadServiceToken(c)
@@ -120,7 +120,13 @@ func TestInstallAndUninstallTempOnly(t *testing.T) {
 		t.Fatal("unit not upgraded", e)
 	}
 	old, e := os.ReadDir(filepath.Join(filepath.Dir(c.Service), ".Trash"))
-	if e != nil || len(old) != 1 {
+	foundBackup := false
+	for _, entry := range old {
+		if strings.HasSuffix(entry.Name(), "-"+filepath.Base(c.Service)) {
+			foundBackup = true
+		}
+	}
+	if e != nil || !foundBackup {
 		t.Fatal("old unit not recoverable", e)
 	}
 	if e = Uninstall(context.Background(), c, false, runner); e != nil {
@@ -346,12 +352,12 @@ func TestInstallDeploymentNASAndUpgrade(t *testing.T) {
 			}
 			changed := c
 			changed.LogRetention = 24 * 60 * 60 * 1e9
-			if err := Install(context.Background(), changed, executable, "", runner); err == nil || !strings.Contains(err.Error(), "--force") || !strings.Contains(err.Error(), "log_retention") {
-				t.Fatal("missing config diff", err)
-			}
-			changed.Force = true
 			if err := Install(context.Background(), changed, executable, "", runner); err != nil {
-				t.Fatal(err)
+				t.Fatal("explicit configuration change required --force", err)
+			}
+			got, err := ReadServiceConfig(c.Config)
+			if err != nil || got.LogRetention != changed.LogRetention {
+				t.Fatal("explicit update was not saved", err)
 			}
 		})
 	}
@@ -377,6 +383,9 @@ func TestInstallStartDisabledPreservesHostGate(t *testing.T) {
 		text := strings.Join(a, " ")
 		if strings.HasSuffix(text, filepath.Base(c.Service)) && (strings.Contains(text, "enable --now") || strings.Contains(text, "restart ")) {
 			t.Fatal("started disabled worker")
+		}
+		if strings.Contains(text, "--property=DropInPaths") {
+			return nil, nil
 		}
 		if strings.Contains(text, "show ") {
 			return []byte("LoadState=loaded\nActiveState=inactive\nControlGroup=\nKillMode=control-group\nSendSIGKILL=yes\n"), nil

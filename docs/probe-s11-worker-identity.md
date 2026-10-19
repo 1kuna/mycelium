@@ -4,7 +4,12 @@
 root host control is accepted. Laptop protocol tests exercise the real launcher,
 child entry and environment as the same user; they do not qualify credential
 changes or the real user manager. Run only with current authorization against a
-disposable installed worker fixture.
+disposable installed worker fixture. **UNRUN / needs-maintainer:** this document is a
+probe plan, not evidence of native acceptance. Pin the reviewed worker/root
+artifact SHA-256 and commit before starting. Use one 60-second total deadline
+including teardown (at most 30 seconds outage plus 30 seconds observation); do
+not renew it. Stop on the first failure, preserve evidence, and leave the fixture
+closed through the same recovery path. A failed recovery remains failed/unknown.
 
 ## Separate root deployment
 
@@ -107,5 +112,49 @@ MYCE_HOST_STATE_DIR or caller session-bus inference selects privileged identity.
 S05 supplies mandatory reconciliation/previous-close settlement to
 `HostMutationExecutor`; S08 owns the final status/verdict envelope. The S06
 adapter's cleanup confirmation is never the complete local-exclusion PASS.
-S07 must record `DOCKER_HOST` at install and read the endpoint from config;
-endpoint persistence is not implemented by S06.
+The installed Docker endpoint is persisted in config; verify its selected daemon
+and socket access as the worker. Endpoint persistence alone proves neither daemon
+identity nor release.
+
+## Install/upgrade probe sequence (document only)
+
+1. Before changing the disposable fixture, close it with the protected absolute
+   root entry and verify closed intent. Preserve the current revision, operation,
+   accepted time, stop deadline, sibling device gates, queue DB, spools and
+   checkpoint manifests. Keep recovery copies and hashes private; never print
+   credentials, environments or raw custody. Install/upgrade is a worker action:
+   root must not run `install`, `service`, `detect` or any non-host command.
+2. As the worker, rerun `myce install worker --config <fixture-config>` without
+   `--force`. Verify schema version 1 and every custom path, resource ceiling,
+   device/unit identity, required-worker list, secret reference, Docker endpoint,
+   PATH and joining setting. Only explicit flags may change the intended config;
+   verify explicit false/zero separately. The intended diff lists changed field
+   names without values. Snapshot the protected root binary before and after:
+   worker install must neither replace it nor change its mode/owner/ACLs.
+3. Put the runtime binary, durable config/spool and user units on separate
+   filesystems. Confirm same-directory atomic replacement, directory fsync and
+   recoverable originals under each destination's `.Trash`. Inject write, rename,
+   fsync, daemon-reload and preactivation failures using a disposable fixture;
+   recover originals without moving files across filesystem boundaries. Inject
+   EXDEV explicitly as well. Verify config/binary/unit bytes recover, spools/DB
+   stay intact, and admission and sibling gates remain closed. Interrupted
+   publication leaves recoverable originals; do not activate a mixed build.
+4. Preserve consumer drop-ins byte-for-byte. A harmless resource override remains
+   effective; an execution, environment or startup-gate override blocks install
+   before any worker activation. Inspect the generated unit plus the manager's
+   actual FragmentPath/DropInPaths and effective ExecStart/ExecCondition,
+   KillMode, delegation and stop timeout. An inspection failure is a failed probe.
+5. Verify both convergence units use the same installed worker binary and config
+   with a bounded reconcile timeout, independent of the GPU unit. Install may
+   enable the convergence timer and register the worker for boot, but never starts
+   or restarts the worker. Fresh staging and explicit `--start-disabled=false`
+   must remain closed; an open host must refuse worker upgrade before mutation.
+   Reopening requires fresh reconciliation and an explicit revision-bound host
+   open, outside this install probe. Verify logout/linger and boot startup remain
+   fenced, with no incompatible worker or terminal attempt replay.
+6. Repeat root-local close/status/reconcile via the pinned root copy and the
+   worker account. Trace UID/GID/groups, `/proc/self/exe`, fd closure, HOME,
+   runtime/user bus, actual mount/cache access and worker-owned locks/files.
+   Check actual service manager/delegation/restart behavior and every typed
+   deployed failure in the native checks above. Finish closed, verify no fixture
+   work remains active, and record native evidence separately from laptop tests.
