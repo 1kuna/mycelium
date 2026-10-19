@@ -11,8 +11,8 @@ import (
 
 // statusBefore consumes the scheduler projection, never recreates its policy.
 func statusBefore(a, b *Job) bool {
-	if rank(a.Spec.Priority) != rank(b.Spec.Priority) {
-		return rank(a.Spec.Priority) < rank(b.Spec.Priority)
+	if a.PriorityPolicy.Index != b.PriorityPolicy.Index {
+		return a.PriorityPolicy.Index < b.PriorityPolicy.Index
 	}
 	active := func(j *Job) int {
 		if j.State == "running" || j.State == "stopping" {
@@ -88,6 +88,30 @@ func activeJobs(jobs []*Job, priority string) []*Job {
 	for _, job := range jobs {
 		if job != nil && job.Spec.Priority == priority && !terminal(job.State) {
 			out = append(out, job)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return statusBefore(out[i], out[j]) })
+	return out
+}
+
+func statusTiers(s Snapshot) []PriorityTier {
+	if len(s.PriorityPolicy.Policy.Tiers) > 0 {
+		return s.PriorityPolicy.Policy.Tiers
+	}
+	return defaultPriorityPolicy().Tiers
+}
+func activeTierJobs(jobs []*Job, tier string) []*Job {
+	out := []*Job{}
+	for _, j := range jobs {
+		if j == nil || terminal(j.State) {
+			continue
+		}
+		name := j.PriorityPolicy.Tier
+		if name == "" {
+			name = (&Queue{}).priorityMatch(j.Spec).Tier
+		}
+		if name == tier {
+			out = append(out, j)
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return statusBefore(out[i], out[j]) })
@@ -211,7 +235,7 @@ func displayState(state string) string {
 func stringsList(values ...string) []string { return values }
 
 var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
-	"activeJobs":         activeJobs,
+	"statusTiers": statusTiers, "activeTierJobs": activeTierJobs, "activeJobs": activeJobs,
 	"hyphaAvailability":  HyphaAvailability,
 	"profileLines":       CapabilityProfileLines,
 	"extensionStatus":    ExtensionStatus,
@@ -298,15 +322,15 @@ var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
   </section>
 
   <section aria-labelledby="queue-title">
-    <div class="section-head"><h2 id="queue-title">Queue</h2><p>Grouped by scheduling priority</p></div>
+    <div class="section-head"><h2 id="queue-title">Queue</h2><p>Grouped by scheduling priority · policy revision {{.PriorityPolicy.Revision}}</p></div>
     <div class="queue">
-    {{range $priority := (list "production" "deadline" "experiment")}}{{$jobs := activeJobs $.Jobs $priority}}
+    {{range $tier := statusTiers .}}{{$priority := $tier.Name}}{{$jobs := activeTierJobs $.Jobs $priority}}
       <div class="card priority"><div class="priority-head"><h3>{{$priority}}</h3><span class="count">{{len $jobs}} active</span></div>
-      {{range $jobs}}<div class="job"><div><div class="job-name">{{.Spec.Name}}</div><div class="muted">{{jobWork .}}</div><code title="{{.ID}}">{{shortID .ID}}</code></div><div><div class="state">{{jobState .}}</div>{{with jobAge . $.Now}}<div class="muted">{{.}}</div>{{end}}</div><div class="machine-cell">{{if .Machine}}{{.Machine}}{{else}}Unassigned{{end}}</div><div class="reason {{if .Reason}}important{{end}}">{{jobReason .}}</div></div>
+      {{range $jobs}}<div class="job"><div><div class="job-name">{{.Spec.Name}}</div><div class="muted">{{jobWork .}}</div><div class="muted">{{.Spec.Project}}/{{.Spec.Class}} · tier {{.PriorityPolicy.Tier}} · {{.PriorityPolicy.Selector}} · revision {{.PriorityPolicy.Revision}}</div><code title="{{.ID}}">{{shortID .ID}}</code></div><div><div class="state">{{jobState .}}</div>{{with jobAge . $.Now}}<div class="muted">{{.}}</div>{{end}}</div><div class="machine-cell">{{if .Machine}}{{.Machine}}{{else}}Unassigned{{end}}</div><div class="reason {{if .Reason}}important{{end}}">{{jobReason .}}</div></div>
       {{else}}<div class="job"><span class="muted">No {{$priority}} work.</span></div>{{end}}</div>
     {{end}}
 	{{$finished := recentFinishedJobs .Jobs}}{{if $finished}}<div class="card priority"><div class="priority-head"><h3>Recent outcomes</h3><span class="count">{{len $finished}} shown</span></div>
-	  {{range $finished}}<div class="job"><div><div class="job-name">{{.Spec.Name}}</div><div class="muted">{{jobWork .}}</div><code title="{{.ID}}">{{shortID .ID}}</code></div><div><div class="state">{{jobState .}}</div>{{with jobAge . $.Now}}<div class="muted">{{.}}</div>{{end}}</div><div class="machine-cell">{{if .Machine}}{{.Machine}}{{else}}Unassigned{{end}}</div><div class="reason">{{.Reason}}</div></div>{{end}}
+	  {{range $finished}}<div class="job"><div><div class="job-name">{{.Spec.Name}}</div><div class="muted">{{jobWork .}}</div><div class="muted">{{.Spec.Project}}/{{.Spec.Class}} · tier {{.PriorityPolicy.Tier}} · {{.PriorityPolicy.Selector}} · revision {{.PriorityPolicy.Revision}}</div><code title="{{.ID}}">{{shortID .ID}}</code></div><div><div class="state">{{jobState .}}</div>{{with jobAge . $.Now}}<div class="muted">{{.}}</div>{{end}}</div><div class="machine-cell">{{if .Machine}}{{.Machine}}{{else}}Unassigned{{end}}</div><div class="reason">{{.Reason}}</div></div>{{end}}
 	</div>{{end}}
     </div>
   </section>

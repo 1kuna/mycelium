@@ -90,6 +90,10 @@ func TestProductionStartDeadlineBlockers(t *testing.T) {
 		t.Run(blocker, func(t *testing.T) {
 			q, c := fixture(t)
 			m := machine("b70", "xpu")
+			if blocker == "Docker" {
+				m.Capabilities = []string{"docker"}
+				m.CapabilityProfile.OS = "linux"
+			}
 			m.TotalMemoryGB = 8
 			check(t, q, m, nil)
 			var experiment *Job
@@ -436,7 +440,7 @@ func TestProductionStartDeadlineDisabledFleetFailsPromptly(t *testing.T) {
 
 func TestProductionStartDeadlineOwnDockerPreparationPermit(t *testing.T) {
 	q, _ := fixture(t)
-	m := machine("b70", "xpu")
+	m := dockerMachine("b70", "xpu")
 	s := dockerJob().Spec
 	s.Priority = "production"
 	submit(t, q, s)

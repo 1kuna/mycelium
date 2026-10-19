@@ -176,7 +176,10 @@ func (q *Queue) callDefaults(c *ModelCall, model Model, h http.Header, defaults 
 		}
 		return errors.New("X-Myce-Project and X-Myce-Priority are required (or set the entry's project/default_call_priority)")
 	}
-	if rank(c.Priority) == 3 {
+	if err := validateProjectIdentifier(c.Project); err != nil {
+		return err
+	}
+	if legacyRank(c.Priority) == 3 {
 		return errors.New("X-Myce-Priority must be production, deadline, or experiment")
 	}
 	c.Deadline = nil

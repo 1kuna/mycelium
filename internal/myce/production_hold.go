@@ -157,7 +157,7 @@ func (q *Queue) placementAllowed(j *Job, m *Machine) bool {
 }
 
 func (q *Queue) placementAllowedForUse(j *Job, m *Machine, resident bool) bool {
-	if cancelled(j) || q.maintenanceBlocked(hostID(m)) || m.HostMemoryPolicyMismatch || !logPolicyFits(j.Spec.Logs, m) {
+	if cancelled(j) || !dockerRuntimeFits(j, m) || q.maintenanceBlocked(hostID(m)) || m.HostMemoryPolicyMismatch || !logPolicyFits(j.Spec.Logs, m) {
 		return false
 	}
 	if model, ok := q.model(j.Spec.Needs.Model); ok {
@@ -359,7 +359,7 @@ func (q *Queue) productionTarget(j *Job, call *ModelCall) string {
 		slot := q.s.ModelSlots[slotKey(m.ID, j.Spec.Needs.Model)]
 		// Calls reuse a ready/loading model's existing host-memory reservation.
 		if call == nil || slot == nil || slot.State != "ready" && slot.State != "loading" {
-			if _, _, ok := q.hostReleases(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, "production"); !ok {
+			if _, _, ok := q.hostReleases(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, "production", j.Spec); !ok {
 				continue
 			}
 		}
@@ -398,7 +398,7 @@ func (q *Queue) maintainHolds() {
 			jobs = append(jobs, j)
 		}
 	}
-	sort.Slice(jobs, func(a, b int) bool { return before(jobs[a], jobs[b], &Machine{}) })
+	sort.Slice(jobs, func(a, b int) bool { return q.before(jobs[a], jobs[b], &Machine{}) })
 	for _, j := range jobs {
 		if j.State == "queued" && j.ProductionHost != "" && q.dockerBlocker(j.ProductionHost) != "" {
 			if target := q.productionTarget(j, nil); target != "" {
@@ -460,7 +460,7 @@ func (q *Queue) maintainHolds() {
 		for _, j := range q.s.Jobs {
 			m := q.s.Machines[j.Machine]
 			if m != nil && hostID(m) == host && (j.State == "running" || j.State == "stopping") {
-				if j.Spec.Priority != "production" {
+				if q.comparePriority(j.Spec, q.hostPrioritySpec(host)) > 0 {
 					q.stopFor(j, "production", "host hold")
 				}
 				q.retainRelease(j)
@@ -468,7 +468,7 @@ func (q *Queue) maintainHolds() {
 		}
 		for _, c := range q.calls {
 			m := q.s.Machines[c.Machine]
-			if m != nil && hostID(m) == host && c.Priority != "production" && c.Error == "" {
+			if m != nil && hostID(m) == host && q.comparePriority(callJob(c).Spec, q.hostPrioritySpec(host)) > 0 && c.Error == "" {
 				if slot := q.s.ModelSlots[slotKey(c.Machine, c.Model)]; slot != nil {
 					slot.ReleasingCalls = true
 				}
@@ -486,7 +486,7 @@ func (q *Queue) maintainHolds() {
 			if m == nil || hostID(m) != host || q.slotPinned(s) || s.State == "failed" {
 				continue
 			}
-			if s.State != "unload_failed" && s.State != "unloading" && (rank(s.Priority) > 0 && (!s.ProductionUsed || s.InFlight > 0) || q.unreported[m.ID]) {
+			if s.State != "unload_failed" && s.State != "unloading" && (q.comparePriority(q.slotSpec(s), q.hostPrioritySpec(host)) > 0 && (!s.ProductionUsed || s.InFlight > 0) || q.unreported[m.ID]) {
 				s.State = "draining"
 			}
 			if s.State == "draining" {

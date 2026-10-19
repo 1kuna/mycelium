@@ -115,7 +115,8 @@ func (q *Queue) refreshHostMemory() {
 // Plan releases first. Never credit stopping/draining work as free until its
 // acknowledgement arrives. GPU releases are local; RAM releases may be on any
 // card on the same physical host. Pins and failed unloads remain protected.
-func (q *Queue) hostReleases(m *Machine, gpu, host float64, priority string) ([]*Job, []*ModelSlot, bool) {
+func (q *Queue) hostReleases(m *Machine, gpu, host float64, priority string, identity ...Spec) ([]*Job, []*ModelSlot, bool) {
+	demand := priorityDemand(priority, identity)
 	if m.HostMemoryBudgetStatus() != "" {
 		return nil, nil, false
 	}
@@ -134,7 +135,7 @@ func (q *Queue) hostReleases(m *Machine, gpu, host float64, priority string) ([]
 	var slots []*ModelSlot
 	for _, j := range q.s.Jobs {
 		owner := q.s.Machines[j.Machine]
-		if owner == nil || owner.Gone || hostID(owner) != hostID(m) || rank(j.Spec.Priority) <= rank(priority) || (!j.Spec.Resumable && priority != "production") || (priority != "production" && (owner.CheckpointUnavailable || !q.checkpointsAvailable())) {
+		if owner == nil || owner.Gone || hostID(owner) != hostID(m) || q.comparePriority(j.Spec, demand) <= 0 || (!j.Spec.Resumable && priority != "production") || (priority != "production" && (owner.CheckpointUnavailable || !q.checkpointsAvailable())) {
 			continue
 		}
 		if j.State == "running" || j.State == "stopping" {
@@ -142,14 +143,14 @@ func (q *Queue) hostReleases(m *Machine, gpu, host float64, priority string) ([]
 		}
 	}
 	sort.Slice(jobs, func(i, j int) bool {
-		if rank(jobs[i].Spec.Priority) != rank(jobs[j].Spec.Priority) {
-			return rank(jobs[i].Spec.Priority) > rank(jobs[j].Spec.Priority)
+		if q.comparePriority(jobs[i].Spec, jobs[j].Spec) != 0 {
+			return q.comparePriority(jobs[i].Spec, jobs[j].Spec) > 0
 		}
 		return jobs[i].ID < jobs[j].ID
 	})
 	for _, s := range q.s.ModelSlots {
 		owner := q.s.Machines[s.Machine]
-		if owner != nil && !owner.Gone && hostID(owner) == hostID(m) && !q.slotPinned(s) && s.State != "unload_failed" && s.State != "failed" && rank(s.Priority) > rank(priority) {
+		if owner != nil && !owner.Gone && hostID(owner) == hostID(m) && !q.slotPinned(s) && s.State != "unload_failed" && s.State != "failed" && q.comparePriority(q.slotSpec(s), demand) > 0 {
 			slots = append(slots, s)
 		}
 	}
@@ -185,8 +186,8 @@ func (q *Queue) hostReleases(m *Machine, gpu, host float64, priority string) ([]
 	}
 	return chosenJobs, chosenSlots, room >= need
 }
-func (q *Queue) reclaimHost(m *Machine, gpu, host float64, priority, kind string) bool {
-	jobs, slots, ok := q.hostReleases(m, gpu, host, priority)
+func (q *Queue) reclaimHost(m *Machine, gpu, host float64, priority, kind string, identity ...Spec) bool {
+	jobs, slots, ok := q.hostReleases(m, gpu, host, priority, identity...)
 	if !ok {
 		return false
 	}
@@ -199,16 +200,17 @@ func (q *Queue) reclaimHost(m *Machine, gpu, host float64, priority, kind string
 	return true
 }
 
-func (q *Queue) reclaimableGPUMemory(m *Machine, priority string) float64 {
+func (q *Queue) reclaimableGPUMemory(m *Machine, priority string, identity ...Spec) float64 {
+	demand := priorityDemand(priority, identity)
 	room := m.FreeMemoryGB
 	for _, s := range q.s.ModelSlots {
-		if s.Machine == m.ID && !q.slotPinned(s) && s.State != "unload_failed" && s.State != "failed" && rank(s.Priority) > rank(priority) {
+		if s.Machine == m.ID && !q.slotPinned(s) && s.State != "unload_failed" && s.State != "failed" && q.comparePriority(q.slotSpec(s), demand) > 0 {
 			model, _ := q.model(s.Model)
 			room += model.MemoryGB
 		}
 	}
 	for _, j := range q.s.Jobs {
-		if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") && rank(j.Spec.Priority) > rank(priority) && (j.Spec.Resumable || priority == "production") && (priority == "production" || (!m.CheckpointUnavailable && q.checkpointsAvailable())) {
+		if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") && q.comparePriority(j.Spec, demand) > 0 && (j.Spec.Resumable || priority == "production") && (priority == "production" || (!m.CheckpointUnavailable && q.checkpointsAvailable())) {
 			room += j.Spec.Needs.MemoryGB
 		}
 	}

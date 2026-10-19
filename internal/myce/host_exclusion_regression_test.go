@@ -168,12 +168,13 @@ func TestExclusionDeadlineSurvivesRestartAndExpiry(t *testing.T) {
 }
 
 func TestExclusionConfiguredDockerEndpoint(t *testing.T) {
-	t.Setenv("DOCKER_HOST", "unix:///configured.sock")
+	t.Setenv("DOCKER_HOST", "unix:///ambient.sock")
 	home := t.TempDir()
 	config, err := PlanInstall("worker", home, "", filepath.Join(home, "nas"), "http://queue:7331", "worker", Detection{OS: "linux", Arch: "amd64", Platform: "cuda", MemoryMode: "dedicated"})
 	if err != nil {
 		t.Fatal(err)
 	}
+	config.DockerEndpoint = "unix:///configured.sock" // Explicit opt-in, independent of ambient Docker settings.
 	b, err := json.Marshal(config)
 	if err != nil {
 		t.Fatal(err)

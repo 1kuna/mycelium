@@ -40,6 +40,7 @@ type batchRelease struct {
 }
 
 type state struct {
+	PriorityPolicy   *PriorityPolicyRecord        `json:"priority_policy,omitempty"`
 	Schema           int                          `json:"schema_version"`
 	HostMaintenance  map[string]HostMaintenance   `json:"host_maintenance,omitempty"`
 	HostIntents      map[string]QueueHostIntent   `json:"host_intents,omitempty"`
@@ -223,17 +224,17 @@ func (q *Queue) machineLossTimeout(id string) time.Duration {
 	priority := 2
 	for _, j := range q.s.Jobs {
 		if j.Machine == id && (j.State == "running" || j.State == "stopping") {
-			priority = min(priority, rank(j.Spec.Priority))
+			priority = min(priority, legacyRank(j.Spec.Priority))
 		}
 	}
 	for _, c := range q.calls {
 		if c.Machine == id && c.Error == "" {
-			priority = min(priority, rank(c.Priority))
+			priority = min(priority, legacyRank(c.Priority))
 		}
 	}
 	for _, slot := range q.s.ModelSlots {
 		if slot.Machine == id && (slot.State == "loading" || slot.InFlight > 0) {
-			priority = min(priority, rank(slot.Priority))
+			priority = min(priority, legacyRank(slot.Priority))
 		}
 	}
 	return q.lossTimeouts[priority]
@@ -413,6 +414,9 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (*Job, error) {
 		if err := s.Validate(); err != nil {
 			return err
 		}
+		if err := normalizeJobClass(&s); err != nil {
+			return err
+		}
 		if e := q.validateProjectPlacement(s.Project, s.AllowedMachines); e != nil {
 			return e
 		}
@@ -435,7 +439,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (*Job, error) {
 			deadline := q.clock.Now().Add(ProductionStartTimeout)
 			s.StartBy = &deadline
 		}
-		j := &Job{FileTransport: q.fileCheckpoints, Extensions: extensions, EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: filepath.Join(q.root, id)}
+		j := &Job{PriorityPolicy: q.priorityMatch(s), FileTransport: q.fileCheckpoints, Extensions: extensions, EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: filepath.Join(q.root, id)}
 		q.applyLearnedNeeds(j)
 		if e := q.validateProjectCapacity(j); e != nil {
 			return e
@@ -893,6 +897,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 				j.RequeuedByOperator = false
 				j.StartedAt = nil
 				now := q.clock.Now()
+				j.PriorityPolicy = q.priorityMatch(j.Spec)
 				j.AssignedAt = &now
 				j.FinishedAt = nil
 				j.StartLatencySeconds = 0
@@ -1260,6 +1265,7 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 			}
 			return a.Kind < b.Kind
 		})
+		out.PriorityPolicy = q.priorityPolicyRecord()
 		out.Now = q.clock.Now()
 		order, reasons := q.queueProjection()
 		for _, j := range q.s.Jobs {
@@ -1276,6 +1282,8 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 				j.Reason = q.startStatusReason(j)
 			}
 			copy := cloneJob(j)
+			copy.Spec.Class = jobClass(copy.Spec)
+			copy.PriorityPolicy = q.priorityMatch(copy.Spec)
 			copy.QueueOrder = order[j.ID]
 			if terminal(j.State) && j.LastStopOutcome == "release pending" {
 				copy.Reason += "; release pending"
@@ -1344,6 +1352,8 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 				call.State = "failed"
 				call.Reason = c.Error
 			}
+			call.Spec.Class = jobClass(call.Spec)
+			call.PriorityPolicy = q.priorityMatch(call.Spec)
 			out.Jobs = append(out.Jobs, call)
 		}
 		for _, m := range q.s.Machines {

@@ -791,6 +791,9 @@ func (w Worker) Run(stop context.Context) error {
 	}()
 	defer func() { retentionCancel(); <-retentionDone }()
 	requestRetention := func(active string, now time.Time) {
+		if w.DockerEndpoint == "" {
+			return // Keep retained custody; disabling a runtime never retires it.
+		}
 		select {
 		case retentionRequests <- retentionRequest{active: active, now: now}:
 		default:
@@ -1030,7 +1033,10 @@ func (w Worker) Run(stop context.Context) error {
 				m.ModelURL = rt.url
 			}
 			m.ModelConfigHash = modelConfigHash(w.ModelConfig)
-			m.Capabilities = append(slices.Clone(w.Machine.Capabilities), "logs_none")
+			m.Capabilities = append(slices.DeleteFunc(slices.Clone(w.Machine.Capabilities), func(c string) bool { return c == "docker" }), "logs_none")
+			if w.DockerEndpoint != "" {
+				m.Capabilities = append(m.Capabilities, "docker")
+			}
 			m.ApprovedModels, m.ModelApprovalStates = rt.cache.modelApprovals(w.ModelConfig.Models)
 			rt.setLocalApprovals(m.ApprovedModels, m.ModelApprovalStates)
 			reports, _ := rt.report()

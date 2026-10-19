@@ -11,7 +11,7 @@ func fits(j *Job, m *Machine, memory float64) bool {
 	return hostFits(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) && fitsWithoutHostMemory(j, m, memory)
 }
 func fitsWithoutHostMemory(j *Job, m *Machine, memory float64) bool {
-	return !cancelled(j) && logPolicyFits(j.Spec.Logs, m) && !availabilityBlocked(m) && capabilityFits(j, m) && extensionCanRun(j, m) && m.MemoryError == "" && !m.Gone && !m.Leaving && (!needsCheckpoint(j) || !m.CheckpointUnavailable) && memory >= j.Spec.Needs.MemoryGB && machineAllowed(j.Spec.AllowedMachines, m.ID) && (len(j.Spec.Needs.Platform.Required) == 0 || slices.Contains(j.Spec.Needs.Platform.Required, m.GPU)) && environmentCanRun(j, m)
+	return !cancelled(j) && dockerRuntimeFits(j, m) && logPolicyFits(j.Spec.Logs, m) && !availabilityBlocked(m) && capabilityFits(j, m) && extensionCanRun(j, m) && m.MemoryError == "" && !m.Gone && !m.Leaving && (!needsCheckpoint(j) || !m.CheckpointUnavailable) && memory >= j.Spec.Needs.MemoryGB && machineAllowed(j.Spec.AllowedMachines, m.ID) && (len(j.Spec.Needs.Platform.Required) == 0 || slices.Contains(j.Spec.Needs.Platform.Required, m.GPU)) && environmentCanRun(j, m)
 }
 func affinity(j *Job, m *Machine) int {
 	n := 0
@@ -26,10 +26,7 @@ func affinity(j *Job, m *Machine) int {
 	}
 	return n
 }
-func before(a, b *Job, m *Machine) bool {
-	if rank(a.Spec.Priority) != rank(b.Spec.Priority) {
-		return rank(a.Spec.Priority) < rank(b.Spec.Priority)
-	}
+func beforeWithinTier(a, b *Job, m *Machine) bool {
 	if affinity(a, m) != affinity(b, m) {
 		return affinity(a, m) > affinity(b, m)
 	}
@@ -56,7 +53,7 @@ func before(a, b *Job, m *Machine) bool {
 func pick(jobs map[string]*Job, m *Machine) *Job {
 	var best *Job
 	for _, j := range jobs {
-		if j.State == "queued" && fits(j, m, m.FreeMemoryGB) && (best == nil || before(j, best, m)) {
+		if j.State == "queued" && fits(j, m, m.FreeMemoryGB) && (best == nil || (&Queue{}).before(j, best, m)) {
 			best = j
 		}
 	}
@@ -66,6 +63,9 @@ func pick(jobs map[string]*Job, m *Machine) *Job {
 	return best
 }
 func waitingReason(j *Job, machines map[string]*Machine, jobs map[string]*Job) string {
+	if reason := dockerRuntimeWaitingReason(j, machines); reason != "" {
+		return reason
+	}
 	if reason := extensionWaitingReason(j, machines); reason != "" {
 		return reason
 	}
@@ -88,6 +88,22 @@ func waitingReason(j *Job, machines map[string]*Machine, jobs map[string]*Job) s
 			}
 			return "waiting for a busy machine to make room"
 		}
+	}
+	unknownCapacity := []string{}
+	knownCapacity := false
+	for _, m := range machines {
+		if m.Gone || m.Leaving || !machineAllowed(j.Spec.AllowedMachines, m.ID) || !environmentCanRun(j, m) || len(j.Spec.Needs.Platform.Required) > 0 && !slices.Contains(j.Spec.Needs.Platform.Required, m.GPU) {
+			continue
+		}
+		if reason := capabilityUnavailableReason(m); reason != "" {
+			unknownCapacity = append(unknownCapacity, m.ID+": "+reason)
+		} else {
+			knownCapacity = true
+		}
+	}
+	if len(unknownCapacity) > 0 && !knownCapacity {
+		slices.Sort(unknownCapacity)
+		return "waiting for hardware capacity readings: " + strings.Join(unknownCapacity, "; ")
 	}
 	needs := []string{}
 	if j.Spec.Needs.HostMemoryGB > 0 {

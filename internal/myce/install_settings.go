@@ -113,7 +113,7 @@ func InstallSettings() []InstallSetting {
 	return []InstallSetting{
 		installSetting("allow-deviceless", "AllowDeviceless", "allow CPU/fake test worker", func(c *ServiceConfig) *bool { return &c.AllowDeviceless }, installAny[bool]),
 		installSetting("device", "Device", "physical GPU selector", func(c *ServiceConfig) *string { return &c.Device }, installAny[string]),
-		installSetting("docker-host", "DockerEndpoint", "worker Docker endpoint", func(c *ServiceConfig) *string { return &c.DockerEndpoint }, installAny[string]),
+		installSetting("docker-host", "DockerEndpoint", "opt in to managed Docker at this endpoint (empty disables Docker)", func(c *ServiceConfig) *string { return &c.DockerEndpoint }, installAny[string]),
 		installContext(installPath("host-state-dir", "HostStateDir", "shared local host control directory", func(c *ServiceConfig) *string { return &c.HostStateDir }, true), func(c ServiceConfig) error { return validateInstallDirective(c, c.HostStateDir, true) }),
 		installPath("joining-file", "JoiningFile", "private joining invitation", func(c *ServiceConfig) *string { return &c.JoiningFile }, false),
 		installNASSetting(),

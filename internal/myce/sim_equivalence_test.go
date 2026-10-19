@@ -11,13 +11,13 @@ func (q *Queue) originalBatchBeforeCall(c *ModelCall, m *Machine) bool {
 	for _, j := range q.s.Jobs {
 		memory := m.FreeMemoryGB
 		for _, s := range q.s.ModelSlots {
-			if s.Machine == m.ID && !q.slotPinned(s) && s.State != "unload_failed" && rank(s.Priority) > rank(j.Spec.Priority) {
+			if s.Machine == m.ID && !q.slotPinned(s) && s.State != "unload_failed" && legacyRank(s.Priority) > legacyRank(j.Spec.Priority) {
 				model, _ := q.model(s.Model)
 				memory += model.MemoryGB
 			}
 		}
 		for _, r := range q.s.Jobs {
-			if r.Machine == m.ID && (r.State == "running" || r.State == "stopping") && (r.Spec.Resumable || j.Spec.Priority == "production") && rank(r.Spec.Priority) > rank(j.Spec.Priority) {
+			if r.Machine == m.ID && (r.State == "running" || r.State == "stopping") && (r.Spec.Resumable || j.Spec.Priority == "production") && legacyRank(r.Spec.Priority) > legacyRank(j.Spec.Priority) {
 				memory += r.Spec.Needs.MemoryGB
 			}
 		}

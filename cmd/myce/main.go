@@ -52,7 +52,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 
 	if len(args) == 0 {
-		return errors.New("usage: myce queue|join|leave|host|submit|status|logs|wait|cancel|resolve-docker|dev")
+		return errors.New("usage: myce queue|join|leave|host|submit|policy|status|logs|wait|cancel|resolve-docker|dev")
 	}
 	if args[0] == "_host-start-check" {
 		f := flag.NewFlagSet("_host-start-check", flag.ContinueOnError)
@@ -76,6 +76,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 	if args[0] == "benchmark" {
 		return benchmarkCommand(args[1:])
+	}
+	if args[0] == "policy" {
+		return policyCommand(args[1:], os.Stdout)
 	}
 	if args[0] == "extension" {
 		return extensionCommand(args[1:])
@@ -156,7 +159,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	address := f.String("listen", "127.0.0.1:7331", "queue listen address")
 	db := f.String("db", "myce-state/myce.db", "SQLite database file")
 	uploadSpoolDir := f.String("upload-spool-dir", "", "queue model-upload directory (default private directory beside DB)")
-	dockerHost := f.String("docker-host", env("DOCKER_HOST", "unix:///var/run/docker.sock"), "managed Docker endpoint")
+	dockerHost := f.String("docker-host", "", "opt in to managed Docker at this endpoint (empty disables Docker)")
 	containerRetention := f.Duration("container-retention", myce.DefaultContainerRetention, "acknowledged stopped Docker container retention (0 removes immediately)")
 	logRetention := f.Duration("log-retention", myce.DefaultLogRetention, "retention of completed batch and inactive model-server logs")
 	uploadSpoolBytes := f.Int64("upload-spool-bytes", myce.DefaultUploadSpoolBytes, "total bytes held in the queue model-upload spool")
@@ -745,7 +748,8 @@ func printStatus(s myce.Snapshot, full bool) {
 		if policy == "" {
 			policy = "keep"
 		}
-		fmt.Printf("%s %s [%s] %s hypha=%s logs=%s %s %s; %s\n", id, j.Spec.Name, j.Spec.Priority, myce.JobState(j), j.Machine, policy, myce.JobReason(j), myce.JobAge(j, s.Now), myce.JobWork(j))
+		fmt.Printf("tier=%s selector=%s policy_revision=%d ", j.PriorityPolicy.Tier, j.PriorityPolicy.Selector, j.PriorityPolicy.Revision)
+		fmt.Printf("%s %s [%s] %s hypha=%s logs=%s %s %s; %s\n", id, j.Spec.Name, j.Spec.Class, myce.JobState(j), j.Machine, policy, myce.JobReason(j), myce.JobAge(j, s.Now), myce.JobWork(j))
 	}
 	if len(s.Jobs) == 0 {
 		fmt.Println("No jobs yet.")

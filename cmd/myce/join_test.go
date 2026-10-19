@@ -21,7 +21,7 @@ func TestJoinGPUDetection(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			probe := myce.MachineProbe{OS: tc.os, Arch: tc.arch, Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
-				if name == "system_profiler" && tc.platform == "metal" || name == "nvidia-smi" && tc.platform == "cuda" || name == "sycl-ls" && tc.platform == "xpu" {
+				if name == "/usr/sbin/system_profiler" && tc.platform == "metal" || name == "nvidia-smi" && tc.platform == "cuda" || name == "sycl-ls" && tc.platform == "xpu" {
 					return []byte(tc.output), nil
 				}
 				return nil, errors.New("absent")
@@ -82,7 +82,7 @@ func TestJoinCLIUsesDetectedOrExplicitGPU(t *testing.T) {
 			if explicit {
 				t.Fatal("explicit CLI GPU ran detector")
 			}
-			if name != "system_profiler" {
+			if name != "/usr/sbin/system_profiler" {
 				t.Fatalf("unexpected command %s", name)
 			}
 			return []byte("Metal Support: Metal 3"), nil

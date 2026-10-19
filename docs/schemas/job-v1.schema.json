@@ -555,6 +555,10 @@
           "$ref": "#/$defs/FileManifest",
           "x-contract": "diagnostic"
         },
+        "priority_policy": {
+          "$ref": "#/$defs/PriorityMatch",
+          "x-contract": "diagnostic"
+        },
         "production_host": {
           "type": "string",
           "x-contract": "diagnostic"
@@ -641,6 +645,7 @@
         }
       },
       "required": [
+        "priority_policy",
         "start_latency_seconds",
         "starts",
         "losses",
@@ -679,6 +684,29 @@
           ]
         }
       },
+      "type": "object"
+    },
+    "PriorityMatch": {
+      "properties": {
+        "index": {
+          "type": "integer"
+        },
+        "revision": {
+          "type": "integer"
+        },
+        "selector": {
+          "type": "string"
+        },
+        "tier": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "tier",
+        "index",
+        "selector",
+        "revision"
+      ],
       "type": "object"
     },
     "Program": {
@@ -736,6 +764,10 @@
             "array",
             "null"
           ],
+          "x-contract": "diagnostic"
+        },
+        "class": {
+          "type": "string",
           "x-contract": "diagnostic"
         },
         "deadline": {

@@ -58,7 +58,8 @@ func (p ProfileProbe) Detect(ctx context.Context, m Machine, disk string, now ti
 	var raw []byte
 	var err error
 	if p.Machine.OS == "darwin" {
-		raw, err = p.Machine.Command(ctx, "sysctl", "-n", "hw.memsize")
+		// System facts must not depend on an interactive shell's PATH.
+		raw, err = p.Machine.Command(ctx, "/usr/sbin/sysctl", "-n", "hw.memsize")
 	} else {
 		raw, err = p.ReadFile("/proc/meminfo")
 		if err == nil {

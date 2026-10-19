@@ -287,6 +287,15 @@ func (c *dockerTestClock) advance(d time.Duration) {
 	defer c.mu.Unlock()
 	c.now = c.now.Add(d)
 }
+
+// Image-job fixtures opt in explicitly; ordinary machine fixtures stay native.
+func dockerMachine(id, gpu string) Machine {
+	m := machine(id, gpu)
+	m.Capabilities = []string{"docker"}
+	m.CapabilityProfile.OS = "linux"
+	return m
+}
+
 func dockerFixture(t *testing.T) (Worker, *workerStore, *dockerTestClock, string) {
 	t.Helper()
 	root := t.TempDir()
@@ -307,7 +316,7 @@ func dockerFixture(t *testing.T) (Worker, *workerStore, *dockerTestClock, string
 	t.Setenv("MYCE_HOST_STATE_DIR", hostDir)
 	clock := &dockerTestClock{now: time.Date(2026, 10, 11, 0, 0, 0, 0, time.UTC)}
 	ensureTestHost(t, hostDir, clock)
-	w := Worker{Client: recoveryWorker(t).Client, HostStateDir: hostDir, Machine: machine("docker-worker", "fake"), StateDir: newTestStateRoot(t), Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return 32, nil }}
+	w := Worker{DockerEndpoint: "unix:///fake.sock", Client: recoveryWorker(t).Client, HostStateDir: hostDir, Machine: dockerMachine("docker-worker", "fake"), StateDir: newTestStateRoot(t), Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return 32, nil }}
 	s, e := w.openStore()
 	if e != nil {
 		t.Fatal(e)
@@ -370,15 +379,15 @@ func TestDockerWorkerGraceAndIdentity(t *testing.T) {
 
 func TestDockerLossKeepsHostReservedWithoutHoldPolicy(t *testing.T) {
 	q, c := fixture(t)
-	a := machine("a", "fake")
+	a := dockerMachine("a", "fake")
 	a.HostID = "shared"
 	a.HostMemoryMeasured = true
 	a.HostAvailableMemoryGB = 32
-	b := machine("b", "fake")
+	b := dockerMachine("b", "fake")
 	b.HostID = "shared"
 	b.HostMemoryMeasured = true
 	b.HostAvailableMemoryGB = 32
-	other := machine("other", "fake")
+	other := dockerMachine("other", "fake")
 	other.HostID = "other"
 	other.HostMemoryMeasured = true
 	other.HostAvailableMemoryGB = 32
@@ -722,7 +731,7 @@ func TestDockerRealCheckpointResume(t *testing.T) {
 	if e := cmd.Run(); e != nil {
 		t.Skip("Docker daemon or local image unavailable; no pull")
 	}
-	w := Worker{Client: recoveryWorker(t).Client, Machine: machine("real-docker-test", "fake"), StateDir: newTestStateRoot(t), Clock: RealClock{}}
+	w := Worker{DockerEndpoint: defaultDockerEndpoint(os.Getenv("DOCKER_HOST")), Client: recoveryWorker(t).Client, Machine: dockerMachine("real-docker-test", "fake"), StateDir: newTestStateRoot(t), Clock: RealClock{}}
 	s, e := w.openStore()
 	if e != nil {
 		t.Fatal(e)
@@ -829,7 +838,7 @@ func TestDockerProductionRetargetPreservesOldHostObligation(t *testing.T) {
 	if e := q.ConfigureHosts(map[string]HostPolicy{"shared": {ProductionHold: true}}); e != nil {
 		t.Fatal(e)
 	}
-	a := machine("a", "fake")
+	a := dockerMachine("a", "fake")
 	a.HostID = "shared"
 	check(t, q, a, nil)
 	j := submit(t, q, dockerJob().Spec)
@@ -839,7 +848,7 @@ func TestDockerProductionRetargetPreservesOldHostObligation(t *testing.T) {
 	}
 	prod := submit(t, q, spec("production"))
 	requireState(t, q, j.ID, "stopping")
-	other := machine("other", "fake")
+	other := dockerMachine("other", "fake")
 	other.HostID = "other"
 	r := check(t, q, other, nil)
 	if r.Job == nil || r.Job.ID != prod.ID {
@@ -858,7 +867,7 @@ func TestDockerProductionRetargetPreservesOldHostObligation(t *testing.T) {
 }
 func TestDockerFreshWorkerAndStaleAckCannotClearCustody(t *testing.T) {
 	q, c := fixture(t)
-	a := machine("a", "fake")
+	a := dockerMachine("a", "fake")
 	a.HostID = "shared"
 	check(t, q, a, nil)
 	j := submit(t, q, dockerJob().Spec)
@@ -944,7 +953,7 @@ func TestDockerQueueRestartRetainsCustody(t *testing.T) {
 	}
 	q.checkpointProbe = func() bool { return true }
 	await(t, func() bool { _, e := q.nasProbe.run(root, func() (bool, error) { return true, nil }); return e == nil })
-	a := machine("a", "fake")
+	a := dockerMachine("a", "fake")
 	a.HostID = "shared"
 	a.UnifiedMemory = true
 	a.CapabilityProfile.MemoryLayout = "unified"
@@ -1007,7 +1016,7 @@ func TestDockerQueueRestartRetainsCustody(t *testing.T) {
 
 func TestDockerCleanupEscalatesDurably(t *testing.T) {
 	q, c := fixture(t)
-	m := machine("b70", "xpu")
+	m := dockerMachine("b70", "xpu")
 	check(t, q, m, nil)
 	j := submit(t, q, dockerJob().Spec)
 	running := check(t, q, m, nil).Job

@@ -1,4 +1,10 @@
 {
+  "priority_policy": {
+    "tier": "",
+    "index": 0,
+    "selector": "",
+    "revision": 0
+  },
   "waiting_since": "0001-01-01T00:00:00Z",
   "start_latency_seconds": 0,
   "starts": 0,

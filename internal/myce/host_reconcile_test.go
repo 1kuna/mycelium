@@ -134,7 +134,7 @@ func TestHostReconcilePlannedDisplacementAndLossRefund(t *testing.T) {
 	for _, offline := range []bool{false, true} {
 		t.Run(stringBool(offline), func(t *testing.T) {
 			q, clock := fixture(t)
-			m := machine("one", "fake")
+			m := dockerMachine("one", "fake")
 			m.HostID = "host"
 			other := machine("other", "fake")
 			check(t, q, m, nil)
@@ -545,7 +545,7 @@ func TestHostReconcileCancelledSavedResultAfterConfirmedCleanup(t *testing.T) {
 	q, clock := fixture(t)
 	dir, spool := newTestStateRoot(t), t.TempDir()
 	s := testHostOpen(t, dir, clock)
-	m := machine("one", "fake")
+	m := dockerMachine("one", "fake")
 	m.HostID = s.Host
 	check(t, q, m, nil)
 	spec := spec("experiment")
