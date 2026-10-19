@@ -80,7 +80,8 @@ func TestDevStandaloneSmoke(t *testing.T) {
 	host := filepath.Join(root, "host")
 	const token = "standalone-smoke-fixture"
 	// Neither the child nor its jobs can see ambient MYCE_* values or user config.
-	env := []string{"PATH=" + os.Getenv("PATH"), "HOME=" + root, "TMPDIR=" + root, "MYCE_TOKEN=" + token}
+	// Fresh services and integration clients need not have /usr/sbin in PATH.
+	env := []string{"PATH=/usr/bin:/bin", "HOME=" + root, "TMPDIR=" + root, "MYCE_TOKEN=" + token}
 	t.Setenv("MYCE_TOKEN", token) // HostControl's local queue reconciliation only.
 	cmd := exec.CommandContext(ctx, binary, "dev", "--listen", "127.0.0.1:0", "--db", filepath.Join(root, "state", "queue.db"), "--checkpoints", filepath.Join(root, "checkpoints"), "--host-state-dir", host, "--host-id", "smoke-host", "--file-store", filepath.Join(root, "files"), "--workers", "1", "--memory-gb", "8")
 	cmd.Dir, cmd.Env = root, env

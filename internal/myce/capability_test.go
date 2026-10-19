@@ -3,9 +3,28 @@ package myce
 import (
 	"context"
 	"errors"
+	"runtime"
 	"testing"
 	"time"
 )
+
+func TestCapabilityProfileMinimalPath(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS system utility lookup")
+	}
+	t.Setenv("PATH", "/usr/bin:/bin")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for _, gpu := range []string{"fake", "metal"} {
+		if gpu == "metal" && runtime.GOARCH != "arm64" {
+			continue
+		}
+		profile := LocalProfileProbe().Detect(ctx, Machine{GPU: gpu}, t.TempDir(), time.Time{})
+		if profile.SystemMemoryBytes == 0 || len(profile.Unavailable) != 0 {
+			t.Fatalf("%s hardware unavailable with minimal PATH: %v", gpu, profile.Unavailable)
+		}
+	}
+}
 
 func TestCapabilityProfileRealMemoryLayouts(t *testing.T) {
 	for _, tc := range []struct {
@@ -18,10 +37,10 @@ func TestCapabilityProfileRealMemoryLayouts(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			probe := ProfileProbe{Machine: MachineProbe{OS: tc.os, Arch: tc.arch, Command: func(_ context.Context, name string, _ ...string) ([]byte, error) {
-				if name == "sysctl" {
+				if name == "/usr/sbin/sysctl" {
 					return []byte("34359738368"), nil
 				}
-				if name == "nvidia-smi" || name == "system_profiler" {
+				if name == "nvidia-smi" || name == "/usr/sbin/system_profiler" {
 					return []byte(tc.output), nil
 				}
 				return nil, errors.New("unavailable")

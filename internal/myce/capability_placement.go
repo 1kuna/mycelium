@@ -33,6 +33,23 @@ func capabilityCapacity(m *Machine) (accelerator, system float64, ok bool) {
 	return accelerator, system, accelerator > 0 && system > 0
 }
 
+func capabilityUnavailableReason(m *Machine) string {
+	if m.CapabilityProfile == nil {
+		return "hardware capability profile unavailable"
+	}
+	if p := m.CapabilityProfile; p.MemoryLayout != "unified" && p.MemoryLayout != "separate" {
+		return "memory layout unavailable"
+	}
+	_, system, ok := capabilityCapacity(m)
+	if system == 0 {
+		return "system RAM capacity unavailable"
+	}
+	if !ok {
+		return "accelerator memory capacity unavailable"
+	}
+	return ""
+}
+
 func capabilityFits(j *Job, m *Machine) bool {
 	if !j.Spec.extensionJob() {
 		return true

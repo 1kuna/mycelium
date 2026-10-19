@@ -22,7 +22,7 @@ func fakeProbe(osname, arch, nvidia, intel string) MachineProbe {
 			if intel != "" {
 				return []byte(intel), nil
 			}
-		case "system_profiler":
+		case "/usr/sbin/system_profiler":
 			return []byte("Chipset Model: Apple M4\nMetal Support: Metal 3"), nil
 		case "uv":
 			return []byte("uv 0.8"), nil
