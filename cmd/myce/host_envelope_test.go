@@ -287,6 +287,13 @@ func TestHostEnvelopeWaitDeadlineFakeClock(t *testing.T) {
 					e := myce.UnknownHostEnvelope("status", clock)
 					e.Desired.Revision = &result.Revision
 					e.Operation = &result.Operation
+					host, boot, state := "fixture-host", "fixture-boot", "open"
+					e.Host, e.Boot, e.Desired.State = &host, &boot, &state
+					e.QueueRevision = &result.Revision
+					at := clock.Now()
+					for _, source := range []string{"local_intent", "queue", "required_workers"} {
+						e.Sources[source] = &at
+					}
 					ready := !tc.wait
 					e.Ready = &ready
 					result.Envelope = &e

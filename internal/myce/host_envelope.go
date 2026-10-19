@@ -63,10 +63,7 @@ type HostEnvelopeAttempt struct {
 
 func hostPtr[T any](v T) *T { return &v }
 func UnknownHostEnvelope(command string, clock Clock) HostEnvelope {
-	return HostEnvelope{Schema: 1, Command: command, Observed: HostEnvelopeState{State: hostPtr("unknown")}, LocalExclusion: "UNKNOWN", Settlement: "unknown", At: clock.Now().UTC(), Sources: map[string]*time.Time{"local_intent": nil, "cgroups": nil, "docker": nil, "gpu_holders": nil, "queue": nil}, Errors: []ExclusionError{}}
-}
-func freshHostSource(at, now time.Time) bool {
-	return !at.IsZero() && !at.After(now) && now.Sub(at) <= HostObservationWindow
+	return HostEnvelope{Schema: 1, Command: command, Observed: HostEnvelopeState{State: hostPtr("unknown")}, LocalExclusion: "UNKNOWN", Settlement: "unknown", At: clock.Now().UTC(), Sources: map[string]*time.Time{"local_intent": nil, "observed_state": nil, "cgroups": nil, "docker": nil, "gpu_holders": nil, "queue": nil}, Errors: []ExclusionError{}}
 }
 
 // ReadHostObservation copies only control evidence under the queue mutex. No
@@ -197,8 +194,9 @@ func HostSnapshot(ctx context.Context, v HostInvocation, clock Clock) (HostEnvel
 	e.RestEvidence.MemoryAllowance = hostPtr(s.MemoryAllowanceBytes)
 	captured := clock.Now().UTC()
 	e.Sources["local_intent"] = &captured
-	if o := s.Observation(boot); o != nil && freshHostSource(o.At, captured) {
+	if o := s.Observation(boot); o != nil {
 		e.Observed = HostEnvelopeState{hostPtr(o.State), hostPtr(o.Revision)}
+		e.Sources["observed_state"] = hostPtr(o.At.UTC())
 	}
 	// Worker-owned saved reports are settlement history. An unprivileged read
 	// cannot certify current real GPU-holder evidence from those bytes.
@@ -226,7 +224,7 @@ func HostSnapshot(ctx context.Context, v HostInvocation, clock Clock) (HostEnvel
 	attempts := []HostEnvelopeAttempt{}
 	queueTime := clock.Now().UTC()
 	queueOK := len(queues) > 0
-	foundWorkers := map[string]time.Time{}
+	foundWorkers := map[string]HostReadyWorker{}
 	placement := HostPlacementObservation{}
 	placementOK := true
 	if len(queues) > 0 {
@@ -239,10 +237,10 @@ func HostSnapshot(ctx context.Context, v HostInvocation, clock Clock) (HostEnvel
 		if ce == nil {
 			ce = c.Call(ctx, "GET", "/api/hosts/"+url.PathEscape(s.Host)+"/observation", nil, &q)
 		}
-		now := clock.Now()
-		if ce != nil || q.Host != s.Host || !freshHostSource(q.At, now) {
+		if ce != nil || q.Host != s.Host {
 			if ce != nil {
 				e.RestEvidence.QueueReachable = hostPtr(false)
+				e.RestEvidence.CollectionFailed = true
 			}
 			queueOK = false
 			ready = false
@@ -254,9 +252,10 @@ func HostSnapshot(ctx context.Context, v HostInvocation, clock Clock) (HostEnvel
 		if e.RestEvidence.QueueAt == nil || q.At.Before(*e.RestEvidence.QueueAt) {
 			e.RestEvidence.QueueAt = hostPtr(q.At)
 		}
-		if s.Desired == "closed" && q.Desired == "open" {
-			e.RestEvidence.OpenAdmission = true
-		}
+		facts := HostRestQueueFacts{OpenAdmission: s.Desired == "closed" && q.Desired == "open"}
+		// Keep each queue's partial facts separately: absent evidence cannot
+		// erase a fresh violation from another queue.
+		e.RestEvidence.QueueFacts = append(e.RestEvidence.QueueFacts, HostRestItem[HostRestQueueFacts]{hostPtr(q.At), HostObservationWindow, &facts})
 		if q.HostRevision != s.HostRevision || q.Boot != boot || q.Desired != s.Desired {
 			queueOK = false
 			ready = false
@@ -268,11 +267,11 @@ func HostSnapshot(ctx context.Context, v HostInvocation, clock Clock) (HostEnvel
 			code string
 		}{{q.Active, "active_attempts"}, {q.Preparing, "preparing_attempts"}, {q.Stopping, "stopping_attempts"}, {len(q.Pending), "release_pending"}} {
 			if fact.n > 0 {
-				e.RestEvidence.ClosedViolations = append(e.RestEvidence.ClosedViolations, fact.code)
+				facts.ClosedViolations = append(facts.ClosedViolations, fact.code)
 			}
 		}
 		if q.Placement != nil && q.Placement.Unfenced > 0 {
-			e.RestEvidence.ClosedViolations = append(e.RestEvidence.ClosedViolations, "eligible_unfenced_work")
+			facts.ClosedViolations = append(facts.ClosedViolations, "eligible_unfenced_work")
 		}
 		preparing += q.Preparing
 		stopping += q.Stopping
@@ -292,25 +291,25 @@ func HostSnapshot(ctx context.Context, v HostInvocation, clock Clock) (HostEnvel
 		}
 		for _, name := range required {
 			for _, w := range q.Workers {
-				if w.Name == name && w.HostRevision == s.HostRevision && w.Boot == boot && freshHostSource(w.At, now) && !w.Healthy {
-					e.RestEvidence.ReadyViolation = true
-				}
-				if w.Name == name && w.HostRevision == s.HostRevision && w.Boot == boot && w.Healthy && freshHostSource(w.At, now) {
-					if w.At.After(foundWorkers[name]) {
-						foundWorkers[name] = w.At
+				if w.Name == name && w.HostRevision == s.HostRevision && w.Boot == boot {
+					previous, found := foundWorkers[name]
+					if !found || w.At.After(previous.At) || w.At.Equal(previous.At) && !w.Healthy {
+						foundWorkers[name] = w
 					}
 				}
 			}
 		}
 	}
-	// Keep the oldest required heartbeat after choosing each worker's latest
-	// qualifying observation. Its freshness must survive subsequent collection
-	// and the dropped-child wire boundary, rather than becoming a cached boolean.
+	// Choose the latest fact for each worker regardless of health; preserve its
+	// timestamp across the child boundary. Equal-time conflicts use unhealthy.
 	for _, name := range required {
-		at := foundWorkers[name]
-		ready = ready && !at.IsZero()
-		if !at.IsZero() && (e.Sources["required_workers"] == nil || at.Before(*e.Sources["required_workers"])) {
-			e.Sources["required_workers"] = hostPtr(at.UTC())
+		w, found := foundWorkers[name]
+		ready = ready && found && w.Healthy
+		if found {
+			e.RestEvidence.WorkerHealth = append(e.RestEvidence.WorkerHealth, HostRestWorkerHealth{hostPtr(w.At.UTC()), HostObservationWindow, hostPtr(w.Healthy)})
+			if e.Sources["required_workers"] == nil || w.At.Before(*e.Sources["required_workers"]) {
+				e.Sources["required_workers"] = hostPtr(w.At.UTC())
+			}
 		}
 	}
 	if queueOK {
@@ -330,6 +329,11 @@ func HostSnapshot(ctx context.Context, v HostInvocation, clock Clock) (HostEnvel
 		e.Ready = hostPtr(ready && unsettled == 0)
 		if *e.Ready {
 			e.Observed = HostEnvelopeState{hostPtr("open"), hostPtr(s.Revision)}
+			observedAt := queueTime
+			if at := e.Sources["required_workers"]; at != nil && at.Before(observedAt) {
+				observedAt = *at
+			}
+			e.Sources["observed_state"] = hostPtr(observedAt)
 		}
 	}
 	// Re-read without taking any mutation lock; a collection crossing an operation
@@ -337,7 +341,7 @@ func HostSnapshot(ctx context.Context, v HostInvocation, clock Clock) (HostEnvel
 	after, err := ReadHostIntent(v.StateDir)
 	currentBoot, be := HostBootID()
 	e.FinishObservation(clock.Now())
-	if err != nil || be != nil || after.HostRevision != s.HostRevision || currentBoot != boot || !freshHostSource(captured, e.At) {
+	if err != nil || be != nil || after.HostRevision != s.HostRevision || currentBoot != boot {
 		return UnknownHostEnvelope("status", clock), ErrHostRevision
 	}
 	return e, nil
@@ -346,6 +350,7 @@ func HostSnapshot(ctx context.Context, v HostInvocation, clock Clock) (HostEnvel
 // ClearExclusion removes worker-supplied evidence before privileged collection.
 func (e *HostEnvelope) ClearExclusion() {
 	e.LocalExclusion = "UNKNOWN"
+	e.Sources["exclusion_report"] = nil
 	e.RestartSafe = nil
 	e.Units = nil
 	e.Counts.PendingDaemon = nil
@@ -356,7 +361,7 @@ func (e *HostEnvelope) ClearExclusion() {
 	}
 	errors := e.Errors[:0]
 	for _, err := range e.Errors {
-		if err.Component != "gpu_holders" && err.Component != "kernel" {
+		if !err.Contrary && err.Component != "gpu_holders" && err.Component != "kernel" {
 			errors = append(errors, err)
 		}
 	}
@@ -364,40 +369,24 @@ func (e *HostEnvelope) ClearExclusion() {
 }
 
 func (e *HostEnvelope) ApplyExclusion(r *HostExclusionReport, now time.Time) {
-	if r == nil || e.Boot == nil || r.Boot != *e.Boot || e.Desired.Revision == nil || r.Revision != *e.Desired.Revision || e.Operation == nil || r.Operation != *e.Operation || !freshHostSource(r.At, now) {
+	if r == nil || e.Boot == nil || r.Boot != *e.Boot || e.Desired.Revision == nil || r.Revision != *e.Desired.Revision || e.Operation == nil || r.Operation != *e.Operation {
 		return
 	}
-	complete := true
-	for _, name := range []string{"local_intent", "cgroups", "docker", "gpu_holders"} {
-		if at := r.Sources[name]; at == nil || !freshHostSource(*at, now) {
-			complete = false
-		}
-	}
 	e.LocalExclusion = r.Verdict
-	if e.LocalExclusion == "PASS" && (!r.completePass() || !complete) {
+	if e.LocalExclusion == "PASS" && !r.completePass() {
 		e.LocalExclusion = "UNKNOWN"
 	}
-	sourceFresh := func(name string) bool { at := r.Sources[name]; return at != nil && freshHostSource(*at, now) }
-	if sourceFresh("cgroups") {
-		e.Units = r.Units
-	}
-	if sourceFresh("docker") {
-		e.Counts.PendingDaemon = r.PendingOperations
-		e.Counts.Containers = r.RunningContainers
-	}
-	if sourceFresh("gpu_holders") {
-		e.Counts.GPUHolders = r.GPUHolders
-	}
-	if complete {
-		e.RestartSafe = r.RestartSafe
-	}
+	e.Units = r.Units
+	e.Counts.PendingDaemon, e.Counts.Containers, e.Counts.GPUHolders = r.PendingOperations, r.RunningContainers, r.GPUHolders
+	e.RestartSafe = r.RestartSafe
 	for name, at := range r.Sources {
-		if name != "queue" && sourceFresh(name) {
+		if name != "queue" {
 			e.Sources[name] = at
 		}
 	}
-
+	e.Sources["exclusion_report"] = hostPtr(r.At)
 	e.Errors = append(e.Errors, r.Errors...)
+	e.FinishObservation(now)
 }
 func HostEnvelopeError(err error) ExclusionError {
 	code, component := "observation_unavailable", "local_intent"
@@ -421,46 +410,9 @@ func HostEnvelopeError(err error) ExclusionError {
 	return ExclusionError{Component: component, Code: code, Message: code}
 }
 
-// FinishObservation applies the same freshness bound after privileged reads.
+// FinishObservation projects the same centralized normalization into the public
+// diagnostics. Only the public completion time changes; source times are retained.
 func (e *HostEnvelope) FinishObservation(now time.Time) {
-	if at := e.Sources["required_workers"]; at != nil && !freshHostSource(*at, now) {
-		e.Ready = nil
-		e.Sources["required_workers"] = nil
-	}
-	if at := e.Sources["queue"]; at != nil && !freshHostSource(*at, now) {
-		e.QueueRevision = nil
-		e.Ready = nil
-		e.Counts.Active = nil
-		e.Counts.Preparing = nil
-		e.Counts.Stopping = nil
-		e.Counts.Unsettled = nil
-		e.Counts.Queued = nil
-		e.Counts.FencedQueued = nil
-		e.Counts.UnresolvedPlacement = nil
-		e.RestEvidence.UnfencedQueued = nil
-		e.Attempts = nil
-		e.Sources["queue"] = nil
-	}
-	for _, name := range []string{"local_intent", "cgroups", "docker", "gpu_holders"} {
-		at := e.Sources[name]
-		if at == nil || freshHostSource(*at, now) {
-			continue
-		}
-		e.LocalExclusion = "UNKNOWN"
-		e.RestartSafe = nil
-		e.Sources[name] = nil
-		switch name {
-		case "cgroups":
-			e.Units = nil
-		case "docker":
-			e.Counts.Containers = nil
-			e.Counts.PendingDaemon = nil
-		case "gpu_holders":
-			e.Counts.GPUHolders = nil
-		case "local_intent":
-			e.Ready = nil
-			e.RestEvidence.MemoryAllowance = nil
-		}
-	}
-	e.At = now.UTC()
+	projection, _ := normalizeHostRestEvidence(*e, now)
+	*e = projection
 }
