@@ -9,8 +9,9 @@
   `time.Now` or `time.Sleep` directly in queue or scheduling logic.
 - Fake-clock unit tests cover scheduling, leave, loss, and retry decisions.
 - `myce dev` uses the real API and command runner with fake GPU inventory.
-- Checkpoints use `MYCE_CHECKPOINT_DIR`; assignments are NAS-relative and each
-  worker configures its own local NAS root with `--checkpoint-root`.
+- Checkpoints use `MYCE_CHECKPOINT_DIR`; NAS assignments are relative and each
+  worker configures its local NAS root with `--checkpoint-root`. Without a NAS,
+  verified file-store generations provide portable progress.
 - Treat worker results as attempt-specific; reject stale executions.
 - No network, remote-storage or bulk I/O (blob hashing, manifest verification,
   large reads) inside `q.mu`; snapshot, work outside, then recheck fences inside.
@@ -21,17 +22,24 @@
 ## Map
 
 - `cmd/myce`: CLI and executable dev end-to-end test.
-- `internal/myce`: job format, scheduler, SQLite state, HTTP API, worker, dev.
+- `internal/myce`: queue/HTTP API, scheduler, worker, host controller, installer, dev.
+- `clients/python`: submission/cancellation and checkpoint client.
+- `docs/operations.md`: canonical install, host close/open/reconcile and recovery.
+- `docs/guide-status-v3.md`: envelope, rest verdicts and status fields.
+- `deploy`: manual service templates; `docs/guide-fresh-install.md`: old-state archives.
 - `docs/guide-resumable-jobs.md`: checkpoint contract and Python example.
 
 ## Build and verify
 
 ```sh
 go build -o myce ./cmd/myce
-go test ./... -race
+go test ./... -race -count=1 -timeout 30m
 go vet ./...
-./myce dev
+./myce dev # long-running local API and fake workers; Ctrl-C to stop
 ```
+
+Serialize full race-suite runs. Native GPU/daemon/identity/boot checks are separate
+from laptop proof; see `docs/production-test-plan.md`.
 
 Work locally, stage explicit paths, and commit completed changes. Do not push
 or touch fleet hardware without current task authorization.

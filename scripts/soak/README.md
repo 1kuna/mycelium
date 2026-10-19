@@ -1,4 +1,4 @@
-# CPU-only Spark soak
+# CPU-only Linux soak
 
 `soak.py` uses Python 3 stdlib, the real Linux arm64 `myce`, SQLite, four
 independent fake workers, and a shared **local fake NAS**. It never probes GPUs,
@@ -12,13 +12,13 @@ Build on the Mac (do not run the soak here):
 
 ```sh
 GOOS=linux GOARCH=arm64 go build -o /tmp/myce-linux-arm64 ./cmd/myce
-ssh spark 'mkdir -p ~/myce-soak'
-scp /tmp/myce-linux-arm64 spark:myce-soak/myce
-scp scripts/soak/soak.py spark:myce-soak/soak.py
+ssh TEST_HOST 'mkdir -p ~/myce-soak'
+scp /tmp/myce-linux-arm64 TEST_HOST:myce-soak/myce
+scp scripts/soak/soak.py TEST_HOST:myce-soak/soak.py
 ```
 
 Before launch, copy the script into the new run folder and launch that immutable
-copy (`/home/user/myce-soak/run-RUN_ID/soak.py`). This prevents a later harness
+copy (`/srv/example/myce-soak/run-RUN_ID/soak.py`). This prevents a later harness
 edit from changing job commands in an already-running test.
 
 Before each launch, check `uptime`, `free -g`, and `df -h ~`. Do not launch
@@ -31,8 +31,8 @@ systemd-run --user --unit=myce-soak-RUN_ID \
   --property=CPUWeight=1 --property=CPUQuota=25% \
   --property=MemoryMax=768M --property=TasksMax=128 \
   --property=TimeoutStopSec=45 --property=KillMode=mixed \
-  /usr/bin/python3 /home/user/myce-soak/run-RUN_ID/soak.py run \
-  --run /home/user/myce-soak/run-RUN_ID --duration 14400
+  /usr/bin/python3 /srv/example/myce-soak/run-RUN_ID/soak.py run \
+  --run /srv/example/myce-soak/run-RUN_ID --duration 14400
 ```
 
 For validation use a **fresh** folder and `--duration 300 --seed 20261010`.
@@ -84,7 +84,7 @@ shells are separately covered by the unit's task limit and cleanup.
 On completion or SIGTERM it cleans only its owned processes. Stop early with:
 
 ```sh
-ssh spark 'systemctl --user stop myce-soak-RUN_ID'
+ssh TEST_HOST 'systemctl --user stop myce-soak-RUN_ID'
 ```
 
 `DONE` is JSON with counts and a clearly listed `violations` array. It means

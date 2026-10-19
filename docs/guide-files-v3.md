@@ -2,7 +2,7 @@
 
 The queue's always-on hypha stores immutable files. Every execution hypha has
 its own bounded cache and private attempt folders. No shared mount is needed.
-This implements the resolved #24 decision and slice #42; production stays frozen.
+This is the v3 file transport used for jobs without explicit NAS roots.
 One store is **not a backup**. Losing its disk can lose the only authoritative
 copy; a cache is not a promised second copy.
 
@@ -50,7 +50,7 @@ explained in [write an extension](write-an-extension.md). The CLI sends the
 relative job filenames, byte counts and SHA-256 identities; it does not send
 local source paths. Only explicitly mapped inputs are uploaded, never a whole
 project or home folder. Inputs are copied into a private working folder before
-running. Programs cannot mutate shared cached blobs. V2 plain commands can also
+running. Programs cannot mutate shared cached blobs. Plain commands can also
 use `files` with relative command arguments and declared outputs; stored inputs
 cannot be combined with a workdir, Docker or NAS input mappings.
 

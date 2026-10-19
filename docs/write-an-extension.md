@@ -1,10 +1,10 @@
-# Write an extension (v3 slice 1)
+# Write an extension
 
 An extension is one small folder: `extension.yaml`, plain notes and the few
 scripts it needs. Use it to teach Mycelium a **kind of work** (preferred) or a
 **program type**. A **hypha** must be **qualified** for that exact version and
 kind/program type before it gets a job. Decisions: issues #18, #20, #35 and #36.
-This is an opt-in v3 path; existing v2 commands and environments still work.
+Extensions and plain commands share the same v3 runtime and software environments.
 
 ## Author the folder
 
@@ -39,13 +39,10 @@ Setup downloads models, packages, source or installers into
 small folder. Use pinned versions and verify model/download hashes. Setup is
 explicit, with a bounded timeout; it is never silently started by a queued job.
 The CLI default setup/check timeout is ten minutes (`--timeout` overrides it).
-The pinned CUDA llama.cpp build completed in about eight minutes on the native
-GB10 retest with two build jobs and under 2 GiB aggregate build RSS. The earlier
-160-second harness deadline was shorter than the default. Keep qualification
-checks and memory guards intact when allowing build time.
+Keep qualification checks and memory guards intact when allowing build time.
 The cache is trusted local code, not a sandbox. Setup/check obtain an exclusive
 cache lock; running jobs hold a shared lock. A setup failure clears qualification.
-Cache cleanup is explicit, not automatic in this slice.
+Cache cleanup is explicit.
 
 Scripts receive `MYCE_EXTENSION_DIR`, `MYCE_EXTENSION_CACHE`, `MYCE_PLATFORM`,
 `MYCE_DEVICES` and ready `MYCE_DEVICE` (`cuda:0`, `xpu:0`, `mps`; `cpu` only for
@@ -189,7 +186,7 @@ program:
 inputs: {train.py: programs/train.py, input.json: inputs/input.json}
 ```
 
-Exactly one of kind, program or the existing v2 `run.command` is accepted.
+Exactly one of kind, program or the plain-command `run.command` is accepted.
 The program file names an input, not a machine path. CLI YAML, API JSON and
 Python `Client.submit(dict)` use these identical fields. Kind/program jobs do
 not declare `needs`, an environment, command or workdir. Ordinary `run.env` can

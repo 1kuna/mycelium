@@ -1,4 +1,4 @@
-# Polite part-time hyphae (experimental v3)
+# Polite part-time hyphae
 
 Dedicated hyphae keep the existing default: offer resources whenever awake.
 For a daily-use machine, add `--daily-use` to its usual `myce join` command.
@@ -19,8 +19,8 @@ A detected laptop needs external power even in dedicated mode. `--laptop`
 explicitly enforces that rule when automatic battery detection is unavailable.
 Use dedicated mode for batteryless servers; daily-use mode for personal machines.
 The battery-equipped classification is retained throughout a worker session
-if a subsequent power read fails. This first slice configures foreground joining;
-installed-service configuration for daily use is a future integration step.
+if a subsequent power read fails. Daily-use flags are available on foreground `join`; installed services can
+pass them through `service ... -- join`. Installation alone is not an opt-in.
 
 Signals refresh every five seconds independently of queue connectivity.
 Required readings older than 15 seconds withhold work. A sampling gap, including
@@ -29,8 +29,8 @@ Owner return, battery use, unsafe heat or unknown required signals stop admissio
 locally and through the queue. Resumable commands get SIGTERM and up to ten
 seconds to checkpoint, then are killed if needed. Non-resumable commands stop
 immediately and later restart from scratch. These planned stops don't spend the
-infrastructure-loss retry budget. Checkpoints use the existing shared-root
-contract; file movement without shared storage is the separate #42 slice.
+infrastructure-loss retry budget. Checkpoints use explicit NAS roots or the
+[verified file transport](guide-files-v3.md) when no shared storage is configured.
 
 Model loads and calls also stop when availability is withdrawn. Pins never
 override owner availability. Engines stay reserved until cleanup confirms

@@ -128,12 +128,12 @@ by the queue and advertise that exact URL:
 
 ```sh
 # Set MYCE_TOKEN securely in both terminals; never put it in the catalog.
-myce queue --model-config models.yaml --listen 192.0.2.10:7331 \
+myce queue --model-config models.yaml --listen QUEUE_ADDRESS:7331 \
   --checkpoints /shared/checkpoints
-myce join --queue http://192.0.2.10:7331 --name gpu-worker --gpu cuda \
+myce join --queue http://QUEUE_ADDRESS:7331 --name gpu-worker --gpu cuda \
   --memory-gb 48 --model-config models.yaml --model-root /shared/models \
   --model-cache /local/disk/myce-models --model-cache-bytes 107374182400 \
-  --model-listen 192.0.2.20:7332 --model-advertise http://192.0.2.20:7332
+  --model-listen WORKER_ADDRESS:7332 --model-advertise http://WORKER_ADDRESS:7332
 ```
 
 The default proxy binds loopback on a random port for dev/local workers.

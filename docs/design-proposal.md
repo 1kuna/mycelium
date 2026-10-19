@@ -1,6 +1,6 @@
 # Mycelium v3: approved design
 
-Approved design, revised 2026-10-17 by the maintainer decisions in [#80](https://github.com/1kuna/mycelium/issues/80). The host-control, rest, keyed-submission and cancellation contracts below are **specified, not yet implemented**. Existing supported features remain; this revision does not claim deployment or native acceptance.
+Approved design, revised 2026-10-17 by the maintainer decisions in [#80](https://github.com/1kuna/mycelium/issues/80). The host-control, rest, keyed-submission, cancellation and installer contracts below are implemented. This is the only product spec; native qualification and deployment remain separate from laptop implementation evidence.
 
 ## Why a redesign
 
@@ -116,7 +116,7 @@ These GPU-work and setup features are implemented now:
 
 ## Host admission and release (#80)
 
-**Specified, not yet implemented.** One durable desired-state record controls the whole physical host. A serialized local controller allocates monotonically increasing revisions; every action and retry binds to its accepted revision. Desired state is durable intent. Observed state is what has been applied and verified on this boot. Queue acknowledgement is separate. Recheck the revision before every native/Docker create, start and admission; stale actions cannot reopen a newer close. Device selection is diagnostic only, not staged per-device enable.
+One durable desired-state record controls the whole physical host. A serialized local controller allocates monotonically increasing revisions; every action and retry binds to its accepted revision. Desired state is durable intent. Observed state is what has been applied and verified on this boot. Queue acknowledgement is separate. Recheck the revision before every native/Docker create, start and admission; stale actions cannot reopen a newer close. Device selection is diagnostic only, not staged per-device enable.
 
 ```sh
 myce host close --local [--expect-revision <R>] --worker-user <user> --wait-released --timeout 30s --json
@@ -127,9 +127,9 @@ myce host status --local --worker-user <user> --expect ready --wait --timeout 30
 
 `close` durably records closed intent before discovery or network calls, fences all launches and stops all Mycelium work on the host. Save stop intent and its deadline before TERM; a restart or bounded KILL never renews grace. Keep resource charges until release is proven. Queued jobs stay durable and fenced here; eligible work elsewhere is unaffected. A reboot invalidates observations, never closed intent.
 
-One installed standard systemd user timer per host runs `myce host reconcile --local`, using the same binary and reconciliation function, even when all GPU workers are stopped. It runs on a timer; no-op when settled. It converges on reconnect. A co-located queue also reconciles before admission. The timer is lifecycle plumbing, not another authority. There is no notify-versus-local-receipt choice. Use systemd startup gates, `Restart=on-failure`, `KillMode=control-group` and bounded stop timeouts; Docker labels, inspect, stop and wait; atomic replace/fsync for local intent; SQLite transactions for queue changes. Reconciliation bridges accepted daemon operations and queue custody, which unit state alone cannot prove.
+One installed standard systemd user timer per host runs `myce host reconcile --local`, using the installed worker binary and reconciliation function, even when all GPU workers are stopped. It runs on a timer; no-op when settled. It converges on reconnect. A co-located queue also reconciles before admission. The timer is lifecycle plumbing, not another authority. There is no notify-versus-local-receipt choice. Use systemd startup gates, `Restart=on-failure`, `KillMode=control-group` and bounded stop timeouts; Docker labels, inspect, stop and wait; atomic replace/fsync for local intent; SQLite transactions for queue changes. Reconciliation bridges accepted daemon operations and queue custody, which unit state alone cannot prove.
 
-### Revision selection (specified; runtime is S08)
+### Revision selection
 
 `open` requires `--expect-revision <R>`. `close` accepts it optionally. HTTP/API equivalents use the request field `expect_revision`. Compare-and-set compares that selector with the **durable** `desired.revision` before allocating anything. A mismatch changes nothing, exits **3**, and returns the current `desired.state` and `desired.revision`, `accepted_revision: null`, and an error with `component: "host_intent"`, `code: "revision_mismatch"`. It never reports acceptance of the rejected operation. Missing the required open selector is a usage error.
 
@@ -157,7 +157,7 @@ Host-local commands are supported under **root** with `--worker-user <user>`. Ro
 
 Root resolves only the OS account (UID/GID, supplementary groups and home) and checks path strings. All worker-file reads, including config, state resolution, tree validation and read-only status, run in a dropped child. Installed config selects that user's state directory; `--state-dir` overrides only the shared host-control directory and must already contain current-format state for the installed host. It does not change the account, worker spool or service, or adopt legacy state. Targets must be worker-owned, regular files/directories and not group/other-writable. Linux host-control targets and every ancestor must have no access ACL. Root-owned writable ancestors require the sticky bit; non-root-owned ancestors must be owned by the worker and not group/other-writable. Worker-owned symlinks are rejected; root-owned symlinked ancestors such as `/home -> /var/home` are permitted, with the resolved target checked. Config/state reads validate opened regular-file inodes, reject FIFOs/devices/symlinks, bound their size, and return typed errors without raw paths or read errors. No caller HOME or user-bus inference selects privileged identity; unknown trees are never recursively chowned.
 
-Root collects read-only cgroup, Docker, restart-policy and complete GPU-holder `/proc` FD/executable observations; `systemctl --user --machine=<user>@.host show` selects the worker's user manager. Every Mycelium state write, lock creation, user-unit or Docker mutation runs in a re-executed child of the same trusted binary via `/proc/self/exe`, with worker UID/GID, supplementary groups, HOME and `XDG_RUNTIME_DIR=/run/user/<uid>`. Fixed JSON requests/results travel over pipes with a scrubbed environment and no fleet token. The command deadline starts before resolution; the child gets the remaining timeout minus two seconds, and SIGTERM cancellation plus a bounded wait preserves a typed partial intent revision with release unconfirmed. The launcher sends SIGTERM no later than the overall deadline minus its one-second `WaitDelay`, reserving forced-exit time inside `--timeout`. Status writes nothing. Non-Linux root control is unsupported. Submission and HTTP clients retain their ordinary unprivileged identity. Non-root commands run in-process, but real GPU-holder evidence is UNKNOWN with `gpu_holders/permission_denied`. Laptop dev uses fakes. The user timer performs worker-owned convergence; it cannot manufacture a privileged exclusion PASS. Recording the worker's Docker endpoint at install and reading it from config is an S07 requirement.
+Root collects read-only cgroup, Docker, restart-policy and complete GPU-holder `/proc` FD/executable observations; `systemctl --user --machine=<user>@.host show` selects the worker's user manager. Every Mycelium state write, lock creation, user-unit or Docker mutation runs in a re-executed child of the same trusted binary via `/proc/self/exe`, with worker UID/GID, supplementary groups, HOME and `XDG_RUNTIME_DIR=/run/user/<uid>`. Fixed JSON requests/results travel over pipes with a scrubbed environment and no fleet token. The command deadline starts before resolution; the child gets the remaining timeout minus two seconds, and SIGTERM cancellation plus a bounded wait preserves a typed partial intent revision with release unconfirmed. The launcher sends SIGTERM no later than the overall deadline minus its one-second `WaitDelay`, reserving forced-exit time inside `--timeout`. Status writes nothing. Non-Linux root control is unsupported. Submission and HTTP clients retain their ordinary unprivileged identity. Non-root commands run in-process, but real GPU-holder evidence is UNKNOWN with `gpu_holders/permission_denied`. Laptop dev uses fakes. The user timer performs worker-owned convergence; it cannot manufacture a privileged exclusion PASS. The installer preserves the worker's configured Docker endpoint for observation and mutation.
 
 ### Host settlement and reopening
 
@@ -249,11 +249,11 @@ Reservations, tombstones and markers follow the retention table. Accept a key re
 
 v3 is the only runtime; no old worker-report, capability/profile, empty-attempt or broad host-cleared fallback. Queue and workers must upgrade together. Old or missing worker/report protocol headers, including checkpoint reports and worker events, receive HTTP 426. Exact execution ownership and release evidence remain mandatory across restart/loss; a new report never silently clears omitted obligations.
 
-**Old formats are refused; operators archive and install fresh.** The only RC installation holds canary/test queue state, which is not imported. Stop the old services and prevent their restart, archive their queue/worker data directories and shared host-control directory, preserve configuration and secret references, then install matching current binaries and units. All queue, worker and shared host-control state roots carry `.myce-format` with `v3` and a newline. One startup gate checks every root before any filesystem write: absent or empty roots receive a fsynced marker first; non-empty roots without that exact marker return `legacy_state_present` naming the root. No content-specific legacy detection or migration of pre-marker development state is supported. There is no in-place or offline converter and no dual runtime decoder. Preserve archives, checkpoints and unique evidence; this rule does not authorize deleting them or changing production outside the queue.
+**Old formats are refused; operators archive and install fresh.** Old queue state is not imported. Stop the old services and prevent their restart, archive their queue/worker data directories and shared host-control directory, preserve configuration and secret references, then install matching current binaries and units. All queue, worker and shared host-control state roots carry `.myce-format` with `v3` and a newline. One startup gate checks every root before any filesystem write: absent or empty roots receive a fsynced marker first; non-empty roots without that exact marker return `legacy_state_present` naming the root. No content-specific legacy detection or migration of pre-marker development state is supported. There is no in-place or offline converter and no dual runtime decoder. Preserve archives, checkpoints and unique evidence; this rule does not authorize deleting them or changing production outside the queue.
 
-Installation reads existing config before defaults and overlays only explicit options, preserving queue address, NAS, names, Docker endpoint and secret references. RC worker template instance names remain valid and their unit definitions are replaced in place with current startup gates. An empty fresh installation starts CLOSED with no previous custody to settle; surviving worker data blocks empty-install confirmation. Current closed upgrades never open or renew their revision. Opening requires explicit revision-bound authorization using status `desired.revision` (status `accepted_revision` is null). Settlement of an empty install is separate from privileged exclusion and readiness. Conflicting effective startup gates block activation instead of rewriting consumer-owned configuration. See [Retiring RC state](guide-fresh-install.md) for the paths and operator procedure.
+Installation reads existing config before defaults and overlays only explicit options, preserving queue address, NAS, names, Docker endpoint and secret references. RC worker template instance names remain valid and their unit definitions are replaced in place with current startup gates. An empty fresh installation starts CLOSED with no previous custody to settle; surviving worker data blocks empty-install confirmation. Current closed upgrades never open or renew their revision. Opening requires explicit revision-bound authorization using status `desired.revision` (status `accepted_revision` is null). Settlement of an empty install is separate from privileged exclusion and readiness. Conflicting effective startup gates block activation instead of rewriting consumer-owned configuration. Installation snapshots artifacts and manager state; failure restores previous bytes, modes and enablement/activity under a bounded recovery context. Incomplete rollback is explicit and keeps convergence fenced; it never opens or renews host intent. The root-owned control copy is deployed separately. See [operations](operations.md#installer-overlay-and-rollback) and [archive plus fresh install](guide-fresh-install.md).
 
-Promotion, history privacy review, fleet coordination and native activation are separate work. Preserve Git history; tag the previous default line `v2-final` when fast-forwarding to the reviewed v3 descendant. Retire old binaries, recovery paths and evidence only after their owners release dependencies; this spec change authorizes no fleet action or cleanup.
+Native activation and release promotion require their own evidence and authorization. Preserve old state archives, checkpoints and unique evidence until their owners release dependencies.
 
 ## Testing
 
@@ -262,7 +262,7 @@ Promotion, history privacy review, fleet coordination and native activation are 
 - One end-to-end test submits a resumable job, stops it to make room, and checks that it resumes from its checkpoint.
 - Real hardware is tested by running `myce join` on a real machine. There is no separate hardware test framework.
 
-The #80 implementation must cover these six bounded component cases. These are required checks, not claims that the new contracts already pass:
+Verification covers these six bounded component cases. The table defines the required evidence; laptop results alone do not qualify the native remainder:
 
 | Case | Laptop evidence and native remainder |
 | --- | --- |
@@ -395,7 +395,7 @@ SQLite queue, plain commands, injected scheduling clock and attempt ownership
 remain. Explicit NAS configuration remains supported. One store is not a backup.
 See [files without a NAS](guide-files-v3.md) for configuration and retention limits.
 
-## Shared native server entry additions (approved 2026-10-16, #68)
+## Shared native server entries (#68)
 
 Server entries may set `project` and `allowed_machines`. Models stay shared
 across projects; owner and caller placement policies intersect. Optional `env`
@@ -415,7 +415,7 @@ ordinary copied-model custody is unchanged. Authenticated header-less `/v1`
 calls default to the entry owner and `experiment`; a per-project production
 default requires explicit operator opt-in by the effective caller project, even
 when calling another owner's entry. Existing entries retain defaults.
-See [operator configuration](design-68-server-entries.md).
+See [operator configuration](guide-servers.md#shared-entries-local-secrets-and-approved-model-folders).
 
 ## Log opt-out rollout (#68 review decision)
 

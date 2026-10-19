@@ -1,16 +1,20 @@
 # Service templates
 
 Follow [operations](../docs/operations.md) for install, start, stop, upgrade,
-and recoverable uninstall on Linux/macOS. These templates have not been
-installed on fleet machines. Linux files are **user** systemd units, not system
+and recoverable uninstall on Linux/macOS. Qualify each rendered definition before native activation. Linux files are **user** systemd units, not system
 units. Replace every `REPLACE_*` field before installing. macOS's worker filename is `local.myce.worker.plist` and its label is
 `local.myce.worker`; the queue is `local.myce.queue.plist` / `local.myce.queue`.
 
-v2 binary: `~/.local/bin/myce`; local state: `~/.local/share/myce`; private
-configuration: `~/.config/myce`. These are manual-template paths; `myce install`
-instead uses `~/.local/share/mycelium/ROLE` and macOS `local.mycelium.ROLE` labels.
-Do not overwrite or disable legacy `mycelium`
-binaries, state, or services. Service definitions contain no real credentials.
+For a generated install, role binary/config/state default to
+`~/.local/share/mycelium/ROLE`; macOS labels use `local.mycelium.ROLE`.
+Manual templates require explicit substituted paths and use `local.myce.*`
+macOS labels. Pick one definition per role; never run both against the same
+state. Service definitions contain placeholders, not credentials.
+[Installer overlay and rollback](../docs/operations.md#installer-overlay-and-rollback)
+preserve omitted settings, artifacts and service/timer state. Nonempty old state
+without `.myce-format` returns `legacy_state_present`: follow
+[archive plus fresh install](../docs/guide-fresh-install.md), preserving local data.
+
 Queue and worker NAS mount paths may differ while mapping the same shared root.
 A checkpoint-root directory probe is not verification of the remote mount's identity.
 

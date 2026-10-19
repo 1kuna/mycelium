@@ -13,9 +13,8 @@ periodically too: a machine that loses power cannot save on demand.
 
 Each attempt receives `MYCE_JOB_ID`, `MYCE_ATTEMPT`, and `MYCE_CHECKPOINT_DIR`.
 Each worker sets `--checkpoint-root` to its own local mount of the same NAS
-checkpoint directory: for example `/mnt/nas/mycelium/checkpoints` on
-Spark, `/mnt/nas/mycelium/checkpoints` on B70 when that is its mount,
-and `/Volumes/NAS/mycelium/checkpoints` on Macs. Queue `--checkpoints`
+checkpoint directory, configured privately per host. For example, use a generic
+`NAS_ROOT/checkpoints` under each machine's verified mount. Queue `--checkpoints`
 uses the queue's local path. Jobs carry relative checkpoint paths; the worker
 resolves them before setting `MYCE_CHECKPOINT_DIR`. Create the root on the
 mounted NAS before starting the queue. Dev creates a local root.
@@ -70,13 +69,13 @@ separately. Neither helper returns early from a still-running file flush.
 Resume copies now sync each copied file, then each staged directory once,
 children before parents, before atomically publishing the entire attempt and
 syncing its parent. This removes per-file directory barriers on local filesystems
-without weakening publication ordering. Verso's 40,002-file timeout occurred on
-ext4, not CIFS; this change does not certify that fixture's five-minute budget.
+without weakening publication ordering. This does not establish a fixed
+latency bound for a large checkpoint.
 File flushes, copying, generation scanning and remote I/O can still be slow or
 block. A timeout after rename on a filesystem requiring directory fsync must not
 be reported as a durable save; visibility alone does not prove durability.
 
-Size Verso checkpoint intervals from measured worst-case/p99 save duration and
+Size checkpoint intervals from measured worst-case/p99 save duration and
 acceptable lost work, including time spent doing the next bounded work unit.
 Avoid overlapping saves. Measure resume-copy latency separately, including file
 count and payload size. Stop grace must exceed the longest bounded work unit plus
