@@ -48,7 +48,7 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 	joiningFile := f.String("joining-file", "", "private invitation; discovers queue and provisions trust")
 	root := f.String("root", "", "installation root (default ~/.local/share/mycelium)")
 
-	config := f.String("config", "", "installed config path (doctor/uninstall)")
+	config := f.String("config", "", "installed config path (install/doctor/uninstall)")
 	nasDefault := "/mnt/nas"
 	if probe.OS == "darwin" {
 		nasDefault = "/Volumes/NAS"
@@ -77,10 +77,10 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 	environmentCache := f.String("environment-cache", "", "local environment cache")
 	environmentCacheBytes := f.Int64("environment-cache-bytes", 20<<30, "local environment cache bytes")
 	heartbeat := f.Duration("heartbeat", time.Second, "worker check-in interval")
-	startDisabled := f.Bool("start-disabled", false, "install with a durable per-unit disable gate; enable explicitly later")
+	startDisabled := f.Bool("start-disabled", false, "stage a closed worker; open explicitly with host open after reconciliation")
 	requireCeilings := f.Bool("require-memory-ceilings", false, "refuse startup without tested cgroup v2 memory ceilings")
 	requireMounted := f.Bool("require-mounted-nas", probe.OS == "linux", "require NAS root to be a mount point in /proc/mounts")
-	force := f.Bool("force", false, "accept displayed installed configuration changes")
+	force := f.Bool("force", false, "deprecated compatibility option; explicit flags already authorize configuration changes")
 	db := f.String("db", "", "queue SQLite path (default state/myce.db)")
 	projectConfig := f.String("project-config", "", "project policy YAML")
 	hostConfig := f.String("host-config", "", "host policy YAML")
@@ -147,7 +147,51 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 		}
 		return nil
 	}
-	if *joiningFile != "" {
+	// Locate the saved configuration before detection or applying fresh-install
+	// defaults. Flag presence, rather than its value, defines the upgrade overlay.
+	explicit := map[string]bool{}
+	f.Visit(func(v *flag.Flag) { explicit[v.Name] = true })
+	if explicit["config"] && (explicit["root"] || explicit["instance"]) {
+		return errors.New("--config selects the installation; omit --root and --instance")
+	}
+	configPath := *config
+	if configPath == "" {
+		base := *root
+		if base == "" {
+			base = filepath.Join(home, ".local", "share", "mycelium")
+		}
+		directory := role
+		if *instance != "" {
+			directory = "worker-" + *instance
+		}
+		configPath = filepath.Join(base, directory, "config.json")
+	}
+	configPath, e = filepath.Abs(configPath)
+	if e != nil {
+		return e
+	}
+	var installed *myce.ServiceConfig
+	if old, err := myce.ReadServiceConfig(configPath); err == nil {
+		if old.Role != role || old.Config != configPath || old.Detection.OS != probe.OS || old.Detection.Arch != probe.Arch {
+			return errors.New("installed role, config and platform identity cannot change")
+		}
+		installed = &old
+		for name, value := range old.InstallFlags() {
+			if !explicit[name] {
+				if err = f.Set(name, value); err != nil {
+					return err
+				}
+			}
+		}
+		if explicit["checkpoint-root"] && !explicit["checkpoints"] {
+			*checkpoints = ""
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	} else if explicit["config"] {
+		return errors.New("--config must select an existing installation; use --root for a fresh install")
+	}
+	if *joiningFile != "" && (installed == nil || explicit["joining-file"]) {
 		if role != "worker" {
 			return errors.New("--joining-file is for installing a hypha")
 		}
@@ -182,8 +226,14 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 		*environmentFile = ""
 	}
 	d := myce.Detection{OS: probe.OS, Arch: probe.Arch}
+	if installed != nil {
+		d = installed.Detection
+	}
 	if role == "worker" {
-		if *gpu != "" {
+		if installed != nil {
+			d = installed.Detection
+			d.Platform, d.MemoryMode, d.MemoryGB, d.ReserveGB = *gpu, *mode, *memory, *reserve
+		} else if *gpu != "" {
 			d.Platform = *gpu
 			d.MemoryMode = *mode
 			d.MemoryGB = *memory
@@ -242,6 +292,10 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 		if e = c.WorkerInstance(*instance); e != nil {
 			return e
 		}
+	}
+	if installed != nil {
+		c = *installed
+		c.Detection = d
 	}
 	if _, err := myce.MemoryCeilingConfig(*hostBudget, *memorySlack, *memorySwap); err != nil {
 		return err
@@ -325,18 +379,17 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 	if e = c.ValidateInstall(); e != nil {
 		return e
 	}
-	if p := os.Getenv("PATH"); p != "" {
+	if p := os.Getenv("PATH"); p != "" && installed == nil {
 		if strings.ContainsAny(p, "\x00\n\r\"\\") {
 			return errors.New("PATH cannot contain newlines, quotes or backslashes for service capture")
 		}
 		c.Path = p
 	}
-	if !*dry && c.EnvironmentFile != "" {
-		_, address, err := myce.ReadFleetEnvironment(c.EnvironmentFile)
-		if err != nil {
+	if installed != nil {
+		if err := myce.ValidateInstallIdentity(*installed, c); err != nil {
 			return err
 		}
-		c.Queue = address
+		fmt.Println("Intended configuration changes:\n" + myce.InstallConfigDiff(*installed, c))
 	}
 	fmt.Printf("%s %s/%s: platform=%s memory=%s reserve=%.0f GiB\nQueue: %s\nNAS: %s\nCheckpoint root: %s\nModel cache: %s (%d bytes)\nEnvironment cache: %s (%d bytes)\nConfig: %s\nBoot service: %s\n", role, d.OS, d.Arch, d.Platform, d.MemoryMode, d.ReserveGB, c.Queue, c.NAS, c.Checkpoints, c.ModelCache, c.ModelCacheBytes, c.EnvironmentCache, c.EnvironmentCacheBytes, c.Config, c.Service)
 	if d.OS == "linux" {
@@ -358,8 +411,8 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 		}
 	}
 	fmt.Printf("Command: myce %s\n", strings.Join(c.Args(), " "))
-	if c.StartDisabled {
-		fmt.Println("Worker will remain disabled until myce enable.")
+	if c.Role == "worker" {
+		fmt.Println("Worker stays closed; reconcile and use myce host open explicitly.")
 	}
 	if *dry {
 		fmt.Println("Dry run: no files written, packages installed, or services changed.")

@@ -139,7 +139,7 @@ func prepareInstallNAS(ctx context.Context, c ServiceConfig, command func(contex
 	return nil
 }
 
-func installConfigDiff(old, new ServiceConfig) string {
+func InstallConfigDiff(old, new ServiceConfig) string {
 	old.Force, new.Force = false, false
 	a, _ := json.Marshal(old)
 	b, _ := json.Marshal(new)
@@ -161,67 +161,23 @@ func installConfigDiff(old, new ServiceConfig) string {
 	out := []string{}
 	for _, key := range fields {
 		if string(before[key]) != string(after[key]) {
-			out = append(out, fmt.Sprintf("%s: %s -> %s", key, before[key], after[key]))
+			out = append(out, key+": changed")
 		}
 	}
 	return strings.Join(out, "\n")
-}
-
-func installDisabled(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error), installed bool) error {
-	unit := filepath.Base(c.Service)
-	dir, err := hostRoot(c.HostStateDir)
-	if err != nil {
-		return err
-	}
-	if _, e := os.Stat(filepath.Join(dir, hostStateFile)); errors.Is(e, os.ErrNotExist) {
-		if _, e = InitializeHostIntent(dir, c.HostID, RealClock{}); e != nil {
-			return e
-		}
-	}
-	w := HostWorker{Config: c.Config, Unit: unit, State: c.State, Host: c.HostID, Name: c.Name, Queue: c.Queue, Environments: c.EnvironmentCache}
-	if err = AdoptHostWorker(c.HostStateDir, w); err != nil {
-		return err
-	}
-
-	h := HostControl{Dir: dir, Docker: true, DockerEndpoint: c.DockerEndpoint, dockerConfigPath: c.Config}
-	if installed {
-		h.Services = map[string]HostService{unit: &SystemdHostService{Unit: unit, Command: command}}
-	}
-	// Installation preserves the whole-host revision and its original stop deadline.
-	r, err := h.Disable(ctx, "installed with --start-disabled", 0)
-	// A disabled install needs successful cleanup, not a privileged exclusion
-	// certificate. Keep UNKNOWN persisted until root performs fresh observation.
-	if r.cleanupComplete {
-		return nil
-	}
-	return err
-}
-
-func replaceInstallBinary(path string, data []byte) error {
-	f, err := os.CreateTemp(filepath.Dir(path), ".myce-binary-")
-	if err != nil {
-		return err
-	}
-	if err = f.Chmod(0700); err != nil {
-		f.Close()
-		return err
-	}
-	_, err = f.Write(data)
-	err = errors.Join(err, f.Sync(), f.Close())
-	if err != nil {
-		return err
-	}
-	if err = os.Rename(f.Name(), path); err != nil {
-		return err
-	}
-	return syncWorkerDir(filepath.Dir(path))
 }
 
 func (c ServiceConfig) ValidateInstall() error {
 	if c.Role != "queue" && c.Role != "worker" {
 		return errors.New("install requires worker or queue")
 	}
+	if c.Version < 0 || c.Version > 1 {
+		return errors.New("unsupported installed config version")
+	}
 	for _, p := range []string{c.JoiningFile, c.NAS, c.State, c.Checkpoints, c.ModelRoot, c.EnvironmentRoot, c.ModelCache, c.EnvironmentCache, c.Config, c.Binary, c.Service, c.Credentials, c.HostStateDir, c.DB, c.UploadSpoolDir, c.ProjectConfig, c.HostConfig, c.ModelCatalog, c.EnvironmentCatalog, c.EnvironmentFile} {
+		if p == "/usr/local/libexec/myce" || strings.HasPrefix(p, "/usr/local/libexec/myce/") {
+			return errors.New("worker installer cannot write the protected root binary tree")
+		}
 		if p != "" && (!filepath.IsAbs(p) || strings.ContainsAny(p, "\x00\n\r")) {
 			return errors.New("installed paths must be absolute and single-line")
 		}

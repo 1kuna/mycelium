@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -177,44 +178,45 @@ func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detectio
 }
 
 type ServiceConfig struct {
-	RequiredWorkers       []string       `json:"required_workers,omitempty"`
+	Version               int            `json:"version"`
+	RequiredWorkers       []string       `json:"required_workers"`
 	DockerEndpoint        string         `json:"docker_endpoint"`
-	WorkerUser            string         `json:"worker_user,omitempty"`
-	WorkerHome            string         `json:"worker_home,omitempty"`
-	LocalDisableReceipts  bool           `json:"local_disable_receipts,omitempty"`
-	OnboardingBenchmark   bool           `json:"onboarding_benchmark,omitempty"`
-	JoiningFile           string         `json:"joining_file,omitempty"`
-	EnvironmentFile       string         `json:"environment_file,omitempty"`
-	HostID                string         `json:"host_id,omitempty"`
-	DB                    string         `json:"db,omitempty"`
-	ProjectConfig         string         `json:"project_config,omitempty"`
-	HostConfig            string         `json:"host_config,omitempty"`
-	UploadSpoolDir        string         `json:"upload_spool_dir,omitempty"`
-	UploadSpoolBytes      int64          `json:"upload_spool_bytes,omitempty"`
-	ContainerRetention    *time.Duration `json:"container_retention,omitempty"`
-	LogRetention          time.Duration  `json:"log_retention,omitempty"`
-	Heartbeat             time.Duration  `json:"heartbeat,omitempty"`
-	RestartGrace          time.Duration  `json:"restart_grace,omitempty"`
-	ProductionLossTimeout time.Duration  `json:"production_loss_timeout,omitempty"`
-	DeadlineLossTimeout   time.Duration  `json:"deadline_loss_timeout,omitempty"`
-	ExperimentLossTimeout time.Duration  `json:"experiment_loss_timeout,omitempty"`
+	WorkerUser            string         `json:"worker_user"`
+	WorkerHome            string         `json:"worker_home"`
+	LocalDisableReceipts  bool           `json:"local_disable_receipts"`
+	OnboardingBenchmark   bool           `json:"onboarding_benchmark"`
+	JoiningFile           string         `json:"joining_file"`
+	EnvironmentFile       string         `json:"environment_file"`
+	HostID                string         `json:"host_id"`
+	DB                    string         `json:"db"`
+	ProjectConfig         string         `json:"project_config"`
+	HostConfig            string         `json:"host_config"`
+	UploadSpoolDir        string         `json:"upload_spool_dir"`
+	UploadSpoolBytes      int64          `json:"upload_spool_bytes"`
+	ContainerRetention    *time.Duration `json:"container_retention"`
+	LogRetention          time.Duration  `json:"log_retention"`
+	Heartbeat             time.Duration  `json:"heartbeat"`
+	RestartGrace          time.Duration  `json:"restart_grace"`
+	ProductionLossTimeout time.Duration  `json:"production_loss_timeout"`
+	DeadlineLossTimeout   time.Duration  `json:"deadline_loss_timeout"`
+	ExperimentLossTimeout time.Duration  `json:"experiment_loss_timeout"`
 	ReserveHostMemoryGB   float64        `json:"reserve_host_memory_gb"`
 	PrivateDevices        bool           `json:"private_devices"`
 	NoNewPrivileges       bool           `json:"no_new_privileges"`
 	Nice                  int            `json:"nice"`
-	CPUQuota              string         `json:"cpu_quota,omitempty"`
-	MemoryMax             string         `json:"memory_max,omitempty"`
-	TasksMax              string         `json:"tasks_max,omitempty"`
-	StartDisabled         bool           `json:"start_disabled,omitempty"`
-	RequireMemoryCeilings bool           `json:"require_memory_ceilings,omitempty"`
-	RequireMountedNAS     bool           `json:"require_mounted_nas,omitempty"`
+	CPUQuota              string         `json:"cpu_quota"`
+	MemoryMax             string         `json:"memory_max"`
+	TasksMax              string         `json:"tasks_max"`
+	StartDisabled         bool           `json:"start_disabled"`
+	RequireMemoryCeilings bool           `json:"require_memory_ceilings"`
+	RequireMountedNAS     bool           `json:"require_mounted_nas"`
 	Force                 bool           `json:"-"`
-	HostMemoryBudgetGB    float64        `json:"host_memory_budget_gb,omitempty"`
+	HostMemoryBudgetGB    float64        `json:"host_memory_budget_gb"`
 	MemoryCeilingSlackGB  float64        `json:"memory_ceiling_slack_gb"`
 	MemorySwapMaxBytes    int64          `json:"memory_swap_max_bytes"`
-	AllowDeviceless       bool           `json:"allow_deviceless,omitempty"`
-	Device                string         `json:"device,omitempty"`
-	HostStateDir          string         `json:"host_state_dir,omitempty"`
+	AllowDeviceless       bool           `json:"allow_deviceless"`
+	Device                string         `json:"device"`
+	HostStateDir          string         `json:"host_state_dir"`
 	Path                  string         `json:"path"`
 	EnvironmentRoot       string         `json:"environment_root"`
 	Role                  string         `json:"role"`
@@ -225,8 +227,8 @@ type ServiceConfig struct {
 	NAS                   string         `json:"nas"`
 	Checkpoints           string         `json:"checkpoint_root"`
 	ModelRoot             string         `json:"model_root"`
-	ModelCatalog          string         `json:"model_catalog,omitempty"`
-	EnvironmentCatalog    string         `json:"environment_catalog,omitempty"`
+	ModelCatalog          string         `json:"model_catalog"`
+	EnvironmentCatalog    string         `json:"environment_catalog"`
 	State                 string         `json:"state_dir"`
 	ModelCache            string         `json:"model_cache"`
 	EnvironmentCache      string         `json:"environment_cache"`
@@ -242,6 +244,7 @@ type ServiceConfig struct {
 // accounts support synthetic plans without consulting the host account database.
 func PlanInstall(role, home, root, nas, queue, name string, d Detection, account ...WorkerAccount) (ServiceConfig, error) {
 	c := ServiceConfig{Role: role, Detection: d, Name: name, Queue: queue, Listen: "127.0.0.1:7331", NAS: nas}
+	c.Version = 1
 	if role == "worker" {
 		c.WorkerHome = home
 		if len(account) == 1 && account[0].Home == home {
@@ -281,10 +284,7 @@ func PlanInstall(role, home, root, nas, queue, name string, d Detection, account
 	c.Checkpoints = filepath.Join(nas, "mycelium", "checkpoints")
 	c.ModelRoot = filepath.Join(nas, "mycelium", "models")
 	c.DB = filepath.Join(c.State, "myce.db")
-	c.HostStateDir = os.Getenv("MYCE_HOST_STATE_DIR")
-	if c.HostStateDir == "" {
-		c.HostStateDir = filepath.Join(home, ".local", "share", "myce")
-	}
+	c.HostStateDir = filepath.Join(home, ".local", "share", "myce")
 	c.DockerEndpoint = defaultDockerEndpoint(os.Getenv("DOCKER_HOST"))
 	c.HostID, _ = os.Hostname()
 	c.ReserveHostMemoryGB = 4
@@ -374,6 +374,17 @@ func (c ServiceConfig) ServiceText() string {
 // Install is only called by an explicit install invocation. Tests use plans or
 // inject a no-op service runner and temp home; no test installs a boot service.
 func Install(ctx context.Context, c ServiceConfig, executable, token string, command func(context.Context, string, ...string) ([]byte, error)) error {
+	return installWithFiles(ctx, c, executable, token, command, installFiles{})
+}
+
+func installWithFiles(ctx context.Context, c ServiceConfig, executable, token string, command func(context.Context, string, ...string) ([]byte, error), files installFiles) (result error) {
+	if os.Geteuid() == 0 {
+		return ErrHostIdentity
+	}
+	if c.Version < 0 || c.Version > 1 {
+		return errors.New("unsupported installed config version")
+	}
+	c.Version = 1
 	if c.LocalDisableReceipts {
 		return ErrLegacyLocalDisableReceipts
 	}
@@ -390,15 +401,21 @@ func Install(ctx context.Context, c ServiceConfig, executable, token string, com
 	if c.StartDisabled && (c.Role != "worker" || c.Detection.OS != "linux") {
 		return errors.New("--start-disabled requires a Linux worker")
 	}
-	if c.EnvironmentFile != "" {
-		var err error
-		token, c.Queue, err = ReadFleetEnvironment(c.EnvironmentFile)
+	existing := false
+	if _, err := os.Lstat(c.Config); err == nil {
+		old, err := ReadServiceConfig(c.Config)
 		if err != nil {
 			return err
 		}
+		if err := ValidateInstallIdentity(old, c); err != nil {
+			return err
+		}
+		existing = true
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
 	}
 	var invitation *Invitation
-	if c.JoiningFile != "" {
+	if c.JoiningFile != "" && !existing {
 		if c.Role != "worker" || c.EnvironmentFile != "" {
 			return errors.New("joining invitation requires a worker without EnvironmentFile")
 		}
@@ -410,28 +427,6 @@ func Install(ctx context.Context, c ServiceConfig, executable, token string, com
 		token = i.Token
 		c.JoiningFile = filepath.Join(filepath.Dir(c.Config), "joining.json")
 	}
-	if token == "" {
-		return errors.New("set MYCE_TOKEN before installing")
-	}
-	existing := false
-	if _, err := os.Lstat(c.Config); err == nil {
-		old, err := ReadServiceConfig(c.Config)
-		if err != nil {
-			return err
-		}
-		if diff := installConfigDiff(old, c); diff != "" {
-			fmt.Fprintln(os.Stdout, "Installed configuration changes:\n"+diff)
-			if !c.Force {
-				return fmt.Errorf("installed configuration differs; review the diff and rerun with --force:\n%s", diff)
-			}
-		}
-		if old.Role != c.Role || old.Service != c.Service || old.Binary != c.Binary || old.State != c.State {
-			return errors.New("installed role, service, binary and state paths cannot change; preserve custody and install separately")
-		}
-		existing = true
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
 	for _, path := range []string{c.Config, c.Binary, c.Credentials, c.Service} {
 		st, err := os.Lstat(path)
 		if err == nil {
@@ -442,6 +437,11 @@ func Install(ctx context.Context, c ServiceConfig, executable, token string, com
 			return err
 		}
 	}
+	if c.Role == "worker" {
+		if err := prepareClosedWorkerInstall(c); err != nil {
+			return err
+		}
+	}
 	if err := prepareInstallNAS(ctx, c, command); err != nil {
 		return err
 	}
@@ -449,44 +449,63 @@ func Install(ctx context.Context, c ServiceConfig, executable, token string, com
 	if err != nil {
 		return err
 	}
-	if c.StartDisabled {
-		if err = installDisabled(ctx, c, command, existing); err != nil {
-			return err
-		}
-	}
 	for _, path := range []string{filepath.Dir(c.Config), filepath.Dir(c.Service), c.State} {
 		if err = os.MkdirAll(path, 0700); err != nil {
 			return err
 		}
 	}
+	// Stage beside each destination: runtime, service and durable roots may be
+	// different filesystems. No rename crosses their boundary.
+	tx := installTransaction{files: files}
+	defer func() {
+		if result != nil {
+			result = errors.Join(result, tx.restore())
+		}
+	}()
+	if err = tx.put(c.Binary, data, 0700); err != nil {
+		return err
+	}
+	configData, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err = tx.put(c.Config, configData, 0600); err != nil {
+		return err
+	}
 	if invitation != nil {
-		if err = WriteInvitation(c.JoiningFile, *invitation); err != nil {
+		invitationData, err := json.Marshal(invitation)
+		if err != nil {
+			return err
+		}
+		if err = tx.put(c.JoiningFile, invitationData, 0600); err != nil {
 			return err
 		}
 	}
-	if err = replaceInstallBinary(c.Binary, data); err != nil {
-		return err
-	}
-	if err = saveWorkerJSON(filepath.Dir(c.Config), filepath.Base(c.Config), c); err != nil {
-		return err
-	}
-	// Legacy programmatic installs retain their private credential file; CLI installs use fleet.env.
-	if c.EnvironmentFile == "" && !existing {
-		if err = saveWorkerJSON(filepath.Dir(c.Credentials), filepath.Base(c.Credentials), map[string]string{"token": token}); err != nil {
+	if c.EnvironmentFile == "" && !existing && invitation == nil {
+		if token == "" {
+			return errors.New("set MYCE_TOKEN before installing")
+		}
+		credentialData, _ := json.Marshal(map[string]string{"token": token})
+		if err = tx.put(c.Credentials, credentialData, 0600); err != nil {
 			return err
 		}
 	}
 	if c.Role == "worker" && c.Detection.OS == "linux" {
-		if err = os.WriteFile(c.GPUEnvironmentFile(), []byte(gpuRuntimeEnvironment(os.Environ())), 0600); err != nil {
+		// Runtime settings are an installed artifact, not ambient upgrade input.
+		if _, err = os.Lstat(c.GPUEnvironmentFile()); errors.Is(err, os.ErrNotExist) {
+			if err = tx.put(c.GPUEnvironmentFile(), []byte(gpuRuntimeEnvironment(os.Environ())), 0600); err != nil {
+				return err
+			}
+		} else if err != nil {
 			return err
 		}
+		for name, body := range map[string]string{"myce-host-reconcile.service": c.HostReconcileServiceText(), "myce-host-reconcile.timer": hostReconcileTimerText} {
+			if err = tx.put(filepath.Join(filepath.Dir(c.Service), name), []byte(body), 0600); err != nil {
+				return err
+			}
+		}
 	}
-	if _, e := os.Stat(c.Service); e == nil {
-		err = saveServiceText(c)
-	} else {
-		err = os.WriteFile(c.Service, []byte(c.ServiceText()), 0600)
-	}
-	if err != nil {
+	if err = tx.put(c.Service, []byte(c.ServiceText()), 0600); err != nil {
 		return err
 	}
 	if c.Detection.OS == "linux" {
@@ -499,11 +518,14 @@ func Install(ctx context.Context, c ServiceConfig, executable, token string, com
 			}
 		}
 		if c.Role == "worker" {
-			if err = installHostReconcileTimer(ctx, c, command); err != nil {
+			if err = validateInstallDropIns(ctx, c, command); err != nil {
+				return err
+			}
+			if _, err = command(ctx, "systemctl", "--user", "enable", "--now", "myce-host-reconcile.timer"); err != nil {
 				return err
 			}
 		}
-		if c.StartDisabled {
+		if c.Role == "worker" {
 			_, err = command(ctx, "systemctl", "--user", "enable", filepath.Base(c.Service))
 			return err
 		}
@@ -514,6 +536,9 @@ func Install(ctx context.Context, c ServiceConfig, executable, token string, com
 			_, err = command(ctx, "systemctl", "--user", "restart", filepath.Base(c.Service))
 		}
 	} else {
+		if c.Role == "worker" {
+			return nil
+		} // stage only; host open is a separate operation
 		if existing {
 			if _, err = command(ctx, "launchctl", "bootout", "gui/"+strconv.Itoa(os.Getuid()), c.Service); err != nil {
 				return err
@@ -530,7 +555,15 @@ func ReadServiceConfig(path string) (ServiceConfig, error) {
 	if e != nil {
 		return c, e
 	}
-	e = json.Unmarshal(b, &c)
+	if !json.Valid(b) {
+		return c, errors.New("invalid installed config JSON")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(b))
+	decoder.DisallowUnknownFields()
+	e = decoder.Decode(&c)
+	if e == nil && (c.Version < 0 || c.Version > 1) {
+		return c, errors.New("unsupported installed config version")
+	}
 	return c, e
 }
 func Uninstall(ctx context.Context, c ServiceConfig, dry bool, command func(context.Context, string, ...string) ([]byte, error)) error {
@@ -809,32 +842,4 @@ func (c ServiceConfig) Args() []string {
 }
 func SetupTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, 15*time.Second)
-}
-
-func saveServiceText(c ServiceConfig) error {
-	f, e := os.CreateTemp(filepath.Dir(c.Service), ".myce-unit-")
-	if e != nil {
-		return e
-	}
-	if e = f.Chmod(0600); e != nil {
-		f.Close()
-		return e
-	}
-	_, e = f.WriteString(c.ServiceText())
-	e = errors.Join(e, f.Sync(), f.Close())
-	if e != nil {
-		return e
-	}
-	trash := filepath.Join(filepath.Dir(c.Service), ".Trash")
-	if e = os.MkdirAll(trash, 0700); e != nil {
-		return e
-	}
-	backup := filepath.Join(trash, ID()+"-"+filepath.Base(c.Service))
-	if e = os.Rename(c.Service, backup); e != nil {
-		return e
-	}
-	if e = os.Rename(f.Name(), c.Service); e != nil {
-		return errors.Join(e, os.Rename(backup, c.Service))
-	}
-	return syncWorkerDir(filepath.Dir(c.Service))
 }
