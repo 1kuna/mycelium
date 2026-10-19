@@ -24,25 +24,87 @@ type Platform struct {
 	Any       bool     `json:"any,omitempty" yaml:"any,omitempty"`
 }
 
+// JSON is a subset of YAML. Both entry points use the same typed node grammar;
+// node tags prevent YAML's scalar coercions from widening the accepted forms.
+func (p *Platform) UnmarshalJSON(data []byte) error {
+	var n yaml.Node
+	if err := yaml.Unmarshal(data, &n); err != nil {
+		return err
+	}
+	if len(n.Content) != 1 {
+		return errors.New("needs.platform is required")
+	}
+	return p.UnmarshalYAML(n.Content[0])
+}
+
 func (p *Platform) UnmarshalYAML(n *yaml.Node) error {
-	*p = Platform{}
-	if n.Kind == yaml.SequenceNode {
-		return n.Decode(&p.Required)
+	var value Platform
+	invalid := func() error {
+		return errors.New("needs.platform requires a platform string, nonempty list, or one required/preferred/any mapping")
 	}
-	if n.Kind == yaml.ScalarNode && n.Value == "any" {
-		p.Any = true
-		return nil
-	}
-	type plain Platform
-	if n.Kind != yaml.MappingNode {
-		return errors.New("platform must be a list, any, or a required/preferred/any mapping")
-	}
-	for i := 0; i < len(n.Content); i += 2 {
-		if !slices.Contains([]string{"required", "preferred", "any"}, n.Content[i].Value) {
-			return fmt.Errorf("unknown platform field %q", n.Content[i].Value)
+	list := func(n *yaml.Node) ([]string, error) {
+		if n.Kind != yaml.SequenceNode || len(n.Content) == 0 {
+			return nil, invalid()
 		}
+		var out []string
+		for _, item := range n.Content {
+			if item.Kind != yaml.ScalarNode || item.Tag != "!!str" || !validGPU(item.Value) {
+				return nil, invalid()
+			}
+			out = append(out, item.Value)
+		}
+		return out, nil
 	}
-	return n.Decode((*plain)(p))
+	switch n.Kind {
+	case yaml.ScalarNode:
+		if n.Tag != "!!str" {
+			return invalid()
+		}
+		if n.Value == "any" {
+			value.Any = true
+		} else if validGPU(n.Value) {
+			value.Required = []string{n.Value}
+		} else {
+			return invalid()
+		}
+	case yaml.SequenceNode:
+		var err error
+		value.Required, err = list(n)
+		if err != nil {
+			return err
+		}
+	case yaml.MappingNode:
+		// The empty canonical value also occurs in stored extension jobs.
+		if len(n.Content) == 0 {
+			*p = value
+			return nil
+		}
+		if len(n.Content) != 2 || n.Content[0].Tag != "!!str" {
+			return invalid()
+		}
+		key, item := n.Content[0].Value, n.Content[1]
+		var err error
+		switch key {
+		case "required":
+			value.Required, err = list(item)
+		case "preferred":
+			value.Preferred, err = list(item)
+		case "any":
+			if item.Kind != yaml.ScalarNode || item.Tag != "!!bool" || item.Value != "true" {
+				return invalid()
+			}
+			value.Any = true
+		default:
+			return invalid()
+		}
+		if err != nil {
+			return err
+		}
+	default:
+		return invalid()
+	}
+	*p = value
+	return nil
 }
 
 type Environment struct {
