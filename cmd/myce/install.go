@@ -296,6 +296,9 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 	if installed != nil {
 		c = *installed
 		c.Detection = d
+		// These PlanInstall inputs were validated above, but replacing its
+		// result with the saved config must not discard explicit overlays.
+		c.Queue, c.NAS, c.Name = *queue, *nas, *name
 	}
 	if _, err := myce.MemoryCeilingConfig(*hostBudget, *memorySlack, *memorySwap); err != nil {
 		return err

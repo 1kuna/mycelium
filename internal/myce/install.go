@@ -457,9 +457,54 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 	// Stage beside each destination: runtime, service and durable roots may be
 	// different filesystems. No rename crosses their boundary.
 	tx := installTransaction{files: files}
+	reloadAttempted := false
+	type activation struct {
+		unit   string
+		active bool
+	}
+	var activations []activation
+	activate := func(unit string) error {
+		_, err := command(ctx, "systemctl", "--user", "is-active", "--quiet", unit)
+		active := err == nil
+		if err != nil {
+			var status interface{ ExitCode() int }
+			if !errors.As(err, &status) || (status.ExitCode() != 3 && status.ExitCode() != 4) {
+				return fmt.Errorf("inspect service before activation: %w", err)
+			}
+		}
+		// Record before the call: even a failed enable can partially start it.
+		activations = append(activations, activation{unit, active})
+		_, err = command(ctx, "systemctl", "--user", "enable", "--now", unit)
+		return err
+	}
 	defer func() {
 		if result != nil {
-			result = errors.Join(result, tx.restore())
+			restoreErr := tx.restore()
+			if reloadAttempted {
+				// The failed command's context may have expired. Bound recovery
+				// separately so the manager can load the restored disk artifacts.
+				recovery, cancel := SetupTimeout(context.WithoutCancel(ctx))
+				defer cancel()
+				_, reloadErr := command(recovery, "systemctl", "--user", "daemon-reload")
+				restoreErr = errors.Join(restoreErr, reloadErr)
+				filesRestored := restoreErr == nil
+				for i := len(activations) - 1; i >= 0; i-- {
+					a := activations[i]
+					action := "stop"
+					if filesRestored && a.active {
+						action = "restart"
+					}
+					_, err := command(recovery, "systemctl", "--user", action, a.unit)
+					restoreErr = errors.Join(restoreErr, err)
+					if err != nil && action == "restart" {
+						_, stopErr := command(recovery, "systemctl", "--user", "stop", a.unit)
+						restoreErr = errors.Join(restoreErr, stopErr)
+					}
+				}
+			}
+			if restoreErr != nil {
+				result = errors.Join(result, fmt.Errorf("install rollback incomplete; keep host closed and reconcile before activation: %w", restoreErr))
+			}
 		}
 	}()
 	if err = tx.put(c.Binary, data, 0700); err != nil {
@@ -509,6 +554,7 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 		return err
 	}
 	if c.Detection.OS == "linux" {
+		reloadAttempted = true
 		if _, err = command(ctx, "systemctl", "--user", "daemon-reload"); err != nil {
 			return err
 		}
@@ -521,7 +567,7 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 			if err = validateInstallDropIns(ctx, c, command); err != nil {
 				return err
 			}
-			if _, err = command(ctx, "systemctl", "--user", "enable", "--now", "myce-host-reconcile.timer"); err != nil {
+			if err = activate("myce-host-reconcile.timer"); err != nil {
 				return err
 			}
 		}
@@ -529,7 +575,7 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 			_, err = command(ctx, "systemctl", "--user", "enable", filepath.Base(c.Service))
 			return err
 		}
-		if _, err = command(ctx, "systemctl", "--user", "enable", "--now", filepath.Base(c.Service)); err != nil {
+		if err = activate(filepath.Base(c.Service)); err != nil {
 			return err
 		}
 		if existing {
