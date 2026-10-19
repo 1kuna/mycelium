@@ -1,33 +1,44 @@
 # Sharing GPUs and measuring the pool
 
-Experiment projects share available GPU time. Production and deadline scheduling
-remain unchanged. A project running alone can use the entire pool.
+Projects in the same owner-configured tier share available GPU time, including
+projects with different job classes. Higher tiers still win. A project running
+alone can use the entire compatible pool.
 
 For each worker, the scheduler considers only jobs that fit and pass their caps.
 It totals those projects' recent usage, computes each project's weighted share,
 and selects the project with the largest deficit (share minus usage). Model and
 environment readiness, deadlines, front-of-line retries, and waiting time break
-ties as before. Usage decays continuously with a 24-hour half-life. Running work
-is accounted before each scheduling decision, including work still in progress.
-This is dispatch fairness: a long non-resumable experiment is not interrupted
-just to rebalance projects. Production preemption remains immediate.
+ties within the selected project. Across projects, equal usage favors fewer
+active allocations per weight before warmth. Usage decays continuously with a
+24-hour half-life and is keyed by stable tier name, resource family and project.
+GPU and CPU accounting are separate families; CPU admission/core accounting is
+a later slice. Assigned batch preparation and model loading charge their owning
+demand once, as do calls sharing a model allocation. Idle models/pins do not
+consume fair usage. Running work is accounted before each scheduling decision.
+This is admission fairness: same-tier work is not interrupted to rebalance
+projects, and an indefinite allocation has no bounded-wait guarantee.
 
-Start the queue with `--project-config projects.yaml` (also supported by `myce dev`):
+Set weights and caps in the revision-CAS [owner policy](guide-priority-policy.md).
+The legacy `--project-config projects.yaml` option (also supported by `myce dev`)
+updates those same settings and revision:
 
 ```yaml
 verso:
   weight: 3
 atlas:
   weight: 1
+  max_concurrent: 3
   max_concurrent_experiments: 2
   max_memory_share: 0.25
 ```
 
 Missing projects have weight 1 and no caps. Configured weights must be positive.
-A concurrency cap includes running/stopping experiment commands and assigned
-experiment calls. A memory cap applies to experiment reservations across online
+The optional `max_concurrent` cap counts running/stopping commands and assigned
+calls across every tier/class, including preparation before Started. Zero means
+unlimited. The legacy experiment concurrency cap counts only experiment commands
+and assigned experiment calls. The memory cap applies to experiment reservations across online
 workers' reported memory budgets, including each active model once per project
-and worker. Production and deadlines bypass both caps. Caps are hard limits even
+and worker. Production and deadlines bypass the legacy experiment caps; the all-class cap still applies. Caps are hard limits even
 when a project is alone. Policies persist in SQLite; omitting the config on queue
 restart preserves them. Supplying a config replaces the policy map.
 
@@ -54,7 +65,9 @@ Usage is **observed allocation time**, not hardware compute utilization. A start
 command or assigned model call makes its device busy. Simultaneous projects share
 that device's elapsed time equally, so busy GPU-hours never exceed observed device
 hours. An assigned call's time includes the worker HTTP trip. Model loading and
-idle loaded models reserve memory but do not count as active compute. Pins are
+idle loaded models reserve memory but do not count as active compute. Fair
+admission usage separately includes allocated batch preparation and model load
+time, without changing these started-work reporting definitions. Pins are
 reported separately and never turn an idle GPU into a busy GPU.
 
 The queue integrates state changes into per-minute SQLite samples, split by

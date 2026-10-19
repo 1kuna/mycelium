@@ -17,15 +17,39 @@ tiers:
     selectors: ["*/*"]
 projects:
   verso: {weight: 1}
-  atlas: {weight: 1}
+  atlas: {weight: 1, max_concurrent: 2}
 ```
 
 The optional `projects` mapping uses the existing project settings, including
 weights, allowed machines and experiment caps. Omitted weights default to one.
 Omitting `projects` preserves existing settings; supplying it replaces the map.
 There is no second project priority store. Existing project configuration remains
-available and advances the same revision when it changes settings. Shared-tier fairness for arbitrary classes is a later slice; existing
-experiment fairness and caps continue to apply.
+available and advances the same revision when it changes settings.
+
+Within each tier, fitting projects take turns by weighted recent usage before
+model/environment warmth. Usage has a 24-hour half-life and separate stable
+`tier/resource-family/project` keys. GPU work uses normalized allocated device
+seconds; CPU core accounting/admission is a later slice. Equal usage favors fewer
+active allocations per weight, then the existing affinity/deadline/queue order.
+Thus a warm project cannot monopolize newly available workers. Non-fitting jobs
+do not block compatible backfill or consume a turn. Idle, unpinned same-tier model
+residency can be reclaimed through the existing release planner; active calls
+and loading attempts are not interrupted for same-tier fairness.
+
+`weight` is positive and defaults to one. `max_concurrent` is an optional
+nonnegative cap across all classes and tiers for that project (zero means no
+cap). It counts running/stopping batch attempts and assigned model calls,
+including preparation before Started. Existing `max_concurrent_experiments` and
+`max_memory_share` retain their experiment-only scope. Both cap types apply
+independently. Updates use the same policy revision CAS; caps remain hard limits
+when a project is alone. Reducing a cap withholds new admissions and does not
+stop existing work.
+
+The accounting migration is versioned and durable. Old project totals lack
+class metadata, so they are preserved once in the current catchall GPU tier.
+New usage remains attached to stable tier names across reordering and restart;
+removed tiers stay inactive without transferring their history to other names.
+See [fairness and usage](guide-fairness-usage.md) for accounting details.
 
 Use the queue owner credential (`MYCE_TOKEN`) and queue address (`MYCE_QUEUE`):
 
@@ -68,8 +92,10 @@ zero-based `index`, `selector` and `revision`, plus the current policy record on
 the snapshot. CLI and browser status show the tier, selector and revision.
 Placement, preparation and existing reclamation use one tier comparator.
 
-This slice changes rank only. Existing resumability, stop-grace, retry, host
-hold and pin rules still apply. Generalized within-tier fairness, expanded
-preemption/retry causes and custom model-call classes are subsequent slices.
-Equal-tier jobs can use separate available workers; they are not stopped to
-manufacture fairness. Strict higher tiers can starve lower ones.
+Placement, status and simulation use the same admission planner and comparator.
+Existing resumability, stop-grace, retry, host hold and pin rules still apply.
+Expanded preemption/retry causes and custom model-call classes are subsequent
+slices. Equal-tier projects share separate available workers; multiple concurrent
+batch attempts on one worker are a later slice. Same-tier work is not stopped
+to rebalance usage: a single indefinite allocation can occupy a scarce device
+indefinitely. Strict higher tiers can starve lower ones.

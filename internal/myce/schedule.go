@@ -50,18 +50,6 @@ func beforeWithinTier(a, b *Job, m *Machine) bool {
 	}
 	return a.ID < b.ID
 }
-func pick(jobs map[string]*Job, m *Machine) *Job {
-	var best *Job
-	for _, j := range jobs {
-		if j.State == "queued" && fits(j, m, m.FreeMemoryGB) && (best == nil || (&Queue{}).before(j, best, m)) {
-			best = j
-		}
-	}
-	if best != nil && !environmentReady(best, m) {
-		return nil
-	}
-	return best
-}
 func waitingReason(j *Job, machines map[string]*Machine, jobs map[string]*Job) string {
 	if reason := dockerRuntimeWaitingReason(j, machines); reason != "" {
 		return reason

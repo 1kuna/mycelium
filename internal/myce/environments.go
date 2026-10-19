@@ -228,17 +228,10 @@ func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
 	if !q.workerIdle(m) || !m.EnvironmentBuilder {
 		return nil
 	}
-	jobs := []*Job{}
-	for _, j := range q.s.Jobs {
-		if j.State == "queued" && q.placementAllowed(j, m) && fits(j, m, m.FreeMemoryGB) && !environmentReady(j, m) {
-			jobs = append(jobs, j)
-		}
-	}
-	sort.Slice(jobs, func(i, k int) bool { return q.before(jobs[i], jobs[k], m) })
-	if len(jobs) == 0 {
+	j := q.candidate(m, nil)
+	if j == nil || environmentReady(j, m) {
 		return nil
 	}
-	j := jobs[0]
 	for _, other := range q.s.Machines {
 		if other.ID == m.ID || !q.workerIdle(other) || !q.placementAllowed(j, other) || !fits(j, other, other.FreeMemoryGB) {
 			continue

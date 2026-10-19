@@ -37,7 +37,15 @@ the real queue's priority loss timeouts and majority-silence guard determine
 when batch work becomes available again. Interrupted model calls fail visibly
 on abrupt loss; this simulator does not emulate HTTP response replay.
 
-Workload projects accept ordinary queue weight/cap policies. Models specify
+A workload may include `policy:` with the same version/tiers/projects mapping as
+`myce policy set`; the simulator installs it through the real queue policy API.
+Legacy top-level `projects:` still supplies weights/caps; do not also specify
+`policy.projects`. Batch streams accept `class:` or legacy `priority:`, normalized just as at
+submission. Model calls still use
+legacy priorities. Shared-tier dispatch, backfill and status use the same queue
+planner; the simulator adds no fairness ordering of its own.
+
+Models specify
 identity, file bytes (when known), GPU/host memory, platforms and local startup
 time. Streams specify project, priority, model, batch versus `call: true`,
 platform/memory for batches, duration, checkpoint interval, repeating arrival

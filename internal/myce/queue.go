@@ -58,6 +58,7 @@ type state struct {
 	UsageMaintenance time.Time                    `json:"usage_maintenance,omitempty"`
 	ProductionStarts []ProductionStart            `json:"production_starts,omitempty"`
 	Policies         map[string]ProjectPolicy     `json:"project_policies,omitempty"`
+	FairUsageVersion int                          `json:"fair_usage_version,omitempty"`
 	FairUsage        map[string]FairUsage         `json:"fair_usage,omitempty"`
 	UsageAt          time.Time                    `json:"usage_at,omitempty"`
 	Preemptions      []Preemption                 `json:"preemptions,omitempty"`
@@ -177,7 +178,7 @@ func Open(path, root string, clock Clock) (*Queue, error) {
 		db.Close()
 		return nil, err
 	}
-	if q.importCancellationEvidence() {
+	if q.importCancellationEvidence() || q.s.FairUsageVersion == 0 {
 		if err = q.update(func() error { return nil }); err != nil {
 			db.Close()
 			return nil, err
@@ -870,7 +871,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			j := q.pick(&m)
 			if j != nil {
 				for _, c := range q.calls {
-					if c.Machine == "" && c.Error == "" && q.callCanUse(&m, c) && q.fairBefore(callJob(c), j, &m) {
+					if c.Machine == "" && c.Error == "" && q.callCanUse(&m, c) && q.before(callJob(c), j, &m) {
 						j = nil
 						break
 					}

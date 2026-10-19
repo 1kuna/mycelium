@@ -17,7 +17,7 @@ func TestFairSharingUsesClockAndExplains(t *testing.T) {
 	b := submit(t, q, projectSpec("atlas"))
 	m := machine("fake", "fake")
 	if e := q.update(func() error {
-		q.s.FairUsage = map[string]FairUsage{"verso": {Seconds: 100, At: c.Now()}}
+		q.s.FairUsage = map[string]FairUsage{fairUsageKey("experiment", "gpu", "verso"): {Seconds: 100, At: c.Now()}}
 		q.s.Machines[m.ID] = &m
 		return nil
 	}); e != nil {
@@ -48,7 +48,7 @@ func TestFairWeightsDeficitAndFit(t *testing.T) {
 	a := submit(t, q, projectSpec("verso"))
 	b := submit(t, q, projectSpec("atlas"))
 	m := machine("fake", "fake")
-	q.s.FairUsage = map[string]FairUsage{"verso": {Seconds: 90, At: c.Now()}, "atlas": {Seconds: 60, At: c.Now()}}
+	q.s.FairUsage = map[string]FairUsage{fairUsageKey("experiment", "gpu", "verso"): {Seconds: 90, At: c.Now()}, fairUsageKey("experiment", "gpu", "atlas"): {Seconds: 60, At: c.Now()}}
 	if got := q.pick(&m); got.ID != a.ID {
 		t.Fatal("weighted deficit should prefer verso", got)
 	}
@@ -71,7 +71,7 @@ func TestFairnessNeverOverridesProductionOrDeadline(t *testing.T) {
 	d := spec("deadline")
 	d.Project = "verso"
 	deadline := submit(t, q, d)
-	q.s.FairUsage = map[string]FairUsage{"verso": {Seconds: 1e9, At: c.Now()}}
+	q.s.FairUsage = map[string]FairUsage{fairUsageKey("experiment", "gpu", "verso"): {Seconds: 1e9, At: c.Now()}}
 	m := machine("fake", "fake")
 	if q.pick(&m).ID != production.ID {
 		t.Fatal("production lost")
@@ -209,7 +209,7 @@ func TestBusyStatusUsesDispatchOrderAndCombinedReasons(t *testing.T) {
 	b := submit(t, q, projectSpec("atlas"))
 	c.Advance(time.Second)
 	d := submit(t, q, projectSpec("atlas"))
-	q.s.FairUsage = map[string]FairUsage{"verso": {Seconds: 100, At: c.Now()}}
+	q.s.FairUsage = map[string]FairUsage{fairUsageKey("experiment", "gpu", "verso"): {Seconds: 100, At: c.Now()}}
 	s, e := q.Snapshot()
 	if e != nil {
 		t.Fatal(e)

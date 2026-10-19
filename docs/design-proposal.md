@@ -49,9 +49,9 @@ The queue gives every job its job id, `MYCE_CHECKPOINT_DIR` and attempt number. 
 When a worker asks for work, the queue picks, from the jobs that fit this machine's free memory and GPU type:
 
 1. the highest owner-configured project/class tier first; without a configured policy, production, then deadline, then the catchall (experiment);
-2. within the same priority, a model already loaded, then cached locally, then needing a NAS copy;
-3. then the earliest deadline;
-4. then the job that has waited longest.
+2. within that tier, the fitting project with the greatest weighted recent-usage deficit; equal usage prefers fewer active allocations per weight;
+3. within that project, a model already loaded, then cached locally, then needing a NAS copy;
+4. then the earliest deadline and the job that has waited longest.
 
 **Making room.** Production is checked first on every check-in and immediately
 on submission. When no idle fitting machine has room, stop lower-priority work
@@ -82,8 +82,9 @@ An already-assigned attempt is treated like a running attempt: a policy change
 alone does not revoke its assignment or prevent it from starting, even if a
 higher-tier job is now waiting. Policy changes apply to future placement
 decisions; reclaiming already-assigned attempts belongs to P3 preemption.
-P2 generalized fairness and P3 expanded preemption/retry semantics remain later
-slices; current eligibility and stop/retry rules still apply. See
+P2 admission fairness applies across all classes within a tier. P3 expanded
+preemption/retry semantics remain a later slice; current eligibility and
+stop/retry rules still apply. See
 [the policy guide](guide-priority-policy.md) for format and API details.
 
 **Optional physical-host takeover.** A queue host policy may opt into whole-machine production takeover, default off. Production selects one eligible physical host; all lower-priority work on that host stops safely, regardless of how much room the request needs. Stopped experiments rejoin the shared queue and resume on any compatible machine, without an infrastructure retry. Production admission waits for all lower-priority cleanup acknowledgements. Unknown cleanup survives loss and restart; elapsed stop grace never proves release. Pins remain protected.
@@ -368,12 +369,19 @@ separate from this transfer estimate. Everything remains laptop-testable.
 
 ## Fair sharing, usage history, and status (maintainer, 2026-10-09)
 
-Experiments share GPU time between competing runnable projects by configurable
-weight (equal by default), using recent usage with a 24-hour decaying half-life.
-Select the greatest fair-share deficit before existing affinity/wait tie-breaks.
-A sole project can use everything. Production and deadline order is unchanged.
-Optional experiment concurrency and GPU memory-share caps are project-specific.
-Status explains fairness and cap decisions in plain words.
+Within each owner-configured tier, competing runnable projects share capacity
+by configurable weight (equal by default), using recent usage with a 24-hour
+half-life. Select the greatest fair-share deficit before affinity/wait tie-breaks;
+equal usage favors fewer active allocations per weight. A sole project can use
+every compatible worker. Non-fitting work does not block useful backfill.
+Stable tier/resource-family/project accounting persists across restart. GPU work
+uses normalized allocated GPU-seconds, including batch preparation and model
+loads charged once to their owner. CPU core-seconds remain a separate family for
+the later CPU admission slice. Optional all-class project concurrency caps live
+in the revision-CAS policy; legacy experiment concurrency and GPU memory-share
+caps retain their scope. Status and the simulator use the dispatch planner.
+This is admission fairness, with no same-tier interruption or bounded-wait
+promise for indefinite allocations. Strict higher tiers may starve lower ones.
 
 The same SQLite queue keeps minute-level device/project/job/model allocation
 samples for seven days, then hourly totals through 90 days. Busy allocation,

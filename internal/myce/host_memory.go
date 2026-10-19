@@ -150,7 +150,7 @@ func (q *Queue) hostReleases(m *Machine, gpu, host float64, priority string, ide
 	})
 	for _, s := range q.s.ModelSlots {
 		owner := q.s.Machines[s.Machine]
-		if owner != nil && !owner.Gone && hostID(owner) == hostID(m) && !q.slotPinned(s) && s.State != "unload_failed" && s.State != "failed" && q.comparePriority(q.slotSpec(s), demand) > 0 {
+		if owner != nil && !owner.Gone && hostID(owner) == hostID(m) && q.slotReclaimableFor(s, demand) {
 			slots = append(slots, s)
 		}
 	}
@@ -204,7 +204,7 @@ func (q *Queue) reclaimableGPUMemory(m *Machine, priority string, identity ...Sp
 	demand := priorityDemand(priority, identity)
 	room := m.FreeMemoryGB
 	for _, s := range q.s.ModelSlots {
-		if s.Machine == m.ID && !q.slotPinned(s) && s.State != "unload_failed" && s.State != "failed" && q.comparePriority(q.slotSpec(s), demand) > 0 {
+		if s.Machine == m.ID && q.slotReclaimableFor(s, demand) {
 			model, _ := q.model(s.Model)
 			room += model.MemoryGB
 		}

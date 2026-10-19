@@ -36,6 +36,7 @@ type SimWindow struct {
 	End   float64 `yaml:"end_hour"`
 }
 type SimWorkload struct {
+	Policy   *PriorityPolicy          `yaml:"policy,omitempty"`
 	Jitter   *float64                 `yaml:"duration_jitter"`
 	Projects map[string]ProjectPolicy `yaml:"projects"`
 	Models   []SimModel               `yaml:"models"`
@@ -53,6 +54,7 @@ type SimStream struct {
 	Name       string   `yaml:"name"`
 	Project    string   `yaml:"project"`
 	Priority   string   `yaml:"priority"`
+	Class      string   `yaml:"class,omitempty"`
 	Model      string   `yaml:"model"`
 	Call       bool     `yaml:"call"`
 	Platforms  []string `yaml:"platforms"`
@@ -223,8 +225,18 @@ func validateSim(f SimFleet, w SimWorkload, o SimOptions) error {
 		models[m.Name] = true
 	}
 	seen = map[string]bool{}
+	if w.Policy != nil && w.Projects != nil && w.Policy.Projects != nil {
+		return errors.New("use policy.projects or projects, not both")
+	}
 	for _, s := range w.Streams {
-		if s.Name == "" || seen[s.Name] || s.Project == "" || legacyRank(s.Priority) == 3 || !validSimNumber(s.Duration) || s.Duration <= 0 || !validSimNumber(s.Every) || s.Every <= 0 || !validSimNumber(s.Start) || !validSimNumber(s.MemoryGB) || !validSimNumber(s.HostGB) || !validSimNumber(s.Checkpoint) || !validSimNumber(s.Deadline) || s.Count < 1 || s.Batch < 0 {
+		identity := Spec{Project: s.Project, Priority: s.Priority, Class: s.Class}
+		if err := normalizeJobClass(&identity); err != nil {
+			return err
+		}
+		if s.Call && s.Class != "" && s.Class != s.Priority {
+			return errors.New("custom model-call classes are not supported")
+		}
+		if s.Name == "" || seen[s.Name] || s.Project == "" || (s.Class == "" && legacyRank(s.Priority) == 3) || !validSimNumber(s.Duration) || s.Duration <= 0 || !validSimNumber(s.Every) || s.Every <= 0 || !validSimNumber(s.Start) || !validSimNumber(s.MemoryGB) || !validSimNumber(s.HostGB) || !validSimNumber(s.Checkpoint) || !validSimNumber(s.Deadline) || s.Count < 1 || s.Batch < 0 {
 			return errors.New("invalid stream: require unique name, project, priority, positive duration/every/count")
 		}
 		seen[s.Name] = true
@@ -293,6 +305,12 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 	if e = q.ConfigureProjects(w.Projects); e != nil {
 		return r, e
 	}
+	if w.Policy != nil {
+		if _, e = q.SetPriorityPolicy(q.policyRevision(), *w.Policy); e != nil {
+			return r, e
+		}
+	}
+
 	workers := []*simWorker{}
 	f.Machines = append([]SimMachine(nil), f.Machines...)
 	sort.Slice(f.Machines, func(i, j int) bool { return f.Machines[i].Name < f.Machines[j].Name })
@@ -927,7 +945,7 @@ func deadlineAt(epoch time.Time, t *simTask) *time.Time {
 	return &v
 }
 func simSpec(t *simTask, epoch time.Time) Spec {
-	s := Spec{Name: t.stream.Name, Project: t.stream.Project, Priority: t.stream.Priority, Deadline: deadlineAt(epoch, t), Resumable: t.stream.Checkpoint > 0, ExpectedMinutes: t.work / 60}
+	s := Spec{Name: t.stream.Name, Project: t.stream.Project, Priority: t.stream.Priority, Class: t.stream.Class, Deadline: deadlineAt(epoch, t), Resumable: t.stream.Checkpoint > 0, ExpectedMinutes: t.work / 60}
 	s.Run.Command = []string{"simulated-timer"}
 	s.Needs.MemoryGB = t.stream.MemoryGB
 	s.Needs.HostMemoryGB = t.stream.HostGB

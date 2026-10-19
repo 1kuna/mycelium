@@ -167,7 +167,7 @@ func (q *Queue) engineDemand(s *ModelSlot, m *Machine) *ModelCall {
 		if c.Exclude == m.ID && c.ExcludeAttempt == "" {
 			continue
 		}
-		if best == nil || q.fairBefore(callJob(c), callJob(best), m) {
+		if best == nil || q.before(callJob(c), callJob(best), m) {
 			best = c
 		}
 	}

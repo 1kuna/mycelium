@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"path"
 	"slices"
@@ -173,6 +174,16 @@ func (q *Queue) comparePriority(a, b Spec) int {
 func (q *Queue) before(a, b *Job, m *Machine) bool {
 	if n := q.comparePriority(a.Spec, b.Spec); n != 0 {
 		return n < 0
+	}
+	if a.Spec.Project != b.Spec.Project && fairResourceFamily(a.Spec) == fairResourceFamily(b.Spec) {
+		x, y := q.fairScore(a, m), q.fairScore(b, m)
+		if math.Abs(x-y) > 1e-6 {
+			return x < y
+		}
+		x, y = q.fairActive(a), q.fairActive(b)
+		if math.Abs(x-y) > 1e-6 {
+			return x < y
+		}
 	}
 	return beforeWithinTier(a, b, m)
 }

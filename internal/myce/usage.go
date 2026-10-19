@@ -45,6 +45,10 @@ type usageSample struct {
 	At                                   int64
 	Span                                 int
 	Machine, Device, Project, Job, Model string
+	// Tier/family/Fair are internal fairness dimensions; reporting keeps its
+	// existing started-work GPU-hour semantics.
+	Tier, Family                         string
+	Fair                                 float64
 	Busy, Idle, Pinned, Memory, Observed float64
 }
 
@@ -52,21 +56,27 @@ type usageSample struct {
 // one GPU-second per second. Pins reserve memory, but are idle unless serving.
 func (q *Queue) deviceUsage(m *Machine) []usageSample {
 	rows := []usageSample{}
-	active := 0
+	active, allocated := 0, 0
 	for _, j := range q.s.Jobs {
-		if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") && j.StartedAt != nil {
-			rows = append(rows, usageSample{Project: j.Spec.Project, Job: j.ID, Memory: j.Spec.Needs.MemoryGB, Busy: 1})
-			active++
+		if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") {
+			busy := 0.0
+			if j.StartedAt != nil {
+				busy = 1
+				active++
+			}
+			rows = append(rows, usageSample{Project: j.Spec.Project, Job: j.ID, Memory: j.Spec.Needs.MemoryGB, Busy: busy, Fair: 1, Tier: q.priorityMatch(j.Spec).Tier, Family: fairResourceFamily(j.Spec)})
+			allocated++
 		}
 	}
 	seen := map[string]bool{}
 	for _, c := range q.calls {
 		if c.Machine == m.ID && c.Error == "" {
-			key := c.Project + "/" + c.Model
+			key := fairUsageKey(q.priorityMatch(callJob(c).Spec).Tier, c.Project, c.Model)
 			if !seen[key] {
 				model, _ := q.model(c.Model)
-				rows = append(rows, usageSample{Project: c.Project, Model: c.Model, Memory: model.MemoryGB, Busy: 1})
+				rows = append(rows, usageSample{Project: c.Project, Model: c.Model, Memory: model.MemoryGB, Busy: 1, Fair: 1, Tier: q.priorityMatch(callJob(c).Spec).Tier, Family: "gpu"})
 				active++
+				allocated++
 				seen[key] = true
 			}
 		}
@@ -98,7 +108,14 @@ func (q *Queue) deviceUsage(m *Machine) []usageSample {
 			}
 			if !found {
 				model, _ := q.model(slot.Model)
-				rows = append(rows, usageSample{Project: model.Project, Model: slot.Model, Memory: model.MemoryGB})
+				row := usageSample{Project: model.Project, Model: slot.Model, Memory: model.MemoryGB}
+				if slot.State == "loading" {
+					row.Project = slot.Project
+					row.Tier = q.priorityMatch(q.slotSpec(slot)).Tier
+					row.Family, row.Fair = "gpu", 1
+					allocated++
+				}
+				rows = append(rows, row)
 			}
 		}
 	}
@@ -106,12 +123,31 @@ func (q *Queue) deviceUsage(m *Machine) []usageSample {
 		rows = append(rows, usageSample{Idle: 1, Observed: 1})
 	}
 	for i := range rows {
+		if allocated > 0 {
+			rows[i].Fair /= float64(allocated)
+		}
 		rows[i].Machine = m.ID
 		rows[i].Device = m.Device
 	}
 	return rows
 }
+
+// Version 1 keys decayed usage by stable tier name/resource family/project.
+// Legacy history has no class dimension: preserve it in the current catchall
+// GPU tier once, rather than copying one aggregate into every tier.
+func (q *Queue) migrateFairUsage() {
+	if q.s.FairUsageVersion == 0 {
+		migrated := map[string]FairUsage{}
+		tiers := q.effectivePriorityPolicy().Tiers
+		for project, usage := range q.s.FairUsage {
+			migrated[fairUsageKey(tiers[len(tiers)-1].Name, "gpu", project)] = usage
+		}
+		q.s.FairUsage = migrated
+		q.s.FairUsageVersion = 1
+	}
+}
 func (q *Queue) accountUsage(now time.Time) {
+	q.migrateFairUsage()
 	from := q.s.UsageAt
 	if from.IsZero() || !now.After(from) {
 		q.s.UsageAt = now
@@ -146,13 +182,14 @@ func (q *Queue) accountUsage(now time.Time) {
 				r.Memory *= seconds
 				r.Observed *= seconds
 				q.usageWrites = append(q.usageWrites, r)
-				if r.Busy > 0 && r.Project != "" {
-					u := q.s.FairUsage[r.Project]
+				if r.Fair > 0 && r.Project != "" {
+					key := fairUsageKey(r.Tier, r.Family, r.Project)
+					u := q.s.FairUsage[key]
 					k := math.Ln2 / FairHalfLife.Seconds()
-					credit := (1 - math.Exp(-k*seconds)) / k * math.Exp(-k*now.Sub(stop).Seconds()) * (r.Busy / seconds)
+					credit := (1 - math.Exp(-k*seconds)) / k * math.Exp(-k*now.Sub(stop).Seconds()) * r.Fair
 					u.Seconds += credit
 					u.At = now
-					q.s.FairUsage[r.Project] = u
+					q.s.FairUsage[key] = u
 				}
 			}
 			start = stop

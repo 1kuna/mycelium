@@ -412,7 +412,7 @@ func (q *Queue) maintainModels() {
 			pending = append(pending, c)
 		}
 	}
-	sort.Slice(pending, func(i, j int) bool { return q.fairBefore(callJob(pending[i]), callJob(pending[j]), &Machine{}) })
+	sort.Slice(pending, func(i, j int) bool { return q.before(callJob(pending[i]), callJob(pending[j]), &Machine{}) })
 	for _, c := range pending {
 		if q.capReason(callJob(c)) != "" {
 			continue
@@ -516,7 +516,7 @@ func (q *Queue) maintainModels() {
 			}
 			possible := m.FreeMemoryGB
 			for _, s := range q.s.ModelSlots {
-				if s.Machine == m.ID && !q.slotPinned(s) && s.State != "unload_failed" && s.State != "failed" && q.comparePriority(q.slotSpec(s), callJob(c).Spec) > 0 {
+				if s.Machine == m.ID && q.slotReclaimableFor(s, callJob(c).Spec) {
 					mm, _ := q.model(s.Model)
 					possible += mm.MemoryGB
 				}
@@ -554,7 +554,7 @@ func (q *Queue) maintainModels() {
 
 	waiting := []*Job{}
 	for _, j := range q.s.Jobs {
-		if j.State == "queued" {
+		if j.State == "queued" && q.capReason(j) == "" {
 			waiting = append(waiting, j)
 		}
 	}
@@ -598,7 +598,7 @@ func (q *Queue) callCanUse(m *Machine, c *ModelCall) bool {
 		if s.Model == c.Model && s.State == "loading" {
 			return true
 		}
-		if !q.slotPinned(s) && s.State != "failed" && s.InFlight == 0 && q.comparePriority(q.slotSpec(s), callJob(c).Spec) > 0 {
+		if s.InFlight == 0 && q.slotReclaimableFor(s, callJob(c).Spec) {
 			resident, _ := q.model(s.Model)
 			possible += resident.MemoryGB
 		}
@@ -612,28 +612,10 @@ func (q *Queue) callCanUse(m *Machine, c *ModelCall) bool {
 	return possible >= model.MemoryGB && hostOK
 }
 func (q *Queue) batchBeforeCall(c *ModelCall, m *Machine) bool {
-	scores := map[string]float64{}
 	call := callJob(c)
-	score := func(j *Job) float64 {
-		if n, ok := scores[j.Spec.Project]; ok {
-			return n
-		}
-		n := q.fairScore(j, m)
-		scores[j.Spec.Project] = n
-		return n
-	}
 	for _, j := range q.s.Jobs {
 		if j.State != "queued" || q.comparePriority(j.Spec, callJob(c).Spec) > 0 || q.capReason(j) != "" || !q.placementAllowed(j, m) || !fits(j, m, q.reclaimableGPUMemory(m, j.Spec.Priority, j.Spec)) {
 			continue
-		}
-		if q.comparePriority(j.Spec, call.Spec) == 0 && j.Spec.Priority == "experiment" && c.Priority == "experiment" && j.Spec.Project != c.Project {
-			a, b := score(j), score(call)
-			if math.Abs(a-b) > 1e-6 {
-				if a < b {
-					return true
-				}
-				continue
-			}
 		}
 		if q.before(j, call, m) {
 			return true
@@ -642,11 +624,22 @@ func (q *Queue) batchBeforeCall(c *ModelCall, m *Machine) bool {
 	return false
 }
 
+// Idle cache residency must not outrank runnable same-tier demand. Reuse this
+// fence in every GPU/RAM release estimate and action; active work and loading
+// attempts retain the existing strictly-lower-tier preemption rule.
+func (q *Queue) slotReclaimableFor(s *ModelSlot, demand Spec) bool {
+	if q.slotPinned(s) || s.State == "unload_failed" || s.State == "failed" {
+		return false
+	}
+	n := q.comparePriority(q.slotSpec(s), demand)
+	return n > 0 || n == 0 && s.InFlight == 0 && (s.State == "ready" || s.State == "draining")
+}
+
 func (q *Queue) makeModelRoom(m *Machine, need float64, priority string, identity ...Spec) {
 	demand := priorityDemand(priority, identity)
 	slots := []*ModelSlot{}
 	for _, s := range q.s.ModelSlots {
-		if s.Machine == m.ID && !q.slotPinned(s) && s.State != "unload_failed" && s.State != "failed" && q.comparePriority(q.slotSpec(s), demand) > 0 {
+		if s.Machine == m.ID && q.slotReclaimableFor(s, demand) {
 			slots = append(slots, s)
 		}
 	}
@@ -1177,7 +1170,7 @@ func (q *Queue) makeBatchRoom(j *Job, planned map[string]bool) string {
 		}
 		slots := []*ModelSlot{}
 		for _, s := range q.s.ModelSlots {
-			if s.Machine != m.ID || q.slotPinned(s) || s.State == "unload_failed" || s.State == "failed" || q.comparePriority(q.slotSpec(s), j.Spec) <= 0 {
+			if s.Machine != m.ID || !q.slotReclaimableFor(s, j.Spec) {
 				continue
 			}
 			model, _ := q.model(s.Model)

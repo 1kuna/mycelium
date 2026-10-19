@@ -133,6 +133,7 @@ func TestEnvironmentLRUEvictionProtectsUse(t *testing.T) {
 	}
 }
 func TestEnvironmentPlacementAndFiltering(t *testing.T) {
+	q, _ := fixture(t)
 	r := binaryRecipe(t, "cuda")
 	j := &Job{State: "queued", EnvironmentRecipes: map[string]EnvironmentRecipe{"cuda": r}}
 	j.Spec.Environment.Name = "torch-cuda"
@@ -146,7 +147,8 @@ func TestEnvironmentPlacementAndFiltering(t *testing.T) {
 	if !fits(j, m, 8) || environmentReady(j, m) {
 		t.Fatal("cold builder excluded or ready")
 	}
-	if pick(map[string]*Job{"j": j}, m) != nil {
+	q.s.Jobs["j"] = j
+	if q.pick(m) != nil {
 		t.Fatal("assigned before build")
 	}
 	m.Environments = []string{r.Key}

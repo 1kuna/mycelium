@@ -40,7 +40,7 @@ func TestUsageRecordingBusyIdleAndDecay(t *testing.T) {
 	if math.Abs(r.Machines[0].IdleHours-30.0/3600) > 1e-8 {
 		t.Fatal(r)
 	}
-	u := q.s.FairUsage["atlas"].Seconds
+	u := q.s.FairUsage[fairUsageKey("experiment", "gpu", "atlas")].Seconds
 	if u <= 119 || u >= 120 {
 		t.Fatal("decaying integral", u)
 	}

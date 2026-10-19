@@ -21,7 +21,7 @@ func (q *Queue) originalBatchBeforeCall(c *ModelCall, m *Machine) bool {
 				memory += r.Spec.Needs.MemoryGB
 			}
 		}
-		if j.State == "queued" && q.capReason(j) == "" && fits(j, m, memory) && q.fairBefore(j, callJob(c), m) {
+		if j.State == "queued" && q.capReason(j) == "" && fits(j, m, memory) && q.before(j, callJob(c), m) {
 			return true
 		}
 	}
@@ -38,7 +38,7 @@ func TestSimSchedulingScanEquivalence(t *testing.T) {
 		for p := 0; p < 3; p++ {
 			name := string(rune('a' + p))
 			q.s.Policies[name] = ProjectPolicy{Weight: float64(p + 1)}
-			q.s.FairUsage[name] = FairUsage{At: clock.Now(), Seconds: rng.Float64() * 100}
+			q.s.FairUsage[fairUsageKey("experiment", "gpu", name)] = FairUsage{At: clock.Now(), Seconds: rng.Float64() * 100}
 		}
 		for i := 0; i < 30; i++ {
 			project := string(rune('a' + rng.Intn(3)))
@@ -57,7 +57,7 @@ func TestSimSchedulingScanEquivalence(t *testing.T) {
 		}
 		var original *Job
 		for _, j := range q.s.Jobs {
-			if j.State == "queued" && fits(j, m, m.FreeMemoryGB) && q.capReason(j) == "" && (original == nil || q.fairBefore(j, original, m)) {
+			if j.State == "queued" && fits(j, m, m.FreeMemoryGB) && q.capReason(j) == "" && (original == nil || q.before(j, original, m)) {
 				original = j
 			}
 		}

@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -13,10 +14,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Caps limit experiments; allowed_machines restricts every priority and model call.
+// MaxConcurrent covers all classes; legacy experiment caps retain their scope.
 type ProjectPolicy struct {
 	DefaultCallPriority      string   `json:"default_call_priority,omitempty" yaml:"default_call_priority,omitempty"`
 	AllowedMachines          []string `json:"allowed_machines,omitempty" yaml:"allowed_machines,omitempty"`
+	MaxConcurrent            int      `json:"max_concurrent,omitempty" yaml:"max_concurrent,omitempty"`
 	Weight                   float64  `json:"weight" yaml:"weight"`
 	MaxConcurrentExperiments int      `json:"max_concurrent_experiments" yaml:"max_concurrent_experiments"`
 	MaxMemoryShare           float64  `json:"max_memory_share" yaml:"max_memory_share"`
@@ -37,19 +39,23 @@ func (q *Queue) weight(project string) float64 {
 	}
 	return 1
 }
-func (q *Queue) fairBefore(a, b *Job, m *Machine) bool {
-	if n := q.comparePriority(a.Spec, b.Spec); n != 0 {
-		return n < 0
+
+// Resource families have separate ledgers: GPU seconds cannot be converted to
+// CPU core-seconds. CPU admission/accounting is supplied by the core ledger slice.
+func fairResourceFamily(s Spec) string {
+	if s.Needs.MemoryGB > 0 || s.Needs.Model != "" {
+		return "gpu"
 	}
-	if a.Spec.Priority == "experiment" && b.Spec.Priority == "experiment" && a.Spec.Project != b.Spec.Project {
-		x := q.fairScore(a, m)
-		y := q.fairScore(b, m)
-		if math.Abs(x-y) > 1e-6 {
-			return x < y
-		}
-	}
-	return q.before(a, b, m)
+	return "cpu"
 }
+func fairUsageKey(tier, family, project string) string {
+	key, _ := json.Marshal([3]string{tier, family, project})
+	return string(key)
+}
+func (q *Queue) fairKey(s Spec) string {
+	return fairUsageKey(q.priorityMatch(s).Tier, fairResourceFamily(s), s.Project)
+}
+
 func ReadProjectPolicies(path string) (map[string]ProjectPolicy, error) {
 	if path == "" {
 		return nil, nil
@@ -85,8 +91,8 @@ func validateProjectPolicies(p map[string]ProjectPolicy) error {
 				return errors.New("project allowed_machines must contain nonempty machine names")
 			}
 		}
-		if name == "" || !validMemoryValue(v.Weight) || v.Weight <= 0 || v.MaxConcurrentExperiments < 0 || !validMemoryValue(v.MaxMemoryShare) || v.MaxMemoryShare > 1 {
-			return errors.New("project requires positive finite weight, nonnegative experiment cap, and memory share in [0,1]")
+		if name == "" || !validMemoryValue(v.Weight) || v.Weight <= 0 || v.MaxConcurrent < 0 || v.MaxConcurrentExperiments < 0 || !validMemoryValue(v.MaxMemoryShare) || v.MaxMemoryShare > 1 {
+			return errors.New("project requires positive finite weight, nonnegative concurrency caps, and memory share in [0,1]")
 		}
 	}
 	return nil
@@ -112,11 +118,24 @@ func (q *Queue) ConfigureProjects(p map[string]ProjectPolicy) error {
 }
 func (q *Queue) capReason(j *Job) string { return q.capReasonFor(j, nil) }
 func (q *Queue) capReasonFor(j *Job, target *Machine) string {
-	if j.Spec.Priority != "experiment" {
-		return ""
-	}
 	p := q.s.Policies[j.Spec.Project]
-	if p.MaxConcurrentExperiments == 0 && p.MaxMemoryShare == 0 {
+	if p.MaxConcurrent > 0 {
+		count := 0
+		for _, r := range q.s.Jobs {
+			if r.ID != j.ID && r.Spec.Project == j.Spec.Project && (r.State == "running" || r.State == "stopping") {
+				count++
+			}
+		}
+		for _, c := range q.calls {
+			if c.ID != j.ID && c.Project == j.Spec.Project && c.Machine != "" && c.Error == "" {
+				count++
+			}
+		}
+		if count >= p.MaxConcurrent {
+			return fmt.Sprintf("%s has reached its concurrent work cap (%d)", j.Spec.Project, p.MaxConcurrent)
+		}
+	}
+	if j.Spec.Priority != "experiment" || p.MaxConcurrentExperiments == 0 && p.MaxMemoryShare == 0 {
 		return ""
 	}
 	need := j.Spec.Needs.MemoryGB
@@ -184,7 +203,7 @@ func (q *Queue) candidate(m *Machine, excluded map[string]bool) *Job {
 	var best *Job
 	for _, p := range projects {
 		j := byProject[p]
-		if best == nil || q.fairBefore(j, best, m) {
+		if best == nil || q.before(j, best, m) {
 			best = j
 		}
 	}
@@ -210,7 +229,7 @@ func (q *Queue) projectionCandidate(m *Machine, excluded map[string]bool) *Job {
 		j := callJob(c)
 		j.State = "queued"
 		j.Spec.Name = "model call: " + c.Model
-		if best == nil || q.fairBefore(j, best, m) {
+		if best == nil || q.before(j, best, m) {
 			best = j
 		}
 	}
@@ -245,7 +264,7 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 		var target *Machine
 		for _, m := range machines {
 			winner := q.projectionCandidate(m, excluded)
-			if winner != nil && (best == nil || q.fairBefore(winner, best, m)) {
+			if winner != nil && (best == nil || q.before(winner, best, m)) {
 				best, target = winner, m
 			}
 		}
@@ -284,8 +303,12 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 		ahead := winner.Spec.Name + " goes first"
 		if q.comparePriority(winner.Spec, best.Spec) < 0 {
 			ahead = q.priorityMatch(winner.Spec).Tier + " work goes first"
-		} else if best.Spec.Priority == "experiment" && winner.Spec.Project != best.Spec.Project && q.fairScore(winner, target) < q.fairScore(best, target)-1e-6 {
-			ahead = fmt.Sprintf("%s goes first (%s is ahead of its fair share)", winner.Spec.Project, best.Spec.Project)
+		} else if winner.Spec.Project != best.Spec.Project && fairResourceFamily(winner.Spec) == fairResourceFamily(best.Spec) {
+			if q.fairScore(winner, target) < q.fairScore(best, target)-1e-6 {
+				ahead = fmt.Sprintf("%s goes first (%s is ahead of its fair share)", winner.Spec.Project, best.Spec.Project)
+			} else if q.fairActive(winner) < q.fairActive(best)-1e-6 {
+				ahead = winner.Spec.Project + " goes first (same-tier fair turn)"
+			}
 		}
 		reasons[best.ID] = base + "; " + ahead
 	}
@@ -321,25 +344,40 @@ func (q *Queue) waitReason(j *Job) string {
 func (q *Queue) fairScore(j *Job, m *Machine) float64 {
 	projects := map[string]bool{j.Spec.Project: true}
 	for _, r := range q.s.Jobs {
-		if r.State == "queued" && r.Spec.Priority == "experiment" && q.capReason(r) == "" && (m.ID == "" || q.placementAllowed(r, m) && fits(r, m, m.FreeMemoryGB)) {
+		if r.State == "queued" && q.comparePriority(r.Spec, j.Spec) == 0 && fairResourceFamily(r.Spec) == fairResourceFamily(j.Spec) && q.capReason(r) == "" && (m.ID == "" || q.placementAllowed(r, m) && q.checkpointReady(r, m) && fits(r, m, m.FreeMemoryGB)) {
 			projects[r.Spec.Project] = true
 		}
 	}
 	for _, c := range q.calls {
-		if c.Machine == "" && c.Error == "" && c.Priority == "experiment" && q.capReason(callJob(c)) == "" && (m.ID == "" || q.callCanUse(m, c)) {
+		r := callJob(c)
+		if c.Machine == "" && c.Error == "" && q.comparePriority(r.Spec, j.Spec) == 0 && fairResourceFamily(r.Spec) == fairResourceFamily(j.Spec) && q.capReason(r) == "" && (m.ID == "" || q.callCanUse(m, c)) {
 			projects[c.Project] = true
 		}
 	}
-	total, weights := 0.0, 0.0
-	largest := 1.0
+	total, weights, largest := 0.0, 0.0, 1.0
 	for p := range projects {
 		largest = max(largest, q.weight(p))
 	}
 	for p := range projects {
-		total += decayed(q.s.FairUsage[p], q.clock.Now())
+		key := fairUsageKey(q.priorityMatch(j.Spec).Tier, fairResourceFamily(j.Spec), p)
+		total += decayed(q.s.FairUsage[key], q.clock.Now())
 		weights += q.weight(p) / largest
 	}
-	return decayed(q.s.FairUsage[j.Spec.Project], q.clock.Now()) - total*(q.weight(j.Spec.Project)/largest)/weights
+	return decayed(q.s.FairUsage[q.fairKey(j.Spec)], q.clock.Now()) - total*(q.weight(j.Spec.Project)/largest)/weights
+}
+
+// Equal usage must also share freshly freed capacity before the clock advances.
+// This is a tie-break, not a reservation or same-tier preemption mechanism.
+func (q *Queue) fairActive(j *Job) float64 {
+	count := 0.0
+	for _, m := range q.s.Machines {
+		for _, row := range q.deviceUsage(m) {
+			if row.Fair > 0 && row.Project == j.Spec.Project && row.Tier == q.priorityMatch(j.Spec).Tier && row.Family == fairResourceFamily(j.Spec) {
+				count++
+			}
+		}
+	}
+	return count / q.weight(j.Spec.Project)
 }
 
 // Machine restrictions are policy, independent of temporary availability or capacity.
