@@ -165,8 +165,9 @@ func normalizeHostRestEvidence(input HostEnvelope, now time.Time) (HostEnvelope,
 	}
 	e.Errors = []ExclusionError{}
 	for _, failure := range input.Errors {
-		// Contrary facts belong to their source, never to the evaluation timestamp.
-		if !failure.Contrary || reportFresh && sources[failure.Component] {
+		// Contrary facts were observed at report time, even when their source
+		// inventory is incomplete. Completeness is required only to prove PASS.
+		if !failure.Contrary || reportFresh {
 			e.Errors = append(e.Errors, failure)
 		}
 	}
