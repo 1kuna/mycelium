@@ -93,7 +93,9 @@ func (q *Queue) hostObligations(host string) []HostObligation {
 		}
 	}
 	for _, s := range q.s.ModelSlots {
-		if q.executionHost(s.Machine) == host {
+		// An exact failed receipt confirms cleanup. A pin's retry reservation
+		// is desired state, not engine custody; unloading/unload_failed still is.
+		if s.State != "failed" && q.executionHost(s.Machine) == host {
 			add(HostObligation{Engine: &HostEngineExecution{Machine: s.Machine, Session: s.Session, Model: s.Model, Attempt: s.Attempt}})
 		}
 	}

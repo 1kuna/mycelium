@@ -736,3 +736,69 @@ func TestReviewMaintenanceDisableStopsActiveModelCall(t *testing.T) {
 		})
 	}
 }
+
+func TestReviewMaintenanceFailedPinnedEngine(t *testing.T) {
+	for _, action := range []string{"drain", "disable", "disable-stop"} {
+		t.Run(action, func(t *testing.T) {
+			q, clock, m := modelFixture(t, "host")
+			if err := q.SetLossTimeouts(time.Hour, time.Hour, time.Hour); err != nil {
+				t.Fatal(err)
+			}
+			if err := q.Pin(ModelPin{Model: "test", Project: "test", Machine: m.ID}); err != nil {
+				t.Fatal(err)
+			}
+			s := q.s.ModelSlots[slotKey(m.ID, "test")]
+			recoveryReport(t, q, m, s, "ready")
+			recoveryReport(t, q, m, s, "failed")
+			attempt := s.Attempt
+			verb := action
+			if verb == "disable-stop" {
+				verb = "disable"
+			}
+			maintenanceChange(t, q, verb, action == "disable-stop")
+			clock.Advance(2 * StopGrace)
+			reply := recoveryReport(t, q, m, s, "failed")
+			if s.State != "failed" || s.Attempt != attempt {
+				t.Fatal("pin restarted during maintenance", s)
+			}
+			for i := 0; i < 3; i++ {
+				clock.Advance(time.Second)
+				if err := q.Tick(); err != nil {
+					t.Fatal(err)
+				}
+				if s.State != "failed" || s.Attempt != attempt {
+					t.Fatal("tick restarted pin during maintenance", s)
+				}
+				recoveryReport(t, q, m, s, "failed")
+			}
+			status, err := q.HostMaintenanceStatus("host")
+			if err != nil {
+				t.Fatal(err)
+			}
+			count := len(q.hostObligations("host"))
+			slotState, retryReserved := s.State, s.RetryReserved
+			if !status.Quiescent {
+				// Removing the configuration intent alone clears the otherwise permanent wait.
+				if err := q.Unpin("test", "test"); err != nil {
+					t.Fatal(err)
+				}
+				check(t, q, m, nil)
+				cleared, err := q.HostMaintenanceStatus("host")
+				if err != nil || !cleared.Quiescent {
+					t.Fatal("unpin did not clear wait", cleared, err)
+				}
+				t.Fatalf("clean failed pin prevents wait: healthy=%v, quiescent=%v, engines=%d, state=%s, retry_reserved=%v, plan=%d, obligations=%d", status.Healthy, status.Quiescent, status.Sidecars, slotState, retryReserved, len(reply.ModelPlan), count)
+			}
+			if !status.Healthy || status.Sidecars != 0 || count != 0 {
+				t.Fatal("cleaned engine retained custody", status, count)
+			}
+			if len(q.s.Pins) != 1 || q.s.Pins[0].Assigned != m.ID {
+				t.Fatal("maintenance removed pin intent", q.s.Pins)
+			}
+			maintenanceChange(t, q, "resume", false)
+			if s.State != "loading" || s.Attempt == attempt {
+				t.Fatal("resume did not restart pin", s)
+			}
+		})
+	}
+}

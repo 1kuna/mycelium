@@ -9,7 +9,7 @@ import (
 // Every host work kind crosses the same maintenance and wait boundary. Sidecars
 // share their parent execution's exact release, including pending Docker creates.
 func TestMaintenanceEveryWorkKind(t *testing.T) {
-	for _, kind := range []string{"batch-production", "batch-experiment", "model-production", "model-experiment", "engine", "engine-load", "environment-build", "preparation", "sidecar"} {
+	for _, kind := range []string{"batch-production", "batch-experiment", "model-production", "model-experiment", "engine", "engine-load", "engine-failed-pinned", "environment-build", "preparation", "sidecar"} {
 		for _, action := range []struct {
 			name, action string
 			stop         bool
@@ -68,6 +68,13 @@ func TestMaintenanceEveryWorkKind(t *testing.T) {
 						}
 						call = nil
 					}
+				case "engine-failed-pinned":
+					if err := q.Pin(ModelPin{Model: "test", Project: "test", Machine: m.ID}); err != nil {
+						t.Fatal(err)
+					}
+					slot = q.s.ModelSlots[slotKey(m.ID, "test")]
+					recoveryReport(t, q, m, slot, "ready")
+					recoveryReport(t, q, m, slot, "failed")
 				case "environment-build":
 					m.EnvironmentReports = []EnvironmentReport{{Key: "build", State: "building"}}
 					check(t, q, m, nil)
@@ -87,7 +94,10 @@ func TestMaintenanceEveryWorkKind(t *testing.T) {
 						if kind == "engine-load" {
 							state = "loading"
 						}
-						request.ModelReports = []ModelReport{{Name: slot.Model, Attempt: slot.Attempt, State: state}}
+						if kind == "engine-failed-pinned" {
+							state = "failed"
+						}
+						request.ModelReports = []ModelReport{{Name: slot.Model, Attempt: slot.Attempt, State: state, RuntimeFailed: state == "failed", CallsMeasured: state == "failed"}}
 					}
 					r, err := q.Checkin(request)
 					if err != nil {
@@ -96,6 +106,25 @@ func TestMaintenanceEveryWorkKind(t *testing.T) {
 					return r
 				}
 				status := maintenanceChange(t, q, action.action, action.stop)
+				if kind == "engine-failed-pinned" {
+					attempt := slot.Attempt
+					if !status.Quiescent || status.Sidecars != 0 || len(q.hostObligations("host")) != 0 {
+						t.Fatal("cleaned pin counted as work", status)
+					}
+					clock.Advance(2 * StopGrace)
+					reply := pulse()
+					if !reply.AdmissionBlocked || slot.State != "failed" || slot.Attempt != attempt {
+						t.Fatal("pin restarted during maintenance", reply)
+					}
+					if len(q.s.Pins) != 1 || q.s.Pins[0].Assigned != m.ID {
+						t.Fatal("maintenance removed pin intent", q.s.Pins)
+					}
+					maintenanceChange(t, q, "resume", false)
+					if slot.State != "loading" || slot.Attempt == attempt {
+						t.Fatal("resume did not restart pin", slot)
+					}
+					return
+				}
 				if status.Quiescent || len(q.hostObligations("host")) == 0 {
 					t.Fatal("wait ignored active work", status)
 				}
