@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -34,6 +36,121 @@ func restEnvelope(clock Clock, expect string) HostEnvelope {
 	e.Units, e.Attempts = []ExclusionUnit{}, []HostEnvelopeAttempt{}
 	e.RestEvidence = HostRestEvidence{QueueReachable: hostPtr(true), MemoryAllowance: hostPtr(int64(2 << 30)), QueueAt: hostPtr(clock.Now()), UnfencedQueued: hostPtr(0)}
 	return e
+}
+
+// Exercise the real observer through the same projection that dropped these
+// mixed FAIL/UNKNOWN reports before the report-time normalization fix.
+func TestHostRestPartialSourceObserver(t *testing.T) {
+	for _, component := range []string{"docker", "cgroups"} {
+		t.Run(component, func(t *testing.T) {
+			clock := &envelopeClock{time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+			in, observation, kernel, data, _ := exclusionFixture(t)
+			call := emptyDocker
+			contrary, gap := "owned_container_live", "inventory_incomplete"
+			if component == "docker" {
+				call = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+					if args[0] == "ps" {
+						return []byte("container missing"), nil
+					}
+					return json.Marshal([]dockerInspection{ownedDockerObject("running", "no")})
+				}
+			} else {
+				contrary, gap = "owned_cgroup_populated", "cgroup_unreadable"
+				data["sys/fs/cgroup/user.slice/user-1000.slice/myce-worker.service/cgroup.events"].Data = []byte("populated 1\n")
+				read := kernel.ReadFile
+				kernel.ReadFile = func(path string) ([]byte, error) {
+					if strings.HasSuffix(path, "/cgroup.procs") {
+						return nil, os.ErrPermission
+					}
+					return read(path)
+				}
+			}
+			e := restEnvelope(clock, "closed")
+			in.HostRevision = HostRevision{*e.Desired.Revision, *e.Operation}
+			in.Boot = *e.Boot
+			data["proc/sys/kernel/random/boot_id"].Data = []byte(in.Boot)
+			report := ObserveHostExclusion(context.Background(), observation, in, clock, kernel, call)
+			if report.Verdict != "FAIL" || report.Sources[component] != nil ||
+				!slices.Contains(exclusionCodes(report), contrary) || !slices.Contains(exclusionCodes(report), gap) {
+				t.Fatalf("fixture did not observe both causes with incomplete %s: %+v", component, report)
+			}
+			e.ApplyExclusion(&report, clock.Now())
+			e.ApplyRestVerdict("closed", clock.Now())
+			if e.Verdict != "FAIL" || !slices.Contains(e.Reasons, component+"/"+contrary) ||
+				!slices.Contains(e.Reasons, "local_exclusion_unknown") {
+				t.Fatalf("lost fresh contrary fact: %+v", e.HostRestVerdict)
+			}
+			for _, code := range []string{contrary, gap} {
+				found := false
+				for _, problem := range e.Errors {
+					found = found || problem.Code == code
+				}
+				if !found {
+					t.Fatalf("lost cause %s: %+v", code, e.Errors)
+				}
+			}
+		})
+	}
+}
+
+// Inventory completeness and contrary facts are independent dimensions. Only
+// report age controls contrary facts; missing inventory still prevents PASS.
+func TestHostRestPartialSourceContraryMatrix(t *testing.T) {
+	for _, component := range []string{"docker", "cgroups", "gpu_holders"} {
+		for _, inventory := range []string{"complete", "missing", "expired"} {
+			for _, contrary := range []bool{false, true} {
+				for _, age := range []time.Duration{HostObservationWindow - time.Nanosecond, HostObservationWindow, HostObservationWindow + time.Nanosecond} {
+					for _, expect := range []string{"closed", "ready"} {
+						t.Run(fmt.Sprintf("%s/%s/contrary=%v/%s/%s", component, inventory, contrary, age, expect), func(t *testing.T) {
+							clock := &envelopeClock{time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+							e := restEnvelope(clock, expect)
+							e.Sources["exclusion_report"] = hostPtr(clock.Now().Add(-age))
+							if inventory != "complete" {
+								e.LocalExclusion = "UNKNOWN"
+								e.Sources[component] = nil
+								if inventory == "expired" {
+									e.Sources[component] = hostPtr(clock.Now().Add(-HostObservationWindow - time.Nanosecond))
+								}
+								e.Errors = append(e.Errors, ExclusionError{Component: component, Code: "inventory_incomplete"})
+							}
+							if contrary {
+								e.LocalExclusion = "FAIL"
+								e.Errors = append(e.Errors, ExclusionError{Component: component, Code: "fixture_negative", Contrary: true})
+							}
+							data, err := json.Marshal(e)
+							if err != nil {
+								t.Fatal(err)
+							}
+							if err = json.Unmarshal(data, &e); err != nil {
+								t.Fatal(err)
+							}
+							e.FinishObservation(clock.Now())
+							e.ApplyRestVerdict(expect, clock.Now())
+							want := "PASS"
+							if expect == "closed" {
+								if inventory != "complete" || age > HostObservationWindow {
+									want = "UNKNOWN"
+								}
+								if contrary && age <= HostObservationWindow {
+									want = "FAIL"
+								}
+							}
+							if e.Verdict != want {
+								t.Fatalf("got %+v, want %s", e.HostRestVerdict, want)
+							}
+							retained := slices.ContainsFunc(e.Errors, func(problem ExclusionError) bool { return problem.Contrary })
+							if retained != (contrary && age <= HostObservationWindow) {
+								t.Fatalf("contrary retention: %+v", e.Errors)
+							}
+							if inventory != "complete" && !slices.ContainsFunc(e.Errors, func(problem ExclusionError) bool { return problem.Code == "inventory_incomplete" }) {
+								t.Fatal("lost inventory gap", e.Errors)
+							}
+						})
+					}
+				}
+			}
+		}
+	}
 }
 
 func TestHostRestClosedMatrix(t *testing.T) {
@@ -548,6 +665,7 @@ func TestHostRestEvidenceNormalizationMatrix(t *testing.T) {
 		rows = append(rows, row{component, component, func(e *HostEnvelope, state string, at *time.Time) {
 			if state == "unhealthy" {
 				e.LocalExclusion = "FAIL"
+				e.Sources["exclusion_report"] = at
 				e.Errors = append(e.Errors, ExclusionError{Component: component, Code: "fixture_negative", Contrary: true})
 			}
 			if state == "missing" {
@@ -598,6 +716,7 @@ func TestHostRestEvidenceNormalizationMatrix(t *testing.T) {
 			}
 			if state == "unhealthy" && diagnostic.negative[0] == "FAIL" {
 				e.LocalExclusion = "FAIL"
+				e.Sources["exclusion_report"] = at
 				e.Errors = append(e.Errors, ExclusionError{Component: diagnostic.source, Code: "fixture_negative", Contrary: true})
 			}
 		}, diagnostic.negative, closed("UNKNOWN"), closed("UNKNOWN")})
@@ -605,6 +724,7 @@ func TestHostRestEvidenceNormalizationMatrix(t *testing.T) {
 	rows = append(rows, row{"restart_safety", "docker", func(e *HostEnvelope, state string, at *time.Time) {
 		if state == "unhealthy" {
 			e.RestartSafe = hostPtr(false)
+			e.Sources["exclusion_report"] = at
 			e.LocalExclusion = "FAIL"
 			e.Errors = append(e.Errors, ExclusionError{Component: "docker", Code: "unsafe_restart", Contrary: true})
 		}
@@ -730,7 +850,7 @@ func TestHostRestExpiredNegativeAndFreshNegative(t *testing.T) {
 		for _, freshNegative := range []bool{false, true} {
 			e := restEnvelope(clock, expect)
 			old := hostPtr(clock.Now().Add(-HostObservationWindow - time.Nanosecond))
-			e.Sources["gpu_holders"] = old
+			e.Sources["exclusion_report"] = old
 			e.Errors = []ExclusionError{{Component: "gpu_holders", Code: "owned_gpu_holder", Contrary: true}}
 			e.LocalExclusion = "FAIL"
 			e.Ready = hostPtr(false)
@@ -752,7 +872,7 @@ func TestHostRestExpiredNegativeAndFreshNegative(t *testing.T) {
 	}
 }
 
-func TestHostRestExclusionSignsExpireTogether(t *testing.T) {
+func TestHostRestExclusionReportControlsContraryExpiry(t *testing.T) {
 	for _, component := range []string{"cgroups", "docker", "gpu_holders"} {
 		for _, negative := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/negative=%v", component, negative), func(t *testing.T) {
@@ -789,8 +909,18 @@ func TestHostRestExclusionSignsExpireTogether(t *testing.T) {
 				clock.at = clock.at.Add(2 * time.Millisecond)
 				e.FinishObservation(clock.Now())
 				e.ApplyRestVerdict("closed", clock.Now())
+				want = "UNKNOWN"
+				if negative {
+					want = "FAIL"
+				}
+				if e.Verdict != want {
+					t.Fatalf("inventory expired with fresh report: %+v", e.HostRestVerdict)
+				}
+				clock.at = report.At.Add(HostObservationWindow + time.Nanosecond)
+				e.FinishObservation(clock.Now())
+				e.ApplyRestVerdict("closed", clock.Now())
 				if e.Verdict != "UNKNOWN" {
-					t.Fatalf("expired: %+v", e.HostRestVerdict)
+					t.Fatalf("report expired: %+v", e.HostRestVerdict)
 				}
 				for _, problem := range e.Errors {
 					if problem.Contrary {
