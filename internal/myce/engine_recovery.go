@@ -46,7 +46,7 @@ func (q *Queue) expireEngineLoad(s *ModelSlot) {
 }
 
 // A slot's attempt identifies an engine, independently of the worker session.
-// Empty attempts preserve compatibility with reports from older workers.
+// Reports must identify the exact engine attempt.
 func (q *Queue) callExcludes(c *ModelCall, machine string) bool {
 	if machine != c.Exclude {
 		return false

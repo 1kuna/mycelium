@@ -33,7 +33,7 @@ func TestHostRestDevExpectations(t *testing.T) {
 	t.Setenv("MYCE_TOKEN", "fixture-token")
 	c.Queue, c.Name, c.RequiredWorkers = d.URL, "fake-1", []string{"fake-1"}
 	c.Credentials = filepath.Join(root, "fixture-credentials.json")
-	if err := os.WriteFile(c.Credentials, []byte(`{"token":"fixture-token"}`), 0600); err != nil {
+	if err := os.WriteFile(c.Credentials, []byte("MYCE_TOKEN=fixture-token\nMYCE_QUEUE="+c.Queue+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	data, _ := json.Marshal(c)

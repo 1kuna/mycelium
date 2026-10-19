@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-const startGateProtocol = "durable-start-v1"
+const startGateProtocol = "host-attempt-v3"
 
 type API struct {
 	Queue *Queue
@@ -148,14 +148,6 @@ func (a API) Handler() http.Handler {
 		v, err := a.Queue.Checkin(c)
 		respond(w, v, err)
 	})
-	mux.HandleFunc("POST /api/workers/start-permit", func(w http.ResponseWriter, r *http.Request) {
-		var c Result
-		if !decode(w, r, &c) {
-			return
-		}
-		permit, err := a.Queue.PermitStart(c)
-		respond(w, permit, err)
-	})
 	mux.HandleFunc("POST /api/workers/started", func(w http.ResponseWriter, r *http.Request) {
 		var c Result
 		if !decode(w, r, &c) {
@@ -217,6 +209,12 @@ func (a API) Handler() http.Handler {
 				w.Header().Set("WWW-Authenticate", `Basic realm="Mycelium", charset="UTF-8"`)
 			}
 			http.Error(w, "invalid fleet token", 401)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/api/workers/") && r.Method == http.MethodPost && r.Header.Get("X-Myce-Start-Gate") != startGateProtocol {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusUpgradeRequired)
+			_ = json.NewEncoder(w).Encode(map[string]string{"code": "worker_protocol_mismatch", "error": "current host-attempt-v3 worker/report protocol required; upgrade queue and workers together"})
 			return
 		}
 		mux.ServeHTTP(w, r)
@@ -307,7 +305,7 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	req.Header.Set("Content-Type", "application/json")
-	if path == "/api/workers/checkin" {
+	if strings.HasPrefix(path, "/api/workers/") {
 		req.Header.Set("X-Myce-Start-Gate", startGateProtocol)
 	}
 	hc := c.HTTP
@@ -326,7 +324,7 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 			Code          string       `json:"code"`
 			Error         string       `json:"error"`
 		}
-		if json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&body) == nil && (body.Code == "submission_key_conflict" || body.Code == "submission_key_expired" || body.Code == "job_unknown" || body.Code == "host_reconcile_rejected" || body.Code == "host_revision_behind_queue") {
+		if json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&body) == nil && (body.Code == "worker_protocol_mismatch" || body.Code == "submission_key_conflict" || body.Code == "submission_key_expired" || body.Code == "job_unknown" || body.Code == "host_reconcile_rejected" || body.Code == "host_revision_behind_queue") {
 			e.Code, e.Message, e.QueueRevision = body.Code, body.Error, body.QueueRevision
 		}
 		return e

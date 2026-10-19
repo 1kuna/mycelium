@@ -947,6 +947,7 @@ func TestDockerQueueRestartRetainsCustody(t *testing.T) {
 	a := machine("a", "fake")
 	a.HostID = "shared"
 	a.UnifiedMemory = true
+	a.CapabilityProfile.MemoryLayout = "unified"
 	a.HostMemoryMeasured = true
 	a.HostAvailableMemoryGB = 32
 	check(t, q, a, nil)
@@ -978,6 +979,7 @@ func TestDockerQueueRestartRetainsCustody(t *testing.T) {
 	fresh := a
 	fresh.Session = "new"
 	fresh.UnifiedMemory = false
+	fresh.CapabilityProfile.MemoryLayout = "separate"
 	if _, e = q.Checkin(Checkin{Machine: fresh, Fresh: true, PreviousSession: a.Session}); e != nil {
 		t.Fatal(e)
 	}

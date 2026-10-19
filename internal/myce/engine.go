@@ -532,7 +532,7 @@ func (rt *modelRuntime) setLocalApprovals(approved map[string]string, states map
 
 // Called under the runtime lock; withholding readiness never releases custody.
 func (rt *modelRuntime) localApprovalAvailable(m Model) bool {
-	return m.LocalSource == "" || (rt.localApprovalStates[m.LocalSource] == "" || rt.localApprovalStates[m.LocalSource] == approvalVerified) && rt.localApprovals[m.LocalSource] == m.SHA256
+	return m.LocalSource == "" || rt.localApprovalStates[m.LocalSource] == approvalVerified && rt.localApprovals[m.LocalSource] == m.SHA256
 }
 
 func (rt *modelRuntime) report() ([]ModelReport, float64) {
@@ -610,7 +610,7 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 		}
 	}
 	for _, s := range plan {
-		if s.Session != rt.session {
+		if s.Session != rt.session || s.Attempt == "" {
 			continue
 		}
 		if s.State == "unloading" {

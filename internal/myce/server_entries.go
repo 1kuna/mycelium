@@ -191,7 +191,7 @@ func (q *Queue) callDefaults(c *ModelCall, model Model, h http.Header, defaults 
 }
 
 func modelFenceAllows(model Model, m *Machine) bool {
-	return (len(model.AllowedMachines) == 0 || contains(model.AllowedMachines, m.ID)) && (model.LocalSource == "" || (m.ModelApprovalStates[model.LocalSource] == "" || m.ModelApprovalStates[model.LocalSource] == approvalVerified) && m.ApprovedModels[model.LocalSource] == model.SHA256)
+	return (len(model.AllowedMachines) == 0 || contains(model.AllowedMachines, m.ID)) && (model.LocalSource == "" || m.ModelApprovalStates[model.LocalSource] == approvalVerified && m.ApprovedModels[model.LocalSource] == model.SHA256)
 }
 func (p *ModelPlacement) allows(machine string) bool {
 	return p == nil || (len(p.AllowedMachines) == 0 || contains(p.AllowedMachines, machine)) && (len(p.ProjectMachines) == 0 || contains(p.ProjectMachines, machine))

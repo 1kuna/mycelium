@@ -448,6 +448,11 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	if w.control != nil {
 		w.control.set(p)
 	}
+	if j.Spec.StartBy == nil {
+		if err = w.authorizeStart(j, s.state.Session); err != nil {
+			return nil, abort(err)
+		}
+	}
 	if err = hostDispatch(w.HostStateDir, w.hostRevision, func() error { _, e := gateWriter.Write([]byte("start\n")); return e }); err != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 	}
@@ -1329,15 +1334,6 @@ func (w Worker) Run(stop context.Context) error {
 							err = nil
 						} else {
 							p, err = w.start(s, j)
-							if err == nil && p != nil && p.docker == nil && j.Spec.StartBy == nil {
-								startedCtx, startedCancel := context.WithTimeout(ctx, 2*time.Second)
-								startedErr := w.Client.Call(startedCtx, "POST", "/api/workers/started", Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}, nil)
-								startedCancel()
-								if startedErr != nil {
-									log.Printf("worker startup acknowledgement: %v", startedErr)
-									p.stop(w.Clock.Now(), 0, true)
-								}
-							}
 						}
 						if err != nil && !(errors.Is(err, errWorkerCheckpoint) || errors.Is(err, errWorkerMemory) || errors.Is(err, errWorkerUnavailable)) {
 							r := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Error: err.Error(), ExtensionUnavailable: errors.Is(err, errExtensionUnavailable), ReleasePending: errors.Is(err, errWorkerReleasePending)}

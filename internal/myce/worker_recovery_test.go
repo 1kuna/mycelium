@@ -47,7 +47,11 @@ func TestWorkerRetryFakeClockBoundaries(t *testing.T) {
 }
 func recoveryWorker(t *testing.T) Worker {
 	t.Helper()
-	return Worker{Machine: machine("recovery-worker", "fake"), StateDir: t.TempDir(), Interval: time.Millisecond, Clock: RealClock{}}
+	server := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{"ok": true, "start_gate": startGateProtocol})
+	}))
+	t.Cleanup(server.Close)
+	return Worker{Client: Client{URL: server.URL}, Machine: machine("recovery-worker", "fake"), StateDir: t.TempDir(), Interval: time.Millisecond, Clock: RealClock{}}
 }
 func recoveryJob(t *testing.T, command []string) Job {
 	t.Helper()
