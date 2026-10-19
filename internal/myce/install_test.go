@@ -96,7 +96,7 @@ func TestInstallAndUninstallTempOnly(t *testing.T) {
 	if e = Install(context.Background(), c, executable, "private-test-secret", runner); e != nil {
 		t.Fatal(e)
 	}
-	if len(commands) != 8 {
+	if len(commands) != 13 {
 		t.Fatal(commands)
 	}
 	if commands[5] != "systemctl --user is-active --quiet myce-host-reconcile.timer" {
@@ -387,6 +387,9 @@ func TestInstallStartDisabledPreservesHostGate(t *testing.T) {
 		if strings.HasSuffix(text, filepath.Base(c.Service)) && (strings.Contains(text, "enable --now") || strings.Contains(text, "restart ")) {
 			t.Fatal("started disabled worker")
 		}
+		if strings.Contains(text, "--property=UnitFileState") {
+			return []byte("disabled"), nil
+		}
 		if strings.Contains(text, "--property=DropInPaths") {
 			return nil, nil
 		}
@@ -430,8 +433,10 @@ func TestInstallDeploymentDefaultUnitAndNASBoundary(t *testing.T) {
 	os.Symlink(outside, filepath.Join(nas, "mycelium"))
 	executable := filepath.Join(home, "binary")
 	os.WriteFile(executable, []byte("test"), 0700)
-	if err := Install(context.Background(), c, executable, "token", func(context.Context, string, ...string) ([]byte, error) {
-		t.Fatal("service changed before NAS check")
+	if err := Install(context.Background(), c, executable, "token", func(_ context.Context, name string, args ...string) ([]byte, error) {
+		if name != "systemctl" || len(args) < 2 || (args[1] != "is-active" && !(args[1] == "show" && strings.Contains(strings.Join(args, " "), "--property=UnitFileState"))) {
+			t.Fatal("service changed before NAS check")
+		}
 		return nil, nil
 	}); err == nil {
 		t.Fatal("NAS symlink followed")

@@ -146,8 +146,15 @@ identity nor release.
    KillMode, delegation and stop timeout. An inspection failure is a failed probe.
 5. Verify both convergence units use the same installed worker binary and config
    with a bounded reconcile timeout, independent of the GPU unit. Install may
-   enable the convergence timer and register the worker for boot, but never starts
-   or restarts the worker. Fresh staging and explicit `--start-disabled=false`
+   enable the convergence timer and register the worker for boot, but forward
+   publication never starts or restarts the worker. Before publication, snapshot
+   every touched unit/job
+   and file, including systemd enablement/activity and launchd loaded/activity
+   state. On failure, restore files, reload definitions, restore registration,
+   then restore captured activity while admission stays closed. If any recovery
+   step fails, keep admission closed and verify the reported per-unit differences
+   against actual manager state; an incomplete rollback is not acceptance. Fresh
+   staging and explicit `--start-disabled=false`
    must remain closed; an open host must refuse worker upgrade before mutation.
    Reopening requires fresh reconciliation and an explicit revision-bound host
    open, outside this install probe. Verify logout/linger and boot startup remain

@@ -654,6 +654,9 @@ func TestExclusionStagedInstallKeepsUnknownProof(t *testing.T) {
 		if strings.HasSuffix(text, filepath.Base(c.Service)) && (strings.Contains(text, "enable --now ") || strings.Contains(text, "restart ")) {
 			t.Fatal("staged install activated worker", args)
 		}
+		if strings.Contains(text, "--property=UnitFileState") {
+			return []byte("disabled"), nil
+		}
 		if strings.Contains(text, "--property=DropInPaths") {
 			return nil, nil
 		}
