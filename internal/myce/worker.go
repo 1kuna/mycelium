@@ -509,6 +509,18 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 			result.OutOfMemory = result.OutOfMemory || (oomErr != nil && strings.HasPrefix(ceilingDiagnostic(oomErr.Error(), ""), "exceeded its "))
 		}
 		if oomErr != nil {
+			result.ExecutionCause = &RuntimeCause{Operation: "command", Class: "resource_limit"}
+		} else if launchErr != nil {
+			result.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("launch", launchErr))
+		} else if waitErr != nil {
+			result.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("command", waitErr))
+		}
+		if groupErr != nil {
+			result.CleanupCause = runtimeDiagnostic(runtimeErrorFor("process_group", groupErr))
+		} else if syncErr != nil || closeErr != nil {
+			result.CleanupCause = runtimeDiagnostic(runtimeErrorFor("persist", errors.Join(syncErr, closeErr)))
+		}
+		if oomErr != nil {
 			result.Error = oomErr.Error()
 		} else if launchErr != nil {
 			result.Error = "command start hand-off: " + launchErr.Error()
@@ -525,6 +537,7 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 			if e := w.publishExtensionFiles(j); e != nil {
 				result.Success = false
 				result.Error = e.Error()
+				result.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("outputs", e))
 			}
 		}
 		p.mu.Lock()
@@ -1017,6 +1030,9 @@ func (w Worker) Run(stop context.Context) error {
 			}
 			if p != nil && p.docker != nil {
 				status := p.docker.status()
+				p.docker.mu.Lock()
+				m.DockerCause = safeRuntimeCause(p.docker.state.CleanupCause)
+				p.docker.mu.Unlock()
 				if status != "running" {
 					m.DockerCleanup = status
 				}

@@ -13,7 +13,24 @@
         "job_unknown",
         "submission_key_conflict",
         "submission_key_expired",
-        "submission_key_invalid"
+        "submission_key_invalid",
+        "request_invalid",
+        "authentication_required",
+        "job_fields_required",
+        "job_logs_invalid",
+        "job_priority_invalid",
+        "job_deadline_invalid",
+        "job_files_invalid",
+        "job_program_invalid",
+        "job_memory_invalid",
+        "job_platform_invalid",
+        "job_docker_invalid",
+        "job_environment_invalid",
+        "job_placement_invalid",
+        "job_capacity_invalid",
+        "request_stale",
+        "request_failed",
+        "request_method_invalid"
       ]
     },
     "job_id": {

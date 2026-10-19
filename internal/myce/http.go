@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -209,13 +210,18 @@ func (a API) Handler() http.Handler {
 			if r.URL.Path == "/" {
 				w.Header().Set("WWW-Authenticate", `Basic realm="Mycelium", charset="UTF-8"`)
 			}
-			http.Error(w, "invalid fleet token", 401)
+			respond(w, nil, &HTTPError{Status: 401, Code: "authentication_required", Message: rejectionMessages["authentication_required"]})
 			return
 		}
 		if workerProtocolEndpoint(r.URL.Path) && (r.Method == http.MethodPost || r.Method == http.MethodGet) && r.Header.Get("X-Myce-Start-Gate") != startGateProtocol {
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusUpgradeRequired)
 			_ = json.NewEncoder(w).Encode(map[string]string{"code": "worker_protocol_mismatch", "error": "current host-attempt-v3 worker/report protocol required; upgrade queue and workers together"})
+			return
+		}
+		if r.URL.Path == "/api/jobs" && r.Method != http.MethodPost {
+			w.Header().Set("Allow", http.MethodPost)
+			respond(w, nil, &HTTPError{Status: 405, Code: "request_method_invalid", Message: rejectionMessages["request_method_invalid"]})
 			return
 		}
 		mux.ServeHTTP(w, r)
@@ -236,7 +242,11 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 		}
 	}
 	if err != nil {
-		http.Error(w, "invalid JSON request", 400)
+		var rejected *rejectionError
+		if !errors.As(err, &rejected) {
+			err = reject("request_invalid", err)
+		}
+		respond(w, nil, err)
 		return false
 	}
 	return true
@@ -248,14 +258,22 @@ func respond(w http.ResponseWriter, v any, err error) {
 		if errors.Is(err, ErrStale) {
 			status = http.StatusConflict
 		}
-		body := map[string]any{"error": "request failed"}
+		code := "request_failed"
+		if errors.Is(err, ErrStale) {
+			code = "request_stale"
+		}
+		var rule *rejectionError
+		if errors.As(err, &rule) {
+			code = rule.code
+		}
+		body := map[string]any{"error": rejectionMessages[code], "code": code}
 		var rejected *hostReconcileError
 		if errors.As(err, &rejected) {
 			status = http.StatusConflict
 			body = map[string]any{"error": "host reconciliation rejected; retry", "code": rejected.code, "queue_revision": rejected.revision}
 		}
 		var apiError *HTTPError
-		if errors.As(err, &apiError) && (apiError.Code == "worker_protocol_invalid" || apiError.Code == "submission_key_conflict" || apiError.Code == "submission_key_expired" || apiError.Code == "submission_key_invalid" || apiError.Code == "job_unknown") {
+		if errors.As(err, &apiError) && (rejectionMessages[apiError.Code] != "" || apiError.Code == "worker_protocol_invalid" || apiError.Code == "submission_key_conflict" || apiError.Code == "submission_key_expired" || apiError.Code == "submission_key_invalid" || apiError.Code == "job_unknown") {
 			status = apiError.Status
 			body = map[string]any{"error": apiError.Message, "code": apiError.Code}
 			if apiError.Code == "job_unknown" {
@@ -264,6 +282,7 @@ func respond(w http.ResponseWriter, v any, err error) {
 				body["state"], body["release"], body["acknowledged_at"] = "unknown", nil, nil
 			}
 		}
+		log.Printf("API rejection status=%d code=%s", status, body["code"])
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(body)
 		return
@@ -325,8 +344,11 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 			Code          string       `json:"code"`
 			Error         string       `json:"error"`
 		}
-		if json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&body) == nil && (body.Code == "worker_protocol_mismatch" || body.Code == "worker_protocol_invalid" || body.Code == "submission_key_conflict" || body.Code == "submission_key_expired" || body.Code == "job_unknown" || body.Code == "host_reconcile_rejected" || body.Code == "host_revision_behind_queue") {
+		if json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&body) == nil && (rejectionMessages[body.Code] != "" || body.Code == "submission_key_invalid" || body.Code == "worker_protocol_mismatch" || body.Code == "worker_protocol_invalid" || body.Code == "submission_key_conflict" || body.Code == "submission_key_expired" || body.Code == "job_unknown" || body.Code == "host_reconcile_rejected" || body.Code == "host_revision_behind_queue") {
 			e.Code, e.Message, e.QueueRevision = body.Code, body.Error, body.QueueRevision
+			if message := rejectionMessages[body.Code]; message != "" {
+				e.Message = message
+			}
 		}
 		return e
 	}

@@ -93,6 +93,7 @@ func dockerRunArgs(command []string) ([]string, error) {
 
 // dockerExecution is durable custody, separate from the worker's heartbeat state.
 type dockerExecution struct {
+	CleanupCause       *RuntimeCause           `json:"cleanup_cause,omitempty"`
 	HostRevision       HostRevision            `json:"host_revision"`
 	LogsNone           bool                    `json:"logs_none,omitempty"`
 	Owner              *Result                 `json:"owner,omitempty"` // Saved job/attempt/machine/session binding; legacy custody uses opaque identity.
@@ -147,7 +148,7 @@ type dockerAttempt struct {
 }
 
 func (d *dockerAttempt) saveLocked() error {
-	err := d.saveState(d.state)
+	err := runtimeErrorFor("persist", d.saveState(d.state))
 	d.dirty = err != nil
 	return err
 }
@@ -216,7 +217,15 @@ func (d *dockerAttempt) stopLocked(now time.Time, grace time.Duration, kill bool
 func (d *dockerAttempt) call(args ...string) ([]byte, error) {
 	return d.callWithTimeout(d.timeout, args...)
 }
-func (d *dockerAttempt) callWithTimeout(timeout time.Duration, args ...string) ([]byte, error) {
+func (d *dockerAttempt) callWithTimeout(timeout time.Duration, args ...string) (out []byte, err error) {
+	operation := "reconcile"
+	if len(args) > 0 {
+		operation = args[0]
+		if operation == "network" && len(args) > 1 {
+			operation += "." + args[1]
+		}
+	}
+	defer func() { err = runtimeErrorFor(operation, err) }()
 	parent := d.ctx
 	if parent == nil {
 		parent = context.Background()
@@ -232,7 +241,7 @@ func (d *dockerAttempt) callWithTimeout(timeout time.Duration, args ...string) (
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return signalWorkerGroup(cmd.Process.Pid, syscall.SIGKILL) }
 	cmd.WaitDelay = timeout
-	out, err := cmd.Output()
+	out, err = cmd.Output()
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
@@ -289,7 +298,7 @@ func (d *dockerAttempt) operation(kind string, args ...string) ([]byte, error) {
 	if err == nil {
 		d.state.Pending = false
 		d.state.Error = ""
-	} else if refusal, ok := err.(*exec.ExitError); ok && strings.HasPrefix(strings.TrimSpace(string(refusal.Stderr)), "Error response from daemon:") {
+	} else if refusal := new(exec.ExitError); errors.As(err, &refusal) && strings.HasPrefix(strings.TrimSpace(string(refusal.Stderr)), "Error response from daemon:") {
 		d.state.Pending = false
 		d.state.Error = "Docker " + kind + " refused"
 	} else {
@@ -350,8 +359,8 @@ func inspectOwnedDocker(ctx context.Context, endpoint, identity string, call fun
 	}
 	out, inspectErr := call(ctx, endpoint, append([]string{"inspect"}, ids...)...)
 	var cs []dockerInspection
-	if json.Unmarshal(out, &cs) != nil {
-		return nil, errors.New("Docker inspection unconfirmed")
+	if decodeErr := json.Unmarshal(out, &cs); decodeErr != nil {
+		return nil, runtimeErrorFor("inspect", errors.Join(inspectErr, decodeErr))
 	}
 	var valid []dockerInspection
 	incomplete := inspectErr != nil || len(cs) != len(ids)
@@ -368,7 +377,7 @@ func inspectOwnedDocker(ctx context.Context, endpoint, identity string, call fun
 		}
 	}
 	if incomplete {
-		return valid, errors.New("incomplete Docker inventory")
+		return valid, runtimeErrorFor("inspect", errors.Join(inspectErr, errors.New("incomplete Docker inventory")))
 	}
 	cs = valid
 	return cs, nil
@@ -390,7 +399,8 @@ func (d *dockerAttempt) containers() ([]dockerInspection, error) {
 	}
 	return containers, err
 }
-func (d *dockerAttempt) reconcile() (bool, error) {
+func (d *dockerAttempt) reconcile() (done bool, err error) {
+	defer func() { err = runtimeErrorFor("reconcile", err) }()
 	if d.state.OperatorConfirmed {
 		return false, errors.New("legacy Docker assertion has unknown operation disposition")
 	}
@@ -415,7 +425,7 @@ func (d *dockerAttempt) reconcile() (bool, error) {
 		}
 		if c.HostConfig.RestartPolicy.Name != "no" {
 			if _, err := d.call("update", "--restart=no", c.ID); err != nil {
-				return false, errors.New("Docker restart policy update unconfirmed")
+				return false, err
 			}
 			return false, nil // Verify effective policy in the next inventory.
 		}
@@ -637,7 +647,8 @@ func (b *dockerTail) Write(p []byte) (int, error) {
 
 // Evidence stays in the private spool, independent of disposable Docker custody.
 // It is not included in Result, queue logs, status, or public diagnostics.
-func (d *dockerAttempt) retainEvidence(containers []dockerInspection) error {
+func (d *dockerAttempt) retainEvidence(containers []dockerInspection) (err error) {
+	defer func() { err = runtimeErrorFor("retain_evidence", err) }()
 	if d.dir == "" {
 		// Orphans have no owning attempt/spool. The host cleanup report records
 		// the evidence gap; an in-memory observation is not retained evidence.
@@ -668,7 +679,7 @@ func (d *dockerAttempt) retainEvidence(containers []dockerInspection) error {
 			err := cmd.Run()
 			cancel()
 			if err != nil {
-				return errors.New("Docker private stderr collection failed")
+				return runtimeErrorFor("logs", err)
 			}
 		}
 		d.mu.Lock()
@@ -895,10 +906,8 @@ func (d *dockerAttempt) run(p *process, j Job, session string, output *os.File, 
 		done, cleanupErr := d.reconcile()
 		if cleanupErr != nil {
 			d.mu.Lock()
-			d.state.Error = "Docker cleanup unconfirmed"
-			if cleanupErr.Error() == "Docker ownership mismatch" {
-				d.state.Error += "; ownership mismatch (missing attempt label)"
-			}
+			d.state.CleanupCause = runtimeDiagnostic(cleanupErr)
+			d.state.Error = "Docker cleanup unconfirmed; " + d.state.CleanupCause.String()
 			_ = d.saveLocked()
 			d.mu.Unlock()
 		}
@@ -931,7 +940,10 @@ func (d *dockerAttempt) run(p *process, j Job, session string, output *os.File, 
 		cmd.WaitDelay = d.timeout
 		if logErr := cmd.Run(); logErr != nil {
 			result.Success = false
-			result.Error = "Docker log collection failed"
+			result.CleanupCause = runtimeDiagnostic(runtimeErrorFor("logs", logErr))
+			if result.Error == "" {
+				result.Error = "Docker log collection failed"
+			}
 		}
 		cancel()
 	}
@@ -939,7 +951,10 @@ func (d *dockerAttempt) run(p *process, j Job, session string, output *os.File, 
 	closeErr := output.Close()
 	if syncErr != nil || closeErr != nil {
 		result.Success = false
-		result.Error = "persist Docker output failed"
+		result.CleanupCause = runtimeDiagnostic(runtimeErrorFor("persist", errors.Join(syncErr, closeErr)))
+		if result.Error == "" {
+			result.Error = "persist Docker output failed"
+		}
 	}
 	err := saveWorkerJSON(d.dir, d.state.Identity+".result.json", result)
 	p.done <- workerFinish{result: result, err: err}
@@ -953,10 +968,18 @@ func (state dockerExecution) completedMain() bool {
 
 func dockerOutcome(state dockerExecution, owner Result, e error) Result {
 	result := owner
+	result.CleanupCause = safeRuntimeCause(state.CleanupCause)
 	infrastructure := state.InfrastructureStop
 	if e != nil {
 		infrastructure = infrastructure || e.Error() == "worker restarted; Docker cleanup required" || errors.Is(e, context.DeadlineExceeded) || errors.Is(e, context.Canceled)
-		result.Error = "Docker launch failed: " + e.Error()
+		result.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("launch", e))
+		result.Error = "Docker launch failed: " + result.ExecutionCause.String()
+		if result.ExecutionCause.Class == "admission_changed" {
+			result.Error = "Docker launch failed: host allowance changed since queue admission"
+		}
+		if result.ExecutionCause.Operation == "readiness" && result.ExecutionCause.Class == "timeout" {
+			result.Error = "Docker readiness timeout"
+		}
 		if strings.HasPrefix(e.Error(), "Docker memory ceiling not enforced") {
 			result.Error = "Docker memory ceiling not enforced"
 		}
@@ -965,14 +988,19 @@ func dockerOutcome(state dockerExecution, owner Result, e error) Result {
 	result.Success = e == nil && state.ExitCode == 0
 	if state.MainFinished && state.ExitCode != 0 {
 		result.Error = fmt.Sprintf("Docker main exited with status %d", state.ExitCode)
+		code := state.ExitCode
+		result.ExecutionCause = &RuntimeCause{Operation: "main", Class: "command_exit", ExitCode: &code}
 	}
 	if state.Failure != "" {
 		result.Error = state.Failure
+		result.ExecutionCause = &RuntimeCause{Operation: "group", Class: "stage_failed"}
 	}
 	if state.MemoryFailure != "" {
 		result.Error = state.MemoryFailure
+		result.ExecutionCause = &RuntimeCause{Operation: "main", Class: "resource_limit"}
 	}
 	if state.OOMKilled {
+		result.ExecutionCause = &RuntimeCause{Operation: "main", Class: "oom"}
 		result.Error = "Docker container OOM-killed without a declared memory ceiling"
 		if state.MemoryLimitBytes > 0 {
 			result.Error = fmt.Sprintf("exceeded its %g GiB memory ceiling", float64(state.MemoryLimitBytes)/(1<<30))

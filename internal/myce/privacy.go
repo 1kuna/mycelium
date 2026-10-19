@@ -20,7 +20,11 @@ func (q *Queue) publicSnapshot() (Snapshot, error) {
 		s.LoadedModels[i].EnvironmentRecipe = nil
 		s.LoadedModels[i].Error = ceilingDiagnostic(s.LoadedModels[i].Error, "model load or unload failed")
 	}
+	unsafeDockerHolds := map[string]string{}
 	for _, m := range s.Machines {
+		if m.DockerCleanup != "" && !safeDockerHoldStatus(m.DockerCleanup) {
+			unsafeDockerHolds[hostID(m)+": Docker cleanup unconfirmed; "+m.DockerCleanup] = hostID(m) + ": Docker cleanup unconfirmed"
+		}
 		m.Disabled = diagnostic(m.Disabled, "disabled by operator")
 		if m.AdmissionReason != "" {
 			if strings.HasPrefix(m.AdmissionReason, "maximum simultaneous jobs reached") {
@@ -51,7 +55,11 @@ func (q *Queue) publicSnapshot() (Snapshot, error) {
 		m.MemoryError = diagnostic(m.MemoryError, "memory probe failed")
 		m.FileTransferError = diagnostic(m.FileTransferError, "file transfer pending; only published progress is available elsewhere")
 		m.CacheError = diagnostic(m.CacheError, "cache operation failed")
+		m.DockerCause = safeRuntimeCause(m.DockerCause)
 		m.DockerCleanup = diagnostic(m.DockerCleanup, "Docker cleanup unconfirmed")
+		if m.DockerCleanup != "" && m.DockerCause != nil {
+			m.DockerCleanup += "; " + m.DockerCause.String()
+		}
 		for i := range m.CopyReports {
 			m.CopyReports[i].Error = diagnostic(m.CopyReports[i].Error, "model copy failed")
 		}
@@ -59,7 +67,23 @@ func (q *Queue) publicSnapshot() (Snapshot, error) {
 			m.EnvironmentReports[i].Error = diagnostic(m.EnvironmentReports[i].Error, "environment build failed")
 		}
 	}
+	// Hold text is derived from worker reports too. Sanitize that projection,
+	// rather than only the machine field from which it was built.
+	for i := range s.HoldsDetail {
+		detail := &s.HoldsDetail[i]
+		if replacement, unsafe := unsafeDockerHolds[detail.Text]; unsafe {
+			old := detail.Text
+			detail.Text = replacement
+			for n, text := range s.HostHolds {
+				if text == old {
+					s.HostHolds[n] = detail.Text
+				}
+			}
+		}
+	}
 	for _, j := range s.Jobs {
+		j.ExecutionCause = safeRuntimeCause(j.ExecutionCause)
+		j.CleanupCause = safeRuntimeCause(j.CleanupCause)
 		// Status is a summary, never a copy of a submitted command, environment,
 		// program arguments, extension files, or local filesystem paths.
 		spec := Spec{AllowedMachines: j.Spec.AllowedMachines, Name: j.Spec.Name, Project: j.Spec.Project, Priority: j.Spec.Priority, Class: j.Spec.Class, Kind: j.Spec.Kind, Resumable: j.Spec.Resumable, Deadline: j.Spec.Deadline, StartBy: j.Spec.StartBy}
@@ -152,4 +176,20 @@ func (q *Queue) statusEligibility(j *Job) {
 		sort.Strings(hosts)
 		j.EligibleHosts = &hosts
 	}
+}
+
+// Preserve the established fixed lifecycle vocabulary, including legacy safe
+// inspection diagnostics. Arbitrary worker error suffixes are never public.
+func safeDockerHoldStatus(value string) bool {
+	switch value {
+	case "creating", "stopping", "released", "create pending", "start pending", "wait pending", "inspect pending", "stop pending", "kill pending", "logs pending", "remove pending", "network-create pending", "network-remove pending":
+		return true
+	}
+	if operation, ok := strings.CutPrefix(value, "cleanup unconfirmed: "); ok {
+		switch operation {
+		case "create", "start", "wait", "inspect", "stop", "kill", "logs", "remove", "network-create", "network-remove":
+			return true
+		}
+	}
+	return false
 }

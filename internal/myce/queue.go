@@ -40,7 +40,12 @@ type batchRelease struct {
 }
 
 type state struct {
-	PriorityPolicy   *PriorityPolicyRecord        `json:"priority_policy,omitempty"`
+	PriorityPolicy *PriorityPolicyRecord `json:"priority_policy,omitempty"`
+	// Actual fleet contact and the first reconnect after silence are separate
+	// from each worker's LastSeen. Reconnects never renew an active outage epoch.
+	LastWorkerContact time.Time `json:"last_worker_contact,omitempty"`
+	NetworkRecoveryAt time.Time `json:"network_recovery_at,omitempty"`
+
 	Schema           int                          `json:"schema_version"`
 	HostIntents      map[string]QueueHostIntent   `json:"host_intents,omitempty"`
 	Submissions      map[string]*submissionRecord `json:"submissions,omitempty"`
@@ -405,7 +410,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (*Job, error) {
 		}
 		// A concurrent key binding/reservation wins even if verification failed.
 		if verificationErr != nil {
-			return verificationErr
+			return reject("job_files_invalid", verificationErr)
 		}
 		if len(s.Files) > 0 && (q.files != store || q.fileCheckpoints != fileCheckpoints) {
 			return ErrStale
@@ -417,15 +422,15 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (*Job, error) {
 			return err
 		}
 		if e := q.validateProjectPlacement(s.Project, s.AllowedMachines); e != nil {
-			return e
+			return reject("job_placement_invalid", e)
 		}
 		extensions, e := q.resolveExtensions(&s)
 		if e != nil {
-			return e
+			return reject("job_program_invalid", e)
 		}
 		recipes, e := q.resolveEnvironment(s.Environment)
 		if e != nil {
-			return e
+			return reject("job_environment_invalid", e)
 		}
 		var id string
 		if q.simulation {
@@ -441,7 +446,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (*Job, error) {
 		j := &Job{PriorityPolicy: q.priorityMatch(s), FileTransport: q.fileCheckpoints, Extensions: extensions, EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: filepath.Join(q.root, id)}
 		q.applyLearnedNeeds(j)
 		if e := q.validateProjectCapacity(j); e != nil {
-			return e
+			return reject("job_capacity_invalid", e)
 		}
 		copy := cloneJob(j)
 		j = &copy
@@ -506,6 +511,21 @@ func (q *Queue) stop(j *Job, why string) {
 	j.State = "stopping"
 	j.Reason = why
 }
+func (q *Queue) fleetQuiet(now time.Time) bool {
+	active, healthy := 0, 0
+	for _, m := range q.s.Machines {
+		if !m.Gone && !m.Leaving && m.Disabled == "" {
+			active++
+			if now.Sub(m.LastSeen) < min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2])) {
+				healthy++
+			}
+		}
+	}
+	// Cached contact can identify a continuously reporting minority, but cannot
+	// replace a currently healthy worker when the entire active fleet is quiet.
+	return q.s.NetworkRecoveryAt.IsZero() && active > 0 && (healthy == 0 || healthy*2 < active && now.Sub(q.s.LastWorkerContact) >= min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2])))
+}
+
 func (q *Queue) maintain() {
 	q.maintainSubmissions()
 	now := q.clock.Now()
@@ -532,19 +552,11 @@ func (q *Queue) maintain() {
 			delete(q.s.BatchReleases, machine)
 		}
 	}
-	active, healthy := 0, 0
-	for _, m := range q.s.Machines {
-		if !m.Gone && !m.Leaving && m.Disabled == "" {
-			active++
-			if now.Sub(m.LastSeen) < min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2])) {
-				healthy++
-			}
-		}
-	}
-	q.networkQuiet = active > 0 && (healthy == 0 || healthy*2 < active)
+	q.networkQuiet = q.fleetQuiet(now)
 	for _, m := range q.s.Machines {
 		unreported := q.unreported[m.ID]
-		grace := unreported && now.Before(q.restartUntil)
+		outageGrace := !q.s.NetworkRecoveryAt.IsZero() && m.LastSeen.Before(q.s.NetworkRecoveryAt) && now.Before(q.s.NetworkRecoveryAt.Add(q.machineLossTimeout(m.ID)))
+		grace := !unreported && outageGrace || unreported && now.Before(q.restartUntil)
 		restartExpired := unreported && !grace
 		if m.Disabled == "" && !m.Gone && !grace && (restartExpired || (!q.networkQuiet && now.Sub(m.LastSeen) >= q.machineLossTimeout(m.ID))) {
 			m.Gone = true
@@ -571,6 +583,19 @@ func (q *Queue) maintain() {
 			}
 		}
 	}
+	if !q.s.NetworkRecoveryAt.IsZero() {
+		pending := false
+		for _, m := range q.s.Machines {
+			if !m.Gone && !m.Leaving && m.Disabled == "" && m.LastSeen.Before(q.s.NetworkRecoveryAt) {
+				pending = true
+				break
+			}
+		}
+		if !pending {
+			q.s.NetworkRecoveryAt = time.Time{}
+		}
+	}
+
 	for _, j := range q.s.Jobs {
 		if q.hostClosedReason(q.executionHost(j.Machine)) == "" && !q.networkQuiet && !q.unreported[j.Machine] && j.State == "stopping" && !j.Spec.Run.Docker && expired(j.StopAt, now) {
 			if cancelled(j) {
@@ -721,18 +746,18 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 				}
 			}
 		}
-		// After fleet silence, give the other workers a full reconnect window.
-		if q.networkQuiet && old != nil && !old.Gone {
-			for _, other := range q.s.Machines {
-				if !other.Gone {
-					other.LastSeen = q.clock.Now()
-				}
-			}
-		}
 		delete(q.unreported, m.ID)
 		m.Gone = false
 		m.LastSeen = q.clock.Now()
 		q.s.Machines[m.ID] = &m
+		// Count this worker as healthy, but detect majority silence before
+		// replacing the previous fleet contact. Otherwise the first reconnect
+		// looks like a continuously reporting survivor and expires its peers.
+		// Keep actual peer heartbeats and the active recovery deadline unchanged.
+		if (q.networkQuiet || q.fleetQuiet(m.LastSeen)) && old != nil && !old.Gone && !m.LastSeen.Before(q.restartUntil) && q.s.NetworkRecoveryAt.IsZero() {
+			q.s.NetworkRecoveryAt = m.LastSeen
+		}
+		q.s.LastWorkerContact = m.LastSeen
 		delete(q.s.BatchReleases, m.ID) // This report supersedes acknowledgement credit.
 		q.reconcileModels(&m, c.ModelReports)
 		if e := q.reconcileEnvironments(&m); e != nil {
@@ -1072,6 +1097,8 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 		m.LastSeen = q.clock.Now()
 		delete(q.unreported, m.ID)
 	}
+	j.ExecutionCause = safeRuntimeCause(r.ExecutionCause)
+	j.CleanupCause = safeRuntimeCause(r.CleanupCause)
 	// A kernel OOM is the payload's failure even if preemption raced it.
 	ceilingFailure := !r.Success && strings.HasPrefix(ceilingDiagnostic(r.Error, ""), "exceeded its ")
 	oomFailure := !r.Success && (r.OutOfMemory || ceilingFailure)

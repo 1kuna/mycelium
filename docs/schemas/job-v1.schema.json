@@ -415,6 +415,10 @@
           "type": "string",
           "x-contract": "diagnostic"
         },
+        "cleanup_cause": {
+          "$ref": "#/$defs/RuntimeCause",
+          "x-contract": "diagnostic"
+        },
         "copies": {
           "items": {
             "$ref": "#/$defs/Copy"
@@ -461,6 +465,10 @@
             "object",
             "null"
           ],
+          "x-contract": "diagnostic"
+        },
+        "execution_cause": {
+          "$ref": "#/$defs/RuntimeCause",
           "x-contract": "diagnostic"
         },
         "extension": {
@@ -727,6 +735,24 @@
       "required": [
         "type",
         "file"
+      ],
+      "type": "object"
+    },
+    "RuntimeCause": {
+      "properties": {
+        "class": {
+          "type": "string"
+        },
+        "exit_code": {
+          "type": "integer"
+        },
+        "operation": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation",
+        "class"
       ],
       "type": "object"
     },
