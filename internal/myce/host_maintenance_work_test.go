@@ -35,6 +35,8 @@ func TestMaintenanceEveryWorkKind(t *testing.T) {
 					s := spec(priority)
 					s.Needs.HostMemoryGB = 2
 					if kind == "sidecar" {
+						m.Capabilities = []string{"docker"}
+						m.CapabilityProfile.OS = "linux"
 						s = dockerGroupJob(t).Spec
 						s.Priority = priority
 					}
