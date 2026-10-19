@@ -42,7 +42,8 @@ func (r *workerRetry) succeeded(now time.Time, interval time.Duration) {
 type workerState struct {
 	Schema          int                    `json:"schema_version"`
 	OperatorStopped bool                   `json:"operator_stopped,omitempty"`
-	Groups          map[int]map[int]string `json:"-"`
+	Groups          map[int]map[int]string `json:"groups,omitempty"`
+	Cgroup          string                 `json:"cgroup,omitempty"`
 	LaunchPending   bool                   `json:"launch_pending,omitempty"`
 	Birth           string                 `json:"birth,omitempty"`
 	Session         string                 `json:"session"`
@@ -322,6 +323,27 @@ func waitWorkerGroup(group int, clock Clock) error {
 	}
 }
 func (s *workerStore) cleanupOrphan(clock Clock) error {
+	// Native members use the ordinary attempt record, written before each exec
+	// gate opens. argv/environment markers may disappear (including env -i),
+	// so authenticate surviving PIDs by their kernel birth identity instead.
+	if s.state.Job != nil && s.state.Identity != "" {
+		data, err := os.ReadFile(filepath.Join(s.dir, "attempt-"+s.state.Identity+".json"))
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if err == nil {
+			var st workerState
+			if err := decodeWorkerJSON(data, &st); err != nil {
+				return err
+			}
+			if st.Identity != s.state.Identity || s.state.PID != 0 && st.PID != s.state.PID {
+				return errors.New("mismatched attempt process custody")
+			}
+			if st.Groups != nil || st.Cgroup != "" {
+				return cleanupAttemptGroups(st, clock)
+			}
+		}
+	}
 	if s.state.PID <= 0 || s.state.Identity == "" {
 		return nil
 	}
@@ -351,6 +373,55 @@ func (s *workerStore) cleanupOrphan(clock Clock) error {
 		return err
 	}
 	return waitWorkerGroup(s.state.PID, clock)
+}
+
+func cleanupAttemptGroups(st workerState, clock Clock) error {
+
+	if st.Cgroup != "" {
+		if filepath.Base(st.Cgroup) != "attempt-"+st.Identity {
+			return errors.New("mismatched attempt cgroup custody")
+		}
+		if _, err := os.Stat(st.Cgroup); !errors.Is(err, os.ErrNotExist) {
+			if err != nil {
+				return err
+			}
+			if err := (&memoryAttempt{fs: osMemoryFS{}, path: st.Cgroup}).cleanup(clock); err != nil {
+				return err
+			}
+		}
+	}
+	for group, births := range st.Groups {
+		members, err := workerGroupMembers(group)
+		if err != nil {
+			return err
+		}
+		owned := false
+		for _, pid := range members {
+			if births[pid] == "" {
+				continue
+			}
+			birth, err := processBirth(pid)
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			owned = owned || birth == births[pid]
+		}
+		if len(members) != 0 && !owned {
+			return errors.New("attempt process group identity unconfirmed; release pending")
+		}
+		if owned {
+			if err := signalWorkerGroup(group, syscall.SIGKILL); err != nil {
+				return err
+			}
+		}
+		if err := waitWorkerGroup(group, clock); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 func attemptCheckpoint(j Job) string {
 	return filepath.Join(j.Checkpoint, fmt.Sprintf("attempt-%d", j.Attempt))

@@ -323,7 +323,7 @@ func TestNativeGroupOccupiedPort(t *testing.T) {
 	s.Run.Sidecars[0].Port = &port
 	r := nativeStart(t, s, "fake")
 	result := nativeFinish(t, r)
-	if result.Success || result.Interrupted || !strings.Contains(result.Error, "port") {
+	if result.Success || !result.Interrupted || !strings.Contains(result.Error, "port") {
 		t.Fatal(result)
 	}
 	if _, err := os.Stat(filepath.Join(r.dir, "side.json")); !os.IsNotExist(err) {

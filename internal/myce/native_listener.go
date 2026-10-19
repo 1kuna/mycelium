@@ -11,6 +11,8 @@ import (
 	"strings"
 )
 
+var errNativeForeignListener = errors.New("native readiness listener belongs to another process")
+
 // A 2xx response alone could be another job's server after the reservation is
 // released. Verify every listener belongs to this attempt's group; unknown
 // ownership fails preparation. No port registry or application nonce protocol.
@@ -38,7 +40,7 @@ func verifyNativeListener(port string, group int) error {
 		if strings.HasPrefix(line, "p") {
 			pid, e := strconv.Atoi(line[1:])
 			if e != nil || !owned[pid] {
-				return errors.New("native readiness listener belongs to another process")
+				return errNativeForeignListener
 			}
 			found = true
 		}
@@ -93,7 +95,7 @@ func verifyLinuxNativeListener(port string, owned map[int]bool) error {
 	}
 	for _, found := range inodes {
 		if !found {
-			return errors.New("native readiness listener belongs to another process")
+			return errNativeForeignListener
 		}
 	}
 	return nil

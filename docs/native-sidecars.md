@@ -38,7 +38,10 @@ A missing `port` declares a plain helper. `port: 0` allocates a free loopback
 port; positive ports must be available. Reservations remain held until that
 member's dispatch. HTTP readiness requires a port, absolute local path and
 positive timeout. The worker verifies listener ownership before accepting 2xx;
-an occupied port, foreign listener or unknown ownership fails preparation.
+a competing listener during handoff retries that member up to three times
+before readiness, allocating a fresh port for `port: 0`. Exhaustion or an
+unavailable fixed port uses the bounded infrastructure requeue. Unknown
+listener ownership fails preparation.
 Linux uses procfs; macOS requires `lsof`. Neither HTTP proxies nor redirects are
 used. Loopback does not isolate the helper from other local users/processes.
 
@@ -61,7 +64,11 @@ timeouts also fail the attempt. Infrastructure stops use the existing requeue
 classifier. During checkpoint grace, main receives TERM while helpers stay up;
 after main exit or the shared deadline, cleanup kills and verifies the whole
 process group. Preparation cancellation prevents subsequent members starting.
-Restart cleanup uses the same recorded attempt PGID and identity.
+Before any payload gate opens, the existing durable attempt record holds its
+PGID, member PID birth identities, and the aggregate cgroup when configured.
+Restart authenticates surviving members, kills the whole group and cgroup, and
+verifies release before reporting completion. Unconfirmed identity or cleanup
+retains custody.
 
 `memory_gb` is a positive member declaration bounded by the whole-job
 `needs.host_memory_gb`. It is accounted within that reservation, not charged
