@@ -17,6 +17,9 @@ func HyphaAvailability(m *Machine) string {
 	case m.Leaving:
 		return "leaving; no new work"
 	}
+	if reason := capabilityUnavailableReason(m); reason != "" {
+		return reason
+	}
 	if a := machineAvailability(m); a != nil && !a.Available {
 		return availabilityWords(a.Reason)
 	}

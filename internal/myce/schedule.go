@@ -89,6 +89,22 @@ func waitingReason(j *Job, machines map[string]*Machine, jobs map[string]*Job) s
 			return "waiting for a busy machine to make room"
 		}
 	}
+	unknownCapacity := []string{}
+	knownCapacity := false
+	for _, m := range machines {
+		if m.Gone || m.Leaving || !machineAllowed(j.Spec.AllowedMachines, m.ID) || len(j.Spec.Needs.Platform.Required) > 0 && !slices.Contains(j.Spec.Needs.Platform.Required, m.GPU) {
+			continue
+		}
+		if reason := capabilityUnavailableReason(m); reason != "" {
+			unknownCapacity = append(unknownCapacity, m.ID+": "+reason)
+		} else {
+			knownCapacity = true
+		}
+	}
+	if len(unknownCapacity) > 0 && !knownCapacity {
+		slices.Sort(unknownCapacity)
+		return "waiting for hardware capacity readings: " + strings.Join(unknownCapacity, "; ")
+	}
 	needs := []string{}
 	if j.Spec.Needs.HostMemoryGB > 0 {
 		needs = append(needs, fmt.Sprintf("waiting for RAM: %.1f GiB host memory (or telemetry unavailable)", j.Spec.Needs.HostMemoryGB))
