@@ -204,15 +204,6 @@ func (q *Queue) resolveExplicitExtension(s *Spec) ([]Extension, error) {
 	}
 	s.Needs.MemoryGB = max(e.MemoryGB, s.SizeHint.MemoryGB)
 	s.Needs.HostMemoryGB = max(e.HostMemoryGB, s.SizeHint.HostMemoryGB)
-	for _, v := range e.Variants {
-		s.Needs.CPUCores = max(s.Needs.CPUCores, v.Needs.CPUCores)
-		if v.Target.Platform == "cpu" {
-			s.Needs.HostMemoryGB = max(s.Needs.HostMemoryGB, v.Needs.MemoryGB)
-		} else {
-			s.Needs.MemoryGB = max(s.Needs.MemoryGB, v.Needs.MemoryGB)
-		}
-		s.Needs.HostMemoryGB = max(s.Needs.HostMemoryGB, v.Needs.HostMemoryGB)
-	}
 	s.Needs.Platform = Platform{Required: e.platforms()}
 	return matches, nil
 }

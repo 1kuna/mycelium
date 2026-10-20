@@ -1141,6 +1141,7 @@ func modelConfigHash(c ModelConfig) string {
 func (q *Queue) makeBatchRoom(j *Job, planned, handled map[string]bool) string {
 	type plan struct {
 		machine string
+		job     *Job
 		batch   *Job
 		slots   []*ModelSlot
 		stops   int
@@ -1151,10 +1152,12 @@ func (q *Queue) makeBatchRoom(j *Job, planned, handled map[string]bool) string {
 		if !q.placementAllowed(j, m) || q.unreported[m.ID] || planned[m.ID] {
 			continue
 		}
-		if winner := q.candidate(m, handled); winner == nil || winner.ID != j.ID {
+		winner := q.candidate(m, handled)
+		if winner == nil || winner.ID != j.ID {
 			continue
 		}
-		p := &plan{machine: m.ID}
+		j := winner // Requirements belong to this machine's qualified variant.
+		p := &plan{machine: m.ID, job: j}
 		room := m.FreeMemoryGB
 		if release, ok := q.s.BatchReleases[m.ID]; ok && release.Session == m.Session && q.clock.Now().Before(release.Until) {
 			room += release.MemoryGB
@@ -1211,7 +1214,8 @@ func (q *Queue) makeBatchRoom(j *Job, planned, handled map[string]bool) string {
 			count++
 		}
 		hostJobs, hostSlots, hostOK := q.hostReleases(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, j.Spec.Priority, j.Spec)
-		if !hostOK || !fitsWithoutHostMemory(j, m, possible) {
+		copy := cpuAfterReleases(m, hostJobs, hostSlots)
+		if !hostOK || !fitsResources(j, &copy, possible) {
 			continue
 		}
 		// Within that count prefer idle models, only when the remaining largest
@@ -1276,6 +1280,7 @@ func (q *Queue) makeBatchRoom(j *Job, planned, handled map[string]bool) string {
 	if best == nil {
 		return ""
 	}
+	j = best.job
 	q.reclaimHost(q.s.Machines[best.machine], j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, j.Spec.Priority, "job", j.Spec)
 	if best.batch != nil && q.comparePriority(best.batch.Spec, j.Spec) > 0 {
 		q.stopFor(best.batch, j.Spec.Priority, "job")

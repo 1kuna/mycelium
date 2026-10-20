@@ -904,7 +904,12 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 				j = nil
 			}
 			if j != nil {
-				if e := qualifiedExtension(j, &m); e != nil {
+				// The planner returns a target-specific copy. Persist its exact
+				// reservation on the live attempt before charging any resources.
+				selected := j
+				j = q.s.Jobs[selected.ID]
+				j.Spec.Needs = selected.Spec.Needs
+				if e := qualifiedExtension(selected, &m); e != nil {
 					j.Extension = &ExtensionSelection{Name: e.Name, Version: e.Version, Digest: e.Digest}
 				}
 				j.State = "running"

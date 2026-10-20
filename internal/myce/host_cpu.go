@@ -132,6 +132,25 @@ func cpuFits(j *Job, m *Machine) bool {
 	return m.FreeCPUCores >= j.Spec.Needs.cores()
 }
 
+// Planning may credit only the exact releases chosen by the existing planner.
+// The live ledger stays charged until acknowledgement, including release debt.
+func cpuAfterReleases(m *Machine, jobs []*Job, slots []*ModelSlot) Machine {
+	copy := *m
+	for _, j := range jobs {
+		if !j.ReleaseConfirmed {
+			copy.CPUInUseCores -= j.Spec.Needs.cores()
+		}
+	}
+	for _, s := range slots {
+		if slotReservesMemory(s) {
+			copy.CPUInUseCores--
+		}
+	}
+	copy.CPUInUseCores = max(0, copy.CPUInUseCores)
+	copy.FreeCPUCores = max(0, copy.EffectiveCPUCores-copy.CPUInUseCores)
+	return copy
+}
+
 func cpuWaitingReason(j *Job, machines map[string]*Machine) string {
 	reasons := []string{}
 	for _, m := range machines {

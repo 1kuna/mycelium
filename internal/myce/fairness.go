@@ -185,9 +185,23 @@ func (q *Queue) capReasonFor(j *Job, target *Machine) string {
 // This lets a batch's fair turn precede an idle resident model, without admitting
 // the batch until the worker has acknowledged the release.
 func (q *Queue) batchCanUse(j *Job, m *Machine) bool {
-	if j.State != "queued" || !q.placementAllowed(j, m) || !q.checkpointReady(j, m) || q.capReason(j) != "" {
-		return false
+	return q.batchCandidate(j, m) != nil
+}
+
+func (q *Queue) batchCandidate(j *Job, m *Machine) *Job {
+	if j.State != "queued" || !q.placementAllowed(j, m) || !q.checkpointReady(j, m) {
+		return nil
 	}
+	for _, candidate := range extensionJobs(j, m, true) {
+		q.applyLearnedNeeds(candidate)
+		if q.capReasonFor(candidate, m) == "" && q.batchResourcesFit(candidate, m) {
+			return candidate
+		}
+	}
+	return nil
+}
+
+func (q *Queue) batchResourcesFit(j *Job, m *Machine) bool {
 	memory := q.reclaimableGPUMemory(m, j.Spec.Priority, j.Spec)
 	if release, ok := q.s.BatchReleases[m.ID]; ok && release.Session == m.Session && q.clock.Now().Before(release.Until) {
 		memory += release.MemoryGB
@@ -197,14 +211,9 @@ func (q *Queue) batchCanUse(j *Job, m *Machine) bool {
 	if m.TotalMemoryGB > 0 {
 		memory = min(memory, m.TotalMemoryGB)
 	}
-	if !fitsWithoutHostMemory(j, m, memory) {
-		return false
-	}
-	if hostFits(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) {
-		return true
-	}
-	_, _, ok := q.hostReleases(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, j.Spec.Priority, j.Spec)
-	return ok
+	jobs, slots, ok := q.hostReleases(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, j.Spec.Priority, j.Spec)
+	copy := cpuAfterReleases(m, jobs, slots)
+	return ok && fitsResources(j, &copy, memory)
 }
 
 // candidate is the device-aware planner for batch dispatch, model admission and
@@ -215,7 +224,10 @@ func (q *Queue) candidate(m *Machine, excluded map[string]bool) *Job {
 	// project's best ordinary candidate instead of rescanning for every queued job.
 	byProject := map[string]*Job{}
 	for _, j := range q.s.Jobs {
-		if !excluded[j.ID] && q.batchCanUse(j, m) {
+		if excluded[j.ID] {
+			continue
+		}
+		if j := q.batchCandidate(j, m); j != nil {
 			old := byProject[j.Spec.Project]
 			if old == nil || q.before(j, old, m) {
 				byProject[j.Spec.Project] = j
@@ -373,7 +385,13 @@ func (q *Queue) waitReason(j *Job) string {
 func (q *Queue) fairScore(j *Job, m *Machine) float64 {
 	projects := map[string]bool{j.Spec.Project: true}
 	for _, r := range q.s.Jobs {
-		if r.State == "queued" && q.comparePriority(r.Spec, j.Spec) == 0 && fairResourceFamily(r.Spec) == fairResourceFamily(j.Spec) && q.capReason(r) == "" && (m.ID == "" || q.batchCanUse(r, m)) {
+		if m.ID != "" {
+			r = q.batchCandidate(r, m)
+			if r == nil {
+				continue
+			}
+		}
+		if r.State == "queued" && q.comparePriority(r.Spec, j.Spec) == 0 && fairResourceFamily(r.Spec) == fairResourceFamily(j.Spec) && q.capReason(r) == "" {
 			projects[r.Spec.Project] = true
 		}
 	}
@@ -461,19 +479,29 @@ func (q *Queue) validateProjectCapacity(j *Job) error {
 		if m == nil || m.TotalMemoryGB == 0 {
 			return nil
 		}
+		if _, reason := cpuCapacity(m); reason != "" {
+			return nil // Unknown telemetry can return; it is not impossibility.
+		}
 		copy := *m
 		copy.Gone = false
 		copy.Leaving = false
 		copy.MemoryError = ""
 		copy.CheckpointUnavailable = false
-		structural := j
-		if j.Spec.extensionJob() {
-			value := cloneJob(j)
-			value.Spec.Kind = ""
-			value.Spec.Program = nil
-			structural = &value
+		// Submit validation uses total admitted capacity, never current occupancy.
+		copy.CPUInUseCores = 0
+		copy.FreeCPUCores = copy.EffectiveCPUCores
+		copy.CPUCapacityReason = "" // Acknowledgement affects dispatch only.
+		possible := false
+		for _, candidate := range extensionJobs(j, &copy, false) {
+			value := *candidate
+			value.Spec.Kind, value.Spec.Program = "", nil
+			value.Spec.Extension, value.Spec.ExtensionDigest, value.Spec.ExtensionCheck = "", "", nil
+			if fitsResources(&value, &copy, copy.TotalMemoryGB) {
+				possible = true
+				break
+			}
 		}
-		if !fitsWithoutHostMemory(structural, &copy, copy.TotalMemoryGB) {
+		if !possible {
 			continue
 		}
 		if model, ok := q.model(j.Spec.Needs.Model); ok && !q.modelFitsMachine(model, m) {

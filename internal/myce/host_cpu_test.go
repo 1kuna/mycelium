@@ -315,6 +315,120 @@ func TestCPUCapacityUnknownAlsoBlocksGPUAdmission(t *testing.T) {
 	}
 }
 
+func TestCPUReclaimProductionAtCoreAllowance(t *testing.T) {
+	for _, tc := range []struct {
+		name, priority string
+		cores          int
+		stop           bool
+		otherCard      bool
+		reverse        bool
+		hold           bool
+	}{
+		{"legacy GPU production reclaims the only admitted core", "production", 1, true, false, false, false},
+		{"production hold reclaims the only admitted core", "production", 1, true, false, false, true},
+		{"production reclaims a core on another card of the host", "production", 1, true, true, false, false},
+		{"same tier waits for the only admitted core", "experiment", 1, false, false, false, false},
+		{"production cannot exceed total admitted cores", "production", 2, false, false, false, false},
+		{"policy comparator protects the higher tier", "production", 1, false, false, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q, _ := fixture(t)
+			m := cpuMachine("gpu", "physical", "cuda", 8, 16)
+			m.CPUBudgetCores = 1
+			if tc.hold {
+				if err := q.ConfigureHosts(map[string]HostPolicy{m.HostID: {ProductionHold: true}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.reverse {
+				policy := defaultPriorityPolicy()
+				policy.Tiers = []PriorityTier{{Name: "experiment", Selectors: []string{"*/experiment"}}, {Name: "other", Selectors: []string{"*/*"}}}
+				if _, err := q.SetPriorityPolicy(0, policy); err != nil {
+					t.Fatal(err)
+				}
+			}
+			submit(t, q, spec("experiment"))
+			running := check(t, q, m, nil).Job
+			if running == nil {
+				t.Fatal("experiment not assigned")
+			}
+			s := spec(tc.priority)
+			target := m
+			if tc.otherCard {
+				target.ID, target.Session = "other", "session-other"
+				check(t, q, target, nil)
+				s.AllowedMachines = []string{target.ID}
+			}
+			if tc.cores > 1 {
+				s.Needs.CPUCores = tc.cores
+			}
+			pending := submit(t, q, s)
+			reply := check(t, q, m, running)
+			if reply.Stop != tc.stop {
+				t.Fatalf("stop=%v, want %v; experiment=%s", reply.Stop, tc.stop, job(t, q, running.ID).State)
+			}
+			if reply.Job != nil || job(t, q, pending.ID).State != "queued" {
+				t.Fatal("admitted before the core was released")
+			}
+			if tc.stop {
+				if err := q.Complete(Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: running.ID, Attempt: running.Attempt}, Interrupted: true}); err != nil {
+					t.Fatal(err)
+				}
+				if next := check(t, q, target, nil).Job; next == nil || next.ID != pending.ID {
+					t.Fatal("production not assigned after release", next)
+				}
+			}
+		})
+	}
+}
+
+func TestCPUSubmitAllowedHostCapacity(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		busy, reject bool
+		cores        int
+	}{
+		{"busy allow-listed legacy GPU host queues", true, false, 0},
+		{"idle allow-listed GPU host queues", false, false, 0},
+		{"job exceeding total core allowance rejects", true, true, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q, _ := fixture(t)
+			m := cpuMachine("gpu", "physical", "cuda", 1, 16)
+			check(t, q, m, nil)
+			if err := q.ConfigureProjects(map[string]ProjectPolicy{"test": {Weight: 1, AllowedMachines: []string{m.ID}}}); err != nil {
+				t.Fatal(err)
+			}
+			var running *Job
+			if tc.busy {
+				submit(t, q, spec("experiment"))
+				running = check(t, q, m, nil).Job
+				if running == nil {
+					t.Fatal("first job not assigned")
+				}
+			}
+			s := spec("experiment")
+			s.Needs.CPUCores = tc.cores
+			pending, err := q.Submit(s)
+			if (err != nil) != tc.reject {
+				t.Fatalf("submit error=%v, reject=%v", err, tc.reject)
+			}
+			if tc.reject {
+				return
+			}
+			if pending.State != "queued" {
+				t.Fatal("submission did not queue", pending.State)
+			}
+			if running != nil {
+				finish(t, q, running, true)
+			}
+			if next := check(t, q, m, nil).Job; next == nil || next.ID != pending.ID {
+				t.Fatal("queued job not assigned when capacity is free", next)
+			}
+		})
+	}
+}
+
 func TestCPUPlacementDoesNotReserveGPUMemory(t *testing.T) {
 	q, _ := fixture(t)
 	m := cpuMachine("gpu", "host", "cuda", 8, 16)

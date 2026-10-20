@@ -536,10 +536,9 @@ single main member through this adapter too. Literal substitutions cover
 argv and environment values are never shell-interpolated. Existing staged
 input files remain available beneath `{work}`. No workflow graph, application
 configuration patch language or second extension executor is introduced.
-Current admission conservatively uses the maximum declared memory floors
-across candidate variants plus caller size hints; target-specific resource
-admission is left to the resource slices. This may withhold a smaller host,
-but never lowers a reservation below the selected recipe's floor.
+Admission evaluates each qualified variant's own CPU/GPU/RAM floors plus
+caller size hints and learned needs for that backend. A host is eligible when
+one matching variant fits; dispatch reserves that selected variant's resources.
 
 Native job groups use `execution.sidecars` or `run.sidecars`: name, command,
 optional environment/env, positive finite member host-RAM declaration, optional
