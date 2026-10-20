@@ -17,7 +17,7 @@ func (q *Queue) resolveSidecarEnvironments(s Spec) (map[string]map[string]Enviro
 			}
 			// Unlike legacy advertised environments, helpers need a cache root to bind.
 			if len(recipes) == 0 {
-				return nil, fmt.Errorf("sidecar %s requires a registered environment recipe", side.Name)
+				return nil, rejectFieldRule("job_environment_invalid", fmt.Errorf("sidecar %s requires a registered environment recipe", side.Name))
 			}
 			out[side.Name] = recipes
 		}

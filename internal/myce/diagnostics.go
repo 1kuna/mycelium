@@ -76,13 +76,23 @@ func (e *rejectionError) Error() string {
 func (e *rejectionError) Unwrap() error     { return e.cause }
 func reject(code string, cause error) error { return &rejectionError{code: code, cause: cause} }
 
+// fieldRuleError is an explicit allowlist marker for Mycelium's field rules.
+// Only pure validation/resolution rules may be marked, never OS or I/O errors.
+// Keep the original error chain local; publish only the marked rule's message.
+type fieldRuleError struct{ error }
+
+func (e *fieldRuleError) Unwrap() error { return e.error }
+func rejectFieldRule(code string, err error) error {
+	return reject(code, &fieldRuleError{err})
+}
+
 // Keep the field-specific validation code; the fallback is only for uncoded rules.
 func specRejection(err error) error {
 	var rule *rejectionError
 	if errors.As(err, &rule) {
-		return err
+		return rejectFieldRule(rule.code, err)
 	}
-	return reject("job_spec_invalid", err)
+	return rejectFieldRule("job_spec_invalid", err)
 }
 
 // RuntimeCause retains safe operation/class information, never daemon stderr,

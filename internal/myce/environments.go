@@ -183,7 +183,7 @@ func (q *Queue) resolveEnvironment(e Environment) (map[string]EnvironmentRecipe,
 			if len(q.environments.Environments) == 0 {
 				return nil, nil
 			}
-			return nil, fmt.Errorf("unknown environment %q", e.Name)
+			return nil, rejectFieldRule("job_environment_invalid", fmt.Errorf("unknown environment %q", e.Name))
 		}
 		return p, nil
 	}

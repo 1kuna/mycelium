@@ -344,11 +344,16 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		if err == nil {
 			return
 		}
-		// Submission validation reasons describe field rules, never the spec or
-		// execution env values. Unclassified storage/IO failures stay generic.
+		// Only explicitly marked field rules may publish their reason. A coded
+		// rejection alone does not make a wrapped filesystem cause public.
 		var rule *rejectionError
 		if errors.As(err, &rule) {
-			err = &HTTPError{Status: 400, Code: rule.code, Message: rule.Error()}
+			message := rejectionMessages[rule.code]
+			var field *fieldRuleError
+			if errors.As(err, &field) {
+				message = field.Error()
+			}
+			err = &HTTPError{Status: 400, Code: rule.code, Message: message}
 		}
 		code, reason := "request_failed", rejectionMessages["request_failed"]
 		var apiError *HTTPError
@@ -412,7 +417,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		submitted := s
 		extensions, e := q.resolveExtensions(&s)
 		if e != nil {
-			return reject("job_program_invalid", e)
+			return rejectFieldRule("job_program_invalid", e)
 		}
 		// Validate the original execution/needs, with the resolved class default.
 		// Resolution must not hide forbidden overrides or bypass deadline rules.
@@ -421,7 +426,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 			return specRejection(err)
 		}
 		if e := q.validateProjectPlacement(s.Project, s.AllowedMachines); e != nil {
-			return reject("job_placement_invalid", e)
+			return rejectFieldRule("job_placement_invalid", e)
 		}
 		if err := normalizeJobClass(&s); err != nil {
 			return specRejection(err)
@@ -453,7 +458,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		j := &Job{PriorityPolicy: q.priorityMatch(s), FileTransport: q.fileCheckpoints, Extensions: extensions, SidecarEnvironmentRecipes: sidecarRecipes, EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: filepath.Join(q.root, id)}
 		q.applyLearnedNeeds(j)
 		if e := q.validateProjectCapacity(j); e != nil {
-			return reject("job_capacity_invalid", e)
+			return rejectFieldRule("job_capacity_invalid", e)
 		}
 		copy := cloneJob(j)
 		j = &copy
