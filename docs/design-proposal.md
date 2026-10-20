@@ -283,7 +283,7 @@ Reservations, tombstones and markers follow the retention table. Accept a key re
 
 ## Upgrade and migration (#80)
 
-v3 is the only runtime; no pre-v3 worker-report, capability/profile, empty-attempt or broad host-cleared fallback. Old or missing worker/report protocol headers, including checkpoint reports and worker events, receive HTTP 426. Within host-launch-v3, current one-attempt workers remain compatible with the R2 keyed wire extension below; upgrade the queue before keyed workers. Exact execution ownership and release evidence remain mandatory across restart/loss; a keyed report never silently clears omitted obligations.
+v3 is the only runtime; no pre-v3 worker-report, capability/profile, empty-attempt or broad host-cleared fallback. Old or missing worker/report protocol headers, including checkpoint reports and worker events, receive HTTP 426. Within host-launch-v3, current one-attempt workers remain compatible with the M1 keyed wire extension below; upgrade the queue before keyed workers. Exact execution ownership and release evidence remain mandatory across restart/loss; a keyed report never silently clears omitted obligations.
 
 **Old formats are refused; operators archive and install fresh.** Old queue state is not imported. Stop the old services and prevent their restart, archive their queue/worker data directories and shared host-control directory, preserve configuration and secret references, then install matching current binaries and units. All current queue, worker and cache state roots carry `.myce-format` with `v3` and a newline. One startup gate checks every root before any filesystem write: absent or empty roots receive a fsynced marker first; non-empty roots without that exact marker return `legacy_state_present` naming the root. No content-specific legacy detection or migration of pre-marker development state is supported. There is no in-place or offline converter and no dual runtime decoder. Preserve archives, checkpoints and unique evidence; this rule does not authorize deleting them or changing production outside the queue.
 
@@ -317,7 +317,7 @@ Supported v3 features include plain batch commands, queue-managed model calls an
 
 Explicit NAS roots remain supported for models, shared files and checkpoints. The queue file store also supports jobs without a NAS. Ordinary commands and servers do not need to become extensions. These are supported v3 paths, not a second runtime or a reason to restore older worker/report protocols.
 
-CPU-only scheduling is implemented by R1 (#98); the M amendment below replaces R2/R3 with one machine worker and concurrent single-device attempts; multi-machine/gang work and vision expansion remain deferred under #17, #22 and #69. Automatic dependency detection for arbitrary projects, automatic memory estimation and a backup queue service also wait. Jobs must name their software recipe or lock file and declare their needs.
+CPU-only scheduling is implemented by R1 (#98); the M amendment below defines one machine worker and concurrent single-device attempts; multi-machine/gang work and vision expansion remain deferred under #17, #22 and #69. Automatic dependency detection for arbitrary projects, automatic memory estimation and a backup queue service also wait. Jobs must name their software recipe or lock file and declare their needs.
 
 ## Product decisions
 
@@ -596,10 +596,10 @@ expansion and native Windows execution remain separate slices.
 ## One machine, one worker (M0–M4, #100; decision 2026-10-20)
 
 The **physical machine is the hypha**. One worker process owns its GPU device
-vector, logical CPU cores, host RAM and, later, other components. maintainer rejected
-one Mycelium instance per GPU. This amendment replaces R2/R3's delivery plan;
-R1, P3 and D5 are its implementation base. M0 is the approved target, not a claim
-that M2–M4 or native qualification have shipped. Until migration, existing
+inventory, logical CPU cores, host RAM and, later, other components. maintainer rejected
+one Mycelium instance per GPU. This amendment defines package M; R1, P3 and
+D5 are its implementation base. M0 is the approved target, not a claim that
+M2–M4 or native qualification have shipped. Until migration, existing
 per-GPU installations use the compatibility rules below. This section governs
 that transition where older guides describe per-GPU workers.
 
@@ -612,10 +612,16 @@ fences. Each device inventory entry has a host-local string ID (`"0"`, `"1"`),
 platform, hardware/driver fingerprint, runtime selector, memory mode, total,
 reserve, effective budget and measured/free-memory evidence. IDs are persisted
 against hardware identity, not silently reassigned when discovery order changes.
-An ambiguous mapping or changed device withholds that component until explicitly
-reconciled and qualified; its old obligations remain. Mixed-platform inventory
-is valid. CPU-only hosts have an empty GPU vector, not a fake GPU. IDs are
-canonical nonnegative decimal strings (no leading zero except `"0"`), unique
+For XPU, that identity is the PCI BDF or Level Zero UUID. The worker forces
+`ZE_ENABLE_PCI_ID_DEVICE_ORDER=1` before its own discovery and in every launched
+member, including engines, helpers and containers. Re-verify the runtime
+ordinal-to-identity mapping at every worker start and before each member start;
+a mismatch or ambiguity withholds that device with typed reason
+`device_identity_mismatch` until explicitly reconciled and qualified. Its old
+obligations remain. CUDA already binds by UUID through `DeviceBinding`; preserve
+that binding rather than launching against an unverified discovery ordinal.
+Mixed-platform inventory is valid. CPU-only hosts have an empty GPU inventory,
+not a fake GPU. IDs are canonical nonnegative decimal strings (no leading zero except `"0"`), unique
 across the host's accelerator families; runtime ordinals may differ from IDs.
 
 Reuse detection, capability profiles and device probes to enumerate every
@@ -628,10 +634,10 @@ Shared CPU/RAM facts and participation policy are sampled once per machine.
 
 R1's queue-owned host ledger remains authoritative. Every allocation contains
 host cores, host RAM and zero or one selected GPU with its VRAM charge in M.
-Assignment reserves the whole vector atomically in SQLite before delivery;
+Assignment reserves these resources atomically in SQLite before delivery;
 preparation, Started work, stopping work, model residency and unconfirmed
 releases retain their charges. A current attempt and its pending release are
-charged once. Local worker checks mirror this vector before launch, but create
+charged once. Local worker checks mirror these charges before launch, but create
 no second scheduler or independent allowance. Lowered allowances expose debt
 and block new allocation rather than resize running ceilings.
 
@@ -654,13 +660,25 @@ must not block the neighbor's heartbeat, cancellation or control. Bulk I/O stays
 outside the queue lock. Spool reopen recovers every attempt and buffered result
 before a fresh session admits work; omission never proves release.
 One heartbeat covers machine liveness; use the shortest existing loss timeout
-among its active work. Machine loss applies to every owned attempt separately,
-retaining each one's cause, retry counter and unknown release charge. Failure
-or completion of one attempt alone never marks the machine or neighbors lost.
+among active work: production **5 s**, deadline **20 s**, experiment **60 s**
+(the defaults in `queue.go`, including `machineLossTimeout`). Thus an experiment
+sharing a machine with production inherits the 5 s machine timeout. One worker
+stall past that threshold costs **every active production attempt one
+infrastructure retry**; per-device processes would have separated that failure
+domain. Accept this shared fate to retain fast production loss detection and
+one machine controller, rather than silently lengthen production recovery.
+Bound its impact with independent nonblocking heartbeat/control paths, bulk I/O
+outside them, and the existing maximum of two infrastructure requeues per
+production job. Unknown custody stays charged until exact release; a timeout
+never permits overlapping replacements. M3 fake-clock tests cover mixed-tier
+loss, all affected counters and the terminal retry bound. Machine loss applies
+to every owned attempt separately, retaining each one's cause, retry counter
+and unknown release charge. Failure or completion of one attempt alone never
+marks the machine or neighbors lost.
 
 M admits at most **one batch attempt per GPU device**. CPU-only attempts may run
 alongside it and one another when the shared cores/RAM and existing owner or
-`max_jobs` caps fit; absent a cap, the resource vector bounds concurrency.
+`max_jobs` caps fit; absent a cap, resource allowances bound concurrency.
 Existing model engines may share a device's remaining memory under their usual
 admission/priority rules; a batch slot does not invent exclusive ownership of
 all VRAM. This preserves model behavior while making independent batch jobs on
@@ -668,13 +686,23 @@ different GPUs the default. An attempt never migrates devices in place.
 
 Reuse `WithModelDevice` and the existing command/group adapter. Construct a
 private environment per attempt without changing the worker's process-wide
-environment. CUDA receives the chosen `CUDA_VISIBLE_DEVICES`; XPU receives its
-physical `ZE_AFFINITY_MASK` and renumbered `ONEAPI_DEVICE_SELECTOR` (one assigned
-card is in-job device 0). Metal retains device 0. Remove other-backend selectors;
-CPU execution retains R1's CPU masks. Main, native sidecars, helpers and managed
-Docker members see the same selected device. Caller/extension env cannot widen
-it, and no payload inherits `MYCE_TOKEN`. These are cooperative device controls,
-not a security sandbox against arbitrary hostile code.
+environment. CUDA receives the chosen UUID in `CUDA_VISIBLE_DEVICES`; XPU
+receives its verified physical `ZE_AFFINITY_MASK` and renumbered
+`ONEAPI_DEVICE_SELECTOR` (one assigned card is in-job device 0). Metal retains
+device 0. Explicitly hide unselected accelerator families, rather than deleting
+their selectors and exposing the runtime defaults. For **CPU attempts**, set
+`CUDA_VISIBLE_DEVICES` to the empty string and set both `ZE_AFFINITY_MASK` and
+`ONEAPI_DEVICE_SELECTOR` to explicit select-none masks for the installed XPU
+runtimes. Unset or empty XPU selectors are not evidence of no visible devices.
+Qualify those select-none semantics with actual runtime enumeration; inability
+to hide a family withholds CPU execution with typed reason
+`cpu_accelerator_isolation_unavailable`. This is an M2 correctness fix: today's
+`worker.go` / `WithModelDevice` CPU path only hides CUDA; R1 supplies no XPU
+select-none masks. Main, native sidecars, helpers and managed Docker members
+see the same selected device, or no accelerator for CPU work, and all inherit
+the forced PCI ordering above. Caller/extension env cannot widen it, and no
+payload inherits `MYCE_TOKEN`. These are cooperative device controls, not a
+security sandbox against arbitrary hostile code.
 
 Reuse D5's delegated service subtree: a worker control leaf, a distinct parent
 for each attempt, and that parent's control/main/sidecar leaves. Install and
@@ -689,48 +717,57 @@ still refuses unsupported hosts.
 
 ### Wire protocol and placement
 
-M1 lands first and retains its exact contract: `host-launch-v3`, opt-in
-`attempt_protocol: keyed-attempt-v1`, keyed `attempts` reports/directives and
-session-fenced events, but at most one attempt. Unchanged current v3 workers
-use the legacy single-attempt form. Results, release-only acknowledgements,
-logs, checkpoint publication and Started keep their existing identity fields.
-M1's exact native release acknowledgement advances requeue without an idle
-heartbeat inference. It does not enable concurrent execution.
+This is the single M1/M2/M3 protocol and placement contract; fold M1's final
+text into this section rather than maintain a second schema set. M1 lands first
+with `host-launch-v3` and **one** opt-in keyed revision,
+`attempt_protocol: keyed-attempt-v1`. Its `attempts` field is a collection of
+unique exact attempt keys in reports/directives from the outset. The
+one-attempt limit is a **queue admission rule**, not the collection's wire
+shape. M1 workers reject multi-attempt replies before execution. Results,
+release-only acknowledgements, logs, checkpoint publication and Started retain
+their exact identity fields and session fences. An exact native release
+acknowledgement advances requeue without an idle heartbeat inference.
 
-M2 extends the same entries/endpoints as `attempt_protocol: keyed-attempt-v2`:
-multiple unique attempt keys plus `machine.devices` inventory; the queue must
-echo v2 before the worker accepts assignments. CPU-only v2 inventory is empty.
-V2 uses device entries as the GPU capacity authority; old scalar GPU/device
-fields are compatibility diagnostics, never a second allocation pool. Host
-CPU/RAM remains on the machine report. Each directive's nested job records its
-selected device; controls retain M1's exact attempt key, not a device-wide stop.
-Duplicate keys, mixed legacy/keyed forms, unknown revisions or invalid sessions
-receive HTTP 426 `worker_protocol_invalid` before mutation. A v1 queue refuses
-v2; the worker preserves custody and asks for a queue upgrade, with no automatic
-downgrade. Explicit revision negotiation prevents a single-attempt peer from
-silently dropping neighbor controls. The v1 decoder and its one-attempt bound
-remain unchanged. M2 accepts v2 inventory but withholds its queue assignments
-with diagnostic `machine_placement_pending` until M3 lands; legacy/v1 workers
-retain normal one-attempt admission. M2's assignment/protocol harness exercises
-concurrent local execution; M3 enables it through the real planner and API.
+M2 adds `machine.devices` as an additive field to that same keyed revision,
+replaces local singular execution state with keyed collections, and enables
+concurrent execution in its assignment/protocol harness. CPU-only inventory is
+empty. Device entries are the GPU capacity authority when present; old scalar
+GPU/device fields then serve only compatibility diagnostics, never a second
+allocation pool. Host CPU/RAM remains on the machine report. Each directive's
+nested job records its selected device; controls retain M1's exact attempt key,
+not a device-wide stop. The queue keeps M1's one-attempt admission rule through
+M2; M3 enables multiple assignments using the existing collection.
 
-The queue places on machines and selects components using **one planner**.
-Reuse P1/P2 order and fairness, P3 preemption and R1's host-release feasibility
-check. Extend its scalar GPU dimension to device entries and the per-device
-batch slot. Prefer compatible free placement before issuing stops. Evaluate
-candidates with the same policy/affinity/deadline/wait ordering, then machine ID
-and device ID for deterministic ties. Affinity/qualification is evaluated for
-the selected device, never another card on the host. CPU work has no device.
+No new revision negotiation is needed. The queue's strict request decoder
+(`DisallowUnknownFields` in `http.go`) rejects fields it does not understand,
+and M1's worker rejects multi-attempt replies. These existing guards fail
+clearly rather than silently drop inventory or neighbor controls. An
+incompatible peer must preserve custody and request the compatible upgrade;
+it must not downgrade automatically. Duplicate keys, mixed legacy/keyed forms,
+unknown revisions and invalid sessions fail before mutation under M1's guards.
+The current unkeyed worker form remains a bounded migration adapter below.
 
-Extend R1's accepted single-sufficient-victim check, greedy selection and reverse
-prune; do not revive the rejected exact subset search. The heuristic is not
-always optimal. GPU/slot release contributes only on the selected device;
-CPU/RAM victims may be elsewhere on that machine. Exclude already-refunded or
-zero-contribution victims, include build core hand-back, and precompute host
-ledger facts once per planner call. Each candidate plan must fit the complete
-vector before any stop is committed. Pending stops are not free capacity;
-replacement waits for exact acknowledgements. Status, simulation, batch jobs,
-models and servers use this same placement path.
+M3 targets **(machine, device)** for GPU work and (machine, no device) for CPU
+work, with device count at most one. Reuse the existing per-target planner,
+P1/P2 order and fairness, P3 preemption and R1's host-release feasibility check;
+**vector fitting is deferred to count > 1** in
+[#105](https://github.com/1kuna/mycelium/issues/105). Holds, maintenance and the
+CPU/RAM ledger already use `hostID` and apply unchanged. Enumerate eligible
+single-device targets, keeping the per-device batch slot; prefer compatible
+free placement before stops. Use the existing policy/affinity/deadline/wait
+ordering, then machine ID and device ID for deterministic ties. Evaluate
+affinity/qualification against the selected device, never a neighboring card.
+
+Keep R1's accepted single-sufficient-victim check, greedy selection and reverse
+prune unchanged; do not revive the rejected exact subset search. The heuristic
+is not always optimal. GPU/slot release contributes only on the selected
+device; CPU/RAM victims may be elsewhere on that machine, using the existing
+host-keyed ledger. Exclude already-refunded or zero-contribution victims,
+include build core hand-back, and precompute host ledger facts once per planner
+call. Each candidate must satisfy its one device's capacity and the shared
+host allowance before any stop is committed. Pending stops are not free
+capacity; replacement waits for exact acknowledgements. Status, simulation,
+batch jobs, models and servers use this same placement path.
 Fair usage remains allocated device-seconds or CPU core-seconds in the existing
 resource families. Grouping devices under one machine never resets history or
 turns several allocations into one for fairness or project concurrency caps.
@@ -762,21 +799,25 @@ a GPU selector on CPU-only work return HTTP 400 `gpu_selector_invalid`.
 
 **Count greater than one is rejected in M**, at admission with HTTP 400
 `gpu_count_unsupported`, including extension-resolved requests and model/server
-configuration selecting multiple cards. There is no
-partial reservation or silent reduction. Existing jobs with no `needs.gpu`
-retain one-device behavior. Deferring gang allocation avoids coupling this
-migration to collective launch, topology and multi-device memory semantics;
-a later spec must define those before enabling it. Cross-machine execution
-remains outside M. CPU/RAM quantity selection already uses R1's needs fields;
-NUMA/core pinning and other component selectors wait for their own requirements.
+configuration selecting multiple cards. Existing worker or model masks such
+as `0,1`, including `WithModelDevice` inputs, fail with typed
+`gpu_count_unsupported` at install/config load, before any process starts;
+M4 must not silently split or truncate them. There is no partial reservation
+or silent reduction. Existing jobs with no `needs.gpu` retain one-device
+behavior. One-host multi-GPU requests and vector fitting are deferred to
+[#105](https://github.com/1kuna/mycelium/issues/105), which must define collective
+launch, topology and multi-device memory semantics before enabling them.
+Cross-machine execution remains outside M. CPU/RAM quantity selection already
+uses R1's needs fields; NUMA/core pinning and other component selectors wait for their own requirements.
 
 ### Reliability, holds and compatibility
 
 Keep the job-v1 endpoints, states, project/submission-key replay, cancellation
 and optional field omission rules. Store the original client spec/fingerprint
-unchanged; resolve aliases/selectors separately, so a replay across migration
-returns the same logical job. `machine` is the actual executing machine string
-(`b70` after migration); never synthesize a per-GPU worker identity in a new
+unchanged; validate new placement separately. `existingSubmission` returns
+before new-submission validation, so an existing key replay across migration
+returns the same logical job even when its original spec names retired workers.
+`machine` is the actual executing machine string (`b70` after migration); never synthesize a per-GPU worker identity in a new
 assignment. Add diagnostic `allocated_devices: ["0"]` to the assignment/job and
 record that selection durably on every copy/release. It is empty for CPU work.
 A client must not derive device identity from the machine string. Regenerate
@@ -805,36 +846,36 @@ not all work ever associated with a machine.
 
 Compatibility choices are deliberately confined to existing interfaces:
 
-- **Old device names are explicit aliases.** Preserve `allowed_machines:
-  ["b70-gpu0"]` as machine `b70` plus device `"0"`. Persist the mapping from
-  known legacy worker inventory/config during migration, not by parsing every
-  `-gpuN` suffix. New installations may declare an `aliases` list on each
-  device config entry; the queue persists the authenticated mapping and refuses
-  rebinding while referenced by retained intent or custody.
-  Existing raw strings and submission fingerprints stay intact. Resolve project,
-  job, pin and server restrictions into allowed machine/device pairs, union
-  alternatives within each list and intersect the lists. A machine name allows
-  its components; an alias allows only its device. Conflicting constraints
-  never fall back to another card. Unknown names remain visibly unresolved as
-  today. Alias conflicts return HTTP 409 `machine_alias_conflict`; historical
-  names cannot also name a new physical machine. Retain mappings while retained
-  policy/job/key records reference them. This small lookup avoids a second
-  worker identity and an unnecessary client flag day.
-- **Old per-GPU workers can talk to a new queue.** Current unkeyed v3 and M1 v1
-  workers keep one batch attempt each, restricted to their reported device and
-  R1's common host ledger. They cannot claim a vector or receive concurrent
-  assignments. Legacy sibling views may coexist during the queue-first upgrade;
-  a v2 machine worker and a legacy worker for the same physical host may not.
-  M4 first reconciles and retires every legacy session under maintenance. An
-  unretired conflict receives HTTP 409 `machine_worker_conflict`, with no new
-  admission or implied release. Pre-v3 workers remain refused.
+- **Retired device names fail clearly.** M4 rewrites queue-side project policy,
+  pins, server restrictions and host policies to actual machine IDs plus any
+  device restriction; there is no alias table or `aliases` config. Retired
+  legacy machine records remain solely for exact late-result rejection and
+  release, and name their replacement machine/device for diagnostics. A new
+  submission or policy/pin/server update referencing `b70-gpu0` after retirement
+  returns HTTP 400 `machine_renamed`, naming the replacement:
+  `allowed_machines: [b70]` plus `needs.gpu.devices: ["0"]` for a job (or that
+  interface's device selector). Config load reports the same typed reason.
+  Do not parse arbitrary `-gpuN` suffixes or resolve retired names as aliases.
+  Existing raw specs, history and submission fingerprints stay intact; keyed
+  replay takes the early return described above. M4 requires Verso #298 merged
+  and **no queued jobs referencing retired names** before conversion.
+- **Old per-GPU workers can talk to a new queue.** Current unkeyed v3 workers
+  keep one batch attempt each, restricted to their reported device and R1's
+  common host ledger. M1 keyed workers also retain one-attempt admission until
+  M3. Legacy sibling views may coexist during a queue-first upgrade; a machine
+  worker and a legacy worker for the same physical host may not. M4 first
+  reconciles and retires every legacy session under maintenance. An unretired
+  conflict receives HTTP 409 `machine_worker_conflict`, with no new admission
+  or implied release. Pre-v3 workers remain refused. Delete the legacy unkeyed
+  worker form once **every fleet host runs machine workers and the rollback
+  window has closed**; historical exact-attempt custody remains available.
 - **Status has one machine row with a device vector**, host CPU/RAM/debt,
   per-device capacity/health/qualification, active keyed attempts, engine slots
   and outstanding releases. Legacy rows are marked transitional/historical,
   never counted again as capacity after retirement. Lost device evidence cannot
   erase an old charge. `eligible_hosts` remains physical host scope; unresolved
-  legacy names remain in `eligible_unknown_machines` until mapped. Do not sum
-  CPU/RAM once per device or sum unified memory into separate physical pools.
+  names remain in `eligible_unknown_machines` as today; known retired names
+  fail new intent with `machine_renamed`. Do not sum CPU/RAM once per device or sum unified memory into separate physical pools.
 - **Qualification and servers stay device-specific.** Reuse extension digest,
   exact target and hardware/driver/baseline fingerprint, now keyed by machine
   and device. A pass on device 0 does not qualify device 1. Reuse an existing
@@ -844,8 +885,9 @@ Compatibility choices are deliberately confined to existing interfaces:
   and release are keyed by machine/device/model/execution. Existing model
   `device` restrictions narrow the component choice and must agree with it.
   A machine pin selects one eligible device and retains it while healthy;
-  a legacy alias pin selects that card. Route to an exact ready slot. Retain
-  shared model memory behavior, owner tiers, local-source approvals, secret
+  a pin's optional device restriction selects the requested card. M4 rewrites
+  legacy pins before retiring their machine names. Route to an exact ready slot.
+  Retain shared model memory behavior, owner tiers, local-source approvals, secret
   handling, streaming interruption and no replay after output starts. Separate
   device engines may share verified weights on disk, not process custody.
 
@@ -869,34 +911,69 @@ from a unit-name glob. Unselected known workers block with
 option can resolve a setting; the installer never silently chooses the first
 value, adds host budgets, drops a secret reference or overwrites unknown state.
 
-1. Agree a maintenance window with production's operator; disable the physical
-   host with stop and wait for **every** batch/member, preparation, engine,
-   buffered result and release to reconcile. A missing/stale old worker is a
-   failed gate, not disposable state. Preserve queue/key/counter state and
-   checkpoint generations. Record the source IDs, sessions and device mapping.
-2. Snapshot binary/config/secret references, environment files, spools and
-   actual unit registration/activity using the installer's rollback mechanism.
-   Preserve NAS/checkpoint/model roots, cache paths/limits, Docker opt-in and
-   endpoint, availability/reserve settings, cgroup limits and every XPU hotfix
-   setting. Conflicting NAS roots require an explicit canonical root resolving
-   the same relative checkpoint names; verify access before changing anything.
-   Existing cache roots may be retained in place as per-device overrides of the
-   machine default. Do not relocate absolute-path environments or delete caches;
-   shared roots/limits are counted once, and existing locks/publication remain.
-3. Stop and disable the exact source units and verify their process/daemon
-   cleanup. Archive their configs/spools recoverably; do not merge spool files,
-   invent a previous-session chain or rename queued attempt ownership. Commit
-   explicit alias mappings and retirement of those fully settled sessions in
-   the maintained queue. Retired sessions may acknowledge old custody but never
-   regain admission. Preserve historical job/attempt identities verbatim.
-4. Install/enable the one machine unit with a fresh spool, inspect effective
-   manager settings and confirm one process reports the complete mapped
-   inventory, CPU/RAM policy and fixed budgets. Keep queue maintenance active
-   through conversion, reboot and redeploy; test execution uses the explicit
-   qualification phases below. Re-running a completed plan is
-   idempotent; interrupted steps resume from the saved transaction or restore
-   it, never enable both generations. Unknown restoration keeps admission off.
-5. Return to ordinary workloads only after the qualification checklist below
+The queue itself runs on **b70**, so the window covers its upgrade and restart
+recovery as well as both fleet workers. **Upgrade spark to a machine worker in
+the same window**, retaining machine name `spark` and its single CUDA device
+bound by UUID. This avoids a permanent legacy fleet dependency, exercises the
+new queue's real reconnect path and gives the unkeyed adapter a deletion path.
+Spark may reconnect in its legacy form only during the queue-first interval;
+final acceptance requires its upgraded machine worker. Include Spark work and
+consumers in the agreed drain. No rolling service restart is implicitly safe.
+
+1. Require Verso #298 merged and a production-operator-agreed window. Pause
+   ordinary submissions, disable **b70 and spark** with stop and wait for every
+   batch/member, preparation, engine, buffered result and release to reconcile.
+   Require no queued jobs whose job or resolved placement references a retiring
+   name; let clients cancel/resubmit before the window, never rewrite keyed
+   specs in place. A missing/stale worker or residual obligation fails the gate.
+   Preserve queue/key/counter state and checkpoint generations. Record source
+   IDs, sessions and device identities.
+2. Snapshot the queue binary, SQLite state and queue-side config, both workers'
+   binaries/config/secret references, environment files, spools and actual unit
+   registration/activity through the existing rollback mechanism. Preserve NAS/
+   checkpoint/model roots, cache paths/limits, Docker opt-in and endpoint,
+   availability/reserve settings, cgroup limits and every XPU hotfix setting.
+   Conflicting NAS roots require an explicit canonical root resolving the same
+   relative checkpoint names; verify access before changing anything. Select
+   **one machine cache root: the existing gpu0 root** and its reviewed limit.
+   Leave the other roots untouched for separately authorized later cleanup;
+   do not add per-device cache-root overrides or relocate absolute-path
+   environments. Existing shared-root locks/publication remain intact.
+3. Convert the **queue-side configuration** explicitly: project policy
+   `allowed_machines: [b70-gpu0, b70-gpu1, spark]` becomes `[b70, spark]`;
+   preserve card-specific intent using the appropriate device restriction.
+   Rewrite pins and server `allowed_machines`/`device` restrictions and reconcile
+   host policies onto the physical host IDs without summing duplicate CPU/RAM
+   budgets. Preview each before/after setting, preserving intersections; any
+   fence that cannot be represented equivalently blocks with
+   `machine_migration_conflict`, never broadens placement. Already host-keyed
+   policies remain unchanged. Reject existing multi-card masks as above.
+4. Stop the b70 queue under the recorded maintenance state, upgrade it first,
+   and restart against the preserved database with the converted config.
+   Verify queue restart recovery: jobs, keys, counters, maintenance, pins,
+   checkpoints and all exact custody are preserved; no idle/loss inference
+   releases resources or starts work. Verify Spark reconnects to this queue,
+   reconciling its old session before its worker conversion. Failed queue
+   recovery or reconnect is a failed window gate, not permission to clear state.
+5. Stop/disable the exact source worker units and verify process/daemon cleanup
+   on both machines. For b70, **remove `myce-worker@gpu0` and
+   `myce-worker@gpu1` from the host/installer's persistent enable set**, as well
+   as disabling their systemd registrations; merely stopping/disabling them
+   leaves redeploy able to recreate them. Archive source configs/spools
+   recoverably; never merge spool files, invent a previous-session chain or
+   rename attempt ownership. Retire fully settled legacy sessions in the
+   maintained queue, retaining their exact historical records and replacement
+   diagnostics. They may acknowledge old custody but never regain admission.
+6. Install/enable one machine unit on each host with a fresh spool. Inspect
+   effective manager settings; verify b70's full stable two-XPU inventory and
+   fixed budgets, Spark's UUID-bound CUDA inventory, and one CPU/RAM allowance
+   per host. Confirm Spark's new session reconnects and reconciles without
+   duplicate capacity, lost history or counter resets. Keep maintenance active
+   through conversion, reboot and redeploy; execution uses the qualification
+   phases below. Re-running a completed plan is idempotent; interrupted steps
+   resume the saved transaction or restore it, never enable both generations.
+   Unknown restoration keeps admission off.
+7. Return to ordinary workloads only after the qualification checklist below
    and explicit window acceptance. Implementation or installer success alone
    is not qualification.
 
@@ -909,15 +986,17 @@ previously accepted checkpoint/root leaves work waiting; it never silently
 restarts saved resumable work from an empty directory. First attempts with no
 saved progress and deliberately nonresumable jobs start normally.
 Old per-GPU attempt identity remains available for late result rejection and
-exact release even after aliases exist.
+exact release after retirement; retirement never rewrites accepted intent.
 
-Rollback is host maintenance followed by exact cleanup of **all** new attempts,
-then restoration of the snapshotted source worker files/units and their verified
-prior activity. Keep the new queue: it supports the legacy worker form. Under
-maintenance, deactivate the machine session and reactivate only the recorded
-legacy identities, preserving alias maps, all jobs/keys/counters and checkpoint
-progress. Never run old and new workers together. A full queue downgrade may
-use its pre-window database snapshot only if no subsequently accepted intent
+Rollback is maintenance on both hosts followed by exact cleanup of **all**
+new attempts, then restoration of the snapshotted queue-side config and source
+worker files/units, persistent enable sets and verified prior activity,
+including Spark's prior worker. Keep the upgraded queue: it supports the legacy
+worker form. Under maintenance, deactivate the machine sessions and reactivate
+only recorded source identities, preserving their historical records, all jobs/
+keys/counters and checkpoint progress. Test Spark's reconnect after restoration.
+Never run old and new workers together. A full queue downgrade may use its
+pre-window database snapshot only if no subsequently accepted intent
 would be lost; otherwise refuse downgrade and retain the compatible queue for
 repair. Never open M-mutated state with an older binary or overwrite newer
 checkpoints with a snapshot. A rollback that cannot prove cleanup/restoration
@@ -927,63 +1006,94 @@ is incomplete, leaves admission disabled and preserves recovery artifacts.
 
 Record binary/config digests, exact attempt IDs, masks, measured capacities and
 results; keep private operational details in approved private evidence. Stop at
-the first failed gate, restore the worker installation as above and verify it
-before ending the window. Conversion/inspection occurs disabled. During the
+the first failed gate, restore the queue config and worker installations as
+above and verify them before ending the window. Conversion/inspection occurs disabled. During the
 agreed window the production operator pauses ordinary submissions using its
 existing controls and accounts for queued demand; explicitly resume the queue
 only for test phases, then disable/stop/wait again before reboot, redeploy or
 rollback. There is no test bypass of maintenance or Started. Final acceptance
-reopens ordinary submissions and resumes the host. These checks are unrun by M0:
+reopens ordinary submissions and resumes both hosts. These checks are unrun by M0:
 
-- Confirm the agreed window, durable host disable, fresh evidence and zero
-  obligations; inventory **two XPUs** with distinct mappings and unchanged
-  fixed per-device budgets, one worker process/unit, one CPU/RAM allowance.
+- Confirm Verso #298 merged, the agreed window, both durable host disables,
+  fresh evidence, zero obligations and no queued retired-name references.
+  Inspect converted queue-side project policies, pins, server restrictions
+  and host policies. Verify typed `machine_renamed` guidance for a new job using
+  `b70-gpu0`, while an existing keyed replay returns its original job.
+- Upgrade/restart the **b70 queue** and verify persisted maintenance, jobs,
+  submission keys, retry counters, pins, checkpoints and release custody.
+  Observe Spark reconnect before conversion, then upgrade it and require a
+  single machine worker/session with UUID-bound CUDA, preserved config and
+  successful reconnect/recovery. Test a small Spark GPU job in the test phase.
+- Inventory **two XPUs** with distinct PCI BDF/Level Zero UUID mappings,
+  `ZE_ENABLE_PCI_ID_DEVICE_ORDER=1` in worker and members, unchanged fixed
+  per-device budgets, one b70 worker process/unit and one CPU/RAM allowance.
+  Exercise a mapping mismatch and require `device_identity_mismatch` with no
+  start on that device; verify the mapping again after restart.
 - Run two small GPU jobs concurrently, one on each XPU, including a native
   sidecar in each. Inspect actual device visibility/allocation: main and helper
-  see only their assigned card as in-job device 0. Test an optional card selector
-  and the old alias; neither may spill onto its neighbor.
+  see only their assigned card as in-job device 0. Test an optional card selector;
+  it must not spill onto its neighbor.
+- Run a **CPU attempt beside GPU work** and enumerate what its main, native
+  sidecar and managed container can actually see through CUDA and XPU runtime
+  APIs: require **zero accelerators**, an empty `CUDA_VISIBLE_DEVICES`, effective
+  select-none `ZE_AFFINITY_MASK` and `ONEAPI_DEVICE_SELECTOR`, and forced PCI
+  ordering. Empty/unset environment checks alone do not pass. Repeat on Spark
+  for CUDA; failure withholds CPU work instead of claiming isolation.
 - Cancel/kill one exact attempt and separately force a member OOM. Require
   whole-group cleanup/release and immediate stage failure for OOM; the neighbor
   continues with unchanged process/device, heartbeat and correct accepted
   result. No host-wide signal, cgroup kill or GPU reset may be used as an
   attempt-local cleanup shortcut.
-- Admit CPU work beside GPU work within the single core/RAM allowance; reject
-  over-budget work and count > 1. Confirm fixed XPU accounting under concurrent
-  load, per-attempt/member ceilings and no stale result publication.
+- Reject over-budget work, count > 1 and multi-card worker/model config masks
+  with their typed errors. Confirm fixed XPU accounting under concurrent load,
+  per-attempt/member ceilings and no stale result publication.
 - Exercise production hold across both devices and CPU work, priority planned
   stops more than twice without retry charges, exact-ack replacement and the
-  two-infrastructure-requeue bound. Drain/disable must still win, including
-  preparation/Started races and independent failure precedence.
+  two-infrastructure-requeue bound. Confirm a machine heartbeat stall uses the
+  shortest active-work timeout and charges each affected production attempt.
+  Drain/disable must still win, including preparation/Started races and
+  independent failure precedence.
 - Save a durable checkpoint, stop under maintenance, reboot and verify only
-  the machine unit returns. Reconcile custody and resume the exact logical job
-  from the accepted generation. Redeploy once more through `myce install`;
-  verify configs, caches, hotfix budgets, aliases and no resurrected GPU units.
-  Exercise rollback to the two source workers and forward again while disabled.
+  machine units return. Reconcile queue/worker custody and resume the exact
+  logical job from its accepted generation. Redeploy through `myce install`;
+  verify queue config, the chosen gpu0 cache root, untouched other caches and
+  hotfix budgets. Inspect the persistent enable set and systemd registration:
+  neither `@gpu0` nor `@gpu1` may return. Exercise rollback to the two b70 source
+  workers and Spark's source worker, then forward again while disabled,
+  including queue recovery and Spark reconnect on both paths.
 - Recheck production/consumer health and obtain window acceptance before the
-  final return to ordinary workloads;
-  record qualification separately for each device and the shared RAM envelope.
+  final return to ordinary workloads; record qualification separately for each
+  device and the shared RAM envelope.
 
 ### Mergeable slices and estimates
 
 M0 may merge alongside M1; implementation order is **M1 → M2 → M3 → M4** on the
 isolated after-Verso track. Do not merge into the consumer's production build or
 operate hardware until the existing GPU/cutover gates and maintenance window
-permit it. M2's admission gate keeps intermediate merges usable; M3 can then
-replace legacy per-GPU placement, and M4 migrates installations. Estimates are
+permit it. The queue keeps M1's one-attempt admission rule through M2; M3
+lifts that rule for machine workers and M4 migrates installations. Estimates are
 changed/added hand-written production LOC and test/doc LOC, with one engineer's
 days including focused validation/review; generated schemas and hardware wait
-are excluded. They replace, not add to, the old R2/R3 estimates.
+are excluded. They replace the previous package M estimates.
 
 | Slice | Mergeable outcome | Production LOC; test/doc LOC; days | Acceptance |
 | --- | --- | --- | --- |
-| M1 (existing owner) | Keyed v1 wire representation; still one attempt, no vector admission. | Existing M1 brief/estimate; excluded below. | Legacy/new queue compatibility, session-fenced stop, stale result rejection, exact release-only requeue and retained restart custody. |
-| M2 | Machine inventory/config, v2 negotiation, keyed spool/supervisors, per-attempt device env and D5 subtrees; v2 queue placement waits for M3. Reuse cache/detection/runner implementations. | 350–550; 450–700; 3–4 days | Fake two-device inventory plus real CPU helpers execute independent harness assignments; stop/member failure leaves neighbor running; group masks/token exclusion, parallel readiness/control, aggregate local refusal, every-attempt restart and buffered-result replay, v1 refusal of v2. Legacy/v1 queue admission stays one-attempt; v2 reports `machine_placement_pending`. |
-| M3 | One vector-aware queue planner, atomic component reservations, selectors/aliases, per-device engines/qualification, job schema and machine status; enable v2 concurrency. | 350–550; 500–750; 3–4 days | Fake-clock two-GPU/CPU backfill, heterogeneous fit, same-card batch exclusion, shared RAM/unified debt, R1 victim usefulness/build hand-back and deterministic heuristic; aliases intersect owner/job/model restrictions without changing keyed replay; count > 1 typed rejection; holds/maintenance, >2 planned stops, bounded infrastructure requeue, stale/missing reports and exact cleanup across restart. Check-in benchmark remains within R1's accepted 1.5× baseline gate on its scenario set. |
-| M4 | Transactional installer conversion, rollback and operator docs; laptop migration first, separately accepted native window. | 200–350; 350–550; 2–3 days plus native window | Fake service-manager/filesystem tests for split→machine, conflict/missing-source refusal, preserved roots/caches/secrets/hotfix flags, injected failure at each mutation, rollback and idempotent redeploy. Real `myce dev` multi-device scenario and complete process/listener teardown; then the native checklist above before hardware acceptance. |
+| M1 (existing owner) | One keyed revision with an `attempts` collection; queue admits one attempt. | Existing M1 brief/estimate; excluded below. | Legacy/new queue compatibility, strict decode and multi-attempt reply rejection, session-fenced stop, stale result rejection, exact release-only requeue and retained restart custody. |
+| M2 | Additive machine inventory/config; replace current-job/process pointers, spool and recovery with keyed collections; per-attempt device env, stable identities and D5 subtrees. Reuse cache/detection/runner implementations. | 700–1,100; 900–1,400; 5–7 days | Fake two-device inventory plus real CPU helpers execute concurrent harness assignments; stop/member failure leaves neighbor running; select-none CPU masks, UUID/BDF mapping rechecks and mismatch refusal, group masks/token exclusion, parallel readiness/control, aggregate local refusal, every-attempt restart and buffered-result replay. M1 queue admission remains one attempt; compatibility guards reject unsupported inventory/replies clearly. |
+| M3 | Enumerate (machine, device) targets using the existing per-target planner and host ledger; per-device engines/qualification, selectors, retired-name errors, job schema and machine status; enable queue concurrency. No vector-fitting planner. | 400–650; 650–1,000; 3–5 days | **`myce dev` multi-device scenario** through the real API/runner: concurrent GPU helpers, CPU backfill, independent cancellation, restart/replay and complete process/listener teardown. Fake-clock heterogeneous targets, same-card exclusion, shared RAM/unified debt, R1 victim usefulness/build hand-back and deterministic heuristic; new retired-name intent fails without changing keyed replay; count > 1 rejection; holds/maintenance, >2 planned stops, mixed-tier shortest loss timeout and bounded per-job infrastructure requeue, stale/missing reports and exact cleanup across restart. Check-in benchmark remains within R1's accepted 1.5× baseline gate on its scenario set. |
+| M4 | Transactional queue/config and worker conversion on b70 and spark, enable-set removal, rollback and operator docs; laptop migration first, separately accepted native window. | 250–450; 450–700; 3–4 days plus native window | Fake service-manager/filesystem tests for queue upgrade/restart, split→machine, Spark reconnect/upgrade, conflict/missing-source/queued-retired-name refusal, preserved roots/secrets/hotfix flags, one gpu0 cache root with other roots untouched, enable-set removal, injected failure at each mutation, rollback and idempotent redeploy. Native checklist above before hardware acceptance. |
 
-M2–M4 total: **900–1,450 production LOC; 1,300–2,000 test/doc LOC; 8–11 engineer
-days**, excluding M1 and native access delays. Every slice keeps `myce dev`
-laptop-testable with the real API/command runner and fake multi-GPU inventory;
+M2–M4 total: **1,350–2,200 production LOC; 2,000–3,100 test/doc LOC;
+11–16 engineer days**, excluding M1 and native access delays. M2 grows from
+3–4 to 5–7 days because singular execution pointers, durable spool formats and
+restart/result custody all become collections; changing only the launcher is
+insufficient. M3 is 3–5 days: removing aliases and vector fitting reduces design
+scope, but per-device engines/qualification, status and end-to-end concurrency
+still require integration. M4 is 3–4 days because the queue and Spark conversion
+are part of the transaction/window, not an assumed external upgrade.
+
+Every slice keeps `myce dev` laptop-testable with the real API/command runner
+and fake multi-GPU inventory;
 run focused fake-clock/process tests, build/vet and serialized race checks.
 Laptop success cannot establish actual XPU masks, device fault isolation,
 cgroup/daemon behavior, reboot or the measured production memory envelope.
@@ -993,20 +1103,22 @@ migration: duplicate host participation/CPU/RAM reports, singular current-job
 and process pointers, global device env, per-GPU worker model-slot keys and
 per-GPU maintenance fan-out for new machines. Replace them with the inventory,
 keyed supervisors and existing host policy. Keep only the bounded legacy wire
-adapter, explicit alias lookup and historical custody required for transition;
-no new peer registry, lease, local host-control daemon, cache installer,
-application-specific scheduler or second victim planner.
+adapter until every fleet host runs machine workers and the rollback window
+has closed, then delete the unkeyed worker form. Retain historical exact-attempt
+custody. Add no new peer registry, lease, local host-control daemon, cache
+installer, application-specific scheduler or second victim planner.
 
 Open delivery risks are actual multi-XPU enumeration/stable mapping, device-local
 native isolation and driver failures that can affect the whole host, stale
 qualification/approval fingerprints, installer source-config conflicts, and
 planner check-in cost. Keep pre-existing planner defects tracked in #104
 separate; their feasibility/preparation repairs must land before M3 enables
-concurrency. Extending the vector must not conceal them. CPU core reservations do
-not enforce CPU time. Same-tier indefinite work still has no bounded-wait
-promise, and multi-device attempts remain explicitly unsupported. Current state:
+concurrency. Enumerating device targets must not conceal them. CPU core
+reservations do not enforce CPU time. Same-tier indefinite work still has no bounded-wait
+promise, and multi-device attempts remain deferred to #105. Current state:
 M0 specifies the target; M1 has its own implementation/review owner. Next step:
-review/merge M0 and M1, then execute M2 with its fake-device acceptance gate.
+orchestrator review/merge of the revised M0 and M1, then M2's fake-device gate.
+The M4 window remains blocked on Verso #298 and its explicit acceptance gates.
 
 ## CPU and shared host resources (R1, #98/#22)
 
@@ -1018,8 +1130,10 @@ positive `host_memory_gb`; stored/replayed jobs use that unambiguous vector.
 GPU declarations retain GPU `memory_gb` and additional `host_memory_gb`, with
 `cpu_cores` defaulting to one. Native sidecars share the attempt's declared
 cores/RAM instead of adding another reservation. CPU commands receive
-`MYCE_DEVICE=cpu`, `MYCE_PLATFORM=cpu`, an empty CUDA mask and no inherited
-XPU selectors or fleet token. This is cooperative device selection.
+`MYCE_DEVICE=cpu`, `MYCE_PLATFORM=cpu`, an empty CUDA mask and no fleet token.
+M2 must additionally apply explicit select-none XPU masks to every member as
+specified above; R1's removal of inherited XPU selectors does not hide XPUs.
+This is cooperative device selection.
 
 Workers offer logical CPUs minus `--reserve-cpu-cores` (default one), capped
 by `--cpu-budget-cores` when positive. Zero CPU budget uses detected capacity
@@ -1043,8 +1157,8 @@ GPU requests default to one core and require known CPU capacity as well;
 missing telemetry never supplies invented cores. Upgrade queue and workers
 together so every host reports complete capacity.
 
-R1 alone keeps one batch attempt per worker. Package M above supersedes R2/R3 and owns machine inventory and concurrent attempts;
-Windows/WSL qualification remains W1/W2. CPU counts are admission reservations,
-not CPU-time enforcement; macOS RAM remains admission-only and delegated Linux
+R1 alone keeps one batch attempt per worker. Package M above owns machine
+inventory and concurrent attempts; Windows/WSL qualification remains W1/W2.
+CPU counts are admission reservations, not CPU-time enforcement; macOS RAM remains admission-only and delegated Linux
 RAM enforcement retains its existing qualification requirements. Real native
 Linux/Windows acceptance and fleet cutover are separate from laptop proof.
