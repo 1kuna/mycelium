@@ -127,7 +127,7 @@ func (a API) checkpointHandler(w http.ResponseWriter, r *http.Request) {
 	if !decode(w, r, &p) {
 		return
 	}
-	respond(w, map[string]bool{"ok": true}, a.Queue.publishCheckpoint(r.Context(), p))
+	respondOperation(w, map[string]bool{"ok": true}, a.Queue.publishCheckpoint(r.Context(), p), "checkpoint_invalid")
 }
 
 // captureCheckpoint copies a complete atomic save to immutable private staging.

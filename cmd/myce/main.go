@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -658,14 +659,30 @@ func printStatus(s myce.Snapshot, full bool) {
 			fmt.Printf("extension %s: %s\n", m.ID, myce.ExtensionStatus(r))
 		}
 		fmt.Printf("hypha %s: %s, %.1f GiB free, %s\n", m.ID, m.GPU, m.FreeMemoryGB, state)
-		fmt.Printf("environments %s: ready=%v build seconds=%v\n", m.ID, m.Environments, m.EnvironmentBuildSeconds)
+		if len(m.Environments) > 0 {
+			fmt.Printf("environments %s: ready=%s\n", m.ID, strings.Join(m.Environments, ", "))
+		}
+		for _, name := range sortedKeys(m.EnvironmentBuildSeconds) {
+			fmt.Printf("environment %s/%s: build_seconds=%.3f\n", m.ID, name, m.EnvironmentBuildSeconds[name])
+		}
 		for _, r := range m.EnvironmentReports {
-			fmt.Printf("environment %s/%s: %s %s\n", m.ID, r.Key, r.State, r.Error)
+			label := "environment"
+			if r.Kind == "extension-setup" {
+				label = "extension preparation"
+			}
+			fmt.Printf("%s %s/%s: %s %s\n", label, m.ID, r.Key, r.State, r.Error)
 		}
 		for _, r := range m.CopyReports {
 			fmt.Printf("copy %s/%s: %s %d/%d bytes %s\n", m.ID, r.Model, r.State, r.Bytes, r.Total, r.Error)
 		}
-		fmt.Printf("copy speed %s: %.0f bytes/s; estimated NAS copy seconds %v\n", m.ID, m.CopyBytesPerSecond, m.ModelCopySeconds)
+		if m.CopyBytesPerSecond > 0 {
+			fmt.Printf("copy speed %s: bytes_per_second=%.0f\n", m.ID, m.CopyBytesPerSecond)
+		}
+		for _, name := range sortedKeys(m.ModelCopySeconds) {
+			if m.ModelCopySeconds[name] > 0 {
+				fmt.Printf("copy estimate %s/%s: seconds=%.3f\n", m.ID, name, m.ModelCopySeconds[name])
+			}
+		}
 		if m.FileTransferError != "" {
 			fmt.Printf("files %s: %s\n", m.ID, m.FileTransferError)
 		}
@@ -707,6 +724,11 @@ func logs(ctx context.Context, c myce.Client, id string, follow bool) error {
 	if err != nil {
 		return err
 	}
+	resolved, err := myce.FindJob(s.Jobs, id)
+	if err != nil {
+		return err
+	}
+	id = resolved.ID
 	for _, j := range s.Jobs {
 		if j.ID == id && j.Spec.Logs == "none" {
 			fmt.Println("logs are disabled for this job (logs: none)")
@@ -744,4 +766,13 @@ func logs(ctx context.Context, c myce.Client, id string, follow bool) error {
 		case <-time.After(300 * time.Millisecond):
 		}
 	}
+}
+
+func sortedKeys(m map[string]float64) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return keys
 }

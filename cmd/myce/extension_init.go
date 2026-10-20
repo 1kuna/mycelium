@@ -20,7 +20,7 @@ func extensionInit(args []string) error {
 	platform := f.String("gpu", "fake", "target backend (fake for laptop CPU smoke)")
 	targetOS := f.String("os", runtime.GOOS, "target OS")
 	arch := f.String("arch", runtime.GOARCH, "target architecture")
-	command := f.String("command", `["python3","{extension}/app.py"]`, "existing app argv as JSON array")
+	command := f.String("command", `["{env.app.python}","{extension}/app.py","input.json","result.json"]`, "existing app argv as JSON array")
 	check := f.String("check", "[]", "check argv as JSON array; empty uses main smoke run")
 	if err := f.Parse(args); err != nil {
 		return err
@@ -35,8 +35,20 @@ func extensionInit(args []string) error {
 	if err := json.Unmarshal([]byte(*check), &checkArgv); err != nil {
 		return err
 	}
-	e := myce.Extension{Name: *name, Version: *version, Purpose: "Wrap an existing app; describe its prerequisites and result contract", DefaultClass: "batch", Variants: []myce.ExtensionVariant{{Target: myce.ExecutionTarget{OS: *targetOS, Arch: *arch, Platform: *platform}, Needs: myce.ResourceNeeds{MemoryGB: 1, HostMemoryGB: 1}, Execution: myce.ExecutionSpec{Main: myce.ExecutionMember{Command: argv}}, Check: checkArgv}}}
-	b, err := yaml.Marshal(e)
+	// Authoring fields only; legacy wire fields never enter the skeleton.
+	description := map[string]any{
+		"name": *name, "version": *version,
+		"purpose":       "Wrap an existing app; describe its prerequisites and result contract",
+		"default_class": "batch", "outputs": []string{"result.json"},
+		"variants": []any{map[string]any{
+			"target":       myce.ExecutionTarget{OS: *targetOS, Arch: *arch, Platform: *platform},
+			"environments": map[string]myce.EnvironmentRecipe{"app": {Backend: "uv", Python: "3.11", LockFile: "requirements.txt"}},
+			"needs":        map[string]float64{"memory_gb": 1, "host_memory_gb": 1},
+			"execution":    myce.ExecutionSpec{Main: myce.ExecutionMember{Environment: "app", Command: argv}},
+			"check":        checkArgv,
+		}},
+	}
+	b, err := yaml.Marshal(description)
 	if err != nil {
 		return err
 	}
@@ -50,6 +62,9 @@ func extensionInit(args []string) error {
 	if err = os.WriteFile(filepath.Join(temporary, "extension.yaml"), b, 0600); err != nil {
 		return err
 	}
+	if err = os.WriteFile(filepath.Join(temporary, "requirements.txt"), []byte("# Add the existing app's pinned dependencies. Empty for standard-library apps.\n"), 0600); err != nil {
+		return err
+	}
 	if _, err = myce.ReadExtension(temporary); err != nil {
 		return fmt.Errorf("invalid skeleton: %w", err)
 	}
@@ -57,6 +72,9 @@ func extensionInit(args []string) error {
 		return err
 	}
 	if err = os.Rename(filepath.Join(temporary, "extension.yaml"), filepath.Join(folder, "extension.yaml")); err != nil {
+		return err
+	}
+	if err = os.Rename(filepath.Join(temporary, "requirements.txt"), filepath.Join(folder, "requirements.txt")); err != nil {
 		return err
 	}
 	fmt.Printf("created %s; add app/locks, then extension check --static %s; docs/extensions/AGENT-GUIDE.md\n", folder, folder)

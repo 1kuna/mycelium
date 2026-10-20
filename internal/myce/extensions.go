@@ -27,6 +27,7 @@ var extensionName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 // Extension is one small folder. Files and Digest are immutable transport data,
 // not extra authoring fields in extension.yaml. Downloads live in its cache.
 type Extension struct {
+	Outputs           []string                                `json:"outputs,omitempty" yaml:"outputs,omitempty"`
 	Assets            FileManifest                            `json:"assets,omitempty" yaml:"assets,omitempty"`
 	DefaultClass      string                                  `json:"default_class,omitempty" yaml:"default_class,omitempty"`
 	Variants          []ExtensionVariant                      `json:"variants,omitempty" yaml:"variants,omitempty"`
@@ -113,6 +114,16 @@ func (e Extension) handles(s Spec) bool {
 	return slices.Contains(e.Kinds, s.Kind)
 }
 func (e Extension) validate() error {
+	names := map[string]string{}
+	for _, name := range e.Outputs {
+		names[name] = "results"
+	}
+	if len(names) != len(e.Outputs) {
+		return errors.New("duplicate extension output")
+	}
+	if err := validateExtensionJob(Spec{Outputs: names}); err != nil {
+		return err
+	}
 	if err := e.Assets.validate(); err != nil {
 		return err
 	}
@@ -286,7 +297,7 @@ func (q *Queue) AddExtension(e Extension) error {
 		}
 		k := extensionKey(checked)
 		if old, ok := q.s.Extensions[k]; ok && old.Digest != checked.Digest {
-			return errors.New("extension version is frozen; publish a new version")
+			return frozenExtensionConflict(k, old.Digest, checked.Digest)
 		}
 		q.s.Extensions[k] = checked
 		for _, j := range q.s.Jobs {
@@ -438,4 +449,8 @@ func compareExtensionOutput(actual, expected []byte, b ExtensionBaseline) error 
 		}
 	}
 	return nil
+}
+
+func frozenExtensionConflict(key, old, incoming string) error {
+	return &HTTPError{Status: 409, Code: "extension_version_conflict", Message: fmt.Sprintf("%s is frozen with digest %s; incoming digest %s conflicts; bump the version", key, old, incoming)}
 }

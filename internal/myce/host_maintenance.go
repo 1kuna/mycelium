@@ -245,7 +245,7 @@ func (q *Queue) hostMaintenanceStatus(host string) HostMaintenanceStatus {
 func (a API) registerHostMaintenance(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/hosts/{id}/maintenance", func(w http.ResponseWriter, r *http.Request) {
 		status, err := a.Queue.HostMaintenanceStatus(r.PathValue("id"))
-		respond(w, status, err)
+		respondOperation(w, status, err, "host_control_invalid")
 	})
 	mux.HandleFunc("POST /api/hosts/{id}/maintenance", func(w http.ResponseWriter, r *http.Request) {
 		var request HostMaintenanceRequest
@@ -253,7 +253,7 @@ func (a API) registerHostMaintenance(mux *http.ServeMux) {
 			return
 		}
 		status, err := a.Queue.ChangeHostMaintenance(r.PathValue("id"), request)
-		respond(w, status, err)
+		respondOperation(w, status, err, "host_control_invalid")
 	})
 }
 

@@ -69,10 +69,61 @@ class ExtensionClientTests(unittest.TestCase):
         with patch.object(client, "get", return_value={"state": "succeeded", "output_refs": {}}):
             with self.assertRaises(APIError) as caught:
                 client.download_result("job", "missing", "unused")
-            self.assertEqual((caught.exception.status, caught.exception.code), (404, "request_failed"))
+            self.assertEqual((caught.exception.status, caught.exception.code), (404, "artifact_unknown"))
 
     def test_rejects_invalid_artifact_identity(self):
         client = Client(token="fixture")
         with patch.object(client, "get", return_value={"state": "succeeded", "output_refs": {"result": {"sha256": "../escape", "size_bytes": 3}}}):
             with self.assertRaisesRegex(ValueError, "identity"):
                 client.download_result("job", "result", "unused")
+
+    def test_run_uploads_submits_and_downloads_in_one_call(self):
+        client = Client(token="fixture")
+        ref = {"sha256": "a" * 64, "size_bytes": 1}
+        job = {"id": "12345678abcdef", "state": "succeeded", "output_refs": {"result.json": ref}}
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(client, "upload_file", return_value=ref) as upload, \
+                 patch.object(client, "submit_and_wait", return_value=job) as submit, \
+                 patch.object(client, "download_result") as download:
+                self.assertEqual(client.run("example@1", inputs={"input.json": "local.json"},
+                    outputs=directory, project="demo", class_="batch", key="stable", timeout=5), job)
+                upload.assert_called_once_with("local.json")
+                submit.assert_called_once_with({"name": "example@1", "project": "demo", "class": "batch",
+                    "extension": "example@1", "submission_key": "stable", "files": {"input.json": ref}}, timeout=5)
+                download.assert_called_once_with(job["id"], "result.json", Path(directory) / "result.json")
+
+    def test_run_failed_job_points_to_logs_and_never_downloads(self):
+        client = Client(token="fixture")
+        with patch.object(client, "submit_and_wait", return_value={"id": "12345678abcdef", "state": "failed", "reason": "execution failed"}), \
+             patch.object(client, "download_result") as download:
+            with self.assertRaises(APIError) as caught:
+                client.run("example@1", inputs={}, outputs="results", project="demo", key="stable")
+            self.assertEqual(caught.exception.code, "job_failed")
+            self.assertIn("myce logs 12345678", str(caught.exception))
+            download.assert_not_called()
+
+    def test_run_rejects_unsafe_paths(self):
+        client = Client(token="fixture")
+        with patch.object(client, "upload_file") as upload:
+            for name in ("../escape", "/absolute", "a/../b", "a\\b", "a:b"):
+                with self.assertRaisesRegex(ValueError, "relative"):
+                    client.run("example@1", inputs={name: "local"}, outputs="results", project="demo", key="stable")
+            upload.assert_not_called()
+        with tempfile.TemporaryDirectory() as directory:
+            for name in ("../escape", "/absolute", "a/../b", "a\\b", "a:b"):
+                with patch.object(client, "submit_and_wait", return_value={"id": "job", "state": "succeeded", "output_refs": {name: {}}}), \
+                     patch.object(client, "download_result") as download:
+                    with self.assertRaisesRegex(ValueError, "relative"):
+                        client.run("example@1", inputs={}, outputs=directory, project="demo", key="stable")
+                    download.assert_not_called()
+            Path(directory, "nested").symlink_to(Path(directory).parent, target_is_directory=True)
+            with patch.object(client, "submit_and_wait", return_value={"id": "job", "state": "succeeded", "output_refs": {"nested/escape": {}}}):
+                with self.assertRaisesRegex(ValueError, "symlink"):
+                    client.run("example@1", inputs={}, outputs=directory, project="demo", key="stable")
+
+    def test_short_job_lookup_and_ambiguous_prefix(self):
+        job = {"id": "12345678abcdef"}
+        self.assertEqual(Client._find([job], "12345678"), job)
+        with self.assertRaises(APIError) as caught:
+            Client._find([job, {"id": "12345678other"}], "12345678")
+        self.assertEqual(caught.exception.code, "job_id_ambiguous")

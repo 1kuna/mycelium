@@ -68,7 +68,7 @@ func InstallExtension(root string, e Extension) error {
 			return err
 		}
 		if old.Digest != checked.Digest {
-			return errors.New("extension version is frozen; publish a new version")
+			return frozenExtensionConflict(extensionKey(checked), old.Digest, checked.Digest)
 		}
 		return nil
 	} else if !os.IsNotExist(err) {

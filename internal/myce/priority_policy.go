@@ -259,17 +259,16 @@ func (a API) registerPriorityPolicy(mux *http.ServeMux) {
 			return
 		}
 		if request.ExpectedRevision == nil {
-			respond(w, nil, errors.New("expected_revision required"))
+			respond(w, nil, reject("policy_invalid", errors.New("expected_revision required")))
 			return
 		}
 		record, err := a.Queue.SetPriorityPolicy(*request.ExpectedRevision, request.Policy)
 		if errors.Is(err, ErrPolicyRevision) {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusConflict)
-			_, _ = io.WriteString(w, `{"code":"policy_revision_conflict","error":"policy revision changed"}`)
+			revision := a.Queue.PriorityPolicy().Revision
+			respond(w, nil, &HTTPError{Status: http.StatusConflict, Code: "policy_revision_conflict", CurrentRevision: &revision, Message: fmt.Sprintf("policy revision changed; current revision %d; export policy and retry with --if-revision %d", revision, revision)})
 			return
 		}
-		respond(w, record, err)
+		respondOperation(w, record, err, "policy_invalid")
 	})
 }
 

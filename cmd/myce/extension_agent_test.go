@@ -138,7 +138,7 @@ func TestExtensionAgentDevEndToEnd(t *testing.T) {
 	}
 	run("extension", "check", "--static", folder)
 	run("extension", "add", "--root", extensionRoot, folder)
-	run("extension", "check", "--root", extensionRoot, "--gpu", "fake", "--device", "0", "--host", "dev-host", "--environment-cache", filepath.Join(root, "state", "workers", "fake-1", "environment-cache"), "http-stage@1")
+	run("extension", "check", "--root", extensionRoot, "http-stage@1")
 	python, err := exec.LookPath("python3.11")
 	if err != nil {
 		python, err = exec.LookPath("python3")
@@ -150,17 +150,14 @@ func TestExtensionAgentDevEndToEnd(t *testing.T) {
 from pathlib import Path
 from mycelium import Client
 c=Client(poll_interval=.02)
-spec={"name":"stage","project":"demo","class":"batch","extension":"http-stage@1","submission_key":"revision-1","files":{"input.json":c.upload_file(sys.argv[1])},"outputs":{"result.json":"results"}}
-j=c.submit_and_wait(spec,timeout=45)
-assert j["state"]=="succeeded",j
-assert c.submit_and_wait(spec,timeout=5)["id"]==j["id"]
-c.download_result(j["id"],"result.json",sys.argv[2])
-assert json.loads(Path(sys.argv[2]).read_text())=={"value":3}
+j=c.run("http-stage@1", inputs={"input.json":sys.argv[1]}, outputs=sys.argv[2], project="demo", class_="batch", key="revision-1", timeout=45)
+assert c.run("http-stage@1", inputs={"input.json":sys.argv[1]}, outputs=sys.argv[2], project="demo", class_="batch", key="revision-1", timeout=5)["id"]==j["id"]
+assert json.loads((Path(sys.argv[2])/"result.json").read_text())=={"value":3}
 ack=c.cancel_submission("demo","never-submit")
 assert ack["will_not_run"] and ack["state"]=="absent"
 print(j["id"])
 `
-	c := exec.CommandContext(ctx, python, "-c", script, filepath.Join(folder, "input.json"), filepath.Join(root, "python-result.json"))
+	c := exec.CommandContext(ctx, python, "-c", script, filepath.Join(folder, "input.json"), filepath.Join(root, "python-results"))
 	clientPath, err := filepath.Abs(filepath.Join("..", "..", "clients", "python", "src"))
 	if err != nil {
 		t.Fatal(err)
@@ -177,19 +174,21 @@ print(j["id"])
 	if err != nil {
 		t.Fatal(err)
 	}
-	ref, err := myce.IdentifyFile(filepath.Join(folder, "input.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	originalSpec := myce.Spec{Name: "stage", Project: "demo", Class: "batch", Extension: "http-stage@1", SubmissionKey: "revision-1", Files: myce.FileManifest{"input.json": ref}, Outputs: map[string]string{"result.json": "results"}}
-	replay, err := client.SubmitAndWait(ctx, originalSpec)
+	replay, err := client.Run(ctx, "http-stage@1", map[string]string{"input.json": filepath.Join(folder, "input.json")}, filepath.Join(root, "go-results"), myce.RunOptions{Project: "demo", Class: "batch", Key: "revision-1"})
 	if err != nil || replay.ID != job.ID {
-		t.Fatal("Go keyed replay", err)
+		t.Fatal("Go run keyed replay", err)
 	}
-	if err = client.DownloadResult(ctx, id, "result.json", filepath.Join(root, "go-result.json")); err != nil {
-		t.Fatal(err)
+	run("logs", myce.ShortID(id))
+	run("wait", myce.ShortID(id), "--timeout", "5s")
+	cache := filepath.Join(root, "state", "workers", "fake-1", "environment-cache")
+	ready, err := filepath.Glob(filepath.Join(cache, "*", "ready.json"))
+	if err != nil || len(ready) != 1 {
+		t.Fatalf("main/check/sidecar/job should share one prepared environment: %v %v", ready, err)
 	}
-	b, err := os.ReadFile(filepath.Join(root, "go-result.json"))
+	if myce.JobAge(job, time.Now()) == "duration 0s" {
+		t.Fatal("nonzero run rounded to zero duration")
+	}
+	b, err := os.ReadFile(filepath.Join(root, "go-results", "result.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -222,6 +221,22 @@ func TestExtensionInitAndStaticCLI(t *testing.T) {
 	}
 	f := filepath.Join(folder, "extension.yaml")
 	b, _ := os.ReadFile(f)
+	var skeleton map[string]any
+	if err := yaml.Unmarshal(b, &skeleton); err != nil {
+		t.Fatal(err)
+	}
+	for _, old := range []string{"platforms", "memory_gb", "run"} {
+		if _, ok := skeleton[old]; ok {
+			t.Fatal("legacy field in skeleton", old)
+		}
+	}
+	variant := skeleton["variants"].([]any)[0].(map[string]any)
+	if _, old := variant["needs"].(map[string]any)["platform"]; old {
+		t.Fatal("legacy needs.platform")
+	}
+	if variant["environments"] == nil || variant["execution"] == nil || skeleton["outputs"] == nil {
+		t.Fatal("incomplete variant skeleton")
+	}
 	b = append(b, []byte("unknown_field: true\n")...)
 	_ = os.WriteFile(f, b, 0600)
 	if err := extensionCommand([]string{"check", "--static", folder}); err == nil {

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 )
@@ -134,6 +135,18 @@ func StartDev(c DevConfig) (*Dev, error) {
 	ctx, cancel := context.WithCancel(context.Background())
 	d := &Dev{Queue: q, URL: "http://" + listener.Addr().String(), cancel: cancel, errors: make(chan error, c.Workers+2)}
 	d.client = Client{URL: d.URL, Token: c.Token}
+	targets := []ExtensionCheckTarget{}
+	for i := 0; i < c.Workers; i++ {
+		cache, err := filepath.Abs(filepath.Join(filepath.Dir(c.Database), "workers", fmt.Sprintf("fake-%d", i+1), "environment-cache"))
+		if err != nil {
+			listener.Close()
+			q.Close()
+			cancel()
+			return nil, err
+		}
+		targets = append(targets, ExtensionCheckTarget{Host: c.HostID, Platform: c.GPU, Device: "0", EnvironmentCache: cache, OS: runtime.GOOS, Arch: runtime.GOARCH})
+	}
+	clock.targets = targets
 	d.server = &http.Server{Handler: API{Queue: q, Token: c.Token}.Handler(), ReadHeaderTimeout: 5 * time.Second}
 	queueCtx, stopQueue := context.WithCancel(context.Background())
 	d.stopQueue = stopQueue

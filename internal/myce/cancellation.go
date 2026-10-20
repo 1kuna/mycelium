@@ -33,6 +33,22 @@ func (q *Queue) CancelJob(id string) (Cancellation, error) {
 	var out Cancellation
 	err := q.update(func() error {
 		q.maintainSubmissions()
+		if q.retainedJob(id) == nil {
+			jobs := []*Job{}
+			for _, j := range q.s.Jobs {
+				jobs = append(jobs, j)
+			}
+			for _, record := range q.s.Submissions {
+				if record.Job != nil {
+					jobs = append(jobs, record.Job)
+				}
+			}
+			resolved, err := FindJob(jobs, id)
+			if err != nil {
+				return err
+			}
+			id = resolved.ID
+		}
 		if j := q.retainedJob(id); j != nil {
 			q.cancelJob(j)
 			out = q.cancellation(j, q.s.Jobs[id] == nil)

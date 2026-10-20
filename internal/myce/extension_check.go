@@ -26,11 +26,8 @@ func CheckExtension(ctx context.Context, root string, e Extension, platform, dev
 	if err != nil {
 		return nil, err
 	}
-	if host == "" {
-		host, err = os.Hostname()
-		if err != nil {
-			return nil, err
-		}
+	if host == "" || device == "" || cache == nil || cache.Root == "" {
+		return nil, errors.New("runtime check requires --host, --device and --environment-cache (start myce dev for automatic local defaults)")
 	}
 	fingerprint, err := ExtensionFingerprint(ctx, platform, device)
 	if err != nil {
@@ -47,9 +44,6 @@ func CheckExtension(ctx context.Context, root string, e Extension, platform, dev
 	if actual.Digest != e.Digest {
 		return nil, errors.New("extension content changed")
 	}
-	if cache == nil {
-		return nil, errors.New("environment cache required")
-	}
 	if err = cache.init(); err != nil {
 		return nil, err
 	}
@@ -58,23 +52,6 @@ func CheckExtension(ctx context.Context, root string, e Extension, platform, dev
 		return nil, err
 	}
 	defer unlock()
-	for _, work := range extensionWorks(e) {
-		r := newExtensionReport(e, &m, work)
-		r.CheckID = ID()
-		reports = append(reports, r)
-	}
-	if err = writeExtensionReports(root, e, platform, reports); err != nil {
-		return reports, err
-	}
-	defer func() {
-		if err != nil {
-			for i := range reports {
-				reports[i].Qualified = false
-				reports[i].Reason = "check failed; see local command log"
-			}
-		}
-		err = errors.Join(err, writeExtensionReports(root, e, platform, reports))
-	}()
 	// Check work uses the configured queue and only this enrolled local worker.
 	// Absolute prepared paths are valid only on this exact target/host/device.
 	var snapshot Snapshot
@@ -91,15 +68,43 @@ func CheckExtension(ctx context.Context, root string, e Extension, platform, dev
 	if selected == nil {
 		return reports, errors.New("no enrolled local worker matches host, target, device and fingerprint")
 	}
+	if err = c.Call(ctx, "POST", "/api/extensions", e, nil); err != nil {
+		return nil, err
+	}
 	m = *selected
+	if err = os.MkdirAll(extensionCache(root, e, platform), 0700); err != nil {
+		return nil, err
+	}
+	commandLog, err := os.CreateTemp(extensionCache(root, e, platform), "check-*.log")
+	if err != nil {
+		return nil, err
+	}
+	defer commandLog.Close()
+	log = io.MultiWriter(log, commandLog)
+	for _, work := range extensionWorks(e) {
+		r := newExtensionReport(e, &m, work)
+		r.CheckID = ID()
+		reports = append(reports, r)
+	}
+	if err = writeExtensionReports(root, e, platform, reports); err != nil {
+		return reports, err
+	}
+	defer func() {
+		if err != nil {
+			fmt.Fprintln(commandLog, err)
+			for i := range reports {
+				reports[i].Qualified = false
+				reports[i].Reason = "check failed; command log: " + commandLog.Name()
+			}
+		}
+		err = errors.Join(err, writeExtensionReports(root, e, platform, reports))
+	}()
+
 	scratch, err := os.MkdirTemp(extensionCache(root, e, platform), "check-")
 	if err != nil {
 		return reports, err
 	}
 	defer os.RemoveAll(scratch)
-	if err = c.Call(ctx, "POST", "/api/extensions", e, nil); err != nil {
-		return reports, err
-	}
 	view, _ := e.forMachine(&m)
 	for i := range reports {
 		r := &reports[i]
@@ -122,20 +127,19 @@ func CheckExtension(ctx context.Context, root string, e Extension, platform, dev
 			}
 		}
 		if job.State != "succeeded" {
+			if hasBaseline {
+				if actual, readErr := readExtensionCheckOutput(scratch); readErr == nil {
+					if mismatch := compareExtensionOutput(actual, e.Files[b.Output], b); mismatch != nil {
+						return reports, mismatch
+					}
+				}
+			}
 			return reports, fmt.Errorf("runtime %s: %s", job.State, job.Reason)
 		}
 		if hasBaseline {
-			output, e2 := os.Open(filepath.Join(scratch, "actual"))
+			actual, e2 := readExtensionCheckOutput(scratch)
 			if e2 != nil {
 				return reports, e2
-			}
-			actual, e2 := io.ReadAll(io.LimitReader(output, extensionMaxBytes+1))
-			e2 = errors.Join(e2, output.Close())
-			if e2 != nil {
-				return reports, e2
-			}
-			if len(actual) > extensionMaxBytes {
-				return reports, errors.New("check output too large")
 			}
 			if e2 = compareExtensionOutput(actual, e.Files[b.Output], b); e2 != nil {
 				return reports, e2
@@ -185,4 +189,19 @@ func waitExtensionCheckRelease(ctx context.Context, c Client, key string) error 
 		case <-tick.C:
 		}
 	}
+}
+
+// Static authoring checks supplement schema validation without executing code.
+func StaticCheckExtension(e Extension) error {
+	for _, v := range e.Variants {
+		for _, side := range v.Execution.Sidecars {
+			if side.Port != nil && *side.Port != 0 {
+				return errors.New("sidecar port must be 0; use {port} for an allocated loopback port")
+			}
+		}
+		if len(v.Check) > 0 && (v.Check[0] == "python3" || v.Check[0] == "python") {
+			return errors.New("check uses bare Python; declare an environment and use {env.NAME.python}")
+		}
+	}
+	return nil
 }

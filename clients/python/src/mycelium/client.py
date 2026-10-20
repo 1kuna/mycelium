@@ -26,10 +26,12 @@ class APIError(RuntimeError):
         self.status = status
         self.body = body
         self.code = None
+        self.current_revision = None
         try:
             response = json.loads(body)
             if isinstance(response, dict):
                 self.code = response.get("code")
+                self.current_revision = response.get("current_revision")
         except (ValueError, TypeError):
             pass
         super().__init__(f"Mycelium HTTP {status}: {body}")
@@ -122,6 +124,43 @@ class Client:
             submitted = self.submit(spec)
         return self.wait(submitted["id"], timeout=timeout)
 
+    def run(self, extension: str, *, inputs: Mapping[str, str | Path],
+            outputs: str | Path, key: str, project: str, class_: str = "",
+            timeout: float | None = None) -> dict[str, Any]:
+        """Upload, submit/wait by key, and download the extension's declared outputs.
+
+        Retry identical inputs/extension/project/class/key after a lost response.
+        Returns the accepted job; failures include a short-ID log command.
+        """
+        if not extension or not key or not project or not str(outputs):
+            raise ValueError("run requires extension, outputs directory, key and project")
+        def local_name(name: str) -> bool:
+            return bool(name) and not name.startswith("/") and "\\" not in name and ":" not in name and all(
+                part not in {"", ".", ".."} for part in name.split("/"))
+        if not all(local_name(name) for name in inputs):
+            raise ValueError("input names must be clean relative paths")
+        files = {name: self.upload_file(source) for name, source in inputs.items()}
+        job = self.submit_and_wait({"name": extension, "project": project, "class": class_,
+                                    "extension": extension, "submission_key": key,
+                                    "files": files}, timeout=timeout)
+        if job["state"] != "succeeded":
+            short = job["id"][:8]
+            raise APIError(409, json.dumps({"code": "job_" + job["state"], "job_id": job["id"],
+                "error": f"job {short} {job['state']}: {job.get('reason', '')}; run myce logs {short} for the traceback"}))
+        names = job.get("output_refs", {})
+        if not all(local_name(name) for name in names):
+            raise ValueError("result names must be clean relative paths")
+        root = Path(outputs).absolute()
+        for name in names:
+            destination = root / name
+            for parent in destination.parents:
+                if parent == root:
+                    break
+                if parent.is_symlink():
+                    raise ValueError("result parent must be a directory, not a symlink")
+            self.download_result(job["id"], name, destination)
+        return job
+
     def _file_request(self, method: str, path: str, data: bytes | None = None,
                       headers: Mapping[str, str] | None = None):
         request = Request(self.url + path, data=data, method=method, headers={
@@ -188,7 +227,7 @@ class Client:
             raise APIError(409, json.dumps({"code": "request_stale", "error": "job has no accepted result"}))
         ref = job.get("output_refs", {}).get(artifact)
         if ref is None:
-            raise APIError(404, json.dumps({"code": "request_failed", "error": "accepted artifact not found"}))
+            raise APIError(404, json.dumps({"code": "artifact_unknown", "error": "accepted artifact not found"}))
         sha, size = ref["sha256"], ref["size_bytes"]
         if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{64}", sha) or not isinstance(size, int) or size < 0:
             raise ValueError("invalid artifact identity")
@@ -233,6 +272,11 @@ class Client:
         for job in jobs:
             if job["id"] == job_id:
                 return job
+        matches = [job for job in jobs if len(job_id) >= 8 and job["id"].startswith(job_id)]
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise APIError(409, json.dumps({"code": "job_id_ambiguous", "error": "use a longer job ID"}))
         raise APIError(404, json.dumps({"code": "job_unknown", "error": "job is unknown"}))
 
     def cancel(self, job_id: str) -> dict[str, Any]:

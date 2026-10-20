@@ -182,6 +182,15 @@ func (q *Queue) resolveExplicitExtension(s *Spec) ([]Extension, error) {
 		return nil, errors.New("extension reference must resolve to one registered version; use name@version or extension_digest")
 	}
 	e := matches[0]
+	if s.ExtensionCheck == nil && len(s.Outputs) == 0 && len(e.Outputs) > 0 {
+		s.Outputs = map[string]string{}
+		for _, name := range e.Outputs {
+			s.Outputs[name] = "results"
+		}
+	}
+	if err := validateExtensionJob(Spec{Files: s.Files, Inputs: s.Inputs, Outputs: s.Outputs}); err != nil {
+		return nil, err
+	}
 	if s.ExtensionCheck != nil && !slices.Contains(extensionWorks(e), s.ExtensionCheck.Work) {
 		return nil, errors.New("check requires a declared work type")
 	}

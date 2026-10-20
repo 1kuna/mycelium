@@ -1450,7 +1450,15 @@ func (q *Queue) Logs(id string, after int64) ([]Log, error) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if q.s.Jobs[id] == nil {
-		return nil, fmt.Errorf("job not found")
+		jobs := []*Job{}
+		for _, j := range q.s.Jobs {
+			jobs = append(jobs, j)
+		}
+		j, err := FindJob(jobs, id)
+		if err != nil {
+			return nil, err
+		}
+		id = j.ID
 	}
 	if q.s.Jobs[id].Spec.Logs == "none" {
 		return []Log{}, nil

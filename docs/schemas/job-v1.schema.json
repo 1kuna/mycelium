@@ -337,6 +337,15 @@
         "notes": {
           "type": "string"
         },
+        "outputs": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "platform_baselines": {
           "additionalProperties": {
             "additionalProperties": {

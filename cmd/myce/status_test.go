@@ -134,3 +134,18 @@ func TestStatusStoppedWorkerBudgetIsLastReported(t *testing.T) {
 		}
 	}
 }
+
+func TestStatusUsabilityStructuredFieldsAndInternalLabel(t *testing.T) {
+	output := captureJoiningOutput(t, func() error {
+		printStatus(myce.Snapshot{Machines: []*myce.Machine{{ID: "fake-1", Environments: []string{"app"}, EnvironmentBuildSeconds: map[string]float64{"app": 1.25}, ModelCopySeconds: map[string]float64{"model": 2.5}}}, Jobs: []*myce.Job{{ID: "12345678abcdef", State: "failed", Spec: myce.Spec{Name: "extension-check", ExtensionCheck: &myce.ExtensionCheckRequest{Work: "extension:sample"}}}}}, false)
+		return nil
+	})
+	for _, expected := range []string{"internal extension check", "failed", "build_seconds=1.250", "seconds=2.500"} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("missing %s: %s", expected, output)
+		}
+	}
+	if strings.Contains(output, "map[") {
+		t.Fatal("raw map in status", output)
+	}
+}

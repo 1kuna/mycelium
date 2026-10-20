@@ -1,9 +1,12 @@
 package myce
 
 import (
+	"context"
 	"errors"
 	"math"
 	"net/http"
+	"path/filepath"
+	"runtime"
 	"sync"
 	"time"
 )
@@ -16,8 +19,9 @@ const devClockMaxAdvance = 90 * 24 * time.Hour
 // advance-only offset for exercising queue deadlines without waiting days.
 // Only StartDev installs it; ordinary Open callers never get the dev route.
 type devClock struct {
-	mu     sync.Mutex
-	offset time.Duration
+	mu      sync.Mutex
+	offset  time.Duration
+	targets []ExtensionCheckTarget
 }
 
 func (c *devClock) Now() time.Time {
@@ -45,6 +49,9 @@ func (a API) registerDevClock(mux *http.ServeMux) {
 	if !ok {
 		return
 	}
+	mux.HandleFunc("GET /api/dev/extension-targets", func(w http.ResponseWriter, r *http.Request) {
+		respond(w, clock.targets, nil)
+	})
 	mux.HandleFunc("POST /api/dev/clock/advance", func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
 			Seconds float64 `json:"seconds"`
@@ -60,6 +67,46 @@ func (a API) registerDevClock(mux *http.ServeMux) {
 		}
 		respond(w, struct {
 			Now time.Time `json:"now"`
-		}{now}, err)
+		}{now}, rejectIf("dev_clock_invalid", err))
 	})
+}
+
+// Only dev exposes these local process settings. Production checks require
+// explicit local host/device/cache flags and never infer a remote worker.
+type ExtensionCheckTarget struct {
+	Host             string `json:"host"`
+	Platform         string `json:"platform"`
+	Device           string `json:"device"`
+	EnvironmentCache string `json:"environment_cache"`
+	OS               string `json:"os"`
+	Arch             string `json:"arch"`
+}
+
+func ResolveExtensionCheckTarget(ctx context.Context, c Client, host, platform, device, cache string) (ExtensionCheckTarget, error) {
+	target := ExtensionCheckTarget{Host: host, Platform: platform, Device: device, EnvironmentCache: cache}
+	if host != "" && platform != "" && device != "" && cache != "" {
+		return target, nil
+	}
+	var targets []ExtensionCheckTarget
+	if err := c.Call(ctx, "GET", "/api/dev/extension-targets", nil, &targets); err != nil {
+		return target, errors.New("runtime check requires --host, --gpu, --device and --environment-cache; start myce dev for automatic local defaults")
+	}
+	if cache != "" {
+		absolute, err := filepath.Abs(cache)
+		if err != nil {
+			return target, err
+		}
+		cache = absolute
+	}
+	matches := []ExtensionCheckTarget{}
+	for _, t := range targets {
+		if t.OS != runtime.GOOS || t.Arch != runtime.GOARCH || host != "" && t.Host != host || platform != "" && t.Platform != platform || device != "" && t.Device != device || cache != "" && filepath.Clean(t.EnvironmentCache) != filepath.Clean(cache) {
+			continue
+		}
+		matches = append(matches, t)
+	}
+	if len(matches) != 1 {
+		return target, errors.New("no unique local dev worker matches; provide --host, --gpu, --device and --environment-cache")
+	}
+	return matches[0], nil
 }

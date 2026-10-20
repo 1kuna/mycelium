@@ -90,6 +90,9 @@ func (q *Queue) publicSnapshot() (Snapshot, error) {
 		if j.Spec.Program != nil {
 			spec.Program = &Program{Type: j.Spec.Program.Type}
 		}
+		if j.Spec.ExtensionCheck != nil {
+			spec.ExtensionCheck = &ExtensionCheckRequest{Work: j.Spec.ExtensionCheck.Work}
+		}
 		spec.Needs = j.Spec.Needs
 		j.Spec = spec
 		j.Extensions = nil

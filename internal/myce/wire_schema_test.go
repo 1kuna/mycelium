@@ -155,12 +155,16 @@ func wireExamples(t *testing.T) map[string]any {
 	expired.State = "unknown"
 	expired.Release = nil
 	expired.AcknowledgedAt = nil
+	revision := uint64(7)
 	return map[string]any{
 		"job-queued-keyed": queued, "job-running": running, "job-succeeded": succeeded, "job-reserved-cancelled": reserved,
 		"cancel-queued": ack, "cancel-running-pending": pending, "cancel-terminal": terminal, "cancel-removed": removed, "cancel-absent": absent, "cancel-expired-unknown": expired,
 		"error-job-unknown":         wireError(t, &HTTPError{Status: 404, Code: "job_unknown", Message: "job is unknown", JobID: "example-unknown-id"}),
 		"error-submission-conflict": wireError(t, submissionFailure(false)), "error-submission-expired": wireError(t, submissionFailure(true)),
 		"error-submission-invalid": wireError(t, validateSubmissionKey("").(*HTTPError)),
+		"error-policy-revision":    wireError(t, &HTTPError{Status: 409, Code: "policy_revision_conflict", CurrentRevision: &revision, Message: "policy revision changed; current revision 7"}),
+		"error-extension-version":  wireError(t, frozenExtensionConflict("example@1", strings.Repeat("a", 64), strings.Repeat("b", 64)).(*HTTPError)),
+		"error-job-ambiguous":      wireError(t, &HTTPError{Status: 409, Code: "job_id_ambiguous", Message: "job ID prefix is ambiguous; use a longer ID"}),
 	}
 }
 

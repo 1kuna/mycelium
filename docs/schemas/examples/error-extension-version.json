@@ -1,0 +1,4 @@
+{
+  "code": "extension_version_conflict",
+  "error": "example@1 is frozen with digest aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; incoming digest bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb conflicts; bump the version"
+}

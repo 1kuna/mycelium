@@ -1,0 +1,4 @@
+{
+  "code": "job_id_ambiguous",
+  "error": "job ID prefix is ambiguous; use a longer ID"
+}

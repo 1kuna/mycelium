@@ -220,7 +220,7 @@ func extensionEnvironmentRecipes(j *Job, m *Machine) []EnvironmentRecipe {
 	}
 	v := e.variant(machineTarget(m))
 	if v == nil {
-		if j.Spec.ExtensionCheck != nil {
+		if j.Spec.ExtensionCheck != nil && (len(e.Assets) > 0 || len(e.Setup) > 0) {
 			return []EnvironmentRecipe{{Key: extensionPreparationKey(*e, m)}}
 		}
 		return nil
@@ -234,12 +234,26 @@ func extensionEnvironmentRecipes(j *Job, m *Machine) []EnvironmentRecipe {
 	for _, n := range names {
 		out = append(out, v.Environments[n])
 	}
-	if len(e.Assets) > 0 || j.Spec.ExtensionCheck != nil {
+	if len(e.Assets) > 0 || j.Spec.ExtensionCheck != nil && len(v.Setup) > 0 {
 		out = append(out, EnvironmentRecipe{Key: extensionPreparationKey(*e, m)})
 	}
 	return out
 }
 func environmentReady(j *Job, m *Machine) bool {
+	// Checks can run before qualification, but never before worker preparation.
+	// A no-environment/no-setup variant still needs its installed frozen files.
+	if e := qualifiedExtension(j, m); e != nil && j.Spec.ExtensionCheck != nil {
+		prepared := false
+		for _, r := range m.ExtensionReports {
+			if r.Digest == e.Digest && r.Setup && (len(e.Variants) == 0 || r.Host == hostID(m) && r.Fingerprint == m.ExtensionFingerprint && r.EnvironmentIdentity == extensionEnvironmentIdentity(*e, m)) {
+				prepared = true
+				break
+			}
+		}
+		if !prepared {
+			return false
+		}
+	}
 	for _, r := range extensionEnvironmentRecipes(j, m) {
 		if !slices.Contains(m.Environments, r.Key) {
 			return false
@@ -268,6 +282,7 @@ func environmentCanRun(j *Job, m *Machine) bool {
 }
 
 type EnvironmentReport struct {
+	Kind         string  `json:"kind,omitempty"`
 	Attempt      string  `json:"attempt,omitempty"`
 	Key          string  `json:"key"`
 	State        string  `json:"state"`
@@ -844,7 +859,11 @@ func (rt *environmentRuntime) sync(plan []EnvironmentRecipe, busy bool, keepActi
 	rt.cancel = cancel
 	rt.done = make(chan struct{})
 	rt.key = r.Key
-	rt.reports[r.Key] = EnvironmentReport{Key: r.Key, State: "building", Attempt: launchAttempt(r.Launch)}
+	kind := ""
+	if r.Preparation != nil {
+		kind = "extension-setup"
+	}
+	rt.reports[r.Key] = EnvironmentReport{Key: r.Key, State: "building", Kind: kind, Attempt: launchAttempt(r.Launch)}
 	if e := saveWorkerJSON(rt.dir, "environment-reports.json", rt.reports); e != nil {
 		log.Printf("persist environment build intent: %v", e)
 	}
@@ -865,7 +884,7 @@ func (rt *environmentRuntime) sync(plan []EnvironmentRecipe, busy bool, keepActi
 		if release != nil {
 			release()
 		}
-		report := EnvironmentReport{Key: r.Key, State: "ready"}
+		report := EnvironmentReport{Key: r.Key, State: "ready", Kind: kind}
 		if e != nil {
 			report.State = "failed"
 			report.Error = e.Error()

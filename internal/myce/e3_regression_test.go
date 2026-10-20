@@ -160,7 +160,7 @@ func TestClientResultTypedErrors(t *testing.T) {
 		{"running", "running", "request_stale", 409},
 		{"failed", "failed", "request_stale", 409},
 		{"cancelled", "cancelled", "request_stale", 409},
-		{"missing-artifact", "succeeded", "request_failed", 404},
+		{"missing-artifact", "succeeded", "artifact_unknown", 404},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

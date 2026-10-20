@@ -1,12 +1,14 @@
 package myce
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -66,12 +68,47 @@ func TestExtensionQualificationSmokeFailureClearsPriorSuccess(t *testing.T) {
 	if currentExtensionQualification(e, reports[0], &m) {
 		t.Fatal("qualification crossed hosts")
 	}
+	before, err := os.ReadFile(extensionRecords(root, e, "fake"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, flags := range []struct {
+		host, device string
+		cache        *EnvironmentCache
+	}{
+		{"wrong-host", "0", cache}, {"", "0", cache}, {"local-host", "", cache}, {"local-host", "0", nil},
+	} {
+		if _, err := CheckExtension(ctx, root, e, "fake", flags.device, flags.host, io.Discard, flags.cache, d.Client()); err == nil {
+			t.Fatal("invalid selection accepted")
+		}
+		after, err := os.ReadFile(extensionRecords(root, e, "fake"))
+		if err != nil || !bytes.Equal(before, after) {
+			t.Fatal("mistaken check changed qualification", err)
+		}
+	}
 	if err = os.WriteFile(filepath.Join(extensionCache(root, e, "fake"), "fail"), nil, 0600); err != nil {
 		t.Fatal(err)
 	}
 	reports, err = CheckExtension(ctx, root, e, "fake", "0", "local-host", io.Discard, cache, d.Client())
 	if err == nil || len(reports) != 1 || reports[0].Qualified {
 		t.Fatal("failed check retained qualification", reports, err)
+	}
+	marker := "command log: "
+	logPath := strings.SplitN(reports[0].Reason, marker, 2)
+	if len(logPath) != 2 {
+		t.Fatal("missing command log path", reports)
+	}
+	if _, err := os.Stat(logPath[1]); err != nil {
+		t.Fatal("missing retained command log", err)
+	}
+	snapshot, err := d.Queue.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, j := range snapshot.Jobs {
+		if j.Spec.SubmissionKey == reports[0].CheckID && j.State != "failed" {
+			t.Fatal("failed check displayed as success")
+		}
 	}
 	saved := readExtensionReports(root, e, "fake")
 	if len(saved) != 1 || saved[0].Qualified {

@@ -48,6 +48,9 @@ func ShortID(id string) string {
 }
 func JobState(j *Job) string {
 	state := displayState(j.State)
+	if j.Spec.ExtensionCheck != nil {
+		state = "internal extension check · " + state
+	}
 	if j.Attempt > 0 {
 		state += fmt.Sprintf(" · attempt %d", j.Attempt)
 	}
@@ -80,7 +83,11 @@ func JobAge(j *Job, now time.Time) string {
 	return ""
 }
 func elapsed(start, end time.Time) string {
-	return (max(0, end.Sub(start)) / time.Second * time.Second).String()
+	d := max(0, end.Sub(start))
+	if d > 0 && d < time.Second {
+		return "<1s"
+	}
+	return (d / time.Second * time.Second).String()
 }
 
 func activeJobs(jobs []*Job, priority string) []*Job {
@@ -315,7 +322,7 @@ var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
         <div class="detail"><div class="label">Environments</div><div class="value chips">{{range .Environments}}<span class="chip">{{.}}</span>{{else}}<span class="empty-inline">None ready</span>{{end}}</div></div>
         {{if or .CopyReports .EnvironmentReports}}<div class="detail"><div class="label">Activity</div><div class="value progress-list">
           {{range .CopyReports}}<div class="progress-row"><div class="progress-copy"><span>Copy {{.Model}} · {{displayState .State}}</span><span>{{bytes .Bytes}} / {{bytes .Total}}</span></div><progress max="100" value="{{printf "%.1f" (copyPercent .Bytes .Total)}}">{{printf "%.0f" (copyPercent .Bytes .Total)}}%</progress>{{if .Error}}<div class="muted">{{.Error}}</div>{{end}}</div>{{end}}
-          {{range .EnvironmentReports}}<div class="progress-row"><div class="progress-copy"><span>Build {{.Key}}</span><span>{{displayState .State}}{{if .BuildSeconds}} · {{printf "%.0f" .BuildSeconds}}s{{end}}</span></div>{{if .Error}}<div class="muted">{{.Error}}</div>{{end}}</div>{{end}}
+          {{range .EnvironmentReports}}<div class="progress-row"><div class="progress-copy"><span>{{if eq .Kind "extension-setup"}}Extension preparation{{else}}Build{{end}} {{.Key}}</span><span>{{displayState .State}}{{if .BuildSeconds}} · {{printf "%.0f" .BuildSeconds}}s{{end}}</span></div>{{if .Error}}<div class="muted">{{.Error}}</div>{{end}}</div>{{end}}
         </div></div>{{end}}
       </article>
     {{end}}</div>{{else}}<div class="empty">No hyphae have joined your mycelium.</div>{{end}}

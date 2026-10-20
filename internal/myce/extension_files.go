@@ -116,6 +116,9 @@ func outputRelative(j Job, name, prefix string) string {
 	return filepath.Join(prefix, j.ID, strconv.Itoa(j.Attempt), name)
 }
 func (w Worker) publishExtensionFiles(j Job) error {
+	if err := w.validateExtensionCheckOutput(j); err != nil {
+		return err
+	}
 	if j.FileTransport || !j.Spec.extensionJob() || len(j.Spec.Outputs) == 0 {
 		return nil
 	}
@@ -224,4 +227,48 @@ func validateExtensionJob(s Spec) error {
 		}
 	}
 	return nil
+}
+
+// Baseline correctness belongs to the attempt result, so status and qualification
+// agree even when the command exits zero with incorrect output.
+func (w Worker) validateExtensionCheckOutput(j Job) error {
+	check := j.Spec.ExtensionCheck
+	if check == nil || j.Extension == nil {
+		return nil
+	}
+	for _, e := range j.Extensions {
+		if e.Digest != j.Extension.Digest {
+			continue
+		}
+		view, ok := e.forMachine(&w.Machine)
+		if !ok {
+			return errors.New("check target unavailable")
+		}
+		b, ok := view.baseline(check.Work, w.Machine.GPU)
+		if !ok {
+			return nil
+		}
+		actual, err := readExtensionCheckOutput(check.Directory)
+		if err != nil {
+			return err
+		}
+		return compareExtensionOutput(actual, e.Files[b.Output], b)
+	}
+	return errors.New("frozen check extension missing")
+}
+
+func readExtensionCheckOutput(directory string) ([]byte, error) {
+	f, err := os.Open(filepath.Join(directory, "actual"))
+	if err != nil {
+		return nil, err
+	}
+	actual, err := io.ReadAll(io.LimitReader(f, extensionMaxBytes+1))
+	err = errors.Join(err, f.Close())
+	if err != nil {
+		return nil, err
+	}
+	if len(actual) > extensionMaxBytes {
+		return nil, errors.New("check output too large")
+	}
+	return actual, nil
 }

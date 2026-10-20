@@ -188,14 +188,18 @@ func (w Worker) prepareRegisteredExtension(ctx context.Context, plan Environment
 			defer release()
 		}
 	}
+	view, ok := e.forMachine(&w.Machine)
+	if !ok {
+		return errors.New("extension target unavailable")
+	}
+	// No synthetic environment for preparation that has nothing left to do.
+	if len(view.Setup) == 0 && len(e.Assets) == 0 {
+		return nil
+	}
 	root := filepath.Join(w.environmentCache.Root, plan.Key)
 	env, err := extensionEnvironment(w.ExtensionRoot, e, w.Machine.GPU, w.Machine.Device)
 	if err != nil {
 		return err
-	}
-	view, ok := e.forMachine(&w.Machine)
-	if !ok {
-		return errors.New("extension target unavailable")
 	}
 	setup := view.Setup
 	if v := e.variant(machineTarget(&w.Machine)); v != nil {

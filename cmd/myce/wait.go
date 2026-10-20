@@ -158,6 +158,16 @@ func waitJobs(ctx context.Context, c myce.Client, ids []string, timeout time.Dur
 				retrying = false
 			}
 			delay = 3 * time.Second
+			for id := range pending {
+				j, err := myce.FindJob(s.Jobs, id)
+				if err != nil {
+					return waitError(2, "wait: "+err.Error())
+				}
+				if j.ID != id {
+					delete(pending, id)
+					pending[j.ID] = true
+				}
+			}
 			found := map[string]bool{}
 			for _, j := range s.Jobs {
 				if !pending[j.ID] {
@@ -180,7 +190,7 @@ func waitJobs(ctx context.Context, c myce.Client, ids []string, timeout time.Dur
 			}
 			for id := range pending {
 				if !found[id] {
-					return waitError(2, "wait: unknown job ID "+id+" (use the full submitted ID)")
+					return waitError(2, "wait: unknown job ID "+id)
 				}
 			}
 		}

@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
@@ -96,11 +95,21 @@ func extensionCommand(args []string) error {
 			if err != nil {
 				return fmt.Errorf("FAIL static: %w", err)
 			}
+			if err := myce.StaticCheckExtension(e); err != nil {
+				return fmt.Errorf("FAIL static: %w", err)
+			}
 			if *digest != "" && e.Digest != *digest {
 				return errors.New("FAIL static: digest mismatch")
 			}
 			fmt.Printf("PASS static %s@%s %s (not qualified)\n", e.Name, e.Version, e.Digest)
 			return nil
+		}
+		if args[0] == "check" {
+			target, err := myce.ResolveExtensionCheckTarget(ctx, client, *host, *platform, *device, *environmentRoot)
+			if err != nil {
+				return err
+			}
+			*host, *platform, *device, *environmentRoot = target.Host, target.Platform, target.Device, target.EnvironmentCache
 		}
 		if f.NArg() != 1 || *platform == "" || *timeout <= 0 {
 			return errors.New("setup/check requires --gpu, positive --timeout and name@version")
@@ -124,9 +133,6 @@ func extensionCommand(args []string) error {
 			}
 			var reports []myce.ExtensionReport
 			if args[0] == "check" {
-				if cache == nil {
-					cache = &myce.EnvironmentCache{Root: filepath.Join(*root, "environments"), Limit: *environmentLimit}
-				}
 				cache.Fetch = client.DownloadFile
 				reports, err = myce.CheckExtension(bounded, *root, e, *platform, *device, *host, os.Stderr, cache, client)
 			} else {
