@@ -136,6 +136,11 @@ func ExtensionFingerprint(ctx context.Context, platform, device string) (string,
 	if !validGPU(platform) {
 		return "", errors.New("invalid extension platform")
 	}
+	// The default fake runtime has always meant its single device. Canonical
+	// machine inventory calls that same simulated component "0".
+	if platform == "fake" && device == "" {
+		device = "0"
+	}
 	data := []byte(runtime.GOOS + "/" + runtime.GOARCH + "/" + platform + "/" + device)
 	commands := [][]string{}
 	switch platform {

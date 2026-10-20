@@ -1129,6 +1129,9 @@ are excluded. They replace the previous package M estimates.
   physical host. The existing `myce dev` clock retains its synthetic shared-host
   fixtures; this exception does not apply to an ordinary queue. Empty CPU
   inventories remain explicit through JSON cloning and reporting.
+- The default single-card fake runtime treats its old empty selector and
+  canonical inventory ID `"0"` identically for extension qualification. Native
+  identity/fingerprint checks are unchanged.
 
 M2–M4 total: **1,350–2,200 production LOC; 2,000–3,100 test/doc LOC;
 11–16 engineer days**, excluding M1 and native access delays. M2 grows from

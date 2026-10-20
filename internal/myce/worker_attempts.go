@@ -179,16 +179,20 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 						}
 					}
 					if err == nil {
-						value, result := a.job, *s.state.Result
+						value, result := *s.state.Job, *s.state.Result
 						finished, e := s.fileFinish.run(attemptCheckpoint(value), func() (Result, error) { return w.finishFileResult(value, result, s.dir) })
 						err = e
 						if e == nil {
+							s.fileError = ""
 							s.state.Result = &finished
 							err = s.save()
+						} else {
+							s.fileError = "file publication pending; local results retained"
 						}
 					}
 				} else if report.Progress > s.fileGeneration {
-					published, e := s.fileProgress.run(attemptCheckpoint(a.job), func() (int64, error) { return w.publishFileCheckpoint(a.job, s.dir) })
+					value := *s.state.Job
+					published, e := s.fileProgress.run(attemptCheckpoint(value), func() (int64, error) { return w.publishFileCheckpoint(value, s.dir) })
 					if e == nil {
 						s.fileGeneration, s.fileError = published, ""
 					} else {
