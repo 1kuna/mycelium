@@ -78,6 +78,7 @@ type Worker struct {
 	HostMemoryReserveGB         float64
 	MemorySource                MemorySource
 	MemoryMeasured              bool
+	FixedAcceleratorMemory      bool
 	batchMemory                 *atomic.Uint64
 }
 type workerFinish struct {
@@ -642,6 +643,7 @@ func (w Worker) Run(stop context.Context) error {
 		probeCtx, cancel := context.WithTimeout(stop, 5*time.Second)
 		profile := LocalProfileProbe().Detect(probeCtx, w.Machine, s.dir, w.Clock.Now())
 		cancel()
+		applyFixedAcceleratorMemory(&profile, w.Machine, w.FixedAcceleratorMemory)
 		w.Machine.CapabilityProfile = &profile
 	}
 

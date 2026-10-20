@@ -117,3 +117,21 @@ func (p CapabilityProfile) Summary() string {
 	}
 	return fmt.Sprintf("capability profile v%d: %s/%s, %d logical CPUs, %s memory, system %.1f GiB, resources [%s], disk %.1f GiB total / %.1f GiB free; %s; unavailable=%v", p.Version, p.OS, p.Arch, p.LogicalCPUs, p.MemoryLayout, float64(p.SystemMemoryBytes)/(1<<30), strings.Join(resources, ", "), float64(p.DiskTotalBytes)/(1<<30), float64(p.DiskFreeBytes)/(1<<30), p.Onboarding+"; "+p.Benchmark.Summary(), p.Unavailable)
 }
+
+// An operator-fixed device budget (--memory-mode fixed --memory-gb) sizes a
+// separate-memory accelerator the probe could not size. Measured facts win.
+func applyFixedAcceleratorMemory(p *CapabilityProfile, m Machine, fixed bool) {
+	if !fixed || m.GPU == "fake" || m.UnifiedMemory || p.MemoryLayout != "separate" || m.FreeMemoryGB <= 0 {
+		return
+	}
+	budget := uint64(m.FreeMemoryGB * (1 << 30))
+	for i := range p.Accelerators {
+		if p.Accelerators[i].Type == m.GPU {
+			if p.Accelerators[i].MemoryBytes == 0 {
+				p.Accelerators[i].MemoryBytes = budget
+			}
+			return
+		}
+	}
+	p.Accelerators = append(p.Accelerators, AcceleratorProfile{Type: m.GPU, MemoryBytes: budget})
+}
