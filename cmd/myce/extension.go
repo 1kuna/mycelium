@@ -144,6 +144,13 @@ func extensionCommand(args []string) error {
 			if err != nil {
 				return fmt.Errorf("FAIL %s: %w", args[0], err)
 			}
+			if args[0] == "check" {
+				for _, r := range reports {
+					if !r.Qualified {
+						return fmt.Errorf("check %s@%s: %s", e.Name, e.Version, r.Reason)
+					}
+				}
+			}
 			fmt.Printf("PASS %s %s@%s\n", args[0], e.Name, e.Version)
 			return nil
 		}

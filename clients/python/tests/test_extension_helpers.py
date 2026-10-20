@@ -99,6 +99,8 @@ class ExtensionClientTests(unittest.TestCase):
             with self.assertRaises(APIError) as caught:
                 client.run("example@1", inputs={}, outputs="results", project="demo", key="stable")
             self.assertEqual(caught.exception.code, "job_failed")
+            self.assertEqual(caught.exception.job_id, "12345678abcdef")
+            self.assertNotIn("HTTP", str(caught.exception))
             self.assertIn("myce logs 12345678", str(caught.exception))
             download.assert_not_called()
 
@@ -127,3 +129,35 @@ class ExtensionClientTests(unittest.TestCase):
         with self.assertRaises(APIError) as caught:
             Client._find([job, {"id": "12345678other"}], "12345678")
         self.assertEqual(caught.exception.code, "job_id_ambiguous")
+
+    def test_wait_and_run_timeout_report_actual_reason_without_cancelling(self):
+        client = Client(token="fixture")
+        job = {"id": "12345678abcdef", "state": "queued",
+               "reason": "no hypha has a qualified extension for this kind of work"}
+        for run in (False, True):
+            with patch.object(client, "_call", return_value={"jobs": [job]}), \
+                 patch.object(client, "submit", return_value=job), \
+                 patch.object(client, "cancel_submission") as cancel, \
+                 patch("mycelium.client.time.monotonic", side_effect=[0, 0, .06, .06]), \
+                 patch("mycelium.client.time.sleep"):
+                with self.assertRaises(TimeoutError) as caught:
+                    if run:
+                        client.run("sample@1", inputs={}, outputs="unused", project="demo", key="key", timeout=.05)
+                    else:
+                        client.wait(job["id"], timeout=.05)
+                for expected in (job["id"], "still queued", job["reason"]):
+                    self.assertIn(expected, str(caught.exception))
+                cancel.assert_not_called()
+                self.assertEqual(job["state"], "queued")
+
+    def test_wait_timeout_for_running_job_does_not_claim_waiting_for_hypha(self):
+        client = Client(token="fixture")
+        job = {"id": "12345678abcdef", "state": "running"}
+        with patch.object(client, "_call", return_value={"jobs": [job]}), \
+             patch("mycelium.client.time.monotonic", side_effect=[0, 0, .06, .06]), \
+             patch("mycelium.client.time.sleep"):
+            with self.assertRaises(TimeoutError) as caught:
+                client.wait(job["id"], timeout=.05)
+        message = str(caught.exception)
+        self.assertIn("still running", message)
+        self.assertNotIn("waiting for a hypha", message)

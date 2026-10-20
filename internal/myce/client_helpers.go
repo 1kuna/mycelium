@@ -42,20 +42,34 @@ func (c Client) GetJob(ctx context.Context, id string) (*Job, error) {
 func (c Client) Wait(ctx context.Context, id string) (*Job, error) {
 	tick := time.NewTicker(100 * time.Millisecond)
 	defer tick.Stop()
+	var last *Job
 	for {
 		j, err := c.GetJob(ctx, id)
 		if err != nil {
+			if ctx.Err() != nil {
+				return last, jobWaitError(id, last, ctx.Err())
+			}
 			return nil, err
 		}
+		last = j
 		if terminal(j.State) {
 			return j, nil
 		}
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return j, jobWaitError(id, j, ctx.Err())
 		case <-tick.C:
 		}
 	}
+}
+
+// Waiting never cancels the queued/running job. Preserve context error matching
+// and the latest authoritative status reason so callers can recover by job ID.
+func jobWaitError(id string, j *Job, cause error) error {
+	if j == nil {
+		return fmt.Errorf("waiting for job %s: %w; status unavailable; job was not cancelled", id, cause)
+	}
+	return fmt.Errorf("waiting for job %s: %w; job is still %s: %s", j.ID, cause, j.State, JobReason(j))
 }
 
 // DownloadResult resolves the accepted current attempt from the queue, rather
@@ -113,7 +127,7 @@ func (c Client) Run(ctx context.Context, extension string, inputs map[string]str
 	}
 	j, err := c.SubmitAndWait(ctx, Spec{Name: extension, Project: options.Project, Class: options.Class, Extension: extension, SubmissionKey: options.Key, Files: files})
 	if err != nil {
-		return nil, err
+		return j, err
 	}
 	if j.State != "succeeded" {
 		return j, &HTTPError{Status: 409, Code: "job_" + j.State, JobID: j.ID, Message: fmt.Sprintf("job %s %s: %s; run myce logs %s for the traceback", ShortID(j.ID), j.State, j.Reason, ShortID(j.ID))}

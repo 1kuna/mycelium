@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -51,5 +53,33 @@ func TestClientKeyedRetryAfterLostSubmitResponse(t *testing.T) {
 	}
 	if _, err = c.SubmitAndWait(ctx, Spec{}); err == nil {
 		t.Fatal("unkeyed helper allowed")
+	}
+}
+
+func TestClientWaitTimeoutReportsActualQueuedReason(t *testing.T) {
+	q, _ := fixture(t)
+	e := compositionExtension(t, false)
+	if err := q.AddExtension(e); err != nil {
+		t.Fatal(err)
+	}
+	j := submit(t, q, Spec{Name: "waiting", Project: "demo", Extension: extensionKey(e), SubmissionKey: "timeout"})
+	m := machine("unqualified", "fake")
+	check(t, q, m, nil)
+	server := httptest.NewServer(API{q, "fixture"}.Handler())
+	defer server.Close()
+	c := Client{URL: server.URL, Token: "fixture"}
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err := c.Wait(ctx, j.ID)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatal(err)
+	}
+	for _, want := range []string{j.ID, "still queued", "no hypha has a qualified extension"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("missing %s: %v", want, err)
+		}
+	}
+	if got := job(t, q, j.ID); got.State != "queued" {
+		t.Fatal("timeout cancelled job", got)
 	}
 }

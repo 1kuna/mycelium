@@ -157,6 +157,12 @@ func JobReason(j *Job) string {
 	return ""
 }
 func JobWork(j *Job) string {
+	if j.Spec.ExtensionCheck != nil {
+		return "checking extension: " + j.Spec.Extension + " (" + j.Spec.ExtensionCheck.Work + ")"
+	}
+	if j.Spec.Extension != "" {
+		return "extension: " + j.Spec.Extension
+	}
 	if j.Spec.Kind != "" {
 		return "kind of work: " + j.Spec.Kind
 	}

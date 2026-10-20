@@ -26,15 +26,20 @@ class APIError(RuntimeError):
         self.status = status
         self.body = body
         self.code = None
+        self.job_id = None
         self.current_revision = None
+        message = f"Mycelium HTTP {status}: {body}"
         try:
             response = json.loads(body)
             if isinstance(response, dict):
                 self.code = response.get("code")
+                self.job_id = response.get("job_id")
                 self.current_revision = response.get("current_revision")
+                if self.code in {"job_failed", "job_cancelled"}:
+                    message = f"{self.code}: {response.get('error', body)}"
         except (ValueError, TypeError):
             pass
-        super().__init__(f"Mycelium HTTP {status}: {body}")
+        super().__init__(message)
 
 
 def _json_default(value: Any) -> str:
@@ -290,13 +295,25 @@ class Client:
         })
 
     def wait(self, job_id: str, *, timeout: float | None = None) -> dict[str, Any]:
-        """Wait for any terminal state, returning it (including failure)."""
+        """Wait for a terminal state; timeout leaves the job queued/running."""
         end = None if timeout is None else time.monotonic() + timeout
+        job = None
+        def timed_out() -> TimeoutError:
+            if job is None:
+                return TimeoutError(f"timed out waiting for job {job_id}; status unavailable; job was not cancelled")
+            fallback = "waiting for a hypha to take this job" if job["state"] == "queued" else "still in progress"
+            reason = job.get("reason") or fallback
+            return TimeoutError(f"timed out waiting for job {job['id']}; job is still {job['state']}: {reason}")
         while True:
             remaining = None if end is None else end - time.monotonic()
             if remaining is not None and remaining <= 0:
-                raise TimeoutError(f"timed out waiting for job {job_id}")
-            snapshot = self._call("GET", "/api/status", timeout=self.timeout if remaining is None else min(self.timeout, remaining))
+                raise timed_out()
+            try:
+                snapshot = self._call("GET", "/api/status", timeout=self.timeout if remaining is None else min(self.timeout, remaining))
+            except (TimeoutError, URLError):
+                if end is not None and time.monotonic() >= end:
+                    raise timed_out() from None
+                raise
             job = self._find(snapshot.get("jobs") or [], job_id)
             if job["state"] in TERMINAL:
                 return job

@@ -359,13 +359,16 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 
 type HTTPError struct {
 	CurrentRevision *uint64
-	JobID           string // Only job_unknown carries the requested cancellation identity.
+	JobID           string // Requested or failed job identity, when applicable.
 	Code            string
 	Status          int
 	Message         string
 }
 
 func (e *HTTPError) Error() string {
+	if e.Code == "job_failed" || e.Code == "job_cancelled" {
+		return e.Code + ": " + e.Message
+	}
 	if e.Code != "" {
 		return fmt.Sprintf("queue: HTTP %d: %s: %s", e.Status, e.Code, e.Message)
 	}

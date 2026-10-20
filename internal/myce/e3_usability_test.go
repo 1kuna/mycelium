@@ -199,7 +199,7 @@ func TestClientRunFailureProvidesTypedLogHint(t *testing.T) {
 	c := Client{URL: server.URL, Token: "fixture"}
 	j, err := c.Run(context.Background(), "sample@1", nil, t.TempDir(), RunOptions{Project: "demo", Key: "stable"})
 	var api *HTTPError
-	if !errors.As(err, &api) || api.Code != "job_failed" || !strings.Contains(api.Message, "myce logs 12345678") || j == nil || j.State != "failed" {
+	if !errors.As(err, &api) || api.Code != "job_failed" || api.JobID != "12345678abcdef" || strings.Contains(err.Error(), "HTTP") || !strings.Contains(api.Message, "myce logs 12345678") || j == nil || j.State != "failed" {
 		t.Fatal(j, err)
 	}
 }

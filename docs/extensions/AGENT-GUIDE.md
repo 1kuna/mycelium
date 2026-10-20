@@ -13,9 +13,12 @@ or service supervisor to the app.
    Reuse its launchers and uv/pixi locks. An image freeze is not an installable lock.
 2. **Write one complete variant per target.** No inheritance or implicit fallback.
    `myce extension init --name app-stage --gpu fake --command
-   '["{env.app.python}","{extension}/app.py","input.json","result.json"]' ./extension` creates a skeleton. Flags
+   '["{env.app.python}","{extension}/app.py","input.json","result.json"]'
+   --outputs '["result.json"]' ./extension` creates a skeleton. Flags
    precede the folder. Replace its purpose/resources, bundle only small regular
    files, and declare the existing environment and execution (example below).
+   Copy the unchanged app scripts into that folder. When the app changes, re-copy
+   them, bump the extension version, and check again.
    `fake` runs CPU code in laptop dev with simulated GPU inventory. Real CPU
    enrollment is separate work; do not advertise fake as a CPU fleet.
    Current native runtime supports Unix; Windows needs its runtime port and check.
@@ -61,8 +64,9 @@ or service supervisor to the app.
 
    Static validation executes nothing and does not qualify. Runtime checks run
    the declared check (or main as a smoke test), with the same setup, environment,
-   sidecars and cleanup as a job. A smoke test proves execution; a replay against
-   recorded native output checks correctness. See [baseline keys and replay](#baseline-keys-and-replay).
+   sidecars and cleanup as a job. A smoke success stays **not qualified**: declare
+   a check command and a native baseline to qualify. Replay checks correctness.
+   See [baseline keys and replay](#baseline-keys-and-replay).
    Changed files under a frozen version require a version bump and another check.
 
    Dev automatically detects the local worker settings. The explicit equivalent is:
@@ -139,9 +143,26 @@ job = Client().run("http-stage@1", inputs={"input.json": "input.json"},
 destination directory. The extension's top-level `outputs` declares the result
 filenames. Python spells the job class `class_` because `class` is a keyword.
 Repeat the **same extension, inputs, project, class and key** after a lost response;
-`submission_key` reconciles it to the original job. Use a new key only for new
-business work. A failed job raises a typed error with `myce logs SHORT_ID`.
+`submission_key` reconciles it to the original job. For a repeatable key, hash
+all inputs in stable filename order plus the stage and extension version, e.g.
+`sha256(stage + version + sorted input names/content hashes)`. After a version
+bump, `submission_key_conflict` means the old key already names a different job
+spec; include the new version in the key. Use a new key only for new business work.
+A failed `run` raises Python `APIError` (`job_id`, `code`) or Go `*myce.HTTPError`
+(`JobID`, `Code`), with a `myce logs SHORT_ID` hint.
 Cancel even after a lost response with `client.cancel_submission("demo", key)`.
+
+`Client()` reads `MYCE_QUEUE` (default `http://127.0.0.1:7331`) and
+`MYCE_TOKEN` (default empty; required). Dev's token is `dev-token`; export it.
+A `run`/wait timeout leaves the job queued or running and reports its ID and
+latest status reason. Cancel explicitly with the call above if work is no longer needed.
+
+For multiple stages, use one extension per stage. The caller downloads A's
+intermediate and uploads it as B's input; keep orchestration in the caller.
+Input keys map fixed extension filenames to any caller-local path. If the caller
+chooses the final output path, download the fixed name then rename it, e.g.
+`(Path("results") / "report.csv").replace(report_path)`. Set `init --outputs
+'["report.csv"]'` to match the command; filenames cannot be inferred from arbitrary argv.
 
 Go's client supplies the same path, bounded by a context:
 
@@ -182,8 +203,11 @@ use `kind:KIND` or `program:TYPE` for those separate checks. See the
 
 Run `myce status`, then `myce logs SHORT_ID` (or `myce logs --follow SHORT_ID`).
 Every job command accepts the unique short ID shown by status; an ambiguous
-prefix requires a longer ID. Logs contain the app's stdout/stderr, including its
-Python traceback. `myce wait SHORT_ID` reports the terminal state.
+prefix requires a longer ID. The minimum prefix length is **8 characters**. Logs
+contain the app's stdout/stderr, including its Python traceback. `myce wait SHORT_ID` reports the terminal state.
+
+Code that always crashes cannot qualify; input-dependent failures in qualified code
+use the job-failure path above.
 
 For a failed runtime check, the CLI prints the actual local command-log path
 under `EXTENSION_ROOT/cache/NAME/VERSION/PLATFORM/check-*.log`. Internal check jobs

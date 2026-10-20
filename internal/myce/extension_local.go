@@ -298,10 +298,10 @@ func LocalExtensionReports(root, platform, fingerprint string, machines ...*Mach
 				if len(machines) > 0 {
 					local = *machines[0]
 				}
-				if !currentExtensionQualification(e, r, &local) {
+				if reason := extensionQualificationReason(e, r, &local); reason != "" {
 					r.Qualified = false
 					r.Setup = false
-					r.Reason = "host, environment or check identity changed; check required"
+					r.Reason = reason
 				}
 			}
 			if v := e.variant(ExecutionTarget{OS: runtime.GOOS, Arch: runtime.GOARCH, Platform: platform}); v != nil {
@@ -465,7 +465,8 @@ func PrepareExtension(ctx context.Context, root string, e Extension, platform, d
 					r.Reason = e3.Error()
 				} else {
 					r.Qualified = true
-					r.Reason = ""
+					r.Reason = extensionQualificationReason(e, *r, &local)
+					r.Qualified = r.Reason == ""
 				}
 			}
 			_ = os.RemoveAll(tmp) // Only this invocation's reproducible check output.
