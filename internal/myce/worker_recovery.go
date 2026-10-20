@@ -40,6 +40,7 @@ func (r *workerRetry) succeeded(now time.Time, interval time.Duration) {
 }
 
 type workerState struct {
+	StopAt          *time.Time             `json:"stop_at,omitempty"`
 	Schema          int                    `json:"schema_version"`
 	OperatorStopped bool                   `json:"operator_stopped,omitempty"`
 	Groups          map[int]map[int]string `json:"groups,omitempty"`
@@ -322,7 +323,7 @@ func waitWorkerGroup(group int, clock Clock) error {
 		<-wake.C
 	}
 }
-func (s *workerStore) cleanupOrphan(clock Clock) error {
+func (s *workerStore) cleanupOrphan(clock Clock, memoryFiles ...memoryFS) error {
 	// Native members use the ordinary attempt record, written before each exec
 	// gate opens. argv/environment markers may disappear (including env -i),
 	// so authenticate surviving PIDs by their kernel birth identity instead.
@@ -340,7 +341,7 @@ func (s *workerStore) cleanupOrphan(clock Clock) error {
 				return errors.New("mismatched attempt process custody")
 			}
 			if st.Groups != nil || st.Cgroup != "" {
-				return cleanupAttemptGroups(st, clock)
+				return cleanupAttemptGroups(st, clock, memoryFiles...)
 			}
 		}
 	}
@@ -375,7 +376,7 @@ func (s *workerStore) cleanupOrphan(clock Clock) error {
 	return waitWorkerGroup(s.state.PID, clock)
 }
 
-func cleanupAttemptGroups(st workerState, clock Clock) error {
+func cleanupAttemptGroups(st workerState, clock Clock, memoryFiles ...memoryFS) error {
 
 	if st.Cgroup != "" {
 		if filepath.Base(st.Cgroup) != "attempt-"+st.Identity {
@@ -385,7 +386,11 @@ func cleanupAttemptGroups(st workerState, clock Clock) error {
 			if err != nil {
 				return err
 			}
-			if err := (&memoryAttempt{fs: osMemoryFS{}, path: st.Cgroup}).cleanup(clock); err != nil {
+			var fs memoryFS = osMemoryFS{}
+			if len(memoryFiles) > 0 {
+				fs = memoryFiles[0]
+			}
+			if err := (&memoryAttempt{fs: fs, path: st.Cgroup}).cleanup(clock); err != nil {
 				return err
 			}
 		}

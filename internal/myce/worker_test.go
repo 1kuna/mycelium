@@ -200,7 +200,7 @@ while :; do read line <&3; done`}
 		}
 	})
 	result := run.result(t)
-	if !result.Success || !result.Interrupted || result.Forced || result.ReleasePending {
+	if !result.Success || result.Interrupted || result.Forced || result.ReleasePending {
 		t.Fatalf("stop did not finish gracefully: %+v", result)
 	}
 	// Leave's capacity reservation expires at the original deadline, even

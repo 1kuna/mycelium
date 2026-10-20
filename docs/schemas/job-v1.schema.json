@@ -1057,6 +1057,9 @@
             "null"
           ]
         },
+        "memory_gb": {
+          "type": "number"
+        },
         "sidecars": {
           "items": {
             "$ref": "#/$defs/NativeSidecar"

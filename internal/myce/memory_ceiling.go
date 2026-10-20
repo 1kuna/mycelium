@@ -16,16 +16,18 @@ import (
 // All paths stay below the worker service: disable confirms the entire subtree.
 type memoryFS interface {
 	ReadFile(string) ([]byte, error)
+	ReadDir(string) ([]os.DirEntry, error)
 	WriteFile(string, []byte) error
 	Mkdir(string) error
 	Remove(string) error
 }
 type osMemoryFS struct{}
 
-func (osMemoryFS) ReadFile(p string) ([]byte, error)  { return os.ReadFile(p) }
-func (osMemoryFS) WriteFile(p string, b []byte) error { return os.WriteFile(p, b, 0600) }
-func (osMemoryFS) Mkdir(p string) error               { return os.Mkdir(p, 0700) }
-func (osMemoryFS) Remove(p string) error              { return os.Remove(p) }
+func (osMemoryFS) ReadDir(p string) ([]os.DirEntry, error) { return os.ReadDir(p) }
+func (osMemoryFS) ReadFile(p string) ([]byte, error)       { return os.ReadFile(p) }
+func (osMemoryFS) WriteFile(p string, b []byte) error      { return os.WriteFile(p, b, 0600) }
+func (osMemoryFS) Mkdir(p string) error                    { return os.Mkdir(p, 0700) }
+func (osMemoryFS) Remove(p string) error                   { return os.Remove(p) }
 
 type memoryCeilings struct {
 	fs       memoryFS
@@ -238,6 +240,45 @@ func (a *memoryAttempt) cleanup(clock Clock) error {
 	}
 	if a == nil {
 		return nil
+	}
+	return a.removeEmptyTree()
+}
+
+// Enable child controllers while the parent has no internal processes.
+func (a *memoryAttempt) children() (*memoryCeilings, error) {
+	if a == nil {
+		return nil, nil
+	}
+	b, err := a.fs.ReadFile(filepath.Join(a.path, "cgroup.procs"))
+	if err != nil || strings.TrimSpace(string(b)) != "" {
+		return nil, errors.New("memory parent must be empty before delegation")
+	}
+	for _, v := range []struct{ name, value string }{{"memory.oom.group", "0"}, {"cgroup.subtree_control", "+memory"}} {
+		if err := a.fs.WriteFile(filepath.Join(a.path, v.name), []byte(v.value)); err != nil {
+			return nil, err
+		}
+		b, err = a.fs.ReadFile(filepath.Join(a.path, v.name))
+		if err != nil || strings.TrimPrefix(strings.TrimSpace(string(b)), "+") != strings.TrimPrefix(v.value, "+") {
+			return nil, errors.New("child memory delegation not confirmed")
+		}
+	}
+	return &memoryCeilings{fs: a.fs, root: a.path}, nil
+}
+
+// cgroup.kill empties descendants but leaves directories. Recovery uses the
+// same bottom-up removal without needing an in-memory child list.
+func (a *memoryAttempt) removeEmptyTree() error {
+	entries, err := a.fs.ReadDir(a.path)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			child := &memoryAttempt{fs: a.fs, path: filepath.Join(a.path, entry.Name())}
+			if err := child.removeEmptyTree(); err != nil {
+				return err
+			}
+		}
 	}
 	return a.fs.Remove(a.path)
 }

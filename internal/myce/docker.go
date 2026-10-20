@@ -945,18 +945,22 @@ func (d *dockerAttempt) run(p *process, j Job, session string, output *os.File, 
 	p.done <- workerFinish{result: result, err: err}
 }
 
-// A bare zero exit code, or terminal state first observed during recovery,
-// cannot authorize main success. Eligibility is frozen before cleanup resumes.
+// A completed main resumes cleanup directly. dockerOutcome also preserves
+// terminal observations made while recovery settles an unfinished attempt.
 func (state dockerExecution) completedMain() bool {
 	return state.MainFinished && state.Container != "" && state.Stopped && state.StopAt != nil && !state.Pending && !state.OperatorConfirmed
 }
 
 func dockerOutcome(state dockerExecution, owner Result, e error) Result {
 	result := owner
+	// Recovery is a cause only when no terminal main outcome was observed.
+	if state.MainFinished && errors.Is(e, errDockerRecovery) {
+		e = nil
+	}
 	result.CleanupCause = safeRuntimeCause(state.CleanupCause)
 	infrastructure := state.InfrastructureStop || errors.Is(e, errWorkerStartAuthorization)
 	if e != nil {
-		infrastructure = infrastructure || e.Error() == "worker restarted; Docker cleanup required" || errors.Is(e, context.DeadlineExceeded) || errors.Is(e, context.Canceled)
+		infrastructure = infrastructure || errors.Is(e, errDockerRecovery) || errors.Is(e, context.DeadlineExceeded) || errors.Is(e, context.Canceled)
 		result.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("launch", e))
 		result.Error = "Docker launch failed: " + result.ExecutionCause.String()
 		if result.ExecutionCause.Class == "admission_changed" {
@@ -969,9 +973,9 @@ func dockerOutcome(state dockerExecution, owner Result, e error) Result {
 			result.Error = "Docker memory ceiling not enforced"
 		}
 	}
-	result.Forced = state.Forced && !state.MainFinished
+	result.Forced = state.Forced
 	result.Success = e == nil && state.ExitCode == 0
-	if state.MainFinished && state.ExitCode != 0 {
+	if state.ExitCode != 0 {
 		result.Error = fmt.Sprintf("Docker main exited with status %d", state.ExitCode)
 		code := state.ExitCode
 		result.ExecutionCause = &RuntimeCause{Operation: "main", Class: "command_exit", ExitCode: &code}
@@ -993,7 +997,7 @@ func dockerOutcome(state dockerExecution, owner Result, e error) Result {
 	}
 	result = classifyAttemptOutcome(result, attemptCause{
 		Infrastructure: infrastructure,
-		StageFailure:   state.Failure != "" || state.MemoryFailure != "" || state.MainFinished && state.ExitCode != 0 || e != nil && !infrastructure,
+		StageFailure:   state.Failure != "" || state.MemoryFailure != "" || state.ExitCode != 0 && !(infrastructure && (state.ExitCode == 137 || state.ExitCode == 143)) || e != nil && !infrastructure,
 		OutOfMemory:    state.OOMKilled,
 		AmbiguousKill:  state.MemoryFailure == "" && (state.AmbiguousKill || state.Failure == "" && state.ExitCode == 137),
 	})
@@ -1005,11 +1009,13 @@ func dockerOutcome(state dockerExecution, owner Result, e error) Result {
 
 func (d *dockerAttempt) close() { d.haltOnce.Do(func() { close(d.halt) }); <-d.closed }
 
+var errDockerRecovery = errors.New("worker restarted; Docker cleanup required")
+
 func dockerRecoveryError(state dockerExecution) error {
 	if state.completedMain() {
 		return nil
 	}
-	return errors.New("worker restarted; Docker cleanup required")
+	return errDockerRecovery
 }
 
 func (w Worker) restoreDocker(s *workerStore) (*process, error) {
@@ -1034,7 +1040,9 @@ func (w Worker) restoreDocker(s *workerStore) (*process, error) {
 			// stage/OOM evidence cannot be erased by this recovery boundary.
 			state.InfrastructureStop = true
 			r := dockerOutcome(state, Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}}, nil)
+			stageFailure := !r.Success && !r.Interrupted
 			r.Success = false
+			r = classifyAttemptOutcome(r, attemptCause{Infrastructure: true, StageFailure: stageFailure})
 			if r.Interrupted {
 				r.Error = "worker restarted after Docker release"
 			}

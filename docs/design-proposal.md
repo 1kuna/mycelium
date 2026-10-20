@@ -548,9 +548,15 @@ zero allocates a loopback port and a positive port reserves that explicit port.
 Members inherit main's workdir and environment when no environment is named.
 All environments are acquired before payload launch and retained through cleanup.
 Member RAM declarations must fit `needs.host_memory_gb`, the whole simultaneous
-host reservation; they are not added as separate reservations. D4 accounts for
-these bounds but does not enforce child caps. Main member RAM caps remain
-rejected until D5. Docker sidecars retain their existing behavior.
+host reservation; they are not added as separate reservations. Delegated Linux
+cgroup v2 enforces the aggregate parent and each member leaf before exec.
+Main RAM is optional (`execution.main.memory_gb` or `run.memory_gb`); when
+omitted its leaf uses the parent cap. A separate control leaf contains the
+supervisor. Member OOM fails the stage and identifies that member; cleanup
+verifies the whole subtree and removes leaves before releasing the parent.
+macOS and nondelegated foreground workers remain admission-only; requiring
+memory ceilings refuses hosts without delegation. Docker sidecars retain their
+existing behavior.
 
 The worker records a process-group anchor and gated member intent/PID/birth
 before exec, authorizes every member through the shared exact-attempt launch

@@ -146,13 +146,16 @@ func TestDockerProductionOutcomeCause(t *testing.T) {
 						t.Fatal(err)
 					}
 					got := job(t, q, submitted.ID)
-					infra := strings.HasPrefix(cause, "maintenance-") || strings.HasPrefix(cause, "stop-") || cause == "exhaustion" || strings.HasSuffix(cause, "recovery")
+					infra := strings.HasPrefix(cause, "maintenance-") || strings.HasPrefix(cause, "stop-") || cause == "exhaustion" || cause == "worker-recovery"
 					want, retries := "failed", 0
 					if infra {
 						want, retries = "queued", min(attempt, 2)
 						if attempt == 3 {
 							want = "failed"
 						}
+					}
+					if cause == "daemon-recovery" {
+						want = "succeeded"
 					}
 					if strings.HasPrefix(cause, "maintenance-") {
 						retries = 0

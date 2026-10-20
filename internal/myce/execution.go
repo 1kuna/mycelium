@@ -16,6 +16,7 @@ import (
 // RunSpec is the existing worker wire contract. Composition lowers into it;
 // there is no separate extension executor.
 type RunSpec struct {
+	MemoryGB         float64           `json:"memory_gb,omitempty" yaml:"memory_gb,omitempty"`
 	Docker           bool              `json:"docker,omitempty" yaml:"docker,omitempty"`
 	DockerNetwork    string            `json:"docker_network,omitempty" yaml:"docker_network,omitempty"`
 	DockerMemoryGB   float64           `json:"docker_memory_gb,omitempty" yaml:"docker_memory_gb,omitempty"`
@@ -47,8 +48,8 @@ type ExecutionMember struct {
 	MemoryGB    float64           `json:"memory_gb,omitempty" yaml:"memory_gb,omitempty"`
 }
 
-// NativeSidecar is an attempt-owned native helper. MemoryGB is admission-only;
-// child cgroup enforcement belongs to the memory-controller adapter.
+// NativeSidecar is an attempt-owned native helper. MemoryGB is enforced by
+// delegated Linux child cgroups; other hosts report admission-only accounting.
 // Port nil is a plain helper; zero requests an allocated loopback port.
 type NativeSidecar struct {
 	Name        string            `json:"name" yaml:"name"`
@@ -105,11 +106,11 @@ func validateMemberEnv(env map[string]string) error {
 // Old run descriptions and composed descriptions meet at this one adapter.
 func lowerExecution(s *Spec) error {
 	if s.Execution == nil {
-		if len(s.Run.Sidecars) > 0 {
+		if len(s.Run.Sidecars) > 0 || s.Run.MemoryGB != 0 {
 			if s.Run.Docker {
 				return errors.New("native sidecars cannot use Docker")
 			}
-			if err := (ExecutionSpec{Main: ExecutionMember{Command: s.Run.Command, Env: s.Run.Env}, Sidecars: s.Run.Sidecars}).validate(); err != nil {
+			if err := (ExecutionSpec{Main: ExecutionMember{Command: s.Run.Command, Env: s.Run.Env, MemoryGB: s.Run.MemoryGB}, Sidecars: s.Run.Sidecars}).validate(); err != nil {
 				return err
 			}
 			return validateNativeMemory(s)
@@ -123,9 +124,6 @@ func lowerExecution(s *Spec) error {
 	if err := e.validate(); err != nil {
 		return err
 	}
-	if e.Main.MemoryGB > 0 {
-		return errors.New("main member RAM caps require D5")
-	}
 	if err := validateNativeMemory(s); err != nil {
 		return err
 	}
@@ -135,7 +133,7 @@ func lowerExecution(s *Spec) error {
 		}
 		s.Environment = Environment{Name: e.Main.Environment}
 	}
-	s.Run = RunSpec{Command: slices.Clone(e.Main.Command), Workdir: e.Main.Workdir, Env: maps.Clone(e.Main.Env), Sidecars: slices.Clone(e.Sidecars)}
+	s.Run = RunSpec{MemoryGB: e.Main.MemoryGB, Command: slices.Clone(e.Main.Command), Workdir: e.Main.Workdir, Env: maps.Clone(e.Main.Env), Sidecars: slices.Clone(e.Sidecars)}
 	for i := range s.Run.Sidecars {
 		s.Run.Sidecars[i].Env = maps.Clone(s.Run.Sidecars[i].Env)
 	}
@@ -188,11 +186,16 @@ func bindEnvironment(env map[string]string, root string) {
 }
 
 // Member ceilings fit the whole simultaneous host envelope; they are not extra
-// reservations or a sum of independent peaks. D5 enforces these child ceilings.
+// reservations or a sum of independent peaks.
 func validateNativeMemory(s *Spec) error {
+	main := s.Run.MemoryGB
 	members := s.Run.Sidecars
 	if s.Execution != nil {
 		members = s.Execution.Sidecars
+		main = s.Execution.Main.MemoryGB
+	}
+	if !validMemoryValue(main) || main > s.Needs.HostMemoryGB {
+		return errors.New("invalid main RAM cap or cap exceeds whole-job host memory reservation")
 	}
 	for _, m := range members {
 		if m.MemoryGB > s.Needs.HostMemoryGB {

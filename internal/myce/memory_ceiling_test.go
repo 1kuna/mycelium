@@ -37,7 +37,20 @@ func (f fakeMemoryFS) WriteFile(p string, b []byte) error {
 	}
 	return f.osMemoryFS.WriteFile(p, b)
 }
-func (f fakeMemoryFS) Remove(p string) error { return os.Rename(p, p+".finished") }
+func (f fakeMemoryFS) Remove(p string) error {
+	entries, err := os.ReadDir(p)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			if err := os.Remove(filepath.Join(p, entry.Name())); err != nil {
+				return err
+			}
+		}
+	}
+	return os.Remove(p)
+}
 func fakeCeilings(t *testing.T) *memoryCeilings {
 	t.Helper()
 	root := t.TempDir()
@@ -576,7 +589,7 @@ func TestRequireMemoryCeilingsStartupAndDeclarations(t *testing.T) {
 	if err := rt.checkLoadMemory(context.Background(), &workerModel{model: Model{MemoryGB: 1}}); err == nil || !strings.Contains(err.Error(), "host_memory_gb") {
 		t.Fatal("undeclared model started", err)
 	}
-	w.memoryCeilings = &memoryCeilings{fs: deniedMemoryFS{}, root: c.root}
+	w.memoryCeilings = &memoryCeilings{fs: pagedMemoryFS{pageSize: 4096, mismatch: "memory.max"}, root: c.root}
 	if err := w.requireMemoryCeilings(); !errors.Is(err, ErrMemoryCeilingsRequired) {
 		t.Fatal("unwritable ceiling accepted", err)
 	}

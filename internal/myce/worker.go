@@ -382,7 +382,7 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		delete(env, "MYCE_USAGE_FILE")
 	}
 	delete(env, "MYCE_TOKEN")
-	if len(j.Spec.Run.Sidecars) > 0 {
+	if len(j.Spec.Run.Sidecars) > 0 || j.Spec.Run.MemoryGB > 0 {
 		if w.batchMemory != nil {
 			w.batchMemory.Store(math.Float64bits(j.Spec.Needs.MemoryGB))
 		}
@@ -562,17 +562,11 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		}
 		p.mu.Lock()
 		result.PoliteStop = p.polite
-		ambiguousKill := false
-		if cmd.ProcessState != nil {
-			if status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok {
-				ambiguousKill = status.Signaled() && status.Signal() == syscall.SIGKILL && oomErr == nil
-			}
-		}
-		result = classifyAttemptOutcome(result, attemptCause{
+		result = nativeOutcome(result, waitErr, attemptCause{
 			Infrastructure: infrastructureStop,
-			StageFailure:   launchErr != nil || waitErr != nil && !infrastructureStop || oomErr != nil,
+			StopSignal:     infrastructureStop && cmd.ProcessState != nil && cmd.ProcessState.ExitCode() == 128+int(syscall.SIGTERM),
+			StageFailure:   launchErr != nil || oomErr != nil,
 			OutOfMemory:    result.OutOfMemory || oomErr != nil && strings.HasPrefix(ceilingDiagnostic(oomErr.Error(), ""), "exceeded its "),
-			AmbiguousKill:  ambiguousKill,
 		})
 		p.mu.Unlock()
 		// Persist independently of the reconnect loop, which may be in a network
@@ -686,8 +680,26 @@ func (w Worker) Run(stop context.Context) error {
 		}
 		s.state.CheckpointRoot = root
 	}
-	if err = s.cleanupOrphan(w.Clock); err != nil {
+	var memoryFiles memoryFS = osMemoryFS{}
+	if w.memoryCeilings != nil {
+		memoryFiles = w.memoryCeilings.fs
+	}
+	if s.state.Job != nil && !s.state.Job.Spec.Run.Docker && s.state.Identity != "" {
+		if err = s.recoverResult(w.Machine.ID); err != nil {
+			return err
+		}
+		if err = s.recoverNativeCause(w.Machine.ID, memoryFiles); err != nil {
+			return err
+		}
+	}
+	if err = s.cleanupOrphan(w.Clock, memoryFiles); err != nil {
 		return err
+	}
+	if s.state.Job != nil && !s.state.Job.Spec.Run.Docker && s.state.Result != nil {
+		s.state.Result.ReleasePending = false
+		if err = saveWorkerJSON(s.dir, s.state.Identity+".result.json", *s.state.Result); err != nil {
+			return err
+		}
 	}
 	var recoveringProcess *process
 	if s.state.Job != nil && s.state.Job.Spec.Run.Docker && s.state.Identity != "" {
@@ -712,10 +724,7 @@ func (w Worker) Run(stop context.Context) error {
 		s.state.PID = 0
 	}
 	if s.state.Result != nil && s.state.OperatorStopped {
-		s.state.Result.OperatorStop = true
-		if !s.state.Result.Success {
-			s.state.Result.Interrupted = true
-		}
+		*s.state.Result = operatorOutcome(*s.state.Result, true)
 	}
 	if s.state.Job != nil && (s.state.Result != nil || recoveringProcess != nil) {
 		recovering = true
@@ -952,10 +961,7 @@ func (w Worker) Run(stop context.Context) error {
 					return fmt.Errorf("persist command result: %w", f.err)
 				}
 				if s.state.OperatorStopped {
-					f.result.OperatorStop = true
-					if !f.result.Success {
-						f.result.Interrupted = true
-					}
+					f.result = operatorOutcome(f.result, true)
 				}
 				s.state.Result = &f.result
 				s.state.PID = 0

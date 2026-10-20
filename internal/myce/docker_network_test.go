@@ -195,6 +195,9 @@ func fakeDockerGroupInspect(root string, ids []string, mode string) {
 			if mode == "main-nonzero" && id == "id1" {
 				code = 7
 			}
+			if _, e := os.Stat(filepath.Join(root, "stopped")); id == "id1" && e == nil {
+				code = 137
+			}
 			if strings.HasPrefix(id, "sidecar-") {
 				if _, e := os.Stat(filepath.Join(root, "stopped-"+id)); e == nil {
 					code = 137
