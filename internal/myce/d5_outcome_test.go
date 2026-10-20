@@ -136,6 +136,7 @@ type outcomeRow struct {
 	name                                                   string
 	code                                                   int
 	intent, delivered, late, lost, oom, recovery, operator bool
+	priority                                               bool
 	launchRefusal, portProbe                               bool
 	success, interrupted                                   bool
 }
@@ -144,6 +145,10 @@ func TestOutcomeRuntimeTable(t *testing.T) {
 	for _, runtime := range []string{"native", "native-group", "docker"} {
 		for _, tc := range []outcomeRow{
 			{name: "completion", success: true},
+			{name: "priority-completion-before-delivery", priority: true, late: true, recovery: true, success: true},
+			{name: "priority-cooperative-stop", priority: true, delivered: true, recovery: true, interrupted: true},
+			{name: "priority-independent-exit", priority: true, code: 7},
+			{name: "priority-oom", priority: true, code: 137, delivered: true, oom: true},
 			{name: "mycelium-launch-refusal", launchRefusal: true, interrupted: true},
 			{name: "mycelium-spawn-failure", startFailureKind: launchFailed, interrupted: true},
 			{name: "mycelium-environment-failure", startFailureKind: environmentFailed, interrupted: true},
@@ -164,6 +169,9 @@ func TestOutcomeRuntimeTable(t *testing.T) {
 		} {
 			t.Run(runtime+"/"+tc.name, func(t *testing.T) {
 				r := operatorOutcome(d5RuntimeOutcome(t, runtime, tc), tc.operator)
+				if (r.PriorityStop != nil) != (tc.priority && tc.interrupted) {
+					t.Fatalf("priority stop provenance: %+v", r)
+				}
 				if r.Success != tc.success || r.Interrupted != tc.interrupted || r.OutOfMemory != tc.oom || r.OperatorStop != tc.operator {
 					t.Fatalf("got %+v; want success=%v interruption=%v oom=%v", r, tc.success, tc.interrupted, tc.oom)
 				}
@@ -194,6 +202,11 @@ func d5RuntimeOutcome(t *testing.T, runtime string, tc outcomeRow) Result {
 	script := fmt.Sprintf(`trap 'exit %d' TERM; touch "$1"; while [ ! -f "$2" ]; do sleep .01; done; exit %d`, tc.code, tc.code)
 	w, s, p := d5NativeStart(t, runtime == "native-group", nil, []string{"sh", "-c", script, "main", dir + "/ready", dir + "/finish"})
 	nativeFile(t, dir, "ready")
+	if tc.priority {
+		if err := p.recordPriorityStop(s, &PriorityPreemption{Cause: priorityPreemptionCause}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if tc.portProbe {
 		fact := d5ForeignPortProbe(t, p.cmd.Process.Pid)
 		p.mu.Lock()
@@ -267,6 +280,15 @@ func d5DockerRuntimeOutcome(t *testing.T, tc outcomeRow) Result {
 		return d5Finish(t, p)
 	}
 	_, s, d, c, root := restartResultFixture(t)
+	if tc.priority {
+		d.mu.Lock()
+		d.state.PriorityStop = &PriorityPreemption{Cause: priorityPreemptionCause}
+		err := d.saveLocked()
+		d.mu.Unlock()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
 	if tc.portProbe {
 		// Fake daemon boundary supplies a real, separate process group as the
 		// synthetic container's PID namespace. The listener is outside that group.

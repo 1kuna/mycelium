@@ -53,20 +53,34 @@ When a worker asks for work, the queue picks, from the jobs that fit this machin
 3. within that project, a model already loaded, then cached locally, then needing a NAS copy;
 4. then the earliest deadline and the job that has waited longest.
 
-**Making room.** Production is checked first on every check-in and immediately
-on submission. When no idle fitting machine has room, stop lower-priority work
-right away through an authenticated long-poll notification, without waiting for
-its next check-in. Resumable work receives SIGTERM and 10 seconds by default to
-save; the queue's `--production-stop-grace` configures that duration. Deadline
-work still allows 2 minutes and only stops resumable lower-priority jobs.
-Production also stops non-resumable lower-priority work immediately. Stopped
-jobs return to the front of their priority line without consuming an
-infrastructure retry; non-resumable jobs start over with a new execution attempt.
-**Make experiments resumable and save checkpoints often**: production may arrive
-at any moment, and a power cut offers no grace at all. Status reports production
-submission-to-start acknowledgement latency; the laptop dev test exercises the actual process
-start under 15 seconds, excluding model load time.
+**Making room.** The highest fitting owner tier is checked on submission and
+check-in through the shared planner. Prefer compatible free capacity; otherwise
+stop only useful lower-tier work, including non-resumable commands, native
+sidecar groups, model calls/loads, pinned engines and environment builds. Idle
+unpinned same-tier model cache may be evicted; active same-tier work is never
+preempted. Resumable commands receive SIGTERM and ten seconds by default to save;
+non-resumable work stops immediately. `--preemption-stop-grace` sets this common
+grace (`--production-stop-grace` is a compatibility alias). After two planned
+preemptions, each resumed batch, build or desired engine gets at least that grace
+of runtime before another priority stop. Strict higher tiers may still starve
+lower tiers before admission.
 
+Each planned stop carries `priority_preemption`, exact demand/victim identity
+and policy match/revision. Stop intent never proves delivery or release. D5's
+recorded member facts classify interruption; independent exit/OOM remains a
+failure. Cancellation wins over completion, and completion observed before stop delivery
+wins over preemption. A checkpoint handler exiting zero after a delivered
+priority stop is an interruption, not a completed attempt.
+Confirmed interruption requeues the same logical job and submission key without
+charging infrastructure retries or losses, including production victims. Resume
+cooperative jobs from their last durable checkpoint; restart other jobs in a new
+attempt. Stop deadlines authorize kill, and exact cleanup still gates replacement.
+
+Pins remain durable desired state and return when capacity permits; higher tiers
+can displace their engines. Streaming calls return a typed `priority_preemption`
+interruption (OpenAI SSE error, or `X-Myce-Error-Code` trailer on generic streams)
+and are never replayed after output starts. Model routing accepts `X-Myce-Class`
+or legacy `X-Myce-Priority`, with conflicting declarations rejected.
 
 **Owner priority tiers (P1, #98).** The durable SQLite policy contains ordered,
 uniquely named tiers of `project/class` selectors using Go `path.Match` globs.
@@ -78,16 +92,13 @@ legacy priority normalizes at admission, and conflicting declarations fail.
 Project/class identifiers cannot contain `/`. Status shows current tier,
 selector and policy revision. Policy changes rerank existing jobs on subsequent
 planning decisions without changing keyed replay or legacy reliability behavior.
-An already-assigned attempt is treated like a running attempt: a policy change
-alone does not revoke its assignment or prevent it from starting, even if a
-higher-tier job is now waiting. Policy changes apply to future placement
-decisions; reclaiming already-assigned attempts belongs to P3 preemption.
-P2 admission fairness applies across all classes within a tier. P3 expanded
-preemption/retry semantics remain a later slice; current eligibility and
-stop/retry rules still apply. See
+An already-assigned attempt can be reclaimed before Started when the normal
+planner selects useful higher-tier demand. Cached assignments and preparation
+offers cannot bypass that stop fence. P2 admission fairness applies across all
+classes within a tier. See
 [the policy guide](guide-priority-policy.md) for format and API details.
 
-**Optional physical-host takeover.** A queue host policy may opt into whole-machine production takeover, default off. Production selects one eligible physical host; all lower-priority work on that host stops safely, regardless of how much room the request needs. Stopped experiments rejoin the shared queue and resume on any compatible machine, without an infrastructure retry. Production admission waits for all lower-priority cleanup acknowledgements. Unknown cleanup survives loss and restart; elapsed stop grace never proves release. Pins remain protected.
+**Optional physical-host takeover.** A queue host policy may opt into whole-machine production takeover, default off. Production selects one eligible physical host; all lower-priority work on that host stops safely, regardless of how much room the request needs. Stopped experiments rejoin the shared queue and resume on any compatible machine, without an infrastructure retry. Production admission waits for all lower-priority cleanup acknowledgements. Unknown cleanup survives loss and restart; elapsed stop grace never proves release. Pins in the same or a higher tier remain protected.
 
 There is **no idle production cooldown** after the final demand and cleanup settle. Lower-priority work can run again; new production preempts through the queue. Production takeover covers submitted GPU work, not CPU publication. Project machine allow-lists apply at every priority and to model calls; commands and servers receive their placement in worker-owned environment variables.
 

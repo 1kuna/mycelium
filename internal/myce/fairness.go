@@ -251,7 +251,7 @@ func (q *Queue) candidate(m *Machine, excluded map[string]bool) *Job {
 }
 func (q *Queue) pick(m *Machine) *Job {
 	best := q.candidate(m, nil)
-	if best != nil && (q.calls[best.ID] != nil || !fits(best, m, m.FreeMemoryGB) || !environmentReady(best, m)) {
+	if best != nil && (q.preparationActive(m) || q.preparationStopping(m) || q.calls[best.ID] != nil || !fits(best, m, m.FreeMemoryGB) || !environmentReady(best, m)) {
 		return nil
 	}
 	return best

@@ -298,7 +298,7 @@ func (q *Queue) holdWaitReason(j *Job) string {
 				continue
 			}
 			for _, slot := range q.s.ModelSlots {
-				if slot.Machine == m.ID && q.slotPinned(slot) && slot.Model != j.Spec.Needs.Model {
+				if slot.Machine == m.ID && q.slotPinned(slot) && q.comparePriority(q.slotSpec(slot), j.Spec) <= 0 && slot.Model != j.Spec.Needs.Model {
 					model, _ := q.model(slot.Model)
 					if model.MemoryGB+j.Spec.Needs.MemoryGB > m.TotalMemoryGB {
 						return "pinned model " + slot.Model + " on " + m.ID + " prevents production placement"
@@ -343,7 +343,7 @@ func (q *Queue) productionTarget(j *Job, call *ModelCall) string {
 		}
 		pinned := 0.0
 		for _, s := range q.s.ModelSlots {
-			if s.Machine == m.ID && (q.slotPinned(s) || s.State == "unload_failed") {
+			if s.Machine == m.ID && (q.slotPinned(s) && q.comparePriority(q.slotSpec(s), j.Spec) <= 0 || s.State == "unload_failed") {
 				model, _ := q.model(s.Model)
 				if call == nil || s.Model != call.Model {
 					pinned += model.MemoryGB
@@ -458,7 +458,7 @@ func (q *Queue) maintainHolds() {
 			m := q.s.Machines[j.Machine]
 			if m != nil && hostID(m) == host && (j.State == "running" || j.State == "stopping") {
 				if q.comparePriority(j.Spec, q.hostPrioritySpec(host)) > 0 {
-					q.stopFor(j, "production", "host hold")
+					q.stopBatchFor(j, q.hostPreemptionDemand(host))
 				}
 				q.retainRelease(j)
 			}
@@ -467,9 +467,13 @@ func (q *Queue) maintainHolds() {
 			m := q.s.Machines[c.Machine]
 			if m != nil && hostID(m) == host && q.comparePriority(callJob(c).Spec, q.hostPrioritySpec(host)) > 0 && c.Error == "" {
 				if slot := q.s.ModelSlots[slotKey(c.Machine, c.Model)]; slot != nil {
+					if slot.PriorityStop == nil && q.preemptionProtected(slot.PreemptionCount, slot.RunSince) {
+						continue
+					}
 					slot.ReleasingCalls = true
 				}
 				if c.StopAt == nil {
+					c.PriorityStop = q.preemption(q.hostPreemptionDemand(host), c.ID)
 					t := now.Add(q.productionGrace)
 					c.StopAt = &t
 				}
@@ -480,13 +484,19 @@ func (q *Queue) maintainHolds() {
 		}
 		for _, s := range q.s.ModelSlots {
 			m := q.s.Machines[s.Machine]
-			if m == nil || hostID(m) != host || q.slotPinned(s) || s.State == "failed" {
+			if m == nil || hostID(m) != host || q.slotPinned(s) && q.comparePriority(q.slotSpec(s), q.hostPrioritySpec(host)) <= 0 || s.State == "failed" {
+				continue
+			}
+			if q.comparePriority(q.slotSpec(s), q.hostPrioritySpec(host)) > 0 && !q.slotReclaimableFor(s, q.hostPrioritySpec(host)) {
 				continue
 			}
 			if s.State != "unload_failed" && s.State != "unloading" && (q.comparePriority(q.slotSpec(s), q.hostPrioritySpec(host)) > 0 && (!s.ProductionUsed || s.InFlight > 0) || q.unreported[m.ID]) {
 				s.State = "draining"
 			}
 			if s.State == "draining" {
+				if q.comparePriority(q.slotSpec(s), q.hostPrioritySpec(host)) > 0 && s.PriorityStop == nil {
+					q.recordEnginePreemption(s, q.hostPreemptionDemand(host))
+				}
 				if s.StopAt == nil {
 					t := now.Add(q.productionGrace)
 					s.StopAt = &t

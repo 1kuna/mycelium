@@ -20,6 +20,11 @@ func TestProductionNonresumableRequeueNoLoss(t *testing.T) {
 	if !stop.Stop || !stop.Kill {
 		t.Fatal("production did not immediately kill")
 	}
+	ack := result(r, false)
+	ack.Interrupted = true
+	if err := q.Complete(ack); err != nil {
+		t.Fatal(err)
+	}
 	requeued := job(t, q, j.ID)
 	if requeued.State != "queued" || requeued.Losses != 0 {
 		t.Fatal("preemption consumed retry")
@@ -260,22 +265,22 @@ func TestPinnedLoadFailureVisible(t *testing.T) {
 	}
 }
 
-func TestProductionShortensExistingDeadlineGrace(t *testing.T) {
+func TestPriorityPreemptionDoesNotExtendExistingDeadlineGrace(t *testing.T) {
 	q, c := fixture(t)
 	submit(t, q, spec("experiment"))
 	m := machine("one", "fake")
 	r := check(t, q, m, nil).Job
 	submit(t, q, spec("deadline"))
-	if check(t, q, m, r).GraceSeconds != 120 {
+	if check(t, q, m, r).GraceSeconds != 10 {
 		t.Fatal("deadline grace")
 	}
 	c.Advance(time.Second)
 	submit(t, q, spec("production"))
-	if check(t, q, m, r).GraceSeconds != 10 {
-		t.Fatal("production did not shorten existing grace")
+	if check(t, q, m, r).GraceSeconds != 9 {
+		t.Fatal("another higher tier extended existing grace")
 	}
 	c.Advance(time.Second)
-	if check(t, q, m, r).GraceSeconds != 9 {
+	if check(t, q, m, r).GraceSeconds != 8 {
 		t.Fatal("grace was extended on check-in")
 	}
 }
@@ -348,7 +353,7 @@ func TestProductionPreemptionAcknowledgementDoesNotStopSecondCard(t *testing.T) 
 		t.Fatal("one production job must stop exactly one experiment")
 	}
 	c.Advance(time.Second)
-	finish(t, q, first, false)
+	finishInterrupted(t, q, first)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
@@ -380,8 +385,8 @@ func TestProductionPreemptionTwoJobsStopTwoCards(t *testing.T) {
 	if !check(t, q, a, first).Stop || !check(t, q, b, second).Stop {
 		t.Fatal("two production jobs need two experiment releases")
 	}
-	finish(t, q, first, false)
-	finish(t, q, second, false)
+	finishInterrupted(t, q, first)
+	finishInterrupted(t, q, second)
 	one, two := check(t, q, a, nil).Job, check(t, q, b, nil).Job
 	if one == nil || two == nil || one.ID == two.ID ||
 		(one.ID != p1.ID && one.ID != p2.ID) || (two.ID != p1.ID && two.ID != p2.ID) {
@@ -408,7 +413,7 @@ func TestProductionPreemptionReleaseGrace(t *testing.T) {
 			}
 			if acknowledged {
 				c.Advance(time.Second)
-				finish(t, q, first, false)
+				finishInterrupted(t, q, first)
 				c.Advance(8 * time.Second)
 			} else {
 				c.Advance(9 * time.Second)
@@ -439,7 +444,7 @@ func TestProductionPreemptionFullReportSupersedesReleaseCredit(t *testing.T) {
 	second := check(t, q, b, nil).Job
 	submit(t, q, spec("production"))
 	c.Advance(time.Second)
-	finish(t, q, first, false)
+	finishInterrupted(t, q, first)
 	a.FreeMemoryGB = 0 // The command exited, but the memory remains unavailable.
 	if check(t, q, a, nil).Job != nil {
 		t.Fatal("release credit cannot admit work")

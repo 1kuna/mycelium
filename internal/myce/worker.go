@@ -84,8 +84,9 @@ type workerFinish struct {
 	err    error
 }
 type process struct {
-	outcome     memberOutcome
-	saveOutcome func(memberOutcome) error
+	priorityStop *PriorityPreemption
+	outcome      memberOutcome
+	saveOutcome  func(memberOutcome) error
 
 	machine string
 	docker  *dockerAttempt
@@ -98,6 +99,31 @@ type process struct {
 	stopped bool
 	polite  bool
 	killed  bool
+}
+
+// Save exact-attempt intent before delivery. Result goroutines read only the
+// process copy under p.mu; restart recovery reads the durable worker/daemon copy.
+func (p *process) recordPriorityStop(s *workerStore, stop *PriorityPreemption) error {
+	if stop == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	s.state.PriorityStop = stop
+	if err := s.save(); err != nil {
+		return err
+	}
+	if p.docker != nil {
+		p.docker.mu.Lock()
+		p.docker.state.PriorityStop = stop
+		err := p.docker.saveLocked()
+		p.docker.mu.Unlock()
+		if err != nil {
+			return err
+		}
+	}
+	p.priorityStop = stop
+	return nil
 }
 
 func (p *process) stop(now time.Time, grace time.Duration, kill bool) {
@@ -588,13 +614,6 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		} else if closeErr != nil {
 			result.Error = closeErr.Error()
 		}
-		if result.Success {
-			if e := w.publishExtensionFiles(j); e != nil {
-				result.Success = false
-				result.Error = e.Error()
-				result.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("outputs", e))
-			}
-		}
 		p.mu.Lock()
 		result.PoliteStop = p.polite
 		facts := p.outcome
@@ -603,10 +622,18 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 			facts.Signals = nil
 		}
 		result = classifyAttemptOutcome(result, attemptCause{
+			PriorityStop:  p.priorityStop,
 			memberOutcome: facts,
 			OutOfMemory:   result.OutOfMemory || oomErr != nil && strings.HasPrefix(ceilingDiagnostic(oomErr.Error(), ""), "exceeded its "),
 		})
 		p.mu.Unlock()
+		if result.Success {
+			if e := w.publishExtensionFiles(j); e != nil {
+				result.Success = false
+				result.Error = e.Error()
+				result.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("outputs", e))
+			}
+		}
 		// Persist independently of the reconnect loop, which may be in a network
 		// request when the command finishes. Restart replays this exact session.
 		saveErr := errors.Join(observationErr, saveWorkerJSON(s.dir, identity+".result.json", result))
@@ -761,7 +788,7 @@ func (w Worker) Run(stop context.Context) error {
 		if err = saveWorkerJSON(s.dir, s.state.Identity+".observation-loss.json", facts); err != nil {
 			return err
 		}
-		r := classifyAttemptOutcome(Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Error: "worker restarted; previous process group cleaned up"}, attemptCause{memberOutcome: facts})
+		r := classifyAttemptOutcome(Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Error: "worker restarted; previous process group cleaned up"}, attemptCause{memberOutcome: facts, PriorityStop: s.state.PriorityStop})
 		s.state.Result = &r
 		s.state.PID = 0
 	}
@@ -1235,6 +1262,9 @@ func (w Worker) Run(stop context.Context) error {
 					leaveSent = true
 				}
 				if p != nil && reply.Stop {
+					if e := p.recordPriorityStop(s, reply.PriorityStop); e != nil {
+						return e
+					}
 					p.stop(now, time.Duration(max(0, reply.GraceSeconds)*float64(time.Second)), reply.Kill)
 				}
 				if leaving && !leaveSent {
@@ -1288,6 +1318,7 @@ func (w Worker) Run(stop context.Context) error {
 					}
 					if s.state.Result != nil && (err == nil || stale(err)) {
 						s.state.Job = nil
+						s.state.PriorityStop = nil
 						s.fileGeneration = 0
 						s.state.OperatorStopped = false
 						s.checkpointUnavailable = false

@@ -81,6 +81,17 @@ func finish(t *testing.T, q *Queue, j *Job, success bool) {
 		t.Fatal(err)
 	}
 }
+
+// Synthetic acknowledgement of a delivered planned stop, distinct from an
+// independently failing payload. Real adapters establish this through D5 facts.
+func finishInterrupted(t *testing.T, q *Queue, j *Job) {
+	t.Helper()
+	r := result(j, false)
+	r.Interrupted = true
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+}
 func result(j *Job, success bool) Result {
 	return Result{Machine: j.Machine, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Success: success, Error: "test error"}
 }

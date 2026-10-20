@@ -149,7 +149,7 @@ func (q *Queue) allStartHostsDisabled(j *Job) bool {
 
 func (q *Queue) startPlacementAllowed(j *Job) bool {
 	m := q.s.Machines[j.Machine]
-	if m == nil {
+	if m == nil || q.preparationStopping(m) {
 		return false
 	}
 	if j.Spec.Run.Docker && (m.DockerCleanup == "creating" || m.DockerCleanup == "create pending") {

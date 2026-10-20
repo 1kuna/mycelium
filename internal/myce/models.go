@@ -182,18 +182,22 @@ func validateModels(c ModelConfig) error {
 }
 
 type ModelSlot struct {
-	Project              string          `json:"project,omitempty"`
-	RuntimeFailed        bool            `json:"runtime_failed,omitempty"`
-	LoadUntil            *time.Time      `json:"load_until,omitempty"`
-	LoadTimedOut         bool            `json:"load_timed_out,omitempty"`
-	RetryReserved        bool            `json:"retry_reserved,omitempty"`
-	FailureCounted       bool            `json:"failure_counted,omitempty"`
-	Attempt              string          `json:"attempt,omitempty"`
-	CrashCount           int             `json:"crash_count,omitempty"`
-	HealthySince         *time.Time      `json:"healthy_since,omitempty"`
-	HealthRevision       uint64          `json:"health_revision,omitempty"`
-	ApprovalUnknownSince *time.Time      `json:"approval_unknown_since,omitempty"`
-	Placement            *ModelPlacement `json:"placement,omitempty"`
+	PreemptionCount      int                 `json:"preemption_count,omitempty"`
+	RunSince             *time.Time          `json:"run_since,omitempty"`
+	Class                string              `json:"class,omitempty"`
+	PriorityStop         *PriorityPreemption `json:"priority_stop,omitempty"`
+	Project              string              `json:"project,omitempty"`
+	RuntimeFailed        bool                `json:"runtime_failed,omitempty"`
+	LoadUntil            *time.Time          `json:"load_until,omitempty"`
+	LoadTimedOut         bool                `json:"load_timed_out,omitempty"`
+	RetryReserved        bool                `json:"retry_reserved,omitempty"`
+	FailureCounted       bool                `json:"failure_counted,omitempty"`
+	Attempt              string              `json:"attempt,omitempty"`
+	CrashCount           int                 `json:"crash_count,omitempty"`
+	HealthySince         *time.Time          `json:"healthy_since,omitempty"`
+	HealthRevision       uint64              `json:"health_revision,omitempty"`
+	ApprovalUnknownSince *time.Time          `json:"approval_unknown_since,omitempty"`
+	Placement            *ModelPlacement     `json:"placement,omitempty"`
 
 	RetryAt           *time.Time         `json:"retry_at,omitempty"`
 	RetryDelay        time.Duration      `json:"retry_delay,omitempty"`
@@ -224,6 +228,9 @@ type ModelReport struct {
 	Error          string `json:"error,omitempty"`
 }
 type ModelCall struct {
+	PreemptionCount                  int
+	Class                            string
+	PriorityStop                     *PriorityPreemption
 	Attempt, ExcludeAttempt          string
 	StopAt                           *time.Time
 	ProductionHost                   string
@@ -466,8 +473,9 @@ func (q *Queue) maintainModels() {
 				c.StartedAt = &now
 				c.Session = m.Session
 				c.Attempt = s.Attempt
-				if s.InFlight == 0 || q.comparePriority(callJob(c).Spec, Spec{Project: s.Project, Priority: s.Priority}) < 0 {
+				if s.InFlight == 0 || q.comparePriority(callJob(c).Spec, Spec{Project: s.Project, Priority: s.Priority, Class: s.Class}) < 0 {
 					s.Priority = c.Priority
+					s.Class = c.Class
 					s.Project = c.Project
 				}
 				s.InFlight++
@@ -490,8 +498,9 @@ func (q *Queue) maintainModels() {
 					eligible = append(eligible, m)
 				}
 				if s.State == "loading" {
-					if q.comparePriority(callJob(c).Spec, Spec{Project: s.Project, Priority: s.Priority}) < 0 {
+					if q.comparePriority(callJob(c).Spec, Spec{Project: s.Project, Priority: s.Priority, Class: s.Class}) < 0 {
 						s.Priority = c.Priority
+						s.Class = c.Class
 						s.Project = c.Project
 						if c.Priority == "production" {
 							s.ProductionUsed = true
@@ -510,12 +519,18 @@ func (q *Queue) maintainModels() {
 		// Check all free workers before draining a model or stopping any batch.
 		for _, m := range eligible {
 			if m.FreeMemoryGB >= model.MemoryGB && hostFits(m, model.MemoryGB, model.HostMemoryGB) {
+				q.preemptPreparations(m, callJob(c))
+				if q.preparationActive(m) {
+					continue
+				}
 				if s := q.s.ModelSlots[slotKey(m.ID, c.Model)]; s != nil {
 					q.beginEngineAttempt(s, c.Priority)
+					s.Class = c.Class
 					s.Project = c.Project
 				} else {
-					q.s.ModelSlots[slotKey(m.ID, c.Model)] = &ModelSlot{Project: c.Project, Model: c.Model, Machine: m.ID, Session: m.Session, State: "loading", LoadUntil: q.engineLoadDeadline(), Attempt: ID(), Priority: c.Priority, ProductionUsed: c.Priority == "production", LastUsed: now}
+					q.s.ModelSlots[slotKey(m.ID, c.Model)] = &ModelSlot{Project: c.Project, Model: c.Model, Machine: m.ID, Session: m.Session, State: "loading", LoadUntil: q.engineLoadDeadline(), Attempt: ID(), Priority: c.Priority, Class: c.Class, ProductionUsed: c.Priority == "production", LastUsed: now}
 				}
+				q.initEnginePreemption(q.s.ModelSlots[slotKey(m.ID, c.Model)])
 				m.FreeMemoryGB -= model.MemoryGB
 				q.refreshHostMemory()
 				allocated = true
@@ -538,7 +553,7 @@ func (q *Queue) maintainModels() {
 			}
 			var victim *Job
 			for _, j := range q.s.Jobs {
-				if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") && (j.Spec.Resumable || c.Priority == "production") && (c.Priority == "production" || (!m.CheckpointUnavailable && q.checkpointsAvailable())) && q.comparePriority(j.Spec, callJob(c).Spec) > 0 {
+				if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") && q.batchPreemptible(j, callJob(c).Spec) {
 					victim = j
 					possible += j.Spec.Needs.MemoryGB
 				}
@@ -546,10 +561,10 @@ func (q *Queue) maintainModels() {
 			if possible < model.MemoryGB {
 				continue
 			}
-			q.reclaimHost(m, model.MemoryGB, model.HostMemoryGB, c.Priority, "model call", callJob(c).Spec)
-			q.makeModelRoom(m, model.MemoryGB, c.Priority, callJob(c).Spec)
+			q.reclaimHostFor(m, model.MemoryGB, model.HostMemoryGB, callJob(c))
+			q.makeModelRoomFor(m, model.MemoryGB, callJob(c))
 			if victim != nil && m.FreeMemoryGB+q.modelMemory(m.ID) < model.MemoryGB {
-				q.stopFor(victim, c.Priority, "model call")
+				q.stopBatchFor(victim, callJob(c))
 			}
 			// Prefer draining models alone; if that cannot suffice, save the batch.
 			reclaimable := m.FreeMemoryGB
@@ -560,7 +575,7 @@ func (q *Queue) maintainModels() {
 				}
 			}
 			if reclaimable < model.MemoryGB && victim != nil {
-				q.stopFor(victim, c.Priority, "model call")
+				q.stopBatchFor(victim, callJob(c))
 			}
 			break
 		}
@@ -592,7 +607,7 @@ func (q *Queue) maintainModels() {
 	}
 }
 func callJob(c *ModelCall) *Job {
-	j := &Job{ProductionHost: c.ProductionHost, ID: c.ID, Queued: c.Queued, WaitingSince: c.WaitingSince, StartedAt: c.StartedAt, Spec: Spec{Project: c.Project, Priority: c.Priority, Deadline: c.Deadline}}
+	j := &Job{ProductionHost: c.ProductionHost, ID: c.ID, Queued: c.Queued, WaitingSince: c.WaitingSince, StartedAt: c.StartedAt, Spec: Spec{Project: c.Project, Priority: c.Priority, Class: c.Class, Deadline: c.Deadline}}
 	j.Spec.Needs.Model = c.Model
 	return j
 }
@@ -619,13 +634,13 @@ func (q *Queue) callCanUse(m *Machine, c *ModelCall) bool {
 		if s.Model == c.Model && s.State == "loading" {
 			return true
 		}
-		if s.InFlight == 0 && q.slotReclaimableFor(s, callJob(c).Spec) {
+		if q.slotReclaimableFor(s, callJob(c).Spec) {
 			resident, _ := q.model(s.Model)
 			possible += resident.MemoryGB
 		}
 	}
 	for _, j := range q.s.Jobs {
-		if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") && (j.Spec.Resumable || c.Priority == "production") && (c.Priority == "production" || (!m.CheckpointUnavailable && q.checkpointsAvailable())) && q.comparePriority(j.Spec, callJob(c).Spec) > 0 {
+		if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") && q.batchPreemptible(j, callJob(c).Spec) {
 			possible += j.Spec.Needs.MemoryGB
 		}
 	}
@@ -637,15 +652,21 @@ func (q *Queue) callCanUse(m *Machine, c *ModelCall) bool {
 // fence in every GPU/RAM release estimate and action; active work and loading
 // attempts retain the existing strictly-lower-tier preemption rule.
 func (q *Queue) slotReclaimableFor(s *ModelSlot, demand Spec) bool {
-	if q.slotPinned(s) || s.State == "unload_failed" || s.State == "failed" {
+	if s.State == "unload_failed" || s.State == "failed" {
 		return false
 	}
 	n := q.comparePriority(q.slotSpec(s), demand)
-	return n > 0 || n == 0 && s.InFlight == 0 && (s.State == "ready" || s.State == "draining")
+	if n > 0 && s.PriorityStop == nil && q.preemptionProtected(s.PreemptionCount, s.RunSince) {
+		return false
+	}
+	return n > 0 || !q.slotPinned(s) && n == 0 && s.InFlight == 0 && (s.State == "ready" || s.State == "draining")
 }
 
 func (q *Queue) makeModelRoom(m *Machine, need float64, priority string, identity ...Spec) {
-	demand := priorityDemand(priority, identity)
+	q.makeModelRoomFor(m, need, &Job{ID: "model room", Spec: priorityDemand(priority, identity)})
+}
+func (q *Queue) makeModelRoomFor(m *Machine, need float64, job *Job) {
+	demand := job.Spec
 	slots := []*ModelSlot{}
 	for _, s := range q.s.ModelSlots {
 		if s.Machine == m.ID && q.slotReclaimableFor(s, demand) {
@@ -663,7 +684,7 @@ func (q *Queue) makeModelRoom(m *Machine, need float64, priority string, identit
 		if room >= need {
 			break
 		}
-		s.State = "draining"
+		q.preemptSlot(s, job)
 		model, _ := q.model(s.Model)
 		room += model.MemoryGB
 	}
@@ -735,11 +756,13 @@ func (q *Queue) refreshModelPriority(c *ModelCall) {
 		return
 	}
 	s.Priority = "experiment"
+	s.Class = "experiment"
 	s.Project = ""
 	found := false
 	for _, live := range q.calls {
-		if live.Machine == c.Machine && live.Session == c.Session && live.Attempt == c.Attempt && live.Model == c.Model && live.Error == "" && (!found || q.comparePriority(callJob(live).Spec, Spec{Project: s.Project, Priority: s.Priority}) < 0) {
+		if live.Machine == c.Machine && live.Session == c.Session && live.Attempt == c.Attempt && live.Model == c.Model && live.Error == "" && (!found || q.comparePriority(callJob(live).Spec, Spec{Project: s.Project, Priority: s.Priority, Class: s.Class}) < 0) {
 			s.Priority = live.Priority
+			s.Class = live.Class
 			s.Project = live.Project
 			found = true
 		}
@@ -747,12 +770,18 @@ func (q *Queue) refreshModelPriority(c *ModelCall) {
 
 }
 func modelError(w http.ResponseWriter, status int, message string) {
+	if message == priorityPreemptionCause {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"type": "interruption", "code": priorityPreemptionCause, "message": errPriorityPreemption.Error()}})
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"message": message, "type": "mycelium_error"}})
 }
 func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
-	c := &ModelCall{Project: r.Header.Get("X-Myce-Project"), Priority: r.Header.Get("X-Myce-Priority")}
+	c := &ModelCall{Project: r.Header.Get("X-Myce-Project"), Priority: r.Header.Get("X-Myce-Priority"), Class: r.Header.Get("X-Myce-Class")}
 	var data []byte
 	var spool *spooledModelRequest
 	var bodySize int64
@@ -869,7 +898,11 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if call.Error != "" {
-			modelError(w, 503, call.Error)
+			if call.PriorityStop != nil {
+				modelError(w, 503, priorityPreemptionCause)
+			} else {
+				modelError(w, 503, call.Error)
+			}
 			return
 		}
 		if timedOut {
@@ -910,10 +943,15 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 						m := a.Queue.s.Machines[call.Machine]
 						live := a.Queue.calls[c.ID]
 						expired := !a.Queue.clock.Now().Before(requestUntil)
+						preempted := live != nil && live.PriorityStop != nil && live.Error != ""
 						lost := m == nil || m.Gone || m.Session != call.Session || live != nil && live.Error != "" || !a.Queue.callAttemptLive(&call)
 						a.Queue.mu.Unlock()
 						if expired {
 							cancelCause(errModelRequestTimeout)
+							return
+						}
+						if preempted {
+							cancelCause(errPriorityPreemption)
 							return
 						}
 						if lost {
@@ -1010,6 +1048,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 						if n > 0 {
 							if !started {
 								copyProxyHeaders(w.Header(), res.Header)
+								w.Header().Add("Trailer", "X-Myce-Error-Code")
 								w.WriteHeader(res.StatusCode)
 								started = true
 							}
@@ -1024,15 +1063,34 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 							}
 						}
 						if readErr != nil {
-							if readErr != io.EOF && started && !generic {
+							// Unload can close the transport before the watcher runs.
+							a.Queue.mu.Lock()
+							live := a.Queue.calls[c.ID]
+							preempted := live != nil && live.PriorityStop != nil && live.Error != ""
+							a.Queue.mu.Unlock()
+							if preempted {
+								cancelCause(errPriorityPreemption)
+							}
+							if (readErr != io.EOF || errors.Is(context.Cause(proxyCtx), errPriorityPreemption)) && started && !generic {
 								message := "worker lost after streaming response started; unsafe to retry"
 								if errors.Is(context.Cause(proxyCtx), errModelRequestTimeout) {
 									message = errModelRequestTimeout.Error()
 								}
-								_, _ = fmt.Fprintf(w, "\ndata: {\"error\":{\"message\":%q}}\n\n", message)
+								if errors.Is(context.Cause(proxyCtx), errPriorityPreemption) {
+									_, _ = fmt.Fprintf(w, "\ndata: {\"error\":{\"type\":\"interruption\",\"code\":\"priority_preemption\",\"message\":%q}}\n\n", errPriorityPreemption.Error())
+								} else {
+									_, _ = fmt.Fprintf(w, "\ndata: {\"error\":{\"message\":%q}}\n\n", message)
+								}
 								if f, ok := w.(http.Flusher); ok {
 									f.Flush()
 								}
+							}
+							if generic && started && errors.Is(context.Cause(proxyCtx), errPriorityPreemption) {
+								w.Header().Set("X-Myce-Error-Code", priorityPreemptionCause)
+								res.Body.Close()
+								cancel()
+								<-done
+								return
 							}
 							if generic && started && readErr != io.EOF {
 								res.Body.Close()
@@ -1080,6 +1138,9 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 			preempted := ""
 			if live != nil {
 				preempted = live.Error
+				if preempted != "" && live.PriorityStop != nil {
+					preempted = priorityPreemptionCause
+				}
 			}
 			a.Queue.mu.Unlock()
 			if preempted != "" {
@@ -1164,7 +1225,11 @@ func (q *Queue) makeBatchRoom(j *Job, planned, handled map[string]bool) string {
 			if r.Machine != m.ID || (r.State != "running" && r.State != "stopping") {
 				continue
 			}
-			if r.State == "running" && (q.comparePriority(r.Spec, j.Spec) <= 0 || (!r.Spec.Resumable && j.Spec.Priority != "production")) {
+			if r.State == "stopping" && expired(r.StopAt, q.clock.Now()) {
+				blocked = true
+				break
+			}
+			if r.State == "running" && !q.batchPreemptible(r, j.Spec) {
 				blocked = true
 				break
 			}
@@ -1276,15 +1341,18 @@ func (q *Queue) makeBatchRoom(j *Job, planned, handled map[string]bool) string {
 	if best == nil {
 		return ""
 	}
-	q.reclaimHost(q.s.Machines[best.machine], j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, j.Spec.Priority, "job", j.Spec)
+	q.reclaimHostFor(q.s.Machines[best.machine], j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, j)
 	if best.batch != nil && q.comparePriority(best.batch.Spec, j.Spec) > 0 {
-		q.stopFor(best.batch, j.Spec.Priority, "job")
+		q.stopBatchFor(best.batch, j)
 	}
 	for _, s := range best.slots {
-		s.State = "draining"
+		q.preemptSlot(s, j)
 	}
+	q.preemptPreparations(q.s.Machines[best.machine], j)
 	return best.machine
 }
+
+var errPriorityPreemption = errors.New("model call interrupted by higher priority demand")
 
 var errModelRequestTimeout = errors.New("model request timeout exceeded")
 

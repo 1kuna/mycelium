@@ -41,6 +41,7 @@ type memberOutcome struct {
 	ObservationLost bool                 `json:"observation_lost,omitempty"`
 }
 type attemptCause struct {
+	PriorityStop *PriorityPreemption
 	memberOutcome
 	OutOfMemory bool
 	Cancelled   bool
@@ -105,11 +106,18 @@ func startFailureOutcome(owner Result, err error) Result {
 func classifyAttemptOutcome(result Result, facts attemptCause) Result {
 	result.OutOfMemory = result.OutOfMemory || facts.OutOfMemory
 	result.Interrupted = false
+	result.PriorityStop = nil
 	if facts.Stale || facts.Cancelled {
 		result.Success, result.Forced = false, false
 		return result
 	}
 	if result.OutOfMemory || facts.Exit != nil && facts.Exit.Status != 0 {
+		result.Success = false
+	}
+	// A checkpoint handler can exit zero after TERM. Delivered priority stops
+	// interrupt that partial attempt; intent or a signal after observed exit
+	// cannot override an already completed payload.
+	if facts.PriorityStop != nil && facts.deliveredBeforeExit() && !result.OutOfMemory {
 		result.Success = false
 	}
 	if !result.Success && !result.OutOfMemory {
@@ -123,6 +131,15 @@ func classifyAttemptOutcome(result Result, facts attemptCause) Result {
 			result.Error += "; "
 		}
 		result.Error += "SIGKILL without an infrastructure stop; treated as stage failure"
+	}
+	return withStopProvenance(result, facts.PriorityStop)
+}
+
+// Planned intent can annotate a proven interruption, never manufacture one.
+func withStopProvenance(result Result, stop *PriorityPreemption) Result {
+	result.PriorityStop = nil
+	if result.Interrupted && !result.Success && !result.OutOfMemory {
+		result.PriorityStop = stop
 	}
 	return result
 }

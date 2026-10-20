@@ -153,7 +153,7 @@ func readModelSecrets(root string, refs map[string]string, fleetToken string) (m
 func (q *Queue) callDefaults(c *ModelCall, model Model, h http.Header, defaults bool) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	for _, name := range []string{"X-Myce-Project", "X-Myce-Priority", "X-Myce-Deadline"} {
+	for _, name := range []string{"X-Myce-Project", "X-Myce-Priority", "X-Myce-Class", "X-Myce-Deadline"} {
 		if values, supplied := h[name]; supplied && len(values) != 1 {
 			return errors.New("duplicate model routing header: supply each X-Myce header once")
 		}
@@ -163,14 +163,14 @@ func (q *Queue) callDefaults(c *ModelCall, model Model, h http.Header, defaults 
 		if _, supplied := h["X-Myce-Project"]; !supplied {
 			c.Project = model.Project
 		}
-		if _, supplied := h["X-Myce-Priority"]; !supplied {
+		if _, supplied := h["X-Myce-Priority"]; !supplied && c.Class == "" {
 			c.Priority = q.s.Policies[c.Project].DefaultCallPriority
 			if c.Priority == "" {
 				c.Priority = "experiment"
 			}
 		}
 	}
-	if c.Project == "" || c.Priority == "" {
+	if c.Project == "" || c.Priority == "" && c.Class == "" {
 		if !defaults {
 			return errors.New("X-Myce-Project and X-Myce-Priority are required for generic model routes")
 		}
@@ -179,9 +179,11 @@ func (q *Queue) callDefaults(c *ModelCall, model Model, h http.Header, defaults 
 	if err := validateProjectIdentifier(c.Project); err != nil {
 		return err
 	}
-	if legacyRank(c.Priority) == 3 {
-		return errors.New("X-Myce-Priority must be production, deadline, or experiment")
+	identity := Spec{Project: c.Project, Priority: c.Priority, Class: c.Class}
+	if err := normalizeJobClass(&identity); err != nil {
+		return err
 	}
+	c.Priority, c.Class = identity.Priority, identity.Class
 	c.Deadline = nil
 	if c.Priority == "deadline" {
 		deadline, err := time.Parse(time.RFC3339, h.Get("X-Myce-Deadline"))

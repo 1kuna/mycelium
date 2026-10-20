@@ -40,6 +40,7 @@ func (r *workerRetry) succeeded(now time.Time, interval time.Duration) {
 }
 
 type workerState struct {
+	PriorityStop    *PriorityPreemption    `json:"priority_stop,omitempty"`
 	StopAt          *time.Time             `json:"stop_at,omitempty"`
 	Schema          int                    `json:"schema_version"`
 	OperatorStopped bool                   `json:"operator_stopped,omitempty"`
