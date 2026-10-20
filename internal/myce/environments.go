@@ -323,7 +323,7 @@ func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
 		return q.extensionPreparationPlan(m)
 	}
 	for _, other := range q.s.Machines {
-		if other.ID == m.ID || !q.workerIdle(other) || !q.placementAllowed(j, other) || !fits(j, other, other.FreeMemoryGB) {
+		if other.ID == m.ID || !q.workerIdle(other, j) || !q.placementAllowed(j, other) || !fits(j, other, other.FreeMemoryGB) {
 			continue
 		}
 		if q.placementBetter(j, other, m) {

@@ -185,12 +185,12 @@ func (q *Queue) loadSeconds(model string, m *Machine) float64 {
 	}
 	return float64(remaining) / speed
 }
-func (q *Queue) workerIdle(m *Machine) bool {
+func (q *Queue) workerIdle(m *Machine, demand *Job) bool {
 	if !q.workerBatchIdle(m) || q.untrackedPreparations(m) > 0 {
 		return false
 	}
 	for _, l := range q.s.PreparationPlans {
-		if l.Machine == m.ID && l.Session == m.Session && l.Started {
+		if l.Machine == m.ID && l.Session == m.Session && l.Started && !q.preparationShared(m, demand, &l) {
 			return false
 		}
 	}
@@ -250,7 +250,7 @@ func (q *Queue) placementBetter(j *Job, a, b *Machine) bool {
 func (q *Queue) betterPlacement(j *Job, m *Machine) bool {
 	if j.Spec.extensionJob() {
 		for _, other := range q.s.Machines {
-			if other.ID != m.ID && !q.unreported[other.ID] && q.workerIdle(other) && q.placementAllowed(j, other) && q.checkpointReady(j, other) && fits(j, other, other.FreeMemoryGB) && q.capabilityPlacementBetter(j, other, m) {
+			if other.ID != m.ID && !q.unreported[other.ID] && q.workerIdle(other, j) && q.placementAllowed(j, other) && q.checkpointReady(j, other) && fits(j, other, other.FreeMemoryGB) && q.capabilityPlacementBetter(j, other, m) {
 				return true
 			}
 		}
@@ -260,7 +260,7 @@ func (q *Queue) betterPlacement(j *Job, m *Machine) bool {
 		return false
 	}
 	for _, other := range q.s.Machines {
-		if other.ID == m.ID || !q.workerIdle(other) || !q.placementAllowed(j, other) || !fits(j, other, other.FreeMemoryGB) {
+		if other.ID == m.ID || !q.workerIdle(other, j) || !q.placementAllowed(j, other) || !fits(j, other, other.FreeMemoryGB) {
 			continue
 		}
 		if q.placementBetter(j, other, m) {
