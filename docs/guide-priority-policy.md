@@ -93,9 +93,27 @@ the snapshot. CLI and browser status show the tier, selector and revision.
 Placement, preparation and existing reclamation use one tier comparator.
 
 Placement, status and simulation use the same admission planner and comparator.
-Existing resumability, stop-grace, retry, host hold and pin rules still apply.
-Expanded preemption/retry causes and custom model-call classes are subsequent
-slices. Equal-tier projects share separate available workers; multiple concurrent
+Higher tiers can reclaim batch attempts, native sidecar groups, model calls and
+loads, idle engines (including pins), and environment builds. Each exact planned
+stop records `priority_preemption`, demand/victim identity and policy revision.
+Production victims keep their infrastructure retry budget; experiments keep
+losses and checkpoint progress. A successful completion wins over preemption;
+cancellation wins over both. Independent exit/OOM still fails under the shared
+outcome classifier. A deadline authorizes stopping, never assumes cleanup.
+
+Resumable victims get ten seconds by default, non-resumable commands stop
+immediately. Deadline demand preserves non-resumable commands and keeps the
+120-second grace for resumable commands. `queue --preemption-stop-grace`
+configures the other priority-stop interval; the legacy
+`--production-stop-grace` flag remains an alias. After two displacements, resumed
+work gets at least that interval of runtime before another priority stop. Pins
+are desired state and are restored when capacity permits. Model requests accept
+`X-Myce-Class` (or legacy `X-Myce-Priority`); conflicts are rejected. Interrupted
+OpenAI streams emit an SSE error with `type: interruption` and
+`code: priority_preemption`; generic streams use the `X-Myce-Error-Code` trailer.
+Partial output is never transparently replayed.
+
+Equal-tier projects share separate available workers; multiple concurrent
 batch attempts on one worker are a later slice. Same-tier work is not stopped
 to rebalance usage: a single indefinite allocation can occupy a scarce device
 indefinitely. Strict higher tiers can starve lower ones.

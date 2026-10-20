@@ -93,7 +93,8 @@ func dockerRunArgs(command []string) ([]string, error) {
 
 // dockerExecution is durable custody, separate from the worker's heartbeat state.
 type dockerExecution struct {
-	CleanupCause *RuntimeCause `json:"cleanup_cause,omitempty"`
+	PriorityStop *PriorityPreemption `json:"priority_stop,omitempty"`
+	CleanupCause *RuntimeCause       `json:"cleanup_cause,omitempty"`
 
 	LogsNone           bool                    `json:"logs_none,omitempty"`
 	Owner              *Result                 `json:"owner,omitempty"` // Saved job/attempt/machine/session binding; legacy custody uses opaque identity.
@@ -1105,7 +1106,7 @@ func dockerOutcome(state dockerExecution, owner Result, e error) Result {
 	if facts.Exit == nil && state.ExitCode != 0 && state.MemoryFailure == "" {
 		facts.Exit = &memberExit{Status: state.ExitCode}
 	}
-	result = classifyAttemptOutcome(result, attemptCause{memberOutcome: facts, OutOfMemory: state.OOMKilled})
+	result = classifyAttemptOutcome(result, attemptCause{PriorityStop: state.PriorityStop, memberOutcome: facts, OutOfMemory: state.OOMKilled})
 	if result.Interrupted {
 		result.Success = false
 	}
@@ -1151,7 +1152,7 @@ func (w Worker) restoreDocker(s *workerStore) (*process, error) {
 			if err := saveWorkerJSON(s.dir, state.Identity+".observation-loss.json", facts); err != nil {
 				return nil, err
 			}
-			r = classifyAttemptOutcome(r, attemptCause{memberOutcome: facts})
+			r = classifyAttemptOutcome(r, attemptCause{PriorityStop: state.PriorityStop, memberOutcome: facts})
 			if r.Interrupted {
 				r.Error = "worker restarted after Docker release"
 			}

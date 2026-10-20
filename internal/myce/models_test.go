@@ -92,8 +92,8 @@ func TestModelPriorityDrainingAndBatchMemory(t *testing.T) {
 		t.Fatal("batch started without enough memory")
 	}
 	s := q.s.ModelSlots[slotKey(m.ID, "test")]
-	if s.State != "draining" || s.InFlight != 1 {
-		t.Fatal("priority must drain without unloading in-flight call")
+	if s.State != "draining" || s.InFlight != 1 || c.Error != priorityPreemptionCause || s.StopAt == nil {
+		t.Fatal("priority must interrupt the call and retain memory until cleanup")
 	}
 	next := addModelCall(t, q, "experiment")
 	if next.Machine != "" {
@@ -720,7 +720,7 @@ func TestCombinedBatchModelReclamation(t *testing.T) {
 	}
 }
 
-func TestCombinedReclamationProtectsPinsAndDeadlineWork(t *testing.T) {
+func TestCombinedReclamationTierAndPinEligibility(t *testing.T) {
 	for _, tc := range []struct {
 		name, priority               string
 		pin, active, resumable, stop bool

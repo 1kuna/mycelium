@@ -61,7 +61,7 @@ func (q *Queue) callExcludes(c *ModelCall, machine string) bool {
 
 func (q *Queue) callAttemptLive(c *ModelCall) bool {
 	s := q.s.ModelSlots[slotKey(c.Machine, c.Model)]
-	return s != nil && s.Session == c.Session && s.Attempt == c.Attempt && (s.State == "ready" || s.State == "draining")
+	return c.Error == "" && s != nil && s.Session == c.Session && s.Attempt == c.Attempt && (s.State == "ready" || s.State == "draining")
 }
 
 func (q *Queue) engineAttemptLost(c *ModelCall) bool {
@@ -221,7 +221,7 @@ func (q *Queue) maintainEngineRetry(key string, s *ModelSlot, m *Machine, model 
 		}
 	}
 
-	job := &Job{Spec: Spec{Project: project, Priority: priority}}
+	job := &Job{ID: "pin/" + project + "/" + s.Model, Spec: Spec{Project: project, Priority: priority}}
 	job.Spec.Needs.Model = s.Model
 	if !q.placementAllowed(job, m) {
 		return
@@ -233,19 +233,15 @@ func (q *Queue) maintainEngineRetry(key string, s *ModelSlot, m *Machine, model 
 		room.FreeMemoryGB = max(0, room.FreeMemoryGB+model.MemoryGB-m.modelReservationDebtGB)
 		room.FreeHostMemoryGB = max(0, room.FreeHostMemoryGB+hostNeed(m, model.MemoryGB, model.HostMemoryGB)-m.hostReservationDebtGB)
 	}
-	if room.FreeMemoryGB < model.MemoryGB || !hostFits(&room, model.MemoryGB, model.HostMemoryGB) {
-		// A newly added pin can still need ordinary pin reclamation.
-		if q.reclaimableGPUMemory(m, priority, job.Spec) < model.MemoryGB || !q.reclaimHost(m, model.MemoryGB, model.HostMemoryGB, priority, "pin", job.Spec) {
-			return
-		}
-		q.makeModelRoom(m, model.MemoryGB, priority, job.Spec)
-		for _, batch := range q.s.Jobs {
-			if batch.Machine == m.ID && (batch.State == "running" || batch.State == "stopping") && q.comparePriority(batch.Spec, job.Spec) > 0 && m.FreeMemoryGB+batch.Spec.Needs.MemoryGB >= model.MemoryGB {
-				q.stopFor(batch, priority, "pin")
-			}
-		}
+	plan := q.roomPlan(job, &room, false)
+	if plan == nil {
 		return
 	}
+	q.applyPlacement(plan, job)
+	if room.FreeMemoryGB < model.MemoryGB || !hostFits(&room, model.MemoryGB, model.HostMemoryGB) || q.preparationActive(m) || q.preparationStopping(m) {
+		return
+	}
+
 	if !s.RetryReserved {
 		s.RetryReserved = true
 		m.FreeMemoryGB -= model.MemoryGB
@@ -269,6 +265,8 @@ func (q *Queue) beginEngineAttempt(s *ModelSlot, priority string) {
 	s.Priority = priority
 	s.ProductionUsed = priority == "production"
 	s.StopAt = nil
+	s.PriorityStop = nil
+	q.initEnginePreemption(s)
 	s.Recovering = false
 	s.RetryAt = nil
 	s.ApprovalUnknownSince = nil

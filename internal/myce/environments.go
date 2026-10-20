@@ -292,8 +292,26 @@ type EnvironmentReport struct {
 }
 
 func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
-	if !q.workerIdle(m) || !m.EnvironmentBuilder {
+	if !q.hostLaunchAllowed(m, m.Session) || !q.workerIdle(m) || !m.EnvironmentBuilder || q.preparationStopping(m) {
 		return nil
+	}
+	// Preserve a started same-tier/protected build even if another queued job
+	// wins admission. Only a planned stop may interrupt its preparation.
+	for _, l := range q.s.PreparationPlans {
+		if l.Kind != "environment" || l.Machine != m.ID || l.Session != m.Session || !l.Started {
+			continue
+		}
+		if j := q.s.Jobs[l.Demand]; j != nil && j.State == "queued" && !cancelled(j) {
+			if e := qualifiedExtension(j, m); e != nil {
+				return q.extensionPreparationOffer(*e, m)
+			}
+			r := j.EnvironmentRecipes[m.GPU]
+			if r.Key == l.Key {
+				copy := l
+				r.Launch = &copy
+				return []EnvironmentRecipe{r}
+			}
+		}
 	}
 	j := q.candidate(m, nil)
 	if j != nil && j.Spec.extensionJob() && !environmentReady(j, m) {

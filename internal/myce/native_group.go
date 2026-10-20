@@ -289,6 +289,7 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 		forced, polite := p.killed, p.polite
 		stage = stage || g.stageFailure
 		facts := g.outcomeLocked(runErr, stage)
+		priorityStop := p.priorityStop
 		p.mu.Unlock()
 		groupErr := g.cleanupProcesses(writer)
 		oom := g.memoryFailure()
@@ -321,7 +322,7 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 				collectProgramUsage(&r, main.cmd.ProcessState, programUsageFile(g.dir, identity))
 			}
 		}
-		r = classifyAttemptOutcome(r, attemptCause{memberOutcome: facts, OutOfMemory: r.OutOfMemory || oom != nil && strings.Contains(oom.Error(), "exceeded its ")})
+		r = classifyAttemptOutcome(r, attemptCause{PriorityStop: priorityStop, memberOutcome: facts, OutOfMemory: r.OutOfMemory || oom != nil && strings.Contains(oom.Error(), "exceeded its ")})
 		if r.Success {
 			if e := w.publishExtensionFiles(j); e != nil {
 				r.Success = false

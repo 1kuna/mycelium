@@ -458,7 +458,7 @@ func (q *Queue) retry(j *Job, why string) {
 		}
 		return
 	}
-	planned := plannedMaintenanceStop(j)
+	planned := plannedStop(j)
 	if j.Spec.Priority == "production" {
 		// Fence every old copy, including a lost copy that later reports newer progress.
 		for i := range j.Copies {
@@ -588,7 +588,7 @@ func (q *Queue) maintain() {
 	}
 
 	for _, j := range q.s.Jobs {
-		if !q.networkQuiet && !q.unreported[j.Machine] && j.State == "stopping" && !j.Spec.Run.Docker && expired(j.StopAt, now) {
+		if !q.networkQuiet && !q.unreported[j.Machine] && j.State == "stopping" && !plannedPriorityStop(j) && !j.Spec.Run.Docker && expired(j.StopAt, now) {
 			if cancelled(j) {
 				j.State = "cancelled"
 				j.StopAt = nil
@@ -784,6 +784,11 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 				q.cancelUnofferedPreparations(&m, reply)
 				return
 			}
+			for _, l := range q.s.PreparationPlans {
+				if l.Machine == m.ID && l.Session == m.Session && l.StopAt != nil {
+					boundStop(&reply.PreparationStopAt, *l.StopAt)
+				}
+			}
 			reply.EnvironmentPlan = q.environmentPlan(&m)
 			reply.ModelPlan = q.modelPlan(m.ID)
 			reply.CopyPlan, reply.CacheUsage, reply.CachePins = q.copyPlan(&m)
@@ -841,6 +846,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			}
 			j.Progress = c.Running.Progress
 			if j.State == "stopping" {
+				reply.PriorityStop = priorityStop(j)
 				reply.Stop = true
 				reply.Kill = expired(j.StopAt, q.clock.Now())
 				reply.GraceSeconds = j.StopAt.Sub(q.clock.Now()).Seconds()
@@ -1096,26 +1102,29 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 		m.LastSeen = q.clock.Now()
 		delete(q.unreported, m.ID)
 	}
+	r = withStopProvenance(r, priorityStop(j))
 	j.ExecutionCause = safeRuntimeCause(r.ExecutionCause)
 	j.CleanupCause = safeRuntimeCause(r.CleanupCause)
 	// A kernel OOM is the payload's failure even if preemption raced it.
 	ceilingFailure := !r.Success && strings.HasPrefix(ceilingDiagnostic(r.Error, ""), "exceeded its ")
 	oomFailure := !r.Success && (r.OutOfMemory || ceilingFailure)
-	stageFailure := j.Spec.Priority == "production" && !r.Success && !r.Interrupted
-	if cancelled(j) || j.State == "stopping" && !oomFailure && !stageFailure {
-		if j.StopAt != nil && q.clock.Now().Before(*j.StopAt) {
-			if q.s.BatchReleases == nil {
-				q.s.BatchReleases = map[string]batchRelease{}
-			}
-			q.s.BatchReleases[j.Machine] = batchRelease{Session: j.Session, MemoryGB: j.Spec.Needs.MemoryGB, Until: *j.StopAt}
+	stageFailure := (j.Spec.Priority == "production" || plannedPriorityStop(j)) && !r.Success && !r.Interrupted
+	// Any confirmed exit frees the victim, including completion or independent
+	// failure. This credit only plans a release; a fresh report still gates use.
+	if j.State == "stopping" && !r.ReleasePending && j.StopAt != nil && q.clock.Now().Before(*j.StopAt) {
+		if q.s.BatchReleases == nil {
+			q.s.BatchReleases = map[string]batchRelease{}
 		}
+		q.s.BatchReleases[j.Machine] = batchRelease{Session: j.Session, MemoryGB: j.Spec.Needs.MemoryGB, Until: *j.StopAt}
+	}
+	if cancelled(j) || j.State == "stopping" && (!r.Success || !plannedPriorityStop(j)) && !oomFailure && !stageFailure {
 		if cancelled(j) {
 			j.State = "cancelled"
 			j.StopAt = nil
 		} else {
 			q.retry(j, j.Reason)
 		}
-	} else if j.Spec.Priority == "production" && (stageFailure || oomFailure) {
+	} else if (j.Spec.Priority == "production" || plannedPriorityStop(j)) && (stageFailure || oomFailure) {
 		j.State, j.Reason = "failed", "command failed: "+r.Error
 	} else if oomFailure && j.Spec.extensionJob() {
 		q.retryOOM(j)
@@ -1531,7 +1540,7 @@ func (q *Queue) markStarted(j *Job) {
 func (q *Queue) Started(r Result) error {
 	var rejected error
 	err := q.update(func() error {
-		q.maintainStartDeadlines()
+		q.maintain()
 		j, e := q.current(r)
 		if e != nil {
 			rejected = e
@@ -1559,7 +1568,7 @@ func (q *Queue) Started(r Result) error {
 func (q *Queue) renewRecoveryStartWindow(j *Job) {
 	// Planned leave keeps its original deadline; queue maintenance stops retain
 	// the recovery window for already-started attempts.
-	recovering := j.State == "running" || j.State == "stopping" && plannedMaintenanceStop(j)
+	recovering := j.State == "running" || j.State == "stopping" && plannedStop(j)
 	if j.Spec.Priority == "production" && recovering && j.StartedAt != nil && j.Spec.StartBy != nil {
 		// Recovery is bounded from loss detection, using the original first-start window.
 		if j.StartWindow == 0 {

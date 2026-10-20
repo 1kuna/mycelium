@@ -623,7 +623,7 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 					}
 					doneAt := t.loadUntil + (t.work-t.segment)/worker.spec.Speed
 					if doneAt <= now+1e-7 || t.stopAt <= now+1e-7 {
-						success := doneAt <= now+1e-7 && j.State == "running"
+						success := doneAt <= now+1e-7 && (j.State == "running" || plannedPriorityStop(j))
 						t.done = min(t.work, t.segment+max(0, now-t.loadUntil)*worker.spec.Speed)
 						if !success {
 							// SIGTERM saves current progress; non-resumable work starts over.
@@ -633,7 +633,9 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 								t.done = 0
 							}
 						}
-						if e = q.Complete(simResult(t, worker, success)); e != nil && !(errors.Is(e, ErrStale) && j.State == "queued") {
+						outcome := simResult(t, worker, success)
+						outcome.Interrupted = !success && j.State == "stopping"
+						if e = q.Complete(outcome); e != nil && !(errors.Is(e, ErrStale) && j.State == "queued") {
 							return r, e
 						}
 						worker.task = nil

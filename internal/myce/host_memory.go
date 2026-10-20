@@ -116,7 +116,9 @@ func (q *Queue) refreshHostMemory() {
 // acknowledgement arrives. GPU releases are local; RAM releases may be on any
 // card on the same physical host. Pins and failed unloads remain protected.
 func (q *Queue) hostReleases(m *Machine, gpu, host float64, priority string, identity ...Spec) ([]*Job, []*ModelSlot, bool) {
-	demand := priorityDemand(priority, identity)
+	return q.hostReleasesExcept(m, gpu, host, priorityDemand(priority, identity), nil, nil)
+}
+func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, releasedJobs map[*Job]bool, releasedSlots map[*ModelSlot]bool) ([]*Job, []*ModelSlot, bool) {
 	if m.HostMemoryBudgetStatus() != "" {
 		return nil, nil, false
 	}
@@ -135,7 +137,7 @@ func (q *Queue) hostReleases(m *Machine, gpu, host float64, priority string, ide
 	var slots []*ModelSlot
 	for _, j := range q.s.Jobs {
 		owner := q.s.Machines[j.Machine]
-		if owner == nil || owner.Gone || hostID(owner) != hostID(m) || q.comparePriority(j.Spec, demand) <= 0 || (!j.Spec.Resumable && priority != "production") || (priority != "production" && (owner.CheckpointUnavailable || !q.checkpointsAvailable())) {
+		if releasedJobs[j] || owner == nil || owner.Gone || hostID(owner) != hostID(m) || !q.batchPreemptible(j, demand) {
 			continue
 		}
 		if j.State == "running" || j.State == "stopping" {
@@ -150,7 +152,7 @@ func (q *Queue) hostReleases(m *Machine, gpu, host float64, priority string, ide
 	})
 	for _, s := range q.s.ModelSlots {
 		owner := q.s.Machines[s.Machine]
-		if owner != nil && !owner.Gone && hostID(owner) == hostID(m) && q.slotReclaimableFor(s, demand) {
+		if !releasedSlots[s] && owner != nil && !owner.Gone && hostID(owner) == hostID(m) && q.slotReclaimableFor(s, demand) {
 			slots = append(slots, s)
 		}
 	}
@@ -186,20 +188,6 @@ func (q *Queue) hostReleases(m *Machine, gpu, host float64, priority string, ide
 	}
 	return chosenJobs, chosenSlots, room >= need
 }
-func (q *Queue) reclaimHost(m *Machine, gpu, host float64, priority, kind string, identity ...Spec) bool {
-	jobs, slots, ok := q.hostReleases(m, gpu, host, priority, identity...)
-	if !ok {
-		return false
-	}
-	for _, s := range slots {
-		s.State = "draining"
-	}
-	for _, j := range jobs {
-		q.stopFor(j, priority, kind)
-	}
-	return true
-}
-
 func (q *Queue) reclaimableGPUMemory(m *Machine, priority string, identity ...Spec) float64 {
 	demand := priorityDemand(priority, identity)
 	room := m.FreeMemoryGB
@@ -210,7 +198,7 @@ func (q *Queue) reclaimableGPUMemory(m *Machine, priority string, identity ...Sp
 		}
 	}
 	for _, j := range q.s.Jobs {
-		if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") && q.comparePriority(j.Spec, demand) > 0 && (j.Spec.Resumable || priority == "production") && (priority == "production" || (!m.CheckpointUnavailable && q.checkpointsAvailable())) {
+		if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") && q.batchPreemptible(j, demand) {
 			room += j.Spec.Needs.MemoryGB
 		}
 	}

@@ -269,14 +269,15 @@ func legacyRank(p string) int {
 }
 
 type Copy struct {
-	StopCause   string              `json:"stop_cause,omitempty"`
-	Extension   *ExtensionSelection `json:"extension,omitempty"`
-	LossCharged bool                `json:"loss_charged,omitempty"`
-	Recoverable bool                `json:"recoverable"`
-	Machine     string              `json:"machine"`
-	Session     string              `json:"session"`
-	Attempt     int                 `json:"attempt"`
-	Progress    int64               `json:"progress"`
+	PriorityStop *PriorityPreemption `json:"priority_stop,omitempty"`
+	StopCause    string              `json:"stop_cause,omitempty"`
+	Extension    *ExtensionSelection `json:"extension,omitempty"`
+	LossCharged  bool                `json:"loss_charged,omitempty"`
+	Recoverable  bool                `json:"recoverable"`
+	Machine      string              `json:"machine"`
+	Session      string              `json:"session"`
+	Attempt      int                 `json:"attempt"`
+	Progress     int64               `json:"progress"`
 
 	// Exact cleanup evidence, retained even after another attempt is assigned.
 	ReleaseConfirmed bool   `json:"release_confirmed,omitempty"`
@@ -284,9 +285,10 @@ type Copy struct {
 }
 
 type Job struct {
-	PriorityPolicy PriorityMatch `json:"priority_policy"`
-	ExecutionCause *RuntimeCause `json:"execution_cause,omitempty"`
-	CleanupCause   *RuntimeCause `json:"cleanup_cause,omitempty"`
+	PreemptionCount int           `json:"preemption_count,omitempty"`
+	PriorityPolicy  PriorityMatch `json:"priority_policy"`
+	ExecutionCause  *RuntimeCause `json:"execution_cause,omitempty"`
+	CleanupCause    *RuntimeCause `json:"cleanup_cause,omitempty"`
 	// Durable cancellation fence, independent of diagnostic reason text.
 	CancelledAt *time.Time `json:"cancelled_at,omitempty"`
 
@@ -414,6 +416,7 @@ type Checkin struct {
 	Running         *Execution    `json:"running,omitempty"`
 }
 type Reply struct {
+	PriorityStop      *PriorityPreemption `json:"priority_stop,omitempty"`
 	BenchmarkPlan     *HostLaunch         `json:"benchmark_plan,omitempty"`
 	PreparationStopAt *time.Time          `json:"preparation_stop_at,omitempty"`
 	HostMaintenance   string              `json:"host_maintenance,omitempty"`
@@ -434,19 +437,20 @@ type Reply struct {
 	GraceSeconds      float64             `json:"grace_seconds"`
 }
 type Result struct {
-	ExecutionCause       *RuntimeCause `json:"execution_cause,omitempty"`
-	CleanupCause         *RuntimeCause `json:"cleanup_cause,omitempty"`
-	PoliteStop           bool          `json:"polite_stop,omitempty"`
-	OutputRefs           FileManifest  `json:"output_refs,omitempty"`
-	Usage                *SizeHint     `json:"usage,omitempty"`
-	OutOfMemory          bool          `json:"out_of_memory,omitempty"`
-	ExtensionUnavailable bool          `json:"extension_unavailable,omitempty"`
-	OperatorStop         bool          `json:"operator_stop,omitempty"`
-	ReleaseOnly          bool          `json:"release_only,omitempty"`
-	Forced               bool          `json:"forced,omitempty"`
-	ReleasePending       bool          `json:"release_pending,omitempty"`
-	Machine              string        `json:"machine"`
-	Session              string        `json:"session"`
+	PriorityStop         *PriorityPreemption `json:"priority_stop,omitempty"`
+	ExecutionCause       *RuntimeCause       `json:"execution_cause,omitempty"`
+	CleanupCause         *RuntimeCause       `json:"cleanup_cause,omitempty"`
+	PoliteStop           bool                `json:"polite_stop,omitempty"`
+	OutputRefs           FileManifest        `json:"output_refs,omitempty"`
+	Usage                *SizeHint           `json:"usage,omitempty"`
+	OutOfMemory          bool                `json:"out_of_memory,omitempty"`
+	ExtensionUnavailable bool                `json:"extension_unavailable,omitempty"`
+	OperatorStop         bool                `json:"operator_stop,omitempty"`
+	ReleaseOnly          bool                `json:"release_only,omitempty"`
+	Forced               bool                `json:"forced,omitempty"`
+	ReleasePending       bool                `json:"release_pending,omitempty"`
+	Machine              string              `json:"machine"`
+	Session              string              `json:"session"`
 	Execution
 	Interrupted bool   `json:"interrupted,omitempty"`
 	Success     bool   `json:"success"`

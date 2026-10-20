@@ -49,7 +49,7 @@ func TestProductionHoldDisplacesBothCardsAndReturnsImmediately(t *testing.T) {
 	if reason := job(t, q, prod.ID).Reason; !strings.Contains(reason, "stopping 2") || !strings.Contains(reason, "7s") {
 		t.Fatal(reason)
 	}
-	finish(t, q, x, false)
+	finishInterrupted(t, q, x)
 	if check(t, q, a, nil).Job != nil {
 		t.Fatal("production started before sibling release")
 	}
@@ -87,7 +87,7 @@ func TestProductionHoldDisplacesBothCardsAndReturnsImmediately(t *testing.T) {
 	if payload.Checkpoint != filepath.Join(q.root, x.ID) {
 		t.Fatal("checkpoint custody changed")
 	}
-	finish(t, q, y, false)
+	finishInterrupted(t, q, y)
 	run := check(t, q, a, nil).Job
 	if run == nil || run.ID != prod.ID {
 		t.Fatalf("production: %+v", run)
@@ -171,12 +171,12 @@ func TestProductionHoldExpiryAndLostWorkerRetainRelease(t *testing.T) {
 		t.Fatal("missing unknown release")
 	}
 	// A stale attempt's acknowledgement settles custody without touching its replacement.
-	finish(t, q, y, false)
+	finishInterrupted(t, q, y)
 	resumed := check(t, q, s, nil).Job
 	if resumed == nil || resumed.Attempt != 2 || resumed.Losses != 0 {
 		t.Fatalf("retry %+v", resumed)
 	}
-	finish(t, q, x, false)
+	finishInterrupted(t, q, x)
 	if got := check(t, q, a, nil).Job; got == nil || got.ID != prod.ID {
 		t.Fatalf("released: %+v", got)
 	}
@@ -204,7 +204,7 @@ func TestProductionHoldWorkerLoss(t *testing.T) {
 	if _, err := q.Checkin(Checkin{Machine: fresh, Fresh: true, PreviousSession: b.Session}); err != nil {
 		t.Fatal(err)
 	}
-	finish(t, q, x, false)
+	finishInterrupted(t, q, x)
 	if got := check(t, q, a, nil).Job; got == nil || got.ID != prod.ID {
 		t.Fatalf("after cleanup %+v", got)
 	}
@@ -242,8 +242,8 @@ func testProductionHoldRestartDuringReclaimAndReturn(t *testing.T) {
 	if got := check(t, q2, a, x).Job; got != nil {
 		t.Fatal("unknown sibling after restart")
 	}
-	finish(t, q2, y, false)
-	finish(t, q2, x, false)
+	finishInterrupted(t, q2, y)
+	finishInterrupted(t, q2, x)
 	// A free sibling check-in is also reconciliation.
 	check(t, q2, b, nil)
 	run := check(t, q2, a, nil).Job
@@ -678,7 +678,7 @@ func TestProductionHoldResidentCallUsesReservedHostMemory(t *testing.T) {
 	if !check(t, q, b, x).Stop {
 		t.Fatal("sibling experiment not stopped")
 	}
-	finish(t, q, x, false)
+	finishInterrupted(t, q, x)
 	reportModel(t, q, a, "ready")
 	if prod.Machine != a.ID {
 		t.Fatalf("resident production call not dispatched: %+v", prod)
@@ -776,7 +776,7 @@ func TestProductionHoldForceStopsBlockedSaveAndResumesDurableGeneration(t *testi
 	}
 	process.stop(workerClock.Now(), time.Duration(ry.GraceSeconds)*time.Second, ry.Kill)
 	await(t, func() bool { return logged("saving") })
-	finish(t, q, x, false)
+	finishInterrupted(t, q, x)
 	if check(t, q, a, nil).Job != nil {
 		t.Fatal("production started before blocked sibling released")
 	}
@@ -932,7 +932,7 @@ func TestProductionHoldSequentialStageGap(t *testing.T) {
 			if check(t, q, a, nil).Job != nil {
 				t.Fatal("new stage bypassed experiment release")
 			}
-			finish(t, q, between, false)
+			finishInterrupted(t, q, between)
 			run := check(t, q, a, nil).Job
 			if run == nil || run.ID != second.ID {
 				t.Fatal("second stage not admitted")
@@ -992,7 +992,7 @@ func TestProductionDemandWithoutIdleCooldown(t *testing.T) {
 	if !check(t, q, b, got).Stop {
 		t.Fatal("new production did not reclaim")
 	}
-	finish(t, q, got, false)
+	finishInterrupted(t, q, got)
 	run := check(t, q, a, nil).Job
 	if run == nil || run.ID != next.ID {
 		t.Fatal("new production not admitted after release")

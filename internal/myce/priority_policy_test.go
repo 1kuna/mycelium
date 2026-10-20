@@ -383,7 +383,7 @@ func TestPriorityPolicyRejectsSlashProject(t *testing.T) {
 	}
 }
 
-func TestPriorityPolicyChangePreservesAssignedAttempt(t *testing.T) {
+func TestPriorityPolicyChangeReclaimsAssignedAttemptBeforeStarted(t *testing.T) {
 	q, _ := fixture(t)
 	policy := PriorityPolicy{Version: 1, Tiers: []PriorityTier{{Name: "top", Selectors: []string{"alpha/production"}}, {Name: "rest", Selectors: []string{"*/*"}}}}
 	if _, err := q.SetPriorityPolicy(0, policy); err != nil {
@@ -405,12 +405,12 @@ func TestPriorityPolicyChangePreservesAssignedAttempt(t *testing.T) {
 	if q.comparePriority(waiting.Spec, assigned.Spec) >= 0 {
 		t.Fatal("waiting job must now outrank assigned attempt")
 	}
-	if err := q.Started(result(assigned, true)); err != nil {
-		t.Fatalf("policy change rejected assigned attempt: %v", err)
+	if err := q.Started(result(assigned, true)); err != ErrStale {
+		t.Fatalf("stale lower-tier assignment started: %v", err)
 	}
 	started := q.s.Jobs[assigned.ID]
-	if started.State != "running" || started.StartedAt == nil || started.Attempt != assigned.Attempt || started.Session != assigned.Session || started.Machine != assigned.Machine {
-		t.Fatalf("assigned attempt did not start: %+v", started)
+	if started.State != "stopping" || started.StartedAt != nil || priorityStop(started) == nil || priorityStop(started).Policy.Revision != 2 {
+		t.Fatalf("assigned attempt not reclaimed with current policy: %+v", started)
 	}
 	if got := q.s.Jobs[waiting.ID]; got.State != "queued" {
 		t.Fatalf("higher-tier job should still wait: %+v", got)

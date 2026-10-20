@@ -281,11 +281,20 @@ func priorityDemand(priority string, identity []Spec) Spec {
 	return Spec{Priority: priority}
 }
 func (q *Queue) slotSpec(s *ModelSlot) Spec {
-	best := Spec{Project: s.Project, Priority: s.Priority}
+	best := Spec{Project: s.Project, Priority: s.Priority, Class: s.Class}
 	found := false
 	for _, c := range q.calls {
 		if c.Model == s.Model && c.Machine == s.Machine && c.Session == s.Session && c.Attempt == s.Attempt && c.Error == "" {
 			candidate := callJob(c).Spec
+			if !found || q.comparePriority(candidate, best) < 0 {
+				best = candidate
+				found = true
+			}
+		}
+	}
+	for _, p := range q.s.Pins {
+		if p.Model == s.Model && p.Assigned == s.Machine && p.active(q.clock.Now()) {
+			candidate := Spec{Project: p.Project, Priority: "production"}
 			if !found || q.comparePriority(candidate, best) < 0 {
 				best = candidate
 				found = true

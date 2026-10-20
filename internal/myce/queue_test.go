@@ -81,6 +81,17 @@ func finish(t *testing.T, q *Queue, j *Job, success bool) {
 		t.Fatal(err)
 	}
 }
+
+// Synthetic acknowledgement of a delivered planned stop, distinct from an
+// independently failing payload. Real adapters establish this through D5 facts.
+func finishInterrupted(t *testing.T, q *Queue, j *Job) {
+	t.Helper()
+	r := result(j, false)
+	r.Interrupted = true
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+}
 func result(j *Job, success bool) Result {
 	return Result{Machine: j.Machine, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Success: success, Error: "test error"}
 }
@@ -322,6 +333,14 @@ func TestGraceAndFrontOfLine(t *testing.T) {
 	c.Advance(time.Second)
 	if reply := check(t, q, m, r); !reply.Kill {
 		t.Fatal("must kill stale copy at 10 seconds")
+	}
+	// Expiry authorizes kill; the exact interrupted attempt must acknowledge
+	// cleanup before a retry or replacement can consume its resources.
+	requireState(t, q, r.ID, "stopping")
+	interrupted := result(r, false)
+	interrupted.Interrupted = true
+	if err := q.Complete(interrupted); err != nil {
+		t.Fatal(err)
 	}
 	requireState(t, q, r.ID, "queued")
 	production := check(t, q, m, nil).Job

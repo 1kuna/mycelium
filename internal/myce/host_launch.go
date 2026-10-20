@@ -10,12 +10,17 @@ import (
 // HostLaunch is exact queue custody for a preparation, or an engine attempt.
 // A cached reply is an offer, never permission to launch.
 type HostLaunch struct {
-	Machine string `json:"machine"`
-	Session string `json:"session"`
-	Kind    string `json:"kind"`
-	Key     string `json:"key"`
-	Attempt string `json:"attempt"`
-	Started bool   `json:"started,omitempty"`
+	StartedAt    *time.Time          `json:"started_at,omitempty"`
+	Spec         *Spec               `json:"spec,omitempty"`
+	Demand       string              `json:"demand,omitempty"`
+	PriorityStop *PriorityPreemption `json:"priority_stop,omitempty"`
+	StopAt       *time.Time          `json:"stop_at,omitempty"`
+	Machine      string              `json:"machine"`
+	Session      string              `json:"session"`
+	Kind         string              `json:"kind"`
+	Key          string              `json:"key"`
+	Attempt      string              `json:"attempt"`
+	Started      bool                `json:"started,omitempty"`
 }
 
 func launchAttempt(l *HostLaunch) string {
@@ -34,6 +39,11 @@ func (q *Queue) issuePreparation(m *Machine, kind, key string) HostLaunch {
 		}
 	}
 	l := HostLaunch{Machine: m.ID, Session: m.Session, Kind: kind, Key: key, Attempt: ID()}
+	if j := q.candidate(m, nil); j != nil {
+		spec := Spec{Project: j.Spec.Project, Priority: j.Spec.Priority, Class: j.Spec.Class}
+		l.Spec = &spec
+		l.Demand = j.ID
+	}
 	q.s.PreparationPlans[l.Attempt] = l
 	return l
 }
@@ -43,9 +53,13 @@ func (q *Queue) hostLaunchAllowed(m *Machine, session string) bool {
 func (q *Queue) AuthorizeLaunch(l HostLaunch) error {
 	var rejected error
 	err := q.update(func() error {
-		q.maintainStartDeadlines()
+		q.maintain()
 		q.refreshHostMemory()
 		if !q.hostLaunchAllowed(q.s.Machines[l.Machine], l.Session) {
+			rejected = ErrStale
+			return nil
+		}
+		if (l.Kind == "batch" || l.Kind == "engine") && q.preparationStopping(q.s.Machines[l.Machine]) {
 			rejected = ErrStale
 			return nil
 		}
@@ -65,11 +79,15 @@ func (q *Queue) AuthorizeLaunch(l HostLaunch) error {
 			return nil
 		}
 		p, ok := q.s.PreparationPlans[l.Attempt]
-		if !ok || p.Machine != l.Machine || p.Session != l.Session || p.Kind != l.Kind || p.Key != l.Key {
+		if !ok || p.PriorityStop != nil || p.Machine != l.Machine || p.Session != l.Session || p.Kind != l.Kind || p.Key != l.Key {
 			rejected = ErrStale
 			return nil
 		}
 		p.Started = true
+		if p.StartedAt == nil {
+			now := q.clock.Now()
+			p.StartedAt = &now
+		}
 		q.s.PreparationPlans[l.Attempt] = p
 		return nil
 	})
