@@ -59,9 +59,14 @@ and exact attempt identity; the fleet token is stripped from every child.
 
 Helpers start in order and become ready before main starts. Every launch uses
 the shared authorization gate; readiness does not extend the start window.
-A helper exiting before main, even successfully, fails the attempt. Readiness
+Without recorded infrastructure evidence, a helper exiting before main, even
+successfully, fails the attempt. Readiness
 timeouts also fail the attempt. Infrastructure stops use the existing requeue
-classifier. During checkpoint grace, main receives TERM while helpers stay up;
+classifier. It accepts durable delivered-signal timestamps preceding the member's
+exit observation, observation loss, Mycelium-side launch/preparation failures, or
+a recorded probe proving foreign ownership of the allocated readiness port.
+Exit codes, stderr and stop intent alone never establish infrastructure cause.
+During checkpoint grace, main receives TERM while helpers stay up;
 after main exit or the shared deadline, cleanup kills and verifies the whole
 process group. Preparation cancellation prevents subsequent members starting.
 Before any payload gate opens, the existing durable attempt record holds its
@@ -72,7 +77,34 @@ retains custody.
 
 `memory_gb` is a positive member declaration bounded by the whole-job
 `needs.host_memory_gb`. It is accounted within that reservation, not charged
-again. D4 uses the existing aggregate cgroup when configured; individual child
-caps and their controller hierarchy are D5. macOS remains admission-only.
+again. With delegated Linux cgroup v2, the attempt parent retains that aggregate
+cap and contains `control`, `main` and `sidecar-NAME` leaves. Each member is
+attached before exec, with its declared cap as `memory.max`; omitted main RAM
+uses the parent cap. Set main RAM with `execution.main.memory_gb` (or
+`run.memory_gb`). Member OOM fails the attempt and identifies the member.
+Cleanup kills the subtree, verifies population, and removes empty leaves before
+the parent; unconfirmed release retains custody. macOS and foreground workers
+without delegation remain admission-only; `--require-memory-ceilings` refuses
+hosts without enforcement.
 Native Windows is a separate slice. All member output uses the existing attempt
 log policy, including `logs: none`.
+
+All runtimes use the same outcome precedence:
+
+| Observed evidence | Outcome |
+| --- | --- |
+| Member OOM, independent nonzero exit, early helper exit, readiness timeout | Stage failure, even with concurrent stop intent |
+| Successful main completion, including completion observed during recovery | Success, after confirmed cleanup and output finalization |
+| Operator or planned stop without independent failure/completion | Interruption with its own stop provenance |
+| SIGKILL without stop evidence | Stage failure with an ambiguity diagnostic |
+| Queue cancellation | Cancelled; takes precedence over a late runtime result |
+
+An operator marker annotates the result and never changes a saved failure into
+an interruption. Group retry/release uses the existing attempt-wide queue
+budget: production infrastructure stops permit at most two requeues; planned
+maintenance/preemption follows the existing free-stop policy. Members have no
+retry budget or separate reservation. A repeated stop cannot extend the group's
+persisted TERM/KILL deadline. Native restart authenticates and force-cleans the
+saved whole subtree without granting fresh checkpoint grace. Missing saved
+Docker output finalization remains a recovery interruption; a known payload
+failure is retained.

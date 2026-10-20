@@ -192,8 +192,16 @@ func fakeDockerGroupInspect(root string, ids []string, mode string) {
 			if mode == "main-killed" && id == "id1" || mode == "sidecar-killed" && id == "sidecar-sortformer" {
 				code = 137
 			}
+			if strings.HasPrefix(mode, "main-exit-") && id == "id1" {
+				if parsed, err := strconv.Atoi(strings.TrimPrefix(mode, "main-exit-")); err == nil {
+					code = parsed
+				}
+			}
 			if mode == "main-nonzero" && id == "id1" {
 				code = 7
+			}
+			if _, e := os.Stat(filepath.Join(root, "stopped")); id == "id1" && e == nil {
+				code = 137
 			}
 			if strings.HasPrefix(id, "sidecar-") {
 				if _, e := os.Stat(filepath.Join(root, "stopped-"+id)); e == nil {
@@ -204,7 +212,7 @@ func fakeDockerGroupInspect(root string, ids []string, mode string) {
 				}
 			}
 		}
-		obj["State"] = map[string]any{"Running": running, "Status": status, "ExitCode": code, "OOMKilled": mode == "main-oom" && id == "id1"}
+		obj["State"] = map[string]any{"Running": running, "Status": status, "ExitCode": code, "OOMKilled": mode == "main-oom" && id == "id1" || tableOOM(root, id)}
 		if _, e := os.Stat(filepath.Join(root, "disconnected-"+id)); e == nil {
 			obj["NetworkSettings"] = map[string]any{"Networks": map[string]any{}}
 		}
@@ -720,4 +728,9 @@ func TestDockerNetworkRemovalEscalatesThroughQueue(t *testing.T) {
 		case <-time.After(5 * time.Millisecond):
 		}
 	}
+}
+
+func tableOOM(root, id string) bool {
+	_, err := os.Stat(filepath.Join(root, "table-oom"))
+	return id == "id1" && err == nil
 }

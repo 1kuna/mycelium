@@ -84,6 +84,9 @@ type workerFinish struct {
 	err    error
 }
 type process struct {
+	outcome     memberOutcome
+	saveOutcome func(memberOutcome) error
+
 	machine string
 	docker  *dockerAttempt
 	native  *nativeGroup
@@ -123,7 +126,7 @@ func (p *process) stopLocked(now time.Time, grace time.Duration, kill bool) {
 	}
 	if kill {
 		if !p.killed {
-			_ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL)
+			p.signalLocked(syscall.SIGKILL)
 			p.killed = true
 		}
 		return
@@ -133,10 +136,31 @@ func (p *process) stopLocked(now time.Time, grace time.Duration, kill bool) {
 		p.stopAt = &deadline
 	}
 	if !p.stopped {
-		_ = syscall.Kill(-p.cmd.Process.Pid, syscall.SIGTERM)
+		p.signalLocked(syscall.SIGTERM)
 		deadline := now.Add(grace)
 		p.stopAt = &deadline
 		p.stopped = true
+	}
+}
+
+// p.mu serializes delivery/persistence with exit observation. Capture the
+// observation timestamp immediately after Wait, before acquiring this lock.
+func (p *process) signalLocked(signal syscall.Signal) {
+	if p.outcome.Exit != nil {
+		return
+	}
+	if err := syscall.Kill(-p.cmd.Process.Pid, signal); err != nil {
+		return
+	}
+	at := time.Now().UTC()
+	name := "TERM"
+	if signal == syscall.SIGKILL {
+		name = "KILL"
+	}
+	next := p.outcome
+	next.Signals = append(append([]deliveredSignal(nil), next.Signals...), deliveredSignal{Signal: name, At: at})
+	if p.saveOutcome != nil && p.saveOutcome(next) == nil {
+		p.outcome = next
 	}
 }
 
@@ -236,14 +260,14 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 			r.Binary = filepath.Join(w.EnvironmentSourceRoot, r.BinaryRelative)
 		}
 		if w.environmentCache == nil {
-			return nil, errors.New("environment builder unavailable")
+			return nil, s.startFailure(j, environmentFailed, errors.New("environment builder unavailable"))
 		}
 		r.readyOnly = j.Spec.extensionJob()
 		environmentPath, release, err = w.environmentCache.Acquire(withLaunchGate(context.Background(), func() error {
 			return w.authorizeLaunch(HostLaunch{Machine: w.Machine.ID, Session: s.state.Session, Kind: "batch", Key: j.ID, Attempt: fmt.Sprint(j.Attempt)})
 		}), r)
 		if err != nil {
-			return nil, err
+			return nil, s.startFailure(j, environmentFailed, err)
 		}
 	}
 	expandExecution(&j.Spec, executionWork, environmentPath, machineTarget(&w.Machine))
@@ -278,7 +302,7 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	}
 	command, err = exec.LookPath(command)
 	if err != nil {
-		return nil, err
+		return nil, s.startFailure(j, launchFailed, err)
 	}
 	if strings.Contains(command, "/") && !filepath.IsAbs(command) {
 		command, err = filepath.Abs(command)
@@ -383,7 +407,7 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		delete(env, "MYCE_USAGE_FILE")
 	}
 	delete(env, "MYCE_TOKEN")
-	if len(j.Spec.Run.Sidecars) > 0 {
+	if len(j.Spec.Run.Sidecars) > 0 || j.Spec.Run.MemoryGB > 0 {
 		if w.batchMemory != nil {
 			w.batchMemory.Store(math.Float64bits(j.Spec.Needs.MemoryGB))
 		}
@@ -440,7 +464,7 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	}
 	if err = cmd.Start(); err != nil {
 		output.Close()
-		return nil, err
+		return nil, s.startFailure(j, launchFailed, err)
 	}
 	if readyWriter != nil {
 		readyWriter.Close()
@@ -466,12 +490,13 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		return nil, abort(err)
 	}
 	p := &process{job: j, cmd: cmd, done: make(chan workerFinish, 1)}
+	p.saveOutcome = func(facts memberOutcome) error { return saveWorkerJSON(s.dir, identity+".outcome.json", facts) }
 	if w.control != nil {
 		w.control.set(p)
 	}
 	if j.Spec.StartBy == nil {
 		if err = w.authorizeStart(j, s.state.Session); err != nil {
-			return nil, abort(err)
+			return nil, abort(s.startFailure(j, launchRefused, err))
 		}
 	}
 	if _, err = gateWriter.Write([]byte("start\n")); err != nil {
@@ -494,13 +519,20 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 			receipt, e := io.ReadAll(io.LimitReader(readyReader, 4096))
 			if e != nil || len(receipt) > 0 {
 				if e != nil {
-					return nil, abort(fmt.Errorf("command exec receipt: %w", e))
+					return nil, abort(s.startFailure(j, launchFailed, fmt.Errorf("command exec receipt: %w", e)))
 				}
-				return nil, abort(errors.New(string(receipt)))
+				return nil, abort(s.startFailure(j, launchFailed, errors.New(string(receipt))))
 			}
 		}
 	}
 	launchErr := err
+	if launchErr != nil {
+		launchErr = s.startFailure(j, launchRefused, launchErr)
+		var recorded *recordedStartError
+		if errors.As(launchErr, &recorded) {
+			p.outcome.Infrastructure = recorded.facts.Infrastructure
+		}
+	}
 	result := Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
 	environmentStarted = true
 	extensionStarted = true
@@ -513,8 +545,10 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 			defer release()
 		}
 		waitErr := cmd.Wait()
+		observed := observedNativeExit(cmd, time.Now().UTC())
 		p.mu.Lock()
-		infrastructureStop := p.stopped || p.killed
+		p.outcome.Exit = observed
+		observationErr := p.saveOutcome(p.outcome)
 		result.Forced = p.killed
 		p.mu.Unlock()
 		// Descendants must not outlive the command or append to delivered output.
@@ -563,22 +597,19 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 		}
 		p.mu.Lock()
 		result.PoliteStop = p.polite
-		ambiguousKill := false
-		if cmd.ProcessState != nil {
-			if status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok {
-				ambiguousKill = status.Signaled() && status.Signal() == syscall.SIGKILL && oomErr == nil
-			}
+		facts := p.outcome
+		if launchErr != nil {
+			facts.Exit = &memberExit{Status: 1, ObservedAt: observed.ObservedAt}
+			facts.Signals = nil
 		}
 		result = classifyAttemptOutcome(result, attemptCause{
-			Infrastructure: infrastructureStop,
-			StageFailure:   launchErr != nil || waitErr != nil && !infrastructureStop || oomErr != nil,
-			OutOfMemory:    result.OutOfMemory || oomErr != nil && strings.HasPrefix(ceilingDiagnostic(oomErr.Error(), ""), "exceeded its "),
-			AmbiguousKill:  ambiguousKill,
+			memberOutcome: facts,
+			OutOfMemory:   result.OutOfMemory || oomErr != nil && strings.HasPrefix(ceilingDiagnostic(oomErr.Error(), ""), "exceeded its "),
 		})
 		p.mu.Unlock()
 		// Persist independently of the reconnect loop, which may be in a network
 		// request when the command finishes. Restart replays this exact session.
-		saveErr := saveWorkerJSON(s.dir, identity+".result.json", result)
+		saveErr := errors.Join(observationErr, saveWorkerJSON(s.dir, identity+".result.json", result))
 		p.done <- workerFinish{result: result, err: saveErr}
 	}()
 	return p, nil
@@ -687,8 +718,26 @@ func (w Worker) Run(stop context.Context) error {
 		}
 		s.state.CheckpointRoot = root
 	}
-	if err = s.cleanupOrphan(w.Clock); err != nil {
+	var memoryFiles memoryFS = osMemoryFS{}
+	if w.memoryCeilings != nil {
+		memoryFiles = w.memoryCeilings.fs
+	}
+	if s.state.Job != nil && !s.state.Job.Spec.Run.Docker && s.state.Identity != "" {
+		if err = s.recoverResult(w.Machine.ID); err != nil {
+			return err
+		}
+		if err = s.recoverNativeCause(w.Machine.ID, memoryFiles); err != nil {
+			return err
+		}
+	}
+	if err = s.cleanupOrphan(w.Clock, memoryFiles); err != nil {
 		return err
+	}
+	if s.state.Job != nil && !s.state.Job.Spec.Run.Docker && s.state.Result != nil {
+		s.state.Result.ReleasePending = false
+		if err = saveWorkerJSON(s.dir, s.state.Identity+".result.json", *s.state.Result); err != nil {
+			return err
+		}
 	}
 	var recoveringProcess *process
 	if s.state.Job != nil && s.state.Job.Spec.Run.Docker && s.state.Identity != "" {
@@ -708,15 +757,16 @@ func (w Worker) Run(stop context.Context) error {
 		}
 	}
 	if s.state.Job != nil && s.state.Result == nil && recoveringProcess == nil {
-		r := Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Interrupted: true, Error: "worker restarted; previous process group cleaned up"}
+		facts := memberOutcome{ObservationLost: true}
+		if err = saveWorkerJSON(s.dir, s.state.Identity+".observation-loss.json", facts); err != nil {
+			return err
+		}
+		r := classifyAttemptOutcome(Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Error: "worker restarted; previous process group cleaned up"}, attemptCause{memberOutcome: facts})
 		s.state.Result = &r
 		s.state.PID = 0
 	}
 	if s.state.Result != nil && s.state.OperatorStopped {
-		s.state.Result.OperatorStop = true
-		if !s.state.Result.Success {
-			s.state.Result.Interrupted = true
-		}
+		*s.state.Result = operatorOutcome(*s.state.Result, true)
 	}
 	if s.state.Job != nil && (s.state.Result != nil || recoveringProcess != nil) {
 		recovering = true
@@ -958,10 +1008,7 @@ func (w Worker) Run(stop context.Context) error {
 					return fmt.Errorf("persist command result: %w", f.err)
 				}
 				if s.state.OperatorStopped {
-					f.result.OperatorStop = true
-					if !f.result.Success {
-						f.result.Interrupted = true
-					}
+					f.result = operatorOutcome(f.result, true)
 				}
 				s.state.Result = &f.result
 				s.state.PID = 0
@@ -1160,7 +1207,8 @@ func (w Worker) Run(stop context.Context) error {
 				}
 				if s.state.Job != nil && s.state.Result == nil && p == nil && !recovering {
 					if reply.Stop {
-						r := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Interrupted: true, Error: "assignment withdrawn before checkpoint storage recovered"}
+						cause := s.startFailure(*s.state.Job, launchRefused, errors.New("assignment withdrawn before checkpoint storage recovered"))
+						r := startFailureOutcome(Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Error: cause.Error()}, cause)
 						s.state.Result = &r
 						if e := s.save(); e != nil {
 							return e
@@ -1171,7 +1219,8 @@ func (w Worker) Run(stop context.Context) error {
 							if errors.Is(err, errWorkerCheckpoint) || errors.Is(err, errWorkerMemory) || errors.Is(err, errWorkerUnavailable) {
 								log.Printf("retry pending start: %v", err)
 							} else {
-								r := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Error: err.Error(), Interrupted: errors.Is(err, errWorkerStartAuthorization), ExtensionUnavailable: errors.Is(err, errExtensionUnavailable), ReleasePending: errors.Is(err, errWorkerReleasePending)}
+								r := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Error: err.Error(), ExtensionUnavailable: errors.Is(err, errExtensionUnavailable), ReleasePending: errors.Is(err, errWorkerReleasePending)}
+								r = startFailureOutcome(r, err)
 								s.state.Result = &r
 								if !r.ReleasePending {
 									s.state.PID = 0
@@ -1314,7 +1363,8 @@ func (w Worker) Run(stop context.Context) error {
 							p, err = w.start(s, j)
 						}
 						if err != nil && !(errors.Is(err, errWorkerCheckpoint) || errors.Is(err, errWorkerMemory) || errors.Is(err, errWorkerUnavailable)) {
-							r := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Error: err.Error(), Interrupted: errors.Is(err, errWorkerStartAuthorization), ExtensionUnavailable: errors.Is(err, errExtensionUnavailable), ReleasePending: errors.Is(err, errWorkerReleasePending)}
+							r := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Error: err.Error(), ExtensionUnavailable: errors.Is(err, errExtensionUnavailable), ReleasePending: errors.Is(err, errWorkerReleasePending)}
+							r = startFailureOutcome(r, err)
 							s.state.Job = &j
 							if w.batchMemory != nil {
 								w.batchMemory.Store(math.Float64bits(j.Spec.Needs.MemoryGB))

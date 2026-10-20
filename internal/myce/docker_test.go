@@ -195,7 +195,11 @@ func TestDockerCLIHelper(t *testing.T) {
 				memory = 0
 			}
 			name, _ := os.ReadFile(filepath.Join(root, "--name"))
-			objects = append(objects, map[string]any{"Name": "/" + string(name), "HostConfig": map[string]any{"RestartPolicy": map[string]any{"Name": "no"}, "Memory": memory, "MemorySwap": memorySwap, "NetworkMode": "none"}, "Id": id, "Config": map[string]any{"Labels": map[string]string{"myce.attempt": objectLabel, "myce.worker": "docker-worker"}}, "State": map[string]any{"Running": running, "Status": status, "ExitCode": 0, "OOMKilled": string(mode) == "docker-oom"}})
+			code := 0
+			if _, err := os.Stat(filepath.Join(root, "stopped")); !running && err == nil {
+				code = 137
+			}
+			objects = append(objects, map[string]any{"Name": "/" + string(name), "HostConfig": map[string]any{"RestartPolicy": map[string]any{"Name": "no"}, "Memory": memory, "MemorySwap": memorySwap, "NetworkMode": "none"}, "Id": id, "Config": map[string]any{"Labels": map[string]string{"myce.attempt": objectLabel, "myce.worker": "docker-worker"}}, "State": map[string]any{"Running": running, "Status": status, "ExitCode": code, "OOMKilled": string(mode) == "docker-oom"}})
 		}
 		_ = json.NewEncoder(os.Stdout).Encode(objects)
 		if string(mode) == "late" {

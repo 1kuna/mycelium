@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -23,13 +24,16 @@ const nativeBindAttempts = 3 // Whole-group preparation attempts, including the 
 
 // The anchor preserves the existing attempt PGID/recovery contract. All members
 // inherit its cgroup and join its process group before their exec gate opens.
-// MemoryGB stays on the member record for D5's child-controller adapter.
+// Members attach to child cgroups before their exec gates open.
 type nativeMember struct {
-	Name     string  `json:"name"`
-	PID      int     `json:"pid,omitempty"`
-	Birth    string  `json:"birth,omitempty"`
-	ExitCode *int    `json:"exit_code,omitempty"`
-	Phase    string  `json:"phase"`
+	memberOutcome
+	Name     string `json:"name"`
+	PID      int    `json:"pid,omitempty"`
+	Birth    string `json:"birth,omitempty"`
+	ExitCode *int   `json:"exit_code,omitempty"`
+	Phase    string `json:"phase"`
+	Cgroup   string `json:"cgroup,omitempty"`
+	memory   *memoryAttempt
 	MemoryGB float64 `json:"memory_gb,omitempty"`
 	cmd      *exec.Cmd
 	done     chan struct{}
@@ -46,6 +50,8 @@ type nativeGroup struct {
 	main                   *nativeMember // guarded by p.mu
 	releases               []func()
 	memory                 *memoryAttempt
+	control                *memoryAttempt
+	memberMemory           map[string]*memoryAttempt
 	custody                workerState
 	supervisor             *exec.Cmd
 }
@@ -76,13 +82,20 @@ func nativeSidecarCount(j *Job, m *Machine) int {
 }
 
 func (g *nativeGroup) save() error {
+	g.p.mu.Lock()
+	defer g.p.mu.Unlock()
+	return g.saveLocked()
+}
+
+func (g *nativeGroup) saveLocked() error {
 	if err := saveWorkerJSON(g.dir, "attempt-"+g.identity+".json", g.custody); err != nil {
 		return err
 	}
 	return saveWorkerJSON(g.dir, "native-"+g.identity+".json", struct {
 		Identity string          `json:"identity"`
 		Members  []*nativeMember `json:"members"`
-	}{g.identity, g.members})
+		Outcome  memberOutcome   `json:"outcome"`
+	}{g.identity, g.members, g.p.outcome})
 }
 
 // Called under p.mu, also held across fork/persistence/exec approval. A stop
@@ -94,25 +107,111 @@ func (g *nativeGroup) stopLocked(now time.Time, grace time.Duration, kill bool) 
 		g.stageFailure = true
 	}
 	g.cancel()
+	deadline := now.Add(grace)
+	if p.stopAt == nil || deadline.Before(*p.stopAt) {
+		p.stopAt = &deadline
+		g.custody.StopAt = &deadline
+		if err := saveWorkerJSON(g.dir, "attempt-"+g.identity+".json", g.custody); err != nil {
+			// Failed stop persistence cannot authorize additional execution.
+			g.signalLocked(nil, syscall.SIGKILL)
+			p.killed = true
+		}
+	}
 	if kill {
 		if !p.killed {
-			_ = signalWorkerGroup(g.supervisor.Process.Pid, syscall.SIGKILL)
+			g.signalLocked(nil, syscall.SIGKILL)
 			p.killed = true
 		}
 		return
 	}
-	deadline := now.Add(grace)
-	if p.stopAt == nil || deadline.Before(*p.stopAt) {
-		p.stopAt = &deadline
-	}
 	if !p.stopped {
 		p.stopped = true
 		if g.main != nil {
-			_ = syscall.Kill(g.main.PID, syscall.SIGTERM)
+			g.signalLocked(g.main, syscall.SIGTERM)
 		} else {
-			_ = signalWorkerGroup(g.supervisor.Process.Pid, syscall.SIGTERM)
+			g.signalLocked(nil, syscall.SIGTERM)
 		}
 	}
+}
+
+func (g *nativeGroup) signalLocked(member *nativeMember, signal syscall.Signal) {
+	if member != nil && member.Exit != nil {
+		return
+	}
+	pid := -g.supervisor.Process.Pid
+	if member != nil {
+		pid = member.PID
+	}
+	if syscall.Kill(pid, signal) != nil {
+		return
+	}
+	at := time.Now().UTC()
+	name := "TERM"
+	if signal == syscall.SIGKILL {
+		name = "KILL"
+	}
+	record := deliveredSignal{Signal: name, At: at}
+	prior := g.p.outcome.Signals
+	g.p.outcome.Signals = append(append([]deliveredSignal(nil), prior...), record)
+	changed := map[*nativeMember][]deliveredSignal{}
+	for _, m := range g.members {
+		if (member == nil || member == m) && m.PID != 0 && m.Exit == nil {
+			changed[m] = m.Signals
+			m.Signals = append(append([]deliveredSignal(nil), m.Signals...), record)
+		}
+	}
+	if g.saveLocked() != nil {
+		g.p.outcome.Signals = prior
+		for m, signals := range changed {
+			m.Signals = signals
+		}
+	}
+}
+
+// Snapshot the member that ended execution before cleanup signals any sibling.
+func (g *nativeGroup) outcomeLocked(runErr error, stage bool) (facts memberOutcome) {
+	defer func() {
+		facts.Infrastructure = append(append([]infrastructureFact(nil), facts.Infrastructure...), g.p.outcome.Infrastructure...)
+	}()
+	for _, m := range g.members {
+		if m.Name != "main" && m.Exit != nil && (g.main == nil || g.main.Exit == nil || m.Exit.ObservedAt.Before(g.main.Exit.ObservedAt)) {
+			r := classifyAttemptOutcome(Result{}, attemptCause{memberOutcome: m.memberOutcome})
+			if !r.Interrupted {
+				return m.memberOutcome
+			}
+		}
+	}
+	if g.main != nil && g.main.Exit != nil {
+		return g.main.memberOutcome
+	}
+	facts = g.p.outcome
+	facts.Infrastructure = nil
+	if runErr != nil {
+		facts.Exit = &memberExit{Status: 1, ObservedAt: time.Now().UTC()}
+		if stage {
+			facts.Signals = nil
+		}
+	}
+	return facts
+}
+
+func (g *nativeGroup) recordInfrastructure(kind, member, port string, cause error) error {
+	g.p.mu.Lock()
+	defer g.p.mu.Unlock()
+	return g.recordInfrastructureLocked(kind, member, port, cause)
+}
+func (g *nativeGroup) recordInfrastructureLocked(kind, member, port string, cause error) error {
+	group := 0
+	if g.supervisor != nil {
+		group = g.supervisor.Process.Pid
+	}
+	prior := g.p.outcome.Infrastructure
+	g.p.outcome.Infrastructure = append(append([]infrastructureFact(nil), prior...), infrastructureFact{Kind: kind, At: time.Now().UTC(), Member: member, Port: port, Group: group})
+	if err := g.saveLocked(); err != nil {
+		g.p.outcome.Infrastructure = prior
+		return errors.Join(cause, err)
+	}
+	return cause
 }
 
 func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory *memoryAttempt, env map[string]string, mainEnvironment string, releases ...func()) (*process, error) {
@@ -137,6 +236,11 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 	p.native = g
 	if memory != nil {
 		g.custody.Cgroup = memory.path
+	}
+	if err := g.setupMemory(); err != nil {
+		cancel()
+		output.Close()
+		return nil, err
 	}
 	writer, err := g.startSupervisor(s, env)
 	if err != nil {
@@ -167,7 +271,7 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 				runErr = errors.Join(runErr, err)
 				break
 			}
-			if err := memory.failure(); err != nil {
+			if err := g.memoryFailure(); err != nil {
 				runErr = err
 				break
 			}
@@ -182,11 +286,12 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 			}
 		}()
 		p.mu.Lock()
-		infrastructure, forced, polite := p.stopped || p.killed, p.killed, p.polite
+		forced, polite := p.killed, p.polite
 		stage = stage || g.stageFailure
+		facts := g.outcomeLocked(runErr, stage)
 		p.mu.Unlock()
 		groupErr := g.cleanupProcesses(writer)
-		oom := memory.failure()
+		oom := g.memoryFailure()
 		cleanup := errors.Join(groupErr, memory.cleanup(w.Clock), g.save())
 		persist := errors.Join(syncCommandOutput(output), output.Close())
 		r := Result{Machine: w.Machine.ID, Session: g.session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Success: runErr == nil && oom == nil && cleanup == nil && persist == nil, Forced: forced, PoliteStop: polite, ReleasePending: cleanup != nil}
@@ -216,7 +321,7 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 				collectProgramUsage(&r, main.cmd.ProcessState, programUsageFile(g.dir, identity))
 			}
 		}
-		r = classifyAttemptOutcome(r, attemptCause{Infrastructure: infrastructure || errors.Is(runErr, errWorkerStartAuthorization) || errors.Is(runErr, errNativePortCollision), StageFailure: stage || oom != nil, OutOfMemory: r.OutOfMemory || oom != nil && strings.HasPrefix(ceilingDiagnostic(oom.Error(), ""), "exceeded its ")})
+		r = classifyAttemptOutcome(r, attemptCause{memberOutcome: facts, OutOfMemory: r.OutOfMemory || oom != nil && strings.Contains(oom.Error(), "exceeded its ")})
 		if r.Success {
 			if e := w.publishExtensionFiles(j); e != nil {
 				r.Success = false
@@ -259,9 +364,23 @@ func (g *nativeGroup) startSupervisor(s *workerStore, env map[string]string) (*o
 	}
 	if err == nil {
 		err = g.worker.authorizeLaunch(HostLaunch{Machine: g.worker.Machine.ID, Session: g.session, Kind: "batch", Key: g.p.job.ID, Attempt: strconv.Itoa(g.p.job.Attempt)})
+		if err != nil {
+			if s != nil {
+				err = s.startFailure(g.p.job, launchRefused, err)
+			} else {
+				err = g.recordInfrastructureLocked(launchRefused, "control", "", err)
+			}
+		}
 	}
 	if err == nil {
 		err = cmd.Start()
+		if err != nil {
+			if s != nil {
+				err = s.startFailure(g.p.job, launchFailed, err)
+			} else {
+				err = g.recordInfrastructureLocked(launchFailed, "control", "", err)
+			}
+		}
 	}
 	if err != nil {
 		writer.Close()
@@ -288,7 +407,7 @@ func (g *nativeGroup) startSupervisor(s *workerStore, env map[string]string) (*o
 	if err = saveWorkerJSON(g.dir, "attempt-"+g.identity+".json", g.custody); err != nil {
 		return abort(err)
 	}
-	if err = g.memory.attach(cmd.Process.Pid); err != nil {
+	if err = g.control.attach(cmd.Process.Pid); err != nil {
 		return abort(err)
 	}
 	if s != nil {
@@ -300,12 +419,19 @@ func (g *nativeGroup) startSupervisor(s *workerStore, env map[string]string) (*o
 		g.p.cmd = cmd
 	}
 	g.supervisor = cmd
+	g.p.outcome = memberOutcome{} // New members cannot inherit a previous group's probe facts.
 	g.members = nil
 	for _, side := range g.p.job.Spec.Run.Sidecars {
 		g.members = append(g.members, &nativeMember{Name: side.Name, Phase: "intent", MemoryGB: side.MemoryGB})
 	}
-	g.members = append(g.members, &nativeMember{Name: "main", Phase: "intent"})
-	if err = g.save(); err != nil {
+	g.members = append(g.members, &nativeMember{Name: "main", Phase: "intent", MemoryGB: g.p.job.Spec.Run.MemoryGB})
+	for _, m := range g.members {
+		m.memory = g.memberMemory[m.Name]
+		if m.memory != nil {
+			m.Cgroup = m.memory.path
+		}
+	}
+	if err = g.saveLocked(); err != nil {
 		return abort(err)
 	}
 	return writer, nil
@@ -324,9 +450,11 @@ func (g *nativeGroup) cleanupProcesses(writer *os.File) error {
 	for _, m := range g.members {
 		if m.done != nil {
 			<-m.done
+			g.p.mu.Lock()
 			m.Phase = "exited"
 			code := m.cmd.ProcessState.ExitCode()
 			m.ExitCode = &code
+			g.p.mu.Unlock()
 		}
 	}
 	if g.supervisor != nil {
@@ -349,11 +477,11 @@ func environmentList(env map[string]string) []string {
 func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]string, dir string, output *os.File) error {
 	l := HostLaunch{Machine: g.worker.Machine.ID, Session: g.session, Kind: "batch", Key: g.p.job.ID, Attempt: strconv.Itoa(g.p.job.Attempt)}
 	if err := g.worker.authorizeLaunch(l); err != nil {
-		return err
+		return g.recordInfrastructure(launchRefused, m.Name, "", err)
 	}
 	if m.Name == "main" {
 		if err := g.worker.authorizeStart(g.p.job, g.session); err != nil {
-			return err
+			return g.recordInfrastructure(launchRefused, m.Name, "", err)
 		}
 	}
 	g.p.mu.Lock()
@@ -376,6 +504,10 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 	args := append([]string{"-c", `read gate || exit 125; exec "$@" < /dev/null`, "myce-member-" + m.Name, command}, argv[1:]...)
 	cmd := exec.Command("sh", args...)
 	cmd.Dir = dir
+	env = maps.Clone(env)
+	if m.memory != nil {
+		env["MYCE_MEMORY_LIMIT_BYTES"] = strconv.FormatInt(m.memory.bytes, 10)
+	}
 	cmd.Env = environmentList(env)
 	cmd.Stdout = output
 	cmd.Stderr = output
@@ -387,33 +519,45 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 	defer reader.Close()
 	defer writer.Close()
 	cmd.Stdin = reader
-	if err = g.save(); err != nil {
+	if err = g.saveLocked(); err != nil {
 		return err
 	}
 	if err = cmd.Start(); err != nil {
-		return err
+		return g.recordInfrastructureLocked(launchFailed, m.Name, "", err)
 	}
 	m.cmd = cmd
 	m.PID = cmd.Process.Pid
 	m.Phase = "gated"
 	m.done = make(chan struct{})
-	go func() { m.err = cmd.Wait(); close(m.done) }()
+	go func() {
+		waitErr := cmd.Wait()
+		observed := observedNativeExit(cmd, time.Now().UTC())
+		g.p.mu.Lock()
+		m.err = waitErr
+		m.Exit = observed
+		saveErr := g.saveLocked()
+		if saveErr != nil {
+			m.err = errors.Join(waitErr, saveErr)
+		}
+		g.p.mu.Unlock()
+		close(m.done)
+	}()
 	m.Birth, err = processBirth(m.PID)
 	if err != nil {
 		return err
 	}
 	g.custody.Groups[g.supervisor.Process.Pid][m.PID] = m.Birth
-	if err = g.save(); err != nil {
+	if err = g.saveLocked(); err != nil {
 		return err
 	}
-	if err = g.memory.attach(m.PID); err != nil {
+	if err = m.memory.attach(m.PID); err != nil {
 		return err
 	}
-	if err = g.save(); err != nil {
+	if err = g.saveLocked(); err != nil {
 		return err
 	}
 	if err = g.worker.authorizeLaunch(l); err != nil {
-		return err
+		return g.recordInfrastructureLocked(launchRefused, m.Name, "", err)
 	}
 	if m.Name == "main" {
 		g.main = m
@@ -422,7 +566,7 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 		return err
 	}
 	m.Phase = "running"
-	return g.save()
+	return g.saveLocked()
 }
 
 func (g *nativeGroup) memberFailure(except ...*nativeMember) error {
@@ -439,6 +583,26 @@ func (g *nativeGroup) memberFailure(except ...*nativeMember) error {
 	return nil
 }
 
+func (g *nativeGroup) independentMemberFailure() bool {
+	for _, m := range g.members {
+		if m.Name == "main" || m.done == nil {
+			continue
+		}
+		select {
+		case <-m.done:
+			g.p.mu.Lock()
+			r := classifyAttemptOutcome(Result{}, attemptCause{memberOutcome: m.memberOutcome})
+			g.p.mu.Unlock()
+			if r.Interrupted {
+				continue
+			}
+			return true
+		default:
+		}
+	}
+	return false
+}
+
 func (g *nativeGroup) run(j Job, base map[string]string, mainEnvironment string, output *os.File) (error, bool) {
 	// Acquire all helper environments before starting any payload; hold cache use
 	// protections until every member has exited (the outer goroutine defers release).
@@ -446,7 +610,10 @@ func (g *nativeGroup) run(j Job, base map[string]string, mainEnvironment string,
 	for _, side := range j.Spec.Run.Sidecars {
 		root, release, err := g.sidecarEnvironment(j, side, mainEnvironment)
 		if err != nil {
-			return err, !errors.Is(err, context.Canceled) && !errors.Is(err, errWorkerStartAuthorization)
+			if !errors.Is(err, context.Canceled) {
+				err = g.recordInfrastructure(environmentFailed, side.Name, "", err)
+			}
+			return err, false
 		}
 		roots[side.Name] = root
 		if release != nil {
@@ -481,7 +648,7 @@ func (g *nativeGroup) run(j Job, base map[string]string, mainEnvironment string,
 			l, err := net.Listen("tcp4", net.JoinHostPort("127.0.0.1", strconv.Itoa(*side.Port)))
 			if err != nil {
 				if errors.Is(err, syscall.EADDRINUSE) {
-					return fmt.Errorf("sidecar %s port: %w", side.Name, errNativePortCollision), false
+					return g.recordInfrastructure(launchFailed, side.Name, strconv.Itoa(*side.Port), fmt.Errorf("sidecar %s port: %w", side.Name, errNativePortCollision)), false
 				}
 				return fmt.Errorf("sidecar %s port: %w", side.Name, err), true
 			}
@@ -494,7 +661,7 @@ func (g *nativeGroup) run(j Job, base map[string]string, mainEnvironment string,
 			g.p.mu.Lock()
 			stopped := g.p.stopped || g.p.killed
 			g.p.mu.Unlock()
-			return err, !stopped
+			return err, !stopped || g.independentMemberFailure()
 		}
 		replace := replacer()
 		memberEnv := maps.Clone(env)
@@ -539,8 +706,11 @@ func (g *nativeGroup) run(j Job, base map[string]string, mainEnvironment string,
 			return err, !errors.Is(err, context.Canceled) && !errors.Is(err, errWorkerStartAuthorization)
 		}
 		if side.Readiness != nil {
+			g.p.mu.Lock()
 			g.members[i].Phase = "waiting_ready"
-			if err := g.save(); err != nil {
+			err := g.saveLocked()
+			g.p.mu.Unlock()
+			if err != nil {
 				return err, true
 			}
 			if err := g.waitReady(g.members[i], port, *side.Readiness); err != nil {
@@ -558,7 +728,7 @@ func (g *nativeGroup) run(j Job, base map[string]string, mainEnvironment string,
 		g.p.mu.Lock()
 		stopped := g.p.stopped || g.p.killed
 		g.p.mu.Unlock()
-		return err, !stopped
+		return err, !stopped || g.independentMemberFailure()
 	}
 	replace := replacer()
 	for k, v := range j.Spec.Run.Env {
@@ -575,7 +745,7 @@ func (g *nativeGroup) run(j Job, base map[string]string, mainEnvironment string,
 			g.p.mu.Lock()
 			stopped := g.p.stopped || g.p.killed
 			g.p.mu.Unlock()
-			return err, !stopped
+			return err, !stopped || g.independentMemberFailure()
 		}
 		select {
 		case <-main.done:
@@ -604,7 +774,7 @@ func (g *nativeGroup) waitReady(member *nativeMember, port string, readiness Nat
 			// A failed helper plus a foreign listener on its reserved port is
 			// positive handoff-collision evidence, independent of exit codes/logs.
 			if port != "" && errors.Is(verifyNativeListener(port, g.supervisor.Process.Pid), errNativeForeignListener) {
-				return errNativePortCollision
+				return g.recordInfrastructure(foreignPort, member.Name, port, errNativePortCollision)
 			}
 			return err
 		}
@@ -621,7 +791,7 @@ func (g *nativeGroup) waitReady(member *nativeMember, port string, readiness Nat
 			if response.StatusCode >= 200 && response.StatusCode < 300 {
 				if err = verifyNativeListener(port, g.supervisor.Process.Pid); err != nil {
 					if errors.Is(err, errNativeForeignListener) {
-						return errNativePortCollision
+						return g.recordInfrastructure(foreignPort, member.Name, port, errNativePortCollision)
 					}
 					return err
 				}
@@ -634,4 +804,121 @@ func (g *nativeGroup) waitReady(member *nativeMember, port string, readiness Nat
 		case <-wake.C:
 		}
 	}
+}
+
+func (g *nativeGroup) setupMemory() error {
+	c, err := g.memory.children()
+	if err != nil || c == nil {
+		return err
+	}
+	g.control, err = c.create("control", g.memory.bytes, 0)
+	if err != nil {
+		return err
+	}
+	g.memberMemory = map[string]*memoryAttempt{}
+	members := map[string]float64{"main": g.p.job.Spec.Run.MemoryGB}
+	for _, side := range g.p.job.Spec.Run.Sidecars {
+		members[side.Name] = side.MemoryGB
+	}
+	for name, gb := range members {
+		bytes := g.memory.bytes
+		if gb > 0 {
+			bytes, err = memoryBytes(gb)
+			if err != nil {
+				return err
+			}
+		}
+		leaf := name
+		if name != "main" {
+			leaf = "sidecar-" + name
+		}
+		g.memberMemory[name], err = c.create(leaf, bytes, g.worker.MemorySwapMaxBytes)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (g *nativeGroup) memoryFailure() error {
+	for _, m := range g.members {
+		if err := m.memory.failure(); err != nil {
+			return fmt.Errorf("native member %s: %w", m.Name, err)
+		}
+	}
+	return g.memory.failure()
+}
+
+// Inspect durable member evidence before orphan cleanup removes kernel counters.
+// Persist the classified result with a release hold so a second crash cannot
+// erase the observed OOM. Startup clears the hold only after whole-group proof.
+func (s *workerStore) recoverNativeCause(machine string, fs memoryFS) error {
+	if s.state.Result != nil {
+		return nil
+	}
+	data, err := os.ReadFile(filepath.Join(s.dir, "native-"+s.state.Identity+".json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var record struct {
+		Identity string
+		Members  []nativeMember
+	}
+	if err := json.Unmarshal(data, &record); err != nil {
+		return err
+	}
+	if record.Identity != s.state.Identity {
+		return errors.New("mismatched native outcome custody")
+	}
+	data, err = os.ReadFile(filepath.Join(s.dir, "attempt-"+s.state.Identity+".json"))
+	if err != nil {
+		return err
+	}
+	var custody workerState
+	if err := json.Unmarshal(data, &custody); err != nil {
+		return err
+	}
+	if custody.Identity != s.state.Identity {
+		return errors.New("mismatched native attempt custody")
+	}
+	for _, m := range record.Members {
+		if m.Cgroup == "" {
+			continue
+		}
+		leaf := "main"
+		if m.Name != "main" {
+			leaf = "sidecar-" + m.Name
+		}
+		if filepath.Base(custody.Cgroup) != "attempt-"+s.state.Identity || m.Cgroup != filepath.Join(custody.Cgroup, leaf) {
+			return errors.New("mismatched member cgroup custody")
+		}
+		limit, err := fs.ReadFile(filepath.Join(m.Cgroup, "memory.max"))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		bytes, err := strconv.ParseInt(strings.TrimSpace(string(limit)), 10, 64)
+		if err != nil || bytes <= 0 {
+			return errors.New("invalid saved member memory cap")
+		}
+		err = (&memoryAttempt{fs: fs, path: m.Cgroup, bytes: bytes}).failure()
+		if err == nil {
+			continue
+		}
+		if ceilingDiagnostic(err.Error(), "") == "" {
+			return err
+		}
+		r := classifyAttemptOutcome(Result{Machine: machine, Session: s.state.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, ReleasePending: true, Error: "native member " + m.Name + ": " + err.Error(), ExecutionCause: &RuntimeCause{Operation: "command", Class: "resource_limit"}}, attemptCause{OutOfMemory: true})
+		if err := saveWorkerJSON(s.dir, s.state.Identity+".result.json", r); err != nil {
+			return err
+		}
+		s.state.Result = &r
+		return nil
+	}
+	return nil
 }

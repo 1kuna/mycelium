@@ -199,30 +199,37 @@ func TestDockerRestartCompletedMain(t *testing.T) {
 }
 
 // Case 2 includes zero first observed while recovery cleans up the old main.
-func TestDockerRestartUnfinishedMainStaysLoss(t *testing.T) {
-	w, s, _, _, root := restartResultFixture(t)
+func TestDockerRestartLiveCompletionSurvivesRecovery(t *testing.T) {
+	w, s, _, clock, root := restartResultFixture(t)
+	clock.advance(StopGrace)
 	if err := os.Remove(filepath.Join(root, "running")); err != nil {
 		t.Fatal(err)
 	}
-	r := restartSavedResult(t, w, s)
-	if r.Success || !r.Interrupted {
-		t.Fatalf("promoted cleanup exit zero: %+v", r)
+	p, err := w.restoreDocker(s)
+	if err != nil || p == nil {
+		t.Fatal("restore", err)
+	}
+	defer p.docker.close()
+	clock.advance(StopGrace)
+	r := d5Finish(t, p)
+	if !r.Success || r.Interrupted {
+		t.Fatalf("discarded recovered completion: %+v", r)
 	}
 	q := restartQueue(t, s, w)
 	if e := q.Complete(r); e != nil {
 		t.Fatal(e)
 	}
 	got := job(t, q, r.ID)
-	if got.State != "queued" || got.Losses != 1 {
-		t.Fatalf("not one loss: %+v", got)
+	if got.State != "succeeded" || got.Losses != 0 {
+		t.Fatalf("completion changed: %+v", got)
 	}
 	m := w.Machine
 	m.HostAvailableMemoryGB = 32
 	m.HostMemoryMeasured = true
 	m.FreeHostMemoryGB = 32
 	reply := check(t, q, m, nil)
-	if reply.Job == nil || reply.Job.Attempt != 2 {
-		t.Fatalf("retry: %+v", reply)
+	if reply.Job != nil {
+		t.Fatalf("completed job retried: %+v", reply)
 	}
 }
 
@@ -292,8 +299,8 @@ func TestDockerRestartProofFailures(t *testing.T) {
 					t.Fatal("TERM before main persistence")
 				}
 				r := restartSavedResult(t, w, s)
-				if r.Success || !r.Interrupted {
-					t.Fatal("unknown main promoted")
+				if !r.Success || r.Interrupted {
+					t.Fatal("recovery discarded observed completion", r)
 				}
 				return
 			}

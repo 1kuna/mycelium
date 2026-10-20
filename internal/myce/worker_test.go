@@ -200,7 +200,7 @@ while :; do read line <&3; done`}
 		}
 	})
 	result := run.result(t)
-	if !result.Success || !result.Interrupted || result.Forced || result.ReleasePending {
+	if !result.Success || result.Interrupted || result.Forced || result.ReleasePending {
 		t.Fatalf("stop did not finish gracefully: %+v", result)
 	}
 	// Leave's capacity reservation expires at the original deadline, even
@@ -252,13 +252,31 @@ func TestWorkerWaitsForNonresumableOnInterrupt(t *testing.T) {
 func TestWorkerCommandStartFailure(t *testing.T) {
 	q, _ := fixture(t)
 	q.clock = RealClock{}
-	s := spec("experiment")
+	s := spec("production")
 	s.Run.Command = []string{"/does-not-exist/myce-test"}
 	j := submit(t, q, s)
-	workerFixture(t, q)
+	run := workerFixture(t, q)
 	await(t, func() bool { return job(t, q, j.ID).State == "failed" })
-	if !strings.Contains(job(t, q, j.ID).Reason, "no such file") {
-		t.Fatal("start failure was not explained")
+	got := job(t, q, j.ID)
+	if got.InfrastructureRetries != 2 || got.Reason != "infrastructure_retries_exhausted" {
+		t.Fatal("launch failure bypassed bounded infrastructure policy", got)
+	}
+	records, err := filepath.Glob(filepath.Join(run.state, "launch-"+j.ID+"-*.outcome.json"))
+	if err != nil || len(records) != 3 {
+		t.Fatal("missing per-attempt Mycelium launch records", len(records), err)
+	}
+	for _, path := range records {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var facts memberOutcome
+		if err = json.Unmarshal(data, &facts); err != nil {
+			t.Fatal(err)
+		}
+		if len(facts.Infrastructure) != 1 || facts.Infrastructure[0].Kind != launchFailed || !facts.recordedInfrastructure() {
+			t.Fatal("launch failure was not explained by a durable Mycelium fact", facts)
+		}
 	}
 }
 

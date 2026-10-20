@@ -90,6 +90,7 @@ func (s Spec) validateDockerGroup() error {
 }
 
 type dockerMember struct {
+	memberOutcome
 	Name           string `json:"name"`
 	Memory         int64  `json:"memory"`
 	Swap           int64  `json:"swap"`
@@ -224,6 +225,7 @@ func (d *dockerAttempt) containerViolation(c dockerInspection) string {
 	return ""
 }
 func (d *dockerAttempt) observeGroup(containers []dockerInspection) error {
+	observedAt := time.Now().UTC()
 	networkFailure := ""
 	d.mu.Lock()
 	stopped := d.state.Stopped
@@ -246,6 +248,16 @@ func (d *dockerAttempt) observeGroup(containers []dockerInspection) error {
 		d.state.Forced = true
 	}
 	for _, c := range containers {
+		if !dockerLive(c) && c.State.Status != "created" {
+			if d.state.Containers == nil {
+				d.state.Containers = map[string]dockerMember{}
+			}
+			m := d.state.Containers[c.ID]
+			if m.Exit == nil {
+				m.Exit = &memberExit{Status: c.State.ExitCode, ObservedAt: observedAt}
+			}
+			d.state.Containers[c.ID] = m
+		}
 		d.state.OOMKilled = d.state.OOMKilled || c.State.OOMKilled
 		if why := d.containerViolation(c); why != "" {
 			d.state.Failure = why
@@ -253,40 +265,48 @@ func (d *dockerAttempt) observeGroup(containers []dockerInspection) error {
 			d.state.Forced = true
 		}
 	}
-	if !d.state.Stopped && d.state.Network != "" {
+	if !d.state.MainFinished {
 		for _, c := range containers {
-			if c.ID == d.state.Container && !*c.State.Running {
+			if c.ID == d.state.Container && !dockerLive(c) && c.State.Status != "created" {
 				d.state.MainFinished = true
 				d.state.ExitCode = c.State.ExitCode
-				d.state.AmbiguousKill = c.State.ExitCode == 137 && !c.State.OOMKilled
+				d.state.AmbiguousKill = d.state.AmbiguousKill || c.State.ExitCode == 137 && !c.State.OOMKilled
 				d.state.Stopped = true
 				deadline := d.clock.Now().Add(StopGrace)
-				d.state.StopAt = &deadline
+				if d.state.StopAt == nil {
+					d.state.StopAt = &deadline
+				}
 				break
 			}
 		}
-		if !d.state.MainFinished {
-			for id, m := range d.state.Containers {
-				if m.Name == "main" || !m.Started {
-					continue
+	}
+	// A launch/readiness refusal already owns the stage failure. Its cleanup
+	// signals are not fresh helper failures. Explicit infrastructure stops still
+	// observe independent helper exits rather than masking them with stop intent.
+	if d.state.Network != "" && !d.state.MainFinished && d.state.Failure == "" && (!stopped || d.state.InfrastructureStop) {
+		for id, m := range d.state.Containers {
+			if m.Name == "main" || !m.Started {
+				continue
+			}
+			alive := false
+			ambiguousKill := false
+			for _, c := range containers {
+				if c.ID == id && *c.State.Running {
+					alive = true
 				}
-				alive := false
-				ambiguousKill := false
-				for _, c := range containers {
-					if c.ID == id && *c.State.Running {
-						alive = true
-					}
-					if c.ID == id && !*c.State.Running && c.State.ExitCode == 137 && !c.State.OOMKilled {
-						ambiguousKill = true
-					}
+				if c.ID == id && !dockerLive(c) && m.deliveredBeforeExit() {
+					alive = true
 				}
-				if !alive {
-					d.state.Failure = "Docker sidecar " + m.Name + " exited before main"
-					d.state.AmbiguousKill = ambiguousKill
-					d.state.Stopped = true
-					d.state.Forced = true
-					break
+				if c.ID == id && !*c.State.Running && c.State.ExitCode == 137 && !c.State.OOMKilled {
+					ambiguousKill = true
 				}
+			}
+			if !alive {
+				d.state.Failure = "Docker sidecar " + m.Name + " exited before main"
+				d.state.AmbiguousKill = ambiguousKill
+				d.state.Stopped = true
+				d.state.Forced = true
+				break
 			}
 		}
 	}
@@ -420,9 +440,15 @@ func (d *dockerAttempt) waitReady(id, name string, r DockerReadiness) error {
 		d.mu.Lock()
 		stopped := d.state.Stopped
 		failure := d.state.Failure
+		infrastructureStop := d.state.InfrastructureStop
 		d.mu.Unlock()
 		if stopped {
-			return fmt.Errorf("Docker sidecar %s readiness stopped: %s", name, failure)
+			err := fmt.Errorf("Docker sidecar %s readiness stopped: %s", name, failure)
+			if failure == "" && infrastructureStop {
+				// Mycelium refuses main launch while readiness is interrupted.
+				return d.recordInfrastructure(infrastructureFact{Kind: launchRefused, At: time.Now().UTC(), Member: "main"}, err)
+			}
+			return err
 		}
 		if !d.clock.Now().Before(deadline) {
 			return &runtimeError{diagnostic: RuntimeCause{Operation: "readiness", Class: "timeout"}, cause: fmt.Errorf("Docker sidecar %s HTTP readiness timeout", name)}

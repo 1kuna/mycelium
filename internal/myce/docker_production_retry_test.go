@@ -87,8 +87,18 @@ func TestDockerProductionOutcomeCause(t *testing.T) {
 							t.Fatal(err)
 						}
 					}
-					// Record intent first; the daemon then reports a killed member.
+					// This is an infrastructure-delivery case. Intent-only exits
+					// are stage failures and have separate table/reviewer coverage.
 					p.stop(clock.Now(), StopGrace, false)
+					target := "id1"
+					if cause == "stop-sidecar" || cause == "maintenance-sidecar" {
+						target = "sidecar-sortformer"
+					}
+					await(t, func() bool {
+						p.docker.mu.Lock()
+						defer p.docker.mu.Unlock()
+						return len(p.docker.state.Containers[target].Signals) > 0
+					})
 					if cause == "stop-sidecar" || cause == "maintenance-sidecar" {
 						writeMode("sidecar-killed")
 						exitContainer("running-sidecar-sortformer")
@@ -146,13 +156,16 @@ func TestDockerProductionOutcomeCause(t *testing.T) {
 						t.Fatal(err)
 					}
 					got := job(t, q, submitted.ID)
-					infra := strings.HasPrefix(cause, "maintenance-") || strings.HasPrefix(cause, "stop-") || cause == "exhaustion" || strings.HasSuffix(cause, "recovery")
+					infra := strings.HasPrefix(cause, "maintenance-") || strings.HasPrefix(cause, "stop-") || cause == "exhaustion" || cause == "worker-recovery"
 					want, retries := "failed", 0
 					if infra {
 						want, retries = "queued", min(attempt, 2)
 						if attempt == 3 {
 							want = "failed"
 						}
+					}
+					if cause == "daemon-recovery" {
+						want = "succeeded"
 					}
 					if strings.HasPrefix(cause, "maintenance-") {
 						retries = 0
