@@ -117,6 +117,10 @@ func TestHostEnvelopeConcurrentClose(t *testing.T) {
 				}
 			}
 			args := []string{"close", "--local", "--config", c.Config, "--grace", "0", "--timeout", "2s", "--json"}
+			observe := func(ctx context.Context, v myce.HostInvocation) (myce.HostExclusionReport, error) {
+				s, err := myce.ReadHostIntent(v.StateDir)
+				return envelopeHardware(ctx, s), err
+			}
 			type result struct {
 				data []byte
 				err  error
@@ -128,7 +132,7 @@ func TestHostEnvelopeConcurrentClose(t *testing.T) {
 				if waitReleased {
 					firstArgs = append(firstArgs, "--wait-released")
 				}
-				err := hostEnvelopeCommandWithHandler(firstArgs, myce.MachineProbe{}, &out, r, nil, handler(true))
+				err := hostEnvelopeCommandWithObservation(firstArgs, myce.MachineProbe{}, &out, r, nil, handler(true), observe)
 				firstDone <- result{out.Bytes(), err}
 			}()
 			select {
@@ -138,7 +142,7 @@ func TestHostEnvelopeConcurrentClose(t *testing.T) {
 			}
 			// A still owns reconcile.lock. B accepts the next durable revision.
 			var out bytes.Buffer
-			err := hostEnvelopeCommandWithHandler(args, myce.MachineProbe{}, &out, r, nil, handler(false))
+			err := hostEnvelopeCommandWithObservation(args, myce.MachineProbe{}, &out, r, nil, handler(false), observe)
 			second := validateEnvelopeOutput(t, out.Bytes())
 			if err != nil || second.Accepted == nil || *second.Accepted != 3 {
 				t.Fatal("second close", second, err)
@@ -147,7 +151,7 @@ func TestHostEnvelopeConcurrentClose(t *testing.T) {
 			select {
 			case got := <-firstDone:
 				first := validateEnvelopeOutput(t, got.data)
-				if (got.err != nil) != waitReleased || first.Accepted == nil || *first.Accepted != 2 || first.Desired.Revision == nil || *first.Desired.Revision != 3 {
+				if got.err == nil || first.Accepted == nil || *first.Accepted != 2 || first.Desired.Revision == nil || *first.Desired.Revision != 3 {
 					t.Fatal("first close", first, got.err)
 				}
 				found := false

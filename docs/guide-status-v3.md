@@ -150,14 +150,16 @@ Status never initializes or repairs state. `state_uninitialized`/`state_corrupt`
 keep unverified fields null. A stale compare-and-set returns exit 3,
 `revision_mismatch`, unchanged desired state and no accepted revision. An accepted
 operation overtaken by another retains its accepted revision with
-`revision_superseded` and the newer desired revision. Without a release wait
-its acceptance exits 0; with a release wait it fails nonzero, never exit 3.
+`revision_superseded` and the newer desired revision. An overtaken close fails
+nonzero, never exit 3.
 Open requires a selector matching the current confirmed close; otherwise it
 rejects with mismatch or `previous_close_unsettled` without allocation.
 
-Without wait/verdict, exit zero means acceptance or successful snapshot only.
-`close --wait-released` needs local exclusion PASS, even if queue settlement is
-pending. `status --expect ready --wait` needs ready PASS. With
+For open/status without wait/verdict, exit zero means acceptance or a successful
+snapshot. Close always needs fresh local exclusion PASS, even if queue settlement
+is pending; `--wait-released` remains accepted. Unconfirmed close release exits 1
+with `release_not_confirmed` and “close accepted, release not confirmed”, preserving
+`accepted_revision`. `status --expect ready --wait` needs ready PASS. With
 `--expect closed|ready --verdict`, zero exit means the requested **rest PASS** only.
 
 ### Rest verdicts

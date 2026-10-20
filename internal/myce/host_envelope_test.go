@@ -19,6 +19,29 @@ type envelopeClock struct{ at time.Time }
 
 func (c *envelopeClock) Now() time.Time { return c.at }
 
+func TestHostEnvelopeExclusionKeepsIntentFreshness(t *testing.T) {
+	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for _, age := range []time.Duration{0, HostObservationWindow, HostObservationWindow + time.Nanosecond} {
+		t.Run(age.String(), func(t *testing.T) {
+			e := UnknownHostEnvelope("status", &envelopeClock{now})
+			e.Host, e.Operation, e.Boot = hostPtr("host"), hostPtr("operation"), hostPtr("boot")
+			e.Desired = HostEnvelopeState{hostPtr("open"), hostPtr(uint64(1))}
+			e.Sources["local_intent"] = hostPtr(now.Add(-age))
+			e.Sources["queue"], e.Sources["docker"] = &now, &now
+			e.ApplyExclusion(&HostExclusionReport{
+				HostRevision: HostRevision{Revision: 1, Operation: "operation"}, Boot: "boot", Verdict: "FAIL", At: now,
+				Sources: map[string]*time.Time{"local_intent": nil, "docker": nil, "queue": nil},
+			}, now)
+			if (e.Desired.Revision != nil) != (age <= HostObservationWindow) {
+				t.Fatal("nil exclusion source changed intent freshness", e.Desired, e.Sources)
+			}
+			if e.Sources["queue"] == nil || e.Sources["docker"] != nil || e.LocalExclusion == "PASS" {
+				t.Fatal("unrelated source semantics changed", e.Sources, e.LocalExclusion)
+			}
+		})
+	}
+}
+
 func TestHostEnvelopeCASAndLastClose(t *testing.T) {
 	dir := t.TempDir()
 	clock := &envelopeClock{RealClock{}.Now()}

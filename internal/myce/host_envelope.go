@@ -385,7 +385,7 @@ func (e *HostEnvelope) ApplyExclusion(r *HostExclusionReport, now time.Time) {
 	e.Counts.PendingDaemon, e.Counts.Containers, e.Counts.GPUHolders = r.PendingOperations, r.RunningContainers, r.GPUHolders
 	e.RestartSafe = r.RestartSafe
 	for name, at := range r.Sources {
-		if name != "queue" {
+		if name != "queue" && (name != "local_intent" || at != nil) {
 			e.Sources[name] = at
 		}
 	}
@@ -393,9 +393,14 @@ func (e *HostEnvelope) ApplyExclusion(r *HostExclusionReport, now time.Time) {
 	e.Errors = append(e.Errors, r.Errors...)
 	e.FinishObservation(now)
 }
+
+var ErrHostReleaseUnconfirmed = errors.New("close accepted, release not confirmed")
+
 func HostEnvelopeError(err error) ExclusionError {
 	code, component := "observation_unavailable", "local_intent"
 	switch {
+	case errors.Is(err, ErrHostReleaseUnconfirmed):
+		return ExclusionError{Component: "command", Code: "release_not_confirmed", Message: ErrHostReleaseUnconfirmed.Error()}
 	case errors.Is(err, ErrLegacyState):
 		code = "legacy_state_present"
 	case errors.Is(err, ErrHostStateUninitialized):

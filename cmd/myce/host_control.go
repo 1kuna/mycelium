@@ -107,6 +107,10 @@ func hostEnvelopeCommandWithTiming(args []string, probe myce.MachineProbe, out i
 	}
 	defer func() {
 		if retErr != nil {
+			if op == "close" && envelope.Accepted != nil {
+				envelope.Errors = append(envelope.Errors, myce.HostEnvelopeError(retErr))
+				retErr = errors.Join(myce.ErrHostReleaseUnconfirmed, retErr)
+			}
 			envelope.Errors = append(envelope.Errors, myce.HostEnvelopeError(retErr))
 		}
 		// A revision fence can fail after durable acceptance. Preserve that
@@ -209,16 +213,11 @@ func hostEnvelopeCommandWithTiming(args []string, probe myce.MachineProbe, out i
 		if r.Revision > 0 {
 			accepted = &r.Revision
 		}
-		if v.Privileged && op == "close" && mutationErr == nil {
-			observation, oe := v.InspectExclusion(ctx, launch, handler, myce.LocalHostKernelReaders())
-			if oe == nil {
-				_, oe = mutate(myce.HostMutation{Operation: "record-exclusion", Evidence: &observation})
-			}
-			if oe != nil {
-				mutationErr = oe
-			}
-		}
-		if mutationErr != nil {
+		envelope.Accepted = accepted
+		// An accepted close may return an error because its dropped child
+		// cannot prove privileged exclusion. Collect and record that proof in
+		// the parent below; cleanup errors alone cannot decide release.
+		if mutationErr != nil && !(op == "close" && accepted != nil && !errors.Is(mutationErr, myce.ErrHostDeadline) && ctx.Err() == nil) {
 			// Read current durable state on CAS rejection; this accessor has no writes.
 			if ctx.Err() == nil && (errors.Is(mutationErr, myce.ErrHostRevision) || errors.Is(mutationErr, myce.ErrPreviousCloseUnsettled) || accepted != nil) {
 				if snapshot, se := mutate(myce.HostMutation{Operation: "status"}); se == nil && snapshot.Envelope != nil {
@@ -261,6 +260,9 @@ func hostEnvelopeCommandWithTiming(args []string, probe myce.MachineProbe, out i
 		envelope.HostRestVerdict = nil
 		envelope.Command = op
 		envelope.Accepted = accepted
+		if op == "close" && accepted != nil && (envelope.Desired.Revision == nil || *envelope.Desired.Revision != *accepted) {
+			return myce.ErrHostRevision
+		}
 		if v.Privileged || observe != nil {
 			envelope.ClearExclusion()
 			observationBudget := min(deadline.Sub(clock.Now()), envelope.At.Add(myce.HostObservationWindow).Sub(clock.Now()))
@@ -282,6 +284,23 @@ func hostEnvelopeCommandWithTiming(args []string, probe myce.MachineProbe, out i
 				}
 				envelope.Errors = append(envelope.Errors, myce.HostEnvelopeError(oe))
 			} else {
+				if v.Privileged && op == "close" && accepted != nil {
+					if _, err := mutate(myce.HostMutation{Operation: "record-exclusion", Evidence: &observation}); err != nil {
+						return err
+					}
+					// Recording relays proof to queue reconciliation. Read its
+					// resulting settlement before rendering the final envelope.
+					updated, err := mutate(myce.HostMutation{Operation: "status"})
+					if err != nil {
+						return err
+					}
+					if updated.Envelope == nil {
+						return myce.ErrHostChild
+					}
+					envelope = *updated.Envelope
+					envelope.Command, envelope.Accepted = op, accepted
+					envelope.ClearExclusion()
+				}
 				envelope.ApplyExclusion(&observation, clock.Now())
 			}
 		}
@@ -306,7 +325,7 @@ func hostEnvelopeCommandWithTiming(args []string, probe myce.MachineProbe, out i
 			envelope.FinishObservation(now)
 		}
 		satisfied := true
-		if *waitReleased {
+		if op == "close" || *waitReleased {
 			satisfied = envelope.LocalExclusion == "PASS"
 		}
 		if *expect == "ready" {
@@ -321,7 +340,7 @@ func hostEnvelopeCommandWithTiming(args []string, probe myce.MachineProbe, out i
 		if satisfied {
 			return nil
 		}
-		if !*wait && !*waitReleased {
+		if op != "close" && !*wait && !*waitReleased {
 			return waitError(1, "host expectation not satisfied")
 		}
 		// A further poll (or an error while waiting) is a new evaluation.

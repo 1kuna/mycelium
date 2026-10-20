@@ -134,9 +134,11 @@ myce host status --local --config WORKER_CONFIG --expect closed --verdict --time
 
 Close durably writes CLOSED before discovery/network calls and fences all launch
 paths. Saved stop intent and its original deadline survive restart; TERM/KILL or
-retry does not renew grace. Charges remain until exact release. Without
-`--wait-released`, exit 0 means durable acceptance. With it, exit 0 means local
-exclusion PASS, which can occur while queue settlement is pending. Rest PASS
+retry does not renew grace. Charges remain until exact release. Close exits 0
+only after fresh local exclusion PASS, with or without `--wait-released`; queue
+settlement may still be pending. Unconfirmed release exits 1 with
+`release_not_confirmed` and “close accepted, release not confirmed”, retaining
+`accepted_revision`. Rest PASS
 also needs current queue acknowledgement and settlement. A timeout leaves
 CLOSED intent and unconfirmed obligations intact.
 
@@ -145,8 +147,7 @@ selector, close accepts a new closing revision even during another operation.
 A rejected selector returns exit 3, `revision_mismatch`, unchanged desired state
 and `accepted_revision: null`. If an accepted close is overtaken, it keeps its
 accepted revision and reports `revision_superseded` with the current revision.
-Without a release wait its acceptance still exits 0; with the wait it fails
-nonzero, never as a CAS rejection. Follow the newer revision.
+It fails nonzero, never as a CAS rejection. Follow the newer revision.
 
 Reconcile retries the same revision using durable custody. The installed timer
 runs it even when workers are stopped; a co-located queue also reconciles before

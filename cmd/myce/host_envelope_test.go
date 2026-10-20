@@ -60,6 +60,11 @@ func envelopeFixture(t *testing.T) (myce.HostIdentityResolver, myce.ServiceConfi
 func invokeEnvelope(t *testing.T, r myce.HostIdentityResolver, c myce.ServiceConfig, flags ...string) (myce.HostEnvelope, error) {
 	t.Helper()
 	args := []string{flags[0], "--local", "--config", c.Config, "--json"}
+	// This fixture has no privileged observer, so an accepted close cannot
+	// confirm release. Keep that failure bounded; explicit timeouts override it.
+	if flags[0] == "close" {
+		args = append(args, "--timeout", "80ms")
+	}
 	args = append(args, flags[1:]...)
 	var out bytes.Buffer
 	err := hostLocalCommandWithIdentity(args, myce.MachineProbe{OS: "fixture"}, &out, r, nil)
@@ -82,7 +87,7 @@ func TestHostEnvelopeCommandsAndFailures(t *testing.T) {
 		{"invalid-flag", []string{"status", "--unit", "myce-worker.service"}, 2},
 		{"invalid-duration", []string{"status", "--timeout", "invalid"}, 2},
 		{"missing-local", []string{"status", "--local=false"}, 2},
-		{"close", []string{"close", "--grace", "0"}, 0},
+		{"close", []string{"close", "--grace", "0"}, 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e, err := invokeEnvelope(t, r, c, tc.flags...)
@@ -109,7 +114,7 @@ func TestHostEnvelopeCommandsAndFailures(t *testing.T) {
 			{[]string{"open"}, 2},
 			{[]string{"close", "--expect-revision", "99"}, 3},
 			{[]string{"status", "--unit", "myce-worker.service"}, 2},
-			{[]string{"close", "--grace", "0"}, 0},
+			{[]string{"close", "--grace", "0", "--timeout", "80ms"}, 1},
 		} {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			args := append([]string{"host", tc.args[0], "--local", "--config", c.Config, "--json"}, tc.args[1:]...)
@@ -161,11 +166,11 @@ func TestHostEnvelopeCASAndLastClose(t *testing.T) {
 		t.Fatal("mismatch wrote host files")
 	}
 	first, err := invokeEnvelope(t, r, c, "close", "--grace", "0")
-	if err != nil || first.Accepted == nil || *first.Accepted != 2 || first.LastClose.Revision != 2 {
+	if !errors.Is(err, myce.ErrHostReleaseUnconfirmed) || first.Accepted == nil || *first.Accepted != 2 || first.LastClose.Revision != 2 {
 		t.Fatal(first, err)
 	}
 	second, err := invokeEnvelope(t, r, c, "close", "--grace", "0", "--expect-revision", "2")
-	if err != nil || second.Accepted == nil || *second.Accepted != 3 || *first.Operation == *second.Operation {
+	if !errors.Is(err, myce.ErrHostReleaseUnconfirmed) || second.Accepted == nil || *second.Accepted != 3 || *first.Operation == *second.Operation {
 		t.Fatal(second, err)
 	}
 	state, err := myce.ReadHostIntent(c.HostStateDir)
