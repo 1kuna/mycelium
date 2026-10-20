@@ -52,7 +52,7 @@ func releaseTestIDs(jobs []*Job, slots []*ModelSlot) []string {
 	return ids
 }
 
-func TestHostReleaseOptimalVictims(t *testing.T) {
+func TestHostReleaseSingleVictimBeforeGreedy(t *testing.T) {
 	for _, tc := range []struct {
 		name        string
 		cores       int
@@ -71,11 +71,17 @@ func TestHostReleaseOptimalVictims(t *testing.T) {
 		{"RAM only swap", 16, 4, 1, 2, []releaseTestVictim{
 			{"a", "experiment", 1, 1, false}, {"b", "experiment", 1, 1, false}, {"c", "experiment", 1, 2, false},
 		}, []string{"job/c"}},
-		{"two experiments before deadline job", 16, 4, 1, 2, []releaseTestVictim{
+		{"single deadline job before two experiments", 16, 4, 1, 2, []releaseTestVictim{
 			{"a", "experiment", 1, 1, false}, {"b", "experiment", 1, 1, false}, {"c", "deadline", 1, 2, false},
-		}, []string{"job/a", "job/b"}},
-		{"two experiments before deadline slot", 16, 4, 1, 2, []releaseTestVictim{
+		}, []string{"job/c"}},
+		{"single deadline slot before two experiments", 16, 4, 1, 2, []releaseTestVictim{
 			{"a", "experiment", 1, 1, false}, {"b", "experiment", 1, 1, false}, {"c", "deadline", 1, 2, true},
+		}, []string{"slot/worker-c/c"}},
+		{"single victim tier before excess", 16, 6, 1, 2, []releaseTestVictim{
+			{"a", "deadline", 1, 2, false}, {"b", "experiment", 1, 4, false},
+		}, []string{"job/b"}},
+		{"greedy two experiments without sufficient singleton", 16, 4, 1, 2, []releaseTestVictim{
+			{"a", "experiment", 1, 1, false}, {"b", "experiment", 1, 1, false}, {"c", "deadline", 1, 1, false}, {"d", "deadline", 1, 1, false},
 		}, []string{"job/a", "job/b"}},
 		{"least excess then IDs", 16, 8, 1, 2, []releaseTestVictim{
 			{"a", "experiment", 1, 4, false}, {"b", "experiment", 1, 2, false}, {"c", "experiment", 1, 2, false},
@@ -320,17 +326,17 @@ func bruteForceHostReleases(q *Queue, m *Machine, demand Spec, releasedJobs map[
 	return bestIDs, bestCounts != nil
 }
 
-func TestHostReleaseSearchMatchesBruteForce(t *testing.T) {
+func TestHostReleaseSeededProperties(t *testing.T) {
 	const seed, cases = 100, 350
 	rng := rand.New(rand.NewSource(seed))
-	feasible := 0
+	feasible, nonOptimal := 0, 0
 	confirmed := 0
 	slotStates := map[string]int{}
 	for n := 0; n < cases; n++ {
 		t.Run(fmt.Sprint(n), func(t *testing.T) {
 			count := 1 + rng.Intn(8)
 			if n == cases-1 {
-				count = 12 // Exercise the inclusive exact-search boundary too.
+				count = 12 // Also exercise a larger host.
 			}
 			victims := make([]releaseTestVictim, count)
 			for i := range victims {
@@ -418,12 +424,22 @@ func TestHostReleaseSearchMatchesBruteForce(t *testing.T) {
 			if possible {
 				feasible++
 			}
+			var first []string
 			for repeat := 0; repeat < 3; repeat++ {
 				jobs, slots, ok := q.hostReleasesExcept(&projected, demand.Needs.MemoryGB, demand.Needs.HostMemoryGB, demand, releasedJobs, releasedSlots)
 				got := releaseTestIDs(jobs, slots)
-				if ok != possible || ok && !slices.Equal(got, want) {
-					t.Fatalf("seed=%d repeat=%d: feasible=%v victims=%v; oracle feasible=%v victims=%v", seed, repeat, ok, got, possible, want)
+				if ok != possible {
+					t.Fatalf("seed=%d repeat=%d: feasible=%v; oracle feasible=%v", seed, repeat, ok, possible)
 				}
+				if repeat == 0 {
+					first = got
+					if ok && !slices.Equal(got, want) {
+						nonOptimal++ // Information only: the heuristic need not match rank.
+					}
+				} else if !slices.Equal(got, first) {
+					t.Fatalf("nondeterministic plan: %v then %v", first, got)
+				}
+				assertReleaseLedgerProperties(t, q, m, demand, jobs, slots, ok, mandatoryJobs, mandatorySlots)
 				if ok {
 					capacity := q.cpuAfterReleases(&projected, append(slices.Clone(mandatoryJobs), jobs...), append(slices.Clone(mandatorySlots), slots...), 0)
 					for _, j := range jobs {
@@ -449,7 +465,7 @@ func TestHostReleaseSearchMatchesBruteForce(t *testing.T) {
 	if confirmed == 0 || len(slotStates) != 6 {
 		t.Fatal("missing release-confirmed or non-ready slot coverage", confirmed, slotStates)
 	}
-	t.Logf("seed=%d: %d hosts compared with brute force (%d feasible, %d confirmed releases, slots=%v), each planned three times", seed, cases, feasible, confirmed, slotStates)
+	t.Logf("seed=%d: cases=%d feasible=%d non-optimal=%d (%.2f%% of feasible); confirmed=%d slots=%v; each planned three times", seed, cases, feasible, nonOptimal, 100*float64(nonOptimal)/float64(feasible), confirmed, slotStates)
 	for _, slot := range []bool{false, true} {
 		for _, stopping := range []bool{false, true} {
 			for _, builds := range []int{0, 1, 6, 12} {
@@ -477,15 +493,23 @@ func TestHostReleaseSearchMatchesBruteForce(t *testing.T) {
 					q.refreshHostMemory()
 					demand := spec("production")
 					demand.Needs = ResourceNeeds{CPUCores: 6, HostMemoryGB: 24}
-					want, possible := bruteForceHostReleases(q, m, demand, nil, nil)
+					_, possible := bruteForceHostReleases(q, m, demand, nil, nil)
+					var first []string
 					var jobs []*Job
 					var slots []*ModelSlot
 					for repeat := 0; repeat < 3; repeat++ {
 						var ok bool
 						jobs, slots, ok = q.hostReleasesExcept(m, 0, 24, demand, nil, nil)
-						if ok != possible || ok && !slices.Equal(releaseTestIDs(jobs, slots), want) {
-							t.Fatalf("repeat=%d: feasible=%v victims=%v; oracle feasible=%v victims=%v", repeat, ok, releaseTestIDs(jobs, slots), possible, want)
+						if ok != possible {
+							t.Fatalf("repeat=%d: feasible=%v oracle=%v", repeat, ok, possible)
 						}
+						got := releaseTestIDs(jobs, slots)
+						if repeat == 0 {
+							first = got
+						} else if !slices.Equal(first, got) {
+							t.Fatalf("nondeterministic plan: %v then %v", first, got)
+						}
+						assertReleaseLedgerProperties(t, q, m, demand, jobs, slots, ok, nil, nil)
 					}
 					if possible {
 						for _, j := range jobs {
@@ -518,11 +542,11 @@ func TestHostReleaseBuildSharesJobAndSlotReservation(t *testing.T) {
 	q.refreshHostMemory()
 	demand := spec("production")
 	demand.Needs = ResourceNeeds{CPUCores: 2}
-	want, possible := bruteForceHostReleases(q, m, demand, nil, nil)
 	jobs, slots, ok := q.hostReleasesExcept(m, 0, 0, demand, nil, nil)
-	if !possible || !ok || !slices.Equal(releaseTestIDs(jobs, slots), want) {
-		t.Fatalf("shared reservation: feasible=%v victims=%v; oracle feasible=%v victims=%v", ok, releaseTestIDs(jobs, slots), possible, want)
+	if !ok {
+		t.Fatal("shared reservation should have a feasible plan")
 	}
+	assertReleaseLedgerProperties(t, q, m, demand, jobs, slots, ok, nil, nil)
 	// The complete projection must retain the build's core even when both its
 	// job and model residency have been selected for release.
 	projected := q.cpuAfterReleases(m, []*Job{q.s.Jobs["a"]}, []*ModelSlot{slot}, 0)
@@ -549,31 +573,5 @@ func TestHostReleaseLocalBuildStopsWithExecution(t *testing.T) {
 	projected := q.cpuAfterReleases(owner, plan.jobs, plan.slots, plan.preparationCores)
 	if !cpuAllocationFits(&projected, 2) {
 		t.Fatal("local release projection retained a stopped build")
-	}
-}
-
-func TestHostReleaseSearchCapAndGreedyFallback(t *testing.T) {
-	for _, count := range []int{12, 13} {
-		t.Run(fmt.Sprint(count), func(t *testing.T) {
-			victims := []releaseTestVictim{{"a", "experiment", 1, 0, false}, {"b", "experiment", 1, 0, false}, {"c", "experiment", 2, 0, false}}
-			for i := len(victims); i < count; i++ {
-				victims = append(victims, releaseTestVictim{fmt.Sprintf("d%02d", i), "experiment", 1, 0, false})
-			}
-			q, m := releaseTestHost(t, count+1, 64, victims)
-			demand := spec("production")
-			demand.Needs = ResourceNeeds{CPUCores: 2}
-			jobs, slots, ok := q.hostReleasesExcept(m, 0, 0, demand, nil, nil)
-			want := []string{"job/c"}
-			if count > 12 {
-				want = []string{"job/a", "job/b"} // Legacy greedy-plus-prune result.
-			}
-			if !ok || !slices.Equal(releaseTestIDs(jobs, slots), want) {
-				t.Fatalf("%d candidates: feasible=%v victims=%v; want %v", count, ok, releaseTestIDs(jobs, slots), want)
-			}
-			capacity := q.cpuAfterReleases(m, jobs, slots, 0)
-			if !cpuAllocationFits(&capacity, demand.Needs.cores()) {
-				t.Fatal("fallback produced an infeasible plan")
-			}
-		})
 	}
 }
