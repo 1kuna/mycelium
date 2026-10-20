@@ -233,6 +233,9 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 }
 
 func (w Worker) recoverAttempt(s *workerStore) (*process, error) {
+	if err := s.restorePriorityStop(); err != nil {
+		return nil, err
+	}
 	var fs memoryFS = osMemoryFS{}
 	if w.memoryCeilings != nil {
 		fs = w.memoryCeilings.fs
@@ -572,14 +575,16 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			m.FileTransferError = diagnostics.FileTransferError
 			probeInventory := w.InventoryProbe
 			observed, probeErr := root.inventory.run("devices", func() ([]MachineDevice, error) {
-				devices, err := probeInventory(ctx)
+				probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+				defer cancel()
+				devices, err := probeInventory(probeCtx)
 				for i := range devices {
 					d := &devices[i]
-					d.ExtensionFingerprint, _ = ExtensionFingerprint(ctx, d.Platform, d.ID)
+					d.ExtensionFingerprint, _ = ExtensionFingerprint(probeCtx, d.Platform, d.ID)
 				}
 				return devices, err
 			})
-			if err := w.refreshInventory(observed, probeErr, root); err != nil {
+			if err := w.refreshInventory(ctx, observed, probeErr, root); err != nil {
 				return err
 			}
 			m.Devices = slices.Clone(w.Machine.Devices)
@@ -610,6 +615,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 					}
 				}
 			}
+			m.InventoryReason = w.inventoryReason
 			if len(m.Devices) == 0 && w.inventoryReason != "" {
 				m.MemoryError = w.inventoryReason
 			}

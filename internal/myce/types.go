@@ -347,6 +347,7 @@ type Job struct {
 type Machine struct {
 	Replacement       *MachineReplacement `json:"replacement,omitempty"`
 	Devices           []MachineDevice     `json:"devices"`
+	InventoryReason   string              `json:"inventory_reason,omitempty"`
 	cpuLedger         bool
 	CPUReserveCores   int           `json:"cpu_reserve_cores,omitempty"`
 	CPUBudgetCores    int           `json:"cpu_budget_cores,omitempty"`

@@ -82,10 +82,15 @@ func TestM3DevTwoGPUScenario(t *testing.T) {
 	}
 	pid := func(j *Job) int {
 		t.Helper()
-		data, err := os.ReadFile(filepath.Join(cfg.Checkpoints, j.ID, fmt.Sprintf("attempt-%d", j.Attempt), "pid"))
-		if err != nil {
-			t.Fatal(err)
-		}
+		var data []byte
+		await(t, func() bool {
+			var err error
+			data, err = os.ReadFile(filepath.Join(cfg.Checkpoints, j.ID, fmt.Sprintf("attempt-%d", j.Attempt), "pid"))
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Fatal(err)
+			}
+			return err == nil && len(data) > 0
+		})
 		value, err := strconv.Atoi(strings.TrimSpace(string(data)))
 		if err != nil {
 			t.Fatal(err)

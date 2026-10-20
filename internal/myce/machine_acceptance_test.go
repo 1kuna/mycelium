@@ -207,11 +207,15 @@ func TestM3StopEventsCoverMachineSession(t *testing.T) {
 			if event.PriorityStop == nil || event.PriorityStop.Demand != demand.ID {
 				t.Fatal("event omitted priority stop provenance", event)
 			}
-			p := &process{job: *a}
+			store := &workerStore{dir: t.TempDir(), state: workerState{Identity: a.ID}}
+			p := &process{job: *a, savePriorityStop: store.priorityStopRecorder()}
 			control := processControl{clock: clock, processes: map[attemptKey]*process{jobKey(*a): p}, pendingEvents: map[attemptKey]WorkerEvent{jobKey(*a): event}}
 			control.apply()
 			if p.priorityStop == nil || p.priorityStop.Demand != demand.ID {
 				t.Fatal("event did not record intent before delivery")
+			}
+			if err := store.restorePriorityStop(); err != nil || store.state.PriorityStop == nil || store.state.PriorityStop.Demand != demand.ID {
+				t.Fatal("event did not retain durable exact-attempt intent", err)
 			}
 		}
 	}

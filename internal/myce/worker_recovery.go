@@ -225,6 +225,31 @@ func (s *workerStore) recoverResult(machine string) error {
 	return nil
 }
 
+// Event delivery must persist intent without racing the attempt actor's state.
+// The execution identity gives this receipt the same custody as its outcome.
+func (s *workerStore) priorityStopRecorder() func(*PriorityPreemption) error {
+	dir, identity := s.dir, s.state.Identity
+	return func(stop *PriorityPreemption) error {
+		return saveWorkerJSON(dir, identity+".priority-stop.json", stop)
+	}
+}
+
+func (s *workerStore) restorePriorityStop() error {
+	data, err := os.ReadFile(filepath.Join(s.dir, s.state.Identity+".priority-stop.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var stop PriorityPreemption
+	if err := decodeWorkerJSON(data, &stop); err != nil {
+		return err
+	}
+	s.state.PriorityStop = &stop
+	return nil
+}
+
 func (s *workerStore) close() {
 	_ = syscall.Flock(int(s.lock.Fd()), syscall.LOCK_UN)
 	_ = s.lock.Close()

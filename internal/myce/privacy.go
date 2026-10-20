@@ -16,7 +16,7 @@ func diagnostic(value, message string) string {
 
 func deviceReasonDiagnostic(reason string) string {
 	switch reason {
-	case "device_identity_mismatch", "device_probe_unavailable", "device_budget_unavailable", "device_memory_unavailable":
+	case "device_identity_mismatch", "device_selector_unmatched", "device_probe_unavailable", "device_budget_unavailable", "device_memory_unavailable":
 		return reason
 	default:
 		return diagnostic(reason, "memory probe failed")
@@ -61,6 +61,7 @@ func (q *Queue) publicSnapshot() (Snapshot, error) {
 		}
 		m.MemoryEnforcement = memoryEnforcementDiagnostic(m.MemoryEnforcement)
 		m.HostMemoryError = diagnostic(m.HostMemoryError, "host memory probe failed")
+		m.InventoryReason = deviceReasonDiagnostic(m.InventoryReason)
 		m.MemoryError = deviceReasonDiagnostic(m.MemoryError)
 		for i := range m.Devices {
 			m.Devices[i].Reason = deviceReasonDiagnostic(m.Devices[i].Reason)

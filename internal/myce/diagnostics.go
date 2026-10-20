@@ -15,6 +15,7 @@ import (
 var rejectionMessages = map[string]string{
 	"machine_renamed":                       "machine retired; use its replacement machine and device selector",
 	"no_matching_device":                    "no matching device is available",
+	"device_selector_unmatched":             "a configured device selector matches no card; check --device against the machine inventory",
 	"device_probe_unavailable":              "accelerator inventory probe unavailable; CPU work remains available with qualified select-none visibility",
 	"device_budget_unavailable":             "accelerator memory budget unavailable",
 	"machine_worker_conflict":               "physical host already has a machine worker; run one machine worker per host; see M4 install conversion",

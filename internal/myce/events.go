@@ -98,15 +98,22 @@ func (w Worker) watchStops(ctx context.Context, events chan<- WorkerEvent) {
 		w.Clock = RealClock{}
 	}
 	after := ""
+	var retry workerRetry
+	wake := time.NewTicker(10 * time.Millisecond)
+	defer wake.Stop()
 	for ctx.Err() == nil {
-		var event WorkerEvent
-		e := w.Client.Call(ctx, "GET", "/api/workers/"+url.PathEscape(w.Machine.ID)+"/events?session="+url.QueryEscape(w.Machine.Session)+"&after="+url.QueryEscape(after), nil, &event)
-		if e != nil {
+		if !retry.ready(w.Clock.Now()) {
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(time.Second):
+			case <-wake.C:
 			}
+			continue
+		}
+		var event WorkerEvent
+		e := w.Client.Call(ctx, "GET", "/api/workers/"+url.PathEscape(w.Machine.ID)+"/events?session="+url.QueryEscape(w.Machine.Session)+"&after="+url.QueryEscape(after), nil, &event)
+		if e != nil {
+			retry.succeeded(w.Clock.Now(), time.Second)
 			continue
 		}
 		if event.Cursor != after {
@@ -130,8 +137,8 @@ func (w Worker) watchStops(ctx context.Context, events chan<- WorkerEvent) {
 	}
 }
 
-// Process control never waits for uploads or takes the worker-store loop's locks.
-// Signal facts and daemon intent use their existing small local state writes.
+// Process control never takes the actor store locks or performs network I/O.
+// Its small stop receipt is independent of the actor's mutable state.
 // A stop received before command startup is retained for that exact attempt.
 type processControl struct {
 	availability  *availabilityMonitor
@@ -161,11 +168,10 @@ func (c *processControl) apply() {
 			p.stop(now, StopGrace, false)
 		}
 		if event, ok := c.pendingEvents[key]; ok {
-			p.mu.Lock()
-			if p.recordPriorityStopLocked(event.PriorityStop) == nil {
-				p.stopLocked(now, max(0, event.deadline.Sub(now)), event.Kill || !now.Before(event.deadline))
+			if err := p.recordPriorityStop(nil, event.PriorityStop); err != nil {
+				continue // Retry persistence before delivering the priority stop.
 			}
-			p.mu.Unlock()
+			p.stop(now, max(0, event.deadline.Sub(now)), event.Kill || !now.Before(event.deadline))
 		}
 		p.enforceGrace(now)
 	}
