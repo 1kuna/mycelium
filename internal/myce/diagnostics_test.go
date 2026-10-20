@@ -56,7 +56,7 @@ func TestAPIRejectionDiagnostics(t *testing.T) {
 	s.Needs.MemoryGB = 0
 	err := (Client{URL: server.URL, Token: "test"}).Call(context.Background(), "POST", "/api/jobs", s, nil)
 	var typed *HTTPError
-	if !errors.As(err, &typed) || typed.Code != "job_memory_invalid" || !strings.Contains(typed.Message, "needs.memory_gb") {
+	if !errors.As(err, &typed) || typed.Code != "job_memory_invalid" || typed.Message != "needs.memory_gb must be positive and needs.host_memory_gb finite and nonnegative" {
 		t.Fatalf("lost client diagnostic: %v", err)
 	}
 }

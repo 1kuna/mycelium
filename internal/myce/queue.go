@@ -1022,9 +1022,9 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 				return err
 			}
 		}
-		// Release-only evidence still settles custody. A superseded production result
-		// is rejected after committing that settlement, without publishing its payload.
-		if j := q.s.Jobs[r.ID]; j != nil && j.Spec.Priority == "production" && !r.ReleaseOnly &&
+		// Release evidence still settles custody. Every superseded result is
+		// rejected after committing that settlement, without publishing its payload.
+		if j := q.s.Jobs[r.ID]; j != nil && !r.ReleaseOnly &&
 			(j.Attempt != r.Attempt || j.Machine != r.Machine || j.Session != r.Session || j.State == "queued") {
 			rejected = ErrStale
 		}

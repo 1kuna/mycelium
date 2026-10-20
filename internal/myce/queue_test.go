@@ -400,8 +400,22 @@ func TestSuddenLossAndLateReturn(t *testing.T) {
 			if !reply.Stop || !reply.Kill {
 				t.Fatal("returning stale copy must be killed")
 			}
+			oldKey := releaseKey(HostRelease{Job: old.ID, Machine: old.Machine, Session: old.Session, Attempt: old.Attempt})
+			if release, ok := q.s.HostReleases[oldKey]; !ok || release.CPUCores != 1 {
+				t.Fatal("loss did not retain the old attempt's default core")
+			}
 			if err := q.Complete(result(old, true)); !errors.Is(err, ErrStale) {
 				t.Fatalf("old completion accepted: %v", err)
+			}
+			if _, ok := q.s.HostReleases[oldKey]; ok {
+				t.Fatal("rejected result did not settle its exact release")
+			}
+			current := job(t, q, next.ID)
+			if current.State != "running" || current.Attempt != next.Attempt || current.Machine != next.Machine || current.Session != next.Session || current.ReleaseConfirmed {
+				t.Fatal("old completion changed replacement attempt", current)
+			}
+			if err := q.Complete(result(old, true)); !errors.Is(err, ErrStale) {
+				t.Fatalf("repeated old completion accepted: %v", err)
 			}
 			if err := q.AppendLog(LogChunk{Result: result(old, true), Text: "late"}); !errors.Is(err, ErrStale) {
 				t.Fatal("old logs accepted")

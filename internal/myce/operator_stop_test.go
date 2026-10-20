@@ -44,14 +44,14 @@ func TestOperatorStopRefundsExactLossOnce(t *testing.T) {
 	}
 	r := operatorResult(result(running, false))
 	r.Interrupted = true
-	if e := q.Complete(r); e != nil {
-		t.Fatal(e)
+	if e := q.Complete(r); !errors.Is(e, ErrStale) {
+		t.Fatalf("obsolete operator result accepted: %v", e)
 	}
 	if got := job(t, q, j.ID); got.Losses != 0 || got.State != "queued" {
 		t.Fatalf("not refunded: %+v", got)
 	}
-	if e := q.Complete(r); e != nil {
-		t.Fatal(e)
+	if e := q.Complete(r); !errors.Is(e, ErrStale) {
+		t.Fatalf("obsolete operator result accepted: %v", e)
 	}
 	if job(t, q, j.ID).Losses != 0 {
 		t.Fatal("duplicate changed losses")
@@ -210,14 +210,14 @@ func TestOperatorStopRefundRevivesThirdLossAndPreservesOtherLosses(t *testing.T)
 	}
 	r := operatorResult(result(old, false))
 	r.Interrupted = true
-	if e := q.Complete(r); e != nil {
-		t.Fatal(e)
+	if e := q.Complete(r); !errors.Is(e, ErrStale) {
+		t.Fatalf("obsolete operator result accepted: %v", e)
 	}
 	if got := job(t, q, j.ID); got.Losses != 2 || got.State != "queued" {
 		t.Fatalf("refund did not revive: %+v", got)
 	}
-	if e := q.Complete(r); e != nil {
-		t.Fatal(e)
+	if e := q.Complete(r); !errors.Is(e, ErrStale) {
+		t.Fatalf("obsolete operator result accepted: %v", e)
 	}
 	if got := job(t, q, j.ID); got.Losses != 2 {
 		t.Fatal("duplicate refunded another attempt")
