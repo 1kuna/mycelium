@@ -143,15 +143,16 @@ func (q *Queue) allStartHostsDisabled(j *Job) bool {
 }
 
 func (q *Queue) startPlacementAllowed(j *Job) bool {
-	m := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
+	owner := q.s.Machines[j.Machine]
+	m := allocationMachine(owner, j.AllocatedDevices)
 	if m == nil || q.preparationStopping(m) {
 		return false
 	}
 	if j.Spec.Run.Docker && (m.DockerCleanup == "creating" || m.DockerCleanup == "create pending") {
 		// Own completed create is safe; sibling custody must still block the hand-off.
-		previous := m.DockerCleanup
-		m.DockerCleanup = ""
-		defer func() { m.DockerCleanup = previous }()
+		previous := owner.DockerCleanup
+		m.DockerCleanup, owner.DockerCleanup = "", ""
+		defer func() { m.DockerCleanup, owner.DockerCleanup = previous, previous }()
 	}
 	return cpuFits(j, m) && q.placementAllowed(j, m)
 }

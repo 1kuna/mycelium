@@ -454,6 +454,18 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 	eventCancel := startEvents()
 	defer func() { eventCancel() }()
 	actors := map[attemptKey]*attemptSupervisor{}
+	activeJobs := func() []Job {
+		jobs := []Job{}
+		for _, actor := range actors {
+			actor.mu.Lock()
+			released := actor.released || actor.finished
+			actor.mu.Unlock()
+			if !released {
+				jobs = append(jobs, actor.job)
+			}
+		}
+		return jobs
+	}
 	recovering := len(stores) > 0
 	spawn := func(s *workerStore, p *process) {
 		j := *s.state.Job
@@ -736,16 +748,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 							r := Result{Machine: m.ID, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Interrupted: true, Error: "worker leaving before command started"}
 							s.state.Result = &r
 						}
-						active := []Job{}
-						for _, old := range actors {
-							old.mu.Lock()
-							released := old.released || old.finished
-							old.mu.Unlock()
-							if !released {
-								active = append(active, old.job)
-							}
-						}
-						if e = localAttemptAdmission(w, active, j, modelReports); e != nil {
+						if e = localAttemptAdmission(w, activeJobs(), j, modelReports); e != nil {
 							e = s.startFailure(j, launchRefused, e)
 							r := startFailureOutcome(Result{Machine: m.ID, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Error: e.Error()}, e)
 							s.state.Result = &r
@@ -796,7 +799,11 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				environments.mu.Unlock()
 				environments.sync(reply.EnvironmentPlan, busy, keep)
 				rt.syncCopies(reply.CopyPlan, reply.CacheUsage, reply.CachePins, busy, keep)
+				// A result can finish while check-in is in flight. Refresh the
+				// same exact local reservations before applying a new engine load.
+				currentJobs := activeJobs()
 				rt.mu.Lock()
+				rt.batchJobs = currentJobs
 				rt.admissionBlocked = reply.AdmissionBlocked
 				rt.mu.Unlock()
 				rt.sync(reply.ModelPlan)

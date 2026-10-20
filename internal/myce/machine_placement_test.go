@@ -1,8 +1,10 @@
 package myce
 
 import (
+	"context"
 	"slices"
 	"testing"
+	"time"
 )
 
 func m3Machine() Machine {
@@ -95,5 +97,52 @@ func TestM3ReleaseCreditStaysOnDevice(t *testing.T) {
 	machineCheck(t, q, m)
 	if len(q.s.BatchReleases) != 0 {
 		t.Fatal("fresh inventory retained speculative release credit", q.s.BatchReleases)
+	}
+}
+
+func TestM3DockerCreateKeepsLaunchAuthorization(t *testing.T) {
+	q, _ := fixture(t)
+	m := m3Machine()
+	m.Capabilities = []string{"docker"}
+	s := dockerJob().Spec
+	s.Needs.GPU = &GPUSelection{Devices: []string{"1"}}
+	j := submit(t, q, s)
+	a := assignedJob(machineCheck(t, q, m))
+	if a == nil || a.ID != j.ID {
+		t.Fatal("missing Docker assignment", a)
+	}
+	m.DockerCleanup = "creating"
+	machineCheck(t, q, m, a)
+	launch := HostLaunch{Machine: a.Machine, Session: a.Session, Kind: "batch", Key: a.ID, Attempt: "1"}
+	if err := q.AuthorizeLaunch(launch); err != nil {
+		t.Fatalf("own device create rejected: %v", err)
+	}
+	if q.s.Machines[m.ID].DockerCleanup != "creating" {
+		t.Fatal("authorization changed persisted diagnostics")
+	}
+	m.DockerCleanup = "cleanup unconfirmed: inspect"
+	machineCheck(t, q, m, a)
+	if err := q.AuthorizeLaunch(launch); err == nil {
+		t.Fatal("unconfirmed cleanup permitted launch")
+	}
+}
+
+func TestM3ModelLoadWaitsForDeviceProbe(t *testing.T) {
+	m := m3Machine()
+	m.Devices[0].Reason = "device_probe_unavailable"
+	w := Worker{Machine: m, InventoryProbe: func(context.Context) ([]MachineDevice, error) { return m3Machine().Devices, nil }, MemorySource: func(context.Context) (float64, error) { return 8, nil }}
+	rt := &modelRuntime{worker: &w, models: map[string]*workerModel{}, memoryMachine: m, session: m.Session, clock: RealClock{}, config: ModelConfig{Wait: time.Minute, Models: []Model{{Name: "probe-model", Engine: "fake", Path: "fake", MemoryGB: 8}}}}
+	plan := []ModelSlot{{Model: "probe-model", Device: "0", Session: m.Session, Attempt: "same-offer", State: "loading"}}
+	rt.sync(plan)
+	rt.wg.Wait()
+	if reports, _ := rt.report(); len(reports) != 0 {
+		t.Fatalf("temporary probe withholding became a failed load: %+v", reports)
+	}
+	rt.memoryMachine = m3Machine()
+	rt.sync(plan)
+	rt.wg.Wait()
+	reports, _ := rt.report()
+	if len(reports) != 1 || reports[0].State != "ready" || reports[0].Attempt != "same-offer" {
+		t.Fatalf("matching probe did not resume the same offer: %+v", reports)
 	}
 }

@@ -669,6 +669,18 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 		if !rt.localApprovalAvailable(model) || rt.admissionBlocked || rt.availability != nil && !rt.availability.snapshot().Available {
 			continue
 		}
+		var bound *Worker
+		if s.Device != "" && rt.worker != nil {
+			device := slices.IndexFunc(rt.memoryMachine.Devices, func(d MachineDevice) bool { return d.ID == s.Device })
+			if device < 0 || rt.memoryMachine.Devices[device].Reason != "" {
+				// Keep the queue's offer pending while this component is
+				// withheld. A matching probe can resume the same load attempt.
+				continue
+			}
+			snapshot := *rt.worker
+			snapshot.Machine = cloneMachine(&rt.memoryMachine)
+			bound = &snapshot
+		}
 		var engine Engine
 		if rt.engineFactory != nil {
 			engine = rt.engineFactory(model)
@@ -697,7 +709,7 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 			})
 		}
 		ctx, cancel := context.WithTimeout(parent, rt.config.Wait)
-		m := &workerModel{device: s.Device, model: model, engine: engine, attempt: s.Attempt, state: "loading", cancel: cancel, recipe: s.EnvironmentRecipe}
+		m := &workerModel{device: s.Device, bound: bound, model: model, engine: engine, attempt: s.Attempt, state: "loading", cancel: cancel, recipe: s.EnvironmentRecipe}
 		rt.models[engineKey(s.Model, s.Device)] = m
 		rt.wg.Add(1)
 		go func() {
@@ -710,9 +722,13 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 	if m.device != "" && rt.worker != nil {
 		bound := *rt.worker
-		rt.mu.Lock()
-		bound.Machine = rt.memoryMachine
-		rt.mu.Unlock()
+		if m.bound != nil {
+			bound = *m.bound
+		} else {
+			rt.mu.Lock()
+			bound.Machine = cloneMachine(&rt.memoryMachine)
+			rt.mu.Unlock()
+		}
 		var err error
 		bound, err = bound.forAttempt(Job{AllocatedDevices: []string{m.device}})
 		if err != nil {

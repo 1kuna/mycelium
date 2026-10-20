@@ -1201,7 +1201,10 @@ are excluded. They replace the previous package M estimates.
   slots and the existing retained CPU/RAM charge. A neighboring device cannot
   invoke the legacy scalar cap; conflicting slots or allowance debt still
   refuse recovery. Model copies use the shared verified cache, with eligibility
-  checked against every component and one copy offer per model.
+  checked against every component and one copy offer per model. A pending model
+  load waits while its component is withheld by a probe, within the existing
+  queue load deadline. A healthy offer snapshots that component before the
+  asynchronous load; the normal fresh identity check still gates launch.
 
 M2–M4 total: **1,350–2,200 production LOC; 2,000–3,100 test/doc LOC;
 11–16 engineer days**, excluding M1 and native access delays. M2 grows from

@@ -36,7 +36,9 @@ func (p *partitionTransport) RoundTrip(r *http.Request) (*http.Response, error) 
 }
 
 func TestWorkerNetworkPartitionFakeClock(t *testing.T) {
-	q, qc := fixture(t)
+	q, initial := fixture(t)
+	qc := &manualWorkerClock{now: initial.Now()}
+	q.clock = qc
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer server.Close()
 	gate := filepath.Join(t.TempDir(), "finish")
