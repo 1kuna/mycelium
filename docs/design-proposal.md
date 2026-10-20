@@ -735,8 +735,10 @@ their exact identity fields, ownership checks and session fences. Omission never
 proves release; exact acknowledgement or the existing immediately previous-session
 cleanup rule is required. When a stop names the worker's own session and a key
 it does not hold, the worker sends an exact release-only acknowledgement for
-that key. An exact native release-only acknowledgement advances a recorded stop
-to requeue/cancellation without an idle heartbeat inference. Restart retains
+that key, including Docker assignments it never received. An exact release-only
+acknowledgement advances a native stop to requeue/cancellation immediately; for
+Docker, the keyed check-in also requires that key to be absent from the report.
+Omission alone never proves container cleanup. Restart retains
 saved keys and buffered results until acknowledged.
 
 M2 adds `machine.devices` as an additive field to that same keyed revision,
@@ -750,10 +752,9 @@ not a device-wide stop. The queue keeps M1's one-attempt admission rule through
 M2; M3 enables multiple assignments using the existing collection.
 
 No new revision negotiation is needed. The queue's strict request decoder
-(`DisallowUnknownFields` in `http.go`) rejects fields it does not understand,
-and M1's worker rejects replies with multiple assignments; multiple stop/hold
-decisions are valid. These existing guards fail
-clearly rather than silently drop inventory or neighbor controls. An
+(`DisallowUnknownFields` in `http.go`) rejects fields it does not understand.
+These existing guards fail clearly rather than silently drop inventory or
+neighbor controls. An
 incompatible peer must preserve custody and request the compatible upgrade;
 it must not downgrade automatically. Duplicate keys, mixed legacy/keyed forms,
 unknown revisions and invalid sessions fail before mutation under M1's guards.

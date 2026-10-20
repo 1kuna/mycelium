@@ -149,3 +149,56 @@ func TestAttemptProtocolCollectionValidationAtomic(t *testing.T) {
 		t.Fatal("invalid collection partially mutated the first attempt")
 	}
 }
+
+func TestAttemptProtocolRecoveryAdmissionSession(t *testing.T) {
+	for _, state := range []string{"running", "stopping"} {
+		for _, stale := range []bool{false, true} {
+			t.Run(state+"/stale-session="+stringBool(stale), func(t *testing.T) {
+				q, clock := fixture(t)
+				m := machine("recovery-session", "fake")
+				check(t, q, m, nil)
+				returning := submit(t, q, spec("experiment"))
+				other := submit(t, q, spec("experiment"))
+				if err := q.update(func() error {
+					j := q.s.Jobs[returning.ID]
+					j.Attempt, j.Starts = 1, 1
+					j.Copies = []Copy{{Attempt: 1, Machine: m.ID, Session: m.Session, Recoverable: true}}
+					blocker := q.s.Jobs[other.ID]
+					blocker.State, blocker.Attempt, blocker.Starts = state, 1, 1
+					blocker.Machine, blocker.Session = m.ID, m.Session
+					if stale {
+						blocker.Session = "stale-session"
+					}
+					if state == "stopping" {
+						stopAt := clock.Now().Add(StopGrace)
+						blocker.StopAt = &stopAt
+					}
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+				reply, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{
+					{Execution: Execution{ID: returning.ID, Attempt: 1}, Session: m.Session},
+				}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				var directive *AttemptDirective
+				for i := range reply.Attempts {
+					if reply.Attempts[i].ID == returning.ID {
+						directive = &reply.Attempts[i]
+					}
+				}
+				if directive == nil || directive.Stop != !stale || directive.Kill != !stale || directive.Hold || directive.Job != nil {
+					t.Fatalf("recovery session fence: %+v", reply)
+				}
+				want := "queued"
+				if stale {
+					want = "running"
+				}
+				requireState(t, q, returning.ID, want)
+				requireState(t, q, other.ID, state)
+			})
+		}
+	}
+}
