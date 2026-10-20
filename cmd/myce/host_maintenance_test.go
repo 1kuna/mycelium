@@ -13,7 +13,7 @@ import (
 )
 
 func maintenanceCLIWorker(id string) myce.Machine {
-	return myce.Machine{ID: id, HostID: "host", Device: id, Session: "session-" + id, GPU: "fake", FreeMemoryGB: 8, HostMemoryMeasured: true, HostAvailableMemoryGB: 16, CapabilityProfile: &myce.CapabilityProfile{Version: 0, MemoryLayout: "separate", SystemMemoryBytes: 32 << 30}}
+	return myce.Machine{ID: id, HostID: "host", Device: id, Session: "session-" + id, GPU: "fake", FreeMemoryGB: 8, HostMemoryMeasured: true, HostAvailableMemoryGB: 16, CapabilityProfile: &myce.CapabilityProfile{Version: 0, OS: "linux", Arch: "amd64", LogicalCPUs: 64, MemoryLayout: "separate", SystemMemoryBytes: 32 << 30}}
 }
 func TestHostMaintenanceCLIAndWaitCustody(t *testing.T) {
 	q, clock, _, _ := waitQueue(t)
@@ -64,13 +64,13 @@ func TestHostMaintenanceCLIAndWaitCustody(t *testing.T) {
 		t.Fatal(status, err)
 	}
 	out.Reset()
-	if err = hostMaintenanceCommand(context.Background(), []string{"budget", "--queue", server.URL, "host", "--memory-budget-gb", "4"}, &out); err != nil {
+	if err = hostMaintenanceCommand(context.Background(), []string{"budget", "--queue", server.URL, "host", "--memory-budget-gb", "4", "--cpu-budget-cores", "3"}, &out); err != nil {
 		t.Fatal(err)
 	}
-	if err = json.Unmarshal(out.Bytes(), &status); err != nil || status.Policy.MemoryBudget.Bytes != 4<<30 {
+	if err = json.Unmarshal(out.Bytes(), &status); err != nil || status.Policy.MemoryBudget.Bytes != 4<<30 || status.Policy.CPUBudgetCores == nil || *status.Policy.CPUBudgetCores != 3 {
 		t.Fatal(out.String(), err)
 	}
-	for _, args := range [][]string{{"status", "host", "--stop"}, {"resume", "host", "--wait"}, {"status", "host", "--memory-budget-gb", "4"}, {"disable", "host", "--timeout", "0s"}, {"budget", "host"}} {
+	for _, args := range [][]string{{"status", "host", "--stop"}, {"resume", "host", "--wait"}, {"status", "host", "--memory-budget-gb", "4"}, {"disable", "host", "--timeout", "0s"}, {"budget", "host"}, {"status", "host", "--cpu-budget-cores", "3"}} {
 		if err = hostMaintenanceCommand(context.Background(), args, &bytes.Buffer{}); err == nil {
 			t.Fatal("accepted invalid args", args)
 		}

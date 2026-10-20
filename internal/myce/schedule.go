@@ -8,10 +8,23 @@ import (
 )
 
 func fits(j *Job, m *Machine, memory float64) bool {
-	return hostFits(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) && fitsWithoutHostMemory(j, m, memory)
+	for _, candidate := range extensionJobs(j, m, true) {
+		if hostFits(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) && fitsResources(candidate, m, memory) {
+			return true
+		}
+	}
+	return false
 }
 func fitsWithoutHostMemory(j *Job, m *Machine, memory float64) bool {
-	return !cancelled(j) && dockerRuntimeFits(j, m) && logPolicyFits(j.Spec.Logs, m) && !availabilityBlocked(m) && capabilityFits(j, m) && extensionCanRun(j, m) && m.MemoryError == "" && !m.Gone && !m.Leaving && (!needsCheckpoint(j) || !m.CheckpointUnavailable) && memory >= j.Spec.Needs.MemoryGB && machineAllowed(j.Spec.AllowedMachines, m.ID) && (len(j.Spec.Needs.Platform.Required) == 0 || slices.Contains(j.Spec.Needs.Platform.Required, m.GPU)) && environmentCanRun(j, m)
+	for _, candidate := range extensionJobs(j, m, true) {
+		if fitsResources(candidate, m, memory) {
+			return true
+		}
+	}
+	return false
+}
+func fitsResources(j *Job, m *Machine, memory float64) bool {
+	return (j.Spec.Needs.cpuOnly() || m.GPU != "cpu") && cpuFits(j, m) && !cancelled(j) && dockerRuntimeFits(j, m) && logPolicyFits(j.Spec.Logs, m) && !availabilityBlocked(m) && capabilityFits(j, m) && extensionCanRun(j, m) && m.MemoryError == "" && !m.Gone && !m.Leaving && (!needsCheckpoint(j) || !m.CheckpointUnavailable) && memory >= j.Spec.Needs.MemoryGB && machineAllowed(j.Spec.AllowedMachines, m.ID) && (j.Spec.Needs.cpuOnly() || len(j.Spec.Needs.Platform.Required) == 0 || slices.Contains(j.Spec.Needs.Platform.Required, m.GPU)) && environmentCanRun(j, m)
 }
 func affinity(j *Job, m *Machine) int {
 	n := 0
@@ -51,6 +64,9 @@ func beforeWithinTier(a, b *Job, m *Machine) bool {
 	return a.ID < b.ID
 }
 func waitingReason(j *Job, machines map[string]*Machine, jobs map[string]*Job) string {
+	if reason := cpuWaitingReason(j, machines); reason != "" {
+		return reason
+	}
 	if reason := dockerRuntimeWaitingReason(j, machines); reason != "" {
 		return reason
 	}
@@ -115,7 +131,9 @@ func waitingReason(j *Job, machines map[string]*Machine, jobs map[string]*Job) s
 			needs = append(needs, "needs "+j.Spec.Environment.Key()+"; no eligible "+strings.Join(platforms, " or ")+" machine online")
 		}
 	}
-	needs = append(needs, fmt.Sprintf("%.1f GB free GPU memory", j.Spec.Needs.MemoryGB))
+	if !j.Spec.Needs.cpuOnly() {
+		needs = append(needs, fmt.Sprintf("%.1f GB free GPU memory", j.Spec.Needs.MemoryGB))
+	}
 	return "no machine in the fleet can run this right now (" + strings.Join(needs, "; ") + ")"
 }
 func expired(t *time.Time, now time.Time) bool { return t != nil && !now.Before(*t) }

@@ -6,13 +6,14 @@ import "sort"
 // placement is applied, after all workers have been considered. Pending releases
 // are useful capacity for planning, never authority to admit a replacement.
 type placementPlan struct {
-	machine      *Machine
-	jobs         []*Job
-	slots        []*ModelSlot
-	calls        []HostObligation
-	stops        int
-	cost         int
-	preparations bool
+	machine          *Machine
+	jobs             []*Job
+	slots            []*ModelSlot
+	calls            []HostObligation
+	stops            int
+	cost             int
+	preparations     bool
+	preparationCores int
 }
 
 func (p *placementPlan) cheaper(other *placementPlan) bool {
@@ -124,11 +125,17 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool) 
 		}
 		need, host = model.MemoryGB, model.HostMemoryGB
 	}
+	sharedPreparation := false
 	for _, o := range q.hostObligations(hostID(m)) {
 		l := o.Launch
-		if l == nil || l.Kind != "environment" || l.Machine != m.ID || l.Session != m.Session || !l.Started || q.preparationShared(m, j, l) {
+		if l == nil || l.Kind != "environment" || l.Machine != m.ID || l.Session != m.Session || !l.Started {
 			continue
 		}
+		if q.preparationShared(m, j, l) {
+			sharedPreparation = true
+			continue
+		}
+		p.preparationCores = 1
 		if l.PriorityStop == nil {
 			if l.Spec == nil || q.comparePriority(*l.Spec, j.Spec) <= 0 {
 				return nil
@@ -139,6 +146,11 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool) 
 			p.stops++
 			p.cost++
 		}
+	}
+	// Preparation shares an execution's reservation; credit its separate core
+	// only when this worker has no batch/model reservation and no shared build.
+	if sharedPreparation || q.workerHasExecutionCPUReservation(m) {
+		p.preparationCores = 0
 	}
 	room := m.FreeMemoryGB
 	if r, ok := q.s.BatchReleases[m.ID]; ok && r.Session == m.Session && q.clock.Now().Before(r.Until) {
@@ -214,7 +226,7 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool) 
 	}
 	// Mandatory/local releases already provide RAM as well as GPU memory.
 	// Project both once before asking for additional host-wide releases.
-	projected := *m
+	projected := cpuAfterReleases(m, p.jobs, p.slots, p.preparationCores)
 	releasedJobs, releasedSlots := map[*Job]bool{}, map[*ModelSlot]bool{}
 	for _, r := range p.jobs {
 		releasedJobs[r] = true

@@ -17,6 +17,9 @@ func HyphaAvailability(m *Machine) string {
 	case m.Leaving:
 		return "leaving; no new work"
 	}
+	if m.CPUCapacityReason != "" && m.GPU == "cpu" {
+		return m.CPUCapacityReason
+	}
 	if reason := capabilityUnavailableReason(m); reason != "" {
 		return reason
 	}
@@ -80,6 +83,8 @@ func resourceWords(platform string) string {
 		return "Apple Metal"
 	case "xpu":
 		return "Intel (XPU)"
+	case "cpu":
+		return "CPU"
 	case "fake":
 		return "test resource (fake)"
 	default:
@@ -122,7 +127,9 @@ func CapabilityProfileLines(m *Machine) []string {
 		}
 		lines = append(lines, resource+": "+profileSize(a.MemoryBytes))
 	}
-	if len(p.Accelerators) == 0 {
+	if m.GPU == "cpu" {
+		lines = append(lines, fmt.Sprintf("CPU capacity: %d free / %d admitted logical cores (%d reserved for owner); no accelerator required", m.FreeCPUCores, m.EffectiveCPUCores, m.CPUReserveCores))
+	} else if len(p.Accelerators) == 0 {
 		lines = append(lines, "accelerator measurements not reported")
 	}
 	lines = append(lines, "local storage: "+profileSize(p.DiskFreeBytes)+" free / "+profileSize(p.DiskTotalBytes)+" total")
@@ -241,6 +248,9 @@ func (q *Queue) statusWaitingReason(j *Job) string {
 		required := ""
 		if len(resources) > 0 {
 			required = " with " + strings.Join(resources, " or ")
+		}
+		if j.Spec.Needs.cpuOnly() {
+			return fmt.Sprintf("no %shypha can run this CPU job right now; it needs %d logical cores and %.1f GiB host RAM", qualifier, j.Spec.Needs.cores(), j.Spec.Needs.HostMemoryGB)
 		}
 		return fmt.Sprintf("no %shypha%s can run this job right now; it needs %.1f GiB free accelerator memory and %.1f GiB free system memory", qualifier, required, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
 	}

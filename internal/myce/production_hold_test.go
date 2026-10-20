@@ -170,7 +170,7 @@ func TestProductionHoldExpiryAndLostWorkerRetainRelease(t *testing.T) {
 	if !strings.Contains(job(t, q, prod.ID).Reason, "release unknown") {
 		t.Fatal("missing unknown release")
 	}
-	// A stale attempt's acknowledgement settles custody without touching its replacement.
+	// Planned stops retain their exact attempt until release is acknowledged.
 	finishInterrupted(t, q, y)
 	resumed := check(t, q, s, nil).Job
 	if resumed == nil || resumed.Attempt != 2 || resumed.Losses != 0 {

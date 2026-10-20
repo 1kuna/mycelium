@@ -1,8 +1,7 @@
 # Job and command reference
 
 See [integration examples](integrating.md) and [operations](operations.md). The
-[approved design](design-proposal.md) remains the product spec. Only GPU work
-belongs in this queue; CPU-only watching, parsing, and orchestration stay outside.
+[approved design](design-proposal.md) remains the product spec. CPU commands and GPU work use the same queue; callers retain orchestration.
 
 ## Batch YAML
 
@@ -22,9 +21,10 @@ when shell expansion is needed.
 | `run.command` | Required, nonempty argv | Executable and arguments; resolved from its environment, then worker PATH |
 | `run.workdir` | Absent: worker's working directory | Existing working directory; use an absolute shared or consistently installed path |
 | `run.env` | Empty map | String environment overrides, merged with worker environment |
-| `needs.memory_gb` | Required, finite and positive | GPU memory reservation in GB, including model/runtime overhead |
+| `needs.cpu_cores` | Default one | Admitted logical cores for the whole attempt, including sidecars; omit GPU selectors for CPU-only work |
+| `needs.memory_gb` | Required, finite and positive | Host RAM GiB for CPU-only work; GPU memory for GPU work |
 | `needs.host_memory_gb` | Absent / `0`: GPU-only admission on uncapped hosts | Additional host RAM in GiB, including runtime/activation peaks; capped hosts require a positive declaration; qualified Linux services enforce it plus worker slack |
-| `needs.platform` | Required | `[cuda]` shorthand, `{required: [cuda, xpu]}`, `{preferred: [metal]}`, or `any` / `{any: true}`; exactly one mode |
+| `needs.platform` | GPU work: required; CPU input: omitted or `cpu` | `[cuda]` shorthand, `{required: [cuda, xpu]}`, `{preferred: [metal]}`, or `any` / `{any: true}`; exactly one mode |
 | `needs.model` | Absent | Batch affinity hint; does not load a model |
 | `environment` | Absent | Catalog name, `{name: torch-cuda}`, or `{lock_file: /shared/project/requirements.txt, python: "3.12", platforms: [cuda]}`; never both name and lock file |
 | `allowed_machines` | Empty: any eligible worker | Machine-name allow-list |
@@ -33,7 +33,7 @@ when shell expansion is needed.
 | `expected_minutes` | `0` | Rough planning hint, never enforced |
 | `resumable` | `false` | Set true only for a command implementing the checkpoint/stop contract |
 
-Platforms are `cuda`, `xpu`, `metal`, and `fake` (laptop tests). A preference
+Platforms are `cuda`, `xpu`, `metal`, `cpu`, and `fake` (laptop tests). A preference
 permits other platforms, so the command itself must support them. An environment restricts eligibility to its supported platforms. Workers build
 immutable recipes on demand and report ready content hashes. See
 [environments](environments.md) for catalog and project-lock contracts.
@@ -43,6 +43,25 @@ points to an attempt-specific folder beneath the stable job folder on the NAS.
 The worker also sets `MYCE_PROCESS_ID` for process ownership. It removes
 `MYCE_TOKEN`, even if supplied in `run.env`. These are plain processes with the
 worker user's permissions, not a sandbox.
+
+## CPU example
+
+```yaml
+name: cpu-shard
+project: example
+class: experiment
+run:
+  command: [python3, compute.py]
+needs:
+  cpu_cores: 2
+  memory_gb: 4
+```
+
+For CPU-only work `memory_gb` is host RAM. The stored job lowers this to zero
+GPU memory and `host_memory_gb: 4`, with explicit CPU platform. GPU work keeps
+its existing memory meanings and can add `cpu_cores`. Several worker views on
+one physical host share a single CPU/RAM ledger. R1 runs one attempt per worker.
+See [CPU capacity and allowances](operations.md#cpu-capacity-and-allowances-r1).
 
 ## Scheduling and results
 

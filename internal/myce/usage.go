@@ -59,13 +59,18 @@ func (q *Queue) deviceUsage(m *Machine) []usageSample {
 	active, allocated := 0, 0
 	for _, j := range q.s.Jobs {
 		if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") {
-			busy := 0.0
-			if j.StartedAt != nil {
+			busy, fair := 0.0, 1.0
+			if j.Spec.Needs.cpuOnly() {
+				fair = float64(j.Spec.Needs.cores())
+			}
+			if j.StartedAt != nil && !j.Spec.Needs.cpuOnly() {
 				busy = 1
 				active++
 			}
-			rows = append(rows, usageSample{Project: j.Spec.Project, Job: j.ID, Memory: j.Spec.Needs.MemoryGB, Busy: busy, Fair: 1, Tier: q.priorityMatch(j.Spec).Tier, Family: fairResourceFamily(j.Spec)})
-			allocated++
+			rows = append(rows, usageSample{Project: j.Spec.Project, Job: j.ID, Memory: j.Spec.Needs.MemoryGB, Busy: busy, Fair: fair, Tier: q.priorityMatch(j.Spec).Tier, Family: fairResourceFamily(j.Spec)})
+			if !j.Spec.Needs.cpuOnly() {
+				allocated++
+			}
 		}
 	}
 	seen := map[string]bool{}
@@ -119,11 +124,11 @@ func (q *Queue) deviceUsage(m *Machine) []usageSample {
 			}
 		}
 	}
-	if active == 0 {
+	if active == 0 && m.GPU != "cpu" {
 		rows = append(rows, usageSample{Idle: 1, Observed: 1})
 	}
 	for i := range rows {
-		if allocated > 0 {
+		if allocated > 0 && rows[i].Family != "cpu" {
 			rows[i].Fair /= float64(allocated)
 		}
 		rows[i].Machine = m.ID

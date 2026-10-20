@@ -141,6 +141,8 @@ func InstallSettings() []InstallSetting {
 		}),
 		installSetting("memory-gb", "Detection.MemoryGB", "GPU memory budget", func(c *ServiceConfig) *float64 { return &c.Detection.MemoryGB }, installNonnegative),
 		installSetting("reserve-memory-gb", "Detection.ReserveGB", "GPU memory reserve", func(c *ServiceConfig) *float64 { return &c.Detection.ReserveGB }, installNonnegative),
+		installSetting("reserve-cpu-cores", "CPUReserveCores", "logical cores reserved for the owner", func(c *ServiceConfig) *int { return &c.CPUReserveCores }, installNonnegativeInt),
+		installSetting("cpu-budget-cores", "CPUBudgetCores", "initial queue host CPU allowance (zero uses detected capacity minus reserve)", func(c *ServiceConfig) *int { return &c.CPUBudgetCores }, installNonnegativeInt),
 		installContext(installSetting("host-memory-budget-gb", "HostMemoryBudgetGB", "initial queue host RAM allowance", func(c *ServiceConfig) *float64 { return &c.HostMemoryBudgetGB }, installNonnegative), func(c ServiceConfig) error {
 			_, err := MemoryCeilingConfig(c.HostMemoryBudgetGB, c.MemoryCeilingSlackGB, c.MemorySwapMaxBytes)
 			return err
@@ -379,4 +381,11 @@ func installAbsolute(path string) (string, error) {
 		return "", nil
 	}
 	return filepath.Abs(path)
+}
+
+func installNonnegativeInt(v int) error {
+	if v < 0 {
+		return errors.New("must be nonnegative")
+	}
+	return nil
 }
