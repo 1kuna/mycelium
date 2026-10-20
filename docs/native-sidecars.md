@@ -59,9 +59,14 @@ and exact attempt identity; the fleet token is stripped from every child.
 
 Helpers start in order and become ready before main starts. Every launch uses
 the shared authorization gate; readiness does not extend the start window.
-A helper exiting before main, even successfully, fails the attempt. Readiness
+Without recorded infrastructure evidence, a helper exiting before main, even
+successfully, fails the attempt. Readiness
 timeouts also fail the attempt. Infrastructure stops use the existing requeue
-classifier. During checkpoint grace, main receives TERM while helpers stay up;
+classifier. It accepts durable delivered-signal timestamps preceding the member's
+exit observation, observation loss, Mycelium-side launch/preparation failures, or
+a recorded probe proving foreign ownership of the allocated readiness port.
+Exit codes, stderr and stop intent alone never establish infrastructure cause.
+During checkpoint grace, main receives TERM while helpers stay up;
 after main exit or the shared deadline, cleanup kills and verifies the whole
 process group. Preparation cancellation prevents subsequent members starting.
 Before any payload gate opens, the existing durable attempt record holds its

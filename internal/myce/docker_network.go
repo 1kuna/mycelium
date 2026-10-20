@@ -90,6 +90,7 @@ func (s Spec) validateDockerGroup() error {
 }
 
 type dockerMember struct {
+	memberOutcome
 	Name           string `json:"name"`
 	Memory         int64  `json:"memory"`
 	Swap           int64  `json:"swap"`
@@ -224,6 +225,7 @@ func (d *dockerAttempt) containerViolation(c dockerInspection) string {
 	return ""
 }
 func (d *dockerAttempt) observeGroup(containers []dockerInspection) error {
+	observedAt := time.Now().UTC()
 	networkFailure := ""
 	d.mu.Lock()
 	stopped := d.state.Stopped
@@ -246,6 +248,16 @@ func (d *dockerAttempt) observeGroup(containers []dockerInspection) error {
 		d.state.Forced = true
 	}
 	for _, c := range containers {
+		if !dockerLive(c) && c.State.Status != "created" {
+			if d.state.Containers == nil {
+				d.state.Containers = map[string]dockerMember{}
+			}
+			m := d.state.Containers[c.ID]
+			if m.Exit == nil {
+				m.Exit = &memberExit{Status: c.State.ExitCode, ObservedAt: observedAt}
+			}
+			d.state.Containers[c.ID] = m
+		}
 		d.state.OOMKilled = d.state.OOMKilled || c.State.OOMKilled
 		if why := d.containerViolation(c); why != "" {
 			d.state.Failure = why
@@ -282,7 +294,7 @@ func (d *dockerAttempt) observeGroup(containers []dockerInspection) error {
 				if c.ID == id && *c.State.Running {
 					alive = true
 				}
-				if c.ID == id && !dockerLive(c) && d.state.InfrastructureStop && (c.State.ExitCode == 137 || c.State.ExitCode == 143) {
+				if c.ID == id && !dockerLive(c) && m.deliveredBeforeExit() {
 					alive = true
 				}
 				if c.ID == id && !*c.State.Running && c.State.ExitCode == 137 && !c.State.OOMKilled {
@@ -428,9 +440,15 @@ func (d *dockerAttempt) waitReady(id, name string, r DockerReadiness) error {
 		d.mu.Lock()
 		stopped := d.state.Stopped
 		failure := d.state.Failure
+		infrastructureStop := d.state.InfrastructureStop
 		d.mu.Unlock()
 		if stopped {
-			return fmt.Errorf("Docker sidecar %s readiness stopped: %s", name, failure)
+			err := fmt.Errorf("Docker sidecar %s readiness stopped: %s", name, failure)
+			if failure == "" && infrastructureStop {
+				// Mycelium refuses main launch while readiness is interrupted.
+				return d.recordInfrastructure(infrastructureFact{Kind: launchRefused, At: time.Now().UTC(), Member: "main"}, err)
+			}
+			return err
 		}
 		if !d.clock.Now().Before(deadline) {
 			return &runtimeError{diagnostic: RuntimeCause{Operation: "readiness", Class: "timeout"}, cause: fmt.Errorf("Docker sidecar %s HTTP readiness timeout", name)}

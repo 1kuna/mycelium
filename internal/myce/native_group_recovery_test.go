@@ -136,7 +136,7 @@ func TestNativeGroupPortHandoff(t *testing.T) {
 	}
 }
 
-func nativePortHandoff(t *testing.T, collisions int) {
+func nativePortHandoff(t *testing.T, collisions int) Result {
 	t.Helper()
 	q, _ := fixture(t)
 	s := nativeSpec(t)
@@ -250,11 +250,13 @@ func nativePortHandoff(t *testing.T, collisions int) {
 			}
 		}
 		nativeNoSurvivors(t, &nativeTestRun{p: p, dir: s.Run.Env["NATIVE_TEST_DIR"]})
+		return finish.result
 	case <-time.After(30 * time.Second):
 		p.stop(w.Clock.Now(), 0, true)
 		<-p.done
 		t.Fatal("unexpected run timeout")
 	}
+	return Result{}
 }
 
 func TestNativeGroupProductionOutcomes(t *testing.T) {

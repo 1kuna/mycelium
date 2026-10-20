@@ -2,32 +2,123 @@ package myce
 
 import (
 	"errors"
+	"fmt"
 	"os/exec"
 	"syscall"
+	"time"
 )
 
-// Infrastructure is positive stop/recovery evidence, never an exit-code guess.
-// An observed payload failure (especially OOM) survives a concurrent stop.
-type attemptCause struct {
-	Infrastructure bool
-	StageFailure   bool
-	OutOfMemory    bool
-	AmbiguousKill  bool
-	StopSignal     bool // Adapter confirmed a stop signal (including a supervisor's encoded wait status).
+// These are runtime facts, not adapter conclusions. Intent is deliberately absent.
+// Times are wall-clock evidence (not scheduling deadlines). A signal is added
+// only after successful delivery and persistence; exit observation is immutable.
+type deliveredSignal struct {
+	Signal string    `json:"signal"`
+	At     time.Time `json:"at"`
+}
+type memberExit struct {
+	Status     int       `json:"status"`
+	ObservedAt time.Time `json:"observed_at"`
+}
+type infrastructureFact struct {
+	Kind   string    `json:"kind"`
+	At     time.Time `json:"at"`
+	Member string    `json:"member,omitempty"`
+	Port   string    `json:"port,omitempty"`
+	Group  int       `json:"group,omitempty"`
 }
 
-func classifyAttemptOutcome(result Result, cause attemptCause) Result {
-	result.OutOfMemory = result.OutOfMemory || cause.OutOfMemory
-	result.Interrupted = cause.Infrastructure && !result.Success && !cause.StageFailure && !result.OutOfMemory
-	if cause.StageFailure || result.OutOfMemory {
-		result.Interrupted = false
+const (
+	launchRefused     = "launch_refused"
+	launchFailed      = "launch_failed"
+	environmentFailed = "environment_failed"
+	foreignPort       = "foreign_port"
+)
+
+type memberOutcome struct {
+	Infrastructure  []infrastructureFact `json:"infrastructure_facts,omitempty"`
+	Signals         []deliveredSignal    `json:"delivered_signals,omitempty"`
+	Exit            *memberExit          `json:"exit,omitempty"`
+	ObservationLost bool                 `json:"observation_lost,omitempty"`
+}
+type attemptCause struct {
+	memberOutcome
+	OutOfMemory bool
+	Cancelled   bool
+	Stale       bool
+}
+
+func (facts memberOutcome) deliveredBeforeExit() bool {
+	if facts.Exit == nil {
+		return false
+	}
+	for _, signal := range facts.Signals {
+		if !signal.At.IsZero() && (signal.Signal == "TERM" || signal.Signal == "KILL") && signal.At.Before(facts.Exit.ObservedAt) {
+			return true
+		}
+	}
+	return false
+}
+
+func (facts memberOutcome) recordedInfrastructure() bool {
+	for _, fact := range facts.Infrastructure {
+		if fact.At.IsZero() {
+			continue
+		}
+		switch fact.Kind {
+		case launchRefused, launchFailed, environmentFailed:
+			return true
+		case foreignPort:
+			if fact.Port != "" && fact.Group > 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// The wrapper carries only facts already saved by Mycelium, preserving error
+// identity for callers that retry admission or retain unconfirmed custody.
+type recordedStartError struct {
+	cause error
+	facts memberOutcome
+}
+
+func (e *recordedStartError) Error() string { return e.cause.Error() }
+func (e *recordedStartError) Unwrap() error { return e.cause }
+
+func (s *workerStore) startFailure(j Job, kind string, cause error) error {
+	facts := memberOutcome{Infrastructure: []infrastructureFact{{Kind: kind, At: time.Now().UTC()}}}
+	if err := saveWorkerJSON(s.dir, fmt.Sprintf("launch-%s-%d.outcome.json", j.ID, j.Attempt), facts); err != nil {
+		return errors.Join(cause, err)
+	}
+	return &recordedStartError{cause: cause, facts: facts}
+}
+func startFailureOutcome(owner Result, err error) Result {
+	var recorded *recordedStartError
+	facts := memberOutcome{}
+	if errors.As(err, &recorded) {
+		facts = recorded.facts
+	}
+	return classifyAttemptOutcome(owner, attemptCause{memberOutcome: facts})
+}
+
+func classifyAttemptOutcome(result Result, facts attemptCause) Result {
+	result.OutOfMemory = result.OutOfMemory || facts.OutOfMemory
+	result.Interrupted = false
+	if facts.Stale || facts.Cancelled {
+		result.Success, result.Forced = false, false
+		return result
+	}
+	if result.OutOfMemory || facts.Exit != nil && facts.Exit.Status != 0 {
 		result.Success = false
+	}
+	if !result.Success && !result.OutOfMemory {
+		result.Interrupted = facts.ObservationLost || facts.deliveredBeforeExit() || facts.recordedInfrastructure()
+	}
+	if !result.Interrupted {
 		result.Forced = false
 	}
-	if result.Success {
-		result.Forced = false
-	}
-	if cause.AmbiguousKill && !result.Interrupted && !result.OutOfMemory {
+	if facts.Exit != nil && facts.Exit.Status == 137 && !result.Interrupted && !result.OutOfMemory {
 		if result.Error != "" {
 			result.Error += "; "
 		}
@@ -36,22 +127,19 @@ func classifyAttemptOutcome(result Result, cause attemptCause) Result {
 	return result
 }
 
-// A native signal delivered during a stop is interruption evidence. Ordinary
-// exits (including exit 7 after TERM) remain payload outcomes.
-func nativeOutcome(result Result, waitErr error, cause attemptCause) Result {
-	var exit *exec.ExitError
-	if errors.As(waitErr, &exit) {
-		status, ok := exit.Sys().(syscall.WaitStatus)
-		stoppedSignal := cause.StopSignal || ok && status.Signaled() && (status.Signal() == syscall.SIGTERM || status.Signal() == syscall.SIGKILL)
-		cause.StageFailure = cause.StageFailure || !cause.Infrastructure || !stoppedSignal
-		cause.AmbiguousKill = ok && status.Signaled() && status.Signal() == syscall.SIGKILL
-	} else if waitErr != nil {
-		cause.StageFailure = true
+// The wait status supplies only the exit status. It never establishes cause.
+func observedNativeExit(cmd *exec.Cmd, at time.Time) *memberExit {
+	code := 1
+	if cmd.ProcessState != nil {
+		code = cmd.ProcessState.ExitCode()
+		if status, ok := cmd.ProcessState.Sys().(syscall.WaitStatus); ok && status.Signaled() {
+			code = 128 + int(status.Signal())
+		}
 	}
-	return classifyAttemptOutcome(result, cause)
+	return &memberExit{Status: code, ObservedAt: at}
 }
 
-// An operator marker records intent without changing runtime evidence. It cannot reinterpret a durable completion or stage failure.
+// An operator marker is provenance, never evidence of signal delivery.
 func operatorOutcome(result Result, stopped bool) Result {
 	result.OperatorStop = result.OperatorStop || stopped
 	return result

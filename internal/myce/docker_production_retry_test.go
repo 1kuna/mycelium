@@ -87,8 +87,18 @@ func TestDockerProductionOutcomeCause(t *testing.T) {
 							t.Fatal(err)
 						}
 					}
-					// Record intent first; the daemon then reports a killed member.
+					// This is an infrastructure-delivery case. Intent-only exits
+					// are stage failures and have separate table/reviewer coverage.
 					p.stop(clock.Now(), StopGrace, false)
+					target := "id1"
+					if cause == "stop-sidecar" || cause == "maintenance-sidecar" {
+						target = "sidecar-sortformer"
+					}
+					await(t, func() bool {
+						p.docker.mu.Lock()
+						defer p.docker.mu.Unlock()
+						return len(p.docker.state.Containers[target].Signals) > 0
+					})
 					if cause == "stop-sidecar" || cause == "maintenance-sidecar" {
 						writeMode("sidecar-killed")
 						exitContainer("running-sidecar-sortformer")
