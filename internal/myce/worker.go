@@ -91,9 +91,10 @@ type workerFinish struct {
 	err    error
 }
 type process struct {
-	priorityStop *PriorityPreemption
-	outcome      memberOutcome
-	saveOutcome  func(memberOutcome) error
+	savePriorityStop func(*PriorityPreemption) error
+	priorityStop     *PriorityPreemption
+	outcome          memberOutcome
+	saveOutcome      func(memberOutcome) error
 
 	machine string
 	docker  *dockerAttempt
@@ -116,9 +117,22 @@ func (p *process) recordPriorityStop(s *workerStore, stop *PriorityPreemption) e
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	s.state.PriorityStop = stop
-	if err := s.save(); err != nil {
-		return err
+	if s != nil {
+		s.state.PriorityStop = stop
+		if err := s.save(); err != nil {
+			return err
+		}
+	}
+	if p.priorityStop != nil {
+		return nil
+	}
+	if s == nil {
+		if p.savePriorityStop == nil {
+			return errors.New("priority stop receipt unavailable")
+		}
+		if err := p.savePriorityStop(stop); err != nil {
+			return err
+		}
 	}
 	if p.docker != nil {
 		p.docker.mu.Lock()
@@ -522,7 +536,7 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	if err = s.save(); err != nil {
 		return nil, abort(err)
 	}
-	p := &process{job: j, cmd: cmd, done: make(chan workerFinish, 1)}
+	p := &process{job: j, cmd: cmd, done: make(chan workerFinish, 1), savePriorityStop: s.priorityStopRecorder()}
 	p.saveOutcome = func(facts memberOutcome) error { return saveWorkerJSON(s.dir, identity+".outcome.json", facts) }
 	if w.control != nil {
 		w.control.set(p)

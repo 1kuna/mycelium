@@ -112,7 +112,9 @@ func (w *Worker) initInventory(ctx context.Context, s *workerStore) error {
 	devices := slices.Clone(w.Machine.Devices)
 	var probeErr error
 	if devices == nil {
-		devices, probeErr = w.InventoryProbe(ctx)
+		probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		devices, probeErr = w.InventoryProbe(probeCtx)
+		cancel()
 	}
 	var previous []MachineDevice
 	data, err := os.ReadFile(filepath.Join(s.dir, "devices.json"))
@@ -127,7 +129,7 @@ func (w *Worker) initInventory(ctx context.Context, s *workerStore) error {
 		return err
 	}
 	w.Machine.Devices = previous
-	if err := w.refreshInventory(devices, probeErr, s); err != nil {
+	if err := w.refreshInventory(ctx, devices, probeErr, s); err != nil {
 		return err
 	}
 	if w.inventoryReason == "device_selector_unmatched" && len(w.Machine.Devices) == 0 {
@@ -145,7 +147,7 @@ func (w *Worker) initInventory(ctx context.Context, s *workerStore) error {
 
 // Probe health is current evidence, never durable identity. Persist the saved
 // mapping, but recompute all withholding on every observation (including reopen).
-func (w *Worker) refreshInventory(observed []MachineDevice, probeErr error, s *workerStore) error {
+func (w *Worker) refreshInventory(ctx context.Context, observed []MachineDevice, probeErr error, s *workerStore) error {
 	if probeErr == nil {
 		probeErr = validateInventory(observed)
 	}
@@ -194,7 +196,9 @@ func (w *Worker) refreshInventory(observed []MachineDevice, probeErr error, s *w
 		}
 		if d.CapabilityProfile == nil {
 			m := d.machine(w.Machine)
-			profile := LocalProfileProbe().Detect(context.Background(), m, s.dir, w.Clock.Now())
+			probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			profile := LocalProfileProbe().Detect(probeCtx, m, s.dir, w.Clock.Now())
+			cancel()
 			applyFixedAcceleratorMemory(&profile, m, d.MemoryMode == "fixed")
 			d.CapabilityProfile = &profile
 		}

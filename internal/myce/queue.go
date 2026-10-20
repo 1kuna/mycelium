@@ -1266,20 +1266,23 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 		sort.Slice(out.LoadedModels, func(i, j int) bool {
 			return slotKey(out.LoadedModels[i].Machine, out.LoadedModels[i].Model) < slotKey(out.LoadedModels[j].Machine, out.LoadedModels[j].Model)
 		})
+		// Concurrent outages must remain visible; one probe cannot hide another.
+		warnings := []string{}
 		if q.networkQuiet {
-			out.Warning = "most workers quiet: waiting for the network to return"
+			warnings = append(warnings, "most workers quiet: waiting for the network to return")
 		}
 		if q.clock.Now().Before(q.restartUntil) && len(q.unreported) > 0 {
-			out.Warning = "queue restarted: waiting for workers to report"
+			warnings = append(warnings, "queue restarted: waiting for workers to report")
 		}
 		if !q.checkpointsAvailable() {
-			out.Warning = "NAS checkpoint root is unreachable; checkpoint-dependent jobs will not start"
+			warnings = append(warnings, "NAS checkpoint root is unreachable; checkpoint-dependent jobs will not start")
 		}
-		for _, m := range q.s.Machines {
+		for _, m := range q.plannerMachines() {
 			if !m.Gone && m.CheckpointUnavailable {
-				out.Warning = "NAS checkpoint root is unreachable on worker " + m.ID
+				warnings = append(warnings, "NAS checkpoint root is unreachable on worker "+m.ID)
 			}
 		}
+		out.Warning = strings.Join(warnings, "; ")
 		for host := range q.s.Hosts {
 			if q.held(host) {
 				detail := q.productionHoldDetail(host)

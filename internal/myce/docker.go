@@ -866,7 +866,7 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 		output.Close()
 		return nil, err
 	}
-	p := &process{machine: w.Machine.ID, job: j, done: make(chan workerFinish, 1), docker: d}
+	p := &process{machine: w.Machine.ID, job: j, done: make(chan workerFinish, 1), docker: d, savePriorityStop: s.priorityStopRecorder()}
 	if w.control != nil {
 		w.control.set(p)
 	}
@@ -1201,7 +1201,7 @@ func (w Worker) restoreDocker(s *workerStore) (*process, error) {
 	if err != nil {
 		return nil, err
 	}
-	p := &process{job: *s.state.Job, machine: w.Machine.ID, done: make(chan workerFinish, 1), docker: d}
+	p := &process{job: *s.state.Job, machine: w.Machine.ID, done: make(chan workerFinish, 1), docker: d, savePriorityStop: s.priorityStopRecorder()}
 	go d.run(p, *s.state.Job, s.state.Session, output, nil, func() error { return recoveryErr })
 	return p, nil
 }

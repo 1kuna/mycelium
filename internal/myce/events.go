@@ -10,8 +10,9 @@ import (
 )
 
 type WorkerEvent struct {
-	Session string `json:"session,omitempty"`
-	Cursor  string `json:"cursor"`
+	PriorityStop *PriorityPreemption `json:"priority_stop,omitempty"`
+	Session      string              `json:"session,omitempty"`
+	Cursor       string              `json:"cursor"`
 	Execution
 	StopAt       *time.Time `json:"stop_at,omitempty"`
 	deadline     time.Time
@@ -30,7 +31,7 @@ func (a API) workerEvent(w http.ResponseWriter, r *http.Request) {
 		for _, j := range a.Queue.s.Jobs {
 			if j.Machine == r.PathValue("id") && j.Session == r.URL.Query().Get("session") && (j.State == "stopping" || terminal(j.State) && !j.ReleaseConfirmed) && j.StopAt != nil {
 				deadline := *j.StopAt
-				event = WorkerEvent{Session: j.Session, StopAt: &deadline, Cursor: fmt.Sprintf("%s:%d:%s", j.ID, j.Attempt, j.StopAt.Format(time.RFC3339Nano)), Execution: Execution{ID: j.ID, Attempt: j.Attempt}, GraceSeconds: max(0, j.StopAt.Sub(a.Queue.clock.Now()).Seconds()), Kill: expired(j.StopAt, a.Queue.clock.Now())}
+				event = WorkerEvent{PriorityStop: priorityStop(j), Session: j.Session, StopAt: &deadline, Cursor: fmt.Sprintf("%s:%d:%s", j.ID, j.Attempt, j.StopAt.Format(time.RFC3339Nano)), Execution: Execution{ID: j.ID, Attempt: j.Attempt}, GraceSeconds: max(0, j.StopAt.Sub(a.Queue.clock.Now()).Seconds()), Kill: expired(j.StopAt, a.Queue.clock.Now())}
 				break
 			}
 		}
@@ -54,15 +55,22 @@ func (w Worker) watchStops(ctx context.Context, events chan<- WorkerEvent) {
 		w.Clock = RealClock{}
 	}
 	after := ""
+	var retry workerRetry
+	wake := time.NewTicker(10 * time.Millisecond)
+	defer wake.Stop()
 	for ctx.Err() == nil {
-		var event WorkerEvent
-		e := w.Client.Call(ctx, "GET", "/api/workers/"+url.PathEscape(w.Machine.ID)+"/events?session="+url.QueryEscape(w.Machine.Session)+"&after="+url.QueryEscape(after), nil, &event)
-		if e != nil {
+		if !retry.ready(w.Clock.Now()) {
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(time.Second):
+			case <-wake.C:
 			}
+			continue
+		}
+		var event WorkerEvent
+		e := w.Client.Call(ctx, "GET", "/api/workers/"+url.PathEscape(w.Machine.ID)+"/events?session="+url.QueryEscape(w.Machine.Session)+"&after="+url.QueryEscape(after), nil, &event)
+		if e != nil {
+			retry.succeeded(w.Clock.Now(), time.Second)
 			continue
 		}
 		if event.ID != "" && event.Cursor != after {
@@ -80,7 +88,8 @@ func (w Worker) watchStops(ctx context.Context, events chan<- WorkerEvent) {
 	}
 }
 
-// Process control never takes the upload/store loop's locks or performs I/O.
+// Process control never takes the actor store locks or performs network I/O.
+// Its small stop receipt is independent of the actor's mutable state.
 // A stop received before command startup is retained for that exact attempt.
 type processControl struct {
 	availability  *availabilityMonitor
@@ -110,6 +119,9 @@ func (c *processControl) apply() {
 			p.stop(now, StopGrace, false)
 		}
 		if event, ok := c.pendingEvents[key]; ok {
+			if err := p.recordPriorityStop(nil, event.PriorityStop); err != nil {
+				continue // Retry persistence before delivering the priority stop.
+			}
 			p.stop(now, max(0, event.deadline.Sub(now)), event.Kill || !now.Before(event.deadline))
 		}
 		p.enforceGrace(now)
