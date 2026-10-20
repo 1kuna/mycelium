@@ -146,3 +146,44 @@ func TestM3ModelLoadWaitsForDeviceProbe(t *testing.T) {
 		t.Fatalf("matching probe did not resume the same offer: %+v", reports)
 	}
 }
+
+func TestM3LegacyCopyKeepsRecoveryExclusion(t *testing.T) {
+	q, clock := fixture(t)
+	m := machine("legacy-recovery", "fake")
+	submit(t, q, spec("experiment"))
+	a := check(t, q, m, nil).Job
+	clock.Advance(LossAfter)
+	check(t, q, observer(), nil)
+	requireState(t, q, a.ID, "queued")
+	m.Devices = m3Machine().Devices
+	r := machineCheck(t, q, m, a)
+	for _, d := range r.Attempts {
+		if d.ID == a.ID && (d.Stop || d.Hold) {
+			t.Fatal("legacy exact copy could not recover", d)
+		}
+	}
+	if got := job(t, q, a.ID); got.State != "running" || got.Attempt != a.Attempt {
+		t.Fatal("legacy custody changed", got)
+	}
+	for _, target := range q.machineTargets(q.s.Machines[m.ID]) {
+		if target.GPU != "cpu" && q.workerBatchIdle(target) {
+			t.Fatal("legacy copy without device evidence left a GPU slot free", target.Device)
+		}
+	}
+}
+
+func TestM3SettledReportsDrainBeforeNewAssignment(t *testing.T) {
+	q, _ := fixture(t)
+	m := m3Machine()
+	submit(t, q, spec("experiment"))
+	a := assignedJob(machineCheck(t, q, m))
+	if err := q.Complete(Result{Machine: a.Machine, Session: a.Session, Execution: Execution{ID: a.ID, Attempt: a.Attempt}, Interrupted: true}); err != nil {
+		t.Fatal(err)
+	}
+	if next := assignedJob(machineCheck(t, q, m, a)); next != nil {
+		t.Fatal("new assignment prevented recovered custody from draining", next.Attempt)
+	}
+	if next := assignedJob(machineCheck(t, q, m)); next == nil || next.Attempt != a.Attempt+1 {
+		t.Fatal("fresh admission did not resume after settled report drained", next)
+	}
+}

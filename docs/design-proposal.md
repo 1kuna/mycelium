@@ -1205,6 +1205,11 @@ are excluded. They replace the previous package M estimates.
   load waits while its component is withheld by a probe, within the existing
   queue load deadline. A healthy offer snapshots that component before the
   asynchronous load; the normal fresh identity check still gates launch.
+- A recovered legacy GPU copy without component evidence retains its original
+  singular recovery guard and excludes all GPU targets until exact cleanup;
+  no device identity is invented. Check-ins returning immediate cleanup for a
+  reported attempt offer no new batch assignment, allowing startup supervisors
+  to drain recovered custody and complete their existing fresh-session handoff.
 
 M2–M4 total: **1,350–2,200 production LOC; 2,000–3,100 test/doc LOC;
 11–16 engineer days**, excluding M1 and native access delays. M2 grows from

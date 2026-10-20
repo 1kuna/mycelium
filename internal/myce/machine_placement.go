@@ -69,7 +69,9 @@ func batchOnTarget(j *Job, m *Machine) bool {
 	if m.Devices == nil {
 		return true
 	}
-	return !j.Spec.Needs.cpuOnly() && m.GPU != "cpu" && slices.Contains(j.AllocatedDevices, m.Device)
+	// A bounded legacy copy has no component evidence. Keep its original
+	// machine-wide GPU exclusion until exact cleanup, without inventing a card.
+	return !j.Spec.Needs.cpuOnly() && m.GPU != "cpu" && (len(j.AllocatedDevices) == 0 || slices.Contains(j.AllocatedDevices, m.Device))
 }
 
 func deviceAllowed(j *Job, m *Machine) bool {
@@ -95,10 +97,12 @@ func allocationMachine(m *Machine, devices []string) *Machine {
 
 func (q *Queue) checkinMachineAttempts(m *Machine, reports []AttemptReport, progresses []attemptProgress, reply *Reply) {
 	seen := map[attemptKey]bool{}
+	cleanup := false
 	for i := range reports {
 		a := q.reconcileAttemptReport(m, &reports[i], progresses[i])
 		reply.Attempts = append(reply.Attempts, a)
 		seen[attemptKey{a.ID, a.Attempt, a.Session}] = true
+		cleanup = cleanup || a.Stop && a.Kill
 	}
 	for _, j := range q.s.Jobs {
 		if j.Machine != m.ID || j.Session != m.Session || seen[jobKey(*j)] {
@@ -115,7 +119,10 @@ func (q *Queue) checkinMachineAttempts(m *Machine, reports []AttemptReport, prog
 			reply.Attempts = append(reply.Attempts, AttemptDirective{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Job: &out})
 		}
 	}
-	if m.Leaving {
+	// Let supervisors drain immediate-cleanup reports before offering more work.
+	// Otherwise startup recovery can keep accepting and refusing replacements,
+	// never reaching its empty collection and fresh-session handoff.
+	if m.Leaving || cleanup {
 		return
 	}
 	var best *Job
@@ -190,7 +197,7 @@ func batchReleaseKey(m *Machine) string {
 // Recovery adopts an execution whose exact release is still charged. It cannot
 // claim another device's slot or add capacity to the shared host allowance.
 func (q *Queue) machineRecoveryFits(m *Machine, j *Job, copy Copy) bool {
-	if m.Devices == nil {
+	if m.Devices == nil || !j.Spec.Needs.cpuOnly() && len(copy.AllocatedDevices) == 0 {
 		return !q.workerHasOtherAttempt(m.ID, m.Session, j.ID)
 	}
 	if _, retained := q.s.HostReleases[releaseKey(HostRelease{Job: j.ID, Machine: m.ID, Session: copy.Session, Attempt: copy.Attempt})]; !retained {
