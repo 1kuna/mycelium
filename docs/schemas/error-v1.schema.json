@@ -17,6 +17,7 @@
         "request_invalid",
         "authentication_required",
         "job_fields_required",
+        "job_spec_invalid",
         "job_logs_invalid",
         "job_priority_invalid",
         "job_deadline_invalid",

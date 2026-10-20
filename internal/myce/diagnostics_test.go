@@ -27,7 +27,7 @@ func TestAPIRejectionDiagnostics(t *testing.T) {
 		{`{"private-secret":123}`, "test", "request_invalid"},
 		{`{"name":`, "test", "request_invalid"},
 		{`{} {}`, "test", "request_invalid"},
-		{`{"name":"private-secret","project":"private-secret","priority":"private-secret","run":{"command":["private-secret"],"env":{"KEY":"private-secret"}}}`, "test", "job_priority_invalid"},
+		{`{"name":"private-secret","project":"private-secret","priority":"private-secret","run":{"command":["private-secret"],"env":{"KEY":"private-secret"}}}`, "test", "job_spec_invalid"},
 		{`{"needs":{"platform":["private-secret"]}}`, "test", "job_platform_invalid"},
 		{`{"submission_key":[]}`, "test", "submission_key_invalid"},
 		{`{}`, "private-secret", "authentication_required"},
@@ -56,7 +56,7 @@ func TestAPIRejectionDiagnostics(t *testing.T) {
 	s.Needs.MemoryGB = 0
 	err := (Client{URL: server.URL, Token: "test"}).Call(context.Background(), "POST", "/api/jobs", s, nil)
 	var typed *HTTPError
-	if !errors.As(err, &typed) || typed.Code != "job_memory_invalid" || !strings.Contains(typed.Message, "needs.memory_gb") {
+	if !errors.As(err, &typed) || typed.Code != "job_spec_invalid" || !strings.Contains(typed.Message, "needs.memory_gb") {
 		t.Fatalf("lost client diagnostic: %v", err)
 	}
 }

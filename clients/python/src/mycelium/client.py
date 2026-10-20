@@ -35,7 +35,7 @@ class APIError(RuntimeError):
                 self.code = response.get("code")
                 self.job_id = response.get("job_id")
                 self.current_revision = response.get("current_revision")
-                if self.code in {"job_failed", "job_cancelled"}:
+                if self.code in {"job_failed", "job_cancelled", "job_spec_invalid"}:
                     message = f"{self.code}: {response.get('error', body)}"
         except (ValueError, TypeError):
             pass

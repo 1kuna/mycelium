@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"maps"
 	"math"
 	"os"
@@ -398,7 +399,9 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (*Job, error) {
 		// Resolution must not hide forbidden overrides or bypass deadline rules.
 		submitted.Class = s.Class
 		if err := submitted.Validate(); err != nil {
-			return err
+			// Validation reports field rules only; never serialize the submitted spec.
+			log.Printf("submission rejected code=job_spec_invalid reason=%q", err.Error())
+			return &HTTPError{Status: 400, Code: "job_spec_invalid", Message: err.Error()}
 		}
 		if e := q.validateProjectPlacement(s.Project, s.AllowedMachines); e != nil {
 			return reject("job_placement_invalid", e)

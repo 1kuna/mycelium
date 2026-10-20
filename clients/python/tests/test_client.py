@@ -16,6 +16,13 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 class ClientTests(unittest.TestCase):
+    def test_job_spec_invalid_message(self):
+        reason = "main Docker memory must fit needs.host_memory_gb"
+        error = APIError(400, json.dumps({"code": "job_spec_invalid", "error": reason}))
+        self.assertEqual(error.status, 400)
+        self.assertEqual(error.code, "job_spec_invalid")
+        self.assertEqual(str(error), "job_spec_invalid: " + reason)
+
     def test_cancellation_acknowledgements(self):
         client = Client(token="test-only")
         ack = {"job_id": None, "project": "test", "submission_key": "key",
