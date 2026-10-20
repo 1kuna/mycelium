@@ -106,7 +106,11 @@ func TestAttemptProtocolOldQueueRefused(t *testing.T) {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 				rw.WriteHeader(status)
-				// A older unkeyed queue either rejects the new fields or returns an unkeyed reply.
+				// The b5fe3e3 queue rejects unknown keyed fields with request_invalid.
+				if status == http.StatusBadRequest {
+					_ = json.NewEncoder(rw).Encode(map[string]string{"code": "request_invalid", "error": "unknown field"})
+					return
+				}
 				_ = json.NewEncoder(rw).Encode(Reply{Stop: true, Kill: true})
 			}))
 			defer server.Close()

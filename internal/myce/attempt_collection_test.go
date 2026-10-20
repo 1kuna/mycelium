@@ -95,20 +95,6 @@ func TestAttemptProtocolCollectionControls(t *testing.T) {
 	}
 }
 
-func TestAttemptProtocolCollectionSchemas(t *testing.T) {
-	m := machine("collection", "fake")
-	c := Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{
-		{Execution: Execution{ID: "first", Attempt: 1}, Session: m.Session},
-		{Execution: Execution{ID: "second", Attempt: 2}, Session: m.Session},
-	}}
-	validateWireValue(t, compileWorkerWireSchema(t, "worker-checkin-v1.schema.json"), c)
-	reply := Reply{AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptDirective{
-		{Execution: c.Attempts[0].Execution, Session: m.Session, Stop: true},
-		{Execution: c.Attempts[1].Execution, Session: m.Session, Kill: true},
-	}}
-	validateWireValue(t, compileWorkerWireSchema(t, "worker-reply-v1.schema.json"), reply)
-}
-
 func TestAttemptProtocolCollectionRecoveryAdmission(t *testing.T) {
 	q, _ := fixture(t)
 	m := machine("recovery", "fake")

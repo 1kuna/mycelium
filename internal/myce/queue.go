@@ -1631,7 +1631,7 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 	reply := AttemptDirective{Execution: Execution{ID: report.ID, Attempt: report.Attempt}, Session: report.Session}
 	j := q.s.Jobs[report.ID]
 	if j != nil && !terminal(j.State) && !cancelled(j) && (j.State == "queued" || j.Attempt != report.Attempt || j.Machine != m.ID || j.Session != m.Session) {
-		canRecover := !q.workerHasOtherAttempt(m.ID, j.ID)
+		canRecover := !q.workerHasOtherAttempt(m.ID, m.Session, j.ID)
 		for _, copy := range j.Copies {
 			if canRecover && q.placementAllowed(j, m) && copy.Recoverable && copy.Attempt == report.Attempt && copy.Machine == m.ID && copy.Session == m.Session && j.State != "queued" && (m.CheckpointUnavailable || !q.checkpointsAvailable() || progress.err != nil || (progress.path != "" && progress.path != attemptCheckpoint(*j))) {
 				reply.Hold = true
@@ -1680,9 +1680,9 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 
 // Recovery is admission too: a returning copy cannot create a second active
 // attempt on this worker. M3 will replace this scalar limit with resource fit.
-func (q *Queue) workerHasOtherAttempt(machine, job string) bool {
+func (q *Queue) workerHasOtherAttempt(machine, session, job string) bool {
 	for _, j := range q.s.Jobs {
-		if j.Machine == machine && j.ID != job && (j.State == "running" || j.State == "stopping") {
+		if j.Machine == machine && j.Session == session && j.ID != job && (j.State == "running" || j.State == "stopping") {
 			return true
 		}
 	}

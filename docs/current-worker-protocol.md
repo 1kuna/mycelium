@@ -70,9 +70,12 @@ A stopping entry can also carry `kill` and P3 `priority_stop`. An exact attempt
 can be held during checkpoint reconciliation. Global model/preparation plans,
 maintenance policy, checkpoint configuration and leave remain worker-scoped.
 The legacy control booleans remain false on keyed replies and `job` is omitted.
-Workers apply controls only to the matching `(id, attempt, session)`; other
-attempts' stops and holds are ignored. Stop events add `session` to their existing
-ID/attempt/deadline fields and are fenced by all three fields before delivery.
+Workers apply controls only to the matching `(id, attempt, session)`. A stop
+for an unheld key in the worker's own session receives an exact release-only
+acknowledgement, including when the original assignment reply was lost or
+discarded. Foreign-session controls and unheld holds are ignored. Stop events
+add `session` to their existing ID/attempt/deadline fields and are fenced by all
+three fields before delivery.
 
 Results, release-only acknowledgements, logs, checkpoint publication and
 `/api/workers/started` already use `id`, `attempt`, `session`, and `machine`.
@@ -89,8 +92,9 @@ Compatibility and refusal:
 - Current host-launch-v3 one-attempt worker → new queue: unchanged legacy form.
 - Keyed worker → new queue: collection form; M1 queue admission remains one attempt.
 - Keyed worker → older unkeyed queue: fail with `worker_protocol_invalid` (HTTP 426)
-  when the old queue rejects the fields or lacks the revision echo. Upgrade the
-  queue first. Saved custody is retained; no automatic unkeyed downgrade.
+  when the old queue returns HTTP 400 `request_invalid` for the keyed fields or
+  lacks the revision echo. Other 400 errors retain their own status and code.
+  Upgrade the queue first. Saved custody is retained; no automatic unkeyed downgrade.
 - Unknown revision, mixed forms, duplicate keys or invalid key/session → `worker_protocol_invalid` (HTTP 426), before queue mutation.
 
 Automatic downgrade would permit an unaddressed stop to affect a different
@@ -105,5 +109,4 @@ M1 local supervisor selects only its owned control from the complete collection
 and refuses conflicting assignments rather than dropping one. M2 adds
 `machine.devices` and concurrent local custody/supervision to this same keyed
 revision. M3 adds machine placement and concurrent admission on the shared
-CPU/RAM ledger. No second keyed revision is planned. Wire schemas are in
-[schemas](schemas/README.md).
+CPU/RAM ledger. No second keyed revision is planned.

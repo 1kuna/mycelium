@@ -386,8 +386,13 @@ func TestWorkerClearsWithdrawnPreparationFailure(t *testing.T) {
 			assigned = true
 			j.Machine, j.Session = c.Machine.ID, c.Machine.Session
 			reply.Job = &j
-		} else if c.Running != nil {
-			reply.Stop, reply.Kill = true, true
+		} else if len(c.Attempts) != 0 {
+			if len(c.Attempts) != 1 {
+				t.Error("expected one held attempt")
+				return
+			}
+			a := c.Attempts[0]
+			reply.Attempts = []AttemptDirective{{Execution: a.Execution, Session: a.Session, Stop: true, Kill: true}}
 		} else {
 			reports <- c.Machine.CheckpointUnavailable
 			reply.Leave = true

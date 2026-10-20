@@ -30,12 +30,6 @@ func normalizeAttemptCheckin(c Checkin) (Checkin, error) {
 		}
 		seen[key] = true
 	}
-	// Retain the singular internal adapter for legacy helpers. Queue report
-	// reconciliation uses the complete Attempts collection below.
-	if len(c.Attempts) == 1 {
-		c.Running = &c.Attempts[0].Execution
-		c.Started = c.Attempts[0].Started
-	}
 	return c, nil
 }
 
@@ -44,18 +38,8 @@ func attemptReply(c Checkin, reply Reply) Reply {
 		return reply
 	}
 	reply.AttemptProtocol = keyedAttemptProtocol
-	if len(reply.Attempts) == 0 {
-		var key Execution
-		session := c.Machine.Session
-		if reply.Job != nil {
-			key = Execution{ID: reply.Job.ID, Attempt: reply.Job.Attempt}
-			session = reply.Job.Session
-		} else if c.Running != nil {
-			key = Execution{ID: c.Running.ID, Attempt: c.Running.Attempt}
-		}
-		if key.ID != "" {
-			reply.Attempts = []AttemptDirective{{Execution: key, Session: session, Job: reply.Job, Hold: reply.Hold, Stop: reply.Stop, Kill: reply.Kill, GraceSeconds: reply.GraceSeconds, PriorityStop: reply.PriorityStop}}
-		}
+	if len(reply.Attempts) == 0 && reply.Job != nil {
+		reply.Attempts = []AttemptDirective{{Execution: Execution{ID: reply.Job.ID, Attempt: reply.Job.Attempt}, Session: reply.Job.Session, Job: reply.Job, Hold: reply.Hold, Stop: reply.Stop, Kill: reply.Kill, GraceSeconds: reply.GraceSeconds, PriorityStop: reply.PriorityStop}}
 	}
 	// Never send an unaddressed assignment or stop to a keyed worker.
 	reply.Job, reply.PriorityStop = nil, nil
@@ -72,12 +56,37 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 	var reply Reply
 	if err := w.Client.Call(ctx, "POST", "/api/workers/checkin", c, &reply); err != nil {
 		var he *HTTPError
-		if errors.As(err, &he) && (he.Status == 400 || he.Status == 426) {
+		if errors.As(err, &he) && (he.Status == 400 && he.Code == "request_invalid" || he.Status == 426) {
 			return Reply{}, currentProtocolError("queue rejected keyed-attempt-v1: upgrade the queue before this worker; saved attempt custody is retained")
 		}
 		return Reply{}, err
 	}
-	return workerAttemptReply(c, reply)
+	validated, err := workerAttemptReply(c, reply)
+	if err != nil {
+		return Reply{}, err
+	}
+	// A lost/discarded assignment leaves no local custody to stop. Validate
+	// the whole reply first, then explicitly release only unheld own-session
+	// keys; omission alone is never the queue's release evidence.
+	for _, a := range reply.Attempts {
+		if !a.Stop || a.Session != c.Machine.Session {
+			continue
+		}
+		held := false
+		for _, report := range c.Attempts {
+			if report.ID == a.ID && report.Attempt == a.Attempt && report.Session == a.Session {
+				held = true
+				break
+			}
+		}
+		if !held {
+			ack := Result{Execution: Execution{ID: a.ID, Attempt: a.Attempt}, Machine: c.Machine.ID, Session: a.Session, ReleaseOnly: true}
+			if err := w.Client.Call(ctx, "POST", "/api/workers/complete", ack, nil); err != nil && !stale(err) {
+				return Reply{}, err
+			}
+		}
+	}
+	return validated, nil
 }
 
 // The supervisor remains singular in M1. Select its decision by key rather
