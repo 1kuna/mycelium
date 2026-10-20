@@ -157,7 +157,7 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool) 
 		room += r.MemoryGB
 	}
 	for _, r := range q.s.Jobs {
-		if r.Machine != m.ID || (r.State != "running" && r.State != "stopping") {
+		if r.Machine != m.ID || r.ReleaseConfirmed || (r.State != "running" && r.State != "stopping") {
 			continue
 		}
 		if !q.batchPreemptible(r, j.Spec) {

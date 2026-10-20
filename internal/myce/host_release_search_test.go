@@ -129,6 +129,67 @@ func TestR1StartedEnvironmentDoesNotDuplicateBuild(t *testing.T) {
 	}
 }
 
+func TestR1StartedCopyDoesNotDuplicateModel(t *testing.T) {
+	q, clock, copying := syncFixture(t)
+	cold := machine("cold", "fake")
+	check(t, q, cold, nil)
+	if err := q.SyncModel(SyncRequest{Model: "a", To: copying.ID}); err != nil {
+		t.Fatal(err)
+	}
+	plan := check(t, q, copying, nil).CopyPlan
+	if len(plan) != 1 || plan[0].Launch == nil {
+		t.Fatal("missing copy offer", plan)
+	}
+	launch := *plan[0].Launch
+	if err := q.AuthorizeLaunch(launch); err != nil {
+		t.Fatal(err)
+	}
+	copying.CopyReports = []CopyReport{{Model: "a", Attempt: launch.Attempt, State: "copying", Bytes: 20_000_000_000, Total: 40_000_000_000}}
+	clock.Advance(time.Second)
+	check(t, q, copying, nil)
+	unrelated := &Job{Spec: spec("experiment")}
+	unrelated.Spec.Needs.Model = "b"
+	if q.workerIdle(q.s.Machines[copying.ID], unrelated) {
+		t.Fatal("copy of a made the worker idle for unrelated model b")
+	}
+	s := spec("experiment")
+	s.Needs.Model = "a"
+	j := submit(t, q, s)
+	if duplicate := check(t, q, cold, nil).Job; duplicate != nil {
+		t.Fatalf("cold worker took %s and duplicated a started 40 GB model copy", duplicate.ID)
+	}
+	if got := check(t, q, copying, nil).Job; got == nil || got.ID != j.ID {
+		t.Fatal("worker already copying the model did not receive its demand", got)
+	}
+}
+
+func TestHostReleaseConfirmedStoppingJobHasNoCredit(t *testing.T) {
+	for _, extra := range []int{0, 13} {
+		t.Run(fmt.Sprint(extra), func(t *testing.T) {
+			victims := []releaseTestVictim{{"a", "production", 1, 4, false}, {"b", "experiment", 1, 4, false}}
+			for i := 0; i < extra; i++ {
+				victims = append(victims, releaseTestVictim{fmt.Sprintf("c%02d", i), "experiment", 1, 0, false})
+			}
+			q, m := releaseTestHost(t, 32, 8, victims)
+			stopping := q.s.Jobs["b"]
+			stopping.State, stopping.ReleaseConfirmed = "stopping", true
+			q.refreshHostMemory()
+			if m.FreeHostMemoryGB != 4 {
+				t.Fatal("release confirmation did not refund RAM", m.FreeHostMemoryGB)
+			}
+			demand := spec("production")
+			demand.Needs = ResourceNeeds{CPUCores: 1, HostMemoryGB: 8}
+			jobs, slots, ok := q.hostReleasesExcept(m, 0, 8, demand, nil, nil)
+			if ok || len(jobs)+len(slots) != 0 {
+				t.Fatalf("already-refunded release supplied phantom RAM: feasible=%v victims=%v", ok, releaseTestIDs(jobs, slots))
+			}
+			if plan := q.roomPlan(&Job{ID: "demand", Spec: demand, State: "queued"}, q.s.Machines[stopping.Machine], true); plan != nil {
+				t.Fatalf("local release projection supplied phantom RAM: victims=%v", releaseTestIDs(plan.jobs, plan.slots))
+			}
+		})
+	}
+}
+
 // The oracle enumerates every allowed subset without the planner's pruning.
 // It computes capacity and rank independently, including pending (zero-stop)
 // releases. Policy matching/eligibility and hostNeed are the existing contract.
@@ -142,21 +203,19 @@ func bruteForceHostReleases(q *Queue, m *Machine, demand Spec, releasedJobs map[
 	var candidates []candidate
 	for _, j := range q.s.Jobs {
 		owner := q.s.Machines[j.Machine]
-		if releasedJobs[j] || owner == nil || owner.Gone || hostID(owner) != hostID(m) || !q.batchPreemptible(j, demand) {
+		if releasedJobs[j] || j.ReleaseConfirmed || owner == nil || owner.Gone || hostID(owner) != hostID(m) || !q.batchPreemptible(j, demand) {
 			continue
 		}
 		v := candidate{id: "job/" + j.ID, tier: q.priorityMatch(j.Spec).Index, ram: hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)}
 		if j.State == "running" {
 			v.stops = 1
 		}
-		if !j.ReleaseConfirmed {
-			v.cores = j.Spec.Needs.cores()
-		}
+		v.cores = j.Spec.Needs.cores()
 		candidates = append(candidates, v)
 	}
 	for _, s := range q.s.ModelSlots {
 		owner := q.s.Machines[s.Machine]
-		if releasedSlots[s] || owner == nil || owner.Gone || hostID(owner) != hostID(m) || !q.slotReclaimableFor(s, demand) {
+		if releasedSlots[s] || !slotReservesMemory(s) || owner == nil || owner.Gone || hostID(owner) != hostID(m) || !q.slotReclaimableFor(s, demand) {
 			continue
 		}
 		model, _ := q.model(s.Model)
@@ -212,11 +271,13 @@ func TestHostReleaseSearchMatchesBruteForce(t *testing.T) {
 	const seed, cases = 100, 350
 	rng := rand.New(rand.NewSource(seed))
 	feasible := 0
+	confirmed := 0
+	slotStates := map[string]int{}
 	for n := 0; n < cases; n++ {
 		t.Run(fmt.Sprint(n), func(t *testing.T) {
 			count := 1 + rng.Intn(8)
 			if n == cases-1 {
-				count = 16 // Exercise the inclusive exact-search boundary too.
+				count = 12 // Exercise the inclusive exact-search boundary too.
 			}
 			victims := make([]releaseTestVictim, count)
 			for i := range victims {
@@ -237,7 +298,9 @@ func TestHostReleaseSearchMatchesBruteForce(t *testing.T) {
 				owner.UnifiedMemory = n%3 == 0
 				owner.MemoryCeilingSlackGB = float64(n%2) / 8
 				if s := q.s.ModelSlots[slotKey(owner.ID, v.id)]; s != nil {
-					s.State = []string{"ready", "loading", "draining", "unloading", "unload_failed"}[rng.Intn(5)]
+					s.State = []string{"ready", "loading", "draining", "unloading", "unload_failed", "failed"}[rng.Intn(6)]
+					s.RetryReserved = rng.Intn(2) == 0
+					slotStates[s.State]++
 					s.InFlight = rng.Intn(2)
 					if rng.Intn(4) == 0 {
 						s.Project = "boost"
@@ -251,7 +314,9 @@ func TestHostReleaseSearchMatchesBruteForce(t *testing.T) {
 						mandatorySlots = append(mandatorySlots, s)
 					}
 					model, _ := q.model(s.Model)
-					reserved += hostNeed(owner, model.MemoryGB, model.HostMemoryGB)
+					if slotReservesMemory(s) {
+						reserved += hostNeed(owner, model.MemoryGB, model.HostMemoryGB)
+					}
 				} else {
 					j := q.s.Jobs[v.id]
 					j.Spec.Needs.MemoryGB = float64(rng.Intn(4))
@@ -261,16 +326,22 @@ func TestHostReleaseSearchMatchesBruteForce(t *testing.T) {
 					if rng.Intn(4) == 0 {
 						until := q.clock.Now().Add(time.Minute)
 						j.State, j.StopAt = "stopping", &until
+						j.ReleaseConfirmed = rng.Intn(2) == 0
+						if j.ReleaseConfirmed {
+							confirmed++
+						}
 					}
 					if rng.Intn(8) == 0 {
 						now := q.clock.Now()
 						j.PreemptionCount, j.StartedAt = 2, &now
 					}
-					if rng.Intn(8) == 0 {
+					if rng.Intn(8) == 0 && !j.ReleaseConfirmed {
 						releasedJobs[j] = true
 						mandatoryJobs = append(mandatoryJobs, j)
 					}
-					reserved += hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
+					if !j.ReleaseConfirmed {
+						reserved += hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
+					}
 				}
 			}
 			for _, owner := range q.s.Machines {
@@ -284,7 +355,9 @@ func TestHostReleaseSearchMatchesBruteForce(t *testing.T) {
 			}
 			for _, s := range mandatorySlots {
 				model, _ := q.model(s.Model)
-				projected.FreeHostMemoryGB += hostNeed(q.s.Machines[s.Machine], model.MemoryGB, model.HostMemoryGB)
+				if slotReservesMemory(s) {
+					projected.FreeHostMemoryGB += hostNeed(q.s.Machines[s.Machine], model.MemoryGB, model.HostMemoryGB)
+				}
 			}
 			demand := spec("production")
 			demand.Needs = ResourceNeeds{CPUCores: 1 + rng.Intn(4), HostMemoryGB: float64(rng.Intn(8)), MemoryGB: float64(rng.Intn(4))}
@@ -301,9 +374,15 @@ func TestHostReleaseSearchMatchesBruteForce(t *testing.T) {
 				if ok {
 					capacity := cpuAfterReleases(&projected, jobs, slots, 0)
 					for _, j := range jobs {
+						if j.ReleaseConfirmed {
+							t.Fatal("selected zero-contribution job", j.ID)
+						}
 						capacity.FreeHostMemoryGB += hostNeed(q.s.Machines[j.Machine], j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
 					}
 					for _, s := range slots {
+						if !slotReservesMemory(s) {
+							t.Fatal("selected zero-contribution slot", slotKey(s.Machine, s.Model))
+						}
 						model, _ := q.model(s.Model)
 						capacity.FreeHostMemoryGB += hostNeed(q.s.Machines[s.Machine], model.MemoryGB, model.HostMemoryGB)
 					}
@@ -314,11 +393,14 @@ func TestHostReleaseSearchMatchesBruteForce(t *testing.T) {
 			}
 		})
 	}
-	t.Logf("seed=%d: %d hosts compared with brute force (%d feasible), each planned three times", seed, cases, feasible)
+	if confirmed == 0 || len(slotStates) != 6 {
+		t.Fatal("missing release-confirmed or non-ready slot coverage", confirmed, slotStates)
+	}
+	t.Logf("seed=%d: %d hosts compared with brute force (%d feasible, %d confirmed releases, slots=%v), each planned three times", seed, cases, feasible, confirmed, slotStates)
 }
 
 func TestHostReleaseSearchCapAndGreedyFallback(t *testing.T) {
-	for _, count := range []int{16, 17} {
+	for _, count := range []int{12, 13} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
 			victims := []releaseTestVictim{{"a", "experiment", 1, 0, false}, {"b", "experiment", 1, 0, false}, {"c", "experiment", 2, 0, false}}
 			for i := len(victims); i < count; i++ {
@@ -329,7 +411,7 @@ func TestHostReleaseSearchCapAndGreedyFallback(t *testing.T) {
 			demand.Needs = ResourceNeeds{CPUCores: 2}
 			jobs, slots, ok := q.hostReleasesExcept(m, 0, 0, demand, nil, nil)
 			want := []string{"job/c"}
-			if count > 16 {
+			if count > 12 {
 				want = []string{"job/a", "job/b"} // Legacy greedy-plus-prune result.
 			}
 			if !ok || !slices.Equal(releaseTestIDs(jobs, slots), want) {

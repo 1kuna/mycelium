@@ -190,6 +190,10 @@ func (q *Queue) workerIdle(m *Machine, demand *Job) bool {
 		return false
 	}
 	for _, l := range q.s.PreparationPlans {
+		// A copy already serving this model demand remains useful preparation.
+		if l.Kind == "copy" && l.Key == demand.Spec.Needs.Model {
+			continue
+		}
 		if l.Machine == m.ID && l.Session == m.Session && l.Started && !q.preparationShared(m, demand, &l) {
 			return false
 		}

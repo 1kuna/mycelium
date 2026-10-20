@@ -147,7 +147,7 @@ func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, r
 	var slots []*ModelSlot
 	for _, j := range q.s.Jobs {
 		owner := q.s.Machines[j.Machine]
-		if releasedJobs[j] || owner == nil || owner.Gone || hostID(owner) != hostID(m) || !q.batchPreemptible(j, demand) {
+		if releasedJobs[j] || j.ReleaseConfirmed || owner == nil || owner.Gone || hostID(owner) != hostID(m) || !q.batchPreemptible(j, demand) {
 			continue
 		}
 		if j.State == "running" || j.State == "stopping" {
@@ -162,7 +162,7 @@ func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, r
 	})
 	for _, s := range q.s.ModelSlots {
 		owner := q.s.Machines[s.Machine]
-		if !releasedSlots[s] && owner != nil && !owner.Gone && hostID(owner) == hostID(m) && q.slotReclaimableFor(s, demand) {
+		if !releasedSlots[s] && slotReservesMemory(s) && owner != nil && !owner.Gone && hostID(owner) == hostID(m) && q.slotReclaimableFor(s, demand) {
 			slots = append(slots, s)
 		}
 	}
@@ -172,8 +172,24 @@ func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, r
 		}
 		return slotKey(slots[i].Machine, slots[i].Model) < slotKey(slots[j].Machine, slots[j].Model)
 	})
-	if len(jobs)+len(slots) <= 16 {
-		// Enumerate only the existing eligible victims. Above the bound, retain
+	// Even releasing every eligible victim must fit. In particular, do not
+	// search subsets for a core demand larger than the physical host allowance.
+	if !cpuOK(jobs, slots) {
+		return nil, nil, false
+	}
+	allRAM := room
+	for _, j := range jobs {
+		allRAM += hostNeed(q.s.Machines[j.Machine], j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
+	}
+	for _, s := range slots {
+		model, _ := q.model(s.Model)
+		allRAM += hostNeed(q.s.Machines[s.Machine], model.MemoryGB, model.HostMemoryGB)
+	}
+	if allRAM < need {
+		return nil, nil, false
+	}
+	if len(jobs)+len(slots) <= 12 {
+		// Search only the existing eligible victims. Above the bound, retain
 		// the greedy-plus-prune path below to bound scheduling work per host.
 		type victim struct {
 			job   *Job
@@ -190,9 +206,7 @@ func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, r
 			if j.State == "running" {
 				v.stops = 1
 			}
-			if !j.ReleaseConfirmed {
-				v.cores = j.Spec.Needs.cores()
-			}
+			v.cores = j.Spec.Needs.cores()
 			victims = append(victims, v)
 		}
 		for _, s := range slots {
@@ -208,6 +222,12 @@ func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, r
 		}
 		// Stable addition order also keeps floating-point RAM sums deterministic.
 		sort.Slice(victims, func(i, j int) bool { return victims[i].id < victims[j].id })
+		remainingRAM := make([]float64, len(victims)+1)
+		remainingCores := make([]int, len(victims)+1)
+		for i := len(victims) - 1; i >= 0; i-- {
+			remainingRAM[i] = remainingRAM[i+1] + victims[i].ram
+			remainingCores[i] = remainingCores[i+1] + victims[i].cores
+		}
 		tiers := make([]int, len(q.effectivePriorityPolicy().Tiers))
 		var bestTiers []int
 		var chosenJobs, bestJobs []*Job
@@ -216,24 +236,37 @@ func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, r
 		stops, bestStops, bestExcess := 0, 0, 0.0
 		ramDeficit := max(0, need-room)
 		coreDeficit := max(0, m.CPUInUseCores+cores-m.EffectiveCPUCores)
+		requiredCoreReleases := coreDeficit
+		if !m.cpuLedger {
+			// Legacy non-ledger capacity is independent of released executions;
+			// cpuOK above has already checked its capability report.
+			requiredCoreReleases = 0
+		}
 		ramCapacity := m.HostAvailableMemoryGB
 		if m.hostBudgetGB > 0 {
 			ramCapacity = min(ramCapacity, m.hostBudgetGB)
 		}
 		var search func(int, float64, int)
 		search = func(i int, freedRAM float64, freedCores int) {
+			if room+freedRAM+remainingRAM[i] < need || freedCores+remainingCores[i] < requiredCoreReleases {
+				return
+			}
 			// Adding victims cannot improve the tier counts or number of stops.
 			order := slices.Compare(tiers, bestTiers)
 			if bestTiers != nil && (order > 0 || order == 0 && stops > bestStops) {
 				return
 			}
+			// Unused capacity is also monotonic as the selected set grows.
+			excess := max(0, freedRAM-ramDeficit)/max(1, ramCapacity) + float64(max(0, freedCores-coreDeficit))/float64(max(1, m.EffectiveCPUCores))
+			if bestTiers != nil && order == 0 && stops == bestStops && excess > bestExcess {
+				return
+			}
 			if i == len(victims) {
-				if room+freedRAM < need || !cpuOK(chosenJobs, chosenSlots) {
+				if room+freedRAM < need || freedCores < requiredCoreReleases {
 					return
 				}
 				// Sum unused fractions of host RAM and cores, so neither unit
 				// (GiB versus cores) implicitly determines the capacity tie-break.
-				excess := max(0, freedRAM-ramDeficit)/max(1, ramCapacity) + float64(max(0, freedCores-coreDeficit))/float64(max(1, m.EffectiveCPUCores))
 				if bestTiers == nil || order < 0 || order == 0 && (stops < bestStops || stops == bestStops && (excess < bestExcess || excess == bestExcess && slices.Compare(ids, bestIDs) < 0)) {
 					bestTiers = slices.Clone(tiers)
 					bestStops, bestExcess = stops, excess
