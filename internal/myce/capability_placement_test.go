@@ -14,7 +14,7 @@ func placementMachine(id, layout string, ram, accelerator float64, e Extension) 
 	m.TotalMemoryGB, m.FreeMemoryGB = accelerator, accelerator
 	m.HostAvailableMemoryGB, m.HostMemoryMeasured = ram, true
 	m.UnifiedMemory = layout == "unified"
-	m.CapabilityProfile = &CapabilityProfile{OS: runtime.GOOS, Arch: runtime.GOARCH, MemoryLayout: layout, SystemMemoryBytes: uint64(ram * (1 << 30)), LogicalCPUs: 8, Accelerators: []AcceleratorProfile{{Type: "fake", MemoryBytes: uint64(accelerator * (1 << 30))}}}
+	m.CapabilityProfile = &CapabilityProfile{MemoryLayout: layout, SystemMemoryBytes: uint64(ram * (1 << 30)), LogicalCPUs: 8, Accelerators: []AcceleratorProfile{{Type: "fake", MemoryBytes: uint64(accelerator * (1 << 30))}}}
 	m.ExtensionReports = []ExtensionReport{{Digest: e.Digest, Work: "kind:sample", Platform: "fake", Qualified: true}, {Digest: e.Digest, Work: "program:sample-script", Platform: "fake", Qualified: true}}
 	if len(e.Variants) > 0 {
 		m.CapabilityProfile.OS, m.CapabilityProfile.Arch = runtime.GOOS, runtime.GOARCH

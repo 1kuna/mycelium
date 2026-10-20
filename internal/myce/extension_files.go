@@ -197,7 +197,7 @@ func validateExtensionJob(s Spec) error {
 			return errors.New("program arguments belong in program.args")
 		}
 	}
-	if s.Execution != nil || (s.Kind == "" && s.Program == nil && len(s.Run.Env) > 0) || len(s.Run.Sidecars) > 0 || len(s.Run.Command) > 0 || s.Run.Workdir != "" || s.Run.Docker || len(s.Run.DockerSidecars) > 0 || s.Run.DockerNetwork != "" || s.Run.DockerMemoryGB != 0 || s.Run.DockerMemorySwap != nil || s.Environment.Key() != "" || s.Needs.CPUCores != 0 || s.Needs.MemoryGB != 0 || s.Needs.HostMemoryGB != 0 || s.Needs.Model != "" || s.Needs.Platform.Any || len(s.Needs.Platform.Required)+len(s.Needs.Platform.Preferred) > 0 {
+	if s.Execution != nil || (s.Kind == "" && s.Program == nil && len(s.Run.Env) > 0) || len(s.Run.Sidecars) > 0 || len(s.Run.Command) > 0 || s.Run.Workdir != "" || s.Run.Docker || len(s.Run.DockerSidecars) > 0 || s.Run.DockerNetwork != "" || s.Run.DockerMemoryGB != 0 || s.Run.DockerMemorySwap != nil || s.Environment.Key() != "" || s.Needs.MemoryGB != 0 || s.Needs.HostMemoryGB != 0 || s.Needs.Model != "" || s.Needs.Platform.Any || len(s.Needs.Platform.Required)+len(s.Needs.Platform.Preferred) > 0 {
 		return errors.New("kind/program jobs use extension-owned commands, environments and hardware reservations; use size_hint")
 	}
 	if !validMemoryValue(s.SizeHint.MemoryGB) || !validMemoryValue(s.SizeHint.HostMemoryGB) {

@@ -18,8 +18,6 @@ import (
 	"time"
 )
 
-var ErrNoGPU = errors.New("no supported GPU visible")
-
 type Detection struct {
 	OS         string  `json:"os"`
 	Arch       string  `json:"arch"`
@@ -69,7 +67,7 @@ func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detectio
 	if p.OS == "darwin" && p.Arch == "arm64" {
 		b, e := p.Command(ctx, "/usr/sbin/system_profiler", "SPDisplaysDataType")
 		if e != nil || !strings.Contains(string(b), "Metal") {
-			return d, fmt.Errorf("%w: Apple GPU/Metal not visible", ErrNoGPU)
+			return d, errors.New("Apple GPU/Metal not visible")
 		}
 		d.Platform = "metal"
 		d.GPU = "Apple Silicon"
@@ -176,7 +174,7 @@ func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detectio
 		d.ReserveGB = 8
 		return d, nil
 	}
-	return d, fmt.Errorf("%w (nvidia-smi, sycl-ls/xpu-smi, or Apple Silicon Metal)", ErrNoGPU)
+	return d, errors.New("no supported GPU visible (nvidia-smi, sycl-ls/xpu-smi, or Apple Silicon Metal)")
 }
 
 type ServiceConfig struct {
@@ -215,8 +213,6 @@ type ServiceConfig struct {
 	RequireMemoryCeilings bool    `json:"require_memory_ceilings"`
 	RequireMountedNAS     bool    `json:"require_mounted_nas"`
 	Force                 bool    `json:"-"`
-	CPUReserveCores       int     `json:"cpu_reserve_cores"`
-	CPUBudgetCores        int     `json:"cpu_budget_cores"`
 	HostMemoryBudgetGB    float64 `json:"host_memory_budget_gb"`
 	MemoryCeilingSlackGB  float64 `json:"memory_ceiling_slack_gb"`
 	MemorySwapMaxBytes    int64   `json:"memory_swap_max_bytes"`
@@ -302,7 +298,6 @@ func PlanInstall(role, home, root, nas, queue, name string, d Detection, account
 	c.UploadSpoolDir = filepath.Join(c.State, "uploads")
 	c.UploadSpoolBytes = DefaultUploadSpoolBytes
 	c.PrivateDevices, c.NoNewPrivileges = false, true
-	c.CPUReserveCores = 1
 	c.Nice, c.CPUQuota, c.MemoryMax, c.TasksMax = 10, "25%", "512M", "64"
 	c.EnvironmentRoot = filepath.Join(nas, "mycelium", "environments")
 	c.Path = filepath.Join(home, ".local", "bin") + ":" + filepath.Join(home, ".cargo", "bin") + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -701,15 +696,11 @@ func Doctor(ctx context.Context, c ServiceConfig, p DoctorProbe) []DoctorCheck {
 		status := WorkerMemoryDelegationStatus(ctx, c, p.Machine.Command)
 		// Enforcement is advisory on unsupported hosts; report its capability plainly.
 		add("memory ceilings", nil, status)
-		if c.Detection.Platform == "cpu" {
-			add("CPU target", nil, "Linux/macOS logical cores and host RAM; GPU not required")
-		} else {
-			d, e := p.Machine.DetectDevice(ctx, c.Device)
-			if e == nil && d.Platform != c.Detection.Platform {
-				e = fmt.Errorf("detected %s; configured %s", d.Platform, c.Detection.Platform)
-			}
-			add("GPU visible", e, d.Platform)
+		d, e := p.Machine.DetectDevice(ctx, c.Device)
+		if e == nil && d.Platform != c.Detection.Platform {
+			e = fmt.Errorf("detected %s; configured %s", d.Platform, c.Detection.Platform)
 		}
+		add("GPU visible", e, d.Platform)
 	}
 	if p.NAS == nil {
 		add("NAS mounted and writable", errors.New("NAS probe missing"), "")
@@ -778,7 +769,7 @@ func (c ServiceConfig) Args() []string {
 	if c.Role == "queue" {
 		args = []string{"queue", "--listen", c.Listen, "--db", c.DB, "--checkpoints", c.Checkpoints, "--queue", c.Queue}
 	} else {
-		args = []string{"join", "--reserve-cpu-cores", strconv.Itoa(c.CPUReserveCores), "--cpu-budget-cores", strconv.Itoa(c.CPUBudgetCores), "--host-memory-budget-gb", strconv.FormatFloat(c.HostMemoryBudgetGB, 'f', -1, 64), "--memory-ceiling-slack-gb", strconv.FormatFloat(c.MemoryCeilingSlackGB, 'f', -1, 64), "--memory-swap-max-bytes", strconv.FormatInt(c.MemorySwapMaxBytes, 10), "--name", c.Name, "--gpu", c.Detection.Platform, "--memory-mode", c.Detection.MemoryMode, "--memory-gb", strconv.FormatFloat(c.Detection.MemoryGB, 'f', -1, 64), "--reserve-memory-gb", strconv.FormatFloat(c.Detection.ReserveGB, 'f', -1, 64), "--state-dir", c.State, "--checkpoint-root", c.Checkpoints, "--model-root", c.ModelRoot, "--model-cache", c.ModelCache, "--model-cache-bytes", strconv.FormatInt(c.ModelCacheBytes, 10), "--environment-root", c.EnvironmentRoot, "--environment-cache", c.EnvironmentCache, "--environment-cache-bytes", strconv.FormatInt(c.EnvironmentCacheBytes, 10)}
+		args = []string{"join", "--host-memory-budget-gb", strconv.FormatFloat(c.HostMemoryBudgetGB, 'f', -1, 64), "--memory-ceiling-slack-gb", strconv.FormatFloat(c.MemoryCeilingSlackGB, 'f', -1, 64), "--memory-swap-max-bytes", strconv.FormatInt(c.MemorySwapMaxBytes, 10), "--name", c.Name, "--gpu", c.Detection.Platform, "--memory-mode", c.Detection.MemoryMode, "--memory-gb", strconv.FormatFloat(c.Detection.MemoryGB, 'f', -1, 64), "--reserve-memory-gb", strconv.FormatFloat(c.Detection.ReserveGB, 'f', -1, 64), "--state-dir", c.State, "--checkpoint-root", c.Checkpoints, "--model-root", c.ModelRoot, "--model-cache", c.ModelCache, "--model-cache-bytes", strconv.FormatInt(c.ModelCacheBytes, 10), "--environment-root", c.EnvironmentRoot, "--environment-cache", c.EnvironmentCache, "--environment-cache-bytes", strconv.FormatInt(c.EnvironmentCacheBytes, 10)}
 	}
 	if c.Role == "worker" {
 

@@ -14,15 +14,13 @@ const maintenanceStopCause = "planned_host_maintenance"
 // A nil budget is possible before the first worker report; zero is uncapped.
 // Existing hosts bootstrap their allowance once, then worker reports cannot edit it.
 type HostMaintenance struct {
-	CPUBudgetCores *int              `json:"cpu_budget_cores,omitempty"`
-	StopAt         *time.Time        `json:"stop_at,omitempty"`
-	Mode           string            `json:"mode"`
-	MemoryBudget   *HostMemoryBudget `json:"memory_budget,omitempty"`
-	UpdatedAt      time.Time         `json:"updated_at"`
+	StopAt       *time.Time        `json:"stop_at,omitempty"`
+	Mode         string            `json:"mode"`
+	MemoryBudget *HostMemoryBudget `json:"memory_budget,omitempty"`
+	UpdatedAt    time.Time         `json:"updated_at"`
 }
 
 type HostMaintenanceRequest struct {
-	CPUBudgetCores *int     `json:"cpu_budget_cores,omitempty"`
 	Action         string   `json:"action"`
 	Stop           bool     `json:"stop,omitempty"`
 	MemoryBudgetGB *float64 `json:"memory_budget_gb,omitempty"`
@@ -94,10 +92,6 @@ func (q *Queue) registerMaintenanceHost(m *Machine) error {
 		policy.MemoryBudget = &budget
 		policy.UpdatedAt = q.clock.Now()
 	}
-	if policy.CPUBudgetCores == nil && m.CapabilityProfile != nil && m.CapabilityProfile.LogicalCPUs > 0 {
-		value := m.CPUBudgetCores
-		policy.CPUBudgetCores = &value
-	}
 	q.s.HostMaintenance[hostID(m)] = policy
 	return nil
 }
@@ -131,18 +125,8 @@ func (q *Queue) ChangeHostMaintenance(host string, request HostMaintenanceReques
 		if request.Stop && request.Action != "disable" {
 			return errors.New("--stop requires disable")
 		}
-		if request.Action == "budget" && request.MemoryBudgetGB == nil && request.CPUBudgetCores == nil {
-			return errors.New("budget requires RAM GiB or CPU cores")
-		}
-		if request.CPUBudgetCores != nil {
-			if policy.Mode == "enabled" {
-				return errors.New("drain or disable the host before changing its CPU allowance")
-			}
-			if *request.CPUBudgetCores < 0 {
-				return errors.New("CPU allowance must be nonnegative (zero uses detected capacity minus reserve)")
-			}
-			value := *request.CPUBudgetCores
-			policy.CPUBudgetCores = &value
+		if request.Action == "budget" && request.MemoryBudgetGB == nil {
+			return errors.New("budget requires positive GiB")
 		}
 		if request.MemoryBudgetGB != nil {
 			if policy.Mode == "enabled" {
@@ -190,10 +174,6 @@ func (q *Queue) hostMaintenanceStatus(host string) HostMaintenanceStatus {
 	if out.Policy.StopAt != nil {
 		deadline := *out.Policy.StopAt
 		out.Policy.StopAt = &deadline
-	}
-	if out.Policy.CPUBudgetCores != nil {
-		value := *out.Policy.CPUBudgetCores
-		out.Policy.CPUBudgetCores = &value
 	}
 	if out.Policy.MemoryBudget != nil {
 		budget := *out.Policy.MemoryBudget

@@ -236,36 +236,3 @@ func (q *Queue) preparationShared(m *Machine, demand *Job, l *HostLaunch) bool {
 	}
 	return l.Kind == "environment" && l.Key == key
 }
-
-// A started environment build owns one core only when this worker has no batch
-// or engine reservation. Credit that charge for planning its exact cleanup (or
-// completion of a shared build); admission still checks the unchanged live view.
-func (q *Queue) cpuAfterPreparation(m *Machine, demand *Job) Machine {
-	copy := *m
-	if q.workerHasCPUExecution(m) {
-		return copy
-	}
-	started := false
-	for _, l := range q.s.PreparationPlans {
-		if l.Machine != m.ID || l.Session != m.Session || !l.Started {
-			continue
-		}
-		if l.Kind != "environment" {
-			return copy
-		}
-		if !q.preparationShared(m, demand, &l) && l.PriorityStop == nil {
-			if l.Spec == nil || q.comparePriority(*l.Spec, demand.Spec) <= 0 {
-				return copy
-			}
-			if owner := q.s.Jobs[l.Demand]; owner != nil && q.preemptionProtected(owner.PreemptionCount, l.StartedAt) {
-				return copy
-			}
-		}
-		started = true
-	}
-	if started {
-		copy.CPUInUseCores = max(0, copy.CPUInUseCores-1)
-		copy.FreeCPUCores = max(0, copy.EffectiveCPUCores-copy.CPUInUseCores)
-	}
-	return copy
-}

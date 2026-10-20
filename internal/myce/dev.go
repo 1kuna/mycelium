@@ -27,7 +27,6 @@ type DevConfig struct {
 	Address, Database, Checkpoints, Token string
 	GPU                                   string
 	Environments, Models                  []string
-	CPUReserveCores, CPUBudgetCores       int
 	Workers                               int
 	MemoryGB                              float64
 	Interval                              time.Duration
@@ -54,11 +53,8 @@ func StartDev(c DevConfig) (*Dev, error) {
 	if !validGPU(c.GPU) {
 		return nil, errors.New("invalid simulated GPU platform")
 	}
-	if c.Workers < 1 || (c.MemoryGB <= 0 && c.GPU != "cpu") || c.Token == "" || c.CPUReserveCores < 0 || c.CPUBudgetCores < 0 {
+	if c.Workers < 1 || c.MemoryGB <= 0 || c.Token == "" {
 		return nil, errors.New("dev requires workers, positive memory, and a token")
-	}
-	if c.GPU == "cpu" {
-		c.MemoryGB = 0
 	}
 	clock := &devClock{}
 	if c.HostID == "" {
@@ -168,7 +164,7 @@ func StartDev(c DevConfig) (*Dev, error) {
 		}
 	}()
 	for i := 0; i < c.Workers; i++ {
-		w := Worker{ExtensionRoot: c.ExtensionRoot, JobFileRoot: c.JobFileRoot, ModelConfig: c.ModelConfig, StateDir: filepath.Join(filepath.Dir(c.Database), "workers", fmt.Sprintf("fake-%d", i+1)), Client: d.client, Machine: Machine{CPUReserveCores: c.CPUReserveCores, CPUBudgetCores: c.CPUBudgetCores, HostMemoryMeasured: true, HostID: c.HostID, Device: "0", ID: fmt.Sprintf("fake-%d", i+1), GPU: c.GPU, FreeMemoryGB: c.MemoryGB, Environments: c.Environments, Models: c.Models}, Interval: c.Interval}
+		w := Worker{ExtensionRoot: c.ExtensionRoot, JobFileRoot: c.JobFileRoot, ModelConfig: c.ModelConfig, StateDir: filepath.Join(filepath.Dir(c.Database), "workers", fmt.Sprintf("fake-%d", i+1)), Client: d.client, Machine: Machine{HostID: c.HostID, Device: "0", ID: fmt.Sprintf("fake-%d", i+1), GPU: c.GPU, FreeMemoryGB: c.MemoryGB, Environments: c.Environments, Models: c.Models}, Interval: c.Interval}
 		d.workerWG.Add(1)
 		go func() {
 			defer d.workerWG.Done()

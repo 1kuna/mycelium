@@ -207,7 +207,7 @@ func modelFitsMachine(model Model, m *Machine) bool {
 
 // WithModelDevice applies a per-process selector; global environment is untouched.
 func WithModelDevice(m Model, platform, device string) (Model, error) {
-	if device == "" && platform != "cpu" {
+	if device == "" {
 		return m, nil
 	}
 	if m.Device != "" && m.Device != device {
@@ -236,8 +236,6 @@ func WithModelDevice(m Model, platform, device string) (Model, error) {
 		}
 		env["ONEAPI_DEVICE_SELECTOR"] = "level_zero:" + strings.Join(indices, ",")
 		env["ZE_AFFINITY_MASK"] = device
-	case "cpu":
-		env["CUDA_VISIBLE_DEVICES"] = ""
 	case "fake":
 	case "metal":
 		if device != "0" {

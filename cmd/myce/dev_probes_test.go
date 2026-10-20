@@ -44,7 +44,7 @@ func TestDevProbeInstallUpgrade(t *testing.T) {
 		name string
 		run  func(*testing.T)
 	}{
-		{"configuration-failure", TestInstallCLICPUWithoutGPU},
+		{"configuration-failure", TestInstallCLIDevicelessNeedsExplicitFlagAndBudget},
 		{"preserve-config", TestInstallPreservesEveryConfigField},
 		{"archive-refuse-fresh", TestLegacyInstallArchiveFresh},
 	} {
@@ -56,11 +56,6 @@ func TestDevProbeInstallUpgrade(t *testing.T) {
 }
 
 func TestDevStandaloneSmoke(t *testing.T) {
-	for _, backend := range []string{"fake", "cpu"} {
-		t.Run(backend, func(t *testing.T) { devStandaloneSmoke(t, backend) })
-	}
-}
-func devStandaloneSmoke(t *testing.T, backend string) {
 	root := t.TempDir()
 	binary := os.Getenv("MYCE_DEV_SMOKE_BINARY")
 	if binary == "" {
@@ -80,7 +75,7 @@ func devStandaloneSmoke(t *testing.T, backend string) {
 	// Fresh services and integration clients need not have /usr/sbin in PATH.
 	env := []string{"PATH=/usr/bin:/bin", "HOME=" + root, "TMPDIR=" + root, "MYCE_TOKEN=" + token}
 	t.Setenv("MYCE_TOKEN", token)
-	cmd := exec.CommandContext(ctx, binary, "dev", "--listen", "127.0.0.1:0", "--db", filepath.Join(root, "state", "queue.db"), "--checkpoints", filepath.Join(root, "checkpoints"), "--host-id", "smoke-host", "--file-store", filepath.Join(root, "files"), "--workers", "1", "--gpu", backend, "--memory-gb", "8")
+	cmd := exec.CommandContext(ctx, binary, "dev", "--listen", "127.0.0.1:0", "--db", filepath.Join(root, "state", "queue.db"), "--checkpoints", filepath.Join(root, "checkpoints"), "--host-id", "smoke-host", "--file-store", filepath.Join(root, "files"), "--workers", "1", "--memory-gb", "8")
 	cmd.Dir, cmd.Env = root, env
 	cmd.Cancel = func() error { return cmd.Process.Signal(os.Interrupt) }
 	cmd.WaitDelay = time.Second
@@ -175,12 +170,7 @@ func devStandaloneSmoke(t *testing.T, backend string) {
 	}
 	marker := filepath.Join(root, "effect")
 	spec := myce.Spec{Name: "smoke-short", Project: "probe", Priority: "experiment"}
-	spec.Needs.MemoryGB = 1
-	if backend == "cpu" {
-		spec.Needs.CPUCores = 1
-	} else {
-		spec.Needs.Platform.Any = true
-	}
+	spec.Needs.MemoryGB, spec.Needs.Platform.Any = 1, true
 	spec.Run.Command = []string{"sh", "-c", `test -z "$MYCE_TOKEN" || exit 99; printf done > "$1"`, "fixture", marker}
 	var job myce.Job
 	if err := client.Call(ctx, "POST", "/api/jobs", spec, &job); err != nil {

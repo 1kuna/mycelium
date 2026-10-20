@@ -171,16 +171,12 @@ func TestProductionHoldExpiryAndLostWorkerRetainRelease(t *testing.T) {
 		t.Fatal("missing unknown release")
 	}
 	// A stale attempt's acknowledgement settles custody without touching its replacement.
-	if err := q.Complete(result(y, false)); !errors.Is(err, ErrStale) {
-		t.Fatalf("obsolete result accepted while settling custody: %v", err)
-	}
+	finishInterrupted(t, q, y)
 	resumed := check(t, q, s, nil).Job
 	if resumed == nil || resumed.Attempt != 2 || resumed.Losses != 0 {
 		t.Fatalf("retry %+v", resumed)
 	}
-	if err := q.Complete(result(x, false)); !errors.Is(err, ErrStale) {
-		t.Fatalf("obsolete result accepted while settling custody: %v", err)
-	}
+	finishInterrupted(t, q, x)
 	if got := check(t, q, a, nil).Job; got == nil || got.ID != prod.ID {
 		t.Fatalf("released: %+v", got)
 	}
@@ -208,9 +204,7 @@ func TestProductionHoldWorkerLoss(t *testing.T) {
 	if _, err := q.Checkin(Checkin{Machine: fresh, Fresh: true, PreviousSession: b.Session}); err != nil {
 		t.Fatal(err)
 	}
-	if err := q.Complete(result(x, false)); !errors.Is(err, ErrStale) {
-		t.Fatalf("obsolete result accepted while settling custody: %v", err)
-	}
+	finishInterrupted(t, q, x)
 	if got := check(t, q, a, nil).Job; got == nil || got.ID != prod.ID {
 		t.Fatalf("after cleanup %+v", got)
 	}

@@ -336,6 +336,10 @@ func (q *Queue) resolveExtensions(s *Spec) ([]Extension, error) {
 			return nil, errors.New("variant jobs use extension-owned execution env")
 		}
 		out = append(out, e)
+		for _, v := range e.Variants {
+			s.Needs.MemoryGB = max(s.Needs.MemoryGB, v.Needs.MemoryGB)
+			s.Needs.HostMemoryGB = max(s.Needs.HostMemoryGB, v.Needs.HostMemoryGB)
+		}
 		platforms = append(platforms, e.platforms()...)
 		s.Needs.MemoryGB = max(s.Needs.MemoryGB, e.MemoryGB)
 		s.Needs.HostMemoryGB = max(s.Needs.HostMemoryGB, e.HostMemoryGB)
@@ -357,9 +361,6 @@ func (q *Queue) resolveExtensions(s *Spec) ([]Extension, error) {
 func qualifiedExtension(j *Job, m *Machine) *Extension {
 	for i := range j.Extensions {
 		e := &j.Extensions[i]
-		if (j.State == "running" || j.State == "stopping") && j.Extension != nil && j.Extension.Digest != e.Digest {
-			continue
-		}
 		if !e.matchesTarget(m) || !slices.Contains(e.platforms(), m.GPU) || (j.Spec.Resumable && !e.Resumable) {
 			continue
 		}
@@ -376,43 +377,6 @@ func qualifiedExtension(j *Job, m *Machine) *Extension {
 	}
 	return nil
 }
-
-// Alternatives are evaluated separately on the exact worker target. These
-// copies carry the reservation the queue will persist if this variant wins.
-// Structural validation deliberately does not require current qualification.
-func extensionJobs(j *Job, m *Machine, qualified bool) []*Job {
-	if !j.Spec.extensionJob() || j.State == "running" || j.State == "stopping" {
-		return []*Job{j}
-	}
-	var out []*Job
-	for _, e := range j.Extensions {
-		if !e.matchesTarget(m) || !slices.Contains(e.platforms(), m.GPU) {
-			continue
-		}
-		copy := *j
-		copy.Extensions = []Extension{e}
-		if qualified && qualifiedExtension(&copy, m) == nil {
-			continue
-		}
-		if v := e.variant(machineTarget(m)); v != nil {
-			copy.Spec.Needs = v.Needs
-			copy.Spec.Needs.Platform = Platform{Required: []string{m.GPU}}
-			copy.Spec.Needs.MemoryGB = max(copy.Spec.Needs.MemoryGB, j.Spec.SizeHint.MemoryGB)
-			copy.Spec.Needs.HostMemoryGB = max(copy.Spec.Needs.HostMemoryGB, j.Spec.SizeHint.HostMemoryGB)
-			if j.Spec.Program != nil && len(j.Spec.Needs.Platform.Required) == 1 && j.Spec.Needs.Platform.Required[0] == m.GPU {
-				// A candidate already lowered for this target carries learned floors.
-				copy.Spec.Needs.MemoryGB = max(copy.Spec.Needs.MemoryGB, j.Spec.Needs.MemoryGB)
-				copy.Spec.Needs.HostMemoryGB = max(copy.Spec.Needs.HostMemoryGB, j.Spec.Needs.HostMemoryGB)
-			}
-			if normalizeResources(&copy.Spec) != nil {
-				continue
-			}
-		}
-		out = append(out, &copy)
-	}
-	return out
-}
-
 func extensionCanRun(j *Job, m *Machine) bool {
 	return !j.Spec.extensionJob() || qualifiedExtension(j, m) != nil
 }

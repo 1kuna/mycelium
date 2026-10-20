@@ -6,7 +6,7 @@ func placementEnvironment(m Machine) map[string]string {
 	if platform == "fake" {
 		platform = "cpu-fake"
 	}
-	return map[string]string{"MYCE_DEVICE": ExtensionDevice(m.GPU), "MYCE_PLATFORM": platform, "MYCE_DEVICES": m.Device, "MYCE_MACHINE": m.ID}
+	return map[string]string{"MYCE_PLATFORM": platform, "MYCE_DEVICES": m.Device, "MYCE_MACHINE": m.ID}
 }
 func withPlacementEnvironment(model Model, m Machine) Model {
 	env := map[string]string{}

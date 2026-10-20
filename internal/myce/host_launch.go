@@ -83,11 +83,6 @@ func (q *Queue) AuthorizeLaunch(l HostLaunch) error {
 			rejected = ErrStale
 			return nil
 		}
-		m := q.s.Machines[l.Machine]
-		if !q.workerHasCPUReservation(m) && !cpuAllocationFits(m, 1) {
-			rejected = ErrStale
-			return nil
-		}
 		p.Started = true
 		if p.StartedAt == nil {
 			now := q.clock.Now()

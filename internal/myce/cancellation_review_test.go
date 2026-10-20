@@ -51,78 +51,55 @@ func TestCancellationRejoinBeforeCancel(t *testing.T) {
 }
 
 func TestCancellationFreshRejoinUntrackedCopies(t *testing.T) {
-	for _, tracked := range []bool{false, true} {
-		t.Run("tracked="+stringBool(tracked), func(t *testing.T) {
-			q, c := fixture(t)
-			m := machine("one", "fake")
-			s := spec("experiment")
-			s.AllowedMachines = []string{m.ID}
-			j := submit(t, q, s)
+	q, c := fixture(t)
+	m := machine("one", "fake")
+	s := spec("experiment")
+	s.AllowedMachines = []string{m.ID}
+	j := submit(t, q, s)
+	j = check(t, q, m, nil).Job
+	check(t, q, machine("two", "fake"), nil)
+	check(t, q, machine("three", "fake"), nil)
+	for attempt := 1; attempt <= 2; attempt++ {
+		c.Advance(LossAfter)
+		if err := q.update(func() error {
+			q.s.Machines["two"].LastSeen, q.s.Machines["three"].LastSeen = c.Now(), c.Now()
+			q.maintain()
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if attempt == 1 {
+			m.Session = "second-one"
 			j = check(t, q, m, nil).Job
-			check(t, q, machine("two", "fake"), nil)
-			check(t, q, machine("three", "fake"), nil)
-			for attempt := 1; attempt <= 2; attempt++ {
-				c.Advance(LossAfter)
-				if err := q.update(func() error {
-					q.s.Machines["two"].LastSeen, q.s.Machines["three"].LastSeen = c.Now(), c.Now()
-					q.maintain()
-					return nil
-				}); err != nil {
-					t.Fatal(err)
-				}
-				if attempt == 1 {
-					m.Session = "second-one"
-					j = check(t, q, m, nil).Job
-					if j == nil || j.Attempt != 2 {
-						t.Fatal("missing second session attempt")
-					}
-				}
+			if j == nil || j.Attempt != 2 {
+				t.Fatal("missing second session attempt")
 			}
-			// Every lost attempt retains its default core reservation in R1.
-			if len(q.s.HostReleases) != 2 {
-				t.Fatal("lost attempts did not retain exact custody")
-			}
-			expectedReleases := 2
-			if !tracked {
-				// Exercise copy-based cancellation recovery when release records are
-				// missing, rather than depending on the old no-core-accounting fixture.
-				if err := q.update(func() error {
-					q.s.HostReleases = nil
-					return nil
-				}); err != nil {
-					t.Fatal(err)
-				}
-				expectedReleases = 0
-			}
-			q = reopenCancellationQueue(t, q, c)
-			if a := cancelAck(t, q, j.ID); ackRelease(a) != "pending" || len(q.s.HostReleases) != expectedReleases {
-				t.Fatal("cancellation changed unknown-copy custody", a)
-			}
-			m.Session = "fresh-one"
-			if _, err := q.Checkin(Checkin{Machine: m, Fresh: true, PreviousSession: j.Session}); err != nil {
-				t.Fatal(err)
-			}
-			if a := cancelAck(t, q, j.ID); ackRelease(a) != "pending" {
-				t.Fatal("fresh rejoin confirmed an older session", a)
-			}
-			if tracked {
-				expectedReleases--
-			}
-			if len(q.s.HostReleases) != expectedReleases {
-				t.Fatal("fresh cleanup changed older-session custody")
-			}
-			copies := q.s.Jobs[j.ID].Copies
-			if copies[0].ReleaseConfirmed || !copies[1].ReleaseConfirmed {
-				t.Fatal("fresh cleanup must cover only the immediately previous session", copies)
-			}
-			r := Result{Execution: Execution{ID: j.ID, Attempt: 1}, Machine: m.ID, Session: "session-one", ReleaseOnly: true}
-			if err := q.Complete(r); err != nil {
-				t.Fatal(err)
-			}
-			if a := cancelAck(t, q, j.ID); ackRelease(a) != "confirmed" || len(q.s.HostReleases) != 0 {
-				t.Fatal("exact older-session proof did not settle release", a)
-			}
-		})
+		}
+	}
+	if len(q.s.HostReleases) != 0 {
+		t.Fatal("fixture unexpectedly tracks custody")
+	}
+	q = reopenCancellationQueue(t, q, c)
+	if a := cancelAck(t, q, j.ID); ackRelease(a) != "pending" || len(q.s.HostReleases) != 0 {
+		t.Fatal("modern unknown copy was assumed released or charged", a)
+	}
+	m.Session = "fresh-one"
+	if _, err := q.Checkin(Checkin{Machine: m, Fresh: true, PreviousSession: j.Session}); err != nil {
+		t.Fatal(err)
+	}
+	if a := cancelAck(t, q, j.ID); ackRelease(a) != "pending" {
+		t.Fatal("fresh rejoin confirmed an older session", a)
+	}
+	copies := q.s.Jobs[j.ID].Copies
+	if copies[0].ReleaseConfirmed || !copies[1].ReleaseConfirmed {
+		t.Fatal("fresh cleanup must cover only the immediately previous session", copies)
+	}
+	r := Result{Execution: Execution{ID: j.ID, Attempt: 1}, Machine: m.ID, Session: "session-one", ReleaseOnly: true}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	if a := cancelAck(t, q, j.ID); ackRelease(a) != "confirmed" {
+		t.Fatal("exact older-session proof did not settle release", a)
 	}
 }
 

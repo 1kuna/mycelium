@@ -273,33 +273,3 @@ accept an operator assertion or launch work. Reconnect workers and require fresh
 acknowledgements afterward. See [managed Docker](job-reference.md#managed-docker-batch-commands)
 for supported command/network/sidecar forms. Unmanaged containers remain outside
 this containment contract.
-
-
-## CPU capacity and allowances (R1)
-
-`myce join --gpu cpu` enrolls a GPU-less Linux/macOS worker without GPU probes.
-Bare join/install selects CPU when supported GPU detection finds no accelerator;
-a detected GPU with incomplete/ambiguous capacity still needs an explicit fix.
-The CPU target reports logical CPUs and measured system RAM, with no fabricated
-accelerator. `myce dev --gpu cpu --workers 1` exercises the real API/runner.
-
-Set `--reserve-cpu-cores 1` (default) to leave logical cores for the owner.
-`--cpu-budget-cores N` caps the remainder; zero uses detected cores minus
-reserve. These options are also durable install settings. The existing
-`--host-memory-budget-gb` and `--reserve-host-memory-gb` govern RAM.
-
-The queue adopts the initial CPU allowance, then owns it alongside RAM:
-
-```sh
-myce host drain HOST --wait
-myce host budget HOST --cpu-budget-cores 4 --memory-budget-gb 8
-myce host resume HOST
-```
-
-Allow each worker view to acknowledge the policy; a mismatch withholds new
-admission. Status shows free/admitted logical cores and unavailable-capacity
-reasons. CPU/GPU views sharing `host_id` share both ledgers. Pending releases
-retain cores/RAM until exact cleanup is acknowledged. One attempt per worker
-remains the R1 execution limit. Core counts reserve capacity, with no CPU-time
-kernel enforcement in R1. Existing Linux memory ceilings and macOS admission-only
-semantics apply unchanged. Native Windows/WSL CPU qualification is later work.

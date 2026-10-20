@@ -49,8 +49,8 @@ func (e Extension) validateVariants() error {
 			return errors.New("variants require unique complete OS/arch/platform targets")
 		}
 		seen[t] = true
-		if v.Needs.CPUCores < 0 || v.Needs.Model != "" || v.Needs.MemoryGB <= 0 || !validMemoryValue(v.Needs.MemoryGB) || !validMemoryValue(v.Needs.HostMemoryGB) || v.Needs.Platform.Any || len(v.Needs.Platform.Required)+len(v.Needs.Platform.Preferred) > 0 {
-			return errors.New("variant needs require finite CPU/GPU/RAM floors; target owns platform")
+		if v.Needs.Model != "" || v.Needs.MemoryGB <= 0 || !validMemoryValue(v.Needs.MemoryGB) || !validMemoryValue(v.Needs.HostMemoryGB) || v.Needs.Platform.Any || len(v.Needs.Platform.Required)+len(v.Needs.Platform.Preferred) > 0 {
+			return errors.New("variant needs require finite GPU/RAM floors; target owns platform")
 		}
 		if err := v.Execution.validate(); err != nil {
 			return err
@@ -204,6 +204,10 @@ func (q *Queue) resolveExplicitExtension(s *Spec) ([]Extension, error) {
 	}
 	s.Needs.MemoryGB = max(e.MemoryGB, s.SizeHint.MemoryGB)
 	s.Needs.HostMemoryGB = max(e.HostMemoryGB, s.SizeHint.HostMemoryGB)
+	for _, v := range e.Variants {
+		s.Needs.MemoryGB = max(s.Needs.MemoryGB, v.Needs.MemoryGB)
+		s.Needs.HostMemoryGB = max(s.Needs.HostMemoryGB, v.Needs.HostMemoryGB)
+	}
 	s.Needs.Platform = Platform{Required: e.platforms()}
 	return matches, nil
 }

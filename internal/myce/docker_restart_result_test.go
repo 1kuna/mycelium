@@ -446,8 +446,8 @@ func TestDockerRestartLateSuccessOnlySettlesExactCustody(t *testing.T) {
 			t.Fatal("wrong result settled old custody")
 		}
 	}
-	if e := q.Complete(old); !errors.Is(e, ErrStale) {
-		t.Fatalf("obsolete result accepted while settling custody: %v", e)
+	if e := q.Complete(old); e != nil {
+		t.Fatal(e)
 	}
 	got := job(t, q, j.ID)
 	if len(q.s.HostReleases) != 0 || got.State != "running" || got.Attempt != 2 || got.Losses != 0 {

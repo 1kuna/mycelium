@@ -26,7 +26,6 @@ type HostState struct {
 // Release obligations survive requeue/loss; only an execution acknowledgement or
 // a fresh worker's completed cleanup can settle them.
 type HostRelease struct {
-	CPUCores                    int        `json:"cpu_cores,omitempty"`
 	CleanupSince                *time.Time `json:"cleanup_since,omitempty"`
 	EscalatedAt                 *time.Time `json:"escalated_at,omitempty"`
 	HostChargeGB                float64    `json:"host_charge_gb,omitempty"`
@@ -105,13 +104,13 @@ func (q *Queue) retainRelease(j *Job) {
 		return
 	}
 	policy := q.s.Hosts[hostID(m)]
-	if j.Spec.Needs.CPUCores == 0 && (m.CapabilityProfile == nil || m.CapabilityProfile.LogicalCPUs == 0) && !q.maintenanceBlocked(hostID(m)) && hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) == 0 && j.Spec.StartBy == nil && !j.Spec.Run.Docker && m.HostMemoryBudgetGB == 0 && m.hostBudgetGB == 0 && q.machineJobLimit(m) == 0 && (policy == nil || !policy.Policy.ProductionHold) {
+	if !q.maintenanceBlocked(hostID(m)) && hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) == 0 && j.Spec.StartBy == nil && !j.Spec.Run.Docker && m.HostMemoryBudgetGB == 0 && m.hostBudgetGB == 0 && q.machineJobLimit(m) == 0 && (policy == nil || !policy.Policy.ProductionHold) {
 		return
 	}
 	if q.s.HostReleases == nil {
 		q.s.HostReleases = map[string]HostRelease{}
 	}
-	r := HostRelease{CPUCores: j.Spec.Needs.cores(), HostChargeGB: hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), Docker: j.Spec.Run.Docker, Device: m.Device, MemoryGB: j.Spec.Needs.MemoryGB, HostMemoryGB: j.Spec.Needs.HostMemoryGB, Host: hostID(m), Job: j.ID, Machine: j.Machine, Session: j.Session, Attempt: j.Attempt}
+	r := HostRelease{HostChargeGB: hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), Docker: j.Spec.Run.Docker, Device: m.Device, MemoryGB: j.Spec.Needs.MemoryGB, HostMemoryGB: j.Spec.Needs.HostMemoryGB, Host: hostID(m), Job: j.ID, Machine: j.Machine, Session: j.Session, Attempt: j.Attempt}
 	if j.StopAt != nil {
 		r.Until = *j.StopAt
 	}

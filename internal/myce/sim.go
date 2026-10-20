@@ -429,9 +429,7 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 		if m.Unified {
 			layout = "unified"
 		}
-		// Synthetic hosts provide explicit CPU facts too; real hosts never infer
-		// capacity from the accelerator count or memory size.
-		report.CapabilityProfile = &CapabilityProfile{OS: "linux", LogicalCPUs: 8, MemoryLayout: layout, SystemMemoryBytes: uint64(m.HostGB * (1 << 30)), Accelerators: []AcceleratorProfile{{Type: m.Platform, MemoryBytes: uint64(m.MemoryGB * (1 << 30))}}}
+		report.CapabilityProfile = &CapabilityProfile{MemoryLayout: layout, SystemMemoryBytes: uint64(m.HostGB * (1 << 30)), Accelerators: []AcceleratorProfile{{Type: m.Platform, MemoryBytes: uint64(m.MemoryGB * (1 << 30))}}}
 		if worker.task != nil {
 			report.FreeMemoryGB = max(0, report.FreeMemoryGB-worker.task.stream.MemoryGB)
 		}

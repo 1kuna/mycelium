@@ -139,19 +139,6 @@ func ExtensionFingerprint(ctx context.Context, platform, device string) (string,
 	data := []byte(runtime.GOOS + "/" + runtime.GOARCH + "/" + platform + "/" + device)
 	commands := [][]string{}
 	switch platform {
-	case "cpu":
-		if runtime.GOOS == "darwin" {
-			commands = [][]string{{"/usr/bin/sw_vers", "-productVersion"}, {"/usr/sbin/sysctl", "-n", "machdep.cpu.brand_string"}}
-		} else if runtime.GOOS == "linux" {
-			commands = [][]string{{"uname", "-r"}}
-			facts, err := os.ReadFile("/proc/cpuinfo")
-			if err != nil {
-				return "", errors.New("CPU identity unavailable")
-			}
-			data = append(data, []byte(cpuIdentity(facts))...)
-		} else {
-			return "", errors.New("CPU qualification requires Linux or macOS")
-		}
 	case "fake":
 		data = append(data, []byte("/fake-v1")...)
 	case "metal":
@@ -201,7 +188,7 @@ func ExtensionDevice(platform string) string {
 		return "xpu:0"
 	case "cuda":
 		return "cuda:0"
-	case "fake", "cpu":
+	case "fake":
 		return "cpu"
 	}
 	return ""
@@ -216,7 +203,7 @@ func extensionEnvironment(root string, e Extension, platform, device string) (ma
 		return nil, err
 	}
 	out := map[string]string{"MYCE_EXTENSION_DIR": folder, "MYCE_EXTENSION_CACHE": cache, "MYCE_DEVICE": ExtensionDevice(platform), "MYCE_PLATFORM": platform, "MYCE_DEVICES": device, "PATH": filepath.Join(cache, "venv", "bin") + string(os.PathListSeparator) + filepath.Join(cache, "bin") + string(os.PathListSeparator) + os.Getenv("PATH")}
-	if device != "" || platform == "cpu" {
+	if device != "" {
 		model, err := WithModelDevice(Model{}, platform, device)
 		if err != nil {
 			return nil, err
@@ -625,26 +612,4 @@ func FormatExtensionReport(r ExtensionReport) string {
 		state = "qualified"
 	}
 	return fmt.Sprintf("%s@%s %s %s: %s %s", r.Name, r.Version, r.Platform, r.Work, state, r.Reason)
-}
-
-// Live MHz, topology order and idle counters are not CPU identity. Hash only
-// stable implementation/feature fields, deduplicated across logical CPUs.
-func cpuIdentity(facts []byte) string {
-	fields := map[string]bool{}
-	for _, line := range strings.Split(string(facts), "\n") {
-		key, value, ok := strings.Cut(line, ":")
-		if !ok {
-			continue
-		}
-		switch strings.ToLower(strings.TrimSpace(key)) {
-		case "vendor_id", "model name", "cpu family", "model", "stepping", "flags", "hardware", "cpu implementer", "cpu architecture", "cpu variant", "cpu part", "cpu revision", "features":
-			fields[strings.TrimSpace(key)+":"+strings.TrimSpace(value)] = true
-		}
-	}
-	values := make([]string, 0, len(fields))
-	for value := range fields {
-		values = append(values, value)
-	}
-	slices.Sort(values)
-	return strings.Join(values, "\n")
 }

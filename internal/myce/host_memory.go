@@ -39,7 +39,6 @@ func hostFits(m *Machine, gpu, host float64) bool {
 	return m.HostMemoryMeasured && m.HostMemoryError == "" && m.FreeHostMemoryGB >= hostNeed(m, gpu, host)
 }
 func (q *Queue) refreshHostMemory() {
-	q.refreshHostCPU()
 	for _, m := range q.s.Machines {
 		available := m.HostAvailableMemoryGB
 		for _, other := range q.s.Machines {
@@ -126,22 +125,14 @@ func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, r
 	if host == 0 && (strings.HasPrefix(m.MemoryEnforcement, "memory ceilings enforced") || m.HostMemoryBudgetGB > 0 || m.hostBudgetGB > 0) {
 		return nil, nil, false
 	}
-	cores := demand.Needs.cores()
-	cpuOK := func(jobs []*Job, slots []*ModelSlot) bool {
-		copy := cpuAfterReleases(m, jobs, slots)
-		return cores == 0 || cpuAllocationFits(&copy, cores)
-	}
-	if (host == 0 || hostFits(m, gpu, host)) && cpuOK(nil, nil) {
+	if host == 0 || hostFits(m, gpu, host) {
 		return nil, nil, true
 	}
-	if host > 0 && (!m.HostMemoryMeasured || m.HostMemoryError != "") {
+	if !m.HostMemoryMeasured || m.HostMemoryError != "" {
 		return nil, nil, false
 	}
 	room := m.FreeHostMemoryGB
 	need := hostNeed(m, gpu, host)
-	if host == 0 {
-		need = 0
-	}
 	var jobs []*Job
 	var slots []*ModelSlot
 	for _, j := range q.s.Jobs {
@@ -174,28 +165,28 @@ func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, r
 	// Prefer releasing model residency before interrupting commands.
 	chosenSlots := []*ModelSlot{}
 	for _, s := range slots {
-		if room >= need && cpuOK(nil, chosenSlots) {
+		if room >= need {
 			break
 		}
 		model, _ := q.model(s.Model)
 		n := hostNeed(q.s.Machines[s.Machine], model.MemoryGB, model.HostMemoryGB)
-		if n > 0 || cores > 0 && slotReservesMemory(s) {
+		if n > 0 {
 			room += n
 			chosenSlots = append(chosenSlots, s)
 		}
 	}
 	chosenJobs := []*Job{}
 	for _, j := range jobs {
-		if room >= need && cpuOK(chosenJobs, chosenSlots) {
+		if room >= need {
 			break
 		}
 		n := hostNeed(q.s.Machines[j.Machine], j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
-		if n > 0 || cores > 0 && !j.ReleaseConfirmed {
+		if n > 0 {
 			room += n
 			chosenJobs = append(chosenJobs, j)
 		}
 	}
-	return chosenJobs, chosenSlots, room >= need && cpuOK(chosenJobs, chosenSlots)
+	return chosenJobs, chosenSlots, room >= need
 }
 func (q *Queue) reclaimableGPUMemory(m *Machine, priority string, identity ...Spec) float64 {
 	demand := priorityDemand(priority, identity)
