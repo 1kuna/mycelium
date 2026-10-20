@@ -775,7 +775,7 @@ func (d *dockerAttempt) retainEvidence(containers []dockerInspection) (err error
 
 func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release func()) (*process, error) {
 	if err := w.verifyDevice(); err != nil {
-		return nil, err
+		return nil, s.startFailure(j, launchRefused, err)
 	}
 	if w.DockerEndpoint == "" {
 		return nil, errors.New("Docker runtime disabled; configure --docker-host to run image jobs")

@@ -584,6 +584,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 					}
 				}
 			}
+			m.InventoryReason = w.inventoryReason
 			if len(m.Devices) == 0 && w.inventoryReason != "" {
 				m.MemoryError = w.inventoryReason
 			}

@@ -319,6 +319,7 @@ var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
         <div class="detail"><div class="label">Availability</div><div class="value">{{hyphaAvailability .}}</div></div>
         <div class="detail"><div class="label">Extensions</div><div class="value">{{range .ExtensionReports}}<div>{{extensionStatus .}}</div>{{else}}<span class="empty-inline">No qualification reported</span>{{end}}</div></div>
         {{if .MaxJobs}}<div class="detail"><div class="label">Job limit</div><div class="value">{{.MaxJobs}} simultaneous jobs per hypha</div></div>{{end}}
+        {{if .InventoryReason}}<div class="alert bad">Device inventory: {{.InventoryReason}}</div>{{end}}
         {{if .MemoryError}}<div class="alert bad">Memory unavailable: {{.MemoryError}}</div>{{end}}
 		{{if .CacheError}}<div class="alert bad">Model cache unavailable: {{.CacheError}}</div>{{end}}
         <div class="detail"><div class="label">Current</div><div class="value">{{range $jobs}}<div><strong>{{.Spec.Name}}</strong> · {{jobState .}}{{if .Progress}} · progress {{.Progress}}{{end}}{{with jobAge . $.Now}} · {{.}}{{end}}</div>{{else}}<span class="empty-inline">Idle</span>{{end}}</div></div>

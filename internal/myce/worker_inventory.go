@@ -130,6 +130,9 @@ func (w *Worker) initInventory(ctx context.Context, s *workerStore) error {
 	if err := w.refreshInventory(devices, probeErr, s); err != nil {
 		return err
 	}
+	if w.inventoryReason == "device_selector_unmatched" && len(w.Machine.Devices) == 0 {
+		return reject(w.inventoryReason, errors.New(rejectionMessages[w.inventoryReason]))
+	}
 	for _, d := range w.Machine.Devices {
 		if d.Reason == "" {
 			w.Machine = d.machine(w.Machine)
@@ -158,22 +161,28 @@ func (w *Worker) refreshInventory(observed []MachineDevice, probeErr error, s *w
 	} else {
 		devices = reconcileDevices(w.Machine.Devices, observed)
 	}
+	matchedSelectors := map[string]bool{}
 	devices = slices.DeleteFunc(devices, func(d MachineDevice) bool {
 		if len(w.inventoryAllowance) == 0 {
 			return false
 		}
-		return !slices.ContainsFunc(w.inventoryAllowance, func(selector string) bool {
+		allowed := false
+		for _, selector := range w.inventoryAllowance {
+			matches := selector == d.Identity || selector == d.Selector
 			if canonicalDeviceID(selector) {
-				return selector == d.ID
+				matches = selector == d.ID
 			}
-			return selector == d.Identity || selector == d.Selector
-		})
+			if matches {
+				matchedSelectors[selector], allowed = true, true
+			}
+		}
+		return !allowed
 	})
 	if devices == nil {
 		devices = []MachineDevice{}
 	}
-	if len(devices) == 0 && len(w.inventoryAllowance) > 0 && w.Machine.GPU != "cpu" {
-		w.inventoryReason = "device_probe_unavailable"
+	if probeErr == nil && w.Machine.GPU != "cpu" && len(matchedSelectors) < len(w.inventoryAllowance) {
+		w.inventoryReason = "device_selector_unmatched"
 	}
 	for i := range devices {
 		d := &devices[i]
@@ -389,7 +398,7 @@ func (w Worker) localInventoryWithProbe(ctx context.Context, probe MachineProbe)
 		if d.UnifiedMemory {
 			budget, reserve = w.Machine.FreeMemoryGB, d.ReserveMemoryGB
 		}
-		if d.MemoryMode == "fixed" && budget <= 0 {
+		if d.MemoryMode == "fixed" && budget <= 0 || d.UnifiedMemory && budget > 0 && budget <= reserve {
 			d.Reason = "device_budget_unavailable"
 			continue
 		}
@@ -480,9 +489,19 @@ func reconcileDevices(previous, current []MachineDevice) []MachineDevice {
 		if matched[i] {
 			continue
 		}
-		// A replacement at an owned ordinal/ID cannot become a new target.
-		if used[d.ID] || slices.ContainsFunc(previous, func(old MachineDevice) bool { return old.Platform == d.Platform && old.Selector == d.Selector }) {
+		// A replacement at an owned runtime selector cannot become a new target.
+		if slices.ContainsFunc(previous, func(old MachineDevice) bool { return old.Platform == d.Platform && old.Selector == d.Selector }) {
 			continue
+		}
+		if used[d.ID] {
+			// Discovery IDs are ordinals; an addition must not steal a saved ID.
+			for next := 0; ; next++ {
+				id := strconv.Itoa(next)
+				if !used[id] {
+					d.ID = id
+					break
+				}
+			}
 		}
 		used[d.ID] = true
 		out = append(out, d)

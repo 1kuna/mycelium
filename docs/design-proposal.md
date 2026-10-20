@@ -649,8 +649,11 @@ Shared CPU/RAM facts and participation policy are sampled once per machine.
 
 A worker's comma-separated `--device` allowance restricts inventory to exactly
 those cards: unlisted cards are never reported or allocated. Omitted means all
-cards. This machine-wide allowance may contain multiple cards while each
-attempt retains its one-card bound.
+cards. After a successful probe, any unmatched entry reports
+`device_selector_unmatched` in status (`inventory_reason`); startup refuses an
+allowance with no matching cards. A partial match keeps only the matched cards available and
+retains that diagnostic. This machine-wide allowance may contain multiple cards
+while each attempt retains its one-card bound.
 
 R1's queue-owned host ledger remains authoritative. Every allocation contains
 host cores, host RAM and zero or one selected GPU with its VRAM charge in M.

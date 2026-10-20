@@ -458,6 +458,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if err != nil {
 			return err
 		}
+		// Keep the host ledger unified even when auto was explicitly selected.
+		// Inventory reports probe failures; they must not prevent CPU startup.
+		unified, _ := myce.DetectUnifiedMemory(ctx, *gpu, binding, *memoryMode)
 		if _, err := myce.MemoryCeilingConfig(*hostBudget, *memorySlack, *memorySwap); err != nil {
 			return err
 		}
@@ -467,9 +470,6 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if *copyParallel < 1 {
 			return errors.New("model-copy-parallel must be positive")
 		}
-		// Inventory probes determine each card's live memory mode. Startup must
-		// still reach the CPU path when an accelerator driver is unavailable.
-		unified := *gpu == "metal" || *memoryMode == "unified"
 		ramReserve := *hostReserve
 		if unified {
 			ramReserve = max(ramReserve, *reserve)
@@ -649,6 +649,9 @@ func printStatus(s myce.Snapshot, full bool) {
 		}
 		if m.HostMemoryMeasured {
 			state += fmt.Sprintf("; host %s RAM %.1f GiB available for admission", m.HostID, m.FreeHostMemoryGB)
+		}
+		if m.InventoryReason != "" {
+			state += "; device inventory: " + m.InventoryReason
 		}
 		if m.MemoryError != "" {
 			state += "; memory unavailable: " + m.MemoryError

@@ -205,7 +205,7 @@ var errWorkerReleasePending = errors.New("command release unconfirmed")
 
 func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	if err := w.verifyDevice(); err != nil {
-		return nil, err
+		return nil, s.startFailure(j, launchRefused, err)
 	}
 	if j.Spec.Needs.cpuOnly() {
 		w.Machine.GPU, w.Machine.Device, w.DeviceBinding = "cpu", "0", ""
@@ -493,7 +493,7 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	}
 	if err = w.verifyDevice(); err != nil {
 		output.Close()
-		return nil, err
+		return nil, s.startFailure(j, launchRefused, err)
 	}
 	if err = cmd.Start(); err != nil {
 		output.Close()
