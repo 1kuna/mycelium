@@ -1,5 +1,8 @@
 # Write an extension
 
+For new composed extensions, hand your agent [AGENT-GUIDE.md](extensions/AGENT-GUIDE.md).
+The legacy run/setup format and native baseline rules below remain supported.
+
 An extension is one small folder: `extension.yaml`, plain notes and the few
 scripts it needs. Use it to teach Mycelium a **kind of work** (preferred) or a
 **program type**. A **hypha** must be **qualified** for that exact version and

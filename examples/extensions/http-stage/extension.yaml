@@ -1,0 +1,31 @@
+name: http-stage
+version: '1'
+purpose: Wrap an existing CPU app with its existing HTTP service
+# Laptop fixture only: fake means CPU code with simulated GPU inventory.
+# Add complete, independently checked real backend targets for GPU apps.
+default_class: batch
+variants:
+  - target: {os: darwin, arch: arm64, platform: fake}
+    environments:
+      app: {backend: uv, python: '3.11', lock_file: requirements.txt}
+    needs: {memory_gb: 1, host_memory_gb: 1}
+    execution:
+      main:
+        environment: app
+        command: ['{env.app.python}', '{extension}/app.py', input.json, result.json]
+        env: {SERVICE_URL: '{sidecars.service.url}'}
+      sidecars:
+        - name: service
+          environment: app
+          command: ['{env.app.python}', '{extension}/service.py', '{port}']
+          memory_gb: 0.1
+          port: 0
+          readiness: {path: /health, timeout: 5s}
+    check: ['{env.app.python}', '{extension}/check.py']
+    baselines:
+      extension:http-stage:
+        input: input.json
+        output: output.json
+        measure: exact
+        native: CPython standard-library CPU app with its loopback HTTP service
+        variation: baseline-measurements.json records three identical actual outputs; exact bytes

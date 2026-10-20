@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -16,7 +17,10 @@ import (
 
 func extensionCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: myce extension add|list|setup|check [flags] [folder|name@version]")
+		return errors.New("usage: myce extension init|add|list|setup|check [flags] [folder|name@version]")
+	}
+	if args[0] == "init" {
+		return extensionInit(args[1:])
 	}
 	f := flag.NewFlagSet("extension "+args[0], flag.ContinueOnError)
 	root := f.String("root", myce.DefaultExtensionRoot(), "local extension library and download cache")
@@ -26,6 +30,9 @@ func extensionCommand(args []string) error {
 	token := f.String("token", env("MYCE_TOKEN", ""), "queue token (prefer MYCE_TOKEN)")
 	// DefValue is only help text; keep the actual environment default private.
 	f.Lookup("token").DefValue = ""
+	static := f.Bool("static", false, "validate folder without executing or qualifying")
+	host := f.String("host", "", "this host's configured worker host ID (local execution only)")
+	digest := f.String("digest", "", "require exact extension SHA-256")
 	local := f.Bool("local", false, "add locally without registering with the queue")
 	platform := f.String("gpu", "", "qualification platform: cuda, xpu, metal or fake")
 	device := f.String("device", "", "same selector as join --device")
@@ -81,6 +88,20 @@ func extensionCommand(args []string) error {
 		}
 		return nil
 	case "setup", "check":
+		if args[0] == "check" && *static {
+			if f.NArg() != 1 {
+				return errors.New("check --static requires a folder")
+			}
+			e, err := myce.ReadExtension(f.Arg(0))
+			if err != nil {
+				return fmt.Errorf("FAIL static: %w", err)
+			}
+			if *digest != "" && e.Digest != *digest {
+				return errors.New("FAIL static: digest mismatch")
+			}
+			fmt.Printf("PASS static %s@%s %s (not qualified)\n", e.Name, e.Version, e.Digest)
+			return nil
+		}
 		if f.NArg() != 1 || *platform == "" || *timeout <= 0 {
 			return errors.New("setup/check requires --gpu, positive --timeout and name@version")
 		}
@@ -98,11 +119,27 @@ func extensionCommand(args []string) error {
 			if *environmentRoot != "" {
 				cache = &myce.EnvironmentCache{Root: *environmentRoot, Limit: *environmentLimit}
 			}
-			reports, err := myce.PrepareExtension(bounded, *root, e, *platform, *device, args[0] == "check", os.Stderr, cache)
+			if *digest != "" && e.Digest != *digest {
+				return errors.New("FAIL: digest mismatch")
+			}
+			var reports []myce.ExtensionReport
+			if args[0] == "check" {
+				if cache == nil {
+					cache = &myce.EnvironmentCache{Root: filepath.Join(*root, "environments"), Limit: *environmentLimit}
+				}
+				cache.Fetch = client.DownloadFile
+				reports, err = myce.CheckExtension(bounded, *root, e, *platform, *device, *host, os.Stderr, cache, client)
+			} else {
+				reports, err = myce.PrepareExtension(bounded, *root, e, *platform, *device, false, os.Stderr, cache)
+			}
 			for _, r := range reports {
 				fmt.Println(myce.FormatExtensionReport(r))
 			}
-			return err
+			if err != nil {
+				return fmt.Errorf("FAIL %s: %w", args[0], err)
+			}
+			fmt.Printf("PASS %s %s@%s\n", args[0], e.Name, e.Version)
+			return nil
 		}
 		return errors.New("extension not installed")
 	default:

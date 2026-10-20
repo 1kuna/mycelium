@@ -1,11 +1,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"mycelium/internal/myce"
 )
@@ -34,12 +36,34 @@ variants:
 			t.Fatal(err)
 		}
 	}
+	devRoot := t.TempDir()
+	d, err := myce.StartDev(myce.DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(devRoot, "queue.db"), Checkpoints: filepath.Join(devRoot, "checkpoints"), HostID: "cli-host", Token: "fixture-not-inherited", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	client := d.Client()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		var snapshot myce.Snapshot
+		if err = client.Call(context.Background(), "GET", "/api/status", nil, &snapshot); err != nil {
+			t.Fatal(err)
+		}
+		if len(snapshot.Machines) > 0 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("worker startup")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Setenv("MYCE_QUEUE", d.URL)
 	t.Setenv("MYCE_TOKEN", "fixture-not-inherited")
 	if err := extensionCommand([]string{"add", "--local", "--root", root, folder}); err != nil {
 		t.Fatal(err)
 	}
 	for _, action := range []string{"setup", "check"} {
-		if err := extensionCommand([]string{action, "--root", root, "--gpu", "fake", "--environment-cache", t.TempDir(), "--environment-cache-bytes", "1048576", "fixture.stage@1"}); err != nil {
+		if err := extensionCommand([]string{action, "--root", root, "--gpu", "fake", "--device", "0", "--host", "cli-host", "--environment-cache", t.TempDir(), "--environment-cache-bytes", "1048576", "fixture.stage@1"}); err != nil {
 			t.Fatal(err)
 		}
 	}

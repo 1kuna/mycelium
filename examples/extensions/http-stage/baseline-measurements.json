@@ -1,0 +1,20 @@
+{
+  "backend": "cpu",
+  "python": "3.11.14",
+  "dependencies": "Python standard library",
+  "comparison": "exact bytes",
+  "runs": [
+    {
+      "exit": 0,
+      "output": "{\"value\": 3}\n"
+    },
+    {
+      "exit": 0,
+      "output": "{\"value\": 3}\n"
+    },
+    {
+      "exit": 0,
+      "output": "{\"value\": 3}\n"
+    }
+  ]
+}

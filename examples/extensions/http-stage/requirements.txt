@@ -1,0 +1,1 @@
+# No third-party dependencies; uv creates the pinned Python environment.

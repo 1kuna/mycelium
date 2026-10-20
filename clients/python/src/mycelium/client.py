@@ -1,6 +1,10 @@
 """Synchronous, standard-library client for the Mycelium HTTP API."""
 from __future__ import annotations
 
+import base64
+import hashlib
+import tempfile
+import re
 import copy
 import datetime as dt
 import json
@@ -8,7 +12,7 @@ import os
 from pathlib import Path
 import time
 from typing import Any, Iterator, Mapping
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
 
@@ -99,6 +103,116 @@ class Client:
         if not isinstance(job, Mapping):
             raise ValueError("job YAML must contain one mapping")
         return self.submit(job)
+
+    def submit_and_wait(self, job: Mapping[str, Any], *, timeout: float | None = None) -> dict[str, Any]:
+        """Retry this call with the same spec/key after an uncertain response.
+
+        One transport retry reuses the identical key/spec.
+        No automatic replay of unkeyed work or application side effects.
+        Returns all terminal states; inspect state before consuming results.
+        """
+        if not job.get("submission_key"):
+            raise ValueError("submit_and_wait requires submission_key")
+        spec = _normalize(job)
+        try:
+            submitted = self.submit(spec)
+        except (URLError, TimeoutError, ConnectionError):
+            # One bounded retry of the identical keyed intent. HTTP rejections
+            # and conflicts propagate; they are not transient transport errors.
+            submitted = self.submit(spec)
+        return self.wait(submitted["id"], timeout=timeout)
+
+    def _file_request(self, method: str, path: str, data: bytes | None = None,
+                      headers: Mapping[str, str] | None = None):
+        request = Request(self.url + path, data=data, method=method, headers={
+            "Authorization": "Bearer " + self.token, **(headers or {})})
+        try:
+            return urlopen(request, timeout=self.timeout)
+        except HTTPError as error:
+            with error:
+                body = error.read(4096).decode("utf-8", errors="replace")
+            raise APIError(error.code, body) from None
+
+    def upload_file(self, source: str | Path) -> dict[str, Any]:
+        """Upload an input via the existing hash-addressed resumable file API."""
+        source = Path(source)
+        digest = hashlib.sha256()
+        size = 0
+        with source.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                digest.update(chunk)
+                size += len(chunk)
+        ref = {"sha256": digest.hexdigest(), "size_bytes": size}
+        endpoint = "/api/files/uploads/" + ref["sha256"]
+        headers = {"Tus-Resumable": "1.0.0"}
+        with self._file_request("POST", "/api/files/uploads/", b"", {
+                **headers, "Upload-Length": str(size),
+                "Upload-Metadata": "sha256 " + base64.b64encode(ref["sha256"].encode()).decode()}):
+            pass
+        # A repeated create may refer to an already published blob.
+        try:
+            with self._file_request("HEAD", "/api/files/blobs/" + ref["sha256"]):
+                return ref
+        except APIError as error:
+            if error.status != 404:
+                raise
+        with self._file_request("HEAD", endpoint, headers=headers) as response:
+            offset = int(response.headers["Upload-Offset"])
+            length = int(response.headers["Upload-Length"])
+        if length != size or not 0 <= offset <= size:
+            raise ValueError("invalid upload offset/length")
+        with source.open("rb") as stream:
+            stream.seek(offset)
+            while offset < size:
+                chunk = stream.read(min(1024 * 1024, size - offset))
+                if not chunk:
+                    raise ValueError("input changed during upload")
+                with self._file_request("PATCH", endpoint, chunk, {
+                        **headers, "Content-Type": "application/offset+octet-stream",
+                        "Upload-Offset": str(offset)}) as response:
+                    if int(response.headers["Upload-Offset"]) != offset + len(chunk):
+                        raise ValueError("invalid upload acknowledgement")
+                offset += len(chunk)
+        with self._file_request("HEAD", "/api/files/blobs/" + ref["sha256"]):
+            pass
+        return ref
+
+    def download_result(self, job_id: str, artifact: str, destination: str | Path) -> Path:
+        """Fetch one accepted current-attempt artifact, verify, then publish.
+
+        artifact is a manifest key; destination is an explicit caller path.
+        Queue/worker paths are never interpreted as local paths.
+        """
+        job = self.get(job_id)
+        if job["state"] != "succeeded":
+            raise ValueError("job has no accepted result")
+        ref = job.get("output_refs", {})[artifact]
+        sha, size = ref["sha256"], ref["size_bytes"]
+        if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{64}", sha) or not isinstance(size, int) or size < 0:
+            raise ValueError("invalid artifact identity")
+        destination = Path(destination)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        temporary = None
+        try:
+            with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as stream:
+                temporary = Path(stream.name)
+                digest, received = hashlib.sha256(), 0
+                with self._file_request("GET", "/api/files/blobs/" + sha) as response:
+                    for chunk in iter(lambda: response.read(1024 * 1024), b""):
+                        received += len(chunk)
+                        if received > size:
+                            raise ValueError("artifact exceeds declared size")
+                        digest.update(chunk)
+                        stream.write(chunk)
+                if received != size or digest.hexdigest() != sha:
+                    raise ValueError("artifact identity mismatch")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, destination)
+            return destination
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
 
     def status(self) -> dict[str, Any]:
         """Return the queue snapshot, including waiting reasons and machines."""

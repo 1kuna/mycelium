@@ -182,7 +182,7 @@ class DevTests(unittest.TestCase):
         binary = cls.root / "myce"
         subprocess.run(["go", "build", "-o", str(binary), "./cmd/myce"], cwd=ROOT, check=True, timeout=120)
         cls.output = (cls.root / "dev.log").open("w+")
-        cls.process = subprocess.Popen([str(binary), "dev", "--listen", "127.0.0.1:0", "--workers", "1", "--db", str(cls.root / "queue.db"), "--checkpoints", str(cls.root / "checkpoints")], stdout=cls.output, stderr=cls.output)
+        cls.process = subprocess.Popen([str(binary), "dev", "--listen", "127.0.0.1:0", "--workers", "1", "--db", str(cls.root / "state" / "queue.db"), "--checkpoints", str(cls.root / "checkpoints")], stdout=cls.output, stderr=cls.output)
         try:
             end = time.monotonic() + 20
             while time.monotonic() < end:

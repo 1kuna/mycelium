@@ -130,3 +130,12 @@ in the attempt directory, including after worker resume or helper restart. Use o
 writer per attempt; file mtimes and machine clocks do not affect resume ordering.
 Existing unwrapped JSON checkpoints still load. See `docs/guide-resumable-jobs.md`
 for worker selection and non-JSON atomic-manifest rules.
+
+## Wrap an existing finite app stage
+
+Give your agent the [extension creation guide](../../docs/extensions/AGENT-GUIDE.md)
+for a complete submit/wait/result example. `upload_file` stages hash-addressed
+inputs; `submit_and_wait` requires a stable submission key and retries one lost
+transport response; `download_result` resolves accepted output and verifies its
+hash before replacing an explicit destination. `cancel_submission(project, key)`
+also works when the submit response was lost. HTTP conflicts propagate.

@@ -94,3 +94,5 @@ end-to-end tests exercise actual commands and checkpoint preemption/recovery.
 Native GPU, daemon, systemd identity, boot and application checks remain separate
 in the [native test plan](docs/production-test-plan.md). Laptop success is not
 deployment or native qualification.
+
+To wrap an existing app, give your agent the [extension creation instructions](docs/extensions/AGENT-GUIDE.md).
