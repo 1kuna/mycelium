@@ -149,3 +149,15 @@ class ExtensionClientTests(unittest.TestCase):
                     self.assertIn(expected, str(caught.exception))
                 cancel.assert_not_called()
                 self.assertEqual(job["state"], "queued")
+
+    def test_wait_timeout_for_running_job_does_not_claim_waiting_for_hypha(self):
+        client = Client(token="fixture")
+        job = {"id": "12345678abcdef", "state": "running"}
+        with patch.object(client, "_call", return_value={"jobs": [job]}), \
+             patch("mycelium.client.time.monotonic", side_effect=[0, 0, .06, .06]), \
+             patch("mycelium.client.time.sleep"):
+            with self.assertRaises(TimeoutError) as caught:
+                client.wait(job["id"], timeout=.05)
+        message = str(caught.exception)
+        self.assertIn("still running", message)
+        self.assertNotIn("waiting for a hypha", message)

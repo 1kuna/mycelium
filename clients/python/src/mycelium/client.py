@@ -301,7 +301,8 @@ class Client:
         def timed_out() -> TimeoutError:
             if job is None:
                 return TimeoutError(f"timed out waiting for job {job_id}; status unavailable; job was not cancelled")
-            reason = job.get("reason") or "waiting for a hypha to take this job"
+            fallback = "waiting for a hypha to take this job" if job["state"] == "queued" else "still in progress"
+            reason = job.get("reason") or fallback
             return TimeoutError(f"timed out waiting for job {job['id']}; job is still {job['state']}: {reason}")
         while True:
             remaining = None if end is None else end - time.monotonic()
