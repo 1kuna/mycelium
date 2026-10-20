@@ -406,6 +406,9 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (*Job, error) {
 		if err := normalizeJobClass(&s); err != nil {
 			return err
 		}
+		if err := normalizeResources(&s); err != nil {
+			return err
+		}
 		if !s.extensionJob() {
 			if err := lowerExecution(&s); err != nil {
 				return reject("job_execution_invalid", err)
@@ -664,6 +667,9 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		if !validMemoryValue(m.HostAvailableMemoryGB) || !validMemoryValue(m.HostMemoryBudgetGB) || !validMemoryValue(m.MemoryCeilingSlackGB) {
 			return errors.New("invalid host memory report")
 		}
+		if m.CPUReserveCores < 0 || m.CPUBudgetCores < 0 {
+			return errors.New("CPU reserve and allowance must be nonnegative")
+		}
 		if m.MaxJobs < 0 {
 			return errors.New("max-jobs must be nonnegative")
 		}
@@ -682,6 +688,10 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		}
 		budget := *q.s.HostMaintenance[hostID(&m)].MemoryBudget
 		reply.HostMemoryBudget = &budget
+		if cores := q.s.HostMaintenance[hostID(&m)].CPUBudgetCores; cores != nil {
+			value := *cores
+			reply.CPUBudgetCores = &value
+		}
 		reply.HostMaintenance = q.s.HostMaintenance[hostID(&m)].Mode
 		if old != nil && old.Session != m.Session && !(c.Fresh && c.PreviousSession == old.Session) {
 			if h := q.s.Hosts[hostID(old)]; q.maintenanceKnown(hostID(old)) || old.HostMemoryBudgetGB > 0 || old.hostBudgetGB > 0 || h != nil && h.Policy.ProductionHold {
@@ -945,7 +955,9 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 	}
 	return reply, err
 }
-func validGPU(s string) bool { return s == "cuda" || s == "xpu" || s == "metal" || s == "fake" }
+func validGPU(s string) bool {
+	return s == "cuda" || s == "xpu" || s == "metal" || s == "fake" || s == "cpu"
+}
 func (q *Queue) current(r Result) (*Job, error) {
 	j := q.s.Jobs[r.ID]
 	if j == nil || j.Attempt != r.Attempt || j.Machine != r.Machine || j.Session != r.Session || (j.State != "running" && j.State != "stopping") {

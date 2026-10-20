@@ -1039,6 +1039,9 @@
     },
     "ResourceNeeds": {
       "properties": {
+        "cpu_cores": {
+          "type": "integer"
+        },
         "host_memory_gb": {
           "type": "number"
         },

@@ -39,6 +39,7 @@ func hostFits(m *Machine, gpu, host float64) bool {
 	return m.HostMemoryMeasured && m.HostMemoryError == "" && m.FreeHostMemoryGB >= hostNeed(m, gpu, host)
 }
 func (q *Queue) refreshHostMemory() {
+	q.refreshHostCPU()
 	for _, m := range q.s.Machines {
 		available := m.HostAvailableMemoryGB
 		for _, other := range q.s.Machines {

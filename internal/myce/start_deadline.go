@@ -158,5 +158,5 @@ func (q *Queue) startPlacementAllowed(j *Job) bool {
 		m.DockerCleanup = ""
 		defer func() { m.DockerCleanup = previous }()
 	}
-	return q.placementAllowed(j, m)
+	return cpuFits(j, m) && q.placementAllowed(j, m)
 }

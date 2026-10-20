@@ -509,7 +509,7 @@ func (q *Queue) maintainModels() {
 		allocated := false
 		// Check all free workers before draining a model or stopping any batch.
 		for _, m := range eligible {
-			if m.FreeMemoryGB >= model.MemoryGB && hostFits(m, model.MemoryGB, model.HostMemoryGB) {
+			if m.FreeMemoryGB >= model.MemoryGB && cpuAllocationFits(m, 1) && hostFits(m, model.MemoryGB, model.HostMemoryGB) {
 				if s := q.s.ModelSlots[slotKey(m.ID, c.Model)]; s != nil {
 					q.beginEngineAttempt(s, c.Priority)
 					s.Project = c.Project

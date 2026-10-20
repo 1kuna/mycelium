@@ -21,7 +21,7 @@ var rejectionMessages = map[string]string{
 	"job_deadline_invalid":           "deadline priority requires deadline; start_by requires production priority",
 	"job_files_invalid":              "files must reference valid available input files with file-store checkpoints enabled",
 	"job_program_invalid":            "kind/program, inputs, outputs, args and size_hint must describe a valid extension job",
-	"job_memory_invalid":             "needs.memory_gb must be positive and needs.host_memory_gb finite and nonnegative",
+	"job_memory_invalid":             "declare positive memory_gb (host RAM for CPU work, GPU memory otherwise); host_memory_gb must be finite and nonnegative",
 	"job_platform_invalid":           "needs.platform requires one valid platform string, list, or required/preferred/any mapping",
 	"job_docker_invalid":             "run Docker command, environment, network, sidecars and memory must satisfy managed Docker rules",
 	"job_environment_invalid":        "environment must identify one configured environment or supported lock_file recipe",

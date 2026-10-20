@@ -43,7 +43,7 @@ func (q *Queue) weight(project string) float64 {
 // Resource families have separate ledgers: GPU seconds cannot be converted to
 // CPU core-seconds. CPU admission/accounting is supplied by the core ledger slice.
 func fairResourceFamily(s Spec) string {
-	if s.Needs.MemoryGB > 0 || s.Needs.Model != "" {
+	if !s.Needs.cpuOnly() && (s.Needs.MemoryGB > 0 || s.Needs.Model != "") {
 		return "gpu"
 	}
 	return "cpu"
@@ -175,7 +175,7 @@ func (q *Queue) capReasonFor(j *Job, target *Machine) string {
 	if p.MaxConcurrentExperiments > 0 && count >= p.MaxConcurrentExperiments {
 		return fmt.Sprintf("%s has reached its concurrent experiment cap (%d)", j.Spec.Project, p.MaxConcurrentExperiments)
 	}
-	if p.MaxMemoryShare > 0 && (total <= 0 || used+need > total*p.MaxMemoryShare+1e-9) {
+	if p.MaxMemoryShare > 0 && !j.Spec.Needs.cpuOnly() && (total <= 0 || used+need > total*p.MaxMemoryShare+1e-9) {
 		return fmt.Sprintf("%s has reached its GPU memory share cap (%.0f%%)", j.Spec.Project, p.MaxMemoryShare*100)
 	}
 	return ""
@@ -402,7 +402,11 @@ func (q *Queue) fairActive(j *Job) float64 {
 	for _, m := range q.s.Machines {
 		for _, row := range q.deviceUsage(m) {
 			if row.Fair > 0 && row.Project == j.Spec.Project && row.Tier == q.priorityMatch(j.Spec).Tier && row.Family == fairResourceFamily(j.Spec) {
-				count++
+				if row.Family == "cpu" {
+					count += row.Fair
+				} else {
+					count++
+				}
 			}
 		}
 	}

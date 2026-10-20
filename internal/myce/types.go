@@ -3,7 +3,6 @@ package myce
 import (
 	"errors"
 	"fmt"
-	"math"
 	"slices"
 	"time"
 
@@ -170,6 +169,9 @@ type Spec struct {
 }
 
 func (s Spec) Validate() error {
+	if err := normalizeResources(&s); err != nil {
+		return err
+	}
 	if !s.extensionJob() {
 		if err := lowerExecution(&s); err != nil {
 			return reject("job_execution_invalid", err)
@@ -202,8 +204,8 @@ func (s Spec) Validate() error {
 	if s.Kind == "" && (len(s.Inputs)+len(s.Args) > 0 || (len(s.Outputs) > 0 && len(s.Files) == 0) || s.SizeHint.MemoryGB != 0 || s.SizeHint.HostMemoryGB != 0) {
 		return reject("job_program_invalid", errors.New("inputs, outputs, args and size_hint require a kind/program job"))
 	}
-	if s.Needs.MemoryGB <= 0 || math.IsInf(s.Needs.MemoryGB, 0) || math.IsNaN(s.Needs.MemoryGB) {
-		return reject("job_memory_invalid", errors.New("needs.memory_gb must be positive: CPU-only work stays outside Mycelium"))
+	if (!s.Needs.cpuOnly() && s.Needs.MemoryGB <= 0) || !validMemoryValue(s.Needs.MemoryGB) || (s.Needs.cpuOnly() && s.Needs.HostMemoryGB <= 0) {
+		return reject("job_memory_invalid", errors.New("declare positive memory_gb (host RAM for CPU work, GPU memory otherwise)"))
 	}
 	if !validMemoryValue(s.Needs.HostMemoryGB) {
 		return reject("job_memory_invalid", errors.New("needs.host_memory_gb must be finite and nonnegative"))
@@ -236,7 +238,7 @@ func (s Spec) Validate() error {
 		return reject("job_platform_invalid", errors.New("needs.platform must specify exactly one of required, preferred or any"))
 	}
 	for _, v := range append(slices.Clone(p.Required), p.Preferred...) {
-		if !slices.Contains([]string{"cuda", "xpu", "metal", "fake"}, v) {
+		if !slices.Contains([]string{"cuda", "xpu", "metal", "fake", "cpu"}, v) {
 			return reject("job_platform_invalid", fmt.Errorf("unknown GPU platform %q", v))
 		}
 	}
@@ -338,8 +340,15 @@ type Job struct {
 	Checkpoint            string                       `json:"checkpoint"`
 }
 type Machine struct {
-	DockerCause      *RuntimeCause `json:"docker_cause,omitempty"`
-	BenchmarkPending bool          `json:"benchmark_pending,omitempty"`
+	cpuLedger         bool
+	CPUReserveCores   int           `json:"cpu_reserve_cores,omitempty"`
+	CPUBudgetCores    int           `json:"cpu_budget_cores,omitempty"`
+	EffectiveCPUCores int           `json:"effective_cpu_cores"`
+	CPUInUseCores     int           `json:"cpu_in_use_cores"`
+	FreeCPUCores      int           `json:"free_cpu_cores"`
+	CPUCapacityReason string        `json:"cpu_capacity_reason,omitempty"`
+	DockerCause       *RuntimeCause `json:"docker_cause,omitempty"`
+	BenchmarkPending  bool          `json:"benchmark_pending,omitempty"`
 
 	Capabilities                []string            `json:"capabilities,omitempty"`
 	MaxJobs                     int                 `json:"max_jobs,omitempty"`
@@ -414,6 +423,7 @@ type Checkin struct {
 	Running         *Execution    `json:"running,omitempty"`
 }
 type Reply struct {
+	CPUBudgetCores    *int                `json:"cpu_budget_cores,omitempty"`
 	BenchmarkPlan     *HostLaunch         `json:"benchmark_plan,omitempty"`
 	PreparationStopAt *time.Time          `json:"preparation_stop_at,omitempty"`
 	HostMaintenance   string              `json:"host_maintenance,omitempty"`

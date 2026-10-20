@@ -24,6 +24,7 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 	stop := f.Bool("stop", false, "disable and stop exact current attempts")
 	wait := f.Bool("wait", false, "wait for fresh workers and zero known work/cleanup")
 	timeout := f.Duration("timeout", 30*time.Second, "bounded wait; timeout never releases custody")
+	cpuBudget := f.Int("cpu-budget-cores", 0, "queue-owned logical CPU allowance; zero uses detected capacity minus reserve")
 	budget := f.Float64("memory-budget-gb", 0, "queue-owned host RAM allowance; requires drained/disabled host")
 	var flags, hosts []string
 	for i := 1; i < len(args); i++ {
@@ -31,7 +32,7 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 		if strings.HasPrefix(arg, "-") {
 			flags = append(flags, arg)
 			key := strings.TrimLeft(arg, "-")
-			if (key == "queue" || key == "token" || key == "timeout" || key == "memory-budget-gb") && i+1 < len(args) {
+			if (key == "queue" || key == "token" || key == "timeout" || key == "memory-budget-gb" || key == "cpu-budget-cores") && i+1 < len(args) {
 				i++
 				flags = append(flags, args[i])
 			}
@@ -59,15 +60,18 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 	}
 	request := myce.HostMaintenanceRequest{Action: action, Stop: *stop}
 	f.Visit(func(v *flag.Flag) {
+		if v.Name == "cpu-budget-cores" {
+			request.CPUBudgetCores = cpuBudget
+		}
 		if v.Name == "memory-budget-gb" {
 			request.MemoryBudgetGB = budget
 		}
 	})
-	if action == "status" && request.MemoryBudgetGB != nil {
+	if action == "status" && (request.MemoryBudgetGB != nil || request.CPUBudgetCores != nil) {
 		return errors.New("status cannot change host policy")
 	}
-	if action == "budget" && request.MemoryBudgetGB == nil {
-		return errors.New("budget requires --memory-budget-gb GiB")
+	if action == "budget" && request.MemoryBudgetGB == nil && request.CPUBudgetCores == nil {
+		return errors.New("budget requires --memory-budget-gb GiB or --cpu-budget-cores N")
 	}
 	if *token == "" {
 		*token = env("MYCE_TOKEN", "")

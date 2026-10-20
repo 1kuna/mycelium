@@ -59,7 +59,7 @@ func machine(id, gpu string, host ...string) Machine {
 	if len(host) > 0 {
 		physicalHost = host[0]
 	}
-	return Machine{HostID: physicalHost, ID: id, Session: "session-" + id, GPU: gpu, FreeMemoryGB: 8, CapabilityProfile: &CapabilityProfile{Version: 0, MemoryLayout: "separate", SystemMemoryBytes: 64 << 30, Accelerators: []AcceleratorProfile{{Type: gpu, MemoryBytes: 64 << 30}}}}
+	return Machine{HostID: physicalHost, ID: id, Session: "session-" + id, GPU: gpu, FreeMemoryGB: 8, CapabilityProfile: &CapabilityProfile{Version: 0, OS: "linux", Arch: "amd64", LogicalCPUs: 64, MemoryLayout: "separate", SystemMemoryBytes: 64 << 30, Accelerators: []AcceleratorProfile{{Type: gpu, MemoryBytes: 64 << 30}}}}
 }
 func check(t *testing.T, q *Queue, m Machine, r *Job) Reply {
 	t.Helper()
@@ -554,7 +554,7 @@ func TestValidationAndYAML(t *testing.T) {
 			t.Fatalf("%s: %v", p, err)
 		}
 	}
-	for _, change := range []func(*Spec){func(s *Spec) { s.Needs.MemoryGB = 0 }, func(s *Spec) { s.Priority = "unknown" }, func(s *Spec) { s.Priority = "deadline"; s.Deadline = nil }, func(s *Spec) { s.Needs.Platform = Platform{} }, func(s *Spec) { s.Needs.Platform = Platform{Required: []string{"cpu"}} }, func(s *Spec) { s.Needs.Platform.Required = []string{"cuda"} }, func(s *Spec) { s.Environment = Environment{Name: "a", LockFile: "b"} }, func(s *Spec) { s.Run.Command = nil }} {
+	for _, change := range []func(*Spec){func(s *Spec) { s.Needs.MemoryGB = 0 }, func(s *Spec) { s.Priority = "unknown" }, func(s *Spec) { s.Priority = "deadline"; s.Deadline = nil }, func(s *Spec) { s.Needs.Platform = Platform{} }, func(s *Spec) { s.Needs.Platform = Platform{Required: []string{"unknown"}} }, func(s *Spec) { s.Needs.Platform.Required = []string{"cuda"} }, func(s *Spec) { s.Environment = Environment{Name: "a", LockFile: "b"} }, func(s *Spec) { s.Run.Command = nil }} {
 		s := spec("experiment")
 		change(&s)
 		if s.Validate() == nil {

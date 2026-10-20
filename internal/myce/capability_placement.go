@@ -30,7 +30,7 @@ func capabilityCapacity(m *Machine) (accelerator, system float64, ok bool) {
 	if p.MemoryLayout == "unified" {
 		accelerator = min(accelerator, system)
 	}
-	return accelerator, system, accelerator > 0 && system > 0
+	return accelerator, system, (accelerator > 0 || m.GPU == "cpu") && system > 0
 }
 
 func capabilityUnavailableReason(m *Machine) string {
@@ -51,10 +51,10 @@ func capabilityUnavailableReason(m *Machine) string {
 }
 
 func capabilityFits(j *Job, m *Machine) bool {
-	if !j.Spec.extensionJob() {
+	if !j.Spec.extensionJob() && !j.Spec.Needs.cpuOnly() {
 		return true
 	}
-	accelerator, system, ok := capabilityCapacity(m)
+	accelerator, system, ok := jobCapabilityCapacity(j, m)
 	systemNeed := j.Spec.Needs.HostMemoryGB
 	if m.CapabilityProfile != nil && m.CapabilityProfile.MemoryLayout == "unified" {
 		systemNeed += j.Spec.Needs.MemoryGB
@@ -68,6 +68,15 @@ func capabilityFits(j *Job, m *Machine) bool {
 		return accelerator >= old.MemoryGB && system >= old.HostMemoryGB && (accelerator > old.MemoryGB || system > old.HostMemoryGB)
 	}
 	return true
+}
+
+func jobCapabilityCapacity(j *Job, m *Machine) (accelerator, system float64, ok bool) {
+	if j.Spec.Needs.cpuOnly() {
+		copy := *m
+		copy.GPU = "cpu"
+		return capabilityCapacity(&copy)
+	}
+	return capabilityCapacity(m)
 }
 
 // Profile v0 has no throughput measurement. Memory-first ordering is provisional
@@ -114,7 +123,11 @@ func (q *Queue) applyLearnedNeeds(j *Job) {
 	for _, e := range j.Extensions {
 		for _, p := range e.platforms() {
 			if needs, ok := q.s.ProgramNeeds[programNeedsKey(j, e, p)]; ok {
-				j.Spec.Needs.MemoryGB = max(j.Spec.Needs.MemoryGB, needs.MemoryGB)
+				if j.Spec.Needs.cpuOnly() {
+					j.Spec.Needs.HostMemoryGB = max(j.Spec.Needs.HostMemoryGB, needs.MemoryGB)
+				} else {
+					j.Spec.Needs.MemoryGB = max(j.Spec.Needs.MemoryGB, needs.MemoryGB)
+				}
 				j.Spec.Needs.HostMemoryGB = max(j.Spec.Needs.HostMemoryGB, needs.HostMemoryGB)
 			}
 		}
@@ -170,7 +183,7 @@ func (q *Queue) retryOOM(j *Job) {
 		j.State, j.Reason = "failed", "out of memory; previous capability unavailable"
 		return
 	}
-	accelerator, system, ok := capabilityCapacity(m)
+	accelerator, system, ok := jobCapabilityCapacity(j, m)
 	if !ok {
 		j.State, j.Reason = "failed", "out of memory; previous capability unavailable"
 		return

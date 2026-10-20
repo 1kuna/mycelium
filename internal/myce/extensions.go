@@ -337,7 +337,12 @@ func (q *Queue) resolveExtensions(s *Spec) ([]Extension, error) {
 		}
 		out = append(out, e)
 		for _, v := range e.Variants {
-			s.Needs.MemoryGB = max(s.Needs.MemoryGB, v.Needs.MemoryGB)
+			s.Needs.CPUCores = max(s.Needs.CPUCores, v.Needs.CPUCores)
+			if v.Target.Platform == "cpu" {
+				s.Needs.HostMemoryGB = max(s.Needs.HostMemoryGB, v.Needs.MemoryGB)
+			} else {
+				s.Needs.MemoryGB = max(s.Needs.MemoryGB, v.Needs.MemoryGB)
+			}
 			s.Needs.HostMemoryGB = max(s.Needs.HostMemoryGB, v.Needs.HostMemoryGB)
 		}
 		platforms = append(platforms, e.platforms()...)
