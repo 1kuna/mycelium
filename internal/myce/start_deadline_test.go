@@ -488,10 +488,15 @@ func TestProductionStartDeadlineWorkerSendsRejectedResultCleanup(t *testing.T) {
 		case "/api/workers/checkin":
 			var c Checkin
 			json.NewDecoder(req.Body).Decode(&c)
+			c, err := normalizeAttemptCheckin(c)
+			if err != nil {
+				t.Error(err)
+				return
+			}
 			if c.Running == nil {
 				cancel()
 			}
-			json.NewEncoder(rw).Encode(Reply{Stop: c.Running != nil, Kill: c.Running != nil, CheckpointRoot: filepath.Dir(j.Checkpoint)})
+			json.NewEncoder(rw).Encode(attemptReply(c, Reply{Stop: c.Running != nil, Kill: c.Running != nil, CheckpointRoot: filepath.Dir(j.Checkpoint)}))
 		case "/api/workers/complete":
 			var got Result
 			json.NewDecoder(req.Body).Decode(&got)

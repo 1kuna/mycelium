@@ -416,15 +416,19 @@ type Execution struct {
 	Attempt  int    `json:"attempt"`
 }
 type Checkin struct {
-	BenchmarkDone   string        `json:"benchmark_done,omitempty"` // Exact preparation attempt, after process cleanup.
-	Started         bool          `json:"started,omitempty"`
-	ModelReports    []ModelReport `json:"model_reports,omitempty"`
-	PreviousSession string        `json:"previous_session,omitempty"`
-	Fresh           bool          `json:"fresh,omitempty"`
-	Machine         Machine       `json:"machine"`
-	Running         *Execution    `json:"running,omitempty"`
+	AttemptProtocol string          `json:"attempt_protocol,omitempty"`
+	Attempts        []AttemptReport `json:"attempts,omitempty"`
+	BenchmarkDone   string          `json:"benchmark_done,omitempty"` // Exact preparation attempt, after process cleanup.
+	Started         bool            `json:"started,omitempty"`
+	ModelReports    []ModelReport   `json:"model_reports,omitempty"`
+	PreviousSession string          `json:"previous_session,omitempty"`
+	Fresh           bool            `json:"fresh,omitempty"`
+	Machine         Machine         `json:"machine"`
+	Running         *Execution      `json:"running,omitempty"`
 }
 type Reply struct {
+	AttemptProtocol   string              `json:"attempt_protocol,omitempty"`
+	Attempts          []AttemptDirective  `json:"attempts,omitempty"`
 	PriorityStop      *PriorityPreemption `json:"priority_stop,omitempty"`
 	CPUBudgetCores    *int                `json:"cpu_budget_cores,omitempty"`
 	BenchmarkPlan     *HostLaunch         `json:"benchmark_plan,omitempty"`
@@ -445,6 +449,27 @@ type Reply struct {
 	Kill              bool                `json:"kill"`
 	Leave             bool                `json:"leave"`
 	GraceSeconds      float64             `json:"grace_seconds"`
+}
+
+// AttemptReport binds heartbeat, progress and Started to an exact execution.
+// Collections have no wire cardinality limit; admission remains in the planner.
+type AttemptReport struct {
+	Execution
+	Session string `json:"session"`
+	Started bool   `json:"started,omitempty"`
+}
+
+// AttemptDirective carries one assignment or control decision for an exact key.
+// Job retains the ordinary job-v1 assignment shape and must match that key.
+type AttemptDirective struct {
+	Execution
+	Session      string              `json:"session"`
+	Job          *Job                `json:"job,omitempty"`
+	Hold         bool                `json:"hold,omitempty"`
+	Stop         bool                `json:"stop,omitempty"`
+	Kill         bool                `json:"kill,omitempty"`
+	GraceSeconds float64             `json:"grace_seconds,omitempty"`
+	PriorityStop *PriorityPreemption `json:"priority_stop,omitempty"`
 }
 type Result struct {
 	PriorityStop         *PriorityPreemption `json:"priority_stop,omitempty"`

@@ -10,7 +10,8 @@ import (
 )
 
 type WorkerEvent struct {
-	Cursor string `json:"cursor"`
+	Session string `json:"session,omitempty"`
+	Cursor  string `json:"cursor"`
 	Execution
 	StopAt       *time.Time `json:"stop_at,omitempty"`
 	deadline     time.Time
@@ -28,7 +29,7 @@ func (a API) workerEvent(w http.ResponseWriter, r *http.Request) {
 		for _, j := range a.Queue.s.Jobs {
 			if j.Machine == r.PathValue("id") && j.Session == r.URL.Query().Get("session") && (j.State == "stopping" || terminal(j.State) && !j.ReleaseConfirmed) && j.StopAt != nil {
 				deadline := *j.StopAt
-				event = WorkerEvent{StopAt: &deadline, Cursor: fmt.Sprintf("%s:%d:%s", j.ID, j.Attempt, j.StopAt.Format(time.RFC3339Nano)), Execution: Execution{ID: j.ID, Attempt: j.Attempt}, GraceSeconds: max(0, j.StopAt.Sub(a.Queue.clock.Now()).Seconds()), Kill: expired(j.StopAt, a.Queue.clock.Now())}
+				event = WorkerEvent{Session: j.Session, StopAt: &deadline, Cursor: fmt.Sprintf("%s:%d:%s", j.ID, j.Attempt, j.StopAt.Format(time.RFC3339Nano)), Execution: Execution{ID: j.ID, Attempt: j.Attempt}, GraceSeconds: max(0, j.StopAt.Sub(a.Queue.clock.Now()).Seconds()), Kill: expired(j.StopAt, a.Queue.clock.Now())}
 				break
 			}
 		}
@@ -109,7 +110,7 @@ func (c *processControl) apply() {
 	if c.leaving && p.job.Spec.Resumable {
 		p.stop(now, StopGrace, false)
 	}
-	if p.job.ID == c.pending.ID && p.job.Attempt == c.pending.Attempt {
+	if p.job.ID == c.pending.ID && p.job.Attempt == c.pending.Attempt && p.job.Session == c.pending.Session {
 		p.stop(now, max(0, c.pending.deadline.Sub(now)), c.pending.Kill || !now.Before(c.pending.deadline))
 	}
 	p.enforceGrace(now)

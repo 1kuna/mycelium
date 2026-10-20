@@ -283,7 +283,7 @@ Reservations, tombstones and markers follow the retention table. Accept a key re
 
 ## Upgrade and migration (#80)
 
-v3 is the only runtime; no old worker-report, capability/profile, empty-attempt or broad host-cleared fallback. Queue and workers must upgrade together. Old or missing worker/report protocol headers, including checkpoint reports and worker events, receive HTTP 426. Exact execution ownership and release evidence remain mandatory across restart/loss; a new report never silently clears omitted obligations.
+v3 is the only runtime; no pre-v3 worker-report, capability/profile, empty-attempt or broad host-cleared fallback. Old or missing worker/report protocol headers, including checkpoint reports and worker events, receive HTTP 426. Within host-launch-v3, current one-attempt workers remain compatible with the R2 keyed wire extension below; upgrade the queue before keyed workers. Exact execution ownership and release evidence remain mandatory across restart/loss; a keyed report never silently clears omitted obligations.
 
 **Old formats are refused; operators archive and install fresh.** Old queue state is not imported. Stop the old services and prevent their restart, archive their queue/worker data directories and shared host-control directory, preserve configuration and secret references, then install matching current binaries and units. All current queue, worker and cache state roots carry `.myce-format` with `v3` and a newline. One startup gate checks every root before any filesystem write: absent or empty roots receive a fsynced marker first; non-empty roots without that exact marker return `legacy_state_present` naming the root. No content-specific legacy detection or migration of pre-marker development state is supported. There is no in-place or offline converter and no dual runtime decoder. Preserve archives, checkpoints and unique evidence; this rule does not authorize deleting them or changing production outside the queue.
 
@@ -632,3 +632,33 @@ Windows/WSL qualification remains W1/W2. CPU counts are admission reservations,
 not CPU-time enforcement; macOS RAM remains admission-only and delegated Linux
 RAM enforcement retains its existing qualification requirements. Real native
 Linux/Windows acceptance and fleet cutover are separate from laptop proof.
+
+## M1 keyed attempts (#100 package M)
+
+The existing `host-launch-v3` endpoints negotiate `attempt_protocol:
+keyed-attempt-v1` by request and reply echo. `attempts` is a collection of unique
+`(id, attempt, session)` reports or directives from M1 onward, with no wire
+cardinality bound. Reports carry heartbeat/progress/Started; directives carry
+assignment/hold/stop/kill/grace and P3 provenance. Nested assignments retain
+[job-v1](schemas/job-v1.schema.json) and match their key and reporting machine.
+Stop events add session fencing. Results, logs, checkpoint publication and
+Started retain their existing exact ownership fields and stale-result checks.
+Omission never proves release; exact acknowledgement or the existing immediately
+previous-session cleanup rule is required. An exact native release-only
+acknowledgement advances a recorded stop to requeue/cancellation. Restart keeps
+saved keys and buffered results until acknowledged.
+
+M1 admits at most one attempt per worker as a queue admission rule, including
+recovered copies. Its local supervisor selects its owned controls from the full
+collection. M2 adds `machine.devices` and concurrent local custody/supervision to
+this same revision; M3 enables machine placement and concurrent admission on the
+shared CPU/RAM ledger. No second keyed revision is planned.
+
+Unchanged current workers use the legacy unkeyed form against a new queue.
+Remove that form once every fleet host runs machine workers and the rollback
+window is closed. A keyed worker requires the revision echo: old-queue rejection
+or missing echo fails clearly with HTTP 426 `worker_protocol_invalid`, retaining
+custody and requiring a queue upgrade. Automatic downgrade could misaddress
+stops. Unknown revisions, mixed forms, duplicate keys and invalid sessions fail
+before mutation. See [worker protocol](current-worker-protocol.md) and
+[schemas](schemas/README.md).

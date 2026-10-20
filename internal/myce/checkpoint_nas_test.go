@@ -376,9 +376,15 @@ func TestWorkerClearsWithdrawnPreparationFailure(t *testing.T) {
 			t.Error(err)
 			return
 		}
+		c, err := normalizeAttemptCheckin(c)
+		if err != nil {
+			t.Error(err)
+			return
+		}
 		reply := Reply{}
 		if !assigned {
 			assigned = true
+			j.Machine, j.Session = c.Machine.ID, c.Machine.Session
 			reply.Job = &j
 		} else if c.Running != nil {
 			reply.Stop, reply.Kill = true, true
@@ -386,7 +392,7 @@ func TestWorkerClearsWithdrawnPreparationFailure(t *testing.T) {
 			reports <- c.Machine.CheckpointUnavailable
 			reply.Leave = true
 		}
-		if err := json.NewEncoder(rw).Encode(reply); err != nil {
+		if err := json.NewEncoder(rw).Encode(attemptReply(c, reply)); err != nil {
 			t.Error(err)
 		}
 	}))

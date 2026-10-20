@@ -649,42 +649,52 @@ func (q *Queue) Tick() error {
 	return q.pruneBatchLogs()
 }
 func (q *Queue) Checkin(c Checkin) (Reply, error) {
+	var err error
+	c, err = normalizeAttemptCheckin(c)
+	if err != nil {
+		return Reply{}, err
+	}
 	if err := validateCurrentCheckin(c); err != nil {
 		return Reply{}, err
 	}
 	reply := Reply{FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
-	var durableProgress int64
-	var progressErr error
-	var progressPath string
-	if c.Running != nil {
+	reports := c.Attempts
+	if c.AttemptProtocol == "" && c.Running != nil {
+		reports = []AttemptReport{{Execution: *c.Running, Session: c.Machine.Session, Started: c.Started}}
+	}
+	progresses := make([]attemptProgress, len(reports))
+	for i := range reports {
+		report, progress := &reports[i], &progresses[i]
 		q.mu.Lock()
-		if j := q.s.Jobs[c.Running.ID]; j != nil && j.FileTransport {
-			c.Running.Progress = 0
-			if save, ok := j.FileCheckpoints[c.Running.Attempt]; ok {
-				c.Running.Progress = save.Generation
+		if j := q.s.Jobs[report.ID]; j != nil && j.FileTransport {
+			report.Progress = 0
+			if save, ok := j.FileCheckpoints[report.Attempt]; ok {
+				report.Progress = save.Generation
 			}
 			if save, ok := j.FileCheckpoints[j.Attempt]; ok {
-				durableProgress = save.Generation
+				progress.durable = save.Generation
 			}
-		} else if j != nil && j.Spec.Resumable && j.Attempt != c.Running.Attempt {
-			progressPath = attemptCheckpoint(*j)
+		} else if j != nil && j.Spec.Resumable && j.Attempt != report.Attempt {
+			progress.path = attemptCheckpoint(*j)
 		}
 		q.mu.Unlock()
-		if progressPath != "" {
-			durableProgress, progressErr = q.nasProgress.run(progressPath, func() (int64, error) {
-				progress, err := checkpointProgress(progressPath)
+		if progress.path != "" {
+			progress.durable, progress.err = q.nasProgress.run(progress.path, func() (int64, error) {
+				generation, err := checkpointProgress(progress.path)
 				if errors.Is(err, os.ErrNotExist) {
 					return 0, nil
 				}
-				return progress, err
+				return generation, err
 			})
 		}
 	}
-	err := q.update(func() error {
+	err = q.update(func() error {
 		m := cloneMachine(&c.Machine)
 		m.Disabled = ""
-		if progressErr != nil {
-			m.CheckpointUnavailable = true
+		for _, progress := range progresses {
+			if progress.err != nil {
+				m.CheckpointUnavailable = true
+			}
 		}
 		if _, err := MemoryCeilingConfig(m.HostMemoryBudgetGB, m.MemoryCeilingSlackGB, 0); err != nil {
 			return err
@@ -727,7 +737,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 				}
 			}
 		}
-		if c.Running == nil && old != nil && old.Session == m.Session {
+		if c.AttemptProtocol == "" && c.Running == nil && old != nil && old.Session == m.Session {
 			for _, j := range q.s.Jobs {
 				if j.Machine == m.ID && j.Session == m.Session && j.State == "stopping" && !j.Spec.Run.Docker && q.held(hostID(old)) {
 					if cancelled(j) {
@@ -840,51 +850,26 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 				}
 			}
 		}
-		if c.Running != nil {
-			j := q.s.Jobs[c.Running.ID]
-			if j != nil && !terminal(j.State) && !cancelled(j) && (j.State == "queued" || j.Attempt != c.Running.Attempt || j.Machine != m.ID || j.Session != m.Session) {
-				for _, copy := range j.Copies {
-					if q.placementAllowed(j, &m) && copy.Recoverable && copy.Attempt == c.Running.Attempt && copy.Machine == m.ID && copy.Session == m.Session && j.State != "queued" && (m.CheckpointUnavailable || !q.checkpointsAvailable() || progressErr != nil || (progressPath != "" && progressPath != attemptCheckpoint(*j))) {
-						reply.Hold = true
-						return nil
-					}
-					if q.placementAllowed(j, &m) && copy.Recoverable && copy.Attempt == c.Running.Attempt && copy.Machine == m.ID && copy.Session == m.Session && (j.State == "queued" || (j.Spec.Resumable && c.Running.Progress > max(0, durableProgress))) {
-						for i := range j.Copies {
-							j.Copies[i].Recoverable = false
-						}
-						j.Attempt = copy.Attempt
-						j.Machine = m.ID
-						j.Session = m.Session
-						j.State = "running"
-						j.ReleaseConfirmed = false
-						j.StopAt = nil
-						j.Reason = ""
-						j.Progress = c.Running.Progress
-						break
-					}
+		if len(reports) != 0 {
+			seen := map[attemptKey]bool{}
+			for i := range reports {
+				a := q.reconcileAttemptReport(&m, &reports[i], progresses[i])
+				if c.AttemptProtocol == "" {
+					reply.Stop, reply.Kill, reply.Hold = a.Stop, a.Kill, a.Hold
+					reply.GraceSeconds, reply.PriorityStop = a.GraceSeconds, a.PriorityStop
+				} else {
+					reply.Attempts = append(reply.Attempts, a)
+					seen[attemptKey{a.ID, a.Attempt, a.Session}] = true
 				}
 			}
-			if j == nil || j.Attempt != c.Running.Attempt || j.Machine != m.ID || j.Session != m.Session || terminal(j.State) || j.State == "queued" {
-				if j != nil {
-					for i := range j.Copies {
-						if j.Copies[i].Attempt == c.Running.Attempt {
-							j.Copies[i].Recoverable = false
-						}
+			// A report for another key neither acknowledges an omitted stop nor
+			// hides it. Keep every outstanding control individually addressed.
+			if c.AttemptProtocol != "" {
+				for _, j := range q.s.Jobs {
+					if j.Machine == m.ID && j.Session == m.Session && j.State == "stopping" && !seen[attemptKey{j.ID, j.Attempt, j.Session}] {
+						reply.Attempts = append(reply.Attempts, AttemptDirective{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Stop: true, Kill: expired(j.StopAt, q.clock.Now()), GraceSeconds: j.StopAt.Sub(q.clock.Now()).Seconds(), PriorityStop: priorityStop(j)})
 					}
 				}
-				reply.Stop = true
-				reply.Kill = true
-				return nil
-			}
-			if c.Started && j.Spec.StartBy == nil && j.StartedAt == nil && j.State == "running" && q.startPlacementAllowed(j) {
-				q.markStarted(j)
-			}
-			j.Progress = c.Running.Progress
-			if j.State == "stopping" {
-				reply.PriorityStop = priorityStop(j)
-				reply.Stop = true
-				reply.Kill = expired(j.StopAt, q.clock.Now())
-				reply.GraceSeconds = j.StopAt.Sub(q.clock.Now()).Seconds()
 			}
 			return nil
 		}
@@ -892,6 +877,10 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		for _, j := range q.s.Jobs {
 			if j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping") {
 				if j.State == "stopping" {
+					if c.AttemptProtocol != "" {
+						reply.Attempts = []AttemptDirective{{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Stop: true, Kill: expired(j.StopAt, q.clock.Now()), GraceSeconds: j.StopAt.Sub(q.clock.Now()).Seconds(), PriorityStop: priorityStop(j)}}
+						return nil
+					}
 					if j.Spec.Run.Docker && !j.ReleaseConfirmed {
 						return nil
 					}
@@ -989,7 +978,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		}
 		reply.Job.Checkpoint = relative
 	}
-	return reply, err
+	return attemptReply(c, reply), err
 }
 func validGPU(s string) bool {
 	return s == "cuda" || s == "xpu" || s == "metal" || s == "fake" || s == "cpu"
@@ -1080,6 +1069,16 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 				j.LastStopOutcome = "forced"
 			} else if j.LastStopOutcome == "release pending" {
 				j.LastStopOutcome = "released"
+			}
+			// Native kill-time reports can carry cleanup only. Advance the
+			// recorded stop on this exact acknowledgement, rather than using
+			// an omitted attempt in the next heartbeat as release evidence.
+			if j.State == "stopping" && !j.Spec.Run.Docker {
+				if cancelled(j) {
+					j.State, j.StopAt = "cancelled", nil
+				} else {
+					q.retry(j, j.Reason)
+				}
 			}
 		}
 		q.maintain()
@@ -1619,4 +1618,73 @@ func (q *Queue) renewRecoveryStartWindow(j *Job) {
 		deadline := q.clock.Now().Add(j.StartWindow)
 		j.Spec.StartBy = &deadline
 	}
+}
+
+type attemptProgress struct {
+	durable int64
+	path    string
+	err     error
+}
+
+// Reuse the same recovery/stop rules for each legacy or keyed report.
+func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progress attemptProgress) AttemptDirective {
+	reply := AttemptDirective{Execution: Execution{ID: report.ID, Attempt: report.Attempt}, Session: report.Session}
+	j := q.s.Jobs[report.ID]
+	if j != nil && !terminal(j.State) && !cancelled(j) && (j.State == "queued" || j.Attempt != report.Attempt || j.Machine != m.ID || j.Session != m.Session) {
+		canRecover := !q.workerHasOtherAttempt(m.ID, j.ID)
+		for _, copy := range j.Copies {
+			if canRecover && q.placementAllowed(j, m) && copy.Recoverable && copy.Attempt == report.Attempt && copy.Machine == m.ID && copy.Session == m.Session && j.State != "queued" && (m.CheckpointUnavailable || !q.checkpointsAvailable() || progress.err != nil || (progress.path != "" && progress.path != attemptCheckpoint(*j))) {
+				reply.Hold = true
+				return reply
+			}
+			if canRecover && q.placementAllowed(j, m) && copy.Recoverable && copy.Attempt == report.Attempt && copy.Machine == m.ID && copy.Session == m.Session && (j.State == "queued" || (j.Spec.Resumable && report.Progress > max(0, progress.durable))) {
+				for i := range j.Copies {
+					j.Copies[i].Recoverable = false
+				}
+				j.Attempt = copy.Attempt
+				j.Machine = m.ID
+				j.Session = m.Session
+				j.State = "running"
+				j.ReleaseConfirmed = false
+				j.StopAt = nil
+				j.Reason = ""
+				j.Progress = report.Progress
+				break
+			}
+		}
+	}
+	if j == nil || j.Attempt != report.Attempt || j.Machine != m.ID || j.Session != m.Session || terminal(j.State) || j.State == "queued" {
+		if j != nil {
+			for i := range j.Copies {
+				if j.Copies[i].Attempt == report.Attempt {
+					j.Copies[i].Recoverable = false
+				}
+			}
+		}
+		reply.Stop = true
+		reply.Kill = true
+		return reply
+	}
+	if report.Started && j.Spec.StartBy == nil && j.StartedAt == nil && j.State == "running" && q.startPlacementAllowed(j) {
+		q.markStarted(j)
+	}
+	j.Progress = report.Progress
+	if j.State == "stopping" {
+		reply.PriorityStop = priorityStop(j)
+		reply.Stop = true
+		reply.Kill = expired(j.StopAt, q.clock.Now())
+		reply.GraceSeconds = j.StopAt.Sub(q.clock.Now()).Seconds()
+	}
+	return reply
+}
+
+// Recovery is admission too: a returning copy cannot create a second active
+// attempt on this worker. M3 will replace this scalar limit with resource fit.
+func (q *Queue) workerHasOtherAttempt(machine, job string) bool {
+	for _, j := range q.s.Jobs {
+		if j.Machine == machine && j.ID != job && (j.State == "running" || j.State == "stopping") {
+			return true
+		}
+	}
+	return false
 }

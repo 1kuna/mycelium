@@ -1,0 +1,797 @@
+{
+  "$defs": {
+    "AcceleratorProfile": {
+      "properties": {
+        "memory_bytes": {
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "type": "object"
+    },
+    "AttemptReport": {
+      "properties": {
+        "attempt": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "progress": {
+          "type": "integer"
+        },
+        "session": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "started": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "attempt",
+        "session"
+      ],
+      "type": "object"
+    },
+    "Availability": {
+      "properties": {
+        "available": {
+          "type": "boolean"
+        },
+        "checked_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "mode": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "signals": {
+          "$ref": "#/$defs/OwnerSignals"
+        }
+      },
+      "required": [
+        "mode",
+        "available",
+        "checked_at",
+        "signals"
+      ],
+      "type": "object"
+    },
+    "BenchmarkResult": {
+      "properties": {
+        "fingerprint": {
+          "type": "string"
+        },
+        "measurements": {
+          "items": {
+            "$ref": "#/$defs/Throughput"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "recorded_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "seconds": {
+          "type": "number"
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "fingerprint",
+        "recorded_at",
+        "seconds",
+        "state",
+        "measurements"
+      ],
+      "type": "object"
+    },
+    "CapabilityProfile": {
+      "properties": {
+        "accelerators": {
+          "items": {
+            "$ref": "#/$defs/AcceleratorProfile"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "arch": {
+          "type": "string"
+        },
+        "availability": {
+          "$ref": "#/$defs/Availability"
+        },
+        "benchmark": {
+          "$ref": "#/$defs/BenchmarkResult"
+        },
+        "disk_free_bytes": {
+          "type": "integer"
+        },
+        "disk_total_bytes": {
+          "type": "integer"
+        },
+        "logical_cpus": {
+          "type": "integer"
+        },
+        "memory_layout": {
+          "type": "string"
+        },
+        "onboarding": {
+          "type": "string"
+        },
+        "os": {
+          "type": "string"
+        },
+        "recorded_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "system_memory_bytes": {
+          "type": "integer"
+        },
+        "unavailable": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "version": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "version",
+        "onboarding",
+        "recorded_at",
+        "os",
+        "arch",
+        "logical_cpus",
+        "memory_layout",
+        "accelerators"
+      ],
+      "type": "object"
+    },
+    "Checkin": {
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "attempts"
+            ]
+          },
+          "then": {
+            "required": [
+              "attempt_protocol"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "attempt_protocol": {
+          "const": "keyed-attempt-v1",
+          "type": "string"
+        },
+        "attempts": {
+          "items": {
+            "$ref": "#/$defs/AttemptReport"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "benchmark_done": {
+          "type": "string"
+        },
+        "fresh": {
+          "type": "boolean"
+        },
+        "machine": {
+          "$ref": "#/$defs/Machine"
+        },
+        "model_reports": {
+          "items": {
+            "$ref": "#/$defs/ModelReport"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "previous_session": {
+          "type": "string"
+        },
+        "running": {
+          "$ref": "#/$defs/Execution"
+        },
+        "started": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "machine"
+      ],
+      "type": "object"
+    },
+    "CopyReport": {
+      "properties": {
+        "attempt": {
+          "type": "string"
+        },
+        "bytes": {
+          "type": "integer"
+        },
+        "bytes_per_second": {
+          "type": "number"
+        },
+        "error": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "total": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "model",
+        "state",
+        "bytes",
+        "total"
+      ],
+      "type": "object"
+    },
+    "EnvironmentReport": {
+      "properties": {
+        "attempt": {
+          "type": "string"
+        },
+        "build_seconds": {
+          "type": "number"
+        },
+        "error": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "log": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key",
+        "state"
+      ],
+      "type": "object"
+    },
+    "Execution": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "progress": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "attempt"
+      ],
+      "type": "object"
+    },
+    "ExecutionTarget": {
+      "properties": {
+        "arch": {
+          "type": "string"
+        },
+        "os": {
+          "type": "string"
+        },
+        "platform": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "os",
+        "arch",
+        "platform"
+      ],
+      "type": "object"
+    },
+    "ExtensionReport": {
+      "properties": {
+        "check_digest": {
+          "type": "string"
+        },
+        "check_id": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string"
+        },
+        "environment_identity": {
+          "type": "string"
+        },
+        "fingerprint": {
+          "type": "string"
+        },
+        "host": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "platform": {
+          "type": "string"
+        },
+        "qualified": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "setup": {
+          "type": "boolean"
+        },
+        "target": {
+          "$ref": "#/$defs/ExecutionTarget"
+        },
+        "version": {
+          "type": "string"
+        },
+        "work": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "digest",
+        "platform",
+        "work",
+        "fingerprint",
+        "setup",
+        "qualified"
+      ],
+      "type": "object"
+    },
+    "Machine": {
+      "properties": {
+        "admission_reason": {
+          "type": "string"
+        },
+        "approved_models": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "benchmark_pending": {
+          "type": "boolean"
+        },
+        "cache_error": {
+          "type": "string"
+        },
+        "cache_free_bytes": {
+          "type": "integer"
+        },
+        "cached_models": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "capabilities": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "capability_profile": {
+          "$ref": "#/$defs/CapabilityProfile"
+        },
+        "checkpoint_unavailable": {
+          "type": "boolean"
+        },
+        "copy_bytes_per_second": {
+          "type": "number"
+        },
+        "copy_reports": {
+          "items": {
+            "$ref": "#/$defs/CopyReport"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "cpu_budget_cores": {
+          "type": "integer"
+        },
+        "cpu_capacity_reason": {
+          "type": "string"
+        },
+        "cpu_in_use_cores": {
+          "type": "integer"
+        },
+        "cpu_reserve_cores": {
+          "type": "integer"
+        },
+        "device": {
+          "type": "string"
+        },
+        "disabled": {
+          "type": "string"
+        },
+        "docker_cause": {
+          "$ref": "#/$defs/RuntimeCause"
+        },
+        "docker_cleanup": {
+          "type": "string"
+        },
+        "effective_cpu_cores": {
+          "type": "integer"
+        },
+        "effective_host_memory_budget_gb": {
+          "type": "number"
+        },
+        "environment_build_seconds": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "environment_builder": {
+          "type": "boolean"
+        },
+        "environment_reports": {
+          "items": {
+            "$ref": "#/$defs/EnvironmentReport"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "environments": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "extension_fingerprint": {
+          "type": "string"
+        },
+        "extension_reports": {
+          "items": {
+            "$ref": "#/$defs/ExtensionReport"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "file_transfer_error": {
+          "type": "string"
+        },
+        "free_cpu_cores": {
+          "type": "integer"
+        },
+        "free_host_memory_gb": {
+          "type": "number"
+        },
+        "free_memory_gb": {
+          "type": "number"
+        },
+        "gone": {
+          "type": "boolean"
+        },
+        "gpu": {
+          "type": "string"
+        },
+        "host_available_memory_gb": {
+          "type": "number"
+        },
+        "host_id": {
+          "type": "string"
+        },
+        "host_memory_budget_gb": {
+          "type": "number"
+        },
+        "host_memory_error": {
+          "type": "string"
+        },
+        "host_memory_in_use_gb": {
+          "type": "number"
+        },
+        "host_memory_measured": {
+          "type": "boolean"
+        },
+        "host_memory_policy_mismatch": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": "string"
+        },
+        "last_seen": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "leaving": {
+          "type": "boolean"
+        },
+        "max_jobs": {
+          "type": "integer"
+        },
+        "memory_allowance_bytes": {
+          "type": "integer"
+        },
+        "memory_allowance_qualification": {
+          "type": "string"
+        },
+        "memory_ceiling_slack_gb": {
+          "type": "number"
+        },
+        "memory_enforcement": {
+          "type": "string"
+        },
+        "memory_error": {
+          "type": "string"
+        },
+        "memory_measured": {
+          "type": "boolean"
+        },
+        "memory_used_gb": {
+          "type": "number"
+        },
+        "model_approval_states": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "model_config_hash": {
+          "type": "string"
+        },
+        "model_copy_seconds": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "model_url": {
+          "type": "string"
+        },
+        "models": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "reserved_memory_gb": {
+          "type": "number"
+        },
+        "session": {
+          "type": "string"
+        },
+        "total_memory_gb": {
+          "type": "number"
+        },
+        "unified_memory": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "effective_cpu_cores",
+        "cpu_in_use_cores",
+        "free_cpu_cores",
+        "host_available_memory_gb",
+        "free_host_memory_gb",
+        "memory_used_gb",
+        "total_memory_gb",
+        "reserved_memory_gb",
+        "cache_free_bytes",
+        "checkpoint_unavailable",
+        "id",
+        "session",
+        "gpu",
+        "free_memory_gb",
+        "last_seen",
+        "leaving",
+        "gone"
+      ],
+      "type": "object"
+    },
+    "ModelReport": {
+      "properties": {
+        "attempt": {
+          "type": "string"
+        },
+        "calls_in_flight": {
+          "type": "integer"
+        },
+        "calls_measured": {
+          "type": "boolean"
+        },
+        "error": {
+          "type": "string"
+        },
+        "health_degraded": {
+          "type": "boolean"
+        },
+        "health_revision": {
+          "type": "integer"
+        },
+        "name": {
+          "type": "string"
+        },
+        "runtime_failed": {
+          "type": "boolean"
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "state"
+      ],
+      "type": "object"
+    },
+    "OwnerSignals": {
+      "properties": {
+        "gpu_heat": {
+          "type": "string"
+        },
+        "heat": {
+          "type": "string"
+        },
+        "heat_coverage": {
+          "type": "string"
+        },
+        "idle_known": {
+          "type": "boolean"
+        },
+        "idle_seconds": {
+          "type": "number"
+        },
+        "laptop": {
+          "type": "boolean"
+        },
+        "power": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "idle_seconds",
+        "idle_known",
+        "laptop",
+        "power",
+        "heat"
+      ],
+      "type": "object"
+    },
+    "RuntimeCause": {
+      "properties": {
+        "class": {
+          "type": "string"
+        },
+        "exit_code": {
+          "type": "integer"
+        },
+        "operation": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "operation",
+        "class"
+      ],
+      "type": "object"
+    },
+    "Throughput": {
+      "properties": {
+        "extension_digest": {
+          "type": "string"
+        },
+        "method": {
+          "type": "string"
+        },
+        "rate": {
+          "type": "number"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "reference_units": {
+          "type": "number"
+        },
+        "resource": {
+          "type": "string"
+        },
+        "seconds": {
+          "type": "number"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "work": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "resource",
+        "method",
+        "unit"
+      ],
+      "type": "object"
+    }
+  },
+  "$ref": "#/$defs/Checkin",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Generated from Go JSON types by TestWorkerWireSchemas. Uses X-Myce-Start-Gate: host-launch-v3. Checkin/Reply negotiate optional attempt_protocol keyed-attempt-v1; omission retains current one-attempt compatibility. Keyed reports and directives require (id, attempt, session); assignments reference the unchanged job-v1 schema. M1 limits admission to one attempt per worker, not collection size. Cross-field key equality is enforced by the runtime. Omission is never keyed release proof.",
+  "title": "Mycelium worker Checkin v1"
+}

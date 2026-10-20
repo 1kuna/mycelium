@@ -194,7 +194,7 @@ func TestProductionStartGateWorkerRestartReconciles(t *testing.T) {
 			return
 		}
 		if r.URL.Path == "/api/workers/checkin" {
-			respond(rw, Reply{CheckpointRoot: q.root}, nil)
+			respond(rw, Reply{AttemptProtocol: keyedAttemptProtocol, CheckpointRoot: q.root}, nil)
 			return
 		}
 		select {

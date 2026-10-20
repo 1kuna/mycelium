@@ -1177,7 +1177,7 @@ func (w Worker) Run(stop context.Context) error {
 				running = &Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt, Progress: progress}
 			}
 			var reply Reply
-			err = w.Client.Call(ctx, "POST", "/api/workers/checkin", Checkin{Started: p != nil && (p.docker == nil || p.docker.status() == "running") && (p.native == nil || p.native.started()), Machine: m, Running: running, Fresh: fresh, PreviousSession: s.state.PreviousSession, ModelReports: reports}, &reply)
+			reply, err = w.checkin(ctx, Checkin{Started: p != nil && (p.docker == nil || p.docker.status() == "running") && (p.native == nil || p.native.started()), Machine: m, Running: running, Fresh: fresh, PreviousSession: s.state.PreviousSession, ModelReports: reports})
 			if err == nil {
 				if reply.CPUBudgetCores != nil {
 					w.Machine.CPUBudgetCores = *reply.CPUBudgetCores
@@ -1433,7 +1433,7 @@ func (w Worker) Run(stop context.Context) error {
 				environments.sync(nil, true)
 				rt.cancelCopies()
 				var he *HTTPError
-				if errors.As(err, &he) && (he.Status == 400 || he.Status == 401) {
+				if errors.As(err, &he) && (he.Status == 400 || he.Status == 401 || he.Status == 426) {
 					return err
 				}
 				log.Printf("worker %s reconnecting: %v", m.ID, err)

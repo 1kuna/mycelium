@@ -1,0 +1,1063 @@
+{
+  "$defs": {
+    "AttemptDirective": {
+      "properties": {
+        "attempt": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "grace_seconds": {
+          "type": "number"
+        },
+        "hold": {
+          "type": "boolean"
+        },
+        "id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "job": {
+          "$ref": "job-v1.schema.json"
+        },
+        "kill": {
+          "type": "boolean"
+        },
+        "priority_stop": {
+          "$ref": "#/$defs/PriorityPreemption"
+        },
+        "progress": {
+          "type": "integer"
+        },
+        "session": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "stop": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "attempt",
+        "session"
+      ],
+      "type": "object"
+    },
+    "CopyTask": {
+      "properties": {
+        "launch": {
+          "$ref": "#/$defs/HostLaunch"
+        },
+        "model": {
+          "type": "string"
+        },
+        "score": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "model",
+        "score"
+      ],
+      "type": "object"
+    },
+    "DockerReadiness": {
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer"
+        },
+        "timeout": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "port",
+        "path",
+        "timeout"
+      ],
+      "type": "object"
+    },
+    "DockerSidecar": {
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "memory_gb": {
+          "type": "number"
+        },
+        "memory_swap": {
+          "type": "number"
+        },
+        "name": {
+          "type": "string"
+        },
+        "readiness": {
+          "$ref": "#/$defs/DockerReadiness"
+        }
+      },
+      "required": [
+        "name",
+        "command",
+        "memory_gb"
+      ],
+      "type": "object"
+    },
+    "Environment": {
+      "properties": {
+        "lock_file": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "platforms": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "python": {
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "EnvironmentRecipe": {
+      "properties": {
+        "assets": {
+          "$ref": "#/$defs/FileManifest"
+        },
+        "backend": {
+          "type": "string"
+        },
+        "binary": {
+          "type": "string"
+        },
+        "binary_relative": {
+          "type": "string"
+        },
+        "build": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "environment": {
+          "type": "string"
+        },
+        "files": {
+          "additionalProperties": {
+            "contentEncoding": "base64",
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "input_digest": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "launch": {
+          "$ref": "#/$defs/HostLaunch"
+        },
+        "lock_file": {
+          "type": "string"
+        },
+        "manifest": {
+          "type": "string"
+        },
+        "platform": {
+          "type": "string"
+        },
+        "preparation": {
+          "$ref": "#/$defs/ExtensionSelection"
+        },
+        "python": {
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/ExecutionTarget"
+        }
+      },
+      "required": [
+        "key",
+        "platform"
+      ],
+      "type": "object"
+    },
+    "ExecutionMember": {
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "environment": {
+          "type": "string"
+        },
+        "memory_gb": {
+          "type": "number"
+        },
+        "workdir": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    "ExecutionSpec": {
+      "properties": {
+        "main": {
+          "$ref": "#/$defs/ExecutionMember"
+        },
+        "sidecars": {
+          "items": {
+            "$ref": "#/$defs/NativeSidecar"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "main"
+      ],
+      "type": "object"
+    },
+    "ExecutionTarget": {
+      "properties": {
+        "arch": {
+          "type": "string"
+        },
+        "os": {
+          "type": "string"
+        },
+        "platform": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "os",
+        "arch",
+        "platform"
+      ],
+      "type": "object"
+    },
+    "ExtensionCheckRequest": {
+      "properties": {
+        "directory": {
+          "type": "string"
+        },
+        "work": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "work",
+        "directory"
+      ],
+      "type": "object"
+    },
+    "ExtensionSelection": {
+      "properties": {
+        "digest": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "digest"
+      ],
+      "type": "object"
+    },
+    "FileManifest": {
+      "additionalProperties": {
+        "$ref": "#/$defs/FileRef"
+      },
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "FileRef": {
+      "properties": {
+        "sha256": {
+          "type": "string"
+        },
+        "size_bytes": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "sha256",
+        "size_bytes"
+      ],
+      "type": "object"
+    },
+    "HostLaunch": {
+      "properties": {
+        "attempt": {
+          "type": "string"
+        },
+        "demand": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "priority_stop": {
+          "$ref": "#/$defs/PriorityPreemption"
+        },
+        "session": {
+          "type": "string"
+        },
+        "spec": {
+          "$ref": "#/$defs/Spec"
+        },
+        "started": {
+          "type": "boolean"
+        },
+        "started_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "stop_at": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "machine",
+        "session",
+        "kind",
+        "key",
+        "attempt"
+      ],
+      "type": "object"
+    },
+    "HostMemoryBudget": {
+      "properties": {
+        "gib": {
+          "type": "number"
+        },
+        "memory_allowance_bytes": {
+          "type": "integer"
+        },
+        "qualification": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "gib",
+        "memory_allowance_bytes",
+        "qualification"
+      ],
+      "type": "object"
+    },
+    "ModelPlacement": {
+      "properties": {
+        "allowed_machines": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "project": {
+          "type": "string"
+        },
+        "project_machines": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "ModelSlot": {
+      "properties": {
+        "approval_unknown_since": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "attempt": {
+          "type": "string"
+        },
+        "calls_in_flight": {
+          "type": "integer"
+        },
+        "class": {
+          "type": "string"
+        },
+        "crash_count": {
+          "type": "integer"
+        },
+        "environment_recipe": {
+          "$ref": "#/$defs/EnvironmentRecipe"
+        },
+        "error": {
+          "type": "string"
+        },
+        "failure_counted": {
+          "type": "boolean"
+        },
+        "health_revision": {
+          "type": "integer"
+        },
+        "healthy_since": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "idle_seconds": {
+          "type": "number"
+        },
+        "last_used": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "load_timed_out": {
+          "type": "boolean"
+        },
+        "load_until": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "model": {
+          "type": "string"
+        },
+        "placement": {
+          "$ref": "#/$defs/ModelPlacement"
+        },
+        "preemption_count": {
+          "type": "integer"
+        },
+        "priority": {
+          "type": "string"
+        },
+        "priority_stop": {
+          "$ref": "#/$defs/PriorityPreemption"
+        },
+        "production_used": {
+          "type": "boolean"
+        },
+        "project": {
+          "type": "string"
+        },
+        "recovering": {
+          "type": "boolean"
+        },
+        "releasing_calls": {
+          "type": "boolean"
+        },
+        "retry_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "retry_delay": {
+          "type": "integer"
+        },
+        "retry_reserved": {
+          "type": "boolean"
+        },
+        "run_since": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "runtime_failed": {
+          "type": "boolean"
+        },
+        "session": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "stop_at": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "model",
+        "machine",
+        "session",
+        "state",
+        "priority",
+        "last_used",
+        "calls_in_flight",
+        "idle_seconds"
+      ],
+      "type": "object"
+    },
+    "NativeReadiness": {
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "timeout": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "timeout"
+      ],
+      "type": "object"
+    },
+    "NativeSidecar": {
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "environment": {
+          "type": "string"
+        },
+        "memory_gb": {
+          "type": "number"
+        },
+        "name": {
+          "type": "string"
+        },
+        "port": {
+          "type": "integer"
+        },
+        "readiness": {
+          "$ref": "#/$defs/NativeReadiness"
+        }
+      },
+      "required": [
+        "name",
+        "command",
+        "memory_gb"
+      ],
+      "type": "object"
+    },
+    "Platform": {
+      "properties": {
+        "any": {
+          "type": "boolean"
+        },
+        "preferred": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "required": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "PriorityMatch": {
+      "properties": {
+        "index": {
+          "type": "integer"
+        },
+        "revision": {
+          "type": "integer"
+        },
+        "selector": {
+          "type": "string"
+        },
+        "tier": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "tier",
+        "index",
+        "selector",
+        "revision"
+      ],
+      "type": "object"
+    },
+    "PriorityPreemption": {
+      "properties": {
+        "cause": {
+          "type": "string"
+        },
+        "demand": {
+          "type": "string"
+        },
+        "policy": {
+          "$ref": "#/$defs/PriorityMatch"
+        },
+        "victim": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "cause",
+        "demand",
+        "victim",
+        "policy"
+      ],
+      "type": "object"
+    },
+    "Program": {
+      "properties": {
+        "args": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "file": {
+          "type": "string"
+        },
+        "type": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "file"
+      ],
+      "type": "object"
+    },
+    "Reply": {
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "attempts"
+            ]
+          },
+          "then": {
+            "required": [
+              "attempt_protocol"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "admission_blocked": {
+          "type": "boolean"
+        },
+        "attempt_protocol": {
+          "const": "keyed-attempt-v1",
+          "type": "string"
+        },
+        "attempts": {
+          "items": {
+            "$ref": "#/$defs/AttemptDirective"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "benchmark_plan": {
+          "$ref": "#/$defs/HostLaunch"
+        },
+        "cache_pins": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "cache_usage": {
+          "items": {
+            "$ref": "#/$defs/CopyTask"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "checkpoint_root": {
+          "type": "string"
+        },
+        "copy_plan": {
+          "items": {
+            "$ref": "#/$defs/CopyTask"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "cpu_budget_cores": {
+          "type": "integer"
+        },
+        "environment_plan": {
+          "items": {
+            "$ref": "#/$defs/EnvironmentRecipe"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "file_checkpoints": {
+          "type": "boolean"
+        },
+        "grace_seconds": {
+          "type": "number"
+        },
+        "hold": {
+          "type": "boolean"
+        },
+        "host_maintenance": {
+          "type": "string"
+        },
+        "host_memory_budget": {
+          "$ref": "#/$defs/HostMemoryBudget"
+        },
+        "job": {
+          "$ref": "job-v1.schema.json"
+        },
+        "kill": {
+          "type": "boolean"
+        },
+        "leave": {
+          "type": "boolean"
+        },
+        "model_plan": {
+          "items": {
+            "$ref": "#/$defs/ModelSlot"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "preparation_stop_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "priority_stop": {
+          "$ref": "#/$defs/PriorityPreemption"
+        },
+        "stop": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "hold",
+        "checkpoint_root",
+        "stop",
+        "kill",
+        "leave",
+        "grace_seconds"
+      ],
+      "type": "object"
+    },
+    "ResourceNeeds": {
+      "properties": {
+        "cpu_cores": {
+          "type": "integer"
+        },
+        "host_memory_gb": {
+          "type": "number"
+        },
+        "memory_gb": {
+          "type": "number"
+        },
+        "model": {
+          "type": "string"
+        },
+        "platform": {
+          "$ref": "#/$defs/Platform"
+        }
+      },
+      "required": [
+        "memory_gb",
+        "platform"
+      ],
+      "type": "object"
+    },
+    "RunSpec": {
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "docker": {
+          "type": "boolean"
+        },
+        "docker_memory_gb": {
+          "type": "number"
+        },
+        "docker_memory_swap": {
+          "type": "number"
+        },
+        "docker_network": {
+          "type": "string"
+        },
+        "docker_sidecars": {
+          "items": {
+            "$ref": "#/$defs/DockerSidecar"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "memory_gb": {
+          "type": "number"
+        },
+        "sidecars": {
+          "items": {
+            "$ref": "#/$defs/NativeSidecar"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "workdir": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    "SizeHint": {
+      "properties": {
+        "host_memory_gb": {
+          "type": "number"
+        },
+        "memory_gb": {
+          "type": "number"
+        }
+      },
+      "type": "object"
+    },
+    "Spec": {
+      "properties": {
+        "allowed_machines": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "args": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "class": {
+          "type": "string"
+        },
+        "deadline": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "environment": {
+          "$ref": "#/$defs/Environment"
+        },
+        "execution": {
+          "$ref": "#/$defs/ExecutionSpec"
+        },
+        "expected_minutes": {
+          "type": "number"
+        },
+        "extension": {
+          "type": "string"
+        },
+        "extension_check": {
+          "$ref": "#/$defs/ExtensionCheckRequest"
+        },
+        "extension_digest": {
+          "type": "string"
+        },
+        "files": {
+          "$ref": "#/$defs/FileManifest"
+        },
+        "give_up_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "inputs": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "kind": {
+          "type": "string"
+        },
+        "logs": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "needs": {
+          "$ref": "#/$defs/ResourceNeeds"
+        },
+        "outputs": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "priority": {
+          "type": "string"
+        },
+        "program": {
+          "$ref": "#/$defs/Program"
+        },
+        "project": {
+          "type": "string"
+        },
+        "resumable": {
+          "type": "boolean"
+        },
+        "run": {
+          "$ref": "#/$defs/RunSpec"
+        },
+        "size_hint": {
+          "$ref": "#/$defs/SizeHint"
+        },
+        "start_by": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "submission_key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "project",
+        "priority",
+        "run",
+        "needs",
+        "resumable"
+      ],
+      "type": "object"
+    }
+  },
+  "$ref": "#/$defs/Reply",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Generated from Go JSON types by TestWorkerWireSchemas. Uses X-Myce-Start-Gate: host-launch-v3. Checkin/Reply negotiate optional attempt_protocol keyed-attempt-v1; omission retains current one-attempt compatibility. Keyed reports and directives require (id, attempt, session); assignments reference the unchanged job-v1 schema. M1 limits admission to one attempt per worker, not collection size. Cross-field key equality is enforced by the runtime. Omission is never keyed release proof.",
+  "title": "Mycelium worker Reply v1"
+}

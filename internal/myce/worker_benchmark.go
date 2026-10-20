@@ -48,8 +48,7 @@ func (w *Worker) runBenchmark(stop context.Context, s *workerStore) error {
 		}
 		a := w.availability.snapshot()
 		m.CapabilityProfile.Availability = &a
-		var reply Reply
-		err := w.Client.Call(ctx, "POST", "/api/workers/checkin", Checkin{Machine: m, Fresh: s.state.Fresh, PreviousSession: s.state.PreviousSession, BenchmarkDone: done}, &reply)
+		reply, err := w.checkin(ctx, Checkin{Machine: m, Fresh: s.state.Fresh, PreviousSession: s.state.PreviousSession, BenchmarkDone: done})
 		if err == nil && s.state.Fresh {
 			s.state.Fresh = false
 			err = s.save()

@@ -327,8 +327,14 @@ func TestWorkerPersistedResultReconcilesThenReplaysBeforeFresh(t *testing.T) {
 		case "/api/workers/checkin":
 			var c Checkin
 			json.NewDecoder(r.Body).Decode(&c)
-			if c.Running != nil {
+			if c.AttemptProtocol != keyedAttemptProtocol || c.Running != nil {
+				t.Error("worker did not use keyed checkin")
+			}
+			if len(c.Attempts) != 0 {
 				calls = append(calls, "old-checkin")
+				if len(c.Attempts) != 1 || c.Attempts[0].ID != j.ID || c.Attempts[0].Attempt != j.Attempt || c.Attempts[0].Session != "old-session" {
+					t.Error("saved completion lost its execution key")
+				}
 				if c.Machine.Session != "old-session" || c.Fresh {
 					t.Error("result reconciled under a fresh session")
 				}
@@ -339,7 +345,7 @@ func TestWorkerPersistedResultReconcilesThenReplaysBeforeFresh(t *testing.T) {
 				}
 				cancel()
 			}
-			json.NewEncoder(rw).Encode(Reply{CheckpointRoot: filepath.Dir(j.Checkpoint)})
+			json.NewEncoder(rw).Encode(Reply{AttemptProtocol: keyedAttemptProtocol, CheckpointRoot: filepath.Dir(j.Checkpoint)})
 		case "/api/workers/log":
 			var l LogChunk
 			json.NewDecoder(r.Body).Decode(&l)
