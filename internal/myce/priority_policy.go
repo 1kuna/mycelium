@@ -175,6 +175,10 @@ func (q *Queue) before(a, b *Job, m *Machine) bool {
 	if n := q.comparePriority(a.Spec, b.Spec); n != 0 {
 		return n < 0
 	}
+	// CPU commands backfill accelerator workers after same-tier GPU demand.
+	if m.GPU != "cpu" && a.Spec.Needs.cpuOnly() != b.Spec.Needs.cpuOnly() {
+		return !a.Spec.Needs.cpuOnly()
+	}
 	if a.Spec.Project != b.Spec.Project && fairResourceFamily(a.Spec) == fairResourceFamily(b.Spec) {
 		x, y := q.fairScore(a, m), q.fairScore(b, m)
 		if math.Abs(x-y) > 1e-6 {

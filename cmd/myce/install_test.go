@@ -144,14 +144,14 @@ func TestSetupCLIRejectsMissingOrUnknownAction(t *testing.T) {
 	}
 }
 
-func TestInstallCLIDevicelessNeedsExplicitFlagAndBudget(t *testing.T) {
+func TestInstallCLICPUWithoutGPU(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		args []string
 		ok   bool
 	}{
-		{name: "no opt out"},
-		{name: "no budget", args: []string{"--allow-deviceless"}},
+		{name: "CPU auto detection", ok: true},
+		{name: "CPU no fake budget", args: []string{"--allow-deviceless"}, ok: true},
 		{name: "CPU test budget", args: []string{"--allow-deviceless", "--memory-gb", "2"}, ok: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

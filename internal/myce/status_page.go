@@ -302,11 +302,17 @@ var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
         <div class="card-head"><div class="identity"><h3>{{.ID}}</h3><div class="platform">{{if .GPU}}{{.GPU}}{{else}}platform unknown{{end}}{{if .Device}} · {{.Device}}{{end}}</div></div>
           <span class="badge {{if or .Disabled .Gone}}offline{{else if or .Leaving .AdmissionReason}}leaving{{end}}">{{hyphaAvailability .}}</span>
         </div>
+        {{if eq .GPU "cpu"}}<div class="metrics" aria-label="CPU capacity">
+          <div class="metric"><span class="label">In use</span><strong>{{.CPUInUseCores}} cores</strong></div>
+          <div class="metric"><span class="label">Free</span><strong>{{.FreeCPUCores}} cores</strong></div>
+          <div class="metric"><span class="label">Admitted</span><strong>{{.EffectiveCPUCores}} cores</strong></div>
+        </div>{{else}}
         <div class="metrics" aria-label="GPU memory">
           <div class="metric"><span class="label">Used</span><strong>{{printf "%.1f" .MemoryUsedGB}} GB</strong></div>
           <div class="metric"><span class="label">Free</span><strong>{{printf "%.1f" .FreeMemoryGB}} GB</strong></div>
 	          <div class="metric"><span class="label">Reserved</span><strong>{{printf "%.1f" .ReservedMemoryGB}} GB</strong></div>
         </div>
+        {{end}}
         {{if or .MemoryEnforcement .EffectiveHostMemoryBudgetGB .HostMemoryBudgetGB}}<div class="detail"><div class="label">RAM ceiling</div><div class="value">{{.MemoryEnforcement}}{{if .EffectiveHostMemoryBudgetGB}}<div>Host allowance (last reported): {{.HostMemoryAllowanceBytes}} bytes (UNQUALIFIED)</div>{{else if .HostMemoryBudgetGB}}<div>Host ceiling budget (last reported): {{printf "%g" .HostMemoryBudgetGB}} GiB</div>{{end}}{{if .HostMemoryBudgetStatus}}<div>{{.HostMemoryBudgetStatus}}</div>{{end}}</div></div>{{end}}
         {{if .DockerCleanup}}<div class="alert bad">Docker {{.DockerCleanup}}</div>{{end}}
         <div class="detail"><div class="label">Capability profile</div><div class="value">{{range profileLines .}}<div>{{.}}</div>{{end}}</div></div>

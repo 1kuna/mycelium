@@ -490,8 +490,8 @@ func TestMemoryCeilingHostBudgetSurvivesWorkerLoss(t *testing.T) {
 				t.Fatal("fixture did not lose worker")
 			}
 			if !model {
-				if err := q.Complete(Result{Machine: a.ID, Session: a.Session, Execution: Execution{ID: running.ID, Attempt: running.Attempt}, Success: true}); err != nil {
-					t.Fatal(err)
+				if err := q.Complete(Result{Machine: a.ID, Session: a.Session, Execution: Execution{ID: running.ID, Attempt: running.Attempt}, Success: true}); !errors.Is(err, ErrStale) {
+					t.Fatalf("obsolete result accepted while settling custody: %v", err)
 				}
 				if r := check(t, q, b, nil); r.Job == nil {
 					t.Fatal("positive cleanup did not release RAM")

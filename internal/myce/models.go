@@ -518,7 +518,7 @@ func (q *Queue) maintainModels() {
 			}
 			continue
 		}
-		if m.FreeMemoryGB < model.MemoryGB || !hostFits(m, model.MemoryGB, model.HostMemoryGB) || q.preparationActive(m) || q.preparationStopping(m) {
+		if m.FreeMemoryGB < model.MemoryGB || !cpuAllocationFits(m, 1) || !hostFits(m, model.MemoryGB, model.HostMemoryGB) || q.preparationActive(m) || q.preparationStopping(m) {
 			continue
 		}
 		if s != nil {
@@ -577,26 +577,10 @@ func (q *Queue) callCanUse(m *Machine, c *ModelCall) bool {
 	if s := q.s.ModelSlots[slotKey(m.ID, c.Model)]; s != nil && s.State == "failed" && (s.RetryAt == nil || q.clock.Now().Before(*s.RetryAt)) {
 		return false
 	}
-	possible := m.FreeMemoryGB
-	for _, s := range q.s.ModelSlots {
-		if s.Machine != m.ID || s.State == "unload_failed" || s.State == "failed" {
-			continue
-		}
-		if s.Model == c.Model && s.State == "loading" {
-			return true
-		}
-		if q.slotReclaimableFor(s, callJob(c).Spec) {
-			resident, _ := q.model(s.Model)
-			possible += resident.MemoryGB
-		}
+	if s := q.s.ModelSlots[slotKey(m.ID, c.Model)]; s != nil && s.State == "loading" {
+		return true
 	}
-	for _, j := range q.s.Jobs {
-		if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") && q.batchPreemptible(j, callJob(c).Spec) {
-			possible += j.Spec.Needs.MemoryGB
-		}
-	}
-	_, _, hostOK := q.hostReleases(m, model.MemoryGB, model.HostMemoryGB, c.Priority, callJob(c).Spec)
-	return possible >= model.MemoryGB && hostOK
+	return q.roomPlan(callJob(c), m, false) != nil
 }
 
 // Idle cache residency must not outrank runnable same-tier demand. Reuse this
@@ -1125,21 +1109,23 @@ func modelConfigHash(c ModelConfig) string {
 // resident models, rather than requiring either allocation alone to suffice.
 func (q *Queue) makeBatchRoom(j *Job, planned, handled map[string]bool) string {
 	var best *placementPlan
+	var selected *Job
 	for _, m := range q.plannerMachines() {
 		if !q.placementAllowed(j, m) || q.unreported[m.ID] || planned[m.ID] {
 			continue
 		}
-		if winner := q.candidate(m, handled); winner == nil || winner.ID != j.ID {
+		winner := q.candidate(m, handled)
+		if winner == nil || winner.ID != j.ID {
 			continue
 		}
-		if p := q.roomPlan(j, m, true); p != nil && p.cheaper(best) {
-			best = p
+		if p := q.roomPlan(winner, m, true); p != nil && p.cheaper(best) {
+			best, selected = p, winner
 		}
 	}
 	if best == nil {
 		return ""
 	}
-	q.applyPlacement(best, j)
+	q.applyPlacement(best, selected)
 	return best.machine.ID
 }
 

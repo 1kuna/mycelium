@@ -146,9 +146,14 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 		d := myce.Detection{OS: probe.OS, Arch: probe.Arch}
 		if role == "worker" {
 			if values.Detection.Platform != "" {
-				d.Platform, d.MemoryMode, d.MemoryGB, d.ReserveGB = "fake", values.Detection.MemoryMode, values.Detection.MemoryGB, values.Detection.ReserveGB
+				d.Platform, d.MemoryMode, d.MemoryGB, d.ReserveGB = values.Detection.Platform, values.Detection.MemoryMode, values.Detection.MemoryGB, values.Detection.ReserveGB
 			} else {
 				d, e = probe.DetectDevice(ctx, values.Device)
+				if errors.Is(e, myce.ErrNoGPU) {
+					fmt.Fprintln(os.Stderr, cpuFallbackNotice)
+					d = myce.Detection{OS: probe.OS, Arch: probe.Arch, Platform: "cpu", MemoryMode: "fixed"}
+					e = nil
+				}
 				if e != nil {
 					if !values.AllowDeviceless {
 						return e

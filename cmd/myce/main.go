@@ -162,6 +162,8 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	f.DurationVar(productionGrace, "production-stop-grace", 10*time.Second, "legacy alias for preemption-stop-grace")
 	heartbeat := f.Duration("heartbeat", time.Second, "worker check-in interval")
 	memoryMode := f.String("memory-mode", "auto", "memory source: auto, unified, dedicated, or fixed")
+	cpuReserve := f.Int("reserve-cpu-cores", 1, "logical cores reserved for the owner")
+	cpuBudget := f.Int("cpu-budget-cores", 0, "initial host CPU allowance; zero uses logical cores minus reserve")
 	hostBudget := f.Float64("host-memory-budget-gb", 0, "initial host RAM allowance in GiB; change with myce host budget while drained or disabled")
 	memorySlack := f.Float64("memory-ceiling-slack-gb", .125, "extra GiB per declared RAM ceiling (counts against host budget)")
 	requireCeilings := f.Bool("require-memory-ceilings", false, "refuse startup unless per-attempt cgroup v2 memory ceilings are enforceable; require host_memory_gb")
@@ -289,7 +291,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if e != nil {
 			return e
 		}
-		d, err := myce.StartDev(myce.DevConfig{ProductionInfrastructureRetries: productionRetries, FileStore: *fileStore, FileStoreLimit: *fileStoreLimit, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, HostPolicies: hosts, HostID: *hostID, ProjectPolicies: policies, EnvironmentConfig: ec, ModelConfig: mc, Address: *address, Database: *db, Checkpoints: *checkpoint, Token: *token, GPU: *gpu, Environments: split(*environments), Models: split(*models), Workers: *workers, MemoryGB: *memory})
+		d, err := myce.StartDev(myce.DevConfig{ProductionInfrastructureRetries: productionRetries, FileStore: *fileStore, FileStoreLimit: *fileStoreLimit, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, HostPolicies: hosts, HostID: *hostID, ProjectPolicies: policies, EnvironmentConfig: ec, ModelConfig: mc, Address: *address, Database: *db, Checkpoints: *checkpoint, Token: *token, GPU: *gpu, Environments: split(*environments), Models: split(*models), Workers: *workers, CPUReserveCores: *cpuReserve, CPUBudgetCores: *cpuBudget, MemoryGB: *memory})
 		if err != nil {
 			return err
 		}
@@ -437,6 +439,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		defer cancel()
 		return errors.Join(err, server.Shutdown(shutdown))
 	case "join":
+		if *cpuReserve < 0 || *cpuBudget < 0 {
+			return errors.New("CPU reserve and allowance must be nonnegative")
+		}
 		if *maxJobs < 0 {
 			return errors.New("max-jobs must be nonnegative")
 		}
@@ -498,7 +503,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 				return err
 			}
 		}
-		w := myce.Worker{OnboardingBenchmark: *onboardingBenchmark, Benchmark: myce.RunOnboardingBenchmark, FileCacheRoot: *fileCache, FileCacheLimit: *fileCacheLimit, DailyUse: *dailyUse, Laptop: *laptop, Desktop: *desktop, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, DockerEndpoint: *dockerHost, ContainerRetention: containerRetention, RequireMemoryCeilings: *requireCeilings, MemorySwapMaxBytes: *memorySwap, LogRetention: *logRetention, Unit: workerUnit, SuperviseProcess: true, HostMemorySource: hostSource, DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, SecretRoot: *secretRoot, ModelApprovalRoot: *modelApprovalRoot, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, FixedAcceleratorMemory: *memoryMode == "fixed", MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{MaxJobs: *maxJobs, HostMemoryBudgetGB: *hostBudget, MemoryCeilingSlackGB: *memorySlack, HostID: *hostID, UnifiedMemory: unified, HostMemoryMeasured: true, ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
+		w := myce.Worker{OnboardingBenchmark: *onboardingBenchmark, Benchmark: myce.RunOnboardingBenchmark, FileCacheRoot: *fileCache, FileCacheLimit: *fileCacheLimit, DailyUse: *dailyUse, Laptop: *laptop, Desktop: *desktop, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, DockerEndpoint: *dockerHost, ContainerRetention: containerRetention, RequireMemoryCeilings: *requireCeilings, MemorySwapMaxBytes: *memorySwap, LogRetention: *logRetention, Unit: workerUnit, SuperviseProcess: true, HostMemorySource: hostSource, DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, SecretRoot: *secretRoot, ModelApprovalRoot: *modelApprovalRoot, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, FixedAcceleratorMemory: *memoryMode == "fixed", MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{CPUReserveCores: *cpuReserve, CPUBudgetCores: *cpuBudget, MaxJobs: *maxJobs, HostMemoryBudgetGB: *hostBudget, MemoryCeilingSlackGB: *memorySlack, HostID: *hostID, UnifiedMemory: unified, HostMemoryMeasured: true, ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, Environments: split(*environments), Models: split(*models)}}
 		fmt.Printf("Joining as %s\n", w)
 		return w.Run(ctx)
 	case "submit":
@@ -642,6 +647,12 @@ func printStatus(s myce.Snapshot, full bool) {
 		}
 		if over := m.HostMemoryBudgetStatus(); over != "" {
 			state += "; " + over
+		}
+		if m.CapabilityProfile != nil {
+			state += fmt.Sprintf("; CPU %d/%d cores free (reserve %d)", m.FreeCPUCores, m.EffectiveCPUCores, m.CPUReserveCores)
+		}
+		if m.CPUCapacityReason != "" {
+			state += "; " + m.CPUCapacityReason
 		}
 		if m.HostMemoryMeasured {
 			state += fmt.Sprintf("; host %s RAM %.1f GiB available for admission", m.HostID, m.FreeHostMemoryGB)

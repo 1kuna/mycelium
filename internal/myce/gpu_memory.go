@@ -44,6 +44,9 @@ func newMemorySource(platform string, budget, reserve float64, mode, goos string
 	if mode != "auto" && mode != "unified" && mode != "dedicated" && mode != "fixed" {
 		return nil, fmt.Errorf("unknown memory mode %q", mode)
 	}
+	if platform == "cpu" {
+		return func(context.Context) (float64, error) { return 0, nil }, nil
+	}
 	if platform != "cuda" && platform != "metal" && platform != "xpu" && platform != "fake" {
 		return nil, fmt.Errorf("unknown GPU memory platform %q", platform)
 	}

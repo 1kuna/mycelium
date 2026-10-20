@@ -6,13 +6,14 @@ import "sort"
 // placement is applied, after all workers have been considered. Pending releases
 // are useful capacity for planning, never authority to admit a replacement.
 type placementPlan struct {
-	machine      *Machine
-	jobs         []*Job
-	slots        []*ModelSlot
-	calls        []HostObligation
-	stops        int
-	cost         int
-	preparations bool
+	machine          *Machine
+	jobs             []*Job
+	slots            []*ModelSlot
+	calls            []HostObligation
+	stops            int
+	cost             int
+	preparations     bool
+	preparationCores int
 }
 
 func (p *placementPlan) cheaper(other *placementPlan) bool {
@@ -124,11 +125,17 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool) 
 		}
 		need, host = model.MemoryGB, model.HostMemoryGB
 	}
+	sharedPreparation := false
 	for _, o := range q.hostObligations(hostID(m)) {
 		l := o.Launch
-		if l == nil || l.Kind != "environment" || l.Machine != m.ID || l.Session != m.Session || !l.Started || q.preparationShared(m, j, l) {
+		if l == nil || l.Kind != "environment" || l.Machine != m.ID || l.Session != m.Session || !l.Started {
 			continue
 		}
+		if q.preparationShared(m, j, l) {
+			sharedPreparation = true
+			continue
+		}
+		p.preparationCores = 1
 		if l.PriorityStop == nil {
 			if l.Spec == nil || q.comparePriority(*l.Spec, j.Spec) <= 0 {
 				return nil
@@ -140,12 +147,17 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool) 
 			p.cost++
 		}
 	}
+	// Keep shared builds. Otherwise project the build stop together with the
+	// execution releases, since its core charge depends on what remains.
+	if sharedPreparation {
+		p.preparationCores = 0
+	}
 	room := m.FreeMemoryGB
 	if r, ok := q.s.BatchReleases[m.ID]; ok && r.Session == m.Session && q.clock.Now().Before(r.Until) {
 		room += r.MemoryGB
 	}
 	for _, r := range q.s.Jobs {
-		if r.Machine != m.ID || (r.State != "running" && r.State != "stopping") {
+		if r.Machine != m.ID || r.ReleaseConfirmed || (r.State != "running" && r.State != "stopping") {
 			continue
 		}
 		if !q.batchPreemptible(r, j.Spec) {
@@ -214,7 +226,7 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool) 
 	}
 	// Mandatory/local releases already provide RAM as well as GPU memory.
 	// Project both once before asking for additional host-wide releases.
-	projected := *m
+	projected := q.cpuAfterReleases(m, p.jobs, p.slots, p.preparationCores)
 	releasedJobs, releasedSlots := map[*Job]bool{}, map[*ModelSlot]bool{}
 	for _, r := range p.jobs {
 		releasedJobs[r] = true
@@ -225,7 +237,7 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool) 
 		model, _ := q.model(s.Model)
 		projected.FreeHostMemoryGB += hostNeed(q.s.Machines[s.Machine], model.MemoryGB, model.HostMemoryGB)
 	}
-	hostJobs, hostSlots, ok := q.hostReleasesExcept(&projected, need, host, j.Spec, releasedJobs, releasedSlots)
+	hostJobs, hostSlots, ok := q.hostReleasesExcept(&projected, need, host, j.Spec, releasedJobs, releasedSlots, p.preparationCores > 0)
 	if !ok {
 		return nil
 	}

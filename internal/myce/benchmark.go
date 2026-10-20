@@ -469,6 +469,9 @@ func (q *Queue) benchmarkBetter(j *Job, a, b *Machine) (better, known bool) {
 	return as < bs, true
 }
 func (q *Queue) capabilityPlacementBetter(j *Job, a, b *Machine) bool {
+	if j.Spec.Needs.cpuOnly() && (a.GPU == "cpu") != (b.GPU == "cpu") {
+		return a.GPU == "cpu"
+	}
 	if better, known := q.benchmarkBetter(j, a, b); known {
 		return better
 	}

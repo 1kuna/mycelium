@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"slices"
 	"sort"
 	"strings"
 )
@@ -39,6 +40,7 @@ func hostFits(m *Machine, gpu, host float64) bool {
 	return m.HostMemoryMeasured && m.HostMemoryError == "" && m.FreeHostMemoryGB >= hostNeed(m, gpu, host)
 }
 func (q *Queue) refreshHostMemory() {
+	q.refreshHostCPU()
 	for _, m := range q.s.Machines {
 		available := m.HostAvailableMemoryGB
 		for _, other := range q.s.Machines {
@@ -118,26 +120,71 @@ func (q *Queue) refreshHostMemory() {
 func (q *Queue) hostReleases(m *Machine, gpu, host float64, priority string, identity ...Spec) ([]*Job, []*ModelSlot, bool) {
 	return q.hostReleasesExcept(m, gpu, host, priorityDemand(priority, identity), nil, nil)
 }
-func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, releasedJobs map[*Job]bool, releasedSlots map[*ModelSlot]bool) ([]*Job, []*ModelSlot, bool) {
+func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, releasedJobs map[*Job]bool, releasedSlots map[*ModelSlot]bool, releasePreparations ...bool) ([]*Job, []*ModelSlot, bool) {
 	if m.HostMemoryBudgetStatus() != "" {
 		return nil, nil, false
 	}
 	if host == 0 && (strings.HasPrefix(m.MemoryEnforcement, "memory ceilings enforced") || m.HostMemoryBudgetGB > 0 || m.hostBudgetGB > 0) {
 		return nil, nil, false
 	}
-	if host == 0 || hostFits(m, gpu, host) {
+	cores := demand.Needs.cores()
+	releasePreparation := len(releasePreparations) > 0 && releasePreparations[0]
+	// Count the ledger's remaining executions and started builds once. Candidate
+	// sets only hand one core back when they remove a worker's last execution.
+	executions, builds := map[string]int{}, map[string]int{}
+	for _, p := range q.s.PreparationPlans {
+		if owner := q.s.Machines[p.Machine]; p.Started && !(releasePreparation && p.Machine == m.ID) && owner != nil && hostID(owner) == hostID(m) {
+			builds[p.Machine]++
+		}
+	}
+	selected := map[string]int{}
+	freedCPU := func(jobs []*Job, slots []*ModelSlot) int {
+		clear(selected)
+		freed := 0
+		for _, j := range jobs {
+			freed += j.Spec.Needs.cores()
+			if builds[j.Machine] > 0 {
+				selected[j.Machine]++
+			}
+		}
+		for _, s := range slots {
+			freed++
+			if builds[s.Machine] > 0 {
+				selected[s.Machine]++
+			}
+		}
+		for worker, count := range selected {
+			if count == executions[worker] {
+				freed--
+			}
+		}
+		return freed
+	}
+	cpuOK := func(jobs []*Job, slots []*ModelSlot) bool {
+		copy := *m
+		copy.CPUInUseCores = max(0, m.CPUInUseCores-freedCPU(jobs, slots))
+		copy.FreeCPUCores = max(0, copy.EffectiveCPUCores-copy.CPUInUseCores)
+		return cores == 0 || cpuAllocationFits(&copy, cores)
+	}
+	if (host == 0 || hostFits(m, gpu, host)) && cpuOK(nil, nil) {
 		return nil, nil, true
 	}
-	if !m.HostMemoryMeasured || m.HostMemoryError != "" {
+	if host > 0 && (!m.HostMemoryMeasured || m.HostMemoryError != "") {
 		return nil, nil, false
 	}
 	room := m.FreeHostMemoryGB
 	need := hostNeed(m, gpu, host)
+	if host == 0 {
+		need = 0
+	}
 	var jobs []*Job
 	var slots []*ModelSlot
 	for _, j := range q.s.Jobs {
 		owner := q.s.Machines[j.Machine]
-		if releasedJobs[j] || owner == nil || owner.Gone || hostID(owner) != hostID(m) || !q.batchPreemptible(j, demand) {
+		if !releasedJobs[j] && !j.ReleaseConfirmed && owner != nil && hostID(owner) == hostID(m) && (j.State == "running" || j.State == "stopping") {
+			executions[j.Machine]++
+		}
+		if releasedJobs[j] || j.ReleaseConfirmed || owner == nil || owner.Gone || hostID(owner) != hostID(m) || !q.batchPreemptible(j, demand) {
 			continue
 		}
 		if j.State == "running" || j.State == "stopping" {
@@ -152,7 +199,10 @@ func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, r
 	})
 	for _, s := range q.s.ModelSlots {
 		owner := q.s.Machines[s.Machine]
-		if !releasedSlots[s] && owner != nil && !owner.Gone && hostID(owner) == hostID(m) && q.slotReclaimableFor(s, demand) {
+		if !releasedSlots[s] && slotReservesMemory(s) && owner != nil && hostID(owner) == hostID(m) {
+			executions[s.Machine]++
+		}
+		if !releasedSlots[s] && slotReservesMemory(s) && owner != nil && !owner.Gone && hostID(owner) == hostID(m) && q.slotReclaimableFor(s, demand) {
 			slots = append(slots, s)
 		}
 	}
@@ -162,31 +212,115 @@ func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, r
 		}
 		return slotKey(slots[i].Machine, slots[i].Model) < slotKey(slots[j].Machine, slots[j].Model)
 	})
+	// Exclude victims that free neither RAM nor cores, including build hand-back.
+	jobs = slices.DeleteFunc(jobs, func(j *Job) bool {
+		return hostNeed(q.s.Machines[j.Machine], j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) == 0 && freedCPU([]*Job{j}, nil) == 0
+	})
+	slots = slices.DeleteFunc(slots, func(s *ModelSlot) bool {
+		model, _ := q.model(s.Model)
+		return hostNeed(q.s.Machines[s.Machine], model.MemoryGB, model.HostMemoryGB) == 0 && freedCPU(nil, []*ModelSlot{s}) == 0
+	})
+	// Reject impossible demands without constructing a partial release plan.
+	allRAM := room
+	for _, j := range jobs {
+		allRAM += hostNeed(q.s.Machines[j.Machine], j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
+	}
+	for _, s := range slots {
+		model, _ := q.model(s.Model)
+		allRAM += hostNeed(q.s.Machines[s.Machine], model.MemoryGB, model.HostMemoryGB)
+	}
+	if allRAM < need || !cpuOK(jobs, slots) {
+		return nil, nil, false
+	}
+	// This single-victim check plus greedy/reverse prune is a heuristic, not
+	// always optimal; #100 accepts this tradeoff to keep check-ins inexpensive.
+	ramCapacity := m.HostAvailableMemoryGB
+	if m.hostBudgetGB > 0 {
+		ramCapacity = min(ramCapacity, m.hostBudgetGB)
+	}
+	ramDeficit := max(0, need-room)
+	coreDeficit := max(0, m.CPUInUseCores+cores-m.EffectiveCPUCores)
+	var bestJobs []*Job
+	var bestSlots []*ModelSlot
+	var bestTiers []int
+	bestStops, bestExcess, bestID := 0, 0.0, ""
+	consider := func(js []*Job, ss []*ModelSlot, spec Spec, stops int, ram float64, id string) {
+		if room+ram < need || !cpuOK(js, ss) {
+			return
+		}
+		tiers := make([]int, len(q.effectivePriorityPolicy().Tiers))
+		tiers[q.priorityMatch(spec).Index] = stops
+		excess := max(0, ram-ramDeficit)/max(1, ramCapacity) + float64(max(0, freedCPU(js, ss)-coreDeficit))/float64(max(1, m.EffectiveCPUCores))
+		order := slices.Compare(tiers, bestTiers)
+		if bestTiers == nil || order < 0 || order == 0 && (stops < bestStops || stops == bestStops && (excess < bestExcess || excess == bestExcess && id < bestID)) {
+			bestJobs, bestSlots, bestTiers = js, ss, tiers
+			bestStops, bestExcess, bestID = stops, excess, id
+		}
+	}
+	for _, j := range jobs {
+		stops := 0
+		if j.State == "running" {
+			stops = 1
+		}
+		consider([]*Job{j}, nil, j.Spec, stops, hostNeed(q.s.Machines[j.Machine], j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), "job/"+j.ID)
+	}
+	for _, s := range slots {
+		stops := 0
+		if s.State != "draining" && s.State != "unloading" {
+			stops = 1
+		}
+		model, _ := q.model(s.Model)
+		consider(nil, []*ModelSlot{s}, q.slotSpec(s), stops, hostNeed(q.s.Machines[s.Machine], model.MemoryGB, model.HostMemoryGB), "slot/"+slotKey(s.Machine, s.Model))
+	}
+	if bestTiers != nil {
+		return bestJobs, bestSlots, true
+	}
 	// Prefer releasing model residency before interrupting commands.
 	chosenSlots := []*ModelSlot{}
 	for _, s := range slots {
-		if room >= need {
+		if room >= need && cpuOK(nil, chosenSlots) {
 			break
 		}
 		model, _ := q.model(s.Model)
 		n := hostNeed(q.s.Machines[s.Machine], model.MemoryGB, model.HostMemoryGB)
-		if n > 0 {
+		if room < need && n > 0 || !cpuOK(nil, chosenSlots) && slotReservesMemory(s) {
 			room += n
 			chosenSlots = append(chosenSlots, s)
 		}
 	}
 	chosenJobs := []*Job{}
 	for _, j := range jobs {
-		if room >= need {
+		if room >= need && cpuOK(chosenJobs, chosenSlots) {
 			break
 		}
 		n := hostNeed(q.s.Machines[j.Machine], j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
-		if n > 0 {
+		if room < need && n > 0 || !cpuOK(chosenJobs, chosenSlots) && !j.ReleaseConfirmed {
 			room += n
 			chosenJobs = append(chosenJobs, j)
 		}
 	}
-	return chosenJobs, chosenSlots, room >= need
+	// A later RAM release can also cover cores freed by an earlier pick.
+	// Prune in reverse preference order, retaining the cheaper victims first.
+	for i := len(chosenJobs) - 1; i >= 0; i-- {
+		j := chosenJobs[i]
+		n := hostNeed(q.s.Machines[j.Machine], j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
+		remaining := slices.Delete(slices.Clone(chosenJobs), i, i+1)
+		if room-n >= need && cpuOK(remaining, chosenSlots) {
+			room -= n
+			chosenJobs = remaining
+		}
+	}
+	for i := len(chosenSlots) - 1; i >= 0; i-- {
+		s := chosenSlots[i]
+		model, _ := q.model(s.Model)
+		n := hostNeed(q.s.Machines[s.Machine], model.MemoryGB, model.HostMemoryGB)
+		remaining := slices.Delete(slices.Clone(chosenSlots), i, i+1)
+		if room-n >= need && cpuOK(chosenJobs, remaining) {
+			room -= n
+			chosenSlots = remaining
+		}
+	}
+	return chosenJobs, chosenSlots, room >= need && cpuOK(chosenJobs, chosenSlots)
 }
 func (q *Queue) reclaimableGPUMemory(m *Machine, priority string, identity ...Spec) float64 {
 	demand := priorityDemand(priority, identity)

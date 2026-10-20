@@ -90,6 +90,9 @@ func (p ProfileProbe) Detect(ctx context.Context, m Machine, disk string, now ti
 		profile.DiskTotalBytes, profile.DiskFreeBytes = 0, 0
 		profile.Unavailable = append(profile.Unavailable, "local disk size")
 	}
+	if m.GPU == "cpu" {
+		return profile
+	}
 	if m.GPU == "fake" {
 		profile.Accelerators = append(profile.Accelerators, AcceleratorProfile{Type: "fake"})
 		return profile

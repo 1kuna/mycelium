@@ -185,7 +185,25 @@ func (q *Queue) loadSeconds(model string, m *Machine) float64 {
 	}
 	return float64(remaining) / speed
 }
-func (q *Queue) workerIdle(m *Machine) bool {
+func (q *Queue) workerIdle(m *Machine, demand *Job) bool {
+	if !q.workerBatchIdle(m) || q.untrackedPreparations(m) > 0 {
+		return false
+	}
+	for _, l := range q.s.PreparationPlans {
+		// A copy already serving this model demand remains useful preparation.
+		if l.Kind == "copy" && l.Key == demand.Spec.Needs.Model {
+			continue
+		}
+		if l.Machine == m.ID && l.Session == m.Session && l.Started && !q.preparationShared(m, demand, &l) {
+			return false
+		}
+	}
+	return true
+}
+
+// Preparation offers must continue while a build runs, even though that
+// worker is busy for placement steering.
+func (q *Queue) workerBatchIdle(m *Machine) bool {
 	if m.Gone || m.Leaving || q.unreported[m.ID] {
 		return false
 	}
@@ -215,6 +233,9 @@ func (q *Queue) recordModelUse(name string) {
 
 // placementBetter applies the same rule to foreground placement and build plans.
 func (q *Queue) placementBetter(j *Job, a, b *Machine) bool {
+	if j.Spec.Needs.cpuOnly() && (a.GPU == "cpu") != (b.GPU == "cpu") {
+		return a.GPU == "cpu"
+	}
 	aa, bb := affinity(j, a), affinity(j, b)
 	if aa != bb {
 		return aa > bb
@@ -233,17 +254,17 @@ func (q *Queue) placementBetter(j *Job, a, b *Machine) bool {
 func (q *Queue) betterPlacement(j *Job, m *Machine) bool {
 	if j.Spec.extensionJob() {
 		for _, other := range q.s.Machines {
-			if other.ID != m.ID && !q.unreported[other.ID] && q.workerIdle(other) && q.placementAllowed(j, other) && q.checkpointReady(j, other) && fits(j, other, other.FreeMemoryGB) && q.capabilityPlacementBetter(j, other, m) {
+			if other.ID != m.ID && !q.unreported[other.ID] && q.workerIdle(other, j) && q.placementAllowed(j, other) && q.checkpointReady(j, other) && fits(j, other, other.FreeMemoryGB) && q.capabilityPlacementBetter(j, other, m) {
 				return true
 			}
 		}
 		return false
 	}
-	if j.Spec.Needs.Model == "" && j.Spec.Environment.Key() == "" {
+	if !j.Spec.Needs.cpuOnly() && j.Spec.Needs.Model == "" && j.Spec.Environment.Key() == "" {
 		return false
 	}
 	for _, other := range q.s.Machines {
-		if other.ID == m.ID || !q.workerIdle(other) || !q.placementAllowed(j, other) || !fits(j, other, other.FreeMemoryGB) {
+		if other.ID == m.ID || !q.workerIdle(other, j) || !q.placementAllowed(j, other) || !fits(j, other, other.FreeMemoryGB) {
 			continue
 		}
 		if q.placementBetter(j, other, m) {

@@ -428,8 +428,8 @@ func TestDockerLossKeepsHostReservedWithoutHoldPolicy(t *testing.T) {
 	if r := check(t, q, other, nil); r.Job == nil || r.Job.ID != prod.ID {
 		t.Fatal("production did not go elsewhere")
 	}
-	if e = q.Complete(Result{Machine: a.ID, Session: a.Session, Execution: Execution{ID: j.ID, Attempt: running.Attempt}}); e != nil {
-		t.Fatal(e)
+	if e = q.Complete(Result{Machine: a.ID, Session: a.Session, Execution: Execution{ID: j.ID, Attempt: running.Attempt}}); !errors.Is(e, ErrStale) {
+		t.Fatalf("obsolete result accepted while settling custody: %v", e)
 	}
 	if r := check(t, q, b, nil); r.Job == nil {
 		t.Fatal("confirmed release did not reopen host")
