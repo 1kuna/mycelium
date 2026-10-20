@@ -109,53 +109,55 @@ func TestR1MixedHostSteersCPUAndPreservesGPUBackfill(t *testing.T) {
 }
 
 func TestR1HostReleaseSkipsUnneededDimensions(t *testing.T) {
-	for _, zeroSlot := range []bool{false, true} {
-		t.Run(fmt.Sprintf("zeroRAMSlot=%v", zeroSlot), func(t *testing.T) {
-			q, clock := fixture(t)
-			a, b, c := cpuMachine("w1", "shared", "fake", 16, 12), cpuMachine("w2", "shared", "fake", 16, 12), cpuMachine("w3", "shared", "fake", 16, 12)
-			check(t, q, a, nil)
-			check(t, q, b, nil)
-			check(t, q, c, nil)
-			var low *Job
-			if zeroSlot {
-				model := Model{Name: "zero", Engine: "fake", Path: "weights", Platforms: []string{"fake"}, MemoryGB: 1}
-				if err := q.ConfigureModels(ModelConfig{Models: []Model{model}, Idle: time.Hour, Wait: time.Minute}); err != nil {
-					t.Fatal(err)
+	for _, cores := range []int{16, 2} {
+		for _, zeroSlot := range []bool{false, true} {
+			t.Run(fmt.Sprintf("cores=%d/zeroRAMSlot=%v", cores, zeroSlot), func(t *testing.T) {
+				q, clock := fixture(t)
+				a, b, c := cpuMachine("w1", "shared", "fake", cores, 12), cpuMachine("w2", "shared", "fake", cores, 12), cpuMachine("w3", "shared", "fake", cores, 12)
+				check(t, q, a, nil)
+				check(t, q, b, nil)
+				check(t, q, c, nil)
+				var low *Job
+				if zeroSlot {
+					model := Model{Name: "zero", Engine: "fake", Path: "weights", Platforms: []string{"fake"}, MemoryGB: 1}
+					if err := q.ConfigureModels(ModelConfig{Models: []Model{model}, Idle: time.Hour, Wait: time.Minute}); err != nil {
+						t.Fatal(err)
+					}
+					q.s.Machines[a.ID].ModelURL = "http://worker"
+					q.s.Machines[a.ID].ModelConfigHash = modelConfigHash(q.models)
+					q.s.ModelSlots[slotKey(a.ID, model.Name)] = &ModelSlot{LastUsed: clock.Now(), Machine: a.ID, Session: a.Session, Model: model.Name, State: "ready", Priority: "experiment", Project: "test"}
+					q.refreshHostMemory()
+				} else {
+					s := spec("experiment")
+					s.AllowedMachines = []string{a.ID}
+					low = submit(t, q, s)
+					if run := check(t, q, a, nil).Job; run == nil || run.ID != low.ID {
+						t.Fatal("missing zero-RAM victim")
+					}
 				}
-				q.s.Machines[a.ID].ModelURL = "http://worker"
-				q.s.Machines[a.ID].ModelConfigHash = modelConfigHash(q.models)
-				q.s.ModelSlots[slotKey(a.ID, model.Name)] = &ModelSlot{LastUsed: clock.Now(), Machine: a.ID, Session: a.Session, Model: model.Name, State: "ready", Priority: "experiment", Project: "test"}
-				q.refreshHostMemory()
-			} else {
-				s := spec("experiment")
-				s.AllowedMachines = []string{a.ID}
-				low = submit(t, q, s)
-				if run := check(t, q, a, nil).Job; run == nil || run.ID != low.ID {
-					t.Fatal("missing zero-RAM victim")
+				s := spec("deadline")
+				s.Needs.HostMemoryGB = 6
+				s.AllowedMachines = []string{b.ID}
+				ram := submit(t, q, s)
+				if run := check(t, q, b, nil).Job; run == nil || run.ID != ram.ID {
+					t.Fatal("missing RAM victim")
 				}
-			}
-			s := spec("deadline")
-			s.Needs.HostMemoryGB = 6
-			s.AllowedMachines = []string{b.ID}
-			ram := submit(t, q, s)
-			if run := check(t, q, b, nil).Job; run == nil || run.ID != ram.ID {
-				t.Fatal("missing RAM victim")
-			}
-			s = spec("production")
-			s.Needs.HostMemoryGB = 8
-			s.AllowedMachines = []string{c.ID}
-			submit(t, q, s)
-			if job(t, q, ram.ID).State != "stopping" {
-				t.Fatal("RAM victim was not stopped")
-			}
-			if zeroSlot {
-				if slot := q.s.ModelSlots[slotKey(a.ID, "zero")]; slot.State != "ready" {
-					t.Fatal("stopped zero-RAM slot despite sufficient cores", slot.State)
+				s = spec("production")
+				s.Needs.HostMemoryGB = 8
+				s.AllowedMachines = []string{c.ID}
+				submit(t, q, s)
+				if job(t, q, ram.ID).State != "stopping" {
+					t.Fatal("RAM victim was not stopped")
 				}
-			} else if job(t, q, low.ID).State != "running" {
-				t.Fatal("stopped zero-RAM job despite sufficient cores")
-			}
-		})
+				if zeroSlot {
+					if slot := q.s.ModelSlots[slotKey(a.ID, "zero")]; slot.State != "ready" {
+						t.Fatal("stopped zero-RAM slot after RAM release covers cores", slot.State)
+					}
+				} else if job(t, q, low.ID).State != "running" {
+					t.Fatal("stopped zero-RAM job after RAM release covers cores")
+				}
+			})
+		}
 	}
 }
 
@@ -225,5 +227,53 @@ func TestR1VariantOOMReservationFloors(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestR1PreparingCPUWorkerAllowsGPUBackfill(t *testing.T) {
+	for _, extension := range []bool{false, true} {
+		t.Run(fmt.Sprintf("extension=%v", extension), func(t *testing.T) {
+			q, clock := fixture(t)
+			gpu := cpuMachine("gpu", "shared", "cuda", 16, 64)
+			cpu := cpuMachine("cpu", "shared", "cpu", 16, 64)
+			cpu.EnvironmentBuilder = true
+			check(t, q, gpu, nil)
+			check(t, q, cpu, nil)
+			s := cpuSpec(1, 1)
+			s.AllowedMachines = []string{cpu.ID}
+			if extension {
+				e := compositionExtension(t, false)
+				e.Variants[0].Target = machineTarget(&cpu)
+				e.Variants[0].Needs = ResourceNeeds{CPUCores: 1, MemoryGB: 1, HostMemoryGB: 1}
+				e = freezeComposition(t, e)
+				if err := q.AddExtension(e); err != nil {
+					t.Fatal(err)
+				}
+				s = Spec{Name: "prepare", Project: "cpu-project", Priority: "experiment", Extension: extensionKey(e), AllowedMachines: []string{cpu.ID}}
+			} else {
+				if err := q.ConfigureEnvironments(EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"build": {"cpu": binaryRecipe(t, "cpu")}}}); err != nil {
+					t.Fatal(err)
+				}
+				s.Environment.Name = "build"
+			}
+			submit(t, q, s)
+			plan := check(t, q, cpu, nil).EnvironmentPlan
+			if len(plan) != 1 || plan[0].Launch == nil {
+				t.Fatal("missing preparation")
+			}
+			launch := *plan[0].Launch
+			if err := q.AuthorizeLaunch(launch); err != nil {
+				t.Fatal(err)
+			}
+			cpu.EnvironmentReports = []EnvironmentReport{{Key: launch.Key, Attempt: launch.Attempt, State: "building"}}
+			clock.Advance(time.Second)
+			if continued := check(t, q, cpu, nil).EnvironmentPlan; len(continued) != 1 || continued[0].Launch.Attempt != launch.Attempt {
+				t.Fatal("active preparation was not re-offered")
+			}
+			backfill := submit(t, q, cpuSpec(2, 1))
+			if run := check(t, q, gpu, nil).Job; run == nil || run.ID != backfill.ID {
+				t.Fatal("GPU declined CPU backfill while CPU worker was preparing")
+			}
+		})
 	}
 }

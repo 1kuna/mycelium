@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"slices"
 	"sort"
 	"strings"
 )
@@ -193,6 +194,27 @@ func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, r
 		if room < need && n > 0 || !cpuOK(chosenJobs, chosenSlots) && !j.ReleaseConfirmed {
 			room += n
 			chosenJobs = append(chosenJobs, j)
+		}
+	}
+	// A later RAM release can also cover cores freed by an earlier pick.
+	// Prune in reverse preference order, retaining the cheaper victims first.
+	for i := len(chosenJobs) - 1; i >= 0; i-- {
+		j := chosenJobs[i]
+		n := hostNeed(q.s.Machines[j.Machine], j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
+		remaining := slices.Delete(slices.Clone(chosenJobs), i, i+1)
+		if room-n >= need && cpuOK(remaining, chosenSlots) {
+			room -= n
+			chosenJobs = remaining
+		}
+	}
+	for i := len(chosenSlots) - 1; i >= 0; i-- {
+		s := chosenSlots[i]
+		model, _ := q.model(s.Model)
+		n := hostNeed(q.s.Machines[s.Machine], model.MemoryGB, model.HostMemoryGB)
+		remaining := slices.Delete(slices.Clone(chosenSlots), i, i+1)
+		if room-n >= need && cpuOK(chosenJobs, remaining) {
+			room -= n
+			chosenSlots = remaining
 		}
 	}
 	return chosenJobs, chosenSlots, room >= need && cpuOK(chosenJobs, chosenSlots)

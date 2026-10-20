@@ -186,6 +186,20 @@ func (q *Queue) loadSeconds(model string, m *Machine) float64 {
 	return float64(remaining) / speed
 }
 func (q *Queue) workerIdle(m *Machine) bool {
+	if !q.workerBatchIdle(m) || q.untrackedPreparations(m) > 0 {
+		return false
+	}
+	for _, l := range q.s.PreparationPlans {
+		if l.Machine == m.ID && l.Session == m.Session && l.Started {
+			return false
+		}
+	}
+	return true
+}
+
+// Preparation offers must continue while a build runs, even though that
+// worker is busy for placement steering.
+func (q *Queue) workerBatchIdle(m *Machine) bool {
 	if m.Gone || m.Leaving || q.unreported[m.ID] {
 		return false
 	}
