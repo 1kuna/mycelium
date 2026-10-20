@@ -29,7 +29,7 @@ func (q *Queue) modelFitsMachine(model Model, m *Machine) bool {
 // All remaining fences (owner, machine, platform, log policy) still apply.
 func (q *Queue) residentModel(model Model, m *Machine) Model {
 	if model.LocalSource != "" && m.ModelApprovalStates[model.LocalSource] == approvalUnknown {
-		if s := q.s.ModelSlots[slotKey(m.ID, model.Name)]; s != nil && s.Session == m.Session && s.State == "ready" && (s.ApprovalUnknownSince == nil || q.clock.Now().Sub(*s.ApprovalUnknownSince) <= localApprovalUnknownGrace) {
+		if s := q.s.ModelSlots[targetSlotKey(m, model.Name)]; s != nil && s.Session == m.Session && s.State == "ready" && (s.ApprovalUnknownSince == nil || q.clock.Now().Sub(*s.ApprovalUnknownSince) <= localApprovalUnknownGrace) {
 			model.LocalSource = ""
 		}
 	}

@@ -1,0 +1,4 @@
+{
+  "code": "machine_renamed",
+  "error": "machine old-gpu0 was renamed; use allowed_machines: [example-machine] plus needs.gpu.devices: [\"0\"]"
+}

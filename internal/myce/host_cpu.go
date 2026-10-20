@@ -17,6 +17,18 @@ func (n ResourceNeeds) cores() int { return max(1, n.CPUCores) }
 // repeated validation/resolution never moves or charges RAM twice.
 func normalizeResources(s *Spec) error {
 	n := &s.Needs
+	if n.GPU != nil && n.GPU.Devices != nil {
+		if len(n.GPU.Devices) == 0 {
+			return reject("gpu_selector_invalid", errors.New("devices must be a nonempty set of canonical device IDs"))
+		}
+		seen := map[string]bool{}
+		for _, id := range n.GPU.Devices {
+			if !canonicalDeviceID(id) || seen[id] {
+				return reject("gpu_selector_invalid", errors.New("devices must be distinct canonical device IDs"))
+			}
+			seen[id] = true
+		}
+	}
 	if n.GPU != nil && n.GPU.Count != nil {
 		if *n.GPU.Count > 1 {
 			return reject("gpu_count_unsupported", errors.New("multiple GPU devices are deferred to #105"))

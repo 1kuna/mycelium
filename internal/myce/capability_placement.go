@@ -156,7 +156,7 @@ func (q *Queue) recordProgramNeeds(j *Job, r Result) {
 	if !validMemoryValue(r.Usage.MemoryGB*1.25) || !validMemoryValue(r.Usage.HostMemoryGB*1.25) {
 		return
 	}
-	m := q.s.Machines[r.Machine]
+	m := allocationMachine(q.s.Machines[r.Machine], j.AllocatedDevices)
 	if m == nil {
 		return
 	}
@@ -181,7 +181,7 @@ func (q *Queue) retryOOM(j *Job) {
 		j.State, j.Reason = "failed", "out of memory after one retry on a larger hypha"
 		return
 	}
-	m := q.s.Machines[j.Machine]
+	m := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
 	if m == nil {
 		j.State, j.Reason = "failed", "out of memory; previous capability unavailable"
 		return

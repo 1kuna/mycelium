@@ -148,12 +148,12 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool) 
 			p.cost++
 		}
 	}
-	room := m.FreeMemoryGB
-	if r, ok := q.s.BatchReleases[m.ID]; ok && r.Session == m.Session && q.clock.Now().Before(r.Until) {
+	room := m.FreeMemoryGB - m.modelReservationDebtGB
+	if r, ok := q.s.BatchReleases[batchReleaseKey(m)]; ok && r.Session == m.Session && q.clock.Now().Before(r.Until) {
 		room += r.MemoryGB
 	}
 	for _, r := range q.s.Jobs {
-		if r.Machine != m.ID || r.ReleaseConfirmed || (r.State != "running" && r.State != "stopping") {
+		if !batchOnTarget(r, m) || r.ReleaseConfirmed || (r.State != "running" && r.State != "stopping") {
 			continue
 		}
 		if !q.batchPreemptible(r, j.Spec) {
@@ -169,7 +169,7 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool) 
 	}
 	var slots []*ModelSlot
 	for _, s := range q.s.ModelSlots {
-		if s.Machine != m.ID || !q.slotReclaimableFor(s, j.Spec) {
+		if !slotOnTarget(s, m) || !q.slotReclaimableFor(s, j.Spec) {
 			continue
 		}
 		if s.State == "draining" {
@@ -228,12 +228,12 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool) 
 	releasedJobs, releasedSlots := map[*Job]bool{}, map[*ModelSlot]bool{}
 	for _, r := range p.jobs {
 		releasedJobs[r] = true
-		projected.FreeHostMemoryGB += hostNeed(q.s.Machines[r.Machine], r.Spec.Needs.MemoryGB, r.Spec.Needs.HostMemoryGB)
+		projected.FreeHostMemoryGB += hostNeed(allocationMachine(q.s.Machines[r.Machine], r.AllocatedDevices), r.Spec.Needs.MemoryGB, r.Spec.Needs.HostMemoryGB)
 	}
 	for _, s := range p.slots {
 		releasedSlots[s] = true
 		model, _ := q.model(s.Model)
-		projected.FreeHostMemoryGB += hostNeed(q.s.Machines[s.Machine], model.MemoryGB, model.HostMemoryGB)
+		projected.FreeHostMemoryGB += hostNeed(slotMachine(q.s.Machines[s.Machine], s), model.MemoryGB, model.HostMemoryGB)
 	}
 	hostJobs, hostSlots, ok := q.hostReleasesExcept(&projected, need, host, j.Spec, releasedJobs, releasedSlots, p.preparationCores > 0)
 	if !ok {

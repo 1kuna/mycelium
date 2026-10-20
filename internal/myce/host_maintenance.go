@@ -110,6 +110,9 @@ func (q *Queue) ChangeHostMaintenance(host string, request HostMaintenanceReques
 		return out, errors.New("physical host is required")
 	}
 	err := q.update(func() error {
+		if err := q.validateMachineNames([]string{host}); err != nil {
+			return err
+		}
 		if q.s.HostMaintenance == nil {
 			q.s.HostMaintenance = map[string]HostMaintenance{}
 		}
@@ -312,7 +315,7 @@ func (q *Queue) maintainHostObligation(p HostObligation, deadline *time.Time) {
 		}
 	case p.Engine != nil:
 		e := p.Engine
-		s := q.s.ModelSlots[slotKey(e.Machine, e.Model)]
+		s := q.s.ModelSlots[slotKey(e.Machine, e.Model, e.Device)]
 		if s == nil || s.Session != e.Session || s.Attempt != e.Attempt {
 			return
 		}

@@ -10,6 +10,7 @@ import (
 // HostLaunch is exact queue custody for a preparation, or an engine attempt.
 // A cached reply is an offer, never permission to launch.
 type HostLaunch struct {
+	Device       string              `json:"device,omitempty"`
 	StartedAt    *time.Time          `json:"started_at,omitempty"`
 	Spec         *Spec               `json:"spec,omitempty"`
 	Demand       string              `json:"demand,omitempty"`
@@ -34,11 +35,11 @@ func (q *Queue) issuePreparation(m *Machine, kind, key string) HostLaunch {
 		q.s.PreparationPlans = map[string]HostLaunch{}
 	}
 	for _, l := range q.s.PreparationPlans {
-		if l.Machine == m.ID && l.Session == m.Session && l.Kind == kind && l.Key == key {
+		if l.Machine == m.ID && l.Session == m.Session && l.Kind == kind && l.Key == key && (kind == "copy" || l.Device == targetDevice(m)) {
 			return l
 		}
 	}
-	l := HostLaunch{Machine: m.ID, Session: m.Session, Kind: kind, Key: key, Attempt: ID()}
+	l := HostLaunch{Device: targetDevice(m), Machine: m.ID, Session: m.Session, Kind: kind, Key: key, Attempt: ID()}
 	if j := q.candidate(m, nil); j != nil {
 		spec := Spec{Project: j.Spec.Project, Priority: j.Spec.Priority, Class: j.Spec.Class}
 		l.Spec = &spec
@@ -72,7 +73,7 @@ func (q *Queue) AuthorizeLaunch(l HostLaunch) error {
 			return nil
 		}
 		if l.Kind == "engine" {
-			s := q.s.ModelSlots[slotKey(l.Machine, l.Key)]
+			s := q.s.ModelSlots[slotKey(l.Machine, l.Key, l.Device)]
 			if s == nil || s.Session != l.Session || s.Attempt != l.Attempt || s.State != "loading" {
 				rejected = ErrStale
 			}

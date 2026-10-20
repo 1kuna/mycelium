@@ -105,6 +105,9 @@ func (q *Queue) ConfigureProjects(p map[string]ProjectPolicy) error {
 	return q.update(func() error {
 		copy := map[string]ProjectPolicy{}
 		for k, v := range p {
+			if err := q.validateMachineNames(v.AllowedMachines); err != nil {
+				return err
+			}
 			v.AllowedMachines = slices.Clone(v.AllowedMachines)
 			copy[k] = v
 		}
@@ -146,7 +149,7 @@ func (q *Queue) capReasonFor(j *Job, target *Machine) string {
 	}
 	count := 0
 	used, total := 0.0, 0.0
-	for _, m := range q.s.Machines {
+	for _, m := range q.plannerMachines() {
 		if !m.Gone && !m.Leaving {
 			total += m.TotalMemoryGB
 		}
@@ -165,7 +168,7 @@ func (q *Queue) capReasonFor(j *Job, target *Machine) string {
 			if j.Spec.Needs.MemoryGB == 0 && j.Spec.Needs.Model == c.Model && (target == nil || target.ID == c.Machine) {
 				need = 0
 			}
-			key := slotKey(c.Machine, c.Model)
+			key := slotKey(c.Machine, c.Model, c.Device)
 			if !seen[key] {
 				model, _ := q.model(c.Model)
 				used += model.MemoryGB
@@ -222,7 +225,7 @@ func (q *Queue) batchResourcesFit(j *Job, m *Machine) bool {
 		projected = q.cpuAfterReleases(m, jobs, slots, 0)
 	}
 	memory := q.reclaimableGPUMemory(m, j.Spec.Priority, j.Spec)
-	if release, ok := q.s.BatchReleases[m.ID]; ok && release.Session == m.Session && q.clock.Now().Before(release.Until) {
+	if release, ok := q.s.BatchReleases[batchReleaseKey(m)]; ok && release.Session == m.Session && q.clock.Now().Before(release.Until) {
 		memory += release.MemoryGB
 	}
 	// Status may already project a running batch's memory as free.
@@ -288,9 +291,9 @@ func (q *Queue) pick(m *Machine) *Job {
 func (q *Queue) plannerMachines() []*Machine {
 	machines := make([]*Machine, 0, len(q.s.Machines))
 	for _, m := range q.s.Machines {
-		machines = append(machines, m)
+		machines = append(machines, q.machineTargets(m)...)
 	}
-	slices.SortFunc(machines, func(a, b *Machine) int { return strings.Compare(a.ID, b.ID) })
+	slices.SortFunc(machines, func(a, b *Machine) int { return strings.Compare(targetKey(a), targetKey(b)) })
 	return machines
 }
 
@@ -303,7 +306,7 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 	for _, m := range q.plannerMachines() {
 		copy := *m // Projection changes only this scalar memory value; inventory stays read-only.
 		for _, r := range q.s.Jobs {
-			if r.Machine == m.ID && (r.State == "running" || r.State == "stopping") {
+			if batchOnTarget(r, m) && (r.State == "running" || r.State == "stopping") {
 				copy.FreeMemoryGB += r.Spec.Needs.MemoryGB
 			}
 		}
@@ -334,9 +337,15 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 		winner := q.candidate(target, nil)
 		base := "waiting for a worker to pull this job"
 		live := q.s.Machines[target.ID]
+		for _, view := range q.machineTargets(live) {
+			if sameTarget(view, target) {
+				live = view
+				break
+			}
+		}
 		busy := false
 		for _, r := range q.s.Jobs {
-			if r.Machine == live.ID && (r.State == "running" || r.State == "stopping") {
+			if batchOnTarget(r, live) && (r.State == "running" || r.State == "stopping") {
 				busy = true
 			}
 		}
@@ -372,6 +381,18 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 	return order, reasons
 }
 func (q *Queue) waitReason(j *Job) string {
+	if g := j.Spec.Needs.GPU; g != nil && g.Devices != nil {
+		found := false
+		for _, target := range q.plannerMachines() {
+			if !target.Gone && q.jobAllowsMachine(j, target.ID) && deviceAllowed(j, target) && target.MemoryError == "" && (len(j.Spec.Needs.Platform.Required) == 0 || slices.Contains(j.Spec.Needs.Platform.Required, target.GPU)) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return "no_matching_device: no selected device is online and compatible"
+		}
+	}
 	if reason := q.logsWaitingReason(j); reason != "" {
 		return reason
 	}
@@ -388,9 +409,9 @@ func (q *Queue) waitReason(j *Job) string {
 		return r
 	}
 	machines := map[string]*Machine{}
-	for id, m := range q.s.Machines {
-		if q.projectAllows(j.Spec.Project, id) {
-			machines[id] = m
+	for _, m := range q.plannerMachines() {
+		if q.projectAllows(j.Spec.Project, m.ID) {
+			machines[targetKey(m)] = m
 		}
 	}
 	return waitingReason(j, machines, q.s.Jobs)
@@ -433,7 +454,7 @@ func (q *Queue) fairScore(j *Job, m *Machine) float64 {
 // This is a tie-break, not a reservation or same-tier preemption mechanism.
 func (q *Queue) fairActive(j *Job) float64 {
 	count := 0.0
-	for _, m := range q.s.Machines {
+	for _, m := range q.plannerMachines() {
 		for _, row := range q.deviceUsage(m) {
 			if row.Fair > 0 && row.Project == j.Spec.Project && row.Tier == q.priorityMatch(j.Spec).Tier && row.Family == fairResourceFamily(j.Spec) {
 				if row.Family == "cpu" {
@@ -462,6 +483,9 @@ func (q *Queue) projectAllows(project, machine string) bool {
 }
 
 func (q *Queue) validateProjectPlacement(project string, allowed []string) error {
+	if err := q.validateMachineNames(allowed); err != nil {
+		return err
+	}
 	p := q.s.Policies[project].AllowedMachines
 	if len(p) > 0 && len(allowed) > 0 {
 		for _, m := range allowed {
@@ -477,6 +501,9 @@ func (q *Queue) validateProjectPlacement(project string, allowed []string) error
 // Missing inventory can return later; reject only restrictions whose entire
 // last-known fleet is structurally incompatible, never temporary occupancy.
 func (q *Queue) validateProjectCapacity(j *Job) error {
+	if g := j.Spec.Needs.GPU; g != nil && g.Devices != nil {
+		return nil
+	} // Selected devices may return later.
 	if model, ok := q.model(j.Spec.Needs.Model); ok && j.Spec.Needs.MemoryGB == 0 {
 		copy := cloneJob(j)
 		copy.Spec.Needs.MemoryGB = model.MemoryGB
@@ -498,32 +525,34 @@ func (q *Queue) validateProjectCapacity(j *Job) error {
 		if _, reason := cpuCapacity(m); reason != "" {
 			return nil // Unknown telemetry can return; it is not impossibility.
 		}
-		copy := *m
-		copy.Gone = false
-		copy.Leaving = false
-		copy.MemoryError = ""
-		copy.CheckpointUnavailable = false
-		// Submit validation uses total admitted capacity, never current occupancy.
-		copy.CPUInUseCores = 0
-		copy.FreeCPUCores = copy.EffectiveCPUCores
-		copy.CPUCapacityReason = "" // Acknowledgement affects dispatch only.
-		possible := false
-		for _, candidate := range extensionJobs(j, &copy, false) {
-			value := *candidate
-			value.Spec.Kind, value.Spec.Program = "", nil
-			value.Spec.Extension, value.Spec.ExtensionDigest, value.Spec.ExtensionCheck = "", "", nil
-			if fitsResources(&value, &copy, copy.TotalMemoryGB) {
-				possible = true
-				break
+		for _, target := range q.machineTargets(m) {
+			copy := *target
+			copy.Gone = false
+			copy.Leaving = false
+			copy.MemoryError = ""
+			copy.CheckpointUnavailable = false
+			// Submit validation uses total admitted capacity, never current occupancy.
+			copy.CPUInUseCores = 0
+			copy.FreeCPUCores = copy.EffectiveCPUCores
+			copy.CPUCapacityReason = "" // Acknowledgement affects dispatch only.
+			possible := false
+			for _, candidate := range extensionJobs(j, &copy, false) {
+				value := *candidate
+				value.Spec.Kind, value.Spec.Program = "", nil
+				value.Spec.Extension, value.Spec.ExtensionDigest, value.Spec.ExtensionCheck = "", "", nil
+				if fitsResources(&value, &copy, copy.TotalMemoryGB) {
+					possible = true
+					break
+				}
 			}
+			if !possible {
+				continue
+			}
+			if model, ok := q.model(j.Spec.Needs.Model); ok && !q.modelFitsMachine(model, target) {
+				continue
+			}
+			return nil
 		}
-		if !possible {
-			continue
-		}
-		if model, ok := q.model(j.Spec.Needs.Model); ok && !q.modelFitsMachine(model, m) {
-			continue
-		}
-		return nil
 	}
 	return fmt.Errorf("no compatible machine in project %s allowed_machines (last-known platform, capacity and environment)", j.Spec.Project)
 }

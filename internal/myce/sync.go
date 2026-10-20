@@ -97,8 +97,18 @@ func (q *Queue) copyPlan(m *Machine) ([]CopyTask, []CopyTask, []string) {
 	if q.maintenanceBlocked(hostID(m)) || m.Leaving || availabilityBlocked(m) || q.machineLimitReason(m) != "" {
 		return nil, nil, nil
 	}
-	scores := q.modelScores(m)
-	pins := q.cachePins(m)
+	targets := q.machineTargets(m)
+	scores, pins := map[string]int{}, []string{}
+	for _, target := range targets {
+		for name, score := range q.modelScores(target) {
+			scores[name] = max(scores[name], score)
+		}
+		for _, name := range q.cachePins(target) {
+			if !contains(pins, name) {
+				pins = append(pins, name)
+			}
+		}
+	}
 	for _, j := range q.s.Jobs {
 		if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") && j.Spec.Needs.Model != "" && !contains(pins, j.Spec.Needs.Model) {
 			pins = append(pins, j.Spec.Needs.Model)
@@ -112,7 +122,11 @@ func (q *Queue) copyPlan(m *Machine) ([]CopyTask, []CopyTask, []string) {
 		}
 	}
 	for _, s := range q.s.SyncRequests {
-		if targetMatches(s.To, m) {
+		matches := false
+		for _, target := range targets {
+			matches = matches || targetMatches(s.To, target)
+		}
+		if matches {
 			if s.Cancel {
 				cancelled[s.Model] = true
 			} else {
@@ -124,6 +138,7 @@ func (q *Queue) copyPlan(m *Machine) ([]CopyTask, []CopyTask, []string) {
 		wanted[name] = true
 		delete(cancelled, name)
 	}
+	sort.Strings(pins)
 	usage := []CopyTask{}
 	for _, model := range q.models.Models {
 		usage = append(usage, CopyTask{Model: model.Name, Score: scores[model.Name]})
@@ -144,9 +159,14 @@ func (q *Queue) copyPlan(m *Machine) ([]CopyTask, []CopyTask, []string) {
 	if !busy {
 		for name := range wanted {
 			model, ok := q.model(name)
-			if ok && !cancelled[name] && model.SizeBytes > 0 && !model.DirectNAS && q.modelFitsMachine(model, m) && !contains(m.CachedModels, name) {
-				l := q.issuePreparation(m, "copy", name)
-				plan = append(plan, CopyTask{Model: name, Score: scores[name], Launch: &l})
+			if ok && !cancelled[name] && model.SizeBytes > 0 && !model.DirectNAS && !contains(m.CachedModels, name) {
+				for _, target := range targets {
+					if q.modelFitsMachine(model, target) {
+						l := q.issuePreparation(target, "copy", name)
+						plan = append(plan, CopyTask{Model: name, Score: scores[name], Launch: &l})
+						break // The verified cache is shared by every component.
+					}
+				}
 			}
 		}
 	}
@@ -208,7 +228,7 @@ func (q *Queue) workerBatchIdle(m *Machine) bool {
 		return false
 	}
 	for _, j := range q.s.Jobs {
-		if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") {
+		if batchOnTarget(j, m) && (j.State == "running" || j.State == "stopping") {
 			return false
 		}
 	}
@@ -253,8 +273,8 @@ func (q *Queue) placementBetter(j *Job, a, b *Machine) bool {
 }
 func (q *Queue) betterPlacement(j *Job, m *Machine) bool {
 	if j.Spec.extensionJob() {
-		for _, other := range q.s.Machines {
-			if other.ID != m.ID && !q.unreported[other.ID] && q.workerIdle(other, j) && q.placementAllowed(j, other) && q.checkpointReady(j, other) && fits(j, other, other.FreeMemoryGB) && q.capabilityPlacementBetter(j, other, m) {
+		for _, other := range q.plannerMachines() {
+			if !sameTarget(other, m) && !q.unreported[other.ID] && q.workerIdle(other, j) && q.placementAllowed(j, other) && q.checkpointReady(j, other) && fits(j, other, other.FreeMemoryGB) && q.capabilityPlacementBetter(j, other, m) {
 				return true
 			}
 		}
@@ -263,8 +283,8 @@ func (q *Queue) betterPlacement(j *Job, m *Machine) bool {
 	if !j.Spec.Needs.cpuOnly() && j.Spec.Needs.Model == "" && j.Spec.Environment.Key() == "" {
 		return false
 	}
-	for _, other := range q.s.Machines {
-		if other.ID == m.ID || !q.workerIdle(other, j) || !q.placementAllowed(j, other) || !fits(j, other, other.FreeMemoryGB) {
+	for _, other := range q.plannerMachines() {
+		if sameTarget(other, m) || !q.workerIdle(other, j) || !q.placementAllowed(j, other) || !fits(j, other, other.FreeMemoryGB) {
 			continue
 		}
 		if q.placementBetter(j, other, m) {

@@ -26,6 +26,7 @@ type attemptSupervisor struct {
 	directive   AttemptDirective
 	worker      Worker
 	connected   bool
+	released    bool
 	finished    bool
 	err         error
 	wake        chan struct{}
@@ -152,6 +153,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		}
 		a.mu.Lock()
 		a.report, a.diagnostics = report, diagnostics
+		a.released = p == nil && s.state.Result != nil && !s.state.Result.ReleasePending
 		a.mu.Unlock()
 		if connected && !d.Hold {
 			var err error
@@ -380,7 +382,7 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport)
 			usedCores++
 			for _, m := range w.ModelConfig.Models {
 				if m.Name == r.Name {
-					usedRAM += hostNeed(&w.Machine, m.MemoryGB, m.HostMemoryGB)
+					usedRAM += hostNeed(allocationMachine(&w.Machine, []string{r.Device}), m.MemoryGB, m.HostMemoryGB)
 				}
 			}
 		}
@@ -395,7 +397,7 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport)
 			for _, r := range models {
 				if r.State == "ready" || r.State == "draining" || r.State == "loading" {
 					for _, m := range w.ModelConfig.Models {
-						if m.Name == r.Name && (m.Device == id || m.Device == "" && id == w.Machine.Device) {
+						if m.Name == r.Name && (r.Device == id || r.Device == "" && (m.Device == id || m.Device == "" && id == w.Machine.Device)) {
 							usedGPU += m.MemoryGB
 						}
 					}
@@ -532,8 +534,13 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			if status.DockerCleanup != "" && (diagnostics.DockerCleanup == "" || status.DockerCleanup < diagnostics.DockerCleanup) {
 				diagnostics.DockerCleanup, diagnostics.DockerCause = status.DockerCleanup, status.DockerCause
 			}
-			jobs = append(jobs, a.job)
-			batch += a.job.Spec.Needs.MemoryGB
+			a.mu.Lock()
+			released := a.released
+			a.mu.Unlock()
+			if !released {
+				jobs = append(jobs, a.job)
+				batch += a.job.Spec.Needs.MemoryGB
+			}
 		}
 		w.batchMemory.Store(math.Float64bits(batch))
 		if recovering && len(actors) == 0 {
@@ -552,7 +559,14 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			m.DockerCleanup, m.DockerCause = diagnostics.DockerCleanup, diagnostics.DockerCause
 			m.FileTransferError = diagnostics.FileTransferError
 			probeInventory := w.InventoryProbe
-			observed, probeErr := root.inventory.run("devices", func() ([]MachineDevice, error) { return probeInventory(ctx) })
+			observed, probeErr := root.inventory.run("devices", func() ([]MachineDevice, error) {
+				devices, err := probeInventory(ctx)
+				for i := range devices {
+					d := &devices[i]
+					d.ExtensionFingerprint, _ = ExtensionFingerprint(ctx, d.Platform, d.ID)
+				}
+				return devices, err
+			})
 			if err := w.refreshInventory(observed, probeErr, root); err != nil {
 				return err
 			}
@@ -619,8 +633,22 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				m.CapabilityProfile = &profile
 			}
 			if w.ExtensionRoot != "" {
-				m.ExtensionReports = LocalExtensionReports(w.ExtensionRoot, m.GPU, w.extensionFingerprint, &m)
+				cpu := m
+				cpu.GPU, cpu.Device = "cpu", ""
+				cpu.ExtensionFingerprint = m.CPUExtensionFingerprint
+				m.ExtensionReports = LocalExtensionReports(w.ExtensionRoot, "cpu", cpu.ExtensionFingerprint, &cpu)
+				for i := range m.Devices {
+					target := m.Devices[i].machine(m)
+					m.Devices[i].ExtensionReports = LocalExtensionReports(w.ExtensionRoot, target.GPU, target.ExtensionFingerprint, &target)
+				}
+				for _, d := range m.Devices {
+					if d.ID == m.Device {
+						m.ExtensionReports = append(m.ExtensionReports, d.ExtensionReports...)
+						m.ExtensionFingerprint = d.ExtensionFingerprint
+					}
+				}
 				w.Machine.ExtensionReports = m.ExtensionReports
+				w.Machine.Devices = slices.Clone(m.Devices)
 			}
 			uploadMachine, uploadClient := m, w.Client
 			_, _ = root.environmentLogs.run("environment-logs", func() (bool, error) { return true, environments.upload(ctx, uploadClient, uploadMachine) })
@@ -653,6 +681,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			}
 			rt.mu.Lock()
 			rt.memoryMachine, rt.session = w.Machine, w.Machine.Session
+			rt.batchJobs = slices.Clone(jobs)
 			rt.mu.Unlock()
 			reply, err := w.checkin(ctx, Checkin{Machine: m, Attempts: reports, Fresh: fresh, PreviousSession: root.state.PreviousSession, ModelReports: modelReports})
 			if err == nil {
@@ -707,7 +736,16 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 							r := Result{Machine: m.ID, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Interrupted: true, Error: "worker leaving before command started"}
 							s.state.Result = &r
 						}
-						if e = localAttemptAdmission(w, jobs, j, modelReports); e != nil {
+						active := []Job{}
+						for _, old := range actors {
+							old.mu.Lock()
+							released := old.released || old.finished
+							old.mu.Unlock()
+							if !released {
+								active = append(active, old.job)
+							}
+						}
+						if e = localAttemptAdmission(w, active, j, modelReports); e != nil {
 							e = s.startFailure(j, launchRefused, e)
 							r := startFailureOutcome(Result{Machine: m.ID, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Error: e.Error()}, e)
 							s.state.Result = &r

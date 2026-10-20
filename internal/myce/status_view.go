@@ -201,7 +201,7 @@ func (q *Queue) statusWaitingReason(j *Job) string {
 	if strings.HasPrefix(reason, "no machine in the fleet can run this right now") || reason == "waiting for a worker to pull this job" {
 		blocked := []string{}
 		possible := 0
-		for _, m := range q.s.Machines {
+		for _, m := range q.plannerMachines() {
 			if !q.projectAllows(j.Spec.Project, m.ID) {
 				continue
 			}

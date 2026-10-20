@@ -2,16 +2,21 @@ package myce
 
 import (
 	"context"
+	"crypto/sha256"
 	"fmt"
 	"net/http"
 	"net/url"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 )
 
 type WorkerEvent struct {
-	Session string `json:"session,omitempty"`
-	Cursor  string `json:"cursor"`
+	PriorityStop *PriorityPreemption `json:"priority_stop,omitempty"`
+	Events       []WorkerEvent       `json:"events,omitempty"`
+	Session      string              `json:"session,omitempty"`
+	Cursor       string              `json:"cursor"`
 	Execution
 	StopAt       *time.Time `json:"stop_at,omitempty"`
 	deadline     time.Time
@@ -26,13 +31,52 @@ func (a API) workerEvent(w http.ResponseWriter, r *http.Request) {
 		a.Queue.mu.Lock()
 		wake := a.Queue.wake
 		var event WorkerEvent
-		// M3: return all stopping attempts; this legacy event path selects only one.
-		for _, j := range a.Queue.s.Jobs {
-			if j.Machine == r.PathValue("id") && j.Session == r.URL.Query().Get("session") && (j.State == "stopping" || terminal(j.State) && !j.ReleaseConfirmed) && j.StopAt != nil {
-				deadline := *j.StopAt
-				event = WorkerEvent{Session: j.Session, StopAt: &deadline, Cursor: fmt.Sprintf("%s:%d:%s", j.ID, j.Attempt, j.StopAt.Format(time.RFC3339Nano)), Execution: Execution{ID: j.ID, Attempt: j.Attempt}, GraceSeconds: max(0, j.StopAt.Sub(a.Queue.clock.Now()).Seconds()), Kill: expired(j.StopAt, a.Queue.clock.Now())}
-				break
+		now := a.Queue.clock.Now()
+		entries := map[attemptKey]WorkerEvent{}
+		add := func(id string, attempt int, session string, deadline time.Time) {
+			if session != r.URL.Query().Get("session") {
+				return
 			}
+			e := WorkerEvent{Session: session, StopAt: &deadline, Cursor: fmt.Sprintf("%s:%s:%d:%s:%t", session, id, attempt, deadline.Format(time.RFC3339Nano), !now.Before(deadline)), Execution: Execution{ID: id, Attempt: attempt}, GraceSeconds: max(0, deadline.Sub(now).Seconds()), Kill: !now.Before(deadline)}
+			if j := a.Queue.s.Jobs[id]; j != nil {
+				for _, copy := range j.Copies {
+					if copy.Machine == r.PathValue("id") && copy.Session == session && copy.Attempt == attempt {
+						e.PriorityStop = copy.PriorityStop
+					}
+				}
+			}
+			if e.PriorityStop != nil {
+				e.Cursor += ":" + e.PriorityStop.Demand
+			}
+			if old, ok := entries[eventKey(e)]; ok && old.StopAt.Before(deadline) {
+				return
+			}
+			entries[eventKey(e)] = e
+		}
+		for _, j := range a.Queue.s.Jobs {
+			if j.Machine == r.PathValue("id") && (j.State == "stopping" || terminal(j.State) && !j.ReleaseConfirmed) && j.StopAt != nil {
+				add(j.ID, j.Attempt, j.Session, *j.StopAt)
+			}
+		}
+		for _, hold := range a.Queue.s.HostReleases {
+			if hold.Machine == r.PathValue("id") && !hold.Until.IsZero() {
+				add(hold.Job, hold.Attempt, hold.Session, hold.Until)
+			}
+		}
+		var events []WorkerEvent
+		for _, e := range entries {
+			events = append(events, e)
+		}
+		slices.SortFunc(events, func(a, b WorkerEvent) int { return strings.Compare(a.Cursor, b.Cursor) })
+		if len(events) > 0 {
+			event = events[0] // Keep the bounded legacy single-event adapter.
+			var cursor strings.Builder
+			for _, e := range events {
+				cursor.WriteString(e.Cursor)
+				cursor.WriteByte(0)
+			}
+			event.Cursor = fmt.Sprintf("%x", sha256.Sum256([]byte(cursor.String())))
+			event.Events = events
 		}
 		a.Queue.mu.Unlock()
 		if event.Cursor != "" && event.Cursor != r.URL.Query().Get("after") {
@@ -65,22 +109,29 @@ func (w Worker) watchStops(ctx context.Context, events chan<- WorkerEvent) {
 			}
 			continue
 		}
-		if event.ID != "" && event.Cursor != after {
-			event.deadline = w.Clock.Now().Add(time.Duration(max(0, event.GraceSeconds) * float64(time.Second)))
-			if event.StopAt != nil {
-				event.deadline = *event.StopAt
+		if event.Cursor != after {
+			batch := event.Events
+			if len(batch) == 0 && event.ID != "" {
+				batch = []WorkerEvent{event}
 			}
-			select {
-			case events <- event:
-			case <-ctx.Done():
-				return
+			for _, e := range batch {
+				e.deadline = w.Clock.Now().Add(time.Duration(max(0, e.GraceSeconds) * float64(time.Second)))
+				if e.StopAt != nil {
+					e.deadline = *e.StopAt
+				}
+				select {
+				case events <- e:
+				case <-ctx.Done():
+					return
+				}
 			}
 		}
 		after = event.Cursor
 	}
 }
 
-// Process control never takes the upload/store loop's locks or performs I/O.
+// Process control never waits for uploads or takes the worker-store loop's locks.
+// Signal facts and daemon intent use their existing small local state writes.
 // A stop received before command startup is retained for that exact attempt.
 type processControl struct {
 	availability  *availabilityMonitor
@@ -110,7 +161,11 @@ func (c *processControl) apply() {
 			p.stop(now, StopGrace, false)
 		}
 		if event, ok := c.pendingEvents[key]; ok {
-			p.stop(now, max(0, event.deadline.Sub(now)), event.Kill || !now.Before(event.deadline))
+			p.mu.Lock()
+			if p.recordPriorityStopLocked(event.PriorityStop) == nil {
+				p.stopLocked(now, max(0, event.deadline.Sub(now)), event.Kill || !now.Before(event.deadline))
+			}
+			p.mu.Unlock()
 		}
 		p.enforceGrace(now)
 	}
@@ -148,7 +203,7 @@ func (c *processControl) run(ctx, stop context.Context, events <-chan WorkerEven
 				c.pendingEvents = map[attemptKey]WorkerEvent{}
 			}
 			key := eventKey(event)
-			if old, ok := c.pendingEvents[key]; !ok || event.deadline.Before(old.deadline) {
+			if old, ok := c.pendingEvents[key]; !ok || event.deadline.Before(old.deadline) || old.PriorityStop == nil && event.PriorityStop != nil {
 				c.pendingEvents[key] = event
 			}
 			c.apply()

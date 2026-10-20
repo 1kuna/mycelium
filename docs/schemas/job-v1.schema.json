@@ -605,6 +605,15 @@
       "properties": {
         "count": {
           "type": "integer"
+        },
+        "devices": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
         }
       },
       "type": "object"
@@ -615,6 +624,9 @@
           "type": "string"
         },
         "demand": {
+          "type": "string"
+        },
+        "device": {
           "type": "string"
         },
         "key": {
@@ -699,6 +711,10 @@
             "array",
             "null"
           ],
+          "x-contract": "diagnostic"
+        },
+        "diagnostic_code": {
+          "type": "string",
           "x-contract": "diagnostic"
         },
         "eligible_hosts": {

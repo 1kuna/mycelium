@@ -3,10 +3,13 @@ package myce
 import (
 	"errors"
 	"sort"
+	"strings"
 	"time"
 )
 
 type ModelPin struct {
+	Device          string `json:"device,omitempty" yaml:"device,omitempty"`
+	AssignedDevice  string `json:"assigned_device,omitempty"`
 	PreemptionCount int    `json:"preemption_count,omitempty"`
 	Project         string `json:"project"`
 	Model           string `json:"model"`
@@ -44,6 +47,12 @@ func (q *Queue) Pin(p ModelPin) error {
 		return err
 	}
 	return q.update(func() error {
+		if strings.Contains(p.Device, ",") {
+			return reject("gpu_count_unsupported", nil)
+		}
+		if p.Device != "" && !canonicalDeviceID(p.Device) {
+			return reject("gpu_selector_invalid", nil)
+		}
 		model, ok := q.model(p.Model)
 		if !ok {
 			return errors.New("unknown model")
@@ -104,7 +113,7 @@ func (q *Queue) Unpin(project, model string) error {
 }
 func (q *Queue) slotPinned(s *ModelSlot) bool {
 	for _, p := range q.s.Pins {
-		if p.Model == s.Model && p.Assigned == s.Machine && p.active(q.clock.Now()) {
+		if p.Model == s.Model && p.Assigned == s.Machine && p.AssignedDevice == s.Device && p.active(q.clock.Now()) {
 			return true
 		}
 	}
@@ -120,21 +129,21 @@ func (q *Queue) maintainPins() {
 		}
 		model, _ := q.model(p.Model)
 		candidates := []*Machine{}
-		for _, m := range q.s.Machines {
+		for _, m := range q.plannerMachines() {
 			if q.hostBenchmarkPending(hostID(m)) {
 				// Keep an existing pin's engine protected while onboarding waits
 				// for an idle host. Do not plan a new engine alongside a benchmark.
-				if s := q.s.ModelSlots[slotKey(m.ID, p.Model)]; s == nil || s.State == "failed" {
+				if s := q.s.ModelSlots[targetSlotKey(m, p.Model)]; s == nil || s.State == "failed" {
 					continue
 				}
 			}
-			if !availabilityBlocked(m) && q.projectAllows(p.Project, m.ID) && !m.Gone && !m.Leaving && m.MemoryError == "" && m.ModelURL != "" && !q.unreported[m.ID] && q.modelUsableMachine(model, m) && (p.Machine == "" || p.Machine == m.ID) && (p.Platform == "" || p.Platform == m.GPU) {
+			if (p.Device == "" || p.Device == m.Device) && !availabilityBlocked(m) && q.projectAllows(p.Project, m.ID) && !m.Gone && !m.Leaving && m.MemoryError == "" && m.ModelURL != "" && !q.unreported[m.ID] && q.modelUsableMachine(model, m) && (p.Machine == "" || p.Machine == m.ID) && (p.Platform == "" || p.Platform == m.GPU) {
 				candidates = append(candidates, m)
 			}
 		}
 		sort.Slice(candidates, func(i, j int) bool {
-			if (candidates[i].ID == p.Assigned) != (candidates[j].ID == p.Assigned) {
-				return candidates[i].ID == p.Assigned
+			if (candidates[i].ID == p.Assigned && candidates[i].Device == p.AssignedDevice) != (candidates[j].ID == p.Assigned && candidates[j].Device == p.AssignedDevice) {
+				return candidates[i].ID == p.Assigned && candidates[i].Device == p.AssignedDevice
 			}
 			a, b := contains(candidates[i].Models, p.Model), contains(candidates[j].Models, p.Model)
 			if a != b {
@@ -144,14 +153,17 @@ func (q *Queue) maintainPins() {
 			if a != b {
 				return a
 			}
-			return candidates[i].ID < candidates[j].ID
+			if candidates[i].ID != candidates[j].ID {
+				return candidates[i].ID < candidates[j].ID
+			}
+			return candidates[i].Device < candidates[j].Device
 		})
 		p.Assigned = ""
 		demand := &Job{ID: "pin/" + p.Project + "/" + p.Model, Spec: Spec{Project: p.Project, Priority: "production"}}
 		demand.Spec.Needs.Model = p.Model
 		var best *placementPlan
 		for _, m := range candidates {
-			key := slotKey(m.ID, p.Model)
+			key := targetSlotKey(m, p.Model)
 			if s := q.s.ModelSlots[key]; s != nil {
 				if s.State != "draining" && s.State != "unloading" && s.State != "unload_failed" {
 					best = &placementPlan{machine: m}
@@ -173,20 +185,20 @@ func (q *Queue) maintainPins() {
 			continue
 		}
 		m := best.machine
-		key := slotKey(m.ID, p.Model)
+		key := targetSlotKey(m, p.Model)
 		if q.s.ModelSlots[key] != nil {
-			p.Assigned = m.ID
+			p.Assigned, p.AssignedDevice = m.ID, targetDevice(m)
 			continue
 		}
 		q.applyPlacement(best, demand)
 		if m.FreeMemoryGB < model.MemoryGB || !cpuAllocationFits(m, 1) || !hostFits(m, model.MemoryGB, model.HostMemoryGB) || q.preparationActive(m) || q.preparationStopping(m) {
 			continue
 		}
-		q.s.ModelSlots[key] = &ModelSlot{Project: p.Project, Model: p.Model, Machine: m.ID, Session: m.Session, State: "loading", LoadUntil: q.engineLoadDeadline(), Attempt: ID(), Priority: "production", LastUsed: now}
+		q.s.ModelSlots[key] = &ModelSlot{Project: p.Project, Model: p.Model, Device: targetDevice(m), Machine: m.ID, Session: m.Session, State: "loading", LoadUntil: q.engineLoadDeadline(), Attempt: ID(), Priority: "production", LastUsed: now}
 		q.initEnginePreemption(q.s.ModelSlots[key])
 		m.FreeMemoryGB -= model.MemoryGB
 		q.refreshHostMemory()
-		p.Assigned = m.ID
+		p.Assigned, p.AssignedDevice = m.ID, targetDevice(m)
 	}
 }
 func (q *Queue) SetProductionGrace(d time.Duration) error {

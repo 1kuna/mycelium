@@ -129,6 +129,10 @@ func wireExamples(t *testing.T) map[string]any {
 	s.Name = "example-job"
 	s.Project = "example"
 	s.SubmissionKey = "example-key"
+	selected := s
+	selected.AllowedMachines = []string{"example-machine"}
+	selected.Needs.GPU = &GPUSelection{Devices: []string{"0", "1"}}
+	deviceJob := Job{ID: "example-device-job", Spec: selected, State: "running", Machine: "example-machine", AllocatedDevices: []string{"1"}, Attempt: 1}
 	queued := Job{ID: "example-job-id", Spec: s, State: "queued", Queued: now, Checkpoint: "example-checkpoints/example-job-id"}
 	running := queued
 	running.State, running.Machine, running.Session, running.Attempt = "running", "example-worker-id", "example-session-id", 1
@@ -157,7 +161,10 @@ func wireExamples(t *testing.T) map[string]any {
 	expired.AcknowledgedAt = nil
 	revision := uint64(7)
 	return map[string]any{
-		"job-queued-keyed": queued, "job-running": running, "job-succeeded": succeeded, "job-reserved-cancelled": reserved,
+		"job-device-selected":         deviceJob,
+		"error-machine-renamed":       wireError(t, &HTTPError{Status: 400, Code: "machine_renamed", Message: `machine old-gpu0 was renamed; use allowed_machines: [example-machine] plus needs.gpu.devices: ["0"]`}),
+		"error-gpu-count-unsupported": wireError(t, &HTTPError{Status: 400, Code: "gpu_count_unsupported", Message: rejectionMessages["gpu_count_unsupported"]}),
+		"job-queued-keyed":            queued, "job-running": running, "job-succeeded": succeeded, "job-reserved-cancelled": reserved,
 		"cancel-queued": ack, "cancel-running-pending": pending, "cancel-terminal": terminal, "cancel-removed": removed, "cancel-absent": absent, "cancel-expired-unknown": expired,
 		"error-job-unknown":         wireError(t, &HTTPError{Status: 404, Code: "job_unknown", Message: "job is unknown", JobID: "example-unknown-id"}),
 		"error-submission-conflict": wireError(t, submissionFailure(false)), "error-submission-expired": wireError(t, submissionFailure(true)),

@@ -587,7 +587,7 @@ func TestMachineWorkerRestartCleansTwoRunningAttempts(t *testing.T) {
 	}
 }
 
-func TestMachineInventoryAuthorityKeepsQueueAdmissionCap(t *testing.T) {
+func TestMachineInventoryAuthorityAllowsIndependentDeviceSlots(t *testing.T) {
 	q, clock := fixture(t)
 	m := machine("inventory", "fake")
 	m.TotalMemoryGB, m.FreeMemoryGB = 1000, 1000
@@ -619,12 +619,11 @@ func TestMachineInventoryAuthorityKeepsQueueAdmissionCap(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, d := range reply.Attempts {
-		if d.Job != nil {
-			t.Fatal("M2 queue lifted one-attempt cap")
-		}
+	neighbor := assignedJob(reply)
+	if neighbor == nil || neighbor.ID != second.ID || !slices.Equal(neighbor.AllocatedDevices, []string{"1"}) {
+		t.Fatal("free neighboring device did not admit the second job", neighbor)
 	}
-	requireState(t, q, second.ID, "queued")
+	requireState(t, q, second.ID, "running")
 }
 func TestMachineDeviceProjectionPreservesSharedHostFacts(t *testing.T) {
 	m := machine("host", "fake")

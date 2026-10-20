@@ -29,7 +29,8 @@ type RunSpec struct {
 }
 
 type GPUSelection struct {
-	Count *int `json:"count,omitempty" yaml:"count,omitempty"`
+	Devices []string `json:"devices,omitempty" yaml:"devices,omitempty"`
+	Count   *int     `json:"count,omitempty" yaml:"count,omitempty"`
 }
 
 type ResourceNeeds struct {

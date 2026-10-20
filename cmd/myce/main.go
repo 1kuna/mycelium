@@ -199,6 +199,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	desktop := f.Bool("desktop", false, "declare a desktop; allow GPU-only thermal coverage on external power")
 	maxJobs := f.Int("max-jobs", 0, "optional maximum simultaneous jobs/calls per physical host (0 means unlimited)")
 	workers := f.Int("workers", 2, "fake workers in dev mode")
+	fakeGPUs := f.Int("fake-gpus", 1, "GPU components per fake machine in dev mode (use --workers 1)")
 	now := f.Bool("now", false, "stop every job on leave")
 	full := f.Bool("full", false, "show full job IDs in status")
 	follow := f.Bool("follow", false, "follow logs until the job is terminal")
@@ -291,7 +292,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if e != nil {
 			return e
 		}
-		d, err := myce.StartDev(myce.DevConfig{ProductionInfrastructureRetries: productionRetries, FileStore: *fileStore, FileStoreLimit: *fileStoreLimit, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, HostPolicies: hosts, HostID: *hostID, ProjectPolicies: policies, EnvironmentConfig: ec, ModelConfig: mc, Address: *address, Database: *db, Checkpoints: *checkpoint, Token: *token, GPU: *gpu, Environments: split(*environments), Models: split(*models), Workers: *workers, CPUReserveCores: *cpuReserve, CPUBudgetCores: *cpuBudget, MemoryGB: *memory})
+		d, err := myce.StartDev(myce.DevConfig{Devices: *fakeGPUs, ProductionInfrastructureRetries: productionRetries, FileStore: *fileStore, FileStoreLimit: *fileStoreLimit, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, HostPolicies: hosts, HostID: *hostID, ProjectPolicies: policies, EnvironmentConfig: ec, ModelConfig: mc, Address: *address, Database: *db, Checkpoints: *checkpoint, Token: *token, GPU: *gpu, Environments: split(*environments), Models: split(*models), Workers: *workers, CPUReserveCores: *cpuReserve, CPUBudgetCores: *cpuBudget, MemoryGB: *memory})
 		if err != nil {
 			return err
 		}
@@ -664,6 +665,15 @@ func printStatus(s myce.Snapshot, full bool) {
 			fmt.Printf("extension %s: %s\n", m.ID, myce.ExtensionStatus(r))
 		}
 		fmt.Printf("hypha %s: %s, %.1f GiB free, %s\n", m.ID, m.GPU, m.FreeMemoryGB, state)
+		for _, d := range m.Devices {
+			fmt.Printf("  device %s: %s, %.1f/%.1f GiB free, %d batch attempts, %d engines, %d outstanding releases %s\n", d.ID, d.Platform, d.FreeMemoryGB, d.BudgetGB, len(d.Attempts), len(d.Models), len(d.Releases), d.Reason)
+			for _, r := range d.ExtensionReports {
+				fmt.Printf("  extension %s/%s: %s\n", m.ID, d.ID, myce.ExtensionStatus(r))
+			}
+		}
+		if m.Replacement != nil {
+			fmt.Printf("  historical: replaced by %s device %s\n", m.Replacement.Machine, m.Replacement.Device)
+		}
 		if len(m.Environments) > 0 {
 			fmt.Printf("environments %s: ready=%s\n", m.ID, strings.Join(m.Environments, ", "))
 		}

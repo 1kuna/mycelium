@@ -1,0 +1,4 @@
+{
+  "code": "gpu_count_unsupported",
+  "error": "only one GPU per attempt is supported; see #105"
+}

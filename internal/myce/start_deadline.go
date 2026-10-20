@@ -3,7 +3,6 @@ package myce
 import (
 	"fmt"
 	"slices"
-	"sort"
 	"time"
 )
 
@@ -15,11 +14,7 @@ func startupPending(j *Job) bool {
 }
 
 func (q *Queue) startWaitingReason(j *Job) string {
-	machines := []*Machine{}
-	for _, m := range q.s.Machines {
-		machines = append(machines, m)
-	}
-	sort.Slice(machines, func(a, b int) bool { return machines[a].ID < machines[b].ID })
+	machines := q.plannerMachines()
 	for _, m := range machines {
 		if !q.projectAllows(j.Spec.Project, m.ID) || len(j.Spec.AllowedMachines) > 0 && !slices.Contains(j.Spec.AllowedMachines, m.ID) || len(j.Spec.Needs.Platform.Required) > 0 && !slices.Contains(j.Spec.Needs.Platform.Required, m.GPU) {
 			continue
@@ -125,7 +120,7 @@ func (q *Queue) allStartHostsDisabled(j *Job) bool {
 		j = &copy
 	}
 	found := false
-	for _, m := range q.s.Machines {
+	for _, m := range q.plannerMachines() {
 		if !q.projectAllows(j.Spec.Project, m.ID) || len(j.Spec.AllowedMachines) > 0 && !slices.Contains(j.Spec.AllowedMachines, m.ID) || len(j.Spec.Needs.Platform.Required) > 0 && !slices.Contains(j.Spec.Needs.Platform.Required, m.GPU) {
 			continue
 		}
@@ -148,7 +143,7 @@ func (q *Queue) allStartHostsDisabled(j *Job) bool {
 }
 
 func (q *Queue) startPlacementAllowed(j *Job) bool {
-	m := q.s.Machines[j.Machine]
+	m := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
 	if m == nil || q.preparationStopping(m) {
 		return false
 	}

@@ -291,7 +291,11 @@ func (q *Queue) withdrawUnavailable(m *Machine) {
 	}
 	for _, j := range q.s.Jobs {
 		if j.Machine == m.ID && j.Session == m.Session && j.State == "running" {
-			q.stop(j, "hypha waiting: "+machineAvailability(m).Reason)
+			reason := "capacity unavailable"
+			if a := machineAvailability(m); a != nil {
+				reason = a.Reason
+			}
+			q.stop(j, "hypha waiting: "+reason)
 			deadline := q.clock.Now().Add(10 * time.Second)
 			if !j.Spec.Resumable {
 				deadline = q.clock.Now()

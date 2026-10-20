@@ -7,6 +7,7 @@ import (
 
 // HostObligation identifies exact retained work; enumeration never releases custody.
 type HostEngineExecution struct {
+	Device  string `json:"device,omitempty"`
 	Machine string `json:"machine"`
 	Session string `json:"session"`
 	Model   string `json:"model"`
@@ -74,12 +75,12 @@ func (q *Queue) hostObligations(host string) []HostObligation {
 		// An exact failed receipt confirms cleanup. A pin's retry reservation
 		// is desired state, not engine custody; unloading/unload_failed still is.
 		if s.State != "failed" && q.executionHost(s.Machine) == host {
-			add(HostObligation{Engine: &HostEngineExecution{Machine: s.Machine, Session: s.Session, Model: s.Model, Attempt: s.Attempt}})
+			add(HostObligation{Engine: &HostEngineExecution{Machine: s.Machine, Session: s.Session, Model: s.Model, Device: s.Device, Attempt: s.Attempt}})
 		}
 	}
 	for _, c := range q.calls {
 		if c.Machine != "" && q.executionHost(c.Machine) == host {
-			add(HostObligation{Call: &HostCallExecution{HostEngineExecution: HostEngineExecution{Machine: c.Machine, Session: c.Session, Model: c.Model, Attempt: c.Attempt}, ID: c.ID}})
+			add(HostObligation{Call: &HostCallExecution{HostEngineExecution: HostEngineExecution{Machine: c.Machine, Session: c.Session, Model: c.Model, Device: c.Device, Attempt: c.Attempt}, ID: c.ID}})
 		}
 	}
 	for _, l := range q.s.PreparationPlans {

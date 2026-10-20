@@ -63,7 +63,7 @@
         "host_control_invalid",
         "dev_clock_invalid",
         "worker_protocol_invalid",
-        "worker_protocol_mismatch"
+        "worker_protocol_mismatch", "gpu_selector_invalid", "gpu_count_unsupported", "machine_renamed", "no_matching_device"
       ]
     },
     "job_id": {

@@ -119,6 +119,18 @@ func (q *Queue) extensionPreparationOffer(e Extension, m *Machine) []Environment
 // Registry bytes are fetched by their frozen digest, then reparsed and verified.
 // All subprocesses and downloads share the existing preparation launch fence.
 func (w Worker) prepareRegisteredExtension(ctx context.Context, plan EnvironmentRecipe) (err error) {
+	if plan.Platform == "cpu" {
+		w, err = w.forAttempt(Job{Spec: Spec{Needs: ResourceNeeds{Platform: Platform{Required: []string{"cpu"}}}}})
+		if err != nil {
+			return err
+		}
+	}
+	if plan.Launch != nil && plan.Launch.Device != "" {
+		w, err = w.forAttempt(Job{AllocatedDevices: []string{plan.Launch.Device}})
+		if err != nil {
+			return err
+		}
+	}
 	if plan.Preparation == nil {
 		return errors.New("missing extension preparation identity")
 	}
@@ -198,6 +210,13 @@ func (w Worker) prepareRegisteredExtension(ctx context.Context, plan Environment
 	}
 	root := filepath.Join(w.environmentCache.Root, plan.Key)
 	env, err := extensionEnvironment(w.ExtensionRoot, e, w.Machine.GPU, w.Machine.Device)
+	if err == nil {
+		var controls map[string]string
+		controls, err = w.deviceEnvironment()
+		for k, v := range controls {
+			env[k] = v
+		}
+	}
 	if err != nil {
 		return err
 	}
@@ -234,7 +253,7 @@ func extensionAssetReplacer(e Extension, root string) *strings.Replacer {
 	return strings.NewReplacer(pairs...)
 }
 func newExtensionReport(e Extension, m *Machine, work string) ExtensionReport {
-	r := ExtensionReport{Name: e.Name, Version: e.Version, Digest: e.Digest, Platform: m.GPU, Work: work, Fingerprint: m.ExtensionFingerprint, Host: hostID(m), EnvironmentIdentity: extensionEnvironmentIdentity(e, m), CheckDigest: extensionCheckIdentity(e, m), Reason: "check required"}
+	r := ExtensionReport{Device: extensionReportDevice(m.GPU, m.Device), Name: e.Name, Version: e.Version, Digest: e.Digest, Platform: m.GPU, Work: work, Fingerprint: m.ExtensionFingerprint, Host: hostID(m), EnvironmentIdentity: extensionEnvironmentIdentity(e, m), CheckDigest: extensionCheckIdentity(e, m), Reason: "check required"}
 	if len(e.Variants) > 0 {
 		t := machineTarget(m)
 		r.Target = &t
@@ -247,6 +266,9 @@ func newExtensionReport(e Extension, m *Machine, work string) ExtensionReport {
 // A successful command alone is only smoke evidence, never qualification.
 func extensionQualificationReason(e Extension, r ExtensionReport, m *Machine) string {
 	view, ok := e.forMachine(m)
+	if m.Devices != nil && (extensionReportDevice(r.Platform, r.Device) != extensionReportDevice(m.GPU, m.Device) || r.Fingerprint == "" || r.Fingerprint != m.ExtensionFingerprint) {
+		return "device identity changed; check required"
+	}
 	if !ok || !e.matchesTarget(m) || !slices.Contains(e.platforms(), m.GPU) {
 		return "extension target does not match this host"
 	}
@@ -277,4 +299,15 @@ func (q *Queue) extensionByDigest(digest string) (Extension, error) {
 		}
 	}
 	return Extension{}, fmt.Errorf("extension digest is not registered")
+}
+
+// The legacy single fake GPU and canonical fake device 0 are the same fixture.
+func extensionReportDevice(platform, device string) string {
+	if platform == "cpu" {
+		return ""
+	}
+	if platform == "fake" && device == "" {
+		return "0"
+	}
+	return device
 }

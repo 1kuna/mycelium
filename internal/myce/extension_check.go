@@ -26,7 +26,10 @@ func CheckExtension(ctx context.Context, root string, e Extension, platform, dev
 	if err != nil {
 		return nil, err
 	}
-	if host == "" || device == "" || cache == nil || cache.Root == "" {
+	if platform == "cpu" {
+		device = ""
+	}
+	if host == "" || platform != "cpu" && device == "" || cache == nil || cache.Root == "" {
 		return nil, errors.New("runtime check requires --host, --device and --environment-cache (start myce dev for automatic local defaults)")
 	}
 	fingerprint, err := ExtensionFingerprint(ctx, platform, device)
@@ -59,10 +62,31 @@ func CheckExtension(ctx context.Context, root string, e Extension, platform, dev
 		return reports, err
 	}
 	var selected *Machine
-	for _, candidate := range snapshot.Machines {
-		if hostID(candidate) == host && candidate.GPU == platform && candidate.Device == device && candidate.ExtensionFingerprint == fingerprint && machineTarget(candidate) == machineTarget(&m) && !candidate.Gone && !candidate.Leaving {
-			selected = candidate
-			break
+	for _, owner := range snapshot.Machines {
+		candidates := []*Machine{owner}
+		if owner.Devices != nil {
+			candidates = nil
+			for _, d := range owner.Devices {
+				target := d.machine(*owner)
+				candidates = append(candidates, &target)
+			}
+			if platform == "cpu" {
+				cpu := *owner
+				cpu.GPU, cpu.Device = "cpu", ""
+				cpu.ExtensionFingerprint = owner.CPUExtensionFingerprint
+				candidates = append(candidates, &cpu)
+			}
+		}
+		for _, candidate := range candidates {
+			if candidate.GPU == "cpu" {
+				cpu := *candidate
+				cpu.Device = ""
+				candidate = &cpu
+			}
+			if hostID(candidate) == host && candidate.GPU == platform && candidate.Device == device && candidate.ExtensionFingerprint == fingerprint && machineTarget(candidate) == machineTarget(&m) && !candidate.Gone && !candidate.Leaving {
+				selected = candidate
+				break
+			}
 		}
 	}
 	if selected == nil {
@@ -109,9 +133,13 @@ func CheckExtension(ctx context.Context, root string, e Extension, platform, dev
 	for i := range reports {
 		r := &reports[i]
 		b, hasBaseline := view.baseline(r.Work, platform)
+		selection := ResourceNeeds{}
+		if platform != "cpu" {
+			selection.GPU = &GPUSelection{Devices: []string{m.Device}}
+		}
 		job, e2 := c.SubmitAndWait(ctx, Spec{Name: "extension-check", Project: "extension-check", SubmissionKey: r.CheckID,
 			Extension: extensionKey(e), ExtensionDigest: e.Digest, AllowedMachines: []string{m.ID},
-			ExtensionCheck: &ExtensionCheckRequest{Work: r.Work, Directory: scratch}})
+			Needs: selection, ExtensionCheck: &ExtensionCheckRequest{Work: r.Work, Directory: scratch}})
 		// Fence the exact check key and confirm cleanup, even when a terminal
 		// result reports a failure with release still pending.
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

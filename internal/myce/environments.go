@@ -298,7 +298,7 @@ func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
 	// Preserve a started same-tier/protected build even if another queued job
 	// wins admission. Only a planned stop may interrupt its preparation.
 	for _, l := range q.s.PreparationPlans {
-		if l.Kind != "environment" || l.Machine != m.ID || l.Session != m.Session || !l.Started {
+		if l.Kind != "environment" || l.Machine != m.ID || l.Session != m.Session || l.Device != targetDevice(m) || !l.Started {
 			continue
 		}
 		if j := q.s.Jobs[l.Demand]; j != nil && j.State == "queued" && !cancelled(j) {

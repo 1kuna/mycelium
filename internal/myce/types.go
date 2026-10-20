@@ -288,6 +288,7 @@ type Copy struct {
 }
 
 type Job struct {
+	DiagnosticCode   string        `json:"diagnostic_code,omitempty"`
 	AllocatedDevices []string      `json:"allocated_devices,omitempty"`
 	PreemptionCount  int           `json:"preemption_count,omitempty"`
 	PriorityPolicy   PriorityMatch `json:"priority_policy"`
@@ -344,7 +345,8 @@ type Job struct {
 	Checkpoint            string                       `json:"checkpoint"`
 }
 type Machine struct {
-	Devices           []MachineDevice `json:"devices"`
+	Replacement       *MachineReplacement `json:"replacement,omitempty"`
+	Devices           []MachineDevice     `json:"devices"`
 	cpuLedger         bool
 	CPUReserveCores   int           `json:"cpu_reserve_cores,omitempty"`
 	CPUBudgetCores    int           `json:"cpu_budget_cores,omitempty"`
@@ -360,6 +362,7 @@ type Machine struct {
 	AdmissionReason             string              `json:"admission_reason,omitempty"`
 	FileTransferError           string              `json:"file_transfer_error,omitempty"`
 	CapabilityProfile           *CapabilityProfile  `json:"capability_profile,omitempty"`
+	CPUExtensionFingerprint     string              `json:"cpu_extension_fingerprint,omitempty"`
 	ExtensionFingerprint        string              `json:"extension_fingerprint,omitempty"`
 	ExtensionReports            []ExtensionReport   `json:"extension_reports,omitempty"`
 	HostMemoryAllowanceBytes    int64               `json:"memory_allowance_bytes,omitempty"`

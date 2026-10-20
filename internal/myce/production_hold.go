@@ -82,6 +82,11 @@ func (q *Queue) ConfigureHosts(p map[string]HostPolicy) error {
 		normalized[host] = v
 	}
 	return q.update(func() error {
+		for h := range normalized {
+			if err := q.validateMachineNames([]string{h}); err != nil {
+				return err
+			}
+		}
 		if len(q.s.Hosts) > 0 {
 			saved := map[string]HostPolicy{}
 			for h, s := range q.s.Hosts {
@@ -110,7 +115,7 @@ func (q *Queue) retainRelease(j *Job) {
 	if j.ReleaseConfirmed {
 		return
 	}
-	m := q.s.Machines[j.Machine]
+	m := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
 	if m == nil {
 		return
 	}
@@ -292,7 +297,7 @@ func productionBlockerDetail(host, text string, class hostBlockerClass) HoldDeta
 }
 
 func (q *Queue) holdWaitReason(j *Job) string {
-	for _, m := range q.s.Machines {
+	for _, m := range q.plannerMachines() {
 		if q.projectAllows(j.Spec.Project, m.ID) && fitsWithoutHostMemory(j, m, m.TotalMemoryGB) {
 			if b := q.dockerBlocker(hostID(m)); b != "" {
 				return b
@@ -303,13 +308,13 @@ func (q *Queue) holdWaitReason(j *Job) string {
 		return q.holdReason(j.ProductionHost)
 	}
 	if j.Spec.Priority == "production" && j.ProductionHost == "" {
-		for _, m := range q.s.Machines {
+		for _, m := range q.plannerMachines() {
 			h := q.s.Hosts[hostID(m)]
 			if h == nil || !h.Policy.ProductionHold || !q.jobAllowsMachine(j, m.ID) || !fitsWithoutHostMemory(j, m, m.TotalMemoryGB) {
 				continue
 			}
 			for _, slot := range q.s.ModelSlots {
-				if slot.Machine == m.ID && q.slotPinned(slot) && q.comparePriority(q.slotSpec(slot), j.Spec) <= 0 && slot.Model != j.Spec.Needs.Model {
+				if slotOnTarget(slot, m) && q.slotPinned(slot) && q.comparePriority(q.slotSpec(slot), j.Spec) <= 0 && slot.Model != j.Spec.Needs.Model {
 					model, _ := q.model(slot.Model)
 					if model.MemoryGB+j.Spec.Needs.MemoryGB > m.TotalMemoryGB {
 						return "pinned model " + slot.Model + " on " + m.ID + " prevents production placement"
@@ -319,7 +324,7 @@ func (q *Queue) holdWaitReason(j *Job) string {
 		}
 	}
 	if j.Spec.Priority != "production" {
-		for _, m := range q.s.Machines {
+		for _, m := range q.plannerMachines() {
 			if q.held(hostID(m)) && q.projectAllows(j.Spec.Project, m.ID) && fitsWithoutHostMemory(j, m, m.TotalMemoryGB) {
 				return "host " + hostID(m) + " reserved for production"
 			}
@@ -331,11 +336,7 @@ func (q *Queue) holdWaitReason(j *Job) string {
 // Select once, before stopping anything. Occupancy is reclaimable; immutable
 // capacity, environments, project/job restrictions and pins are not.
 func (q *Queue) productionTarget(j *Job, call *ModelCall) string {
-	machines := []*Machine{}
-	for _, m := range q.s.Machines {
-		machines = append(machines, m)
-	}
-	sort.Slice(machines, func(a, b int) bool { return machines[a].ID < machines[b].ID })
+	machines := q.plannerMachines()
 	var best *Machine
 	bestStops := int(^uint(0) >> 1)
 	for _, m := range machines {
@@ -349,12 +350,12 @@ func (q *Queue) productionTarget(j *Job, call *ModelCall) string {
 		if hasModel && !q.modelFitsMachine(model, m) {
 			continue
 		}
-		if call != nil && (m.ModelURL == "" || m.ID == call.Exclude) {
+		if call != nil && (m.ModelURL == "" || q.callExcludes(call, m.ID, targetDevice(m))) {
 			continue
 		}
 		pinned := 0.0
 		for _, s := range q.s.ModelSlots {
-			if s.Machine == m.ID && (q.slotPinned(s) && q.comparePriority(q.slotSpec(s), j.Spec) <= 0 || s.State == "unload_failed") {
+			if slotOnTarget(s, m) && (q.slotPinned(s) && q.comparePriority(q.slotSpec(s), j.Spec) <= 0 || s.State == "unload_failed") {
 				model, _ := q.model(s.Model)
 				if call == nil || s.Model != call.Model {
 					pinned += model.MemoryGB
@@ -364,7 +365,7 @@ func (q *Queue) productionTarget(j *Job, call *ModelCall) string {
 		if m.TotalMemoryGB-pinned < j.Spec.Needs.MemoryGB {
 			continue
 		}
-		slot := q.s.ModelSlots[slotKey(m.ID, j.Spec.Needs.Model)]
+		slot := q.s.ModelSlots[targetSlotKey(m, j.Spec.Needs.Model)]
 		// Calls reuse a ready/loading model's existing host-memory reservation.
 		if call == nil || slot == nil || slot.State != "ready" && slot.State != "loading" {
 			if _, _, ok := q.hostReleases(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, "production", j.Spec); !ok {
@@ -414,7 +415,7 @@ func (q *Queue) maintainHolds() {
 			}
 		}
 		if j.ProductionHost == "" {
-			if m := q.s.Machines[j.Machine]; m != nil {
+			if m := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices); m != nil {
 				if h := q.s.Hosts[hostID(m)]; h != nil && h.Policy.ProductionHold {
 					j.ProductionHost = hostID(m)
 				}
@@ -466,7 +467,7 @@ func (q *Queue) maintainHolds() {
 			}
 		}
 		for _, j := range q.s.Jobs {
-			m := q.s.Machines[j.Machine]
+			m := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
 			if m != nil && hostID(m) == host && (j.State == "running" || j.State == "stopping") {
 				if q.comparePriority(j.Spec, q.hostPrioritySpec(host)) > 0 {
 					q.stopBatchFor(j, q.hostPreemptionDemand(host))
@@ -477,7 +478,7 @@ func (q *Queue) maintainHolds() {
 		for _, c := range q.calls {
 			m := q.s.Machines[c.Machine]
 			if m != nil && hostID(m) == host && q.comparePriority(callJob(c).Spec, q.hostPrioritySpec(host)) > 0 && c.Error == "" {
-				if slot := q.s.ModelSlots[slotKey(c.Machine, c.Model)]; slot != nil {
+				if slot := q.s.ModelSlots[slotKey(c.Machine, c.Model, c.Device)]; slot != nil {
 					if slot.PriorityStop == nil && q.preemptionProtected(slot.PreemptionCount, slot.RunSince) {
 						continue
 					}
@@ -562,8 +563,13 @@ func (q *Queue) backgroundPreparing(m *Machine) bool {
 	}
 	for _, r := range m.CopyReports {
 		if r.State == "copying" {
-			s := q.s.ModelSlots[slotKey(m.ID, r.Model)]
-			if s == nil || s.Priority != "production" {
+			production := false
+			for _, s := range q.s.ModelSlots {
+				if s.Machine == m.ID && s.Model == r.Model && s.Priority == "production" {
+					production = true
+				}
+			}
+			if !production {
 				return true
 			}
 		}

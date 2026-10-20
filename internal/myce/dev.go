@@ -14,6 +14,7 @@ import (
 )
 
 type DevConfig struct {
+	Devices                         int
 	ProductionInfrastructureRetries *int
 	FileStore                       string
 	FileStoreLimit                  int64
@@ -59,6 +60,12 @@ func StartDev(c DevConfig) (*Dev, error) {
 	}
 	if c.GPU == "cpu" {
 		c.MemoryGB = 0
+	}
+	if c.Devices == 0 {
+		c.Devices = 1
+	}
+	if c.Devices < 1 || c.Devices > 1 && (c.Workers != 1 || c.GPU != "fake") {
+		return nil, errors.New("multiple fake GPUs require one fake machine worker")
 	}
 	clock := &devClock{}
 	if c.HostID == "" {
@@ -148,7 +155,9 @@ func StartDev(c DevConfig) (*Dev, error) {
 			cancel()
 			return nil, err
 		}
-		targets = append(targets, ExtensionCheckTarget{Host: c.HostID, Platform: c.GPU, Device: "0", EnvironmentCache: cache, OS: runtime.GOOS, Arch: runtime.GOARCH})
+		for device := 0; device < c.Devices; device++ {
+			targets = append(targets, ExtensionCheckTarget{Host: c.HostID, Platform: c.GPU, Device: fmt.Sprint(device), EnvironmentCache: cache, OS: runtime.GOOS, Arch: runtime.GOARCH})
+		}
 	}
 	clock.targets = targets
 	d.server = &http.Server{Handler: API{Queue: q, Token: c.Token}.Handler(), ReadHeaderTimeout: 5 * time.Second}
@@ -169,6 +178,16 @@ func StartDev(c DevConfig) (*Dev, error) {
 	}()
 	for i := 0; i < c.Workers; i++ {
 		w := Worker{CPUIsolationProbe: func(context.Context) error { return nil }, ExtensionRoot: c.ExtensionRoot, JobFileRoot: c.JobFileRoot, ModelConfig: c.ModelConfig, StateDir: filepath.Join(filepath.Dir(c.Database), "workers", fmt.Sprintf("fake-%d", i+1)), Client: d.client, Machine: Machine{CPUReserveCores: c.CPUReserveCores, CPUBudgetCores: c.CPUBudgetCores, HostMemoryMeasured: true, HostID: c.HostID, Device: "0", ID: fmt.Sprintf("fake-%d", i+1), GPU: c.GPU, FreeMemoryGB: c.MemoryGB, Environments: c.Environments, Models: c.Models}, Interval: c.Interval}
+		if c.Devices > 1 {
+			w.Machine.ID, w.Machine.Device = c.HostID, ""
+			devices := []MachineDevice{}
+			for index := 0; index < c.Devices; index++ {
+				id := fmt.Sprint(index)
+				devices = append(devices, MachineDevice{ID: id, Platform: "fake", Identity: "fake-" + id, Fingerprint: "fake", Selector: id, MemoryMode: "fixed", TotalMemoryGB: c.MemoryGB, BudgetGB: c.MemoryGB, FreeMemoryGB: c.MemoryGB})
+			}
+			w.Machine.Devices = devices
+			w.InventoryProbe = func(context.Context) ([]MachineDevice, error) { return append([]MachineDevice(nil), devices...), nil }
+		}
 		d.workerWG.Add(1)
 		go func() {
 			defer d.workerWG.Done()

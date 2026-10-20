@@ -20,6 +20,7 @@ import (
 var errExtensionUnavailable = errors.New("extension qualification unavailable")
 
 type ExtensionReport struct {
+	Device              string           `json:"device,omitempty"`
 	Host                string           `json:"host,omitempty"`
 	EnvironmentIdentity string           `json:"environment_identity,omitempty"`
 	CheckDigest         string           `json:"check_digest,omitempty"`
@@ -133,6 +134,9 @@ func LocalExtensions(root string) ([]Extension, error) {
 // Fingerprints are only hashes. Rejoining after a hardware/driver/OS change
 // invalidates cached qualification. A failed identity probe fails closed.
 func ExtensionFingerprint(ctx context.Context, platform, device string) (string, error) {
+	if platform == "cpu" {
+		device = ""
+	}
 	if !validGPU(platform) {
 		return "", errors.New("invalid extension platform")
 	}
@@ -255,6 +259,15 @@ func writeExtensionReports(root string, e Extension, platform string, reports []
 	if err := os.MkdirAll(extensionCache(root, e, platform), 0700); err != nil {
 		return err
 	}
+	devices := map[string]bool{}
+	for _, r := range reports {
+		devices[r.Device] = true
+	}
+	for _, r := range readExtensionReports(root, e, platform) {
+		if !devices[r.Device] {
+			reports = append(reports, r)
+		}
+	}
 	return saveWorkerJSON(extensionCache(root, e, platform), "qualification.json", reports)
 }
 func readExtensionReports(root string, e Extension, platform string) []ExtensionReport {
@@ -301,7 +314,7 @@ func LocalExtensionReports(root, platform, fingerprint string, machines ...*Mach
 				}
 			}
 			for _, old := range records {
-				if old.Work == work && old.Digest == e.Digest {
+				if old.Work == work && old.Digest == e.Digest && (len(machines) == 0 || extensionReportDevice(platform, old.Device) == extensionReportDevice(platform, machines[0].Device)) {
 					r = old
 					break
 				}
@@ -368,7 +381,7 @@ func runExtensionCommand(ctx context.Context, args []string, dir string, env map
 // detailed logs stay local; only fixed reasons enter reports/status.
 func PrepareExtension(ctx context.Context, root string, e Extension, platform, device string, check bool, log io.Writer, caches ...*EnvironmentCache) ([]ExtensionReport, error) {
 	host, _ := os.Hostname()
-	local := Machine{HostID: host, GPU: platform, CapabilityProfile: &CapabilityProfile{OS: runtime.GOOS, Arch: runtime.GOARCH}}
+	local := Machine{HostID: host, GPU: platform, Device: device, CapabilityProfile: &CapabilityProfile{OS: runtime.GOOS, Arch: runtime.GOARCH}}
 	if reason := e.targetUnavailableReason(machineTarget(&local)); reason != "" {
 		return nil, errors.New(reason)
 	}
@@ -530,6 +543,13 @@ func (w Worker) prepareExtensionExecution(j *Job) (envOut map[string]string, rel
 		return nil, nil, errors.New("extension qualification changed")
 	}
 	env, err := extensionEnvironment(w.ExtensionRoot, *e, w.Machine.GPU, w.Machine.Device)
+	if err == nil {
+		var controls map[string]string
+		controls, err = w.deviceEnvironment()
+		for k, v := range controls {
+			env[k] = v
+		}
+	}
 	if err != nil {
 		unlock()
 		return nil, nil, err

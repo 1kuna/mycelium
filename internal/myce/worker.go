@@ -120,6 +120,16 @@ func (p *process) recordPriorityStop(s *workerStore, stop *PriorityPreemption) e
 	if err := s.save(); err != nil {
 		return err
 	}
+	return p.recordPriorityStopLocked(stop)
+}
+
+func (p *process) recordPriorityStopLocked(stop *PriorityPreemption) error {
+	if stop == nil {
+		return nil
+	}
+	if p.priorityStop != nil && p.priorityStop.Demand == stop.Demand && p.priorityStop.Victim == stop.Victim {
+		return nil
+	}
 	if p.docker != nil {
 		p.docker.mu.Lock()
 		p.docker.state.PriorityStop = stop
@@ -936,6 +946,9 @@ func (w Worker) Run(stop context.Context) error {
 	w.extensionFingerprint, _ = ExtensionFingerprint(probeCtx, w.Machine.GPU, w.Machine.Device)
 	cancel()
 	w.Machine.ExtensionFingerprint = w.extensionFingerprint
+	probeCtx, cancel = context.WithTimeout(context.Background(), 15*time.Second)
+	w.Machine.CPUExtensionFingerprint, _ = ExtensionFingerprint(probeCtx, "cpu", "")
+	cancel()
 	w.environmentCache.Fetch = w.fileCache.copyTo
 	return w.runAttempts(stop, s, stores, rt, environments, rawMemory, requestRetention)
 }

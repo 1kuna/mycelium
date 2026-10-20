@@ -47,20 +47,23 @@ func (q *Queue) expireEngineLoad(s *ModelSlot) {
 
 // A slot's attempt identifies an engine, independently of the worker session.
 // Reports must identify the exact engine attempt.
-func (q *Queue) callExcludes(c *ModelCall, machine string) bool {
+func (q *Queue) callExcludes(c *ModelCall, machine string, device ...string) bool {
+	if len(device) > 0 && c.ExcludeAttempt != "" && c.Device != device[0] {
+		return false
+	}
 	if machine != c.Exclude {
 		return false
 	}
 	if c.ExcludeAttempt == "" {
 		return true
 	}
-	s := q.s.ModelSlots[slotKey(machine, c.Model)]
+	s := q.s.ModelSlots[slotKey(machine, c.Model, c.Device)]
 	// A cleaned failed slot can only receive a fresh load, never a dispatch.
 	return s != nil && s.State != "failed" && s.Attempt == c.ExcludeAttempt
 }
 
 func (q *Queue) callAttemptLive(c *ModelCall) bool {
-	s := q.s.ModelSlots[slotKey(c.Machine, c.Model)]
+	s := q.s.ModelSlots[slotKey(c.Machine, c.Model, c.Device)]
 	return c.Error == "" && s != nil && s.Session == c.Session && s.Attempt == c.Attempt && (s.State == "ready" || s.State == "draining")
 }
 

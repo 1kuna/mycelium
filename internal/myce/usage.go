@@ -58,7 +58,7 @@ func (q *Queue) deviceUsage(m *Machine) []usageSample {
 	rows := []usageSample{}
 	active, allocated := 0, 0
 	for _, j := range q.s.Jobs {
-		if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") {
+		if (batchOnTarget(j, m) || m.Devices != nil && m.GPU == "cpu" && j.Machine == m.ID && j.Spec.Needs.cpuOnly()) && (j.State == "running" || j.State == "stopping") {
 			busy, fair := 0.0, 1.0
 			if j.Spec.Needs.cpuOnly() {
 				fair = float64(j.Spec.Needs.cores())
@@ -75,7 +75,7 @@ func (q *Queue) deviceUsage(m *Machine) []usageSample {
 	}
 	seen := map[string]bool{}
 	for _, c := range q.calls {
-		if c.Machine == m.ID && c.Error == "" {
+		if c.Machine == m.ID && (m.Devices == nil || c.Device == m.Device && m.GPU != "cpu") && c.Error == "" {
 			key := fairUsageKey(q.priorityMatch(callJob(c).Spec).Tier, c.Project, c.Model)
 			if !seen[key] {
 				model, _ := q.model(c.Model)
@@ -95,8 +95,8 @@ func (q *Queue) deviceUsage(m *Machine) []usageSample {
 	// A pin is a separate reservation, never added to busy/observed totals.
 	reserved := map[string]bool{}
 	for _, p := range q.s.Pins {
-		if p.Assigned == m.ID {
-			if s := q.s.ModelSlots[slotKey(m.ID, p.Model)]; s != nil && q.slotPinned(s) {
+		if p.Assigned == m.ID && (m.Devices == nil || p.AssignedDevice == m.Device && m.GPU != "cpu") {
+			if s := q.s.ModelSlots[slotKey(m.ID, p.Model, p.AssignedDevice)]; s != nil && q.slotPinned(s) {
 				model, _ := q.model(p.Model)
 				reserved[p.Model] = true
 				rows = append(rows, usageSample{Project: p.Project, Model: p.Model, Pinned: 1, Memory: model.MemoryGB})
@@ -104,7 +104,7 @@ func (q *Queue) deviceUsage(m *Machine) []usageSample {
 		}
 	}
 	for _, slot := range q.s.ModelSlots {
-		if slot.Machine == m.ID && slot.State != "unloaded" && !reserved[slot.Model] {
+		if slotOnTarget(slot, m) && slot.State != "unloaded" && !reserved[slot.Model] {
 			found := false
 			for _, r := range rows {
 				if r.Model == slot.Model {
@@ -165,7 +165,7 @@ func (q *Queue) accountUsage(now time.Time) {
 		q.s.FairUsage[project] = FairUsage{Seconds: decayed(u, now), At: now}
 	}
 	from = maxTime(from, now.Add(-90*24*time.Hour))
-	for _, m := range q.s.Machines {
+	for _, m := range q.plannerMachines() {
 		if m.Gone || q.unreported[m.ID] || m.MemoryError != "" {
 			continue
 		}

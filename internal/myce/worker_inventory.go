@@ -14,20 +14,25 @@ import (
 
 // MachineDevice is one accelerator's capacity, never an additional host pool.
 type MachineDevice struct {
-	ID                string             `json:"id"`
-	Platform          string             `json:"platform"`
-	Identity          string             `json:"identity"`
-	Fingerprint       string             `json:"fingerprint"`
-	Selector          string             `json:"selector"`
-	MemoryMode        string             `json:"memory_mode"`
-	TotalMemoryGB     float64            `json:"total_memory_gb"`
-	ReserveMemoryGB   float64            `json:"reserve_memory_gb"`
-	BudgetGB          float64            `json:"budget_gb"`
-	FreeMemoryGB      float64            `json:"free_memory_gb"`
-	MemoryMeasured    bool               `json:"memory_measured,omitempty"`
-	UnifiedMemory     bool               `json:"unified_memory,omitempty"`
-	Reason            string             `json:"reason,omitempty"`
-	CapabilityProfile *CapabilityProfile `json:"capability_profile,omitempty"`
+	Attempts             []Execution        `json:"attempts,omitempty"`
+	Models               []ModelSlot        `json:"models,omitempty"`
+	Releases             []HostRelease      `json:"releases,omitempty"`
+	ExtensionFingerprint string             `json:"extension_fingerprint,omitempty"`
+	ExtensionReports     []ExtensionReport  `json:"extension_reports,omitempty"`
+	ID                   string             `json:"id"`
+	Platform             string             `json:"platform"`
+	Identity             string             `json:"identity"`
+	Fingerprint          string             `json:"fingerprint"`
+	Selector             string             `json:"selector"`
+	MemoryMode           string             `json:"memory_mode"`
+	TotalMemoryGB        float64            `json:"total_memory_gb"`
+	ReserveMemoryGB      float64            `json:"reserve_memory_gb"`
+	BudgetGB             float64            `json:"budget_gb"`
+	FreeMemoryGB         float64            `json:"free_memory_gb"`
+	MemoryMeasured       bool               `json:"memory_measured,omitempty"`
+	UnifiedMemory        bool               `json:"unified_memory,omitempty"`
+	Reason               string             `json:"reason,omitempty"`
+	CapabilityProfile    *CapabilityProfile `json:"capability_profile,omitempty"`
 }
 
 func singleDeviceMask(device string) error {
@@ -61,6 +66,7 @@ func validateInventory(devices []MachineDevice) error {
 
 func (d MachineDevice) machine(base Machine) Machine {
 	base.GPU, base.Device = d.Platform, d.ID
+	base.ExtensionFingerprint, base.ExtensionReports = d.ExtensionFingerprint, d.ExtensionReports
 	// The old planner's total is its effective capacity. Physical totals stay in
 	// the inventory; neither telemetry nor scalar compatibility adds allowance.
 	base.FreeMemoryGB, base.TotalMemoryGB, base.ReservedMemoryGB = min(d.FreeMemoryGB, d.BudgetGB), d.BudgetGB, d.ReserveMemoryGB
@@ -246,6 +252,10 @@ func (w Worker) verifyDevice() error {
 func (w Worker) forAttempt(j Job) (Worker, error) {
 	if j.Spec.Needs.cpuOnly() {
 		w.Machine.GPU, w.Machine.Device, w.DeviceBinding = "cpu", "", ""
+		if w.Machine.CPUExtensionFingerprint != "" {
+			w.Machine.ExtensionFingerprint = w.Machine.CPUExtensionFingerprint
+		}
+		w.extensionFingerprint = w.Machine.ExtensionFingerprint
 		w.MemorySource = nil
 		w.selectedDevice = nil
 		w.cpuIsolation = true
@@ -277,6 +287,7 @@ func (w Worker) forAttempt(j Job) (Worker, error) {
 		}
 		w.selectedDevice = &d
 		w.Machine = d.machine(w.Machine)
+		w.extensionFingerprint = w.Machine.ExtensionFingerprint
 		w.DeviceBinding = d.Selector
 		if err := w.verifyDevice(); err != nil {
 			return w, err
@@ -413,6 +424,8 @@ func (w Worker) localInventoryWithProbe(ctx context.Context, probe MachineProbe)
 // M2 projects exactly one inventory component into the existing planner. M3
 // enumerates targets; scalar diagnostics never add another allocation pool.
 func inventoryTarget(m *Machine) error {
+	fingerprint, reports := m.ExtensionFingerprint, m.ExtensionReports
+	defer func() { m.ExtensionFingerprint, m.ExtensionReports = fingerprint, reports }()
 	if m.Devices == nil {
 		return nil
 	}

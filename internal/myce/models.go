@@ -192,6 +192,7 @@ func validateModels(c ModelConfig) error {
 }
 
 type ModelSlot struct {
+	Device               string              `json:"device,omitempty"`
 	PreemptionCount      int                 `json:"preemption_count,omitempty"`
 	RunSince             *time.Time          `json:"run_since,omitempty"`
 	Class                string              `json:"class,omitempty"`
@@ -227,6 +228,7 @@ type ModelSlot struct {
 	IdleSeconds       float64            `json:"idle_seconds"`
 }
 type ModelReport struct {
+	Device         string `json:"device,omitempty"`
 	Attempt        string `json:"attempt,omitempty"`
 	RuntimeFailed  bool   `json:"runtime_failed,omitempty"`
 	HealthRevision uint64 `json:"health_revision,omitempty"`
@@ -238,6 +240,7 @@ type ModelReport struct {
 	Error          string `json:"error,omitempty"`
 }
 type ModelCall struct {
+	Device                           string
 	PreemptionCount                  int
 	Class                            string
 	PriorityStop                     *PriorityPreemption
@@ -252,7 +255,29 @@ type ModelCall struct {
 	Machine, Session, Exclude, Error string
 }
 
-func slotKey(machine, model string) string { return machine + "/" + model }
+func slotKey(machine, model string, device ...string) string {
+	if len(device) > 0 && device[0] != "" {
+		return machine + "/" + device[0] + "/" + model
+	}
+	return machine + "/" + model
+}
+func targetDevice(m *Machine) string {
+	if m.Devices != nil {
+		return m.Device
+	}
+	return ""
+}
+func targetSlotKey(m *Machine, model string) string { return slotKey(m.ID, model, targetDevice(m)) }
+func slotOnTarget(s *ModelSlot, m *Machine) bool {
+	return s.Machine == m.ID && (m.Devices == nil || s.Device == m.Device && m.GPU != "cpu")
+}
+func slotMachine(m *Machine, s *ModelSlot) *Machine {
+	if s.Device == "" {
+		return m
+	}
+	return allocationMachine(m, []string{s.Device})
+}
+
 func (q *Queue) ConfigureModels(c ModelConfig) error {
 	if e := validateModels(c); e != nil {
 		return e
@@ -273,6 +298,9 @@ func (q *Queue) ConfigureModels(c ModelConfig) error {
 		}
 	}
 	for _, m := range c.Models {
+		if err := q.validateMachineNames(m.AllowedMachines); err != nil {
+			return err
+		}
 		if m.Environment != "" {
 			recipes, ok := q.environments.Environments[m.Environment]
 			if !ok {
@@ -330,7 +358,7 @@ func (q *Queue) modelReservation(m *Machine, reports []ModelReport) float64 {
 	}
 	resident := map[string]bool{}
 	for _, r := range reports {
-		if slot := q.s.ModelSlots[slotKey(m.ID, r.Name)]; slot != nil && (r.Attempt == "" || slot.Attempt != r.Attempt) {
+		if slot := q.s.ModelSlots[slotKey(m.ID, r.Name, r.Device)]; slot != nil && (r.Attempt == "" || slot.Attempt != r.Attempt) {
 			continue
 		}
 		if contains([]string{"ready", "draining", "unloading", "unload_failed"}, r.State) {
@@ -359,7 +387,7 @@ func (q *Queue) reconcileModels(m *Machine, reports []ModelReport) {
 			continue
 		}
 		for _, r := range reports {
-			if r.Name == s.Model {
+			if r.Name == s.Model && r.Device == s.Device {
 				if r.Attempt == "" || r.Attempt != s.Attempt {
 					continue
 				}
@@ -402,7 +430,7 @@ func (q *Queue) maintainModels() {
 	now := q.clock.Now()
 	q.maintainPins()
 	for k, s := range q.s.ModelSlots {
-		m := q.s.Machines[s.Machine]
+		m := slotMachine(q.s.Machines[s.Machine], s)
 		if m == nil || m.Gone || m.Session != s.Session {
 			if m != nil && (q.maintenanceKnown(hostID(m)) || m.Session == s.Session && (m.HostMemoryBudgetGB > 0 || m.hostBudgetGB > 0 || q.s.Hosts[hostID(m)] != nil && q.s.Hosts[hostID(m)].Policy.ProductionHold)) {
 				continue
@@ -462,7 +490,7 @@ func (q *Queue) maintainModels() {
 		// load beats interrupting a ready engine's call or another worker's build.
 		sort.SliceStable(machines, func(i, j int) bool {
 			rank := func(m *Machine) int {
-				if s := q.s.ModelSlots[slotKey(m.ID, c.Model)]; s != nil {
+				if s := q.s.ModelSlots[targetSlotKey(m, c.Model)]; s != nil {
 					if s.State == "ready" {
 						return 0
 					}
@@ -484,7 +512,7 @@ func (q *Queue) maintainModels() {
 		var best *placementPlan
 		for _, m := range machines {
 			var p *placementPlan
-			s := q.s.ModelSlots[slotKey(m.ID, c.Model)]
+			s := q.s.ModelSlots[targetSlotKey(m, c.Model)]
 			switch {
 			case s != nil && s.State == "ready":
 				p = q.callSlotPlan(m, c, s, model.MaxInFlight)
@@ -502,12 +530,12 @@ func (q *Queue) maintainModels() {
 		}
 		q.applyPlacement(best, callJob(c))
 		m := best.machine
-		s := q.s.ModelSlots[slotKey(m.ID, c.Model)]
+		s := q.s.ModelSlots[targetSlotKey(m, c.Model)]
 		if s != nil && s.State == "ready" {
 			if model.MaxInFlight > 0 && s.InFlight >= model.MaxInFlight {
 				continue
 			}
-			c.Machine, c.Session, c.Attempt = m.ID, m.Session, s.Attempt
+			c.Machine, c.Session, c.Attempt, c.Device = m.ID, m.Session, s.Attempt, s.Device
 			c.StartedAt = &now
 			if c.Priority == "production" {
 				s.ProductionUsed = true
@@ -535,8 +563,8 @@ func (q *Queue) maintainModels() {
 			q.beginEngineAttempt(s, c.Priority)
 			s.Class, s.Project = c.Class, c.Project
 		} else {
-			s = &ModelSlot{Project: c.Project, Model: c.Model, Machine: m.ID, Session: m.Session, State: "loading", LoadUntil: q.engineLoadDeadline(), Attempt: ID(), Priority: c.Priority, Class: c.Class, ProductionUsed: c.Priority == "production", LastUsed: now}
-			q.s.ModelSlots[slotKey(m.ID, c.Model)] = s
+			s = &ModelSlot{Project: c.Project, Model: c.Model, Device: targetDevice(m), Machine: m.ID, Session: m.Session, State: "loading", LoadUntil: q.engineLoadDeadline(), Attempt: ID(), Priority: c.Priority, Class: c.Class, ProductionUsed: c.Priority == "production", LastUsed: now}
+			q.s.ModelSlots[targetSlotKey(m, c.Model)] = s
 		}
 		q.initEnginePreemption(s)
 		m.FreeMemoryGB -= model.MemoryGB
@@ -550,7 +578,7 @@ func (q *Queue) maintainModels() {
 	for {
 		var j *Job
 		for _, m := range q.plannerMachines() {
-			if planned[m.ID] {
+			if planned[targetKey(m)] {
 				continue
 			}
 			winner := q.candidate(m, handled)
@@ -578,16 +606,16 @@ func callJob(c *ModelCall) *Job {
 // behind requests that cannot reclaim higher-priority work.
 func (q *Queue) callCanUse(m *Machine, c *ModelCall) bool {
 	model, ok := q.model(c.Model)
-	if !ok || !q.callPlacementAllowed(c, m) || c.Machine != "" || c.Error != "" || q.capReasonFor(callJob(c), m) != "" || m.MemoryError != "" || m.Gone || m.Leaving || q.callExcludes(c, m.ID) || m.ModelURL == "" || !q.modelUsableMachine(model, m) || q.unreported[m.ID] {
+	if !ok || !q.callPlacementAllowed(c, m) || c.Machine != "" || c.Error != "" || q.capReasonFor(callJob(c), m) != "" || m.MemoryError != "" || m.Gone || m.Leaving || q.callExcludes(c, m.ID, targetDevice(m)) || m.ModelURL == "" || !q.modelUsableMachine(model, m) || q.unreported[m.ID] {
 		return false
 	}
-	if s := q.s.ModelSlots[slotKey(m.ID, c.Model)]; s != nil && s.State == "ready" {
+	if s := q.s.ModelSlots[targetSlotKey(m, c.Model)]; s != nil && s.State == "ready" {
 		return q.callSlotPlan(m, c, s, model.MaxInFlight) != nil
 	}
-	if s := q.s.ModelSlots[slotKey(m.ID, c.Model)]; s != nil && s.State == "failed" && (s.RetryAt == nil || q.clock.Now().Before(*s.RetryAt)) {
+	if s := q.s.ModelSlots[targetSlotKey(m, c.Model)]; s != nil && s.State == "failed" && (s.RetryAt == nil || q.clock.Now().Before(*s.RetryAt)) {
 		return false
 	}
-	if s := q.s.ModelSlots[slotKey(m.ID, c.Model)]; s != nil && s.State == "loading" {
+	if s := q.s.ModelSlots[targetSlotKey(m, c.Model)]; s != nil && s.State == "loading" {
 		return true
 	}
 	return q.roomPlan(callJob(c), m, false) != nil
@@ -618,7 +646,7 @@ func (q *Queue) modelPlan(machine string) []ModelSlot {
 			}
 			slot.Placement = q.modelPlacement(model)
 			if model.Environment != "" {
-				recipe := q.environments.Environments[model.Environment][q.s.Machines[machine].GPU]
+				recipe := q.environments.Environments[model.Environment][slotMachine(q.s.Machines[machine], s).GPU]
 				slot.EnvironmentRecipe = &recipe
 			}
 			out = append(out, slot)
@@ -651,7 +679,7 @@ func (q *Queue) finishCall(id string) error {
 	return q.update(func() error {
 		c := q.calls[id]
 		if c != nil {
-			if s := q.s.ModelSlots[slotKey(c.Machine, c.Model)]; s != nil && s.Session == c.Session && s.Attempt == c.Attempt {
+			if s := q.s.ModelSlots[slotKey(c.Machine, c.Model, c.Device)]; s != nil && s.Session == c.Session && s.Attempt == c.Attempt {
 				s.InFlight = max(0, s.InFlight-1)
 				s.LastUsed = q.clock.Now()
 			}
@@ -669,7 +697,7 @@ func (q *Queue) finishCall(id string) error {
 // Only current use protects a model from reclamation. A completed high-priority
 // request must not protect remaining experiments (or an entirely idle model).
 func (q *Queue) refreshModelPriority(c *ModelCall) {
-	s := q.s.ModelSlots[slotKey(c.Machine, c.Model)]
+	s := q.s.ModelSlots[slotKey(c.Machine, c.Model, c.Device)]
 	if s == nil || s.Session != c.Session || s.Attempt != c.Attempt {
 		return
 	}
@@ -1091,7 +1119,7 @@ func (q *Queue) retryCall(id string) error {
 			return errors.New("model call no longer active")
 		}
 		previous := *live
-		if s := q.s.ModelSlots[slotKey(live.Machine, live.Model)]; s != nil && s.Session == live.Session && s.Attempt == live.Attempt {
+		if s := q.s.ModelSlots[slotKey(live.Machine, live.Model, live.Device)]; s != nil && s.Session == live.Session && s.Attempt == live.Attempt {
 			s.InFlight = max(0, s.InFlight-1)
 			s.LastUsed = q.clock.Now()
 		}
@@ -1121,7 +1149,7 @@ func (q *Queue) makeBatchRoom(j *Job, planned, handled map[string]bool) string {
 	var best *placementPlan
 	var selected *Job
 	for _, m := range q.plannerMachines() {
-		if !q.placementAllowed(j, m) || q.unreported[m.ID] || planned[m.ID] {
+		if !q.placementAllowed(j, m) || q.unreported[m.ID] || planned[targetKey(m)] {
 			continue
 		}
 		winner := q.candidate(m, handled)
@@ -1136,7 +1164,7 @@ func (q *Queue) makeBatchRoom(j *Job, planned, handled map[string]bool) string {
 		return ""
 	}
 	q.applyPlacement(best, selected)
-	return best.machine.ID
+	return targetKey(best.machine)
 }
 
 var errPriorityPreemption = errors.New("model call interrupted by higher priority demand")

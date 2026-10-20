@@ -384,6 +384,9 @@ func extensionJobs(j *Job, m *Machine, qualified bool) []*Job {
 	if !j.Spec.extensionJob() || j.State == "running" || j.State == "stopping" {
 		return []*Job{j}
 	}
+	if !deviceAllowed(j, m) {
+		return nil
+	}
 	var out []*Job
 	for _, e := range j.Extensions {
 		if !e.matchesTarget(m) || !slices.Contains(e.platforms(), m.GPU) {
@@ -396,6 +399,23 @@ func extensionJobs(j *Job, m *Machine, qualified bool) []*Job {
 		}
 		if v := e.variant(machineTarget(m)); v != nil {
 			copy.Spec.Needs = v.Needs
+			floor, caller := v.Needs.GPU, j.Spec.Needs.GPU
+			if caller != nil {
+				selection := *caller
+				if floor != nil {
+					selection.Count = floor.Count
+					if floor.Devices != nil {
+						selection.Devices = slices.Clone(floor.Devices)
+						if caller.Devices != nil {
+							selection.Devices = slices.DeleteFunc(selection.Devices, func(id string) bool { return !slices.Contains(caller.Devices, id) })
+						}
+					}
+				}
+				copy.Spec.Needs.GPU = &selection
+			}
+			if !deviceAllowed(&copy, m) {
+				continue
+			}
 			copy.Spec.Needs.Platform = Platform{Required: []string{m.GPU}}
 			copy.Spec.Needs.MemoryGB = max(copy.Spec.Needs.MemoryGB, j.Spec.SizeHint.MemoryGB)
 			copy.Spec.Needs.HostMemoryGB = max(copy.Spec.Needs.HostMemoryGB, j.Spec.SizeHint.HostMemoryGB)

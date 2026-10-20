@@ -224,23 +224,32 @@ func (q *Queue) SetLossTimeouts(production, deadline, experiment time.Duration) 
 	return nil
 }
 func (q *Queue) machineLossTimeout(id string) time.Duration {
-	priority := 2
+	timeout := time.Duration(0)
+	add := func(priority string) {
+		d := q.lossTimeouts[min(2, legacyRank(priority))]
+		if timeout == 0 || d < timeout {
+			timeout = d
+		}
+	}
 	for _, j := range q.s.Jobs {
 		if j.Machine == id && (j.State == "running" || j.State == "stopping") {
-			priority = min(priority, legacyRank(j.Spec.Priority))
+			add(j.Spec.Priority)
 		}
 	}
 	for _, c := range q.calls {
 		if c.Machine == id && c.Error == "" {
-			priority = min(priority, legacyRank(c.Priority))
+			add(c.Priority)
 		}
 	}
 	for _, slot := range q.s.ModelSlots {
 		if slot.Machine == id && (slot.State == "loading" || slot.InFlight > 0) {
-			priority = min(priority, legacyRank(slot.Priority))
+			add(slot.Priority)
 		}
 	}
-	return q.lossTimeouts[priority]
+	if timeout == 0 {
+		return q.lossTimeouts[2]
+	}
+	return timeout
 }
 
 // Simulated workers have an always-available pretend NAS; production still probes it.
@@ -403,6 +412,9 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		if existing != nil {
 			out = *existing
 			return nil
+		}
+		if err := q.validateMachineNames(s.AllowedMachines); err != nil {
+			return err
 		}
 		if err := ctx.Err(); err != nil {
 			return err
@@ -726,6 +738,17 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			return errors.New("worker model config does not match queue")
 		}
 		old := q.s.Machines[m.ID]
+		if old != nil && old.Replacement != nil {
+			return q.validateMachineNames([]string{m.ID})
+		}
+		if old != nil && m.Devices != nil {
+			for _, d := range old.Devices {
+				if !slices.ContainsFunc(m.Devices, func(current MachineDevice) bool { return current.ID == d.ID }) {
+					d.Reason, d.FreeMemoryGB = "device_probe_unavailable", 0
+					m.Devices = append(m.Devices, d)
+				}
+			}
+		}
 		if old != nil && hostID(old) != hostID(&m) {
 			return errors.New("machine physical host identity changed")
 		}
@@ -807,6 +830,9 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		}
 		q.s.LastWorkerContact = m.LastSeen
 		delete(q.s.BatchReleases, m.ID) // This report supersedes acknowledgement credit.
+		for _, d := range m.Devices {
+			delete(q.s.BatchReleases, m.ID+"/"+d.ID)
+		}
 		q.reconcileModels(&m, c.ModelReports)
 		if e := q.reconcileEnvironments(&m); e != nil {
 			return e
@@ -845,7 +871,16 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 					boundStop(&reply.PreparationStopAt, *l.StopAt)
 				}
 			}
-			reply.EnvironmentPlan = q.environmentPlan(&m)
+			if m.Devices == nil {
+				reply.EnvironmentPlan = q.environmentPlan(&m)
+			} else {
+				for _, target := range q.machineTargets(&m) {
+					if plans := q.environmentPlan(target); len(plans) > 0 {
+						reply.EnvironmentPlan = plans
+						break
+					}
+				}
+			}
 			reply.ModelPlan = q.modelPlan(m.ID)
 			reply.CopyPlan, reply.CacheUsage, reply.CachePins = q.copyPlan(&m)
 			q.cancelUnofferedPreparations(&m, reply)
@@ -861,6 +896,12 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 				}
 			}
 		}
+		if c.AttemptProtocol != "" && m.Devices != nil {
+			q.checkinMachineAttempts(&m, reports, progresses, &reply)
+			q.maintain()
+			return nil
+		}
+
 		if len(reports) != 0 {
 			seen := map[attemptKey]bool{}
 			for i := range reports {
@@ -940,47 +981,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 				j = nil
 			}
 			if j != nil {
-				// The planner returns a target-specific copy. Persist its exact
-				// reservation on the live attempt before charging any resources.
-				selected := j
-				j = q.s.Jobs[selected.ID]
-				j.Spec.Needs = selected.Spec.Needs
-				if e := qualifiedExtension(selected, &m); e != nil {
-					j.Extension = &ExtensionSelection{Name: e.Name, Version: e.Version, Digest: e.Digest}
-				}
-				j.State = "running"
-				j.ReleaseConfirmed = false
-				j.RequeuedByOperator = false
-				j.StartedAt = nil
-				now := q.clock.Now()
-				j.PriorityPolicy = q.priorityMatch(j.Spec)
-				j.AssignedAt = &now
-				j.FinishedAt = nil
-				j.StartLatencySeconds = 0
-				m.FreeMemoryGB = max(0, m.FreeMemoryGB-j.Spec.Needs.MemoryGB)
-				j.Starts = max(j.Starts, j.Attempt) + 1
-				j.Attempt = j.Starts
-				if j.FileTransport {
-					j.OutputRefs = nil
-					j.ResumeFiles = bestFileCheckpoint(j)
-				}
-				if j.Spec.extensionJob() && !j.FileTransport {
-					j.OutputFiles = map[string]string{}
-					for name, prefix := range j.Spec.Outputs {
-						j.OutputFiles[name] = outputRelative(*j, name, prefix)
-					}
-				}
-				j.Progress = 0
-				j.Machine = m.ID
-				j.AllocatedDevices = nil
-				if m.Devices != nil && !j.Spec.Needs.cpuOnly() {
-					j.AllocatedDevices = []string{m.Device}
-				}
-				j.Copies = append(j.Copies, Copy{AllocatedDevices: slices.Clone(j.AllocatedDevices), Machine: m.ID, Session: m.Session, Attempt: j.Attempt, Extension: j.Extension, ReleaseReason: "awaiting_release"})
-				j.Session = m.Session
-				j.Reason = ""
-				q.refreshHostMemory()
-				out := cloneJob(j)
+				out := q.assign(j, &m)
 				reply.Job = &out
 			}
 		}
@@ -997,6 +998,15 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			return Reply{}, e
 		}
 		reply.Job.Checkpoint = relative
+	}
+	for i := range reply.Attempts {
+		if j := reply.Attempts[i].Job; j != nil {
+			relative, e := filepath.Rel(q.root, j.Checkpoint)
+			if e != nil {
+				return Reply{}, e
+			}
+			j.Checkpoint = relative
+		}
 	}
 	return attemptReply(c, reply), err
 }
@@ -1176,7 +1186,8 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 		if q.s.BatchReleases == nil {
 			q.s.BatchReleases = map[string]batchRelease{}
 		}
-		q.s.BatchReleases[j.Machine] = batchRelease{Session: j.Session, MemoryGB: j.Spec.Needs.MemoryGB, Until: *j.StopAt}
+		owner := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
+		q.s.BatchReleases[batchReleaseKey(owner)] = batchRelease{Session: j.Session, MemoryGB: j.Spec.Needs.MemoryGB, Until: *j.StopAt}
 	}
 	if cancelled(j) || j.State == "stopping" && (!r.Success || !plannedPriorityStop(j)) && !oomFailure && !stageFailure {
 		if cancelled(j) {
@@ -1397,7 +1408,7 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 						continue
 					}
 					eligible = true
-					slot := q.s.ModelSlots[slotKey(m.ID, c.Model)]
+					slot := q.s.ModelSlots[targetSlotKey(m, c.Model)]
 					if slot != nil && (slot.State == "ready" || slot.State == "loading") || hostFits(m, model.MemoryGB, model.HostMemoryGB) {
 						room = true
 					}
@@ -1426,6 +1437,7 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 		}
 		for _, m := range q.s.Machines {
 			copy := cloneMachine(m)
+			q.machineDeviceStatus(&copy, m)
 			copy.AdmissionReason = q.machineLimitReason(m)
 			copy.Disabled = ""
 			if q.maintenanceBlocked(hostID(m)) {
@@ -1450,11 +1462,19 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 			}
 			out.Machines = append(out.Machines, &copy)
 		}
+		for _, j := range out.Jobs {
+			if strings.HasPrefix(j.Reason, "no_matching_device:") {
+				j.DiagnosticCode = "no_matching_device"
+			}
+		}
 		if forStatus {
 			for _, j := range out.Jobs {
 				q.statusEligibility(j)
 				if j.State == "queued" {
 					j.Reason = q.statusWaitingReason(j)
+					if strings.HasPrefix(j.Reason, "no_matching_device:") {
+						j.DiagnosticCode = "no_matching_device"
+					}
 				}
 			}
 		}
@@ -1651,8 +1671,8 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 	reply := AttemptDirective{Execution: Execution{ID: report.ID, Attempt: report.Attempt}, Session: report.Session}
 	j := q.s.Jobs[report.ID]
 	if j != nil && !terminal(j.State) && !cancelled(j) && (j.State == "queued" || j.Attempt != report.Attempt || j.Machine != m.ID || j.Session != m.Session) {
-		canRecover := !q.workerHasOtherAttempt(m.ID, m.Session, j.ID)
 		for _, copy := range j.Copies {
+			canRecover := q.machineRecoveryFits(m, j, copy)
 			if canRecover && q.placementAllowed(j, m) && copy.Recoverable && copy.Attempt == report.Attempt && copy.Machine == m.ID && copy.Session == m.Session && j.State != "queued" && (m.CheckpointUnavailable || !q.checkpointsAvailable() || progress.err != nil || (progress.path != "" && progress.path != attemptCheckpoint(*j))) {
 				reply.Hold = true
 				return reply
@@ -1664,6 +1684,7 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 				j.Attempt = copy.Attempt
 				j.Machine = m.ID
 				j.Session = m.Session
+				j.AllocatedDevices = slices.Clone(copy.AllocatedDevices)
 				j.State = "running"
 				j.ReleaseConfirmed = false
 				j.StopAt = nil
@@ -1698,8 +1719,7 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 	return reply
 }
 
-// Recovery is admission too: a returning copy cannot create a second active
-// attempt on this worker. M3 will replace this scalar limit with resource fit.
+// The bounded legacy adapter retains its original scalar recovery limit.
 func (q *Queue) workerHasOtherAttempt(machine, session, job string) bool {
 	for _, j := range q.s.Jobs {
 		if j.Machine == machine && j.Session == session && j.ID != job && (j.State == "running" || j.State == "stopping") {
@@ -1707,4 +1727,49 @@ func (q *Queue) workerHasOtherAttempt(machine, session, job string) bool {
 		}
 	}
 	return false
+}
+
+// assign persists the exact target before delivering it through either wire form.
+func (q *Queue) assign(j *Job, m *Machine) Job {
+	// The planner returns a target-specific copy. Persist its exact
+	// reservation on the live attempt before charging any resources.
+	selected := j
+	j = q.s.Jobs[selected.ID]
+	j.Spec.Needs = selected.Spec.Needs
+	if e := qualifiedExtension(selected, m); e != nil {
+		j.Extension = &ExtensionSelection{Name: e.Name, Version: e.Version, Digest: e.Digest}
+	}
+	j.State = "running"
+	j.ReleaseConfirmed = false
+	j.RequeuedByOperator = false
+	j.StartedAt = nil
+	now := q.clock.Now()
+	j.PriorityPolicy = q.priorityMatch(j.Spec)
+	j.AssignedAt = &now
+	j.FinishedAt = nil
+	j.StartLatencySeconds = 0
+	m.FreeMemoryGB = max(0, m.FreeMemoryGB-j.Spec.Needs.MemoryGB)
+	j.Starts = max(j.Starts, j.Attempt) + 1
+	j.Attempt = j.Starts
+	if j.FileTransport {
+		j.OutputRefs = nil
+		j.ResumeFiles = bestFileCheckpoint(j)
+	}
+	if j.Spec.extensionJob() && !j.FileTransport {
+		j.OutputFiles = map[string]string{}
+		for name, prefix := range j.Spec.Outputs {
+			j.OutputFiles[name] = outputRelative(*j, name, prefix)
+		}
+	}
+	j.Progress = 0
+	j.Machine = m.ID
+	j.AllocatedDevices = nil
+	if m.Devices != nil && !j.Spec.Needs.cpuOnly() {
+		j.AllocatedDevices = []string{m.Device}
+	}
+	j.Copies = append(j.Copies, Copy{AllocatedDevices: slices.Clone(j.AllocatedDevices), Machine: m.ID, Session: m.Session, Attempt: j.Attempt, Extension: j.Extension, ReleaseReason: "awaiting_release"})
+	j.Session = m.Session
+	j.Reason = ""
+	q.refreshHostMemory()
+	return cloneJob(j)
 }

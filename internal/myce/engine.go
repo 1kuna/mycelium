@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -400,6 +401,8 @@ func cleanupRecordedProcesses(dir, pattern string, clock Clock) error {
 }
 
 type workerModel struct {
+	device             string
+	bound              *Worker
 	runtimeFailed      bool
 	attempt            string
 	model              Model
@@ -413,6 +416,8 @@ type workerModel struct {
 	drainRequested     bool
 }
 type modelRuntime struct {
+	worker                *Worker
+	batchJobs             []Job
 	verifyDevice          func() error
 	deviceEnv             map[string]string
 	authorize             func(HostLaunch) error
@@ -475,6 +480,7 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 	if limit == 0 {
 		limit = 100 * 1024 * 1024 * 1024
 	}
+	rt.worker = &w
 	rt.secretRoot = w.SecretRoot
 	rt.cache = &ModelCache{ApprovalRoot: w.ModelApprovalRoot, FileClient: &w.Client, Root: root, NASRoot: w.ModelRoot, Limit: limit, Clock: w.Clock}
 	rt.engineFactory = w.modelEngine
@@ -549,9 +555,9 @@ func (rt *modelRuntime) report() ([]ModelReport, float64) {
 	defer rt.mu.Unlock()
 	out := []ModelReport{}
 	memory := 0.0
-	for name, m := range rt.models {
+	for _, m := range rt.models {
 		rt.checkEngineHealth(m)
-		report := ModelReport{Name: name, Attempt: m.attempt, RuntimeFailed: m.runtimeFailed, State: m.state, Error: ceilingDiagnostic(m.err, "model load or unload failed"), InFlight: m.inflight, CallsMeasured: true}
+		report := ModelReport{Name: m.model.Name, Device: m.device, Attempt: m.attempt, RuntimeFailed: m.runtimeFailed, State: m.state, Error: ceilingDiagnostic(m.err, "model load or unload failed"), InFlight: m.inflight, CallsMeasured: true}
 		if m.state == "ready" {
 			if owned, ok := m.engine.(*LlamaEngine); ok {
 				_, report.HealthRevision, report.HealthDegraded = owned.runtimeHealth()
@@ -588,7 +594,7 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 	defer rt.mu.Unlock()
 	desired := map[string]ModelSlot{}
 	for _, s := range plan {
-		desired[s.Model] = s
+		desired[engineKey(s.Model, s.Device)] = s
 	}
 	for name, m := range rt.models {
 		s, ok := desired[name]
@@ -626,17 +632,17 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 			continue
 		}
 		if s.State == "unloading" {
-			if m := rt.models[s.Model]; m == nil || m.state == "unloaded" || m.state == "failed" {
+			if m := rt.models[engineKey(s.Model, s.Device)]; m == nil || m.state == "unloaded" || m.state == "failed" {
 				// The load deadline can expire before B starts. A has been
 				// cleaned (or never existed), so acknowledge absence under B.
-				rt.models[s.Model] = &workerModel{model: Model{Name: s.Model}, attempt: s.Attempt, state: "unloaded"}
+				rt.models[engineKey(s.Model, s.Device)] = &workerModel{device: s.Device, model: Model{Name: s.Model}, attempt: s.Attempt, state: "unloaded"}
 			}
 			continue
 		}
 		if s.State != "loading" || s.Session != rt.session {
 			continue
 		}
-		if m := rt.models[s.Model]; m != nil {
+		if m := rt.models[engineKey(s.Model, s.Device)]; m != nil {
 			// A delayed loading reply may race with local failure/cleanup.
 			// Only a fresh queue attempt can authorize another engine load.
 			if m.attempt == s.Attempt || m.state != "unloaded" && m.state != "failed" {
@@ -653,11 +659,11 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 			model.Project = s.Placement.Project
 		}
 		if model.Name != "" && (len(model.AllowedMachines) > 0 && !contains(model.AllowedMachines, rt.machine) || !s.Placement.allows(rt.machine)) {
-			rt.models[s.Model] = &workerModel{model: model, attempt: s.Attempt, state: "failed", err: "model placement excludes this worker"}
+			rt.models[engineKey(s.Model, s.Device)] = &workerModel{device: s.Device, model: model, attempt: s.Attempt, state: "failed", err: "model placement excludes this worker"}
 			continue
 		}
 		if model.Name == "" {
-			rt.models[s.Model] = &workerModel{model: Model{Name: s.Model}, attempt: s.Attempt, state: "failed", err: "model absent from worker config"}
+			rt.models[engineKey(s.Model, s.Device)] = &workerModel{device: s.Device, model: Model{Name: s.Model}, attempt: s.Attempt, state: "failed", err: "model absent from worker config"}
 			continue
 		}
 		if !rt.localApprovalAvailable(model) || rt.admissionBlocked || rt.availability != nil && !rt.availability.snapshot().Available {
@@ -680,9 +686,9 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 		}
 		if authorize := rt.authorize; authorize != nil {
 			// Capture the exact plan under rt.mu; heartbeats update rt.session.
-			launch := HostLaunch{Machine: rt.machine, Session: s.Session, Kind: "engine", Key: s.Model, Attempt: s.Attempt}
+			launch := HostLaunch{Machine: rt.machine, Session: s.Session, Kind: "engine", Key: s.Model, Device: s.Device, Attempt: s.Attempt}
 			parent = withLaunchGate(parent, func() error {
-				if rt.verifyDevice != nil {
+				if s.Device == "" && rt.verifyDevice != nil {
 					if err := rt.verifyDevice(); err != nil {
 						return err
 					}
@@ -691,8 +697,8 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 			})
 		}
 		ctx, cancel := context.WithTimeout(parent, rt.config.Wait)
-		m := &workerModel{model: model, engine: engine, attempt: s.Attempt, state: "loading", cancel: cancel, recipe: s.EnvironmentRecipe}
-		rt.models[s.Model] = m
+		m := &workerModel{device: s.Device, model: model, engine: engine, attempt: s.Attempt, state: "loading", cancel: cancel, recipe: s.EnvironmentRecipe}
+		rt.models[engineKey(s.Model, s.Device)] = m
 		rt.wg.Add(1)
 		go func() {
 			defer rt.wg.Done()
@@ -702,6 +708,32 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 }
 
 func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
+	if m.device != "" && rt.worker != nil {
+		bound := *rt.worker
+		rt.mu.Lock()
+		bound.Machine = rt.memoryMachine
+		rt.mu.Unlock()
+		var err error
+		bound, err = bound.forAttempt(Job{AllocatedDevices: []string{m.device}})
+		if err != nil {
+			m.cancel()
+			rt.mu.Lock()
+			m.state, m.err = "failed", err.Error()
+			rt.mu.Unlock()
+			return
+		}
+		m.bound = &bound
+		if owned, ok := m.engine.(*LlamaEngine); ok {
+			owned.memoryMachine = bound.Machine
+		}
+		parent := ctx
+		ctx = withLaunchGate(parent, func() error {
+			if err := bound.verifyDevice(); err != nil {
+				return err
+			}
+			return checkLaunchGate(parent)
+		})
+	}
 	if e := rt.checkLoadMemory(ctx, m); e != nil {
 		m.cancel()
 		rt.mu.Lock()
@@ -710,13 +742,18 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 		rt.mu.Unlock()
 		return
 	}
-	model := withPlacementEnvironment(m.model, Machine{ID: rt.machine, GPU: rt.platform, Device: rt.device})
+	platform, device, deviceEnv := rt.platform, rt.device, rt.deviceEnv
+	if m.bound != nil {
+		platform, device = m.bound.Machine.GPU, m.bound.Machine.Device
+		deviceEnv, _ = m.bound.deviceEnvironment()
+	}
+	model := withPlacementEnvironment(m.model, Machine{ID: rt.machine, GPU: platform, Device: device})
 	model.secretRoot, model.fleetToken = rt.secretRoot, rt.token
 	var e error
-	if rt.device != "" || rt.platform == "cpu" {
-		model, e = WithModelDevice(model, rt.platform, rt.device)
+	if device != "" || platform == "cpu" {
+		model, e = WithModelDevice(model, platform, device)
 		if e == nil {
-			for k, v := range rt.deviceEnv {
+			for k, v := range deviceEnv {
 				model.DeviceEnv[k] = v
 			}
 		}
@@ -786,6 +823,10 @@ func (rt *modelRuntime) checkLoadMemory(ctx context.Context, loading *workerMode
 	rt.mu.Lock()
 	machine := rt.memoryMachine
 	rt.mu.Unlock()
+	source, measured := rt.memorySource, rt.memoryMeasured
+	if loading.bound != nil {
+		machine, source, measured = loading.bound.Machine, loading.bound.MemorySource, loading.bound.MemoryMeasured
+	}
 	if err := (Worker{Machine: machine}).checkHostMemoryBudget(loading.model.MemoryGB, loading.model.HostMemoryGB); err != nil {
 		return err
 	}
@@ -798,32 +839,58 @@ func (rt *modelRuntime) checkLoadMemory(ctx context.Context, loading *workerMode
 			return errors.New("model load requires host RAM source")
 		}
 		free, e := rt.hostMemorySource(ctx)
-		machine.UnifiedMemory, machine.HostMemoryMeasured = rt.unifiedMemory, true
+		machine.HostMemoryMeasured = true
 		need := hostNeed(&machine, loading.model.MemoryGB, loading.model.HostMemoryGB)
 		if e != nil || !validMemoryValue(free) || free < need {
 			return fmt.Errorf("insufficient host RAM for model %s: need %.1f GiB, available %.1f GiB: %v", loading.model.Name, need, free, e)
 		}
 	}
-	if rt.memorySource == nil {
+	// Include every admitted batch and resident engine in the same local host
+	// allowance. Device-local free memory alone cannot authorize another load.
+	rt.mu.Lock()
+	cores, ram := 0, 0.0
+	for _, j := range rt.batchJobs {
+		cores += j.Spec.Needs.cores()
+		ram += hostNeed(allocationMachine(&rt.memoryMachine, j.AllocatedDevices), j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
+	}
+	for _, other := range rt.models {
+		if other.state != "unloaded" && other.state != "failed" {
+			cores++
+			ram += hostNeed(allocationMachine(&rt.memoryMachine, []string{other.device}), other.model.MemoryGB, other.model.HostMemoryGB)
+		}
+	}
+	rt.mu.Unlock()
+	capacity, reason := cpuCapacity(&machine)
+	if reason == "" && cores > capacity || machine.HostMemoryBudgetGB > 0 && ram > machine.HostMemoryBudgetGB {
+		return fmt.Errorf("%w: aggregate engine CPU/RAM allowance", errWorkerMemory)
+	}
+	if source == nil {
 		return errors.New("model load requires a free-memory source")
 	}
 	// The source may inspect worker/runtime state. Never invoke it under rt.mu.
-	free, e := rt.memorySource(ctx)
+	free, e := source(ctx)
 	if e != nil {
 		return fmt.Errorf("model free-memory check: %w", e)
 	}
 	if math.IsNaN(free) || math.IsInf(free, 0) || free < 0 {
 		return errors.New("model free-memory source returned invalid memory")
 	}
-	if !rt.memoryMeasured && rt.batchMemory != nil {
+	if loading.bound == nil && !measured && rt.batchMemory != nil {
 		free -= math.Float64frombits(rt.batchMemory.Load())
 	}
 	rt.mu.Lock()
+	if loading.bound != nil && !measured {
+		for _, j := range rt.batchJobs {
+			if slices.Contains(j.AllocatedDevices, loading.device) {
+				free -= j.Spec.Needs.MemoryGB
+			}
+		}
+	}
 	for _, other := range rt.models {
-		if other == loading || other.state == "unloaded" || other.state == "failed" {
+		if other.device != loading.device || other == loading || other.state == "unloaded" || other.state == "failed" {
 			continue
 		}
-		if !rt.memoryMeasured || other.state == "loading" {
+		if !measured || other.state == "loading" {
 			free -= other.model.MemoryGB
 		}
 	}
@@ -933,6 +1000,19 @@ func (rt *modelRuntime) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	rt.mu.Lock()
 	m := rt.models[req.Model]
+	if attempt := r.Header.Get("X-Myce-Engine-Attempt"); attempt != "" {
+		// Preserve the bounded legacy runtime's unkeyed model entry. Inventory
+		// engines always carry an attempt and route only to an exact match.
+		if m != nil && m.attempt != "" {
+			m = nil
+		}
+		for _, candidate := range rt.models {
+			if candidate.model.Name == req.Model && candidate.attempt == attempt {
+				m = candidate
+				break
+			}
+		}
+	}
 	if attempt := r.Header.Get("X-Myce-Engine-Attempt"); attempt != "" && m != nil && m.attempt != "" && attempt != m.attempt {
 		rt.mu.Unlock()
 		w.Header().Set("X-Myce-Engine-Rejected", attempt)
@@ -1070,4 +1150,11 @@ func (rt *modelRuntime) withdrawLocalAvailability() {
 			rt.unload(m)
 		}
 	}
+}
+
+func engineKey(model, device string) string {
+	if device == "" {
+		return model
+	}
+	return model + "/" + device
 }

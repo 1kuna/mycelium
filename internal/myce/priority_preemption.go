@@ -89,7 +89,7 @@ func (q *Queue) preemptObligation(p HostObligation, demand *Job) {
 		c.Error = priorityPreemptionCause
 	case p.Engine != nil:
 		e := p.Engine
-		s := q.s.ModelSlots[slotKey(e.Machine, e.Model)]
+		s := q.s.ModelSlots[slotKey(e.Machine, e.Model, e.Device)]
 		if s == nil || s.Session != e.Session || s.Attempt != e.Attempt || !q.slotReclaimableFor(s, demand.Spec) {
 			return
 		}
@@ -154,10 +154,10 @@ func (q *Queue) recordEnginePreemption(s *ModelSlot, demand *Job) {
 			}
 		}
 	}
-	s.PriorityStop = q.preemption(demand, obligationKey(HostObligation{Engine: &HostEngineExecution{Machine: s.Machine, Session: s.Session, Model: s.Model, Attempt: s.Attempt}}))
+	s.PriorityStop = q.preemption(demand, obligationKey(HostObligation{Engine: &HostEngineExecution{Machine: s.Machine, Session: s.Session, Model: s.Model, Device: s.Device, Attempt: s.Attempt}}))
 }
 func (q *Queue) preemptSlot(s *ModelSlot, demand *Job) {
-	q.preemptObligation(HostObligation{Engine: &HostEngineExecution{Machine: s.Machine, Session: s.Session, Model: s.Model, Attempt: s.Attempt}}, demand)
+	q.preemptObligation(HostObligation{Engine: &HostEngineExecution{Machine: s.Machine, Session: s.Session, Model: s.Model, Device: s.Device, Attempt: s.Attempt}}, demand)
 }
 func (q *Queue) preemptPreparations(m *Machine, demand *Job) {
 	for _, p := range q.hostObligations(hostID(m)) {

@@ -1177,6 +1177,32 @@ are excluded. They replace the previous package M estimates.
   canonical inventory ID `"0"` identically for extension qualification. Native
   hardware identity checks remain required before launch.
 
+#### M3 implementation decisions
+
+- A check-in reconciles every exact attempt and offers at most one additional
+  assignment. Subsequent check-ins fill other eligible components through the
+  same planner; the collection and active-attempt count have no cardinality cap.
+  CPU targets have no accelerator batch slot and share the host CPU/RAM ledger.
+- Historical machine records carry explicit `replacement: {machine, device}`
+  migration guidance. M4 creates that metadata transactionally. M3 refuses new
+  intent naming those records and never infers retirement from a name suffix.
+- Device entries carry their extension fingerprint and reports. The machine's
+  `cpu_extension_fingerprint` identifies CPU qualification; the existing scalar
+  reports retain the first-device compatibility view alongside CPU reports.
+  Residency and pin assignment use the actual machine plus selected device.
+- Unknown or unavailable explicit device selections expose the additive job
+  diagnostic `diagnostic_code: no_matching_device`. The original submission
+  fingerprint remains unchanged. Stop events return an `events` collection
+  with an aggregate cursor, retaining the first event's fields for the bounded
+  legacy adapter. Each exact event carries priority-stop provenance before
+  signal delivery, so a checkpoint handler that exits zero after TERM remains
+  an interrupted attempt even when the event precedes its heartbeat directive.
+- Returning collection attempts recover independently against their selected
+  slots and the existing retained CPU/RAM charge. A neighboring device cannot
+  invoke the legacy scalar cap; conflicting slots or allowance debt still
+  refuse recovery. Model copies use the shared verified cache, with eligibility
+  checked against every component and one copy offer per model.
+
 M2–M4 total: **1,350–2,200 production LOC; 2,000–3,100 test/doc LOC;
 11–16 engineer days**, excluding M1 and native access delays. M2 grows from
 3–4 to 5–7 days because singular execution pointers, durable spool formats and

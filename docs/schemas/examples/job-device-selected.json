@@ -1,0 +1,53 @@
+{
+  "allocated_devices": [
+    "1"
+  ],
+  "priority_policy": {
+    "tier": "",
+    "index": 0,
+    "selector": "",
+    "revision": 0
+  },
+  "waiting_since": "0001-01-01T00:00:00Z",
+  "start_latency_seconds": 0,
+  "starts": 0,
+  "losses": 0,
+  "progress": 0,
+  "id": "example-device-job",
+  "spec": {
+    "submission_key": "example-key",
+    "size_hint": {},
+    "name": "example-job",
+    "project": "example",
+    "priority": "experiment",
+    "run": {
+      "command": [
+        "echo",
+        "done"
+      ]
+    },
+    "needs": {
+      "gpu": {
+        "devices": [
+          "0",
+          "1"
+        ]
+      },
+      "memory_gb": 8,
+      "platform": {
+        "any": true
+      }
+    },
+    "environment": {},
+    "allowed_machines": [
+      "example-machine"
+    ],
+    "resumable": true
+  },
+  "state": "running",
+  "attempt": 1,
+  "machine": "example-machine",
+  "queued": "0001-01-01T00:00:00Z",
+  "front": 0,
+  "checkpoint": ""
+}
