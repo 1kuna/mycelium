@@ -227,6 +227,9 @@ func (q *Queue) hostPreemptionDemand(host string) *Job {
 }
 
 func (q *Queue) preparationShared(m *Machine, demand *Job, l *HostLaunch) bool {
+	if l.Kind == "copy" {
+		return demand.Spec.Needs.Model != "" && l.Key == demand.Spec.Needs.Model
+	}
 	key := environmentKey(demand, m)
 	if model, ok := q.model(demand.Spec.Needs.Model); ok && model.Environment != "" {
 		key = q.environments.Environments[model.Environment][m.GPU].Key

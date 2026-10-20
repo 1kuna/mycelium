@@ -125,14 +125,15 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool) 
 		}
 		need, host = model.MemoryGB, model.HostMemoryGB
 	}
-	sharedPreparation := false
 	for _, o := range q.hostObligations(hostID(m)) {
 		l := o.Launch
 		if l == nil || l.Kind != "environment" || l.Machine != m.ID || l.Session != m.Session || !l.Started {
 			continue
 		}
 		if q.preparationShared(m, j, l) {
-			sharedPreparation = true
+			// The winning execution covers this machine's preparation core.
+			// Hand it back in the projection without stopping the shared build.
+			p.preparationCores = 1
 			continue
 		}
 		p.preparationCores = 1
@@ -146,11 +147,6 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool) 
 			p.stops++
 			p.cost++
 		}
-	}
-	// Keep shared builds. Otherwise project the build stop together with the
-	// execution releases, since its core charge depends on what remains.
-	if sharedPreparation {
-		p.preparationCores = 0
 	}
 	room := m.FreeMemoryGB
 	if r, ok := q.s.BatchReleases[m.ID]; ok && r.Session == m.Session && q.clock.Now().Before(r.Until) {
@@ -227,6 +223,8 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool) 
 	// Mandatory/local releases already provide RAM as well as GPU memory.
 	// Project both once before asking for additional host-wide releases.
 	projected := q.cpuAfterReleases(m, p.jobs, p.slots, p.preparationCores)
+	projected.FreeHostMemoryGB -= m.hostReservationDebtGB
+	projected.hostReservationDebtGB = 0 // Carry signed room through local releases once.
 	releasedJobs, releasedSlots := map[*Job]bool{}, map[*ModelSlot]bool{}
 	for _, r := range p.jobs {
 		releasedJobs[r] = true

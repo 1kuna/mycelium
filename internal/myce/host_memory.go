@@ -172,7 +172,9 @@ func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, r
 	if host > 0 && (!m.HostMemoryMeasured || m.HostMemoryError != "") {
 		return nil, nil, false
 	}
-	room := m.FreeHostMemoryGB
+	// Free RAM is clamped in the live ledger. Repay any hidden reservation
+	// debt before crediting candidate releases (#104).
+	room := m.FreeHostMemoryGB - m.hostReservationDebtGB
 	need := hostNeed(m, gpu, host)
 	if host == 0 {
 		need = 0
