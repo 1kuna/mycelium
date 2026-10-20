@@ -113,6 +113,12 @@ func (q *Queue) preemptObligation(p HostObligation, demand *Job) {
 		if !ok || l.Spec == nil || q.comparePriority(*l.Spec, demand.Spec) <= 0 {
 			return
 		}
+		// An unstarted offer has no process custody. Revoke its exact launch
+		// rather than inventing a cleanup wait that can block a free worker.
+		if !l.Started {
+			delete(q.s.PreparationPlans, l.Attempt)
+			return
+		}
 		if j := q.s.Jobs[l.Demand]; j != nil && l.PriorityStop == nil {
 			if q.preemptionProtected(j.PreemptionCount, l.StartedAt) {
 				return
@@ -155,14 +161,7 @@ func (q *Queue) preemptPreparations(m *Machine, demand *Job) {
 			l := *p.Launch
 			// Preparation shared with the winner inherits its tier. Stopping a
 			// build that the replacement also needs cannot release useful capacity.
-			key := environmentKey(demand, m)
-			if model, ok := q.model(demand.Spec.Needs.Model); ok && model.Environment != "" {
-				key = q.environments.Environments[model.Environment][m.GPU].Key
-			}
-			if e := qualifiedExtension(demand, m); e != nil {
-				key = extensionPreparationKey(*e, m)
-			}
-			if l.Kind == "environment" && l.Key == key && l.PriorityStop == nil {
+			if q.preparationShared(m, demand, &l) && l.PriorityStop == nil {
 				if l.Spec == nil || q.comparePriority(demand.Spec, *l.Spec) < 0 {
 					spec := Spec{Project: demand.Spec.Project, Class: demand.Spec.Class, Priority: demand.Spec.Priority}
 					l.Spec, l.Demand = &spec, demand.ID
@@ -221,4 +220,15 @@ func (q *Queue) hostPreemptionDemand(host string) *Job {
 		}
 	}
 	return &Job{ID: "host/" + host, Spec: spec}
+}
+
+func (q *Queue) preparationShared(m *Machine, demand *Job, l *HostLaunch) bool {
+	key := environmentKey(demand, m)
+	if model, ok := q.model(demand.Spec.Needs.Model); ok && model.Environment != "" {
+		key = q.environments.Environments[model.Environment][m.GPU].Key
+	}
+	if e := qualifiedExtension(demand, m); e != nil {
+		key = extensionPreparationKey(*e, m)
+	}
+	return l.Kind == "environment" && l.Key == key
 }

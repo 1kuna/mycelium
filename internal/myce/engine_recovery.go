@@ -233,19 +233,15 @@ func (q *Queue) maintainEngineRetry(key string, s *ModelSlot, m *Machine, model 
 		room.FreeMemoryGB = max(0, room.FreeMemoryGB+model.MemoryGB-m.modelReservationDebtGB)
 		room.FreeHostMemoryGB = max(0, room.FreeHostMemoryGB+hostNeed(m, model.MemoryGB, model.HostMemoryGB)-m.hostReservationDebtGB)
 	}
-	if room.FreeMemoryGB < model.MemoryGB || !hostFits(&room, model.MemoryGB, model.HostMemoryGB) {
-		// A newly added pin can still need ordinary pin reclamation.
-		if q.reclaimableGPUMemory(m, priority, job.Spec) < model.MemoryGB || !q.reclaimHostFor(m, model.MemoryGB, model.HostMemoryGB, job) {
-			return
-		}
-		q.makeModelRoomFor(m, model.MemoryGB, job)
-		for _, batch := range q.s.Jobs {
-			if batch.Machine == m.ID && (batch.State == "running" || batch.State == "stopping") && q.comparePriority(batch.Spec, job.Spec) > 0 && m.FreeMemoryGB+batch.Spec.Needs.MemoryGB >= model.MemoryGB {
-				q.stopBatchFor(batch, job)
-			}
-		}
+	plan := q.roomPlan(job, &room, false)
+	if plan == nil {
 		return
 	}
+	q.applyPlacement(plan, job)
+	if room.FreeMemoryGB < model.MemoryGB || !hostFits(&room, model.MemoryGB, model.HostMemoryGB) || q.preparationActive(m) || q.preparationStopping(m) {
+		return
+	}
+
 	if !s.RetryReserved {
 		s.RetryReserved = true
 		m.FreeMemoryGB -= model.MemoryGB

@@ -147,46 +147,46 @@ func (q *Queue) maintainPins() {
 			return candidates[i].ID < candidates[j].ID
 		})
 		p.Assigned = ""
+		demand := &Job{ID: "pin/" + p.Project + "/" + p.Model, Spec: Spec{Project: p.Project, Priority: "production"}}
+		demand.Spec.Needs.Model = p.Model
+		var best *placementPlan
 		for _, m := range candidates {
-			if q.preparationActive(m) {
-				continue
-			}
 			key := slotKey(m.ID, p.Model)
-			if s := q.s.ModelSlots[key]; s != nil && s.State != "draining" && s.State != "unloading" && s.State != "unload_failed" {
-				p.Assigned = m.ID
-				break
-			}
 			if s := q.s.ModelSlots[key]; s != nil {
-				continue
-			}
-			if winner := q.candidate(m, nil); winner != nil && q.comparePriority(winner.Spec, Spec{Project: p.Project, Priority: "production"}) < 0 {
-				continue
-			}
-			if !q.placementAllowed(&Job{Spec: Spec{Project: p.Project, Priority: "production"}}, m) {
-				continue
-			}
-			if m.FreeMemoryGB >= model.MemoryGB && hostFits(m, model.MemoryGB, model.HostMemoryGB) {
-				q.s.ModelSlots[key] = &ModelSlot{Project: p.Project, Model: p.Model, Machine: m.ID, Session: m.Session, State: "loading", LoadUntil: q.engineLoadDeadline(), Attempt: ID(), Priority: "production", LastUsed: now}
-				q.initEnginePreemption(q.s.ModelSlots[key])
-				m.FreeMemoryGB -= model.MemoryGB
-				q.refreshHostMemory()
-				p.Assigned = m.ID
-				break
-			}
-			if q.reclaimableGPUMemory(m, "production", Spec{Project: p.Project, Priority: "production"}) < model.MemoryGB {
-				continue
-			}
-			demand := &Job{ID: "pin/" + p.Project + "/" + p.Model, Spec: Spec{Project: p.Project, Priority: "production"}}
-			if !q.reclaimHostFor(m, model.MemoryGB, model.HostMemoryGB, demand) {
-				continue
-			}
-			q.makeModelRoomFor(m, model.MemoryGB, demand)
-			for _, j := range q.s.Jobs {
-				if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") && q.comparePriority(j.Spec, Spec{Project: p.Project, Priority: "production"}) > 0 && m.FreeMemoryGB+j.Spec.Needs.MemoryGB >= model.MemoryGB {
-					q.stopBatchFor(j, demand)
+				if s.State != "draining" && s.State != "unloading" && s.State != "unload_failed" {
+					best = &placementPlan{machine: m}
+					break
 				}
+				continue
+			}
+			if winner := q.candidate(m, nil); winner != nil && q.comparePriority(winner.Spec, demand.Spec) < 0 {
+				continue
+			}
+			if !q.placementAllowed(demand, m) {
+				continue
+			}
+			if plan := q.roomPlan(demand, m, false); plan != nil && plan.cheaper(best) {
+				best = plan
 			}
 		}
+		if best == nil {
+			continue
+		}
+		m := best.machine
+		key := slotKey(m.ID, p.Model)
+		if q.s.ModelSlots[key] != nil {
+			p.Assigned = m.ID
+			continue
+		}
+		q.applyPlacement(best, demand)
+		if m.FreeMemoryGB < model.MemoryGB || !hostFits(m, model.MemoryGB, model.HostMemoryGB) || q.preparationActive(m) || q.preparationStopping(m) {
+			continue
+		}
+		q.s.ModelSlots[key] = &ModelSlot{Project: p.Project, Model: p.Model, Machine: m.ID, Session: m.Session, State: "loading", LoadUntil: q.engineLoadDeadline(), Attempt: ID(), Priority: "production", LastUsed: now}
+		q.initEnginePreemption(q.s.ModelSlots[key])
+		m.FreeMemoryGB -= model.MemoryGB
+		q.refreshHostMemory()
+		p.Assigned = m.ID
 	}
 }
 func (q *Queue) SetProductionGrace(d time.Duration) error {

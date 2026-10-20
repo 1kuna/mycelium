@@ -448,138 +448,89 @@ func (q *Queue) maintainModels() {
 			c.Error = "unknown model"
 			continue
 		}
-		// Ready affinity precedes loading a second copy.
-		sort.Slice(machines, func(i, j int) bool {
+		// Compare every compatible placement before mutating any victim. A free
+		// load beats interrupting a ready engine's call or another worker's build.
+		sort.SliceStable(machines, func(i, j int) bool {
+			rank := func(m *Machine) int {
+				if s := q.s.ModelSlots[slotKey(m.ID, c.Model)]; s != nil {
+					if s.State == "ready" {
+						return 0
+					}
+					if s.State == "loading" {
+						return 1
+					}
+				}
+				return 2
+			}
+			if a, b := rank(machines[i]), rank(machines[j]); a != b {
+				return a < b
+			}
 			a, b := q.loadSeconds(c.Model, machines[i]), q.loadSeconds(c.Model, machines[j])
 			if a != b {
 				return a < b
 			}
-			ac, bc := contains(machines[i].CachedModels, c.Model), contains(machines[j].CachedModels, c.Model)
-			if ac != bc {
-				return ac
-			}
 			return machines[i].ID < machines[j].ID
 		})
+		var best *placementPlan
 		for _, m := range machines {
-			if !q.callPlacementAllowed(c, m) || q.capReasonFor(callJob(c), m) != "" || m.MemoryError != "" || m.Gone || m.Leaving || q.callExcludes(c, m.ID) || m.ModelURL == "" || !q.modelUsableMachine(model, m) || q.unreported[m.ID] {
+			var p *placementPlan
+			s := q.s.ModelSlots[slotKey(m.ID, c.Model)]
+			switch {
+			case s != nil && s.State == "ready":
+				p = q.callSlotPlan(m, c, s, model.MaxInFlight)
+			case s != nil && s.State == "loading":
+				p = &placementPlan{machine: m}
+			case s == nil || s.State == "failed" && s.RetryAt != nil && !now.Before(*s.RetryAt):
+				p = q.roomPlan(callJob(c), m, false)
+			}
+			if p != nil && p.cheaper(best) {
+				best = p
+			}
+		}
+		if best == nil {
+			continue
+		}
+		q.applyPlacement(best, callJob(c))
+		m := best.machine
+		s := q.s.ModelSlots[slotKey(m.ID, c.Model)]
+		if s != nil && s.State == "ready" {
+			if model.MaxInFlight > 0 && s.InFlight >= model.MaxInFlight {
 				continue
 			}
-			s := q.s.ModelSlots[slotKey(m.ID, c.Model)]
-			if s != nil && s.State == "ready" && (model.MaxInFlight == 0 || s.InFlight < model.MaxInFlight) {
-				c.Machine = m.ID
+			c.Machine, c.Session, c.Attempt = m.ID, m.Session, s.Attempt
+			c.StartedAt = &now
+			if c.Priority == "production" {
+				s.ProductionUsed = true
+			}
+			if s.InFlight == 0 || q.comparePriority(callJob(c).Spec, Spec{Project: s.Project, Priority: s.Priority, Class: s.Class}) < 0 {
+				s.Priority, s.Class, s.Project = c.Priority, c.Class, c.Project
+			}
+			s.InFlight++
+			s.LastUsed = now
+			continue
+		}
+		if s != nil && s.State == "loading" {
+			if q.comparePriority(callJob(c).Spec, Spec{Project: s.Project, Priority: s.Priority, Class: s.Class}) < 0 {
+				s.Priority, s.Class, s.Project = c.Priority, c.Class, c.Project
 				if c.Priority == "production" {
 					s.ProductionUsed = true
 				}
-				c.StartedAt = &now
-				c.Session = m.Session
-				c.Attempt = s.Attempt
-				if s.InFlight == 0 || q.comparePriority(callJob(c).Spec, Spec{Project: s.Project, Priority: s.Priority, Class: s.Class}) < 0 {
-					s.Priority = c.Priority
-					s.Class = c.Class
-					s.Project = c.Project
-				}
-				s.InFlight++
-				s.LastUsed = now
-				break
 			}
-		}
-		if c.Machine != "" {
 			continue
 		}
-
-		eligible := []*Machine{}
-		loading := false
-		for _, m := range machines {
-			if !q.placementAllowed(callJob(c), m) || q.capReasonFor(callJob(c), m) != "" || m.MemoryError != "" || m.Gone || m.Leaving || q.callExcludes(c, m.ID) || m.ModelURL == "" || !q.modelFitsMachine(model, m) || q.unreported[m.ID] {
-				continue
-			}
-			if s := q.s.ModelSlots[slotKey(m.ID, c.Model)]; s != nil {
-				if s.State == "failed" && s.RetryAt != nil && !now.Before(*s.RetryAt) {
-					eligible = append(eligible, m)
-				}
-				if s.State == "loading" {
-					if q.comparePriority(callJob(c).Spec, Spec{Project: s.Project, Priority: s.Priority, Class: s.Class}) < 0 {
-						s.Priority = c.Priority
-						s.Class = c.Class
-						s.Project = c.Project
-						if c.Priority == "production" {
-							s.ProductionUsed = true
-						}
-					}
-					loading = true
-				}
-				continue
-			}
-			eligible = append(eligible, m)
-		}
-		if loading {
+		if m.FreeMemoryGB < model.MemoryGB || !hostFits(m, model.MemoryGB, model.HostMemoryGB) || q.preparationActive(m) || q.preparationStopping(m) {
 			continue
 		}
-		allocated := false
-		// Check all free workers before draining a model or stopping any batch.
-		for _, m := range eligible {
-			if m.FreeMemoryGB >= model.MemoryGB && hostFits(m, model.MemoryGB, model.HostMemoryGB) {
-				q.preemptPreparations(m, callJob(c))
-				if q.preparationActive(m) {
-					continue
-				}
-				if s := q.s.ModelSlots[slotKey(m.ID, c.Model)]; s != nil {
-					q.beginEngineAttempt(s, c.Priority)
-					s.Class = c.Class
-					s.Project = c.Project
-				} else {
-					q.s.ModelSlots[slotKey(m.ID, c.Model)] = &ModelSlot{Project: c.Project, Model: c.Model, Machine: m.ID, Session: m.Session, State: "loading", LoadUntil: q.engineLoadDeadline(), Attempt: ID(), Priority: c.Priority, Class: c.Class, ProductionUsed: c.Priority == "production", LastUsed: now}
-				}
-				q.initEnginePreemption(q.s.ModelSlots[slotKey(m.ID, c.Model)])
-				m.FreeMemoryGB -= model.MemoryGB
-				q.refreshHostMemory()
-				allocated = true
-				break
-			}
+		if s != nil {
+			q.beginEngineAttempt(s, c.Priority)
+			s.Class, s.Project = c.Class, c.Project
+		} else {
+			s = &ModelSlot{Project: c.Project, Model: c.Model, Machine: m.ID, Session: m.Session, State: "loading", LoadUntil: q.engineLoadDeadline(), Attempt: ID(), Priority: c.Priority, Class: c.Class, ProductionUsed: c.Priority == "production", LastUsed: now}
+			q.s.ModelSlots[slotKey(m.ID, c.Model)] = s
 		}
-		if allocated {
-			continue
-		}
-		for _, m := range eligible {
-			if _, _, ok := q.hostReleases(m, model.MemoryGB, model.HostMemoryGB, c.Priority, callJob(c).Spec); !ok {
-				continue
-			}
-			possible := m.FreeMemoryGB
-			for _, s := range q.s.ModelSlots {
-				if s.Machine == m.ID && q.slotReclaimableFor(s, callJob(c).Spec) {
-					mm, _ := q.model(s.Model)
-					possible += mm.MemoryGB
-				}
-			}
-			var victim *Job
-			for _, j := range q.s.Jobs {
-				if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") && q.batchPreemptible(j, callJob(c).Spec) {
-					victim = j
-					possible += j.Spec.Needs.MemoryGB
-				}
-			}
-			if possible < model.MemoryGB {
-				continue
-			}
-			q.reclaimHostFor(m, model.MemoryGB, model.HostMemoryGB, callJob(c))
-			q.makeModelRoomFor(m, model.MemoryGB, callJob(c))
-			if victim != nil && m.FreeMemoryGB+q.modelMemory(m.ID) < model.MemoryGB {
-				q.stopBatchFor(victim, callJob(c))
-			}
-			// Prefer draining models alone; if that cannot suffice, save the batch.
-			reclaimable := m.FreeMemoryGB
-			for _, s := range q.s.ModelSlots {
-				if s.Machine == m.ID && s.State == "draining" {
-					mm, _ := q.model(s.Model)
-					reclaimable += mm.MemoryGB
-				}
-			}
-			if reclaimable < model.MemoryGB && victim != nil {
-				q.stopBatchFor(victim, callJob(c))
-			}
-			break
-		}
-
+		q.initEnginePreemption(s)
+		m.FreeMemoryGB -= model.MemoryGB
+		q.refreshHostMemory()
 	}
 
 	// Each worker release covers one batch. Remove both that worker and its
@@ -621,7 +572,7 @@ func (q *Queue) callCanUse(m *Machine, c *ModelCall) bool {
 		return false
 	}
 	if s := q.s.ModelSlots[slotKey(m.ID, c.Model)]; s != nil && s.State == "ready" {
-		return model.MaxInFlight == 0 || s.InFlight < model.MaxInFlight
+		return q.callSlotPlan(m, c, s, model.MaxInFlight) != nil
 	}
 	if s := q.s.ModelSlots[slotKey(m.ID, c.Model)]; s != nil && s.State == "failed" && (s.RetryAt == nil || q.clock.Now().Before(*s.RetryAt)) {
 		return false
@@ -662,33 +613,6 @@ func (q *Queue) slotReclaimableFor(s *ModelSlot, demand Spec) bool {
 	return n > 0 || !q.slotPinned(s) && n == 0 && s.InFlight == 0 && (s.State == "ready" || s.State == "draining")
 }
 
-func (q *Queue) makeModelRoom(m *Machine, need float64, priority string, identity ...Spec) {
-	q.makeModelRoomFor(m, need, &Job{ID: "model room", Spec: priorityDemand(priority, identity)})
-}
-func (q *Queue) makeModelRoomFor(m *Machine, need float64, job *Job) {
-	demand := job.Spec
-	slots := []*ModelSlot{}
-	for _, s := range q.s.ModelSlots {
-		if s.Machine == m.ID && q.slotReclaimableFor(s, demand) {
-			slots = append(slots, s)
-		}
-	}
-	sort.Slice(slots, func(i, j int) bool {
-		if q.comparePriority(q.slotSpec(slots[i]), q.slotSpec(slots[j])) != 0 {
-			return q.comparePriority(q.slotSpec(slots[i]), q.slotSpec(slots[j])) > 0
-		}
-		return slots[i].Model < slots[j].Model
-	})
-	room := m.FreeMemoryGB
-	for _, s := range slots {
-		if room >= need {
-			break
-		}
-		q.preemptSlot(s, job)
-		model, _ := q.model(s.Model)
-		room += model.MemoryGB
-	}
-}
 func (q *Queue) modelPlan(machine string) []ModelSlot {
 	out := []ModelSlot{}
 	for _, s := range q.s.ModelSlots {
@@ -1200,156 +1124,23 @@ func modelConfigHash(c ModelConfig) string {
 // Batch workers run one command at a time. Plan its release together with
 // resident models, rather than requiring either allocation alone to suffice.
 func (q *Queue) makeBatchRoom(j *Job, planned, handled map[string]bool) string {
-	type plan struct {
-		machine string
-		batch   *Job
-		slots   []*ModelSlot
-		stops   int
-		cost    int
-	}
-	var best *plan
-	for _, m := range q.s.Machines {
+	var best *placementPlan
+	for _, m := range q.plannerMachines() {
 		if !q.placementAllowed(j, m) || q.unreported[m.ID] || planned[m.ID] {
 			continue
 		}
 		if winner := q.candidate(m, handled); winner == nil || winner.ID != j.ID {
 			continue
 		}
-		p := &plan{machine: m.ID}
-		room := m.FreeMemoryGB
-		if release, ok := q.s.BatchReleases[m.ID]; ok && release.Session == m.Session && q.clock.Now().Before(release.Until) {
-			room += release.MemoryGB
-		}
-		blocked := false
-		for _, r := range q.s.Jobs {
-			if r.Machine != m.ID || (r.State != "running" && r.State != "stopping") {
-				continue
-			}
-			if r.State == "stopping" && expired(r.StopAt, q.clock.Now()) {
-				blocked = true
-				break
-			}
-			if r.State == "running" && !q.batchPreemptible(r, j.Spec) {
-				blocked = true
-				break
-			}
-			p.batch = r
-			room += r.Spec.Needs.MemoryGB
-			if r.State == "running" {
-				p.stops++
-				if !r.Spec.Resumable {
-					p.cost++
-				}
-			}
-		}
-		if blocked {
-			continue
-		}
-		slots := []*ModelSlot{}
-		for _, s := range q.s.ModelSlots {
-			if s.Machine != m.ID || !q.slotReclaimableFor(s, j.Spec) {
-				continue
-			}
-			model, _ := q.model(s.Model)
-			if s.State == "draining" {
-				room += model.MemoryGB
-			} else {
-				slots = append(slots, s)
-			}
-		}
-		// Largest allocations first establish the minimum number of releases.
-		sort.Slice(slots, func(a, b int) bool {
-			ma, _ := q.model(slots[a].Model)
-			mb, _ := q.model(slots[b].Model)
-			if ma.MemoryGB != mb.MemoryGB {
-				return ma.MemoryGB > mb.MemoryGB
-			}
-			return slots[a].Model < slots[b].Model
-		})
-		possible, count := room, 0
-		for _, s := range slots {
-			if possible >= j.Spec.Needs.MemoryGB {
-				break
-			}
-			model, _ := q.model(s.Model)
-			possible += model.MemoryGB
-			count++
-		}
-		hostJobs, hostSlots, hostOK := q.hostReleases(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, j.Spec.Priority, j.Spec)
-		if !hostOK || !fitsWithoutHostMemory(j, m, possible) {
-			continue
-		}
-		// Within that count prefer idle models, only when the remaining largest
-		// allocations can still cover the deficit. Preference cannot block work.
-		for count > 0 {
-			chosen := 0
-			for i, s := range slots {
-				if s.InFlight != 0 {
-					continue
-				}
-				model, _ := q.model(s.Model)
-				capacity, n := room+model.MemoryGB, 0
-				for k, other := range slots {
-					if k != i && n < count-1 {
-						model, _ := q.model(other.Model)
-						capacity += model.MemoryGB
-						n++
-					}
-				}
-				if capacity >= j.Spec.Needs.MemoryGB {
-					chosen = i
-					break
-				}
-			}
-			s := slots[chosen]
-			model, _ := q.model(s.Model)
-			room += model.MemoryGB
-			p.slots = append(p.slots, s)
-			p.stops++
-			if s.InFlight > 0 {
-				p.cost++
-			}
-			slots = append(slots[:chosen], slots[chosen+1:]...)
-			count--
-		}
-		for _, victim := range hostJobs {
-			if victim != p.batch && victim.State == "running" {
-				p.stops++
-				if !victim.Spec.Resumable {
-					p.cost++
-				}
-			}
-		}
-		for _, victim := range hostSlots {
-			found := false
-			for _, s := range p.slots {
-				if s == victim {
-					found = true
-				}
-			}
-			if !found && victim.State != "draining" {
-				p.stops++
-				if victim.InFlight > 0 {
-					p.cost++
-				}
-			}
-		}
-		if best == nil || p.stops < best.stops || p.stops == best.stops && (p.cost < best.cost || p.cost == best.cost && p.machine < best.machine) {
+		if p := q.roomPlan(j, m, true); p != nil && p.cheaper(best) {
 			best = p
 		}
 	}
 	if best == nil {
 		return ""
 	}
-	q.reclaimHostFor(q.s.Machines[best.machine], j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, j)
-	if best.batch != nil && q.comparePriority(best.batch.Spec, j.Spec) > 0 {
-		q.stopBatchFor(best.batch, j)
-	}
-	for _, s := range best.slots {
-		q.preemptSlot(s, j)
-	}
-	q.preemptPreparations(q.s.Machines[best.machine], j)
-	return best.machine
+	q.applyPlacement(best, j)
+	return best.machine.ID
 }
 
 var errPriorityPreemption = errors.New("model call interrupted by higher priority demand")
