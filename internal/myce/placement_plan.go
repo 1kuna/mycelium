@@ -147,9 +147,9 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool) 
 			p.cost++
 		}
 	}
-	// Preparation shares an execution's reservation; credit its separate core
-	// only when this worker has no batch/model reservation and no shared build.
-	if sharedPreparation || q.workerHasExecutionCPUReservation(m) {
+	// Keep shared builds. Otherwise project the build stop together with the
+	// execution releases, since its core charge depends on what remains.
+	if sharedPreparation {
 		p.preparationCores = 0
 	}
 	room := m.FreeMemoryGB
@@ -226,7 +226,7 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool) 
 	}
 	// Mandatory/local releases already provide RAM as well as GPU memory.
 	// Project both once before asking for additional host-wide releases.
-	projected := cpuAfterReleases(m, p.jobs, p.slots, p.preparationCores)
+	projected := q.cpuAfterReleases(m, p.jobs, p.slots, p.preparationCores)
 	releasedJobs, releasedSlots := map[*Job]bool{}, map[*ModelSlot]bool{}
 	for _, r := range p.jobs {
 		releasedJobs[r] = true
@@ -237,7 +237,7 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool) 
 		model, _ := q.model(s.Model)
 		projected.FreeHostMemoryGB += hostNeed(q.s.Machines[s.Machine], model.MemoryGB, model.HostMemoryGB)
 	}
-	hostJobs, hostSlots, ok := q.hostReleasesExcept(&projected, need, host, j.Spec, releasedJobs, releasedSlots)
+	hostJobs, hostSlots, ok := q.hostReleasesExcept(&projected, need, host, j.Spec, releasedJobs, releasedSlots, p.preparationCores > 0)
 	if !ok {
 		return nil
 	}

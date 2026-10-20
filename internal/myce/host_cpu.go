@@ -73,43 +73,53 @@ func (q *Queue) refreshHostCPU() {
 		if policy.CPUBudgetCores != nil && *policy.CPUBudgetCores > 0 {
 			capacity = min(capacity, *policy.CPUBudgetCores)
 		}
-		used := 0
-		covered := map[string]bool{}
-		for _, j := range q.s.Jobs {
-			owner := q.s.Machines[j.Machine]
-			if !j.ReleaseConfirmed && owner != nil && hostID(owner) == hostID(m) && (j.State == "running" || j.State == "stopping") {
-				used += j.Spec.Needs.cores()
-				covered[j.Machine] = true
-			}
-		}
-		for _, r := range q.s.HostReleases {
-			if r.Host != hostID(m) {
-				continue
-			}
-			j := q.s.Jobs[r.Job]
-			if j != nil && j.Machine == r.Machine && j.Session == r.Session && j.Attempt == r.Attempt && !j.ReleaseConfirmed && (j.State == "running" || j.State == "stopping") {
-				continue
-			}
-			used += max(1, r.CPUCores) // Older receipts predate the one-core default.
-		}
-		for _, s := range q.s.ModelSlots {
-			owner := q.s.Machines[s.Machine]
-			if owner != nil && hostID(owner) == hostID(m) && slotReservesMemory(s) {
-				used++ // One admitted core per GPU model residency, shared by its calls.
-				covered[s.Machine] = true
-			}
-		}
-		for _, p := range q.s.PreparationPlans {
-			owner := q.s.Machines[p.Machine]
-			if p.Started && owner != nil && hostID(owner) == hostID(m) && !covered[p.Machine] {
-				used++ // Preparation on a reserved execution is already charged once.
-				covered[p.Machine] = true
-			}
-		}
+		used := q.hostCPUInUse(m, nil, nil, false)
 		m.cpuLedger = true
 		m.EffectiveCPUCores, m.CPUInUseCores = capacity, used
 		m.FreeCPUCores, m.CPUCapacityReason = max(0, capacity-used), reason
 	}
+}
+
+// Live admission and release projections share this ledger. A preparation
+// inherits one core when its worker loses its final execution reservation.
+func (q *Queue) hostCPUInUse(m *Machine, releasedJobs map[*Job]bool, releasedSlots map[*ModelSlot]bool, releasePreparation bool) int {
+	used := 0
+	covered := map[string]bool{}
+	for _, j := range q.s.Jobs {
+		owner := q.s.Machines[j.Machine]
+		if !releasedJobs[j] && !j.ReleaseConfirmed && owner != nil && hostID(owner) == hostID(m) && (j.State == "running" || j.State == "stopping") {
+			used += j.Spec.Needs.cores()
+			covered[j.Machine] = true
+		}
+	}
+	for _, r := range q.s.HostReleases {
+		if r.Host != hostID(m) {
+			continue
+		}
+		j := q.s.Jobs[r.Job]
+		if j != nil && releasedJobs[j] && j.Machine == r.Machine && j.Session == r.Session && j.Attempt == r.Attempt {
+			continue
+		}
+		if j != nil && j.Machine == r.Machine && j.Session == r.Session && j.Attempt == r.Attempt && !j.ReleaseConfirmed && (j.State == "running" || j.State == "stopping") {
+			continue
+		}
+		used += max(1, r.CPUCores) // Older receipts predate the one-core default.
+	}
+	for _, s := range q.s.ModelSlots {
+		owner := q.s.Machines[s.Machine]
+		if !releasedSlots[s] && owner != nil && hostID(owner) == hostID(m) && slotReservesMemory(s) {
+			used++ // One admitted core per GPU model residency, shared by its calls.
+			covered[s.Machine] = true
+		}
+	}
+	for _, p := range q.s.PreparationPlans {
+		owner := q.s.Machines[p.Machine]
+		if p.Started && !(releasePreparation && p.Machine == m.ID) && owner != nil && hostID(owner) == hostID(m) && !covered[p.Machine] {
+			used++ // Preparation on a reserved execution is already charged once.
+			covered[p.Machine] = true
+		}
+	}
+	return used
 }
 
 func cpuFits(j *Job, m *Machine) bool {
@@ -134,20 +144,16 @@ func cpuFits(j *Job, m *Machine) bool {
 
 // Planning may credit only the exact releases chosen by the existing planner.
 // The live ledger stays charged until acknowledgement, including release debt.
-func cpuAfterReleases(m *Machine, jobs []*Job, slots []*ModelSlot, preparationCores int) Machine {
+func (q *Queue) cpuAfterReleases(m *Machine, jobs []*Job, slots []*ModelSlot, preparationCores int) Machine {
 	copy := *m
-	copy.CPUInUseCores -= preparationCores
+	releasedJobs, releasedSlots := map[*Job]bool{}, map[*ModelSlot]bool{}
 	for _, j := range jobs {
-		if !j.ReleaseConfirmed {
-			copy.CPUInUseCores -= j.Spec.Needs.cores()
-		}
+		releasedJobs[j] = true
 	}
 	for _, s := range slots {
-		if slotReservesMemory(s) {
-			copy.CPUInUseCores--
-		}
+		releasedSlots[s] = true
 	}
-	copy.CPUInUseCores = max(0, copy.CPUInUseCores)
+	copy.CPUInUseCores = max(0, q.hostCPUInUse(m, releasedJobs, releasedSlots, preparationCores > 0))
 	copy.FreeCPUCores = max(0, copy.EffectiveCPUCores-copy.CPUInUseCores)
 	return copy
 }

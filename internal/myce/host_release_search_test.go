@@ -190,12 +190,37 @@ func TestHostReleaseConfirmedStoppingJobHasNoCredit(t *testing.T) {
 	}
 }
 
+func TestHostReleaseEnvironmentBuildKeepsCPUReservation(t *testing.T) {
+	q, m := releaseTestHost(t, 3, 64, []releaseTestVictim{
+		{"a", "experiment", 1, 0, false}, {"b", "experiment", 1, 0, false},
+	})
+	owner := q.s.Machines["worker-a"]
+	q.s.PreparationPlans = map[string]HostLaunch{
+		"build": {Machine: owner.ID, Session: owner.Session, Kind: "environment", Key: "tool", Attempt: "build", Started: true},
+	}
+	q.refreshHostMemory()
+	demand := spec("production")
+	demand.Needs = ResourceNeeds{CPUCores: 2}
+	jobs, slots, ok := q.hostReleasesExcept(m, 0, 0, demand, nil, nil)
+	if !ok || !slices.Equal(releaseTestIDs(jobs, slots), []string{"job/b"}) {
+		t.Fatalf("build takes a's released core: feasible=%v victims=%v; want [job/b]", ok, releaseTestIDs(jobs, slots))
+	}
+	for _, j := range jobs {
+		j.State = "succeeded"
+	}
+	q.refreshHostMemory()
+	if !cpuAllocationFits(m, 2) {
+		t.Fatal("selected releases do not fit the live CPU ledger")
+	}
+}
+
 // The oracle enumerates every allowed subset without the planner's pruning.
 // It computes capacity and rank independently, including pending (zero-stop)
 // releases. Policy matching/eligibility and hostNeed are the existing contract.
 func bruteForceHostReleases(q *Queue, m *Machine, demand Spec, releasedJobs map[*Job]bool, releasedSlots map[*ModelSlot]bool) ([]string, bool) {
 	type candidate struct {
 		id          string
+		machine     string
 		tier, stops int
 		cores       int
 		ram         float64
@@ -206,7 +231,7 @@ func bruteForceHostReleases(q *Queue, m *Machine, demand Spec, releasedJobs map[
 		if releasedJobs[j] || j.ReleaseConfirmed || owner == nil || owner.Gone || hostID(owner) != hostID(m) || !q.batchPreemptible(j, demand) {
 			continue
 		}
-		v := candidate{id: "job/" + j.ID, tier: q.priorityMatch(j.Spec).Index, ram: hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)}
+		v := candidate{id: "job/" + j.ID, machine: j.Machine, tier: q.priorityMatch(j.Spec).Index, ram: hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)}
 		if j.State == "running" {
 			v.stops = 1
 		}
@@ -219,7 +244,7 @@ func bruteForceHostReleases(q *Queue, m *Machine, demand Spec, releasedJobs map[
 			continue
 		}
 		model, _ := q.model(s.Model)
-		v := candidate{id: "slot/" + slotKey(s.Machine, s.Model), tier: q.priorityMatch(q.slotSpec(s)).Index, ram: hostNeed(owner, model.MemoryGB, model.HostMemoryGB)}
+		v := candidate{id: "slot/" + slotKey(s.Machine, s.Model), machine: s.Machine, tier: q.priorityMatch(q.slotSpec(s)).Index, ram: hostNeed(owner, model.MemoryGB, model.HostMemoryGB)}
 		if s.State != "draining" && s.State != "unloading" {
 			v.stops = 1
 		}
@@ -229,6 +254,27 @@ func bruteForceHostReleases(q *Queue, m *Machine, demand Spec, releasedJobs map[
 		candidates = append(candidates, v)
 	}
 	slices.SortFunc(candidates, func(a, b candidate) int { return strings.Compare(a.id, b.id) })
+	// Independent oracle accounting: a started build takes one core when the
+	// final charged execution on its worker is removed. Count executions, not
+	// cores, so multi-core jobs and a job sharing a worker with a slot work too.
+	buildExecutions := map[string]int{}
+	for _, p := range q.s.PreparationPlans {
+		if owner := q.s.Machines[p.Machine]; p.Started && owner != nil && hostID(owner) == hostID(m) {
+			buildExecutions[p.Machine] = 0
+		}
+	}
+	for worker := range buildExecutions {
+		for _, j := range q.s.Jobs {
+			if j.Machine == worker && !releasedJobs[j] && !j.ReleaseConfirmed && (j.State == "running" || j.State == "stopping") {
+				buildExecutions[worker]++
+			}
+		}
+		for _, s := range q.s.ModelSlots {
+			if s.Machine == worker && !releasedSlots[s] && slotReservesMemory(s) {
+				buildExecutions[worker]++
+			}
+		}
+	}
 	needRAM := 0.0
 	if demand.Needs.HostMemoryGB > 0 {
 		needRAM = hostNeed(m, demand.Needs.MemoryGB, demand.Needs.HostMemoryGB)
@@ -244,13 +290,20 @@ func bruteForceHostReleases(q *Queue, m *Machine, demand Spec, releasedJobs map[
 		counts := make([]int, len(q.effectivePriorityPolicy().Tiers))
 		ids := []string{}
 		freedRAM, freedCores, stops := 0.0, 0, 0
+		selectedExecutions := map[string]int{}
 		for i, v := range candidates {
 			if mask&(1<<i) != 0 {
 				counts[v.tier] += v.stops
 				stops += v.stops
 				freedRAM += v.ram
 				freedCores += v.cores
+				selectedExecutions[v.machine]++
 				ids = append(ids, v.id)
+			}
+		}
+		for worker, count := range buildExecutions {
+			if count > 0 && selectedExecutions[worker] == count {
+				freedCores--
 			}
 		}
 		if m.FreeHostMemoryGB+freedRAM < needRAM || m.EffectiveCPUCores-max(0, m.CPUInUseCores-freedCores) < demand.Needs.cores() {
@@ -349,7 +402,7 @@ func TestHostReleaseSearchMatchesBruteForce(t *testing.T) {
 			}
 			m.UnifiedMemory, m.MemoryCeilingSlackGB = n%3 == 0, float64(n%2)/8
 			q.refreshHostMemory()
-			projected := cpuAfterReleases(m, mandatoryJobs, mandatorySlots, 0)
+			projected := q.cpuAfterReleases(m, mandatoryJobs, mandatorySlots, 0)
 			for _, j := range mandatoryJobs {
 				projected.FreeHostMemoryGB += hostNeed(q.s.Machines[j.Machine], j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
 			}
@@ -372,7 +425,7 @@ func TestHostReleaseSearchMatchesBruteForce(t *testing.T) {
 					t.Fatalf("seed=%d repeat=%d: feasible=%v victims=%v; oracle feasible=%v victims=%v", seed, repeat, ok, got, possible, want)
 				}
 				if ok {
-					capacity := cpuAfterReleases(&projected, jobs, slots, 0)
+					capacity := q.cpuAfterReleases(&projected, append(slices.Clone(mandatoryJobs), jobs...), append(slices.Clone(mandatorySlots), slots...), 0)
 					for _, j := range jobs {
 						if j.ReleaseConfirmed {
 							t.Fatal("selected zero-contribution job", j.ID)
@@ -397,6 +450,106 @@ func TestHostReleaseSearchMatchesBruteForce(t *testing.T) {
 		t.Fatal("missing release-confirmed or non-ready slot coverage", confirmed, slotStates)
 	}
 	t.Logf("seed=%d: %d hosts compared with brute force (%d feasible, %d confirmed releases, slots=%v), each planned three times", seed, cases, feasible, confirmed, slotStates)
+	for _, slot := range []bool{false, true} {
+		for _, stopping := range []bool{false, true} {
+			for _, builds := range []int{0, 1, 6, 12} {
+				t.Run(fmt.Sprintf("ties/slot=%v/stopping=%v/builds=%d", slot, stopping, builds), func(t *testing.T) {
+					victims := make([]releaseTestVictim, 12)
+					for i := range victims {
+						victims[i] = releaseTestVictim{fmt.Sprintf("v%02d", i), "experiment", 1, 4, slot}
+					}
+					q, m := releaseTestHost(t, 12, 48, victims)
+					q.s.PreparationPlans = map[string]HostLaunch{}
+					for i, v := range victims {
+						owner := q.s.Machines["worker-"+v.id]
+						if stopping {
+							if slot {
+								q.s.ModelSlots[slotKey(owner.ID, v.id)].State = "draining"
+							} else {
+								until := q.clock.Now().Add(time.Minute)
+								q.s.Jobs[v.id].State, q.s.Jobs[v.id].StopAt = "stopping", &until
+							}
+						}
+						if i < builds {
+							q.s.PreparationPlans[v.id] = HostLaunch{Machine: owner.ID, Session: owner.Session, Kind: "environment", Attempt: v.id, Started: true}
+						}
+					}
+					q.refreshHostMemory()
+					demand := spec("production")
+					demand.Needs = ResourceNeeds{CPUCores: 6, HostMemoryGB: 24}
+					want, possible := bruteForceHostReleases(q, m, demand, nil, nil)
+					var jobs []*Job
+					var slots []*ModelSlot
+					for repeat := 0; repeat < 3; repeat++ {
+						var ok bool
+						jobs, slots, ok = q.hostReleasesExcept(m, 0, 24, demand, nil, nil)
+						if ok != possible || ok && !slices.Equal(releaseTestIDs(jobs, slots), want) {
+							t.Fatalf("repeat=%d: feasible=%v victims=%v; oracle feasible=%v victims=%v", repeat, ok, releaseTestIDs(jobs, slots), possible, want)
+						}
+					}
+					if possible {
+						for _, j := range jobs {
+							j.State = "succeeded"
+						}
+						for _, s := range slots {
+							delete(q.s.ModelSlots, slotKey(s.Machine, s.Model))
+						}
+						q.refreshHostMemory()
+						if !cpuAllocationFits(m, 6) || !hostFits(m, 0, 24) {
+							t.Fatal("chosen releases do not fit the live ledger")
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestHostReleaseBuildSharesJobAndSlotReservation(t *testing.T) {
+	q, m := releaseTestHost(t, 3, 64, []releaseTestVictim{
+		{"a", "experiment", 1, 0, false}, {"b", "experiment", 1, 0, false},
+	})
+	owner := q.s.Machines["worker-a"]
+	q.models.Models = append(q.models.Models, Model{Name: "model", MemoryGB: 1})
+	slot := &ModelSlot{Machine: owner.ID, Session: owner.Session, Model: "model", State: "ready", Priority: "experiment", Project: "test"}
+	q.s.ModelSlots[slotKey(owner.ID, slot.Model)] = slot
+	q.s.PreparationPlans = map[string]HostLaunch{}
+	q.s.PreparationPlans["build"] = HostLaunch{Machine: owner.ID, Session: owner.Session, Kind: "environment", Attempt: "build", Started: true}
+	q.refreshHostMemory()
+	demand := spec("production")
+	demand.Needs = ResourceNeeds{CPUCores: 2}
+	want, possible := bruteForceHostReleases(q, m, demand, nil, nil)
+	jobs, slots, ok := q.hostReleasesExcept(m, 0, 0, demand, nil, nil)
+	if !possible || !ok || !slices.Equal(releaseTestIDs(jobs, slots), want) {
+		t.Fatalf("shared reservation: feasible=%v victims=%v; oracle feasible=%v victims=%v", ok, releaseTestIDs(jobs, slots), possible, want)
+	}
+	// The complete projection must retain the build's core even when both its
+	// job and model residency have been selected for release.
+	projected := q.cpuAfterReleases(m, []*Job{q.s.Jobs["a"]}, []*ModelSlot{slot}, 0)
+	if projected.CPUInUseCores != 2 {
+		t.Fatal("lost the build's inherited reservation", projected.CPUInUseCores)
+	}
+}
+
+func TestHostReleaseLocalBuildStopsWithExecution(t *testing.T) {
+	q, _ := releaseTestHost(t, 3, 64, []releaseTestVictim{
+		{"a", "experiment", 1, 0, false}, {"b", "experiment", 1, 0, false},
+	})
+	owner := q.s.Machines["worker-a"]
+	buildSpec := spec("experiment")
+	q.s.PreparationPlans = map[string]HostLaunch{}
+	q.s.PreparationPlans["build"] = HostLaunch{Machine: owner.ID, Session: owner.Session, Kind: "environment", Key: "tool", Attempt: "build", Started: true, Spec: &buildSpec}
+	q.refreshHostMemory()
+	demand := &Job{ID: "demand", State: "queued", Spec: spec("production")}
+	demand.Spec.Needs = ResourceNeeds{CPUCores: 2}
+	plan := q.roomPlan(demand, owner, true)
+	if plan == nil || !slices.Equal(releaseTestIDs(plan.jobs, plan.slots), []string{"job/a"}) {
+		t.Fatal("local job/build stop did not free its core", plan)
+	}
+	projected := q.cpuAfterReleases(owner, plan.jobs, plan.slots, plan.preparationCores)
+	if !cpuAllocationFits(&projected, 2) {
+		t.Fatal("local release projection retained a stopped build")
+	}
 }
 
 func TestHostReleaseSearchCapAndGreedyFallback(t *testing.T) {
@@ -417,7 +570,7 @@ func TestHostReleaseSearchCapAndGreedyFallback(t *testing.T) {
 			if !ok || !slices.Equal(releaseTestIDs(jobs, slots), want) {
 				t.Fatalf("%d candidates: feasible=%v victims=%v; want %v", count, ok, releaseTestIDs(jobs, slots), want)
 			}
-			capacity := cpuAfterReleases(m, jobs, slots, 0)
+			capacity := q.cpuAfterReleases(m, jobs, slots, 0)
 			if !cpuAllocationFits(&capacity, demand.Needs.cores()) {
 				t.Fatal("fallback produced an infeasible plan")
 			}

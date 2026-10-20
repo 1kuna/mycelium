@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -120,7 +121,7 @@ func (q *Queue) refreshHostMemory() {
 func (q *Queue) hostReleases(m *Machine, gpu, host float64, priority string, identity ...Spec) ([]*Job, []*ModelSlot, bool) {
 	return q.hostReleasesExcept(m, gpu, host, priorityDemand(priority, identity), nil, nil)
 }
-func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, releasedJobs map[*Job]bool, releasedSlots map[*ModelSlot]bool) ([]*Job, []*ModelSlot, bool) {
+func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, releasedJobs map[*Job]bool, releasedSlots map[*ModelSlot]bool, releasePreparations ...bool) ([]*Job, []*ModelSlot, bool) {
 	if m.HostMemoryBudgetStatus() != "" {
 		return nil, nil, false
 	}
@@ -128,8 +129,24 @@ func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, r
 		return nil, nil, false
 	}
 	cores := demand.Needs.cores()
+	releasePreparation := len(releasePreparations) > 0 && releasePreparations[0]
+	initialCPU := q.hostCPUInUse(m, releasedJobs, releasedSlots, releasePreparation)
+	freedCPU := func(jobs []*Job, slots []*ModelSlot) int {
+		jobSet, slotSet := map[*Job]bool{}, map[*ModelSlot]bool{}
+		maps.Copy(jobSet, releasedJobs)
+		maps.Copy(slotSet, releasedSlots)
+		for _, j := range jobs {
+			jobSet[j] = true
+		}
+		for _, s := range slots {
+			slotSet[s] = true
+		}
+		return initialCPU - q.hostCPUInUse(m, jobSet, slotSet, releasePreparation)
+	}
 	cpuOK := func(jobs []*Job, slots []*ModelSlot) bool {
-		copy := cpuAfterReleases(m, jobs, slots, 0)
+		copy := *m
+		copy.CPUInUseCores = max(0, m.CPUInUseCores-freedCPU(jobs, slots))
+		copy.FreeCPUCores = max(0, copy.EffectiveCPUCores-copy.CPUInUseCores)
 		return cores == 0 || cpuAllocationFits(&copy, cores)
 	}
 	if (host == 0 || hostFits(m, gpu, host)) && cpuOK(nil, nil) {
@@ -191,6 +208,12 @@ func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, r
 	if len(jobs)+len(slots) <= 12 {
 		// Search only the existing eligible victims. Above the bound, retain
 		// the greedy-plus-prune path below to bound scheduling work per host.
+		type symmetryKey struct {
+			tier, stops, cores, inFlight int
+			ram                          float64
+			slot, resumable, retry       bool
+			state, preparationWorker     string
+		}
 		type victim struct {
 			job   *Job
 			slot  *ModelSlot
@@ -199,6 +222,13 @@ func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, r
 			ram   float64
 			cores int
 			id    string
+			key   symmetryKey
+		}
+		preparationWorkers := map[string]bool{}
+		for _, p := range q.s.PreparationPlans {
+			if owner := q.s.Machines[p.Machine]; p.Started && !(releasePreparation && p.Machine == m.ID) && owner != nil && hostID(owner) == hostID(m) {
+				preparationWorkers[p.Machine] = true
+			}
 		}
 		victims := make([]victim, 0, len(jobs)+len(slots))
 		for _, j := range jobs {
@@ -207,6 +237,10 @@ func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, r
 				v.stops = 1
 			}
 			v.cores = j.Spec.Needs.cores()
+			v.key = symmetryKey{tier: v.tier, stops: v.stops, cores: v.cores, ram: v.ram, state: j.State, resumable: j.Spec.Resumable}
+			if preparationWorkers[j.Machine] {
+				v.key.preparationWorker = j.Machine
+			}
 			victims = append(victims, v)
 		}
 		for _, s := range slots {
@@ -218,10 +252,28 @@ func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, r
 			if slotReservesMemory(s) {
 				v.cores = 1
 			}
+			v.key = symmetryKey{tier: v.tier, stops: v.stops, cores: v.cores, ram: v.ram, state: s.State, slot: true, inFlight: s.InFlight, retry: s.RetryReserved}
+			if preparationWorkers[s.Machine] {
+				v.key.preparationWorker = s.Machine
+			}
 			victims = append(victims, v)
 		}
 		// Stable addition order also keeps floating-point RAM sums deterministic.
 		sort.Slice(victims, func(i, j int) bool { return victims[i].id < victims[j].id })
+		// Interchangeable victims need only their ID-ordered prefixes. Keeping
+		// the preceding equal victim selected satisfies the ID tie-break without
+		// visiting every tied subset. Build-dependent releases stay worker-local.
+		previousEqual := make([]int, len(victims))
+		selected := make([]bool, len(victims))
+		for i, v := range victims {
+			previousEqual[i] = -1
+			for k := i - 1; k >= 0; k-- {
+				if victims[k].key == v.key {
+					previousEqual[i] = k
+					break
+				}
+			}
+		}
 		remainingRAM := make([]float64, len(victims)+1)
 		remainingCores := make([]int, len(victims)+1)
 		for i := len(victims) - 1; i >= 0; i-- {
@@ -248,6 +300,9 @@ func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, r
 		}
 		var search func(int, float64, int)
 		search = func(i int, freedRAM float64, freedCores int) {
+			if len(preparationWorkers) > 0 {
+				freedCores = freedCPU(chosenJobs, chosenSlots)
+			}
 			if room+freedRAM+remainingRAM[i] < need || freedCores+remainingCores[i] < requiredCoreReleases {
 				return
 			}
@@ -275,7 +330,11 @@ func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, r
 				return
 			}
 			search(i+1, freedRAM, freedCores)
+			if previousEqual[i] >= 0 && !selected[previousEqual[i]] {
+				return
+			}
 			v := victims[i]
+			selected[i] = true
 			tiers[v.tier] += v.stops
 			stops += v.stops
 			ids = append(ids, v.id)
@@ -293,6 +352,7 @@ func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, r
 			ids = ids[:len(ids)-1]
 			tiers[v.tier] -= v.stops
 			stops -= v.stops
+			selected[i] = false
 		}
 		search(0, 0, 0)
 		return bestJobs, bestSlots, bestTiers != nil

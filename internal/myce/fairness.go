@@ -210,7 +210,7 @@ func (q *Queue) batchResourcesFit(j *Job, m *Machine) bool {
 	plan := q.roomPlan(j, m, true)
 	var projected Machine
 	if plan != nil {
-		projected = cpuAfterReleases(m, plan.jobs, plan.slots, plan.preparationCores)
+		projected = q.cpuAfterReleases(m, plan.jobs, plan.slots, plan.preparationCores)
 	} else {
 		// Future queue order still includes work behind an occupied command
 		// slot. Only roomPlan authorizes stops; this estimate cannot admit it.
@@ -218,7 +218,7 @@ func (q *Queue) batchResourcesFit(j *Job, m *Machine) bool {
 		if !ok {
 			return false
 		}
-		projected = cpuAfterReleases(m, jobs, slots, 0)
+		projected = q.cpuAfterReleases(m, jobs, slots, 0)
 	}
 	memory := q.reclaimableGPUMemory(m, j.Spec.Priority, j.Spec)
 	if release, ok := q.s.BatchReleases[m.ID]; ok && release.Session == m.Session && q.clock.Now().Before(release.Until) {
