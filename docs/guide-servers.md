@@ -45,14 +45,23 @@ kills the owned group and returns a visible error. The optional stop command
 and TERM share `stop_timeout` (default 10 seconds), followed by KILL and group
 verification. Failed unload retains its memory reservation and environment lease.
 
-Start one worker per physical card, using `join --name b70-gpu0 --gpu xpu
---device 0 --memory-mode fixed --memory-gb REVIEWED_ALLOWANCE`. Device selectors
+Until package M migration, start one worker per physical card, using
+`join --name b70-gpu0 --gpu xpu --device 0 --memory-mode fixed
+--memory-gb REVIEWED_ALLOWANCE`. Device selectors
 apply to batch commands and server processes without changing global env.
 For XPU, `ZE_AFFINITY_MASK` names physical cards while `ONEAPI_DEVICE_SELECTOR`
 uses indices after that mask: physical device `1` becomes `level_zero:0` /
-PyTorch `xpu:0`. A mask `0,1` exposes local indices `0,1`. `MYCE_DEVICES`
-always retains the physical selector. CUDA visibility also renumbers selected
-cards from zero; a single selected card is `cuda:0` inside the process.
+PyTorch `xpu:0`. `MYCE_DEVICES` always retains the physical selector.
+Under the [package M target](design-proposal.md#one-machine-one-worker-m0m4-100-decision-2026-10-20),
+one worker owns the machine inventory and a server selects at most one card.
+Existing multi-card worker or model masks such as `0,1` (including inputs to
+`WithModelDevice`) must fail at install/config load with typed
+`gpu_count_unsupported`, before launching anything; do not silently truncate or
+split them. This is the M2 target, not a claim that the legacy worker already
+rejects them. One job using multiple GPUs on the same machine is deferred to
+[#105](https://github.com/1kuna/mycelium/issues/105). CUDA visibility also
+renumbers selected cards from zero; a single selected card is `cuda:0` inside
+the process.
 Keep `{device}` for physical selectors, not framework-local device arguments.
 A server launched through `docker run` must explicitly forward these variables
 with Docker `--env NAME` and expose the required device nodes; a Docker client
@@ -65,7 +74,16 @@ Every card worker on one machine shares `--host-id` (default OS hostname).
 Optional catalog `host_memory_gb` and batch `needs.host_memory_gb` reserve RAM
 from that shared host allowance, rather than independently per card. See
 [host admission](operations.md#host-ram-admission-and-ceilings) for the unified-memory rule.
-No second worker/controller may own that card. A selector is framework isolation,
+No second worker/controller may own that card. Under M2, XPU identity is PCI BDF
+or Level Zero UUID; the worker and every member force
+`ZE_ENABLE_PCI_ID_DEVICE_ORDER=1`. Verify ordinal-to-identity mapping at worker
+and member start; a mismatch withholds that device with
+`device_identity_mismatch`. CPU execution must hide both CUDA and XPU, using
+an empty `CUDA_VISIBLE_DEVICES` and explicit select-none `ZE_AFFINITY_MASK` and
+`ONEAPI_DEVICE_SELECTOR`; deleting XPU selectors exposes defaults. Verify zero
+visible accelerators with the actual runtimes, including sidecars/containers;
+inability to enforce this withholds CPU work with
+`cpu_accelerator_isolation_unavailable`. A selector is framework isolation,
 not an OS security boundary; qualify it with the real runtime before cutover.
 
 `max_in_flight` optionally limits simultaneous calls per loaded copy (set it to
