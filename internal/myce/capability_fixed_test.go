@@ -5,7 +5,8 @@ import "testing"
 func TestFixedAcceleratorMemorySizesUnprobedDevice(t *testing.T) {
 	m := Machine{ID: "w", GPU: "xpu", FreeMemoryGB: 31, TotalMemoryGB: 31}
 	unsized := func() CapabilityProfile {
-		return CapabilityProfile{MemoryLayout: "separate", SystemMemoryBytes: 32 << 30, Accelerators: []AcceleratorProfile{{Type: "xpu"}}, Unavailable: []string{"accelerator facts"}}
+		// ProfileProbe records logical CPUs even when accelerator probing fails.
+		return CapabilityProfile{LogicalCPUs: 8, MemoryLayout: "separate", SystemMemoryBytes: 32 << 30, Accelerators: []AcceleratorProfile{{Type: "xpu"}}, Unavailable: []string{"accelerator facts"}}
 	}
 	p := unsized()
 	m.CapabilityProfile = &p

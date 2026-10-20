@@ -19,7 +19,7 @@ func TestJobSpecInvalidHTTPAndQueueLog(t *testing.T) {
 		prepare            func(*testing.T, *Queue, *Spec)
 	}{
 		{"logs", "job_logs_invalid", "logs must be keep or none", func(_ *testing.T, _ *Queue, s *Spec) { s.Logs = "bad" }},
-		{"memory", "job_memory_invalid", "needs.memory_gb must be positive: CPU-only work stays outside Mycelium", func(_ *testing.T, _ *Queue, s *Spec) { s.Needs.MemoryGB = 0 }},
+		{"memory", "job_memory_invalid", "declare positive memory_gb (host RAM for CPU work, GPU memory otherwise)", func(_ *testing.T, _ *Queue, s *Spec) { s.Needs.MemoryGB = 0 }},
 		{"docker", "job_docker_invalid", "main Docker memory must fit needs.host_memory_gb", func(_ *testing.T, _ *Queue, s *Spec) {
 			s.Needs.HostMemoryGB = 1
 			s.Run.Docker, s.Run.DockerNetwork, s.Run.DockerMemoryGB = true, "private", 2
