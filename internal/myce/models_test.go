@@ -728,7 +728,7 @@ func TestCombinedReclamationTierAndPinEligibility(t *testing.T) {
 		{"active-pin", "production", true, true, true, false},
 		{"inactive-pin", "production", true, false, true, true},
 		{"nonresumable-production", "production", false, false, false, true},
-		{"nonresumable-deadline", "deadline", false, false, false, true},
+		{"nonresumable-deadline", "deadline", false, false, false, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			q, _, m := modelFixture(t)

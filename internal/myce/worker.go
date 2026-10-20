@@ -197,6 +197,9 @@ var errWorkerCheckpoint = errors.New("checkpoint storage unavailable")
 var errWorkerReleasePending = errors.New("command release unconfirmed")
 
 func (w Worker) start(s *workerStore, j Job) (*process, error) {
+	if j.Spec.Needs.cpuOnly() {
+		w.Machine.GPU, w.Machine.Device, w.DeviceBinding = "cpu", "0", ""
+	}
 	if !j.Spec.extensionJob() {
 		if err := lowerExecution(&j.Spec); err != nil {
 			return nil, err
@@ -400,22 +403,26 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	if environmentPath != "" {
 		bindEnvironment(env, environmentPath)
 	}
-	if w.Machine.Device != "" {
+	placement := w.Machine
+	if j.Spec.Needs.cpuOnly() {
+		placement.GPU, placement.Device = "cpu", ""
+	}
+	if placement.Device != "" || placement.GPU == "cpu" {
 		delete(env, "CUDA_VISIBLE_DEVICES")
 		delete(env, "ONEAPI_DEVICE_SELECTOR")
 		delete(env, "ZE_AFFINITY_MASK")
-		bound, e := WithModelDevice(Model{}, w.Machine.GPU, w.Machine.Device)
+		bound, e := WithModelDevice(Model{}, placement.GPU, placement.Device)
 		if e != nil {
 			return nil, e
 		}
 		for k, v := range bound.DeviceEnv {
 			env[k] = v
 		}
-		if w.Machine.GPU == "cuda" && w.DeviceBinding != "" {
+		if placement.GPU == "cuda" && w.DeviceBinding != "" {
 			env["CUDA_VISIBLE_DEVICES"] = w.DeviceBinding
 		}
 	}
-	for k, v := range placementEnvironment(w.Machine) {
+	for k, v := range placementEnvironment(placement) {
 		env[k] = v
 	}
 	if ceilingBytes > 0 {
@@ -694,7 +701,7 @@ func (w Worker) Run(stop context.Context) error {
 	if w.Machine.MaxJobs < 0 {
 		return errors.New("max-jobs must be nonnegative")
 	}
-	if w.Machine.ID == "" || !validGPU(w.Machine.GPU) || (w.MemorySource == nil && (!validMemoryValue(w.Machine.FreeMemoryGB) || w.Machine.FreeMemoryGB <= 0)) {
+	if w.Machine.ID == "" || !validGPU(w.Machine.GPU) || (w.Machine.GPU != "cpu" && w.MemorySource == nil && (!validMemoryValue(w.Machine.FreeMemoryGB) || w.Machine.FreeMemoryGB <= 0)) {
 		return errors.New("worker requires a name, GPU platform and positive free-memory budget")
 	}
 	retention := DefaultContainerRetention
@@ -829,6 +836,9 @@ func (w Worker) Run(stop context.Context) error {
 			return errors.New("worker requires physical host identity")
 		}
 	}
+	if w.Machine.GPU == "cpu" {
+		w.Machine.HostMemoryMeasured = true
+	}
 	if w.HostMemorySource == nil {
 		w.HostMemorySource, err = NewHostMemorySource(w.HostMemoryReserveGB)
 		if err != nil {
@@ -899,7 +909,7 @@ func (w Worker) Run(stop context.Context) error {
 	defer func() { availabilityCancel(); <-availabilityDone }()
 	// Benchmark before any model load or admission, and never over a recovered job.
 	// Fake inventory keeps dev/tests light; measured fake runners are tested separately.
-	if w.OnboardingBenchmark && w.Benchmark != nil && w.Machine.GPU != "fake" && s.state.Job == nil {
+	if w.OnboardingBenchmark && w.Benchmark != nil && w.Machine.GPU != "fake" && w.Machine.GPU != "cpu" && s.state.Job == nil {
 		if err = w.runBenchmark(stop, s); err != nil {
 			return err
 		}
@@ -1167,6 +1177,9 @@ func (w Worker) Run(stop context.Context) error {
 			var reply Reply
 			err = w.Client.Call(ctx, "POST", "/api/workers/checkin", Checkin{Started: p != nil && (p.docker == nil || p.docker.status() == "running") && (p.native == nil || p.native.started()), Machine: m, Running: running, Fresh: fresh, PreviousSession: s.state.PreviousSession, ModelReports: reports}, &reply)
 			if err == nil {
+				if reply.CPUBudgetCores != nil {
+					w.Machine.CPUBudgetCores = *reply.CPUBudgetCores
+				}
 				if reply.HostMemoryBudget != nil {
 					w.Machine.HostMemoryBudgetGB = reply.HostMemoryBudget.GiB
 					rt.mu.Lock()

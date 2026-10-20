@@ -7,6 +7,7 @@ import "sort"
 // are useful capacity for planning, never authority to admit a replacement.
 type placementPlan struct {
 	machine      *Machine
+	demand       *Job
 	jobs         []*Job
 	slots        []*ModelSlot
 	calls        []HostObligation
@@ -47,6 +48,9 @@ func (p *placementPlan) addSlot(s *ModelSlot) {
 	}
 }
 func (q *Queue) applyPlacement(p *placementPlan, demand *Job) {
+	if p.demand != nil {
+		demand = p.demand
+	}
 	for _, j := range p.jobs {
 		q.stopBatchFor(j, demand)
 	}
@@ -115,7 +119,7 @@ func (q *Queue) roomPlan(j *Job, m *Machine, batch bool) *placementPlan {
 	return best
 }
 func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool) *placementPlan {
-	p := &placementPlan{machine: m, preparations: true}
+	p := &placementPlan{machine: m, demand: j, preparations: true}
 	need, host := j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB
 	if !batch {
 		model, ok := q.model(j.Spec.Needs.Model)
@@ -214,7 +218,8 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool) 
 	}
 	// Mandatory/local releases already provide RAM as well as GPU memory.
 	// Project both once before asking for additional host-wide releases.
-	projected := *m
+	projected := q.cpuAfterPreparation(m, j)
+	projected = cpuAfterReleases(&projected, p.jobs, p.slots)
 	releasedJobs, releasedSlots := map[*Job]bool{}, map[*ModelSlot]bool{}
 	for _, r := range p.jobs {
 		releasedJobs[r] = true
@@ -225,7 +230,11 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool) 
 		model, _ := q.model(s.Model)
 		projected.FreeHostMemoryGB += hostNeed(q.s.Machines[s.Machine], model.MemoryGB, model.HostMemoryGB)
 	}
-	hostJobs, hostSlots, ok := q.hostReleasesExcept(&projected, need, host, j.Spec, releasedJobs, releasedSlots)
+	resourceDemand := j.Spec
+	if !batch {
+		resourceDemand.Needs.CPUCores = 1
+	}
+	hostJobs, hostSlots, ok := q.hostReleasesExcept(&projected, need, host, resourceDemand, releasedJobs, releasedSlots)
 	if !ok {
 		return nil
 	}

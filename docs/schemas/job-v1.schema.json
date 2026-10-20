@@ -14,6 +14,9 @@
         "machine": {
           "type": "string"
         },
+        "priority_stop": {
+          "$ref": "#/$defs/PriorityPreemption"
+        },
         "progress": {
           "type": "integer"
         },
@@ -594,6 +597,9 @@
         "attempt": {
           "type": "string"
         },
+        "demand": {
+          "type": "string"
+        },
         "key": {
           "type": "string"
         },
@@ -603,11 +609,25 @@
         "machine": {
           "type": "string"
         },
+        "priority_stop": {
+          "$ref": "#/$defs/PriorityPreemption"
+        },
         "session": {
           "type": "string"
         },
+        "spec": {
+          "$ref": "#/$defs/Spec"
+        },
         "started": {
           "type": "boolean"
+        },
+        "started_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "stop_at": {
+          "format": "date-time",
+          "type": "string"
         }
       },
       "required": [
@@ -783,6 +803,10 @@
         },
         "output_refs": {
           "$ref": "#/$defs/FileManifest",
+          "x-contract": "diagnostic"
+        },
+        "preemption_count": {
+          "type": "integer",
           "x-contract": "diagnostic"
         },
         "priority_policy": {
@@ -1013,6 +1037,29 @@
       ],
       "type": "object"
     },
+    "PriorityPreemption": {
+      "properties": {
+        "cause": {
+          "type": "string"
+        },
+        "demand": {
+          "type": "string"
+        },
+        "policy": {
+          "$ref": "#/$defs/PriorityMatch"
+        },
+        "victim": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "cause",
+        "demand",
+        "victim",
+        "policy"
+      ],
+      "type": "object"
+    },
     "Program": {
       "properties": {
         "args": {
@@ -1039,6 +1086,9 @@
     },
     "ResourceNeeds": {
       "properties": {
+        "cpu_cores": {
+          "type": "integer"
+        },
         "host_memory_gb": {
           "type": "number"
         },

@@ -59,7 +59,7 @@ func machine(id, gpu string, host ...string) Machine {
 	if len(host) > 0 {
 		physicalHost = host[0]
 	}
-	return Machine{HostID: physicalHost, ID: id, Session: "session-" + id, GPU: gpu, FreeMemoryGB: 8, CapabilityProfile: &CapabilityProfile{Version: 0, MemoryLayout: "separate", SystemMemoryBytes: 64 << 30, Accelerators: []AcceleratorProfile{{Type: gpu, MemoryBytes: 64 << 30}}}}
+	return Machine{HostID: physicalHost, ID: id, Session: "session-" + id, GPU: gpu, FreeMemoryGB: 8, CapabilityProfile: &CapabilityProfile{Version: 0, OS: "linux", Arch: "amd64", LogicalCPUs: 64, MemoryLayout: "separate", SystemMemoryBytes: 64 << 30, Accelerators: []AcceleratorProfile{{Type: gpu, MemoryBytes: 64 << 30}}}}
 }
 func check(t *testing.T, q *Queue, m Machine, r *Job) Reply {
 	t.Helper()
@@ -334,6 +334,14 @@ func TestGraceAndFrontOfLine(t *testing.T) {
 	if reply := check(t, q, m, r); !reply.Kill {
 		t.Fatal("must kill stale copy at 10 seconds")
 	}
+	// Expiry authorizes kill; the exact interrupted attempt must acknowledge
+	// cleanup before a retry or replacement can consume its resources.
+	requireState(t, q, r.ID, "stopping")
+	interrupted := result(r, false)
+	interrupted.Interrupted = true
+	if err := q.Complete(interrupted); err != nil {
+		t.Fatal(err)
+	}
 	requireState(t, q, r.ID, "queued")
 	production := check(t, q, m, nil).Job
 	if production.Spec.Priority != "production" {
@@ -411,8 +419,22 @@ func TestSuddenLossAndLateReturn(t *testing.T) {
 			if !reply.Stop || !reply.Kill {
 				t.Fatal("returning stale copy must be killed")
 			}
+			oldKey := releaseKey(HostRelease{Job: old.ID, Machine: old.Machine, Session: old.Session, Attempt: old.Attempt})
+			if release, ok := q.s.HostReleases[oldKey]; !ok || release.CPUCores != 1 {
+				t.Fatal("loss did not retain the old attempt's default core")
+			}
 			if err := q.Complete(result(old, true)); !errors.Is(err, ErrStale) {
 				t.Fatalf("old completion accepted: %v", err)
+			}
+			if _, ok := q.s.HostReleases[oldKey]; ok {
+				t.Fatal("rejected result did not settle its exact release")
+			}
+			current := job(t, q, next.ID)
+			if current.State != "running" || current.Attempt != next.Attempt || current.Machine != next.Machine || current.Session != next.Session || current.ReleaseConfirmed {
+				t.Fatal("old completion changed replacement attempt", current)
+			}
+			if err := q.Complete(result(old, true)); !errors.Is(err, ErrStale) {
+				t.Fatalf("repeated old completion accepted: %v", err)
 			}
 			if err := q.AppendLog(LogChunk{Result: result(old, true), Text: "late"}); !errors.Is(err, ErrStale) {
 				t.Fatal("old logs accepted")
@@ -565,7 +587,7 @@ func TestValidationAndYAML(t *testing.T) {
 			t.Fatalf("%s: %v", p, err)
 		}
 	}
-	for _, change := range []func(*Spec){func(s *Spec) { s.Needs.MemoryGB = 0 }, func(s *Spec) { s.Priority = "unknown" }, func(s *Spec) { s.Priority = "deadline"; s.Deadline = nil }, func(s *Spec) { s.Needs.Platform = Platform{} }, func(s *Spec) { s.Needs.Platform = Platform{Required: []string{"cpu"}} }, func(s *Spec) { s.Needs.Platform.Required = []string{"cuda"} }, func(s *Spec) { s.Environment = Environment{Name: "a", LockFile: "b"} }, func(s *Spec) { s.Run.Command = nil }} {
+	for _, change := range []func(*Spec){func(s *Spec) { s.Needs.MemoryGB = 0 }, func(s *Spec) { s.Priority = "unknown" }, func(s *Spec) { s.Priority = "deadline"; s.Deadline = nil }, func(s *Spec) { s.Needs.Platform = Platform{} }, func(s *Spec) { s.Needs.Platform = Platform{Required: []string{"unknown"}} }, func(s *Spec) { s.Needs.Platform.Required = []string{"cuda"} }, func(s *Spec) { s.Environment = Environment{Name: "a", LockFile: "b"} }, func(s *Spec) { s.Run.Command = nil }} {
 		s := spec("experiment")
 		change(&s)
 		if s.Validate() == nil {

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -33,6 +34,10 @@ func detectJoinGPU(ctx context.Context, probe myce.MachineProbe, options joinGPU
 		}
 	}
 	d, err := probe.DetectDevice(ctx, options.device)
+	if errors.Is(err, myce.ErrNoGPU) {
+		options.platform, options.mode, options.memory, options.reserve = "cpu", "fixed", 0, 0
+		return options, nil
+	}
 	if err != nil {
 		return options, fmt.Errorf("GPU auto-detection on %s/%s checked %s: %s; specify --gpu (and --device on multi-GPU hosts)", probe.OS, probe.Arch, strings.Join(checked, ", "), strings.ReplaceAll(err.Error(), "\n", " "))
 	}

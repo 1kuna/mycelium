@@ -265,22 +265,22 @@ func TestPinnedLoadFailureVisible(t *testing.T) {
 	}
 }
 
-func TestPriorityPreemptionDoesNotExtendExistingDeadlineGrace(t *testing.T) {
+func TestProductionShortensExistingDeadlineGrace(t *testing.T) {
 	q, c := fixture(t)
 	submit(t, q, spec("experiment"))
 	m := machine("one", "fake")
 	r := check(t, q, m, nil).Job
 	submit(t, q, spec("deadline"))
-	if check(t, q, m, r).GraceSeconds != 10 {
+	if check(t, q, m, r).GraceSeconds != 120 {
 		t.Fatal("deadline grace")
 	}
 	c.Advance(time.Second)
 	submit(t, q, spec("production"))
-	if check(t, q, m, r).GraceSeconds != 9 {
-		t.Fatal("another higher tier extended existing grace")
+	if check(t, q, m, r).GraceSeconds != 10 {
+		t.Fatal("production did not shorten existing grace")
 	}
 	c.Advance(time.Second)
-	if check(t, q, m, r).GraceSeconds != 8 {
+	if check(t, q, m, r).GraceSeconds != 9 {
 		t.Fatal("grace was extended on check-in")
 	}
 }

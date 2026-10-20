@@ -34,7 +34,7 @@ func TestPriorityPreemptionEveryBatchKind(t *testing.T) {
 				}
 				tier := "experiment"
 				if higher {
-					tier = "deadline"
+					tier = "production"
 				}
 				submit(t, q, spec(tier))
 				got := job(t, q, batch.ID)

@@ -2,6 +2,7 @@ package myce
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -177,11 +178,11 @@ func (q *Queue) callDefaults(c *ModelCall, model Model, h http.Header, defaults 
 		return errors.New("X-Myce-Project and X-Myce-Priority are required (or set the entry's project/default_call_priority)")
 	}
 	if err := validateProjectIdentifier(c.Project); err != nil {
-		return err
+		return fmt.Errorf("X-Myce-Project: %w", err)
 	}
 	identity := Spec{Project: c.Project, Priority: c.Priority, Class: c.Class}
 	if err := normalizeJobClass(&identity); err != nil {
-		return err
+		return fmt.Errorf("X-Myce-Class/X-Myce-Priority: %w", err)
 	}
 	c.Priority, c.Class = identity.Priority, identity.Class
 	c.Deadline = nil

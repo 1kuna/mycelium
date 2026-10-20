@@ -102,7 +102,9 @@ cancellation wins over both. Independent exit/OOM still fails under the shared
 outcome classifier. A deadline authorizes stopping, never assumes cleanup.
 
 Resumable victims get ten seconds by default, non-resumable commands stop
-immediately. `queue --preemption-stop-grace` configures this interval; the legacy
+immediately. Deadline demand preserves non-resumable commands and keeps the
+120-second grace for resumable commands. `queue --preemption-stop-grace`
+configures the other priority-stop interval; the legacy
 `--production-stop-grace` flag remains an alias. After two displacements, resumed
 work gets at least that interval of runtime before another priority stop. Pins
 are desired state and are restored when capacity permits. Model requests accept

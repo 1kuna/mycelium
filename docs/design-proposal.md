@@ -8,7 +8,7 @@ v1 tried to do too much at once and never thought about how people would use or 
 
 ## What it is
 
-One shared queue for production, research and future projects. The approved extension direction includes CPU and accelerator workloads through the same execution interface. **Current admission remains GPU-only:** CPU/core reservations and CPU-only workers are a later #98 resource slice; E1 does not enable them. Laptop tests use fake GPU inventory. Projects submit jobs. Machines pull the most important job they can run. No machine sits idle because its "own" project is quiet.
+One shared queue for production, research and future projects. The approved extension direction includes CPU and accelerator workloads through the same execution interface. CPU-only commands now declare logical cores and host RAM and may run on GPU-less Linux/macOS workers. Laptop tests use real CPU commands and optional fake GPU inventory. Projects submit jobs. Machines pull the most important job they can run. No machine sits idle because its "own" project is quiet.
 
 ## The parts
 
@@ -59,7 +59,9 @@ stop only useful lower-tier work, including non-resumable commands, native
 sidecar groups, model calls/loads, pinned engines and environment builds. Idle
 unpinned same-tier model cache may be evicted; active same-tier work is never
 preempted. Resumable commands receive SIGTERM and ten seconds by default to save;
-non-resumable work stops immediately. `--preemption-stop-grace` sets this common
+non-resumable work stops immediately. Deadline demand preserves non-resumable
+commands and gives resumable commands the existing 120-second grace.
+`--preemption-stop-grace` sets the other priority-stop
 grace (`--production-stop-grace` is a compatibility alias). After two planned
 preemptions, each resumed batch, build or desired engine gets at least that grace
 of runtime before another priority stop. Strict higher tiers may still starve
@@ -315,11 +317,11 @@ Supported v3 features include plain batch commands, queue-managed model calls an
 
 Explicit NAS roots remain supported for models, shared files and checkpoints. The queue file store also supports jobs without a NAS. Ordinary commands and servers do not need to become extensions. These are supported v3 paths, not a second runtime or a reason to restore older worker/report protocols.
 
-CPU-only scheduling is approved direction under #98, with implementation deferred to its resource slices; multi-machine/gang work and vision expansion remain deferred under #17, #22 and #69. Automatic dependency detection for arbitrary projects, automatic memory estimation and a backup queue service also wait. Jobs must name their software recipe or lock file and declare their needs.
+CPU-only scheduling is implemented by R1 (#98); concurrent batch attempts per worker remain R2; multi-machine/gang work and vision expansion remain deferred under #17, #22 and #69. Automatic dependency detection for arbitrary projects, automatic memory estimation and a backup queue service also wait. Jobs must name their software recipe or lock file and declare their needs.
 
 ## Product decisions
 
-1. **GPU work only.** CPU callers, file watching and publication stay outside the queue.
+1. **CPU and GPU compute.** CPU commands and accelerator workloads share the queue. Applications retain file watching, submission and publication.
 2. **The queue owns GPU work.** Apps submit commands or model calls instead of keeping their own GPU processes between jobs. An unpinned idle model is unloaded after its configured interval (default 10 minutes), or when higher-priority work needs the memory. Explicit production pins are the reservation mechanism.
 3. **Progress can move.** NAS checkpoints or verified file-store checkpoint generations allow a resumable job to continue on another compatible machine. Outputs must be safe to repeat; attempt-specific results reject stale executions.
 4. **One local network, one queue.** No peer network, leases, leader election or replicated registry.
@@ -387,8 +389,8 @@ equal usage favors fewer active allocations per weight. A sole project can use
 every compatible worker. Non-fitting work does not block useful backfill.
 Stable tier/resource-family/project accounting persists across restart. GPU work
 uses normalized allocated GPU-seconds, including batch preparation and model
-loads charged once to their owner. CPU core-seconds remain a separate family for
-the later CPU admission slice. Optional all-class project concurrency caps live
+loads charged once to their owner. CPU work uses allocated core-seconds in a separate family, with the same
+decay and weighted planner. GPU work also reserves host cores/RAM for admission. Optional all-class project concurrency caps live
 in the revision-CAS policy; legacy experiment concurrency and GPU memory-share
 caps retain their scope. Status and the simulator use the dispatch planner.
 This is admission fairness, with no same-tier interruption or bounded-wait
@@ -496,7 +498,7 @@ extension-owned commands, environments, workdir, env, or resource floors.
 An extension may retain its old `platforms`, memory floors, `run: [argv...]`,
 setup/check and baselines, or declare complete `variants`. A variant has an
 exact `target: {os, arch, platform}` (Go OS/architecture names and the existing
-cuda/xpu/metal/fake backend), named `environments`, `needs`, `execution`, and
+cuda/xpu/metal/cpu/fake backend), named `environments`, `needs`, `execution`, and
 its own setup/check and baselines. Targets are unique. No field inheritance,
 recipe merging, backend fallback or implicit OS emulation occurs. Legacy
 execution fields cannot accompany variants. Qualification reports for variants
@@ -547,10 +549,9 @@ single main member through this adapter too. Literal substitutions cover
 argv and environment values are never shell-interpolated. Existing staged
 input files remain available beneath `{work}`. No workflow graph, application
 configuration patch language or second extension executor is introduced.
-Current admission conservatively uses the maximum declared memory floors
-across candidate variants plus caller size hints; target-specific resource
-admission is left to the resource slices. This may withhold a smaller host,
-but never lowers a reservation below the selected recipe's floor.
+Admission evaluates each qualified variant's own CPU/GPU/RAM floors plus
+caller size hints and learned needs for that backend. A host is eligible when
+one matching variant fits; dispatch reserves that selected variant's resources.
 
 Native job groups use `execution.sidecars` or `run.sidecars`: name, command,
 optional environment/env, positive finite member host-RAM declaration, optional
@@ -587,5 +588,47 @@ An occupied port or unverifiable listener fails preparation. Loopback is not a
 private-network sandbox. Endpoint env and literal substitutions, examples and
 platform limits are described in [Native sidecars](native-sidecars.md).
 All members share worker-selected GPU masks, receive no `MYCE_TOKEN`, and honor
-`logs: none`. CPU admission, multi-GPU vectors, child cgroups, assets/archive
+`logs: none`. Concurrent attempts, multi-GPU vectors, assets/archive
 expansion and native Windows execution remain separate slices.
+
+
+## CPU and shared host resources (R1, #98/#22)
+
+A plain CPU job declares `needs: {cpu_cores: 2, memory_gb: 4}` without GPU
+selectors. Here memory is host RAM in GiB. `platform: cpu` also selects CPU
+execution, defaulting to one logical core when `cpu_cores` is omitted. Admission
+normalizes CPU work to `platform: {required: [cpu]}`, zero GPU `memory_gb` and
+positive `host_memory_gb`; stored/replayed jobs use that unambiguous vector.
+GPU declarations retain GPU `memory_gb` and additional `host_memory_gb`, with
+`cpu_cores` defaulting to one. Native sidecars share the attempt's declared
+cores/RAM instead of adding another reservation. CPU commands receive
+`MYCE_DEVICE=cpu`, `MYCE_PLATFORM=cpu`, an empty CUDA mask and no inherited
+XPU selectors or fleet token. This is cooperative device selection.
+
+Workers offer logical CPUs minus `--reserve-cpu-cores` (default one), capped
+by `--cpu-budget-cores` when positive. Zero CPU budget uses detected capacity
+minus reserve. CPU and RAM allowances are queue-owned physical-host policy;
+`myce host budget HOST --cpu-budget-cores N` changes the CPU allowance while
+that host is drained/disabled, beside `--memory-budget-gb`. Worker views must
+acknowledge the same policy before admission. Host identity is shared across
+CPU/GPU views, so capacity is never multiplied by device or worker count.
+Running/stopping allocations, model residency and unconfirmed batch releases
+retain their cores; pending release and its current attempt are charged once.
+Background preparation uses one core per worker unless that execution already
+reserves it. Preparation overhead RAM remains covered by the owner reserve,
+following the existing host RAM budget contract.
+
+A GPU-less Linux/macOS host can `myce join --gpu cpu`; automatic enrollment
+chooses CPU when no supported GPU is visible. An explicit CPU target requires
+no GPU probe. CPU extensions use exact Linux/macOS OS/arch/`cpu` variants and
+the existing baseline check/qualification mechanism. Missing CPU counts, OS
+support, RAM facts or live RAM readings withhold CPU work with a status reason.
+GPU requests default to one core and require known CPU capacity as well;
+missing telemetry never supplies invented cores. Upgrade queue and workers
+together so every host reports complete capacity.
+
+R1 keeps one batch attempt per worker. R2 owns concurrent worker attempts;
+Windows/WSL qualification remains W1/W2. CPU counts are admission reservations,
+not CPU-time enforcement; macOS RAM remains admission-only and delegated Linux
+RAM enforcement retains its existing qualification requirements. Real native
+Linux/Windows acceptance and fleet cutover are separate from laptop proof.

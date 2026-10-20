@@ -292,7 +292,7 @@ type EnvironmentReport struct {
 }
 
 func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
-	if !q.workerIdle(m) || !m.EnvironmentBuilder || q.preparationStopping(m) {
+	if !q.hostLaunchAllowed(m, m.Session) || !q.workerIdle(m) || !m.EnvironmentBuilder || q.preparationStopping(m) {
 		return nil
 	}
 	// Preserve a started same-tier/protected build even if another queued job

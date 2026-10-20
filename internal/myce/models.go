@@ -518,7 +518,7 @@ func (q *Queue) maintainModels() {
 			}
 			continue
 		}
-		if m.FreeMemoryGB < model.MemoryGB || !hostFits(m, model.MemoryGB, model.HostMemoryGB) || q.preparationActive(m) || q.preparationStopping(m) {
+		if m.FreeMemoryGB < model.MemoryGB || !cpuAllocationFits(m, 1) || !hostFits(m, model.MemoryGB, model.HostMemoryGB) || q.preparationActive(m) || q.preparationStopping(m) {
 			continue
 		}
 		if s != nil {
@@ -595,7 +595,8 @@ func (q *Queue) callCanUse(m *Machine, c *ModelCall) bool {
 			possible += j.Spec.Needs.MemoryGB
 		}
 	}
-	_, _, hostOK := q.hostReleases(m, model.MemoryGB, model.HostMemoryGB, c.Priority, callJob(c).Spec)
+	projected := q.cpuAfterPreparation(m, callJob(c))
+	_, _, hostOK := q.hostReleases(&projected, model.MemoryGB, model.HostMemoryGB, c.Priority, callJob(c).Spec)
 	return possible >= model.MemoryGB && hostOK
 }
 
@@ -1129,10 +1130,11 @@ func (q *Queue) makeBatchRoom(j *Job, planned, handled map[string]bool) string {
 		if !q.placementAllowed(j, m) || q.unreported[m.ID] || planned[m.ID] {
 			continue
 		}
-		if winner := q.candidate(m, handled); winner == nil || winner.ID != j.ID {
+		winner := q.candidate(m, handled)
+		if winner == nil || winner.ID != j.ID {
 			continue
 		}
-		if p := q.roomPlan(j, m, true); p != nil && p.cheaper(best) {
+		if p := q.roomPlan(winner, m, true); p != nil && p.cheaper(best) {
 			best = p
 		}
 	}

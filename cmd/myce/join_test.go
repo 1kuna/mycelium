@@ -62,13 +62,17 @@ func TestJoinDetectionPreservesExplicitOptions(t *testing.T) {
 	}
 }
 
-func TestJoinNoGPUFailsBeforeContactingQueue(t *testing.T) {
+func TestJoinNoGPUOffersCPUWithoutContactingQueue(t *testing.T) {
 	t.Setenv("MYCE_TOKEN", "test-only-token")
-	for _, tc := range []struct{ os, arch, checked string }{{"linux", "amd64", "nvidia-smi"}, {"darwin", "arm64", "system_profiler"}} {
+	for _, tc := range []struct{ os, arch string }{{"linux", "amd64"}, {"darwin", "amd64"}, {"darwin", "arm64"}} {
 		probe := myce.MachineProbe{OS: tc.os, Arch: tc.arch, Command: func(context.Context, string, ...string) ([]byte, error) { return nil, errors.New("absent") }}
-		err := runWithProbe([]string{"join", "--queue", "http://127.0.0.1:1"}, probe)
-		if err == nil || !strings.Contains(err.Error(), tc.checked) || !strings.Contains(err.Error(), "specify --gpu") || strings.Contains(err.Error(), "\n") {
-			t.Fatalf("unexpected error: %v", err)
+		got, err := detectJoinGPU(context.Background(), probe, joinGPUOptions{mode: "auto"}, nil)
+		if err != nil || got.platform != "cpu" || got.memory != 0 {
+			t.Fatalf("CPU enrollment: %+v %v", got, err)
+		}
+		err = runWithProbe([]string{"join", "--heartbeat", "0"}, probe)
+		if err == nil || err.Error() != "heartbeat must be positive" {
+			t.Fatalf("unexpected setup error: %v", err)
 		}
 	}
 }
