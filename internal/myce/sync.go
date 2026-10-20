@@ -215,6 +215,9 @@ func (q *Queue) recordModelUse(name string) {
 
 // placementBetter applies the same rule to foreground placement and build plans.
 func (q *Queue) placementBetter(j *Job, a, b *Machine) bool {
+	if j.Spec.Needs.cpuOnly() && (a.GPU == "cpu") != (b.GPU == "cpu") {
+		return a.GPU == "cpu"
+	}
 	aa, bb := affinity(j, a), affinity(j, b)
 	if aa != bb {
 		return aa > bb
@@ -239,7 +242,7 @@ func (q *Queue) betterPlacement(j *Job, m *Machine) bool {
 		}
 		return false
 	}
-	if j.Spec.Needs.Model == "" && j.Spec.Environment.Key() == "" {
+	if !j.Spec.Needs.cpuOnly() && j.Spec.Needs.Model == "" && j.Spec.Environment.Key() == "" {
 		return false
 	}
 	for _, other := range q.s.Machines {

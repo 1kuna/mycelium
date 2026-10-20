@@ -195,6 +195,11 @@ func (q *Queue) batchCandidate(j *Job, m *Machine) *Job {
 	for _, candidate := range extensionJobs(j, m, true) {
 		q.applyLearnedNeeds(candidate)
 		if q.capReasonFor(candidate, m) == "" && q.batchResourcesFit(candidate, m) {
+			// Leave accelerator workers for GPU work when CPU placement is free.
+			// Filter here so the same planner can consider the next candidate.
+			if candidate.Spec.Needs.cpuOnly() && m.GPU != "cpu" && q.betterPlacement(candidate, m) {
+				continue
+			}
 			return candidate
 		}
 	}

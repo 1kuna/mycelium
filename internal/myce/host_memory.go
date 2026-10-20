@@ -179,7 +179,7 @@ func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, r
 		}
 		model, _ := q.model(s.Model)
 		n := hostNeed(q.s.Machines[s.Machine], model.MemoryGB, model.HostMemoryGB)
-		if n > 0 || cores > 0 && slotReservesMemory(s) {
+		if room < need && n > 0 || !cpuOK(nil, chosenSlots) && slotReservesMemory(s) {
 			room += n
 			chosenSlots = append(chosenSlots, s)
 		}
@@ -190,7 +190,7 @@ func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, r
 			break
 		}
 		n := hostNeed(q.s.Machines[j.Machine], j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
-		if n > 0 || cores > 0 && !j.ReleaseConfirmed {
+		if room < need && n > 0 || !cpuOK(chosenJobs, chosenSlots) && !j.ReleaseConfirmed {
 			room += n
 			chosenJobs = append(chosenJobs, j)
 		}

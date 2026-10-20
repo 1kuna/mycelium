@@ -399,8 +399,11 @@ func extensionJobs(j *Job, m *Machine, qualified bool) []*Job {
 			copy.Spec.Needs.Platform = Platform{Required: []string{m.GPU}}
 			copy.Spec.Needs.MemoryGB = max(copy.Spec.Needs.MemoryGB, j.Spec.SizeHint.MemoryGB)
 			copy.Spec.Needs.HostMemoryGB = max(copy.Spec.Needs.HostMemoryGB, j.Spec.SizeHint.HostMemoryGB)
-			if j.Spec.Program != nil && len(j.Spec.Needs.Platform.Required) == 1 && j.Spec.Needs.Platform.Required[0] == m.GPU {
-				// A candidate already lowered for this target carries learned floors.
+			// Retry reservations are floors on every backend and entry path.
+			// Unresolved program estimates may still include other backends;
+			// successful learned needs remain scoped to their target.
+			if j.OOMRetries > 0 || len(j.Spec.Needs.Platform.Required) == 1 && j.Spec.Needs.Platform.Required[0] == m.GPU {
+				copy.Spec.Needs.CPUCores = max(copy.Spec.Needs.CPUCores, j.Spec.Needs.CPUCores)
 				copy.Spec.Needs.MemoryGB = max(copy.Spec.Needs.MemoryGB, j.Spec.Needs.MemoryGB)
 				copy.Spec.Needs.HostMemoryGB = max(copy.Spec.Needs.HostMemoryGB, j.Spec.Needs.HostMemoryGB)
 			}

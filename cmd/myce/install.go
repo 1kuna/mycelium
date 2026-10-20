@@ -150,6 +150,7 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 			} else {
 				d, e = probe.DetectDevice(ctx, values.Device)
 				if errors.Is(e, myce.ErrNoGPU) {
+					fmt.Fprintln(os.Stderr, cpuFallbackNotice)
 					d = myce.Detection{OS: probe.OS, Arch: probe.Arch, Platform: "cpu", MemoryMode: "fixed"}
 					e = nil
 				}

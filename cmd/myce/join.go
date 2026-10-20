@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"mycelium/internal/myce"
@@ -35,6 +36,7 @@ func detectJoinGPU(ctx context.Context, probe myce.MachineProbe, options joinGPU
 	}
 	d, err := probe.DetectDevice(ctx, options.device)
 	if errors.Is(err, myce.ErrNoGPU) {
+		fmt.Fprintln(os.Stderr, cpuFallbackNotice)
 		options.platform, options.mode, options.memory, options.reserve = "cpu", "fixed", 0, 0
 		return options, nil
 	}
@@ -55,3 +57,5 @@ func detectJoinGPU(ctx context.Context, probe myce.MachineProbe, options joinGPU
 	}
 	return options, nil
 }
+
+const cpuFallbackNotice = "No GPU driver was found; this machine joins as CPU-only. If it has a GPU, install its driver and re-run this command."
