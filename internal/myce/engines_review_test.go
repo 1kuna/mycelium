@@ -276,7 +276,7 @@ func TestBoundServerDropsInheritedOtherBackendSelectors(t *testing.T) {
 		if platform != "cuda" && got["CUDA_VISIBLE_DEVICES"] != "" {
 			t.Fatal(platform, got["CUDA_VISIBLE_DEVICES"])
 		}
-		if platform != "xpu" && (got["ZE_AFFINITY_MASK"] != "" || got["ONEAPI_DEVICE_SELECTOR"] != "") {
+		if platform != "xpu" && (got["ZE_AFFINITY_MASK"] != "2147483647" || got["ONEAPI_DEVICE_SELECTOR"] != "!*:*") {
 			t.Fatal(platform, "inherited XPU selector")
 		}
 	}

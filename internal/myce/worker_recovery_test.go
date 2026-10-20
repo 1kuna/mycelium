@@ -320,6 +320,7 @@ func TestWorkerPersistedResultReconcilesThenReplaysBeforeFresh(t *testing.T) {
 	var calls []string
 	var total string
 	var uploadedSession string
+	var freshChecked bool
 	server := workerTestServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
@@ -339,10 +340,13 @@ func TestWorkerPersistedResultReconcilesThenReplaysBeforeFresh(t *testing.T) {
 					t.Error("result reconciled under a fresh session")
 				}
 			} else {
-				calls = append(calls, "fresh")
-				if len(calls) == 4 && (!c.Fresh || c.Machine.Session == "old-session") {
-					t.Error("did not switch to fresh session after replay")
+				if !freshChecked {
+					if !c.Fresh || c.Machine.Session == "old-session" {
+						t.Error("did not switch to fresh session after replay")
+					}
+					freshChecked = true
 				}
+				calls = append(calls, "fresh")
 				cancel()
 			}
 			json.NewEncoder(rw).Encode(Reply{AttemptProtocol: keyedAttemptProtocol, CheckpointRoot: filepath.Dir(j.Checkpoint)})
@@ -379,7 +383,15 @@ func TestWorkerPersistedResultReconcilesThenReplaysBeforeFresh(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
-	if len(calls) < 4 || strings.Join(calls[:4], ",") != "old-checkin,log,complete,fresh" {
+	// Uploads are independent of the machine heartbeat. Repeated reports keep
+	// exact old-session custody; only the replay/session transition is ordered.
+	ordered := []string{}
+	for i, call := range calls {
+		if i == 0 || call != "old-checkin" {
+			ordered = append(ordered, call)
+		}
+	}
+	if len(ordered) < 4 || strings.Join(ordered[:4], ",") != "old-checkin,log,complete,fresh" {
 		t.Fatalf("replay order: %v", calls)
 	}
 	if total != "recovered\n" || uploadedSession != "old-session" {

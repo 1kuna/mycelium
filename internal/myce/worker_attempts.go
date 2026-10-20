@@ -285,7 +285,7 @@ func (w Worker) recoverAttempt(s *workerStore) (*process, error) {
 func (s *workerStore) attemptStores() ([]*workerStore, error) {
 	stores := []*workerStore{}
 	for _, name := range s.state.Attempts {
-		if filepath.Base(name) != name || name != "legacy-state.json" && (!strings.HasPrefix(name, "attempt-state-") || !strings.HasSuffix(name, ".json")) {
+		if filepath.Base(name) != name || name != "legacy-state.json" && (!strings.HasPrefix(name, "state-attempt-") || !strings.HasSuffix(name, ".json")) {
 			return nil, errors.New("invalid saved attempt index")
 		}
 		if _, err := os.Stat(filepath.Join(s.dir, name)); err != nil {
@@ -295,6 +295,11 @@ func (s *workerStore) attemptStores() ([]*workerStore, error) {
 	if s.state.Job != nil { // Adopt the bounded old single-attempt spool in place.
 		child := &workerStore{dir: s.dir, state: s.state, stateName: "legacy-state.json"}
 		child.state.Attempts = nil
+		// The singular spool predates assignment session fields. Only this
+		// bounded adoption may recover the absent field from saved custody.
+		if child.state.Job.Session == "" {
+			child.state.Job.Session = child.state.Session
+		}
 		if err := child.save(); err != nil {
 			return nil, err
 		}
@@ -319,7 +324,7 @@ func (s *workerStore) attemptStores() ([]*workerStore, error) {
 			return nil, err
 		}
 	}
-	paths, err := filepath.Glob(filepath.Join(s.dir, "attempt-state-*.json"))
+	paths, err := filepath.Glob(filepath.Join(s.dir, "state-attempt-*.json"))
 	if err != nil {
 		return nil, err
 	}
@@ -352,7 +357,7 @@ func (s *workerStore) attemptStores() ([]*workerStore, error) {
 }
 
 func newAttemptStore(root *workerStore, j Job) (*workerStore, error) {
-	s := &workerStore{dir: root.dir, stateName: "attempt-state-" + ID() + ".json", state: workerState{Session: j.Session, Job: &j, CheckpointRoot: root.state.CheckpointRoot, Identity: ID()}}
+	s := &workerStore{dir: root.dir, stateName: "state-attempt-" + ID() + ".json", state: workerState{Session: j.Session, Job: &j, CheckpointRoot: root.state.CheckpointRoot, Identity: ID()}}
 	s.nasPrepare.timeout = 250 * time.Millisecond
 	return s, s.save()
 }
@@ -574,9 +579,21 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				if err != nil || !validMemoryValue(free) {
 					free = 0
 					m.MemoryError = "memory probe failed"
+					if err != nil {
+						m.MemoryError = err.Error()
+					}
 				}
 				m.FreeMemoryGB = free
 				m.MemoryMeasured = w.MemoryMeasured
+			}
+			// The legacy fake runtime can inject measured telemetry. Carry it
+			// into its sole inventory entry so projection cannot hide failure.
+			if len(m.Devices) == 1 && m.Devices[0].Platform == "fake" {
+				m.Devices[0].FreeMemoryGB = m.FreeMemoryGB
+				m.Devices[0].MemoryMeasured = m.MemoryMeasured
+				if m.Devices[0].Reason != "device_identity_mismatch" {
+					m.Devices[0].Reason = m.MemoryError
+				}
 			}
 			if !w.MemoryMeasured {
 				m.FreeMemoryGB = max(0, m.FreeMemoryGB-batch)

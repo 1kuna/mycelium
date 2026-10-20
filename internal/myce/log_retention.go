@@ -59,7 +59,7 @@ func (q *Queue) pruneBatchLogs() error {
 
 func pruneWorkerLogs(dir, pending string, now time.Time, age time.Duration) error {
 	protected := map[string]bool{pending: true}
-	paths, err := filepath.Glob(filepath.Join(dir, "attempt-state-*.json"))
+	paths, err := filepath.Glob(filepath.Join(dir, "state-attempt-*.json"))
 	if err != nil {
 		return err
 	}

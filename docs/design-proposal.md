@@ -1108,6 +1108,8 @@ are excluded. They replace the previous package M estimates.
   so a crash between child persistence and index persistence retains custody.
   The old single-attempt state is adopted in place before new admission. Buffered
   results keep their session until every recovered attempt is acknowledged.
+  Only singular legacy adoption may fill an absent assignment session from its
+  saved spool session; nonempty mismatches and keyed-file mismatches fail closed.
 - Canonical IDs follow saved hardware identities across enumeration order changes.
   A changed XPU ordinal, missing identity or changed fingerprint withholds that
   saved component with `device_identity_mismatch`; discovery never substitutes

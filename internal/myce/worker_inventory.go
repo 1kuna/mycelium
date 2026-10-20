@@ -216,7 +216,9 @@ func (w Worker) forAttempt(j Job) (Worker, error) {
 		if err != nil {
 			return w, err
 		}
-		w.MemorySource, w.MemoryMeasured = source, d.MemoryMeasured
+		if d.Platform != "fake" || len(w.Machine.Devices) != 1 || w.MemorySource == nil {
+			w.MemorySource, w.MemoryMeasured = source, d.MemoryMeasured
+		}
 		if err := w.verifyDevice(); err != nil {
 			return w, err
 		}
@@ -338,7 +340,12 @@ func inventoryTarget(m *Machine) error {
 			return nil
 		}
 	}
-	m.GPU, m.Device, m.TotalMemoryGB, m.FreeMemoryGB = "cpu", "", 0, 0
+	// Preserve a CPU worker's diagnostic selector for qualification matching;
+	// an empty inventory still contributes no accelerator capacity.
+	if m.GPU != "cpu" {
+		m.Device = ""
+	}
+	m.GPU, m.TotalMemoryGB, m.FreeMemoryGB = "cpu", 0, 0
 	return nil
 }
 
