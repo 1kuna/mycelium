@@ -73,6 +73,15 @@ func savedInstallFixture(t *testing.T, roles ...string) (myce.ServiceConfig, myc
 	c.RequireMountedNAS = false
 	c.EnvironmentFile = "" // synthetic credential file; no real fleet file is read
 	c.JoiningFile = ""
+	// Saved policy references must point to files the new binary can decode.
+	for path, body := range map[string]string{
+		c.HostConfig:    "hosts:\n  fixture-host: {production_hold: true}\n",
+		c.ProjectConfig: "fixture: {weight: 1}\n",
+	} {
+		if err := os.WriteFile(path, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 
 	retention := 3 * time.Hour
 	c.ContainerRetention = &retention

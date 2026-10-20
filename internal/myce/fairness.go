@@ -56,7 +56,8 @@ func (q *Queue) fairKey(s Spec) string {
 	return fairUsageKey(q.priorityMatch(s).Tier, fairResourceFamily(s), s.Project)
 }
 
-func ReadProjectPolicies(path string) (map[string]ProjectPolicy, error) {
+func ReadProjectPolicies(path string) (policies map[string]ProjectPolicy, err error) {
+	defer func() { err = policyFileError(path, err) }()
 	if path == "" {
 		return nil, nil
 	}

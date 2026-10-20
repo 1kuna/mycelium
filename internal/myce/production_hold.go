@@ -39,7 +39,8 @@ type HostRelease struct {
 	Until                       time.Time
 }
 
-func ReadHostPolicies(path string) (map[string]HostPolicy, error) {
+func ReadHostPolicies(path string) (policies map[string]HostPolicy, err error) {
+	defer func() { err = policyFileError(path, err) }()
 	if path == "" {
 		return nil, nil
 	}

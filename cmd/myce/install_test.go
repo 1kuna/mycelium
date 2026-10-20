@@ -172,6 +172,15 @@ func TestInstallCLIDevicelessNeedsExplicitFlagAndBudget(t *testing.T) {
 
 func TestInstallQueueDeploymentFlags(t *testing.T) {
 	home := t.TempDir()
+	policies := t.TempDir()
+	for name, body := range map[string]string{
+		"hosts.yaml":    "hosts:\n  fixture: {production_hold: true}\n",
+		"projects.yaml": "fixture: {weight: 1}\n",
+	} {
+		if err := os.WriteFile(filepath.Join(policies, name), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	out, err := os.CreateTemp(t.TempDir(), "stdout")
 	if err != nil {
 		t.Fatal(err)
@@ -179,12 +188,12 @@ func TestInstallQueueDeploymentFlags(t *testing.T) {
 	saved := os.Stdout
 	os.Stdout = out
 	defer func() { os.Stdout = saved; out.Close() }()
-	args := []string{"install", "queue", "--nas", home, "--dry-run", "--listen", "192.0.2.1:7331", "--db", home + "/db.sqlite", "--project-config", home + "/projects.yaml", "--host-config", home + "/hosts.yaml", "--log-retention", "24h", "--upload-spool-dir", home + "/uploads", "--upload-spool-bytes", "12345", "--restart-grace", "2m", "--production-infrastructure-retries", "4", "--production-loss-timeout", "6s", "--deadline-loss-timeout", "21s", "--experiment-loss-timeout", "61s", "--checkpoints", home + "/checkpoints", "--environment-file", home + "/fleet.env", "--private-devices=false", "--no-new-privileges=false", "--nice", "12", "--cpu-quota", "30%", "--memory-max", "600M", "--tasks-max", "70"}
+	args := []string{"install", "queue", "--nas", home, "--dry-run", "--listen", "192.0.2.1:7331", "--db", home + "/db.sqlite", "--project-config", policies + "/projects.yaml", "--host-config", policies + "/hosts.yaml", "--log-retention", "24h", "--upload-spool-dir", home + "/uploads", "--upload-spool-bytes", "12345", "--restart-grace", "2m", "--production-infrastructure-retries", "4", "--production-loss-timeout", "6s", "--deadline-loss-timeout", "21s", "--experiment-loss-timeout", "61s", "--checkpoints", home + "/checkpoints", "--environment-file", home + "/fleet.env", "--private-devices=false", "--no-new-privileges=false", "--nice", "12", "--cpu-quota", "30%", "--memory-max", "600M", "--tasks-max", "70"}
 	if err := setupCommandWithProbe(args, myce.MachineProbe{OS: "linux", Arch: "amd64"}, home); err != nil {
 		t.Fatal(err)
 	}
 	b, _ := os.ReadFile(out.Name())
-	for _, want := range []string{"--listen", "192.0.2.1:7331", "--db", home + "/db.sqlite", "--project-config", home + "/projects.yaml", "--host-config", home + "/hosts.yaml", "--log-retention", "24h0m0s", "--upload-spool-dir", home + "/uploads", "--upload-spool-bytes", "12345", "--restart-grace", "2m0s", "--production-infrastructure-retries", "4", "--production-loss-timeout", "6s", "--deadline-loss-timeout", "21s", "--experiment-loss-timeout", "1m1s", "--checkpoints", home + "/checkpoints", "EnvironmentFile=", home + "/fleet.env", "PrivateDevices=no", "NoNewPrivileges=no", "Nice=12", "CPUQuota=30%", "MemoryMax=600M", "TasksMax=70"} {
+	for _, want := range []string{"--listen", "192.0.2.1:7331", "--db", home + "/db.sqlite", "--project-config", policies + "/projects.yaml", "--host-config", policies + "/hosts.yaml", "--log-retention", "24h0m0s", "--upload-spool-dir", home + "/uploads", "--upload-spool-bytes", "12345", "--restart-grace", "2m0s", "--production-infrastructure-retries", "4", "--production-loss-timeout", "6s", "--deadline-loss-timeout", "21s", "--experiment-loss-timeout", "1m1s", "--checkpoints", home + "/checkpoints", "EnvironmentFile=", home + "/fleet.env", "PrivateDevices=no", "NoNewPrivileges=no", "Nice=12", "CPUQuota=30%", "MemoryMax=600M", "TasksMax=70"} {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("missing %q in dry-run unit", want)
 		}

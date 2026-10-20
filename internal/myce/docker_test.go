@@ -953,8 +953,10 @@ func TestDockerQueueRestartRetainsCustody(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	q.checkpointProbe = func() bool { return true }
+	// Open may return while its bounded NAS probe is still reading the hook.
+	// Join that probe before replacing it; keep the custody assertions below.
 	await(t, func() bool { _, e := q.nasProbe.run(root, func() (bool, error) { return true, nil }); return e == nil })
+	q.checkpointProbe = func() bool { return true }
 	a := dockerMachine("a", "fake")
 	a.HostID = "shared"
 	a.UnifiedMemory = true

@@ -381,6 +381,10 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 		return errors.New("refusing non-Mycelium service unit")
 	}
 
+	if err := c.ValidateInstallPolicies(); err != nil {
+		return err
+	}
+
 	roots, err := c.StateRoots()
 	if err != nil {
 		return err

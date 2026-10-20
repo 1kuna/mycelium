@@ -217,6 +217,9 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 	if e != nil {
 		return e
 	}
+	if err := c.ValidateInstallPolicies(); err != nil {
+		return err
+	}
 	d := c.Detection
 	if installed != nil {
 		if err := myce.ValidateInstallIdentity(*installed, c); err != nil {
