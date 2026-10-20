@@ -364,23 +364,13 @@ func qualifiedExtension(j *Job, m *Machine) *Extension {
 		if !e.matchesTarget(m) || !slices.Contains(e.platforms(), m.GPU) || (j.Spec.Resumable && !e.Resumable) {
 			continue
 		}
-		view, ok := e.forMachine(m)
-		if !ok {
-			continue
-		}
 		// Only the frozen check command may run before qualification. Its
 		// preparation still crosses E2's ordinary launch/custody boundary.
 		if j.Spec.ExtensionCheck != nil && slices.Contains(extensionWorks(*e), j.Spec.workType()) {
 			return e
 		}
-		if _, ok := view.baseline(j.Spec.workType(), m.GPU); !ok {
-			continue
-		}
 		for _, r := range m.ExtensionReports {
-			if len(e.Variants) > 0 && (r.Target == nil || *r.Target != machineTarget(m)) {
-				continue
-			}
-			if r.Digest == e.Digest && r.Work == j.Spec.workType() && r.Qualified && r.Platform == m.GPU && currentExtensionQualification(*e, r, m) {
+			if r.Work == j.Spec.workType() && extensionQualificationReason(*e, r, m) == "" {
 				return e
 			}
 		}

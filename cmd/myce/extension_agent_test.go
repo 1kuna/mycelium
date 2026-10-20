@@ -203,11 +203,35 @@ print(j["id"])
 	if err != nil || !bytes.Equal(unchanged, original) {
 		t.Fatal("existing app changed", err)
 	}
+	// A successful smoke command must never print PASS or qualify its version.
+	smoke, err := myce.ReadExtension(folder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	smoke.Version = "2"
+	smoke.Variants[0].Check = nil
+	smoke.Variants[0].Baselines = nil
+	smoke.Variants[0].Execution.Main.Command = []string{"sh", "-c", "exit 0"}
+	smokeYAML, err := yaml.Marshal(smoke)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(folder, "extension.yaml"), smokeYAML, 0600); err != nil {
+		t.Fatal(err)
+	}
+	run("extension", "add", "--root", extensionRoot, folder)
+	smokeCommand := exec.CommandContext(ctx, binary, "extension", "check", "--root", extensionRoot, "http-stage@2")
+	smokeCommand.Env = os.Environ()
+	smokeOutput, smokeErr := smokeCommand.CombinedOutput()
+	t.Logf("smoke check exit: %v\n%s", smokeErr, smokeOutput)
+	if smokeErr == nil || strings.Contains(string(smokeOutput), "PASS check") || !strings.Contains(string(smokeOutput), "ran OK but not qualified: declare a check command") || !strings.Contains(string(smokeOutput), "baselines[extension:http-stage]") {
+		t.Fatalf("false smoke PASS: %v %s", smokeErr, smokeOutput)
+	}
 }
 
 func TestExtensionInitAndStaticCLI(t *testing.T) {
 	folder := filepath.Join(t.TempDir(), "new-extension")
-	if err := extensionCommand([]string{"init", "--name", "fixture", folder}); err != nil {
+	if err := extensionCommand([]string{"init", "--name", "fixture", "--outputs", `["profile.json","report.csv"]`, folder}); err != nil {
 		t.Fatal(err)
 	}
 	if err := extensionCommand([]string{"check", "--static", folder}); err != nil {
@@ -233,6 +257,10 @@ func TestExtensionInitAndStaticCLI(t *testing.T) {
 	variant := skeleton["variants"].([]any)[0].(map[string]any)
 	if _, old := variant["needs"].(map[string]any)["platform"]; old {
 		t.Fatal("legacy needs.platform")
+	}
+	outputs := skeleton["outputs"].([]any)
+	if len(outputs) != 2 || outputs[0] != "profile.json" || outputs[1] != "report.csv" {
+		t.Fatal("ignored --outputs", outputs)
 	}
 	if variant["environments"] == nil || variant["execution"] == nil || skeleton["outputs"] == nil {
 		t.Fatal("incomplete variant skeleton")

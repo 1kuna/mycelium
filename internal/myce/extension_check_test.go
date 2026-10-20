@@ -19,8 +19,8 @@ func TestExtensionQualificationSmokeFailureClearsPriorSuccess(t *testing.T) {
 	asset := []byte("small checked asset")
 	hash := sha256.Sum256(asset)
 	e.Assets = FileManifest{"model": {SHA256: hex.EncodeToString(hash[:]), SizeBytes: int64(len(asset))}}
-	e.Variants[0].Check = []string{"sh", "-c", `test -z "$MYCE_TOKEN" && test -f "$1" && test ! -e "$MYCE_EXTENSION_CACHE/fail"`, "check", "{assets.model}"}
-	e.Variants[0].Baselines = nil
+	e.Variants[0].Check = []string{"sh", "-c", `test -z "$MYCE_TOKEN" && test -f "$1" && test ! -e "$MYCE_EXTENSION_CACHE/fail" && sh "$MYCE_EXTENSION_DIR/check.sh"`, "check", "{assets.model}"}
+	delete(e.Variants[0].Baselines, "kind:sample")
 	e = freezeComposition(t, e)
 	root := t.TempDir()
 	if err := InstallExtension(root, e); err != nil {
@@ -61,11 +61,11 @@ func TestExtensionQualificationSmokeFailureClearsPriorSuccess(t *testing.T) {
 		t.Fatal(reports, err)
 	}
 	m := Machine{HostID: "local-host", GPU: "fake", ExtensionFingerprint: reports[0].Fingerprint, CapabilityProfile: &CapabilityProfile{OS: e.Variants[0].Target.OS, Arch: e.Variants[0].Target.Arch}}
-	if !currentExtensionQualification(e, reports[0], &m) {
+	if extensionQualificationReason(e, reports[0], &m) != "" {
 		t.Fatal("qualification does not bind placement")
 	}
 	m.HostID = "other-host"
-	if currentExtensionQualification(e, reports[0], &m) {
+	if extensionQualificationReason(e, reports[0], &m) == "" {
 		t.Fatal("qualification crossed hosts")
 	}
 	before, err := os.ReadFile(extensionRecords(root, e, "fake"))

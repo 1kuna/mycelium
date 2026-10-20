@@ -22,24 +22,28 @@ func extensionInit(args []string) error {
 	arch := f.String("arch", runtime.GOARCH, "target architecture")
 	command := f.String("command", `["{env.app.python}","{extension}/app.py","input.json","result.json"]`, "existing app argv as JSON array")
 	check := f.String("check", "[]", "check argv as JSON array; empty uses main smoke run")
+	outputs := f.String("outputs", `["result.json"]`, "relative output filenames as JSON array")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
 	if f.NArg() != 1 {
 		return errors.New("extension init [flags] NEW_FOLDER; see docs/extensions/AGENT-GUIDE.md")
 	}
-	var argv, checkArgv []string
+	var argv, checkArgv, outputNames []string
 	if err := json.Unmarshal([]byte(*command), &argv); err != nil {
 		return err
 	}
 	if err := json.Unmarshal([]byte(*check), &checkArgv); err != nil {
 		return err
 	}
+	if err := json.Unmarshal([]byte(*outputs), &outputNames); err != nil {
+		return err
+	}
 	// Authoring fields only; legacy wire fields never enter the skeleton.
 	description := map[string]any{
 		"name": *name, "version": *version,
 		"purpose":       "Wrap an existing app; describe its prerequisites and result contract",
-		"default_class": "batch", "outputs": []string{"result.json"},
+		"default_class": "batch", "outputs": outputNames,
 		"variants": []any{map[string]any{
 			"target":       myce.ExecutionTarget{OS: *targetOS, Arch: *arch, Platform: *platform},
 			"environments": map[string]myce.EnvironmentRecipe{"app": {Backend: "uv", Python: "3.11", LockFile: "requirements.txt"}},

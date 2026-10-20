@@ -241,11 +241,31 @@ func newExtensionReport(e Extension, m *Machine, work string) ExtensionReport {
 	}
 	return r
 }
-func currentExtensionQualification(e Extension, r ExtensionReport, m *Machine) bool {
+
+// extensionQualificationReason is the single qualification predicate for check
+// verdicts, cached reports and placement. Empty means qualified for this host.
+// A successful command alone is only smoke evidence, never qualification.
+func extensionQualificationReason(e Extension, r ExtensionReport, m *Machine) string {
+	view, ok := e.forMachine(m)
+	if !ok || !e.matchesTarget(m) || !slices.Contains(e.platforms(), m.GPU) {
+		return "extension target does not match this host"
+	}
+	if len(view.Check) == 0 {
+		return "declare a check command and a native baseline in baselines[" + r.Work + "]"
+	}
+	if _, ok := view.baseline(r.Work, m.GPU); !ok {
+		return "declare a native baseline in baselines[" + r.Work + "] for the check command"
+	}
+	if r.Digest != e.Digest || r.Platform != m.GPU || !r.Qualified {
+		return "successful check required for this extension version and platform"
+	}
 	if len(e.Variants) == 0 {
-		return true
+		return ""
 	} // existing legacy checks retain their wire contract
-	return r.Host != "" && r.Host == hostID(m) && r.Fingerprint != "" && r.Fingerprint == m.ExtensionFingerprint && r.EnvironmentIdentity == extensionEnvironmentIdentity(e, m) && r.CheckDigest == extensionCheckIdentity(e, m) && r.CheckID != "" && r.Setup
+	if r.Target == nil || *r.Target != machineTarget(m) || r.Host == "" || r.Host != hostID(m) || r.Fingerprint == "" || r.Fingerprint != m.ExtensionFingerprint || r.EnvironmentIdentity != extensionEnvironmentIdentity(e, m) || r.CheckDigest != extensionCheckIdentity(e, m) || r.CheckID == "" || !r.Setup {
+		return "host, environment or check identity changed; check required"
+	}
+	return ""
 }
 
 func (q *Queue) extensionByDigest(digest string) (Extension, error) {

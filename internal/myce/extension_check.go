@@ -150,7 +150,11 @@ func CheckExtension(ctx context.Context, root string, e Extension, platform, dev
 		}
 		r.Setup = true
 		r.Qualified = true
-		r.Reason = ""
+		r.Reason = extensionQualificationReason(e, *r, &m)
+		if r.Reason != "" {
+			r.Qualified = false
+			r.Reason = "ran OK but not qualified: " + r.Reason
+		}
 	}
 	return reports, nil
 }
