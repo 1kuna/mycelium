@@ -14,6 +14,9 @@ func TestInstallPolicyPreflight(t *testing.T) {
 			{"retired", "hosts.yaml", "hosts:\n  fixture:\n    production_idle: 10s\n", "production_idle", "retired"},
 			{"unknown host", "hosts.yaml", "hosts:\n  fixture:\n    typo: true\n", "typo", "unknown"},
 			{"unknown project", "projects.yaml", "fixture:\n  weight: 1\n  typo: true\n", "typo", "unknown"},
+			{"zero weight", "projects.yaml", "fixture:\n  weight: 0\n", "weight", "positive finite weight"},
+			{"deadline call priority", "projects.yaml", "fixture:\n  weight: 1\n  default_call_priority: deadline\n", "default_call_priority", "experiment or production"},
+			{"empty host", "hosts.yaml", "hosts:\n  '':\n    production_hold: true\n", "host name", "required"},
 			{"valid", "", "", "", ""},
 		} {
 			t.Run(role+"/"+tc.name, func(t *testing.T) {
@@ -34,7 +37,8 @@ func TestInstallPolicyPreflight(t *testing.T) {
 					calls++
 					return f.manager.run(ctx, name, args...)
 				})
-				if tc.key == "" {
+				// Workers never pass these policy files to their service units.
+				if tc.key == "" || role == "worker" {
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -46,7 +50,11 @@ func TestInstallPolicyPreflight(t *testing.T) {
 				if err == nil {
 					t.Errorf("invalid policy installed")
 				} else {
-					for _, want := range []string{tc.file, tc.key, "line 3", tc.classification} {
+					wants := []string{tc.file, tc.key, tc.classification}
+					if tc.classification == "retired" || tc.classification == "unknown" {
+						wants = append(wants, "line 3")
+					}
+					for _, want := range wants {
 						if !strings.Contains(err.Error(), want) {
 							t.Errorf("missing %q in %v", want, err)
 						}

@@ -32,12 +32,23 @@ func policyFileError(path string, err error) error {
 	return fmt.Errorf("%s: %w", path, err)
 }
 
-// ValidateInstallPolicies loads only explicitly configured files, using the
-// startup readers, before the installer writes files or invokes a manager.
+// ValidateInstallPolicies checks files read by the role, using startup decoders
+// and semantic validators before installer writes or service-manager calls.
+// Comparison with saved database policy belongs to queue startup only.
 func (c ServiceConfig) ValidateInstallPolicies() error {
-	if _, err := ReadHostPolicies(c.HostConfig); err != nil {
+	if c.Role != "queue" {
+		return nil
+	}
+	hosts, err := ReadHostPolicies(c.HostConfig)
+	if err != nil {
 		return err
 	}
-	_, err := ReadProjectPolicies(c.ProjectConfig)
-	return err
+	if err := validateHostPolicies(hosts); err != nil {
+		return policyFileError(c.HostConfig, err)
+	}
+	projects, err := ReadProjectPolicies(c.ProjectConfig)
+	if err != nil {
+		return err
+	}
+	return policyFileError(c.ProjectConfig, validateProjectPolicies(projects))
 }

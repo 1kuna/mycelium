@@ -63,12 +63,21 @@ func ReadHostPolicies(path string) (policies map[string]HostPolicy, err error) {
 	}
 	return v.Hosts, nil
 }
-func (q *Queue) ConfigureHosts(p map[string]HostPolicy) error {
-	normalized := map[string]HostPolicy{}
-	for host, v := range p {
+func validateHostPolicies(p map[string]HostPolicy) error {
+	for host := range p {
 		if strings.TrimSpace(host) == "" {
 			return errors.New("host name is required")
 		}
+	}
+	return nil
+}
+
+func (q *Queue) ConfigureHosts(p map[string]HostPolicy) error {
+	if err := validateHostPolicies(p); err != nil {
+		return err
+	}
+	normalized := map[string]HostPolicy{}
+	for host, v := range p {
 		normalized[host] = v
 	}
 	return q.update(func() error {

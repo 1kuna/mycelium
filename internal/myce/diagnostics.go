@@ -10,12 +10,16 @@ import (
 	"syscall"
 )
 
-// Only this vocabulary crosses API boundaries. Wrapped causes stay local.
+// Stable rejection codes and default messages. Submission validation returns
+// the specific field rule; other wrapped causes stay local.
 var rejectionMessages = map[string]string{
 	"request_method_invalid":         "method must be POST for /api/jobs",
 	"request_invalid":                "body must be one JSON object with known fields and valid field types",
 	"authentication_required":        "authentication requires a valid fleet token",
 	"job_fields_required":            "name, project and run.command are required",
+	"job_project_invalid":            "project cannot contain slash",
+	"job_class_invalid":              "class must be valid and agree with legacy priority",
+	"job_execution_invalid":          "run or execution must describe valid managed execution",
 	"job_logs_invalid":               "logs must be keep or none",
 	"job_priority_invalid":           "priority must be production, deadline or experiment",
 	"job_deadline_invalid":           "deadline priority requires deadline; start_by requires production priority",
@@ -71,6 +75,15 @@ func (e *rejectionError) Error() string {
 }
 func (e *rejectionError) Unwrap() error     { return e.cause }
 func reject(code string, cause error) error { return &rejectionError{code: code, cause: cause} }
+
+// Keep the field-specific validation code; the fallback is only for uncoded rules.
+func specRejection(err error) error {
+	var rule *rejectionError
+	if errors.As(err, &rule) {
+		return err
+	}
+	return reject("job_spec_invalid", err)
+}
 
 // RuntimeCause retains safe operation/class information, never daemon stderr,
 // command arguments, environment values, endpoint URLs, or filesystem paths.

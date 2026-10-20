@@ -339,7 +339,26 @@ func (q *Queue) Submit(s Spec) (*Job, error) {
 
 // SubmitContext snapshots input custody before bulk verification. Key replay,
 // cancellation and job creation still serialize in the final update transaction.
-func (q *Queue) SubmitContext(ctx context.Context, s Spec) (*Job, error) {
+func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
+	defer func() {
+		if err == nil {
+			return
+		}
+		// Submission validation reasons describe field rules, never the spec or
+		// execution env values. Unclassified storage/IO failures stay generic.
+		var rule *rejectionError
+		if errors.As(err, &rule) {
+			err = &HTTPError{Status: 400, Code: rule.code, Message: rule.Error()}
+		}
+		code, reason := "request_failed", rejectionMessages["request_failed"]
+		var apiError *HTTPError
+		if errors.As(err, &apiError) {
+			code, reason = apiError.Code, apiError.Message
+		} else if errors.Is(err, ErrStale) {
+			code, reason = "request_stale", rejectionMessages["request_stale"]
+		}
+		log.Printf("submission rejected code=%s reason=%q", code, reason)
+	}()
 	ctx, cancel := context.WithTimeout(ctx, submitVerificationTimeout)
 	defer cancel()
 	if s.SubmissionKey != "" {
@@ -399,19 +418,17 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (*Job, error) {
 		// Resolution must not hide forbidden overrides or bypass deadline rules.
 		submitted.Class = s.Class
 		if err := submitted.Validate(); err != nil {
-			// Validation reports field rules only; never serialize the submitted spec.
-			log.Printf("submission rejected code=job_spec_invalid reason=%q", err.Error())
-			return &HTTPError{Status: 400, Code: "job_spec_invalid", Message: err.Error()}
+			return specRejection(err)
 		}
 		if e := q.validateProjectPlacement(s.Project, s.AllowedMachines); e != nil {
 			return reject("job_placement_invalid", e)
 		}
 		if err := normalizeJobClass(&s); err != nil {
-			return err
+			return specRejection(err)
 		}
 		if !s.extensionJob() {
 			if err := lowerExecution(&s); err != nil {
-				return reject("job_execution_invalid", err)
+				return specRejection(err)
 			}
 		}
 		recipes, e := q.resolveEnvironment(s.Environment)

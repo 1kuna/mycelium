@@ -344,7 +344,8 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 		if json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&body) == nil && (rejectionMessages[body.Code] != "" || body.Code == "job_spec_invalid" || body.Code == "submission_key_invalid" || body.Code == "worker_protocol_mismatch" || body.Code == "worker_protocol_invalid" || body.Code == "submission_key_conflict" || body.Code == "submission_key_expired" || body.Code == "job_unknown") {
 			e.Code, e.Message = body.Code, body.Error
 			e.CurrentRevision = body.CurrentRevision
-			if message := rejectionMessages[body.Code]; message != "" && body.Code != "extension_version_conflict" && body.Code != "policy_revision_conflict" {
+			// The queue returns specific, safe submission validation reasons.
+			if message := rejectionMessages[body.Code]; message != "" && body.Code != "extension_version_conflict" && body.Code != "policy_revision_conflict" && !(method == http.MethodPost && path == "/api/jobs") {
 				e.Message = message
 			}
 		}
