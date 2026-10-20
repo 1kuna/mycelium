@@ -268,8 +268,9 @@ class DevTests(unittest.TestCase):
         self.assertEqual(original["needs"]["platform"], ["fake"])
         failed = self.client.submit(self.spec([sys.executable, "-c", "raise SystemExit(7)"]))
         self.assertEqual(self.client.wait(failed["id"], timeout=10)["state"], "failed")
-        with self.assertRaises(KeyError):
+        with self.assertRaises(APIError) as caught:
             self.client.get("missing")
+        self.assertEqual((caught.exception.status, caught.exception.code), (404, "job_unknown"))
 
     def test_status_cancel_timeout_auth(self):
         job = self.client.submit(self.spec([sys.executable, "-c", "print('never')"], allowed_machines=["absent"]))

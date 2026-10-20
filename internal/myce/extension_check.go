@@ -5,29 +5,26 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
-	"slices"
-	"sort"
 	"strings"
 	"time"
 )
 
+// ExtensionCheckRequest selects a frozen check command and a local scratch
+// directory. It never grants qualification or bypasses launch authorization.
+type ExtensionCheckRequest struct {
+	Work      string `json:"work" yaml:"work"`
+	Directory string `json:"directory" yaml:"directory"`
+}
+
 // CheckExtension checks a frozen local variant on this host. Host is the local
 // worker's configured physical-host identity, not a remote execution request.
-// Legacy extensions retain their baseline/setup contract in PrepareExtension.
 func CheckExtension(ctx context.Context, root string, e Extension, platform, device, host string, log io.Writer, cache *EnvironmentCache, c Client) (reports []ExtensionReport, err error) {
 	root, err = filepath.Abs(root)
 	if err != nil {
 		return nil, err
-	}
-	if len(e.Variants) == 0 {
-		if _, err = PrepareExtension(ctx, root, e, platform, device, false, log, cache); err != nil {
-			return nil, err
-		}
-		return PrepareExtension(ctx, root, e, platform, device, true, log, cache)
 	}
 	if host == "" {
 		host, err = os.Hostname()
@@ -56,7 +53,7 @@ func CheckExtension(ctx context.Context, root string, e Extension, platform, dev
 	if err = cache.init(); err != nil {
 		return nil, err
 	}
-	unlock, err := extensionLock(root, e, platform, false)
+	unlock, err := extensionLock(root, e, platform+"-check", false)
 	if err != nil {
 		return nil, err
 	}
@@ -100,107 +97,16 @@ func CheckExtension(ctx context.Context, root string, e Extension, platform, dev
 		return reports, err
 	}
 	defer os.RemoveAll(scratch)
-	var releases []func()
-	defer func() {
-		for _, release := range releases {
-			release()
-		}
-	}()
 	if err = c.Call(ctx, "POST", "/api/extensions", e, nil); err != nil {
 		return reports, err
 	}
-	w := Worker{ExtensionRoot: root, Machine: m, Client: c, Clock: RealClock{}, environmentCache: cache}
-	// The caller holds the extension lock; E2 owns exact folder/environment/asset preparation.
-	plan := EnvironmentRecipe{Key: extensionPreparationKey(e, &m), Preparation: &ExtensionSelection{Name: e.Name, Version: e.Version, Digest: e.Digest}}
-	if err = w.prepareRegisteredExtension(ctx, plan); err != nil {
-		return reports, err
-	}
-	if len(e.Assets) > 0 {
-		_, release, e2 := cache.Acquire(ctx, EnvironmentRecipe{Key: plan.Key, Assets: e.Assets, readyOnly: true})
-		if e2 != nil {
-			return reports, e2
-		}
-		releases = append(releases, release)
-	}
-	v := e.variant(machineTarget(&m))
-	roots := map[string]string{}
-	for name, r := range v.Environments {
-		prefix, release, e2 := cache.Acquire(ctx, r)
-		if e2 != nil {
-			return reports, e2
-		}
-		releases = append(releases, release)
-		roots[name] = prefix
-	}
-	base, err := extensionEnvironment(root, e, platform, device)
-	if err != nil {
-		return reports, err
-	}
-	replace := func(s string) string {
-		s = strings.NewReplacer("{extension}", base["MYCE_EXTENSION_DIR"], "{cache}", base["MYCE_EXTENSION_CACHE"]).Replace(s)
-		s = extensionAssetReplacer(e, filepath.Join(cache.Root, plan.Key)).Replace(s)
-		s = executionReplacer(scratch, "", "", machineTarget(&m)).Replace(s)
-		for name, prefix := range roots {
-			s = executionReplacer(scratch, prefix, name, machineTarget(&m)).Replace(s)
-		}
-		return s
-	}
+	view, _ := e.forMachine(&m)
 	for i := range reports {
 		r := &reports[i]
-		r.Setup = true
-		execution := v.Execution
-		execution.Main.Env = maps.Clone(execution.Main.Env)
-		execution.Sidecars = slices.Clone(execution.Sidecars)
-		command := v.Check
-		b, hasBaseline := v.Baselines[r.Work]
-		if len(command) == 0 {
-			command = v.Execution.Main.Command
-		}
-		for k, value := range execution.Main.Env {
-			execution.Main.Env[k] = replace(value)
-		}
-		for n := range execution.Sidecars {
-			side := &execution.Sidecars[n]
-			side.Command = slices.Clone(side.Command)
-			side.Env = maps.Clone(side.Env)
-			for n, arg := range side.Command {
-				side.Command[n] = replace(arg)
-			}
-			for k, value := range side.Env {
-				side.Env[k] = replace(value)
-			}
-			ref := side.Environment
-			if ref == "" {
-				ref = v.Execution.Main.Environment
-			}
-			side.Command = extensionCheckLauncher(side.Command, base, roots[ref])
-			side.Environment = ""
-		}
-		// env is the standard native launcher; control values are supplied by us,
-		// never accepted from extension-authored execution.env.
-		mainEnv := maps.Clone(base)
-		if hasBaseline {
-			mainEnv["MYCE_CHECK_INPUT"] = filepath.Join(base["MYCE_EXTENSION_DIR"], b.Input)
-			mainEnv["MYCE_CHECK_OUTPUT"] = filepath.Join(scratch, "actual")
-			mainEnv["MYCE_CHECK_WORK"] = r.Work
-		}
-		argv := make([]string, len(command))
-		for n, arg := range command {
-			argv[n] = replace(arg)
-		}
-		argv = extensionCheckLauncher(argv, mainEnv, roots[v.Execution.Main.Environment])
-		execution.Main.Command = argv
-		execution.Main.Environment = ""
-		if len(v.Check) > 0 {
-			execution.Main.Workdir = base["MYCE_EXTENSION_DIR"]
-		} else if execution.Main.Workdir != "" {
-			execution.Main.Workdir = replace(execution.Main.Workdir)
-		} else {
-			execution.Main.Workdir = scratch
-		}
-		needs := v.Needs
-		needs.Platform = Platform{Required: []string{platform}}
-		job, e2 := c.SubmitAndWait(ctx, Spec{Name: "extension-check", Project: "extension-check", SubmissionKey: r.CheckID, AllowedMachines: []string{m.ID}, Needs: needs, Execution: &execution})
+		b, hasBaseline := view.baseline(r.Work, platform)
+		job, e2 := c.SubmitAndWait(ctx, Spec{Name: "extension-check", Project: "extension-check", SubmissionKey: r.CheckID,
+			Extension: extensionKey(e), ExtensionDigest: e.Digest, AllowedMachines: []string{m.ID},
+			ExtensionCheck: &ExtensionCheckRequest{Work: r.Work, Directory: scratch}})
 		// Fence the exact check key and confirm cleanup, even when a terminal
 		// result reports a failure with release still pending.
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -219,7 +125,7 @@ func CheckExtension(ctx context.Context, root string, e Extension, platform, dev
 			return reports, fmt.Errorf("runtime %s: %s", job.State, job.Reason)
 		}
 		if hasBaseline {
-			output, e2 := os.Open(mainEnv["MYCE_CHECK_OUTPUT"])
+			output, e2 := os.Open(filepath.Join(scratch, "actual"))
 			if e2 != nil {
 				return reports, e2
 			}
@@ -234,33 +140,32 @@ func CheckExtension(ctx context.Context, root string, e Extension, platform, dev
 			if e2 = compareExtensionOutput(actual, e.Files[b.Output], b); e2 != nil {
 				return reports, e2
 			}
-			if e2 = os.Remove(mainEnv["MYCE_CHECK_OUTPUT"]); e2 != nil {
+			if e2 = os.Remove(filepath.Join(scratch, "actual")); e2 != nil {
 				return reports, e2
 			}
 		}
+		r.Setup = true
 		r.Qualified = true
 		r.Reason = ""
 	}
 	return reports, nil
 }
 
-// Use the OS env launcher to bind already-prepared member environments. The
-// ordinary native runtime still owns every member, port, readiness and stop.
-func extensionCheckLauncher(command []string, base map[string]string, root string) []string {
-	env := maps.Clone(base)
-	if root != "" {
-		bindEnvironment(env, root)
+// Expand all declared environment references from the prepared worker cache.
+// The ordinary runtime still binds each member's environment and owns launch.
+func expandExecutionReference(s *Spec, r *strings.Replacer) {
+	s.Run.Command = expandArgs(s.Run.Command, r)
+	s.Run.Workdir = r.Replace(s.Run.Workdir)
+	for k, v := range s.Run.Env {
+		s.Run.Env[k] = r.Replace(v)
 	}
-	keys := make([]string, 0, len(env))
-	for key := range env {
-		keys = append(keys, key)
+	for i := range s.Run.Sidecars {
+		side := &s.Run.Sidecars[i]
+		side.Command = expandArgs(side.Command, r)
+		for k, v := range side.Env {
+			side.Env[k] = r.Replace(v)
+		}
 	}
-	sort.Strings(keys)
-	argv := []string{"env"}
-	for _, key := range keys {
-		argv = append(argv, key+"="+env[key])
-	}
-	return append(argv, command...)
 }
 
 func waitExtensionCheckRelease(ctx context.Context, c Client, key string) error {

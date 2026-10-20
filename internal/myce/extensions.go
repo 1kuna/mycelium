@@ -87,9 +87,12 @@ func safeRelative(p string) bool {
 }
 func extensionKey(e Extension) string { return e.Name + "@" + e.Version }
 func (s Spec) extensionJob() bool {
-	return s.Kind != "" || s.Program != nil || s.Extension != "" || s.ExtensionDigest != ""
+	return s.Kind != "" || s.Program != nil || s.Extension != "" || s.ExtensionDigest != "" || s.ExtensionCheck != nil
 }
 func (s Spec) workType() string {
+	if s.ExtensionCheck != nil {
+		return s.ExtensionCheck.Work
+	}
 	if s.Program != nil {
 		return "program:" + s.Program.Type
 	}
@@ -353,6 +356,11 @@ func qualifiedExtension(j *Job, m *Machine) *Extension {
 		view, ok := e.forMachine(m)
 		if !ok {
 			continue
+		}
+		// Only the frozen check command may run before qualification. Its
+		// preparation still crosses E2's ordinary launch/custody boundary.
+		if j.Spec.ExtensionCheck != nil && slices.Contains(extensionWorks(*e), j.Spec.workType()) {
+			return e
 		}
 		if _, ok := view.baseline(j.Spec.workType(), m.GPU); !ok {
 			continue

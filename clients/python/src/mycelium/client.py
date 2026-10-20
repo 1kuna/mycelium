@@ -185,8 +185,10 @@ class Client:
         """
         job = self.get(job_id)
         if job["state"] != "succeeded":
-            raise ValueError("job has no accepted result")
-        ref = job.get("output_refs", {})[artifact]
+            raise APIError(409, json.dumps({"code": "request_stale", "error": "job has no accepted result"}))
+        ref = job.get("output_refs", {}).get(artifact)
+        if ref is None:
+            raise APIError(404, json.dumps({"code": "request_failed", "error": "accepted artifact not found"}))
         sha, size = ref["sha256"], ref["size_bytes"]
         if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{64}", sha) or not isinstance(size, int) or size < 0:
             raise ValueError("invalid artifact identity")
@@ -223,7 +225,7 @@ class Client:
         return self.status().get("jobs") or []
 
     def get(self, job_id: str) -> dict[str, Any]:
-        """Find a job in the snapshot; raise KeyError if absent."""
+        """Find a job in the snapshot; raise APIError(job_unknown) if absent."""
         return self._find(self.list(), job_id)
 
     @staticmethod
@@ -231,7 +233,7 @@ class Client:
         for job in jobs:
             if job["id"] == job_id:
                 return job
-        raise KeyError(job_id)
+        raise APIError(404, json.dumps({"code": "job_unknown", "error": "job is unknown"}))
 
     def cancel(self, job_id: str) -> dict[str, Any]:
         """Acknowledge no future execution; release may still be pending."""

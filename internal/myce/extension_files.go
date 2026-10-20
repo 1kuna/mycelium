@@ -170,6 +170,11 @@ func validateExtensionJob(s Spec) error {
 	if err := validateExtensionSelector(s); err != nil {
 		return err
 	}
+	if c := s.ExtensionCheck; c != nil {
+		if s.Extension == "" || s.ExtensionDigest == "" || len(s.AllowedMachines) != 1 || !filepath.IsAbs(c.Directory) || c.Work == "" || s.Kind != "" || s.Program != nil || len(s.Args)+len(s.Inputs)+len(s.Outputs)+len(s.Files) != 0 || s.Resumable {
+			return errors.New("extension checks require an exact extension, one local worker, a check work type and an absolute scratch directory")
+		}
+	}
 	if s.Kind != "" && s.Program != nil {
 		return errors.New("choose kind or program, not both")
 	}

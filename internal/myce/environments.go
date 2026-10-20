@@ -220,6 +220,9 @@ func extensionEnvironmentRecipes(j *Job, m *Machine) []EnvironmentRecipe {
 	}
 	v := e.variant(machineTarget(m))
 	if v == nil {
+		if j.Spec.ExtensionCheck != nil {
+			return []EnvironmentRecipe{{Key: extensionPreparationKey(*e, m)}}
+		}
 		return nil
 	}
 	names := make([]string, 0, len(v.Environments))
@@ -231,7 +234,7 @@ func extensionEnvironmentRecipes(j *Job, m *Machine) []EnvironmentRecipe {
 	for _, n := range names {
 		out = append(out, v.Environments[n])
 	}
-	if len(e.Assets) > 0 {
+	if len(e.Assets) > 0 || j.Spec.ExtensionCheck != nil {
 		out = append(out, EnvironmentRecipe{Key: extensionPreparationKey(*e, m)})
 	}
 	return out

@@ -452,6 +452,21 @@
       ],
       "type": "object"
     },
+    "ExtensionCheckRequest": {
+      "properties": {
+        "directory": {
+          "type": "string"
+        },
+        "work": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "work",
+        "directory"
+      ],
+      "type": "object"
+    },
     "ExtensionSelection": {
       "properties": {
         "digest": {
@@ -1167,6 +1182,10 @@
         },
         "extension": {
           "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "extension_check": {
+          "$ref": "#/$defs/ExtensionCheckRequest",
           "x-contract": "diagnostic"
         },
         "extension_digest": {

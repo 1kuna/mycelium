@@ -31,11 +31,18 @@ func TestExtensionQualificationSmokeFailureClearsPriorSuccess(t *testing.T) {
 		return os.WriteFile(dest, asset, 0600)
 	}}
 	devRoot := t.TempDir()
-	d, err := StartDev(DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(devRoot, "queue.db"), Checkpoints: filepath.Join(devRoot, "checkpoints"), HostID: "local-host", Token: "fixture", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond})
+	d, err := StartDev(DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(devRoot, "queue.db"), Checkpoints: filepath.Join(devRoot, "checkpoints"), FileStore: filepath.Join(devRoot, "files"), ExtensionRoot: root, HostID: "local-host", Token: "fixture", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer d.Close()
+	assetFile := filepath.Join(devRoot, "asset")
+	if err = os.WriteFile(assetFile, asset, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = d.Client().UploadFile(context.Background(), assetFile, e.Assets["model"]); err != nil {
+		t.Fatal(err)
+	}
 	await(t, func() bool { snap, _ := d.Queue.Snapshot(); return len(snap.Machines) > 0 })
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()

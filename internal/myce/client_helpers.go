@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -38,7 +40,7 @@ func (c Client) GetJob(ctx context.Context, id string) (*Job, error) {
 			return j, nil
 		}
 	}
-	return nil, errors.New("job not found")
+	return nil, &HTTPError{Status: 404, Code: "job_unknown", Message: "job is unknown", JobID: id}
 }
 
 func (c Client) Wait(ctx context.Context, id string) (*Job, error) {
@@ -68,11 +70,26 @@ func (c Client) DownloadResult(ctx context.Context, id, name, dest string) error
 		return err
 	}
 	if j.State != "succeeded" {
-		return fmt.Errorf("job is %s, no accepted result", j.State)
+		return &HTTPError{Status: 409, Code: "request_stale", Message: fmt.Sprintf("job is %s, no accepted result", j.State)}
 	}
 	ref, ok := j.OutputRefs[name]
 	if !ok {
-		return errors.New("accepted artifact not found")
+		return &HTTPError{Status: 404, Code: "request_failed", Message: "accepted artifact not found"}
 	}
-	return c.DownloadFile(ctx, ref, dest)
+	if err := os.MkdirAll(filepath.Dir(dest), 0700); err != nil {
+		return err
+	}
+	f, err := os.CreateTemp(filepath.Dir(dest), ".myce-result-*")
+	if err != nil {
+		return err
+	}
+	temporary := f.Name()
+	defer os.Remove(temporary)
+	if err = f.Close(); err != nil {
+		return err
+	}
+	if err = c.DownloadFile(ctx, ref, temporary); err != nil {
+		return err
+	}
+	return os.Rename(temporary, dest)
 }

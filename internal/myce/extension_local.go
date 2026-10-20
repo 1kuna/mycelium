@@ -519,6 +519,26 @@ func (w Worker) prepareExtensionExecution(j *Job) (envOut map[string]string, rel
 		unlock()
 		return nil, nil, err
 	}
+	if check := j.Spec.ExtensionCheck; check != nil {
+		if w.environmentCache == nil {
+			unlock()
+			return nil, nil, errors.New("extension check requires prepared environments")
+		}
+		// Use worker-owned stable prefixes. The CLI never builds an environment
+		// or launches setup, and its cache argument cannot redirect preparation.
+		if v := e.variant(machineTarget(&w.Machine)); v != nil {
+			for name, recipe := range v.Environments {
+				expandExecutionReference(&j.Spec, executionReplacer(check.Directory, filepath.Join(w.environmentCache.Root, recipe.Key), name, machineTarget(&w.Machine)))
+			}
+		}
+		expandExecutionReference(&j.Spec, executionReplacer(check.Directory, "", "", machineTarget(&w.Machine)))
+		view, _ := e.forMachine(&w.Machine)
+		if b, ok := view.baseline(check.Work, w.Machine.GPU); ok {
+			env["MYCE_CHECK_INPUT"] = filepath.Join(env["MYCE_EXTENSION_DIR"], b.Input)
+			env["MYCE_CHECK_OUTPUT"] = filepath.Join(check.Directory, "actual")
+			env["MYCE_CHECK_WORK"] = check.Work
+		}
+	}
 	if r, ok := extensionRecipe(*e, &w.Machine); ok {
 		j.EnvironmentRecipes = map[string]EnvironmentRecipe{w.Machine.GPU: r}
 	}

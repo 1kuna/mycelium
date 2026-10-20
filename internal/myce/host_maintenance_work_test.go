@@ -9,7 +9,7 @@ import (
 // Every host work kind crosses the same maintenance and wait boundary. Sidecars
 // share their parent execution's exact release, including pending Docker creates.
 func TestMaintenanceEveryWorkKind(t *testing.T) {
-	for _, kind := range []string{"batch-production", "batch-experiment", "model-production", "model-experiment", "engine", "engine-load", "engine-failed-pinned", "environment-build", "environment-plan-pending", "preparation", "benchmark", "sidecar", "native-sidecar"} {
+	for _, kind := range []string{"batch-production", "batch-experiment", "model-production", "model-experiment", "engine", "engine-load", "engine-failed-pinned", "environment-build", "environment-plan-pending", "preparation", "benchmark", "sidecar", "native-sidecar", "extension check", "extension-check-setup"} {
 		for _, action := range []struct {
 			name, action string
 			stop         bool
@@ -31,7 +31,42 @@ func TestMaintenanceEveryWorkKind(t *testing.T) {
 				var call *ModelCall
 				var slot *ModelSlot
 				var benchmark *HostLaunch
+				var preparation *HostLaunch
 				switch kind {
+				case "extension check", "extension-check-setup":
+					e := compositionExtension(t, false)
+					profile := *m.CapabilityProfile
+					profile.OS, profile.Arch = e.Variants[0].Target.OS, e.Variants[0].Target.Arch
+					m.CapabilityProfile = &profile
+					check(t, q, m, nil)
+					if err := q.AddExtension(e); err != nil {
+						t.Fatal(err)
+					}
+					j := submit(t, q, Spec{Name: "extension-check", Project: "extension-check", Extension: extensionKey(e), ExtensionDigest: e.Digest, AllowedMachines: []string{m.ID}, ExtensionCheck: &ExtensionCheckRequest{Work: "extension:" + e.Name, Directory: t.TempDir()}})
+					reply := check(t, q, m, nil)
+					if reply.Job != nil || len(reply.EnvironmentPlan) != 1 || reply.EnvironmentPlan[0].Launch == nil {
+						t.Fatal("check ran before shared preparation", reply)
+					}
+					preparation = reply.EnvironmentPlan[0].Launch
+					if err := q.AuthorizeLaunch(*preparation); err != nil {
+						t.Fatal(err)
+					}
+					m.EnvironmentReports = []EnvironmentReport{{Key: preparation.Key, Attempt: preparation.Attempt, State: "building"}}
+					if kind == "extension check" {
+						m.EnvironmentReports[0].State = "ready"
+						m.Environments = append(m.Environments, preparation.Key)
+						r := newExtensionReport(e, &m, j.Spec.workType())
+						r.Setup = true
+						m.ExtensionReports = []ExtensionReport{r}
+						batch = check(t, q, m, nil).Job
+						if batch == nil || batch.ID != j.ID {
+							t.Fatal("prepared check was not assigned", batch)
+						}
+						if err := q.Started(result(batch, false)); err != nil {
+							t.Fatal(err)
+						}
+						preparation = nil
+					}
 				case "benchmark":
 					m.BenchmarkPending = true
 					benchmark = check(t, q, m, nil).BenchmarkPlan
@@ -186,11 +221,11 @@ func TestMaintenanceEveryWorkKind(t *testing.T) {
 				}
 				// Worker channels preserve running preparations on drain/disable, and
 				// cancel them on --stop. No missing plan may silently restart one.
-				if kind == "environment-build" || kind == "preparation" {
+				if kind == "environment-build" || kind == "preparation" || kind == "extension-check-setup" {
 					ctx, cancel := context.WithCancel(context.Background())
 					defer cancel()
 					keep := (reply.HostMaintenance == "drained" || reply.HostMaintenance == "disabled") && reply.PreparationStopAt == nil
-					if kind == "environment-build" {
+					if kind == "environment-build" || kind == "extension-check-setup" {
 						rt := &environmentRuntime{key: "build", cancel: cancel}
 						rt.sync(reply.EnvironmentPlan, false, keep)
 					} else {
@@ -299,6 +334,16 @@ func TestMaintenanceEveryWorkKind(t *testing.T) {
 							t.Fatal(err)
 						}
 					}
+				}
+				if preparation != nil {
+					m.EnvironmentReports = []EnvironmentReport{{Key: preparation.Key, Attempt: "wrong-attempt", State: "paused"}}
+					check(t, q, m, nil)
+					status, err = q.HostMaintenanceStatus("host")
+					if err != nil || status.Quiescent {
+						t.Fatal("wrong attempt discharged check setup", status, err)
+					}
+					m.EnvironmentReports[0].Attempt = preparation.Attempt
+					check(t, q, m, nil)
 				}
 				m.EnvironmentReports, m.CopyReports = nil, nil
 				if benchmark != nil {

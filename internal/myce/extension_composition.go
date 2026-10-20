@@ -182,6 +182,9 @@ func (q *Queue) resolveExplicitExtension(s *Spec) ([]Extension, error) {
 		return nil, errors.New("extension reference must resolve to one registered version; use name@version or extension_digest")
 	}
 	e := matches[0]
+	if s.ExtensionCheck != nil && !slices.Contains(extensionWorks(e), s.ExtensionCheck.Work) {
+		return nil, errors.New("check requires a declared work type")
+	}
 	if len(e.Variants) > 0 && len(s.Run.Env) > 0 {
 		return nil, errors.New("variant jobs use extension-owned execution env")
 	}
@@ -252,6 +255,13 @@ func (e Extension) lower(s *Spec, m *Machine) error {
 	legacyEnv := s.Run.Env
 	if len(e.Variants) == 0 {
 		s.Execution = &ExecutionSpec{Main: ExecutionMember{Command: slices.Clone(e.Run)}}
+		if check := s.ExtensionCheck; check != nil {
+			s.Execution.Main.Command = slices.Clone(e.Check)
+			if len(s.Execution.Main.Command) == 0 {
+				return errors.New("legacy extension check command required")
+			}
+			s.Execution.Main.Workdir = "{extension}"
+		}
 	} else {
 		if len(legacyEnv) > 0 {
 			return errors.New("variant jobs use extension-owned execution env")
@@ -261,6 +271,14 @@ func (e Extension) lower(s *Spec, m *Machine) error {
 			return errors.New("no extension variant for worker target")
 		}
 		execution := v.Execution
+		if check := s.ExtensionCheck; check != nil {
+			if len(v.Check) > 0 {
+				execution.Main.Command = slices.Clone(v.Check)
+				execution.Main.Workdir = "{extension}"
+			} else if execution.Main.Workdir == "" {
+				execution.Main.Workdir = check.Directory
+			}
+		}
 		execution.Main.Environment = "" // Bound to its immutable recipe below.
 		s.Environment = Environment{Name: v.Execution.Main.Environment}
 		s.Execution = &execution

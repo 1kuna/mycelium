@@ -42,6 +42,7 @@ class ExtensionClientTests(unittest.TestCase):
         job = {"state": "succeeded", "output_refs": {"../../worker-path": ref}}
         with tempfile.TemporaryDirectory() as folder:
             dest = Path(folder, "chosen-result")
+            dest.write_bytes(b"prior app result")
             with patch.object(client, "get", return_value=job):
                 with patch.object(client, "_file_request", return_value=io.BytesIO(body)) as request:
                     self.assertEqual(client.download_result("job", "../../worker-path", dest), dest)
@@ -55,8 +56,20 @@ class ExtensionClientTests(unittest.TestCase):
                 self.assertEqual(list(Path(folder).iterdir()), [dest])
             for state in ("queued", "running", "failed", "cancelled"):
                 with patch.object(client, "get", return_value={**job, "state": state}):
-                    with self.assertRaisesRegex(ValueError, "accepted result"):
+                    with self.assertRaises(APIError) as caught:
                         client.download_result("job", "../../worker-path", dest)
+                    self.assertEqual((caught.exception.status, caught.exception.code), (409, "request_stale"))
+
+    def test_missing_result_errors_are_typed(self):
+        client = Client(token="fixture")
+        with patch.object(client, "list", return_value=[]):
+            with self.assertRaises(APIError) as caught:
+                client.download_result("missing", "result", "unused")
+            self.assertEqual((caught.exception.status, caught.exception.code), (404, "job_unknown"))
+        with patch.object(client, "get", return_value={"state": "succeeded", "output_refs": {}}):
+            with self.assertRaises(APIError) as caught:
+                client.download_result("job", "missing", "unused")
+            self.assertEqual((caught.exception.status, caught.exception.code), (404, "request_failed"))
 
     def test_rejects_invalid_artifact_identity(self):
         client = Client(token="fixture")
