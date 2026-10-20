@@ -878,6 +878,10 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			if c.AttemptProtocol != "" {
 				for _, j := range q.s.Jobs {
 					if j.Machine == m.ID && j.Session == m.Session && j.State == "stopping" && !seen[attemptKey{j.ID, j.Attempt, j.Session}] {
+						if j.ReleaseConfirmed {
+							q.retry(j, j.Reason)
+							continue
+						}
 						reply.Attempts = append(reply.Attempts, AttemptDirective{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Stop: true, Kill: expired(j.StopAt, q.clock.Now()), GraceSeconds: j.StopAt.Sub(q.clock.Now()).Seconds(), PriorityStop: priorityStop(j)})
 					}
 				}
@@ -888,7 +892,8 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		for _, j := range q.s.Jobs {
 			if j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping") {
 				if j.State == "stopping" {
-					if c.AttemptProtocol != "" {
+					// Omission only finishes a keyed stop after an exact release ack.
+					if c.AttemptProtocol != "" && !j.ReleaseConfirmed {
 						reply.Attempts = []AttemptDirective{{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Stop: true, Kill: expired(j.StopAt, q.clock.Now()), GraceSeconds: j.StopAt.Sub(q.clock.Now()).Seconds(), PriorityStop: priorityStop(j)}}
 						return nil
 					}
