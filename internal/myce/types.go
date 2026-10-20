@@ -271,15 +271,16 @@ func legacyRank(p string) int {
 }
 
 type Copy struct {
-	PriorityStop *PriorityPreemption `json:"priority_stop,omitempty"`
-	StopCause    string              `json:"stop_cause,omitempty"`
-	Extension    *ExtensionSelection `json:"extension,omitempty"`
-	LossCharged  bool                `json:"loss_charged,omitempty"`
-	Recoverable  bool                `json:"recoverable"`
-	Machine      string              `json:"machine"`
-	Session      string              `json:"session"`
-	Attempt      int                 `json:"attempt"`
-	Progress     int64               `json:"progress"`
+	AllocatedDevices []string            `json:"allocated_devices,omitempty"`
+	PriorityStop     *PriorityPreemption `json:"priority_stop,omitempty"`
+	StopCause        string              `json:"stop_cause,omitempty"`
+	Extension        *ExtensionSelection `json:"extension,omitempty"`
+	LossCharged      bool                `json:"loss_charged,omitempty"`
+	Recoverable      bool                `json:"recoverable"`
+	Machine          string              `json:"machine"`
+	Session          string              `json:"session"`
+	Attempt          int                 `json:"attempt"`
+	Progress         int64               `json:"progress"`
 
 	// Exact cleanup evidence, retained even after another attempt is assigned.
 	ReleaseConfirmed bool   `json:"release_confirmed,omitempty"`
@@ -287,10 +288,11 @@ type Copy struct {
 }
 
 type Job struct {
-	PreemptionCount int           `json:"preemption_count,omitempty"`
-	PriorityPolicy  PriorityMatch `json:"priority_policy"`
-	ExecutionCause  *RuntimeCause `json:"execution_cause,omitempty"`
-	CleanupCause    *RuntimeCause `json:"cleanup_cause,omitempty"`
+	AllocatedDevices []string      `json:"allocated_devices,omitempty"`
+	PreemptionCount  int           `json:"preemption_count,omitempty"`
+	PriorityPolicy   PriorityMatch `json:"priority_policy"`
+	ExecutionCause   *RuntimeCause `json:"execution_cause,omitempty"`
+	CleanupCause     *RuntimeCause `json:"cleanup_cause,omitempty"`
 	// Durable cancellation fence, independent of diagnostic reason text.
 	CancelledAt *time.Time `json:"cancelled_at,omitempty"`
 
@@ -342,6 +344,7 @@ type Job struct {
 	Checkpoint            string                       `json:"checkpoint"`
 }
 type Machine struct {
+	Devices           []MachineDevice `json:"devices"`
 	cpuLedger         bool
 	CPUReserveCores   int           `json:"cpu_reserve_cores,omitempty"`
 	CPUBudgetCores    int           `json:"cpu_budget_cores,omitempty"`

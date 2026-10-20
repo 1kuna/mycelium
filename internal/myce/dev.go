@@ -168,7 +168,7 @@ func StartDev(c DevConfig) (*Dev, error) {
 		}
 	}()
 	for i := 0; i < c.Workers; i++ {
-		w := Worker{ExtensionRoot: c.ExtensionRoot, JobFileRoot: c.JobFileRoot, ModelConfig: c.ModelConfig, StateDir: filepath.Join(filepath.Dir(c.Database), "workers", fmt.Sprintf("fake-%d", i+1)), Client: d.client, Machine: Machine{CPUReserveCores: c.CPUReserveCores, CPUBudgetCores: c.CPUBudgetCores, HostMemoryMeasured: true, HostID: c.HostID, Device: "0", ID: fmt.Sprintf("fake-%d", i+1), GPU: c.GPU, FreeMemoryGB: c.MemoryGB, Environments: c.Environments, Models: c.Models}, Interval: c.Interval}
+		w := Worker{CPUIsolationProbe: func(context.Context) error { return nil }, ExtensionRoot: c.ExtensionRoot, JobFileRoot: c.JobFileRoot, ModelConfig: c.ModelConfig, StateDir: filepath.Join(filepath.Dir(c.Database), "workers", fmt.Sprintf("fake-%d", i+1)), Client: d.client, Machine: Machine{CPUReserveCores: c.CPUReserveCores, CPUBudgetCores: c.CPUBudgetCores, HostMemoryMeasured: true, HostID: c.HostID, Device: "0", ID: fmt.Sprintf("fake-%d", i+1), GPU: c.GPU, FreeMemoryGB: c.MemoryGB, Environments: c.Environments, Models: c.Models}, Interval: c.Interval}
 		d.workerWG.Add(1)
 		go func() {
 			defer d.workerWG.Done()

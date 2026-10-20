@@ -690,6 +690,17 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 	}
 	err = q.update(func() error {
 		m := cloneMachine(&c.Machine)
+		if err := inventoryTarget(&m); err != nil {
+			return err
+		}
+		// Dev's existing fake workers intentionally share a synthetic host ledger.
+		if _, simulated := q.clock.(*devClock); m.Devices != nil && !simulated {
+			for _, owner := range q.s.Machines {
+				if owner.ID != m.ID && owner.Devices != nil && !owner.Gone && hostID(owner) == hostID(&m) {
+					return errors.New("physical host already has a machine worker; reuse its machine identity and spool")
+				}
+			}
+		}
 		m.Disabled = ""
 		for _, progress := range progresses {
 			if progress.err != nil {
@@ -955,8 +966,12 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 					}
 				}
 				j.Progress = 0
-				j.Copies = append(j.Copies, Copy{Machine: m.ID, Session: m.Session, Attempt: j.Attempt, Extension: j.Extension, ReleaseReason: "awaiting_release"})
 				j.Machine = m.ID
+				j.AllocatedDevices = nil
+				if m.Devices != nil && !j.Spec.Needs.cpuOnly() {
+					j.AllocatedDevices = []string{m.Device}
+				}
+				j.Copies = append(j.Copies, Copy{AllocatedDevices: slices.Clone(j.AllocatedDevices), Machine: m.ID, Session: m.Session, Attempt: j.Attempt, Extension: j.Extension, ReleaseReason: "awaiting_release"})
 				j.Session = m.Session
 				j.Reason = ""
 				q.refreshHostMemory()

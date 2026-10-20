@@ -167,6 +167,9 @@ func InstallConfigDiff(old, new ServiceConfig) string {
 }
 
 func (c ServiceConfig) ValidateInstall() error {
+	if err := singleDeviceMask(c.Device); err != nil {
+		return err
+	}
 	for _, setting := range InstallSettings() {
 		if setting.validate != nil {
 			if err := setting.validate(c); err != nil {

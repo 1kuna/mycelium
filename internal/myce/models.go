@@ -101,6 +101,16 @@ func validateModels(c ModelConfig) error {
 	}
 	seen := map[string]bool{}
 	for _, m := range c.Models {
+		if err := singleDeviceMask(m.Device); err != nil {
+			return err
+		}
+		for k, v := range m.DeviceEnv {
+			if dockerDeviceEnvironment(k) && k != "ZE_ENABLE_PCI_ID_DEVICE_ORDER" {
+				if err := singleDeviceMask(v); err != nil {
+					return err
+				}
+			}
+		}
 		if !validMemoryValue(m.HostMemoryGB) {
 			return errors.New("host_memory_gb must be finite and nonnegative")
 		}

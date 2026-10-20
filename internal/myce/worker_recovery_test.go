@@ -549,7 +549,7 @@ func TestWorkerRestartCleansOrphanBeforeReassignment(t *testing.T) {
 		}
 		return false
 	})
-	data, err := os.ReadFile(filepath.Join(stateDir, "state.json"))
+	data, err := readSingleAttemptState(filepath.Join(stateDir, "state.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

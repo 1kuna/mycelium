@@ -476,6 +476,9 @@ func environmentList(env map[string]string) []string {
 }
 
 func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]string, dir string, output *os.File) error {
+	if err := g.worker.verifyDevice(); err != nil {
+		return err
+	}
 	l := HostLaunch{Machine: g.worker.Machine.ID, Session: g.session, Kind: "batch", Key: g.p.job.ID, Attempt: strconv.Itoa(g.p.job.Attempt)}
 	if err := g.worker.authorizeLaunch(l); err != nil {
 		return g.recordInfrastructure(launchRefused, m.Name, "", err)
@@ -506,6 +509,17 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 	cmd := exec.Command("sh", args...)
 	cmd.Dir = dir
 	env = maps.Clone(env)
+	bound, e := g.worker.deviceEnvironment()
+	if e != nil {
+		return e
+	}
+	for k, v := range bound {
+		env[k] = v
+	}
+	for k, v := range placementEnvironment(g.worker.Machine) {
+		env[k] = v
+	}
+	delete(env, "MYCE_TOKEN")
 	if m.memory != nil {
 		env["MYCE_MEMORY_LIMIT_BYTES"] = strconv.FormatInt(m.memory.bytes, 10)
 	}

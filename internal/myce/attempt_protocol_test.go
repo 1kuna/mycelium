@@ -156,7 +156,12 @@ func TestAttemptProtocolOldQueueWorkerRetainsCustody(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.close()
-	if store.state.Session != j.Session || store.state.Result == nil || !store.matchesResult(*store.state.Result, m.ID) {
+	stores, e := store.attemptStores()
+	if e != nil || len(stores) != 1 {
+		t.Fatalf("retained collection: %v", e)
+	}
+	saved := stores[0]
+	if saved.state.Session != j.Session || saved.state.Result == nil || !saved.matchesResult(*saved.state.Result, m.ID) {
 		t.Fatal("old queue refusal discarded buffered custody")
 	}
 }
@@ -244,7 +249,7 @@ func TestAttemptProtocolWrongStopIgnored(t *testing.T) {
 		// An unused PID makes any mistaken delivery observable in p.killed
 		// without signalling a real process. macOS/Linux PID limits are smaller.
 		p := &process{job: Job{ID: key.ID, Attempt: key.Attempt, Session: key.Session}, cmd: &exec.Cmd{Process: &os.Process{Pid: 1 << 30}}}
-		control := processControl{clock: clock, current: p, pending: WorkerEvent{Execution: a.Execution, Session: a.Session, deadline: clock.Now(), Kill: true}}
+		control := processControl{clock: clock, processes: map[attemptKey]*process{jobKey(p.job): p}, pendingEvents: map[attemptKey]WorkerEvent{eventKey(WorkerEvent{Execution: a.Execution, Session: a.Session}): {Execution: a.Execution, Session: a.Session, deadline: clock.Now(), Kill: true}}}
 		control.apply()
 		if p.stopped || p.killed || p.stopAt != nil {
 			t.Fatal("wrong event affected current process")

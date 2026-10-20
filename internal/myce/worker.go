@@ -22,6 +22,10 @@ import (
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
+	InventoryProbe    func(context.Context) ([]MachineDevice, error)
+	CPUIsolationProbe func(context.Context) error
+	selectedDevice    *MachineDevice
+	cpuIsolation      bool
 	// Benchmark runs only when explicitly enabled; fake inventory never loads the host.
 	OnboardingBenchmark   bool
 	Benchmark             func(context.Context, BenchmarkConfig, *CapabilityProfile) error
@@ -198,6 +202,9 @@ var errWorkerCheckpoint = errors.New("checkpoint storage unavailable")
 var errWorkerReleasePending = errors.New("command release unconfirmed")
 
 func (w Worker) start(s *workerStore, j Job) (*process, error) {
+	if err := w.verifyDevice(); err != nil {
+		return nil, err
+	}
 	if j.Spec.Needs.cpuOnly() {
 		w.Machine.GPU, w.Machine.Device, w.DeviceBinding = "cpu", "0", ""
 	}
@@ -408,20 +415,12 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	if j.Spec.Needs.cpuOnly() {
 		placement.GPU, placement.Device = "cpu", ""
 	}
-	if placement.Device != "" || placement.GPU == "cpu" {
-		delete(env, "CUDA_VISIBLE_DEVICES")
-		delete(env, "ONEAPI_DEVICE_SELECTOR")
-		delete(env, "ZE_AFFINITY_MASK")
-		bound, e := WithModelDevice(Model{}, placement.GPU, placement.Device)
-		if e != nil {
-			return nil, e
-		}
-		for k, v := range bound.DeviceEnv {
-			env[k] = v
-		}
-		if placement.GPU == "cuda" && w.DeviceBinding != "" {
-			env["CUDA_VISIBLE_DEVICES"] = w.DeviceBinding
-		}
+	bound, e := w.deviceEnvironment()
+	if e != nil {
+		return nil, e
+	}
+	for k, v := range bound {
+		env[k] = v
 	}
 	for k, v := range placementEnvironment(placement) {
 		env[k] = v
@@ -442,9 +441,6 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	}
 	delete(env, "MYCE_TOKEN")
 	if len(j.Spec.Run.Sidecars) > 0 || j.Spec.Run.MemoryGB > 0 {
-		if w.batchMemory != nil {
-			w.batchMemory.Store(math.Float64bits(j.Spec.Needs.MemoryGB))
-		}
 		p, e := w.startNativeGroup(s, j, identity, memoryAttempt, env, environmentPath, extensionRelease, release)
 		if e == nil {
 			environmentStarted, extensionStarted, started = true, true, true
@@ -481,9 +477,6 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	// Record intent before creating even the gated process. It cannot execute
 	// the command until its group identity has been durably recorded.
 	s.state.Job = &j
-	if w.batchMemory != nil {
-		w.batchMemory.Store(math.Float64bits(j.Spec.Needs.MemoryGB))
-	}
 	s.state.Identity = identity
 	s.state.Log = logName
 	s.state.Offset = 0
@@ -493,6 +486,10 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	s.state.PID = 0
 	s.state.LaunchPending = true
 	if err = s.save(); err != nil {
+		output.Close()
+		return nil, err
+	}
+	if err = w.verifyDevice(); err != nil {
 		output.Close()
 		return nil, err
 	}
@@ -693,6 +690,12 @@ func (w Worker) replay(ctx context.Context, s *workerStore) error {
 	return nil
 }
 func (w Worker) Run(stop context.Context) error {
+	if err := singleDeviceMask(w.Machine.Device); err != nil {
+		return err
+	}
+	if err := singleDeviceMask(w.DeviceBinding); err != nil {
+		return err
+	}
 	if w.Interval <= 0 {
 		w.Interval = time.Second
 	}
@@ -754,68 +757,22 @@ func (w Worker) Run(stop context.Context) error {
 		}
 		s.state.CheckpointRoot = root
 	}
-	var memoryFiles memoryFS = osMemoryFS{}
-	if w.memoryCeilings != nil {
-		memoryFiles = w.memoryCeilings.fs
-	}
-	if s.state.Job != nil && !s.state.Job.Spec.Run.Docker && s.state.Identity != "" {
-		if err = s.recoverResult(w.Machine.ID); err != nil {
-			return err
-		}
-		if err = s.recoverNativeCause(w.Machine.ID, memoryFiles); err != nil {
-			return err
-		}
-	}
-	if err = s.cleanupOrphan(w.Clock, memoryFiles); err != nil {
+	stores, err := s.attemptStores()
+	if err != nil {
 		return err
 	}
-	if s.state.Job != nil && !s.state.Job.Spec.Run.Docker && s.state.Result != nil {
-		s.state.Result.ReleasePending = false
-		if err = saveWorkerJSON(s.dir, s.state.Identity+".result.json", *s.state.Result); err != nil {
-			return err
-		}
-	}
-	var recoveringProcess *process
-	if s.state.Job != nil && s.state.Job.Spec.Run.Docker && s.state.Identity != "" {
-		recoveringProcess, err = w.restoreDocker(s)
-		if err != nil {
-			return err
-		}
-	}
-	if recoveringProcess != nil {
-		s.state.Result = nil
-		defer recoveringProcess.docker.close()
-	}
-	recovering := recoveringProcess != nil
-	if s.state.Job != nil && s.state.Identity != "" && recoveringProcess == nil {
-		if err = s.recoverResult(w.Machine.ID); err != nil {
-			return err
-		}
-	}
-	if s.state.Job != nil && s.state.Result == nil && recoveringProcess == nil {
-		facts := memberOutcome{ObservationLost: true}
-		if err = saveWorkerJSON(s.dir, s.state.Identity+".observation-loss.json", facts); err != nil {
-			return err
-		}
-		r := classifyAttemptOutcome(Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Error: "worker restarted; previous process group cleaned up"}, attemptCause{memberOutcome: facts, PriorityStop: s.state.PriorityStop})
-		s.state.Result = &r
-		s.state.PID = 0
-	}
-	if s.state.Result != nil && s.state.OperatorStopped {
-		*s.state.Result = operatorOutcome(*s.state.Result, true)
-	}
-	if s.state.Job != nil && (s.state.Result != nil || recoveringProcess != nil) {
-		recovering = true
+	if len(stores) > 0 {
 		w.Machine.Session = s.state.Session
 	} else {
-		root := s.state.CheckpointRoot
 		if !s.state.Fresh || s.state.Session == "" {
-			previous := s.state.Session
-			s.state = workerState{Session: ID(), PreviousSession: previous, Fresh: true, CheckpointRoot: root}
+			s.state = workerState{Session: ID(), PreviousSession: s.state.Session, Fresh: true, CheckpointRoot: s.state.CheckpointRoot}
 		}
 		w.Machine.Session = s.state.Session
 	}
 	if err = s.save(); err != nil {
+		return err
+	}
+	if err = w.initInventory(stop, s); err != nil {
 		return err
 	}
 	// Startup may rotate an idle session after exact orphan recovery. The first
@@ -862,7 +819,6 @@ func (w Worker) Run(stop context.Context) error {
 	if w.LogRetention < 0 {
 		return errors.New("log-retention must be positive")
 	}
-	var nextLogCleanup time.Time
 	retentionCtx, retentionCancel := context.WithCancel(context.Background())
 	type retentionRequest struct {
 		active string
@@ -877,6 +833,12 @@ func (w Worker) Run(stop context.Context) error {
 			case <-retentionCtx.Done():
 				return
 			case request := <-retentionRequests:
+				if e := pruneWorkerLogs(s.dir, "", request.now, w.LogRetention); e != nil {
+					log.Printf("worker log retention: %v", e)
+				}
+				if w.DockerEndpoint == "" {
+					continue
+				}
 				if e := pruneStoppedDocker(retentionCtx, s.dir, w.Machine.ID, request.active, request.now, retention, nil); e != nil && retentionCtx.Err() == nil {
 					log.Printf("stopped-container retention (will retry): %v", e)
 				}
@@ -885,9 +847,6 @@ func (w Worker) Run(stop context.Context) error {
 	}()
 	defer func() { retentionCancel(); <-retentionDone }()
 	requestRetention := func(active string, now time.Time) {
-		if w.DockerEndpoint == "" {
-			return // Keep retained custody; disabling a runtime never retires it.
-		}
 		select {
 		case retentionRequests <- retentionRequest{active: active, now: now}:
 		default:
@@ -911,7 +870,7 @@ func (w Worker) Run(stop context.Context) error {
 	defer func() { availabilityCancel(); <-availabilityDone }()
 	// Benchmark before any model load or admission, and never over a recovered job.
 	// Fake inventory keeps dev/tests light; measured fake runners are tested separately.
-	if w.OnboardingBenchmark && w.Benchmark != nil && w.Machine.GPU != "fake" && w.Machine.GPU != "cpu" && s.state.Job == nil {
+	if w.OnboardingBenchmark && w.Benchmark != nil && w.Machine.GPU != "fake" && w.Machine.GPU != "cpu" && len(stores) == 0 {
 		if err = w.runBenchmark(stop, s); err != nil {
 			return err
 		}
@@ -968,499 +927,17 @@ func (w Worker) Run(stop context.Context) error {
 		free = max(0, free-used)
 		return free, e
 	}
-	ctx := context.Background()
-	ticker := time.NewTicker(min(w.Interval, 100*time.Millisecond))
-	defer ticker.Stop()
-	p := recoveringProcess
-	leaving := stop.Err() != nil
-	leaveSent := false
-	stopCh := stop.Done()
 	if w.ExtensionRoot == "" {
 		w.ExtensionRoot = filepath.Join(s.dir, "extensions")
 	}
-	if w.ExtensionRoot != "" {
-		probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		w.extensionFingerprint, _ = ExtensionFingerprint(probeCtx, w.Machine.GPU, w.Machine.Device)
-		cancel()
-	}
+	probeCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	w.extensionFingerprint, _ = ExtensionFingerprint(probeCtx, w.Machine.GPU, w.Machine.Device)
+	cancel()
 	w.Machine.ExtensionFingerprint = w.extensionFingerprint
 	w.environmentCache.Fetch = w.fileCache.copyTo
-	base := w.Machine.FreeMemoryGB
-	fresh := !recovering && s.state.Fresh
-	eventCtx, eventCancel := context.WithCancel(context.Background())
-	defer eventCancel()
-	events := make(chan WorkerEvent, 1)
-	go w.watchStops(eventCtx, events)
-	w.control = &processControl{clock: w.Clock, wake: make(chan struct{}, 1), availability: w.availability}
-	controlDone := make(chan struct{})
-	go func() {
-		defer close(controlDone)
-		w.control.run(eventCtx, stop, events)
-	}()
-	defer func() { eventCancel(); <-controlDone }()
-	var retry workerRetry
-	probeUnavailable := false
-	defer func() {
-		if p != nil {
-			p.stop(w.Clock.Now(), 0, true)
-			if p.docker != nil {
-				p.docker.close()
-				return
-			}
-			finished := <-p.done
-			if finished.err != nil {
-				log.Printf("persist result: %v", finished.err)
-			}
-		}
-	}()
-	for {
-		now := w.Clock.Now()
-		if !now.Before(nextLogCleanup) {
-			if err = pruneWorkerLogs(s.dir, s.state.Log, now, w.LogRetention); err != nil {
-				return errors.New("worker log retention failed")
-			}
-			requestRetention(s.state.Identity, now)
-			nextLogCleanup = now.Add(time.Minute)
-		}
-		batch := 0.0
-		if s.state.Job != nil {
-			batch = s.state.Job.Spec.Needs.MemoryGB
-		}
-		w.batchMemory.Store(math.Float64bits(batch))
-		select {
-		case <-stopCh:
-			leaving = true
-			stopCh = nil
-			if p != nil && p.job.Spec.Resumable {
-				p.stop(now, StopGrace, false)
-			}
-		default:
-		}
-		if p != nil {
-			p.enforceGrace(now)
-			select {
-			case f := <-p.done:
-				retry = workerRetry{}
-				w.control.set(nil)
-				p = nil
-				if f.err != nil {
-					return fmt.Errorf("persist command result: %w", f.err)
-				}
-				if s.state.OperatorStopped {
-					f.result = operatorOutcome(f.result, true)
-				}
-				s.state.Result = &f.result
-				s.state.PID = 0
-				if err = s.save(); err != nil {
-					return err
-				}
-			default:
-			}
-		}
-		if retry.ready(now) {
-			rt.mu.Lock()
-			rt.memoryMachine = w.Machine
-			rt.session = w.Machine.Session
-			rt.mu.Unlock()
-			m := w.Machine
-			m.FileTransferError = s.fileError
-			if w.ExtensionRoot != "" {
-				m.ExtensionReports = LocalExtensionReports(w.ExtensionRoot, m.GPU, w.extensionFingerprint, &m)
-				w.Machine.ExtensionReports = m.ExtensionReports
-			}
-			if m.CapabilityProfile != nil {
-				profile := *m.CapabilityProfile
-				a := w.availability.snapshot()
-				profile.Availability = &a
-				m.CapabilityProfile = &profile
-			}
-			if p != nil && p.docker != nil {
-				status := p.docker.status()
-				p.docker.mu.Lock()
-				m.DockerCause = safeRuntimeCause(p.docker.state.CleanupCause)
-				p.docker.mu.Unlock()
-				if status != "running" {
-					m.DockerCleanup = status
-				}
-			}
-			m.EnvironmentBuilder = true
-			if e := environments.upload(ctx, w.Client, m); e != nil && !stale(e) {
-				log.Printf("environment log upload: %v", e)
-			}
-			ready, envReports, envTimes := environments.report()
-			m.Environments = append(slices.Clone(w.Machine.Environments), ready...)
-			m.EnvironmentReports = envReports
-			m.EnvironmentBuildSeconds = envTimes
-			if !recovering {
-				m.ModelURL = rt.url
-			}
-			m.ModelConfigHash = modelConfigHash(w.ModelConfig)
-			m.Capabilities = append(slices.DeleteFunc(slices.Clone(w.Machine.Capabilities), func(c string) bool { return c == "docker" }), "logs_none")
-			if w.DockerEndpoint != "" {
-				m.Capabilities = append(m.Capabilities, "docker")
-			}
-			m.ApprovedModels, m.ModelApprovalStates = rt.cache.modelApprovals(w.ModelConfig.Models)
-			rt.setLocalApprovals(m.ApprovedModels, m.ModelApprovalStates)
-			reports, _ := rt.report()
-			if rt.cache != nil {
-				var ce error
-				m.CachedModels, m.CacheFreeBytes, ce = rt.cache.report(w.ModelConfig.Models, m.ApprovedModels)
-				m.CopyReports, m.CopyBytesPerSecond = rt.copyTelemetry()
-				if ce != nil {
-					m.CacheError = ce.Error()
-				}
-			}
-			for _, r := range reports {
-				if r.State == "failed" {
-					m.CacheError = r.Error
-				}
-			}
-			m.Leaving = leaving
-			m.FreeMemoryGB = base
-			m.TotalMemoryGB = base
-			if w.MemorySource != nil {
-				free, e := rawMemory(ctx)
-				if e != nil || !validMemoryValue(free) {
-					log.Printf("worker %s GPU memory probe failed: %v", m.ID, e)
-					free = 0
-					m.MemoryError = fmt.Sprintf("%v", e)
-					if e == nil {
-						m.MemoryError = "probe returned invalid memory"
-					}
-				}
-				m.FreeMemoryGB = free
-				m.MemoryMeasured = w.MemoryMeasured
-			}
-			hostFree, hostErr := w.HostMemorySource(ctx)
-			m.HostAvailableMemoryGB = hostFree
-			if hostErr != nil || !validMemoryValue(hostFree) {
-				m.HostAvailableMemoryGB = 0
-				m.HostMemoryError = fmt.Sprintf("host RAM probe failed: %v", hostErr)
-			}
-			root := s.state.CheckpointRoot
-			available, probeErr := s.nasProbe.run(root, func() (bool, error) { err := workerCheckpointAvailable(root); return err == nil, err })
-			if !available != probeUnavailable {
-				if available {
-					log.Printf("worker %s NAS checkpoint probe recovered", m.ID)
-				} else {
-					log.Printf("worker %s NAS checkpoint probe failed: %v", m.ID, probeErr)
-				}
-				probeUnavailable = !available
-			}
-			m.CheckpointUnavailable = !available || s.checkpointUnavailable
-			var running *Execution
-			if s.state.Job != nil {
-				if !w.MemoryMeasured {
-					m.FreeMemoryGB = max(0, m.FreeMemoryGB-s.state.Job.Spec.Needs.MemoryGB)
-				}
-				var progress int64
-				if needsCheckpoint(s.state.Job) && available {
-					path := attemptCheckpoint(*s.state.Job)
-					var progressErr error
-					progress, progressErr = s.nasProgress.run(path, func() (int64, error) { return checkpointProgress(path) })
-					if progressErr != nil && !errors.Is(progressErr, os.ErrNotExist) {
-						m.CheckpointUnavailable = true
-						log.Printf("NAS checkpoint progress unavailable: %v", progressErr)
-					}
-				}
-				if s.state.Job.FileTransport && s.state.Result == nil && progress > s.fileGeneration {
-					value := *s.state.Job
-					transferWorker := w
-					published, e := s.fileProgress.run(attemptCheckpoint(value), func() (int64, error) { return transferWorker.publishFileCheckpoint(value, s.dir) })
-					if e == nil {
-						s.fileGeneration = published
-						s.fileError = ""
-					} else {
-						s.fileError = "checkpoint transfer pending; only published progress can resume elsewhere"
-					}
-				}
-				running = &Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt, Progress: progress}
-			}
-			var reply Reply
-			reply, err = w.checkin(ctx, Checkin{Started: p != nil && (p.docker == nil || p.docker.status() == "running") && (p.native == nil || p.native.started()), Machine: m, Running: running, Fresh: fresh, PreviousSession: s.state.PreviousSession, ModelReports: reports})
-			if err == nil {
-				if reply.CPUBudgetCores != nil {
-					w.Machine.CPUBudgetCores = *reply.CPUBudgetCores
-				}
-				if reply.HostMemoryBudget != nil {
-					w.Machine.HostMemoryBudgetGB = reply.HostMemoryBudget.GiB
-					rt.mu.Lock()
-					rt.memoryMachine = w.Machine
-					rt.mu.Unlock()
-				}
-				if s.state.Job != nil && s.state.Job.Spec.Run.Docker && s.state.Result != nil {
-					ack := *s.state.Result
-					ack.ReleaseOnly = true
-					if ackErr := w.Client.Call(ctx, "POST", "/api/workers/complete", ack, nil); ackErr != nil && !stale(ackErr) {
-						log.Printf("Docker release acknowledgement: %v", ackErr)
-					}
-				}
-				busy := reply.Job != nil || s.state.Job != nil || leaving || recovering || w.checkAvailability() != nil
-				for _, slot := range reply.ModelPlan {
-					if slot.State == "loading" || slot.InFlight > 0 {
-						busy = true
-					}
-				}
-				for i := range reply.EnvironmentPlan {
-					r := &reply.EnvironmentPlan[i]
-					if r.BinaryRelative != "" && w.EnvironmentSourceRoot != "" {
-						r.Binary = filepath.Join(w.EnvironmentSourceRoot, r.BinaryRelative)
-					}
-				}
-				keepPreparations := (reply.HostMaintenance == "drained" || reply.HostMaintenance == "disabled") && reply.PreparationStopAt == nil
-				prepareWorker := w
-				environments.mu.Lock()
-				environments.prepare = prepareWorker.prepareRegisteredExtension
-				environments.mu.Unlock()
-				environments.sync(reply.EnvironmentPlan, busy, keepPreparations)
-				rt.syncCopies(reply.CopyPlan, reply.CacheUsage, reply.CachePins, busy, keepPreparations)
-				// syncCopies cancels immediately; do not block heartbeats behind an
-				// outstanding filesystem syscall on an unavailable NAS. Loads share
-				// the cache admission gate and wait for the reservation to release.
-				rt.mu.Lock()
-				rt.admissionBlocked = reply.AdmissionBlocked
-				rt.mu.Unlock()
-				rt.sync(reply.ModelPlan)
-				fresh = false
-				if s.state.Fresh {
-					s.state.Fresh = false
-					if e := s.save(); e != nil {
-						return e
-					}
-				}
-				if reply.FileCheckpoints && !w.fileCheckpoints {
-					if w.CheckpointRoot != "" {
-						return errors.New("NAS checkpoint-root cannot be combined with file-store checkpoints")
-					}
-					w.fileCheckpoints = true
-					s.state.CheckpointRoot = filepath.Join(s.dir, "file-checkpoints")
-					if e := os.MkdirAll(s.state.CheckpointRoot, 0700); e != nil {
-						return e
-					}
-					if e := s.save(); e != nil {
-						return e
-					}
-				}
-				if !w.fileCheckpoints && w.CheckpointRoot == "" && reply.CheckpointRoot != "" && reply.CheckpointRoot != s.state.CheckpointRoot {
-					s.state.CheckpointRoot = reply.CheckpointRoot
-					if e := s.save(); e != nil {
-						return e
-					}
-				}
-				if s.state.Job != nil && s.state.Result == nil && p == nil && !recovering {
-					if reply.Stop {
-						cause := s.startFailure(*s.state.Job, launchRefused, errors.New("assignment withdrawn before checkpoint storage recovered"))
-						r := startFailureOutcome(Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Error: cause.Error()}, cause)
-						s.state.Result = &r
-						if e := s.save(); e != nil {
-							return e
-						}
-					} else if !reply.AdmissionBlocked && (!needsCheckpoint(s.state.Job) || available) {
-						p, err = w.start(s, *s.state.Job)
-						if err != nil {
-							if errors.Is(err, errWorkerCheckpoint) || errors.Is(err, errWorkerMemory) || errors.Is(err, errWorkerUnavailable) {
-								log.Printf("retry pending start: %v", err)
-							} else {
-								r := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Error: err.Error(), ExtensionUnavailable: errors.Is(err, errExtensionUnavailable), ReleasePending: errors.Is(err, errWorkerReleasePending)}
-								r = startFailureOutcome(r, err)
-								s.state.Result = &r
-								if !r.ReleasePending {
-									s.state.PID = 0
-								}
-								err = s.save()
-							}
-						}
-					}
-				}
-				if reply.Leave && !recovering {
-					leaving = true
-					leaveSent = true
-				}
-				if p != nil && reply.Stop {
-					if e := p.recordPriorityStop(s, reply.PriorityStop); e != nil {
-						return e
-					}
-					p.stop(now, time.Duration(max(0, reply.GraceSeconds)*float64(time.Second)), reply.Kill)
-				}
-				if leaving && !leaveSent {
-					err = w.Client.Call(ctx, "POST", "/api/workers/"+m.ID+"/leave", map[string]bool{"now": false}, nil)
-					if err == nil {
-						leaveSent = true
-					}
-				}
-				if err == nil && s.state.Job != nil && !reply.Hold {
-					// A killed losing copy must never upload its result over the winner.
-					if !(reply.Stop && reply.Kill) {
-						err = w.replay(ctx, s)
-					} else if s.state.Result != nil && !s.state.Job.Spec.Run.Docker {
-						// Reject stale output, but deliver the exact attempt's cleanup status.
-						released := *s.state.Result
-						released.ReleaseOnly = !released.ReleasePending
-						err = w.Client.Call(ctx, "POST", "/api/workers/complete", released, nil)
-						if err == nil {
-							err = &HTTPError{Status: 409}
-						}
-					}
-					if err == nil && s.state.Result != nil && s.state.Job.FileTransport {
-						if !s.state.Result.ReleasePending {
-							released := *s.state.Result
-							released.ReleaseOnly = true
-							released.OutputRefs = nil
-							if e := w.Client.Call(ctx, "POST", "/api/workers/complete", released, nil); e != nil && !stale(e) {
-								err = e
-							}
-						}
-						value := *s.state.Job
-						result := *s.state.Result
-						transferWorker := w
-						finished, e := s.fileFinish.run(attemptCheckpoint(value), func() (Result, error) { return transferWorker.finishFileResult(value, result, s.dir) })
-						if e != nil {
-							err = e
-							s.fileError = "file publication pending; local results retained"
-						} else {
-							s.fileError = ""
-							s.state.Result = &finished
-							err = s.save()
-						}
-					}
-					if err == nil && s.state.Result != nil {
-						err = w.Client.Call(ctx, "POST", "/api/workers/complete", s.state.Result, nil)
-					}
-					if s.state.Result != nil && err == nil && s.state.Job.Spec.Run.Docker && !s.state.Result.ReleasePending {
-						if e := acknowledgeDocker(s, w.Machine.ID, now); e != nil {
-							return e
-						}
-					}
-					if s.state.Result != nil && (err == nil || stale(err)) {
-						s.state.Job = nil
-						s.state.PriorityStop = nil
-						s.fileGeneration = 0
-						s.state.OperatorStopped = false
-						s.checkpointUnavailable = false
-						s.state.Result = nil
-						s.state.PID = 0
-						s.state.Identity = ""
-						s.state.Log = ""
-						s.state.Offset = 0
-						s.state.Pending = 0
-						if recovering {
-							recovering = false
-							s.state.PreviousSession = s.state.Session
-							s.state.Session = ID()
-							s.state.Fresh = true
-							w.Machine.Session = s.state.Session
-							if e := s.save(); e != nil {
-								return e
-							}
-							eventCancel()
-							sessionCtx, sessionCancel := context.WithCancel(context.Background())
-							defer sessionCancel()
-							go w.watchStops(sessionCtx, events)
-							fresh = true
-						}
-						if e := s.save(); e != nil {
-							return e
-						}
-						if retention == 0 {
-							requestRetention("", now)
-						}
-						err = nil
-					} else if stale(err) && p != nil {
-						p.stop(now, 0, true)
-						err = nil
-					}
-				}
-				if err == nil && reply.Job != nil {
-					if s.state.Job != nil {
-						return errors.New("queue assigned a job while an execution is still pending")
-					}
-					j := *reply.Job
-					if j.FileTransport {
-						j.Checkpoint = filepath.Join(s.dir, "file-checkpoints", j.ID)
-					} else if !filepath.IsAbs(j.Checkpoint) {
-						rel := filepath.Clean(j.Checkpoint)
-						if rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-							return errors.New("invalid relative checkpoint path")
-						}
-						j.Checkpoint = filepath.Join(s.state.CheckpointRoot, rel)
-					}
-					if leaving || recovering {
-						r := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Error: "worker leaving before command started"}
-						s.state.Job = &j
-						if w.batchMemory != nil {
-							w.batchMemory.Store(math.Float64bits(j.Spec.Needs.MemoryGB))
-						}
-						s.state.Result = &r
-						err = s.save()
-					} else {
-						s.state.Job = &j
-						if w.batchMemory != nil {
-							w.batchMemory.Store(math.Float64bits(j.Spec.Needs.MemoryGB))
-						}
-						if s.state.CheckpointRoot == "" {
-							s.state.CheckpointRoot = filepath.Dir(j.Checkpoint)
-						}
-						if e := s.save(); e != nil {
-							return e
-						}
-						if needsCheckpoint(&j) && !available {
-							err = nil
-						} else {
-							p, err = w.start(s, j)
-						}
-						if err != nil && !(errors.Is(err, errWorkerCheckpoint) || errors.Is(err, errWorkerMemory) || errors.Is(err, errWorkerUnavailable)) {
-							r := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Error: err.Error(), ExtensionUnavailable: errors.Is(err, errExtensionUnavailable), ReleasePending: errors.Is(err, errWorkerReleasePending)}
-							r = startFailureOutcome(r, err)
-							s.state.Job = &j
-							if w.batchMemory != nil {
-								w.batchMemory.Store(math.Float64bits(j.Spec.Needs.MemoryGB))
-							}
-							s.state.Result = &r
-							if !r.ReleasePending {
-								s.state.PID = 0
-							}
-							err = s.save()
-						}
-					}
-				}
-				if err == nil && leaving && s.state.Job == nil && !recovering && len(reply.ModelPlan) == 0 {
-					return nil
-				}
-			}
-			if err != nil {
-				// Pause background I/O while disconnected: new priority decisions
-				// cannot reach this worker. Preserve pins and durable copy bytes.
-				environments.sync(nil, true)
-				rt.cancelCopies()
-				var he *HTTPError
-				if errors.As(err, &he) && (he.Status == 400 || he.Status == 401 || he.Status == 426) {
-					return err
-				}
-				log.Printf("worker %s reconnecting: %v", m.ID, err)
-				retry.failed(w.Clock.Now(), w.Interval)
-			} else {
-				nextInterval := w.Interval
-				if running != nil && s.state.Job == nil {
-					nextInterval = time.Millisecond
-				}
-				retry.succeeded(w.Clock.Now(), nextInterval)
-			}
-		}
-		select {
-		case <-stopCh:
-			leaving = true
-			stopCh = nil
-			if p != nil && p.job.Spec.Resumable {
-				p.stop(w.Clock.Now(), StopGrace, false)
-			}
-		case <-availabilityWake:
-			retry = workerRetry{}
-		case <-w.control.wake:
-			retry = workerRetry{}
-		case <-ticker.C:
-		}
-	}
+	return w.runAttempts(stop, s, stores, rt, environments, rawMemory, requestRetention)
 }
+
 func (w Worker) String() string {
 	return fmt.Sprintf("%s (%s, %.1f GB)", w.Machine.ID, w.Machine.GPU, w.Machine.FreeMemoryGB)
 }

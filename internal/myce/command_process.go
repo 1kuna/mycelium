@@ -42,7 +42,7 @@ func runRecordedCommand(ctx context.Context, argv []string, dir string, env []st
 	args = append(args, argv...)
 	cmd := exec.CommandContext(ctx, "sh", args...)
 	cmd.Dir = dir
-	cmd.Env = append(env, "MYCE_PROCESS_ID="+identity)
+	cmd.Env = append(env, "MYCE_PROCESS_ID="+identity, "ZE_ENABLE_PCI_ID_DEVICE_ORDER=1")
 	cmd.Stdout = out
 	cmd.Stderr = out
 	if scope.Stderr != nil {

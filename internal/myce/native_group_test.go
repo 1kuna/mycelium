@@ -282,7 +282,7 @@ func TestNativeGroupReadyEnvironmentAndCleanup(t *testing.T) {
 			if main["HELPER_URL"] != main["MYCE_SIDECAR_HELPER_URL"] || side["MYCE_SIDECAR_PORT"] != main["MYCE_SIDECAR_HELPER_PORT"] || side["PORT_ARG"] != side["MYCE_SIDECAR_PORT"] {
 				t.Fatal("endpoint env mismatch")
 			}
-			if platform == "cuda" && side["ZE_AFFINITY_MASK"] != "" || platform == "xpu" && side["CUDA_VISIBLE_DEVICES"] != "" {
+			if platform == "cuda" && (side["ZE_AFFINITY_MASK"] != "2147483647" || side["ONEAPI_DEVICE_SELECTOR"] != "!*:*") || platform == "xpu" && side["CUDA_VISIBLE_DEVICES"] != "" {
 				t.Fatal("irrelevant selector inherited")
 			}
 			status, err := r.q.HostMaintenanceStatus("native-host")
@@ -448,7 +448,7 @@ func TestNativeWorkerCancellationPreparation(t *testing.T) {
 	if value := job(t, q, j.ID); value.StartedAt != nil {
 		t.Fatal("readiness preparation marked started")
 	}
-	data, err := os.ReadFile(filepath.Join(run.state, "state.json"))
+	data, err := readSingleAttemptState(filepath.Join(run.state, "state.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

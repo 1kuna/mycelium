@@ -62,7 +62,7 @@ func TestNativeGroupEarlierConsumerEndpoint(t *testing.T) {
 				t.Error(err)
 			}
 			oldURL = string(data)
-			b, _ := os.ReadFile(filepath.Join(stateDir, "state.json"))
+			b, _ := readSingleAttemptState(filepath.Join(stateDir, "state.json"))
 			var st workerState
 			_ = json.Unmarshal(b, &st)
 			oldGroup = st.PID

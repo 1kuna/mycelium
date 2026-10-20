@@ -89,8 +89,8 @@ func (w Worker) checkin(ctx context.Context, c Checkin) (Reply, error) {
 	return validated, nil
 }
 
-// The supervisor remains singular in M1. Select its decision by key rather
-// than treating an arbitrary stop in the response as a stop for the current job.
+// Validate the whole collection before mutation. Singular projections below are
+// retained for benchmark/direct callers; the M2 supervisor consumes Attempts.
 func workerAttemptReply(c Checkin, reply Reply) (Reply, error) {
 	if reply.AttemptProtocol != keyedAttemptProtocol {
 		return Reply{}, currentProtocolError("queue lacks keyed-attempt-v1: upgrade the queue before this worker; saved attempt custody is retained")
@@ -109,8 +109,10 @@ func workerAttemptReply(c Checkin, reply Reply) (Reply, error) {
 		}
 		seen[key] = true
 		if a.Job != nil {
-			if len(c.Attempts) != 0 || reply.Job != nil {
-				return Reply{}, currentProtocolError("M1 worker requires one-attempt queue admission; concurrent assignment refused with custody retained")
+			for _, held := range c.Attempts {
+				if held.ID == a.ID && held.Attempt == a.Attempt && held.Session == a.Session {
+					return Reply{}, currentProtocolError("queue reassigned an owned attempt")
+				}
 			}
 			if a.Job.ID != a.ID || a.Job.Attempt != a.Attempt || a.Job.Session != a.Session || a.Session != c.Machine.Session || a.Job.Machine != c.Machine.ID || a.Stop || a.Kill || a.Hold {
 				return Reply{}, currentProtocolError("queue assignment does not match its attempt key or worker")

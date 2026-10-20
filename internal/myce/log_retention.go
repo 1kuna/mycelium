@@ -58,13 +58,36 @@ func (q *Queue) pruneBatchLogs() error {
 }
 
 func pruneWorkerLogs(dir, pending string, now time.Time, age time.Duration) error {
+	protected := map[string]bool{pending: true}
+	paths, err := filepath.Glob(filepath.Join(dir, "attempt-state-*.json"))
+	if err != nil {
+		return err
+	}
+	paths = append(paths, filepath.Join(dir, "legacy-state.json"))
+	for _, path := range paths {
+		data, e := os.ReadFile(path)
+		if errors.Is(e, os.ErrNotExist) {
+			continue
+		}
+		if e != nil {
+			return e
+		}
+		var st workerState
+		if e = decodeWorkerState(data, &st); e != nil {
+			return e
+		}
+		if st.Job != nil {
+			protected[st.Log] = true
+		}
+	}
+
 	files, err := filepath.Glob(filepath.Join(dir, "*.log"))
 	if err != nil {
 		return err
 	}
 	for _, path := range files {
 		name := filepath.Base(path)
-		if name == pending {
+		if protected[name] {
 			continue
 		}
 		identity := strings.TrimSuffix(strings.TrimPrefix(name, "engine-"), ".log")

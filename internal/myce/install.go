@@ -56,6 +56,9 @@ func (p MachineProbe) Detect(ctx context.Context) (Detection, error) {
 // DetectDevice shares setup detection while allowing foreground workers to
 // inspect a selected CUDA card instead of requiring a single-card host.
 func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detection, error) {
+	if err := singleDeviceMask(device); err != nil {
+		return Detection{}, err
+	}
 	d := Detection{OS: p.OS, Arch: p.Arch, MemoryMode: "auto"}
 	if p.OS != "linux" && p.OS != "darwin" {
 		return d, fmt.Errorf("unsupported OS %s", p.OS)
@@ -565,6 +568,9 @@ func ReadServiceConfig(path string) (ServiceConfig, error) {
 		RequiredWorkers json.RawMessage `json:"required_workers"`
 	}{ServiceConfig: &c}
 	e = decoder.Decode(&legacy)
+	if e == nil {
+		e = singleDeviceMask(c.Device)
+	}
 	if e == nil && (c.Version < 0 || c.Version > 1) {
 		return c, errors.New("unsupported installed config version")
 	}

@@ -207,7 +207,13 @@ func modelFitsMachine(model Model, m *Machine) bool {
 
 // WithModelDevice applies a per-process selector; global environment is untouched.
 func WithModelDevice(m Model, platform, device string) (Model, error) {
-	if device == "" && platform != "cpu" {
+	if err := singleDeviceMask(device); err != nil {
+		return m, err
+	}
+	if err := singleDeviceMask(m.Device); err != nil {
+		return m, err
+	}
+	if device == "" && platform != "cpu" && platform != "fake" {
 		return m, nil
 	}
 	if m.Device != "" && m.Device != device {
@@ -219,22 +225,16 @@ func WithModelDevice(m Model, platform, device string) (Model, error) {
 		env[k] = v
 	}
 	m.DeviceEnv = env
-	// Never carry a selector for another accelerator family into this process.
-	// A mixed CUDA/XPU host must not expose an unselected physical device merely
-	// because the catalog contained a stale or irrelevant selector.
-	delete(env, "CUDA_VISIBLE_DEVICES")
-	delete(env, "ONEAPI_DEVICE_SELECTOR")
-	delete(env, "ZE_AFFINITY_MASK")
+	// Select-none is explicit for every unselected accelerator family.
+	env["CUDA_VISIBLE_DEVICES"] = ""
+	env["ZE_AFFINITY_MASK"] = "2147483647"
+	env["ONEAPI_DEVICE_SELECTOR"] = "!*:*"
+	env["ZE_ENABLE_PCI_ID_DEVICE_ORDER"] = "1"
 	switch platform {
 	case "cuda":
 		env["CUDA_VISIBLE_DEVICES"] = device
 	case "xpu":
-		// Level Zero renumbers the affinity-masked physical devices from zero.
-		indices := strings.Split(device, ",")
-		for i := range indices {
-			indices[i] = strconv.Itoa(i)
-		}
-		env["ONEAPI_DEVICE_SELECTOR"] = "level_zero:" + strings.Join(indices, ",")
+		env["ONEAPI_DEVICE_SELECTOR"] = "level_zero:0"
 		env["ZE_AFFINITY_MASK"] = device
 	case "cpu":
 		env["CUDA_VISIBLE_DEVICES"] = ""

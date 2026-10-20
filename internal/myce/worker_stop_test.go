@@ -83,7 +83,7 @@ func testWorkerBlockedNetworkStop(t *testing.T, blockCheckin bool) {
 	w := Worker{StateDir: stateDir, Clock: clock, Interval: time.Millisecond, Machine: machine("one", "fake"), Client: Client{URL: server.URL, Token: "test"}}
 	go func() { done <- w.Run(ctx) }()
 	defer func() {
-		data, _ := os.ReadFile(filepath.Join(stateDir, "state.json"))
+		data, _ := readSingleAttemptState(filepath.Join(stateDir, "state.json"))
 		var state workerState
 		if json.Unmarshal(data, &state) == nil && state.PID > 0 {
 			_ = syscall.Kill(-state.PID, syscall.SIGKILL)
@@ -114,7 +114,7 @@ waitingUpload:
 		}
 	}
 	var state workerState
-	data, err := os.ReadFile(filepath.Join(stateDir, "state.json"))
+	data, err := readSingleAttemptState(filepath.Join(stateDir, "state.json"))
 	if err != nil {
 		t.Fatal(err)
 	}

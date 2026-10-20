@@ -413,6 +413,8 @@ type workerModel struct {
 	drainRequested     bool
 }
 type modelRuntime struct {
+	verifyDevice          func() error
+	deviceEnv             map[string]string
 	authorize             func(HostLaunch) error
 	copyResults           map[string]CopyReport
 	localApprovals        map[string]string
@@ -491,6 +493,22 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 		}
 	}
 	rt.device, rt.platform = w.Machine.Device, w.Machine.GPU
+	if w.Machine.GPU == "cpu" {
+		bound := w
+		bound.cpuIsolation = true
+		rt.verifyDevice = bound.verifyDevice
+		rt.deviceEnv, _ = bound.deviceEnvironment()
+	}
+	for _, d := range w.Machine.Devices {
+		if d.ID == w.Machine.Device {
+			bound := w
+			bound.selectedDevice = &d
+			bound.DeviceBinding = d.Selector
+			rt.verifyDevice = bound.verifyDevice
+			rt.deviceEnv, _ = bound.deviceEnvironment()
+			break
+		}
+	}
 	rt.machine = w.Machine.ID
 	rt.environmentCache = w.environmentCache
 	rt.environmentSourceRoot = w.EnvironmentSourceRoot
@@ -663,7 +681,14 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 		if authorize := rt.authorize; authorize != nil {
 			// Capture the exact plan under rt.mu; heartbeats update rt.session.
 			launch := HostLaunch{Machine: rt.machine, Session: s.Session, Kind: "engine", Key: s.Model, Attempt: s.Attempt}
-			parent = withLaunchGate(parent, func() error { return authorize(launch) })
+			parent = withLaunchGate(parent, func() error {
+				if rt.verifyDevice != nil {
+					if err := rt.verifyDevice(); err != nil {
+						return err
+					}
+				}
+				return authorize(launch)
+			})
 		}
 		ctx, cancel := context.WithTimeout(parent, rt.config.Wait)
 		m := &workerModel{model: model, engine: engine, attempt: s.Attempt, state: "loading", cancel: cancel, recipe: s.EnvironmentRecipe}
@@ -688,8 +713,13 @@ func (rt *modelRuntime) load(ctx context.Context, m *workerModel) {
 	model := withPlacementEnvironment(m.model, Machine{ID: rt.machine, GPU: rt.platform, Device: rt.device})
 	model.secretRoot, model.fleetToken = rt.secretRoot, rt.token
 	var e error
-	if rt.device != "" {
+	if rt.device != "" || rt.platform == "cpu" {
 		model, e = WithModelDevice(model, rt.platform, rt.device)
+		if e == nil {
+			for k, v := range rt.deviceEnv {
+				model.DeviceEnv[k] = v
+			}
+		}
 	}
 	if e == nil {
 		e = checkLaunchGate(ctx)

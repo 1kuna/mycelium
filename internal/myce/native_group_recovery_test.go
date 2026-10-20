@@ -56,7 +56,7 @@ func TestNativeGroupSIGKILLRestart(t *testing.T) {
 			defer func() { _ = child.Process.Kill(); _ = child.Wait() }()
 			var before workerState
 			await(t, func() bool {
-				b, e := os.ReadFile(filepath.Join(stateDir, "state.json"))
+				b, e := readSingleAttemptState(filepath.Join(stateDir, "state.json"))
 				if e != nil {
 					return false
 				}
@@ -163,7 +163,7 @@ func nativePortHandoff(t *testing.T, collisions int) Result {
 		if r.URL.Path == "/api/workers/launch" {
 			call := n.Add(1)
 			if call >= 3 && call <= int32(3*collisions) && call%3 == 0 {
-				b, _ := os.ReadFile(filepath.Join(stateDir, "state.json"))
+				b, _ := readSingleAttemptState(filepath.Join(stateDir, "state.json"))
 				var st workerState
 				_ = json.Unmarshal(b, &st)
 				b, _ = os.ReadFile(filepath.Join(stateDir, "native-"+st.Identity+".json"))

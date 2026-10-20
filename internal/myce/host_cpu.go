@@ -17,6 +17,14 @@ func (n ResourceNeeds) cores() int { return max(1, n.CPUCores) }
 // repeated validation/resolution never moves or charges RAM twice.
 func normalizeResources(s *Spec) error {
 	n := &s.Needs
+	if n.GPU != nil && n.GPU.Count != nil {
+		if *n.GPU.Count > 1 {
+			return reject("gpu_count_unsupported", errors.New("multiple GPU devices are deferred to #105"))
+		}
+		if *n.GPU.Count <= 0 {
+			return reject("gpu_selector_invalid", errors.New("GPU count must be positive"))
+		}
+	}
 	if !validMemoryValue(n.HostMemoryGB) {
 		return reject("job_memory_invalid", errors.New("host_memory_gb must be finite and nonnegative"))
 	}
@@ -27,6 +35,9 @@ func normalizeResources(s *Spec) error {
 		n.Platform = Platform{Required: []string{"cpu"}}
 	}
 	if n.cpuOnly() {
+		if n.GPU != nil {
+			return reject("gpu_selector_invalid", errors.New("CPU work cannot select a GPU"))
+		}
 		if n.Model != "" {
 			return reject("job_capacity_invalid", errors.New("CPU commands cannot request a GPU model"))
 		}

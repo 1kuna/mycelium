@@ -49,6 +49,11 @@ func (e Extension) validateVariants() error {
 			return errors.New("variants require unique complete OS/arch/platform targets")
 		}
 		seen[t] = true
+		resources := Spec{Needs: v.Needs}
+		resources.Needs.Platform = Platform{Required: []string{t.Platform}}
+		if err := normalizeResources(&resources); err != nil {
+			return err
+		}
 		if v.Needs.CPUCores < 0 || v.Needs.Model != "" || v.Needs.MemoryGB <= 0 || !validMemoryValue(v.Needs.MemoryGB) || !validMemoryValue(v.Needs.HostMemoryGB) || v.Needs.Platform.Any || len(v.Needs.Platform.Required)+len(v.Needs.Platform.Preferred) > 0 {
 			return errors.New("variant needs require finite CPU/GPU/RAM floors; target owns platform")
 		}

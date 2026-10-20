@@ -774,6 +774,9 @@ func (d *dockerAttempt) retainEvidence(containers []dockerInspection) (err error
 }
 
 func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release func()) (*process, error) {
+	if err := w.verifyDevice(); err != nil {
+		return nil, err
+	}
 	if w.DockerEndpoint == "" {
 		return nil, errors.New("Docker runtime disabled; configure --docker-host to run image jobs")
 	}
@@ -813,6 +816,9 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 	}
 	launch := HostLaunch{Machine: w.Machine.ID, Session: s.state.Session, Kind: "batch", Key: j.ID, Attempt: strconv.Itoa(j.Attempt)}
 	d := &dockerAttempt{admit: func() error {
+		if err := w.verifyDevice(); err != nil {
+			return err
+		}
 		if err := w.checkHostMemoryBudget(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB); err != nil {
 			return err
 		}
@@ -834,7 +840,7 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 		}
 	}
 	for k, v := range j.Spec.Run.Env {
-		if k != "MYCE_TOKEN" && !strings.HasPrefix(k, "DOCKER_") {
+		if k != "MYCE_TOKEN" && !strings.HasPrefix(k, "DOCKER_") && !dockerDeviceEnvironment(k) {
 			d.env = append(d.env, k+"="+v)
 		}
 	}
@@ -880,17 +886,15 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 	for k, v := range placementEnvironment(w.Machine) {
 		create = append(create, "--env", k+"="+v)
 	}
-	if w.Machine.Device != "" {
-		bound, _ := WithModelDevice(Model{}, w.Machine.GPU, w.Machine.Device)
-		if w.Machine.GPU == "cuda" && w.DeviceBinding != "" {
-			bound.DeviceEnv["CUDA_VISIBLE_DEVICES"] = w.DeviceBinding
-		}
-		for k, v := range bound.DeviceEnv {
-			create = append(create, "--env", k+"="+v)
-		}
+	bound, e := w.deviceEnvironment()
+	if e != nil {
+		return nil, e
+	}
+	for k, v := range bound {
+		create = append(create, "--env", k+"="+v)
 	}
 	for k, v := range j.Spec.Run.Env {
-		if !strings.HasPrefix(k, "MYCE_") && !strings.HasPrefix(k, "DOCKER_") {
+		if !strings.HasPrefix(k, "MYCE_") && !strings.HasPrefix(k, "DOCKER_") && !dockerDeviceEnvironment(k) {
 			create = append(create, "--env", k+"="+v)
 		}
 	}
@@ -1258,7 +1262,7 @@ func dockerClientEnvironment() []string {
 }
 
 func dockerDeviceEnvironment(name string) bool {
-	return slices.Contains([]string{"CUDA_VISIBLE_DEVICES", "ONEAPI_DEVICE_SELECTOR", "ZE_AFFINITY_MASK"}, name)
+	return slices.Contains([]string{"CUDA_VISIBLE_DEVICES", "ONEAPI_DEVICE_SELECTOR", "ZE_AFFINITY_MASK", "ZE_ENABLE_PCI_ID_DEVICE_ORDER"}, name)
 }
 
 func dockerAttemptFilter(identity string) string {

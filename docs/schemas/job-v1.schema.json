@@ -2,6 +2,15 @@
   "$defs": {
     "Copy": {
       "properties": {
+        "allocated_devices": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "attempt": {
           "type": "integer"
         },
@@ -592,6 +601,14 @@
       ],
       "type": "object"
     },
+    "GPUSelection": {
+      "properties": {
+        "count": {
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "HostLaunch": {
       "properties": {
         "attempt": {
@@ -641,6 +658,16 @@
     },
     "Job": {
       "properties": {
+        "allocated_devices": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
         "assigned_at": {
           "format": "date-time",
           "type": "string",
@@ -1088,6 +1115,9 @@
       "properties": {
         "cpu_cores": {
           "type": "integer"
+        },
+        "gpu": {
+          "$ref": "#/$defs/GPUSelection"
         },
         "host_memory_gb": {
           "type": "number"

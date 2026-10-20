@@ -819,7 +819,7 @@ func TestDockerStopBeforeDispatchNeverStarts(t *testing.T) {
 	w, s, c, root := dockerFixture(t)
 	j := dockerJob()
 	j.Checkpoint = filepath.Join(t.TempDir(), "checkpoint")
-	w.control = &processControl{clock: c, pending: WorkerEvent{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, deadline: c.Now(), Kill: true}}
+	w.control = &processControl{clock: c, pendingEvents: map[attemptKey]WorkerEvent{jobKey(j): {Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, deadline: c.Now(), Kill: true}}}
 	p, e := startDockerFixture(w, s, j)
 	if e != nil {
 		t.Fatal(e)

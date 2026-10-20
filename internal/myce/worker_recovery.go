@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -40,6 +41,7 @@ func (r *workerRetry) succeeded(now time.Time, interval time.Duration) {
 }
 
 type workerState struct {
+	Attempts        []string               `json:"attempts,omitempty"`
 	PriorityStop    *PriorityPreemption    `json:"priority_stop,omitempty"`
 	StopAt          *time.Time             `json:"stop_at,omitempty"`
 	Schema          int                    `json:"schema_version"`
@@ -61,6 +63,9 @@ type workerState struct {
 	Log             string                 `json:"log,omitempty"`
 }
 type workerStore struct {
+	stateName             string
+	environmentLogs       checkpointIO[bool]
+	inventory             checkpointIO[[]MachineDevice]
 	fileError             string
 	fileProgress          checkpointIO[int64]
 	fileFinish            checkpointIO[Result]
@@ -163,6 +168,10 @@ func (s *workerStore) readOperatorStop() error {
 		return fmt.Errorf("read operator-stop marker: %w", err)
 	}
 	st := &s.state
+	if s.stateName != "" && marker.Session == st.Session && slices.Contains(marker.Attempts, s.stateName) && st.Job != nil && st.Result == nil {
+		st.OperatorStopped = true
+		return s.save()
+	}
 	if marker.Job != nil && marker.Result == nil && st.Job != nil && marker.Identity != "" && marker.Identity == st.Identity && marker.Session == st.Session && marker.Job.ID == st.Job.ID && marker.Job.Attempt == st.Job.Attempt {
 		st.OperatorStopped = true
 		return s.save()
@@ -220,7 +229,13 @@ func (s *workerStore) close() {
 	_ = syscall.Flock(int(s.lock.Fd()), syscall.LOCK_UN)
 	_ = s.lock.Close()
 }
-func (s *workerStore) save() error              { return saveWorkerJSON(s.dir, "state.json", s.state) }
+func (s *workerStore) save() error {
+	name := s.stateName
+	if name == "" {
+		name = "state.json"
+	}
+	return saveWorkerJSON(s.dir, name, s.state)
+}
 func decodeWorkerJSON(data []byte, v any) error { return json.Unmarshal(data, v) }
 func saveWorkerJSON(dir, name string, v any) error {
 	switch value := v.(type) {

@@ -28,12 +28,17 @@ type RunSpec struct {
 	Sidecars         []NativeSidecar   `json:"sidecars,omitempty" yaml:"sidecars,omitempty"`
 }
 
+type GPUSelection struct {
+	Count *int `json:"count,omitempty" yaml:"count,omitempty"`
+}
+
 type ResourceNeeds struct {
-	CPUCores     int      `json:"cpu_cores,omitempty" yaml:"cpu_cores,omitempty"`
-	MemoryGB     float64  `json:"memory_gb" yaml:"memory_gb"`
-	HostMemoryGB float64  `json:"host_memory_gb,omitempty" yaml:"host_memory_gb,omitempty"`
-	Platform     Platform `json:"platform" yaml:"platform"`
-	Model        string   `json:"model,omitempty" yaml:"model,omitempty"`
+	GPU          *GPUSelection `json:"gpu,omitempty" yaml:"gpu,omitempty"`
+	CPUCores     int           `json:"cpu_cores,omitempty" yaml:"cpu_cores,omitempty"`
+	MemoryGB     float64       `json:"memory_gb" yaml:"memory_gb"`
+	HostMemoryGB float64       `json:"host_memory_gb,omitempty" yaml:"host_memory_gb,omitempty"`
+	Platform     Platform      `json:"platform" yaml:"platform"`
+	Model        string        `json:"model,omitempty" yaml:"model,omitempty"`
 }
 
 type ExecutionSpec struct {

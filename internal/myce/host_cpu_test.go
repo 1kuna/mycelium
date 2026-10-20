@@ -238,7 +238,7 @@ func TestCPUDevGPUlessAndMixedWorkerRunRealCommand(t *testing.T) {
 			defer d.Close()
 			s := cpuSpec(1, .1)
 			s.SubmissionKey = "cpu-dev-" + backend
-			s.Run.Command = []string{"sh", "-c", `test "$MYCE_PLATFORM" = cpu && test "$MYCE_DEVICE" = cpu && test -z "$CUDA_VISIBLE_DEVICES" && test -z "$ONEAPI_DEVICE_SELECTOR" && test -z "$ZE_AFFINITY_MASK" && test -z "$MYCE_TOKEN"`}
+			s.Run.Command = []string{"sh", "-c", `test "$MYCE_PLATFORM" = cpu && test "$MYCE_DEVICE" = cpu && test -z "$CUDA_VISIBLE_DEVICES" && test "$ONEAPI_DEVICE_SELECTOR" = "!*:*" && test "$ZE_AFFINITY_MASK" = 2147483647 && test "$ZE_ENABLE_PCI_ID_DEVICE_ORDER" = 1 && test -z "$MYCE_TOKEN"`}
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 			j, err := d.Client().SubmitAndWait(ctx, s)

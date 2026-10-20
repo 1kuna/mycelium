@@ -23,7 +23,7 @@ func selectedDeviceEnv(platform, device string) map[string]string {
 
 func TestDeviceSelectionEnvironment(t *testing.T) {
 	for _, platform := range []string{"xpu", "cuda"} {
-		for _, device := range []string{"0", "1", "0,1"} {
+		for _, device := range []string{"0", "1"} {
 			t.Run(platform+"/"+device, func(t *testing.T) {
 				m, err := WithModelDevice(Model{}, platform, device)
 				if err != nil {
@@ -92,7 +92,7 @@ done
 	if err != nil || strings.TrimSpace(string(out)) != "" {
 		t.Fatalf("fake must reject index 1 after a one-card mask: %q %v", out, err)
 	}
-	for _, device := range []string{"0", "1", "0,1"} {
+	for _, device := range []string{"0", "1"} {
 		t.Run(device, func(t *testing.T) {
 			t.Setenv("ZE_AFFINITY_MASK", "1")
 			t.Setenv("ONEAPI_DEVICE_SELECTOR", "level_zero:1")
@@ -115,7 +115,7 @@ done
 
 func TestDeviceSelectionBatchEnvironment(t *testing.T) {
 	for _, platform := range []string{"xpu", "cuda"} {
-		for _, device := range []string{"0", "1", "0,1"} {
+		for _, device := range []string{"0", "1"} {
 			t.Run(platform+"/"+device, func(t *testing.T) {
 				w := recoveryWorker(t)
 				w.Machine.GPU, w.Machine.Device = platform, device
@@ -145,7 +145,7 @@ func TestDeviceSelectionBatchEnvironment(t *testing.T) {
 
 func TestDeviceSelectionDockerEnvironment(t *testing.T) {
 	for _, platform := range []string{"xpu", "cuda"} {
-		for _, device := range []string{"0", "1", "0,1"} {
+		for _, device := range []string{"0", "1"} {
 			t.Run(platform+"/"+device, func(t *testing.T) {
 				w, s, c, root := dockerFixture(t)
 				w.Machine.GPU, w.Machine.Device = platform, device
@@ -189,7 +189,7 @@ func TestDeviceSelectionDockerEnvironment(t *testing.T) {
 }
 
 func TestDeviceSelectionDockerSidecarEnvironment(t *testing.T) {
-	for _, device := range []string{"0", "1", "0,1"} {
+	for _, device := range []string{"0", "1"} {
 		t.Run(device, func(t *testing.T) {
 			w, s, c, root := dockerFixture(t)
 			w.Machine.GPU, w.Machine.Device = "xpu", device

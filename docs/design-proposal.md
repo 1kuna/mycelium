@@ -1100,6 +1100,36 @@ are excluded. They replace the previous package M estimates.
 | M3 | Enumerate (machine, device) targets using the existing per-target planner and host ledger; per-device engines/qualification, selectors, retired-name errors, job schema and machine status; enable queue concurrency. No vector-fitting planner. | 400–650; 650–1,000; 3–5 days | **`myce dev` multi-device scenario** through the real API/runner: concurrent GPU helpers, CPU backfill, independent cancellation, restart/replay and complete process/listener teardown. Fake-clock heterogeneous targets, same-card exclusion, shared RAM/unified debt, R1 victim usefulness/build hand-back and deterministic heuristic; new retired-name intent fails without changing keyed replay; count > 1 rejection; holds/maintenance, >2 planned stops, mixed-tier shortest loss timeout and bounded per-job infrastructure requeue, stale/missing reports and exact cleanup across restart. Check-in benchmark remains within R1's accepted 1.5× baseline gate on its scenario set. |
 | M4 | Transactional queue/config and worker conversion on b70 and spark, enable-set removal, rollback and operator docs; laptop migration first, separately accepted native window. | 250–450; 450–700; 3–4 days plus native window | Fake service-manager/filesystem tests for queue upgrade/restart, split→machine, Spark reconnect/upgrade, conflict/missing-source/queued-retired-name refusal, preserved roots/secrets/hotfix flags, one gpu0 cache root with other roots untouched, enable-set removal, injected failure at each mutation, rollback and idempotent redeploy. Native checklist above before hardware acceptance. |
 
+#### M2 implementation decisions
+
+- The one locked machine spool indexes independent exact-attempt state files.
+  Each uses the existing worker state and runner; reopen also scans those files
+  so a crash between child persistence and index persistence retains custody.
+  The old single-attempt state is adopted in place before new admission. Buffered
+  results keep their session until every recovered attempt is acknowledged.
+- Canonical IDs follow saved hardware identities across enumeration order changes.
+  A changed XPU ordinal, missing identity or changed fingerprint withholds that
+  saved component with `device_identity_mismatch`; discovery never substitutes
+  another card for it. The native probe uses NVIDIA UUID inventory and the
+  installed Level Zero API through Python's standard-library `ctypes`, with PCI
+  ordering forced in the probe and all members. Native qualification remains an
+  M4 gate; an unavailable or ambiguous runtime probe cannot authorize a launch.
+- CPU and unselected XPU controls are `ZE_AFFINITY_MASK=2147483647` and
+  `ONEAPI_DEVICE_SELECTOR=!*:*`; CUDA's select-none mask is the empty string.
+  Native CPU admission requires actual installed-runtime enumeration with these
+  masks. Metal has no qualified select-none control here, so native CPU work on
+  a Metal host is withheld with `cpu_accelerator_isolation_unavailable`.
+  `myce dev` and the protocol harness inject fake runtime visibility evidence,
+  alongside fake inventory, and still run real CPU payloads.
+- Until M3 enumerates placement targets, an inventory report projects one
+  component into the existing planner. Scalar GPU fields add no capacity. The
+  worker harness supplies explicit `allocated_devices` for concurrent jobs;
+  the real queue continues to admit one attempt per worker.
+- The queue refuses a second inventory-bearing machine identity on a live
+  physical host. The existing `myce dev` clock retains its synthetic shared-host
+  fixtures; this exception does not apply to an ordinary queue. Empty CPU
+  inventories remain explicit through JSON cloning and reporting.
+
 M2–M4 total: **1,350–2,200 production LOC; 2,000–3,100 test/doc LOC;
 11–16 engineer days**, excluding M1 and native access delays. M2 grows from
 3–4 to 5–7 days because singular execution pointers, durable spool formats and
