@@ -22,10 +22,12 @@ import (
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
-	InventoryProbe    func(context.Context) ([]MachineDevice, error)
-	CPUIsolationProbe func(context.Context) error
-	selectedDevice    *MachineDevice
-	cpuIsolation      bool
+	InventoryProbe     func(context.Context) ([]MachineDevice, error)
+	CPUIsolationProbe  func(context.Context) error
+	selectedDevice     *MachineDevice
+	cpuIsolation       bool
+	inventoryAllowance []string
+	inventoryReason    string
 	// Benchmark runs only when explicitly enabled; fake inventory never loads the host.
 	OnboardingBenchmark   bool
 	Benchmark             func(context.Context, BenchmarkConfig, *CapabilityProfile) error
@@ -690,10 +692,10 @@ func (w Worker) replay(ctx context.Context, s *workerStore) error {
 	return nil
 }
 func (w Worker) Run(stop context.Context) error {
-	if err := singleDeviceMask(w.Machine.Device); err != nil {
+	if _, err := deviceAllowance(w.Machine.Device); err != nil {
 		return err
 	}
-	if err := singleDeviceMask(w.DeviceBinding); err != nil {
+	if _, err := deviceAllowance(w.DeviceBinding); err != nil {
 		return err
 	}
 	if w.Interval <= 0 {
@@ -705,8 +707,8 @@ func (w Worker) Run(stop context.Context) error {
 	if w.Machine.MaxJobs < 0 {
 		return errors.New("max-jobs must be nonnegative")
 	}
-	if w.Machine.ID == "" || !validGPU(w.Machine.GPU) || (w.Machine.GPU != "cpu" && w.MemorySource == nil && (!validMemoryValue(w.Machine.FreeMemoryGB) || w.Machine.FreeMemoryGB <= 0)) {
-		return errors.New("worker requires a name, GPU platform and positive free-memory budget")
+	if w.Machine.ID == "" || !validGPU(w.Machine.GPU) || !validMemoryValue(w.Machine.FreeMemoryGB) {
+		return errors.New("worker requires a name, GPU platform and finite nonnegative memory budget")
 	}
 	retention := DefaultContainerRetention
 	if w.ContainerRetention != nil {

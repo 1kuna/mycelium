@@ -207,11 +207,17 @@ func parseCUDAFreeMemory(output []byte) (float64, error) {
 // NewDeviceMemorySource binds dedicated CUDA probes to the worker's device.
 // XPU admission remains an explicit fixed budget until a live driver query is qualified.
 func NewDeviceMemorySource(platform, device string, budget, reserve float64, mode string) (MemorySource, error) {
-	return newMemorySource(platform, budget, reserve, mode, runtime.GOOS, os.ReadFile, func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return newDeviceMemorySource(platform, device, budget, reserve, mode, runtime.GOOS, os.ReadFile, func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		return exec.CommandContext(ctx, name, args...).Output()
+	})
+}
+
+func newDeviceMemorySource(platform, device string, budget, reserve float64, mode, goos string, readFile func(string) ([]byte, error), command func(context.Context, string, ...string) ([]byte, error)) (MemorySource, error) {
+	return newMemorySource(platform, budget, reserve, mode, goos, readFile, func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		if name == "nvidia-smi" && device != "" {
 			args = append(args, "--id="+device)
 		}
-		return exec.CommandContext(ctx, name, args...).Output()
+		return command(ctx, name, args...)
 	})
 }
 

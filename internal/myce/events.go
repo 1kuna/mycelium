@@ -26,6 +26,7 @@ func (a API) workerEvent(w http.ResponseWriter, r *http.Request) {
 		a.Queue.mu.Lock()
 		wake := a.Queue.wake
 		var event WorkerEvent
+		// M3: return all stopping attempts; this legacy event path selects only one.
 		for _, j := range a.Queue.s.Jobs {
 			if j.Machine == r.PathValue("id") && j.Session == r.URL.Query().Get("session") && (j.State == "stopping" || terminal(j.State) && !j.ReleaseConfirmed) && j.StopAt != nil {
 				deadline := *j.StopAt

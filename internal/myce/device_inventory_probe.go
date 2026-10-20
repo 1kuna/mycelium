@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -22,11 +24,14 @@ func (p MachineProbe) Accelerators(ctx context.Context) ([]MachineDevice, error)
 		return []MachineDevice{{ID: "0", Platform: "metal", Identity: d.GPU, Selector: "0", Fingerprint: d.GPU}}, nil
 	}
 	b, err := p.Command(ctx, "nvidia-smi", "--query-gpu=uuid,driver_version", "--format=csv,noheader,nounits")
-	if err == nil {
+	if err != nil && !errors.Is(err, exec.ErrNotFound) && !errors.Is(err, os.ErrNotExist) {
+		return nil, reject("device_probe_unavailable", errors.New("CUDA inventory probe unavailable"))
+	}
+	if err == nil && strings.TrimSpace(string(b)) != "" {
 		for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
 			uuid, driver, ok := strings.Cut(line, ",")
 			if !ok || !strings.HasPrefix(strings.TrimSpace(uuid), "GPU-") {
-				return nil, errors.New("invalid CUDA UUID inventory")
+				return nil, reject("device_probe_unavailable", errors.New("invalid CUDA UUID inventory"))
 			}
 			uuid = strings.TrimSpace(uuid)
 			out = append(out, MachineDevice{Platform: "cuda", Identity: uuid, Selector: uuid, Fingerprint: strings.TrimSpace(driver)})
@@ -35,18 +40,18 @@ func (p MachineProbe) Accelerators(ctx context.Context) ([]MachineDevice, error)
 	nodes, _ := filepath.Glob("/dev/dri/renderD*")
 	if len(nodes) > 0 {
 		if p.CommandEnv == nil {
-			return nil, errors.New("Level Zero inventory requires a private environment runner")
+			return nil, reject("device_probe_unavailable", errors.New("Level Zero inventory requires a private environment runner"))
 		}
 		b, err = p.CommandEnv(ctx, map[string]string{"ZE_ENABLE_PCI_ID_DEVICE_ORDER": "1", "ZE_AFFINITY_MASK": "", "ONEAPI_DEVICE_SELECTOR": ""}, "python3", "-c", levelZeroInventory)
 		if err != nil {
-			return nil, reject("device_identity_mismatch", errors.New("cannot enumerate Level Zero UUIDs in runtime order"))
+			return nil, reject("device_probe_unavailable", errors.New("cannot enumerate Level Zero UUIDs in runtime order"))
 		}
 		var devices []struct {
 			Identity    string `json:"identity"`
 			Fingerprint string `json:"fingerprint"`
 		}
 		if err = json.Unmarshal(b, &devices); err != nil {
-			return nil, fmt.Errorf("Level Zero inventory: %w", err)
+			return nil, reject("device_probe_unavailable", fmt.Errorf("Level Zero inventory: %w", err))
 		}
 		for i, d := range devices {
 			out = append(out, MachineDevice{Platform: "xpu", Identity: d.Identity, Selector: strconv.Itoa(i), Fingerprint: d.Fingerprint})

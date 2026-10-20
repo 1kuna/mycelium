@@ -392,12 +392,15 @@ func readSingleAttemptState(path string) ([]byte, error) {
 	}
 	var st workerState
 	if err = json.Unmarshal(data, &st); err != nil {
+		return nil, err
+	}
+	if st.Job != nil {
 		return data, nil
 	}
-	if st.Job == nil && len(st.Attempts) == 1 {
-		return os.ReadFile(filepath.Join(filepath.Dir(path), st.Attempts[0]))
+	if len(st.Attempts) != 1 {
+		return nil, fmt.Errorf("expected exactly one attempt, got %d", len(st.Attempts))
 	}
-	return data, nil
+	return os.ReadFile(filepath.Join(filepath.Dir(path), st.Attempts[0]))
 }
 
 func TestMachineWorkerSlowReadinessNeighborControls(t *testing.T) {
@@ -469,16 +472,25 @@ func TestMachineWorkerUnsupportedMasksBeforeLaunch(t *testing.T) {
 			t.Fatalf("missing typed multi-device refusal: %v", err)
 		}
 	}
-	check((ServiceConfig{Device: "0,1"}).ValidateInstall())
-	_, err := (MachineProbe{}).DetectDevice(context.Background(), "0,1")
+	config, err := PlanInstall("worker", "/fixture/home", "", "/fixture/nas", "http://queue.invalid", "fixture", Detection{OS: "linux", Arch: "amd64", Platform: "fake", MemoryMode: "fixed", MemoryGB: 8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.Device = "0,1"
+	if err := config.ValidateInstall(); err != nil {
+		t.Fatalf("worker inventory allowance rejected: %v", err)
+	}
+	_, err = (MachineProbe{}).DetectDevice(context.Background(), "0,1")
 	check(err)
 	c := ModelConfig{Idle: time.Minute, Wait: time.Minute, Models: []Model{{Device: "0,1"}}}
 	check(validateModels(c))
 	c.Models[0].Device = ""
 	c.Models[0].DeviceEnv = map[string]string{"ONEAPI_DEVICE_SELECTOR": "level_zero:0,1"}
 	check(validateModels(c))
-	w := Worker{Machine: Machine{Device: "0,1"}}
-	check(w.Run(context.Background()))
+	w := Worker{Machine: Machine{Device: "0,0"}}
+	if err := w.Run(context.Background()); !errors.As(err, &rule) || rule.code != "gpu_selector_invalid" {
+		t.Fatalf("duplicate inventory selectors accepted: %v", err)
+	}
 	q, _ := fixture(t)
 	server := httptest.NewServer(API{q, "test"}.Handler())
 	defer server.Close()

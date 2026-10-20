@@ -13,6 +13,9 @@ import (
 // Stable rejection codes and default messages. Submission validation returns
 // the specific field rule; other wrapped causes stay local.
 var rejectionMessages = map[string]string{
+	"device_probe_unavailable":              "accelerator inventory probe unavailable; CPU work remains available with qualified select-none visibility",
+	"device_budget_unavailable":             "accelerator memory budget unavailable",
+	"machine_worker_conflict":               "physical host already has a machine worker; run one machine worker per host; see M4 install conversion",
 	"gpu_count_unsupported":                 "only one GPU per attempt is supported; see #105",
 	"gpu_selector_invalid":                  "GPU count must be a positive integer",
 	"device_identity_mismatch":              "device runtime mapping does not match saved identity",

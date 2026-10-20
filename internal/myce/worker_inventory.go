@@ -78,32 +78,41 @@ func (d MachineDevice) machine(base Machine) Machine {
 	return base
 }
 
+// A worker allowance can include several cards; each attempt still gets one.
+func deviceAllowance(value string) ([]string, error) {
+	if value == "" {
+		return nil, nil
+	}
+	out := []string{}
+	for _, selector := range strings.Split(value, ",") {
+		selector = strings.TrimSpace(selector)
+		if selector == "" || strings.ContainsAny(selector, ";\r\n") || slices.Contains(out, selector) {
+			return nil, reject("gpu_selector_invalid", errors.New("device allowance requires distinct nonempty selectors"))
+		}
+		out = append(out, selector)
+	}
+	return out, nil
+}
+
 func (w *Worker) initInventory(ctx context.Context, s *workerStore) error {
-	if err := singleDeviceMask(w.Machine.Device); err != nil {
+	var err error
+	w.inventoryAllowance, err = deviceAllowance(w.Machine.Device)
+	if err != nil {
 		return err
 	}
 	if w.InventoryProbe == nil {
 		if w.Machine.GPU == "fake" {
-			w.InventoryProbe = func(context.Context) ([]MachineDevice, error) {
-				return []MachineDevice{{ID: "0", Platform: "fake", Identity: "fake-0", Fingerprint: "fake", Selector: "0", MemoryMode: "fixed", TotalMemoryGB: w.Machine.FreeMemoryGB, BudgetGB: w.Machine.FreeMemoryGB, FreeMemoryGB: w.Machine.FreeMemoryGB}}, nil
-			}
+			d := MachineDevice{ID: "0", Platform: "fake", Identity: "fake-0", Fingerprint: "fake", Selector: "0", MemoryMode: "fixed", TotalMemoryGB: w.Machine.FreeMemoryGB, BudgetGB: w.Machine.FreeMemoryGB, FreeMemoryGB: w.Machine.FreeMemoryGB}
+			w.InventoryProbe = func(context.Context) ([]MachineDevice, error) { return []MachineDevice{d}, nil }
 		} else {
+			// Capture operator configuration before any scalar device projection.
 			w.InventoryProbe = w.localInventory
 		}
 	}
 	devices := slices.Clone(w.Machine.Devices)
+	var probeErr error
 	if devices == nil {
-		var err error
-		devices, err = w.InventoryProbe(ctx)
-		if err != nil {
-			return err
-		}
-	}
-	if devices == nil {
-		devices = []MachineDevice{}
-	}
-	if err := validateInventory(devices); err != nil {
-		return err
+		devices, probeErr = w.InventoryProbe(ctx)
 	}
 	var previous []MachineDevice
 	data, err := os.ReadFile(filepath.Join(s.dir, "devices.json"))
@@ -117,31 +126,82 @@ func (w *Worker) initInventory(ctx context.Context, s *workerStore) error {
 	if err := validateInventory(previous); err != nil {
 		return err
 	}
-	devices = reconcileDevices(previous, devices)
-	if err := validateInventory(devices); err != nil {
+	w.Machine.Devices = previous
+	if err := w.refreshInventory(devices, probeErr, s); err != nil {
 		return err
 	}
-	for i := range devices {
-		d := &devices[i]
-		if d.BudgetGB <= 0 || d.Fingerprint == "" {
-			d.Reason = "device_identity_mismatch"
-		}
-		if d.CapabilityProfile == nil {
-			m := d.machine(w.Machine)
-			profile := LocalProfileProbe().Detect(ctx, m, s.dir, w.Clock.Now())
-			applyFixedAcceleratorMemory(&profile, m, d.MemoryMode == "fixed")
-			d.CapabilityProfile = &profile
-		}
-	}
-	w.Machine.Devices = devices
-	for _, d := range devices {
-		if w.Machine.Device == "" || w.Machine.Device == d.ID || w.DeviceBinding == d.Selector {
+	for _, d := range w.Machine.Devices {
+		if d.Reason == "" {
 			w.Machine = d.machine(w.Machine)
 			w.DeviceBinding = d.Selector
 			break
 		}
 	}
-	return saveWorkerJSON(s.dir, "devices.json", devices)
+	return nil
+}
+
+// Probe health is current evidence, never durable identity. Persist the saved
+// mapping, but recompute all withholding on every observation (including reopen).
+func (w *Worker) refreshInventory(observed []MachineDevice, probeErr error, s *workerStore) error {
+	if probeErr == nil {
+		probeErr = validateInventory(observed)
+	}
+	w.inventoryReason = ""
+	var devices []MachineDevice
+	if probeErr != nil || len(observed) == 0 && w.Machine.GPU != "cpu" {
+		w.inventoryReason = "device_probe_unavailable"
+		devices = slices.Clone(w.Machine.Devices)
+		for i := range devices {
+			devices[i].Reason = w.inventoryReason
+			devices[i].FreeMemoryGB = 0
+		}
+	} else {
+		devices = reconcileDevices(w.Machine.Devices, observed)
+	}
+	devices = slices.DeleteFunc(devices, func(d MachineDevice) bool {
+		if len(w.inventoryAllowance) == 0 {
+			return false
+		}
+		return !slices.ContainsFunc(w.inventoryAllowance, func(selector string) bool {
+			if canonicalDeviceID(selector) {
+				return selector == d.ID
+			}
+			return selector == d.Identity || selector == d.Selector
+		})
+	})
+	if devices == nil {
+		devices = []MachineDevice{}
+	}
+	if len(devices) == 0 && len(w.inventoryAllowance) > 0 && w.Machine.GPU != "cpu" {
+		w.inventoryReason = "device_probe_unavailable"
+	}
+	for i := range devices {
+		d := &devices[i]
+		if d.UnifiedMemory && d.MemoryMeasured && d.BudgetGB == 0 && d.Reason == "" {
+			d.BudgetGB = d.FreeMemoryGB
+		}
+		if d.BudgetGB <= 0 && d.Reason == "" {
+			d.Reason = "device_budget_unavailable"
+		}
+		if d.CapabilityProfile == nil {
+			m := d.machine(w.Machine)
+			profile := LocalProfileProbe().Detect(context.Background(), m, s.dir, w.Clock.Now())
+			applyFixedAcceleratorMemory(&profile, m, d.MemoryMode == "fixed")
+			d.CapabilityProfile = &profile
+		}
+	}
+	if err := validateInventory(devices); err != nil {
+		return err
+	}
+	if !slices.EqualFunc(w.Machine.Devices, devices, func(a, b MachineDevice) bool {
+		return a.ID == b.ID && a.Identity == b.Identity && a.Selector == b.Selector && a.Reason == b.Reason && a.BudgetGB == b.BudgetGB && a.Fingerprint == b.Fingerprint
+	}) {
+		if err := saveWorkerJSON(s.dir, "devices.json", devices); err != nil {
+			return err
+		}
+	}
+	w.Machine.Devices = devices
+	return nil
 }
 
 // Verify both the full physical mapping and the selected runtime view before
@@ -167,11 +227,17 @@ func (w Worker) verifyDevice() error {
 	expected := *w.selectedDevice
 	matches := 0
 	for _, d := range devices {
-		if d.Platform == expected.Platform && d.Selector == expected.Selector && d.Identity == expected.Identity && d.Fingerprint == expected.Fingerprint {
+		if d.Platform == expected.Platform && d.Selector == expected.Selector && d.Identity == expected.Identity {
 			matches++
 		}
 	}
-	if err != nil || matches != 1 || expected.Reason != "" {
+	if err != nil {
+		return reject("device_probe_unavailable", errors.New("device inventory probe unavailable before launch"))
+	}
+	if expected.Reason != "" {
+		return reject(expected.Reason, errors.New(rejectionMessages[expected.Reason]))
+	}
+	if matches != 1 {
 		return reject("device_identity_mismatch", errors.New("device runtime mapping no longer matches saved identity"))
 	}
 	return nil
@@ -212,15 +278,19 @@ func (w Worker) forAttempt(j Job) (Worker, error) {
 		w.selectedDevice = &d
 		w.Machine = d.machine(w.Machine)
 		w.DeviceBinding = d.Selector
-		source, err := NewDeviceMemorySource(d.Platform, d.Selector, d.BudgetGB, 0, d.MemoryMode)
+		if err := w.verifyDevice(); err != nil {
+			return w, err
+		}
+		budget, reserve := d.BudgetGB, 0.0
+		if d.UnifiedMemory {
+			budget, reserve = d.BudgetGB+d.ReserveMemoryGB, d.ReserveMemoryGB
+		}
+		source, err := NewDeviceMemorySource(d.Platform, d.Selector, budget, reserve, d.MemoryMode)
 		if err != nil {
 			return w, err
 		}
 		if d.Platform != "fake" || len(w.Machine.Devices) != 1 || w.MemorySource == nil {
 			w.MemorySource, w.MemoryMeasured = source, d.MemoryMeasured
-		}
-		if err := w.verifyDevice(); err != nil {
-			return w, err
 		}
 		return w, nil
 	}
@@ -272,10 +342,13 @@ func (w Worker) verifyCPUIsolation() error {
 }
 
 func (w Worker) localInventory(ctx context.Context) ([]MachineDevice, error) {
+	return w.localInventoryWithProbe(ctx, LocalMachineProbe())
+}
+
+func (w Worker) localInventoryWithProbe(ctx context.Context, probe MachineProbe) ([]MachineDevice, error) {
 	if w.Machine.GPU == "cpu" {
 		return []MachineDevice{}, nil
 	}
-	probe := LocalMachineProbe()
 	physical, err := probe.Accelerators(ctx)
 	if err != nil {
 		return nil, err
@@ -309,9 +382,18 @@ func (w Worker) localInventory(ctx context.Context) ([]MachineDevice, error) {
 		}
 		d.UnifiedMemory = d.MemoryMode == "unified"
 		if d.UnifiedMemory {
-			d.BudgetGB = w.Machine.FreeMemoryGB
+			// Zero is an uncapped measured allowance, as on GB10 and Metal.
+			d.BudgetGB = max(0, w.Machine.FreeMemoryGB-d.ReserveMemoryGB)
 		}
-		source, e := NewDeviceMemorySource(d.Platform, d.Selector, d.BudgetGB, 0, d.MemoryMode)
+		budget, reserve := d.BudgetGB, 0.0
+		if d.UnifiedMemory {
+			budget, reserve = w.Machine.FreeMemoryGB, d.ReserveMemoryGB
+		}
+		if d.MemoryMode == "fixed" && budget <= 0 {
+			d.Reason = "device_budget_unavailable"
+			continue
+		}
+		source, e := newDeviceMemorySource(d.Platform, d.Selector, budget, reserve, d.MemoryMode, probe.OS, os.ReadFile, probe.Command)
 		if e != nil {
 			return nil, e
 		}
@@ -321,6 +403,9 @@ func (w Worker) localInventory(ctx context.Context) ([]MachineDevice, error) {
 			d.FreeMemoryGB = 0
 		}
 		d.MemoryMeasured = d.MemoryMode != "fixed" && d.Platform != "fake"
+		if d.UnifiedMemory && w.Machine.FreeMemoryGB == 0 {
+			d.BudgetGB = d.FreeMemoryGB
+		}
 	}
 	return physical, nil
 }
@@ -344,6 +429,9 @@ func inventoryTarget(m *Machine) error {
 	// an empty inventory still contributes no accelerator capacity.
 	if m.GPU != "cpu" {
 		m.Device = ""
+	}
+	if len(m.Devices) > 0 {
+		m.MemoryError = m.Devices[0].Reason
 	}
 	m.GPU, m.TotalMemoryGB, m.FreeMemoryGB = "cpu", 0, 0
 	return nil
@@ -373,7 +461,10 @@ func reconcileDevices(previous, current []MachineDevice) []MachineDevice {
 			found = true
 			matched[i] = true
 			d.ID = old.ID
-			if old.Reason == "device_identity_mismatch" || d.Fingerprint != old.Fingerprint || d.Selector != old.Selector {
+			if d.CapabilityProfile == nil && d.Fingerprint == old.Fingerprint {
+				d.CapabilityProfile = old.CapabilityProfile
+			}
+			if d.Selector != old.Selector {
 				old.Reason = "device_identity_mismatch"
 				d = old
 			}
@@ -389,14 +480,9 @@ func reconcileDevices(previous, current []MachineDevice) []MachineDevice {
 		if matched[i] {
 			continue
 		}
-		if used[d.ID] {
-			for n := 0; ; n++ {
-				id := strconv.Itoa(n)
-				if !used[id] {
-					d.ID = id
-					break
-				}
-			}
+		// A replacement at an owned ordinal/ID cannot become a new target.
+		if used[d.ID] || slices.ContainsFunc(previous, func(old MachineDevice) bool { return old.Platform == d.Platform && old.Selector == d.Selector }) {
+			continue
 		}
 		used[d.ID] = true
 		out = append(out, d)

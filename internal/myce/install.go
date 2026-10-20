@@ -569,7 +569,7 @@ func ReadServiceConfig(path string) (ServiceConfig, error) {
 	}{ServiceConfig: &c}
 	e = decoder.Decode(&legacy)
 	if e == nil {
-		e = singleDeviceMask(c.Device)
+		_, e = deviceAllowance(c.Device)
 	}
 	if e == nil && (c.Version < 0 || c.Version > 1) {
 		return c, errors.New("unsupported installed config version")

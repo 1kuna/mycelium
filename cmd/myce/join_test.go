@@ -62,6 +62,29 @@ func TestJoinDetectionPreservesExplicitOptions(t *testing.T) {
 	}
 }
 
+func TestJoinMachineDeviceAllowance(t *testing.T) {
+	for _, selection := range []string{"", "0,1", "1"} {
+		t.Run("selection="+selection, func(t *testing.T) {
+			p := myce.MachineProbe{OS: "linux", Arch: "amd64", Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
+				if name != "nvidia-smi" {
+					return nil, errors.New("absent")
+				}
+				if strings.Contains(strings.Join(args, " "), "--query-gpu=uuid,driver_version") {
+					return []byte("GPU-a, driver\nGPU-b, driver"), nil
+				}
+				if strings.Contains(strings.Join(args, " "), "--id=") {
+					return []byte("RTX, 8192"), nil
+				}
+				return []byte("RTX, 8192\nRTX, 8192"), nil
+			}}
+			got, err := detectJoinGPU(context.Background(), p, joinGPUOptions{device: selection, mode: "auto"}, nil)
+			if err != nil || got.platform != "cuda" || got.device != selection {
+				t.Fatalf("allowance narrowed or rejected: %+v %v", got, err)
+			}
+		})
+	}
+}
+
 func TestJoinNoGPUOffersCPUWithoutContactingQueue(t *testing.T) {
 	t.Setenv("MYCE_TOKEN", "test-only-token")
 	for _, tc := range []struct{ os, arch string }{{"linux", "amd64"}, {"darwin", "amd64"}, {"darwin", "arm64"}} {

@@ -697,7 +697,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		if _, simulated := q.clock.(*devClock); m.Devices != nil && !simulated {
 			for _, owner := range q.s.Machines {
 				if owner.ID != m.ID && owner.Devices != nil && !owner.Gone && hostID(owner) == hostID(&m) {
-					return errors.New("physical host already has a machine worker; reuse its machine identity and spool")
+					return &HTTPError{Status: 409, Code: "machine_worker_conflict", Message: rejectionMessages["machine_worker_conflict"]}
 				}
 			}
 		}

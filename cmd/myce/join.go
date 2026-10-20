@@ -34,7 +34,16 @@ func detectJoinGPU(ctx context.Context, probe myce.MachineProbe, options joinGPU
 			return command(ctx, env, name, args...)
 		}
 	}
-	d, err := probe.DetectDevice(ctx, options.device)
+	selector := strings.TrimSpace(strings.Split(options.device, ",")[0])
+	d, err := probe.DetectDevice(ctx, selector)
+	if err != nil && err.Error() == "automatic setup requires exactly one GPU" {
+		// Detect a representative card without narrowing the offered inventory.
+		var devices []myce.MachineDevice
+		devices, err = probe.Accelerators(ctx)
+		if err == nil && len(devices) > 0 {
+			d, err = probe.DetectDevice(ctx, devices[0].Selector)
+		}
+	}
 	if errors.Is(err, myce.ErrNoGPU) {
 		fmt.Fprintln(os.Stderr, cpuFallbackNotice)
 		options.platform, options.mode, options.memory, options.reserve = "cpu", "fixed", 0, 0

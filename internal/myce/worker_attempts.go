@@ -552,25 +552,11 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			m.DockerCleanup, m.DockerCause = diagnostics.DockerCleanup, diagnostics.DockerCause
 			m.FileTransferError = diagnostics.FileTransferError
 			probeInventory := w.InventoryProbe
-			if observed, e := root.inventory.run("devices", func() ([]MachineDevice, error) { return probeInventory(ctx) }); e == nil && validateInventory(observed) == nil {
-				updated := reconcileDevices(w.Machine.Devices, observed)
-				nextDevices := slices.Clone(w.Machine.Devices)
-				// Discovery cannot introduce new targets after startup; only explicit reopen does.
-				for i := range nextDevices {
-					for _, d := range updated {
-						if nextDevices[i].ID == d.ID {
-							if d.Reason == "device_identity_mismatch" {
-								nextDevices[i].Reason = d.Reason
-							}
-							if nextDevices[i].MemoryMode != "fixed" {
-								nextDevices[i].FreeMemoryGB = min(d.FreeMemoryGB, nextDevices[i].BudgetGB)
-							}
-						}
-					}
-				}
-				w.Machine.Devices = nextDevices
-				m.Devices = slices.Clone(nextDevices)
+			observed, probeErr := root.inventory.run("devices", func() ([]MachineDevice, error) { return probeInventory(ctx) })
+			if err := w.refreshInventory(observed, probeErr, root); err != nil {
+				return err
 			}
+			m.Devices = slices.Clone(w.Machine.Devices)
 			m.Leaving = leaving
 			m.FreeMemoryGB = base
 			m.TotalMemoryGB = base
@@ -591,9 +577,15 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			if len(m.Devices) == 1 && m.Devices[0].Platform == "fake" {
 				m.Devices[0].FreeMemoryGB = m.FreeMemoryGB
 				m.Devices[0].MemoryMeasured = m.MemoryMeasured
-				if m.Devices[0].Reason != "device_identity_mismatch" {
+				if m.Devices[0].Reason == "" || m.Devices[0].Reason == m.MemoryError {
 					m.Devices[0].Reason = m.MemoryError
+					if m.MemoryMeasured {
+						m.Devices[0].BudgetGB, m.Devices[0].TotalMemoryGB = m.FreeMemoryGB, m.FreeMemoryGB
+					}
 				}
+			}
+			if len(m.Devices) == 0 && w.inventoryReason != "" {
+				m.MemoryError = w.inventoryReason
 			}
 			if !w.MemoryMeasured {
 				m.FreeMemoryGB = max(0, m.FreeMemoryGB-batch)
@@ -785,7 +777,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 					a.update(w, AttemptDirective{}, false)
 				}
 				var he *HTTPError
-				if errors.As(err, &he) && (he.Status == 400 || he.Status == 401 || he.Status == 426) {
+				if errors.As(err, &he) && (he.Status == 400 || he.Status == 401 || he.Status == 426 || he.Code == "machine_worker_conflict") {
 					return err
 				}
 				log.Printf("worker %s reconnecting: %v", m.ID, err)

@@ -165,9 +165,7 @@ func TestUnifiedProbeFailureStatusAndRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	m := machine("unified", "fake")
-	m.FreeMemoryGB = 80 // Match the injected 96 GiB source minus its 16 GiB reserve.
-	w := Worker{StateDir: newTestStateRoot(t), Client: Client{URL: server.URL, Token: "test"}, Machine: m, MemorySource: source, MemoryMeasured: true, Interval: time.Millisecond}
+	w := Worker{StateDir: newTestStateRoot(t), Client: Client{URL: server.URL, Token: "test"}, Machine: machine("unified", "fake"), MemorySource: source, MemoryMeasured: true, Interval: time.Millisecond}
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
 	t.Cleanup(func() {

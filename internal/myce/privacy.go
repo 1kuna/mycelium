@@ -14,6 +14,15 @@ func diagnostic(value, message string) string {
 	return message
 }
 
+func deviceReasonDiagnostic(reason string) string {
+	switch reason {
+	case "device_identity_mismatch", "device_probe_unavailable", "device_budget_unavailable", "device_memory_unavailable":
+		return reason
+	default:
+		return diagnostic(reason, "memory probe failed")
+	}
+}
+
 func (q *Queue) publicSnapshot() (Snapshot, error) {
 	s, err := q.snapshot(true)
 	for i := range s.LoadedModels {
@@ -52,7 +61,10 @@ func (q *Queue) publicSnapshot() (Snapshot, error) {
 		}
 		m.MemoryEnforcement = memoryEnforcementDiagnostic(m.MemoryEnforcement)
 		m.HostMemoryError = diagnostic(m.HostMemoryError, "host memory probe failed")
-		m.MemoryError = diagnostic(m.MemoryError, "memory probe failed")
+		m.MemoryError = deviceReasonDiagnostic(m.MemoryError)
+		for i := range m.Devices {
+			m.Devices[i].Reason = deviceReasonDiagnostic(m.Devices[i].Reason)
+		}
 		m.FileTransferError = diagnostic(m.FileTransferError, "file transfer pending; only published progress is available elsewhere")
 		m.CacheError = diagnostic(m.CacheError, "cache operation failed")
 		m.DockerCause = safeRuntimeCause(m.DockerCause)

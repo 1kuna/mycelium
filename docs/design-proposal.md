@@ -609,15 +609,26 @@ A machine has one durable ID (`b70` in examples), equal to its physical
 `host_id`, one live worker session and one spool/lock. A second machine worker
 for the same host is refused; a reconnect uses the existing session/recovery
 fences. Each device inventory entry has a host-local string ID (`"0"`, `"1"`),
-platform, hardware/driver fingerprint, runtime selector, memory mode, total,
+platform, hardware identity, informational driver/name fingerprint, runtime
+selector, memory mode, total,
 reserve, effective budget and measured/free-memory evidence. IDs are persisted
 against hardware identity, not silently reassigned when discovery order changes.
-For XPU, that identity is the PCI BDF or Level Zero UUID. The worker forces
+Identity is the PCI BDF, Level Zero UUID or CUDA UUID; driver version and
+name are informational and never decide whether the hardware identity matches.
+For XPU, use the PCI BDF or Level Zero UUID. The worker forces
 `ZE_ENABLE_PCI_ID_DEVICE_ORDER=1` before its own discovery and in every launched
 member, including engines, helpers and containers. Re-verify the runtime
 ordinal-to-identity mapping at every worker start and before each member start;
 a mismatch or ambiguity withholds that device with typed reason
-`device_identity_mismatch` until explicitly reconciled and qualified. Its old
+`device_identity_mismatch` while the mapping differs. A probe error or empty
+startup probe uses `device_probe_unavailable`, withholding accelerators without
+stopping CPU work whose select-none visibility is qualified. Re-evaluate every
+probe: a matching saved identity restores the device, even after restart; a
+persisted reason never outlives its condition. A true replacement at a saved
+ordinal stays withheld while it differs. To accept a replacement deliberately,
+drain/stop and settle the old worker's custody, preserve its spool, inspect the
+new mapping and re-run install/`myce join` with a fresh spool (`--state-dir`) to
+record that hardware identity. Requalify before reopening admission. Its old
 obligations remain. CUDA already binds by UUID through `DeviceBinding`; preserve
 that binding rather than launching against an unverified discovery ordinal.
 Mixed-platform inventory is valid. CPU-only hosts have an empty GPU inventory,
@@ -630,7 +641,16 @@ operator's `--memory-mode fixed` / `--memory-gb` budget and reserve, including
 capability and free-memory reports. It never substitutes host RAM, sums two
 cards into one capacity, or overwrites a fixed budget with unreliable live XPU
 telemetry. Unknown mandatory facts withhold work on the affected component.
+On unified devices (GB10/Metal included), `--memory-gb 0` uses measured memory
+for capacity; a nonzero operator allowance caps it, and live telemetry and the
+reserve still apply below that cap. Missing capacity/budget uses
+`device_budget_unavailable`, never `device_identity_mismatch`.
 Shared CPU/RAM facts and participation policy are sampled once per machine.
+
+A worker's comma-separated `--device` allowance restricts inventory to exactly
+those cards: unlisted cards are never reported or allocated. Omitted means all
+cards. This machine-wide allowance may contain multiple cards while each
+attempt retains its one-card bound.
 
 R1's queue-owned host ledger remains authoritative. Every allocation contains
 host cores, host RAM and zero or one selected GPU with its VRAM charge in M.
@@ -817,10 +837,12 @@ a GPU selector on CPU-only work return HTTP 400 `gpu_selector_invalid`.
 
 **Count greater than one is rejected in M**, at admission with HTTP 400
 `gpu_count_unsupported`, including extension-resolved requests and model/server
-configuration selecting multiple cards. Existing worker or model masks such
-as `0,1`, including `WithModelDevice` inputs, fail with typed
-`gpu_count_unsupported` at install/config load, before any process starts;
-M4 must not silently split or truncate them. There is no partial reservation
+configuration selecting multiple cards for one execution. Model/attempt masks
+such as `0,1`, including `WithModelDevice` inputs, fail with typed
+`gpu_count_unsupported` at config load, before any process starts. A worker's
+`--device 0,1` instead offers two independently selectable components; it does
+not request a multi-card execution. M4 must preserve that distinction. There is no
+partial reservation
 or silent reduction. Existing jobs with no `needs.gpu` retain one-device
 behavior. One-host multi-GPU requests and vector fitting are deferred to
 [#105](https://github.com/1kuna/mycelium/issues/105), which must define collective
@@ -917,6 +939,13 @@ inventory rather than create a new hypha. The existing per-device memory,
 reserve and selector settings become entries in the saved machine config;
 host policy stays host-wide. No automatic GPU driver, service or host changes
 are authorized by this spec.
+
+**Deploy gate:** do not deploy the M2 binary to the current split per-GPU fleet
+workers before this M4 conversion. The queue refuses another inventory-reporting
+machine identity on the same physical host with HTTP 409
+`machine_worker_conflict`: "run one machine worker per host; see M4 install
+conversion". A queue-first upgrade does not authorize upgrading split workers;
+convert their units/config/spools under the maintenance gates below.
 
 Extend the current installer transaction rather than add a migration daemon.
 For an existing split install, use a destination `--config MACHINE_CONFIG` and
@@ -1046,7 +1075,11 @@ reopens ordinary submissions and resumes both hosts. These checks are unrun by M
   `ZE_ENABLE_PCI_ID_DEVICE_ORDER=1` in worker and members, unchanged fixed
   per-device budgets, one b70 worker process/unit and one CPU/RAM allowance.
   Exercise a mapping mismatch and require `device_identity_mismatch` with no
-  start on that device; verify the mapping again after restart.
+  start on that device; verify the mapping again after restart. Exercise a
+  transient and an empty startup probe, then matching-identity recovery, plus a
+  driver-version/name update that does not withhold the same hardware. A Level
+  Zero probe failure at startup must report `device_probe_unavailable` and allow
+  qualified CPU work while withholding accelerators.
 - Run two small GPU jobs concurrently, one on each XPU, including a native
   sidecar in each. Inspect actual device visibility/allocation: main and helper
   see only their assigned card as in-job device 0. Test an optional card selector;
@@ -1056,14 +1089,20 @@ reopens ordinary submissions and resumes both hosts. These checks are unrun by M
   APIs: require **zero accelerators**, an empty `CUDA_VISIBLE_DEVICES`, effective
   select-none `ZE_AFFINITY_MASK` and `ONEAPI_DEVICE_SELECTOR`, and forced PCI
   ordering. Empty/unset environment checks alone do not pass. Repeat on Spark
-  for CUDA; failure withholds CPU work instead of claiming isolation.
+  for CUDA; failure withholds CPU work instead of claiming isolation. The
+  visibility probes require `python3` and a loadable `libcudart` on CUDA hosts,
+  and `sycl-ls` on PATH on XPU hosts. Qualify the installed `sycl-ls` behavior
+  under `ONEAPI_DEVICE_SELECTOR=!*:*`, including its exit status and output;
+  a nonzero exit is not automatically evidence of zero accelerators.
 - Cancel/kill one exact attempt and separately force a member OOM. Require
   whole-group cleanup/release and immediate stage failure for OOM; the neighbor
   continues with unchanged process/device, heartbeat and correct accepted
   result. No host-wide signal, cgroup kill or GPU reset may be used as an
   attempt-local cleanup shortcut.
-- Reject over-budget work, count > 1 and multi-card worker/model config masks
-  with their typed errors. Confirm fixed XPU accounting under concurrent load,
+- Reject over-budget work, count > 1 and multi-card model/attempt masks with
+  their typed errors. Verify worker `--device 1` reports/allocates only card 1,
+  `--device 0,1` offers both, and an omitted flag reports all cards. Confirm fixed
+  XPU accounting under concurrent load,
   per-attempt/member ceilings and no stale result publication.
 - Exercise production hold across both devices and CPU work, priority planned
   stops more than twice without retry charges, exact-ack replacement and the
@@ -1111,9 +1150,11 @@ are excluded. They replace the previous package M estimates.
   Only singular legacy adoption may fill an absent assignment session from its
   saved spool session; nonempty mismatches and keyed-file mismatches fail closed.
 - Canonical IDs follow saved hardware identities across enumeration order changes.
-  A changed XPU ordinal, missing identity or changed fingerprint withholds that
-  saved component with `device_identity_mismatch`; discovery never substitutes
-  another card for it. The native probe uses NVIDIA UUID inventory and the
+  A changed XPU ordinal or different hardware identity withholds that saved
+  component with `device_identity_mismatch`; discovery never substitutes another
+  card for it. Probe errors use `device_probe_unavailable`; both conditions are
+  re-evaluated on every probe, and matching identity restores admission. Driver
+  versions and names are informational. The native probe uses NVIDIA UUID inventory and the
   installed Level Zero API through Python's standard-library `ctypes`, with PCI
   ordering forced in the probe and all members. Native qualification remains an
   M4 gate; an unavailable or ambiguous runtime probe cannot authorize a launch.
@@ -1134,7 +1175,7 @@ are excluded. They replace the previous package M estimates.
   inventories remain explicit through JSON cloning and reporting.
 - The default single-card fake runtime treats its old empty selector and
   canonical inventory ID `"0"` identically for extension qualification. Native
-  identity/fingerprint checks are unchanged.
+  hardware identity checks remain required before launch.
 
 M2–M4 total: **1,350–2,200 production LOC; 2,000–3,100 test/doc LOC;
 11–16 engineer days**, excluding M1 and native access delays. M2 grows from

@@ -146,8 +146,9 @@ func DetectService(ctx context.Context, c ServiceConfig, p MachineProbe, access 
 	if err := os.Setenv("PATH", c.Path); err != nil {
 		return Detection{}, err
 	}
-	if c.Device != "" && c.Detection.Platform == "xpu" {
-		bound, err := WithModelDevice(Model{}, "xpu", c.Device)
+	selector := strings.TrimSpace(strings.Split(c.Device, ",")[0])
+	if selector != "" && c.Detection.Platform == "xpu" {
+		bound, err := WithModelDevice(Model{}, "xpu", selector)
 		if err != nil {
 			return Detection{}, err
 		}
@@ -171,7 +172,7 @@ func DetectService(ctx context.Context, c ServiceConfig, p MachineProbe, access 
 			return command(ctx, name, args...)
 		}
 	}
-	d, err := p.DetectDevice(ctx, c.Device)
+	d, err := p.DetectDevice(ctx, selector)
 	// Explicit budgets must not require telemetry unavailable on discrete XPUs.
 	if err != nil && c.Detection.Platform == "xpu" && strings.HasPrefix(err.Error(), "discrete Intel GPU memory unavailable") {
 		return c.Detection, nil
