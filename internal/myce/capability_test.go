@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -36,7 +37,10 @@ func TestCapabilityProfileRealMemoryLayouts(t *testing.T) {
 		{"Discrete", "linux", "amd64", "cuda", "RTX 4090, 24576", "separate", 64 << 30, 24 << 30},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			probe := ProfileProbe{Machine: MachineProbe{OS: tc.os, Arch: tc.arch, Command: func(_ context.Context, name string, _ ...string) ([]byte, error) {
+			probe := ProfileProbe{Machine: MachineProbe{OS: tc.os, Arch: tc.arch, Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
+				if name == "nvidia-smi" && strings.Contains(strings.Join(args, " "), "uuid,driver_version") {
+					return []byte("GPU-fixture, driver"), nil
+				}
 				if name == "/usr/sbin/sysctl" {
 					return []byte("34359738368"), nil
 				}
@@ -50,6 +54,9 @@ func TestCapabilityProfileRealMemoryLayouts(t *testing.T) {
 				}
 				return []byte("MemTotal: 67108864 kB\n"), nil
 			}, Disk: func(string) (uint64, uint64, error) { return 512 << 30, 123 << 30, nil }}
+			if tc.gpu == "cuda" {
+				probe.Machine = withCUDAFacts(probe.Machine, tc.layout == "unified", 1)
+			}
 			now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 			profile := probe.Detect(context.Background(), Machine{GPU: tc.gpu}, "ignored", now)
 			if profile.MemoryLayout != tc.layout || profile.SystemMemoryBytes != tc.system || len(profile.Accelerators) != 1 || profile.Accelerators[0].MemoryBytes != tc.accelerator || profile.DiskFreeBytes != 123<<30 || profile.RecordedAt != now || len(profile.Unavailable) > 0 {

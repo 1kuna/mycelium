@@ -38,10 +38,18 @@ func onboardingProbe(platform string) MachineProbe {
 		return nil, exec.ErrNotFound
 	}
 	p.CommandEnv = func(ctx context.Context, env map[string]string, n string, args ...string) ([]byte, error) {
-		if n == "python3" {
-			return []byte(`[{"identity":"uuid-a","fingerprint":"driver"},{"identity":"uuid-b","fingerprint":"driver"}]`), nil
+		if n == "python3" && platform == "xpu" {
+			return []byte(`[{"identity":"uuid-a","fingerprint":"driver","pci_address":"0000:01:00.0"},{"identity":"uuid-b","fingerprint":"driver","pci_address":"0000:02:00.0"}]`), nil
 		}
 		return p.Command(ctx, n, args...)
+	}
+	if platform == "cuda" {
+		facts := pciFixtureProbe(pciFixture{"0000:01:00.0", "0x10de", "0", "NVIDIA GB10", "", true})
+		p.Glob, p.ReadFile = facts.Glob, facts.ReadFile
+	}
+	if platform == "xpu" {
+		facts := pciFixtureProbe(pciFixture{"0000:01:00.0", "0x8086", "8", "Intel GPU", "", true}, pciFixture{"0000:02:00.0", "0x8086", "8", "Intel GPU", "", true})
+		p.Glob, p.ReadFile = facts.Glob, facts.ReadFile
 	}
 	if platform == "metal" {
 		p.OS = "darwin"

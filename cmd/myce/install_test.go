@@ -59,6 +59,9 @@ func TestInstallCLIDryRunFakeDetection(t *testing.T) {
 				}
 				return p.Command(ctx, n, args...)
 			}
+			if platform == "cuda" {
+				p = cudaPCIFixture(p, false)
+			}
 			if platform == "xpu" {
 				p = integratedPCIFixture(p)
 			}
@@ -318,6 +321,7 @@ func TestInstallWorkerOverridesDetectedReserve(t *testing.T) {
 		}
 		return []byte("NVIDIA GB10, [N/A]"), nil
 	}}
+	probe = cudaPCIFixture(probe, true)
 	if err := setupCommandWithProbe([]string{"install", "worker", "--nas", home, "--reserve-memory-gb", "24", "--dry-run"}, probe, home); err != nil {
 		t.Fatal(err)
 	}

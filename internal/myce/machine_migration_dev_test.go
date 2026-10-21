@@ -76,7 +76,10 @@ func TestM4DevSplitConvertConcurrentRollback(t *testing.T) {
 		j := submitAPI(s)
 		reply := checkAPI(m)
 		if reply.Job == nil || reply.Job.ID != j.ID {
-			t.Fatal("legacy assignment missing", reply)
+			d.Queue.mu.Lock()
+			reason, nasAvailable := d.Queue.s.Jobs[j.ID].Reason, d.Queue.nasAvailable
+			d.Queue.mu.Unlock()
+			t.Fatalf("legacy assignment missing: reply=%+v waiting=%q nas_available=%t", reply, reason, nasAvailable)
 		}
 		assigned := *reply.Job
 		w := Worker{StateDir: spool, Machine: m, Client: client, Clock: RealClock{}, CheckpointRoot: c.Checkpoints, HostMemorySource: func(context.Context) (float64, error) { return 128, nil }}

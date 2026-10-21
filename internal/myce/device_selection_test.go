@@ -90,8 +90,16 @@ done
 	probe := LocalMachineProbe()
 	probe.OS, probe.Arch = "linux", "amd64"
 	// The fake runtime represents discrete hardware; provide its PCI facts too.
-	fixture := pciFixtureProbe(pciFixture{"0000:01:00.0", "0x8086", "8", "Intel GPU", "", true})
+	fixture := pciFixtureProbe(pciFixture{"0000:01:00.0", "0x8086", "8", "Intel GPU", "", true}, pciFixture{"0000:02:00.0", "0x8086", "8", "Intel GPU", "", true})
 	probe.Glob, probe.ReadFile = fixture.Glob, fixture.ReadFile
+	envRun := probe.CommandEnv
+	probe.CommandEnv = func(ctx context.Context, env map[string]string, name string, args ...string) ([]byte, error) {
+		if name == "python3" {
+			return []byte(`[{"identity":"fixture-0","fingerprint":"physical=0","pci_address":"0000:01:00.0"},{"identity":"fixture-1","fingerprint":"physical=1","pci_address":"0000:02:00.0"}]`), nil
+		}
+		return envRun(ctx, env, name, args...)
+	}
+
 	out, err := probe.Command(context.Background(), "sycl-ls")
 	if err != nil || strings.TrimSpace(string(out)) != "" {
 		t.Fatalf("fake must reject index 1 after a one-card mask: %q %v", out, err)

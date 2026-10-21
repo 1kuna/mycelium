@@ -14,6 +14,7 @@ import (
 
 // MachineDevice is one accelerator's capacity, never an additional host pool.
 type MachineDevice struct {
+	pciFact              *pciAccelerator    // Physical facts from the shared probe.
 	pciAddress           string             // Local probe fact; never part of the queue protocol.
 	Attempts             []Execution        `json:"attempts,omitempty"`
 	Models               []ModelSlot        `json:"models,omitempty"`
@@ -155,12 +156,22 @@ func (w *Worker) initInventory(ctx context.Context, s *workerStore) error {
 // Probe health is current evidence, never durable identity. Persist the saved
 // mapping, but recompute all withholding on every observation (including reopen).
 func (w *Worker) refreshInventory(ctx context.Context, observed []MachineDevice, probeErr error, s *workerStore) error {
-	if probeErr == nil {
-		probeErr = validateInventory(observed)
+	// A heartbeat's short I/O wait is not the probe's deadline. Keep the last
+	// completed observation while it runs; apply its success or failure when
+	// collected. Launch verification still probes the selected device directly.
+	if errors.Is(probeErr, errCheckpointIOPending) {
+		return nil
+	}
+	var partial *acceleratorProbeError
+	familyFailure := errors.As(probeErr, &partial)
+	if probeErr == nil || familyFailure {
+		if err := validateInventory(observed); err != nil {
+			probeErr, familyFailure = err, false
+		}
 	}
 	w.inventoryReason = ""
 	var devices []MachineDevice
-	if probeErr != nil || len(observed) == 0 && w.Machine.GPU != "cpu" {
+	if !familyFailure && (probeErr != nil || len(observed) == 0 && w.Machine.GPU != "cpu") {
 		w.inventoryReason = "device_probe_unavailable"
 		devices = slices.Clone(w.Machine.Devices)
 		for i := range devices {
@@ -169,6 +180,14 @@ func (w *Worker) refreshInventory(ctx context.Context, observed []MachineDevice,
 		}
 	} else {
 		devices = reconcileDevices(w.Machine.Devices, observed)
+		if familyFailure {
+			w.inventoryReason = partial.Error()
+			for i := range devices {
+				if partial.failed(devices[i].Platform) {
+					devices[i].Reason, devices[i].FreeMemoryGB = "device_probe_unavailable", 0
+				}
+			}
+		}
 	}
 	matchedSelectors := map[string]bool{}
 	devices = slices.DeleteFunc(devices, func(d MachineDevice) bool {
@@ -246,19 +265,27 @@ func (w Worker) verifyDevice() error {
 	devices, err := w.InventoryProbe(ctx)
 	expected := *w.selectedDevice
 	matches := 0
+	currentReason := ""
 	for _, d := range devices {
 		if d.Platform == expected.Platform && d.Selector == expected.Selector && d.Identity == expected.Identity {
 			matches++
+			currentReason = d.Reason
 		}
 	}
 	if err != nil {
-		return reject("device_probe_unavailable", errors.New("device inventory probe unavailable before launch"))
+		var partial *acceleratorProbeError
+		if !errors.As(err, &partial) || partial.failed(expected.Platform) {
+			return reject("device_probe_unavailable", errors.New("device inventory probe unavailable before launch"))
+		}
 	}
 	if expected.Reason != "" {
 		return reject(expected.Reason, errors.New(rejectionMessages[expected.Reason]))
 	}
 	if matches != 1 {
 		return reject("device_identity_mismatch", errors.New("device runtime mapping no longer matches saved identity"))
+	}
+	if currentReason != "" {
+		return reject(currentReason, errors.New(rejectionMessages[currentReason]))
 	}
 	return nil
 }
@@ -371,15 +398,24 @@ func (w Worker) localInventory(ctx context.Context) ([]MachineDevice, error) {
 }
 
 func (w Worker) localInventoryWithProbe(ctx context.Context, probe MachineProbe) ([]MachineDevice, error) {
+	probe = probe.withFilesystem()
 	if w.Machine.GPU == "cpu" {
 		return []MachineDevice{}, nil
 	}
 	physical, err := probe.Accelerators(ctx)
-	if err != nil {
+	var partial *acceleratorProbeError
+	if err != nil && !errors.As(err, &partial) {
 		return nil, err
 	}
 	for i := range physical {
 		d := &physical[i]
+		if d.Reason != "" {
+			continue
+		}
+		if (d.Platform == "cuda" || d.Platform == "xpu") && (d.pciFact == nil || !d.pciFact.topologyKnown) {
+			d.Reason = "device_memory_unavailable"
+			continue
+		}
 		configured := w
 		configuredMode := "auto"
 		if len(w.DeviceSettings) > 0 {
@@ -412,19 +448,10 @@ func (w Worker) localInventoryWithProbe(ctx context.Context, probe MachineProbe)
 			d.MemoryMode, d.BudgetGB = "fixed", configured.Machine.FreeMemoryGB
 			d.TotalMemoryGB, d.ReserveMemoryGB = configured.Machine.FreeMemoryGB+configured.Machine.ReservedMemoryGB, configured.Machine.ReservedMemoryGB
 		} else {
-			selectedProbe := probe
-			if d.Platform == "xpu" {
-				run := probe.Command
-				selectedProbe.Command = func(ctx context.Context, name string, args ...string) ([]byte, error) {
-					if name == "nvidia-smi" {
-						return nil, ErrNoGPU
-					}
-					return run(ctx, name, args...)
-				}
-			}
-			detected, e := selectedProbe.DetectDevice(ctx, d.Selector)
+			detected, e := probe.detectAccelerator(ctx, *d)
 			if e != nil {
-				return nil, e
+				d.Reason = "device_memory_unavailable"
+				continue
 			}
 			d.MemoryMode, d.TotalMemoryGB, d.ReserveMemoryGB = detected.MemoryMode, detected.MemoryGB, detected.ReserveGB
 			if len(w.DeviceSettings) > 0 {
@@ -444,6 +471,14 @@ func (w Worker) localInventoryWithProbe(ctx context.Context, probe MachineProbe)
 				}
 			}
 		}
+		if d.pciFact != nil {
+			if d.pciFact.integrated {
+				d.MemoryMode = "unified"
+			} else if d.MemoryMode == "unified" {
+				d.Reason = "device_memory_unavailable"
+				continue
+			}
+		}
 		d.UnifiedMemory = d.MemoryMode == "unified"
 		if d.UnifiedMemory {
 			// Zero is an uncapped measured allowance, as on GB10 and Metal.
@@ -457,9 +492,10 @@ func (w Worker) localInventoryWithProbe(ctx context.Context, probe MachineProbe)
 			d.Reason = "device_budget_unavailable"
 			continue
 		}
-		source, e := newDeviceMemorySource(d.Platform, d.Selector, budget, reserve, d.MemoryMode, probe.OS, os.ReadFile, probe.Command)
+		source, e := newDeviceMemorySource(d.Platform, d.Selector, budget, reserve, d.MemoryMode, probe.OS, probe.ReadFile, probe.Command)
 		if e != nil {
-			return nil, e
+			d.Reason = "device_memory_unavailable"
+			continue
 		}
 		d.FreeMemoryGB, e = source(ctx)
 		if e != nil {
@@ -471,7 +507,7 @@ func (w Worker) localInventoryWithProbe(ctx context.Context, probe MachineProbe)
 			d.BudgetGB = d.FreeMemoryGB
 		}
 	}
-	return physical, nil
+	return physical, err
 }
 
 // M2 projects exactly one inventory component into the existing planner. M3

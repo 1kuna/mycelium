@@ -22,44 +22,6 @@ func probeAbsent(err error) bool {
 	return errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist) || errors.Is(err, ErrNoGPU)
 }
 
-// Shared PCI facts keep runtime-family checks consistent with onboarding.
-func (p MachineProbe) gpuPresent() (bool, error) {
-	devices, err := p.pciAccelerators()
-	if err != nil {
-		return false, err
-	}
-	for _, d := range devices {
-		if d.platform() != "" && !(d.platform() == "xpu" && d.topologyKnown && d.integrated) {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-func (p MachineProbe) nvidiaPresent() (bool, error) {
-	if p.OS != "linux" || p.Glob == nil {
-		return true, nil
-	}
-	devices, err := p.pciAccelerators()
-	if err != nil {
-		return false, err
-	}
-	for _, d := range devices {
-		if d.platform() == "cuda" {
-			return true, nil
-		}
-	}
-	return false, nil
-}
-func (p MachineProbe) nvidiaProbeFailure(present bool) error {
-	if present {
-		return preflightError("gpu_driver_unavailable", "cuda", "NVIDIA driver probe failed; repair the driver and re-detect")
-	}
-	if p.Info != nil {
-		p.Info("nvidia-smi failed without an NVIDIA PCI display device; continuing CPU/other accelerator detection")
-	}
-	return nil
-}
-
 // HardwarePreflight is also the nonsecret detect --config reply. The scalar
 // fields retain compatibility; Devices is the complete selected install plan.
 type HardwarePreflight struct {
@@ -86,19 +48,9 @@ func PreflightHardware(ctx context.Context, c ServiceConfig, p MachineProbe) (Ha
 	if err != nil {
 		return out, err
 	}
-	pci, err := p.pciAccelerators()
-	if err != nil {
-		return out, preflightError("gpu_inventory_unavailable", "gpu", "cannot inspect PCI inventory; restore access and re-detect")
-	}
-	for _, d := range pci {
-		if d.platform() == "" && p.Info != nil {
-			p.Info(fmt.Sprintf("Ignoring display device %s (PCI %s:%s); no supported accelerator backend", d.address, d.vendor, d.device))
-		}
-	}
 	physical, runtimeErr := p.Accelerators(ctx)
-	facts, pciErr := reconcilePCI(pci, physical)
-	if err := errors.Join(runtimeErr, pciErr); err != nil {
-		return out, err
+	if len(physical) == 0 && runtimeErr != nil {
+		return out, runtimeErr
 	}
 	if len(physical) == 0 {
 		if c.Detection.Platform != "" {
@@ -110,6 +62,7 @@ func PreflightHardware(ctx context.Context, c ServiceConfig, p MachineProbe) (Ha
 		out.Detection = Detection{OS: p.OS, Arch: p.Arch, Platform: "cpu", MemoryMode: "fixed"}
 		return out, nil
 	}
+	var deviceErrors []error
 	matched := map[string]bool{}
 	for _, device := range physical {
 		selected := len(allowance) == 0
@@ -122,20 +75,7 @@ func PreflightHardware(ctx context.Context, c ServiceConfig, p MachineProbe) (Ha
 		if !selected {
 			continue
 		}
-		probe := p
-		if fact, ok := facts[device.Platform+":"+device.Selector]; ok {
-			probe.pciDevice = &fact
-		}
-		if device.Platform == "xpu" {
-			command := p.Command
-			probe.Command = func(ctx context.Context, n string, args ...string) ([]byte, error) {
-				if n == "nvidia-smi" {
-					return nil, exec.ErrNotFound
-				}
-				return command(ctx, n, args...)
-			}
-		}
-		d, e := probe.DetectDevice(ctx, device.Selector)
+		d, e := p.detectAccelerator(ctx, device)
 		var configured *Detection
 		perDevice := false
 		for _, saved := range c.MachineDevices {
@@ -151,9 +91,10 @@ func PreflightHardware(ctx context.Context, c ServiceConfig, p MachineProbe) (Ha
 			configured = &v
 		}
 		var typed *PreflightError
-		fixed := configured != nil && configured.MemoryMode == "fixed" && configured.Platform == device.Platform && configured.MemoryGB > configured.ReserveGB
-		if e != nil && !(fixed && device.Platform == "xpu" && errors.As(e, &typed) && typed.Code == "gpu_memory_unavailable") {
-			return out, e
+		fixed := device.pciFact != nil && device.pciFact.topologyKnown && !device.pciFact.integrated && configured != nil && configured.MemoryMode == "fixed" && configured.Platform == device.Platform && configured.MemoryGB > configured.ReserveGB
+		if e != nil && !(fixed && errors.As(e, &typed) && typed.Code == "gpu_memory_unavailable") {
+			deviceErrors = append(deviceErrors, e)
+			continue
 		}
 		if configured != nil {
 			if configured.Platform != device.Platform {
@@ -170,6 +111,14 @@ func PreflightHardware(ctx context.Context, c ServiceConfig, p MachineProbe) (Ha
 				}
 			}
 		}
+		if device.pciFact != nil {
+			if device.pciFact.integrated {
+				d.MemoryMode = "unified"
+			} else if d.MemoryMode == "unified" {
+				deviceErrors = append(deviceErrors, preflightError("gpu_memory_unavailable", device.Selector, "discrete device cannot use unified memory"))
+				continue
+			}
+		}
 		if d.Platform == "" {
 			d.Platform = device.Platform
 		}
@@ -180,13 +129,16 @@ func PreflightHardware(ctx context.Context, c ServiceConfig, p MachineProbe) (Ha
 		return out, preflightError("device_selector_unmatched", "gpu", "one or more explicit selectors are absent; selection was not broadened")
 	}
 	if len(out.Devices) == 0 {
+		if err := errors.Join(append(deviceErrors, runtimeErr)...); err != nil {
+			return out, err
+		}
 		return out, preflightError("gpu_inventory_unavailable", "gpu", "no selected components detected")
 	}
 	if err := ValidateDeviceSettings(out.Devices); err != nil {
 		return out, err
 	}
 	out.Detection = out.Devices[0].Detection
-	return out, nil
+	return out, errors.Join(append(deviceErrors, runtimeErr)...)
 }
 
 // ApplyHardwarePreflight leaves identity, selector allowance and all host policy

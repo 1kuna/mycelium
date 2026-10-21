@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"io/fs"
 	"net/url"
 	"os"
 	"os/exec"
@@ -30,10 +31,10 @@ type Detection struct {
 	GPU        string  `json:"gpu"`
 }
 type MachineProbe struct {
-	pciDevice *pciAccelerator // Selected physical component during onboarding.
-	OS, Arch  string
-	Info      func(string) // Optional informational diagnostics; never inventory output.
-	Command   func(context.Context, string, ...string) ([]byte, error)
+	Files    fs.FS // Entire filesystem view for injected probes.
+	OS, Arch string
+	Info     func(string) // Optional informational diagnostics; never inventory output.
+	Command  func(context.Context, string, ...string) ([]byte, error)
 	// CommandEnv runs a probe with per-process overrides; nil keeps injected Command fixtures.
 	CommandEnv func(context.Context, map[string]string, string, ...string) ([]byte, error)
 	Glob       func(string) ([]string, error)
@@ -60,188 +61,12 @@ func LocalMachineProbe() MachineProbe {
 		}
 		return stdout.Bytes(), err
 	}
-	return MachineProbe{Info: func(line string) { fmt.Fprintln(os.Stderr, line) }, OS: runtime.GOOS, Arch: runtime.GOARCH, Glob: filepath.Glob, ReadFile: os.ReadFile, CommandEnv: run, Command: func(ctx context.Context, n string, args ...string) ([]byte, error) {
+	return MachineProbe{Info: func(line string) { fmt.Fprintln(os.Stderr, line) }, OS: runtime.GOOS, Arch: runtime.GOARCH, Files: os.DirFS("/"), CommandEnv: run, Command: func(ctx context.Context, n string, args ...string) ([]byte, error) {
 		return run(ctx, nil, n, args...)
 	}}
 }
 func (p MachineProbe) Detect(ctx context.Context) (Detection, error) {
 	return p.DetectDevice(ctx, "")
-}
-
-// DetectDevice shares setup detection while allowing foreground workers to
-// inspect a selected CUDA card instead of requiring a single-card host.
-func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detection, error) {
-	if err := singleDeviceMask(device); err != nil {
-		return Detection{}, err
-	}
-	d := Detection{OS: p.OS, Arch: p.Arch, MemoryMode: "auto"}
-	if p.OS != "linux" && p.OS != "darwin" {
-		return d, fmt.Errorf("unsupported OS %s", p.OS)
-	}
-	if p.Arch != "amd64" && p.Arch != "arm64" {
-		return d, fmt.Errorf("unsupported architecture %s", p.Arch)
-	}
-	if p.Command == nil {
-		return d, errors.New("GPU detection command runner missing")
-	}
-	if p.OS == "darwin" && p.Arch == "arm64" {
-		b, e := p.Command(ctx, "/usr/sbin/system_profiler", "SPDisplaysDataType")
-		if e != nil && !probeAbsent(e) {
-			return d, preflightError("gpu_driver_unavailable", "metal", "cannot inspect Metal; repair the runtime and re-detect")
-		}
-		if e != nil || !strings.Contains(string(b), "Metal") {
-			return d, preflightError("gpu_driver_unavailable", "metal", "Apple Silicon Metal is unavailable; repair runtime access and re-detect")
-		}
-		d.Platform = "metal"
-		d.GPU = "Apple Silicon"
-		d.MemoryMode = "unified"
-		d.ReserveGB = 4
-		return d, nil
-	}
-	nvidia, pciErr := p.nvidiaPresent()
-	if pciErr != nil {
-		return d, preflightError("gpu_inventory_unavailable", "gpu", "cannot inspect PCI inventory; restore access and re-detect")
-	}
-	args := []string{"--query-gpu=name,memory.total,pci.bus_id", "--format=csv,noheader,nounits"}
-	if device != "" {
-		args = append(args, "--id="+device)
-	}
-	b, e := p.Command(ctx, "nvidia-smi", args...)
-	if e != nil && !probeAbsent(e) {
-		if err := p.nvidiaProbeFailure(nvidia); err != nil {
-			return d, err
-		}
-	}
-	if e == nil && strings.TrimSpace(string(b)) != "" {
-		lines := strings.Split(strings.TrimSpace(string(b)), "\n")
-		if len(lines) != 1 {
-			return d, errors.New("automatic setup requires exactly one GPU")
-		}
-		fields := strings.Split(lines[0], ",")
-		if len(fields) < 2 || len(fields) > 3 {
-			return d, preflightError("gpu_inventory_invalid", "cuda", "invalid nvidia-smi inventory")
-		}
-		name, memory := fields[0], fields[1]
-		fact := p.pciDevice
-		if fact == nil && len(fields) == 3 {
-			pci, err := p.pciAccelerators()
-			if err != nil {
-				return d, preflightError("gpu_inventory_unavailable", "cuda", "cannot inspect CUDA PCI topology; restore access and re-detect")
-			}
-			for _, candidate := range pci {
-				if candidate.platform() == "cuda" && normalizePCIAddress(candidate.address) == normalizePCIAddress(fields[2]) {
-					v := candidate
-					fact = &v
-					break
-				}
-			}
-		}
-		d.Platform = "cuda"
-		d.GPU = strings.TrimSpace(name)
-		d.ReserveGB = 2
-		n, e := parseCUDAFreeMemory([]byte(strings.TrimSpace(memory)))
-		if errors.Is(e, errUnifiedMemory) || fact != nil && fact.topologyKnown && fact.integrated {
-			d.MemoryMode = "unified"
-			d.ReserveGB = 16
-			return d, nil
-		}
-		if e != nil || n <= 0 {
-			return d, preflightError("gpu_memory_unavailable", "cuda", "invalid CUDA memory inventory")
-		}
-		d.MemoryGB = n
-		d.MemoryMode = "dedicated"
-		return d, nil
-	}
-	sycl := p.Command
-	if device != "" && p.CommandEnv != nil {
-		bound, err := WithModelDevice(Model{}, "xpu", device)
-		if err != nil {
-			return d, err
-		}
-		sycl = func(ctx context.Context, name string, args ...string) ([]byte, error) {
-			return p.CommandEnv(ctx, bound.DeviceEnv, name, args...)
-		}
-	}
-	b, e = sycl(ctx, "sycl-ls")
-	if e != nil {
-		if !probeAbsent(e) {
-			return d, preflightError("gpu_driver_unavailable", "xpu", "Intel driver probe failed; repair the runtime and re-detect")
-		}
-		b, e = p.Command(ctx, "xpu-smi", "discovery")
-		if e != nil && !probeAbsent(e) {
-			return d, preflightError("gpu_driver_unavailable", "xpu", "Intel driver probe failed; repair the runtime and re-detect")
-		}
-	}
-	intelGPU := ""
-	if e == nil {
-		for _, line := range strings.Split(string(b), "\n") {
-			low := strings.ToLower(line)
-			if strings.Contains(low, "gpu") && strings.Contains(low, "intel") {
-				intelGPU = line
-				break
-			}
-		}
-	}
-	if intelGPU != "" {
-		d.Platform, d.GPU = "xpu", strings.TrimSpace(intelGPU)
-		// Integrated XPU uses OS memory. Discrete XPU needs a measured allowance:
-		// do not silently substitute host RAM for its device memory.
-		fact, err := p.intelPCIDevice(ctx, device)
-		if err != nil {
-			return d, err
-		}
-		if fact == nil || !fact.topologyKnown {
-			return d, preflightError("gpu_memory_unavailable", "xpu", "Intel GPU topology unavailable: restore PCI/sysfs access or specify an explicit fixed device budget")
-		}
-		if !fact.integrated {
-			verbose, err := sycl(ctx, "sycl-ls", "--verbose")
-			if err == nil {
-				budget := uint64(0)
-				for _, line := range strings.Split(string(verbose), "\n") {
-					if !strings.Contains(line, "global_mem_size") && !strings.Contains(strings.ToLower(line), "global memory size") {
-						continue
-					}
-					_, value, ok := strings.Cut(line, ":")
-					if !ok {
-						continue
-					}
-					fields := strings.Fields(value)
-					if len(fields) == 0 {
-						continue
-					}
-					bytes, err := strconv.ParseUint(fields[0], 10, 64)
-					if err == nil && bytes > 0 {
-						if budget == 0 || bytes < budget {
-							budget = bytes
-						}
-					}
-
-				}
-				if budget > 0 {
-					d.Platform = "xpu"
-					d.GPU = strings.TrimSpace(intelGPU)
-					d.MemoryMode = "fixed"
-					d.MemoryGB = float64(budget) / (1024 * 1024 * 1024)
-					d.ReserveGB = min(2, d.MemoryGB/4)
-					return d, nil
-				}
-			}
-			return d, preflightError("gpu_memory_unavailable", "xpu", "discrete Intel GPU memory unavailable: specify --gpu xpu --memory-mode fixed --memory-gb with an explicit device budget")
-		}
-		d.Platform = "xpu"
-		d.GPU = strings.TrimSpace(intelGPU)
-		d.MemoryMode = "unified"
-		d.ReserveGB = 8
-		return d, nil
-	}
-	present, err := p.gpuPresent()
-	if err != nil {
-		return d, preflightError("gpu_inventory_unavailable", "gpu", "cannot inspect PCI inventory; restore access and re-detect")
-	}
-	if present {
-		return d, preflightError("gpu_driver_missing", "gpu", "supported GPU has no runtime inventory; install its driver and re-detect")
-	}
-	return d, fmt.Errorf("%w (nvidia-smi, sycl-ls/xpu-smi, or Apple Silicon Metal)", ErrNoGPU)
 }
 
 type ServiceConfig struct {

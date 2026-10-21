@@ -584,10 +584,11 @@ func TestM4PerDeviceFixedCapacityAtRuntime(t *testing.T) {
 	}}
 	probe := MachineProbe{OS: "linux", Arch: "amd64", Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
 		if name == "nvidia-smi" && args[0] == "--query-gpu=uuid,driver_version,pci.bus_id" {
-			return []byte("GPU-one, driver\nGPU-two, driver\n"), nil
+			return []byte("GPU-one, driver, 0000:01:00.0\nGPU-two, driver, 0000:02:00.0\n"), nil
 		}
 		return nil, errors.New("fixed capacity must not require telemetry")
 	}}
+	probe = withCUDAFacts(probe, false, 2)
 	devices, err := w.localInventoryWithProbe(context.Background(), probe)
 	if err != nil {
 		t.Fatal(err)
@@ -743,6 +744,7 @@ func TestM4PerDeviceMeasuredReserveAtRuntime(t *testing.T) {
 		}
 		return nil, errors.New("unexpected probe")
 	}}
+	probe = withCUDAFacts(probe, false, 1)
 	d, err := w.localInventoryWithProbe(context.Background(), probe)
 	if err != nil {
 		t.Fatal(err)

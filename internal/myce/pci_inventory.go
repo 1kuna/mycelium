@@ -1,9 +1,9 @@
 package myce
 
 import (
-	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -26,44 +26,70 @@ func (d pciAccelerator) platform() string {
 	}
 	return ""
 }
+
+// withFilesystem adapts both fixture APIs to one reader; neither falls back to
+// the host. LocalMachineProbe alone opts into the real root filesystem.
+func (p MachineProbe) withFilesystem() MachineProbe {
+	if p.Files != nil {
+		if p.Glob == nil {
+			p.Glob = func(pattern string) ([]string, error) {
+				paths, err := fs.Glob(p.Files, strings.TrimPrefix(pattern, "/"))
+				for i := range paths {
+					paths[i] = "/" + paths[i]
+				}
+				return paths, err
+			}
+		}
+		if p.ReadFile == nil {
+			p.ReadFile = func(path string) ([]byte, error) { return fs.ReadFile(p.Files, strings.TrimPrefix(path, "/")) }
+		}
+	}
+	return p
+}
+
 func (p MachineProbe) pciAccelerators() ([]pciAccelerator, error) {
-	if p.OS != "linux" || p.Glob == nil {
+	p = p.withFilesystem()
+	if p.OS != "linux" {
 		return nil, nil
+	}
+	if p.Glob == nil {
+		return nil, preflightError("gpu_inventory_unavailable", "gpu", "PCI filesystem unavailable")
 	}
 	paths, err := p.Glob("/sys/bus/pci/devices/*/class")
 	if err != nil {
-		return nil, err
+		return nil, preflightError("gpu_inventory_unavailable", "gpu", "cannot inspect PCI inventory")
 	}
 	out := []pciAccelerator{}
+	var failures []error
 	for _, path := range paths {
 		if p.ReadFile == nil {
-			return nil, fmt.Errorf("PCI reader missing")
+			failures = append(failures, preflightError("gpu_inventory_unavailable", "gpu", "PCI reader missing"))
+			continue
 		}
 		b, err := p.ReadFile(path)
-		if err != nil {
-			return nil, err
+		class, e := strconv.ParseUint(strings.TrimSpace(string(b)), 0, 32)
+		if err != nil || e != nil {
+			failures = append(failures, preflightError("gpu_inventory_unavailable", filepath.Base(filepath.Dir(path)), "cannot inspect PCI class"))
+			continue
 		}
-		class, err := strconv.ParseUint(strings.TrimSpace(string(b)), 0, 32)
-		if err != nil {
-			return nil, err
-		}
-		// PCI base classes: display controller and processing accelerator.
-		if class>>16 != 0x03 && class>>16 != 0x12 {
+		if class>>16 != 3 && class>>16 != 0x12 {
 			continue
 		}
 		dir := filepath.Dir(path)
-		vendor, err := p.ReadFile(filepath.Join(dir, "vendor"))
-		if err != nil {
-			return nil, err
+		vendor, e := p.ReadFile(filepath.Join(dir, "vendor"))
+		if e != nil {
+			failures = append(failures, preflightError("gpu_inventory_unavailable", filepath.Base(dir), "cannot inspect PCI vendor"))
+			continue
 		}
 		device, _ := p.ReadFile(filepath.Join(dir, "device"))
-		integrated, known, err := p.pciTopology(dir)
-		if err != nil {
-			return nil, err
+		integrated, known, e := p.pciTopology(dir)
+		// Inaccessible topology affects this endpoint's memory evidence only.
+		if e != nil {
+			known = false
 		}
 		out = append(out, pciAccelerator{filepath.Base(dir), strings.ToLower(strings.TrimSpace(string(vendor))), strings.TrimSpace(string(device)), integrated, known})
 	}
-	return out, nil
+	return out, errors.Join(failures...)
 }
 
 func (p MachineProbe) pciTopology(dir string) (integrated, known bool, err error) {
@@ -101,6 +127,7 @@ func (p MachineProbe) pciTopology(dir string) (integrated, known bool, err error
 func reconcilePCI(pci []pciAccelerator, runtime []MachineDevice) (map[string]pciAccelerator, error) {
 	matched := map[string]bool{}
 	facts := map[string]pciAccelerator{}
+	var failures []error
 	for _, r := range runtime {
 		candidates := []pciAccelerator{}
 		for _, d := range pci {
@@ -112,13 +139,13 @@ func reconcilePCI(pci []pciAccelerator, runtime []MachineDevice) (map[string]pci
 			continue
 		} // Non-PCI platforms / injected runtime-only probes.
 		if len(candidates) != 1 || matched[candidates[0].address] {
-			return facts, preflightError("gpu_inventory_invalid", r.Platform, "runtime components cannot be matched uniquely to PCI hardware; restore complete inventory and re-detect")
+			failures = append(failures, preflightError("gpu_inventory_invalid", r.Platform, "runtime components cannot be matched uniquely to PCI hardware; restore complete inventory and re-detect"))
+			continue
 		}
 		d := candidates[0]
 		matched[d.address] = true
 		facts[r.Platform+":"+r.Selector] = d
 	}
-	var failures []error
 	for _, d := range pci {
 		if d.platform() == "" || matched[d.address] {
 			continue
@@ -139,38 +166,4 @@ func normalizePCIAddress(s string) string {
 		}
 	}
 	return s
-}
-
-func (p MachineProbe) intelPCIDevice(ctx context.Context, selector string) (*pciAccelerator, error) {
-	if p.pciDevice != nil {
-		return p.pciDevice, nil
-	}
-	pci, err := p.pciAccelerators()
-	if err != nil {
-		return nil, preflightError("gpu_inventory_unavailable", "xpu", "cannot inspect Intel PCI topology; restore access and re-detect")
-	}
-	intel := []pciAccelerator{}
-	for _, d := range pci {
-		if d.platform() == "xpu" {
-			intel = append(intel, d)
-		}
-	}
-	if len(intel) == 0 {
-		return nil, nil
-	}
-	if len(intel) == 1 {
-		return &intel[0], nil
-	}
-	runtime, err := p.Accelerators(ctx)
-	if err != nil {
-		return nil, err
-	}
-	facts, err := reconcilePCI(pci, runtime)
-	if err != nil {
-		return nil, err
-	}
-	if fact, ok := facts["xpu:"+selector]; ok {
-		return &fact, nil
-	}
-	return nil, preflightError("gpu_inventory_invalid", "xpu", "select a PCI-correlated Intel device before memory detection")
 }

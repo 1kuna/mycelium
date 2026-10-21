@@ -169,6 +169,7 @@ func TestDetectIntelMemoryUsesPCITopology(t *testing.T) {
 func withIntegratedPCI(p MachineProbe) MachineProbe {
 	fixture := pciFixtureProbe(pciFixture{"0000:00:02.0", "0x8086", "0", "Intel Graphics", "", true})
 	p.Glob, p.ReadFile = fixture.Glob, fixture.ReadFile
+	p = withIntelRuntimeFixture(p)
 	return p
 }
 
@@ -274,7 +275,10 @@ func TestDetectCUDAMemoryUsesPCITopology(t *testing.T) {
 	} {
 		t.Run(tc.mode, func(t *testing.T) {
 			p := pciFixtureProbe(pciFixture{"0000:01:00.0", "0x10de", tc.link, tc.name, "", true})
-			p.Command = func(context.Context, string, ...string) ([]byte, error) {
+			p.Command = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+				if strings.Contains(strings.Join(args, " "), "uuid,driver_version") {
+					return []byte("GPU-fixture, driver, 00000000:01:00.0"), nil
+				}
 				return []byte(tc.name + ", 24576, 00000000:01:00.0"), nil
 			}
 			got, err := p.Detect(context.Background())
@@ -288,5 +292,39 @@ func TestDetectCUDAMemoryUsesPCITopology(t *testing.T) {
 func withDiscretePCI(p MachineProbe) MachineProbe {
 	fixture := pciFixtureProbe(pciFixture{"0000:01:00.0", "0x8086", "8", "Intel GPU", "", true})
 	p.Glob, p.ReadFile = fixture.Glob, fixture.ReadFile
+	p = withIntelRuntimeFixture(p)
+	return p
+}
+
+// Legacy detection fixtures now provide runtime UUIDs as well as memory text.
+// Their assertions stay unchanged; non-Level-Zero text cannot invent a device.
+func withIntelRuntimeFixture(p MachineProbe) MachineProbe {
+	p.CommandEnv = func(ctx context.Context, _ map[string]string, name string, args ...string) ([]byte, error) {
+		if name == "python3" {
+			b, err := p.Command(ctx, "sycl-ls")
+			if err != nil {
+				return nil, err
+			}
+			if !strings.Contains(string(b), "[level_zero:gpu") {
+				return []byte("[]"), nil
+			}
+			return []byte(`[{"identity":"intel-fixture","fingerprint":"driver:Intel GPU"}]`), nil
+		}
+		return p.Command(ctx, name, args...)
+	}
+	return p
+}
+
+func withCUDAFacts(p MachineProbe, integrated bool, count int) MachineProbe {
+	devices := []pciFixture{}
+	link := "16"
+	if integrated {
+		link = "0"
+	}
+	for i := 1; i <= count; i++ {
+		devices = append(devices, pciFixture{fmt.Sprintf("0000:%02x:00.0", i), "0x10de", link, "fixture", "", true})
+	}
+	facts := pciFixtureProbe(devices...)
+	p.Glob, p.ReadFile = facts.Glob, facts.ReadFile
 	return p
 }

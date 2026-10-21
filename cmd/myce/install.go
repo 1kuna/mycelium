@@ -52,6 +52,7 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 		return e
 	})
 	machineMap := f.String("machine-map", "", "explicit queue conversion mapping JSON file")
+	drainEvidence := f.String("drain-evidence", "", "explicit stopped-source proof: verified-empty (offline queue conversion with every --from-worker-config)")
 	rollbackQueue := f.Bool("rollback-machines", false, "restore queue-side fences and legacy identities; retain upgraded queue")
 	rollback := f.Bool("rollback-machine", false, "restore the saved per-GPU installation; keep the compatible queue")
 	dry := f.Bool("dry-run", false, "print plan without installing")
@@ -77,6 +78,9 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 	}
 	if f.NArg() != 0 {
 		return errors.New("unexpected setup arguments")
+	}
+	if *drainEvidence != "" && (*drainEvidence != "verified-empty" || action != "install" || role != "queue" || *machineMap == "" || *rollbackQueue) {
+		return errors.New("machine_drain_evidence_invalid: --drain-evidence=verified-empty requires forward install queue --machine-map")
 	}
 	signals, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGHUP, os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
@@ -139,7 +143,7 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 		}
 		fmt.Println(myce.MachineConversionDiff(mapping))
 		fmt.Println("Queue must be stopped; preview/write queue-side policies, pins, servers and retired identities. Keep the upgraded queue on rollback.")
-		return myce.ConvertQueueInstall(ctx, c, mapping, *dry, *rollbackQueue, myce.RealClock{}, probe.Command)
+		return myce.ConvertQueueInstall(ctx, c, mapping, *dry, *rollbackQueue, myce.RealClock{}, probe.Command, myce.MachineDrainOptions{Mode: *drainEvidence, WorkerConfigs: sources})
 	}
 	// Locate the saved configuration before detection or applying fresh-install
 	// defaults. Flag presence, rather than its value, defines the upgrade overlay.

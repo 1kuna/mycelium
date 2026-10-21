@@ -3,6 +3,7 @@ package myce
 import (
 	"errors"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -204,6 +205,7 @@ func (q *Queue) hostMaintenanceStatus(host string) HostMaintenanceStatus {
 		out.Policy.MemoryBudget = &budget
 	}
 	out.Healthy = true
+	freshEvidence := true
 	now := q.clock.Now()
 	for _, m := range q.s.Machines {
 		if hostID(m) != host || m.Replacement != nil || q.migrationHistoricalMachine(m) {
@@ -211,7 +213,9 @@ func (q *Queue) hostMaintenanceStatus(host string) HostMaintenanceStatus {
 		}
 		fresh := !m.Gone && !q.unreported[m.ID] && !m.LastSeen.After(now) && now.Sub(m.LastSeen) < min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2]))
 		out.Workers = append(out.Workers, MaintenanceWorker{Machine: cloneMachine(m), Fresh: fresh})
-		out.Healthy = out.Healthy && fresh && !m.HostMemoryPolicyMismatch && m.MemoryError == "" && m.HostMemoryError == ""
+		freshEvidence = freshEvidence && fresh
+		out.Healthy = out.Healthy && fresh && !m.HostMemoryPolicyMismatch && m.MemoryError == "" && m.HostMemoryError == "" && m.InventoryReason == ""
+		out.Healthy = out.Healthy && !slices.ContainsFunc(m.Devices, func(d MachineDevice) bool { return d.Reason != "" })
 		out.MemoryInUseGB = max(out.MemoryInUseGB, m.HostMemoryInUseGB)
 		out.MemoryDebtGB = max(out.MemoryDebtGB, m.hostReservationDebtGB)
 		if m.DockerCleanup != "" {
@@ -264,7 +268,8 @@ func (q *Queue) hostMaintenanceStatus(host string) HostMaintenanceStatus {
 	sort.Strings(out.PendingCleanup)
 	out.Healthy = out.Healthy && len(out.Workers) > 0 && out.Policy.MemoryBudget != nil
 	out.MigrationReady = q.machineMigrationReady(host)
-	out.Quiescent = out.Healthy && q.maintenanceBlocked(host) && len(obligations) == 0 && len(out.PendingCleanup) == 0
+	// Fresh custody evidence is required; inventory and memory health are separate.
+	out.Quiescent = freshEvidence && len(out.Workers) > 0 && q.maintenanceBlocked(host) && len(obligations) == 0 && len(out.PendingCleanup) == 0
 	return out
 }
 func (a API) registerHostMaintenance(mux *http.ServeMux) {

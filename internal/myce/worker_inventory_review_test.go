@@ -287,7 +287,15 @@ func TestInventoryReviewUnifiedLocalProbe(t *testing.T) {
 				}}
 				reserve := 4.0
 				if platform == "cuda" {
-					p.Arch, reserve = "amd64", 16
+					p.OS, p.Arch, reserve = "linux", "arm64", 16
+					p = withCUDAFacts(p, true, 1)
+					read := p.ReadFile
+					p.ReadFile = func(path string) ([]byte, error) {
+						if path == "/proc/meminfo" {
+							return []byte(fmt.Sprintf("MemAvailable: %d kB\n", available*1048576)), nil
+						}
+						return read(path)
+					}
 				}
 				w := Worker{Machine: Machine{GPU: platform, FreeMemoryGB: cap}}
 				// GB10 reserves 16 GiB; use an allowance above that reserve.
@@ -343,12 +351,14 @@ func TestInventoryReviewCPUHasNoProbeError(t *testing.T) {
 
 func TestInventoryReviewCUDAProbeFailureTyped(t *testing.T) {
 	p := MachineProbe{OS: "linux", Arch: "amd64", Command: func(context.Context, string, ...string) ([]byte, error) { return nil, errors.New("driver failed") }}
+	p = withCUDAFacts(p, false, 1)
 	_, err := p.Accelerators(context.Background())
 	var rule *rejectionError
 	if !errors.As(err, &rule) || rule.code != "device_probe_unavailable" {
 		t.Fatalf("failed CUDA inventory swallowed: %v", err)
 	}
 	p.Command = func(context.Context, string, ...string) ([]byte, error) { return nil, exec.ErrNotFound }
+	p.Glob = func(string) ([]string, error) { return nil, nil }
 	if devices, err := p.Accelerators(context.Background()); err != nil || len(devices) != 0 {
 		t.Fatalf("GPU-less host: %v %v", devices, err)
 	}

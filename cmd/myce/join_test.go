@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,11 +25,17 @@ func TestJoinGPUDetection(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			probe := myce.MachineProbe{OS: tc.os, Arch: tc.arch, Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
+				if name == "nvidia-smi" && tc.platform == "cuda" && strings.Contains(strings.Join(args, " "), "uuid,driver_version") {
+					return []byte("GPU-fixture, driver, 0000:01:00.0"), nil
+				}
 				if name == "/usr/sbin/system_profiler" && tc.platform == "metal" || name == "nvidia-smi" && tc.platform == "cuda" || name == "sycl-ls" && tc.platform == "xpu" {
 					return []byte(tc.output), nil
 				}
 				return nil, exec.ErrNotFound
 			}}
+			if tc.platform == "cuda" {
+				probe = cudaPCIFixture(probe, tc.mode == "unified")
+			}
 			if tc.platform == "xpu" {
 				probe = integratedPCIFixture(probe)
 			}
@@ -55,11 +62,15 @@ func TestJoinExplicitGPUBypassesDetection(t *testing.T) {
 
 func TestJoinDetectionPreservesExplicitOptions(t *testing.T) {
 	probe := myce.MachineProbe{OS: "linux", Arch: "amd64", Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
-		if name != "nvidia-smi" || !strings.Contains(strings.Join(args, " "), "--id=2") {
+		if name == "nvidia-smi" && strings.Contains(strings.Join(args, " "), "uuid,driver_version") {
+			return []byte("GPU-0, driver, 0000:01:00.0\nGPU-1, driver, 0000:02:00.0\nGPU-2, driver, 0000:03:00.0"), nil
+		}
+		if name != "nvidia-smi" || !strings.Contains(strings.Join(args, " "), "--id=GPU-2") {
 			t.Fatalf("unexpected probe %s %v", name, args)
 		}
 		return []byte("RTX 4090, 24576"), nil
 	}}
+	probe = cudaPCIFixtureN(probe, false, 3)
 	options := joinGPUOptions{device: "2", mode: "auto", memory: 0, reserve: 0}
 	got, err := detectJoinGPU(context.Background(), probe, options, map[string]bool{"memory-mode": true, "memory-gb": true, "reserve-memory-gb": true})
 	options.platform = "cuda"
@@ -76,13 +87,14 @@ func TestJoinMachineDeviceAllowance(t *testing.T) {
 					return nil, exec.ErrNotFound
 				}
 				if strings.Contains(strings.Join(args, " "), "--query-gpu=uuid,driver_version") {
-					return []byte("GPU-a, driver\nGPU-b, driver"), nil
+					return []byte("GPU-a, driver, 0000:01:00.0\nGPU-b, driver, 0000:02:00.0"), nil
 				}
 				if strings.Contains(strings.Join(args, " "), "--id=") {
 					return []byte("RTX, 8192"), nil
 				}
 				return []byte("RTX, 8192\nRTX, 8192"), nil
 			}}
+			p = cudaPCIFixtureN(p, false, 2)
 			got, err := detectJoinGPU(context.Background(), p, joinGPUOptions{device: selection, mode: "auto"}, nil)
 			if err != nil || got.platform != "cuda" || got.device != selection {
 				t.Fatalf("allowance narrowed or rejected: %+v %v", got, err)
@@ -196,6 +208,50 @@ func integratedPCIFixture(p myce.MachineProbe) myce.MachineProbe {
 			return []byte("0x8086"), nil
 		case "current_link_width":
 			return []byte("0"), nil
+		}
+		return nil, os.ErrNotExist
+	}
+	if p.CommandEnv == nil {
+		p.CommandEnv = func(ctx context.Context, _ map[string]string, name string, args ...string) ([]byte, error) {
+			if name == "python3" {
+				b, err := p.Command(ctx, "sycl-ls")
+				if err != nil {
+					return nil, err
+				}
+				if !strings.Contains(string(b), "[level_zero:gpu") {
+					return []byte("[]"), nil
+				}
+				return []byte(`[{"identity":"intel-fixture","fingerprint":"driver"}]`), nil
+			}
+			return p.Command(ctx, name, args...)
+		}
+	}
+	return p
+}
+
+func cudaPCIFixture(p myce.MachineProbe, integrated bool) myce.MachineProbe {
+	return cudaPCIFixtureN(p, integrated, 1)
+}
+
+func cudaPCIFixtureN(p myce.MachineProbe, integrated bool, n int) myce.MachineProbe {
+	p.Glob = func(string) ([]string, error) {
+		paths := []string{}
+		for i := 1; i <= n; i++ {
+			paths = append(paths, fmt.Sprintf("/sys/bus/pci/devices/0000:%02x:00.0/class", i))
+		}
+		return paths, nil
+	}
+	p.ReadFile = func(path string) ([]byte, error) {
+		switch filepath.Base(path) {
+		case "class":
+			return []byte("0x030000"), nil
+		case "vendor":
+			return []byte("0x10de"), nil
+		case "current_link_width":
+			if integrated {
+				return []byte("0"), nil
+			}
+			return []byte("16"), nil
 		}
 		return nil, os.ErrNotExist
 	}

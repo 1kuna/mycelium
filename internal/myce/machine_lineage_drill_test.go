@@ -18,6 +18,7 @@ import (
 // Opt-in because it builds/runs two historical binaries. The private wrapper
 // builds their exact git revisions in detached .reports worktrees, plus M.
 func TestM4ProductionLineageDrill(t *testing.T) {
+	stopOnly := os.Getenv("MYCE_M4_STOP_ONLY") == "1"
 	production, compat, bridge, current := os.Getenv("MYCE_M4_PRODUCTION_BINARY"), os.Getenv("MYCE_M4_COMPAT_BINARY"), os.Getenv("MYCE_M4_BRIDGE_BINARY"), os.Getenv("MYCE_M4_CURRENT_BINARY")
 	if production == "" {
 		t.Skip("run scripts/m4-production-drill.sh to build the historical binaries")
@@ -184,7 +185,9 @@ func TestM4ProductionLineageDrill(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	bridgeCall("close")
+	if !stopOnly {
+		bridgeCall("close")
+	}
 	stop(old, oldDone)
 	oldStopped = true
 	closedIntent, err := os.ReadFile(filepath.Join(hostDir, "host-state.json"))
@@ -205,14 +208,22 @@ func TestM4ProductionLineageDrill(t *testing.T) {
 			}
 		}
 	}
-	t.Log("production drain confirmed; stopped-state DB/config/unit/binary snapshot retained")
+	t.Logf("production stopped (stop-only=%t); stopped-state DB/config/unit/binary snapshot retained", stopOnly)
 	q, err := Open(db, checkpoints, RealClock{})
 	if err != nil {
 		t.Fatal("M upgrade", err)
 	}
-	if q.s.HostMaintenance["b70"].Mode != "disabled" {
+	if !stopOnly && q.s.HostMaintenance["b70"].Mode != "disabled" {
 		q.Close()
 		t.Fatal("M startup lost production drain fence")
+	}
+	if stopOnly {
+		if len(q.s.ProductionDrains) != 0 {
+			t.Fatal("stop-only drill unexpectedly has production drain receipts")
+		}
+		if _, err := q.ChangeHostMaintenance("b70", HostMaintenanceRequest{Action: "disable", Stop: true}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	newListener, err := net.Listen("tcp", address)
 	if err != nil {
@@ -248,8 +259,9 @@ func TestM4ProductionLineageDrill(t *testing.T) {
 		t.Fatal(err)
 	}
 	workerArgs := []string{"join", "--queue", url, "--name", "fake-1", "--host-id", "b70", "--gpu", "fake", "--memory-mode", "fixed", "--memory-gb", "8", "--state-dir", src[0].State, "--checkpoint-root", checkpoints, "--host-state-dir", compatHost}
-	legacy, legacyDone := start(compat, workerArgs...)
-	legacyStopped := false
+	var legacy *exec.Cmd
+	var legacyDone <-chan error
+	legacyStopped := true
 	defer func() {
 		if !legacyStopped {
 			legacy.Process.Kill()
@@ -265,16 +277,20 @@ func TestM4ProductionLineageDrill(t *testing.T) {
 		stop(legacy, legacyDone)
 		legacyStopped = true
 	}
-	beforeContact := q.s.Machines["fake-1"].LastSeen
-	wait(func() bool {
-		data, _ := os.ReadFile(processLogs[legacy])
-		return strings.Contains(string(data), "HTTP 404")
-	})
-	if !q.s.Machines["fake-1"].LastSeen.Equal(beforeContact) {
-		t.Fatal("legacy binary unexpectedly passed removed host-control route")
+	if !stopOnly {
+		legacy, legacyDone = start(compat, workerArgs...)
+		legacyStopped = false
+		beforeContact := q.s.Machines["fake-1"].LastSeen
+		wait(func() bool {
+			data, _ := os.ReadFile(processLogs[legacy])
+			return strings.Contains(string(data), "HTTP 404")
+		})
+		if !q.s.Machines["fake-1"].LastSeen.Equal(beforeContact) {
+			t.Fatal("legacy binary unexpectedly passed removed host-control route")
+		}
+		stopCompat()
+		t.Log("08816cf binary: removed host-control route returns HTTP 404; process retries, no check-in/admission; laptop local close stops it")
 	}
-	stopCompat()
-	t.Log("08816cf binary: removed host-control route returns HTTP 404; process retries, no check-in/admission; laptop local close stops it")
 	// Leave no live worker while offline conversion runs. Preserve actual source
 	// session identity after the compatibility check's clean leave.
 	closeQueue()
@@ -291,12 +307,21 @@ func TestM4ProductionLineageDrill(t *testing.T) {
 	os.WriteFile(qc.Config, data, 0600)
 	mapping := []MachineRename{{"fake-1", "b70", "0"}, {"fake-2", "b70", "1"}}
 	noop := func(context.Context, string, ...string) ([]byte, error) { return nil, nil }
-	if err := ConvertQueueInstall(ctx, qc, mapping, false, false, RealClock{}, noop); err != nil {
+	var drain []MachineDrainOptions
+	if stopOnly {
+		options, evidenceRun := m4DrillEmptyEvidence(t, src)
+		drain = []MachineDrainOptions{options}
+		noop = evidenceRun
+	}
+	if err := ConvertQueueInstall(ctx, qc, mapping, false, false, RealClock{}, noop, drain...); err != nil {
 		t.Fatal("offline production conversion", err)
 	}
 	q, err = Open(db, checkpoints, RealClock{})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if stopOnly && len(q.s.MachineConversion.VerifiedEmptyDrains) != 2 {
+		t.Fatal("missing stop-only conversion receipts")
 	}
 	newListener, err = net.Listen("tcp", address)
 	if err != nil {
@@ -390,31 +415,35 @@ func TestM4ProductionLineageDrill(t *testing.T) {
 	if err := writeInstallFile(filepath.Join(compatHost, "host-state.json"), openIntent, 0600, installFiles{}, nil); err != nil {
 		t.Fatal(err)
 	}
-	legacy, legacyDone = start(compat, workerArgs...)
-	legacyStopped = false
+	if !stopOnly {
+		legacy, legacyDone = start(compat, workerArgs...)
+		legacyStopped = false
+	}
 	var reply Reply
 	err = client.Call(ctx, "POST", "/api/workers/checkin", Checkin{Machine: *q.s.MachineConversion.Machines["fake-1"]}, &reply)
 	if !errors.As(err, &typed) || typed.Code != "machine_renamed" {
 		t.Fatal("rollback interval must refuse retired checkin", err)
 	}
-	wait(func() bool {
-		data, _ := os.ReadFile(processLogs[legacy])
-		return strings.Contains(string(data), "HTTP 404")
-	})
-	ticker := time.NewTimer(100 * time.Millisecond)
-	select {
-	case err := <-legacyDone:
-		legacyStopped = true
-		var exit *exec.ExitError
-		if !errors.As(err, &exit) {
-			t.Fatal("unexpected legacy exit", err)
+	if !stopOnly {
+		wait(func() bool {
+			data, _ := os.ReadFile(processLogs[legacy])
+			return strings.Contains(string(data), "HTTP 404")
+		})
+		ticker := time.NewTimer(100 * time.Millisecond)
+		select {
+		case err := <-legacyDone:
+			legacyStopped = true
+			var exit *exec.ExitError
+			if !errors.As(err, &exit) {
+				t.Fatal("unexpected legacy exit", err)
+			}
+			t.Logf("rollback interval: legacy process exit=%d; RestartPreventExitStatus=78 applies only to exit 78", exit.ExitCode())
+		case <-ticker.C:
+			t.Log("rollback interval: retired check-ins refused; actual 08816cf process stays alive/retries (78 does not suppress retries)")
+			stopCompat()
 		}
-		t.Logf("rollback interval: legacy process exit=%d; RestartPreventExitStatus=78 applies only to exit 78", exit.ExitCode())
-	case <-ticker.C:
-		t.Log("rollback interval: retired check-ins refused; actual 08816cf process stays alive/retries (78 does not suppress retries)")
-		stopCompat()
+		ticker.Stop()
 	}
-	ticker.Stop()
 	serviceContract := src[0]
 	serviceContract.RequireMemoryCeilings = true
 	if !strings.Contains(serviceContract.ServiceText(), "RestartPreventExitStatus=78") {
@@ -445,7 +474,9 @@ func TestM4ProductionLineageDrill(t *testing.T) {
 	old, oldDone = start(production, oldArgs...)
 	oldStopped = false
 	wait(func() bool { return len(snapshot().Machines) == 2 })
-	bridgeCall("open")
+	if !stopOnly {
+		bridgeCall("open")
+	}
 	for _, name := range []string{"fake-1", "fake-2"} {
 		s := spec("experiment")
 		s.Resumable = false

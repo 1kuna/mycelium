@@ -24,6 +24,8 @@ func TestOnboardingInstallWholeMachineSelectorsAndDriverRefusal(t *testing.T) {
 		switch filepath.Base(path) {
 		case "class":
 			return []byte("0x030000"), nil
+		case "current_link_width":
+			return []byte("16"), nil
 		case "vendor":
 			return []byte("0x10de"), nil
 		}

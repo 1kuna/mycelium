@@ -13,10 +13,13 @@ import (
 )
 
 func fakeProbe(osname, arch, nvidia, intel string) MachineProbe {
-	return MachineProbe{OS: osname, Arch: arch, Glob: func(string) ([]string, error) { return nil, nil }, ReadFile: func(string) ([]byte, error) { return nil, os.ErrNotExist }, Command: func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	p := MachineProbe{OS: osname, Arch: arch, Glob: func(string) ([]string, error) { return nil, nil }, ReadFile: func(string) ([]byte, error) { return nil, os.ErrNotExist }, Command: func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		switch name {
 		case "nvidia-smi":
 			if nvidia != "" {
+				if strings.Contains(strings.Join(args, " "), "uuid,driver_version") {
+					return []byte("GPU-fixture, driver, 0000:01:00.0"), nil
+				}
 				return []byte(nvidia), nil
 			}
 		case "sycl-ls":
@@ -30,6 +33,16 @@ func fakeProbe(osname, arch, nvidia, intel string) MachineProbe {
 		}
 		return nil, exec.ErrNotFound
 	}}
+	if nvidia != "" {
+		link := "16"
+		if strings.Contains(nvidia, "N/A") {
+			link = "0"
+		}
+		facts := pciFixtureProbe(pciFixture{"0000:01:00.0", "0x10de", link, "fixture", "", true})
+		p.Glob, p.ReadFile = facts.Glob, facts.ReadFile
+	}
+	return p
+
 }
 func TestInstallDetectionDryPlans(t *testing.T) {
 	cases := []struct {
@@ -202,6 +215,7 @@ func TestInstallDiscreteIntelUsesConservativeDeviceMemory(t *testing.T) {
 		}
 		return nil, exec.ErrNotFound
 	}
+	p = withIntelRuntimeFixture(p)
 	if _, e = p.Detect(context.Background()); e == nil {
 		t.Fatal("CPU vendor used as GPU vendor")
 	}

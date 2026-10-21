@@ -179,6 +179,9 @@ func TestDetectServiceSelectedXPUUsesWorkerBinding(t *testing.T) {
 		}
 		return command(ctx, name, args...)
 	}
+	facts := pciFixtureProbe(pciFixture{"0000:01:00.0", "0x8086", "8", "Intel GPU", "", true}, pciFixture{"0000:02:00.0", "0x8086", "8", "Intel GPU", "", true})
+	p.Glob, p.ReadFile = facts.Glob, facts.ReadFile
+	p.CommandEnv = facts.CommandEnv
 	access := GPUAccessProbe{Glob: func(string) ([]string, error) { return []string{"/dev/dri/renderD129"}, nil }, Groups: func() ([]string, error) { return []string{"render"}, nil }, Open: func(string) error { return nil }}
 	d, err := DetectService(context.Background(), c, p, access)
 	if err != nil || d.Platform != "xpu" || d.MemoryGB != 16 {

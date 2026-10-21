@@ -13,7 +13,10 @@ import (
 const networkFilesystemBudget = 250 * time.Millisecond
 
 var errCheckpointIOTimeout = errors.New("NAS unreachable: filesystem operation timed out")
-var errCheckpointIOPending = errors.New("NAS unreachable: previous filesystem call is still blocked")
+
+// Pending preserves the worker's timeout diagnostic, while distinguishing an
+// unfinished observation from a completed failure for inventory refresh.
+var errCheckpointIOPending = errors.New("NAS unreachable: filesystem operation timed out")
 
 // Filesystem syscalls cannot be cancelled. Keep at most one outstanding call
 // per operation, and never wait for NAS I/O while holding the queue lock.
@@ -52,6 +55,9 @@ func (n *checkpointIO[T]) runBounded(parent context.Context, key string, fn func
 	for {
 		if err := context.Cause(ctx); err != nil {
 			if errors.Is(err, context.DeadlineExceeded) {
+				if !discardOnTimeout {
+					return zero, errCheckpointIOPending
+				}
 				return zero, errCheckpointIOTimeout
 			}
 			return zero, err
@@ -88,8 +94,11 @@ func (n *checkpointIO[T]) runBounded(parent context.Context, key string, fn func
 				continue
 			}
 			// A completion racing cancellation must not be accepted as success.
-			if err := context.Cause(ctx); err != nil {
+			if err := context.Cause(ctx); discardOnTimeout && err != nil {
 				if errors.Is(err, context.DeadlineExceeded) {
+					if !discardOnTimeout {
+						return zero, errCheckpointIOPending
+					}
 					return zero, errCheckpointIOTimeout
 				}
 				return zero, err
@@ -101,6 +110,9 @@ func (n *checkpointIO[T]) runBounded(parent context.Context, key string, fn func
 			n.mu.Unlock()
 			err := context.Cause(ctx)
 			if errors.Is(err, context.DeadlineExceeded) {
+				if !discardOnTimeout {
+					return zero, errCheckpointIOPending
+				}
 				return zero, errCheckpointIOTimeout
 			}
 			return zero, err
