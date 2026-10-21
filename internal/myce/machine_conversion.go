@@ -17,18 +17,19 @@ type MachineRename struct {
 	Device string `json:"device"`
 }
 type MachineConversion struct {
-	Changes             []string                 `json:"changes,omitempty"`
-	PublicationPending  bool                     `json:"publication_pending,omitempty"`
-	Mapping             []MachineRename          `json:"mapping"`
-	RolledBack          bool                     `json:"rolled_back"`
-	Policies            map[string]ProjectPolicy `json:"policies"`
-	Pins                []ModelPin               `json:"pins"`
-	Hosts               map[string]*HostState    `json:"hosts"`
-	Machines            map[string]*Machine      `json:"machines"`
-	Models              ModelConfig              `json:"models"`
-	ModelsHash          string                   `json:"models_hash"`
-	ConvertedModelsHash string                   `json:"converted_models_hash"`
-	ConvertedModels     ModelConfig              `json:"converted_models"`
+	VerifiedEmptyDrains []VerifiedEmptyDrainReceipt `json:"verified_empty_drains,omitempty"`
+	Changes             []string                    `json:"changes,omitempty"`
+	PublicationPending  bool                        `json:"publication_pending,omitempty"`
+	Mapping             []MachineRename             `json:"mapping"`
+	RolledBack          bool                        `json:"rolled_back"`
+	Policies            map[string]ProjectPolicy    `json:"policies"`
+	Pins                []ModelPin                  `json:"pins"`
+	Hosts               map[string]*HostState       `json:"hosts"`
+	Machines            map[string]*Machine         `json:"machines"`
+	Models              ModelConfig                 `json:"models"`
+	ModelsHash          string                      `json:"models_hash"`
+	ConvertedModelsHash string                      `json:"converted_models_hash"`
+	ConvertedModels     ModelConfig                 `json:"converted_models"`
 }
 
 // Refusal identifies the exact logical jobs; keyed intent is never rewritten.
@@ -95,7 +96,7 @@ func migrationNames(names []string, mapping []MachineRename, device string, card
 	return result, device, nil
 }
 
-func (q *Queue) machineConversionPlan(mapping []MachineRename, models ModelConfig) (*MachineConversion, error) {
+func (q *Queue) machineConversionPlan(mapping []MachineRename, models ModelConfig, drains []VerifiedEmptyDrainReceipt) (*MachineConversion, error) {
 	if len(mapping) == 0 {
 		return nil, migrationError("machine_migration_incomplete", "explicit machine map is required")
 	}
@@ -166,7 +167,7 @@ func (q *Queue) machineConversionPlan(mapping []MachineRename, models ModelConfi
 			if !seen[m.ID] {
 				return nil, migrationError("machine_migration_incomplete", "missing source "+m.ID)
 			}
-			if (!q.productionSourceSettled(m) && (m.Gone || m.LastSeen.After(q.clock.Now()) || q.clock.Now().Sub(m.LastSeen) >= min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2])))) || m.DockerCleanup != "" {
+			if (!q.productionSourceSettled(m) && !verifiedEmptySource(drains, m) && (m.Gone || m.LastSeen.After(q.clock.Now()) || q.clock.Now().Sub(m.LastSeen) >= min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2])))) || m.DockerCleanup != "" {
 				return nil, migrationError("machine_migration_incomplete", "source is stale, missing or has cleanup")
 			}
 			for _, j := range q.s.Jobs {
@@ -177,7 +178,7 @@ func (q *Queue) machineConversionPlan(mapping []MachineRename, models ModelConfi
 		}
 	}
 	copyJSON := func(from, to any) { data, _ := json.Marshal(from); _ = json.Unmarshal(data, to) }
-	out := &MachineConversion{Mapping: slices.Clone(mapping)}
+	out := &MachineConversion{Mapping: slices.Clone(mapping), VerifiedEmptyDrains: drains}
 	copyJSON(q.s.Policies, &out.Policies)
 	copyJSON(q.s.Pins, &out.Pins)
 	copyJSON(q.s.Hosts, &out.Hosts)
@@ -193,7 +194,11 @@ func (q *Queue) machineConversionPlan(mapping []MachineRename, models ModelConfi
 func (q *Queue) ConvertMachines(mapping []MachineRename, models ModelConfig, dry bool) (*MachineConversion, error) {
 	return q.convertMachines(mapping, models, dry, false)
 }
-func (q *Queue) convertMachines(mapping []MachineRename, models ModelConfig, dry, publicationPending bool) (*MachineConversion, error) {
+func (q *Queue) convertMachines(mapping []MachineRename, models ModelConfig, dry, publicationPending bool, evidence ...[]VerifiedEmptyDrainReceipt) (*MachineConversion, error) {
+	var drains []VerifiedEmptyDrainReceipt
+	if len(evidence) > 0 {
+		drains = evidence[0]
+	}
 	var result *MachineConversion
 	operation := func() error {
 		if previous := q.s.MachineConversion; previous != nil && !previous.RolledBack {
@@ -203,7 +208,7 @@ func (q *Queue) convertMachines(mapping []MachineRename, models ModelConfig, dry
 			result = previous
 			return nil
 		}
-		plan, err := q.machineConversionPlan(mapping, models)
+		plan, err := q.machineConversionPlan(mapping, models, drains)
 		if err != nil {
 			return err
 		}
@@ -269,6 +274,9 @@ func (q *Queue) convertMachines(mapping []MachineRename, models ModelConfig, dry
 		q.s.Policies, q.s.Pins, q.s.Hosts = policies, pins, hosts
 		for _, r := range mapping {
 			if r.From == r.To {
+				if verifiedEmptySource(drains, q.s.Machines[r.From]) {
+					q.s.Machines[r.From].Gone = true
+				}
 				continue
 			}
 			m := q.s.Machines[r.From]

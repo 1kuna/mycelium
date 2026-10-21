@@ -51,18 +51,40 @@ func openConversionQueue(c ServiceConfig, clock Clock) (*Queue, error) {
 // ConvertQueueInstall publishes the small policy/config files through the same
 // install transaction as worker installs. SQLite owns logical state; the journal
 // survives interruption and a retry completes publication before queue startup.
-func ConvertQueueInstall(ctx context.Context, c ServiceConfig, mapping []MachineRename, dry, rollback bool, clock Clock, command func(context.Context, string, ...string) ([]byte, error)) (result error) {
+func ConvertQueueInstall(ctx context.Context, c ServiceConfig, mapping []MachineRename, dry, rollback bool, clock Clock, command func(context.Context, string, ...string) ([]byte, error), drain ...MachineDrainOptions) (result error) {
 	if c.Role != "queue" || clock == nil {
 		return errors.New("queue config and Clock required")
 	}
-	return convertQueueInstall(ctx, c, mapping, dry, rollback, clock, command, installFiles{})
+	return convertQueueInstall(ctx, c, mapping, dry, rollback, clock, command, installFiles{}, drain...)
 }
-func convertQueueInstall(ctx context.Context, c ServiceConfig, mapping []MachineRename, dry, rollback bool, clock Clock, command func(context.Context, string, ...string) ([]byte, error), files installFiles) (result error) {
+func convertQueueInstall(ctx context.Context, c ServiceConfig, mapping []MachineRename, dry, rollback bool, clock Clock, command func(context.Context, string, ...string) ([]byte, error), files installFiles, drain ...MachineDrainOptions) (result error) {
+	var options MachineDrainOptions
+	if len(drain) > 1 {
+		return migrationError("machine_drain_evidence_invalid", "one drain mode is required")
+	}
+	if len(drain) == 1 {
+		options = drain[0]
+	}
+	if options.Mode != "" && (options.Mode != "verified-empty" || rollback) {
+		return migrationError("machine_drain_evidence_invalid", "verified-empty is only for forward offline queue conversion")
+	}
 	q, err := openConversionQueue(c, clock)
 	if err != nil {
+		if options.Mode != "" {
+			return migrationError("machine_drain_queue_unreadable", "stopped queue database or exclusive lock unavailable")
+		}
 		return err
 	}
 	defer q.Close()
+	var receipts []VerifiedEmptyDrainReceipt
+	if options.Mode == "verified-empty" && (q.s.MachineConversion == nil || q.s.MachineConversion.RolledBack) {
+		var release func()
+		receipts, release, err = q.verifyEmptyDrain(ctx, mapping, options, command)
+		if err != nil {
+			return err
+		}
+		defer release()
+	}
 	models, err := ReadModels(c.ModelCatalog)
 	if err != nil {
 		return err
@@ -75,7 +97,7 @@ func convertQueueInstall(ctx context.Context, c ServiceConfig, mapping []Machine
 		}
 		plan = q.s.MachineConversion
 	} else {
-		plan, err = q.ConvertMachines(mapping, models, true)
+		plan, err = q.convertMachines(mapping, models, true, false, receipts)
 		if err != nil {
 			return err
 		}
@@ -156,7 +178,7 @@ func convertQueueInstall(ctx context.Context, c ServiceConfig, mapping []Machine
 	}
 	// A saved mapping is the idempotence fence. The state commit also retains the
 	// full original pins/policies and historical source records for rollback.
-	plan, err = q.convertMachines(mapping, models, false, true)
+	plan, err = q.convertMachines(mapping, models, false, true, receipts)
 	if err != nil {
 		return err
 	}

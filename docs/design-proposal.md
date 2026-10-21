@@ -986,7 +986,9 @@ consumers in the agreed drain. No rolling service restart is implicitly safe.
    window. The starting point is **production 57ed4e6 queue/root and 08816cf
    workers**, not integ: it has local host intent/registry but no queue-owned
    maintenance API or host memory budget record. Freeze Verso/other intake.
-   On that lineage use its root `host close --local --wait-released` bridge;
+   The preferred route on that lineage uses its root
+   `host close --local --wait-released` bridge; the explicit verified-empty
+   alternative below requires no privileged close.
    exit 1 with `release_not_confirmed` means re-check status, never release.
    Require confirmed settlement, zero custody, then stop the exact units and
    snapshot binaries (root separately), configs, units, registries and DB.
@@ -997,7 +999,8 @@ consumers in the agreed drain. No rolling service restart is implicitly safe.
    Require no queued jobs whose job or resolved placement references a retiring
    name; let clients cancel/resubmit before the window, never rewrite keyed
    specs in place. A missing/stale worker without the exact production discharge
-   receipt, or any residual obligation, fails the gate.
+   receipt, or any residual obligation, fails the gate unless the explicit
+   verified-empty route below independently proves the stopped sources empty.
    Preserve queue/key/counter state and checkpoint generations. Record source
    IDs, sessions and device identities.
 2. Snapshot the queue binary, SQLite state and queue-side config, both workers'
@@ -1118,6 +1121,70 @@ Queued jobs resolved through project, pin or server fences also block retirement
 with `QueuedRetiredMachinesError` (`machine_migration_queued_jobs`), including
 logical job IDs and retiring machine names. Jobs and keyed specs are unchanged.
 
+**Verified-empty drain (decision 2026-10-21).** Exact persisted production close
+and source-session discharge receipts remain the preferred route. Operators who
+cannot or choose not to run privileged production close may instead stop the
+source user units, freeze all producers, disable the mapped hosts in M, and run:
+
+```sh
+myce install queue --config QUEUE_CONFIG --machine-map MAP \
+  --drain-evidence=verified-empty \
+  --from-worker-config SOURCE_0 --from-worker-config SOURCE_1 --dry-run
+```
+
+Repeat without `--dry-run` after reviewing the plan. Supply every mapped source
+config, including a single-worker host's config when converting that host. The
+tool inspects the **local systemd user manager** and source spools; copied remote
+attestations cannot authorize conversion. The offline database must be an
+existing, readable supported queue held under its exclusive lock. This route
+conservatively requires **zero queued, running, stopping or preparing jobs in the
+whole queue**, including retained submission records, and zero host releases or
+obligations on the mapped hosts. It never infers discharge from worker age.
+
+For each exact queue machine/session and source config, verify the loaded unit's
+identity and fragment path, `ActiveState=inactive`, `MainPID=0`, and no pending
+unit job. Verify cgroup v2 and read `cgroup.procs` throughout the unit subtree.
+When systemd clears an inactive unit's `ControlGroup`, derive its normal path
+from the manager's reported containing slice and exact unit name; an absent
+subtree is accepted only with a readable containing slice. Missing or unreadable
+kernel evidence refuses. Hold the source's existing exclusive `worker.lock`
+through conversion and publication, require its marked v3 spool and exact saved
+session, and use the C4 production/M spool inspector without cleanup or inferred
+acknowledgements. Hash the format marker and top-level JSON evidence in sorted
+name order with length-delimited file names/sizes and SHA-256.
+
+At each configured Docker endpoint (explicit local default when Docker was not
+configured), successful `docker ps` must show zero running containers labelled
+with the source's `myce.worker` and zero with `myce.attempt`. The latter is a
+conservative endpoint-wide fence covering older attempt-only labels. Docker
+being disabled for future jobs does not waive this observation. Inaccessible
+Docker returns `machine_drain_docker_inaccessible`; running labelled containers
+return `machine_drain_container_running`. Other distinct typed refusals include
+`machine_drain_queue_not_empty`, `machine_drain_obligations_pending`,
+`machine_drain_unit_active`, `machine_drain_unit_unreadable`,
+`machine_drain_cgroup_populated`, `machine_drain_cgroup_unreadable`,
+`machine_drain_spool_unsettled`, `machine_drain_evidence_missing` and
+`machine_drain_queue_unreadable`. Refusal and preview never persist a receipt.
+
+The conversion record's `verified_empty_drains` receipts commit atomically with
+source retirement: injected-Clock timestamps, machine/host/session, inactive unit
+and substate/MainPID, cgroup path and empty/absent observations, spool SHA-256,
+Docker observation time/count, and all six zero queue/custody counts. They are
+historical installation evidence, never reusable health or admission authority.
+The verified stopped source becomes Gone even for a same-name single-worker
+conversion, allowing a fresh machine spool without fabricating a leave/session
+chain. Publication retries use the already committed conversion; forward after
+rollback requires fresh evidence. Without the flag all existing conversion gates
+remain unchanged.
+
+This is safe because there is **no producer, no custody, and no process can hold
+a device**: intake is frozen and the queue is stopped/locked, mapped hosts remain
+disabled, no pending intent or release remains, existing spool locks exclude
+worker restart through retirement, units/cgroups are stopped/empty, and the
+daemon independently proves there is no labelled container execution. Any
+unknown observation refuses. It adds no production host-control API, privilege
+requirement, remote attestation system or runtime compatibility path.
+
 Rollback reverses the current representable pins, preserving additions, removals
 and preemption counters. A new host-wide pin that cannot be expressed on split
 workers blocks rollback until the operator explicitly selects a card or removes
@@ -1162,7 +1229,8 @@ catalog hash while its host is disabled with no obligations; its model endpoint
 is withheld. Inventory workers, unknown sessions and resumed hosts still require
 the current hash. This exception ends with conversion/rollback and cannot admit
 work. Spark uses a fresh spool only after its same-name source completes the normal
-leave handshake. No prior-session relationship is invented. The compatible
+leave handshake or passes the explicit verified-empty retirement gate above.
+No prior-session relationship is invented. The compatible
 queue and all subsequently accepted jobs, keys, counters and checkpoints survive
 worker rollback. A separate queue downgrade remains subject to the stricter
 no-new-intent rule above. In the production-snapshot abort, stop all M writers,
