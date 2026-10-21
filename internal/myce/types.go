@@ -345,6 +345,7 @@ type Job struct {
 	Checkpoint            string                       `json:"checkpoint"`
 }
 type Machine struct {
+	Enrollment             *EnrollmentProof    `json:"enrollment,omitempty"`
 	Recovering             bool                `json:"recovering,omitempty"`
 	RecoveringSince        *time.Time          `json:"recovering_since,omitempty"`
 	RecoveryNeedsAttention bool                `json:"recovery_needs_attention,omitempty"` // Status-only projection.

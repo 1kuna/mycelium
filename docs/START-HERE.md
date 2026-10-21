@@ -22,6 +22,14 @@ parsing, request coordination and publication stay in the caller.
 Commands and extensions are supported paths in the same runtime. Fake inventory
 runs actual laptop commands; it cannot qualify a real GPU library or model.
 
+## Add a hypha
+
+Run `myce invite` on an authorized installed hypha, then paste the one output line
+on the new machine. No Go/git or credential-file transfer is needed. The queue
+must have an approved release; [joining](guide-joining-v3.md) covers that setup,
+NAS prerequisites, readiness states and upgrades. `--out FILE` optionally saves
+the command. A polite waiting enrollment succeeds without claiming work is ready.
+
 ## Try it on a laptop
 
 Follow the [README quick start](../README.md#five-minute-laptop-start). Keep dev

@@ -1460,3 +1460,62 @@ inventory and concurrent attempts; Windows/WSL qualification remains W1/W2.
 CPU counts are admission reservations, not CPU-time enforcement; macOS RAM remains admission-only and delegated Linux
 RAM enforcement retains its existing qualification requirements. Real native
 Linux/Windows acceptance and fleet cutover are separate from laptop proof.
+
+
+## One-command enrollment: B0/B1/B6 (#108, 2026-10-21)
+
+One mycelium is the cluster; a hypha is a machine and reports all its components.
+The existing `myce invite` and `myce install worker --enroll` paths provide
+bootstrap and enrollment. By default invite prints exactly one paste-ready line
+to stdout; `--out FILE` also saves it privately. Foreground `join` remains the worker runtime.
+NAS mode is required by #109. B2/B3/B4 own hardware preflight, NAS/tools and saved
+service/policy fields; this slice passes their ordinary installer options through
+unchanged. B5's automatic legacy conversion and B7/B8 qualification remain separate.
+
+Releases contain linux/amd64, linux/arm64 and native darwin/arm64+cgo binaries.
+The publisher signs an exact JSON manifest with Ed25519. The queue verifies it
+against an independently provisioned public key, never a key from the manifest,
+then supplies approved public release metadata to pinned authenticated inviters.
+Explicit local manifest/key/origin overrides perform the same verification.
+The verified manifest binds version, protocols, OS/arch, size, SHA-256 and native
+Mac sensing. No release tooling existed to reuse. A small POSIX command is needed
+because clean hosts have no myce, Go or Git. Its embedded verified hash matrix
+selects the artifact and HTTPS origin; curl resumes a private partial download,
+refuses redirects, and a platform SHA-256 tool verifies bytes before execution.
+Publisher HTTPS plus the signed manifest are separate from the LAN queue's exact
+certificate-DER pin. Never confuse that pin with curl's SPKI pinnedpubkey.
+
+Authenticated inviters mint 15-minute tickets (maximum one hour) over pinned TLS.
+The existing SQLite stores only ticket digests, expiry, queue pin and consumed
+state. One atomic conditional update redeems exactly once. Tickets authorize only
+redemption, never the jobs/status API; expiry uses the injected queue Clock. The
+fleet credential travels only in the pinned TLS response and mode-0600 installed
+joining file, never argv, URLs, history or diagnostics. If a redemption response
+is lost before durable saving, mint a new ticket; do not make replay reusable.
+Existing private file invitations remain supported with explicit
+`--private-file --out FILE` for compatibility. Installed
+reruns use their saved joining authority and do not redeem the spent ticket.
+
+Enrollment completion requires the installed spool's exact session, the current
+host-launch and keyed-attempt protocols, every expected device identity, CPU/RAM
+facts and live memory, policy acknowledgement, fresh queue observations, a small
+recorded runner smoke with no fleet token, and stable service-manager health.
+A machine's receipt binds its service PID, exact release/session, expected
+inventory, CPU count and total RAM; queue-owned CPU/RAM allowances must be acknowledged. Registration
+alone is incomplete. A healthy daily-use hypha may finish as `polite_waiting`;
+an operator-maintained host finishes as `disabled` or `drained`, never `ready`.
+Unknown devices, queue outage/426, recovery or a start-loop cannot complete ready.
+The summary includes the hypha name, OS/arch, devices, CPU/RAM allowances, storage,
+participation and enforcement. This smoke does not qualify project extensions.
+
+Each printed line freezes the approved release and checksums for reproducibility.
+Reuse that line for interrupted installation and same-version health checks;
+use a line for a newer approved release to upgrade. Installed upgrades use saved
+authority without redeeming or requiring another ticket.
+Same-version reruns verify health without changing files or restarting services.
+A changed release drains only the local host through existing queue maintenance,
+waits for exact custody settlement, and uses the existing installer transaction
+and spool. Existing disabled/drained policy is preserved; an installer never
+resumes an operator-disabled host. Upgrade failures retain maintenance and custody
+for repair. No fleet operation, reboot, driver install or privileged service is
+implied. Native fleet acceptance remains a separately authorized test window.

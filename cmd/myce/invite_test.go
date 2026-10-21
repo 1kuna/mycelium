@@ -20,7 +20,7 @@ func TestInvitePrintsCommandWithoutCredential(t *testing.T) {
 	token := "invite-private-test-only"
 	t.Setenv("MYCE_TOKEN", token)
 	path := filepath.Join(t.TempDir(), "private invite.json")
-	output := captureJoiningOutput(t, func() error { return inviteCommand([]string{"--identity-dir", dir, "--out", path}) })
+	output := captureJoiningOutput(t, func() error { return inviteCommand([]string{"--private-file", "--identity-dir", dir, "--out", path}) })
 	if strings.Contains(output, token) || !strings.Contains(output, "myce install worker --joining-file 'private invite.json'") {
 		t.Fatal("unsafe invite output")
 	}
@@ -28,11 +28,13 @@ func TestInvitePrintsCommandWithoutCredential(t *testing.T) {
 	if err != nil || invitation.Token != token || invitation.Fingerprint != identity.Fingerprint() {
 		t.Fatal("invitation missing authority", err)
 	}
-	if err = inviteCommand([]string{"--identity-dir", dir, "--out", path}); err == nil {
+	if err = inviteCommand([]string{"--private-file", "--identity-dir", dir, "--out", path}); err == nil {
 		t.Fatal("overwrote invitation")
 	}
 	copyPath := filepath.Join(t.TempDir(), "copy.json")
-	captureJoiningOutput(t, func() error { return inviteCommand([]string{"--joining-file", path, "--out", copyPath}) })
+	captureJoiningOutput(t, func() error {
+		return inviteCommand([]string{"--private-file", "--joining-file", path, "--out", copyPath})
+	})
 	copy, err := myce.ReadInvitation(copyPath)
 	if err != nil || copy != invitation {
 		t.Fatal("existing hypha cannot invite", err)

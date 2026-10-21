@@ -111,6 +111,7 @@ func installName(v string) error {
 // explicit aliases for one field, so table order can never define precedence.
 func InstallSettings() []InstallSetting {
 	return []InstallSetting{
+		installSetting("enrollment", "Enrollment", "record exact-session enrollment and runner smoke", func(c *ServiceConfig) *bool { return &c.Enrollment }, installAny[bool]),
 		installSetting("allow-deviceless", "AllowDeviceless", "allow CPU/fake test worker", func(c *ServiceConfig) *bool { return &c.AllowDeviceless }, installAny[bool]),
 		installSetting("device", "Device", "physical GPU selector", func(c *ServiceConfig) *string { return &c.Device }, installAny[string]),
 		installSetting("docker-host", "DockerEndpoint", "opt in to managed Docker at this endpoint (empty disables Docker)", func(c *ServiceConfig) *string { return &c.DockerEndpoint }, installAny[string]),

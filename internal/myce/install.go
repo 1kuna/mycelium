@@ -183,6 +183,7 @@ func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detectio
 }
 
 type ServiceConfig struct {
+	Enrollment        bool            `json:"enrollment,omitempty"`
 	MachineDevices    []DeviceInstall `json:"machine_devices,omitempty"`
 	FromWorkerConfigs []string        `json:"-"`
 
@@ -806,6 +807,9 @@ func (c ServiceConfig) Args() []string {
 
 		if c.DockerEndpoint != "" {
 			args = append(args, "--docker-host", c.DockerEndpoint)
+		}
+		if c.Enrollment {
+			args = append(args, "--enrollment")
 		}
 		if c.OnboardingBenchmark {
 			args = append(args, "--onboarding-benchmark")

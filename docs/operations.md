@@ -1,5 +1,19 @@
 # Operating Mycelium v3
 
+## Add a hypha with one command
+
+On an authorized installed hypha, run `myce invite` and paste its single output
+line on the new machine. `--out FILE` optionally saves the same command. The queue
+must approve a [signed release](guide-onboarding-releases.md) first. The bootstrap
+needs no Go or Git and never prints the fleet token. See
+[joining](guide-joining-v3.md) for prerequisites, ticket expiry and recovery.
+
+Completion checks exact session/protocol/components, CPU/RAM budgets, runner smoke
+and stable manager health. `polite_waiting`, `disabled` and `drained` do not mean
+`ready`. Repeat a release's line for an interrupted install or health check;
+use a line for a newer release to upgrade while preserving spool, identity and
+maintenance. Existing legacy conversion remains the explicit M4 procedure below.
+
 ## Queue maintenance
 
 All commands use the authenticated queue and run as an ordinary account.

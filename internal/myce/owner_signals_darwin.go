@@ -9,6 +9,8 @@ void myce_owner_signals(double *idle, int *power, int *laptop, int *heat);
 import "C"
 import "context"
 
+const NativeOwnerSignals = true
+
 func LocalOwnerSignals(context.Context) OwnerSignals {
 	var idle C.double
 	var power, laptop, heat C.int

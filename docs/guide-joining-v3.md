@@ -1,56 +1,77 @@
 # Automatic joining
 
-A new hypha uses Bonjour/mDNS to find the mycelium. Discovery is only an
-address finder: a private invitation supplies the queue's certificate pin and
-joining credential before any connection is trusted. This is the provisional
-invitation choice in [#32](https://github.com/1kuna/mycelium/issues/32).
-It does not add a peer network, another queue or extension qualification.
-
-## Make an invitation
-
-On the queue, with its token already supplied privately through `MYCE_TOKEN`:
+One mycelium is the cluster; a hypha is a machine that contributes its devices,
+CPU and RAM. An installed, authorized hypha prints an invitation with:
 
 ```sh
-myce invite --identity-dir queue.db.joining --out invitation.json
+myce invite
 ```
 
-`queue.db.joining` is the identity directory for `queue --db queue.db`.
-`queue --identity-dir DIR` overrides it. The queue creates its identity when it
-starts, and reuses it on restart. Preserve that directory with the queue's
-private state; replacing it invalidates existing invitations.
+Paste the single output line into a terminal on the new hypha. It selects Linux
+amd64/arm64 or native macOS arm64, resumes interrupted downloads, checks the
+approved release's SHA-256 before execution, redeems a short-lived ticket over
+pinned TLS, and uses the existing worker installer. The new machine needs curl,
+a SHA-256 tool and the OS shell utilities; it needs neither Go nor Git.
+The fleet token never appears in that command, shell history or logs. The line
+contains public release metadata, the queue certificate pin, and an enrollment-only
+one-time ticket (15 minutes by default, `--expires` up to one hour).
 
-The command writes a mode-0600 invitation and prints only:
+`--out FILE` optionally saves the same line mode 0600 and still prints it.
+Existing files are never overwritten. `MYCE_JOINING_FILE` or `--joining-file FILE`
+selects an existing private invitation when the inviter is not using its default
+installed config. A queue operator may use `--identity-dir queue.db.joining`
+with its token supplied privately and `--queue HTTPS_ORIGIN`.
+The queue must already advertise a reachable joining endpoint and approve a
+signed release: see [release setup](guide-onboarding-releases.md).
+
+Enrollment binds the receipt to the current service PID and release, then waits
+for the queue to observe the exact local session, compatible
+protocols, every expected device, CPU/RAM and acknowledged budgets, a small runner
+smoke, and five seconds of stable service-manager health. The final line contains
+the hypha name, OS/arch, components, allowances, participation and enforcement.
+`ready`, `polite_waiting`, `disabled` and `drained` are separate successful states.
+A queue outage, HTTP 426, unavailable component or restarting service leaves
+enrollment incomplete. A smoke proves the command runner; project extensions
+still need their own native checks.
+
+Keep the printed command to resume an interrupted install or repeat a health
+check. It uses private saved authority after installation, even when the original
+ticket is spent or expired. A same-release rerun preserves files and service PID.
+A command for a newer approved release drains only this hypha, waits for custody
+to settle, upgrades through the existing installer and rechecks readiness. Spools,
+identity, settings and operator-disabled policy persist. Failure leaves custody
+and maintenance in place for repair. Printed commands freeze a release; a newer
+release needs a newly printed line, whose ticket an installed host does not use.
+
+NAS mode is required by [#109](https://github.com/1kuna/mycelium/issues/109).
+Hardware preflight, NAS/tool setup and saved participation/service policy use the
+normal installer options; those slices are integrated separately under #108.
+Automatic legacy conversion, installed extension qualification and native MacBook
+sleep/travel acceptance remain separate slices. No onboarding command grants
+permission to operate other hyphae or bypass storage/device prerequisites.
+
+## Private file compatibility and foreground join
+
+For explicit credential-file transfer, use:
 
 ```sh
-myce install worker --joining-file 'invitation.json'
+myce invite --private-file --out invitation.json
+myce install worker --joining-file invitation.json
 ```
 
-Transfer the binary and invitation privately to the new hypha. An invitation
-contains the shared credential: keep it out of Git, messages, command arguments,
-shell history and logs. The printed command references the file rather than
-printing its contents. `invite` refuses to overwrite an existing file.
-An existing hypha can invite another using its installed invitation:
-
-```sh
-myce invite --joining-file joining.json --out invitation.json
-```
-
-Joining uses the installer, including its GPU, service, software and
-mounted-storage prerequisites. Add the usual `--nas` option when that mount is
-not at the installer's default location. Automatic joining supplies the address
-and trust; it does not mount storage or install GPU drivers. The installer
-copies the invitation into its private installation directory, and the service
-uses that copy on future starts. Queue host maintenance remains effective across joining and rejoin. Foreground joining is also available:
+This older mode requires a separately delivered binary. Its mode-0600 file
+contains the shared credential: transfer privately and keep it out of Git,
+messages, argv, history and logs. The installer copies it into its private
+installation directory. Foreground operation and status use the same pinned client:
 
 ```sh
 myce join --joining-file invitation.json
 myce status --joining-file invitation.json
 ```
 
-Foreground join saves the authenticated address back into the private invitation.
-`MYCE_JOINING_FILE` can select it for these commands. Separate commands with
-independent parsers, such as `wait` and `model`, retain their existing explicit
-URL/token configuration.
+`MYCE_JOINING_FILE` also selects that file. Queue host maintenance remains effective
+across joining and rejoin. Preserve the queue's identity directory with its SQLite
+state; replacing the identity invalidates existing certificate pins.
 
 ## Address and network behavior
 
@@ -138,8 +159,8 @@ default joins leave that cache untouched. `myce status` shows:
 - total and available bytes on the spool filesystem;
 - unavailable facts, which remain unknown instead of becoming guessed budgets.
 
-Each per-card worker reports the accelerator it owns, following the existing
-one-card-per-worker contract. Fake resources remain explicitly fake. The queue
+One machine worker reports all configured devices and the shared CPU/RAM
+capacity. Fake resources remain explicitly fake. The queue
 stores the profile with the normal SQLite machine state. These facts are distinct
 from the live free-memory admission readings and operator caps.
 

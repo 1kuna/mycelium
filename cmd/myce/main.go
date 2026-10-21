@@ -55,6 +55,12 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if args[0] == "dev" && len(args) > 1 && args[1] == "clock" {
 		return devClockCommand(args[2:], os.Stdout)
 	}
+	if args[0] == "version" {
+		return versionCommand(args[1:])
+	}
+	if args[0] == "release" {
+		return releaseCommand(args[1:])
+	}
 	if args[0] == "invite" {
 		return inviteCommand(args[1:])
 	}
@@ -129,6 +135,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	joiningFile := f.String("joining-file", env("MYCE_JOINING_FILE", ""), "privately supplied invitation (discovery plus saved address)")
 	discovery := f.Bool("discovery", true, "advertise a pinned TLS joining endpoint over DNS-SD")
 	discoveryListen := f.String("discovery-listen", "", "TLS joining listen address (default same interface as queue, automatic port)")
+	releaseManifest := f.String("release-manifest", "", "approved signed enrollment release manifest")
+	releaseKey := f.String("release-key", "", "provisioned publisher Ed25519 public key PEM")
+	releaseURL := f.String("release-url", "", "approved HTTPS release directory")
 	identityDir := f.String("identity-dir", "", "durable joining identity directory (default DB.joining)")
 	hostConfig := f.String("host-config", "", "physical-host production hold policy YAML")
 	projectConfig := f.String("project-config", "", "project weights and experiment caps YAML")
@@ -194,6 +203,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	modelWait := f.Duration("model-wait", 0, "override maximum model wait")
 	modelListen := f.String("model-listen", "127.0.0.1:0", "worker model proxy listen address")
 	modelAdvertise := f.String("model-advertise", "", "worker model proxy URL reachable by queue")
+	enrollment := f.Bool("enrollment", false, "record small runner smoke and exact-session enrollment")
 	onboardingBenchmark := f.Bool("onboarding-benchmark", false, "measure throughput before admission (may take nine minutes)")
 	dailyUse := f.Bool("daily-use", false, "take work only after 5 idle minutes, on external power, with known safe heat signals")
 	laptop := f.Bool("laptop", false, "require external power even in dedicated mode")
@@ -321,6 +331,19 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			return err
 		}
 		defer q.Close()
+		if *releaseManifest != "" || *releaseKey != "" || *releaseURL != "" {
+			data, e := os.ReadFile(*releaseManifest)
+			if e != nil {
+				return e
+			}
+			key, e := myce.ReadReleasePublicKey(*releaseKey)
+			if e != nil {
+				return e
+			}
+			if e = q.ConfigureEnrollmentRelease(data, key, *releaseURL); e != nil {
+				return e
+			}
+		}
 
 		root := *fileStore
 		if root == "" {
@@ -414,7 +437,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 				return e
 			}
 			defer tlsListener.Close()
-			joiningServer, _, e := myce.ServeJoining(tlsListener, myce.API{Queue: q, Token: *token}.Handler(), identity)
+			joiningServer, _, e := myce.ServeJoining(tlsListener, myce.API{Queue: q, Token: *token}.HandlerWithJoiningIdentity(identity.Fingerprint()), identity)
 			if e != nil {
 				return e
 			}
@@ -504,7 +527,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 				return err
 			}
 		}
-		w := myce.Worker{DeviceSettings: deviceConfig, OnboardingBenchmark: *onboardingBenchmark, Benchmark: myce.RunOnboardingBenchmark, FileCacheRoot: *fileCache, FileCacheLimit: *fileCacheLimit, DailyUse: *dailyUse, Laptop: *laptop, Desktop: *desktop, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, DockerEndpoint: *dockerHost, ContainerRetention: containerRetention, RequireMemoryCeilings: *requireCeilings, MemorySwapMaxBytes: *memorySwap, LogRetention: *logRetention, Unit: workerUnit, SuperviseProcess: true, HostMemorySource: hostSource, DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, SecretRoot: *secretRoot, ModelApprovalRoot: *modelApprovalRoot, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, FixedAcceleratorMemory: *memoryMode == "fixed", MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{CPUReserveCores: *cpuReserve, CPUBudgetCores: *cpuBudget, MaxJobs: *maxJobs, HostMemoryBudgetGB: *hostBudget, MemoryCeilingSlackGB: *memorySlack, HostID: *hostID, UnifiedMemory: unified, HostMemoryMeasured: true, ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, ReservedMemoryGB: *reserve, Environments: split(*environments), Models: split(*models)}}
+		w := myce.Worker{Enrollment: *enrollment, DeviceSettings: deviceConfig, OnboardingBenchmark: *onboardingBenchmark, Benchmark: myce.RunOnboardingBenchmark, FileCacheRoot: *fileCache, FileCacheLimit: *fileCacheLimit, DailyUse: *dailyUse, Laptop: *laptop, Desktop: *desktop, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, DockerEndpoint: *dockerHost, ContainerRetention: containerRetention, RequireMemoryCeilings: *requireCeilings, MemorySwapMaxBytes: *memorySwap, LogRetention: *logRetention, Unit: workerUnit, SuperviseProcess: true, HostMemorySource: hostSource, DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, SecretRoot: *secretRoot, ModelApprovalRoot: *modelApprovalRoot, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, FixedAcceleratorMemory: *memoryMode == "fixed", MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{CPUReserveCores: *cpuReserve, CPUBudgetCores: *cpuBudget, MaxJobs: *maxJobs, HostMemoryBudgetGB: *hostBudget, MemoryCeilingSlackGB: *memorySlack, HostID: *hostID, UnifiedMemory: unified, HostMemoryMeasured: true, ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, ReservedMemoryGB: *reserve, Environments: split(*environments), Models: split(*models)}}
 		fmt.Printf("Joining as %s\n", w)
 		return w.Run(ctx)
 	case "submit":

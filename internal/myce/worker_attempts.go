@@ -703,6 +703,9 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			rt.mu.Unlock()
 			reply, err := w.checkin(ctx, Checkin{Machine: m, Attempts: reports, Recovering: recovering, Fresh: fresh, PreviousSession: root.state.PreviousSession, ModelReports: modelReports})
 			if err == nil {
+				if err = saveEnrollmentReceipt(root.dir, m); err != nil {
+					return err
+				}
 				if reply.CPUBudgetCores != nil {
 					w.Machine.CPUBudgetCores = *reply.CPUBudgetCores
 				}

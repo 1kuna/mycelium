@@ -22,10 +22,12 @@ type HostMaintenance struct {
 }
 
 type HostMaintenanceRequest struct {
-	CPUBudgetCores *int     `json:"cpu_budget_cores,omitempty"`
-	Action         string   `json:"action"`
-	Stop           bool     `json:"stop,omitempty"`
-	MemoryBudgetGB *float64 `json:"memory_budget_gb,omitempty"`
+	IfMode         string     `json:"if_mode,omitempty"`
+	IfUpdatedAt    *time.Time `json:"if_updated_at,omitempty"`
+	CPUBudgetCores *int       `json:"cpu_budget_cores,omitempty"`
+	Action         string     `json:"action"`
+	Stop           bool       `json:"stop,omitempty"`
+	MemoryBudgetGB *float64   `json:"memory_budget_gb,omitempty"`
 }
 
 type MaintenanceWorker struct {
@@ -118,6 +120,9 @@ func (q *Queue) ChangeHostMaintenance(host string, request HostMaintenanceReques
 			q.s.HostMaintenance = map[string]HostMaintenance{}
 		}
 		policy := q.s.HostMaintenance[host]
+		if request.IfUpdatedAt != nil && !policy.UpdatedAt.Equal(*request.IfUpdatedAt) || request.IfMode != "" && policy.Mode != request.IfMode {
+			return ErrStale
+		}
 		if policy.Mode == "" {
 			policy.Mode = "enabled"
 		}
