@@ -170,6 +170,8 @@ func TestProductionStartGateWorkerRestartReconciles(t *testing.T) {
 	}
 	w := recoveryWorker(t)
 	w.Machine = machine("b70", "xpu")
+	w.InventoryProbe = benchmarkTestInventory
+	w.CPUIsolationProbe = func(context.Context) error { return nil }
 	w.Clock = RealClock{}
 	store, e := w.openStore()
 	if e != nil {
@@ -257,6 +259,8 @@ func TestProductionStartGateExecutionAndReplay(t *testing.T) {
 	defer server.Close()
 	w := recoveryWorker(t)
 	w.Machine = machine("b70", "xpu", "test-host")
+	w.InventoryProbe = benchmarkTestInventory
+	w.CPUIsolationProbe = func(context.Context) error { return nil }
 	w.Client = Client{URL: server.URL, Token: "test"}
 	store, e := w.openStore()
 	if e != nil {

@@ -236,7 +236,7 @@ func (w *Worker) refreshInventory(ctx context.Context, observed []MachineDevice,
 		if d.CapabilityProfile == nil {
 			m := d.machine(w.Machine)
 			probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			profile := LocalProfileProbe().Detect(probeCtx, m, s.dir, w.Clock.Now())
+			profile := workerProfileProbe().Detect(probeCtx, m, s.dir, w.Clock.Now())
 			cancel()
 			applyFixedAcceleratorMemory(&profile, m, d.MemoryMode == "fixed")
 			d.CapabilityProfile = &profile
@@ -363,7 +363,7 @@ func (w Worker) forAttempt(j Job) (Worker, error) {
 }
 
 func (w Worker) localInventory(ctx context.Context) ([]MachineDevice, error) {
-	return w.localInventoryWithProbe(ctx, LocalMachineProbe())
+	return w.localInventoryWithProbe(ctx, workerMachineProbe())
 }
 
 func (w Worker) localInventoryWithProbe(ctx context.Context, probe MachineProbe) ([]MachineDevice, error) {

@@ -7,9 +7,11 @@ import (
 	"strings"
 
 	"golang.org/x/sys/unix"
+	"mycelium/internal/probeguard"
 )
 
 func LocalOwnerSignals(ctx context.Context) OwnerSignals {
+	probeguard.Check()
 	p := linuxOwnerProbe{host: configuredHostOwnerSignals, read: os.ReadFile, glob: func(pattern string) ([]string, error) {
 		if strings.HasPrefix(pattern, "/sys/class/power_supply/") {
 			if _, err := os.ReadDir("/sys/class/power_supply"); err != nil {

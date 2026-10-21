@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,6 +16,8 @@ import (
 	"slices"
 	"strings"
 	"syscall"
+
+	"mycelium/internal/probeguard"
 )
 
 var errExtensionUnavailable = errors.New("extension qualification unavailable")
@@ -145,6 +148,7 @@ func ExtensionFingerprint(ctx context.Context, platform, device string) (string,
 	if platform == "fake" && device == "" {
 		device = "0"
 	}
+	probe := extensionIdentityProbe()
 	data := []byte(runtime.GOOS + "/" + runtime.GOARCH + "/" + platform + "/" + device)
 	commands := [][]string{}
 	switch platform {
@@ -153,7 +157,7 @@ func ExtensionFingerprint(ctx context.Context, platform, device string) (string,
 			commands = [][]string{{"/usr/bin/sw_vers", "-productVersion"}, {"/usr/sbin/sysctl", "-n", "machdep.cpu.brand_string"}}
 		} else if runtime.GOOS == "linux" {
 			commands = [][]string{{"uname", "-r"}}
-			facts, err := os.ReadFile("/proc/cpuinfo")
+			facts, err := fs.ReadFile(probe.Files, "proc/cpuinfo")
 			if err != nil {
 				return "", errors.New("CPU identity unavailable")
 			}
@@ -171,9 +175,7 @@ func ExtensionFingerprint(ctx context.Context, platform, device string) (string,
 		commands = [][]string{{"sycl-ls"}, {"uname", "-r"}}
 	}
 	for _, args := range commands {
-		cmd := exec.CommandContext(ctx, args[0], args[1:]...)
-		cmd.Env = cleanExtensionEnv(nil)
-		b, err := cmd.Output()
+		b, err := probe.Command(ctx, args[0], args[1:]...)
 		if err != nil {
 			return "", errors.New("hardware/driver identity unavailable")
 		}
@@ -672,4 +674,15 @@ func cpuIdentity(facts []byte) string {
 	}
 	slices.Sort(values)
 	return strings.Join(values, "\n")
+}
+
+var extensionIdentityProbe = localExtensionIdentityProbe
+
+func localExtensionIdentityProbe() MachineProbe {
+	return MachineProbe{Files: guardedProbeFS{os.DirFS("/")}, Command: func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		probeguard.Check()
+		command := exec.CommandContext(ctx, name, args...)
+		command.Env = cleanExtensionEnv(nil)
+		return command.Output()
+	}}
 }

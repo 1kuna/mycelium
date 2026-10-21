@@ -12,6 +12,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"mycelium/internal/probeguard"
 )
 
 // Only documented runtime controls: prefix matching could copy a credential.
@@ -81,7 +83,8 @@ type GPUAccessProbe struct {
 }
 
 func LocalGPUAccessProbe() GPUAccessProbe {
-	return GPUAccessProbe{Glob: filepath.Glob, Open: func(path string) error {
+	return GPUAccessProbe{Glob: func(pattern string) ([]string, error) { probeguard.Check(); return filepath.Glob(pattern) }, Open: func(path string) error {
+		probeguard.Check()
 		f, e := os.OpenFile(path, os.O_RDWR, 0)
 		if e != nil {
 			return e

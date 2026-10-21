@@ -3,12 +3,13 @@ package myce
 import (
 	"context"
 	"fmt"
-	"os"
 	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
+
+	"mycelium/internal/probeguard"
 )
 
 type AcceleratorProfile struct {
@@ -44,7 +45,7 @@ type ProfileProbe struct {
 }
 
 func LocalProfileProbe() ProfileProbe {
-	return ProfileProbe{Machine: LocalMachineProbe(), ReadFile: os.ReadFile, CPUs: runtime.NumCPU, Disk: func(path string) (uint64, uint64, error) {
+	return ProfileProbe{Machine: LocalMachineProbe(), ReadFile: guardedHardwareReadFile, CPUs: func() int { probeguard.Check(); return runtime.NumCPU() }, Disk: func(path string) (uint64, uint64, error) {
 		var st syscall.Statfs_t
 		err := syscall.Statfs(path, &st)
 		return st.Blocks * uint64(st.Bsize), st.Bavail * uint64(st.Bsize), err

@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"mycelium/internal/testenv"
 	"mycelium/internal/testguard"
 	"os"
 	"path/filepath"
@@ -22,6 +23,7 @@ func coreTestMain(m *testing.M) int {
 		}
 		return 0
 	}
+	installSyntheticWorkerHost()
 	// The crash/restart drill is another process on the same provisioned host.
 	// Preserve its inherited operation rather than inventing a conflicting host.
 	if os.Getenv("MYCE_RECOVERY_TEST_HELPER") == "1" || os.Getenv("MYCE_TEST_DOCKER_BIN") != "" {
@@ -32,6 +34,12 @@ func coreTestMain(m *testing.M) int {
 		panic(err)
 	}
 
+	if err = testenv.Isolate(dir); err != nil {
+		panic(err)
+	}
+	if err = os.Setenv("MYCE_TEST_ISOLATED_HOME", os.Getenv("HOME")); err != nil {
+		panic(err)
+	}
 	// Keep ordinary laptop tests off any installed daemon; Docker fault fixtures override this CLI.
 	if err = os.WriteFile(filepath.Join(dir, "docker"), []byte("#!/bin/sh\ncase \"$3:$4\" in ps:*|network:ls) exit 0;; *) exit 99;; esac\n"), 0700); err != nil {
 		panic(err)
@@ -45,7 +53,7 @@ func coreTestMain(m *testing.M) int {
 		panic(err)
 	}
 	code := m.Run()
-	if err := os.RemoveAll(dir); err != nil { // All tests and children have joined.
+	if err := testenv.Cleanup(dir); err != nil { // All tests and children have joined.
 		code = 1
 	}
 	return code

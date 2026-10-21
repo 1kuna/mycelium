@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"mycelium/internal/probeguard"
 )
 
 // MemoryReading is absolute system usage in GiB, not a configured allowance.
@@ -404,6 +406,7 @@ func NewMeasurementSource(platform, device string) (func(context.Context) (Memor
 		return nil, errors.New("one explicit device is required")
 	}
 	return func(ctx context.Context) (MemoryReading, error) {
+		probeguard.Check()
 		c, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
 		host, e := os.ReadFile("/proc/meminfo")

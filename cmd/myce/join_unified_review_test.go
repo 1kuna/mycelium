@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -24,9 +25,11 @@ printf 'N/A\n'
 	if err := os.WriteFile(filepath.Join(dir, "nvidia-smi"), []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
-	probe := myce.MachineProbe{Command: func(context.Context, string, ...string) ([]byte, error) {
-		t.Fatal("explicit GPU ran setup detection")
-		return nil, nil
+	probe := myce.MachineProbe{Command: func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		if name != "nvidia-smi" || !strings.Contains(strings.Join(args, " "), "--query-gpu=memory.free") {
+			t.Fatal("explicit GPU ran setup detection")
+		}
+		return exec.CommandContext(ctx, filepath.Join(dir, name), args...).Output()
 	}}
 	err := runWithProbe([]string{"join", "--gpu", "cuda", "--device", "0,1", "--memory-mode", "auto", "--heartbeat", "0"}, probe)
 	if err == nil || err.Error() != "heartbeat must be positive" {

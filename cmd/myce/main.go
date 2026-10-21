@@ -486,7 +486,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		}
 		// Keep the host ledger unified even when auto was explicitly selected.
 		// Inventory reports probe failures; they must not prevent CPU startup.
-		unified, _ := myce.DetectUnifiedMemory(ctx, *gpu, binding, *memoryMode)
+		unified, _ := probe.DetectUnifiedMemory(ctx, *gpu, binding, *memoryMode)
 		if _, err := myce.MemoryCeilingConfig(*hostBudget, *memorySlack, *memorySwap); err != nil {
 			return err
 		}

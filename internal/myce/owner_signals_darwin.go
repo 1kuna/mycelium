@@ -8,10 +8,12 @@ void myce_owner_signals(double *idle, int *power, int *laptop, int *heat);
 */
 import "C"
 import "context"
+import "mycelium/internal/probeguard"
 
 const NativeOwnerSignals = true
 
 func LocalOwnerSignals(context.Context) OwnerSignals {
+	probeguard.Check()
 	var idle C.double
 	var power, laptop, heat C.int
 	C.myce_owner_signals(&idle, &power, &laptop, &heat)

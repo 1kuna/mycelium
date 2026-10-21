@@ -60,7 +60,7 @@ func TestS6ReviewOnboardingWhileDrained(t *testing.T) {
 			t.Error(err)
 		}
 	}()
-	w := Worker{OnboardingBenchmark: true, StateDir: root, ExtensionRoot: extRoot, Machine: m, Client: Client{URL: server.URL, Token: "test"}, Interval: time.Millisecond,
+	w := Worker{InventoryProbe: benchmarkTestInventory, CPUIsolationProbe: func(context.Context) error { return nil }, OnboardingBenchmark: true, StateDir: root, ExtensionRoot: extRoot, Machine: m, Client: Client{URL: server.URL, Token: "test"}, Interval: time.Millisecond,
 		OwnerSignals: func(context.Context) OwnerSignals { return OwnerSignals{Power: "desktop"} },
 		Benchmark: func(ctx context.Context, c BenchmarkConfig, p *CapabilityProfile) error {
 			// Simulate accelerator inventory only; execute the product's real benchmark
@@ -116,7 +116,7 @@ func maintenanceBenchmarkWorker(t *testing.T, m Machine) (Worker, string, string
 		t.Fatal(err)
 	}
 	installQualified(t, extRoot, e, "")
-	w := Worker{OnboardingBenchmark: true, StateDir: root, ExtensionRoot: extRoot, Machine: m, Interval: time.Millisecond,
+	w := Worker{InventoryProbe: benchmarkTestInventory, CPUIsolationProbe: func(context.Context) error { return nil }, OnboardingBenchmark: true, StateDir: root, ExtensionRoot: extRoot, Machine: m, Interval: time.Millisecond,
 		OwnerSignals: func(context.Context) OwnerSignals { return OwnerSignals{Power: "desktop"} },
 		Benchmark: func(ctx context.Context, c BenchmarkConfig, p *CapabilityProfile) error {
 			c.Machine.GPU = "fake"
@@ -316,4 +316,9 @@ func TestMaintenanceBenchmarkPreservesActivePin(t *testing.T) {
 	if reply.BenchmarkPlan != nil || slot.State != "ready" || slot.Attempt != attempt || !q.slotPinned(slot) {
 		t.Fatal("onboarding disrupted existing pin", reply, slot)
 	}
+}
+
+// Match the fixture's synthetic XPU and 8 GiB allowance, independently of the host.
+func benchmarkTestInventory(context.Context) ([]MachineDevice, error) {
+	return []MachineDevice{{ID: "0", Platform: "xpu", Identity: "benchmark-xpu", Selector: "0", Fingerprint: "fixture-driver", MemoryMode: "fixed", TotalMemoryGB: 8, BudgetGB: 8, FreeMemoryGB: 8}}, nil
 }
