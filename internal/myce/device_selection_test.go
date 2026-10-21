@@ -4,10 +4,12 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"testing/fstest"
 )
 
 func selectedDeviceEnv(platform, device string) map[string]string {
@@ -86,7 +88,16 @@ done
 	t.Setenv("PATH", root+":"+os.Getenv("PATH"))
 	t.Setenv("ZE_AFFINITY_MASK", "1")
 	t.Setenv("ONEAPI_DEVICE_SELECTOR", "level_zero:1")
-	probe := LocalMachineProbe()
+	probe := MachineProbe{Files: fstest.MapFS{}, Command: func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		return exec.CommandContext(ctx, filepath.Join(root, name), args...).Output()
+	}, CommandEnv: func(ctx context.Context, env map[string]string, name string, args ...string) ([]byte, error) {
+		cmd := exec.CommandContext(ctx, filepath.Join(root, name), args...)
+		cmd.Env = os.Environ()
+		for k, v := range env {
+			cmd.Env = append(cmd.Env, k+"="+v)
+		}
+		return cmd.Output()
+	}}
 	probe.OS, probe.Arch = "linux", "amd64"
 	out, err := probe.Command(context.Background(), "sycl-ls")
 	if err != nil || strings.TrimSpace(string(out)) != "" {

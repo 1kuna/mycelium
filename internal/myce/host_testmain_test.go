@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"mycelium/internal/testenv"
 )
 
 var dockerTestOriginalPath = os.Getenv("PATH")
@@ -15,6 +17,7 @@ func TestMain(m *testing.M) {
 		}
 		return
 	}
+	installSyntheticWorkerHost()
 	// The crash/restart drill is another process on the same provisioned host.
 	// Preserve its inherited operation rather than inventing a conflicting host.
 	if os.Getenv("MYCE_RECOVERY_TEST_HELPER") == "1" {
@@ -25,6 +28,9 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 
+	if err = testenv.Isolate(dir); err != nil {
+		panic(err)
+	}
 	// Keep ordinary laptop tests off any installed daemon; Docker fault fixtures override this CLI.
 	if err = os.WriteFile(filepath.Join(dir, "docker"), []byte("#!/bin/sh\ncase \"$3:$4\" in ps:*|network:ls) exit 0;; *) exit 99;; esac\n"), 0700); err != nil {
 		panic(err)
@@ -33,6 +39,8 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	code := m.Run()
-	_ = os.RemoveAll(dir) // Owned fake Docker executable; all tests and children have joined.
+	if err := testenv.Cleanup(dir); err != nil {
+		panic(err)
+	} // All tests and children have joined.
 	os.Exit(code)
 }

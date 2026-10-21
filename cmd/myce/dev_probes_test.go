@@ -65,7 +65,7 @@ func devStandaloneSmoke(t *testing.T, backend string) {
 	binary := os.Getenv("MYCE_DEV_SMOKE_BINARY")
 	if binary == "" {
 		binary = filepath.Join(root, "myce")
-		if out, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
+		if out, err := exec.Command("go", "build", "-tags=myce_test", "-o", binary, ".").CombinedOutput(); err != nil {
 			t.Fatalf("build smoke binary: %v %s", err, out)
 		}
 	}

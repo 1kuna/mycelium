@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -10,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"mycelium/internal/probeguard"
 )
 
 // MachineDevice is one accelerator's capacity, never an additional host pool.
@@ -221,7 +224,7 @@ func (w *Worker) refreshInventory(ctx context.Context, observed []MachineDevice,
 		if d.CapabilityProfile == nil {
 			m := d.machine(w.Machine)
 			probeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			profile := LocalProfileProbe().Detect(probeCtx, m, s.dir, w.Clock.Now())
+			profile := workerProfileProbe().Detect(probeCtx, m, s.dir, w.Clock.Now())
 			cancel()
 			applyFixedAcceleratorMemory(&profile, m, d.MemoryMode == "fixed")
 			d.CapabilityProfile = &profile
@@ -354,6 +357,9 @@ func (w Worker) verifyCPUIsolation() error {
 	for _, d := range devices {
 		simulated = simulated && d.Platform == "fake"
 	}
+	if !simulated {
+		probeguard.Check()
+	}
 	if !simulated && len(devices) == 0 {
 		if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
 			return reject("cpu_accelerator_isolation_unavailable", errors.New("Metal has no qualified select-none control"))
@@ -392,7 +398,7 @@ func (w Worker) verifyCPUIsolation() error {
 }
 
 func (w Worker) localInventory(ctx context.Context) ([]MachineDevice, error) {
-	return w.localInventoryWithProbe(ctx, LocalMachineProbe())
+	return w.localInventoryWithProbe(ctx, workerMachineProbe())
 }
 
 func (w Worker) localInventoryWithProbe(ctx context.Context, probe MachineProbe) ([]MachineDevice, error) {
@@ -484,7 +490,12 @@ func (w Worker) localInventoryWithProbe(ctx context.Context, probe MachineProbe)
 			d.Reason = "device_budget_unavailable"
 			continue
 		}
-		source, e := newDeviceMemorySource(d.Platform, d.Selector, budget, reserve, d.MemoryMode, probe.OS, os.ReadFile, probe.Command)
+		source, e := newDeviceMemorySource(d.Platform, d.Selector, budget, reserve, d.MemoryMode, probe.OS, func(path string) ([]byte, error) {
+			if probe.Files == nil {
+				return nil, errors.New("memory filesystem unavailable")
+			}
+			return fs.ReadFile(probe.Files, strings.TrimPrefix(path, "/"))
+		}, probe.Command)
 		if e != nil {
 			d.Reason = "device_memory_unavailable"
 			continue

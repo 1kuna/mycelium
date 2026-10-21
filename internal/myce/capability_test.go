@@ -3,23 +3,29 @@ package myce
 import (
 	"context"
 	"errors"
-	"runtime"
 	"testing"
 	"time"
 )
 
 func TestCapabilityProfileMinimalPath(t *testing.T) {
-	if runtime.GOOS != "darwin" {
-		t.Skip("macOS system utility lookup")
-	}
 	t.Setenv("PATH", "/usr/bin:/bin")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	for _, gpu := range []string{"fake", "metal"} {
-		if gpu == "metal" && runtime.GOARCH != "arm64" {
-			continue
+		probe := syntheticProfileProbe()
+		probe.Machine.OS, probe.Machine.Arch = "darwin", "arm64"
+		probe.Machine.Command = func(_ context.Context, name string, args ...string) ([]byte, error) {
+			switch name {
+			case "/usr/sbin/sysctl":
+				return []byte("34359738368"), nil
+			case "/usr/sbin/system_profiler":
+				return []byte("Metal Support: Metal 3"), nil
+			default:
+				t.Fatalf("system utility must use absolute path: %s", name)
+				return nil, ErrNoGPU
+			}
 		}
-		profile := LocalProfileProbe().Detect(ctx, Machine{GPU: gpu}, t.TempDir(), time.Time{})
+		profile := probe.Detect(ctx, Machine{GPU: gpu}, t.TempDir(), time.Time{})
 		if profile.SystemMemoryBytes == 0 || len(profile.Unavailable) != 0 {
 			t.Fatalf("%s hardware unavailable with minimal PATH: %v", gpu, profile.Unavailable)
 		}

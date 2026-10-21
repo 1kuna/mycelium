@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"mycelium/internal/probeguard"
 )
 
 // MemorySource reports available GPU memory in GiB. Sources must return a finite,
@@ -27,14 +29,15 @@ func NewMemorySource(platform string, budget, reserve float64) (MemorySource, er
 // Live sources are capped by budget (if positive), then reserve is subtracted.
 // Fixed is an explicit operator allowance, never an implicit probe fallback.
 func NewMemorySourceWithMode(platform string, budget, reserve float64, mode string) (MemorySource, error) {
-	return newMemorySource(platform, budget, reserve, mode, runtime.GOOS, os.ReadFile,
+	return newMemorySource(platform, budget, reserve, mode, runtime.GOOS, guardedHardwareReadFile,
 		func(ctx context.Context, name string, args ...string) ([]byte, error) {
+			probeguard.Check()
 			return exec.CommandContext(ctx, name, args...).Output()
 		})
 }
 
 func newMemorySourceWithCommand(platform string, budget, reserve float64, command func(context.Context, string, ...string) ([]byte, error)) (MemorySource, error) {
-	return newMemorySource(platform, budget, reserve, "auto", runtime.GOOS, os.ReadFile, command)
+	return newMemorySource(platform, budget, reserve, "auto", runtime.GOOS, guardedHardwareReadFile, command)
 }
 
 func newMemorySource(platform string, budget, reserve float64, mode, goos string, readFile func(string) ([]byte, error), command func(context.Context, string, ...string) ([]byte, error)) (MemorySource, error) {
@@ -207,7 +210,8 @@ func parseCUDAFreeMemory(output []byte) (float64, error) {
 // NewDeviceMemorySource binds dedicated CUDA probes to the worker's device.
 // XPU admission remains an explicit fixed budget until a live driver query is qualified.
 func NewDeviceMemorySource(platform, device string, budget, reserve float64, mode string) (MemorySource, error) {
-	return newDeviceMemorySource(platform, device, budget, reserve, mode, runtime.GOOS, os.ReadFile, func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return newDeviceMemorySource(platform, device, budget, reserve, mode, runtime.GOOS, guardedHardwareReadFile, func(ctx context.Context, name string, args ...string) ([]byte, error) {
+		probeguard.Check()
 		return exec.CommandContext(ctx, name, args...).Output()
 	})
 }
@@ -225,6 +229,7 @@ func newDeviceMemorySource(platform, device string, budget, reserve float64, mod
 // used by both CUDA_VISIBLE_DEVICES and NVIDIA-SMI, regardless of CUDA ordering.
 func ResolveCUDADevice(ctx context.Context, selector string) (string, error) {
 	return resolveCUDADevice(ctx, selector, func(c context.Context, name string, args ...string) ([]byte, error) {
+		probeguard.Check()
 		return exec.CommandContext(c, name, args...).Output()
 	})
 }
@@ -247,7 +252,8 @@ func resolveCUDADevice(ctx context.Context, selector string, command func(contex
 
 // NewHostMemorySource reports live reclaimable RAM after the operator reserve.
 func NewHostMemorySource(reserve float64) (MemorySource, error) {
-	return newHostMemorySource(reserve, runtime.GOOS, os.ReadFile, func(c context.Context, name string, args ...string) ([]byte, error) {
+	return newHostMemorySource(reserve, runtime.GOOS, guardedHardwareReadFile, func(c context.Context, name string, args ...string) ([]byte, error) {
+		probeguard.Check()
 		return exec.CommandContext(c, name, args...).Output()
 	})
 }
@@ -268,11 +274,20 @@ func newHostMemorySource(reserve float64, goos string, readFile func(string) ([]
 
 // DetectUnifiedMemory uses the same unsupported-CUDA marker as admission.
 func DetectUnifiedMemory(ctx context.Context, platform, device, mode string) (bool, error) {
+	return LocalMachineProbe().DetectUnifiedMemory(ctx, platform, device, mode)
+}
+
+// DetectUnifiedMemory shares the injected setup command runner.
+func (p MachineProbe) DetectUnifiedMemory(ctx context.Context, platform, device, mode string) (bool, error) {
+	command := p.Command
 	if platform == "metal" || mode == "unified" {
 		return true, nil
 	}
 	if platform != "cuda" || mode != "auto" {
 		return false, nil
+	}
+	if command == nil {
+		return false, errors.New("GPU detection command runner missing")
 	}
 	c, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
@@ -280,7 +295,7 @@ func DetectUnifiedMemory(ctx context.Context, platform, device, mode string) (bo
 	if device != "" {
 		args = append(args, "--id="+device)
 	}
-	out, err := exec.CommandContext(c, "nvidia-smi", args...).Output()
+	out, err := command(c, "nvidia-smi", args...)
 	if err != nil {
 		return false, fmt.Errorf("detect unified CUDA memory: %w", err)
 	}
@@ -289,4 +304,9 @@ func DetectUnifiedMemory(ctx context.Context, platform, device, mode string) (bo
 		return true, nil
 	}
 	return false, err
+}
+
+func guardedHardwareReadFile(path string) ([]byte, error) {
+	probeguard.Check()
+	return os.ReadFile(path)
 }

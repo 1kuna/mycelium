@@ -750,7 +750,7 @@ func (w Worker) Run(stop context.Context) error {
 	}
 	if w.Machine.CapabilityProfile == nil {
 		probeCtx, cancel := context.WithTimeout(stop, 5*time.Second)
-		profile := LocalProfileProbe().Detect(probeCtx, w.Machine, s.dir, w.Clock.Now())
+		profile := workerProfileProbe().Detect(probeCtx, w.Machine, s.dir, w.Clock.Now())
 		cancel()
 		applyFixedAcceleratorMemory(&profile, w.Machine, w.FixedAcceleratorMemory)
 		w.Machine.CapabilityProfile = &profile
@@ -820,7 +820,7 @@ func (w Worker) Run(stop context.Context) error {
 		w.Machine.HostMemoryMeasured = true
 	}
 	if w.HostMemorySource == nil {
-		w.HostMemorySource, err = NewHostMemorySource(w.HostMemoryReserveGB)
+		w.HostMemorySource, err = workerHostMemorySource(w.HostMemoryReserveGB)
 		if err != nil {
 			return err
 		}
@@ -879,7 +879,7 @@ func (w Worker) Run(stop context.Context) error {
 	availabilityWake := make(chan struct{}, 1)
 	w.availability = newAvailabilityMonitor(w.Clock, w.DailyUse, w.Laptop, w.Desktop)
 	if w.OwnerSignals == nil {
-		w.OwnerSignals = LocalOwnerSignals
+		w.OwnerSignals = workerOwnerSignals
 	}
 	probeCtx, probeCancel := context.WithTimeout(availabilityCtx, 2*time.Second)
 	w.availability.sample(w.OwnerSignals(probeCtx))

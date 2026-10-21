@@ -17,6 +17,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"mycelium/internal/probeguard"
 )
 
 var ErrNoGPU = errors.New("no supported GPU visible")
@@ -41,6 +43,7 @@ type MachineProbe struct {
 
 func LocalMachineProbe() MachineProbe {
 	run := func(ctx context.Context, env map[string]string, n string, args ...string) ([]byte, error) {
+		probeguard.Check()
 		cmd := exec.CommandContext(ctx, n, args...)
 		cmd.Env = os.Environ()
 		for key, value := range env {
@@ -48,7 +51,7 @@ func LocalMachineProbe() MachineProbe {
 		}
 		return cmd.Output()
 	}
-	return MachineProbe{OS: runtime.GOOS, Arch: runtime.GOARCH, Files: os.DirFS("/"), CommandEnv: run, Command: func(ctx context.Context, n string, args ...string) ([]byte, error) {
+	return MachineProbe{OS: runtime.GOOS, Arch: runtime.GOARCH, Files: guardedProbeFS{os.DirFS("/")}, CommandEnv: run, Command: func(ctx context.Context, n string, args ...string) ([]byte, error) {
 		return run(ctx, nil, n, args...)
 	}}
 }
@@ -852,4 +855,12 @@ func (c ServiceConfig) Args() []string {
 }
 func SetupTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(ctx, 15*time.Second)
+}
+
+// Guard filesystem discovery as well as vendor subprocesses.
+type guardedProbeFS struct{ fs.FS }
+
+func (f guardedProbeFS) Open(name string) (fs.File, error) {
+	probeguard.Check()
+	return f.FS.Open(name)
 }
