@@ -84,9 +84,12 @@ Same-version reruns explain that installer flags are not reapplied; use the norm
 Upgrade preflight refuses busy hosts before changing policy. If work races with
 the drain, a wait timeout restores the exact self-made drain through CAS, with a
 separate cleanup budget. A mode-0600 intent receipt is written before the drain
-POST. A rerun promotes an intent plus an observed drain into an exact timestamp
-receipt, covering a crash before recording the POST response. Once recorded, the
-receipt cannot authorize resuming an operator's later disable or drain.
+POST, carrying a unique owner ID that the queue stores atomically with the drain.
+A rerun requires that queue-side owner to match before recording a resume receipt.
+Resume checks both owner and timestamp in the queue transaction. Independent
+maintenance edits revoke ownership, even at the same clock timestamp. Old receipts
+or queues without ownership proof cannot authorize resume: maintenance stays in
+place and the error prints `myce host resume HOST` for the operator.
 
 Installer failure restores the existing install transaction and resumes only the
 self-made drain. If newly installed bytes never become ready, that same transaction

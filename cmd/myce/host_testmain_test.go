@@ -8,11 +8,15 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	os.Exit(cliTestMain(m))
+}
+
+func cliTestMain(m *testing.M) int {
 	if len(os.Args) > 1 && os.Args[1] == "_command-exec" {
 		if myce.CommandExec(os.Args[2:]) != nil {
-			os.Exit(125)
+			return 125
 		}
-		return
+		return 0
 	}
 	dir, err := os.MkdirTemp("", "myce-cli-docker-tests-")
 	if err != nil {
@@ -26,7 +30,14 @@ func TestMain(m *testing.M) {
 	if err = os.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH")); err != nil {
 		panic(err)
 	}
-	code := m.Run()
-	_ = os.RemoveAll(dir) // Owned fake Docker executable; all tests and children have joined.
-	os.Exit(code)
+	var code int
+	if os.Getenv("MYCE_TEST_BIND_STOP") == "1" {
+		code = queueBindStopHelper()
+	} else {
+		code = m.Run()
+	}
+	if err := os.RemoveAll(dir); err != nil { // All tests and children have joined.
+		code = 1
+	}
+	return code
 }

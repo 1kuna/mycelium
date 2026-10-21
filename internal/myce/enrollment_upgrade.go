@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -11,10 +12,11 @@ import (
 )
 
 type enrollmentResumeReceipt struct {
-	Intent    bool      `json:"intent,omitempty"`
-	Host      string    `json:"host"`
-	Name      string    `json:"name"`
-	UpdatedAt time.Time `json:"updated_at"`
+	DrainOwner string    `json:"drain_owner,omitempty"`
+	Intent     bool      `json:"intent,omitempty"`
+	Host       string    `json:"host"`
+	Name       string    `json:"name"`
+	UpdatedAt  time.Time `json:"updated_at"`
 }
 
 const enrollmentResumeFile = "enrollment-resume.json"
@@ -39,25 +41,32 @@ func ReadEnrollmentUpgrade(c ServiceConfig) (HostMaintenanceStatus, error) {
 	if r.Intent {
 		mode = "enabled"
 	}
-	status.Policy = HostMaintenance{Mode: mode, UpdatedAt: r.UpdatedAt}
+	status.Policy = HostMaintenance{Mode: mode, UpdatedAt: r.UpdatedAt, DrainOwner: r.DrainOwner}
 	return status, nil
 }
 
 // ResolveEnrollmentUpgrade promotes a durable drain intent after a crash between
-// the request and recording its response. Completed receipts retain their CAS fence.
+// the request and recording its response, using queue-side ownership proof.
+// Completed receipts retain both their owner and timestamp CAS fences.
 func ResolveEnrollmentUpgrade(ctx context.Context, c ServiceConfig, client Client) (HostMaintenanceStatus, error) {
 	receipt, err := ReadEnrollmentUpgrade(c)
-	if err != nil || receipt.Policy.Mode != "enabled" {
+	if err != nil || receipt.Policy.Mode == "" {
 		return receipt, err
 	}
 	var observed HostMaintenanceStatus
 	if err = client.Call(ctx, "GET", "/api/hosts/"+url.PathEscape(c.HostID)+"/maintenance", nil, &observed); err != nil {
 		return receipt, err
 	}
-	if observed.Policy.Mode != "drained" {
+	if receipt.Policy.Mode == "enabled" && observed.Policy.Mode == "enabled" {
 		return HostMaintenanceStatus{}, nil
 	}
-	err = saveWorkerJSON(c.State, enrollmentResumeFile, enrollmentResumeReceipt{Host: c.HostID, Name: c.Name, UpdatedAt: observed.Policy.UpdatedAt})
+	if receipt.Policy.DrainOwner == "" || observed.Policy.Mode != "drained" || observed.Policy.DrainOwner != receipt.Policy.DrainOwner || receipt.Policy.Mode == "drained" && !receipt.Policy.UpdatedAt.Equal(observed.Policy.UpdatedAt) {
+		return HostMaintenanceStatus{}, enrollmentDrainUnproven(c)
+	}
+	if receipt.Policy.Mode == "drained" {
+		return observed, nil
+	}
+	err = saveWorkerJSON(c.State, enrollmentResumeFile, enrollmentResumeReceipt{Host: c.HostID, Name: c.Name, UpdatedAt: observed.Policy.UpdatedAt, DrainOwner: observed.Policy.DrainOwner})
 	return observed, err
 }
 
@@ -103,16 +112,17 @@ func PrepareEnrollmentUpgrade(ctx context.Context, c ServiceConfig, client Clien
 	if err != nil {
 		return status, err
 	}
-	owned := receipt.Policy.Mode == "drained" && status.Policy.Mode == "drained" && receipt.Policy.UpdatedAt.Equal(status.Policy.UpdatedAt)
+	owned := receipt.Policy.Mode == "drained" && status.Policy.Mode == "drained" && receipt.Policy.UpdatedAt.Equal(status.Policy.UpdatedAt) && receipt.Policy.DrainOwner != "" && receipt.Policy.DrainOwner == status.Policy.DrainOwner
 	if status.Policy.Mode == "enabled" {
 		if !status.Healthy || len(status.Attempts) > 0 || status.Calls > 0 || status.Preparations > 0 || status.Sidecars > 0 || len(status.PendingReleases) > 0 || len(status.PendingCleanup) > 0 || status.MemoryInUseGB > 0 || status.MemoryDebtGB > 0 {
 			return status, errors.New("upgrade refused before drain: local host still has execution custody; rerun after jobs finish")
 		}
-		// Save intent before crossing the queue mutation boundary.
-		if err = saveWorkerJSON(c.State, enrollmentResumeFile, enrollmentResumeReceipt{Intent: true, Host: c.HostID, Name: c.Name, UpdatedAt: status.Policy.UpdatedAt}); err != nil {
+		// Save a unique intent before crossing the queue mutation boundary.
+		owner := ID()
+		if err = saveWorkerJSON(c.State, enrollmentResumeFile, enrollmentResumeReceipt{Intent: true, Host: c.HostID, Name: c.Name, UpdatedAt: status.Policy.UpdatedAt, DrainOwner: owner}); err != nil {
 			return status, errors.Join(errors.New("cannot persist upgrade drain intent"), err)
 		}
-		if err = client.Call(ctx, "POST", path, HostMaintenanceRequest{Action: "drain", IfMode: "enabled", IfUpdatedAt: &status.Policy.UpdatedAt}, &status); err != nil {
+		if err = client.Call(ctx, "POST", path, HostMaintenanceRequest{Action: "drain", IfMode: "enabled", IfUpdatedAt: &status.Policy.UpdatedAt, DrainOwner: owner}, &status); err != nil {
 			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			defer cancel()
 			recovered, resolveErr := ResolveEnrollmentUpgrade(cleanup, c, client)
@@ -121,9 +131,12 @@ func PrepareEnrollmentUpgrade(ctx context.Context, c ServiceConfig, client Clien
 			}
 			return status, errors.Join(err, resolveErr)
 		}
+		if status.Policy.DrainOwner != owner {
+			return status, enrollmentDrainUnproven(c)
+		}
 		receipt = status
 		owned = true
-		if err = saveWorkerJSON(c.State, enrollmentResumeFile, enrollmentResumeReceipt{Host: c.HostID, Name: c.Name, UpdatedAt: status.Policy.UpdatedAt}); err != nil {
+		if err = saveWorkerJSON(c.State, enrollmentResumeFile, enrollmentResumeReceipt{Host: c.HostID, Name: c.Name, UpdatedAt: status.Policy.UpdatedAt, DrainOwner: status.Policy.DrainOwner}); err != nil {
 			return status, errors.Join(errors.New("cannot persist upgrade resume receipt"), undoEnrollmentDrain(ctx, c, client, receipt))
 		}
 	}
@@ -163,12 +176,19 @@ func FinishEnrollmentUpgrade(ctx context.Context, c ServiceConfig, client Client
 	if receipt.Policy.Mode != "drained" || receipt.Policy.UpdatedAt.IsZero() {
 		return nil
 	}
-	if err := client.Call(ctx, "POST", "/api/hosts/"+url.PathEscape(c.HostID)+"/maintenance", HostMaintenanceRequest{Action: "resume", IfMode: "drained", IfUpdatedAt: &receipt.Policy.UpdatedAt}, nil); err != nil {
-		return err
+	if receipt.Policy.DrainOwner == "" {
+		return enrollmentDrainUnproven(c)
+	}
+	if err := client.Call(ctx, "POST", "/api/hosts/"+url.PathEscape(c.HostID)+"/maintenance", HostMaintenanceRequest{Action: "resume", IfMode: "drained", IfUpdatedAt: &receipt.Policy.UpdatedAt, IfDrainOwner: receipt.Policy.DrainOwner}, nil); err != nil {
+		return errors.Join(enrollmentDrainUnproven(c), err)
 	}
 	err := os.Remove(filepath.Join(c.State, enrollmentResumeFile))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
 	return err
+}
+
+func enrollmentDrainUnproven(c ServiceConfig) error {
+	return fmt.Errorf("drain ownership unproven or maintenance changed; host maintenance preserved; operator can resume with: myce host resume %s", c.HostID)
 }

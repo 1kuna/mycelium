@@ -14,6 +14,7 @@ const maintenanceStopCause = "planned_host_maintenance"
 // A nil budget is possible before the first worker report; zero is uncapped.
 // Existing hosts bootstrap their allowance once, then worker reports cannot edit it.
 type HostMaintenance struct {
+	DrainOwner     string            `json:"drain_owner,omitempty"`
 	CPUBudgetCores *int              `json:"cpu_budget_cores,omitempty"`
 	StopAt         *time.Time        `json:"stop_at,omitempty"`
 	Mode           string            `json:"mode"`
@@ -22,6 +23,8 @@ type HostMaintenance struct {
 }
 
 type HostMaintenanceRequest struct {
+	DrainOwner     string     `json:"drain_owner,omitempty"`
+	IfDrainOwner   string     `json:"if_drain_owner,omitempty"`
 	IfMode         string     `json:"if_mode,omitempty"`
 	IfUpdatedAt    *time.Time `json:"if_updated_at,omitempty"`
 	CPUBudgetCores *int       `json:"cpu_budget_cores,omitempty"`
@@ -120,15 +123,19 @@ func (q *Queue) ChangeHostMaintenance(host string, request HostMaintenanceReques
 			q.s.HostMaintenance = map[string]HostMaintenance{}
 		}
 		policy := q.s.HostMaintenance[host]
-		if request.IfUpdatedAt != nil && !policy.UpdatedAt.Equal(*request.IfUpdatedAt) || request.IfMode != "" && policy.Mode != request.IfMode {
+		if request.IfUpdatedAt != nil && !policy.UpdatedAt.Equal(*request.IfUpdatedAt) || request.IfMode != "" && policy.Mode != request.IfMode || request.IfDrainOwner != "" && policy.DrainOwner != request.IfDrainOwner {
 			return ErrStale
 		}
 		if policy.Mode == "" {
 			policy.Mode = "enabled"
 		}
+		// Every independent maintenance edit revokes the prior drain authority,
+		// including an operator re-drain at the same Clock timestamp.
+		policy.DrainOwner = ""
 		switch request.Action {
 		case "drain":
 			policy.Mode = "drained"
+			policy.DrainOwner = request.DrainOwner
 		case "disable":
 			policy.Mode = "disabled"
 		case "resume":

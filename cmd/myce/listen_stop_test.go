@@ -14,10 +14,7 @@ import (
 )
 
 // Exercise each real command call site without a fleet queue or built binary.
-func TestQueueBindStopHelper(t *testing.T) {
-	if os.Getenv("MYCE_TEST_BIND_STOP") != "1" {
-		return
-	}
+func queueBindStopHelper() int {
 	dir := os.Getenv("MYCE_TEST_BIND_DIR")
 	args := []string{"queue", "--token", "bind-test-only", "--db", filepath.Join(dir, "queue.db"), "--checkpoints", filepath.Join(dir, "checkpoints"), "--identity-dir", filepath.Join(dir, "identity")}
 	if os.Getenv("MYCE_TEST_BIND_LISTENER") == "joining" {
@@ -29,7 +26,7 @@ func TestQueueBindStopHelper(t *testing.T) {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 	}
-	os.Exit(exitCode(err))
+	return exitCode(err)
 }
 
 func TestQueueBindStopIsSuccessful(t *testing.T) {
@@ -37,7 +34,7 @@ func TestQueueBindStopIsSuccessful(t *testing.T) {
 		t.Run(listener, func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 			defer cancel()
-			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestQueueBindStopHelper$")
+			cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^$")
 			cmd.Env = append(os.Environ(), "MYCE_TEST_BIND_STOP=1", "MYCE_TEST_BIND_LISTENER="+listener, "MYCE_TEST_BIND_DIR="+t.TempDir(), "MYCE_TOKEN=bind-test-only")
 			stderr, err := cmd.StderrPipe()
 			if err != nil {
