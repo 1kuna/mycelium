@@ -19,6 +19,7 @@ func inviteCommand(args []string) error {
 	manifest := f.String("release-manifest", "", "override queue-approved signed release JSON")
 	key := f.String("release-key", "", "provisioned public PEM for a manifest override")
 	origin := f.String("release-url", "", "trusted publisher HTTPS directory override")
+	ca := f.String("release-ca", "", "provisioned publisher CA PEM for a manifest override")
 	ttl := f.Duration("expires", 15*time.Minute, "one-time invite lifetime, at most one hour")
 	out := f.String("out", "", "optionally save the paste-ready command as a private file")
 	identityDir := f.String("identity-dir", "myce.db.joining", "existing queue joining identity directory")
@@ -83,7 +84,7 @@ func inviteCommand(args []string) error {
 	}
 	defer client.HTTP.CloseIdleConnections()
 	var distribution myce.EnrollmentRelease
-	if *manifest != "" || *key != "" || *origin != "" {
+	if *manifest != "" || *key != "" || *origin != "" || *ca != "" {
 		data, e := os.ReadFile(*manifest)
 		if e != nil {
 			return e
@@ -97,20 +98,27 @@ func inviteCommand(args []string) error {
 			return e
 		}
 		distribution.Origin = *origin
+		if *ca != "" {
+			cert, e := os.ReadFile(*ca)
+			if e != nil {
+				return e
+			}
+			distribution.CACert = string(cert)
+		}
 	} else if err = client.Call(ctx, "GET", "/api/invites/release", nil, &distribution); err != nil {
 		return err
 	}
 	if err = distribution.Validate(); err != nil {
 		return err
 	}
-	if _, err = myce.BootstrapCommand(distribution.Manifest, distribution.Origin, invitation.Address, invitation.Fingerprint, strings.Repeat("a", 64)); err != nil {
+	if _, err = myce.BootstrapCommand(distribution.Manifest, distribution.Origin, invitation.Address, invitation.Fingerprint, strings.Repeat("a", 64), distribution.CACert); err != nil {
 		return err
 	}
 	var ticket myce.EnrollmentTicket
 	if err = client.Call(ctx, "POST", "/api/invites", myce.InviteRequest{TTL: *ttl}, &ticket); err != nil {
 		return err
 	}
-	command, err := myce.BootstrapCommand(distribution.Manifest, distribution.Origin, invitation.Address, invitation.Fingerprint, ticket.Ticket)
+	command, err := myce.BootstrapCommand(distribution.Manifest, distribution.Origin, invitation.Address, invitation.Fingerprint, ticket.Ticket, distribution.CACert)
 	if err != nil {
 		return err
 	}

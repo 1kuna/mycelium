@@ -139,6 +139,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	releaseManifest := f.String("release-manifest", "", "approved signed enrollment release manifest")
 	releaseKey := f.String("release-key", "", "provisioned publisher Ed25519 public key PEM")
 	releaseURL := f.String("release-url", "", "approved HTTPS release directory")
+	releaseCA := f.String("release-ca", "", "provisioned publisher CA PEM (default ordinary HTTPS trust)")
 	identityDir := f.String("identity-dir", "", "durable joining identity directory (default DB.joining)")
 	hostConfig := f.String("host-config", "", "physical-host production hold policy YAML")
 	projectConfig := f.String("project-config", "", "project weights and experiment caps YAML")
@@ -332,7 +333,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			return err
 		}
 		defer q.Close()
-		if *releaseManifest != "" || *releaseKey != "" || *releaseURL != "" {
+		if *releaseManifest != "" || *releaseKey != "" || *releaseURL != "" || *releaseCA != "" {
 			data, e := os.ReadFile(*releaseManifest)
 			if e != nil {
 				return e
@@ -341,7 +342,14 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			if e != nil {
 				return e
 			}
-			if e = q.ConfigureEnrollmentRelease(data, key, *releaseURL, *allowReleaseDowngrade); e != nil {
+			var ca []byte
+			if *releaseCA != "" {
+				ca, e = os.ReadFile(*releaseCA)
+				if e != nil {
+					return e
+				}
+			}
+			if e = q.ConfigureEnrollmentReleaseWithCA(data, key, *releaseURL, string(ca), *allowReleaseDowngrade); e != nil {
 				return e
 			}
 		}

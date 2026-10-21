@@ -203,9 +203,41 @@ func releaseOrigin(origin string) error {
 }
 func quoteShell(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }
 
+func validateReleaseCA(cert string) error {
+	if cert == "" {
+		return nil
+	}
+	if len(cert) > 64<<10 {
+		return errors.New("release CA bundle exceeds 64 KiB")
+	}
+	rest := []byte(cert)
+	count := 0
+	for len(strings.TrimSpace(string(rest))) > 0 {
+		// pem.Decode skips leading text; refuse it so private material cannot
+		// accidentally ride along in public release metadata.
+		rest = []byte(strings.TrimSpace(string(rest)))
+		if !strings.HasPrefix(string(rest), "-----BEGIN CERTIFICATE-----") {
+			return errors.New("release CA requires only PEM certificates")
+		}
+		block, tail := pem.Decode(rest)
+		if block == nil || block.Type != "CERTIFICATE" || len(block.Headers) != 0 {
+			return errors.New("release CA requires only PEM certificates")
+		}
+		if _, err := x509.ParseCertificate(block.Bytes); err != nil {
+			return errors.New("invalid release CA certificate")
+		}
+		count++
+		rest = tail
+	}
+	if count == 0 {
+		return errors.New("release CA requires PEM certificates")
+	}
+	return nil
+}
+
 // The authenticated inviter embeds only public release metadata and a limited
 // ticket. No downloaded shell script runs ahead of checksum verification.
-func BootstrapCommand(m ReleaseManifest, origin, queue, pin, ticket string) (string, error) {
+func BootstrapCommand(m ReleaseManifest, origin, queue, pin, ticket string, publisherCA ...string) (string, error) {
 	if err := m.Validate(); err != nil {
 		return "", err
 	}
@@ -217,6 +249,18 @@ func BootstrapCommand(m ReleaseManifest, origin, queue, pin, ticket string) (str
 	}
 	if !validPin(pin) || !validPin(ticket) {
 		return "", errors.New("invalid invite pin or ticket")
+	}
+	caSetup, caCurl, caCleanup := "", "", ""
+	if len(publisherCA) > 1 {
+		return "", errors.New("one release CA bundle expected")
+	}
+	if len(publisherCA) == 1 && publisherCA[0] != "" {
+		if err := validateReleaseCA(publisherCA[0]); err != nil {
+			return "", err
+		}
+		caSetup = "ca=$(mktemp \"$cache/.release-ca.XXXXXX\")\ntrap 'rm -f \"$ca\"' 0\nprintf %s " + quoteShell(publisherCA[0]) + " > \"$ca\"\n"
+		caCurl = ` --cacert "$ca"`
+		caCleanup = "rm -f \"$ca\"\ntrap - 0\n"
 	}
 	var matrix strings.Builder
 	for _, a := range m.Artifacts {
@@ -233,6 +277,7 @@ cache="$HOME/.cache/mycelium/bootstrap"
 mkdir -p "$cache"
 test ! -L "$cache" || exit 1
 chmod 700 "$cache"
+` + caSetup + `
 part="$cache/$hash.partial"; binary="$cache/$hash"
 test ! -L "$part" && test ! -L "$binary" || exit 1
 checksum() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi; }
@@ -242,12 +287,13 @@ if ! test -f "$binary" || ! verify "$binary"; then
     rm -f "$part"; echo "release_partial_invalid: discarded invalid full-size partial; rerun to download" >&2; exit 1
   fi
   if ! test -f "$part" || ! verify "$part"; then
-    code=$(curl --fail --silent --show-error --proto =https --tlsv1.2 --connect-timeout 15 --max-time 600 --retry 3 --continue-at - --output "$part" --write-out "%{http_code}" ` + quoteShell(strings.TrimRight(origin, "/")+"/") + `"$file") || { echo "download incomplete; rerun to resume" >&2; exit 1; }
+    code=$(curl --fail --silent --show-error --proto =https --tlsv1.2 --connect-timeout 15 --max-time 600 --retry 3 --continue-at - --output "$part" --write-out "%{http_code}"` + caCurl + ` ` + quoteShell(strings.TrimRight(origin, "/")+"/") + `"$file") || { echo "download incomplete; rerun to resume" >&2; exit 1; }
     case "$code" in 200|206) ;; *) rm -f "$part"; echo "release_redirect_refused: discarded response body" >&2; exit 1;; esac
   fi
   verify "$part" || { rm -f "$part"; echo "release_checksum_refused: release checksum refused; discarded partial" >&2; exit 1; }
   mv "$part" "$binary"
 fi
+` + caCleanup + `
 chmod 700 "$binary"
 "$binary" version --expect-version ` + quoteShell(m.Version) + ` --expect-os "$os" --expect-arch "$arch" --expect-start-gate ` + quoteShell(m.StartGate) + ` --expect-attempt-protocol ` + quoteShell(m.AttemptProtocol) + ` --require-native-sensing
 exec "$binary" install worker --enroll --queue ` + quoteShell(queue) + ` --pin ` + quoteShell(pin) + ` --ticket-stdin --release-version ` + quoteShell(m.Version) + ` --release-sha "$hash" "$@" <<'MYCE_ENROLLMENT_TICKET'
