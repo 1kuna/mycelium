@@ -968,9 +968,17 @@ bound by UUID. This avoids a permanent legacy fleet dependency, exercises the
 new queue's real reconnect path and gives the unkeyed adapter a deletion path.
 The singular worker wire form remains bounded to the queue-first interval, but
 the actual production binary must be tested separately: 08816cf retries a removed
-host-control endpoint with HTTP 404 before check-in. Do not require that binary
-to reconnect successfully as a conversion prerequisite. Final acceptance requires
-Spark's upgraded machine worker. Include Spark work and
+host-control endpoint with HTTP 404 before check-in. Queue and **all B70 and Spark
+workers must cut over in the same window**; old workers cannot provide service on
+M. Spark is unavailable from the queue upgrade until its own conversion and new
+machine check-in. Prestage both hosts' artifacts, mappings and restore manifests;
+after queue migration and offline topology conversion, convert Spark first, then
+B70, deferring lengthy qualification until both have reconnected under disabled
+maintenance. A failed Spark conversion is an explicit abort point: while intake
+is frozen and no new business intent has been accepted, settle custody and restore
+the complete pre-window queue/worker snapshot. Unresolved custody blocks restore;
+keep admission disabled. Do not start old Spark workers against M as a fallback.
+Final acceptance requires Spark's upgraded machine worker. Include Spark work and
 consumers in the agreed drain. No rolling service restart is implicitly safe.
 
 1. Require Verso #298 and #106 merged into the staged commit (verify ancestry
