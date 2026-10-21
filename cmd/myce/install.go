@@ -185,7 +185,7 @@ func setupCommandWithInstaller(args []string, probe myce.MachineProbe, home stri
 		if role != "worker" || !explicit["config"] {
 			return errors.New("conversion requires install worker --config MACHINE_CONFIG")
 		}
-		c, err := myce.PlanMachineInstall(configPath, sources, explicit)
+		c, err := myce.PlanMachineInstallWithProbe(ctx, configPath, sources, explicit, probe)
 		if err != nil {
 			return err
 		}
