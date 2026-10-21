@@ -22,6 +22,7 @@ import (
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
+	Enrollment     bool
 	DeviceSettings []DeviceInstall
 
 	InventoryProbe     func(context.Context) ([]MachineDevice, error)
@@ -794,6 +795,9 @@ func (w Worker) Run(stop context.Context) error {
 		return err
 	}
 	if err = w.initInventory(stop, s); err != nil {
+		return err
+	}
+	if err = w.prepareEnrollment(stop, s); err != nil {
 		return err
 	}
 	// Startup may rotate an idle session after exact orphan recovery. The first

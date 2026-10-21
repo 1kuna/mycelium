@@ -6,6 +6,15 @@ layout, command arguments and result format. Mycelium supplies mechanisms,
 not application packages. Do not add a scheduler, retry loop, environment builder
 or service supervisor to the app.
 
+To add a machine, use the existing one-command flow: run `myce invite` on an
+authorized installed hypha and paste its single output line on the new hypha.
+Optional `--out FILE` saves that command. Never put the fleet token in argv,
+history, job environments or logs, and never read a fleet environment file to
+construct an invite. The queue must approve a signed release first; see
+[joining](../guide-joining-v3.md). Enrollment's component/runner/service checks
+do not qualify an application extension. `polite_waiting` and maintained states
+are distinct from `ready`; preserve them through upgrades and native checks.
+
 1. **Inspect before writing.** Read the app's setup/run instructions and locks.
    Find its existing HTTP endpoint setting or finite command boundary. Inventory
    argv, environment variables, prerequisites, model/data identities, input/output

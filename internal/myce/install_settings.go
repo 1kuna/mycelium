@@ -119,6 +119,7 @@ func InstallSettings() []InstallSetting {
 			return nil
 		}),
 		installSetting("desktop", "Desktop", "declare a daily-use desktop", func(c *ServiceConfig) *bool { return &c.Desktop }, installAny[bool]),
+		installSetting("enrollment", "Enrollment", "record exact-session enrollment and runner smoke", func(c *ServiceConfig) *bool { return &c.Enrollment }, installAny[bool]),
 		installSetting("allow-deviceless", "AllowDeviceless", "allow CPU/fake test worker", func(c *ServiceConfig) *bool { return &c.AllowDeviceless }, installAny[bool]),
 		installSetting("device", "Device", "physical GPU selector", func(c *ServiceConfig) *string { return &c.Device }, installAny[string]),
 		installSetting("docker-host", "DockerEndpoint", "opt in to managed Docker at this endpoint (empty disables Docker)", func(c *ServiceConfig) *string { return &c.DockerEndpoint }, installAny[string]),

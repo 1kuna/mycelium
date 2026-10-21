@@ -14,6 +14,8 @@ import (
 )
 
 func TestInvitePrintsCommandWithoutCredential(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("MYCE_JOINING_FILE", "")
 	dir := t.TempDir()
 	identity, err := myce.LoadJoiningIdentity(dir)
 	if err != nil {
@@ -22,7 +24,7 @@ func TestInvitePrintsCommandWithoutCredential(t *testing.T) {
 	token := "invite-private-test-only"
 	t.Setenv("MYCE_TOKEN", token)
 	path := filepath.Join(t.TempDir(), "private invite.json")
-	output := captureJoiningOutput(t, func() error { return inviteCommand([]string{"--identity-dir", dir, "--out", path}) })
+	output := captureJoiningOutput(t, func() error { return inviteCommand([]string{"--private-file", "--identity-dir", dir, "--out", path}) })
 	if strings.Contains(output, token) || !strings.Contains(output, "myce install worker --joining-file 'private invite.json'") {
 		t.Fatal("unsafe invite output")
 	}
@@ -30,11 +32,13 @@ func TestInvitePrintsCommandWithoutCredential(t *testing.T) {
 	if err != nil || invitation.Token != token || invitation.Fingerprint != identity.Fingerprint() {
 		t.Fatal("invitation missing authority", err)
 	}
-	if err = inviteCommand([]string{"--identity-dir", dir, "--out", path}); err == nil {
+	if err = inviteCommand([]string{"--private-file", "--identity-dir", dir, "--out", path}); err == nil {
 		t.Fatal("overwrote invitation")
 	}
 	copyPath := filepath.Join(t.TempDir(), "copy.json")
-	captureJoiningOutput(t, func() error { return inviteCommand([]string{"--joining-file", path, "--out", copyPath}) })
+	captureJoiningOutput(t, func() error {
+		return inviteCommand([]string{"--private-file", "--joining-file", path, "--out", copyPath})
+	})
 	copy, err := myce.ReadInvitation(copyPath)
 	if err != nil || copy != invitation {
 		t.Fatal("existing hypha cannot invite", err)
@@ -130,5 +134,41 @@ func TestInvitationInstallPersistsTrustAndStatus(t *testing.T) {
 	})
 	if !strings.Contains(text, "capability profile v0") || !strings.Contains(text, "unified") {
 		t.Fatal("profile missing from CLI status")
+	}
+}
+
+func TestInviteExplicitIdentityOverridesHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("MYCE_JOINING_FILE", "")
+	t.Setenv("MYCE_QUEUE", "")
+	t.Setenv("MYCE_TOKEN", "synthetic-inviter")
+	other := myce.Invitation{Version: 1, Fingerprint: strings.Repeat("b", 64), Token: "synthetic-other"}
+	joining := filepath.Join(home, "other.json")
+	if err := myce.WriteInvitation(joining, other); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(home, ".local/share/mycelium/worker/config.json")
+	if err := os.MkdirAll(filepath.Dir(config), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config, []byte(`{"joining_file":"`+joining+`"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	identity, err := myce.LoadJoiningIdentity(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := filepath.Join(t.TempDir(), "invitation.json")
+	captureJoiningOutput(t, func() error { return inviteCommand([]string{"--private-file", "--identity-dir", dir, "--out", out}) })
+	got, err := myce.ReadInvitation(out)
+	if err != nil || got.Fingerprint != identity.Fingerprint() {
+		t.Fatal("explicit identity lost to HOME config", err)
+	}
+}
+func TestInviteDeadInstallFlagRemoved(t *testing.T) {
+	if err := inviteCommand([]string{"--install=false"}); err == nil || !strings.Contains(err.Error(), "flag provided but not defined") {
+		t.Fatal("dead install flag accepted", err)
 	}
 }

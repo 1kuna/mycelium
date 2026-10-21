@@ -21,8 +21,15 @@ type API struct {
 	Token string
 }
 
-func (a API) Handler() http.Handler {
+func (a API) Handler() http.Handler { return a.handler("") }
+
+func (a API) HandlerWithJoiningIdentity(pin string) http.Handler { return a.handler(pin) }
+
+func (a API) handler(joiningPin string) http.Handler {
 	mux := http.NewServeMux()
+	a.registerInvites(mux, joiningPin)
+	a.registerEnrollmentRelease(mux)
+	a.registerEnrollment(mux)
 	a.registerDevClock(mux)
 	a.registerHostMaintenance(mux)
 	a.registerPriorityPolicy(mux)
@@ -199,6 +206,10 @@ func (a API) Handler() http.Handler {
 		respondOperation(w, map[string]bool{"ok": true}, a.Queue.Leave(r.PathValue("id"), c.Now), "worker_leave_invalid")
 	})
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/invites/redeem" {
+			a.redeemInvite(w, r, joiningPin)
+			return
+		}
 		credential := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
 		if r.Method == "GET" && (r.URL.Path == "/" || r.URL.Path == "/api/status") {
 			if user, password, ok := r.BasicAuth(); ok && user == "myce" {

@@ -26,6 +26,12 @@ func setupCommandWithProbe(args []string, probe myce.MachineProbe, home string) 
 	return setupCommandWithAccountLookup(args, probe, home, myce.LookupWorkerAccount)
 }
 func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home string, lookup func(string) (myce.WorkerAccount, error)) error {
+	return setupCommandWithInstaller(args, probe, home, lookup, myce.Install)
+}
+func setupCommandWithInstaller(args []string, probe myce.MachineProbe, home string, lookup func(string) (myce.WorkerAccount, error), install func(context.Context, myce.ServiceConfig, string, string, func(context.Context, string, ...string) ([]byte, error)) error) error {
+	if len(args) >= 2 && args[0] == "install" && args[1] == "worker" && hasEnrollmentFlag(args[2:], "--enroll") {
+		return enrollmentCommand(args, probe, home, lookup)
+	}
 	var e error
 	if len(args) == 0 || (args[0] != "install" && args[0] != "uninstall" && args[0] != "doctor") {
 		return errors.New("usage: myce install|uninstall|doctor")
@@ -387,7 +393,7 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 		}
 		fmt.Println(report.String())
 	}
-	if e = myce.Install(ctx, c, executable, env("MYCE_TOKEN", ""), probe.Command); e != nil {
+	if e = install(ctx, c, executable, env("MYCE_TOKEN", ""), probe.Command); e != nil {
 		return e
 	}
 	if role == "worker" {

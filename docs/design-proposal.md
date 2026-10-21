@@ -1617,3 +1617,91 @@ inventory and concurrent attempts; Windows/WSL qualification remains W1/W2.
 CPU counts are admission reservations, not CPU-time enforcement; macOS RAM remains admission-only and delegated Linux
 RAM enforcement retains its existing qualification requirements. Real native
 Linux/Windows acceptance and fleet cutover are separate from laptop proof.
+
+
+## One-command enrollment: B0/B1/B6 (#108, 2026-10-21)
+
+One mycelium is the cluster; a hypha is a machine and reports all its components.
+The existing `myce invite` and `myce install worker --enroll` paths provide
+bootstrap and enrollment. By default invite prints exactly one paste-ready line
+to stdout; `--out FILE` also saves it privately. Foreground `join` remains the worker runtime.
+NAS mode is required by #109. B2/B3/B4 own hardware preflight, NAS/tools and saved
+service/policy fields; this slice passes their ordinary installer options through
+unchanged. B5's automatic legacy conversion and B7/B8 qualification remain separate.
+
+Releases contain linux/amd64, linux/arm64 and native darwin/arm64+cgo binaries.
+The publisher signs an exact JSON manifest with Ed25519. The queue verifies it
+against an independently provisioned public key, never a key from the manifest,
+then supplies approved public release metadata to pinned authenticated inviters.
+Explicit local manifest/key/origin overrides perform the same verification.
+Release versions are ordered semver values (for example `v3.1.0`). Queue approval
+is persisted in SQLite and must strictly increase unless `--allow-downgrade`
+explicitly re-approves or downgrades it. Semver build metadata has equal precedence.
+The verified manifest binds version, protocols, OS/arch, size, SHA-256 and native
+Mac sensing. No release tooling existed to reuse. A small POSIX command is needed
+because clean hosts have no myce, Go or Git. Its embedded verified hash matrix
+selects the artifact and HTTPS origin; curl resumes a private partial download,
+refuses redirects, and a platform SHA-256 tool verifies bytes before execution.
+Publisher HTTPS plus the signed manifest are separate from the LAN queue's exact
+certificate-DER pin. Never confuse that pin with curl's SPKI pinnedpubkey.
+
+Authenticated inviters mint 15-minute tickets (maximum one hour) over pinned TLS.
+The existing SQLite stores only ticket digests, expiry, queue pin and consumed
+state. Used and expired rows are pruned. One atomic conditional update redeems
+exactly once. Tickets authorize only redemption, never the jobs/status API; expiry uses the injected queue Clock. The
+fleet credential travels only in the pinned TLS response and mode-0600 installed
+joining file, never argv, URLs, history or diagnostics. If a redemption response
+is lost before durable saving, mint a new ticket; do not make replay reusable.
+Existing private file invitations remain supported with explicit
+`--private-file --out FILE` for compatibility. Installed
+reruns use their saved joining authority and do not redeem the spent ticket.
+The limited ticket enters the installer on stdin, never in its argv or environment.
+Bootstrap authority is retained at mode 0600 only until the installed joining file
+is durable, then deleted, including on interrupted-install recovery.
+
+Enrollment completion requires the installed spool's exact session, the current
+host-launch and keyed-attempt protocols, every expected device identity, CPU/RAM
+facts and live memory, policy acknowledgement, fresh queue observations, a small
+recorded runner smoke with no fleet token, and stable service-manager health.
+A machine's receipt binds its service PID, exact release/session, expected
+inventory, CPU count and total RAM; queue-owned CPU/RAM allowances must be
+acknowledged.
+Saved per-device settings or explicit selector lists independently establish expected
+devices. A failed probe retains `device_probe_unavailable`; a successful probe
+with a configured but absent device reports `device_selector_unmatched` and
+cannot be ready. launchd health reads the service block's direct keys, ignoring
+nested resource states. Healthy service identity must remain stable for 30 seconds.
+Unchanged receipts are not rewritten; receipt-write failures are logged without
+terminating the worker, and retried after the next successful check-in. Registration
+alone is incomplete. A healthy daily-use hypha may finish as `polite_waiting`;
+an operator-maintained host finishes as `disabled` or `drained`, never `ready`.
+Unknown devices, queue outage/426, recovery or a start-loop cannot complete ready.
+The summary includes the hypha name, OS/arch, devices, CPU/RAM allowances, storage,
+participation and enforcement. This smoke does not qualify project extensions.
+
+Each printed line freezes the approved release and checksums for reproducibility.
+Reuse that line for interrupted installation and same-version health checks;
+use a line for a newer approved release to upgrade. Installed upgrades use saved
+authority without redeeming or requiring another ticket.
+Same-version reruns verify health without changing files or restarting services,
+and explicitly explain that installer flags are not reapplied. Older releases are
+refused unless the operator passes `--allow-downgrade` explicitly; comparison uses
+the installed binary's version, not an invitation's age or a stale worker receipt.
+Equal versions (including `+build` metadata) require identical bytes, otherwise
+`--allow-downgrade` is required. Replacing an installed non-semver version such as
+`development` also requires that explicit flag; the published target remains semver.
+A changed release refuses busy local hosts before draining through existing queue
+maintenance. A race with new custody is bounded: drain-wait failure conditionally
+restores its own exact transition. Drain-wait and install/readiness have separate
+budgets. The existing installer transaction and spool remain the install path.
+Existing disabled/drained policy is preserved; an installer never resumes an
+operator-disabled host. A private resume receipt fences a self-made drain by host,
+name and policy timestamp. Its durable intent precedes the drain POST; an intent
+plus an observed drain on rerun is promoted to the exact timestamp receipt.
+Install/readiness failure restores the previous installation through the existing
+transaction and verifies its enrolled readiness before resuming only the self-made drain, with a separate cleanup
+budget. Errors state whether the previous release resumed or why recovery failed.
+A crash loses the in-memory installer snapshot; if already-installed bytes never
+become ready on rerun, report rollback unavailable and preserve maintenance.
+Operator-created maintenance remains respected. No fleet
+operation, reboot, driver install or privileged service is implied. Native fleet acceptance remains a separately authorized test window.
