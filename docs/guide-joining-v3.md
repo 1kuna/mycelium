@@ -52,6 +52,40 @@ Foreground join saves the authenticated address back into the private invitation
 independent parsers, such as `wait` and `model`, retain their existing explicit
 URL/token configuration.
 
+## Onboarding storage and tools
+
+The NAS selection is saved configuration, `--nas PATH`, or the default
+`/mnt/nas` (Linux) / `/Volumes/NAS` (macOS). The installer never selects an
+unrelated mounted share. When the default is absent, `nas_not_configured` lists
+candidate mounts with an explicit selection hint before either install plan.
+Dry-run resolves the same selection without creating roots or running write
+probes. Real installation requires a visible network/automount and validates
+all NAS filesystem operations in a single 250 ms I/O budget; `nas_unresponsive`
+means the mount did not answer within that budget (#63). A kernel call may
+remain blocked, but retries cannot duplicate the outstanding validation.
+NFS/SMB, autofs (including autofs-managed NFS) and the known network FUSE types
+`fuse.sshfs`, `fuse.rclone`, `fuse.smbnetfs` are eligible; generic/local FUSE is
+not. Mycelium does not mount a share or fall back to local storage.
+
+On Linux, missing-runtime refusal applies to NVIDIA display controllers and
+Intel discrete PCIe display endpoints (Intel vendor ID and positive
+[`current_link_width`](https://github.com/torvalds/linux/blob/master/Documentation/ABI/testing/sysfs-bus-pci)
+from the PCI sysfs ABI). Integrated root-complex graphics have no discrete
+PCIe link. This device-class rule avoids a model list; actual runtime inventory
+still qualifies the accelerator. Other displays, including BMC, VM and AMD
+controllers, are ignored with one informational PCI identity line. Apple Silicon
+without Metal returns a typed runtime failure.
+
+Onboarding does not download uv/pixi or require them for an idle command worker.
+A native environment build resolves its required backend from the service's
+saved PATH first. A suitable tool identifies itself with a numeric version via
+`--version`; existing installs retain precedence on upgrades. If unavailable,
+only that backend's pinned vendor archive is fetched, checksum-verified and
+installed under the user's Mycelium tool directory, then invoked by absolute
+path. uv archives also install uvx when present. Download failure fails that
+requested environment build with a typed reason. It does not retroactively fail
+onboarding. Probe commands strip `MYCE_TOKEN` and never print raw stderr.
+
 ## Address and network behavior
 
 The queue keeps the existing HTTP API and adds a TLS endpoint for joining.

@@ -11,7 +11,10 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 )
 
@@ -73,8 +76,8 @@ func LocalToolBootstrapProbe(p MachineProbe) ToolBootstrapProbe {
 }
 
 // BootstrapEnvironmentTools installs only into this user's Mycelium tool tree.
-// Already verified pinned executables are reused. System tools and existing
-// user-managed uv/pixi are never overwritten; the saved service PATH is explicit.
+// Existing suitable service tools and verified pinned executables are reused.
+// User-managed uv/pixi are never overwritten; acquired paths are appended.
 func BootstrapEnvironmentTools(ctx context.Context, c ServiceConfig, p ToolBootstrapProbe) (ServiceConfig, error) {
 	releases, err := PinnedEnvironmentTools(c.Detection.OS, c.Detection.Arch)
 	if err != nil {
@@ -86,8 +89,11 @@ func BootstrapEnvironmentTools(ctx context.Context, c ServiceConfig, p ToolBoots
 	return bootstrapEnvironmentTools(ctx, c, p, releases)
 }
 func bootstrapEnvironmentTools(ctx context.Context, c ServiceConfig, p ToolBootstrapProbe, releases []ToolRelease) (ServiceConfig, error) {
-	dirs := []string{}
+	dirs := filepath.SplitList(c.Path)
 	for _, r := range releases {
+		if suitableEnvironmentTool(ctx, c.Path, r.Name, p.Command) != "" {
+			continue
+		}
 		dir := filepath.Join(c.WorkerHome, ".local", "share", "mycelium", "tools", r.Name+"-"+r.Version+"-"+c.Detection.OS+"-"+c.Detection.Arch)
 		path := filepath.Join(dir, r.Name)
 		if err := checkToolTree(c.WorkerHome, dir); err != nil {
@@ -121,18 +127,24 @@ func bootstrapEnvironmentTools(ctx context.Context, c ServiceConfig, p ToolBoots
 			if e = writeInstallFile(path+".sha256", []byte(hex.EncodeToString(digest[:])), 0600, installFiles{}, nil); e != nil {
 				return c, e
 			}
+			if r.Name == "uv" {
+				uvx, e := toolExecutable(data, "uvx")
+				if e != nil && e.Error() != "missing executable" {
+					return c, preflightError("tool_archive_invalid", "uvx", "invalid uvx executable in the pinned archive")
+				}
+				if e == nil {
+					if e = writeInstallFile(filepath.Join(dir, "uvx"), uvx, 0700, installFiles{}, nil); e != nil {
+						return c, preflightError("tool_install_failed", "uvx", "cannot publish user-local uvx")
+					}
+				}
+			}
 			if !verifiedTool(ctx, path, r, p.Command) {
 				return c, preflightError("tool_version_invalid", r.Name, "pinned executable cannot run or reports the wrong version")
 			}
 		}
 		dirs = append(dirs, dir)
 	}
-	// De-duplicate on rerun, preserving the remaining configured runtime PATH.
-	for _, dir := range strings.Split(c.Path, string(os.PathListSeparator)) {
-		if dir != "" && !containsString(dirs, dir) {
-			dirs = append(dirs, dir)
-		}
-	}
+	// Preserve the complete configured service PATH and append only new tool paths.
 	c.Path = strings.Join(dirs, string(os.PathListSeparator))
 	return c, nil
 }
@@ -213,30 +225,65 @@ func toolExecutable(data []byte, name string) ([]byte, error) {
 	return binary, nil
 }
 
-func validateOnboardingToolEnvironment(ctx context.Context, c ServiceConfig, p MachineProbe) error {
-	root := filepath.Join(c.WorkerHome, ".local", "share", "mycelium", "tools")
-	managed := false
-	for _, dir := range strings.Split(c.Path, string(os.PathListSeparator)) {
-		if withinNAS(root, dir) {
-			managed = true
+// suitableEnvironmentTool resolves only the saved service PATH. A suitable
+// executable identifies itself with a numeric version via --version. Recipe
+// locks define package versions; bootstrap pins apply only to acquired tools.
+func suitableEnvironmentTool(ctx context.Context, path, name string, command func(context.Context, string, ...string) ([]byte, error)) string {
+	if command == nil {
+		return ""
+	}
+	for _, dir := range filepath.SplitList(path) {
+		if !filepath.IsAbs(dir) {
+			continue
+		}
+		executable := filepath.Join(dir, name)
+		st, err := os.Stat(executable)
+		if err != nil || !st.Mode().IsRegular() || st.Mode().Perm()&0111 == 0 {
+			continue
+		}
+		b, err := command(ctx, executable, "--version")
+		f := strings.Fields(string(b))
+		if err == nil && len(f) >= 2 && f[0] == name {
+			parts := strings.Split(f[1], ".")
+			if len(parts) >= 2 {
+				if _, e := strconv.ParseUint(parts[0], 10, 32); e == nil {
+					if _, e = strconv.ParseUint(parts[1], 10, 32); e == nil {
+						return executable
+					}
+				}
+			}
 		}
 	}
-	if !managed {
-		return nil
-	} // Existing installations have no bootstrap contract.
+	return ""
+}
+
+// acquireEnvironmentTool is lazy: the native environment build calls it only
+// for the backend it is about to execute. Existing service PATH wins, including
+// on upgrades. Acquired tools are invoked by absolute path, never prepended.
+func acquireEnvironmentTool(ctx context.Context, name string) (string, error) {
+	p := LocalMachineProbe()
+	if path := suitableEnvironmentTool(ctx, os.Getenv("PATH"), name, p.Command); path != "" {
+		return path, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	c := ServiceConfig{WorkerHome: home, Path: os.Getenv("PATH"), Detection: Detection{OS: runtime.GOOS, Arch: runtime.GOARCH}}
 	releases, err := PinnedEnvironmentTools(c.Detection.OS, c.Detection.Arch)
 	if err != nil {
-		return err
+		return "", err
 	}
 	for _, r := range releases {
-		if p.Command == nil {
-			return preflightError("service_tools_unavailable", r.Name, "service tool version runner missing")
-		}
-		b, e := p.Command(ctx, r.Name, "--version")
-		fields := strings.Fields(string(b))
-		if e != nil || len(fields) < 2 || fields[0] != r.Name || fields[1] != r.Version {
-			return preflightError("service_tools_unavailable", r.Name, "service PATH cannot run the pinned environment tool; re-run onboarding")
+		if r.Name == name {
+			c, err = bootstrapEnvironmentTools(ctx, c, LocalToolBootstrapProbe(p), []ToolRelease{r})
+			if err != nil {
+				return "", err
+			}
+			if path := suitableEnvironmentTool(ctx, c.Path, name, p.Command); path != "" {
+				return path, nil
+			}
 		}
 	}
-	return nil
+	return "", exec.ErrNotFound
 }

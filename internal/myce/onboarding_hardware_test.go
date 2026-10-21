@@ -55,6 +55,7 @@ func TestOnboardingWholeMachineHardware(t *testing.T) {
 			c := ServiceConfig{}
 			if platform == "cpu-mac" {
 				p.OS = "darwin"
+				p.Arch = "amd64"
 			}
 			if platform == "xpu" {
 				c.Detection = Detection{Platform: "xpu", MemoryMode: "fixed", MemoryGB: 24, ReserveGB: 2}
@@ -125,14 +126,9 @@ func requirePreflightCode(t *testing.T, err error, code string) {
 	}
 }
 func TestOnboardingPresentGPUWithoutDriverRefuses(t *testing.T) {
-	p := onboardingProbe("cpu")
-	p.Glob = func(pattern string) ([]string, error) {
-		if strings.Contains(pattern, "/class") {
-			return []string{"/sys/bus/pci/devices/00:00/class"}, nil
-		}
-		return nil, nil
-	}
-	p.ReadFile = func(string) ([]byte, error) { return []byte("0x030000"), nil }
+	// The previous fixture returned 0x030000 for every sysfs file. That tested
+	// the rejected class-only rule, not the supported-accelerator contract.
+	p := reviewPCIProbe("0x10de", "0x2b85", "16")
 	_, err := PreflightHardware(context.Background(), ServiceConfig{}, p)
 	requirePreflightCode(t, err, "gpu_driver_missing")
 	_, err = p.Detect(context.Background())

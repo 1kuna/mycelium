@@ -78,6 +78,9 @@ func TestOnboardingAbsentExplicitSelectorsNeverSelectCPU(t *testing.T) {
 	for _, osname := range []string{"linux", "darwin"} {
 		p := onboardingProbe("cpu")
 		p.OS = osname
+		if osname == "darwin" {
+			p.Arch = "amd64"
+		}
 		c := ServiceConfig{Device: "1,0"}
 		_, err := PreflightHardware(context.Background(), c, p)
 		requirePreflightCode(t, err, "device_selector_unmatched")

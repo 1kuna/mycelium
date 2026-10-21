@@ -28,7 +28,7 @@ func TestOnboardingInstallWholeMachineSelectorsAndDriverRefusal(t *testing.T) {
 		return []byte("GPU, 24576"), nil
 	}}
 	text := captureJoiningOutput(t, func() error {
-		return setupCommandWithProbe([]string{"install", "worker", "--device=1,0", "--dry-run"}, p, home)
+		return setupCommandWithProbe([]string{"install", "worker", "--device=1,0", "--nas", home, "--dry-run"}, p, home)
 	})
 	for _, want := range []string{"--device", `1,0`, "--device-settings", "GPU-a", "GPU-b"} {
 		if !strings.Contains(text, want) {

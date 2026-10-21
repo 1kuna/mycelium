@@ -50,7 +50,7 @@ func detectJoinGPU(ctx context.Context, probe myce.MachineProbe, options joinGPU
 		return options, nil
 	}
 	if err != nil {
-		return options, fmt.Errorf("GPU auto-detection on %s/%s checked %s: %s; specify --gpu (and --device on multi-GPU hosts)", probe.OS, probe.Arch, strings.Join(checked, ", "), strings.ReplaceAll(err.Error(), "\n", " "))
+		return options, fmt.Errorf("GPU auto-detection on %s/%s checked %s: %w; specify --gpu (and --device on multi-GPU hosts)", probe.OS, probe.Arch, strings.Join(checked, ", "), err)
 	}
 	options.platform = d.Platform
 	// Like install worker, an omitted selector uses the sole detected CUDA

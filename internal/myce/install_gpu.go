@@ -50,7 +50,12 @@ func validateWorkerService(ctx context.Context, c ServiceConfig, command func(co
 	if c.AllowDeviceless {
 		return nil
 	}
-	b, err := command(ctx, "systemd-run", "--user", "--wait", "--pipe", "--collect", "--property=UMask=0077", "--property=EnvironmentFile="+c.GPUEnvironmentFile(), c.Binary, "detect", "--config", c.Config)
+	b, err := command(ctx, "systemd-run", "--user", "--wait", "--pipe", "--collect", "--property=UMask=0077", "--property=UnsetEnvironment=MYCE_TOKEN", "--property=EnvironmentFile="+c.GPUEnvironmentFile(), c.Binary, "detect", "--config", c.Config)
+	if err != nil {
+		if typed := serviceProbeFailure(b, err); typed != nil {
+			return typed
+		}
+	}
 	var detected HardwarePreflight
 	if err == nil {
 		err = json.Unmarshal(b, &detected)
@@ -59,6 +64,10 @@ func validateWorkerService(ctx context.Context, c ServiceConfig, command func(co
 		err = validateServiceHardware(c, detected)
 	}
 	if err != nil {
+		var typed *PreflightError
+		if errors.As(err, &typed) {
+			return typed
+		}
 		return preflightError("service_environment_invalid", "service", "worker service GPU validation failed; run detect --config under the user manager and check saved PATH, runtime and device permissions")
 	}
 	return nil
@@ -159,7 +168,7 @@ func DetectService(ctx context.Context, c ServiceConfig, p MachineProbe, access 
 	}
 	if c.Detection.OS == "linux" {
 		if err := access.Check(c.Detection.Platform); err != nil {
-			return Detection{}, err
+			return Detection{}, preflightError("gpu_permission_denied", "gpu", "service cannot access configured GPU nodes; repair driver permissions")
 		}
 	}
 	if c.Detection.Platform == "xpu" {
@@ -187,9 +196,7 @@ func DetectServiceHardware(ctx context.Context, c ServiceConfig, p MachineProbe,
 	if err := os.Setenv("PATH", c.Path); err != nil {
 		return HardwarePreflight{}, err
 	}
-	if err := validateOnboardingToolEnvironment(ctx, c, p); err != nil {
-		return HardwarePreflight{}, err
-	}
+	// Environment backends are resolved only when a recipe needs them.
 	if len(c.MachineDevices) == 0 {
 		d, err := DetectService(ctx, c, p, access)
 		return HardwarePreflight{Detection: d}, err

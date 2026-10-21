@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -23,31 +24,56 @@ func probeAbsent(err error) bool {
 	return errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist) || errors.Is(err, ErrNoGPU)
 }
 
+// gpuPresent recognizes NVIDIA display controllers and Intel discrete PCIe
+// display endpoints. Linux's current_link_width PCI sysfs ABI is positive for
+// a discrete PCIe link; integrated root-complex graphics have no such link.
+// Runtime inventory remains authoritative for enrolling an accelerator.
 func (p MachineProbe) gpuPresent() (bool, error) {
-	if p.OS != "linux" {
+	if p.OS != "linux" || p.Glob == nil {
 		return false, nil
 	}
-	glob, read := p.Glob, p.ReadFile
-	if glob == nil {
-		glob = filepath.Glob
-	}
-	if read == nil {
-		read = os.ReadFile
-	}
-	paths, err := glob("/sys/bus/pci/devices/*/class")
+	paths, err := p.Glob("/sys/bus/pci/devices/*/class")
 	if err != nil {
 		return false, err
 	}
+	present := false
 	for _, path := range paths {
-		b, e := read(path)
-		if e != nil {
-			return false, e
+		if p.ReadFile == nil {
+			return false, fmt.Errorf("PCI reader missing")
 		}
-		if strings.HasPrefix(strings.TrimSpace(string(b)), "0x03") {
-			return true, nil
+		b, err := p.ReadFile(path)
+		if err != nil {
+			return false, err
+		}
+		if !strings.HasPrefix(strings.TrimSpace(string(b)), "0x03") {
+			continue
+		}
+		dir := filepath.Dir(path)
+		vendor, err := p.ReadFile(filepath.Join(dir, "vendor"))
+		if err != nil {
+			return false, err
+		}
+		v := strings.TrimSpace(string(vendor))
+		supported := v == "0x10de" || v == "0x8086" && p.intelDiscrete(dir)
+		if supported {
+			present = true
+			continue
+		}
+		device, _ := p.ReadFile(filepath.Join(dir, "device"))
+		if p.Info != nil {
+			p.Info(fmt.Sprintf("Ignoring display device %s (PCI %s:%s); no supported accelerator backend", filepath.Base(dir), v, strings.TrimSpace(string(device))))
 		}
 	}
-	return false, nil
+	return present, nil
+}
+
+func (p MachineProbe) intelDiscrete(dir string) bool {
+	if p.ReadFile == nil {
+		return false
+	}
+	b, err := p.ReadFile(filepath.Join(dir, "current_link_width"))
+	width, parseErr := strconv.Atoi(strings.TrimSpace(string(b)))
+	return err == nil && parseErr == nil && width > 0
 }
 
 // HardwarePreflight is also the nonsecret detect --config reply. The scalar
@@ -82,7 +108,11 @@ func PreflightHardware(ctx context.Context, c ServiceConfig, p MachineProbe) (Ha
 	}
 	if len(physical) == 0 {
 		// Absence of a runtime is not absence of hardware.
-		if present, e := p.gpuPresent(); e != nil || present {
+		present, e := p.gpuPresent()
+		if e != nil {
+			return out, preflightError("gpu_inventory_unavailable", "gpu", "cannot inspect PCI inventory; restore access and re-detect")
+		}
+		if present {
 			return out, preflightError("gpu_driver_missing", "gpu", "GPU hardware has no supported inventory; repair the driver and re-detect")
 		}
 		if c.Detection.Platform != "" {
@@ -209,4 +239,14 @@ func validateServiceHardware(c ServiceConfig, p HardwarePreflight) error {
 		}
 	}
 	return nil
+}
+
+func withoutMyceToken(env []string) []string {
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		if !strings.HasPrefix(entry, "MYCE_TOKEN=") {
+			out = append(out, entry)
+		}
+	}
+	return out
 }

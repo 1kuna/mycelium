@@ -327,7 +327,9 @@ One mycelium is the cluster; a hypha is a machine with CPU, RAM and accelerator
 components. Onboarding reuses the M inventory, installer overlay and service
 transaction. It enumerates all components, preserves explicit selector lists and
 per-device fixed budgets, and refuses typed driver, inventory or memory failures
-instead of saving CPU fallback. Only confirmed GPU absence selects CPU. Explicit
+instead of saving CPU fallback. Only confirmed absence of supported accelerator hardware selects CPU. NVIDIA
+display devices and Intel discrete PCIe display endpoints require their runtime;
+other display controllers are informational and do not block CPU enrollment. Explicit
 CPU selection remains supported; re-detection is an explicit install operation
 so upgrades do not silently broaden an owner's component allowance.
 Inventory errors retain M2's `device_probe_unavailable` runtime rejection while
@@ -335,18 +337,35 @@ also carrying the more specific typed onboarding diagnosis.
 
 NAS mode is the only supported onboarding storage mode (#109). Checkpoint,
 model and environment roots must use an existing reachable network filesystem.
-Discover an unambiguous mounted NAS when the default is absent; preserve saved
-roots. Never mount a share, modify fstab or substitute local directories. The
+Use the saved NAS root, an explicit `--nas PATH`, or the documented default
+(`/mnt/nas` on Linux, `/Volumes/NAS` on macOS). Never adopt another discovered
+share; missing selection refuses `nas_not_configured` with candidate mount paths
+and a `--nas` hint before printing the plan. Preserve saved roots. Never mount
+a share, modify fstab or substitute local directories. The
 legacy deviceless test flag cannot bypass this requirement for CPU/GPU workers.
 The file store remains the job input/output transport, not a second storage mode.
-Bootstrap pinned vendor uv/pixi binaries into the ordinary user's installation
-and save their PATH. Do not execute remote installer scripts or print credentials.
+Resolve uv/pixi on the service PATH first and preserve that order on upgrades.
+Only a native environment build that needs a backend may acquire its pinned
+vendor binary in the ordinary user's installation; invoke it by absolute path.
+Include uvx when shipped with uv. An offline machine with no recipes needs no
+backend download. Do not execute remote installer scripts or print credentials.
+
+NAS validation uses the existing bounded checkpoint I/O pattern with one
+250 ms network-filesystem budget for the complete metadata/create/write/sync/
+rename/cleanup sequence (#63, following the worker CIFS allowance). Timeout
+returns `nas_unresponsive`; an uninterruptible syscall can finish afterward,
+with no second sequence launched while it is pending. Known NFS/SMB mount types,
+autofs-managed mounts and explicitly network FUSE subtypes (`fuse.sshfs`,
+`fuse.rclone`, `fuse.smbnetfs`) are eligible. Generic or local FUSE is not.
+Autofs is triggered only inside bounded validation.
 
 Save daily-use, laptop and desktop policy through the same flags/overlay/Args
 as budgets. False and zero are values, including on rerun. Linux onboarding
 enables and verifies user lingering without sudo, or reports the administrator
 prerequisite. macOS installs a LaunchAgent in the logged-in gui domain and
-validates its environment there. It starts at GUI login, not before login, and
+validates its environment there. The injected Clock owns the service-probe
+deadline; a real ticker paces local output polling without advancing scheduling
+time. Bounded service stderr retains only allowlisted typed reasons. It starts at GUI login, not before login, and
 does not promise survival after logout. CPU/RAM admission on macOS is not an OS
 ceiling; required unsupported memory ceilings refuse explicitly. Hardware,
 service-session and native participation qualification remain separate gates.

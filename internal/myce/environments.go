@@ -825,6 +825,17 @@ func (c *EnvironmentCache) cleanupBuild(path string) error {
 	return store.cleanupOrphan(c.Clock)
 }
 func (c *EnvironmentCache) runBuild(ctx context.Context, argv []string, dir string, env []string, stdout, stderr io.Writer) error {
+	if len(argv) > 0 && (argv[0] == "uv" || argv[0] == "pixi") {
+		if err := checkLaunchGate(ctx); err != nil {
+			return err
+		}
+		tool, err := acquireEnvironmentTool(ctx, argv[0])
+		if err != nil {
+			return err
+		}
+		argv = append([]string(nil), argv...)
+		argv[0] = tool
+	}
 	return runRecordedCommand(ctx, argv, dir, env, stdout, commandScope{StateDir: dir, Clock: c.Clock, Stderr: stderr}, "build-state.json")
 }
 

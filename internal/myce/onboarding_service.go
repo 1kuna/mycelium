@@ -1,11 +1,15 @@
 package myce
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"html"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -88,12 +92,13 @@ func ValidateWorkerServiceEnvironment(ctx context.Context, c ServiceConfig, cloc
 	}
 	label := "local.mycelium.preflight." + filepath.Base(dir)
 	output := filepath.Join(dir, "result.json")
+	stderr := filepath.Join(dir, "stderr")
 	plist := filepath.Join(dir, "probe.plist")
 	args := ""
-	for _, arg := range []string{c.Binary, "detect", "--config", c.Config} {
+	for _, arg := range []string{"/usr/bin/env", "-u", "MYCE_TOKEN", c.Binary, "detect", "--config", c.Config} {
 		args += "<string>" + html.EscapeString(arg) + "</string>"
 	}
-	text := `<?xml version="1.0"?><plist version="1.0"><dict><key>Label</key><string>` + label + `</string><key>ProgramArguments</key><array>` + args + `</array><key>EnvironmentVariables</key><dict><key>PATH</key><string>` + html.EscapeString(c.Path) + `</string></dict><key>RunAtLoad</key><true/><key>StandardOutPath</key><string>` + html.EscapeString(output) + `</string><key>StandardErrorPath</key><string>/dev/null</string></dict></plist>`
+	text := `<?xml version="1.0"?><plist version="1.0"><dict><key>Label</key><string>` + label + `</string><key>ProgramArguments</key><array>` + args + `</array><key>EnvironmentVariables</key><dict><key>PATH</key><string>` + html.EscapeString(c.Path) + `</string></dict><key>RunAtLoad</key><true/><key>StandardOutPath</key><string>` + html.EscapeString(output) + `</string><key>StandardErrorPath</key><string>` + html.EscapeString(stderr) + `</string><key>SoftResourceLimits</key><dict><key>FileSize</key><integer>1048576</integer></dict></dict></plist>`
 	if err = os.WriteFile(plist, []byte(text), 0600); err != nil {
 		return err
 	}
@@ -107,18 +112,23 @@ func ValidateWorkerServiceEnvironment(ctx context.Context, c ServiceConfig, cloc
 		if err == nil || installExit(err, 113) {
 			_ = os.RemoveAll(dir)
 		} else {
-			result = preflightError("service_probe_cleanup_failed", "service", "launchd probe cleanup is unconfirmed; retained private probe artifacts for recovery")
+			result = errors.Join(result, preflightError("service_probe_cleanup_failed", "service", "launchd probe cleanup is unconfirmed; retained private probe artifacts for recovery"))
 		}
 	}()
 	if _, err = command(ctx, "launchctl", "bootstrap", domain, plist); err != nil {
 		return preflightError("service_environment_invalid", "service", "cannot bootstrap the launchd GUI detection probe")
 	}
+	// Clock owns the probe deadline. The real ticker only paces local I/O;
+	// it does not advance scheduling time (Clock deliberately exposes only Now).
 	deadline := clock.Now().Add(10 * time.Second)
 	ticker := time.NewTicker(20 * time.Millisecond)
 	defer ticker.Stop()
 	for {
-		b, e := os.ReadFile(output)
-		if e == nil && len(b) > 0 {
+		if typed := serviceProbeFailure(readProbeOutput(stderr, 4096), nil); typed != nil {
+			return typed
+		}
+		b := readProbeOutput(output, 1<<20)
+		if len(b) > 0 {
 			var got HardwarePreflight
 			if json.Unmarshal(b, &got) == nil {
 				if err = validateServiceHardware(c, got); err != nil {
@@ -140,4 +150,70 @@ func ValidateWorkerServiceEnvironment(ctx context.Context, c ServiceConfig, cloc
 
 func (r ServiceSessionReport) String() string {
 	return fmt.Sprintf("%s; lingering: %s; %s; %s", r.Manager, r.Lingering, r.Limitation, r.MemoryEnforcement)
+}
+
+// boundedProbeOutput caps both stdout and stderr while still draining the
+// subprocess pipes. Version/inventory output and private stderr never escape
+// through operator-facing errors.
+type boundedProbeOutput struct {
+	buffer bytes.Buffer
+	limit  int
+}
+
+func (b *boundedProbeOutput) Bytes() []byte { return b.buffer.Bytes() }
+
+func (b *boundedProbeOutput) Write(p []byte) (int, error) {
+	n := len(p)
+	if remaining := b.limit - b.buffer.Len(); remaining > 0 {
+		if len(p) > remaining {
+			p = p[:remaining]
+		}
+		_, _ = b.buffer.Write(p)
+	}
+	return n, nil
+}
+func readProbeOutput(path string, limit int64) []byte {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	b, _ := io.ReadAll(io.LimitReader(f, limit))
+	return b
+}
+
+// Only stable B2 reasons are accepted. Messages/components from command output
+// are discarded, including paths, device names and arbitrary private stderr.
+func serviceProbeFailure(output []byte, err error) error {
+	var exit *exec.ExitError
+	if errors.As(err, &exit) {
+		output = exit.Stderr
+	}
+	if len(output) > 4096 {
+		output = output[:4096]
+	}
+	messages := map[string]string{
+		"gpu_driver_missing":           "supported GPU has no driver inventory; install its runtime and re-detect",
+		"gpu_driver_unavailable":       "GPU driver probe failed in the service session; repair runtime access",
+		"gpu_inventory_unavailable":    "service GPU inventory is unavailable; restore configured components",
+		"gpu_inventory_invalid":        "service GPU inventory is invalid; repair the runtime and re-detect",
+		"gpu_memory_unavailable":       "service GPU memory inventory is unavailable; supply a measured device budget",
+		"gpu_permission_denied":        "service cannot access the configured GPU nodes; repair driver permissions",
+		"hardware_unsupported":         "service OS/architecture is unsupported",
+		"device_selector_unmatched":    "service cannot observe the explicit device selectors",
+		"service_inventory_incomplete": "service cannot observe every configured component and budget",
+	}
+	for _, line := range strings.Split(string(output), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 3 {
+			if _, err := time.Parse("2006/01/02 15:04:05", strings.Join(fields[:2], " ")); err == nil {
+				line = strings.Join(fields[2:], " ")
+			}
+		}
+		code, _, _ := strings.Cut(strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "myce: ")), ":")
+		if message, ok := messages[code]; ok {
+			return preflightError(code, "service", message)
+		}
+	}
+	return nil
 }

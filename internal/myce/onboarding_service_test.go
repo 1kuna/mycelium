@@ -204,42 +204,29 @@ func TestOnboardingServiceRejectsMissingComponentAndSanitizesOutput(t *testing.T
 			}
 			return []byte(`{"platform":"xpu","devices":[{"selector":"0","detection":{"platform":"xpu"}}]}`), nil
 		})
-		requirePreflightCode(t, err, "service_environment_invalid")
+		code := "service_environment_invalid"
+		if mode == "missing-component" {
+			code = "service_inventory_incomplete"
+		}
+		requirePreflightCode(t, err, code)
 		if strings.Contains(err.Error(), "private-value") {
 			t.Fatal("probe leaked credentials")
 		}
 	}
 }
 
-func TestOnboardingServiceValidatesPinnedToolPATH(t *testing.T) {
+// Backend availability is checked only when a recipe needs it. Retained tool
+// PATH entries on upgrades must not make an offline CPU service unusable.
+func TestOnboardingServicePreservesToolPATHWithoutEagerProbes(t *testing.T) {
 	t.Setenv("PATH", os.Getenv("PATH"))
 	c, _ := PlanInstall("worker", t.TempDir(), "", "/fixture/nas", "http://queue.invalid", "hypha", Detection{OS: "linux", Arch: "arm64", Platform: "cpu", MemoryMode: "fixed"})
 	c.Path = filepath.Join(c.WorkerHome, ".local", "share", "mycelium", "tools", "uv-0.8.22-linux-arm64") + ":/usr/bin"
-	fail := false
-	p := MachineProbe{OS: "linux", Arch: "arm64", Command: func(_ context.Context, n string, args ...string) ([]byte, error) {
-		if os.Getenv("PATH") != c.Path {
-			t.Fatal("service tool probe ignored saved PATH")
-		}
-		if fail {
-			return []byte("private-value"), errors.New("private-value")
-		}
-		switch n {
-		case "uv":
-			return []byte("uv 0.8.22"), nil
-		case "pixi":
-			return []byte("pixi 0.55.0"), nil
-		}
-		t.Fatal("CPU validation probed GPU")
+	p := MachineProbe{OS: "linux", Arch: "arm64", Command: func(context.Context, string, ...string) ([]byte, error) {
+		t.Fatal("idle service invoked backend tool")
 		return nil, nil
 	}}
 	got, err := DetectServiceHardware(context.Background(), c, p, GPUAccessProbe{})
-	if err != nil || got.Platform != "cpu" {
+	if err != nil || got.Platform != "cpu" || os.Getenv("PATH") != c.Path {
 		t.Fatal(got, err)
-	}
-	fail = true
-	_, err = DetectServiceHardware(context.Background(), c, p, GPUAccessProbe{})
-	requirePreflightCode(t, err, "service_tools_unavailable")
-	if strings.Contains(err.Error(), "private-value") {
-		t.Fatal("credential output leaked")
 	}
 }

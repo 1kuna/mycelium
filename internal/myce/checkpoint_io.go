@@ -7,6 +7,14 @@ import (
 	"time"
 )
 
+// networkFilesystemBudget is the 250 ms warm-network allowance used by worker
+// preparation/heartbeat (#63, bc2684b). Onboarding applies it to the complete
+// NAS validation sequence, outside service publication and queue locks.
+const networkFilesystemBudget = 250 * time.Millisecond
+
+var errCheckpointIOTimeout = errors.New("NAS unreachable: filesystem operation timed out")
+var errCheckpointIOPending = errors.New("NAS unreachable: previous filesystem call is still blocked")
+
 // Filesystem syscalls cannot be cancelled. Keep at most one outstanding call
 // per operation, and never wait for NAS I/O while holding the queue lock.
 type checkpointIO[T any] struct {
@@ -30,7 +38,7 @@ func (n *checkpointIO[T]) run(key string, fn func() (T, error)) (T, error) {
 			n.pending = nil
 		default:
 			n.mu.Unlock()
-			return zero, errors.New("NAS unreachable: previous filesystem call is still blocked")
+			return zero, errCheckpointIOPending
 		}
 	}
 	if n.pending == nil {
@@ -57,7 +65,7 @@ func (n *checkpointIO[T]) run(key string, fn func() (T, error)) (T, error) {
 		n.mu.Unlock()
 		return pending.value, pending.err
 	case <-ctx.Done():
-		return zero, errors.New("NAS unreachable: filesystem operation timed out")
+		return zero, errCheckpointIOTimeout
 	}
 }
 

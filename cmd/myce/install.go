@@ -318,6 +318,12 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 	if err := c.ValidateInstallPolicies(); err != nil {
 		return err
 	}
+	if role == "worker" && c.Detection.Platform != "fake" {
+		c, e = myce.ResolveOnboardingStorage(ctx, c, installed == nil && !explicit["nas"], probe.Command)
+		if e != nil {
+			return e
+		}
+	}
 	d := c.Detection
 	if installed != nil {
 		if err := myce.ValidateInstallIdentity(*installed, c); err != nil {
@@ -371,10 +377,6 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 		}
 	}
 	if role == "worker" && !c.AllowDeviceless {
-		c, e = myce.BootstrapEnvironmentTools(ctx, c, myce.LocalToolBootstrapProbe(probe))
-		if e != nil {
-			return e
-		}
 		report, err := myce.EnsureOnboardingServiceSession(ctx, c, probe.Command)
 		if err != nil {
 			return err

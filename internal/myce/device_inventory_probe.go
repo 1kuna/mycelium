@@ -44,11 +44,24 @@ func (p MachineProbe) Accelerators(ctx context.Context) ([]MachineDevice, error)
 	}
 	glob := p.Glob
 	if glob == nil {
-		glob = filepath.Glob
+		glob = func(string) ([]string, error) { return nil, nil }
 	}
 	nodes, globErr := glob("/dev/dri/renderD*")
 	if globErr != nil {
 		return nil, inventoryPreflightError("gpu_inventory_unavailable", "xpu", "cannot inspect GPU nodes")
+	}
+	// Only Intel discrete render nodes belong to the Level Zero backend.
+	// A BMC, AMD or VM render node does not require Intel's runtime.
+	if p.ReadFile != nil {
+		intel := nodes[:0]
+		for _, node := range nodes {
+			dir := filepath.Join("/sys/class/drm", filepath.Base(node), "device")
+			vendor, _ := p.ReadFile(filepath.Join(dir, "vendor"))
+			if strings.TrimSpace(string(vendor)) == "0x8086" && p.intelDiscrete(dir) {
+				intel = append(intel, node)
+			}
+		}
+		nodes = intel
 	}
 	if len(nodes) > 0 {
 		if p.CommandEnv == nil {
@@ -56,7 +69,11 @@ func (p MachineProbe) Accelerators(ctx context.Context) ([]MachineDevice, error)
 		}
 		b, err = p.CommandEnv(ctx, map[string]string{"ZE_ENABLE_PCI_ID_DEVICE_ORDER": "1", "ZE_AFFINITY_MASK": "", "ONEAPI_DEVICE_SELECTOR": ""}, "python3", "-c", levelZeroInventory)
 		if err != nil {
-			return nil, inventoryPreflightError("gpu_driver_unavailable", "xpu", "cannot enumerate Level Zero UUIDs in runtime order")
+			code := "gpu_driver_unavailable"
+			if probeAbsent(err) || installExit(err, 78) {
+				code = "gpu_driver_missing"
+			}
+			return nil, inventoryPreflightError(code, "xpu", "cannot enumerate Level Zero UUIDs; install or repair the oneAPI/Level Zero runtime")
 		}
 		var devices []struct {
 			Identity    string `json:"identity"`
@@ -86,8 +103,9 @@ func inventoryPreflightError(code, component, message string) error {
 // ctypes is only a standard-library binding to the installed Level Zero API;
 // it does not require torch, a model, or a separately managed service.
 const levelZeroInventory = `
-import ctypes as c, json
-z=c.CDLL("libze_loader.so.1")
+import ctypes as c, json, sys
+try: z=c.CDLL("libze_loader.so.1")
+except OSError: sys.exit(78)
 def check(code):
     if code: raise RuntimeError("Level Zero inventory failed")
 class Props(c.Structure):

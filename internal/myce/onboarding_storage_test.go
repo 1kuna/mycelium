@@ -109,9 +109,13 @@ func TestOnboardingNASDiscoveryAndBoundaries(t *testing.T) {
 	c.ModelRoot = filepath.Join(c.NAS, "mycelium", "models")
 	c.EnvironmentRoot = filepath.Join(c.NAS, "mycelium", "environments")
 	got, err := PrepareOnboardingStorage(context.Background(), c, true, command)
-	if err != nil || got.NAS != old {
-		t.Fatal(got, err)
+	requirePreflightCode(t, err, "nas_not_configured")
+	if got.NAS != c.NAS {
+		t.Fatal("candidate adopted without selection", got.NAS)
 	}
+	got.NAS = old
+	got.Checkpoints = filepath.Join(old, "mycelium", "checkpoints")
+	got.EnvironmentRoot = filepath.Join(old, "mycelium", "environments")
 	got.ModelRoot = filepath.Join(c.WorkerHome, "local-models")
 	_, err = PrepareOnboardingStorage(context.Background(), got, false, command)
 	requirePreflightCode(t, err, "nas_root_outside_mount")

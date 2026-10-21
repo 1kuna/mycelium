@@ -31,6 +31,7 @@ type Detection struct {
 }
 type MachineProbe struct {
 	OS, Arch string
+	Info     func(string) // Optional informational diagnostics; never inventory output.
 	Command  func(context.Context, string, ...string) ([]byte, error)
 	// CommandEnv runs a probe with per-process overrides; nil keeps injected Command fixtures.
 	CommandEnv func(context.Context, map[string]string, string, ...string) ([]byte, error)
@@ -41,13 +42,24 @@ type MachineProbe struct {
 func LocalMachineProbe() MachineProbe {
 	run := func(ctx context.Context, env map[string]string, n string, args ...string) ([]byte, error) {
 		cmd := exec.CommandContext(ctx, n, args...)
-		cmd.Env = os.Environ()
+		cmd.Env = withoutMyceToken(os.Environ())
 		for key, value := range env {
+			if key == "MYCE_TOKEN" {
+				continue
+			}
 			cmd.Env = append(cmd.Env, key+"="+value)
 		}
-		return cmd.Output()
+		var stdout, stderr boundedProbeOutput
+		stdout.limit, stderr.limit = 1<<20, 4096
+		cmd.Stdout, cmd.Stderr = &stdout, &stderr
+		err := cmd.Run()
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			exit.Stderr = stderr.Bytes()
+		}
+		return stdout.Bytes(), err
 	}
-	return MachineProbe{OS: runtime.GOOS, Arch: runtime.GOARCH, Glob: filepath.Glob, ReadFile: os.ReadFile, CommandEnv: run, Command: func(ctx context.Context, n string, args ...string) ([]byte, error) {
+	return MachineProbe{Info: func(line string) { fmt.Fprintln(os.Stderr, line) }, OS: runtime.GOOS, Arch: runtime.GOARCH, Glob: filepath.Glob, ReadFile: os.ReadFile, CommandEnv: run, Command: func(ctx context.Context, n string, args ...string) ([]byte, error) {
 		return run(ctx, nil, n, args...)
 	}}
 }
@@ -77,7 +89,7 @@ func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detectio
 			return d, preflightError("gpu_driver_unavailable", "metal", "cannot inspect Metal; repair the runtime and re-detect")
 		}
 		if e != nil || !strings.Contains(string(b), "Metal") {
-			return d, fmt.Errorf("%w: Apple GPU/Metal not visible", ErrNoGPU)
+			return d, preflightError("gpu_driver_unavailable", "metal", "Apple Silicon Metal is unavailable; repair runtime access and re-detect")
 		}
 		d.Platform = "metal"
 		d.GPU = "Apple Silicon"
@@ -194,8 +206,12 @@ func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detectio
 		d.ReserveGB = 8
 		return d, nil
 	}
-	if present, err := p.gpuPresent(); err != nil || present {
-		return d, preflightError("gpu_driver_missing", "gpu", "GPU hardware is present or cannot be inspected; install its supported driver and re-detect")
+	present, err := p.gpuPresent()
+	if err != nil {
+		return d, preflightError("gpu_inventory_unavailable", "gpu", "cannot inspect PCI inventory; restore access and re-detect")
+	}
+	if present {
+		return d, preflightError("gpu_driver_missing", "gpu", "supported GPU has no runtime inventory; install its driver and re-detect")
 	}
 	return d, fmt.Errorf("%w (nvidia-smi, sycl-ls/xpu-smi, or Apple Silicon Metal)", ErrNoGPU)
 }

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"os/exec"
 	"strings"
 	"testing"
@@ -87,8 +88,8 @@ func TestJoinMachineDeviceAllowance(t *testing.T) {
 
 func TestJoinNoGPUOffersCPUWithoutContactingQueue(t *testing.T) {
 	t.Setenv("MYCE_TOKEN", "test-only-token")
-	for _, tc := range []struct{ os, arch string }{{"linux", "amd64"}, {"darwin", "amd64"}, {"darwin", "arm64"}} {
-		probe := myce.MachineProbe{OS: tc.os, Arch: tc.arch, Command: func(context.Context, string, ...string) ([]byte, error) { return nil, exec.ErrNotFound }}
+	for _, tc := range []struct{ os, arch string }{{"linux", "amd64"}, {"darwin", "amd64"}} {
+		probe := myce.MachineProbe{OS: tc.os, Arch: tc.arch, Glob: func(string) ([]string, error) { return nil, nil }, Command: func(context.Context, string, ...string) ([]byte, error) { return nil, exec.ErrNotFound }}
 		got, err := detectJoinGPU(context.Background(), probe, joinGPUOptions{mode: "auto"}, nil)
 		if err != nil || got.platform != "cpu" || got.memory != 0 {
 			t.Fatalf("CPU enrollment: %+v %v", got, err)
@@ -147,5 +148,29 @@ func TestJoinAcceptsOnboardingBenchmarkFlag(t *testing.T) {
 		if err == nil || err.Error() != "heartbeat must be positive" {
 			t.Fatalf("flag %s: %v", value, err)
 		}
+	}
+}
+
+// An Apple Silicon host cannot be classified as GPU-less merely because its
+// Metal runtime is unavailable. The owner can still explicitly select CPU.
+func TestJoinAppleSiliconWithoutMetalRefusesUnlessCPUSelected(t *testing.T) {
+	t.Setenv("MYCE_TOKEN", "test-only-token")
+	probe := myce.MachineProbe{OS: "darwin", Arch: "arm64", Command: func(context.Context, string, ...string) ([]byte, error) { return nil, exec.ErrNotFound }}
+	_, err := detectJoinGPU(context.Background(), probe, joinGPUOptions{mode: "auto"}, nil)
+	var typed *myce.PreflightError
+	if !errors.As(err, &typed) || typed.Code != "gpu_driver_unavailable" {
+		t.Fatalf("missing Metal lost typed refusal: %v", err)
+	}
+	err = runWithProbe([]string{"join", "--heartbeat", "0"}, probe)
+	if !errors.As(err, &typed) || typed.Code != "gpu_driver_unavailable" {
+		t.Fatalf("join accepted unavailable Metal: %v", err)
+	}
+	got, err := detectJoinGPU(context.Background(), probe, joinGPUOptions{platform: "cpu", mode: "fixed"}, nil)
+	if err != nil || got.platform != "cpu" || got.memory != 0 {
+		t.Fatal(got, err)
+	}
+	err = runWithProbe([]string{"join", "--gpu", "cpu", "--heartbeat", "0"}, probe)
+	if err == nil || err.Error() != "heartbeat must be positive" {
+		t.Fatalf("explicit CPU did not reach local validation: %v", err)
 	}
 }

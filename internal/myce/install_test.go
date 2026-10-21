@@ -13,7 +13,7 @@ import (
 )
 
 func fakeProbe(osname, arch, nvidia, intel string) MachineProbe {
-	return MachineProbe{OS: osname, Arch: arch, Command: func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	return MachineProbe{OS: osname, Arch: arch, Glob: func(string) ([]string, error) { return nil, nil }, ReadFile: func(string) ([]byte, error) { return nil, os.ErrNotExist }, Command: func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		switch name {
 		case "nvidia-smi":
 			if nvidia != "" {

@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -50,7 +51,7 @@ func MountedNASRoots(ctx context.Context, osname string, command func(context.Co
 			kind = strings.TrimSpace(strings.Split(rest[i+2:], ",")[0])
 			kind = strings.TrimSuffix(kind, ")")
 		}
-		if slices.Contains([]string{"nfs", "nfs4", "cifs", "smbfs", "smb3"}, kind) && filepath.IsAbs(path) && path != "/" {
+		if networkMountType(kind) && filepath.IsAbs(path) && path != "/" {
 			roots = append(roots, filepath.Clean(path))
 		}
 	}
@@ -62,48 +63,95 @@ func withinNAS(root, path string) bool {
 	return err == nil && (rel == "." || filepath.IsLocal(rel))
 }
 
-// PrepareOnboardingStorage is the mandatory NAS-mode seam before tool bootstrap
-// or service publication. discover is true only for a fresh default NAS plan;
-// an upgrade or explicit path must never select a different filesystem.
-func PrepareOnboardingStorage(ctx context.Context, c ServiceConfig, discover bool, command func(context.Context, string, ...string) ([]byte, error)) (ServiceConfig, error) {
-	roots, err := MountedNASRoots(ctx, c.Detection.OS, command)
-	if err != nil {
-		return c, err
-	}
+// networkMountType accepts OS-managed automounts and known network FUSE
+// subtypes, never generic/local FUSE (for example encfs). An autofs path is
+// triggered only inside the bounded filesystem validation below.
+func networkMountType(kind string) bool {
+	return slices.Contains([]string{"nfs", "nfs4", "cifs", "smbfs", "smb3", "autofs", "fuse.sshfs", "fuse.rclone", "fuse.smbnetfs"}, kind)
+}
+
+func onboardingMount(c ServiceConfig, roots []string) string {
 	mount := ""
 	for _, root := range roots {
 		if withinNAS(root, c.NAS) && (mount == "" || len(root) > len(mount)) {
 			mount = root
 		}
 	}
-	if mount == "" && discover && len(roots) == 1 {
-		old := c.NAS
-		c.NAS = roots[0]
-		mount = roots[0]
-		for _, pair := range []struct {
-			path *string
-			name string
-		}{{&c.Checkpoints, "checkpoints"}, {&c.ModelRoot, "models"}, {&c.EnvironmentRoot, "environments"}} {
-			if *pair.path == filepath.Join(old, "mycelium", pair.name) {
-				*pair.path = filepath.Join(c.NAS, "mycelium", pair.name)
-			}
-		}
+	return mount
+}
+func nasNotConfigured(roots []string) error {
+	return preflightError("nas_not_configured", "storage", fmt.Sprintf("configured/default NAS is absent; mount it through the OS or select --nas PATH; candidate mounts: %q", roots))
+}
+
+// ResolveOnboardingStorage resolves selection before displaying either a dry
+// or real install plan. Explicit/saved paths are selections, not proof of I/O;
+// only the documented default may be selected without --nas on a fresh plan.
+func ResolveOnboardingStorage(ctx context.Context, c ServiceConfig, discover bool, command func(context.Context, string, ...string) ([]byte, error)) (ServiceConfig, error) {
+	if !discover && c.NAS != "" {
+		return c, nil
 	}
+	roots, err := MountedNASRoots(ctx, c.Detection.OS, command)
+	if err != nil {
+		return c, err
+	}
+	if c.NAS == "" || onboardingMount(c, roots) == "" {
+		return c, nasNotConfigured(roots)
+	}
+	return c, nil
+}
+
+type onboardingStorageFS struct {
+	lstat func(string) (os.FileInfo, error)
+	mkdir func(string, os.FileMode) error
+	probe func(string) error
+}
+
+var onboardingNASIO = checkpointIO[bool]{timeout: networkFilesystemBudget}
+
+// PrepareOnboardingStorage never adopts discovered candidates. One checkpointIO
+// guards the complete filesystem sequence, including cleanup. A blocked syscall
+// may outlive the caller, but no second sequence is launched while it is pending.
+func PrepareOnboardingStorage(ctx context.Context, c ServiceConfig, discover bool, command func(context.Context, string, ...string) ([]byte, error)) (ServiceConfig, error) {
+	return prepareOnboardingStorageFS(ctx, c, discover, command, onboardingStorageFS{os.Lstat, os.Mkdir, probeNASDirectory})
+}
+func prepareOnboardingStorageFS(ctx context.Context, c ServiceConfig, discover bool, command func(context.Context, string, ...string) ([]byte, error), fs onboardingStorageFS) (ServiceConfig, error) {
+	roots, err := MountedNASRoots(ctx, c.Detection.OS, command)
+	if err != nil {
+		return c, err
+	}
+	mount := onboardingMount(c, roots)
 	if mount == "" {
-		code := "nas_not_mounted"
-		if discover && len(roots) > 1 {
-			code = "nas_mount_ambiguous"
+		if discover || c.NAS == "" {
+			return c, nasNotConfigured(roots)
 		}
-		return c, preflightError(code, "storage", "shared NAS is not unambiguously mounted; mount it through the OS and supply --nas; no local substitute was created")
+		return c, preflightError("nas_not_mounted", "storage", "selected NAS is not mounted; restore the OS mount or supply --nas PATH")
+	}
+	ioCtx, cancel := context.WithTimeout(ctx, networkFilesystemBudget)
+	defer cancel()
+	_, err = onboardingNASIO.run(c.NAS+"\x00"+c.Checkpoints+"\x00"+c.ModelRoot+"\x00"+c.EnvironmentRoot, func() (bool, error) {
+		return false, validateOnboardingStorageFS(ioCtx, c, mount, fs)
+	})
+	if errors.Is(err, errCheckpointIOTimeout) || errors.Is(err, errCheckpointIOPending) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return c, preflightError("nas_unresponsive", "storage", "NAS validation exceeded the 250 ms network-filesystem budget or was cancelled; restore the mount and retry")
+	}
+	if err != nil {
+		return c, err
+	}
+	c.RequireMountedNAS = true
+	return c, nil
+}
+func validateOnboardingStorageFS(ctx context.Context, c ServiceConfig, mount string, fs onboardingStorageFS) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	// Check the mount and every ancestor before mkdir. In particular, a missing
 	// mountpoint is never created on the local disk.
-	if st, e := os.Lstat(mount); e != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
-		return c, preflightError("nas_unreachable", "storage", "mounted NAS is unavailable; restore the OS mount")
+	if st, e := fs.lstat(mount); e != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
+		return preflightError("nas_unreachable", "storage", "mounted NAS is unavailable; restore the OS mount")
 	}
 	for _, path := range []string{c.NAS, c.Checkpoints, c.ModelRoot, c.EnvironmentRoot} {
 		if !filepath.IsAbs(path) || !withinNAS(mount, path) {
-			return c, preflightError("nas_root_outside_mount", "storage", "checkpoint, model and environment roots must stay on the mounted NAS")
+			return preflightError("nas_root_outside_mount", "storage", "checkpoint, model and environment roots must stay on the mounted NAS")
 		}
 		rel, _ := filepath.Rel(mount, path)
 		at := mount
@@ -112,26 +160,31 @@ func PrepareOnboardingStorage(ctx context.Context, c ServiceConfig, discover boo
 				continue
 			}
 			at = filepath.Join(at, part)
-			st, e := os.Lstat(at)
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			st, e := fs.lstat(at)
 			if errors.Is(e, os.ErrNotExist) {
-				if e = os.Mkdir(at, 0700); e != nil {
-					return c, preflightError("nas_unreachable", "storage", "NAS roots cannot be created; check reachability and write permission")
+				if err := ctx.Err(); err != nil {
+					return err
+				}
+				if e = fs.mkdir(at, 0700); e != nil {
+					return preflightError("nas_unreachable", "storage", "NAS roots cannot be created; check reachability and write permission")
 				}
 			} else if e != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
-				return c, preflightError("nas_root_invalid", "storage", "NAS roots require accessible real directories, without symlinks")
+				return preflightError("nas_root_invalid", "storage", "NAS roots require accessible real directories, without symlinks")
 			}
 		}
 	}
 	for _, path := range []string{c.Checkpoints, c.ModelRoot, c.EnvironmentRoot} {
 		if ctx.Err() != nil {
-			return c, ctx.Err()
+			return ctx.Err()
 		}
-		if err := probeNASDirectory(path); err != nil {
-			return c, preflightError("nas_unreachable", "storage", "NAS write/sync/rename probe failed; restore mount reachability and permissions")
+		if err := fs.probe(path); err != nil {
+			return preflightError("nas_unreachable", "storage", "NAS write/sync/rename probe failed; restore mount reachability and permissions")
 		}
 	}
-	c.RequireMountedNAS = true
-	return c, nil
+	return ctx.Err()
 }
 
 func probeNASDirectory(dir string) error {

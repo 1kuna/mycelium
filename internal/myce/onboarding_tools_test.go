@@ -64,10 +64,10 @@ func TestOnboardingPinnedToolsBootstrapPATHAndRerun(t *testing.T) {
 				t.Fatal(err)
 			}
 			dirs := strings.Split(got.Path, ":")
-			if len(dirs) != 4 || !strings.Contains(dirs[0], "uv-0.8.22") || !strings.Contains(dirs[1], "pixi-0.55.0") || dirs[2] != "/runtime/bin" {
+			if len(dirs) != 4 || dirs[0] != "/runtime/bin" || dirs[1] != "/usr/bin" || !strings.Contains(dirs[2], "uv-0.8.22") || !strings.Contains(dirs[3], "pixi-0.55.0") {
 				t.Fatal(got.Path)
 			}
-			for _, dir := range dirs[:2] {
+			for _, dir := range dirs[2:] {
 				entries, _ := os.ReadDir(dir)
 				if len(entries) != 2 {
 					t.Fatal(entries)
