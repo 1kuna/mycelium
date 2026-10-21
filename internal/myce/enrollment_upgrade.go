@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -47,7 +48,8 @@ func ReadEnrollmentUpgrade(c ServiceConfig) (HostMaintenanceStatus, error) {
 
 // ResolveEnrollmentUpgrade promotes a durable drain intent after a crash between
 // the request and recording its response, using queue-side ownership proof.
-// Completed receipts retain both their owner and timestamp CAS fences.
+// Enabled/disabled queue state retires stale receipts. While drained, completed
+// receipts retain both their owner and timestamp CAS fences.
 func ResolveEnrollmentUpgrade(ctx context.Context, c ServiceConfig, client Client) (HostMaintenanceStatus, error) {
 	receipt, err := ReadEnrollmentUpgrade(c)
 	if err != nil || receipt.Policy.Mode == "" {
@@ -57,11 +59,15 @@ func ResolveEnrollmentUpgrade(ctx context.Context, c ServiceConfig, client Clien
 	if err = client.Call(ctx, "GET", "/api/hosts/"+url.PathEscape(c.HostID)+"/maintenance", nil, &observed); err != nil {
 		return receipt, err
 	}
-	if receipt.Policy.Mode == "enabled" && observed.Policy.Mode == "enabled" {
+	if observed.Policy.Mode == "enabled" || observed.Policy.Mode == "disabled" {
+		if err := os.Remove(filepath.Join(c.State, enrollmentResumeFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return HostMaintenanceStatus{}, fmt.Errorf("retire stale enrollment resume receipt: %w", err)
+		}
+		log.Printf("Retired stale enrollment resume receipt: queue confirms host is %s; no drain to resume.", observed.Policy.Mode)
 		return HostMaintenanceStatus{}, nil
 	}
 	if receipt.Policy.DrainOwner == "" || observed.Policy.Mode != "drained" || observed.Policy.DrainOwner != receipt.Policy.DrainOwner || receipt.Policy.Mode == "drained" && !receipt.Policy.UpdatedAt.Equal(observed.Policy.UpdatedAt) {
-		return HostMaintenanceStatus{}, enrollmentDrainUnproven(c)
+		return HostMaintenanceStatus{}, enrollmentDrainUnproven(c, observed.Policy.Mode)
 	}
 	if receipt.Policy.Mode == "drained" {
 		return observed, nil
@@ -132,7 +138,7 @@ func PrepareEnrollmentUpgrade(ctx context.Context, c ServiceConfig, client Clien
 			return status, errors.Join(err, resolveErr)
 		}
 		if status.Policy.DrainOwner != owner {
-			return status, enrollmentDrainUnproven(c)
+			return status, enrollmentDrainUnproven(c, status.Policy.Mode)
 		}
 		receipt = status
 		owned = true
@@ -177,10 +183,16 @@ func FinishEnrollmentUpgrade(ctx context.Context, c ServiceConfig, client Client
 		return nil
 	}
 	if receipt.Policy.DrainOwner == "" {
-		return enrollmentDrainUnproven(c)
+		return enrollmentDrainUnproven(c, "")
 	}
 	if err := client.Call(ctx, "POST", "/api/hosts/"+url.PathEscape(c.HostID)+"/maintenance", HostMaintenanceRequest{Action: "resume", IfMode: "drained", IfUpdatedAt: &receipt.Policy.UpdatedAt, IfDrainOwner: receipt.Policy.DrainOwner}, nil); err != nil {
-		return errors.Join(enrollmentDrainUnproven(c), err)
+		// A failed response may follow a committed resume. Only suggest an
+		// operator resume when the queue still confirms a drain.
+		var observed HostMaintenanceStatus
+		if e := client.Call(ctx, "GET", "/api/hosts/"+url.PathEscape(c.HostID)+"/maintenance", nil, &observed); e != nil {
+			observed.Policy.Mode = ""
+		}
+		return errors.Join(enrollmentDrainUnproven(c, observed.Policy.Mode), err)
 	}
 	err := os.Remove(filepath.Join(c.State, enrollmentResumeFile))
 	if errors.Is(err, os.ErrNotExist) {
@@ -189,6 +201,10 @@ func FinishEnrollmentUpgrade(ctx context.Context, c ServiceConfig, client Client
 	return err
 }
 
-func enrollmentDrainUnproven(c ServiceConfig) error {
-	return fmt.Errorf("drain ownership unproven or maintenance changed; host maintenance preserved; operator can resume with: myce host resume %s", c.HostID)
+func enrollmentDrainUnproven(c ServiceConfig, mode string) error {
+	message := "drain ownership unproven or maintenance changed; host maintenance preserved"
+	if mode == "drained" {
+		message += fmt.Sprintf("; operator can resume with: myce host resume %s", c.HostID)
+	}
+	return errors.New(message)
 }
