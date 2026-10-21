@@ -875,6 +875,10 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			}
 			// Onboarding reports health and exact custody before any ordinary
 			// admission. Do not return offers that this startup phase cannot run.
+			if c.Recovering {
+				q.cancelUnofferedPreparations(&m, reply)
+				return
+			}
 			if m.BenchmarkPending || c.BenchmarkDone != "" {
 				if m.BenchmarkPending && q.hostLaunchAllowed(&m, m.Session) && q.benchmarkIdle(&m) {
 					l := q.issuePreparation(&m, "benchmark", "onboarding")
@@ -914,7 +918,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			}
 		}
 		if c.AttemptProtocol != "" && m.Devices != nil {
-			q.checkinMachineAttempts(&m, reports, progresses, &reply)
+			q.checkinMachineAttempts(&m, reports, progresses, c.Recovering, &reply)
 			q.maintain()
 			return nil
 		}
@@ -967,7 +971,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 					}
 					break
 				}
-				if q.maintenanceBlocked(hostID(&m)) || !logPolicyFits(j.Spec.Logs, &m) || !q.checkpointReady(j, &m) {
+				if c.Recovering || q.maintenanceBlocked(hostID(&m)) || !logPolicyFits(j.Spec.Logs, &m) || !q.checkpointReady(j, &m) {
 					return nil
 				}
 				out := cloneJob(j)
@@ -975,7 +979,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 				return nil
 			}
 		}
-		if !m.Leaving {
+		if !m.Leaving && !c.Recovering {
 			j := q.pick(&m)
 			if j != nil && q.betterPlacement(j, &m) {
 				j = nil
@@ -1180,14 +1184,21 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 	ceilingFailure := !r.Success && strings.HasPrefix(ceilingDiagnostic(r.Error, ""), "exceeded its ")
 	oomFailure := !r.Success && (r.OutOfMemory || ceilingFailure)
 	stageFailure := (j.Spec.Priority == "production" || plannedPriorityStop(j)) && !r.Success && !r.Interrupted
-	// Any confirmed exit frees the victim, including completion or independent
-	// failure. This credit only plans a release; a fresh report still gates use.
-	if j.State == "stopping" && !r.ReleasePending && j.StopAt != nil && q.clock.Now().Before(*j.StopAt) {
-		if q.s.BatchReleases == nil {
-			q.s.BatchReleases = map[string]batchRelease{}
-		}
+	// Machine-worker cleanup can finish in the kill phase before fresh memory
+	// telemetry. Bridge that report gap, bounded by machine liveness. Legacy
+	// workers retain their original stop-grace bound. This never admits work.
+	if j.State == "stopping" && !r.ReleasePending && j.StopAt != nil {
 		owner := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
-		q.s.BatchReleases[batchReleaseKey(owner)] = batchRelease{Session: j.Session, MemoryGB: j.Spec.Needs.MemoryGB, Until: *j.StopAt}
+		until := *j.StopAt
+		if owner != nil && owner.Devices != nil {
+			until = q.clock.Now().Add(q.machineLossTimeout(j.Machine))
+		}
+		if owner != nil && q.clock.Now().Before(until) {
+			if q.s.BatchReleases == nil {
+				q.s.BatchReleases = map[string]batchRelease{}
+			}
+			q.s.BatchReleases[batchReleaseKey(owner)] = batchRelease{Session: j.Session, MemoryGB: j.Spec.Needs.MemoryGB, Until: until}
+		}
 	}
 	if cancelled(j) || j.State == "stopping" && (!r.Success || !plannedPriorityStop(j)) && !oomFailure && !stageFailure {
 		if cancelled(j) {

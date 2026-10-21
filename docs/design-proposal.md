@@ -1334,6 +1334,27 @@ are excluded. They replace the previous package M estimates.
   no device identity is invented. Check-ins returning immediate cleanup for a
   reported attempt offer no new batch assignment, allowing startup supervisors
   to drain recovered custody and complete their existing fresh-session handoff.
+- Startup check-ins explicitly set additive `recovering: true` until every
+  saved attempt and buffered result is acknowledged and the existing fresh-session
+  handoff completes (#106). Reports alone cannot distinguish startup recovery
+  from ordinary concurrent work. Reconcile exact custody and stop/kill controls,
+  including owned kill-phase attempts, but offer no batch assignments (including
+  redelivery), preparation or model work. Recovery refuses admission **before**
+  allocating an attempt: no attempt number, copy history, loss or infrastructure
+  retry is consumed. Do not refund/reuse offered identities; stale execution
+  fences remain monotonic. The worker rejects an assignment in a recovery reply
+  as a protocol error, retaining custody, rather than reporting an interrupted
+  execution. Actual launch/infrastructure failures keep their existing classification.
+- For machine workers, the planner credits lower-tier stopping attempts in both
+  grace and kill phases as soon-free capacity (#106), preferring that pending release over a new stop
+  on another device. A confirmed exit in either phase retains the existing
+  planning credit until fresh inventory arrives, bounded by the machine's loss
+  timeout, so stale free-memory telemetry cannot trigger a neighbor stop between
+  release and check-in. This is only a release projection: device/CPU/RAM charges
+  and exact cleanup acknowledgements still gate replacement admission. Ordinary
+  non-recovering workers may continue backfilling unaffected capacity. The bounded
+  legacy adapter retains its existing fallback to another worker after stop
+  grace, including expiry of acknowledgement credit.
 
 M2–M4 total: **1,350–2,200 production LOC; 2,000–3,100 test/doc LOC;
 11–16 engineer days**, excluding M1 and native access delays. M2 grows from
