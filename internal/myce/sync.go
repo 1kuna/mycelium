@@ -272,6 +272,15 @@ func (q *Queue) placementBetter(j *Job, a, b *Machine) bool {
 	return q.loadSeconds(j.Spec.Needs.Model, a)+environmentSeconds(j, a) < q.loadSeconds(j.Spec.Needs.Model, b)+environmentSeconds(j, b)
 }
 func (q *Queue) betterPlacement(j *Job, m *Machine) bool {
+	// Plain commands and component targets use the same preferred-platform
+	// deferral as legacy workers, before the specialized placement ranking.
+	if len(j.Spec.Needs.Platform.Preferred) > 0 && !contains(j.Spec.Needs.Platform.Preferred, m.GPU) {
+		for _, other := range q.plannerMachines() {
+			if contains(j.Spec.Needs.Platform.Preferred, other.GPU) && q.placementAllowed(j, other) && fits(j, other, other.FreeMemoryGB) && affinity(j, other) >= affinity(j, m) && q.workerBatchIdle(other) {
+				return true
+			}
+		}
+	}
 	if j.Spec.extensionJob() {
 		for _, other := range q.plannerMachines() {
 			if !sameTarget(other, m) && !q.unreported[other.ID] && q.workerIdle(other, j) && q.placementAllowed(j, other) && q.checkpointReady(j, other) && fits(j, other, other.FreeMemoryGB) && q.capabilityPlacementBetter(j, other, m) {

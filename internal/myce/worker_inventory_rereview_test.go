@@ -230,3 +230,99 @@ func TestInventoryRereviewAllowanceSingleCardMasks(t *testing.T) {
 		}
 	}
 }
+
+func TestQCNativeGroupLaunchProbeRetry(t *testing.T) {
+	for _, resumable := range []bool{false, true} {
+		for _, probe := range []int{3, 4} {
+			for _, mismatch := range []bool{false, true} {
+				t.Run(fmt.Sprintf("resumable=%t/probe=%d/mismatch=%t", resumable, probe, mismatch), func(t *testing.T) {
+					q, clock := fixture(t)
+					server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+					defer server.Close()
+					w := recoveryWorker(t)
+					w.Clock = clock
+					w.Machine.HostMemoryMeasured = true
+					w.Machine.FreeHostMemoryGB = 64
+					w.Machine.HostAvailableMemoryGB = 64
+					w.Client = Client{URL: server.URL, Token: "test"}
+					w.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
+					root, err := w.openStore()
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer root.close()
+					root.state.Session = w.Machine.Session
+					spec := spec("production")
+					spec.Resumable = resumable
+					spec.Run.Command = []string{"sh", "-c", "exit 0"}
+					spec.Run.Sidecars = []NativeSidecar{{Name: "helper", Command: []string{"sh", "-c", "sleep 60"}, MemoryGB: 1}}
+					spec.Needs.HostMemoryGB = 2
+					submitted := submit(t, q, spec)
+					devices := inventoryReviewDevices()[:1]
+					for attempt := 1; attempt <= 2; attempt++ {
+						reply := check(t, q, w.Machine, nil)
+						if reply.Job == nil {
+							t.Fatalf("no retry assignment: %+v", job(t, q, submitted.ID))
+						}
+						j := *reply.Job
+						store, err := newAttemptStore(root, j)
+						if err != nil {
+							t.Fatal(err)
+						}
+						runner := workerWithPreparedCheckpoint(t, w, store, j)
+						runner.Machine.Device = "0"
+						runner.Machine.Devices = devices
+						calls := 0
+						runner.InventoryProbe = func(context.Context) ([]MachineDevice, error) {
+							calls++
+							if attempt == 1 && calls == probe {
+								if !mismatch {
+									return nil, errors.New("transient probe failure")
+								}
+								changed := append([]MachineDevice(nil), devices...)
+								changed[0].Identity = "swapped-card"
+								return changed, nil
+							}
+							return devices, nil
+						}
+						bound, err := runner.forAttempt(j)
+						if err != nil {
+							t.Fatal(err)
+						}
+						p, err := bound.start(store, j)
+						var r Result
+						if attempt == 1 {
+							if p != nil {
+								r = d5Finish(t, p)
+								if r.Success || !r.Interrupted {
+									t.Fatalf("group refusal not infrastructure: %+v", r)
+								}
+							} else if err == nil {
+								t.Fatal("launch probe did not refuse execution")
+							}
+							if p == nil {
+								r = startFailureOutcome(result(&j, false), err)
+							}
+						} else {
+							if err != nil {
+								t.Fatal(err)
+							}
+							r = d5Finish(t, p)
+						}
+						if err = q.Complete(r); err != nil {
+							t.Fatal(err)
+						}
+						got := job(t, q, submitted.ID)
+						want := "queued"
+						if attempt == 2 {
+							want = "succeeded"
+						}
+						if got.State != want || got.InfrastructureRetries != 1 || got.Attempt != attempt {
+							t.Fatalf("state=%s attempt=%d retries=%d reason=%s; want %s", got.State, got.Attempt, got.InfrastructureRetries, got.Reason, want)
+						}
+					}
+				})
+			}
+		}
+	}
+}

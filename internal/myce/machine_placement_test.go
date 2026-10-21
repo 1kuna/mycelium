@@ -18,6 +18,7 @@ func m3Machine() Machine {
 
 func machineCheck(t *testing.T, q *Queue, m Machine, jobs ...*Job) Reply {
 	t.Helper()
+	m.Devices = slices.Clone(m.Devices)
 	c := Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol}
 	for _, j := range jobs {
 		c.Attempts = append(c.Attempts, AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Started: true})

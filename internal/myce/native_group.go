@@ -477,7 +477,7 @@ func environmentList(env map[string]string) []string {
 
 func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]string, dir string, output *os.File) error {
 	if err := g.worker.verifyDevice(); err != nil {
-		return err
+		return g.recordInfrastructure(launchRefused, m.Name, "", err)
 	}
 	l := HostLaunch{Machine: g.worker.Machine.ID, Session: g.session, Kind: "batch", Key: g.p.job.ID, Attempt: strconv.Itoa(g.p.job.Attempt)}
 	if err := g.worker.authorizeLaunch(l); err != nil {

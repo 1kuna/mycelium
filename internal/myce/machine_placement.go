@@ -102,7 +102,12 @@ func (q *Queue) checkinMachineAttempts(m *Machine, reports []AttemptReport, prog
 		a := q.reconcileAttemptReport(m, &reports[i], progresses[i])
 		reply.Attempts = append(reply.Attempts, a)
 		seen[attemptKey{a.ID, a.Attempt, a.Session}] = true
-		cleanup = cleanup || a.Stop && a.Kill
+		// Immediate cleanup of an unowned recovered copy must drain before
+		// startup's fresh-session handoff. An owned stopping attempt, even
+		// past its kill deadline, fences only its device and charged resources.
+		j := q.s.Jobs[a.ID]
+		owned := j != nil && j.Machine == m.ID && j.Session == a.Session && j.Attempt == a.Attempt && j.State == "stopping"
+		cleanup = cleanup || a.Stop && a.Kill && !owned
 	}
 	for _, j := range q.s.Jobs {
 		if j.Machine != m.ID || j.Session != m.Session || seen[jobKey(*j)] {
@@ -122,7 +127,18 @@ func (q *Queue) checkinMachineAttempts(m *Machine, reports []AttemptReport, prog
 	// Let supervisors drain immediate-cleanup reports before offering more work.
 	// Otherwise startup recovery can keep accepting and refusing replacements,
 	// never reaching its empty collection and fresh-session handoff.
-	if m.Leaving || cleanup {
+	if m.Leaving {
+		active := len(reports) > 0
+		for _, j := range q.s.Jobs {
+			active = active || j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping") && !j.ReleaseConfirmed
+		}
+		if !active && len(q.modelPlan(m.ID)) == 0 {
+			m.Gone = true
+			m.Models = nil
+		}
+		return
+	}
+	if cleanup {
 		return
 	}
 	var best *Job
@@ -152,7 +168,11 @@ type MachineReplacement struct {
 func (q *Queue) validateMachineNames(names []string) error {
 	for _, name := range names {
 		if m := q.s.Machines[name]; m != nil && m.Replacement != nil {
-			return &HTTPError{Status: 400, Code: "machine_renamed", Message: fmt.Sprintf("machine %s was renamed; use allowed_machines: [%s] plus needs.gpu.devices: [%q]", name, m.Replacement.Machine, m.Replacement.Device)}
+			hint := fmt.Sprintf("machine %s was renamed; use allowed_machines: [%s]", name, m.Replacement.Machine)
+			if m.Replacement.Device != "" {
+				hint += fmt.Sprintf(" plus needs.gpu.devices: [%q]", m.Replacement.Device)
+			}
+			return &HTTPError{Status: 400, Code: "machine_renamed", Message: hint}
 		}
 	}
 	return nil

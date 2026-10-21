@@ -628,7 +628,10 @@ func (q *Queue) maintain() {
 	}
 
 	for _, j := range q.s.Jobs {
-		if !q.networkQuiet && !q.unreported[j.Machine] && j.State == "stopping" && !plannedPriorityStop(j) && !j.Spec.Run.Docker && expired(j.StopAt, now) {
+		// Machine attempts retain their exact device and host charge through kill;
+		// only their release acknowledgement can retire the stopping attempt.
+		m := q.s.Machines[j.Machine]
+		if (m == nil || m.Devices == nil) && !q.networkQuiet && !q.unreported[j.Machine] && j.State == "stopping" && !plannedPriorityStop(j) && !j.Spec.Run.Docker && expired(j.StopAt, now) {
 			if cancelled(j) {
 				j.State = "cancelled"
 				j.StopAt = nil
@@ -960,23 +963,6 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		}
 		if !m.Leaving {
 			j := q.pick(&m)
-			if j != nil && len(j.Spec.Needs.Platform.Preferred) > 0 && !contains(j.Spec.Needs.Platform.Preferred, m.GPU) {
-				for _, other := range q.s.Machines {
-					if !contains(j.Spec.Needs.Platform.Preferred, other.GPU) || !q.placementAllowed(j, other) || !fits(j, other, other.FreeMemoryGB) || affinity(j, other) < affinity(j, &m) {
-						continue
-					}
-					busy := false
-					for _, r := range q.s.Jobs {
-						if r.Machine == other.ID && (r.State == "running" || r.State == "stopping") {
-							busy = true
-						}
-					}
-					if !busy {
-						j = nil
-						break
-					}
-				}
-			}
 			if j != nil && q.betterPlacement(j, &m) {
 				j = nil
 			}
@@ -1288,8 +1274,9 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 		if !q.checkpointsAvailable() {
 			warnings = append(warnings, "NAS checkpoint root is unreachable; checkpoint-dependent jobs will not start")
 		}
-		for _, m := range q.plannerMachines() {
-			if !m.Gone && m.CheckpointUnavailable {
+		for _, id := range slices.Sorted(maps.Keys(q.s.Machines)) {
+			m := q.s.Machines[id]
+			if m.Replacement == nil && !m.Gone && m.CheckpointUnavailable {
 				warnings = append(warnings, "NAS checkpoint root is unreachable on worker "+m.ID)
 			}
 		}

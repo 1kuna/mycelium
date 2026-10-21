@@ -26,13 +26,83 @@ func (c *manualWorkerClock) Advance(d time.Duration) {
 	c.now = c.now.Add(d)
 }
 
-type partitionTransport struct{ down atomic.Bool }
+type partitionGate struct {
+	mu    sync.RWMutex
+	value atomic.Bool
+}
+
+func (g *partitionGate) Store(down bool) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.value.Store(down)
+}
+
+func (g *partitionGate) Load() bool { return g.value.Load() }
+
+type partitionTransport struct{ down partitionGate }
 
 func (p *partitionTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	// Store(true) closes admission and waits for accepted requests to finish
+	// their server-side mutations before the harness advances queue time.
+	p.down.mu.RLock()
+	defer p.down.mu.RUnlock()
 	if p.down.Load() {
 		return nil, errors.New("pretend network partition")
 	}
 	return http.DefaultTransport.RoundTrip(r)
+}
+
+// Partition admission must also drain requests that already passed the gate.
+func TestQCPartitionDrainsInFlight(t *testing.T) {
+	q, clock := fixture(t)
+	ms := []Machine{machine("a", "fake", "ha"), machine("b", "fake", "hb"), machine("c", "fake", "hc")}
+	for _, m := range ms {
+		check(t, q, m, nil)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(entered)
+		<-release
+		check(t, q, ms[2], nil)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	transport := &partitionTransport{}
+	done := make(chan error, 1)
+	go func() {
+		r, err := (&http.Client{Transport: transport}).Get(server.URL)
+		if r != nil {
+			r.Body.Close()
+		}
+		done <- err
+	}()
+	<-entered
+	partitioned := make(chan struct{})
+	go func() { transport.down.Store(true); close(partitioned) }()
+	premature := false
+	select {
+	case <-partitioned:
+		premature = true
+	case <-time.After(20 * time.Millisecond):
+	}
+	if premature {
+		clock.Advance(10 * time.Minute)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	<-partitioned
+	if !premature {
+		clock.Advance(10 * time.Minute)
+	}
+	s, err := q.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if premature || !strings.Contains(s.Warning, "network") {
+		t.Fatalf("partition returned before in-flight check-in drained; warning=%q", s.Warning)
+	}
 }
 
 func TestWorkerNetworkPartitionFakeClock(t *testing.T) {
