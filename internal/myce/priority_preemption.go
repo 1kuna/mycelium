@@ -41,7 +41,10 @@ func (q *Queue) batchPreemptible(j *Job, demand Spec) bool {
 	if demand.Priority == "deadline" && !j.Spec.Resumable {
 		return false
 	}
-	if j.State == "stopping" && expired(j.StopAt, q.clock.Now()) {
+	// Grace expiry authorizes kill; it does not make the pending release less
+	// useful than a fresh stop on a neighboring machine-worker device. Retain
+	// the bounded legacy-worker fallback to another worker after stop grace.
+	if owner := q.s.Machines[j.Machine]; j.State == "stopping" && expired(j.StopAt, q.clock.Now()) && (owner == nil || owner.Devices == nil) {
 		return false
 	}
 	return j.State == "stopping" || !q.preemptionProtected(j.PreemptionCount, j.StartedAt)

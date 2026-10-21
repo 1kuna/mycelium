@@ -95,7 +95,7 @@ func allocationMachine(m *Machine, devices []string) *Machine {
 	return m
 }
 
-func (q *Queue) checkinMachineAttempts(m *Machine, reports []AttemptReport, progresses []attemptProgress, reply *Reply) {
+func (q *Queue) checkinMachineAttempts(m *Machine, reports []AttemptReport, progresses []attemptProgress, recovering bool, reply *Reply) {
 	seen := map[attemptKey]bool{}
 	cleanup := false
 	for i := range reports {
@@ -119,7 +119,7 @@ func (q *Queue) checkinMachineAttempts(m *Machine, reports []AttemptReport, prog
 				continue
 			}
 			reply.Attempts = append(reply.Attempts, AttemptDirective{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Stop: true, Kill: expired(j.StopAt, q.clock.Now()), GraceSeconds: max(0, j.StopAt.Sub(q.clock.Now()).Seconds()), PriorityStop: priorityStop(j)})
-		} else if j.State == "running" && !q.maintenanceBlocked(hostID(m)) && logPolicyFits(j.Spec.Logs, m) && q.checkpointReady(j, m) {
+		} else if !recovering && j.State == "running" && !q.maintenanceBlocked(hostID(m)) && logPolicyFits(j.Spec.Logs, m) && q.checkpointReady(j, m) {
 			out := cloneJob(j)
 			reply.Attempts = append(reply.Attempts, AttemptDirective{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Job: &out})
 		}
@@ -138,7 +138,9 @@ func (q *Queue) checkinMachineAttempts(m *Machine, reports []AttemptReport, prog
 		}
 		return
 	}
-	if cleanup {
+	// Refuse admission before assign creates an attempt or history. Refunding
+	// an offered identity would allow stale results to match a reused attempt.
+	if recovering || cleanup {
 		return
 	}
 	var best *Job

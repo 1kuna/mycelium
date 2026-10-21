@@ -701,7 +701,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			rt.memoryMachine, rt.session = w.Machine, w.Machine.Session
 			rt.batchJobs = slices.Clone(jobs)
 			rt.mu.Unlock()
-			reply, err := w.checkin(ctx, Checkin{Machine: m, Attempts: reports, Fresh: fresh, PreviousSession: root.state.PreviousSession, ModelReports: modelReports})
+			reply, err := w.checkin(ctx, Checkin{Machine: m, Attempts: reports, Recovering: recovering, Fresh: fresh, PreviousSession: root.state.PreviousSession, ModelReports: modelReports})
 			if err == nil {
 				if reply.CPUBudgetCores != nil {
 					w.Machine.CPUBudgetCores = *reply.CPUBudgetCores
@@ -750,7 +750,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 						if e != nil {
 							return e
 						}
-						if leaving || recovering {
+						if leaving {
 							r := Result{Machine: m.ID, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Interrupted: true, Error: "worker leaving before command started"}
 							s.state.Result = &r
 						}

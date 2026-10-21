@@ -425,6 +425,7 @@ type Execution struct {
 type Checkin struct {
 	AttemptProtocol string          `json:"attempt_protocol,omitempty"`
 	Attempts        []AttemptReport `json:"attempts,omitempty"`
+	Recovering      bool            `json:"recovering,omitempty"`     // Reconcile custody without offering new work.
 	BenchmarkDone   string          `json:"benchmark_done,omitempty"` // Exact preparation attempt, after process cleanup.
 	Started         bool            `json:"started,omitempty"`
 	ModelReports    []ModelReport   `json:"model_reports,omitempty"`
