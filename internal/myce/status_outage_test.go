@@ -29,3 +29,26 @@ func TestStatusConcurrentOutageWarnings(t *testing.T) {
 	}
 	requireState(t, q, queued.ID, "queued")
 }
+
+func TestLateCheckinClearsNetworkWarning(t *testing.T) {
+	q, clock := fixture(t)
+	workers := []Machine{machine("a", "fake"), machine("b", "fake"), machine("c", "fake")}
+	for _, m := range workers {
+		check(t, q, m, nil)
+	}
+	clock.Advance(10 * time.Minute)
+	s, err := q.Snapshot()
+	if err != nil || !strings.Contains(s.Warning, "network") {
+		t.Fatalf("whole-network warning missing: %q, %v", s.Warning, err)
+	}
+	check(t, q, workers[0], nil)
+	s, err = q.Snapshot()
+	if err != nil || strings.Contains(s.Warning, "network") || q.s.NetworkRecoveryAt.IsZero() {
+		t.Fatalf("late contact did not clear warning and record recovery: %q, %v", s.Warning, err)
+	}
+	for _, m := range s.Machines {
+		if m.Gone {
+			t.Fatalf("peer %s marked gone during network recovery", m.ID)
+		}
+	}
+}
