@@ -17,7 +17,7 @@ func TestMain(m *testing.M) {
 	}
 	// The crash/restart drill is another process on the same provisioned host.
 	// Preserve its inherited operation rather than inventing a conflicting host.
-	if os.Getenv("MYCE_RECOVERY_TEST_HELPER") == "1" {
+	if os.Getenv("MYCE_RECOVERY_TEST_HELPER") == "1" || os.Getenv("MYCE_TEST_DOCKER_BIN") != "" {
 		os.Exit(m.Run())
 	}
 	dir, err := os.MkdirTemp("", "myce-docker-tests-")
@@ -32,7 +32,14 @@ func TestMain(m *testing.M) {
 	if err = os.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH")); err != nil {
 		panic(err)
 	}
+	// Helpers may call os.Exit or be deliberately killed. They reuse this
+	// parent-owned shim instead of creating a temp root they cannot clean up.
+	if err = os.Setenv("MYCE_TEST_DOCKER_BIN", dir); err != nil {
+		panic(err)
+	}
 	code := m.Run()
-	_ = os.RemoveAll(dir) // Owned fake Docker executable; all tests and children have joined.
+	if err := os.RemoveAll(dir); err != nil { // All tests and children have joined.
+		code = 1
+	}
 	os.Exit(code)
 }
