@@ -59,7 +59,7 @@ func machine(id, gpu string, host ...string) Machine {
 	if len(host) > 0 {
 		physicalHost = host[0]
 	}
-	return Machine{HostID: physicalHost, ID: id, Session: "session-" + id, GPU: gpu, FreeMemoryGB: 8, CapabilityProfile: &CapabilityProfile{Version: 0, OS: "linux", Arch: "amd64", LogicalCPUs: 64, MemoryLayout: "separate", SystemMemoryBytes: 64 << 30, Accelerators: []AcceleratorProfile{{Type: gpu, MemoryBytes: 64 << 30}}}}
+	return Machine{CPUIsolation: "select-none", HostID: physicalHost, ID: id, Session: "session-" + id, GPU: gpu, FreeMemoryGB: 8, CapabilityProfile: &CapabilityProfile{Version: 0, OS: "linux", Arch: "amd64", LogicalCPUs: 64, MemoryLayout: "separate", SystemMemoryBytes: 64 << 30, Accelerators: []AcceleratorProfile{{Type: gpu, MemoryBytes: 64 << 30}}}}
 }
 func check(t *testing.T, q *Queue, m Machine, r *Job) Reply {
 	t.Helper()

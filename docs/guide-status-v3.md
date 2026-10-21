@@ -10,6 +10,16 @@ memory, shared or separate memory, and local storage. Missing measurements say
 unknown. Extension reports say which kind of work or program is qualified on
 that hypha; having hardware alone does not make an extension qualified.
 
+Machine `cpu_isolation` reports `select-none` after runtime qualification,
+`not-enforced` for cooperative CPU execution on macOS/Metal, or
+`cpu_accelerator_isolation_unavailable` while qualification is unavailable.
+Metal has no device-masking environment equivalent; a CPU request is a resource
+and execution target, not a guarantee that its command cannot use Metal.
+CUDA/XPU select-none controls remain required. CPU/RAM accounting is unchanged.
+Unqualified CPU targets are withheld before placement, with the same typed job
+`diagnostic_code`. If qualification changes before launch, the job is requeued
+without consuming infrastructure retries and the host's CPU readiness is withdrawn.
+
 Availability explains owner use, battery power, heat, missing readings,
 disabling, leaving, and loss of contact. An available hypha can still be busy.
 Running jobs show their hypha and attempt. Every waiting job has an explanation,

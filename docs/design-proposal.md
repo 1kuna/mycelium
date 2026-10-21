@@ -797,13 +797,16 @@ their selectors and exposing the runtime defaults. For **CPU attempts**, set
 `ONEAPI_DEVICE_SELECTOR` to explicit select-none masks for the installed XPU
 runtimes. Unset or empty XPU selectors are not evidence of no visible devices.
 Qualify those select-none semantics with actual runtime enumeration; inability
-to hide a family withholds CPU execution with typed reason
+to hide CUDA/XPU withholds CPU execution with typed reason
 `cpu_accelerator_isolation_unavailable`. This is an M2 correctness fix: today's
 `worker.go` / `WithModelDevice` CPU path only hides CUDA; R1 supplies no XPU
 select-none masks. Main, native sidecars, helpers and managed Docker members
-see the same selected device, or no accelerator for CPU work, and all inherit
+see the same selected device, or the same CPU masks, and all inherit
 the forced PCI ordering above. Caller/extension env cannot widen it, and no
-payload inherits `MYCE_TOKEN`. These are cooperative device controls, not a
+payload inherits `MYCE_TOKEN`. Metal has no masking environment equivalent:
+CPU attempts on macOS run with GPU isolation explicitly not enforced, as
+reported in status (#116); CUDA/XPU select-none requirements still apply.
+These are cooperative device controls, not a
 security sandbox against arbitrary hostile code.
 
 Reuse D5's delegated service subtree: a worker control leaf, a distinct parent
@@ -1450,8 +1453,14 @@ are excluded. They replace the previous package M estimates.
 - CPU and unselected XPU controls are `ZE_AFFINITY_MASK=2147483647` and
   `ONEAPI_DEVICE_SELECTOR=!*:*`; CUDA's select-none mask is the empty string.
   Native CPU admission requires actual installed-runtime enumeration with these
-  masks. Metal has no qualified select-none control here, so native CPU work on
-  a Metal host is withheld with `cpu_accelerator_isolation_unavailable`.
+  masks. Metal has no device-masking environment equivalent. Under the #116
+  contract, CPU work on macOS runs cooperatively without Metal isolation; status
+  reports `cpu_isolation=not-enforced` and says GPU isolation is not enforced.
+  CPU/RAM remain admission budgets, not hard macOS ceilings. CUDA/XPU masks and
+  runtime enumeration are unchanged. Workers report CPU readiness before
+  placement; unsupported/unqualified targets are withheld with
+  `cpu_accelerator_isolation_unavailable`. A qualification loss before launch
+  withdraws that CPU target and requeues without infrastructure-loss retries.
   `myce dev` and the protocol harness inject fake runtime visibility evidence,
   alongside fake inventory, and still run real CPU payloads.
 - Until M3 enumerates placement targets, an inventory report projects one

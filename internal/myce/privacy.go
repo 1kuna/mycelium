@@ -60,6 +60,7 @@ func (q *Queue) publicSnapshot() (Snapshot, error) {
 			m.EnvironmentReports[i].Key = statusEnvironmentName(m.EnvironmentReports[i].Key)
 		}
 		m.MemoryEnforcement = memoryEnforcementDiagnostic(m.MemoryEnforcement)
+		m.CPUIsolation = cpuIsolationDiagnostic(m.CPUIsolation)
 		m.HostMemoryError = diagnostic(m.HostMemoryError, "host memory probe failed")
 		m.InventoryReason = deviceReasonDiagnostic(m.InventoryReason)
 		m.MemoryError = deviceReasonDiagnostic(m.MemoryError)
@@ -117,6 +118,8 @@ func (q *Queue) publicSnapshot() (Snapshot, error) {
 		}
 		if j.State == "failed" {
 			switch {
+			case j.ExecutionCause != nil && j.ExecutionCause.Class == cpuIsolationUnavailable:
+				j.Reason = cpuIsolationUnavailable + ": " + rejectionMessages[cpuIsolationUnavailable]
 			case j.Reason == "infrastructure_retries_exhausted", j.Reason == "out of memory after one retry on a larger hypha", j.Reason == "out of memory; previous capability unavailable":
 				// Fixed scheduler diagnostics contain no payload or machine paths.
 			case strings.HasPrefix(j.Reason, "production start deadline exceeded:"):

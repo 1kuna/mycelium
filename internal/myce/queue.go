@@ -504,19 +504,23 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 	return &out, err
 }
 func (q *Queue) retry(j *Job, why string) {
+	q.requeue(j, why, !plannedStop(j))
+}
+
+// Admission refusal and planned stops do not spend infrastructure retry budgets.
+func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 	if cancelled(j) {
 		if !terminal(j.State) {
 			q.finishCancellation(j)
 		}
 		return
 	}
-	planned := plannedStop(j)
 	if j.Spec.Priority == "production" {
 		// Fence every old copy, including a lost copy that later reports newer progress.
 		for i := range j.Copies {
 			j.Copies[i].Recoverable = false
 		}
-		if !planned && j.InfrastructureRetries >= q.productionInfrastructureRetries {
+		if chargeInfrastructure && j.InfrastructureRetries >= q.productionInfrastructureRetries {
 			j.State, j.Reason = "failed", "infrastructure_retries_exhausted"
 			j.StopAt = nil
 			now := q.clock.Now()
@@ -524,7 +528,7 @@ func (q *Queue) retry(j *Job, why string) {
 			return
 		}
 		q.renewRecoveryStartWindow(j)
-		if !planned {
+		if chargeInfrastructure {
 			j.InfrastructureRetries++
 		}
 	}
@@ -534,7 +538,7 @@ func (q *Queue) retry(j *Job, why string) {
 	j.StartedAt = nil
 	j.FinishedAt = nil
 	j.Reason = why
-	if !planned && j.Spec.Priority != "production" && j.Losses >= 3 {
+	if chargeInfrastructure && j.Spec.Priority != "production" && j.Losses >= 3 {
 		j.State = "failed"
 		j.Reason = "failed after 3 infrastructure losses: " + why
 		return
@@ -1230,6 +1234,13 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 			}
 		}
 		q.retry(j, "waiting for a qualified extension")
+	} else if !r.Success && j.StartedAt == nil && j.ExecutionCause != nil && j.ExecutionCause.Operation == "launch" && j.ExecutionCause.Class == cpuIsolationUnavailable {
+		// Qualification may change after admission. Withdraw CPU readiness and
+		// wait for fresh evidence rather than exhausting infrastructure retries.
+		if m := q.s.Machines[r.Machine]; m != nil {
+			m.CPUIsolation = cpuIsolationUnavailable
+		}
+		q.requeue(j, cpuIsolationUnavailable+": "+rejectionMessages[cpuIsolationUnavailable], false)
 	} else if r.Interrupted && r.PoliteStop {
 		q.retry(j, "requeued: hypha availability withdrawn")
 	} else if r.Interrupted && r.OperatorStop {
@@ -1487,6 +1498,9 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 			out.Machines = append(out.Machines, &copy)
 		}
 		for _, j := range out.Jobs {
+			if strings.Contains(j.Reason, cpuIsolationUnavailable) {
+				j.DiagnosticCode = cpuIsolationUnavailable
+			}
 			if strings.HasPrefix(j.Reason, "no_matching_device:") {
 				j.DiagnosticCode = "no_matching_device"
 			}
@@ -1496,6 +1510,9 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 				q.statusEligibility(j)
 				if j.State == "queued" {
 					j.Reason = q.statusWaitingReason(j)
+					if strings.Contains(j.Reason, cpuIsolationUnavailable) {
+						j.DiagnosticCode = cpuIsolationUnavailable
+					}
 					if strings.HasPrefix(j.Reason, "no_matching_device:") {
 						j.DiagnosticCode = "no_matching_device"
 					}
