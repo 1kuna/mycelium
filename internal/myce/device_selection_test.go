@@ -89,6 +89,9 @@ done
 	t.Setenv("ONEAPI_DEVICE_SELECTOR", "level_zero:1")
 	probe := LocalMachineProbe()
 	probe.OS, probe.Arch = "linux", "amd64"
+	// The fake runtime represents discrete hardware; provide its PCI facts too.
+	fixture := pciFixtureProbe(pciFixture{"0000:01:00.0", "0x8086", "8", "Intel GPU", "", true})
+	probe.Glob, probe.ReadFile = fixture.Glob, fixture.ReadFile
 	out, err := probe.Command(context.Background(), "sycl-ls")
 	if err != nil || strings.TrimSpace(string(out)) != "" {
 		t.Fatalf("fake must reject index 1 after a one-card mask: %q %v", out, err)

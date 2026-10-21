@@ -14,6 +14,21 @@ import (
 // MountedNASRoots retains only mount paths, never source addresses/options
 // (which can contain credentials). Mounting belongs to the operator or OS.
 func MountedNASRoots(ctx context.Context, osname string, command func(context.Context, string, ...string) ([]byte, error)) ([]string, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	bounded, cancel := context.WithTimeout(ctx, onboardingStorageBudget)
+	defer cancel()
+	roots, err := mountedNASRoots(bounded, osname, command)
+	if errors.Is(ctx.Err(), context.Canceled) || errors.Is(err, context.Canceled) {
+		return nil, context.Canceled
+	}
+	if bounded.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
+		return nil, preflightError("nas_unresponsive", "storage", "NAS validation exceeded the 5 s total budget; restore the mount and retry")
+	}
+	return roots, err
+}
+func mountedNASRoots(ctx context.Context, osname string, command func(context.Context, string, ...string) ([]byte, error)) ([]string, error) {
 	if command == nil {
 		return nil, preflightError("nas_unreachable", "storage", "mount inventory runner missing")
 	}
@@ -27,6 +42,9 @@ func MountedNASRoots(ctx context.Context, osname string, command func(context.Co
 		return nil, preflightError("nas_unsupported", "storage", "NAS mount detection supports Linux and macOS")
 	}
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return nil, err
+		}
 		return nil, preflightError("nas_unreachable", "storage", "cannot inspect existing NAS mounts; mount the shared NAS through the OS")
 	}
 	roots := []string{}

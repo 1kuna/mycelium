@@ -14,6 +14,7 @@ import (
 
 // MachineDevice is one accelerator's capacity, never an additional host pool.
 type MachineDevice struct {
+	pciAddress           string             // Local probe fact; never part of the queue protocol.
 	Attempts             []Execution        `json:"attempts,omitempty"`
 	Models               []ModelSlot        `json:"models,omitempty"`
 	Releases             []HostRelease      `json:"releases,omitempty"`

@@ -202,7 +202,7 @@ func TestInventoryRereviewUnifiedCapBelowReserve(t *testing.T) {
 		if name != "nvidia-smi" {
 			return nil, exec.ErrNotFound
 		}
-		if len(args) > 0 && args[0] == "--query-gpu=uuid,driver_version" {
+		if len(args) > 0 && args[0] == "--query-gpu=uuid,driver_version,pci.bus_id" {
 			return []byte("GPU-unified, driver"), nil
 		}
 		return []byte("NVIDIA GB10, N/A"), nil

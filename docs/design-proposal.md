@@ -327,8 +327,13 @@ One mycelium is the cluster; a hypha is a machine with CPU, RAM and accelerator
 components. Onboarding reuses the M inventory, installer overlay and service
 transaction. It enumerates all components, preserves explicit selector lists and
 per-device fixed budgets, and refuses typed driver, inventory or memory failures
-instead of saving CPU fallback. NVIDIA display devices and Intel discrete PCIe
-display endpoints require their runtime. A failed `nvidia-smi` is informational
+instead of saving CPU fallback. Enumerate PCI display and processing-accelerator
+classes, classify each vendor and integrated/discrete topology from sysfs facts
+(local device memory or PCIe link width), then correlate every runtime device
+with its PCI address. Product names never determine memory mode. Missing facts
+stay unknown; ambiguous multi-device correlation refuses instead of guessing.
+NVIDIA devices and discrete Intel endpoints require their runtime independently
+of any other working component. A failed `nvidia-smi` is informational
 when PCI inventory confirms no NVIDIA display device. Working integrated Intel
 graphics enrolls as `xpu` with unified memory; a missing integrated runtime permits
 CPU, while a broken runtime still refuses. Other display controllers are
@@ -356,7 +361,9 @@ backend download. Do not execute remote installer scripts or print credentials.
 NAS validation uses the existing bounded checkpoint I/O pattern with one
 250 ms network-filesystem budget per metadata/create/write/sync/close/rename/
 cleanup operation (#63, following the worker CIFS allowance), with a 5 s cap
-on the whole check, including mount inventory. Slow healthy sequences may exceed 250 ms in
+on the whole check, including mount inventory. Fresh/default NAS selection for
+both real and dry-run plans uses that same bounded, cancellable mount helper.
+Slow healthy sequences may exceed 250 ms in
 total. Timeout returns `nas_unresponsive`; caller cancellation remains
 `context.Canceled`. Cancelled/timed-out results are discarded before retrying
 the same key. An uninterruptible syscall can finish afterward,

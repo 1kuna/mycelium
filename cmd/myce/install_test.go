@@ -59,6 +59,9 @@ func TestInstallCLIDryRunFakeDetection(t *testing.T) {
 				}
 				return p.Command(ctx, n, args...)
 			}
+			if platform == "xpu" {
+				p = integratedPCIFixture(p)
+			}
 			if platform == "metal" {
 				p.OS = "darwin"
 				p.Arch = "arm64"

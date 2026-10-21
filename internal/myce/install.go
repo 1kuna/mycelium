@@ -30,9 +30,10 @@ type Detection struct {
 	GPU        string  `json:"gpu"`
 }
 type MachineProbe struct {
-	OS, Arch string
-	Info     func(string) // Optional informational diagnostics; never inventory output.
-	Command  func(context.Context, string, ...string) ([]byte, error)
+	pciDevice *pciAccelerator // Selected physical component during onboarding.
+	OS, Arch  string
+	Info      func(string) // Optional informational diagnostics; never inventory output.
+	Command   func(context.Context, string, ...string) ([]byte, error)
 	// CommandEnv runs a probe with per-process overrides; nil keeps injected Command fixtures.
 	CommandEnv func(context.Context, map[string]string, string, ...string) ([]byte, error)
 	Glob       func(string) ([]string, error)
@@ -101,7 +102,7 @@ func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detectio
 	if pciErr != nil {
 		return d, preflightError("gpu_inventory_unavailable", "gpu", "cannot inspect PCI inventory; restore access and re-detect")
 	}
-	args := []string{"--query-gpu=name,memory.total", "--format=csv,noheader,nounits"}
+	args := []string{"--query-gpu=name,memory.total,pci.bus_id", "--format=csv,noheader,nounits"}
 	if device != "" {
 		args = append(args, "--id="+device)
 	}
@@ -116,15 +117,30 @@ func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detectio
 		if len(lines) != 1 {
 			return d, errors.New("automatic setup requires exactly one GPU")
 		}
-		name, memory, ok := strings.Cut(lines[0], ",")
-		if !ok {
+		fields := strings.Split(lines[0], ",")
+		if len(fields) < 2 || len(fields) > 3 {
 			return d, preflightError("gpu_inventory_invalid", "cuda", "invalid nvidia-smi inventory")
+		}
+		name, memory := fields[0], fields[1]
+		fact := p.pciDevice
+		if fact == nil && len(fields) == 3 {
+			pci, err := p.pciAccelerators()
+			if err != nil {
+				return d, preflightError("gpu_inventory_unavailable", "cuda", "cannot inspect CUDA PCI topology; restore access and re-detect")
+			}
+			for _, candidate := range pci {
+				if candidate.platform() == "cuda" && normalizePCIAddress(candidate.address) == normalizePCIAddress(fields[2]) {
+					v := candidate
+					fact = &v
+					break
+				}
+			}
 		}
 		d.Platform = "cuda"
 		d.GPU = strings.TrimSpace(name)
 		d.ReserveGB = 2
 		n, e := parseCUDAFreeMemory([]byte(strings.TrimSpace(memory)))
-		if errors.Is(e, errUnifiedMemory) || strings.Contains(strings.ToUpper(name), "GB10") {
+		if errors.Is(e, errUnifiedMemory) || fact != nil && fact.topologyKnown && fact.integrated {
 			d.MemoryMode = "unified"
 			d.ReserveGB = 16
 			return d, nil
@@ -170,8 +186,14 @@ func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detectio
 		d.Platform, d.GPU = "xpu", strings.TrimSpace(intelGPU)
 		// Integrated XPU uses OS memory. Discrete XPU needs a measured allowance:
 		// do not silently substitute host RAM for its device memory.
-		low := strings.ToLower(intelGPU)
-		if !strings.Contains(low, "integrated") && !strings.Contains(low, "uhd") && !strings.Contains(low, "iris") {
+		fact, err := p.intelPCIDevice(ctx, device)
+		if err != nil {
+			return d, err
+		}
+		if fact == nil || !fact.topologyKnown {
+			return d, preflightError("gpu_memory_unavailable", "xpu", "Intel GPU topology unavailable: restore PCI/sysfs access or specify an explicit fixed device budget")
+		}
+		if !fact.integrated {
 			verbose, err := sycl(ctx, "sycl-ls", "--verbose")
 			if err == nil {
 				budget := uint64(0)

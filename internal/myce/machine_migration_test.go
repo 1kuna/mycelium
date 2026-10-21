@@ -583,7 +583,7 @@ func TestM4PerDeviceFixedCapacityAtRuntime(t *testing.T) {
 		{Selector: "GPU-two", Detection: Detection{Platform: "cuda", MemoryMode: "fixed", MemoryGB: 31, ReserveGB: 3}},
 	}}
 	probe := MachineProbe{OS: "linux", Arch: "amd64", Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
-		if name == "nvidia-smi" && args[0] == "--query-gpu=uuid,driver_version" {
+		if name == "nvidia-smi" && args[0] == "--query-gpu=uuid,driver_version,pci.bus_id" {
 			return []byte("GPU-one, driver\nGPU-two, driver\n"), nil
 		}
 		return nil, errors.New("fixed capacity must not require telemetry")
@@ -733,9 +733,9 @@ func TestM4PerDeviceMeasuredReserveAtRuntime(t *testing.T) {
 	probe := MachineProbe{OS: "linux", Arch: "amd64", Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
 		if name == "nvidia-smi" {
 			switch args[0] {
-			case "--query-gpu=uuid,driver_version":
+			case "--query-gpu=uuid,driver_version,pci.bus_id":
 				return []byte("GPU-one, driver\n"), nil
-			case "--query-gpu=name,memory.total":
+			case "--query-gpu=name,memory.total,pci.bus_id":
 				return []byte("CUDA, 32768\n"), nil
 			case "--query-gpu=memory.free":
 				return []byte("32768\n"), nil

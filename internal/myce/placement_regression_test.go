@@ -75,6 +75,7 @@ func TestPlacementLinuxFreshHostAllowance(t *testing.T) {
 		CPUs: func() int { return 8 },
 		Disk: func(string) (uint64, uint64, error) { return 100 << 30, 50 << 30, nil },
 	}
+	probe.Machine = withDiscretePCI(probe.Machine)
 	for i, hostNeed := range []float64{8, 12, 5} {
 		m := machine([]string{"card-0", "card-1", "card-2"}[i], "xpu")
 		m.HostID, m.Device, m.FreeMemoryGB = "host", "0", 32

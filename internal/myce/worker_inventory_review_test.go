@@ -276,7 +276,7 @@ func TestInventoryReviewUnifiedLocalProbe(t *testing.T) {
 					case "/usr/sbin/system_profiler":
 						return []byte("Metal Support: Metal 3"), nil
 					case "nvidia-smi":
-						if slices.Contains(args, "--query-gpu=uuid,driver_version") {
+						if slices.Contains(args, "--query-gpu=uuid,driver_version,pci.bus_id") {
 							return []byte("GPU-unified, driver"), nil
 						}
 						return []byte("NVIDIA GB10, N/A"), nil

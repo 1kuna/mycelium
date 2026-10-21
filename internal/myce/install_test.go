@@ -40,7 +40,7 @@ func TestInstallDetectionDryPlans(t *testing.T) {
 	}{
 		{"4090", fakeProbe("linux", "amd64", "NVIDIA GeForce RTX 4090, 24564", ""), "cuda", "dedicated", 2},
 		{"Spark", fakeProbe("linux", "arm64", "NVIDIA GB10, [N/A]", ""), "cuda", "unified", 16},
-		{"Intel", fakeProbe("linux", "amd64", "", "[level_zero:gpu] Intel(R) UHD Integrated Graphics"), "xpu", "unified", 8},
+		{"Intel", withIntegratedPCI(fakeProbe("linux", "amd64", "", "[level_zero:gpu] Intel(R) UHD Integrated Graphics")), "xpu", "unified", 8},
 		{"Mac", fakeProbe("darwin", "arm64", "", ""), "metal", "unified", 4},
 	}
 	for _, tc := range cases {
@@ -191,6 +191,7 @@ func TestInstallDiscreteIntelUsesConservativeDeviceMemory(t *testing.T) {
 		}
 		return nil, exec.ErrNotFound
 	}}
+	p = withDiscretePCI(p)
 	d, e := p.Detect(context.Background())
 	if e != nil || d.Platform != "xpu" || d.MemoryMode != "fixed" || d.MemoryGB != 16 {
 		t.Fatalf("%+v %v", d, e)

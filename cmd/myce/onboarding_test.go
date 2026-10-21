@@ -17,7 +17,7 @@ func TestOnboardingInstallWholeMachineSelectorsAndDriverRefusal(t *testing.T) {
 	fail := false
 	p := myce.MachineProbe{OS: "linux", Arch: "arm64", Glob: func(pattern string) ([]string, error) {
 		if strings.HasSuffix(pattern, "/class") {
-			return []string{"/fixture/pci/gpu/class"}, nil
+			return []string{"/fixture/pci/0000:01:00.0/class", "/fixture/pci/0000:02:00.0/class"}, nil
 		}
 		return nil, nil
 	}, ReadFile: func(path string) ([]byte, error) {
@@ -36,7 +36,7 @@ func TestOnboardingInstallWholeMachineSelectorsAndDriverRefusal(t *testing.T) {
 			return nil, errors.New("private-value")
 		}
 		if strings.Contains(strings.Join(args, " "), "uuid,driver_version") {
-			return []byte("GPU-a, driver\nGPU-b, driver"), nil
+			return []byte("GPU-a, driver, 0000:01:00.0\nGPU-b, driver, 0000:02:00.0"), nil
 		}
 		return []byte("GPU, 24576"), nil
 	}}

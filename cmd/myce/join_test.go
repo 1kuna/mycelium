@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -27,6 +29,9 @@ func TestJoinGPUDetection(t *testing.T) {
 				}
 				return nil, exec.ErrNotFound
 			}}
+			if tc.platform == "xpu" {
+				probe = integratedPCIFixture(probe)
+			}
 			got, err := detectJoinGPU(context.Background(), probe, joinGPUOptions{mode: "auto"}, nil)
 			want := joinGPUOptions{platform: tc.platform, mode: tc.mode, memory: tc.memory, reserve: tc.reserve}
 			if err != nil || got != want {
@@ -173,4 +178,26 @@ func TestJoinAppleSiliconWithoutMetalRefusesUnlessCPUSelected(t *testing.T) {
 	if err == nil || err.Error() != "heartbeat must be positive" {
 		t.Fatalf("explicit CPU did not reach local validation: %v", err)
 	}
+}
+
+// Integrated fixtures provide physical topology, never just a marketing name.
+func integratedPCIFixture(p myce.MachineProbe) myce.MachineProbe {
+	p.Glob = func(pattern string) ([]string, error) {
+		if strings.Contains(pattern, "renderD") {
+			return []string{"/dev/dri/renderD128"}, nil
+		}
+		return []string{"/sys/bus/pci/devices/0000:00:02.0/class"}, nil
+	}
+	p.ReadFile = func(path string) ([]byte, error) {
+		switch filepath.Base(path) {
+		case "class":
+			return []byte("0x030000"), nil
+		case "vendor":
+			return []byte("0x8086"), nil
+		case "current_link_width":
+			return []byte("0"), nil
+		}
+		return nil, os.ErrNotExist
+	}
+	return p
 }
