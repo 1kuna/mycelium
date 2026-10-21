@@ -110,7 +110,7 @@ func workerAttemptReply(c Checkin, reply Reply) (Reply, error) {
 		seen[key] = true
 		if a.Job != nil {
 			if c.Recovering {
-				return Reply{}, currentProtocolError("queue offered work during startup recovery; saved attempt custody is retained")
+				return Reply{}, currentProtocolError("queue offered work during startup recovery; upgrade the queue before this worker; saved attempt custody is retained")
 			}
 			for _, held := range c.Attempts {
 				if held.ID == a.ID && held.Attempt == a.Attempt && held.Session == a.Session {

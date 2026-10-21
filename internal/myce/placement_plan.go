@@ -107,6 +107,9 @@ func (q *Queue) callSlotPlan(m *Machine, c *ModelCall, s *ModelSlot, limit int) 
 // demands), model loads and pins. A batch needs the worker's command slot;
 // engines can coexist with a batch when the resource vector has room.
 func (q *Queue) roomPlan(j *Job, m *Machine, batch bool) *placementPlan {
+	if m.Recovering {
+		return nil
+	}
 	best := q.roomPlanWithBatch(j, m, batch, batch)
 	if !batch {
 		if p := q.roomPlanWithBatch(j, m, false, true); p != nil && p.cheaper(best) {

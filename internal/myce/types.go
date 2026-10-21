@@ -345,18 +345,21 @@ type Job struct {
 	Checkpoint            string                       `json:"checkpoint"`
 }
 type Machine struct {
-	Replacement       *MachineReplacement `json:"replacement,omitempty"`
-	Devices           []MachineDevice     `json:"devices"`
-	InventoryReason   string              `json:"inventory_reason,omitempty"`
-	cpuLedger         bool
-	CPUReserveCores   int           `json:"cpu_reserve_cores,omitempty"`
-	CPUBudgetCores    int           `json:"cpu_budget_cores,omitempty"`
-	EffectiveCPUCores int           `json:"effective_cpu_cores"`
-	CPUInUseCores     int           `json:"cpu_in_use_cores"`
-	FreeCPUCores      int           `json:"free_cpu_cores"`
-	CPUCapacityReason string        `json:"cpu_capacity_reason,omitempty"`
-	DockerCause       *RuntimeCause `json:"docker_cause,omitempty"`
-	BenchmarkPending  bool          `json:"benchmark_pending,omitempty"`
+	Recovering             bool                `json:"recovering,omitempty"`
+	RecoveringSince        *time.Time          `json:"recovering_since,omitempty"`
+	RecoveryNeedsAttention bool                `json:"recovery_needs_attention,omitempty"` // Status-only projection.
+	Replacement            *MachineReplacement `json:"replacement,omitempty"`
+	Devices                []MachineDevice     `json:"devices"`
+	InventoryReason        string              `json:"inventory_reason,omitempty"`
+	cpuLedger              bool
+	CPUReserveCores        int           `json:"cpu_reserve_cores,omitempty"`
+	CPUBudgetCores         int           `json:"cpu_budget_cores,omitempty"`
+	EffectiveCPUCores      int           `json:"effective_cpu_cores"`
+	CPUInUseCores          int           `json:"cpu_in_use_cores"`
+	FreeCPUCores           int           `json:"free_cpu_cores"`
+	CPUCapacityReason      string        `json:"cpu_capacity_reason,omitempty"`
+	DockerCause            *RuntimeCause `json:"docker_cause,omitempty"`
+	BenchmarkPending       bool          `json:"benchmark_pending,omitempty"`
 
 	Capabilities                []string            `json:"capabilities,omitempty"`
 	MaxJobs                     int                 `json:"max_jobs,omitempty"`

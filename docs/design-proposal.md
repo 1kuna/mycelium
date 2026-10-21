@@ -1274,12 +1274,29 @@ are excluded. They replace the previous package M estimates.
   fences remain monotonic. The worker rejects an assignment in a recovery reply
   as a protocol error, retaining custody, rather than reporting an interrupted
   execution. Actual launch/infrastructure failures keep their existing classification.
+  The queue persists `recovering` and queue-observed `recovering_since` from
+  each check-in; every device and CPU target of that machine is admission-blocked
+  in placement, preemption planning and launch authorization. Other machines
+  remain eligible, so production can preempt there. Refusing new admission must
+  not hold existing supervisors' buffered-result replay. Status displays recovery
+  and its start time, with `recovery_needs_attention` after **two minutes** of
+  continuous recovery (the ordinary cleanup escalation interval). Heartbeats do
+  not reset that timer. A check-in clearing recovery clears the timer and warning
+  automatically after the worker finishes draining.
+  **Deploy the #106 queue before workers.** A new worker receiving an assignment
+  during recovery from a pre-#106 queue fails closed with HTTP 426
+  `worker_protocol_invalid`, tells the operator to upgrade the queue first,
+  and retains saved custody. A queue lacking keyed-attempt-v1 also fails closed
+  with that upgrade instruction.
 - For machine workers, the planner credits lower-tier stopping attempts in both
-  grace and kill phases as soon-free capacity (#106), preferring that pending release over a new stop
-  on another device. A confirmed exit in either phase retains the existing
-  planning credit until fresh inventory arrives, bounded by the machine's loss
-  timeout, so stale free-memory telemetry cannot trigger a neighbor stop between
-  release and check-in. This is only a release projection: device/CPU/RAM charges
+  grace and kill phases as soon-free capacity (#106), but only **before
+  `StopAt + preemptionGrace()`** (ten seconds after `StopAt` by default).
+  Within that window prefer the pending release over a new stop on another
+  device. At the bound, stop crediting a wedged kill and preempt useful capacity
+  elsewhere, on the same or another machine, within production's start window.
+  A confirmed exit retains planning credit until fresh inventory arrives or the
+  same absolute bound, whichever comes first. Neither completion nor heartbeats
+  extend it. This is only a release projection: device/CPU/RAM charges
   and exact cleanup acknowledgements still gate replacement admission. Ordinary
   non-recovering workers may continue backfilling unaffected capacity. The bounded
   legacy adapter retains its existing fallback to another worker after stop

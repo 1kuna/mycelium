@@ -173,7 +173,7 @@ func (q *Queue) placementAllowed(j *Job, m *Machine) bool {
 }
 
 func (q *Queue) placementAllowedForUse(j *Job, m *Machine, resident bool) bool {
-	if cancelled(j) || !dockerRuntimeFits(j, m) || q.maintenanceBlocked(hostID(m)) || m.HostMemoryPolicyMismatch || !logPolicyFits(j.Spec.Logs, m) {
+	if m.Recovering || cancelled(j) || !dockerRuntimeFits(j, m) || q.maintenanceBlocked(hostID(m)) || m.HostMemoryPolicyMismatch || !logPolicyFits(j.Spec.Logs, m) {
 		return false
 	}
 	if model, ok := q.model(j.Spec.Needs.Model); ok {

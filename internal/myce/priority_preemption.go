@@ -30,6 +30,19 @@ func priorityStop(j *Job) *PriorityPreemption {
 func plannedPriorityStop(j *Job) bool { return priorityStop(j) != nil }
 func plannedStop(j *Job) bool         { return plannedMaintenanceStop(j) || plannedPriorityStop(j) }
 
+// Pending cleanup is planning credit only. A slow kill must eventually stop
+// attracting demand so another device can be reclaimed without releasing custody.
+func (q *Queue) batchCreditUntil(j *Job) time.Time {
+	if j.StopAt == nil {
+		return time.Time{}
+	}
+	until := *j.StopAt
+	if owner := q.s.Machines[j.Machine]; owner != nil && owner.Devices != nil {
+		until = until.Add(q.preemptionGrace())
+	}
+	return until
+}
+
 // After two displacements a resumed payload gets one full checkpoint grace to
 // make progress. Strict tiers still win after that bounded interval. Unstarted
 // offers are always revocable; the protection begins only at Started.
@@ -41,10 +54,7 @@ func (q *Queue) batchPreemptible(j *Job, demand Spec) bool {
 	if demand.Priority == "deadline" && !j.Spec.Resumable {
 		return false
 	}
-	// Grace expiry authorizes kill; it does not make the pending release less
-	// useful than a fresh stop on a neighboring machine-worker device. Retain
-	// the bounded legacy-worker fallback to another worker after stop grace.
-	if owner := q.s.Machines[j.Machine]; j.State == "stopping" && expired(j.StopAt, q.clock.Now()) && (owner == nil || owner.Devices == nil) {
+	if j.State == "stopping" && !q.clock.Now().Before(q.batchCreditUntil(j)) {
 		return false
 	}
 	return j.State == "stopping" || !q.preemptionProtected(j.PreemptionCount, j.StartedAt)
