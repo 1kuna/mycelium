@@ -151,7 +151,10 @@ func evaluateEnrollmentVersion(receipt EnrollmentReceipt, o EnrollmentObservatio
 		found := false
 		for _, device := range m.Devices {
 			if device.ID == expected.ID && device.Identity == expected.Identity && device.Platform == expected.Platform {
-				found = device.Reason == "" && device.BudgetGB > 0 && device.TotalMemoryGB > 0
+				// Unified devices use the measured host RAM checked below;
+				// automatic inventory has no separate device-memory total.
+				memoryKnown := device.TotalMemoryGB > 0 || device.UnifiedMemory && device.MemoryMeasured
+				found = device.Reason == "" && device.BudgetGB > 0 && memoryKnown
 				break
 			}
 		}
