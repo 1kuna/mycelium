@@ -67,6 +67,8 @@ func validateInstallDropIns(ctx context.Context, c ServiceConfig, command func(c
 // installFiles is a per-invocation fault seam, never a global filesystem hook.
 type installFiles struct {
 	machineConversion bool
+	// Persist ownership before publication, including across a process crash.
+	publication func(path string, data []byte, mode os.FileMode, removed bool) error
 
 	before func(operation, path string) error
 	rename func(source, destination string) error
@@ -98,6 +100,11 @@ func (tx *installTransaction) put(path string, data []byte, mode os.FileMode) er
 	old, ok := tx.originals[path]
 	if !ok {
 		return errors.New("artifact missing from install snapshot")
+	}
+	if tx.files.publication != nil {
+		if err := tx.files.publication(path, data, mode, false); err != nil {
+			return err
+		}
 	}
 	if old.existed {
 		trash := filepath.Join(filepath.Dir(path), ".Trash")
@@ -156,6 +163,9 @@ func (tx *installTransaction) restoreFiles() error {
 	var result error
 	for i := len(tx.published) - 1; i >= 0; i-- {
 		p := tx.published[i]
+		if tx.fileMatches(p.path) {
+			continue
+		}
 		err := tx.files.check("restore", p.path)
 		if err == nil {
 			if p.existed {
@@ -203,6 +213,11 @@ func (tx *installTransaction) retire(path string) error {
 	}
 	if !old.existed {
 		return nil
+	}
+	if tx.files.publication != nil {
+		if err := tx.files.publication(path, nil, 0, true); err != nil {
+			return err
+		}
 	}
 	trash := filepath.Join(filepath.Dir(path), ".Trash")
 	if err := os.MkdirAll(trash, 0700); err != nil {

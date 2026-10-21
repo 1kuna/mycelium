@@ -289,8 +289,9 @@ func m4InstallFixtureFor(t *testing.T, spark bool) ([]ServiceConfig, ServiceConf
 	t.Cleanup(server.Close)
 	t.Setenv("MYCE_TOKEN", "synthetic-local-test")
 	paths := []string{}
-	for _, c := range src {
-		c.Queue = server.URL
+	for i := range src {
+		src[i].Queue = server.URL
+		c := src[i]
 		data, _ := json.Marshal(c)
 		if err := os.WriteFile(c.Config, data, 0600); err != nil {
 			t.Fatal(err)
@@ -696,7 +697,7 @@ func TestM4QueuePublicationInterruption(t *testing.T) {
 			c, clock, mapping := m4OfflineQueue(t)
 			run := func(context.Context, string, ...string) ([]byte, error) { return nil, nil }
 			files := installFiles{before: func(operation, path string) error {
-				if operation == op && path == c.HostConfig {
+				if operation == op && path == c.ProjectConfig {
 					return errors.New("injected publication interruption")
 				}
 				return nil

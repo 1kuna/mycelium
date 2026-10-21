@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"gopkg.in/yaml.v3"
 	"os"
 	"path/filepath"
@@ -12,7 +13,6 @@ import (
 	"slices"
 	"sort"
 	"strings"
-	"syscall"
 )
 
 // DeviceInstall preserves each source worker's selector and capacity contract.
@@ -34,7 +34,10 @@ func PlanMachineInstall(destination string, paths []string, explicit map[string]
 		if err = json.Unmarshal(data, &j); err != nil {
 			return zero, err
 		}
-		if j.Phase == "complete" {
+		if j.Version != 1 || j.Config.Config != destination {
+			return zero, errors.New("invalid machine migration journal")
+		}
+		if j.Phase != "rolled-back" {
 			wanted := slices.Clone(paths)
 			known := []string{}
 			for _, c := range j.Sources {
@@ -45,8 +48,11 @@ func PlanMachineInstall(destination string, paths []string, explicit map[string]
 			if !slices.Equal(wanted, known) {
 				return zero, migrationError("machine_migration_conflict", "completed sources differ")
 			}
+			j.Config.FromWorkerConfigs = slices.Clone(paths)
 			return j.Config, nil
 		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return zero, err
 	}
 	if len(paths) == 0 || !filepath.IsAbs(destination) {
 		return zero, migrationError("machine_migration_incomplete", "absolute destination and all source configs required")
@@ -134,12 +140,13 @@ type migrationUnit struct {
 	Loaded, Active bool
 }
 type workerMigration struct {
-	Version int
-	Phase   string
-	Config  ServiceConfig
-	Sources []ServiceConfig
-	Files   []migrationFile
-	Units   []migrationUnit
+	Version      int
+	Phase        string
+	Config       ServiceConfig
+	Sources      []ServiceConfig
+	Files        []migrationFile
+	Units        []migrationUnit
+	Publications []migrationPublication
 }
 
 func machineJournal(c ServiceConfig) string { return c.Config + ".m4-rollback.json" }
@@ -289,8 +296,11 @@ func convertWorkerInstall(ctx context.Context, c ServiceConfig, executable strin
 		sources = append(sources, old)
 		extra = append(extra, old.Config, old.Binary, old.Credentials, old.Service, old.GPUEnvironmentFile())
 	}
-	// The current installer has no separate host enable registry: systemd's
-	// persistent wants links and the saved source unit/config are the enable set.
+	registries, err := legacyMigrationRegistries(sources)
+	if err != nil {
+		return err
+	}
+	extra = append(extra, registries...)
 	tx, err := snapshotInstall(ctx, c, files, command, extra...)
 	if err != nil {
 		return err
@@ -329,9 +339,15 @@ func convertWorkerInstall(ctx context.Context, c ServiceConfig, executable strin
 	if err = saveMigration(journal, j); err != nil {
 		return err
 	}
+	files = j.publishing(files)
+	tx.files = files
 	defer func() {
 		if result != nil {
-			restore := journalTransaction(j, command)
+			restore, checkErr := checkedJournalTransaction(j, command)
+			if checkErr != nil {
+				result = errors.Join(result, checkErr)
+				return
+			}
 			result = errors.Join(result, restore.restore(ctx))
 			if len(restore.differences(ctx)) == 0 {
 				j.Phase = "rolled-back"
@@ -350,7 +366,7 @@ func convertWorkerInstall(ctx context.Context, c ServiceConfig, executable strin
 		if state.active || state.enabled == "enabled" || state.enabled == "enabled-runtime" {
 			return errors.New("source worker still active or enabled")
 		}
-		if err = settledMigrationSpool(s.State); err != nil {
+		if err = settledMigrationSpool(s.State, snapshot); err != nil {
 			return err
 		}
 		if err = tx.retire(s.Service); err != nil {
@@ -361,6 +377,14 @@ func convertWorkerInstall(ctx context.Context, c ServiceConfig, executable strin
 				return err
 			}
 		}
+	}
+	for _, path := range registries {
+		if err = tx.retire(path); err != nil {
+			return err
+		}
+	}
+	if err = settledMigrationSpool(c.State, snapshot); err != nil {
+		return err
 	}
 	// A same-name single-card source (Spark) must have completed its normal
 	// leave handshake. Never invent a previous-session chain for a fresh spool.
@@ -398,7 +422,7 @@ func convertWorkerInstall(ctx context.Context, c ServiceConfig, executable strin
 		}
 	}
 	if catalogData != nil {
-		if err = tx.put(c.ModelCatalog, catalogData, 0600); err != nil {
+		if err = tx.put(c.ModelCatalog, catalogData, tx.originals[c.ModelCatalog].mode); err != nil {
 			return err
 		}
 	}
@@ -425,7 +449,7 @@ func RollbackMachineInstall(ctx context.Context, config string, dry bool, comman
 	if j.Version != 1 || j.Config.Config != config {
 		return errors.New("invalid machine rollback journal")
 	}
-	if dry || j.Phase == "rolled-back" {
+	if j.Phase == "rolled-back" {
 		return nil
 	}
 	c := j.Config
@@ -437,13 +461,42 @@ func RollbackMachineInstall(ctx context.Context, config string, dry bool, comman
 	if status.Policy.Mode != "disabled" || !(status.MigrationReady || status.Quiescent && status.Healthy) {
 		return migrationError("machine_migration_incomplete", "rollback requires fresh disabled host and exact cleanup")
 	}
-	tx := journalTransaction(j, command)
+	tx, err := checkedJournalTransaction(j, command)
+	if err != nil {
+		return err
+	}
+	var snapshot Snapshot
+	if err = client.Call(ctx, "GET", "/api/status", nil, &snapshot); err != nil {
+		return err
+	}
+	if err = inspectMigrationSpool(c.State, snapshot); err != nil {
+		return err
+	}
+	fmt.Println("Rollback: stop/disable " + filepath.Base(c.Service))
+	for _, p := range tx.published {
+		fmt.Println("Restore:", filepath.Base(p.path))
+	}
+	for _, u := range tx.units {
+		fmt.Printf("Unit: %s enabled=%s active=%t\n", u.name(), u.state.enabled, u.state.active)
+	}
+	if dry {
+		return nil
+	}
 	// Stop the machine generation before any source definition can be restored.
 	if err = tx.manager.stop(ctx, installUnit{path: c.Service}); err != nil {
 		return err
 	}
-	if _, err = command(ctx, "systemctl", "--user", "disable", filepath.Base(c.Service)); err != nil {
+	if err = settledMigrationSpool(c.State, snapshot); err != nil {
 		return err
+	}
+	current, err := tx.manager.inspect(ctx, installUnit{path: c.Service})
+	if err != nil {
+		return err
+	}
+	if current.enabled != "not-found" {
+		if _, err = command(ctx, "systemctl", "--user", "disable", filepath.Base(c.Service)); err != nil {
+			return err
+		}
 	}
 	if err = tx.restore(ctx); err != nil {
 		return err
@@ -463,43 +516,6 @@ func ValidateDeviceSettings(settings []DeviceInstall) error {
 			return migrationError("machine_migration_conflict", "invalid device memory mode")
 		}
 		seen[s.Selector] = true
-	}
-	return nil
-}
-
-func settledMigrationSpool(dir string) error {
-	// The exact service has stopped. Keep its spool locked until inspected; do
-	// not adopt, merge or modify any attempt or buffered result.
-	lock, err := os.OpenFile(filepath.Join(dir, "worker.lock"), os.O_RDWR, 0)
-	if err == nil {
-		defer lock.Close()
-		if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-			return migrationError("machine_migration_incomplete", "source spool still in use")
-		}
-		defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	paths, err := filepath.Glob(filepath.Join(dir, "state-attempt-*.json"))
-	if err != nil {
-		return err
-	}
-	paths = append(paths, filepath.Join(dir, "state.json"), filepath.Join(dir, "legacy-state.json"))
-	for _, path := range paths {
-		data, err := os.ReadFile(path)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return err
-		}
-		var s workerState
-		if err = decodeWorkerState(data, &s); err != nil {
-			return err
-		}
-		if s.Job != nil || s.Result != nil || s.LaunchPending {
-			return migrationError("machine_migration_incomplete", "source spool has unresolved attempt or result")
-		}
 	}
 	return nil
 }

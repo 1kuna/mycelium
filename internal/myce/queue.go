@@ -40,7 +40,8 @@ type batchRelease struct {
 }
 
 type state struct {
-	MachineConversion *MachineConversion `json:"machine_conversion,omitempty"`
+	MachineConversion *MachineConversion         `json:"machine_conversion,omitempty"`
+	ProductionDrains  map[string]productionDrain `json:"production_drains,omitempty"`
 
 	PriorityPolicy *PriorityPolicyRecord `json:"priority_policy,omitempty"`
 	// Actual fleet contact and the first reconnect after silence are separate
@@ -161,6 +162,10 @@ func Open(path, root string, clock Clock) (*Queue, error) {
 		err = json.Unmarshal(data, &q.s)
 	}
 	if err != nil && err != sql.ErrNoRows {
+		db.Close()
+		return nil, err
+	}
+	if err = q.importProductionDrain(data); err != nil {
 		db.Close()
 		return nil, err
 	}

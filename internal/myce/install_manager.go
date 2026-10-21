@@ -128,8 +128,10 @@ func (m installManager) registration(ctx context.Context, u installUnit, want in
 		return nil
 	}
 	// Drop links from the failed install first, including runtime enablement.
-	if _, err = m.command(ctx, "systemctl", "--user", "disable", u.name()); err != nil {
-		return err
+	if current.enabled != "not-found" {
+		if _, err = m.command(ctx, "systemctl", "--user", "disable", u.name()); err != nil {
+			return err
+		}
 	}
 	switch want.enabled {
 	case "enabled", "enabled-runtime":

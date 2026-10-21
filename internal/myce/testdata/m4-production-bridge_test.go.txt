@@ -1,0 +1,32 @@
+package myce
+
+import (
+ "context"
+ "os"
+ "testing"
+ "time"
+)
+
+// Laptop bridge: original production close/reconcile/open code and real spool
+// locks/process inventory; only kernel/GPU exclusion observation is synthetic.
+func TestM4ProductionBridge(t *testing.T) {
+ dir:=os.Getenv("MYCE_M4_BRIDGE_DIR");if dir==""{t.Fatal("isolated host dir required")}
+ ctx,cancel:=context.WithTimeout(context.Background(),20*time.Second);defer cancel()
+ clock:=RealClock{}
+ client:=func(url string)(Client,error){return Client{URL:url,Token:os.Getenv("MYCE_TOKEN")},nil}
+ if os.Getenv("MYCE_M4_BRIDGE_ACTION")=="open" {
+  if err:=ReconcileHostLocal(ctx,dir,clock,client);err!=nil{t.Fatal(err)}
+  s,err:=ReadHostIntent(dir);if err!=nil{t.Fatal(err)}
+  if err=(HostControl{Dir:dir,Clock:clock,Expected:s.HostRevision}).Enable(ctx);err!=nil{t.Fatal(err)}
+  return
+ }
+ report,err:=(HostControl{Dir:dir,Clock:clock,Observe:testHostExclusion,Processes:HostProcesses{Owned:ownedHostProcess,Signal:signalHostProcess}}).Disable(ctx,"M4 production-lineage drill",0)
+ if err!=nil || !report.Confirmed{t.Fatalf("close: %+v %v",report,err)}
+ ticker:=time.NewTicker(10*time.Millisecond);defer ticker.Stop()
+ for {
+  if err=ReconcileHostLocal(ctx,dir,clock,client);err!=nil{t.Fatal(err)}
+  s,err:=ReadHostIntent(dir);if err!=nil{t.Fatal(err)}
+  if s.HostSettlement()=="confirmed" && len(s.Pending)==0 {t.Log("confirmed settlement; zero pending custody");return}
+  select{case <-ctx.Done():t.Fatal(ctx.Err());case <-ticker.C:}
+ }
+}

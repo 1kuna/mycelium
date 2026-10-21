@@ -7,8 +7,10 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"mycelium/internal/myce"
 )
@@ -75,7 +77,9 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 	if f.NArg() != 0 {
 		return errors.New("unexpected setup arguments")
 	}
-	ctx, cancel := myce.SetupTimeout(context.Background())
+	signals, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGHUP, os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	ctx, cancel := myce.SetupTimeout(signals)
 	defer cancel()
 	if action != "install" {
 		if *config == "" {

@@ -80,7 +80,7 @@ func convertQueueInstall(ctx context.Context, c ServiceConfig, mapping []Machine
 			return err
 		}
 	}
-	artifacts, err := conversionPolicyFiles(c, plan)
+	artifacts, err := conversionPolicyFiles(c, plan, models)
 	if err != nil {
 		return err
 	}
@@ -121,7 +121,10 @@ func convertQueueInstall(ctx context.Context, c ServiceConfig, mapping []Machine
 		}
 		// Keep upgraded binary, database and current checkpoints. Restore only the
 		// policy artifacts owned by this transaction, never a snapshot of jobs.
-		tx := journalTransaction(saved, command)
+		tx, err := checkedJournalTransaction(saved, command)
+		if err != nil {
+			return err
+		}
 		tx.units = nil
 		if err = q.rollbackMachines(false, true); err != nil {
 			return err
@@ -162,13 +165,21 @@ func convertQueueInstall(ctx context.Context, c ServiceConfig, mapping []Machine
 	}
 	tx := journalTransaction(saved, command)
 	tx.published = nil
-	tx.files = files
+	tx.files = saved.publishing(files)
 	for _, a := range artifacts {
+		before, _ := json.Marshal(a.before)
+		after, _ := json.Marshal(a.after)
+		if bytes.Equal(before, after) {
+			continue
+		}
 		data, err := yaml.Marshal(a.after)
 		if err != nil {
 			return err
 		}
-		if err = tx.put(a.path, data, 0600); err != nil {
+		if bytes.Equal(tx.originals[a.path].data, data) {
+			continue
+		}
+		if err = tx.put(a.path, data, tx.originals[a.path].mode); err != nil {
 			return fmt.Errorf("policy publication interrupted; keep queue stopped and rerun conversion: %w", err)
 		}
 	}
@@ -199,7 +210,7 @@ type conversionPolicyFile struct {
 	read          func(string) (any, error)
 }
 
-func conversionPolicyFiles(c ServiceConfig, p *MachineConversion) ([]conversionPolicyFile, error) {
+func conversionPolicyFiles(c ServiceConfig, p *MachineConversion, models ModelConfig) ([]conversionPolicyFile, error) {
 	projects := map[string]ProjectPolicy{}
 	for name, v := range p.Policies {
 		var err error
@@ -223,10 +234,16 @@ func conversionPolicyFiles(c ServiceConfig, p *MachineConversion) ([]conversionP
 	type hostFile struct {
 		Hosts map[string]HostPolicy `yaml:"hosts"`
 	}
+
+	beforeModels := migrationApplyModelFences(models, p.Models)
+	afterModels := migrationApplyModelFences(models, p.ConvertedModels)
+	if c.ModelCatalog != "" && (modelConfigHash(beforeModels) != p.ModelsHash || modelConfigHash(afterModels) != p.ConvertedModelsHash) {
+		return nil, migrationError("machine_migration_conflict", "model catalog differs from saved conversion")
+	}
 	all := []conversionPolicyFile{
 		{c.ProjectConfig, p.Policies, projects, func(path string) (any, error) { return ReadProjectPolicies(path) }},
 		{c.HostConfig, hostFile{beforeHosts}, hostFile{hosts}, func(path string) (any, error) { v, e := ReadHostPolicies(path); return hostFile{v}, e }},
-		{c.ModelCatalog, p.Models, p.ConvertedModels, func(path string) (any, error) { return ReadModels(path) }},
+		{c.ModelCatalog, beforeModels, afterModels, func(path string) (any, error) { return ReadModels(path) }},
 	}
 	return slices.DeleteFunc(all, func(a conversionPolicyFile) bool { return a.path == "" }), nil
 }

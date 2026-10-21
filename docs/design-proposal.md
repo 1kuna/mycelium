@@ -285,7 +285,7 @@ Reservations, tombstones and markers follow the retention table. Accept a key re
 
 v3 is the only runtime; no pre-v3 worker-report, capability/profile, empty-attempt or broad host-cleared fallback. Old or missing worker/report protocol headers, including checkpoint reports and worker events, receive HTTP 426. Within host-launch-v3, current one-attempt workers remain compatible with the M1 keyed wire extension below; upgrade the queue before keyed workers. Exact execution ownership and release evidence remain mandatory across restart/loss; a keyed report never silently clears omitted obligations.
 
-**Old formats are refused; operators archive and install fresh.** Old queue state is not imported. Stop the old services and prevent their restart, archive their queue/worker data directories and shared host-control directory, preserve configuration and secret references, then install matching current binaries and units. All current queue, worker and cache state roots carry `.myce-format` with `v3` and a newline. One startup gate checks every root before any filesystem write: absent or empty roots receive a fsynced marker first; non-empty roots without that exact marker return `legacy_state_present` naming the root. No content-specific legacy detection or migration of pre-marker development state is supported. There is no in-place or offline converter and no dual runtime decoder. Preserve archives, checkpoints and unique evidence; this rule does not authorize deleting them or changing production outside the queue.
+**Pre-v3 formats are refused; operators archive and install fresh.** Pre-marker queue state is not imported. Stop the old services and prevent their restart, archive their queue/worker data directories and shared host-control directory, preserve configuration and secret references, then install matching current binaries and units. All current queue, worker and cache state roots carry `.myce-format` with `v3` and a newline. One startup gate checks every root before any filesystem write: absent or empty roots receive a fsynced marker first; non-empty roots without that exact marker return `legacy_state_present` naming the root. No content-specific legacy detection or migration of pre-marker development state is supported. There is no pre-v3 converter or dual runtime decoder. The separately gated M4 conversion below starts from production's marked v3 state. Preserve archives, checkpoints and unique evidence; this rule does not authorize deleting them or changing production outside the queue.
 
 Installation overlays explicit options on saved current configuration, preserving
 queue address, NAS, names, Docker endpoint, GPU environment and secret references.
@@ -966,16 +966,30 @@ recovery as well as both fleet workers. **Upgrade spark to a machine worker in
 the same window**, retaining machine name `spark` and its single CUDA device
 bound by UUID. This avoids a permanent legacy fleet dependency, exercises the
 new queue's real reconnect path and gives the unkeyed adapter a deletion path.
-Spark may reconnect in its legacy form only during the queue-first interval;
-final acceptance requires its upgraded machine worker. Include Spark work and
+The singular worker wire form remains bounded to the queue-first interval, but
+the actual production binary must be tested separately: 08816cf retries a removed
+host-control endpoint with HTTP 404 before check-in. Do not require that binary
+to reconnect successfully as a conversion prerequisite. Final acceptance requires
+Spark's upgraded machine worker. Include Spark work and
 consumers in the agreed drain. No rolling service restart is implicitly safe.
 
-1. Require Verso #298 merged and a production-operator-agreed window. Pause
-   ordinary submissions, disable **b70 and spark** with stop and wait for every
+1. Require Verso #298 and #106 merged into the staged commit (verify ancestry
+   and maintainer-published binary SHA-256), plus a production-operator-agreed
+   window. The starting point is **production 57ed4e6 queue/root and 08816cf
+   workers**, not integ: it has local host intent/registry but no queue-owned
+   maintenance API or host memory budget record. Freeze Verso/other intake.
+   On that lineage use its root `host close --local --wait-released` bridge;
+   exit 1 with `release_not_confirmed` means re-check status, never release.
+   Require confirmed settlement, zero custody, then stop the exact units and
+   snapshot binaries (root separately), configs, units, registries and DB.
+   Upgrade the stopped queue first and let the M build open/migrate its state.
+   Only now use M's queue-owned maintenance commands: disable **b70 and spark**
+   with stop and wait for every
    batch/member, preparation, engine, buffered result and release to reconcile.
    Require no queued jobs whose job or resolved placement references a retiring
    name; let clients cancel/resubmit before the window, never rewrite keyed
-   specs in place. A missing/stale worker or residual obligation fails the gate.
+   specs in place. A missing/stale worker without the exact production discharge
+   receipt, or any residual obligation, fails the gate.
    Preserve queue/key/counter state and checkpoint generations. Record source
    IDs, sessions and device identities.
 2. Snapshot the queue binary, SQLite state and queue-side config, both workers'
@@ -998,13 +1012,20 @@ consumers in the agreed drain. No rolling service restart is implicitly safe.
    fence that cannot be represented equivalently blocks with
    `machine_migration_conflict`, never broadens placement. Already host-keyed
    policies remain unchanged. Reject existing multi-card masks as above.
-4. Stop the b70 queue under the recorded maintenance state, upgrade it first,
-   and restart against the preserved database with the converted config.
+4. The queue upgrade projects production's persisted closed `host_intents`
+   into disabled queue-owned maintenance, preserving the equal per-worker host
+   allowance once (disagreeing allowances refuse startup). Exact discharged
+   source-session receipts authorize offline conversion of stopped/Gone sources
+   without pretending they are fresh. No age-based release or fabricated session
+   is allowed. This one-time projection adds no production host-control runtime
+   or API to M. Reconnecting legacy workers remain held by M maintenance.
+   Stop the M queue for
+   offline conversion, then restart against the preserved DB and converted config.
    Verify queue restart recovery: jobs, keys, counters, maintenance, pins,
    checkpoints and all exact custody are preserved; no idle/loss inference
-   releases resources or starts work. Verify Spark reconnects to this queue,
-   reconciling its old session before its worker conversion. Failed queue
-   recovery or reconnect is a failed window gate, not permission to clear state.
+   releases resources or starts work. Verify Spark's discharged old session and
+   refusal behavior, then its upgraded worker's reconnect. Failed queue recovery
+   or upgraded reconnect is a failed gate, not permission to clear state.
 5. Stop/disable the exact source worker units and verify process/daemon cleanup
    on both machines. For b70, **remove `myce-worker@gpu0` and
    `myce-worker@gpu1` from the host/installer's persistent enable set**, as well
@@ -1041,10 +1062,12 @@ exact release after retirement; retirement never rewrites accepted intent.
 Rollback is maintenance on both hosts followed by exact cleanup of **all**
 new attempts, then restoration of the snapshotted queue-side config and source
 worker files/units, persistent enable sets and verified prior activity,
-including Spark's prior worker. Keep the upgraded queue: it supports the legacy
-worker form. Under maintenance, deactivate the machine sessions and reactivate
+including Spark's prior worker. Keep the upgraded queue for a topology rollback:
+it supports the bounded singular worker wire form, but actual production binaries
+may remain contained and unable to check in. Under maintenance, deactivate the machine sessions and reactivate
 only recorded source identities, preserving their historical records, all jobs/
-keys/counters and checkpoint progress. Test Spark's reconnect after restoration.
+keys/counters and checkpoint progress. Record actual reconnect/refusal behavior.
+Restoring working production requires the separately gated snapshot abort below.
 Never run old and new workers together. A full queue downgrade may use its
 pre-window database snapshot only if no subsequently accepted intent
 would be lost; otherwise refuse downgrade and retain the compatible queue for
@@ -1061,9 +1084,15 @@ are installer-owned and must stay outside public reports. Referenced secret
 files are preserved by reference, never imported into the plan. Source spools,
 binaries and all caches remain on disk; source unit/config definitions move to
 recoverable transaction backups. In the current installer the persistent enable
-set consists of the systemd wants registrations and saved unit/config artifacts;
-there is no additional host registry. Remove both, and refuse any unselected
-split unit. Source units must also pass the existing Mycelium worker-unit
+set also includes the **production-lineage** `worker-*.json` records in
+`~/.local/share/myce` (or the source config's explicit `host_state_dir`). Retire
+only records whose config/unit/spool/host/name/queue match the selected sources;
+refuse unknown or conflicting records. Journal and restore their exact bytes on
+rollback. Remove these records and systemd registrations/config artifacts, and
+refuse any unselected split unit. The production root copy's local open/close no
+longer controls the converted worker: use M `host disable HOST --stop --wait`,
+`host status HOST`, and `host resume HOST`. Retain the old root executable only
+for the explicitly gated frozen-snapshot abort, never as M host control. Source units must also pass the existing Mycelium worker-unit
 allow-list before any manager action. The gate applies to ordinary redeploys as well as fresh installs.
 
 Queue conversion is an explicit offline `myce install queue --config ...
@@ -1085,12 +1114,40 @@ Rollback reverses the current representable pins, preserving additions, removals
 and preemption counters. A new host-wide pin that cannot be expressed on split
 workers blocks rollback until the operator explicitly selects a card or removes
 it. Unknown policy edits similarly require reconciliation before restoration.
+Rollback **refuses**, rather than rewriting keyed job intent, while any queued,
+failed or cancelled job has a machine-era `allowed_machines` reference that
+would disappear (including resumable/requeueable jobs). Succeeded historical
+jobs retain their exact identity. Cancellation alone does not remove this gate;
+retain the M topology until referencing intent is reconciled explicitly outside
+the converter. This is independent of the much
+stricter no-new-business-intent gate for restoring a production DB snapshot.
 Queue-side rollback reactivates only recorded legacy identities and refuses the
 machine generation until forward conversion. Retired records retain their old
 sessions for exact result/release handling; a new check-in cannot revive them.
 Worker-local catalogs use the queue's explicit retired records to rewrite only
 placement fences, retaining local environments/secrets and exact original file
-bytes in the worker journal. This handles a separate local catalog on Spark as
+bytes in the private worker journal. Write-ahead SHA-256/mode/removal receipts
+bind every publication, including intermediate writes before a crash. Rollback
+checks all changed files before any manager mutation; unknown content/mode
+returns typed `machine_migration_conflict` with sanitized file/difference names.
+Unchanged files, especially a shared catalog already converted by the queue,
+are not rewritten. Policy/catalog publication preserves original modes. SQLite
+stores only model names, placement restrictions and original/converted hashes;
+model environment values and secret references never enter conversion state.
+Interrupted plans read source identity from the journal, even after source files
+move to recoverable backups. Missing destination units are valid rollback input.
+CLI SIGHUP/SIGINT/SIGTERM cancel setup; recovery ignores cancellation within its
+bounded restoration context. Dry rollback performs maintenance, file ownership
+and spool inspection and prints the file/unit plan without writes; after a real
+stop it also acquires the exclusive spool lock before restoring source units.
+The same machine spool survives forward -> rollback -> forward. Inspect both
+source and reused destination spools: heartbeat and operator-stop state,
+`attempt-*.json`, `*.result.json`, `*.docker.json`/ack and `engine-*.json`, using
+the sparse formats actually written by production 08816cf as well as M. Retained
+results require an exact terminal/released queue record; retained Docker custody
+requires its release and acknowledgement. Process/cgroup custody must be absent.
+No daemon calls, orphan cleanup or inferred result acknowledgement are made by
+this read-only gate. This handles a separate local catalog on Spark as
 well as a shared catalog already converted by the queue. During the queue-first
 interval only the recorded same-name legacy session may report the saved old
 catalog hash while its host is disabled with no obligations; its model endpoint
@@ -1100,14 +1157,28 @@ work. Spark uses a fresh spool only after its same-name source completes the nor
 leave handshake. No prior-session relationship is invented. The compatible
 queue and all subsequently accepted jobs, keys, counters and checkpoints survive
 worker rollback. A separate queue downgrade remains subject to the stricter
-no-new-intent rule above.
+no-new-intent rule above. In the production-snapshot abort, stop all M writers,
+archive post-upgrade synthetic probe evidence, restore the pre-window DB/configs,
+local host intent/registries, exact units/enablement and each binary from its own
+backup with `sha256sum -c`. Never open an M-mutated DB with 57ed4e6. Upgraded queue
+startup failure, incompatible Verso client and failed verification all take this
+same abort branch while intake remains stopped and no new Verso/other business
+intent was accepted; after that cutoff, keep admission disabled and repair
+forward. Restored 08816cf workers are not assumed runnable on the M queue: record
+actual check-in refusals and exit behavior during the rollback interval. The
+laptop historical-binary drill observes 08816cf retrying a removed host-control
+route with HTTP 404 before check-in; direct retired check-ins return
+`machine_renamed`. Their
+`RestartPreventExitStatus=78` suppresses restart only when the process actually
+exits 78; a retrying HTTP refusal is not an exited/safely restored worker.
 
 ### Native b70 maintenance-window qualification
 
 Record binary/config digests, exact attempt IDs, masks, measured capacities and
 results; keep private operational details in approved private evidence. Stop at
 the first failed gate, restore the queue config and worker installations as
-above and verify them before ending the window. Conversion/inspection occurs disabled. During the
+above when its gates permit; otherwise remain disabled and repair forward.
+Verify restoration before ending the window. Conversion/inspection occurs disabled. During the
 agreed window the production operator pauses ordinary submissions using its
 existing controls and accounts for queued demand; explicitly resume the queue
 only for test phases, then disable/stop/wait again before reboot, redeploy or

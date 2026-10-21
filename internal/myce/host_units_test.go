@@ -38,7 +38,7 @@ func TestInstanceInstallerPlan(t *testing.T) {
 	}
 }
 
-func TestInstallInstanceTargetsItsOwnUnit(t *testing.T) {
+func TestInstallMachineTargetsItsOwnUnit(t *testing.T) {
 	home := t.TempDir()
 	c, err := PlanInstall("worker", home, "", home, "http://127.0.0.1:1", "gpu1", Detection{OS: "linux", Platform: "fake"})
 	if err != nil {

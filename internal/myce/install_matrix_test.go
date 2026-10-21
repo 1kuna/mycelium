@@ -52,7 +52,15 @@ func (m *installMatrixManager) run(ctx context.Context, name string, args ...str
 			}
 		case "daemon-reload":
 			for _, path := range installUnitPaths(m.c) {
-				m.cached[filepath.Base(path)] = m.read(path)
+				unit := filepath.Base(path)
+				m.cached[unit] = m.read(path)
+				state := m.states[unit]
+				if m.cached[unit] == nil {
+					state.enabled = "not-found"
+				} else if state.enabled == "not-found" || state.enabled == "" {
+					state.enabled = "disabled"
+				}
+				m.states[unit] = state
 			}
 		case "enable":
 			s.enabled = "enabled"
@@ -61,6 +69,9 @@ func (m *installMatrixManager) run(ctx context.Context, name string, args ...str
 			}
 			m.states[unit] = s
 		case "disable":
+			if m.cached[unit] == nil {
+				return []byte("Failed to disable unit: Unit file does not exist"), installTestExit(1)
+			}
 			s.enabled = "disabled"
 			if m.cached[unit] == nil {
 				s.enabled = "not-found"

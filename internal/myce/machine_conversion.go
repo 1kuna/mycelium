@@ -17,16 +17,18 @@ type MachineRename struct {
 	Device string `json:"device"`
 }
 type MachineConversion struct {
-	Changes            []string                 `json:"changes,omitempty"`
-	PublicationPending bool                     `json:"publication_pending,omitempty"`
-	Mapping            []MachineRename          `json:"mapping"`
-	RolledBack         bool                     `json:"rolled_back"`
-	Policies           map[string]ProjectPolicy `json:"policies"`
-	Pins               []ModelPin               `json:"pins"`
-	Hosts              map[string]*HostState    `json:"hosts"`
-	Machines           map[string]*Machine      `json:"machines"`
-	Models             ModelConfig              `json:"models"`
-	ConvertedModels    ModelConfig              `json:"converted_models"`
+	Changes             []string                 `json:"changes,omitempty"`
+	PublicationPending  bool                     `json:"publication_pending,omitempty"`
+	Mapping             []MachineRename          `json:"mapping"`
+	RolledBack          bool                     `json:"rolled_back"`
+	Policies            map[string]ProjectPolicy `json:"policies"`
+	Pins                []ModelPin               `json:"pins"`
+	Hosts               map[string]*HostState    `json:"hosts"`
+	Machines            map[string]*Machine      `json:"machines"`
+	Models              ModelConfig              `json:"models"`
+	ModelsHash          string                   `json:"models_hash"`
+	ConvertedModelsHash string                   `json:"converted_models_hash"`
+	ConvertedModels     ModelConfig              `json:"converted_models"`
 }
 
 // Refusal identifies the exact logical jobs; keyed intent is never rewritten.
@@ -164,7 +166,7 @@ func (q *Queue) machineConversionPlan(mapping []MachineRename, models ModelConfi
 			if !seen[m.ID] {
 				return nil, migrationError("machine_migration_incomplete", "missing source "+m.ID)
 			}
-			if m.Gone || m.LastSeen.After(q.clock.Now()) || q.clock.Now().Sub(m.LastSeen) >= min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2])) || m.DockerCleanup != "" {
+			if (!q.productionSourceSettled(m) && (m.Gone || m.LastSeen.After(q.clock.Now()) || q.clock.Now().Sub(m.LastSeen) >= min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2])))) || m.DockerCleanup != "" {
 				return nil, migrationError("machine_migration_incomplete", "source is stale, missing or has cleanup")
 			}
 			for _, j := range q.s.Jobs {
@@ -180,8 +182,9 @@ func (q *Queue) machineConversionPlan(mapping []MachineRename, models ModelConfi
 	copyJSON(q.s.Pins, &out.Pins)
 	copyJSON(q.s.Hosts, &out.Hosts)
 	copyJSON(q.s.Machines, &out.Machines)
-	copyJSON(models, &out.Models)
-	copyJSON(models, &out.ConvertedModels)
+	out.Models = migrationModelFences(models)
+	out.ConvertedModels = migrationModelFences(models)
+	out.ModelsHash = modelConfigHash(models)
 	return out, nil
 }
 
@@ -249,6 +252,8 @@ func (q *Queue) convertMachines(mapping []MachineRename, models ModelConfig, dry
 				return fmt.Errorf("server %s: %w", m.Name, err)
 			}
 		}
+		converted := migrationApplyModelFences(models, plan.ConvertedModels)
+		plan.ConvertedModelsHash = modelConfigHash(converted)
 		for i, p := range pins {
 			plan.Changes = append(plan.Changes, fmt.Sprintf("pin %s/%s: %s device %s -> %s device %s", p.Project, p.Model, q.s.Pins[i].Machine, q.s.Pins[i].Device, p.Machine, p.Device))
 		}
@@ -305,6 +310,33 @@ func (q *Queue) rollbackMachines(dry, publicationPending bool) error {
 					return migrationError("machine_migration_incomplete", "rollback has an active attempt")
 				}
 			}
+		}
+
+		// Accepted keyed intent is immutable. Even terminal resumable/requeueable
+		// jobs must be cancelled/resubmitted explicitly, never silently renamed.
+		blocked := &QueuedRetiredMachinesError{}
+		for _, j := range q.s.Jobs {
+			if j.State == "succeeded" {
+				continue
+			}
+			for _, r := range plan.Mapping {
+				if r.From == r.To {
+					continue
+				}
+				if slices.Contains(j.Spec.AllowedMachines, r.To) {
+					if !slices.Contains(blocked.Jobs, j.ID) {
+						blocked.Jobs = append(blocked.Jobs, j.ID)
+					}
+					if !slices.Contains(blocked.Machines, r.To) {
+						blocked.Machines = append(blocked.Machines, r.To)
+					}
+				}
+			}
+		}
+		if len(blocked.Jobs) > 0 {
+			slices.Sort(blocked.Jobs)
+			slices.Sort(blocked.Machines)
+			return blocked
 		}
 
 		pins := slices.Clone(q.s.Pins)
@@ -426,7 +458,7 @@ func (q *Queue) machineMigrationReady(host string) bool {
 // session under maintenance. It contributes no model endpoint or admission.
 func (q *Queue) migrationLegacyCatalog(m *Machine) bool {
 	p := q.s.MachineConversion
-	if p == nil || p.RolledBack || m.Devices != nil || q.s.HostMaintenance[hostID(m)].Mode != "disabled" || len(q.hostObligations(hostID(m))) != 0 || m.ModelConfigHash != modelConfigHash(p.Models) {
+	if p == nil || p.RolledBack || m.Devices != nil || q.s.HostMaintenance[hostID(m)].Mode != "disabled" || len(q.hostObligations(hostID(m))) != 0 || m.ModelConfigHash != p.ModelsHash {
 		return false
 	}
 	for _, r := range p.Mapping {
@@ -437,4 +469,26 @@ func (q *Queue) migrationLegacyCatalog(m *Machine) bool {
 		}
 	}
 	return false
+}
+
+// Only placement fields enter SQLite. Environment values and secret references
+// stay in the catalog and its private installer journal, never queue snapshots.
+func migrationModelFences(models ModelConfig) ModelConfig {
+	out := ModelConfig{}
+	for _, m := range models.Models {
+		out.Models = append(out.Models, Model{Name: m.Name, AllowedMachines: slices.Clone(m.AllowedMachines), Device: m.Device})
+	}
+	return out
+}
+func migrationApplyModelFences(models, fences ModelConfig) ModelConfig {
+	models.Models = slices.Clone(models.Models)
+	for i := range models.Models {
+		for _, f := range fences.Models {
+			if models.Models[i].Name == f.Name {
+				models.Models[i].AllowedMachines = slices.Clone(f.AllowedMachines)
+				models.Models[i].Device = f.Device
+			}
+		}
+	}
+	return models
 }
