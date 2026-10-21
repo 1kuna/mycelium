@@ -138,7 +138,9 @@ func TestReviewLaunchdServiceRetainsTypedFailure(t *testing.T) {
 func TestReviewProbeCommandsStripToken(t *testing.T) {
 	t.Setenv("MYCE_TOKEN", "synthetic-test-secret")
 	dir := t.TempDir()
-	path := filepath.Join(dir, "probe")
+	// Exercise the real prerequisite runner with an owned fake uv command.
+	// Hardware probe commands remain guarded in tests.
+	path := filepath.Join(dir, "uv")
 	if err := os.WriteFile(path, []byte("#!/bin/sh\nif [ \"${MYCE_TOKEN+x}\" = x ]; then exit 9; fi\nprintf 'uv 0.8.22\\n'\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -249,9 +251,13 @@ func TestReviewServiceStderrIsBoundedAndUnknownReasonsStayGeneric(t *testing.T) 
 
 func TestReviewLocalProbeCaptureIsBounded(t *testing.T) {
 	p := LocalMachineProbe()
+	path := filepath.Join(t.TempDir(), "uv")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexec /usr/bin/awk \"$@\"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
 	// os/exec copies from a pipe. This also catches io.Copy optimizations that
 	// could bypass a bounded writer through a promoted bytes.Buffer.ReadFrom.
-	output, err := p.Command(context.Background(), "/usr/bin/awk", `BEGIN {for(i=0;i<1100000;i++) printf "x"; for(i=0;i<8192;i++) printf "e" > "/dev/stderr"; exit 1}`)
+	output, err := p.Command(context.Background(), path, `BEGIN {for(i=0;i<1100000;i++) printf "x"; for(i=0;i<8192;i++) printf "e" > "/dev/stderr"; exit 1}`)
 	var exit *exec.ExitError
 	if !errors.As(err, &exit) {
 		t.Fatalf("want child exit, got %v", err)

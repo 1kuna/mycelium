@@ -511,7 +511,7 @@ func TestMachineWorkerCrashHelper(t *testing.T) {
 	m := machine("machine", "fake", "machine")
 	m.Devices = fakeMachineDevices()
 	m.HostMemoryBudgetGB = 32
-	w := Worker{Machine: m, StateDir: os.Getenv("MYCE_MACHINE_CRASH_STATE"), Client: Client{URL: os.Getenv("MYCE_MACHINE_CRASH_URL")}, Interval: 10 * time.Millisecond, Clock: RealClock{}, InventoryProbe: func(context.Context) ([]MachineDevice, error) { return fakeMachineDevices(), nil }, HostMemorySource: func(context.Context) (float64, error) { return 64, nil }}
+	w := Worker{Machine: m, StateDir: os.Getenv("MYCE_MACHINE_CRASH_STATE"), Client: Client{URL: os.Getenv("MYCE_MACHINE_CRASH_URL")}, Interval: 10 * time.Millisecond, Clock: RealClock{}, InventoryProbe: func(context.Context) ([]MachineDevice, error) { return fakeMachineDevices(), nil }, CPUIsolationProbe: func(context.Context) error { return nil }, HostMemorySource: func(context.Context) (float64, error) { return 64, nil }}
 	if err := w.Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -525,6 +525,7 @@ func TestMachineWorkerRestartCleansTwoRunningAttempts(t *testing.T) {
 	}
 	w := harnessWorker(t, h)
 	child := exec.Command(os.Args[0], "-test.run=^TestMachineWorkerCrashHelper$")
+	child.Stdout, child.Stderr = os.Stdout, os.Stderr
 	child.Env = append(os.Environ(), "MYCE_RECOVERY_TEST_HELPER=1", "MYCE_MACHINE_CRASH_HELPER=1", "MYCE_MACHINE_CRASH_STATE="+w.StateDir, "MYCE_MACHINE_CRASH_URL="+w.Client.URL)
 	if err := child.Start(); err != nil {
 		t.Fatal(err)

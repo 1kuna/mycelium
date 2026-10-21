@@ -36,12 +36,16 @@ func TestMachineInstallAutomaticSparkPreview(t *testing.T) {
 		t.Fatal(err)
 	}
 	probes := 0
-	probe := myce.MachineProbe{OS: "linux", Arch: "arm64", Files: fstest.MapFS{}, Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
-		if name != "nvidia-smi" || strings.Join(args, " ") != "--query-gpu=uuid,driver_version --format=csv,noheader,nounits" {
+	probe := myce.MachineProbe{OS: "linux", Arch: "arm64", Files: fstest.MapFS{
+		"sys/bus/pci/devices/0000:01:00.0/class":              {Data: []byte("0x030000")},
+		"sys/bus/pci/devices/0000:01:00.0/vendor":             {Data: []byte("0x10de")},
+		"sys/bus/pci/devices/0000:01:00.0/current_link_width": {Data: []byte("0")},
+	}, Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
+		if name != "nvidia-smi" || strings.Join(args, " ") != "--query-gpu=uuid,driver_version,pci.bus_id --format=csv,noheader,nounits" {
 			t.Fatalf("preview invoked unexpected command %s %q", name, args)
 		}
 		probes++
-		return []byte("GPU-spark-gb10-fixture, 580.95.05\n"), nil
+		return []byte("GPU-spark-gb10-fixture, 580.95.05, 0000:01:00.0\n"), nil
 	}}
 	destination := filepath.Join(home, "machine", "config.json")
 	output := captureJoiningOutput(t, func() error {

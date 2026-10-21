@@ -45,7 +45,14 @@ type MachineProbe struct {
 
 func LocalMachineProbe() MachineProbe {
 	run := func(ctx context.Context, env map[string]string, n string, args ...string) ([]byte, error) {
-		probeguard.Check()
+		// This runner also serves installer service managers and lazy tool
+		// version checks. Those are not hardware probes; test CLI processes
+		// supply their ordinary fake managers through PATH.
+		switch filepath.Base(n) {
+		case "systemctl", "systemd-run", "launchctl", "loginctl", "uv", "uvx", "pixi":
+		default:
+			probeguard.Check()
+		}
 		cmd := exec.CommandContext(ctx, n, args...)
 		cmd.Env = withoutMyceToken(os.Environ())
 		for key, value := range env {

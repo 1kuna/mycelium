@@ -67,6 +67,17 @@ func (p MachineProbe) detectAccelerator(ctx context.Context, device MachineDevic
 			return d, preflightError("gpu_inventory_invalid", "cuda", "CUDA memory response differs from selected PCI component")
 		}
 		n, err := parseCUDAFreeMemory([]byte(strings.TrimSpace(fields[1])))
+		if errors.Is(err, errUnifiedMemory) {
+			// A PCI transport can exist inside an integrated SoC (GB10 has
+			// current_link_width=1). N/A is not topology evidence. Ask the
+			// CUDA driver for the selected PCI device's integrated property.
+			b, propertyErr := p.Command(ctx, "python3", "-c", cudaIntegratedAttribute, fact.address)
+			if propertyErr == nil && strings.TrimSpace(string(b)) == "1" {
+				fact.integrated, fact.topologyKnown = true, true
+				d.MemoryMode, d.ReserveGB = "unified", 16
+				return d, nil
+			}
+		}
 		if err != nil || n <= 0 {
 			return d, preflightError("gpu_memory_unavailable", "cuda", "discrete CUDA memory unavailable; specify an explicit fixed device budget")
 		}
@@ -115,3 +126,14 @@ func (p MachineProbe) detectAccelerator(ctx context.Context, device MachineDevic
 	d.MemoryMode, d.MemoryGB, d.ReserveGB = "fixed", budget, min(2, budget/4)
 	return d, nil
 }
+
+const cudaIntegratedAttribute = `import ctypes as c, sys
+driver=c.CDLL("libcuda.so.1")
+assert driver.cuInit(0)==0
+device=c.c_int()
+assert driver.cuDeviceGetByPCIBusId(c.byref(device),sys.argv[1].encode())==0
+integrated=c.c_int()
+assert driver.cuDeviceGetAttribute(c.byref(integrated),18,device)==0
+assert integrated.value in (0,1)
+print(integrated.value)
+`

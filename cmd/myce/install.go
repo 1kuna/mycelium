@@ -312,7 +312,7 @@ func setupCommandWithInstaller(args []string, probe myce.MachineProbe, home stri
 		}
 		c = myce.ApplyHardwarePreflight(c, found)
 	}
-	if role == "worker" && !*dry && installed == nil && hardware == nil && c.Detection.Platform != "fake" && c.Detection.Platform != "cpu" {
+	if role == "worker" && !*dry && (installed == nil || c.Enrollment) && hardware == nil && c.Detection.Platform != "fake" {
 		found, err := myce.PreflightHardware(ctx, c, probe)
 		if err != nil {
 			return err
@@ -392,6 +392,11 @@ func setupCommandWithInstaller(args []string, probe myce.MachineProbe, home stri
 			return err
 		}
 		fmt.Println(report.String())
+	}
+	if c.Enrollment {
+		if e = myce.PreflightEnrollmentInstall(ctx, c, executable, probe.Command); e != nil {
+			return e
+		}
 	}
 	if e = install(ctx, c, executable, env("MYCE_TOKEN", ""), probe.Command); e != nil {
 		return e

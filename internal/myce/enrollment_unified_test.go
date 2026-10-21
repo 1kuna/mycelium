@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"os/exec"
+	"strings"
 	"testing"
 )
 
@@ -21,16 +22,22 @@ func TestEnrollmentReadinessUnifiedMemory(t *testing.T) {
 				m.Devices[0].Selector = "GPU-unified"
 				m.Devices[0].ReserveMemoryGB = 16
 			}
-			probe := MachineProbe{OS: m.CapabilityProfile.OS, Arch: "arm64", Command: func(_ context.Context, name string, _ ...string) ([]byte, error) {
+			probe := MachineProbe{OS: m.CapabilityProfile.OS, Arch: "arm64", Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
 				switch name {
 				case "/usr/sbin/system_profiler":
 					return []byte("Metal: Supported"), nil
 				case "nvidia-smi":
+					if strings.Contains(strings.Join(args, " "), "uuid,driver_version") {
+						return []byte("GPU-unified, fixture-driver"), nil
+					}
 					return []byte("NVIDIA GB10, N/A"), nil
 				default:
 					return nil, exec.ErrNotFound
 				}
 			}}
+			if platform == "cuda" {
+				probe = withCUDAFacts(probe, true, 1)
+			}
 			detected, err := probe.DetectDevice(context.Background(), m.Devices[0].Selector)
 			if err != nil || detected.MemoryGB != 0 || detected.MemoryMode != "unified" {
 				t.Fatalf("unexpected automatic %s detection: %+v %v", platform, detected, err)

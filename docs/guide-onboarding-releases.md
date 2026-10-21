@@ -81,7 +81,9 @@ conversion path where required.
 Same-version reruns explain that installer flags are not reapplied; use the normal
 `myce install worker --config CONFIG` path to change those settings.
 
-Upgrade preflight refuses busy hosts before changing policy. If work races with
+Hardware, NAS, policy, state-root, manager-session and candidate service-environment
+preflights finish before onboarding drains or stops the installed worker.
+Upgrade preflight also refuses busy hosts before changing policy. If work races with
 the drain, a wait timeout restores the exact self-made drain through CAS, with a
 separate cleanup budget. A mode-0600 intent receipt is written before the drain
 POST, carrying a unique owner ID that the queue stores atomically with the drain.
@@ -89,7 +91,9 @@ A rerun requires that queue-side owner to match before recording a resume receip
 Resume checks both owner and timestamp in the queue transaction. Independent
 maintenance edits revoke ownership, even at the same clock timestamp. Old receipts
 or queues without ownership proof cannot authorize resume: maintenance stays in
-place and the error prints `myce host resume HOST` for the operator.
+place and the error names the recorded drain owner and prints the exact
+`myce host resume HOST` command for the operator. A drained same-release rerun
+prints that recovery information even if its local intent receipt was lost.
 
 Installer failure restores the existing install transaction and resumes only the
 self-made drain. If newly installed bytes never become ready, that same transaction

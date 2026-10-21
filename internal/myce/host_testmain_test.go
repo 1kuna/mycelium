@@ -15,8 +15,6 @@ func TestMain(m *testing.M) {
 }
 
 func coreTestMain(m *testing.M) int {
-	cleanupHome := testguard.Install()
-	defer cleanupHome()
 	if len(os.Args) > 1 && os.Args[1] == "_command-exec" {
 		if CommandExec(os.Args[2:]) != nil {
 			return 125
@@ -27,6 +25,8 @@ func coreTestMain(m *testing.M) int {
 	// The crash/restart drill is another process on the same provisioned host.
 	// Preserve its inherited operation rather than inventing a conflicting host.
 	if os.Getenv("MYCE_RECOVERY_TEST_HELPER") == "1" || os.Getenv("MYCE_TEST_DOCKER_BIN") != "" {
+		cleanupHome := testguard.Install()
+		defer cleanupHome()
 		return m.Run()
 	}
 	dir, err := os.MkdirTemp("", "myce-docker-tests-")
@@ -40,6 +40,8 @@ func coreTestMain(m *testing.M) int {
 	if err = os.Setenv("MYCE_TEST_ISOLATED_HOME", os.Getenv("HOME")); err != nil {
 		panic(err)
 	}
+	cleanupHome := testguard.Install()
+	defer cleanupHome()
 	// Keep ordinary laptop tests off any installed daemon; Docker fault fixtures override this CLI.
 	if err = os.WriteFile(filepath.Join(dir, "docker"), []byte("#!/bin/sh\ncase \"$3:$4\" in ps:*|network:ls) exit 0;; *) exit 99;; esac\n"), 0700); err != nil {
 		panic(err)

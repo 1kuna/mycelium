@@ -18,8 +18,6 @@ func TestMain(m *testing.M) {
 }
 
 func cliTestMain(m *testing.M) int {
-	cleanupHome := testguard.Install()
-	defer cleanupHome()
 	if len(os.Args) > 1 && os.Args[1] == "_command-exec" {
 		if myce.CommandExec(os.Args[2:]) != nil {
 			return 125
@@ -29,6 +27,8 @@ func cliTestMain(m *testing.M) int {
 	installSyntheticHost()
 	probeguard.Before = func() { panic("test invoked a real hardware probe; inject a fake") }
 	if os.Getenv("MYCE_TEST_DOCKER_BIN") != "" {
+		cleanupHome := testguard.Install()
+		defer cleanupHome()
 		if os.Getenv("MYCE_TEST_BIND_STOP") == "1" {
 			return queueBindStopHelper()
 		}
@@ -45,6 +45,8 @@ func cliTestMain(m *testing.M) int {
 	if err = os.Setenv("MYCE_TEST_ISOLATED_HOME", os.Getenv("HOME")); err != nil {
 		panic(err)
 	}
+	cleanupHome := testguard.Install()
+	defer cleanupHome()
 	if err = os.Setenv("MYCE_TEST_DOCKER_BIN", dir); err != nil {
 		panic(err)
 	}

@@ -224,7 +224,8 @@ echo FINISHED
 			InventoryProbe: func(context.Context) ([]MachineDevice, error) {
 				return []MachineDevice{{ID: "0", Platform: gpu, Identity: "fixture-" + gpu, Fingerprint: "fixture-driver", Selector: "0", MemoryMode: "fixed", TotalMemoryGB: 8, BudgetGB: 8, FreeMemoryGB: 8}}, nil
 			},
-			Machine: machine(gpu, gpu, "fixture-"+gpu+"-host"), Client: Client{URL: server.URL, Token: "predeploy-token", HTTP: &http.Client{Transport: transport, Timeout: testWaitTimeout}}}
+			CPUIsolationProbe: func(context.Context) error { return nil },
+			Machine:           machine(gpu, gpu, "fixture-"+gpu+"-host"), Client: Client{URL: server.URL, Token: "predeploy-token", HTTP: &http.Client{Transport: transport, Timeout: testWaitTimeout}}}
 		go func() { lw.done <- w.Run(ctx) }()
 	}
 	// Cleanup also handles failed assertions while a NAS or network fault is active.

@@ -67,7 +67,7 @@ func ResolveEnrollmentUpgrade(ctx context.Context, c ServiceConfig, client Clien
 		return HostMaintenanceStatus{}, nil
 	}
 	if receipt.Policy.DrainOwner == "" || observed.Policy.Mode != "drained" || observed.Policy.DrainOwner != receipt.Policy.DrainOwner || receipt.Policy.Mode == "drained" && !receipt.Policy.UpdatedAt.Equal(observed.Policy.UpdatedAt) {
-		return HostMaintenanceStatus{}, enrollmentDrainUnproven(c, observed.Policy.Mode)
+		return HostMaintenanceStatus{}, enrollmentDrainUnproven(c, observed.Policy)
 	}
 	if receipt.Policy.Mode == "drained" {
 		return observed, nil
@@ -138,7 +138,7 @@ func PrepareEnrollmentUpgrade(ctx context.Context, c ServiceConfig, client Clien
 			return status, errors.Join(err, resolveErr)
 		}
 		if status.Policy.DrainOwner != owner {
-			return status, enrollmentDrainUnproven(c, status.Policy.Mode)
+			return status, enrollmentDrainUnproven(c, status.Policy)
 		}
 		receipt = status
 		owned = true
@@ -183,7 +183,7 @@ func FinishEnrollmentUpgrade(ctx context.Context, c ServiceConfig, client Client
 		return nil
 	}
 	if receipt.Policy.DrainOwner == "" {
-		return enrollmentDrainUnproven(c, "")
+		return enrollmentDrainUnproven(c, receipt.Policy)
 	}
 	if err := client.Call(ctx, "POST", "/api/hosts/"+url.PathEscape(c.HostID)+"/maintenance", HostMaintenanceRequest{Action: "resume", IfMode: "drained", IfUpdatedAt: &receipt.Policy.UpdatedAt, IfDrainOwner: receipt.Policy.DrainOwner}, nil); err != nil {
 		// A failed response may follow a committed resume. Only suggest an
@@ -192,7 +192,7 @@ func FinishEnrollmentUpgrade(ctx context.Context, c ServiceConfig, client Client
 		if e := client.Call(ctx, "GET", "/api/hosts/"+url.PathEscape(c.HostID)+"/maintenance", nil, &observed); e != nil {
 			observed.Policy.Mode = ""
 		}
-		return errors.Join(enrollmentDrainUnproven(c, observed.Policy.Mode), err)
+		return errors.Join(enrollmentDrainUnproven(c, observed.Policy), err)
 	}
 	err := os.Remove(filepath.Join(c.State, enrollmentResumeFile))
 	if errors.Is(err, os.ErrNotExist) {
@@ -201,10 +201,14 @@ func FinishEnrollmentUpgrade(ctx context.Context, c ServiceConfig, client Client
 	return err
 }
 
-func enrollmentDrainUnproven(c ServiceConfig, mode string) error {
+func enrollmentDrainUnproven(c ServiceConfig, policy HostMaintenance) error {
 	message := "drain ownership unproven or maintenance changed; host maintenance preserved"
-	if mode == "drained" {
-		message += fmt.Sprintf("; operator can resume with: myce host resume %s", c.HostID)
+	if policy.Mode == "drained" {
+		owner := policy.DrainOwner
+		if owner == "" {
+			owner = "operator (no onboarding owner recorded)"
+		}
+		message += fmt.Sprintf("; drain owner: %s; operator can resume with: myce host resume %s", owner, c.HostID)
 	}
 	return errors.New(message)
 }

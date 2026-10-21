@@ -28,7 +28,11 @@ func Install() func() {
 		if err != nil {
 			panic(err)
 		}
-		cleanup = func() { _ = os.RemoveAll(home) }
+		cleanup = func() {
+			if err := os.RemoveAll(home); err != nil {
+				panic(err)
+			}
+		}
 		if err = os.Setenv("MYCE_TEST_ISOLATED_HOME", home); err != nil {
 			panic(err)
 		}

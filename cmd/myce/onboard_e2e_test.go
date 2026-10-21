@@ -48,6 +48,7 @@ set -eu
 base="$HOME/.local/share/mycelium/worker"
 pidfile="$HOME/fake-manager.pid"
 start() {
+  if test -f "$HOME/fail-next-install"; then rm "$HOME/fail-next-install"; exit 99; fi
   "$base/myce" service --config "$base/config.json" >> "$HOME/fake-service.log" 2>&1 < /dev/null &
   echo $! > "$pidfile"
   echo start >> "$HOME/fake-manager.log"
@@ -117,10 +118,14 @@ func TestOneCommandEnrollmentEndToEnd(t *testing.T) {
 	}
 	token := "test-only-fleet-secret-never-printed"
 	var redemptions atomic.Int32
+	var maintenanceWrites atomic.Int32
 	api := (myce.API{Queue: q, Token: token}).HandlerWithJoiningIdentity(identity.Fingerprint())
 	queue := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/invites/redeem" {
 			redemptions.Add(1)
+		}
+		if r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/maintenance") {
+			maintenanceWrites.Add(1)
 		}
 		api.ServeHTTP(w, r)
 	}))
@@ -176,7 +181,7 @@ func TestOneCommandEnrollmentEndToEnd(t *testing.T) {
 	makeCommand := func(version string) string {
 		t.Helper()
 		binary := filepath.Join(dir, "artifact-"+version)
-		build := exec.CommandContext(ctx, "go", "build", "-ldflags", "-X mycelium/internal/myce.BuildVersion="+version, "-o", binary, ".")
+		build := exec.CommandContext(ctx, "go", "build", "-tags=myce_test", "-ldflags", "-X mycelium/internal/myce.BuildVersion="+version, "-o", binary, ".")
 		if output, e := build.CombinedOutput(); e != nil {
 			t.Fatalf("build: %v %s", e, output)
 		}
@@ -370,7 +375,18 @@ func TestOneCommandEnrollmentEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	installerFailure := runCommand(newCommand, host, false, "--invalid-installer-option")
+	beforeInvalid := maintenanceWrites.Load()
+	invalidOptions := runCommand(newCommand, host, false, "--invalid-installer-option")
+	if maintenanceWrites.Load() != beforeInvalid || !strings.Contains(invalidOptions, "invalid-installer-option") {
+		t.Fatal("invalid install options reached drain", invalidOptions)
+	}
+	if hash, e := myce.FileSHA256(c.Binary); e != nil || hash != oldHash {
+		t.Fatal("invalid install options changed previous binary", e)
+	}
+	if err := os.WriteFile(filepath.Join(host, "fail-next-install"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	installerFailure := runCommand(newCommand, host, false)
 	var installerStatus myce.HostMaintenanceStatus
 	if err = client.Call(ctx, "GET", "/api/hosts/"+c.HostID+"/maintenance", nil, &installerStatus); err != nil || installerStatus.Policy.Mode != "enabled" || !strings.Contains(installerFailure, "host resumed on previous release") {
 		t.Error("installer failure abandoned drain or omitted outcome", err, installerFailure)

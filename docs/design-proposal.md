@@ -330,7 +330,10 @@ per-device fixed budgets, and refuses typed driver, inventory or memory failures
 instead of saving CPU fallback. Enumerate PCI display and processing-accelerator
 classes, classify each vendor and integrated/discrete topology from sysfs facts
 (local device memory or PCIe link width), then correlate every runtime device
-with its PCI address. Product names never determine memory mode. Missing facts
+with its PCI address. A CUDA device can expose a nonzero PCI transport width
+while sharing host RAM. When its memory total is unavailable, the selected PCI
+device's CUDA driver integrated attribute can establish unified topology; an
+unavailable total alone cannot. Product names never determine memory mode. Missing facts
 stay unknown; ambiguous multi-device correlation refuses instead of guessing.
 NVIDIA devices and discrete Intel endpoints require their runtime independently
 of any other working component. A failed `nvidia-smi` is informational
@@ -342,6 +345,12 @@ CPU selection remains supported; re-detection is an explicit install operation
 so upgrades do not silently broaden an owner's component allowance.
 Inventory errors retain M2's `device_probe_unavailable` runtime rejection while
 also carrying the more specific typed onboarding diagnosis.
+
+Enrollment completes hardware, storage, policy, state-root and service-session
+preflights before acquiring a drain. The candidate binary and a private staged
+config run the existing service-environment hardware probe before the live
+installation changes. Post-publication validation and exact-session readiness
+still verify the installed worker. Environment backend acquisition stays lazy.
 
 NAS mode is the only supported onboarding storage mode (#109). Checkpoint,
 model and environment roots must use an existing reachable network filesystem.

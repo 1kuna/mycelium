@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"runtime"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"mycelium/internal/probeguard"
 )
@@ -32,6 +34,8 @@ func installSyntheticWorkerHost() {
 
 func TestRealProbeGuard(t *testing.T) {
 	for name, call := range map[string]func(){
+		"profile":  func() { _ = LocalProfileProbe().Detect(context.Background(), Machine{GPU: "metal"}, ".", time.Time{}) },
+		"disk":     func() { _, _, _ = LocalProfileProbe().Disk(".") },
 		"identity": func() { _, _ = localExtensionIdentityProbe().Command(context.Background(), "nvidia-smi") },
 		"level-zero": func() {
 			_, _ = LocalMachineProbe().CommandEnv(context.Background(), map[string]string{}, "python3", "-c", levelZeroInventory)
@@ -71,11 +75,12 @@ func TestMaintenanceBenchmarkIgnoresSparkInventory(t *testing.T) {
 	workerMachineProbe = func() MachineProbe {
 		calls.Add(1)
 		return MachineProbe{OS: "linux", Arch: "arm64", Files: fstest.MapFS{
-			"dev/dri/renderD128":                      &fstest.MapFile{},
-			"sys/bus/pci/devices/0000:01:00.0/vendor": &fstest.MapFile{Data: []byte("0x10de")},
-			"sys/bus/pci/devices/0000:01:00.0/class":  &fstest.MapFile{Data: []byte("0x030000")},
+			"dev/dri/renderD128":                                  &fstest.MapFile{},
+			"sys/bus/pci/devices/0000:01:00.0/vendor":             &fstest.MapFile{Data: []byte("0x10de")},
+			"sys/bus/pci/devices/0000:01:00.0/class":              &fstest.MapFile{Data: []byte("0x030000")},
+			"sys/bus/pci/devices/0000:01:00.0/current_link_width": {Data: []byte("0")},
 		}, Command: func(_ context.Context, _ string, args ...string) ([]byte, error) {
-			if len(args) > 0 && args[0] == "--query-gpu=uuid,driver_version" {
+			if len(args) > 0 && strings.HasPrefix(args[0], "--query-gpu=uuid,driver_version") {
 				return []byte("GPU-synthetic-gb10, 580.159.03"), nil
 			}
 			return []byte("NVIDIA GB10, [N/A]"), nil
@@ -96,15 +101,16 @@ func TestMaintenanceBenchmarkIgnoresSparkInventory(t *testing.T) {
 
 func TestSparkInventoryUsesInjectedFilesystem(t *testing.T) {
 	probe := MachineProbe{OS: "linux", Arch: "arm64", Files: fstest.MapFS{
-		"proc/meminfo":                            {Data: []byte("MemTotal: 134217728 kB\nMemAvailable: 33554432 kB\n")},
-		"dev/dri/renderD128":                      {},
-		"sys/bus/pci/devices/0000:01:00.0/vendor": {Data: []byte("0x10de")},
-		"sys/bus/pci/devices/0000:01:00.0/class":  {Data: []byte("0x030000")},
+		"proc/meminfo":                                        {Data: []byte("MemTotal: 134217728 kB\nMemAvailable: 33554432 kB\n")},
+		"dev/dri/renderD128":                                  {},
+		"sys/bus/pci/devices/0000:01:00.0/vendor":             {Data: []byte("0x10de")},
+		"sys/bus/pci/devices/0000:01:00.0/class":              {Data: []byte("0x030000")},
+		"sys/bus/pci/devices/0000:01:00.0/current_link_width": {Data: []byte("0")},
 	}, Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
 		if name != "nvidia-smi" {
 			t.Fatalf("unexpected device command %s", name)
 		}
-		if len(args) > 0 && args[0] == "--query-gpu=uuid,driver_version" {
+		if len(args) > 0 && strings.HasPrefix(args[0], "--query-gpu=uuid,driver_version") {
 			return []byte("GPU-synthetic-gb10, 580.159.03"), nil
 		}
 		return []byte("NVIDIA GB10, [N/A]"), nil

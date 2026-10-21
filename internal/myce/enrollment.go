@@ -38,8 +38,9 @@ type EnrollmentObservation struct {
 	Policy          HostMaintenance `json:"policy"`
 }
 type EnrollmentResult struct {
-	State   string
-	Machine Machine
+	State       string
+	Machine     Machine
+	Maintenance HostMaintenance
 }
 
 func (a API) registerEnrollment(mux *http.ServeMux) {
@@ -314,7 +315,7 @@ func WaitEnrollment(ctx context.Context, c ServiceConfig, client Client, opt Enr
 				stableSince = opt.Clock.Now()
 			}
 			if opt.Clock.Now().Sub(stableSince) >= opt.StableFor {
-				return EnrollmentResult{state, observation.Machine}, nil
+				return EnrollmentResult{State: state, Machine: observation.Machine, Maintenance: observation.Policy}, nil
 			}
 			last = "service stability check pending"
 		} else {
@@ -344,7 +345,11 @@ func (r EnrollmentResult) Summary(c ServiceConfig) string {
 	if p.Availability != nil {
 		participation = p.Availability.Summary()
 	}
-	return fmt.Sprintf("%s · %s/%s · %s · CPU %d logical, allowance %d (0=detected minus reserve) · RAM %.1f GiB, allowance %.1f GiB (0=uncapped) · service healthy · %s · NAS · %s · %s", m.ID, p.OS, p.Arch, strings.Join(devices, ", "), p.LogicalCPUs, m.CPUBudgetCores, float64(p.SystemMemoryBytes)/(1<<30), m.HostMemoryBudgetGB, r.State, participation, m.MemoryEnforcement)
+	summary := fmt.Sprintf("%s · %s/%s · %s · CPU %d logical, allowance %d (0=detected minus reserve) · RAM %.1f GiB, allowance %.1f GiB (0=uncapped) · service healthy · %s · NAS · %s · %s", m.ID, p.OS, p.Arch, strings.Join(devices, ", "), p.LogicalCPUs, m.CPUBudgetCores, float64(p.SystemMemoryBytes)/(1<<30), m.HostMemoryBudgetGB, r.State, participation, m.MemoryEnforcement)
+	if r.State == "drained" {
+		summary += "\n" + enrollmentDrainUnproven(c, r.Maintenance).Error()
+	}
+	return summary
 }
 
 // Configured selectors are the independent expectation. A receipt describes

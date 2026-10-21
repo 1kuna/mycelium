@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -38,23 +39,32 @@ func TestMachineInstallAutomaticDevices(t *testing.T) {
 		probeErr        error
 		want            []string
 	}{
-		{name: "GB10", inventory: "GPU-gb10-fixture, driver\n", want: []string{"GPU-gb10-fixture"}},
-		{name: "all CUDA devices", inventory: "GPU-first, driver\nGPU-second, driver\n", want: []string{"GPU-first", "GPU-second"}},
+		{name: "GB10", inventory: "GPU-gb10-fixture, driver, 0000:01:00.0\n", want: []string{"GPU-gb10-fixture"}},
+		{name: "all CUDA devices", inventory: "GPU-first, driver, 0000:01:00.0\nGPU-second, driver, 0000:02:00.0\n", want: []string{"GPU-first", "GPU-second"}},
 		// A failed unrelated family must not hide a valid CUDA inventory (#115).
-		{name: "unavailable XPU", inventory: "GPU-gb10-fixture, driver\n", files: fstest.MapFS{"dev/dri/renderD128": {}}, want: []string{"GPU-gb10-fixture"}},
+		{name: "unavailable XPU", inventory: "GPU-gb10-fixture, driver, 0000:01:00.0\n", files: fstest.MapFS{"dev/dri/renderD128": {}}, want: []string{"GPU-gb10-fixture"}},
 		{name: "no matching devices"},
 		{name: "CUDA probe failed", probeErr: errors.New("fixture unavailable")},
-		{name: "ambiguous UUIDs", inventory: "GPU-duplicate, driver\nGPU-duplicate, driver\n"},
+		{name: "ambiguous UUIDs", inventory: "GPU-duplicate, driver, 0000:01:00.0\nGPU-duplicate, driver, 0000:02:00.0\n"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
 			source, dest := automaticSparkSource(t)
 			probe := MachineProbe{OS: "linux", Arch: "arm64", Files: tc.files, Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
-				if name != "nvidia-smi" || strings.Join(args, " ") != "--query-gpu=uuid,driver_version --format=csv,noheader,nounits" {
+				if name != "nvidia-smi" || strings.Join(args, " ") != "--query-gpu=uuid,driver_version,pci.bus_id --format=csv,noheader,nounits" {
 					t.Fatalf("unexpected command %s %q", name, args)
 				}
 				return []byte(tc.inventory), tc.probeErr
 			}}
+			facts := []pciFixture{}
+			for i := 1; i <= max(1, len(strings.Split(strings.TrimSpace(tc.inventory), "\n"))); i++ {
+				facts = append(facts, pciFixture{fmt.Sprintf("0000:%02x:00.0", i), "0x10de", "0", "fixture", "", true})
+			}
+			if tc.name == "unavailable XPU" {
+				facts = append(facts, pciFixture{"0000:03:00.0", "0x8086", "16", "fixture", "", false})
+			}
+			physical := pciFixtureProbe(facts...)
+			probe.Glob, probe.ReadFile = physical.Glob, physical.ReadFile
 			got, err := PlanMachineInstallWithProbe(context.Background(), dest.Config, []string{source.Config}, nil, probe)
 			if tc.want == nil {
 				if err == nil {
@@ -121,8 +131,9 @@ func TestMachineInstallAutomaticPreviewWithoutQueueRegistration(t *testing.T) {
 	}))
 	defer server.Close()
 	probe := MachineProbe{OS: "linux", Arch: "arm64", Files: fstest.MapFS{}, Command: func(context.Context, string, ...string) ([]byte, error) {
-		return []byte("GPU-gb10-fixture, driver\n"), nil
+		return []byte("GPU-gb10-fixture, driver, 0000:01:00.0\n"), nil
 	}}
+	probe = withCUDAFacts(probe, true, 1)
 	c, err := PlanMachineInstallWithProbe(context.Background(), dest.Config, []string{source.Config}, nil, probe)
 	if err != nil {
 		t.Fatal(err)

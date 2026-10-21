@@ -251,6 +251,9 @@ func enrollmentCommand(args []string, probe myce.MachineProbe, home string, look
 		if e = myce.CheckReleaseUpgrade(o.version, installedVersion, o.allowDowngrade, installedHash == actualHash); e != nil {
 			return e
 		}
+		if old.State == "" {
+			return errors.New("upgrade state directory required")
+		}
 		pendingDrain, e := myce.ResolveEnrollmentUpgrade(ctx, *old, client)
 		if e != nil {
 			return e
@@ -286,13 +289,6 @@ func enrollmentCommand(args []string, probe myce.MachineProbe, home string, look
 			fmt.Println(result.Summary(*old))
 			return nil
 		}
-		drainCtx, cancelDrain := context.WithTimeout(signals, o.timeout)
-		status, e := myce.PrepareEnrollmentUpgrade(drainCtx, *old, client, clock, o.timeout, nil)
-		cancelDrain()
-		if e != nil {
-			return e
-		}
-		drain = &status
 		o.forward = withoutEnrollmentSelection(o.forward)
 		o.forward = append(o.forward, "--config", config)
 	} else {
@@ -347,6 +343,17 @@ func enrollmentCommand(args []string, probe myce.MachineProbe, home string, look
 	installArgs := append([]string{"install", "worker"}, o.forward...)
 	installArgs = append(installArgs, "--enrollment")
 	install := func(installCtx context.Context, c myce.ServiceConfig, executable, token string, command func(context.Context, string, ...string) ([]byte, error)) error {
+		// The existing installer calls us only after hardware, storage, policy,
+		// session and candidate service-environment preflights have succeeded.
+		if old != nil {
+			drainCtx, cancelDrain := context.WithTimeout(signals, o.timeout)
+			status, e := myce.PrepareEnrollmentUpgrade(drainCtx, *old, client, clock, o.timeout, nil)
+			cancelDrain()
+			if e != nil {
+				return e
+			}
+			drain = &status
+		}
 		var e error
 		rollback, e = myce.InstallWithRollback(installCtx, c, executable, token, command)
 		return e
