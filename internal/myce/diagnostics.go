@@ -22,7 +22,7 @@ var rejectionMessages = map[string]string{
 	"gpu_count_unsupported":                 "only one GPU per attempt is supported; see #105",
 	"gpu_selector_invalid":                  "GPU count must be a positive integer",
 	"device_identity_mismatch":              "device runtime mapping does not match saved identity",
-	"cpu_accelerator_isolation_unavailable": "accelerator select-none runtime visibility is unqualified",
+	"cpu_accelerator_isolation_unavailable": "CPU execution withheld: accelerator select-none runtime visibility is unqualified; check installed CUDA/XPU runtimes",
 	"request_method_invalid":                "method must be POST for /api/jobs",
 	"request_invalid":                       "body must be one JSON object with known fields and valid field types",
 	"authentication_required":               "authentication requires a valid fleet token",
@@ -144,7 +144,10 @@ func runtimeErrorFor(operation string, err error) error {
 	var exit *exec.ExitError
 	var syntax *json.SyntaxError
 	var mismatch *json.UnmarshalTypeError
+	var rejection *rejectionError
 	switch {
+	case errors.As(err, &rejection) && rejection.code == cpuIsolationUnavailable:
+		c.Class = cpuIsolationUnavailable
 	case errors.Is(err, context.DeadlineExceeded):
 		c.Class = "timeout"
 	case errors.Is(err, context.Canceled):
@@ -196,7 +199,7 @@ func safeRuntimeCause(c *RuntimeCause) *RuntimeCause {
 		return nil
 	}
 	operations := map[string]bool{"main": true, "group": true, "command": true, "process_group": true, "outputs": true, "launch": true, "readiness": true, "reconcile": true, "persist": true, "ps": true, "inspect": true, "create": true, "start": true, "update": true, "unpause": true, "kill": true, "stop": true, "logs": true, "network.ls": true, "network.inspect": true, "network.rm": true, "network.create": true, "network.disconnect": true, "retain_evidence": true, "observe_group": true, "remove_networks": true}
-	classes := map[string]bool{"admission_changed": true, "resource_limit": true, "stage_failed": true, "oom": true, "io_error": true, "timeout": true, "cancelled": true, "permission_denied": true, "not_found": true, "storage_full": true, "connection_refused": true, "command_exit": true, "invalid_response": true, "inventory_incomplete": true, "ownership_mismatch": true, "restart_policy_unknown": true, "disposition_unknown": true}
+	classes := map[string]bool{cpuIsolationUnavailable: true, "admission_changed": true, "resource_limit": true, "stage_failed": true, "oom": true, "io_error": true, "timeout": true, "cancelled": true, "permission_denied": true, "not_found": true, "storage_full": true, "connection_refused": true, "command_exit": true, "invalid_response": true, "inventory_incomplete": true, "ownership_mismatch": true, "restart_policy_unknown": true, "disposition_unknown": true}
 	if !operations[c.Operation] || !classes[c.Class] {
 		return nil
 	}

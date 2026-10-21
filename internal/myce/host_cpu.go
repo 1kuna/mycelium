@@ -216,6 +216,9 @@ func cpuWaitingReason(j *Job, machines map[string]*Machine) string {
 }
 
 func cpuTargetReason(m *Machine) string {
+	if cpuIsolationDiagnostic(m.CPUIsolation) == cpuIsolationUnavailable {
+		return cpuIsolationUnavailable + ": " + rejectionMessages[cpuIsolationUnavailable]
+	}
 	if m.CapabilityProfile == nil || (m.CapabilityProfile.OS != "linux" && m.CapabilityProfile.OS != "darwin") {
 		return "CPU execution requires Linux or macOS (Windows/WSL qualification is pending)"
 	}

@@ -26,6 +26,7 @@ type Worker struct {
 
 	InventoryProbe     func(context.Context) ([]MachineDevice, error)
 	CPUIsolationProbe  func(context.Context) error
+	cpuRuntimeProbe    *MachineProbe // Runtime/OS seam; tests still exercise real verification rules.
 	selectedDevice     *MachineDevice
 	cpuIsolation       bool
 	inventoryAllowance []string

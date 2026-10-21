@@ -5,7 +5,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -345,50 +344,6 @@ func (w Worker) forAttempt(j Job) (Worker, error) {
 		return w, nil
 	}
 	return w, reject("device_identity_mismatch", errors.New("assigned device is not in the machine inventory"))
-}
-
-func (w Worker) verifyCPUIsolation() error {
-	probe := LocalMachineProbe()
-	devices := w.Machine.Devices
-	simulated := len(devices) > 0
-	for _, d := range devices {
-		simulated = simulated && d.Platform == "fake"
-	}
-	if !simulated && len(devices) == 0 {
-		if runtime.GOOS == "darwin" && runtime.GOARCH == "arm64" {
-			return reject("cpu_accelerator_isolation_unavailable", errors.New("Metal has no qualified select-none control"))
-		}
-		if _, err := os.Stat("/dev/nvidiactl"); err == nil {
-			devices = append(devices, MachineDevice{Platform: "cuda"})
-		}
-		if nodes, _ := filepath.Glob("/dev/dri/renderD*"); len(nodes) > 0 {
-			devices = append(devices, MachineDevice{Platform: "xpu"})
-		}
-	}
-	for _, d := range devices {
-		switch d.Platform {
-		case "fake":
-		case "cuda":
-			env, _ := WithModelDevice(Model{}, "cpu", "")
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			b, err := probe.CommandEnv(ctx, env.DeviceEnv, "python3", "-c", `import ctypes as c; r=c.CDLL("libcudart.so"); n=c.c_int(); e=r.cudaGetDeviceCount(c.byref(n)); assert e in (0,100) and n.value==0; print("none")`)
-			cancel()
-			if err != nil || strings.TrimSpace(string(b)) != "none" {
-				return reject("cpu_accelerator_isolation_unavailable", errors.New("CUDA select-none runtime enumeration failed"))
-			}
-		case "xpu":
-			env, _ := WithModelDevice(Model{}, "cpu", "")
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			b, err := probe.CommandEnv(ctx, env.DeviceEnv, "sycl-ls")
-			cancel()
-			if err != nil || strings.Contains(strings.ToLower(string(b)), "gpu") {
-				return reject("cpu_accelerator_isolation_unavailable", errors.New("XPU select-none runtime enumeration failed"))
-			}
-		default:
-			return reject("cpu_accelerator_isolation_unavailable", errors.New("accelerator runtime has no qualified select-none control"))
-		}
-	}
-	return nil
 }
 
 func (w Worker) localInventory(ctx context.Context) ([]MachineDevice, error) {

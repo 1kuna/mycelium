@@ -351,6 +351,7 @@ type Machine struct {
 	Replacement            *MachineReplacement `json:"replacement,omitempty"`
 	Devices                []MachineDevice     `json:"devices"`
 	InventoryReason        string              `json:"inventory_reason,omitempty"`
+	CPUIsolation           string              `json:"cpu_isolation,omitempty"`
 	cpuLedger              bool
 	CPUReserveCores        int           `json:"cpu_reserve_cores,omitempty"`
 	CPUBudgetCores         int           `json:"cpu_budget_cores,omitempty"`

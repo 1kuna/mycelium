@@ -50,6 +50,9 @@ func HyphaAvailability(m *Machine) string {
 	if a := machineAvailability(m); a != nil && a.Available && a.Reason == "CPU thermal coverage waived for desktop" {
 		return "available for work; CPU thermal coverage waived for desktop"
 	}
+	if m.CPUIsolation == "not-enforced" {
+		return "available for work; GPU isolation is not enforced for CPU work (Metal has no device mask)"
+	}
 	return "available for work"
 }
 

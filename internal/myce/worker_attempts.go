@@ -494,6 +494,8 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 	}
 	tick := time.NewTicker(min(w.Interval, 100*time.Millisecond))
 	defer tick.Stop()
+	var cpuQualification checkpointIO[string]
+	w.Machine.CPUIsolation = cpuIsolationUnavailable
 	var retry workerRetry
 	var nextRetention time.Time
 	leaving, leaveSent := stop.Err() != nil, false
@@ -588,6 +590,16 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				return err
 			}
 			m.Devices = slices.Clone(w.Machine.Devices)
+			// Slow runtime enumeration must not block heartbeats or stop delivery.
+			probeWorker := w
+			isolation, isolationErr := cpuQualification.run("cpu-isolation", func() (string, error) {
+				return probeWorker.cpuIsolationStatus(), nil
+			})
+			if isolationErr == nil {
+				w.Machine.CPUIsolation = isolation
+			}
+			m.CPUIsolation = w.Machine.CPUIsolation
+
 			m.Leaving = leaving
 			m.FreeMemoryGB = base
 			m.TotalMemoryGB = base

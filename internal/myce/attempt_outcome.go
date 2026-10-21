@@ -100,6 +100,10 @@ func startFailureOutcome(owner Result, err error) Result {
 	if errors.As(err, &recorded) {
 		facts = recorded.facts
 	}
+	var rejection *rejectionError
+	if errors.As(err, &rejection) && rejection.code == cpuIsolationUnavailable {
+		owner.ExecutionCause = &RuntimeCause{Operation: "launch", Class: cpuIsolationUnavailable}
+	}
 	return classifyAttemptOutcome(owner, attemptCause{memberOutcome: facts})
 }
 
