@@ -1,0 +1,407 @@
+{
+  "missing_ack": [
+    "record-kill-1.docker.json",
+    "record-requeue-1.docker.json",
+    "record-requeue-2.docker.json"
+  ],
+  "superseded_results": [
+    "record-kill-1.result.json",
+    "record-requeue-1.result.json",
+    "record-requeue-2.result.json",
+    "record-restart-1.result.json"
+  ],
+  "jobs": [
+    {
+      "id": "job-kill",
+      "attempt": 2,
+      "machine": "host-gpu0",
+      "session": "session-history-1",
+      "state": "succeeded",
+      "release_confirmed": true,
+      "copies": [
+        {
+          "machine": "host-gpu0",
+          "session": "session-history-1",
+          "attempt": 1,
+          "recoverable": false,
+          "release_confirmed": true,
+          "release_reason": "execution_acknowledged"
+        },
+        {
+          "machine": "host-gpu0",
+          "session": "session-history-1",
+          "attempt": 2,
+          "recoverable": false,
+          "release_confirmed": true,
+          "release_reason": "execution_acknowledged"
+        }
+      ]
+    },
+    {
+      "id": "job-normal-1",
+      "attempt": 1,
+      "machine": "host-gpu0",
+      "session": "session-history-1",
+      "state": "succeeded",
+      "release_confirmed": true,
+      "copies": [
+        {
+          "machine": "host-gpu0",
+          "session": "session-history-1",
+          "attempt": 1,
+          "recoverable": false,
+          "release_confirmed": true,
+          "release_reason": "execution_acknowledged"
+        }
+      ]
+    },
+    {
+      "id": "job-normal-2",
+      "attempt": 1,
+      "machine": "host-gpu0",
+      "session": "session-history-2",
+      "state": "succeeded",
+      "release_confirmed": true,
+      "copies": [
+        {
+          "machine": "host-gpu0",
+          "session": "session-history-2",
+          "attempt": 1,
+          "recoverable": false,
+          "release_confirmed": true,
+          "release_reason": "execution_acknowledged"
+        }
+      ]
+    },
+    {
+      "id": "job-requeue",
+      "attempt": 3,
+      "machine": "host-gpu0",
+      "session": "session-history-1",
+      "state": "succeeded",
+      "release_confirmed": true,
+      "copies": [
+        {
+          "machine": "host-gpu0",
+          "session": "session-history-1",
+          "attempt": 1,
+          "recoverable": false,
+          "release_confirmed": true,
+          "release_reason": "execution_acknowledged"
+        },
+        {
+          "machine": "host-gpu0",
+          "session": "session-history-1",
+          "attempt": 2,
+          "recoverable": false,
+          "release_confirmed": true,
+          "release_reason": "execution_acknowledged"
+        },
+        {
+          "machine": "host-gpu0",
+          "session": "session-history-1",
+          "attempt": 3,
+          "recoverable": false,
+          "release_confirmed": true,
+          "release_reason": "execution_acknowledged"
+        }
+      ]
+    },
+    {
+      "id": "job-restart",
+      "attempt": 2,
+      "machine": "host-gpu0",
+      "session": "session-history-2",
+      "state": "succeeded",
+      "release_confirmed": true,
+      "copies": [
+        {
+          "machine": "host-gpu0",
+          "session": "session-history-3",
+          "attempt": 1,
+          "recoverable": false,
+          "release_confirmed": true,
+          "release_reason": "execution_acknowledged"
+        },
+        {
+          "machine": "host-gpu0",
+          "session": "session-history-2",
+          "attempt": 2,
+          "recoverable": false,
+          "release_confirmed": true,
+          "release_reason": "execution_acknowledged"
+        }
+      ]
+    }
+  ],
+  "spool": {
+    "record-kill-1.docker.json": {
+      "evidence_saved": true,
+      "network_removed": true,
+      "infrastructure_stop": true,
+      "memory_limit_bytes": 17179869184,
+      "stopped": true,
+      "forced": true,
+      "released": true,
+      "exit_code": 137,
+      "identity": "record-kill-1",
+      "endpoint": "synthetic",
+      "owner": {
+        "id": "job-kill",
+        "attempt": 1,
+        "machine": "host-gpu0",
+        "session": "session-history-1",
+        "success": false
+      }
+    },
+    "record-kill-1.result.json": {
+      "forced": true,
+      "attempt": 1,
+      "interrupted": true,
+      "success": false,
+      "id": "job-kill",
+      "machine": "host-gpu0",
+      "session": "session-history-1"
+    },
+    "record-kill-2.docker-ack.json": {
+      "worker": "host-gpu0",
+      "at": "2026-01-01T00:00:00Z"
+    },
+    "record-kill-2.docker.json": {
+      "evidence_saved": true,
+      "network_removed": true,
+      "main_finished": true,
+      "memory_limit_bytes": 17179869184,
+      "stopped": true,
+      "released": true,
+      "exit_code": 0,
+      "identity": "record-kill-2",
+      "endpoint": "synthetic",
+      "owner": {
+        "id": "job-kill",
+        "attempt": 2,
+        "machine": "host-gpu0",
+        "session": "session-history-1",
+        "success": false
+      }
+    },
+    "record-kill-2.result.json": {
+      "attempt": 2,
+      "success": true,
+      "id": "job-kill",
+      "machine": "host-gpu0",
+      "session": "session-history-1"
+    },
+    "record-normal-1-1.docker-ack.json": {
+      "worker": "host-gpu0",
+      "at": "2026-01-01T00:00:00Z"
+    },
+    "record-normal-1-1.docker.json": {
+      "evidence_saved": true,
+      "network_removed": true,
+      "main_finished": true,
+      "memory_limit_bytes": 13958643712,
+      "stopped": true,
+      "released": true,
+      "exit_code": 0,
+      "identity": "record-normal-1-1",
+      "endpoint": "synthetic",
+      "owner": {
+        "id": "job-normal-1",
+        "attempt": 1,
+        "machine": "host-gpu0",
+        "session": "session-history-1",
+        "success": false
+      }
+    },
+    "record-normal-1-1.result.json": {
+      "attempt": 1,
+      "success": true,
+      "id": "job-normal-1",
+      "machine": "host-gpu0",
+      "session": "session-history-1"
+    },
+    "record-normal-2-1.docker-ack.json": {
+      "worker": "host-gpu0",
+      "at": "2026-01-01T00:00:00Z"
+    },
+    "record-normal-2-1.docker.json": {
+      "evidence_saved": true,
+      "network_removed": true,
+      "main_finished": true,
+      "memory_limit_bytes": 13958643712,
+      "stopped": true,
+      "released": true,
+      "exit_code": 0,
+      "identity": "record-normal-2-1",
+      "endpoint": "synthetic",
+      "owner": {
+        "id": "job-normal-2",
+        "attempt": 1,
+        "machine": "host-gpu0",
+        "session": "session-history-2",
+        "success": false
+      }
+    },
+    "record-normal-2-1.result.json": {
+      "attempt": 1,
+      "success": true,
+      "id": "job-normal-2",
+      "machine": "host-gpu0",
+      "session": "session-history-2"
+    },
+    "record-requeue-1.docker.json": {
+      "evidence_saved": true,
+      "network_removed": true,
+      "infrastructure_stop": true,
+      "memory_limit_bytes": 13958643712,
+      "stopped": true,
+      "forced": true,
+      "released": true,
+      "exit_code": 137,
+      "identity": "record-requeue-1",
+      "endpoint": "synthetic",
+      "owner": {
+        "id": "job-requeue",
+        "attempt": 1,
+        "machine": "host-gpu0",
+        "session": "session-history-1",
+        "success": false
+      }
+    },
+    "record-requeue-1.result.json": {
+      "forced": true,
+      "attempt": 1,
+      "interrupted": true,
+      "success": false,
+      "id": "job-requeue",
+      "machine": "host-gpu0",
+      "session": "session-history-1"
+    },
+    "record-requeue-2.docker.json": {
+      "evidence_saved": true,
+      "network_removed": true,
+      "infrastructure_stop": true,
+      "memory_limit_bytes": 13958643712,
+      "stopped": true,
+      "forced": true,
+      "released": true,
+      "exit_code": 137,
+      "identity": "record-requeue-2",
+      "endpoint": "synthetic",
+      "owner": {
+        "id": "job-requeue",
+        "attempt": 2,
+        "machine": "host-gpu0",
+        "session": "session-history-1",
+        "success": false
+      }
+    },
+    "record-requeue-2.result.json": {
+      "forced": true,
+      "attempt": 2,
+      "interrupted": true,
+      "success": false,
+      "id": "job-requeue",
+      "machine": "host-gpu0",
+      "session": "session-history-1"
+    },
+    "record-requeue-3.docker-ack.json": {
+      "worker": "host-gpu0",
+      "at": "2026-01-01T00:00:00Z"
+    },
+    "record-requeue-3.docker.json": {
+      "evidence_saved": true,
+      "network_removed": true,
+      "main_finished": true,
+      "memory_limit_bytes": 13958643712,
+      "stopped": true,
+      "released": true,
+      "exit_code": 0,
+      "identity": "record-requeue-3",
+      "endpoint": "synthetic",
+      "owner": {
+        "id": "job-requeue",
+        "attempt": 3,
+        "machine": "host-gpu0",
+        "session": "session-history-1",
+        "success": false
+      }
+    },
+    "record-requeue-3.result.json": {
+      "attempt": 3,
+      "success": true,
+      "id": "job-requeue",
+      "machine": "host-gpu0",
+      "session": "session-history-1"
+    },
+    "record-restart-1.docker-ack.json": {
+      "worker": "host-gpu0",
+      "at": "2026-01-01T00:00:00Z"
+    },
+    "record-restart-1.docker.json": {
+      "evidence_saved": true,
+      "network_removed": true,
+      "infrastructure_stop": true,
+      "memory_limit_bytes": 17179869184,
+      "stopped": true,
+      "forced": true,
+      "released": true,
+      "exit_code": 0,
+      "identity": "record-restart-1",
+      "endpoint": "synthetic",
+      "owner": {
+        "id": "job-restart",
+        "attempt": 1,
+        "machine": "host-gpu0",
+        "session": "session-history-3",
+        "success": false
+      }
+    },
+    "record-restart-1.result.json": {
+      "forced": true,
+      "attempt": 1,
+      "interrupted": true,
+      "success": false,
+      "id": "job-restart",
+      "machine": "host-gpu0",
+      "session": "session-history-3",
+      "error": "worker restarted; previous process group cleaned up"
+    },
+    "record-restart-2.docker-ack.json": {
+      "worker": "host-gpu0",
+      "at": "2026-01-01T00:00:00Z"
+    },
+    "record-restart-2.docker.json": {
+      "evidence_saved": true,
+      "network_removed": true,
+      "main_finished": true,
+      "memory_limit_bytes": 17179869184,
+      "stopped": true,
+      "released": true,
+      "exit_code": 0,
+      "identity": "record-restart-2",
+      "endpoint": "synthetic",
+      "owner": {
+        "id": "job-restart",
+        "attempt": 2,
+        "machine": "host-gpu0",
+        "session": "session-history-2",
+        "success": false
+      }
+    },
+    "record-restart-2.result.json": {
+      "attempt": 2,
+      "success": true,
+      "id": "job-restart",
+      "machine": "host-gpu0",
+      "session": "session-history-2"
+    },
+    "state.json": {
+      "schema_version": 3,
+      "session": "session-host-gpu0",
+      "fresh": false,
+      "offset": 0
+    }
+  }
+}

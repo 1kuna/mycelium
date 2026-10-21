@@ -1150,8 +1150,16 @@ subtree is accepted only with a readable containing slice. Missing or unreadable
 kernel evidence refuses. Hold the source's existing exclusive `worker.lock`
 through conversion and publication, require its marked v3 spool and exact saved
 session, and use the C4 production/M spool inspector without cleanup or inferred
-acknowledgements. Hash the format marker and top-level JSON evidence in sorted
-name order with length-delimited file names/sizes and SHA-256.
+acknowledgements. Retained results and released Docker records are settled
+history only when that locked queue accounts for the exact job/attempt/worker/
+session: a current attempt must be terminal with confirmed release; a superseded
+attempt must have its own confirmed-release copy. A legacy Docker retention ack
+may be absent after a stale completion; its presence, age or a newer attempt is
+never release proof. Pending, unreleased or operator-confirmed Docker custody,
+unreadable evidence and active process state still refuse. Report every blocking
+spool filename with its specific reason. Hash the format marker and top-level
+JSON evidence in sorted name order with length-delimited file names/sizes and
+SHA-256.
 
 At each configured Docker endpoint (explicit local default when Docker was not
 configured), successful `docker ps` must show zero running containers labelled
@@ -1219,8 +1227,10 @@ The same machine spool survives forward -> rollback -> forward. Inspect both
 source and reused destination spools: heartbeat and operator-stop state,
 `attempt-*.json`, `*.result.json`, `*.docker.json`/ack and `engine-*.json`, using
 the sparse formats actually written by production 08816cf as well as M. Retained
-results require an exact terminal/released queue record; retained Docker custody
-requires its release and acknowledgement. Process/cgroup custody must be absent.
+results and released Docker records require the exact queue settlement described
+above, including explicit released copies for superseded attempts; a legacy
+retention acknowledgement is not release authority. Process/cgroup custody must
+be absent.
 No daemon calls, orphan cleanup or inferred result acknowledgement are made by
 this read-only gate. This handles a separate local catalog on Spark as
 well as a shared catalog already converted by the queue. During the queue-first

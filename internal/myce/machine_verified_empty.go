@@ -189,7 +189,7 @@ func (q *Queue) verifyEmptyDrain(ctx context.Context, mapping []MachineRename, o
 			return nil, release, refuse("spool_unsettled", "source spool session missing or differs from queue")
 		}
 		if e = inspectMigrationSpool(s.State, snapshot); e != nil {
-			return nil, release, refuse("spool_unsettled", "C4 spool has unresolved or unreadable custody")
+			return nil, release, refuse("spool_unsettled", "C4 spool: "+e.Error())
 		}
 		digest, e := migrationSpoolDigest(s.State)
 		if e != nil {
