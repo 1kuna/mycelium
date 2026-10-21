@@ -7,6 +7,10 @@ import (
 	"time"
 )
 
+// The responsiveness budget expired, but the single outstanding operation is
+// still running. Its eventual result is collected on a subsequent call.
+var errCheckpointIOPending = errors.New("NAS unreachable: filesystem operation timed out")
+
 // Filesystem syscalls cannot be cancelled. Keep at most one outstanding call
 // per operation, and never wait for NAS I/O while holding the queue lock.
 type checkpointIO[T any] struct {
@@ -57,7 +61,7 @@ func (n *checkpointIO[T]) run(key string, fn func() (T, error)) (T, error) {
 		n.mu.Unlock()
 		return pending.value, pending.err
 	case <-ctx.Done():
-		return zero, errors.New("NAS unreachable: filesystem operation timed out")
+		return zero, errCheckpointIOPending
 	}
 }
 

@@ -154,6 +154,12 @@ func (w *Worker) initInventory(ctx context.Context, s *workerStore) error {
 // Probe health is current evidence, never durable identity. Persist the saved
 // mapping, but recompute all withholding on every observation (including reopen).
 func (w *Worker) refreshInventory(ctx context.Context, observed []MachineDevice, probeErr error, s *workerStore) error {
+	// A heartbeat's short I/O wait is not the probe's deadline. Keep the last
+	// completed observation while it runs; apply its success or failure when
+	// collected. Launch verification still probes the selected device directly.
+	if errors.Is(probeErr, errCheckpointIOPending) {
+		return nil
+	}
 	var partial *acceleratorProbeError
 	familyFailure := errors.As(probeErr, &partial)
 	if probeErr == nil || familyFailure {
