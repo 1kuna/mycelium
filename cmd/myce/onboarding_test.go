@@ -15,7 +15,20 @@ import (
 func TestOnboardingInstallWholeMachineSelectorsAndDriverRefusal(t *testing.T) {
 	home := t.TempDir()
 	fail := false
-	p := myce.MachineProbe{OS: "linux", Arch: "arm64", Glob: func(string) ([]string, error) { return nil, nil }, Command: func(_ context.Context, n string, args ...string) ([]byte, error) {
+	p := myce.MachineProbe{OS: "linux", Arch: "arm64", Glob: func(pattern string) ([]string, error) {
+		if strings.HasSuffix(pattern, "/class") {
+			return []string{"/fixture/pci/gpu/class"}, nil
+		}
+		return nil, nil
+	}, ReadFile: func(path string) ([]byte, error) {
+		switch filepath.Base(path) {
+		case "class":
+			return []byte("0x030000"), nil
+		case "vendor":
+			return []byte("0x10de"), nil
+		}
+		return nil, os.ErrNotExist
+	}, Command: func(_ context.Context, n string, args ...string) ([]byte, error) {
 		if n != "nvidia-smi" {
 			return nil, exec.ErrNotFound
 		}

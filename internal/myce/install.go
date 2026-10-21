@@ -97,13 +97,19 @@ func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detectio
 		d.ReserveGB = 4
 		return d, nil
 	}
+	nvidia, pciErr := p.nvidiaPresent()
+	if pciErr != nil {
+		return d, preflightError("gpu_inventory_unavailable", "gpu", "cannot inspect PCI inventory; restore access and re-detect")
+	}
 	args := []string{"--query-gpu=name,memory.total", "--format=csv,noheader,nounits"}
 	if device != "" {
 		args = append(args, "--id="+device)
 	}
 	b, e := p.Command(ctx, "nvidia-smi", args...)
 	if e != nil && !probeAbsent(e) {
-		return d, preflightError("gpu_driver_unavailable", "cuda", "NVIDIA driver probe failed; repair the driver and re-detect")
+		if err := p.nvidiaProbeFailure(nvidia); err != nil {
+			return d, err
+		}
 	}
 	if e == nil && strings.TrimSpace(string(b)) != "" {
 		lines := strings.Split(strings.TrimSpace(string(b)), "\n")

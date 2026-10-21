@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"mycelium/internal/testguard"
 	"os"
 	"path/filepath"
 	"testing"
@@ -9,6 +10,7 @@ import (
 var dockerTestOriginalPath = os.Getenv("PATH")
 
 func TestMain(m *testing.M) {
+	cleanupHome := testguard.Install()
 	if len(os.Args) > 1 && os.Args[1] == "_command-exec" {
 		if CommandExec(os.Args[2:]) != nil {
 			os.Exit(125)
@@ -33,6 +35,7 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	code := m.Run()
+	cleanupHome()
 	_ = os.RemoveAll(dir) // Owned fake Docker executable; all tests and children have joined.
 	os.Exit(code)
 }

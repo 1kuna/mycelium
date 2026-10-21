@@ -359,6 +359,7 @@ func environmentSeconds(j *Job, m *Machine) float64 {
 // EnvironmentCache uses OS file locks, atomic publication and shared use leases.
 // Partial builds and evictions are moved to recoverable local Trash, never deleted.
 type EnvironmentCache struct {
+	Tools   *EnvironmentToolSource
 	once    sync.Once
 	initErr error
 	Root    string
@@ -829,7 +830,7 @@ func (c *EnvironmentCache) runBuild(ctx context.Context, argv []string, dir stri
 		if err := checkLaunchGate(ctx); err != nil {
 			return err
 		}
-		tool, err := acquireEnvironmentTool(ctx, argv[0])
+		tool, err := c.acquireEnvironmentTool(ctx, argv[0])
 		if err != nil {
 			return err
 		}

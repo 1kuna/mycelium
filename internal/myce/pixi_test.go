@@ -23,7 +23,7 @@ func fakePixi(t *testing.T) string {
 	script := `#!/bin/sh
 set -eu
 # Version probes run before a build and must not require its activation env.
-if [ "${1:-}" = --version ]; then printf 'pixi 0.55.0\n'; exit 0; fi
+if [ "${1:-}" = --version ]; then printf 'pixi 0.81.0\n'; exit 0; fi
 test "$PIXI_NO_PROGRESS" = true
 case "$1" in
 install)

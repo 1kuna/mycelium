@@ -327,9 +327,12 @@ One mycelium is the cluster; a hypha is a machine with CPU, RAM and accelerator
 components. Onboarding reuses the M inventory, installer overlay and service
 transaction. It enumerates all components, preserves explicit selector lists and
 per-device fixed budgets, and refuses typed driver, inventory or memory failures
-instead of saving CPU fallback. Only confirmed absence of supported accelerator hardware selects CPU. NVIDIA
-display devices and Intel discrete PCIe display endpoints require their runtime;
-other display controllers are informational and do not block CPU enrollment. Explicit
+instead of saving CPU fallback. NVIDIA display devices and Intel discrete PCIe
+display endpoints require their runtime. A failed `nvidia-smi` is informational
+when PCI inventory confirms no NVIDIA display device. Working integrated Intel
+graphics enrolls as `xpu` with unified memory; a missing integrated runtime permits
+CPU, while a broken runtime still refuses. Other display controllers are
+informational and do not block CPU enrollment. Explicit
 CPU selection remains supported; re-detection is an explicit install operation
 so upgrades do not silently broaden an owner's component allowance.
 Inventory errors retain M2's `device_probe_unavailable` runtime rejection while
@@ -351,9 +354,12 @@ Include uvx when shipped with uv. An offline machine with no recipes needs no
 backend download. Do not execute remote installer scripts or print credentials.
 
 NAS validation uses the existing bounded checkpoint I/O pattern with one
-250 ms network-filesystem budget for the complete metadata/create/write/sync/
-rename/cleanup sequence (#63, following the worker CIFS allowance). Timeout
-returns `nas_unresponsive`; an uninterruptible syscall can finish afterward,
+250 ms network-filesystem budget per metadata/create/write/sync/close/rename/
+cleanup operation (#63, following the worker CIFS allowance), with a 5 s cap
+on the whole check, including mount inventory. Slow healthy sequences may exceed 250 ms in
+total. Timeout returns `nas_unresponsive`; caller cancellation remains
+`context.Canceled`. Cancelled/timed-out results are discarded before retrying
+the same key. An uninterruptible syscall can finish afterward,
 with no second sequence launched while it is pending. Known NFS/SMB mount types,
 autofs-managed mounts and explicitly network FUSE subtypes (`fuse.sshfs`,
 `fuse.rclone`, `fuse.smbnetfs`) are eligible. Generic or local FUSE is not.
@@ -380,7 +386,7 @@ hardware plan without reading credentials. These functions accept fake probes;
 service-probe deadlines use the injected Clock. Ordinary install upgrades keep
 saved component choices; `install worker --redetect` explicitly refreshes them.
 
-Tool versions are uv **0.8.22** and pixi **0.55.0**, with vendor GitHub release
+Tool versions are uv **0.8.22** and pixi **0.81.0**, with vendor GitHub release
 archive SHA-256 pins for Linux/macOS amd64/arm64. Both use versioned user-local
 directories; no existing system/user executable is replaced. The saved PATH
 prepends those directories and remains stable on rerun. Unsupported releases,

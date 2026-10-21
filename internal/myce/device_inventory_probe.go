@@ -28,9 +28,15 @@ func (p MachineProbe) Accelerators(ctx context.Context) ([]MachineDevice, error)
 	if p.Command == nil {
 		return nil, inventoryPreflightError("gpu_inventory_unavailable", "gpu", "inventory command runner missing")
 	}
+	nvidia, pciErr := p.nvidiaPresent()
+	if pciErr != nil {
+		return nil, inventoryPreflightError("gpu_inventory_unavailable", "gpu", "cannot inspect PCI inventory; restore access and re-detect")
+	}
 	b, err := p.Command(ctx, "nvidia-smi", "--query-gpu=uuid,driver_version", "--format=csv,noheader,nounits")
 	if err != nil && !errors.Is(err, exec.ErrNotFound) && !errors.Is(err, os.ErrNotExist) {
-		return nil, inventoryPreflightError("gpu_driver_unavailable", "cuda", "CUDA inventory probe unavailable; repair the driver and re-detect")
+		if err := p.nvidiaProbeFailure(nvidia); err != nil {
+			return nil, reject("device_probe_unavailable", err)
+		}
 	}
 	if err == nil && strings.TrimSpace(string(b)) != "" {
 		for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
@@ -50,27 +56,38 @@ func (p MachineProbe) Accelerators(ctx context.Context) ([]MachineDevice, error)
 	if globErr != nil {
 		return nil, inventoryPreflightError("gpu_inventory_unavailable", "xpu", "cannot inspect GPU nodes")
 	}
-	// Only Intel discrete render nodes belong to the Level Zero backend.
+	// Working integrated and discrete Intel render nodes belong to Level Zero.
 	// A BMC, AMD or VM render node does not require Intel's runtime.
+	discrete := p.ReadFile == nil
 	if p.ReadFile != nil {
 		intel := nodes[:0]
 		for _, node := range nodes {
 			dir := filepath.Join("/sys/class/drm", filepath.Base(node), "device")
 			vendor, _ := p.ReadFile(filepath.Join(dir, "vendor"))
-			if strings.TrimSpace(string(vendor)) == "0x8086" && p.intelDiscrete(dir) {
+			if strings.TrimSpace(string(vendor)) == "0x8086" {
 				intel = append(intel, node)
+				discrete = discrete || p.intelDiscrete(dir)
 			}
 		}
 		nodes = intel
 	}
 	if len(nodes) > 0 {
 		if p.CommandEnv == nil {
+			if !discrete {
+				return out, nil
+			}
 			return nil, inventoryPreflightError("gpu_inventory_unavailable", "xpu", "Level Zero inventory requires a private environment runner")
 		}
 		b, err = p.CommandEnv(ctx, map[string]string{"ZE_ENABLE_PCI_ID_DEVICE_ORDER": "1", "ZE_AFFINITY_MASK": "", "ONEAPI_DEVICE_SELECTOR": ""}, "python3", "-c", levelZeroInventory)
 		if err != nil {
 			code := "gpu_driver_unavailable"
 			if probeAbsent(err) || installExit(err, 78) {
+				if !discrete {
+					if p.Info != nil {
+						p.Info("Intel integrated graphics runtime missing; continuing with CPU")
+					}
+					return out, nil
+				}
 				code = "gpu_driver_missing"
 			}
 			return nil, inventoryPreflightError(code, "xpu", "cannot enumerate Level Zero UUIDs; install or repair the oneAPI/Level Zero runtime")

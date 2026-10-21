@@ -55,7 +55,7 @@ func TestOnboardingPinnedToolsBootstrapPATHAndRerun(t *testing.T) {
 				name := filepath.Base(n)
 				version := "0.8.22"
 				if name == "pixi" {
-					version = "0.55.0"
+					version = "0.81.0"
 				}
 				return []byte(name + " " + version), nil
 			}}
@@ -64,7 +64,7 @@ func TestOnboardingPinnedToolsBootstrapPATHAndRerun(t *testing.T) {
 				t.Fatal(err)
 			}
 			dirs := strings.Split(got.Path, ":")
-			if len(dirs) != 4 || dirs[0] != "/runtime/bin" || dirs[1] != "/usr/bin" || !strings.Contains(dirs[2], "uv-0.8.22") || !strings.Contains(dirs[3], "pixi-0.55.0") {
+			if len(dirs) != 4 || dirs[0] != "/runtime/bin" || dirs[1] != "/usr/bin" || !strings.Contains(dirs[2], "uv-0.8.22") || !strings.Contains(dirs[3], "pixi-0.81.0") {
 				t.Fatal(got.Path)
 			}
 			for _, dir := range dirs[2:] {

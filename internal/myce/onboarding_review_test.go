@@ -215,7 +215,7 @@ func TestReviewIntelRenderNodeWithoutOneAPI(t *testing.T) {
 	requirePreflightCode(t, err, "gpu_driver_missing")
 }
 func TestReviewOtherRenderNodesDoNotRequireIntelRuntime(t *testing.T) {
-	for _, vendor := range []string{"0x1a03", "0x1af4", "0x1002", "0x8086"} {
+	for _, vendor := range []string{"0x1a03", "0x1af4", "0x1002"} {
 		p := reviewPCIProbe(vendor, "0x0001", "0")
 		original := p.Glob
 		p.Glob = func(pattern string) ([]string, error) {

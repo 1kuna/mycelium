@@ -60,11 +60,52 @@ func (p MachineProbe) gpuPresent() (bool, error) {
 			continue
 		}
 		device, _ := p.ReadFile(filepath.Join(dir, "device"))
-		if p.Info != nil {
+		if p.Info != nil && v != "0x8086" {
 			p.Info(fmt.Sprintf("Ignoring display device %s (PCI %s:%s); no supported accelerator backend", filepath.Base(dir), v, strings.TrimSpace(string(device))))
 		}
 	}
 	return present, nil
+}
+
+// NVIDIA tools can remain installed on hosts with only a BMC or other GPU.
+func (p MachineProbe) nvidiaPresent() (bool, error) {
+	if p.OS != "linux" || p.Glob == nil {
+		// Without PCI inventory, absence cannot excuse a failing driver tool.
+		return true, nil
+	}
+	paths, err := p.Glob("/sys/bus/pci/devices/*/class")
+	if err != nil {
+		return false, err
+	}
+	for _, path := range paths {
+		if p.ReadFile == nil {
+			return false, fmt.Errorf("PCI reader missing")
+		}
+		class, err := p.ReadFile(path)
+		if err != nil {
+			return false, err
+		}
+		if !strings.HasPrefix(strings.TrimSpace(string(class)), "0x03") {
+			continue
+		}
+		vendor, err := p.ReadFile(filepath.Join(filepath.Dir(path), "vendor"))
+		if err != nil {
+			return false, err
+		}
+		if strings.TrimSpace(string(vendor)) == "0x10de" {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+func (p MachineProbe) nvidiaProbeFailure(present bool) error {
+	if present {
+		return preflightError("gpu_driver_unavailable", "cuda", "NVIDIA driver probe failed; repair the driver and re-detect")
+	}
+	if p.Info != nil {
+		p.Info("nvidia-smi failed without an NVIDIA PCI display device; continuing CPU/other accelerator detection")
+	}
+	return nil
 }
 
 func (p MachineProbe) intelDiscrete(dir string) bool {

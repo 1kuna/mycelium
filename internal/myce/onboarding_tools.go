@@ -22,10 +22,10 @@ import (
 type ToolRelease struct{ Name, Version, URL, SHA256 string }
 
 var toolChecksums = map[string][2]string{
-	"darwin/arm64": {"3f61099e261e449527141dbf125629fab33ad696468c8c90cebbac40185a306c", "9e15f80e610633d954e41d1ae07b127607e9367e09d86679fb6ee0ba958bb1c7"},
-	"darwin/amd64": {"76638fdcfa91357858771551a1c88de1f7c3b270b33ab1866f8a0618d9e442d8", "c96b1e3ff0e6357a3c9d99daa5bbca340e3fbb453a94a016ab537af5a7dae98b"},
-	"linux/arm64":  {"726b72a137fda33565143325f7d31c42cd30ff9ccdf067e00d124d37b4081cb2", "a34a99e62f06eb8059f02865cb98697b4746625b62d0c0c0363324845c4cd400"},
-	"linux/amd64":  {"741ff1f5742c5a4a25d2f829e8395355e43f7a5ae2ebc6368e9ae2df0efb69cf", "cb733205ae1a02986071bcbeff47c60460bfb92d1cd9565d40f4dea5448c86a5"},
+	"darwin/arm64": {"3f61099e261e449527141dbf125629fab33ad696468c8c90cebbac40185a306c", "f4e32ea91970d4e11739488817979a5f2c6ebbb9cedb0d6dea74b2b790b272dc"},
+	"darwin/amd64": {"76638fdcfa91357858771551a1c88de1f7c3b270b33ab1866f8a0618d9e442d8", "9859588ba57f390b5c77d56b2654fab37bc00e10952da25e3efd6e3434557e5a"},
+	"linux/arm64":  {"726b72a137fda33565143325f7d31c42cd30ff9ccdf067e00d124d37b4081cb2", "9f8d2113fe9dc01788a65f5c2acec34fa56b1193461a5c3e9a775d6d2d621bcb"},
+	"linux/amd64":  {"741ff1f5742c5a4a25d2f829e8395355e43f7a5ae2ebc6368e9ae2df0efb69cf", "7aa3ec39aecceff9062fa2ed4d42cbaa0bdc25ddea727d048e061cf188d434f6"},
 }
 
 func PinnedEnvironmentTools(osname, arch string) ([]ToolRelease, error) {
@@ -40,7 +40,7 @@ func PinnedEnvironmentTools(osname, arch string) ([]ToolRelease, error) {
 	}
 	return []ToolRelease{
 		{"uv", "0.8.22", "https://github.com/astral-sh/uv/releases/download/0.8.22/uv-" + machine + "-" + uvTarget + ".tar.gz", hashes[0]},
-		{"pixi", "0.55.0", "https://github.com/prefix-dev/pixi/releases/download/v0.55.0/pixi-" + machine + "-" + pixiTarget + ".tar.gz", hashes[1]},
+		{"pixi", "0.81.0", "https://github.com/prefix-dev/pixi/releases/download/v0.81.0/pixi-" + machine + "-" + pixiTarget + ".tar.gz", hashes[1]},
 	}, nil
 }
 
@@ -260,23 +260,48 @@ func suitableEnvironmentTool(ctx context.Context, path, name string, command fun
 // acquireEnvironmentTool is lazy: the native environment build calls it only
 // for the backend it is about to execute. Existing service PATH wins, including
 // on upgrades. Acquired tools are invoked by absolute path, never prepended.
-func acquireEnvironmentTool(ctx context.Context, name string) (string, error) {
-	p := LocalMachineProbe()
+// EnvironmentToolSource injects lazy acquisition without replacing the build
+// runner. Nil fields retain production defaults. Releases permits synthetic,
+// checksum-verified archives in tests without mutating the production pins.
+type EnvironmentToolSource struct {
+	Home     func() (string, error)
+	Probe    ToolBootstrapProbe
+	Releases func(string, string) ([]ToolRelease, error)
+}
+
+func (cache *EnvironmentCache) acquireEnvironmentTool(ctx context.Context, name string) (string, error) {
+	source := EnvironmentToolSource{}
+	if cache.Tools != nil {
+		source = *cache.Tools
+	}
+	if source.Home == nil {
+		source.Home = os.UserHomeDir
+	}
+	if source.Probe.Command == nil {
+		source.Probe.Command = LocalMachineProbe().Command
+	}
+	if source.Probe.Fetch == nil {
+		source.Probe.Fetch = LocalToolBootstrapProbe(MachineProbe{}).Fetch
+	}
+	if source.Releases == nil {
+		source.Releases = PinnedEnvironmentTools
+	}
+	p := source.Probe
 	if path := suitableEnvironmentTool(ctx, os.Getenv("PATH"), name, p.Command); path != "" {
 		return path, nil
 	}
-	home, err := os.UserHomeDir()
+	home, err := source.Home()
 	if err != nil {
 		return "", err
 	}
 	c := ServiceConfig{WorkerHome: home, Path: os.Getenv("PATH"), Detection: Detection{OS: runtime.GOOS, Arch: runtime.GOARCH}}
-	releases, err := PinnedEnvironmentTools(c.Detection.OS, c.Detection.Arch)
+	releases, err := source.Releases(c.Detection.OS, c.Detection.Arch)
 	if err != nil {
 		return "", err
 	}
 	for _, r := range releases {
 		if r.Name == name {
-			c, err = bootstrapEnvironmentTools(ctx, c, LocalToolBootstrapProbe(p), []ToolRelease{r})
+			c, err = bootstrapEnvironmentTools(ctx, c, p, []ToolRelease{r})
 			if err != nil {
 				return "", err
 			}
