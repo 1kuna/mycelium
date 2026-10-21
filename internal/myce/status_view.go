@@ -4,7 +4,10 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 )
+
+const recoveryAttentionDelay = 2 * time.Minute
 
 // Status presentation consumes measured facts and the existing queue projection.
 // It never selects a hypha or changes an admission decision.
@@ -16,6 +19,15 @@ func HyphaAvailability(m *Machine) string {
 		return "offline; waiting for this hypha to return"
 	case m.Leaving:
 		return "leaving; no new work"
+	case m.Recovering:
+		state := "recovering saved attempts; no new work"
+		if m.RecoveringSince != nil {
+			state += " since " + m.RecoveringSince.UTC().Format(time.RFC3339)
+		}
+		if m.RecoveryNeedsAttention {
+			state += "; needs attention (recovery longer than 2 minutes)"
+		}
+		return state
 	}
 	if m.CPUCapacityReason != "" && m.GPU == "cpu" {
 		return m.CPUCapacityReason

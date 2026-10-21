@@ -836,6 +836,15 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		delete(q.unreported, m.ID)
 		m.Gone = false
 		m.LastSeen = q.clock.Now()
+		// Recovery is queue-observed admission state, not worker-supplied status.
+		m.Recovering, m.RecoveringSince, m.RecoveryNeedsAttention = c.Recovering, nil, false
+		if m.Recovering {
+			since := m.LastSeen
+			if old != nil && old.Recovering && old.RecoveringSince != nil {
+				since = *old.RecoveringSince
+			}
+			m.RecoveringSince = &since
+		}
 		q.reconcilePreparationPlans(c)
 		q.s.Machines[m.ID] = &m
 		// Count this worker as healthy, but detect majority silence before
@@ -865,6 +874,8 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 				m.AdmissionReason = a.Reason
 			}
 
+			// AdmissionBlocked also holds existing supervisors' result replay.
+			// Recovery gates new offers/planning separately so saved results drain.
 			reply.AdmissionBlocked = availabilityBlocked(&m) || m.HostMemoryBudgetStatus() != "" || q.maintenanceBlocked(hostID(&m))
 			for _, p := range q.hostObligations(hostID(&m)) {
 				if p.Preparation && p.Result.Machine == m.ID && p.Result.Session == m.Session {
@@ -1184,15 +1195,11 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 	ceilingFailure := !r.Success && strings.HasPrefix(ceilingDiagnostic(r.Error, ""), "exceeded its ")
 	oomFailure := !r.Success && (r.OutOfMemory || ceilingFailure)
 	stageFailure := (j.Spec.Priority == "production" || plannedPriorityStop(j)) && !r.Success && !r.Interrupted
-	// Machine-worker cleanup can finish in the kill phase before fresh memory
-	// telemetry. Bridge that report gap, bounded by machine liveness. Legacy
-	// workers retain their original stop-grace bound. This never admits work.
+	// Bridge cleanup-to-inventory telemetry with the same absolute bound as
+	// pending cleanup. Completion and heartbeats cannot renew planning credit.
 	if j.State == "stopping" && !r.ReleasePending && j.StopAt != nil {
 		owner := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
-		until := *j.StopAt
-		if owner != nil && owner.Devices != nil {
-			until = q.clock.Now().Add(q.machineLossTimeout(j.Machine))
-		}
+		until := q.batchCreditUntil(j)
 		if owner != nil && q.clock.Now().Before(until) {
 			if q.s.BatchReleases == nil {
 				q.s.BatchReleases = map[string]batchRelease{}
@@ -1452,6 +1459,7 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 		}
 		for _, m := range q.s.Machines {
 			copy := cloneMachine(m)
+			copy.RecoveryNeedsAttention = m.Recovering && m.RecoveringSince != nil && q.clock.Now().Sub(*m.RecoveringSince) > recoveryAttentionDelay
 			q.machineDeviceStatus(&copy, m)
 			copy.AdmissionReason = q.machineLimitReason(m)
 			copy.Disabled = ""
