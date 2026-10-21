@@ -1,0 +1,130 @@
+service = {
+	active count = <redacted>
+	path = <redacted>
+	type = <redacted>
+	state = running
+	bundle id = <redacted>
+
+	program = <redacted>
+	redacted block = {
+		<redacted>
+	}
+
+	redacted block = {
+		<redacted>
+	}
+
+	redacted block = {
+		<redacted>
+		<redacted>
+	}
+
+	domain = <redacted>
+	asid = <redacted>
+	minimum runtime = <redacted>
+	base minimum runtime = <redacted>
+	exit timeout = <redacted>
+	runs = 1
+	pid = 123
+	immediate reason = <redacted>
+	forks = <redacted>
+	execs = <redacted>
+	initialized = <redacted>
+	trampolined = <redacted>
+	started suspended = <redacted>
+	proxy started suspended = <redacted>
+	checked allocations = <redacted>
+	checked allocations reason = <redacted>
+	checked allocations flags = <redacted>
+	last exit code = <redacted>
+
+	redacted block = {
+		<redacted>
+	}
+
+	redacted block = {
+		redacted block = {
+			port = <redacted>
+			active = <redacted>
+			managed = <redacted>
+			reset = <redacted>
+			hide = <redacted>
+			watching = <redacted>
+		}
+		redacted block = {
+			port = <redacted>
+			active = <redacted>
+			managed = <redacted>
+			reset = <redacted>
+			hide = <redacted>
+			watching = <redacted>
+		}
+	}
+
+	redacted block = {
+		redacted block = {
+			port = <redacted>
+			active = <redacted>
+			managed = <redacted>
+			reset = <redacted>
+			hide = <redacted>
+			watching = <redacted>
+		}
+		redacted block = {
+			port = <redacted>
+			active = <redacted>
+			managed = <redacted>
+			reset = <redacted>
+			hide = <redacted>
+			watching = <redacted>
+		}
+		redacted block = {
+			port = <redacted>
+			active = <redacted>
+			managed = <redacted>
+			reset = <redacted>
+			hide = <redacted>
+			watching = <redacted>
+		}
+		redacted block = {
+			port = <redacted>
+			active = <redacted>
+			managed = <redacted>
+			reset = <redacted>
+			hide = <redacted>
+			watching = <redacted>
+		}
+	}
+
+	redacted block = {
+		ID = <redacted>
+		type = <redacted>
+		state = active
+		active count = <redacted>
+		name = <redacted>
+		bundle ID = <redacted>
+	}
+
+	redacted block = {
+		ID = <redacted>
+		type = <redacted>
+		state = active
+		active count = <redacted>
+		name = <redacted>
+		bundle ID = <redacted>
+	}
+
+	spawn type = <redacted>
+	spawn role = <redacted>
+	jetsam priority = <redacted>
+	redacted = <redacted>
+	redacted = <redacted>
+	jetsamproperties category = <redacted>
+	jetsam thread limit = <redacted>
+	cpumon = <redacted>
+	exponential throttling grace limit = <redacted>
+	job state = <redacted>
+	sanitizer flags = <redacted>
+
+	properties = <redacted>
+}

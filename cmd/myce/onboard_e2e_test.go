@@ -62,7 +62,7 @@ stop() {
 }
 if test "$(basename "$0")" = launchctl; then
   case "$1" in
-    print) test -f "$pidfile" || exit 113; pid=$(cat "$pidfile"); kill -0 "$pid" || exit 113; printf 'state = running\npid = %s\nruns = 1\n' "$pid";;
+    print) test -f "$pidfile" || exit 113; pid=$(cat "$pidfile"); kill -0 "$pid" || exit 113; printf 'service = {\n\tstate = running\n\tpid = %s\n\truns = 1\n\tresource coalition = {\n\t\tstate = active\n\t}\n}\n' "$pid";;
     bootstrap) start;;
     bootout) stop;;
     kickstart) stop; start;;
@@ -94,7 +94,7 @@ func TestOneCommandEnrollmentEndToEnd(t *testing.T) {
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		t.Skip("supported enrollment targets only")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
 	defer cancel()
 	dir := t.TempDir()
 	nas := filepath.Join(dir, "nas")
@@ -253,9 +253,9 @@ func TestOneCommandEnrollmentEndToEnd(t *testing.T) {
 		}
 		return host
 	}
-	runCommand := func(command, host string, expectSuccess bool) string {
+	runCommand := func(command, host string, expectSuccess bool, extra ...string) string {
 		t.Helper()
-		script := command + " --gpu fake --memory-mode fixed --memory-gb 8 --allow-deviceless --nas " + shellQuote(nas) + " --require-mounted-nas=false --enrollment-timeout 45s"
+		script := command + " --gpu fake --memory-mode fixed --memory-gb 8 --allow-deviceless --nas " + shellQuote(nas) + " --require-mounted-nas=false --enrollment-timeout 80s" + " " + strings.Join(extra, " ")
 		cmd := exec.CommandContext(ctx, "sh", "-c", script)
 		for _, entry := range os.Environ() {
 			k, _, _ := strings.Cut(entry, "=")
@@ -274,7 +274,7 @@ func TestOneCommandEnrollmentEndToEnd(t *testing.T) {
 		}
 		return string(out)
 	}
-	command := makeCommand("onboard-e2e-1")
+	command := makeCommand("v1.0.1")
 	host := newHost()
 	defer func() {
 		b, _ := os.ReadFile(filepath.Join(host, "fake-manager.pid"))
@@ -301,6 +301,9 @@ func TestOneCommandEnrollmentEndToEnd(t *testing.T) {
 	if !strings.Contains(output, " · ready · ") || !strings.Contains(output, "CPU ") || !strings.Contains(output, "RAM ") || rangeCount.Load() == 0 {
 		t.Fatal("missing ready/capabilities/resume", output)
 	}
+	if _, e := os.Stat(filepath.Join(cache, "invitation.json")); !os.IsNotExist(e) {
+		t.Error("bootstrap left a second credential copy", e)
+	}
 	c, err := myce.ReadServiceConfig(filepath.Join(host, ".local", "share", "mycelium", "worker", "config.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -314,7 +317,10 @@ func TestOneCommandEnrollmentEndToEnd(t *testing.T) {
 	}
 	managerBefore, _ := os.ReadFile(filepath.Join(host, "fake-manager.log"))
 	downloadsBefore := downloadCount.Load()
-	runCommand(command, host, true)
+	rerunOutput := runCommand(command, host, true)
+	if !strings.Contains(rerunOutput, "installer flags are not reapplied") {
+		t.Error("same-version rerun silently ignored installer flags")
+	}
 	after, _ := os.Stat(c.Config)
 	managerAfter, _ := os.ReadFile(filepath.Join(host, "fake-manager.log"))
 	if !stat.ModTime().Equal(after.ModTime()) || !bytes.Equal(managerBefore, managerAfter) || downloadCount.Load() != downloadsBefore || redemptions.Load() != 1 {
@@ -327,7 +333,7 @@ func TestOneCommandEnrollmentEndToEnd(t *testing.T) {
 	runCommand(command, newHost(), false)
 	// Even authentic executable bytes must match the approved release version.
 	wrongManifest := manifest
-	wrongManifest.Version = "wrong-release"
+	wrongManifest.Version = "v9.0.0"
 	wrongCommand, err := myce.BootstrapCommand(wrongManifest, publisher.URL, queue.URL, authority.Fingerprint, strings.Repeat("b", 64))
 	if err != nil {
 		t.Fatal(err)
@@ -352,12 +358,32 @@ func TestOneCommandEnrollmentEndToEnd(t *testing.T) {
 	if _, err = os.Stat(filepath.Join(badHost, ".local", "share", "mycelium", "worker", "config.json")); !os.IsNotExist(err) {
 		t.Fatal("tampered artifact installed")
 	}
-	// Upgrade preserves spool and queue-owned disable, without spending a ticket.
+	// Upgrade recovery uses durable drain authority even after new bytes install.
+	// A deliberately short readiness budget interrupts after successful setup.
 	client, err := authority.Client(queue.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer client.HTTP.CloseIdleConnections()
+	newCommand := makeCommand("v1.0.2")
+	beforeInterrupted := redemptions.Load()
+	runCommand(newCommand, host, false, "--enrollment-timeout=1s")
+	var held myce.HostMaintenanceStatus
+	if err = client.Call(ctx, "GET", "/api/hosts/"+c.HostID+"/maintenance", nil, &held); err != nil || held.Policy.Mode != "drained" {
+		t.Fatal("interrupted upgrade did not retain its self-made drain", err)
+	}
+	receipt := filepath.Join(c.State, "enrollment-resume.json")
+	if st, e := os.Stat(receipt); e != nil || st.Mode().Perm() != 0600 {
+		t.Fatal("resume receipt is not private", e)
+	}
+	output = runCommand(newCommand, host, true)
+	if !strings.Contains(output, " · ready · ") || redemptions.Load() != beforeInterrupted {
+		t.Fatal("same-binary recovery did not resume its own drain")
+	}
+	if _, e := os.Stat(receipt); !os.IsNotExist(e) {
+		t.Fatal("completed upgrade retained resume authority", e)
+	}
+	// A subsequent replacement must still preserve operator-owned disable.
 	if err = client.Call(ctx, "POST", "/api/hosts/"+c.HostID+"/maintenance", myce.HostMaintenanceRequest{Action: "disable"}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -366,7 +392,7 @@ func TestOneCommandEnrollmentEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	beforeUpgrade := redemptions.Load()
-	newCommand := makeCommand("onboard-e2e-2")
+	newCommand = makeCommand("v1.0.3")
 	output = runCommand(newCommand, host, true)
 	if !strings.Contains(output, " · disabled · ") || strings.Contains(output, " · ready · ") || redemptions.Load() != beforeUpgrade {
 		t.Fatal("upgrade resumed maintenance or redeemed ticket", output)
@@ -374,6 +400,9 @@ func TestOneCommandEnrollmentEndToEnd(t *testing.T) {
 	if data, err := os.ReadFile(sentinel); err != nil || string(data) != "preserved custody" {
 		t.Fatal("upgrade lost spool custody", err)
 	}
+	// Replay an authentic older invitation line against a newer installation.
+	runCommand(command, host, false)
+	runCommand(command+" --allow-downgrade", host, true)
 	if strings.Contains(logs.String(), token) {
 		t.Fatal("fleet token in queue logs")
 	}

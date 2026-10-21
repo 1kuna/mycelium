@@ -16,6 +16,8 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+
+	"golang.org/x/mod/semver"
 )
 
 const StartGateProtocol = startGateProtocol
@@ -56,20 +58,44 @@ func Version() VersionInfo {
 
 var releaseName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$`)
 
+type ReleaseTarget struct {
+	OS            string `json:"os"`
+	Arch          string `json:"arch"`
+	NativeSensing bool   `json:"native_sensing"`
+}
+
+// ReleaseTargets is shared by the publisher, validator and release build script.
+var ReleaseTargets = []ReleaseTarget{{"linux", "amd64", false}, {"linux", "arm64", false}, {"darwin", "arm64", true}}
+
+func CheckReleaseUpgrade(target, installed string, allowDowngrade bool) error {
+	if !semver.IsValid(target) || !semver.IsValid(installed) {
+		return errors.New("release_version_unordered: version comparison requires semver releases")
+	}
+	if semver.Compare(target, installed) < 0 && !allowDowngrade {
+		return errors.New("release_downgrade_refused: use --allow-downgrade explicitly to install an older release")
+	}
+	return nil
+}
+
 func (m ReleaseManifest) Validate() error {
-	if !releaseName.MatchString(m.Version) || m.StartGate != startGateProtocol || m.AttemptProtocol != keyedAttemptProtocol {
+	if !semver.IsValid(m.Version) || !releaseName.MatchString(m.Version) || m.StartGate != startGateProtocol || m.AttemptProtocol != keyedAttemptProtocol {
 		return errors.New("release version or worker protocol incompatible")
+	}
+	required := map[string]ReleaseTarget{}
+	for _, target := range ReleaseTargets {
+		required[target.OS+"/"+target.Arch] = target
 	}
 	seen := map[string]bool{}
 	for _, a := range m.Artifacts {
 		key := a.OS + "/" + a.Arch
-		if seen[key] || !(key == "linux/amd64" || key == "linux/arm64" || key == "darwin/arm64") || a.File != "myce-"+a.OS+"-"+a.Arch || !validPin(a.SHA256) || a.Size <= 0 || a.OS == "darwin" && !a.NativeSensing {
+		target, supported := required[key]
+		if seen[key] || !supported || a.File != "myce-"+a.OS+"-"+a.Arch || !validPin(a.SHA256) || a.Size <= 0 || target.NativeSensing && !a.NativeSensing {
 			return errors.New("invalid release matrix, checksum or native Mac sensing")
 		}
 		seen[key] = true
 	}
-	if len(seen) != 3 {
-		return errors.New("release requires Linux amd64/arm64 and native macOS arm64")
+	if len(seen) != len(required) {
+		return errors.New("release requires every configured target")
 	}
 	return nil
 }
@@ -199,16 +225,21 @@ test ! -L "$part" && test ! -L "$binary" || exit 1
 checksum() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi; }
 verify() { test "$(wc -c < "$1" | tr -d " ")" = "$size" && test "$(checksum "$1" | cut -d " " -f 1)" = "$hash"; }
 if ! test -f "$binary" || ! verify "$binary"; then
+  if test -f "$part" && ! verify "$part" && test "$(wc -c < "$part" | tr -d " ")" -ge "$size"; then
+    rm -f "$part"; echo "release_partial_invalid: discarded invalid full-size partial; rerun to download" >&2; exit 1
+  fi
   if ! test -f "$part" || ! verify "$part"; then
     code=$(curl --fail --silent --show-error --proto =https --tlsv1.2 --connect-timeout 15 --max-time 600 --retry 3 --continue-at - --output "$part" --write-out "%{http_code}" ` + quoteShell(strings.TrimRight(origin, "/")+"/") + `"$file") || { echo "download incomplete; rerun to resume" >&2; exit 1; }
-    case "$code" in 200|206) ;; *) echo "release redirect or response refused" >&2; exit 1;; esac
+    case "$code" in 200|206) ;; *) rm -f "$part"; echo "release_redirect_refused: discarded response body" >&2; exit 1;; esac
   fi
-  verify "$part" || { echo "release checksum refused; remove the partial download before retry" >&2; exit 1; }
+  verify "$part" || { rm -f "$part"; echo "release_checksum_refused: release checksum refused; discarded partial" >&2; exit 1; }
   mv "$part" "$binary"
 fi
 chmod 700 "$binary"
 "$binary" version --expect-version ` + quoteShell(m.Version) + ` --expect-os "$os" --expect-arch "$arch" --expect-start-gate ` + quoteShell(m.StartGate) + ` --expect-attempt-protocol ` + quoteShell(m.AttemptProtocol) + ` --require-native-sensing
-exec "$binary" install worker --enroll --queue ` + quoteShell(queue) + ` --pin ` + quoteShell(pin) + ` --ticket ` + quoteShell(ticket) + ` --release-version ` + quoteShell(m.Version) + ` --release-sha "$hash" "$@"
+exec "$binary" install worker --enroll --queue ` + quoteShell(queue) + ` --pin ` + quoteShell(pin) + ` --ticket-stdin --release-version ` + quoteShell(m.Version) + ` --release-sha "$hash" "$@" <<'MYCE_ENROLLMENT_TICKET'
+` + ticket + `
+MYCE_ENROLLMENT_TICKET
 `
 	// A single physical command; base64 is available on both supported OSes.
 	return "printf %s " + quoteShell(base64.StdEncoding.EncodeToString([]byte(script))) + " | base64 -d | sh -s --", nil

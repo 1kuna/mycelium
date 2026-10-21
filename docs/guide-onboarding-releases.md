@@ -9,9 +9,12 @@ Ed25519/SHA-256 rather than adding a distribution service.
 On an Apple Silicon macOS build host with Go and Xcode command-line tools:
 
 ```sh
-scripts/release.sh VERSION OUTPUT_DIR PRIVATE_SIGNING_KEY
+scripts/release.sh v3.1.0 OUTPUT_DIR PRIVATE_SIGNING_KEY
 ```
 
+Versions must be semver values, monotonically increasing for normal upgrades.
+The shared `ReleaseTargets` data drives validation, manifest creation and
+`myce release build-targets`, which the build script consumes.
 This builds `myce-linux-amd64`, `myce-linux-arm64` (CGO disabled), and
 `myce-darwin-arm64` (CGO enabled with the Apple SDK). The native Mac binary must
 report real owner-sensing support. `myce release manifest` checks executable
@@ -44,7 +47,11 @@ The output embeds approved hashes instead of fetching and running a remote scrip
 The bootstrap resumes private hash-addressed `.partial` files, rejects redirect
 responses and checks exact size/SHA-256 before running even `myce version`.
 The version command then checks version, OS/arch, both protocols and Mac sensing
-before install or ticket redemption.
+before install or ticket redemption. A corrupt full-size partial, a redirect body
+or a checksum mismatch is discarded with a typed reason so a rerun can recover.
+The ticket is supplied to the installer through stdin and is absent from its
+argv/environment. The temporary private invitation is deleted once the installed
+joining file is durable.
 
 Each line binds one approved release. Repeat it after an interrupted download or
 installation; print a line for a newer release to upgrade. An already-installed
@@ -53,3 +60,16 @@ cannot reuse a spent ticket. If redemption succeeds but the response is lost
 before private authority is saved, issue a fresh ticket; replay stays refused.
 
 See [joining](guide-joining-v3.md) for the user flow and successful enrollment states.
+
+An older invitation line cannot silently downgrade an installed binary. The target
+compares the signed release version with the installed executable's version and
+refuses an older version unless `--allow-downgrade` is explicitly appended.
+Same-version reruns explain that installer flags are not reapplied; use the normal
+`myce install worker --config CONFIG` path to change those settings.
+
+Upgrade preflight refuses busy hosts before changing policy. If work races with
+the drain, a wait timeout restores the exact self-made drain through CAS, with a
+separate cleanup budget. After install/readiness failure, a mode-0600 resume
+receipt enables a successful rerun to resume its own drain. It cannot authorize
+resuming an operator's later disable or drain. Drain waiting, installation and
+readiness do not share an exhausted timeout budget.

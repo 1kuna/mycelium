@@ -152,7 +152,7 @@ func TestEnrollmentWaitRequiresStableManagerAndSupportsPoliteWaiting(t *testing.
 			budget := 0
 			observations := 0
 			result, err := WaitEnrollment(context.Background(), ServiceConfig{State: dir, Detection: Detection{OS: "linux"}}, Client{}, EnrollmentWait{
-				Clock: clock, Timeout: 6 * time.Second,
+				Clock: clock, Timeout: 36 * time.Second,
 				Wait: func(context.Context, time.Duration) error { clock.Advance(time.Second); return nil },
 				Observe: func(context.Context) (EnrollmentObservation, error) {
 					return EnrollmentObservation{Machine: m, Fresh: true, StartGate: StartGateProtocol, AttemptProtocol: AttemptProtocol, Policy: HostMaintenance{Mode: "enabled", CPUBudgetCores: &budget, MemoryBudget: &HostMemoryBudget{}}}, nil
@@ -174,7 +174,7 @@ func TestEnrollmentWaitRequiresStableManagerAndSupportsPoliteWaiting(t *testing.
 				if err == nil || result.State == "ready" {
 					t.Fatal("restarting or different manager process accepted", result.State, err)
 				}
-			} else if err != nil || result.State != mode || observations < 6 {
+			} else if err != nil || result.State != mode || observations < 31 {
 				t.Fatal("stable enrollment did not finish correctly", result.State, observations, err)
 			}
 		})

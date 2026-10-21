@@ -703,8 +703,10 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			rt.mu.Unlock()
 			reply, err := w.checkin(ctx, Checkin{Machine: m, Attempts: reports, Recovering: recovering, Fresh: fresh, PreviousSession: root.state.PreviousSession, ModelReports: modelReports})
 			if err == nil {
-				if err = saveEnrollmentReceipt(root.dir, m); err != nil {
-					return err
+				if receiptErr := saveEnrollmentReceipt(root.dir, m); receiptErr != nil {
+					// Enrollment is an observer, never authority to terminate live work.
+					// Retry next successful check-in; no filesystem paths or errors in logs.
+					log.Printf("enrollment receipt unavailable; will retry")
 				}
 				if reply.CPUBudgetCores != nil {
 					w.Machine.CPUBudgetCores = *reply.CPUBudgetCores

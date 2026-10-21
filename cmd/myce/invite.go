@@ -15,7 +15,6 @@ import (
 
 func inviteCommand(args []string) error {
 	f := flag.NewFlagSet("invite", flag.ContinueOnError)
-	f.Bool("install", true, "print one-command enrollment (the default)")
 	private := f.Bool("private-file", false, "legacy private credential export; requires --out")
 	manifest := f.String("release-manifest", "", "override queue-approved signed release JSON")
 	key := f.String("release-key", "", "provisioned public PEM for a manifest override")
@@ -31,9 +30,15 @@ func inviteCommand(args []string) error {
 	if f.NArg() != 0 || *private && *out == "" {
 		return errors.New("usage: myce invite [--out FILE] [--joining-file FILE | --identity-dir DIR] [--queue HTTPS_ORIGIN]")
 	}
+	explicitIdentity := false
+	f.Visit(func(flag *flag.Flag) {
+		if flag.Name == "identity-dir" {
+			explicitIdentity = true
+		}
+	})
 	var invitation myce.Invitation
 	var err error
-	if *source != "" {
+	if *source != "" && !explicitIdentity {
 		invitation, err = myce.ReadInvitation(*source)
 	} else {
 		// An installed worker's private joining file is already the authority. Never
@@ -43,7 +48,7 @@ func inviteCommand(args []string) error {
 			return e
 		}
 		saved, e := myce.ReadServiceConfig(filepath.Join(home, ".local", "share", "mycelium", "worker", "config.json"))
-		if e == nil && saved.JoiningFile != "" {
+		if !explicitIdentity && e == nil && saved.JoiningFile != "" {
 			invitation, err = myce.ReadInvitation(saved.JoiningFile)
 		} else {
 			if _, err = os.Stat(filepath.Join(*identityDir, "identity.json")); err == nil {

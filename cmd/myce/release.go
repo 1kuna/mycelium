@@ -35,6 +35,19 @@ func versionCommand(args []string) error {
 	return json.NewEncoder(os.Stdout).Encode(info)
 }
 func releaseCommand(args []string) error {
+	if len(args) == 1 && args[0] == "targets" {
+		return json.NewEncoder(os.Stdout).Encode(myce.ReleaseTargets)
+	}
+	if len(args) == 1 && args[0] == "build-targets" {
+		for _, target := range myce.ReleaseTargets {
+			cgo := 0
+			if target.NativeSensing {
+				cgo = 1
+			}
+			fmt.Printf("%s %s %d\n", target.OS, target.Arch, cgo)
+		}
+		return nil
+	}
 	if len(args) == 0 || args[0] != "manifest" {
 		return errors.New("usage: myce release manifest --dir DIR --version VERSION --signing-key PRIVATE_PEM")
 	}
@@ -49,8 +62,8 @@ func releaseCommand(args []string) error {
 		return errors.New("release directory and signing key required")
 	}
 	m := myce.ReleaseManifest{Version: *version, StartGate: myce.StartGateProtocol, AttemptProtocol: myce.AttemptProtocol}
-	for _, target := range [][2]string{{"linux", "amd64"}, {"linux", "arm64"}, {"darwin", "arm64"}} {
-		a := myce.ReleaseArtifact{OS: target[0], Arch: target[1], File: "myce-" + target[0] + "-" + target[1]}
+	for _, target := range myce.ReleaseTargets {
+		a := myce.ReleaseArtifact{OS: target.OS, Arch: target.Arch, File: "myce-" + target.OS + "-" + target.Arch}
 		path := filepath.Join(*dir, a.File)
 		st, err := os.Lstat(path)
 		if err != nil {

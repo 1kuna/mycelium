@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -112,10 +113,70 @@ func TestEnrollmentTicketPinnedHTTPAndRedirect(t *testing.T) {
 	if _, err = RedeemInvitation(context.Background(), s.URL, authority.Fingerprint, ticket.Ticket); err == nil {
 		t.Fatal("HTTP replay accepted")
 	}
+	var redirected atomic.Int32
 	handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, s.URL+"/api/status", http.StatusTemporaryRedirect)
+		if r.URL.Path == "/accepted" {
+			redirected.Add(1)
+			respond(w, authority, nil)
+			return
+		}
+		http.Redirect(w, r, s.URL+"/accepted", http.StatusTemporaryRedirect)
 	})
 	if _, err = RedeemInvitation(context.Background(), s.URL, authority.Fingerprint, "limited-ticket"); err == nil {
 		t.Fatal("redirect accepted")
+	}
+	if redirected.Load() != 0 {
+		t.Fatal("client followed redirect before returning an error")
+	}
+}
+
+func TestEnrollmentTicketHTTPConcurrentRedemption(t *testing.T) {
+	q, _ := fixture(t)
+	var handler http.Handler
+	server, authority := joiningTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { handler.ServeHTTP(w, r) }))
+	handler = (API{Queue: q, Token: authority.Token}).HandlerWithJoiningIdentity(authority.Fingerprint)
+	ticket, err := q.MintEnrollmentTicket(authority.Fingerprint, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	var accepted atomic.Int32
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := RedeemInvitation(context.Background(), server.URL, authority.Fingerprint, ticket.Ticket); err == nil {
+				accepted.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if accepted.Load() != 1 {
+		t.Fatal("HTTP redemption count", accepted.Load())
+	}
+}
+func TestEnrollmentTicketPrunesExpiredAndUsed(t *testing.T) {
+	q, clock := fixture(t)
+	pin := strings.Repeat("a", 64)
+	used, err := q.MintEnrollmentTicket(pin, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = q.RedeemEnrollmentTicket(used.Ticket, pin); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = q.MintEnrollmentTicket(pin, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(2 * time.Second)
+	if _, err = q.MintEnrollmentTicket(pin, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err = q.db.QueryRow("SELECT COUNT(*) FROM enrollment_tickets").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatal("expired/used rows retained", count)
 	}
 }

@@ -45,6 +45,9 @@ func (q *Queue) MintEnrollmentTicket(pin string, ttl time.Duration) (EnrollmentT
 	out.Ticket = hex.EncodeToString(secret[:])
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if _, err := q.db.Exec("DELETE FROM enrollment_tickets WHERE used=1 OR expires<=?", q.clock.Now().UnixNano()); err != nil {
+		return out, err
+	}
 	out.ExpiresAt = q.clock.Now().Add(ttl)
 	_, err := q.db.Exec("INSERT INTO enrollment_tickets (digest,pin,expires,used) VALUES (?,?,?,0)", ticketHash(out.Ticket), pin, out.ExpiresAt.UnixNano())
 	return out, err
@@ -66,7 +69,8 @@ func (q *Queue) RedeemEnrollmentTicket(ticket, pin string) error {
 	if n != 1 {
 		return enrollmentTicketRejected()
 	}
-	return nil
+	_, err = q.db.Exec("DELETE FROM enrollment_tickets WHERE used=1 OR expires<=?", q.clock.Now().UnixNano())
+	return err
 }
 func enrollmentTicketRejected() error {
 	return &HTTPError{Status: 403, Code: "invite_rejected", Message: "invite expired, already used, or does not match this queue"}

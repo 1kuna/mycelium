@@ -192,6 +192,20 @@ func (w *Worker) refreshInventory(ctx context.Context, observed []MachineDevice,
 	if probeErr == nil && w.Machine.GPU != "cpu" && len(matchedSelectors) < len(w.inventoryAllowance) {
 		w.inventoryReason = "device_selector_unmatched"
 	}
+	// Saved per-device settings are an independent expectation even when
+	// --device was omitted (whole-machine installation).
+	for _, setting := range w.DeviceSettings {
+		found := false
+		for _, d := range observed {
+			if setting.Selector == d.Selector || setting.Selector == d.Identity || setting.Selector == d.ID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			w.inventoryReason = "device_selector_unmatched"
+		}
+	}
 	for i := range devices {
 		d := &devices[i]
 		if d.UnifiedMemory && d.MemoryMeasured && d.BudgetGB == 0 && d.Reason == "" {

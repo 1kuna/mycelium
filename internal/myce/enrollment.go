@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -104,6 +105,13 @@ func saveEnrollmentReceipt(dir string, m Machine) error {
 	if p := m.CapabilityProfile; p != nil {
 		r.LogicalCPUs, r.SystemMemoryBytes = p.LogicalCPUs, p.SystemMemoryBytes
 	}
+	data, err := json.Marshal(r)
+	if err != nil {
+		return err
+	}
+	if previous, err := os.ReadFile(filepath.Join(dir, "enrollment.json")); err == nil && bytes.Equal(previous, data) {
+		return nil
+	}
 	return saveWorkerJSON(dir, "enrollment.json", r)
 }
 func ReadEnrollmentReceipt(dir string) (EnrollmentReceipt, error) {
@@ -175,7 +183,7 @@ func EvaluateEnrollment(receipt EnrollmentReceipt, o EnrollmentObservation) (str
 }
 
 // EnrollmentServiceHealth returns a stable process/restart identity, never
-// stdout from a service or its environment. Two stable observations are required.
+// stdout from a service or its environment. Readiness requires 30 stable seconds.
 func EnrollmentServiceHealth(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error)) (string, error) {
 	if command == nil {
 		return "", errors.New("service manager unavailable")
@@ -193,6 +201,11 @@ func EnrollmentServiceHealth(ctx context.Context, c ServiceConfig, command func(
 	}
 	fields := map[string]string{}
 	for _, line := range strings.Split(string(b), "\n") {
+		// launchctl prints a service block whose direct children have one tab.
+		// Nested resource/coalition states are unrelated to the service state.
+		if c.Detection.OS != "linux" && (!strings.HasPrefix(line, "\t") || strings.HasPrefix(line, "\t\t")) {
+			continue
+		}
 		k, v, ok := strings.Cut(strings.TrimSpace(line), "=")
 		if ok {
 			fields[strings.TrimSpace(k)] = strings.TrimSpace(v)
@@ -244,7 +257,7 @@ func WaitEnrollment(ctx context.Context, c ServiceConfig, client Client, opt Enr
 		opt.Timeout = time.Minute
 	}
 	if opt.StableFor <= 0 {
-		opt.StableFor = 5 * time.Second
+		opt.StableFor = 30 * time.Second
 	}
 	deadline := opt.Clock.Now().Add(opt.Timeout)
 	var stableSince time.Time
@@ -270,6 +283,9 @@ func WaitEnrollment(ctx context.Context, c ServiceConfig, client Client, opt Enr
 		}
 		if err == nil {
 			state, err = EvaluateEnrollment(receipt, observation)
+			if err == nil {
+				err = expectedEnrollmentDevices(c, observation.Machine.Devices)
+			}
 		}
 		if err == nil {
 			health, err = EnrollmentServiceHealth(ctx, c, opt.Command)
@@ -318,4 +334,33 @@ func (r EnrollmentResult) Summary(c ServiceConfig) string {
 		participation = p.Availability.Summary()
 	}
 	return fmt.Sprintf("%s · %s/%s · %s · CPU %d logical, allowance %d (0=detected minus reserve) · RAM %.1f GiB, allowance %.1f GiB (0=uncapped) · service healthy · %s · NAS · %s · %s", m.ID, p.OS, p.Arch, strings.Join(devices, ", "), p.LogicalCPUs, m.CPUBudgetCores, float64(p.SystemMemoryBytes)/(1<<30), m.HostMemoryBudgetGB, r.State, participation, m.MemoryEnforcement)
+}
+
+// Configured selectors are the independent expectation. A receipt describes
+// what the worker observed and cannot establish that a configured card exists.
+func expectedEnrollmentDevices(c ServiceConfig, devices []MachineDevice) error {
+	selectors := []string{}
+	for _, d := range c.MachineDevices {
+		selectors = append(selectors, d.Selector)
+	}
+	if len(selectors) == 0 {
+		var err error
+		selectors, err = deviceAllowance(c.Device)
+		if err != nil {
+			return err
+		}
+	}
+	for _, selector := range selectors {
+		found := false
+		for _, d := range devices {
+			if selector == d.Selector || selector == d.Identity || selector == d.ID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return errors.New("enrollment incomplete: configured device_selector_unmatched")
+		}
+	}
+	return nil
 }

@@ -2,9 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strings"
@@ -19,6 +22,7 @@ type enrollmentCLI struct {
 	timeout                          time.Duration
 	config, root                     string
 	forward                          []string
+	ticketStdin, allowDowngrade      bool
 }
 
 func parseEnrollmentCLI(args []string) (enrollmentCLI, error) {
@@ -33,10 +37,24 @@ func parseEnrollmentCLI(args []string) (enrollmentCLI, error) {
 		}
 		var target *string
 		switch arg {
+		case "--ticket-stdin", "--allow-downgrade":
+			enabled := true
+			if hasValue {
+				if value != "true" && value != "false" {
+					return o, errors.New("invalid enrollment boolean")
+				}
+				enabled = value == "true"
+			}
+			if arg == "--ticket-stdin" {
+				o.ticketStdin = enabled
+			} else {
+				o.allowDowngrade = enabled
+			}
+			continue
 		case "--pin":
 			target = &o.pin
 		case "--ticket":
-			target = &o.ticket
+			return o, errors.New("enrollment ticket requires --ticket-stdin; argv tickets are refused")
 		case "--release-version":
 			target = &o.version
 		case "--release-sha":
@@ -91,6 +109,17 @@ func enrollmentCommand(args []string, probe myce.MachineProbe, home string, look
 	if o.version != myce.BuildVersion {
 		return errors.New("release version mismatch before install")
 	}
+	if o.ticketStdin {
+		// Read a bounded private channel, never argv or the environment.
+		data, e := io.ReadAll(io.LimitReader(os.Stdin, 66))
+		if e != nil || len(data) > 65 {
+			return errors.New("invalid enrollment ticket input")
+		}
+		o.ticket = strings.TrimSpace(string(data))
+		if len(o.ticket) != 64 {
+			return errors.New("invalid enrollment ticket input")
+		}
+	}
 	executable, err := os.Executable()
 	if err != nil {
 		return err
@@ -130,8 +159,14 @@ func enrollmentCommand(args []string, probe myce.MachineProbe, home string, look
 	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 	signals, cancelSignals := signal.NotifyContext(context.Background(), syscall.SIGHUP, os.Interrupt, syscall.SIGTERM)
 	defer cancelSignals()
-	ctx, cancel := context.WithTimeout(signals, o.timeout)
-	defer cancel()
+	// Each phase owns its budget. Time spent draining never consumes the
+	// install/readiness budget; the existing installer has its own setup timeout.
+	ctx := signals
+	waitReady := func(c myce.ServiceConfig, client myce.Client) (myce.EnrollmentResult, error) {
+		phase, cancel := context.WithTimeout(signals, o.timeout)
+		defer cancel()
+		return myce.WaitEnrollment(phase, c, client, myce.EnrollmentWait{Clock: myce.RealClock{}, Timeout: o.timeout, Command: probe.Command})
+	}
 	var old *myce.ServiceConfig
 	if saved, e := myce.ReadServiceConfig(config); e == nil {
 		old = &saved
@@ -161,15 +196,43 @@ func enrollmentCommand(args []string, probe myce.MachineProbe, home string, look
 		if e != nil {
 			return e
 		}
+		versionCtx, cancelVersion := context.WithTimeout(signals, 10*time.Second)
+		installedVersion, e := installedEnrollmentVersion(versionCtx, old.Binary)
+		cancelVersion()
+		if e != nil {
+			return e
+		}
+		if e = myce.CheckReleaseUpgrade(o.version, installedVersion, o.allowDowngrade); e != nil {
+			return e
+		}
+		pendingDrain, e := myce.ReadEnrollmentUpgrade(*old)
+		if e != nil {
+			return e
+		}
 		if installedHash == actualHash && old.Enrollment {
-			result, e := myce.WaitEnrollment(ctx, *old, client, myce.EnrollmentWait{Clock: clock, Timeout: o.timeout, Command: probe.Command})
+			result, e := waitReady(*old, client)
 			if e != nil {
 				return e
 			}
+			if pendingDrain.Policy.Mode == "drained" {
+				if e = myce.FinishEnrollmentUpgrade(ctx, *old, client, pendingDrain); e != nil {
+					return e
+				}
+				result, e = waitReady(*old, client)
+				if e != nil {
+					return e
+				}
+			}
+			if e = cleanupPendingEnrollment(lockDir, *old); e != nil {
+				return e
+			}
+			fmt.Println("Same release: installer flags are not reapplied; use myce install worker --config with the desired flags to change settings.")
 			fmt.Println(result.Summary(*old))
 			return nil
 		}
-		status, e := myce.PrepareEnrollmentUpgrade(ctx, *old, client, clock, o.timeout, nil)
+		drainCtx, cancelDrain := context.WithTimeout(signals, o.timeout)
+		status, e := myce.PrepareEnrollmentUpgrade(drainCtx, *old, client, clock, o.timeout, nil)
+		cancelDrain()
 		if e != nil {
 			return e
 		}
@@ -189,7 +252,9 @@ func enrollmentCommand(args []string, probe myce.MachineProbe, home string, look
 			if !errors.Is(e, os.ErrNotExist) {
 				return e
 			}
-			authority, e = myce.RedeemInvitation(ctx, o.queue, o.pin, o.ticket)
+			phase, cancel := context.WithTimeout(signals, o.timeout)
+			authority, e = myce.RedeemInvitation(phase, o.queue, o.pin, o.ticket)
+			cancel()
 			if e != nil {
 				return e
 			}
@@ -232,7 +297,12 @@ func enrollmentCommand(args []string, probe myce.MachineProbe, home string, look
 	if err != nil {
 		return err
 	}
-	result, err := myce.WaitEnrollment(ctx, c, client, myce.EnrollmentWait{Clock: clock, Timeout: o.timeout, Command: probe.Command})
+	// The installed joining file is durable now. Drop the bootstrap copy even
+	// if later readiness fails, and also on a resumed same-version invocation.
+	if err = cleanupPendingEnrollment(lockDir, c); err != nil {
+		return err
+	}
+	result, err := waitReady(c, client)
 	if err != nil {
 		return err
 	}
@@ -240,13 +310,51 @@ func enrollmentCommand(args []string, probe myce.MachineProbe, home string, look
 		if err = myce.FinishEnrollmentUpgrade(ctx, c, client, *drain); err != nil {
 			return err
 		}
-		result, err = myce.WaitEnrollment(ctx, c, client, myce.EnrollmentWait{Clock: clock, Timeout: o.timeout, Command: probe.Command})
+		result, err = waitReady(c, client)
 		if err != nil {
 			return err
 		}
 	}
 	fmt.Println(result.Summary(c))
 	return nil
+}
+
+func installedEnrollmentVersion(ctx context.Context, binary string) (string, error) {
+	cmd := exec.CommandContext(ctx, binary, "version", "--json")
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if key != "MYCE_TOKEN" {
+			cmd.Env = append(cmd.Env, entry)
+		}
+	}
+	data, err := cmd.Output()
+	if err != nil {
+		return "", errors.New("cannot inspect installed release version")
+	}
+	var info myce.VersionInfo
+	if json.Unmarshal(data, &info) != nil || info.Version == "" {
+		return "", errors.New("installed release version unavailable")
+	}
+	return info.Version, nil
+}
+
+func cleanupPendingEnrollment(lockDir string, c myce.ServiceConfig) error {
+	path := filepath.Join(lockDir, "invitation.json")
+	pending, err := myce.ReadInvitation(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	installed, err := myce.ReadInvitation(c.JoiningFile)
+	if err != nil {
+		return err
+	}
+	if c.JoiningFile == path || pending != installed {
+		return errors.New("pending joining authority differs from installation; preserve private invitation")
+	}
+	return os.Remove(path)
 }
 func hasEnrollmentFlag(args []string, key string) bool {
 	for _, arg := range args {

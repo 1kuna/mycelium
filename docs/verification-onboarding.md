@@ -1,5 +1,8 @@
 # B0/B1/B6 onboarding evidence (#108)
 
+This records the initial `8a5a590` implementation. Current review repairs and
+verification are tracked in [the review evidence](verification-onboarding-review.md).
+
 Current state: implemented and laptop integration-tested on the package-M base
 `30ed4cc`. Both required unfiltered race commands have exit-0 results. The first
 full repository run failed two existing test cases; an unchanged full retry passed.

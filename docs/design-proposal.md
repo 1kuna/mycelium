@@ -1477,6 +1477,7 @@ The publisher signs an exact JSON manifest with Ed25519. The queue verifies it
 against an independently provisioned public key, never a key from the manifest,
 then supplies approved public release metadata to pinned authenticated inviters.
 Explicit local manifest/key/origin overrides perform the same verification.
+Release versions are ordered semver values (for example `v3.1.0`).
 The verified manifest binds version, protocols, OS/arch, size, SHA-256 and native
 Mac sensing. No release tooling existed to reuse. A small POSIX command is needed
 because clean hosts have no myce, Go or Git. Its embedded verified hash matrix
@@ -1487,21 +1488,31 @@ certificate-DER pin. Never confuse that pin with curl's SPKI pinnedpubkey.
 
 Authenticated inviters mint 15-minute tickets (maximum one hour) over pinned TLS.
 The existing SQLite stores only ticket digests, expiry, queue pin and consumed
-state. One atomic conditional update redeems exactly once. Tickets authorize only
-redemption, never the jobs/status API; expiry uses the injected queue Clock. The
+state. Used and expired rows are pruned. One atomic conditional update redeems
+exactly once. Tickets authorize only redemption, never the jobs/status API; expiry uses the injected queue Clock. The
 fleet credential travels only in the pinned TLS response and mode-0600 installed
 joining file, never argv, URLs, history or diagnostics. If a redemption response
 is lost before durable saving, mint a new ticket; do not make replay reusable.
 Existing private file invitations remain supported with explicit
 `--private-file --out FILE` for compatibility. Installed
 reruns use their saved joining authority and do not redeem the spent ticket.
+The limited ticket enters the installer on stdin, never in its argv or environment.
+Bootstrap authority is retained at mode 0600 only until the installed joining file
+is durable, then deleted, including on interrupted-install recovery.
 
 Enrollment completion requires the installed spool's exact session, the current
 host-launch and keyed-attempt protocols, every expected device identity, CPU/RAM
 facts and live memory, policy acknowledgement, fresh queue observations, a small
 recorded runner smoke with no fleet token, and stable service-manager health.
 A machine's receipt binds its service PID, exact release/session, expected
-inventory, CPU count and total RAM; queue-owned CPU/RAM allowances must be acknowledged. Registration
+inventory, CPU count and total RAM; queue-owned CPU/RAM allowances must be
+acknowledged.
+Saved per-device settings or explicit selector lists independently establish expected
+devices. A configured but absent device reports `device_selector_unmatched` and
+cannot be ready. launchd health reads the service block's direct keys, ignoring
+nested resource states. Healthy service identity must remain stable for 30 seconds.
+Unchanged receipts are not rewritten; receipt-write failures are logged without
+terminating the worker, and retried after the next successful check-in. Registration
 alone is incomplete. A healthy daily-use hypha may finish as `polite_waiting`;
 an operator-maintained host finishes as `disabled` or `drained`, never `ready`.
 Unknown devices, queue outage/426, recovery or a start-loop cannot complete ready.
@@ -1512,10 +1523,18 @@ Each printed line freezes the approved release and checksums for reproducibility
 Reuse that line for interrupted installation and same-version health checks;
 use a line for a newer approved release to upgrade. Installed upgrades use saved
 authority without redeeming or requiring another ticket.
-Same-version reruns verify health without changing files or restarting services.
-A changed release drains only the local host through existing queue maintenance,
-waits for exact custody settlement, and uses the existing installer transaction
-and spool. Existing disabled/drained policy is preserved; an installer never
-resumes an operator-disabled host. Upgrade failures retain maintenance and custody
-for repair. No fleet operation, reboot, driver install or privileged service is
-implied. Native fleet acceptance remains a separately authorized test window.
+Same-version reruns verify health without changing files or restarting services,
+and explicitly explain that installer flags are not reapplied. Older releases are
+refused unless the operator passes `--allow-downgrade` explicitly; comparison uses
+the installed binary's version, not an invitation's age or a stale worker receipt.
+A changed release refuses busy local hosts before draining through existing queue
+maintenance. A race with new custody is bounded: drain-wait failure conditionally
+restores its own exact transition. Drain-wait and install/readiness have separate
+budgets. The existing installer transaction and spool remain the install path.
+Existing disabled/drained policy is preserved; an installer never resumes an
+operator-disabled host. A private resume receipt fences a self-made drain by host,
+name and policy timestamp.
+Install/readiness failures retain that receipt and custody for repair; a successful
+rerun resumes only that exact transition, including a rerun after new bytes have
+already installed. Operator-created maintenance remains respected. No fleet
+operation, reboot, driver install or privileged service is implied. Native fleet acceptance remains a separately authorized test window.
