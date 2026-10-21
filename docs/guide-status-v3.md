@@ -134,11 +134,13 @@ or session selector. Job/project placement restrictions still apply.
 
 The reply has `host`, durable `policy` (`mode`: enabled/drained/disabled,
 `memory_budget`, `updated_at`), `local_fence`, `workers` (machine/device report
-and `fresh`), exact `attempts`, `preparations`, `sidecars`, `pending_releases`,
+and `fresh`), exact `attempts`, `calls`, `preparations`, `sidecars`, `pending_releases`,
 `pending_cleanup`, `memory_in_use_gb`, `memory_debt_gb`, `healthy` and `quiescent`.
 Workers and releases retain missing/unreported members. `healthy` needs all known
-workers fresh with consistent budget and usable memory reports. `quiescent`
-additionally needs drained/disabled policy and every work/cleanup count zero.
+workers fresh with consistent budget and usable memory and inventory reports.
+`quiescent` needs fresh worker custody reports, drained/disabled policy and every
+work/cleanup count zero. Degraded inventory or memory probes can leave `healthy`
+false while `quiescent` is true, allowing `disable --stop --wait` to complete.
 Sidecars are conservatively counted until their exact attempt is released.
 Plain status exits nonzero when worker health is incomplete; mutations exit
 zero on durable acceptance. Queue maintenance status has no privileged

@@ -154,12 +154,16 @@ func (w *Worker) initInventory(ctx context.Context, s *workerStore) error {
 // Probe health is current evidence, never durable identity. Persist the saved
 // mapping, but recompute all withholding on every observation (including reopen).
 func (w *Worker) refreshInventory(ctx context.Context, observed []MachineDevice, probeErr error, s *workerStore) error {
-	if probeErr == nil {
-		probeErr = validateInventory(observed)
+	var partial *acceleratorProbeError
+	familyFailure := errors.As(probeErr, &partial)
+	if probeErr == nil || familyFailure {
+		if err := validateInventory(observed); err != nil {
+			probeErr, familyFailure = err, false
+		}
 	}
 	w.inventoryReason = ""
 	var devices []MachineDevice
-	if probeErr != nil || len(observed) == 0 && w.Machine.GPU != "cpu" {
+	if !familyFailure && (probeErr != nil || len(observed) == 0 && w.Machine.GPU != "cpu") {
 		w.inventoryReason = "device_probe_unavailable"
 		devices = slices.Clone(w.Machine.Devices)
 		for i := range devices {
@@ -168,6 +172,14 @@ func (w *Worker) refreshInventory(ctx context.Context, observed []MachineDevice,
 		}
 	} else {
 		devices = reconcileDevices(w.Machine.Devices, observed)
+		if familyFailure {
+			w.inventoryReason = partial.Error()
+			for i := range devices {
+				if partial.failed(devices[i].Platform) {
+					devices[i].Reason, devices[i].FreeMemoryGB = "device_probe_unavailable", 0
+				}
+			}
+		}
 	}
 	matchedSelectors := map[string]bool{}
 	devices = slices.DeleteFunc(devices, func(d MachineDevice) bool {
@@ -251,7 +263,10 @@ func (w Worker) verifyDevice() error {
 		}
 	}
 	if err != nil {
-		return reject("device_probe_unavailable", errors.New("device inventory probe unavailable before launch"))
+		var partial *acceleratorProbeError
+		if !errors.As(err, &partial) || partial.failed(expected.Platform) {
+			return reject("device_probe_unavailable", errors.New("device inventory probe unavailable before launch"))
+		}
 	}
 	if expected.Reason != "" {
 		return reject(expected.Reason, errors.New(rejectionMessages[expected.Reason]))
@@ -374,7 +389,8 @@ func (w Worker) localInventoryWithProbe(ctx context.Context, probe MachineProbe)
 		return []MachineDevice{}, nil
 	}
 	physical, err := probe.Accelerators(ctx)
-	if err != nil {
+	var partial *acceleratorProbeError
+	if err != nil && !errors.As(err, &partial) {
 		return nil, err
 	}
 	for i := range physical {
@@ -423,7 +439,8 @@ func (w Worker) localInventoryWithProbe(ctx context.Context, probe MachineProbe)
 			}
 			detected, e := selectedProbe.DetectDevice(ctx, d.Selector)
 			if e != nil {
-				return nil, e
+				d.Reason = "device_memory_unavailable"
+				continue
 			}
 			d.MemoryMode, d.TotalMemoryGB, d.ReserveMemoryGB = detected.MemoryMode, detected.MemoryGB, detected.ReserveGB
 			if len(w.DeviceSettings) > 0 {
@@ -458,7 +475,8 @@ func (w Worker) localInventoryWithProbe(ctx context.Context, probe MachineProbe)
 		}
 		source, e := newDeviceMemorySource(d.Platform, d.Selector, budget, reserve, d.MemoryMode, probe.OS, os.ReadFile, probe.Command)
 		if e != nil {
-			return nil, e
+			d.Reason = "device_memory_unavailable"
+			continue
 		}
 		d.FreeMemoryGB, e = source(ctx)
 		if e != nil {
@@ -470,7 +488,7 @@ func (w Worker) localInventoryWithProbe(ctx context.Context, probe MachineProbe)
 			d.BudgetGB = d.FreeMemoryGB
 		}
 	}
-	return physical, nil
+	return physical, err
 }
 
 // M2 projects exactly one inventory component into the existing planner. M3

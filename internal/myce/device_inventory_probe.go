@@ -5,9 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
+	"log"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 )
@@ -23,42 +24,138 @@ func (p MachineProbe) Accelerators(ctx context.Context) ([]MachineDevice, error)
 		}
 		return []MachineDevice{{ID: "0", Platform: "metal", Identity: d.GPU, Selector: "0", Fingerprint: d.GPU}}, nil
 	}
+	failures := &acceleratorProbeError{}
 	b, err := p.Command(ctx, "nvidia-smi", "--query-gpu=uuid,driver_version", "--format=csv,noheader,nounits")
-	if err != nil && !errors.Is(err, exec.ErrNotFound) && !errors.Is(err, os.ErrNotExist) {
-		return nil, reject("device_probe_unavailable", errors.New("CUDA inventory probe unavailable"))
+	if err != nil {
+		missing := errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist)
+		present, pciErr := p.nvidiaDisplayPresent()
+		if present || pciErr != nil && !missing {
+			failures.cuda = true
+		} else if !missing {
+			log.Print("CUDA inventory note: nvidia-smi failed; no NVIDIA PCI display device present")
+		}
 	}
 	if err == nil && strings.TrimSpace(string(b)) != "" {
+		cuda := []MachineDevice{}
 		for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
 			uuid, driver, ok := strings.Cut(line, ",")
 			if !ok || !strings.HasPrefix(strings.TrimSpace(uuid), "GPU-") {
-				return nil, reject("device_probe_unavailable", errors.New("invalid CUDA UUID inventory"))
+				failures.cuda = true
+				break
 			}
 			uuid = strings.TrimSpace(uuid)
-			out = append(out, MachineDevice{Platform: "cuda", Identity: uuid, Selector: uuid, Fingerprint: strings.TrimSpace(driver)})
+			cuda = append(cuda, MachineDevice{Platform: "cuda", Identity: uuid, Selector: uuid, Fingerprint: strings.TrimSpace(driver)})
+		}
+		for i := range cuda {
+			cuda[i].ID = strconv.Itoa(i)
+		}
+		if validateInventory(cuda) != nil {
+			failures.cuda = true
+		}
+		if !failures.cuda {
+			out = append(out, cuda...)
 		}
 	}
-	nodes, _ := filepath.Glob("/dev/dri/renderD*")
-	if len(nodes) > 0 {
-		if p.CommandEnv == nil {
-			return nil, reject("device_probe_unavailable", errors.New("Level Zero inventory requires a private environment runner"))
-		}
-		b, err = p.CommandEnv(ctx, map[string]string{"ZE_ENABLE_PCI_ID_DEVICE_ORDER": "1", "ZE_AFFINITY_MASK": "", "ONEAPI_DEVICE_SELECTOR": ""}, "python3", "-c", levelZeroInventory)
+	var nodes []string
+	if p.Files != nil {
+		nodes, err = fs.Glob(p.Files, "dev/dri/renderD*")
 		if err != nil {
-			return nil, reject("device_probe_unavailable", errors.New("cannot enumerate Level Zero UUIDs in runtime order"))
+			failures.xpu = true
 		}
-		var devices []struct {
-			Identity    string `json:"identity"`
-			Fingerprint string `json:"fingerprint"`
-		}
-		if err = json.Unmarshal(b, &devices); err != nil {
-			return nil, reject("device_probe_unavailable", fmt.Errorf("Level Zero inventory: %w", err))
-		}
-		for i, d := range devices {
-			out = append(out, MachineDevice{Platform: "xpu", Identity: d.Identity, Selector: strconv.Itoa(i), Fingerprint: d.Fingerprint})
+	}
+	if len(nodes) > 0 {
+		xpu, err := p.levelZeroDevices(ctx)
+		if err != nil {
+			failures.xpu = true
+		} else {
+			out = append(out, xpu...)
 		}
 	}
 	for i := range out {
 		out[i].ID = strconv.Itoa(i)
+	}
+	if failures.cuda || failures.xpu {
+		return out, failures
+	}
+	return out, nil
+}
+
+// A partial probe error withholds only its failed families. The public message
+// contains fixed reason codes, never subprocess output or host paths.
+type acceleratorProbeError struct{ cuda, xpu bool }
+
+func (e *acceleratorProbeError) failed(platform string) bool {
+	return platform == "cuda" && e.cuda || platform == "xpu" && e.xpu
+}
+func (e *acceleratorProbeError) Error() string {
+	reasons := []string{}
+	if e.cuda {
+		reasons = append(reasons, "cuda: device_probe_unavailable")
+	}
+	if e.xpu {
+		reasons = append(reasons, "xpu: device_probe_unavailable")
+	}
+	return strings.Join(reasons, "; ")
+}
+func (e *acceleratorProbeError) Unwrap() error {
+	return reject("device_probe_unavailable", errors.New(e.Error()))
+}
+
+// Unknown PCI evidence fails closed. Only the local probe opts into the real
+// filesystem; fixtures supply the complete view, including an empty PCI tree.
+func (p MachineProbe) nvidiaDisplayPresent() (bool, error) {
+	if p.Files == nil {
+		return false, errors.New("PCI inventory unavailable")
+	}
+	entries, err := fs.ReadDir(p.Files, "sys/bus/pci/devices")
+	if err != nil {
+		return false, err
+	}
+	for _, entry := range entries {
+		base := "sys/bus/pci/devices/" + entry.Name()
+		vendor, err := fs.ReadFile(p.Files, base+"/vendor")
+		if err != nil {
+			return false, err
+		}
+		if strings.TrimSpace(string(vendor)) != "0x10de" {
+			continue
+		}
+		class, err := fs.ReadFile(p.Files, base+"/class")
+		if err != nil {
+			return false, err
+		}
+		value, err := strconv.ParseUint(strings.TrimSpace(string(class)), 0, 32)
+		if err != nil {
+			return false, err
+		}
+		if value>>16 == 0x03 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (p MachineProbe) levelZeroDevices(ctx context.Context) ([]MachineDevice, error) {
+	if p.CommandEnv == nil {
+		return nil, errors.New("Level Zero private environment runner unavailable")
+	}
+	b, err := p.CommandEnv(ctx, map[string]string{"ZE_ENABLE_PCI_ID_DEVICE_ORDER": "1", "ZE_AFFINITY_MASK": "", "ONEAPI_DEVICE_SELECTOR": ""}, "python3", "-c", levelZeroInventory)
+	if err != nil {
+		return nil, err
+	}
+	var devices []struct {
+		Identity    string `json:"identity"`
+		Fingerprint string `json:"fingerprint"`
+	}
+	if err := json.Unmarshal(b, &devices); err != nil {
+		return nil, fmt.Errorf("Level Zero inventory: %w", err)
+	}
+	out := []MachineDevice{}
+	for i, d := range devices {
+		out = append(out, MachineDevice{ID: strconv.Itoa(i), Platform: "xpu", Identity: d.Identity, Selector: strconv.Itoa(i), Fingerprint: d.Fingerprint})
+	}
+	if err := validateInventory(out); err != nil {
+		return nil, err
 	}
 	return out, nil
 }

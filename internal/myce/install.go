@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"io/fs"
 	"net/url"
 	"os"
 	"os/exec"
@@ -32,6 +33,8 @@ type Detection struct {
 type MachineProbe struct {
 	OS, Arch string
 	Command  func(context.Context, string, ...string) ([]byte, error)
+	// Files is the probe's entire filesystem view; injected probes never fall back to the host.
+	Files fs.FS
 	// CommandEnv runs a probe with per-process overrides; nil keeps injected Command fixtures.
 	CommandEnv func(context.Context, map[string]string, string, ...string) ([]byte, error)
 }
@@ -45,7 +48,7 @@ func LocalMachineProbe() MachineProbe {
 		}
 		return cmd.Output()
 	}
-	return MachineProbe{OS: runtime.GOOS, Arch: runtime.GOARCH, CommandEnv: run, Command: func(ctx context.Context, n string, args ...string) ([]byte, error) {
+	return MachineProbe{OS: runtime.GOOS, Arch: runtime.GOARCH, Files: os.DirFS("/"), CommandEnv: run, Command: func(ctx context.Context, n string, args ...string) ([]byte, error) {
 		return run(ctx, nil, n, args...)
 	}}
 }
