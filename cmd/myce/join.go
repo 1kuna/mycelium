@@ -67,4 +67,4 @@ func detectJoinGPU(ctx context.Context, probe myce.MachineProbe, options joinGPU
 	return options, nil
 }
 
-const cpuFallbackNotice = "No GPU driver was found; this machine joins as CPU-only. If it has a GPU, install its driver and re-run this command."
+const cpuFallbackNotice = "No supported GPU hardware is visible; this hypha joins with CPU and RAM components."

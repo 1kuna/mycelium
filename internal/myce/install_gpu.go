@@ -51,19 +51,15 @@ func validateWorkerService(ctx context.Context, c ServiceConfig, command func(co
 		return nil
 	}
 	b, err := command(ctx, "systemd-run", "--user", "--wait", "--pipe", "--collect", "--property=UMask=0077", "--property=EnvironmentFile="+c.GPUEnvironmentFile(), c.Binary, "detect", "--config", c.Config)
-	var detected Detection
+	var detected HardwarePreflight
 	if err == nil {
 		err = json.Unmarshal(b, &detected)
 	}
-	if err == nil && (detected.Platform == "" || detected.Platform != c.Detection.Platform) {
-		err = errors.New("no device matching the configured GPU platform")
+	if err == nil {
+		err = validateServiceHardware(c, detected)
 	}
 	if err != nil {
-		var exited *exec.ExitError
-		if errors.As(err, &exited) && len(exited.Stderr) > 0 {
-			err = fmt.Errorf("%w: %s", err, strings.TrimSpace(string(exited.Stderr)))
-		}
-		return fmt.Errorf("worker service GPU validation failed: %w; run %s detect --config %s under the user manager; check PATH, LD_LIBRARY_PATH, Level Zero/oneAPI/SYCL or CUDA runtime and device permissions; use --allow-deviceless only for CPU/fake test workers (unit written, not enabled by this install)", err, c.Binary, c.Config)
+		return preflightError("service_environment_invalid", "service", "worker service GPU validation failed; run detect --config under the user manager and check saved PATH, runtime and device permissions")
 	}
 	return nil
 }
@@ -146,6 +142,9 @@ func DetectService(ctx context.Context, c ServiceConfig, p MachineProbe, access 
 	if err := os.Setenv("PATH", c.Path); err != nil {
 		return Detection{}, err
 	}
+	if c.Detection.Platform == "cpu" {
+		return Detection{OS: p.OS, Arch: p.Arch, Platform: "cpu", MemoryMode: "fixed"}, nil
+	}
 	selector := strings.TrimSpace(strings.Split(c.Device, ",")[0])
 	if selector != "" && c.Detection.Platform == "xpu" {
 		bound, err := WithModelDevice(Model{}, "xpu", selector)
@@ -167,15 +166,43 @@ func DetectService(ctx context.Context, c ServiceConfig, p MachineProbe, access 
 		command := p.Command
 		p.Command = func(ctx context.Context, name string, args ...string) ([]byte, error) {
 			if name == "nvidia-smi" {
-				return nil, errors.New("configured XPU worker")
+				return nil, exec.ErrNotFound
 			}
 			return command(ctx, name, args...)
 		}
 	}
 	d, err := p.DetectDevice(ctx, selector)
 	// Explicit budgets must not require telemetry unavailable on discrete XPUs.
-	if err != nil && c.Detection.Platform == "xpu" && strings.HasPrefix(err.Error(), "discrete Intel GPU memory unavailable") {
+	var failure *PreflightError
+	if err != nil && c.Detection.Platform == "xpu" && c.Detection.MemoryMode == "fixed" && c.Detection.MemoryGB > c.Detection.ReserveGB && errors.As(err, &failure) && failure.Code == "gpu_memory_unavailable" {
 		return c.Detection, nil
 	}
 	return d, err
+}
+
+// DetectServiceHardware runs inside the service manager's probe process and
+// reads only nonsecret configuration. Legacy scalar configurations keep their
+// compatible diagnostic reply; machine plans verify every selected component.
+func DetectServiceHardware(ctx context.Context, c ServiceConfig, p MachineProbe, access GPUAccessProbe) (HardwarePreflight, error) {
+	if err := os.Setenv("PATH", c.Path); err != nil {
+		return HardwarePreflight{}, err
+	}
+	if err := validateOnboardingToolEnvironment(ctx, c, p); err != nil {
+		return HardwarePreflight{}, err
+	}
+	if len(c.MachineDevices) == 0 {
+		d, err := DetectService(ctx, c, p, access)
+		return HardwarePreflight{Detection: d}, err
+	}
+	if err := os.Setenv("PATH", c.Path); err != nil {
+		return HardwarePreflight{}, err
+	}
+	if p.OS == "linux" {
+		for _, s := range c.MachineDevices {
+			if err := access.Check(s.Detection.Platform); err != nil {
+				return HardwarePreflight{}, preflightError("gpu_permission_denied", s.Selector, "service cannot access the configured GPU nodes; repair driver permissions")
+			}
+		}
+	}
+	return PreflightHardware(ctx, c, p)
 }

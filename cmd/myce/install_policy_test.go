@@ -28,8 +28,11 @@ func TestInstallCLIPolicyDryRun(t *testing.T) {
 			if tc.file == "projects.yaml" {
 				flag = "--project-config"
 			}
-			probe := myce.MachineProbe{OS: "linux", Arch: "amd64", Command: func(_ context.Context, name string, _ ...string) ([]byte, error) {
+			probe := myce.MachineProbe{OS: "linux", Arch: "amd64", Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
 				if name == "nvidia-smi" {
+					if strings.Contains(strings.Join(args, " "), "uuid,driver_version") {
+						return []byte("GPU-fixture, driver"), nil
+					}
 					return []byte("Fixture GPU, 24576"), nil
 				}
 				if name == "systemctl" || name == "launchctl" {

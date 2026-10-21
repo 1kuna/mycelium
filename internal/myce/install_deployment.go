@@ -77,28 +77,9 @@ func ReadFleetEnvironment(path string) (token, queue string, err error) {
 }
 
 func prepareInstallNAS(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error)) error {
-	if c.RequireMountedNAS {
-		if c.Detection.OS != "linux" {
-			return errors.New("--require-mounted-nas requires Linux /proc/mounts")
-		}
-		mounts, err := command(ctx, "cat", "/proc/mounts")
-		if err != nil {
-			return fmt.Errorf("inspect NAS mount: %w", err)
-		}
-		mounted := false
-		for _, line := range strings.Split(string(mounts), "\n") {
-			f := strings.Fields(line)
-			if len(f) < 4 {
-				continue
-			}
-			path := strings.NewReplacer(`\040`, " ", `\011`, "\t", `\134`, `\`).Replace(f[1])
-			if path == filepath.Clean(c.NAS) && path != "/" {
-				mounted = true
-			}
-		}
-		if !mounted {
-			return errors.New("NAS root is not a mounted filesystem in /proc/mounts; refusing local fallback")
-		}
+	if c.RequireMountedNAS || c.Role == "worker" && c.Detection.Platform != "fake" {
+		_, err := PrepareOnboardingStorage(ctx, c, false, command)
+		return err
 	}
 	// Refuse symlinks so creation and probes cannot escape the Mycelium namespace.
 	for _, dir := range []string{c.NAS, filepath.Join(c.NAS, "mycelium"), filepath.Join(c.NAS, "mycelium", "checkpoints"), filepath.Join(c.NAS, "mycelium", "models"), filepath.Join(c.NAS, "mycelium", "environments")} {

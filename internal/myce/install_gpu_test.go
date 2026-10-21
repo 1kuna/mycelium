@@ -32,6 +32,9 @@ func TestInstallWorkerRuntimeAndServiceDetection(t *testing.T) {
 			os.WriteFile(binary, []byte("fake"), 0700)
 			checked, enabled := false, false
 			runner := func(_ context.Context, name string, args ...string) ([]byte, error) {
+				if name == "cat" {
+					return []byte("fixture " + c.NAS + " nfs rw 0 0\n"), nil
+				}
 				if name == "systemd-run" {
 					checked = true
 					wantProperty := "--property=EnvironmentFile=" + c.GPUEnvironmentFile()
@@ -80,6 +83,9 @@ func TestInstallWorkerRuntimeAndServiceDetection(t *testing.T) {
 			}
 			// A failed upgrade also refuses acceptance and retains its saved token.
 			err := Install(context.Background(), c, binary, "changed", func(_ context.Context, n string, args ...string) ([]byte, error) {
+				if n == "cat" {
+					return []byte("fixture " + c.NAS + " nfs rw 0 0\n"), nil
+				}
 				if n == "systemd-run" {
 					return nil, errors.New("no devices")
 				}

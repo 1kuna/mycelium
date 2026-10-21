@@ -321,6 +321,53 @@ CPU-only scheduling is implemented by R1 (#98); the M amendment below defines on
 
 ## Product decisions
 
+### One-command onboarding preflight (B2–B4, #108/#109)
+
+One mycelium is the cluster; a hypha is a machine with CPU, RAM and accelerator
+components. Onboarding reuses the M inventory, installer overlay and service
+transaction. It enumerates all components, preserves explicit selector lists and
+per-device fixed budgets, and refuses typed driver, inventory or memory failures
+instead of saving CPU fallback. Only confirmed GPU absence selects CPU. Explicit
+CPU selection remains supported; re-detection is an explicit install operation
+so upgrades do not silently broaden an owner's component allowance.
+Inventory errors retain M2's `device_probe_unavailable` runtime rejection while
+also carrying the more specific typed onboarding diagnosis.
+
+NAS mode is the only supported onboarding storage mode (#109). Checkpoint,
+model and environment roots must use an existing reachable network filesystem.
+Discover an unambiguous mounted NAS when the default is absent; preserve saved
+roots. Never mount a share, modify fstab or substitute local directories. The
+legacy deviceless test flag cannot bypass this requirement for CPU/GPU workers.
+The file store remains the job input/output transport, not a second storage mode.
+Bootstrap pinned vendor uv/pixi binaries into the ordinary user's installation
+and save their PATH. Do not execute remote installer scripts or print credentials.
+
+Save daily-use, laptop and desktop policy through the same flags/overlay/Args
+as budgets. False and zero are values, including on rerun. Linux onboarding
+enables and verifies user lingering without sudo, or reports the administrator
+prerequisite. macOS installs a LaunchAgent in the logged-in gui domain and
+validates its environment there. It starts at GUI login, not before login, and
+does not promise survival after logout. CPU/RAM admission on macOS is not an OS
+ceiling; required unsupported memory ceilings refuse explicitly. Hardware,
+service-session and native participation qualification remain separate gates.
+
+The B0/B1/B6 command calls `PreflightHardware` and `ApplyHardwarePreflight`
+while planning, then `OverlayHardwareSettings` after explicit memory overrides.
+Call `PrepareOnboardingStorage` before publishing a service (discovery only for
+a fresh default mount), `BootstrapEnvironmentTools`, and
+`EnsureOnboardingServiceSession`. The existing `Install` transaction invokes
+`ValidateWorkerServiceEnvironment`; `detect --config` returns the whole selected
+hardware plan without reading credentials. These functions accept fake probes;
+service-probe deadlines use the injected Clock. Ordinary install upgrades keep
+saved component choices; `install worker --redetect` explicitly refreshes them.
+
+Tool versions are uv **0.8.22** and pixi **0.55.0**, with vendor GitHub release
+archive SHA-256 pins for Linux/macOS amd64/arm64. Both use versioned user-local
+directories; no existing system/user executable is replaced. The saved PATH
+prepends those directories and remains stable on rerun. Unsupported releases,
+downloads, checksums, archive shapes and executable versions refuse with typed
+reasons. These pins are onboarding prerequisites, not extension qualification.
+
 1. **CPU and GPU compute.** CPU commands and accelerator workloads share the queue. Applications retain file watching, submission and publication.
 2. **The queue owns GPU work.** Apps submit commands or model calls instead of keeping their own GPU processes between jobs. An unpinned idle model is unloaded after its configured interval (default 10 minutes), or when higher-priority work needs the memory. Explicit production pins are the reservation mechanism.
 3. **Progress can move.** NAS checkpoints or verified file-store checkpoint generations allow a resumable job to continue on another compatible machine. Outputs must be safe to repeat; attempt-specific results reject stale executions.

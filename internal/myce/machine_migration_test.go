@@ -247,6 +247,11 @@ func m4InstallFixtureFor(t *testing.T, spark bool) ([]ServiceConfig, ServiceConf
 	var stopped atomic.Bool
 	for i := range src {
 		src[i].AllowDeviceless = true
+		// The manager advertises this synthetic NAS mount; preflight must find
+		// its mount directory already present rather than create local fallback.
+		if err := os.MkdirAll(src[i].NAS, 0700); err != nil {
+			t.Fatal(err)
+		}
 		if err := PrepareStateRoots(src[i].State, src[i].ModelCache, src[i].EnvironmentCache); err != nil {
 			t.Fatal(err)
 		}

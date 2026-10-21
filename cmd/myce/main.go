@@ -100,7 +100,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		}
 		ctx, cancel := myce.SetupTimeout(context.Background())
 		defer cancel()
-		d, err := myce.DetectService(ctx, c, probe, myce.LocalGPUAccessProbe())
+		d, err := myce.DetectServiceHardware(ctx, c, probe, myce.LocalGPUAccessProbe())
 		if err != nil {
 			return err
 		}

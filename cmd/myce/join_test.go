@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"errors"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -24,7 +24,7 @@ func TestJoinGPUDetection(t *testing.T) {
 				if name == "/usr/sbin/system_profiler" && tc.platform == "metal" || name == "nvidia-smi" && tc.platform == "cuda" || name == "sycl-ls" && tc.platform == "xpu" {
 					return []byte(tc.output), nil
 				}
-				return nil, errors.New("absent")
+				return nil, exec.ErrNotFound
 			}}
 			got, err := detectJoinGPU(context.Background(), probe, joinGPUOptions{mode: "auto"}, nil)
 			want := joinGPUOptions{platform: tc.platform, mode: tc.mode, memory: tc.memory, reserve: tc.reserve}
@@ -67,7 +67,7 @@ func TestJoinMachineDeviceAllowance(t *testing.T) {
 		t.Run("selection="+selection, func(t *testing.T) {
 			p := myce.MachineProbe{OS: "linux", Arch: "amd64", Command: func(_ context.Context, name string, args ...string) ([]byte, error) {
 				if name != "nvidia-smi" {
-					return nil, errors.New("absent")
+					return nil, exec.ErrNotFound
 				}
 				if strings.Contains(strings.Join(args, " "), "--query-gpu=uuid,driver_version") {
 					return []byte("GPU-a, driver\nGPU-b, driver"), nil
@@ -88,7 +88,7 @@ func TestJoinMachineDeviceAllowance(t *testing.T) {
 func TestJoinNoGPUOffersCPUWithoutContactingQueue(t *testing.T) {
 	t.Setenv("MYCE_TOKEN", "test-only-token")
 	for _, tc := range []struct{ os, arch string }{{"linux", "amd64"}, {"darwin", "amd64"}, {"darwin", "arm64"}} {
-		probe := myce.MachineProbe{OS: tc.os, Arch: tc.arch, Command: func(context.Context, string, ...string) ([]byte, error) { return nil, errors.New("absent") }}
+		probe := myce.MachineProbe{OS: tc.os, Arch: tc.arch, Command: func(context.Context, string, ...string) ([]byte, error) { return nil, exec.ErrNotFound }}
 		got, err := detectJoinGPU(context.Background(), probe, joinGPUOptions{mode: "auto"}, nil)
 		if err != nil || got.platform != "cpu" || got.memory != 0 {
 			t.Fatalf("CPU enrollment: %+v %v", got, err)

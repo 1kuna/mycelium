@@ -38,6 +38,23 @@ func (m *installMatrixManager) run(ctx context.Context, name string, args ...str
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	if name == "launchctl" && len(args) > 0 {
+		if args[0] == "bootstrap" && filepath.Base(args[len(args)-1]) == "probe.plist" {
+			if err := completeLaunchdProbe(m.t, args[len(args)-1], m.c); err != nil {
+				return nil, err
+			}
+			if m.event != nil {
+				return nil, m.event("launchd-probe bootstrap")
+			}
+			return nil, nil
+		}
+		if args[0] == "bootout" && strings.Contains(args[len(args)-1], "local.mycelium.preflight.") {
+			if m.event != nil {
+				return nil, m.event("launchd-probe bootout")
+			}
+			return nil, nil
+		}
+	}
 	call := name + " " + strings.Join(args, " ")
 	var out []byte
 	var result error

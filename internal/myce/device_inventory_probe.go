@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,40 +17,53 @@ func (p MachineProbe) Accelerators(ctx context.Context) ([]MachineDevice, error)
 	out := []MachineDevice{}
 	if p.OS == "darwin" && p.Arch == "arm64" {
 		d, err := p.Detect(ctx)
+		if errors.Is(err, ErrNoGPU) {
+			return out, nil
+		}
 		if err != nil {
 			return nil, err
 		}
 		return []MachineDevice{{ID: "0", Platform: "metal", Identity: d.GPU, Selector: "0", Fingerprint: d.GPU}}, nil
 	}
+	if p.Command == nil {
+		return nil, inventoryPreflightError("gpu_inventory_unavailable", "gpu", "inventory command runner missing")
+	}
 	b, err := p.Command(ctx, "nvidia-smi", "--query-gpu=uuid,driver_version", "--format=csv,noheader,nounits")
 	if err != nil && !errors.Is(err, exec.ErrNotFound) && !errors.Is(err, os.ErrNotExist) {
-		return nil, reject("device_probe_unavailable", errors.New("CUDA inventory probe unavailable"))
+		return nil, inventoryPreflightError("gpu_driver_unavailable", "cuda", "CUDA inventory probe unavailable; repair the driver and re-detect")
 	}
 	if err == nil && strings.TrimSpace(string(b)) != "" {
 		for _, line := range strings.Split(strings.TrimSpace(string(b)), "\n") {
 			uuid, driver, ok := strings.Cut(line, ",")
 			if !ok || !strings.HasPrefix(strings.TrimSpace(uuid), "GPU-") {
-				return nil, reject("device_probe_unavailable", errors.New("invalid CUDA UUID inventory"))
+				return nil, inventoryPreflightError("gpu_inventory_invalid", "cuda", "invalid CUDA UUID inventory")
 			}
 			uuid = strings.TrimSpace(uuid)
 			out = append(out, MachineDevice{Platform: "cuda", Identity: uuid, Selector: uuid, Fingerprint: strings.TrimSpace(driver)})
 		}
 	}
-	nodes, _ := filepath.Glob("/dev/dri/renderD*")
+	glob := p.Glob
+	if glob == nil {
+		glob = filepath.Glob
+	}
+	nodes, globErr := glob("/dev/dri/renderD*")
+	if globErr != nil {
+		return nil, inventoryPreflightError("gpu_inventory_unavailable", "xpu", "cannot inspect GPU nodes")
+	}
 	if len(nodes) > 0 {
 		if p.CommandEnv == nil {
-			return nil, reject("device_probe_unavailable", errors.New("Level Zero inventory requires a private environment runner"))
+			return nil, inventoryPreflightError("gpu_inventory_unavailable", "xpu", "Level Zero inventory requires a private environment runner")
 		}
 		b, err = p.CommandEnv(ctx, map[string]string{"ZE_ENABLE_PCI_ID_DEVICE_ORDER": "1", "ZE_AFFINITY_MASK": "", "ONEAPI_DEVICE_SELECTOR": ""}, "python3", "-c", levelZeroInventory)
 		if err != nil {
-			return nil, reject("device_probe_unavailable", errors.New("cannot enumerate Level Zero UUIDs in runtime order"))
+			return nil, inventoryPreflightError("gpu_driver_unavailable", "xpu", "cannot enumerate Level Zero UUIDs in runtime order")
 		}
 		var devices []struct {
 			Identity    string `json:"identity"`
 			Fingerprint string `json:"fingerprint"`
 		}
 		if err = json.Unmarshal(b, &devices); err != nil {
-			return nil, reject("device_probe_unavailable", fmt.Errorf("Level Zero inventory: %w", err))
+			return nil, inventoryPreflightError("gpu_inventory_invalid", "xpu", "invalid Level Zero inventory")
 		}
 		for i, d := range devices {
 			out = append(out, MachineDevice{Platform: "xpu", Identity: d.Identity, Selector: strconv.Itoa(i), Fingerprint: d.Fingerprint})
@@ -60,7 +72,15 @@ func (p MachineProbe) Accelerators(ctx context.Context) ([]MachineDevice, error)
 	for i := range out {
 		out[i].ID = strconv.Itoa(i)
 	}
+	if err := validateInventory(out); err != nil {
+		return nil, inventoryPreflightError("gpu_inventory_invalid", "gpu", "invalid or duplicate component identities")
+	}
 	return out, nil
+}
+
+// Keep M2's runtime rejection contract while exposing the onboarding diagnosis.
+func inventoryPreflightError(code, component, message string) error {
+	return reject("device_probe_unavailable", preflightError(code, component, message))
 }
 
 // ctypes is only a standard-library binding to the installed Level Zero API;

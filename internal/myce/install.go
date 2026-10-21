@@ -34,6 +34,8 @@ type MachineProbe struct {
 	Command  func(context.Context, string, ...string) ([]byte, error)
 	// CommandEnv runs a probe with per-process overrides; nil keeps injected Command fixtures.
 	CommandEnv func(context.Context, map[string]string, string, ...string) ([]byte, error)
+	Glob       func(string) ([]string, error)
+	ReadFile   func(string) ([]byte, error)
 }
 
 func LocalMachineProbe() MachineProbe {
@@ -45,7 +47,7 @@ func LocalMachineProbe() MachineProbe {
 		}
 		return cmd.Output()
 	}
-	return MachineProbe{OS: runtime.GOOS, Arch: runtime.GOARCH, CommandEnv: run, Command: func(ctx context.Context, n string, args ...string) ([]byte, error) {
+	return MachineProbe{OS: runtime.GOOS, Arch: runtime.GOARCH, Glob: filepath.Glob, ReadFile: os.ReadFile, CommandEnv: run, Command: func(ctx context.Context, n string, args ...string) ([]byte, error) {
 		return run(ctx, nil, n, args...)
 	}}
 }
@@ -71,6 +73,9 @@ func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detectio
 	}
 	if p.OS == "darwin" && p.Arch == "arm64" {
 		b, e := p.Command(ctx, "/usr/sbin/system_profiler", "SPDisplaysDataType")
+		if e != nil && !probeAbsent(e) {
+			return d, preflightError("gpu_driver_unavailable", "metal", "cannot inspect Metal; repair the runtime and re-detect")
+		}
 		if e != nil || !strings.Contains(string(b), "Metal") {
 			return d, fmt.Errorf("%w: Apple GPU/Metal not visible", ErrNoGPU)
 		}
@@ -85,6 +90,9 @@ func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detectio
 		args = append(args, "--id="+device)
 	}
 	b, e := p.Command(ctx, "nvidia-smi", args...)
+	if e != nil && !probeAbsent(e) {
+		return d, preflightError("gpu_driver_unavailable", "cuda", "NVIDIA driver probe failed; repair the driver and re-detect")
+	}
 	if e == nil && strings.TrimSpace(string(b)) != "" {
 		lines := strings.Split(strings.TrimSpace(string(b)), "\n")
 		if len(lines) != 1 {
@@ -92,7 +100,7 @@ func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detectio
 		}
 		name, memory, ok := strings.Cut(lines[0], ",")
 		if !ok {
-			return d, errors.New("invalid nvidia-smi inventory")
+			return d, preflightError("gpu_inventory_invalid", "cuda", "invalid nvidia-smi inventory")
 		}
 		d.Platform = "cuda"
 		d.GPU = strings.TrimSpace(name)
@@ -104,7 +112,7 @@ func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detectio
 			return d, nil
 		}
 		if e != nil || n <= 0 {
-			return d, errors.New("invalid CUDA memory inventory")
+			return d, preflightError("gpu_memory_unavailable", "cuda", "invalid CUDA memory inventory")
 		}
 		d.MemoryGB = n
 		d.MemoryMode = "dedicated"
@@ -122,7 +130,13 @@ func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detectio
 	}
 	b, e = sycl(ctx, "sycl-ls")
 	if e != nil {
+		if !probeAbsent(e) {
+			return d, preflightError("gpu_driver_unavailable", "xpu", "Intel driver probe failed; repair the runtime and re-detect")
+		}
 		b, e = p.Command(ctx, "xpu-smi", "discovery")
+		if e != nil && !probeAbsent(e) {
+			return d, preflightError("gpu_driver_unavailable", "xpu", "Intel driver probe failed; repair the runtime and re-detect")
+		}
 	}
 	intelGPU := ""
 	if e == nil {
@@ -135,6 +149,7 @@ func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detectio
 		}
 	}
 	if intelGPU != "" {
+		d.Platform, d.GPU = "xpu", strings.TrimSpace(intelGPU)
 		// Integrated XPU uses OS memory. Discrete XPU needs a measured allowance:
 		// do not silently substitute host RAM for its device memory.
 		low := strings.ToLower(intelGPU)
@@ -171,7 +186,7 @@ func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detectio
 					return d, nil
 				}
 			}
-			return d, errors.New("discrete Intel GPU memory unavailable: specify --gpu xpu --memory-mode fixed --memory-gb with an explicit device budget")
+			return d, preflightError("gpu_memory_unavailable", "xpu", "discrete Intel GPU memory unavailable: specify --gpu xpu --memory-mode fixed --memory-gb with an explicit device budget")
 		}
 		d.Platform = "xpu"
 		d.GPU = strings.TrimSpace(intelGPU)
@@ -179,10 +194,16 @@ func (p MachineProbe) DetectDevice(ctx context.Context, device string) (Detectio
 		d.ReserveGB = 8
 		return d, nil
 	}
+	if present, err := p.gpuPresent(); err != nil || present {
+		return d, preflightError("gpu_driver_missing", "gpu", "GPU hardware is present or cannot be inspected; install its supported driver and re-detect")
+	}
 	return d, fmt.Errorf("%w (nvidia-smi, sycl-ls/xpu-smi, or Apple Silicon Metal)", ErrNoGPU)
 }
 
 type ServiceConfig struct {
+	DailyUse          bool            `json:"daily_use"`
+	Laptop            bool            `json:"laptop"`
+	Desktop           bool            `json:"desktop"`
 	MachineDevices    []DeviceInstall `json:"machine_devices,omitempty"`
 	FromWorkerConfigs []string        `json:"-"`
 
@@ -464,10 +485,10 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 			result = errors.Join(result, tx.restore(ctx))
 		}
 	}()
-	if err := PrepareStateRoots(roots...); err != nil {
+	if err := prepareInstallNAS(ctx, c, command); err != nil {
 		return err
 	}
-	if err := prepareInstallNAS(ctx, c, command); err != nil {
+	if err := PrepareStateRoots(roots...); err != nil {
 		return err
 	}
 	data, err := os.ReadFile(executable)
@@ -530,7 +551,7 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 			return err
 		}
 		if c.Role == "worker" {
-			if err = validateWorkerService(ctx, c, command); err != nil {
+			if err = ValidateWorkerServiceEnvironment(ctx, c, RealClock{}, command); err != nil {
 				return err
 			}
 		}
@@ -546,6 +567,9 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 			_, err = command(ctx, "systemctl", "--user", "restart", filepath.Base(c.Service))
 		}
 	} else {
+		if err = ValidateWorkerServiceEnvironment(ctx, c, RealClock{}, command); err != nil {
+			return err
+		}
 		if tx.units[0].state.loaded {
 			if _, err = command(ctx, "launchctl", "bootout", tx.units[0].target()); err != nil {
 				return err
@@ -799,6 +823,7 @@ func (c ServiceConfig) Args() []string {
 		args = []string{"join", "--reserve-cpu-cores", strconv.Itoa(c.CPUReserveCores), "--cpu-budget-cores", strconv.Itoa(c.CPUBudgetCores), "--host-memory-budget-gb", strconv.FormatFloat(c.HostMemoryBudgetGB, 'f', -1, 64), "--memory-ceiling-slack-gb", strconv.FormatFloat(c.MemoryCeilingSlackGB, 'f', -1, 64), "--memory-swap-max-bytes", strconv.FormatInt(c.MemorySwapMaxBytes, 10), "--name", c.Name, "--gpu", c.Detection.Platform, "--memory-mode", c.Detection.MemoryMode, "--memory-gb", strconv.FormatFloat(c.Detection.MemoryGB, 'f', -1, 64), "--reserve-memory-gb", strconv.FormatFloat(c.Detection.ReserveGB, 'f', -1, 64), "--state-dir", c.State, "--checkpoint-root", c.Checkpoints, "--model-root", c.ModelRoot, "--model-cache", c.ModelCache, "--model-cache-bytes", strconv.FormatInt(c.ModelCacheBytes, 10), "--environment-root", c.EnvironmentRoot, "--environment-cache", c.EnvironmentCache, "--environment-cache-bytes", strconv.FormatInt(c.EnvironmentCacheBytes, 10)}
 	}
 	if c.Role == "worker" {
+		args = append(args, "--daily-use="+strconv.FormatBool(c.DailyUse), "--laptop="+strconv.FormatBool(c.Laptop), "--desktop="+strconv.FormatBool(c.Desktop))
 		if len(c.MachineDevices) > 0 {
 			data, _ := json.Marshal(c.MachineDevices)
 			args = append(args, "--device-settings", string(data))

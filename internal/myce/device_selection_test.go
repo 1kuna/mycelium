@@ -79,7 +79,8 @@ done
 		t.Fatal(err)
 	}
 	for _, name := range []string{"nvidia-smi", "xpu-smi"} {
-		if err := os.WriteFile(filepath.Join(root, name), []byte("#!/bin/sh\nexit 1\n"), 0700); err != nil {
+		// Empty inventory means absent hardware; a failing installed driver blocks.
+		if err := os.WriteFile(filepath.Join(root, name), []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
 			t.Fatal(err)
 		}
 	}

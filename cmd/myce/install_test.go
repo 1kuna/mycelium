@@ -28,6 +28,9 @@ func TestInstallCLIDryRunFakeDetection(t *testing.T) {
 				switch n {
 				case "nvidia-smi":
 					if platform == "cuda" {
+						if strings.Contains(strings.Join(args, " "), "uuid,driver_version") {
+							return []byte("GPU-test, driver"), nil
+						}
 						return []byte("RTX 4090, 24576"), nil
 					}
 				case "sycl-ls":
@@ -42,8 +45,20 @@ func TestInstallCLIDryRunFakeDetection(t *testing.T) {
 				if n == "systemctl" || n == "launchctl" {
 					t.Fatal("dry run touched service")
 				}
-				return nil, errors.New("absent")
+				return nil, exec.ErrNotFound
 			}}
+			p.Glob = func(pattern string) ([]string, error) {
+				if platform == "xpu" && strings.Contains(pattern, "renderD") {
+					return []string{"/dev/dri/renderD128"}, nil
+				}
+				return nil, nil
+			}
+			p.CommandEnv = func(ctx context.Context, _ map[string]string, n string, args ...string) ([]byte, error) {
+				if n == "python3" {
+					return []byte(`[{"identity":"uuid-test","fingerprint":"driver"}]`), nil
+				}
+				return p.Command(ctx, n, args...)
+			}
 			if platform == "metal" {
 				p.OS = "darwin"
 				p.Arch = "arm64"
@@ -157,7 +172,7 @@ func TestInstallCLICPUWithoutGPU(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home := t.TempDir()
-			probe := myce.MachineProbe{OS: "linux", Arch: "amd64", Command: func(context.Context, string, ...string) ([]byte, error) { return nil, errors.New("no GPU") }}
+			probe := myce.MachineProbe{OS: "linux", Arch: "amd64", Glob: func(string) ([]string, error) { return nil, nil }, Command: func(context.Context, string, ...string) ([]byte, error) { return nil, exec.ErrNotFound }}
 			args := append([]string{"install", "worker", "--nas", home, "--dry-run"}, tc.args...)
 			err := setupCommandWithProbe(args, probe, home)
 			if (err == nil) != tc.ok {
@@ -294,7 +309,12 @@ func TestInstallWorkerOverridesDetectedReserve(t *testing.T) {
 	saved := os.Stdout
 	os.Stdout = out
 	defer func() { os.Stdout = saved; out.Close() }()
-	probe := myce.MachineProbe{OS: "linux", Arch: "arm64", Command: func(context.Context, string, ...string) ([]byte, error) { return []byte("NVIDIA GB10, [N/A]"), nil }}
+	probe := myce.MachineProbe{OS: "linux", Arch: "arm64", Command: func(_ context.Context, n string, args ...string) ([]byte, error) {
+		if n == "nvidia-smi" && strings.Contains(strings.Join(args, " "), "uuid,driver_version") {
+			return []byte("GPU-test, driver"), nil
+		}
+		return []byte("NVIDIA GB10, [N/A]"), nil
+	}}
 	if err := setupCommandWithProbe([]string{"install", "worker", "--nas", home, "--reserve-memory-gb", "24", "--dry-run"}, probe, home); err != nil {
 		t.Fatal(err)
 	}

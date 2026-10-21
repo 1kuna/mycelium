@@ -2,7 +2,7 @@ package myce
 
 import (
 	"context"
-	"errors"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -64,7 +64,7 @@ func TestPlacementLinuxFreshHostAllowance(t *testing.T) {
 				}
 				return []byte("[level_zero:gpu:0] Intel discrete GPU\n"), nil
 			}
-			return nil, errors.New("unavailable")
+			return nil, exec.ErrNotFound
 		}},
 		ReadFile: func(path string) ([]byte, error) {
 			if path != "/proc/meminfo" {

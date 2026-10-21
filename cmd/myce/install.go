@@ -55,6 +55,7 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 	rollbackQueue := f.Bool("rollback-machines", false, "restore queue-side fences and legacy identities; retain upgraded queue")
 	rollback := f.Bool("rollback-machine", false, "restore the saved per-GPU installation; keep the compatible queue")
 	dry := f.Bool("dry-run", false, "print plan without installing")
+	redetect := f.Bool("redetect", false, "re-detect hardware without changing saved selectors or per-device budgets")
 	f.Bool("force", false, "deprecated compatibility option; explicit flags authorize changes")
 	f.BoolFunc("local-disable-receipts", "retired; reinstall without this option", func(string) error { return myce.ErrLegacyLocalDisableReceipts })
 	// Parsed values are separate from the effective config. These defaults are
@@ -205,6 +206,7 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 		return errors.New("--config must select an existing installation; use --root for a fresh install")
 	}
 	var c myce.ServiceConfig
+	var hardware *myce.HardwarePreflight
 	if installed != nil {
 		c = *installed
 	} else {
@@ -213,13 +215,12 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 			if values.Detection.Platform != "" {
 				d.Platform, d.MemoryMode, d.MemoryGB, d.ReserveGB = values.Detection.Platform, values.Detection.MemoryMode, values.Detection.MemoryGB, values.Detection.ReserveGB
 			} else {
-				d, e = probe.DetectDevice(ctx, values.Device)
-				if errors.Is(e, myce.ErrNoGPU) {
-					fmt.Fprintln(os.Stderr, cpuFallbackNotice)
-					d = myce.Detection{OS: probe.OS, Arch: probe.Arch, Platform: "cpu", MemoryMode: "fixed"}
-					e = nil
-				}
+				var detected myce.HardwarePreflight
+				detected, e = myce.PreflightHardware(ctx, values, probe)
+				d = detected.Detection
+				hardware = &detected
 				if e != nil {
+					hardware = nil
 					if !values.AllowDeviceless {
 						return e
 					}
@@ -239,6 +240,9 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 		c, e = myce.PlanInstall(role, home, *root, defaults.NAS, defaults.Queue, defaults.Name, d, account)
 		if e != nil {
 			return fmt.Errorf("usage: %w", e)
+		}
+		if hardware != nil && e == nil {
+			c = myce.ApplyHardwarePreflight(c, *hardware)
 		}
 		if *instance != "" {
 			if !explicit["name"] {
@@ -287,6 +291,27 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 	if e != nil {
 		return e
 	}
+	if role == "worker" && *redetect {
+		probeConfig := c
+		if !explicit["gpu"] {
+			probeConfig.Detection.Platform = ""
+		}
+		found, err := myce.PreflightHardware(ctx, probeConfig, probe)
+		if err != nil {
+			return err
+		}
+		c = myce.ApplyHardwarePreflight(c, found)
+	}
+	if role == "worker" && !*dry && installed == nil && hardware == nil && c.Detection.Platform != "fake" && c.Detection.Platform != "cpu" {
+		found, err := myce.PreflightHardware(ctx, c, probe)
+		if err != nil {
+			return err
+		}
+		c = myce.ApplyHardwarePreflight(c, found)
+	}
+	if role == "worker" {
+		c = myce.OverlayHardwareSettings(c, explicit)
+	}
 	if err := myce.CheckMachineInstallGate(c); err != nil {
 		return err
 	}
@@ -301,7 +326,7 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 		fmt.Println("Intended configuration changes:\n" + myce.InstallConfigDiff(*installed, c))
 	}
 	fmt.Printf("%s %s/%s: platform=%s memory=%s reserve=%.0f GiB\nQueue: %s\nNAS: %s\nCheckpoint root: %s\nModel cache: %s (%d bytes)\nEnvironment cache: %s (%d bytes)\nConfig: %s\nBoot service: %s\n", role, d.OS, d.Arch, d.Platform, d.MemoryMode, d.ReserveGB, c.Queue, c.NAS, c.Checkpoints, c.ModelCache, c.ModelCacheBytes, c.EnvironmentCache, c.EnvironmentCacheBytes, c.Config, c.Service)
-	if d.OS == "linux" {
+	if d.OS == "linux" && role == "queue" {
 		if probe.Command == nil {
 			fmt.Println("cannot inspect user lingering: command probe missing; run myce doctor.")
 		} else {
@@ -319,6 +344,13 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 			}
 		}
 	}
+	if role == "worker" && *dry {
+		if d.OS == "linux" {
+			fmt.Println("Install will enable and verify user lingering, or report the required administrator action.")
+		} else {
+			fmt.Println("LaunchAgent starts at GUI login; no pre-login or after-logout service. macOS CPU/RAM budgets are admission-only.")
+		}
+	}
 	fmt.Printf("Command: myce %s\n", strings.Join(c.Args(), " "))
 	if c.Role == "worker" {
 		fmt.Println("Worker installed; queue maintenance controls admission.")
@@ -331,6 +363,23 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 	executable, e := os.Executable()
 	if e != nil {
 		return e
+	}
+	if role == "worker" && c.Detection.Platform != "fake" {
+		c, e = myce.PrepareOnboardingStorage(ctx, c, installed == nil && !explicit["nas"], probe.Command)
+		if e != nil {
+			return e
+		}
+	}
+	if role == "worker" && !c.AllowDeviceless {
+		c, e = myce.BootstrapEnvironmentTools(ctx, c, myce.LocalToolBootstrapProbe(probe))
+		if e != nil {
+			return e
+		}
+		report, err := myce.EnsureOnboardingServiceSession(ctx, c, probe.Command)
+		if err != nil {
+			return err
+		}
+		fmt.Println(report.String())
 	}
 	if e = myce.Install(ctx, c, executable, env("MYCE_TOKEN", ""), probe.Command); e != nil {
 		return e

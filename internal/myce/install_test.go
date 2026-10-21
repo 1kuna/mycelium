@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -27,7 +28,7 @@ func fakeProbe(osname, arch, nvidia, intel string) MachineProbe {
 		case "uv":
 			return []byte("uv 0.8"), nil
 		}
-		return nil, errors.New("not installed")
+		return nil, exec.ErrNotFound
 	}}
 }
 func TestInstallDetectionDryPlans(t *testing.T) {
@@ -84,10 +85,16 @@ func TestInstallAndUninstallTempOnly(t *testing.T) {
 		t.Fatal(e)
 	}
 	executable := filepath.Join(home, "test-executable")
+	if err := os.Mkdir(c.NAS, 0700); err != nil {
+		t.Fatal(err)
+	}
 	os.WriteFile(executable, []byte("test binary"), 0700)
 	commands := []string{}
 	runner := func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		commands = append(commands, name+" "+strings.Join(args, " "))
+		if name == "cat" {
+			return []byte("fixture " + c.NAS + " nfs rw 0 0\n"), nil
+		}
 		if name == "systemctl" && len(args) > 1 && args[1] == "is-active" {
 			return nil, installTestExit(3)
 		}
@@ -100,7 +107,7 @@ func TestInstallAndUninstallTempOnly(t *testing.T) {
 		t.Fatal(e)
 	}
 	// Snapshot the current unit, both obsolete units and effective drop-ins.
-	if len(commands) != 11 {
+	if len(commands) != 12 {
 		t.Fatal(commands)
 	}
 	if commands[1] != "systemctl --user is-active --quiet myce-worker.service" {
@@ -182,7 +189,7 @@ func TestInstallDiscreteIntelUsesConservativeDeviceMemory(t *testing.T) {
 			}
 			return []byte("[level_zero:gpu] Intel Data Center GPU Max"), nil
 		}
-		return nil, errors.New("absent")
+		return nil, exec.ErrNotFound
 	}}
 	d, e := p.Detect(context.Background())
 	if e != nil || d.Platform != "xpu" || d.MemoryMode != "fixed" || d.MemoryGB != 16 {
@@ -192,7 +199,7 @@ func TestInstallDiscreteIntelUsesConservativeDeviceMemory(t *testing.T) {
 		if name == "sycl-ls" {
 			return []byte("[opencl:cpu] Intel CPU\n[opencl:gpu] Other GPU"), nil
 		}
-		return nil, errors.New("absent")
+		return nil, exec.ErrNotFound
 	}
 	if _, e = p.Detect(context.Background()); e == nil {
 		t.Fatal("CPU vendor used as GPU vendor")

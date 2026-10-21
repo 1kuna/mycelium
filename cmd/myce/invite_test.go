@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"html"
 	"io"
 	"os"
 	"path/filepath"
@@ -88,7 +90,22 @@ func TestInvitationInstallPersistsTrustAndStatus(t *testing.T) {
 	if err = os.WriteFile(binary, []byte("test binary"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err = myce.Install(context.Background(), c, binary, "", func(context.Context, string, ...string) ([]byte, error) { return nil, nil }); err != nil {
+	if err = myce.Install(context.Background(), c, binary, "", func(_ context.Context, name string, args ...string) ([]byte, error) {
+		if name == "launchctl" && args[0] == "bootstrap" && filepath.Base(args[2]) == "probe.plist" {
+			b, err := os.ReadFile(args[2])
+			if err != nil {
+				return nil, err
+			}
+			_, rest, ok := strings.Cut(string(b), "<key>StandardOutPath</key><string>")
+			if !ok {
+				t.Fatal("launchd probe output missing")
+			}
+			output, _, _ := strings.Cut(rest, "</string>")
+			data, _ := json.Marshal(myce.HardwarePreflight{Detection: c.Detection})
+			return nil, os.WriteFile(html.UnescapeString(output), data, 0600)
+		}
+		return nil, nil
+	}); err != nil {
 		t.Fatal(err)
 	}
 	installed, err := myce.ReadServiceConfig(c.Config)

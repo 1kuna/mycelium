@@ -63,6 +63,9 @@ func savedInstallFixture(t *testing.T, roles ...string) (myce.ServiceConfig, myc
 		}
 	}
 	c.HostID = "fixture-host"
+	// Chassis declarations are exclusive; preserve both true and false policy
+	// values without constructing an invalid laptop+desktop fixture.
+	c.Desktop = false
 	if role == "worker" {
 		c.RequireMemoryCeilings = true
 
