@@ -257,9 +257,11 @@ func (w Worker) verifyDevice() error {
 	devices, err := w.InventoryProbe(ctx)
 	expected := *w.selectedDevice
 	matches := 0
+	currentReason := ""
 	for _, d := range devices {
 		if d.Platform == expected.Platform && d.Selector == expected.Selector && d.Identity == expected.Identity {
 			matches++
+			currentReason = d.Reason
 		}
 	}
 	if err != nil {
@@ -273,6 +275,9 @@ func (w Worker) verifyDevice() error {
 	}
 	if matches != 1 {
 		return reject("device_identity_mismatch", errors.New("device runtime mapping no longer matches saved identity"))
+	}
+	if currentReason != "" {
+		return reject(currentReason, errors.New(rejectionMessages[currentReason]))
 	}
 	return nil
 }

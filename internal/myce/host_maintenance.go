@@ -3,6 +3,7 @@ package myce
 import (
 	"errors"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -214,6 +215,7 @@ func (q *Queue) hostMaintenanceStatus(host string) HostMaintenanceStatus {
 		out.Workers = append(out.Workers, MaintenanceWorker{Machine: cloneMachine(m), Fresh: fresh})
 		freshEvidence = freshEvidence && fresh
 		out.Healthy = out.Healthy && fresh && !m.HostMemoryPolicyMismatch && m.MemoryError == "" && m.HostMemoryError == "" && m.InventoryReason == ""
+		out.Healthy = out.Healthy && !slices.ContainsFunc(m.Devices, func(d MachineDevice) bool { return d.Reason != "" })
 		out.MemoryInUseGB = max(out.MemoryInUseGB, m.HostMemoryInUseGB)
 		out.MemoryDebtGB = max(out.MemoryDebtGB, m.hostReservationDebtGB)
 		if m.DockerCleanup != "" {
