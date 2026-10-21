@@ -170,6 +170,17 @@ NEW_MYCE install worker --config SINGLE_MACHINE_CONFIG \
   --from-worker-config SINGLE_SOURCE_CONFIG
 ```
 
+A single source with automatic device selection is resolved on that host using
+the normal accelerator inventory. The preview shows the detected UUIDs and keeps
+the source's memory settings for each device in its configured accelerator
+family. Explicit source selectors are preserved without probing. An automatic
+source cannot be combined with other source workers. Preview does not require
+queue registration; installation still requires the source in the maintained
+queue with the existing identity and settlement checks. For a source absent from
+the queue, use the ordinary in-place install path and the
+[fresh-state procedure](guide-fresh-install.md) when required; a successful
+conversion preview does not authorize bypassing those checks.
+
 The source manager stop must complete the same-name worker's normal leave.
 Failure restores the previous install and keeps queue maintenance active.
 Worker-local catalog placement fences are rewritten from explicit queue retirement

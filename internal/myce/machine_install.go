@@ -15,7 +15,7 @@ import (
 	"strings"
 )
 
-// DeviceInstall preserves each source worker's selector and capacity contract.
+// DeviceInstall preserves each source worker's resolved selector and capacity contract.
 type DeviceInstall struct {
 	Selector  string    `json:"selector"`
 	Detection Detection `json:"detection"`
@@ -28,6 +28,12 @@ func migrationError(code, detail string) error {
 // PlanMachineInstall is read-only: explicit sources establish ownership. Cache
 // artifacts remain where they are; gpu0 supplies the single machine cache.
 func PlanMachineInstall(destination string, paths []string, explicit map[string]bool) (ServiceConfig, error) {
+	return PlanMachineInstallWithProbe(context.Background(), destination, paths, explicit, LocalMachineProbe())
+}
+
+// PlanMachineInstallWithProbe resolves automatic sources using the same vendor
+// inventory as a fresh worker. Explicit source selectors need no hardware probe.
+func PlanMachineInstallWithProbe(ctx context.Context, destination string, paths []string, explicit map[string]bool, probe MachineProbe) (ServiceConfig, error) {
 	var zero ServiceConfig
 	if data, err := os.ReadFile(destination + ".m4-rollback.json"); err == nil {
 		var j workerMigration
@@ -64,8 +70,11 @@ func PlanMachineInstall(destination string, paths []string, explicit map[string]
 		if err != nil {
 			return zero, err
 		}
-		if c.Role != "worker" || c.Config != path || c.HostID == "" || seen[path] || c.Device == "" || singleDeviceMask(c.Device) != nil || c.Detection.OS == "linux" && !ValidWorkerUnit(filepath.Base(c.Service)) {
+		if c.Role != "worker" || c.Config != path || c.HostID == "" || seen[path] || singleDeviceMask(c.Device) != nil || c.Detection.OS == "linux" && !ValidWorkerUnit(filepath.Base(c.Service)) {
 			return zero, migrationError("machine_migration_conflict", "source identity or device")
+		}
+		if c.Device == "" && len(paths) != 1 {
+			return zero, migrationError("machine_migration_conflict", "automatic selection requires a single source worker")
 		}
 		seen[path] = true
 		sources = append(sources, c)
@@ -106,6 +115,26 @@ func PlanMachineInstall(destination string, paths []string, explicit map[string]
 	selectors := []string{}
 	base.MachineDevices = nil
 	for _, c := range sources {
+		if c.Device == "" {
+			if c.Detection.OS != probe.OS || c.Detection.Arch != probe.Arch {
+				return zero, migrationError("machine_migration_conflict", "automatic selection requires the source platform")
+			}
+			devices, err := probe.Accelerators(ctx)
+			var partial *acceleratorProbeError
+			if err != nil && (!errors.As(err, &partial) || partial.failed(c.Detection.Platform)) {
+				return zero, err
+			}
+			for _, d := range devices {
+				if d.Platform == c.Detection.Platform {
+					selectors = append(selectors, d.Identity)
+					base.MachineDevices = append(base.MachineDevices, DeviceInstall{d.Identity, c.Detection})
+				}
+			}
+			if len(selectors) == 0 {
+				return zero, migrationError("machine_migration_conflict", "automatic selection found no matching devices")
+			}
+			continue
+		}
 		if slices.Contains(selectors, c.Device) {
 			return zero, migrationError("machine_migration_conflict", "duplicate selector")
 		}
