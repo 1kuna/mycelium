@@ -13,6 +13,7 @@ scripts/release.sh v3.1.0 OUTPUT_DIR PRIVATE_SIGNING_KEY
 ```
 
 Versions must be semver values, monotonically increasing for normal upgrades.
+Build metadata (`+build`) does not change version precedence.
 The shared `ReleaseTargets` data drives validation, manifest creation and
 `myce release build-targets`, which the build script consumes.
 This builds `myce-linux-amd64`, `myce-linux-arm64` (CGO disabled), and
@@ -33,7 +34,11 @@ myce queue --release-manifest RELEASE_JSON --release-key PUBLIC_PEM \
 ```
 
 The queue refuses invalid signatures, incomplete target matrices, incompatible
-protocols or a Mac artifact lacking native sensing. A pinned authenticated
+protocols or a Mac artifact lacking native sensing. Approval is persisted in the
+SQLite queue and requires a version strictly newer than its current approval.
+To intentionally re-approve the same release (including after restarting with the
+same manifest), or approve an older one, append `--allow-downgrade` to the queue
+command. Signature and artifact validation still apply. A pinned authenticated
 `myce invite` fetches the approved public metadata; a queue without release
 configuration returns `release_unavailable` and cannot mint a bootstrap command.
 The publisher certificate trust is ordinary HTTPS. The LAN queue's full
@@ -64,12 +69,31 @@ See [joining](guide-joining-v3.md) for the user flow and successful enrollment s
 An older invitation line cannot silently downgrade an installed binary. The target
 compares the signed release version with the installed executable's version and
 refuses an older version unless `--allow-downgrade` is explicitly appended.
+An equal version with different bytes also requires that flag; `+build` metadata
+counts as equal. Identical-byte same-version reruns remain idempotent.
+
+Existing fleet installations may report `development` or another non-semver
+version. To replace one, use a currently approved semver release's printed line
+with `--allow-downgrade` appended explicitly. This overrides the unordered installed
+version, while retaining checksum, protocol, saved-authority, custody and readiness
+checks. It does not convert an incompatible legacy installation; use the explicit
+conversion path where required.
 Same-version reruns explain that installer flags are not reapplied; use the normal
 `myce install worker --config CONFIG` path to change those settings.
 
 Upgrade preflight refuses busy hosts before changing policy. If work races with
 the drain, a wait timeout restores the exact self-made drain through CAS, with a
-separate cleanup budget. After install/readiness failure, a mode-0600 resume
-receipt enables a successful rerun to resume its own drain. It cannot authorize
-resuming an operator's later disable or drain. Drain waiting, installation and
-readiness do not share an exhausted timeout budget.
+separate cleanup budget. A mode-0600 intent receipt is written before the drain
+POST. A rerun promotes an intent plus an observed drain into an exact timestamp
+receipt, covering a crash before recording the POST response. Once recorded, the
+receipt cannot authorize resuming an operator's later disable or drain.
+
+Installer failure restores the existing install transaction and resumes only the
+self-made drain. If newly installed bytes never become ready, that same transaction
+restores the previous binary/config/service and verifies its enrolled readiness
+before resuming. The error states the
+recovery outcome. Failed rollback or conditional resume reports why the host could
+not be resumed and asks for a rerun. A process crash loses the in-memory install
+snapshot: if already-installed bytes fail readiness on rerun, the command explicitly
+reports that rollback is unavailable and preserves maintenance for recovery.
+Drain waiting, installation and readiness have separate timeout budgets.

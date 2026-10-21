@@ -109,7 +109,7 @@ func TestEnrollmentUpgradeRerunResumesOwnDrain(t *testing.T) {
 	if _, err := PrepareEnrollmentUpgrade(context.Background(), c, client, clock, time.Second, nil); err != nil {
 		t.Fatal(err)
 	}
-	// Simulate an installer failure and a new invocation with no in-memory receipt.
+	// Simulate a process crash and a new invocation with no in-memory receipt.
 	receipt, err := PrepareEnrollmentUpgrade(context.Background(), c, client, clock, time.Second, nil)
 	if err != nil {
 		t.Fatal(err)

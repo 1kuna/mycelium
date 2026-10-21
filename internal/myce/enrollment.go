@@ -126,13 +126,16 @@ func ReadEnrollmentReceipt(dir string) (EnrollmentReceipt, error) {
 	return r, nil
 }
 func EvaluateEnrollment(receipt EnrollmentReceipt, o EnrollmentObservation) (string, error) {
+	return evaluateEnrollmentVersion(receipt, o, BuildVersion)
+}
+func evaluateEnrollmentVersion(receipt EnrollmentReceipt, o EnrollmentObservation, version string) (string, error) {
 	incomplete := func(reason string) (string, error) { return "", fmt.Errorf("enrollment incomplete: %s", reason) }
 	m := o.Machine
 	p := m.Enrollment
 	if !o.Fresh || m.Gone || m.Leaving || m.Recovering || m.Session == "" || m.Session != receipt.Session {
 		return incomplete("exact session is not fresh and reconciled")
 	}
-	if receipt.Version != BuildVersion || o.StartGate != startGateProtocol || o.AttemptProtocol != keyedAttemptProtocol || p == nil || p.StartGate != startGateProtocol || p.AttemptProtocol != keyedAttemptProtocol || p.Version != receipt.Version {
+	if receipt.Version != version || o.StartGate != startGateProtocol || o.AttemptProtocol != keyedAttemptProtocol || p == nil || p.StartGate != startGateProtocol || p.AttemptProtocol != keyedAttemptProtocol || p.Version != receipt.Version {
 		return incomplete("release or worker protocol mismatch; upgrade the queue first")
 	}
 	if !p.RunnerSmoke {
@@ -228,6 +231,8 @@ func EnrollmentServiceHealth(ctx context.Context, c ServiceConfig, command func(
 }
 
 type EnrollmentWait struct {
+	// Version defaults to this binary; recovery explicitly verifies the restored release.
+	Version   string
 	Clock     Clock
 	Timeout   time.Duration
 	StableFor time.Duration
@@ -259,6 +264,9 @@ func WaitEnrollment(ctx context.Context, c ServiceConfig, client Client, opt Enr
 	if opt.StableFor <= 0 {
 		opt.StableFor = 30 * time.Second
 	}
+	if opt.Version == "" {
+		opt.Version = BuildVersion
+	}
 	deadline := opt.Clock.Now().Add(opt.Timeout)
 	var stableSince time.Time
 	var previous string
@@ -282,7 +290,7 @@ func WaitEnrollment(ctx context.Context, c ServiceConfig, client Client, opt Enr
 			return EnrollmentResult{}, errors.New("enrollment incomplete: HTTP 426; upgrade queue before the hypha")
 		}
 		if err == nil {
-			state, err = EvaluateEnrollment(receipt, observation)
+			state, err = evaluateEnrollmentVersion(receipt, observation, opt.Version)
 			if err == nil {
 				err = expectedEnrollmentDevices(c, observation.Machine.Devices)
 			}

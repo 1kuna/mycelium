@@ -11,6 +11,7 @@ import (
 )
 
 type enrollmentResumeReceipt struct {
+	Intent    bool      `json:"intent,omitempty"`
 	Host      string    `json:"host"`
 	Name      string    `json:"name"`
 	UpdatedAt time.Time `json:"updated_at"`
@@ -18,8 +19,8 @@ type enrollmentResumeReceipt struct {
 
 const enrollmentResumeFile = "enrollment-resume.json"
 
-// ReadEnrollmentUpgrade returns only a self-made drain, fenced by host, worker
-// identity and the queue policy timestamp. No receipt means no resume authority.
+// ReadEnrollmentUpgrade reads the private drain or pre-POST intent fence.
+// ResolveEnrollmentUpgrade observes intents before granting resume authority.
 func ReadEnrollmentUpgrade(c ServiceConfig) (HostMaintenanceStatus, error) {
 	var status HostMaintenanceStatus
 	b, err := os.ReadFile(filepath.Join(c.State, enrollmentResumeFile))
@@ -34,13 +35,35 @@ func ReadEnrollmentUpgrade(c ServiceConfig) (HostMaintenanceStatus, error) {
 		return status, errors.New("invalid enrollment resume receipt; preserve maintenance and inspect installation")
 	}
 	status.Host = r.Host
-	status.Policy = HostMaintenance{Mode: "drained", UpdatedAt: r.UpdatedAt}
+	mode := "drained"
+	if r.Intent {
+		mode = "enabled"
+	}
+	status.Policy = HostMaintenance{Mode: mode, UpdatedAt: r.UpdatedAt}
 	return status, nil
+}
+
+// ResolveEnrollmentUpgrade promotes a durable drain intent after a crash between
+// the request and recording its response. Completed receipts retain their CAS fence.
+func ResolveEnrollmentUpgrade(ctx context.Context, c ServiceConfig, client Client) (HostMaintenanceStatus, error) {
+	receipt, err := ReadEnrollmentUpgrade(c)
+	if err != nil || receipt.Policy.Mode != "enabled" {
+		return receipt, err
+	}
+	var observed HostMaintenanceStatus
+	if err = client.Call(ctx, "GET", "/api/hosts/"+url.PathEscape(c.HostID)+"/maintenance", nil, &observed); err != nil {
+		return receipt, err
+	}
+	if observed.Policy.Mode != "drained" {
+		return HostMaintenanceStatus{}, nil
+	}
+	err = saveWorkerJSON(c.State, enrollmentResumeFile, enrollmentResumeReceipt{Host: c.HostID, Name: c.Name, UpdatedAt: observed.Policy.UpdatedAt})
+	return observed, err
 }
 
 // PrepareEnrollmentUpgrade refuses busy hosts before changing policy. If work
 // races with the drain, bounded waiting restores only our exact CAS transition.
-// Installation failures retain the private receipt for the next invocation.
+// The caller restores installation and resumes owned drains on install/readiness failure.
 func PrepareEnrollmentUpgrade(ctx context.Context, c ServiceConfig, client Client, clock Clock, timeout time.Duration, wait func(context.Context, time.Duration) error) (HostMaintenanceStatus, error) {
 	if c.State == "" {
 		return HostMaintenanceStatus{}, errors.New("upgrade state directory required")
@@ -76,7 +99,7 @@ func PrepareEnrollmentUpgrade(ctx context.Context, c ServiceConfig, client Clien
 	if !observation.Fresh || observation.Machine.Session != session || observation.StartGate != startGateProtocol || observation.AttemptProtocol != keyedAttemptProtocol {
 		return status, errors.New("upgrade requires compatible queue protocols before replacing the worker")
 	}
-	receipt, err := ReadEnrollmentUpgrade(c)
+	receipt, err := ResolveEnrollmentUpgrade(ctx, c, client)
 	if err != nil {
 		return status, err
 	}
@@ -85,12 +108,22 @@ func PrepareEnrollmentUpgrade(ctx context.Context, c ServiceConfig, client Clien
 		if !status.Healthy || len(status.Attempts) > 0 || status.Calls > 0 || status.Preparations > 0 || status.Sidecars > 0 || len(status.PendingReleases) > 0 || len(status.PendingCleanup) > 0 || status.MemoryInUseGB > 0 || status.MemoryDebtGB > 0 {
 			return status, errors.New("upgrade refused before drain: local host still has execution custody; rerun after jobs finish")
 		}
+		// Save intent before crossing the queue mutation boundary.
+		if err = saveWorkerJSON(c.State, enrollmentResumeFile, enrollmentResumeReceipt{Intent: true, Host: c.HostID, Name: c.Name, UpdatedAt: status.Policy.UpdatedAt}); err != nil {
+			return status, errors.Join(errors.New("cannot persist upgrade drain intent"), err)
+		}
 		if err = client.Call(ctx, "POST", path, HostMaintenanceRequest{Action: "drain", IfMode: "enabled", IfUpdatedAt: &status.Policy.UpdatedAt}, &status); err != nil {
-			return status, err
+			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+			defer cancel()
+			recovered, resolveErr := ResolveEnrollmentUpgrade(cleanup, c, client)
+			if resolveErr == nil {
+				resolveErr = FinishEnrollmentUpgrade(cleanup, c, client, recovered)
+			}
+			return status, errors.Join(err, resolveErr)
 		}
 		receipt = status
 		owned = true
-		if err = saveWorkerJSON(c.State, enrollmentResumeFile, enrollmentResumeReceipt{c.HostID, c.Name, status.Policy.UpdatedAt}); err != nil {
+		if err = saveWorkerJSON(c.State, enrollmentResumeFile, enrollmentResumeReceipt{Host: c.HostID, Name: c.Name, UpdatedAt: status.Policy.UpdatedAt}); err != nil {
 			return status, errors.Join(errors.New("cannot persist upgrade resume receipt"), undoEnrollmentDrain(ctx, c, client, receipt))
 		}
 	}

@@ -1477,7 +1477,9 @@ The publisher signs an exact JSON manifest with Ed25519. The queue verifies it
 against an independently provisioned public key, never a key from the manifest,
 then supplies approved public release metadata to pinned authenticated inviters.
 Explicit local manifest/key/origin overrides perform the same verification.
-Release versions are ordered semver values (for example `v3.1.0`).
+Release versions are ordered semver values (for example `v3.1.0`). Queue approval
+is persisted in SQLite and must strictly increase unless `--allow-downgrade`
+explicitly re-approves or downgrades it. Semver build metadata has equal precedence.
 The verified manifest binds version, protocols, OS/arch, size, SHA-256 and native
 Mac sensing. No release tooling existed to reuse. A small POSIX command is needed
 because clean hosts have no myce, Go or Git. Its embedded verified hash matrix
@@ -1508,7 +1510,8 @@ A machine's receipt binds its service PID, exact release/session, expected
 inventory, CPU count and total RAM; queue-owned CPU/RAM allowances must be
 acknowledged.
 Saved per-device settings or explicit selector lists independently establish expected
-devices. A configured but absent device reports `device_selector_unmatched` and
+devices. A failed probe retains `device_probe_unavailable`; a successful probe
+with a configured but absent device reports `device_selector_unmatched` and
 cannot be ready. launchd health reads the service block's direct keys, ignoring
 nested resource states. Healthy service identity must remain stable for 30 seconds.
 Unchanged receipts are not rewritten; receipt-write failures are logged without
@@ -1527,14 +1530,21 @@ Same-version reruns verify health without changing files or restarting services,
 and explicitly explain that installer flags are not reapplied. Older releases are
 refused unless the operator passes `--allow-downgrade` explicitly; comparison uses
 the installed binary's version, not an invitation's age or a stale worker receipt.
+Equal versions (including `+build` metadata) require identical bytes, otherwise
+`--allow-downgrade` is required. Replacing an installed non-semver version such as
+`development` also requires that explicit flag; the published target remains semver.
 A changed release refuses busy local hosts before draining through existing queue
 maintenance. A race with new custody is bounded: drain-wait failure conditionally
 restores its own exact transition. Drain-wait and install/readiness have separate
 budgets. The existing installer transaction and spool remain the install path.
 Existing disabled/drained policy is preserved; an installer never resumes an
 operator-disabled host. A private resume receipt fences a self-made drain by host,
-name and policy timestamp.
-Install/readiness failures retain that receipt and custody for repair; a successful
-rerun resumes only that exact transition, including a rerun after new bytes have
-already installed. Operator-created maintenance remains respected. No fleet
+name and policy timestamp. Its durable intent precedes the drain POST; an intent
+plus an observed drain on rerun is promoted to the exact timestamp receipt.
+Install/readiness failure restores the previous installation through the existing
+transaction and verifies its enrolled readiness before resuming only the self-made drain, with a separate cleanup
+budget. Errors state whether the previous release resumed or why recovery failed.
+A crash loses the in-memory installer snapshot; if already-installed bytes never
+become ready on rerun, report rollback unavailable and preserve maintenance.
+Operator-created maintenance remains respected. No fleet
 operation, reboot, driver install or privileged service is implied. Native fleet acceptance remains a separately authorized test window.

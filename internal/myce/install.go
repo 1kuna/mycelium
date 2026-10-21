@@ -385,6 +385,14 @@ func Install(ctx context.Context, c ServiceConfig, executable, token string, com
 	return installWithFiles(ctx, c, executable, token, command, installFiles{})
 }
 
+// InstallWithRollback retains the normal transaction until the caller completes
+// enrollment readiness. The returned rollback restores files and manager state.
+func InstallWithRollback(ctx context.Context, c ServiceConfig, executable, token string, command func(context.Context, string, ...string) ([]byte, error)) (func(context.Context) error, error) {
+	var rollback func(context.Context) error
+	err := installWithFiles(ctx, c, executable, token, command, installFiles{retain: func(tx *installTransaction) { rollback = tx.restore }})
+	return rollback, err
+}
+
 func installWithFiles(ctx context.Context, c ServiceConfig, executable, token string, command func(context.Context, string, ...string) ([]byte, error), files installFiles) (result error) {
 	if os.Geteuid() == 0 {
 		return ErrHostIdentity
@@ -553,6 +561,9 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 			}
 		}
 		_, err = command(ctx, "launchctl", "bootstrap", "gui/"+strconv.Itoa(os.Getuid()), c.Service)
+	}
+	if err == nil && files.retain != nil {
+		files.retain(tx)
 	}
 	return err
 }

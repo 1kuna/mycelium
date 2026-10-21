@@ -202,7 +202,7 @@ func (w *Worker) refreshInventory(ctx context.Context, observed []MachineDevice,
 				break
 			}
 		}
-		if !found {
+		if !found && w.inventoryReason == "" {
 			w.inventoryReason = "device_selector_unmatched"
 		}
 	}

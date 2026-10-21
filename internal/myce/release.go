@@ -56,7 +56,7 @@ func Version() VersionInfo {
 	return VersionInfo{BuildVersion, runtime.GOOS, runtime.GOARCH, startGateProtocol, keyedAttemptProtocol, NativeOwnerSignals}
 }
 
-var releaseName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,79}$`)
+var releaseName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._+-]{0,79}$`)
 
 type ReleaseTarget struct {
 	OS            string `json:"os"`
@@ -67,12 +67,25 @@ type ReleaseTarget struct {
 // ReleaseTargets is shared by the publisher, validator and release build script.
 var ReleaseTargets = []ReleaseTarget{{"linux", "amd64", false}, {"linux", "arm64", false}, {"darwin", "arm64", true}}
 
-func CheckReleaseUpgrade(target, installed string, allowDowngrade bool) error {
-	if !semver.IsValid(target) || !semver.IsValid(installed) {
-		return errors.New("release_version_unordered: version comparison requires semver releases")
+// sameBytes is supplied when comparing installed artifacts, rather than versions alone.
+func CheckReleaseUpgrade(target, installed string, allowDowngrade bool, sameBytes ...bool) error {
+	if !semver.IsValid(target) {
+		return errors.New("release_version_unordered: target requires a semver release")
 	}
-	if semver.Compare(target, installed) < 0 && !allowDowngrade {
-		return errors.New("release_downgrade_refused: use --allow-downgrade explicitly to install an older release")
+	if !semver.IsValid(installed) {
+		if allowDowngrade {
+			return nil
+		}
+		return errors.New("release_version_unordered: installed version is not semver; use --allow-downgrade explicitly to replace it")
+	}
+	comparison := semver.Compare(target, installed)
+	if !allowDowngrade {
+		if comparison < 0 {
+			return errors.New("release_downgrade_refused: use --allow-downgrade explicitly to install an older release")
+		}
+		if comparison == 0 && len(sameBytes) > 0 && !sameBytes[0] {
+			return errors.New("release_version_reused: equal versions require identical bytes; use --allow-downgrade explicitly to replace them")
+		}
 	}
 	return nil
 }

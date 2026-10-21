@@ -98,7 +98,7 @@ func parseEnrollmentCLI(args []string) (enrollmentCLI, error) {
 	}
 	return o, nil
 }
-func enrollmentCommand(args []string, probe myce.MachineProbe, home string, lookup func(string) (myce.WorkerAccount, error)) error {
+func enrollmentCommand(args []string, probe myce.MachineProbe, home string, lookup func(string) (myce.WorkerAccount, error)) (resultErr error) {
 	o, err := parseEnrollmentCLI(args)
 	if err != nil {
 		return err
@@ -176,6 +176,51 @@ func enrollmentCommand(args []string, probe myce.MachineProbe, home string, look
 	clock := myce.RealClock{}
 	var client myce.Client
 	var drain *myce.HostMaintenanceStatus
+	var previousHash, previousVersion string
+	var rollback func(context.Context) error
+	var resumed bool
+	defer func() {
+		if resultErr == nil || old == nil || drain == nil || drain.Policy.Mode != "drained" || drain.Policy.UpdatedAt.IsZero() {
+			return
+		}
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
+		defer cancel()
+		recoveryFailed := func(reason error) {
+			resultErr = fmt.Errorf("upgrade failed; host could not be resumed: %v; rerun to recover: %w", reason, resultErr)
+		}
+		// If final verification fails after resume, regain quiescence before rollback.
+		if resumed {
+			status, e := myce.PrepareEnrollmentUpgrade(cleanup, *old, client, clock, o.timeout, nil)
+			if e != nil {
+				recoveryFailed(e)
+				return
+			}
+			drain = &status
+		}
+		if rollback != nil {
+			if e := rollback(cleanup); e != nil {
+				recoveryFailed(e)
+				return
+			}
+		}
+		hash, e := myce.FileSHA256(old.Binary)
+		if e != nil || hash != previousHash || strings.Contains(resultErr.Error(), "rollback incomplete") {
+			recoveryFailed(errors.New("previous installation could not be restored; preserve the drain and repair the install"))
+			return
+		}
+		if old.Enrollment {
+			_, e = myce.WaitEnrollment(cleanup, *old, client, myce.EnrollmentWait{Clock: clock, Timeout: 2 * time.Minute, Command: probe.Command, Version: previousVersion})
+			if e != nil {
+				recoveryFailed(fmt.Errorf("previous release did not become ready: %w", e))
+				return
+			}
+		}
+		if e = myce.FinishEnrollmentUpgrade(cleanup, *old, client, *drain); e != nil {
+			recoveryFailed(e)
+			return
+		}
+		resultErr = fmt.Errorf("upgrade failed; host resumed on previous release: %w", resultErr)
+	}()
 	if old != nil {
 		if old.Role != "worker" || old.Config != config || old.JoiningFile == "" || old.EnvironmentFile != "" || old.Detection.OS != probe.OS || old.Detection.Arch != probe.Arch {
 			return errors.New("existing installation requires its saved pinned joining authority and matching platform; use the explicit conversion path")
@@ -202,22 +247,33 @@ func enrollmentCommand(args []string, probe myce.MachineProbe, home string, look
 		if e != nil {
 			return e
 		}
-		if e = myce.CheckReleaseUpgrade(o.version, installedVersion, o.allowDowngrade); e != nil {
+		previousHash, previousVersion = installedHash, installedVersion
+		if e = myce.CheckReleaseUpgrade(o.version, installedVersion, o.allowDowngrade, installedHash == actualHash); e != nil {
 			return e
 		}
-		pendingDrain, e := myce.ReadEnrollmentUpgrade(*old)
+		pendingDrain, e := myce.ResolveEnrollmentUpgrade(ctx, *old, client)
 		if e != nil {
 			return e
 		}
 		if installedHash == actualHash && old.Enrollment {
+			// An earlier process may have installed new bytes without leaving a durable
+			// installer snapshot. Never claim that this invocation can roll those back.
+			if pendingDrain.Policy.Mode == "drained" {
+				drain = &pendingDrain
+			}
 			result, e := waitReady(*old, client)
 			if e != nil {
+				if drain != nil {
+					drain = nil
+					return fmt.Errorf("upgrade failed; rollback unavailable for the already-installed binary; host could not be resumed; rerun to recover: %w", e)
+				}
 				return e
 			}
 			if pendingDrain.Policy.Mode == "drained" {
 				if e = myce.FinishEnrollmentUpgrade(ctx, *old, client, pendingDrain); e != nil {
 					return e
 				}
+				resumed = true
 				result, e = waitReady(*old, client)
 				if e != nil {
 					return e
@@ -290,7 +346,12 @@ func enrollmentCommand(args []string, probe myce.MachineProbe, home string, look
 	// This dispatch is the existing installer, with B2/B3/B4 options unchanged.
 	installArgs := append([]string{"install", "worker"}, o.forward...)
 	installArgs = append(installArgs, "--enrollment")
-	if err = setupCommandWithAccountLookup(installArgs, probe, home, lookup); err != nil {
+	install := func(installCtx context.Context, c myce.ServiceConfig, executable, token string, command func(context.Context, string, ...string) ([]byte, error)) error {
+		var e error
+		rollback, e = myce.InstallWithRollback(installCtx, c, executable, token, command)
+		return e
+	}
+	if err = setupCommandWithInstaller(installArgs, probe, home, lookup, install); err != nil {
 		return err
 	}
 	c, err := myce.ReadServiceConfig(config)
@@ -310,6 +371,7 @@ func enrollmentCommand(args []string, probe myce.MachineProbe, home string, look
 		if err = myce.FinishEnrollmentUpgrade(ctx, c, client, *drain); err != nil {
 			return err
 		}
+		resumed = true
 		result, err = waitReady(c, client)
 		if err != nil {
 			return err

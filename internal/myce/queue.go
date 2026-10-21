@@ -40,6 +40,7 @@ type batchRelease struct {
 }
 
 type state struct {
+	EnrollmentRelease *EnrollmentRelease         `json:"enrollment_release,omitempty"`
 	MachineConversion *MachineConversion         `json:"machine_conversion,omitempty"`
 	ProductionDrains  map[string]productionDrain `json:"production_drains,omitempty"`
 
@@ -76,7 +77,6 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
-	enrollmentRelease               *EnrollmentRelease
 	productionInfrastructureRetries int
 
 	files                  *FileStore

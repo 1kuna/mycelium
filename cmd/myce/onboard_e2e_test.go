@@ -358,8 +358,7 @@ func TestOneCommandEnrollmentEndToEnd(t *testing.T) {
 	if _, err = os.Stat(filepath.Join(badHost, ".local", "share", "mycelium", "worker", "config.json")); !os.IsNotExist(err) {
 		t.Fatal("tampered artifact installed")
 	}
-	// Upgrade recovery uses durable drain authority even after new bytes install.
-	// A deliberately short readiness budget interrupts after successful setup.
+	// Failed upgrades resume their own drain and restore the previous release.
 	client, err := authority.Client(queue.URL)
 	if err != nil {
 		t.Fatal(err)
@@ -367,18 +366,33 @@ func TestOneCommandEnrollmentEndToEnd(t *testing.T) {
 	defer client.HTTP.CloseIdleConnections()
 	newCommand := makeCommand("v1.0.2")
 	beforeInterrupted := redemptions.Load()
-	runCommand(newCommand, host, false, "--enrollment-timeout=1s")
+	oldHash, err := myce.FileSHA256(c.Binary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	installerFailure := runCommand(newCommand, host, false, "--invalid-installer-option")
+	var installerStatus myce.HostMaintenanceStatus
+	if err = client.Call(ctx, "GET", "/api/hosts/"+c.HostID+"/maintenance", nil, &installerStatus); err != nil || installerStatus.Policy.Mode != "enabled" || !strings.Contains(installerFailure, "host resumed on previous release") {
+		t.Error("installer failure abandoned drain or omitted outcome", err, installerFailure)
+	}
+	readinessFailure := runCommand(newCommand, host, false, "--enrollment-timeout=1s")
 	var held myce.HostMaintenanceStatus
-	if err = client.Call(ctx, "GET", "/api/hosts/"+c.HostID+"/maintenance", nil, &held); err != nil || held.Policy.Mode != "drained" {
-		t.Fatal("interrupted upgrade did not retain its self-made drain", err)
+	if err = client.Call(ctx, "GET", "/api/hosts/"+c.HostID+"/maintenance", nil, &held); err != nil || held.Policy.Mode != "enabled" {
+		t.Error("readiness failure did not resume its self-made drain", err)
 	}
 	receipt := filepath.Join(c.State, "enrollment-resume.json")
-	if st, e := os.Stat(receipt); e != nil || st.Mode().Perm() != 0600 {
-		t.Fatal("resume receipt is not private", e)
+	if hash, e := myce.FileSHA256(c.Binary); e != nil || hash != oldHash {
+		t.Error("readiness failure did not roll back previous binary", e)
+	}
+	if !strings.Contains(readinessFailure, "host resumed on previous release") {
+		t.Error("readiness failure omitted recovery outcome", readinessFailure)
+	}
+	if _, e := os.Stat(receipt); !os.IsNotExist(e) {
+		t.Error("successful failure recovery retained resume authority", e)
 	}
 	output = runCommand(newCommand, host, true)
 	if !strings.Contains(output, " · ready · ") || redemptions.Load() != beforeInterrupted {
-		t.Fatal("same-binary recovery did not resume its own drain")
+		t.Fatal("upgrade retry did not become ready without redeeming again")
 	}
 	if _, e := os.Stat(receipt); !os.IsNotExist(e) {
 		t.Fatal("completed upgrade retained resume authority", e)

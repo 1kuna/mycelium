@@ -135,6 +135,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	joiningFile := f.String("joining-file", env("MYCE_JOINING_FILE", ""), "privately supplied invitation (discovery plus saved address)")
 	discovery := f.Bool("discovery", true, "advertise a pinned TLS joining endpoint over DNS-SD")
 	discoveryListen := f.String("discovery-listen", "", "TLS joining listen address (default same interface as queue, automatic port)")
+	allowReleaseDowngrade := f.Bool("allow-downgrade", false, "explicitly re-approve an equal or older enrollment release")
 	releaseManifest := f.String("release-manifest", "", "approved signed enrollment release manifest")
 	releaseKey := f.String("release-key", "", "provisioned publisher Ed25519 public key PEM")
 	releaseURL := f.String("release-url", "", "approved HTTPS release directory")
@@ -340,7 +341,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			if e != nil {
 				return e
 			}
-			if e = q.ConfigureEnrollmentRelease(data, key, *releaseURL); e != nil {
+			if e = q.ConfigureEnrollmentRelease(data, key, *releaseURL, *allowReleaseDowngrade); e != nil {
 				return e
 			}
 		}
