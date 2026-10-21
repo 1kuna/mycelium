@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -40,6 +41,17 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 	f := flag.NewFlagSet(action, flag.ContinueOnError)
 	instance := f.String("instance", "", "Linux worker instance")
 	root := f.String("root", "", "installation root")
+	var sources []string
+	f.Func("from-worker-config", "source per-device worker config; repeat for every worker", func(v string) error {
+		p, e := filepath.Abs(v)
+		if e == nil {
+			sources = append(sources, p)
+		}
+		return e
+	})
+	machineMap := f.String("machine-map", "", "explicit queue conversion mapping JSON file")
+	rollbackQueue := f.Bool("rollback-machines", false, "restore queue-side fences and legacy identities; retain upgraded queue")
+	rollback := f.Bool("rollback-machine", false, "restore the saved per-GPU installation; keep the compatible queue")
 	dry := f.Bool("dry-run", false, "print plan without installing")
 	f.Bool("force", false, "deprecated compatibility option; explicit flags authorize changes")
 	f.BoolFunc("local-disable-receipts", "retired; reinstall without this option", func(string) error { return myce.ErrLegacyLocalDisableReceipts })
@@ -102,6 +114,28 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 		}
 		return nil
 	}
+	if *machineMap != "" || *rollbackQueue {
+		if role != "queue" || *config == "" {
+			return errors.New("queue conversion requires install queue --config QUEUE_CONFIG")
+		}
+		c, err := myce.ReadServiceConfig(*config)
+		if err != nil {
+			return err
+		}
+		var mapping []myce.MachineRename
+		if *machineMap != "" {
+			data, err := os.ReadFile(*machineMap)
+			if err != nil {
+				return err
+			}
+			if err = json.Unmarshal(data, &mapping); err != nil {
+				return err
+			}
+		}
+		fmt.Println(myce.MachineConversionDiff(mapping))
+		fmt.Println("Queue must be stopped; preview/write queue-side policies, pins, servers and retired identities. Keep the upgraded queue on rollback.")
+		return myce.ConvertQueueInstall(ctx, c, mapping, *dry, *rollbackQueue, myce.RealClock{}, probe.Command)
+	}
 	// Locate the saved configuration before detection or applying fresh-install
 	// defaults. Flag presence, rather than its value, defines the upgrade overlay.
 	explicit := map[string]bool{}
@@ -127,6 +161,33 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 	configPath, e = filepath.Abs(configPath)
 	if e != nil {
 		return e
+	}
+	if *rollback {
+		fmt.Println("Restore saved worker files, enablement and prior activity; queue stays upgraded.")
+		return myce.RollbackMachineInstall(ctx, configPath, *dry, probe.Command)
+	}
+	if len(sources) > 0 {
+		if role != "worker" || !explicit["config"] {
+			return errors.New("conversion requires install worker --config MACHINE_CONFIG")
+		}
+		c, err := myce.PlanMachineInstall(configPath, sources, explicit)
+		if err != nil {
+			return err
+		}
+		c, err = myce.OverlayInstallFlags(f, c, values)
+		if err != nil {
+			return err
+		}
+		fmt.Println("Convert split workers: stop/disable and retire source units/configs; retain source spools, all roots and gpu0 cache; install one machine worker with fresh spool. Rollback: " + c.Config + ".m4-rollback.json")
+		for _, path := range sources {
+			fmt.Println("Source:", path)
+		}
+		fmt.Println("Destination:", c.Config, "Unit:", c.Service, "Command:", strings.Join(c.Args(), " "))
+		executable, err := os.Executable()
+		if err != nil {
+			return err
+		}
+		return myce.ConvertWorkerInstall(ctx, c, executable, *dry, probe.Command)
 	}
 	var installed *myce.ServiceConfig
 	if old, err := myce.ReadServiceConfig(configPath); err == nil {
@@ -221,6 +282,9 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 	c, e = myce.OverlayInstallFlags(f, c, values)
 	if e != nil {
 		return e
+	}
+	if err := myce.CheckMachineInstallGate(c); err != nil {
+		return err
 	}
 	if err := c.ValidateInstallPolicies(); err != nil {
 		return err

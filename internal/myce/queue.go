@@ -40,6 +40,8 @@ type batchRelease struct {
 }
 
 type state struct {
+	MachineConversion *MachineConversion `json:"machine_conversion,omitempty"`
+
 	PriorityPolicy *PriorityPolicyRecord `json:"priority_policy,omitempty"`
 	// Actual fleet contact and the first reconnect after silence are separate
 	// from each worker's LastSeen. Reconnects never renew an active outage epoch.
@@ -161,6 +163,10 @@ func Open(path, root string, clock Clock) (*Queue, error) {
 	if err != nil && err != sql.ErrNoRows {
 		db.Close()
 		return nil, err
+	}
+	if q.s.MachineConversion != nil && q.s.MachineConversion.PublicationPending {
+		db.Close()
+		return nil, errors.New("machine conversion publication incomplete; keep queue stopped and rerun install queue conversion or rollback")
 	}
 	q.unreported = map[string]bool{}
 	if len(data) > 0 {
@@ -705,13 +711,16 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 	}
 	err = q.update(func() error {
 		m := cloneMachine(&c.Machine)
+		if q.migrationInventoryBlocked(&m) {
+			return migrationError("machine_worker_conflict", "machine installation is rolled back; restore the saved legacy workers or convert forward under maintenance")
+		}
 		if err := inventoryTarget(&m); err != nil {
 			return err
 		}
 		// Dev's existing fake workers intentionally share a synthetic host ledger.
-		if _, simulated := q.clock.(*devClock); m.Devices != nil && !simulated {
+		if _, simulated := q.clock.(*devClock); !simulated {
 			for _, owner := range q.s.Machines {
-				if owner.ID != m.ID && owner.Devices != nil && !owner.Gone && hostID(owner) == hostID(&m) {
+				if owner.ID != m.ID && (m.Devices != nil || owner.Devices != nil) && owner.Replacement == nil && !owner.Gone && hostID(owner) == hostID(&m) {
 					return &HTTPError{Status: 409, Code: "machine_worker_conflict", Message: rejectionMessages["machine_worker_conflict"]}
 				}
 			}
@@ -737,7 +746,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		if m.ID == "" || m.Session == "" || !validGPU(m.GPU) || !validMemoryValue(m.TotalMemoryGB) || m.FreeMemoryGB < 0 || math.IsNaN(m.FreeMemoryGB) || math.IsInf(m.FreeMemoryGB, 0) {
 			return errors.New("invalid machine report")
 		}
-		if m.ModelURL != "" && len(q.models.Models) > 0 && m.ModelConfigHash != modelConfigHash(q.models) {
+		if m.ModelURL != "" && len(q.models.Models) > 0 && m.ModelConfigHash != modelConfigHash(q.models) && !q.migrationLegacyCatalog(&m) {
 			return errors.New("worker model config does not match queue")
 		}
 		old := q.s.Machines[m.ID]

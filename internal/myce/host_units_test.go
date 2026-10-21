@@ -44,9 +44,7 @@ func TestInstallInstanceTargetsItsOwnUnit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = c.WorkerInstance("gpu1"); err != nil {
-		t.Fatal(err)
-	}
+	c.Device = "1"
 	executable := filepath.Join(home, "source-myce")
 	os.WriteFile(executable, []byte("fixture"), 0700)
 	var calls []string
@@ -58,7 +56,7 @@ func TestInstallInstanceTargetsItsOwnUnit(t *testing.T) {
 	if err = Install(context.Background(), c, executable, "private-fixture", command); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(strings.Join(calls, "\n"), "enable --now myce-worker@gpu1.service") {
+	if !strings.Contains(strings.Join(calls, "\n"), "enable --now myce-worker.service") {
 		t.Fatal(calls)
 	}
 	text, err := os.ReadFile(c.Service)
@@ -77,7 +75,7 @@ func TestInstallInstanceTargetsItsOwnUnit(t *testing.T) {
 	if err = Uninstall(context.Background(), c, false, command); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(strings.Join(calls, "\n"), "disable --now myce-worker@gpu1.service") {
+	if !strings.Contains(strings.Join(calls, "\n"), "disable --now myce-worker.service") {
 		t.Fatal(calls)
 	}
 }

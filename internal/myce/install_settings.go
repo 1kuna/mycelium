@@ -216,6 +216,7 @@ func InstallSettings() []InstallSetting {
 		installPath("model-config", "ModelCatalog", "NAS model catalog", func(c *ServiceConfig) *string { return &c.ModelCatalog }, false),
 		installEnvironmentCatalogSetting(),
 		// No CLI overrides: preserved verbatim, with identity enforced separately.
+		{Field: "MachineDevices", validate: func(c ServiceConfig) error { return ValidateDeviceSettings(c.MachineDevices) }}, {Field: "FromWorkerConfigs"},
 		{Field: "Version", validate: func(c ServiceConfig) error {
 			if c.Version < 0 || c.Version > 1 {
 				return errors.New("unsupported installed config version")

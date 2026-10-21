@@ -43,8 +43,9 @@ type MaintenanceAttempt struct {
 }
 
 type HostMaintenanceStatus struct {
-	Host   string          `json:"host"`
-	Policy HostMaintenance `json:"policy"`
+	MigrationReady bool            `json:"migration_ready,omitempty"`
+	Host           string          `json:"host"`
+	Policy         HostMaintenance `json:"policy"`
 
 	Workers         []MaintenanceWorker  `json:"workers"`
 	Attempts        []MaintenanceAttempt `json:"attempts"`
@@ -205,7 +206,7 @@ func (q *Queue) hostMaintenanceStatus(host string) HostMaintenanceStatus {
 	out.Healthy = true
 	now := q.clock.Now()
 	for _, m := range q.s.Machines {
-		if hostID(m) != host {
+		if hostID(m) != host || m.Replacement != nil || q.migrationHistoricalMachine(m) {
 			continue
 		}
 		fresh := !m.Gone && !q.unreported[m.ID] && !m.LastSeen.After(now) && now.Sub(m.LastSeen) < min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2]))
@@ -262,6 +263,7 @@ func (q *Queue) hostMaintenanceStatus(host string) HostMaintenanceStatus {
 	sort.Slice(out.PendingReleases, func(i, j int) bool { return releaseKey(out.PendingReleases[i]) < releaseKey(out.PendingReleases[j]) })
 	sort.Strings(out.PendingCleanup)
 	out.Healthy = out.Healthy && len(out.Workers) > 0 && out.Policy.MemoryBudget != nil
+	out.MigrationReady = q.machineMigrationReady(host)
 	out.Quiescent = out.Healthy && q.maintenanceBlocked(host) && len(obligations) == 0 && len(out.PendingCleanup) == 0
 	return out
 }

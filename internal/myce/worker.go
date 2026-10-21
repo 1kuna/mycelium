@@ -22,6 +22,8 @@ import (
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
+	DeviceSettings []DeviceInstall
+
 	InventoryProbe     func(context.Context) ([]MachineDevice, error)
 	CPUIsolationProbe  func(context.Context) error
 	selectedDevice     *MachineDevice
@@ -706,6 +708,9 @@ func (w Worker) replay(ctx context.Context, s *workerStore) error {
 	return nil
 }
 func (w Worker) Run(stop context.Context) error {
+	if err := ValidateDeviceSettings(w.DeviceSettings); err != nil {
+		return err
+	}
 	if _, err := deviceAllowance(w.Machine.Device); err != nil {
 		return err
 	}

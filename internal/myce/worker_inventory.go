@@ -379,10 +379,37 @@ func (w Worker) localInventoryWithProbe(ctx context.Context, probe MachineProbe)
 	}
 	for i := range physical {
 		d := &physical[i]
+		configured := w
+		configuredMode := "auto"
+		if len(w.DeviceSettings) > 0 {
+			found := false
+			for _, setting := range w.DeviceSettings {
+				if setting.Selector == d.Selector || setting.Selector == d.Identity || setting.Selector == d.ID {
+					if setting.Detection.Platform != d.Platform {
+						return nil, migrationError("machine_migration_conflict", "device platform changed")
+					}
+					configured.Machine.FreeMemoryGB = setting.Detection.MemoryGB
+					configured.Machine.ReservedMemoryGB = setting.Detection.ReserveGB
+					configured.FixedAcceleratorMemory = setting.Detection.MemoryMode == "fixed"
+					configuredMode = setting.Detection.MemoryMode
+					found = true
+					break
+				}
+			}
+			if !found {
+				d.Reason = "device_budget_unavailable"
+				continue
+			}
+		}
 		d.MemoryMode = "auto"
-		if d.Platform == "xpu" && w.FixedAcceleratorMemory {
-			d.MemoryMode, d.BudgetGB = "fixed", w.Machine.FreeMemoryGB
-			d.TotalMemoryGB, d.ReserveMemoryGB = w.Machine.FreeMemoryGB+w.Machine.ReservedMemoryGB, w.Machine.ReservedMemoryGB
+		if len(w.DeviceSettings) > 0 && configured.FixedAcceleratorMemory {
+			d.MemoryMode = "fixed"
+			d.TotalMemoryGB = configured.Machine.FreeMemoryGB
+			d.ReserveMemoryGB = configured.Machine.ReservedMemoryGB
+			d.BudgetGB = max(0, d.TotalMemoryGB-d.ReserveMemoryGB)
+		} else if d.Platform == "xpu" && configured.FixedAcceleratorMemory {
+			d.MemoryMode, d.BudgetGB = "fixed", configured.Machine.FreeMemoryGB
+			d.TotalMemoryGB, d.ReserveMemoryGB = configured.Machine.FreeMemoryGB+configured.Machine.ReservedMemoryGB, configured.Machine.ReservedMemoryGB
 		} else {
 			selectedProbe := probe
 			if d.Platform == "xpu" {
@@ -399,19 +426,31 @@ func (w Worker) localInventoryWithProbe(ctx context.Context, probe MachineProbe)
 				return nil, e
 			}
 			d.MemoryMode, d.TotalMemoryGB, d.ReserveMemoryGB = detected.MemoryMode, detected.MemoryGB, detected.ReserveGB
-			d.BudgetGB = max(0, detected.MemoryGB-detected.ReserveGB)
-			if w.Machine.FreeMemoryGB > 0 {
-				d.BudgetGB = min(d.BudgetGB, w.Machine.FreeMemoryGB)
+			if len(w.DeviceSettings) > 0 {
+				d.ReserveMemoryGB = configured.Machine.ReservedMemoryGB
+				if configuredMode != "auto" && detected.MemoryMode != "unified" {
+					d.MemoryMode = configuredMode
+				}
+				capacity := detected.MemoryGB
+				if configured.Machine.FreeMemoryGB > 0 {
+					capacity = min(capacity, configured.Machine.FreeMemoryGB)
+				}
+				d.BudgetGB = max(0, capacity-d.ReserveMemoryGB)
+			} else {
+				d.BudgetGB = max(0, detected.MemoryGB-detected.ReserveGB)
+				if configured.Machine.FreeMemoryGB > 0 {
+					d.BudgetGB = min(d.BudgetGB, configured.Machine.FreeMemoryGB)
+				}
 			}
 		}
 		d.UnifiedMemory = d.MemoryMode == "unified"
 		if d.UnifiedMemory {
 			// Zero is an uncapped measured allowance, as on GB10 and Metal.
-			d.BudgetGB = max(0, w.Machine.FreeMemoryGB-d.ReserveMemoryGB)
+			d.BudgetGB = max(0, configured.Machine.FreeMemoryGB-d.ReserveMemoryGB)
 		}
 		budget, reserve := d.BudgetGB, 0.0
 		if d.UnifiedMemory {
-			budget, reserve = w.Machine.FreeMemoryGB, d.ReserveMemoryGB
+			budget, reserve = configured.Machine.FreeMemoryGB, d.ReserveMemoryGB
 		}
 		if d.MemoryMode == "fixed" && budget <= 0 || d.UnifiedMemory && budget > 0 && budget <= reserve {
 			d.Reason = "device_budget_unavailable"
@@ -427,7 +466,7 @@ func (w Worker) localInventoryWithProbe(ctx context.Context, probe MachineProbe)
 			d.FreeMemoryGB = 0
 		}
 		d.MemoryMeasured = d.MemoryMode != "fixed" && d.Platform != "fake"
-		if d.UnifiedMemory && w.Machine.FreeMemoryGB == 0 {
+		if d.UnifiedMemory && configured.Machine.FreeMemoryGB == 0 {
 			d.BudgetGB = d.FreeMemoryGB
 		}
 	}

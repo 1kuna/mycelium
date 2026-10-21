@@ -1052,6 +1052,56 @@ repair. Never open M-mutated state with an older binary or overwrite newer
 checkpoints with a snapshot. A rollback that cannot prove cleanup/restoration
 is incomplete, leaves admission disabled and preserves recovery artifacts.
 
+### M4 implementation decisions
+
+The conversion uses the installer's existing file transaction and service-manager
+snapshot. Private mode-0600 `CONFIG.m4-rollback.json` journals retain original
+files and unit registration/activity; they contain credential copies when those
+are installer-owned and must stay outside public reports. Referenced secret
+files are preserved by reference, never imported into the plan. Source spools,
+binaries and all caches remain on disk; source unit/config definitions move to
+recoverable transaction backups. In the current installer the persistent enable
+set consists of the systemd wants registrations and saved unit/config artifacts;
+there is no additional host registry. Remove both, and refuse any unselected
+split unit. Source units must also pass the existing Mycelium worker-unit
+allow-list before any manager action. The gate applies to ordinary redeploys as well as fresh installs.
+
+Queue conversion is an explicit offline `myce install queue --config ...
+--machine-map ...` operation under the existing SQLite exclusive lock, using the
+injected Clock for freshness. The map names every source and its physical host
+and component, including Spark's same-name entry. A durable pending-publication
+fence commits with retirement; queue startup refuses partial policy publication.
+Retry the identical command to publish the remaining policy files, or restore
+through the journal. Neither action restores a database snapshot. Policy files
+must match the saved original or converted typed values; unknown edits block
+with `machine_migration_conflict`. Projects lack a device restriction, so a
+partial-card project allow-list blocks rather than widening to the entire host.
+A pin or single-host server allow-list can retain its card through `device`.
+Queued jobs resolved through project, pin or server fences also block retirement
+with `QueuedRetiredMachinesError` (`machine_migration_queued_jobs`), including
+logical job IDs and retiring machine names. Jobs and keyed specs are unchanged.
+
+Rollback reverses the current representable pins, preserving additions, removals
+and preemption counters. A new host-wide pin that cannot be expressed on split
+workers blocks rollback until the operator explicitly selects a card or removes
+it. Unknown policy edits similarly require reconciliation before restoration.
+Queue-side rollback reactivates only recorded legacy identities and refuses the
+machine generation until forward conversion. Retired records retain their old
+sessions for exact result/release handling; a new check-in cannot revive them.
+Worker-local catalogs use the queue's explicit retired records to rewrite only
+placement fences, retaining local environments/secrets and exact original file
+bytes in the worker journal. This handles a separate local catalog on Spark as
+well as a shared catalog already converted by the queue. During the queue-first
+interval only the recorded same-name legacy session may report the saved old
+catalog hash while its host is disabled with no obligations; its model endpoint
+is withheld. Inventory workers, unknown sessions and resumed hosts still require
+the current hash. This exception ends with conversion/rollback and cannot admit
+work. Spark uses a fresh spool only after its same-name source completes the normal
+leave handshake. No prior-session relationship is invented. The compatible
+queue and all subsequently accepted jobs, keys, counters and checkpoints survive
+worker rollback. A separate queue downgrade remains subject to the stricter
+no-new-intent rule above.
+
 ### Native b70 maintenance-window qualification
 
 Record binary/config digests, exact attempt IDs, masks, measured capacities and

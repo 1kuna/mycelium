@@ -58,8 +58,9 @@ For an existing current installation, select its exact saved config:
 Omitted flags preserve saved values, including false/zero/empty settings,
 queue/NAS addresses, Docker opt-in, GPU runtime environment, catalogs and secret
 references. Explicit flags overlay only their setting. Identity cannot be moved
-over an existing installation. Each Linux GPU instance retains its own config,
-spool and `myce-worker@INSTANCE.service`; the physical `--host-id` is shared.
+over an existing installation. Fresh Linux installs use one `myce-worker.service` and spool per machine;
+`--device` restricts its inventory. Existing split installations require the M4
+conversion below before installing this version.
 Docker is optional (`--docker-host` opts in); ambient `DOCKER_HOST` is not adopted.
 
 Drain/disable admission before installing an upgrade. Matching queue and workers
@@ -95,6 +96,133 @@ Drain or disable and verify exact release before an authorized uninstall. Inspec
 and disabled and role files move to recoverable Trash; preserve active spools,
 checkpoints, archives and data needed by sibling workers. No fleet action is
 implied by these instructions.
+
+## Convert split workers to one machine worker (M4)
+
+Follow the [accepted maintenance and native qualification gates](design-proposal.md#installation-checkpoints-and-rollback-m4).
+Conversion is an operator-run maintenance action on the queue host and every
+converted worker host, including the single-card Spark worker in the same
+window. Commands below use placeholders for approved installation paths and
+accounts. Load authentication through the existing private secret mechanism;
+never print a token or pass it on the command line.
+
+Pause ordinary submissions and disable both physical hosts through the current
+queue. Record source identities/sessions, actual unit enablement/activity,
+config/binary digests, device identities and settled spool evidence. Keep the
+current binaries and a queue/database/config backup as well as the installer's
+rollback journals. Require fresh reports and no attempts, preparations, engines,
+buffered results, releases or queued jobs resolved to retiring names:
+
+```sh
+myce host disable HOST --stop --wait --timeout 5m
+myce host disable SINGLE_CARD_HOST --stop --wait --timeout 5m
+myce host status HOST
+myce host status SINGLE_CARD_HOST
+```
+
+Stop the exact recorded queue unit before offline conversion. Use the new binary
+from a staging location; do not copy it into old split worker installations.
+Write an explicit ownership map in private storage, for example:
+
+```json
+[
+  {"from":"HOST-gpu0","to":"HOST","device":"0"},
+  {"from":"HOST-gpu1","to":"HOST","device":"1"},
+  {"from":"SINGLE_CARD_HOST","to":"SINGLE_CARD_HOST","device":"0"}
+]
+```
+
+Preview every before/after project, pin, server and host-policy change, then
+commit it while the queue remains stopped:
+
+```sh
+systemctl --user stop QUEUE_UNIT
+NEW_MYCE install queue --config QUEUE_CONFIG --machine-map PRIVATE_MAP --dry-run
+NEW_MYCE install queue --config QUEUE_CONFIG --machine-map PRIVATE_MAP
+NEW_MYCE install queue --config QUEUE_CONFIG --dry-run
+NEW_MYCE install queue --config QUEUE_CONFIG
+```
+
+The last command installs the compatible queue binary and restarts its recorded
+unit. Verify durable disables, job/key/retry/checkpoint/release state and Spark's
+legacy reconnect before changing workers. `machine_migration_queued_jobs` lists
+jobs to cancel/resubmit through clients; accepted specs are never rewritten.
+Partial-card project fences and unrepresentable intersections refuse with
+`machine_migration_conflict`. Reconcile those policies explicitly before retry.
+A partial file publication blocks queue startup: rerun the identical offline
+conversion or its queue rollback command. Never clear the database or journal.
+
+On each worker host, pass a fresh destination config and **all** source configs:
+
+```sh
+NEW_MYCE install worker --config MACHINE_CONFIG \
+  --from-worker-config GPU0_CONFIG --from-worker-config GPU1_CONFIG --dry-run
+NEW_MYCE install worker --config MACHINE_CONFIG \
+  --from-worker-config GPU0_CONFIG --from-worker-config GPU1_CONFIG
+```
+
+On the single-card host use one source, retaining its UUID selector:
+
+```sh
+NEW_MYCE install worker --config SINGLE_MACHINE_CONFIG \
+  --from-worker-config SINGLE_SOURCE_CONFIG --dry-run
+NEW_MYCE install worker --config SINGLE_MACHINE_CONFIG \
+  --from-worker-config SINGLE_SOURCE_CONFIG
+```
+
+The source manager stop must complete the same-name worker's normal leave.
+Failure restores the previous install and keeps queue maintenance active.
+Worker-local catalog placement fences are rewritten from explicit queue retirement
+records, preserving local environment/secret values and original bytes for rollback.
+The exact legacy Spark session may reconnect with its old catalog hash only while
+disabled with no obligations; its model endpoint is withheld. New machine workers
+still require the current catalog hash.
+Source definitions are retired recoverably and persistent wants links removed;
+spools, binaries and all caches remain intact. The gpu0 model/environment caches
+and limits become the sole machine caches. Per-device selectors, fixed capacities,
+reserves, shared roots, secret references and the host allowance are retained.
+Shared-field conflicts require a named explicit installer flag; budgets are
+never added. The private `MACHINE_CONFIG.m4-rollback.json` journal contains exact
+original file bytes/modes and unit registration/activity. Preserve it securely.
+Interrupted worker conversion requires its rollback command before retry.
+
+Inspect effective manager configuration, exactly one worker unit/process, device
+inventory and maintenance state. During the agreed test phases explicitly resume
+hosts, run the entire native checklist, then disable/stop/wait before further
+maintenance. Installer success does not qualify hardware. An ordinary `install
+worker --config MACHINE_CONFIG` redeploy preserves the converted device settings;
+repeating the completed conversion is idempotent. An old split config or an
+unselected split unit fails the deploy gate with `machine_worker_conflict` or
+`machine_migration_incomplete`.
+
+### Roll back without losing accepted intent
+
+Pause ordinary submissions and disable/stop/wait on both hosts. Require all new
+attempts, group members, engines, results and releases settled. Restore worker
+installations first while maintenance remains active, then restore queue fences
+and legacy identities offline. This ordering allows the upgraded queue to verify
+exact cleanup before the worker stop. Early legacy reconnects remain refused
+until queue rollback finishes; no ordinary admission is enabled.
+
+```sh
+NEW_MYCE install worker --config MACHINE_CONFIG --rollback-machine --dry-run
+NEW_MYCE install worker --config MACHINE_CONFIG --rollback-machine
+NEW_MYCE install worker --config SINGLE_MACHINE_CONFIG --rollback-machine
+systemctl --user stop QUEUE_UNIT
+NEW_MYCE install queue --config QUEUE_CONFIG --rollback-machines --dry-run
+NEW_MYCE install queue --config QUEUE_CONFIG --rollback-machines
+systemctl --user start QUEUE_UNIT
+```
+
+Keep the upgraded queue binary/database, all new jobs/keys/counters and accepted
+checkpoint generations. The journal restores source configs, units, enablement
+and verified prior activity; never merge spools. Current pin additions/removals
+and counters survive when their card restriction is representable. A new
+host-wide pin or an unknown policy edit blocks restoration until explicitly
+reconciled, preserving that intent. Unknown cleanup/restoration keeps admission
+disabled. Verify both source workers and Spark reconnect, device isolation,
+secret/root custody and consumer health before the operator accepts rollback.
+Forward conversion can be repeated under the same maintenance gates.
 
 ## Monitoring and failures
 

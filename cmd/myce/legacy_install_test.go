@@ -60,17 +60,20 @@ func TestLegacyInstallArchiveFresh(t *testing.T) {
 		if i == 0 {
 			role = "queue"
 		}
-		c, err := myce.PlanInstall(role, home, "", home, "http://fixture-queue.invalid", fmt.Sprintf("fixture-%d", i), myce.Detection{OS: "linux", Arch: runtime.GOARCH, Platform: "fake", MemoryMode: "fixed", MemoryGB: 8})
+		// Independent install accounts keep this archive-custody test valid with
+		// one machine unit per account; split conversion has separate coverage.
+		installHome := home
+		if role == "worker" {
+			installHome = filepath.Join(home, instance)
+		}
+		c, err := myce.PlanInstall(role, installHome, "", home, "http://fixture-queue.invalid", fmt.Sprintf("fixture-%d", i), myce.Detection{OS: "linux", Arch: runtime.GOARCH, Platform: "fake", MemoryMode: "fixed", MemoryGB: 8})
 		if err != nil {
 			t.Fatal(err)
 		}
-		c.EnvironmentFile, c.HostID = environment, "fixture-host"
+		c.EnvironmentFile, c.HostID = environment, fmt.Sprintf("fixture-host-%d", i)
 		c.DockerEndpoint = "unix:///var/run/docker.sock"
 		if role == "worker" {
 			c.AllowDeviceless = true
-			if err := c.WorkerInstance(instance); err != nil {
-				t.Fatal(err)
-			}
 		}
 		if err := os.MkdirAll(filepath.Dir(c.Config), 0700); err != nil {
 			t.Fatal(err)

@@ -66,6 +66,8 @@ func validateInstallDropIns(ctx context.Context, c ServiceConfig, command func(c
 
 // installFiles is a per-invocation fault seam, never a global filesystem hook.
 type installFiles struct {
+	machineConversion bool
+
 	before func(operation, path string) error
 	rename func(source, destination string) error
 }

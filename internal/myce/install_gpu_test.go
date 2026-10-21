@@ -25,9 +25,7 @@ func TestInstallWorkerRuntimeAndServiceDetection(t *testing.T) {
 			}
 			c, _ := PlanInstall("worker", home, "", home, "http://queue:7331", "worker", Detection{OS: "linux", Arch: "amd64", Platform: "xpu", MemoryMode: "fixed", MemoryGB: 16})
 			if instance != "" {
-				if err := c.WorkerInstance(instance); err != nil {
-					t.Fatal(err)
-				}
+				// A machine worker can offer only card 1 without a split unit.
 				c.Device = "1"
 			}
 			binary := filepath.Join(home, "source")

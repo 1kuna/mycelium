@@ -684,7 +684,19 @@ func TestMaintenanceWorkerCheckinPolicy(t *testing.T) {
 		}
 		return false
 	})
-	r := check(t, q, machine("policy-observer", "fake", "test-host"), nil)
+	// One machine worker owns this host; observe policy through its registered
+	// identity rather than introduce a legacy peer beside the running worker.
+	snapshot, err := q.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var observer Machine
+	for _, m := range snapshot.Machines {
+		if m.ID == w.Machine.ID {
+			observer = cloneMachine(m)
+		}
+	}
+	r := check(t, q, observer, nil)
 	if r.HostMaintenance != "drained" || !r.AdmissionBlocked || r.HostMemoryBudget == nil || r.HostMemoryBudget.GiB != value {
 		t.Fatal(r)
 	}

@@ -204,6 +204,9 @@ func snapshotInstall(ctx context.Context, c ServiceConfig, files installFiles, c
 	// Snapshot every possible destination before the first write, including
 	// absent files. put cannot introduce a destination outside this snapshot.
 	for _, path := range paths {
+		if path == "" {
+			continue
+		}
 		if _, ok := tx.originals[path]; ok {
 			continue
 		}
