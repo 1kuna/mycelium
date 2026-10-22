@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // installManager adapts the existing injected command runner. The transaction
@@ -100,7 +101,7 @@ func (m installManager) reload(ctx context.Context, units []installUnit) error {
 	for _, u := range units {
 		s, err := m.inspect(ctx, u)
 		if err == nil && s.loaded {
-			_, err = m.command(ctx, "launchctl", "bootout", u.target())
+			err = m.stop(ctx, u)
 		}
 		if err != nil {
 			result = errors.Join(result, fmt.Errorf("%s reload: %w", u.name(), err))
@@ -120,7 +121,7 @@ func (m installManager) registration(ctx context.Context, u installUnit, want in
 		if want.loaded {
 			_, err = m.command(ctx, "launchctl", "bootstrap", "gui/"+strconv.Itoa(os.Getuid()), u.path)
 		} else {
-			_, err = m.command(ctx, "launchctl", "bootout", u.target())
+			err = m.stop(ctx, u)
 		}
 		return err
 	}
@@ -330,7 +331,29 @@ func (m installManager) stop(ctx context.Context, u installUnit) error {
 	if installExit(err, 113) {
 		return nil
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	// bootout acknowledges the request before launchd necessarily removes the
+	// label. Reusing it sooner races bootstrap (EIO), including during rollback.
+	wait, cancel := SetupTimeout(ctx)
+	defer cancel()
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		state, err := m.inspect(wait, u)
+		if err != nil {
+			return err
+		}
+		if !state.loaded {
+			return nil
+		}
+		select {
+		case <-wait.Done():
+			return wait.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func obsoleteStartDropIns(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error)) ([]string, error) {

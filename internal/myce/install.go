@@ -460,7 +460,7 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 			return err
 		}
 		if tx.units[0].state.loaded {
-			if _, err = command(ctx, "launchctl", "bootout", tx.units[0].target()); err != nil {
+			if err = tx.manager.stop(ctx, tx.units[0]); err != nil {
 				return err
 			}
 		}
