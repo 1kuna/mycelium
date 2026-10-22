@@ -1723,3 +1723,40 @@ A crash loses the in-memory installer snapshot; if already-installed bytes never
 become ready on rerun, report rollback unavailable and preserve maintenance.
 Operator-created maintenance remains respected. No fleet
 operation, reboot, driver install or privileged service is implied. Native fleet acceptance remains a separately authorized test window.
+
+## Comparable observations (slice 1, #107; approved 2026-10-22)
+
+The orchestrator approves this slice under maintainer's delegated design authority,
+following [the benchmark/batch research](research/benchmark-batch-placement.md#incremental-build-plan).
+Placement, admission, qualification and concurrency limits remain unchanged.
+
+A variant may declare `references`, keyed by its existing work type. Each entry
+has `input_shape` (an opaque compatibility bucket), `unit` (a generic work unit),
+and positive `units` (the amount in that work type's bundled native baseline).
+It requires that variant's check command and baseline. This is a serial reference
+contract: one independent item, concurrency 1, vector batch size 1. Threads,
+backend/cache settings and correctness semantics belong in the frozen recipe;
+changing the reference or recipe changes the extension digest and requires
+qualification again. No automatic reference sweep is introduced in this slice.
+
+An ordinary extension job opts into comparable timing with
+`workload: {input_shape: small-v1, units: 100}`. The author promises the same
+serial execution mode and work unit as the matching reference. Absent metadata,
+legacy profiles, checks (which have not yet qualified), resumptions and unmatched
+shapes remain unknown. Successful accepted attempts alone update a per-key mean;
+failed, interrupted, stopped, stale and duplicate results cannot contribute.
+
+Keys bind work type, extension digest, exact target, reference, input shape,
+physical host/component, hardware/backend/environment fingerprints, host/device
+allowances, and the attempt's declared resources. Queue Clock timestamps measure
+Started acknowledgement through accepted completion: preparation is excluded,
+while cleanup/result handoff is included. These are observed elapsed times, not
+isolated kernel timings; contention is reported and mixed/unknown occupancy is
+excluded from comparable estimates. No rates are inferred from old scalar
+onboarding benchmarks. Evidence persists as per-record SQLite rows alongside jobs.
+
+Status exposes the frozen prediction, actual accepted elapsed time, sample count
+and unknown reason. Predictions use only matching prior evidence and never feed
+placement. Status remains a read-only projection: no mutation, persistence or
+history-wide reserialization is added to status reads. Safe idle curves and
+placement changes require their later amendments.
