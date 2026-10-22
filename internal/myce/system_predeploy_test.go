@@ -365,6 +365,7 @@ echo FINISHED
 	writeGate(metalGate)
 	metalNext := submitAPI(short("metal-successor", "experiment", []string{"metal"}))
 	clock.Advance(10 * time.Minute)
+	must(q.Tick())
 	s := snapshot()
 	if !strings.Contains(s.Warning, "network") {
 		t.Fatalf("whole-network warning: %q", s.Warning)

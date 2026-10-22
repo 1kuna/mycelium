@@ -33,8 +33,13 @@ func TestPlacementUnknownCapacityReason(t *testing.T) {
 			if got := job(t, q, j.ID); got.Attempt != 0 || !strings.Contains(got.Reason, want) {
 				t.Fatalf("unhelpful job reason: %+v", got)
 			}
-			if got := q.statusWaitingReason(q.s.Jobs[j.ID]); !strings.Contains(got, want) {
-				t.Fatal("status hid missing capacity:", got)
+			snapshot, err := q.publicSnapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := FindJob(snapshot.Jobs, j.ID)
+			if err != nil || !strings.Contains(got.Reason, want) {
+				t.Fatal("status hid missing capacity:", got, err)
 			}
 			// A healthy eligible sibling still places the job.
 			m = machine("healthy", "xpu")

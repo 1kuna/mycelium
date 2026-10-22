@@ -3,6 +3,8 @@ package myce
 import (
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"testing"
 	"time"
@@ -49,6 +51,21 @@ func TestQueueStatusReadsDoNotWriteRetainedHistory(t *testing.T) {
 		if len(j.Extensions) > 0 {
 			t.Fatal("private retained payload in status")
 		}
+	}
+	// Exercise the stock Go client's transparent gzip support: the realistic
+	// history must remain readable without transferring its repetitive JSON.
+	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+	defer server.Close()
+	req, _ := http.NewRequest(http.MethodGet, server.URL+"/api/status", nil)
+	req.Header.Set("Authorization", "Bearer test")
+	response, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	var received Snapshot
+	if err := json.NewDecoder(response.Body).Decode(&received); err != nil || !response.Uncompressed || len(received.Jobs) != 300 {
+		t.Fatalf("compressed read-only status: gzip=%v jobs=%d error=%v", response.Uncompressed, len(received.Jobs), err)
 	}
 	result := testing.Benchmark(func(b *testing.B) {
 		for b.Loop() {

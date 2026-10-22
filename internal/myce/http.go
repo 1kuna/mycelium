@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"compress/gzip"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -93,6 +94,21 @@ func (a API) handler(joiningPin string) http.Handler {
 	})
 	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
 		s, err := a.Queue.publicSnapshot()
+		w.Header().Add("Vary", "Accept-Encoding")
+		if err == nil {
+			for _, encoding := range strings.Split(r.Header.Get("Accept-Encoding"), ",") {
+				if strings.EqualFold(strings.TrimSpace(encoding), "gzip") {
+					// The stock Go client negotiates and decodes gzip automatically.
+					// Compress only the detached public summary, outside the queue lock.
+					w.Header().Set("Content-Type", "application/json")
+					w.Header().Set("Content-Encoding", "gzip")
+					compressed := gzip.NewWriter(w)
+					_ = json.NewEncoder(compressed).Encode(s)
+					_ = compressed.Close()
+					return
+				}
+			}
+		}
 		respondOperation(w, s, err, "status_unavailable")
 	})
 	mux.HandleFunc("POST /api/jobs", func(w http.ResponseWriter, r *http.Request) {
