@@ -2,16 +2,9 @@ package myce
 
 import (
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 )
-
-type environmentCapacityError struct{ needed, limit int64 }
-
-func (e *environmentCapacityError) Error() string {
-	return fmt.Sprintf("environment cache needs %d bytes; limit %d (in-use entries protected)", e.needed, e.limit)
-}
 
 // AutoEnvironmentCacheLimit uses the cache filesystem, including its nearest
 // existing ancestor on fresh installs. It reserves 20 GiB and never allocates.
