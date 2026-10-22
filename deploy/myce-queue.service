@@ -5,11 +5,10 @@ After=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=%h/.local/share/myce
-Environment=GOMAXPROCS=1
 PrivateDevices=no
 NoNewPrivileges=yes
-Nice=10
-CPUQuota=25%
+Nice=0
+CPUQuota=
 MemoryMax=512M
 TasksMax=64
 EnvironmentFile=%h/.config/myce/queue.env

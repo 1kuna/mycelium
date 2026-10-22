@@ -173,6 +173,9 @@ func (c ServiceConfig) ValidateInstall() error {
 }
 
 func validateInstallQuota(value string) error {
+	if value == "" {
+		return nil // systemd: no CPU bandwidth limit
+	}
 	quota, err := strconv.ParseFloat(strings.TrimSuffix(value, "%"), 64)
 	if err != nil || !strings.HasSuffix(value, "%") || quota <= 0 || math.IsNaN(quota) || math.IsInf(quota, 0) {
 		return errors.New("cpu-quota must be a positive percentage")

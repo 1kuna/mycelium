@@ -215,6 +215,10 @@ func PlanInstall(role, home, root, nas, queue, name string, d Detection, account
 	c.PrivateDevices, c.NoNewPrivileges = false, true
 	c.CPUReserveCores = 1
 	c.Nice, c.CPUQuota, c.MemoryMax, c.TasksMax = 10, "25%", "512M", "64"
+	if role == "queue" {
+		// Control transactions and heartbeats must not share job politeness limits.
+		c.Nice, c.CPUQuota = 0, ""
+	}
 	c.EnvironmentRoot = filepath.Join(nas, "mycelium", "environments")
 	c.Path = filepath.Join(home, ".local", "bin") + ":" + filepath.Join(home, ".cargo", "bin") + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 	if d.OS == "linux" {
@@ -264,7 +268,7 @@ func (c ServiceConfig) ServiceText() string {
 				}
 				return "no"
 			}
-			settings += fmt.Sprintf("Environment=GOMAXPROCS=1\nPrivateDevices=%s\nNoNewPrivileges=%s\nNice=%d\nCPUQuota=%s\nMemoryMax=%s\nTasksMax=%s\nTimeoutStopSec=150\n", yesno(c.PrivateDevices), yesno(c.NoNewPrivileges), c.Nice, c.CPUQuota, c.MemoryMax, c.TasksMax)
+			settings += fmt.Sprintf("PrivateDevices=%s\nNoNewPrivileges=%s\nNice=%d\nCPUQuota=%s\nMemoryMax=%s\nTasksMax=%s\nTimeoutStopSec=150\n", yesno(c.PrivateDevices), yesno(c.NoNewPrivileges), c.Nice, c.CPUQuota, c.MemoryMax, c.TasksMax)
 		}
 		if c.RequireMemoryCeilings {
 			settings += "RestartPreventExitStatus=78\n"
@@ -501,6 +505,12 @@ func ReadServiceConfig(path string) (ServiceConfig, error) {
 		RequiredWorkers json.RawMessage `json:"required_workers"`
 	}{ServiceConfig: &c}
 	e = decoder.Decode(&legacy)
+	// Retire the exact installer default that throttled serialized control work
+	// past worker authorization/loss deadlines (#108). Saved upgrades otherwise
+	// preserve old defaults forever. Distinct operator overrides stay explicit.
+	if e == nil && c.Role == "queue" && c.Nice == 10 && c.CPUQuota == "25%" {
+		c.Nice, c.CPUQuota = 0, ""
+	}
 	if e == nil {
 		_, e = deviceAllowance(c.Device)
 	}

@@ -23,8 +23,14 @@ entry, matching generated units. Replace binary and config placeholders before
 use. Queue maintenance controls admission. There is no local start condition or
 reconciliation timer; native service activation remains an authorized operation.
 
-The Linux user queue uses `PrivateDevices=no`, `NoNewPrivileges=yes`, one Go CPU,
-and initial limits of 25% CPU and 512 MiB RAM. Device namespaces (even with
+The Linux user queue uses `PrivateDevices=no`, `NoNewPrivileges=yes`, normal
+OS/Go CPU scheduling, and an initial 512 MiB RAM limit. It has no default CPU
+quota or reduced process priority: control transactions and worker heartbeats
+must not inherit job-execution politeness limits. The installer retires its exact
+old `Nice=10` / `CPUQuota=25%` default when reading a saved queue config, so a
+normal upgrade also repairs that configuration. Explicitly different operator
+CPU settings remain preserved. macOS queue plists likewise have no execution
+politeness settings. Device namespaces (even with
 `PrivateUsers=yes`) can fail with 218/CAPABILITIES in unprivileged user managers.
 The queue never opens GPU devices and refuses inherited GPU descriptors at
 startup; this is not an OS device-access sandbox. Verify it holds no GPU
