@@ -12,9 +12,83 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
+
+func TestEnvironmentRetiredPurgeProtectsReferences(t *testing.T) {
+	c := &EnvironmentCache{Root: t.TempDir(), Limit: 8 << 20}
+	r := binaryRecipe(t, "fake")
+	path, release, err := c.Acquire(context.Background(), r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { release() }()
+	if err = os.WriteFile(filepath.Join(path, "payload"), make([]byte, 1<<20), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = c.trash(path); err != nil {
+		t.Fatal(err)
+	}
+	// A preparation can hold a build reference independently of an attempt.
+	key := strings.Repeat("b", 64)
+	build, err := c.lock(context.Background(), key+".build", syscall.LOCK_EX)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { unlockEnvironment(build) }()
+	preparing := filepath.Join(c.Root, key+".partial")
+	if err = os.Mkdir(preparing, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(preparing, "payload"), make([]byte, 1<<20), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = c.trash(preparing); err != nil {
+		t.Fatal(err)
+	}
+	unreferenced := filepath.Join(c.Root, strings.Repeat("c", 64))
+	if err = os.Mkdir(unreferenced, 0700); err != nil {
+		t.Fatal(err)
+	}
+	const freed = int64(1 << 20)
+	if err = os.WriteFile(filepath.Join(unreferenced, "payload"), make([]byte, freed), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = c.trash(unreferenced); err != nil {
+		t.Fatal(err)
+	}
+	trash := filepath.Join(c.Root, ".Trash")
+	before, err := environmentSize(trash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Limit = 1
+	err = c.admit("", 0)
+	after, sizeErr := environmentSize(trash)
+	if sizeErr != nil || before-after != freed {
+		t.Fatalf("retired bytes freed = %d, want %d; err=%v", before-after, freed, sizeErr)
+	}
+	if err == nil || !strings.Contains(err.Error(), "in-use entries protected") {
+		t.Fatalf("referenced retired bytes bypassed cache limit: %v", err)
+	}
+	release()
+	release = func() {}
+	remaining, err := environmentSize(trash)
+	if err != nil || remaining != 1<<20 {
+		t.Fatalf("attempt release must purge only its retired bytes: remaining=%d err=%v", remaining, err)
+	}
+	unlockEnvironment(build)
+	build = nil
+	if err = c.Cleanup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	remaining, err = environmentSize(trash)
+	if err != nil || remaining != 0 {
+		t.Fatalf("released preparation retained %d bytes: %v", remaining, err)
+	}
+}
 
 func binaryRecipe(t *testing.T, platform string) EnvironmentRecipe {
 	t.Helper()
@@ -95,8 +169,8 @@ func TestEnvironmentBuildLockReuseAndCleanup(t *testing.T) {
 		t.Fatal("interrupted build remained")
 	}
 	trash, _ := os.ReadDir(filepath.Join(c.Root, ".Trash"))
-	if len(trash) != 1 {
-		t.Fatal("interrupted build not recoverable")
+	if len(trash) != 0 {
+		t.Fatal("interrupted build retained")
 	}
 }
 func TestEnvironmentLRUEvictionProtectsUse(t *testing.T) {
@@ -128,8 +202,8 @@ func TestEnvironmentLRUEvictionProtectsUse(t *testing.T) {
 	}
 	release()
 	trash, _ := os.ReadDir(filepath.Join(c.Root, ".Trash"))
-	if len(trash) != 1 {
-		t.Fatal("eviction not recoverable")
+	if len(trash) != 0 {
+		t.Fatal("eviction did not free retired bytes")
 	}
 }
 func TestEnvironmentPlacementAndFiltering(t *testing.T) {
@@ -367,7 +441,7 @@ func TestEnvironmentProductionBuildDoesNotStarveBehindReadyExperiments(t *testin
 	}
 }
 
-func TestEnvironmentOversizedBuildFailsAndIsRecoverable(t *testing.T) {
+func TestEnvironmentOversizedBuildFailsAndIsPurged(t *testing.T) {
 	r, e := snapshotEnvironment(EnvironmentRecipe{Build: []string{"sh", "-c", `dd if=/dev/zero of="$1/bin/too-big" bs=1024 count=8 2>/dev/null`, "build", "{root}"}}, "fake")
 	if e != nil {
 		t.Fatal(e)
@@ -386,8 +460,8 @@ func TestEnvironmentOversizedBuildFailsAndIsRecoverable(t *testing.T) {
 		t.Fatal(e)
 	}
 	entries, _ := os.ReadDir(filepath.Join(c.Root, ".Trash"))
-	if len(entries) == 0 {
-		t.Fatal("failed build was not recoverable")
+	if len(entries) != 0 {
+		t.Fatal("failed build retained retired bytes")
 	}
 }
 

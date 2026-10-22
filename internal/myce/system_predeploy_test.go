@@ -980,9 +980,9 @@ func TestPreDeployEnvironmentBuildRestart(t *testing.T) {
 	if e = <-done; e != nil {
 		t.Fatal(e)
 	}
-	evidence, err := filepath.Glob(filepath.Join(state, "environment-cache", ".Trash", "*-"+r.Key, "interrupted-input"))
-	if err != nil || len(evidence) != 1 {
-		t.Fatal("lost interrupted build evidence", evidence, err)
+	retired, err := os.ReadDir(filepath.Join(state, "environment-cache", ".Trash"))
+	if err != nil || len(retired) != 0 {
+		t.Fatal("cancelled build retained retired bytes", len(retired), err)
 	}
 	if _, err := os.Stat(filepath.Join(state, "environment-cache", r.Key, "ready.json")); !os.IsNotExist(err) {
 		t.Fatal("cancelled prefix published", err)
@@ -1002,9 +1002,9 @@ func TestPreDeployEnvironmentBuildRestart(t *testing.T) {
 		}
 	}()
 	wait("rebuilt job finishes", func() bool { return job(t, q, j.ID).State == "succeeded" })
-	trash, _ := os.ReadDir(filepath.Join(state, "environment-cache", ".Trash"))
-	if len(trash) == 0 {
-		t.Fatal("worker restart did not preserve interrupted build")
+	trash, err := os.ReadDir(filepath.Join(state, "environment-cache", ".Trash"))
+	if err != nil || len(trash) != 0 {
+		t.Fatal("worker restart retained interrupted build", len(trash), err)
 	}
 	if logs, e := q.Logs(j.ID, 0); e != nil || !strings.Contains(fmt.Sprint(logs), "FINISHED-environment") {
 		t.Fatal(logs, e)

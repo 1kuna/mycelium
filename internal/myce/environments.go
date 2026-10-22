@@ -357,7 +357,7 @@ func environmentSeconds(j *Job, m *Machine) float64 {
 }
 
 // EnvironmentCache uses OS file locks, atomic publication and shared use leases.
-// Partial builds and evictions are moved to recoverable local Trash, never deleted.
+// Partial builds and evictions are retired, then purged once use/build locks allow it.
 type EnvironmentCache struct {
 	Tools   *EnvironmentToolSource
 	once    sync.Once
@@ -452,6 +452,71 @@ func (c *EnvironmentCache) trash(path string) error {
 	_, e := os.Stat(dst)
 	return e
 }
+
+// tryLock skips live attempts/preparations without waiting for them to finish.
+func (c *EnvironmentCache) tryLock(key string) (*os.File, error) {
+	f, err := os.OpenFile(filepath.Join(c.Root, "locks", key), os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, err
+	}
+	if err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		f.Close()
+		if err == syscall.EWOULDBLOCK || err == syscall.EAGAIN {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return f, nil
+}
+
+// purgeRetired runs under admission. The remaining bytes still count toward
+// the limit, including entries protected by an attempt or preparation.
+func (c *EnvironmentCache) purgeRetired() (int64, error) {
+	root := filepath.Join(c.Root, ".Trash")
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return 0, err
+	}
+	for _, d := range entries {
+		_, key, ok := strings.Cut(d.Name(), "-")
+		key = strings.TrimSuffix(key, ".partial")
+		if !ok || (FileRef{SHA256: key}).validate() != nil {
+			continue
+		}
+		use, err := c.tryLock(key + ".use")
+		if err != nil {
+			return 0, err
+		}
+		if use == nil {
+			continue
+		}
+		build, err := c.tryLock(key + ".build")
+		if err == nil && build != nil {
+			path := filepath.Join(root, d.Name())
+			// Old interrupted builds may still have a recorded child to reap.
+			if err = c.cleanupBuild(path); err == nil {
+				err = os.RemoveAll(path)
+			}
+		}
+		unlockEnvironment(build)
+		unlockEnvironment(use)
+		if err != nil {
+			return 0, err
+		}
+	}
+	return environmentSize(root)
+}
+
+func (c *EnvironmentCache) purgeReleased() {
+	gate, err := c.lock(context.Background(), "admission", syscall.LOCK_EX)
+	if err == nil {
+		_, err = c.purgeRetired()
+		unlockEnvironment(gate)
+	}
+	if err != nil {
+		log.Printf("purge retired environments: %v", err)
+	}
+}
 func environmentSize(path string) (int64, error) {
 	var size int64
 	e := filepath.WalkDir(path, func(p string, d os.DirEntry, e error) error {
@@ -478,6 +543,11 @@ func (c *EnvironmentCache) Cleanup(ctx context.Context) error {
 	if e := c.init(); e != nil {
 		return e
 	}
+	gate, e := c.lock(ctx, "admission", syscall.LOCK_EX)
+	if e != nil {
+		return e
+	}
+	defer unlockEnvironment(gate)
 	entries, e := os.ReadDir(c.Root)
 	if e != nil {
 		return e
@@ -487,26 +557,36 @@ func (c *EnvironmentCache) Cleanup(ctx context.Context) error {
 			continue
 		}
 		key := strings.TrimSuffix(d.Name(), ".partial")
-		f, e := os.OpenFile(filepath.Join(c.Root, "locks", key+".build"), os.O_CREATE|os.O_RDWR, 0600)
+		use, e := c.tryLock(key + ".use")
 		if e != nil {
 			return e
 		}
-		if syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) == nil {
+		if use == nil {
+			continue
+		}
+		build, e := c.tryLock(key + ".build")
+		if e == nil && build != nil {
 			e = c.cleanupBuild(filepath.Join(c.Root, d.Name()))
 			if e == nil {
 				e = c.trash(filepath.Join(c.Root, d.Name()))
 			}
-			unlockEnvironment(f)
-			if e != nil {
-				return e
-			}
-		} else {
-			f.Close()
 		}
+		unlockEnvironment(build)
+		unlockEnvironment(use)
+		if e != nil {
+			return e
+		}
+	}
+	if _, e := c.purgeRetired(); e != nil {
+		return e
 	}
 	return ctx.Err()
 }
 func (c *EnvironmentCache) admit(key string, size int64) error {
+	retired, e := c.purgeRetired()
+	if e != nil {
+		return e
+	}
 	entries, e := os.ReadDir(c.Root)
 	if e != nil {
 		return e
@@ -517,7 +597,7 @@ func (c *EnvironmentCache) admit(key string, size int64) error {
 		at   time.Time
 	}
 	candidates := []entry{}
-	total := size
+	total := size + retired
 	for _, d := range entries {
 		if d.IsDir() && strings.HasSuffix(d.Name(), ".partial") && d.Name() != key+".partial" {
 			n, e := environmentSize(filepath.Join(c.Root, d.Name()))
@@ -561,7 +641,12 @@ func (c *EnvironmentCache) admit(key string, size int64) error {
 			if e != nil {
 				return e
 			}
-			total -= v.size
+			remaining, e := c.purgeRetired()
+			if e != nil {
+				return e
+			}
+			total += remaining - retired - v.size
+			retired = remaining
 		} else {
 			f.Close()
 		}
@@ -589,7 +674,13 @@ func (c *EnvironmentCache) Acquire(ctx context.Context, r EnvironmentRecipe) (st
 	if e != nil {
 		return "", nil, e
 	}
-	release := func() { unlockEnvironment(use) }
+	var released sync.Once
+	release := func() {
+		released.Do(func() {
+			unlockEnvironment(use)
+			c.purgeReleased()
+		})
+	}
 	if r.readyOnly && !c.ready(r.Key) {
 		release()
 		return "", nil, fmt.Errorf("%w: environment preparation required", errExtensionUnavailable)

@@ -118,7 +118,7 @@ estimate subsequent builds alongside remaining NAS model-copy time.
 Idle workers build waiting-job environments in queue order. Ready assignments,
 model loads/calls, leaving, and network loss pause background building. A paused
 build restarts from scratch; completed environments are retained. On restart,
-partial builds are detected under OS build locks and moved to `.Trash`. There
+partial builds are detected under OS use/build locks and retired to `.Trash`. There
 is one build per hash per local cache at a time, including across processes.
 Published cache entries use least-recently-used eviction. A shared use lease
 protects builds and running jobs against eviction.
@@ -130,13 +130,14 @@ publication follows file sync and an atomic ready-marker rename. Job environment
 include `VIRTUAL_ENV` for Python environments and `MYCE_ENVIRONMENT_DIR` for the
 cache root. Jobs and builders never receive `MYCE_TOKEN`.
 
-Trash preserves interrupted builds and evictions. The size limit bounds active
-published environments and counts other partial builds at admission; builds
-monitor size and pause/fail if the limit or free-space floor is exceeded.
-Recovery storage is separate; moving files to same-disk Trash
-does not reclaim physical free space. Disk exhaustion fails visibly. Never empty
-Trash automatically. Runtime/build logs may contain project output and should be
-protected like other job logs.
+The environment cache's internal `.Trash` is temporary retirement storage.
+Cleanup, admission and attempt release purge retired environments once no
+attempt or preparation holds their use/build locks. The size limit includes
+published environments, other partial builds and all remaining retired bytes.
+Admission purges before enforcing the limit and before the build free-space
+check, so retirement frees disk rather than accumulating outside the budget.
+Disk exhaustion fails visibly. Local `HASH.build.log` files remain outside the
+retired entries; protect runtime/build logs like other job logs.
 
 `uv` must be installed and visible in the worker's configured `PATH` for Python
 recipes. The installer preserves that PATH for the boot service; doctor checks
@@ -191,9 +192,9 @@ installation is a follow-up. Workers run `pixi install --locked`, which rejects 
 manifest/lock mismatch without re-solving, then `pixi shell-hook --json --locked`
 for activation. `--frozen` permits mismatched inputs and is deliberately not used.
 Pixi and uv install into stable cache prefixes; only the final ready marker is
-atomically published. Cancelled/crashed unready prefixes move recoverably to
-cache Trash after exact process cleanup. Pixi's package cache lives inside the
-entry and counts against its budget. Builds can optionally run argv under
+atomically published. Cancelled/crashed unready prefixes retire to internal
+cache Trash after exact process cleanup and are purged once unreferenced.
+Pixi's package cache lives inside the entry and counts against its budget. Builds can optionally run argv under
 `build` with `{root}` and frozen bundled `{extension}` inputs, inside the prepared
 environment. There is no implicit shell or Docker requirement.
 
@@ -211,7 +212,7 @@ backed by the existing queue file store. `{assets.model}` resolves to the verifi
 worker cache copy in setup, main and sidecar argv/env/workdir. Assets are plain
 files; this slice does not add archive extraction. Environment and asset use
 locks remain held until the whole native process group, including sidecars, is
-gone. Cache Trash is retained evidence, not reclaimed disk space.
+gone. Retired environment bytes are purged after those references are released.
 
 Preparation alone never qualifies a host. Variant qualification records bind
 host, exact OS/arch/backend, extension digest, host fingerprint, all environment
