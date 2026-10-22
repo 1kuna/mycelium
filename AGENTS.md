@@ -32,13 +32,17 @@
 ## Build and verify
 
 ```sh
-go build -o myce ./cmd/myce
-go test ./... -race -count=1 -timeout 30m
-go vet ./...
+./scripts/gate.sh quick BASE   # per change (default); build, vet, targets, related race tests
+./scripts/gate.sh full         # once per batch before a fleet deploy; dev e2e + one race suite
 ./myce dev # long-running local API and fake workers; Ctrl-C to stop
 ```
 
-Serialize full race-suite runs. Native GPU/daemon/identity/boot checks are separate
+Hotfix: quick, deploy, then full, fixing forward. At most two full race suites
+at once on one Mac (more causes false failures). Details: `docs/test-gates.md`.
+
+Test behavior, security invariants and real incidents; add a focused regression
+per observed bug. No speculative edge-case matrices, implementation-detail pins,
+duplicate journeys or process self-audits (maintainer, 2026-10-22). Native GPU/daemon/identity/boot checks are separate
 from laptop proof; see `docs/production-test-plan.md`.
 
 Work locally, stage explicit paths, and commit completed changes. Do not push
