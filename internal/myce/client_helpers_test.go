@@ -3,12 +3,14 @@ package myce
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -82,4 +84,60 @@ func TestClientWaitTimeoutReportsActualQueuedReason(t *testing.T) {
 	if got := job(t, q, j.ID); got.State != "queued" {
 		t.Fatal("timeout cancelled job", got)
 	}
+}
+
+// A request timeout is an observation failure, not the overall wait deadline.
+func TestClientWaitRetriesTransientStatusWithinContext(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		posts, reads := 0, 0
+		c := Client{URL: "http://fixture", HTTP: &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
+			body := `{"id":"keyed-job","state":"queued"}`
+			if r.Method == "POST" && r.URL.Path == "/api/jobs" {
+				posts++
+			} else if r.Method == "GET" && r.URL.Path == "/api/status" {
+				reads++
+				if reads == 2 {
+					return nil, context.DeadlineExceeded
+				}
+				state := "queued"
+				if reads >= 3 {
+					state = "succeeded"
+				}
+				body = `{"jobs":[{"id":"keyed-job","state":"` + state + `"}]}`
+			} else {
+				t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
+			}
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+		})}}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		start := time.Now()
+		j, err := c.SubmitAndWait(ctx, Spec{SubmissionKey: "one-check"})
+		if err != nil || j == nil || j.State != "succeeded" || posts != 1 || reads != 3 {
+			t.Fatalf("job=%+v error=%v posts=%d reads=%d", j, err, posts, reads)
+		}
+		if time.Since(start) < 2*time.Second {
+			t.Fatal("rapid status polling")
+		}
+		// Repeated failures preserve the last observation and stop at caller deadline.
+		outageReads := 0
+		c.HTTP.Transport = clientTestTransport(func(r *http.Request) (*http.Response, error) {
+			outageReads++
+			if outageReads == 1 {
+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"jobs":[{"id":"keyed-job","state":"queued","reason":"preparing"}]}`))}, nil
+			}
+			return nil, context.DeadlineExceeded
+		})
+		ctx2, cancel2 := context.WithTimeout(context.Background(), 7*time.Second)
+		defer cancel2()
+		last, err := c.Wait(ctx2, j.ID)
+		if !errors.Is(err, context.DeadlineExceeded) || ctx2.Err() == nil || last == nil || last.State != "queued" || !strings.Contains(err.Error(), "preparing") || outageReads < 3 {
+			t.Fatalf("deadline/last observation lost: job=%+v error=%v reads=%d", last, err, outageReads)
+		}
+		ctx3, cancel3 := context.WithCancel(context.Background())
+		cancel3()
+		if _, err = c.Wait(ctx3, j.ID); !errors.Is(err, context.Canceled) {
+			t.Fatal(err)
+		}
+	})
 }

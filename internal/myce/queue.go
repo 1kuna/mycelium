@@ -102,7 +102,7 @@ type Queue struct {
 	models           ModelConfig
 	calls            map[string]*ModelCall
 	lock             *os.File
-	mu               sync.Mutex
+	mu               sync.RWMutex
 	db               *sql.DB
 	persisted        map[string][]byte
 	clock            Clock
@@ -1297,8 +1297,7 @@ func (q *Queue) Snapshot() (Snapshot, error) { return q.snapshot(false) }
 
 func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 	var out Snapshot
-	err := q.update(func() error {
-		q.maintain()
+	project := func() error {
 		out = Snapshot{HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
 		for _, s := range q.s.ModelSlots {
 			copy := *s
@@ -1386,7 +1385,9 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 		out.PriorityPolicy = q.priorityPolicyRecord()
 		out.Now = q.clock.Now()
 		order, reasons := q.queueProjection()
-		for _, j := range q.s.Jobs {
+		for _, stored := range q.s.Jobs {
+			value := *stored
+			j := &value
 			if j.State == "queued" {
 				j.Reason = reasons[j.ID]
 				if j.RequeuedByOperator {
@@ -1399,7 +1400,12 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 			if startupPending(j) {
 				j.Reason = q.startStatusReason(j)
 			}
-			copy := cloneJob(j)
+			// Status reasons/eligibility need the original spec under the lock;
+			// detach the public summary only after those calculations.
+			copy := *j
+			if !forStatus {
+				copy = cloneJob(j)
+			}
 			copy.Spec.Class = jobClass(copy.Spec)
 			copy.PriorityPolicy = q.priorityMatch(copy.Spec)
 			copy.QueueOrder = order[j.ID]
@@ -1522,16 +1528,30 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 						j.DiagnosticCode = "no_matching_device"
 					}
 				}
+				*j = statusJobCopy(j)
 			}
 		}
 		sort.SliceStable(out.Jobs, func(i, k int) bool { return statusBefore(out.Jobs[i], out.Jobs[k]) })
 		sort.Slice(out.Machines, func(i, k int) bool { return out.Machines[i].ID < out.Machines[k].ID })
 		return nil
-	})
-	if err == nil {
-		q.mu.Lock()
-		out.Usage, err = q.usageLocked(q.clock.Now().Add(-7 * 24 * time.Hour))
-		q.mu.Unlock()
+	}
+	var err error
+	if forStatus {
+		// Observation never performs maintenance, usage accounting, rollback
+		// snapshots or persistence. Tick/check-ins own those durable mutations.
+		q.mu.RLock()
+		defer q.mu.RUnlock()
+		err = project()
+		if err == nil {
+			out.Usage, err = q.usageLocked(q.clock.Now().Add(-7 * 24 * time.Hour))
+		}
+	} else {
+		err = q.update(func() error { q.maintain(); return project() })
+		if err == nil {
+			q.mu.Lock()
+			out.Usage, err = q.usageLocked(q.clock.Now().Add(-7 * 24 * time.Hour))
+			q.mu.Unlock()
+		}
 	}
 	return out, err
 }

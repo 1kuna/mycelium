@@ -217,7 +217,7 @@ func PlanInstall(role, home, root, nas, queue, name string, d Detection, account
 	c.Nice, c.CPUQuota, c.MemoryMax, c.TasksMax = 10, "25%", "512M", "64"
 	if role == "queue" {
 		// Control transactions and heartbeats must not share job politeness limits.
-		c.Nice, c.CPUQuota = 0, ""
+		c.Nice, c.CPUQuota, c.MemoryMax = 0, "", ""
 	}
 	c.EnvironmentRoot = filepath.Join(nas, "mycelium", "environments")
 	c.Path = filepath.Join(home, ".local", "bin") + ":" + filepath.Join(home, ".cargo", "bin") + ":/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -510,6 +510,10 @@ func ReadServiceConfig(path string) (ServiceConfig, error) {
 	// preserve old defaults forever. Distinct operator overrides stay explicit.
 	if e == nil && c.Role == "queue" && c.Nice == 10 && c.CPUQuota == "25%" {
 		c.Nice, c.CPUQuota = 0, ""
+	}
+	// Retire only the exact former queue default; keep explicit custom caps.
+	if e == nil && c.Role == "queue" && c.MemoryMax == "512M" {
+		c.MemoryMax = ""
 	}
 	if e == nil {
 		_, e = deviceAllowance(c.Device)

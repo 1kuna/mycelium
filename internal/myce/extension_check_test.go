@@ -6,9 +6,11 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -56,8 +58,19 @@ func TestExtensionQualificationSmokeFailureClearsPriorSuccess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reports, err := CheckExtension(ctx, relative, e, "fake", "0", "local-host", io.Discard, cache, d.Client())
-	if err != nil || len(reports) != 1 || !reports[0].Qualified || !reports[0].Setup || reports[0].CheckID == "" {
+	client := d.Client()
+	var submitted, failedRead atomic.Bool
+	client.HTTP = &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
+		if r.Method == "POST" && r.URL.Path == "/api/jobs" {
+			submitted.Store(true)
+		}
+		if r.Method == "GET" && r.URL.Path == "/api/status" && submitted.Load() && !failedRead.Swap(true) {
+			return nil, context.DeadlineExceeded
+		}
+		return http.DefaultTransport.RoundTrip(r)
+	})}
+	reports, err := CheckExtension(ctx, relative, e, "fake", "0", "local-host", io.Discard, cache, client)
+	if err != nil || len(reports) != 1 || !reports[0].Qualified || !reports[0].Setup || reports[0].CheckID == "" || !failedRead.Load() {
 		t.Fatal(reports, err)
 	}
 	m := Machine{HostID: "local-host", GPU: "fake", ExtensionFingerprint: reports[0].Fingerprint, CapabilityProfile: &CapabilityProfile{OS: e.Variants[0].Target.OS, Arch: e.Variants[0].Target.Arch}}

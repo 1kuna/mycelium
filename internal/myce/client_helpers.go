@@ -40,25 +40,58 @@ func (c Client) GetJob(ctx context.Context, id string) (*Job, error) {
 }
 
 func (c Client) Wait(ctx context.Context, id string) (*Job, error) {
-	tick := time.NewTicker(100 * time.Millisecond)
-	defer tick.Stop()
+	return c.wait(ctx, id)
+}
+
+func waitStatusPause(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+// RetryStatusRead shares the CLI wait command's idempotent-read policy.
+// Authentication/other permanent HTTP errors must still return immediately.
+func RetryStatusRead(err error) bool {
+	var httpErr *HTTPError
+	return err != nil && (!errors.As(err, &httpErr) || httpErr.Status >= 500 || httpErr.Status == 408 || httpErr.Status == 429)
+}
+
+func (c Client) wait(ctx context.Context, id string) (*Job, error) {
+	const poll = time.Second
+	delay := poll
 	var last *Job
 	for {
-		j, err := c.GetJob(ctx, id)
+		if ctx.Err() != nil {
+			return last, jobWaitError(id, last, ctx.Err())
+		}
+		var snapshot Snapshot
+		err := c.Call(ctx, "GET", "/api/status", nil, &snapshot)
+		if ctx.Err() != nil {
+			return last, jobWaitError(id, last, ctx.Err())
+		}
 		if err != nil {
-			if ctx.Err() != nil {
-				return last, jobWaitError(id, last, ctx.Err())
+			if !RetryStatusRead(err) {
+				return last, err
 			}
-			return nil, err
+			delay = min(delay*2, 10*time.Second)
+		} else {
+			j, err := FindJob(snapshot.Jobs, id)
+			if err != nil {
+				return last, err
+			}
+			last = j
+			if terminal(j.State) {
+				return j, nil
+			}
+			delay = poll
 		}
-		last = j
-		if terminal(j.State) {
-			return j, nil
-		}
-		select {
-		case <-ctx.Done():
-			return j, jobWaitError(id, j, ctx.Err())
-		case <-tick.C:
+		if err := waitStatusPause(ctx, delay); err != nil {
+			return last, jobWaitError(id, last, err)
 		}
 	}
 }

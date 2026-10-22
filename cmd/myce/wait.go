@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -143,7 +142,7 @@ func waitJobs(ctx context.Context, c myce.Client, ids []string, timeout time.Dur
 		}
 		if err != nil {
 			var httpErr *myce.HTTPError
-			if errors.As(err, &httpErr) && httpErr.Status < 500 && httpErr.Status != http.StatusRequestTimeout && httpErr.Status != http.StatusTooManyRequests {
+			if errors.As(err, &httpErr) && !myce.RetryStatusRead(err) {
 				// Do not echo a remote response body (it may contain credentials).
 				return waitError(2, fmt.Sprintf("wait: queue HTTP %d; check authentication and queue address", httpErr.Status))
 			}

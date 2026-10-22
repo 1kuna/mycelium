@@ -95,42 +95,7 @@ func (q *Queue) publicSnapshot() (Snapshot, error) {
 			}
 		}
 	}
-	for _, j := range s.Jobs {
-		j.ExecutionCause = safeRuntimeCause(j.ExecutionCause)
-		j.CleanupCause = safeRuntimeCause(j.CleanupCause)
-		// Status is a summary, never a copy of a submitted command, environment,
-		// program arguments, extension files, or local filesystem paths.
-		spec := Spec{AllowedMachines: j.Spec.AllowedMachines, Name: j.Spec.Name, Project: j.Spec.Project, Priority: j.Spec.Priority, Class: j.Spec.Class, Kind: j.Spec.Kind, Resumable: j.Spec.Resumable, Deadline: j.Spec.Deadline, StartBy: j.Spec.StartBy}
-		if j.Spec.Program != nil {
-			spec.Program = &Program{Type: j.Spec.Program.Type}
-		}
-		if j.Spec.ExtensionCheck != nil {
-			spec.ExtensionCheck = &ExtensionCheckRequest{Work: j.Spec.ExtensionCheck.Work}
-		}
-		spec.Needs = j.Spec.Needs
-		j.Spec = spec
-		j.Extensions = nil
-		j.EnvironmentRecipes = nil
-		j.EnvironmentFailureLog = ""
-		j.Checkpoint = ""
-		if strings.HasPrefix(j.Reason, "hypha waiting: ") {
-			j.Reason = "hypha waiting: " + availabilityWords(strings.TrimPrefix(j.Reason, "hypha waiting: "))
-		}
-		if j.State == "failed" {
-			switch {
-			case j.ExecutionCause != nil && j.ExecutionCause.Class == cpuIsolationUnavailable:
-				j.Reason = cpuIsolationUnavailable + ": " + rejectionMessages[cpuIsolationUnavailable]
-			case j.Reason == "infrastructure_retries_exhausted", j.Reason == "out of memory after one retry on a larger hypha", j.Reason == "out of memory; previous capability unavailable":
-				// Fixed scheduler diagnostics contain no payload or machine paths.
-			case strings.HasPrefix(j.Reason, "production start deadline exceeded:"):
-				j.Reason = "production start deadline exceeded"
-			case strings.HasPrefix(j.Reason, "production cannot start: no eligible host is enabled;"):
-				j.Reason = "production cannot start: no eligible host is enabled"
-			default:
-				j.Reason = ceilingDiagnostic(j.Reason, "execution failed")
-			}
-		}
-	}
+
 	return s, err
 }
 
@@ -211,4 +176,47 @@ func safeDockerHoldStatus(value string) bool {
 		}
 	}
 	return false
+}
+
+// Called after eligibility/reasons are projected under the read lock. Drop private
+// payload before cloning: frozen files dominate retained history, not status.
+func statusJobCopy(job *Job) Job {
+	value := *job
+	j := &value
+	j.ExecutionCause = safeRuntimeCause(j.ExecutionCause)
+	j.CleanupCause = safeRuntimeCause(j.CleanupCause)
+	// Status is a summary, never a copy of a submitted command, environment,
+	// program arguments, extension files, or local filesystem paths.
+	spec := Spec{AllowedMachines: j.Spec.AllowedMachines, Name: j.Spec.Name, Project: j.Spec.Project, Priority: j.Spec.Priority, Class: j.Spec.Class, Kind: j.Spec.Kind, Resumable: j.Spec.Resumable, Deadline: j.Spec.Deadline, StartBy: j.Spec.StartBy}
+	if j.Spec.Program != nil {
+		spec.Program = &Program{Type: j.Spec.Program.Type}
+	}
+	if j.Spec.ExtensionCheck != nil {
+		spec.ExtensionCheck = &ExtensionCheckRequest{Work: j.Spec.ExtensionCheck.Work}
+	}
+	spec.Needs = j.Spec.Needs
+	j.Spec = spec
+	j.Extensions = nil
+	j.EnvironmentRecipes = nil
+	j.SidecarEnvironmentRecipes = nil
+	j.EnvironmentFailureLog = ""
+	j.Checkpoint = ""
+	if strings.HasPrefix(j.Reason, "hypha waiting: ") {
+		j.Reason = "hypha waiting: " + availabilityWords(strings.TrimPrefix(j.Reason, "hypha waiting: "))
+	}
+	if j.State == "failed" {
+		switch {
+		case j.ExecutionCause != nil && j.ExecutionCause.Class == cpuIsolationUnavailable:
+			j.Reason = cpuIsolationUnavailable + ": " + rejectionMessages[cpuIsolationUnavailable]
+		case j.Reason == "infrastructure_retries_exhausted", j.Reason == "out of memory after one retry on a larger hypha", j.Reason == "out of memory; previous capability unavailable":
+			// Fixed scheduler diagnostics contain no payload or machine paths.
+		case strings.HasPrefix(j.Reason, "production start deadline exceeded:"):
+			j.Reason = "production start deadline exceeded"
+		case strings.HasPrefix(j.Reason, "production cannot start: no eligible host is enabled;"):
+			j.Reason = "production cannot start: no eligible host is enabled"
+		default:
+			j.Reason = ceilingDiagnostic(j.Reason, "execution failed")
+		}
+	}
+	return cloneJob(j)
 }
