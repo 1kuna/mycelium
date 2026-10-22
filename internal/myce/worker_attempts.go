@@ -114,7 +114,12 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					} else {
 						err = s.startFailure(a.job, launchRefused, err)
 					}
-					if err != nil && !errors.Is(err, errWorkerCheckpoint) && !errors.Is(err, errWorkerMemory) && !errors.Is(err, errWorkerUnavailable) {
+					if errors.Is(err, errWorkerMemory) {
+						// RAM may disappear after assignment or during preparation.
+						// Release unstarted custody so the queue can wait for capacity.
+						err = s.startFailure(a.job, launchRefused, err)
+					}
+					if err != nil && !errors.Is(err, errWorkerCheckpoint) && !errors.Is(err, errWorkerUnavailable) {
 						r := startFailureOutcome(Result{Machine: w.Machine.ID, Session: a.job.Session, Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}, Error: err.Error(), ExtensionUnavailable: errors.Is(err, errExtensionUnavailable), ReleasePending: errors.Is(err, errWorkerReleasePending)}, err)
 						s.state.Result = &r
 					}

@@ -1255,6 +1255,8 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 			m.CPUIsolation = cpuIsolationUnavailable
 		}
 		q.requeue(j, cpuIsolationUnavailable+": "+rejectionMessages[cpuIsolationUnavailable], false)
+	} else if !r.Success && j.StartedAt == nil && j.ExecutionCause != nil && j.ExecutionCause.Operation == "launch" && j.ExecutionCause.Class == "resource_limit" {
+		q.requeue(j, "waiting for memory after prelaunch admission changed", false)
 	} else if r.Interrupted && r.PoliteStop {
 		q.retry(j, "requeued: hypha availability withdrawn")
 	} else if r.Interrupted && r.OperatorStop {
