@@ -40,6 +40,10 @@ func TestHoldsDetailDemandReturnAndDockerEscalation(t *testing.T) {
 	r := HostRelease{Host: "b70", Job: "old-job", Machine: a.ID, Session: "old-session", Attempt: 1, Docker: true, CleanupSince: &idle}
 	q.s.HostReleases[releaseKey(r)] = r
 	c.Advance(2 * time.Minute)
+	// Durable escalation belongs to maintenance, not status observation.
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
 	snap, err = q.publicSnapshot()
 	if err != nil {
 		t.Fatal(err)
@@ -113,7 +117,7 @@ func TestHoldsDetailKindsAndLegacyCompatibility(t *testing.T) {
 func TestHoldsDetailProductionKinds(t *testing.T) {
 	q, c, a, _, _ := holdFleet(t, true)
 	// Direct state fixtures isolate formatting from dispatch; snapshots above
-	// exercise the maintained, public status path.
+	// exercise the public status path after explicit maintenance.
 	h := q.s.Hosts["b70"]
 	h.Active = true
 	d := q.productionHoldDetail("b70")
