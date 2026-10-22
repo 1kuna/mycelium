@@ -136,6 +136,14 @@ func (w Worker) publishExtensionFiles(j Job) error {
 	if err != nil {
 		return err
 	}
+	return publishJobOutputs(j, root)
+}
+
+// Non-Darwin workers retain hard-link publication. Darwin installs its SMB
+// directory publisher during package initialization.
+var publishJobOutputs = publishLinkedJobOutputs
+
+func publishLinkedJobOutputs(j Job, root string) error {
 	for name, prefix := range j.Spec.Outputs {
 		src, err := confinedPath(j.Spec.Run.Workdir, name)
 		if err != nil {
@@ -167,7 +175,7 @@ func (w Worker) publishExtensionFiles(j Job) error {
 		staged := filepath.Join(tmp, "file")
 		err = copyJobFile(src, staged)
 		if err == nil {
-			err = publishJobOutput(staged, dest)
+			err = os.Link(staged, dest)
 		} // Atomic no-overwrite publication.
 		_ = os.RemoveAll(tmp)
 		if err != nil {
