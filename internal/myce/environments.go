@@ -374,6 +374,12 @@ func (c *EnvironmentCache) init() error {
 		if c.Clock == nil {
 			c.Clock = RealClock{}
 		}
+		if c.Limit == 0 && c.Root != "" {
+			c.Limit, c.initErr = AutoEnvironmentCacheLimit(c.Root)
+			if c.initErr != nil {
+				return
+			}
+		}
 		if c.Limit <= 0 {
 			c.initErr = errors.New("environment-cache-bytes must be positive")
 			return
@@ -1195,6 +1201,19 @@ func (rt *environmentRuntime) restore() error {
 		}
 	}
 	for key, r := range rt.reports {
+		// s007 and older stored only the diagnostic. Migrate that exact capacity
+		// refusal too; other failures remain negatively cached across restarts.
+		var needed, limit int64
+		// Acquire wraps admission failures with the build error and log path.
+		if at := strings.Index(r.Error, "environment cache needs "); at >= 0 {
+			if n, err := fmt.Sscanf(r.Error[at:], "environment cache needs %d bytes; limit %d (in-use entries protected)", &needed, &limit); n != 2 || err != nil {
+				limit = 0
+			}
+		}
+		if r.State == "failed" && limit > 0 && limit != rt.cache.Limit {
+			r.State, r.Error = "paused", ""
+			rt.reports[key] = r
+		}
 		if r.State == "building" {
 			r.State = "paused"
 			r.Error = ""

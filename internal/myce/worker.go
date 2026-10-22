@@ -761,9 +761,6 @@ func (w Worker) Run(stop context.Context) error {
 	if w.EnvironmentRoot == "" {
 		w.EnvironmentRoot = filepath.Join(s.dir, "environment-cache")
 	}
-	if w.EnvironmentLimit == 0 {
-		w.EnvironmentLimit = 20 * 1024 * 1024 * 1024
-	}
 	w.environmentCache = &EnvironmentCache{Root: w.EnvironmentRoot, Limit: w.EnvironmentLimit, Clock: w.Clock, Run: w.environmentRun}
 	if err = w.environmentCache.Cleanup(context.Background()); err != nil {
 		return err

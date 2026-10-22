@@ -462,3 +462,28 @@ retain cores/RAM until exact cleanup is acknowledged. One attempt per worker
 remains the R1 execution limit. Core counts reserve capacity, with no CPU-time
 kernel enforcement in R1. Existing Linux memory ceilings and macOS admission-only
 semantics apply unchanged. Native Windows/WSL CPU qualification is later work.
+
+## Environment cache capacity
+
+Omitting `--environment-cache-bytes` auto-sizes from available bytes on the local
+cache filesystem (the nearest existing ancestor for a fresh path): one quarter
+of free space, bounded to 4–80 GiB and capped to retain 20 GiB free. Below 24 GiB
+free, automatic sizing refuses; choose an explicit byte limit after checking
+headroom. The limit is a ceiling, not a preallocation. Explicit CLI byte values
+win. Saved-config upgrades migrate only the exact former 20 GiB default;
+other saved limits stay unchanged. A historical explicitly selected 20 GiB
+cannot be distinguished from that former default; pass it explicitly again to
+retain it during an upgrade.
+
+After a cache-capacity refusal, reconfigure the idle worker with the supported
+`myce install worker --config CONFIG --environment-cache-bytes BYTES` path.
+The worker reconsiders saved capacity failures when its allowance changes,
+including failures written by older releases. Other preparation failures remain
+cached. No state-file edit or cache deletion is needed. Preparation may be
+admitted on the next heartbeat; successful preparation and qualification are
+separate results.
+
+One-shot NAS install/reconfigure validation allows 10 seconds per filesystem
+operation within the existing 15-second total deadline, to accommodate SMB
+metadata/fsync latency. Heartbeat filesystem observation keeps its shorter
+budget; a stalled installation remains bounded and preserves installed state.

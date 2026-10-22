@@ -12,7 +12,7 @@ import (
 // slower SMB fsync/metadata calls. The total cap includes inventory and all I/O.
 const (
 	heartbeatFilesystemBudget      = 750 * time.Millisecond
-	networkFilesystemBudget        = 3 * time.Second // onboarding, per operation
+	networkFilesystemBudget        = 10 * time.Second // one-shot onboarding/reconfigure; total remains capped
 	onboardingStorageBudget        = 15 * time.Second
 	onboardingMountInventoryBudget = 5 * time.Second // standalone selection, including dry runs
 )
