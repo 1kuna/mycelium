@@ -676,6 +676,16 @@ func TestResumableThreeInfrastructureLosses(t *testing.T) {
 }
 
 func TestRestartProductionPreemptionAfterReport(t *testing.T) {
+	fakeCheckpointProbe := func(q *Queue) {
+		// Drain Open's pending observation before replacing the seam. This test
+		// models healthy storage; assignment and preemption must not time fsync.
+		await(t, func() bool {
+			_, err := q.nasProbe.run(q.root, func() (bool, error) { return true, nil })
+			return err == nil
+		})
+		q.checkpointProbe = func() bool { return true }
+		q.nasAvailable = true
+	}
 	dir := t.TempDir()
 	root := t.TempDir()
 	c := &fakeClock{now: time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)}
@@ -684,6 +694,7 @@ func TestRestartProductionPreemptionAfterReport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fakeCheckpointProbe(q)
 	submit(t, q, spec("experiment"))
 	m := machine("one", "fake")
 	r := check(t, q, m, nil).Job
@@ -702,6 +713,7 @@ func TestRestartProductionPreemptionAfterReport(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer q.Close()
+	fakeCheckpointProbe(q)
 	check(t, q, m, r)
 	p := spec("production")
 	p.AllowedMachines = []string{m.ID}
