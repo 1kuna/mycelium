@@ -44,10 +44,14 @@ func environmentCacheSize(free int64) (int64, error) {
 
 // An explicit flag wins. Only the exact retired 20 GiB default migrates.
 func ResolveEnvironmentCacheSizing(c *ServiceConfig, explicit bool) error {
+	return resolveEnvironmentCacheSizing(c, explicit, AutoEnvironmentCacheLimit)
+}
+
+func resolveEnvironmentCacheSizing(c *ServiceConfig, explicit bool, size func(string) (int64, error)) error {
 	if c.Role != "worker" || explicit || c.EnvironmentCacheBytes != 0 && c.EnvironmentCacheBytes != 20<<30 {
 		return nil
 	}
-	limit, err := AutoEnvironmentCacheLimit(c.EnvironmentCache)
+	limit, err := size(c.EnvironmentCache)
 	if err != nil {
 		return err
 	}

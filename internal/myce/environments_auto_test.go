@@ -26,12 +26,12 @@ func TestEnvironmentCacheAutoSizing(t *testing.T) {
 		{20 << 30, false}, {32 << 30, false}, {40 << 30, false}, {20 << 30, true},
 	} {
 		s := ServiceConfig{Role: "worker", EnvironmentCache: c.Root, EnvironmentCacheBytes: tc.saved}
-		if err := ResolveEnvironmentCacheSizing(&s, tc.explicit); err != nil {
+		if err := resolveEnvironmentCacheSizing(&s, tc.explicit, func(string) (int64, error) { return 50 << 30, nil }); err != nil {
 			t.Fatal(err)
 		}
 		want := tc.saved
 		if tc.saved == 20<<30 && !tc.explicit {
-			want = c.Limit
+			want = 50 << 30
 		}
 		if s.EnvironmentCacheBytes != want {
 			t.Fatalf("saved %d explicit=%v became %d", tc.saved, tc.explicit, s.EnvironmentCacheBytes)
