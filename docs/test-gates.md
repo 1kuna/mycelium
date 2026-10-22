@@ -35,8 +35,11 @@ already active. Do not terminate another worker's tests. The gate allows two
 Go packages at once (`-p 2`), rather than unbounded compiler parallelism. The
 independent fake-clock tests use at most four parallel tests per package.
 `GORACE=atexit_sleep_ms=0` omits the race runtime's artificial one-second delay
-on each helper-process exit; all accesses remain race-instrumented and tests
-still join their workers. Vet runs explicitly once, so test commands use
+on each helper-process exit; product code and assertions remain race-instrumented
+and tests still join their workers. The external fake Docker CLI is built once
+with `go test -c -race=false` and shared by fixture calls. It only simulates the
+external daemon protocol; it never runs product tests. The worker and Docker
+adapter execute in the parent under `-race`. Vet runs explicitly once, so test commands use
 `-vet=off`. Ambient `MYCE_*` settings (including real-Docker opt-ins) are cleared.
 The package fixtures isolate local storage and substitute synthetic GPU and daemon
 probes; they don't need fleet or NAS access. HTTP integration tests use loopback

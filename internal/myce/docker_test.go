@@ -300,15 +300,34 @@ func dockerMachine(id, gpu string) Machine {
 	return m
 }
 
+var dockerCLIExecutable struct {
+	sync.Once
+	path string
+	out  []byte
+	err  error
+}
+
+// The simulated Docker CLI is an external program, like Docker itself. Build it
+// once without race instrumentation; the worker, adapter and assertions stay in
+// the race-instrumented parent. Do not use this binary to run product tests.
+func dockerCLITestBinary(t *testing.T) string {
+	t.Helper()
+	dockerCLIExecutable.Do(func() {
+		dockerCLIExecutable.path = filepath.Join(os.Getenv("MYCE_TEST_DOCKER_BIN"), "fake-docker.test")
+		dockerCLIExecutable.out, dockerCLIExecutable.err = exec.Command("go", "test", "-c", "-vet=off", "-race=false", "-o", dockerCLIExecutable.path, ".").CombinedOutput()
+	})
+	if dockerCLIExecutable.err != nil {
+		t.Fatalf("build fake Docker CLI: %v\n%s", dockerCLIExecutable.err, dockerCLIExecutable.out)
+	}
+	return dockerCLIExecutable.path
+}
+
 func dockerFixture(t *testing.T) (Worker, *workerStore, *dockerTestClock, string) {
 	t.Helper()
 	root := t.TempDir()
-	binary, e := os.Executable()
-	if e != nil {
-		t.Fatal(e)
-	}
+	binary := dockerCLITestBinary(t)
 	script := "#!/bin/sh\nexec '" + binary + "' -test.run='^TestDockerCLIHelper$' -- \"$@\"\n"
-	if e = os.WriteFile(filepath.Join(root, "docker"), []byte(script), 0700); e != nil {
+	if e := os.WriteFile(filepath.Join(root, "docker"), []byte(script), 0700); e != nil {
 		t.Fatal(e)
 	}
 	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
