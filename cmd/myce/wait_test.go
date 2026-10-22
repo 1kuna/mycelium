@@ -348,7 +348,7 @@ func TestWaitProductionStartDeadline(t *testing.T) {
 	server := httptest.NewServer(myce.API{Queue: q, Token: "test-only"}.Handler())
 	defer server.Close()
 	var out, diagnostics bytes.Buffer
-	err = waitJobs(context.Background(), myce.Client{URL: server.URL, Token: "test-only"}, []string{j.ID}, 0, &out, &diagnostics, clock, func(_ context.Context, d time.Duration) error { clock.advance(d); return nil })
+	err = waitJobs(context.Background(), myce.Client{URL: server.URL, Token: "test-only"}, []string{j.ID}, 0, &out, &diagnostics, clock, func(_ context.Context, d time.Duration) error { clock.advance(d); return q.Tick() })
 	if exitCode(err) != 1 || !strings.Contains(out.String(), "production start deadline exceeded") || strings.Contains(out.String(), "needs xpu") {
 		t.Fatalf("exit=%d output=%s err=%v", exitCode(err), out.String(), err)
 	}
