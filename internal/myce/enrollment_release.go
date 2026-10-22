@@ -14,9 +14,16 @@ import (
 type EnrollmentRelease struct {
 	Manifest ReleaseManifest `json:"manifest"`
 	Origin   string          `json:"origin"`
+	CACert   string          `json:"ca_cert,omitempty"`
 }
 
 func (q *Queue) ConfigureEnrollmentRelease(data []byte, key ed25519.PublicKey, origin string, allowDowngrade ...bool) error {
+	return q.ConfigureEnrollmentReleaseWithCA(data, key, origin, "", allowDowngrade...)
+}
+
+// Publisher trust is explicitly provisioned by the administrator, then delivered
+// to inviters over their already pinned, authenticated queue connection.
+func (q *Queue) ConfigureEnrollmentReleaseWithCA(data []byte, key ed25519.PublicKey, origin, caCert string, allowDowngrade ...bool) error {
 	m, err := VerifyRelease(data, key)
 	if err != nil {
 		return err
@@ -24,11 +31,14 @@ func (q *Queue) ConfigureEnrollmentRelease(data []byte, key ed25519.PublicKey, o
 	if err = releaseOrigin(origin); err != nil {
 		return err
 	}
+	if err = validateReleaseCA(caCert); err != nil {
+		return err
+	}
 	return q.update(func() error {
 		if current := q.s.EnrollmentRelease; current != nil && semver.Compare(m.Version, current.Manifest.Version) <= 0 && !(len(allowDowngrade) > 0 && allowDowngrade[0]) {
 			return errors.New("release_downgrade_refused: queue approval requires a newer version; use --allow-downgrade explicitly to re-approve or downgrade")
 		}
-		q.s.EnrollmentRelease = &EnrollmentRelease{m, origin}
+		q.s.EnrollmentRelease = &EnrollmentRelease{Manifest: m, Origin: origin, CACert: caCert}
 		return nil
 	})
 }
@@ -52,5 +62,5 @@ func (r EnrollmentRelease) Validate() error {
 	if err := releaseOrigin(r.Origin); err != nil {
 		return errors.New("queue approved release origin invalid")
 	}
-	return nil
+	return validateReleaseCA(r.CACert)
 }

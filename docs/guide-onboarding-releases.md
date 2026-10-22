@@ -45,8 +45,25 @@ The publisher certificate trust is ordinary HTTPS. The LAN queue's full
 certificate-DER pin is checked separately by the existing joining client;
 it is not a curl SPKI `--pinnedpubkey` value.
 
+For a private LAN HTTPS directory, the administrator may additionally pass
+`--release-ca PUBLIC_CERTIFICATE_PEM` to the queue command. This explicitly
+provisions the publisher's public CA certificate (or self-signed server
+certificate); never pass its private key. The queue persists this certificate
+with the approved release and supplies it to authenticated inviters. The inviter
+must run a version supporting `--release-ca`. Its pinned queue connection
+authenticates this trust material, which the bootstrap supplies to curl through
+a private temporary `--cacert` file. TLS certificate validity and the publisher
+URL's hostname/IP SAN are still verified; redirects remain refused. The temporary
+certificate is removed before the executable runs and on download failure.
+No system trust-store changes or TLS-verification bypass is used. Without this
+option, ordinary HTTPS trust is unchanged. Existing joining certificates have no
+hostname SAN and cannot serve as ordinary HTTPS publisher certificates; provision
+a separate publisher certificate with the correct SAN. A static HTTPS directory
+can serve the signed release without changing the queue's joining identity.
+
 An inviter can explicitly override the configured distribution with
 `--release-manifest FILE --release-key PUBLIC_PEM --release-url HTTPS_DIRECTORY`.
+For that local override, `--release-ca PUBLIC_CERTIFICATE_PEM` is also supported.
 That verifies the signature locally with the independently provisioned key.
 The output embeds approved hashes instead of fetching and running a remote script.
 The bootstrap resumes private hash-addressed `.partial` files, rejects redirect
