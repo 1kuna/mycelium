@@ -49,7 +49,7 @@ func LocalMachineProbe() MachineProbe {
 		// version checks. Those are not hardware probes; test CLI processes
 		// supply their ordinary fake managers through PATH.
 		switch filepath.Base(n) {
-		case "systemctl", "systemd-run", "launchctl", "loginctl", "uv", "uvx", "pixi":
+		case "systemctl", "systemd-run", "launchctl", "loginctl", "codesign", "uv", "uvx", "pixi":
 		default:
 			probeguard.Check()
 		}
@@ -68,6 +68,10 @@ func LocalMachineProbe() MachineProbe {
 		var exit *exec.ExitError
 		if errors.As(err, &exit) {
 			exit.Stderr = stderr.Bytes()
+		}
+		if filepath.Base(n) == "codesign" {
+			// codesign writes inspection metadata to stderr, even on success.
+			return append(stdout.Bytes(), stderr.Bytes()...), err
 		}
 		return stdout.Bytes(), err
 	}
@@ -336,6 +340,11 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 		existing = true
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
+	}
+	if existing && c.Detection.OS == "darwin" {
+		if err := validateDarwinUpgradeIdentity(ctx, c.Binary, executable, command); err != nil {
+			return err
+		}
 	}
 	var invitation *Invitation
 	if c.JoiningFile != "" && !existing {

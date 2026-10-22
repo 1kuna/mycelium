@@ -43,6 +43,15 @@ func (b *enrollmentLogBuffer) String() string { b.mu.Lock(); defer b.mu.Unlock()
 // fleet, SSH, sudo or external service is involved.
 const enrollmentFakeManager = `#!/bin/sh
 set -eu
+if test "$(basename "$0")" = codesign; then
+  case "$1" in
+    --verify) :;;
+    -dv) printf 'Identifier=io.github.1kuna.mycelium\nAuthority=Developer ID Application: synthetic\nflags=0x10000(runtime)\n';;
+    -dr) echo 'designated => identifier "io.github.1kuna.mycelium" and anchor apple generic and certificate leaf[subject.OU] = "SYNTHETIC"';;
+    *) exit 99;;
+  esac
+  exit
+fi
 base="$HOME/.local/share/mycelium/worker"
 pidfile="$HOME/fake-manager.pid"
 start() {
@@ -242,7 +251,7 @@ func TestOneCommandEnrollmentEndToEnd(t *testing.T) {
 		if err := os.Mkdir(bin, 0700); err != nil {
 			t.Fatal(err)
 		}
-		for _, name := range []string{"launchctl", "systemctl"} {
+		for _, name := range []string{"launchctl", "systemctl", "codesign"} {
 			if err := os.WriteFile(filepath.Join(bin, name), []byte(enrollmentFakeManager), 0700); err != nil {
 				t.Fatal(err)
 			}

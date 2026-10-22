@@ -94,6 +94,7 @@ func TestInvitationInstallPersistsTrustAndStatus(t *testing.T) {
 	if err = os.WriteFile(binary, []byte("test binary"), 0700); err != nil {
 		t.Fatal(err)
 	}
+	loaded := false
 	if err = myce.Install(context.Background(), c, binary, "", func(_ context.Context, name string, args ...string) ([]byte, error) {
 		if name == "launchctl" && args[0] == "bootstrap" && filepath.Base(args[2]) == "probe.plist" {
 			b, err := os.ReadFile(args[2])
@@ -107,6 +108,19 @@ func TestInvitationInstallPersistsTrustAndStatus(t *testing.T) {
 			output, _, _ := strings.Cut(rest, "</string>")
 			data, _ := json.Marshal(myce.HardwarePreflight{Detection: c.Detection})
 			return nil, os.WriteFile(html.UnescapeString(output), data, 0600)
+		}
+		if name == "launchctl" {
+			switch args[0] {
+			case "print":
+				if !loaded {
+					return nil, installFixtureExit(113)
+				}
+				return []byte("state = running\npid = 42\n"), nil
+			case "bootstrap":
+				loaded = true
+			case "bootout":
+				loaded = false
+			}
 		}
 		return nil, nil
 	}); err != nil {
