@@ -249,6 +249,7 @@ func legacyCancellationFixture(t *testing.T, retained bool) (*Queue, *fakeClock,
 		t.Fatal(err)
 	}
 	q = reopenCancellationQueue(t, q, c)
+	fakeCheckpointAvailability(t, q, true)
 	return q, c, q.s.Jobs[j.ID], one
 }
 
