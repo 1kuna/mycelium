@@ -22,7 +22,7 @@ func readQueueState(db *sql.DB, data []byte) ([]byte, error) {
 	}
 	defer rows.Close()
 	var base map[string]json.RawMessage
-	groups := map[string]map[string]json.RawMessage{"jobs": {}, "submissions": {}, "extensions": {}}
+	groups := map[string]map[string]json.RawMessage{"jobs": {}, "submissions": {}, "extensions": {}, "work_observations": {}}
 	for rows.Next() {
 		var key string
 		var value []byte
@@ -88,6 +88,7 @@ func (q *Queue) persistState(tx *sql.Tx) (map[string][]byte, error) {
 	base.Jobs = nil
 	base.Submissions = nil
 	base.Extensions = nil
+	base.WorkObservations = nil
 	if err := put("state", base); err != nil {
 		return nil, err
 	}
@@ -103,6 +104,11 @@ func (q *Queue) persistState(tx *sql.Tx) (map[string][]byte, error) {
 	}
 	for key, value := range q.s.Extensions {
 		if err := put("extensions/"+key, value); err != nil {
+			return nil, err
+		}
+	}
+	for key, value := range q.s.WorkObservations {
+		if err := put("work_observations/"+key, value); err != nil {
 			return nil, err
 		}
 	}

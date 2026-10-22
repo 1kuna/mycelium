@@ -139,7 +139,8 @@ func (e Environment) Key() string {
 }
 
 type Spec struct {
-	SubmissionKey string `json:"submission_key,omitempty" yaml:"submission_key,omitempty"`
+	Workload      *Workload `json:"workload,omitempty" yaml:"workload,omitempty"`
+	SubmissionKey string    `json:"submission_key,omitempty" yaml:"submission_key,omitempty"`
 
 	Files           FileManifest           `json:"files,omitempty" yaml:"files,omitempty"`
 	Kind            string                 `json:"kind,omitempty" yaml:"kind,omitempty"`
@@ -169,6 +170,9 @@ type Spec struct {
 }
 
 func (s Spec) Validate() error {
+	if s.Workload != nil && (!s.extensionJob() || !s.Workload.valid()) {
+		return errors.New("workload requires extension work, input_shape and positive units")
+	}
 	if err := normalizeResources(&s); err != nil {
 		return err
 	}
@@ -288,6 +292,7 @@ type Copy struct {
 }
 
 type Job struct {
+	Timing           *WorkTiming   `json:"timing,omitempty"`
 	DiagnosticCode   string        `json:"diagnostic_code,omitempty"`
 	AllocatedDevices []string      `json:"allocated_devices,omitempty"`
 	PreemptionCount  int           `json:"preemption_count,omitempty"`

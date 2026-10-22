@@ -40,6 +40,7 @@ type batchRelease struct {
 }
 
 type state struct {
+	WorkObservations  map[string]WorkObservation `json:"work_observations,omitempty"`
 	EnrollmentRelease *EnrollmentRelease         `json:"enrollment_release,omitempty"`
 	MachineConversion *MachineConversion         `json:"machine_conversion,omitempty"`
 	ProductionDrains  map[string]productionDrain `json:"production_drains,omitempty"`
@@ -206,6 +207,11 @@ func Open(path, root string, clock Clock) (*Queue, error) {
 			return nil, err
 		}
 	}
+	for _, j := range q.s.Jobs {
+		if j.Timing != nil && !terminal(j.State) {
+			j.Timing.Reason = "queue restarted; occupancy unknown"
+		}
+	}
 	success = true
 	return q, nil
 }
@@ -341,6 +347,9 @@ func (q *Queue) update(fn func() error) error {
 	q.usageWrites = nil
 	q.accountUsage(q.clock.Now())
 	err := fn()
+	if err == nil {
+		q.invalidateWorkTimings()
+	}
 	if err == nil {
 		q.maintainSubmissions()
 		err = q.persistUsage()
@@ -1263,6 +1272,7 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 			j.OutputRefs = r.OutputRefs
 			j.OutputFiles = nil
 		}
+		q.recordWorkObservation(j, r)
 		q.recordProgramNeeds(j, r)
 		q.recordModelUse(j.Spec.Needs.Model)
 		j.State = "succeeded"
@@ -1674,6 +1684,7 @@ func (q *Queue) markStarted(j *Job) {
 	if j.StartedAt == nil {
 		now := q.clock.Now()
 		j.StartedAt = &now
+		q.beginWorkTiming(j)
 		if j.Spec.StartBy != nil && j.StartWindow == 0 {
 			j.StartWindow = j.Spec.StartBy.Sub(j.Queued)
 		}
@@ -1809,6 +1820,7 @@ func (q *Queue) assign(j *Job, m *Machine) Job {
 	j.ReleaseConfirmed = false
 	j.RequeuedByOperator = false
 	j.StartedAt = nil
+	j.Timing = nil
 	now := q.clock.Now()
 	j.PriorityPolicy = q.priorityMatch(j.Spec)
 	j.AssignedAt = &now

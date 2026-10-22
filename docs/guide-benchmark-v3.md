@@ -89,3 +89,44 @@ This is a provisional workload estimate: there is no automatic model of arbitrar
 program size or data-dependent execution time yet. CPU, memory and disk rates are
 reported separately; they are not blended into an arbitrary accelerator score.
 There is no queue for a busy faster hypha, automatic migration, or new service.
+
+## Comparable accepted work (slice 1, #107)
+
+Opt in per variant, using the same work key as its existing native baseline:
+
+```yaml
+variants:
+  - target: {os: linux, arch: amd64, platform: cpu}
+    # Existing needs, execution, check and baselines remain required.
+    references:
+      extension:example.stage:
+        input_shape: small-v1
+        unit: records
+        units: 100
+```
+
+`units` is the amount in the bundled reference input. `input_shape` is an opaque
+compatibility bucket, and `unit` is a generic unit name. Both use lowercase
+letters/digits, dots, underscores or hyphens, up to 64 characters. The contract
+promises one independent item and vector batch size one; recipe settings own
+thread/cache behavior. Reference metadata never qualifies a variant: the exact
+native-baseline check still must pass, and a changed recipe/reference invalidates
+its digest and qualification.
+
+An ordinary job selects the extension and declares
+`workload: {input_shape: small-v1, units: 250}`. A matching qualified variant's
+accepted success contributes queue-Clock elapsed time from Started to completion,
+including cleanup/handoff but excluding preparation. Per-key estimates divide
+accumulated elapsed seconds by completed units; a job's prediction is frozen at
+start using prior samples, and its actual appears only after accepted success.
+The CLI, HTML status and JSON job `timing` field show prediction/actual and the
+sample count; absent old fields mean unknown. The key records exact work, shape,
+recipe/reference, target, physical component, fingerprints and resource settings.
+
+Failed, duplicate, stale, interrupted, stopped, resumed, release-pending and check
+attempts never update estimates. Competing Mycelium host custody invalidates the
+whole interval, even if that work finishes first. Queue restart or identity,
+qualification or resource-setting changes also invalidate an in-progress sample.
+This is queue-observed contention; it does not certify absence of external OS
+work. Old scalar profiles supply no comparable samples. No automatic benchmark
+sweep or placement change is enabled by these observations.

@@ -21,6 +21,7 @@ type ExecutionTarget struct {
 }
 
 type ExtensionVariant struct {
+	References   map[string]WorkReference     `json:"references,omitempty" yaml:"references,omitempty"`
 	Target       ExecutionTarget              `json:"target" yaml:"target"`
 	Environments map[string]EnvironmentRecipe `json:"environments,omitempty" yaml:"environments,omitempty"`
 	Needs        ResourceNeeds                `json:"needs" yaml:"needs"`
@@ -80,6 +81,11 @@ func (e Extension) validateVariants() error {
 		view.Check = v.Check
 		if err := view.validateBaselines(v.Baselines); err != nil {
 			return err
+		}
+		for work, ref := range v.References {
+			if _, ok := v.Baselines[work]; !ok || !ref.valid() {
+				return errors.New("reference requires a native baseline, input_shape, unit and positive units")
+			}
 		}
 	}
 	return nil

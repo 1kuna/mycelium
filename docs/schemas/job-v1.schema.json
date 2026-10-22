@@ -206,6 +206,24 @@
       ],
       "type": "object"
     },
+    "Execution": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "progress": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "attempt"
+      ],
+      "type": "object"
+    },
     "ExecutionMember": {
       "properties": {
         "command": {
@@ -541,6 +559,15 @@
         },
         "needs": {
           "$ref": "#/$defs/ResourceNeeds"
+        },
+        "references": {
+          "additionalProperties": {
+            "$ref": "#/$defs/WorkReference"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
         },
         "setup": {
           "items": {
@@ -951,6 +978,10 @@
           "type": "string",
           "x-contract": "diagnostic"
         },
+        "timing": {
+          "$ref": "#/$defs/WorkTiming",
+          "x-contract": "diagnostic"
+        },
         "waiting_since": {
           "format": "date-time",
           "type": "string",
@@ -1028,6 +1059,61 @@
         "name",
         "command",
         "memory_gb"
+      ],
+      "type": "object"
+    },
+    "ObservationKey": {
+      "properties": {
+        "batch_size": {
+          "type": "integer"
+        },
+        "component": {
+          "type": "string"
+        },
+        "concurrency": {
+          "type": "integer"
+        },
+        "configuration": {
+          "type": "string"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "extension_digest": {
+          "type": "string"
+        },
+        "fingerprint": {
+          "type": "string"
+        },
+        "hardware": {
+          "type": "string"
+        },
+        "host": {
+          "type": "string"
+        },
+        "reference": {
+          "$ref": "#/$defs/WorkReference"
+        },
+        "target": {
+          "$ref": "#/$defs/ExecutionTarget"
+        },
+        "work": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "work",
+        "extension_digest",
+        "target",
+        "reference",
+        "host",
+        "component",
+        "hardware",
+        "fingerprint",
+        "environment",
+        "configuration",
+        "concurrency",
+        "batch_size"
       ],
       "type": "object"
     },
@@ -1388,6 +1474,10 @@
           "pattern": "^[A-Za-z0-9._:-]{1,128}$",
           "type": "string",
           "x-contract": "stable"
+        },
+        "workload": {
+          "$ref": "#/$defs/Workload",
+          "x-contract": "diagnostic"
         }
       },
       "required": [
@@ -1397,6 +1487,75 @@
         "run",
         "needs",
         "resumable"
+      ],
+      "type": "object"
+    },
+    "WorkReference": {
+      "properties": {
+        "input_shape": {
+          "type": "string"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "units": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "input_shape",
+        "unit",
+        "units"
+      ],
+      "type": "object"
+    },
+    "WorkTiming": {
+      "properties": {
+        "actual_seconds": {
+          "type": "number"
+        },
+        "execution": {
+          "$ref": "#/$defs/Execution"
+        },
+        "key": {
+          "$ref": "#/$defs/ObservationKey"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "predicted_seconds": {
+          "type": "number"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "samples": {
+          "type": "integer"
+        },
+        "session": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "execution",
+        "machine",
+        "session",
+        "samples"
+      ],
+      "type": "object"
+    },
+    "Workload": {
+      "properties": {
+        "input_shape": {
+          "type": "string"
+        },
+        "units": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "input_shape",
+        "units"
       ],
       "type": "object"
     }

@@ -247,6 +247,7 @@ var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
 	"profileLines":       CapabilityProfileLines,
 	"extensionStatus":    ExtensionStatus,
 	"jobWork":            JobWork,
+	"jobTiming":          JobTiming,
 	"jobReason":          JobReason,
 	"shortID":            ShortID,
 	"jobState":           JobState,
@@ -343,11 +344,11 @@ var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
     <div class="queue">
     {{range $tier := statusTiers .}}{{$priority := $tier.Name}}{{$jobs := activeTierJobs $.Jobs $priority}}
       <div class="card priority"><div class="priority-head"><h3>{{$priority}}</h3><span class="count">{{len $jobs}} active</span></div>
-      {{range $jobs}}<div class="job"><div><div class="job-name">{{.Spec.Name}}</div><div class="muted">{{jobWork .}}</div><div class="muted">{{.Spec.Project}}/{{.Spec.Class}} · tier {{.PriorityPolicy.Tier}} · {{.PriorityPolicy.Selector}} · revision {{.PriorityPolicy.Revision}}</div><code title="{{.ID}}">{{shortID .ID}}</code></div><div><div class="state">{{jobState .}}</div>{{with jobAge . $.Now}}<div class="muted">{{.}}</div>{{end}}</div><div class="machine-cell">{{if .Machine}}{{.Machine}}{{else}}Unassigned{{end}}</div><div class="reason {{if .Reason}}important{{end}}">{{jobReason .}}</div></div>
+      {{range $jobs}}<div class="job"><div><div class="job-name">{{.Spec.Name}}</div><div class="muted">{{jobWork .}}</div><div class="muted">{{jobTiming .}}</div><div class="muted">{{.Spec.Project}}/{{.Spec.Class}} · tier {{.PriorityPolicy.Tier}} · {{.PriorityPolicy.Selector}} · revision {{.PriorityPolicy.Revision}}</div><code title="{{.ID}}">{{shortID .ID}}</code></div><div><div class="state">{{jobState .}}</div>{{with jobAge . $.Now}}<div class="muted">{{.}}</div>{{end}}</div><div class="machine-cell">{{if .Machine}}{{.Machine}}{{else}}Unassigned{{end}}</div><div class="reason {{if .Reason}}important{{end}}">{{jobReason .}}</div></div>
       {{else}}<div class="job"><span class="muted">No {{$priority}} work.</span></div>{{end}}</div>
     {{end}}
 	{{$finished := recentFinishedJobs .Jobs}}{{if $finished}}<div class="card priority"><div class="priority-head"><h3>Recent outcomes</h3><span class="count">{{len $finished}} shown</span></div>
-	  {{range $finished}}<div class="job"><div><div class="job-name">{{.Spec.Name}}</div><div class="muted">{{jobWork .}}</div><div class="muted">{{.Spec.Project}}/{{.Spec.Class}} · tier {{.PriorityPolicy.Tier}} · {{.PriorityPolicy.Selector}} · revision {{.PriorityPolicy.Revision}}</div><code title="{{.ID}}">{{shortID .ID}}</code></div><div><div class="state">{{jobState .}}</div>{{with jobAge . $.Now}}<div class="muted">{{.}}</div>{{end}}</div><div class="machine-cell">{{if .Machine}}{{.Machine}}{{else}}Unassigned{{end}}</div><div class="reason">{{.Reason}}</div></div>{{end}}
+	  {{range $finished}}<div class="job"><div><div class="job-name">{{.Spec.Name}}</div><div class="muted">{{jobWork .}}</div><div class="muted">{{jobTiming .}}</div><div class="muted">{{.Spec.Project}}/{{.Spec.Class}} · tier {{.PriorityPolicy.Tier}} · {{.PriorityPolicy.Selector}} · revision {{.PriorityPolicy.Revision}}</div><code title="{{.ID}}">{{shortID .ID}}</code></div><div><div class="state">{{jobState .}}</div>{{with jobAge . $.Now}}<div class="muted">{{.}}</div>{{end}}</div><div class="machine-cell">{{if .Machine}}{{.Machine}}{{else}}Unassigned{{end}}</div><div class="reason">{{.Reason}}</div></div>{{end}}
 	</div>{{end}}
     </div>
   </section>

@@ -280,6 +280,7 @@ func TestCPUQualificationNativeTarget(t *testing.T) {
 	e.Variants[0].Needs = ResourceNeeds{CPUCores: 1, MemoryGB: .1}
 	e.Variants[0].Execution.Main.Command = []string{"sh", "-c", `test "$MYCE_DEVICE" = cpu && test "$MYCE_PLATFORM" = cpu && test -z "$MYCE_TOKEN" && cat "$MYCE_EXTENSION_DIR/baseline/input"`}
 	delete(e.Variants[0].Baselines, "kind:sample")
+	e.Variants[0].References = map[string]WorkReference{"extension:" + e.Name: {InputShape: "small-v1", Unit: "records", Units: 2}}
 	e = freezeComposition(t, e)
 	root := t.TempDir()
 	if err := InstallExtension(root, e); err != nil {
@@ -299,12 +300,15 @@ func TestCPUQualificationNativeTarget(t *testing.T) {
 	if err != nil || len(reports) != 1 || !reports[0].Qualified {
 		t.Fatal("native CPU check", reports, err)
 	}
-	j, err := d.Client().SubmitAndWait(ctx, Spec{Name: "cpu-extension", SubmissionKey: "cpu-qualified", Project: "cpu", Extension: extensionKey(e)})
+	j, err := d.Client().SubmitAndWait(ctx, Spec{Name: "cpu-extension", SubmissionKey: "cpu-qualified", Project: "cpu", Extension: extensionKey(e), Workload: &Workload{InputShape: "small-v1", Units: 2}})
 	if err != nil {
 		t.Fatal("qualified CPU placement", err)
 	}
 	if j.State != "succeeded" {
 		t.Fatal("qualified CPU placement", j.State, j.Reason)
+	}
+	if j.Timing == nil || j.Timing.ActualSeconds == nil || j.Timing.Key == nil || j.Timing.Key.Component != "cpu" || j.Timing.Key.Reference.InputShape != "small-v1" {
+		t.Fatal("CPU recipe observation", j.Timing)
 	}
 }
 

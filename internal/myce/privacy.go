@@ -194,6 +194,7 @@ func statusJobCopy(job *Job) Job {
 	if j.Spec.ExtensionCheck != nil {
 		spec.ExtensionCheck = &ExtensionCheckRequest{Work: j.Spec.ExtensionCheck.Work}
 	}
+	spec.Workload = j.Spec.Workload
 	spec.Needs = j.Spec.Needs
 	j.Spec = spec
 	j.Extensions = nil
