@@ -380,9 +380,9 @@ func TestSubmitVerificationKeyAtomicity(t *testing.T) {
 				changed.Files = nil
 				duplicate = submit(t, q, changed)
 			case "write-failure", "cancel-write-failure":
-				// The empty fixture has no queue row yet. Reject INSERT so the
-				// upsert fails on both its first-write and conflict/update paths.
-				if _, err := q.db.Exec(`CREATE TRIGGER reject_queue BEFORE INSERT ON queue BEGIN SELECT RAISE(ABORT,'test write failure'); END`); err != nil {
+				// Reject the normalized state upsert on both its first-write
+				// and conflict/update paths.
+				if _, err := q.db.Exec(`CREATE TRIGGER reject_queue BEFORE INSERT ON queue_state BEGIN SELECT RAISE(ABORT,'test write failure'); END`); err != nil {
 					t.Fatal(err)
 				}
 				if outcome == "cancel-write-failure" {
