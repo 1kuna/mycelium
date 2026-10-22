@@ -486,7 +486,7 @@ func TestCancellationDurabilityAndRollback(t *testing.T) {
 	s := spec("experiment")
 	s.SubmissionKey = "write-failure"
 	j := submit(t, q, s)
-	if _, err := q.db.Exec(`CREATE TRIGGER reject_queue BEFORE UPDATE ON queue BEGIN SELECT RAISE(ABORT,'test write failure'); END`); err != nil {
+	if _, err := q.db.Exec(`CREATE TRIGGER reject_queue BEFORE INSERT ON queue_state BEGIN SELECT RAISE(ABORT,'test write failure'); END`); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := q.CancelJob(j.ID); err == nil {

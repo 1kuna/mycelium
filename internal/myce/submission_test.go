@@ -236,7 +236,7 @@ func TestSubmissionPersistenceAndRollback(t *testing.T) {
 		t.Fatal("restart created duplicate")
 	}
 	// A SQLite failure must roll back both the job and its key.
-	if _, err := reopened.db.Exec(`CREATE TRIGGER reject_queue BEFORE UPDATE ON queue BEGIN SELECT RAISE(ABORT,'test write failure'); END`); err != nil {
+	if _, err := reopened.db.Exec(`CREATE TRIGGER reject_queue BEFORE INSERT ON queue_state BEGIN SELECT RAISE(ABORT,'test write failure'); END`); err != nil {
 		t.Fatal(err)
 	}
 	s.SubmissionKey = "write-failure"
