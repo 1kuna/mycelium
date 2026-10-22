@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key><string>io.github.1kuna.mycelium</string>
+  <key>CFBundleName</key><string>Mycelium</string>
+  <key>CFBundleDisplayName</key><string>Mycelium</string>
+  <key>CFBundleExecutable</key><string>myce</string>
+  <key>CFBundleVersion</key><string>1</string>
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>Mycelium connects to your queue and discovers your machines on the local network to run your jobs.</string>
+  <key>NSBonjourServices</key><array><string>_mycelium._tcp</string></array>
+</dict>
+</plist>

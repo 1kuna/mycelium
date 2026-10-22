@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"slices"
 	"strings"
 	"syscall"
@@ -524,9 +525,16 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 					explicit = *url
 				}
 			})
-			resolveCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
-			client, err = myce.ResolveJoining(resolveCtx, *invitation, explicit, myce.MDNSDiscovery{})
-			cancel()
+			resolve := func(ctx context.Context) (myce.Client, error) {
+				resolveCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+				defer cancel()
+				return myce.ResolveJoining(resolveCtx, *invitation, explicit, myce.MDNSDiscovery{})
+			}
+			if runtime.GOOS == "darwin" {
+				client, err = resolveWorkerJoining(ctx, resolve, waitPause)
+			} else {
+				client, err = resolve(ctx)
+			}
 			if err != nil {
 				return err
 			}

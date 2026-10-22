@@ -12,6 +12,19 @@ On an Apple Silicon macOS build host with Go and Xcode command-line tools:
 scripts/release.sh v3.1.0 OUTPUT_DIR PRIVATE_SIGNING_KEY
 ```
 
+For native LaunchAgent distribution, set `MYCE_DEVELOPER_ID` to the provisioned
+Developer ID Application identity. The build embeds Mycelium's stable identifier,
+Local Network usage description and Bonjour service declaration in the single
+Darwin executable. The script applies and verifies a timestamped hardened-runtime
+signature before manifest generation, so Ed25519 authenticates the codesigned
+bytes. Linux artifacts use the same CGO-disabled builds and are not codesigned.
+Tests replace the signing tool and never access a real keychain.
+
+When the Ed25519 key lives on a different publisher host, use
+`sh scripts/build-release.sh VERSION OUTPUT_DIR` on the Mac, then generate and
+sign the manifest on the key's host without modifying the artifacts. Never copy
+the private key to the build host just to run the combined script.
+
 Versions must be semver values, monotonically increasing for normal upgrades.
 Build metadata (`+build`) does not change version precedence.
 The shared `ReleaseTargets` data drives validation, manifest creation and

@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -34,6 +35,9 @@ type Invitation struct {
 }
 
 var errJoiningIdentity = errors.New("queue identity does not match invitation")
+
+// ErrLocalNetworkAccess identifies a blocked route without disclosing its address.
+var ErrLocalNetworkAccess = errors.New("local network access unavailable")
 
 func (i Invitation) Validate() error {
 	pin, err := hex.DecodeString(i.Fingerprint)
@@ -134,7 +138,11 @@ func ResolveJoining(ctx context.Context, i Invitation, explicit string, d Discov
 		return Client{}, err
 	}
 	if explicit != "" {
-		return verifiedJoining(ctx, i, explicit)
+		c, err := verifiedJoining(ctx, i, explicit)
+		if localNetworkUnavailable(err) {
+			return Client{}, ErrLocalNetworkAccess
+		}
+		return c, err
 	}
 	addresses, browseErr := d.Browse(ctx)
 	failures := []string{}
@@ -147,6 +155,7 @@ func ResolveJoining(ctx context.Context, i Invitation, explicit string, d Discov
 		addresses = append(addresses, i.Address)
 	}
 	seen := map[string]bool{}
+	localNetworkBlocked := false
 	for _, address := range addresses {
 		if seen[address] {
 			continue
@@ -157,6 +166,9 @@ func ResolveJoining(ctx context.Context, i Invitation, explicit string, d Discov
 		cancel()
 		if err == nil {
 			return c, nil
+		}
+		if localNetworkUnavailable(err) && (address == i.Address || i.Address == "") {
+			localNetworkBlocked = true
 		}
 		stage := "connection failed"
 		var response *HTTPError
@@ -175,7 +187,14 @@ func ResolveJoining(ctx context.Context, i Invitation, explicit string, d Discov
 		}
 	}
 	// Fixed stage labels disclose neither candidate addresses nor credentials.
+	if localNetworkBlocked {
+		return Client{}, ErrLocalNetworkAccess
+	}
 	return Client{}, fmt.Errorf("cannot find your mycelium: %s; supply its saved HTTPS address", strings.Join(failures, "; "))
+}
+
+func localNetworkUnavailable(err error) bool {
+	return errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ENETUNREACH)
 }
 func verifiedJoining(ctx context.Context, i Invitation, address string) (Client, error) {
 	c, err := i.Client(address)

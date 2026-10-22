@@ -188,6 +188,12 @@ func enrollmentCommandWithTiming(args []string, probe myce.MachineProbe, home st
 		}
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
 		defer cancel()
+		if len(drain.Workers) == 0 {
+			// There was no accepted prior session to restore. Retire only our
+			// admission fence; leave an installed consent-waiting agent alive.
+			resultErr = errors.Join(resultErr, myce.FinishEnrollmentUpgrade(cleanup, *old, client, *drain))
+			return
+		}
 		recoveryFailed := func(reason error) {
 			resultErr = fmt.Errorf("upgrade failed; host could not be resumed: %v; rerun to recover: %w", reason, resultErr)
 		}
@@ -398,6 +404,14 @@ func enrollmentCommandWithTiming(args []string, probe myce.MachineProbe, home st
 	// if later readiness fails, and also on a resumed same-version invocation.
 	if err = cleanupPendingEnrollment(lockDir, c); err != nil {
 		return err
+	}
+	if drain != nil && len(drain.Workers) == 0 {
+		// First enrollment resumes admission after installation, like a fresh
+		// install. Consent may arrive after the foreground readiness deadline.
+		if err = myce.FinishEnrollmentUpgrade(ctx, c, client, *drain); err != nil {
+			return err
+		}
+		drain = nil
 	}
 	result, err := waitReady(c, client)
 	if err != nil {

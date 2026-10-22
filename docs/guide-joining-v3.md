@@ -162,9 +162,13 @@ says macOS automatically allows local-network access for command-line tools
 started in Terminal or over SSH, including their children. SSH alone therefore
 does not require a Local Network permission grant. App-launched helpers and
 launch agents can instead require user approval for the responsible app in
-System Settings > Privacy & Security > Local Network. If denied or prompted,
-stop and have the user review that permission; Mycelium does not grant or reset
-it. A successful foreground/SSH check does not establish launch-agent,
+System Settings > Privacy & Security > Local Network. Allow Mycelium in its normal
+consent alert or that panel. The signed agent stays alive and retries blocked
+routes after approval; it does not grant or reset the permission itself.
+The foreground installer can reach its readiness deadline while consent is
+pending; rerun the same command to wait again without reinstalling or spending
+another ticket. It prints enrollment success only after readiness passes.
+A successful foreground/SSH check does not establish launch-agent,
 login/reboot or app-launch behavior.
 
 WSL2 default NAT does not reliably carry mDNS. Use a saved/supplied address, or

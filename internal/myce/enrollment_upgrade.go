@@ -34,7 +34,7 @@ func ReadEnrollmentUpgrade(c ServiceConfig) (HostMaintenanceStatus, error) {
 		return status, err
 	}
 	var r enrollmentResumeReceipt
-	if json.Unmarshal(b, &r) != nil || r.Host != c.HostID || r.Name != c.Name || r.UpdatedAt.IsZero() {
+	if json.Unmarshal(b, &r) != nil || r.Host != c.HostID || r.Name != c.Name || r.UpdatedAt.IsZero() && (!r.Intent || r.DrainOwner == "") {
 		return status, errors.New("invalid enrollment resume receipt; preserve maintenance and inspect installation")
 	}
 	status.Host = r.Host
@@ -97,30 +97,41 @@ func PrepareEnrollmentUpgrade(ctx context.Context, c ServiceConfig, client Clien
 	if err := client.Call(ctx, "GET", path, nil, &status); err != nil {
 		return status, err
 	}
-	if len(status.Workers) != 1 || status.Workers[0].Machine.ID != c.Name || !status.Workers[0].Fresh {
-		return status, errors.New("upgrade requires the exact fresh local hypha and no legacy siblings")
-	}
-	session := status.Workers[0].Machine.Session
-	if c.Enrollment {
-		r, err := ReadEnrollmentReceipt(c.State)
-		if err != nil || r.Session != session {
-			return status, errors.New("upgrade requires the exact locally recorded session")
-		}
-	}
-	var observation EnrollmentObservation
-	if err := client.Call(ctx, "GET", "/api/workers/"+url.PathEscape(c.Name)+"/enrollment?session="+url.QueryEscape(session), nil, &observation); err != nil {
-		return status, err
-	}
-	if !observation.Fresh || observation.Machine.Session != session || observation.StartGate != startGateProtocol || observation.AttemptProtocol != keyedAttemptProtocol {
-		return status, errors.New("upgrade requires compatible queue protocols before replacing the worker")
-	}
 	receipt, err := ResolveEnrollmentUpgrade(ctx, c, client)
 	if err != nil {
 		return status, err
 	}
 	owned := receipt.Policy.Mode == "drained" && status.Policy.Mode == "drained" && receipt.Policy.UpdatedAt.Equal(status.Policy.UpdatedAt) && receipt.Policy.DrainOwner != "" && receipt.Policy.DrainOwner == status.Policy.DrainOwner
+	// A failed first install may never have opened a worker session. Reserve
+	// admission with the same durable CAS drain before replacing that install.
+	// Registered workers always establish budgets. A local session, prior
+	// budget or independently withheld admission disqualifies this repair.
+	firstEnrollment := c.Enrollment && len(status.Workers) == 0 && status.Policy.MemoryBudget == nil && status.Policy.CPUBudgetCores == nil && (status.Policy.Mode == "enabled" || owned)
+	if firstEnrollment {
+		if _, err := os.Lstat(filepath.Join(c.State, "enrollment.json")); !errors.Is(err, os.ErrNotExist) {
+			return status, errors.New("first-enrollment repair requires no previous local session")
+		}
+	} else {
+		if len(status.Workers) != 1 || status.Workers[0].Machine.ID != c.Name || !status.Workers[0].Fresh {
+			return status, errors.New("upgrade requires the exact fresh local hypha and no legacy siblings")
+		}
+		session := status.Workers[0].Machine.Session
+		if c.Enrollment {
+			r, err := ReadEnrollmentReceipt(c.State)
+			if err != nil || r.Session != session {
+				return status, errors.New("upgrade requires the exact locally recorded session")
+			}
+		}
+		var observation EnrollmentObservation
+		if err := client.Call(ctx, "GET", "/api/workers/"+url.PathEscape(c.Name)+"/enrollment?session="+url.QueryEscape(session), nil, &observation); err != nil {
+			return status, err
+		}
+		if !observation.Fresh || observation.Machine.Session != session || observation.StartGate != startGateProtocol || observation.AttemptProtocol != keyedAttemptProtocol {
+			return status, errors.New("upgrade requires compatible queue protocols before replacing the worker")
+		}
+	}
 	if status.Policy.Mode == "enabled" {
-		if !status.Healthy || len(status.Attempts) > 0 || status.Calls > 0 || status.Preparations > 0 || status.Sidecars > 0 || len(status.PendingReleases) > 0 || len(status.PendingCleanup) > 0 || status.MemoryInUseGB > 0 || status.MemoryDebtGB > 0 {
+		if !status.Healthy && !firstEnrollment || len(status.Attempts) > 0 || status.Calls > 0 || status.Preparations > 0 || status.Sidecars > 0 || len(status.PendingReleases) > 0 || len(status.PendingCleanup) > 0 || status.MemoryInUseGB > 0 || status.MemoryDebtGB > 0 {
 			return status, errors.New("upgrade refused before drain: local host still has execution custody; rerun after jobs finish")
 		}
 		// Save a unique intent before crossing the queue mutation boundary.
@@ -128,7 +139,11 @@ func PrepareEnrollmentUpgrade(ctx context.Context, c ServiceConfig, client Clien
 		if err = saveWorkerJSON(c.State, enrollmentResumeFile, enrollmentResumeReceipt{Intent: true, Host: c.HostID, Name: c.Name, UpdatedAt: status.Policy.UpdatedAt, DrainOwner: owner}); err != nil {
 			return status, errors.Join(errors.New("cannot persist upgrade drain intent"), err)
 		}
-		if err = client.Call(ctx, "POST", path, HostMaintenanceRequest{Action: "drain", IfMode: "enabled", IfUpdatedAt: &status.Policy.UpdatedAt, DrainOwner: owner}, &status); err != nil {
+		mode := "enabled"
+		if firstEnrollment && status.Policy.UpdatedAt.IsZero() {
+			mode = ""
+		} // A new policy is absent, not stored as enabled.
+		if err = client.Call(ctx, "POST", path, HostMaintenanceRequest{Action: "drain", IfMode: mode, IfUpdatedAt: &status.Policy.UpdatedAt, DrainOwner: owner}, &status); err != nil {
 			cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 			defer cancel()
 			recovered, resolveErr := ResolveEnrollmentUpgrade(cleanup, c, client)
@@ -145,10 +160,16 @@ func PrepareEnrollmentUpgrade(ctx context.Context, c ServiceConfig, client Clien
 		if err = saveWorkerJSON(c.State, enrollmentResumeFile, enrollmentResumeReceipt{Host: c.HostID, Name: c.Name, UpdatedAt: status.Policy.UpdatedAt, DrainOwner: status.Policy.DrainOwner}); err != nil {
 			return status, errors.Join(errors.New("cannot persist upgrade resume receipt"), undoEnrollmentDrain(ctx, c, client, receipt))
 		}
+		if firstEnrollment {
+			return status, nil
+		}
 	}
 	if !owned {
 		receipt = status
 		receipt.Policy.UpdatedAt = time.Time{}
+	}
+	if firstEnrollment && owned {
+		return status, nil
 	}
 	deadline := clock.Now().Add(timeout)
 	fail := func(cause error) (HostMaintenanceStatus, error) {
