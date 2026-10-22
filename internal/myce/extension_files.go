@@ -64,6 +64,9 @@ func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
 	if !j.Spec.extensionJob() && len(j.Spec.Files) == 0 {
 		return nil
 	}
+	if len(j.Spec.Inputs) > 0 && w.JobFileRoot == "" {
+		return errors.New("job files require a root and clean relative names")
+	}
 	dir := filepath.Join(stateDir, "job-files", j.ID, strconv.Itoa(j.Attempt))
 	if info, err := os.Lstat(dir); err == nil {
 		if !info.IsDir() {
@@ -122,6 +125,9 @@ func (w Worker) publishExtensionFiles(j Job) error {
 	if j.FileTransport || !j.Spec.extensionJob() || len(j.Spec.Outputs) == 0 {
 		return nil
 	}
+	if w.JobFileRoot == "" {
+		return errors.New("job files require a root and clean relative names")
+	}
 	root, err := filepath.EvalSymlinks(w.JobFileRoot)
 	if err != nil {
 		return err
@@ -141,7 +147,8 @@ func (w Worker) publishExtensionFiles(j Job) error {
 		// outputs never overwrite another execution's results, including late ones.
 		parent := filepath.Dir(dest)
 		for p := parent; p != root; p = filepath.Dir(p) {
-			if !strings.HasPrefix(p, root+string(filepath.Separator)) {
+			rel, err := filepath.Rel(root, p)
+			if err != nil || !filepath.IsLocal(rel) {
 				return errors.New("output escapes root")
 			}
 			if info, e := os.Lstat(p); e == nil && !info.IsDir() {

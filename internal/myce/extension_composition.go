@@ -240,16 +240,13 @@ func (e Extension) targetUnavailableReason(t ExecutionTarget) string {
 	if v == nil {
 		return fmt.Sprintf("no variant matches this host's OS/arch/backend: missing target %s/%s/%s", t.OS, t.Arch, t.Platform)
 	}
-	if v.Execution.Main.MemoryGB > 0 {
-		return "main member RAM caps require D5"
-	}
 	return ""
 }
 func (e Extension) forMachine(m *Machine) (Extension, bool) {
 	if len(e.Variants) == 0 {
 		return e, true
 	}
-	// Refuse targets whose requested member caps are not yet enforceable.
+	// Match the same execution targets and member-cap semantics as plain jobs.
 	if e.targetUnavailableReason(machineTarget(m)) != "" {
 		return e, false
 	}
