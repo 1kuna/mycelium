@@ -13,7 +13,7 @@ func TestExtensionPrepareCapacityChange(t *testing.T) {
 	submit(t, q, Spec{Name: "capacity", Project: "test", Extension: extensionKey(e)})
 	key := extensionPreparationKey(e, &w.Machine)
 	dir := t.TempDir()
-	failed := EnvironmentReport{Key: key, Kind: "extension-setup", State: "failed", Error: fmt.Sprintf("environment cache needs %d bytes; limit %d (in-use entries protected)", 30<<30, 20<<30)}
+	failed := EnvironmentReport{Key: key, Kind: "extension-setup", State: "failed", Error: fmt.Sprintf("environment prefix build failed: signal: killed\nenvironment cache needs %d bytes; limit %d (in-use entries protected) (log retained)", 30<<30, 20<<30)}
 	if err := saveWorkerJSON(dir, "environment-reports.json", map[string]EnvironmentReport{key: failed}); err != nil {
 		t.Fatal(err)
 	}

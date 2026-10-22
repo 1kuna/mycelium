@@ -1204,8 +1204,11 @@ func (rt *environmentRuntime) restore() error {
 		// s007 and older stored only the diagnostic. Migrate that exact capacity
 		// refusal too; other failures remain negatively cached across restarts.
 		var needed, limit int64
-		if n, err := fmt.Sscanf(r.Error, "environment cache needs %d bytes; limit %d (in-use entries protected)", &needed, &limit); n != 2 || err != nil {
-			limit = 0
+		// Acquire wraps admission failures with the build error and log path.
+		if at := strings.Index(r.Error, "environment cache needs "); at >= 0 {
+			if n, err := fmt.Sscanf(r.Error[at:], "environment cache needs %d bytes; limit %d (in-use entries protected)", &needed, &limit); n != 2 || err != nil {
+				limit = 0
+			}
 		}
 		if r.State == "failed" && limit > 0 && limit != rt.cache.Limit {
 			r.State, r.Error = "paused", ""
