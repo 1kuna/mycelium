@@ -267,6 +267,11 @@ func TestEntrySecretsStayLocalAndEnvReachesProcess(t *testing.T) {
 	if err := q.db.QueryRow("SELECT data FROM queue WHERE id=1").Scan(&persisted); err != nil {
 		t.Fatal(err)
 	}
+	decoded, decodeErr := readQueueState(q.db, persisted)
+	if decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	persisted = decoded
 	if bytes.Contains(persisted, []byte(secret)) {
 		t.Fatal("secret persisted in queue")
 	}

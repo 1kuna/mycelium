@@ -1,60 +1,72 @@
 package myce
 
 import (
-	"net/http"
+	"encoding/json"
+	"fmt"
+	"os"
+	"reflect"
 	"testing"
-	"testing/synctest"
 	"time"
 )
 
-// The retained 26 MB queue reproduced 0.97-1.18 s SQLite commits with the
-// default cache, versus 0.15-0.20 s when old/new snapshot pages fit. Model that
-// measured I/O budget behind three ordinary control transactions. The real
-// worker's unchanged two-second launch deadline is the acceptance boundary.
-func TestQueueSnapshotCacheAllowsLaunch(t *testing.T) {
-	q, _ := fixture(t)
-	var cacheSize, pageSize int
-	if err := q.db.QueryRow("PRAGMA cache_size").Scan(&cacheSize); err != nil {
+// Replay the 26 MB retained-history trigger with real SQLite, including upgrade
+// from the existing full-state format. A timestamp-only update must not rewrite
+// the unchanged history to the WAL. No wall-clock performance assertion is used.
+func TestQueueHistoryDoesNotAmplifyControlWrites(t *testing.T) {
+	q, c := fixture(t)
+	var seq int
+	var name, path string
+	if err := q.db.QueryRow("PRAGMA database_list").Scan(&seq, &name, &path); err != nil {
 		t.Fatal(err)
 	}
-	if err := q.db.QueryRow("PRAGMA page_size").Scan(&pageSize); err != nil {
+	root := q.root
+	q.s.Extensions = map[string]Extension{}
+	for i := 0; i < 32; i++ {
+		name := fmt.Sprintf("fixture-%d", i)
+		q.s.Extensions[name] = Extension{Name: name, Files: map[string][]byte{"fixture": make([]byte, 600<<10)}}
+	}
+	want := q.s.Extensions
+	legacy, err := json.Marshal(q.s)
+	if err != nil {
 		t.Fatal(err)
 	}
-	cacheBytes := cacheSize * pageSize
-	if cacheSize < 0 {
-		cacheBytes = -cacheSize * 1024
+	if _, err = q.db.Exec("UPDATE queue SET data=? WHERE id=1", legacy); err != nil {
+		t.Fatal(err)
 	}
-	const snapshotBytes = 26162944
-	cost := 1100 * time.Millisecond
-	if cacheBytes >= 2*snapshotBytes {
-		cost = 200 * time.Millisecond
+	q.Close()
+	q, err = Open(path, root, c)
+	if err != nil {
+		t.Fatal(err)
 	}
-	synctest.Test(t, func(t *testing.T) {
-		store := &queuedControlStore{work: make(chan chan struct{}, 4), cost: cost}
-		done, exited := make(chan struct{}), make(chan struct{})
-		defer func() { close(done); <-exited }()
-		go func() {
-			defer close(exited)
-			for {
-				select {
-				case reply := <-store.work:
-					select {
-					case <-time.After(store.cost):
-						close(reply)
-					case <-done:
-						return
-					}
-				case <-done:
-					return
-				}
-			}
-		}()
-		for i := 0; i < 3; i++ {
-			store.work <- make(chan struct{})
-		}
-		worker := Worker{Client: Client{URL: "http://queue.invalid", HTTP: &http.Client{Transport: store}}}
-		if err := worker.authorizeLaunch(HostLaunch{}); err != nil {
-			t.Fatalf("snapshot cache starves launch behind control updates: %v", err)
-		}
-	})
+	if !reflect.DeepEqual(q.s.Extensions, want) {
+		t.Fatal("legacy history changed during upgrade")
+	}
+	if err = q.Tick(); err != nil {
+		t.Fatal(err)
+	} // First write may migrate all legacy history.
+	if _, err = q.db.Exec("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA wal_autocheckpoint=0"); err != nil {
+		t.Fatal(err)
+	}
+	c.Advance(137 * time.Millisecond)
+	if err = q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	wal, err := os.Stat(path + "-wal")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Normal metadata fits comfortably below this budget; the old implementation
+	// writes approximately 26 MB for the same single control update.
+	if wal.Size() > 256<<10 {
+		t.Errorf("control update rewrote retained history: %d WAL bytes", wal.Size())
+	}
+	q.Close()
+	q, err = Open(path, root, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	if !reflect.DeepEqual(q.s.Extensions, want) {
+		t.Fatal("retained history lost on restart")
+	}
 }

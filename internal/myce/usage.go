@@ -232,7 +232,7 @@ func maxTime(a, b time.Time) time.Time {
 	}
 	return b
 }
-func (q *Queue) persistUsage(data []byte) error {
+func (q *Queue) persistUsage() error {
 	tx, e := q.db.Begin()
 	if e != nil {
 		return e
@@ -257,10 +257,15 @@ func (q *Queue) persistUsage(data []byte) error {
 		}
 	}
 
-	if _, e = tx.Exec("INSERT INTO queue(id,data) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data", data); e != nil {
+	next, e := q.persistState(tx)
+	if e != nil {
 		return e
 	}
-	return tx.Commit()
+	if e = tx.Commit(); e != nil {
+		return e
+	}
+	q.persisted = next
+	return nil
 }
 func (q *Queue) Usage(since time.Time) (UsageReport, error) {
 	if e := q.Tick(); e != nil {

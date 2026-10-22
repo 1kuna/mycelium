@@ -35,9 +35,16 @@ func openConversionQueue(c ServiceConfig, clock Clock) (*Queue, error) {
 	q := &Queue{db: db, lock: lock, clock: clock, root: c.Checkpoints, unreported: map[string]bool{}, calls: map[string]*ModelCall{}, lossTimeouts: [3]time.Duration{ProductionLossAfter, DeadlineLossAfter, LossAfter}}
 	var data []byte
 	if err = db.QueryRow("SELECT data FROM queue WHERE id=1").Scan(&data); err == nil {
-		err = json.Unmarshal(data, &q.s)
+		data, err = readQueueState(db, data)
+		if err == nil {
+			err = json.Unmarshal(data, &q.s)
+		}
 	}
 	if err != nil {
+		q.Close()
+		return nil, err
+	}
+	if err = q.loadPersistedState(); err != nil {
 		q.Close()
 		return nil, err
 	}
