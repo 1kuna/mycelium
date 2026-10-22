@@ -289,11 +289,7 @@ func TestAttemptProtocolRestartCustody(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	await(t, func() bool {
-		_, err := q.nasProbe.run(q.root, func() (bool, error) { return true, nil })
-		return err == nil
-	})
-	q.checkpointProbe = func() bool { return true }
+	fakeCheckpointAvailability(t, q, true)
 	s := spec("experiment")
 	s.Resumable = false
 	submit(t, q, s)
@@ -322,11 +318,7 @@ func TestAttemptProtocolRestartCustody(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer q.Close()
-	await(t, func() bool {
-		_, err := q.nasProbe.run(q.root, func() (bool, error) { return true, nil })
-		return err == nil
-	})
-	q.checkpointProbe = func() bool { return true }
+	fakeCheckpointAvailability(t, q, true)
 	store, err = w.openStore()
 	if err != nil {
 		t.Fatal(err)
