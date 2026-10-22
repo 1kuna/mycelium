@@ -490,8 +490,7 @@ func TestPriorityPreemptionCheckpointQueueRestart(t *testing.T) {
 	if err = q.SetLossTimeouts(time.Hour, time.Hour, time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	q.checkpointProbe = func() bool { return true }
-	q.nasAvailable = true
+	fakeCheckpointAvailability(t, q, true)
 	got := job(t, q, victim.ID)
 	if got.StopAt == nil || !got.StopAt.Equal(deadline) || priorityStop(got) == nil || priorityStop(got).Demand != demand.ID {
 		t.Fatal("restart lost stop provenance", got)
