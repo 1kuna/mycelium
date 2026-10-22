@@ -74,6 +74,8 @@ func TestLegacyInstallArchiveFresh(t *testing.T) {
 		c.DockerEndpoint = "unix:///var/run/docker.sock"
 		if role == "worker" {
 			c.AllowDeviceless = true
+			// Preservation uses a custom value; the retired default migrates.
+			c.EnvironmentCacheBytes = 32 << 30
 		}
 		if err := os.MkdirAll(filepath.Dir(c.Config), 0700); err != nil {
 			t.Fatal(err)
