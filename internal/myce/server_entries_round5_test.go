@@ -271,6 +271,11 @@ func TestEntryAlwaysSlowApprovalDrainsAfterGrace(t *testing.T) {
 			if err := q.db.QueryRow("SELECT data FROM queue WHERE id=1").Scan(&data); err != nil {
 				t.Fatal(err)
 			}
+			decoded, decodeErr := readQueueState(q.db, data)
+			if decodeErr != nil {
+				t.Fatal(decodeErr)
+			}
+			data = decoded
 			var restored state
 			if err := json.Unmarshal(data, &restored); err != nil {
 				t.Fatal(err)

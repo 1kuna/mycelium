@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -146,7 +147,7 @@ func TestExtensionPrepareCustodyAndQualificationIdentity(t *testing.T) {
 		t.Fatal("drained preparation launched")
 	}
 }
-func TestExtensionPrepareMissingPixiVisibleFailure(t *testing.T) {
+func TestExtensionPreparePixiAcquisitionVisibleFailure(t *testing.T) {
 	t.Setenv("PATH", t.TempDir())
 	e := compositionExtension(t, false)
 	v := &e.Variants[0]
@@ -156,14 +157,17 @@ func TestExtensionPrepareMissingPixiVisibleFailure(t *testing.T) {
 	e.Files["env/pixi.toml"] = []byte("[workspace]")
 	e = freezeComposition(t, e)
 	q, w := prepareTestWorker(t, e)
+	w.environmentCache.Tools = &EnvironmentToolSource{Home: func() (string, error) { return t.TempDir(), nil }, Probe: ToolBootstrapProbe{Fetch: func(context.Context, ToolRelease) (io.ReadCloser, error) {
+		return nil, errors.New("synthetic pixi acquisition failure")
+	}}}
 	submit(t, q, Spec{Name: "prepare", Project: "test", Extension: extensionKey(e)})
 	plan := check(t, q, w.Machine, nil).EnvironmentPlan[0]
 	err := w.prepareRegisteredExtension(context.Background(), plan)
-	if err == nil || !strings.Contains(err.Error(), "pixi is not installed") {
+	if err == nil || !strings.Contains(err.Error(), "tool_download_failed") {
 		t.Fatal(err)
 	}
 	reports := LocalExtensionReports(w.ExtensionRoot, "fake", w.extensionFingerprint, &w.Machine)
-	if len(reports) == 0 || reports[0].Qualified || !strings.Contains(reports[0].Reason, "pixi is not installed") {
+	if len(reports) == 0 || reports[0].Qualified || !strings.Contains(reports[0].Reason, "tool_download_failed") {
 		t.Fatal("missing prerequisite invisible", reports)
 	}
 	w.Machine.ExtensionReports = reports

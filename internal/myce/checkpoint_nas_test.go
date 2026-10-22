@@ -61,11 +61,7 @@ func TestProductionDuringMissingNAS(t *testing.T) {
 	s := spec("production")
 	s.Resumable = false
 	j := submit(t, q, s)
-	root, away := q.root, q.root+"-unavailable"
-	if err := os.Rename(root, away); err != nil {
-		t.Fatal(err)
-	}
-	defer os.Rename(away, root)
+	fakeCheckpointAvailability(t, q, false)
 	m := machine("synthetic-only", "fake")
 	m.CheckpointUnavailable = true
 	if reply := check(t, q, m, nil); reply.Job == nil {
@@ -82,11 +78,7 @@ func TestProductionPreemptsDuringNASLoss(t *testing.T) {
 	if running == nil {
 		t.Fatal("experiment did not start")
 	}
-	away := q.root + "-away"
-	if err := os.Rename(q.root, away); err != nil {
-		t.Fatal(err)
-	}
-	defer os.Rename(away, q.root)
+	fakeCheckpointAvailability(t, q, false)
 	m.CheckpointUnavailable = true
 	s := spec("production")
 	s.Resumable = false

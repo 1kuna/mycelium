@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"fmt"
+	"log"
 	"strconv"
 	"time"
 )
@@ -53,40 +54,60 @@ func (q *Queue) hostLaunchAllowed(m *Machine, session string) bool {
 }
 func (q *Queue) AuthorizeLaunch(l HostLaunch) error {
 	var rejected error
+	reject := func(fence string) {
+		log.Printf("event=launch_rejected fence=%s", fence)
+		rejected = ErrStale
+	}
 	err := q.update(func() error {
 		q.maintain()
 		q.refreshHostMemory()
 		if !q.hostLaunchAllowed(q.s.Machines[l.Machine], l.Session) {
-			rejected = ErrStale
+			reject("host_launch")
 			return nil
 		}
 		if (l.Kind == "batch" || l.Kind == "engine") && q.preparationStopping(q.s.Machines[l.Machine]) {
-			rejected = ErrStale
+			reject("preparation_stopping")
 			return nil
 		}
 		if l.Kind == "batch" {
 			attempt, err := strconv.Atoi(l.Attempt)
 			j, errCurrent := q.current(Result{Machine: l.Machine, Session: l.Session, Execution: Execution{ID: l.Key, Attempt: attempt}})
-			if err != nil || errCurrent != nil || j.State != "running" || cancelled(j) || !q.startPlacementAllowed(j) {
-				rejected = ErrStale
+			switch {
+			case err != nil:
+				reject("attempt_number")
+			case errCurrent != nil:
+				reject("attempt_custody")
+			case j.State != "running":
+				reject("job_state")
+			case cancelled(j):
+				reject("cancelled")
+			case !q.startPlacementAllowed(j):
+				m := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
+				detail := q.dockerHoldDetail(hostID(m))
+				transition := "other"
+				if dockerStartingOrRunning(m.DockerCleanup) {
+					transition = m.DockerCleanup
+				}
+				log.Printf("event=launch_placement_rejected job=%s attempt=%d cpu_fits=%t docker_hold_kind=%q docker_transition=%q", j.ID, j.Attempt, cpuFits(j, m), detail.Kind, transition)
+				reject("start_placement")
 			}
 			return nil
 		}
 		if l.Kind == "engine" {
 			s := q.s.ModelSlots[slotKey(l.Machine, l.Key, l.Device)]
 			if s == nil || s.Session != l.Session || s.Attempt != l.Attempt || s.State != "loading" {
-				rejected = ErrStale
+				reject("engine_custody")
 			}
 			return nil
 		}
 		p, ok := q.s.PreparationPlans[l.Attempt]
 		if !ok || p.PriorityStop != nil || p.Machine != l.Machine || p.Session != l.Session || p.Kind != l.Kind || p.Key != l.Key {
-			rejected = ErrStale
+			reject("preparation_custody")
 			return nil
 		}
 		m := q.s.Machines[l.Machine]
 		if !q.workerHasCPUReservation(m) && !cpuAllocationFits(m, 1) {
-			rejected = ErrStale
+			reject("preparation_cpu")
 			return nil
 		}
 		p.Started = true

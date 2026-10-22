@@ -64,7 +64,7 @@ func TestOnboardingSelectsOnlyClusterNAS(t *testing.T) {
 			if mode == "override" {
 				want = second
 			}
-			for _, line := range []string{"NAS: " + want + "\n", "Checkpoint root: " + filepath.Join(want, "mycelium", "checkpoints") + "\n", "--model-root " + filepath.Join(want, "mycelium", "models")} {
+			for _, line := range []string{"NAS: " + want + "\n", "Checkpoint root: " + filepath.Join(want, "mycelium", "checkpoints") + "\n", "--model-root " + filepath.Join(want, "mycelium", "models"), "--job-file-root " + want} {
 				if !strings.Contains(output, line) {
 					t.Fatalf("selected wrong storage; missing %q in %s", line, output)
 				}

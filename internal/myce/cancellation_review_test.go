@@ -328,6 +328,11 @@ func TestCancellationLegacyIntentPersistsOnOpen(t *testing.T) {
 	if err := q.db.QueryRow("SELECT data FROM queue WHERE id=1").Scan(&saved); err != nil {
 		t.Fatal(err)
 	}
+	decoded, decodeErr := readQueueState(q.db, saved)
+	if decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	saved = decoded
 	var persisted state
 	if err := json.Unmarshal(saved, &persisted); err != nil || persisted.Jobs[j.ID].CancelledAt == nil {
 		t.Fatal("Open did not persist cancellation import", err)

@@ -45,7 +45,7 @@ func TestProductionInfrastructureRetryLimit(t *testing.T) {
 						t.Fatal(err)
 					}
 					t.Cleanup(func() { q.Close() })
-					q.checkpointProbe = func() bool { return true }
+					fakeCheckpointAvailability(t, q, true)
 					q.SetRestartGrace(time.Second)
 					clock.Advance(time.Second)
 					if err := q.Tick(); err != nil {

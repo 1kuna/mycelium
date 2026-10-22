@@ -148,8 +148,9 @@ func (q *Queue) startPlacementAllowed(j *Job) bool {
 	if m == nil || q.preparationStopping(m) {
 		return false
 	}
-	if j.Spec.Run.Docker && (m.DockerCleanup == "creating" || m.DockerCleanup == "create pending") {
-		// Own completed create is safe; sibling custody must still block the hand-off.
+	if j.Spec.Run.Docker && dockerStartingOrRunning(m.DockerCleanup) {
+		// A heartbeat can retain a healthy pending operation after its receipt.
+		// Reuse the exact-custody classifier; sibling and old-copy holds still fence.
 		previous := owner.DockerCleanup
 		m.DockerCleanup, owner.DockerCleanup = "", ""
 		defer func() { m.DockerCleanup, owner.DockerCleanup = previous, previous }()

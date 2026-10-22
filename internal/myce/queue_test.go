@@ -2,7 +2,6 @@ package myce
 
 import (
 	"errors"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -23,23 +22,22 @@ func fixture(t *testing.T) (*Queue, *fakeClock) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { q.Close() })
-	fixtureNAS(t, q)
+	fakeCheckpointAvailability(t, q, true)
 	return q, c
 }
 
-func fixtureNAS(t *testing.T, q *Queue) {
+// Scheduling and recovery tests model availability without timing filesystem I/O.
+func fakeCheckpointAvailability(t *testing.T, q *Queue, available bool) {
 	t.Helper()
-	// Scheduling tests model NAS availability without timing the shared disk's fsync.
+	// Join Open's pending observation before replacing its probe seam.
 	await(t, func() bool {
 		_, err := q.nasProbe.run(q.root, func() (bool, error) { return true, nil })
 		return err == nil
 	})
-	q.checkpointProbe = func() bool {
-		info, err := os.Stat(q.root)
-		return err == nil && info.IsDir()
-	}
-	q.nasAvailable = q.checkpointProbe()
+	q.checkpointProbe = func() bool { return available }
+	q.nasAvailable = available
 }
+
 func spec(priority string) Spec {
 	s := Spec{Name: "job", Project: "test", Priority: priority, Resumable: true}
 	s.Run.Command = []string{"echo", "done"}
@@ -553,6 +551,7 @@ func TestPersistenceAndAssignmentRedelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer q.Close()
+	fakeCheckpointAvailability(t, q, true)
 	j := submit(t, q, spec("experiment"))
 	m := machine("one", "fake")
 	// A slow checkpoint probe can temporarily withhold either assignment response.
@@ -580,6 +579,7 @@ func TestPersistenceAndAssignmentRedelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer q.Close()
+	fakeCheckpointAvailability(t, q, true)
 	requireState(t, q, j.ID, "running")
 	if reply := check(t, q, m, r); reply.Stop {
 		t.Fatal("queue restart lost running job")
@@ -700,7 +700,7 @@ func TestRestartProductionPreemptionAfterReport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fixtureNAS(t, q)
+	fakeCheckpointAvailability(t, q, true)
 	submit(t, q, spec("experiment"))
 	m := machine("one", "fake")
 	r := check(t, q, m, nil).Job
@@ -719,7 +719,7 @@ func TestRestartProductionPreemptionAfterReport(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer q.Close()
-	fixtureNAS(t, q)
+	fakeCheckpointAvailability(t, q, true)
 	check(t, q, m, r)
 	p := spec("production")
 	p.AllowedMachines = []string{m.ID}

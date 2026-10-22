@@ -185,12 +185,7 @@ func TestNASLossDoesNotStopRunningJob(t *testing.T) {
 	submit(t, q, spec("experiment"))
 	m := machine("a", "fake")
 	running := check(t, q, m, nil).Job
-	root := q.root
-	away := root + "-offline"
-	if err := os.Rename(root, away); err != nil {
-		t.Fatal(err)
-	}
-	defer os.Rename(away, root)
+	fakeCheckpointAvailability(t, q, false)
 	submit(t, q, spec("production"))
 	c.Advance(time.Second)
 	if reply := check(t, q, m, running); reply.Stop {

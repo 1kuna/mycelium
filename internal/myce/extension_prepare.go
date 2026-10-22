@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -187,11 +186,6 @@ func (w Worker) prepareRegisteredExtension(ctx context.Context, plan Environment
 		slices.Sort(names)
 		for _, n := range names {
 			r := v.Environments[n]
-			if r.Backend == "pixi" {
-				if _, err = exec.LookPath("pixi"); err != nil {
-					return errors.New("missing prerequisite: pixi is not installed on this host")
-				}
-			}
 			var release func()
 			roots[n], release, err = w.environmentCache.Acquire(ctx, r)
 			if err != nil {

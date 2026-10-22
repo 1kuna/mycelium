@@ -36,6 +36,10 @@ shell, background service or dependencies in the description format. Explicit
 `[sh, script.sh]` is fine. Include only regular files, no symlinks. Total folder
 contents are limited to 1 MiB. Execute scripts through their interpreter; file
 execute permissions are not part of the frozen content identity.
+Mycelium sets `PYTHONDONTWRITEBYTECODE=1` for extension setup, checks and jobs
+to keep ordinary Python imports from writing `__pycache__`/`.pyc` files into
+the frozen library. Generated caches belong in `MYCE_EXTENSION_CACHE`; all
+files in the library remain part of its immutable identity.
 
 Setup downloads models, packages, source or installers into
 `MYCE_EXTENSION_CACHE`, once per hypha/version/platform. They stay outside the

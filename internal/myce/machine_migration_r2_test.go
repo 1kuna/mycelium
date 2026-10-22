@@ -272,6 +272,11 @@ func TestM4R2CatalogEnvAbsentFromSQLite(t *testing.T) {
 	if err := q.db.QueryRow("SELECT data FROM queue WHERE id=1").Scan(&data); err != nil {
 		t.Fatal(err)
 	}
+	decoded, decodeErr := readQueueState(q.db, data)
+	if decodeErr != nil {
+		t.Fatal(decodeErr)
+	}
+	data = decoded
 	if strings.Contains(string(data), "synthetic-private") || strings.Contains(string(data), `"env"`) || strings.Contains(string(data), `"secret_env"`) {
 		t.Fatal("catalog environment persisted in queue state")
 	}

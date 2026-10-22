@@ -74,7 +74,13 @@ func TestM4DevSplitConvertConcurrentRollback(t *testing.T) {
 		s.Run.Command = []string{"sh", "-c", "printf legacy-ok"}
 		legacyIntents[m.ID] = s
 		j := submitAPI(s)
-		reply := checkAPI(m)
+		var reply Reply
+		// A real checkpoint probe can still be pending at the first check-in.
+		// Follow the worker's normal retry until the assignment is available.
+		await(t, func() bool {
+			reply = checkAPI(m)
+			return reply.Job != nil
+		})
 		if reply.Job == nil || reply.Job.ID != j.ID {
 			d.Queue.mu.Lock()
 			reason, nasAvailable := d.Queue.s.Jobs[j.ID].Reason, d.Queue.nasAvailable
