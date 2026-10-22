@@ -167,7 +167,7 @@ func (w Worker) publishExtensionFiles(j Job) error {
 		staged := filepath.Join(tmp, "file")
 		err = copyJobFile(src, staged)
 		if err == nil {
-			err = os.Link(staged, dest)
+			err = publishJobOutput(staged, dest)
 		} // Atomic no-overwrite publication.
 		_ = os.RemoveAll(tmp)
 		if err != nil {

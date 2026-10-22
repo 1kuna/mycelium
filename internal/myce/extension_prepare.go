@@ -158,6 +158,45 @@ func (w Worker) prepareRegisteredExtension(ctx context.Context, plan Environment
 	if err = InstallExtension(w.ExtensionRoot, e); err != nil {
 		return err
 	}
+	// A delayed/repeated offer is not a new environment identity. Retain the
+	// exact check only while every prepared prefix is still ready and use-locked.
+	if v := e.variant(machineTarget(&w.Machine)); v != nil {
+		checked := true
+		old := readExtensionReports(w.ExtensionRoot, e, w.Machine.GPU)
+		for _, work := range extensionWorks(e) {
+			found := false
+			for _, r := range old {
+				if r.Work == work && extensionQualificationReason(e, r, &w.Machine) == "" {
+					found = true
+				}
+			}
+			checked = checked && found
+		}
+		if checked {
+			recipes := []EnvironmentRecipe{}
+			for _, recipe := range v.Environments {
+				recipes = append(recipes, recipe)
+			}
+			if len(v.Setup) > 0 || len(e.Assets) > 0 {
+				recipes = append(recipes, EnvironmentRecipe{Key: plan.Key})
+			}
+			for _, recipe := range recipes {
+				recipe.readyOnly = true
+				_, release, readyErr := w.environmentCache.Acquire(ctx, recipe)
+				if errors.Is(readyErr, errExtensionUnavailable) {
+					checked = false
+					break
+				}
+				if readyErr != nil {
+					return readyErr
+				}
+				defer release()
+			}
+			if checked {
+				return nil
+			}
+		}
+	}
 	reports := []ExtensionReport{}
 	for _, work := range extensionWorks(e) {
 		reports = append(reports, newExtensionReport(e, &w.Machine, work))
