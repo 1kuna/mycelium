@@ -26,10 +26,11 @@ import (
 // Invitation is privately provisioned authority. Neither DNS-SD nor a fetched
 // certificate may change its pin. The shared token remains provisional (#32).
 type Invitation struct {
-	Version     int    `json:"version"`
-	Fingerprint string `json:"fingerprint"`
-	Token       string `json:"token"`
-	Address     string `json:"address,omitempty"`
+	NASIdentity NASIdentity `json:"nas_identity,omitempty"`
+	Version     int         `json:"version"`
+	Fingerprint string      `json:"fingerprint"`
+	Token       string      `json:"token"`
+	Address     string      `json:"address,omitempty"`
 }
 
 var errJoiningIdentity = errors.New("queue identity does not match invitation")

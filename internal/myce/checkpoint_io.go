@@ -7,10 +7,15 @@ import (
 	"time"
 )
 
-// networkFilesystemBudget is the 250 ms warm-network allowance used by worker
-// preparation/heartbeat (#63, bc2684b). Onboarding applies it per filesystem
-// operation, outside service publication and queue locks.
-const networkFilesystemBudget = 250 * time.Millisecond
+// NAS filesystem deadlines differ by phase: the heartbeat must report a
+// stalled observation within one second, while one-shot onboarding allows
+// slower SMB fsync/metadata calls. The total cap includes inventory and all I/O.
+const (
+	heartbeatFilesystemBudget      = 750 * time.Millisecond
+	networkFilesystemBudget        = 3 * time.Second // onboarding, per operation
+	onboardingStorageBudget        = 15 * time.Second
+	onboardingMountInventoryBudget = 5 * time.Second // standalone selection, including dry runs
+)
 
 var errCheckpointIOTimeout = errors.New("NAS unreachable: filesystem operation timed out")
 

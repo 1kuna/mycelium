@@ -14,6 +14,7 @@ import (
 // inherit synthetic host facts and the same fail-closed probe boundary. Normal
 // builds never include this file or expose a runtime switch for fake hardware.
 func init() {
+	SetOnboardingMountCommand(func(context.Context, string, ...string) ([]byte, error) { return nil, nil })
 	extensionIdentityProbe = func() MachineProbe {
 		return MachineProbe{Files: fstest.MapFS{"proc/cpuinfo": {Data: []byte("model name : synthetic CPU\n")}}, Command: func(context.Context, string, ...string) ([]byte, error) {
 			return []byte("synthetic hardware identity"), nil

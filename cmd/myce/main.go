@@ -39,7 +39,11 @@ func env(k, d string) string {
 	return d
 }
 func run(args []string) error {
-	return runWithProbe(args, myce.LocalMachineProbe())
+	probe := myce.LocalMachineProbe()
+	if len(args) > 0 && args[0] == "queue" {
+		probe.Command = myce.OnboardingMountCommand()
+	}
+	return runWithProbe(args, probe)
 }
 func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if err := myce.GuardRootStartup(); err != nil {
@@ -356,6 +360,11 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 				nasConfigured = true
 			}
 		})
+		if nasConfigured && *discovery {
+			if err = q.ConfigureOnboardingNAS(ctx, probe.OS, probe.Command); err != nil {
+				return err
+			}
+		}
 		if !nasConfigured {
 			if err = os.MkdirAll(*checkpoint, 0700); err != nil {
 				return err

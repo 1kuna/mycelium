@@ -77,8 +77,12 @@ func ReadFleetEnvironment(path string) (token, queue string, err error) {
 }
 
 func prepareInstallNAS(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error)) error {
+	return prepareInstallNASMode(ctx, c, command, false)
+}
+
+func prepareInstallNASMode(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error), preflight bool) (result error) {
 	if c.RequireMountedNAS || c.Role == "worker" && c.Detection.Platform != "fake" {
-		_, err := PrepareOnboardingStorage(ctx, c, false, command)
+		_, err := prepareOnboardingStorageFS(ctx, c, false, command, onboardingStorageFS{lstat: os.Lstat, mkdir: os.Mkdir, probeContext: probeNASDirectoryContext, removeCreated: preflight})
 		return err
 	}
 	// Refuse symlinks so creation and probes cannot escape the Mycelium namespace.
@@ -87,6 +91,9 @@ func prepareInstallNAS(ctx context.Context, c ServiceConfig, command func(contex
 		if errors.Is(err, os.ErrNotExist) {
 			if err = os.Mkdir(dir, 0700); err != nil {
 				return err
+			}
+			if preflight {
+				defer func(path string) { result = errors.Join(result, os.Remove(path)) }(dir)
 			}
 		} else if err != nil {
 			return err

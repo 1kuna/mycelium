@@ -135,9 +135,9 @@ func (w Worker) openStore() (*workerStore, error) {
 	}
 	s := &workerStore{dir: dir, lock: lock}
 	// CIFS metadata round trips can exceed the queue's 25 ms I/O budget.
-	s.nasProbe.timeout = 250 * time.Millisecond
+	s.nasProbe.timeout = heartbeatFilesystemBudget
 	// Preparation also crosses CIFS metadata/automount boundaries. Keep its
-	// wait bounded, but allow the same network-filesystem latency as the probe.
+	// wait bounded at its existing preparation allowance.
 	s.nasPrepare.timeout = 250 * time.Millisecond
 	data, err := os.ReadFile(filepath.Join(dir, "state.json"))
 	if err == nil {

@@ -29,6 +29,23 @@ func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home 
 	return setupCommandWithInstaller(args, probe, home, lookup, myce.Install)
 }
 func setupCommandWithInstaller(args []string, probe myce.MachineProbe, home string, lookup func(string) (myce.WorkerAccount, error), install func(context.Context, myce.ServiceConfig, string, string, func(context.Context, string, ...string) ([]byte, error)) error) error {
+	return setupCommandWithInstallerTimeout(args, probe, home, lookup, func(ctx context.Context, c myce.ServiceConfig, executable, token string, command func(context.Context, string, ...string) ([]byte, error)) error {
+		if err := ensureSetupServiceSession(ctx, c, command); err != nil {
+			return err
+		}
+		return install(ctx, c, executable, token, command)
+	}, myce.SetupTimeout)
+}
+
+func ensureSetupServiceSession(ctx context.Context, c myce.ServiceConfig, command func(context.Context, string, ...string) ([]byte, error)) error {
+	if c.Role != "worker" || c.AllowDeviceless {
+		return nil
+	}
+	_, err := myce.EnsureOnboardingServiceSession(ctx, c, command)
+	return err
+}
+
+func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, home string, lookup func(string) (myce.WorkerAccount, error), install func(context.Context, myce.ServiceConfig, string, string, func(context.Context, string, ...string) ([]byte, error)) error, setupTimeout func(context.Context) (context.Context, context.CancelFunc)) error {
 	if len(args) >= 2 && args[0] == "install" && args[1] == "worker" && hasEnrollmentFlag(args[2:], "--enroll") {
 		return enrollmentCommand(args, probe, home, lookup)
 	}
@@ -90,7 +107,7 @@ func setupCommandWithInstaller(args []string, probe myce.MachineProbe, home stri
 	}
 	signals, stopSignals := signal.NotifyContext(context.Background(), syscall.SIGHUP, os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
-	ctx, cancel := myce.SetupTimeout(signals)
+	ctx, cancel := setupTimeout(signals)
 	defer cancel()
 	if action != "install" {
 		if *config == "" {
@@ -287,9 +304,6 @@ func setupCommandWithInstaller(args []string, probe myce.MachineProbe, home stri
 					return err
 				}
 				i.Address = client.URL
-				if err = myce.WriteInvitation(values.JoiningFile, i); err != nil {
-					return err
-				}
 			}
 			if i.Address != "" {
 				c.Queue = i.Address
@@ -329,7 +343,25 @@ func setupCommandWithInstaller(args []string, probe myce.MachineProbe, home stri
 		return err
 	}
 	if role == "worker" && c.Detection.Platform != "fake" {
-		c, e = myce.ResolveOnboardingStorage(ctx, c, installed == nil && !explicit["nas"], probe.Command)
+		var identity myce.NASIdentity
+		if c.JoiningFile != "" {
+			invitation, err := myce.ReadInvitation(c.JoiningFile)
+			if err != nil {
+				return err
+			}
+			identity = invitation.NASIdentity
+		}
+		beforeStorage := c
+		c, e = myce.ResolveOnboardingStorage(ctx, c, installed == nil && !explicit["nas"], probe.Command, identity)
+		if explicit["checkpoint-root"] {
+			c.Checkpoints = beforeStorage.Checkpoints
+		}
+		if explicit["model-root"] {
+			c.ModelRoot = beforeStorage.ModelRoot
+		}
+		if explicit["environment-root"] {
+			c.EnvironmentRoot = beforeStorage.EnvironmentRoot
+		}
 		if e != nil {
 			return e
 		}
@@ -368,9 +400,6 @@ func setupCommandWithInstaller(args []string, probe myce.MachineProbe, home stri
 		}
 	}
 	fmt.Printf("Command: myce %s\n", strings.Join(c.Args(), " "))
-	if c.Role == "worker" {
-		fmt.Println("Worker installed; queue maintenance controls admission.")
-	}
 	if *dry {
 		fmt.Println("Dry run: no files written, packages installed, or services changed.")
 		fmt.Print(c.ServiceText())
@@ -380,29 +409,42 @@ func setupCommandWithInstaller(args []string, probe myce.MachineProbe, home stri
 	if e != nil {
 		return e
 	}
-	if role == "worker" && c.Detection.Platform != "fake" {
-		c, e = myce.PrepareOnboardingStorage(ctx, c, installed == nil && !explicit["nas"], probe.Command)
+	if role == "worker" && !c.AllowDeviceless {
+		_, e = myce.PreflightOnboardingServiceSession(ctx, c, probe.Command)
 		if e != nil {
 			return e
 		}
-	}
-	if role == "worker" && !c.AllowDeviceless {
-		report, err := myce.EnsureOnboardingServiceSession(ctx, c, probe.Command)
-		if err != nil {
-			return err
-		}
-		fmt.Println(report.String())
 	}
 	if c.Enrollment {
 		if e = myce.PreflightEnrollmentInstall(ctx, c, executable, probe.Command); e != nil {
 			return e
 		}
 	}
+	if role == "worker" && c.Detection.Platform != "fake" {
+		if c.Enrollment {
+			// Preflight already proved NAS I/O. The installer creates its roots
+			// after drain succeeds, alongside the other persistent changes.
+			c.RequireMountedNAS = true
+		} else {
+			c, e = myce.PrepareOnboardingStorage(ctx, c, installed == nil && !explicit["nas"], probe.Command)
+			if e != nil {
+				return e
+			}
+		}
+	}
 	if e = install(ctx, c, executable, env("MYCE_TOKEN", ""), probe.Command); e != nil {
 		return e
 	}
 	if role == "worker" {
-		fmt.Println(myce.WorkerMemoryDelegationStatus(ctx, c, probe.Command))
+		fmt.Println("Worker installed; queue maintenance controls admission.")
+		statusCtx, cancelStatus := setupTimeout(signals)
+		defer cancelStatus()
+		if !c.AllowDeviceless {
+			if report, err := myce.PreflightOnboardingServiceSession(statusCtx, c, probe.Command); err == nil {
+				fmt.Println(report.String())
+			}
+		}
+		fmt.Println(myce.WorkerMemoryDelegationStatus(statusCtx, c, probe.Command))
 	}
 	fmt.Println("Installed. Run myce doctor to verify prerequisites.")
 	return nil

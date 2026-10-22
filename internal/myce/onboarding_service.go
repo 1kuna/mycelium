@@ -18,9 +18,29 @@ import (
 
 type ServiceSessionReport struct{ Manager, Lingering, Limitation, MemoryEnforcement string }
 
-// EnsureOnboardingServiceSession performs the narrow user lingering action,
-// never sudo. On macOS it verifies the actual GUI domain before any install.
+// EnsureOnboardingServiceSession validates the session before the narrow user
+// lingering action, never sudo. Callers with more preflights use the read-only
+// PreflightOnboardingServiceSession first and defer this action until afterward.
 func EnsureOnboardingServiceSession(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error)) (ServiceSessionReport, error) {
+	report, err := PreflightOnboardingServiceSession(ctx, c, command)
+	if err != nil || report.Lingering != "disabled" {
+		return report, err
+	}
+	uid := strconv.Itoa(os.Getuid())
+	if _, err = command(ctx, "loginctl", "enable-linger", uid); err != nil {
+		return report, preflightError("lingering_permission_required", "service", "could not enable lingering; administrator must run loginctl enable-linger for this user")
+	}
+	b, err := command(ctx, "loginctl", "show-user", uid, "--property=Linger", "--value")
+	if err != nil || strings.TrimSpace(string(b)) != "yes" {
+		return report, preflightError("lingering_unavailable", "service", "lingering action did not verify; administrator must enable it for this user")
+	}
+	report.Lingering = "enabled and verified"
+	return report, nil
+}
+
+// PreflightOnboardingServiceSession inspects manager access and lingering
+// without changing the user's boot/logout service lifecycle.
+func PreflightOnboardingServiceSession(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error)) (ServiceSessionReport, error) {
 	report := ServiceSessionReport{MemoryEnforcement: "admission-only until Linux cgroup delegation is verified"}
 	if command == nil {
 		return report, preflightError("service_session_unavailable", "service", "service manager runner missing")
@@ -32,6 +52,10 @@ func EnsureOnboardingServiceSession(ctx context.Context, c ServiceConfig, comman
 	switch c.Detection.OS {
 	case "linux":
 		report.Manager = "systemd user"
+		// Verify manager access before the persistent lingering action too.
+		if _, err := command(ctx, "systemctl", "--user", "show-environment"); err != nil {
+			return report, preflightError("service_session_unavailable", "service", "systemd user manager is unavailable; log in as the service user")
+		}
 		b, err := command(ctx, "loginctl", "show-user", uid, "--property=Linger", "--value")
 		if err != nil {
 			return report, preflightError("lingering_unavailable", "service", "cannot inspect lingering; administrator must enable it for this user")
@@ -40,19 +64,9 @@ func EnsureOnboardingServiceSession(ctx context.Context, c ServiceConfig, comman
 		case "yes":
 			report.Lingering = "already enabled"
 		case "no":
-			if _, err = command(ctx, "loginctl", "enable-linger", uid); err != nil {
-				return report, preflightError("lingering_permission_required", "service", "could not enable lingering; administrator must run loginctl enable-linger for this user")
-			}
-			b, err = command(ctx, "loginctl", "show-user", uid, "--property=Linger", "--value")
-			if err != nil || strings.TrimSpace(string(b)) != "yes" {
-				return report, preflightError("lingering_unavailable", "service", "lingering action did not verify; administrator must enable it for this user")
-			}
-			report.Lingering = "enabled and verified"
+			report.Lingering = "disabled"
 		default:
 			return report, preflightError("lingering_unavailable", "service", "unknown lingering state; administrator must inspect loginctl")
-		}
-		if _, err = command(ctx, "systemctl", "--user", "show-environment"); err != nil {
-			return report, preflightError("service_session_unavailable", "service", "systemd user manager is unavailable; log in as the service user")
 		}
 	case "darwin":
 		report.Manager = "launchd gui/" + uid

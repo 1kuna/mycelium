@@ -18,11 +18,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 
@@ -49,15 +47,12 @@ base="$HOME/.local/share/mycelium/worker"
 pidfile="$HOME/fake-manager.pid"
 start() {
   if test -f "$HOME/fail-next-install"; then rm "$HOME/fail-next-install"; exit 99; fi
-  "$base/myce" service --config "$base/config.json" >> "$HOME/fake-service.log" 2>&1 < /dev/null &
-  echo $! > "$pidfile"
+  /usr/bin/curl --noproxy '*' --fail --silent --show-error --request POST "$(cat "$HOME/fake-manager.url")/start" > "$pidfile"
   echo start >> "$HOME/fake-manager.log"
 }
 stop() {
   if test -f "$pidfile"; then
-    pid=$(cat "$pidfile")
-    kill -TERM "$pid" 2>/dev/null || true
-    i=0; while kill -0 "$pid" 2>/dev/null && test "$i" -lt 100; do sleep .1; i=$((i+1)); done
+    /usr/bin/curl --noproxy '*' --fail --silent --show-error --request POST "$(cat "$HOME/fake-manager.url")/stop"
     rm -f "$pidfile"
   fi
 }
@@ -96,7 +91,7 @@ func TestOneCommandEnrollmentEndToEnd(t *testing.T) {
 		t.Skip("supported enrollment targets only")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
-	defer cancel()
+	t.Cleanup(cancel)
 	dir := t.TempDir()
 	nas := filepath.Join(dir, "nas")
 	checkpoint := filepath.Join(nas, "mycelium", "checkpoints")
@@ -107,7 +102,7 @@ func TestOneCommandEnrollmentEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer q.Close()
+	t.Cleanup(func() { _ = q.Close() })
 	identity, err := myce.LoadJoiningIdentity(filepath.Join(dir, "joining-identity"))
 	if err != nil {
 		t.Fatal(err)
@@ -132,12 +127,12 @@ func TestOneCommandEnrollmentEndToEnd(t *testing.T) {
 	queue.TLS = &tls.Config{Certificates: []tls.Certificate{cert}}
 	queue.Config.ErrorLog = log.New(io.Discard, "", 0)
 	queue.StartTLS()
-	defer queue.Close()
+	t.Cleanup(queue.Close)
 	// Observe API and runner logs without any synthetic credential disclosure.
 	var logs enrollmentLogBuffer
 	priorLog := log.Writer()
 	log.SetOutput(&logs)
-	defer log.SetOutput(priorLog)
+	t.Cleanup(func() { log.SetOutput(priorLog) })
 	authority := myce.Invitation{Version: 1, Token: token, Fingerprint: identity.Fingerprint(), Address: queue.URL}
 	inviteFile := filepath.Join(dir, "source-invitation.json")
 	if err = myce.WriteInvitation(inviteFile, authority); err != nil {
@@ -173,7 +168,7 @@ func TestOneCommandEnrollmentEndToEnd(t *testing.T) {
 		}
 		http.ServeContent(w, r, "myce", time.Unix(1, 0), bytes.NewReader(data))
 	}))
-	defer publisher.Close()
+	t.Cleanup(publisher.Close)
 	ca := filepath.Join(dir, "publisher-ca.pem")
 	if err = os.WriteFile(ca, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: publisher.Certificate().Raw}), 0600); err != nil {
 		t.Fatal(err)
@@ -242,6 +237,7 @@ func TestOneCommandEnrollmentEndToEnd(t *testing.T) {
 	newHost := func() string {
 		t.Helper()
 		host := t.TempDir()
+		newEnrollmentTestManager(t, host)
 		bin := filepath.Join(host, "bin")
 		if err := os.Mkdir(bin, 0700); err != nil {
 			t.Fatal(err)
@@ -281,13 +277,6 @@ func TestOneCommandEnrollmentEndToEnd(t *testing.T) {
 	}
 	command := makeCommand("v1.0.1")
 	host := newHost()
-	defer func() {
-		b, _ := os.ReadFile(filepath.Join(host, "fake-manager.pid"))
-		pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
-		if pid > 0 {
-			_ = syscall.Kill(pid, syscall.SIGTERM)
-		}
-	}()
 	// A preexisting prefix proves curl's Range recovery on a clean host.
 	var signed myce.SignedRelease
 	manifestData, _ := os.ReadFile(filepath.Join(dir, "release.json"))
@@ -368,7 +357,7 @@ func TestOneCommandEnrollmentEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer client.HTTP.CloseIdleConnections()
+	t.Cleanup(client.HTTP.CloseIdleConnections)
 	newCommand := makeCommand("v1.0.2")
 	beforeInterrupted := redemptions.Load()
 	oldHash, err := myce.FileSHA256(c.Binary)

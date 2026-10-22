@@ -353,7 +353,7 @@ func (s *workerStore) attemptStores() ([]*workerStore, error) {
 			return nil, errors.New("mismatched or duplicate saved attempt custody")
 		}
 		seen[key] = true
-		child.nasProbe.timeout, child.nasPrepare.timeout = 250*time.Millisecond, 250*time.Millisecond
+		child.nasProbe.timeout, child.nasPrepare.timeout = heartbeatFilesystemBudget, 250*time.Millisecond
 		if err := child.readOperatorStop(); err != nil {
 			return nil, err
 		}

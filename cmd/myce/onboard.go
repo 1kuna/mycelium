@@ -99,6 +99,10 @@ func parseEnrollmentCLI(args []string) (enrollmentCLI, error) {
 	return o, nil
 }
 func enrollmentCommand(args []string, probe myce.MachineProbe, home string, lookup func(string) (myce.WorkerAccount, error)) (resultErr error) {
+	return enrollmentCommandWithTiming(args, probe, home, lookup, myce.RealClock{}, nil, myce.SetupTimeout)
+}
+
+func enrollmentCommandWithTiming(args []string, probe myce.MachineProbe, home string, lookup func(string) (myce.WorkerAccount, error), clock myce.Clock, wait func(context.Context, time.Duration) error, setupTimeout func(context.Context) (context.Context, context.CancelFunc)) (resultErr error) {
 	o, err := parseEnrollmentCLI(args)
 	if err != nil {
 		return err
@@ -165,7 +169,7 @@ func enrollmentCommand(args []string, probe myce.MachineProbe, home string, look
 	waitReady := func(c myce.ServiceConfig, client myce.Client) (myce.EnrollmentResult, error) {
 		phase, cancel := context.WithTimeout(signals, o.timeout)
 		defer cancel()
-		return myce.WaitEnrollment(phase, c, client, myce.EnrollmentWait{Clock: myce.RealClock{}, Timeout: o.timeout, Command: probe.Command})
+		return myce.WaitEnrollment(phase, c, client, myce.EnrollmentWait{Clock: clock, Wait: wait, Timeout: o.timeout, Command: probe.Command})
 	}
 	var old *myce.ServiceConfig
 	if saved, e := myce.ReadServiceConfig(config); e == nil {
@@ -173,7 +177,6 @@ func enrollmentCommand(args []string, probe myce.MachineProbe, home string, look
 	} else if !errors.Is(e, os.ErrNotExist) {
 		return e
 	}
-	clock := myce.RealClock{}
 	var client myce.Client
 	var drain *myce.HostMaintenanceStatus
 	var previousHash, previousVersion string
@@ -190,7 +193,7 @@ func enrollmentCommand(args []string, probe myce.MachineProbe, home string, look
 		}
 		// If final verification fails after resume, regain quiescence before rollback.
 		if resumed {
-			status, e := myce.PrepareEnrollmentUpgrade(cleanup, *old, client, clock, o.timeout, nil)
+			status, e := myce.PrepareEnrollmentUpgrade(cleanup, *old, client, clock, o.timeout, wait)
 			if e != nil {
 				recoveryFailed(e)
 				return
@@ -209,7 +212,7 @@ func enrollmentCommand(args []string, probe myce.MachineProbe, home string, look
 			return
 		}
 		if old.Enrollment {
-			_, e = myce.WaitEnrollment(cleanup, *old, client, myce.EnrollmentWait{Clock: clock, Timeout: 2 * time.Minute, Command: probe.Command, Version: previousVersion})
+			_, e = myce.WaitEnrollment(cleanup, *old, client, myce.EnrollmentWait{Clock: clock, Wait: wait, Timeout: 2 * time.Minute, Command: probe.Command, Version: previousVersion})
 			if e != nil {
 				recoveryFailed(fmt.Errorf("previous release did not become ready: %w", e))
 				return
@@ -342,23 +345,30 @@ func enrollmentCommand(args []string, probe myce.MachineProbe, home string, look
 	// This dispatch is the existing installer, with B2/B3/B4 options unchanged.
 	installArgs := append([]string{"install", "worker"}, o.forward...)
 	installArgs = append(installArgs, "--enrollment")
-	install := func(installCtx context.Context, c myce.ServiceConfig, executable, token string, command func(context.Context, string, ...string) ([]byte, error)) error {
+	install := func(_ context.Context, c myce.ServiceConfig, executable, token string, command func(context.Context, string, ...string) ([]byte, error)) error {
 		// The existing installer calls us only after hardware, storage, policy,
 		// session and candidate service-environment preflights have succeeded.
 		if old != nil {
 			drainCtx, cancelDrain := context.WithTimeout(signals, o.timeout)
-			status, e := myce.PrepareEnrollmentUpgrade(drainCtx, *old, client, clock, o.timeout, nil)
+			status, e := myce.PrepareEnrollmentUpgrade(drainCtx, *old, client, clock, o.timeout, wait)
 			cancelDrain()
 			if e != nil {
 				return e
 			}
 			drain = &status
 		}
+		// Preflight's setup budget has continued ticking during drain. Installation
+		// starts a new budget under the same signal cancellation, never that context.
+		installCtx, cancelInstall := setupTimeout(signals)
+		defer cancelInstall()
+		if e := ensureSetupServiceSession(installCtx, c, command); e != nil {
+			return e
+		}
 		var e error
 		rollback, e = myce.InstallWithRollback(installCtx, c, executable, token, command)
 		return e
 	}
-	if err = setupCommandWithInstaller(installArgs, probe, home, lookup, install); err != nil {
+	if err = setupCommandWithInstallerTimeout(installArgs, probe, home, lookup, install, setupTimeout); err != nil {
 		return err
 	}
 	c, err := myce.ReadServiceConfig(config)

@@ -300,7 +300,7 @@ func TestRereviewNASTotalBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Every operation is healthy, but a very deep root would exceed the cap.
-	c.Checkpoints = filepath.Join(c.NAS, strings.Repeat("part/", 60), "checkpoints")
+	c.Checkpoints = filepath.Join(c.NAS, strings.Repeat("part/", 200), "checkpoints")
 	synctest.Test(t, func(t *testing.T) {
 		start := time.Now()
 		fs := onboardingStorageFS{lstat: func(string) (os.FileInfo, error) { time.Sleep(100 * time.Millisecond); return st, nil }, mkdir: func(string, os.FileMode) error { return nil }, probe: func(string) error { return nil }}

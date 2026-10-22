@@ -346,6 +346,7 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 		if err != nil {
 			return err
 		}
+		i.Address = c.Queue // Save the verified origin only with the installed authority.
 		invitation = &i
 		token = i.Token
 		c.JoiningFile = filepath.Join(filepath.Dir(c.Config), "joining.json")

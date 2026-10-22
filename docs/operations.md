@@ -8,6 +8,12 @@ must approve a [signed release](guide-onboarding-releases.md) first. The bootstr
 needs no Go or Git and never prints the fleet token. See
 [joining](guide-joining-v3.md) for prerequisites, ticket expiry and recovery.
 
+Fresh invitations carry a credential-free server/share fingerprint and a
+share-relative checkpoint location. The joining machine automatically selects
+exactly one matching OS mount; missing or duplicate matches require mounting
+the share or choosing `--nas PATH`. Different server aliases or storage protocols
+require an explicit selection. Saved paths and explicit storage flags are preserved.
+
 Completion checks exact session/protocol/components, CPU/RAM budgets, runner smoke
 and stable manager health. `polite_waiting`, `disabled` and `drained` do not mean
 `ready`. Repeat a release's line for an interrupted install or health check;

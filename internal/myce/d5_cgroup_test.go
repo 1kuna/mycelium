@@ -371,6 +371,10 @@ func TestNativeGroupCgroupFaults(t *testing.T) {
 					t.Fatal("pending cgroup removed", err)
 				}
 				fs.trip.Store(false)
+				// Clearing the injected fault also lets the fixture join its supervisor.
+				if err := p.native.cleanupProcesses(nil); err != nil {
+					t.Fatal(err)
+				}
 				if err := p.native.memory.cleanup(w.Clock); err != nil {
 					t.Fatal(err)
 				}

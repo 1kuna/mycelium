@@ -111,7 +111,10 @@ func (a API) redeemInvite(w http.ResponseWriter, r *http.Request, pin string) {
 		respondOperation(w, nil, err, "invite_rejected")
 		return
 	}
-	respond(w, Invitation{Version: 1, Fingerprint: pin, Token: a.Token}, nil)
+	a.Queue.mu.Lock()
+	identity := a.Queue.onboardingNAS
+	a.Queue.mu.Unlock()
+	respond(w, Invitation{Version: 1, Fingerprint: pin, Token: a.Token, NASIdentity: identity}, nil)
 }
 
 // PinnedClient centralizes exact certificate validation and redirect refusal

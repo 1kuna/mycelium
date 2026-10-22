@@ -130,9 +130,12 @@ without NAS checkpoint access and receives a local scratch checkpoint directory
 under the worker state directory. Declare `resumable: true` when production needs
 NAS checkpoints. Experiments and resumable production still wait for NAS recovery.
 
-The worker heartbeat allows 250 ms for its checkpoint-root probe, including
+The worker heartbeat allows 750 ms for its checkpoint-root probe, including
 creating and removing a temporary file; slower or blocked probes report the root
-unavailable. Probe failures and recovery are logged on state changes. Worker
+unavailable. One-shot onboarding allows three seconds per filesystem operation
+and has a cancellable 15-second total validation limit, including mount inventory.
+Standalone mount selection retains its five-second limit, including dry runs.
+Probe failures and recovery are logged on state changes. Worker
 attempt preparation also allows 250 ms for network-filesystem metadata and cold
 automount access. Queue I/O and checkpoint progress reads retain their 25 ms
 waits; the queue performs them outside its lock. An outstanding filesystem

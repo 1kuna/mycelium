@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"mycelium/internal/myce"
 	"mycelium/internal/probeguard"
 	"mycelium/internal/testenv"
@@ -63,6 +64,10 @@ func cliTestMain(m *testing.M) int {
 	} else {
 		code = m.Run()
 	}
+	if err := testenv.CheckProcesses(dir); err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1 // Preserve the fixture while a child may still be using it.
+	}
 	if err := testenv.Cleanup(dir); err != nil { // All tests and children have joined.
 		code = 1
 	}
@@ -71,6 +76,7 @@ func cliTestMain(m *testing.M) int {
 
 // In-process dev workers need the same synthetic host as tagged CLI children.
 func installSyntheticHost() {
+	myce.SetOnboardingMountCommand(func(context.Context, string, ...string) ([]byte, error) { return nil, nil })
 	myce.SetWorkerProbeDefaults(myce.WorkerProbeDefaults{
 		Profile: func() myce.ProfileProbe {
 			return myce.ProfileProbe{Machine: myce.MachineProbe{OS: runtime.GOOS, Arch: runtime.GOARCH, Files: fstest.MapFS{}, Command: func(_ context.Context, name string, _ ...string) ([]byte, error) {

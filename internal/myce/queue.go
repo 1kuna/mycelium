@@ -77,6 +77,7 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
+	onboardingNAS                   NASIdentity
 	productionInfrastructureRetries int
 
 	files                  *FileStore
