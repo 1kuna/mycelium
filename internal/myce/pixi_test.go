@@ -149,8 +149,8 @@ func TestPixiEnvironmentBrokenLockAndPartialRecovery(t *testing.T) {
 		t.Fatal("restart retained partial", err)
 	}
 	trash, _ := os.ReadDir(filepath.Join(c.Root, ".Trash"))
-	if len(trash) != 2 {
-		t.Fatal("lost recoverable builds", len(trash))
+	if len(trash) != 0 {
+		t.Fatal("retained retired builds", len(trash))
 	}
 }
 
