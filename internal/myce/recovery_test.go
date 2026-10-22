@@ -60,6 +60,7 @@ func TestRestartGraceReportsAndExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fakeCheckpointAvailability(t, q, true)
 	submit(t, q, spec("experiment"))
 	a := check(t, q, machine("a", "fake"), nil).Job
 	submit(t, q, spec("experiment"))
@@ -73,6 +74,7 @@ func TestRestartGraceReportsAndExpiry(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer q.Close()
+	fakeCheckpointAvailability(t, q, true)
 	q.SetRestartGrace(2 * time.Minute)
 	c.Advance(119 * time.Second)
 	requireState(t, q, a.ID, "running")
@@ -182,12 +184,7 @@ func TestLateReturnCheckpointWinner(t *testing.T) {
 func TestNASUnavailableBlocksAndRecovers(t *testing.T) {
 	q, c := fixture(t)
 	j := submit(t, q, spec("experiment"))
-	root := q.root
-	away := root + "-away"
-	if err := os.Rename(root, away); err != nil {
-		t.Fatal(err)
-	}
-	defer os.Rename(away, root)
+	fakeCheckpointAvailability(t, q, false)
 	c.Advance(time.Second)
 	if check(t, q, machine("a", "fake"), nil).Job != nil {
 		t.Fatal("started without checkpoint root")
@@ -196,9 +193,7 @@ func TestNASUnavailableBlocksAndRecovers(t *testing.T) {
 	if !strings.Contains(snap.Warning, "NAS") || !strings.Contains(job(t, q, j.ID).Reason, "NAS") {
 		t.Fatal("NAS missing status")
 	}
-	if err := os.Rename(away, root); err != nil {
-		t.Fatal(err)
-	}
+	fakeCheckpointAvailability(t, q, true)
 	m := machine("a", "fake")
 	m.CheckpointUnavailable = true
 	if check(t, q, m, nil).Job != nil {
@@ -294,12 +289,7 @@ func TestCheckpointReconciliationWaitsForNAS(t *testing.T) {
 	check(t, q, observer(), nil)
 	n := machine("b", "fake")
 	next := check(t, q, n, nil).Job
-	root := q.root
-	away := root + "-unavailable"
-	if err := os.Rename(root, away); err != nil {
-		t.Fatal(err)
-	}
-	defer os.Rename(away, root)
+	fakeCheckpointAvailability(t, q, false)
 	c.Advance(time.Second)
 	reply := check(t, q, m, old)
 	if reply.Kill || !reply.Hold {
