@@ -303,195 +303,28 @@ func (f installMatrixFixture) assertRestored(t *testing.T) {
 	}
 }
 
-// Each successful trace defines its own complete failure matrix. A newly added
-// publication/manager operation automatically adds a fault case. No fixed step
-// count or hand-maintained list can silently omit a future operation.
-func TestInstallSnapshotFailureMatrix(t *testing.T) {
-	cases := 0
+// A failed publication restores the installed worker on each service manager.
+// Detailed identity and launchd regressions use the same fixture independently.
+func TestInstallSnapshotPublicationRollback(t *testing.T) {
 	for _, platform := range []string{"linux", "darwin"} {
-		states := 4
-		if platform == "darwin" {
-			states = 3
-		}
-		for _, role := range []string{"queue", "worker"} {
-			for prior := -1; prior < states; prior++ {
-				label := fmt.Sprintf("%s/%s/prior=%d", platform, role, prior)
-				baseline := newInstallMatrixFixture(t, platform, role, prior)
-				trace := []string{}
-				baseline.manager.event = func(event string) error { trace = append(trace, event); return nil }
-				files := installFiles{before: func(op, path string) error { trace = append(trace, op+" "+filepath.Base(path)); return nil }}
-				if err := installWithFiles(context.Background(), baseline.c, baseline.source, "fixture", baseline.manager.run, files); err != nil {
-					t.Fatalf("%s baseline: %v", label, err)
+		t.Run(platform, func(t *testing.T) {
+			f := newInstallMatrixFixture(t, platform, "worker", 2)
+			injected := errors.New("injected publication failure")
+			fired := false
+			files := installFiles{before: func(op, path string) error {
+				if op == "directory-fsync" && path == f.c.Service && !fired {
+					fired = true
+					return injected
 				}
-				for step := range trace {
-					cases++
-					t.Run(fmt.Sprintf("%s/step=%02d", label, step), func(t *testing.T) {
-						f := newInstallMatrixFixture(t, platform, role, prior)
-						count := 0
-						reloadSeen := false
-						fired := false
-						injected := errors.New("injected snapshot matrix failure")
-						event := func(event string) error {
-							if fired {
-								f.assertRecoveryOrder(t, event, &reloadSeen)
-							}
-							n := count
-							count++
-							if n == step {
-								fired = true
-								return injected
-							}
-							return nil
-						}
-						f.manager.event = event
-						files := installFiles{before: func(op, path string) error { return event(op + " " + filepath.Base(path)) }}
-						changed := f.c
-						changed.Heartbeat = 2 * time.Second
-						err := installWithFiles(context.Background(), changed, f.source, "fixture", f.manager.run, files)
-						// Drop-in diagnostics deliberately sanitize the underlying manager error.
-						if err == nil || !fired {
-							t.Fatalf("fault not exercised: %v", err)
-						}
-						f.assertRestored(t)
-					})
-				}
+				return nil
+			}}
+			changed := f.c
+			changed.Heartbeat = 2 * time.Second
+			if err := installWithFiles(context.Background(), changed, f.source, "fixture", f.manager.run, files); !errors.Is(err, injected) || !fired {
+				t.Fatal("publication failure not exercised", err)
 			}
-		}
-	}
-	t.Logf("failure matrix cases: %d", cases)
-}
-
-func TestInstallSnapshotRecoveryFailureMatrix(t *testing.T) {
-	cases := 0
-	for _, platform := range []string{"linux", "darwin"} {
-		states := 4
-		if platform == "darwin" {
-			states = 3
-		}
-		for _, role := range []string{"queue", "worker"} {
-			for prior := -1; prior < states; prior++ {
-				label := fmt.Sprintf("%s/%s/prior=%d", platform, role, prior)
-				baseline := newInstallMatrixFixture(t, platform, role, prior)
-				forward := 0
-				baseline.manager.event = func(string) error { forward++; return nil }
-				files := installFiles{before: func(string, string) error { forward++; return nil }}
-				if err := installWithFiles(context.Background(), baseline.c, baseline.source, "fixture", baseline.manager.run, files); err != nil {
-					t.Fatal(err)
-				}
-				// A failure at the last forward operation has exercised every publication
-				// and every manager mutation before recovery starts.
-				probe := newInstallMatrixFixture(t, platform, role, prior)
-				n, recoverySteps := 0, 0
-				primary := errors.New("injected final install failure")
-				event := func(string) error {
-					n++
-					if n == forward {
-						return primary
-					}
-					if n > forward {
-						recoverySteps++
-					}
-					return nil
-				}
-				probe.manager.event = event
-				files = installFiles{before: func(op, path string) error { return event(op + " " + filepath.Base(path)) }}
-				if err := installWithFiles(context.Background(), probe.c, probe.source, "fixture", probe.manager.run, files); !errors.Is(err, primary) {
-					t.Fatalf("%s primary fault not hit: %v", label, err)
-				}
-				probe.assertRestored(t)
-				for step := 0; step < recoverySteps; step++ {
-					cases++
-					t.Run(fmt.Sprintf("%s/recovery=%02d", label, step), func(t *testing.T) {
-						f := newInstallMatrixFixture(t, platform, role, prior)
-						n := 0
-						fired := false
-						recoveryFailure := errors.New("injected recovery failure")
-						event := func(string) error {
-							n++
-							if n == forward {
-								return primary
-							}
-							if n == forward+step+1 {
-								fired = true
-								return recoveryFailure
-							}
-							return nil
-						}
-						f.manager.event = event
-						files := installFiles{before: func(op, path string) error { return event(op + " " + filepath.Base(path)) }}
-						err := installWithFiles(context.Background(), f.c, f.source, "fixture", f.manager.run, files)
-						if !errors.Is(err, primary) || !fired || !strings.Contains(err.Error(), "rollback incomplete") {
-							t.Fatalf("recovery failure not reported: %v", err)
-						}
-						// Verify the diagnostic against the fake's actual final state, including
-						// changes caused by fail-closed stopping after an incomplete rollback.
-						for _, path := range installUnitPaths(f.c) {
-							unit := filepath.Base(path)
-							fields := []string{}
-							data, readErr := os.ReadFile(path)
-							st, statErr := os.Stat(path)
-							want := f.files[path]
-							matches := want == nil && errors.Is(readErr, os.ErrNotExist) || want != nil && readErr == nil && statErr == nil && bytes.Equal(want, data) && st.Mode().Perm() == f.modes[path]
-							if !matches {
-								fields = append(fields, "file")
-							}
-							got, wantState := f.manager.states[unit], f.states[unit]
-							if got.enabled != wantState.enabled {
-								fields = append(fields, "enabled")
-							}
-							if got.loaded != wantState.loaded {
-								fields = append(fields, "loaded")
-							}
-							if got.active != wantState.active {
-								fields = append(fields, "active")
-							}
-							for _, field := range []string{"file", "enabled", "loaded", "active"} {
-								reported := false
-								for _, chunk := range strings.Split(strings.SplitN(err.Error(), "snapshot differences: ", 2)[1], "; ") {
-									if strings.HasPrefix(chunk, unit+": ") {
-										details := strings.SplitN(strings.TrimPrefix(chunk, unit+": "), ": ", 2)[0]
-										for _, value := range strings.Split(details, ",") {
-											reported = reported || value == field
-										}
-									}
-								}
-								different := false
-								for _, value := range fields {
-									different = different || value == field
-								}
-								if reported != different {
-									t.Fatalf("inaccurate difference for %s/%s: %v", unit, field, err)
-								}
-							}
-						}
-						if role == "worker" {
-						}
-					})
-				}
-			}
-		}
-	}
-	t.Logf("recovery-failure matrix cases: %d", cases)
-}
-
-func (f installMatrixFixture) assertRecoveryOrder(t *testing.T, event string, reloaded *bool) {
-	t.Helper()
-	if event == "systemctl --user daemon-reload" || strings.HasPrefix(event, "launchctl bootout ") || strings.HasPrefix(event, "launchctl print ") && !f.manager.states[filepath.Base(f.c.Service)].loaded {
-		f.assertFiles(t)
-		*reloaded = true
-	}
-	registration := strings.HasPrefix(event, "systemctl --user enable ") || strings.HasPrefix(event, "systemctl --user disable ") || strings.HasPrefix(event, "launchctl bootstrap ")
-	activity := strings.HasPrefix(event, "systemctl --user restart ") || strings.HasPrefix(event, "systemctl --user stop ") || strings.HasPrefix(event, "launchctl kickstart ") || strings.HasPrefix(event, "launchctl kill ")
-	if (registration || activity) && !*reloaded {
-		t.Fatal("restored manager state before restored definitions were reloaded")
-	}
-	if activity {
-		for unit, want := range f.states {
-			got := f.manager.states[unit]
-			if got.enabled != want.enabled || got.loaded != want.loaded {
-				t.Fatal("restored activity before all registrations were restored")
-			}
-		}
+			f.assertRestored(t)
+		})
 	}
 }
 

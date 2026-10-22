@@ -18,6 +18,7 @@ PRIVATE_OPS.md
 *.local.md
 ops/private/
 .reports/
+/.gate/
 
 # Local queue and quick-start files
 /myce.db*

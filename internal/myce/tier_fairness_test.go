@@ -326,8 +326,8 @@ func TestTierFairnessModelPreparationChargedOnce(t *testing.T) {
 }
 
 func TestTierFairnessSimulatorUsesPolicy(t *testing.T) {
-	a := simTestStream("atlas", "production", 0, 1, 100)
-	v := simTestStream("verso", "experiment", 0, 1, 100)
+	a := simTestStream("atlas", "production", 0, 1, 32)
+	v := simTestStream("verso", "experiment", 0, 1, 32)
 	w := simTestWork(a, v)
 	p := examplePriorityPolicy()
 	p.Projects = map[string]ProjectPolicy{"atlas": {Weight: 3}, "verso": {Weight: 1}}

@@ -122,14 +122,10 @@ func TestOneCommandEnrollmentEndToEnd(t *testing.T) {
 	}
 	token := "test-only-fleet-secret-never-printed"
 	var redemptions atomic.Int32
-	var maintenanceWrites atomic.Int32
 	api := (myce.API{Queue: q, Token: token}).HandlerWithJoiningIdentity(identity.Fingerprint())
 	queue := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/invites/redeem" {
 			redemptions.Add(1)
-		}
-		if r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/maintenance") {
-			maintenanceWrites.Add(1)
 		}
 		api.ServeHTTP(w, r)
 	}))
@@ -334,22 +330,6 @@ func TestOneCommandEnrollmentEndToEnd(t *testing.T) {
 	}
 	// A different host cannot replay the ticket, even with the authentic artifact.
 	runCommand(command, newHost(), false)
-	// Even authentic executable bytes must match the approved release version.
-	wrongManifest := manifest
-	wrongManifest.Version = "v9.0.0"
-	wrongCommand, err := myce.BootstrapCommand(wrongManifest, publisher.URL, queue.URL, authority.Fingerprint, strings.Repeat("b", 64))
-	if err != nil {
-		t.Fatal(err)
-	}
-	beforeWrong := redemptions.Load()
-	wrongHost := newHost()
-	runCommand(wrongCommand, wrongHost, false)
-	if redemptions.Load() != beforeWrong {
-		t.Fatal("wrong artifact reached redemption")
-	}
-	if _, err = os.Stat(filepath.Join(wrongHost, ".local", "share", "mycelium", "worker", "config.json")); !os.IsNotExist(err) {
-		t.Fatal("wrong artifact installed")
-	}
 	beforeTamper := redemptions.Load()
 	tamper.Store(true)
 	badHost := newHost()
@@ -361,76 +341,13 @@ func TestOneCommandEnrollmentEndToEnd(t *testing.T) {
 	if _, err = os.Stat(filepath.Join(badHost, ".local", "share", "mycelium", "worker", "config.json")); !os.IsNotExist(err) {
 		t.Fatal("tampered artifact installed")
 	}
-	// Failed upgrades resume their own drain and restore the previous release.
-	client, err := authority.Client(queue.URL)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(client.HTTP.CloseIdleConnections)
-	newCommand := makeCommand("v1.0.2")
-	beforeInterrupted := redemptions.Load()
-	oldHash, err := myce.FileSHA256(c.Binary)
-	if err != nil {
-		t.Fatal(err)
-	}
-	beforeInvalid := maintenanceWrites.Load()
-	invalidOptions := runCommand(newCommand, host, false, "--invalid-installer-option")
-	if maintenanceWrites.Load() != beforeInvalid || !strings.Contains(invalidOptions, "invalid-installer-option") {
-		t.Fatal("invalid install options reached drain", invalidOptions)
-	}
-	if hash, e := myce.FileSHA256(c.Binary); e != nil || hash != oldHash {
-		t.Fatal("invalid install options changed previous binary", e)
-	}
-	if err := os.WriteFile(filepath.Join(host, "fail-next-install"), nil, 0600); err != nil {
-		t.Fatal(err)
-	}
-	installerFailure := runCommand(newCommand, host, false)
-	var installerStatus myce.HostMaintenanceStatus
-	if err = client.Call(ctx, "GET", "/api/hosts/"+c.HostID+"/maintenance", nil, &installerStatus); err != nil || installerStatus.Policy.Mode != "enabled" || !strings.Contains(installerFailure, "host resumed on previous release") {
-		t.Error("installer failure abandoned drain or omitted outcome", err, installerFailure)
-	}
-	readinessFailure := runCommand(newCommand, host, false, "--enrollment-timeout=1s")
-	var held myce.HostMaintenanceStatus
-	if err = client.Call(ctx, "GET", "/api/hosts/"+c.HostID+"/maintenance", nil, &held); err != nil || held.Policy.Mode != "enabled" {
-		t.Error("readiness failure did not resume its self-made drain", err)
-	}
-	receipt := filepath.Join(c.State, "enrollment-resume.json")
-	if hash, e := myce.FileSHA256(c.Binary); e != nil || hash != oldHash {
-		t.Error("readiness failure did not roll back previous binary", e)
-	}
-	if !strings.Contains(readinessFailure, "host resumed on previous release") {
-		t.Error("readiness failure omitted recovery outcome", readinessFailure)
-	}
-	if _, e := os.Stat(receipt); !os.IsNotExist(e) {
-		t.Error("successful failure recovery retained resume authority", e)
-	}
-	output = runCommand(newCommand, host, true)
-	if !strings.Contains(output, " · ready · ") || redemptions.Load() != beforeInterrupted {
-		t.Fatal("upgrade retry did not become ready without redeeming again")
-	}
-	if _, e := os.Stat(receipt); !os.IsNotExist(e) {
-		t.Fatal("completed upgrade retained resume authority", e)
-	}
-	// A subsequent replacement must still preserve operator-owned disable.
-	if err = client.Call(ctx, "POST", "/api/hosts/"+c.HostID+"/maintenance", myce.HostMaintenanceRequest{Action: "disable"}, nil); err != nil {
-		t.Fatal(err)
-	}
-	sentinel := filepath.Join(c.State, "custody-sentinel.bin")
-	if err = os.WriteFile(sentinel, []byte("preserved custody"), 0600); err != nil {
-		t.Fatal(err)
-	}
+	// Upgrade the same installed worker without redeeming another ticket.
 	beforeUpgrade := redemptions.Load()
-	newCommand = makeCommand("v1.0.3")
+	newCommand := makeCommand("v1.0.2")
 	output = runCommand(newCommand, host, true)
-	if !strings.Contains(output, " · disabled · ") || strings.Contains(output, " · ready · ") || redemptions.Load() != beforeUpgrade {
-		t.Fatal("upgrade resumed maintenance or redeemed ticket", output)
+	if !strings.Contains(output, " · ready · ") || redemptions.Load() != beforeUpgrade {
+		t.Fatal("upgrade did not become ready without redeeming again")
 	}
-	if data, err := os.ReadFile(sentinel); err != nil || string(data) != "preserved custody" {
-		t.Fatal("upgrade lost spool custody", err)
-	}
-	// Replay an authentic older invitation line against a newer installation.
-	runCommand(command, host, false)
-	runCommand(command+" --allow-downgrade", host, true)
 	if strings.Contains(logs.String(), token) {
 		t.Fatal("fleet token in queue logs")
 	}

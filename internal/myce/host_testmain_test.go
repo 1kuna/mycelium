@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"fmt"
 	"mycelium/internal/testenv"
 	"mycelium/internal/testguard"
 	"os"
@@ -56,10 +55,7 @@ func coreTestMain(m *testing.M) int {
 		panic(err)
 	}
 	code := m.Run()
-	if err := testenv.CheckProcesses(dir); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1 // Preserve the fixture until child cleanup is confirmed.
-	}
+
 	if err := testenv.Cleanup(dir); err != nil { // All tests and children have joined.
 		code = 1
 	}

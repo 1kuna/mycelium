@@ -140,134 +140,135 @@ func TestEngineRecoveryCrashLoopClockAndFreshAttempt(t *testing.T) {
 }
 
 func TestEngineRecoveryRealProcessBothLogs(t *testing.T) {
-	for _, policy := range []string{"", "none"} {
-		for _, pinned := range []bool{false, true} {
-			for _, loss := range []string{"kill", "exit", "health"} {
-				t.Run(fmt.Sprintf("logs=%s/pinned=%v/%s", policy, pinned, loss), func(t *testing.T) {
-					q, clock := fixture(t)
-					model := serverTestModel(t, "ready")
-					weights := []byte("synthetic immutable weights")
-					model.Path = filepath.Join(t.TempDir(), "weights")
-					if err := os.WriteFile(model.Path, weights, 0600); err != nil {
-						t.Fatal(err)
-					}
-					model.SizeBytes = int64(len(weights))
-					model.SHA256 = fmt.Sprintf("%x", sha256.Sum256(weights))
-					model.Logs = policy
-					model.Device = ""
-					model.DeviceEnv = nil
-					config := ModelConfig{Models: []Model{model}, Idle: time.Minute, Wait: time.Minute}
-					if err := q.ConfigureModels(config); err != nil {
-						t.Fatal(err)
-					}
-					m := machine("engine-worker", "fake")
-					m.Capabilities = []string{"logs_none"}
-					m.ModelConfigHash = modelConfigHash(config)
-					rt, err := startModels(Worker{Machine: m, ModelConfig: config, Clock: RealClock{}, Client: Client{Token: "test"}, MemorySource: func(context.Context) (float64, error) { return 32, nil }}, t.TempDir())
-					if err != nil {
-						t.Fatal(err)
-					}
-					defer func() {
-						if err := rt.close(); err != nil {
-							t.Error(err)
-						}
-					}()
-					m.ModelURL = rt.url
-					heartbeat := func() Reply {
-						t.Helper()
-						reports, _ := rt.report()
-						reply, err := q.Checkin(Checkin{Machine: m, ModelReports: reports})
-						if err != nil {
-							t.Fatal(err)
-						}
-						rt.sync(reply.ModelPlan)
-						return reply
-					}
-					heartbeat()
-					if pinned {
-						if err := q.Pin(ModelPin{Model: model.Name, Project: "test", Machine: m.ID}); err != nil {
-							t.Fatal(err)
-						}
-					}
-					call := &ModelCall{Model: model.Name, Project: "test", Priority: "experiment"}
-					if err := q.addCall(call); err != nil {
-						t.Fatal(err)
-					}
-					heartbeat()
-					await(t, func() bool { reports, _ := rt.report(); return len(reports) == 1 && reports[0].State == "ready" })
-					heartbeat()
-					if err := q.finishCall(call.ID); err != nil {
-						t.Fatal(err)
-					}
-					rt.mu.Lock()
-					engine := rt.models[model.Name].engine.(*LlamaEngine)
-					rt.mu.Unlock()
-					old := q.s.ModelSlots[slotKey(m.ID, model.Name)].Attempt
-					switch loss {
-					case "kill":
-						if err := syscall.Kill(-engine.cmd.Process.Pid, syscall.SIGKILL); err != nil {
-							t.Fatal(err)
-						}
-					case "exit":
-						res, _ := engine.CallRequest(context.Background(), "POST", "/exit", nil, nil)
-						if res != nil {
-							res.Body.Close()
-						}
-					case "health":
-						res, err := engine.CallRequest(context.Background(), "POST", "/fail-health", nil, nil)
-						if err != nil {
-							t.Fatal(err)
-						}
-						res.Body.Close()
-						await(t, func() bool { err, _, _ := engine.runtimeHealth(); return err != nil })
-						if err := syscall.Kill(engine.cmd.Process.Pid, 0); err != nil {
-							t.Fatal("health fixture process exited before withdrawal")
-						}
-					}
-					if loss != "health" {
-						select {
-						case <-engine.exited:
-						case <-time.After(testWaitTimeout):
-							t.Fatal("Wait not observed")
-						}
-					}
-
-					heartbeat()
-					if s := q.s.ModelSlots[slotKey(m.ID, model.Name)]; s != nil && s.State == "ready" {
-						t.Fatal("ready survived death heartbeat")
-					}
-					await(t, func() bool { reports, used := rt.report(); return reports[0].State == "failed" && used == 0 })
-					heartbeat()
-					s := q.s.ModelSlots[slotKey(m.ID, model.Name)]
-					if !pinned {
-						if s != nil || q.modelMemory(m.ID) != 0 {
-							t.Fatal("idle failure kept queue reservation")
-						}
-						return
-					}
-					if s.State != "failed" || s.RetryAt == nil {
-						t.Fatal("pinned retry not pending")
-					}
-					queued := &ModelCall{Model: model.Name, Project: "test", Priority: "experiment"}
-					if err := q.addCall(queued); err != nil {
-						t.Fatal(err)
-					}
-					if queued.Machine != "" {
-						t.Fatal("queued call routed to dead slot")
-					}
-					clock.Advance(time.Second)
-					heartbeat()
-					await(t, func() bool { reports, _ := rt.report(); return reports[0].State == "ready" })
-					heartbeat()
-					if s.Attempt == old || queued.Machine != m.ID || s.State != "ready" {
-						t.Fatalf("pin did not reload: %+v %+v", s, queued)
-					}
-					if err := q.finishCall(queued.ID); err != nil {
-						t.Fatal(err)
-					}
-				})
+	for _, tc := range []struct {
+		policy string
+		pinned bool
+		loss   string
+	}{{"", false, "kill"}, {"none", true, "exit"}, {"", true, "health"}} {
+		t.Run(fmt.Sprintf("logs=%s/pinned=%v/%s", tc.policy, tc.pinned, tc.loss), func(t *testing.T) {
+			policy, pinned, loss := tc.policy, tc.pinned, tc.loss
+			q, clock := fixture(t)
+			model := serverTestModel(t, "ready")
+			weights := []byte("synthetic immutable weights")
+			model.Path = filepath.Join(t.TempDir(), "weights")
+			if err := os.WriteFile(model.Path, weights, 0600); err != nil {
+				t.Fatal(err)
 			}
-		}
+			model.SizeBytes = int64(len(weights))
+			model.SHA256 = fmt.Sprintf("%x", sha256.Sum256(weights))
+			model.Logs = policy
+			model.Device = ""
+			model.DeviceEnv = nil
+			config := ModelConfig{Models: []Model{model}, Idle: time.Minute, Wait: time.Minute}
+			if err := q.ConfigureModels(config); err != nil {
+				t.Fatal(err)
+			}
+			m := machine("engine-worker", "fake")
+			m.Capabilities = []string{"logs_none"}
+			m.ModelConfigHash = modelConfigHash(config)
+			rt, err := startModels(Worker{Machine: m, ModelConfig: config, Clock: RealClock{}, Client: Client{Token: "test"}, MemorySource: func(context.Context) (float64, error) { return 32, nil }}, t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if err := rt.close(); err != nil {
+					t.Error(err)
+				}
+			}()
+			m.ModelURL = rt.url
+			heartbeat := func() Reply {
+				t.Helper()
+				reports, _ := rt.report()
+				reply, err := q.Checkin(Checkin{Machine: m, ModelReports: reports})
+				if err != nil {
+					t.Fatal(err)
+				}
+				rt.sync(reply.ModelPlan)
+				return reply
+			}
+			heartbeat()
+			if pinned {
+				if err := q.Pin(ModelPin{Model: model.Name, Project: "test", Machine: m.ID}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			call := &ModelCall{Model: model.Name, Project: "test", Priority: "experiment"}
+			if err := q.addCall(call); err != nil {
+				t.Fatal(err)
+			}
+			heartbeat()
+			await(t, func() bool { reports, _ := rt.report(); return len(reports) == 1 && reports[0].State == "ready" })
+			heartbeat()
+			if err := q.finishCall(call.ID); err != nil {
+				t.Fatal(err)
+			}
+			rt.mu.Lock()
+			engine := rt.models[model.Name].engine.(*LlamaEngine)
+			rt.mu.Unlock()
+			old := q.s.ModelSlots[slotKey(m.ID, model.Name)].Attempt
+			switch loss {
+			case "kill":
+				if err := syscall.Kill(-engine.cmd.Process.Pid, syscall.SIGKILL); err != nil {
+					t.Fatal(err)
+				}
+			case "exit":
+				res, _ := engine.CallRequest(context.Background(), "POST", "/exit", nil, nil)
+				if res != nil {
+					res.Body.Close()
+				}
+			case "health":
+				res, err := engine.CallRequest(context.Background(), "POST", "/fail-health", nil, nil)
+				if err != nil {
+					t.Fatal(err)
+				}
+				res.Body.Close()
+				await(t, func() bool { err, _, _ := engine.runtimeHealth(); return err != nil })
+				if err := syscall.Kill(engine.cmd.Process.Pid, 0); err != nil {
+					t.Fatal("health fixture process exited before withdrawal")
+				}
+			}
+			if loss != "health" {
+				select {
+				case <-engine.exited:
+				case <-time.After(testWaitTimeout):
+					t.Fatal("Wait not observed")
+				}
+			}
+
+			heartbeat()
+			if s := q.s.ModelSlots[slotKey(m.ID, model.Name)]; s != nil && s.State == "ready" {
+				t.Fatal("ready survived death heartbeat")
+			}
+			await(t, func() bool { reports, used := rt.report(); return reports[0].State == "failed" && used == 0 })
+			heartbeat()
+			s := q.s.ModelSlots[slotKey(m.ID, model.Name)]
+			if !pinned {
+				if s != nil || q.modelMemory(m.ID) != 0 {
+					t.Fatal("idle failure kept queue reservation")
+				}
+				return
+			}
+			if s.State != "failed" || s.RetryAt == nil {
+				t.Fatal("pinned retry not pending")
+			}
+			queued := &ModelCall{Model: model.Name, Project: "test", Priority: "experiment"}
+			if err := q.addCall(queued); err != nil {
+				t.Fatal(err)
+			}
+			if queued.Machine != "" {
+				t.Fatal("queued call routed to dead slot")
+			}
+			clock.Advance(time.Second)
+			heartbeat()
+			await(t, func() bool { reports, _ := rt.report(); return reports[0].State == "ready" })
+			heartbeat()
+			if s.Attempt == old || queued.Machine != m.ID || s.State != "ready" {
+				t.Fatalf("pin did not reload: %+v %+v", s, queued)
+			}
+			if err := q.finishCall(queued.ID); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 

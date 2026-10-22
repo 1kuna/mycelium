@@ -24,10 +24,7 @@ func TestExtensionAgentDevEndToEnd(t *testing.T) {
 	root := t.TempDir()
 	binary := os.Getenv("MYCE_DEV_SMOKE_BINARY")
 	if binary == "" {
-		binary = filepath.Join(root, "myce")
-		if out, err := exec.Command("go", "build", "-tags=myce_test", "-o", binary, ".").CombinedOutput(); err != nil {
-			t.Fatalf("build: %v %s", err, out)
-		}
+		binary = devTestBinary(t)
 	}
 	binary, err := filepath.Abs(binary)
 	if err != nil {

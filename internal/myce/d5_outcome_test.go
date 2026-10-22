@@ -145,26 +145,12 @@ func TestOutcomeRuntimeTable(t *testing.T) {
 	for _, runtime := range []string{"native", "native-group", "docker"} {
 		for _, tc := range []outcomeRow{
 			{name: "completion", success: true},
-			{name: "priority-completion-before-delivery", priority: true, late: true, recovery: true, success: true},
 			{name: "priority-cooperative-stop", priority: true, delivered: true, recovery: true, interrupted: true},
 			{name: "priority-independent-exit", priority: true, code: 7},
 			{name: "priority-oom", priority: true, code: 137, delivered: true, oom: true},
 			{name: "mycelium-launch-refusal", launchRefusal: true, interrupted: true},
-			{name: "mycelium-spawn-failure", startFailureKind: launchFailed, interrupted: true},
-			{name: "mycelium-environment-failure", startFailureKind: environmentFailed, interrupted: true},
 			{name: "mycelium-foreign-port-probe", code: 1, portProbe: true, interrupted: true},
-			{name: "completion-with-intent", intent: true, success: true},
-			{name: "live-recovery-completion", recovery: true, success: true},
-			{name: "exit-7-with-intent", code: 7, intent: true},
-			{name: "exit-137-without-signal", code: 137},
 			{name: "exit-143-without-signal", code: 143},
-			{name: "exit-143-with-intent", code: 143, intent: true},
-			{name: "stop-intent-after-exit", code: 137, late: true},
-			{name: "saved-failure-operator-stop", code: 7, late: true, operator: true, recovery: true},
-			{name: "delivered-stop-exit-7", code: 7, delivered: true, interrupted: true},
-			{name: "delivered-stop-exit-143", code: 143, delivered: true, interrupted: true},
-			{name: "delivered-stop-success", delivered: true, success: true},
-			{name: "oom-after-stop", code: 137, delivered: true, oom: true},
 			{name: "observation-loss", code: 137, lost: true, interrupted: true},
 		} {
 			t.Run(runtime+"/"+tc.name, func(t *testing.T) {

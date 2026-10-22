@@ -17,10 +17,7 @@ import (
 
 func TestDevClockSubmissionExpiryEndToEnd(t *testing.T) {
 	root := currentTestStateRoot(t)
-	binary := filepath.Join(root, "myce")
-	if output, err := exec.Command("go", "build", "-tags=myce_test", "-race", "-o", binary, ".").CombinedOutput(); err != nil {
-		t.Fatalf("build: %v %s", err, output)
-	}
+	binary := devTestBinary(t)
 	d, err := myce.StartDev(myce.DevConfig{Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Address: "127.0.0.1:0", Token: "clock-test", Workers: 1, MemoryGB: 8})
 	if err != nil {
 		t.Fatal(err)

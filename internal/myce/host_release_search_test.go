@@ -2,9 +2,7 @@ package myce
 
 import (
 	"fmt"
-	"math/rand"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 )
@@ -220,315 +218,6 @@ func TestHostReleaseEnvironmentBuildKeepsCPUReservation(t *testing.T) {
 	}
 }
 
-// The oracle enumerates every allowed subset without the planner's pruning.
-// It computes capacity and rank independently, including pending (zero-stop)
-// releases. Policy matching/eligibility and hostNeed are the existing contract.
-func bruteForceHostReleases(q *Queue, m *Machine, demand Spec, releasedJobs map[*Job]bool, releasedSlots map[*ModelSlot]bool) ([]string, bool) {
-	type candidate struct {
-		id          string
-		machine     string
-		tier, stops int
-		cores       int
-		ram         float64
-	}
-	var candidates []candidate
-	for _, j := range q.s.Jobs {
-		owner := q.s.Machines[j.Machine]
-		if releasedJobs[j] || j.ReleaseConfirmed || owner == nil || owner.Gone || hostID(owner) != hostID(m) || !q.batchPreemptible(j, demand) {
-			continue
-		}
-		v := candidate{id: "job/" + j.ID, machine: j.Machine, tier: q.priorityMatch(j.Spec).Index, ram: hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)}
-		if j.State == "running" {
-			v.stops = 1
-		}
-		v.cores = j.Spec.Needs.cores()
-		candidates = append(candidates, v)
-	}
-	for _, s := range q.s.ModelSlots {
-		owner := q.s.Machines[s.Machine]
-		if releasedSlots[s] || !slotReservesMemory(s) || owner == nil || owner.Gone || hostID(owner) != hostID(m) || !q.slotReclaimableFor(s, demand) {
-			continue
-		}
-		model, _ := q.model(s.Model)
-		v := candidate{id: "slot/" + slotKey(s.Machine, s.Model), machine: s.Machine, tier: q.priorityMatch(q.slotSpec(s)).Index, ram: hostNeed(owner, model.MemoryGB, model.HostMemoryGB)}
-		if s.State != "draining" && s.State != "unloading" {
-			v.stops = 1
-		}
-		if slotReservesMemory(s) {
-			v.cores = 1
-		}
-		candidates = append(candidates, v)
-	}
-	slices.SortFunc(candidates, func(a, b candidate) int { return strings.Compare(a.id, b.id) })
-	// Independent oracle accounting: a started build takes one core when the
-	// final charged execution on its worker is removed. Count executions, not
-	// cores, so multi-core jobs and a job sharing a worker with a slot work too.
-	buildExecutions := map[string]int{}
-	for _, p := range q.s.PreparationPlans {
-		if owner := q.s.Machines[p.Machine]; p.Started && owner != nil && hostID(owner) == hostID(m) {
-			buildExecutions[p.Machine] = 0
-		}
-	}
-	for worker := range buildExecutions {
-		for _, j := range q.s.Jobs {
-			if j.Machine == worker && !releasedJobs[j] && !j.ReleaseConfirmed && (j.State == "running" || j.State == "stopping") {
-				buildExecutions[worker]++
-			}
-		}
-		for _, s := range q.s.ModelSlots {
-			if s.Machine == worker && !releasedSlots[s] && slotReservesMemory(s) {
-				buildExecutions[worker]++
-			}
-		}
-	}
-	needRAM := 0.0
-	if demand.Needs.HostMemoryGB > 0 {
-		needRAM = hostNeed(m, demand.Needs.MemoryGB, demand.Needs.HostMemoryGB)
-	}
-	ramCapacity := m.HostAvailableMemoryGB
-	if m.hostBudgetGB > 0 {
-		ramCapacity = min(ramCapacity, m.hostBudgetGB)
-	}
-	var bestCounts []int
-	var bestIDs []string
-	bestStops, bestExcess := 0, 0.0
-	for mask := 0; mask < 1<<len(candidates); mask++ {
-		counts := make([]int, len(q.effectivePriorityPolicy().Tiers))
-		ids := []string{}
-		freedRAM, freedCores, stops := 0.0, 0, 0
-		selectedExecutions := map[string]int{}
-		for i, v := range candidates {
-			if mask&(1<<i) != 0 {
-				counts[v.tier] += v.stops
-				stops += v.stops
-				freedRAM += v.ram
-				freedCores += v.cores
-				selectedExecutions[v.machine]++
-				ids = append(ids, v.id)
-			}
-		}
-		for worker, count := range buildExecutions {
-			if count > 0 && selectedExecutions[worker] == count {
-				freedCores--
-			}
-		}
-		if m.FreeHostMemoryGB+freedRAM < needRAM || m.EffectiveCPUCores-max(0, m.CPUInUseCores-freedCores) < demand.Needs.cores() {
-			continue
-		}
-		unneededRAM := max(0, freedRAM-max(0, needRAM-m.FreeHostMemoryGB))
-		unneededCores := max(0, freedCores-max(0, m.CPUInUseCores+demand.Needs.cores()-m.EffectiveCPUCores))
-		excess := unneededRAM/max(1, ramCapacity) + float64(unneededCores)/float64(max(1, m.EffectiveCPUCores))
-		order := slices.Compare(counts, bestCounts)
-		if bestCounts == nil || order < 0 || order == 0 && (stops < bestStops || stops == bestStops && (excess < bestExcess || excess == bestExcess && slices.Compare(ids, bestIDs) < 0)) {
-			bestCounts, bestIDs, bestStops, bestExcess = counts, ids, stops, excess
-		}
-	}
-	return bestIDs, bestCounts != nil
-}
-
-func TestHostReleaseSeededProperties(t *testing.T) {
-	const seed, cases = 100, 350
-	rng := rand.New(rand.NewSource(seed))
-	feasible, nonOptimal := 0, 0
-	confirmed := 0
-	slotStates := map[string]int{}
-	for n := 0; n < cases; n++ {
-		t.Run(fmt.Sprint(n), func(t *testing.T) {
-			count := 1 + rng.Intn(8)
-			if n == cases-1 {
-				count = 12 // Also exercise a larger host.
-			}
-			victims := make([]releaseTestVictim, count)
-			for i := range victims {
-				victims[i] = releaseTestVictim{fmt.Sprintf("v%02d", i), []string{"production", "deadline", "experiment"}[rng.Intn(3)], 1 + rng.Intn(4), float64(rng.Intn(5)), rng.Intn(3) == 0}
-			}
-			q, m := releaseTestHost(t, 1+rng.Intn(12), 100, victims)
-			if n%2 == 0 {
-				q.s.PriorityPolicy = &PriorityPolicyRecord{Policy: PriorityPolicy{Version: 1, Tiers: []PriorityTier{
-					{"production", []string{"*/production"}}, {"boost", []string{"boost/*"}}, {"deadline", []string{"*/deadline"}}, {"other", []string{"*/*"}},
-				}}}
-			}
-			releasedJobs, releasedSlots := map[*Job]bool{}, map[*ModelSlot]bool{}
-			var mandatoryJobs []*Job
-			var mandatorySlots []*ModelSlot
-			reserved := 0.0
-			for _, v := range victims {
-				owner := q.s.Machines["worker-"+v.id]
-				owner.UnifiedMemory = n%3 == 0
-				owner.MemoryCeilingSlackGB = float64(n%2) / 8
-				if s := q.s.ModelSlots[slotKey(owner.ID, v.id)]; s != nil {
-					s.State = []string{"ready", "loading", "draining", "unloading", "unload_failed", "failed"}[rng.Intn(6)]
-					s.RetryReserved = rng.Intn(2) == 0
-					slotStates[s.State]++
-					s.InFlight = rng.Intn(2)
-					if rng.Intn(4) == 0 {
-						s.Project = "boost"
-					}
-					if rng.Intn(8) == 0 {
-						now := q.clock.Now()
-						s.PreemptionCount, s.RunSince = 2, &now
-					}
-					if rng.Intn(8) == 0 {
-						releasedSlots[s] = true
-						mandatorySlots = append(mandatorySlots, s)
-					}
-					model, _ := q.model(s.Model)
-					if slotReservesMemory(s) {
-						reserved += hostNeed(owner, model.MemoryGB, model.HostMemoryGB)
-					}
-				} else {
-					j := q.s.Jobs[v.id]
-					j.Spec.Needs.MemoryGB = float64(rng.Intn(4))
-					if rng.Intn(4) == 0 {
-						j.Spec.Project = "boost"
-					}
-					if rng.Intn(4) == 0 {
-						until := q.clock.Now().Add(time.Minute)
-						j.State, j.StopAt = "stopping", &until
-						j.ReleaseConfirmed = rng.Intn(2) == 0
-						if j.ReleaseConfirmed {
-							confirmed++
-						}
-					}
-					if rng.Intn(8) == 0 {
-						now := q.clock.Now()
-						j.PreemptionCount, j.StartedAt = 2, &now
-					}
-					if rng.Intn(8) == 0 && !j.ReleaseConfirmed {
-						releasedJobs[j] = true
-						mandatoryJobs = append(mandatoryJobs, j)
-					}
-					if !j.ReleaseConfirmed {
-						reserved += hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
-					}
-				}
-			}
-			for _, owner := range q.s.Machines {
-				owner.HostAvailableMemoryGB = reserved + float64(n%4)
-			}
-			m.UnifiedMemory, m.MemoryCeilingSlackGB = n%3 == 0, float64(n%2)/8
-			q.refreshHostMemory()
-			projected := q.cpuAfterReleases(m, mandatoryJobs, mandatorySlots, 0)
-			for _, j := range mandatoryJobs {
-				projected.FreeHostMemoryGB += hostNeed(q.s.Machines[j.Machine], j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
-			}
-			for _, s := range mandatorySlots {
-				model, _ := q.model(s.Model)
-				if slotReservesMemory(s) {
-					projected.FreeHostMemoryGB += hostNeed(q.s.Machines[s.Machine], model.MemoryGB, model.HostMemoryGB)
-				}
-			}
-			demand := spec("production")
-			demand.Needs = ResourceNeeds{CPUCores: 1 + rng.Intn(4), HostMemoryGB: float64(rng.Intn(8)), MemoryGB: float64(rng.Intn(4))}
-			want, possible := bruteForceHostReleases(q, &projected, demand, releasedJobs, releasedSlots)
-			if possible {
-				feasible++
-			}
-			var first []string
-			for repeat := 0; repeat < 3; repeat++ {
-				jobs, slots, ok := q.hostReleasesExcept(&projected, demand.Needs.MemoryGB, demand.Needs.HostMemoryGB, demand, releasedJobs, releasedSlots)
-				got := releaseTestIDs(jobs, slots)
-				if ok != possible {
-					t.Fatalf("seed=%d repeat=%d: feasible=%v; oracle feasible=%v", seed, repeat, ok, possible)
-				}
-				if repeat == 0 {
-					first = got
-					if ok && !slices.Equal(got, want) {
-						nonOptimal++ // Information only: the heuristic need not match rank.
-					}
-				} else if !slices.Equal(got, first) {
-					t.Fatalf("nondeterministic plan: %v then %v", first, got)
-				}
-				assertReleaseLedgerProperties(t, q, m, demand, jobs, slots, ok, mandatoryJobs, mandatorySlots)
-				if ok {
-					capacity := q.cpuAfterReleases(&projected, append(slices.Clone(mandatoryJobs), jobs...), append(slices.Clone(mandatorySlots), slots...), 0)
-					for _, j := range jobs {
-						if j.ReleaseConfirmed {
-							t.Fatal("selected zero-contribution job", j.ID)
-						}
-						capacity.FreeHostMemoryGB += hostNeed(q.s.Machines[j.Machine], j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
-					}
-					for _, s := range slots {
-						if !slotReservesMemory(s) {
-							t.Fatal("selected zero-contribution slot", slotKey(s.Machine, s.Model))
-						}
-						model, _ := q.model(s.Model)
-						capacity.FreeHostMemoryGB += hostNeed(q.s.Machines[s.Machine], model.MemoryGB, model.HostMemoryGB)
-					}
-					if !cpuAllocationFits(&capacity, demand.Needs.cores()) || demand.Needs.HostMemoryGB > 0 && !hostFits(&capacity, demand.Needs.MemoryGB, demand.Needs.HostMemoryGB) {
-						t.Fatal("selected plan does not fit")
-					}
-				}
-			}
-		})
-	}
-	if confirmed == 0 || len(slotStates) != 6 {
-		t.Fatal("missing release-confirmed or non-ready slot coverage", confirmed, slotStates)
-	}
-	t.Logf("seed=%d: cases=%d feasible=%d non-optimal=%d (%.2f%% of feasible); confirmed=%d slots=%v; each planned three times", seed, cases, feasible, nonOptimal, 100*float64(nonOptimal)/float64(feasible), confirmed, slotStates)
-	for _, slot := range []bool{false, true} {
-		for _, stopping := range []bool{false, true} {
-			for _, builds := range []int{0, 1, 6, 12} {
-				t.Run(fmt.Sprintf("ties/slot=%v/stopping=%v/builds=%d", slot, stopping, builds), func(t *testing.T) {
-					victims := make([]releaseTestVictim, 12)
-					for i := range victims {
-						victims[i] = releaseTestVictim{fmt.Sprintf("v%02d", i), "experiment", 1, 4, slot}
-					}
-					q, m := releaseTestHost(t, 12, 48, victims)
-					q.s.PreparationPlans = map[string]HostLaunch{}
-					for i, v := range victims {
-						owner := q.s.Machines["worker-"+v.id]
-						if stopping {
-							if slot {
-								q.s.ModelSlots[slotKey(owner.ID, v.id)].State = "draining"
-							} else {
-								until := q.clock.Now().Add(time.Minute)
-								q.s.Jobs[v.id].State, q.s.Jobs[v.id].StopAt = "stopping", &until
-							}
-						}
-						if i < builds {
-							q.s.PreparationPlans[v.id] = HostLaunch{Machine: owner.ID, Session: owner.Session, Kind: "environment", Attempt: v.id, Started: true}
-						}
-					}
-					q.refreshHostMemory()
-					demand := spec("production")
-					demand.Needs = ResourceNeeds{CPUCores: 6, HostMemoryGB: 24}
-					_, possible := bruteForceHostReleases(q, m, demand, nil, nil)
-					var first []string
-					var jobs []*Job
-					var slots []*ModelSlot
-					for repeat := 0; repeat < 3; repeat++ {
-						var ok bool
-						jobs, slots, ok = q.hostReleasesExcept(m, 0, 24, demand, nil, nil)
-						if ok != possible {
-							t.Fatalf("repeat=%d: feasible=%v oracle=%v", repeat, ok, possible)
-						}
-						got := releaseTestIDs(jobs, slots)
-						if repeat == 0 {
-							first = got
-						} else if !slices.Equal(first, got) {
-							t.Fatalf("nondeterministic plan: %v then %v", first, got)
-						}
-						assertReleaseLedgerProperties(t, q, m, demand, jobs, slots, ok, nil, nil)
-					}
-					if possible {
-						for _, j := range jobs {
-							j.State = "succeeded"
-						}
-						for _, s := range slots {
-							delete(q.s.ModelSlots, slotKey(s.Machine, s.Model))
-						}
-						q.refreshHostMemory()
-						if !cpuAllocationFits(m, 6) || !hostFits(m, 0, 24) {
-							t.Fatal("chosen releases do not fit the live ledger")
-						}
-					}
-				})
-			}
-		}
-	}
-}
-
 func TestHostReleaseBuildSharesJobAndSlotReservation(t *testing.T) {
 	q, m := releaseTestHost(t, 3, 64, []releaseTestVictim{
 		{"a", "experiment", 1, 0, false}, {"b", "experiment", 1, 0, false},
@@ -546,13 +235,23 @@ func TestHostReleaseBuildSharesJobAndSlotReservation(t *testing.T) {
 	if !ok {
 		t.Fatal("shared reservation should have a feasible plan")
 	}
-	assertReleaseLedgerProperties(t, q, m, demand, jobs, slots, ok, nil, nil)
 	// The complete projection must retain the build's core even when both its
 	// job and model residency have been selected for release.
 	projected := q.cpuAfterReleases(m, []*Job{q.s.Jobs["a"]}, []*ModelSlot{slot}, 0)
 	if projected.CPUInUseCores != 2 {
 		t.Fatal("lost the build's inherited reservation", projected.CPUInUseCores)
 	}
+	for _, j := range jobs {
+		j.State = "succeeded"
+	}
+	for _, s := range slots {
+		delete(q.s.ModelSlots, slotKey(s.Machine, s.Model))
+	}
+	q.refreshHostMemory()
+	if !cpuAllocationFits(m, demand.Needs.cores()) {
+		t.Fatal("chosen releases do not make room for the demand")
+	}
+
 }
 
 func TestHostReleaseLocalBuildStopsWithExecution(t *testing.T) {

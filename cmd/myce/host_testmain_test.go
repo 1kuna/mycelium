@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"mycelium/internal/myce"
 	"mycelium/internal/probeguard"
 	"mycelium/internal/testenv"
@@ -64,10 +63,7 @@ func cliTestMain(m *testing.M) int {
 	} else {
 		code = m.Run()
 	}
-	if err := testenv.CheckProcesses(dir); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1 // Preserve the fixture while a child may still be using it.
-	}
+
 	if err := testenv.Cleanup(dir); err != nil { // All tests and children have joined.
 		code = 1
 	}

@@ -23,6 +23,12 @@ func fixture(t *testing.T) (*Queue, *fakeClock) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { q.Close() })
+	fixtureNAS(t, q)
+	return q, c
+}
+
+func fixtureNAS(t *testing.T, q *Queue) {
+	t.Helper()
 	// Scheduling tests model NAS availability without timing the shared disk's fsync.
 	await(t, func() bool {
 		_, err := q.nasProbe.run(q.root, func() (bool, error) { return true, nil })
@@ -33,7 +39,6 @@ func fixture(t *testing.T) (*Queue, *fakeClock) {
 		return err == nil && info.IsDir()
 	}
 	q.nasAvailable = q.checkpointProbe()
-	return q, c
 }
 func spec(priority string) Spec {
 	s := Spec{Name: "job", Project: "test", Priority: priority, Resumable: true}
@@ -117,6 +122,7 @@ func requireState(t *testing.T, q *Queue, id, state string) {
 }
 
 func TestSchedulingOrder(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name          string
 		first, second Spec
@@ -170,6 +176,7 @@ func TestSchedulingOrder(t *testing.T) {
 	}
 }
 func TestEligibility(t *testing.T) {
+	t.Parallel()
 	for _, name := range []string{"memory", "required GPU", "allowed machines", "environment not ready", "leaving machine", "gone machine"} {
 		t.Run(name, func(t *testing.T) {
 			j := &Job{Spec: spec("experiment"), State: "queued"}
@@ -204,6 +211,7 @@ func TestEligibility(t *testing.T) {
 	}
 }
 func TestPreferredPlatform(t *testing.T) {
+	t.Parallel()
 	q, _ := fixture(t)
 	cuda := machine("cuda", "cuda")
 	metal := machine("mac", "metal")
@@ -225,6 +233,7 @@ func TestPreferredPlatform(t *testing.T) {
 	}
 }
 func TestMakingRoom(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name, waiting   string
 		resumable, stop bool
@@ -310,6 +319,7 @@ func TestMakingRoom(t *testing.T) {
 	})
 }
 func TestGraceAndFrontOfLine(t *testing.T) {
+	t.Parallel()
 	q, c := fixture(t)
 	submit(t, q, spec("experiment"))
 	m := machine("one", "fake")
@@ -354,6 +364,7 @@ func TestGraceAndFrontOfLine(t *testing.T) {
 	}
 }
 func TestPlannedLeave(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name                 string
 		resumable, now, stop bool
@@ -391,6 +402,7 @@ func TestPlannedLeave(t *testing.T) {
 	}
 }
 func TestSuddenLossAndLateReturn(t *testing.T) {
+	t.Parallel()
 	for _, resumable := range []bool{true, false} {
 		t.Run("resumable="+stringBool(resumable), func(t *testing.T) {
 			q, c := fixture(t)
@@ -450,6 +462,7 @@ func stringBool(v bool) string {
 	return "false"
 }
 func TestThreeAttempts(t *testing.T) {
+	t.Parallel()
 	q, c := fixture(t)
 	s := spec("experiment")
 	s.Resumable = false
@@ -475,6 +488,7 @@ func TestThreeAttempts(t *testing.T) {
 	}
 }
 func TestWaitingReasonAndGiveUp(t *testing.T) {
+	t.Parallel()
 	for _, kind := range []string{"platform", "pinned", "environment", "memory"} {
 		t.Run(kind, func(t *testing.T) {
 			q, c := fixture(t)
@@ -508,6 +522,7 @@ func TestWaitingReasonAndGiveUp(t *testing.T) {
 	}
 }
 func TestCancelAndFailure(t *testing.T) {
+	t.Parallel()
 	q, _ := fixture(t)
 	a := submit(t, q, spec("experiment"))
 	if err := q.Cancel(a.ID); err != nil {
@@ -656,6 +671,7 @@ func TestPinnedMachineLeavesAndLateReturnBeforeReassignment(t *testing.T) {
 func observer() Machine { m := machine("observer", "metal"); m.FreeMemoryGB = 1; return m }
 
 func TestResumableThreeInfrastructureLosses(t *testing.T) {
+	t.Parallel()
 	q, c := fixture(t)
 	j := submit(t, q, spec("experiment"))
 	m := machine("one", "fake")
@@ -684,6 +700,7 @@ func TestRestartProductionPreemptionAfterReport(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fixtureNAS(t, q)
 	submit(t, q, spec("experiment"))
 	m := machine("one", "fake")
 	r := check(t, q, m, nil).Job
@@ -702,6 +719,7 @@ func TestRestartProductionPreemptionAfterReport(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer q.Close()
+	fixtureNAS(t, q)
 	check(t, q, m, r)
 	p := spec("production")
 	p.AllowedMachines = []string{m.ID}

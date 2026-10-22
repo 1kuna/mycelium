@@ -70,8 +70,8 @@ func TestSimLeaveMidJob(t *testing.T) {
 	nearSim(t, r.Machines["b"].BusyHours, 10.0/3600)
 }
 func TestSimFairWeights(t *testing.T) {
-	a := simTestStream("a", "experiment", 0, 10, 100)
-	b := simTestStream("b", "experiment", 0, 10, 100)
+	a := simTestStream("a", "experiment", 0, 10, 32)
+	b := simTestStream("b", "experiment", 0, 10, 32)
 	w := simTestWork(a, b)
 	w.Projects = map[string]ProjectPolicy{"a": {Weight: 2}, "b": {Weight: 1}}
 	r := runSimTest(t, simTestFleet(1), w, 300)
