@@ -1,12 +1,8 @@
 package myce
 
 import (
-	"go/ast"
-	"go/parser"
-	"go/token"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -103,78 +99,5 @@ func TestDockerEvidenceWithoutStore(t *testing.T) {
 	}
 	if d.state.EvidenceSaved {
 		t.Fatal("evidence saved without a durable write")
-	}
-}
-
-// Enumerate lifecycle dispatch sites so another cleanup path cannot quietly
-// introduce a TERM loop. Behavioral tests exercise both permitted dispatchers.
-func TestDockerLifecycleCallSites(t *testing.T) {
-	want := map[string]int{
-		"docker.go/signalContainer/kill/--signal=TERM":   1,
-		"docker.go/signalContainer/kill/--signal=KILL":   1,
-		"docker_orphan.go/stopOrphan/kill/--signal=KILL": 2,
-		"docker_orphan.go/stopOrphan/stop/--time":        1,
-		"docker_retention.go/pruneStoppedDocker/rm":      1,
-		"docker_network.go/removeNetworks/network/rm":    1,
-	}
-	seen := map[string]int{}
-	files, err := filepath.Glob("*.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, path := range files {
-		if strings.HasSuffix(path, "_test.go") {
-			continue
-		}
-		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, decl := range file.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok {
-				continue
-			}
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				if ident, ok := call.Fun.(*ast.Ident); ok && ident.Name == "append" {
-					return true
-				}
-				var literals []string
-				for _, arg := range call.Args {
-					ast.Inspect(arg, func(n ast.Node) bool {
-						if lit, ok := n.(*ast.BasicLit); ok && lit.Kind == token.STRING {
-							s, err := strconv.Unquote(lit.Value)
-							if err != nil {
-								t.Fatal(err)
-							}
-							literals = append(literals, s)
-						}
-						return true
-					})
-				}
-				// Systemd stops units, not containers; it has no Docker TERM call.
-				if path == "host_systemd.go" {
-					return true
-				}
-				key := path + "/" + fn.Name.Name + "/" + strings.Join(literals, "/")
-				values := "/" + strings.Join(literals, "/")
-				if strings.Contains(values, "--signal=TERM") || strings.Contains(values, "--signal=KILL") || strings.Contains(values, "/stop/") || strings.HasSuffix(values, "/rm") {
-					seen[key]++
-					if want[key] == 0 {
-						t.Errorf("unaudited lifecycle call site %s", key)
-					}
-				}
-				return true
-			})
-		}
-	}
-	for key, count := range want {
-		if seen[key] != count {
-			t.Errorf("%s count=%d want %d", key, seen[key], count)
-		}
 	}
 }

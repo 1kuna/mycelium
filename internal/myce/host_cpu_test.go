@@ -29,6 +29,7 @@ func cpuMachine(id, host, backend string, cores int, ram float64) Machine {
 }
 
 func TestCPUResourceInputAndCanonicalRoundtrip(t *testing.T) {
+	t.Parallel()
 	q, _ := fixture(t)
 	var s Spec
 	if err := yaml.Unmarshal([]byte("name: cpu\nproject: demo\nclass: experiment\nrun: {command: [echo, done]}\nneeds: {cpu_cores: 2, memory_gb: 3}\n"), &s); err != nil {
@@ -60,6 +61,7 @@ func TestCPUResourceInputAndCanonicalRoundtrip(t *testing.T) {
 }
 
 func TestCPUResourceMixedHostSharesOneLedger(t *testing.T) {
+	t.Parallel()
 	q, _ := fixture(t)
 	a, b := cpuMachine("gpu", "physical", "cuda", 8, 12), cpuMachine("cpu", "physical", "cpu", 8, 12)
 	a.CPUReserveCores, b.CPUReserveCores = 2, 2
@@ -124,6 +126,7 @@ func TestCPUResourceMixedHostSharesOneLedger(t *testing.T) {
 }
 
 func TestCPUAdmissionUnknownCapacityAndOwnerReserve(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name, os, reason       string
 		cores, reserve, budget int
@@ -156,6 +159,7 @@ func TestCPUAdmissionUnknownCapacityAndOwnerReserve(t *testing.T) {
 }
 
 func TestCPUAllowanceUsesHostPolicyAndStartedFence(t *testing.T) {
+	t.Parallel()
 	q, _ := fixture(t)
 	a, b := cpuMachine("a", "shared", "cpu", 8, 16), cpuMachine("b", "shared", "cpu", 8, 16)
 	a.CPUBudgetCores, b.CPUBudgetCores = 6, 6
@@ -195,6 +199,7 @@ func TestCPUAllowanceUsesHostPolicyAndStartedFence(t *testing.T) {
 }
 
 func TestCPUFairUsageChargesCoreHoursAndSeparatesGPU(t *testing.T) {
+	t.Parallel()
 	q, c := fixture(t)
 	q.lossTimeouts = [3]time.Duration{2 * time.Hour, 2 * time.Hour, 2 * time.Hour}
 	a, b := cpuMachine("a", "host-a", "cpu", 8, 16), cpuMachine("b", "host-b", "cpu", 8, 16)
@@ -228,6 +233,7 @@ func TestCPUFairUsageChargesCoreHoursAndSeparatesGPU(t *testing.T) {
 }
 
 func TestCPUDevGPUlessAndMixedWorkerRunRealCommand(t *testing.T) {
+	t.Parallel()
 	for _, backend := range []string{"cpu", "fake"} {
 		t.Run(backend, func(t *testing.T) {
 			dir := t.TempDir()
@@ -264,6 +270,7 @@ func TestCPUDevGPUlessAndMixedWorkerRunRealCommand(t *testing.T) {
 }
 
 func TestCPUQualificationNativeTarget(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
 		t.Skip("R1 native CPU targets")
 	}
@@ -302,6 +309,7 @@ func TestCPUQualificationNativeTarget(t *testing.T) {
 }
 
 func TestCPUCapacityUnknownAlsoBlocksGPUAdmission(t *testing.T) {
+	t.Parallel()
 	q, _ := fixture(t)
 	m := cpuMachine("gpu", "host", "cuda", 0, 16)
 	gpu := spec("experiment")
@@ -316,6 +324,7 @@ func TestCPUCapacityUnknownAlsoBlocksGPUAdmission(t *testing.T) {
 }
 
 func TestCPUReclaimProductionAtCoreAllowance(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name, priority string
 		cores          int
@@ -383,6 +392,7 @@ func TestCPUReclaimProductionAtCoreAllowance(t *testing.T) {
 }
 
 func TestCPUSubmitAllowedHostCapacity(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name         string
 		busy, reject bool
@@ -430,6 +440,7 @@ func TestCPUSubmitAllowedHostCapacity(t *testing.T) {
 }
 
 func TestCPUPlacementDoesNotReserveGPUMemory(t *testing.T) {
+	t.Parallel()
 	q, _ := fixture(t)
 	m := cpuMachine("gpu", "host", "cuda", 8, 16)
 	m.FreeMemoryGB = 0 // Healthy mixed host, with no accelerator memory free.
@@ -441,6 +452,7 @@ func TestCPUPlacementDoesNotReserveGPUMemory(t *testing.T) {
 }
 
 func TestCPULearnedProgramUsageRemainsHostRAM(t *testing.T) {
+	t.Parallel()
 	q, _ := fixture(t)
 	e := fakeExtension(t)
 	e.Platforms = []string{"cpu"}
@@ -454,6 +466,7 @@ func TestCPULearnedProgramUsageRemainsHostRAM(t *testing.T) {
 }
 
 func TestCPUProfileDoesNotProbeAnAccelerator(t *testing.T) {
+	t.Parallel()
 	for _, goos := range []string{"linux", "darwin"} {
 		t.Run(goos, func(t *testing.T) {
 			probe := ProfileProbe{Machine: MachineProbe{OS: goos, Arch: "amd64", Command: func(_ context.Context, name string, _ ...string) ([]byte, error) {
@@ -481,6 +494,7 @@ func TestCPUProfileDoesNotProbeAnAccelerator(t *testing.T) {
 }
 
 func TestCPUFingerprintIgnoresVolatileReadings(t *testing.T) {
+	t.Parallel()
 	a := []byte("processor : 0\nmodel name : example\ncpu MHz : 1000\nflags : one two\nprocessor : 1\nmodel name : example\nflags : one two\n")
 	b := []byte("flags : one two\nmodel name : example\ncpu MHz : 2000\nprocessor : 3\n")
 	if cpuIdentity(a) != cpuIdentity(b) || cpuIdentity(a) == "" {
@@ -492,6 +506,7 @@ func TestCPUFingerprintIgnoresVolatileReadings(t *testing.T) {
 }
 
 func TestCPUStatusNamesCoresInsteadOfAcceleratorMemory(t *testing.T) {
+	t.Parallel()
 	m := cpuMachine("cpu", "host", "cpu", 8, 16)
 	m.CPUReserveCores = 1
 	m.EffectiveCPUCores, m.FreeCPUCores = 7, 7

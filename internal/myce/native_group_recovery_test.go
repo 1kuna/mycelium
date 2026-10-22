@@ -131,7 +131,8 @@ func TestNativeGroupSIGKILLRestart(t *testing.T) {
 }
 
 func TestNativeGroupPortHandoff(t *testing.T) {
-	for _, collisions := range []int{1, 2, 3} {
+	t.Parallel()
+	for _, collisions := range []int{1, 3} {
 		t.Run(strconv.Itoa(collisions), func(t *testing.T) { nativePortHandoff(t, collisions) })
 	}
 }

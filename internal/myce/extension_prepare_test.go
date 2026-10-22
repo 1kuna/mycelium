@@ -234,6 +234,7 @@ func TestExtensionPrepareFingerprintChangesOffer(t *testing.T) {
 }
 
 func TestEnvironmentActiveSidecarRetained(t *testing.T) {
+	t.Parallel()
 	s := nativeSpec(t)
 	recipe, err := snapshotEnvironment(EnvironmentRecipe{Build: []string{"sh", "-c", "printf prepared > '{root}/bin/prepared'"}}, "fake")
 	if err != nil {

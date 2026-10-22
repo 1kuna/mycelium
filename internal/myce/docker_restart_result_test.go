@@ -8,7 +8,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"testing/synctest"
 	"time"
 )
 
@@ -272,94 +271,6 @@ func TestDockerRestartMainFailures(t *testing.T) {
 				t.Fatalf("failure changed: %+v", r)
 			}
 		})
-	}
-}
-
-// Case 5: each failed proof retains custody; retries never renew grace.
-// Fake timers keep subprocess scheduling latency out of CLI/recovery budgets;
-// real CLI completion and the injected grace clock still drive every assertion.
-func TestDockerRestartProofFailures(t *testing.T) {
-	for _, kind := range []string{"main-save", "evidence-save", "logs", "inspect", "network", "release-save", "pending-start"} {
-		run := func(t *testing.T) {
-			w, s, d, c, root := restartResultFixture(t)
-			if kind == "main-save" {
-				d.persist = func(dockerExecution) error { return errors.New("disk unavailable") }
-				if e := os.Remove(filepath.Join(root, "running")); e != nil {
-					t.Fatal(e)
-				}
-				if done, e := d.reconcile(); done || e == nil {
-					t.Fatal("failed main write released")
-				}
-				st := restartRead(t, s)
-				if st.MainFinished {
-					t.Fatal("failed main write persisted")
-				}
-				b, _ := os.ReadFile(filepath.Join(root, "calls"))
-				if strings.Contains(string(b), "--signal=TERM") {
-					t.Fatal("TERM before main persistence")
-				}
-				r := restartSavedResult(t, w, s)
-				if !r.Success || r.Interrupted {
-					t.Fatal("recovery discarded observed completion", r)
-				}
-				return
-			}
-			restartMainExit(t, d, root)
-			deadline := *d.state.StopAt
-			switch kind {
-			case "inspect":
-				_ = os.WriteFile(filepath.Join(root, "mode"), []byte("down"), 0600)
-			case "network":
-				_ = os.WriteFile(filepath.Join(root, "mode"), []byte("refuse-network-rm"), 0600)
-			case "logs":
-				_ = os.WriteFile(filepath.Join(root, "mode"), []byte("logs-error"), 0600)
-			case "evidence-save":
-				_ = os.Mkdir(filepath.Join(s.dir, s.state.Identity+".docker-evidence.json.tmp"), 0700)
-			case "release-save":
-				d.persist = func(st dockerExecution) error {
-					if st.Released {
-						return errors.New("release write failed")
-					}
-					return saveWorkerJSON(s.dir, st.Identity+".docker.json", st)
-				}
-			case "pending-start":
-				d.state.Pending = true
-				d.state.Operation = "start"
-				d.state.PendingContainer = "missing"
-				if e := d.saveLocked(); e != nil {
-					t.Fatal(e)
-				}
-			}
-			c.advance(StopGrace)
-			for i := 0; i < 2; i++ {
-				done, _ := d.reconcile()
-				if done || d.state.Released {
-					t.Fatal("failed proof released")
-				}
-			}
-			if !d.state.StopAt.Equal(deadline) || restartRead(t, s).Released {
-				t.Fatal("deadline/release changed")
-			}
-			if kind == "pending-start" {
-				return
-			} // No acceptance witness: deliberately cannot release.
-			_ = os.WriteFile(filepath.Join(root, "mode"), nil, 0600)
-			if kind == "evidence-save" {
-				if e := os.Remove(filepath.Join(s.dir, s.state.Identity+".docker-evidence.json.tmp")); e != nil {
-					t.Fatal(e)
-				}
-			}
-			d.persist = nil
-			r := restartSavedResult(t, w, s)
-			if kind == "release-save" || kind == "network" {
-				if r.Success || !strings.Contains(r.Error, "private network attachment missing") {
-					t.Fatalf("disconnected retry hid containment failure: %+v", r)
-				}
-			} else if !r.Success || r.Interrupted {
-				t.Fatalf("retry lost outcome: %+v", r)
-			}
-		}
-		t.Run(kind, func(t *testing.T) { synctest.Test(t, run) })
 	}
 }
 

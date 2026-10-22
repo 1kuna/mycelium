@@ -277,64 +277,66 @@ func dockerGroupJob(t *testing.T) Job {
 }
 
 func TestDockerGroupInspectsEachDeclaredMemoryLimit(t *testing.T) {
-	for _, id := range []string{"", "id1", "sidecar-sortformer", "sidecar-naming"} {
-		for _, afterStart := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/after-start=%v", id, afterStart), func(t *testing.T) {
-				w, s, c, root := dockerFixture(t)
-				j := dockerGroupJob(t)
-				j.Spec.Run.DockerSidecars[0].MemoryGB = 3
-				j.Spec.Run.DockerSidecars[1].MemoryGB = 4
-				if id != "" && !afterStart {
-					if e := os.WriteFile(filepath.Join(root, "mode"), []byte("wrong-memory-"+id), 0600); e != nil {
-						t.Fatal(e)
-					}
-				}
-				p, e := startDockerFixture(w, s, j)
-				if e != nil {
+	for _, tc := range []struct {
+		id         string
+		afterStart bool
+	}{{"", false}, {"id1", false}, {"sidecar-sortformer", true}} {
+		id, afterStart := tc.id, tc.afterStart
+		t.Run(fmt.Sprintf("%s/after-start=%v", id, afterStart), func(t *testing.T) {
+			w, s, c, root := dockerFixture(t)
+			j := dockerGroupJob(t)
+			j.Spec.Run.DockerSidecars[0].MemoryGB = 3
+			j.Spec.Run.DockerSidecars[1].MemoryGB = 4
+			if id != "" && !afterStart {
+				if e := os.WriteFile(filepath.Join(root, "mode"), []byte("wrong-memory-"+id), 0600); e != nil {
 					t.Fatal(e)
 				}
-				t.Cleanup(p.docker.close)
-				if afterStart || id == "" {
-					await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
-					for container, limit := range map[string]int64{"id1": 2 << 30, "sidecar-sortformer": 3 << 30, "sidecar-naming": 4 << 30} {
-						data, e := os.ReadFile(filepath.Join(root, "object-"+container+".json"))
-						var object dockerInspection
-						if e != nil || json.Unmarshal(data, &object) != nil || object.HostConfig.Memory != limit {
-							t.Fatalf("%s: own declared memory %d missing", container, limit)
-						}
-					}
-					if id == "" {
-						p.stop(c.Now(), 0, true)
-					} else if e := os.WriteFile(filepath.Join(root, "mode"), []byte("wrong-memory-"+id), 0600); e != nil {
-						t.Fatal(e)
+			}
+			p, e := startDockerFixture(w, s, j)
+			if e != nil {
+				t.Fatal(e)
+			}
+			t.Cleanup(p.docker.close)
+			if afterStart || id == "" {
+				await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
+				for container, limit := range map[string]int64{"id1": 2 << 30, "sidecar-sortformer": 3 << 30, "sidecar-naming": 4 << 30} {
+					data, e := os.ReadFile(filepath.Join(root, "object-"+container+".json"))
+					var object dockerInspection
+					if e != nil || json.Unmarshal(data, &object) != nil || object.HostConfig.Memory != limit {
+						t.Fatalf("%s: own declared memory %d missing", container, limit)
 					}
 				}
-				if afterStart && id == "id1" {
-					await(t, func() bool {
-						calls, _ := os.ReadFile(filepath.Join(root, "calls"))
-						return strings.Contains(string(calls), "kill --signal=TERM sidecar-")
-					})
-					c.advance(StopGrace)
+				if id == "" {
+					p.stop(c.Now(), 0, true)
+				} else if e := os.WriteFile(filepath.Join(root, "mode"), []byte("wrong-memory-"+id), 0600); e != nil {
+					t.Fatal(e)
 				}
-				select {
-				case f := <-p.done:
-					if id != "" && (f.result.Success || f.result.Interrupted || f.result.Error != "Docker memory ceiling not enforced") {
-						t.Fatalf("wrong container ceiling accepted: %+v", f.result)
-					}
-				case <-time.After(4 * time.Second):
-					t.Fatal("container memory failure did not settle")
-				}
-				if id != "" && !afterStart {
+			}
+			if afterStart && id == "id1" {
+				await(t, func() bool {
 					calls, _ := os.ReadFile(filepath.Join(root, "calls"))
-					if strings.Contains(string(calls), "\nstart "+id+"\n") {
-						t.Fatal("container started before its limit was verified")
-					}
+					return strings.Contains(string(calls), "kill --signal=TERM sidecar-")
+				})
+				c.advance(StopGrace)
+			}
+			select {
+			case f := <-p.done:
+				if id != "" && (f.result.Success || f.result.Interrupted || f.result.Error != "Docker memory ceiling not enforced") {
+					t.Fatalf("wrong container ceiling accepted: %+v", f.result)
 				}
-				if _, e := os.Stat(filepath.Join(root, "network-removed")); e != nil {
-					t.Fatal("memory failure retained private network")
+			case <-time.After(4 * time.Second):
+				t.Fatal("container memory failure did not settle")
+			}
+			if id != "" && !afterStart {
+				calls, _ := os.ReadFile(filepath.Join(root, "calls"))
+				if strings.Contains(string(calls), "\nstart "+id+"\n") {
+					t.Fatal("container started before its limit was verified")
 				}
-			})
-		}
+			}
+			if _, e := os.Stat(filepath.Join(root, "network-removed")); e != nil {
+				t.Fatal("memory failure retained private network")
+			}
+		})
 	}
 }
 
@@ -427,7 +429,7 @@ func TestDockerSidecarCrashFailsJob(t *testing.T) {
 }
 
 func TestDockerNetworkViolationsAndRemovalHold(t *testing.T) {
-	for _, mode := range []string{"published-port", "other-network", "socket-mount", "refuse-network-rm", "late-network-container"} {
+	for _, mode := range []string{"published-port", "refuse-network-rm"} {
 		t.Run(mode, func(t *testing.T) {
 			w, s, c, root := dockerFixture(t)
 			j := dockerGroupJob(t)

@@ -33,7 +33,8 @@ ignored `.reports/` folder (for example redirect stdout/stderr there).
 Before a full run, use `pgrep -fl 'go test'` and wait if two full race suites are
 already active. Do not terminate another worker's tests. The gate allows two
 Go packages at once (`-p 2`), rather than unbounded compiler parallelism. The
-independent fake-clock tests use at most four parallel tests per package.
+suite runs at most four independent tests concurrently within each package.
+Tests that mutate process environment remain serial.
 `GORACE=atexit_sleep_ms=0` omits the race runtime's artificial one-second delay
 on each helper-process exit; product code and assertions remain race-instrumented
 and tests still join their workers. The external fake Docker CLI is built once

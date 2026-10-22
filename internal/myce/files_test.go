@@ -17,6 +17,7 @@ import (
 )
 
 func TestFilesResumableAndHashRefusal(t *testing.T) {
+	t.Parallel()
 	q, _ := fixture(t)
 	if err := q.ConfigureFileStore(filepath.Join(t.TempDir(), "store"), 1<<20, true); err != nil {
 		t.Fatal(err)
@@ -108,6 +109,7 @@ func TestFilesResumableAndHashRefusal(t *testing.T) {
 }
 
 func TestFileCacheBoundedEvictionAndPrivateCopies(t *testing.T) {
+	t.Parallel()
 	q, _ := fixture(t)
 	if err := q.ConfigureFileStore(t.TempDir(), 128, true); err != nil {
 		t.Fatal(err)
@@ -161,6 +163,7 @@ func TestFileCacheBoundedEvictionAndPrivateCopies(t *testing.T) {
 }
 
 func TestStoredCheckpointDurabilityStalenessAndOutputAcceptance(t *testing.T) {
+	t.Parallel()
 	q, _ := fixture(t)
 	if err := q.ConfigureFileStore(t.TempDir(), 1<<20, true); err != nil {
 		t.Fatal(err)
@@ -217,6 +220,7 @@ func TestStoredCheckpointDurabilityStalenessAndOutputAcceptance(t *testing.T) {
 }
 
 func TestFilesDifferentHyphaResume(t *testing.T) {
+	t.Parallel()
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 required for atomic checkpoint example")
 	}
@@ -337,6 +341,7 @@ if not stopping: pathlib.Path('output').write_text(str(n))
 }
 
 func TestFileStoreCorruptUploadOffsetCapacityAndRestart(t *testing.T) {
+	t.Parallel()
 	db := filepath.Join(t.TempDir(), "queue.db")
 	checkpoint := t.TempDir()
 	store := t.TempDir()
@@ -408,6 +413,7 @@ func TestFileStoreCorruptUploadOffsetCapacityAndRestart(t *testing.T) {
 }
 
 func TestStoredModelCacheSingleAndBundle(t *testing.T) {
+	t.Parallel()
 	q, _ := fixture(t)
 	if err := q.ConfigureFileStore(t.TempDir(), 1<<20, true); err != nil {
 		t.Fatal(err)
@@ -453,6 +459,7 @@ func TestStoredModelCacheSingleAndBundle(t *testing.T) {
 }
 
 func TestStoredExtensionInputAndOutput(t *testing.T) {
+	t.Parallel()
 	q, _ := fixture(t)
 	if err := q.ConfigureFileStore(t.TempDir(), 1<<20, true); err != nil {
 		t.Fatal(err)

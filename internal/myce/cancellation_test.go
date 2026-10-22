@@ -25,6 +25,7 @@ func cancelAck(t *testing.T, q *Queue, id string) Cancellation {
 }
 
 func TestCancellationStates(t *testing.T) {
+	t.Parallel()
 	for _, state := range []string{"queued", "preparing", "running", "stopping", "succeeded", "failed", "cancelled"} {
 		t.Run(state, func(t *testing.T) {
 			q, c := fixture(t)
@@ -109,6 +110,7 @@ func TestCancellationStates(t *testing.T) {
 }
 
 func TestCancellationKeyRecords(t *testing.T) {
+	t.Parallel()
 	q, c := fixture(t)
 	s := spec("experiment")
 	s.SubmissionKey = "never-seen"
@@ -158,6 +160,7 @@ func TestCancellationKeyRecords(t *testing.T) {
 }
 
 func TestCancellationSubmitOrders(t *testing.T) {
+	t.Parallel()
 	for _, cancelFirst := range []bool{true, false} {
 		q, _ := fixture(t)
 		s := spec("experiment")
@@ -216,6 +219,7 @@ func TestCancellationSubmitOrders(t *testing.T) {
 }
 
 func TestCancellationHTTP(t *testing.T) {
+	t.Parallel()
 	q, _ := fixture(t)
 	server := httptest.NewServer(API{Queue: q, Token: "test-only"}.Handler())
 	defer server.Close()
@@ -286,6 +290,7 @@ func assertNoCancellationAttempt(t *testing.T, q *Queue, j *Job) {
 }
 
 func TestCancellationNoFutureExecution(t *testing.T) {
+	t.Parallel()
 	for _, path := range []string{"loss", "leave", "rejoin", "queue-restart", "engine-restart", "stop-grace", "operator-stop", "polite-stop", "oom", "extension-unavailable", "terminal-refund"} {
 		t.Run(path, func(t *testing.T) {
 			q, c := fixture(t)
@@ -421,6 +426,7 @@ func TestCancellationNoFutureExecution(t *testing.T) {
 }
 
 func TestCancellationReleaseCustody(t *testing.T) {
+	t.Parallel()
 	q, c := fixture(t)
 	s := spec("experiment")
 	s.SubmissionKey = "copy-key"
@@ -482,6 +488,7 @@ func TestCancellationReleaseCustody(t *testing.T) {
 }
 
 func TestCancellationDurabilityAndRollback(t *testing.T) {
+	t.Parallel()
 	q, c := fixture(t)
 	s := spec("experiment")
 	s.SubmissionKey = "write-failure"
@@ -531,6 +538,7 @@ func TestCancellationDurabilityAndRollback(t *testing.T) {
 }
 
 func TestCancellationStartRace(t *testing.T) {
+	t.Parallel()
 	for _, cancelFirst := range []bool{true, false} {
 		q, _ := fixture(t)
 		j := submit(t, q, spec("experiment"))
@@ -553,6 +561,7 @@ func TestCancellationStartRace(t *testing.T) {
 }
 
 func TestCancellationQueuedLostCopyRelease(t *testing.T) {
+	t.Parallel()
 	q, c := fixture(t)
 	j := submit(t, q, spec("experiment"))
 	m := machine("one", "fake")
@@ -587,6 +596,7 @@ func TestCancellationQueuedLostCopyRelease(t *testing.T) {
 }
 
 func TestCancellationMaintenanceKeepsExactCustody(t *testing.T) {
+	t.Parallel()
 	q, _ := fixture(t)
 	j := submit(t, q, spec("experiment"))
 	m := machine("one", "fake")

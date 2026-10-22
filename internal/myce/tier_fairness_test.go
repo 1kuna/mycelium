@@ -9,6 +9,7 @@ import (
 )
 
 func TestTierFairnessInterleavesClasses(t *testing.T) {
+	t.Parallel()
 	q, c := fixture(t)
 	if _, err := q.SetPriorityPolicy(0, examplePriorityPolicy()); err != nil {
 		t.Fatal(err)
@@ -48,6 +49,7 @@ func TestTierFairnessInterleavesClasses(t *testing.T) {
 }
 
 func TestTierFairnessWeightsAcrossClasses(t *testing.T) {
+	t.Parallel()
 	q, c := fixture(t)
 	policy := examplePriorityPolicy()
 	policy.Projects = map[string]ProjectPolicy{"atlas": {Weight: 3}, "verso": {Weight: 1}}
@@ -77,6 +79,7 @@ func TestTierFairnessWeightsAcrossClasses(t *testing.T) {
 }
 
 func TestTierFairnessSharesSimultaneousCapacity(t *testing.T) {
+	t.Parallel()
 	q, _ := fixture(t)
 	if _, err := q.SetPriorityPolicy(0, examplePriorityPolicy()); err != nil {
 		t.Fatal(err)
@@ -106,6 +109,7 @@ func TestTierFairnessSharesSimultaneousCapacity(t *testing.T) {
 }
 
 func TestTierFairnessFitBackfillAndHistoryIsolation(t *testing.T) {
+	t.Parallel()
 	q, c := fixture(t)
 	if _, err := q.SetPriorityPolicy(0, examplePriorityPolicy()); err != nil {
 		t.Fatal(err)
@@ -142,6 +146,7 @@ func TestTierFairnessFitBackfillAndHistoryIsolation(t *testing.T) {
 }
 
 func TestTierFairnessWarmthCannotStarveColdProject(t *testing.T) {
+	t.Parallel()
 	q, c := fixture(t)
 	p := PriorityPolicy{Version: 1, Tiers: []PriorityTier{{Name: "shared", Selectors: []string{"*/*"}}}}
 	if _, err := q.SetPriorityPolicy(0, p); err != nil {
@@ -189,6 +194,7 @@ func reopenTierQueue(t *testing.T, q *Queue, c Clock) *Queue {
 }
 
 func TestTierFairnessDecayRestartAndStableNames(t *testing.T) {
+	t.Parallel()
 	q, c := fixture(t)
 	if _, err := q.SetPriorityPolicy(0, examplePriorityPolicy()); err != nil {
 		t.Fatal(err)
@@ -235,6 +241,7 @@ func TestTierFairnessDecayRestartAndStableNames(t *testing.T) {
 }
 
 func TestTierFairnessLegacyUsageMigration(t *testing.T) {
+	t.Parallel()
 	q, c := fixture(t)
 	// Emulate the old persisted record, whose project totals had no tier metadata.
 	if err := q.update(func() error {
@@ -259,6 +266,7 @@ func TestTierFairnessLegacyUsageMigration(t *testing.T) {
 }
 
 func TestTierFairnessOwnerCapCASAndCalls(t *testing.T) {
+	t.Parallel()
 	q, c, m := modelFixture(t)
 	policy := examplePriorityPolicy()
 	policy.Projects = map[string]ProjectPolicy{"atlas": {MaxConcurrent: 1}}
@@ -303,6 +311,7 @@ func TestTierFairnessOwnerCapCASAndCalls(t *testing.T) {
 }
 
 func TestTierFairnessModelPreparationChargedOnce(t *testing.T) {
+	t.Parallel()
 	q, c, m := modelFixture(t)
 	q.s.ModelSlots[slotKey(m.ID, "test")] = &ModelSlot{Model: "test", Project: "atlas", Priority: "experiment", Machine: m.ID, Session: m.Session, State: "loading"}
 	c.Advance(time.Second)
@@ -326,6 +335,7 @@ func TestTierFairnessModelPreparationChargedOnce(t *testing.T) {
 }
 
 func TestTierFairnessSimulatorUsesPolicy(t *testing.T) {
+	t.Parallel()
 	a := simTestStream("atlas", "production", 0, 1, 32)
 	v := simTestStream("verso", "experiment", 0, 1, 32)
 	w := simTestWork(a, v)
@@ -349,6 +359,7 @@ func TestTierFairnessSimulatorUsesPolicy(t *testing.T) {
 }
 
 func TestTierFairnessReclaimsIdleWarmthBeforeServingOverspentProject(t *testing.T) {
+	t.Parallel()
 	q, c, m := modelFixture(t)
 	if _, err := q.SetPriorityPolicy(0, examplePriorityPolicy()); err != nil {
 		t.Fatal(err)
@@ -373,6 +384,7 @@ func TestTierFairnessReclaimsIdleWarmthBeforeServingOverspentProject(t *testing.
 }
 
 func TestTierFairnessIdleReclamationProtectsActiveAndHigherTiers(t *testing.T) {
+	t.Parallel()
 	q, _, m := modelFixture(t)
 	demand := projectSpec("atlas")
 	for _, tc := range []struct {
@@ -398,6 +410,7 @@ func TestTierFairnessIdleReclamationProtectsActiveAndHigherTiers(t *testing.T) {
 }
 
 func TestTierFairnessCappedDemandDoesNotStopBackfill(t *testing.T) {
+	t.Parallel()
 	q, _ := fixture(t)
 	p := examplePriorityPolicy()
 	p.Tiers[0].Selectors = append(p.Tiers[0].Selectors, "atlas/urgent")

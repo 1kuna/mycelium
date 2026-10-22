@@ -140,6 +140,7 @@ func TestEngineRecoveryCrashLoopClockAndFreshAttempt(t *testing.T) {
 }
 
 func TestEngineRecoveryRealProcessBothLogs(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		policy string
 		pinned bool
@@ -273,6 +274,7 @@ func TestEngineRecoveryRealProcessBothLogs(t *testing.T) {
 }
 
 func TestEngineRecoveryHealthThresholdAndTimeout(t *testing.T) {
+	t.Parallel()
 	for _, code := range []int{503, 302, 0} {
 		t.Run(fmt.Sprint(code), func(t *testing.T) {
 			var probes atomic.Int32

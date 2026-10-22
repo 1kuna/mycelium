@@ -29,6 +29,7 @@ func holdFleet(t *testing.T, enabled bool) (*Queue, *fakeClock, Machine, Machine
 	return q, c, a, b, s
 }
 func TestProductionHoldDisplacesBothCardsAndReturnsImmediately(t *testing.T) {
+	t.Parallel()
 	q, c, a, b, s := holdFleet(t, true)
 	e := spec("experiment")
 	x := submit(t, q, e)
@@ -100,6 +101,7 @@ func TestProductionHoldDisplacesBothCardsAndReturnsImmediately(t *testing.T) {
 }
 
 func TestProductionHoldDefaultOffAndOtherHost(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"off", "spark", "impossible"} {
 		t.Run(mode, func(t *testing.T) {
 			q, _, a, b, s := holdFleet(t, mode != "off")
@@ -126,6 +128,7 @@ func TestProductionHoldDefaultOffAndOtherHost(t *testing.T) {
 	}
 }
 func TestProductionHoldSecondArrival(t *testing.T) {
+	t.Parallel()
 	q, _, a, b, _ := holdFleet(t, true)
 	p := spec("production")
 	p.AllowedMachines = []string{a.ID}
@@ -149,6 +152,7 @@ func TestProductionHoldSecondArrival(t *testing.T) {
 	}
 }
 func TestProductionHoldExpiryAndLostWorkerRetainRelease(t *testing.T) {
+	t.Parallel()
 	q, c, a, b, s := holdFleet(t, true)
 	x := submit(t, q, spec("experiment"))
 	x = check(t, q, a, nil).Job
@@ -182,6 +186,7 @@ func TestProductionHoldExpiryAndLostWorkerRetainRelease(t *testing.T) {
 	}
 }
 func TestProductionHoldWorkerLoss(t *testing.T) {
+	t.Parallel()
 	q, c, a, b, s := holdFleet(t, true)
 	x := submit(t, q, spec("experiment"))
 	x = check(t, q, a, nil).Job
@@ -214,6 +219,7 @@ func TestProductionHoldWorkerLoss(t *testing.T) {
 // Reopening restores real NAS probes. Fake their I/O budget too, so disk/CPU
 // latency cannot masquerade as a lost release while scheduling uses c.
 func TestProductionHoldRestartDuringReclaimAndReturn(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, testProductionHoldRestartDuringReclaimAndReturn)
 }
 
@@ -275,6 +281,7 @@ func (q *Queue) dbPathForTest(t *testing.T) string {
 }
 
 func TestProductionHoldModelPathsAndResidency(t *testing.T) {
+	t.Parallel()
 	q, c, a := modelFixture(t, "b70")
 	check(t, q, a, nil)
 	b := a
@@ -330,6 +337,7 @@ func TestProductionHoldModelPathsAndResidency(t *testing.T) {
 
 }
 func TestProductionHoldPinProtected(t *testing.T) {
+	t.Parallel()
 	q, _, a := modelFixture(t, "b70")
 	check(t, q, a, nil)
 	b := machine("two", "fake")
@@ -352,6 +360,7 @@ func TestProductionHoldPinProtected(t *testing.T) {
 	}
 }
 func TestProjectMachineAllowListForCalls(t *testing.T) {
+	t.Parallel()
 	q, _, a := modelFixture(t)
 	b := a
 	b.ID = "spark"
@@ -371,6 +380,7 @@ func TestProjectMachineAllowListForCalls(t *testing.T) {
 }
 
 func TestProductionHoldCancelsPreparationAndWaitsForAcknowledgement(t *testing.T) {
+	t.Parallel()
 	q, _, a, b, _ := holdFleet(t, true)
 	b.EnvironmentBuilder = true
 	b.EnvironmentReports = []EnvironmentReport{{Key: "background", State: "building"}}
@@ -395,6 +405,7 @@ func TestProductionHoldCancelsPreparationAndWaitsForAcknowledgement(t *testing.T
 }
 
 func TestProductionHoldFailedCleanupIsNotRelease(t *testing.T) {
+	t.Parallel()
 	q, _, a, b, _ := holdFleet(t, true)
 	x := submit(t, q, spec("experiment"))
 	x = check(t, q, b, nil).Job
@@ -416,6 +427,7 @@ func TestProductionHoldFailedCleanupIsNotRelease(t *testing.T) {
 }
 
 func TestProductionHoldReportsPinnedConflict(t *testing.T) {
+	t.Parallel()
 	q, _, a := modelFixture(t, "b70")
 	check(t, q, a, nil)
 	if e := q.Pin(ModelPin{Project: "test", Model: "test", Machine: a.ID}); e != nil {
@@ -432,6 +444,7 @@ func TestProductionHoldReportsPinnedConflict(t *testing.T) {
 }
 
 func TestProductionHoldRestartReconcilesModelInference(t *testing.T) {
+	t.Parallel()
 	q, c, a := modelFixture(t, "b70")
 	check(t, q, a, nil)
 	if e := q.ConfigureHosts(map[string]HostPolicy{"b70": {ProductionHold: true}}); e != nil {
@@ -473,6 +486,7 @@ func TestProductionHoldRestartReconcilesModelInference(t *testing.T) {
 }
 
 func TestProductionHoldWaitsForExperimentCallOnPinnedModel(t *testing.T) {
+	t.Parallel()
 	q, c, a := modelFixture(t, "b70")
 	check(t, q, a, nil)
 	b := machine("two", "fake")
@@ -522,6 +536,7 @@ func TestProductionHoldWaitsForExperimentCallOnPinnedModel(t *testing.T) {
 }
 
 func TestProductionHoldRetainsExecutionLostBeforeDemand(t *testing.T) {
+	t.Parallel()
 	q, c, a, b, s := holdFleet(t, true)
 	x := submit(t, q, spec("experiment"))
 	x = check(t, q, b, nil).Job
@@ -558,6 +573,7 @@ func TestProductionHoldRetainsExecutionLostBeforeDemand(t *testing.T) {
 }
 
 func TestProductionHoldExpiredDemandDoesNotStopExperiments(t *testing.T) {
+	t.Parallel()
 	q, c, a, _, _ := holdFleet(t, true)
 	x := submit(t, q, spec("experiment"))
 	x = check(t, q, a, nil).Job
@@ -573,6 +589,7 @@ func TestProductionHoldExpiredDemandDoesNotStopExperiments(t *testing.T) {
 }
 
 func TestProductionHoldKeepsProductionEnvironmentBuild(t *testing.T) {
+	t.Parallel()
 	q, _, a, _, _ := holdFleet(t, true)
 	r := binaryRecipe(t, "fake")
 	if err := q.ConfigureEnvironments(EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"production-tools": {"fake": r}}}); err != nil {
@@ -601,6 +618,7 @@ func TestProductionHoldKeepsProductionEnvironmentBuild(t *testing.T) {
 }
 
 func TestProductionHoldLostModelNeedsPriorSessionCleanup(t *testing.T) {
+	t.Parallel()
 	q, c, a := modelFixture(t, "b70")
 	check(t, q, a, nil)
 	b := machine("two", "fake")
@@ -644,6 +662,7 @@ func TestProductionHoldLostModelNeedsPriorSessionCleanup(t *testing.T) {
 }
 
 func TestProductionHoldResidentCallUsesReservedHostMemory(t *testing.T) {
+	t.Parallel()
 	q, _, a := modelFixture(t, "b70")
 	config := q.models
 	config.Models[0].HostMemoryGB = 1
@@ -686,6 +705,7 @@ func TestProductionHoldResidentCallUsesReservedHostMemory(t *testing.T) {
 }
 
 func TestProductionHoldReportsModelUnloadFailure(t *testing.T) {
+	t.Parallel()
 	q, _, a := modelFixture(t, "b70")
 	check(t, q, a, nil)
 	b := machine("two", "fake")
@@ -715,6 +735,7 @@ func TestProductionHoldReportsModelUnloadFailure(t *testing.T) {
 }
 
 func TestProductionHoldForceStopsBlockedSaveAndResumesDurableGeneration(t *testing.T) {
+	t.Parallel()
 	q, clock, a, b, spark := holdFleet(t, true)
 	x := submit(t, q, spec("experiment"))
 	x = check(t, q, a, nil).Job
@@ -877,6 +898,7 @@ func TestProductionHoldForceStopsBlockedSaveAndResumesDurableGeneration(t *testi
 }
 
 func TestProductionHoldKillsLateCopyDuringNASLoss(t *testing.T) {
+	t.Parallel()
 	q, clock, a, b, spark := holdFleet(t, true)
 	x := submit(t, q, spec("experiment"))
 	x = check(t, q, b, nil).Job
@@ -907,6 +929,7 @@ func TestProductionHoldKillsLateCopyDuringNASLoss(t *testing.T) {
 }
 
 func TestProductionHoldSequentialStageGap(t *testing.T) {
+	t.Parallel()
 	for _, gap := range []time.Duration{5 * time.Second, 200 * time.Second} {
 		t.Run(gap.String(), func(t *testing.T) {
 			q, c, a, b, _ := holdFleet(t, true)
@@ -946,6 +969,7 @@ func TestProductionHoldSequentialStageGap(t *testing.T) {
 }
 
 func TestProductionDemandWithoutIdleCooldown(t *testing.T) {
+	t.Parallel()
 	q, clock, a, b, _ := holdFleet(t, true)
 	e := spec("experiment")
 	e.AllowedMachines = []string{b.ID}
@@ -1004,6 +1028,7 @@ func TestProductionDemandWithoutIdleCooldown(t *testing.T) {
 }
 
 func TestProductionDemandPreservesModelIdleUnload(t *testing.T) {
+	t.Parallel()
 	q, clock, a := modelFixture(t)
 	if err := q.ConfigureHosts(map[string]HostPolicy{hostID(&a): {ProductionHold: true}}); err != nil {
 		t.Fatal(err)

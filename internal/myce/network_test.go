@@ -54,6 +54,7 @@ func (p *partitionTransport) RoundTrip(r *http.Request) (*http.Response, error) 
 
 // Partition admission must also drain requests that already passed the gate.
 func TestQCPartitionDrainsInFlight(t *testing.T) {
+	t.Parallel()
 	q, clock := fixture(t)
 	ms := []Machine{machine("a", "fake", "ha"), machine("b", "fake", "hb"), machine("c", "fake", "hc")}
 	for _, m := range ms {
@@ -106,6 +107,7 @@ func TestQCPartitionDrainsInFlight(t *testing.T) {
 }
 
 func TestWorkerNetworkPartitionFakeClock(t *testing.T) {
+	t.Parallel()
 	q, initial := fixture(t)
 	qc := &manualWorkerClock{now: initial.Now()}
 	q.clock = qc
@@ -178,6 +180,7 @@ func TestWorkerNetworkPartitionFakeClock(t *testing.T) {
 }
 
 func TestNASLossDoesNotStopRunningJob(t *testing.T) {
+	t.Parallel()
 	q, c := fixture(t)
 	submit(t, q, spec("experiment"))
 	m := machine("a", "fake")

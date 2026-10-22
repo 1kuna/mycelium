@@ -22,6 +22,7 @@ import (
 // exactly-once external-side-effect guarantee. Only GPU inventory/model engines
 // are fake: requests, SQLite, worker spools, signals and commands are real.
 func TestPreDeployFullSystem(t *testing.T) {
+	t.Parallel()
 	clock := &manualWorkerClock{now: time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)}
 	workerClocks := map[string]*manualWorkerClock{}
 	for _, gpu := range []string{"cuda", "xpu", "metal"} {
@@ -615,6 +616,7 @@ func (e *auditedModelEngine) Load(ctx context.Context, m Model) error {
 // Extends the full-system scenario with controlled mid-copy faults. Every phase
 // uses the actual worker loop, HTTP API, SQLite restart, files and command runner.
 func TestPreDeployModelCopyFaults(t *testing.T) {
+	t.Parallel()
 	base := newTestStateRoot(t)
 	nas, state := filepath.Join(base, "nas"), filepath.Join(base, "worker")
 	cache := filepath.Join(state, "model-cache")
@@ -926,6 +928,7 @@ func TestPreDeployModelCopyFaults(t *testing.T) {
 // Environment restart fault extends the acceptance suite with real binary
 // builder process groups, HTTP, SQLite, worker cache and command execution.
 func TestPreDeployEnvironmentBuildRestart(t *testing.T) {
+	t.Parallel()
 	base := newTestStateRoot(t)
 	nas := filepath.Join(base, "nas")
 	if e := os.Mkdir(nas, 0700); e != nil {

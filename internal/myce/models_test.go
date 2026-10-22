@@ -46,6 +46,7 @@ func reportModel(t *testing.T, q *Queue, m Machine, state string) Reply {
 	return r
 }
 func TestModelLoadRouteIdleAndReload(t *testing.T) {
+	t.Parallel()
 	q, clock, m := modelFixture(t)
 	c := addModelCall(t, q, "experiment")
 	s := q.s.ModelSlots[slotKey(m.ID, "test")]
@@ -83,6 +84,7 @@ func TestModelLoadRouteIdleAndReload(t *testing.T) {
 	}
 }
 func TestModelPriorityDrainingAndBatchMemory(t *testing.T) {
+	t.Parallel()
 	q, _, m := modelFixture(t)
 	c := addModelCall(t, q, "experiment")
 	reportModel(t, q, m, "ready")
@@ -111,6 +113,7 @@ func TestModelPriorityDrainingAndBatchMemory(t *testing.T) {
 	}
 }
 func TestModelCallPreemptsResumableBatch(t *testing.T) {
+	t.Parallel()
 	q, _, m := modelFixture(t)
 	j := submit(t, q, spec("experiment"))
 	r := check(t, q, m, nil)
@@ -128,6 +131,7 @@ func TestModelCallPreemptsResumableBatch(t *testing.T) {
 	}
 }
 func TestModelCallStopsNonresumableBatch(t *testing.T) {
+	t.Parallel()
 	q, _, m := modelFixture(t)
 	s := spec("experiment")
 	s.Resumable = false
@@ -139,6 +143,7 @@ func TestModelCallStopsNonresumableBatch(t *testing.T) {
 	}
 }
 func TestModelLossAndFreshSession(t *testing.T) {
+	t.Parallel()
 	q, clock, m := modelFixture(t)
 	c := addModelCall(t, q, "experiment")
 	reportModel(t, q, m, "ready")
@@ -162,6 +167,7 @@ func TestModelLossAndFreshSession(t *testing.T) {
 	}
 }
 func TestModelCallSharesPriorityOrder(t *testing.T) {
+	t.Parallel()
 	q, _, m := modelFixture(t)
 	low := submit(t, q, spec("experiment"))
 	c := addModelCall(t, q, "production")
@@ -171,6 +177,7 @@ func TestModelCallSharesPriorityOrder(t *testing.T) {
 	}
 }
 func TestModelLoadedAffinity(t *testing.T) {
+	t.Parallel()
 	q, _, m := modelFixture(t)
 	c := addModelCall(t, q, "experiment")
 	reportModel(t, q, m, "ready")
@@ -185,6 +192,7 @@ func TestModelLoadedAffinity(t *testing.T) {
 	}
 }
 func TestModelConfigAndOpenAIValidation(t *testing.T) {
+	t.Parallel()
 	q, _, _ := modelFixture(t)
 	handler := API{Queue: q, Token: "test-token"}.Handler()
 	for _, tc := range []struct {
@@ -203,6 +211,7 @@ func TestModelConfigAndOpenAIValidation(t *testing.T) {
 	}
 }
 func TestDevModelHTTPFormats(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	d, e := StartDev(DevConfig{Address: "127.0.0.1:0", Database: dir + "/db", Checkpoints: dir + "/checkpoints", Token: "test", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond})
 	if e != nil {
@@ -240,6 +249,7 @@ func TestDevModelHTTPFormats(t *testing.T) {
 }
 
 func TestModelIdleStartsAfterLoad(t *testing.T) {
+	t.Parallel()
 	q, clock, m := modelFixture(t)
 	// Permit a load longer than the idle interval without crossing its own
 	// whole-load deadline. Idle accounting starts only once readiness arrives.
@@ -254,6 +264,7 @@ func TestModelIdleStartsAfterLoad(t *testing.T) {
 	}
 }
 func TestModelLeaveDrainsBeforeGone(t *testing.T) {
+	t.Parallel()
 	q, _, m := modelFixture(t)
 	c := addModelCall(t, q, "production")
 	reportModel(t, q, m, "ready")
@@ -272,6 +283,7 @@ func TestModelLeaveDrainsBeforeGone(t *testing.T) {
 }
 
 func TestModelRetryAndStreamFailure(t *testing.T) {
+	t.Parallel()
 	for _, stream := range []bool{false, true} {
 		t.Run(fmt.Sprintf("stream=%v", stream), func(t *testing.T) {
 			q, _, m := modelFixture(t)
@@ -335,6 +347,7 @@ func TestModelRetryAndStreamFailure(t *testing.T) {
 }
 
 func TestModelCallUsesFreeWorkerBeforePreemption(t *testing.T) {
+	t.Parallel()
 	q, _, m := modelFixture(t)
 	j := submit(t, q, spec("experiment"))
 	check(t, q, m, nil)
@@ -349,6 +362,7 @@ func TestModelCallUsesFreeWorkerBeforePreemption(t *testing.T) {
 }
 
 func TestModelWaitTimeoutUsesClock(t *testing.T) {
+	t.Parallel()
 	q, clock, _ := modelFixture(t)
 	clock.Advance(2 * time.Minute)
 	// An advancing clock makes the waiting limit deterministic, with no sleep.
@@ -368,6 +382,7 @@ type advancingModelClock struct{ now time.Time }
 
 func (c *advancingModelClock) Now() time.Time { c.now = c.now.Add(time.Minute); return c.now }
 func TestModelConfigMismatchFailsClearly(t *testing.T) {
+	t.Parallel()
 	q, _, m := modelFixture(t)
 	m.ModelConfigHash = "wrong"
 	if _, e := q.Checkin(Checkin{Machine: m}); e == nil || !strings.Contains(e.Error(), "config does not match") {
@@ -375,6 +390,7 @@ func TestModelConfigMismatchFailsClearly(t *testing.T) {
 	}
 }
 func TestModelUnloadFailureKeepsMemory(t *testing.T) {
+	t.Parallel()
 	q, _, m := modelFixture(t)
 	c := addModelCall(t, q, "experiment")
 	reportModel(t, q, m, "ready")
@@ -390,6 +406,7 @@ func TestModelUnloadFailureKeepsMemory(t *testing.T) {
 }
 
 func TestModelLostWorkerRetriesInFlightCall(t *testing.T) {
+	t.Parallel()
 	q, clock, m := modelFixture(t)
 	q.models.Wait = 10 * time.Minute
 	started := make(chan struct{})
@@ -460,6 +477,7 @@ func TestModelLostWorkerRetriesInFlightCall(t *testing.T) {
 }
 
 func TestModelPriorityTracksRemainingCalls(t *testing.T) {
+	t.Parallel()
 	q, _, m := modelFixture(t)
 	high := addModelCall(t, q, "production")
 	reportModel(t, q, m, "ready")
@@ -481,6 +499,7 @@ func TestModelPriorityTracksRemainingCalls(t *testing.T) {
 }
 
 func TestIdleModelCanBeReclaimedAfterProductionCall(t *testing.T) {
+	t.Parallel()
 	q, _, m := modelFixture(t)
 	c := addModelCall(t, q, "production")
 	reportModel(t, q, m, "ready")
@@ -497,6 +516,7 @@ func TestIdleModelCanBeReclaimedAfterProductionCall(t *testing.T) {
 }
 
 func TestModelCallNotBlockedByBatchThatCannotReclaimMemory(t *testing.T) {
+	t.Parallel()
 	q, _, m := modelFixture(t)
 	addModelCall(t, q, "production")
 	reportModel(t, q, m, "ready")
@@ -508,6 +528,7 @@ func TestModelCallNotBlockedByBatchThatCannotReclaimMemory(t *testing.T) {
 }
 
 func TestModelReservationMeasuredMemory(t *testing.T) {
+	t.Parallel()
 	q, _, m := modelFixture(t)
 	for _, state := range []string{"loading", "ready", "draining", "unloading", "unload_failed"} {
 		q.s.ModelSlots[slotKey(m.ID, "test")] = &ModelSlot{Model: "test", Machine: m.ID, Session: m.Session, Attempt: "engine-attempt", State: state}
@@ -533,6 +554,7 @@ func TestModelReservationMeasuredMemory(t *testing.T) {
 }
 
 func TestCallCanUseDoesNotBlockBatchForImpossibleCall(t *testing.T) {
+	t.Parallel()
 	q, _, m := modelFixture(t)
 	q.models.Models[0].MemoryGB = 16
 	c := &ModelCall{Model: "test", Priority: "production"}
@@ -546,6 +568,7 @@ func TestCallCanUseDoesNotBlockBatchForImpossibleCall(t *testing.T) {
 }
 
 func TestEmptyStreamingResponsePreservesStatus(t *testing.T) {
+	t.Parallel()
 	q, _, m := modelFixture(t)
 	upstream := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -567,6 +590,7 @@ func TestEmptyStreamingResponsePreservesStatus(t *testing.T) {
 }
 
 func TestFailedUnloadIsNotCountedAsReclaimable(t *testing.T) {
+	t.Parallel()
 	q, _, m := modelFixture(t)
 	c := addModelCall(t, q, "experiment")
 	reportModel(t, q, m, "ready")
@@ -585,6 +609,7 @@ func TestFailedUnloadIsNotCountedAsReclaimable(t *testing.T) {
 }
 
 func TestCancelledModelCallDoesNotLoadRetryWorker(t *testing.T) {
+	t.Parallel()
 	q, _, m := modelFixture(t)
 	started := make(chan struct{})
 	first := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -631,6 +656,7 @@ func TestCancelledModelCallDoesNotLoadRetryWorker(t *testing.T) {
 }
 
 func TestRetryReleasesOldModelPriorityAndResetsIdle(t *testing.T) {
+	t.Parallel()
 	q, clock, m := modelFixture(t)
 	c := addModelCall(t, q, "production")
 	reportModel(t, q, m, "ready")
@@ -648,6 +674,7 @@ func TestRetryReleasesOldModelPriorityAndResetsIdle(t *testing.T) {
 // Move the transient CLI ready-state assertions here: a status HTTP request
 // cannot be guaranteed to arrive before a one-second real idle timer expires.
 func TestModelReadyIdleReloadStatusFakeClock(t *testing.T) {
+	t.Parallel()
 	q, clock, m := modelFixture(t)
 	q.models.Idle = time.Second
 	api := API{Queue: q, Token: "test"}.Handler()
@@ -697,6 +724,7 @@ func TestModelReadyIdleReloadStatusFakeClock(t *testing.T) {
 }
 
 func TestCombinedBatchModelReclamation(t *testing.T) {
+	t.Parallel()
 	q, _, m := modelFixture(t)
 	m.FreeMemoryGB = 16
 	check(t, q, m, nil)
@@ -721,6 +749,7 @@ func TestCombinedBatchModelReclamation(t *testing.T) {
 }
 
 func TestCombinedReclamationTierAndPinEligibility(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name, priority               string
 		pin, active, resumable, stop bool
@@ -767,6 +796,7 @@ func TestCombinedReclamationTierAndPinEligibility(t *testing.T) {
 }
 
 func TestBatchReclamationStopsLeastWork(t *testing.T) {
+	t.Parallel()
 	for _, need := range []float64{8, 16} {
 		t.Run(fmt.Sprint(need), func(t *testing.T) {
 			q, _, m := modelFixture(t)
