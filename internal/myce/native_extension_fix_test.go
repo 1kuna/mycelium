@@ -297,6 +297,12 @@ func TestNativeExtensionPixiLazyAcquisition(t *testing.T) {
 	if len(reports) == 0 || !reports[0].Qualified {
 		t.Fatal("PATH-free prepared pixi lost qualification", reports)
 	}
+	// Clear the synthetic report before starting the worker: ordinary work must
+	// remain queued until the real queue runtime check grants qualification.
+	r.Qualified, r.CheckID = false, ""
+	if err := writeExtensionReports(w.ExtensionRoot, e, "fake", []ExtensionReport{r}); err != nil {
+		t.Fatal(err)
+	}
 	startNativeExtensionFixture(t, w)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
