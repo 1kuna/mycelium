@@ -321,7 +321,8 @@ func TestDockerGroupInspectsEachDeclaredMemoryLimit(t *testing.T) {
 					if id != "" && (f.result.Success || f.result.Interrupted || f.result.Error != "Docker memory ceiling not enforced") {
 						t.Fatalf("wrong container ceiling accepted: %+v", f.result)
 					}
-				case <-time.After(4 * time.Second):
+				// Several fake CLI launches complete before this semantic result.
+				case <-time.After(testWaitTimeout):
 					t.Fatal("container memory failure did not settle")
 				}
 				if id != "" && !afterStart {
