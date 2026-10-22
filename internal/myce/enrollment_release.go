@@ -12,9 +12,10 @@ import (
 // It verifies the publisher's signature using its provisioned key, then serves
 // public approved metadata to inviters. No credential or signing key is served.
 type EnrollmentRelease struct {
-	Manifest ReleaseManifest `json:"manifest"`
-	Origin   string          `json:"origin"`
-	CACert   string          `json:"ca_cert,omitempty"`
+	Manifest    ReleaseManifest `json:"manifest"`
+	Origin      string          `json:"origin"`
+	CACert      string          `json:"ca_cert,omitempty"`
+	NASIdentity NASIdentity     `json:"nas_identity,omitempty"`
 }
 
 func (q *Queue) ConfigureEnrollmentRelease(data []byte, key ed25519.PublicKey, origin string, allowDowngrade ...bool) error {
@@ -47,6 +48,11 @@ func (a API) registerEnrollmentRelease(mux *http.ServeMux) {
 		w.Header().Set("Cache-Control", "no-store")
 		a.Queue.mu.Lock()
 		release := a.Queue.s.EnrollmentRelease
+		if release != nil {
+			current := *release
+			current.NASIdentity = a.Queue.onboardingNAS
+			release = &current
+		}
 		a.Queue.mu.Unlock()
 		if release == nil {
 			respond(w, nil, &HTTPError{Status: 503, Code: "release_unavailable", Message: "queue administrator must configure a signed release and publisher URL before inviting"})

@@ -299,6 +299,7 @@ func enrollmentCommandWithTiming(args []string, probe myce.MachineProbe, home st
 		// It is outside the worker state roots and never printed.
 		pending := filepath.Join(lockDir, "invitation.json")
 		authority, e := myce.ReadInvitation(pending)
+		resuming := e == nil
 		if e == nil {
 			if authority.Address != o.queue || authority.Fingerprint != o.pin {
 				return errors.New("pending enrollment belongs to another mycelium; preserve its private authority and resolve explicitly")
@@ -322,6 +323,24 @@ func enrollmentCommandWithTiming(args []string, probe myce.MachineProbe, home st
 			return e
 		}
 		defer client.HTTP.CloseIdleConnections()
+		if resuming && authority.NASIdentity.Fingerprint == "" && !hasEnrollmentFlag(o.forward, "--nas") {
+			// Older interrupted installs saved authority before NAS metadata existed.
+			// Refresh only public selection metadata through that same pinned authority;
+			// a resumed install must not spend another one-time ticket.
+			var current myce.EnrollmentRelease
+			phase, cancel := context.WithTimeout(signals, o.timeout)
+			e = client.Call(phase, "GET", "/api/invites/release", nil, &current)
+			cancel()
+			if e != nil {
+				return e
+			}
+			if current.NASIdentity.Fingerprint != "" {
+				authority.NASIdentity = current.NASIdentity
+				if e = myce.WriteInvitation(pending, authority); e != nil {
+					return e
+				}
+			}
+		}
 		o.forward = append(o.forward, "--joining-file", pending)
 		if !hasEnrollmentFlag(o.forward, "--name") && !hasEnrollmentFlag(o.forward, "--host-id") {
 			identityPath := filepath.Join(lockDir, "hypha-id")
