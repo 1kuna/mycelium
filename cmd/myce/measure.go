@@ -142,7 +142,7 @@ func runMeasure(ctx context.Context, args []string, stdout, stderr io.Writer) er
 				if err := mc.Initialize(); err != nil {
 					return m, nil, err
 				}
-				environments = &myce.EnvironmentCache{Root: er, Limit: 20 * 1024 * 1024 * 1024, Clock: w.Clock}
+				environments = &myce.EnvironmentCache{Root: er, Clock: w.Clock}
 			}
 			if m.Engine != "fake" {
 				path, err := mc.Prepare(c, m)

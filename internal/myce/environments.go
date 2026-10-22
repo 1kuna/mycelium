@@ -282,13 +282,14 @@ func environmentCanRun(j *Job, m *Machine) bool {
 }
 
 type EnvironmentReport struct {
-	Kind         string  `json:"kind,omitempty"`
-	Attempt      string  `json:"attempt,omitempty"`
-	Key          string  `json:"key"`
-	State        string  `json:"state"`
-	Error        string  `json:"error,omitempty"`
-	Log          string  `json:"log,omitempty"`
-	BuildSeconds float64 `json:"build_seconds,omitempty"`
+	CacheLimitBytes int64   `json:"cache_limit_bytes,omitempty"`
+	Kind            string  `json:"kind,omitempty"`
+	Attempt         string  `json:"attempt,omitempty"`
+	Key             string  `json:"key"`
+	State           string  `json:"state"`
+	Error           string  `json:"error,omitempty"`
+	Log             string  `json:"log,omitempty"`
+	BuildSeconds    float64 `json:"build_seconds,omitempty"`
 }
 
 func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
@@ -373,6 +374,12 @@ func (c *EnvironmentCache) init() error {
 	c.once.Do(func() {
 		if c.Clock == nil {
 			c.Clock = RealClock{}
+		}
+		if c.Limit == 0 && c.Root != "" {
+			c.Limit, c.initErr = AutoEnvironmentCacheLimit(c.Root)
+			if c.initErr != nil {
+				return
+			}
 		}
 		if c.Limit <= 0 {
 			c.initErr = errors.New("environment-cache-bytes must be positive")
@@ -561,7 +568,7 @@ func (c *EnvironmentCache) admit(key string, size int64) error {
 		}
 	}
 	if total > c.Limit {
-		return fmt.Errorf("environment cache needs %d bytes; limit %d (in-use entries protected)", total, c.Limit)
+		return &environmentCapacityError{needed: total, limit: c.Limit}
 	}
 	return nil
 }
@@ -918,6 +925,10 @@ func (rt *environmentRuntime) sync(plan []EnvironmentRecipe, busy bool, keepActi
 		if e != nil {
 			report.State = "failed"
 			report.Error = e.Error()
+			var capacity *environmentCapacityError
+			if errors.As(e, &capacity) {
+				report.CacheLimitBytes = capacity.limit
+			}
 		}
 		b, _ := os.ReadFile(filepath.Join(rt.cache.Root, r.Key+".build.log"))
 		if len(b) > 32768 {
@@ -1195,6 +1206,19 @@ func (rt *environmentRuntime) restore() error {
 		}
 	}
 	for key, r := range rt.reports {
+		// s007 and older stored only the diagnostic. Migrate that exact capacity
+		// refusal too; other failures remain negatively cached across restarts.
+		limit := r.CacheLimitBytes
+		if limit == 0 {
+			var needed int64
+			if n, err := fmt.Sscanf(r.Error, "environment cache needs %d bytes; limit %d (in-use entries protected)", &needed, &limit); n != 2 || err != nil {
+				limit = 0
+			}
+		}
+		if r.State == "failed" && limit > 0 && limit != rt.cache.Limit {
+			r.State, r.Error, r.CacheLimitBytes = "paused", "", 0
+			rt.reports[key] = r
+		}
 		if r.State == "building" {
 			r.State = "paused"
 			r.Error = ""

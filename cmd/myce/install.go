@@ -315,6 +315,9 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 	if e != nil {
 		return e
 	}
+	if err := myce.ResolveEnvironmentCacheSizing(&c, explicit["environment-cache-bytes"]); err != nil {
+		return err
+	}
 	if role == "worker" && *redetect {
 		probeConfig := c
 		if !explicit["gpu"] {

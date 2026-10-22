@@ -204,7 +204,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	environmentFile := f.String("environment-config", "", "shared NAS environment catalog")
 	environmentSourceRoot := f.String("environment-root", "", "worker-local NAS environment catalog directory")
 	environmentRoot := f.String("environment-cache", "", "local environment cache directory")
-	environmentLimit := f.Int64("environment-cache-bytes", 20*1024*1024*1024, "active environment cache limit")
+	environmentLimit := f.Int64("environment-cache-bytes", 0, "active environment cache bytes (omitted: auto-size from cache disk)")
 	modelFile := f.String("model-config", "", "model YAML config shared by queue and workers")
 	modelIdle := f.Duration("model-idle", 0, "override model idle timeout")
 	modelWait := f.Duration("model-wait", 0, "override maximum model wait")

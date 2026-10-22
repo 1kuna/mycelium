@@ -132,7 +132,7 @@ NAS checkpoints. Experiments and resumable production still wait for NAS recover
 
 The worker heartbeat allows 750 ms for its checkpoint-root probe, including
 creating and removing a temporary file; slower or blocked probes report the root
-unavailable. One-shot onboarding allows three seconds per filesystem operation
+unavailable. One-shot onboarding allows ten seconds per filesystem operation
 and has a cancellable 15-second total validation limit, including mount inventory.
 Standalone mount selection retains its five-second limit, including dry runs.
 Probe failures and recovery are logged on state changes. Worker
