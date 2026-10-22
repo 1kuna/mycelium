@@ -14,7 +14,10 @@ func TestInstallQueueMemoryDefaultUpgrade(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if c.MemoryMax != "" || !strings.Contains(c.ServiceText(), "MemoryMax=\n") {
+	if err = c.ValidateInstall(); err != nil {
+		t.Fatal(err)
+	}
+	if c.MemoryMax != "infinity" || !strings.Contains(c.ServiceText(), "MemoryMax=infinity\n") {
 		t.Fatal("queue has a default hard memory cap")
 	}
 	if err = os.MkdirAll(filepath.Dir(c.Config), 0700); err != nil {
@@ -36,7 +39,7 @@ func TestInstallQueueMemoryDefaultUpgrade(t *testing.T) {
 		return got
 	}
 	c.MemoryMax = "512M"
-	if got := save(); got.MemoryMax != "" {
+	if got := save(); got.MemoryMax != "infinity" {
 		t.Fatal("upgrade retained exact obsolete default")
 	}
 	c.MemoryMax = "2G"
@@ -48,7 +51,7 @@ func TestInstallQueueMemoryDefaultUpgrade(t *testing.T) {
 		t.Fatal("worker memory setting changed")
 	}
 	data, err := os.ReadFile("../../deploy/myce-queue.service")
-	if err != nil || !strings.Contains(string(data), "MemoryMax=\n") {
+	if err != nil || !strings.Contains(string(data), "MemoryMax=infinity\n") {
 		t.Fatal("manual queue template caps memory", err)
 	}
 }
