@@ -49,6 +49,11 @@ type Dev struct {
 }
 
 func StartDev(c DevConfig) (*Dev, error) {
+	return startDev(c, nil)
+}
+
+// Configure test clocks and storage probes before queue/worker goroutines start.
+func startDev(c DevConfig, configureQueue func(*Queue)) (*Dev, error) {
 	if c.GPU == "" {
 		c.GPU = "fake"
 	}
@@ -86,6 +91,9 @@ func StartDev(c DevConfig) (*Dev, error) {
 	q, err := Open(c.Database, c.Checkpoints, clock)
 	if err != nil {
 		return nil, err
+	}
+	if configureQueue != nil {
+		configureQueue(q)
 	}
 	if c.ProductionInfrastructureRetries != nil {
 		if err = q.SetProductionInfrastructureRetries(*c.ProductionInfrastructureRetries); err != nil {

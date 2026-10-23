@@ -16,11 +16,23 @@ import (
 func TestM4DevSplitConvertConcurrentRollback(t *testing.T) {
 	src, c, binary, manager, run := m4InstallFixture(t)
 	root := t.TempDir()
-	d, err := StartDev(DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: c.Checkpoints, Token: "synthetic-local-test", Workers: 1, HostID: "dev-controller", MemoryGB: 8, Interval: 10 * time.Millisecond})
+	clock := &workerFakeClock{now: time.Date(2026, 10, 23, 12, 0, 0, 0, time.UTC)}
+	d, err := startDev(DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: c.Checkpoints, Token: "synthetic-local-test", Workers: 1, HostID: "dev-controller", MemoryGB: 8, Interval: 10 * time.Millisecond}, func(q *Queue) {
+		q.clock = clock
+		fakeCheckpointAvailability(t, q, true)
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer d.Close()
+	cancelAttempts := func() {
+		snap, _ := d.Queue.Snapshot()
+		for _, j := range snap.Jobs {
+			_ = d.Queue.Cancel(j.ID)
+		}
+		clock.Advance(StopGrace)
+	}
+	defer cancelAttempts()
 	client := d.Client()
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
@@ -75,12 +87,8 @@ func TestM4DevSplitConvertConcurrentRollback(t *testing.T) {
 		legacyIntents[m.ID] = s
 		j := submitAPI(s)
 		var reply Reply
-		// A real checkpoint probe can still be pending at the first check-in.
-		// Follow the worker's normal retry until the assignment is available.
-		await(t, func() bool {
-			reply = checkAPI(m)
-			return reply.Job != nil
-		})
+		// Storage availability is injected; assignment needs no filesystem retry.
+		reply = checkAPI(m)
 		if reply.Job == nil || reply.Job.ID != j.ID {
 			d.Queue.mu.Lock()
 			reason, nasAvailable := d.Queue.s.Jobs[j.ID].Reason, d.Queue.nasAvailable
@@ -143,7 +151,7 @@ func TestM4DevSplitConvertConcurrentRollback(t *testing.T) {
 	checkAPI(spark) // Final source check-in records its settled leave.
 	sparkCtx, stopSpark := context.WithCancel(ctx)
 	sparkDone := make(chan error, 1)
-	sw := Worker{StateDir: filepath.Join(root, "spark-machine"), Machine: machine("spark", "fake", "spark"), Client: client, ModelConfig: d.Queue.models, Interval: 10 * time.Millisecond, InventoryProbe: func(context.Context) ([]MachineDevice, error) {
+	sw := Worker{Clock: RealClock{}, StateDir: filepath.Join(root, "spark-machine"), Machine: machine("spark", "fake", "spark"), Client: client, ModelConfig: d.Queue.models, Interval: 10 * time.Millisecond, InventoryProbe: func(context.Context) ([]MachineDevice, error) {
 		return []MachineDevice{{ID: "0", Platform: "fake", Identity: "GPU-spark", Selector: "GPU-spark", MemoryMode: "fixed", TotalMemoryGB: 8, BudgetGB: 8, FreeMemoryGB: 8}}, nil
 	}}
 	sw.Machine.Device = "GPU-spark"
@@ -151,6 +159,7 @@ func TestM4DevSplitConvertConcurrentRollback(t *testing.T) {
 	sparkStopped := false
 	defer func() {
 		if !sparkStopped {
+			cancelAttempts()
 			stopSpark()
 			<-sparkDone
 		}
@@ -187,15 +196,20 @@ func TestM4DevSplitConvertConcurrentRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	devices := []MachineDevice{{ID: "0", Platform: "fake", Identity: "fake0", Selector: "0", MemoryMode: "fixed", TotalMemoryGB: 8, BudgetGB: 8, FreeMemoryGB: 8}, {ID: "1", Platform: "fake", Identity: "fake1", Selector: "1", MemoryMode: "fixed", TotalMemoryGB: 8, BudgetGB: 8, FreeMemoryGB: 8}}
-	machineWorker := Worker{StateDir: saved.State, Machine: legacy("host"), Client: client, ModelConfig: d.Queue.models, Interval: 10 * time.Millisecond, CheckpointRoot: c.Checkpoints, InventoryProbe: func(context.Context) ([]MachineDevice, error) { return append([]MachineDevice(nil), devices...), nil }, CPUIsolationProbe: func(context.Context) error { return nil }, HostMemorySource: func(context.Context) (float64, error) { return 128, nil }}
+	machineWorker := Worker{Clock: RealClock{}, StateDir: saved.State, Machine: legacy("host"), Client: client, ModelConfig: d.Queue.models, Interval: 10 * time.Millisecond, CheckpointRoot: c.Checkpoints, InventoryProbe: func(context.Context) ([]MachineDevice, error) { return append([]MachineDevice(nil), devices...), nil }, CPUIsolationProbe: func(context.Context) error { return nil }, HostMemorySource: func(context.Context) (float64, error) { return 128, nil }}
 	workerCtx, stopWorker := context.WithCancel(ctx)
 	workerDone := make(chan error, 1)
 	go func() { workerDone <- machineWorker.Run(workerCtx) }()
 	stopped := false
 	defer func() {
 		if !stopped {
+			cancelAttempts()
 			stopWorker()
-			<-workerDone
+			select {
+			case <-workerDone:
+			case <-time.After(45 * time.Second):
+				t.Error("machine worker cleanup did not finish")
+			}
 		}
 	}()
 	await(t, func() bool {

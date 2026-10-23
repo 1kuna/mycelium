@@ -23,10 +23,15 @@ func TestJoinBenchmarkOptIn(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			registered := make(chan struct{})
 			admitted := make(chan struct{})
+			var registerOnce sync.Once
 			var once sync.Once
 			handler := API{Queue: q, Token: "test"}.Handler()
 			server := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/api/workers/checkin" {
+					registerOnce.Do(func() { close(registered) })
+				}
 				handler.ServeHTTP(w, r)
 				snap, err := q.Snapshot()
 				if err == nil && len(snap.Machines) > 0 && !snap.Machines[0].BenchmarkPending {
@@ -56,6 +61,9 @@ func TestJoinBenchmarkOptIn(t *testing.T) {
 				},
 			}
 			go func() { done <- w.Run(ctx) }()
+			// Joining's admission assertion starts at queue registration, after local
+			// profile/store/model-server startup, which this test does not measure.
+			<-registered
 			select {
 			case <-admitted:
 			case <-time.After(2 * time.Second):

@@ -231,10 +231,13 @@ func TestMachineWorkerConcurrentDevicesCPUAndNeighborStop(t *testing.T) {
 func TestMachineWorkerParallelReadinessUploadAndControl(t *testing.T) {
 	dir := t.TempDir()
 	h := &machineHarness{controls: map[string]AttemptDirective{}, blockLog: "slow", logEntered: make(chan struct{}), unblock: make(chan struct{})}
-	h.jobs = []Job{harnessJob(t, "slow", "0", `echo ready; while :; do sleep 1; done`), harnessJob(t, "neighbor", "1", `touch `+filepath.Join(dir, "neighbor")+`; while :; do sleep 1; done`)}
+	h.jobs = []Job{harnessJob(t, "slow", "0", `echo ready; touch `+filepath.Join(dir, "slow-ready")+`; while :; do sleep 1; done`), harnessJob(t, "neighbor", "1", `touch `+filepath.Join(dir, "neighbor")+`; while :; do sleep 1; done`)}
 	w := harnessWorker(t, h)
 	startHarness(t, w, h)
 	t.Cleanup(func() { close(h.unblock) })
+	// The upload assertion starts after the payload has emitted its log, rather
+	// than charging profile/store/process startup against the upload budget.
+	awaitFile(t, filepath.Join(dir, "slow-ready"))
 	select {
 	case <-h.logEntered:
 	case <-time.After(3 * time.Second):

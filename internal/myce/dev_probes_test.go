@@ -22,7 +22,7 @@ func devProbe(t *testing.T) (*Dev, DevConfig, context.Context) {
 	t.Setenv("MYCE_TOKEN", c.Token)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
-	d, err := StartDev(c)
+	d, err := startDev(c, func(q *Queue) { fakeCheckpointAvailability(t, q, true) })
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,6 +101,7 @@ func TestDevProbeQueueRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	fakeCheckpointAvailability(t, q, true)
 	d.Queue = q
 	listener, err := net.Listen("tcp", strings.TrimPrefix(d.URL, "http://"))
 	if err != nil {
