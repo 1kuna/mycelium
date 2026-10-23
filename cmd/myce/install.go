@@ -79,6 +79,7 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 	rollbackQueue := f.Bool("rollback-machines", false, "restore queue-side fences and legacy identities; retain upgraded queue")
 	rollback := f.Bool("rollback-machine", false, "restore the saved per-GPU installation; keep the compatible queue")
 	dry := f.Bool("dry-run", false, "print plan without installing")
+	machineCacheRoot := f.Bool("machine-cache-root", false, "move generated per-device cache settings to the machine spool; retain old directories and custom paths")
 	redetect := f.Bool("redetect", false, "re-detect hardware without changing saved selectors or per-device budgets")
 	f.Bool("force", false, "deprecated compatibility option; explicit flags authorize changes")
 	f.BoolFunc("local-disable-receipts", "retired; reinstall without this option", func(string) error { return myce.ErrLegacyLocalDisableReceipts })
@@ -101,6 +102,9 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 	}
 	if f.NArg() != 0 {
 		return errors.New("unexpected setup arguments")
+	}
+	if *machineCacheRoot && (action != "install" || role != "worker" || *rollback || *rollbackQueue || *machineMap != "") {
+		return errors.New("--machine-cache-root requires forward install worker")
 	}
 	if *drainEvidence != "" && (*drainEvidence != "verified-empty" || action != "install" || role != "queue" || *machineMap == "" || *rollbackQueue) {
 		return errors.New("machine_drain_evidence_invalid: --drain-evidence=verified-empty requires forward install queue --machine-map")
@@ -210,7 +214,20 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 		if err != nil {
 			return err
 		}
-		fmt.Println("Convert split workers: stop/disable and retire source units/configs; retain source spools, all roots and gpu0 cache; install one machine worker with fresh spool. Rollback: " + c.Config + ".m4-rollback.json")
+		if *machineCacheRoot {
+			var preview string
+			c, preview, err = myce.PlanMachineCacheMigration(c, explicit)
+			if err != nil {
+				return err
+			}
+			fmt.Print(preview)
+			if !*dry {
+				if err = myce.CheckMachineCacheMigration(ctx, c); err != nil {
+					return err
+				}
+			}
+		}
+		fmt.Println("Convert split workers: stop/disable and retire source units/configs; retain source spools, all roots and gpu0 cache artifacts; install one machine worker with fresh spool. Rollback: " + c.Config + ".m4-rollback.json")
 		for _, path := range sources {
 			fmt.Println("Source:", path)
 		}
@@ -315,7 +332,18 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 	if e != nil {
 		return e
 	}
-	if err := myce.ResolveEnvironmentCacheSizing(&c, explicit["environment-cache-bytes"]); err != nil {
+	if *machineCacheRoot {
+		if installed == nil {
+			return errors.New("--machine-cache-root requires a saved machine config or --from-worker-config")
+		}
+		var preview string
+		c, preview, e = myce.PlanMachineCacheMigration(c, explicit)
+		if e != nil {
+			return e
+		}
+		fmt.Print(preview)
+	}
+	if err := myce.ResolveEnvironmentCacheSizing(&c, explicit["environment-cache-bytes"] || *machineCacheRoot); err != nil {
 		return err
 	}
 	if role == "worker" && *redetect {
@@ -407,6 +435,11 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 		fmt.Println("Dry run: no files written, packages installed, or services changed.")
 		fmt.Print(c.ServiceText())
 		return nil
+	}
+	if *machineCacheRoot {
+		if e = myce.CheckMachineCacheMigration(ctx, c); e != nil {
+			return e
+		}
 	}
 	executable, e := os.Executable()
 	if e != nil {

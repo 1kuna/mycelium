@@ -1414,8 +1414,9 @@ reopens ordinary submissions and resumes both hosts. These checks are unrun by M
 - Save a durable checkpoint, stop under maintenance, reboot and verify only
   machine units return. Reconcile queue/worker custody and resume the exact
   logical job from its accepted generation. Redeploy through `myce install`;
-  verify queue config, the chosen gpu0 cache root, untouched other caches and
-  hotfix budgets. Inspect the persistent enable set and systemd registration:
+  verify queue config, the chosen gpu0 cache root (or explicitly migrate generated
+  cache settings with `install worker --machine-cache-root`), untouched other
+  caches and hotfix budgets. Inspect the persistent enable set and systemd registration:
   neither `@gpu0` nor `@gpu1` may return. Exercise rollback to the two b70 source
   workers and Spark's source worker, then forward again while disabled,
   including queue recovery and Spark reconnect on both paths.

@@ -70,6 +70,12 @@ func PlanMachineInstallWithProbe(ctx context.Context, destination string, paths 
 		if err != nil {
 			return zero, err
 		}
+		if !explicit["host-memory-budget-gb"] {
+			c.HostMemoryBudgetGB, err = machineInstallMemoryAllowance(path, c.HostMemoryBudgetGB)
+			if err != nil {
+				return zero, err
+			}
+		}
 		if c.Role != "worker" || c.Config != path || c.HostID == "" || seen[path] || singleDeviceMask(c.Device) != nil || c.Detection.OS == "linux" && !ValidWorkerUnit(filepath.Base(c.Service)) {
 			return zero, migrationError("machine_migration_conflict", "source identity or device")
 		}
@@ -153,6 +159,47 @@ func PlanMachineInstallWithProbe(ctx context.Context, destination string, paths 
 	base.Device = strings.Join(selectors, ",")
 	base.FromWorkerConfigs = slices.Clone(paths)
 	return base, nil
+}
+
+// Project only the production lineage's effective allowance into the new saved
+// config. Retired local host control remains inert; no runtime decoder is added.
+func machineInstallMemoryAllowance(config string, fallback float64) (float64, error) {
+	data, err := os.ReadFile(config)
+	if err != nil {
+		return 0, err
+	}
+	var legacy struct {
+		HostStateDir string `json:"host_state_dir"`
+	}
+	if err = json.Unmarshal(data, &legacy); err != nil {
+		return 0, err
+	}
+	// Configs without retired local control already use queue-owned policy and
+	// keep their saved bootstrap value. Never sum values across source workers.
+	if legacy.HostStateDir == "" {
+		return fallback, nil
+	}
+	refuse := func() (float64, error) {
+		return 0, migrationError("machine_memory_allowance_unavailable", "legacy effective host allowance unavailable; supply --host-memory-budget-gb explicitly")
+	}
+	if !filepath.IsAbs(legacy.HostStateDir) {
+		return refuse()
+	}
+	data, err = os.ReadFile(filepath.Join(legacy.HostStateDir, "host-state.json"))
+	if err != nil {
+		return refuse()
+	}
+	var state struct {
+		Bytes int64 `json:"memory_allowance_bytes"`
+	}
+	if json.Unmarshal(data, &state) != nil || state.Bytes <= 0 {
+		return refuse()
+	}
+	gib := float64(state.Bytes) / (1 << 30)
+	if _, err = hostMemoryAllowance(gib); err != nil {
+		return refuse()
+	}
+	return gib, nil
 }
 
 // The private journal holds exact file bytes and manager state. No queue DB,
@@ -579,4 +626,87 @@ func machineWorkerCatalog(path string, snapshot Snapshot) ([]byte, error) {
 		return nil, nil
 	}
 	return yaml.Marshal(converted)
+}
+
+// PlanMachineCacheMigration changes only generated source defaults. A custom
+// cache needs an explicit cache flag; the conversion journal proves provenance
+// after source configs have been retired. No cache contents are copied/deleted.
+func PlanMachineCacheMigration(c ServiceConfig, explicit map[string]bool) (ServiceConfig, string, error) {
+	if c.Role != "worker" || strings.Contains(filepath.Base(c.Service), "@") {
+		return c, "", errors.New("--machine-cache-root requires a machine worker")
+	}
+	var sources []ServiceConfig
+	data, err := os.ReadFile(machineJournal(c))
+	if err == nil {
+		var j workerMigration
+		if err = json.Unmarshal(data, &j); err != nil {
+			return c, "", err
+		}
+		if j.Version != 1 || j.Config.Config != c.Config {
+			return c, "", errors.New("invalid machine migration journal")
+		}
+		sources = j.Sources
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return c, "", err
+	} else {
+		for _, path := range c.FromWorkerConfigs {
+			source, e := ReadServiceConfig(path)
+			if e != nil {
+				return c, "", e
+			}
+			sources = append(sources, source)
+		}
+	}
+	before := c
+	for _, s := range sources {
+		if !explicit["model-cache"] && before.ModelCache == filepath.Join(s.State, "model-cache") {
+			c.ModelCache = filepath.Join(c.State, "model-cache")
+		}
+		if !explicit["environment-cache"] && before.EnvironmentCache == filepath.Join(s.State, "environment-cache") {
+			c.EnvironmentCache = filepath.Join(c.State, "environment-cache")
+		}
+	}
+	var preview strings.Builder
+	for _, cache := range []struct{ name, old, next string }{{"Model", before.ModelCache, c.ModelCache}, {"Environment", before.EnvironmentCache, c.EnvironmentCache}} {
+		size, e := environmentDiskUsage(cache.old)
+		if e != nil {
+			return c, "", e
+		}
+		root := cache.next
+		var free int64
+		for {
+			free, e = diskFree(root)
+			if e == nil {
+				break
+			}
+			if !errors.Is(e, os.ErrNotExist) || filepath.Dir(root) == root {
+				return c, "", e
+			}
+			root = filepath.Dir(root)
+		}
+		fmt.Fprintf(&preview, "%s cache: %s -> %s; old directory retained (%d allocated bytes); destination filesystem %d available bytes\n", cache.name, cache.old, cache.next, size, free)
+	}
+	preview.WriteString("Custom paths are preserved unless explicitly overridden. Cache limits are preserved; environments at a new root will be prepared again. No cache files are moved or deleted.\n")
+	return c, preview.String(), nil
+}
+
+// Reuse the queue's custody/health facts, without changing maintenance policy.
+func CheckMachineCacheMigration(ctx context.Context, c ServiceConfig) error {
+	token := os.Getenv("MYCE_TOKEN")
+	if token == "" {
+		var err error
+		token, err = ReadServiceToken(c)
+		if err != nil {
+			return err
+		}
+	}
+	client := Client{URL: c.Queue, Token: token}
+	var status HostMaintenanceStatus
+	if err := client.Call(ctx, "GET", "/api/hosts/"+c.HostID+"/maintenance", nil, &status); err != nil {
+		return err
+	}
+	if !status.Healthy || !status.Quiescent || status.Policy.Mode != "disabled" && status.Policy.Mode != "drained" {
+		return migrationError("cache_migration_not_ready", "machine must be disabled or drained, idle and Healthy")
+	}
+	return nil
 }

@@ -210,10 +210,34 @@ disabled with no obligations; its model endpoint is withheld. New machine worker
 still require the current catalog hash.
 Source definitions are retired recoverably and persistent wants links removed;
 spools, binaries and all caches remain intact. The gpu0 model/environment caches
-and limits become the sole machine caches. Per-device selectors, fixed capacities,
+and limits remain the sole machine caches unless the explicit migration below is
+selected. Per-device selectors, fixed capacities,
 reserves, shared roots, secret references and the host allowance are retained.
+For a new conversion, add `--machine-cache-root` to move generated per-device
+cache settings to `MACHINE_STATE/model-cache` and
+`MACHINE_STATE/environment-cache`. For an already converted worker, use
+`myce install worker --config MACHINE_CONFIG --machine-cache-root --dry-run`,
+then repeat without `--dry-run` during an authorized maintenance window.
+The saved conversion journal identifies generated source defaults; custom paths
+are preserved unless selected with `--model-cache` or `--environment-cache`.
+The preview shows both paths, retained allocated bytes and available disk space.
+Installation requires a disabled or drained, idle, Healthy host. It uses the
+normal saved-config overlay and install rollback, including same-binary
+reconfiguration. Limits stay unchanged, old directories remain intact, and
+environments at the new root will be prepared again. An ordinary upgrade keeps
+saved cache paths; this option does not copy or delete cache contents. Keep the
+journal and old directories for rollback; cleanup needs separate authorization.
+
 Shared-field conflicts require a named explicit installer flag; budgets are
-never added. The private `MACHINE_CONFIG.m4-rollback.json` journal contains exact
+never added. Conversion reads a legacy source's persisted
+`host_state_dir/host-state.json` allowance before comparing shared settings;
+that effective value wins over stale installer flags. Missing/invalid allowance
+in a local-control source refuses with `machine_memory_allowance_unavailable`;
+use an explicit `--host-memory-budget-gb` only after establishing the intended
+allowance. Sources without retired local-control configuration retain their
+saved queue bootstrap value. Existing queue-owned policy remains authoritative
+and is never replaced by later worker reports. The private
+`MACHINE_CONFIG.m4-rollback.json` journal contains exact
 original file bytes/modes and unit registration/activity. Preserve it securely.
 Interrupted worker conversion requires its rollback command before retry.
 
