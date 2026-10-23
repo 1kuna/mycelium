@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,7 +18,9 @@ import (
 // Retains the round 2 review reproduction: an earlier consumer must restart
 // with the HTTP helper when the helper loses its port at final exec approval.
 func TestNativeGroupEarlierConsumerEndpoint(t *testing.T) {
-	q, _ := fixture(t)
+	q, initial := fixture(t)
+	clock := &workerFakeClock{now: initial.Now()}
+	q.clock = clock
 	s := nativeSpec(t)
 	s.Priority = "production"
 	s.SubmissionKey = "round2-earlier-consumer"
@@ -44,7 +45,7 @@ func TestNativeGroupEarlierConsumerEndpoint(t *testing.T) {
 	var oldURL string
 	var oldGroup int
 	api := API{Queue: q, Token: "review-synthetic"}.Handler()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		call := int32(0)
 		if r.URL.Path == "/api/workers/launch" {
 			call = n.Add(1)
@@ -79,14 +80,13 @@ func TestNativeGroupEarlierConsumerEndpoint(t *testing.T) {
 			}
 		}
 		api.ServeHTTP(w, r)
-	}))
-	defer server.Close()
+	})
 	defer func() {
 		if stolen != nil {
 			stolen.Close()
 		}
 	}()
-	worker := Worker{Clock: RealClock{}, StateDir: stateDir, Machine: m, Client: Client{URL: server.URL, Token: "review-synthetic"}, HostMemorySource: func(context.Context) (float64, error) { return 64, nil }}
+	worker := Worker{Clock: clock, StateDir: stateDir, Machine: m, Client: nativeFixtureClient(handler), HostMemorySource: func(context.Context) (float64, error) { return 64, nil }}
 	store, e := worker.openStore()
 	if e != nil {
 		t.Fatal(e)

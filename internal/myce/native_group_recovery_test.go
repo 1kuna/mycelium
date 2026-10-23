@@ -139,7 +139,9 @@ func TestNativeGroupPortHandoff(t *testing.T) {
 
 func nativePortHandoff(t *testing.T, collisions int) Result {
 	t.Helper()
-	q, _ := fixture(t)
+	q, initial := fixture(t)
+	clock := &workerFakeClock{now: initial.Now()}
+	q.clock = clock
 	s := nativeSpec(t)
 	s.Run.Env["NATIVE_TEST_BLOCK"] = "0"
 	s.Priority = "production"
@@ -160,7 +162,7 @@ func nativePortHandoff(t *testing.T, collisions int) Result {
 	var stolen []net.Listener
 	var stealErr error
 	api := API{Queue: q, Token: "review-synthetic"}.Handler()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/api/workers/launch" {
 			call := n.Add(1)
 			if call >= 3 && call <= int32(3*collisions) && call%3 == 0 {
@@ -199,14 +201,13 @@ func nativePortHandoff(t *testing.T, collisions int) Result {
 			}
 		}
 		api.ServeHTTP(w, r)
-	}))
-	defer server.Close()
+	})
 	defer func() {
 		for _, l := range stolen {
 			l.Close()
 		}
 	}()
-	w := Worker{Clock: RealClock{}, StateDir: stateDir, Machine: m, Client: Client{URL: server.URL, Token: "review-synthetic"}, HostMemorySource: func(context.Context) (float64, error) { return 64, nil }}
+	w := Worker{Clock: clock, StateDir: stateDir, Machine: m, Client: nativeFixtureClient(handler), HostMemorySource: func(context.Context) (float64, error) { return 64, nil }}
 	w.memoryCeilings = ceilings
 	store, e := w.openStore()
 	if e != nil {
@@ -360,4 +361,14 @@ func TestNativeGroupRecoveryBirthMismatch(t *testing.T) {
 	if _, err := processBirth(st.PID); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("authenticated group survived recovery", err)
 	}
+}
+
+// Exercise the real API without an HTTP deadline around test-only process and
+// filesystem inspection. Real processes, port theft and custody remain intact.
+func nativeFixtureClient(handler http.Handler) Client {
+	return Client{URL: "http://native-fixture", Token: "review-synthetic", HTTP: &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, r)
+		return recorder.Result(), nil
+	})}}
 }
