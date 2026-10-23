@@ -4,33 +4,32 @@
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.svg">
-  <img alt="Your machines (a gaming PC, a Mac mini, a laptop and an AI box) join one Mycelium. Each job you send goes to a free machine with the right hardware." src="docs/assets/how-it-works.svg">
+  <img alt="Your machines (a desktop, a mini PC, a laptop and a server) join one Mycelium. Each job you send goes to a free machine with the right hardware." src="docs/assets/how-it-works.svg">
 </picture>
 
-Maybe you have a gaming PC, a Mac mini, a laptop and an AI box. Mycelium links
-them together. You hand it a job, and it runs that job on whichever machine is
-free and has the right hardware. Files pass between machines through your
-shared network drive, so you never have to pick a machine or copy anything by hand.
+Mycelium links your computers together. You hand it a job, and it runs that job
+on whichever machine is free and has the right hardware. You never have to pick
+a machine yourself.
 
 Like the fungus it's named after, it's one network with many branches, and each
 of your computers is a branch.
 
 ## What it's for
 
-- **Transcribing recordings.** In a real run, one 25-minute recording was split
-  across three machines. Speech-to-text ran on an Nvidia PC, telling the
-  speakers apart ran on an Intel GPU box, and the final document was written on a
-  Mac mini. Nobody chose where any step ran.
-- **Training and testing AI or robot models** on whichever GPU is idle.
-- **Running lots of AI prompts** against models on your own hardware.
-- **Anything else you'd run in a terminal:** rendering, converting video,
-  building code, crunching data. It isn't just for AI.
-- **Using spare power politely.** Mark a computer as in daily use, and jobs wait
-  until you step away from it.
-- **Growing in one step.** Adding a machine takes one pasted command.
+- **Run any command or script** on whichever machine is free and has the
+  hardware it needs.
+- **Put idle computers to work** instead of leaving their power unused.
+- **Share files between machines** through your network drive, without copying
+  them by hand.
+- **Keep the computers you use responsive.** Mark a machine as in daily use,
+  and it only takes work while you're away.
+- **Grow easily.** Your agent adds each new machine with one command.
+- **Use what you have:** Nvidia, Intel or Apple GPUs, or just a CPU, on Linux
+  and Apple Silicon Macs.
 
-It works with Nvidia, Intel and Apple GPUs, or just a CPU, on Linux and Apple
-Silicon Macs. Coming next: Windows, and splitting one huge job across several GPUs.
+For example: ML training, simulations, rendering, data processing or builds.
+
+Coming next: Windows, and splitting one huge job across several GPUs.
 
 ## Set it up with your AI agent
 
@@ -48,7 +47,7 @@ print or commit the secret token.
 The agent installs the hub, adds your other machines, checks that each one shows
 up, and runs a test job. Before you start, you need:
 
-- Linux or Apple Silicon Mac computers on the same home network
+- Linux or Apple Silicon Mac computers on the same local network
 - A shared network drive (NAS) mounted on each one
 - Working GPU drivers, if a machine has a GPU
 
