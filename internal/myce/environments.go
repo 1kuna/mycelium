@@ -587,9 +587,9 @@ func environmentDiskUsage(paths ...string) (int64, error) {
 	return size, nil
 }
 
-// Download objects have their own bounded cache; env admission counts all stable,
-// building and retired prefixes together so linked wheels are never multiplied.
-func (c *EnvironmentCache) diskUsage() (int64, error) {
+// DiskUsage reports allocated bytes across stable, building and retired prefixes.
+// Download objects have their own bounded cache. Shared inodes count once.
+func (c *EnvironmentCache) DiskUsage() (int64, error) {
 	entries, err := os.ReadDir(c.Root)
 	if err != nil {
 		return 0, err
@@ -664,7 +664,7 @@ func (c *EnvironmentCache) admit(key string, size int64) error {
 		at  time.Time
 	}
 	candidates := []entry{}
-	total, e := c.diskUsage()
+	total, e := c.DiskUsage()
 	if e != nil {
 		return e
 	}
@@ -709,7 +709,7 @@ func (c *EnvironmentCache) admit(key string, size int64) error {
 				return e
 			}
 			// Removing one link may free no blocks: measure the remaining inode union.
-			total, e = c.diskUsage()
+			total, e = c.DiskUsage()
 			if e != nil {
 				return e
 			}
