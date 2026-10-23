@@ -137,12 +137,22 @@ func (d *dockerAttempt) observeDockerEvents() func() {
 				err = cmd.Start()
 				if err == nil {
 					readDone := make(chan struct{})
+					readExpired := make(chan bool, 1)
 					go func() {
 						select {
 						case <-ctx.Done():
-							_ = stdout.Close()
+							// KILL closes the CLI's writer. Let Scanner drain
+							// buffered events before closing our reader.
+							select {
+							case <-readDone:
+							case <-time.After(time.Second):
+								_ = stdout.Close()
+								readExpired <- true
+								return
+							}
 						case <-readDone:
 						}
+						readExpired <- false
 					}()
 					scanner := bufio.NewScanner(stdout)
 					scanner.Buffer(make([]byte, 4096), dockerEventLineLimit)
@@ -154,6 +164,9 @@ func (d *dockerAttempt) observeDockerEvents() func() {
 						}
 					}
 					close(readDone)
+					if <-readExpired {
+						w.archive.Cause = &RuntimeCause{Operation: "events", Class: "timeout"}
+					}
 					if err = errors.Join(err, scanner.Err()); err != nil {
 						if ctx.Err() == nil {
 							w.archive.Cause = runtimeDiagnostic(runtimeErrorFor("events", err))
