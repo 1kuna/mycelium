@@ -32,7 +32,7 @@ the command. A polite waiting enrollment succeeds without claiming work is ready
 
 ## Try it on a laptop
 
-Follow the [README quick start](../README.md#five-minute-laptop-start). Keep dev
+Follow the [laptop quick start](try-it-locally.md#five-minute-start). Keep dev
 running and use its loopback address and synthetic `dev-token` only for the demo.
 Use a fresh working directory for isolated state; if port 7331 is occupied, choose
 another free port via `dev --listen 127.0.0.1:PORT` and use that port in callers.

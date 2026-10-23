@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="400" viewBox="0 0 900 400" role="img" aria-labelledby="title desc">
+  <title id="title">How Mycelium works</title>
+  <desc id="desc">Four computers (a gaming PC, a Mac mini, a laptop and an AI box) join one Mycelium. Jobs come in on the right, and each is sent to a free machine with the right hardware.</desc>
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif; }
+    .h { font-size: 13px; font-weight: 600; letter-spacing: 0.08em; fill: #9198a1; }
+    .t { font-size: 16px; font-weight: 600; fill: #e6edf3; }
+    .s { font-size: 13px; fill: #9198a1; }
+    .card { fill: #161b22; stroke: #3d444d; stroke-width: 1.5; }
+    .icon { fill: none; stroke: #e6edf3; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+    .hub { fill: #238636; }
+    .hubt { font-size: 24px; font-weight: 700; fill: #ffffff; }
+    .hubs { font-size: 14px; fill: #ffffff; opacity: 0.9; }
+    .wire { fill: none; stroke-width: 3; stroke-linecap: round; }
+    .foot { font-size: 14px; fill: #9198a1; }
+  </style>
+  <defs>
+    <marker id="a-teal" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0L10 5L0 10z" fill="#12a594"/></marker>
+    <marker id="a-amber" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0L10 5L0 10z" fill="#d4880f"/></marker>
+    <marker id="a-blue" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0L10 5L0 10z" fill="#2f81f7"/></marker>
+    <marker id="a-violet" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0L10 5L0 10z" fill="#8957e5"/></marker>
+  </defs>
+
+  <text class="h" x="20" y="34">YOUR MACHINES</text>
+  <text class="h" x="880" y="34" text-anchor="end">YOUR JOBS</text>
+
+  <!-- Wires: hub to machines (each job's colour shows where it ran) -->
+  <path class="wire" stroke="#12a594" d="M360 172 C 318 172, 318 81, 276 81" marker-end="url(#a-teal)"/>
+  <path class="wire" stroke="#d4880f" d="M360 197 C 318 197, 318 161, 276 161" marker-end="url(#a-amber)"/>
+  <path class="wire" stroke="#2f81f7" d="M360 223 C 318 223, 318 241, 276 241" marker-end="url(#a-blue)"/>
+  <path class="wire" stroke="#8957e5" d="M360 248 C 318 248, 318 321, 276 321" marker-end="url(#a-violet)"/>
+
+  <!-- Wires: jobs to hub (arrowheads only point at machines) -->
+  <path class="wire" stroke="#12a594" d="M630 81 C 588 81, 588 172, 546 172"/>
+  <path class="wire" stroke="#8957e5" d="M630 161 C 588 161, 588 248, 546 248"/>
+  <path class="wire" stroke="#d4880f" d="M630 241 C 588 241, 588 197, 546 197"/>
+  <path class="wire" stroke="#2f81f7" d="M630 321 C 588 321, 588 223, 546 223"/>
+
+  <!-- Machines -->
+  <g>
+    <rect class="card" x="20" y="50" width="250" height="62" rx="12"/>
+    <rect class="icon" x="40" y="62" width="24" height="38" rx="3"/>
+    <circle class="icon" cx="52" cy="87" r="6"/>
+    <line class="icon" x1="46" y1="70" x2="58" y2="70"/>
+    <text class="t" x="84" y="77">Gaming PC</text>
+    <text class="s" x="84" y="97">Nvidia graphics card</text>
+  </g>
+  <g>
+    <rect class="card" x="20" y="130" width="250" height="62" rx="12"/>
+    <rect class="icon" x="36" y="149" width="32" height="18" rx="5"/>
+    <line class="icon" x1="40" y1="173" x2="64" y2="173"/>
+    <text class="t" x="84" y="157">Mac mini</text>
+    <text class="s" x="84" y="177">Apple chip</text>
+  </g>
+  <g>
+    <rect class="card" x="20" y="210" width="250" height="62" rx="12"/>
+    <rect class="icon" x="40" y="226" width="24" height="18" rx="2"/>
+    <path class="icon" d="M35 251 H69 L66 246 H38 Z"/>
+    <text class="t" x="84" y="237">Laptop</text>
+    <text class="s" x="84" y="257">Helps when you're away</text>
+  </g>
+  <g>
+    <rect class="card" x="20" y="290" width="250" height="62" rx="12"/>
+    <rect class="icon" x="36" y="306" width="32" height="30" rx="4"/>
+    <line class="icon" x1="43" y1="315" x2="61" y2="315"/>
+    <line class="icon" x1="43" y1="321" x2="61" y2="321"/>
+    <line class="icon" x1="43" y1="327" x2="61" y2="327"/>
+    <text class="t" x="84" y="317">AI box</text>
+    <text class="s" x="84" y="337">Big GPU for heavy work</text>
+  </g>
+
+  <!-- Hub -->
+  <rect class="hub" x="360" y="150" width="186" height="120" rx="24"/>
+  <text class="hubt" x="453" y="205" text-anchor="middle">Mycelium</text>
+  <text class="hubs" x="453" y="230" text-anchor="middle">one big computer</text>
+
+  <!-- Jobs -->
+  <g>
+    <rect class="card" x="630" y="50" width="250" height="62" rx="12" style="stroke:#12a594"/>
+    <text class="t" x="648" y="77">Transcribe a recording</text>
+    <text class="s" x="648" y="97">needs an Nvidia GPU</text>
+  </g>
+  <g>
+    <rect class="card" x="630" y="130" width="250" height="62" rx="12" style="stroke:#8957e5"/>
+    <text class="t" x="648" y="157">Train a robot</text>
+    <text class="s" x="648" y="177">needs lots of GPU memory</text>
+  </g>
+  <g>
+    <rect class="card" x="630" y="210" width="250" height="62" rx="12" style="stroke:#d4880f"/>
+    <text class="t" x="648" y="237">Render a document</text>
+    <text class="s" x="648" y="257">runs best on a Mac</text>
+  </g>
+  <g>
+    <rect class="card" x="630" y="290" width="250" height="62" rx="12" style="stroke:#2f81f7"/>
+    <text class="t" x="648" y="317">Build some code</text>
+    <text class="s" x="648" y="337">any free CPU will do</text>
+  </g>
+
+  <text class="foot" x="450" y="388" text-anchor="middle">Each job goes to a free machine that has the right hardware.</text>
+</svg>

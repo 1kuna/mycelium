@@ -1,98 +1,70 @@
-# Mycelium v3
+# Mycelium
 
-One shared queue for GPU commands, OpenAI-format model calls and general HTTP
-model servers. One Go binary, one SQLite database, plain-command workers and a
-read-only status page. CPU callers and publication stay outside the queue.
-The [approved design](docs/design-proposal.md) is the only product spec.
+**Turn the computers you already own into one big computer.**
 
-Start with [the integration guide](docs/START-HERE.md), [job/CLI reference](docs/job-reference.md)
-or [operations](docs/operations.md). v3 includes authenticated joining, capability
-profiles, qualified extensions, polite daily-use workers, measured placement,
-verified file transport, software environments, pins and memory admission.
-These are one runtime; no separate experimental branch is required.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/how-it-works-dark.svg">
+  <img alt="Your machines (a gaming PC, a Mac mini, a laptop and an AI box) join one Mycelium. Each job you send goes to a free machine with the right hardware." src="docs/assets/how-it-works.svg">
+</picture>
 
-## Five-minute laptop start
+Maybe you have a gaming PC, a Mac mini, a laptop and an AI box. Mycelium links
+them together. You hand it a job, and it runs that job on whichever machine is
+free and has the right hardware. Files pass between machines through your
+shared network drive, so you never have to pick a machine or copy anything by hand.
 
-You need Go 1.25.6+ and a Unix shell. Fake GPUs provide inventory; commands really
-execute. No GPU, Python, container or remote machine is needed. From the checkout:
+Like the fungus it's named after, it's one network with many branches, and each
+of your computers is a branch.
 
-```sh
-go build -o myce ./cmd/myce
-./myce dev --workers 2 --token dev-token
+## What it's for
+
+- **Transcribing recordings.** In a real run, one 25-minute recording was split
+  across three machines. Speech-to-text ran on an Nvidia PC, telling the
+  speakers apart ran on an Intel GPU box, and the final document was written on a
+  Mac mini. Nobody chose where any step ran.
+- **Training and testing AI or robot models** on whichever GPU is idle.
+- **Running lots of AI prompts** against models on your own hardware.
+- **Anything else you'd run in a terminal:** rendering, converting video,
+  building code, crunching data. It isn't just for AI.
+- **Using spare power politely.** Mark a computer as in daily use, and jobs wait
+  until you step away from it.
+- **Growing in one step.** Adding a machine takes one pasted command.
+
+It works with Nvidia, Intel and Apple GPUs, or just a CPU, on Linux and Apple
+Silicon Macs. Coming next: Windows, and splitting one huge job across several GPUs.
+
+## Set it up with your AI agent
+
+Open Claude Code, Codex or another coding agent on the computer that should be
+the hub (one that stays on), and paste this:
+
+```text
+Set up Mycelium on my computers. Clone https://github.com/1kuna/mycelium,
+then read docs/agent-setup.md and follow it step by step. Ask me which
+computer is the hub, which others to add, and where my shared network drive
+is mounted on each. Show me every install plan before running it, and never
+print or commit the secret token.
 ```
 
-Dev is a long-running server at `http://127.0.0.1:7331`, with two 64-GiB fake
-workers and a fake `dev-model`. Keep it running. In another terminal:
+The agent installs the hub, adds your other machines, checks that each one shows
+up, and runs a test job. Before you start, you need:
+
+- Linux or Apple Silicon Mac computers on the same home network
+- A shared network drive (NAS) mounted on each one
+- Working GPU drivers, if a machine has a GPU
+
+## Try it without any setup
+
+On one laptop with [Go](https://go.dev/dl/) installed, from a clone of this repo,
+start a pretend cluster with fake GPUs. The jobs really run.
 
 ```sh
-export MYCE_QUEUE=http://127.0.0.1:7331
-export MYCE_TOKEN=dev-token
-cat > job.yaml <<'YAML'
-name: hello-queue
-project: demo
-priority: experiment
-submission_key: demo-hello-1
-run:
-  command: [sh, -c, 'echo "job=$MYCE_JOB_ID attempt=$MYCE_ATTEMPT"; echo done']
-needs:
-  memory_gb: 1
-  platform: any
-resumable: false
-YAML
-id=$(./myce submit job.yaml)
-./myce wait "$id" --timeout 30s
-./myce logs "$id"
-./myce status
+go build -o myce ./cmd/myce && ./myce dev
+# in a second terminal:
+MYCE_QUEUE=http://127.0.0.1:7331 MYCE_TOKEN=dev-token ./myce run -- echo hello
 ```
 
-Retrying this identical keyed submission returns the same job, including after
-completion. A changed spec with that key returns `submission_key_conflict`.
-Use a new key for new work. [Integration examples](docs/integrating.md) cover
-lost replies, cancellation, retention and owner switches. Ctrl-C stops dev;
-its database, checkpoints and worker spools persist. Use a fresh isolated
-working directory for a new independent demo.
+## More
 
-## Host ownership and installation
-
-[Operations](docs/operations.md) covers installation and queue-owned maintenance.
-`myce host drain HOST` pauses admission, `host disable HOST --stop --wait`
-requests exact cleanup, and `host resume HOST` restores admission. `host status
-HOST` reports worker freshness, RAM/debt and pending custody. Missing reports or
-queue outage cannot prove quiescence. All commands run as an ordinary account;
-there is no privileged local controller or offline rest certificate.
-
-## Models, files and workers
-
-Call the fake model in dev:
-
-```sh
-curl "$MYCE_QUEUE/v1/chat/completions" \
-  -H "Authorization: Bearer $MYCE_TOKEN" -H 'Content-Type: application/json' \
-  -H 'X-Myce-Project: demo' -H 'X-Myce-Priority: experiment' \
-  -d '{"model":"dev-model","messages":[{"role":"user","content":"Hello"}]}'
-```
-
-Real models use explicitly provisioned, verified content and declared environments.
-[Model calls](docs/guide-model-calls.md), [general servers](docs/guide-servers.md),
-[environments](docs/environments.md), [files](docs/guide-files-v3.md) and
-[resumable commands](docs/guide-resumable-jobs.md) document these paths.
-[Joining](docs/guide-joining-v3.md) discovers addresses using a private pinned
-invitation; discovery does not establish trust. Jobs never inherit `MYCE_TOKEN`.
-Only run trusted commands: workers use the installed account's permissions.
-
-## Build and verify
-
-```sh
-go build -o myce ./cmd/myce
-go vet ./...
-go test ./... -race -count=1 -timeout 30m
-```
-
-Serialize full race-suite runs. `./myce dev` starts the real API and command
-runner with fake GPU inventory; it does not exit by itself. The executable
-end-to-end tests exercise actual commands and checkpoint preemption/recovery.
-Native GPU, daemon, systemd identity, boot and application checks remain separate
-in the [native test plan](docs/production-test-plan.md). Laptop success is not
-deployment or native qualification.
-
-To wrap an existing app, give your agent the [extension creation instructions](docs/extensions/AGENT-GUIDE.md).
+[Guides](docs/START-HERE.md) · [Agent setup](docs/agent-setup.md) ·
+[Laptop walkthrough](docs/try-it-locally.md) · [Running jobs](docs/job-reference.md) ·
+[Operations](docs/operations.md) · [Design](docs/design-proposal.md)

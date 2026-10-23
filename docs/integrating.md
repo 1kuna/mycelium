@@ -9,7 +9,7 @@ submissions. CPU preparation and publication stay in the consumer.
 
 ## Keyed submission and cancellation
 
-Start the [laptop dev queue](../README.md#five-minute-laptop-start). Persist the
+Start the [laptop dev queue](try-it-locally.md#five-minute-start). Persist the
 key and identical spec in the consumer before the first request. For this demo:
 
 ```sh
