@@ -11,25 +11,19 @@ if [[ $mode == quick && ${MYCE_GATE_BUDGET:-} != 1 ]]; then
   exec python3 "$repo/scripts/gate-budget.py" "$repo/scripts/gate.sh" "$@"
 fi
 export GOTOOLCHAIN=local GOTELEMETRY=off
-case "$(uname -s)" in
-  Darwin) test -x /usr/bin/trash ;;
-  *) command -v trash-put >/dev/null ;;
-esac
-# Read caches only to seed private copies; builds/tests never write user caches.
-seed_build=$(go env GOCACHE)
-seed_modules=$(go env GOMODCACHE)
-gate_user_home=$HOME
+# Share Go's build and module caches across runs and worktrees (Go locks them
+# safely). Per-run private copies cost 1-3 GB each and filled the disk (2026-10-23).
+shared_build=$(go env GOCACHE)
+shared_modules=$(go env GOMODCACHE)
 mkdir -p "$repo/.gate"
 scratch=$(mktemp -d "$repo/.gate/run.XXXXXX")
 started=$SECONDS
 cleanup() {
   status=$?
   trap - EXIT
-  # Recoverable cleanup after tests have joined their children.
-  case "$(uname -s)" in
-    Darwin) env HOME="$gate_user_home" /usr/bin/trash "$scratch" || status=1 ;;
-    *) env HOME="$gate_user_home" trash-put "$scratch" || status=1 ;;
-  esac
+  # Scratch is rebuildable test state (fake HOME, temp files): delete it outright.
+  chmod -R u+w "$scratch" 2>/dev/null || true
+  rm -rf "$scratch" || status=1
   if [[ -d $scratch ]]; then echo "gate scratch retained: $scratch" >&2; fi
   echo "gate $mode: exit=$status wall=$((SECONDS-started))s"
   exit "$status"
@@ -39,20 +33,9 @@ if [[ $mode == quick ]]; then
   git rev-parse --verify "$base" >/dev/null
   python3 scripts/gate-related.py "$base" > "$scratch/selection"
 fi
-mkdir -p "$scratch"/{home,tmp,gocache,modcache,gopath,bin}
-copy_cache() {
-  if [[ -d $1 ]]; then
-    case "$(uname -s)" in
-      Darwin) cp -cR "$1/." "$2/" ;;
-      Linux) cp -a --reflink=auto "$1/." "$2/" ;;
-      *) cp -R "$1/." "$2/" ;;
-    esac
-  fi
-}
-copy_cache "$seed_build" "$scratch/gocache"
-copy_cache "$seed_modules" "$scratch/modcache"
+mkdir -p "$scratch"/{home,tmp,gopath,bin}
 export HOME="$scratch/home" USERPROFILE="$scratch/home" TMPDIR="$scratch/tmp"
-export GOCACHE="$scratch/gocache" GOMODCACHE="$scratch/modcache" GOPATH="$scratch/gopath"
+export GOCACHE="$shared_build" GOMODCACHE="$shared_modules" GOPATH="$scratch/gopath"
 export XDG_CONFIG_HOME="$HOME/.config" XDG_CACHE_HOME="$HOME/.cache" XDG_DATA_HOME="$HOME/.local/share"
 export GOTOOLCHAIN=local GOTELEMETRY=off GOPROXY=off GOSUMDB=off GOENV=off GOWORK=off
 export UV_OFFLINE=1 UV_PYTHON_DOWNLOADS=never UV_CACHE_DIR="$scratch/uv" PIXI_HOME="$scratch/pixi"

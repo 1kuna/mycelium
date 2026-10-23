@@ -28,14 +28,14 @@ target is ten minutes. Timings
 include build, vet, the three release target builds, test execution and scratch
 cleanup.
 
-Go 1.25.6, a native macOS arm64 toolchain (for the CGO release target), `uv`,
-Python 3, and `/usr/bin/trash` are current laptop prerequisites. Install
-prerequisites separately: the gate runs offline and never downloads tools or
-modules. Seed dependencies with your usual `go mod download` before running a
-first gate. Caches are copied into an ignored `.gate/run.*` workspace; HOME,
-TMPDIR, GOCACHE, GOMODCACHE and GOPATH all point inside it. On APFS this uses
-copy-on-write clones. The owned workspace goes to Trash on exit, so this is
-recoverable cleanup, not physical disk reclamation. Failure logs belong in an
+Go 1.25.6, a native macOS arm64 toolchain (for the CGO release target), `uv`
+and Python 3 are current laptop prerequisites. Install prerequisites separately:
+the gate runs offline and never downloads tools or modules. Seed dependencies
+with your usual `go mod download` before running a first gate. The gate shares
+Go's normal build and module caches (Go locks them safely across concurrent
+runs); only HOME, TMPDIR and GOPATH point inside an ignored `.gate/run.*`
+workspace, which is deleted on exit because it holds only rebuildable test state.
+Failure logs belong in an
 ignored `.reports/` folder (for example redirect stdout/stderr there).
 
 Before a full run, use `pgrep -fl 'go test'` and wait if two full race suites are
