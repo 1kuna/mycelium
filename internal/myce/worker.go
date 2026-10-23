@@ -19,6 +19,10 @@ import (
 	"time"
 )
 
+// Ordinary builds use the real NAS preparation; package fixtures replace it
+// before workers start. A worker override still exercises storage faults.
+var workerCheckpointPrepare = prepareCheckpoint
+
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {

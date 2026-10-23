@@ -10,10 +10,6 @@ var workerOwnerSignals = LocalOwnerSignals
 
 var workerMachineProbe = LocalMachineProbe
 
-// Ordinary builds use the real NAS preparation; package fixtures replace it
-// before workers start. A worker override still exercises storage faults.
-var workerCheckpointPrepare = prepareCheckpoint
-
 // WorkerProbeDefaults groups host sources used when a worker has no override.
 // Embedded callers may inject these before starting any worker goroutines.
 type WorkerProbeDefaults struct {
