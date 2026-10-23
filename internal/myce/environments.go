@@ -367,6 +367,15 @@ type EnvironmentCache struct {
 	Clock   Clock
 	Fetch   func(context.Context, FileRef, string) error
 	Run     func(context.Context, []string, string, []string, io.Writer, io.Writer) error
+	// DownloadLimit is separate from the prepared-environment limit.
+	DownloadLimit int64
+}
+
+const environmentRecentWindow = 24 * time.Hour
+
+func (c *EnvironmentCache) recent(path string) bool {
+	st, err := os.Stat(filepath.Join(path, "ready.json"))
+	return err == nil && c.Clock.Now().Sub(st.ModTime()) < environmentRecentWindow
 }
 
 func (c *EnvironmentCache) init() error {
@@ -403,6 +412,9 @@ func (c *EnvironmentCache) init() error {
 			return
 		}
 		c.Root = root
+		if c.DownloadLimit == 0 {
+			c.DownloadLimit = 16 << 30
+		}
 		for _, p := range []string{filepath.Join(c.Root, "locks"), filepath.Join(c.Root, ".Trash")} {
 			if e := os.MkdirAll(p, 0700); e != nil {
 				c.initErr = e
@@ -494,8 +506,10 @@ func (c *EnvironmentCache) purgeRetired() (int64, error) {
 		if err == nil && build != nil {
 			path := filepath.Join(root, d.Name())
 			// Old interrupted builds may still have a recorded child to reap.
-			if err = c.cleanupBuild(path); err == nil {
-				err = os.RemoveAll(path)
+			if !c.recent(path) {
+				if err = c.cleanupBuild(path); err == nil {
+					err = os.RemoveAll(path)
+				}
 			}
 		}
 		unlockEnvironment(build)
@@ -636,6 +650,12 @@ func (c *EnvironmentCache) admit(key string, size int64) error {
 			return e
 		}
 		if syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) == nil {
+			// Recheck after locking: a just-finished attempt may have refreshed use.
+			if c.recent(filepath.Join(c.Root, v.key)) {
+				unlockEnvironment(f)
+				continue
+			}
+			log.Printf("environment eviction key=%s reason=cache_limit", v.key)
 			e = c.trash(filepath.Join(c.Root, v.key))
 			unlockEnvironment(f)
 			if e != nil {
@@ -677,6 +697,8 @@ func (c *EnvironmentCache) Acquire(ctx context.Context, r EnvironmentRecipe) (st
 	var released sync.Once
 	release := func() {
 		released.Do(func() {
+			at := c.Clock.Now()
+			_ = os.Chtimes(filepath.Join(c.Root, r.Key, "ready.json"), at, at)
 			unlockEnvironment(use)
 			c.purgeReleased()
 		})
@@ -685,7 +707,19 @@ func (c *EnvironmentCache) Acquire(ctx context.Context, r EnvironmentRecipe) (st
 		release()
 		return "", nil, fmt.Errorf("%w: environment preparation required", errExtensionUnavailable)
 	}
-	if e = c.ensure(ctx, r); e != nil {
+	for attempt := 0; attempt < 2; attempt++ {
+		e = c.ensure(ctx, r)
+		if !errors.Is(e, errEnvironmentBuildStalled) || ctx.Err() != nil {
+			break
+		}
+		if attempt == 0 {
+			if f, err := os.OpenFile(filepath.Join(c.Root, r.Key+".build.log"), os.O_APPEND|os.O_WRONLY, 0600); err == nil {
+				fmt.Fprintln(f, "environment build watchdog: retry 1/1 using shared downloads")
+				_ = f.Close()
+			}
+		}
+	}
+	if e != nil {
 		release()
 		return "", nil, e
 	}
@@ -731,11 +765,11 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) erro
 	start := c.Clock.Now()
 	env := []string{}
 	for _, v := range os.Environ() {
-		if !strings.HasPrefix(v, "MYCE_TOKEN=") && !strings.HasPrefix(v, "PIXI_") && !strings.HasPrefix(v, "UV_CACHE_DIR=") && !strings.HasPrefix(v, "UV_PYTHON_INSTALL_DIR=") && !strings.HasPrefix(v, "UV_PROJECT_ENVIRONMENT=") {
+		if !strings.HasPrefix(v, "MYCE_TOKEN=") && !strings.HasPrefix(v, "PIXI_") && !strings.HasPrefix(v, "UV_CACHE_DIR=") && !strings.HasPrefix(v, "UV_PYTHON_INSTALL_DIR=") && !strings.HasPrefix(v, "UV_PROJECT_ENVIRONMENT=") && !strings.HasPrefix(v, "UV_HTTP_TIMEOUT=") && !strings.HasPrefix(v, "UV_HTTP_RETRIES=") && !strings.HasPrefix(v, "UV_NO_PROGRESS=") {
 			env = append(env, v)
 		}
 	}
-	env = append(env, "PIXI_CACHE_DIR="+filepath.Join(partial, "pixi-cache"), "PIXI_NO_PROGRESS=true", "UV_CACHE_DIR="+filepath.Join(partial, "uv-cache"), "UV_PYTHON_INSTALL_DIR="+filepath.Join(partial, "python"), "UV_PROJECT_ENVIRONMENT="+filepath.Join(partial, "venv"))
+	env = append(env, "PIXI_CACHE_DIR="+c.downloadCache("pixi"), "PIXI_NO_PROGRESS=true", "UV_CACHE_DIR="+c.downloadCache("uv"), "UV_HTTP_TIMEOUT=60", "UV_HTTP_RETRIES=3", "UV_PYTHON_INSTALL_DIR="+filepath.Join(partial, "python"), "UV_PROJECT_ENVIRONMENT="+filepath.Join(partial, "venv"))
 	run := c.Run
 	if run == nil {
 		run = c.runBuild
@@ -748,11 +782,26 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) erro
 			return custom(ctx, argv, dir, env, stdout, stderr)
 		}
 	}
+	if e = c.pruneDownloads(ctx, partial, env, output, run); e != nil {
+		return e
+	}
+	downloads, e := c.lock(ctx, "downloads", syscall.LOCK_SH)
+	if e != nil {
+		return e
+	}
+	defer func() { unlockEnvironment(downloads) }()
 
 	buildCtx, cancelBuild := context.WithCancel(ctx)
 	monitorDone := make(chan struct{})
 	monitorStop := make(chan struct{})
 	var budgetErr error
+	lastProgress := c.Clock.Now()
+	lastSample := lastProgress
+	logSize, cacheSize := int64(0), int64(0)
+	if st, err := output.Stat(); err == nil {
+		logSize = st.Size()
+	}
+	cacheSize, _ = environmentSize(filepath.Join(c.Root, ".downloads"))
 	go func() {
 		defer close(monitorDone)
 		ticker := time.NewTicker(250 * time.Millisecond)
@@ -762,6 +811,27 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) erro
 			case <-monitorStop:
 				return
 			case <-ticker.C:
+				now := c.Clock.Now()
+				if now.Sub(lastSample) >= 10*time.Second {
+					lastSample = now
+					st, statErr := output.Stat()
+					n, sizeErr := environmentSize(filepath.Join(c.Root, ".downloads"))
+					if errors.Is(sizeErr, os.ErrNotExist) {
+						continue // uv atomically renames cache objects while installing.
+					}
+					if statErr != nil || sizeErr != nil {
+						budgetErr = errors.Join(statErr, sizeErr)
+					} else if st.Size() > logSize || n > cacheSize {
+						lastProgress = now
+					} else if now.Sub(lastProgress) >= environmentBuildStallWindow {
+						budgetErr = errEnvironmentBuildStalled
+					}
+					if budgetErr != nil {
+						cancelBuild()
+						return
+					}
+					logSize, cacheSize = st.Size(), n
+				}
 				size, e := environmentSize(partial)
 				if errors.Is(e, os.ErrNotExist) {
 					continue
@@ -830,11 +900,11 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) erro
 		} else if r.Backend == "pixi" {
 			e = c.installPixi(buildCtx, r, partial, env, output, run)
 		} else if _, ok := r.Files["uv.lock"]; ok {
-			e = run(buildCtx, []string{"uv", "sync", "--frozen", "--no-dev", "--no-install-project", "--no-editable", "--python", r.Python}, partial, env, output, output)
+			e = run(buildCtx, []string{"uv", "sync", "--verbose", "--frozen", "--no-dev", "--no-install-project", "--no-editable", "--python", r.Python}, partial, env, output, output)
 		} else {
-			e = run(buildCtx, []string{"uv", "venv", "--python", r.Python, filepath.Join(partial, "venv")}, partial, env, output, output)
+			e = run(buildCtx, []string{"uv", "venv", "--verbose", "--python", r.Python, filepath.Join(partial, "venv")}, partial, env, output, output)
 			if e == nil {
-				e = run(buildCtx, []string{"uv", "pip", "sync", "--python", filepath.Join(partial, "venv", "bin", "python"), "requirements.txt"}, partial, env, output, output)
+				e = run(buildCtx, []string{"uv", "pip", "sync", "--verbose", "--python", filepath.Join(partial, "venv", "bin", "python"), "requirements.txt"}, partial, env, output, output)
 			}
 		}
 	}
@@ -868,6 +938,11 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) erro
 	}
 	stopMonitor()
 	e = errors.Join(e, budgetErr)
+	unlockEnvironment(downloads)
+	downloads = nil
+	if ctx.Err() == nil {
+		e = errors.Join(e, c.pruneDownloads(ctx, partial, env, output, run))
+	}
 	_ = output.Sync()
 	if e != nil {
 		fmt.Fprintln(output, "environment build failed:", e)

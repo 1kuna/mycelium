@@ -28,6 +28,10 @@ func TestEnvironmentRetiredPurgeProtectsReferences(t *testing.T) {
 	if err = os.WriteFile(filepath.Join(path, "payload"), make([]byte, 1<<20), 0600); err != nil {
 		t.Fatal(err)
 	}
+	old := time.Unix(1, 0)
+	if err = os.Chtimes(filepath.Join(path, "ready.json"), old, old); err != nil {
+		t.Fatal(err)
+	}
 	if err = c.trash(path); err != nil {
 		t.Fatal(err)
 	}

@@ -487,3 +487,32 @@ One-shot NAS install/reconfigure validation allows 10 seconds per filesystem
 operation within the existing 15-second total deadline, to accommodate SMB
 metadata/fsync latency. Heartbeat filesystem observation keeps its shorter
 budget; a stalled installation remains bounded and preserves installed state.
+
+Workers retain prepared environments for at least 24 hours after preparation or
+last use (including qualification checks and completion of long-running jobs).
+Active attempt/build locks also protect them. If protected entries fill the
+configured limit, preparation refuses capacity rather than evicting them.
+Evictions record the environment key and cache-limit reason in the worker log.
+
+Package downloads use persistent worker-wide `.downloads/uv` and
+`.downloads/pixi` caches under the configured environment-cache root. These bytes
+are excluded from the prepared-environment budget and have a separate 16 GiB
+combined high-water limit. Before and after builds, excess downloads are pruned
+with `uv cache prune --ci` and `pixi clean cache --yes`, while no Mycelium
+installer uses the shared cache. If standard pruning cannot bring the cache
+under budget, preparation fails with the remaining byte count. Active builds
+can temporarily exceed this waterline; the existing free-disk guard still
+applies. Pruning can require a future wheel download; installed environments
+are preserved. uv retains its default clone/hardlink mode (an explicit
+`UV_LINK_MODE` remains available); avoid symlink mode because pruning would break
+installed environments. Existing per-environment caches are not migrated or
+removed on upgrade.
+
+uv builds set `UV_HTTP_TIMEOUT=60` and `UV_HTTP_RETRIES=3`, supported by the
+pinned uv release, and log verbose download/cache activity. The build watchdog
+samples log and shared download-cache growth every ten seconds. Five minutes
+without growth cancels the exact recorded build process group, waits for cleanup
+and retries once with the persistent downloads. A second stall fails preparation
+with a diagnostic in the build log; cancellation never starts a retry. This
+watchdog also covers pixi and custom build steps. It does not impose a total
+build deadline on a build that continues making progress.
