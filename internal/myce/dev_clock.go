@@ -67,6 +67,9 @@ func (a API) registerDevClock(mux *http.ServeMux) {
 			var err error
 			now, err = clock.advance(request.Seconds)
 			if err == nil {
+				// Preserve Tick's observation window up to the last heartbeat's
+				// loss deadline before applying the advanced-time decisions.
+				a.Queue.accountUsage(now)
 				a.Queue.maintain()
 			}
 			return err
