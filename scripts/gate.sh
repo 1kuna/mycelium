@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Per change: ./scripts/gate.sh [quick [BASE]]; per batch/deploy: ... full.
 set -euo pipefail
+umask 022
 mode=${1:-quick}
 base=${2:-origin/integ/108}
 case "$mode" in quick|full) ;; *) echo 'usage: scripts/gate.sh [quick [BASE]|full]' >&2; exit 2;; esac
