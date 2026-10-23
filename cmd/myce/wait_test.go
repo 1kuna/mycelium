@@ -3,11 +3,13 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -30,12 +32,51 @@ func waitQueue(t *testing.T) (*myce.Queue, *waitClock, string, string) {
 	t.Helper()
 	clock := &waitClock{now: time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)}
 	db, checkpoints := filepath.Join(t.TempDir(), "queue.db"), t.TempDir()
-	q, err := myce.Open(db, checkpoints, clock)
+	return waitOpenQueue(t, db, checkpoints, clock), clock, db, checkpoints
+}
+
+func waitOpenQueue(t *testing.T, db, checkpoints string, clock *waitClock) *myce.Queue {
+	t.Helper()
+	// These fixtures exercise CLI protocols, not storage. Storage tests keep
+	// the real availability default by calling myce.Open directly.
+	q, err := myce.Open(db, checkpoints, clock, myce.WithCheckpointAvailability(func() bool { return true }))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { q.Close() })
-	return q, clock, db, checkpoints
+	return q
+}
+
+// Read the status API without running another mutation/probe that could hide
+// the availability observed by the failed check-in.
+func waitAssignmentDiagnostics(q *myce.Queue) string {
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest("GET", "/api/status", nil)
+	request.Header.Set("Authorization", "Bearer diagnostic-fixture")
+	myce.API{Queue: q, Token: "diagnostic-fixture"}.Handler().ServeHTTP(recorder, request)
+	var status myce.Snapshot
+	if err := json.Unmarshal(recorder.Body.Bytes(), &status); err != nil || recorder.Code != http.StatusOK {
+		return fmt.Sprintf("status_code=%d status_error=%v", recorder.Code, err)
+	}
+	var waiting, workers []string
+	for _, j := range status.Jobs {
+		waiting = append(waiting, fmt.Sprintf("id=%s state=%s reason=%q", j.ID, j.State, j.Reason))
+	}
+	for _, m := range status.Machines {
+		workers = append(workers, fmt.Sprintf("id=%s admission=%q checkpoint_unavailable=%t", m.ID, m.AdmissionReason, m.CheckpointUnavailable))
+	}
+	return fmt.Sprintf("waiting=%v nas_status=%q workers=%v", waiting, status.Warning, workers)
+}
+
+func TestWaitQueueIgnoresCheckpointStorage(t *testing.T) {
+	q, _, _, checkpoints := waitQueue(t)
+	// CLI outcome fixtures do not prepare checkpoints. A missing real root
+	// must not turn their synthetic assignment into a host I/O timing check.
+	if err := os.Rename(checkpoints, checkpoints+".offline"); err != nil {
+		t.Fatal(err)
+	}
+	waitSubmit(t, q)
+	waitFinish(t, q, true)
 }
 func waitSubmit(t *testing.T, q *myce.Queue) *myce.Job {
 	t.Helper()
@@ -53,9 +94,13 @@ func waitSubmit(t *testing.T, q *myce.Queue) *myce.Job {
 // A fake worker uses the real queue assignment/result protocol, without processes/GPU.
 func waitFinish(t *testing.T, q *myce.Queue, success bool) {
 	t.Helper()
-	// A bounded NAS probe may defer a check-in on a loaded laptop. Observe
-	// assignment before completing it, just as a real worker does. Keep the
-	// scheduling clock fixed while waiting for filesystem work to finish.
+	defer func() {
+		if t.Failed() {
+			t.Log(waitAssignmentDiagnostics(q))
+		}
+	}()
+	// Observe assignment before completing it, just as a real worker does.
+	// Keep the scheduling clock fixed while waiting.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	var reply myce.Reply
@@ -171,13 +216,7 @@ func TestWaitQueueRestartAndNetworkRecovery(t *testing.T) {
 			if d != 10*time.Second {
 				t.Fatal(d)
 			}
-			var e error
-			q, e = myce.Open(db, checkpoints, clock)
-			if e != nil {
-				t.Fatal(e)
-			}
-			deferClose := q
-			t.Cleanup(func() { deferClose.Close() })
+			q = waitOpenQueue(t, db, checkpoints, clock)
 			listener, e := net.Listen("tcp", address)
 			if e != nil {
 				t.Fatal(e)
@@ -304,7 +343,7 @@ func TestWaitCancellationWaitsForWorkerAcknowledgement(t *testing.T) {
 	j := waitSubmit(t, q)
 	reply, err := q.Checkin(myce.Checkin{Machine: myce.Machine{CapabilityProfile: &myce.CapabilityProfile{Version: 0, OS: "linux", Arch: "amd64", LogicalCPUs: 64, MemoryLayout: "separate", SystemMemoryBytes: 64 << 30, Accelerators: []myce.AcceleratorProfile{{Type: "fake", MemoryBytes: 64 << 30}}}, ID: "fake", Session: "session", GPU: "fake", FreeMemoryGB: 8}})
 	if err != nil || reply.Job == nil {
-		t.Fatalf("%v %+v", err, reply)
+		t.Fatalf("assignment: %v %+v %s", err, reply, waitAssignmentDiagnostics(q))
 	}
 	result := myce.Result{Machine: reply.Job.Machine, Session: reply.Job.Session, Execution: myce.Execution{ID: j.ID, Attempt: reply.Job.Attempt}}
 	if err = q.Started(result); err != nil {

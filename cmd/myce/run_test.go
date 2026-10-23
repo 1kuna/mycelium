@@ -52,7 +52,7 @@ func TestRunQueueOutcomesAndCancellation(t *testing.T) {
 						m.CPUIsolation = "select-none"
 						reply, err := q.Checkin(myce.Checkin{Machine: m})
 						if err != nil || reply.Job == nil {
-							t.Errorf("assignment: %+v %v", reply, err)
+							t.Errorf("assignment: %+v %v %s", reply, err, waitAssignmentDiagnostics(q))
 							w.WriteHeader(500)
 							return
 						}
