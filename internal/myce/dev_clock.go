@@ -59,12 +59,22 @@ func (a API) registerDevClock(mux *http.ServeMux) {
 		if !decode(w, r, &request) {
 			return
 		}
-		now, err := clock.advance(request.Seconds)
+		var now time.Time
+		// Advance inside the queue transaction: a heartbeat must not account at
+		// the old time and then stamp LastSeen at the new time. That would turn
+		// the skipped interval into observed usage on the next transaction.
+		err := a.Queue.update(func() error {
+			var err error
+			now, err = clock.advance(request.Seconds)
+			if err == nil {
+				a.Queue.maintain()
+			}
+			return err
+		})
 		if err == nil {
-			// Apply expiry/loss/deadline decisions before acknowledging the advance.
-			// A failed Tick cannot rewind a clock that other requests have observed.
-			err = a.Queue.Tick()
+			err = a.Queue.pruneBatchLogs()
 		}
+		// A failed transaction cannot rewind a clock other requests observed.
 		respond(w, struct {
 			Now time.Time `json:"now"`
 		}{now}, rejectIf("dev_clock_invalid", err))

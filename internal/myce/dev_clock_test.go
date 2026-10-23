@@ -195,3 +195,56 @@ func TestDevClockQueueDecisions(t *testing.T) {
 		}
 	})
 }
+
+type accountingInterleaveClock struct {
+	base             Clock
+	once             sync.Once
+	entered, release chan struct{}
+}
+
+func (c *accountingInterleaveClock) Now() time.Time {
+	value := c.base.Now()
+	c.once.Do(func() { close(c.entered); <-c.release })
+	return value
+}
+
+func TestDevClockAdvanceDuringCheckin(t *testing.T) {
+	q, _ := fixture(t)
+	clock := &devClock{}
+	q.clock = clock
+	m := machine("clock-worker", "fake")
+	check(t, q, m, nil)
+	handler := API{Queue: q, Token: "test"}.Handler()
+	gate := &accountingInterleaveClock{base: clock, entered: make(chan struct{}), release: make(chan struct{})}
+	q.clock = gate
+	done := make(chan error, 1)
+	go func() { _, err := q.Checkin(Checkin{Machine: m}); done <- err }()
+	<-gate.entered
+	// The next transaction has reached the availability seam, but the
+	// in-flight heartbeat still owns the queue and its old accounting time.
+	probeEntered := make(chan struct{})
+	q.checkpointProbe = func() bool { close(probeEntered); return true }
+	response := make(chan *httptest.ResponseRecorder, 1)
+	go func() { response <- clockRequest(handler, `{"seconds":2592001}`, "test") }()
+	<-probeEntered
+	clock.mu.Lock()
+	advancedDuringHeartbeat := clock.offset != 0
+	clock.mu.Unlock()
+	close(gate.release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if r := <-response; r.Code != 200 {
+		t.Fatal(r.Code, r.Body.String())
+	}
+	if advancedDuringHeartbeat {
+		t.Error("clock advanced during an in-flight heartbeat")
+	}
+	var samples int
+	if err := q.db.QueryRow("SELECT COUNT(*) FROM usage_samples").Scan(&samples); err != nil {
+		t.Fatal(err)
+	}
+	if samples > 10 {
+		t.Fatalf("clock advance fabricated coverage across outage: %d samples", samples)
+	}
+}
