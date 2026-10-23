@@ -105,8 +105,29 @@ func CheckExtension(ctx context.Context, root string, e Extension, platform, dev
 	}
 	defer commandLog.Close()
 	log = io.MultiWriter(log, commandLog)
+	// Starting a check revokes qualification, not successful local setup. In
+	// particular, a repaired local setup must remain usable when an earlier
+	// automatic preparation is negative-cached. The queue still checks every
+	// required prefix and setup marker before assigning the check.
+	view, _ := e.forMachine(&m)
+	previous := readExtensionReports(root, e, platform)
+	localHost, _ := os.Hostname()
 	for _, work := range extensionWorks(e) {
 		r := newExtensionReport(e, &m, work)
+		// Frozen files are already installed. Without setup steps or assets,
+		// only ready environment prefixes remain, checked by the queue. This
+		// also repairs records cleared by an older check invocation.
+		r.Setup = len(view.Setup) == 0 && len(e.Assets) == 0
+		for _, old := range previous {
+			if old.Setup && old.Work == work && old.Digest == r.Digest && old.Platform == platform &&
+				extensionReportDevice(platform, old.Device) == extensionReportDevice(platform, device) &&
+				old.Fingerprint == r.Fingerprint && old.EnvironmentIdentity == r.EnvironmentIdentity &&
+				(old.Host == r.Host || old.Host == localHost) &&
+				(old.Target == nil && r.Target == nil || old.Target != nil && r.Target != nil && *old.Target == *r.Target) {
+				r.Setup = true
+				break
+			}
+		}
 		r.CheckID = ID()
 		reports = append(reports, r)
 	}
@@ -129,7 +150,6 @@ func CheckExtension(ctx context.Context, root string, e Extension, platform, dev
 		return reports, err
 	}
 	defer os.RemoveAll(scratch)
-	view, _ := e.forMachine(&m)
 	for i := range reports {
 		r := &reports[i]
 		b, hasBaseline := view.baseline(r.Work, platform)

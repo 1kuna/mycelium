@@ -86,7 +86,7 @@ func waitingReason(j *Job, machines map[string]*Machine, jobs map[string]*Job) s
 		if fits(j, m, memory) {
 			if memory == m.FreeMemoryGB {
 				if !environmentReady(j, m) {
-					return "building environment: " + j.Spec.Environment.Key()
+					return environmentWaitingReason(j, m)
 				}
 				return "waiting for a worker to pull this job"
 			}
@@ -140,4 +140,28 @@ func expired(t *time.Time, now time.Time) bool { return t != nil && !now.Before(
 
 func modelLoaded(j *Job, m *Machine) bool {
 	return j.Spec.Needs.Model != "" && slices.Contains(m.Models, j.Spec.Needs.Model)
+}
+
+// Extension checks have no job-level Environment name. Explain the frozen
+// preparation identity, including a negative-cached failure, instead of an
+// empty software label that suggests a build is still making progress.
+func environmentWaitingReason(j *Job, m *Machine) string {
+	label := j.Spec.Environment.Key()
+	if e := qualifiedExtension(j, m); e != nil {
+		label = extensionKey(*e)
+		key := extensionPreparationKey(*e, m)
+		for _, r := range m.EnvironmentReports {
+			if r.Key == key && (r.State == "failed" || r.State == "uploading") {
+				cause := r.Error
+				if cause == "" {
+					cause = "previous preparation failed; explicit setup required"
+				}
+				return "environment preparation blocked: " + label + ": " + cause
+			}
+		}
+	}
+	if label == "" {
+		label = j.Spec.workType()
+	}
+	return "building environment: " + label
 }

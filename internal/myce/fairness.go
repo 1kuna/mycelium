@@ -357,9 +357,9 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 		}
 		if !environmentReady(best, target) {
 			if busy {
-				base += "; environment not ready: " + best.Spec.Environment.Key()
+				base += "; " + strings.Replace(environmentWaitingReason(best, target), "building environment:", "environment not ready:", 1)
 			} else {
-				base = "building environment: " + best.Spec.Environment.Key()
+				base = environmentWaitingReason(best, target)
 			}
 		}
 		if winner.ID == best.ID {
