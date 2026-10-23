@@ -51,10 +51,12 @@ type Worker struct {
 	memoryCeilings        *memoryCeilings
 	MemorySwapMaxBytes    int64
 	DockerEndpoint        string
+	nativeListenerProbe   func(port string, group int) error
 
 	ContainerRetention *time.Duration
 	LogRetention       time.Duration
 	dockerCallTimeout  time.Duration
+	dockerCommand      func(context.Context, ...string) ([]byte, error)
 	Unit               string
 
 	SuperviseProcess bool

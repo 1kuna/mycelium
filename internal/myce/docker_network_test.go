@@ -1,9 +1,12 @@
 package myce
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -11,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"testing"
@@ -46,9 +50,9 @@ func TestDockerPrivateNetworkContract(t *testing.T) {
 	}
 }
 
-func fakeDockerNetwork(root string, args []string, mode string) bool {
+func fakeDockerNetwork(root string, args []string, mode string, out io.Writer) (bool, error) {
 	if args[0] != "network" {
-		return false
+		return false, nil
 	}
 	path := filepath.Join(root, "network")
 	switch args[1] {
@@ -61,24 +65,23 @@ func fakeDockerNetwork(root string, args []string, mode string) bool {
 		}
 		data, _ := json.Marshal(map[string]any{"Id": "net1", "Name": args[len(args)-1], "Driver": "bridge", "Internal": true, "Labels": map[string]string{"myce.attempt": label}, "Containers": map[string]any{}})
 		_ = os.WriteFile(path, data, 0600)
-		fmt.Println("net1")
+		fmt.Fprintln(out, "net1")
 	case "ls":
 		if mode == "hidden-network" {
-			return true
+			return true, nil
 		}
 		if _, err := os.Stat(path); err == nil {
-			fmt.Println("net1")
+			fmt.Fprintln(out, "net1")
 		}
 		if !strings.Contains(strings.Join(args, " "), "label=myce.attempt") {
 			if _, e := os.Stat(filepath.Join(root, "unlabeled-network")); e == nil {
-				fmt.Println("legacy-net")
+				fmt.Fprintln(out, "legacy-net")
 			}
 		}
 	case "inspect":
 		data, _ := os.ReadFile(path)
 		if len(data) == 0 {
-			fmt.Fprintln(os.Stderr, "Error: No such network: net1")
-			os.Exit(1)
+			return true, errors.New("Error: No such network: net1")
 		}
 		if mode == "hidden-network" {
 			var obj map[string]any
@@ -86,7 +89,7 @@ func fakeDockerNetwork(root string, args []string, mode string) bool {
 			obj["Labels"] = map[string]string{}
 			data, _ = json.Marshal(obj)
 		}
-		fmt.Printf("[%s]", data)
+		fmt.Fprintf(out, "[%s]", data)
 	case "disconnect":
 		data, _ := os.ReadFile(path)
 		var obj map[string]any
@@ -97,30 +100,28 @@ func fakeDockerNetwork(root string, args []string, mode string) bool {
 		_ = os.WriteFile(filepath.Join(root, "disconnected-"+args[len(args)-1]), nil, 0600)
 	case "rm":
 		if mode == "refuse-network-rm" {
-			fmt.Fprintln(os.Stderr, "Error response from daemon: network removal refused")
-			os.Exit(1)
+			return true, errors.New("Error response from daemon: network removal refused")
 		}
 		// A late labeled container races the first removal.
 		if mode == "late-network-container" {
 			if _, e := os.Stat(filepath.Join(root, "late-added")); e != nil {
 				_ = os.WriteFile(filepath.Join(root, "extra"), nil, 0600)
 				_ = os.WriteFile(filepath.Join(root, "late-added"), nil, 0600)
-				os.Exit(1)
+				return true, errors.New("late container")
 			}
 		}
 		data, _ := os.ReadFile(path)
 		var obj map[string]any
 		_ = json.Unmarshal(data, &obj)
 		if len(obj["Containers"].(map[string]any)) > 0 {
-			fmt.Fprintln(os.Stderr, "Error response from daemon: active endpoints")
-			os.Exit(1)
+			return true, errors.New("Error response from daemon: active endpoints")
 		}
 		_ = os.Rename(path, filepath.Join(root, "network-removed"))
-		fmt.Println("net1")
+		fmt.Fprintln(out, "net1")
 	}
-	return true
+	return true, nil
 }
-func fakeDockerGroupCreate(root string, args []string) {
+func fakeDockerGroupCreate(root string, args []string, out io.Writer) {
 	id := "id1"
 	alias := "main"
 	label := ""
@@ -158,9 +159,9 @@ func fakeDockerGroupCreate(root string, args []string) {
 		_ = os.WriteFile(filepath.Join(root, "created"), nil, 0600)
 		_ = os.WriteFile(filepath.Join(root, "label"), []byte(label), 0600)
 	}
-	fmt.Println(id)
+	fmt.Fprintln(out, id)
 }
-func fakeDockerGroupInspect(root string, ids []string, mode string) {
+func fakeDockerGroupInspect(root string, ids []string, mode string, out io.Writer) {
 	objects := []map[string]any{}
 	for _, id := range ids {
 		data, _ := os.ReadFile(filepath.Join(root, "object-"+id+".json"))
@@ -230,7 +231,7 @@ func fakeDockerGroupInspect(root string, ids []string, mode string) {
 		}
 		objects = append(objects, obj)
 	}
-	_ = json.NewEncoder(os.Stdout).Encode(objects)
+	_ = json.NewEncoder(out).Encode(objects)
 }
 
 func TestDockerPrivateNetworkLifecycle(t *testing.T) {
@@ -276,6 +277,65 @@ func dockerGroupJob(t *testing.T) Job {
 	return j
 }
 
+// Run the shared fake daemon effects in process. Memory rejection is independent
+// of CLI startup; TestDockerHealthyHelperStartupBudget covers that boundary.
+func fakeDockerGroupCommand(root string) func(context.Context, ...string) ([]byte, error) {
+	var mu sync.Mutex
+	return func(ctx context.Context, args ...string) ([]byte, error) {
+		mu.Lock()
+		defer mu.Unlock()
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		f, err := os.OpenFile(filepath.Join(root, "calls"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+		if err != nil {
+			return nil, err
+		}
+		_, err = fmt.Fprintln(f, strings.Join(args, " "))
+		closeErr := f.Close()
+		if err = errors.Join(err, closeErr); err != nil {
+			return nil, err
+		}
+		mode, _ := os.ReadFile(filepath.Join(root, "mode"))
+		var out bytes.Buffer
+		if handled, err := fakeDockerNetwork(root, args, string(mode), &out); handled {
+			return out.Bytes(), err
+		}
+		switch args[0] {
+		case "create":
+			fakeDockerGroupCreate(root, args, &out)
+		case "inspect":
+			fakeDockerGroupInspect(root, args[1:], string(mode), &out)
+		case "ps":
+			paths, err := filepath.Glob(filepath.Join(root, "object-*.json"))
+			if err != nil {
+				return nil, err
+			}
+			for _, path := range paths {
+				fmt.Fprintln(&out, strings.TrimSuffix(strings.TrimPrefix(filepath.Base(path), "object-"), ".json"))
+			}
+		case "start":
+			file := "running-" + args[1]
+			if args[1] == "id1" {
+				file = "running"
+			}
+			return nil, os.WriteFile(filepath.Join(root, file), nil, 0600)
+		case "kill":
+			if args[1] == "--signal=KILL" {
+				file := "running-" + args[2]
+				target := "stopped-" + args[2]
+				if args[2] == "id1" {
+					file, target = "running", "stopped"
+				}
+				return nil, os.Rename(filepath.Join(root, file), filepath.Join(root, target))
+			}
+		default:
+			return nil, fmt.Errorf("unexpected fake group command: %v", args)
+		}
+		return out.Bytes(), nil
+	}
+}
+
 func TestDockerGroupInspectsEachDeclaredMemoryLimit(t *testing.T) {
 	for _, tc := range []struct {
 		id         string
@@ -283,8 +343,9 @@ func TestDockerGroupInspectsEachDeclaredMemoryLimit(t *testing.T) {
 	}{{"", false}, {"id1", false}, {"sidecar-sortformer", true}} {
 		id, afterStart := tc.id, tc.afterStart
 		t.Run(fmt.Sprintf("%s/after-start=%v", id, afterStart), func(t *testing.T) {
-			w, s, c, root := dockerFixture(t)
+			w, s, c, root := dockerFixtureCommand(t, fakeDockerGroupCommand)
 			j := dockerGroupJob(t)
+			j.Spec.Logs = "none"
 			j.Spec.Run.DockerSidecars[0].MemoryGB = 3
 			j.Spec.Run.DockerSidecars[1].MemoryGB = 4
 			if id != "" && !afterStart {
@@ -324,7 +385,7 @@ func TestDockerGroupInspectsEachDeclaredMemoryLimit(t *testing.T) {
 				if id != "" && (f.result.Success || f.result.Interrupted || f.result.Error != "Docker memory ceiling not enforced") {
 					t.Fatalf("wrong container ceiling accepted: %+v", f.result)
 				}
-			// Several fake CLI launches complete before this semantic result.
+			// Keep an asynchronous completion guard around the semantic result.
 			case <-time.After(testWaitTimeout):
 				t.Fatal("container memory failure did not settle")
 			}

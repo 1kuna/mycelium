@@ -773,6 +773,13 @@ func (g *nativeGroup) run(j Job, base map[string]string, mainEnvironment string,
 	}
 }
 
+func (w Worker) verifyNativeListener(port string, group int) error {
+	if w.nativeListenerProbe != nil {
+		return w.nativeListenerProbe(port, group)
+	}
+	return verifyNativeListener(port, group)
+}
+
 func (g *nativeGroup) waitReady(member *nativeMember, port string, readiness NativeReadiness) error {
 	timeout, _ := time.ParseDuration(readiness.Timeout)
 	deadline := g.worker.Clock.Now().Add(timeout)
@@ -788,7 +795,7 @@ func (g *nativeGroup) waitReady(member *nativeMember, port string, readiness Nat
 		if err := g.memberFailure(); err != nil {
 			// A failed helper plus a foreign listener on its reserved port is
 			// positive handoff-collision evidence, independent of exit codes/logs.
-			if port != "" && errors.Is(verifyNativeListener(port, g.supervisor.Process.Pid), errNativeForeignListener) {
+			if port != "" && errors.Is(g.worker.verifyNativeListener(port, g.supervisor.Process.Pid), errNativeForeignListener) {
 				return g.recordInfrastructure(foreignPort, member.Name, port, errNativePortCollision)
 			}
 			return err
@@ -804,7 +811,7 @@ func (g *nativeGroup) waitReady(member *nativeMember, port string, readiness Nat
 		if err == nil {
 			response.Body.Close()
 			if response.StatusCode >= 200 && response.StatusCode < 300 {
-				if err = verifyNativeListener(port, g.supervisor.Process.Pid); err != nil {
+				if err = g.worker.verifyNativeListener(port, g.supervisor.Process.Pid); err != nil {
 					if errors.Is(err, errNativeForeignListener) {
 						return g.recordInfrastructure(foreignPort, member.Name, port, errNativePortCollision)
 					}

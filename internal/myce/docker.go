@@ -825,6 +825,7 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 		return w.authorizeLaunch(launch)
 	}, closed: make(chan struct{}), halt: make(chan struct{}), dir: s.dir, workdir: j.Spec.Run.Workdir, binary: binary, clock: w.Clock, timeout: w.dockerCallTimeout, state: dockerExecution{Identity: identity, Endpoint: endpoint, MemoryLimitBytes: ceilingBytes, MemorySwapBytes: 0}}
 	d.state.Owner = &Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
+	d.command = w.dockerCommand
 	d.state.LogsNone = j.Spec.Logs == "none"
 	if j.Spec.Run.DockerNetwork == "private" {
 		d.state.Network = "myce-" + identity

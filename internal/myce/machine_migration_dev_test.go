@@ -11,8 +11,9 @@ import (
 )
 
 // The dev composition supplies its real HTTP API, queue and command runner.
-// Only inventory and the service manager are fake. The legacy leg speaks the
-// supported singular wire form and executes through Worker.start.
+// Inventory, scheduling time, checkpoint availability and the service manager
+// are fake. The legacy leg speaks the supported singular wire form and executes
+// through Worker.start.
 func TestM4DevSplitConvertConcurrentRollback(t *testing.T) {
 	src, c, binary, manager, run := m4InstallFixture(t)
 	root := t.TempDir()
@@ -161,7 +162,11 @@ func TestM4DevSplitConvertConcurrentRollback(t *testing.T) {
 		if !sparkStopped {
 			cancelAttempts()
 			stopSpark()
-			<-sparkDone
+			select {
+			case <-sparkDone:
+			case <-time.After(45 * time.Second):
+				t.Error("Spark worker cleanup did not finish")
+			}
 		}
 	}()
 	await(t, func() bool {

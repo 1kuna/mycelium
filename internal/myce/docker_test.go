@@ -87,7 +87,11 @@ func TestDockerCLIHelper(t *testing.T) {
 		time.Sleep(time.Minute)
 		os.Exit(1)
 	}
-	if fakeDockerNetwork(root, args, string(mode)) {
+	if handled, err := fakeDockerNetwork(root, args, string(mode), os.Stdout); handled {
+		if err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
 		os.Exit(0)
 	}
 	switch args[0] {
@@ -108,7 +112,7 @@ func TestDockerCLIHelper(t *testing.T) {
 		}
 	case "create":
 		if _, e := os.Stat(filepath.Join(root, "network")); e == nil {
-			fakeDockerGroupCreate(root, args)
+			fakeDockerGroupCreate(root, args, os.Stdout)
 			os.Exit(0)
 		}
 		if string(mode) == "refuse-create" {
@@ -173,7 +177,7 @@ func TestDockerCLIHelper(t *testing.T) {
 		_, networkErr := os.Stat(filepath.Join(root, "network"))
 		_, removedErr := os.Stat(filepath.Join(root, "network-removed"))
 		if networkErr == nil || removedErr == nil {
-			fakeDockerGroupInspect(root, args[1:], string(mode))
+			fakeDockerGroupInspect(root, args[1:], string(mode), os.Stdout)
 			os.Exit(0)
 		}
 		if string(mode) == "bad-inspect" {
@@ -345,8 +349,17 @@ func dockerCLITestBinary(t *testing.T) string {
 
 func dockerFixture(t *testing.T) (Worker, *workerStore, *dockerTestClock, string) {
 	t.Helper()
+	return dockerFixtureCommand(t, nil)
+}
+
+func dockerFixtureCommand(t *testing.T, command func(string) func(context.Context, ...string) ([]byte, error)) (Worker, *workerStore, *dockerTestClock, string) {
+	t.Helper()
 	root := t.TempDir()
-	binary := dockerCLITestBinary(t)
+	// An in-process daemon must never fall through to a real CLI.
+	binary := "/usr/bin/false"
+	if command == nil {
+		binary = dockerCLITestBinary(t)
+	}
 	script := "#!/bin/sh\nexec '" + binary + "' -test.run='^TestDockerCLIHelper$' -- \"$@\"\n"
 	if e := os.WriteFile(filepath.Join(root, "docker"), []byte(script), 0700); e != nil {
 		t.Fatal(e)
@@ -360,6 +373,9 @@ func dockerFixture(t *testing.T) (Worker, *workerStore, *dockerTestClock, string
 
 	// Docker fixtures must not require 24 GiB of free host disk for auto-sizing.
 	w := Worker{EnvironmentLimit: 1 << 20, DockerEndpoint: "unix:///fake.sock", Client: recoveryWorker(t).Client, Machine: dockerMachine("docker-worker", "fake"), StateDir: newTestStateRoot(t), Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return 32, nil }}
+	if command != nil {
+		w.dockerCommand = command(root)
+	}
 	s, e := w.openStore()
 	if e != nil {
 		t.Fatal(e)

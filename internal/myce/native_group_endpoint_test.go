@@ -87,6 +87,12 @@ func TestNativeGroupEarlierConsumerEndpoint(t *testing.T) {
 		}
 	}()
 	worker := Worker{Clock: clock, StateDir: stateDir, Machine: m, Client: nativeFixtureClient(handler), HostMemorySource: func(context.Context) (float64, error) { return 64, nil }}
+	worker.nativeListenerProbe = func(port string, _ int) error {
+		if stolen != nil && port == strconv.Itoa(stolen.Addr().(*net.TCPAddr).Port) {
+			return errNativeForeignListener
+		}
+		return nil
+	}
 	store, e := worker.openStore()
 	if e != nil {
 		t.Fatal(e)

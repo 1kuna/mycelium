@@ -63,7 +63,14 @@ func TestJoinBenchmarkOptIn(t *testing.T) {
 			go func() { done <- w.Run(ctx) }()
 			// Joining's admission assertion starts at queue registration, after local
 			// profile/store/model-server startup, which this test does not measure.
-			<-registered
+			select {
+			case <-registered:
+			case err := <-done:
+				done <- err // Cleanup still owns the worker join.
+				t.Fatalf("worker stopped before registration: %v", err)
+			case <-time.After(testWaitTimeout):
+				t.Fatal("worker never registered")
+			}
 			select {
 			case <-admitted:
 			case <-time.After(2 * time.Second):
