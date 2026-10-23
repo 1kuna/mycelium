@@ -751,7 +751,14 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) erro
 	}
 	defer func() {
 		if !c.ready(r.Key) && c.cleanupBuild(partial) == nil {
-			_ = c.trash(partial)
+			if errors.Is(e, errEnvironmentBuildStalled) {
+				// Only this just-created, never-published build is disposable.
+				// Its recorded process has been reaped and .build is still held;
+				// retain download objects, not a duplicate prefix charged to retry.
+				_ = os.RemoveAll(partial)
+			} else {
+				_ = c.trash(partial)
+			}
 		}
 	}()
 	if e = os.MkdirAll(filepath.Join(partial, "bin"), 0700); e != nil {

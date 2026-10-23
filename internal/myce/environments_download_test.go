@@ -92,10 +92,13 @@ func TestEnvironmentStallWatchdogRetriesOnce(t *testing.T) {
 	for _, recover := range []bool{true, false} {
 		t.Run(fmt.Sprint("recover=", recover), func(t *testing.T) {
 			clock := &workerFakeClock{now: time.Date(2026, 10, 23, 0, 0, 0, 0, time.UTC)}
-			c := &EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: clock}
+			c := &EnvironmentCache{Root: t.TempDir(), Limit: 12 << 10, Clock: clock}
 			calls := 0
-			c.Run = func(ctx context.Context, _ []string, _ string, _ []string, _, _ io.Writer) error {
+			c.Run = func(ctx context.Context, _ []string, dir string, _ []string, _, _ io.Writer) error {
 				calls++
+				if err := os.WriteFile(filepath.Join(dir, "partial-wheel-install"), make([]byte, 8<<10), 0600); err != nil {
+					return err
+				}
 				if calls == 2 && recover {
 					return nil
 				}
