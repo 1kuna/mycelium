@@ -7,6 +7,9 @@ base=${2:-origin/integ/108}
 case "$mode" in quick|full) ;; *) echo 'usage: scripts/gate.sh [quick [BASE]|full]' >&2; exit 2;; esac
 repo=$(cd "$(dirname "$0")/.." && pwd)
 cd "$repo"
+if [[ $mode == quick && ${MYCE_GATE_BUDGET:-} != 1 ]]; then
+  exec python3 "$repo/scripts/gate-budget.py" "$repo/scripts/gate.sh" "$@"
+fi
 export GOTOOLCHAIN=local GOTELEMETRY=off
 case "$(uname -s)" in
   Darwin) test -x /usr/bin/trash ;;
@@ -32,6 +35,10 @@ cleanup() {
   exit "$status"
 }
 trap cleanup EXIT
+if [[ $mode == quick ]]; then
+  git rev-parse --verify "$base" >/dev/null
+  python3 scripts/gate-related.py "$base" > "$scratch/selection"
+fi
 mkdir -p "$scratch"/{home,tmp,gocache,modcache,gopath,bin}
 copy_cache() {
   if [[ -d $1 ]]; then
@@ -83,43 +90,12 @@ if [[ $mode == full ]]; then
   wait_for_race_slot
   step race-and-dev go test -race -vet=off -json -p 2 -parallel 4 -count=1 -timeout 15m ./...
 else
-  git rev-parse --verify "$base" >/dev/null
-  if [[ -n $(git diff --name-only "$base" -- go.mod go.sum) ]]; then
-    echo 'quick: module change, all-package fallback'
-    wait_for_race_slot
-    step race-module go test -race -vet=off -json -p 2 -parallel 4 -count=1 -timeout 15m ./...
-    exit 0
-  fi
-  { git diff --name-only "$base" -- '*.go'; git ls-files --others --exclude-standard -- '*.go'; } | sort -u > "$scratch/changed"
-  # Simple file-prefix convention, with a package fallback when names don't match.
-  while read -r dir; do
-    [[ -d $dir ]] || continue
+  while IFS=$'\t' read -r dir names; do
     package=$(go list "./$dir")
-    : > "$scratch/names"
-    fallback=0
-    while read -r file; do
-      [[ $(dirname "$file") == "$dir" ]] || continue
-      stem=$(basename "$file" .go)
-      stem=${stem%_test}
-      : > "$scratch/file-names"
-      for test_file in "$dir/$stem"*_test.go; do
-        [[ -f $test_file ]] || continue
-        sed -nE 's/^func (Test[[:alnum:]_]+)\(t \*testing\.T\).*/\1/p' "$test_file" >> "$scratch/file-names"
-      done
-      if [[ ! -s $scratch/file-names ]]; then fallback=1; fi
-      cat "$scratch/file-names" >> "$scratch/names"
-    done < "$scratch/changed"
-    names=$(sort -u "$scratch/names" | paste -sd '|' -)
-    if [[ -n $names && $fallback == 0 ]]; then
-      echo "quick $package: $names"
-      step race-related go test -race -vet=off -json -p 2 -parallel 4 -count=1 -timeout 10m "$package" -run "^($names)$"
-    else
-      echo "quick $package: package fallback"
-      wait_for_race_slot
-      step race-package go test -race -vet=off -json -p 2 -parallel 4 -count=1 -timeout 10m "$package"
-    fi
-  done < <(while read -r file; do dirname "$file"; done < "$scratch/changed" | sort -u)
-  if [[ ! -s $scratch/changed ]]; then
+    echo "quick $package: $names"
+    step race-related go test -race -vet=off -json -p 2 -parallel 4 -count=1 -timeout 3m "$package" -run "$names"
+  done < "$scratch/selection"
+  if [[ ! -s $scratch/selection ]]; then
     step race-dev-smoke go test -race -vet=off -json -p 2 -parallel 4 -count=1 -timeout 3m ./cmd/myce -run '^TestDevStandaloneSmoke$'
   fi
 fi

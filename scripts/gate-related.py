@@ -1,0 +1,52 @@
+#!/usr/bin/env python3
+"""Conventional test files plus direct textual references, not dependency analysis."""
+import pathlib
+import re
+import subprocess
+import sys
+
+
+def git(*args):
+    return subprocess.check_output(['git', *args], text=True)
+
+
+def select(base):
+    if git('diff', '--name-only', base, '--', 'go.mod', 'go.sum').strip():
+        raise ValueError('module dependencies changed')
+    changed = sorted(set((git('diff', '--name-only', base, '--', '*.go') +
+                          git('ls-files', '--others', '--exclude-standard', '--', '*.go')).splitlines()))
+    packages = {}
+    for name in changed:
+        path = pathlib.Path(name)
+        tests = set()
+        stem = path.stem.removesuffix('_test')
+        for test_file in path.parent.glob(stem + '*_test.go'):
+            tests.update(re.findall(r'^func (Test\w+)\(', test_file.read_text(), re.M))
+        # Hunk headers identify the enclosing function; +/- declarations also
+        # cover renamed functions and exported types/variables/constants.
+        diff = git('diff', '--unified=0', base, '--', name)
+        symbols = set(re.findall(r'^(?:@@.*?@@ |[+-])func (?:\([^)]*\) )?([A-Z]\w*)', diff, re.M))
+        symbols.update(re.findall(r'^[+-](?:type|var|const) ([A-Z]\w*)', diff, re.M))
+        if symbols:
+            reference = re.compile(r'\b(?:' + '|'.join(sorted(symbols)) + r')\b')
+            for test_file in path.parent.glob('*_test.go'):
+                # Split at top-level functions, so a reference selects its test
+                # rather than every unrelated test in the same file.
+                for block in re.split(r'(?=^func )', test_file.read_text(), flags=re.M):
+                    test = re.match(r'func (Test\w+)\(', block)
+                    if test and reference.search(block):
+                        tests.add(test[1])
+        if not tests:
+            raise ValueError(f'no related tests for {name}')
+        packages.setdefault(path.parent, set()).update(tests)
+    return [(str(directory), '^(' + '|'.join(sorted(tests)) + ')$')
+            for directory, tests in sorted(packages.items())]
+
+
+if __name__ == '__main__':
+    try:
+        for directory, pattern in select(sys.argv[1]):
+            print(f'{directory}\t{pattern}')
+    except ValueError as error:
+        print(f'quick: {error}; run ./scripts/gate.sh full', file=sys.stderr)
+        sys.exit(2)

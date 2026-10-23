@@ -4,10 +4,14 @@ Run `./scripts/gate.sh` (or `./scripts/gate.sh quick BASE`) for a change. The
 base defaults to `origin/integ/108`; select the commit before your change when
 working elsewhere. Quick builds the CLI and every release target, vets all Go
 packages, and race-tests changed packages with test names from matching file
-prefixes. If a prefix has no tests it runs that package. Review the printed
-selection: changes to shared helpers can need a wider package run or `full`.
+prefixes, plus tests that directly reference changed exported symbols (using
+diff hunk function names and changed declarations). This is a textual heuristic,
+not a dependency analyser. Review the printed selection: shared helpers and
+indirect callers can need `full`. If any Go file has no related tests, quick
+stops with a message requesting `full`; it never expands to a whole package.
 Quick is feedback for the selected change, not evidence that every test passed.
-Module dependency changes fall back to all packages.
+Module dependency changes also require an explicit `full`. The selector
+regression can be run with `python3 scripts/test-gate-related.py`.
 
 Run `./scripts/gate.sh full` once for a batch before deployment. It runs the lean
 full race suite once, including dev checkpoint/resume, model and enrollment
@@ -16,9 +20,13 @@ separate dev run. For an authorized urgent hotfix: run quick, deploy, run full
 afterwards, and fix forward if full finds a problem. This workflow does not grant
 fleet/deployment authorization.
 
-The quick target is three minutes; the full target is ten minutes. Timings
+Quick has a hard three-minute wall deadline, including cache setup and builds;
+on expiry it stops its process group and suggests `./scripts/gate.sh full`
+(exit 124). It sends TERM at 175 seconds and KILL after five seconds if needed.
+Interrupted cleanup may leave its ignored scratch folder for recovery. The full
+target is ten minutes. Timings
 include build, vet, the three release target builds, test execution and scratch
-cleanup. A package fallback may take longer than a small matching test set.
+cleanup.
 
 Go 1.25.6, a native macOS arm64 toolchain (for the CGO release target), `uv`,
 Python 3, and `/usr/bin/trash` are current laptop prerequisites. Install
