@@ -58,9 +58,11 @@ start a pretend cluster with fake GPUs. The jobs really run.
 
 ```sh
 go build -o myce ./cmd/myce && ./myce dev
-# in a second terminal:
+# leave this running; in a second terminal:
 MYCE_QUEUE=http://127.0.0.1:7331 MYCE_TOKEN=dev-token ./myce run -- echo hello
 ```
+
+If you see "queued waiting for a hypha", the job is waiting for a worker machine.
 
 ## More
 

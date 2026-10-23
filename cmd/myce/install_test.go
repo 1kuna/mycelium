@@ -158,6 +158,13 @@ func TestDoctorCLIUsesInjectedRunner(t *testing.T) {
 	}
 }
 
+func TestDoctorCLIMissingInstall(t *testing.T) {
+	err := setupCommandWithProbe([]string{"doctor"}, myce.MachineProbe{}, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "no install found; run myce install first") {
+		t.Fatalf("missing install guidance: %v", err)
+	}
+}
+
 func TestSetupCLIRejectsMissingOrUnknownAction(t *testing.T) {
 	for _, args := range [][]string{nil, {"unknown"}} {
 		if err := setupCommandWithProbe(args, myce.MachineProbe{}, t.TempDir()); err == nil {

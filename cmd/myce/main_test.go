@@ -21,6 +21,30 @@ import (
 	"mycelium/internal/myce"
 )
 
+func TestCLIHelp(t *testing.T) {
+	_, _, err := captureUsageOutput(t, nil)
+	for _, command := range []string{"install", "uninstall", "invite", "doctor", "host", "resume", "version", "release", "file", "benchmark", "extension", "sim", "detect", "service", "measure", "model", "usage"} {
+		if err == nil || !strings.Contains(err.Error(), command) {
+			t.Fatalf("usage omits %s: %v", command, err)
+		}
+	}
+	for _, command := range []string{"status", "logs"} {
+		_, help, _ := captureUsageOutput(t, []string{command, "--help"})
+		option := "-full"
+		if command == "logs" {
+			option = "-follow"
+		}
+		for _, want := range []string{"Usage of myce " + command, "-queue", "-token", "-joining-file", option} {
+			if !strings.Contains(help, want) {
+				t.Fatalf("%s help omits %s: %s", command, want, help)
+			}
+		}
+		if strings.Contains(help, "-nas") || strings.Contains(help, "-listen") || strings.Contains(help, "-memory-gb") {
+			t.Fatalf("%s help includes unrelated flags: %s", command, help)
+		}
+	}
+}
+
 // This test binary also serves as a real checkpointing command in the dev test.
 func TestCheckpointCommand(t *testing.T) {
 	if os.Getenv("MYCE_TEST_CHILD") != "1" {

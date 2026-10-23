@@ -123,6 +123,9 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 		}
 		c, e := myce.ReadServiceConfig(*config)
 		if e != nil {
+			if action == "doctor" && errors.Is(e, os.ErrNotExist) {
+				return fmt.Errorf("no install found; run myce install first (or use --config for an existing installation): %w", e)
+			}
 			return e
 		}
 		if action == "uninstall" {

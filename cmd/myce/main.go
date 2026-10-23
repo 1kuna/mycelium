@@ -55,7 +55,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 
 	if len(args) == 0 {
-		return errors.New("usage: myce queue|join|leave|host|run|submit|policy|status|logs|wait|cancel|resolve-docker|dev")
+		return errors.New("usage: myce install|uninstall|invite|doctor|queue|join|leave|host|run|submit|policy|status|logs|wait|cancel|resolve-docker|dev|version|release|file|benchmark|extension|sim|detect|service|measure|model|usage\n       myce host drain|disable|resume|status|budget HOST\nRun myce COMMAND --help for command options.")
 	}
 	if args[0] == "dev" && len(args) > 1 && args[1] == "clock" {
 		return devClockCommand(args[2:], os.Stdout)
@@ -226,6 +226,27 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	now := f.Bool("now", false, "stop every job on leave")
 	full := f.Bool("full", false, "show full job IDs in status")
 	follow := f.Bool("follow", false, "follow logs until the job is terminal")
+	if args[0] == "status" || args[0] == "logs" {
+		f.Usage = func() {
+			help := flag.NewFlagSet("myce "+args[0], flag.ContinueOnError)
+			help.SetOutput(f.Output())
+			option := "full"
+			if args[0] == "logs" {
+				option = "follow"
+			}
+			for _, name := range []string{"queue", "token", "joining-file", option} {
+				v := f.Lookup(name)
+				help.Var(v.Value, v.Name, v.Usage)
+				help.Lookup(name).DefValue = v.DefValue
+			}
+			fmt.Fprintf(f.Output(), "Usage of myce %s", args[0])
+			if args[0] == "logs" {
+				fmt.Fprint(f.Output(), " <id>")
+			}
+			fmt.Fprintln(f.Output(), " [flags]:")
+			help.PrintDefaults()
+		}
+	}
 	// Accept conventional 'logs ID --follow' and 'leave --now'.
 	flags := args[1:]
 	if (args[0] == "logs" || args[0] == "submit" || args[0] == "cancel") && len(flags) > 0 && !strings.HasPrefix(flags[0], "-") {

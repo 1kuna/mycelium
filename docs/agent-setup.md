@@ -38,6 +38,8 @@ differed. Lines marked **Check:** are the least certain; confirm them with
   machine. The defaults are `/mnt/nas` on Linux and `/Volumes/NAS` on macOS;
   otherwise pass `--nas PATH`. Mycelium never mounts a drive or falls back to
   local disk, so a missing mount stops the install with `nas_not_configured`.
+  The dry run does not check the mount. Run `ls NAS_PATH` yourself and confirm
+  it shows the shared drive's contents before installing.
 - **GPU drivers already working:** for Nvidia, `nvidia-smi` lists the card. For
   Intel GPUs on Linux, the Level Zero/oneAPI runtime is installed. Apple GPUs
   need nothing. CPU-only machines are fine.
@@ -76,7 +78,8 @@ reports `lingering_permission_required`, ask the user to run
 ## 3. Create the first invitation
 
 Load the credential into the environment without printing it, then write a
-private invitation file:
+private invitation file. This bootstraps the first worker without requiring a
+signed release; later workers can use the one-time invitations in step 4:
 
 ```sh
 set -a; . ~/.config/myce/fleet.env; set +a

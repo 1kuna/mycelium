@@ -360,7 +360,7 @@ production pins, run `myce measure` locally in an approved maintenance window
 with the exact worker identity/spool, explicit platform/device/budget and model
 list. It holds all models together, optionally warms them, writes JSON and text,
 and unloads them. Missing native counters fail visibly. See the separate
-[native measurement checklist](production-test-plan.md#model-and-memory-qualification).
+[native measurement checklist](production-test-plan.md).
 
 `measure --warmup-parallel N` defaults to `1` (warm each model after loading it).
 With `N > 1`, load all selected models first, then run at most N warm-up

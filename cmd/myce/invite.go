@@ -15,7 +15,7 @@ import (
 
 func inviteCommand(args []string) error {
 	f := flag.NewFlagSet("invite", flag.ContinueOnError)
-	private := f.Bool("private-file", false, "legacy private credential export; requires --out")
+	private := f.Bool("private-file", false, "export a private credential file for the first worker or installs without a signed release; requires --out")
 	manifest := f.String("release-manifest", "", "override queue-approved signed release JSON")
 	key := f.String("release-key", "", "provisioned public PEM for a manifest override")
 	origin := f.String("release-url", "", "trusted publisher HTTPS directory override")
