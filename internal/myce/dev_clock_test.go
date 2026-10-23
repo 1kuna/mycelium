@@ -241,8 +241,12 @@ func TestDevClockAdvanceDuringCheckin(t *testing.T) {
 		t.Error("clock advanced during an in-flight heartbeat")
 	}
 	var samples int
-	if err := q.db.QueryRow("SELECT COUNT(*) FROM usage_samples").Scan(&samples); err != nil {
+	var observed float64
+	if err := q.db.QueryRow("SELECT COUNT(*), COALESCE(SUM(observed), 0) FROM usage_samples").Scan(&samples, &observed); err != nil {
 		t.Fatal(err)
+	}
+	if observed < LossAfter.Seconds()/2 {
+		t.Fatalf("clock advance dropped the last heartbeat's observation window: %f seconds", observed)
 	}
 	if samples > 10 {
 		t.Fatalf("clock advance fabricated coverage across outage: %d samples", samples)
