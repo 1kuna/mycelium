@@ -213,7 +213,8 @@ echo FINISHED
 		ctx, cancel := context.WithCancel(context.Background())
 		lw := &liveWorker{transport: transport, cancel: cancel, done: make(chan error, 1), alias: alias, state: filepath.Join(base, gpu+"-state")}
 		workers[gpu] = lw
-		w := Worker{CheckpointRoot: alias, ModelConfig: config, StateDir: lw.state, Clock: workerClocks[gpu], Interval: 5 * time.Millisecond,
+		// This journey verifies real saves, cross-mount resume and NAS loss.
+		w := Worker{checkpointPrepare: prepareCheckpoint, CheckpointRoot: alias, ModelConfig: config, StateDir: lw.state, Clock: workerClocks[gpu], Interval: 5 * time.Millisecond,
 			modelEngine: func(model Model) Engine {
 				if model.Name == "cuda-model" {
 					reserveModel.Do(func() {
