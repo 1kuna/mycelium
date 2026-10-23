@@ -205,7 +205,7 @@ func TestExtensionPrepareAssetsSingleFlightAndUseProtection(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer release()
-	size, err := environmentSize(root)
+	size, err := environmentDiskUsage(root)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +248,7 @@ func TestEnvironmentActiveSidecarRetained(t *testing.T) {
 	r := nativeStart(t, s, "fake", EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"helper-tools": {"fake": recipe}}})
 	nativeFile(t, r.dir, "main-ready")
 	root := filepath.Join(r.w.environmentCache.Root, recipe.Key)
-	size, err := environmentSize(root)
+	size, err := environmentDiskUsage(root)
 	if err != nil {
 		t.Fatal(err)
 	}

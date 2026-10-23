@@ -146,7 +146,10 @@ func (e *Extension) snapshotVariantEnvironments() error {
 			r.Target = &target
 			r.Platform = target.Platform
 			r.Key = ""
+			// Qualification remains extension-specific; package prefixes depend only on
+			// the snapshotted installer/build inputs and exact target/toolchain.
 			identity := r
+			identity.InputDigest = ""
 			identity.LockFile = ""
 			identity.Manifest = ""
 			b, err := json.Marshal(identity)

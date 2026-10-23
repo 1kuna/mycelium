@@ -548,6 +548,60 @@ func environmentSize(path string) (int64, error) {
 	})
 	return size, e
 }
+
+// environmentDiskUsage follows du: allocated blocks, one count per device/inode
+// across all supplied prefixes. Symlinks are counted without following targets.
+func environmentDiskUsage(paths ...string) (int64, error) {
+	seen := map[[2]uint64]bool{}
+	var size int64
+	for _, root := range paths {
+		err := filepath.WalkDir(root, func(p string, d os.DirEntry, err error) error {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			info, err := d.Info()
+			if errors.Is(err, os.ErrNotExist) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			stat, ok := info.Sys().(*syscall.Stat_t)
+			if !ok {
+				return errors.New("environment disk accounting unavailable")
+			}
+			id := [2]uint64{uint64(stat.Dev), uint64(stat.Ino)}
+			if !seen[id] {
+				size += stat.Blocks * 512
+				seen[id] = true
+			}
+			return nil
+		})
+		if err != nil {
+			return 0, err
+		}
+	}
+	return size, nil
+}
+
+// Download objects have their own bounded cache; env admission counts all stable,
+// building and retired prefixes together so linked wheels are never multiplied.
+func (c *EnvironmentCache) diskUsage() (int64, error) {
+	entries, err := os.ReadDir(c.Root)
+	if err != nil {
+		return 0, err
+	}
+	paths := []string{filepath.Join(c.Root, ".Trash")}
+	for _, d := range entries {
+		if d.IsDir() && (len(d.Name()) == 64 || strings.HasSuffix(d.Name(), ".partial")) {
+			paths = append(paths, filepath.Join(c.Root, d.Name()))
+		}
+	}
+	return environmentDiskUsage(paths...)
+}
 func (c *EnvironmentCache) ready(key string) bool {
 	var r EnvironmentReport
 	b, e := os.ReadFile(filepath.Join(c.Root, key, "ready.json"))
@@ -597,7 +651,7 @@ func (c *EnvironmentCache) Cleanup(ctx context.Context) error {
 	return ctx.Err()
 }
 func (c *EnvironmentCache) admit(key string, size int64) error {
-	retired, e := c.purgeRetired()
+	_, e := c.purgeRetired()
 	if e != nil {
 		return e
 	}
@@ -606,39 +660,29 @@ func (c *EnvironmentCache) admit(key string, size int64) error {
 		return e
 	}
 	type entry struct {
-		key  string
-		size int64
-		at   time.Time
+		key string
+		at  time.Time
 	}
 	candidates := []entry{}
-	total := size + retired
+	total, e := c.diskUsage()
+	if e != nil {
+		return e
+	}
+	total += size
 	for _, d := range entries {
-		if d.IsDir() && strings.HasSuffix(d.Name(), ".partial") && d.Name() != key+".partial" {
-			n, e := environmentSize(filepath.Join(c.Root, d.Name()))
-			if e != nil && !errors.Is(e, os.ErrNotExist) {
-				return e
-			}
-			total += n
-			continue
-		}
 		if !d.IsDir() || len(d.Name()) != 64 || d.Name() == key {
 			continue
 		}
 		path := filepath.Join(c.Root, d.Name())
-		n, e := environmentSize(path)
-		if e != nil {
-			return e
-		}
 		s, e := os.Stat(filepath.Join(path, "ready.json"))
 		if errors.Is(e, os.ErrNotExist) {
-			total += n // unready stable prefixes are builds, never eviction candidates
+			// Unready stable prefixes are builds, never eviction candidates.
 			continue
 		}
 		if e != nil {
 			return e
 		}
-		total += n
-		candidates = append(candidates, entry{d.Name(), n, s.ModTime()})
+		candidates = append(candidates, entry{d.Name(), s.ModTime()})
 	}
 	sort.Slice(candidates, func(i, j int) bool { return candidates[i].at.Before(candidates[j].at) })
 	for _, v := range candidates {
@@ -661,12 +705,15 @@ func (c *EnvironmentCache) admit(key string, size int64) error {
 			if e != nil {
 				return e
 			}
-			remaining, e := c.purgeRetired()
+			if _, e = c.purgeRetired(); e != nil {
+				return e
+			}
+			// Removing one link may free no blocks: measure the remaining inode union.
+			total, e = c.diskUsage()
 			if e != nil {
 				return e
 			}
-			total += remaining - retired - v.size
-			retired = remaining
+			total += size
 		} else {
 			f.Close()
 		}
@@ -839,7 +886,7 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) erro
 					}
 					logSize, cacheSize = st.Size(), n
 				}
-				size, e := environmentSize(partial)
+				_, e := os.Stat(partial)
 				if errors.Is(e, os.ErrNotExist) {
 					continue
 				}
@@ -847,7 +894,7 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) erro
 					var gate *os.File
 					gate, e = c.lock(buildCtx, "admission", syscall.LOCK_EX)
 					if e == nil {
-						e = c.admit(r.Key, size)
+						e = c.admit(r.Key, 0)
 						unlockEnvironment(gate)
 					}
 				}
@@ -956,12 +1003,12 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) erro
 		return fmt.Errorf("environment %s build failed: %w (log %s)", r.Key, e, output.Name())
 	}
 	report := EnvironmentReport{Key: r.Key, State: "ready", BuildSeconds: c.Clock.Now().Sub(start).Seconds()}
-	size, e := environmentSize(partial)
-	if e != nil {
+	// Reserve one filesystem block for ready.json before publishing readiness.
+	var fs syscall.Statfs_t
+	if e = syscall.Statfs(partial, &fs); e != nil {
 		return e
 	}
-	metadata, _ := json.Marshal(report)
-	size += int64(len(metadata))
+	size := int64(fs.Bsize)
 	gate, e := c.lock(ctx, "admission", syscall.LOCK_EX)
 	if e != nil {
 		return e

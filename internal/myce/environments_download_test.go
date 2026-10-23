@@ -15,7 +15,7 @@ import (
 func TestEnvironmentSharedDownloadsAndSeparatePruning(t *testing.T) {
 	for _, backend := range []string{"uv", "pixi"} {
 		t.Run(backend, func(t *testing.T) {
-			c := &EnvironmentCache{Root: t.TempDir(), Limit: 4096, DownloadLimit: 1 << 20}
+			c := &EnvironmentCache{Root: t.TempDir(), Limit: 64 << 10, DownloadLimit: 1 << 20}
 			downloads, prunes := 0, 0
 			shared := ""
 			c.Run = func(_ context.Context, args []string, dir string, env []string, out, errout io.Writer) error {
@@ -56,7 +56,7 @@ func TestEnvironmentSharedDownloadsAndSeparatePruning(t *testing.T) {
 				wheel := filepath.Join(cache, "shared-wheel")
 				if _, err := os.Stat(wheel); os.IsNotExist(err) {
 					downloads++
-					return os.WriteFile(wheel, make([]byte, 8192), 0600)
+					return os.WriteFile(wheel, make([]byte, 128<<10), 0600)
 				}
 				return nil
 			}

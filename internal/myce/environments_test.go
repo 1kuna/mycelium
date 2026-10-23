@@ -193,8 +193,8 @@ func TestEnvironmentLRUEvictionProtectsUse(t *testing.T) {
 	rb()
 	os.Chtimes(filepath.Join(pa, "ready.json"), time.Unix(1, 0), time.Unix(1, 0))
 	os.Chtimes(filepath.Join(pb, "ready.json"), time.Unix(2, 0), time.Unix(2, 0))
-	sizeA, _ := environmentSize(pa)
-	sizeB, _ := environmentSize(pb)
+	sizeA, _ := environmentDiskUsage(pa)
+	sizeB, _ := environmentDiskUsage(pb)
 	c.Limit = sizeA + sizeB + 20
 	_, rd, e := c.Acquire(context.Background(), d)
 	if e != nil {
@@ -518,5 +518,57 @@ func TestBuildOnlyLauncherRelocation(t *testing.T) {
 	b, e := exec.Command(filepath.Join(root, "bin", "tool")).Output()
 	if e != nil || string(b) != "relocated\n" {
 		t.Fatalf("published launcher broken: %q %v", b, e)
+	}
+}
+
+func TestEnvironmentAdmissionCountsHardlinksOnce(t *testing.T) {
+	c := &EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: RealClock{}}
+	if err := c.init(); err != nil {
+		t.Fatal(err)
+	}
+	a, b := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	for _, key := range []string{a, b} {
+		if err := os.Mkdir(filepath.Join(c.Root, key), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(c.Root, key, "ready.json"), []byte("ready"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	payload := filepath.Join(c.Root, a, "wheel")
+	if err := os.WriteFile(payload, make([]byte, 1<<20), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(payload, filepath.Join(c.Root, b, "wheel")); err != nil {
+		t.Fatal(err)
+	}
+	// A build links the same wheel; its bytes must also be deduplicated.
+	partial := filepath.Join(c.Root, strings.Repeat("c", 64)+".partial")
+	if err := os.Mkdir(partial, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(payload, filepath.Join(partial, "wheel")); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command("du", "-sk", c.Root).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var kib int64
+	if _, err = fmt.Sscan(string(out), &kib); err != nil {
+		t.Fatal(err)
+	}
+	c.Limit = kib * 1024
+	if err := c.admit(strings.Repeat("c", 64), 0); err != nil {
+		t.Fatalf("shared wheel exceeds physical limit: %v", err)
+	}
+	// After one prefix is removed, its shared wheel still consumes space.
+	old := time.Unix(1, 0)
+	if err := os.Chtimes(filepath.Join(c.Root, a, "ready.json"), old, old); err != nil {
+		t.Fatal(err)
+	}
+	c.Limit = 1
+	if err := c.admit(strings.Repeat("c", 64), 0); err == nil {
+		t.Fatal("evicting a link credited the shared wheel as freed")
 	}
 }

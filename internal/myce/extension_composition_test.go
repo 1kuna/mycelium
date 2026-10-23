@@ -473,3 +473,41 @@ func TestCompositionDefaultClassUsesAdmissionValidation(t *testing.T) {
 		})
 	}
 }
+
+// Versions and debug scripts must not multiply identical dependency prefixes.
+func TestCompositionEnvironmentSharedAcrossVersions(t *testing.T) {
+	a := compositionExtension(t, true)
+	b := compositionExtension(t, true)
+	b.Version = "2-debug"
+	b.Files["run.sh"] = []byte("#!/bin/sh\necho debug\n")
+	b = freezeComposition(t, b)
+	ra, rb := a.Variants[0].Environments["main"], b.Variants[0].Environments["main"]
+	if a.Digest == b.Digest || ra.Key != rb.Key {
+		t.Fatalf("identical dependency inputs have different prefixes: %s != %s", ra.Key, rb.Key)
+	}
+	var builds int
+	c := &EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Run: func(context.Context, []string, string, []string, io.Writer, io.Writer) error { builds++; return nil }}
+	pa, release, err := c.Acquire(context.Background(), ra)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	pb, release, err := c.Acquire(context.Background(), rb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	if pa != pb || builds != 2 {
+		t.Fatalf("prefix reuse: %s %s installer calls=%d", pa, pb, builds)
+	}
+	m := machine("target", "fake")
+	m.CapabilityProfile = &CapabilityProfile{OS: runtime.GOOS, Arch: runtime.GOARCH}
+	m.ExtensionFingerprint = "test-fingerprint"
+	report := newExtensionReport(a, &m, "extension:"+a.Name)
+	report.Setup, report.Qualified, report.CheckID = true, true, "check-a"
+	m.ExtensionReports = []ExtensionReport{report}
+	j := Job{Spec: Spec{Extension: extensionKey(b)}, Extensions: []Extension{b}}
+	if qualifiedExtension(&j, &m) != nil {
+		t.Fatal("shared prefix inherited another version's qualification")
+	}
+}
