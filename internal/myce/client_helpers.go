@@ -17,18 +17,27 @@ func (c Client) SubmitAndWait(ctx context.Context, spec Spec) (*Job, error) {
 	if spec.SubmissionKey == "" {
 		return nil, errors.New("submit-and-wait requires submission_key")
 	}
+	j, err := c.Submit(ctx, spec)
+	if err != nil {
+		return nil, err
+	}
+	return c.Wait(ctx, j.ID)
+}
+
+// Submit uses the ordinary jobs API. A keyed submission can safely retry one
+// uncertain transport response without creating another job.
+func (c Client) Submit(ctx context.Context, spec Spec) (*Job, error) {
 	var j Job
 	if err := c.Call(ctx, "POST", "/api/jobs", spec, &j); err != nil {
 		var transport *url.Error
-		if !errors.As(err, &transport) || ctx.Err() != nil {
+		if spec.SubmissionKey == "" || !errors.As(err, &transport) || ctx.Err() != nil {
 			return nil, err
 		}
-		// Only an uncertain transport response gets one identical keyed retry.
 		if err = c.Call(ctx, "POST", "/api/jobs", spec, &j); err != nil {
 			return nil, err
 		}
 	}
-	return c.Wait(ctx, j.ID)
+	return &j, nil
 }
 
 func (c Client) GetJob(ctx context.Context, id string) (*Job, error) {
@@ -39,8 +48,11 @@ func (c Client) GetJob(ctx context.Context, id string) (*Job, error) {
 	return FindJob(s.Jobs, id)
 }
 
-func (c Client) Wait(ctx context.Context, id string) (*Job, error) {
-	return c.wait(ctx, id)
+// Wait observes a job through terminal state. Optional updates run on each
+// successful status read, including completion, and may drain logs. Transient
+// read errors from an update use the same retry policy as status reads.
+func (c Client) Wait(ctx context.Context, id string, updates ...func(*Job) error) (*Job, error) {
+	return c.wait(ctx, id, updates)
 }
 
 func waitStatusPause(ctx context.Context, delay time.Duration) error {
@@ -61,7 +73,7 @@ func RetryStatusRead(err error) bool {
 	return err != nil && (!errors.As(err, &httpErr) || httpErr.Status >= 500 || httpErr.Status == 408 || httpErr.Status == 429)
 }
 
-func (c Client) wait(ctx context.Context, id string) (*Job, error) {
+func (c Client) wait(ctx context.Context, id string, updates []func(*Job) error) (*Job, error) {
 	const poll = time.Second
 	delay := poll
 	var last *Job
@@ -85,10 +97,25 @@ func (c Client) wait(ctx context.Context, id string) (*Job, error) {
 				return last, err
 			}
 			last = j
-			if terminal(j.State) {
+			for _, update := range updates {
+				if err = update(j); err != nil {
+					break
+				}
+			}
+			if err != nil {
+				var httpErr *HTTPError
+				var transport *url.Error
+				if !RetryStatusRead(err) || (!errors.As(err, &httpErr) && !errors.As(err, &transport)) {
+					return last, err
+				}
+			}
+			if err == nil && terminal(j.State) {
 				return j, nil
 			}
 			delay = poll
+			if err != nil {
+				delay = 2 * poll
+			}
 		}
 		if err := waitStatusPause(ctx, delay); err != nil {
 			return last, jobWaitError(id, last, err)

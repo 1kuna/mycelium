@@ -3,6 +3,40 @@
 See [integration examples](integrating.md) and [operations](operations.md). The
 [approved design](design-proposal.md) remains the product spec. CPU commands and GPU work use the same queue; callers retain orchestration.
 
+## One-line commands
+
+```sh
+myce run -- echo hello
+myce run --gpu cuda --mem 8G --host-mem 4G --project demo -- python task.py
+myce run --cpu 2 --mem 8G --detach -- python task.py
+```
+
+`run` uses the ordinary submission API and waits with transient status-read
+retry. It sends command arguments literally; use `sh -c` explicitly for shell
+syntax. Defaults are CPU-only, one logical core, 1 GiB host RAM, project
+`default`, class `experiment`, and non-resumable execution. With `--gpu
+cuda|xpu|metal`, `--mem` means accelerator RAM and `--host-mem` is additional
+host RAM (default 1 GiB). `G`/`GiB` and `M`/`MiB` use binary units; a bare
+number is GiB. `--name`, `--class`, legacy `--priority` and RFC3339 `--deadline`
+cover common scheduling declarations. Deadline priority requires a deadline.
+
+Status changes go to stderr; command logs go to stdout. A successful command
+exits zero; a recorded positive command exit code is propagated, and other
+failures or cancelled jobs exit 1. Ctrl-C requests durable cancellation by
+submission key and exits 130; the acknowledgement does not prove a running
+process has finished cleanup. An unconfirmed cancellation prints the exact
+project/key for recovery through the cancellation API. `--detach` prints only
+the job ID and leaves the job running.
+
+An installed worker's private joining authority supplies the queue credential
+and TLS certificate pin automatically, with the installed queue config as a
+fallback. `--config` selects another installation; `--joining-file` or
+`MYCE_JOINING_FILE` selects private joining authority explicitly. `--queue`
+changes its endpoint without removing the pin. Explicit `MYCE_TOKEN` (or
+`--token`) and `MYCE_QUEUE` select the existing direct client, useful for dev.
+Use YAML below for shared-storage workdirs, environments, file mappings,
+checkpoints and other advanced options.
+
 ## Batch YAML
 
 `myce submit job.yaml` accepts exactly one YAML document, at most 1 MiB, and

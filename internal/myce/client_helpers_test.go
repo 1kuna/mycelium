@@ -141,3 +141,27 @@ func TestClientWaitRetriesTransientStatusWithinContext(t *testing.T) {
 		}
 	})
 }
+
+func TestClientWaitUpdatesRetryLogRead(t *testing.T) {
+	updates := 0
+	c := Client{URL: "http://queue.invalid", HTTP: &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"jobs":[{"id":"updated-job","state":"succeeded"}]}`))}, nil
+	})}}
+	j, err := c.Wait(context.Background(), "updated-job", func(j *Job) error {
+		updates++
+		if updates == 1 {
+			return &HTTPError{Status: 503}
+		}
+		return nil
+	})
+	if err != nil || j.State != "succeeded" || updates != 2 {
+		t.Fatalf("job=%+v err=%v updates=%d", j, err, updates)
+	}
+	// A local output failure must return immediately, rather than being retried
+	// forever as though it were a transient queue read.
+	failure := errors.New("output closed")
+	_, err = c.Wait(context.Background(), "updated-job", func(*Job) error { return failure })
+	if !errors.Is(err, failure) {
+		t.Fatal(err)
+	}
+}

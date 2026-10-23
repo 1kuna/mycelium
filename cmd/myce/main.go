@@ -55,7 +55,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 
 	if len(args) == 0 {
-		return errors.New("usage: myce queue|join|leave|host|submit|policy|status|logs|wait|cancel|resolve-docker|dev")
+		return errors.New("usage: myce queue|join|leave|host|run|submit|policy|status|logs|wait|cancel|resolve-docker|dev")
 	}
 	if args[0] == "dev" && len(args) > 1 && args[1] == "clock" {
 		return devClockCommand(args[2:], os.Stdout)
@@ -119,6 +119,11 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 	if args[0] == "service" {
 		return serviceCommand(args[1:])
+	}
+	if args[0] == "run" {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return runCommand(ctx, args[1:], os.Stdout, os.Stderr)
 	}
 	if args[0] == "wait" {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -576,8 +581,8 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 				return err
 			}
 		}
-		var j myce.Job
-		if err := client.Call(ctx, "POST", "/api/jobs", s, &j); err != nil {
+		j, err := client.Submit(ctx, s)
+		if err != nil {
 			return err
 		}
 		fmt.Println(j.ID)
@@ -807,16 +812,8 @@ func logs(ctx context.Context, c myce.Client, id string, follow bool) error {
 	}
 	var after int64
 	for {
-		var chunks []myce.Log
-		if err := c.Call(ctx, "GET", fmt.Sprintf("/api/jobs/%s/logs?after=%d", id, after), nil, &chunks); err != nil {
+		if err := drainJobLogs(ctx, c, id, &after, os.Stdout); err != nil {
 			return err
-		}
-		for _, l := range chunks {
-			fmt.Print(l.Text)
-			after = l.Seq
-		}
-		if len(chunks) == 256 {
-			continue
 		}
 		if !follow {
 			return nil

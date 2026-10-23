@@ -22,7 +22,7 @@ func TestCommandUsageDoesNotExposeSecrets(t *testing.T) {
 	t.Setenv("MYCE_JOINING_FILE", invitation)
 	// Include every command and nested action, including commands sharing a FlagSet.
 	commands := []string{
-		"queue", "join", "leave", "submit", "usage", "status", "logs", "cancel", "dev",
+		"queue", "join", "leave", "submit", "run", "usage", "status", "logs", "cancel", "dev",
 		"disable", "enable", "resolve-docker", "detect", "service", "wait", "measure",
 		"invite", "benchmark", "sim", "install worker", "install queue", "uninstall", "doctor",
 		"file put", "file get", "model fetch", "model approve-local", "model sync", "model pin", "model unpin",
