@@ -457,6 +457,17 @@ acknowledgements afterward. See [managed Docker](job-reference.md#managed-docker
 for supported command/network/sidecar forms. Unmanaged containers remain outside
 this containment contract.
 
+Each managed attempt also retains a private `ATTEMPT_ID.docker-events.json`
+in its worker spool, including with `logs: none`. A separate `docker events`
+subscription retains the last 256 lifecycle events (container ID, daemon
+timestamp, action, numeric signal and exit code), plus dropped/rejected counts
+and stream start/end status. Labels, images, command output and daemon stderr
+are excluded. The file survives stopped-container retention and is mode 0600.
+Recovery preserves prior events and increments the stream count; subscription
+interruptions and Docker's finite replay history can leave gaps. These are
+diagnostic observations, not proof that Mycelium delivered a signal, and cannot
+change attempt outcomes or custody. Capture failures do not stop jobs.
+
 
 ## CPU capacity and allowances (R1)
 

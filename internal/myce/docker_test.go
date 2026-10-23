@@ -91,6 +91,21 @@ func TestDockerCLIHelper(t *testing.T) {
 		os.Exit(0)
 	}
 	switch args[0] {
+	case "events":
+		if os.Getenv("MYCE_TEST_DOCKER_EVENTS") != "1" {
+			os.Exit(0)
+		}
+		for {
+			data, err := os.ReadFile(filepath.Join(root, "events-input"))
+			if err == nil {
+				label, _ := os.ReadFile(filepath.Join(root, "label"))
+				fmt.Print(strings.ReplaceAll(string(data), "ATTEMPT", string(label)))
+				_ = os.WriteFile(filepath.Join(root, "events-sent"), nil, 0600)
+				time.Sleep(time.Minute)
+				os.Exit(0)
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
 	case "create":
 		if _, e := os.Stat(filepath.Join(root, "network")); e == nil {
 			fakeDockerGroupCreate(root, args)
@@ -217,6 +232,12 @@ func TestDockerCLIHelper(t *testing.T) {
 		}
 		_ = os.Rename(filepath.Join(root, "running"), filepath.Join(root, "stopped"))
 	case "kill":
+		if string(mode) == "kill-timeout" {
+			_ = os.Rename(filepath.Join(root, "running"), filepath.Join(root, "stopped"))
+			_ = os.WriteFile(filepath.Join(root, "kill-sent"), nil, 0600)
+			time.Sleep(time.Minute)
+			os.Exit(0)
+		}
 		if strings.HasPrefix(args[2], "sidecar-") && (args[1] == "--signal=KILL" || string(mode) == "term") {
 			_ = os.Rename(filepath.Join(root, "running-"+args[2]), filepath.Join(root, "stopped-"+args[2]))
 			os.Exit(0)
@@ -337,7 +358,8 @@ func dockerFixture(t *testing.T) (Worker, *workerStore, *dockerTestClock, string
 	t.Setenv("MYCE_TOKEN", "must-not-leak")
 	clock := &dockerTestClock{now: time.Date(2026, 10, 11, 0, 0, 0, 0, time.UTC)}
 
-	w := Worker{DockerEndpoint: "unix:///fake.sock", Client: recoveryWorker(t).Client, Machine: dockerMachine("docker-worker", "fake"), StateDir: newTestStateRoot(t), Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return 32, nil }}
+	// Docker fixtures must not require 24 GiB of free host disk for auto-sizing.
+	w := Worker{EnvironmentLimit: 1 << 20, DockerEndpoint: "unix:///fake.sock", Client: recoveryWorker(t).Client, Machine: dockerMachine("docker-worker", "fake"), StateDir: newTestStateRoot(t), Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return 32, nil }}
 	s, e := w.openStore()
 	if e != nil {
 		t.Fatal(e)
@@ -634,7 +656,7 @@ func TestDockerDefiniteRefusalReleasesWithoutStarting(t *testing.T) {
 		t.Fatal("definite refusal stayed reserved")
 	}
 	data, _ := os.ReadFile(filepath.Join(root, "calls"))
-	if strings.Contains(string(data), "start ") {
+	if strings.Contains("\n"+string(data), "\nstart ") {
 		t.Fatal("start sent after refused create")
 	}
 }
@@ -850,7 +872,7 @@ func TestDockerStopBeforeDispatchNeverStarts(t *testing.T) {
 		t.Fatal("never-started stop did not settle")
 	}
 	data, _ := os.ReadFile(filepath.Join(root, "calls"))
-	if strings.Contains(string(data), "create ") || strings.Contains(string(data), "start ") {
+	if strings.Contains("\n"+string(data), "\ncreate ") || strings.Contains("\n"+string(data), "\nstart ") {
 		t.Fatal("request sent after persisted stop")
 	}
 }

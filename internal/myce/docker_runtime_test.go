@@ -104,7 +104,7 @@ func TestDockerRuntimeDisabledWorkerMakesNoCalls(t *testing.T) {
 	if err := saveWorkerJSON(state, "old.docker.json", dockerExecution{Identity: "old", Endpoint: "unix:///old.sock", Released: true}); err != nil {
 		t.Fatal(err)
 	}
-	w := Worker{StateDir: state, Clock: q.clock, Client: Client{URL: server.URL, Token: "test"}, Machine: machine("native", "fake"), Interval: time.Millisecond}
+	w := Worker{EnvironmentLimit: 1 << 20, StateDir: state, Clock: q.clock, Client: Client{URL: server.URL, Token: "test"}, Machine: machine("native", "fake"), Interval: time.Millisecond}
 	w.Machine.HostID = "test-host"
 	// A stale caller-supplied capability cannot enable an unconfigured runtime.
 	w.Machine.Capabilities = []string{"docker"}

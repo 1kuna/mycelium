@@ -946,6 +946,8 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 }
 func (d *dockerAttempt) run(p *process, j Job, session string, output *os.File, release func(), launch func() error) {
 	defer close(d.closed)
+	stopEvents := d.observeDockerEvents()
+	defer stopEvents()
 	if release != nil {
 		defer release()
 	}
@@ -1022,6 +1024,7 @@ func (d *dockerAttempt) run(p *process, j Job, session string, output *os.File, 
 			result.Error = "persist Docker output failed"
 		}
 	}
+	stopEvents()
 	err := saveWorkerJSON(d.dir, d.state.Identity+".result.json", result)
 	p.done <- workerFinish{result: result, err: err}
 }

@@ -137,7 +137,7 @@ func classifyAttemptOutcome(result Result, facts attemptCause) Result {
 		if result.Error != "" {
 			result.Error += "; "
 		}
-		result.Error += "SIGKILL without an infrastructure stop; treated as stage failure"
+		result.Error += "SIGKILL; interruption cause unconfirmed; treated as stage failure"
 	}
 	return withStopProvenance(result, facts.PriorityStop)
 }

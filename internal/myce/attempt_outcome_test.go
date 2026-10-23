@@ -43,9 +43,13 @@ func TestAttemptOutcomeCause(t *testing.T) {
 
 func TestDockerStandaloneKillDiagnostic(t *testing.T) {
 	// A standalone container has no group observation to populate AmbiguousKill.
-	r := dockerOutcome(dockerExecution{ExitCode: 137}, Result{}, nil)
-	if r.Success || r.Interrupted || !strings.Contains(r.Error, "SIGKILL without an infrastructure stop") {
-		t.Fatal(r)
+	for _, stopIntent := range []bool{false, true} {
+		// #149: stop intent can exist even when the kill reply timed out.
+		r := dockerOutcome(dockerExecution{ExitCode: 137, InfrastructureStop: stopIntent,
+			CleanupCause: &RuntimeCause{Operation: "kill", Class: "timeout"}}, Result{}, nil)
+		if r.Success || r.Interrupted || !strings.Contains(r.Error, "SIGKILL; interruption cause unconfirmed") {
+			t.Fatal(r)
+		}
 	}
 }
 
