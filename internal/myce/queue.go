@@ -91,7 +91,7 @@ type Queue struct {
 	nextApprovalWarning time.Time
 
 	// simulation bypasses durable storage only; all scheduling/accounting paths remain shared.
-	checkpointProbe  func() bool // Filesystem fault seam.
+	checkpointProbe  func() bool // Availability seam; bounded real I/O is the default.
 	simulation       bool
 	simID            int64
 	uploadSpool      uploadSpool
@@ -318,12 +318,13 @@ func (q *Queue) Close() error {
 func (q *Queue) update(fn func() error) error {
 	available := true
 	if !q.simulation {
-		available, _ = q.nasProbe.run(q.root, func() (bool, error) {
-			if q.checkpointProbe != nil {
-				return q.checkpointProbe(), nil
-			}
-			return checkpointAvailable(q.root), nil
-		})
+		if q.checkpointProbe != nil {
+			available = q.checkpointProbe()
+		} else {
+			available, _ = q.nasProbe.run(q.root, func() (bool, error) {
+				return checkpointAvailable(q.root), nil
+			})
+		}
 	}
 	q.mu.Lock()
 	q.nasAvailable = available

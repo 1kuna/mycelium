@@ -20,7 +20,9 @@ type workerTestRun struct {
 	state  string
 }
 
-func workerFixture(t *testing.T, q *Queue) *workerTestRun {
+// Storage journeys explicitly pass prepareCheckpoint; lifecycle fixtures use
+// the shared synthetic default installed by TestMain.
+func workerFixture(t *testing.T, q *Queue, prepare ...func(Job) (string, error)) *workerTestRun {
 	t.Helper()
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	ctx, cancel := context.WithCancel(context.Background())
@@ -28,6 +30,9 @@ func workerFixture(t *testing.T, q *Queue) *workerTestRun {
 	// Stop events carry absolute queue deadlines. Use the queue's clock so a
 	// fake deadline cannot appear already expired to the worker.
 	w := Worker{StateDir: run.state, Clock: q.clock, Client: Client{URL: server.URL, Token: "test"}, Machine: machine("worker", "fake", "fixture-worker-host"), Interval: 5 * time.Millisecond}
+	if len(prepare) > 0 {
+		w.checkpointPrepare = prepare[0]
+	}
 	go func() { run.err = w.Run(ctx); close(run.done) }()
 	t.Cleanup(func() {
 		defer server.Close()
@@ -153,7 +158,7 @@ echo ready
 while :; do read line <&3; done`}
 	s.Run.Env = map[string]string{"SAVE_FIFO": fifo, "STOP_FILE": stopping}
 	j := submit(t, q, s)
-	run := workerFixture(t, q)
+	run := workerFixture(t, q, prepareCheckpoint)
 	wait(func() bool {
 		ls, _ := q.Logs(j.ID, 0)
 		for _, l := range ls {
@@ -208,7 +213,7 @@ while :; do read line <&3; done`}
 	clock.Advance(deadline.Sub(clock.Now()))
 	// A fresh worker must actually consume the copied checkpoint, not just
 	// find the prior attempt's save on disk.
-	workerFixture(t, q)
+	workerFixture(t, q, prepareCheckpoint)
 	wait(func() bool { return job(t, q, j.ID).State == "succeeded" })
 	if got := job(t, q, j.ID); got.Attempt != 2 || got.Losses != 0 {
 		t.Fatalf("resume attempt=%d losses=%d, want attempt 2 without infrastructure losses", got.Attempt, got.Losses)

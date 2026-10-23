@@ -284,7 +284,7 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 			return nil, fmt.Errorf("%w: need %.1f GB, available %.1f GB: %v", errWorkerMemory, j.Spec.Needs.MemoryGB, free, e)
 		}
 	}
-	prepare := prepareCheckpoint
+	prepare := workerCheckpointPrepare
 	if j.FileTransport {
 		prepare = func(value Job) (string, error) { return w.prepareFileCheckpoint(value, s.dir) }
 	}

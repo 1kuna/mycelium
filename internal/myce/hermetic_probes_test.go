@@ -3,6 +3,8 @@ package myce
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -23,6 +25,10 @@ func syntheticProfileProbe() ProfileProbe {
 }
 
 func installSyntheticWorkerHost() {
+	workerCheckpointPrepare = func(j Job) (string, error) {
+		dir := attemptCheckpoint(j)
+		return dir, os.MkdirAll(dir, 0700)
+	}
 	extensionIdentityProbe = syntheticIdentityProbe
 	workerProfileProbe = syntheticProfileProbe
 	workerHostMemorySource = func(reserve float64) (MemorySource, error) {
@@ -129,4 +135,32 @@ func syntheticIdentityProbe() MachineProbe {
 	return MachineProbe{Files: fstest.MapFS{"proc/cpuinfo": {Data: []byte("model name : synthetic CPU\n")}}, Command: func(context.Context, string, ...string) ([]byte, error) {
 		return []byte("synthetic hardware identity"), nil
 	}}
+}
+
+// A lifecycle fixture must not scan or copy the previous attempt's NAS state.
+func TestSyntheticWorkerCheckpointPreparation(t *testing.T) {
+	w := recoveryWorker(t)
+	store, err := w.openStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.close()
+	j := recoveryJob(t, []string{"sh", "-c", `printf ready > "$MYCE_CHECKPOINT_DIR/ready"`})
+	j.Attempt = 2
+	if err := os.MkdirAll(filepath.Join(j.Checkpoint, "attempt-1"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("absent", filepath.Join(j.Checkpoint, "attempt-1", "old-save")); err != nil {
+		t.Fatal(err)
+	}
+	p, err := w.start(store, j)
+	if err != nil {
+		t.Fatalf("synthetic preparation consulted prior storage: %v", err)
+	}
+	if f := <-p.done; !f.result.Success {
+		t.Fatal(f)
+	}
+	if data, err := os.ReadFile(filepath.Join(attemptCheckpoint(j), "ready")); err != nil || string(data) != "ready" {
+		t.Fatal("attempt-local directory", err)
+	}
 }

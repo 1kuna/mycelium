@@ -207,6 +207,7 @@ func TestMaintenancePersistenceRejoinAndMemoryDebt(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer q.Close()
+	fakeCheckpointAvailability(t, q, true)
 	status, err = q.HostMaintenanceStatus("host")
 	if err != nil || status.Policy.Mode != "drained" || status.Policy.MemoryBudget.GiB != 1 || status.Quiescent || status.Healthy || len(status.Attempts) != 1 {
 		t.Fatal(status, err)
@@ -234,8 +235,8 @@ func TestMaintenancePersistenceRejoinAndMemoryDebt(t *testing.T) {
 	check(t, q, a, nil)
 	check(t, q, b, nil)
 	maintenanceChange(t, q, "resume", false)
-	if check(t, q, a, nil).Job == nil {
-		t.Fatal("rejoined host did not resume")
+	if reply := check(t, q, a, nil); reply.Job == nil {
+		t.Fatalf("rejoined host did not resume: reply=%+v job=%+v", reply, job(t, q, j.ID))
 	}
 }
 func TestMaintenanceBudgetMismatchAndStarted(t *testing.T) {

@@ -144,12 +144,17 @@ func TestBlockedNASDoesNotHoldQueue(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
 	defer close(release)
 	var calls atomic.Int32
+	// This fixture is about blocked storage, so retain the real bounded I/O
+	// adapter explicitly rather than the synchronous availability fake.
 	q.checkpointProbe = func() bool {
-		if calls.Add(1) == 1 {
-			close(entered)
-		}
-		<-release
-		return false
+		available, _ := q.nasProbe.run(q.root, func() (bool, error) {
+			if calls.Add(1) == 1 {
+				close(entered)
+			}
+			<-release
+			return false, nil
+		})
+		return available
 	}
 	done := make(chan Reply, 1)
 	go func() { r, _ := q.Checkin(Checkin{Machine: machine("worker", "fake")}); done <- r }()

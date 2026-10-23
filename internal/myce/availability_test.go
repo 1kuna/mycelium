@@ -276,6 +276,7 @@ func TestPoliteWorkerCheckpointResumesElsewhere(t *testing.T) {
 		}
 		return s
 	}, Clock: clock, Interval: time.Millisecond, Machine: machine("daily", "fake", "fixture-daily-host"), StateDir: newTestStateRoot(t), Client: Client{URL: server.URL, Token: "test"}}
+	w.checkpointPrepare = prepareCheckpoint
 	go func() { done <- w.Run(ctx) }()
 	defer func() {
 		cancel()
@@ -313,7 +314,7 @@ func TestPoliteWorkerCheckpointResumesElsewhere(t *testing.T) {
 	if got.Losses != 0 {
 		t.Fatal("planned local stop charged loss")
 	}
-	workerFixture(t, q)
+	workerFixture(t, q, prepareCheckpoint)
 	wait(func() bool { return job(t, q, j.ID).State == "succeeded" })
 	logs, _ := q.Logs(j.ID, 0)
 	found := false

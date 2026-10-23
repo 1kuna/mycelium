@@ -142,13 +142,19 @@ func TestM3CrossDeviceRAMVictimAndExactAck(t *testing.T) {
 
 func TestM3UnifiedMemoryDebtAndDeterminism(t *testing.T) {
 	q, _ := fixture(t)
+	// Scheduling fakes must remain usable even when the real I/O budget expires.
+	q.nasProbe.timeout = -1
 	m := m3Machine()
 	m.HostMemoryBudgetGB = 12
 	m.Devices[1].UnifiedMemory = true
-	submit(t, q, m3Spec("experiment", "1", 6, 4))
-	a := assignedJob(machineCheck(t, q, m))
+	j := submit(t, q, m3Spec("experiment", "1", 6, 4))
+	reply := machineCheck(t, q, m)
+	a := assignedJob(reply)
 	if a == nil {
-		t.Fatal("first assignment")
+		q.mu.Lock()
+		reason, available := q.s.Jobs[j.ID].Reason, q.nasAvailable
+		q.mu.Unlock()
+		t.Fatalf("first assignment: reply=%+v reason=%q nas_available=%t", reply, reason, available)
 	}
 	submit(t, q, m3Spec("experiment", "0", 1, 4))
 	if b := assignedJob(machineCheck(t, q, m, a)); b != nil {

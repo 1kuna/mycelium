@@ -245,6 +245,7 @@ func TestWorkerAttemptCheckpointIsolation(t *testing.T) {
 }
 func TestWorkerMissingCheckpointRootNotCreated(t *testing.T) {
 	w := recoveryWorker(t)
+	w.checkpointPrepare = prepareCheckpoint
 	s, err := w.openStore()
 	if err != nil {
 		t.Fatal(err)
