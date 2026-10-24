@@ -81,6 +81,8 @@ installed queue config when no worker config exists. They retain the joining
 certificate pin; consumers do not read config files or handle credentials.
 Explicit `--queue` / `--token` and `MYCE_QUEUE` / `MYCE_TOKEN` keep working.
 `--config` and `--joining-file` remain available for explicit authority selection.
+As with `run`, `MYCE_QUEUE` overrides the invitation address for `status`, `logs`
+and `file get`, including when `--joining-file` is explicit.
 
 ```sh
 myce status
@@ -95,8 +97,11 @@ myce file get --size-bytes BYTE_COUNT SHA256 ./new-destination
 `myce result` resolves the succeeded job's accepted output manifest and calls
 `DownloadResult` for every artifact. It verifies SHA-256 and byte count before
 publishing each local file. Failed/running/cancelled jobs are refused with
-`result_not_accepted`; failed downloads, including hash/size mismatches, report
-`result_download_failed`; an HTTP 410 reports `result_expired`. All exit nonzero.
+`result_not_accepted`. Server-labelled errors, such as HTTP 401 authentication
+failures or an unknown job, retain the server's code; HTTP 410 reports
+`result_expired`. Only transport or verification failures, including hash/size
+mismatches, report `result_download_failed`. All use exit code 1, with the typed
+code first on stderr and no timestamp.
 Existing destination files are replaced only after that artifact verifies.
 Result directories may contain earlier verified artifacts if a later one fails.
 
