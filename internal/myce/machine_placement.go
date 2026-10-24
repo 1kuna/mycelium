@@ -6,6 +6,17 @@ import (
 	"strings"
 )
 
+// CPU work uses the host allowance, never the accelerator's memory or reserve.
+// Share this view between placement, observation recording and curve validation.
+func cpuMachineView(m *Machine) *Machine {
+	cpu := *m
+	cpu.GPU, cpu.Device, cpu.ExtensionFingerprint = "cpu", "", m.CPUExtensionFingerprint
+	cpu.FreeMemoryGB, cpu.TotalMemoryGB, cpu.ReservedMemoryGB = 0, 0, 0
+	cpu.UnifiedMemory, cpu.MemoryError = false, ""
+	cpu.modelReservationDebtGB = 0
+	return &cpu
+}
+
 // Targets are views of one persisted machine, never additional workers or host
 // allowances. The existing planner consumes one GPU (or CPU) view at a time.
 func (q *Queue) machineTargets(m *Machine) []*Machine {
@@ -15,12 +26,7 @@ func (q *Queue) machineTargets(m *Machine) []*Machine {
 	if m.Devices == nil {
 		return []*Machine{m}
 	}
-	cpu := *m
-	cpu.GPU, cpu.Device, cpu.FreeMemoryGB, cpu.TotalMemoryGB = "cpu", "", 0, 0
-	cpu.UnifiedMemory, cpu.MemoryError = false, ""
-	cpu.modelReservationDebtGB = 0
-	cpu.ExtensionFingerprint = m.CPUExtensionFingerprint
-	out := []*Machine{&cpu}
+	out := []*Machine{cpuMachineView(m)}
 	for _, d := range m.Devices {
 		target := d.machine(*m)
 		reserved := 0.0

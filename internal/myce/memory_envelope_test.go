@@ -32,6 +32,76 @@ func TestMemoryEnvelopeMeasuredAccepted(t *testing.T) {
 	}
 }
 
+func TestMemoryEnvelopeCPUOnGPUHostReusesAndRelearnsPeak(t *testing.T) {
+	q, clock, m, s := observationFixture(t)
+	m.CPUExtensionFingerprint = m.ExtensionFingerprint
+	m.GPU, m.ExtensionFingerprint = "fake", "synthetic-gpu-v1"
+	m.Devices = m3Machine().Devices
+	for i := range m.Devices {
+		m.Devices[i].ReserveMemoryGB, m.Devices[i].BudgetGB = 1, 7
+	}
+	machineCheck(t, q, m)
+	s.Needs.Memory = "auto"
+	start := func(source string, hostGB float64) *Job {
+		t.Helper()
+		queued := submit(t, q, s)
+		j := assignedJob(machineCheck(t, q, m))
+		if j == nil || j.ID != queued.ID {
+			t.Fatalf("CPU job not assigned: %+v", job(t, q, queued.ID))
+		}
+		if len(j.AllocatedDevices) != 0 || j.MemoryEnvelope == nil || j.MemoryEnvelope.Source != source || hostGB > 0 && j.Spec.Needs.HostMemoryGB != hostGB {
+			t.Fatalf("wrong CPU admission: devices=%v envelope=%+v", j.AllocatedDevices, j.MemoryEnvelope)
+		}
+		if err := q.Started(result(j, false)); err != nil {
+			t.Fatal(err)
+		}
+		return j
+	}
+	complete := func(j *Job, peak float64) {
+		t.Helper()
+		clock.Advance(time.Second)
+		r := result(j, true)
+		r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak}
+		if err := q.Complete(r); err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, point := range q.s.WorkObservations {
+			if point.Job == j.ID {
+				found = true
+				if point.StaleReason != "" || point.MemoryPeak == nil || point.MemoryPeak.HostGB == nil || *point.MemoryPeak.HostGB != peak || !point.MemoryRecordedAt.Equal(clock.Now()) {
+					t.Fatalf("accepted CPU peak is not current: %+v", point)
+				}
+			}
+		}
+		if !found {
+			t.Fatal("successful solo CPU run did not record a peak")
+		}
+	}
+	first := start("exploratory first run", 0)
+	if owner := q.s.Machines[m.ID]; len(owner.Devices) != 2 || owner.ReservedMemoryGB != 1 {
+		t.Fatalf("missing multi-device GPU reserve: %+v", owner)
+	}
+	complete(first, 2)
+	next := start("accepted peak × 1.25", 2.5)
+	clock.Advance(time.Second)
+	r := result(next, false)
+	r.OutOfMemory = true
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	for _, point := range q.s.WorkObservations {
+		if point.MemoryPeak != nil || !point.MemoryRecordedAt.IsZero() {
+			t.Fatalf("OOM retained a memory peak: %+v", point)
+		}
+	}
+	if err := q.Cancel(next.ID); err != nil {
+		t.Fatal(err)
+	}
+	complete(start("exploratory first run", 0), 8)
+	start("accepted peak × 1.25", 10)
+}
+
 func TestMemoryEnvelopeCrossMachineEstimate(t *testing.T) {
 	q, clock, m, s := observationFixture(t)
 	first := startObservation(t, q, m, s)

@@ -95,10 +95,7 @@ func (q *Queue) workObservationKey(j *Job) (*ObservationKey, string) {
 	}
 	m := allocationMachine(owner, j.AllocatedDevices)
 	if j.Spec.Needs.cpuOnly() && owner.Devices != nil {
-		cpu := *owner
-		cpu.GPU, cpu.Device, cpu.ExtensionFingerprint = "cpu", "", owner.CPUExtensionFingerprint
-		cpu.TotalMemoryGB, cpu.ReservedMemoryGB = 0, 0
-		m = &cpu
+		m = cpuMachineView(owner)
 	}
 	e := qualifiedExtension(j, m)
 	if e == nil || m.ExtensionFingerprint == "" {
