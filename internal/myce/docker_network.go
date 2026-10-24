@@ -244,8 +244,7 @@ func (d *dockerAttempt) observeGroup(containers []dockerInspection) error {
 	defer d.mu.Unlock()
 	if networkFailure != "" {
 		d.state.Failure = networkFailure
-		d.state.Stopped = true
-		d.state.Forced = true
+		d.stopLocked(d.clock.Now(), 0, true)
 	}
 	for _, c := range containers {
 		if !dockerLive(c) && c.State.Status != "created" {
@@ -261,8 +260,7 @@ func (d *dockerAttempt) observeGroup(containers []dockerInspection) error {
 		d.state.OOMKilled = d.state.OOMKilled || c.State.OOMKilled
 		if why := d.containerViolation(c); why != "" {
 			d.state.Failure = why
-			d.state.Stopped = true
-			d.state.Forced = true
+			d.stopLocked(d.clock.Now(), 0, true)
 		}
 	}
 	if !d.state.MainFinished {
@@ -272,7 +270,11 @@ func (d *dockerAttempt) observeGroup(containers []dockerInspection) error {
 				d.state.ExitCode = c.State.ExitCode
 				d.state.AmbiguousKill = d.state.AmbiguousKill || c.State.ExitCode == 137 && !c.State.OOMKilled
 				d.state.Stopped = true
-				deadline := d.clock.Now().Add(StopGrace)
+				grace := StopGrace
+				if d.state.Accelerator {
+					grace = acceleratorStopGrace(d.state.StopGrace)
+				}
+				deadline := d.clock.Now().Add(grace)
 				if d.state.StopAt == nil {
 					d.state.StopAt = &deadline
 				}
@@ -304,8 +306,7 @@ func (d *dockerAttempt) observeGroup(containers []dockerInspection) error {
 			if !alive {
 				d.state.Failure = "Docker sidecar " + m.Name + " exited before main"
 				d.state.AmbiguousKill = ambiguousKill
-				d.state.Stopped = true
-				d.state.Forced = true
+				d.stopLocked(d.clock.Now(), 0, true)
 				break
 			}
 		}

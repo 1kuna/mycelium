@@ -987,7 +987,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 				a := q.reconcileAttemptReport(&m, &reports[i], progresses[i])
 				if c.AttemptProtocol == "" {
 					reply.Stop, reply.Kill, reply.Hold = a.Stop, a.Kill, a.Hold
-					reply.GraceSeconds, reply.PriorityStop = a.GraceSeconds, a.PriorityStop
+					reply.GraceSeconds, reply.PriorityStop, reply.UserCancel = a.GraceSeconds, a.PriorityStop, a.UserCancel
 				} else {
 					reply.Attempts = append(reply.Attempts, a)
 					seen[attemptKey{a.ID, a.Attempt, a.Session}] = true
@@ -1002,7 +1002,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 							q.retry(j, j.Reason)
 							continue
 						}
-						reply.Attempts = append(reply.Attempts, AttemptDirective{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Stop: true, Kill: expired(j.StopAt, q.clock.Now()), GraceSeconds: j.StopAt.Sub(q.clock.Now()).Seconds(), PriorityStop: priorityStop(j)})
+						reply.Attempts = append(reply.Attempts, AttemptDirective{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Stop: true, Kill: expired(j.StopAt, q.clock.Now()), GraceSeconds: j.StopAt.Sub(q.clock.Now()).Seconds(), PriorityStop: priorityStop(j), UserCancel: cancelled(j)})
 					}
 				}
 			}
@@ -1014,7 +1014,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 				if j.State == "stopping" {
 					// Omission only finishes a keyed stop after an exact release ack.
 					if c.AttemptProtocol != "" && !j.ReleaseConfirmed {
-						reply.Attempts = []AttemptDirective{{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Stop: true, Kill: expired(j.StopAt, q.clock.Now()), GraceSeconds: j.StopAt.Sub(q.clock.Now()).Seconds(), PriorityStop: priorityStop(j)}}
+						reply.Attempts = []AttemptDirective{{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Stop: true, Kill: expired(j.StopAt, q.clock.Now()), GraceSeconds: j.StopAt.Sub(q.clock.Now()).Seconds(), PriorityStop: priorityStop(j), UserCancel: cancelled(j)}}
 						return nil
 					}
 					if j.Spec.Run.Docker && !j.ReleaseConfirmed {
@@ -1807,6 +1807,9 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 			}
 		}
 	}
+	if j != nil {
+		reply.UserCancel = cancelled(j)
+	}
 	if j == nil || j.Attempt != report.Attempt || j.Machine != m.ID || j.Session != m.Session || terminal(j.State) || j.State == "queued" {
 		if j != nil {
 			for i := range j.Copies {
@@ -1825,6 +1828,7 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 	j.Progress = report.Progress
 	if j.State == "stopping" {
 		reply.PriorityStop = priorityStop(j)
+		reply.UserCancel = cancelled(j)
 		reply.Stop = true
 		reply.Kill = expired(j.StopAt, q.clock.Now())
 		reply.GraceSeconds = j.StopAt.Sub(q.clock.Now()).Seconds()

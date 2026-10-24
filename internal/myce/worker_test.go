@@ -232,7 +232,9 @@ while :; do read line <&3; done`}
 func TestWorkerWaitsForNonresumableOnInterrupt(t *testing.T) {
 	q, _ := fixture(t)
 	q.clock = RealClock{}
-	s := spec("experiment")
+	// CPU-only work still finishes naturally on worker shutdown. Accelerator
+	// work instead receives the bounded group TERM required by #154.
+	s := cpuSpec(1, 1)
 	s.Resumable = false
 	s.Run.Command = []string{"sh", "-c", `echo ready; while [ ! -f "$MYCE_CHECKPOINT_DIR/finish" ]; do sleep 0.01; done; echo finished`}
 	j := submit(t, q, s)

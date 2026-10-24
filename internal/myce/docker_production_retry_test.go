@@ -147,6 +147,7 @@ func TestDockerProductionOutcomeCause(t *testing.T) {
 					exitContainer("running")
 					writeMode("")
 				}
+				expireDockerStop(t, p)
 				select {
 				case finish := <-p.done:
 					if finish.err != nil {

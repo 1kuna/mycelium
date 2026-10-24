@@ -577,6 +577,7 @@ func TestMaintenanceLateDockerCreateAndPolicyDelivery(t *testing.T) {
 		t.Fatal("pending create missed stop")
 	}
 	p.stop(clock.Now(), 0, true)
+	expireDockerStop(t, p)
 	status, _ = q.HostMaintenanceStatus("host")
 	if status.Quiescent || status.MemoryInUseGB != 2 {
 		t.Fatal("empty scan freed custody", status)

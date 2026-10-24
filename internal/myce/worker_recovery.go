@@ -43,6 +43,9 @@ func (r *workerRetry) succeeded(now time.Time, interval time.Duration) {
 type workerState struct {
 	Attempts        []string               `json:"attempts,omitempty"`
 	PriorityStop    *PriorityPreemption    `json:"priority_stop,omitempty"`
+	Accelerator     bool                   `json:"accelerator"`
+	StopGrace       time.Duration          `json:"stop_grace,omitempty"`
+	UserCancel      bool                   `json:"user_cancel,omitempty"`
 	StopAt          *time.Time             `json:"stop_at,omitempty"`
 	Schema          int                    `json:"schema_version"`
 	OperatorStopped bool                   `json:"operator_stopped,omitempty"`
@@ -381,12 +384,33 @@ func (s *workerStore) cleanupOrphan(clock Clock, memoryFiles ...memoryFS) error 
 				return errors.New("mismatched attempt process custody")
 			}
 			if st.Groups != nil || st.Cgroup != "" {
+				if !s.state.Job.Spec.Needs.cpuOnly() && !st.UserCancel {
+					if err := gracefulRecoveredGroups(&st, clock, func() error { return saveWorkerJSON(s.dir, "attempt-"+s.state.Identity+".json", st) }, memoryFiles...); err != nil {
+						return err
+					}
+				}
 				return cleanupAttemptGroups(st, clock, memoryFiles...)
 			}
 		}
 	}
 	if s.state.PID <= 0 || s.state.Identity == "" {
 		return nil
+	}
+	if s.state.Job != nil {
+		data, err := os.ReadFile(filepath.Join(s.dir, s.state.Identity+".stop.json"))
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if err == nil {
+			var intent workerState
+			if err := decodeWorkerJSON(data, &intent); err != nil {
+				return err
+			}
+			if intent.Identity != s.state.Identity {
+				return errors.New("mismatched stop custody")
+			}
+			s.state.StopAt, s.state.UserCancel = intent.StopAt, intent.UserCancel
+		}
 	}
 	members, err := workerGroupMembers(s.state.PID)
 	if err != nil {
@@ -407,13 +431,38 @@ func (s *workerStore) cleanupOrphan(clock Clock, memoryFiles ...memoryFS) error 
 			break
 		}
 	}
-	if !owned {
+	var memory *memoryAttempt
+	if s.state.Cgroup != "" && s.state.Job == nil {
+		if filepath.Base(s.state.Cgroup) != "engine-"+s.state.Identity {
+			return errors.New("mismatched engine cgroup custody")
+		}
+		if _, err := os.Stat(s.state.Cgroup); err == nil {
+			memory = &memoryAttempt{fs: osMemoryFS{}, path: s.state.Cgroup}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	if !owned && memory == nil {
 		return nil
 	}
-	if err = syscall.Kill(-s.state.PID, syscall.SIGKILL); err != nil && err != syscall.ESRCH {
-		return err
+	if (s.state.Accelerator || s.state.Job != nil && !s.state.Job.Spec.Needs.cpuOnly()) && !s.state.UserCancel {
+		group := s.state.PID
+		if !owned {
+			group = 0 // Only the cgroup is authenticated, never signal a reused PGID.
+		}
+		if err := gracefulRecoveredGroup(group, clock, &s.state.StopAt, s.state.StopGrace, s.save, memory); err != nil {
+			return err
+		}
 	}
-	return waitWorkerGroup(s.state.PID, clock)
+	if owned {
+		if err = signalWorkerGroup(s.state.PID, syscall.SIGKILL); err != nil {
+			return err
+		}
+	}
+	if !owned {
+		return memory.cleanup(clock)
+	}
+	return errors.Join(waitWorkerGroup(s.state.PID, clock), memory.cleanup(clock))
 }
 
 func cleanupAttemptGroups(st workerState, clock Clock, memoryFiles ...memoryFS) error {
@@ -704,4 +753,132 @@ func syncCheckpointDirectory(dir string, filesystem func(*os.File) (bool, error)
 		return nil
 	}
 	return syncFile(f)
+}
+
+// Recovery authenticates every surviving group before sending any signal. A
+// persisted deadline prevents worker restarts from renewing or resending TERM.
+func gracefulRecoveredGroups(st *workerState, clock Clock, persist func() error, memoryFiles ...memoryFS) error {
+	var memory *memoryAttempt
+	if st.Cgroup != "" {
+		if filepath.Base(st.Cgroup) != "attempt-"+st.Identity {
+			return errors.New("mismatched attempt cgroup custody")
+		}
+		if _, err := os.Stat(st.Cgroup); err == nil {
+			var fs memoryFS = osMemoryFS{}
+			if len(memoryFiles) > 0 {
+				fs = memoryFiles[0]
+			}
+			memory = &memoryAttempt{fs: fs, path: st.Cgroup}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	for group, births := range st.Groups {
+		members, err := workerGroupMembers(group)
+		if err != nil {
+			return err
+		}
+		owned := len(members) == 0
+		for _, pid := range members {
+			if births[pid] == "" {
+				continue
+			}
+			birth, err := processBirth(pid)
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				return err
+			}
+			owned = owned || birth == births[pid]
+		}
+		if !owned {
+			return errors.New("attempt process group identity unconfirmed; release pending")
+		}
+	}
+	first := st.StopAt == nil
+	if first {
+		deadline := clock.Now().Add(acceleratorStopGrace(st.StopGrace))
+		st.StopAt = &deadline
+		if err := persist(); err != nil {
+			return err
+		}
+		groups := map[int]bool{}
+		for group := range st.Groups {
+			groups[group] = true
+			if err := signalWorkerGroup(group, syscall.SIGTERM); err != nil {
+				return err
+			}
+		}
+		if err := memory.termOutsideGroups(groups); err != nil {
+			return err
+		}
+	}
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for clock.Now().Before(*st.StopAt) {
+		alive, err := memory.populated()
+		if err != nil {
+			return err
+		}
+		for group := range st.Groups {
+			members, err := workerGroupMembers(group)
+			if err != nil {
+				return err
+			}
+			alive = alive || len(members) > 0
+		}
+		if !alive {
+			return nil
+		}
+		<-tick.C
+	}
+	return nil
+}
+
+func gracefulRecoveredGroup(group int, clock Clock, deadline **time.Time, grace time.Duration, persist func() error, memories ...*memoryAttempt) error {
+	var memory *memoryAttempt
+	if len(memories) > 0 {
+		memory = memories[0]
+	}
+	groups := map[int]bool{}
+	if group > 0 {
+		groups[group] = true
+	}
+	if *deadline == nil {
+		at := clock.Now().Add(acceleratorStopGrace(grace))
+		*deadline = &at
+		if err := persist(); err != nil {
+			return err
+		}
+		if group > 0 {
+			if err := signalWorkerGroup(group, syscall.SIGTERM); err != nil {
+				return err
+			}
+		}
+		if err := memory.termOutsideGroups(groups); err != nil {
+			return err
+		}
+	}
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for clock.Now().Before(**deadline) {
+		var members []int
+		if group > 0 {
+			var err error
+			members, err = workerGroupMembers(group)
+			if err != nil {
+				return err
+			}
+		}
+		outside, err := memory.outsideGroups(groups, false)
+		if err != nil {
+			return err
+		}
+		if len(members) == 0 && !outside {
+			return nil
+		}
+		<-tick.C
+	}
+	return nil
 }

@@ -20,6 +20,7 @@ type WorkerEvent struct {
 	Execution
 	StopAt       *time.Time `json:"stop_at,omitempty"`
 	deadline     time.Time
+	UserCancel   bool    `json:"user_cancel,omitempty"`
 	GraceSeconds float64 `json:"grace_seconds"`
 	Kill         bool    `json:"kill"`
 }
@@ -39,6 +40,7 @@ func (a API) workerEvent(w http.ResponseWriter, r *http.Request) {
 			}
 			e := WorkerEvent{Session: session, StopAt: &deadline, Cursor: fmt.Sprintf("%s:%s:%d:%s:%t", session, id, attempt, deadline.Format(time.RFC3339Nano), !now.Before(deadline)), Execution: Execution{ID: id, Attempt: attempt}, GraceSeconds: max(0, deadline.Sub(now).Seconds()), Kill: !now.Before(deadline)}
 			if j := a.Queue.s.Jobs[id]; j != nil {
+				e.UserCancel = cancelled(j)
 				for _, copy := range j.Copies {
 					if copy.Machine == r.PathValue("id") && copy.Session == session && copy.Attempt == attempt {
 						e.PriorityStop = copy.PriorityStop
@@ -164,14 +166,18 @@ func (c *processControl) apply() {
 			}
 			p.stop(now, grace, false)
 		}
-		if c.leaving && p.job.Spec.Resumable {
-			p.stop(now, StopGrace, false)
+		if c.leaving && (p.job.Spec.Resumable || !p.job.Spec.Needs.cpuOnly()) {
+			grace := StopGrace
+			if !p.job.Spec.Needs.cpuOnly() {
+				grace = defaultGPUStopGrace
+			}
+			p.stop(now, grace, false)
 		}
 		if event, ok := c.pendingEvents[key]; ok {
 			if err := p.recordPriorityStop(nil, event.PriorityStop); err != nil {
 				continue // Retry persistence before delivering the priority stop.
 			}
-			p.stop(now, max(0, event.deadline.Sub(now)), event.Kill || !now.Before(event.deadline))
+			p.stopDirective(now, max(0, event.deadline.Sub(now)), event.Kill || !now.Before(event.deadline), event.UserCancel)
 		}
 		p.enforceGrace(now)
 	}

@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -34,7 +36,13 @@ func runRecordedCommand(ctx context.Context, argv []string, dir string, env []st
 		scope.Clock = RealClock{}
 	}
 	identity := ID()
+	var stateMu sync.Mutex
 	state := workerState{Identity: identity, LaunchPending: true}
+	for _, entry := range env {
+		if platform, ok := strings.CutPrefix(entry, "MYCE_PLATFORM="); ok && platform != "" && platform != "cpu" {
+			state.Accelerator = true
+		}
+	}
 	if e := saveWorkerJSON(scope.StateDir, record, state); e != nil {
 		return e
 	}
@@ -50,8 +58,17 @@ func runRecordedCommand(ctx context.Context, argv []string, dir string, env []st
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
+		stateMu.Lock()
+		defer stateMu.Unlock()
 		if cmd.Process != nil {
-			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			if state.Accelerator {
+				if err := gracefulRecoveredGroup(cmd.Process.Pid, scope.Clock, &state.StopAt, state.StopGrace, func() error {
+					return saveWorkerJSON(scope.StateDir, record, state)
+				}); err != nil {
+					return err
+				}
+			}
+			return signalWorkerGroup(cmd.Process.Pid, syscall.SIGKILL)
 		}
 		return nil
 	}
@@ -66,9 +83,12 @@ func runRecordedCommand(ctx context.Context, argv []string, dir string, env []st
 	if e = cmd.Start(); e != nil {
 		return e
 	}
+	stateMu.Lock()
 	state.PID = cmd.Process.Pid
 	state.LaunchPending = false
-	if e = saveWorkerJSON(scope.StateDir, record, state); e != nil {
+	e = saveWorkerJSON(scope.StateDir, record, state)
+	stateMu.Unlock()
+	if e != nil {
 		_ = syscall.Kill(-state.PID, syscall.SIGKILL)
 		_ = cmd.Wait()
 		return e
@@ -78,9 +98,16 @@ func runRecordedCommand(ctx context.Context, argv []string, dir string, env []st
 		_, e = writer.Write([]byte("start\n"))
 	}
 	if e != nil {
-		_ = syscall.Kill(-state.PID, syscall.SIGKILL)
+		_ = cmd.Cancel()
 	}
 	waitErr := cmd.Wait()
+	if state.Accelerator {
+		if err := gracefulRecoveredGroup(state.PID, scope.Clock, &state.StopAt, state.StopGrace, func() error {
+			return saveWorkerJSON(scope.StateDir, record, state)
+		}); err != nil {
+			return errors.Join(e, waitErr, err)
+		}
+	}
 	_ = syscall.Kill(-state.PID, syscall.SIGKILL)
 	groupErr := waitWorkerGroup(state.PID, scope.Clock)
 	if groupErr == nil {

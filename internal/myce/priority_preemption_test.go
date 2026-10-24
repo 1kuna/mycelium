@@ -43,9 +43,6 @@ func TestPriorityPreemptionEveryBatchKind(t *testing.T) {
 				}
 				if higher && got.State == "stopping" {
 					want := 10 * time.Second
-					if !victim.Resumable {
-						want = 0
-					}
 					if got.StopAt == nil || got.StopAt.Sub(q.clock.Now()) != want {
 						t.Fatal("tier grace", got.StopAt)
 					}

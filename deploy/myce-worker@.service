@@ -13,7 +13,7 @@ UMask=0077
 Delegate=memory
 KillMode=control-group
 SendSIGKILL=yes
-TimeoutStopSec=10s
+TimeoutStopSec=45s
 
 [Install]
 WantedBy=default.target

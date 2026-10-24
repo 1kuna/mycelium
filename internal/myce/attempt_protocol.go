@@ -39,11 +39,11 @@ func attemptReply(c Checkin, reply Reply) Reply {
 	}
 	reply.AttemptProtocol = keyedAttemptProtocol
 	if len(reply.Attempts) == 0 && reply.Job != nil {
-		reply.Attempts = []AttemptDirective{{Execution: Execution{ID: reply.Job.ID, Attempt: reply.Job.Attempt}, Session: reply.Job.Session, Job: reply.Job, Hold: reply.Hold, Stop: reply.Stop, Kill: reply.Kill, GraceSeconds: reply.GraceSeconds, PriorityStop: reply.PriorityStop}}
+		reply.Attempts = []AttemptDirective{{Execution: Execution{ID: reply.Job.ID, Attempt: reply.Job.Attempt}, Session: reply.Job.Session, Job: reply.Job, Hold: reply.Hold, Stop: reply.Stop, Kill: reply.Kill, GraceSeconds: reply.GraceSeconds, PriorityStop: reply.PriorityStop, UserCancel: reply.UserCancel}}
 	}
 	// Never send an unaddressed assignment or stop to a keyed worker.
 	reply.Job, reply.PriorityStop = nil, nil
-	reply.Hold, reply.Stop, reply.Kill, reply.GraceSeconds = false, false, false, 0
+	reply.Hold, reply.Stop, reply.Kill, reply.UserCancel, reply.GraceSeconds = false, false, false, false, 0
 	return reply
 }
 
@@ -95,7 +95,7 @@ func workerAttemptReply(c Checkin, reply Reply) (Reply, error) {
 	if reply.AttemptProtocol != keyedAttemptProtocol {
 		return Reply{}, currentProtocolError("queue lacks keyed-attempt-v1: upgrade the queue before this worker; saved attempt custody is retained")
 	}
-	if reply.Job != nil || reply.Stop || reply.Kill || reply.Hold || reply.PriorityStop != nil || reply.GraceSeconds != 0 {
+	if reply.Job != nil || reply.Stop || reply.Kill || reply.Hold || reply.PriorityStop != nil || reply.GraceSeconds != 0 || reply.UserCancel {
 		return Reply{}, currentProtocolError("keyed-attempt-v1 queue returned unkeyed attempt decisions")
 	}
 	seen := map[attemptKey]bool{}
@@ -127,7 +127,7 @@ func workerAttemptReply(c Checkin, reply Reply) (Reply, error) {
 			current := c.Attempts[0]
 			if current.ID == a.ID && current.Attempt == a.Attempt && current.Session == a.Session {
 				reply.Stop, reply.Kill, reply.Hold = a.Stop, a.Kill, a.Hold
-				reply.GraceSeconds, reply.PriorityStop = a.GraceSeconds, a.PriorityStop
+				reply.GraceSeconds, reply.PriorityStop, reply.UserCancel = a.GraceSeconds, a.PriorityStop, a.UserCancel
 			}
 		}
 	}

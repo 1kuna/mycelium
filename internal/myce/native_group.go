@@ -99,22 +99,30 @@ func (g *nativeGroup) saveLocked() error {
 }
 
 // Called under p.mu, also held across fork/persistence/exec approval. A stop
-// cannot race another member into execution. Main gets checkpoint grace while
-// helpers remain available; prep has no main and terminates the whole group.
+// cannot race another member into execution. CPU main keeps its checkpoint
+// helpers; non-user accelerator stops terminate all members together.
 func (g *nativeGroup) stopLocked(now time.Time, grace time.Duration, kill bool) {
 	p := g.p
+	firstDelivery := !p.stopped || p.stopAt == nil
 	if !p.stopped && !p.killed && g.memberFailure() != nil {
 		g.stageFailure = true
 	}
 	g.cancel()
+	cancelChanged := g.custody.UserCancel != p.userCancel
+	g.custody.UserCancel = p.userCancel
 	deadline := now.Add(grace)
-	if p.stopAt == nil || deadline.Before(*p.stopAt) {
+	if p.stopAt == nil || deadline.Before(*p.stopAt) || cancelChanged {
 		p.stopAt = &deadline
 		g.custody.StopAt = &deadline
 		if err := saveWorkerJSON(g.dir, "attempt-"+g.identity+".json", g.custody); err != nil {
 			// Failed stop persistence cannot authorize additional execution.
-			g.signalLocked(nil, syscall.SIGKILL)
-			p.killed = true
+			if p.stopGroup {
+				g.signalLocked(nil, syscall.SIGTERM)
+				p.stopped = true
+			} else {
+				g.signalLocked(nil, syscall.SIGKILL)
+				p.killed = true
+			}
 		}
 	}
 	if kill {
@@ -124,12 +132,15 @@ func (g *nativeGroup) stopLocked(now time.Time, grace time.Duration, kill bool) 
 		}
 		return
 	}
-	if !p.stopped {
+	if firstDelivery {
 		p.stopped = true
-		if g.main != nil {
+		if g.main != nil && !p.stopGroup {
 			g.signalLocked(g.main, syscall.SIGTERM)
 		} else {
 			g.signalLocked(nil, syscall.SIGTERM)
+		}
+		if p.stopGroup {
+			_ = g.memory.termOutsideGroups(map[int]bool{g.supervisor.Process.Pid: true})
 		}
 	}
 }
@@ -230,9 +241,9 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 	s.state.Pending = 0
 	s.state.Result = nil
 	s.state.OperatorStopped = false
-	p := &process{job: j, done: make(chan workerFinish, 1), savePriorityStop: s.priorityStopRecorder()}
+	p := &process{stopGrace: w.AcceleratorStopGrace, job: j, done: make(chan workerFinish, 1), savePriorityStop: s.priorityStopRecorder()}
 	ctx, cancel := context.WithCancel(context.Background())
-	g := &nativeGroup{p: p, worker: w, dir: s.dir, identity: identity, session: s.state.Session, ctx: ctx, cancel: cancel, memory: memory, custody: workerState{Identity: identity, Groups: map[int]map[int]string{}}}
+	g := &nativeGroup{p: p, worker: w, dir: s.dir, identity: identity, session: s.state.Session, ctx: ctx, cancel: cancel, memory: memory, custody: workerState{Identity: identity, StopGrace: acceleratorStopGrace(w.AcceleratorStopGrace), Groups: map[int]map[int]string{}}}
 	p.native = g
 	if memory != nil {
 		g.custody.Cgroup = memory.path
@@ -267,7 +278,7 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 			}
 			// No advertised endpoint may change while an old consumer survives.
 			// Keep custody until the entire old group is verified empty.
-			if err := g.cleanupProcesses(writer); err != nil {
+			if err := g.cleanupProcesses(writer, true); err != nil {
 				runErr = errors.Join(runErr, err)
 				break
 			}
@@ -285,13 +296,14 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 				release()
 			}
 		}()
+		p.waitStopGrace(w.Clock, g.supervisor.Process.Pid, g.supervisor.Process.Pid)
 		p.mu.Lock()
 		forced, polite := p.killed, p.polite
 		stage = stage || g.stageFailure
 		facts := g.outcomeLocked(runErr, stage)
 		priorityStop := p.priorityStop
 		p.mu.Unlock()
-		groupErr := g.cleanupProcesses(writer)
+		groupErr := g.cleanupProcesses(writer, false)
 		oom := g.memoryFailure()
 		cleanup := errors.Join(groupErr, memory.cleanup(w.Clock), g.save())
 		persist := errors.Join(syncCommandOutput(output), output.Close())
@@ -422,6 +434,7 @@ func (g *nativeGroup) startSupervisor(s *workerStore, env map[string]string) (*o
 	g.supervisor = cmd
 	g.p.outcome = memberOutcome{} // New members cannot inherit a previous group's probe facts.
 	g.members = nil
+	g.custody.StopAt = nil // The previous group is verified empty before retry.
 	for _, side := range g.p.job.Spec.Run.Sidecars {
 		g.members = append(g.members, &nativeMember{Name: side.Name, Phase: "intent", MemoryGB: side.MemoryGB})
 	}
@@ -438,7 +451,51 @@ func (g *nativeGroup) startSupervisor(s *workerStore, env map[string]string) (*o
 	return writer, nil
 }
 
-func (g *nativeGroup) cleanupProcesses(writer *os.File) error {
+func (g *nativeGroup) cleanupProcesses(writer *os.File, retry bool) error {
+	g.p.mu.Lock()
+	graceful := !g.p.job.Spec.Needs.cpuOnly() && !g.p.userCancel
+	g.p.mu.Unlock()
+	if graceful && retry {
+		// A bind retry drains this group without cancelling the attempt's next
+		// preparation. External stops still cancel g.ctx and forbid relaunch.
+		g.p.mu.Lock()
+		deadline := g.worker.Clock.Now().Add(acceleratorStopGrace(g.worker.AcceleratorStopGrace))
+		g.custody.StopAt = &deadline
+		persistErr := g.saveLocked()
+		g.signalLocked(nil, syscall.SIGTERM)
+		termErr := g.memory.termOutsideGroups(map[int]bool{g.supervisor.Process.Pid: true})
+		g.p.mu.Unlock()
+		if termErr != nil {
+			return termErr
+		}
+		if persistErr != nil {
+			return persistErr
+		}
+		tick := time.NewTicker(10 * time.Millisecond)
+		for g.worker.Clock.Now().Before(deadline) {
+			members, err := workerGroupMembers(g.supervisor.Process.Pid)
+			populated, populationErr := g.memory.outsideGroups(map[int]bool{g.supervisor.Process.Pid: true}, false)
+			if err == nil && populationErr == nil && !populated && (len(members) == 0 || len(members) == 1 && members[0] == g.supervisor.Process.Pid) {
+				break
+			}
+			<-tick.C
+		}
+		tick.Stop()
+	} else if graceful {
+		g.p.stop(g.worker.Clock.Now(), acceleratorStopGrace(g.worker.AcceleratorStopGrace), false)
+		g.p.waitStopGrace(g.worker.Clock, g.supervisor.Process.Pid, g.supervisor.Process.Pid)
+	}
+
+	// If only the anchor remains, let EOF end it without signaling an exited payload.
+	g.p.mu.Lock()
+	groupStop := g.p.stopGroup
+	g.p.mu.Unlock()
+	members, err := workerGroupMembers(g.supervisor.Process.Pid)
+	if groupStop && err == nil && len(members) == 1 && members[0] == g.supervisor.Process.Pid && writer != nil {
+		writer.Close()
+		_ = g.supervisor.Wait()
+	}
+
 	// Retain the cgroup reservation, but kill and verify its entire subtree,
 	// including descendants that left the process group, before relaunching.
 	cleanup := errors.Join(g.memory.stop(g.worker.Clock), cleanupAttemptGroups(workerState{Groups: g.custody.Groups}, g.worker.Clock))

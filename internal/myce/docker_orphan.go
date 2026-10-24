@@ -39,5 +39,8 @@ func (d *dockerAttempt) stopOrphan(id string, kill bool) ([]byte, error) {
 	}
 	// Docker sends TERM once and KILL at its timeout. On any error, subsequent
 	// observations wait for the original grace, then retry only idempotent KILL.
+	if d.state.Accelerator {
+		return d.call("kill", "--signal=TERM", id)
+	}
 	return d.callWithTimeout(grace+d.timeout, "stop", "--time", strconv.FormatInt(seconds, 10), id)
 }

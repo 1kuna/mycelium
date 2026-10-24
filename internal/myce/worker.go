@@ -26,8 +26,9 @@ var workerCheckpointPrepare = prepareCheckpoint
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
-	Enrollment     bool
-	DeviceSettings []DeviceInstall
+	AcceleratorStopGrace time.Duration
+	Enrollment           bool
+	DeviceSettings       []DeviceInstall
 
 	DeviceFaultSource       DeviceFaultSource
 	DeviceFaultMatchers     map[string]DeviceFaultMatcher
@@ -106,22 +107,26 @@ type workerFinish struct {
 	err    error
 }
 type process struct {
+	saveStopIntent   func(*time.Time, bool) error
 	savePriorityStop func(*PriorityPreemption) error
 	priorityStop     *PriorityPreemption
 	outcome          memberOutcome
 	saveOutcome      func(memberOutcome) error
 
-	machine string
-	docker  *dockerAttempt
-	native  *nativeGroup
-	mu      sync.Mutex
-	job     Job
-	cmd     *exec.Cmd
-	done    chan workerFinish
-	stopAt  *time.Time
-	stopped bool
-	polite  bool
-	killed  bool
+	machine    string
+	docker     *dockerAttempt
+	native     *nativeGroup
+	mu         sync.Mutex
+	job        Job
+	cmd        *exec.Cmd
+	done       chan workerFinish
+	stopAt     *time.Time
+	stopped    bool
+	polite     bool
+	stopGroup  bool
+	userCancel bool
+	stopGrace  time.Duration
+	killed     bool
 }
 
 // Save exact-attempt intent before delivery. Result goroutines read only the
@@ -163,8 +168,13 @@ func (p *process) recordPriorityStop(s *workerStore, stop *PriorityPreemption) e
 }
 
 func (p *process) stop(now time.Time, grace time.Duration, kill bool) {
+	p.stopDirective(now, grace, kill, false)
+}
+func (p *process) stopDirective(now time.Time, grace time.Duration, kill, userCancel bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.userCancel = p.userCancel || userCancel
+	p.stopGroup = p.job.ID != "" && !p.job.Spec.Needs.cpuOnly() && !p.userCancel
 	p.stopLocked(now, grace, kill)
 }
 func (p *process) enforceGrace(now time.Time) {
@@ -175,6 +185,33 @@ func (p *process) enforceGrace(now time.Time) {
 	}
 }
 func (p *process) stopLocked(now time.Time, grace time.Duration, kill bool) {
+	if p.docker != nil {
+		p.docker.mu.Lock()
+		if p.userCancel && !p.docker.state.UserCancel {
+			p.docker.state.UserCancel = true
+			p.docker.dirty = true
+		}
+		p.docker.mu.Unlock()
+	} else if p.stopGroup {
+		if kill {
+			grace = p.stopGrace
+		}
+		grace = min(acceleratorStopGrace(grace), acceleratorStopGrace(p.stopGrace))
+		deadline := now.Add(grace)
+		if p.stopped && p.stopAt != nil && p.stopAt.Before(deadline) {
+			deadline = *p.stopAt
+		}
+		grace = max(0, deadline.Sub(now))
+		kill = grace == 0
+	}
+
+	if p.saveStopIntent != nil && !p.job.Spec.Needs.cpuOnly() {
+		deadline := now.Add(grace)
+		if p.stopAt != nil && p.stopAt.Before(deadline) {
+			deadline = *p.stopAt
+		}
+		_ = p.saveStopIntent(&deadline, p.userCancel)
+	}
 	if p.native != nil {
 		p.native.stopLocked(now, grace, kill)
 		return
@@ -205,15 +242,44 @@ func (p *process) stopLocked(now time.Time, grace time.Duration, kill bool) {
 	}
 }
 
+// A helper may exit before main (or main before a helper) after group TERM.
+// Neither exit authorizes cleanup KILL before the shared injected-clock deadline.
+func (p *process) waitStopGrace(clock Clock, group, anchor int) {
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		p.mu.Lock()
+		waiting := p.stopGroup && p.stopped && !p.killed && p.stopAt != nil
+		p.mu.Unlock()
+		if !waiting {
+			return
+		}
+		members, err := workerGroupMembers(group)
+		populated, populationErr := false, error(nil)
+		if p.native != nil {
+			populated, populationErr = p.native.memory.outsideGroups(map[int]bool{group: true}, false)
+		}
+		if err == nil && populationErr == nil && !populated && (len(members) == 0 || len(members) == 1 && members[0] == anchor) {
+			return
+		}
+		p.enforceGrace(clock.Now())
+		<-tick.C
+	}
+}
+
 // p.mu serializes delivery/persistence with exit observation. Capture the
 // observation timestamp immediately after Wait, before acquiring this lock.
 func (p *process) signalLocked(signal syscall.Signal) {
-	if p.outcome.Exit != nil {
+	exited := p.outcome.Exit != nil
+	if exited && !p.stopGroup {
 		return
 	}
 	if err := syscall.Kill(-p.cmd.Process.Pid, signal); err != nil {
 		return
 	}
+	if exited {
+		return
+	} // A descendant signal cannot rewrite the main's exit facts.
 	at := time.Now().UTC()
 	name := "TERM"
 	if signal == syscall.SIGKILL {
@@ -523,6 +589,8 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (*proce
 	s.state.OperatorStopped = false
 	s.state.PID = 0
 	s.state.LaunchPending = true
+	s.state.StopGrace = acceleratorStopGrace(w.AcceleratorStopGrace)
+	s.state.StopAt, s.state.UserCancel = nil, false
 	if err = s.save(); err != nil {
 		output.Close()
 		return nil, err
@@ -538,7 +606,16 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (*proce
 	if readyWriter != nil {
 		readyWriter.Close()
 	}
+	payloadPossible := false
 	abort := func(cause error) error {
+		if payloadPossible && !j.Spec.Needs.cpuOnly() {
+			var deadline *time.Time
+			if stopErr := gracefulRecoveredGroup(cmd.Process.Pid, w.Clock, &deadline, w.AcceleratorStopGrace, func() error {
+				return saveWorkerJSON(s.dir, identity+".stop.json", workerState{Identity: identity, StopAt: deadline})
+			}); stopErr != nil {
+				return errors.Join(cause, fmt.Errorf("%w: %v", errWorkerReleasePending, stopErr))
+			}
+		}
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		_ = cmd.Wait()
 		output.Close()
@@ -558,7 +635,20 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (*proce
 	if err = s.save(); err != nil {
 		return nil, abort(err)
 	}
-	p := &process{job: j, cmd: cmd, done: make(chan workerFinish, 1), savePriorityStop: s.priorityStopRecorder()}
+	p := &process{job: j, stopGrace: w.AcceleratorStopGrace, cmd: cmd, done: make(chan workerFinish, 1), savePriorityStop: s.priorityStopRecorder()}
+	var savedStopAt *time.Time
+	var savedUserCancel bool
+	p.saveStopIntent = func(deadline *time.Time, userCancel bool) error {
+		if savedStopAt != nil && deadline.Equal(*savedStopAt) && savedUserCancel == userCancel {
+			return nil
+		}
+		if err := saveWorkerJSON(s.dir, identity+".stop.json", workerState{Identity: identity, StopAt: deadline, UserCancel: userCancel}); err != nil {
+			return err
+		}
+		at := *deadline
+		savedStopAt, savedUserCancel = &at, userCancel
+		return nil
+	}
 	p.saveOutcome = func(facts memberOutcome) error { return saveWorkerJSON(s.dir, identity+".outcome.json", facts) }
 	if w.control != nil {
 		w.control.set(p)
@@ -568,8 +658,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (*proce
 			return nil, abort(s.startFailure(j, launchRefused, err))
 		}
 	}
+	payloadPossible = true
 	if _, err = gateWriter.Write([]byte("start\n")); err != nil {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		return nil, abort(err)
 	}
 	if readyReader != nil {
 		// Bound receipt I/O; queue startup decisions still use its injected Clock.
@@ -618,6 +709,12 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (*proce
 		p.mu.Lock()
 		p.outcome.Exit = observed
 		observationErr := p.saveOutcome(p.outcome)
+		p.mu.Unlock()
+		if !j.Spec.Needs.cpuOnly() {
+			p.stop(w.Clock.Now(), acceleratorStopGrace(w.AcceleratorStopGrace), false)
+		}
+		p.waitStopGrace(w.Clock, cmd.Process.Pid, 0)
+		p.mu.Lock()
 		result.Forced = p.killed
 		p.mu.Unlock()
 		// Descendants must not outlive the command or append to delivered output.

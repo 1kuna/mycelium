@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -281,6 +282,76 @@ func (a *memoryAttempt) removeEmptyTree() error {
 		}
 	}
 	return a.fs.Remove(a.path)
+}
+
+// A descendant can leave its PGID while remaining in the attempt cgroup.
+// Give those processes TERM too, and retain the full grace while any remain.
+func (a *memoryAttempt) termOutsideGroups(groups map[int]bool) error {
+	_, err := a.outsideGroups(groups, true)
+	return err
+}
+
+func (a *memoryAttempt) outsideGroups(groups map[int]bool, term bool) (bool, error) {
+	if a == nil {
+		return false, nil
+	}
+	data, err := a.fs.ReadFile(filepath.Join(a.path, "cgroup.procs"))
+	if err != nil {
+		return false, err
+	}
+	alive := false
+	for _, value := range strings.Fields(string(data)) {
+		pid, err := strconv.Atoi(value)
+		if err != nil || pid <= 0 {
+			return false, errors.New("invalid cgroup process inventory")
+		}
+		group, err := syscall.Getpgid(pid)
+		if errors.Is(err, syscall.ESRCH) {
+			continue
+		}
+		if err != nil {
+			return false, err
+		}
+		if !groups[group] {
+			alive = true
+			if term {
+				if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+					return false, err
+				}
+			}
+		}
+	}
+	entries, err := a.fs.ReadDir(a.path)
+	if err != nil {
+		return false, err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			childAlive, err := (&memoryAttempt{fs: a.fs, path: filepath.Join(a.path, entry.Name())}).outsideGroups(groups, term)
+			if err != nil {
+				return false, err
+			}
+			alive = alive || childAlive
+		}
+	}
+	return alive, nil
+}
+
+func (a *memoryAttempt) populated() (bool, error) {
+	if a == nil {
+		return false, nil
+	}
+	data, err := a.fs.ReadFile(filepath.Join(a.path, "cgroup.events"))
+	if err != nil {
+		return false, err
+	}
+	fields := strings.Fields(string(data))
+	for i := 0; i+1 < len(fields); i += 2 {
+		if fields[i] == "populated" {
+			return fields[i+1] != "0", nil
+		}
+	}
+	return false, errors.New("cgroup population unconfirmed")
 }
 
 // Stop and verify the subtree while retaining its reservation for a group retry.

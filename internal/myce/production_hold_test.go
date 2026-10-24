@@ -163,8 +163,8 @@ func TestProductionHoldExpiryAndLostWorkerRetainRelease(t *testing.T) {
 	p := spec("production")
 	p.AllowedMachines = []string{a.ID}
 	prod := submit(t, q, p)
-	if got := check(t, q, b, y); !got.Stop || !got.Kill {
-		t.Fatal("non-resumable must stop immediately")
+	if got := check(t, q, b, y); !got.Stop || got.Kill || got.GraceSeconds != 10 {
+		t.Fatal("GPU non-resumable must receive grace")
 	}
 	c.Advance(11 * time.Second)
 	check(t, q, s, nil)

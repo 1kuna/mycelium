@@ -10,10 +10,10 @@ import (
 
 func TestProductionNonresumableRequeueNoLoss(t *testing.T) {
 	q, c := fixture(t)
-	s := spec("experiment")
+	s := cpuSpec(1, 1)
 	s.Resumable = false
 	j := submit(t, q, s)
-	m := machine("one", "fake")
+	m := cpuMachine("one", "one", "fake", 1, 8)
 	r := check(t, q, m, nil).Job
 	prod := submit(t, q, spec("production"))
 	stop := check(t, q, m, r)
@@ -267,8 +267,10 @@ func TestPinnedLoadFailureVisible(t *testing.T) {
 
 func TestProductionShortensExistingDeadlineGrace(t *testing.T) {
 	q, c := fixture(t)
-	submit(t, q, spec("experiment"))
-	m := machine("one", "fake")
+	s := cpuSpec(1, 1)
+	s.Resumable = true
+	submit(t, q, s)
+	m := cpuMachine("one", "one", "fake", 1, 8)
 	r := check(t, q, m, nil).Job
 	submit(t, q, spec("deadline"))
 	if check(t, q, m, r).GraceSeconds != 120 {

@@ -195,6 +195,7 @@ func TestDeviceSelectionDockerEnvironment(t *testing.T) {
 					t.Fatal(err)
 				}
 				p.stop(c.Now(), 0, true)
+				expireDockerStop(t, p)
 				<-p.done
 				for key, want := range selectedDeviceEnv(platform, device) {
 					if !strings.Contains(string(data), "--env "+key+"="+want+" ") {
@@ -237,6 +238,7 @@ func TestDeviceSelectionDockerSidecarEnvironment(t *testing.T) {
 				return err == nil
 			})
 			p.stop(c.Now(), 0, true)
+			expireDockerStop(t, p)
 			<-p.done
 			data, err := os.ReadFile(filepath.Join(root, "calls"))
 			if err != nil {

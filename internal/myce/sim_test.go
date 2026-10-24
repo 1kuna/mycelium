@@ -49,8 +49,9 @@ func TestSimProductionPreemption(t *testing.T) {
 }
 func TestSimNonResumableLostWork(t *testing.T) {
 	r := runSimTest(t, simTestFleet(1), simTestWork(simTestStream("exp", "experiment", 0, 100, 1), simTestStream("prod", "production", 10, 5, 1)), 120)
-	nearSim(t, r.Production.Max, 0)
-	nearSim(t, r.LostSeconds, 10)
+	// The simulator models a cooperative TERM response after one second.
+	nearSim(t, r.Production.Max, 1)
+	nearSim(t, r.LostSeconds, 11)
 	if r.Preemptions != 1 || r.Completed != 2 {
 		t.Fatalf("%+v", r)
 	}

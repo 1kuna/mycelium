@@ -92,6 +92,7 @@ func restartSavedResult(t *testing.T, w Worker, s *workerStore) Result {
 	}
 	if p != nil {
 		defer p.docker.close()
+		expireDockerStop(t, p)
 		select {
 		case f := <-p.done:
 			if f.err != nil {
@@ -114,7 +115,7 @@ func TestDockerRestartCompletedMain(t *testing.T) {
 	w, s, d, c, root := restartResultFixture(t)
 	restartMainExit(t, d, root)
 	deadline := *d.state.StopAt
-	for _, step := range []time.Duration{StopGrace / 2, StopGrace/2 - time.Nanosecond} {
+	for _, step := range []time.Duration{defaultGPUStopGrace / 2, defaultGPUStopGrace/2 - time.Nanosecond} {
 		c.advance(step)
 		restartOnce(t, w, s)
 		st := restartRead(t, s)

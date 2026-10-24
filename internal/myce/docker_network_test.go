@@ -246,6 +246,7 @@ func TestDockerPrivateNetworkLifecycle(t *testing.T) {
 	t.Cleanup(p.docker.close)
 	await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
 	p.stop(c.Now(), 0, true)
+	expireDockerStop(t, p)
 	select {
 	case f := <-p.done:
 		if !f.result.Forced {
@@ -369,6 +370,7 @@ func TestDockerGroupInspectsEachDeclaredMemoryLimit(t *testing.T) {
 				}
 				if id == "" {
 					p.stop(c.Now(), 0, true)
+					expireDockerStop(t, p)
 				} else if e := os.WriteFile(filepath.Join(root, "mode"), []byte("wrong-memory-"+id), 0600); e != nil {
 					t.Fatal(e)
 				}
@@ -380,6 +382,7 @@ func TestDockerGroupInspectsEachDeclaredMemoryLimit(t *testing.T) {
 				})
 				c.advance(StopGrace)
 			}
+			expireDockerStop(t, p)
 			select {
 			case f := <-p.done:
 				if id != "" && (f.result.Success || f.result.Interrupted || f.result.Error != "Docker memory ceiling not enforced") {
@@ -480,6 +483,7 @@ func TestDockerSidecarCrashFailsJob(t *testing.T) {
 	t.Cleanup(p.docker.close)
 	await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
 	_ = os.Rename(filepath.Join(root, "running-sidecar-naming"), filepath.Join(root, "crashed"))
+	expireDockerStop(t, p)
 	select {
 	case f := <-p.done:
 		if f.result.Success || f.result.Interrupted || !strings.Contains(f.result.Error, "sidecar naming exited") {
@@ -505,7 +509,9 @@ func TestDockerNetworkViolationsAndRemovalHold(t *testing.T) {
 			_ = os.WriteFile(filepath.Join(root, "unlabeled-network"), nil, 0600)
 			if mode == "refuse-network-rm" || mode == "late-network-container" {
 				p.stop(c.Now(), 0, true)
+				expireDockerStop(t, p)
 			}
+			expireDockerStop(t, p)
 			if mode == "refuse-network-rm" {
 				await(t, func() bool { return strings.Contains(p.docker.status(), "unconfirmed") })
 				select {
@@ -556,9 +562,11 @@ func TestDockerReadinessTimeoutAndStop(t *testing.T) {
 			await(t, func() bool { return checked.Load() })
 			if stop {
 				p.stop(c.Now(), 0, true)
+				expireDockerStop(t, p)
 			} else {
 				c.advance(time.Second)
 			}
+			expireDockerStop(t, p)
 			select {
 			case f := <-p.done:
 				if f.result.Success {
@@ -595,6 +603,7 @@ func TestDockerExplicitSwapAndHiddenNetworkCustody(t *testing.T) {
 	}
 	_ = os.WriteFile(filepath.Join(root, "mode"), []byte("hidden-network"), 0600)
 	p.stop(c.Now(), 0, true)
+	expireDockerStop(t, p)
 	select {
 	case <-p.done:
 		t.Fatal("saved network disappeared from filtered scan; custody released")
@@ -658,6 +667,7 @@ func TestDockerReadinessRejectsSuccessAtDeadline(t *testing.T) {
 	t.Cleanup(p.docker.close)
 	// Synchronize readiness and cleanup independently of laptop load.
 	await(t, func() bool { return checked.Load() })
+	expireDockerStop(t, p)
 	await(t, func() bool {
 		select {
 		case f := <-p.done:
@@ -690,6 +700,7 @@ func TestDockerReadinessFailureIsCommandFailureNotLoss(t *testing.T) {
 	t.Cleanup(p.docker.close)
 	await(t, func() bool { return checked.Load() })
 	c.advance(time.Second)
+	expireDockerStop(t, p)
 	select {
 	case f := <-p.done:
 		if f.result.Interrupted || f.result.Success {
@@ -717,6 +728,7 @@ func TestDockerGroupRestartCleansSidecarsAndNetwork(t *testing.T) {
 		t.Fatalf("restore: %v", e)
 	}
 	t.Cleanup(restarted.docker.close)
+	expireDockerStop(t, restarted)
 	select {
 	case f := <-restarted.done:
 		if !f.result.Interrupted || !f.result.Forced {

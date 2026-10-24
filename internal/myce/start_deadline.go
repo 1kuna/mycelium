@@ -6,8 +6,9 @@ import (
 	"time"
 )
 
-// Allow ordinary stop grace and the two-minute cleanup escalation, plus reporting.
-const ProductionStartTimeout = 150 * time.Second
+// Budget includes up to 15s accelerator TERM grace, 120s cleanup escalation,
+// and 15s for reporting and replacement launch; grace never extends StartBy.
+const ProductionStartTimeout = maxGPUStopGrace + StopGrace + 15*time.Second
 
 func startupPending(j *Job) bool {
 	return j.Spec.StartBy != nil && !terminal(j.State) && !cancelled(j) && (j.State == "queued" || j.StartedAt == nil)

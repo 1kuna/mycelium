@@ -230,7 +230,9 @@ func TestMemoryCeilingDockerContract(t *testing.T) {
 			if mode == "" {
 				await(t, func() bool { _, err := os.Stat(filepath.Join(root, "running")); return err == nil })
 				p.stop(w.Clock.Now(), 0, true)
+				expireDockerStop(t, p)
 			}
+			expireDockerStop(t, p)
 			select {
 			case f := <-p.done:
 				calls, _ := os.ReadFile(filepath.Join(root, "calls"))

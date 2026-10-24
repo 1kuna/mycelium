@@ -74,6 +74,7 @@ type LlamaEngine struct {
 	memoryMachine      Machine
 	memorySwapMaxBytes int64
 
+	custody     workerState
 	stopCommand []string
 	stopTimeout time.Duration
 	env         []string
@@ -146,6 +147,10 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 		return err
 	}
 	l.identity = ID()
+	l.custody = workerState{Identity: l.identity, LaunchPending: true, Accelerator: !(len(m.Platforms) == 1 && m.Platforms[0] == "cpu"), StopGrace: acceleratorStopGrace(l.stopTimeout)}
+	if l.custody.Accelerator {
+		l.stopTimeout = l.custody.StopGrace
+	}
 	name := "engine-" + l.identity
 	logHint := "; logs disabled"
 	if m.Logs != "none" {
@@ -171,7 +176,7 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 	defer reader.Close()
 	defer writer.Close()
 	l.cmd.Stdin = reader
-	if e = saveWorkerJSON(l.Dir, name+".json", workerState{Identity: l.identity, LaunchPending: true}); e != nil {
+	if e = saveWorkerJSON(l.Dir, name+".json", l.custody); e != nil {
 		l.log.Close()
 		return e
 	}
@@ -190,13 +195,17 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 		l.log.Close()
 		return e
 	}
+	if l.memoryAttempt != nil {
+		l.custody.Cgroup = l.memoryAttempt.path
+	}
 	l.exited = make(chan struct{})
 	go func() { l.waitErr = l.cmd.Wait(); close(l.exited) }()
 	if e = l.memoryAttempt.attach(l.cmd.Process.Pid); e != nil {
 		_ = l.Unload()
 		return fmt.Errorf("memory ceiling attach: %w", e)
 	}
-	if e = saveWorkerJSON(l.Dir, name+".json", workerState{Identity: l.identity, PID: l.cmd.Process.Pid}); e != nil {
+	l.custody.PID, l.custody.LaunchPending = l.cmd.Process.Pid, false
+	if e = saveWorkerJSON(l.Dir, name+".json", l.custody); e != nil {
 		_ = l.Unload()
 		return e
 	}
@@ -276,12 +285,33 @@ func (l *LlamaEngine) Unload() error {
 	if l.cmd == nil || l.cmd.Process == nil {
 		return nil
 	}
-	// Give the optional control command and process group one bounded grace period.
-	grace, cancel := context.WithTimeout(context.Background(), l.stopTimeout)
+	// Give the optional control command and every process one shared deadline.
+	// Main exiting never shortens a GPU descendant's opportunity to drain.
+	persist := func() error { return saveWorkerJSON(l.Dir, "engine-"+l.identity+".json", l.custody) }
+	if l.custody.Accelerator && l.custody.StopAt == nil {
+		at := l.Clock.Now().Add(acceleratorStopGrace(l.stopTimeout))
+		l.custody.StopAt = &at
+		if err := persist(); err != nil {
+			return err
+		}
+		_ = signalWorkerGroup(l.cmd.Process.Pid, syscall.SIGTERM)
+		_ = l.memoryAttempt.termOutsideGroups(map[int]bool{l.cmd.Process.Pid: true})
+	}
+	remaining := l.stopTimeout
+	if l.custody.StopAt != nil {
+		remaining = max(0, l.custody.StopAt.Sub(l.Clock.Now()))
+	}
+	grace, cancel := context.WithTimeout(context.Background(), remaining)
 	defer cancel()
 	stopErr := l.runStopCommand(grace)
-	_ = syscall.Kill(-l.cmd.Process.Pid, syscall.SIGTERM)
-	if l.exited != nil {
+	if l.custody.Accelerator {
+		if err := gracefulRecoveredGroup(l.cmd.Process.Pid, l.Clock, &l.custody.StopAt, l.stopTimeout, persist, l.memoryAttempt); err != nil {
+			return errors.Join(stopErr, err)
+		}
+	} else {
+		_ = syscall.Kill(-l.cmd.Process.Pid, syscall.SIGTERM)
+	}
+	if l.exited != nil && !l.custody.Accelerator {
 		select {
 		case <-l.exited:
 		case <-grace.Done():
@@ -358,6 +388,13 @@ func (l *LlamaEngine) runStopCommand(grace context.Context) error {
 			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		}
 		_ = cmd.Wait()
+		if l.custody.Accelerator {
+			_ = signalWorkerGroup(cmd.Process.Pid, syscall.SIGTERM)
+			deadline := l.custody.StopAt
+			if err := gracefulRecoveredGroup(cmd.Process.Pid, l.Clock, &deadline, l.stopTimeout, func() error { return nil }); err != nil {
+				return err
+			}
+		}
 		killErr := signalWorkerGroup(cmd.Process.Pid, syscall.SIGKILL)
 		if err := errors.Join(gateErr, killErr, waitWorkerGroup(cmd.Process.Pid, l.Clock)); err != nil {
 			return err
@@ -387,10 +424,20 @@ func cleanupRecordedProcesses(dir, pattern string, clock Clock) error {
 		if e = decodeWorkerJSON(data, &st); e != nil {
 			return e
 		}
-		s := workerStore{dir: dir, state: st}
+		// Legacy command/engine records do not identify their device. Drain
+		// conservatively; new records explicitly preserve known CPU custody.
+		var fields map[string]json.RawMessage
+		if e = json.Unmarshal(data, &fields); e != nil {
+			return e
+		}
+		if _, known := fields["accelerator"]; !known {
+			st.Accelerator = true
+		}
+		s := workerStore{dir: dir, stateName: filepath.Base(p), state: st}
 		if e = s.cleanupOrphan(clock); e != nil {
 			return e
 		}
+		st = s.state
 		st.PID = 0
 		st.LaunchPending = false
 		if e = saveWorkerJSON(dir, filepath.Base(p), st); e != nil {

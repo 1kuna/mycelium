@@ -19,6 +19,26 @@ func (q *Queue) preemptionGrace() time.Duration {
 	}
 	return 10 * time.Second
 }
+
+// Keep accelerator teardown inside the 150s production window: at most 15s
+// to drain, 120s for cleanup escalation, and 15s for reporting/launch.
+const maxGPUStopGrace = 15 * time.Second
+const defaultGPUStopGrace = 10 * time.Second
+
+func acceleratorStopGrace(d time.Duration) time.Duration {
+	if d <= 0 {
+		return defaultGPUStopGrace
+	}
+	return min(d, maxGPUStopGrace)
+}
+
+func (q *Queue) gpuStopGrace() time.Duration {
+	return min(q.preemptionGrace(), maxGPUStopGrace)
+}
+func gracefulGPUStop(j *Job) bool {
+	return !j.Spec.Needs.cpuOnly() && !cancelled(j)
+}
+
 func priorityStop(j *Job) *PriorityPreemption {
 	for _, c := range j.Copies {
 		if c.Attempt == j.Attempt && c.Machine == j.Machine && c.Session == j.Session {

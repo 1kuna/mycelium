@@ -505,6 +505,7 @@ func TestDockerDaemonRefusalRetriesWithoutRelease(t *testing.T) {
 	await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
 	_ = os.WriteFile(filepath.Join(root, "mode"), []byte("down"), 0600)
 	p.stop(c.Now(), 0, true)
+	expireDockerStop(t, p)
 	await(t, func() bool { return strings.Contains(p.docker.status(), "unconfirmed") })
 	select {
 	case <-p.done:
@@ -533,6 +534,7 @@ func TestDockerDelayedStartSurvivesClientTimeout(t *testing.T) {
 	t.Cleanup(p.docker.close)
 	await(t, func() bool { return strings.Contains(p.docker.status(), "unconfirmed: start") })
 	p.stop(c.Now(), 0, true)
+	expireDockerStop(t, p)
 	select {
 	case <-p.done:
 		t.Fatal("empty scan settled a pending start")
@@ -603,6 +605,7 @@ func TestDockerRestartReconcilesContainers(t *testing.T) {
 		t.Fatal("restart assumed CLI death meant release")
 	}
 	t.Cleanup(restored.docker.close)
+	expireDockerStop(t, restored)
 	select {
 	case f := <-restored.done:
 		if !f.result.Interrupted || !f.result.Forced {
@@ -624,6 +627,7 @@ func TestDockerOwnershipMismatchDoesNotKillUnrelatedContainer(t *testing.T) {
 	await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
 	_ = os.WriteFile(filepath.Join(root, "label"), []byte("unrelated"), 0600)
 	p.stop(c.Now(), 0, true)
+	expireDockerStop(t, p)
 	await(t, func() bool { return strings.Contains(p.docker.status(), "unconfirmed") })
 	data, _ := os.ReadFile(filepath.Join(root, "calls"))
 	if strings.Contains(string(data), "kill --signal=") {
@@ -857,6 +861,7 @@ func TestDockerAcceptedStartObservationSettlesLostResponse(t *testing.T) {
 	t.Cleanup(p.docker.close)
 	await(t, func() bool { return strings.Contains(p.docker.status(), "unconfirmed: start") })
 	p.stop(c.Now(), 0, true)
+	expireDockerStop(t, p)
 	if err := os.WriteFile(filepath.Join(root, "release-late"), nil, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -977,6 +982,7 @@ func TestDockerEveryLabeledContainerAndKillRefusalRetainsCustody(t *testing.T) {
 			_ = os.WriteFile(filepath.Join(root, "extra"), []byte("yes"), 0600)
 			_ = os.WriteFile(filepath.Join(root, "mode"), []byte("refuse-kill"), 0600)
 			p.stop(c.Now(), StopGrace, kill)
+			expireDockerStop(t, p)
 			await(t, func() bool { return strings.Contains(p.docker.status(), "unconfirmed") })
 			select {
 			case <-p.done:
@@ -1158,6 +1164,7 @@ func TestDockerDelayedCreateAfterEmptyScanRetainsCustody(t *testing.T) {
 		t.Fatalf("first scan not empty: %v %v", objects, err)
 	}
 	p.stop(c.Now(), 0, true)
+	expireDockerStop(t, p)
 	if err := os.WriteFile(filepath.Join(root, "release-late"), nil, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -1217,6 +1224,7 @@ func TestDockerHealthyHelperStartupBudget(t *testing.T) {
 			}
 			await(t, func() bool { _, err := os.Stat(filepath.Join(root, "running")); return err == nil })
 			p.stop(w.Clock.Now(), 0, true)
+			expireDockerStop(t, p)
 			select {
 			case <-p.done:
 			case <-time.After(5 * time.Second):
@@ -1240,4 +1248,20 @@ func startDockerFixture(w Worker, s *workerStore, j Job) (*process, error) {
 		case <-time.After(5 * time.Millisecond):
 		}
 	}
+}
+
+// Non-user accelerator cleanup now consumes injected-clock grace. Tests of
+// unrelated daemon contracts explicitly advance it instead of waiting forever.
+func expireDockerStop(t *testing.T, p *process) {
+	t.Helper()
+	await(t, func() bool {
+		p.docker.mu.Lock()
+		defer p.docker.mu.Unlock()
+		return p.docker.state.Stopped && p.docker.state.StopAt != nil
+	})
+	p.docker.mu.Lock()
+	until := *p.docker.state.StopAt
+	p.docker.mu.Unlock()
+	clock := p.docker.clock.(*dockerTestClock)
+	clock.advance(max(0, until.Sub(clock.Now())))
 }

@@ -248,13 +248,7 @@ func TestMakingRoom(t *testing.T) {
 			if reply.Stop != tc.stop {
 				t.Fatalf("stop=%v want=%v", reply.Stop, tc.stop)
 			}
-			grace := 120.0
-			if tc.waiting == "production" {
-				grace = 10
-				if !tc.resumable {
-					grace = 0
-				}
-			}
+			grace := 10.0
 			if tc.stop && reply.GraceSeconds != grace {
 				t.Fatalf("grace=%v", reply.GraceSeconds)
 			}

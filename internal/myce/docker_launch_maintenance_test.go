@@ -65,6 +65,7 @@ func TestMaintenanceDelayedDockerGroupLaunch(t *testing.T) {
 			}
 			maintenanceChange(t, q, name, action == "disable-stop")
 			close(release)
+			expireDockerStop(t, p)
 			select {
 			case f := <-p.done:
 				if f.result.Success || f.result.ReleasePending {

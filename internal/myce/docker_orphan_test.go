@@ -9,7 +9,7 @@ import (
 )
 
 func TestDockerOrphanStopProtocol(t *testing.T) {
-	for _, mode := range []string{"term", "stop-error", "delivered-stop-error"} {
+	for _, mode := range []string{"term", "refuse-kill", "delivered-error"} {
 		t.Run(mode, func(t *testing.T) {
 			_, s, clock, root := dockerFixture(t)
 			for name, value := range map[string]string{"created": "id1", "running": "yes", "label": "owned", "mode": mode} {
@@ -37,9 +37,7 @@ func TestDockerOrphanStopProtocol(t *testing.T) {
 				}
 				d = newOrphan()
 			}
-			if _, err := os.Stat(filepath.Join(root, "stop-delivered")); (err == nil) != (mode == "delivered-stop-error") {
-				t.Fatal("delivery uncertainty fixture", err)
-			}
+
 			calls := func() string {
 				b, err := os.ReadFile(filepath.Join(root, "calls"))
 				if err != nil {
@@ -47,12 +45,12 @@ func TestDockerOrphanStopProtocol(t *testing.T) {
 				}
 				return string(b)
 			}
-			if strings.Count(calls(), "stop --time 5 id1\n") != 1 || strings.Contains(calls(), "kill ") {
+			if strings.Count(calls(), "kill --signal=TERM id1\n") != 1 || strings.Contains(calls(), "--signal=KILL") {
 				t.Fatalf("before grace: %s", calls())
 			}
 			clock.advance(5*time.Second - time.Nanosecond)
 			_, _ = d.reconcile()
-			if strings.Contains(calls(), "kill ") {
+			if strings.Contains(calls(), "--signal=KILL") {
 				t.Fatal("premature KILL")
 			}
 			clock.advance(time.Nanosecond)
@@ -80,7 +78,7 @@ func TestDockerOrphanStopProtocol(t *testing.T) {
 			if !d.state.Released || d.state.EvidenceSaved {
 				t.Fatalf("untruthful orphan state: %+v", d.state)
 			}
-			if strings.Count(calls(), "stop --time ") != 1 || strings.Contains(calls(), "--signal=TERM") || strings.Contains(calls(), "logs ") {
+			if strings.Count(calls(), "kill --signal=TERM id1\n") != 1 || strings.Contains(calls(), "stop --time ") || strings.Contains(calls(), "logs ") {
 				t.Fatalf("orphan signal/evidence calls: %s", calls())
 			}
 			for _, suffix := range []string{".docker.json", ".docker-evidence.json"} {

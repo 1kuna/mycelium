@@ -372,7 +372,7 @@ func TestNativeGroupCgroupFaults(t *testing.T) {
 				}
 				fs.trip.Store(false)
 				// Clearing the injected fault also lets the fixture join its supervisor.
-				if err := p.native.cleanupProcesses(nil); err != nil {
+				if err := p.native.cleanupProcesses(nil, false); err != nil {
 					t.Fatal(err)
 				}
 				if err := p.native.memory.cleanup(w.Clock); err != nil {

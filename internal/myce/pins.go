@@ -224,7 +224,9 @@ func (q *Queue) stopFor(j *Job, priority, kind string) {
 		if priority == "deadline" {
 			grace = StopGrace
 		}
-		if !j.Spec.Resumable {
+		if gracefulGPUStop(j) {
+			grace = q.gpuStopGrace()
+		} else if !j.Spec.Resumable {
 			grace = 0
 		}
 		t := q.clock.Now().Add(grace)

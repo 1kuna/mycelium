@@ -45,6 +45,7 @@ func TestDockerRetainsEventsWhenKillReplyTimesOut(t *testing.T) {
 		t.Fatal(err)
 	}
 	p.stop(clock.Now(), 0, true)
+	expireDockerStop(t, p)
 	select {
 	case f := <-p.done:
 		if f.err != nil || f.result.CleanupCause == nil || f.result.CleanupCause.Operation != "kill" || f.result.CleanupCause.Class != "timeout" || f.result.Interrupted {

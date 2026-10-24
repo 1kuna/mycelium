@@ -93,6 +93,9 @@ func dockerRunArgs(command []string) ([]string, error) {
 
 // dockerExecution is durable custody, separate from the worker's heartbeat state.
 type dockerExecution struct {
+	Accelerator  bool                `json:"accelerator,omitempty"`
+	UserCancel   bool                `json:"user_cancel,omitempty"`
+	StopGrace    time.Duration       `json:"accelerator_stop_grace,omitempty"`
 	PriorityStop *PriorityPreemption `json:"priority_stop,omitempty"`
 	CleanupCause *RuntimeCause       `json:"cleanup_cause,omitempty"`
 
@@ -198,7 +201,23 @@ func (d *dockerAttempt) stop(now time.Time, grace time.Duration, kill bool) {
 
 // Cleanup after a launch error is not itself evidence of infrastructure loss.
 func (d *dockerAttempt) stopLocked(now time.Time, grace time.Duration, kill bool) {
-	changed := !d.state.Stopped
+	changed := !d.state.Stopped || d.dirty
+	if d.state.Accelerator && !d.state.UserCancel {
+		if kill {
+			grace = d.state.StopGrace
+		}
+		grace = min(acceleratorStopGrace(grace), acceleratorStopGrace(d.state.StopGrace))
+		deadline := now.Add(grace)
+		if d.state.Stopped && d.state.StopAt != nil && d.state.StopAt.Before(deadline) {
+			deadline = *d.state.StopAt
+		}
+		grace = max(0, deadline.Sub(now))
+		kill = grace == 0
+		if d.state.Forced != kill {
+			d.state.Forced = kill
+			changed = true
+		}
+	}
 	d.state.Stopped = true
 	deadline := now.Add(grace)
 	if d.state.StopAt == nil || deadline.Before(*d.state.StopAt) {
@@ -511,8 +530,8 @@ func (d *dockerAttempt) reconcile() (done bool, err error) {
 		}
 	}
 	if (pending || (stopped && d.state.StopAt != nil && !d.clock.Now().Before(*d.state.StopAt))) && !forced {
-		d.state.Forced = true
-		forced = true
+		d.stopLocked(d.clock.Now(), 0, true)
+		forced = d.state.Forced
 		if err := d.saveLocked(); err != nil && !killDue {
 			d.mu.Unlock()
 			return false, err
@@ -598,6 +617,17 @@ func (d *dockerAttempt) reconcile() (done bool, err error) {
 // TERM intent is permanent once durable; every delivery error waits for the
 // deadline. KILL is idempotent and is retried while inspection proves running.
 func (d *dockerAttempt) signalContainer(id string, kill bool) ([]byte, error) {
+	d.mu.Lock()
+	if d.dir == "" {
+		d.state.Accelerator = true
+	}
+	if kill {
+		if d.state.Accelerator && !d.state.UserCancel {
+			d.stopLocked(d.clock.Now(), 0, true)
+			kill = d.state.Forced
+		}
+	}
+	d.mu.Unlock()
 	if d.dir == "" {
 		return d.stopOrphan(id, kill)
 	}
@@ -824,6 +854,8 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 		}
 		return w.authorizeLaunch(launch)
 	}, closed: make(chan struct{}), halt: make(chan struct{}), dir: s.dir, workdir: j.Spec.Run.Workdir, binary: binary, clock: w.Clock, timeout: w.dockerCallTimeout, state: dockerExecution{Identity: identity, Endpoint: endpoint, MemoryLimitBytes: ceilingBytes, MemorySwapBytes: 0}}
+	d.state.Accelerator = !j.Spec.Needs.cpuOnly()
+	d.state.StopGrace = acceleratorStopGrace(w.AcceleratorStopGrace)
 	d.state.Owner = &Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
 	d.command = w.dockerCommand
 	d.state.LogsNone = j.Spec.Logs == "none"
@@ -1121,6 +1153,22 @@ func dockerOutcome(state dockerExecution, owner Result, e error) Result {
 	return result
 }
 
+// Let the independent reconciler deliver TERM to every member and enforce its
+// durable deadline before shutting observation down. Unknown release stays held.
+func (d *dockerAttempt) waitShutdown(clock Clock) {
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		d.mu.Lock()
+		until, released := d.state.StopAt, d.state.Released || !d.state.Accelerator || d.state.UserCancel
+		d.mu.Unlock()
+		if released || until == nil || !clock.Now().Before(until.Add(5*time.Second)) {
+			return
+		}
+		<-tick.C
+	}
+}
+
 func (d *dockerAttempt) close() { d.haltOnce.Do(func() { close(d.halt) }); <-d.closed }
 
 var errDockerRecovery = errors.New("worker restarted; Docker cleanup required")
@@ -1175,6 +1223,7 @@ func (w Worker) restoreDocker(s *workerStore) (*process, error) {
 	if err != nil {
 		binary = "docker"
 	} // Retry a missing CLI without declaring release.
+	state.Accelerator = !s.state.Job.Spec.Needs.cpuOnly()
 	state.LogsNone = state.LogsNone || s.state.Job.Spec.Logs == "none"
 	d := &dockerAttempt{closed: make(chan struct{}), halt: make(chan struct{}), state: state, dir: s.dir, binary: binary, clock: w.Clock, timeout: w.dockerCallTimeout}
 	if d.timeout <= 0 {
@@ -1187,7 +1236,7 @@ func (w Worker) restoreDocker(s *workerStore) (*process, error) {
 		}
 	}
 	// A saved stop keeps its original deadline and dispatch latches. An
-	// unfinished launch/running attempt still requires immediate forced cleanup.
+	// unfinished launch/running attempt still requires bounded runtime cleanup.
 	recoveryErr := dockerRecoveryError(state)
 	if recoveryErr != nil {
 		if err := d.recordObservationLoss(); err != nil {
@@ -1237,6 +1286,7 @@ func ReconcileDockerAttempt(ctx context.Context, dir, identity string) error {
 	if json.Unmarshal(b, &state) != nil || state.Identity != identity || state.Endpoint == "" {
 		return errors.New("invalid Docker custody record")
 	}
+	state.Accelerator = !store.state.Job.Spec.Needs.cpuOnly()
 	d := &dockerAttempt{ctx: ctx, dir: dir, binary: "docker", clock: RealClock{}, timeout: 2 * time.Second, state: state, env: dockerClientEnvironment()}
 	d.stop(d.clock.Now(), StopGrace, false)
 	released, err := d.reconcile()

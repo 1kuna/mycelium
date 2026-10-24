@@ -80,7 +80,7 @@ func TestWorkerEventCarriesPriorityStop(t *testing.T) {
 	if err := client.Call(context.Background(), "GET", "/api/workers/"+m.ID+"/events?session="+m.Session, nil, &event); err != nil {
 		t.Fatal(err)
 	}
-	if event.ID != j.ID || event.Attempt != 1 || event.Session != m.Session || event.PriorityStop == nil || event.PriorityStop.Demand != "deadline-model" || event.PriorityStop.Victim != j.ID {
+	if event.ID != j.ID || event.Attempt != 1 || event.Session != m.Session || event.UserCancel || event.PriorityStop == nil || event.PriorityStop.Demand != "deadline-model" || event.PriorityStop.Victim != j.ID {
 		t.Fatalf("event lost exact priority stop: %+v", event)
 	}
 }

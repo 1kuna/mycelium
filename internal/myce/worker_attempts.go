@@ -64,9 +64,21 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		if p != nil {
 			p.stop(initial.Clock.Now(), 0, true)
 			if p.docker != nil {
+				p.docker.waitShutdown(initial.Clock)
 				p.docker.close()
 			} else {
-				f := <-p.done
+				wake := time.NewTicker(10 * time.Millisecond)
+				defer wake.Stop()
+				var f workerFinish
+				waiting := true
+				for waiting {
+					p.enforceGrace(initial.Clock.Now())
+					select {
+					case f = <-p.done:
+						waiting = false
+					case <-wake.C:
+					}
+				}
 				if f.err != nil {
 					a.mu.Lock()
 					a.err = errors.Join(a.err, f.err)
@@ -137,7 +149,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					finish(err)
 					return
 				}
-				p.stop(now, time.Duration(max(0, d.GraceSeconds)*float64(time.Second)), d.Kill)
+				p.stopDirective(now, time.Duration(max(0, d.GraceSeconds)*float64(time.Second)), d.Kill, d.UserCancel)
 			}
 		}
 		report := AttemptReport{Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}, Session: a.job.Session, Started: p != nil && (p.docker == nil || p.docker.status() == "running") && (p.native == nil || p.native.started())}

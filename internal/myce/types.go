@@ -469,6 +469,7 @@ type Reply struct {
 	Stop              bool                `json:"stop"`
 	Kill              bool                `json:"kill"`
 	Leave             bool                `json:"leave"`
+	UserCancel        bool                `json:"user_cancel,omitempty"`
 	GraceSeconds      float64             `json:"grace_seconds"`
 }
 
@@ -489,6 +490,7 @@ type AttemptDirective struct {
 	Hold         bool                `json:"hold,omitempty"`
 	Stop         bool                `json:"stop,omitempty"`
 	Kill         bool                `json:"kill,omitempty"`
+	UserCancel   bool                `json:"user_cancel,omitempty"`
 	GraceSeconds float64             `json:"grace_seconds,omitempty"`
 	PriorityStop *PriorityPreemption `json:"priority_stop,omitempty"`
 }
