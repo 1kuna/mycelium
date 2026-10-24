@@ -44,6 +44,11 @@ then existing attempt-specific output verification must all succeed. Retrieve
 accepted outputs through `Client.DownloadResult` / Python `download_result`;
 these verify their SHA-256 and size.
 
+Profiles upload their frozen source archive and explicit inputs to the queue's
+local file store in either checkpoint mode. A NAS fleet keeps its existing
+`--checkpoints` / worker `--checkpoint-root` configuration; input downloads and
+verified result uploads use the queue API without changing NAS checkpoint paths.
+
 Before any upload or submission, `.mycelium/receipts/` contains a synced, private
 receipt with frozen source/input hashes, argv and submission key. Gitignore this
 folder in each consuming project. The default key derives from profile, args and
@@ -157,3 +162,5 @@ dev queue/token in environment and a local test notifier. Commit the intended
 source first. Wait once using the armed observer, inspect its terminal receipt,
 and verify `gate-result.txt` through the accepted result API. Do not launch an
 additional full suite while two are already active.
+Add `--checkpoints DEV_CHECKPOINTS` to exercise NAS checkpoint semantics with a
+local test folder while keeping the same stored source/input/result transport.

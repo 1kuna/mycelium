@@ -189,7 +189,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			} else {
 				err = w.replay(ctx, s)
 			}
-			if err == nil && a.job.FileTransport {
+			if err == nil && a.job.storedFileResults() {
 				if s.state.Result != nil {
 					if !s.state.Result.ReleasePending {
 						released := *s.state.Result
@@ -212,7 +212,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 							s.fileError = "file publication pending; local results retained"
 						}
 					}
-				} else if report.Progress > s.fileGeneration {
+				} else if a.job.FileTransport && report.Progress > s.fileGeneration {
 					value := *s.state.Job
 					published, e := s.fileProgress.run(attemptCheckpoint(value), func() (int64, error) { return w.publishFileCheckpoint(value, s.dir) })
 					if e == nil {

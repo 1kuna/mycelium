@@ -39,7 +39,7 @@ var rejectionMessages = map[string]string{
 	"job_logs_invalid":                      "logs must be keep or none",
 	"job_priority_invalid":                  "priority must be production, deadline or experiment",
 	"job_deadline_invalid":                  "deadline priority requires deadline; start_by requires production priority",
-	"job_files_invalid":                     "files must reference valid available input files with file-store checkpoints enabled",
+	"job_files_invalid":                     "files must reference valid available input files in the queue file store",
 	"job_program_invalid":                   "kind/program, inputs, outputs, args and size_hint must describe a valid extension job",
 	"job_memory_invalid":                    "needs.memory_gb must be positive and needs.host_memory_gb finite and nonnegative",
 	"job_platform_invalid":                  "needs.platform requires one valid platform string, list, or required/preferred/any mapping",

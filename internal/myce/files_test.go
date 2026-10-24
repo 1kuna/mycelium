@@ -108,6 +108,68 @@ func TestFilesResumableAndHashRefusal(t *testing.T) {
 	}
 }
 
+func TestFilesNASInputs(t *testing.T) {
+	root := t.TempDir()
+	checkpoints := filepath.Join(root, "checkpoints")
+	d, err := StartDev(DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: checkpoints, FileStore: filepath.Join(root, "files"), FileStoreLimit: 1 << 20, NASCheckpoints: true, Token: "nas-input-fixture", GPU: "cpu", Workers: 1, Interval: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	c := d.Client()
+	source := filepath.Join(root, "input")
+	if err := os.WriteFile(source, []byte("NAS-mode input"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := IdentifyFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.UploadFile(ctx, source, ref); err != nil {
+		t.Fatal(err)
+	}
+	s := spec("experiment")
+	s.Needs.CPUCores, s.Needs.MemoryGB = 1, 1
+	s.Needs.Platform = Platform{Required: []string{"cpu"}}
+	s.Resumable = true
+	s.Run.Command = []string{"sh", "-c", `test -z "$MYCE_TOKEN" && cat input > output && printf '{"myce_checkpoint":{"generation":1},"value":42}' > "$MYCE_CHECKPOINT_DIR/save.json"`}
+	s.Files = FileManifest{"input": ref}
+	s.Outputs = map[string]string{"output": "results"}
+	var accepted Job
+	if err := c.Call(ctx, "POST", "/api/jobs", s, &accepted); err != nil {
+		t.Fatal("NAS-mode queue rejected stored inputs:", err)
+	}
+	finished, err := c.Wait(ctx, accepted.ID)
+	if err != nil || finished.State != "succeeded" {
+		t.Fatalf("NAS-mode execution: %+v %v", finished, err)
+	}
+	if finished.FileTransport || len(finished.FileCheckpoints) != 0 || finished.ResumeFiles != nil {
+		t.Fatal("stored inputs changed NAS checkpoint transport", finished)
+	}
+	save := filepath.Join(checkpoints, accepted.ID, "attempt-1", "save.json")
+	if data, err := os.ReadFile(save); err != nil || !bytes.Contains(data, []byte(`"value":42`)) {
+		t.Fatalf("NAS checkpoint missing: %s %v", data, err)
+	}
+	dest := filepath.Join(root, "downloaded")
+	if err := c.DownloadResult(ctx, accepted.ID, "output", dest); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(dest); err != nil || string(data) != "NAS-mode input" {
+		t.Fatalf("stored result: %s %v", data, err)
+	}
+	// NAS-mode admission must retain the same input hash verification.
+	if err := os.WriteFile(d.Queue.files.blob(ref), []byte("corrupt input!"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	err = c.Call(ctx, "POST", "/api/jobs", s, nil)
+	var rejection *HTTPError
+	if !errors.As(err, &rejection) || rejection.Status != 400 || rejection.Code != "job_files_invalid" {
+		t.Fatal("corrupt NAS-mode input accepted", err)
+	}
+}
+
 func TestFileCacheBoundedEvictionAndPrivateCopies(t *testing.T) {
 	t.Parallel()
 	q, _ := fixture(t)

@@ -5,6 +5,11 @@ the queue hypha before publication. The atomic generation contract below is the
 same; newer local-only saves cannot resume elsewhere. Explicit NAS configuration
 keeps the path described below.
 
+Stored job inputs (`files`, including a profile's frozen source archive) and
+their verified results use the queue file store in both modes. Uploading inputs
+does not switch NAS checkpoints to file-store generations; workers fetch and
+verify those inputs through the queue API. See [file transport](guide-files-v3.md).
+
 Set `resumable: true` only when the command can safely restart. Mycelium sends
 SIGTERM to the command's process group, allows 10 seconds for production preemption (configurable), or two minutes for
 deadline preemption and planned leave, to save and exit,

@@ -431,7 +431,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 	q.mu.Lock()
 	// Own all client maps/slices across the unlocked verification interval.
 	s = cloneJob(&Job{Spec: s}).Spec
-	store, fileCheckpoints := q.files, q.fileCheckpoints
+	store := q.files
 	replay := s.SubmissionKey != "" && q.s.Submissions[submissionDigest(s.Project, s.SubmissionKey)] != nil
 	if len(s.Files) > 0 && !replay && q.submitVerificationSlot == nil {
 		q.submitVerificationSlot = make(chan struct{}, 1)
@@ -440,11 +440,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 	q.mu.Unlock()
 	var verificationErr error
 	if len(s.Files) > 0 && !replay {
-		if !fileCheckpoints {
-			verificationErr = errors.New("stored job files require file-store checkpoints; omit queue --checkpoints")
-		} else {
-			verificationErr = verifySubmissionInputs(ctx, store, s.Files, slot)
-		}
+		verificationErr = verifySubmissionInputs(ctx, store, s.Files, slot)
 	}
 	var out Job
 	err = q.update(func() error {
@@ -467,7 +463,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		if verificationErr != nil {
 			return reject("job_files_invalid", verificationErr)
 		}
-		if len(s.Files) > 0 && (q.files != store || q.fileCheckpoints != fileCheckpoints) {
+		if len(s.Files) > 0 && q.files != store {
 			return ErrStale
 		}
 		submitted := s
@@ -1107,7 +1103,7 @@ func (q *Queue) Complete(r Result) error {
 func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 	q.mu.Lock()
 	j, err := q.current(r)
-	verify := err == nil && j.FileTransport && j.State == "running" && !cancelled(j) && r.Success && !r.Interrupted && !r.ReleaseOnly
+	verify := err == nil && j.storedFileResults() && j.State == "running" && !cancelled(j) && r.Success && !r.Interrupted && !r.ReleaseOnly
 	var outputs map[string]string
 	var host string
 	if verify {
@@ -1315,7 +1311,7 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 		q.chargeLoss(j)
 		q.retry(j, "worker restarted after cleaning old processes")
 	} else if r.Success {
-		if j.FileTransport {
+		if j.storedFileResults() {
 			if !outputsVerified {
 				return ErrStale
 			}
@@ -1890,11 +1886,13 @@ func (q *Queue) assign(j *Job, m *Machine) Job {
 	m.FreeMemoryGB = max(0, m.FreeMemoryGB-j.Spec.Needs.MemoryGB)
 	j.Starts = max(j.Starts, j.Attempt) + 1
 	j.Attempt = j.Starts
-	if j.FileTransport {
+	if j.storedFileResults() {
 		j.OutputRefs = nil
+	}
+	if j.FileTransport {
 		j.ResumeFiles = bestFileCheckpoint(j)
 	}
-	if j.Spec.extensionJob() && !j.FileTransport {
+	if j.Spec.extensionJob() && !j.storedFileResults() {
 		j.OutputFiles = map[string]string{}
 		for name, prefix := range j.Spec.Outputs {
 			j.OutputFiles[name] = outputRelative(*j, name, prefix)

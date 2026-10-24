@@ -329,6 +329,12 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if err != nil {
 		return err
 	}
+	nasConfigured := false
+	f.Visit(func(value *flag.Flag) {
+		if value.Name == "checkpoints" {
+			nasConfigured = true
+		}
+	})
 	switch args[0] {
 	case "dev":
 		if f.NArg() != 0 {
@@ -341,7 +347,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if e != nil {
 			return e
 		}
-		d, err := myce.StartDev(myce.DevConfig{Devices: *fakeGPUs, ProductionInfrastructureRetries: productionRetries, FileStore: *fileStore, FileStoreLimit: *fileStoreLimit, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, HostPolicies: hosts, HostID: *hostID, ProjectPolicies: policies, EnvironmentConfig: ec, ModelConfig: mc, Address: *address, Database: *db, Checkpoints: *checkpoint, Token: *token, GPU: *gpu, Environments: split(*environments), Models: split(*models), Workers: *workers, CPUReserveCores: *cpuReserve, CPUBudgetCores: *cpuBudget, MemoryGB: *memory})
+		d, err := myce.StartDev(myce.DevConfig{Devices: *fakeGPUs, ProductionInfrastructureRetries: productionRetries, FileStore: *fileStore, FileStoreLimit: *fileStoreLimit, NASCheckpoints: nasConfigured, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, HostPolicies: hosts, HostID: *hostID, ProjectPolicies: policies, EnvironmentConfig: ec, ModelConfig: mc, Address: *address, Database: *db, Checkpoints: *checkpoint, Token: *token, GPU: *gpu, Environments: split(*environments), Models: split(*models), Workers: *workers, CPUReserveCores: *cpuReserve, CPUBudgetCores: *cpuBudget, MemoryGB: *memory})
 		if err != nil {
 			return err
 		}
@@ -394,12 +400,6 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if root == "" {
 			root = *db + ".files"
 		}
-		nasConfigured := false
-		f.Visit(func(value *flag.Flag) {
-			if value.Name == "checkpoints" {
-				nasConfigured = true
-			}
-		})
 		if nasConfigured && *discovery {
 			if err = q.ConfigureOnboardingNAS(ctx, probe.OS, probe.Command); err != nil {
 				return err

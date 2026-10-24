@@ -19,7 +19,8 @@ func TestCompletionVerificationDoesNotHoldQueueLock(t *testing.T) {
 	for _, fence := range []string{"cancel", "maintenance", "interrupt", "request-cancel", "accept"} {
 		t.Run(fence, func(t *testing.T) {
 			q, _ := fixture(t)
-			if err := q.ConfigureFileStore(t.TempDir(), 1<<20, true); err != nil {
+			// Stored inputs/results retain these fences with NAS checkpoints too.
+			if err := q.ConfigureFileStore(t.TempDir(), 1<<20, false); err != nil {
 				t.Fatal(err)
 			}
 			a, b := machine("a", "fake"), machine("b", "fake")

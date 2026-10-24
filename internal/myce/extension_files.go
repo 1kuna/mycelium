@@ -122,7 +122,7 @@ func (w Worker) publishExtensionFiles(j Job) error {
 	if err := w.validateExtensionCheckOutput(j); err != nil {
 		return err
 	}
-	if j.FileTransport || !j.Spec.extensionJob() || len(j.Spec.Outputs) == 0 {
+	if j.storedFileResults() || !j.Spec.extensionJob() || len(j.Spec.Outputs) == 0 {
 		return nil
 	}
 	if w.JobFileRoot == "" {

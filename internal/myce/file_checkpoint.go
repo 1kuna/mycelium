@@ -278,7 +278,7 @@ func (w Worker) finishFileResult(j Job, result Result, parent string) (Result, e
 	if _, err := w.publishFileCheckpoint(j, parent); err != nil && !stale(err) {
 		return result, err
 	}
-	if !result.Success || result.Interrupted || len(j.Spec.Outputs) == 0 || !j.FileTransport {
+	if !result.Success || result.Interrupted || len(j.Spec.Outputs) == 0 || !j.storedFileResults() {
 		return result, nil
 	}
 	output := FileManifest{}

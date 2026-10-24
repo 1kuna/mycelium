@@ -1,8 +1,9 @@
-# Files without a NAS (v3)
+# Files with or without a NAS (v3)
 
 The queue's always-on hypha stores immutable files. Every execution hypha has
 its own bounded cache and private attempt folders. No shared mount is needed.
-This is the v3 file transport used for jobs without explicit NAS roots.
+Stored job inputs and their results use this v3 file transport in either
+checkpoint mode. Jobs without explicit NAS roots also use it for checkpoints.
 One store is **not a backup**. Losing its disk can lose the only authoritative
 copy; a cache is not a promised second copy.
 
@@ -13,9 +14,10 @@ SQLite database in `DB.files`. `--file-store DIR` chooses that local disk folder
 `--file-store-bytes` bounds complete files plus reserved interrupted uploads
 (default 100 GiB). Keep the database and file store on durable local storage.
 Existing queue `--checkpoints` and hypha `--checkpoint-root` NAS configurations
-keep their original behavior. Supplying queue `--checkpoints` selects NAS mode;
-file-store job inputs require the default no-NAS mode. Model files can use either
-source independently. Keep the same mode and storage folder across restarts.
+keep their original checkpoint behavior. Supplying queue `--checkpoints` selects
+NAS checkpoints; uploaded job inputs and their verified results still use the
+queue's local file store. Model files can use either source independently.
+Keep the same checkpoint mode and storage folder across restarts.
 
 Use the existing private invitation and pinned HTTPS joining endpoint for hyphae
 on other machines. File APIs use the same authentication and TLS connection as

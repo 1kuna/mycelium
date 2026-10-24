@@ -18,6 +18,7 @@ type DevConfig struct {
 	ProductionInfrastructureRetries *int
 	FileStore                       string
 	FileStoreLimit                  int64
+	NASCheckpoints                  bool
 	ExtensionRoot, JobFileRoot      string
 
 	HostPolicies                          map[string]HostPolicy
@@ -106,7 +107,7 @@ func startDev(c DevConfig, configureQueue func(*Queue)) (*Dev, error) {
 		if limit == 0 {
 			limit = 100 << 30
 		}
-		if err = q.ConfigureFileStore(c.FileStore, limit, true); err != nil {
+		if err = q.ConfigureFileStore(c.FileStore, limit, !c.NASCheckpoints); err != nil {
 			q.Close()
 			return nil, err
 		}
