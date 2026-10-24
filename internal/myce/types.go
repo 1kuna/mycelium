@@ -139,8 +139,10 @@ func (e Environment) Key() string {
 }
 
 type Spec struct {
-	Workload      *Workload `json:"workload,omitempty" yaml:"workload,omitempty"`
-	SubmissionKey string    `json:"submission_key,omitempty" yaml:"submission_key,omitempty"`
+	Targets       []ExecutionTarget `json:"targets,omitempty" yaml:"targets,omitempty"`
+	RequireTarget bool              `json:"require_target,omitempty" yaml:"require_target,omitempty"`
+	Workload      *Workload         `json:"workload,omitempty" yaml:"workload,omitempty"`
+	SubmissionKey string            `json:"submission_key,omitempty" yaml:"submission_key,omitempty"`
 
 	Files           FileManifest           `json:"files,omitempty" yaml:"files,omitempty"`
 	Kind            string                 `json:"kind,omitempty" yaml:"kind,omitempty"`
@@ -170,6 +172,11 @@ type Spec struct {
 }
 
 func (s Spec) Validate() error {
+	for _, target := range s.Targets {
+		if !extensionName.MatchString(target.OS) || !extensionName.MatchString(target.Arch) || !validGPU(target.Platform) {
+			return reject("job_placement_invalid", errors.New("targets require explicit OS, arch and platform"))
+		}
+	}
 	if s.Workload != nil && (!s.extensionJob() || !s.Workload.valid()) {
 		return errors.New("workload requires extension work, input_shape and positive units")
 	}

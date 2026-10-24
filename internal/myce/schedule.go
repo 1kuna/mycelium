@@ -24,6 +24,9 @@ func fitsWithoutHostMemory(j *Job, m *Machine, memory float64) bool {
 	return false
 }
 func fitsResources(j *Job, m *Machine, memory float64) bool {
+	if !executionTargetMatches(j.Spec, m) {
+		return false
+	}
 	return !m.Recovering && deviceAllowed(j, m) && (j.Spec.Needs.cpuOnly() || m.GPU != "cpu") && cpuFits(j, m) && !cancelled(j) && dockerRuntimeFits(j, m) && logPolicyFits(j.Spec.Logs, m) && !availabilityBlocked(m) && capabilityFits(j, m) && extensionCanRun(j, m) && (j.Spec.Needs.cpuOnly() || m.MemoryError == "") && !m.Gone && !m.Leaving && (!needsCheckpoint(j) || !m.CheckpointUnavailable) && memory >= j.Spec.Needs.MemoryGB && machineAllowed(j.Spec.AllowedMachines, m.ID) && (j.Spec.Needs.cpuOnly() || len(j.Spec.Needs.Platform.Required) == 0 || slices.Contains(j.Spec.Needs.Platform.Required, m.GPU)) && environmentCanRun(j, m)
 }
 func affinity(j *Job, m *Machine) int {

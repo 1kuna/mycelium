@@ -41,6 +41,7 @@ func waitCommand(ctx context.Context, args []string, out, errOut io.Writer) erro
 	f.SetOutput(errOut)
 	address := f.String("queue", env("MYCE_QUEUE", "http://127.0.0.1:7331"), "queue address")
 	token := f.String("token", "", "shared fleet token (prefer MYCE_TOKEN)")
+	receipt := f.String("receipt", "", "private profile receipt directory (managed detached observer)")
 	timeout := f.Duration("timeout", 0, "maximum wait duration; does not cancel jobs (default: unlimited)")
 	f.Usage = func() {
 		fmt.Fprintln(errOut, "Usage: myce wait <job-id> [<job-id>...] [--timeout DURATION]")
@@ -59,7 +60,7 @@ func waitCommand(ctx context.Context, args []string, out, errOut io.Writer) erro
 		if strings.HasPrefix(a, "-") {
 			flags = append(flags, a)
 			key := strings.TrimLeft(a, "-")
-			if (key == "queue" || key == "token" || key == "timeout") && i+1 < len(args) {
+			if (key == "queue" || key == "token" || key == "timeout" || key == "receipt") && i+1 < len(args) {
 				i++
 				flags = append(flags, args[i])
 			}
@@ -72,6 +73,9 @@ func waitCommand(ctx context.Context, args []string, out, errOut io.Writer) erro
 			return nil
 		}
 		return &exitError{2, err}
+	}
+	if *receipt != "" {
+		return waitProfileReceipt(ctx, *receipt, *timeout)
 	}
 	if len(ids) == 0 {
 		return waitError(2, "usage: myce wait <job-id> [<job-id>...] [--timeout DURATION]")

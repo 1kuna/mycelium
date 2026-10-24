@@ -35,8 +35,23 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 	deadline := f.String("deadline", "", "RFC3339 deadline (required for deadline priority/class)")
 	name := f.String("name", "", "job name (default: command basename)")
 	detach := f.Bool("detach", false, "print job ID and return without waiting")
+	profile := f.String("profile", "", "project execution profile name or YAML path (returns a JSON receipt)")
+	key := f.String("key", "", "profile submission key (default: content-derived; reuse to recover)")
+	notify := f.String("notify", os.Getenv("MYCE_NOTIFY"), "local notifier executable; must support --check and JSON on stdin")
 	if err := f.Parse(args); err != nil {
 		return err
+	}
+	if *profile != "" {
+		return runProfile(ctx, *profile, f.Args(), *key, *notify, *config, *joining, *address, *token, out)
+	}
+	explicitNotify := false
+	f.Visit(func(v *flag.Flag) {
+		if v.Name == "notify" {
+			explicitNotify = true
+		}
+	})
+	if *key != "" || explicitNotify {
+		return errors.New("--key and --notify require --profile")
 	}
 	if f.NArg() == 0 {
 		return errors.New("usage: myce run [flags] -- <command> [args]")

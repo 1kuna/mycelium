@@ -65,6 +65,10 @@ step build go build -o "$scratch/bin/myce" ./cmd/myce
 step vet go vet ./...
 # Same matrix as ReleaseTargets; darwin/arm64 is the native CGO build.
 while read -r os arch cgo; do
+  if [[ $cgo == 1 && $os != $(go env GOHOSTOS) ]]; then
+    echo "build-$os-$arch: skipped (native CGO toolchain required; verify on $os)"
+    continue
+  fi
   step "build-$os-$arch" env GOOS="$os" GOARCH="$arch" CGO_ENABLED="$cgo" go build -o "$scratch/bin/myce-$os-$arch" ./cmd/myce
 done < <("$scratch/bin/myce" release build-targets)
 if [[ $mode == full ]]; then

@@ -54,6 +54,7 @@ The package fixtures isolate local storage and substitute synthetic GPU and daem
 probes; they don't need fleet or NAS access. HTTP integration tests use loopback
 servers and local temporary directories, never external storage.
 
-A faster Linux runner and submission of the full gate as a Mycelium CPU job
-remain proposals. Linux cannot build the native Darwin CGO target without the
-appropriate cross toolchain, so an SSH flag alone would not reproduce this gate.
+The `gate-full` execution profile submits the full gate as a Mycelium CPU job;
+see [agent offload](agent-offload.md). Linux runs the Linux builds, vet and full
+race/dev suite. The native Darwin CGO build explicitly skips there and remains
+a separate macOS check; the Linux gate is not proof of that release target.

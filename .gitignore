@@ -37,3 +37,4 @@ clients/python/src/*.egg-info/
 
 # Private memory evidence and unpublished outboxes
 /docs/history/
+/.mycelium/receipts/

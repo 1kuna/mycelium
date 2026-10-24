@@ -37,6 +37,10 @@ changes its endpoint without removing the pin. Explicit `MYCE_TOKEN` (or
 Use YAML below for shared-storage workdirs, environments, file mappings,
 checkpoints and other advanced options.
 
+For repeatable project commands with frozen source, recoverable JSON receipts and
+a detached completion notifier, use `myce run --profile NAME`; see
+[agent offload](agent-offload.md).
+
 ## Batch YAML
 
 `myce submit job.yaml` accepts exactly one YAML document, at most 1 MiB, and
@@ -61,6 +65,8 @@ when shell expansion is needed.
 | `needs.platform` | GPU work: required; CPU input: omitted or `cpu` | `[cuda]` shorthand, `{required: [cuda, xpu]}`, `{preferred: [metal]}`, or `any` / `{any: true}`; exactly one mode |
 | `needs.model` | Absent | Batch affinity hint; does not load a model |
 | `environment` | Absent | Catalog name, `{name: torch-cuda}`, or `{lock_file: /shared/project/requirements.txt, python: "3.12", platforms: [cuda]}`; never both name and lock file |
+| `targets` | Empty: any OS/arch | Exact `{os, arch, platform}` alternatives, enforced at dispatch and launch |
+| `require_target` | `false` | Refuse a new submission without an online qualified target of sufficient total admitted capacity; busy qualified targets may queue |
 | `allowed_machines` | Empty: any eligible worker | Machine-name allow-list |
 | `start_by` | Production: submission + 150 seconds; absent for other priorities | Absolute RFC3339 first-start deadline, production batch only; loss recovery gets a fresh original-length window |
 | `give_up_at` | Absent: wait indefinitely | RFC3339 expiry while queued; not a running-job timeout |
