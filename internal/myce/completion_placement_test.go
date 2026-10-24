@@ -149,6 +149,11 @@ func TestCompletionTransferExactEvidenceAndReleaseCosts(t *testing.T) {
 	wm, cm := q.s.Machines[warm.ID], q.s.Machines[cold.ID]
 	seedCompletion(t, q, live, wm, 1)
 	seedCompletion(t, q, live, cm, 100)
+	live.Spec.Resumable, live.Attempt = true, 1
+	if _, ok := q.estimateCompletion(live, wm); ok {
+		t.Fatal("first queued retry reused full-work estimate")
+	}
+	live.Spec.Resumable, live.Attempt = false, 0
 	live.Spec.Files = FileManifest{"input": {SizeBytes: 100}}
 	wm.CapabilityProfile.Benchmark = &BenchmarkResult{Measurements: []Throughput{{Resource: "network", Method: "file-store-download-8MiB-sha256-v1", Unit: "bytes/s", Rate: 100}}}
 	cm.CapabilityProfile.Benchmark = &BenchmarkResult{Measurements: []Throughput{{Resource: "network", Method: "file-store-download-8MiB-sha256-v1", Unit: "bytes/s", Rate: 1}}}

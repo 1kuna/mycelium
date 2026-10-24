@@ -25,6 +25,11 @@ func (q *Queue) estimateCompletion(j *Job, m *Machine) (completionEstimate, bool
 	if j.Spec.Workload == nil || !j.Spec.extensionJob() {
 		return completionEstimate{}, false
 	}
+	// Queued retries still carry the preceding attempt number. No remaining
+	// work-size contract exists for a resumed attempt, including its first retry.
+	if j.State == "queued" && j.Spec.Resumable && j.Attempt > 0 {
+		return completionEstimate{}, false
+	}
 	// Resolve each target's own qualified recipe and resource floors before
 	// ranking. #145's quality filter belongs in this eligibility boundary.
 	for _, candidate := range extensionJobs(j, m, true) {
