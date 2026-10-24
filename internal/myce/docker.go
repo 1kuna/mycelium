@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"maps"
 	"os"
 	"os/exec"
@@ -918,6 +919,11 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 			d.env = append(d.env, k+"="+v)
 		}
 	}
+	// Persist custody before publishing its identity in the attempt record.
+	// No Docker operation can be dispatched until both writes succeed.
+	if err = d.saveLocked(); err != nil {
+		return nil, err
+	}
 	s.state.Job = &j
 	s.state.Identity = identity
 	s.state.Log = identity + ".log"
@@ -933,9 +939,7 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 	if err != nil {
 		return nil, err
 	}
-	if err = d.saveLocked(); err == nil {
-		err = s.save()
-	}
+	err = s.save()
 	if err != nil {
 		output.Close()
 		return nil, err
@@ -1244,6 +1248,23 @@ func dockerRecoveryError(state dockerExecution) error {
 
 func (w Worker) restoreDocker(s *workerStore) (*process, error) {
 	data, err := os.ReadFile(filepath.Join(s.dir, s.state.Identity+".docker.json"))
+	if errors.Is(err, os.ErrNotExist) {
+		// Old pre-launch refusals carried a generic identity without Docker
+		// custody. Preserve their result; otherwise record attempt-local loss.
+		if s.state.Result == nil || s.state.Result.ReleasePending {
+			facts := memberOutcome{ObservationLost: true}
+			if err := saveWorkerJSON(s.dir, s.state.Identity+".observation-loss.json", facts); err != nil {
+				return nil, err
+			}
+			r := classifyAttemptOutcome(Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Error: "worker restarted; owned Docker state missing"}, attemptCause{memberOutcome: facts, PriorityStop: s.state.PriorityStop})
+			s.state.Result = &r
+			if err := s.save(); err != nil {
+				return nil, err
+			}
+			log.Printf("attempt %s/%d: owned Docker state missing; reconciled as interrupted", s.state.Job.ID, s.state.Job.Attempt)
+		}
+		return nil, nil
+	}
 	if err != nil {
 		return nil, err
 	}

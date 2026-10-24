@@ -21,6 +21,11 @@ type dockerAcknowledgement struct {
 func acknowledgeDocker(s *workerStore, worker string, now time.Time) error {
 	path := filepath.Join(s.dir, s.state.Identity+".docker.json")
 	b, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		// Pre-launch refusals and recovered missing custody have no retained
+		// containers to acknowledge. Their attempt result is still delivered.
+		return nil
+	}
 	if err != nil {
 		return err
 	}

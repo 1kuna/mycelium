@@ -384,6 +384,11 @@ func (s *workerStore) attemptStores() ([]*workerStore, error) {
 
 func newAttemptStore(root *workerStore, j Job) (*workerStore, error) {
 	s := &workerStore{dir: root.dir, stateName: "state-attempt-" + ID() + ".json", state: workerState{Session: j.Session, Job: &j, CheckpointRoot: root.state.CheckpointRoot, Identity: ID()}}
+	// Docker identity denotes durable Docker custody, not mere assignment.
+	// Refusals before startDocker must not request container recovery (#166).
+	if j.Spec.Run.Docker {
+		s.state.Identity = ""
+	}
 	s.nasPrepare.timeout = checkpointPreparationBudget
 	s.nasProgress.timeout = heartbeatFilesystemBudget
 	return s, s.save()
