@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"sync"
 	"syscall"
@@ -89,6 +90,49 @@ func (w *dockerEventWriter) event(line []byte) {
 	w.archive.Events = append(w.archive.Events, e)
 }
 
+// record keeps intake independent of disk latency. Notifications coalesce, not
+// events: every accepted record enters the bounded archive or increments Dropped.
+// Only the saver writes files; it joins intake and persists the final snapshot.
+func (w *dockerEventWriter) record(stdout io.ReadCloser, readDone chan<- struct{}, save func(dockerEventArchive) error) error {
+	var mu sync.Mutex
+	dirty := make(chan struct{}, 1)
+	finished := make(chan error, 1)
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		scanner.Buffer(make([]byte, 4096), dockerEventLineLimit)
+		for scanner.Scan() {
+			mu.Lock()
+			w.event(scanner.Bytes())
+			w.archive.Status = "recording"
+			mu.Unlock()
+			select {
+			case dirty <- struct{}{}:
+			default:
+			}
+		}
+		close(readDone)
+		finished <- scanner.Err()
+	}()
+	persist := func() error {
+		mu.Lock()
+		archive := w.archive
+		archive.Events = slices.Clone(archive.Events)
+		mu.Unlock()
+		return save(archive)
+	}
+	for {
+		select {
+		case err := <-finished:
+			return errors.Join(err, persist())
+		case <-dirty:
+			if err := persist(); err != nil {
+				_ = stdout.Close()
+				return errors.Join(err, <-finished)
+			}
+		}
+	}
+}
+
 // One standard CLI subscription per attempt, independent of daemon control
 // calls, heartbeat and custody locks. Only its own process group is cancelled.
 func (d *dockerAttempt) observeDockerEvents() func() {
@@ -154,21 +198,14 @@ func (d *dockerAttempt) observeDockerEvents() func() {
 						}
 						readExpired <- false
 					}()
-					scanner := bufio.NewScanner(stdout)
-					scanner.Buffer(make([]byte, 4096), dockerEventLineLimit)
-					for scanner.Scan() {
-						w.event(scanner.Bytes())
-						w.archive.Status = "recording"
-						if err = w.save(); err != nil {
-							break
-						}
-					}
-					close(readDone)
+					err = w.record(stdout, readDone, func(archive dockerEventArchive) error {
+						return saveWorkerJSON(w.dir, w.identity+".docker-events.json", archive)
+					})
 					if <-readExpired {
 						w.archive.Cause = &RuntimeCause{Operation: "events", Class: "timeout"}
 					}
-					if err = errors.Join(err, scanner.Err()); err != nil {
-						if ctx.Err() == nil {
+					if err != nil {
+						if w.archive.Cause == nil {
 							w.archive.Cause = runtimeDiagnostic(runtimeErrorFor("events", err))
 						}
 						cancel()
