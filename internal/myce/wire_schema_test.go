@@ -162,6 +162,7 @@ func wireExamples(t *testing.T) map[string]any {
 	revision := uint64(7)
 	return map[string]any{
 		"job-device-selected":         deviceJob,
+		"error-no-qualified-target":   wireError(t, &HTTPError{Status: 409, Code: "no_qualified_target", Message: rejectionMessages["no_qualified_target"]}),
 		"error-machine-renamed":       wireError(t, &HTTPError{Status: 400, Code: "machine_renamed", Message: `machine old-gpu0 was renamed; use allowed_machines: [example-machine] plus needs.gpu.devices: ["0"]`}),
 		"error-gpu-count-unsupported": wireError(t, &HTTPError{Status: 400, Code: "gpu_count_unsupported", Message: rejectionMessages["gpu_count_unsupported"]}),
 		"job-queued-keyed":            queued, "job-running": running, "job-succeeded": succeeded, "job-reserved-cancelled": reserved,

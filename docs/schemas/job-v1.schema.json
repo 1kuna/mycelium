@@ -1493,6 +1493,10 @@
           "type": "string",
           "x-contract": "stable"
         },
+        "require_target": {
+          "type": "boolean",
+          "x-contract": "diagnostic"
+        },
         "resumable": {
           "type": "boolean",
           "x-contract": "diagnostic"
@@ -1517,6 +1521,16 @@
           "pattern": "^[A-Za-z0-9._:-]{1,128}$",
           "type": "string",
           "x-contract": "stable"
+        },
+        "targets": {
+          "items": {
+            "$ref": "#/$defs/ExecutionTarget"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
         },
         "workload": {
           "$ref": "#/$defs/Workload",

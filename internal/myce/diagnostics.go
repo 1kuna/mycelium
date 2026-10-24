@@ -13,6 +13,7 @@ import (
 // Stable rejection codes and default messages. Submission validation returns
 // the specific field rule; other wrapped causes stay local.
 var rejectionMessages = map[string]string{
+	"no_qualified_target":                   "no online qualified target with the declared platform, environment and capacity; intent retained locally",
 	"device_fault_xe":                       "device quarantined after an xe kernel driver fault; clear after recovery",
 	"device_fault_i915":                     "device quarantined after an i915 kernel driver fault; clear after recovery",
 	"device_fault_nvidia_xid":               "device quarantined after an NVIDIA Xid; clear after recovery",

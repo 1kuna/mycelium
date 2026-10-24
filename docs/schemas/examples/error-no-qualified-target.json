@@ -1,0 +1,4 @@
+{
+  "code": "no_qualified_target",
+  "error": "no online qualified target with the declared platform, environment and capacity; intent retained locally"
+}

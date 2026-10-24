@@ -517,7 +517,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		j := &Job{PriorityPolicy: q.priorityMatch(s), FileTransport: q.fileCheckpoints, Extensions: extensions, SidecarEnvironmentRecipes: sidecarRecipes, EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: filepath.Join(q.root, id)}
 		q.applyLearnedNeeds(j)
 		if s.RequireTarget && !q.hasQualifiedTarget(j) {
-			return &HTTPError{Status: 409, Code: "no_qualified_target", Message: "no online qualified target with the declared platform, environment and capacity; intent retained locally"}
+			return &HTTPError{Status: 409, Code: "no_qualified_target", Message: rejectionMessages["no_qualified_target"]}
 		}
 		if e := q.validateProjectCapacity(j); e != nil {
 			return rejectFieldRule("job_capacity_invalid", e)
