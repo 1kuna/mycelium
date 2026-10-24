@@ -61,7 +61,9 @@ and its output references. The parent succeeds only after every piece succeeds;
 its final `output_refs`/`output_files` use `KEY/OUTPUT_NAME`. A failed wave fails
 the parent. An OOM forbids its exact measured count and fails the wave; it does
 not qualify the same occupancy for another attempt. Infrastructure loss and planned interruption use existing retry
-policy on that wave alone. Membership stays fixed across retries; late attempts
+policy on that wave alone. Membership and measured count stay fixed across
+retries, preserving the recipe's vector-batch semantics. A retry waits if no
+component can safely admit that count and its resource envelope. Late attempts
 cannot replace accepted results. Parent cancellation stops its children and
 reports outstanding cleanup. Persisted membership/results survive queue restart.
 
