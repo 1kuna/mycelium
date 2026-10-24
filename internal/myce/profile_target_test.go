@@ -46,3 +46,39 @@ func TestProfileTargetQualificationAndReplay(t *testing.T) {
 		t.Fatal("key replay requires no current qualification", adopted, err)
 	}
 }
+
+func TestProfileTargetTemporaryHoldsStillQueue(t *testing.T) {
+	q, _ := fixture(t)
+	m := machine("worker", "fake")
+	m.TotalMemoryGB = 64
+	m.HostMemoryMeasured = true
+	m.HostAvailableMemoryGB = 32
+	check(t, q, m, nil)
+	if err := q.update(func() error {
+		q.s.Policies = map[string]ProjectPolicy{"test": {AllowedMachines: []string{m.ID}}}
+		live := q.s.Machines[m.ID]
+		live.Gone, live.Leaving, live.Recovering = true, true, true
+		live.CPUCapacityReason = "CPU allowance awaiting worker acknowledgement"
+		live.CapabilityProfile.Availability = &Availability{Available: false, Reason: "owner active"}
+		policy := q.s.HostMaintenance[hostID(live)]
+		policy.Mode = "disabled"
+		budget := 4
+		policy.CPUBudgetCores = &budget
+		q.s.HostMaintenance[hostID(live)] = policy
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s := Spec{Name: "profile", Project: "test", Class: "experiment", RequireTarget: true, Targets: []ExecutionTarget{{OS: "linux", Arch: "amd64", Platform: "cpu"}}, Run: RunSpec{Command: []string{"true"}}, Needs: ResourceNeeds{CPUCores: 1, MemoryGB: 1}}
+	j := submit(t, q, s)
+	if j.State != "queued" {
+		t.Fatal("temporary hold did not queue", j)
+	}
+	s.Needs.CPUCores = 8 // Physical capacity fits, but the persistent allowance does not.
+	if _, err := q.Submit(s); err == nil {
+		t.Fatal("permanent capacity mismatch accepted")
+	}
+	if q.s.Machines[m.ID].CapabilityProfile.Availability.Available {
+		t.Fatal("qualification modified live owner availability")
+	}
+}

@@ -519,8 +519,12 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		if s.RequireTarget && !q.hasQualifiedTarget(j) {
 			return &HTTPError{Status: 409, Code: "no_qualified_target", Message: rejectionMessages["no_qualified_target"]}
 		}
-		if e := q.validateProjectCapacity(j); e != nil {
-			return rejectFieldRule("job_capacity_invalid", e)
+		// require_target already checked permanent capacity and project policy;
+		// do not reclassify temporary holds through the legacy capacity diagnostic.
+		if !s.RequireTarget {
+			if e := q.validateProjectCapacity(j); e != nil {
+				return rejectFieldRule("job_capacity_invalid", e)
+			}
 		}
 		copy := cloneJob(j)
 		j = &copy

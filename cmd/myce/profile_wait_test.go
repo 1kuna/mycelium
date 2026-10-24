@@ -13,7 +13,7 @@ import (
 )
 
 func TestProfileObserverTimeoutAndTransport(t *testing.T) {
-	for _, mode := range []string{"timeout", "transport_error"} {
+	for _, mode := range []string{"timeout", "transport_error", "interrupted"} {
 		t.Run(mode, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if mode == "transport_error" {
@@ -25,14 +25,30 @@ func TestProfileObserverTimeoutAndTransport(t *testing.T) {
 			defer server.Close()
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 			defer cancel()
+			if mode == "interrupted" {
+				cancel()
+			}
 			dir := t.TempDir()
-			r := profileReceipt{Key: "key", Project: "test", JobID: "fixture", Status: "queued", Observation: "armed", Delivery: "not_configured"}
-			if err := observeProfile(ctx, myce.Client{URL: server.URL, Token: "fixture"}, dir, r, profileObserver{}); err == nil {
+			hook := filepath.Join(dir, "notify")
+			payload := filepath.Join(dir, "notification.json")
+			if err := os.WriteFile(hook, []byte("#!/bin/sh\ncat > "+shellArg(payload)+"\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			r := profileReceipt{Key: "key", Project: "test", JobID: "fixture", Status: "queued", Observation: "armed", Nonce: "receipt-nonce", Delivery: "armed"}
+			if err := observeProfile(ctx, myce.Client{URL: server.URL, Token: "fixture"}, dir, r, profileObserver{Notify: hook}); err == nil {
 				t.Fatal("observation should fail")
 			}
 			var saved profileReceipt
-			if err := readProfileJSON(filepath.Join(dir, "receipt.json"), &saved); err != nil || saved.ObservationError != mode || saved.Status != "queued" {
+			if err := readProfileJSON(filepath.Join(dir, "receipt.json"), &saved); err != nil || saved.ObservationError != mode || saved.Status != "queued" || saved.Delivery == "armed" {
 				t.Fatal(saved, err)
+			}
+			var notification profileNotification
+			if err := readProfileJSON(payload, &notification); err != nil || notification.Status != "observation_failed" || notification.ObservationError != mode || notification.DeliveryID == "" {
+				t.Fatal("abnormal end not notified", notification, err)
+			}
+			terminalID := profileHash([]string{r.Nonce, r.Project, r.Key, r.JobID, "succeeded", ""})
+			if notification.DeliveryID == terminalID {
+				t.Fatal("failure reused terminal delivery identity")
 			}
 		})
 	}
@@ -55,7 +71,7 @@ func TestProfileNotifierDeliveryFailure(t *testing.T) {
 		t.Fatal("delivery rejection hidden")
 	}
 	var saved profileReceipt
-	if err := readProfileJSON(filepath.Join(dir, "receipt.json"), &saved); err != nil || saved.Status != "succeeded" || saved.DeliveryStatus != "failed" || saved.Observation != "not_armed" {
+	if err := readProfileJSON(filepath.Join(dir, "receipt.json"), &saved); err != nil || saved.Status != "succeeded" || saved.DeliveryStatus != "failed" || saved.Observation != "not_armed" || saved.Delivery == "armed" {
 		t.Fatal("delivery rejection changed computation state", saved, err)
 	}
 }

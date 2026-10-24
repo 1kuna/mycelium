@@ -18,15 +18,35 @@ func executionTargetMatches(s Spec, m *Machine) bool {
 // admission through fitsResources; this check grants no capacity reservation.
 func (q *Queue) hasQualifiedTarget(j *Job) bool {
 	for _, m := range q.s.Machines {
-		if q.maintenanceBlocked(hostID(m)) || !q.jobAllowsMachine(j, m.ID) {
+		if !q.jobAllowsMachine(j, m.ID) {
 			continue
 		}
 		for _, target := range q.machineTargets(m) {
-			copy := *target
+			copy := cloneMachine(target)
+			copy.Gone, copy.Leaving, copy.Recovering, copy.CheckpointUnavailable = false, false, false, false
+			copy.MemoryError, copy.HostMemoryError, copy.CPUCapacityReason = "", "", ""
+			copy.HostMemoryPolicyMismatch = false
+			policy := q.s.HostMaintenance[hostID(m)]
+			if policy.CPUBudgetCores != nil {
+				copy.CPUBudgetCores = *policy.CPUBudgetCores
+			}
+			copy.EffectiveCPUCores, _ = cpuCapacity(&copy)
+			if availability := machineAvailability(&copy); availability != nil {
+				availability.Available = true
+			}
+			copy.cpuLedger = true
+			copy.CPUInUseCores = 0
 			copy.FreeCPUCores = copy.EffectiveCPUCores
-			copy.FreeHostMemoryGB = copy.EffectiveHostMemoryBudgetGB
-			if copy.FreeHostMemoryGB == 0 && copy.CapabilityProfile != nil {
+			if copy.CapabilityProfile != nil {
 				copy.FreeHostMemoryGB = float64(copy.CapabilityProfile.SystemMemoryBytes) / (1 << 30)
+				allowance := copy.HostMemoryBudgetGB
+				if policy.MemoryBudget != nil {
+					allowance = policy.MemoryBudget.GiB
+				}
+				if allowance > 0 {
+					copy.FreeHostMemoryGB = min(copy.FreeHostMemoryGB, allowance)
+				}
+				copy.HostMemoryMeasured = true
 			}
 			copy.FreeMemoryGB = copy.TotalMemoryGB
 			if fits(j, &copy, copy.TotalMemoryGB) {

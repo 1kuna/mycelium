@@ -61,7 +61,7 @@ func armProfileObserver(ctx context.Context, dir string, r *profileReceipt, cfg 
 	if err = readProfileJSON(filepath.Join(dir, "receipt.json"), r); err != nil {
 		return err
 	}
-	if r.DeliveryStatus == "delivered" {
+	if r.DeliveryStatus == "delivered" && r.ObservationError == "" && (r.Status == "succeeded" || r.Status == "failed" || r.Status == "cancelled") {
 		return nil
 	}
 	var saved profileObserver
@@ -83,6 +83,7 @@ func armProfileObserver(ctx context.Context, dir string, r *profileReceipt, cfg 
 		return err
 	}
 	r.Observation, r.ObservationError = "armed", ""
+	r.DeliveryStatus = ""
 	r.Delivery = "not_configured"
 	if cfg.Notify != "" {
 		r.Delivery = "armed"
@@ -107,6 +108,9 @@ func armProfileObserver(ctx context.Context, dir string, r *profileReceipt, cfg 
 	// No inherited stdio pipe or terminal may keep the submitting session alive.
 	if err = cmd.Start(); err != nil {
 		r.Observation = "not_armed"
+		if r.Delivery == "armed" {
+			r.Delivery = "not_armed"
+		}
 		_ = saveProfileJSON(filepath.Join(dir, "receipt.json"), r)
 		return err
 	}
@@ -124,6 +128,9 @@ func armProfileObserver(ctx context.Context, dir string, r *profileReceipt, cfg 
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 		r.Observation = "not_armed"
+		if r.Delivery == "armed" {
+			r.Delivery = "not_armed"
+		}
 		_ = saveProfileJSON(filepath.Join(dir, "receipt.json"), r)
 		return err
 	}
@@ -132,16 +139,18 @@ func armProfileObserver(ctx context.Context, dir string, r *profileReceipt, cfg 
 }
 
 type profileNotification struct {
-	DeliveryID      string            `json:"delivery_id"`
-	JobID           string            `json:"job_id"`
-	Key             string            `json:"key"`
-	Status          string            `json:"status"`
-	ResultReference myce.FileManifest `json:"result_reference"`
+	ObservationError string            `json:"observation_error,omitempty"`
+	DeliveryID       string            `json:"delivery_id"`
+	JobID            string            `json:"job_id"`
+	Key              string            `json:"key"`
+	Status           string            `json:"status"`
+	ResultReference  myce.FileManifest `json:"result_reference"`
 }
 
 // This is the detached myce wait process. The inherited flock survives caller
 // exit and prevents another invocation from spawning a duplicate watcher.
 func waitProfileReceipt(ctx context.Context, dir string, timeout time.Duration) error {
+	syscall.CloseOnExec(3)
 	if os.Getenv("MYCE_PROFILE_OBSERVER") != "1" {
 		return waitError(2, "receipt observer is started by myce run --profile; rerun that command to recover")
 	}
@@ -180,39 +189,50 @@ func waitProfileReceipt(ctx context.Context, dir string, timeout time.Duration) 
 }
 
 func observeProfile(ctx context.Context, c myce.Client, dir string, r profileReceipt, cfg profileObserver) error {
-	j, err := c.Wait(ctx, r.JobID)
+	j, waitErr := c.Wait(ctx, r.JobID)
 	r.Observation = "not_armed"
-	if err != nil {
+	r.Delivery = "not_configured"
+	if cfg.Notify != "" {
+		r.Delivery = "not_armed"
+	}
+	notification := profileNotification{JobID: r.JobID, Key: r.Key}
+	if waitErr != nil {
 		r.ObservationError = "transport_error"
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			r.ObservationError = "timeout"
 		} else if errors.Is(ctx.Err(), context.Canceled) {
 			r.ObservationError = "interrupted"
 		}
-		_ = saveProfileJSON(filepath.Join(dir, "receipt.json"), r)
-		return waitError(2, "receipt observation ended; job continues; rerun the profile to recover")
+		notification.Status, notification.ObservationError = "observation_failed", r.ObservationError
+	} else {
+		r.Status, r.ResultReference = j.State, j.OutputRefs
+		notification.Status, notification.ResultReference = r.Status, r.ResultReference
 	}
-	r.Status, r.ResultReference = j.State, j.OutputRefs
-	if err = saveProfileJSON(filepath.Join(dir, "receipt.json"), r); err != nil {
+	notification.DeliveryID = profileHash([]string{r.Nonce, r.Project, r.Key, r.JobID, notification.Status, notification.ObservationError})
+	if err := saveProfileJSON(filepath.Join(dir, "receipt.json"), r); err != nil {
 		return err
 	}
-	if cfg.Notify == "" {
-		return nil
+	if cfg.Notify != "" {
+		b, _ := json.Marshal(notification)
+		// Observation cancellation must still report its failure. The notifier owns
+		// delivery deadlines/retries and gets no fleet token or diagnostic text.
+		cmd := exec.Command(cfg.Notify)
+		cmd.Stdin = strings.NewReader(string(b))
+		cmd.Env = notifierEnvironment()
+		deliveryErr := cmd.Run()
+		r.DeliveryStatus = "delivered"
+		if deliveryErr != nil {
+			r.DeliveryStatus = "failed"
+		}
+		if err := saveProfileJSON(filepath.Join(dir, "receipt.json"), r); err != nil {
+			return err
+		}
+		if deliveryErr != nil {
+			return deliveryErr
+		}
 	}
-	notification := profileNotification{DeliveryID: profileHash([]string{r.Project, r.Key, r.JobID}), JobID: r.JobID, Key: r.Key, Status: r.Status, ResultReference: r.ResultReference}
-	b, _ := json.Marshal(notification)
-	// Notifier owns its HTTP retry/deadline policy. No logs or queue reason text
-	// are passed; a crash after delivery may replay this same delivery_id.
-	cmd := exec.CommandContext(ctx, cfg.Notify)
-	cmd.Stdin = strings.NewReader(string(b))
-	cmd.Env = notifierEnvironment()
-	err = cmd.Run()
-	r.DeliveryStatus = "delivered"
-	if err != nil {
-		r.DeliveryStatus = "failed"
+	if waitErr != nil {
+		return waitError(2, "receipt observation ended; job continues; rerun the profile to recover")
 	}
-	if e := saveProfileJSON(filepath.Join(dir, "receipt.json"), r); e != nil {
-		return e
-	}
-	return err
+	return nil
 }

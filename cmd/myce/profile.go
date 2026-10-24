@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -26,6 +27,7 @@ type executionProfile struct {
 }
 
 type profileReceipt struct {
+	Nonce            string            `json:"nonce"`
 	Key              string            `json:"key"`
 	Project          string            `json:"project"`
 	Intent           string            `json:"intent"`
@@ -168,6 +170,15 @@ func runProfile(ctx context.Context, name string, args []string, key, notify, co
 		return waitError(75, "submission_busy: another local profile submission is preparing; retry")
 	}
 	defer lock.Close()
+	stages, err := filepath.Glob(filepath.Join(receipts, ".prepare-*"))
+	if err != nil {
+		return err
+	}
+	for _, stage := range stages {
+		if err = os.RemoveAll(stage); err != nil {
+			return err
+		}
+	}
 	var r profileReceipt
 	var dir string
 	if key != "" {
@@ -183,6 +194,37 @@ func runProfile(ctx context.Context, name string, args []string, key, notify, co
 			return err
 		}
 	}
+	var sourceIdentity string
+	inputRefs := myce.FileManifest{}
+	if r.Key == "" {
+		p.Source, sourceIdentity, err = identifyProfileSource(ctx, root, p.Source)
+		if err != nil {
+			return waitError(64, "profile_source_invalid: source unavailable or dirty HEAD; commit it or declare allow_dirty")
+		}
+		for dest, local := range p.Inputs {
+			if !profileRelative(dest) || dest == ".myce-source.tar" || dest == ".myce-inputs" || strings.HasPrefix(dest, ".myce-inputs/") {
+				return waitError(64, "profile_invalid: invalid input name")
+			}
+			if !filepath.IsAbs(local) {
+				local = filepath.Join(root, local)
+			}
+			inputRefs[dest], err = myce.IdentifyFile(local)
+			if err != nil {
+				return waitError(64, "profile_input_invalid: cannot identify declared input")
+			}
+		}
+		if key == "" {
+			key = "profile-" + profileHash(struct {
+				Intent, Source string
+				Inputs         myce.FileManifest
+			}{intent, sourceIdentity, inputRefs})
+		}
+		dir = filepath.Join(receipts, profileHash([]string{p.Project, key}))
+		err = readProfileJSON(filepath.Join(dir, "receipt.json"), &r)
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
 	if r.Key == "" {
 		stage, err := os.MkdirTemp(receipts, ".prepare-")
 		if err != nil {
@@ -193,6 +235,10 @@ func runProfile(ctx context.Context, name string, args []string, key, notify, co
 		ref, err := freezeProfileSource(ctx, root, p.Source, source)
 		if err != nil {
 			return waitError(64, "profile_source_invalid: cannot snapshot declared source")
+		}
+		_, afterIdentity, err := identifyProfileSource(ctx, root, p.Source)
+		if err != nil || afterIdentity != sourceIdentity {
+			return waitError(65, "profile_source_changed: source changed while freezing")
 		}
 		s := p.Spec
 		s.SubmissionKey = ""
@@ -207,10 +253,8 @@ func runProfile(ctx context.Context, name string, args []string, key, notify, co
 			if !filepath.IsAbs(local) {
 				local = filepath.Join(root, local)
 			}
-			inputRef, e := myce.IdentifyFile(local)
-			if e != nil {
-				return waitError(64, "profile_input_invalid: cannot identify declared input")
-			}
+			inputRef := inputRefs[dest]
+			var e error
 			frozen := filepath.Join(stage, "input-"+profileHash(dest))
 			if e = copyProfileInput(local, frozen); e != nil {
 				return e
@@ -222,7 +266,7 @@ func runProfile(ctx context.Context, name string, args []string, key, notify, co
 			stored := ".myce-inputs/" + profileHash(dest)
 			uploads[stored] = filepath.Base(frozen)
 			s.Files[stored] = inputRef
-			inputCommands = append(inputCommands, "mkdir -p "+shellArg(filepath.Dir(dest))+"; cp "+shellArg(stored)+" "+shellArg(dest))
+			inputCommands = append(inputCommands, "mkdir -p "+shellArg("./"+filepath.Dir(dest))+"; cp "+shellArg("./"+stored)+" "+shellArg("./"+dest))
 		}
 		s.Inputs = nil
 		command := append(append([]string{}, p.Run.Command...), args...)
@@ -230,12 +274,7 @@ func runProfile(ctx context.Context, name string, args []string, key, notify, co
 		// are already in the attempt cwd; no checkout or caller environment is copied.
 		slices.Sort(inputCommands)
 		s.Run.Command = []string{"sh", "-ec", "tar -xf .myce-source.tar\n" + strings.Join(inputCommands, "\n") + "\n" + shellCommand(command) + "\n" + shellCommand(p.Check)}
-		if key == "" {
-			key = "profile-" + profileHash(struct {
-				Intent string
-				Files  myce.FileManifest
-			}{intent, s.Files})
-		}
+
 		s.SubmissionKey = key
 		if err = s.Validate(); err != nil {
 			return waitError(64, "profile_invalid: job fields failed validation")
@@ -246,7 +285,7 @@ func runProfile(ctx context.Context, name string, args []string, key, notify, co
 			return err
 		}
 		if r.Key == "" {
-			r = profileReceipt{Key: key, Project: p.Project, Intent: intent, Status: "intent", Observation: "not_armed", Delivery: "not_configured", Spec: s, Uploads: uploads}
+			r = profileReceipt{Key: key, Nonce: rand.Text(), Project: p.Project, Intent: intent, Status: "intent", Observation: "not_armed", Delivery: "not_configured", Spec: s, Uploads: uploads}
 			if err = saveProfileJSON(filepath.Join(stage, "receipt.json"), r); err != nil {
 				return err
 			}
@@ -292,6 +331,22 @@ func runProfile(ctx context.Context, name string, args []string, key, notify, co
 			return profileFailure(out, &r, 69, "queue_unavailable: submission unconfirmed; retry the saved key")
 		}
 		r.JobID, r.Status = j.ID, j.State
+		if err = saveProfileJSON(filepath.Join(dir, "receipt.json"), r); err != nil {
+			return err
+		}
+	}
+	// The verified queue store owns these bytes after JobID is durable. Keep
+	// only intent/hashes locally; an uncertain submission still retains uploads.
+	if len(r.Uploads) > 0 {
+		for _, file := range r.Uploads {
+			if filepath.Base(file) != file {
+				return errors.New("invalid saved upload path")
+			}
+			if err = os.Remove(filepath.Join(dir, file)); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
+		r.Uploads = nil
 		if err = saveProfileJSON(filepath.Join(dir, "receipt.json"), r); err != nil {
 			return err
 		}

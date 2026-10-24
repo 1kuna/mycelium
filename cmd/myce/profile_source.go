@@ -14,9 +14,10 @@ import (
 )
 
 type profileSource struct {
-	Git       string `json:"git,omitempty" yaml:"git,omitempty"`
-	Directory string `json:"directory,omitempty" yaml:"directory,omitempty"`
-	Snapshot  string `json:"snapshot,omitempty" yaml:"snapshot,omitempty"`
+	AllowDirty bool   `json:"allow_dirty,omitempty" yaml:"allow_dirty,omitempty"`
+	Git        string `json:"git,omitempty" yaml:"git,omitempty"`
+	Directory  string `json:"directory,omitempty" yaml:"directory,omitempty"`
+	Snapshot   string `json:"snapshot,omitempty" yaml:"snapshot,omitempty"`
 }
 
 func profileRelative(name string) bool {
@@ -42,6 +43,7 @@ func freezeProfileSource(ctx context.Context, root string, source profileSource,
 	}
 	tw := tar.NewWriter(out)
 	write := func(name string, mode int64, size int64, r io.Reader) error {
+		name = strings.TrimPrefix(name, "./")
 		if !profileRelative(name) || name == ".myce-source.tar" || name == ".myce-inputs" || strings.HasPrefix(name, ".myce-inputs/") {
 			return errors.New("source requires clean relative file names")
 		}
@@ -54,43 +56,13 @@ func freezeProfileSource(ctx context.Context, root string, source profileSource,
 	var cmd *exec.Cmd
 	var input io.ReadCloser
 	if source.Directory != "" {
-		directory := filepath.Join(root, source.Directory)
-		if filepath.IsAbs(source.Directory) {
-			directory = source.Directory
-		}
-		err = filepath.WalkDir(directory, func(path string, entry os.DirEntry, e error) error {
-			if e != nil {
-				return e
-			}
-			if e = ctx.Err(); e != nil {
-				return e
-			}
-			name, e := filepath.Rel(directory, path)
-			if e != nil {
-				return e
-			}
-			if name == ".git" || name == filepath.Join(".mycelium", "receipts") {
-				if entry.IsDir() {
-					return filepath.SkipDir
-				}
-				return nil
-			}
-			if entry.IsDir() {
-				return nil
-			}
-			info, e := entry.Info()
-			if e != nil {
-				return e
-			}
-			if !info.Mode().IsRegular() {
-				return errors.New("source must contain only regular files and directories")
-			}
+		err = walkProfileDirectory(ctx, root, source.Directory, func(name, path string, info os.FileInfo) error {
 			f, e := os.Open(path)
 			if e != nil {
 				return e
 			}
 			defer f.Close()
-			return write(filepath.ToSlash(name), int64(info.Mode().Perm()), info.Size(), f)
+			return write(name, int64(info.Mode().Perm()), info.Size(), f)
 		})
 	} else {
 		if source.Git != "" {
@@ -148,6 +120,91 @@ func freezeProfileSource(ctx context.Context, root string, source profileSource,
 		return ref, err
 	}
 	return myce.IdentifyFile(dest)
+}
+
+// Resolve and hash in place before allocating staging space. Existing keys
+// never need a second archive or another copy of their upload bytes.
+func identifyProfileSource(ctx context.Context, root string, source profileSource) (profileSource, string, error) {
+	modes := 0
+	for _, value := range []string{source.Git, source.Directory, source.Snapshot} {
+		if value != "" {
+			modes++
+		}
+	}
+	if modes != 1 {
+		return source, "", errors.New("declare exactly one source")
+	}
+	if source.Git != "" {
+		if source.Git == "HEAD" && !source.AllowDirty {
+			dirty, err := exec.CommandContext(ctx, "git", "-C", root, "status", "--porcelain", "--untracked-files=normal").Output()
+			if err != nil {
+				return source, "", err
+			}
+			if len(dirty) != 0 {
+				return source, "", errors.New("git HEAD source is dirty; commit it or explicitly allow_dirty")
+			}
+		}
+		tree, err := exec.CommandContext(ctx, "git", "-C", root, "rev-parse", "--verify", "--end-of-options", source.Git+"^{tree}").Output()
+		source.Git = strings.TrimSpace(string(tree))
+		return source, "git:" + source.Git, err
+	}
+	if source.Snapshot != "" {
+		path := source.Snapshot
+		if !filepath.IsAbs(path) {
+			path = filepath.Join(root, path)
+		}
+		ref, err := myce.IdentifyFile(path)
+		return source, "snapshot:" + profileHash(ref), err
+	}
+	type entry struct {
+		Ref  myce.FileRef
+		Mode uint32
+	}
+	files := map[string]entry{}
+	err := walkProfileDirectory(ctx, root, source.Directory, func(name, path string, info os.FileInfo) error {
+		ref, err := myce.IdentifyFile(path)
+		if err != nil {
+			return err
+		}
+		files[name] = entry{ref, uint32(info.Mode().Perm())}
+		return nil
+	})
+	return source, "directory:" + profileHash(files), err
+}
+
+func walkProfileDirectory(ctx context.Context, root, directory string, visit func(string, string, os.FileInfo) error) error {
+	if !filepath.IsAbs(directory) {
+		directory = filepath.Join(root, directory)
+	}
+	return filepath.WalkDir(directory, func(path string, item os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if err = ctx.Err(); err != nil {
+			return err
+		}
+		name, err := filepath.Rel(directory, path)
+		if err != nil {
+			return err
+		}
+		if name == ".git" || name == filepath.Join(".mycelium", "receipts") {
+			if item.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if item.IsDir() {
+			return nil
+		}
+		info, err := item.Info()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return errors.New("source requires regular files")
+		}
+		return visit(filepath.ToSlash(name), path, info)
+	})
 }
 
 func shellArg(s string) string { return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'" }

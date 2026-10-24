@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -45,8 +47,30 @@ check: [test, -s, result]
 	if err := os.WriteFile(path, []byte(profile), 0600); err != nil {
 		t.Fatal(err)
 	}
+	notifierFIFO := filepath.Join(root, "notifier-fifo")
+	if err := syscall.Mkfifo(notifierFIFO, 0600); err != nil {
+		t.Fatal(err)
+	}
+	notifierPID := filepath.Join(root, "notifier-child")
+	defer func() {
+		if b, e := os.ReadFile(notifierPID); e == nil {
+			var pid int
+			if _, e = fmt.Sscanf(string(b), "%d", &pid); e == nil {
+				_ = syscall.Kill(pid, syscall.SIGTERM)
+			}
+		}
+	}()
 	notifier := filepath.Join(root, "notify")
-	if err := os.WriteFile(notifier, []byte("#!/bin/sh\nif [ \"${1:-}\" = --check ]; then test -n \"${NOTIFICATION_FILE:-}\"; exit $?; fi\ntest -z \"${MYCE_TOKEN:-}\" || exit 99\ncat >> \"$NOTIFICATION_FILE\"\nprintf '\\n' >> \"$NOTIFICATION_FILE\"\n"), 0700); err != nil {
+	if err := os.WriteFile(notifier, []byte(`#!/bin/sh
+if [ "${1:-}" = --check ]; then test -n "${NOTIFICATION_FILE:-}"; exit $?; fi
+test -z "${MYCE_TOKEN:-}" || exit 99
+if [ ! -f "$NOTIFIER_PID" ]; then
+ sh -c 'read value < "$NOTIFIER_FIFO"' &
+ echo "$!" > "$NOTIFIER_PID"
+fi
+cat >> "$NOTIFICATION_FILE"
+printf '\n' >> "$NOTIFICATION_FILE"
+`), 0700); err != nil {
 		t.Fatal(err)
 	}
 	binary := devTestBinary(t)
@@ -64,7 +88,7 @@ check: [test, -s, result]
 	invoke := func(extra ...string) (profileReceipt, error) {
 		cmd := exec.CommandContext(ctx, binary, append([]string{"run", "--queue", d.URL, "--profile", path}, extra...)...)
 		cmd.Dir = root
-		cmd.Env = append(os.Environ(), "MYCE_TOKEN="+token, "NOTIFICATION_FILE="+notificationFile)
+		cmd.Env = append(os.Environ(), "MYCE_TOKEN="+token, "NOTIFICATION_FILE="+notificationFile, "NOTIFIER_FIFO="+notifierFIFO, "NOTIFIER_PID="+notifierPID)
 		var stderr bytes.Buffer
 		cmd.Stderr = &stderr
 		out, e := cmd.Output()
@@ -87,9 +111,16 @@ check: [test, -s, result]
 	if exitCodeForTest(err) != 74 || missing.Delivery != "not_configured" || missing.Observation != "not_armed" {
 		t.Fatal("missing notifier armed", missing, err)
 	}
+	for _, upload := range missing.Uploads {
+		t.Fatal("accepted upload retained in receipt", upload)
+	}
+	dir := filepath.Join(root, ".mycelium", "receipts", profileHash([]string{"test", missing.Key}))
+	if _, e := os.Stat(filepath.Join(dir, "source.tar")); !os.IsNotExist(e) {
+		t.Fatal("accepted upload copy retained", e)
+	}
 	// Recover that exact job with configured delivery and literal argv.
 	r, err := invoke("--key", "missing", "--notify", notifier, "--", "literal")
-	if err != nil || r.JobID != missing.JobID || r.Delivery != "armed" {
+	if err != nil || r.JobID != missing.JobID || r.Delivery == "not_configured" || r.Nonce == "" {
 		t.Fatal("recovery", r, err)
 	}
 	recovered, err := invoke("--key", "missing", "--notify", notifier, "--", "literal")
@@ -115,6 +146,22 @@ check: [test, -s, result]
 	result, _ := os.ReadFile(dest)
 	if string(result) != "literal" {
 		t.Fatal("bad result", string(result))
+	}
+	wait(t, ctx, func() bool {
+		lock, e := profileLock(filepath.Join(dir, "watch.lock"))
+		if e != nil {
+			return false
+		}
+		lock.Close()
+		return true
+	})
+	childBytes, e := os.ReadFile(notifierPID)
+	if e != nil {
+		t.Fatal(e)
+	}
+	var childPID int
+	if _, e = fmt.Sscanf(string(childBytes), "%d", &childPID); e != nil || syscall.Kill(childPID, 0) != nil {
+		t.Fatal("notifier child did not survive for descriptor regression", e)
 	}
 	replay, err := invoke("--key", "missing", "--notify", notifier, "--", "literal")
 	if err != nil || replay.JobID != r.JobID {
@@ -149,6 +196,13 @@ check: [test, -s, result]
 		var current profileReceipt
 		return readProfileJSON(filepath.Join(root, ".mycelium", "receipts", profileHash([]string{"test", failed.Key}), "receipt.json"), &current) == nil && current.DeliveryStatus == "delivered" && current.Status == "failed"
 	})
+	if err = os.WriteFile(path, []byte(strings.Replace(profile, "os: "+runtime.GOOS, "os: plan9", 1)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	impossible, err := invoke("--key", "impossible", "--", "literal")
+	if exitCodeForTest(err) != 78 || impossible.Status != "intent" || impossible.JobID != "" {
+		t.Fatal("impossible target did not retain typed hold", impossible, err)
+	}
 	t.Log("local dev: frozen source, result check/download, missing notifier, detached delivery, caller replay and single notification")
 }
 
@@ -197,6 +251,14 @@ check: [true]
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503) }))
 	defer server.Close()
+	receipts := filepath.Join(root, ".mycelium", "receipts")
+	abandoned := filepath.Join(receipts, ".prepare-abandoned")
+	if err := os.MkdirAll(abandoned, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(abandoned, "source.tar"), []byte("disposable staging"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	var out bytes.Buffer
 	err := runProfile(context.Background(), path, nil, "stable", "", "", "", server.URL, "fixture", &out)
 	if exitCode(err) != 69 {
@@ -212,5 +274,29 @@ check: [true]
 	var saved profileReceipt
 	if err = readProfileJSON(filepath.Join(root, ".mycelium", "receipts", profileHash([]string{"test", "stable"}), "receipt.json"), &saved); err != nil || len(saved.Spec.Run.Command) == 0 {
 		t.Fatal("intent not persisted", err)
+	}
+	if _, err = os.Stat(abandoned); !os.IsNotExist(err) {
+		t.Fatal("stale preparation retained", err)
+	}
+	out.Reset()
+	if err = runProfile(context.Background(), path, nil, "", "", "", "", server.URL, "fixture", &out); exitCode(err) != 69 {
+		t.Fatal(err)
+	}
+	var generated profileReceipt
+	if err = json.Unmarshal(out.Bytes(), &generated); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Chmod(receipts, 0500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(receipts, 0700)
+	out.Reset()
+	err = runProfile(context.Background(), path, nil, "", "", "", "", server.URL, "fixture", &out)
+	if exitCode(err) != 69 {
+		t.Fatal("existing automatic key attempted to stage again", err)
+	}
+	var adopted profileReceipt
+	if err = json.Unmarshal(out.Bytes(), &adopted); err != nil || adopted.Key != generated.Key {
+		t.Fatal("automatic key not adopted", adopted, err)
 	}
 }
