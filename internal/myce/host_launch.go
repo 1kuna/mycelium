@@ -106,6 +106,10 @@ func (q *Queue) AuthorizeLaunch(l HostLaunch) error {
 			return nil
 		}
 		m := q.s.Machines[l.Machine]
+		if l.Kind == "benchmark" && !q.benchmarkIdle(m) {
+			reject("benchmark_busy")
+			return nil
+		}
 		if !q.workerHasCPUReservation(m) && !cpuAllocationFits(m, 1) {
 			reject("preparation_cpu")
 			return nil

@@ -433,22 +433,25 @@ type Execution struct {
 	Attempt  int    `json:"attempt"`
 }
 type Checkin struct {
-	AttemptProtocol string          `json:"attempt_protocol,omitempty"`
-	Attempts        []AttemptReport `json:"attempts,omitempty"`
-	Recovering      bool            `json:"recovering,omitempty"`     // Reconcile custody without offering new work.
-	BenchmarkDone   string          `json:"benchmark_done,omitempty"` // Exact preparation attempt, after process cleanup.
-	Started         bool            `json:"started,omitempty"`
-	ModelReports    []ModelReport   `json:"model_reports,omitempty"`
-	PreviousSession string          `json:"previous_session,omitempty"`
-	Fresh           bool            `json:"fresh,omitempty"`
-	Machine         Machine         `json:"machine"`
-	Running         *Execution      `json:"running,omitempty"`
+	AttemptProtocol string            `json:"attempt_protocol,omitempty"`
+	Attempts        []AttemptReport   `json:"attempts,omitempty"`
+	Recovering      bool              `json:"recovering,omitempty"` // Reconcile custody without offering new work.
+	CurveReports    []WorkObservation `json:"curve_reports,omitempty"`
+	BenchmarkDone   string            `json:"benchmark_done,omitempty"` // Exact preparation attempt, after process cleanup.
+	Started         bool              `json:"started,omitempty"`
+	ModelReports    []ModelReport     `json:"model_reports,omitempty"`
+	PreviousSession string            `json:"previous_session,omitempty"`
+	Fresh           bool              `json:"fresh,omitempty"`
+	Machine         Machine           `json:"machine"`
+	Running         *Execution        `json:"running,omitempty"`
 }
 type Reply struct {
 	AttemptProtocol   string              `json:"attempt_protocol,omitempty"`
 	Attempts          []AttemptDirective  `json:"attempts,omitempty"`
 	PriorityStop      *PriorityPreemption `json:"priority_stop,omitempty"`
 	CPUBudgetCores    *int                `json:"cpu_budget_cores,omitempty"`
+	BenchmarkCurves   []WorkObservation   `json:"benchmark_curves,omitempty"`
+	BenchmarkMachine  *Machine            `json:"benchmark_machine,omitempty"`
 	BenchmarkPlan     *HostLaunch         `json:"benchmark_plan,omitempty"`
 	PreparationStopAt *time.Time          `json:"preparation_stop_at,omitempty"`
 	HostMaintenance   string              `json:"host_maintenance,omitempty"`
@@ -526,6 +529,7 @@ type HoldDetail struct {
 }
 
 type Snapshot struct {
+	WorkCurves     []WorkObservation    `json:"work_curves"`
 	PriorityPolicy PriorityPolicyRecord `json:"priority_policy"`
 	HoldsDetail    []HoldDetail         `json:"holds_detail"`
 	HostHolds      []string             `json:"host_holds,omitempty"`

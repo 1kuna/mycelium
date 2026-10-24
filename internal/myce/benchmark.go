@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"os"
 	"path/filepath"
@@ -30,11 +31,12 @@ type Throughput struct {
 	Reason          string  `json:"reason,omitempty"`
 }
 type BenchmarkResult struct {
-	Fingerprint  string       `json:"fingerprint"`
-	RecordedAt   time.Time    `json:"recorded_at"`
-	Seconds      float64      `json:"seconds"`
-	State        string       `json:"state"`
-	Measurements []Throughput `json:"measurements"`
+	Curves       []WorkObservation `json:"curves,omitempty"`
+	Fingerprint  string            `json:"fingerprint"`
+	RecordedAt   time.Time         `json:"recorded_at"`
+	Seconds      float64           `json:"seconds"`
+	State        string            `json:"state"`
+	Measurements []Throughput      `json:"measurements"`
 }
 
 func (b *BenchmarkResult) Summary() string {
@@ -54,6 +56,10 @@ func (b *BenchmarkResult) Summary() string {
 func validRate(v float64) bool { return v > 0 && !math.IsNaN(v) && !math.IsInf(v, 0) }
 
 type BenchmarkConfig struct {
+	CurveMaxConcurrency     int
+	EnvironmentCache        *EnvironmentCache
+	PreviousCurves          []WorkObservation
+	MeasureCurve            func(context.Context, BenchmarkConfig, Extension, *Machine, string, int) (CurveMeasurement, error)
 	Clock                   Clock
 	Machine                 Machine
 	StateDir, ExtensionRoot string
@@ -106,17 +112,57 @@ func RunOnboardingBenchmark(ctx context.Context, c BenchmarkConfig, p *Capabilit
 		digests = append(digests, e.Digest)
 	}
 	slices.Sort(digests)
-	raw, _ := json.Marshal([]any{"onboarding-v1", identity, p.OS, p.Arch, p.LogicalCPUs, p.SystemMemoryBytes, p.Accelerators, p.DiskTotalBytes, c.Client.URL, digests})
+	raw, _ := json.Marshal([]any{"onboarding-v2", c.CurveMaxConcurrency, observationAllowance(&c.Machine), c.Machine.Devices, identity, p.OS, p.Arch, p.LogicalCPUs, p.SystemMemoryBytes, p.Accelerators, p.DiskTotalBytes, c.Client.URL, digests})
 	sum := sha256.Sum256(raw)
 	fingerprint := hex.EncodeToString(sum[:])
 	var saved CapabilityProfile
-	if b, e := os.ReadFile(filepath.Join(c.StateDir, "capability-profile.json")); e == nil && json.Unmarshal(b, &saved) == nil && identityErr == nil && saved.Benchmark != nil && saved.Benchmark.Fingerprint == fingerprint && saved.Benchmark.State == "complete" {
+	if data, err := os.ReadFile(filepath.Join(c.StateDir, "capability-profile.json")); err == nil {
+		_ = json.Unmarshal(data, &saved)
+	}
+	if saved.Benchmark != nil {
+		for _, point := range saved.Benchmark.Curves {
+			found := false
+			for _, current := range c.PreviousCurves {
+				if current.Key == point.Key {
+					found = true
+					break
+				}
+			}
+			if !found {
+				c.PreviousCurves = append(c.PreviousCurves, point)
+			}
+		}
+	}
+	// Retain historical local evidence, but never present an old identity as current.
+	targets := (&Queue{}).machineTargets(&c.Machine)
+	for i, point := range c.PreviousCurves {
+		reason := "recipe or component changed"
+		for _, target := range targets {
+			component := "cpu"
+			if target.GPU != "cpu" {
+				component = target.Device
+			}
+			if point.Key.Host != hostID(target) || point.Key.Component != component {
+				continue
+			}
+			for _, e := range extensions {
+				if e.Digest == point.Key.ExtensionDigest {
+					reason = curveStaleReason(point, e, target, c.Clock.Now())
+					break
+				}
+			}
+		}
+		c.PreviousCurves[i].StaleReason = reason
+	}
+	if identityErr == nil && saved.Benchmark != nil && saved.Benchmark.Fingerprint == fingerprint && saved.Benchmark.State == "complete" && c.Clock.Now().Sub(saved.Benchmark.RecordedAt) <= 30*24*time.Hour {
 		p.Benchmark = saved.Benchmark
+		p.Benchmark.Curves = c.PreviousCurves
 		p.Onboarding = "measured; qualified reference replay"
 		return nil
 	}
+
 	start := c.Clock.Now()
-	result := &BenchmarkResult{Fingerprint: fingerprint, RecordedAt: start, State: "partial"}
+	result := &BenchmarkResult{Fingerprint: fingerprint, RecordedAt: start, State: "partial", Curves: slices.Clone(c.PreviousCurves)}
 	p.Benchmark = result
 	p.Onboarding = "measured; qualified reference replay"
 	monitor := newAvailabilityMonitor(c.Clock, c.DailyUse, c.Laptop, c.Desktop)
@@ -193,6 +239,23 @@ func RunOnboardingBenchmark(ctx context.Context, c BenchmarkConfig, p *Capabilit
 			}
 		}
 		result.Measurements = append(result.Measurements, measurements...)
+	}
+	if work.Err() == nil && c.CurveMaxConcurrency > 0 {
+		// Snapshot target views without queue mutation or extra host allowances.
+		for _, target := range targets {
+			for _, e := range extensions {
+				v := e.variant(machineTarget(target))
+				if v == nil {
+					continue
+				}
+				for _, name := range slices.Sorted(maps.Keys(v.Sweeps)) {
+					for _, point := range runReferenceSweep(work, c, e, target, name, monitor) {
+						result.Curves = slices.DeleteFunc(result.Curves, func(old WorkObservation) bool { return old.Key == point.Key })
+						result.Curves = append(result.Curves, point)
+					}
+				}
+			}
+		}
 	}
 	if work.Err() == nil {
 		result.State = "complete"

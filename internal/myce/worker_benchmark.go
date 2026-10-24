@@ -38,6 +38,7 @@ func (w *Worker) runBenchmark(stop context.Context, s *workerStore) error {
 	m.BenchmarkPending = true
 	m.ModelURL = ""
 	m.ModelConfigHash = modelConfigHash(w.ModelConfig)
+	var curves []WorkObservation
 	checkin := func(done string) (Reply, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
@@ -48,7 +49,7 @@ func (w *Worker) runBenchmark(stop context.Context, s *workerStore) error {
 		}
 		a := w.availability.snapshot()
 		m.CapabilityProfile.Availability = &a
-		reply, err := w.checkin(ctx, Checkin{Machine: m, Fresh: s.state.Fresh, PreviousSession: s.state.PreviousSession, BenchmarkDone: done})
+		reply, err := w.checkin(ctx, Checkin{Machine: m, Fresh: s.state.Fresh, PreviousSession: s.state.PreviousSession, BenchmarkDone: done, CurveReports: curves})
 		if err == nil && s.state.Fresh {
 			s.state.Fresh = false
 			err = s.save()
@@ -72,9 +73,13 @@ func (w *Worker) runBenchmark(stop context.Context, s *workerStore) error {
 		return err
 	}
 	profile := *w.Machine.CapabilityProfile
+	benchmarkMachine := m
+	if reply.BenchmarkMachine != nil {
+		benchmarkMachine = *reply.BenchmarkMachine
+	}
 	done := make(chan error, 1)
 	go func() {
-		done <- w.Benchmark(ctx, BenchmarkConfig{Clock: w.Clock, Machine: w.Machine, StateDir: s.dir, ExtensionRoot: w.ExtensionRoot, Client: w.Client, DailyUse: w.DailyUse, Laptop: w.Laptop, Desktop: w.Desktop, OwnerSignals: w.OwnerSignals}, &profile)
+		done <- w.Benchmark(ctx, BenchmarkConfig{PreviousCurves: reply.BenchmarkCurves, CurveMaxConcurrency: w.CurveMaxConcurrency, EnvironmentCache: w.environmentCache, Clock: w.Clock, Machine: benchmarkMachine, StateDir: s.dir, ExtensionRoot: w.ExtensionRoot, Client: w.Client, DailyUse: w.DailyUse, Laptop: w.Laptop, Desktop: w.Desktop, OwnerSignals: w.OwnerSignals}, &profile)
 	}()
 	// Keep health fresh and receive disable-stop while the benchmark runs.
 	tick := time.NewTicker(min(w.Interval, time.Second))
@@ -88,6 +93,10 @@ func (w *Worker) runBenchmark(stop context.Context, s *workerStore) error {
 				return errors.Join(err, heartbeatErr, cleanupErr) // Retain queue custody.
 			}
 			m.BenchmarkPending = false
+			m.CapabilityProfile = &profile
+			if profile.Benchmark != nil {
+				curves = profile.Benchmark.Curves
+			}
 			_, ackErr := checkin(launch.Attempt)
 			w.Machine.CapabilityProfile = &profile
 			return errors.Join(err, heartbeatErr, ackErr)

@@ -366,6 +366,7 @@ func (q *Queue) update(fn func() error) error {
 	err := fn()
 	if err == nil {
 		q.invalidateWorkTimings()
+		q.invalidateWorkCurves()
 	}
 	if err == nil {
 		q.maintainSubmissions()
@@ -881,8 +882,10 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			}
 			m.RecoveringSince = &since
 		}
-		q.reconcilePreparationPlans(c)
 		q.s.Machines[m.ID] = &m
+		q.refreshHostMemory()
+		q.acceptCurveReports(c, &m)
+		q.reconcilePreparationPlans(c)
 		// Count this worker as healthy, but detect majority silence before
 		// replacing the previous fleet contact. Otherwise the first reconnect
 		// looks like a continuously reporting survivor and expires its peers.
@@ -931,6 +934,13 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 				if m.BenchmarkPending && q.hostLaunchAllowed(&m, m.Session) && q.benchmarkIdle(&m) {
 					l := q.issuePreparation(&m, "benchmark", "onboarding")
 					reply.BenchmarkPlan = &l
+					copy := cloneMachine(&m)
+					reply.BenchmarkMachine = &copy
+					for _, point := range q.s.WorkObservations {
+						if point.Key.Host == hostID(&m) {
+							reply.BenchmarkCurves = append(reply.BenchmarkCurves, point)
+						}
+					}
 				}
 				q.cancelUnofferedPreparations(&m, reply)
 				return
@@ -1231,6 +1241,9 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 	// A kernel OOM is the payload's failure even if preemption raced it.
 	ceilingFailure := !r.Success && strings.HasPrefix(ceilingDiagnostic(r.Error, ""), "exceeded its ")
 	oomFailure := !r.Success && (r.OutOfMemory || ceilingFailure)
+	if oomFailure {
+		q.recordWorkOOM(j, r)
+	}
 	stageFailure := (j.Spec.Priority == "production" || plannedPriorityStop(j)) && !r.Success && !r.Interrupted
 	// Bridge cleanup-to-inventory telemetry with the same absolute bound as
 	// pending cleanup. Completion and heartbeats cannot renew planning credit.
@@ -1412,6 +1425,9 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 			}
 			return a.Kind < b.Kind
 		})
+		for _, key := range slices.Sorted(maps.Keys(q.s.WorkObservations)) {
+			out.WorkCurves = append(out.WorkCurves, q.s.WorkObservations[key])
+		}
 		out.PriorityPolicy = q.priorityPolicyRecord()
 		out.Now = q.clock.Now()
 		order, reasons := q.queueProjection()

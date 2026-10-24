@@ -1761,3 +1761,45 @@ and unknown reason. Predictions use only matching prior evidence and never feed
 placement. Status remains a read-only projection: no mutation, persistence or
 history-wide reserialization is added to status reads. Safe idle curves and
 placement changes require their later amendments.
+
+## Safe sparse curves (slice 2, #107; approved 2026-10-24)
+
+The orchestrator approves this slice under Zach's delegated design authority,
+following the [research build plan](research/benchmark-batch-placement.md#incremental-build-plan).
+Placement and ordinary admission/concurrency limits remain unchanged.
+
+A variant may declare `sweeps`, keyed by a declared reference work type, with a
+`command`, sorted supported power-of-two `counts` starting at 1, and positive
+`max_concurrency` (at most 64). One command implements concurrency internally;
+Mycelium does not launch concurrent GPU attempts. `--curve-max-concurrency N`
+on `join`, together with `--onboarding-benchmark`, explicitly enables sweeps up
+to the smaller operator/recipe bound (default 0, disabled). There is no periodic
+load generation. Prepared exact variants and native baselines must qualify first.
+
+Reuse host-wide benchmark preparation custody, command supervision and cleanup.
+Busy/recovering hosts cannot start; components run serially. Daily-use hosts need
+fresh five-minute idle, external-power and safe-heat evidence. Owner return or
+unsafe/unknown signals cancels the command, retaining custody until cleanup.
+A sweep has a 60-second Clock budget, and each command a ten-second bound.
+Stop on non-increasing aggregate throughput, memory exhaustion or failure.
+The declared per-item CPU/RAM/device floors bound counts conservatively; unified
+memory is charged once against the one host allowance. Unknown memory permits
+no point. No resources are granted by learned measurements.
+
+The command gets `MYCE_BENCHMARK_CONCURRENCY`, normal check input/output/work,
+and `MYCE_BENCHMARK_OUTPUT`. It replays the bundled reference with unchanged
+quality, writes each item’s native output to `MYCE_CHECK_OUTPUT_DIR/0`, `/1`,
+and so on (all are compared), and reports aggregate `units`, measured service `seconds`, mean
+`latency_seconds`, baseline and peak host/device GiB, plus `out_of_memory`.
+Correct output is required for successful samples. Incremental memory is peak
+minus baseline; high-water memory never decreases. OOM permanently forbids that
+exact point, even if a later successful sample arrives.
+
+Store points as separate rows in the existing observation store. Clean accepted
+ordinary attempts refine their exact point using `0.8 * old + 0.2 * sample`;
+serial-only ordinary timing stays serial. Failed, mixed, interrupted, duplicate
+and stale attempts never refine rates. Fingerprint, hardware, recipe/reference,
+environment or allowance changes retain evidence with a stale reason and prevent
+rate reuse; 30-day-old points also become stale. JSON, CLI and HTML status expose
+rates, latency, incremental/high-water memory, samples and stale/forbidden reasons.
+Native mixed-load curves and fleet acceptance require separate authorization.

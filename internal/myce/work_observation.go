@@ -7,7 +7,7 @@ import (
 
 // WorkReference describes the amount in the variant's bundled correctness
 // baseline. The frozen check/recipe owns semantics; these fields are generic.
-// Slice 1 supports one independent item and vector batch size one only.
+// Ordinary accepted work supports one independent item and batch size one.
 type WorkReference struct {
 	InputShape string  `json:"input_shape" yaml:"input_shape"`
 	Unit       string  `json:"unit" yaml:"unit"`
@@ -27,6 +27,7 @@ func (r WorkReference) valid() bool {
 // ObservationKey contains no private input paths or application-specific data.
 // Configuration is a digest of resource reservations, allowances and power mode.
 type ObservationKey struct {
+	Allowance       string          `json:"allowance,omitempty"`
 	Work            string          `json:"work"`
 	ExtensionDigest string          `json:"extension_digest"`
 	Target          ExecutionTarget `json:"target"`
@@ -44,15 +45,25 @@ type ObservationKey struct {
 // One bounded aggregate per comparable key, persisted as its own SQLite row.
 // Last execution is provenance, not the duplicate fence: Queue.complete owns it.
 type WorkObservation struct {
-	Key        ObservationKey `json:"key"`
-	Samples    int            `json:"samples"`
-	Units      float64        `json:"units"`
-	Seconds    float64        `json:"seconds"`
-	RecordedAt time.Time      `json:"recorded_at"`
-	Job        string         `json:"job"`
-	Machine    string         `json:"machine"`
-	Session    string         `json:"session"`
-	Attempt    int            `json:"attempt"`
+	SampleID                  string         `json:"sample_id,omitempty"`
+	Rate                      float64        `json:"rate,omitempty"`
+	LatencySeconds            float64        `json:"latency_seconds,omitempty"`
+	HostMemoryGB              float64        `json:"host_memory_gb,omitempty"`
+	DeviceMemoryGB            float64        `json:"device_memory_gb,omitempty"`
+	IncrementalHostMemoryGB   float64        `json:"incremental_host_memory_gb,omitempty"`
+	IncrementalDeviceMemoryGB float64        `json:"incremental_device_memory_gb,omitempty"`
+	Forbidden                 bool           `json:"forbidden,omitempty"`
+	StaleReason               string         `json:"stale_reason,omitempty"`
+	Source                    string         `json:"source,omitempty"`
+	Key                       ObservationKey `json:"key"`
+	Samples                   int            `json:"samples"`
+	Units                     float64        `json:"units"`
+	Seconds                   float64        `json:"seconds"`
+	RecordedAt                time.Time      `json:"recorded_at"`
+	Job                       string         `json:"job"`
+	Machine                   string         `json:"machine"`
+	Session                   string         `json:"session"`
+	Attempt                   int            `json:"attempt"`
 }
 
 type WorkTiming struct {
@@ -112,12 +123,16 @@ func (q *Queue) workObservationKey(j *Job) (*ObservationKey, string) {
 			return nil, "physical component identity unavailable"
 		}
 	}
+	if a := machineAvailability(m); a != nil && !a.Available {
+		return nil, "owner availability withdrawn"
+	}
+	return referenceObservationKey(*e, m, ref, j.Spec.workType(), j.Spec.Needs, j.Spec.Args, j.Spec.Program, component, hardware)
+}
+
+func referenceObservationKey(e Extension, m *Machine, ref WorkReference, work string, needs ResourceNeeds, args []string, program *Program, component, hardware string) (*ObservationKey, string) {
 	power, mode := "", ""
 	if p := m.CapabilityProfile; p != nil && p.Availability != nil {
 		power, mode = p.Availability.Signals.Power, p.Availability.Mode
-		if !p.Availability.Available {
-			return nil, "owner availability withdrawn"
-		}
 	}
 	configuration := identityHash(struct {
 		Needs                                         ResourceNeeds
@@ -125,13 +140,13 @@ func (q *Queue) workObservationKey(j *Job) (*ObservationKey, string) {
 		HostAllowance, DeviceAllowance, DeviceReserve float64
 		Power, Mode                                   string
 		Arguments                                     string
-	}{j.Spec.Needs, m.CPUReserveCores, m.EffectiveCPUCores, m.EffectiveHostMemoryBudgetGB, m.TotalMemoryGB, m.ReservedMemoryGB, power, mode, identityHash(struct {
+	}{needs, m.CPUReserveCores, m.EffectiveCPUCores, m.EffectiveHostMemoryBudgetGB, m.TotalMemoryGB, m.ReservedMemoryGB, power, mode, identityHash(struct {
 		Args    []string
 		Program *Program
-	}{j.Spec.Args, j.Spec.Program})})
-	return &ObservationKey{Work: j.Spec.workType(), ExtensionDigest: e.Digest, Target: machineTarget(m), Reference: ref,
+	}{args, program})})
+	return &ObservationKey{Work: work, ExtensionDigest: e.Digest, Target: machineTarget(m), Reference: ref,
 		Host: hostID(m), Component: component, Hardware: hardware, Fingerprint: m.ExtensionFingerprint,
-		Environment: extensionEnvironmentIdentity(*e, m), Configuration: configuration, Concurrency: 1, BatchSize: 1}, ""
+		Environment: extensionEnvironmentIdentity(e, m), Allowance: observationAllowance(m), Configuration: configuration, Concurrency: 1, BatchSize: 1}, ""
 }
 
 func (q *Queue) beginWorkTiming(j *Job) {
@@ -141,8 +156,12 @@ func (q *Queue) beginWorkTiming(j *Job) {
 	key, reason := q.workObservationKey(j)
 	j.Timing = &WorkTiming{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: j.Machine, Session: j.Session, Key: key, Reason: reason}
 	if key != nil {
-		if old, ok := q.s.WorkObservations[identityHash(key)]; ok && validRate(old.Units) && validRate(old.Seconds) {
-			predicted := j.Spec.Workload.Units * old.Seconds / old.Units
+		if old, ok := q.s.WorkObservations[identityHash(key)]; ok && old.StaleReason == "" && !old.Forbidden && q.clock.Now().Sub(old.RecordedAt) <= 30*24*time.Hour && validRate(old.Units) && validRate(old.Seconds) {
+			rate := old.Rate
+			if !validRate(rate) {
+				rate = old.Units / old.Seconds
+			}
+			predicted := j.Spec.Workload.Units / rate
 			if validRate(predicted) {
 				j.Timing.PredictedSeconds, j.Timing.Samples = &predicted, old.Samples
 			}
@@ -209,8 +228,22 @@ func (q *Queue) recordWorkObservation(j *Job, r Result) {
 	if q.s.WorkObservations == nil {
 		q.s.WorkObservations = map[string]WorkObservation{}
 	}
-	q.s.WorkObservations[key] = WorkObservation{Key: *t.Key, Samples: old.Samples + 1, Units: units, Seconds: elapsed,
+	point := WorkObservation{Key: *t.Key, Samples: old.Samples + 1, Units: units, Seconds: elapsed,
 		RecordedAt: q.clock.Now(), Job: j.ID, Machine: r.Machine, Session: r.Session, Attempt: r.Attempt}
+	if old.StaleReason != "" {
+		old.Rate, old.LatencySeconds = 0, 0
+	}
+	point.Rate = ewma(old.Rate, j.Spec.Workload.Units/seconds)
+	point.LatencySeconds = ewma(old.LatencySeconds, seconds)
+	point.HostMemoryGB, point.DeviceMemoryGB = old.HostMemoryGB, old.DeviceMemoryGB
+	point.IncrementalHostMemoryGB, point.IncrementalDeviceMemoryGB = old.IncrementalHostMemoryGB, old.IncrementalDeviceMemoryGB
+	point.Forbidden, point.Source = old.Forbidden, "accepted work"
+	point.SampleID = old.SampleID
+	if r.Usage != nil && r.Usage.valid() {
+		point.HostMemoryGB = max(point.HostMemoryGB, r.Usage.HostMemoryGB)
+		point.DeviceMemoryGB = max(point.DeviceMemoryGB, r.Usage.MemoryGB)
+	}
+	q.s.WorkObservations[key] = point
 }
 
 // Shared by the CLI and HTML status. A missing old field is explicitly unknown.

@@ -41,6 +41,7 @@ type Worker struct {
 	inventoryAllowance      []string
 	inventoryReason         string
 	// Benchmark runs only when explicitly enabled; fake inventory never loads the host.
+	CurveMaxConcurrency   int
 	OnboardingBenchmark   bool
 	Benchmark             func(context.Context, BenchmarkConfig, *CapabilityProfile) error
 	DailyUse              bool
@@ -913,7 +914,7 @@ func (w Worker) Run(stop context.Context) error {
 	defer func() { availabilityCancel(); <-availabilityDone }()
 	// Benchmark before any model load or admission, and never over a recovered job.
 	// Fake inventory keeps dev/tests light; measured fake runners are tested separately.
-	if w.OnboardingBenchmark && w.Benchmark != nil && w.Machine.GPU != "fake" && w.Machine.GPU != "cpu" && len(stores) == 0 {
+	if w.OnboardingBenchmark && w.Benchmark != nil && (w.Machine.GPU != "fake" || w.CurveMaxConcurrency > 0) && len(stores) == 0 {
 		if err = w.runBenchmark(stop, s); err != nil {
 			return err
 		}

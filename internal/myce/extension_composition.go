@@ -21,6 +21,7 @@ type ExecutionTarget struct {
 }
 
 type ExtensionVariant struct {
+	Sweeps       map[string]ReferenceSweep    `json:"sweeps,omitempty" yaml:"sweeps,omitempty"`
 	References   map[string]WorkReference     `json:"references,omitempty" yaml:"references,omitempty"`
 	Target       ExecutionTarget              `json:"target" yaml:"target"`
 	Environments map[string]EnvironmentRecipe `json:"environments,omitempty" yaml:"environments,omitempty"`
@@ -81,6 +82,11 @@ func (e Extension) validateVariants() error {
 		view.Check = v.Check
 		if err := view.validateBaselines(v.Baselines); err != nil {
 			return err
+		}
+		for work, sweep := range v.Sweeps {
+			if _, ok := v.References[work]; !ok || !sweep.valid() {
+				return errors.New("sweep requires a reference, command, bounded concurrency and sorted power-of-two counts starting at one")
+			}
 		}
 		for work, ref := range v.References {
 			if _, ok := v.Baselines[work]; !ok || !ref.valid() {
