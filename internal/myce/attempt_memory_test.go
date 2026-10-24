@@ -10,7 +10,7 @@ func TestAttemptMemoryDeviceAccounting(t *testing.T) {
 	if _, err := cudaAttemptMemory([]byte("GPU-one, 7, N/A\n"), "GPU-one", map[int]bool{7: true}); err != errAttemptMemoryUnsupported {
 		t.Fatal("N/A became zero")
 	}
-	client, peak, err := drmAttemptMemory([]byte("drm-client-id: 7\ndrm-pdev: 0000:03:00.0\ndrm-resident-vram0: 2097152 KiB\n"), "0000:03:00.0")
+	client, peak, err := drmAttemptMemory([]byte("drm-client-id: 7\ndrm-pdev: 0000:03:00.0\ndrm-resident-vram0: 2048 MiB\n"), "0000:03:00.0")
 	if err != nil || peak != 2 || client != "0000:03:00.0/7" {
 		t.Fatal("bad DRM client memory", client, peak, err)
 	}

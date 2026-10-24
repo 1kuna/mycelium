@@ -127,9 +127,12 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 			}
 		}
 		if floor := j.MemoryOOMFloor; floor != nil {
-			n.MemoryGB = max(n.MemoryGB, floor.MemoryGB)
+			n.MemoryGB = floor.MemoryGB // A host OOM is not a GPU measurement.
 			n.HostMemoryGB = max(n.HostMemoryGB, floor.HostMemoryGB)
-			source += "; OOM lower bound"
+			source += "; OOM retry floor"
+		}
+		if !n.cpuOnly() && m.TotalMemoryGB > 0 {
+			n.MemoryGB = min(n.MemoryGB, m.TotalMemoryGB)
 		}
 	}
 	enforcement := m.MemoryEnforcement
@@ -177,7 +180,6 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) (*AttemptMemoryPeak, float64,
 		return nil, 0, ""
 	}
 	var exact, family, other *AttemptMemoryPeak
-	exactOOM := false
 	configuration := memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
 	layout := "separate"
 	if m.UnifiedMemory && !j.Spec.Needs.cpuOnly() {
@@ -186,8 +188,7 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) (*AttemptMemoryPeak, float64,
 	for _, point := range q.s.WorkObservations {
 		k, p := point.Key, point.MemoryPeak
 		age := q.clock.Now().Sub(point.MemoryRecordedAt)
-		usable := point.Source == "accepted work" && point.Samples > 0 || point.Source == "OOM lower bound"
-		if !sameMemoryWork(point, *key, configuration) || !usable || point.StaleReason != "" || point.MemoryRecordedAt.IsZero() || age < 0 || age > workCurveMaxAge || p == nil || p.Constrained || p.HostGB == nil || !validRate(*p.HostGB) || !validRate(*p.HostGB*2.5) {
+		if !sameMemoryWork(point, *key, configuration) || point.Source != "accepted work" || point.Samples <= 0 || point.StaleReason != "" || point.MemoryRecordedAt.IsZero() || age < 0 || age > workCurveMaxAge || p == nil || p.Constrained || p.HostGB == nil || !validRate(*p.HostGB) || !validRate(*p.HostGB*2.5) {
 			continue
 		}
 		if m.UnifiedMemory && !j.Spec.Needs.cpuOnly() && (p.DeviceGB == nil || !validRate(*p.DeviceGB)) {
@@ -196,7 +197,6 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) (*AttemptMemoryPeak, float64,
 		sameFamily := k.Target == key.Target && point.MemoryLayout != "" && point.MemoryLayout == layout
 		if sameFamily && k.Host == key.Host && k.Component == key.Component && k.Hardware == key.Hardware && k.Fingerprint == key.Fingerprint && k.Environment == key.Environment {
 			exact = mergeMemoryPeaks(exact, p)
-			exactOOM = exactOOM || point.Forbidden
 		} else if sameFamily {
 			family = mergeMemoryPeaks(family, p)
 		} else {
@@ -204,9 +204,6 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) (*AttemptMemoryPeak, float64,
 		}
 	}
 	if exact != nil {
-		if exactOOM {
-			return exact, 1.25, "OOM lower bound × 1.25"
-		}
 		return exact, 1.25, "accepted peak × 1.25"
 	}
 	if family != nil {

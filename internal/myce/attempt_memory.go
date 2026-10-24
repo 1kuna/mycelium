@@ -129,6 +129,7 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job) func() *AttemptMem
 	peak := a.peak()
 	var mu sync.Mutex
 	var samplers sync.WaitGroup
+	hostSampled := false // Read only after joining the host sampler.
 	record := func(sample *AttemptMemoryPeak) {
 		mu.Lock()
 		peak = sampledMemoryPeak(peak, sample)
@@ -146,7 +147,9 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job) func() *AttemptMem
 			case <-ctx.Done():
 				return
 			case <-hostTick.C:
-				record(a.peak())
+				sample := a.peak()
+				hostSampled = hostSampled || sample != nil && sample.HostGB != nil
+				record(sample)
 			}
 		}
 	}()
@@ -183,6 +186,9 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job) func() *AttemptMem
 			cancel()
 			samplers.Wait()
 			record(a.peak())
+			if !hostSampled && peak != nil {
+				peak.Constrained = true
+			}
 		})
 		return peak
 	}
@@ -298,14 +304,25 @@ func drmAttemptMemory(b []byte, pci string) (string, float64, error) {
 		default:
 			if strings.HasPrefix(key, "drm-resident-vram") {
 				f := strings.Fields(val)
-				if len(f) != 2 || f[1] != "KiB" {
+				if len(f) == 0 || len(f) > 2 {
 					return "", 0, errAttemptMemoryUnsupported
+				}
+				scale := float64(1)
+				if len(f) == 2 {
+					switch f[1] {
+					case "KiB":
+						scale = 1 << 10
+					case "MiB":
+						scale = 1 << 20
+					default:
+						return "", 0, errAttemptMemoryUnsupported
+					}
 				}
 				n, err := strconv.ParseUint(f[0], 10, 64)
 				if err != nil {
 					return "", 0, errAttemptMemoryUnsupported
 				}
-				total += float64(n) / (1 << 20)
+				total += float64(n) * scale / (1 << 30)
 				found = true
 			}
 		}

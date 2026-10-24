@@ -207,7 +207,8 @@ func (p WorkObservation) Summary() string {
 	return fmt.Sprintf("%s %s/%s c=%d: %s; %s; latency %.2fs; incremental host/device %.2f/%.2f GiB; peak %.2f/%.2f GiB; %d samples", p.Key.Work, p.Key.Host, p.Key.Component, p.Key.Concurrency, rate, state, p.LatencySeconds, p.IncrementalHostMemoryGB, p.IncrementalDeviceMemoryGB, p.HostMemoryGB, p.DeviceMemoryGB, p.Samples)
 }
 
-// Failure does not learn speed, but exact-attempt OOM evidence forbids its point.
+// Explicit OOMs forbid their performance point; auto OOMs only invalidate
+// comparable memory measurements, so exploratory work can re-teach the peak.
 func (q *Queue) recordWorkOOM(j *Job, r Result) {
 	var key *ObservationKey
 	if j.Timing != nil {
@@ -215,13 +216,23 @@ func (q *Queue) recordWorkOOM(j *Job, r Result) {
 	}
 	if key == nil && j.Spec.Needs.Memory == "auto" {
 		provenance := *j
-		provenance.Attempt = 0 // Resumed OOMs still establish a conservative floor.
+		provenance.Attempt = 0 // Resumed failures invalidate the same memory class.
 		key, _ = q.workObservationKey(&provenance)
 	}
 	if key == nil {
 		return
 	}
 	k := *key
+	if j.Spec.Needs.Memory == "auto" {
+		configuration := memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
+		for id, point := range q.s.WorkObservations {
+			if sameMemoryWork(point, k, configuration) {
+				point.MemoryPeak, point.MemoryRecordedAt = nil, time.Time{}
+				q.s.WorkObservations[id] = point
+			}
+		}
+		return // Memory invalidation does not forbid completion predictions.
+	}
 	id := identityHash(k)
 	p := q.s.WorkObservations[id]
 	p.Key = k
@@ -231,22 +242,6 @@ func (q *Queue) recordWorkOOM(j *Job, r Result) {
 	p.Attempt = r.Attempt
 	p.Machine = r.Machine
 	p.Session = r.Session
-	if j.Spec.Needs.Memory == "auto" {
-		// OOM cannot provide a complete peak, but it can raise a lower bound.
-		// Persist it independently of this job's retry so later jobs recover
-		// from an underestimated accepted sample too, including a final OOM.
-		host, device := j.Spec.Needs.HostMemoryGB*1.25, j.Spec.Needs.MemoryGB*1.25
-		p.MemoryPeak = mergeMemoryPeaks(p.MemoryPeak, &AttemptMemoryPeak{HostGB: &host, DeviceGB: &device})
-		p.MemoryRecordedAt = q.clock.Now()
-		p.MemoryConfiguration = memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
-		p.MemoryLayout = "separate"
-		if m := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices); m != nil && m.UnifiedMemory && !j.Spec.Needs.cpuOnly() {
-			p.MemoryLayout = "unified"
-		}
-		if p.Source != "accepted work" {
-			p.Source = "OOM lower bound"
-		}
-	}
 	if q.s.WorkObservations == nil {
 		q.s.WorkObservations = map[string]WorkObservation{}
 	}

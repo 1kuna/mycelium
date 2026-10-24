@@ -183,8 +183,19 @@ func (q *Queue) retryOOM(j *Job) {
 			return
 		}
 		j.OOMRetries++
-		j.MemoryOOMFloor = &SizeHint{MemoryGB: j.Spec.Needs.MemoryGB * 1.25, HostMemoryGB: j.Spec.Needs.HostMemoryGB * 1.25}
+		j.MemoryOOMFloor = &SizeHint{MemoryGB: j.Spec.Needs.MemoryGB, HostMemoryGB: j.Spec.Needs.HostMemoryGB * 1.25}
 		j.OOMCapacity = nil
+		probe := cloneJob(j)
+		probe.State, probe.MemoryEnvelope = "queued", nil
+		probe.Spec.Needs.MemoryGB, probe.Spec.Needs.HostMemoryGB = j.MemoryOOMFloor.MemoryGB, j.MemoryOOMFloor.HostMemoryGB
+		if !q.hasQualifiedTarget(&probe) {
+			need := max(probe.Spec.Needs.MemoryGB, probe.Spec.Needs.HostMemoryGB)
+			if m := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices); m != nil {
+				need = max(need, hostNeed(m, probe.Spec.Needs.MemoryGB, probe.Spec.Needs.HostMemoryGB))
+			}
+			j.State, j.Reason = "failed", fmt.Sprintf("needs more memory than any eligible host allows (%.1f GiB)", need)
+			return
+		}
 		q.requeue(j, "out of memory; waiting for room above the previous envelope", false)
 		return
 	}

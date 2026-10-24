@@ -1860,12 +1860,15 @@ Input-size/duration scaling per recipe is a follow-up slice, not part of this
 amendment.
 Reservations are frozen per attempt; stale, failed, OOM, constrained and resumed
 observations cannot shrink an envelope. Resumed jobs can use prior accepted
-estimates. An auto OOM retains its envelope as a lower bound for one retry with
-25% more room, on the same host if it fits. Persist that bound in work history,
-including a final OOM, so later jobs cannot keep using an underestimate;
-it can only raise an estimate and never learns successful speed. Performance
-Forbidden points do not discard earlier accepted memory evidence. Member caps are optional; explicit caps
-remain supported and fit the job envelope.
+estimates. An auto OOM invalidates comparable learned memory points across
+machines and families, without recording a bound or setting the performance
+Forbidden flag. The next unhinted job explores again; a successful exploration
+re-teaches the peak. One retry keeps a job-local host floor with 25% more room,
+on the same host if it fits, without raising its GPU reservation from a host OOM.
+If that floor exceeds every eligible host allowance or card, fail explicitly
+with the required GiB. Device reservations never exceed the card total and
+never stand in for measured device peaks. Member caps are optional; explicit
+caps remain supported and fit the job envelope.
 
 Linux native attempts use their existing shared parent cgroup for main and all
 sidecars, bounded/zero swap and a job OOM cause. Learn the sampled whole-parent
@@ -1878,6 +1881,8 @@ auto or estimate-feeding attempts, every five seconds and until unsupported.
 Independent host and GPU sampler goroutines max-track under one small mutex;
 cancellation joins both before the final read, so a slow GPU query cannot
 delay host sampling. The GPU query keeps its existing two-second timeout.
+Without an in-flight host tick, mark the result constrained and do not learn
+from start or post-exit readings alone.
 Empty process rows, uninitialised counters and transient query timeouts retry;
 missing tools or unparseable counters stop GPU sampling. A retained recipe GPU
 default is named as such beside a measured host source.
@@ -1896,5 +1901,6 @@ unit stops. If daemon inventory proves all members stopped but the delegated
 parent vanished, release custody with unknown peak and cause, without learning.
 If the parent survives but the running sampler was lost, its post-exit resident
 reading also cannot train an estimate, even when main had already succeeded.
-Docker driver and Linux/GPU enforcement qualification
-are deployment checks, separate from laptop proof; the B70 driver is unverified.
+Docker driver and Linux/GPU enforcement qualification are deployment checks,
+separate from laptop proof. Verify the B70 Docker driver and the kernel's XPU
+fdinfo size format (bare bytes, KiB or MiB); both remain unverified on that host.
