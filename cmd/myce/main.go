@@ -56,7 +56,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 
 	if len(args) == 0 {
-		return errors.New("usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|run|submit|policy|status|logs|wait|cancel|resolve-docker|dev|version|release|file|benchmark|extension|sim|detect|service|measure|model|usage\n       myce host drain|disable|resume|status|budget HOST\nRun myce COMMAND --help for command options.")
+		return errors.New("usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|run|submit|policy|status|logs|wait|result|cancel|resolve-docker|dev|version|release|file|benchmark|extension|sim|detect|service|measure|model|usage\n       myce host drain|disable|resume|status|budget HOST\nRun myce COMMAND --help for command options.")
 	}
 	if args[0] == "dev" && len(args) > 1 && args[1] == "clock" {
 		return devClockCommand(args[2:], os.Stdout)
@@ -129,6 +129,11 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		defer stop()
 		return runCommand(ctx, args[1:], os.Stdout, os.Stderr)
 	}
+	if args[0] == "result" {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return resultCommand(ctx, args[1:], os.Stderr)
+	}
 	if args[0] == "wait" {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
@@ -146,6 +151,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	f := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	since := f.String("since", "7d", "usage lookback, up to 90d")
 	by := f.String("by", "project", "usage grouping: project or machine")
+	clientConfig := f.String("config", "", "installed config (default: installed worker, then queue)")
 	joiningFile := f.String("joining-file", env("MYCE_JOINING_FILE", ""), "privately supplied invitation (discovery plus saved address)")
 	discovery := f.Bool("discovery", true, "advertise a pinned TLS joining endpoint over DNS-SD")
 	discoveryListen := f.String("discovery-listen", "", "TLS joining listen address (default same interface as queue, automatic port)")
@@ -239,7 +245,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			if args[0] == "logs" {
 				option = "follow"
 			}
-			for _, name := range []string{"queue", "token", "joining-file", option} {
+			for _, name := range []string{"queue", "token", "config", "joining-file", option} {
 				v := f.Lookup(name)
 				help.Var(v.Value, v.Name, v.Usage)
 				help.Lookup(name).DefValue = v.DefValue
@@ -280,36 +286,56 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		}
 
 	}
-	var invitation *myce.Invitation
-	if *joiningFile != "" {
-		i, e := myce.ReadInvitation(*joiningFile)
-		if e != nil {
-			return e
-		}
-		invitation = &i
-		*token = i.Token
-	}
-	if *token == "" {
-		return errors.New("set MYCE_TOKEN to the shared fleet token (dev defaults to dev-token)")
-	}
-	client := myce.Client{URL: *url, Token: *token}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if invitation != nil && args[0] != "join" {
-		explicit := ""
+	var client myce.Client
+	var invitation *myce.Invitation
+	if args[0] == "status" || args[0] == "logs" {
+		// An omitted endpoint must not mask the installed queue address.
+		endpoint := os.Getenv("MYCE_QUEUE")
 		f.Visit(func(v *flag.Flag) {
 			if v.Name == "queue" {
-				explicit = *url
+				endpoint = *url
 			}
 		})
-		if explicit == "" {
-			explicit = invitation.Address
+		var err error
+		client, err = runClient(*clientConfig, *joiningFile, endpoint, *token)
+		if err != nil {
+			return err
 		}
-		var e error
-		client, e = invitation.Client(explicit)
-		if e != nil {
-			return e
+		if client.HTTP != nil {
+			defer client.HTTP.CloseIdleConnections()
 		}
+	} else {
+		if *joiningFile != "" {
+			i, e := myce.ReadInvitation(*joiningFile)
+			if e != nil {
+				return e
+			}
+			invitation = &i
+			*token = i.Token
+		}
+		if *token == "" {
+			return errors.New("set MYCE_TOKEN to the shared fleet token (dev defaults to dev-token)")
+		}
+		client = myce.Client{URL: *url, Token: *token}
+		if invitation != nil && args[0] != "join" {
+			explicit := ""
+			f.Visit(func(v *flag.Flag) {
+				if v.Name == "queue" {
+					explicit = *url
+				}
+			})
+			if explicit == "" {
+				explicit = invitation.Address
+			}
+			var e error
+			client, e = invitation.Client(explicit)
+			if e != nil {
+				return e
+			}
+		}
+
 	}
 	mc, err := myce.ReadModels(*modelFile)
 	if err != nil {

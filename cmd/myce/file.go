@@ -16,31 +16,17 @@ func fileCommand(args []string) error {
 		return errors.New("usage: myce file put [flags] FILE | get [flags] SHA256 DEST")
 	}
 	f := flag.NewFlagSet("file "+args[0], flag.ContinueOnError)
-	queue := f.String("queue", env("MYCE_QUEUE", "http://127.0.0.1:7331"), "queue address")
-	invitation := f.String("joining-file", env("MYCE_JOINING_FILE", ""), "private invitation for pinned HTTPS")
+	authority := installedClientFlags(f)
 	size := f.Int64("size-bytes", -1, "expected file byte count for get")
 	if err := f.Parse(args[1:]); err != nil {
 		return err
 	}
-	c := myce.Client{URL: *queue, Token: env("MYCE_TOKEN", "")}
-	if *invitation != "" {
-		i, err := myce.ReadInvitation(*invitation)
-		if err != nil {
-			return err
-		}
-		address := i.Address
-		f.Visit(func(v *flag.Flag) {
-			if v.Name == "queue" {
-				address = *queue
-			}
-		})
-		c, err = i.Client(address)
-		if err != nil {
-			return err
-		}
+	c, err := authority.client()
+	if err != nil {
+		return err
 	}
-	if c.Token == "" {
-		return errors.New("set MYCE_TOKEN")
+	if c.HTTP != nil {
+		defer c.HTTP.CloseIdleConnections()
 	}
 	ctx := context.Background()
 	switch args[0] {
