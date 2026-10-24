@@ -140,6 +140,9 @@ func waitJobs(ctx context.Context, c myce.Client, ids []string, timeout time.Dur
 			return waitError(3, "wait timed out; jobs continue")
 		}
 		if err != nil {
+			if myce.IsTLSIdentityError(err) {
+				return waitError(2, "wait: tls_identity; check installed queue authority")
+			}
 			var httpErr *myce.HTTPError
 			if errors.As(err, &httpErr) && !myce.RetryStatusRead(err) {
 				// Do not echo a remote response body (it may contain credentials).

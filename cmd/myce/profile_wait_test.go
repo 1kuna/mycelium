@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"io"
 	"mycelium/internal/myce"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -54,6 +56,49 @@ func TestProfileObserverTimeoutAndTransport(t *testing.T) {
 			terminalID := profileHash([]string{r.Nonce, r.Project, r.Key, r.JobID, "succeeded", ""})
 			if notification.DeliveryID == terminalID {
 				t.Fatal("failure reused terminal delivery identity")
+			}
+		})
+	}
+}
+
+func TestProfileObserverTLSIdentityFailure(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		t.Error("TLS identity failure must prevent authenticated HTTP requests")
+	}))
+	defer server.Close()
+	pinned, err := (myce.Invitation{Version: 1, Fingerprint: strings.Repeat("00", 32), Token: "private-fixture-token"}).Client(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pinned.HTTP.CloseIdleConnections()
+	for name, client := range map[string]myce.Client{
+		"certificate": {URL: server.URL, Token: "private-fixture-token"},
+		"pin":         pinned,
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			payload := filepath.Join(dir, "notification.json")
+			hook := filepath.Join(dir, "notify")
+			if err := os.WriteFile(hook, []byte("#!/bin/sh\ncat > "+shellArg(payload)+"\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+			r := profileReceipt{Key: "key", Project: "test", JobID: "fixture", Status: "queued", Observation: "armed", Delivery: "armed"}
+			if err := observeProfile(ctx, client, dir, r, profileObserver{Notify: hook}); err == nil || ctx.Err() != nil {
+				t.Fatal("TLS identity failure did not promptly end observation", err, ctx.Err())
+			}
+			var saved profileReceipt
+			if err := readProfileJSON(filepath.Join(dir, "receipt.json"), &saved); err != nil || saved.Status != "queued" || saved.Observation != "not_armed" || saved.ObservationError != "tls_identity" || saved.DeliveryStatus != "delivered" {
+				t.Fatal(saved, err)
+			}
+			var event profileNotification
+			if err := readProfileJSON(payload, &event); err != nil || event.Status != "observation_failed" || event.ObservationError != "tls_identity" || event.DeliveryID == "" {
+				t.Fatal("TLS failure wake missing or unsanitized", event, err)
+			}
+			data, err := os.ReadFile(payload)
+			if err != nil || strings.Contains(string(data), client.Token) || strings.Contains(string(data), server.URL) || strings.Contains(string(data), "x509") {
+				t.Fatal("notification leaked authority diagnostics", err)
 			}
 		})
 	}
@@ -205,8 +250,38 @@ printf '\n' >> ` + shellArg(payload) + "\n"
 		}
 		return receipt
 	}
+	dir := filepath.Join(root, ".mycelium", "receipts", profileHash([]string{"demo", "installed-observer"}))
+	// This test owns this exact temporary binary/receipt pair. Bound cleanup
+	// even when a regression leaves the detached waiter retrying indefinitely.
+	t.Cleanup(func() {
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		processes, err := exec.CommandContext(cleanupCtx, "ps", "-axo", "pid=,command=").Output()
+		if err != nil {
+			t.Error("observer cleanup process lookup:", err)
+			return
+		}
+		for _, line := range strings.Split(string(processes), "\n") {
+			pidText, command, ok := strings.Cut(strings.TrimSpace(line), " ")
+			if !ok || strings.TrimSpace(command) != binary+" wait --receipt "+dir {
+				continue
+			}
+			pid, err := strconv.Atoi(pidText)
+			if err != nil {
+				t.Error(err)
+				continue
+			}
+			process, err := os.FindProcess(pid)
+			if err == nil {
+				err = process.Kill()
+				process.Release()
+			}
+			if err != nil && !errors.Is(err, os.ErrProcessDone) {
+				t.Error("observer cleanup:", err)
+			}
+		}
+	})
 	submitted := invoke()
-	dir := filepath.Join(root, ".mycelium", "receipts", profileHash([]string{"demo", submitted.Key}))
 	receiptPath := filepath.Join(dir, "receipt.json")
 	delivered := func() profileReceipt {
 		t.Helper()
@@ -254,10 +329,15 @@ printf '\n' >> ` + shellArg(payload) + "\n"
 	if len(lines) != 2 {
 		t.Fatalf("notifier not invoked for initial and recovered observation: %s", data)
 	}
+	var terminalID string
 	for _, line := range lines {
 		var event profileNotification
 		if err := json.Unmarshal([]byte(line), &event); err != nil || event.JobID != submitted.JobID || event.Status != "succeeded" {
 			t.Fatal("bad completion notification", event, err)
 		}
+		if event.DeliveryID == "" || (terminalID != "" && event.DeliveryID != terminalID) {
+			t.Fatal("terminal delivery identity changed across recovery", terminalID, event.DeliveryID)
+		}
+		terminalID = event.DeliveryID
 	}
 }

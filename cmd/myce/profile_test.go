@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -286,7 +287,7 @@ check: [true]
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	err := runProfile(context.Background(), path, nil, "stable", "", "", "", server.URL, "fixture", &out)
+	err := runProfile(context.Background(), path, nil, "stable", "", "", "", server.URL, "fixture", &out, io.Discard)
 	if exitCode(err) != 69 {
 		t.Fatal(err)
 	}
@@ -305,7 +306,7 @@ check: [true]
 		t.Fatal("stale preparation retained", err)
 	}
 	out.Reset()
-	if err = runProfile(context.Background(), path, nil, "", "", "", "", server.URL, "fixture", &out); exitCode(err) != 69 {
+	if err = runProfile(context.Background(), path, nil, "", "", "", "", server.URL, "fixture", &out, io.Discard); exitCode(err) != 69 {
 		t.Fatal(err)
 	}
 	var generated profileReceipt
@@ -317,7 +318,7 @@ check: [true]
 	}
 	defer os.Chmod(receipts, 0700)
 	out.Reset()
-	err = runProfile(context.Background(), path, nil, "", "", "", "", server.URL, "fixture", &out)
+	err = runProfile(context.Background(), path, nil, "", "", "", "", server.URL, "fixture", &out, io.Discard)
 	if exitCode(err) != 69 {
 		t.Fatal("existing automatic key attempted to stage again", err)
 	}

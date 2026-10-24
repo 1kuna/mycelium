@@ -174,22 +174,27 @@ delivered; the separate `delivery_status` becomes `delivered` or `failed`. A rec
 file is a past snapshot, not proof of a live watcher; rerun with `--key` to check
 the OS lock and adopt or recover observation. Completion records
 terminal `status` and immutable `result_reference`; observer errors instead record
-`observation_error: timeout|transport_error|interrupted`, leaving job state alone
-and attempting a notifier event with `status: observation_failed` and
+`observation_error: timeout|transport_error|interrupted|tls_identity`, leaving job
+state alone and attempting a notifier event with `status: observation_failed` and
 `observation_error`, even on interruption.
-Transient queue outages retry inside the observer. Observation normally has no
-time limit. Rerun after observer loss or delivery failure to recover the same job
+Transient queue outages retry inside the observer. Permanent TLS identity or
+certificate verification failures end observation and notify `tls_identity`.
+Observation normally has no time limit. Rerun after observer loss or delivery
+failure to recover the same job
 and retry the same event delivery identity. IDs include a per-receipt nonce, so
 recreating a receipt cannot suppress a new event at a deduplicating receiver.
 Observation-failure IDs also include a nonce saved on each arm, so a later arm
 failing the same way produces a new wake. Terminal IDs remain stable across arms.
 
 A rerun adopts an already-running observer and prints its receipt directory;
-it never replaces or stops that owner. For an s022 observer stuck queued/armed
-because its installed certificate pin was lost, the owning session finds its
+it never replaces or stops that owner. For an observer started by a build before
+this fix that is stuck queued/armed because its installed certificate pin was
+lost, the owning session finds its
 own `myce wait --receipt RECEIPT_DIR` process in `ps` by that exact receipt path
-and stops it. Then rerun the original profile with the same `--key`. Once the
-old owner releases the OS lock, the rerun re-arms observation using the fixed
+and stops it. SIGTERM or Ctrl-C first sends an `observation_failed` wake with
+`observation_error: interrupted`; the terminal wake follows after rearm. Both
+wakes are expected. Then rerun the original profile with the same `--key`. Once
+the old owner releases the OS lock, the rerun re-arms observation using the fixed
 installed authority, retains the job ID and retries notification. An exited
 observer needs only the same-key rerun. No new submission key is needed.
 

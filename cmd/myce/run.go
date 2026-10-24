@@ -42,7 +42,7 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 		return err
 	}
 	if *profile != "" {
-		return runProfile(ctx, *profile, f.Args(), *key, *notify, *config, *joining, *address, *token, out)
+		return runProfile(ctx, *profile, f.Args(), *key, *notify, *config, *joining, *address, *token, out, errOut)
 	}
 	explicitNotify := false
 	f.Visit(func(v *flag.Flag) {

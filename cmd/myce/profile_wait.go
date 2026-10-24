@@ -50,14 +50,14 @@ func notifierEnvironment() []string {
 	return env
 }
 
-func armProfileObserver(ctx context.Context, dir string, r *profileReceipt, cfg profileObserver, token string) error {
+func armProfileObserver(ctx context.Context, dir string, r *profileReceipt, cfg profileObserver, token string, errOut io.Writer) error {
 	lock, err := profileLock(filepath.Join(dir, "watch.lock"))
 	if err != nil {
 		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
 			return err
 		}
 		// An OS lock, not a PID file, proves there is exactly one live observer.
-		fmt.Fprintln(os.Stderr, "adopted existing watcher for receipt:", dir)
+		fmt.Fprintln(errOut, "adopted existing watcher for receipt:", dir)
 		return readProfileJSON(filepath.Join(dir, "receipt.json"), r)
 	}
 	defer lock.Close()
@@ -209,6 +209,8 @@ func observeProfile(ctx context.Context, c myce.Client, dir string, r profileRec
 			r.ObservationError = "timeout"
 		} else if errors.Is(ctx.Err(), context.Canceled) {
 			r.ObservationError = "interrupted"
+		} else if myce.IsTLSIdentityError(waitErr) {
+			r.ObservationError = "tls_identity"
 		}
 		notification.Status, notification.ObservationError = "observation_failed", r.ObservationError
 	} else {

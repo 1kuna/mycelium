@@ -114,7 +114,7 @@ func profileFailure(out io.Writer, r *profileReceipt, code int, reason string) e
 	return waitError(code, reason)
 }
 
-func runProfile(ctx context.Context, name string, args []string, key, notify, config, joining, address, token string, out io.Writer) error {
+func runProfile(ctx context.Context, name string, args []string, key, notify, config, joining, address, token string, out, errOut io.Writer) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return err
@@ -376,7 +376,7 @@ func runProfile(ctx context.Context, name string, args []string, key, notify, co
 		// Direct credentials cannot be reopened from an installed authority.
 		observerToken = c.Token
 	}
-	if err = armProfileObserver(ctx, dir, &r, observer, observerToken); err != nil {
+	if err = armProfileObserver(ctx, dir, &r, observer, observerToken, errOut); err != nil {
 		return profileFailure(out, &r, 74, "wakeup_not_armed: job retained; check notifier configuration and retry")
 	}
 	return json.NewEncoder(out).Encode(r)

@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net/url"
@@ -66,9 +67,30 @@ func waitStatusPause(ctx context.Context, delay time.Duration) error {
 	}
 }
 
+// IsTLSIdentityError identifies permanent TLS identity/handshake failures without
+// exposing certificate, endpoint or credential diagnostics to notifications.
+func IsTLSIdentityError(err error) bool {
+	var verification *tls.CertificateVerificationError
+	var record tls.RecordHeaderError
+	if errors.Is(err, errJoiningIdentity) || errors.As(err, &verification) || errors.As(err, &record) {
+		return true
+	}
+	// Go also emits unexported TLS alert/handshake errors. Network timeouts
+	// (including net/http's TLS handshake timeout) retain their retry policy.
+	for cause := err; cause != nil; cause = errors.Unwrap(cause) {
+		if strings.HasPrefix(cause.Error(), "tls:") || strings.HasPrefix(cause.Error(), "remote error: tls:") {
+			return true
+		}
+	}
+	return false
+}
+
 // RetryStatusRead shares the CLI wait command's idempotent-read policy.
-// Authentication/other permanent HTTP errors must still return immediately.
+// Authentication, TLS identity and other permanent HTTP errors return immediately.
 func RetryStatusRead(err error) bool {
+	if IsTLSIdentityError(err) {
+		return false
+	}
 	var httpErr *HTTPError
 	return err != nil && (!errors.As(err, &httpErr) || httpErr.Status >= 500 || httpErr.Status == 408 || httpErr.Status == 429)
 }
