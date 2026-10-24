@@ -142,7 +142,9 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 			n.HostMemoryGB = max(n.HostMemoryGB, floor.HostMemoryGB)
 			source += "; OOM retry floor"
 		}
-		if !n.cpuOnly() && m.TotalMemoryGB > 0 {
+		// An OOM floor is a retained requirement, not an exploratory budget.
+		// Keep it above smaller cards so qualification rejects impossible retries.
+		if j.MemoryOOMFloor == nil && !n.cpuOnly() && m.TotalMemoryGB > 0 {
 			n.MemoryGB = min(n.MemoryGB, m.TotalMemoryGB)
 		}
 	}
