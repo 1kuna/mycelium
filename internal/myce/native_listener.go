@@ -1,14 +1,16 @@
 package myce
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 )
 
 var errNativeForeignListener = errors.New("native readiness listener belongs to another process")
@@ -17,6 +19,10 @@ var errNativeForeignListener = errors.New("native readiness listener belongs to 
 // released. Verify every listener belongs to this attempt's group; unknown
 // ownership fails preparation. No port registry or application nonce protocol.
 func verifyNativeListener(port string, group int) error {
+	return verifyNativeListenerContext(context.Background(), port, group)
+}
+
+func verifyNativeListenerContext(ctx context.Context, port string, group int) error {
 	members, err := workerGroupMembers(group)
 	if err != nil {
 		return err
@@ -31,28 +37,34 @@ func verifyNativeListener(port string, group int) error {
 	if runtime.GOOS != "darwin" {
 		return errors.New("native listener ownership unsupported on this OS")
 	}
-	out, err := exec.Command("lsof", "-nP", "-a", "-iTCP:"+port, "-sTCP:LISTEN", "-Fpn").Output()
-	if err != nil {
-		return fmt.Errorf("native listener ownership: %w", err)
-	}
-	found := false
-	for _, line := range strings.Split(string(out), "\n") {
-		if strings.HasPrefix(line, "p") {
-			pid, e := strconv.Atoi(line[1:])
-			if e != nil || !owned[pid] {
-				return errNativeForeignListener
-			}
-			found = true
-		}
-		if strings.HasPrefix(line, "n") && line != "n127.0.0.1:"+port {
-			return errors.New("native sidecar must listen on 127.0.0.1")
-		}
-	}
-	if !found {
-		return errors.New("native readiness listener ownership unconfirmed")
-	}
-	return nil
+	return verifyNativeListenerBounded(ctx, func() error { return verifyDarwinNativeListener(port, owned) })
 }
+
+func verifyNativeListenerBounded(ctx context.Context, probe func() error) error {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	// A kernel call can remain uninterruptible. Readiness must not wait for
+	// it; the buffered channel lets the probe finish asynchronously afterward.
+	go func() { done <- probe() }()
+	select {
+	case err := <-done:
+		if ctx.Err() != nil {
+			return runtimeErrorFor("readiness", ctx.Err())
+		}
+		return err
+	case <-ctx.Done():
+		go func() {
+			select {
+			case <-done:
+			case <-time.After(time.Second):
+				log.Print("native listener probe still blocked one second after cancellation; awaiting completion asynchronously")
+			}
+		}()
+		return runtimeErrorFor("readiness", ctx.Err())
+	}
+}
+
 func verifyLinuxNativeListener(port string, owned map[int]bool) error {
 	number, _ := strconv.Atoi(port)
 	suffix := fmt.Sprintf(":%04X", number)
