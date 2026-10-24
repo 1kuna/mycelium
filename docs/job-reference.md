@@ -721,7 +721,7 @@ OpenAI client defaults: [operator configuration](guide-servers.md#shared-entries
 Native main and sidecars share one Linux attempt cgroup. Sidecar `memory_gb`
 and main `run.memory_gb` are optional additional member caps; omit them to let
 members share the job envelope. Learn sampled whole-group anon + kernel + shmem
-from `memory.stat`, excluding reclaimable file cache; `memory.peak` remains a
+from `memory.stat` every 200 ms, excluding reclaimable file cache; `memory.peak` remains a
 total-memory diagnostic. macOS remains admission-only and does not promise a kernel
 RAM ceiling. OOM is a job failure with an explicit resource-limit cause.
 
@@ -753,10 +753,15 @@ accounting or XPU DRM resident VRAM deduplicated by device/client on Linux.
 Unavailable counters remain unknown, including unsupported Metal per-attempt
 counters. Until Spark accounting is qualified, measured unified host/GPU peaks
 are added with 25% headroom; an unknown device peak prevents an exact estimate.
-the existing driver/system reserve and attempt slack still apply. Measurements
+GPU queries run every five seconds; empty rows and transient timeouts retry,
+while unsupported or unparseable accounting stops sampling. When only host
+memory was measured, the source names the retained GPU recipe default.
+The existing driver/system reserve and attempt slack still apply. Measurements
 never override an existing attempt or opt an explicitly declared job into auto.
 Resumed attempts may use accepted estimates but do not train them. Auto OOMs
 retain a lower-bound envelope for one retry with 25% more room; the same host is
-eligible when it has room. Shared-envelope Docker attempts end on worker-unit
-stop. Verified stopped members with a vanished parent release custody with
-unknown memory/cause and supply no learning data.
+eligible when it has room. OOM floors persist for later jobs as well, including
+after the final retry. Shared-envelope Docker attempts end on worker-unit stop.
+Verified stopped members with a vanished parent release custody with unknown
+memory/cause and supply no learning data. A surviving parent's post-exit reading
+cannot train an estimate when the running sampler was lost during restart.

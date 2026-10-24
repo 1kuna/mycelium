@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"encoding/csv"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -125,61 +126,91 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job) func() *AttemptMem
 		return func() *AttemptMemoryPeak { return nil }
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
 	peak := a.peak()
-	deviceSupported := estimateFeedingAttempt(j) && !j.Spec.Needs.cpuOnly() && (w.Machine.GPU == "cuda" || w.Machine.GPU == "xpu")
+	var mu sync.Mutex
+	var samplers sync.WaitGroup
+	record := func(sample *AttemptMemoryPeak) {
+		mu.Lock()
+		peak = sampledMemoryPeak(peak, sample)
+		mu.Unlock()
+	}
+	samplers.Add(1)
 	go func() {
-		defer close(done)
-		// Avoid a per-process nvidia-smi probe twice a second on production.
-		tick := time.NewTicker(5 * time.Second)
-		defer tick.Stop()
+		defer samplers.Done()
+		// Resident memory can spike and disappear before process exit. Keep
+		// cheap cgroup reads independent of the slower driver probe cadence.
+		hostTick := time.NewTicker(200 * time.Millisecond)
+		defer hostTick.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-tick.C:
-				peak = sampledMemoryPeak(peak, a.peak())
-				if !deviceSupported {
-					continue
-				}
-				ids := map[int]bool{}
-				if a.processIDs(ids) != nil || len(ids) == 0 {
-					continue
-				}
-				gb, ok := w.attemptDeviceMemory(ctx, ids)
-				if !ok {
-					deviceSupported = false
-					continue
-				}
-				peak = sampledMemoryPeak(peak, &AttemptMemoryPeak{DeviceGB: &gb})
+			case <-hostTick.C:
+				record(a.peak())
 			}
 		}
 	}()
+	if estimateFeedingAttempt(j) && !j.Spec.Needs.cpuOnly() && (w.Machine.GPU == "cuda" || w.Machine.GPU == "xpu") {
+		samplers.Add(1)
+		go func() {
+			defer samplers.Done()
+			deviceTick := time.NewTicker(5 * time.Second)
+			defer deviceTick.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-deviceTick.C:
+					ids := map[int]bool{}
+					if a.processIDs(ids) != nil || len(ids) == 0 {
+						continue
+					}
+					gb, err := w.attemptDeviceMemory(ctx, ids)
+					if err != nil {
+						if !errors.Is(err, errAttemptMemoryPending) {
+							return
+						}
+						continue
+					}
+					record(&AttemptMemoryPeak{DeviceGB: &gb})
+				}
+			}
+		}()
+	}
 	var once sync.Once
 	return func() *AttemptMemoryPeak {
 		once.Do(func() {
 			cancel()
-			<-done
-			peak = sampledMemoryPeak(peak, a.peak())
+			samplers.Wait()
+			record(a.peak())
 		})
 		return peak
 	}
 }
 
-func (w Worker) attemptDeviceMemory(ctx context.Context, ids map[int]bool) (float64, bool) {
+var (
+	errAttemptMemoryPending     = errors.New("attempt GPU memory not available yet")
+	errAttemptMemoryUnsupported = errors.New("attempt GPU memory accounting unsupported")
+)
+
+func (w Worker) attemptDeviceMemory(ctx context.Context, ids map[int]bool) (float64, error) {
 	if w.Machine.GPU == "cuda" {
 		selector := w.Machine.Device
 		if w.selectedDevice != nil {
 			selector = w.selectedDevice.Selector
 		}
 		if !strings.HasPrefix(selector, "GPU-") {
-			return 0, false
+			return 0, errAttemptMemoryUnsupported
 		}
 		probe, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
 		b, err := exec.CommandContext(probe, "nvidia-smi", "--query-compute-apps=gpu_uuid,pid,used_gpu_memory", "--format=csv,noheader,nounits").Output()
 		if err != nil {
-			return 0, false
+			if errors.Is(err, exec.ErrNotFound) {
+				return 0, errAttemptMemoryUnsupported
+			}
+			// Driver startup and query timeouts do not establish lack of support.
+			return 0, errAttemptMemoryPending
 		}
 		return cudaAttemptMemory(b, selector, ids)
 	}
@@ -195,8 +226,11 @@ func (w Worker) attemptDeviceMemory(ctx context.Context, ids map[int]bool) (floa
 				if err != nil {
 					continue
 				}
-				key, gb, ok := drmAttemptMemory(b, w.selectedDevice.pciAddress)
-				if ok {
+				key, gb, err := drmAttemptMemory(b, w.selectedDevice.pciAddress)
+				if errors.Is(err, errAttemptMemoryUnsupported) {
+					return 0, err
+				}
+				if err == nil {
 					clients[key] = max(clients[key], gb)
 				}
 			}
@@ -205,42 +239,48 @@ func (w Worker) attemptDeviceMemory(ctx context.Context, ids map[int]bool) (floa
 		for _, gb := range clients {
 			total += gb
 		}
-		return total, len(clients) > 0
+		if len(clients) == 0 {
+			return 0, errAttemptMemoryPending
+		}
+		return total, nil
 	}
-	return 0, false
+	return 0, errAttemptMemoryUnsupported
 }
 
-func cudaAttemptMemory(b []byte, selector string, ids map[int]bool) (float64, bool) {
+func cudaAttemptMemory(b []byte, selector string, ids map[int]bool) (float64, error) {
 	rows, err := csv.NewReader(strings.NewReader(string(b))).ReadAll()
 	if err != nil {
-		return 0, false
+		return 0, errAttemptMemoryUnsupported
 	}
 	total, found := 0.0, false
 	for _, row := range rows {
 		if len(row) != 3 {
-			return 0, false
+			return 0, errAttemptMemoryUnsupported
 		}
 		if strings.TrimSpace(row[0]) != selector {
 			continue
 		}
 		pid, err := strconv.Atoi(strings.TrimSpace(row[1]))
 		if err != nil {
-			return 0, false
+			return 0, errAttemptMemoryUnsupported
 		}
 		if !ids[pid] {
 			continue
 		}
 		mib, err := strconv.ParseFloat(strings.TrimSpace(row[2]), 64)
 		if err != nil || !validMemoryValue(mib) {
-			return 0, false
+			return 0, errAttemptMemoryUnsupported
 		}
 		total += mib / 1024
 		found = true
 	}
-	return total, found
+	if !found {
+		return 0, errAttemptMemoryPending
+	}
+	return total, nil
 }
 
-func drmAttemptMemory(b []byte, pci string) (string, float64, bool) {
+func drmAttemptMemory(b []byte, pci string) (string, float64, error) {
 	client, pdev := "", ""
 	total := 0.0
 	found := false
@@ -259,16 +299,19 @@ func drmAttemptMemory(b []byte, pci string) (string, float64, bool) {
 			if strings.HasPrefix(key, "drm-resident-vram") {
 				f := strings.Fields(val)
 				if len(f) != 2 || f[1] != "KiB" {
-					return "", 0, false
+					return "", 0, errAttemptMemoryUnsupported
 				}
 				n, err := strconv.ParseUint(f[0], 10, 64)
 				if err != nil {
-					return "", 0, false
+					return "", 0, errAttemptMemoryUnsupported
 				}
 				total += float64(n) / (1 << 20)
 				found = true
 			}
 		}
 	}
-	return pdev + "/" + client, total, found && client != "" && normalizePCIAddress(pdev) == normalizePCIAddress(pci)
+	if !found || client == "" || normalizePCIAddress(pdev) != normalizePCIAddress(pci) {
+		return "", 0, errAttemptMemoryPending
+	}
+	return pdev + "/" + client, total, nil
 }

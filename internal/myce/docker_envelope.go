@@ -93,6 +93,11 @@ func (d *dockerAttempt) releaseEnvelope() error {
 		d.state.OOMKilled = true
 	}
 	d.state.MemoryPeak = a.peak()
+	if d.memoryWorker == nil && d.state.MemoryPeak != nil {
+		// Recovery has no running sampler's resident high-water mark. The
+		// surviving cgroup only supplies a post-exit reading, not a job peak.
+		d.state.MemoryPeak.Constrained = true
+	}
 	d.state.EnvelopeReleased = true
 	if err := d.saveLocked(); err != nil {
 		return err

@@ -209,10 +209,19 @@ func (p WorkObservation) Summary() string {
 
 // Failure does not learn speed, but exact-attempt OOM evidence forbids its point.
 func (q *Queue) recordWorkOOM(j *Job, r Result) {
-	if j.Timing == nil || j.Timing.Key == nil {
+	var key *ObservationKey
+	if j.Timing != nil {
+		key = j.Timing.Key
+	}
+	if key == nil && j.Spec.Needs.Memory == "auto" {
+		provenance := *j
+		provenance.Attempt = 0 // Resumed OOMs still establish a conservative floor.
+		key, _ = q.workObservationKey(&provenance)
+	}
+	if key == nil {
 		return
 	}
-	k := *j.Timing.Key
+	k := *key
 	id := identityHash(k)
 	p := q.s.WorkObservations[id]
 	p.Key = k
@@ -222,6 +231,22 @@ func (q *Queue) recordWorkOOM(j *Job, r Result) {
 	p.Attempt = r.Attempt
 	p.Machine = r.Machine
 	p.Session = r.Session
+	if j.Spec.Needs.Memory == "auto" {
+		// OOM cannot provide a complete peak, but it can raise a lower bound.
+		// Persist it independently of this job's retry so later jobs recover
+		// from an underestimated accepted sample too, including a final OOM.
+		host, device := j.Spec.Needs.HostMemoryGB*1.25, j.Spec.Needs.MemoryGB*1.25
+		p.MemoryPeak = mergeMemoryPeaks(p.MemoryPeak, &AttemptMemoryPeak{HostGB: &host, DeviceGB: &device})
+		p.MemoryRecordedAt = q.clock.Now()
+		p.MemoryConfiguration = memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
+		p.MemoryLayout = "separate"
+		if m := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices); m != nil && m.UnifiedMemory && !j.Spec.Needs.cpuOnly() {
+			p.MemoryLayout = "unified"
+		}
+		if p.Source != "accepted work" {
+			p.Source = "OOM lower bound"
+		}
+	}
 	if q.s.WorkObservations == nil {
 		q.s.WorkObservations = map[string]WorkObservation{}
 	}

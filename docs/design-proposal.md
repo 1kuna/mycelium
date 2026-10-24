@@ -1861,18 +1861,26 @@ amendment.
 Reservations are frozen per attempt; stale, failed, OOM, constrained and resumed
 observations cannot shrink an envelope. Resumed jobs can use prior accepted
 estimates. An auto OOM retains its envelope as a lower bound for one retry with
-25% more room, on the same host if it fits; performance Forbidden points do not
-discard earlier accepted memory evidence. Member caps are optional; explicit caps
+25% more room, on the same host if it fits. Persist that bound in work history,
+including a final OOM, so later jobs cannot keep using an underestimate;
+it can only raise an estimate and never learns successful speed. Performance
+Forbidden points do not discard earlier accepted memory evidence. Member caps are optional; explicit caps
 remain supported and fit the job envelope.
 
 Linux native attempts use their existing shared parent cgroup for main and all
 sidecars, bounded/zero swap and a job OOM cause. Learn the sampled whole-parent
-anon + kernel + shmem peak from `memory.stat`; retain `memory.peak` only as a
-total-memory diagnostic, since it includes reclaimable page cache. OOM, swap-out
+anon + kernel + shmem peak from `memory.stat` every 200 ms; retain `memory.peak`
+only as a total-memory diagnostic, since it includes reclaimable page cache. OOM, swap-out
 or anonymous reclaim mark measurements constrained; file-cache reclaim does not.
 Fully capped native groups preserve member-level OOM attribution and kill mode.
 GPU samples belong to the attempt's process inventory where supported, only for
 auto or estimate-feeding attempts, every five seconds and until unsupported.
+Independent host and GPU sampler goroutines max-track under one small mutex;
+cancellation joins both before the final read, so a slow GPU query cannot
+delay host sampling. The GPU query keeps its existing two-second timeout.
+Empty process rows, uninitialised counters and transient query timeouts retry;
+missing tools or unparseable counters stop GPU sampling. A retained recipe GPU
+default is named as such beside a measured host source.
 Missing counters stay unknown. Until a Spark qualification establishes whether
 CUDA allocations overlap memcg charges, add measured host and GPU peaks on
 unified hosts. An unknown device peak cannot supply an exact unified estimate.
@@ -1886,5 +1894,7 @@ reason and native/capped alternatives. Existing capped Docker groups retain
 member-only enforcement. Shared-envelope Docker attempts end when the worker
 unit stops. If daemon inventory proves all members stopped but the delegated
 parent vanished, release custody with unknown peak and cause, without learning.
+If the parent survives but the running sampler was lost, its post-exit resident
+reading also cannot train an estimate, even when main had already succeeded.
 Docker driver and Linux/GPU enforcement qualification
 are deployment checks, separate from laptop proof; the B70 driver is unverified.

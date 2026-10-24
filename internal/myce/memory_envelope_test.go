@@ -216,6 +216,19 @@ func TestMemoryEnvelopeUnifiedHeadroom(t *testing.T) {
 	if peak, _, _ := q.memoryEstimate(assigned, &m); peak != nil {
 		t.Fatal("unified exact estimate used an unknown device peak")
 	}
+	// On a separate-memory target, a host estimate is still useful, but the
+	// retained GPU declaration must not masquerade as a measured GPU peak.
+	separateTarget := allocationMachine(q.s.Machines[m.ID], assigned.AllocatedDevices)
+	separateTarget.UnifiedMemory = false
+	for id, point := range q.s.WorkObservations {
+		point.MemoryLayout = "separate"
+		q.s.WorkObservations[id] = point
+	}
+	probe := *assigned
+	probe.State = "queued"
+	if candidate := q.memoryCandidate(&probe, separateTarget); !strings.Contains(candidate.MemoryEnvelope.Source, "GPU recipe default") {
+		t.Fatalf("unknown GPU peak has misleading source: %+v", candidate.MemoryEnvelope)
+	}
 	s.Priority = "production"
 	productionID := submit(t, q, s)
 	production := assignedJob(machineCheck(t, q, m))

@@ -58,6 +58,7 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 		peak, factor, label := q.memoryEstimate(j, m)
 		switch {
 		case peak != nil:
+			source = label
 			host := *peak.HostGB * factor
 			if !n.cpuOnly() {
 				if peak.DeviceGB != nil && validRate(*peak.DeviceGB) && validRate(*peak.DeviceGB*factor) {
@@ -65,12 +66,14 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 				} else if label == "cross-machine estimate" {
 					// Unknown device counters cannot become zero reservations.
 					n.MemoryGB = max(n.MemoryGB, host)
+					source += "; GPU recipe default with host estimate floor"
+				} else {
+					source += "; GPU recipe default"
 				}
 			}
 			// Until unified memcg/GPU overlap is qualified on Spark, count both.
 			// hostNeed already adds this GPU reservation to the host vector.
 			n.HostMemoryGB = max(minimumHostMemoryGB, host)
-			source = label
 		case j.MemoryFallback != nil && j.MemoryFallback.valid():
 			n.MemoryGB, n.HostMemoryGB = j.MemoryFallback.MemoryGB, j.MemoryFallback.HostMemoryGB
 			if n.cpuOnly() {
@@ -174,6 +177,7 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) (*AttemptMemoryPeak, float64,
 		return nil, 0, ""
 	}
 	var exact, family, other *AttemptMemoryPeak
+	exactOOM := false
 	configuration := memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
 	layout := "separate"
 	if m.UnifiedMemory && !j.Spec.Needs.cpuOnly() {
@@ -182,7 +186,8 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) (*AttemptMemoryPeak, float64,
 	for _, point := range q.s.WorkObservations {
 		k, p := point.Key, point.MemoryPeak
 		age := q.clock.Now().Sub(point.MemoryRecordedAt)
-		if !sameMemoryWork(point, *key, configuration) || point.Source != "accepted work" || point.Samples <= 0 || point.StaleReason != "" || point.MemoryRecordedAt.IsZero() || age < 0 || age > workCurveMaxAge || p == nil || p.Constrained || p.HostGB == nil || !validRate(*p.HostGB) || !validRate(*p.HostGB*2.5) {
+		usable := point.Source == "accepted work" && point.Samples > 0 || point.Source == "OOM lower bound"
+		if !sameMemoryWork(point, *key, configuration) || !usable || point.StaleReason != "" || point.MemoryRecordedAt.IsZero() || age < 0 || age > workCurveMaxAge || p == nil || p.Constrained || p.HostGB == nil || !validRate(*p.HostGB) || !validRate(*p.HostGB*2.5) {
 			continue
 		}
 		if m.UnifiedMemory && !j.Spec.Needs.cpuOnly() && (p.DeviceGB == nil || !validRate(*p.DeviceGB)) {
@@ -191,6 +196,7 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) (*AttemptMemoryPeak, float64,
 		sameFamily := k.Target == key.Target && point.MemoryLayout != "" && point.MemoryLayout == layout
 		if sameFamily && k.Host == key.Host && k.Component == key.Component && k.Hardware == key.Hardware && k.Fingerprint == key.Fingerprint && k.Environment == key.Environment {
 			exact = mergeMemoryPeaks(exact, p)
+			exactOOM = exactOOM || point.Forbidden
 		} else if sameFamily {
 			family = mergeMemoryPeaks(family, p)
 		} else {
@@ -198,6 +204,9 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) (*AttemptMemoryPeak, float64,
 		}
 	}
 	if exact != nil {
+		if exactOOM {
+			return exact, 1.25, "OOM lower bound × 1.25"
+		}
 		return exact, 1.25, "accepted peak × 1.25"
 	}
 	if family != nil {
