@@ -134,6 +134,12 @@ terminal**, configured with `queue --file-retention DURATION` (positive, default
 Job records, keyed answers and file identities remain, with `files_expired: true`.
 Increasing the window cannot restore files that already expired.
 
+Publishing a blob or successfully HEAD-verifying it refreshes its on-disk mtime.
+Collection gives those bytes a one-minute publication grace, allowing upload
+chunks and the following submit/complete request to establish a new reference.
+That grace survives queue restarts; it does not extend an expired job's result
+recovery contract. Expired reusable worker-cache copies remain evictable.
+
 A blob remains while another job within its window or any non-terminal job needs
 it, or any checkpoint generation, catalog model, extension or environment refers
 to it. Checkpoints and catalog storage are outside this collector. Open downloads

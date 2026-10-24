@@ -84,6 +84,7 @@ type Queue struct {
 	fileReferenceRevision  uint64
 	fileLifecycle          sync.RWMutex // Reference publication versus unlink; acquire before q.mu.
 	fileRetention          time.Duration
+	fileCollectionDeferred bool // q.mu; warn once per contiguous deferred streak.
 	files                  *FileStore
 	fileCheckpoints        bool
 	submitVerificationSlot chan struct{}

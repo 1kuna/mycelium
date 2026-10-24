@@ -77,8 +77,18 @@ recorded finish time receive a full window from first observation.
 Reclamation preserves blobs needed by non-terminal or unexpired jobs, any
 checkpoint generation, catalog models, extensions and environments. It runs from
 `Queue.Tick`, with filesystem work outside the queue lock. There is no job-record
-pruning, result acknowledgment or early release command. Unreferenced and
-interrupted uploads are not swept in this round; inspect them explicitly before
+pruning, result acknowledgment or early release command. Each pass checks at most
+64 unprotected candidate blobs and records completed reclamation on the existing
+job, so later passes do not revisit those hashes. Publication and successful blob
+HEAD verification refresh a durable mtime; collection waits one minute after that
+refresh to cover the 30-second file-request timeout plus several maintenance
+intervals before submit/complete. A new committed reference then keeps the bytes.
+This publication grace does not extend an expired job's result-recovery window.
+
+Storage removal/stat failures are logged and retried on the next pass; they do
+not stop queue maintenance. A busy publication/verification fence logs
+`file retention deferred` once per consecutive streak of skipped passes.
+Unreferenced and interrupted uploads are not swept in this round; inspect them explicitly before
 any separately authorized cleanup. Protected data or abandoned uploads can still
 fill the configured store or disk and return HTTP 507. See [files](guide-files-v3.md).
 
