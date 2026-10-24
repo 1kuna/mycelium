@@ -19,8 +19,30 @@ an isolated working folder; extension/Docker/sidecar profiles are outside this
 MVP. `environment` selects an existing immutable catalog recipe; `{}` explicitly
 uses installed tools. The gate profile checks the installed toolchain before
 running. It declares two CPU cores, matches Go parallelism to that declaration,
-and uses a provisional 8 GiB host-memory declaration. Automatic memory remains
-#146 work; this value is not a measured whole-attempt peak.
+and retains an explicit 8 GiB host-memory declaration. That bootstrap value is
+not a measured whole-attempt peak. Profiles can instead opt into measured memory:
+
+```yaml
+needs:
+  cpu_cores: 2
+  memory: auto
+  platform: cpu
+```
+
+Without a prior peak or submitter hint, the first run explores using available
+host headroom. A successful solo run with an unconstrained host-memory peak
+teaches later comparable jobs. The same host uses the accepted peak with 25%
+headroom; estimates from another host use the existing larger margins. An OOM
+clears comparable memory peaks, and a subsequent successful exploration re-learns
+them. Explicit memory declarations keep their existing behavior.
+
+Memory comparability uses the project, profile YAML `name`, and a digest of the
+normalized command/configuration, including appended arguments, the check,
+environment and non-source inputs. The frozen source archive digest is excluded,
+so a new commit of the same suite can reuse its peak. Changing the command or
+configuration starts a separate memory class. These observations learn memory
+only, without throughput or timing curves. Plain commands outside the profile
+submission contract still require hints or explore on each run.
 
 Choose exactly one source:
 

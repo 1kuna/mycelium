@@ -83,7 +83,7 @@ type WorkTiming struct {
 }
 
 func (q *Queue) workObservationKey(j *Job) (*ObservationKey, string) {
-	if j.Spec.ExtensionCheck != nil || j.Spec.Workload == nil {
+	if j.Spec.ExtensionCheck != nil || j.Spec.Workload == nil && !profileMemoryWork(j.Spec) {
 		return nil, "workload/reference metadata unavailable"
 	}
 	if j.Spec.Resumable && j.Attempt > 1 {
@@ -96,18 +96,6 @@ func (q *Queue) workObservationKey(j *Job) (*ObservationKey, string) {
 	m := allocationMachine(owner, j.AllocatedDevices)
 	if j.Spec.Needs.cpuOnly() && owner.Devices != nil {
 		m = cpuMachineView(owner)
-	}
-	e := qualifiedExtension(j, m)
-	if e == nil || m.ExtensionFingerprint == "" {
-		return nil, "qualified reference unavailable"
-	}
-	v := e.variant(machineTarget(m))
-	if v == nil {
-		return nil, "variant reference unavailable"
-	}
-	ref, ok := v.References[j.Spec.workType()]
-	if !ok || ref.InputShape != j.Spec.Workload.InputShape {
-		return nil, "input shape has no matching reference"
 	}
 	component, hardware := "cpu", m.ExtensionFingerprint
 	if m.GPU != "cpu" {
@@ -128,7 +116,48 @@ func (q *Queue) workObservationKey(j *Job) (*ObservationKey, string) {
 	if a := machineAvailability(m); a != nil && !a.Available {
 		return nil, "owner availability withdrawn"
 	}
+	if profileMemoryWork(j.Spec) {
+		key, reason := referenceObservationKey(Extension{}, m, WorkReference{}, profileMemoryIdentity(j), j.Spec.Needs, j.Spec.Args, j.Spec.Program, component, hardware)
+		key.Environment = environmentKey(j, m)
+		return key, reason
+	}
+	e := qualifiedExtension(j, m)
+	if e == nil || m.ExtensionFingerprint == "" {
+		return nil, "qualified reference unavailable"
+	}
+	v := e.variant(machineTarget(m))
+	if v == nil {
+		return nil, "variant reference unavailable"
+	}
+	ref, ok := v.References[j.Spec.workType()]
+	if !ok || ref.InputShape != j.Spec.Workload.InputShape {
+		return nil, "input shape has no matching reference"
+	}
 	return referenceObservationKey(*e, m, ref, j.Spec.workType(), j.Spec.Needs, j.Spec.Args, j.Spec.Program, component, hardware)
+}
+
+// run --profile already supplies its YAML name, project, target requirement and
+// reserved source manifest entry. Ordinary commands have no comparable identity.
+func profileMemoryWork(s Spec) bool {
+	_, source := s.Files[".myce-source.tar"]
+	return !s.extensionJob() && s.RequireTarget && source && s.Name != "" && s.Project != ""
+}
+
+func profileMemoryIdentity(j *Job) string {
+	s := j.Spec
+	inputs := FileManifest{}
+	for name, ref := range s.Files {
+		if name != ".myce-source.tar" {
+			inputs[name] = ref
+		}
+	}
+	return "profile:" + identityHash(struct {
+		Project, Name, Configuration string
+		Run                          RunSpec
+		Environment                  Environment
+		Recipes                      map[string]EnvironmentRecipe
+		Inputs                       FileManifest
+	}{s.Project, s.Name, memoryConfiguration(s.Needs, s.Args, s.Program), s.Run, s.Environment, j.EnvironmentRecipes, inputs})
 }
 
 func referenceObservationKey(e Extension, m *Machine, ref WorkReference, work string, needs ResourceNeeds, args []string, program *Program, component, hardware string) (*ObservationKey, string) {
@@ -152,7 +181,7 @@ func referenceObservationKey(e Extension, m *Machine, ref WorkReference, work st
 }
 
 func (q *Queue) beginWorkTiming(j *Job) {
-	if j.Spec.Workload == nil {
+	if j.Spec.Workload == nil && !profileMemoryWork(j.Spec) {
 		return
 	}
 	placement := ""
@@ -162,7 +191,7 @@ func (q *Queue) beginWorkTiming(j *Job) {
 	key, reason := q.workObservationKey(j)
 	j.Timing = &WorkTiming{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: j.Machine, Session: j.Session, Key: key, Reason: reason}
 	j.Timing.PlacementReason = placement
-	if key != nil {
+	if key != nil && j.Spec.Workload != nil {
 		if old, ok := q.s.WorkObservations[identityHash(key)]; ok && old.StaleReason == "" && !old.Forbidden && q.clock.Now().Sub(old.RecordedAt) <= 30*24*time.Hour && validRate(old.Units) && validRate(old.Seconds) {
 			rate := old.Rate
 			if !validRate(rate) {
@@ -221,28 +250,32 @@ func (q *Queue) recordWorkObservation(j *Job, r Result) {
 		return
 	}
 	q.validateWorkTiming(j, q.hostObligations(t.Key.Host))
-	seconds := q.clock.Now().Sub(*j.StartedAt).Seconds()
-	if t.Reason != "" || !validRate(seconds) {
+	if t.Reason != "" {
 		return
 	}
-	t.ActualSeconds = &seconds
 	key := identityHash(t.Key)
 	old := q.s.WorkObservations[key]
-	units, elapsed := old.Units+j.Spec.Workload.Units, old.Seconds+seconds
-	if !validRate(units) || !validRate(elapsed) {
-		return
-	}
 	if q.s.WorkObservations == nil {
 		q.s.WorkObservations = map[string]WorkObservation{}
 	}
-	point := WorkObservation{Key: *t.Key, Samples: old.Samples + 1, Units: units, Seconds: elapsed,
+	point := WorkObservation{Key: *t.Key, Samples: old.Samples + 1,
 		RecordedAt: q.clock.Now(), Job: j.ID, Machine: r.Machine, Session: r.Session, Attempt: r.Attempt}
 	if old.StaleReason != "" {
 		old.Rate, old.LatencySeconds = 0, 0
 		old.MemoryPeak = nil
 	}
-	point.Rate = ewma(old.Rate, j.Spec.Workload.Units/seconds)
-	point.LatencySeconds = ewma(old.LatencySeconds, seconds)
+	if j.Spec.Workload != nil {
+		seconds := q.clock.Now().Sub(*j.StartedAt).Seconds()
+		point.Units, point.Seconds = old.Units+j.Spec.Workload.Units, old.Seconds+seconds
+		if !validRate(seconds) || !validRate(point.Units) || !validRate(point.Seconds) {
+			return
+		}
+		t.ActualSeconds = &seconds
+		point.Rate = ewma(old.Rate, j.Spec.Workload.Units/seconds)
+		point.LatencySeconds = ewma(old.LatencySeconds, seconds)
+	} else if r.MemoryPeak == nil || r.MemoryPeak.Constrained || r.MemoryPeak.HostGB == nil || !validRate(*r.MemoryPeak.HostGB) {
+		return // Plain profiles learn memory only, with the same solo custody fence.
+	}
 	point.HostMemoryGB, point.DeviceMemoryGB = old.HostMemoryGB, old.DeviceMemoryGB
 	point.IncrementalHostMemoryGB, point.IncrementalDeviceMemoryGB = old.IncrementalHostMemoryGB, old.IncrementalDeviceMemoryGB
 	point.Forbidden, point.Source = old.Forbidden, "accepted work"
