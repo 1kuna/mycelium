@@ -110,7 +110,8 @@ func TestFileRetention(t *testing.T) {
 	if err := c.HasFile(context.Background(), shared); err != nil {
 		t.Fatal(err)
 	}
-	clock.Advance(time.Hour)
+	// The HEAD above refreshes publication grace independently of the window.
+	clock.Advance(filePublicationGrace)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
@@ -253,6 +254,9 @@ func TestFileRetentionPublicationGrace(t *testing.T) {
 					if running == nil {
 						t.Fatal("no running attempt")
 					}
+					if err := q.Started(result(running, false)); err != nil {
+						t.Fatal(err)
+					}
 				}
 				if reuse == "publish" {
 					// Keep the old job's candidate pending while republishing bytes.
@@ -263,7 +267,13 @@ func TestFileRetentionPublicationGrace(t *testing.T) {
 				if err := c.UploadFile(context.Background(), path, a); err != nil {
 					t.Fatal(err)
 				}
-				clock.Advance(time.Second) // A maintenance tick between requests.
+				// The first file must survive hours spent uploading later files or
+				// waiting through a queue outage/deploy before submit/complete.
+				clock.Advance(6*time.Hour - time.Second)
+				if running != nil {
+					// Keep worker liveness independent of the file-publication gap.
+					check(t, q, machine("worker", "fake"), running)
+				}
 				if err := q.Tick(); err != nil {
 					t.Fatal(err)
 				}

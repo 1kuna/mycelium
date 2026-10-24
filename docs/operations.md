@@ -80,9 +80,10 @@ checkpoint generation, catalog models, extensions and environments. It runs from
 pruning, result acknowledgment or early release command. Each pass checks at most
 64 unprotected candidate blobs and records completed reclamation on the existing
 job, so later passes do not revisit those hashes. Publication and successful blob
-HEAD verification refresh a durable mtime; collection waits one minute after that
-refresh to cover the 30-second file-request timeout plus several maintenance
-intervals before submit/complete. A new committed reference then keeps the bytes.
+HEAD verification refresh a durable mtime; collection waits six hours after that
+refresh. This covers the gap from the first file through later multi-GB uploads,
+slow NAS, or a queue outage/deploy before submit/complete. Only refreshed blobs
+receive the grace; a new committed reference then keeps the bytes.
 This publication grace does not extend an expired job's result-recovery window.
 
 Storage removal/stat failures are logged and retried on the next pass; they do
