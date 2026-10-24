@@ -30,7 +30,12 @@ func main() {
 		os.Exit(exitCode(err))
 	}
 	if err := run(os.Args[1:]); err != nil {
-		log.Print(err)
+		var resultErr *ResultError
+		if errors.As(err, &resultErr) {
+			fmt.Fprintln(os.Stderr, err)
+		} else {
+			log.Print(err)
+		}
 		os.Exit(exitCode(err))
 	}
 }
@@ -151,7 +156,10 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	f := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	since := f.String("since", "7d", "usage lookback, up to 90d")
 	by := f.String("by", "project", "usage grouping: project or machine")
-	clientConfig := f.String("config", "", "installed config (default: installed worker, then queue)")
+	var clientConfig string
+	if args[0] == "status" || args[0] == "logs" {
+		f.StringVar(&clientConfig, "config", "", "installed config (default: installed worker, then queue)")
+	}
 	joiningFile := f.String("joining-file", env("MYCE_JOINING_FILE", ""), "privately supplied invitation (discovery plus saved address)")
 	discovery := f.Bool("discovery", true, "advertise a pinned TLS joining endpoint over DNS-SD")
 	discoveryListen := f.String("discovery-listen", "", "TLS joining listen address (default same interface as queue, automatic port)")
@@ -299,7 +307,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			}
 		})
 		var err error
-		client, err = runClient(*clientConfig, *joiningFile, endpoint, *token)
+		client, err = runClient(clientConfig, *joiningFile, endpoint, *token)
 		if err != nil {
 			return err
 		}

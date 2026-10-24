@@ -115,6 +115,12 @@ func TestInstalledClientDevResult(t *testing.T) {
 		}
 		return output, err
 	}
+	// Commands without installed-authority resolution must reject --config.
+	for _, name := range []string{"cancel", "join"} {
+		if output, err := command(name, "--config", config); err == nil || !strings.Contains(string(output), "flag provided but not defined: -config") {
+			t.Fatalf("%s silently accepted --config: %v %s", name, err, output)
+		}
+	}
 	for _, args := range [][]string{{"status"}, {"wait", j.ID}, {"logs", j.ID}, {"result", j.ID, "--out", filepath.Join(root, "result")}, {"file", "get", "--size-bytes", "15", j.OutputRefs["output"].SHA256, filepath.Join(root, "raw-output")}} {
 		if output, err := command(args...); err != nil {
 			t.Fatalf("%s: %v %s", args[0], err, output)
@@ -160,7 +166,7 @@ assert Path(sys.argv[2]).read_text() == "verified result"
 		if state == 4 {
 			code = "result_not_accepted"
 		}
-		if output, err := command("result", j.ID, "--out", dest); err == nil || !strings.Contains(string(output), code) {
+		if output, err := command("result", j.ID, "--out", dest); err == nil || !strings.HasPrefix(string(output), code+":") {
 			t.Fatalf("typed rejection %d: %v %s", state, err, output)
 		}
 		if _, err := os.Stat(filepath.Join(dest, "output")); !os.IsNotExist(err) {
