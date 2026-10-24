@@ -2,6 +2,8 @@
 
 Approved design, revised 2026-10-20 by the maintainer decisions in [#80](https://github.com/1kuna/mycelium/issues/80) and the machine-instance decision in [#100](https://github.com/1kuna/mycelium/issues/100). Queue maintenance, keyed submission, cancellation and installer contracts below are implemented. Package M is an approved amendment awaiting implementation and qualification. This is the only product spec; native qualification and deployment remain separate from laptop implementation evidence.
 
+Sanitized decision rationale and supersession: [decisions](DECISIONS.md). This design remains the only product spec.
+
 ## Why a redesign
 
 v1 tried to do too much at once and never thought about how people would use or test it. It was too heavy to run in production and too hard to test. Mycelium keeps one rule above all others: **every feature must be easy to use, and easy to test on a laptop with no GPU.** If a feature can't meet that bar, it waits.
