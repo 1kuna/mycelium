@@ -79,6 +79,22 @@ class Client:
             raise ValueError("timeout and poll_interval must be positive")
         self.timeout = timeout
         self.poll_interval = poll_interval
+        self._urlopen = urlopen
+
+    @classmethod
+    def from_installed(cls, config: str | Path | None = None, *,
+                       timeout: float = 10, poll_interval: float = 0.3) -> Client:
+        """Use the installed worker/queue authority without exporting credentials.
+
+        Reads worker config first, then queue config if no worker is installed.
+        A joining authority retains its certificate pin and refuses redirects.
+        Explicit Client(url, token) construction keeps its existing behavior.
+        """
+        from .installed import installed_authority
+        address, token, opener = installed_authority(config)
+        client = cls(address, token, timeout=timeout, poll_interval=poll_interval)
+        client._urlopen = opener
+        return client
 
     def _call(self, method: str, path: str, body: Any = None,
               *, timeout: float | None = None) -> Any:
@@ -86,7 +102,7 @@ class Client:
         request = Request(self.url + path, data=data, method=method, headers={
             "Authorization": "Bearer " + self.token, "Content-Type": "application/json"})
         try:
-            with urlopen(request, timeout=self.timeout if timeout is None else timeout) as response:
+            with self._urlopen(request, timeout=self.timeout if timeout is None else timeout) as response:
                 return json.load(response)
         except HTTPError as error:
             with error:
@@ -171,7 +187,7 @@ class Client:
         request = Request(self.url + path, data=data, method=method, headers={
             "Authorization": "Bearer " + self.token, **(headers or {})})
         try:
-            return urlopen(request, timeout=self.timeout)
+            return self._urlopen(request, timeout=self.timeout)
         except HTTPError as error:
             with error:
                 body = error.read(4096).decode("utf-8", errors="replace")

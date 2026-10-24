@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net/url"
 	"strings"
 	"time"
 
@@ -39,8 +38,7 @@ func waitError(code int, message string) error { return &exitError{code, errors.
 func waitCommand(ctx context.Context, args []string, out, errOut io.Writer) error {
 	f := flag.NewFlagSet("wait", flag.ContinueOnError)
 	f.SetOutput(errOut)
-	address := f.String("queue", env("MYCE_QUEUE", "http://127.0.0.1:7331"), "queue address")
-	token := f.String("token", "", "shared fleet token (prefer MYCE_TOKEN)")
+	authority := installedClientFlags(f)
 	receipt := f.String("receipt", "", "private profile receipt directory (managed detached observer)")
 	timeout := f.Duration("timeout", 0, "maximum wait duration; does not cancel jobs (default: unlimited)")
 	f.Usage = func() {
@@ -60,7 +58,7 @@ func waitCommand(ctx context.Context, args []string, out, errOut io.Writer) erro
 		if strings.HasPrefix(a, "-") {
 			flags = append(flags, a)
 			key := strings.TrimLeft(a, "-")
-			if (key == "queue" || key == "token" || key == "timeout" || key == "receipt") && i+1 < len(args) {
+			if (key == "queue" || key == "token" || key == "config" || key == "joining-file" || key == "timeout" || key == "receipt") && i+1 < len(args) {
 				i++
 				flags = append(flags, args[i])
 			}
@@ -89,17 +87,14 @@ func waitCommand(ctx context.Context, args []string, out, errOut io.Writer) erro
 	if explicitTimeout && *timeout <= 0 {
 		return waitError(2, "timeout must be positive")
 	}
-	if *token == "" {
-		*token = env("MYCE_TOKEN", "")
+	client, err := authority.client()
+	if err != nil {
+		return &exitError{2, err}
 	}
-	if *token == "" {
-		return waitError(2, "set MYCE_TOKEN to the shared fleet token")
+	if client.HTTP != nil {
+		defer client.HTTP.CloseIdleConnections()
 	}
-	u, err := url.Parse(*address)
-	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil {
-		return waitError(2, "queue must be an http(s) URL without credentials")
-	}
-	return waitJobs(ctx, myce.Client{URL: *address, Token: *token}, ids, *timeout, out, errOut, myce.RealClock{}, waitPause)
+	return waitJobs(ctx, client, ids, *timeout, out, errOut, myce.RealClock{}, waitPause)
 }
 
 func waitPause(ctx context.Context, d time.Duration) error {

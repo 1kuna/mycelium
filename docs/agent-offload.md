@@ -74,6 +74,44 @@ arming failed, `75` another local submission is preparing, and `78` no qualified
 target. Failures after intent persistence print the receipt as well as a typed
 stderr reason. An uncertain submit retains the key for safe recovery.
 
+## Installed client commands
+
+On an enrolled machine these commands read the installed worker config, or the
+installed queue config when no worker config exists. They retain the joining
+certificate pin; consumers do not read config files or handle credentials.
+Explicit `--queue` / `--token` and `MYCE_QUEUE` / `MYCE_TOKEN` keep working.
+`--config` and `--joining-file` remain available for explicit authority selection.
+
+```sh
+myce status
+myce wait JOB_ID
+myce logs JOB_ID
+myce logs JOB_ID --follow
+myce result JOB_ID --out ./accepted-results
+# For an explicitly supplied file identity (not accepted-result resolution):
+myce file get --size-bytes BYTE_COUNT SHA256 ./new-destination
+```
+
+`myce result` resolves the succeeded job's accepted output manifest and calls
+`DownloadResult` for every artifact. It verifies SHA-256 and byte count before
+publishing each local file. Failed/running/cancelled jobs are refused with
+`result_not_accepted`; failed downloads, including hash/size mismatches, report
+`result_download_failed`; an HTTP 410 reports `result_expired`. All exit nonzero.
+Existing destination files are replaced only after that artifact verifies.
+Result directories may contain earlier verified artifacts if a later one fails.
+
+```python
+from mycelium import Client
+
+client = Client.from_installed()
+job = client.wait("JOB_ID")
+client.download_result(job["id"], "result.json", "./accepted-results/result.json")
+```
+
+The Python library reads installed authority itself and retains the certificate
+pin. `Client(url=..., token=...)` keeps its existing explicit-credential behavior.
+Neither flow adds credentials to job environments; jobs never inherit `MYCE_TOKEN`.
+
 ## Completion notification
 
 Set `MYCE_NOTIFY` or pass `--notify /path/to/executable`. This is one local
