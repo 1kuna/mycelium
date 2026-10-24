@@ -291,8 +291,8 @@ func TestMemoryEnvelopeExploratoryFirstRun(t *testing.T) {
 	m.HostAvailableMemoryGB = 32 // This telemetry already excludes the host reserve.
 	first := check(t, q, m, nil).Job
 	data, _ := json.Marshal(first)
-	if first == nil || first.Spec.Needs.HostMemoryGB != 32 || !strings.Contains(string(data), "exploratory first run") {
-		t.Fatalf("no-hint first run must use available allowance: %+v; %s", first, job(t, q, j.ID).Reason)
+	if first == nil || first.Spec.Needs.HostMemoryGB != 31.875 || !strings.Contains(string(data), "exploratory first run") {
+		t.Fatalf("no-hint first run must leave launch drift headroom: %+v; %s", first, job(t, q, j.ID).Reason)
 	}
 	if err := q.Started(result(first, false)); err != nil {
 		t.Fatal(err)
@@ -348,6 +348,39 @@ func TestMemoryEnvelopeExploratoryLaunchWithRAMDrift(t *testing.T) {
 	err = w.checkHostRAM(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
 	if !errors.Is(err, errWorkerMemory) || !strings.Contains(err.Error(), "need "+strconv.FormatFloat(need, 'f', -1, 64)+" GiB, available "+strconv.FormatFloat(free, 'f', -1, 64)+" GiB") {
 		t.Fatalf("genuine shortage lacks exact values: %v", err)
+	}
+}
+
+func TestMemoryEnvelopeUnifiedExploratoryGPUDrift(t *testing.T) {
+	q, clock, m, s := unifiedAutoFixture(t, .25)
+	// Device room, rather than host headroom, limits the exploratory GPU share.
+	m.MemoryCeilingSlackGB = 0
+	m.Devices[0].BudgetGB, m.Devices[0].FreeMemoryGB = 59, 59
+	queued := submit(t, q, s)
+	j := assignedJob(machineCheck(t, q, m))
+	if j == nil || j.ID != queued.ID {
+		t.Fatalf("unified exploration not assigned: %s", job(t, q, queued.ID).Reason)
+	}
+	w := recoveryWorker(t)
+	w.Machine, w.Clock = *allocationMachine(&m, j.AllocatedDevices), clock
+	w.memoryCeilings = fakeCeilings(t)
+	w.HostMemorySource = func(context.Context) (float64, error) { return 100, nil }
+	w.MemorySource = func(context.Context) (float64, error) { return 59 - .0625, nil }
+	store, err := w.openStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.close()
+	// Exercise the real strict GPU launch check with a small plain payload.
+	payload := *j
+	payload.Spec = Spec{Run: RunSpec{Command: []string{"true"}}, Needs: j.Spec.Needs}
+	payload.Extensions, payload.Extension = nil, nil
+	p, err := w.start(store, payload)
+	if err != nil {
+		t.Fatalf("small GPU drift refused exploratory launch: %v", err)
+	}
+	if f := <-p.done; f.err != nil || !f.result.Success {
+		t.Fatalf("exploratory payload failed: %+v", f)
 	}
 }
 

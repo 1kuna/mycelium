@@ -25,6 +25,11 @@ type JobMemoryEnvelope struct {
 	Enforcement string  `json:"enforcement"`
 }
 
+// Snapshot-to-launch telemetry drift needs headroom even with ceiling slack off.
+func exploratoryDriftMarginGB(m *Machine) float64 {
+	return max(m.MemoryCeilingSlackGB, .125) // 128 MiB minimum.
+}
+
 func mergeMemoryPeaks(old, next *AttemptMemoryPeak) *AttemptMemoryPeak {
 	if next == nil || next.Constrained {
 		return old
@@ -120,6 +125,7 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 					n.MemoryGB = min(n.MemoryGB, m.TotalMemoryGB)
 				}
 				if m.UnifiedMemory {
+					n.MemoryGB = max(0, n.MemoryGB-exploratoryDriftMarginGB(m))
 					// Reserve member containment before filling the GPU share.
 					if host < hostFloor && refusal == "" {
 						refusal = fmt.Sprintf("exploratory first run needs %.3f GiB host member memory; %.3f GiB shared headroom available", hostFloor, host)
@@ -266,9 +272,9 @@ func (q *Queue) exploratoryMemory(j *Job, m *Machine) (float64, string) {
 		}
 	}
 	room = min(room, allowance)
-	// hostNeed adds one slack margin to the ceiling. Leave another unused
-	// for free-RAM drift between the inventory snapshot and the strict launch check.
-	slack := 2 * m.MemoryCeilingSlackGB
+	// hostNeed adds ceiling slack back. Leave the named drift margin unused
+	// between the inventory snapshot and the strict launch check.
+	slack := m.MemoryCeilingSlackGB + exploratoryDriftMarginGB(m)
 	if room < allowance/2 || room <= slack {
 		return 0, fmt.Sprintf("exploratory first run needs half the host allowance free (%.1f GiB available; %.1f GiB allowance)", room, allowance)
 	}
