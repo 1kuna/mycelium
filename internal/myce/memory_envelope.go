@@ -266,10 +266,13 @@ func (q *Queue) exploratoryMemory(j *Job, m *Machine) (float64, string) {
 		}
 	}
 	room = min(room, allowance)
-	if room < allowance/2 || room <= m.MemoryCeilingSlackGB {
+	// hostNeed adds one slack margin to the ceiling. Leave another unused
+	// for free-RAM drift between the inventory snapshot and the strict launch check.
+	slack := 2 * m.MemoryCeilingSlackGB
+	if room < allowance/2 || room <= slack {
 		return 0, fmt.Sprintf("exploratory first run needs half the host allowance free (%.1f GiB available; %.1f GiB allowance)", room, allowance)
 	}
-	return room - m.MemoryCeilingSlackGB, ""
+	return room - slack, ""
 }
 
 // Use the same candidates, policy and telemetry as dispatch. This diagnostic

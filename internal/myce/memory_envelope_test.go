@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -308,6 +309,45 @@ func TestMemoryEnvelopeExploratoryFirstRun(t *testing.T) {
 	data, _ = json.Marshal(next)
 	if next.Spec.Needs.HostMemoryGB != 2.5 || !strings.Contains(string(data), "accepted peak × 1.25") {
 		t.Fatalf("exploration did not become a measurement: %s", data)
+	}
+}
+
+func TestMemoryEnvelopeExploratoryLaunchWithRAMDrift(t *testing.T) {
+	q, clock := fixture(t)
+	m := cpuMachine("drift", "drift-host", "cpu", 8, 32)
+	m.HostMemoryBudgetGB, m.MemoryCeilingSlackGB = 64, .125
+	check(t, q, m, nil)
+	s := cpuSpec(1, 0)
+	s.Needs.Memory = "auto"
+	s.Run.Command = []string{"true"}
+	queued := submit(t, q, s)
+	j := check(t, q, m, nil).Job
+	if j == nil || j.ID != queued.ID || j.MemoryEnvelope.Source != "exploratory first run" {
+		t.Fatal("exploratory job did not dispatch", j)
+	}
+	w := recoveryWorker(t)
+	w.Machine, w.Clock = m, clock
+	w.memoryCeilings = fakeCeilings(t)
+	free := m.HostAvailableMemoryGB - .0625
+	w.HostMemorySource = func(context.Context) (float64, error) { return free, nil }
+	store, err := w.openStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.close()
+	p, err := w.start(store, *j)
+	if err != nil {
+		t.Fatalf("small RAM drift refused exploratory launch: %v", err)
+	}
+	if f := <-p.done; f.err != nil || !f.result.Success {
+		t.Fatalf("exploratory payload failed: %+v", f)
+	}
+	// Keep the check strict, and retain the exact values for a sub-MiB gap.
+	need := hostNeed(&m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
+	free = need - 1.0/(1<<20)
+	err = w.checkHostRAM(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
+	if !errors.Is(err, errWorkerMemory) || !strings.Contains(err.Error(), "need "+strconv.FormatFloat(need, 'f', -1, 64)+" GiB, available "+strconv.FormatFloat(free, 'f', -1, 64)+" GiB") {
+		t.Fatalf("genuine shortage lacks exact values: %v", err)
 	}
 }
 
