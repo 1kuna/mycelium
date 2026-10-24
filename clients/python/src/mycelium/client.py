@@ -200,7 +200,7 @@ class Client:
             with self._file_request("HEAD", "/api/files/blobs/" + ref["sha256"]):
                 return ref
         except APIError as error:
-            if error.status != 404:
+            if error.status not in (404, 410):
                 raise
         with self._file_request("HEAD", endpoint, headers=headers) as response:
             offset = int(response.headers["Upload-Offset"])

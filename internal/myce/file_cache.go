@@ -113,10 +113,10 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) error 
 			if e != nil {
 				return e
 			}
-			if e = fileResponse(res, 200); e != nil {
+			if e = fileResponse(res, 200); e != nil && !isResultExpired(e) {
 				return e
 			}
-		} else if e := c.Client.HasFile(ctx, FileRef{hash, v.size}); e != nil {
+		} else if e := c.Client.HasFile(ctx, FileRef{hash, v.size}); e != nil && !isResultExpired(e) {
 			return e
 		}
 		if err = os.Remove(filepath.Join(root, v.name)); err != nil {

@@ -108,6 +108,7 @@ type FileStore struct {
 	syncDir   func(string) error // Durability failure injection.
 	expired   func(string) bool
 	lifecycle *sync.RWMutex
+	clock     Clock
 }
 type FileConfig struct {
 	Checkpoints bool `json:"checkpoints"`
@@ -142,7 +143,7 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 			return err
 		}
 	}
-	s := &FileStore{root: root, limit: limit, syncDir: syncWorkerDir, expired: q.expiredBlob, lifecycle: &q.fileLifecycle}
+	s := &FileStore{root: root, limit: limit, syncDir: syncWorkerDir, expired: q.expiredBlob, lifecycle: &q.fileLifecycle, clock: q.clock}
 	fs := filestore.New(filepath.Join(root, "uploads"))
 	fs.DirModePerm = 0700
 	fs.FileModePerm = 0600
@@ -179,6 +180,20 @@ func (s *FileStore) blob(ref FileRef) string { return filepath.Join(s.root, "blo
 func (s *FileStore) verify(ctx context.Context, ref FileRef) error {
 	return verifyFile(ctx, s.blob(ref), ref)
 }
+
+// Publication/HEAD callers hold lifecycle.RLock. Refresh even deduplicated
+// bytes: they may be about to acquire a new job or attempt reference.
+func (s *FileStore) refreshBlob(path string) error {
+	now := s.clock.Now()
+	if err := os.Chtimes(path, now, now); err != nil {
+		return err
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	return errors.Join(f.Sync(), f.Close())
+}
 func (s *FileStore) publish(ctx context.Context, ref FileRef) error {
 	if err := ref.validate(); err != nil {
 		return err
@@ -198,6 +213,9 @@ func (s *FileStore) publish(ctx context.Context, ref FileRef) error {
 		return err
 	}
 	if err = s.verify(ctx, ref); err != nil {
+		return err
+	}
+	if err = s.refreshBlob(s.blob(ref)); err != nil {
 		return err
 	}
 	if err = s.syncDir(filepath.Join(s.root, "blobs")); err != nil {
@@ -250,6 +268,10 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.verify(r.Context(), ref) == nil {
+		if e := s.refreshBlob(s.blob(ref)); e != nil {
+			http.Error(w, "storage freshness unavailable", 503)
+			return
+		}
 		if e := s.syncDir(filepath.Join(s.root, "blobs")); e != nil {
 			http.Error(w, "storage durability unavailable", 503)
 			return
@@ -324,6 +346,12 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 	s.handler.ServeHTTP(w, r)
 }
 func (s *FileStore) serveBlob(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodHead {
+		// HEAD is upload deduplication authority. Fence verification and refresh
+		// together; GET needs only its open descriptor to survive collection.
+		s.lifecycle.RLock()
+		defer s.lifecycle.RUnlock()
+	}
 	hash := r.PathValue("hash")
 	if (FileRef{SHA256: hash}).validate() != nil {
 		http.Error(w, "invalid file", 400)
@@ -359,6 +387,12 @@ func (s *FileStore) serveBlob(w http.ResponseWriter, r *http.Request) {
 	if verifyErr != nil || n != st.Size() || hex.EncodeToString(h.Sum(nil)) != hash {
 		http.Error(w, "stored file corrupt", 500)
 		return
+	}
+	if r.Method == http.MethodHead {
+		if err = s.refreshBlob(path); err != nil {
+			http.Error(w, "file freshness unavailable", 503)
+			return
+		}
 	}
 	if err = s.syncDir(filepath.Join(s.root, "blobs")); err != nil {
 		http.Error(w, "file durability unavailable", 503)

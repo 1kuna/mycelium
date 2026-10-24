@@ -11,6 +11,31 @@ from mycelium import Client
 
 
 class ExtensionClientTests(unittest.TestCase):
+    def test_upload_republishes_expired_content(self):
+        client = Client(token="fixture")
+        body = b"republished input"
+        sha = hashlib.sha256(body).hexdigest()
+        blob = "/api/files/blobs/" + sha
+        upload = "/api/files/uploads/" + sha
+        calls = []
+
+        def request(method, endpoint, data=None, headers=None):
+            calls.append((method, endpoint))
+            if (method, endpoint) == ("HEAD", blob) and calls.count(("HEAD", blob)) == 1:
+                raise APIError(410, '{"code":"result_expired","error":"expired"}')
+            response = io.BytesIO()
+            response.headers = {"Upload-Offset": str(len(body) if method == "PATCH" else 0),
+                                "Upload-Length": str(len(body))}
+            return response
+
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder, "input")
+            source.write_bytes(body)
+            with patch.object(client, "_file_request", side_effect=request):
+                self.assertEqual(client.upload_file(source), {"sha256": sha, "size_bytes": len(body)})
+        self.assertEqual(calls, [("POST", "/api/files/uploads/"), ("HEAD", blob),
+                                 ("HEAD", upload), ("PATCH", upload), ("HEAD", blob)])
+
     def test_keyed_submit_wait_and_terminal_failure(self):
         client = Client(token="fixture")
         with self.assertRaisesRegex(ValueError, "submission_key"):

@@ -59,6 +59,10 @@ reports `result_expired` with exit 65, including for a receipt whose notificatio
 was already delivered. Open downloads finish, but a disconnected caller gets no
 extra grace beyond the window. Checkpoints and catalog storage remain protected.
 Abandoned uploads from profiles that never submitted are not automatically swept.
+Re-uploaded or HEAD-verified bytes receive a one-minute publication grace while
+the next submit/complete establishes its reference. This does not restore an
+expired job's result-recovery window. Reusable worker caches can evict expired
+copies, so expiry does not block future profile input downloads.
 
 Before any upload or submission, `.mycelium/receipts/` contains a synced, private
 receipt with frozen source/input hashes, argv and submission key. Gitignore this

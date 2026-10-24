@@ -621,6 +621,20 @@
         "null"
       ]
     },
+    "FileReclamation": {
+      "properties": {
+        "pending": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
     "FileRef": {
       "properties": {
         "sha256": {
@@ -816,6 +830,10 @@
             }
           },
           "type": "object",
+          "x-contract": "diagnostic"
+        },
+        "file_reclamation": {
+          "$ref": "#/$defs/FileReclamation",
           "x-contract": "diagnostic"
         },
         "file_transport": {

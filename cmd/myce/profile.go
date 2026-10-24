@@ -358,7 +358,7 @@ func runProfile(ctx context.Context, name string, args []string, key, notify, co
 	if r.Status == "succeeded" || r.Status == "failed" || r.Status == "cancelled" {
 		current, err := c.GetJob(ctx, r.JobID)
 		if err != nil {
-			return profileFailure(out, &r, 69, "queue_unavailable: retained job unavailable; intent retained")
+			return profileFailure(out, &r, 69, "queue_unavailable: retained job unavailable; terminal receipt retained")
 		}
 		r.Status, r.FilesExpired = current.State, current.FilesExpired
 		if r.FilesExpired {
