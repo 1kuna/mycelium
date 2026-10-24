@@ -102,6 +102,89 @@ func TestMemoryEnvelopeCPUOnGPUHostReusesAndRelearnsPeak(t *testing.T) {
 	start("accepted peak × 1.25", 10)
 }
 
+func TestMemoryEnvelopeProfileIdentityAndLifecycle(t *testing.T) {
+	q, clock := fixture(t)
+	if err := q.ConfigureFileStore(t.TempDir(), 1<<20, true); err != nil {
+		t.Fatal(err)
+	}
+	m := m3Machine()
+	m.CPUExtensionFingerprint = "profile-cpu-v1"
+	for i := range m.Devices {
+		m.Devices[i].ReserveMemoryGB, m.Devices[i].BudgetGB = 1, 7
+	}
+	machineCheck(t, q, m)
+	s := cpuSpec(1, 0)
+	s.Name, s.Project, s.RequireTarget, s.Needs.Memory = "gate-full", "synthetic", true, "auto"
+	s.Targets = []ExecutionTarget{{OS: "linux", Arch: "amd64", Platform: "cpu"}}
+	s.Run.Command = []string{"sh", "-ec", "tar -xf .myce-source.tar\nbash scripts/gate.sh full\ntest -f result"}
+	setSource := func(data string) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "source")
+		if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+		ref, err := IdentifyFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(q.files.blob(ref), []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+		s.Files = FileManifest{".myce-source.tar": ref}
+	}
+	start := func(source string, hostGB float64) *Job {
+		t.Helper()
+		queued := submit(t, q, s)
+		j := assignedJob(machineCheck(t, q, m))
+		if j == nil || j.ID != queued.ID {
+			t.Fatalf("profile not assigned: %+v", job(t, q, queued.ID))
+		}
+		if j.MemoryEnvelope.Source != source || hostGB > 0 && j.Spec.Needs.HostMemoryGB != hostGB {
+			t.Fatalf("wrong profile estimate: %+v", j.MemoryEnvelope)
+		}
+		if err := q.Started(result(j, false)); err != nil {
+			t.Fatal(err)
+		}
+		return j
+	}
+	complete := func(j *Job, peak float64) {
+		t.Helper()
+		clock.Advance(time.Second)
+		r := result(j, true)
+		r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak}
+		if err := q.Complete(r); err != nil {
+			t.Fatal(err)
+		}
+		if timing := q.s.Jobs[j.ID].Timing; timing != nil && (timing.PredictedSeconds != nil || timing.ActualSeconds != nil) {
+			t.Fatalf("plain profile learned timing: %+v", timing)
+		}
+	}
+	setSource("commit one")
+	complete(start("exploratory first run", 0), 2)
+	complete(start("accepted peak × 1.25", 2.5), 2)
+	setSource("commit two")
+	oom := start("accepted peak × 1.25", 2.5)
+	r := result(oom, false)
+	r.OutOfMemory = true
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Cancel(oom.ID); err != nil {
+		t.Fatal(err)
+	}
+	complete(start("exploratory first run", 0), 4)
+	complete(start("accepted peak × 1.25", 5), 4)
+	s.Run.Command = []string{"sh", "-ec", "tar -xf .myce-source.tar\nbash scripts/other-suite.sh"}
+	complete(start("exploratory first run", 0), 1)
+	for _, point := range q.s.WorkObservations {
+		if point.StaleReason != "" || point.Rate != 0 || point.Seconds != 0 || point.Units != 0 || point.LatencySeconds != 0 {
+			t.Fatalf("profile memory observation contains stale/timing data: %+v", point)
+		}
+	}
+	s.Needs.Memory, s.Needs.HostMemoryGB = "", 3
+	complete(start("declared", 3), 1)
+}
+
 func TestMemoryEnvelopeCrossMachineEstimate(t *testing.T) {
 	q, clock, m, s := observationFixture(t)
 	first := startObservation(t, q, m, s)

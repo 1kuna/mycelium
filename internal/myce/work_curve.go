@@ -3,6 +3,7 @@ package myce
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -102,6 +103,10 @@ func (q *Queue) invalidateWorkCurves() {
 					continue
 				}
 				reason = "recipe or reference changed"
+				if strings.HasPrefix(p.Key.Work, "profile:") {
+					reason = profileMemoryStaleReason(p, m, q.clock.Now())
+					continue
+				}
 				for _, e := range q.s.Extensions {
 					if e.Digest != p.Key.ExtensionDigest {
 						continue
@@ -116,6 +121,29 @@ func (q *Queue) invalidateWorkCurves() {
 			q.s.WorkObservations[id] = p
 		}
 	}
+}
+
+func profileMemoryStaleReason(p WorkObservation, m *Machine, now time.Time) string {
+	if m.ExtensionFingerprint != p.Key.Fingerprint {
+		return "driver or backend fingerprint changed"
+	}
+	if m.GPU != "cpu" {
+		for _, d := range m.Devices {
+			if d.ID == m.Device && d.Identity != p.Key.Hardware {
+				return "hardware changed"
+			}
+		}
+	}
+	if machineTarget(m) != p.Key.Target {
+		return "environment or target changed"
+	}
+	if observationAllowance(m) != p.Key.Allowance {
+		return "resource allowance or power mode changed"
+	}
+	if now.Sub(p.RecordedAt) > workCurveMaxAge {
+		return "measurement older than 30 days"
+	}
+	return ""
 }
 
 // Only exact, started benchmark cleanup acknowledgements publish reference points.
