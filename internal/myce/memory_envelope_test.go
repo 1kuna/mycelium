@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -109,6 +110,8 @@ func TestMemoryEnvelopeProfileIdentityAndLifecycle(t *testing.T) {
 	}
 	m := m3Machine()
 	m.CPUExtensionFingerprint = "profile-cpu-v1"
+	m.MemoryEnforcement = "memory ceilings enforced (cgroup v2)"
+	m.HostMemoryBudgetGB, m.MemoryCeilingSlackGB = 16, 0.1
 	for i := range m.Devices {
 		m.Devices[i].ReserveMemoryGB, m.Devices[i].BudgetGB = 1, 7
 	}
@@ -135,6 +138,9 @@ func TestMemoryEnvelopeProfileIdentityAndLifecycle(t *testing.T) {
 	start := func(source string, hostGB float64) *Job {
 		t.Helper()
 		queued := submit(t, q, s)
+		if queued.State != "queued" {
+			t.Fatal("profile did not queue", queued.State)
+		}
 		j := assignedJob(machineCheck(t, q, m))
 		if j == nil || j.ID != queued.ID {
 			t.Fatalf("profile not assigned: %+v", job(t, q, queued.ID))
@@ -160,7 +166,15 @@ func TestMemoryEnvelopeProfileIdentityAndLifecycle(t *testing.T) {
 		}
 	}
 	setSource("commit one")
-	complete(start("exploratory first run", 0), 2)
+	first := start("exploratory first run", 0)
+	busy := submit(t, q, s)
+	if busy.State != "queued" || assignedJob(machineCheck(t, q, m, first)) != nil {
+		t.Fatal("busy auto profile must queue without dispatching", busy)
+	}
+	if err := q.Cancel(busy.ID); err != nil {
+		t.Fatal(err)
+	}
+	complete(first, 2)
 	complete(start("accepted peak × 1.25", 2.5), 2)
 	setSource("commit two")
 	oom := start("accepted peak × 1.25", 2.5)
@@ -183,6 +197,22 @@ func TestMemoryEnvelopeProfileIdentityAndLifecycle(t *testing.T) {
 	}
 	s.Needs.Memory, s.Needs.HostMemoryGB = "", 3
 	complete(start("declared", 3), 1)
+	// A first run can fit while its learned peak plus safety margin cannot.
+	s.Needs.Memory, s.Needs.HostMemoryGB = "auto", 0
+	s.Run.Command = []string{"sh", "-ec", "bash scripts/memory-heavy-suite.sh"}
+	complete(start("exploratory first run", 0), 13)
+	for _, mode := range []string{"auto", ""} {
+		s.Needs.Memory = mode
+		s.Needs.HostMemoryGB = 17
+		if mode == "auto" {
+			s.Needs.HostMemoryGB = 0 // The rejection must come from the learned peak.
+		}
+		_, err := q.Submit(s)
+		var api *HTTPError
+		if !errors.As(err, &api) || api.Code != "no_qualified_target" {
+			t.Fatalf("oversized %q memory must retain exit-78 rejection: %v", mode, err)
+		}
+	}
 }
 
 func TestMemoryEnvelopeCrossMachineEstimate(t *testing.T) {
