@@ -1803,3 +1803,33 @@ environment or allowance changes retain evidence with a stale reason and prevent
 rate reuse; 30-day-old points also become stale. JSON, CLI and HTML status expose
 rates, latency, incremental/high-water memory, samples and stale/forbidden reasons.
 Native mixed-load curves and fleet acceptance require separate authorization.
+
+## Completion-aware placement (slice 3, #107; approved 2026-10-24)
+
+The orchestrator approves this slice under Zach's delegated design authority,
+following the [research build plan](research/benchmark-batch-placement.md#incremental-build-plan).
+Rank qualified extension commands using a common completion estimate: declared
+workload units divided by the exact comparable serial measured rate, plus cold
+environment setup, model copy and input-file transfer costs. Reuse the existing
+setup/copy estimates; input transfers require measured network throughput.
+Missing, stale, forbidden, resumed or incompatible evidence remains unknown.
+Unknown estimates retain the existing placement decision exactly, including
+legacy scalar benchmark ordering. Comparable measured candidates precede unknown
+ones; distinct reference groups and equal estimates have deterministic ordering.
+
+Eligibility precedes ranking. Existing resource and learned memory floors,
+platform preferences, owner policy, tiers, fairness, project caps, holds and
+checkpoint/cleanup fences remain authoritative. Reuse the existing victim
+selection and minimize stop count/lost-work cost before completion ranking.
+Only currently admissible alternatives can defer dispatch; estimates create no
+reservations and never wait for a busy fast host. Independent command concurrency
+stays one. Freeze the chosen measured estimate's reason for JSON/CLI/HTML status.
+All time comparisons use the injected Clock; ranking does no I/O.
+
+Scope clarification from the orchestrator: model calls use the shared estimate
+seam but remain unknown until an explicit model/reference binding is designed.
+Their routing, configured limits and victim selection remain exactly as today;
+learned call caps are deferred with that binding to slice 4. Extension command
+sweep concurrency does not qualify a model server for concurrent calls. The
+future #145 quality-tolerance filter belongs at the existing qualified-variant
+eligibility boundary, before completion ranking; no quality policy is added here.

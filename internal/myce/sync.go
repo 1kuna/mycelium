@@ -266,6 +266,9 @@ func (q *Queue) placementBetter(j *Job, a, b *Machine) bool {
 			return ap
 		}
 	}
+	if better, known := q.completionBetter(j, a, b); known {
+		return better
+	}
 	if modelLoaded(j, a) != modelLoaded(j, b) {
 		return modelLoaded(j, a)
 	}

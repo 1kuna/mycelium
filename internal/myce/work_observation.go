@@ -67,6 +67,7 @@ type WorkObservation struct {
 }
 
 type WorkTiming struct {
+	PlacementReason  string          `json:"placement_reason,omitempty"`
 	Execution        Execution       `json:"execution"`
 	Machine          string          `json:"machine"`
 	Session          string          `json:"session"`
@@ -153,8 +154,13 @@ func (q *Queue) beginWorkTiming(j *Job) {
 	if j.Spec.Workload == nil {
 		return
 	}
+	placement := ""
+	if j.Timing != nil {
+		placement = j.Timing.PlacementReason
+	}
 	key, reason := q.workObservationKey(j)
 	j.Timing = &WorkTiming{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: j.Machine, Session: j.Session, Key: key, Reason: reason}
+	j.Timing.PlacementReason = placement
 	if key != nil {
 		if old, ok := q.s.WorkObservations[identityHash(key)]; ok && old.StaleReason == "" && !old.Forbidden && q.clock.Now().Sub(old.RecordedAt) <= 30*24*time.Hour && validRate(old.Units) && validRate(old.Seconds) {
 			rate := old.Rate
@@ -262,6 +268,9 @@ func JobTiming(j *Job) string {
 	text := "prediction " + prediction + "; actual " + actual
 	if t.Reason != "" {
 		text += "; " + t.Reason
+	}
+	if t.PlacementReason != "" {
+		text += "; " + t.PlacementReason
 	}
 	return text
 }

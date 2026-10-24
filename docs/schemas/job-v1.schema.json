@@ -1566,6 +1566,9 @@
         "machine": {
           "type": "string"
         },
+        "placement_reason": {
+          "type": "string"
+        },
         "predicted_seconds": {
           "type": "number"
         },

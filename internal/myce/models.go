@@ -521,7 +521,7 @@ func (q *Queue) maintainModels() {
 			case s == nil || s.State == "failed" && s.RetryAt != nil && !now.Before(*s.RetryAt):
 				p = q.roomPlan(callJob(c), m, false)
 			}
-			if p != nil && p.cheaper(best) {
+			if p != nil && q.completionPlanBetter(callJob(c), p, best) {
 				best = p
 			}
 		}
@@ -1156,7 +1156,7 @@ func (q *Queue) makeBatchRoom(j *Job, planned, handled map[string]bool) string {
 		if winner == nil || winner.ID != j.ID {
 			continue
 		}
-		if p := q.roomPlan(winner, m, true); p != nil && p.cheaper(best) {
+		if p := q.roomPlan(winner, m, true); p != nil && q.completionPlanBetter(winner, p, best) {
 			best, selected = p, winner
 		}
 	}

@@ -1844,6 +1844,7 @@ func (q *Queue) workerHasOtherAttempt(machine, session, job string) bool {
 
 // assign persists the exact target before delivering it through either wire form.
 func (q *Queue) assign(j *Job, m *Machine) Job {
+	estimate, measured := q.estimateCompletion(j, m)
 	// The planner returns a target-specific copy. Persist its exact
 	// reservation on the live attempt before charging any resources.
 	selected := j
@@ -1884,6 +1885,9 @@ func (q *Queue) assign(j *Job, m *Machine) Job {
 	j.Copies = append(j.Copies, Copy{AllocatedDevices: slices.Clone(j.AllocatedDevices), Machine: m.ID, Session: m.Session, Attempt: j.Attempt, Extension: j.Extension, ReleaseReason: "awaiting_release"})
 	j.Session = m.Session
 	j.Reason = ""
+	if measured {
+		j.Timing = &WorkTiming{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: m.ID, Session: m.Session, PlacementReason: estimate.reason()}
+	}
 	q.refreshHostMemory()
 	return cloneJob(j)
 }
