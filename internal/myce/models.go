@@ -470,8 +470,11 @@ func (q *Queue) maintainModels() {
 	}
 	for {
 		var c *ModelCall
+		candidates := map[string]*candidateSet{}
 		for _, m := range q.plannerMachines() {
-			winner := q.candidate(m, attempted)
+			set := q.candidates(m)
+			candidates[targetKey(m)] = set
+			winner := set.pick(attempted)
 			if winner == nil || q.calls[winner.ID] == nil {
 				continue
 			}
@@ -484,7 +487,7 @@ func (q *Queue) maintainModels() {
 		}
 		machines := []*Machine{}
 		for _, m := range q.plannerMachines() {
-			if winner := q.candidate(m, attempted); winner != nil && winner.ID == c.ID {
+			if winner := candidates[targetKey(m)].pick(attempted); winner != nil && winner.ID == c.ID {
 				machines = append(machines, m)
 			}
 		}
@@ -589,13 +592,19 @@ func (q *Queue) maintainModels() {
 	// winner before selecting the next release through the shared planner.
 	planned := map[string]bool{}
 	handled := map[string]bool{}
+	candidates := map[string]*candidateSet{}
 	for {
 		var j *Job
 		for _, m := range q.plannerMachines() {
 			if planned[targetKey(m)] {
 				continue
 			}
-			winner := q.candidate(m, handled)
+			set := candidates[targetKey(m)]
+			if set == nil {
+				set = q.candidates(m)
+				candidates[targetKey(m)] = set
+			}
+			winner := set.pick(handled)
 			if winner != nil && q.calls[winner.ID] == nil && (j == nil || q.before(winner, j, m)) {
 				j = winner
 			}
@@ -603,8 +612,10 @@ func (q *Queue) maintainModels() {
 		if j == nil {
 			break
 		}
-		if machine := q.makeBatchRoom(j, planned, handled); machine != "" {
+		if machine := q.makeBatchRoom(j, planned, handled, candidates); machine != "" {
 			planned[machine] = true
+			// Applying releases changes eligibility and active fair-share usage.
+			candidates = map[string]*candidateSet{}
 		}
 		handled[j.ID] = true
 	}
@@ -1172,14 +1183,19 @@ func modelConfigHash(c ModelConfig) string {
 
 // Batch workers run one command at a time. Plan its release together with
 // resident models, rather than requiring either allocation alone to suffice.
-func (q *Queue) makeBatchRoom(j *Job, planned, handled map[string]bool) string {
+func (q *Queue) makeBatchRoom(j *Job, planned, handled map[string]bool, candidates map[string]*candidateSet) string {
 	var best *placementPlan
 	var selected *Job
 	for _, m := range q.plannerMachines() {
 		if !q.placementAllowed(j, m) || q.unreported[m.ID] || planned[targetKey(m)] {
 			continue
 		}
-		winner := q.candidate(m, handled)
+		set := candidates[targetKey(m)]
+		if set == nil {
+			set = q.candidates(m)
+			candidates[targetKey(m)] = set
+		}
+		winner := set.pick(handled)
 		if winner == nil || winner.ID != j.ID {
 			continue
 		}

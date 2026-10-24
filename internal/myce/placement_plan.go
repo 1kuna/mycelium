@@ -128,9 +128,11 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool) 
 		}
 		need, host = model.MemoryGB, model.HostMemoryGB
 	}
-	for _, o := range q.hostObligations(hostID(m)) {
-		l := o.Launch
-		if l == nil || l.Kind != "environment" || l.Machine != m.ID || l.Session != m.Session || !l.Started {
+	// Only preparation launches participate here. Enumerating every retained
+	// execution copies the entire backlog for each candidate's resource check.
+	for _, launch := range q.s.PreparationPlans {
+		l := &launch
+		if q.executionHost(l.Machine) != hostID(m) || l.Kind != "environment" || l.Machine != m.ID || l.Session != m.Session || !l.Started {
 			continue
 		}
 		if q.preparationShared(m, j, l) {

@@ -172,6 +172,10 @@ func (q *Queue) comparePriority(a, b Spec) int {
 	return q.priorityMatch(a).Index - q.priorityMatch(b).Index
 }
 func (q *Queue) before(a, b *Job, m *Machine) bool {
+	return q.beforeWithFair(a, b, m, q.fairScore, q.fairActive)
+}
+
+func (q *Queue) beforeWithFair(a, b *Job, m *Machine, score func(*Job, *Machine) float64, active func(*Job) float64) bool {
 	if n := q.comparePriority(a.Spec, b.Spec); n != 0 {
 		return n < 0
 	}
@@ -180,11 +184,11 @@ func (q *Queue) before(a, b *Job, m *Machine) bool {
 		return !a.Spec.Needs.cpuOnly()
 	}
 	if a.Spec.Project != b.Spec.Project && fairResourceFamily(a.Spec) == fairResourceFamily(b.Spec) {
-		x, y := q.fairScore(a, m), q.fairScore(b, m)
+		x, y := score(a, m), score(b, m)
 		if math.Abs(x-y) > 1e-6 {
 			return x < y
 		}
-		x, y = q.fairActive(a), q.fairActive(b)
+		x, y = active(a), active(b)
 		if math.Abs(x-y) > 1e-6 {
 			return x < y
 		}

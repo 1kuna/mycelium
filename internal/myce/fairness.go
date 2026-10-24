@@ -249,46 +249,7 @@ func (q *Queue) batchResourcesFit(j *Job, m *Machine) bool {
 // status. Exclusions enumerate later candidates without changing the competing
 // projects used to calculate their deficits.
 func (q *Queue) candidate(m *Machine, excluded map[string]bool) *Job {
-	// Fair score is constant within a project on this worker. Compare each
-	// project's best ordinary candidate instead of rescanning for every queued job.
-	byProject := map[string]*Job{}
-	for _, j := range q.s.Jobs {
-		if excluded[j.ID] {
-			continue
-		}
-		if j := q.batchCandidate(j, m); j != nil {
-			old := byProject[j.Spec.Project]
-			if old == nil || q.before(j, old, m) {
-				byProject[j.Spec.Project] = j
-			}
-		}
-	}
-	for _, c := range q.calls {
-		if excluded[c.ID] || !q.callCanUse(m, c) {
-			continue
-		}
-		j := callJob(c)
-		j.State = "queued"
-		j.Spec.Name = "model call: " + c.Model
-		old := byProject[j.Spec.Project]
-		if old == nil || q.before(j, old, m) {
-			byProject[j.Spec.Project] = j
-		}
-	}
-	projects := make([]string, 0, len(byProject))
-	for p := range byProject {
-		projects = append(projects, p)
-	}
-	slices.Sort(projects)
-	var best *Job
-	for _, p := range projects {
-		j := byProject[p]
-		if best == nil || q.before(j, best, m) {
-			best = j
-		}
-	}
-
-	return best
+	return q.candidates(m).pick(excluded)
 }
 func (q *Queue) pick(m *Machine) *Job {
 	best := q.candidate(m, nil)
@@ -451,6 +412,10 @@ func (q *Queue) fairScore(j *Job, m *Machine) float64 {
 			projects[c.Project] = true
 		}
 	}
+	return q.fairScoreProjects(j, projects)
+}
+
+func (q *Queue) fairScoreProjects(j *Job, projects map[string]bool) float64 {
 	total, weights, largest := 0.0, 0.0, 1.0
 	for p := range projects {
 		largest = max(largest, q.weight(p))
