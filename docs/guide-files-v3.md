@@ -55,6 +55,8 @@ project or home folder. Inputs are copied into a private working folder before
 running. Programs cannot mutate shared cached blobs. Plain commands can also
 use `files` with relative command arguments and declared outputs; stored inputs
 cannot be combined with a workdir, Docker or NAS input mappings.
+A NAS-mode job declaring any stored `files` returns all its outputs through the
+file store rather than the worker's `--job-file-root` (`JobFileRoot`).
 
 For API/Python dict submissions, upload each file first with the file API or CLI
 and replace `inputs` with `files`:

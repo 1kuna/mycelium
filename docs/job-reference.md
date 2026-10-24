@@ -223,7 +223,9 @@ Flags belong before the positional argument except that `logs ID --follow`,
 
 `dev` also accepts listen/db/checkpoints, environments, models, and model catalog
 settings. Its root is local and created automatically. Custom dev catalogs must
-use the fake engine. `status`, `submit`, `logs`, `wait`, `cancel`, and `leave` use the API;
+use the fake engine. Explicit `myce dev --checkpoints X` selects NAS-mode
+checkpoints even with `--file-store`, matching the real queue.
+`status`, `submit`, `logs`, `wait`, `cancel`, and `leave` use the API;
 `leave` does not disable a service's automatic restart policy.
 
 `wait` prints each full ID, final state (`succeeded`, `failed`, `cancelled`),
