@@ -135,8 +135,9 @@ Job records, keyed answers and file identities remain, with `files_expired: true
 Increasing the window cannot restore files that already expired.
 
 Publishing a blob or successfully HEAD-verifying it refreshes its on-disk mtime.
-Collection gives those bytes a one-minute publication grace, allowing upload
-chunks and the following submit/complete request to establish a new reference.
+Collection gives those bytes a six-hour publication grace, covering the gap from
+the first file's refresh through later multi-GB uploads, slow NAS, or a queue
+outage/deploy before submit/complete establishes a new reference.
 That grace survives queue restarts; it does not extend an expired job's result
 recovery contract. Expired reusable worker-cache copies remain evictable.
 

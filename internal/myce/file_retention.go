@@ -10,10 +10,11 @@ import (
 
 const DefaultFileRetention = 7 * 24 * time.Hour
 
-// One minute covers the client's 30-second file request timeout plus multiple
-// one-second maintenance ticks between upload chunks and submit/complete. This
-// is a publication grace, not an extension of a terminal job's recovery window.
-const filePublicationGrace = time.Minute
+// Six hours covers the gap from the first file's publish/HEAD to submit or
+// complete: later multi-GB uploads, slow NAS, and a queue outage or deploy can
+// delay that reference for hours. Only refreshed bytes receive this publication
+// grace; it does not extend a terminal job's result-recovery window.
+const filePublicationGrace = 6 * time.Hour
 
 // Bound filesystem work while draining a large expiry backlog so maintenance
 // remains responsive. Durable per-job progress avoids repeating completed work.
