@@ -60,8 +60,9 @@ when shell expansion is needed.
 | `run.workdir` | Absent: worker's working directory | Existing working directory; use an absolute shared or consistently installed path |
 | `run.env` | Empty map | String environment overrides, merged with worker environment |
 | `needs.cpu_cores` | Default one | Admitted logical cores for the whole attempt, including sidecars; omit GPU selectors for CPU-only work |
-| `needs.memory_gb` | Required, finite and positive | Host RAM GiB for CPU-only work; GPU memory for GPU work |
-| `needs.host_memory_gb` | Absent / `0`: GPU-only admission on uncapped hosts | Additional host RAM in GiB, including runtime/activation peaks; capped hosts require a positive declaration; qualified Linux services enforce it plus worker slack |
+| `needs.memory_gb` | Finite and positive unless `memory: auto` | Host RAM GiB for CPU-only work; GPU memory for GPU work; optional hint with auto |
+| `needs.host_memory_gb` | Absent / `0`: GPU-only admission on uncapped hosts | Additional host RAM in GiB, including runtime/activation peaks; capped hosts require a positive resolved envelope; qualified Linux services enforce it plus worker slack |
+| `needs.memory` | Omitted: declared reservation | `auto`: local accepted peaks, cross-machine estimate, optional hint, or guarded exploratory first run; resolved once per attempt |
 | `needs.platform` | GPU work: required; CPU input: omitted or `cpu` | `[cuda]` shorthand, `{required: [cuda, xpu]}`, `{preferred: [metal]}`, or `any` / `{any: true}`; exactly one mode |
 | `needs.model` | Absent | Batch affinity hint; does not load a model |
 | `environment` | Absent | Catalog name, `{name: torch-cuda}`, or `{lock_file: /shared/project/requirements.txt, python: "3.12", platforms: [cuda]}`; never both name and lock file |
@@ -606,10 +607,9 @@ Without this field the managed container uses `--network none`.
 
 `run.docker_sidecars` is an optional ordered list with unique lowercase DNS
 `name` (1–63 letters/digits/hyphens; `main` is reserved), direct Docker `command`,
-positive `memory_gb`, optional `env`, optional `memory_swap`, and optional
-`readiness: {port, path, timeout}`. Main retains `run.command` and declares
-positive `run.docker_memory_gb`. Sidecars require this main declaration and the
-private network. The worker starts sidecars in order, awaits each configured
+optional positive `memory_gb`, optional `env`, optional `memory_swap`, and optional
+`readiness: {port, path, timeout}`. Main retains `run.command` and may declare
+`run.docker_memory_gb`. Sidecars require the private network. The worker starts sidecars in order, awaits each configured
 HTTP GET readiness (2xx), then starts main. DNS aliases are the declared names
 and `main`. Jobs have no Docker socket and cannot launch containers themselves.
 Readiness probes use the inspected container IP from the worker, without proxies
@@ -617,12 +617,14 @@ or redirects. The worker must reach the daemon's bridge IP (normally local Linux
 Docker Desktop/remote bridge reachability is not assumed. Unreachable probes fail
 at their positive declared timeout, measured with the injected Clock.
 
-Each container's limit must individually fit `needs.host_memory_gb`; their sum
-may exceed it. Admission and the host budget charge the job's measured
-simultaneous need, rather than summing peaks at different times. Each Docker
-`--memory` limit is supplied and verified separately. This is not a shared kernel
-ceiling: overlapping peaks can exceed the declared simultaneous need, so qualify
-the actual workload overlap.
+Explicit member limits must individually fit `needs.host_memory_gb`; their sum
+may exceed it. A group omitting any member cap requires a shared local cgroup v2
+parent with a cgroupfs Docker daemon and delegated worker memory. Its aggregate
+parent limit includes all members and forbids swap; omitted member caps inherit
+that envelope. Unsupported daemons refuse explicitly with the native/capped
+alternatives. Existing capped groups retain **member-only** enforcement and
+their existing swap settings. The B70 Docker driver remains unverified until
+the separately authorized deployment check.
 
 Main's `run.docker_memory_swap` and sidecar `memory_swap` are optional GiB values
 for Docker's total RAM plus swap limit (`--memory-swap`), at least the container's
@@ -630,7 +632,8 @@ RAM limit. Equal to RAM explicitly forbids swap. When omitted, the worker leaves
 the flag unset: Docker's daemon default applies (normally RAM plus an equal swap
 allowance when host swap is available). Native `--memory-swap-max-bytes` still
 defaults to zero for native cgroups; it does not configure managed Docker.
-Swap-free Verso production is not qualified.
+These legacy member-only swap settings do not weaken a shared parent's zero
+swap limit. Swap-free Verso production requires separate native qualification.
 
 A Verso-shaped production batch (replace placeholders with real local digests
 and use measured memory/device mappings):
@@ -712,3 +715,41 @@ form, setup/check qualification and per-attempt output contract.
 
 Native server entry placement, `env`/`secret_env`, local model approval and
 OpenAI client defaults: [operator configuration](guide-servers.md#shared-entries-local-secrets-and-approved-model-folders).
+
+### Measured job envelopes
+
+Native main and sidecars share one Linux attempt cgroup. Sidecar `memory_gb`
+and main `run.memory_gb` are optional additional member caps; omit them to let
+members share the job envelope. `memory.peak` measures the whole group, not a
+sum of member peaks. macOS remains admission-only and does not promise a kernel
+RAM ceiling. OOM is a job failure with an explicit resource-limit cause.
+
+For qualified extension work, opt into automatic sizing. A submitter hint is
+optional:
+
+```yaml
+extension: example.stage@1
+needs: {memory: auto}
+workload: {input_shape: recording-v1, units: 1500}
+# Optional: size_hint: {host_memory_gb: 24, memory_gb: 8}
+```
+
+A matching variant reference enables accepted slice-1 observations. Prefer
+local peaks × 1.25, then another machine's peaks for the same recipe/work/shape
+× 1.25 × 1.5 for the same OS/architecture/accelerator/memory-layout family, or
+× 1.25 × 2 for another family. Cross-machine estimates are labelled in status.
+Unknown, older than 30 days, constrained, stale or failed measurements are
+excluded; main-process RSS alone is not a whole-attempt observation. Next use
+the optional hint. Otherwise an exploratory first run needs at least half the
+host allowance (physical RAM if uncapped) available and no protected attempt or
+model residency charging a quarter of it. Its envelope uses the available
+allowance after existing reserves, charges and attempt slack. Existing priority
+and release rules still apply. Accepted exploratory peaks train later runs.
+Input-size/duration scaling is a follow-up. The chosen
+source, reservation and enforcement mode appear in `memory_envelope` on the job.
+GPU counters are process-scoped sampled lower bounds, using NVIDIA compute-process
+accounting or XPU DRM resident VRAM deduplicated by device/client on Linux.
+Unavailable counters remain unknown, including unsupported Metal per-attempt
+counters. Unified host/GPU peaks overlap and use their maximum with 25% headroom;
+the existing driver/system reserve and attempt slack still apply. Measurements
+never override an existing attempt or opt an explicitly declared job into auto.

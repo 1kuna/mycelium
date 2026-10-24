@@ -198,6 +198,7 @@ func (q *Queue) batchCandidate(j *Job, m *Machine) *Job {
 	}
 	for _, candidate := range extensionJobs(j, m, true) {
 		q.applyLearnedNeeds(candidate)
+		candidate = q.memoryCandidate(candidate, m)
 		if q.capReasonFor(candidate, m) == "" && q.batchResourcesFit(candidate, m) {
 			// Leave accelerator workers for GPU work when CPU placement is free.
 			// Filter here so the same planner can consider the next candidate.
@@ -413,6 +414,9 @@ func (q *Queue) waitReason(j *Job) string {
 		if q.projectAllows(j.Spec.Project, m.ID) {
 			machines[targetKey(m)] = m
 		}
+	}
+	if reason := q.memoryWaitingReason(j, machines); reason != "" {
+		return reason
 	}
 	return waitingReason(j, machines, q.s.Jobs)
 }

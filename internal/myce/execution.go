@@ -34,6 +34,7 @@ type GPUSelection struct {
 }
 
 type ResourceNeeds struct {
+	Memory       string        `json:"memory,omitempty" yaml:"memory,omitempty"`
 	GPU          *GPUSelection `json:"gpu,omitempty" yaml:"gpu,omitempty"`
 	CPUCores     int           `json:"cpu_cores,omitempty" yaml:"cpu_cores,omitempty"`
 	MemoryGB     float64       `json:"memory_gb" yaml:"memory_gb"`
@@ -63,7 +64,7 @@ type NativeSidecar struct {
 	Command     []string          `json:"command" yaml:"command"`
 	Environment string            `json:"environment,omitempty" yaml:"environment,omitempty"`
 	Env         map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
-	MemoryGB    float64           `json:"memory_gb" yaml:"memory_gb"`
+	MemoryGB    float64           `json:"memory_gb,omitempty" yaml:"memory_gb,omitempty"`
 	Port        *int              `json:"port,omitempty" yaml:"port,omitempty"`
 	Readiness   *NativeReadiness  `json:"readiness,omitempty" yaml:"readiness,omitempty"`
 }
@@ -82,8 +83,8 @@ func (e ExecutionSpec) validate() error {
 	names := map[string]bool{}
 	for _, s := range e.Sidecars {
 		normalized := strings.ToUpper(strings.NewReplacer("-", "_", ".", "_").Replace(s.Name))
-		if s.Name == "main" || !extensionName.MatchString(s.Name) || names[normalized] || len(s.Command) == 0 || s.Command[0] == "" || !validMemoryValue(s.MemoryGB) || s.MemoryGB == 0 {
-			return errors.New("sidecars require unique names, commands and positive finite RAM caps")
+		if s.Name == "main" || !extensionName.MatchString(s.Name) || names[normalized] || len(s.Command) == 0 || s.Command[0] == "" || !validMemoryValue(s.MemoryGB) {
+			return errors.New("sidecars require unique names, commands and finite nonnegative RAM caps")
 		}
 		names[normalized] = true
 		if s.Port != nil && (*s.Port < 0 || *s.Port > 65535) {
@@ -217,11 +218,12 @@ func validateNativeMemory(s *Spec) error {
 		members = s.Execution.Sidecars
 		main = s.Execution.Main.MemoryGB
 	}
-	if !validMemoryValue(main) || main > s.Needs.HostMemoryGB {
+	deferredEnvelope := s.Needs.Memory == "auto" && s.Needs.HostMemoryGB == 0
+	if !validMemoryValue(main) || !deferredEnvelope && main > s.Needs.HostMemoryGB {
 		return errors.New("invalid main RAM cap or cap exceeds whole-job host memory reservation")
 	}
 	for _, m := range members {
-		if m.MemoryGB > s.Needs.HostMemoryGB {
+		if !deferredEnvelope && m.MemoryGB > s.Needs.HostMemoryGB {
 			return errors.New("sidecar RAM exceeds whole-job host memory reservation")
 		}
 	}

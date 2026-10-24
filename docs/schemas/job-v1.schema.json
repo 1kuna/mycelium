@@ -108,8 +108,7 @@
       },
       "required": [
         "name",
-        "command",
-        "memory_gb"
+        "command"
       ],
       "type": "object"
     },
@@ -862,6 +861,14 @@
           "$ref": "#/$defs/SizeHint",
           "x-contract": "diagnostic"
         },
+        "memory_envelope": {
+          "$ref": "#/$defs/JobMemoryEnvelope",
+          "x-contract": "diagnostic"
+        },
+        "memory_fallback": {
+          "$ref": "#/$defs/SizeHint",
+          "x-contract": "diagnostic"
+        },
         "oom_capacity": {
           "$ref": "#/$defs/SizeHint",
           "x-contract": "diagnostic"
@@ -1013,6 +1020,39 @@
       ],
       "type": "object"
     },
+    "JobMemoryEnvelope": {
+      "properties": {
+        "device": {
+          "type": "string"
+        },
+        "device_gb": {
+          "type": "number"
+        },
+        "enforcement": {
+          "type": "string"
+        },
+        "host_gb": {
+          "type": "number"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "refusal": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "source",
+        "machine",
+        "host_gb",
+        "device_gb",
+        "enforcement"
+      ],
+      "type": "object"
+    },
     "NativeReadiness": {
       "properties": {
         "path": {
@@ -1066,8 +1106,7 @@
       },
       "required": [
         "name",
-        "command",
-        "memory_gb"
+        "command"
       ],
       "type": "object"
     },
@@ -1101,6 +1140,12 @@
           "type": "string"
         },
         "host": {
+          "type": "string"
+        },
+        "memory_configuration": {
+          "type": "string"
+        },
+        "memory_layout": {
           "type": "string"
         },
         "reference": {
@@ -1266,6 +1311,9 @@
         },
         "host_memory_gb": {
           "type": "number"
+        },
+        "memory": {
+          "type": "string"
         },
         "memory_gb": {
           "type": "number"

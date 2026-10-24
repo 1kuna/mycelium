@@ -254,7 +254,7 @@ func (a *memoryAttempt) children() (*memoryCeilings, error) {
 	if err != nil || strings.TrimSpace(string(b)) != "" {
 		return nil, errors.New("memory parent must be empty before delegation")
 	}
-	for _, v := range []struct{ name, value string }{{"memory.oom.group", "0"}, {"cgroup.subtree_control", "+memory"}} {
+	for _, v := range []struct{ name, value string }{{"cgroup.subtree_control", "+memory"}} {
 		if err := a.fs.WriteFile(filepath.Join(a.path, v.name), []byte(v.value)); err != nil {
 			return nil, err
 		}

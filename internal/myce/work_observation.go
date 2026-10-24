@@ -27,43 +27,47 @@ func (r WorkReference) valid() bool {
 // ObservationKey contains no private input paths or application-specific data.
 // Configuration is a digest of resource reservations, allowances and power mode.
 type ObservationKey struct {
-	Allowance       string          `json:"allowance,omitempty"`
-	Work            string          `json:"work"`
-	ExtensionDigest string          `json:"extension_digest"`
-	Target          ExecutionTarget `json:"target"`
-	Reference       WorkReference   `json:"reference"`
-	Host            string          `json:"host"`
-	Component       string          `json:"component"`
-	Hardware        string          `json:"hardware"`
-	Fingerprint     string          `json:"fingerprint"`
-	Environment     string          `json:"environment"`
-	Configuration   string          `json:"configuration"`
-	Concurrency     int             `json:"concurrency"`
-	BatchSize       int             `json:"batch_size"`
+	MemoryLayout        string          `json:"memory_layout,omitempty"`
+	MemoryConfiguration string          `json:"memory_configuration,omitempty"`
+	Allowance           string          `json:"allowance,omitempty"`
+	Work                string          `json:"work"`
+	ExtensionDigest     string          `json:"extension_digest"`
+	Target              ExecutionTarget `json:"target"`
+	Reference           WorkReference   `json:"reference"`
+	Host                string          `json:"host"`
+	Component           string          `json:"component"`
+	Hardware            string          `json:"hardware"`
+	Fingerprint         string          `json:"fingerprint"`
+	Environment         string          `json:"environment"`
+	Configuration       string          `json:"configuration"`
+	Concurrency         int             `json:"concurrency"`
+	BatchSize           int             `json:"batch_size"`
 }
 
 // One bounded aggregate per comparable key, persisted as its own SQLite row.
 // Last execution is provenance, not the duplicate fence: Queue.complete owns it.
 type WorkObservation struct {
-	SampleID                  string         `json:"sample_id,omitempty"`
-	Rate                      float64        `json:"rate,omitempty"`
-	LatencySeconds            float64        `json:"latency_seconds,omitempty"`
-	HostMemoryGB              float64        `json:"host_memory_gb,omitempty"`
-	DeviceMemoryGB            float64        `json:"device_memory_gb,omitempty"`
-	IncrementalHostMemoryGB   float64        `json:"incremental_host_memory_gb,omitempty"`
-	IncrementalDeviceMemoryGB float64        `json:"incremental_device_memory_gb,omitempty"`
-	Forbidden                 bool           `json:"forbidden,omitempty"`
-	StaleReason               string         `json:"stale_reason,omitempty"`
-	Source                    string         `json:"source,omitempty"`
-	Key                       ObservationKey `json:"key"`
-	Samples                   int            `json:"samples"`
-	Units                     float64        `json:"units"`
-	Seconds                   float64        `json:"seconds"`
-	RecordedAt                time.Time      `json:"recorded_at"`
-	Job                       string         `json:"job"`
-	Machine                   string         `json:"machine"`
-	Session                   string         `json:"session"`
-	Attempt                   int            `json:"attempt"`
+	MemoryRecordedAt          time.Time          `json:"memory_recorded_at,omitempty"`
+	MemoryPeak                *AttemptMemoryPeak `json:"memory_peak,omitempty"`
+	SampleID                  string             `json:"sample_id,omitempty"`
+	Rate                      float64            `json:"rate,omitempty"`
+	LatencySeconds            float64            `json:"latency_seconds,omitempty"`
+	HostMemoryGB              float64            `json:"host_memory_gb,omitempty"`
+	DeviceMemoryGB            float64            `json:"device_memory_gb,omitempty"`
+	IncrementalHostMemoryGB   float64            `json:"incremental_host_memory_gb,omitempty"`
+	IncrementalDeviceMemoryGB float64            `json:"incremental_device_memory_gb,omitempty"`
+	Forbidden                 bool               `json:"forbidden,omitempty"`
+	StaleReason               string             `json:"stale_reason,omitempty"`
+	Source                    string             `json:"source,omitempty"`
+	Key                       ObservationKey     `json:"key"`
+	Samples                   int                `json:"samples"`
+	Units                     float64            `json:"units"`
+	Seconds                   float64            `json:"seconds"`
+	RecordedAt                time.Time          `json:"recorded_at"`
+	Job                       string             `json:"job"`
+	Machine                   string             `json:"machine"`
+	Session                   string             `json:"session"`
+	Attempt                   int                `json:"attempt"`
 }
 
 type WorkTiming struct {
@@ -145,7 +149,19 @@ func referenceObservationKey(e Extension, m *Machine, ref WorkReference, work st
 		Args    []string
 		Program *Program
 	}{args, program})})
-	return &ObservationKey{Work: work, ExtensionDigest: e.Digest, Target: machineTarget(m), Reference: ref,
+	memoryNeeds := needs
+	memoryNeeds.Memory, memoryNeeds.MemoryGB, memoryNeeds.HostMemoryGB = "", 0, 0
+	memoryNeeds.Platform, memoryNeeds.GPU = Platform{}, nil
+	memoryConfiguration := identityHash(struct {
+		Needs   ResourceNeeds
+		Args    []string
+		Program *Program
+	}{memoryNeeds, args, program})
+	layout := "separate"
+	if m.UnifiedMemory {
+		layout = "unified"
+	}
+	return &ObservationKey{MemoryLayout: layout, MemoryConfiguration: memoryConfiguration, Work: work, ExtensionDigest: e.Digest, Target: machineTarget(m), Reference: ref,
 		Host: hostID(m), Component: component, Hardware: hardware, Fingerprint: m.ExtensionFingerprint,
 		Environment: extensionEnvironmentIdentity(e, m), Allowance: observationAllowance(m), Configuration: configuration, Concurrency: 1, BatchSize: 1}, ""
 }
@@ -238,6 +254,7 @@ func (q *Queue) recordWorkObservation(j *Job, r Result) {
 		RecordedAt: q.clock.Now(), Job: j.ID, Machine: r.Machine, Session: r.Session, Attempt: r.Attempt}
 	if old.StaleReason != "" {
 		old.Rate, old.LatencySeconds = 0, 0
+		old.MemoryPeak = nil
 	}
 	point.Rate = ewma(old.Rate, j.Spec.Workload.Units/seconds)
 	point.LatencySeconds = ewma(old.LatencySeconds, seconds)
@@ -245,6 +262,11 @@ func (q *Queue) recordWorkObservation(j *Job, r Result) {
 	point.IncrementalHostMemoryGB, point.IncrementalDeviceMemoryGB = old.IncrementalHostMemoryGB, old.IncrementalDeviceMemoryGB
 	point.Forbidden, point.Source = old.Forbidden, "accepted work"
 	point.SampleID = old.SampleID
+	point.MemoryPeak = mergeMemoryPeaks(old.MemoryPeak, r.MemoryPeak)
+	point.MemoryRecordedAt = old.MemoryRecordedAt
+	if r.MemoryPeak != nil && !r.MemoryPeak.Constrained && r.MemoryPeak.HostGB != nil && validRate(*r.MemoryPeak.HostGB) {
+		point.MemoryRecordedAt = q.clock.Now()
+	}
 	if r.Usage != nil && r.Usage.valid() {
 		point.HostMemoryGB = max(point.HostMemoryGB, r.Usage.HostMemoryGB)
 		point.DeviceMemoryGB = max(point.DeviceMemoryGB, r.Usage.MemoryGB)
@@ -254,9 +276,13 @@ func (q *Queue) recordWorkObservation(j *Job, r Result) {
 
 // Shared by the CLI and HTML status. A missing old field is explicitly unknown.
 func JobTiming(j *Job) string {
+	envelope := ""
+	if j.MemoryEnvelope != nil && j.Spec.Needs.Memory == "auto" {
+		envelope = fmt.Sprintf("; memory %.2f GiB (%s; %s)", j.MemoryEnvelope.HostGB, j.MemoryEnvelope.Source, j.MemoryEnvelope.Enforcement)
+	}
 	t := j.Timing
 	if t == nil {
-		return "prediction unknown; actual unknown"
+		return "prediction unknown; actual unknown" + envelope
 	}
 	prediction, actual := "unknown", "unknown"
 	if t.PredictedSeconds != nil {
@@ -272,5 +298,5 @@ func JobTiming(j *Job) string {
 	if t.PlacementReason != "" {
 		text += "; " + t.PlacementReason
 	}
-	return text
+	return text + envelope
 }

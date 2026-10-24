@@ -719,9 +719,12 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				m.ModelURL = rt.url
 			}
 			m.ModelConfigHash = modelConfigHash(w.ModelConfig)
-			m.Capabilities = append(slices.DeleteFunc(slices.Clone(w.Machine.Capabilities), func(c string) bool { return c == "docker" }), "logs_none")
+			m.Capabilities = append(slices.DeleteFunc(slices.Clone(w.Machine.Capabilities), func(c string) bool { return c == "docker" || c == "docker_envelope" }), "logs_none")
 			if w.DockerEndpoint != "" {
 				m.Capabilities = append(m.Capabilities, "docker")
+				if w.dockerEnvelope {
+					m.Capabilities = append(m.Capabilities, "docker_envelope")
+				}
 			}
 			m.ApprovedModels, m.ModelApprovalStates = rt.cache.modelApprovals(w.ModelConfig.Models)
 			rt.setLocalApprovals(m.ApprovedModels, m.ModelApprovalStates)

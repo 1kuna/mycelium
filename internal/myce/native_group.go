@@ -262,6 +262,7 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 	if w.control != nil {
 		w.control.set(p)
 	}
+	finishMemory := w.observeAttemptMemory(memory)
 	go func() {
 		defer cancel()
 		for _, release := range releases {
@@ -304,10 +305,11 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 		priorityStop := p.priorityStop
 		p.mu.Unlock()
 		groupErr := g.cleanupProcesses(writer, false)
+		peak := finishMemory()
 		oom := g.memoryFailure()
 		cleanup := errors.Join(groupErr, memory.cleanup(w.Clock), g.save())
 		persist := errors.Join(syncCommandOutput(output), output.Close())
-		r := Result{Machine: w.Machine.ID, Session: g.session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Success: runErr == nil && oom == nil && cleanup == nil && persist == nil, Forced: forced, PoliteStop: polite, ReleasePending: cleanup != nil}
+		r := Result{MemoryPeak: peak, Machine: w.Machine.ID, Session: g.session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Success: runErr == nil && oom == nil && cleanup == nil && persist == nil, Forced: forced, PoliteStop: polite, ReleasePending: cleanup != nil}
 		if runErr != nil {
 			r.Error = runErr.Error()
 			r.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("command", runErr))
@@ -920,6 +922,9 @@ func (g *nativeGroup) setupMemory() error {
 }
 
 func (g *nativeGroup) memoryFailure() error {
+	if err := g.memory.failure(); err != nil {
+		return err
+	}
 	for _, m := range g.members {
 		if err := m.memory.failure(); err != nil {
 			return fmt.Errorf("native member %s: %w", m.Name, err)

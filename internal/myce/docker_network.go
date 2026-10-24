@@ -25,12 +25,15 @@ type DockerSidecar struct {
 	Command    []string          `json:"command" yaml:"command"`
 	Env        map[string]string `json:"env,omitempty" yaml:"env,omitempty"`
 	MemorySwap *float64          `json:"memory_swap,omitempty" yaml:"memory_swap,omitempty"`
-	MemoryGB   float64           `json:"memory_gb" yaml:"memory_gb"`
+	MemoryGB   float64           `json:"memory_gb,omitempty" yaml:"memory_gb,omitempty"`
 	Readiness  *DockerReadiness  `json:"readiness,omitempty" yaml:"readiness,omitempty"`
 }
 
 func (s Spec) validateDockerGroup() error {
 	r := s.Run
+	if dockerNeedsEnvelope(s) && s.Needs.HostMemoryGB <= 0 && s.Needs.Memory != "auto" {
+		return errors.New("Docker envelope requires positive needs.host_memory_gb")
+	}
 	if r.DockerNetwork != "" && r.DockerNetwork != "private" {
 		return errors.New("run.docker_network must be private (internal bridge; no outbound access)")
 	}
@@ -50,10 +53,11 @@ func (s Spec) validateDockerGroup() error {
 	if len(r.DockerSidecars) == 0 && r.DockerMemoryGB == 0 {
 		return nil
 	}
-	if r.DockerNetwork != "private" || r.DockerMemoryGB <= 0 {
-		return errors.New("per-container memory requires docker_network: private and positive docker_memory_gb")
+	if r.DockerNetwork != "private" {
+		return errors.New("Docker sidecars or per-container memory require docker_network: private")
 	}
-	if r.DockerMemoryGB > s.Needs.HostMemoryGB {
+	deferredEnvelope := s.Needs.Memory == "auto" && s.Needs.HostMemoryGB == 0
+	if !deferredEnvelope && r.DockerMemoryGB > s.Needs.HostMemoryGB {
 		return errors.New("main Docker memory must fit needs.host_memory_gb")
 	}
 	names := map[string]bool{"main": true}
@@ -62,13 +66,13 @@ func (s Spec) validateDockerGroup() error {
 			return errors.New("sidecar name must be a unique lowercase DNS name (main is reserved)")
 		}
 		names[c.Name] = true
-		if !validMemoryValue(c.MemoryGB) || c.MemoryGB <= 0 {
-			return errors.New("sidecar memory_gb must be positive and finite")
+		if !validMemoryValue(c.MemoryGB) {
+			return errors.New("sidecar memory_gb must be finite and nonnegative")
 		}
-		if c.MemoryGB > s.Needs.HostMemoryGB {
+		if !deferredEnvelope && c.MemoryGB > s.Needs.HostMemoryGB {
 			return errors.New("each Docker container memory must fit needs.host_memory_gb")
 		}
-		if !validDockerSwap(c.MemorySwap, c.MemoryGB) {
+		if !validDockerSwap(c.MemorySwap, max(c.MemoryGB, s.Needs.HostMemoryGB)) && c.MemoryGB == 0 || c.MemoryGB > 0 && !validDockerSwap(c.MemorySwap, c.MemoryGB) {
 			return errors.New("sidecar memory_swap is total RAM plus swap GiB and must be at least memory_gb")
 		}
 		if _, err := dockerRunArgs(c.Command); err != nil {
@@ -199,6 +203,9 @@ func (d *dockerAttempt) containerLimit(id string) (int64, int64) {
 	return d.state.MemoryLimitBytes, d.state.MemorySwapBytes
 }
 func (d *dockerAttempt) containerViolation(c dockerInspection) string {
+	if d.state.CgroupParent != "" && c.HostConfig.CgroupParent != d.state.CgroupParent {
+		return "Docker shared parent not enforced"
+	}
 	if len(c.HostConfig.PortBindings) > 0 || c.HostConfig.PublishAllPorts {
 		return "Docker containment violation: publishing host ports is forbidden"
 	}
@@ -323,6 +330,9 @@ func (d *dockerAttempt) launchContainer(base, args []string, name string, memory
 	if memorySwap != nil {
 		swap = int64(math.Ceil(*memorySwap * (1 << 30)))
 	}
+	if d.state.CgroupParent != "" {
+		swap = limit
+	}
 	for i := 1; i < len(create)-1; i++ {
 		switch create[i] {
 		case "--name":
@@ -413,6 +423,27 @@ func (d *dockerAttempt) launchContainer(base, args []string, name string, memory
 	_, e = d.operation("start", "start", id)
 	if e != nil {
 		return "", e
+	}
+	if d.state.CgroupParent != "" {
+		objects, e := d.containers()
+		if e != nil {
+			return "", e
+		}
+		found := false
+		for _, c := range objects {
+			if c.ID != id {
+				continue
+			}
+			found = true
+			if dockerLive(c) {
+				if e := verifyDockerCgroup(c.State.Pid, d.state.CgroupParent); e != nil {
+					return "", e
+				}
+			}
+		}
+		if !found {
+			return "", errors.New("started Docker container missing from shared parent inspection")
+		}
 	}
 	d.mu.Lock()
 	if m, ok := d.state.Containers[id]; ok {

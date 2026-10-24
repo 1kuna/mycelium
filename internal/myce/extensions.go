@@ -381,7 +381,7 @@ func qualifiedExtension(j *Job, m *Machine) *Extension {
 // copies carry the reservation the queue will persist if this variant wins.
 // Structural validation deliberately does not require current qualification.
 func extensionJobs(j *Job, m *Machine, qualified bool) []*Job {
-	if !j.Spec.extensionJob() || j.State == "running" || j.State == "stopping" {
+	if !j.Spec.extensionJob() || j.State == "running" || j.State == "stopping" || j.MemoryEnvelope != nil && j.MemoryEnvelope.Machine == m.ID && j.MemoryEnvelope.Device == m.Device {
 		return []*Job{j}
 	}
 	if !deviceAllowed(j, m) {
@@ -399,6 +399,7 @@ func extensionJobs(j *Job, m *Machine, qualified bool) []*Job {
 		}
 		if v := e.variant(machineTarget(m)); v != nil {
 			copy.Spec.Needs = v.Needs
+			copy.Spec.Needs.Memory = j.Spec.Needs.Memory
 			floor, caller := v.Needs.GPU, j.Spec.Needs.GPU
 			if caller != nil {
 				selection := *caller

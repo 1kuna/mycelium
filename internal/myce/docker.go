@@ -114,6 +114,9 @@ type dockerExecution struct {
 	InfrastructureStop bool                    `json:"infrastructure_stop,omitempty"`
 	AmbiguousKill      bool                    `json:"ambiguous_kill,omitempty"`
 	Failure            string                  `json:"failure,omitempty"`
+	CgroupParent       string                  `json:"cgroup_parent,omitempty"`
+	EnvelopeReleased   bool                    `json:"envelope_released,omitempty"`
+	MemoryPeak         *AttemptMemoryPeak      `json:"memory_peak,omitempty"`
 	MemoryLimitBytes   int64                   `json:"memory_limit_bytes,omitempty"`
 	MemorySwapBytes    int64                   `json:"memory_swap_bytes,omitempty"`
 	MemoryFailure      string                  `json:"memory_failure,omitempty"`
@@ -133,16 +136,18 @@ type dockerExecution struct {
 	ExitCode           int                     `json:"exit_code"`
 }
 type dockerAttempt struct {
-	command     func(context.Context, ...string) ([]byte, error) // Injectable daemon boundary.
-	persist     func(dockerExecution) error                      // Optional custody store for fault injection.
-	admit       func() error
-	dirty       bool
-	closed      chan struct{}
-	halt        chan struct{}
-	haltOnce    sync.Once
-	mu          sync.Mutex
-	state       dockerExecution
-	dir, binary string
+	memory       *memoryAttempt
+	memoryWorker *Worker
+	command      func(context.Context, ...string) ([]byte, error) // Injectable daemon boundary.
+	persist      func(dockerExecution) error                      // Optional custody store for fault injection.
+	admit        func() error
+	dirty        bool
+	closed       chan struct{}
+	halt         chan struct{}
+	haltOnce     sync.Once
+	mu           sync.Mutex
+	state        dockerExecution
+	dir, binary  string
 
 	ctx       context.Context
 	inventory func([]string)
@@ -351,6 +356,7 @@ type dockerInspection struct {
 		RestartPolicy   *dockerRestartPolicy
 		Memory          int64
 		MemorySwap      int64
+		CgroupParent    string
 		NetworkMode     string
 		PortBindings    map[string]json.RawMessage
 		PublishAllPorts bool
@@ -605,6 +611,9 @@ func (d *dockerAttempt) reconcile() (done bool, err error) {
 			d.state.OOMKilled = d.state.OOMKilled || c.State.OOMKilled
 		}
 	}
+	if err := d.releaseEnvelope(); err != nil {
+		return false, err
+	}
 	d.state.Released = true
 	d.state.Error = ""
 	if err := d.saveLocked(); err != nil {
@@ -803,7 +812,10 @@ func (d *dockerAttempt) retainEvidence(containers []dockerInspection) (err error
 	return d.saveLocked()
 }
 
-func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release func()) (*process, error) {
+func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release func()) (proc *process, resultErr error) {
+	if dockerNeedsEnvelope(j.Spec) && !w.dockerEnvelopeSupported() {
+		return nil, errors.New(dockerEnvelopeUnavailable)
+	}
 	if err := w.verifyDevice(); err != nil {
 		return nil, s.startFailure(j, launchRefused, err)
 	}
@@ -854,6 +866,30 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 		}
 		return w.authorizeLaunch(launch)
 	}, closed: make(chan struct{}), halt: make(chan struct{}), dir: s.dir, workdir: j.Spec.Run.Workdir, binary: binary, clock: w.Clock, timeout: w.dockerCallTimeout, state: dockerExecution{Identity: identity, Endpoint: endpoint, MemoryLimitBytes: ceilingBytes, MemorySwapBytes: 0}}
+	launched := false
+	defer func() {
+		if !launched && d.memory != nil {
+			resultErr = errors.Join(resultErr, d.releaseEnvelope())
+		}
+	}()
+	if dockerNeedsEnvelope(j.Spec) {
+		parent, e := w.memoryCeilings.create("attempt-"+identity, ceilingBytes, 0)
+		if e != nil {
+			return nil, e
+		}
+		if _, e = parent.children(); e != nil {
+			_ = parent.cleanup(w.Clock)
+			return nil, e
+		}
+		relative, e := filepath.Rel("/sys/fs/cgroup", parent.path)
+		if e != nil || strings.HasPrefix(relative, "..") {
+			_ = parent.cleanup(w.Clock)
+			return nil, errors.New(dockerEnvelopeUnavailable)
+		}
+		d.state.CgroupParent = "/" + relative
+		d.memory = parent
+		d.memoryWorker = &w
+	}
 	d.state.Accelerator = !j.Spec.Needs.cpuOnly()
 	d.state.StopGrace = acceleratorStopGrace(w.AcceleratorStopGrace)
 	d.state.Owner = &Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
@@ -905,6 +941,9 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 	}
 	label := "myce.attempt=" + identity
 	create := []string{"create", "--restart=no", "--pull=never", "--init", "--name", "myce-" + identity, "--label", label, "--label", "myce.worker=" + w.Machine.ID, "--cidfile", filepath.Join(s.dir, identity+".cid"), "--env", "MYCE_ATTEMPT_ID=" + identity, "--env", "MYCE_DOCKER_LABEL=" + label, "--env", "MYCE_JOB_ID=" + j.ID, "--env", "MYCE_ATTEMPT=" + strconv.Itoa(j.Attempt), "--env", "MYCE_CHECKPOINT_DIR=/myce/checkpoint", "--volume", checkpoint + ":/myce/checkpoint"}
+	if d.state.CgroupParent != "" {
+		create = append(create, "--cgroup-parent", d.state.CgroupParent, "--memory-swap", strconv.FormatInt(ceilingBytes, 10))
+	}
 	if d.state.LogsNone {
 		create = append(create, "--log-driver", "none")
 	}
@@ -932,6 +971,7 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 		}
 	}
 	create = append(create, args...)
+	launched = true
 	go d.run(p, j, s.state.Session, output, release, func() error {
 		if e := w.authorizeStart(j, j.Session); e != nil {
 			return d.recordInfrastructure(infrastructureFact{Kind: launchRefused, At: time.Now().UTC()}, e)
@@ -979,6 +1019,11 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 }
 func (d *dockerAttempt) run(p *process, j Job, session string, output *os.File, release func(), launch func() error) {
 	defer close(d.closed)
+	finishMemory := func() *AttemptMemoryPeak { return nil }
+	if d.memoryWorker != nil {
+		finishMemory = d.memoryWorker.observeAttemptMemory(d.envelope())
+	}
+	defer finishMemory()
 	stopEvents := d.observeDockerEvents()
 	defer stopEvents()
 	if release != nil {
@@ -1025,7 +1070,14 @@ func (d *dockerAttempt) run(p *process, j Job, session string, output *os.File, 
 	p.mu.Lock()
 	result.PoliteStop = p.polite
 	p.mu.Unlock()
+	sample := finishMemory()
 	d.mu.Lock()
+	if sample != nil && sample.DeviceGB != nil {
+		if d.state.MemoryPeak == nil {
+			d.state.MemoryPeak = &AttemptMemoryPeak{}
+		}
+		d.state.MemoryPeak.DeviceGB = sample.DeviceGB
+	}
 	result = dockerOutcome(d.state, result, e)
 	container := d.state.Container
 	logsNone := d.state.LogsNone
@@ -1070,6 +1122,7 @@ func (state dockerExecution) completedMain() bool {
 
 func dockerOutcome(state dockerExecution, owner Result, e error) Result {
 	result := owner
+	result.MemoryPeak = state.MemoryPeak
 	// Recovery is a cause only when no terminal main outcome was observed.
 	if state.MainFinished && errors.Is(e, errDockerRecovery) {
 		e = nil

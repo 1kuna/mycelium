@@ -61,6 +61,7 @@ type Worker struct {
 	memoryCeilings        *memoryCeilings
 	MemorySwapMaxBytes    int64
 	DockerEndpoint        string
+	dockerEnvelope        bool
 	nativeListenerProbe   func(port string, group int) error
 
 	ContainerRetention *time.Duration
@@ -697,6 +698,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (*proce
 	environmentStarted = true
 	extensionStarted = true
 	started = true
+	finishMemory := w.observeAttemptMemory(memoryAttempt)
 	go func() {
 		if extensionRelease != nil {
 			defer extensionRelease()
@@ -719,8 +721,11 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (*proce
 		p.mu.Unlock()
 		// Descendants must not outlive the command or append to delivered output.
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		groupErr := waitWorkerGroup(cmd.Process.Pid, w.Clock)
+		peak := finishMemory()
 		oomErr := memoryAttempt.failure()
-		groupErr := errors.Join(waitWorkerGroup(cmd.Process.Pid, w.Clock), memoryAttempt.cleanup(w.Clock))
+		groupErr = errors.Join(groupErr, memoryAttempt.cleanup(w.Clock))
+		result.MemoryPeak = peak
 		result.ReleasePending = groupErr != nil
 		syncErr := syncCommandOutput(output)
 		closeErr := output.Close()
@@ -854,6 +859,7 @@ func (w Worker) Run(stop context.Context) error {
 		return errors.New("container-retention must be nonnegative")
 	}
 	w.initMemoryCeilings()
+	w.dockerEnvelope = w.dockerEnvelopeSupported()
 	if err := w.requireMemoryCeilings(); err != nil {
 		return err
 	}

@@ -645,12 +645,12 @@ caller size hints and learned needs for that backend. A host is eligible when
 one matching variant fits; dispatch reserves that selected variant's resources.
 
 Native job groups use `execution.sidecars` or `run.sidecars`: name, command,
-optional environment/env, positive finite member host-RAM declaration, optional
+optional environment/env, optional finite member host-RAM cap, optional
 port and HTTP readiness path/timeout. An absent port means a plain helper;
 zero allocates a loopback port and a positive port reserves that explicit port.
 Members inherit main's workdir and environment when no environment is named.
 All environments are acquired before payload launch and retained through cleanup.
-Member RAM declarations must fit `needs.host_memory_gb`, the whole simultaneous
+Explicit member RAM caps must fit `needs.host_memory_gb`, the whole simultaneous
 host reservation; they are not added as separate reservations. Delegated Linux
 cgroup v2 enforces the aggregate parent and each member leaf before exec.
 Main RAM is optional (`execution.main.memory_gb` or `run.memory_gb`); when
@@ -1835,3 +1835,43 @@ learned call caps are deferred with that binding to slice 4. Extension command
 sweep concurrency does not qualify a model server for concurrent calls. The
 future #145 quality-tolerance filter belongs at the existing qualified-variant
 eligibility boundary, before completion ranking; no quality policy is added here.
+
+
+## Amendment: job memory envelopes (#146)
+
+Approved by the orchestrator under Zach's delegated design authority, 2026-10-24.
+Explicit `needs.host_memory_gb` and GPU `needs.memory_gb` retain their current
+admission meanings and defaults, including production. Optional `needs.memory:
+auto` first selects fresh accepted slice-1 whole-attempt peaks for the same
+work, recipe, input shape and machine/component, times 1.25. Without local
+history, use the same recipe/work/shape from another machine: prefer the same
+OS/architecture/accelerator/memory-layout family, times 1.25 × 1.5; otherwise
+times 1.25 × 2. Label both as a cross-machine estimate. Next use an optional
+submitter hint; a bootstrap declaration is not required and recipe defaults do
+not count as submitter hints. Without either, allow an exploratory first run
+only with measured memory, a known allowance (physical RAM if uncapped), at
+least half that allowance available after existing reserves and charges, and
+no protected attempt or model residency charging a quarter of the allowance.
+Use that available room, less existing per-attempt slack, as the envelope.
+Lower-priority work remains reclaimable through the existing release planner;
+release acknowledgement still precedes admission. Accepted exploratory peaks
+become measurements. Status shows the source, envelope and enforcement mode.
+Input-size/duration scaling per recipe is a follow-up slice, not part of this
+amendment.
+Reservations are frozen per attempt; stale, failed, OOM, constrained and resumed
+observations cannot shrink an envelope. Member caps are optional; explicit caps
+remain supported and fit the job envelope.
+
+Linux native attempts use their existing shared parent cgroup for main and all
+sidecars, bounded/zero swap, whole-parent `memory.peak` and a job OOM cause.
+GPU samples belong to the attempt's process inventory where supported; missing
+counters stay unknown. Unified host/GPU peaks overlap: their maximum bounds the
+shared pool, never their sum. Keep the existing operator/driver reserve and
+per-attempt slack; do not invent another fixed reserve. Live available RAM and
+the shared machine allowance both bound admission, with a visible refusal reason.
+
+Envelope-only Docker groups require a verified local shared cgroup parent
+(cgroupfs with worker delegation). Unsupported daemons refuse with an explicit
+reason and native/capped alternatives. Existing capped Docker groups retain
+member-only enforcement. Docker driver and Linux/GPU enforcement qualification
+are deployment checks, separate from laptop proof; the B70 driver is unverified.

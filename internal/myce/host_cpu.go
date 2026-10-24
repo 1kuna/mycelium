@@ -17,6 +17,9 @@ func (n ResourceNeeds) cores() int { return max(1, n.CPUCores) }
 // repeated validation/resolution never moves or charges RAM twice.
 func normalizeResources(s *Spec) error {
 	n := &s.Needs
+	if n.Memory != "" && n.Memory != "auto" {
+		return reject("job_memory_invalid", errors.New("needs.memory must be auto or omitted"))
+	}
 	if n.GPU != nil && n.GPU.Devices != nil {
 		if len(n.GPU.Devices) == 0 {
 			return reject("gpu_selector_invalid", errors.New("devices must be a nonempty set of canonical device IDs"))

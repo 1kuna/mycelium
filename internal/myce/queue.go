@@ -515,6 +515,13 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 			s.StartBy = &deadline
 		}
 		j := &Job{PriorityPolicy: q.priorityMatch(s), FileTransport: q.fileCheckpoints, Extensions: extensions, SidecarEnvironmentRecipes: sidecarRecipes, EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: filepath.Join(q.root, id)}
+		if submitted.Needs.Memory == "auto" {
+			// Capture only submitter hints, before recipe defaults can mask an
+			// undeclared first run. A non-nil empty hint explicitly means none.
+			hintSpec := submitted
+			_ = normalizeResources(&hintSpec) // submitted.Validate already checked it.
+			j.MemoryFallback = &SizeHint{MemoryGB: max(hintSpec.Needs.MemoryGB, submitted.SizeHint.MemoryGB), HostMemoryGB: max(hintSpec.Needs.HostMemoryGB, submitted.SizeHint.HostMemoryGB)}
+		}
 		q.applyLearnedNeeds(j)
 		if s.RequireTarget && !q.hasQualifiedTarget(j) {
 			return &HTTPError{Status: 409, Code: "no_qualified_target", Message: rejectionMessages["no_qualified_target"]}
@@ -1863,6 +1870,7 @@ func (q *Queue) assign(j *Job, m *Machine) Job {
 	selected := j
 	j = q.s.Jobs[selected.ID]
 	j.Spec.Needs = selected.Spec.Needs
+	j.MemoryEnvelope, j.MemoryFallback = selected.MemoryEnvelope, selected.MemoryFallback
 	if e := qualifiedExtension(selected, m); e != nil {
 		j.Extension = &ExtensionSelection{Name: e.Name, Version: e.Version, Digest: e.Digest}
 	}

@@ -35,6 +35,7 @@ func (q *Queue) estimateCompletion(j *Job, m *Machine) (completionEstimate, bool
 	for _, candidate := range extensionJobs(j, m, true) {
 		copy := *candidate
 		q.applyLearnedNeeds(&copy)
+		copy = *q.memoryCandidate(&copy, m)
 		copy.Machine, copy.Session = m.ID, m.Session
 		copy.AllocatedDevices = nil
 		if m.Devices != nil && !copy.Spec.Needs.cpuOnly() {

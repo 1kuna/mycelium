@@ -215,7 +215,7 @@ func (s Spec) Validate() error {
 	if s.Kind == "" && (len(s.Inputs)+len(s.Args) > 0 || (len(s.Outputs) > 0 && len(s.Files) == 0) || s.SizeHint.MemoryGB != 0 || s.SizeHint.HostMemoryGB != 0) {
 		return reject("job_program_invalid", errors.New("inputs, outputs, args and size_hint require a kind/program job"))
 	}
-	if (!s.Needs.cpuOnly() && s.Needs.MemoryGB <= 0) || !validMemoryValue(s.Needs.MemoryGB) || (s.Needs.cpuOnly() && s.Needs.HostMemoryGB <= 0) {
+	if !validMemoryValue(s.Needs.MemoryGB) || (s.Needs.Memory != "auto" && ((!s.Needs.cpuOnly() && s.Needs.MemoryGB <= 0) || (s.Needs.cpuOnly() && s.Needs.HostMemoryGB <= 0))) {
 		return reject("job_memory_invalid", errors.New("declare positive memory_gb (host RAM for CPU work, GPU memory otherwise)"))
 	}
 	if !validMemoryValue(s.Needs.HostMemoryGB) {
@@ -320,6 +320,8 @@ type Job struct {
 	FileCheckpoints       map[int]FileCheckpoint       `json:"file_checkpoints,omitempty"`
 	ResumeFiles           *FileCheckpoint              `json:"resume_files,omitempty"`
 	OutputRefs            FileManifest                 `json:"output_refs,omitempty"`
+	MemoryEnvelope        *JobMemoryEnvelope           `json:"memory_envelope,omitempty"`
+	MemoryFallback        *SizeHint                    `json:"memory_fallback,omitempty"`
 	MeasuredNeeds         *SizeHint                    `json:"measured_needs,omitempty"`
 	OOMCapacity           *SizeHint                    `json:"oom_capacity,omitempty"`
 	OOMRetries            int                          `json:"oom_retries,omitempty"`
@@ -507,6 +509,7 @@ type Result struct {
 	CleanupCause         *RuntimeCause       `json:"cleanup_cause,omitempty"`
 	PoliteStop           bool                `json:"polite_stop,omitempty"`
 	OutputRefs           FileManifest        `json:"output_refs,omitempty"`
+	MemoryPeak           *AttemptMemoryPeak  `json:"memory_peak,omitempty"`
 	Usage                *SizeHint           `json:"usage,omitempty"`
 	OutOfMemory          bool                `json:"out_of_memory,omitempty"`
 	ExtensionUnavailable bool                `json:"extension_unavailable,omitempty"`
