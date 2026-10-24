@@ -180,6 +180,16 @@ func runMemory(value string) (float64, error) {
 // installation's authority, including its certificate pin. A queue override
 // changes only the endpoint, never removes installed trust.
 func runClient(config, joining, address, token string) (myce.Client, error) {
+	authority := runAuthority{Config: config, Joining: joining}
+	return authority.client(address, token)
+}
+
+// Retain only private authority references for detached observers, never credentials.
+// Both foreground and detached clients resolve through this same implementation.
+type runAuthority struct{ Config, Joining string }
+
+func (authority *runAuthority) client(address, token string) (myce.Client, error) {
+	config, joining := authority.Config, authority.Joining
 	if config != "" || joining == "" && token == "" {
 		paths := []string{config}
 		if config == "" {
@@ -194,6 +204,10 @@ func runClient(config, joining, address, token string) (myce.Client, error) {
 			c, err := myce.ReadServiceConfig(path)
 			if err == nil {
 				saved = c
+				authority.Config, err = filepath.Abs(path)
+				if err != nil {
+					return myce.Client{}, err
+				}
 				break
 			}
 			if !os.IsNotExist(err) || i == len(paths)-1 {
@@ -223,7 +237,12 @@ func runClient(config, joining, address, token string) (myce.Client, error) {
 		}
 	}
 	if joining != "" {
-		invitation, err := myce.ReadInvitation(joining)
+		var err error
+		authority.Joining, err = filepath.Abs(joining)
+		if err != nil {
+			return myce.Client{}, err
+		}
+		invitation, err := myce.ReadInvitation(authority.Joining)
 		if err != nil {
 			return myce.Client{}, errors.New("cannot read private joining authority")
 		}

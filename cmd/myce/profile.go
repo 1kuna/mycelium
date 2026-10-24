@@ -308,7 +308,8 @@ func runProfile(ctx context.Context, name string, args []string, key, notify, co
 	if token == "" {
 		token = os.Getenv("MYCE_TOKEN")
 	}
-	c, err := runClient(config, joining, address, token)
+	authority := runAuthority{Config: config, Joining: joining}
+	c, err := authority.client(address, token)
 	if err != nil {
 		return profileFailure(out, &r, 69, "queue_unavailable: cannot resolve queue authority; intent retained")
 	}
@@ -369,8 +370,13 @@ func runProfile(ctx context.Context, name string, args []string, key, notify, co
 		}
 	}
 	// Observer configuration is private caller state, never part of the job.
-	observer := profileObserver{Queue: c.URL, Config: config, Joining: joining, Notify: notify}
-	if err = armProfileObserver(ctx, dir, &r, observer, c.Token); err != nil {
+	observer := profileObserver{Queue: c.URL, Config: authority.Config, Joining: authority.Joining, Notify: notify}
+	observerToken := ""
+	if token != "" && authority.Joining == "" {
+		// Direct credentials cannot be reopened from an installed authority.
+		observerToken = c.Token
+	}
+	if err = armProfileObserver(ctx, dir, &r, observer, observerToken); err != nil {
 		return profileFailure(out, &r, 74, "wakeup_not_armed: job retained; check notifier configuration and retry")
 	}
 	return json.NewEncoder(out).Encode(r)

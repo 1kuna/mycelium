@@ -150,6 +150,9 @@ assert Path(sys.argv[2]).read_text() == "verified result"
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("Python installed authority: %v %s", err, strings.ReplaceAll(string(output), token, "[redacted]"))
 	}
+	t.Run("profile_observer", func(t *testing.T) {
+		testProfileInstalledObserverNotification(t, ctx, binary, root)
+	})
 	for _, state := range []int32{1, 2, 3, 4} {
 		mode.Store(state)
 		dest := filepath.Join(root, fmt.Sprint("rejected-", state))

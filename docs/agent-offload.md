@@ -183,6 +183,16 @@ and retry the same event delivery identity. IDs include a per-receipt nonce, so
 recreating a receipt cannot suppress a new event at a deduplicating receiver.
 Observation-failure IDs also include a nonce saved on each arm, so a later arm
 failing the same way produces a new wake. Terminal IDs remain stable across arms.
+
+A rerun adopts an already-running observer and prints its receipt directory;
+it never replaces or stops that owner. For an s022 observer stuck queued/armed
+because its installed certificate pin was lost, the owning session finds its
+own `myce wait --receipt RECEIPT_DIR` process in `ps` by that exact receipt path
+and stops it. Then rerun the original profile with the same `--key`. Once the
+old owner releases the OS lock, the rerun re-arms observation using the fixed
+installed authority, retains the job ID and retries notification. An exited
+observer needs only the same-key rerun. No new submission key is needed.
+
 Completed successful terminal delivery is not sent again. Receipt snapshots
 cannot promise survival of a later observer-machine failure; this MVP has no
 queue outbox or automatic boot restart.

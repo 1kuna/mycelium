@@ -11,6 +11,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 )
@@ -147,5 +149,115 @@ check: [true]
 	}
 	if ids[0] == "" || ids[0] == ids[1] || arms[0] == "" || arms[0] == arms[1] {
 		t.Fatal("rearmed observation failure was deduplicated", ids, arms)
+	}
+}
+
+// Reuse TestInstalledClientDevResult's real dev API and pinned installed config.
+func testProfileInstalledObserverNotification(t *testing.T, ctx context.Context, binary, root string) {
+	t.Helper()
+	source := filepath.Join(root, "observer-source")
+	if err := os.Mkdir(source, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "run.sh"), []byte(`test -z "$MYCE_TOKEN" && printf observed > result
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	profiles := filepath.Join(root, ".mycelium", "profiles")
+	if err := os.MkdirAll(profiles, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(profiles, "installed-observer.yaml")
+	profile := `name: installed-observer
+project: demo
+class: experiment
+source: {directory: observer-source}
+run: {command: [sh, run.sh]}
+needs: {cpu_cores: 1, memory_gb: 1}
+targets: [{os: ` + runtime.GOOS + `, arch: ` + runtime.GOARCH + `, platform: cpu}]
+outputs: {result: results}
+check: [test, -s, result]
+`
+	if err := os.WriteFile(path, []byte(profile), 0600); err != nil {
+		t.Fatal(err)
+	}
+	payload := filepath.Join(root, "installed-notifications")
+	hook := filepath.Join(root, "installed-notify")
+	script := `#!/bin/sh
+test -z "${MYCE_TOKEN+x}" || exit 99
+if [ "${1:-}" = --check ]; then exit 0; fi
+cat >> ` + shellArg(payload) + `
+printf '\n' >> ` + shellArg(payload) + "\n"
+	if err := os.WriteFile(hook, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	invoke := func() profileReceipt {
+		t.Helper()
+		cmd := exec.CommandContext(ctx, binary, "run", "--profile", path, "--key", "installed-observer", "--notify", hook)
+		cmd.Dir = root
+		output, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("installed profile: %v %s", err, output)
+		}
+		var receipt profileReceipt
+		if err := json.Unmarshal(output, &receipt); err != nil {
+			t.Fatal(err)
+		}
+		return receipt
+	}
+	submitted := invoke()
+	dir := filepath.Join(root, ".mycelium", "receipts", profileHash([]string{"demo", submitted.Key}))
+	receiptPath := filepath.Join(dir, "receipt.json")
+	delivered := func() profileReceipt {
+		t.Helper()
+		var receipt profileReceipt
+		wait(t, ctx, func() bool {
+			if readProfileJSON(receiptPath, &receipt) != nil || receipt.DeliveryStatus != "delivered" {
+				return false
+			}
+			lock, err := profileLock(filepath.Join(dir, "watch.lock"))
+			if err != nil {
+				return false
+			}
+			lock.Close()
+			return true
+		})
+		if receipt.Status != "succeeded" || receipt.Observation != "not_armed" || receipt.Delivery == "armed" {
+			t.Fatal("observer did not complete", receipt)
+		}
+		data, err := os.ReadFile(filepath.Join(dir, "observer.json"))
+		var observer profileObserver
+		if err != nil || json.Unmarshal(data, &observer) != nil || observer.Config == "" || observer.Joining == "" || strings.Contains(string(data), "installed-dev-fixture-token") {
+			t.Fatalf("installed observer authority missing or leaked: %v", err)
+		}
+		return receipt
+	}
+	current := delivered()
+	// Model a legacy stuck receipt after its owning session has stopped the
+	// old waiter and released the lock. The same key must re-arm this job.
+	current.Status, current.Observation, current.Delivery, current.DeliveryStatus = "queued", "armed", "armed", ""
+	if err := saveProfileJSON(receiptPath, current); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveProfileJSON(filepath.Join(dir, "observer.json"), profileObserver{Queue: "legacy-unused-endpoint", Notify: hook}); err != nil {
+		t.Fatal(err)
+	}
+	if recovered := invoke(); recovered.JobID != submitted.JobID {
+		t.Fatal("recovery resubmitted job", recovered)
+	}
+	delivered()
+	data, err := os.ReadFile(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("notifier not invoked for initial and recovered observation: %s", data)
+	}
+	for _, line := range lines {
+		var event profileNotification
+		if err := json.Unmarshal([]byte(line), &event); err != nil || event.JobID != submitted.JobID || event.Status != "succeeded" {
+			t.Fatal("bad completion notification", event, err)
+		}
 	}
 }

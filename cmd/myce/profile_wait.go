@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -56,6 +57,7 @@ func armProfileObserver(ctx context.Context, dir string, r *profileReceipt, cfg 
 			return err
 		}
 		// An OS lock, not a PID file, proves there is exactly one live observer.
+		fmt.Fprintln(os.Stderr, "adopted existing watcher for receipt:", dir)
 		return readProfileJSON(filepath.Join(dir, "receipt.json"), r)
 	}
 	defer lock.Close()
@@ -104,7 +106,10 @@ func armProfileObserver(ctx context.Context, dir string, r *profileReceipt, cfg 
 	defer ready.Close()
 	defer writeReady.Close()
 	cmd := exec.Command(executable, "wait", "--receipt", dir)
-	cmd.Env = append(notifierEnvironment(), "MYCE_TOKEN="+token, "MYCE_PROFILE_OBSERVER=1")
+	cmd.Env = append(notifierEnvironment(), "MYCE_PROFILE_OBSERVER=1")
+	if token != "" {
+		cmd.Env = append(cmd.Env, "MYCE_TOKEN="+token)
+	}
 	cmd.ExtraFiles = []*os.File{lock, writeReady}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	// No inherited stdio pipe or terminal may keep the submitting session alive.
