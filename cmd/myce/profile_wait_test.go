@@ -2,11 +2,14 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/json"
 	"io"
 	"mycelium/internal/myce"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -73,5 +76,76 @@ func TestProfileNotifierDeliveryFailure(t *testing.T) {
 	var saved profileReceipt
 	if err := readProfileJSON(filepath.Join(dir, "receipt.json"), &saved); err != nil || saved.Status != "succeeded" || saved.DeliveryStatus != "failed" || saved.Observation != "not_armed" || saved.Delivery == "armed" {
 		t.Fatal("delivery rejection changed computation state", saved, err)
+	}
+}
+
+func TestProfileObserverRearmDeliveryIdentity(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusUnauthorized) }))
+	defer server.Close()
+	root := t.TempDir()
+	profile := `name: fixture
+project: test
+class: experiment
+source: {git: HEAD}
+run: {command: [true]}
+targets: [{os: linux, arch: amd64, platform: cpu}]
+check: [true]
+`
+	path := filepath.Join(root, "fixture.yaml")
+	if err := os.WriteFile(path, []byte(profile), 0600); err != nil {
+		t.Fatal(err)
+	}
+	key := "rearm"
+	dir := filepath.Join(root, ".mycelium", "receipts", profileHash([]string{"test", key}))
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	receipt := profileReceipt{Key: key, Project: "test", JobID: "fixture", Status: "queued", Nonce: rand.Text(), Intent: profileHash(struct {
+		Profile string
+		Args    []string
+	}{profile, []string{"literal"}})}
+	if err := saveProfileJSON(filepath.Join(dir, "receipt.json"), receipt); err != nil {
+		t.Fatal(err)
+	}
+	payload := filepath.Join(root, "notification.json")
+	hook := filepath.Join(root, "notify")
+	if err := os.WriteFile(hook, []byte("#!/bin/sh\nif [ \"${1:-}\" = --check ]; then exit 0; fi\ncat > "+shellArg(payload)+"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	binary := devTestBinary(t)
+	ctx, cancel := context.WithTimeout(context.Background(), devTestTimeout)
+	defer cancel()
+	var ids, arms []string
+	for range 2 {
+		cmd := exec.CommandContext(ctx, binary, "run", "--queue", server.URL, "--profile", path, "--key", key, "--notify", hook, "--", "literal")
+		cmd.Dir = root
+		cmd.Env = append(os.Environ(), "MYCE_TOKEN=fixture")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("arm: %v %s", err, out)
+		}
+		wait(t, ctx, func() bool {
+			if readProfileJSON(filepath.Join(dir, "receipt.json"), &receipt) != nil || receipt.ObservationError != "transport_error" || receipt.DeliveryStatus != "delivered" {
+				return false
+			}
+			lock, err := profileLock(filepath.Join(dir, "watch.lock"))
+			if err != nil {
+				return false
+			}
+			lock.Close()
+			return true
+		})
+		var notification profileNotification
+		data, err := os.ReadFile(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := json.Unmarshal(data, &notification); err != nil || notification.Status != "observation_failed" {
+			t.Fatal(notification, err)
+		}
+		ids = append(ids, notification.DeliveryID)
+		arms = append(arms, receipt.ArmNonce)
+	}
+	if ids[0] == "" || ids[0] == ids[1] || arms[0] == "" || arms[0] == arms[1] {
+		t.Fatal("rearmed observation failure was deduplicated", ids, arms)
 	}
 }

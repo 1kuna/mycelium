@@ -25,7 +25,9 @@ and uses a provisional 8 GiB host-memory declaration. Automatic memory remains
 Choose exactly one source:
 
 - `source: {git: HEAD}`: archive the committed tree. A tree hash or commit hash
-  also works. A dirty HEAD is refused. Explicit `allow_dirty: true` acknowledges
+  also works. The dirty-worktree check applies only to literal `HEAD`, excluding
+  Mycelium's own receipts. Other Git references archive their resolved committed
+  tree without checking worktree changes. Explicit `allow_dirty: true` acknowledges
   using only committed bytes; dirty/untracked changes and the Git directory are excluded.
 - `source: {snapshot: source.tar}`: an explicit uncompressed tar archive.
 - `source: {directory: prepared-source}`: explicitly upload regular files in that
@@ -93,6 +95,8 @@ Transient queue outages retry inside the observer. Observation normally has no
 time limit. Rerun after observer loss or delivery failure to recover the same job
 and retry the same event delivery identity. IDs include a per-receipt nonce, so
 recreating a receipt cannot suppress a new event at a deduplicating receiver.
+Observation-failure IDs also include a nonce saved on each arm, so a later arm
+failing the same way produces a new wake. Terminal IDs remain stable across arms.
 Completed successful terminal delivery is not sent again. Receipt snapshots
 cannot promise survival of a later observer-machine failure; this MVP has no
 queue outbox or automatic boot restart.

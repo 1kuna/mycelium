@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"io"
@@ -83,6 +84,7 @@ func armProfileObserver(ctx context.Context, dir string, r *profileReceipt, cfg 
 		return err
 	}
 	r.Observation, r.ObservationError = "armed", ""
+	r.ArmNonce = rand.Text()
 	r.DeliveryStatus = ""
 	r.Delivery = "not_configured"
 	if cfg.Notify != "" {
@@ -209,6 +211,9 @@ func observeProfile(ctx context.Context, c myce.Client, dir string, r profileRec
 		notification.Status, notification.ResultReference = r.Status, r.ResultReference
 	}
 	notification.DeliveryID = profileHash([]string{r.Nonce, r.Project, r.Key, r.JobID, notification.Status, notification.ObservationError})
+	if waitErr != nil {
+		notification.DeliveryID = profileHash([]string{notification.DeliveryID, r.ArmNonce})
+	}
 	if err := saveProfileJSON(filepath.Join(dir, "receipt.json"), r); err != nil {
 		return err
 	}

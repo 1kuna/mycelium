@@ -136,7 +136,7 @@ func identifyProfileSource(ctx context.Context, root string, source profileSourc
 	}
 	if source.Git != "" {
 		if source.Git == "HEAD" && !source.AllowDirty {
-			dirty, err := exec.CommandContext(ctx, "git", "-C", root, "status", "--porcelain", "--untracked-files=normal").Output()
+			dirty, err := exec.CommandContext(ctx, "git", "-C", root, "status", "--porcelain", "--untracked-files=normal", "--", ".", ":(exclude).mycelium/receipts").Output()
 			if err != nil {
 				return source, "", err
 			}

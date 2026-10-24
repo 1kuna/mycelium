@@ -41,6 +41,16 @@ func TestProfileSourceExplicitAndStable(t *testing.T) {
 	if err != nil || gitAgain != gitRef {
 		t.Fatal("unstable git tree snapshot", err)
 	}
+	receipts := filepath.Join(root, ".mycelium", "receipts")
+	if err = os.MkdirAll(receipts, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(receipts, "submit.lock"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err = identifyProfileSource(context.Background(), root, profileSource{Git: "HEAD"}); err != nil {
+		t.Fatal("own unignored receipts made HEAD dirty", err)
+	}
 	if err = os.WriteFile(filepath.Join(root, "script"), []byte("dirty"), 0755); err != nil {
 		t.Fatal(err)
 	}

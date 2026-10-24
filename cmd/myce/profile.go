@@ -28,6 +28,7 @@ type executionProfile struct {
 
 type profileReceipt struct {
 	Nonce            string            `json:"nonce"`
+	ArmNonce         string            `json:"arm_nonce,omitempty"`
 	Key              string            `json:"key"`
 	Project          string            `json:"project"`
 	Intent           string            `json:"intent"`
