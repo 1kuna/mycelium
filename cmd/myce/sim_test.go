@@ -62,7 +62,7 @@ streams:
     checkpoint_seconds: 1
     every_hours: 24
     count: 1
-    batch_files: 40
+    batch_files: 4
     curves:
       a: [{concurrency: 1, rate: 1}, {concurrency: 2, rate: 1.76}, {concurrency: 4, rate: 2.88}, {concurrency: 8, rate: 3.84}]
       b: [{concurrency: 1, rate: 1}, {concurrency: 2, rate: 1.76}, {concurrency: 4, rate: 2.88}, {concurrency: 8, rate: 3.84}]
