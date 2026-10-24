@@ -98,8 +98,9 @@ harness's deny decision with the exact `myce run --profile NAME` replacement, or
 route through a supported tool adapter that runs it once and returns the receipt.
 Permit small read-only commands and the adapter itself to avoid recursion. Do
 not run both the original command and its replacement. Persist/reuse the key in
-the harness operation record; only end the agent turn on an armed receipt or an
-explicit typed hold with its next owner.
+the harness operation record; only end the agent turn when observation and
+delivery are both armed, completion is already verified, or an explicit typed
+hold records its next owner.
 
 For Codex, install the equivalent only through a supported pre-tool interception
 interface in the host harness. Do not assume every Codex CLI or T3 provider
