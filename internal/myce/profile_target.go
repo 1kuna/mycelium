@@ -17,6 +17,10 @@ func executionTargetMatches(s Spec, m *Machine) bool {
 // Busy qualified hosts can queue work. Dispatch and launch still check live
 // admission through fitsResources; this check grants no capacity reservation.
 func (q *Queue) hasQualifiedTarget(j *Job) bool {
+	// Resolve envelopes with the planner's code, but without temporary
+	// occupancy or release holds. Retain observations for learned needs.
+	capacity := Queue{clock: q.clock, s: q.s}
+	capacity.s.Jobs, capacity.s.ModelSlots, capacity.s.HostReleases = nil, nil, nil
 	for _, m := range q.s.Machines {
 		if !q.jobAllowsMachine(j, m.ID) {
 			continue
@@ -43,14 +47,21 @@ func (q *Queue) hasQualifiedTarget(j *Job) bool {
 				if policy.MemoryBudget != nil {
 					allowance = policy.MemoryBudget.GiB
 				}
+				copy.EffectiveHostMemoryBudgetGB = allowance
 				if allowance > 0 {
 					copy.FreeHostMemoryGB = min(copy.FreeHostMemoryGB, allowance)
 				}
 				copy.HostMemoryMeasured = true
 			}
 			copy.FreeMemoryGB = copy.TotalMemoryGB
-			if fits(j, &copy, copy.TotalMemoryGB) {
-				return true
+			// Observation identity must see the same available target copy,
+			// including when the live owner is temporarily unavailable.
+			capacity.s.Machines = map[string]*Machine{copy.ID: &copy}
+			for _, candidate := range extensionJobs(j, &copy, true) {
+				candidate = capacity.memoryCandidate(candidate, &copy)
+				if hostFits(&copy, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) && fitsResources(candidate, &copy, copy.TotalMemoryGB) {
+					return true
+				}
 			}
 		}
 	}

@@ -53,6 +53,8 @@ func TestProfileTargetTemporaryHoldsStillQueue(t *testing.T) {
 	m.TotalMemoryGB = 64
 	m.HostMemoryMeasured = true
 	m.HostAvailableMemoryGB = 32
+	m.MemoryEnforcement = "memory ceilings enforced (cgroup v2)"
+	m.HostMemoryBudgetGB, m.MemoryCeilingSlackGB = 16, 0.1
 	check(t, q, m, nil)
 	if err := q.update(func() error {
 		q.s.Policies = map[string]ProjectPolicy{"test": {AllowedMachines: []string{m.ID}}}
@@ -70,9 +72,15 @@ func TestProfileTargetTemporaryHoldsStillQueue(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := Spec{Name: "profile", Project: "test", Class: "experiment", RequireTarget: true, Targets: []ExecutionTarget{{OS: "linux", Arch: "amd64", Platform: "cpu"}}, Run: RunSpec{Command: []string{"true"}}, Needs: ResourceNeeds{CPUCores: 1, MemoryGB: 1}}
-	j := submit(t, q, s)
-	if j.State != "queued" {
-		t.Fatal("temporary hold did not queue", j)
+	for _, mode := range []string{"", "auto"} {
+		s.Needs.Memory = mode
+		if mode == "auto" {
+			s.Needs.MemoryGB = 0
+		}
+		j := submit(t, q, s)
+		if j.State != "queued" {
+			t.Fatal("temporary hold did not queue", j)
+		}
 	}
 	s.Needs.CPUCores = 8 // Physical capacity fits, but the persistent allowance does not.
 	if _, err := q.Submit(s); err == nil {
