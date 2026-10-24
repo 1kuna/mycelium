@@ -674,7 +674,7 @@ whole group is killed, reaped and verified empty before completion. Unconfirmed
 cleanup retains release custody. Restart reuses the existing attempt group scan.
 
 Ports bind `127.0.0.1`; readiness accepts HTTP 2xx, without proxies or redirects,
-and verifies listening-process group ownership (Linux procfs, macOS lsof).
+and verifies listening-process group ownership (Linux procfs, macOS libproc).
 An occupied port or unverifiable listener fails preparation. Loopback is not a
 private-network sandbox. Endpoint env and literal substitutions, examples and
 platform limits are described in [Native sidecars](native-sidecars.md).

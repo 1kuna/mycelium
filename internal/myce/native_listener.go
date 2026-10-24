@@ -16,8 +16,9 @@ import (
 var errNativeForeignListener = errors.New("native readiness listener belongs to another process")
 
 // A 2xx response alone could be another job's server after the reservation is
-// released. Verify every listener belongs to this attempt's group; unknown
-// ownership fails preparation. No port registry or application nonce protocol.
+// released. Linux verifies every listener belongs to this attempt's group;
+// Darwin checks owned sockets, then dials to distinguish foreign from absent.
+// Unknown ownership fails preparation. No port registry or application nonce.
 func verifyNativeListener(port string, group int) error {
 	return verifyNativeListenerContext(context.Background(), port, group)
 }

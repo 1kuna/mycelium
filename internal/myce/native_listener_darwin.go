@@ -14,15 +14,21 @@ package myce
 // information (including cwd/text), which can block on a stalled mount.
 // Return 0 for no listener, 1 for loopback, 2 for non-loopback, or -errno.
 static int myce_owned_listener(int pid, int port) {
+    errno = 0;
     int size = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, NULL, 0);
-    if (size <= 0) return 0;
+    if (size <= 0) return errno == ESRCH ? 0 : -errno;
     struct proc_fdinfo *fds;
     int bytes;
     for (;;) {
         fds = malloc(size);
         if (!fds) return -ENOMEM;
+        errno = 0;
         bytes = proc_pidinfo(pid, PROC_PIDLISTFDS, 0, fds, size);
-        if (bytes <= 0) { free(fds); return 0; }
+        if (bytes <= 0) {
+            int error = errno;
+            free(fds);
+            return error == ESRCH ? 0 : -error;
+        }
         if (bytes < size) break;
         free(fds);
         size *= 2; // Retry a full buffer so newly opened descriptors aren't lost.
@@ -54,8 +60,10 @@ import "C"
 import (
 	"errors"
 	"fmt"
+	"net"
 	"strconv"
 	"syscall"
+	"time"
 )
 
 func verifyDarwinNativeListener(port string, owned map[int]bool) error {
@@ -76,8 +84,17 @@ func verifyDarwinNativeListener(port string, owned map[int]bool) error {
 		}
 	}
 	if !found {
-		// A foreign listener cannot confirm ownership of this attempt's port.
-		return errNativeForeignListener
+		// Distinguish a foreign listener from a helper that exited before
+		// listening, so an application failure isn't retried as a port collision.
+		conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", port), 100*time.Millisecond)
+		if err == nil {
+			conn.Close()
+			return errNativeForeignListener
+		}
+		if errors.Is(err, syscall.ECONNREFUSED) {
+			return errors.New("native readiness listener ownership unconfirmed")
+		}
+		return fmt.Errorf("native listener ownership: %w", err)
 	}
 	return nil
 }

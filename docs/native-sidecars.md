@@ -42,7 +42,7 @@ a competing listener during handoff retries that member up to three times
 before readiness, allocating a fresh port for `port: 0`. Exhaustion or an
 unavailable fixed port uses the bounded infrastructure requeue. Unknown
 listener ownership fails preparation.
-Linux uses procfs; macOS requires `lsof`. Neither HTTP proxies nor redirects are
+Linux uses procfs; macOS uses libproc. Neither HTTP proxies nor redirects are
 used. Loopback does not isolate the helper from other local users/processes.
 
 For a helper named `my-helper`, main and all helpers receive:
