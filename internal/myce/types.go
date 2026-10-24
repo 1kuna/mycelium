@@ -319,6 +319,7 @@ type Job struct {
 	FileTransport         bool                         `json:"file_transport,omitempty"`
 	FileCheckpoints       map[int]FileCheckpoint       `json:"file_checkpoints,omitempty"`
 	ResumeFiles           *FileCheckpoint              `json:"resume_files,omitempty"`
+	FilesExpired          bool                         `json:"files_expired,omitempty"`
 	OutputRefs            FileManifest                 `json:"output_refs,omitempty"`
 	MemoryEnvelope        *JobMemoryEnvelope           `json:"memory_envelope,omitempty"`
 	MemoryFallback        *SizeHint                    `json:"memory_fallback,omitempty"`

@@ -192,6 +192,7 @@ func InstallSettings() []InstallSetting {
 			}
 			return nil
 		}),
+		installSetting("file-retention", "FileRetention", "terminal job input/result retention", func(c *ServiceConfig) *time.Duration { return &c.FileRetention }, installPositiveDuration),
 		installSetting("log-retention", "LogRetention", "completed log retention", func(c *ServiceConfig) *time.Duration { return &c.LogRetention }, installPositiveDuration),
 		installPath("upload-spool-dir", "UploadSpoolDir", "local upload spool", func(c *ServiceConfig) *string { return &c.UploadSpoolDir }, false),
 		installSetting("upload-spool-bytes", "UploadSpoolBytes", "total upload spool bytes", func(c *ServiceConfig) *int64 { return &c.UploadSpoolBytes }, installBytes),

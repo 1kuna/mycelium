@@ -168,8 +168,11 @@ func snapshotEnvironment(r EnvironmentRecipe, platform string) (EnvironmentRecip
 	return r, nil
 }
 func (q *Queue) ConfigureEnvironments(c EnvironmentCatalog) error {
+	q.fileLifecycle.RLock()
+	defer q.fileLifecycle.RUnlock()
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	q.fileReferenceRevision++
 	q.environments = c
 	return nil
 }

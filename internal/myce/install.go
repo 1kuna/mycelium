@@ -109,6 +109,7 @@ type ServiceConfig struct {
 	UploadSpoolDir        string         `json:"upload_spool_dir"`
 	UploadSpoolBytes      int64          `json:"upload_spool_bytes"`
 	ContainerRetention    *time.Duration `json:"container_retention"`
+	FileRetention         time.Duration  `json:"file_retention"`
 	LogRetention          time.Duration  `json:"log_retention"`
 	Heartbeat             time.Duration  `json:"heartbeat"`
 	RestartGrace          time.Duration  `json:"restart_grace"`
@@ -207,6 +208,7 @@ func PlanInstall(role, home, root, nas, queue, name string, d Detection, account
 	c.MemoryCeilingSlackGB = .125
 	c.Heartbeat = time.Second
 	c.LogRetention = DefaultLogRetention
+	c.FileRetention = DefaultFileRetention
 	c.RestartGrace = RestartGrace
 	c.ProductionInfrastructureRetries = DefaultProductionInfrastructureRetries
 	c.ProductionLossTimeout, c.DeadlineLossTimeout, c.ExperimentLossTimeout = ProductionLossAfter, DeadlineLossAfter, LossAfter
@@ -486,7 +488,7 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 }
 
 func ReadServiceConfig(path string) (ServiceConfig, error) {
-	c := ServiceConfig{ProductionInfrastructureRetries: DefaultProductionInfrastructureRetries}
+	c := ServiceConfig{ProductionInfrastructureRetries: DefaultProductionInfrastructureRetries, FileRetention: DefaultFileRetention}
 	b, e := os.ReadFile(path)
 	if e != nil {
 		return c, e
@@ -761,6 +763,9 @@ func (c ServiceConfig) Args() []string {
 		args = append(args, "--log-retention", c.LogRetention.String())
 	}
 	if c.Role == "queue" {
+		if c.FileRetention > 0 {
+			args = append(args, "--file-retention", c.FileRetention.String())
+		}
 		for _, v := range [][2]string{{"--project-config", c.ProjectConfig}, {"--host-config", c.HostConfig}, {"--upload-spool-dir", c.UploadSpoolDir}} {
 			if v[1] != "" {
 				args = append(args, v[0], v[1])

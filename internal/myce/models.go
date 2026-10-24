@@ -279,6 +279,8 @@ func slotMachine(m *Machine, s *ModelSlot) *Machine {
 }
 
 func (q *Queue) ConfigureModels(c ModelConfig) error {
+	q.fileLifecycle.RLock()
+	defer q.fileLifecycle.RUnlock()
 	if e := validateModels(c); e != nil {
 		return e
 	}
@@ -313,6 +315,7 @@ func (q *Queue) ConfigureModels(c ModelConfig) error {
 			}
 		}
 	}
+	q.fileReferenceRevision++
 	q.models = c
 	q.calls = map[string]*ModelCall{}
 	if q.s.ModelSlots == nil {

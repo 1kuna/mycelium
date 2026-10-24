@@ -101,11 +101,13 @@ func verifyFile(ctx context.Context, path string, ref FileRef) error {
 }
 
 type FileStore struct {
-	root    string
-	limit   int64
-	mu      sync.Mutex
-	handler http.Handler
-	syncDir func(string) error // Durability failure injection.
+	root      string
+	limit     int64
+	mu        sync.Mutex
+	handler   http.Handler
+	syncDir   func(string) error // Durability failure injection.
+	expired   func(string) bool
+	lifecycle *sync.RWMutex
 }
 type FileConfig struct {
 	Checkpoints bool `json:"checkpoints"`
@@ -140,7 +142,7 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 			return err
 		}
 	}
-	s := &FileStore{root: root, limit: limit, syncDir: syncWorkerDir}
+	s := &FileStore{root: root, limit: limit, syncDir: syncWorkerDir, expired: q.expiredBlob, lifecycle: &q.fileLifecycle}
 	fs := filestore.New(filepath.Join(root, "uploads"))
 	fs.DirModePerm = 0700
 	fs.FileModePerm = 0600
@@ -165,6 +167,8 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 		return err
 	}
 	s.handler = http.StripPrefix("/api/files/uploads/", h)
+	q.fileLifecycle.RLock()
+	defer q.fileLifecycle.RUnlock()
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.files = s
@@ -210,6 +214,9 @@ func (s *FileStore) publish(ctx context.Context, ref FileRef) error {
 	return s.syncDir(filepath.Join(s.root, "uploads"))
 }
 func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
+	// Fence upload publication against unlink without serializing other uploads.
+	s.lifecycle.RLock()
+	defer s.lifecycle.RUnlock()
 	id := strings.TrimPrefix(r.URL.Path, "/api/files/uploads/")
 	if id != "" {
 		if err := (FileRef{SHA256: id}).validate(); err != nil {
@@ -223,7 +230,7 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 		s.handler.ServeHTTP(w, r)
 		return
 	}
-	// Serialize creation/admission only. tusd's file locker serializes each PATCH/HEAD.
+	// tusd serializes each PATCH/HEAD; only creation/admission is global.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	length, err := strconv.ParseInt(r.Header.Get("Upload-Length"), 10, 64)
@@ -322,14 +329,22 @@ func (s *FileStore) serveBlob(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid file", 400)
 		return
 	}
+	missing := func() {
+		if s.expired != nil && s.expired(hash) {
+			w.Header().Set("X-Myce-Error-Code", "result_expired")
+			respond(w, nil, resultExpired())
+		} else {
+			http.NotFound(w, r)
+		}
+	}
 	path := filepath.Join(s.root, "blobs", hash)
 	if err := noModelSymlinks(path, false); err != nil {
-		http.NotFound(w, r)
+		missing()
 		return
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		http.NotFound(w, r)
+		missing()
 		return
 	}
 	defer f.Close()
@@ -339,12 +354,18 @@ func (s *FileStore) serveBlob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Recheck disk bytes before serving: an ETag must never certify corrupt data.
-	if err = verifyFile(r.Context(), path, FileRef{hash, st.Size()}); err != nil {
+	h := sha256.New()
+	n, verifyErr := io.Copy(h, contextReader{r.Context(), f})
+	if verifyErr != nil || n != st.Size() || hex.EncodeToString(h.Sum(nil)) != hash {
 		http.Error(w, "stored file corrupt", 500)
 		return
 	}
 	if err = s.syncDir(filepath.Join(s.root, "blobs")); err != nil {
 		http.Error(w, "file durability unavailable", 503)
+		return
+	}
+	if _, err = f.Seek(0, io.SeekStart); err != nil {
+		http.Error(w, "stored file seek failed", 500)
 		return
 	}
 	w.Header().Set("ETag", `"`+hash+`"`)
@@ -387,7 +408,7 @@ func fileResponse(res *http.Response, want int) error {
 	defer res.Body.Close()
 	_, err := io.Copy(io.Discard, res.Body)
 	if res.StatusCode != want {
-		return &HTTPError{Status: res.StatusCode, Message: "file transfer failed"}
+		return fileTransferError(res, "file transfer failed")
 	}
 	return err
 }
@@ -405,7 +426,7 @@ func (c Client) HasFile(ctx context.Context, ref FileRef) error {
 	}
 	defer res.Body.Close()
 	if res.StatusCode != 200 {
-		return &HTTPError{Status: res.StatusCode, Message: "file unavailable"}
+		return fileTransferError(res, "file unavailable")
 	}
 	if res.ContentLength != ref.SizeBytes || res.Header.Get("ETag") != `"`+ref.SHA256+`"` {
 		return errors.New("stored file identity mismatch")
@@ -420,7 +441,7 @@ func (c Client) UploadFile(ctx context.Context, path string, ref FileRef) error 
 		return nil
 	} else {
 		var he *HTTPError
-		if !errors.As(err, &he) || he.Status != 404 {
+		if !errors.As(err, &he) || (he.Status != 404 && he.Status != 410) {
 			return err
 		}
 	}
@@ -507,6 +528,11 @@ func (c Client) DownloadFile(ctx context.Context, ref FileRef, dest string) erro
 		return errors.New("file partial exceeds declared size")
 	}
 	if offset == ref.SizeBytes {
+		if ref.SizeBytes == 0 {
+			if err := c.HasFile(ctx, ref); err != nil {
+				return err
+			}
+		}
 		return verifyFile(ctx, dest, ref)
 	}
 	headers := map[string]string{"If-Range": `"` + ref.SHA256 + `"`}
@@ -518,6 +544,9 @@ func (c Client) DownloadFile(ctx context.Context, ref FileRef, dest string) erro
 		return err
 	}
 	defer res.Body.Close()
+	if res.StatusCode != 200 && res.StatusCode != 206 {
+		return fileTransferError(res, "download failed")
+	}
 	if res.Header.Get("ETag") != `"`+ref.SHA256+`"` {
 		return errors.New("download identity mismatch")
 	}
@@ -549,4 +578,11 @@ func (c Client) DownloadFile(ctx context.Context, ref FileRef, dest string) erro
 		return errors.New("download interrupted or oversized")
 	}
 	return verifyFile(ctx, dest, ref)
+}
+
+func fileTransferError(res *http.Response, message string) error {
+	if res.StatusCode == 410 && res.Header.Get("X-Myce-Error-Code") == "result_expired" {
+		return resultExpired()
+	}
+	return &HTTPError{Status: res.StatusCode, Message: message}
 }

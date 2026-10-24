@@ -822,6 +822,10 @@
           "type": "boolean",
           "x-contract": "diagnostic"
         },
+        "files_expired": {
+          "type": "boolean",
+          "x-contract": "diagnostic"
+        },
         "finished_at": {
           "description": "Recorded terminal time, when present. Historical terminal records may omit it.",
           "format": "date-time",

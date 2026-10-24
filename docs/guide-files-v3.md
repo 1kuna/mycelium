@@ -128,12 +128,28 @@ loading/pre-copy uses the existing `--model-cache-bytes` admission and pin/loade
 protection. Stored model eviction verifies that authoritative files remain before
 removing disposable copies. The original NAS cache Trash behavior is unchanged.
 
-The authoritative store never automatically deletes inputs, outputs, checkpoints
-or interrupted uploads. Capacity exhaustion returns HTTP 507; keep local source
-copies until acknowledgement. Failed/unindexed uploads stay for explicit operator
-inspection and recovery. Retention/backup and a separate storage-role selector
-are future work, not automatic cleanup or failover. Attempt folders and local
-spools remain for inspection, separate from the bounded reusable caches.
+The queue reclaims stored inputs and results **7 days after a job becomes
+terminal**, configured with `queue --file-retention DURATION` (positive, default
+`168h`). Queue maintenance uses the queue clock; no separate cleanup timer runs.
+Job records, keyed answers and file identities remain, with `files_expired: true`.
+Increasing the window cannot restore files that already expired.
+
+A blob remains while another job within its window or any non-terminal job needs
+it, or any checkpoint generation, catalog model, extension or environment refers
+to it. Checkpoints and catalog storage are outside this collector. Open downloads
+finish through their existing file handles; disconnected callers must download
+within the retention window. An expired result download returns typed HTTP 410
+`result_expired`. Raw file fetches return that code when expired bytes have been
+reclaimed, rather than reporting an unknown file. Accepted result helpers also
+check the job's expiry marker, even if another reference keeps shared bytes.
+
+Only expired terminal-job input/result blobs are candidates. Unreferenced,
+interrupted and unindexed uploads remain for explicit operator inspection and
+recovery; abandoned pre-submission profile uploads are a known follow-up. Capacity
+exhaustion still returns HTTP 507: retention does not evict active data, checkpoints
+or catalog files to make room. Keep local sources until acknowledgement and
+retrieve results before expiry. One store is not a backup. Attempt folders and
+local spools remain for inspection, separate from bounded reusable caches.
 
 The implementation uses Go HTTP range serving, SHA-256 and embedded tusd file
 storage/locking. Local failure tests cover interrupted transfers, offsets, corrupt

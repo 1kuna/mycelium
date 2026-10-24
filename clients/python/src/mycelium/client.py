@@ -148,6 +148,8 @@ class Client:
         job = self.submit_and_wait({"name": extension, "project": project, "class": class_,
                                     "extension": extension, "submission_key": key,
                                     "files": files}, timeout=timeout)
+        if job.get("files_expired"):
+            raise APIError(410, json.dumps({"code": "result_expired", "error": "stored job files expired after the retention window"}))
         if job["state"] != "succeeded":
             short = job["id"][:8]
             raise APIError(409, json.dumps({"code": "job_" + job["state"], "job_id": job["id"],
@@ -228,6 +230,8 @@ class Client:
         Queue/worker paths are never interpreted as local paths.
         """
         job = self.get(job_id)
+        if job.get("files_expired"):
+            raise APIError(410, json.dumps({"code": "result_expired", "error": "stored job files expired after the retention window"}))
         if job["state"] != "succeeded":
             raise APIError(409, json.dumps({"code": "request_stale", "error": "job has no accepted result"}))
         ref = job.get("output_refs", {}).get(artifact)

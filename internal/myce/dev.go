@@ -18,6 +18,7 @@ type DevConfig struct {
 	ProductionInfrastructureRetries *int
 	FileStore                       string
 	FileStoreLimit                  int64
+	FileRetention                   time.Duration
 	NASCheckpoints                  bool
 	ExtensionRoot, JobFileRoot      string
 
@@ -98,6 +99,12 @@ func startDev(c DevConfig, configureQueue func(*Queue)) (*Dev, error) {
 	}
 	if c.ProductionInfrastructureRetries != nil {
 		if err = q.SetProductionInfrastructureRetries(*c.ProductionInfrastructureRetries); err != nil {
+			q.Close()
+			return nil, err
+		}
+	}
+	if c.FileRetention != 0 {
+		if err = q.ConfigureFileRetention(c.FileRetention); err != nil {
 			q.Close()
 			return nil, err
 		}

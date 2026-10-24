@@ -287,6 +287,8 @@ func ReadExtension(folder string) (Extension, error) {
 	return extensionFromFiles(files)
 }
 func (q *Queue) AddExtension(e Extension) error {
+	q.fileLifecycle.RLock()
+	defer q.fileLifecycle.RUnlock()
 	checked, err := extensionFromFiles(e.Files)
 	if err != nil {
 		return err
