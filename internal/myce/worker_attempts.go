@@ -110,7 +110,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				} else if !d.Hold {
 					bound, err := w.forAttempt(a.job)
 					if err == nil {
-						p, err = bound.start(s, a.job)
+						p, err = bound.startContext(ctx, s, a.job)
 					} else {
 						err = s.startFailure(a.job, launchRefused, err)
 					}
@@ -358,7 +358,8 @@ func (s *workerStore) attemptStores() ([]*workerStore, error) {
 			return nil, errors.New("mismatched or duplicate saved attempt custody")
 		}
 		seen[key] = true
-		child.nasProbe.timeout, child.nasPrepare.timeout = heartbeatFilesystemBudget, 250*time.Millisecond
+		child.nasProbe.timeout, child.nasPrepare.timeout = heartbeatFilesystemBudget, checkpointPreparationBudget
+		child.nasProgress.timeout = heartbeatFilesystemBudget
 		if err := child.readOperatorStop(); err != nil {
 			return nil, err
 		}
@@ -368,7 +369,8 @@ func (s *workerStore) attemptStores() ([]*workerStore, error) {
 
 func newAttemptStore(root *workerStore, j Job) (*workerStore, error) {
 	s := &workerStore{dir: root.dir, stateName: "state-attempt-" + ID() + ".json", state: workerState{Session: j.Session, Job: &j, CheckpointRoot: root.state.CheckpointRoot, Identity: ID()}}
-	s.nasPrepare.timeout = 250 * time.Millisecond
+	s.nasPrepare.timeout = checkpointPreparationBudget
+	s.nasProgress.timeout = heartbeatFilesystemBudget
 	return s, s.save()
 }
 

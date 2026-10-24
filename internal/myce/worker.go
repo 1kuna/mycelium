@@ -228,6 +228,10 @@ var errWorkerCheckpoint = errors.New("checkpoint storage unavailable")
 var errWorkerReleasePending = errors.New("command release unconfirmed")
 
 func (w Worker) start(s *workerStore, j Job) (*process, error) {
+	return w.startContext(context.Background(), s, j)
+}
+
+func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (*process, error) {
 	if err := w.verifyDevice(); err != nil {
 		return nil, s.startFailure(j, launchRefused, err)
 	}
@@ -298,7 +302,10 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	var checkpoint string
 	var err error
 	if needsCheckpoint(&j) {
-		checkpoint, err = s.nasPrepare.run(attemptCheckpoint(j), func() (string, error) { return prepare(j) })
+		checkpoint, err = s.nasPrepare.runBounded(ctx, attemptCheckpoint(j), func() (string, error) { return prepare(j) }, false)
+		if err == nil {
+			err = ctx.Err()
+		}
 		s.checkpointUnavailable = err != nil
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", errWorkerCheckpoint, err)

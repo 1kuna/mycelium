@@ -300,7 +300,11 @@ func workerWithPreparedCheckpoint(t *testing.T, w Worker, store *workerStore, pa
 		<-release
 		return prepareCheckpoint(value)
 	}
+	// This fixture forces a timeout; use a short injected budget, then restore policy.
+	budget := store.nasPrepare.timeout
+	store.nasPrepare.timeout = time.Millisecond
 	process, err := w.start(store, payload)
+	store.nasPrepare.timeout = budget
 	close(release)
 	if process != nil || !errors.Is(err, errWorkerCheckpoint) || !store.checkpointUnavailable {
 		t.Fatalf("blocked preparation must defer startup: process=%v err=%v unavailable=%v", process, err, store.checkpointUnavailable)

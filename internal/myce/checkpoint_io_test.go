@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"errors"
 	"strings"
 	"sync/atomic"
@@ -26,9 +27,8 @@ func testWorkerPreparationToleratesSlowMetadata(t *testing.T) {
 	finished := make(chan struct{})
 	w.checkpointPrepare = func(j Job) (string, error) {
 		defer close(finished)
-		// Healthy CIFS operation sequences measured up to 109 ms; allow margin
-		// beyond that and the previously observed 16 ms cold stat.
-		<-time.After(150 * time.Millisecond)
+		// Healthy SMB fsync can take over a second before a job starts.
+		<-time.After(1500 * time.Millisecond)
 		return prepareCheckpoint(j)
 	}
 	defer func() { <-finished }()
@@ -79,8 +79,8 @@ func testWorkerPreparationTimeoutRetainsSingleCall(t *testing.T) {
 			if !s.checkpointUnavailable || s.state.Result != nil || s.state.PID != 0 {
 				t.Fatal("timed-out preparation started or failed the job")
 			}
-		case <-time.After(time.Second):
-			t.Fatal("hung preparation exceeded one-second wall-clock test bound")
+		case <-time.After(checkpointPreparationBudget + time.Second):
+			t.Fatal("hung preparation exceeded its bounded wait")
 		}
 	}
 	if calls.Load() != 1 {
@@ -160,4 +160,57 @@ func testWorkerNASProbeBlockedAndRecovery(t *testing.T) {
 	if available || !errors.Is(err, want) {
 		t.Fatalf("filesystem error lost: %v", err)
 	}
+}
+
+// Exercise the real queue adapter without making a network filesystem a test prerequisite.
+func TestQueueNASProbeToleratesSlowMetadata(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		q, _ := fixture(t)
+		defer func() {
+			q.nasProbe.mu.Lock()
+			pending := q.nasProbe.pending
+			q.nasProbe.mu.Unlock()
+			if pending != nil {
+				<-pending.done
+			}
+		}()
+		q.checkpointProbe = func() bool {
+			available, _ := q.nasProbe.run(q.root, func() (bool, error) {
+				time.Sleep(500 * time.Millisecond)
+				return true, nil
+			})
+			return available
+		}
+		j := submit(t, q, spec("experiment"))
+		if r := check(t, q, machine("worker", "fake"), nil); r.Job == nil || r.Job.ID != j.ID {
+			t.Fatal("healthy slow NAS prevented assignment")
+		}
+	})
+}
+
+func TestWorkerPreparationCancellationRetainsSingleCall(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		w := recoveryWorker(t)
+		s, err := w.openStore()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.close()
+		release, entered, finished := make(chan struct{}), make(chan struct{}), make(chan struct{})
+		w.checkpointPrepare = func(Job) (string, error) {
+			close(entered)
+			defer close(finished)
+			<-release
+			return "", nil
+		}
+		defer func() { close(release); <-finished }()
+		ctx, cancel := context.WithCancel(context.Background())
+		done := make(chan error, 1)
+		go func() { _, err := w.startContext(ctx, s, recoveryJob(t, []string{"true"})); done <- err }()
+		<-entered
+		cancel()
+		if err := <-done; !errors.Is(err, errWorkerCheckpoint) || s.state.PID != 0 || s.state.Result != nil {
+			t.Fatalf("cancelled preparation launched or failed job: %v", err)
+		}
+	})
 }

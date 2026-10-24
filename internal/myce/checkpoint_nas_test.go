@@ -168,7 +168,7 @@ func TestBlockedNASDoesNotHoldQueue(t *testing.T) {
 		if r.Job == nil {
 			t.Fatal("production blocked by hung NAS")
 		}
-	case <-time.After(300 * time.Millisecond):
+	case <-time.After(heartbeatFilesystemBudget + time.Second):
 		t.Fatal("checkin hangs behind NAS syscall")
 	}
 	tick := make(chan error, 1)
@@ -178,7 +178,7 @@ func TestBlockedNASDoesNotHoldQueue(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(300 * time.Millisecond):
+	case <-time.After(heartbeatFilesystemBudget + time.Second):
 		t.Fatal("NAS holds queue loop")
 	}
 	if calls.Load() != 1 {
@@ -208,7 +208,7 @@ func TestBlockedCheckpointPreparationIsBounded(t *testing.T) {
 		if !errors.Is(err, errWorkerCheckpoint) {
 			t.Fatalf("%v", err)
 		}
-	case <-time.After(300 * time.Millisecond):
+	case <-time.After(checkpointPreparationBudget + time.Second):
 		t.Fatal("checkpoint preparation hangs start")
 	}
 }

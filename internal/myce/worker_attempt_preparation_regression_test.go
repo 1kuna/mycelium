@@ -34,8 +34,8 @@ func TestNewAttemptBlockedCheckpointPreparationIsBounded(t *testing.T) {
 		if p != nil || !errors.Is(err, errWorkerCheckpoint) {
 			t.Fatalf("blocked NAS preparation must defer attempt startup: process=%v err=%v", p, err)
 		}
-		if elapsed > 300*time.Millisecond {
-			t.Fatalf("new attempt checkpoint preparation held startup for %s; limit 300 ms", elapsed)
+		if elapsed != checkpointPreparationBudget {
+			t.Fatalf("new attempt checkpoint preparation waited %s; want budget %s", elapsed, checkpointPreparationBudget)
 		}
 	})
 }

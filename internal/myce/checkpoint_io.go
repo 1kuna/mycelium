@@ -7,14 +7,16 @@ import (
 	"time"
 )
 
-// NAS filesystem deadlines differ by phase: the heartbeat must report a
-// stalled observation within one second, while one-shot onboarding allows
-// slower SMB fsync/metadata calls. The total cap includes inventory and all I/O.
+// NAS budgets share one policy for SMB/NFS/autofs. Background observations must
+// return within a heartbeat; one-shot validation and job preparation allow slow
+// metadata/fsync sequences. Onboarding also caps the complete interactive check.
 const (
 	heartbeatFilesystemBudget      = 750 * time.Millisecond
-	networkFilesystemBudget        = 10 * time.Second // one-shot onboarding/reconfigure; total remains capped
+	networkFilesystemBudget        = 10 * time.Second
+	checkpointPreparationBudget    = networkFilesystemBudget
 	onboardingStorageBudget        = 15 * time.Second
-	onboardingMountInventoryBudget = 5 * time.Second // standalone selection, including dry runs
+	onboardingMountInventoryBudget = 5 * time.Second       // standalone selection, including dry runs
+	localObservationBudget         = 25 * time.Millisecond // local caches/inventory, never NAS
 )
 
 var errCheckpointIOTimeout = errors.New("NAS unreachable: filesystem operation timed out")
@@ -52,7 +54,7 @@ func (n *checkpointIO[T]) runBounded(parent context.Context, key string, fn func
 	var zero T
 	timeout := n.timeout
 	if timeout == 0 {
-		timeout = 25 * time.Millisecond
+		timeout = localObservationBudget
 	}
 	// I/O budgets use real deadlines; queue scheduling and grace still use Clock.
 	ctx, cancel := context.WithTimeout(parent, timeout)
