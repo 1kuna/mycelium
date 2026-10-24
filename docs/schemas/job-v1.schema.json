@@ -578,6 +578,15 @@
             "null"
           ]
         },
+        "sweeps": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ReferenceSweep"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
         "target": {
           "$ref": "#/$defs/ExecutionTarget"
         }
@@ -1064,6 +1073,9 @@
     },
     "ObservationKey": {
       "properties": {
+        "allowance": {
+          "type": "string"
+        },
         "batch_size": {
           "type": "integer"
         },
@@ -1210,6 +1222,37 @@
       "required": [
         "type",
         "file"
+      ],
+      "type": "object"
+    },
+    "ReferenceSweep": {
+      "properties": {
+        "command": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "counts": {
+          "items": {
+            "type": "integer"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "max_concurrency": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "command",
+        "counts",
+        "max_concurrency"
       ],
       "type": "object"
     },
