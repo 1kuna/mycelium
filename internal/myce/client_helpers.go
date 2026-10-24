@@ -139,6 +139,9 @@ func (c Client) DownloadResult(ctx context.Context, id, name, dest string) error
 	if err != nil {
 		return err
 	}
+	if j.FilesExpired {
+		return resultExpired()
+	}
 	if j.State != "succeeded" {
 		return &HTTPError{Status: 409, Code: "request_stale", Message: fmt.Sprintf("job is %s, no accepted result", j.State)}
 	}

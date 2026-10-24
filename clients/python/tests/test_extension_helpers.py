@@ -62,6 +62,10 @@ class ExtensionClientTests(unittest.TestCase):
 
     def test_missing_result_errors_are_typed(self):
         client = Client(token="fixture")
+        with patch.object(client, "get", return_value={"state": "succeeded", "files_expired": True}):
+            with self.assertRaises(APIError) as caught:
+                client.download_result("job", "result", "unused")
+            self.assertEqual((caught.exception.status, caught.exception.code), (410, "result_expired"))
         with patch.object(client, "list", return_value=[]):
             with self.assertRaises(APIError) as caught:
                 client.download_result("missing", "result", "unused")

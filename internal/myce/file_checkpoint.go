@@ -59,6 +59,8 @@ func (q *Queue) verifyManifest(ctx context.Context, m FileManifest) error {
 	return ctx.Err()
 }
 func (q *Queue) publishCheckpoint(ctx context.Context, p checkpointPublication) error {
+	q.fileLifecycle.RLock()
+	defer q.fileLifecycle.RUnlock()
 	if p.Checkpoint.Generation < 0 || len(p.Checkpoint.Files) == 0 {
 		return errors.New("checkpoint requires a complete save")
 	}

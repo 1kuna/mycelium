@@ -71,6 +71,17 @@ local file store in either checkpoint mode. A NAS fleet keeps its existing
 `--checkpoints` / worker `--checkpoint-root` configuration; input downloads and
 verified result uploads use the queue API without changing NAS checkpoint paths.
 
+Profile source/input and result blobs expire **7 days after the job becomes
+terminal**, configurable on the queue with `--file-retention` (default `168h`).
+Download results within that window. Job/key answers and hashes remain, with
+`files_expired: true`; a keyed resubmit adopts the same job and never reruns it.
+`Client.DownloadResult` / Python `download_result` fail with typed HTTP 410
+`result_expired` after expiry. Replaying `myce run --profile` refreshes the job and
+reports `result_expired` with exit 65, including for a receipt whose notification
+was already delivered. Open downloads finish, but a disconnected caller gets no
+extra grace beyond the window. Checkpoints and catalog storage remain protected.
+Abandoned uploads from profiles that never submitted are not automatically swept.
+
 Before any upload or submission, `.mycelium/receipts/` contains a synced, private
 receipt with frozen source/input hashes, argv and submission key. Gitignore this
 folder in each consuming project. The default key derives from profile, args and

@@ -208,6 +208,7 @@ func observeProfile(ctx context.Context, c myce.Client, dir string, r profileRec
 		notification.Status, notification.ObservationError = "observation_failed", r.ObservationError
 	} else {
 		r.Status, r.ResultReference = j.State, j.OutputRefs
+		r.FilesExpired = j.FilesExpired
 		notification.Status, notification.ResultReference = r.Status, r.ResultReference
 	}
 	notification.DeliveryID = profileHash([]string{r.Nonce, r.Project, r.Key, r.JobID, notification.Status, notification.ObservationError})

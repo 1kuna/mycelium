@@ -203,7 +203,33 @@ printf '\n' >> "$NOTIFICATION_FILE"
 	if exitCodeForTest(err) != 78 || impossible.Status != "intent" || impossible.JobID != "" {
 		t.Fatal("impossible target did not retain typed hold", impossible, err)
 	}
-	t.Log("local dev: frozen source, result check/download, missing notifier, detached delivery, caller replay and single notification")
+	// The same real profile result remains recoverable until the queue's
+	// fake clock advances beyond the documented recovery window.
+	if err = d.Client().Call(ctx, "POST", "/api/dev/clock/advance", map[string]any{"seconds": (myce.DefaultFileRetention + time.Second).Seconds()}, nil); err != nil {
+		t.Fatal(err)
+	}
+	var expired *myce.HTTPError
+	if err = d.Client().DownloadResult(ctx, r.JobID, "result", filepath.Join(root, "expired")); !errors.As(err, &expired) || expired.Status != 410 || expired.Code != "result_expired" {
+		t.Fatal("profile result did not expire loudly", err)
+	}
+	job, err := d.Client().GetJob(ctx, r.JobID)
+	if err != nil || !job.FilesExpired {
+		t.Fatal("expiry status missing", job, err)
+	}
+	for _, ref := range job.Spec.Files {
+		expired = nil
+		if err = d.Client().HasFile(ctx, ref); !errors.As(err, &expired) || expired.Status != 410 || expired.Code != "result_expired" {
+			t.Fatal("profile source not reclaimed", err)
+		}
+	}
+	if err = os.WriteFile(path, []byte(profile), 0600); err != nil {
+		t.Fatal(err)
+	}
+	expiredReceipt, err := invoke("--key", "missing", "--notify", notifier, "--", "literal")
+	if exitCodeForTest(err) != 65 || !expiredReceipt.FilesExpired || expiredReceipt.JobID != r.JobID {
+		t.Fatal("expired profile replay", expiredReceipt, err)
+	}
+	t.Log("local dev: frozen source, result check/download, receipt recovery, notification and fake-clock result expiry")
 }
 
 func exitCodeForTest(err error) int {

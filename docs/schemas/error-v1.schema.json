@@ -37,6 +37,7 @@
         "request_failed",
         "request_method_invalid",
         "artifact_unknown",
+        "result_expired",
         "extension_version_conflict",
         "extension_invalid",
         "extension_unknown",

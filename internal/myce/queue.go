@@ -81,6 +81,9 @@ type Queue struct {
 	onboardingNAS                   NASIdentity
 	productionInfrastructureRetries int
 
+	fileReferenceRevision  uint64
+	fileLifecycle          sync.RWMutex // Reference publication versus unlink; acquire before q.mu.
+	fileRetention          time.Duration
 	files                  *FileStore
 	fileCheckpoints        bool
 	submitVerificationSlot chan struct{}
@@ -166,7 +169,7 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	q := &Queue{logRetention: DefaultLogRetention, uploadSpool: uploadSpool{limit: DefaultUploadSpoolBytes, defaultDir: path + ".uploads"}, productionGrace: 10 * time.Second, productionInfrastructureRetries: DefaultProductionInfrastructureRetries, wake: make(chan struct{}), lossTimeouts: [3]time.Duration{ProductionLossAfter, DeadlineLossAfter, LossAfter}, lock: lock, db: db, clock: clock, root: abs, s: state{Schema: persistedSchema, Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
+	q := &Queue{fileRetention: DefaultFileRetention, logRetention: DefaultLogRetention, uploadSpool: uploadSpool{limit: DefaultUploadSpoolBytes, defaultDir: path + ".uploads"}, productionGrace: 10 * time.Second, productionInfrastructureRetries: DefaultProductionInfrastructureRetries, wake: make(chan struct{}), lossTimeouts: [3]time.Duration{ProductionLossAfter, DeadlineLossAfter, LossAfter}, lock: lock, db: db, clock: clock, root: abs, s: state{Schema: persistedSchema, Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
 	q.nasProbe.timeout = heartbeatFilesystemBudget
 	q.nasProgress.timeout = heartbeatFilesystemBudget
 	for _, option := range options {
@@ -372,6 +375,9 @@ func (q *Queue) update(fn func() error) error {
 		q.maintainSubmissions()
 		err = q.persistUsage()
 	}
+	if err == nil {
+		q.fileReferenceRevision++
+	}
 	if err == nil && q.wake != nil {
 		close(q.wake)
 		q.wake = make(chan struct{})
@@ -393,6 +399,8 @@ func (q *Queue) Submit(s Spec) (*Job, error) {
 // SubmitContext snapshots input custody before bulk verification. Key replay,
 // cancellation and job creation still serialize in the final update transaction.
 func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
+	q.fileLifecycle.RLock()
+	defer q.fileLifecycle.RUnlock()
 	defer func() {
 		if err == nil {
 			return
@@ -616,6 +624,7 @@ func (q *Queue) fleetQuiet(now time.Time) bool {
 }
 
 func (q *Queue) maintain() {
+	q.maintainFileExpiry()
 	q.maintainHostMaintenance()
 	q.maintainSubmissions()
 	now := q.clock.Now()
@@ -720,7 +729,7 @@ func (q *Queue) Tick() error {
 	if err := q.update(func() error { q.maintain(); return nil }); err != nil {
 		return err
 	}
-	return q.pruneBatchLogs()
+	return errors.Join(q.pruneBatchLogs(), q.reclaimJobFiles())
 }
 func (q *Queue) Checkin(c Checkin) (Reply, error) {
 	var err error
@@ -1101,6 +1110,8 @@ func (q *Queue) Complete(r Result) error {
 // Only a current, publishable attempt needs verification; release acknowledgements
 // and interrupted or retransmitted results retain their normal handling.
 func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
+	q.fileLifecycle.RLock()
+	defer q.fileLifecycle.RUnlock()
 	q.mu.Lock()
 	j, err := q.current(r)
 	verify := err == nil && j.storedFileResults() && j.State == "running" && !cancelled(j) && r.Success && !r.Interrupted && !r.ReleaseOnly

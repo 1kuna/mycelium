@@ -38,6 +38,7 @@ type profileReceipt struct {
 	Delivery         string            `json:"delivery"`
 	ObservationError string            `json:"observation_error,omitempty"`
 	DeliveryStatus   string            `json:"delivery_status,omitempty"`
+	FilesExpired     bool              `json:"files_expired,omitempty"`
 	ResultReference  myce.FileManifest `json:"result_reference,omitempty"`
 	Spec             myce.Spec         `json:"spec"`
 	Uploads          map[string]string `json:"uploads"`
@@ -350,6 +351,21 @@ func runProfile(ctx context.Context, name string, args []string, key, notify, co
 		r.Uploads = nil
 		if err = saveProfileJSON(filepath.Join(dir, "receipt.json"), r); err != nil {
 			return err
+		}
+	}
+	// Receipts can outlive the store's recovery window. Refresh the retained
+	// answer even when terminal notification was already delivered.
+	if r.Status == "succeeded" || r.Status == "failed" || r.Status == "cancelled" {
+		current, err := c.GetJob(ctx, r.JobID)
+		if err != nil {
+			return profileFailure(out, &r, 69, "queue_unavailable: retained job unavailable; intent retained")
+		}
+		r.Status, r.FilesExpired = current.State, current.FilesExpired
+		if r.FilesExpired {
+			if err = saveProfileJSON(filepath.Join(dir, "receipt.json"), r); err != nil {
+				return err
+			}
+			return profileFailure(out, &r, 65, "result_expired: stored job files exceeded the queue retention window")
 		}
 	}
 	// Observer configuration is private caller state, never part of the job.

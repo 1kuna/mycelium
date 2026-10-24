@@ -58,6 +58,30 @@ succeed. Inspect owned work before using separately authorized service/container
 tools. Preserve results and custody for reconnect; there is no offline release
 guarantee. Consumer cancellation and application health remain independent.
 
+### Stored job file retention
+
+Queue maintenance reclaims stored job inputs and results after **7 days in a
+terminal state**. Set a positive `myce queue --file-retention DURATION`; installed
+queues accept `myce install queue --config QUEUE_CONFIG --file-retention DURATION`
+and preserve the setting across upgrades. The default is `168h`. This is separate
+from log retention, and applies in NAS and file-store checkpoint modes.
+
+Job records and keyed answers stay, including their file identities and
+`files_expired: true`. A keyed retry returns the original answer and never reruns
+expired work. Result helpers return HTTP 410 `result_expired`; raw input/result
+fetches return that typed error once their bytes are reclaimed. Open downloads
+can finish; callers returning after the window must accept expiry. Increasing
+retention does not restore expired data. Historical terminal jobs without a
+recorded finish time receive a full window from first observation.
+
+Reclamation preserves blobs needed by non-terminal or unexpired jobs, any
+checkpoint generation, catalog models, extensions and environments. It runs from
+`Queue.Tick`, with filesystem work outside the queue lock. There is no job-record
+pruning, result acknowledgment or early release command. Unreferenced and
+interrupted uploads are not swept in this round; inspect them explicitly before
+any separately authorized cleanup. Protected data or abandoned uploads can still
+fill the configured store or disk and return HTTP 507. See [files](guide-files-v3.md).
+
 ## Install and upgrade
 
 Build the single binary and inspect a plan before installation:
