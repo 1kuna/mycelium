@@ -551,3 +551,42 @@ and retries once with the persistent downloads. A second stall fails preparation
 with a diagnostic in the build log; cancellation never starts a retry. This
 watchdog also covers pixi and custom build steps. It does not impose a total
 build deadline on a build that continues making progress.
+
+### Accelerator driver fault quarantine
+
+Linux machine workers inspect the current boot's kernel journal on startup and
+check for new records every five seconds using the injected worker clock.
+`journalctl -k -b` runs as the worker account, without sudo; a readable `/dev/kmsg`
+is the fallback. The account needs ordinary kernel-journal read permission (for
+example, membership in `systemd-journal` where configured). If neither source is
+readable, the worker logs `accelerator fault monitor unavailable`; monitoring
+cannot detect faults in that state. No cheap qualified Apple source is currently
+available, so Apple monitoring is skipped.
+
+An xe/i915 fault or NVIDIA Xid matched to the device's PCI BDF sets its health
+reason to `device_fault_xe`, `device_fault_i915`, or `device_fault_nvidia_xid` and
+withholds its placement capacity. Other devices remain usable. The queue moves
+affected running jobs directly to `queued` using the existing bounded
+infrastructure-loss budget; their old exact attempts receive stop/kill directives
+and retain custody until cleanup is acknowledged. Reassignment creates a new
+attempt under the same job ID. This transition does not expose `stopping` or a
+terminal job state when a retry remains available. Infrastructure exhaustion
+still follows the existing terminal policy. Stale results cannot publish.
+
+Quarantine persists in the local worker spool across worker restarts. A changed
+Linux boot ID clears old quarantine; faults in the new boot can quarantine again.
+After repairing a device, an operator can request a clear without stopping the
+worker (replace the example directory with the configured worker state directory):
+
+```sh
+myce device clear-quarantine --state-dir ./worker-state --device 0
+```
+
+The command prints `clear_requested: true`; this confirms the local request,
+not healthy capacity. The worker applies it on the next successful log scan,
+provided no newer fault has replaced the acknowledged fault. Verify the device
+reason is empty and capacity is available in `myce status` before relying on it.
+Historical fault records are acknowledged so clearing does not immediately
+replay the same fault. Raw kernel text remains local and is neither published
+in status nor retained in quarantine state. Fault sources and family matchers
+are injectable for laptop verification.

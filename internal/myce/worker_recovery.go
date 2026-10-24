@@ -63,6 +63,7 @@ type workerState struct {
 	Log             string                 `json:"log,omitempty"`
 }
 type workerStore struct {
+	deviceFaults          checkpointIO[KernelLogSnapshot]
 	stateName             string
 	environmentLogs       checkpointIO[bool]
 	inventory             checkpointIO[[]MachineDevice]

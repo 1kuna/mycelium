@@ -30,6 +30,7 @@ func installSyntheticWorkerHost() {
 		return dir, os.MkdirAll(dir, 0700)
 	}
 	extensionIdentityProbe = syntheticIdentityProbe
+	workerDeviceFaultSource = func() DeviceFaultSource { return nil }
 	workerProfileProbe = syntheticProfileProbe
 	workerHostMemorySource = func(reserve float64) (MemorySource, error) {
 		return func(context.Context) (float64, error) { return max(0, 128-reserve), nil }, nil

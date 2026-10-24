@@ -253,6 +253,7 @@ func (w *Worker) refreshInventory(ctx context.Context, observed []MachineDevice,
 		}
 	}
 	w.Machine.Devices = devices
+	w.applyDeviceQuarantine()
 	return nil
 }
 

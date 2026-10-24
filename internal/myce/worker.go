@@ -29,13 +29,17 @@ type Worker struct {
 	Enrollment     bool
 	DeviceSettings []DeviceInstall
 
-	InventoryProbe     func(context.Context) ([]MachineDevice, error)
-	CPUIsolationProbe  func(context.Context) error
-	cpuRuntimeProbe    *MachineProbe // Runtime/OS seam; tests still exercise real verification rules.
-	selectedDevice     *MachineDevice
-	cpuIsolation       bool
-	inventoryAllowance []string
-	inventoryReason    string
+	DeviceFaultSource       DeviceFaultSource
+	DeviceFaultMatchers     map[string]DeviceFaultMatcher
+	faults                  *deviceQuarantine
+	faultMonitorUnavailable bool
+	InventoryProbe          func(context.Context) ([]MachineDevice, error)
+	CPUIsolationProbe       func(context.Context) error
+	cpuRuntimeProbe         *MachineProbe // Runtime/OS seam; tests still exercise real verification rules.
+	selectedDevice          *MachineDevice
+	cpuIsolation            bool
+	inventoryAllowance      []string
+	inventoryReason         string
 	// Benchmark runs only when explicitly enabled; fake inventory never loads the host.
 	OnboardingBenchmark   bool
 	Benchmark             func(context.Context, BenchmarkConfig, *CapabilityProfile) error
@@ -806,6 +810,9 @@ func (w Worker) Run(stop context.Context) error {
 		return err
 	}
 	if err = w.initInventory(stop, s); err != nil {
+		return err
+	}
+	if err = w.initDeviceFaults(stop, s); err != nil {
 		return err
 	}
 	if err = w.prepareEnrollment(stop, s); err != nil {

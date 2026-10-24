@@ -504,7 +504,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 	var cpuQualification checkpointIO[string]
 	w.Machine.CPUIsolation = cpuIsolationUnavailable
 	var retry workerRetry
-	var nextRetention time.Time
+	var nextRetention, nextFaultProbe time.Time
 	leaving, leaveSent := stop.Err() != nil, false
 	stopCh := stop.Done()
 	base := w.Machine.FreeMemoryGB
@@ -595,6 +595,12 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			})
 			if err := w.refreshInventory(ctx, observed, probeErr, root); err != nil {
 				return err
+			}
+			if !now.Before(nextFaultProbe) {
+				if err := w.refreshDeviceFaults(ctx, root); err != nil {
+					return err
+				}
+				nextFaultProbe = now.Add(5 * time.Second)
 			}
 			m.Devices = slices.Clone(w.Machine.Devices)
 			// Slow runtime enumeration must not block heartbeats or stop delivery.

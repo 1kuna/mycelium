@@ -15,6 +15,9 @@ func diagnostic(value, message string) string {
 }
 
 func deviceReasonDiagnostic(reason string) string {
+	if deviceFaultReason(reason) {
+		return reason
+	}
 	switch reason {
 	case "cuda: device_probe_unavailable", "xpu: device_probe_unavailable", "cuda: device_probe_unavailable; xpu: device_probe_unavailable", "device_identity_mismatch", "device_selector_unmatched", "device_probe_unavailable", "device_budget_unavailable", "device_memory_unavailable":
 		return reason

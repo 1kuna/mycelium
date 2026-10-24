@@ -903,6 +903,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		m.modelReservationDebtGB = max(0, reservation-m.FreeMemoryGB)
 		m.FreeMemoryGB = max(0, m.FreeMemoryGB-reservation)
 		q.withdrawUnavailable(&m)
+		q.quarantineDeviceAttempts(&m)
 		q.maintain()
 		defer func() {
 			m.AdmissionReason = q.machineLimitReason(&m)
