@@ -1859,19 +1859,32 @@ become measurements. Status shows the source, envelope and enforcement mode.
 Input-size/duration scaling per recipe is a follow-up slice, not part of this
 amendment.
 Reservations are frozen per attempt; stale, failed, OOM, constrained and resumed
-observations cannot shrink an envelope. Member caps are optional; explicit caps
+observations cannot shrink an envelope. Resumed jobs can use prior accepted
+estimates. An auto OOM retains its envelope as a lower bound for one retry with
+25% more room, on the same host if it fits; performance Forbidden points do not
+discard earlier accepted memory evidence. Member caps are optional; explicit caps
 remain supported and fit the job envelope.
 
 Linux native attempts use their existing shared parent cgroup for main and all
-sidecars, bounded/zero swap, whole-parent `memory.peak` and a job OOM cause.
-GPU samples belong to the attempt's process inventory where supported; missing
-counters stay unknown. Unified host/GPU peaks overlap: their maximum bounds the
-shared pool, never their sum. Keep the existing operator/driver reserve and
+sidecars, bounded/zero swap and a job OOM cause. Learn the sampled whole-parent
+anon + kernel + shmem peak from `memory.stat`; retain `memory.peak` only as a
+total-memory diagnostic, since it includes reclaimable page cache. OOM, swap-out
+or anonymous reclaim mark measurements constrained; file-cache reclaim does not.
+Fully capped native groups preserve member-level OOM attribution and kill mode.
+GPU samples belong to the attempt's process inventory where supported, only for
+auto or estimate-feeding attempts, every five seconds and until unsupported.
+Missing counters stay unknown. Until a Spark qualification establishes whether
+CUDA allocations overlap memcg charges, add measured host and GPU peaks on
+unified hosts. An unknown device peak cannot supply an exact unified estimate.
+Keep the existing operator/driver reserve and
 per-attempt slack; do not invent another fixed reserve. Live available RAM and
 the shared machine allowance both bound admission, with a visible refusal reason.
 
 Envelope-only Docker groups require a verified local shared cgroup parent
 (cgroupfs with worker delegation). Unsupported daemons refuse with an explicit
 reason and native/capped alternatives. Existing capped Docker groups retain
-member-only enforcement. Docker driver and Linux/GPU enforcement qualification
+member-only enforcement. Shared-envelope Docker attempts end when the worker
+unit stops. If daemon inventory proves all members stopped but the delegated
+parent vanished, release custody with unknown peak and cause, without learning.
+Docker driver and Linux/GPU enforcement qualification
 are deployment checks, separate from laptop proof; the B70 driver is unverified.

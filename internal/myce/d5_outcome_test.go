@@ -209,7 +209,7 @@ func d5RuntimeOutcome(t *testing.T, runtime string, tc outcomeRow) Result {
 			leaf = p.native.main.Cgroup
 		}
 		p.mu.Unlock()
-		if err := os.WriteFile(filepath.Join(leaf, "memory.events"), []byte("oom_kill 1\n"), 0600); err != nil {
+		if err := os.WriteFile(filepath.Join(leaf, "memory.events"), []byte("oom 1\noom_kill 1\n"), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}

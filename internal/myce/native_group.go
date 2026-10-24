@@ -262,7 +262,7 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 	if w.control != nil {
 		w.control.set(p)
 	}
-	finishMemory := w.observeAttemptMemory(memory)
+	finishMemory := w.observeAttemptMemory(memory, j)
 	go func() {
 		defer cancel()
 		for _, release := range releases {
@@ -892,6 +892,13 @@ func (g *nativeGroup) setupMemory() error {
 	if err != nil || c == nil {
 		return err
 	}
+	whole := g.p.job.Spec.Needs.Memory == "auto" || g.p.job.Spec.Run.MemoryGB == 0
+	for _, side := range g.p.job.Spec.Run.Sidecars {
+		whole = whole || side.MemoryGB == 0
+	}
+	if err := g.memory.setOOMGroup(whole); err != nil {
+		return err
+	}
 	g.control, err = c.create("control", g.memory.bytes, 0)
 	if err != nil {
 		return err
@@ -922,15 +929,12 @@ func (g *nativeGroup) setupMemory() error {
 }
 
 func (g *nativeGroup) memoryFailure() error {
-	if err := g.memory.failure(); err != nil {
-		return err
-	}
 	for _, m := range g.members {
-		if err := m.memory.failure(); err != nil {
+		if err := m.memory.localLimitFailure(); err != nil {
 			return fmt.Errorf("native member %s: %w", m.Name, err)
 		}
 	}
-	return g.memory.failure()
+	return g.memory.localLimitFailure()
 }
 
 // Inspect durable member evidence before orphan cleanup removes kernel counters.
@@ -968,7 +972,9 @@ func (s *workerStore) recoverNativeCause(machine string, fs memoryFS) error {
 	if custody.Identity != s.state.Identity {
 		return errors.New("mismatched native attempt custody")
 	}
-	for _, m := range record.Members {
+	// Recover member own-cap failures before the attempt parent's local OOM.
+	scopes := append(slices.Clone(record.Members), nativeMember{Cgroup: custody.Cgroup})
+	for i, m := range scopes {
 		if m.Cgroup == "" {
 			continue
 		}
@@ -976,7 +982,7 @@ func (s *workerStore) recoverNativeCause(machine string, fs memoryFS) error {
 		if m.Name != "main" {
 			leaf = "sidecar-" + m.Name
 		}
-		if filepath.Base(custody.Cgroup) != "attempt-"+s.state.Identity || m.Cgroup != filepath.Join(custody.Cgroup, leaf) {
+		if filepath.Base(custody.Cgroup) != "attempt-"+s.state.Identity || i < len(record.Members) && m.Cgroup != filepath.Join(custody.Cgroup, leaf) {
 			return errors.New("mismatched member cgroup custody")
 		}
 		limit, err := fs.ReadFile(filepath.Join(m.Cgroup, "memory.max"))
@@ -990,14 +996,18 @@ func (s *workerStore) recoverNativeCause(machine string, fs memoryFS) error {
 		if err != nil || bytes <= 0 {
 			return errors.New("invalid saved member memory cap")
 		}
-		err = (&memoryAttempt{fs: fs, path: m.Cgroup, bytes: bytes}).failure()
+		err = (&memoryAttempt{fs: fs, path: m.Cgroup, bytes: bytes}).localLimitFailure()
 		if err == nil {
 			continue
 		}
 		if ceilingDiagnostic(err.Error(), "") == "" {
 			return err
 		}
-		r := classifyAttemptOutcome(Result{Machine: machine, Session: s.state.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, ReleasePending: true, Error: "native member " + m.Name + ": " + err.Error(), ExecutionCause: &RuntimeCause{Operation: "command", Class: "resource_limit"}}, attemptCause{OutOfMemory: true})
+		cause := err.Error()
+		if i < len(record.Members) {
+			cause = "native member " + m.Name + ": " + cause
+		}
+		r := classifyAttemptOutcome(Result{Machine: machine, Session: s.state.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, ReleasePending: true, Error: cause, ExecutionCause: &RuntimeCause{Operation: "command", Class: "resource_limit"}}, attemptCause{OutOfMemory: true})
 		if err := saveWorkerJSON(s.dir, s.state.Identity+".result.json", r); err != nil {
 			return err
 		}

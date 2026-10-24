@@ -18,6 +18,14 @@ import (
 // Fake kernel files make delegation and launch ordering laptop-testable.
 type fakeMemoryFS struct{ osMemoryFS }
 
+func (f fakeMemoryFS) ReadFile(p string) ([]byte, error) {
+	b, err := f.osMemoryFS.ReadFile(p)
+	if errors.Is(err, os.ErrNotExist) && filepath.Base(p) == "memory.events.local" {
+		return f.osMemoryFS.ReadFile(filepath.Join(filepath.Dir(p), "memory.events"))
+	}
+	return b, err
+}
+
 func (f fakeMemoryFS) Mkdir(p string) error {
 	if err := os.Mkdir(p, 0700); err != nil {
 		return err

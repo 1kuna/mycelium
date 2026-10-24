@@ -6,10 +6,11 @@ import (
 	"strings"
 )
 
-// Nil counters mean unavailable, never zero. HostGB is the whole attempt's
-// cgroup high-water mark; DeviceGB is an attempt-scoped sampled lower bound.
+// Nil counters mean unavailable. HostGB samples anon + kernel + shmem, excluding
+// reclaimable file cache. CgroupGB retains the kernel's total high-water mark.
 type AttemptMemoryPeak struct {
 	HostGB      *float64 `json:"host_gb,omitempty"`
+	CgroupGB    *float64 `json:"cgroup_gb,omitempty"`
 	DeviceGB    *float64 `json:"device_gb,omitempty"`
 	Constrained bool     `json:"constrained,omitempty"`
 }
@@ -32,13 +33,13 @@ func mergeMemoryPeaks(old, next *AttemptMemoryPeak) *AttemptMemoryPeak {
 	if old != nil && !old.Constrained {
 		out = *old
 	}
-	for _, pair := range [][2]**float64{{&out.HostGB, &next.HostGB}, {&out.DeviceGB, &next.DeviceGB}} {
+	for _, pair := range [][2]**float64{{&out.HostGB, &next.HostGB}, {&out.CgroupGB, &next.CgroupGB}, {&out.DeviceGB, &next.DeviceGB}} {
 		if *pair[1] != nil && validMemoryValue(**pair[1]) && (*pair[0] == nil || **pair[1] > **pair[0]) {
 			n := **pair[1]
 			*pair[0] = &n
 		}
 	}
-	if out.HostGB == nil && out.DeviceGB == nil {
+	if out.HostGB == nil && out.CgroupGB == nil && out.DeviceGB == nil {
 		return nil
 	}
 	return &out
@@ -53,24 +54,21 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 	copy := *j
 	n := &copy.Spec.Needs
 	source, refusal := "declared", ""
-	if n.Memory == "auto" && j.OOMRetries == 0 {
+	if n.Memory == "auto" {
 		peak, factor, label := q.memoryEstimate(j, m)
 		switch {
 		case peak != nil:
 			host := *peak.HostGB * factor
 			if !n.cpuOnly() {
-				if peak.DeviceGB != nil && validRate(*peak.DeviceGB) {
+				if peak.DeviceGB != nil && validRate(*peak.DeviceGB) && validRate(*peak.DeviceGB*factor) {
 					n.MemoryGB = *peak.DeviceGB * factor
 				} else if label == "cross-machine estimate" {
 					// Unknown device counters cannot become zero reservations.
 					n.MemoryGB = max(n.MemoryGB, host)
 				}
 			}
-			if m.UnifiedMemory {
-				// Existing needs encode additional CPU-side RAM. Translate the
-				// overlapping whole-pool envelope back to that vector once.
-				host = max(host, n.MemoryGB) - n.MemoryGB
-			}
+			// Until unified memcg/GPU overlap is qualified on Spark, count both.
+			// hostNeed already adds this GPU reservation to the host vector.
 			n.HostMemoryGB = max(minimumHostMemoryGB, host)
 			source = label
 		case j.MemoryFallback != nil && j.MemoryFallback.valid():
@@ -125,6 +123,11 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 				}
 			}
 		}
+		if floor := j.MemoryOOMFloor; floor != nil {
+			n.MemoryGB = max(n.MemoryGB, floor.MemoryGB)
+			n.HostMemoryGB = max(n.HostMemoryGB, floor.HostMemoryGB)
+			source += "; OOM lower bound"
+		}
 	}
 	enforcement := m.MemoryEnforcement
 	if enforcement == "" {
@@ -140,17 +143,27 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 	return &copy
 }
 
-func sameMemoryWork(a, b ObservationKey) bool {
-	return a.MemoryConfiguration != "" && a.MemoryConfiguration == b.MemoryConfiguration && a.Work == b.Work && a.ExtensionDigest == b.ExtensionDigest && a.Reference == b.Reference && a.Concurrency == b.Concurrency && a.BatchSize == b.BatchSize
+func memoryConfiguration(needs ResourceNeeds, args []string, program *Program) string {
+	needs.Memory, needs.MemoryGB, needs.HostMemoryGB = "", 0, 0
+	needs.Platform, needs.GPU = Platform{}, nil
+	return identityHash(struct {
+		Needs   ResourceNeeds
+		Args    []string
+		Program *Program
+	}{needs, args, program})
+}
+
+func sameMemoryWork(point WorkObservation, key ObservationKey, configuration string) bool {
+	a := point.Key
+	return point.MemoryConfiguration != "" && point.MemoryConfiguration == configuration && a.Work == key.Work && a.ExtensionDigest == key.ExtensionDigest && a.Reference == key.Reference && a.Concurrency == key.Concurrency && a.BatchSize == key.BatchSize
 }
 
 // Transfer only the same frozen recipe/work/shape. Prefer the same OS/arch/
 // accelerator/layout family; this is not a throughput or input-size model.
 func (q *Queue) memoryEstimate(j *Job, m *Machine) (*AttemptMemoryPeak, float64, string) {
-	if j.Spec.Resumable && j.Attempt > 0 {
-		return nil, 0, ""
-	}
 	provenance := *j
+	// Resumption excludes recording, not using a prior complete-input estimate.
+	provenance.Attempt = 0
 	provenance.Machine, provenance.Session = m.ID, m.Session
 	provenance.AllocatedDevices = nil
 	if m.Devices != nil && !j.Spec.Needs.cpuOnly() {
@@ -161,13 +174,21 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) (*AttemptMemoryPeak, float64,
 		return nil, 0, ""
 	}
 	var exact, family, other *AttemptMemoryPeak
+	configuration := memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
+	layout := "separate"
+	if m.UnifiedMemory && !j.Spec.Needs.cpuOnly() {
+		layout = "unified"
+	}
 	for _, point := range q.s.WorkObservations {
 		k, p := point.Key, point.MemoryPeak
 		age := q.clock.Now().Sub(point.MemoryRecordedAt)
-		if !sameMemoryWork(k, *key) || point.Source != "accepted work" || point.Samples <= 0 || point.Forbidden || point.StaleReason != "" || point.MemoryRecordedAt.IsZero() || age < 0 || age > workCurveMaxAge || p == nil || p.Constrained || p.HostGB == nil || !validRate(*p.HostGB) || !validRate(*p.HostGB*2.5) {
+		if !sameMemoryWork(point, *key, configuration) || point.Source != "accepted work" || point.Samples <= 0 || point.StaleReason != "" || point.MemoryRecordedAt.IsZero() || age < 0 || age > workCurveMaxAge || p == nil || p.Constrained || p.HostGB == nil || !validRate(*p.HostGB) || !validRate(*p.HostGB*2.5) {
 			continue
 		}
-		sameFamily := k.Target == key.Target && k.MemoryLayout != "" && k.MemoryLayout == key.MemoryLayout
+		if m.UnifiedMemory && !j.Spec.Needs.cpuOnly() && (p.DeviceGB == nil || !validRate(*p.DeviceGB)) {
+			continue
+		}
+		sameFamily := k.Target == key.Target && point.MemoryLayout != "" && point.MemoryLayout == layout
 		if sameFamily && k.Host == key.Host && k.Component == key.Component && k.Hardware == key.Hardware && k.Fingerprint == key.Fingerprint && k.Environment == key.Environment {
 			exact = mergeMemoryPeaks(exact, p)
 		} else if sameFamily {

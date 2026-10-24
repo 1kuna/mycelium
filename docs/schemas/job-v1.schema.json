@@ -869,6 +869,10 @@
           "$ref": "#/$defs/SizeHint",
           "x-contract": "diagnostic"
         },
+        "memory_oom_floor": {
+          "$ref": "#/$defs/SizeHint",
+          "x-contract": "diagnostic"
+        },
         "oom_capacity": {
           "$ref": "#/$defs/SizeHint",
           "x-contract": "diagnostic"
@@ -1140,12 +1144,6 @@
           "type": "string"
         },
         "host": {
-          "type": "string"
-        },
-        "memory_configuration": {
-          "type": "string"
-        },
-        "memory_layout": {
           "type": "string"
         },
         "reference": {

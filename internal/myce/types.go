@@ -322,6 +322,7 @@ type Job struct {
 	OutputRefs            FileManifest                 `json:"output_refs,omitempty"`
 	MemoryEnvelope        *JobMemoryEnvelope           `json:"memory_envelope,omitempty"`
 	MemoryFallback        *SizeHint                    `json:"memory_fallback,omitempty"`
+	MemoryOOMFloor        *SizeHint                    `json:"memory_oom_floor,omitempty"`
 	MeasuredNeeds         *SizeHint                    `json:"measured_needs,omitempty"`
 	OOMCapacity           *SizeHint                    `json:"oom_capacity,omitempty"`
 	OOMRetries            int                          `json:"oom_retries,omitempty"`

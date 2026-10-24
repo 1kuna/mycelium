@@ -698,7 +698,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (*proce
 	environmentStarted = true
 	extensionStarted = true
 	started = true
-	finishMemory := w.observeAttemptMemory(memoryAttempt)
+	finishMemory := w.observeAttemptMemory(memoryAttempt, j)
 	go func() {
 		if extensionRelease != nil {
 			defer extensionRelease()

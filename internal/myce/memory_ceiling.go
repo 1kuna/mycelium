@@ -234,6 +234,42 @@ func (a *memoryAttempt) failure() error {
 	return errors.New("memory ceiling OOM status missing")
 }
 
+// Hierarchical oom_kill includes victims of a descendant's own limit. Require
+// this cgroup's local OOM trigger before attributing the failure to its cap.
+func (a *memoryAttempt) localLimitFailure() error {
+	if a == nil {
+		return nil
+	}
+	b, err := a.fs.ReadFile(filepath.Join(a.path, "memory.events.local"))
+	if err != nil {
+		return fmt.Errorf("read local memory ceiling OOM status: %w", err)
+	}
+	events := memoryCounters(b)
+	if events["oom"] == 0 && events["oom_group_kill"] == 0 {
+		return nil
+	}
+	return a.failure()
+}
+
+func (a *memoryAttempt) setOOMGroup(whole bool) error {
+	if a == nil {
+		return nil
+	}
+	value := "0"
+	if whole {
+		value = "1"
+	}
+	path := filepath.Join(a.path, "memory.oom.group")
+	if err := a.fs.WriteFile(path, []byte(value)); err != nil {
+		return err
+	}
+	b, err := a.fs.ReadFile(path)
+	if err != nil || strings.TrimSpace(string(b)) != value {
+		return errors.New("memory OOM group mode not confirmed")
+	}
+	return nil
+}
+
 // Kill the entire attempt subtree, including descendants that changed sessions.
 func (a *memoryAttempt) cleanup(clock Clock) error {
 	if err := a.stop(clock); err != nil {
@@ -253,6 +289,9 @@ func (a *memoryAttempt) children() (*memoryCeilings, error) {
 	b, err := a.fs.ReadFile(filepath.Join(a.path, "cgroup.procs"))
 	if err != nil || strings.TrimSpace(string(b)) != "" {
 		return nil, errors.New("memory parent must be empty before delegation")
+	}
+	if err := a.setOOMGroup(false); err != nil {
+		return nil, err
 	}
 	for _, v := range []struct{ name, value string }{{"cgroup.subtree_control", "+memory"}} {
 		if err := a.fs.WriteFile(filepath.Join(a.path, v.name), []byte(v.value)); err != nil {

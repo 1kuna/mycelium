@@ -177,6 +177,17 @@ func (q *Queue) recordProgramNeeds(j *Job, r Result) {
 }
 
 func (q *Queue) retryOOM(j *Job) {
+	if j.Spec.Needs.Memory == "auto" {
+		if j.OOMRetries > 0 {
+			j.State, j.Reason = "failed", "out of memory after one retry above the OOM envelope"
+			return
+		}
+		j.OOMRetries++
+		j.MemoryOOMFloor = &SizeHint{MemoryGB: j.Spec.Needs.MemoryGB * 1.25, HostMemoryGB: j.Spec.Needs.HostMemoryGB * 1.25}
+		j.OOMCapacity = nil
+		q.requeue(j, "out of memory; waiting for room above the previous envelope", false)
+		return
+	}
 	if j.OOMRetries > 0 {
 		j.State, j.Reason = "failed", "out of memory after one retry on a larger hypha"
 		return

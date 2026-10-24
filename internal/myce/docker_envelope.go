@@ -78,7 +78,11 @@ func (d *dockerAttempt) releaseEnvelope() error {
 		if d.state.EnvelopeReleased {
 			return nil
 		}
-		return errors.New("Docker shared parent missing before release proof")
+		// Called only after successful daemon inventory proves all members
+		// stopped. The delegated unit and its counters can vanish on restart.
+		d.state.EnvelopeReleased, d.state.EnvelopeEvidenceLost = true, true
+		d.state.MemoryPeak = nil
+		return d.saveLocked()
 	} else if err != nil {
 		return err
 	}

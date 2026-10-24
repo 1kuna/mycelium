@@ -87,7 +87,7 @@ func TestNativeGroupCgroupRecoveryPreservesOOMWithOperatorStop(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(leaf.path, "memory.events"), []byte("oom_kill 1\n"), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(leaf.path, "memory.events"), []byte("oom 1\noom_kill 1\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	store, err := w.openStore()
@@ -319,7 +319,7 @@ func TestNativeGroupCgroupCapsAndOOM(t *testing.T) {
 					leaf = m.Cgroup
 				}
 			}
-			if err := os.WriteFile(filepath.Join(leaf, "memory.events"), []byte("oom_kill 1\n"), 0600); err != nil {
+			if err := os.WriteFile(filepath.Join(leaf, "memory.events"), []byte("oom 1\noom_kill 1\n"), 0600); err != nil {
 				t.Fatal(err)
 			}
 			p.stop(w.Clock.Now(), 0, true)

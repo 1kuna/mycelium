@@ -27,26 +27,26 @@ func (r WorkReference) valid() bool {
 // ObservationKey contains no private input paths or application-specific data.
 // Configuration is a digest of resource reservations, allowances and power mode.
 type ObservationKey struct {
-	MemoryLayout        string          `json:"memory_layout,omitempty"`
-	MemoryConfiguration string          `json:"memory_configuration,omitempty"`
-	Allowance           string          `json:"allowance,omitempty"`
-	Work                string          `json:"work"`
-	ExtensionDigest     string          `json:"extension_digest"`
-	Target              ExecutionTarget `json:"target"`
-	Reference           WorkReference   `json:"reference"`
-	Host                string          `json:"host"`
-	Component           string          `json:"component"`
-	Hardware            string          `json:"hardware"`
-	Fingerprint         string          `json:"fingerprint"`
-	Environment         string          `json:"environment"`
-	Configuration       string          `json:"configuration"`
-	Concurrency         int             `json:"concurrency"`
-	BatchSize           int             `json:"batch_size"`
+	Allowance       string          `json:"allowance,omitempty"`
+	Work            string          `json:"work"`
+	ExtensionDigest string          `json:"extension_digest"`
+	Target          ExecutionTarget `json:"target"`
+	Reference       WorkReference   `json:"reference"`
+	Host            string          `json:"host"`
+	Component       string          `json:"component"`
+	Hardware        string          `json:"hardware"`
+	Fingerprint     string          `json:"fingerprint"`
+	Environment     string          `json:"environment"`
+	Configuration   string          `json:"configuration"`
+	Concurrency     int             `json:"concurrency"`
+	BatchSize       int             `json:"batch_size"`
 }
 
 // One bounded aggregate per comparable key, persisted as its own SQLite row.
 // Last execution is provenance, not the duplicate fence: Queue.complete owns it.
 type WorkObservation struct {
+	MemoryLayout              string             `json:"memory_layout,omitempty"`
+	MemoryConfiguration       string             `json:"memory_configuration,omitempty"`
 	MemoryRecordedAt          time.Time          `json:"memory_recorded_at,omitempty"`
 	MemoryPeak                *AttemptMemoryPeak `json:"memory_peak,omitempty"`
 	SampleID                  string             `json:"sample_id,omitempty"`
@@ -149,19 +149,7 @@ func referenceObservationKey(e Extension, m *Machine, ref WorkReference, work st
 		Args    []string
 		Program *Program
 	}{args, program})})
-	memoryNeeds := needs
-	memoryNeeds.Memory, memoryNeeds.MemoryGB, memoryNeeds.HostMemoryGB = "", 0, 0
-	memoryNeeds.Platform, memoryNeeds.GPU = Platform{}, nil
-	memoryConfiguration := identityHash(struct {
-		Needs   ResourceNeeds
-		Args    []string
-		Program *Program
-	}{memoryNeeds, args, program})
-	layout := "separate"
-	if m.UnifiedMemory {
-		layout = "unified"
-	}
-	return &ObservationKey{MemoryLayout: layout, MemoryConfiguration: memoryConfiguration, Work: work, ExtensionDigest: e.Digest, Target: machineTarget(m), Reference: ref,
+	return &ObservationKey{Work: work, ExtensionDigest: e.Digest, Target: machineTarget(m), Reference: ref,
 		Host: hostID(m), Component: component, Hardware: hardware, Fingerprint: m.ExtensionFingerprint,
 		Environment: extensionEnvironmentIdentity(e, m), Allowance: observationAllowance(m), Configuration: configuration, Concurrency: 1, BatchSize: 1}, ""
 }
@@ -264,6 +252,11 @@ func (q *Queue) recordWorkObservation(j *Job, r Result) {
 	point.SampleID = old.SampleID
 	point.MemoryPeak = mergeMemoryPeaks(old.MemoryPeak, r.MemoryPeak)
 	point.MemoryRecordedAt = old.MemoryRecordedAt
+	point.MemoryConfiguration = memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
+	point.MemoryLayout = "separate"
+	if owner := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices); owner != nil && owner.UnifiedMemory && !j.Spec.Needs.cpuOnly() {
+		point.MemoryLayout = "unified"
+	}
 	if r.MemoryPeak != nil && !r.MemoryPeak.Constrained && r.MemoryPeak.HostGB != nil && validRate(*r.MemoryPeak.HostGB) {
 		point.MemoryRecordedAt = q.clock.Now()
 	}

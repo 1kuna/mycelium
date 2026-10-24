@@ -20,22 +20,73 @@ func (a *memoryAttempt) peak() *AttemptMemoryPeak {
 	if b, err := a.fs.ReadFile(filepath.Join(a.path, "memory.peak")); err == nil {
 		if n, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64); err == nil {
 			gb := float64(n) / (1 << 30)
+			p.CgroupGB = &gb
+		}
+	}
+	if b, err := a.fs.ReadFile(filepath.Join(a.path, "memory.stat")); err == nil {
+		stats := memoryCounters(b)
+		anon, aok := stats["anon"]
+		kernel, kok := stats["kernel"]
+		shmem, sok := stats["shmem"]
+		if aok && kok && sok {
+			gb := (float64(anon) + float64(kernel) + float64(shmem)) / (1 << 30)
 			p.HostGB = &gb
+		}
+		for _, name := range []string{"pgscan_anon", "pgsteal_anon", "workingset_refault_anon", "pswpout"} {
+			p.Constrained = p.Constrained || stats[name] > 0
 		}
 	}
 	if b, err := a.fs.ReadFile(filepath.Join(a.path, "memory.events")); err == nil {
-		f := strings.Fields(string(b))
-		for i := 0; i+1 < len(f); i += 2 {
-			if f[i] == "max" {
-				n, err := strconv.ParseUint(f[i+1], 10, 64)
-				p.Constrained = err != nil || n > 0
-			}
+		events := memoryCounters(b)
+		p.Constrained = p.Constrained || events["oom"] > 0 || events["oom_kill"] > 0 || events["oom_group_kill"] > 0
+	}
+	for _, name := range []string{"memory.swap.peak", "memory.swap.current"} {
+		if b, err := a.fs.ReadFile(filepath.Join(a.path, name)); err == nil {
+			n, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64)
+			p.Constrained = p.Constrained || err != nil || n > 0
 		}
 	}
-	if p.HostGB == nil {
+	if p.HostGB == nil && p.CgroupGB == nil && !p.Constrained {
 		return nil
 	}
 	return p
+}
+
+func memoryCounters(b []byte) map[string]uint64 {
+	values := map[string]uint64{}
+	fields := strings.Fields(string(b))
+	for i := 0; i+1 < len(fields); i += 2 {
+		if n, err := strconv.ParseUint(fields[i+1], 10, 64); err == nil {
+			values[fields[i]] = n
+		}
+	}
+	return values
+}
+
+// Keep pressure evidence across samples, rather than training from a later
+// unconstrained-looking counter snapshot after memory has been reclaimed.
+func sampledMemoryPeak(old, next *AttemptMemoryPeak) *AttemptMemoryPeak {
+	if next == nil {
+		return old
+	}
+	copy := *next
+	copy.Constrained = false
+	previous := old
+	if old != nil {
+		p := *old
+		p.Constrained = false
+		previous = &p
+	}
+	out := mergeMemoryPeaks(previous, &copy)
+	if out == nil {
+		out = &AttemptMemoryPeak{}
+	}
+	out.Constrained = next.Constrained || old != nil && old.Constrained
+	return out
+}
+
+func estimateFeedingAttempt(j Job) bool {
+	return j.Spec.Needs.Memory == "auto" || j.Spec.Workload != nil && j.Spec.ExtensionCheck == nil && (!j.Spec.Resumable || j.Attempt <= 1)
 }
 
 func (a *memoryAttempt) processIDs(ids map[int]bool) error {
@@ -69,47 +120,47 @@ func (a *memoryAttempt) processIDs(ids map[int]bool) error {
 
 // Sample only processes inside this exact attempt. Driver/device totals include
 // other workloads and cannot serve as job peaks. Sampling is a lower bound.
-func (w Worker) observeAttemptMemory(a *memoryAttempt) func() *AttemptMemoryPeak {
+func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job) func() *AttemptMemoryPeak {
 	if a == nil {
 		return func() *AttemptMemoryPeak { return nil }
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
-	var device *float64
+	peak := a.peak()
+	deviceSupported := estimateFeedingAttempt(j) && !j.Spec.Needs.cpuOnly() && (w.Machine.GPU == "cuda" || w.Machine.GPU == "xpu")
 	go func() {
 		defer close(done)
-		tick := time.NewTicker(500 * time.Millisecond)
+		// Avoid a per-process nvidia-smi probe twice a second on production.
+		tick := time.NewTicker(5 * time.Second)
 		defer tick.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-tick.C:
+				peak = sampledMemoryPeak(peak, a.peak())
+				if !deviceSupported {
+					continue
+				}
 				ids := map[int]bool{}
 				if a.processIDs(ids) != nil || len(ids) == 0 {
 					continue
 				}
 				gb, ok := w.attemptDeviceMemory(ctx, ids)
-				if ok && (device == nil || gb > *device) {
-					n := gb
-					device = &n
+				if !ok {
+					deviceSupported = false
+					continue
 				}
+				peak = sampledMemoryPeak(peak, &AttemptMemoryPeak{DeviceGB: &gb})
 			}
 		}
 	}()
 	var once sync.Once
-	var peak *AttemptMemoryPeak
 	return func() *AttemptMemoryPeak {
 		once.Do(func() {
 			cancel()
 			<-done
-			peak = a.peak()
-			if peak == nil && device != nil {
-				peak = &AttemptMemoryPeak{}
-			}
-			if peak != nil {
-				peak.DeviceGB = device
-			}
+			peak = sampledMemoryPeak(peak, a.peak())
 		})
 		return peak
 	}

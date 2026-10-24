@@ -99,41 +99,42 @@ type dockerExecution struct {
 	PriorityStop *PriorityPreemption `json:"priority_stop,omitempty"`
 	CleanupCause *RuntimeCause       `json:"cleanup_cause,omitempty"`
 
-	LogsNone           bool                    `json:"logs_none,omitempty"`
-	Owner              *Result                 `json:"owner,omitempty"` // Saved job/attempt/machine/session binding; legacy custody uses opaque identity.
-	EvidenceSaved      bool                    `json:"evidence_saved,omitempty"`
-	NetworkID          string                  `json:"network_id,omitempty"`
-	NetworkRemoved     bool                    `json:"network_removed,omitempty"`
-	Network            string                  `json:"network,omitempty"`
-	Containers         map[string]dockerMember `json:"containers,omitempty"`
-	PendingContainer   string                  `json:"pending_container,omitempty"`
-	PendingName        string                  `json:"pending_name,omitempty"`
-	MainFinished       bool                    `json:"main_finished,omitempty"`
-	Infrastructure     []infrastructureFact    `json:"infrastructure_facts,omitempty"`
-	ObservationLost    bool                    `json:"observation_lost,omitempty"`
-	InfrastructureStop bool                    `json:"infrastructure_stop,omitempty"`
-	AmbiguousKill      bool                    `json:"ambiguous_kill,omitempty"`
-	Failure            string                  `json:"failure,omitempty"`
-	CgroupParent       string                  `json:"cgroup_parent,omitempty"`
-	EnvelopeReleased   bool                    `json:"envelope_released,omitempty"`
-	MemoryPeak         *AttemptMemoryPeak      `json:"memory_peak,omitempty"`
-	MemoryLimitBytes   int64                   `json:"memory_limit_bytes,omitempty"`
-	MemorySwapBytes    int64                   `json:"memory_swap_bytes,omitempty"`
-	MemoryFailure      string                  `json:"memory_failure,omitempty"`
-	OOMKilled          bool                    `json:"oom_killed,omitempty"`
-	Identity           string                  `json:"identity"`
-	Endpoint           string                  `json:"endpoint"`
-	Container          string                  `json:"container,omitempty"`
-	DispatchedAt       *time.Time              `json:"dispatched_at,omitempty"`
-	Operation          string                  `json:"operation,omitempty"`
-	Pending            bool                    `json:"pending,omitempty"`
-	Stopped            bool                    `json:"stopped,omitempty"`
-	Forced             bool                    `json:"forced,omitempty"`
-	StopAt             *time.Time              `json:"stop_at,omitempty"`
-	OperatorConfirmed  bool                    `json:"operator_confirmed,omitempty"`
-	Released           bool                    `json:"released,omitempty"`
-	Error              string                  `json:"error,omitempty"`
-	ExitCode           int                     `json:"exit_code"`
+	LogsNone             bool                    `json:"logs_none,omitempty"`
+	Owner                *Result                 `json:"owner,omitempty"` // Saved job/attempt/machine/session binding; legacy custody uses opaque identity.
+	EvidenceSaved        bool                    `json:"evidence_saved,omitempty"`
+	NetworkID            string                  `json:"network_id,omitempty"`
+	NetworkRemoved       bool                    `json:"network_removed,omitempty"`
+	Network              string                  `json:"network,omitempty"`
+	Containers           map[string]dockerMember `json:"containers,omitempty"`
+	PendingContainer     string                  `json:"pending_container,omitempty"`
+	PendingName          string                  `json:"pending_name,omitempty"`
+	MainFinished         bool                    `json:"main_finished,omitempty"`
+	Infrastructure       []infrastructureFact    `json:"infrastructure_facts,omitempty"`
+	ObservationLost      bool                    `json:"observation_lost,omitempty"`
+	InfrastructureStop   bool                    `json:"infrastructure_stop,omitempty"`
+	AmbiguousKill        bool                    `json:"ambiguous_kill,omitempty"`
+	Failure              string                  `json:"failure,omitempty"`
+	CgroupParent         string                  `json:"cgroup_parent,omitempty"`
+	EnvelopeReleased     bool                    `json:"envelope_released,omitempty"`
+	EnvelopeEvidenceLost bool                    `json:"envelope_evidence_lost,omitempty"`
+	MemoryPeak           *AttemptMemoryPeak      `json:"memory_peak,omitempty"`
+	MemoryLimitBytes     int64                   `json:"memory_limit_bytes,omitempty"`
+	MemorySwapBytes      int64                   `json:"memory_swap_bytes,omitempty"`
+	MemoryFailure        string                  `json:"memory_failure,omitempty"`
+	OOMKilled            bool                    `json:"oom_killed,omitempty"`
+	Identity             string                  `json:"identity"`
+	Endpoint             string                  `json:"endpoint"`
+	Container            string                  `json:"container,omitempty"`
+	DispatchedAt         *time.Time              `json:"dispatched_at,omitempty"`
+	Operation            string                  `json:"operation,omitempty"`
+	Pending              bool                    `json:"pending,omitempty"`
+	Stopped              bool                    `json:"stopped,omitempty"`
+	Forced               bool                    `json:"forced,omitempty"`
+	StopAt               *time.Time              `json:"stop_at,omitempty"`
+	OperatorConfirmed    bool                    `json:"operator_confirmed,omitempty"`
+	Released             bool                    `json:"released,omitempty"`
+	Error                string                  `json:"error,omitempty"`
+	ExitCode             int                     `json:"exit_code"`
 }
 type dockerAttempt struct {
 	memory       *memoryAttempt
@@ -881,6 +882,10 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 			_ = parent.cleanup(w.Clock)
 			return nil, e
 		}
+		if e = parent.setOOMGroup(true); e != nil {
+			_ = parent.cleanup(w.Clock)
+			return nil, e
+		}
 		relative, e := filepath.Rel("/sys/fs/cgroup", parent.path)
 		if e != nil || strings.HasPrefix(relative, "..") {
 			_ = parent.cleanup(w.Clock)
@@ -1021,7 +1026,7 @@ func (d *dockerAttempt) run(p *process, j Job, session string, output *os.File, 
 	defer close(d.closed)
 	finishMemory := func() *AttemptMemoryPeak { return nil }
 	if d.memoryWorker != nil {
-		finishMemory = d.memoryWorker.observeAttemptMemory(d.envelope())
+		finishMemory = d.memoryWorker.observeAttemptMemory(d.envelope(), j)
 	}
 	defer finishMemory()
 	stopEvents := d.observeDockerEvents()
@@ -1072,11 +1077,8 @@ func (d *dockerAttempt) run(p *process, j Job, session string, output *os.File, 
 	p.mu.Unlock()
 	sample := finishMemory()
 	d.mu.Lock()
-	if sample != nil && sample.DeviceGB != nil {
-		if d.state.MemoryPeak == nil {
-			d.state.MemoryPeak = &AttemptMemoryPeak{}
-		}
-		d.state.MemoryPeak.DeviceGB = sample.DeviceGB
+	if !d.state.EnvelopeEvidenceLost {
+		d.state.MemoryPeak = sampledMemoryPeak(d.state.MemoryPeak, sample)
 	}
 	result = dockerOutcome(d.state, result, e)
 	container := d.state.Container
@@ -1200,6 +1202,13 @@ func dockerOutcome(state dockerExecution, owner Result, e error) Result {
 		facts.Exit = &memberExit{Status: state.ExitCode}
 	}
 	result = classifyAttemptOutcome(result, attemptCause{PriorityStop: state.PriorityStop, memberOutcome: facts, OutOfMemory: state.OOMKilled})
+	if state.EnvelopeEvidenceLost {
+		result.MemoryPeak = nil
+		if !state.OOMKilled {
+			result.Interrupted, result.Success = true, false
+			result.Error = "Docker shared envelope ended with worker stop; memory peak and OOM cause unavailable"
+		}
+	}
 	if result.Interrupted {
 		result.Success = false
 	}

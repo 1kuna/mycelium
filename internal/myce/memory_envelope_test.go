@@ -194,21 +194,28 @@ func TestMemoryEnvelopeUnifiedHeadroom(t *testing.T) {
 	if err := json.Unmarshal([]byte(`{"memory":"auto"}`), &auto.Needs); err != nil {
 		t.Fatal(err)
 	}
-	m.HostAvailableMemoryGB = 12.5
+	m.HostAvailableMemoryGB = 22.5
 	j := submit(t, q, auto)
 	if assignedJob(machineCheck(t, q, m)) != nil {
 		t.Fatal("unified peak admitted without existing slack")
 	}
-	m.HostAvailableMemoryGB = 12.625
+	m.HostAvailableMemoryGB = 22.625
 	assigned := assignedJob(machineCheck(t, q, m))
 	if assigned == nil || assigned.ID != j.ID {
-		t.Fatalf("overlapping host and GPU peaks were summed: %s", job(t, q, j.ID).Reason)
+		t.Fatalf("conservative host + GPU reservation did not fit: %s", job(t, q, j.ID).Reason)
 	}
-	if assigned.Spec.Needs.MemoryGB != 10 || assigned.Spec.Needs.HostMemoryGB != 2.5 {
+	if assigned.Spec.Needs.MemoryGB != 10 || assigned.Spec.Needs.HostMemoryGB != 12.5 {
 		t.Fatalf("wrong unified vector: %+v", assigned.Spec.Needs)
 	}
 	// No auto opt-in: production keeps the existing 8 + 4 + slack declaration.
 	finish(t, q, assigned, true)
+	for id, point := range q.s.WorkObservations {
+		point.MemoryPeak.DeviceGB = nil
+		q.s.WorkObservations[id] = point
+	}
+	if peak, _, _ := q.memoryEstimate(assigned, &m); peak != nil {
+		t.Fatal("unified exact estimate used an unknown device peak")
+	}
 	s.Priority = "production"
 	productionID := submit(t, q, s)
 	production := assignedJob(machineCheck(t, q, m))
@@ -231,6 +238,9 @@ func (f envelopePeakFS) Mkdir(p string) error {
 	}
 	if strings.HasPrefix(filepath.Base(p), "attempt-") {
 		if err := os.WriteFile(filepath.Join(p, "memory.peak"), []byte("2147483648"), 0600); err != nil {
+			return err
+		}
+		if err := os.WriteFile(filepath.Join(p, "memory.stat"), []byte("anon 2147483648\nkernel 0\nshmem 0\n"), 0600); err != nil {
 			return err
 		}
 		if f.oom {

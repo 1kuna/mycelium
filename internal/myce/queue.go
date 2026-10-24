@@ -579,6 +579,7 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 		}
 	}
 	j.Machine = ""
+	j.MemoryEnvelope = nil // Re-resolve variants and live sizing for every retry.
 	j.Session = ""
 	j.StopAt = nil
 	j.StartedAt = nil
@@ -1278,6 +1279,8 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 		} else {
 			q.retry(j, j.Reason)
 		}
+	} else if oomFailure && j.Spec.Needs.Memory == "auto" {
+		q.retryOOM(j)
 	} else if (j.Spec.Priority == "production" || plannedPriorityStop(j)) && (stageFailure || oomFailure) {
 		j.State, j.Reason = "failed", "command failed: "+r.Error
 	} else if oomFailure && j.Spec.extensionJob() {
