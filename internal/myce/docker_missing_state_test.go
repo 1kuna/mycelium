@@ -3,9 +3,11 @@ package myce
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -21,7 +23,9 @@ func TestDockerMissingStateWorkerRecovery(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			q, _ := fixture(t)
 			q.clock = &workerFakeClock{now: q.clock.Now()}
-			server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+			var requests atomic.Int64
+			handler := API{Queue: q, Token: "test"}.Handler()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { requests.Add(1); handler.ServeHTTP(w, r) }))
 			defer server.Close()
 			w := recoveryWorker(t)
 			w.Client = Client{URL: server.URL, Token: "test"}
@@ -61,7 +65,7 @@ func TestDockerMissingStateWorkerRecovery(t *testing.T) {
 					t.Fatalf("recovery: process=%v error=%v", p, err)
 				}
 				r := s.state.Result
-				if r == nil || !r.Interrupted || r.Success || r.ReleasePending || r.ID != j.ID {
+				if r == nil || !r.Interrupted || r.Success || r.ReleasePending == refused || r.ID != j.ID {
 					t.Fatalf("lost attempt outcome: %+v", r)
 				}
 				if refused && (r.ExecutionCause == nil || r.ExecutionCause.Class != "resource_limit") {
@@ -82,6 +86,16 @@ func TestDockerMissingStateWorkerRecovery(t *testing.T) {
 					t.Error("worker did not stop")
 				}
 			}()
+			if !refused {
+				await(t, func() bool { q.clock.(*workerFakeClock).Advance(time.Millisecond); return requests.Load() >= 4 })
+				select {
+				case err := <-done:
+					done <- err
+					t.Fatal("worker exited on missing custody", err)
+				default:
+				}
+				return // Unconfirmed release remains excluded; other workers stay available.
+			}
 			await(t, func() bool {
 				q.clock.(*workerFakeClock).Advance(time.Millisecond)
 				b, err := os.ReadFile(filepath.Join(s.dir, s.stateName))

@@ -1249,19 +1249,22 @@ func dockerRecoveryError(state dockerExecution) error {
 func (w Worker) restoreDocker(s *workerStore) (*process, error) {
 	data, err := os.ReadFile(filepath.Join(s.dir, s.state.Identity+".docker.json"))
 	if errors.Is(err, os.ErrNotExist) {
-		// Old pre-launch refusals carried a generic identity without Docker
-		// custody. Preserve their result; otherwise record attempt-local loss.
+		// A settled pre-launch refusal (including legacy generic identities)
+		// needs no Docker recovery. Missing custody otherwise proves loss of
+		// observation, never release: keep this attempt's exclusion pending.
 		if s.state.Result == nil || s.state.Result.ReleasePending {
-			facts := memberOutcome{ObservationLost: true}
-			if err := saveWorkerJSON(s.dir, s.state.Identity+".observation-loss.json", facts); err != nil {
-				return nil, err
+			if s.state.Result == nil {
+				facts := memberOutcome{ObservationLost: true}
+				if err := saveWorkerJSON(s.dir, s.state.Identity+".observation-loss.json", facts); err != nil {
+					return nil, err
+				}
+				r := classifyAttemptOutcome(Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, ReleasePending: true, Error: "worker restarted; owned Docker state missing; release unconfirmed"}, attemptCause{memberOutcome: facts, PriorityStop: s.state.PriorityStop})
+				s.state.Result = &r
+				if err := s.save(); err != nil {
+					return nil, err
+				}
+				log.Printf("attempt %s/%d: owned Docker state missing; interrupted, release unconfirmed", s.state.Job.ID, s.state.Job.Attempt)
 			}
-			r := classifyAttemptOutcome(Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Error: "worker restarted; owned Docker state missing"}, attemptCause{memberOutcome: facts, PriorityStop: s.state.PriorityStop})
-			s.state.Result = &r
-			if err := s.save(); err != nil {
-				return nil, err
-			}
-			log.Printf("attempt %s/%d: owned Docker state missing; reconciled as interrupted", s.state.Job.ID, s.state.Job.Attempt)
 		}
 		return nil, nil
 	}
