@@ -388,6 +388,52 @@ func TestMemoryEnvelopeUnifiedCappedAutoStarts(t *testing.T) {
 	}
 }
 
+func TestMemoryEnvelopeUnifiedAutoReusesPeakAcrossLiveDrift(t *testing.T) {
+	q, clock, m, s := unifiedAutoFixture(t, 0)
+	var allowance string
+	for run := 0; run < 2; run++ {
+		queued := submit(t, q, s)
+		j := assignedJob(machineCheck(t, q, m))
+		if j == nil || j.ID != queued.ID {
+			t.Fatalf("solo CUDA run %d not assigned: %s", run, job(t, q, queued.ID).Reason)
+		}
+		if run == 1 && (j.MemoryEnvelope.Source != "accepted peak × 1.25" || j.Spec.Needs.HostMemoryGB != .15625 || j.Spec.Needs.MemoryGB != .3125 || j.MemoryEnvelope.HostGB != .59375) {
+			t.Fatalf("second CUDA run did not sum learned host + GPU + slack: %+v", j.MemoryEnvelope)
+		}
+		if err := q.Started(result(j, false)); err != nil {
+			t.Fatal(err)
+		}
+		key := job(t, q, j.ID).Timing.Key
+		if run == 0 {
+			allowance = key.Allowance
+		} else if key.Allowance != allowance {
+			t.Fatal("live RAM drift changed the allowance hash")
+		}
+		// Uncapped unified inventory currently reports live room as BudgetGB.
+		m.HostAvailableMemoryGB--
+		m.Devices[0].BudgetGB, m.Devices[0].FreeMemoryGB = m.HostAvailableMemoryGB, m.HostAvailableMemoryGB
+		machineCheck(t, q, m, j)
+		clock.Advance(time.Second)
+		host, device := .125, .25
+		r := result(j, true)
+		r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, DeviceGB: &device}
+		if err := q.Complete(r); err != nil {
+			t.Fatal(err)
+		}
+		if timing := job(t, q, j.ID).Timing; timing.Reason != "" {
+			t.Fatalf("successful solo CUDA run lost comparability: %+v", timing)
+		}
+	}
+	if len(q.s.WorkObservations) != 2 {
+		t.Fatalf("expected both solo CUDA runs to record peaks, got %d", len(q.s.WorkObservations))
+	}
+	for _, point := range q.s.WorkObservations {
+		if point.Samples != 1 || point.StaleReason != "" || point.MemoryPeak == nil || point.MemoryLayout != "unified" {
+			t.Fatalf("CUDA peaks not accepted: %+v", point)
+		}
+	}
+}
+
 func TestMemoryEnvelopeUnifiedHeadroom(t *testing.T) {
 	q, clock := fixture(t)
 	e := compositionExtension(t, false)

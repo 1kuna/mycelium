@@ -82,6 +82,15 @@ func (d MachineDevice) machine(base Machine) Machine {
 		}
 		base.CapabilityProfile = &profile
 	}
+	if d.UnifiedMemory {
+		// Uncapped unified BudgetGB follows live free RAM. Keep that admission
+		// telemetry out of the capacity shared by observation keys and curves.
+		capacity := d.TotalMemoryGB
+		if capacity == 0 && base.CapabilityProfile != nil {
+			capacity = float64(base.CapabilityProfile.SystemMemoryBytes) / (1 << 30)
+		}
+		base.TotalMemoryGB = max(0, capacity-d.ReserveMemoryGB)
+	}
 	return base
 }
 
@@ -452,6 +461,7 @@ func (w Worker) localInventoryWithProbe(ctx context.Context, probe MachineProbe)
 		d.UnifiedMemory = d.MemoryMode == "unified"
 		if d.UnifiedMemory {
 			// Zero is an uncapped measured allowance, as on GB10 and Metal.
+			d.TotalMemoryGB = configured.Machine.FreeMemoryGB
 			d.BudgetGB = max(0, configured.Machine.FreeMemoryGB-d.ReserveMemoryGB)
 		}
 		budget, reserve := d.BudgetGB, 0.0
