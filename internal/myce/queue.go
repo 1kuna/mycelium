@@ -540,6 +540,9 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		}
 		copy := cloneJob(j)
 		j = &copy
+		if s.FanOut != nil {
+			j.FanOut = &FanOutProgress{Results: map[string]PieceResult{}}
+		}
 		q.s.Jobs[id] = j
 		if s.SubmissionKey != "" {
 			if q.s.Submissions == nil {
@@ -716,6 +719,7 @@ func (q *Queue) maintain() {
 	q.maintainStartDeadlines()
 	q.maintainHolds()
 	q.refreshHostMemory()
+	q.maintainFanOut()
 	q.maintainModels()
 	q.escalateDockerCleanup()
 	q.refreshHostMemory()
@@ -780,8 +784,9 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		if err := inventoryTarget(&m); err != nil {
 			return err
 		}
-		// Dev's existing fake workers intentionally share a synthetic host ledger.
-		if _, simulated := q.clock.(*devClock); !simulated {
+		// Dev and the event simulator intentionally use synthetic per-component
+		// workers on one shared host ledger; neither creates native workers.
+		if _, simulated := q.clock.(*devClock); !simulated && !q.simulation {
 			for _, owner := range q.s.Machines {
 				if owner.ID != m.ID && (m.Devices != nil || owner.Devices != nil) && owner.Replacement == nil && !owner.Gone && hostID(owner) == hostID(&m) {
 					return &HTTPError{Status: 409, Code: "machine_worker_conflict", Message: rejectionMessages["machine_worker_conflict"]}
@@ -1291,6 +1296,9 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 		q.retryOOM(j)
 	} else if (j.Spec.Priority == "production" || plannedPriorityStop(j)) && (stageFailure || oomFailure) {
 		j.State, j.Reason = "failed", "command failed: "+r.Error
+	} else if oomFailure && j.Batch != nil && j.Batch.Run {
+		// Fixed measured occupancy cannot be retried after OOM forbids it.
+		j.State, j.Reason = "failed", "declared wave exceeded its measured resource envelope"
 	} else if oomFailure && j.Spec.extensionJob() {
 		q.retryOOM(j)
 	} else if r.ExtensionUnavailable && j.Spec.extensionJob() && j.StartedAt == nil && j.Extension != nil {
@@ -1875,6 +1883,9 @@ func (q *Queue) workerHasOtherAttempt(machine, session, job string) bool {
 
 // assign persists the exact target before delivering it through either wire form.
 func (q *Queue) assign(j *Job, m *Machine) Job {
+	if j.Spec.FanOut != nil {
+		j = q.assignFanOut(j, m)
+	}
 	estimate, measured := q.estimateCompletion(j, m)
 	// The planner returns a target-specific copy. Persist its exact
 	// reservation on the live attempt before charging any resources.
@@ -1882,6 +1893,9 @@ func (q *Queue) assign(j *Job, m *Machine) Job {
 	j = q.s.Jobs[selected.ID]
 	j.Spec.Needs = selected.Spec.Needs
 	j.MemoryEnvelope, j.MemoryFallback = selected.MemoryEnvelope, selected.MemoryFallback
+	if selected.Batch != nil {
+		j.Batch = selected.Batch
+	}
 	if e := qualifiedExtension(selected, m); e != nil {
 		j.Extension = &ExtensionSelection{Name: e.Name, Version: e.Version, Digest: e.Digest}
 	}

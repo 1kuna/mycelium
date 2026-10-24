@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -100,6 +101,20 @@ func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
 		}
 		if err := copyJobFile(p, filepath.Join(staged, name)); err != nil {
 			return err
+		}
+	}
+	if j.Batch != nil && j.Batch.Run {
+		data, err := json.Marshal(batchManifest(j))
+		if err != nil {
+			return err
+		}
+		if err = os.WriteFile(filepath.Join(staged, ".myce-batch.json"), data, 0600); err != nil {
+			return err
+		}
+		for name := range j.Spec.Outputs {
+			if err = os.MkdirAll(filepath.Dir(filepath.Join(staged, name)), 0700); err != nil {
+				return err
+			}
 		}
 	}
 	if err := syncModelDirectory(staged); err != nil {

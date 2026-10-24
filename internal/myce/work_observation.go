@@ -27,6 +27,7 @@ func (r WorkReference) valid() bool {
 // ObservationKey contains no private input paths or application-specific data.
 // Configuration is a digest of resource reservations, allowances and power mode.
 type ObservationKey struct {
+	ServerDigest    string          `json:"server_digest,omitempty"`
 	Allowance       string          `json:"allowance,omitempty"`
 	Work            string          `json:"work"`
 	ExtensionDigest string          `json:"extension_digest"`
@@ -83,6 +84,12 @@ type WorkTiming struct {
 }
 
 func (q *Queue) workObservationKey(j *Job) (*ObservationKey, string) {
+	if j.Batch != nil {
+		if j.Batch.Run {
+			return q.waveObservationKey(j)
+		}
+		return nil, "declared wave; serial occupancy is not comparable"
+	}
 	if j.Spec.ExtensionCheck != nil || j.Spec.Workload == nil && !profileMemoryWork(j.Spec) {
 		return nil, "workload/reference metadata unavailable"
 	}
@@ -175,7 +182,11 @@ func referenceObservationKey(e Extension, m *Machine, ref WorkReference, work st
 		Args    []string
 		Program *Program
 	}{args, program})})
-	return &ObservationKey{Work: work, ExtensionDigest: e.Digest, Target: machineTarget(m), Reference: ref,
+	serverDigest := ""
+	if v := e.variant(machineTarget(m)); v != nil {
+		serverDigest = v.Sweeps[work].ServerDigest
+	}
+	return &ObservationKey{ServerDigest: serverDigest, Work: work, ExtensionDigest: e.Digest, Target: machineTarget(m), Reference: ref,
 		Host: hostID(m), Component: component, Hardware: hardware, Fingerprint: m.ExtensionFingerprint,
 		Environment: extensionEnvironmentIdentity(e, m), Allowance: observationAllowance(m), Configuration: configuration, Concurrency: 1, BatchSize: 1}, ""
 }

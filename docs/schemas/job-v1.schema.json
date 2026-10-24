@@ -1,5 +1,36 @@
 {
   "$defs": {
+    "BatchWork": {
+      "properties": {
+        "concurrency": {
+          "type": "integer"
+        },
+        "parent": {
+          "type": "string"
+        },
+        "pieces": {
+          "items": {
+            "$ref": "#/$defs/FanOutPiece"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "run": {
+          "type": "boolean"
+        },
+        "seconds": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "parent",
+        "pieces",
+        "concurrency"
+      ],
+      "type": "object"
+    },
     "Copy": {
       "properties": {
         "allocated_devices": {
@@ -597,6 +628,76 @@
       ],
       "type": "object"
     },
+    "FanOut": {
+      "properties": {
+        "max_concurrency": {
+          "type": "integer"
+        },
+        "pieces": {
+          "items": {
+            "$ref": "#/$defs/FanOutPiece"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "pieces",
+        "max_concurrency"
+      ],
+      "type": "object"
+    },
+    "FanOutPiece": {
+      "properties": {
+        "args": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "key": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "key"
+      ],
+      "type": "object"
+    },
+    "FanOutProgress": {
+      "properties": {
+        "children": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "next": {
+          "type": "integer"
+        },
+        "results": {
+          "additionalProperties": {
+            "$ref": "#/$defs/PieceResult"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "next"
+      ],
+      "type": "object"
+    },
     "FileCheckpoint": {
       "properties": {
         "files": {
@@ -739,6 +840,10 @@
           "type": "integer",
           "x-contract": "stable"
         },
+        "batch": {
+          "$ref": "#/$defs/BatchWork",
+          "x-contract": "diagnostic"
+        },
         "cancelled_at": {
           "format": "date-time",
           "type": "string",
@@ -820,6 +925,10 @@
             "array",
             "null"
           ],
+          "x-contract": "diagnostic"
+        },
+        "fan_out": {
+          "$ref": "#/$defs/FanOutProgress",
           "x-contract": "diagnostic"
         },
         "file_checkpoints": {
@@ -1171,6 +1280,9 @@
         "reference": {
           "$ref": "#/$defs/WorkReference"
         },
+        "server_digest": {
+          "type": "string"
+        },
         "target": {
           "$ref": "#/$defs/ExecutionTarget"
         },
@@ -1191,6 +1303,29 @@
         "configuration",
         "concurrency",
         "batch_size"
+      ],
+      "type": "object"
+    },
+    "PieceResult": {
+      "properties": {
+        "execution": {
+          "$ref": "#/$defs/Execution"
+        },
+        "output_files": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "output_refs": {
+          "$ref": "#/$defs/FileManifest"
+        }
+      },
+      "required": [
+        "execution"
       ],
       "type": "object"
     },
@@ -1312,6 +1447,18 @@
         },
         "max_concurrency": {
           "type": "integer"
+        },
+        "run": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "server_digest": {
+          "type": "string"
         }
       },
       "required": [
@@ -1495,6 +1642,10 @@
         },
         "extension_digest": {
           "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "fan_out": {
+          "$ref": "#/$defs/FanOut",
           "x-contract": "diagnostic"
         },
         "files": {

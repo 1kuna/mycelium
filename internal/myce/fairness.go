@@ -193,10 +193,19 @@ func (q *Queue) batchCanUse(j *Job, m *Machine) bool {
 }
 
 func (q *Queue) batchCandidate(j *Job, m *Machine) *Job {
+	if j.Spec.FanOut != nil {
+		return q.fanOutCandidate(j, m)
+	}
 	if j.State != "queued" || !q.placementAllowed(j, m) || !q.checkpointReady(j, m) {
 		return nil
 	}
 	for _, candidate := range extensionJobs(j, m, true) {
+		if j.Batch != nil && j.Batch.Run {
+			candidate = q.retryWaveCandidate(candidate, m)
+			if candidate == nil {
+				continue
+			}
+		}
 		q.applyLearnedNeeds(candidate)
 		candidate = q.memoryCandidate(candidate, m)
 		if q.capReasonFor(candidate, m) == "" && q.batchResourcesFit(candidate, m) {

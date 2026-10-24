@@ -275,6 +275,9 @@ func (q *Queue) placementBetter(j *Job, a, b *Machine) bool {
 	return q.loadSeconds(j.Spec.Needs.Model, a)+environmentSeconds(j, a) < q.loadSeconds(j.Spec.Needs.Model, b)+environmentSeconds(j, b)
 }
 func (q *Queue) betterPlacement(j *Job, m *Machine) bool {
+	if j.Spec.FanOut != nil {
+		return false
+	} // The discrete plan already selected this component.
 	// Plain commands and component targets use the same preferred-platform
 	// deferral as legacy workers, before the specialized placement ranking.
 	if len(j.Spec.Needs.Platform.Preferred) > 0 && !contains(j.Spec.Needs.Platform.Preferred, m.GPU) {

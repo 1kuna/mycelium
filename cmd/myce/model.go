@@ -15,9 +15,11 @@ import (
 
 func modelCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: myce model fetch|approve-local|sync|pin|unpin [flags]")
+		return errors.New("usage: myce model fetch|approve-local|sync|pin|unpin|measurement-digest [flags]")
 	}
 	f := flag.NewFlagSet("model "+args[0], flag.ContinueOnError)
+	modelConfig := f.String("model-config", "", "model catalog for measurement-digest (read only)")
+	environmentConfig := f.String("environment-config", "", "environment catalog for measurement-digest")
 	queue := f.String("queue", env("MYCE_QUEUE", "http://127.0.0.1:7331"), "queue URL")
 	token := f.String("token", env("MYCE_TOKEN", ""), "fleet token (prefer MYCE_TOKEN)")
 	// DefValue is only help text; keep the actual environment default private.
@@ -47,6 +49,26 @@ func modelCommand(args []string) error {
 	}
 	if f.NArg() != 1 {
 		return errors.New("supply one model name (or NAS-relative destination for fetch)")
+	}
+	if args[0] == "measurement-digest" {
+		if *modelConfig == "" {
+			return errors.New("measurement-digest requires --model-config")
+		}
+		catalog, err := myce.ReadModels(*modelConfig)
+		if err != nil {
+			return err
+		}
+		environments, err := myce.ReadEnvironments(*environmentConfig)
+		if err != nil {
+			return err
+		}
+		for _, model := range catalog.Models {
+			if model.Name == f.Arg(0) {
+				fmt.Fprintln(os.Stdout, myce.ModelMeasurementDigest(model, environments))
+				return nil
+			}
+		}
+		return errors.New("unknown model")
 	}
 	if args[0] == "approve-local" {
 		m, err := myce.ApproveLocalModel(context.Background(), *approvalRoot, f.Arg(0), *localPath, *approvedRoot)

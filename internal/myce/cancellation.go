@@ -110,6 +110,13 @@ func (q *Queue) CancelSubmission(project, key string) (Cancellation, error) {
 // Called only under update. Keep terminal state/results, but persist exclusion
 // even for failed jobs that an operator loss refund could otherwise requeue.
 func (q *Queue) cancelJob(j *Job) {
+	if j.FanOut != nil {
+		for _, id := range j.FanOut.Children {
+			if child := q.s.Jobs[id]; child != nil && !cancelled(child) && !terminal(child.State) {
+				q.cancelJob(child)
+			}
+		}
+	}
 	if j.CancelledAt == nil {
 		now := q.clock.Now()
 		j.CancelledAt = &now
@@ -160,6 +167,17 @@ func (q *Queue) cancellation(j *Job, removed bool) Cancellation {
 	for _, r := range q.s.HostReleases {
 		if r.Job == j.ID {
 			out.Release = releaseState("pending")
+		}
+	}
+	if j.FanOut != nil {
+		for _, id := range j.FanOut.Children {
+			if child := q.s.Jobs[id]; child != nil {
+				for _, copy := range child.Copies {
+					if !copy.ReleaseConfirmed && !(copy.Attempt == child.Attempt && child.ReleaseConfirmed) {
+						out.Release = releaseState("pending")
+					}
+				}
+			}
 		}
 	}
 	// Do not return pointers into mutable queue state after unlocking.

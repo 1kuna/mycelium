@@ -141,6 +141,7 @@ func (e Environment) Key() string {
 type Spec struct {
 	Targets       []ExecutionTarget `json:"targets,omitempty" yaml:"targets,omitempty"`
 	RequireTarget bool              `json:"require_target,omitempty" yaml:"require_target,omitempty"`
+	FanOut        *FanOut           `json:"fan_out,omitempty" yaml:"fan_out,omitempty"`
 	Workload      *Workload         `json:"workload,omitempty" yaml:"workload,omitempty"`
 	SubmissionKey string            `json:"submission_key,omitempty" yaml:"submission_key,omitempty"`
 
@@ -176,6 +177,9 @@ func (s Spec) Validate() error {
 		if !extensionName.MatchString(target.OS) || !extensionName.MatchString(target.Arch) || !validGPU(target.Platform) {
 			return reject("job_placement_invalid", errors.New("targets require explicit OS, arch and platform"))
 		}
+	}
+	if err := validateFanOut(s); err != nil {
+		return err
 	}
 	if s.Workload != nil && (!s.extensionJob() || !s.Workload.valid()) {
 		return errors.New("workload requires extension work, input_shape and positive units")
@@ -299,13 +303,15 @@ type Copy struct {
 }
 
 type Job struct {
-	Timing           *WorkTiming   `json:"timing,omitempty"`
-	DiagnosticCode   string        `json:"diagnostic_code,omitempty"`
-	AllocatedDevices []string      `json:"allocated_devices,omitempty"`
-	PreemptionCount  int           `json:"preemption_count,omitempty"`
-	PriorityPolicy   PriorityMatch `json:"priority_policy"`
-	ExecutionCause   *RuntimeCause `json:"execution_cause,omitempty"`
-	CleanupCause     *RuntimeCause `json:"cleanup_cause,omitempty"`
+	FanOut           *FanOutProgress `json:"fan_out,omitempty"`
+	Batch            *BatchWork      `json:"batch,omitempty"`
+	Timing           *WorkTiming     `json:"timing,omitempty"`
+	DiagnosticCode   string          `json:"diagnostic_code,omitempty"`
+	AllocatedDevices []string        `json:"allocated_devices,omitempty"`
+	PreemptionCount  int             `json:"preemption_count,omitempty"`
+	PriorityPolicy   PriorityMatch   `json:"priority_policy"`
+	ExecutionCause   *RuntimeCause   `json:"execution_cause,omitempty"`
+	CleanupCause     *RuntimeCause   `json:"cleanup_cause,omitempty"`
 	// Durable cancellation fence, independent of diagnostic reason text.
 	CancelledAt *time.Time `json:"cancelled_at,omitempty"`
 

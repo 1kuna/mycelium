@@ -20,15 +20,15 @@ func simCommand(args []string, out io.Writer) error {
 	days := f.Float64("days", 7, "simulated days (maximum 90)")
 	seed := f.Int64("seed", 1, "deterministic seed")
 	output := f.String("json", "sim-results.json", "JSON output path")
-	whatif := f.String("what-if", "", "comparison: split-batch")
+	whatif := f.String("what-if", "", "comparison: split-batch or declared-batch")
 	if e := f.Parse(args); e != nil {
 		return e
 	}
 	if f.NArg() != 0 {
 		return errors.New("sim accepts flags only")
 	}
-	if *whatif != "" && *whatif != "split-batch" {
-		return errors.New("what-if must be split-batch")
+	if *whatif != "" && *whatif != "split-batch" && *whatif != "declared-batch" {
+		return errors.New("what-if must be split-batch or declared-batch")
 	}
 	var fleetConfig myce.SimFleet
 	var workConfig myce.SimWorkload
@@ -61,7 +61,57 @@ func simCommand(args []string, out io.Writer) error {
 	}
 	myce.PrintSim(out, baseline)
 	var result any = baseline
-	if *whatif != "" {
+	gateFailed := false
+	if *whatif == "declared-batch" {
+		opts.Split = true
+		naive, err := myce.Simulate(fleetConfig, workConfig, opts)
+		if err != nil {
+			return err
+		}
+		opts.Split = false
+		opts.Declared = true
+		declared, err := myce.Simulate(fleetConfig, workConfig, opts)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(out, "\nNaive split:")
+		myce.PrintSim(out, naive)
+		fmt.Fprintln(out, "\nDeclared fan-out (real queue planner):")
+		myce.PrintSim(out, declared)
+		paired, gain, worstRegression := 0, 0.0, 0.0
+		keys := make([]string, 0, len(baseline.Batches))
+		for key := range baseline.Batches {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			one, many := baseline.Batches[key], declared.Batches[key]
+			if one.FinishedSeconds != nil && many.FinishedSeconds != nil && one.SubmittedSeconds == many.SubmittedSeconds {
+				paired++
+				difference := *one.FinishedSeconds - *many.FinishedSeconds
+				gain += difference
+				worstRegression = max(worstRegression, -difference)
+			}
+		}
+		if paired > 0 {
+			gain /= float64(paired)
+		}
+		delta := declared.Production.P95 - baseline.Production.P95
+		passed := paired > 0 && paired == len(baseline.Batches) && paired == len(declared.Batches) && baseline.BatchUnfinished == 0 && declared.BatchUnfinished == 0 && declared.Failed == baseline.Failed && gain > 0 && delta == 0 && declared.Production.Started == baseline.Production.Started && declared.Production.Unstarted == baseline.Production.Unstarted
+		gateFailed = !passed
+		fmt.Fprintf(out, "\nDeclared fan-out gate: %t; batch makespan mean gain %.1f s; production p95 delta %+.2f s.\n", passed, gain, delta)
+		result = struct {
+			Baseline        myce.SimReport `json:"baseline"`
+			Naive           myce.SimReport `json:"naive_split"`
+			Declared        myce.SimReport `json:"declared"`
+			GatePassed      bool           `json:"gate_passed"`
+			Gain            float64        `json:"batch_seconds_sooner"`
+			ProductionDelta float64        `json:"production_p95_delta_seconds"`
+			Paired          int            `json:"paired_completed_batches"`
+			WorstRegression float64        `json:"worst_batch_regression_seconds"`
+		}{baseline, naive, declared, passed, gain, delta, paired, worstRegression}
+	}
+	if *whatif == "split-batch" {
 		opts.Split = true
 		split, e := myce.Simulate(fleetConfig, workConfig, opts)
 		if e != nil {
@@ -100,5 +150,11 @@ func simCommand(args []string, out io.Writer) error {
 	if e != nil {
 		return e
 	}
-	return os.WriteFile(*output, append(data, '\n'), 0600)
+	if e = os.WriteFile(*output, append(data, '\n'), 0600); e != nil {
+		return e
+	}
+	if gateFailed {
+		return errors.New("declared fan-out simulator gate failed; see comparison JSON")
+	}
+	return nil
 }

@@ -7,21 +7,26 @@ import (
 
 const workCurveMaxAge = 30 * 24 * time.Hour
 
-// A forecast ranks already eligible placements. It grants no resources, slots,
-// victim choices or reservations. Models deliberately remain unknown until
-// their exact server recipe can be bound to qualified measurements (#107/4).
+// A forecast ranks already eligible placements. It grants no resources or slots.
 type completionEstimate struct {
 	group                    string
 	service, setup, transfer float64
 	samples                  int
+	count                    int
 }
 
 func (e completionEstimate) seconds() float64 { return e.service + e.setup + e.transfer }
 func (e completionEstimate) reason() string {
-	return fmt.Sprintf("measured completion %.2fs (service %.2fs + setup %.2fs + transfer %.2fs; %d samples; concurrency 1)", e.seconds(), e.service, e.setup, e.transfer, e.samples)
+	return fmt.Sprintf("measured completion %.2fs (service %.2fs + setup %.2fs + transfer %.2fs; %d samples; concurrency %d)", e.seconds(), e.service, e.setup, e.transfer, e.samples, max(1, e.count))
 }
 
 func (q *Queue) estimateCompletion(j *Job, m *Machine) (completionEstimate, bool) {
+	if c := q.calls[j.ID]; c != nil && c.FanOut != "" {
+		return q.estimateDeclaredCall(c, m)
+	}
+	if j.Batch != nil && j.Batch.Run && validRate(j.Batch.Seconds) && !(j.Spec.Resumable && j.Attempt > 0) {
+		return completionEstimate{group: j.Batch.Parent, service: j.Batch.Seconds, count: j.Batch.Concurrency}, true
+	}
 	if j.Spec.Workload == nil || !j.Spec.extensionJob() {
 		return completionEstimate{}, false
 	}

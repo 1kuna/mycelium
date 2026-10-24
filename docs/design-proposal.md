@@ -1904,3 +1904,51 @@ reading also cannot train an estimate, even when main had already succeeded.
 Docker driver and Linux/GPU enforcement qualification are deployment checks,
 separate from laptop proof. Verify the B70 Docker driver and the kernel's XPU
 fdinfo size format (bare bytes, KiB or MiB); both remain unverified on that host.
+
+## Declared fan-out and batch planning (slice 4, #107; approved 2026-10-24)
+
+The orchestrator approves this slice under Zach's delegated design authority,
+following the [research build plan](research/benchmark-batch-placement.md#incremental-build-plan).
+This approval covers explicit homogeneous independent pieces, measured discrete
+horizon planning, and the model-measurement binding deferred from slice 3.
+Generic stage graphs, dynamic enumeration and timed downstream batching remain
+slice 5. No fleet qualification or deployment is authorized by this amendment.
+
+An extension job may declare `fan_out: {pieces: [{key: ..., args: [...]}],
+max_concurrency: N}` with at most 256 unique, stable keys. Its `workload` describes
+one piece. The application supplies the pieces; Mycelium never splits a program.
+Inputs and output names use the existing artifact contract. A variant's reference
+sweep may additionally declare `run`, a command implementing the same measured
+internal concurrency mode on a keyed input manifest. Without this explicit
+execution contract or safe matching measurements, execution stays serial. One
+wave is one ordinary attempt on one component; independent GPU attempts remain
+one per device. A failed/lost wave retries only its own fixed membership, with
+existing cleanup and stale-attempt fences. Accepted outputs gather by piece key
+on the parent; the application owns semantic reduction of the gathered results.
+
+Only declared groups use the new planner. Enumerate safe measured counts and
+integer waves over a completion horizon, including measured smaller tails.
+Filter through existing qualification, owner availability, placement, tier,
+fairness, caps, memory and release fences before considering capacity. Charge
+shared CPU/RAM once per host, conservatively scale declared per-piece floors,
+and never lower a floor below measured high-water memory. Forecasts grant no
+reservations: recompute on ordinary queue transitions and pull only currently
+admissible work. Busy daily hosts contribute zero. Jobs and calls without a
+fan-out declaration keep their existing placement and concurrency behavior.
+
+A model can bind a reference work type and exact frozen extension digest to its
+server configuration digest. The sweep explicitly declares that same server
+digest; extension-command concurrency alone is insufficient. Shape, model bytes,
+server command/arguments, environment, backend, component, allowances, freshness,
+qualification and OOM checks must all match. Only explicitly declared, compatible
+model-call groups may use these points, bounded by configured `max_in_flight`.
+Unbound, changed or unqualified evidence falls back to serial for declared groups;
+legacy undeclared calls retain configured admission, including zero-as-unlimited.
+No automatic quality-tolerance policy is added; #145 remains eligibility first.
+
+Laptop acceptance includes the research arithmetic, short tails, daily-owner
+exclusion, exact affected-piece retries/gather and unchanged undeclared decisions.
+`myce sim` compares the existing mixed-load example with declared synthetic curves
+against the same unsplit and naive-split arrivals, policy and seeds. A makespan
+gain with exactly unchanged production p95 is mandatory before integration.
+Synthetic curves are assumptions, not fleet measurements.

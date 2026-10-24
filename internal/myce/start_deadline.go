@@ -11,6 +11,9 @@ import (
 const ProductionStartTimeout = maxGPUStopGrace + StopGrace + 15*time.Second
 
 func startupPending(j *Job) bool {
+	if j.Spec.FanOut != nil && j.FanOut != nil && j.FanOut.Next > 0 {
+		return false
+	}
 	return j.Spec.StartBy != nil && !terminal(j.State) && !cancelled(j) && (j.State == "queued" || j.StartedAt == nil)
 }
 

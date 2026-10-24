@@ -10,6 +10,8 @@ import (
 // ReferenceSweep runs one extension-owned command at supported concurrency.
 // Counts describe internal work in that command, never additional GPU attempts.
 type ReferenceSweep struct {
+	Run            []string `json:"run,omitempty" yaml:"run,omitempty"`
+	ServerDigest   string   `json:"server_digest,omitempty" yaml:"server_digest,omitempty"`
 	Command        []string `json:"command" yaml:"command"`
 	Counts         []int    `json:"counts" yaml:"counts"`
 	MaxConcurrency int      `json:"max_concurrency" yaml:"max_concurrency"`

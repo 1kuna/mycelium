@@ -51,27 +51,29 @@ type SimModel struct {
 	Platforms   []string `yaml:"platforms"`
 }
 type SimStream struct {
-	Name       string   `yaml:"name"`
-	Project    string   `yaml:"project"`
-	Priority   string   `yaml:"priority"`
-	Class      string   `yaml:"class,omitempty"`
-	Model      string   `yaml:"model"`
-	Call       bool     `yaml:"call"`
-	Platforms  []string `yaml:"platforms"`
-	MemoryGB   float64  `yaml:"memory_gb"`
-	HostGB     float64  `yaml:"host_memory_gb"`
-	Duration   float64  `yaml:"duration_seconds"`
-	Checkpoint float64  `yaml:"checkpoint_seconds"`
-	Every      float64  `yaml:"every_hours"`
-	Start      float64  `yaml:"start_hour"`
-	Count      int      `yaml:"count"`
-	Deadline   float64  `yaml:"deadline_seconds"`
-	Batch      int      `yaml:"batch_files"` // >1 enables paired one-job/per-file comparison
+	Curves     map[string][]SimCurvePoint `yaml:"curves,omitempty"`
+	Name       string                     `yaml:"name"`
+	Project    string                     `yaml:"project"`
+	Priority   string                     `yaml:"priority"`
+	Class      string                     `yaml:"class,omitempty"`
+	Model      string                     `yaml:"model"`
+	Call       bool                       `yaml:"call"`
+	Platforms  []string                   `yaml:"platforms"`
+	MemoryGB   float64                    `yaml:"memory_gb"`
+	HostGB     float64                    `yaml:"host_memory_gb"`
+	Duration   float64                    `yaml:"duration_seconds"`
+	Checkpoint float64                    `yaml:"checkpoint_seconds"`
+	Every      float64                    `yaml:"every_hours"`
+	Start      float64                    `yaml:"start_hour"`
+	Count      int                        `yaml:"count"`
+	Deadline   float64                    `yaml:"deadline_seconds"`
+	Batch      int                        `yaml:"batch_files"` // >1 enables paired one-job/per-file comparison
 }
 type SimOptions struct {
-	Days  float64
-	Seed  int64
-	Split bool
+	Declared bool
+	Days     float64
+	Seed     int64
+	Split    bool
 }
 type SimWait struct {
 	Median    float64 `json:"median_seconds"`
@@ -103,6 +105,7 @@ type SimBatchMetric struct {
 	FinishedSeconds  *float64 `json:"finished_seconds"`
 }
 type SimReport struct {
+	Declared                  bool                         `json:"declared_fan_out,omitempty"`
 	Batches                   map[string]SimBatchMetric    `json:"batches"`
 	Days                      float64                      `json:"days"`
 	Seed                      int64                        `json:"seed"`
@@ -152,6 +155,9 @@ type simClock struct{ now time.Time }
 func (c *simClock) Now() time.Time { return c.now }
 
 type simTask struct {
+	parent                                            *simTask
+	pieceWork                                         []float64
+	reservation                                       float64
 	stream                                            SimStream
 	at, timeStarted, timeFinished                     float64
 	started, finished, failed, placeable              bool
@@ -280,7 +286,7 @@ func simResult(t *simTask, w *simWorker, success bool) Result {
 // Simulate executes real queue methods in a single deterministic event loop.
 // No wall-clock waits, engines, HTTP listeners, child processes or GPU probes.
 func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
-	r := SimReport{Days: o.Days, Seed: o.Seed, Split: o.Split, Projects: map[string]*SimProjectMetric{}, Machines: map[string]*SimMachineMetric{}, NeverPlaceable: []string{}, Batches: map[string]SimBatchMetric{}}
+	r := SimReport{Declared: o.Declared, Days: o.Days, Seed: o.Seed, Split: o.Split, Projects: map[string]*SimProjectMetric{}, Machines: map[string]*SimMachineMetric{}, NeverPlaceable: []string{}, Batches: map[string]SimBatchMetric{}}
 	if e := validateSim(f, w, o); e != nil {
 		return r, e
 	}
@@ -308,6 +314,15 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 	if w.Policy != nil {
 		if _, e = q.SetPriorityPolicy(q.policyRevision(), *w.Policy); e != nil {
 			return r, e
+		}
+	}
+	extensions, err := simBatchExtensions(w)
+	if err != nil {
+		return r, err
+	}
+	for _, extension := range extensions {
+		if err = q.AddExtension(extension); err != nil {
+			return r, err
 		}
 	}
 
@@ -368,11 +383,15 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 						batches[key].remaining = count
 					}
 				}
-				if s.Batch <= 1 || !o.Split {
+				pieceWork := slices.Clone(durations)
+				if s.Batch <= 1 || !o.Split || o.Declared {
 					durations = []float64{total}
 				}
 				for _, duration := range durations {
 					t := &simTask{stream: s, at: at, work: duration, batch: key, stopAt: math.Inf(1)}
+					if o.Declared && s.Batch > 1 && len(s.Curves) > 0 {
+						t.pieceWork = pieceWork
+					}
 					if len(tasks) >= 20000 {
 						return r, errors.New("simulation exceeds 20000 jobs; reduce days or arrival count")
 					}
@@ -396,6 +415,9 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 	finish := func(t *simTask) {
 		t.finished = true
 		t.timeFinished = now
+		if t.parent != nil {
+			return
+		}
 		r.Completed++
 		if t.batch != "" {
 			b := batches[t.batch]
@@ -433,7 +455,14 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 		// capacity from the accelerator count or memory size.
 		report.CapabilityProfile = &CapabilityProfile{OS: "linux", LogicalCPUs: 8, MemoryLayout: layout, SystemMemoryBytes: uint64(m.HostGB * (1 << 30)), Accelerators: []AcceleratorProfile{{Type: m.Platform, MemoryBytes: uint64(m.MemoryGB * (1 << 30))}}}
 		if worker.task != nil {
-			report.FreeMemoryGB = max(0, report.FreeMemoryGB-worker.task.stream.MemoryGB)
+			need := worker.task.stream.MemoryGB
+			if worker.task.reservation > 0 {
+				need = worker.task.reservation
+			}
+			report.FreeMemoryGB = max(0, report.FreeMemoryGB-need)
+		}
+		if len(extensions) > 0 {
+			simBatchInventory(&report, extensions)
 		}
 		for name := range worker.cached {
 			report.CachedModels = append(report.CachedModels, name)
@@ -464,7 +493,9 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 					t.machine = ""
 
 					finish(t)
-					delete(q.s.Jobs, t.id)
+					if t.parent == nil {
+						delete(q.s.Jobs, t.id)
+					}
 				}
 			}
 		}
@@ -543,7 +574,7 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 				// One final empty check-in acknowledges departure and model unloads.
 				reports := []ModelReport{}
 				for _, slot := range q.modelPlan(worker.spec.Name) {
-					reports = append(reports, ModelReport{Name: slot.Model, Attempt: slot.Attempt, State: "unloaded"})
+					reports = append(reports, ModelReport{Device: slot.Device, Name: slot.Model, Attempt: slot.Attempt, State: "unloaded"})
 				}
 				if _, e = q.Checkin(Checkin{Machine: machineReport(worker), ModelReports: reports}); e != nil {
 					return r, e
@@ -568,6 +599,7 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 				}
 			}
 		}
+		seedSimBatchCurves(q, w, extensions)
 		for ai < len(arrivals) && arrivals[ai].at <= now {
 			t := arrivals[ai].task
 			ai++
@@ -597,7 +629,11 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 				e = q.addCall(&ModelCall{ID: t.id, Model: t.stream.Model, Project: t.stream.Project, Priority: t.stream.Priority, Deadline: deadlineAt(epoch, t), Queued: clock.now, WaitingSince: clock.now})
 			} else {
 				var j *Job
-				j, e = q.Submit(simSpec(t, epoch))
+				spec := simSpec(t, epoch)
+				if len(t.pieceWork) > 0 {
+					spec = simDeclaredSpec(t, epoch, extensions[t.stream.Name])
+				}
+				j, e = q.Submit(spec)
 				if e == nil {
 					t.id = j.ID
 				}
@@ -645,7 +681,9 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 
 						if success {
 							finish(t)
-							delete(q.s.Jobs, t.id)
+							if t.parent == nil {
+								delete(q.s.Jobs, t.id)
+							}
 						}
 						changed = true
 					}
@@ -654,7 +692,7 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 				for _, slot := range q.modelPlan(worker.spec.Name) {
 					load := worker.loads[slot.Model]
 					if slot.State == "draining" && slot.InFlight == 0 {
-						reports = append(reports, ModelReport{Name: slot.Model, Attempt: slot.Attempt, State: "unloaded"})
+						reports = append(reports, ModelReport{Device: slot.Device, Name: slot.Model, Attempt: slot.Attempt, State: "unloaded"})
 						delete(worker.loads, slot.Model)
 						changed = true
 					} else if slot.State == "loading" {
@@ -671,7 +709,7 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 							changed = true
 						}
 						if load.until <= now && !load.seen {
-							reports = append(reports, ModelReport{Name: slot.Model, Attempt: slot.Attempt, State: "ready"})
+							reports = append(reports, ModelReport{Device: slot.Device, Name: slot.Model, Attempt: slot.Attempt, State: "ready"})
 							load.seen = true
 							changed = true
 						}
@@ -695,7 +733,23 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 						}
 					}
 					if t == nil {
-						return r, errors.New("untracked assignment")
+						if reply.Job.Batch != nil {
+							for _, parent := range tasks {
+								if parent.id == reply.Job.Batch.Parent {
+									t = &simTask{parent: parent, stream: parent.stream, at: parent.at, id: reply.Job.ID, stopAt: math.Inf(1)}
+									tasks = append(tasks, t)
+									break
+								}
+							}
+						}
+						if t == nil {
+							return r, errors.New("untracked assignment")
+						}
+					}
+					if t.parent != nil {
+						if err = simWaveWork(t, reply.Job, worker.spec); err != nil {
+							return r, err
+						}
 					}
 					t.attempt = reply.Job.Attempt
 					load := 0.0
@@ -711,6 +765,14 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 					worker.task = t
 					start(t, worker, load)
 					changed = true
+				}
+			}
+			for _, t := range tasks {
+				if len(t.pieceWork) > 0 && !t.finished {
+					if parent := q.s.Jobs[t.id]; parent != nil && parent.State == "succeeded" {
+						finish(t)
+						changed = true
+					}
 				}
 			}
 			for _, t := range tasks {
@@ -801,7 +863,7 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 				}
 			}
 			for name, load := range worker.loads {
-				if slot := q.s.ModelSlots[slotKey(worker.spec.Name, name)]; slot != nil {
+				if slot := simModelSlot(q, worker.spec.Name, name); slot != nil {
 					if slot.State == "loading" {
 						next = min(next, load.until)
 					} else if slot.State == "ready" && slot.InFlight == 0 {
@@ -840,7 +902,7 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 			}
 			loading := worker.task != nil && worker.task.loadUntil > now
 			for name := range worker.loads {
-				if s := q.s.ModelSlots[slotKey(worker.spec.Name, name)]; s != nil && s.State == "loading" {
+				if s := simModelSlot(q, worker.spec.Name, name); s != nil && s.State == "loading" {
 					loading = true
 				}
 			}

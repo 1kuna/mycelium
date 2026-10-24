@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -32,11 +33,12 @@ type VLLMPreset struct {
 	GPUMemoryUtilization float64 `yaml:"gpu_memory_utilization" json:"gpu_memory_utilization"`
 }
 type Model struct {
-	Project         string            `yaml:"project,omitempty" json:"project,omitempty"`
-	AllowedMachines []string          `yaml:"allowed_machines,omitempty" json:"allowed_machines,omitempty"`
-	Env             map[string]string `yaml:"env,omitempty" json:"env,omitempty"`
-	SecretEnv       map[string]string `yaml:"secret_env,omitempty" json:"secret_env,omitempty"`
-	LocalSource     string            `yaml:"local_source,omitempty" json:"local_source,omitempty"`
+	Measurement     *ModelMeasurementBinding `yaml:"measurement,omitempty" json:"measurement,omitempty"`
+	Project         string                   `yaml:"project,omitempty" json:"project,omitempty"`
+	AllowedMachines []string                 `yaml:"allowed_machines,omitempty" json:"allowed_machines,omitempty"`
+	Env             map[string]string        `yaml:"env,omitempty" json:"env,omitempty"`
+	SecretEnv       map[string]string        `yaml:"secret_env,omitempty" json:"secret_env,omitempty"`
+	LocalSource     string                   `yaml:"local_source,omitempty" json:"local_source,omitempty"`
 	secretRoot      string
 	fleetToken      string
 
@@ -240,6 +242,9 @@ type ModelReport struct {
 	Error          string `json:"error,omitempty"`
 }
 type ModelCall struct {
+	FanOut                           string
+	Workload                         *Workload
+	BatchConcurrency                 int
 	Device                           string
 	PreemptionCount                  int
 	Class                            string
@@ -518,7 +523,9 @@ func (q *Queue) maintainModels() {
 			s := q.s.ModelSlots[targetSlotKey(m, c.Model)]
 			switch {
 			case s != nil && s.State == "ready":
-				p = q.callSlotPlan(m, c, s, model.MaxInFlight)
+				if limit := q.declaredCallLimit(c, m, model); limit >= 0 {
+					p = q.callSlotPlan(m, c, s, limit)
+				}
 			case s != nil && s.State == "loading":
 				p = &placementPlan{machine: m}
 			case s == nil || s.State == "failed" && s.RetryAt != nil && !now.Before(*s.RetryAt):
@@ -535,8 +542,12 @@ func (q *Queue) maintainModels() {
 		m := best.machine
 		s := q.s.ModelSlots[targetSlotKey(m, c.Model)]
 		if s != nil && s.State == "ready" {
-			if model.MaxInFlight > 0 && s.InFlight >= model.MaxInFlight {
+			limit := q.declaredCallLimit(c, m, model)
+			if limit < 0 || limit > 0 && s.InFlight >= limit {
 				continue
+			}
+			if c.FanOut != "" {
+				c.BatchConcurrency = limit
 			}
 			c.Machine, c.Session, c.Attempt, c.Device = m.ID, m.Session, s.Attempt, s.Device
 			c.StartedAt = &now
@@ -613,7 +624,8 @@ func (q *Queue) callCanUse(m *Machine, c *ModelCall) bool {
 		return false
 	}
 	if s := q.s.ModelSlots[targetSlotKey(m, c.Model)]; s != nil && s.State == "ready" {
-		return q.callSlotPlan(m, c, s, model.MaxInFlight) != nil
+		limit := q.declaredCallLimit(c, m, model)
+		return limit >= 0 && q.callSlotPlan(m, c, s, limit) != nil
 	}
 	if s := q.s.ModelSlots[targetSlotKey(m, c.Model)]; s != nil && s.State == "failed" && (s.RetryAt == nil || q.clock.Now().Before(*s.RetryAt)) {
 		return false
@@ -659,6 +671,9 @@ func (q *Queue) modelPlan(machine string) []ModelSlot {
 	return out
 }
 func (q *Queue) addCall(c *ModelCall) error {
+	if c.FanOut != "" && (!extensionName.MatchString(c.FanOut) || c.Workload == nil || !c.Workload.valid()) {
+		return errors.New("declared calls require a group, input shape and positive work units")
+	}
 	if err := validateProjectIdentifier(c.Project); err != nil {
 		return err
 	}
@@ -731,6 +746,15 @@ func modelError(w http.ResponseWriter, status int, message string) {
 }
 func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 	c := &ModelCall{Project: r.Header.Get("X-Myce-Project"), Priority: r.Header.Get("X-Myce-Priority"), Class: r.Header.Get("X-Myce-Class")}
+	if group := r.Header.Get("X-Myce-Fan-Out"); group != "" {
+		units, err := strconv.ParseFloat(r.Header.Get("X-Myce-Work-Units"), 64)
+		if err != nil {
+			modelError(w, 400, "declared calls require positive work units")
+			return
+		}
+		c.FanOut = group
+		c.Workload = &Workload{InputShape: r.Header.Get("X-Myce-Input-Shape"), Units: units}
+	}
 	var data []byte
 	var spool *spooledModelRequest
 	var bodySize int64
