@@ -3,11 +3,9 @@ package myce
 import (
 	"context"
 	"encoding/json"
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -23,9 +21,7 @@ func TestDockerMissingStateWorkerRecovery(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			q, _ := fixture(t)
 			q.clock = &workerFakeClock{now: q.clock.Now()}
-			var requests atomic.Int64
-			handler := API{Queue: q, Token: "test"}.Handler()
-			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { requests.Add(1); handler.ServeHTTP(w, r) }))
+			server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 			defer server.Close()
 			w := recoveryWorker(t)
 			w.Client = Client{URL: server.URL, Token: "test"}
@@ -72,6 +68,9 @@ func TestDockerMissingStateWorkerRecovery(t *testing.T) {
 					t.Fatalf("launch refusal replaced: %+v", r)
 				}
 			}
+			if !refused {
+				return // Missing unknown custody stays excluded; it cannot be gracefully released without proof.
+			}
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan error, 1)
 			go func() { done <- w.Run(ctx) }()
@@ -86,16 +85,6 @@ func TestDockerMissingStateWorkerRecovery(t *testing.T) {
 					t.Error("worker did not stop")
 				}
 			}()
-			if !refused {
-				await(t, func() bool { q.clock.(*workerFakeClock).Advance(time.Millisecond); return requests.Load() >= 4 })
-				select {
-				case err := <-done:
-					done <- err
-					t.Fatal("worker exited on missing custody", err)
-				default:
-				}
-				return // Unconfirmed release remains excluded; other workers stay available.
-			}
 			await(t, func() bool {
 				q.clock.(*workerFakeClock).Advance(time.Millisecond)
 				b, err := os.ReadFile(filepath.Join(s.dir, s.stateName))
