@@ -19,8 +19,8 @@ an isolated working folder; extension/Docker/sidecar profiles are outside this
 MVP. `environment` selects an existing immutable catalog recipe; `{}` explicitly
 uses installed tools. The gate profile checks the installed toolchain before
 running. It declares two CPU cores, matches Go parallelism to that declaration,
-and retains an explicit 8 GiB host-memory declaration. That bootstrap value is
-not a measured whole-attempt peak. Profiles can instead opt into measured memory:
+and uses measured automatic memory so it also fits an 8 GiB host allowance.
+Profiles opt into measured memory with:
 
 ```yaml
 needs:

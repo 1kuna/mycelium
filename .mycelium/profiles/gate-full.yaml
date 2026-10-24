@@ -1,4 +1,4 @@
-# Declared envelope until automatic whole-attempt memory is available (#146).
+# Learn the whole-attempt envelope; an 8 GiB declaration exceeds an 8 GiB host allowance once slack is added.
 name: mycelium-gate-full
 project: mycelium
 class: test
@@ -10,7 +10,7 @@ run:
     GOMAXPROCS: '2'
 needs:
   cpu_cores: 2
-  memory_gb: 8
+  memory: auto
   platform: cpu
 targets:
   - {os: linux, arch: amd64, platform: cpu}
