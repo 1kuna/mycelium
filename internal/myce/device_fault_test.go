@@ -1,16 +1,23 @@
 package myce
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
 	"net/http/httptest"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
 
 // #149: a kernel fault must fence only its card before another job can hang there.
 func TestDeviceFaultQuarantine(t *testing.T) {
+	var journal bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&journal)
+	t.Cleanup(func() { log.SetOutput(previous) })
 	q, clock := fixture(t)
 	m := m3Machine()
 	m.Devices[0].pciAddress, m.Devices[1].pciAddress = "0000:03:00.0", "0000:07:00.0"
@@ -60,6 +67,10 @@ func TestDeviceFaultQuarantine(t *testing.T) {
 	reply := machineCheck(t, q, w.Machine, a, b)
 	if w.Machine.Devices[0].Reason != "device_fault_xe" || w.Machine.Devices[0].FreeMemoryGB != 0 || w.Machine.Devices[1].Reason != "" {
 		t.Fatal("device quarantine", w.Machine.Devices)
+	}
+	detail := "device=0 pci=0000:03:00.0 reason=device_fault_xe fault_event=" + w.faults.Devices[deviceFaultKey(m.Devices[0])].Event
+	if strings.Count(journal.String(), "device quarantined: "+detail) != 1 {
+		t.Fatal("missing quarantine journal line", journal.String())
 	}
 	got := observe("queued")
 	if got.State != "queued" || got.Losses != 1 || got.InfrastructureRetries != 1 {
@@ -120,6 +131,9 @@ func TestDeviceFaultQuarantine(t *testing.T) {
 	}
 	if w.Machine.Devices[0].Reason != "" {
 		t.Fatal("cleared fault replayed")
+	}
+	if strings.Count(journal.String(), "device quarantined: "+detail) != 1 || strings.Count(journal.String(), "device quarantine cleared: "+detail) != 1 {
+		t.Fatal("quarantine transitions must be logged once", journal.String())
 	}
 	lines = []KernelLogLine{{ID: "124", Message: "xe 0000:03:00.0: GPU HANG"}}
 	if err := w.refreshDeviceFaults(context.Background(), root); err != nil {

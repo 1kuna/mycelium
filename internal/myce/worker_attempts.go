@@ -32,6 +32,8 @@ type attemptSupervisor struct {
 	wake        chan struct{}
 	done        chan struct{}
 	recovering  *process
+
+	admissionBlocked bool
 }
 
 func jobKey(j Job) attemptKey { return attemptKey{j.ID, j.Attempt, j.Session} }
@@ -40,9 +42,10 @@ func (a *attemptSupervisor) snapshot() (AttemptReport, Machine, bool, error) {
 	defer a.mu.Unlock()
 	return a.report, a.diagnostics, a.finished, a.err
 }
-func (a *attemptSupervisor) update(w Worker, d AttemptDirective, connected bool) {
+func (a *attemptSupervisor) update(w Worker, d AttemptDirective, connected, admissionBlocked bool) {
 	a.mu.Lock()
 	a.worker, a.directive, a.connected = w, d, connected
+	a.admissionBlocked = admissionBlocked
 	a.mu.Unlock()
 	select {
 	case a.wake <- struct{}{}:
@@ -77,7 +80,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 	finish := func(err error) { a.mu.Lock(); a.err, a.finished = err, true; a.mu.Unlock() }
 	for ctx.Err() == nil {
 		a.mu.Lock()
-		w, d, connected := a.worker, a.directive, a.connected
+		w, d, connected, admissionBlocked := a.worker, a.directive, a.connected, a.admissionBlocked
 		a.mu.Unlock()
 		now := w.Clock.Now()
 		if p != nil {
@@ -107,7 +110,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					cause := s.startFailure(a.job, launchRefused, errors.New("assignment withdrawn before command started"))
 					r := startFailureOutcome(Result{Machine: w.Machine.ID, Session: a.job.Session, Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}, Error: cause.Error()}, cause)
 					s.state.Result = &r
-				} else if !d.Hold {
+				} else if !d.Hold && !admissionBlocked {
 					bound, err := w.forAttempt(a.job)
 					if err == nil {
 						p, err = bound.startContext(ctx, s, a.job)
@@ -800,10 +803,8 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 						}
 					}
 					if a := actors[key]; a != nil {
-						if reply.AdmissionBlocked && !d.Stop {
-							d.Hold = true
-						}
-						a.update(w, d, true)
+						// Maintenance fences new starts, not log/result replay.
+						a.update(w, d, true, reply.AdmissionBlocked)
 					}
 				}
 				for key, a := range actors {
@@ -814,7 +815,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 						}
 					}
 					if !found {
-						a.update(w, AttemptDirective{Hold: reply.AdmissionBlocked}, true)
+						a.update(w, AttemptDirective{}, true, reply.AdmissionBlocked)
 					}
 				}
 				busy := len(actors) > 0 || leaving || recovering || w.checkAvailability() != nil
@@ -856,7 +857,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				environments.sync(nil, true)
 				rt.cancelCopies()
 				for _, a := range actors {
-					a.update(w, AttemptDirective{}, false)
+					a.update(w, AttemptDirective{}, false, false)
 				}
 				var he *HTTPError
 				if errors.As(err, &he) && (he.Status == 400 || he.Status == 401 || he.Status == 426 || he.Code == "machine_worker_conflict") {

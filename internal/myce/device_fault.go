@@ -163,6 +163,17 @@ func (w *Worker) refreshDeviceFaults(ctx context.Context, root *workerStore) err
 		if err := saveWorkerJSON(root.dir, deviceFaultFile, next); err != nil {
 			return err
 		}
+		for _, d := range w.Machine.Devices {
+			before, after := w.faults.Devices[deviceFaultKey(d)], next.Devices[deviceFaultKey(d)]
+			if before == after {
+				continue
+			}
+			if after.Reason != "" {
+				log.Printf("device quarantined: device=%s pci=%s reason=%s fault_event=%s", d.ID, d.pciAddress, after.Reason, after.Event)
+			} else {
+				log.Printf("device quarantine cleared: device=%s pci=%s reason=%s fault_event=%s", d.ID, d.pciAddress, before.Reason, before.Event)
+			}
+		}
 	}
 	w.faults = &next
 	for _, name := range clears {

@@ -7,9 +7,80 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
+
+// #152: an admission drain must not hold a running actor's reports or custody.
+func TestAttemptReportsAndReleasesDuringAdmissionDrain(t *testing.T) {
+	q, _ := fixture(t)
+	clock := &workerFakeClock{now: q.clock.Now()}
+	q.clock = clock
+	fifo := filepath.Join(t.TempDir(), "command")
+	if err := syscall.Mkfifo(fifo, 0600); err != nil {
+		t.Fatal(err)
+	}
+	command, err := os.OpenFile(fifo, os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { command.Close() })
+	s := spec("experiment")
+	s.Resumable = false
+	s.Run.Command = []string{"sh", "-c", `exec 3<> "$1"; read line <&3; echo during-drain; read line <&3`, "fixture", fifo}
+	j := submit(t, q, s)
+	workerFixture(t, q)
+	await(t, func() bool {
+		clock.Advance(time.Millisecond)
+		return job(t, q, j.ID).StartedAt != nil
+	})
+	const host = "fixture-worker-host"
+	if _, err := q.ChangeHostMaintenance(host, HostMaintenanceRequest{Action: "drain"}); err != nil {
+		t.Fatal(err)
+	}
+	// Observe two check-ins after draining: the first response must have reached
+	// the actor before the machine loop can send the second request.
+	for range 2 {
+		clock.Advance(time.Second)
+		seen := clock.Now()
+		await(t, func() bool {
+			clock.Advance(time.Millisecond)
+			status, err := q.HostMaintenanceStatus(host)
+			return err == nil && len(status.Workers) == 1 && !status.Workers[0].Machine.LastSeen.Before(seen)
+		})
+	}
+	if _, err := command.WriteString("log\n"); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	probeWait(t, ctx, func() bool {
+		clock.Advance(time.Millisecond)
+		logs, err := q.Logs(j.ID, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, l := range logs {
+			if strings.Contains(l.Text, "during-drain") {
+				return true
+			}
+		}
+		return false
+	})
+	if got := job(t, q, j.ID); got.State != "running" {
+		t.Fatal("drain stopped the running attempt", got.State)
+	}
+	if _, err := command.WriteString("finish\n"); err != nil {
+		t.Fatal(err)
+	}
+	probeWait(t, ctx, func() bool {
+		clock.Advance(time.Millisecond)
+		got := job(t, q, j.ID)
+		status, err := q.HostMaintenanceStatus(host)
+		return err == nil && got.State == "succeeded" && got.ReleaseConfirmed && status.Quiescent && len(status.Attempts) == 0 && len(status.PendingReleases) == 0
+	})
+}
 
 func TestAttemptReleasesWhenRAMDropsBeforeEntrypoint(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "entrypoint")
