@@ -478,7 +478,7 @@ func (q *Queue) maintainModels() {
 			if winner == nil || q.calls[winner.ID] == nil {
 				continue
 			}
-			if c == nil || q.before(winner, callJob(c), m) {
+			if c == nil || set.before(winner, callJob(c)) {
 				c = q.calls[winner.ID]
 			}
 		}
@@ -605,7 +605,7 @@ func (q *Queue) maintainModels() {
 				candidates[targetKey(m)] = set
 			}
 			winner := set.pick(handled)
-			if winner != nil && q.calls[winner.ID] == nil && (j == nil || q.before(winner, j, m)) {
+			if winner != nil && q.calls[winner.ID] == nil && (j == nil || set.before(winner, j)) {
 				j = winner
 			}
 		}
@@ -1199,7 +1199,7 @@ func (q *Queue) makeBatchRoom(j *Job, planned, handled map[string]bool, candidat
 		if winner == nil || winner.ID != j.ID {
 			continue
 		}
-		if p := q.roomPlan(winner, m, true); p != nil && q.completionPlanBetter(winner, p, best) {
+		if p := set.batchPlan(winner); p != nil && q.completionPlanBetter(winner, p, best) {
 			best, selected = p, winner
 		}
 	}

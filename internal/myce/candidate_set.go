@@ -6,17 +6,21 @@ import "slices"
 // which work may win, never which projects compete for fair share. Discard the
 // set after applying a placement or otherwise changing queue state.
 type candidateSet struct {
-	q       *Queue
-	m       *Machine
-	jobs    []*Job
-	scores  map[string]float64
-	actives map[string]float64
+	q         *Queue
+	m         *Machine
+	jobs      []*Job
+	scores    map[string]float64
+	actives   map[string]float64
+	resources map[batchResourceKey]batchResourceRoom
+	ordered   map[string][]*Job
+	projects  []string
 }
 
 func (q *Queue) candidates(m *Machine) *candidateSet {
 	s := &candidateSet{q: q, m: m, scores: map[string]float64{}, actives: map[string]float64{}}
+	s.resources = map[batchResourceKey]batchResourceRoom{}
 	for _, j := range q.s.Jobs {
-		if candidate := q.batchCandidate(j, m); candidate != nil {
+		if candidate := q.batchCandidateWithResources(j, m, s.resources); candidate != nil {
 			s.jobs = append(s.jobs, candidate)
 		}
 	}
@@ -64,28 +68,52 @@ func (s *candidateSet) before(a, b *Job) bool {
 	return s.q.beforeWithFair(a, b, s.m, s.score, s.active)
 }
 
+// Within-project order is immutable during a read-only pass. Sort it once
+// instead of comparing every remaining job again for each exclusion.
 func (s *candidateSet) pick(excluded map[string]bool) *Job {
-	byProject := map[string]*Job{}
-	for _, j := range s.jobs {
-		if excluded[j.ID] {
-			continue
+	if s.ordered == nil {
+		s.ordered = map[string][]*Job{}
+		for _, j := range s.jobs {
+			s.ordered[j.Spec.Project] = append(s.ordered[j.Spec.Project], j)
 		}
-		old := byProject[j.Spec.Project]
-		if old == nil || s.before(j, old) {
-			byProject[j.Spec.Project] = j
+		for project, jobs := range s.ordered {
+			s.projects = append(s.projects, project)
+			slices.SortFunc(jobs, func(a, b *Job) int {
+				if s.before(a, b) {
+					return -1
+				}
+				if s.before(b, a) {
+					return 1
+				}
+				return 0
+			})
 		}
+		slices.Sort(s.projects)
 	}
-	projects := make([]string, 0, len(byProject))
-	for project := range byProject {
-		projects = append(projects, project)
-	}
-	slices.Sort(projects)
 	var best *Job
-	for _, project := range projects {
-		j := byProject[project]
-		if best == nil || s.before(j, best) {
-			best = j
+	for _, project := range s.projects {
+		for _, j := range s.ordered[project] {
+			if excluded[j.ID] {
+				continue
+			}
+			if best == nil || s.before(j, best) {
+				best = j
+			}
+			break
 		}
 	}
 	return best
+}
+
+func (s *candidateSet) batchPlan(j *Job) *placementPlan {
+	if len(s.q.s.PreparationPlans) != 0 {
+		return s.q.roomPlan(j, s.m, true)
+	}
+	key := resourceKey(j)
+	if room, ok := s.resources[key]; ok {
+		return room.plan
+	}
+	plan := s.q.roomPlan(j, s.m, true)
+	s.resources[key] = batchResourceRoom{plan: plan}
+	return plan
 }

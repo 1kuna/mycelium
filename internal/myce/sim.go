@@ -817,6 +817,18 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 					}
 				}
 			}
+			// A check-in or call completion can admit a load after that virtual
+			// worker's turn. Observe it now, before advancing the fake clock.
+			for _, worker := range workers {
+				if !worker.online {
+					continue
+				}
+				for _, slot := range q.modelPlan(worker.spec.Name) {
+					if slot.State == "loading" && worker.loads[slot.Model] == nil {
+						changed = true
+					}
+				}
+			}
 			if !changed {
 				break
 			}

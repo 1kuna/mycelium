@@ -169,3 +169,19 @@ func TestSimSuddenLossCheckpoint(t *testing.T) {
 	nearSim(t, r.InfrastructureLostSeconds, 3)
 	nearSim(t, r.Projects["exp"].ExperimentFinishSeconds, 93) // loss at 13 + real 60s timeout + remaining 20
 }
+
+// A check-in can admit a model after its command releases memory. Virtual
+// workers must observe that load in the same instant, before jumping time.
+func TestSimModelLoadAfterCommandRelease(t *testing.T) {
+	batch := simTestStream("batch", "experiment", 0, 10, 1)
+	call := simTestStream("call", "experiment", 1, 10, 1)
+	call.Call, call.Model = true, "model"
+	w := simTestWork(batch, call)
+	w.Models = []SimModel{{Name: "model", MemoryGB: 8, Platforms: []string{"fake"}, LoadSeconds: 100}}
+	r := runSimTest(t, simTestFleet(1), w, 500)
+	if r.Failed != 0 || r.Completed != 2 {
+		t.Fatalf("model admitted after command release did not complete: %+v", r)
+	}
+	nearSim(t, r.LoadingSeconds, 100)
+	nearSim(t, r.Projects["call"].ExperimentFinishSeconds, 119)
+}

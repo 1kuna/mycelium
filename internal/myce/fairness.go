@@ -193,6 +193,10 @@ func (q *Queue) batchCanUse(j *Job, m *Machine) bool {
 }
 
 func (q *Queue) batchCandidate(j *Job, m *Machine) *Job {
+	return q.batchCandidateWithResources(j, m, nil)
+}
+
+func (q *Queue) batchCandidateWithResources(j *Job, m *Machine, resources map[batchResourceKey]batchResourceRoom) *Job {
 	if j.Spec.FanOut != nil {
 		return q.fanOutCandidate(j, m)
 	}
@@ -208,7 +212,7 @@ func (q *Queue) batchCandidate(j *Job, m *Machine) *Job {
 		}
 		q.applyLearnedNeeds(candidate)
 		candidate = q.memoryCandidate(candidate, m)
-		if q.capReasonFor(candidate, m) == "" && q.batchResourcesFit(candidate, m) {
+		if q.capReasonFor(candidate, m) == "" && q.batchResourcesFitWithScan(candidate, m, resources) {
 			// Leave accelerator workers for GPU work when CPU placement is free.
 			// Filter here so the same planner can consider the next candidate.
 			if candidate.Spec.Needs.cpuOnly() && m.GPU != "cpu" && q.betterPlacement(candidate, m) {
@@ -220,7 +224,40 @@ func (q *Queue) batchCandidate(j *Job, m *Machine) *Job {
 	return nil
 }
 
+// Resource projections depend on the concrete vector and demand identity, not
+// queue age or job ID. Reuse them only within one read-only device scan and only
+// without preparations, whose sharing decision also depends on the recipe.
+type batchResourceKey struct {
+	project, class, priority string
+	gpu, host                float64
+	cores                    int
+}
+type batchResourceRoom struct {
+	machine Machine
+	memory  float64
+	ok      bool
+	plan    *placementPlan
+}
+
+func resourceKey(j *Job) batchResourceKey {
+	return batchResourceKey{j.Spec.Project, j.Spec.Class, j.Spec.Priority, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, j.Spec.Needs.cores()}
+}
+
 func (q *Queue) batchResourcesFit(j *Job, m *Machine) bool {
+	return q.batchResourcesFitWithScan(j, m, nil)
+}
+func (q *Queue) batchResourcesFitWithScan(j *Job, m *Machine, resources map[batchResourceKey]batchResourceRoom) bool {
+	key := resourceKey(j)
+	room, found := resources[key]
+	if !found {
+		room = q.batchResourceProjection(j, m)
+		if resources != nil && len(q.s.PreparationPlans) == 0 {
+			resources[key] = room
+		}
+	}
+	return room.ok && fitsResources(j, &room.machine, room.memory)
+}
+func (q *Queue) batchResourceProjection(j *Job, m *Machine) batchResourceRoom {
 	plan := q.roomPlan(j, m, true)
 	var projected Machine
 	if plan != nil {
@@ -230,7 +267,7 @@ func (q *Queue) batchResourcesFit(j *Job, m *Machine) bool {
 		// slot. Only roomPlan authorizes stops; this estimate cannot admit it.
 		jobs, slots, ok := q.hostReleases(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, j.Spec.Priority, j.Spec)
 		if !ok {
-			return false
+			return batchResourceRoom{}
 		}
 		projected = q.cpuAfterReleases(m, jobs, slots, 0)
 	}
@@ -242,7 +279,7 @@ func (q *Queue) batchResourcesFit(j *Job, m *Machine) bool {
 	if m.TotalMemoryGB > 0 {
 		memory = min(memory, m.TotalMemoryGB)
 	}
-	return fitsResources(j, &projected, memory)
+	return batchResourceRoom{machine: projected, memory: memory, ok: true, plan: plan}
 }
 
 // candidate is the device-aware planner for batch dispatch, model admission and

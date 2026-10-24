@@ -6,7 +6,9 @@ fair-share accounting. In-process workers run timers instead of processes or
 models. A fake clock jumps between arrivals, finishes, stop acknowledgements,
 model readiness/idle expiry, availability changes and worker-loss deadlines.
 No GPU, network connection, token, SQLite file, model download or real sleep is
-needed. The simulator skips persistence and assumes a reachable pretend NAS.
+needed. Model loads admitted during a check-in settle at that same fake-clock
+instant, including after command cleanup; an unrelated future event must not
+delay their startup timer or create an artificial load timeout. The simulator skips persistence and assumes a reachable pretend NAS.
 It aborts on queue errors. Finished jobs are removed after their metrics are
 collected; production does not use that removal path.
 
@@ -110,6 +112,9 @@ majority guard; work may remain pending until reconnect instead of being retried
 The queue's scan implementation has equivalent performance shortcuts for large
 backlogs: one ordinary candidate per project, cached fair scores within a scan,
 priority-specific reclaimable memory, and no reclamation scan for experiments.
+Within a read-only device scan it also reuses identical resource projections
+when no preparation is active and sorts each project's candidates once for
+exclusion enumeration. These snapshots are discarded on placement mutations.
 They do not add placement or fairness rules; regression tests compare decisions
 against the original scans. Fake-clock tests cover preemption, graceful leave,
 sudden loss/checkpoints, exact weighted allocation, fitting-idle accounting,

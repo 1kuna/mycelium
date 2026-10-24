@@ -11,17 +11,22 @@ func TestCandidateSetExclusionsKeepFairCompetitors(t *testing.T) {
 	q.s.Policies = map[string]ProjectPolicy{"a": {Weight: 1}, "b": {Weight: 1}, "c": {Weight: 1}}
 	m := machine("worker", "fake")
 	for _, project := range []string{"a", "b", "c"} {
-		j := submit(t, q, projectSpec(project))
-		q.s.FairUsage[q.fairKey(j.Spec)] = FairUsage{Seconds: map[string]float64{"a": 100, "b": 10, "c": 30}[project], At: clock.Now()}
+		for i := range 3 {
+			spec := projectSpec(project)
+			spec.Needs.CPUCores = 1 + i%2
+			j := submit(t, q, spec)
+			q.s.FairUsage[q.fairKey(j.Spec)] = FairUsage{Seconds: map[string]float64{"a": 100, "b": 10, "c": 30}[project], At: clock.Now()}
+		}
 	}
 	set := q.candidates(&m)
 	excluded := map[string]bool{}
-	for range 3 {
+	for range 9 {
 		got := set.pick(excluded)
 		// Existing standalone comparator includes excluded-but-runnable projects.
 		var want *Job
-		for _, j := range set.jobs {
-			if !excluded[j.ID] && (want == nil || q.before(j, want, &m)) {
+		for _, original := range q.s.Jobs {
+			j := q.batchCandidate(original, &m)
+			if j != nil && !excluded[j.ID] && (want == nil || q.before(j, want, &m)) {
 				want = j
 			}
 		}
