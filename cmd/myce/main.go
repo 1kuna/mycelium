@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -699,6 +700,9 @@ func status(ctx context.Context, c myce.Client) (myce.Snapshot, error) {
 	return s, err
 }
 func printStatus(s myce.Snapshot, full bool) {
+	for _, host := range slices.Sorted(maps.Keys(s.HostStates)) {
+		fmt.Printf("host %s: %s\n", host, s.HostStates[host])
+	}
 	for _, hold := range s.HostHolds {
 		fmt.Println(hold)
 	}

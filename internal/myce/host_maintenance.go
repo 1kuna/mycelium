@@ -62,8 +62,10 @@ type HostMaintenanceStatus struct {
 	PendingCleanup  []string             `json:"pending_cleanup"`
 	MemoryInUseGB   float64              `json:"memory_in_use_gb"`
 	MemoryDebtGB    float64              `json:"memory_debt_gb"`
-	Healthy         bool                 `json:"healthy"`
-	Quiescent       bool                 `json:"quiescent"`
+	// Healthy retains the legacy all-workers/all-devices health contract.
+	Healthy   bool   `json:"healthy"`
+	State     string `json:"state"`
+	Quiescent bool   `json:"quiescent"`
 }
 
 func (q *Queue) maintenanceKnown(host string) bool {
@@ -217,6 +219,7 @@ func (q *Queue) hostMaintenanceStatus(host string) HostMaintenanceStatus {
 		out.Policy.MemoryBudget = &budget
 	}
 	out.Healthy = true
+	operational := true
 	freshEvidence := true
 	now := q.clock.Now()
 	for _, m := range q.s.Machines {
@@ -226,7 +229,8 @@ func (q *Queue) hostMaintenanceStatus(host string) HostMaintenanceStatus {
 		fresh := !m.Gone && !q.unreported[m.ID] && !m.LastSeen.After(now) && now.Sub(m.LastSeen) < min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2]))
 		out.Workers = append(out.Workers, MaintenanceWorker{Machine: cloneMachine(m), Fresh: fresh})
 		freshEvidence = freshEvidence && fresh
-		out.Healthy = out.Healthy && fresh && !m.HostMemoryPolicyMismatch && m.MemoryError == "" && m.HostMemoryError == "" && m.InventoryReason == ""
+		operational = operational && fresh && !m.HostMemoryPolicyMismatch && m.MemoryError == "" && m.HostMemoryError == "" && m.InventoryReason == ""
+		out.Healthy = out.Healthy && operational
 		out.Healthy = out.Healthy && !slices.ContainsFunc(m.Devices, func(d MachineDevice) bool { return d.Reason != "" })
 		out.MemoryInUseGB = max(out.MemoryInUseGB, m.HostMemoryInUseGB)
 		out.MemoryDebtGB = max(out.MemoryDebtGB, m.hostReservationDebtGB)
@@ -278,7 +282,15 @@ func (q *Queue) hostMaintenanceStatus(host string) HostMaintenanceStatus {
 	sort.Slice(out.Workers, func(i, j int) bool { return out.Workers[i].Machine.ID < out.Workers[j].Machine.ID })
 	sort.Slice(out.PendingReleases, func(i, j int) bool { return releaseKey(out.PendingReleases[i]) < releaseKey(out.PendingReleases[j]) })
 	sort.Strings(out.PendingCleanup)
-	out.Healthy = out.Healthy && len(out.Workers) > 0 && out.Policy.MemoryBudget != nil
+	operational = operational && len(out.Workers) > 0 && out.Policy.MemoryBudget != nil
+	out.Healthy = out.Healthy && operational
+	out.State = "unhealthy"
+	if operational {
+		out.State = "degraded"
+		if out.Healthy {
+			out.State = "healthy"
+		}
+	}
 	out.MigrationReady = q.machineMigrationReady(host)
 	// Fresh custody evidence is required; inventory and memory health are separate.
 	out.Quiescent = freshEvidence && len(out.Workers) > 0 && q.maintenanceBlocked(host) && len(obligations) == 0 && len(out.PendingCleanup) == 0

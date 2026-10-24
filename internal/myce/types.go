@@ -531,6 +531,7 @@ type HoldDetail struct {
 }
 
 type Snapshot struct {
+	HostStates     map[string]string    `json:"host_states,omitempty"`
 	WorkCurves     []WorkObservation    `json:"work_curves"`
 	PriorityPolicy PriorityPolicyRecord `json:"priority_policy"`
 	HoldsDetail    []HoldDetail         `json:"holds_detail"`

@@ -1404,7 +1404,9 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 			}
 		}
 
+		out.HostStates = make(map[string]string, len(hosts))
 		for host, hasMachine := range hosts {
+			out.HostStates[host] = q.hostMaintenanceStatus(host).State
 			if !hasMachine {
 				if detail := q.dockerHoldDetail(host); detail.Text != "" {
 					out.HoldsDetail = append(out.HoldsDetail, detail)

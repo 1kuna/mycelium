@@ -50,7 +50,7 @@ func TestStatusFullIDsAndOneBasedAttempts(t *testing.T) {
 
 func TestStatusShowsProfileQualificationAndEveryWaitingReason(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprint(w, `{"machines":[{"id":"example","gpu":"cuda","capability_profile":{"benchmark":{"state":"complete","seconds":1,"measurements":[{"resource":"cpu","work":"sha256","rate":123,"unit":"bytes/s"}]},"os":"linux","arch":"arm64","logical_cpus":8,"memory_layout":"unified","system_memory_bytes":17179869184,"accelerators":[{"type":"cuda","memory_bytes":17179869184}],"availability":{"available":false,"reason":"on battery"}},"extension_reports":[{"name":"sample","version":"1","work":"kind:sample","qualified":true}]}],"jobs":[{"id":"running-job","machine":"example","state":"running","spec":{"name":"running sample","priority":"experiment","kind":"sample"}},{"id":"waiting-job","state":"queued","reason":"example: hypha on battery; waiting for external power","spec":{"name":"waiting sample","priority":"experiment"}},{"id":"no-reason","state":"queued","spec":{"name":"new sample","priority":"experiment"}}]}`)
+		fmt.Fprint(w, `{"host_states":{"example":"degraded"},"machines":[{"id":"example","gpu":"cuda","capability_profile":{"benchmark":{"state":"complete","seconds":1,"measurements":[{"resource":"cpu","work":"sha256","rate":123,"unit":"bytes/s"}]},"os":"linux","arch":"arm64","logical_cpus":8,"memory_layout":"unified","system_memory_bytes":17179869184,"accelerators":[{"type":"cuda","memory_bytes":17179869184}],"availability":{"available":false,"reason":"on battery"}},"extension_reports":[{"name":"sample","version":"1","work":"kind:sample","qualified":true}]}],"jobs":[{"id":"running-job","machine":"example","state":"running","spec":{"name":"running sample","priority":"experiment","kind":"sample"}},{"id":"waiting-job","state":"queued","reason":"example: hypha on battery; waiting for external power","spec":{"name":"waiting sample","priority":"experiment"}},{"id":"no-reason","state":"queued","spec":{"name":"new sample","priority":"experiment"}}]}`)
 	}))
 	defer server.Close()
 	saved := os.Stdout
@@ -68,7 +68,7 @@ func TestStatusShowsProfileQualificationAndEveryWaitingReason(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"hypha example capability profile v0:", "benchmark complete", "cpu sha256 123.00 bytes/s", "unified memory", "NVIDIA (CUDA): 16.0 GiB", "hypha example:", "hypha on battery; waiting for external power", "sample@1 · kind of work sample · qualified", "running sample", "hypha=example", "waiting sample", "waiting for a hypha to take this job"} {
+	for _, want := range []string{"host example: degraded", "hypha example capability profile v0:", "benchmark complete", "cpu sha256 123.00 bytes/s", "unified memory", "NVIDIA (CUDA): 16.0 GiB", "hypha example:", "hypha on battery; waiting for external power", "sample@1 · kind of work sample · qualified", "running sample", "hypha=example", "waiting sample", "waiting for a hypha to take this job"} {
 		if !strings.Contains(string(data), want) {
 			t.Errorf("missing %q", want)
 		}

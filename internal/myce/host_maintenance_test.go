@@ -813,3 +813,35 @@ func TestReviewMaintenanceFailedPinnedEngine(t *testing.T) {
 		})
 	}
 }
+
+// #153: an isolated quarantine must not hide usable neighboring resources.
+func TestMaintenanceQuarantinedDeviceDegraded(t *testing.T) {
+	q, clock := fixture(t)
+	m := m3Machine()
+	machineCheck(t, q, m)
+	status, err := q.HostMaintenanceStatus(m.HostID)
+	if err != nil || status.State != "healthy" || !status.Healthy {
+		t.Fatal(status, err)
+	}
+	m.Devices[0].Reason = "device_fault_xe"
+	m.Devices[0].FreeMemoryGB = 0
+	machineCheck(t, q, m)
+	status, err = q.HostMaintenanceStatus(m.HostID)
+	if err != nil || status.State != "degraded" || status.Healthy || status.Workers[0].Machine.Devices[0].Reason != "device_fault_xe" {
+		t.Fatal(status, err)
+	}
+	snapshot, err := q.Snapshot()
+	if err != nil || snapshot.HostStates[m.HostID] != "degraded" {
+		t.Fatal(snapshot, err)
+	}
+	submit(t, q, spec("production"))
+	assigned := assignedJob(machineCheck(t, q, m))
+	if assigned == nil || len(assigned.AllocatedDevices) != 1 || assigned.AllocatedDevices[0] != "1" {
+		t.Fatal("quarantine must preserve placement on the healthy neighbor", assigned)
+	}
+	clock.Advance(ProductionLossAfter)
+	status, err = q.HostMaintenanceStatus(m.HostID)
+	if err != nil || status.State != "unhealthy" || status.Healthy {
+		t.Fatal("stale host must remain unhealthy", status, err)
+	}
+}
