@@ -55,6 +55,22 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 	n := &copy.Spec.Needs
 	source, refusal := "declared", ""
 	if n.Memory == "auto" {
+		// Explicit optional member caps remain declarations to preserve.
+		hostFloor := max(minimumHostMemoryGB, copy.Spec.Run.MemoryGB, copy.Spec.Run.DockerMemoryGB)
+		for _, side := range copy.Spec.Run.Sidecars {
+			hostFloor = max(hostFloor, side.MemoryGB)
+		}
+		for _, side := range copy.Spec.Run.DockerSidecars {
+			hostFloor = max(hostFloor, side.MemoryGB)
+		}
+		if e := qualifiedExtension(&copy, m); e != nil {
+			if v := e.variant(machineTarget(m)); v != nil {
+				hostFloor = max(hostFloor, v.Execution.Main.MemoryGB)
+				for _, side := range v.Execution.Sidecars {
+					hostFloor = max(hostFloor, side.MemoryGB)
+				}
+			}
+		}
 		peak, factor, label := q.memoryEstimate(j, m)
 		switch {
 		case peak != nil:
@@ -104,28 +120,17 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 					n.MemoryGB = min(n.MemoryGB, m.TotalMemoryGB)
 				}
 				if m.UnifiedMemory {
-					n.MemoryGB = min(n.MemoryGB, max(0, host-minimumHostMemoryGB))
+					// Reserve member containment before filling the GPU share.
+					if host < hostFloor && refusal == "" {
+						refusal = fmt.Sprintf("exploratory first run needs %.3f GiB host member memory; %.3f GiB shared headroom available", hostFloor, host)
+					}
+					n.MemoryGB = min(n.MemoryGB, max(0, host-hostFloor))
 					host -= n.MemoryGB
 				}
 			}
 			n.HostMemoryGB = max(minimumHostMemoryGB, host)
 		}
-		// Explicit optional member caps remain declarations to preserve.
-		n.HostMemoryGB = max(n.HostMemoryGB, copy.Spec.Run.MemoryGB, copy.Spec.Run.DockerMemoryGB)
-		for _, side := range copy.Spec.Run.Sidecars {
-			n.HostMemoryGB = max(n.HostMemoryGB, side.MemoryGB)
-		}
-		for _, side := range copy.Spec.Run.DockerSidecars {
-			n.HostMemoryGB = max(n.HostMemoryGB, side.MemoryGB)
-		}
-		if e := qualifiedExtension(&copy, m); e != nil {
-			if v := e.variant(machineTarget(m)); v != nil {
-				n.HostMemoryGB = max(n.HostMemoryGB, v.Execution.Main.MemoryGB)
-				for _, side := range v.Execution.Sidecars {
-					n.HostMemoryGB = max(n.HostMemoryGB, side.MemoryGB)
-				}
-			}
-		}
+		n.HostMemoryGB = max(n.HostMemoryGB, hostFloor)
 		if floor := j.MemoryOOMFloor; floor != nil {
 			n.MemoryGB = floor.MemoryGB // A host OOM is not a GPU measurement.
 			n.HostMemoryGB = max(n.HostMemoryGB, floor.HostMemoryGB)

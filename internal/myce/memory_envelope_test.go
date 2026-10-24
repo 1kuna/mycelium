@@ -329,6 +329,65 @@ func TestMemoryEnvelopeRefusalReason(t *testing.T) {
 	}
 }
 
+func unifiedAutoFixture(t *testing.T, memberCap float64) (*Queue, *fakeClock, Machine, Spec) {
+	t.Helper()
+	q, clock := fixture(t)
+	e := compositionExtension(t, false)
+	e.Kinds = nil
+	v := &e.Variants[0]
+	v.Target = ExecutionTarget{OS: "linux", Arch: "arm64", Platform: "cuda"}
+	v.Needs = ResourceNeeds{MemoryGB: .0625, HostMemoryGB: .015625}
+	v.Execution.Main.MemoryGB = memberCap
+	delete(v.Baselines, "kind:sample")
+	v.References = map[string]WorkReference{"extension:sample": {InputShape: "small-v1", Unit: "records", Units: 10}}
+	e = freezeComposition(t, e)
+	if err := q.AddExtension(e); err != nil {
+		t.Fatal(err)
+	}
+	m := cpuMachine("unified", "shared-host", "cuda", 8, 101)
+	m.HostMemoryBudgetGB, m.MemoryCeilingSlackGB = 64, .125
+	m.MemoryEnforcement = "memory ceilings enforced (cgroup v2)"
+	m.CapabilityProfile.Arch, m.CapabilityProfile.MemoryLayout = "arm64", "unified"
+	m.CapabilityProfile.SystemMemoryBytes = 128 << 30
+	d := MachineDevice{ID: "0", Platform: "cuda", Identity: "synthetic-gb10", Selector: "0", MemoryMode: "unified", ReserveMemoryGB: 16, BudgetGB: 101, FreeMemoryGB: 101, UnifiedMemory: true, MemoryMeasured: true, ExtensionFingerprint: "unified-v1"}
+	target := d.machine(m)
+	report := newExtensionReport(e, &target, "extension:sample")
+	report.Setup, report.Qualified, report.CheckID = true, true, "check"
+	d.ExtensionReports = []ExtensionReport{report}
+	m.Devices = []MachineDevice{d}
+	machineCheck(t, q, m)
+	s := Spec{Name: "memory", Project: "synthetic", RequireTarget: true, Extension: extensionKey(e), Needs: ResourceNeeds{Memory: "auto"}, Workload: &Workload{InputShape: "small-v1", Units: 10}}
+	return q, clock, m, s
+}
+
+func TestMemoryEnvelopeUnifiedCappedAutoStarts(t *testing.T) {
+	q, _, m, s := unifiedAutoFixture(t, .25)
+	queued := submit(t, q, s)
+	j := assignedJob(machineCheck(t, q, m))
+	if j == nil || j.ID != queued.ID {
+		t.Fatalf("capped auto job did not qualify and dispatch: %s", job(t, q, queued.ID).Reason)
+	}
+	if j.MemoryEnvelope == nil || j.MemoryEnvelope.Refusal != "" || j.MemoryEnvelope.Source != "exploratory first run" || j.Spec.Needs.HostMemoryGB < .25 || j.Spec.Needs.MemoryGB <= 0 || j.MemoryEnvelope.HostGB > 64 {
+		t.Fatalf("capped exploration exceeds shared allowance: %+v", j)
+	}
+	if err := q.Started(result(j, false)); err != nil {
+		t.Fatal(err)
+	}
+	if got := job(t, q, j.ID); got.State != "running" || got.StartedAt == nil {
+		t.Fatalf("capped auto job did not start: %+v", got)
+	}
+	// A member floor larger than all shared headroom must still refuse.
+	finish(t, q, j, true)
+	machineCheck(t, q, m)
+	probe := *j
+	probe.State = "queued"
+	probe.Spec.Run.MemoryGB = 65
+	target := allocationMachine(q.s.Machines[m.ID], j.AllocatedDevices)
+	if candidate := q.memoryCandidate(&probe, target); candidate.MemoryEnvelope.Refusal == "" {
+		t.Fatalf("impossible member floor explored: %+v", candidate.MemoryEnvelope)
+	}
+}
+
 func TestMemoryEnvelopeUnifiedHeadroom(t *testing.T) {
 	q, clock := fixture(t)
 	e := compositionExtension(t, false)
