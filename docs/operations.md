@@ -75,6 +75,16 @@ The line contains no worker identity, payload, filesystem path or transport erro
 it is written after releasing the queue lock. These timings are diagnostic wall
 time, independent of the injected scheduling clock.
 
+`event=slow_queue_mutex_hold` identifies sampled holds of at least 250 ms in
+queue updates (including Tick, check-ins and scheduling), status projection and
+batch-log retention. `operation` names the code operation, `duration_ms` measures
+time holding the lock (excluding acquisition), and `sample_every=16` means one
+in sixteen holds at each boundary is measured. Fast holds stay silent; unsampled
+holds do no clock reads. Logging and operation-name resolution happen after
+unlocking, without request identifiers. Sampling can miss an isolated slow hold;
+absence of a line does not rule out contention. These measurements also use
+diagnostic wall time, never the scheduling clock.
+
 ### Stored job file retention
 
 Queue maintenance reclaims stored job inputs and results after **7 days in a

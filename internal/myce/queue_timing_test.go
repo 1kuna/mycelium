@@ -17,7 +17,7 @@ type launchLogWriter struct {
 }
 
 func (w *launchLogWriter) Write(b []byte) (int, error) {
-	if strings.Contains(string(b), "event=slow_launch_authorization") {
+	if strings.Contains(string(b), "event=slow_launch_authorization") || strings.Contains(string(b), "event=slow_queue_mutex_hold") {
 		if !w.q.mu.TryLock() {
 			w.t.Error("slow launch logging held the queue lock")
 		} else {
@@ -25,6 +25,40 @@ func (w *launchLogWriter) Write(b []byte) (int, error) {
 		}
 	}
 	return w.Buffer.Write(b)
+}
+
+func TestQueueMutexHoldTelemetry(t *testing.T) {
+	q, _ := fixture(t)
+	logs := &launchLogWriter{q: q, t: t}
+	old := log.Writer()
+	log.SetOutput(logs)
+	defer log.SetOutput(old)
+	var sampler queueHoldSampler
+	for i := range 33 {
+		q.mu.Lock()
+		started := sampler.start()
+		if sampled := !started.IsZero(); sampled != (i%16 == 0) {
+			t.Errorf("hold %d sampled=%t", i, sampled)
+		}
+		duration := queueHoldDuration(started)
+		q.mu.Unlock()
+		logQueueHold(duration, "fast", nil)
+	}
+	if logs.Len() != 0 {
+		t.Fatal("fast holds emitted telemetry", logs.String())
+	}
+	// Exercise the real update boundary. Wall time only models a slow critical
+	// section; queue decisions still use the fixture's injected clock.
+	q.updateHolds.count.Store(0)
+	if err := q.update(func() error {
+		<-time.After(300 * time.Millisecond)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if line := logs.String(); strings.Count(line, "event=slow_queue_mutex_hold") != 1 || !strings.Contains(line, "TestQueueMutexHoldTelemetry") || !strings.Contains(line, "duration_ms=") || !strings.Contains(line, "sample_every=16") {
+		t.Fatal("missing slow hold attribution", line)
+	}
 }
 
 func TestHostLaunchSlowAuthorizationTelemetry(t *testing.T) {

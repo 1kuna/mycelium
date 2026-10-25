@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -8,6 +9,35 @@ import (
 	"testing"
 	"time"
 )
+
+// Measure the status projection's read-lock hold for a multi-project backlog.
+// No wall-time assertion: compare the same workload before/after the fix.
+func BenchmarkQueueMutexProjection(b *testing.B) {
+	for _, count := range []int{100, 300} {
+		b.Run(fmt.Sprint(count), func(b *testing.B) {
+			clock := &fakeClock{now: time.Date(2026, 10, 25, 0, 0, 0, 0, time.UTC)}
+			m := machine("worker", "fake")
+			m.TotalMemoryGB = 8
+			q := &Queue{simulation: true, clock: clock, nasAvailable: true, s: state{Jobs: map[string]*Job{}, Machines: map[string]*Machine{m.ID: &m}}}
+			for i := range count {
+				id := fmt.Sprintf("queued-%06d", i)
+				s := projectSpec(fmt.Sprintf("project-%d", i%4))
+				s.Needs.MemoryGB = 1
+				q.s.Jobs[id] = &Job{ID: id, State: "queued", Queued: clock.Now(), Spec: s}
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				q.mu.RLock()
+				order, _ := q.queueProjection()
+				q.mu.RUnlock()
+				if len(order) != count {
+					b.Fatalf("projected %d of %d jobs", len(order), count)
+				}
+			}
+		})
+	}
+}
 
 func projectSpec(project string) Spec { s := spec("experiment"); s.Project = project; return s }
 func TestFairSharingUsesClockAndExplains(t *testing.T) {

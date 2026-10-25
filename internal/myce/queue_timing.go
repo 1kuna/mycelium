@@ -3,12 +3,46 @@ package myce
 import (
 	"database/sql"
 	"log"
+	"reflect"
+	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
+// Sample one in sixteen holds (including the first), independently of queue
+// time. Fast, unsampled operations do no clock reads or stack inspection.
+type queueHoldSampler struct{ count atomic.Uint64 }
+
+func (s *queueHoldSampler) start() time.Time {
+	if (s.count.Add(1)-1)%16 == 0 {
+		return time.Now()
+	}
+	return time.Time{}
+}
+
+func queueHoldDuration(started time.Time) time.Duration {
+	if started.IsZero() {
+		return 0
+	}
+	return time.Since(started)
+}
+
+// Call only after unlocking. fn names a transaction's operation without logging
+// job, host, path or other request data. Resolve its name only for slow holds.
+func logQueueHold(duration time.Duration, operation string, fn func() error) {
+	if duration < 250*time.Millisecond {
+		return
+	}
+	if fn != nil {
+		operation = runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
+	}
+	log.Printf("event=slow_queue_mutex_hold operation=%s duration_ms=%.3f sample_every=16", operation, float64(duration)/float64(time.Millisecond))
+}
+
 // Monotonic wall time is observational only: queue decisions still use q.clock.
-// Only launch requests opt in; other transactions pay no clock-read cost.
+// Only launch requests opt into detailed request/commit timing; mutex holds
+// are sampled independently above.
 type queueUpdateTiming struct {
 	started   time.Time
 	mutexWait time.Duration

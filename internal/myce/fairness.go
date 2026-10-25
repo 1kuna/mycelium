@@ -310,7 +310,7 @@ func (q *Queue) plannerMachines() []*Machine {
 // and usage: future arrivals, usage and which worker frees first can change it.
 func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 	order, reasons := map[string]int{}, map[string]string{}
-	machines := make([]*Machine, 0, len(q.s.Machines))
+	sets := make([]*candidateSet, 0, len(q.s.Machines))
 	for _, m := range q.plannerMachines() {
 		copy := *m // Projection changes only this scalar memory value; inventory stays read-only.
 		for _, r := range q.s.Jobs {
@@ -318,7 +318,9 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 				copy.FreeMemoryGB += r.Spec.Needs.MemoryGB
 			}
 		}
-		machines = append(machines, &copy)
+		// Projection only changes exclusions, never queue state or inventory.
+		// Reuse the same read-only planning pass for every projected position.
+		sets = append(sets, q.candidates(&copy))
 	}
 	for _, j := range q.s.Jobs {
 		if j.State != "queued" {
@@ -329,11 +331,11 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 	excluded := map[string]bool{}
 	for n := 1; ; n++ {
 		var best *Job
-		var target *Machine
-		for _, m := range machines {
-			winner := q.candidate(m, excluded)
-			if winner != nil && (best == nil || q.before(winner, best, m)) {
-				best, target = winner, m
+		var selected *candidateSet
+		for _, set := range sets {
+			winner := set.pick(excluded)
+			if winner != nil && (best == nil || set.before(winner, best)) {
+				best, selected = winner, set
 			}
 		}
 		if best == nil {
@@ -341,8 +343,9 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 		}
 		order[best.ID] = n
 		excluded[best.ID] = true
+		target := selected.m
 		// Explain the first competing job, not a separate UI ordering heuristic.
-		winner := q.candidate(target, nil)
+		winner := selected.pick(nil)
 		base := "waiting for a worker to pull this job"
 		live := q.s.Machines[target.ID]
 		for _, view := range q.machineTargets(live) {
@@ -378,9 +381,9 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 		if q.comparePriority(winner.Spec, best.Spec) < 0 {
 			ahead = q.priorityMatch(winner.Spec).Tier + " work goes first"
 		} else if winner.Spec.Project != best.Spec.Project && fairResourceFamily(winner.Spec) == fairResourceFamily(best.Spec) {
-			if q.fairScore(winner, target) < q.fairScore(best, target)-1e-6 {
+			if selected.score(winner, target) < selected.score(best, target)-1e-6 {
 				ahead = fmt.Sprintf("%s goes first (%s is ahead of its fair share)", winner.Spec.Project, best.Spec.Project)
-			} else if q.fairActive(winner) < q.fairActive(best)-1e-6 {
+			} else if selected.active(winner) < selected.active(best)-1e-6 {
 				ahead = winner.Spec.Project + " goes first (same-tier fair turn)"
 			}
 		}
