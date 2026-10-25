@@ -16,9 +16,8 @@ targets:
   - {os: linux, arch: amd64, platform: cpu}
   - {os: linux, arch: arm64, platform: cpu}
   - {os: darwin, arch: arm64, platform: cpu}
-# Empty means the worker's installed toolchain, checked before the expensive run.
-# A named catalog environment can supply an immutable recipe instead.
-environment: {}
+# Locked CPU tools for every declared target (see env/mycelium-gate/README.md).
+environment: mycelium-gate
 outputs:
   gate-result.txt: results
 check: [grep, -qx, 'gate full: exit=0', gate-result.txt]

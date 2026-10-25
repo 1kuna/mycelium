@@ -17,8 +17,9 @@ A profile is ordinary batch YAML plus `source` and `check` (an argv array). Reus
 `platform` (the existing extension target grammar). Plain command profiles use
 an isolated working folder; extension/Docker/sidecar profiles are outside this
 MVP. `environment` selects an existing immutable catalog recipe; `{}` explicitly
-uses installed tools. The gate profile checks the installed toolchain before
-running. It declares two CPU cores, matches Go parallelism to that declaration,
+uses installed tools. The gate profile selects the locked `mycelium-gate` catalog
+environment and checks the toolchain before running. It declares two CPU cores,
+matches Go parallelism to that declaration,
 and uses measured automatic memory so it also fits an 8 GiB host allowance.
 Profiles opt into measured memory with:
 
@@ -347,13 +348,15 @@ bypass it. Report coverage explicitly rather than claiming universal interceptio
 ## Dogfood
 
 The checked-in `gate-full` profile runs the real full gate from a committed
-source snapshot with installed Go 1.25.6 or newer, Python 3.11, Git, Bash and uv. The
-gate's HOME/XDG isolation hides uv-managed interpreters (#169). Before isolation,
+source snapshot with Go 1.25.6 or newer, Python 3.11, Git and uv from the
+[`mycelium-gate` CPU environment](../env/mycelium-gate/README.md). Bash is supplied
+by the worker host. The gate's HOME/XDG isolation hides uv-managed interpreters (#169). Before isolation,
 `scripts/gate.sh` resolves installed Python 3.11 with `uv python find --offline
 --no-python-downloads 3.11` and exposes only a `python3.11` symlink in a private
 scratch bin directory on PATH. This covers both profile and local gate runs
 without letting the interpreter's installation directory shadow other tools.
-Missing Python fails during gate setup; install it separately. Dependency
+Missing Python fails during gate setup; the catalog environment supplies it for
+the profile. Local gate runs still need an installed Python 3.11. Dependency
 preparation happens before the gate goes offline. On Linux, Darwin CGO release
 builds explicitly skip and require separate native macOS verification; Linux
 builds, vet and the full race/dev suite still run. This is laptop proof, not
