@@ -18,6 +18,12 @@ from mycelium import APIError, Checkpoint, Client, IncompleteReplyError, StopSig
 ROOT = Path(__file__).resolve().parents[3]
 
 
+class Reply(io.BytesIO):
+    def __init__(self, body=b"", length=None):
+        super().__init__(body)
+        self.headers = {} if length is None else {"Content-Length": str(length)}
+
+
 class ClientTests(unittest.TestCase):
     def test_job_reply_invalid(self):
         client = Client(token="test-only")
@@ -25,26 +31,40 @@ class ClientTests(unittest.TestCase):
                      b'{"id":"","state":"succeeded"}',
                      b'{"id":"fixture","state":""}',
                      b"<html>wrong endpoint</html>",
+                     b'{"id":"fixture","state":tru',
+                     b"\xff",
                      b""):
             for read in (client.get, client.wait):
                 with self.subTest(body=body, read=read.__name__):
-                    with patch.object(client, "_urlopen", side_effect=lambda *_, **__: io.BytesIO(body)), patch(
+                    with patch.object(client, "_urlopen", side_effect=lambda *_, **__: Reply(body, len(body))), patch(
                             "mycelium.client.time.sleep", side_effect=AssertionError("invalid reply was polled")):
                         with self.assertRaises(APIError) as caught:
                             read("fixture")
                         self.assertEqual(caught.exception.code, "job_reply_invalid")
 
     def test_job_reply_truncated(self):
-        class Dropped(io.BytesIO):
+        class Dropped(Reply):
             def read(self, *_):
                 raise http.client.IncompleteRead(b'{"id":"fixture"')
-        bodies = [Dropped(), io.BytesIO(b'{"id":"fixture","state":'), io.BytesIO(b'{"id":"fixture","state":"succeeded"}')]
+        short = b'{"id":"fixture","state":tru'
+        bodies = [Dropped(), Reply(short, len(short) + 2), Reply(b'{"id":"fixture","state":"succeeded"}')]
         client = Client(token="test-only")
         with patch.object(client, "_urlopen", side_effect=lambda *_, **__: bodies.pop(0)), patch("mycelium.client.time.sleep"):
             self.assertEqual(client.wait("fixture")["state"], "succeeded")
-        with patch.object(client, "_urlopen", side_effect=lambda *_, **__: io.BytesIO(b'{"id":"fix')):
+        with patch.object(client, "_urlopen", side_effect=lambda *_, **__: Reply(short, len(short) + 2)):
             with self.assertRaises(IncompleteReplyError):
                 client.get("fixture")
+
+    def test_job_reply_unauthorized_truncated_body_not_retried(self):
+        class Dropped(io.BytesIO):
+            def read(self, *_):
+                raise http.client.IncompleteRead(b'{"code":"unauth')
+        client = Client(token="test-only")
+        response = HTTPError("http://queue/api/jobs/job", 401, "Unauthorized", {}, Dropped())
+        with patch.object(client, "_urlopen", side_effect=response), patch(
+                "mycelium.client.time.sleep", side_effect=AssertionError("authentication failure was polled")):
+            with self.assertRaises(http.client.IncompleteRead):
+                client.wait("job")
 
     def test_installed_libressl_requires_openssl(self):
         with patch("ssl.OPENSSL_VERSION", "LibreSSL 2.8.3"):
@@ -114,7 +134,7 @@ class ClientTests(unittest.TestCase):
     def test_wait_reports_production_start_deadline(self):
         client = Client(token="test-only")
         failed = {"id": "prod", "state": "failed", "reason": "production start deadline exceeded"}
-        with patch.object(client, "_call", return_value=failed):
+        with patch.object(client, "_read_job", return_value=failed):
             self.assertEqual(client.wait("prod"), failed)
 
 

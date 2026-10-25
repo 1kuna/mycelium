@@ -71,6 +71,17 @@ def _job_reply(reply: Any) -> dict[str, Any]:
     return reply
 
 
+def _read_reply(response: Any) -> bytes:
+    try:
+        body = response.read()
+    except http.client.IncompleteRead:
+        raise IncompleteReplyError("queue reply ended early") from None
+    length = response.headers.get("Content-Length")
+    if length is not None and length.isdigit() and len(body) < int(length):
+        raise IncompleteReplyError("queue reply ended early")
+    return body
+
+
 def _normalize(spec: Mapping[str, Any]) -> dict[str, Any]:
     result = copy.deepcopy(dict(spec))
     needs = result.get("needs", {})
@@ -124,13 +135,13 @@ class Client:
         return client
 
     def _call(self, method: str, path: str, body: Any = None,
-              *, timeout: float | None = None) -> Any:
+              *, timeout: float | None = None, raw: bool = False) -> Any:
         data = None if body is None else json.dumps(body, default=_json_default, allow_nan=False).encode()
         request = Request(self.url + path, data=data, method=method, headers={
             "Authorization": "Bearer " + self.token, "Content-Type": "application/json"})
         try:
             with self._urlopen(request, timeout=self.timeout if timeout is None else timeout) as response:
-                return json.load(response)
+                return _read_reply(response) if raw else json.load(response)
         except HTTPError as error:
             with error:
                 body = error.read(4096).decode("utf-8", errors="replace")
@@ -331,15 +342,12 @@ class Client:
         return self.status().get("jobs") or []
 
     def _read_job(self, job_id: str, *, timeout: float | None = None) -> dict[str, Any]:
-        # Matches Go GetJob: a reply that ends mid-document is retryable; an
-        # empty, non-JSON or incomplete Job is the typed job_reply_invalid.
+        # A 2xx body cut short in transport is retryable; a complete body that
+        # is not a UTF-8 JSON Job is the typed job_reply_invalid.
+        body = self._call("GET", f"/api/jobs/{quote(job_id, safe='')}", timeout=timeout, raw=True)
         try:
-            reply = self._call("GET", f"/api/jobs/{quote(job_id, safe='')}", timeout=timeout)
-        except http.client.IncompleteRead:
-            raise IncompleteReplyError(f"Job reply for {job_id} ended early") from None
-        except json.JSONDecodeError as error:
-            if error.doc.strip() and (error.pos >= len(error.doc) or error.msg.startswith("Unterminated string")):
-                raise IncompleteReplyError(f"Job reply for {job_id} ended early") from None
+            reply = json.loads(body.decode("utf-8"))
+        except ValueError:
             reply = None
         return _job_reply(reply)
 
