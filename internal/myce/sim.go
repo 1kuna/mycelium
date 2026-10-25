@@ -20,15 +20,16 @@ type SimFleet struct {
 	Machines []SimMachine          `yaml:"machines"`
 }
 type SimMachine struct {
-	Name      string      `yaml:"name"`
-	Host      string      `yaml:"host"`
-	Platform  string      `yaml:"platform"`
-	MemoryGB  float64     `yaml:"memory_gb"`
-	HostGB    float64     `yaml:"host_memory_gb"`
-	Unified   bool        `yaml:"unified"`
-	Speed     float64     `yaml:"speed"`
-	Departure string      `yaml:"departure"` // planned (default) or loss
-	Windows   []SimWindow `yaml:"windows"`
+	LastResort bool        `yaml:"last_resort"`
+	Name       string      `yaml:"name"`
+	Host       string      `yaml:"host"`
+	Platform   string      `yaml:"platform"`
+	MemoryGB   float64     `yaml:"memory_gb"`
+	HostGB     float64     `yaml:"host_memory_gb"`
+	Unified    bool        `yaml:"unified"`
+	Speed      float64     `yaml:"speed"`
+	Departure  string      `yaml:"departure"` // planned (default) or loss
+	Windows    []SimWindow `yaml:"windows"`
 }
 type SimWindow struct {
 	Days  []int   `yaml:"days"` // Monday=0 through Sunday=6
@@ -339,6 +340,16 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 	f.Machines = append([]SimMachine(nil), f.Machines...)
 	sort.Slice(f.Machines, func(i, j int) bool { return f.Machines[i].Name < f.Machines[j].Name })
 	for _, m := range f.Machines {
+		if m.LastResort {
+			if q.s.HostMaintenance == nil {
+				q.s.HostMaintenance = map[string]HostMaintenance{}
+			}
+			host := m.Host
+			if host == "" {
+				host = m.Name
+			}
+			q.s.HostMaintenance[host] = HostMaintenance{Mode: "enabled", LastResort: true}
+		}
 		cached := map[string]bool{}
 		for _, model := range w.Models {
 			if slices.Contains(model.Platforms, m.Platform) {

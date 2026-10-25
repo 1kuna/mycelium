@@ -29,6 +29,173 @@ func valueFleet(t *testing.T) (*Queue, *fakeClock, Machine, Machine) {
 	check(t, q, big, nil)
 	return q, c, small, big
 }
+
+func lastResortPolicy(t *testing.T, q *Queue, host string, enabled bool) {
+	t.Helper()
+	if _, err := q.ChangeHostMaintenance(host, HostMaintenanceRequest{Action: "placement", LastResort: &enabled}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValueLastResortCPU(t *testing.T) {
+	q, _ := fixture(t)
+	small, ordinary := valueMachine("small", "cpu", 8), valueMachine("ordinary", "metal", 24)
+	check(t, q, small, nil)
+	check(t, q, ordinary, nil)
+	lastResortPolicy(t, q, small.HostID, true)
+	wanted := submit(t, q, cpuSpec(1, 1))
+	if got := check(t, q, small, nil).Job; got != nil {
+		t.Fatal("last-resort host won by pulling first", got)
+	}
+	if got := check(t, q, ordinary, nil).Job; got == nil || got.ID != wanted.ID {
+		t.Fatal("ordinary accelerator host did not get CPU work", got)
+	}
+	// A fresh policy pass must immediately restore the original MY-18 ordering.
+	lastResortPolicy(t, q, small.HostID, false)
+	wanted = submit(t, q, cpuSpec(1, 1))
+	if got := check(t, q, small, nil).Job; got == nil || got.ID != wanted.ID {
+		t.Fatal("clearing last-resort did not restore admission", got)
+	}
+}
+
+func TestValueLastResortImmediateFallbackAndStatus(t *testing.T) {
+	for _, mode := range []string{"busy", "lost"} {
+		t.Run(mode, func(t *testing.T) {
+			q, clock, small, ordinary := valueFleet(t)
+			lastResortPolicy(t, q, small.HostID, true)
+			var running *Job
+			if mode == "busy" {
+				submit(t, q, cpuSpec(4, 1))
+				running = check(t, q, ordinary, nil).Job
+				if running == nil {
+					t.Fatal("ordinary host did not take initial work")
+				}
+			} else {
+				clock.Advance(LossAfter + time.Second)
+			}
+			wanted := submit(t, q, cpuSpec(1, 1))
+			if mode == "busy" {
+				snap, err := q.Snapshot()
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, j := range snap.Jobs {
+					if j.ID == wanted.ID && !strings.Contains(j.Reason, "last-resort fallback") {
+						t.Fatal("queued fallback reason hidden", j.Reason)
+					}
+				}
+			}
+			before := clock.Now()
+			got := check(t, q, small, nil).Job
+			if got == nil || got.ID != wanted.ID || !clock.Now().Equal(before) {
+				t.Fatal("fallback did not start immediately", got)
+			}
+			if running != nil && job(t, q, running.ID).State != "running" {
+				t.Fatal("fallback preempted equal-tier work")
+			}
+			if !strings.Contains(JobTiming(got), "last-resort fallback: no ordinary host can admit") {
+				t.Fatal("missing fallback explanation", JobTiming(got))
+			}
+			snap, err := q.publicSnapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, m := range snap.Machines {
+				if m.ID == small.ID && !m.LastResort {
+					t.Fatal("host policy hidden in status")
+				}
+			}
+			var html bytes.Buffer
+			if err := statusPage.Execute(&html, snap); err != nil || !strings.Contains(html.String(), "Last-resort placement") || !strings.Contains(html.String(), "last-resort fallback") {
+				t.Fatal("policy or reason hidden in status page", err)
+			}
+		})
+	}
+}
+
+func TestValueLastResortFairnessAndHigherTier(t *testing.T) {
+	t.Run("fairness", func(t *testing.T) {
+		q, clock, small, ordinary := valueFleet(t)
+		lastResortPolicy(t, q, small.HostID, true)
+		a := cpuSpec(1, 1)
+		a.Project, a.AllowedMachines = "first", []string{ordinary.ID}
+		first := submit(t, q, a)
+		clock.Advance(time.Millisecond)
+		b := cpuSpec(1, 1)
+		b.Project = "second"
+		second := submit(t, q, b)
+		if got := check(t, q, small, nil).Job; got == nil || got.ID != second.ID {
+			t.Fatal("last-resort policy waited behind another project's fair turn", got)
+		}
+		if got := check(t, q, ordinary, nil).Job; got == nil || got.ID != first.ID {
+			t.Fatal("policy changed ordinary host's fair winner", got)
+		}
+	})
+	t.Run("higher tier and custody", func(t *testing.T) {
+		q, _, small, ordinary := valueFleet(t)
+		lastResortPolicy(t, q, small.HostID, true)
+		preemptionPolicy(t, q)
+		low := submit(t, q, cpuSpec(4, 1))
+		run := check(t, q, ordinary, nil).Job
+		if run == nil {
+			t.Fatal("ordinary host did not take low tier")
+		}
+		highSpec := cpuSpec(4, 1)
+		highSpec.Project = "urgent"
+		high := submit(t, q, highSpec)
+		if job(t, q, low.ID).State != "running" {
+			t.Fatal("preempted ordinary host despite free fallback")
+		}
+		if got := check(t, q, small, nil).Job; got == nil || got.ID != high.ID {
+			t.Fatal("high tier did not use immediate fallback", got)
+		}
+		high2 := submit(t, q, highSpec)
+		if job(t, q, low.ID).State != "stopping" || priorityStop(job(t, q, low.ID)) == nil {
+			t.Fatal("last-resort policy blocked higher-tier preemption")
+		}
+		if got := check(t, q, ordinary, run).Job; got != nil {
+			t.Fatal("preemption credited capacity before exact release")
+		}
+		finishInterrupted(t, q, run)
+		if got := check(t, q, ordinary, nil).Job; got == nil || got.ID != high2.ID {
+			t.Fatal("higher tier lost after release", got)
+		}
+	})
+}
+
+func TestValueLastResortSimulationPair(t *testing.T) {
+	for _, file := range []string{"baseline.yaml", "fleet.yaml"} {
+		t.Run(file, func(t *testing.T) {
+			var fleet SimFleet
+			var work SimWorkload
+			root := "../../examples/sim/last-resort-hosts/"
+			if err := ReadSimYAML(root+file, &fleet); err != nil {
+				t.Fatal(err)
+			}
+			if err := ReadSimYAML(root+"workload.yaml", &work); err != nil {
+				t.Fatal(err)
+			}
+			r := runSimTest(t, fleet, work, 259.2)
+			if r.Completed != 2 || r.Failed != 0 || r.Unfinished != 0 || r.Production.P95 != 0 || r.Production.Unstarted != 0 || len(r.NeverPlaceable) != 0 {
+				t.Fatal("paired fixture changed liveness or production wait", r)
+			}
+			firstHost, overflowHost := "small", "ordinary"
+			if file == "fleet.yaml" {
+				firstHost, overflowHost = overflowHost, firstHost
+			}
+			nearSim(t, r.Machines[firstHost].BusyHours*3600, 200)
+			nearSim(t, r.Machines[overflowHost].BusyHours*3600, 40)
+			latest := 0.0
+			for _, batch := range r.Batches {
+				if batch.FinishedSeconds == nil {
+					t.Fatal("unfinished batch")
+				}
+				latest = max(latest, *batch.FinishedSeconds)
+			}
+			nearSim(t, latest, 200)
+		})
+	}
+}
 func TestValueCPUAndAccelerator(t *testing.T) {
 	q, _, small, big := valueFleet(t)
 	cpu := submit(t, q, cpuSpec(1, 1))
@@ -572,6 +739,7 @@ func TestValuePlanningWorkCounts(t *testing.T) {
 			q, _ := fixture(t)
 			accelerator := valueMachine("a-accelerator", "fake", 64)
 			check(t, q, accelerator, nil)
+			lastResortPolicy(t, q, accelerator.HostID, true)
 			for i := range 4 {
 				id := fmt.Sprintf("cpu-%d", i)
 				check(t, q, valueMachine(id, "cpu", 16), nil)

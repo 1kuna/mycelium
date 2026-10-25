@@ -15,7 +15,7 @@ import (
 
 func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: myce host drain|disable|resume|status|budget HOST [--stop] [--memory-budget-gb GiB] [--wait] [--timeout DURATION]")
+		return errors.New("usage: myce host drain|disable|resume|status|budget|placement HOST [--last-resort=true|false] [--stop] [--memory-budget-gb GiB] [--wait] [--timeout DURATION]")
 	}
 	action := args[0]
 	f := flag.NewFlagSet("host "+action, flag.ContinueOnError)
@@ -26,6 +26,7 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 	timeout := f.Duration("timeout", 30*time.Second, "bounded wait; timeout never releases custody")
 	cpuBudget := f.Int("cpu-budget-cores", 0, "queue-owned logical CPU allowance; zero uses detected capacity minus reserve")
 	budget := f.Float64("memory-budget-gb", 0, "queue-owned host RAM allowance; requires drained/disabled host")
+	lastResort := f.Bool("last-resort", false, "prefer ordinary admissible hosts before this host; use --last-resort=false to clear")
 	var flags, hosts []string
 	for i := 1; i < len(args); i++ {
 		arg := args[i]
@@ -46,7 +47,7 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 	if len(hosts) != 1 || f.NArg() != 0 {
 		return errors.New("exactly one physical HOST is required")
 	}
-	if action != "drain" && action != "disable" && action != "resume" && action != "status" && action != "budget" {
+	if action != "drain" && action != "disable" && action != "resume" && action != "status" && action != "budget" && action != "placement" {
 		return errors.New("unknown queue host action")
 	}
 	if *stop && action != "disable" {
@@ -55,11 +56,14 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 	if *timeout <= 0 {
 		return errors.New("timeout must be positive")
 	}
-	if *wait && (action == "resume" || action == "budget") {
+	if *wait && (action == "resume" || action == "budget" || action == "placement") {
 		return errors.New("--wait requires drain, disable or status")
 	}
 	request := myce.HostMaintenanceRequest{Action: action, Stop: *stop}
 	f.Visit(func(v *flag.Flag) {
+		if v.Name == "last-resort" {
+			request.LastResort = lastResort
+		}
 		if v.Name == "cpu-budget-cores" {
 			request.CPUBudgetCores = cpuBudget
 		}
@@ -67,6 +71,12 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 			request.MemoryBudgetGB = budget
 		}
 	})
+	if action == "placement" && request.LastResort == nil {
+		return errors.New("placement requires --last-resort=true|false")
+	}
+	if request.LastResort != nil && action != "placement" {
+		return errors.New("--last-resort requires placement")
+	}
 	if action == "status" && (request.MemoryBudgetGB != nil || request.CPUBudgetCores != nil) {
 		return errors.New("status cannot change host policy")
 	}

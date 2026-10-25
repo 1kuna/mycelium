@@ -189,6 +189,7 @@ Flags belong before the positional argument except that `logs ID --follow`,
 | `queue --experiment-loss-timeout` | `60s` | Experiment loss detection |
 | `join --name` | Hostname | Unique stable worker name |
 | `join --host-id` | OS hostname | Physical host identity; every per-card worker on the same machine must use the same stable value |
+| `host placement HOST --last-resort=true\|false` | `false` | Queue-owned placement policy; ordinary admissible hosts first, unchanged MY-18 order within each group, immediate fallback without waiting or reservation; may change while enabled |
 | `join/install worker --host-memory-budget-gb` | `0` | initial queue allowance input; subsequent changes use `host budget HOST` while drained/disabled |
 | `join/install worker --memory-ceiling-slack-gb` | `0.125` | Extra GiB per declared ceiling; included in host admission |
 | `join/install worker --memory-swap-max-bytes` | `0` | Swap allowance per native attempt; managed Docker uses optional run-spec total RAM-plus-swap values |
@@ -220,6 +221,15 @@ Flags belong before the positional argument except that `logs ID --follow`,
 | `dev --workers` | `2` | Fake workers, real command runner |
 | `dev --memory-gb` | `64` | Per-worker fake budget |
 | `dev --gpu` | `fake` | Simulated platform; does not detect hardware |
+
+Host policy status: `host status HOST` returns `policy.last_resort` (boolean).
+The status API's machine `last_resort` field is present when true; CLI and web
+status also label last-resort hosts. Queued job `reason` and assigned attempt
+`timing.placement_reason` explain fallback when no ordinary host can admit the
+work now in the current plan, alongside the existing value ranking. Reasons are
+diagnostic text, not stable machine-readable codes. The policy is keyed by
+physical host, persists across queue restarts and worker sessions, and does not
+alter fairness, tiers, preemption, eligibility or cleanup custody.
 
 `dev` also accepts listen/db/checkpoints, environments, models, and model catalog
 settings. Its root is local and created automatically. Custom dev catalogs must

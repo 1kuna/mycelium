@@ -15,6 +15,7 @@ const maintenanceStopCause = "planned_host_maintenance"
 // A nil budget is possible before the first worker report; zero is uncapped.
 // Existing hosts bootstrap their allowance once, then worker reports cannot edit it.
 type HostMaintenance struct {
+	LastResort     bool              `json:"last_resort"`
 	DrainOwner     string            `json:"drain_owner,omitempty"`
 	CPUBudgetCores *int              `json:"cpu_budget_cores,omitempty"`
 	StopAt         *time.Time        `json:"stop_at,omitempty"`
@@ -24,6 +25,7 @@ type HostMaintenance struct {
 }
 
 type HostMaintenanceRequest struct {
+	LastResort     *bool      `json:"last_resort,omitempty"`
 	DrainOwner     string     `json:"drain_owner,omitempty"`
 	IfDrainOwner   string     `json:"if_drain_owner,omitempty"`
 	IfMode         string     `json:"if_mode,omitempty"`
@@ -144,8 +146,18 @@ func (q *Queue) ChangeHostMaintenance(host string, request HostMaintenanceReques
 		case "resume":
 			policy.Mode = "enabled"
 		case "budget":
+		case "placement":
+			if request.LastResort == nil {
+				return errors.New("placement requires last_resort")
+			}
 		default:
-			return errors.New("expected drain, disable, resume or budget")
+			return errors.New("expected drain, disable, resume, budget or placement")
+		}
+		if request.LastResort != nil {
+			if request.Action != "placement" {
+				return errors.New("last_resort requires placement")
+			}
+			policy.LastResort = *request.LastResort
 		}
 		if request.Stop && request.Action != "disable" {
 			return errors.New("--stop requires disable")

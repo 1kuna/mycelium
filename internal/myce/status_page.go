@@ -304,6 +304,7 @@ var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
           <span class="badge {{if or .Disabled .Gone}}offline{{else if or .Leaving .AdmissionReason}}leaving{{end}}">{{hyphaAvailability .}}</span>
         </div>
         {{if .Replacement}}<div class="detail">Historical worker; replaced by {{.Replacement.Machine}} device {{.Replacement.Device}}</div>{{end}}
+        {{if .LastResort}}<div class="detail">Last-resort placement: used when no ordinary host can admit the work</div>{{end}}
         {{range .Devices}}<div class="detail"><div class="label">Device {{.ID}} · {{.Platform}}</div><div class="value">{{printf "%.1f" .FreeMemoryGB}} / {{printf "%.1f" .BudgetGB}} GiB free · {{len .Attempts}} batch attempts · {{len .Models}} engines · {{len .Releases}} outstanding releases{{if .Reason}} · {{.Reason}}{{end}}{{range .ExtensionReports}}<div>{{extensionStatus .}}</div>{{end}}</div></div>{{end}}
         {{if .Devices}}<div class="detail"><div class="label">Shared CPU capacity</div><div class="value">{{.CPUInUseCores}} cores in use · {{.FreeCPUCores}} free · {{.EffectiveCPUCores}} admitted</div></div>{{end}}
         {{if eq .GPU "cpu"}}<div class="metrics" aria-label="CPU capacity">

@@ -15,6 +15,42 @@ import (
 func maintenanceCLIWorker(id string) myce.Machine {
 	return myce.Machine{ID: id, HostID: "host", Device: id, Session: "session-" + id, GPU: "fake", FreeMemoryGB: 8, HostMemoryMeasured: true, HostAvailableMemoryGB: 16, CapabilityProfile: &myce.CapabilityProfile{Version: 0, OS: "linux", Arch: "amd64", LogicalCPUs: 64, MemoryLayout: "separate", SystemMemoryBytes: 32 << 30}}
 }
+
+func TestHostMaintenancePlacementCLI(t *testing.T) {
+	q, _, _, _ := waitQueue(t)
+	if _, err := q.Checkin(myce.Checkin{Machine: maintenanceCLIWorker("worker")}); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer((myce.API{Queue: q, Token: "test-only"}).Handler())
+	defer server.Close()
+	t.Setenv("MYCE_TOKEN", "test-only")
+	for _, enabled := range []bool{true, false} {
+		var out bytes.Buffer
+		flag := "--last-resort=false"
+		if enabled {
+			flag = "--last-resort=true"
+		}
+		if err := hostMaintenanceCommand(context.Background(), []string{"placement", "host", flag, "--queue", server.URL}, &out); err != nil {
+			t.Fatal(err)
+		}
+		var status myce.HostMaintenanceStatus
+		if err := json.Unmarshal(out.Bytes(), &status); err != nil || status.Policy.LastResort != enabled || status.Policy.Mode != "enabled" {
+			t.Fatal("placement did not edit enabled host", out.String(), err)
+		}
+		if err := hostMaintenanceCommand(context.Background(), []string{"status", "host", "--queue", server.URL}, &bytes.Buffer{}); err != nil {
+			t.Fatal(err)
+		}
+		output, _, err := captureUsageOutput(t, []string{"status", "--queue", server.URL, "--token", "test-only"})
+		if err != nil || strings.Contains(output, "last-resort placement") != enabled {
+			t.Fatal("CLI status hid placement policy", output, err)
+		}
+	}
+	for _, args := range [][]string{{"placement", "host"}, {"placement", "host", "--last-resort", "--wait"}, {"status", "host", "--last-resort"}, {"resume", "host", "--last-resort=false"}} {
+		if err := hostMaintenanceCommand(context.Background(), args, &bytes.Buffer{}); err == nil {
+			t.Fatal("accepted invalid placement arguments", args)
+		}
+	}
+}
 func TestHostMaintenanceCLIAndWaitCustody(t *testing.T) {
 	q, clock, _, _ := waitQueue(t)
 	a, b := maintenanceCLIWorker("gpu0"), maintenanceCLIWorker("gpu1")

@@ -61,7 +61,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 
 	if len(args) == 0 {
-		return errors.New("usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|run|submit|policy|status|logs|wait|result|cancel|resolve-docker|reconcile-docker-retention|dev|version|release|file|benchmark|extension|sim|detect|service|measure|model|usage\n       myce host drain|disable|resume|status|budget HOST\nRun myce COMMAND --help for command options.")
+		return errors.New("usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|run|submit|policy|status|logs|wait|result|cancel|resolve-docker|reconcile-docker-retention|dev|version|release|file|benchmark|extension|sim|detect|service|measure|model|usage\n       myce host drain|disable|resume|status|budget|placement HOST\nRun myce COMMAND --help for command options.")
 	}
 	if args[0] == "dev" && len(args) > 1 && args[1] == "clock" {
 		return devClockCommand(args[2:], os.Stdout)
@@ -796,6 +796,9 @@ func printStatus(s myce.Snapshot, full bool) {
 	}
 	for _, m := range s.Machines {
 		state := myce.HyphaAvailability(m)
+		if m.LastResort {
+			state += "; last-resort placement"
+		}
 		if m.MaxJobs > 0 {
 			state += fmt.Sprintf("; maximum simultaneous jobs %d", m.MaxJobs)
 		}

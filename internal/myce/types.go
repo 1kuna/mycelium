@@ -418,7 +418,8 @@ type Machine struct {
 	HostMemoryBudgetGB          float64             `json:"host_memory_budget_gb,omitempty"`
 	MemoryCeilingSlackGB        float64             `json:"memory_ceiling_slack_gb,omitempty"`
 	DockerCleanup               string              `json:"docker_cleanup,omitempty"`
-	Disabled                    string              `json:"disabled,omitempty"` // Status-only queue maintenance projection.
+	Disabled                    string              `json:"disabled,omitempty"`    // Status-only queue maintenance projection.
+	LastResort                  bool                `json:"last_resort,omitempty"` // Status-only queue placement policy.
 	HostID                      string              `json:"host_id,omitempty"`
 	HostAvailableMemoryGB       float64             `json:"host_available_memory_gb"`
 	FreeHostMemoryGB            float64             `json:"free_host_memory_gb"`
