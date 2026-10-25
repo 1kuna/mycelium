@@ -467,7 +467,7 @@ func measureReferences(ctx context.Context, c BenchmarkConfig, extensions []Exte
 // Compare only the same frozen work/reference and units. Memory/eligibility,
 // project fairness, priority and start authorization remain outside this score.
 // With no program-size model yet, one reference is the provisional work estimate.
-func (q *Queue) benchmarkBetter(j *Job, a, b *Machine) (better, known bool) {
+func (q *Queue) benchmarkBetter(j *Job, a, b *Machine, stableTie ...bool) (better, known bool) {
 	ae, be := qualifiedExtension(j, a), qualifiedExtension(j, b)
 	if ae == nil || be == nil {
 		return false, false
@@ -527,26 +527,30 @@ func (q *Queue) benchmarkBetter(j *Job, a, b *Machine) (better, known bool) {
 		return ag < bg, true
 	} // Incomparable references have a stable group order.
 	if as == bs {
-		return a.ID < b.ID, true
+		return (len(stableTie) == 0 || stableTie[0]) && a.ID < b.ID, true
 	}
 	return as < bs, true
 }
-func (q *Queue) capabilityPlacementBetter(j *Job, a, b *Machine) bool {
-	value, knownValue := q.valueCompare(a, b)
+func (q *Queue) capabilityPlacementBetter(j *Job, a, b *Machine, scans ...*placementScan) bool {
+	return q.capabilityPlacementBetterWithTie(j, a, b, true, scans...)
+}
+
+func (q *Queue) capabilityPlacementBetterWithTie(j *Job, a, b *Machine, allowTie bool, scans ...*placementScan) bool {
+	value, knownValue := q.valueCompare(a, b, scans...)
 	if value != 0 {
 		return value < 0
 	}
 	if j.Spec.Needs.cpuOnly() && (a.GPU == "cpu") != (b.GPU == "cpu") {
 		return a.GPU == "cpu"
 	}
-	if better, known := q.completionBetter(j, a, b); known {
+	if better, known := q.completionBetter(j, a, b, allowTie); known {
 		return better
 	}
-	if better, known := q.benchmarkBetter(j, a, b); known {
+	if better, known := q.benchmarkBetter(j, a, b, allowTie); known {
 		return better
 	}
 	if knownValue {
-		return targetKey(a) < targetKey(b)
+		return allowTie && targetKey(a) < targetKey(b)
 	}
 	return q.unmeasuredProgram(j, a) && capabilityBetter(a, b)
 }

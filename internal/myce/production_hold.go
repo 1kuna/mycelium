@@ -345,7 +345,8 @@ func (q *Queue) holdWaitReason(j *Job) string {
 // Select once, before stopping anything. Occupancy is reclaimable; immutable
 // capacity, environments, project/job restrictions and pins are not.
 func (q *Queue) productionTarget(j *Job, call *ModelCall) string {
-	machines := q.plannerMachines()
+	scan := q.placementScan()
+	machines := scan.machines
 	var best *Machine
 	bestStops := int(^uint(0) >> 1)
 	for _, m := range machines {
@@ -402,7 +403,7 @@ func (q *Queue) productionTarget(j *Job, call *ModelCall) string {
 		// release planner still governs actual preemption after binding.
 		freeNow := q.workerIdle(m, j) && !q.preparationActive(m) && !q.preparationStopping(m) && fits(j, m, m.FreeMemoryGB)
 		bestFree := best != nil && q.workerIdle(best, j) && !q.preparationActive(best) && !q.preparationStopping(best) && fits(j, best, best.FreeMemoryGB)
-		preferFreeTarget := best != nil && stops == 0 && bestStops == 0 && freeNow && (!bestFree || q.targetPlacementBetter(j, m, best))
+		preferFreeTarget := best != nil && stops == 0 && bestStops == 0 && freeNow && (!bestFree || q.targetPlacementBetter(j, m, best, scan))
 		if best == nil || stops < bestStops || preferFreeTarget {
 			best, bestStops = m, stops
 		}

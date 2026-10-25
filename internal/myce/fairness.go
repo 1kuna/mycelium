@@ -193,7 +193,11 @@ func (q *Queue) batchCanUse(j *Job, m *Machine) bool {
 }
 
 func (q *Queue) batchCandidate(j *Job, m *Machine) *Job {
-	return q.batchCandidateWithResources(j, m, nil)
+	candidate := q.batchCandidateWithResources(j, m, nil)
+	if candidate != nil && candidate.Spec.Needs.cpuOnly() && m.GPU != "cpu" && q.betterPlacement(candidate, m) {
+		return nil
+	}
+	return candidate
 }
 
 func (q *Queue) batchCandidateWithResources(j *Job, m *Machine, resources map[batchResourceKey]batchResourceRoom) *Job {
@@ -213,11 +217,6 @@ func (q *Queue) batchCandidateWithResources(j *Job, m *Machine, resources map[ba
 		q.applyLearnedNeeds(candidate)
 		candidate = q.memoryCandidate(candidate, m)
 		if q.capReasonFor(candidate, m) == "" && q.batchResourcesFitWithScan(candidate, m, resources) {
-			// Leave accelerator workers for GPU work when CPU placement is free.
-			// Filter here so the same planner can consider the next candidate.
-			if candidate.Spec.Needs.cpuOnly() && m.GPU != "cpu" && q.betterPlacement(candidate, m) {
-				continue
-			}
 			return candidate
 		}
 	}
@@ -285,11 +284,15 @@ func (q *Queue) batchResourceProjection(j *Job, m *Machine) batchResourceRoom {
 // candidate is the device-aware planner for batch dispatch, model admission and
 // status. Exclusions enumerate later candidates without changing the competing
 // projects used to calculate their deficits.
-func (q *Queue) candidate(m *Machine, excluded map[string]bool) *Job {
-	return q.candidates(m).pick(excluded)
+func (q *Queue) candidate(m *Machine, excluded map[string]bool, scans ...*placementScan) *Job {
+	return q.candidates(m, scans...).pick(excluded)
 }
-func (q *Queue) pick(m *Machine) *Job {
-	best := q.candidate(m, nil)
+func (q *Queue) pick(m *Machine, scans ...*placementScan) *Job {
+	best := q.candidate(m, nil, scans...)
+	return q.immediateCandidate(best, m)
+}
+
+func (q *Queue) immediateCandidate(best *Job, m *Machine) *Job {
 	if best != nil && (q.preparationActive(m) || q.preparationStopping(m) || q.calls[best.ID] != nil || !fits(best, m, m.FreeMemoryGB) || !environmentReady(best, m)) {
 		return nil
 	}
@@ -310,13 +313,14 @@ func (q *Queue) plannerMachines() []*Machine {
 // and usage: future arrivals, usage and which worker frees first can change it.
 func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 	order, reasons := map[string]int{}, map[string]string{}
+	scan := q.placementScan()
 	sets := make([]*candidateSet, 0, len(q.s.Machines))
 	immediate := map[string]*Machine{}
-	for _, m := range q.plannerMachines() {
+	for _, m := range scan.machines {
 		// Explain the current admissible target, even when the queue-order
 		// projection also includes a cheaper host whose capacity is occupied.
-		if j := q.pick(m); j != nil && q.workerIdle(m, j) && q.placementAllowed(j, m) && q.checkpointReady(j, m) {
-			if previous := immediate[j.ID]; previous == nil || q.targetPlacementBetter(j, m, previous) {
+		if j := q.pick(m, scan); j != nil && q.workerIdle(m, j) && q.placementAllowed(j, m) && q.checkpointReady(j, m) {
+			if previous := immediate[j.ID]; previous == nil || q.targetPlacementBetter(j, m, previous, scan) {
 				immediate[j.ID] = m
 			}
 		}
@@ -328,7 +332,7 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 		}
 		// Projection only changes exclusions, never queue state or inventory.
 		// Reuse the same read-only planning pass for every projected position.
-		sets = append(sets, q.candidates(&copy))
+		sets = append(sets, q.candidates(&copy, scan))
 	}
 	for _, j := range q.s.Jobs {
 		if j.State != "queued" {
@@ -342,7 +346,7 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 		var selected *candidateSet
 		for _, set := range sets {
 			winner := set.pick(excluded)
-			if winner != nil && (best == nil || set.before(winner, best) || winner.ID == best.ID && q.targetPlacementBetter(winner, set.m, selected.m)) {
+			if winner != nil && (best == nil || set.before(winner, best) || winner.ID == best.ID && q.targetPlacementBetter(winner, set.m, selected.m, scan)) {
 				best, selected = winner, set
 			}
 		}
@@ -357,7 +361,7 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 		}
 		// Explain the first competing job, not a separate UI ordering heuristic.
 		winner := selected.pick(nil)
-		base := "waiting for a worker to pull this job; " + valueReason(q.hostValues()[hostID(target)], target)
+		base := "waiting for a worker to pull this job; " + valueReason(q.placementValues(scan)[hostID(target)], target)
 		live := q.s.Machines[target.ID]
 		for _, view := range q.machineTargets(live) {
 			if sameTarget(view, target) {

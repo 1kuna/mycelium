@@ -16,11 +16,18 @@ type candidateSet struct {
 	projects  []string
 }
 
-func (q *Queue) candidates(m *Machine) *candidateSet {
+func (q *Queue) candidates(m *Machine, scans ...*placementScan) *candidateSet {
+	return q.candidatesForPlacement(m, q.placementScan(scans...), true)
+}
+
+func (q *Queue) candidatesForPlacement(m *Machine, scan *placementScan, steer bool) *candidateSet {
 	s := &candidateSet{q: q, m: m, scores: map[string]float64{}, actives: map[string]float64{}}
 	s.resources = map[batchResourceKey]batchResourceRoom{}
 	for _, j := range q.s.Jobs {
 		if candidate := q.batchCandidateWithResources(j, m, s.resources); candidate != nil {
+			if steer && candidate.Spec.Needs.cpuOnly() && m.GPU != "cpu" && q.betterPlacement(candidate, m, scan) {
+				continue
+			}
 			s.jobs = append(s.jobs, candidate)
 		}
 	}

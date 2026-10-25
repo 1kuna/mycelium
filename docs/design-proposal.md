@@ -2032,7 +2032,7 @@ deficit. Free capacity and existing victim stop-count/lost-work comparisons
 precede host value. Value never selects another project, changes fair-share
 charges or preempts equal-tier work.
 
-Fresh known inventory and owner allowances define distinct accelerator backend/
+Known measured inventory and owner allowances define distinct accelerator backend/
 usable-memory bands and host-memory bands above the fleet minimum. Count the
 physical hosts supplying each band, not devices or worker rows. Rank hosts
 lexicographically by the count of bands supplied by one host, then two, and so
@@ -2042,7 +2042,10 @@ its host and device capacities are never summed. Unknown value gets no invented
 ranking; prefer a known fitting alternative and explain an unknown-only choice.
 
 The shared planner applies this ordering to currently admissible targets across
-pulls, status and simulation. Occupancy does not redefine value. Never reserve
+pulls, status and simulation. Owner activity, stale reports, maintenance and other
+temporary occupancy do not redefine measured supply or value; only immediate
+admission excludes those hosts. Compute scarcity once per read-only planning
+pass and discard the projection on state changes. Never reserve
 or wait for a cheaper host: an idle scarce host runs the work when cheap hosts
 are busy, lost, owner-active, recovering or otherwise inadmissible. Attempt and
 cleanup custody remain authoritative across restarts. Status exposes the chosen

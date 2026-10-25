@@ -23,10 +23,9 @@ type capabilityBand struct {
 func (q *Queue) hostValues() map[string]*hostValue {
 	hosts := map[string]*hostValue{}
 	for _, m := range q.s.Machines {
-		if m.Replacement != nil || m.Gone || m.Leaving || q.unreported[m.ID] || q.clock.Now().Sub(m.LastSeen) >= q.machineLossTimeout(m.ID) || q.maintenanceBlocked(hostID(m)) {
-			continue
-		}
-		if a := machineAvailability(m); a != nil && (!a.Available || (a.Mode == "daily" || a.Signals.Laptop) && q.clock.Now().Sub(a.CheckedAt) > signalMaxAge) {
+		// Temporary availability affects admission, not the measured supply.
+		// Replacement records no longer represent a participating host.
+		if m.Replacement != nil {
 			continue
 		}
 		id := hostID(m)
@@ -154,8 +153,42 @@ func compareHostValue(values map[string]*hostValue, a, b *Machine) (int, bool) {
 	}
 	return cmp.Compare(av.ram, bv.ram), true
 }
-func (q *Queue) valueCompare(a, b *Machine) (int, bool) {
-	return compareHostValue(q.hostValues(), a, b)
+
+// placementScan is discarded after any placement/inventory/policy mutation.
+// Scarcity and peer fair-turn winners are computed at most once in this pass.
+// Peer scans omit steering, so admission checks cannot recurse into placement.
+type placementScan struct {
+	values   map[string]*hostValue
+	machines []*Machine
+	winners  map[string]*Job
+}
+
+func (q *Queue) placementScan(scans ...*placementScan) *placementScan {
+	if len(scans) > 0 {
+		return scans[0]
+	}
+	return &placementScan{machines: q.plannerMachines(), winners: map[string]*Job{}}
+}
+
+func (q *Queue) placementValues(scan *placementScan) map[string]*hostValue {
+	if scan.values == nil {
+		scan.values = q.hostValues()
+	}
+	return scan.values
+}
+
+func (q *Queue) valueCompare(a, b *Machine, scans ...*placementScan) (int, bool) {
+	return compareHostValue(q.placementValues(q.placementScan(scans...)), a, b)
+}
+
+func (q *Queue) peerWinner(m *Machine, scan *placementScan) *Job {
+	key := targetKey(m)
+	if winner, ok := scan.winners[key]; ok {
+		return winner
+	}
+	winner := q.candidatesForPlacement(m, scan, false).pick(nil)
+	scan.winners[key] = winner
+	return winner
 }
 
 func valueReason(h *hostValue, m *Machine) string {
@@ -164,8 +197,8 @@ func valueReason(h *hostValue, m *Machine) string {
 	}
 	return fmt.Sprintf("preserve scarce machines: host %s scarcity %v (1-host bands first), usable RAM %g GiB; currently admissible targets only", hostID(m), h.vector, h.ram)
 }
-func (q *Queue) recordValuePlacement(j *Job, m *Machine) {
-	reason := valueReason(q.hostValues()[hostID(m)], m)
+func (q *Queue) recordValuePlacement(j *Job, m *Machine, values map[string]*hostValue) {
+	reason := valueReason(values[hostID(m)], m)
 	if j.Timing == nil || j.Timing.Execution.Attempt != j.Attempt {
 		j.Timing = &WorkTiming{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: m.ID, Session: m.Session}
 	}

@@ -270,8 +270,8 @@ func TestValueBandsCountPhysicalHostsAndAllowances(t *testing.T) {
 	}
 	clock.Advance(LossAfter + time.Second)
 	check(t, q, d, nil)
-	if _, ok := q.hostValues()[c.HostID]; ok {
-		t.Fatal("stale inventory counted as fresh supply")
+	if got := q.hostValues()[c.HostID]; got == nil || !slices.Equal(got.vector, before) {
+		t.Fatal("stale inventory changed scarcity supply", got)
 	}
 }
 func TestValueUnifiedAndUnknownInventory(t *testing.T) {
@@ -420,4 +420,116 @@ func TestValueUnifiedOccupancyDoesNotChangeBands(t *testing.T) {
 	if !before.known || !after.known || before.accelerators["fake"] != 64 || after.accelerators["fake"] != 64 || !slices.Equal(before.vector, after.vector) {
 		t.Fatal("live unified free RAM redefined host value", before, after)
 	}
+}
+
+// Both cases used to recurse through candidate -> betterPlacement -> candidate.
+func TestValueMultipleAcceleratorTargetsCPU(t *testing.T) {
+	t.Run("two hosts", func(t *testing.T) {
+		q, _ := fixture(t)
+		large, small := valueMachine("a-large", "fake", 64), valueMachine("z-small", "fake", 32)
+		check(t, q, large, nil)
+		check(t, q, small, nil)
+		wanted := submit(t, q, cpuSpec(1, 1))
+		if got := check(t, q, large, nil).Job; got != nil {
+			t.Fatal("expensive accelerator won", got)
+		}
+		if got := check(t, q, small, nil).Job; got == nil || got.ID != wanted.ID {
+			t.Fatal("no CPU progress on accelerator", got)
+		}
+	})
+	t.Run("two devices", func(t *testing.T) {
+		q, _ := fixture(t)
+		m := m3Machine()
+		machineCheck(t, q, m)
+		wanted := submit(t, q, cpuSpec(1, 1))
+		got := assignedJob(machineCheck(t, q, m))
+		if got == nil || got.ID != wanted.ID || len(got.AllocatedDevices) != 0 {
+			t.Fatal("no CPU progress with two GPU targets", got)
+		}
+	})
+}
+
+func TestValueTieRequiresImmediateAdmission(t *testing.T) {
+	for _, mode := range []string{"environment", "preparation"} {
+		t.Run(mode, func(t *testing.T) {
+			q, _ := fixture(t)
+			a, z := valueMachine("a-peer", "fake", 32), valueMachine("z-puller", "fake", 32)
+			check(t, q, a, nil)
+			check(t, q, z, nil)
+			s := spec("experiment")
+			if mode == "environment" {
+				if err := q.ConfigureEnvironments(EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"build": {"fake": binaryRecipe(t, "fake")}}}); err != nil {
+					t.Fatal(err)
+				}
+				s.Environment.Name = "build"
+				z.Environments = []string{q.environments.Environments["build"]["fake"].Key}
+				check(t, q, z, nil)
+			}
+			wanted := submit(t, q, s)
+			if mode == "preparation" {
+				q.s.PreparationPlans = map[string]HostLaunch{"busy": {Machine: a.ID, Session: a.Session, Kind: "environment", Key: "other", Attempt: "busy", Started: true}}
+			}
+			if got := check(t, q, z, nil).Job; got == nil || got.ID != wanted.ID {
+				t.Fatal("tie waited for unready lower-ID peer", got)
+			}
+		})
+	}
+}
+
+func TestValueTemporaryAvailabilityKeepsScarcity(t *testing.T) {
+	for _, mode := range []string{"owner", "stale", "maintenance"} {
+		t.Run(mode, func(t *testing.T) {
+			q, clock := fixture(t)
+			a, b := valueMachine("a", "fake", 32), valueMachine("b", "fake", 32)
+			c := valueMachine("c", "cpu", 16)
+			for _, m := range []Machine{a, b, c} {
+				check(t, q, m, nil)
+			}
+			before := q.hostValues()
+			switch mode {
+			case "owner":
+				a.CapabilityProfile.Availability = &Availability{Mode: "daily", Available: false, CheckedAt: clock.Now(), Signals: idleSignals()}
+				check(t, q, a, nil)
+			case "stale":
+				clock.Advance(LossAfter + time.Second)
+			case "maintenance":
+				if _, err := q.ChangeHostMaintenance(a.HostID, HostMaintenanceRequest{Action: "disable"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			after := q.hostValues()
+			for id, h := range before {
+				if after[id] == nil || !slices.Equal(h.vector, after[id].vector) {
+					t.Fatalf("%s changed scarcity: before %v after %v", id, h, after[id])
+				}
+			}
+			wanted := submit(t, q, spec("experiment"))
+			if got := check(t, q, b, nil).Job; got == nil || got.ID != wanted.ID {
+				t.Fatal("unavailable peer blocked accelerator", got)
+			}
+		})
+	}
+}
+
+func TestValueSimulationCPUStreams(t *testing.T) {
+	var fleet SimFleet
+	var work SimWorkload
+	if err := ReadSimYAML("../../examples/sim/value-placement-cpu/fleet.yaml", &fleet); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReadSimYAML("../../examples/sim/value-placement-cpu/workload.yaml", &work); err != nil {
+		t.Fatal(err)
+	}
+	r := runSimTest(t, fleet, work, 864)
+	if r.Completed != 4 || r.Failed != 0 || r.Unfinished != 0 || r.Production.P95 != 0 || r.Production.Unstarted != 0 || len(r.NeverPlaceable) != 0 {
+		t.Fatal("mixed CPU/accelerator regression", r)
+	}
+	latest := 0.0
+	for _, batch := range r.Batches {
+		if batch.FinishedSeconds == nil {
+			t.Fatal("unfinished batch")
+		}
+		latest = max(latest, *batch.FinishedSeconds)
+	}
+	nearSim(t, latest, 201)
 }

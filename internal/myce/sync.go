@@ -252,8 +252,12 @@ func (q *Queue) recordModelUse(name string) {
 }
 
 // placementBetter applies the same rule to foreground placement and build plans.
-func (q *Queue) placementBetter(j *Job, a, b *Machine) bool {
-	value, knownValue := q.valueCompare(a, b)
+func (q *Queue) placementBetter(j *Job, a, b *Machine, scans ...*placementScan) bool {
+	return q.placementBetterWithTie(j, a, b, true, scans...)
+}
+
+func (q *Queue) placementBetterWithTie(j *Job, a, b *Machine, allowTie bool, scans ...*placementScan) bool {
+	value, knownValue := q.valueCompare(a, b, scans...)
 	if value != 0 {
 		return value < 0
 	}
@@ -270,7 +274,7 @@ func (q *Queue) placementBetter(j *Job, a, b *Machine) bool {
 			return ap
 		}
 	}
-	if better, known := q.completionBetter(j, a, b); known {
+	if better, known := q.completionBetter(j, a, b, allowTie); known {
 		return better
 	}
 	if modelLoaded(j, a) != modelLoaded(j, b) {
@@ -280,27 +284,32 @@ func (q *Queue) placementBetter(j *Job, a, b *Machine) bool {
 	if ac != bc {
 		return ac < bc
 	}
-	return knownValue && targetKey(a) < targetKey(b)
+	return allowTie && knownValue && targetKey(a) < targetKey(b)
 }
-func (q *Queue) betterPlacement(j *Job, m *Machine) bool {
+func (q *Queue) betterPlacement(j *Job, m *Machine, scans ...*placementScan) bool {
 	if j.Spec.FanOut != nil {
 		return false
 	} // The discrete plan selected this component.
-	values := q.hostValues()
-	for _, other := range q.plannerMachines() {
-		if sameTarget(other, m) || !q.workerIdle(other, j) || !q.placementAllowed(j, other) || !q.checkpointReady(j, other) {
+	scan := q.placementScan(scans...)
+	values := q.placementValues(scan)
+	for _, other := range scan.machines {
+		if sameTarget(other, m) || q.clock.Now().Sub(other.LastSeen) >= q.machineLossTimeout(other.ID) {
 			continue
 		}
-		// Value cannot change the project winning this target's tier/deficit turn.
-		winner := q.candidate(other, nil)
-		if winner == nil || winner.ID != j.ID || !fits(winner, other, other.FreeMemoryGB) {
+		// Direct admission: the peer's fair-turn winner is computed without
+		// CPU-on-accelerator steering. It cannot ask this target to yield back.
+		winner := q.peerWinner(other, scan)
+		if winner == nil || winner.ID != j.ID || !q.workerIdle(other, winner) || !q.placementAllowed(winner, other) || !q.checkpointReady(winner, other) || !fits(winner, other, other.FreeMemoryGB) {
 			continue
 		}
+		// Preserve strict legacy completion/affinity choices toward cold targets.
+		// Host value and identity-only ties require immediate admission.
+		ready := q.immediateCandidate(winner, other) != nil
 		value, known := compareHostValue(values, other, m)
 		if value != 0 {
 			// Only immediately admissible capacity can defer a pull for host value.
 			// In particular a cheap host's build or cleanup creates no reservation.
-			if value < 0 && q.pick(other) != nil {
+			if value < 0 && ready {
 				return true
 			}
 			continue
@@ -311,11 +320,11 @@ func (q *Queue) betterPlacement(j *Job, m *Machine) bool {
 			return true
 		}
 		if j.Spec.extensionJob() {
-			if q.capabilityPlacementBetter(j, other, m) {
+			if q.capabilityPlacementBetterWithTie(j, other, m, ready, scan) {
 				return true
 			}
 		} else if known || j.Spec.Needs.cpuOnly() || j.Spec.Needs.Model != "" || j.Spec.Environment.Key() != "" {
-			if q.placementBetter(j, other, m) {
+			if q.placementBetterWithTie(j, other, m, ready, scan) {
 				return true
 			}
 		}
@@ -324,9 +333,9 @@ func (q *Queue) betterPlacement(j *Job, m *Machine) bool {
 }
 
 // Keep all target projections on the same qualified-work comparator.
-func (q *Queue) targetPlacementBetter(j *Job, a, b *Machine) bool {
+func (q *Queue) targetPlacementBetter(j *Job, a, b *Machine, scans ...*placementScan) bool {
 	if j.Spec.extensionJob() {
-		return q.capabilityPlacementBetter(j, a, b)
+		return q.capabilityPlacementBetter(j, a, b, scans...)
 	}
-	return q.placementBetter(j, a, b)
+	return q.placementBetter(j, a, b, scans...)
 }

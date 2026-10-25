@@ -207,3 +207,64 @@ its remaining backlog prevents a whole-workload makespan claim. The existing
 simulated failure is unchanged. These runs demonstrate preservation and no
 regression on the paired examples, not native performance or a general speedup.
 The explicit speed/deadline tradeoff remains a later slice.
+
+
+### CPU streams with multiple accelerator hosts (round 2)
+
+```sh
+myce sim --fleet examples/sim/value-placement-cpu/fleet.yaml \
+  --workload examples/sim/value-placement-cpu/workload.yaml \
+  --days 0.01 --seed 1 --json cpu-mixed.json
+```
+
+This finite fixture mixes one CPU host and two accelerator hosts. Two staggered
+CPU-only streams occupy the CPU host and overflow onto an accelerator; a later
+32 GiB accelerator job demonstrates why the smaller card should take the CPU
+overflow. A production CPU stream checks immediate admission without waiting for
+a cheap host. All four jobs are marked batches, so the latest finish measures
+whole-workload makespan. Speeds, memory and arrivals are synthetic and identical
+in both runs.
+
+The simulator previously advertised no CPU execution capability, so CPU streams
+could never run. Both paired binaries use the same harness correction:
+`machineReport` sets `CPUIsolation: "select-none"` for the simulated runner.
+The baseline scheduler is otherwise unchanged at `e060a9b9`.
+
+| Metric | Base + CPU runner fact | Round 2 |
+|---|---:|---:|
+| Whole makespan | 301 s | 201 s |
+| Accelerator batch finish | 301 s | 102 s |
+| Production wait p95 / unstarted | 0 s / 0 | 0 s / 0 |
+| Completed / failed / unfinished / impossible | 4 / 0 / 0 / 0 | 4 / 0 / 0 / 0 |
+
+### Check-in cost regression
+
+`go test ./internal/myce -run '^TestValueCheckinCost$' -v -count=1`
+measures five **fresh first check-ins**, not assignment redelivery. Each queue has
+one accelerator, four CPU hosts and 50 or 200 canonical queued CPU jobs. Bulk
+fixture setup is outside the timing; the public check-in includes SQLite and all
+maintenance passes. An unchanged copy of the test measures the base scheduler.
+The injected fake Clock remains the only scheduling clock; wall time measures
+only the test call.
+
+Paired laptop measurements on 2026-10-25, median of five trials:
+
+| Queued jobs | Base | Round 2 | Round 2 / base |
+|---|---:|---:|---:|
+| 50, ordinary build | 17.16 ms | 28.32 ms | 1.65 |
+| 200, ordinary build | 86.12 ms | 158.95 ms | 1.85 |
+| 50, race build | 59.32 ms | 133.77 ms | 2.26 |
+| 200, race build | 323.73 ms | 740.01 ms | 2.29 |
+
+The regression enforces four times the rounded-up measured base medians:
+72/360 ms for 50/200 jobs, or 240/1,300 ms with race instrumentation. This detects
+the reported recursive/superlinear control-transaction stall, with headroom for
+shared-host variance. Its cost is ten small local queue fixtures and roughly
+1–2 seconds ordinary / 7 seconds race on this laptop. These are laptop regression
+bounds, not production latency promises. Scarcity and each peer's fair-turn
+winner are reused within a read-only planning pass; peer admission scans omit
+placement steering so no nested candidate lookup can recurse.
+
+Delivery validation: `./scripts/gate.sh quick e060a9b9` passed with exit 0
+in 157 seconds: build, vet, supported-target builds and 299 selected top-level
+race tests. Full gate, merge and fleet access were excluded from this worker task.

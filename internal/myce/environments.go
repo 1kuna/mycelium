@@ -333,7 +333,8 @@ func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
 			}
 		}
 	}
-	j := q.candidate(m, nil)
+	scan := q.placementScan()
+	j := q.candidate(m, nil, scan)
 	if j != nil && j.Spec.extensionJob() && !environmentReady(j, m) {
 		if e := qualifiedExtension(j, m); e != nil {
 			return q.extensionPreparationOffer(*e, m)
@@ -346,7 +347,7 @@ func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
 		if sameTarget(other, m) || q.preparationActive(other) || q.preparationStopping(other) || !q.workerIdle(other, j) || !q.placementAllowed(j, other) || !fits(j, other, other.FreeMemoryGB) {
 			continue
 		}
-		if winner := q.candidate(other, nil); winner != nil && winner.ID == j.ID && q.placementBetter(j, other, m) {
+		if winner := q.candidate(other, nil, scan); winner != nil && winner.ID == j.ID && q.placementBetter(j, other, m, scan) {
 			return nil
 		}
 	}

@@ -58,7 +58,10 @@ func TestCurrentProtocolRejectsMissingIdentity(t *testing.T) {
 			}
 		}
 	}
-	s := submit(t, q, spec("experiment"))
+	// Protocol validation is independent of which equal-value peer pulls first.
+	wanted := spec("experiment")
+	wanted.AllowedMachines = []string{"worker"}
+	s := submit(t, q, wanted)
 	a := check(t, q, machine("worker", "fake"), nil).Job
 	if a == nil || a.ID != s.ID {
 		t.Fatal("assignment")
