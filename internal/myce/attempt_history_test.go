@@ -132,3 +132,76 @@ func TestAttemptHistoryBoundedRequeues(t *testing.T) {
 		}
 	}
 }
+
+// Queue stop provenance must survive every requeue path without a full result.
+func TestAttemptHistoryQueueStopWithoutResult(t *testing.T) {
+	for _, tc := range []struct {
+		path, reason string
+	}{
+		{"release-only", "hypha waiting: on battery"},
+		{"heartbeat-other", "machine leaving"},
+		{"heartbeat-empty", "making room for production job"},
+		{"stop-expiry", "making room for production job"},
+		{"machine-quiet", "hypha waiting: on battery"},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			q, clock := fixture(t)
+			m := machine("one", "fake")
+			s := spec("experiment")
+			heartbeat := strings.HasPrefix(tc.path, "heartbeat-")
+			if heartbeat {
+				// Docker release-only ack settles custody; heartbeat omission
+				// then advances the stop, exercising both omission branches.
+				m = dockerMachine(m.ID, m.GPU)
+				s.Run = dockerJob().Spec.Run
+			}
+			submit(t, q, s)
+			first := check(t, q, m, nil).Job
+			if first == nil {
+				t.Fatal("missing assignment")
+			}
+			if err := q.update(func() error {
+				live := q.s.Jobs[first.ID]
+				if strings.HasPrefix(tc.reason, "making room for ") {
+					q.stopFor(live, "production", "job")
+				} else {
+					q.stop(live, tc.reason)
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if tc.path == "release-only" || heartbeat {
+				r := result(first, false)
+				r.ReleaseOnly = true
+				if err := q.Complete(r); err != nil {
+					t.Fatal(err)
+				}
+			}
+			switch tc.path {
+			case "heartbeat-other", "heartbeat-empty":
+				c := Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Recovering: true}
+				if tc.path == "heartbeat-other" {
+					c.Attempts = []AttemptReport{{Execution: Execution{ID: "unknown", Attempt: 1}, Session: m.Session}}
+				}
+				if _, err := q.Checkin(c); err != nil {
+					t.Fatal(err)
+				}
+			case "stop-expiry":
+				clock.Advance(job(t, q, first.ID).StopAt.Sub(clock.Now()))
+				check(t, q, observer(), nil)
+			case "machine-quiet":
+				clock.Advance(LossAfter)
+				check(t, q, observer(), nil)
+			}
+			got := job(t, q, first.ID)
+			if got.State != "queued" || got.Losses != 0 || got.InfrastructureRetries != 0 || len(got.AttemptHistory) != 1 {
+				t.Fatal("stop did not requeue once without a counted loss", got)
+			}
+			a := got.AttemptHistory[0]
+			if a.Attempt != first.Attempt || a.Machine != first.Machine || a.Session != first.Session || a.State != "queued" || !a.Interrupted || !a.PoliteStop || !a.EndedAt.Equal(clock.Now()) {
+				t.Fatalf("queue-planned stop reads as infrastructure loss: %+v", a)
+			}
+		})
+	}
+}
