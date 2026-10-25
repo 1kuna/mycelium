@@ -160,7 +160,12 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	since := f.String("since", "7d", "usage lookback, up to 90d")
 	by := f.String("by", "project", "usage grouping: project or machine")
 	var clientConfig string
-	if args[0] == "status" || args[0] == "logs" {
+	var cancelProject, cancelKey string
+	if args[0] == "cancel" {
+		f.StringVar(&cancelProject, "project", "", "project owning the submission key")
+		f.StringVar(&cancelKey, "key", "", "submission key to cancel (requires --project, no job ID)")
+	}
+	if args[0] == "status" || args[0] == "logs" || args[0] == "cancel" {
 		f.StringVar(&clientConfig, "config", "", "installed config (default: installed worker, then queue)")
 	}
 	joiningFile := f.String("joining-file", env("MYCE_JOINING_FILE", ""), "privately supplied invitation (discovery plus saved address)")
@@ -302,7 +307,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	defer stop()
 	var client myce.Client
 	var invitation *myce.Invitation
-	if args[0] == "status" || args[0] == "logs" {
+	if args[0] == "status" || args[0] == "logs" || args[0] == "cancel" {
 		// An omitted endpoint must not mask the installed queue address.
 		endpoint := os.Getenv("MYCE_QUEUE")
 		f.Visit(func(v *flag.Flag) {
@@ -698,10 +703,19 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		printStatus(s, *full)
 		return nil
 	case "cancel":
-		if f.NArg() != 1 {
-			return errors.New("usage: myce cancel <id>")
+		var ack myce.Cancellation
+		var err error
+		if cancelProject != "" || cancelKey != "" {
+			if cancelProject == "" || cancelKey == "" || f.NArg() != 0 {
+				return errors.New("usage: myce cancel <id> | --project PROJECT --key KEY")
+			}
+			ack, err = client.CancelSubmission(ctx, cancelProject, cancelKey)
+		} else {
+			if f.NArg() != 1 {
+				return errors.New("usage: myce cancel <id> | --project PROJECT --key KEY")
+			}
+			ack, err = client.Cancel(ctx, f.Arg(0))
 		}
-		ack, err := client.Cancel(ctx, f.Arg(0))
 		if err != nil {
 			return err
 		}

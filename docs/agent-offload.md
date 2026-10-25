@@ -158,7 +158,7 @@ installed queue config when no worker config exists. They retain the joining
 certificate pin; consumers do not read config files or handle credentials.
 Explicit `--queue` / `--token` and `MYCE_QUEUE` / `MYCE_TOKEN` keep working.
 `--config` and `--joining-file` remain available for explicit authority selection.
-As with `run`, `MYCE_QUEUE` overrides the invitation address for `status`, `logs`
+As with `run`, `MYCE_QUEUE` overrides the invitation address for `status`, `logs`, `cancel`
 and `file get`, including when `--joining-file` is explicit.
 
 ```sh
@@ -166,6 +166,8 @@ myce status
 myce wait JOB_ID
 myce logs JOB_ID
 myce logs JOB_ID --follow
+myce cancel JOB_ID
+myce cancel --project PROJECT --key KEY
 myce result JOB_ID --out ./accepted-results
 # For an explicitly supplied file identity (not accepted-result resolution):
 myce file get --size-bytes BYTE_COUNT SHA256 ./new-destination

@@ -134,6 +134,8 @@ of success.
 ```sh
 myce wait JOB_ID                # exit 0 succeeded, 1 failed/cancelled, 2 usage/auth/API, 3 --timeout, 4 interrupted
 myce logs JOB_ID [--follow]
+myce cancel JOB_ID              # installed authority; no token needed
+myce cancel --project PROJECT --key KEY  # cancel by submission key
 myce result JOB_ID --out DIR    # every accepted output, SHA-256 and size verified; succeeded jobs only
 ```
 
@@ -142,7 +144,6 @@ from mycelium import Client
 client = Client.from_installed()
 job = client.wait("JOB_ID")
 client.download_result(job["id"], "ARTIFACT", "DIR/ARTIFACT")  # one verified artifact
-client.cancel("JOB_ID")
 ```
 
 - `Client.from_installed()` needs an OpenSSL Python, such as Homebrew or

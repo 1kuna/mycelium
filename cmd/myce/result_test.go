@@ -116,7 +116,7 @@ func TestInstalledClientDevResult(t *testing.T) {
 		return output, err
 	}
 	// Commands without installed-authority resolution must reject --config.
-	for _, name := range []string{"cancel", "join"} {
+	for _, name := range []string{"join"} {
 		if output, err := command(name, "--config", config); err == nil || !strings.Contains(string(output), "flag provided but not defined: -config") {
 			t.Fatalf("%s silently accepted --config: %v %s", name, err, output)
 		}
@@ -175,5 +175,71 @@ assert Path(sys.argv[2]).read_text() == "verified result"
 		if _, err := os.Stat(filepath.Join(dest, "output")); !os.IsNotExist(err) {
 			t.Fatal("unverified artifact published")
 		}
+	}
+}
+
+func TestCancelInstalledAuthority(t *testing.T) {
+	q, _, _, _ := waitQueue(t)
+	const token = "cancel-fixture-token"
+	server := httptest.NewTLSServer(myce.API{Queue: q, Token: token}.Handler())
+	defer server.Close()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	for _, name := range []string{"MYCE_TOKEN", "MYCE_QUEUE", "MYCE_JOINING_FILE"} {
+		t.Setenv(name, "")
+	}
+	joining := filepath.Join(home, "joining.json")
+	hash := sha256.Sum256(server.Certificate().Raw)
+	invitation := myce.Invitation{Version: 1, Token: token, Address: server.URL, Fingerprint: hex.EncodeToString(hash[:])}
+	if err := myce.WriteInvitation(joining, invitation); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(home, ".local", "share", "mycelium", "worker", "config.json")
+	if err := os.MkdirAll(filepath.Dir(config), 0700); err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(myce.ServiceConfig{Role: "worker", JoiningFile: joining})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(config, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	byID := waitSubmit(t, q)
+	byKey, err := q.Submit(myce.Spec{Name: "cancel-key", Project: "test", SubmissionKey: "installed-cancel", Priority: "experiment", Run: myce.RunSpec{Command: []string{"echo", "done"}}, Needs: myce.ResourceNeeds{MemoryGB: 1, Platform: myce.Platform{Any: true}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		args []string
+		id   string
+	}{
+		{[]string{"cancel", byID.ID}, byID.ID},
+		{[]string{"cancel", "--project", "test", "--key", "installed-cancel"}, byKey.ID},
+	} {
+		out, diagnostics, err := captureUsageOutput(t, tc.args)
+		var ack myce.Cancellation
+		if err != nil || json.Unmarshal([]byte(out), &ack) != nil || ack.JobID == nil || *ack.JobID != tc.id || ack.State != "cancelled" || !ack.WillNotRun {
+			t.Fatalf("cancel %v: ack=%+v err=%v stderr=%s", tc.args, ack, err, diagnostics)
+		}
+		if strings.Contains(out+diagnostics, token) {
+			t.Fatal("cancel exposed authority")
+		}
+	}
+	// A wrong installed pin must reject cancellation before it changes the job.
+	pending := waitSubmit(t, q)
+	invitation.Fingerprint = strings.Repeat("0", 64)
+	if err := myce.WriteInvitation(joining, invitation); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := captureUsageOutput(t, []string{"cancel", pending.ID, "--config", config}); err == nil {
+		t.Fatal("cancel accepted a mismatched certificate pin")
+	}
+	snapshot, err := q.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job, err := myce.FindJob(snapshot.Jobs, pending.ID); err != nil || job.State == "cancelled" {
+		t.Fatalf("pin refusal changed job: %+v %v", job, err)
 	}
 }
