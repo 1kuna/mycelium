@@ -24,13 +24,31 @@ func fitsWithoutHostMemory(j *Job, m *Machine, memory float64) bool {
 	return false
 }
 func fitsResources(j *Job, m *Machine, memory float64) bool {
-	if !executionTargetMatches(j.Spec, m) {
-		return false
-	}
-	if j.MemoryEnvelope != nil && j.MemoryEnvelope.Refusal != "" {
-		return false
-	}
-	return !m.Recovering && deviceAllowed(j, m) && (j.Spec.Needs.cpuOnly() || m.GPU != "cpu") && cpuFits(j, m) && !cancelled(j) && dockerRuntimeFits(j, m) && logPolicyFits(j.Spec.Logs, m) && !availabilityBlocked(m) && capabilityFits(j, m) && extensionCanRun(j, m) && (j.Spec.Needs.cpuOnly() || m.MemoryError == "") && !m.Gone && !m.Leaving && (!needsCheckpoint(j) || !m.CheckpointUnavailable) && memory >= j.Spec.Needs.MemoryGB && machineAllowed(j.Spec.AllowedMachines, m.ID) && (j.Spec.Needs.cpuOnly() || len(j.Spec.Needs.Platform.Required) == 0 || slices.Contains(j.Spec.Needs.Platform.Required, m.GPU)) && environmentCanRun(j, m)
+	return fitsResourcesChecked(j, m, memory, nil)
+}
+
+// A nil report retains short-circuit dispatch/launch evaluation. Qualification
+// collects failures from these very same checks, without a second fit path.
+func fitsResourcesChecked(j *Job, m *Machine, memory float64, report *targetFit) bool {
+	return report.check(executionTargetMatches(j.Spec, m), "target") &&
+		report.check(j.MemoryEnvelope == nil || j.MemoryEnvelope.Refusal == "", "memory envelope") &&
+		report.check(!m.Recovering, "recovering") &&
+		report.check(deviceAllowed(j, m), "device") &&
+		report.check(j.Spec.Needs.cpuOnly() || m.GPU != "cpu", "platform") &&
+		report.check(cpuFits(j, m), "cores") &&
+		report.check(!cancelled(j), "cancelled") &&
+		report.check(dockerRuntimeFits(j, m), "Docker runtime") &&
+		report.check(logPolicyFits(j.Spec.Logs, m), "log policy") &&
+		report.check(!availabilityBlocked(m), "availability") &&
+		report.check(capabilityFits(j, m), "hardware capacity") &&
+		report.check(extensionCanRun(j, m), "extension") &&
+		report.check(j.Spec.Needs.cpuOnly() || m.MemoryError == "", "GPU memory telemetry") &&
+		report.check(!m.Gone, "gone") && report.check(!m.Leaving, "leaving") &&
+		report.check(!needsCheckpoint(j) || !m.CheckpointUnavailable, "checkpoint") &&
+		report.check(memory >= j.Spec.Needs.MemoryGB, "GPU memory") &&
+		report.check(machineAllowed(j.Spec.AllowedMachines, m.ID), "allow-list") &&
+		report.check(j.Spec.Needs.cpuOnly() || len(j.Spec.Needs.Platform.Required) == 0 || slices.Contains(j.Spec.Needs.Platform.Required, m.GPU), "platform") &&
+		report.check(environmentCanRun(j, m), "environment")
 }
 func affinity(j *Job, m *Machine) int {
 	n := 0

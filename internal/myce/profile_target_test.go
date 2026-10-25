@@ -1,10 +1,56 @@
 package myce
 
 import (
+	"context"
 	"errors"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
+
+func TestProfileTargetRefusalHostMemorySlack(t *testing.T) {
+	q, _ := fixture(t)
+	for _, id := range []string{"small", "closest", "also-close"} {
+		m := machine(id, "cpu")
+		m.HostMemoryMeasured, m.HostAvailableMemoryGB = true, 32
+		m.HostMemoryBudgetGB, m.MemoryCeilingSlackGB = 8, .125
+		if id == "small" {
+			m.HostMemoryBudgetGB = 4
+		}
+		check(t, q, m, nil)
+	}
+	server := httptest.NewServer(API{Queue: q, Token: "fixture-secret"}.Handler())
+	defer server.Close()
+	c := Client{URL: server.URL, Token: "fixture-secret"}
+	s := Spec{Name: "profile", Project: "test", Class: "experiment", RequireTarget: true,
+		Run: RunSpec{Command: []string{"true"}}, Needs: ResourceNeeds{CPUCores: 2, MemoryGB: 8}}
+	// Equal capacity ties use machine name, independently of map iteration.
+	for range 10 {
+		_, err := c.Submit(context.Background(), s)
+		var api *HTTPError
+		want := "host memory need 8.125 GiB (8 + 0.125 slack) exceeds allowance 8 GiB on also-close"
+		if !errors.As(err, &api) || api.Code != "no_qualified_target" || !strings.Contains(api.Message, want) {
+			t.Fatalf("refusal = %v; want %q", err, want)
+		}
+	}
+}
+
+func TestProfileTargetRefusalPlatform(t *testing.T) {
+	q, _ := fixture(t)
+	m := machine("worker", "cpu")
+	m.HostMemoryMeasured, m.HostAvailableMemoryGB = true, 32
+	check(t, q, m, nil)
+	s := Spec{Name: "profile", Project: "test", Class: "experiment", RequireTarget: true,
+		Targets: []ExecutionTarget{{OS: "darwin", Arch: "arm64", Platform: "cpu"}},
+		Run:     RunSpec{Command: []string{"true"}}, Needs: ResourceNeeds{CPUCores: 2, MemoryGB: 1}}
+	_, err := q.Submit(s)
+	var api *HTTPError
+	want := "target linux/amd64/cpu does not match required darwin/arm64/cpu on worker"
+	if !errors.As(err, &api) || api.Code != "no_qualified_target" || !strings.Contains(api.Message, want) {
+		t.Fatalf("refusal = %v; want %q", err, want)
+	}
+}
 
 func TestProfileTargetQualificationAndReplay(t *testing.T) {
 	q, clock := fixture(t)

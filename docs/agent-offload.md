@@ -112,6 +112,14 @@ arming failed, `75` another local submission is preparing, and `78` no qualified
 target. Failures after intent persistence print the receipt as well as a typed
 stderr reason. An uncertain submit retains the key for safe recovery.
 
+`no_qualified_target` names the closest eligible machine and its first failed
+fit check, including exact resource needs and allowances (host RAM includes
+admission slack). The HTTP error and CLI stderr carry that detail; the printed
+and saved profile receipt retain it as `refusal_code` and `refusal_reason`.
+Eligible targets rank ahead of placement mismatches, followed by the fewest
+failed checks, smallest proportional resource shortfall, then machine/device
+name. Retrying an accepted intent clears the saved refusal.
+
 ## Installed client commands
 
 On an enrolled machine these commands read the installed worker config, or the
