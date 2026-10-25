@@ -103,7 +103,7 @@ func uploadJobInputs(ctx context.Context, c myce.Client, s *myce.Spec, root stri
 		if err != nil {
 			return err
 		}
-		if err = c.UploadFile(ctx, p, ref); err != nil {
+		if err = c.UploadJobInput(ctx, p, ref); err != nil {
 			return err
 		}
 		files[name] = ref

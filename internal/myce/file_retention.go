@@ -2,7 +2,6 @@ package myce
 
 import (
 	"errors"
-	"io"
 	"log"
 	"os"
 	"path/filepath"
@@ -25,6 +24,52 @@ const fileReclaimBatch = 64
 // with no pending hashes means this job's input/result reclamation is complete.
 type FileReclamation struct {
 	Pending []string `json:"pending,omitempty"`
+}
+
+const jobInputUploadPurpose = "job-input"
+
+// Creation and publication callers hold fileLifecycle.RLock. Only newly
+// created job-input identities acquire eligibility; reusing an unmarked import
+// never makes it collectible. A generic import permanently releases the marker.
+func (q *Queue) recordFileUpload(hash, purpose string, created bool) error {
+	return q.update(func() error {
+		if purpose != jobInputUploadPurpose {
+			delete(q.s.JobInputUploads, hash)
+		} else if published, marked := q.s.JobInputUploads[hash]; marked {
+			if !published.IsZero() {
+				q.s.JobInputUploads[hash] = q.clock.Now()
+			}
+		} else if created {
+			if q.s.JobInputUploads == nil {
+				q.s.JobInputUploads = map[string]time.Time{}
+			}
+			q.s.JobInputUploads[hash] = time.Time{}
+		}
+		return nil
+	})
+}
+
+func (q *Queue) publishFileUpload(hash string) error {
+	return q.update(func() error {
+		if _, marked := q.s.JobInputUploads[hash]; marked {
+			q.s.JobInputUploads[hash] = q.clock.Now()
+		}
+		return nil
+	})
+}
+
+// Called before the transaction commits a job/reference. Terminal retention
+// takes over once attached; other durable custody also releases orphan eligibility.
+func (q *Queue) releaseFileUploadMarkers() {
+	if len(q.s.JobInputUploads) == 0 {
+		return
+	}
+	_, _, referenced := q.fileReferences(false)
+	for hash := range q.s.JobInputUploads {
+		if referenced[hash] {
+			delete(q.s.JobInputUploads, hash)
+		}
+	}
 }
 
 func (q *Queue) ConfigureFileRetention(age time.Duration) error {
@@ -188,14 +233,8 @@ func (q *Queue) expiredBlob(hash string) bool {
 
 // Tick snapshots candidates, then fences reference publication and rechecks
 // custody for each unlink. Neither filesystem access nor waiting for the fence
-// holds q.mu. Published orphans share the same budget and publication fence.
+// holds q.mu. Only positively marked job-input uploads can be orphans.
 func (q *Queue) reclaimJobFiles() error {
-	// Concurrent ticks must not race the incremental directory cursor. Like the
-	// publication fence, a busy collector defers rather than queuing maintenance.
-	if !q.fileReclaimMu.TryLock() {
-		return nil
-	}
-	defer q.fileReclaimMu.Unlock()
 	q.mu.RLock()
 	store := q.files
 	expired, keep, referenced := q.fileReferences(true)
@@ -203,6 +242,12 @@ func (q *Queue) reclaimJobFiles() error {
 	revision := q.fileReferenceRevision
 	cutoff := q.clock.Now().Add(-filePublicationGrace)
 	orphanCutoff := q.clock.Now().Add(-q.fileRetention)
+	orphans := map[string]time.Time{}
+	for hash, published := range q.s.JobInputUploads {
+		if !published.IsZero() && !published.After(orphanCutoff) && !referenced[hash] {
+			orphans[hash] = published
+		}
+	}
 	q.mu.RUnlock()
 	if store == nil {
 		return nil
@@ -227,7 +272,8 @@ func (q *Queue) reclaimJobFiles() error {
 		}
 		remove := q.files == store && expired[hash] && !keep[hash]
 		if orphan {
-			remove = q.files == store && !referenced[hash]
+			published, marked := q.s.JobInputUploads[hash]
+			remove = q.files == store && marked && published == orphans[hash] && !referenced[hash]
 		}
 		q.mu.RUnlock()
 		var err error
@@ -263,24 +309,12 @@ func (q *Queue) reclaimJobFiles() error {
 		checked++
 		reclaim(hash, false)
 	}
-	if checked < fileReclaimBatch && !deferred {
-		entries, err := q.readReclaimBlobs(store, fileReclaimBatch-checked)
-		if err != nil {
-			log.Printf("file retention orphan scan deferred error=%q; retrying next tick", err)
+	for hash := range orphans {
+		if checked == fileReclaimBatch || deferred {
+			break
 		}
-		for _, entry := range entries {
-			// Every visited entry consumes the remaining budget, even protected,
-			// malformed or recent blobs. ReadDir resumes beyond it next tick.
-			checked++
-			hash := entry.Name()
-			if (FileRef{SHA256: hash}).validate() != nil || referenced[hash] || !entry.Type().IsRegular() {
-				continue
-			}
-			reclaim(hash, true)
-			if deferred {
-				break
-			}
-		}
+		checked++
+		reclaim(hash, true)
 	}
 	q.mu.Lock()
 	warn := deferred && !q.fileCollectionDeferred
@@ -295,6 +329,13 @@ func (q *Queue) reclaimJobFiles() error {
 	return q.update(func() error {
 		if q.files != store {
 			return nil
+		}
+		for hash := range gone {
+			// A re-publication between unlink and this transaction owns a newer
+			// marker. Never erase its eligibility/progress with an older result.
+			if q.s.JobInputUploads[hash] == orphans[hash] {
+				delete(q.s.JobInputUploads, hash)
+			}
 		}
 		mark := func(j *Job) {
 			if j == nil || j.FileReclamation == nil {
@@ -316,41 +357,4 @@ func (q *Queue) reclaimJobFiles() error {
 		}
 		return nil
 	})
-}
-
-// fileReclaimMu is held. Go's directory stream avoids an unbounded ReadDir of
-// the entire store or a separate blob index. A restart simply starts a new pass.
-func (q *Queue) readReclaimBlobs(store *FileStore, budget int) ([]os.DirEntry, error) {
-	path := filepath.Join(store.root, "blobs")
-	if q.fileReclaimDir != nil && q.fileReclaimDir.Name() != path {
-		if err := q.closeFileReclaimDir(); err != nil {
-			return nil, err
-		}
-	}
-	if q.fileReclaimDir == nil {
-		var err error
-		q.fileReclaimDir, err = os.Open(path)
-		if err != nil {
-			return nil, err
-		}
-	}
-	entries, err := q.fileReclaimDir.ReadDir(budget)
-	if err != nil || len(entries) < budget {
-		closeErr := q.closeFileReclaimDir()
-		if errors.Is(err, io.EOF) {
-			err = nil
-		}
-		err = errors.Join(err, closeErr)
-	}
-	return entries, err
-}
-
-// fileReclaimMu is held; closing the directory also happens outside q.mu.
-func (q *Queue) closeFileReclaimDir() error {
-	if q.fileReclaimDir == nil {
-		return nil
-	}
-	dir := q.fileReclaimDir
-	q.fileReclaimDir = nil
-	return dir.Close()
 }

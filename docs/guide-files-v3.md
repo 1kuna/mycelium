@@ -150,14 +150,23 @@ within the retention window. An expired result download returns typed HTTP 410
 reclaimed, rather than reporting an unknown file. Accepted result helpers also
 check the job's expiry marker, even if another reference keeps shared bytes.
 
-Published uploads abandoned before submission are also reclaimed after the same
-retention window (default `168h`), measured from their on-disk mtime using the queue
-clock, and only after the six-hour publication grace. Publishing or successful HEAD
-verification refreshes that mtime. A blob is an orphan only if no job (including
-retained expired records and fan-out results), keyed answer, checkpoint, model,
-extension, environment or pending file-reclamation list references it. Catalog and
-model bytes remain protected. The existing collector incrementally scans published
-blobs within its shared per-tick budget and rechecks custody and mtime before unlink.
+Only uploads explicitly created for job inputs can be reclaimed before submission.
+CLI/profile input uploads, Go `UploadJobInput` and Python `upload_file` send tus
+metadata `purpose=job-input`; the queue persists an eligibility marker and publish
+time in its existing SQLite state. Collection requires both the publish time and
+blob's mtime to be older than `--file-retention` (default `168h`), the six-hour
+publication grace to have elapsed, and no job (including retained expired records
+and fan-out results), keyed answer, checkpoint, model, extension, environment or
+pending file-reclamation list to reference the blob. All times use the queue Clock.
+Publishing or successful HEAD verification refreshes the mtime. Job admission clears
+the marker in the same transaction; normal terminal-job retention then governs it.
+
+Unmarked imports, including `myce file put`, Go `UploadFile`, models and existing
+uploads from older clients, are never orphan-swept, even with an empty or edited
+model catalog. Reusing an unmarked import as a job input does not mark it; a generic
+import of marked bytes clears the marker. The collector shares its bounded per-tick
+budget between terminal reclamation and eligible marked uploads, rechecking purpose,
+custody and mtime before unlink. It does not scan the blob directory for orphans.
 
 Interrupted tus uploads and files outside the published blob namespace remain for
 explicit operator inspection and recovery. Capacity exhaustion still returns HTTP

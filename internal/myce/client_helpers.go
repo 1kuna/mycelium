@@ -205,7 +205,7 @@ func (c Client) Run(ctx context.Context, extension string, inputs map[string]str
 		if err != nil {
 			return nil, err
 		}
-		if err = c.UploadFile(ctx, source, ref); err != nil {
+		if err = c.UploadJobInput(ctx, source, ref); err != nil {
 			return nil, err
 		}
 		files[name] = ref

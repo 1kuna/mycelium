@@ -80,7 +80,14 @@ Download results within that window. Job/key answers and hashes remain, with
 reports `result_expired` with exit 65, including for a receipt whose notification
 was already delivered. Open downloads finish, but a disconnected caller gets no
 extra grace beyond the window. Checkpoints and catalog storage remain protected.
-Abandoned uploads from profiles that never submitted are not automatically swept.
+Abandoned profile job-input uploads are reclaimed only when positively marked in
+queue SQLite state, unreferenced by every job/keyed answer, checkpoint, catalog/model,
+extension, environment and pending reclamation list, and older than the configured
+window by both publish time and file mtime, outside the six-hour publication grace.
+Job admission clears that marker; normal terminal retention then applies. Unmarked
+imports (`myce file put`, models, Go `UploadFile`, older clients) are never orphan-swept,
+including when the model catalog is empty or edited. Reusing an unmarked import as
+a job input does not mark it; a generic import of marked bytes clears its marker.
 Re-uploaded or HEAD-verified bytes receive a six-hour publication grace, covering
 later multi-GB uploads, slow NAS, or a queue outage/deploy between the first file
 and submit/complete establishing its reference. This does not restore an
