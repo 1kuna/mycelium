@@ -40,7 +40,7 @@ Profiles are strict YAML: use only fields those docs define. Plain
 - **Commit the intended source.** `source: {git: HEAD}` archives committed bytes
   only, and a dirty HEAD fails with exit 64.
 - **Gitignore `.mycelium/receipts/`** in the project.
-- **Have a wake binding ready**, and `"$MYCE_NOTIFY" --check` exits 0 (step 4).
+- **Have this thread's wake binding ready**, and `NOTIFIER --check` exits 0 (step 4).
 
 ## 3. Submit
 
@@ -51,35 +51,60 @@ Run from the repository root (`--profile NAME` reads
 myce run --profile NAME                         # or --profile path/to/file.yaml
 myce run --profile NAME -- EXTRA ARGS           # appended literally to run.command
 myce run --profile NAME --key KEY               # explicit operation name
-myce run --profile NAME --notify /abs/notifier  # per-run notifier instead of MYCE_NOTIFY
+myce run --profile NAME --notify /abs/notifier  # this thread's notifier; overrides MYCE_NOTIFY
 ```
+
+**The receiver is chosen on each submit or replay:** `--notify`, else
+`MYCE_NOTIFY` in that command's environment, else (replay only) the notifier saved
+in the receipt. Pass your own thread's `--notify` on every submit and replay, so
+a stale or shared `MYCE_NOTIFY` never sends your wake to another thread. An
+already-running observer keeps the notifier it was started with.
 
 Arguments after `--` are **appended** to `run.command`. Pass only extra
 arguments, such as a test filter, and never repeat the original command.
 
 The command returns at once. It prints a JSON receipt on stdout and keeps it
 under `.mycelium/receipts/`. Record `key` and `job_id` in your task record, then
-check two fields:
+read the receipt in this order:
 
-- `observation: armed` and `delivery: armed`: end the turn, and the wake arrives.
-- `delivery: not_configured`: no notifier was set, so no wake will come. Fix the
-  binding, then rerun with the same `--key` to arm it.
+1. **`status` is already terminal** (`succeeded`, `failed`, `cancelled`): the
+   job is done, perhaps before the receipt printed, or this is a replay whose
+   terminal wake was already delivered. A replay of delivered completion sends
+   no new wake, so do not wait for one. Go straight to step 5.
+2. **`observation: armed` and `delivery: armed`:** end the turn, and the wake
+   arrives. `armed` means configured, not yet delivered.
+3. **Anything else** means no wake is coming, so do not end the turn on it:
+   - `delivery: not_configured`: no notifier was given.
+   - `delivery_status: failed`: the notifier ran and could not deliver.
+   - `observation: not_armed` or `delivery: not_armed` with no terminal status:
+     the observer exited (see `observation_error`).
+
+   Fix the notifier until `--check` passes, then rerun the same command with the
+   same `--key` and `--notify`. That adopts the job and re-arms the observer, or
+   retries the same terminal event, which keeps its `delivery_id`. If it cannot
+   be armed, wait in the foreground with `myce wait JOB_ID`, or record a hold.
+
+A receipt file is a past snapshot. Rerunning with the same `--key` checks for a
+live observer and adopts it.
 
 **Keys.** The default key derives from the profile, the arguments and the source
 and input identities. Identical work adopts its existing job and is never rerun,
-so replaying the same command is safe recovery. A new commit produces a new key
-automatically. To repeat identical work deliberately, such as a suspected flake,
-pass a new `--key`. Reusing a key after changing the profile or arguments exits 65.
+so replaying the same command is safe recovery. For `source: {git: ...}` the
+source identity is the resolved **tree**, not the commit. An empty commit, or a
+new commit with an identical tree, adopts the previous job. Only changed source,
+inputs, profile or arguments produce a new default key. To repeat identical work
+deliberately, such as a suspected flake, pass a new `--key`. Reusing a key after
+changing the profile or arguments exits 65.
 
 ## 4. Completion wake
 
 **Never poll.** That means no sleep loops, no repeated `myce status` and no
 polling schedule. One detached observer per job already waits.
 
-- **In T3:** reuse the project's recorded binding (its webhook schedule and
-  notifier). If none exists, create it once from the owning thread with
-  [t3-binding.md](t3-binding.md). A worker without that authority asks its
-  orchestrator.
+- **In T3:** the wake must reach the thread that submitted the job. Each
+  submitting thread uses its own binding, a webhook schedule bound to that
+  thread and a notifier holding its URL, never a project-wide one. Reuse your
+  thread's binding if it exists, or create it with [t3-binding.md](t3-binding.md).
 - **Outside T3:** run `myce wait JOB_ID` as a background command that your
   harness reports on exit.
 
@@ -125,7 +150,8 @@ client.cancel("JOB_ID")
   `result_not_accepted` (the job did not succeed), `result_expired`,
   `result_download_failed`, or a server code such as an authentication error.
 - **Failed job:** the command or its `check` really failed. Read `myce logs`,
-  fix, commit, and resubmit. The new commit gets a new key.
+  fix, commit, and resubmit. A changed tree gets a new key. To rerun an unchanged
+  tree, pass a new `--key`.
 
 ## Exit codes of `myce run --profile`
 
@@ -158,12 +184,12 @@ authority fails, report the hold.
 
 ## Current limits
 
-- **CPU only.** Plain-command profiles declare `needs.platform: cpu`. GPU work,
-  including GPU sims, has no profile path yet
-  ([mycelium#187](https://github.com/1kuna/mycelium/issues/187)), so take it to the project
-  owner.
-- **macOS-only work gets no relief yet.** Today the fleet's only darwin worker is
-  the orchestrator's own Mac, so a darwin-only profile runs on that host.
-  Submit it anyway, because admission still meters it. Relief arrives when more
-  Apple Silicon workers join
-  ([mycelium#108](https://github.com/1kuna/mycelium/issues/108)).
+- **CPU only.** Plain command profiles are CPU-only and declare
+  `needs.platform: cpu`. GPU work, including GPU sims, has no profile path yet
+  ([mycelium#187](https://github.com/1kuna/mycelium/issues/187)), so take it to the
+  project owner.
+- **Targets bound relief.** Placement only uses workers that match the profile's
+  `targets`. macOS-only work relieves the submitting machine only when a darwin
+  worker other than that machine qualifies. If the submitter is the only match,
+  the job still runs there under admission control. Submit it anyway, and report
+  missing capacity to the fleet owner.
