@@ -203,6 +203,23 @@ func (q *Queue) resolveEnvironment(e Environment) (map[string]EnvironmentRecipe,
 	}
 	return out, nil
 }
+func environmentPlatformsMatch(needs ResourceNeeds, recipes map[string]EnvironmentRecipe) bool {
+	if len(recipes) == 0 { // No recipe constraint in legacy preinstalled mode.
+		return true
+	}
+	if needs.cpuOnly() {
+		_, ok := recipes["cpu"]
+		return ok
+	}
+	// As in placement, any/preferred permit GPU platforms only. CPU execution
+	// requires an explicit CPU request after resource normalization.
+	for platform := range recipes {
+		if platform != "cpu" && (len(needs.Platform.Required) == 0 || slices.Contains(needs.Platform.Required, platform)) {
+			return true
+		}
+	}
+	return false
+}
 func environmentKey(j *Job, m *Machine) string {
 	if j.Spec.extensionJob() {
 		if e := qualifiedExtension(j, m); e != nil {

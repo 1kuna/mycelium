@@ -46,6 +46,7 @@ var rejectionMessages = map[string]string{
 	"job_platform_invalid":                  "needs.platform requires one valid platform string, list, or required/preferred/any mapping",
 	"job_docker_invalid":                    "run Docker command, environment, network, sidecars and memory must satisfy managed Docker rules",
 	"job_environment_invalid":               "environment must identify one configured environment or supported lock_file recipe",
+	"job_environment_platform_mismatch":     "job platform and environment recipes have no compatible execution platform",
 	"job_placement_invalid":                 "allowed_machines must satisfy the project's placement policy",
 	"job_capacity_invalid":                  "needs must fit the project's configured capacity",
 	"request_stale":                         "attempt or input custody is stale; refresh before retrying",

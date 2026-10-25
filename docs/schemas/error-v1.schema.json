@@ -30,6 +30,7 @@
         "job_platform_invalid",
         "job_docker_invalid",
         "job_environment_invalid",
+        "job_environment_platform_mismatch",
         "job_placement_invalid",
         "job_capacity_invalid",
         "no_qualified_target",

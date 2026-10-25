@@ -176,7 +176,11 @@ ffmpeg = "*"
 Run `pixi lock --manifest-path cpu-tools/pixi.toml`, then give the manifest and
 generated lock to the queue operator. To register it, place both files in
 `cpu-tools/` beside the existing NAS environment catalog, add this entry, and
-restart the queue with its existing `--environment-config` path:
+restart the queue with its existing `--environment-config` path. Before enabling
+the first catalog, read the
+[preinstalled-environment compatibility warning](environments.md#preinstalled-environment-compatibility):
+worker `--environments` names must also be registered or new submissions using
+them will be rejected.
 
 ```yaml
 environments:
@@ -188,7 +192,11 @@ The catalog is loaded at queue startup; there is no consumer registration API
 or live reload command. Preserve existing entries and submit a new job after
 the reload. See [CPU tools with pixi](environments.md#cpu-tools-with-pixi) for
 the complete registration steps and workspace limits. Workers prepare the
-immutable recipe through the usual cache; they need pixi as a build prerequisite.
+immutable recipe through the usual cache. They reuse suitable pixi on their
+configured PATH or download the pinned, checksum-verified release on first use;
+pixi need not be preinstalled. Workers need outbound network access for that
+download and the locked dependencies. The downloaded backend is not itself
+added to the job's PATH; declare tools such as uv in the locked environment.
 
 In the consuming profile, select the registered name and CPU resources:
 
@@ -205,6 +213,10 @@ CPU targets, including GPU hosts serving CPU work, use the locked environment's
 Declare each intended OS/architecture in the pixi lock and profile targets.
 `platform: any` permits only platforms with recipes; CPU and GPU recipes never
 implicitly substitute for each other.
+CPU jobs must use `needs.platform: cpu`, or set CPU cores with no platform
+selector. Neither `platform: any` nor `platform: {preferred: [cpu]}` places work
+on CPU. A job whose permitted platforms do not overlap its environment recipes
+is rejected at submission with HTTP 400 `job_environment_platform_mismatch`.
 
 ## Completion notification
 

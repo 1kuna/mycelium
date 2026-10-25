@@ -92,6 +92,9 @@ recipes all accept `cpu`. The recipe must support the target's OS/architecture;
 fallback between CPU and GPU recipes. `platform: any` still permits only a
 matching recipe and does not turn a GPU job into a CPU job. Select CPU execution
 with `needs.platform: cpu` (or CPU cores without a platform selector).
+Neither `platform: any` nor `platform: {preferred: [cpu]}` places work on CPU.
+If the job's permitted platforms have no overlap with its environment recipes,
+submission fails with HTTP 400 `job_environment_platform_mismatch`.
 
 For Python 3.12, uv and ffmpeg from conda-forge, create `cpu-tools/pixi.toml`:
 
@@ -110,9 +113,12 @@ ffmpeg = "*"
 Run `pixi lock --manifest-path cpu-tools/pixi.toml` when authoring the recipe.
 Keep the generated `pixi.lock` beside the manifest; it pins the actual tool and
 dependency versions for each declared OS/architecture. Workers install this
-lock with `pixi install --locked`; they do not solve it again. Pixi itself is a
-worker build prerequisite. The Python, uv and ffmpeg used by the job come from
-the prepared environment, independent of those tools on the host.
+lock with `pixi install --locked`; they do not solve it again. Workers reuse a
+suitable pixi on their configured PATH or download the pinned, checksum-verified
+pixi release on first use. Preinstallation is unnecessary; workers need outbound
+network access for that download and the locked dependencies. The Python, uv
+and ffmpeg used by the job come from the prepared environment, independent of
+those tools on the host.
 
 Register it through the existing shared catalog:
 
@@ -120,7 +126,9 @@ Register it through the existing shared catalog:
    NAS catalog, in its `cpu-tools/` subdirectory. Catalog pixi recipes snapshot
    these two files; keep bundled activation/setup inputs in an extension if
    they need a complete workspace snapshot.
-2. Add the following entry to that catalog (preserve the other entries):
+2. Add the following entry to that catalog (preserve the other entries). Before
+   enabling the first catalog, read the
+   [preinstalled-environment compatibility warning](#preinstalled-environment-compatibility):
 
    ```yaml
    environments:
@@ -161,7 +169,7 @@ A job can bypass the named catalog:
 environment:
   lock_file: /queue/nas/project/uv.lock
   python: '3.12'
-  platforms: [cpu, cuda, xpu]
+  platforms: [cuda, xpu]
 needs:
   memory_gb: 8
   platform: {preferred: [cuda]}
@@ -173,6 +181,19 @@ and defaults to every platform; state it when dependencies only support a
 subset. Exactly one of `name` and `lock_file` is allowed. Changing the content,
 Python version, or platform changes the cache identity. Identical content at
 different NAS paths reuses the same environment.
+
+For CPU-only work, use a CPU recipe and select CPU execution explicitly:
+
+```yaml
+environment:
+  lock_file: /queue/nas/project/uv.lock
+  python: '3.12'
+  platforms: [cpu]
+needs:
+  cpu_cores: 2
+  memory_gb: 2
+  platform: cpu
+```
 
 ## Cache, placement, and failures
 
@@ -209,16 +230,22 @@ check, so retirement frees disk rather than accumulating outside the budget.
 Disk exhaustion fails visibly. Local `HASH.build.log` files remain outside the
 retired entries; protect runtime/build logs like other job logs.
 
-`uv` must be installed and visible in the worker's configured `PATH` for Python
-recipes. The installer preserves that PATH for the boot service; doctor checks
-uv. Its download and package caches live inside the build folder. Environments
-can download their declared dependencies, but model loading continues to use NAS
-masters only.
+Workers reuse suitable uv/pixi tools on their configured `PATH`; otherwise the
+environment builder downloads the pinned, checksum-verified backend on first
+use and caches it locally. Workers need outbound network access for backend and
+dependency downloads. Acquired backend tools are invoked by absolute path and
+are not automatically put on the job's PATH: declare uv in the locked environment
+when the job itself needs it. Package caches use the environment cache's shared
+download area. Model loading continues to use NAS masters only.
+
+## Preinstalled-environment compatibility
 
 For existing installations without an environment catalog, explicit
 `join --environments NAME,...` remains a preinstalled-environment compatibility
 mode. It does not build anything or provide content-based identity. With a
-catalog, unknown named environments are rejected.
+catalog, unknown named environments are rejected. Adding the first catalog
+therefore rejects new submissions using names advertised only through worker
+`--environments`; register those names in the catalog before enabling it.
 
 ## Extension preparation and pixi
 
@@ -256,9 +283,9 @@ dependencies. The extension owns every version, channel, platform and variant.
 Mycelium supplies mechanisms and
 **guarantees no packages**. Existing uv recipes remain supported.
 
-The worker requires pixi on PATH; it never installs pixi automatically. A host
-without it is unqualified with a missing-prerequisite reason. Automatic pixi
-installation is a follow-up. Workers run `pixi install --locked`, which rejects a
+Workers reuse suitable pixi on PATH or acquire the pinned release on first use,
+as described above; outbound network access is required for downloads.
+Workers run `pixi install --locked`, which rejects a
 manifest/lock mismatch without re-solving, then `pixi shell-hook --json --locked`
 for activation. `--frozen` permits mismatched inputs and is deliberately not used.
 Pixi and uv install into stable cache prefixes; only the final ready marker is
