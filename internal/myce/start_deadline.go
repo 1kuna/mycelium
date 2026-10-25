@@ -150,6 +150,12 @@ func (q *Queue) allStartHostsDisabled(j *Job) bool {
 }
 
 func (q *Queue) startPlacementAllowed(j *Job) bool {
+	return q.diskHeadroomReason(j, q.s.Machines[j.Machine]) == "" && q.startPlacementPolicyAllowed(j)
+}
+
+// A worker reporting Started has already executed; retain the policy fences
+// without treating its existing files as a new disk allocation.
+func (q *Queue) startPlacementPolicyAllowed(j *Job) bool {
 	owner := q.s.Machines[j.Machine]
 	m := allocationMachine(owner, j.AllocatedDevices)
 	if m == nil || q.preparationStopping(m) {
@@ -162,5 +168,5 @@ func (q *Queue) startPlacementAllowed(j *Job) bool {
 		m.DockerCleanup, owner.DockerCleanup = "", ""
 		defer func() { m.DockerCleanup, owner.DockerCleanup = previous, previous }()
 	}
-	return q.diskHeadroomReason(j, m) == "" && executionTargetMatches(j.Spec, m) && cpuFits(j, m) && q.placementAllowed(j, m)
+	return executionTargetMatches(j.Spec, m) && cpuFits(j, m) && q.placementPolicyAllowed(j, m, false)
 }

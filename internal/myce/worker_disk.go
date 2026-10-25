@@ -11,17 +11,17 @@ import (
 )
 
 // DiskVolume contains no local paths or raw filesystem IDs. ID is an opaque,
-// stable host/volume hash shared by workers on the same host. Roots name uses of the
-// same volume; rate is signed free-space change, nil until two samples exist.
+// stable host/volume hash. Roots name uses of the same volume; rate is signed
+// free-space change, nil until two samples exist.
 type DiskVolume struct {
 	ID                    string    `json:"id,omitempty"`
 	Roots                 []string  `json:"roots"`
 	TotalBytes            uint64    `json:"total_bytes"`
 	FreeBytes             uint64    `json:"free_bytes"`
 	ChangeBytesPerHour    *float64  `json:"change_bytes_per_hour,omitempty"`
-	SampledAt             time.Time `json:"sampled_at"`
+	SampledAt             time.Time `json:"sampled_at" jsonschema:"description=Worker-clock sample timestamp; freshness uses reported age plus queue time since receipt."`
 	SampleIntervalSeconds float64   `json:"sample_interval_seconds,omitempty"`
-	AgeSeconds            float64   `json:"age_seconds,omitempty"`
+	AgeSeconds            float64   `json:"age_seconds,omitempty" jsonschema:"description=Sample age on the worker at check-in; status adds queue-clock time since receipt."`
 	Retained              bool      `json:"retained,omitempty"`
 	Error                 string    `json:"error,omitempty"`
 }

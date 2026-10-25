@@ -378,6 +378,7 @@ type Job struct {
 	Checkpoint            string                       `json:"checkpoint"`
 }
 type Machine struct {
+	DiskReceivedAt         time.Time           `json:"disk_received_at,omitempty"` // Queue-owned receipt time; only disk check-ins renew it.
 	DiskVolumes            []DiskVolume        `json:"disk_volumes,omitempty"`
 	Enrollment             *EnrollmentProof    `json:"enrollment,omitempty"`
 	Recovering             bool                `json:"recovering,omitempty"`

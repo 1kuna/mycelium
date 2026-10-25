@@ -16,7 +16,7 @@ worker-clock `sampled_at`, `sample_interval_seconds`, `age_seconds`, and signed
 successive worker samples and is omitted until two readings exist. `roots`
 identifies `data`, `environment`, `checkpoint`, `file-cache`, and `model-cache`;
 roots on the same filesystem share an entry. An opaque `id` identifies that
-host's volume across its workers; no paths or raw filesystem IDs are published.
+host's volume; no paths or raw filesystem IDs are published.
 The [disk-volume schema](schemas/disk-volume-v1.schema.json) describes each entry.
 Old workers without samples retain startup storage figures.
 
@@ -25,18 +25,23 @@ Local probes use the existing 25 ms budget; the checkpoint/NAS probe uses the
 existing 750 ms heartbeat filesystem budget. A timeout retains the last good
 reading with its age and `retained: true`, and reports `error: disk reading
 unavailable`. Retention preserves the baseline for later rate calculation. The
-queue can use that reading for three reported heartbeat intervals; older or
+queue can use that reading for three reported heartbeat intervals. Freshness is
+worker-reported `age_seconds` plus queue time since `disk_received_at`, which the
+queue stamps on check-in; worker and queue clocks need not agree. Older or
 missing readings hold new work as `disk reading unavailable`, without inventing
 zero free bytes. The CLI shows retained values and age. A status read also
 updates displayed age without renewing freshness or writing queue state.
 
 New work stays queued with `diagnostic_code: disk_headroom` when a volume cannot
-retain its free floor plus the projected need and other assigned/running work's
-projected need on that host/volume. The diagnostic names the host, roots, free
-bytes, floor, need and reserved bytes. Launch excludes its own reservation.
-Dispatch and launch use the same queue check; existing running work is not
-stopped. Queued production work can move off a disk-held host to another fitting
-host, and its pinned-host disk reason remains visible while it waits.
+retain its free floor plus the job's projected need. The diagnostic names the
+host, roots, free bytes, floor and need. Admission uses observed free bytes and
+does not subtract other jobs' projected writes: writes already made are included
+in the observation. One machine worker admits work per physical host; its
+component targets share the observations. Dispatch and launch use the same queue
+check. Recovery of an already-running copy bypasses admission-time disk checks.
+Queued production work can move off a disk-held host to another fitting host,
+and its pinned-host disk reason remains visible while it waits. Disk pressure
+does not trigger preemption: stopping work does not free its files.
 
 The floor is 1% of volume size with a 256 MiB minimum for filesystem metadata,
 control state and other writers; there is no job-size cap. Submission preserves
@@ -56,9 +61,8 @@ measured resume manifest or optional `spec.disk.checkpoint_bytes` hint. A separa
 environment or model-cache volume checks the floor when the job uses it. The
 existing cache copy/eviction checks still govern actual model downloads.
 
-Reservations conservatively retain a job's full projected writes through its
-assigned/running/stopping lifetime; they do not predict writes by other programs
-or unreported scratch/archive expansion. Cross-job output-size learning remains
+Estimates do not predict future writes by other jobs or programs, or unreported
+scratch/archive expansion. Cross-job output-size learning remains
 a follow-up; existing observation keys learn memory/throughput, not disk size.
 
 Machine `cpu_isolation` reports `select-none` after runtime qualification,

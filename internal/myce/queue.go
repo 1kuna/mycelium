@@ -936,6 +936,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		delete(q.unreported, m.ID)
 		m.Gone = false
 		m.LastSeen = q.clock.Now()
+		m.DiskReceivedAt = m.LastSeen // Ignore worker-supplied queue timestamps.
 		// Recovery is queue-observed admission state, not worker-supplied status.
 		m.Recovering, m.RecoveringSince, m.RecoveryNeedsAttention = c.Recovering, nil, false
 		if m.Recovering {
@@ -1617,7 +1618,7 @@ func (q *Queue) snapshotView(forStatus, jobReply bool) (Snapshot, error) {
 		for _, m := range q.s.Machines {
 			copy := cloneMachine(m)
 			for i, v := range copy.DiskVolumes {
-				copy.DiskVolumes[i] = q.currentDiskVolume(v)
+				copy.DiskVolumes[i] = q.currentDiskVolume(v, m.DiskReceivedAt)
 			}
 			copy.RecoveryNeedsAttention = m.Recovering && m.RecoveringSince != nil && q.clock.Now().Sub(*m.RecoveringSince) > recoveryAttentionDelay
 			q.machineDeviceStatus(&copy, m)
@@ -1888,11 +1889,11 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 	if j != nil && !terminal(j.State) && !cancelled(j) && (j.State == "queued" || j.Attempt != report.Attempt || j.Machine != m.ID || j.Session != m.Session) {
 		for _, copy := range j.Copies {
 			canRecover := q.machineRecoveryFits(m, j, copy)
-			if canRecover && q.placementAllowed(j, m) && copy.Recoverable && copy.Attempt == report.Attempt && copy.Machine == m.ID && copy.Session == m.Session && j.State != "queued" && (m.CheckpointUnavailable || !q.checkpointsAvailable() || progress.err != nil || (progress.path != "" && progress.path != attemptCheckpoint(*j))) {
+			if canRecover && q.placementPolicyAllowed(j, m, false) && copy.Recoverable && copy.Attempt == report.Attempt && copy.Machine == m.ID && copy.Session == m.Session && j.State != "queued" && (m.CheckpointUnavailable || !q.checkpointsAvailable() || progress.err != nil || (progress.path != "" && progress.path != attemptCheckpoint(*j))) {
 				reply.Hold = true
 				return reply
 			}
-			if canRecover && q.placementAllowed(j, m) && copy.Recoverable && copy.Attempt == report.Attempt && copy.Machine == m.ID && copy.Session == m.Session && (j.State == "queued" || (j.Spec.Resumable && report.Progress > max(0, progress.durable))) {
+			if canRecover && q.placementPolicyAllowed(j, m, false) && copy.Recoverable && copy.Attempt == report.Attempt && copy.Machine == m.ID && copy.Session == m.Session && (j.State == "queued" || (j.Spec.Resumable && report.Progress > max(0, progress.durable))) {
 				for i := range j.Copies {
 					j.Copies[i].Recoverable = false
 				}
@@ -1924,7 +1925,7 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 		reply.Kill = true
 		return reply
 	}
-	if report.Started && j.Spec.StartBy == nil && j.StartedAt == nil && j.State == "running" && q.startPlacementAllowed(j) {
+	if report.Started && j.Spec.StartBy == nil && j.StartedAt == nil && j.State == "running" && q.startPlacementPolicyAllowed(j) {
 		q.markStarted(j)
 	}
 	j.Progress = report.Progress

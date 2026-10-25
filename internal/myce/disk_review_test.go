@@ -58,36 +58,66 @@ func TestDiskHeadroomProductionRepins(t *testing.T) {
 	}
 }
 
-func TestDiskHeadroomSharedHostReservations(t *testing.T) {
+// Observed free space already includes the experiment's writes. Its projected
+// output must not prevent ordinary GPU preemption for production (N1/N2).
+func TestDiskHeadroomProductionPreemptsWithObservedSpace(t *testing.T) {
 	q, c := fixture(t)
-	a := reportDisk(t, machine("a", "fake", "shared-host"), c, "shared-volume", []string{"data"}, 100<<30, 41<<30)
-	b := reportDisk(t, machine("b", "fake", "shared-host"), c, "shared-volume", []string{"data"}, 100<<30, 41<<30)
-	check(t, q, a, nil)
-	check(t, q, b, nil)
+	m := m3Machine()
+	m.Devices = m.Devices[:1]
+	m = reportDisk(t, m, c, "volume", []string{"data"}, 100<<30, 81<<30)
 	s := spec("experiment")
+	s.Disk = &DiskNeeds{OutputBytes: 60 << 30}
+	submit(t, q, s)
+	busy := assignedJob(machineCheck(t, q, m))
+	if busy == nil {
+		t.Fatal("experiment not assigned")
+	}
+	machineCheck(t, q, m, busy)
+	m = reportDisk(t, m, c, "volume", []string{"data"}, 100<<30, 41<<30)
+	machineCheck(t, q, m, busy)
+	s = spec("production")
 	s.Disk = &DiskNeeds{OutputBytes: 30 << 30}
-	one := submit(t, q, s)
-	two := submit(t, q, s)
-	first := check(t, q, a, nil).Job
-	if first == nil {
-		t.Fatal("first job not admitted")
+	prod := submit(t, q, s)
+	machineCheck(t, q, m, busy)
+	if got := job(t, q, busy.ID); got.State != "stopping" || got.PreemptionCount != 1 {
+		t.Fatalf("disk estimate prevented GPU preemption: state=%s preemptions=%d production=%+v", got.State, got.PreemptionCount, job(t, q, prod.ID))
 	}
-	secondID := one.ID
-	if first.ID == one.ID {
-		secondID = two.ID
+	finishInterrupted(t, q, busy)
+	next := assignedJob(machineCheck(t, q, m))
+	if next == nil || next.ID != prod.ID || !c.Now().Before(*next.Spec.StartBy) {
+		t.Fatal("production did not start before its deadline", next)
 	}
-	if got := check(t, q, b, nil).Job; got != nil {
-		t.Fatalf("second job reused assigned disk headroom: %s", got.ID)
+	if err := q.Started(result(next, true)); err != nil {
+		t.Fatal(err)
 	}
-	if err := q.Started(result(first, true)); err != nil {
-		t.Fatal("own reservation blocked launch", err)
+}
+
+// A lost worker's exact running copy is recovery, not a new disk admission (N3).
+func TestDiskHeadroomReconnectRecoversRunningCopy(t *testing.T) {
+	q, c := fixture(t)
+	m := m3Machine()
+	m.Devices = m.Devices[:1]
+	m = reportDisk(t, m, c, "volume", []string{"data"}, 100<<30, 81<<30)
+	s := spec("experiment")
+	s.Disk = &DiskNeeds{OutputBytes: 60 << 30}
+	s.Needs.GPU = &GPUSelection{Devices: []string{"0"}}
+	submit(t, q, s)
+	a := assignedJob(machineCheck(t, q, m))
+	if a == nil {
+		t.Fatal("no initial assignment")
 	}
-	if got := check(t, q, b, nil).Job; got != nil {
-		t.Fatalf("second job reused running disk headroom: %s", got.ID)
+	machineCheck(t, q, m, a)
+	c.Advance(61 * time.Second)
+	check(t, q, machine("healthy", "fake"), nil)
+	requireState(t, q, a.ID, "queued")
+	m = reportDisk(t, m, c, "volume", []string{"data"}, 100<<30, 0)
+	r := machineCheck(t, q, m, a)
+	if len(r.Attempts) != 1 || r.Attempts[0].Stop || r.Attempts[0].Kill || r.Attempts[0].Hold {
+		t.Fatalf("disk admission killed a running copy: %+v", r.Attempts)
 	}
-	other := reportDisk(t, machine("other", "fake", "shared-host"), c, "different-volume", []string{"data"}, 100<<30, 41<<30)
-	if got := check(t, q, other, nil).Job; got == nil || got.ID != secondID {
-		t.Fatal("independent volume was charged", got)
+	got := job(t, q, a.ID)
+	if got.State != "running" || got.Attempt != a.Attempt || got.Machine != a.Machine || got.Session != a.Session || got.ReleaseConfirmed || got.StartedAt == nil {
+		t.Fatal("exact running copy was not recovered", got)
 	}
 }
 
@@ -146,6 +176,7 @@ func TestDiskHeadroomUnavailableAndStaleReadings(t *testing.T) {
 	q, c := fixture(t)
 	m := reportDisk(t, machine("a", "fake"), c, "volume", []string{"data"}, 100<<30, 41<<30)
 	c.Advance(10 * time.Second)
+	m.DiskVolumes[0].AgeSeconds = 10
 	check(t, q, m, nil)
 	s := spec("experiment")
 	s.Disk = &DiskNeeds{OutputBytes: 1 << 30}
@@ -238,5 +269,38 @@ func TestWorkerDiskCacheVolumesAndOpaqueIdentity(t *testing.T) {
 	}
 	if strings.Join(av[1].Roots, ",") != "file-cache" || strings.Join(av[2].Roots, ",") != "model-cache" {
 		t.Fatal(av)
+	}
+}
+
+func TestDiskHeadroomFreshnessUsesReceiveTimeAndReportedAge(t *testing.T) {
+	for _, skew := range []time.Duration{-24 * time.Hour, 24 * time.Hour} {
+		t.Run(skew.String(), func(t *testing.T) {
+			q, c := fixture(t)
+			m := reportDisk(t, machine("a", "fake"), c, "volume", []string{"data"}, 100<<30, 41<<30)
+			m.DiskVolumes[0].SampledAt = c.Now().Add(skew)
+			m.DiskVolumes[0].SampleIntervalSeconds = 10
+			m.DiskVolumes[0].AgeSeconds = 20
+			m.DiskVolumes[0].Retained = true
+			m.DiskVolumes[0].Error = "disk reading unavailable"
+			check(t, q, m, nil)
+			s := spec("experiment")
+			s.Disk = &DiskNeeds{OutputBytes: 30 << 30}
+			j := &Job{Spec: s}
+			if reason := q.diskHeadroomReason(j, q.s.Machines[m.ID]); reason != "" {
+				t.Fatalf("clock skew expired a recent sample: %s", reason)
+			}
+			c.Advance(11 * time.Second)
+			// Other worker traffic must not refresh the disk report's receive time.
+			if err := q.update(func() error { q.s.Machines[m.ID].LastSeen = c.Now(); return nil }); err != nil {
+				t.Fatal(err)
+			}
+			if reason := q.diskHeadroomReason(j, q.s.Machines[m.ID]); !strings.Contains(reason, "disk reading unavailable") {
+				t.Fatalf("reported age plus time since receipt did not expire: %s", reason)
+			}
+			snap, err := q.Snapshot()
+			if err != nil || len(snap.Machines) != 1 || snap.Machines[0].DiskVolumes[0].AgeSeconds != 31 || snap.Machines[0].DiskVolumes[0].Retained {
+				t.Fatal("status failed to age the detached sample", snap.Machines, err)
+			}
+		})
 	}
 }

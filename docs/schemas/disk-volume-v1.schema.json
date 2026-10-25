@@ -24,13 +24,15 @@
         },
         "sampled_at": {
           "type": "string",
-          "format": "date-time"
+          "format": "date-time",
+          "description": "Worker-clock sample timestamp; freshness uses reported age plus queue time since receipt."
         },
         "sample_interval_seconds": {
           "type": "number"
         },
         "age_seconds": {
-          "type": "number"
+          "type": "number",
+          "description": "Sample age on the worker at check-in; status adds queue-clock time since receipt."
         },
         "retained": {
           "type": "boolean"
