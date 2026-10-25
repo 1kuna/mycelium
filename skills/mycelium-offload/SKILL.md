@@ -72,12 +72,19 @@ read the receipt in this order:
 2. **`observation: armed` and `delivery: armed`:** end the turn, and the wake
    arrives. `armed` means configured, not yet delivered.
 3. **Anything else** means no wake is coming, so do not end the turn on it:
+   - `delivery: adopted_other_notifier`: another thread in a shared checkout
+     submitted the same work, and its live observer keeps a different notifier.
+     Treat this like `not_armed` for this thread: wait in the foreground with
+     `myce wait JOB_ID`, or record a hold with its next owner. Exit 0 means the
+     job and observer are healthy; it does not promise this thread a wake.
+     Leave the other thread's observer running and keep the same submission key.
    - `delivery: not_configured`: no notifier was given.
    - `delivery_status: failed`: the notifier ran and could not deliver.
    - `observation: not_armed` or `delivery: not_armed` with no terminal status:
      the observer exited (see `observation_error`).
 
-   Fix the notifier until `--check` passes, then rerun the same command with the
+   For notifier configuration or delivery failures, fix the notifier until
+   `--check` passes, then rerun the same command with the
    same `--key` and `--notify`. That adopts the job and re-arms the observer, or
    retries the same terminal event, which keeps its `delivery_id`. If it cannot
    be armed, wait in the foreground with `myce wait JOB_ID`, or record a hold.
