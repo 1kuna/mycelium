@@ -5,6 +5,8 @@ defines this contract. It uses ordinary extension jobs and existing artifact
 transport. Applications supply homogeneous independent pieces and own semantic
 splitting and reduction. Mycelium plans, retries and gathers them.
 
+Declared calls fall back to serial admission when undeclared calls share the slot.
+
 ```yaml
 name: parameter-sweep
 project: research

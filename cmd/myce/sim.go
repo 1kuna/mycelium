@@ -97,7 +97,7 @@ func simCommand(args []string, out io.Writer) error {
 			gain /= float64(paired)
 		}
 		delta := declared.Production.P95 - baseline.Production.P95
-		passed := paired > 0 && paired == len(baseline.Batches) && paired == len(declared.Batches) && baseline.BatchUnfinished == 0 && declared.BatchUnfinished == 0 && declared.Failed == baseline.Failed && gain > 0 && delta == 0 && declared.Production.Started == baseline.Production.Started && declared.Production.Unstarted == baseline.Production.Unstarted
+		passed := paired > 0 && paired == len(baseline.Batches) && paired == len(declared.Batches) && baseline.BatchUnfinished == 0 && declared.BatchUnfinished == 0 && declared.Failed == baseline.Failed && gain > 0 && delta == 0 && declared.Production.Started == baseline.Production.Started && declared.Production.Unstarted == baseline.Production.Unstarted && declared.BatchMeanSeconds < naive.BatchMeanSeconds && declared.Production.P95 == naive.Production.P95 && declared.Failed == naive.Failed
 		gateFailed = !passed
 		fmt.Fprintf(out, "\nDeclared fan-out gate: %t; batch makespan mean gain %.1f s; production p95 delta %+.2f s.\n", passed, gain, delta)
 		result = struct {

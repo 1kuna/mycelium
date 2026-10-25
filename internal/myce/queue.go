@@ -711,7 +711,7 @@ func (q *Queue) maintain() {
 				q.retry(j, j.Reason)
 			}
 		}
-		if j.State == "queued" && expired(j.Spec.GiveUpAt, now) {
+		if j.State == "queued" && !(j.Spec.FanOut != nil && j.FanOut != nil && j.FanOut.Next > 0) && expired(j.Spec.GiveUpAt, now) {
 			j.State = "failed"
 			j.Reason = "give-up time reached"
 		}

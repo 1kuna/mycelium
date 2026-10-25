@@ -403,6 +403,9 @@ func (q *Queue) maintainHolds() {
 	demand := map[string]bool{}
 	jobs := []*Job{}
 	for _, j := range q.s.Jobs {
+		if j.Spec.FanOut != nil && j.FanOut != nil && j.FanOut.Next > 0 {
+			continue
+		}
 		if j.Spec.Priority == "production" && !terminal(j.State) && !cancelled(j) && !(j.State == "queued" && expired(j.Spec.GiveUpAt, now)) {
 			jobs = append(jobs, j)
 		}

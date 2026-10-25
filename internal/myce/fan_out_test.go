@@ -124,6 +124,38 @@ func TestFanOutShortDailyAndGather(t *testing.T) {
 	}
 }
 
+func TestFanOutGiveUpAfterDispatchStillGathers(t *testing.T) {
+	q, clock, m, s := fanOutFixture(t, 3)
+	s.Priority = "production"
+	s.Outputs = map[string]string{"out": "results"}
+	deadline := clock.Now().Add(time.Second)
+	s.GiveUpAt = &deadline
+	if err := q.ConfigureHosts(map[string]HostPolicy{hostID(&m): {ProductionHold: true}}); err != nil {
+		t.Fatal(err)
+	}
+	parent := submit(t, q, s)
+	for _, want := range []int{2, 1} {
+		run := check(t, q, m, nil).Job
+		if run == nil || run.Batch == nil || run.Batch.Concurrency != want {
+			t.Fatalf("missing wave of %d pieces: %+v", want, run)
+		}
+		if err := q.Started(result(run, true)); err != nil {
+			t.Fatal(err)
+		}
+		clock.Advance(2 * time.Second)
+		if err := q.Tick(); err != nil {
+			t.Fatal(err)
+		}
+		if got := job(t, q, parent.ID); got.State != "queued" || job(t, q, run.ID).State != "running" {
+			t.Fatalf("start cutoff cancelled dispatched work: parent=%s wave=%s", got.State, job(t, q, run.ID).State)
+		}
+		finish(t, q, run, true)
+	}
+	if got := job(t, q, parent.ID); got.State != "succeeded" || len(got.FanOut.Results) != 3 || len(got.OutputFiles) != 3 {
+		t.Fatalf("incomplete gather: %+v", got)
+	}
+}
+
 func TestFanOutLossRetriesOnlyAffectedWave(t *testing.T) {
 	q, clock, m, s := fanOutFixture(t, 4)
 	s.FanOut.MaxConcurrency = 2
