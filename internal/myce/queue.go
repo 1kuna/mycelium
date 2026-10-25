@@ -531,8 +531,10 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 			j.MemoryFallback = &SizeHint{MemoryGB: max(hintSpec.Needs.MemoryGB, submitted.SizeHint.MemoryGB), HostMemoryGB: max(hintSpec.Needs.HostMemoryGB, submitted.SizeHint.HostMemoryGB)}
 		}
 		q.applyLearnedNeeds(j)
-		if s.RequireTarget && !q.hasQualifiedTarget(j) {
-			return &HTTPError{Status: 409, Code: "no_qualified_target", Message: rejectionMessages["no_qualified_target"]}
+		if s.RequireTarget {
+			if ok, reason := q.qualifiedTarget(j); !ok {
+				return &HTTPError{Status: 409, Code: "no_qualified_target", Message: reason + "; intent retained locally"}
+			}
 		}
 		// require_target already checked permanent capacity and project policy;
 		// do not reclassify temporary holds through the legacy capacity diagnostic.

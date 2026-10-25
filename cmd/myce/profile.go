@@ -39,6 +39,8 @@ type profileReceipt struct {
 	ObservationError string            `json:"observation_error,omitempty"`
 	DeliveryStatus   string            `json:"delivery_status,omitempty"`
 	FilesExpired     bool              `json:"files_expired,omitempty"`
+	RefusalCode      string            `json:"refusal_code,omitempty"`
+	RefusalReason    string            `json:"refusal_reason,omitempty"`
 	ResultReference  myce.FileManifest `json:"result_reference,omitempty"`
 	Spec             myce.Spec         `json:"spec"`
 	Uploads          map[string]string `json:"uploads"`
@@ -107,6 +109,7 @@ func profileLock(path string) (*os.File, error) {
 
 // Typed failures always print the recoverable receipt; remote messages, local
 // paths and transport diagnostics never become the public failure reason.
+// Qualified-target refusals use the queue's sanitized fit diagnostic.
 func profileFailure(out io.Writer, r *profileReceipt, code int, reason string) error {
 	if r != nil {
 		_ = json.NewEncoder(out).Encode(r)
@@ -327,13 +330,18 @@ func runProfile(ctx context.Context, name string, args []string, key, notify, co
 			var h *myce.HTTPError
 			if errors.As(e, &h) {
 				if h.Code == "no_qualified_target" {
-					return profileFailure(out, &r, 78, "no_qualified_target: no qualified target; intent retained")
+					r.RefusalCode, r.RefusalReason = h.Code, h.Message
+					if err = saveProfileJSON(filepath.Join(dir, "receipt.json"), r); err != nil {
+						return err
+					}
+					return profileFailure(out, &r, 78, h.Code+": "+h.Message)
 				}
 				return profileFailure(out, &r, 65, "submission_rejected: queue rejected the saved intent")
 			}
 			return profileFailure(out, &r, 69, "queue_unavailable: submission unconfirmed; retry the saved key")
 		}
 		r.JobID, r.Status = j.ID, j.State
+		r.RefusalCode, r.RefusalReason = "", ""
 		if err = saveProfileJSON(filepath.Join(dir, "receipt.json"), r); err != nil {
 			return err
 		}

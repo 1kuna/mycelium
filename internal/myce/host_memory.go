@@ -31,13 +31,26 @@ func hostNeed(m *Machine, gpu, host float64) float64 {
 	return need
 }
 func hostFits(m *Machine, gpu, host float64) bool {
+	return hostFitFailure(m, gpu, host) == ""
+}
+
+func hostFitFailure(m *Machine, gpu, host float64) string {
 	if m.HostMemoryPolicyMismatch {
-		return false
+		return "host memory allowance awaiting worker acknowledgement"
 	}
 	if host == 0 {
-		return !strings.HasPrefix(m.MemoryEnforcement, "memory ceilings enforced") && m.HostMemoryBudgetGB == 0 && m.hostBudgetGB == 0
+		if strings.HasPrefix(m.MemoryEnforcement, "memory ceilings enforced") || m.HostMemoryBudgetGB != 0 || m.hostBudgetGB != 0 {
+			return "host memory declaration is 0 GiB; allowance or enforced ceilings require a positive declaration"
+		}
+		return ""
 	}
-	return m.HostMemoryMeasured && m.HostMemoryError == "" && m.FreeHostMemoryGB >= hostNeed(m, gpu, host)
+	if !m.HostMemoryMeasured || m.HostMemoryError != "" {
+		return "host memory capacity unavailable"
+	}
+	if !(m.FreeHostMemoryGB >= hostNeed(m, gpu, host)) {
+		return "host memory"
+	}
+	return ""
 }
 func (q *Queue) refreshHostMemory() {
 	q.refreshHostCPU()
