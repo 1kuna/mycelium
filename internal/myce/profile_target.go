@@ -122,7 +122,11 @@ func targetFitReason(dimension string, j *Job, m *Machine) string {
 	case "environment":
 		key := environmentKey(j, m)
 		if key == "" {
-			key = "none"
+			platform := m.GPU
+			if !validGPU(platform) {
+				platform = "unknown"
+			}
+			return "environment has no recipe for platform " + platform
 		} else if !extensionName.MatchString(key) {
 			key = "private recipe"
 		}
@@ -135,7 +139,7 @@ func targetFitReason(dimension string, j *Job, m *Machine) string {
 		}
 		return fmt.Sprintf("hardware capacity insufficient or unqualified: need %g GiB GPU and %g GiB host, capacity %g GiB GPU and %g GiB host", n.MemoryGB, systemNeed, accelerator, system)
 	case "memory envelope":
-		return "memory envelope unavailable within target allowance"
+		return "memory envelope unavailable within target allowance: " + j.MemoryEnvelope.Refusal
 	case "extension":
 		return "no qualified extension variant for " + formatTarget(target)
 	default:
