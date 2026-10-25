@@ -206,3 +206,30 @@ func TestClientWaitUpdatesRetryLogRead(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestClientJobReplyOldQueue(t *testing.T) {
+	for _, body := range []string{"404 page not found", `{"code":"job_unknown","error":"job is unknown"}`} {
+		t.Run(body, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(404)
+				io.WriteString(w, body)
+			}))
+			defer server.Close()
+			c := Client{URL: server.URL}
+			for _, read := range []func(context.Context, string) (*Job, error){c.GetJob, func(ctx context.Context, id string) (*Job, error) { return c.Wait(ctx, id) }} {
+				_, err := read(context.Background(), "job")
+				var api *HTTPError
+				if !errors.As(err, &api) || api.Status != 404 {
+					t.Fatalf("expected typed 404, got %v", err)
+				}
+				if strings.Contains(body, "job_unknown") {
+					if api.Code != "job_unknown" {
+						t.Fatalf("lost missing-job error: %v", err)
+					}
+				} else if api.Code != "queue_upgrade_required" || !strings.Contains(err.Error(), "queue too old for this client; upgrade the queue first") {
+					t.Fatalf("unclear old queue error: %v", err)
+				}
+			}
+		})
+	}
+}

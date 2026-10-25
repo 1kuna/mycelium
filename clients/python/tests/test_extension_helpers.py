@@ -154,13 +154,6 @@ class ExtensionClientTests(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "symlink"):
                     client.run("example@1", inputs={}, outputs=directory, project="demo", key="stable")
 
-    def test_short_job_lookup_and_ambiguous_prefix(self):
-        job = {"id": "12345678abcdef"}
-        self.assertEqual(Client._find([job], "12345678"), job)
-        with self.assertRaises(APIError) as caught:
-            Client._find([job, {"id": "12345678other"}], "12345678")
-        self.assertEqual(caught.exception.code, "job_id_ambiguous")
-
     def test_wait_and_run_timeout_report_actual_reason_without_cancelling(self):
         client = Client(token="fixture")
         job = {"id": "12345678abcdef", "state": "queued",

@@ -1,3 +1,4 @@
+import io
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ import tempfile
 import time
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 from mycelium import APIError, Checkpoint, Client, StopSignal
 
@@ -30,6 +32,22 @@ class ClientTests(unittest.TestCase):
             with patch("mycelium.installed.installed_authority", return_value=(
                     "https://queue.invalid", "fixture", object())):
                 self.assertEqual(Client.from_installed().url, "https://queue.invalid")
+
+    def test_job_reply_old_queue(self):
+        client = Client(token="fixture")
+        for body in (b"404 page not found", b'{"code":"job_unknown","error":"job is unknown"}'):
+            for read in (client.get, client.wait):
+                with self.subTest(body=body, read=read.__name__):
+                    response = HTTPError("http://queue/api/jobs/job", 404, "Not Found", {}, io.BytesIO(body))
+                    with patch.object(client, "_urlopen", side_effect=response):
+                        with self.assertRaises(APIError) as caught:
+                            read("job")
+                    self.assertEqual(caught.exception.status, 404)
+                    if b"job_unknown" in body:
+                        self.assertEqual(caught.exception.code, "job_unknown")
+                    else:
+                        self.assertEqual(caught.exception.code, "queue_upgrade_required")
+                        self.assertIn("queue too old for this client; upgrade the queue first", str(caught.exception))
 
     def test_job_spec_invalid_message(self):
         reason = "main Docker memory must fit needs.host_memory_gb"
