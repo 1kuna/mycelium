@@ -117,6 +117,9 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 			}
 		default:
 			source = "exploratory first run"
+			if label != "" {
+				source = label
+			}
 			host, why := q.exploratoryMemory(j, m)
 			refusal = why
 			if !n.cpuOnly() {
@@ -193,6 +196,7 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) (*AttemptMemoryPeak, float64,
 		return nil, 0, ""
 	}
 	var exact, family, other *AttemptMemoryPeak
+	invalidated := false
 	configuration := memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
 	layout := "separate"
 	if m.UnifiedMemory && !j.Spec.Needs.cpuOnly() {
@@ -201,6 +205,9 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) (*AttemptMemoryPeak, float64,
 	for _, point := range q.s.WorkObservations {
 		k, p := point.Key, point.MemoryPeak
 		age := q.clock.Now().Sub(point.MemoryRecordedAt)
+		if sameMemoryWork(point, *key, configuration) && point.StaleReason == "" && p != nil && p.Constrained && point.MemoryRecordedAt.IsZero() {
+			invalidated = true
+		}
 		if !sameMemoryWork(point, *key, configuration) || point.Source != "accepted work" || point.Samples <= 0 || point.StaleReason != "" || point.MemoryRecordedAt.IsZero() || age < 0 || age > workCurveMaxAge || p == nil || p.Constrained || p.HostGB == nil || !validRate(*p.HostGB) || !validRate(*p.HostGB*2.5) {
 			continue
 		}
@@ -224,6 +231,9 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) (*AttemptMemoryPeak, float64,
 	}
 	if other != nil {
 		return other, 1.25 * 2, "cross-machine estimate"
+	}
+	if invalidated {
+		return nil, 0, "exploratory (previous peak constrained)"
 	}
 	return nil, 0, ""
 }

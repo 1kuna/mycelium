@@ -60,7 +60,7 @@ func TestMemoryEnvelopeCeilingBoundThenExploratory(t *testing.T) {
 			if tc.mode == "auto" && bound.MemoryEnvelope.Source != "accepted peak × 1.25" {
 				t.Fatalf("auto run did not reuse seed peak: %+v", bound.MemoryEnvelope)
 			}
-			a, err := fakeCeilings(t).create("attempt-bound", 3<<30, 0)
+			a, err := fakeCeilings(t).create("attempt-bound", 5<<29, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -86,13 +86,17 @@ func TestMemoryEnvelopeCeilingBoundThenExploratory(t *testing.T) {
 				t.Fatalf("ceiling pressure changed the attempt outcome: %+v", got)
 			}
 			for _, point := range q.s.WorkObservations {
-				if point.MemoryPeak != nil || !point.MemoryRecordedAt.IsZero() || point.Forbidden {
+				if point.MemoryPeak != nil && !point.MemoryPeak.Constrained || !point.MemoryRecordedAt.IsZero() || point.Forbidden {
 					t.Errorf("cap-bound result retained a learned peak or forbade work: %+v", point)
 				}
 			}
 			s.Needs.Memory = "auto"
 			next := startObservation(t, q, m, s)
-			if next.MemoryEnvelope.Source != "exploratory first run" || next.Spec.Needs.HostMemoryGB <= bound.Spec.Needs.HostMemoryGB {
+			wantSource := "exploratory first run"
+			if tc.mode == "auto" {
+				wantSource = "exploratory (previous peak constrained)"
+			}
+			if next.MemoryEnvelope.Source != wantSource || next.Spec.Needs.HostMemoryGB <= bound.Spec.Needs.HostMemoryGB {
 				t.Fatalf("next auto run did not explore a larger envelope: bound=%+v next=%+v", bound.MemoryEnvelope, next.MemoryEnvelope)
 			}
 		})
