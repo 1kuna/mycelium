@@ -56,8 +56,11 @@ func generatedJobSchema(t *testing.T) []byte {
 	}
 	nullableCollections(schema)
 	schema["title"] = "Mycelium Job reply v1"
-	schema["description"] = "Generated from Job and Spec JSON types by TestWireSchemas. This is a reply schema, not submission validation: a cancelled reservation has a minimal zero-valued spec. x-contract marks stable identity/lifecycle fields versus diagnostic projections; reason text is never a machine contract. Optional fields follow Go omitempty. Additional diagnostics may grow."
+	schema["description"] = "Generated from Job and Spec JSON types by TestWireSchemas. This is a reply schema, not submission validation: a cancelled reservation has a minimal zero-valued spec. x-contract marks stable identity/lifecycle fields versus diagnostic projections; reason text is never a machine contract. Optional fields follow Go omitempty; GET replies also omit execution payloads, including run.command. Additional diagnostics may grow."
 	defs := schema["$defs"].(map[string]any)
+	// GET Job replies redact execution payloads, including run.command.
+	// Spec encoding itself stays unchanged for durable submission fingerprints.
+	delete(defs["RunSpec"].(map[string]any), "required")
 	for _, definition := range []string{"Job", "Spec"} {
 		properties := defs[definition].(map[string]any)["properties"].(map[string]any)
 		for _, property := range properties {

@@ -245,10 +245,11 @@ Batch `POST /api/jobs` supports project-scoped `submission_key`.
 acknowledgements. See [submission/cancellation](design-proposal.md#submission-identity-and-cancellation-80)
 and [examples](integrating.md#keyed-submission-and-cancellation).
 
-`GET /api/status`, `POST /api/jobs` (JSON job spec),
+`GET /api/status`, `GET /api/jobs/ID`, `POST /api/jobs` (JSON job spec),
 `POST /api/jobs/ID/cancel`, `GET /api/jobs/ID/logs?after=SEQ`, and
 `POST /api/workers/NAME/leave` (`{"now":false}` or `true`) require bearer auth.
-The read-only HTML status page is LAN-visible without authentication.
+The read-only HTML status page also requires authentication: use HTTP Basic
+username `myce` with the fleet token as the password.
 
 Model calls support `POST /v1/embeddings`, `/v1/completions`, and
 `/v1/chat/completions` (including chat SSE streaming). Required headers are

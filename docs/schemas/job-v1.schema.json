@@ -1692,9 +1692,6 @@
           "type": "string"
         }
       },
-      "required": [
-        "command"
-      ],
       "type": "object"
     },
     "RuntimeCause": {
@@ -1982,6 +1979,6 @@
   },
   "$ref": "#/$defs/Job",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "Generated from Job and Spec JSON types by TestWireSchemas. This is a reply schema, not submission validation: a cancelled reservation has a minimal zero-valued spec. x-contract marks stable identity/lifecycle fields versus diagnostic projections; reason text is never a machine contract. Optional fields follow Go omitempty. Additional diagnostics may grow.",
+  "description": "Generated from Job and Spec JSON types by TestWireSchemas. This is a reply schema, not submission validation: a cancelled reservation has a minimal zero-valued spec. x-contract marks stable identity/lifecycle fields versus diagnostic projections; reason text is never a machine contract. Optional fields follow Go omitempty; GET replies also omit execution payloads, including run.command. Additional diagnostics may grow.",
   "title": "Mycelium Job reply v1"
 }
