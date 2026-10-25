@@ -34,6 +34,7 @@
         "job_placement_invalid",
         "job_capacity_invalid",
         "no_qualified_target",
+        "disk_headroom",
         "request_stale",
         "request_failed",
         "request_method_invalid",
