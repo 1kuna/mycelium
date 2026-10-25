@@ -726,6 +726,10 @@ form, setup/check qualification and per-attempt output contract.
 Native server entry placement, `env`/`secret_env`, local model approval and
 OpenAI client defaults: [operator configuration](guide-servers.md#shared-entries-local-secrets-and-approved-model-folders).
 
+`GET /api/extensions` lists extension metadata and may include an optional
+`files_ref` bundle reference (`sha256` and `size_bytes`) instead of embedded
+files. Job GET replies continue to omit extension payloads.
+
 ### Measured job envelopes
 
 Native main and sidecars share one Linux attempt cgroup. Sidecar `memory_gb`

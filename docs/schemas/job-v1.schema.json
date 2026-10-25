@@ -268,6 +268,9 @@
             "null"
           ]
         },
+        "files_ref": {
+          "$ref": "#/$defs/FileRef"
+        },
         "input_digest": {
           "type": "string"
         },
@@ -442,6 +445,9 @@
             "null"
           ]
         },
+        "files_ref": {
+          "$ref": "#/$defs/FileRef"
+        },
         "host_memory_gb": {
           "type": "number"
         },
@@ -549,7 +555,6 @@
         "platforms",
         "memory_gb",
         "run",
-        "files",
         "digest"
       ],
       "type": "object"
