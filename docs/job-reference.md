@@ -767,3 +767,13 @@ after the final retry. Shared-envelope Docker attempts end on worker-unit stop.
 Verified stopped members with a vanished parent release custody with unknown
 memory/cause and supply no learning data. A surviving parent's post-exit reading
 cannot train an estimate when the running sampler was lost during restart.
+
+### Per-piece dependencies
+
+`after: {job: FULL_PARENT_ID, piece: KEY, outputs: {LOCAL_INPUT: PRODUCER_OUTPUT}}`
+predeclares one consumer of an accepted fan-out piece in the same project. Use an
+ordinary command or extension job; see [fan-out dependencies](guide-fan-out.md#start-a-consumer-when-one-piece-is-accepted)
+for validation, exact-attempt binding, deadlines, cancellation and retention.
+`queued` includes blocked jobs; inspect structured `dependency.state` and
+`dependency.execution`, rather than parsing `reason`. Parent failure preserves
+accepted independent pieces; explicit cancellation aborts unfinished consumers.

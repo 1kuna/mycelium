@@ -158,6 +158,7 @@ func TestFanOutGiveUpAfterDispatchStillGathers(t *testing.T) {
 
 func TestFanOutLossRetriesOnlyAffectedWave(t *testing.T) {
 	q, clock, m, s := fanOutFixture(t, 4)
+	s.Outputs = map[string]string{"out": "results"}
 	s.FanOut.MaxConcurrency = 2
 	other := cloneMachine(&m)
 	other.ID, other.HostID, other.Session = "other", "other-host", "other-session"
@@ -173,6 +174,7 @@ func TestFanOutLossRetriesOnlyAffectedWave(t *testing.T) {
 		q.s.WorkObservations[identityHash(k)] = WorkObservation{Key: k, Rate: float64(c) * 10, HostMemoryGB: float64(c), Samples: 1, RecordedAt: clock.Now()}
 	}
 	parent := submit(t, q, s)
+	consumer := submit(t, q, pieceConsumer(s, parent.ID, "item-0"))
 	a := check(t, q, m, nil).Job
 	if a == nil {
 		t.Fatal("no first wave")
@@ -203,7 +205,13 @@ func TestFanOutLossRetriesOnlyAffectedWave(t *testing.T) {
 	if job(t, q, parent.ID).State == "succeeded" {
 		t.Fatal("stale wave unlocked gather")
 	}
+	if dependencyReady(job(t, q, consumer.ID)) {
+		t.Fatal("stale attempt released consumer")
+	}
 	finish(t, q, retry, true)
+	if got := job(t, q, consumer.ID); !dependencyReady(got) || got.Dependency.Execution.Attempt != 2 {
+		t.Fatal("retry did not bind exact accepted attempt")
+	}
 	if got := job(t, q, parent.ID); got.State != "succeeded" || len(got.FanOut.Results) != 4 {
 		t.Fatalf("state=%s results=%d children=%v", got.State, len(got.FanOut.Results), got.FanOut.Children)
 	}

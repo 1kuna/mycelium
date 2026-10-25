@@ -51,6 +51,7 @@ type SimModel struct {
 	Platforms   []string `yaml:"platforms"`
 }
 type SimStream struct {
+	Downstream *SimDownstream             `yaml:"downstream,omitempty"`
 	Curves     map[string][]SimCurvePoint `yaml:"curves,omitempty"`
 	Name       string                     `yaml:"name"`
 	Project    string                     `yaml:"project"`
@@ -70,10 +71,13 @@ type SimStream struct {
 	Batch      int                        `yaml:"batch_files"` // >1 enables paired one-job/per-file comparison
 }
 type SimOptions struct {
-	Declared bool
-	Days     float64
-	Seed     int64
-	Split    bool
+	Pipeline      bool
+	GatherBarrier bool
+	CancelAfter   float64
+	Declared      bool
+	Days          float64
+	Seed          int64
+	Split         bool
 }
 type SimWait struct {
 	Median    float64 `json:"median_seconds"`
@@ -105,31 +109,33 @@ type SimBatchMetric struct {
 	FinishedSeconds  *float64 `json:"finished_seconds"`
 }
 type SimReport struct {
-	Declared                  bool                         `json:"declared_fan_out,omitempty"`
-	Batches                   map[string]SimBatchMetric    `json:"batches"`
-	Days                      float64                      `json:"days"`
-	Seed                      int64                        `json:"seed"`
-	Split                     bool                         `json:"split"`
-	Production                SimWait                      `json:"production_wait"`
-	DeadlineMisses            int                          `json:"deadline_misses"`
-	Submitted                 int                          `json:"submitted"`
-	Completed                 int                          `json:"completed"`
-	Unfinished                int                          `json:"unfinished"`
-	Failed                    int                          `json:"failed"`
-	NeverPlaceable            []string                     `json:"never_placeable"`
-	Projects                  map[string]*SimProjectMetric `json:"projects"`
-	Machines                  map[string]*SimMachineMetric `json:"machines"`
-	ModelLoads                int                          `json:"model_loads"`
-	ModelReloads              int                          `json:"model_reloads"`
-	LoadingSeconds            float64                      `json:"loading_seconds"`
-	Preemptions               int                          `json:"preemptions"`
-	LostSeconds               float64                      `json:"preemption_lost_seconds"`
-	LeaveLostSeconds          float64                      `json:"leave_lost_seconds"`
-	InfrastructureLostSeconds float64                      `json:"infrastructure_lost_seconds"`
-	IdleWaitingHours          float64                      `json:"idle_fit_waiting_gpu_hours"`
-	BatchCompleted            int                          `json:"batches_completed"`
-	BatchUnfinished           int                          `json:"batches_unfinished"`
-	BatchMeanSeconds          float64                      `json:"batch_mean_submit_to_finish_seconds"`
+	Pipelines                 map[string]*SimPipelineMetric `json:"pipelines,omitempty"`
+	Cancelled                 int                           `json:"cancelled"`
+	Declared                  bool                          `json:"declared_fan_out,omitempty"`
+	Batches                   map[string]SimBatchMetric     `json:"batches"`
+	Days                      float64                       `json:"days"`
+	Seed                      int64                         `json:"seed"`
+	Split                     bool                          `json:"split"`
+	Production                SimWait                       `json:"production_wait"`
+	DeadlineMisses            int                           `json:"deadline_misses"`
+	Submitted                 int                           `json:"submitted"`
+	Completed                 int                           `json:"completed"`
+	Unfinished                int                           `json:"unfinished"`
+	Failed                    int                           `json:"failed"`
+	NeverPlaceable            []string                      `json:"never_placeable"`
+	Projects                  map[string]*SimProjectMetric  `json:"projects"`
+	Machines                  map[string]*SimMachineMetric  `json:"machines"`
+	ModelLoads                int                           `json:"model_loads"`
+	ModelReloads              int                           `json:"model_reloads"`
+	LoadingSeconds            float64                       `json:"loading_seconds"`
+	Preemptions               int                           `json:"preemptions"`
+	LostSeconds               float64                       `json:"preemption_lost_seconds"`
+	LeaveLostSeconds          float64                       `json:"leave_lost_seconds"`
+	InfrastructureLostSeconds float64                       `json:"infrastructure_lost_seconds"`
+	IdleWaitingHours          float64                       `json:"idle_fit_waiting_gpu_hours"`
+	BatchCompleted            int                           `json:"batches_completed"`
+	BatchUnfinished           int                           `json:"batches_unfinished"`
+	BatchMeanSeconds          float64                       `json:"batch_mean_submit_to_finish_seconds"`
 }
 
 func ReadSimYAML(path string, out any) error {
@@ -155,6 +161,9 @@ type simClock struct{ now time.Time }
 func (c *simClock) Now() time.Time { return c.now }
 
 type simTask struct {
+	downstreamOf                                      *simTask
+	piece                                             string
+	cancelSent                                        bool
 	parent                                            *simTask
 	pieceWork                                         []float64
 	reservation                                       float64
@@ -286,7 +295,7 @@ func simResult(t *simTask, w *simWorker, success bool) Result {
 // Simulate executes real queue methods in a single deterministic event loop.
 // No wall-clock waits, engines, HTTP listeners, child processes or GPU probes.
 func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
-	r := SimReport{Declared: o.Declared, Days: o.Days, Seed: o.Seed, Split: o.Split, Projects: map[string]*SimProjectMetric{}, Machines: map[string]*SimMachineMetric{}, NeverPlaceable: []string{}, Batches: map[string]SimBatchMetric{}}
+	r := SimReport{Pipelines: map[string]*SimPipelineMetric{}, Declared: o.Declared, Days: o.Days, Seed: o.Seed, Split: o.Split, Projects: map[string]*SimProjectMetric{}, Machines: map[string]*SimMachineMetric{}, NeverPlaceable: []string{}, Batches: map[string]SimBatchMetric{}}
 	if e := validateSim(f, w, o); e != nil {
 		return r, e
 	}
@@ -493,7 +502,7 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 					t.machine = ""
 
 					finish(t)
-					if t.parent == nil {
+					if t.parent == nil && t.downstreamOf == nil {
 						delete(q.s.Jobs, t.id)
 					}
 				}
@@ -632,10 +641,22 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 				spec := simSpec(t, epoch)
 				if len(t.pieceWork) > 0 {
 					spec = simDeclaredSpec(t, epoch, extensions[t.stream.Name])
+					if o.Pipeline && t.stream.Downstream != nil {
+						spec.Outputs = map[string]string{"intermediate": "results"}
+					}
 				}
 				j, e = q.Submit(spec)
 				if e == nil {
 					t.id = j.ID
+					if o.Pipeline && t.stream.Downstream != nil && len(t.pieceWork) > 0 {
+						consumers, metric, err := simSubmitConsumers(q, t, epoch, o.GatherBarrier)
+						if err != nil {
+							return r, err
+						}
+						tasks = append(tasks, consumers...)
+						r.Submitted += len(consumers)
+						r.Pipelines[t.batch] = metric
+					}
 				}
 			}
 			if e != nil {
@@ -645,7 +666,7 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 		// Settle instantaneous responses, including immediate kill, load completion,
 		// unload acknowledgements, dispatch, and call start. Bound guards regressions.
 		for round := 0; round < 100; round++ {
-			changed := false
+			changed := simPipelineTransitions(q, tasks, r.Pipelines, now, epoch, o)
 			for _, worker := range workers {
 				if !worker.online {
 					continue
@@ -681,7 +702,7 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 
 						if success {
 							finish(t)
-							if t.parent == nil {
+							if t.parent == nil && t.downstreamOf == nil {
 								delete(q.s.Jobs, t.id)
 							}
 						}
@@ -718,7 +739,7 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 				c := Checkin{Machine: machineReport(worker), ModelReports: reports}
 				if t := worker.task; t != nil {
 					c.Running = &Execution{ID: t.id, Attempt: t.attempt}
-					c.Started = true // Batch process starts before its native model initialization.
+					c.Started = t.downstreamOf == nil || now >= t.loadUntil // Input preparation precedes command authorization.
 				}
 				reply, err := q.Checkin(c)
 				if err != nil {
@@ -751,6 +772,9 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 							return r, err
 						}
 					}
+					if t.parent != nil && o.Pipeline && t.stream.Downstream != nil {
+						t.work += t.stream.Downstream.PublicationSeconds * float64(len(reply.Job.Batch.Pieces)) * worker.spec.Speed
+					}
 					t.attempt = reply.Job.Attempt
 					load := 0.0
 					if t.stream.Model != "" {
@@ -761,6 +785,9 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 						}
 						loadsSeen[slotKey(worker.spec.Name, t.stream.Model)] = true
 						worker.cached[t.stream.Model] = true
+					}
+					if t.downstreamOf != nil {
+						load += t.downstreamOf.stream.Downstream.TransferSeconds + t.downstreamOf.stream.Downstream.PreparationSeconds
 					}
 					worker.task = t
 					start(t, worker, load)
@@ -836,11 +863,30 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 				return r, errors.New("simulation failed to settle")
 			}
 		}
+		for _, t := range tasks {
+			if t.id != "" && !t.finished && !t.failed && t.parent == nil {
+				if j := q.s.Jobs[t.id]; j != nil && terminal(j.State) && j.State != "succeeded" {
+					t.failed = true
+					if j.State == "cancelled" {
+						r.Cancelled++
+					} else {
+						r.Failed++
+					}
+				}
+			}
+		}
 		if now >= horizon {
 			break
 		}
 
 		next := horizon
+		if o.CancelAfter > 0 {
+			for _, t := range tasks {
+				if len(t.pieceWork) > 0 && !t.cancelSent && t.id != "" && t.stream.Downstream != nil && t.at+o.CancelAfter > now {
+					next = min(next, t.at+o.CancelAfter)
+				}
+			}
+		}
 		for _, c := range q.calls {
 			if c.StopAt != nil && c.Error == "" {
 				at := float64(c.StopAt.Sub(epoch).Nanoseconds()) / 1e9
@@ -944,9 +990,10 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 		now = next
 	}
 	r.Preemptions = len(q.s.Preemptions)
-	r.Unfinished = r.Submitted - r.Completed - r.Failed
+	simPipelineTransitions(q, tasks, r.Pipelines, now, epoch, o)
+	r.Unfinished = r.Submitted - r.Completed - r.Failed - r.Cancelled
 	for _, t := range tasks {
-		if t.stream.Priority == "production" && !t.started {
+		if t.parent == nil && t.stream.Priority == "production" && !t.started {
 			r.Production.Unstarted++
 		}
 		if t.stream.Priority == "deadline" && t.at+t.stream.Deadline <= horizon && (!t.finished || t.timeFinished > t.at+t.stream.Deadline) {

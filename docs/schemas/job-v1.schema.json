@@ -867,6 +867,10 @@
           ],
           "x-contract": "diagnostic"
         },
+        "dependency": {
+          "$ref": "#/$defs/PieceBinding",
+          "x-contract": "diagnostic"
+        },
         "diagnostic_code": {
           "type": "string",
           "x-contract": "diagnostic"
@@ -1306,6 +1310,70 @@
       ],
       "type": "object"
     },
+    "PieceBinding": {
+      "properties": {
+        "execution": {
+          "$ref": "#/$defs/Execution"
+        },
+        "files": {
+          "$ref": "#/$defs/FileManifest"
+        },
+        "inputs": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "job": {
+          "type": "string"
+        },
+        "piece": {
+          "type": "string"
+        },
+        "ready_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "job",
+        "piece",
+        "state",
+        "execution"
+      ],
+      "type": "object"
+    },
+    "PieceDependency": {
+      "properties": {
+        "job": {
+          "type": "string"
+        },
+        "outputs": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "piece": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "job",
+        "piece",
+        "outputs"
+      ],
+      "type": "object"
+    },
     "PieceResult": {
       "properties": {
         "execution": {
@@ -1591,6 +1659,10 @@
     },
     "Spec": {
       "properties": {
+        "after": {
+          "$ref": "#/$defs/PieceDependency",
+          "x-contract": "diagnostic"
+        },
         "allowed_machines": {
           "items": {
             "type": "string"

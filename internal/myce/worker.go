@@ -329,7 +329,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (*proce
 		}
 	}()
 	executionWorkdir := j.Spec.Run.Workdir
-	if j.Spec.extensionJob() || len(j.Spec.Files) > 0 {
+	if j.Spec.extensionJob() || len(jobInputFiles(&j))+len(jobInputPaths(&j)) > 0 {
 		value := j
 		dir, err := s.extensionFiles.run(attemptCheckpoint(j), func() (string, error) {
 			err := w.prepareExtensionFiles(&value, s.dir)

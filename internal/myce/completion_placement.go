@@ -79,7 +79,7 @@ func (q *Queue) estimateCompletion(j *Job, m *Machine) (completionEstimate, bool
 
 func inputTransferSeconds(j *Job, m *Machine) (float64, bool) {
 	bytes := 0.0
-	for _, f := range j.Spec.Files {
+	for _, f := range jobInputFiles(j) {
 		bytes += float64(f.SizeBytes)
 	}
 	if bytes == 0 {

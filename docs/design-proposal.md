@@ -1952,3 +1952,51 @@ exclusion, exact affected-piece retries/gather and unchanged undeclared decision
 against the same unsplit and naive-split arrivals, policy and seeds. A makespan
 gain with exactly unchanged production p95 is mandatory before integration.
 Synthetic curves are assumptions, not fleet measurements.
+
+## Per-piece accepted-output dependencies (#175; approved 2026-10-25)
+
+The orchestrator approved the [per-piece readiness design](research/per-piece-readiness.md)
+on #175. An ordinary batch or extension job may declare one `after: {job: FULL_ID,
+piece: KEY, outputs: {LOCAL_NAME: PRODUCER_OUTPUT}}` edge to an already submitted
+fan-out parent in the same project. The piece and outputs must be declared;
+local input/output names cannot overlap. Fan-out consumers, forward references,
+program/check jobs and broader graphs are excluded. Existing project-scoped
+submission keys preserve identical replay and reject changed intent.
+
+The job remains `queued` with a structured `dependency` diagnostic while blocked.
+Acceptance of a current producer attempt binds selected verified file references
+or NAS-relative paths once, separately from the submitted spec and fingerprint.
+Acceptance, binding and readiness commit together before planning. Measured waves
+accept all their pieces jointly after complete publication and verification; this
+adds no partial-wave streaming. Retry and restart keep the same binding. Missing
+inputs cannot authorize command execution: the existing input staging and Started
+fences still apply. No network or bulk I/O runs inside the queue lock.
+
+Blocked jobs create no placement, preparation, fairness, preemption or production
+hold demand. Runnable wait age and a generated production start window begin at
+readiness, using the injected Clock. Explicit client deadlines remain absolute.
+Unaccepted pieces fail dependents with `diagnostic_code: upstream_failed` when
+the producer fails. Accepted independent pieces and their consumers remain valid
+when a sibling fails, including late submissions while the source is retained.
+Explicit parent cancellation instead aborts all registered nonterminal consumers,
+even after parent success/failure, and fences future dependencies. Terminal
+results remain; cancellation release aggregates exact current and old downstream
+attempt custody. Cancelling a consumer does not cancel its producer or siblings.
+
+Producer gather is unchanged: every producer piece must succeed; downstream
+outcomes neither delay nor fail it. Partial accepted results retain artifacts
+through the parent's existing live/terminal window, and bound inputs through each
+consumer's window. New bindings to expired results return `result_expired`;
+existing keyed replay still returns its original answer. The existing collector
+and publication fencing own reclamation. There is no additional store, event
+scheduler, fallback, automatic second gather or atomic pipeline publication.
+
+Laptop proof covers CPU commands over stored files and local-directory NAS,
+acceptance before gather, restart/replay, retries, failure, cancellation and
+retention. Paired synthetic simulations use identical work, policy and seeds,
+separate publication/verification and input preparation costs, and complete keyed
+output coverage. Earlier downstream execution and lower pipeline makespan are
+required in the overlap-capable case; mixed-load production p95 must be exactly
+unchanged with zero extra failures or unfinished work. Report contention
+regressions individually. Native throughput and consumer integration remain
+separate work.

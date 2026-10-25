@@ -62,10 +62,10 @@ func copyJobFile(src, dst string) error {
 	return errors.Join(copyErr, syncErr, out.Close())
 }
 func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
-	if !j.Spec.extensionJob() && len(j.Spec.Files) == 0 {
+	if !j.Spec.extensionJob() && len(jobInputFiles(j))+len(jobInputPaths(j)) == 0 {
 		return nil
 	}
-	if len(j.Spec.Inputs) > 0 && w.JobFileRoot == "" {
+	if len(jobInputPaths(j)) > 0 && w.JobFileRoot == "" {
 		return errors.New("job files require a root and clean relative names")
 	}
 	dir := filepath.Join(stateDir, "job-files", j.ID, strconv.Itoa(j.Attempt))
@@ -86,7 +86,7 @@ func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
 		return err
 	}
 	defer os.RemoveAll(staged)
-	for name, ref := range j.Spec.Files {
+	for name, ref := range jobInputFiles(j) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		err := w.fileCache.copyTo(ctx, ref, filepath.Join(staged, name))
 		cancel()
@@ -94,7 +94,7 @@ func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
 			return err
 		}
 	}
-	for name, source := range j.Spec.Inputs {
+	for name, source := range jobInputPaths(j) {
 		p, err := confinedPath(w.JobFileRoot, source)
 		if err != nil {
 			return err
@@ -137,7 +137,7 @@ func (w Worker) publishExtensionFiles(j Job) error {
 	if err := w.validateExtensionCheckOutput(j); err != nil {
 		return err
 	}
-	if j.storedFileResults() || !j.Spec.extensionJob() || len(j.Spec.Outputs) == 0 {
+	if j.storedFileResults() || (!j.Spec.extensionJob() && j.Spec.After == nil) || len(j.Spec.Outputs) == 0 {
 		return nil
 	}
 	if w.JobFileRoot == "" {

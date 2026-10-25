@@ -110,11 +110,9 @@ func (q *Queue) CancelSubmission(project, key string) (Cancellation, error) {
 // Called only under update. Keep terminal state/results, but persist exclusion
 // even for failed jobs that an operator loss refund could otherwise requeue.
 func (q *Queue) cancelJob(j *Job) {
-	if j.FanOut != nil {
-		for _, id := range j.FanOut.Children {
-			if child := q.s.Jobs[id]; child != nil && !cancelled(child) && !terminal(child.State) {
-				q.cancelJob(child)
-			}
+	for _, child := range q.cancellationMembers(j) {
+		if !cancelled(child) {
+			q.cancelJob(child)
 		}
 	}
 	if j.CancelledAt == nil {
@@ -169,15 +167,9 @@ func (q *Queue) cancellation(j *Job, removed bool) Cancellation {
 			out.Release = releaseState("pending")
 		}
 	}
-	if j.FanOut != nil {
-		for _, id := range j.FanOut.Children {
-			if child := q.s.Jobs[id]; child != nil {
-				for _, copy := range child.Copies {
-					if !copy.ReleaseConfirmed && !(copy.Attempt == child.Attempt && child.ReleaseConfirmed) {
-						out.Release = releaseState("pending")
-					}
-				}
-			}
+	for _, child := range q.cancellationMembers(j) {
+		if q.jobReleasePending(child) {
+			out.Release = releaseState("pending")
 		}
 	}
 	// Do not return pointers into mutable queue state after unlocking.
@@ -291,3 +283,44 @@ func (q *Queue) retainedJob(id string) *Job {
 }
 
 func releaseState(state string) *string { return &state }
+
+// Producer waves and registered consumers share the existing exact-copy custody.
+// Dependency validation prohibits fan-out consumers, so this is a finite tree.
+func (q *Queue) cancellationMembers(j *Job) []*Job {
+	if j.FanOut == nil {
+		return nil
+	}
+	out := []*Job{}
+	for _, id := range j.FanOut.Children {
+		if child := q.retainedJob(id); child != nil {
+			out = append(out, child)
+		}
+	}
+	for _, child := range q.s.Jobs {
+		if child.Spec.After != nil && child.Spec.After.Job == j.ID {
+			out = append(out, child)
+		}
+	}
+	return out
+}
+func (q *Queue) jobReleasePending(j *Job) bool {
+	if j.Attempt > 0 && len(j.Copies) == 0 && !j.ReleaseConfirmed {
+		return true
+	}
+	for _, copy := range j.Copies {
+		if !copy.ReleaseConfirmed && !(copy.Attempt == j.Attempt && j.ReleaseConfirmed) {
+			return true
+		}
+	}
+	for _, r := range q.s.HostReleases {
+		if r.Job == j.ID {
+			return true
+		}
+	}
+	for _, child := range q.cancellationMembers(j) {
+		if q.jobReleasePending(child) {
+			return true
+		}
+	}
+	return false
+}

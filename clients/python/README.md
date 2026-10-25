@@ -139,3 +139,27 @@ inputs; `submit_and_wait` requires a stable submission key and retries one lost
 transport response; `download_result` resolves accepted output and verifies its
 hash before replacing an explicit destination. `cancel_submission(project, key)`
 also works when the submit response was lost. HTTP conflicts propagate.
+
+### Consume one accepted piece
+
+Predeclare consumers with `submit`; the queue releases them without a caller-side
+scheduler. A consumer uses the same project and an existing fan-out parent's full
+ID. Output mapping keys are downstream input names:
+
+```python
+consumer = client.submit({
+    "name": "consume-first", "project": "research",
+    "extension": "summarizer@1", "submission_key": "operation-42.consume.first",
+    "after": {"job": producer["id"], "piece": "first",
+              "outputs": {"input.json": "metrics.json"}},
+})
+result = client.wait(consumer["id"])
+```
+
+`Client.run(..., inputs={}, after={...})` accepts the same edge and downloads
+accepted results. `run` waits synchronously; use `submit` to register the full
+finite list before waiting. Go `Spec.After` and `RunOptions.After` expose the same
+contract. Read `dependency.state` (`blocked`/`ready`), `ready_at` and `execution`
+for the exact producing attempt. Retries and keyed replay preserve that binding.
+See the [fan-out guide](../../docs/guide-fan-out.md) for sibling failure, parent
+abort and artifact expiry. Parent gather does not gather downstream results.

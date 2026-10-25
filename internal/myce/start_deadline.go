@@ -54,14 +54,14 @@ func (q *Queue) startWaitingReason(j *Job) string {
 func (q *Queue) maintainStartDeadlines() {
 	now := q.clock.Now()
 	for _, j := range q.s.Jobs {
-		if j.Spec.Priority == "production" && j.Spec.StartBy == nil && !terminal(j.State) {
+		if j.Spec.Priority == "production" && j.Spec.StartBy == nil && dependencyReady(j) && !terminal(j.State) {
 			deadline := j.Queued.Add(ProductionStartTimeout)
 			j.Spec.StartBy = &deadline
 		}
 		if !startupPending(j) {
 			continue
 		}
-		disabled := j.State == "queued" && j.Attempt == 0 && q.allStartHostsDisabled(j)
+		disabled := dependencyReady(j) && j.State == "queued" && j.Attempt == 0 && q.allStartHostsDisabled(j)
 		if !expired(j.Spec.StartBy, now) && !disabled {
 			continue
 		}
