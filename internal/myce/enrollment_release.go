@@ -9,6 +9,7 @@ import (
 	"reflect"
 
 	"golang.org/x/mod/semver"
+	"modernc.org/sqlite"
 )
 
 // The queue is the approval authority already trusted by the exact TLS pin.
@@ -127,6 +128,14 @@ func (a API) registerEnrollmentRelease(mux *http.ServeMux) {
 		var rule *rejectionError
 		var apiError *HTTPError
 		if err != nil && !errors.As(err, &rule) && !errors.As(err, &apiError) {
+			// SQLite's error text may contain paths or SQL values. Log the
+			// underlying code with its static description, never raw input.
+			var storage *sqlite.Error
+			if errors.As(err, &storage) {
+				log.Printf("release approval persistence failed: sqlite_code=%d cause=%q", storage.Code(), sqlite.ErrorCodeString[storage.Code()&0xff])
+			} else {
+				log.Printf("release approval persistence failed: cause=%s error_type=%T", runtimeDiagnostic(err).Class, err)
+			}
 			err = &HTTPError{Status: http.StatusInternalServerError, Code: "release_approval_failed", Message: rejectionMessages["release_approval_failed"]}
 		}
 		respond(w, map[string]bool{"ok": true}, err)

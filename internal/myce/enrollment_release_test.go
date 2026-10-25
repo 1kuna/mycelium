@@ -117,7 +117,11 @@ func TestEnrollmentReleaseApprovalTrustAndVersionFences(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	attackerPayload, _ := json.Marshal(manifest)
+	attacker := manifest
+	attacker.Version = "v9.9.9"
+	attacker.Artifacts = append([]ReleaseArtifact{}, manifest.Artifacts...)
+	attacker.Artifacts[0].SHA256 = strings.Repeat("b", 64)
+	attackerPayload, _ := json.Marshal(attacker)
 	attackerSigned, _ := json.Marshal(SignedRelease{Manifest: attackerPayload, Signature: ed25519.Sign(wrongPrivate, attackerPayload)})
 	for _, tc := range []struct {
 		name  string
@@ -129,6 +133,7 @@ func TestEnrollmentReleaseApprovalTrustAndVersionFences(t *testing.T) {
 	}{
 		{"unauthenticated", current, pub, "limited-ticket", false, "authentication_required"},
 		{"wrong-key", current, wrong, "fixture-authority", false, "release_publisher_key_mismatch"},
+		{"attacker-newer", attackerSigned, wrong, "fixture-authority", false, "release_publisher_key_mismatch"},
 		{"attacker-signed-even-if-forced", attackerSigned, wrong, "fixture-authority", true, "release_publisher_key_mismatch"},
 		{"attacker-signature-stored-key", attackerSigned, pub, "fixture-authority", true, "release_approval_invalid"},
 		{"unsigned", unsigned, pub, "fixture-authority", false, "release_approval_invalid"},
@@ -147,6 +152,9 @@ func TestEnrollmentReleaseApprovalTrustAndVersionFences(t *testing.T) {
 			defer server.Close()
 			client := Client{URL: server.URL, Token: tc.token}
 			request := EnrollmentReleaseApproval{SignedRelease: tc.data, PublicKey: tc.key, Origin: origin, AllowDowngrade: tc.force}
+			if strings.HasPrefix(tc.name, "attacker-") {
+				request.Origin = "https://attacker.invalid/releases"
+			}
 			err := client.Call(context.Background(), "POST", "/api/invites/release", request, nil)
 			var httpErr *HTTPError
 			if tc.code == "" {
@@ -165,7 +173,7 @@ func TestEnrollmentReleaseApprovalTrustAndVersionFences(t *testing.T) {
 			if tc.code == "" {
 				want = older
 			}
-			if !reflect.DeepEqual(approved.Manifest, want) {
+			if !reflect.DeepEqual(approved.Manifest, want) || approved.Origin != origin {
 				t.Errorf("unexpected default approval after request: %+v", approved)
 			}
 		})
@@ -209,6 +217,10 @@ func TestEnrollmentReleaseApprovalStorageFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	before, _ := json.Marshal(q.s)
+	var logs bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(previous)
 	if _, err := q.db.Exec("PRAGMA query_only=ON"); err != nil {
 		t.Fatal(err)
 	}
@@ -221,6 +233,12 @@ func TestEnrollmentReleaseApprovalStorageFailure(t *testing.T) {
 	var httpErr *HTTPError
 	if !errors.As(err, &httpErr) || httpErr.Status != 500 || httpErr.Code != "release_approval_failed" {
 		t.Fatalf("storage failure must be internal, not a manifest refusal: %v", err)
+	}
+	if !strings.Contains(logs.String(), "SQLITE_READONLY") || !strings.Contains(logs.String(), "code=release_approval_failed") {
+		t.Fatalf("storage failure must log its sanitized underlying cause alongside the 500: %s", logs.String())
+	}
+	if strings.Contains(logs.String(), "fixture-authority") || strings.Contains(logs.String(), q.root) {
+		t.Fatal("storage diagnostics exposed private input")
 	}
 	after, _ := json.Marshal(q.s)
 	if !bytes.Equal(before, after) {
@@ -308,5 +326,15 @@ func TestEnrollmentReleaseStartupPreservesAdvancedApproval(t *testing.T) {
 	}
 	if err = restarted.approveEnrollmentRelease(EnrollmentReleaseApproval{SignedRelease: rotatedSigned, PublicKey: rotated, Origin: "https://publisher.invalid/old"}); err != nil {
 		t.Fatal("locally rotated key could not approve release", err)
+	}
+	newer := original
+	newer.Version = "v1.0.3"
+	payload, _ = json.Marshal(newer)
+	newerSigned, _ := json.Marshal(SignedRelease{Manifest: payload, Signature: ed25519.Sign(rotatedPrivate, payload)})
+	if err = restarted.ConfigureStartupEnrollmentRelease(newerSigned, rotated, "https://publisher.invalid/newer", "", false); err != nil {
+		t.Fatal("legitimately newer startup manifest was not applied", err)
+	}
+	if !reflect.DeepEqual(restarted.s.EnrollmentRelease.Manifest, newer) || restarted.s.EnrollmentRelease.Origin != "https://publisher.invalid/newer" {
+		t.Fatal("startup did not advance to the newer release")
 	}
 }
