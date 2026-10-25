@@ -25,7 +25,7 @@ func TestCandidateSetExclusionsKeepFairCompetitors(t *testing.T) {
 		// Existing standalone comparator includes excluded-but-runnable projects.
 		var want *Job
 		for _, original := range q.s.Jobs {
-			j := q.batchCandidate(original, &m)
+			j := q.batchCandidateWithResources(original, &m, nil)
 			if j != nil && !excluded[j.ID] && (want == nil || q.before(j, want, &m)) {
 				want = j
 			}

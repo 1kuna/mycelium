@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"fmt"
 	"slices"
+	"time"
 )
 
 // Values belong to physical hosts, not worker rows, devices or free capacity.
@@ -155,24 +156,31 @@ func compareHostValue(values map[string]*hostValue, a, b *Machine) (int, bool) {
 }
 
 // placementScan is discarded after any placement/inventory/policy mutation.
-// Scarcity and peer fair-turn winners are computed at most once in this pass.
-// Peer scans omit steering, so admission checks cannot recurse into placement.
+// Candidate sets, liveness, scarcity and the global next-pull plan belong to
+// this one read-only pass; no job asks what a peer would pick.
 type placementScan struct {
-	values   map[string]*hostValue
-	machines []*Machine
-	winners  map[string]*Job
+	values          map[string]*hostValue
+	machines        []*Machine
+	sets            map[string]*candidateSet
+	live            map[string]bool
+	assignments     map[string]*Job
+	planBuilds      int
+	rankingBuilds   int
+	livenessBuilds  int
+	candidateBuilds int
 }
 
 func (q *Queue) placementScan(scans ...*placementScan) *placementScan {
 	if len(scans) > 0 {
 		return scans[0]
 	}
-	return &placementScan{machines: q.plannerMachines(), winners: map[string]*Job{}}
+	return &placementScan{machines: q.plannerMachines(), sets: map[string]*candidateSet{}}
 }
 
 func (q *Queue) placementValues(scan *placementScan) map[string]*hostValue {
 	if scan.values == nil {
 		scan.values = q.hostValues()
+		scan.rankingBuilds++
 	}
 	return scan.values
 }
@@ -181,14 +189,134 @@ func (q *Queue) valueCompare(a, b *Machine, scans ...*placementScan) (int, bool)
 	return compareHostValue(q.placementValues(q.placementScan(scans...)), a, b)
 }
 
-func (q *Queue) peerWinner(m *Machine, scan *placementScan) *Job {
-	key := targetKey(m)
-	if winner, ok := scan.winners[key]; ok {
-		return winner
+// One queue walk collects the shortest workload-specific loss threshold for
+// each worker. Temporary occupancy affects admission, never the value ranking.
+func (q *Queue) placementLiveness(scan *placementScan) map[string]bool {
+	if scan.live != nil {
+		return scan.live
 	}
-	winner := q.candidatesForPlacement(m, scan, false).pick(nil)
-	scan.winners[key] = winner
-	return winner
+	scan.livenessBuilds++
+	timeouts := map[string]time.Duration{}
+	add := func(id, priority string) {
+		d := q.lossTimeouts[min(2, legacyRank(priority))]
+		if old := timeouts[id]; old == 0 || d < old {
+			timeouts[id] = d
+		}
+	}
+	for _, j := range q.s.Jobs {
+		if j.State == "running" || j.State == "stopping" {
+			add(j.Machine, j.Spec.Priority)
+		}
+	}
+	for _, c := range q.calls {
+		if c.Machine != "" && c.Error == "" {
+			add(c.Machine, c.Priority)
+		}
+	}
+	for _, s := range q.s.ModelSlots {
+		if s.State == "loading" || s.InFlight > 0 {
+			add(s.Machine, s.Priority)
+		}
+	}
+	scan.live = map[string]bool{}
+	now := q.clock.Now()
+	for _, m := range scan.machines {
+		d := timeouts[m.ID]
+		if d == 0 {
+			d = q.lossTimeouts[2]
+		}
+		scan.live[m.ID] = !m.Gone && !m.Leaving && now.Sub(m.LastSeen) < d
+	}
+	return scan.live
+}
+
+func (q *Queue) assignmentPlan(scan *placementScan) map[string]*Job {
+	if scan.assignments != nil {
+		return scan.assignments
+	}
+	scan.planBuilds++
+	scan.assignments = map[string]*Job{}
+	q.placementValues(scan)
+	q.placementLiveness(scan)
+	sets := make([]*candidateSet, 0, len(scan.machines))
+	for _, m := range scan.machines {
+		sets = append(sets, q.candidates(m, scan))
+	}
+	excluded := map[string]bool{}
+	for {
+		j, selected := q.nextProjection(sets, excluded, scan, true)
+		if j == nil {
+			break
+		}
+		scan.assignments[targetKey(selected.m)] = j
+		excluded[j.ID] = true
+		remaining := sets[:0]
+		for _, s := range sets {
+			// A check-in offers one next attempt, even on a multi-device worker.
+			if s.m.ID != selected.m.ID {
+				remaining = append(remaining, s)
+			}
+		}
+		sets = remaining
+	}
+	return scan.assignments
+}
+
+// Shared with queueProjection: every target offers its next admissible fair
+// winner after earlier jobs have been claimed. Value only compares targets
+// offering that same job. Dispatch requires live free capacity; existing strict
+// completion/affinity
+// choices can select preparation instead of an immediate start.
+func (q *Queue) nextProjection(sets []*candidateSet, excluded map[string]bool, scan *placementScan, immediate bool) (*Job, *candidateSet) {
+	var best *Job
+	var selected *candidateSet
+	for _, set := range sets {
+		winner := set.pick(excluded)
+		if winner == nil {
+			continue
+		}
+		// Background copies yield to foreground commands in the existing worker.
+		// Builds and stopping preparations still fence admission.
+		if immediate && (!scan.live[set.m.ID] || !q.workerBatchIdle(set.m) || q.preparationActive(set.m) || q.preparationStopping(set.m) || q.calls[winner.ID] != nil || !fits(winner, set.m, set.m.FreeMemoryGB)) {
+			continue
+		}
+		if best == nil || winner.ID != best.ID && set.before(winner, best) || winner.ID == best.ID && q.projectionTargetBetter(winner, set.m, selected.m, scan, immediate) {
+			best, selected = winner, set
+		}
+	}
+	return best, selected
+}
+
+// Immediate capacity wins over an unready host's value or identity. Keep the
+// existing strict completion/affinity choice within an equal-value band (for
+// example preparing software beside an already resident model).
+func (q *Queue) projectionTargetBetter(j *Job, a, b *Machine, scan *placementScan, immediate bool) bool {
+	if !immediate || environmentReady(j, a) && environmentReady(j, b) {
+		return q.targetPlacementBetter(j, a, b, scan)
+	}
+	ar, br := environmentReady(j, a), environmentReady(j, b)
+	if ar != br {
+		if value, _ := q.valueCompare(a, b, scan); value != 0 {
+			return ar
+		}
+		if j.Spec.extensionJob() {
+			if q.capabilityPlacementBetterWithTie(j, a, b, false, scan) {
+				return true
+			}
+			if q.capabilityPlacementBetterWithTie(j, b, a, false, scan) {
+				return false
+			}
+		} else {
+			if q.placementBetterWithTie(j, a, b, false, scan) {
+				return true
+			}
+			if q.placementBetterWithTie(j, b, a, false, scan) {
+				return false
+			}
+		}
+		return ar
+	}
+	return q.targetPlacementBetter(j, a, b, scan)
 }
 
 func valueReason(h *hostValue, m *Machine) string {

@@ -230,41 +230,107 @@ could never run. Both paired binaries use the same harness correction:
 `machineReport` sets `CPUIsolation: "select-none"` for the simulated runner.
 The baseline scheduler is otherwise unchanged at `e060a9b9`.
 
-| Metric | Base + CPU runner fact | Round 2 |
+| Metric | Base + CPU runner fact | Global assignment plan (round 3) |
 |---|---:|---:|
 | Whole makespan | 301 s | 201 s |
 | Accelerator batch finish | 301 s | 102 s |
 | Production wait p95 / unstarted | 0 s / 0 | 0 s / 0 |
 | Completed / failed / unfinished / impossible | 4 / 0 / 0 / 0 | 4 / 0 / 0 / 0 |
 
-### Check-in cost regression
+### Idle CPU peers (round-2 review regression)
 
-`go test ./internal/myce -run '^TestValueCheckinCost$' -v -count=1`
-measures five **fresh first check-ins**, not assignment redelivery. Each queue has
-one accelerator, four CPU hosts and 50 or 200 canonical queued CPU jobs. Bulk
-fixture setup is outside the timing; the public check-in includes SQLite and all
-maintenance passes. An unchanged copy of the test measures the base scheduler.
-The injected fake Clock remains the only scheduling clock; wall time measures
-only the test call.
+```sh
+myce sim --fleet examples/sim/value-placement-idle-cpus/fleet.yaml \
+  --workload examples/sim/value-placement-idle-cpus/workload.yaml \
+  --days 0.01 --seed 1 --json idle-cpus.json
+```
 
-Paired laptop measurements on 2026-10-25, median of five trials:
+Two simultaneous two-piece CPU batches use two CPU workers while an accelerator
+checks in first. A 32 GiB accelerator batch arrives at 2 s. Both base plus the
+CPU runner fact and round 3 finish the accelerator batch at **102 s**, with whole
+makespan **200 s**, production p95 **0 s**, and completed/failed/unfinished
+**3/0/0**. The JSON reports are identical. This catches round 2's single-job
+steering error, which occupied the accelerator with the second CPU batch.
 
-| Queued jobs | Base | Round 2 | Round 2 / base |
+### Global planning and check-in cost (round 3)
+
+Round 3 replaces peer-by-peer simulation with one next-pull assignment plan per
+read-only pass. It extends the same projection step used by queue order: each
+eligible target offers its next fair winner after earlier claims are excluded;
+value compares only targets offering that job. Each worker claims one next
+attempt. Dispatch reads its slot and keeps exact admission/cleanup checks.
+Candidate sets are shared per target; finding a head uses a linear minimum
+rather than sorting the backlog. Maintenance retains its shared release planner,
+including free capacity before preemption and existing stop/lost-work costs.
+
+Scarcity and the worker liveness/loss map each build once per pass. There is no
+per-job peer simulation, recursive steering, or per-pair loss-timeout scan.
+Temporary occupancy still does not redefine value. Value and identity ties
+require immediate admission; existing strict completion/affinity choices within
+a value tie can still prepare software beside a resident model. Background model
+copies use the existing batch-idle admission rule, so foreground commands can
+start and pause copying; environment builds and stopping preparations still
+fence admission. The real copy-fault test and a fake-clock regression cover this.
+
+```sh
+go test ./internal/myce -run '^TestValuePlanningWorkCounts$' -v -count=1
+go test -tags placement_cost ./internal/myce -run '^TestValueCheckinCost$' -v -count=1
+```
+
+The deterministic regression checks **one plan, one scarcity ranking, one
+liveness map, and five candidate-set builds for five targets** at 200, 800 and
+1,600 queued jobs, even after repeated reads of every target. Fake-clock
+regressions cover two accelerator hosts with CPU work, a multi-device host, and
+one accelerator checking in before four idle CPU hosts with three CPU jobs.
+The accelerator receives nothing in that last case; all three jobs start on
+CPU workers.
+
+The timing probe measures three fresh first public check-ins per queue size,
+including SQLite and all maintenance passes; bulk canonical fixture setup is
+outside the timing. Copy the probe unchanged to base `e060a9b9` for comparison.
+The scheduling clock remains injected; wall time measures only the API call.
+The measurement-only probe is opt-in through Go's `placement_cost` build tag;
+normal gates run the deterministic assertions without timing samples. There is
+no machine-dependent wall-time gate. Ordinary-build laptop medians on
+2026-10-25, run sequentially using normal shared Go caches:
+
+| Queued jobs | Base | Round 3 | Round 3 / base |
 |---|---:|---:|---:|
-| 50, ordinary build | 17.16 ms | 28.32 ms | 1.65 |
-| 200, ordinary build | 86.12 ms | 158.95 ms | 1.85 |
-| 50, race build | 59.32 ms | 133.77 ms | 2.26 |
-| 200, race build | 323.73 ms | 740.01 ms | 2.29 |
+| 200 | 56.24 ms | 64.34 ms | 1.14× |
+| 800 | 319.41 ms | 307.75 ms | 0.96× |
+| 1,600 | 808.00 ms | 601.16 ms | 0.74× |
 
-The regression enforces four times the rounded-up measured base medians:
-72/360 ms for 50/200 jobs, or 240/1,300 ms with race instrumentation. This detects
-the reported recursive/superlinear control-transaction stall, with headroom for
-shared-host variance. Its cost is ten small local queue fixtures and roughly
-1–2 seconds ordinary / 7 seconds race on this laptop. These are laptop regression
-bounds, not production latency promises. Scarcity and each peer's fair-turn
-winner are reused within a read-only planning pass; peer admission scans omit
-placement steering so no nested candidate lookup can recurse.
+These measurements meet the requested approximately 1.2× base target. They are
+shared-laptop observations, not production latency promises. Paired seed-1
+simulation also retains finite accelerator preservation (300 → 200 s whole
+makespan) and byte-identical one-day mixed reports (194 completed, 1 failed,
+98 unfinished; production p95 1 s). The existing mixed failure/backlog remains.
+The CPU fixture above retains 301 → 201 s makespan, accelerator finish
+301 → 102 s, p95 0/0 and failures 0/0. No native or fleet performance is claimed.
 
-Delivery validation: `./scripts/gate.sh quick e060a9b9` passed with exit 0
-in 157 seconds: build, vet, supported-target builds and 299 selected top-level
-race tests. Full gate, merge and fleet access were excluded from this worker task.
+
+### Validation ledger and remaining gate criterion
+
+The final `./scripts/gate.sh quick e060a9b9` did **not** pass its unchanged
+three-minute wrapper budget: TERM at 175 s, exit 124, after 407 top-level race
+tests passed with no failures. Build, vet, Linux amd64/arm64 and native Darwin
+arm64 builds passed. The final diff, including the s034 rebase, selects 460
+ordinary top-level tests (the timing probe is opt-in).
+
+A targeted race run of the exact 53 remaining selected internal tests completed
+in 37.897 s: 52 passed and the opt-in production-lineage drill skipped. Across
+the final quick attempt and that follow-up, **459 passed, one skipped, zero
+failed**. This accounts for selected behavior; it is a workaround for collecting
+all results, **not a passing quick command**. The orchestrator still owns that
+explicit acceptance item on a suitable host or through a separately authorized
+gate-budget correction. No full gate, merge or fleet work was performed.
+
+Earlier attempts exposed an exact timing-string assertion, now strengthened to
+check unknown prediction/actual fields and zero samples while allowing placement
+metadata, and the background-copy admission regression described above, now
+fixed and race-tested with the real copy-fault journey. Earlier quick attempts
+also hit the wrapper deadline; timeout cleanup raised `PermissionError` in two
+attempts and left owned fixture children after interrupted runs. Their ownership
+was verified before cleanup. That separate gate-runner defect is tracked in
+[#203](https://github.com/1kuna/mycelium/issues/203); this branch does not change
+the gate runner. Only source, fixtures and this concise evidence ledger are kept.

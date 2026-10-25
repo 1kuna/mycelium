@@ -156,8 +156,8 @@ func (q *Queue) checkinMachineAttempts(m *Machine, reports []AttemptReport, prog
 		if !q.workerBatchIdle(candidate) {
 			continue
 		}
-		j := q.pick(candidate, scan)
-		if j != nil && !q.betterPlacement(j, candidate, scan) && (best == nil || q.before(j, best, candidate)) {
+		j := q.plannedPick(candidate, scan)
+		if j != nil && (best == nil || q.candidates(candidate, scan).before(j, best)) {
 			best, target = j, candidate
 		}
 	}

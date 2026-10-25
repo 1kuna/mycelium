@@ -1,0 +1,6 @@
+# Two simultaneous CPU batches leave the accelerator free for work at t=2 s.
+duration_jitter: 0
+streams:
+  - {name: cpu-1, project: general, priority: experiment, platforms: [cpu], memory_gb: 1, duration_seconds: 100, every_hours: 24, start_hour: 0, count: 1, batch_files: 2}
+  - {name: cpu-2, project: general, priority: experiment, platforms: [cpu], memory_gb: 1, duration_seconds: 100, every_hours: 24, start_hour: 0, count: 1, batch_files: 2}
+  - {name: accelerator, project: accelerator, priority: experiment, platforms: [fake], memory_gb: 32, host_memory_gb: 1, duration_seconds: 50, every_hours: 24, start_hour: 0.0005555555555555556, count: 1, batch_files: 2}

@@ -2,6 +2,7 @@ package myce
 
 import (
 	"bytes"
+	"fmt"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -532,4 +533,106 @@ func TestValueSimulationCPUStreams(t *testing.T) {
 		latest = max(latest, *batch.FinishedSeconds)
 	}
 	nearSim(t, latest, 201)
+}
+
+// Round 2 steered only J1: every CPU peer independently claimed the same head,
+// so the accelerator took J2 while four CPU hosts remained idle.
+func TestValueGlobalPlanClaimsDistinctCPUJobs(t *testing.T) {
+	q, _ := fixture(t)
+	accelerator := valueMachine("a-accelerator", "fake", 64)
+	check(t, q, accelerator, nil)
+	cpus := make([]Machine, 4)
+	for i := range cpus {
+		cpus[i] = valueMachine(fmt.Sprintf("cpu-%d", i), "cpu", 16)
+		check(t, q, cpus[i], nil)
+	}
+	wanted := map[string]bool{}
+	for range 3 {
+		wanted[submit(t, q, cpuSpec(1, 1)).ID] = true
+	}
+	if got := check(t, q, accelerator, nil).Job; got != nil {
+		t.Fatal("accelerator took CPU work despite idle CPU capacity", got.ID)
+	}
+	for _, m := range cpus {
+		if got := check(t, q, m, nil).Job; got != nil {
+			if !wanted[got.ID] {
+				t.Fatal("duplicate or unexpected claim", got.ID)
+			}
+			delete(wanted, got.ID)
+		}
+	}
+	if len(wanted) != 0 {
+		t.Fatal("CPU jobs did not progress", wanted)
+	}
+}
+
+func TestValuePlanningWorkCounts(t *testing.T) {
+	for _, count := range []int{200, 800, 1600} {
+		t.Run(fmt.Sprint(count), func(t *testing.T) {
+			q, _ := fixture(t)
+			accelerator := valueMachine("a-accelerator", "fake", 64)
+			check(t, q, accelerator, nil)
+			for i := range 4 {
+				id := fmt.Sprintf("cpu-%d", i)
+				check(t, q, valueMachine(id, "cpu", 16), nil)
+			}
+			template := submit(t, q, cpuSpec(1, 1))
+			// In-memory canonical queued work; no timing or storage work in the proof.
+			for i := 1; i < count; i++ {
+				copy := cloneJob(template)
+				copy.ID = fmt.Sprintf("count-%06d", i)
+				q.s.Jobs[copy.ID] = &copy
+			}
+			scan := q.placementScan()
+			for range 2 {
+				for _, m := range scan.machines {
+					q.plannedPick(m, scan)
+					q.candidate(m, nil, scan)
+					q.valueCompare(m, m, scan)
+				}
+			}
+			if scan.planBuilds != 1 || scan.rankingBuilds != 1 || scan.livenessBuilds != 1 || scan.candidateBuilds != len(scan.machines) {
+				t.Fatalf("jobs=%d plans=%d rankings=%d liveness maps=%d candidate sets=%d targets=%d", count, scan.planBuilds, scan.rankingBuilds, scan.livenessBuilds, scan.candidateBuilds, len(scan.machines))
+			}
+		})
+	}
+}
+
+func TestValueSimulationIdleCPUHosts(t *testing.T) {
+	var fleet SimFleet
+	var work SimWorkload
+	if err := ReadSimYAML("../../examples/sim/value-placement-idle-cpus/fleet.yaml", &fleet); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReadSimYAML("../../examples/sim/value-placement-idle-cpus/workload.yaml", &work); err != nil {
+		t.Fatal(err)
+	}
+	r := runSimTest(t, fleet, work, 864)
+	if r.Completed != 3 || r.Failed != 0 || r.Unfinished != 0 || r.Production.P95 != 0 || r.Production.Unstarted != 0 || len(r.NeverPlaceable) != 0 {
+		t.Fatal("idle CPU fleet regression", r)
+	}
+	var acceleratorFinish float64
+	latest := 0.0
+	for name, batch := range r.Batches {
+		if batch.FinishedSeconds == nil {
+			t.Fatal("unfinished batch", name)
+		}
+		latest = max(latest, *batch.FinishedSeconds)
+		if strings.HasPrefix(name, "accelerator") {
+			acceleratorFinish = *batch.FinishedSeconds
+		}
+	}
+	nearSim(t, latest, 200)
+	nearSim(t, acceleratorFinish, 102)
+}
+
+func TestValueBackgroundCopyDoesNotBlockDispatch(t *testing.T) {
+	q, _ := fixture(t)
+	m := valueMachine("worker", "fake", 32)
+	check(t, q, m, nil)
+	wanted := submit(t, q, cpuSpec(1, 1))
+	q.s.PreparationPlans = map[string]HostLaunch{"copy": {Machine: m.ID, Session: m.Session, Kind: "copy", Key: "other-model", Attempt: "copy", Started: true}}
+	if got := q.plannedPick(q.s.Machines[m.ID], q.placementScan()); got == nil || got.ID != wanted.ID {
+		t.Fatal("background copy blocked foreground admission", got)
+	}
 }

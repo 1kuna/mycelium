@@ -286,51 +286,6 @@ func (q *Queue) placementBetterWithTie(j *Job, a, b *Machine, allowTie bool, sca
 	}
 	return allowTie && knownValue && targetKey(a) < targetKey(b)
 }
-func (q *Queue) betterPlacement(j *Job, m *Machine, scans ...*placementScan) bool {
-	if j.Spec.FanOut != nil {
-		return false
-	} // The discrete plan selected this component.
-	scan := q.placementScan(scans...)
-	values := q.placementValues(scan)
-	for _, other := range scan.machines {
-		if sameTarget(other, m) || q.clock.Now().Sub(other.LastSeen) >= q.machineLossTimeout(other.ID) {
-			continue
-		}
-		// Direct admission: the peer's fair-turn winner is computed without
-		// CPU-on-accelerator steering. It cannot ask this target to yield back.
-		winner := q.peerWinner(other, scan)
-		if winner == nil || winner.ID != j.ID || !q.workerIdle(other, winner) || !q.placementAllowed(winner, other) || !q.checkpointReady(winner, other) || !fits(winner, other, other.FreeMemoryGB) {
-			continue
-		}
-		// Preserve strict legacy completion/affinity choices toward cold targets.
-		// Host value and identity-only ties require immediate admission.
-		ready := q.immediateCandidate(winner, other) != nil
-		value, known := compareHostValue(values, other, m)
-		if value != 0 {
-			// Only immediately admissible capacity can defer a pull for host value.
-			// In particular a cheap host's build or cleanup creates no reservation.
-			if value < 0 && ready {
-				return true
-			}
-			continue
-		}
-		// Preserve explicit platform preference and legacy measured/affinity order
-		// within a value tie (or when both inventories have unknown value).
-		if len(j.Spec.Needs.Platform.Preferred) > 0 && !contains(j.Spec.Needs.Platform.Preferred, m.GPU) && contains(j.Spec.Needs.Platform.Preferred, other.GPU) && affinity(j, other) >= affinity(j, m) {
-			return true
-		}
-		if j.Spec.extensionJob() {
-			if q.capabilityPlacementBetterWithTie(j, other, m, ready, scan) {
-				return true
-			}
-		} else if known || j.Spec.Needs.cpuOnly() || j.Spec.Needs.Model != "" || j.Spec.Environment.Key() != "" {
-			if q.placementBetterWithTie(j, other, m, ready, scan) {
-				return true
-			}
-		}
-	}
-	return false
-}
 
 // Keep all target projections on the same qualified-work comparator.
 func (q *Queue) targetPlacementBetter(j *Job, a, b *Machine, scans ...*placementScan) bool {

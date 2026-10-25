@@ -1,0 +1,5 @@
+# Regression: the accelerator checks in before two idle CPU workers.
+machines:
+  - {name: a-large, host: large, platform: fake, memory_gb: 64, host_memory_gb: 64, speed: 1}
+  - {name: cpu-1, host: cpu-1, platform: cpu, memory_gb: 1, host_memory_gb: 16, speed: 1}
+  - {name: cpu-2, host: cpu-2, platform: cpu, memory_gb: 1, host_memory_gb: 16, speed: 1}

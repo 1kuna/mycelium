@@ -17,17 +17,22 @@ type candidateSet struct {
 }
 
 func (q *Queue) candidates(m *Machine, scans ...*placementScan) *candidateSet {
-	return q.candidatesForPlacement(m, q.placementScan(scans...), true)
+	scan := q.placementScan(scans...)
+	key := targetKey(m)
+	if s := scan.sets[key]; s != nil {
+		return s
+	}
+	s := q.buildCandidates(m)
+	scan.sets[key] = s
+	scan.candidateBuilds++
+	return s
 }
 
-func (q *Queue) candidatesForPlacement(m *Machine, scan *placementScan, steer bool) *candidateSet {
+func (q *Queue) buildCandidates(m *Machine) *candidateSet {
 	s := &candidateSet{q: q, m: m, scores: map[string]float64{}, actives: map[string]float64{}}
 	s.resources = map[batchResourceKey]batchResourceRoom{}
 	for _, j := range q.s.Jobs {
 		if candidate := q.batchCandidateWithResources(j, m, s.resources); candidate != nil {
-			if steer && candidate.Spec.Needs.cpuOnly() && m.GPU != "cpu" && q.betterPlacement(candidate, m, scan) {
-				continue
-			}
 			s.jobs = append(s.jobs, candidate)
 		}
 	}
@@ -78,6 +83,16 @@ func (s *candidateSet) before(a, b *Job) bool {
 // Within-project order is immutable during a read-only pass. Sort it once
 // instead of comparing every remaining job again for each exclusion.
 func (s *candidateSet) pick(excluded map[string]bool) *Job {
+	// Most passes only need the head. Do not sort the backlog to find it.
+	if len(excluded) == 0 && s.ordered == nil {
+		var best *Job
+		for _, j := range s.jobs {
+			if best == nil || s.before(j, best) {
+				best = j
+			}
+		}
+		return best
+	}
 	if s.ordered == nil {
 		s.ordered = map[string][]*Job{}
 		for _, j := range s.jobs {

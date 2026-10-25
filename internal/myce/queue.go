@@ -1137,10 +1137,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		}
 		if !m.Leaving && !c.Recovering {
 			scan := q.placementScan()
-			j := q.pick(&m, scan)
-			if j != nil && q.betterPlacement(j, &m, scan) {
-				j = nil
-			}
+			j := q.plannedPick(&m, scan)
 			if j != nil {
 				out := q.assign(j, &m, scan)
 				reply.Job = &out

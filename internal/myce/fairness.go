@@ -185,21 +185,6 @@ func (q *Queue) capReasonFor(j *Job, target *Machine) string {
 	return ""
 }
 
-// batchCanUse includes memory that the existing release planner can reclaim.
-// This lets a batch's fair turn precede an idle resident model, without admitting
-// the batch until the worker has acknowledged the release.
-func (q *Queue) batchCanUse(j *Job, m *Machine) bool {
-	return q.batchCandidate(j, m) != nil
-}
-
-func (q *Queue) batchCandidate(j *Job, m *Machine) *Job {
-	candidate := q.batchCandidateWithResources(j, m, nil)
-	if candidate != nil && candidate.Spec.Needs.cpuOnly() && m.GPU != "cpu" && q.betterPlacement(candidate, m) {
-		return nil
-	}
-	return candidate
-}
-
 func (q *Queue) batchCandidateWithResources(j *Job, m *Machine, resources map[batchResourceKey]batchResourceRoom) *Job {
 	if j.Spec.FanOut != nil {
 		return q.fanOutCandidate(j, m)
@@ -288,8 +273,11 @@ func (q *Queue) candidate(m *Machine, excluded map[string]bool, scans ...*placem
 	return q.candidates(m, scans...).pick(excluded)
 }
 func (q *Queue) pick(m *Machine, scans ...*placementScan) *Job {
-	best := q.candidate(m, nil, scans...)
-	return q.immediateCandidate(best, m)
+	return q.immediateCandidate(q.candidate(m, nil, scans...), m)
+}
+
+func (q *Queue) plannedPick(m *Machine, scan *placementScan) *Job {
+	return q.immediateCandidate(q.assignmentPlan(scan)[targetKey(m)], m)
 }
 
 func (q *Queue) immediateCandidate(best *Job, m *Machine) *Job {
@@ -319,7 +307,7 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 	for _, m := range scan.machines {
 		// Explain the current admissible target, even when the queue-order
 		// projection also includes a cheaper host whose capacity is occupied.
-		if j := q.pick(m, scan); j != nil && q.workerIdle(m, j) && q.placementAllowed(j, m) && q.checkpointReady(j, m) {
+		if j := q.plannedPick(m, scan); j != nil && q.workerIdle(m, j) && q.placementAllowed(j, m) && q.checkpointReady(j, m) {
 			if previous := immediate[j.ID]; previous == nil || q.targetPlacementBetter(j, m, previous, scan) {
 				immediate[j.ID] = m
 			}
@@ -332,7 +320,7 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 		}
 		// Projection only changes exclusions, never queue state or inventory.
 		// Reuse the same read-only planning pass for every projected position.
-		sets = append(sets, q.candidates(&copy, scan))
+		sets = append(sets, q.buildCandidates(&copy))
 	}
 	for _, j := range q.s.Jobs {
 		if j.State != "queued" {
@@ -342,14 +330,7 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 	}
 	excluded := map[string]bool{}
 	for n := 1; ; n++ {
-		var best *Job
-		var selected *candidateSet
-		for _, set := range sets {
-			winner := set.pick(excluded)
-			if winner != nil && (best == nil || set.before(winner, best) || winner.ID == best.ID && q.targetPlacementBetter(winner, set.m, selected.m, scan)) {
-				best, selected = winner, set
-			}
-		}
+		best, selected := q.nextProjection(sets, excluded, scan, false)
 		if best == nil {
 			break
 		}
@@ -452,14 +433,11 @@ func (q *Queue) waitReason(j *Job) string {
 // Deficit uses only competing runnable projects. An absent project reserves no
 // capacity; an otherwise idle device is always available to its sole project.
 func (q *Queue) fairScore(j *Job, m *Machine) float64 {
+	if m.ID != "" {
+		return q.candidates(m).score(j, m)
+	}
 	projects := map[string]bool{j.Spec.Project: true}
 	for _, r := range q.s.Jobs {
-		if m.ID != "" {
-			r = q.batchCandidate(r, m)
-			if r == nil {
-				continue
-			}
-		}
 		if dependencyReady(r) && r.State == "queued" && q.comparePriority(r.Spec, j.Spec) == 0 && fairResourceFamily(r.Spec) == fairResourceFamily(j.Spec) && q.capReason(r) == "" {
 			projects[r.Spec.Project] = true
 		}
