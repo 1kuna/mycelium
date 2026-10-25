@@ -1,0 +1,5 @@
+# Synthetic capacity budgets, not fleet measurements. Both run ordinary work;
+# only the large card can run the 32 GiB accelerator work.
+machines:
+  - {name: a-scarce, host: scarce, platform: fake, memory_gb: 64, host_memory_gb: 64, speed: 1}
+  - {name: z-small, host: small, platform: fake, memory_gb: 8, host_memory_gb: 16, speed: 1}

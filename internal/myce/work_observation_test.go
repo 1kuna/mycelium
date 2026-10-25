@@ -156,7 +156,10 @@ func TestWorkObservationUnknownAndInvalidation(t *testing.T) {
 	j := startObservation(t, q, m, legacy)
 	clock.Advance(time.Second)
 	finish(t, q, &j, true)
-	if JobTiming(q.s.Jobs[j.ID]) != "prediction unknown; actual unknown" || len(q.s.WorkObservations) != 0 {
+	// Placement metadata can explain the host without inventing a measured
+	// prediction or observation for an old profile.
+	timing := q.s.Jobs[j.ID].Timing
+	if !strings.HasPrefix(JobTiming(q.s.Jobs[j.ID]), "prediction unknown; actual unknown") || len(q.s.WorkObservations) != 0 || timing != nil && (timing.PredictedSeconds != nil || timing.ActualSeconds != nil || timing.Samples != 0) {
 		t.Fatal("old profile invented comparable evidence")
 	}
 	j = startObservation(t, q, m, s)

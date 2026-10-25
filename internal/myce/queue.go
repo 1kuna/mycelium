@@ -1136,12 +1136,10 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			}
 		}
 		if !m.Leaving && !c.Recovering {
-			j := q.pick(&m)
-			if j != nil && q.betterPlacement(j, &m) {
-				j = nil
-			}
+			scan := q.placementScan()
+			j := q.plannedPick(&m, scan)
 			if j != nil {
-				out := q.assign(j, &m)
+				out := q.assign(j, &m, scan)
 				reply.Job = &out
 			}
 		}
@@ -1998,7 +1996,8 @@ func (q *Queue) workerHasOtherAttempt(machine, session, job string) bool {
 }
 
 // assign persists the exact target before delivering it through either wire form.
-func (q *Queue) assign(j *Job, m *Machine) Job {
+func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
+	values := q.placementValues(q.placementScan(scans...))
 	if j.Spec.FanOut != nil {
 		j = q.assignFanOut(j, m)
 	}
@@ -2053,6 +2052,7 @@ func (q *Queue) assign(j *Job, m *Machine) Job {
 	if measured {
 		j.Timing = &WorkTiming{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: m.ID, Session: m.Session, PlacementReason: estimate.reason()}
 	}
+	q.recordValuePlacement(j, m, values)
 	q.refreshHostMemory()
 	return cloneJob(j)
 }

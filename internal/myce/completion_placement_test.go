@@ -8,8 +8,8 @@ import (
 	"time"
 )
 
-// This exact decision transcript also runs against the pre-slice-3 source.
-// Unmeasured commands retain pull order; legacy servers retain ready-first
+// Unknown completion estimates leave value/identity and legacy model routing intact.
+// Equal-value commands use stable target identity; legacy servers retain ready-first
 // routing and zero-as-unlimited, even with unrelated extension observations.
 func TestCompletionUnknownPlacementUnchanged(t *testing.T) {
 	q, clock, m, s := observationFixture(t)
@@ -22,9 +22,9 @@ func TestCompletionUnknownPlacementUnchanged(t *testing.T) {
 	check(t, q, other, nil)
 	q.s.WorkObservations = map[string]WorkObservation{"unrelated": {Rate: 1000, Samples: 1, RecordedAt: clock.Now()}}
 	command := submit(t, q, s)
-	run := check(t, q, m, nil).Job
+	run := check(t, q, other, nil).Job
 	if run == nil || run.ID != command.ID {
-		t.Fatal("unmeasured command changed pull order", run)
+		t.Fatal("equal-value command did not use stable identity", run)
 	}
 	models, _, warm := modelFixture(t)
 	first := addModelCall(t, models, "experiment")
@@ -39,7 +39,7 @@ func TestCompletionUnknownPlacementUnchanged(t *testing.T) {
 		InFlight int      `json:"in_flight"`
 	}{[]string{run.Machine}, []string{first.Machine, second.Machine}, models.s.ModelSlots[slotKey(warm.ID, "test")].InFlight}
 	got, err := json.Marshal(decision)
-	want := []byte(`{"commands":["synthetic"],"models":["one","one"],"in_flight":2}`)
+	want := []byte(`{"commands":["other"],"models":["one","one"],"in_flight":2}`)
 	if err != nil || !bytes.Equal(got, want) {
 		t.Fatalf("legacy decision changed: %s, want %s (%v)", got, want, err)
 	}

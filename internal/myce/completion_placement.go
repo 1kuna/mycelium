@@ -99,7 +99,7 @@ func inputTransferSeconds(j *Job, m *Machine) (float64, bool) {
 // Known estimates precede unknowns; incomparable reference groups have a stable
 // order. Never mix pairwise speed and legacy ordering into a cyclic comparator.
 // When both are unknown the caller executes its original comparator unchanged.
-func (q *Queue) completionBetter(j *Job, a, b *Machine) (better, known bool) {
+func (q *Queue) completionBetter(j *Job, a, b *Machine, stableTie ...bool) (better, known bool) {
 	ae, aok := q.estimateCompletion(j, a)
 	be, bok := q.estimateCompletion(j, b)
 	if aok != bok {
@@ -114,13 +114,16 @@ func (q *Queue) completionBetter(j *Job, a, b *Machine) (better, known bool) {
 	if ae.seconds() != be.seconds() {
 		return ae.seconds() < be.seconds(), true
 	}
-	return targetKey(a) < targetKey(b), true
+	return (len(stableTie) == 0 || stableTie[0]) && targetKey(a) < targetKey(b), true
 }
 
 // Keep existing useful-victim selection and disruption costs authoritative.
 // Only otherwise equivalent release plans use completion as their tie-break.
-func (q *Queue) completionPlanBetter(j *Job, p, other *placementPlan) bool {
+func (q *Queue) completionPlanBetter(j *Job, p, other *placementPlan, scans ...*placementScan) bool {
 	if other != nil && p.stops == other.stops && p.cost == other.cost {
+		if value, _ := q.valueCompare(p.machine, other.machine, scans...); value != 0 {
+			return value < 0
+		}
 		if better, known := q.completionBetter(j, p.machine, other.machine); known {
 			return better
 		}

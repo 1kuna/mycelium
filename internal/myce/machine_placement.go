@@ -151,17 +151,18 @@ func (q *Queue) checkinMachineAttempts(m *Machine, reports []AttemptReport, prog
 	}
 	var best *Job
 	var target *Machine
+	scan := q.placementScan()
 	for _, candidate := range q.machineTargets(m) {
 		if !q.workerBatchIdle(candidate) {
 			continue
 		}
-		j := q.pick(candidate)
-		if j != nil && !q.betterPlacement(j, candidate) && (best == nil || q.before(j, best, candidate)) {
+		j := q.plannedPick(candidate, scan)
+		if j != nil && (best == nil || q.candidates(candidate, scan).before(j, best)) {
 			best, target = j, candidate
 		}
 	}
 	if best != nil {
-		out := q.assign(best, target)
+		out := q.assign(best, target, scan)
 		reply.Attempts = append(reply.Attempts, AttemptDirective{Execution: Execution{ID: out.ID, Attempt: out.Attempt}, Session: out.Session, Job: &out})
 	}
 }

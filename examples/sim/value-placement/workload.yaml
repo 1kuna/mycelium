@@ -1,0 +1,7 @@
+# Finite arrivals; every stream is a marked batch, so max finished_seconds
+# reports whole-workload makespan. No assumptions about native CPU/GPU speed.
+duration_jitter: 0
+streams:
+  - {name: ordinary, project: general, priority: experiment, platforms: [fake], memory_gb: 8, host_memory_gb: 1, duration_seconds: 100, every_hours: 24, start_hour: 0, count: 1, batch_files: 2}
+  - {name: accelerator, project: accelerator, priority: experiment, platforms: [fake], memory_gb: 32, host_memory_gb: 1, duration_seconds: 50, every_hours: 24, start_hour: 0.0002777777777777778, count: 1, batch_files: 2}
+  - {name: urgent, project: urgent, priority: production, platforms: [fake], memory_gb: 8, host_memory_gb: 1, duration_seconds: 5, every_hours: 24, start_hour: 0.041666666666666664, count: 1, batch_files: 2}

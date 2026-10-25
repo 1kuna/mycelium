@@ -406,7 +406,8 @@ func TestProductionHoldCancelsPreparationAndWaitsForAcknowledgement(t *testing.T
 
 func TestProductionHoldFailedCleanupIsNotRelease(t *testing.T) {
 	t.Parallel()
-	q, _, a, b, _ := holdFleet(t, true)
+	// The first execution uses the stable first target; the sibling stays free.
+	q, _, b, a, _ := holdFleet(t, true)
 	x := submit(t, q, spec("experiment"))
 	x = check(t, q, b, nil).Job
 	p := spec("production")
@@ -537,7 +538,8 @@ func TestProductionHoldWaitsForExperimentCallOnPinnedModel(t *testing.T) {
 
 func TestProductionHoldRetainsExecutionLostBeforeDemand(t *testing.T) {
 	t.Parallel()
-	q, c, a, b, s := holdFleet(t, true)
+	// The first execution uses the stable first target; the sibling stays free.
+	q, c, b, a, s := holdFleet(t, true)
 	x := submit(t, q, spec("experiment"))
 	x = check(t, q, b, nil).Job
 	a.FreeMemoryGB = 0
@@ -899,7 +901,8 @@ func TestProductionHoldForceStopsBlockedSaveAndResumesDurableGeneration(t *testi
 
 func TestProductionHoldKillsLateCopyDuringNASLoss(t *testing.T) {
 	t.Parallel()
-	q, clock, a, b, spark := holdFleet(t, true)
+	// The first execution uses the stable first target; the sibling stays free.
+	q, clock, b, a, spark := holdFleet(t, true)
 	x := submit(t, q, spec("experiment"))
 	x = check(t, q, b, nil).Job
 	a.FreeMemoryGB = 0

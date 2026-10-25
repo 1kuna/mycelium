@@ -252,7 +252,15 @@ func (q *Queue) recordModelUse(name string) {
 }
 
 // placementBetter applies the same rule to foreground placement and build plans.
-func (q *Queue) placementBetter(j *Job, a, b *Machine) bool {
+func (q *Queue) placementBetter(j *Job, a, b *Machine, scans ...*placementScan) bool {
+	return q.placementBetterWithTie(j, a, b, true, scans...)
+}
+
+func (q *Queue) placementBetterWithTie(j *Job, a, b *Machine, allowTie bool, scans ...*placementScan) bool {
+	value, knownValue := q.valueCompare(a, b, scans...)
+	if value != 0 {
+		return value < 0
+	}
 	if j.Spec.Needs.cpuOnly() && (a.GPU == "cpu") != (b.GPU == "cpu") {
 		return a.GPU == "cpu"
 	}
@@ -266,45 +274,23 @@ func (q *Queue) placementBetter(j *Job, a, b *Machine) bool {
 			return ap
 		}
 	}
-	if better, known := q.completionBetter(j, a, b); known {
+	if better, known := q.completionBetter(j, a, b, allowTie); known {
 		return better
 	}
 	if modelLoaded(j, a) != modelLoaded(j, b) {
 		return modelLoaded(j, a)
 	}
-	return q.loadSeconds(j.Spec.Needs.Model, a)+environmentSeconds(j, a) < q.loadSeconds(j.Spec.Needs.Model, b)+environmentSeconds(j, b)
+	ac, bc := q.loadSeconds(j.Spec.Needs.Model, a)+environmentSeconds(j, a), q.loadSeconds(j.Spec.Needs.Model, b)+environmentSeconds(j, b)
+	if ac != bc {
+		return ac < bc
+	}
+	return allowTie && knownValue && targetKey(a) < targetKey(b)
 }
-func (q *Queue) betterPlacement(j *Job, m *Machine) bool {
-	if j.Spec.FanOut != nil {
-		return false
-	} // The discrete plan already selected this component.
-	// Plain commands and component targets use the same preferred-platform
-	// deferral as legacy workers, before the specialized placement ranking.
-	if len(j.Spec.Needs.Platform.Preferred) > 0 && !contains(j.Spec.Needs.Platform.Preferred, m.GPU) {
-		for _, other := range q.plannerMachines() {
-			if contains(j.Spec.Needs.Platform.Preferred, other.GPU) && q.placementAllowed(j, other) && fits(j, other, other.FreeMemoryGB) && affinity(j, other) >= affinity(j, m) && q.workerBatchIdle(other) {
-				return true
-			}
-		}
-	}
+
+// Keep all target projections on the same qualified-work comparator.
+func (q *Queue) targetPlacementBetter(j *Job, a, b *Machine, scans ...*placementScan) bool {
 	if j.Spec.extensionJob() {
-		for _, other := range q.plannerMachines() {
-			if !sameTarget(other, m) && !q.unreported[other.ID] && q.workerIdle(other, j) && q.placementAllowed(j, other) && q.checkpointReady(j, other) && fits(j, other, other.FreeMemoryGB) && q.capabilityPlacementBetter(j, other, m) {
-				return true
-			}
-		}
-		return false
+		return q.capabilityPlacementBetter(j, a, b, scans...)
 	}
-	if !j.Spec.Needs.cpuOnly() && j.Spec.Needs.Model == "" && j.Spec.Environment.Key() == "" {
-		return false
-	}
-	for _, other := range q.plannerMachines() {
-		if sameTarget(other, m) || !q.workerIdle(other, j) || !q.placementAllowed(j, other) || !fits(j, other, other.FreeMemoryGB) {
-			continue
-		}
-		if q.placementBetter(j, other, m) {
-			return true
-		}
-	}
-	return false
+	return q.placementBetter(j, a, b, scans...)
 }

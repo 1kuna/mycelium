@@ -333,7 +333,8 @@ func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
 			}
 		}
 	}
-	j := q.candidate(m, nil)
+	scan := q.placementScan()
+	j := q.candidate(m, nil, scan)
 	if j != nil && j.Spec.extensionJob() && !environmentReady(j, m) {
 		if e := qualifiedExtension(j, m); e != nil {
 			return q.extensionPreparationOffer(*e, m)
@@ -342,11 +343,13 @@ func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
 	if j == nil || environmentReady(j, m) {
 		return q.extensionPreparationPlan(m)
 	}
-	for _, other := range q.s.Machines {
-		if other.ID == m.ID || !q.workerIdle(other, j) || !q.placementAllowed(j, other) || !fits(j, other, other.FreeMemoryGB) {
+	for _, other := range q.plannerMachines() {
+		if sameTarget(other, m) || q.preparationStopping(other) || !q.workerIdle(other, j) || !q.placementAllowed(j, other) || !fits(j, other, other.FreeMemoryGB) {
 			continue
 		}
-		if q.placementBetter(j, other, m) {
+		// workerIdle permits a shared started build. Preserve a strict
+		// preference for it, but never defer on an identity tie to a busy peer.
+		if winner := q.candidate(other, nil, scan); winner != nil && winner.ID == j.ID && q.placementBetterWithTie(j, other, m, !q.preparationActive(other), scan) {
 			return nil
 		}
 	}

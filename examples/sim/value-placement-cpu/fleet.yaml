@@ -1,0 +1,6 @@
+# Synthetic equal-speed hosts; CPU streams can use every worker, but only
+# accelerators can serve GPU work. Two accelerators also exercise peer steering.
+machines:
+  - {name: a-large, host: large, platform: fake, memory_gb: 64, host_memory_gb: 64, speed: 1}
+  - {name: b-card, host: card, platform: fake, memory_gb: 8, host_memory_gb: 32, speed: 1}
+  - {name: z-cpu, host: cpu, platform: cpu, memory_gb: 1, host_memory_gb: 16, speed: 1}

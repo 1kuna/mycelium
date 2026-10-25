@@ -455,7 +455,8 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 	}
 	machineReport := func(worker *simWorker) Machine {
 		m := worker.spec
-		report := Machine{ID: m.Name, HostID: m.Host, Session: fmt.Sprint(worker.session), GPU: m.Platform, TotalMemoryGB: m.MemoryGB, FreeMemoryGB: m.MemoryGB, HostMemoryMeasured: true, HostAvailableMemoryGB: m.HostGB, UnifiedMemory: m.Unified, ModelURL: "http://sim.invalid", ModelConfigHash: modelConfigHash(mc), CacheFreeBytes: 1 << 50, CopyBytesPerSecond: 40e6}
+		// Timers simulate a supported CPU runner as well as the GPU backend.
+		report := Machine{CPUIsolation: "select-none", ID: m.Name, HostID: m.Host, Session: fmt.Sprint(worker.session), GPU: m.Platform, TotalMemoryGB: m.MemoryGB, FreeMemoryGB: m.MemoryGB, HostMemoryMeasured: true, HostAvailableMemoryGB: m.HostGB, UnifiedMemory: m.Unified, ModelURL: "http://sim.invalid", ModelConfigHash: modelConfigHash(mc), CacheFreeBytes: 1 << 50, CopyBytesPerSecond: 40e6}
 		layout := "separate"
 		if m.Unified {
 			layout = "unified"

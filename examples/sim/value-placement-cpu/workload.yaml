@@ -1,0 +1,8 @@
+# Every stream is a marked batch; the latest finish is whole-workload makespan.
+# CPU memory_gb is lowered by the real submit API into a host-RAM reservation.
+duration_jitter: 0
+streams:
+  - {name: cpu-stream, project: general, priority: experiment, platforms: [cpu], memory_gb: 1, duration_seconds: 100, every_hours: 24, start_hour: 0, count: 1, batch_files: 2}
+  - {name: cpu-overflow, project: general, priority: experiment, platforms: [cpu], memory_gb: 1, duration_seconds: 100, every_hours: 24, start_hour: 0.0002777777777777778, count: 1, batch_files: 2}
+  - {name: accelerator, project: accelerator, priority: experiment, platforms: [fake], memory_gb: 32, host_memory_gb: 1, duration_seconds: 50, every_hours: 24, start_hour: 0.0005555555555555556, count: 1, batch_files: 2}
+  - {name: urgent-cpu, project: urgent, priority: production, platforms: [cpu], memory_gb: 1, duration_seconds: 5, every_hours: 24, start_hour: 0.041666666666666664, count: 1, batch_files: 2}
