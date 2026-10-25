@@ -1660,6 +1660,11 @@ is persisted in SQLite and must strictly increase unless `--allow-downgrade`
 explicitly re-approves or downgrades it. Repeating an identical verified approval
 is idempotent. `myce release approve` advances the running queue's default after
 a signed deployment without changing catalogs or service settings.
+The queue persists the publisher key provisioned only on its host; API approval
+requires an exact key match and verifies against that stored key. Startup verifies
+then skips/logs older or equal flag manifests unless explicitly forced, preserving
+the newer default across restart. Missing stored trust refuses API approval until
+local provisioning; key rotation remains local.
 Semver build metadata has equal precedence.
 The verified manifest binds version, protocols, OS/arch, size, SHA-256 and native
 Mac sensing. No release tooling existed to reuse. A small POSIX command is needed

@@ -148,9 +148,23 @@ run `myce release approve --config QUEUE_CONFIG --release-manifest RELEASE_JSON
 --release-key PUBLIC_PEM --release-url HTTPS_PUBLISHER_DIRECTORY` (plus
 `--release-ca PUBLIC_CERTIFICATE_PEM` for a private publisher). This authenticated,
 verified update persists the new default without changing catalogs or service
-settings. Identical reruns are idempotent; older or changed equal-version approvals
+settings. Its public key must match the publisher key stored by queue-host startup;
+API callers cannot provision or rotate trust. An existing queue without a stored
+key refuses until its local command is restarted with the existing `--release-*`
+flags (and usual catalog/service settings) to provision it.
+Identical reruns are idempotent; older or changed equal-version API approvals
 require `--allow-downgrade`. Do this before fresh invites or one-command onboarding;
 see the [signed-release deployment step](guide-onboarding-releases.md#advance-the-default-after-a-signed-update).
+
+Queue startup verifies retained `--release-*` flags, then logs and skips manifests
+older than or equal to the persisted default. This preserves a newer API approval
+across restarts while still provisioning the local publisher key. An explicit
+startup `--allow-downgrade` applies the flag manifest instead; remove it after an
+intentional downgrade so future restarts do not keep reverting the default.
+Invalid signatures never qualify for skipping or forcing. Publisher-key rotation
+remains a local queue-host restart with an independently provisioned key and a
+manifest signed by it. Approval storage failures return HTTP 500
+`release_approval_failed`; invalid input and downgrade refusals remain 4xx.
 
 Saved configs accept the retired local-control fields during overlay and omit
 them when rewritten; runtime options and secret references remain intact. Old state is never converted or

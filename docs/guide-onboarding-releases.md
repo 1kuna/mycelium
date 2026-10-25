@@ -47,12 +47,18 @@ myce queue --release-manifest RELEASE_JSON --release-key PUBLIC_PEM \
 ```
 
 The queue refuses invalid signatures, incomplete target matrices, incompatible
-protocols or a Mac artifact lacking native sensing. Approval is persisted in the
-SQLite queue and requires a version strictly newer than its current approval.
-Repeating the identical verified manifest, publisher URL and CA is idempotent,
-including after a restart. To replace an equal version's bytes or publisher
-metadata, or approve an older one, append `--allow-downgrade` to the queue
-command. Signature and manifest validation still apply. A pinned authenticated
+protocols or a Mac artifact lacking native sensing. It persists both approval and
+the locally provisioned publisher public key in SQLite. Only queue-host startup
+can provision or rotate that key; fleet-token API callers cannot establish trust.
+On restart, a verified startup manifest older than or equal to the stored approval
+is skipped and logged, preserving a default advanced through `release approve`.
+The local publisher key is still provisioned when the flag manifest is skipped,
+so existing queues can acquire the stored trust without reverting their default.
+Invalid startup manifests still fail verification, even when old enough to skip.
+To deliberately apply an older or changed equal-version approval, append
+`--allow-downgrade` to the queue command. Remove that override after the intended
+change: leaving it with stale service flags explicitly reapplies their old release
+on future restarts. Signature and manifest validation still apply. A pinned authenticated
 `myce invite` fetches the approved public metadata; a queue without release
 configuration returns `release_unavailable` and cannot mint a bootstrap command.
 The publisher certificate trust is ordinary HTTPS. The LAN queue's full
@@ -93,9 +99,17 @@ queue authority; no credential extraction or service reconfiguration is needed.
 Installed hypha authority is also supported when `--config` is omitted. The queue
 must already run a version supporting this command's approval endpoint.
 Supply the independently provisioned publisher public key, never a key obtained
-from the manifest. The command verifies the signed manifest locally and the
-authenticated queue verifies it again using the existing signature, protocol,
-target-matrix and native-sensing checks before committing approval to SQLite.
+from the manifest. It must exactly match the key already persisted by the queue
+host. The command verifies the signed manifest locally; the authenticated queue
+verifies it again against its own stored key using the existing signature,
+protocol, target-matrix and native-sensing checks before committing to SQLite.
+The API cannot provision or rotate publisher keys, even with `--allow-downgrade`.
+If the queue has no stored key (including an existing approval created by an older
+version), the command refuses with `release_publisher_key_unavailable`. On the
+queue host, restart the existing queue command with `--release-manifest`,
+`--release-key` and `--release-url` as above to provision it. Retain the usual
+catalog, database and service flags. Key rotation uses that same local procedure
+with a valid manifest signed by the replacement key.
 This approves the manifest; it does not download or install artifacts.
 
 For a private publisher, add `--release-ca PUBLIC_CERTIFICATE_PEM` on each approval;
@@ -106,6 +120,8 @@ does not restart the queue or reinstall workers. Success prints the approved
 version and publisher URL. Identical reruns are safe after a lost response;
 older versions or changed metadata at equal version precedence require explicit
 `--allow-downgrade`, which never bypasses signature or manifest validation.
+Invalid approval input returns a 4xx code; queue storage/commit failures return
+HTTP 500 `release_approval_failed` and leave the previous default and key intact.
 
 After success, `GET /api/invites/release` over the authenticated queue connection
 returns the new default. Run ordinary `myce invite` without release overrides for

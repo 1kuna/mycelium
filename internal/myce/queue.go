@@ -44,10 +44,11 @@ type state struct {
 	// Zero time means an input upload has not finished publication yet.
 	JobInputUploads map[string]time.Time `json:"job_input_uploads,omitempty"`
 
-	WorkObservations  map[string]WorkObservation `json:"work_observations,omitempty"`
-	EnrollmentRelease *EnrollmentRelease         `json:"enrollment_release,omitempty"`
-	MachineConversion *MachineConversion         `json:"machine_conversion,omitempty"`
-	ProductionDrains  map[string]productionDrain `json:"production_drains,omitempty"`
+	WorkObservations     map[string]WorkObservation `json:"work_observations,omitempty"`
+	EnrollmentRelease    *EnrollmentRelease         `json:"enrollment_release,omitempty"`
+	EnrollmentReleaseKey []byte                     `json:"enrollment_release_key,omitempty"`
+	MachineConversion    *MachineConversion         `json:"machine_conversion,omitempty"`
+	ProductionDrains     map[string]productionDrain `json:"production_drains,omitempty"`
 
 	PriorityPolicy *PriorityPolicyRecord `json:"priority_policy,omitempty"`
 	// Actual fleet contact and the first reconnect after silence are separate

@@ -432,7 +432,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 					return e
 				}
 			}
-			if e = q.ConfigureEnrollmentReleaseWithCA(data, key, *releaseURL, string(ca), *allowReleaseDowngrade); e != nil {
+			if e = q.ConfigureStartupEnrollmentRelease(data, key, *releaseURL, string(ca), *allowReleaseDowngrade); e != nil {
 				return e
 			}
 		}

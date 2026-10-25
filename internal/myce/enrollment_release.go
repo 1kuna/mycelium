@@ -1,8 +1,10 @@
 package myce
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"errors"
+	"log"
 	"net/http"
 	"reflect"
 
@@ -19,9 +21,8 @@ type EnrollmentRelease struct {
 	NASIdentity NASIdentity     `json:"nas_identity,omitempty"`
 }
 
-// EnrollmentReleaseApproval carries signed publisher bytes and a public key
-// independently provisioned by the authenticated administrator, never a key
-// supplied by the manifest. It changes only the queue's default invitation.
+// EnrollmentReleaseApproval cannot provision trust. PublicKey must exactly
+// match the publisher key provisioned locally on the queue host.
 type EnrollmentReleaseApproval struct {
 	SignedRelease  []byte            `json:"signed_release"`
 	PublicKey      ed25519.PublicKey `json:"public_key"`
@@ -34,29 +35,86 @@ func (q *Queue) ConfigureEnrollmentRelease(data []byte, key ed25519.PublicKey, o
 	return q.ConfigureEnrollmentReleaseWithCA(data, key, origin, "", allowDowngrade...)
 }
 
-// Publisher trust is explicitly provisioned by the administrator, then delivered
-// to inviters over their already pinned, authenticated queue connection.
+// ConfigureEnrollmentReleaseWithCA is local queue-host provisioning, including
+// publisher key rotation. Never call it from an HTTP handler.
 func (q *Queue) ConfigureEnrollmentReleaseWithCA(data []byte, key ed25519.PublicKey, origin, caCert string, allowDowngrade ...bool) error {
+	return q.configureEnrollmentRelease(data, key, origin, caCert, len(allowDowngrade) > 0 && allowDowngrade[0], false)
+}
+
+// ConfigureStartupEnrollmentRelease preserves a newer/equal persisted default
+// when old service flags are replayed, while provisioning the local publisher key.
+func (q *Queue) ConfigureStartupEnrollmentRelease(data []byte, key ed25519.PublicKey, origin, caCert string, allowDowngrade bool) error {
+	return q.configureEnrollmentRelease(data, key, origin, caCert, allowDowngrade, true)
+}
+
+func verifiedEnrollmentRelease(data []byte, key ed25519.PublicKey, origin, caCert string) (*EnrollmentRelease, error) {
 	m, err := VerifyRelease(data, key)
+	if err != nil {
+		return nil, reject("release_approval_invalid", err)
+	}
+	if err = releaseOrigin(origin); err != nil {
+		return nil, reject("release_approval_invalid", err)
+	}
+	if err = validateReleaseCA(caCert); err != nil {
+		return nil, reject("release_approval_invalid", err)
+	}
+	return &EnrollmentRelease{Manifest: m, Origin: origin, CACert: caCert}, nil
+}
+
+func (q *Queue) configureEnrollmentRelease(data []byte, key ed25519.PublicKey, origin, caCert string, allowDowngrade, startup bool) error {
+	key = bytes.Clone(key)
+	approved, err := verifiedEnrollmentRelease(data, key, origin, caCert)
 	if err != nil {
 		return err
 	}
-	if err = releaseOrigin(origin); err != nil {
-		return err
+	var keptVersion string
+	err = q.update(func() error {
+		if current := q.s.EnrollmentRelease; startup && current != nil && semver.Compare(approved.Manifest.Version, current.Manifest.Version) <= 0 && !allowDowngrade {
+			keptVersion = current.Manifest.Version
+		} else if err := q.applyEnrollmentRelease(approved, allowDowngrade); err != nil {
+			return err
+		}
+		q.s.EnrollmentReleaseKey = key
+		return nil
+	})
+	if err == nil && keptVersion != "" {
+		log.Printf("startup release %s skipped: retaining persisted approval %s; use --allow-downgrade explicitly to replace it", approved.Manifest.Version, keptVersion)
 	}
-	if err = validateReleaseCA(caCert); err != nil {
+	return err
+}
+
+// applyEnrollmentRelease runs inside the committing queue transaction.
+func (q *Queue) applyEnrollmentRelease(approved *EnrollmentRelease, allowDowngrade bool) error {
+	if reflect.DeepEqual(q.s.EnrollmentRelease, approved) {
+		return nil
+	}
+	if current := q.s.EnrollmentRelease; current != nil && semver.Compare(approved.Manifest.Version, current.Manifest.Version) <= 0 && !allowDowngrade {
+		return reject("release_downgrade_refused", nil)
+	}
+	q.s.EnrollmentRelease = approved
+	return nil
+}
+
+func (q *Queue) approveEnrollmentRelease(approval EnrollmentReleaseApproval) error {
+	q.mu.RLock()
+	key := ed25519.PublicKey(bytes.Clone(q.s.EnrollmentReleaseKey))
+	q.mu.RUnlock()
+	if len(key) != ed25519.PublicKeySize {
+		return &HTTPError{Status: http.StatusServiceUnavailable, Code: "release_publisher_key_unavailable", Message: rejectionMessages["release_publisher_key_unavailable"]}
+	}
+	if !bytes.Equal(key, approval.PublicKey) {
+		return reject("release_publisher_key_mismatch", nil)
+	}
+	approved, err := verifiedEnrollmentRelease(approval.SignedRelease, key, approval.Origin, approval.CACert)
+	if err != nil {
 		return err
 	}
 	return q.update(func() error {
-		approved := &EnrollmentRelease{Manifest: m, Origin: origin, CACert: caCert}
-		if reflect.DeepEqual(q.s.EnrollmentRelease, approved) {
-			return nil // Retry of an already committed, verified approval.
+		// Verification is outside q.mu; local rotation must invalidate the snapshot.
+		if !bytes.Equal(key, q.s.EnrollmentReleaseKey) {
+			return reject("release_publisher_key_mismatch", nil)
 		}
-		if current := q.s.EnrollmentRelease; current != nil && semver.Compare(m.Version, current.Manifest.Version) <= 0 && !(len(allowDowngrade) > 0 && allowDowngrade[0]) {
-			return reject("release_downgrade_refused", nil)
-		}
-		q.s.EnrollmentRelease = approved
-		return nil
+		return q.applyEnrollmentRelease(approved, approval.AllowDowngrade)
 	})
 }
 func (a API) registerEnrollmentRelease(mux *http.ServeMux) {
@@ -65,8 +123,13 @@ func (a API) registerEnrollmentRelease(mux *http.ServeMux) {
 		if !decode(w, r, &approval) {
 			return
 		}
-		err := a.Queue.ConfigureEnrollmentReleaseWithCA(approval.SignedRelease, approval.PublicKey, approval.Origin, approval.CACert, approval.AllowDowngrade)
-		respondOperation(w, map[string]bool{"ok": true}, err, "release_approval_invalid")
+		err := a.Queue.approveEnrollmentRelease(approval)
+		var rule *rejectionError
+		var apiError *HTTPError
+		if err != nil && !errors.As(err, &rule) && !errors.As(err, &apiError) {
+			err = &HTTPError{Status: http.StatusInternalServerError, Code: "release_approval_failed", Message: rejectionMessages["release_approval_failed"]}
+		}
+		respond(w, map[string]bool{"ok": true}, err)
 	})
 	mux.HandleFunc("GET /api/invites/release", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
