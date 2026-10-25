@@ -169,9 +169,9 @@ func (q *Queue) diskHeadroomReason(j *Job, m *Machine) string {
 	return ""
 }
 
-// The start fence refuses only a current observation below the free floor.
-// Need was admitted at dispatch and staged inputs may already be reflected in
-// free space; an expired or failed reading is not evidence of exhaustion (s029).
+// The start fence refuses only a current or retained observation below the free
+// floor. Need was admitted at dispatch and staged inputs may already be
+// reflected in free space; an expired reading is not evidence of exhaustion (s029).
 func (q *Queue) startDiskFloorReason(j *Job, m *Machine) string {
 	if m == nil {
 		return ""
@@ -181,7 +181,7 @@ func (q *Queue) startDiskFloorReason(j *Job, m *Machine) string {
 			continue
 		}
 		v = q.currentDiskVolume(v, m.DiskReceivedAt)
-		if v.Error != "" || v.TotalBytes == 0 {
+		if v.Error != "" && !v.Retained || v.TotalBytes == 0 {
 			continue
 		}
 		if reason := diskVolumeReason(m, v, 0); reason != "" {

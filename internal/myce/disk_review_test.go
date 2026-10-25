@@ -528,3 +528,44 @@ func TestDiskHeadroomStartFenceRefusalIsNotLoss(t *testing.T) {
 		t.Fatalf("start-fence placement refusal charged as a loss: state=%s losses=%d retries=%d reason=%q", got.State, got.Losses, got.InfrastructureRetries, got.Reason)
 	}
 }
+
+// The start fence refuses on the free floor alone, using the same current or
+// retained readings dispatch trusts: admitted need never re-refuses Started.
+func TestDiskHeadroomStartFenceUsesCurrentFloor(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		free     uint64
+		retained bool
+		want     error
+	}{
+		{"above floor below need", 2 << 30, false, nil},
+		{"retained below floor", 512 << 20, true, ErrStale},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q, c := fixture(t)
+			m := reportDisk(t, machine("spark", "fake"), c, "volume", []string{"data"}, 100<<30, 41<<30)
+			check(t, q, m, nil)
+			s := spec("production")
+			s.Disk = &DiskNeeds{OutputBytes: 2 << 30}
+			prod := submit(t, q, s)
+			a := check(t, q, m, nil).Job
+			if a == nil || a.ID != prod.ID {
+				t.Fatal("production not assigned")
+			}
+			if err := q.update(func() error {
+				owner := q.s.Machines[a.Machine]
+				v := &owner.DiskVolumes[0]
+				v.FreeBytes, v.SampledAt, owner.DiskReceivedAt = tc.free, c.Now(), c.Now()
+				if tc.retained {
+					v.Retained, v.Error = true, "probe failed"
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := q.Started(result(a, true)); !errors.Is(err, tc.want) {
+				t.Fatalf("Started = %v, want %v", err, tc.want)
+			}
+		})
+	}
+}

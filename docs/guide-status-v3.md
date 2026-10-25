@@ -43,8 +43,8 @@ host, roots, free bytes, floor and need. Admission uses observed free bytes and
 does not subtract other jobs' projected writes: writes already made are included
 in the observation. One machine worker admits work per physical host; its
 component targets share the observations. Dispatch applies this check. The
-launch and Started fences refuse only a current reading below the free floor; a
-stale or failed reading does not refuse there, since need was admitted at
+launch and Started fences refuse only a current or retained reading below the
+free floor; an expired reading does not refuse there, since need was admitted at
 dispatch and staged inputs already appear in free space. Recovery of an
 already-running copy bypasses admission-time disk checks.
 Queued production work can move off a disk-held host to another fitting host,
