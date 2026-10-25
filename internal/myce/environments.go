@@ -344,10 +344,12 @@ func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
 		return q.extensionPreparationPlan(m)
 	}
 	for _, other := range q.plannerMachines() {
-		if sameTarget(other, m) || q.preparationActive(other) || q.preparationStopping(other) || !q.workerIdle(other, j) || !q.placementAllowed(j, other) || !fits(j, other, other.FreeMemoryGB) {
+		if sameTarget(other, m) || q.preparationStopping(other) || !q.workerIdle(other, j) || !q.placementAllowed(j, other) || !fits(j, other, other.FreeMemoryGB) {
 			continue
 		}
-		if winner := q.candidate(other, nil, scan); winner != nil && winner.ID == j.ID && q.placementBetter(j, other, m, scan) {
+		// workerIdle permits a shared started build. Preserve a strict
+		// preference for it, but never defer on an identity tie to a busy peer.
+		if winner := q.candidate(other, nil, scan); winner != nil && winner.ID == j.ID && q.placementBetterWithTie(j, other, m, !q.preparationActive(other), scan) {
 			return nil
 		}
 	}
