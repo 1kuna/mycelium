@@ -311,7 +311,7 @@ The CPU fixture above retains 301 → 201 s makespan, accelerator finish
 
 ### Validation ledger and remaining gate criterion
 
-The final `./scripts/gate.sh quick e060a9b9` did **not** pass its unchanged
+A final-code `./scripts/gate.sh quick e060a9b9` did **not** pass its unchanged
 three-minute wrapper budget: TERM at 175 s, exit 124, after 407 top-level race
 tests passed with no failures. Build, vet, Linux amd64/arm64 and native Darwin
 arm64 builds passed. The final diff, including the s034 rebase, selects 460
@@ -334,3 +334,12 @@ attempts and left owned fixture children after interrupted runs. Their ownership
 was verified before cleanup. That separate gate-runner defect is tracked in
 [#203](https://github.com/1kuna/mycelium/issues/203); this branch does not change
 the gate runner. Only source, fixtures and this concise evidence ledger are kept.
+
+
+A final retry after removing all cwd-verified orphan fixture shells also hit the
+unchanged deadline: **175 s, exit 124, 414 top-level race passes, no failures**.
+The quick-command acceptance item remains open; there are no further retries in
+this worker task. The combined selected-test results above remain valid for the
+same production code. The final handle audit also found detached shells without
+a gate-binary path, so cleanup used verified working directories, UID and
+supervisor ancestry before stopping those groups. #203 records that follow-up.
