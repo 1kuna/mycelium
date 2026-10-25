@@ -19,6 +19,80 @@ import (
 	"time"
 )
 
+// Two threads replay the same saved submission while the first owns the watcher.
+func TestProfileAdoptedObserverNotifier(t *testing.T) {
+	root := t.TempDir()
+	profiles := filepath.Join(root, ".mycelium", "profiles")
+	if err := os.MkdirAll(profiles, 0700); err != nil {
+		t.Fatal(err)
+	}
+	profile := "name: fixture\nproject: test\nclass: experiment\nsource: {directory: source}\nrun: {command: [true]}\ntargets: [{os: linux, arch: amd64, platform: cpu}]\ncheck: [true]\n"
+	path := filepath.Join(profiles, "fixture.yaml")
+	if err := os.WriteFile(path, []byte(profile), 0600); err != nil {
+		t.Fatal(err)
+	}
+	dir := filepath.Join(root, ".mycelium", "receipts", profileHash([]string{"test", "shared"}))
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	owner := profileObserver{Notify: filepath.Join(root, "thread-a-notify")}
+	other := filepath.Join(root, "thread-b-notify")
+	for _, hook := range []string{owner.Notify, other} {
+		if err := os.WriteFile(hook, []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	receipt := profileReceipt{Key: "shared", Project: "test", JobID: "existing-job", Status: "queued", Observation: "armed", Delivery: "armed", Intent: profileHash(struct {
+		Profile string
+		Args    []string
+	}{profile, nil})}
+	if err := saveProfileJSON(filepath.Join(dir, "receipt.json"), receipt); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveProfileJSON(filepath.Join(dir, "observer.json"), owner); err != nil {
+		t.Fatal(err)
+	}
+	lock, err := profileLock(filepath.Join(dir, "watch.lock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+	t.Setenv("PATH", root+string(os.PathListSeparator)+os.Getenv("PATH"))
+	for _, tc := range []struct{ name, notify, delivery string }{
+		{"other thread", other, "adopted_other_notifier"},
+		{"same notifier via PATH", filepath.Base(owner.Notify), "armed"},
+		{"saved notifier fallback", "", "armed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, stderr strings.Builder
+			err := runProfile(context.Background(), path, nil, "shared", tc.notify, "", "", "http://127.0.0.1:1", "fixture-token", &out, &stderr)
+			if err != nil {
+				t.Fatalf("adoption must succeed: %v", err)
+			}
+			var got profileReceipt
+			if err := json.Unmarshal([]byte(out.String()), &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.JobID != receipt.JobID || got.Observation != "armed" || got.Delivery != tc.delivery {
+				t.Fatalf("adopted receipt: %+v", got)
+			}
+			for _, private := range []string{owner.Notify, other, "fixture-token"} {
+				if strings.Contains(out.String(), private) {
+					t.Fatal("receipt exposed private notifier state")
+				}
+			}
+		})
+	}
+	var saved profileReceipt
+	if err := readProfileJSON(filepath.Join(dir, "receipt.json"), &saved); err != nil || saved.Delivery != "armed" {
+		t.Fatalf("owner receipt changed: %+v, %v", saved, err)
+	}
+	var cfg profileObserver
+	if err := readProfileJSON(filepath.Join(dir, "observer.json"), &cfg); err != nil || cfg != owner {
+		t.Fatalf("owner binding changed: %+v, %v", cfg, err)
+	}
+}
+
 func TestProfileObserverTimeoutAndTransport(t *testing.T) {
 	for _, mode := range []string{"timeout", "transport_error", "interrupted"} {
 		t.Run(mode, func(t *testing.T) {

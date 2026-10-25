@@ -58,7 +58,27 @@ func armProfileObserver(ctx context.Context, dir string, r *profileReceipt, cfg 
 		}
 		// An OS lock, not a PID file, proves there is exactly one live observer.
 		fmt.Fprintln(errOut, "adopted existing watcher for receipt:", dir)
-		return readProfileJSON(filepath.Join(dir, "receipt.json"), r)
+		if err := readProfileJSON(filepath.Join(dir, "receipt.json"), r); err != nil {
+			return err
+		}
+		var saved profileObserver
+		if err := readProfileJSON(filepath.Join(dir, "observer.json"), &saved); err != nil {
+			return err
+		}
+		// An omitted notifier inherits the saved binding. Compare explicit hooks
+		// by the same executable resolution used when arming, without running
+		// --check on a hook this observer will never use.
+		if cfg.Notify != "" {
+			resolved, err := exec.LookPath(cfg.Notify)
+			if err == nil {
+				resolved, err = filepath.Abs(resolved)
+			}
+			if err != nil || resolved != saved.Notify {
+				// This is the caller's view; preserve the owner's receipt and hook.
+				r.Delivery = "adopted_other_notifier"
+			}
+		}
+		return nil
 	}
 	defer lock.Close()
 	if err = readProfileJSON(filepath.Join(dir, "receipt.json"), r); err != nil {
