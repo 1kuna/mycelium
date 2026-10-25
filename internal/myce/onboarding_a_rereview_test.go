@@ -31,6 +31,9 @@ func TestReleaseApprovalMonotonic(t *testing.T) {
 				t.Fatal(err)
 			}
 			m.Version = version
+			// Identical approvals are idempotent; reusing an equal version for
+			// different artifact bytes must still require explicit force.
+			m.Artifacts[0].Size++
 			if err := q.ConfigureEnrollmentRelease(sign(), pub, "https://publisher.invalid"); err == nil {
 				t.Fatal("queue approved equal or older manifest without explicit override")
 			}
@@ -178,10 +181,13 @@ func TestReleaseApprovalSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer q.Close()
-	if err = q.ConfigureEnrollmentRelease(data, pub, "https://publisher.invalid"); err == nil {
-		t.Fatal("restart forgot approval monotonicity")
+	if err = q.ConfigureEnrollmentRelease(data, pub, "https://publisher.invalid"); err != nil {
+		t.Fatal("identical approval after restart was not idempotent", err)
 	}
-	if err = q.ConfigureEnrollmentRelease(data, pub, "https://publisher.invalid", true); err != nil {
+	if err = q.ConfigureEnrollmentRelease(data, pub, "https://publisher.invalid/changed"); err == nil {
+		t.Fatal("restart forgot approval monotonicity for changed metadata")
+	}
+	if err = q.ConfigureEnrollmentRelease(data, pub, "https://publisher.invalid/changed", true); err != nil {
 		t.Fatal("explicit restart re-approval refused", err)
 	}
 }

@@ -45,8 +45,10 @@ func TestLANReleaseApprovalPersistsPublicTrust(t *testing.T) {
 	if approved.CACert != ca || approved.Validate() != nil {
 		t.Fatal("publisher trust not retained across restart")
 	}
-	// An equal approval still requires the existing explicit downgrade override.
-	if err = q.ConfigureEnrollmentReleaseWithCA(data, pub, "https://publisher.invalid", ca); err == nil {
-		t.Fatal("version fence bypassed")
+	if err = q.ConfigureEnrollmentReleaseWithCA(data, pub, "https://publisher.invalid", ca); err != nil {
+		t.Fatal("identical approval not idempotent", err)
+	}
+	if err = q.ConfigureEnrollmentReleaseWithCA(data, pub, "https://publisher.invalid/changed", ca); err == nil {
+		t.Fatal("equal version with changed metadata bypassed version fence")
 	}
 }

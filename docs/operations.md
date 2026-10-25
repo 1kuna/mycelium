@@ -142,6 +142,16 @@ services and reports differences; preserve the snapshot for recovery. Effective
 drop-ins that override execution, credentials or containment block activation;
 consumer files are preserved. Check health and exact cleanup before resuming.
 
+For a signed-release deployment, installing the queue/worker bytes alone leaves
+the default onboarding approval unchanged. After verifying the updated queue,
+run `myce release approve --config QUEUE_CONFIG --release-manifest RELEASE_JSON
+--release-key PUBLIC_PEM --release-url HTTPS_PUBLISHER_DIRECTORY` (plus
+`--release-ca PUBLIC_CERTIFICATE_PEM` for a private publisher). This authenticated,
+verified update persists the new default without changing catalogs or service
+settings. Identical reruns are idempotent; older or changed equal-version approvals
+require `--allow-downgrade`. Do this before fresh invites or one-command onboarding;
+see the [signed-release deployment step](guide-onboarding-releases.md#advance-the-default-after-a-signed-update).
+
 Saved configs accept the retired local-control fields during overlay and omit
 them when rewritten; runtime options and secret references remain intact. Old state is never converted or
 silently cleared. See [fresh install](guide-fresh-install.md).

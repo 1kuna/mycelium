@@ -49,9 +49,10 @@ myce queue --release-manifest RELEASE_JSON --release-key PUBLIC_PEM \
 The queue refuses invalid signatures, incomplete target matrices, incompatible
 protocols or a Mac artifact lacking native sensing. Approval is persisted in the
 SQLite queue and requires a version strictly newer than its current approval.
-To intentionally re-approve the same release (including after restarting with the
-same manifest), or approve an older one, append `--allow-downgrade` to the queue
-command. Signature and artifact validation still apply. A pinned authenticated
+Repeating the identical verified manifest, publisher URL and CA is idempotent,
+including after a restart. To replace an equal version's bytes or publisher
+metadata, or approve an older one, append `--allow-downgrade` to the queue
+command. Signature and manifest validation still apply. A pinned authenticated
 `myce invite` fetches the approved public metadata; a queue without release
 configuration returns `release_unavailable` and cannot mint a bootstrap command.
 The publisher certificate trust is ordinary HTTPS. The LAN queue's full
@@ -73,6 +74,45 @@ option, ordinary HTTPS trust is unchanged. Existing joining certificates have no
 hostname SAN and cannot serve as ordinary HTTPS publisher certificates; provision
 a separate publisher certificate with the correct SAN. A static HTTPS directory
 can serve the signed release without changing the queue's joining identity.
+
+## Advance the default after a signed update
+
+Installing signed runtime bytes on the queue or workers does **not** change the
+queue's persisted default onboarding release. After publishing the artifacts and
+installing/verifying the new queue runtime, advance that default as a deployment
+step, before issuing fresh invites or using one-command onboarding:
+
+```sh
+myce release approve --config QUEUE_CONFIG \
+  --release-manifest RELEASE_JSON --release-key PUBLIC_PEM \
+  --release-url HTTPS_PUBLISHER_DIRECTORY
+```
+
+Run as the ordinary queue administrator. `--config` reads the existing saved
+queue authority; no credential extraction or service reconfiguration is needed.
+Installed hypha authority is also supported when `--config` is omitted. The queue
+must already run a version supporting this command's approval endpoint.
+Supply the independently provisioned publisher public key, never a key obtained
+from the manifest. The command verifies the signed manifest locally and the
+authenticated queue verifies it again using the existing signature, protocol,
+target-matrix and native-sensing checks before committing approval to SQLite.
+This approves the manifest; it does not download or install artifacts.
+
+For a private publisher, add `--release-ca PUBLIC_CERTIFICATE_PEM` on each approval;
+omitting it selects ordinary HTTPS trust. The command updates only the default
+release, publisher URL and public CA. It preserves the loaded environment/model
+catalogs, saved service settings, queue database path and joining identity, and
+does not restart the queue or reinstall workers. Success prints the approved
+version and publisher URL. Identical reruns are safe after a lost response;
+older versions or changed metadata at equal version precedence require explicit
+`--allow-downgrade`, which never bypasses signature or manifest validation.
+
+After success, `GET /api/invites/release` over the authenticated queue connection
+returns the new default. Run ordinary `myce invite` without release overrides for
+fresh machines; one-command onboarding uses the same default. Previously printed
+invitation lines remain bound to their original release.
+
+## Invite and upgrade machines
 
 An inviter can explicitly override the configured distribution with
 `--release-manifest FILE --release-key PUBLIC_PEM --release-url HTTPS_DIRECTORY`.

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"debug/elf"
 	"debug/macho"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 )
 
 func versionCommand(args []string) error {
@@ -35,6 +37,9 @@ func versionCommand(args []string) error {
 	return json.NewEncoder(os.Stdout).Encode(info)
 }
 func releaseCommand(args []string) error {
+	if len(args) > 0 && args[0] == "approve" {
+		return releaseApproveCommand(args[1:])
+	}
 	if len(args) == 1 && args[0] == "targets" {
 		return json.NewEncoder(os.Stdout).Encode(myce.ReleaseTargets)
 	}
@@ -49,7 +54,7 @@ func releaseCommand(args []string) error {
 		return nil
 	}
 	if len(args) == 0 || args[0] != "manifest" {
-		return errors.New("usage: myce release manifest --dir DIR --version VERSION --signing-key PRIVATE_PEM")
+		return errors.New("usage: myce release manifest --dir DIR --version VERSION --signing-key PRIVATE_PEM\n       myce release approve --release-manifest FILE --release-key PUBLIC_PEM --release-url HTTPS_DIRECTORY [--config CONFIG] [--release-ca PUBLIC_PEM] [--allow-downgrade]")
 	}
 	f := flag.NewFlagSet("release manifest", flag.ContinueOnError)
 	dir := f.String("dir", "", "release artifacts directory")
@@ -125,4 +130,58 @@ func releaseCommand(args []string) error {
 		checksums += fmt.Sprintf("%s  %s\n", a.SHA256, a.File)
 	}
 	return os.WriteFile(filepath.Join(*dir, "SHA256SUMS"), []byte(checksums), 0644)
+}
+
+func releaseApproveCommand(args []string) error {
+	f := flag.NewFlagSet("release approve", flag.ContinueOnError)
+	authority := installedClientFlags(f)
+	manifest := f.String("release-manifest", "", "signed enrollment release JSON")
+	key := f.String("release-key", "", "independently provisioned publisher Ed25519 public key PEM")
+	origin := f.String("release-url", "", "trusted publisher HTTPS directory")
+	ca := f.String("release-ca", "", "provisioned publisher CA PEM (default ordinary HTTPS trust)")
+	force := f.Bool("allow-downgrade", false, "explicitly replace an equal or older default approval")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if f.NArg() != 0 || *manifest == "" || *key == "" || *origin == "" {
+		return errors.New("release approve requires --release-manifest, --release-key and --release-url")
+	}
+	data, err := os.ReadFile(*manifest)
+	if err != nil {
+		return err
+	}
+	pub, err := myce.ReadReleasePublicKey(*key)
+	if err != nil {
+		return err
+	}
+	m, err := myce.VerifyRelease(data, pub)
+	if err != nil {
+		return err
+	}
+	approval := myce.EnrollmentReleaseApproval{SignedRelease: data, PublicKey: pub, Origin: *origin, AllowDowngrade: *force}
+	if *ca != "" {
+		cert, err := os.ReadFile(*ca)
+		if err != nil {
+			return err
+		}
+		approval.CACert = string(cert)
+	}
+	if err = (myce.EnrollmentRelease{Manifest: m, Origin: approval.Origin, CACert: approval.CACert}).Validate(); err != nil {
+		return err
+	}
+	client, err := authority.client()
+	if err != nil {
+		return err
+	}
+	if client.HTTP != nil {
+		defer client.HTTP.CloseIdleConnections()
+	}
+	// Bound one admin HTTP transaction, including an unavailable queue. Retrying
+	// after a lost response is safe because identical approvals are idempotent.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	if err = client.Call(ctx, "POST", "/api/invites/release", approval, nil); err != nil {
+		return err
+	}
+	return json.NewEncoder(os.Stdout).Encode(map[string]string{"approved_version": m.Version, "origin": approval.Origin})
 }

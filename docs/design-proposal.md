@@ -1657,7 +1657,10 @@ then supplies approved public release metadata to pinned authenticated inviters.
 Explicit local manifest/key/origin overrides perform the same verification.
 Release versions are ordered semver values (for example `v3.1.0`). Queue approval
 is persisted in SQLite and must strictly increase unless `--allow-downgrade`
-explicitly re-approves or downgrades it. Semver build metadata has equal precedence.
+explicitly re-approves or downgrades it. Repeating an identical verified approval
+is idempotent. `myce release approve` advances the running queue's default after
+a signed deployment without changing catalogs or service settings.
+Semver build metadata has equal precedence.
 The verified manifest binds version, protocols, OS/arch, size, SHA-256 and native
 Mac sensing. No release tooling existed to reuse. A small POSIX command is needed
 because clean hosts have no myce, Go or Git. Its embedded verified hash matrix

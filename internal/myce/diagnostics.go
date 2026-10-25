@@ -19,6 +19,8 @@ var rejectionMessages = map[string]string{
 	"device_fault_i915":                     "device quarantined after an i915 kernel driver fault; clear after recovery",
 	"device_fault_nvidia_xid":               "device quarantined after an NVIDIA Xid; clear after recovery",
 	"release_unavailable":                   "queue administrator must configure a signed release and publisher URL before inviting",
+	"release_approval_invalid":              "release approval requires a valid signed manifest, independently provisioned Ed25519 public key, HTTPS publisher URL and optional public CA certificates",
+	"release_downgrade_refused":             "queue approval requires a newer version or identical approval; use --allow-downgrade explicitly to replace an equal or older release",
 	"invite_rejected":                       "invite expired, already used, or does not match this queue",
 	"machine_renamed":                       "machine retired; use its replacement machine and device selector",
 	"no_matching_device":                    "no matching device is available",
