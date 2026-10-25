@@ -39,12 +39,12 @@ func TestDockerCommandContract(t *testing.T) {
 
 func TestDockerSupplementalGroups(t *testing.T) {
 	image := "image@sha256:" + strings.Repeat("a", 64)
-	command := []string{"docker", "run", "--user", "1000", "--device", "/dev/dri/renderD128", "--group-add", "109", "--group-add=render", image, "echo", "ok"}
+	command := []string{"docker", "run", "--user", "1000", "--device", "/dev/dri/renderD128", "--group-add", "109", "--group-add=render", "--group-add=2147483647", image, "echo", "ok"}
 	args, err := dockerRunArgs(command)
 	if err != nil || !slices.Equal(args, command[2:]) {
 		t.Fatalf("supplemental groups not preserved: %q, %v", args, err)
 	}
-	for _, value := range []string{"", "-1", "--privileged", "render:109", "render group", "render\n", "4294967296", "/etc/group"} {
+	for _, value := range []string{"", "-1", "--privileged", "render:109", "render group", "render\n", "2147483648", "4294967296", "/etc/group"} {
 		if _, err := dockerRunArgs([]string{"docker", "run", "--group-add=" + value, image}); err == nil {
 			t.Errorf("accepted malformed group %q", value)
 		}

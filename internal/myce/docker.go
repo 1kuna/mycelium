@@ -57,8 +57,8 @@ func dockerRunArgs(command []string) ([]string, error) {
 				return nil, fmt.Errorf("unsupported Docker %s value", flag)
 			}
 			if flag == "--group-add" && !dockerGroupName.MatchString(value) {
-				if _, err := strconv.ParseUint(value, 10, 32); err != nil {
-					return nil, errors.New("Docker --group-add requires a numeric GID or group name")
+				if _, err := strconv.ParseUint(value, 10, 31); err != nil {
+					return nil, errors.New("Docker --group-add requires a GID from 0 to 2147483647 or group name")
 				}
 			}
 			if flag == "--volume" || flag == "-v" {
