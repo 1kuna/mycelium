@@ -70,7 +70,7 @@ func (q *Queue) declaredCallPlan(c *ModelCall, model Model) []batchAllocation {
 	var components []batchComponent
 	for _, m := range q.plannerMachines() {
 		s := q.s.ModelSlots[targetSlotKey(m, c.Model)]
-		if s == nil || s.State != "ready" || s.InFlight != 0 || !q.callPlacementAllowed(c, m) || !q.placementAllowed(callJob(c), m) || q.capReasonFor(callJob(c), m) != "" || !q.modelUsableMachine(model, m) || q.unreported[m.ID] || q.callExcludes(c, m.ID, targetDevice(m)) {
+		if s == nil || s.State != "ready" || s.InFlight != 0 || !q.callPlacementAllowed(c, m) || !q.placementPolicyAllowed(callJob(c), m, false) || q.capReasonFor(callJob(c), m) != "" || !q.modelUsableMachine(model, m) || q.unreported[m.ID] || q.callExcludes(c, m.ID, targetDevice(m)) {
 			continue
 		}
 		component := batchComponent{id: targetKey(m), host: hostID(m), cpuBudget: 1, hostBudget: model.HostMemoryGB}

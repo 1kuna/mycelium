@@ -123,7 +123,7 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool) 
 	need, host := j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB
 	if !batch {
 		model, ok := q.model(j.Spec.Needs.Model)
-		if !ok {
+		if !ok || q.modelLoadDiskHeadroomReason(model, m) != "" {
 			return nil
 		}
 		need, host = model.MemoryGB, model.HostMemoryGB

@@ -304,3 +304,72 @@ func TestDiskHeadroomFreshnessUsesReceiveTimeAndReportedAge(t *testing.T) {
 		})
 	}
 }
+
+// Review probe A1: routing to a ready server writes no new model/data bytes.
+func TestDiskHeadroomRoutesReadyModelBelowFloor(t *testing.T) {
+	for _, hold := range []bool{false, true} {
+		t.Run("production-hold="+stringBool(hold), func(t *testing.T) {
+			q, c, m := modelFixture(t, "model-host")
+			if hold {
+				if err := q.ConfigureHosts(map[string]HostPolicy{"model-host": {ProductionHold: true}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			first := addModelCall(t, q, "production")
+			reportModel(t, q, m, "ready")
+			if err := q.finishCall(first.ID); err != nil {
+				t.Fatal(err)
+			}
+			m = reportDisk(t, m, c, "volume", []string{"data", "model-cache"}, 100<<30, 512<<20)
+			reportModel(t, q, m, "ready")
+			prod := addModelCall(t, q, "production")
+			if prod.Machine != m.ID || prod.Attempt == "" {
+				t.Fatalf("disk floor blocked a ready server: %+v", prod)
+			}
+		})
+	}
+}
+
+func TestDiskHeadroomPinnedEngineRestartsWithCachedFiles(t *testing.T) {
+	q, c, m := modelFixture(t)
+	if err := q.Pin(ModelPin{Model: "test", Project: "test", Machine: m.ID}); err != nil {
+		t.Fatal(err)
+	}
+	slot := q.s.ModelSlots[slotKey(m.ID, "test")]
+	recoveryReport(t, q, m, slot, "ready")
+	old := slot.Attempt
+	m.CachedModels = []string{"test"}
+	m = reportDisk(t, m, c, "volume", []string{"data", "model-cache"}, 100<<30, 512<<20)
+	recoveryReport(t, q, m, slot, "unloading")
+	recoveryReport(t, q, m, slot, "failed")
+	c.Advance(time.Second)
+	m = reportDisk(t, m, c, "volume", []string{"data", "model-cache"}, 100<<30, 512<<20)
+	recoveryReport(t, q, m, slot, "failed")
+	if slot.State != "loading" || slot.Attempt == old {
+		t.Fatalf("disk floor blocked cached pinned-engine restart: %+v", slot)
+	}
+}
+
+func TestDiskHeadroomNewModelLoadChargesCacheSize(t *testing.T) {
+	q, c, m := modelFixture(t)
+	config := q.models
+	config.Models[0].SizeBytes = 2 << 30
+	if err := q.ConfigureModels(config); err != nil {
+		t.Fatal(err)
+	}
+	m.ModelConfigHash = modelConfigHash(q.models)
+	m = reportDisk(t, m, c, "data", []string{"data"}, 100<<30, 5<<30)
+	cache := DiskVolume{ID: "cache", Roots: []string{"model-cache"}, TotalBytes: 100 << 30, FreeBytes: 2 << 30, SampledAt: c.Now()}
+	m.DiskVolumes = append(m.DiskVolumes, cache)
+	check(t, q, m, nil)
+	call := addModelCall(t, q, "production")
+	if slot := q.s.ModelSlots[slotKey(m.ID, "test")]; slot != nil {
+		t.Fatal("new load ignored model size plus cache floor", slot)
+	}
+	m.DiskVolumes[0].FreeBytes = 512 << 20
+	m.DiskVolumes[1].FreeBytes = 4 << 30
+	check(t, q, m, nil)
+	if slot := q.s.ModelSlots[slotKey(m.ID, "test")]; slot == nil || slot.State != "loading" || call.Machine != "" {
+		t.Fatal("cache space did not admit new load despite unwritten data root", slot)
+	}
+}

@@ -58,11 +58,18 @@ immutable input cache copy charges `file-cache`; NAS/path inputs bypass that cac
 Shared volumes sum those writes once per
 role. Checkpoint writes charge only declared resumable/checkpoint work, using a
 measured resume manifest or optional `spec.disk.checkpoint_bytes` hint. A separate
-environment or model-cache volume checks the floor when the job uses it. The
-existing cache copy/eviction checks still govern actual model downloads.
+environment volume checks the floor when the job uses it. New engine/model loads
+check the model-cache volume for the known model size plus its floor when files
+need copying. Calls to an already-ready slot, and pinned-engine restarts whose
+files are cached or read in place, do not run disk admission checks. The existing
+cache copy/eviction checks still govern actual model downloads.
 
-Estimates do not predict future writes by other jobs or programs, or unreported
-scratch/archive expansion. Cross-job output-size learning remains
+The NAS checkpoint volume is shared across hosts. Each host's observation can
+admit concurrent checkpoint writes against the same free-space figure. A host
+with multiple GPUs can also admit several jobs before their writes appear in a
+sample. Both are accepted limits of admission from observations without disk
+reservations. Estimates do not predict future writes by other jobs or programs,
+or unreported scratch/archive expansion. Cross-job output-size learning remains
 a follow-up; existing observation keys learn memory/throughput, not disk size.
 
 Machine `cpu_isolation` reports `select-none` after runtime qualification,

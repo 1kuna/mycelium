@@ -349,7 +349,17 @@ func (q *Queue) productionTarget(j *Job, call *ModelCall) string {
 	var best *Machine
 	bestStops := int(^uint(0) >> 1)
 	for _, m := range machines {
-		if q.diskHeadroomReason(j, m) != "" || q.dockerBlocker(hostID(m)) != "" || q.unreported[m.ID] || !q.jobAllowsMachine(j, m.ID) || !fitsWithoutHostMemory(j, m, m.TotalMemoryGB) {
+		capacity := *m
+		diskReason := ""
+		if call == nil {
+			diskReason = q.diskHeadroomReason(j, m)
+		} else {
+			// Calls reuse residency; only a new load can need cache writes.
+			capacity.DiskVolumes = nil
+			model, _ := q.model(call.Model)
+			diskReason = q.modelLoadDiskHeadroomReason(model, m)
+		}
+		if diskReason != "" || q.dockerBlocker(hostID(m)) != "" || q.unreported[m.ID] || !q.jobAllowsMachine(j, m.ID) || !fitsWithoutHostMemory(j, &capacity, m.TotalMemoryGB) {
 			continue
 		}
 		model, hasModel := q.model(j.Spec.Needs.Model)

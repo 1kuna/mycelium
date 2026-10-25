@@ -70,7 +70,8 @@ func (q *Queue) modelUsableMachine(model Model, m *Machine) bool {
 }
 
 func (q *Queue) callPlacementAllowed(c *ModelCall, m *Machine) bool {
-	return q.placementAllowedForUse(callJob(c), m, true)
+	// Routing/demand checks do not launch a model or write its cache files.
+	return q.placementPolicyAllowed(callJob(c), m, true)
 }
 
 var localNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)

@@ -159,6 +159,26 @@ func (q *Queue) diskHeadroomReason(j *Job, m *Machine) string {
 	return ""
 }
 
+// Model loads only write a cache copy when verified files are not present.
+// Calls to ready/loading slots and restarts with cached/local files write none.
+func (q *Queue) modelLoadDiskHeadroomReason(model Model, m *Machine) string {
+	if model.DirectNAS || model.LocalSource != "" || slices.Contains(m.CachedModels, model.Name) {
+		return ""
+	}
+	if slot := q.s.ModelSlots[targetSlotKey(m, model.Name)]; slot != nil && slot.Session == m.Session && (slot.State == "ready" || slot.State == "loading") {
+		return ""
+	}
+	for _, v := range m.DiskVolumes {
+		if slices.Contains(v.Roots, "model-cache") {
+			v = q.currentDiskVolume(v, m.DiskReceivedAt)
+			if reason := diskVolumeReason(m, v, uint64(max(0, model.SizeBytes))); reason != "" {
+				return reason
+			}
+		}
+	}
+	return ""
+}
+
 // Capacity preserves measured totals while removing transient use and errors.
 func diskCapacityVolumes(volumes []DiskVolume) []DiskVolume {
 	out := []DiskVolume{}
@@ -203,7 +223,14 @@ func (q *Queue) diskWaitingReason(j *Job, host string) string {
 		if !executionTargetMatches(j.Spec, m) || !deviceAllowed(j, m) || !j.Spec.Needs.cpuOnly() && (m.GPU == "cpu" || len(j.Spec.Needs.Platform.Required) > 0 && !slices.Contains(j.Spec.Needs.Platform.Required, m.GPU)) {
 			continue
 		}
-		if reason := q.diskHeadroomReason(j, m); reason != "" {
+		reason := ""
+		if call := q.calls[j.ID]; call != nil {
+			model, _ := q.model(call.Model)
+			reason = q.modelLoadDiskHeadroomReason(model, m)
+		} else {
+			reason = q.diskHeadroomReason(j, m)
+		}
+		if reason != "" {
 			reasons = append(reasons, reason)
 		} else {
 			return ""
