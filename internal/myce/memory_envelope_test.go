@@ -768,3 +768,63 @@ func TestMemoryEnvelopeNativeGroupPeak(t *testing.T) {
 		t.Fatalf("whole group peak missing: %s", data)
 	}
 }
+
+// A previously accepted explicit-cap peak must stop seeding auto once a
+// comparable explicit attempt demonstrates that the ceiling is binding.
+func TestMemoryEnvelopeExplicitPressureInvalidatesSeed(t *testing.T) {
+	q, clock, m, s := observationFixture(t)
+	s.SizeHint.HostMemoryGB = 4
+	seed := startObservation(t, q, m, s)
+	clock.Advance(time.Second)
+	host := 4.0 // Models a pre-#184 cap-bound sample stored as unconstrained.
+	r := result(&seed, true)
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	bound := startObservation(t, q, m, s)
+	clock.Advance(time.Second)
+	r = result(&bound, true)
+	r.MemoryPeak = envelopeCeilingPeak(t, host)
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	s.Needs.Memory = "auto"
+	s.SizeHint = SizeHint{} // An old declaration must not act as a submitter hint.
+	next := startObservation(t, q, m, s)
+	if next.MemoryEnvelope.Source != "exploratory (previous peak constrained)" {
+		t.Errorf("constrained explicit attempt left its old seed usable: %+v", next.MemoryEnvelope)
+	}
+	// Subsequent auto pressure must continue to invalidate comparable evidence.
+	clock.Advance(time.Second)
+	r = result(&next, true)
+	r.MemoryPeak = envelopeCeilingPeak(t, next.MemoryEnvelope.HostGB)
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	third := startObservation(t, q, m, s)
+	if third.MemoryEnvelope.Source != "exploratory (previous peak constrained)" {
+		t.Errorf("auto pressure failed to clear the explicit seed: %+v", third.MemoryEnvelope)
+	}
+}
+
+func envelopeCeilingPeak(t *testing.T, capGB float64) *AttemptMemoryPeak {
+	t.Helper()
+	a, err := fakeCeilings(t).create("attempt-bound", int64(capGB*(1<<30)), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, value := range map[string]string{
+		"memory.stat":   "anon " + strconv.FormatInt(int64(capGB*(1<<30)), 10) + "\nkernel 0\nshmem 0\n",
+		"memory.events": "max 9907\nhigh 0\noom 0\noom_kill 0\n",
+	} {
+		if err := os.WriteFile(filepath.Join(a.path, name), []byte(value), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	peak := a.peak()
+	if peak == nil || !peak.Constrained {
+		t.Fatal("resident ceiling pressure was not classified")
+	}
+	return peak
+}

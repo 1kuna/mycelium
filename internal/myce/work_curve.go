@@ -253,11 +253,12 @@ func (p WorkObservation) summary(state string) string {
 // Explicit OOMs forbid their performance point; auto OOMs and constrained peaks
 // only invalidate comparable memory measurements, so exploration can re-teach it.
 func (q *Queue) recordWorkOOM(j *Job, r Result, oomFailure bool) {
+	memoryOnly := j.Spec.Needs.Memory == "auto" || !oomFailure
 	var key *ObservationKey
 	if j.Timing != nil {
 		key = j.Timing.Key
 	}
-	if key == nil && j.Spec.Needs.Memory == "auto" {
+	if key == nil && memoryOnly {
 		provenance := *j
 		provenance.Attempt = 0 // Resumed failures invalidate the same memory class.
 		key, _ = q.workObservationKey(&provenance)
@@ -266,7 +267,7 @@ func (q *Queue) recordWorkOOM(j *Job, r Result, oomFailure bool) {
 		return
 	}
 	k := *key
-	if j.Spec.Needs.Memory == "auto" {
+	if memoryOnly {
 		configuration := memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
 		for id, point := range q.s.WorkObservations {
 			if sameMemoryWork(point, k, configuration) {
