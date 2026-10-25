@@ -342,11 +342,11 @@ func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
 	if j == nil || environmentReady(j, m) {
 		return q.extensionPreparationPlan(m)
 	}
-	for _, other := range q.s.Machines {
-		if other.ID == m.ID || !q.workerIdle(other, j) || !q.placementAllowed(j, other) || !fits(j, other, other.FreeMemoryGB) {
+	for _, other := range q.plannerMachines() {
+		if sameTarget(other, m) || q.preparationActive(other) || q.preparationStopping(other) || !q.workerIdle(other, j) || !q.placementAllowed(j, other) || !fits(j, other, other.FreeMemoryGB) {
 			continue
 		}
-		if q.placementBetter(j, other, m) {
+		if winner := q.candidate(other, nil); winner != nil && winner.ID == j.ID && q.placementBetter(j, other, m) {
 			return nil
 		}
 	}

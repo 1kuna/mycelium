@@ -397,12 +397,14 @@ func (q *Queue) productionTarget(j *Job, call *ModelCall) string {
 				stops++
 			}
 		}
-		// A first program still chooses the most capable free hypha before the
-		// hold binds it to a host. Existing minimal-preemption ordering remains.
-		preferFreeProgram := best != nil && stops == 0 && bestStops == 0 && j.Spec.extensionJob() && fits(j, m, m.FreeMemoryGB) && (!fits(j, best, best.FreeMemoryGB) || q.capabilityPlacementBetter(j, m, best))
-		if best == nil || stops < bestStops || preferFreeProgram {
-			best = m
-			bestStops = stops
+		// A hold is a custody commitment even when production is already busy.
+		// Value only ranks immediately free fitting alternatives; the common
+		// release planner still governs actual preemption after binding.
+		freeNow := q.workerIdle(m, j) && !q.preparationActive(m) && !q.preparationStopping(m) && fits(j, m, m.FreeMemoryGB)
+		bestFree := best != nil && q.workerIdle(best, j) && !q.preparationActive(best) && !q.preparationStopping(best) && fits(j, best, best.FreeMemoryGB)
+		preferFreeTarget := best != nil && stops == 0 && bestStops == 0 && freeNow && (!bestFree || q.targetPlacementBetter(j, m, best))
+		if best == nil || stops < bestStops || preferFreeTarget {
+			best, bestStops = m, stops
 		}
 	}
 	if best == nil {

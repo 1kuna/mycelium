@@ -311,7 +311,15 @@ func (q *Queue) plannerMachines() []*Machine {
 func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 	order, reasons := map[string]int{}, map[string]string{}
 	sets := make([]*candidateSet, 0, len(q.s.Machines))
+	immediate := map[string]*Machine{}
 	for _, m := range q.plannerMachines() {
+		// Explain the current admissible target, even when the queue-order
+		// projection also includes a cheaper host whose capacity is occupied.
+		if j := q.pick(m); j != nil && q.workerIdle(m, j) && q.placementAllowed(j, m) && q.checkpointReady(j, m) {
+			if previous := immediate[j.ID]; previous == nil || q.targetPlacementBetter(j, m, previous) {
+				immediate[j.ID] = m
+			}
+		}
 		copy := *m // Projection changes only this scalar memory value; inventory stays read-only.
 		for _, r := range q.s.Jobs {
 			if batchOnTarget(r, m) && (r.State == "running" || r.State == "stopping") {
@@ -334,7 +342,7 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 		var selected *candidateSet
 		for _, set := range sets {
 			winner := set.pick(excluded)
-			if winner != nil && (best == nil || set.before(winner, best)) {
+			if winner != nil && (best == nil || set.before(winner, best) || winner.ID == best.ID && q.targetPlacementBetter(winner, set.m, selected.m)) {
 				best, selected = winner, set
 			}
 		}
@@ -344,9 +352,12 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 		order[best.ID] = n
 		excluded[best.ID] = true
 		target := selected.m
+		if current := immediate[best.ID]; current != nil {
+			target = current
+		}
 		// Explain the first competing job, not a separate UI ordering heuristic.
 		winner := selected.pick(nil)
-		base := "waiting for a worker to pull this job"
+		base := "waiting for a worker to pull this job; " + valueReason(q.hostValues()[hostID(target)], target)
 		live := q.s.Machines[target.ID]
 		for _, view := range q.machineTargets(live) {
 			if sameTarget(view, target) {

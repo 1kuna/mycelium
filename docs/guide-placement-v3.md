@@ -15,13 +15,27 @@ Live free-memory checks, operator budgets and reservations still apply. Unknown
 native profile sizes wait; explicitly fake resources use their configured
 allowance. Workers must report the current protocol and a capability profile; unknown capacity withholds admission.
 
-Among free eligible hyphae, measured reference throughput now supplies a
-provisional predicted finish time, including file delivery and known preparation.
-See [the onboarding benchmark](guide-benchmark-v3.md) for units, unknown-data
-fallbacks and limits. Without comparable measurements a first program retains
-the capacity order (accelerator-reachable memory, system memory, CPUs, hypha ID).
-Priority, preemption, fairness, production holds and start authorization still
-use the existing scheduler and cannot be bypassed by speed.
+Among admissible targets for the same work, preserve scarce machines first
+(MY-18). Measured accelerator backends and usable memory tiers, plus host RAM
+tiers above the fleet minimum, form capability bands. Each band counts physical
+hosts, regardless of their number of devices or worker rows. Compare how many
+bands each host supplies alone, then how many it shares with one other host,
+and so on: fewer rare bands wins. Equal vectors prefer smaller usable host RAM,
+then existing measured completion/affinity and stable target identity. Unified
+RAM remains one physical allowance; host and accelerator RAM are never added to
+invent capacity or value. Unknown inventory has no invented cheap score; a known
+fitting host precedes it, but an unknown-only admissible target still runs.
+
+Eligibility, qualification, owner policy, priority tier, project deficit, free
+capacity before preemption, and victim disruption costs all precede value.
+Temporary occupancy does not change a host's capability bands. A busy, lost,
+owner-active, recovering or otherwise inadmissible cheap host cannot make work
+wait on an idle scarce host. Value creates no reservation, changes no fair-share
+charge and never preempts equal-tier work. Pulls, status and simulation use the
+shared planner; status reports the host scarcity vector and usable RAM, or an
+explicit unknown reason. See [the onboarding benchmark](guide-benchmark-v3.md)
+for the measured completion tie-break. Explicit speed/deadline goals are a later
+slice; no new goal or deadline policy is introduced here.
 
 Successful current attempts save observations in the same SQLite queue. The
 next matching submission and already queued matching programs reuse the largest

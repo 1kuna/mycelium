@@ -253,6 +253,10 @@ func (q *Queue) recordModelUse(name string) {
 
 // placementBetter applies the same rule to foreground placement and build plans.
 func (q *Queue) placementBetter(j *Job, a, b *Machine) bool {
+	value, knownValue := q.valueCompare(a, b)
+	if value != 0 {
+		return value < 0
+	}
 	if j.Spec.Needs.cpuOnly() && (a.GPU == "cpu") != (b.GPU == "cpu") {
 		return a.GPU == "cpu"
 	}
@@ -272,39 +276,57 @@ func (q *Queue) placementBetter(j *Job, a, b *Machine) bool {
 	if modelLoaded(j, a) != modelLoaded(j, b) {
 		return modelLoaded(j, a)
 	}
-	return q.loadSeconds(j.Spec.Needs.Model, a)+environmentSeconds(j, a) < q.loadSeconds(j.Spec.Needs.Model, b)+environmentSeconds(j, b)
+	ac, bc := q.loadSeconds(j.Spec.Needs.Model, a)+environmentSeconds(j, a), q.loadSeconds(j.Spec.Needs.Model, b)+environmentSeconds(j, b)
+	if ac != bc {
+		return ac < bc
+	}
+	return knownValue && targetKey(a) < targetKey(b)
 }
 func (q *Queue) betterPlacement(j *Job, m *Machine) bool {
 	if j.Spec.FanOut != nil {
 		return false
-	} // The discrete plan already selected this component.
-	// Plain commands and component targets use the same preferred-platform
-	// deferral as legacy workers, before the specialized placement ranking.
-	if len(j.Spec.Needs.Platform.Preferred) > 0 && !contains(j.Spec.Needs.Platform.Preferred, m.GPU) {
-		for _, other := range q.plannerMachines() {
-			if contains(j.Spec.Needs.Platform.Preferred, other.GPU) && q.placementAllowed(j, other) && fits(j, other, other.FreeMemoryGB) && affinity(j, other) >= affinity(j, m) && q.workerBatchIdle(other) {
-				return true
-			}
-		}
-	}
-	if j.Spec.extensionJob() {
-		for _, other := range q.plannerMachines() {
-			if !sameTarget(other, m) && !q.unreported[other.ID] && q.workerIdle(other, j) && q.placementAllowed(j, other) && q.checkpointReady(j, other) && fits(j, other, other.FreeMemoryGB) && q.capabilityPlacementBetter(j, other, m) {
-				return true
-			}
-		}
-		return false
-	}
-	if !j.Spec.Needs.cpuOnly() && j.Spec.Needs.Model == "" && j.Spec.Environment.Key() == "" {
-		return false
-	}
+	} // The discrete plan selected this component.
+	values := q.hostValues()
 	for _, other := range q.plannerMachines() {
-		if sameTarget(other, m) || !q.workerIdle(other, j) || !q.placementAllowed(j, other) || !fits(j, other, other.FreeMemoryGB) {
+		if sameTarget(other, m) || !q.workerIdle(other, j) || !q.placementAllowed(j, other) || !q.checkpointReady(j, other) {
 			continue
 		}
-		if q.placementBetter(j, other, m) {
+		// Value cannot change the project winning this target's tier/deficit turn.
+		winner := q.candidate(other, nil)
+		if winner == nil || winner.ID != j.ID || !fits(winner, other, other.FreeMemoryGB) {
+			continue
+		}
+		value, known := compareHostValue(values, other, m)
+		if value != 0 {
+			// Only immediately admissible capacity can defer a pull for host value.
+			// In particular a cheap host's build or cleanup creates no reservation.
+			if value < 0 && q.pick(other) != nil {
+				return true
+			}
+			continue
+		}
+		// Preserve explicit platform preference and legacy measured/affinity order
+		// within a value tie (or when both inventories have unknown value).
+		if len(j.Spec.Needs.Platform.Preferred) > 0 && !contains(j.Spec.Needs.Platform.Preferred, m.GPU) && contains(j.Spec.Needs.Platform.Preferred, other.GPU) && affinity(j, other) >= affinity(j, m) {
 			return true
+		}
+		if j.Spec.extensionJob() {
+			if q.capabilityPlacementBetter(j, other, m) {
+				return true
+			}
+		} else if known || j.Spec.Needs.cpuOnly() || j.Spec.Needs.Model != "" || j.Spec.Environment.Key() != "" {
+			if q.placementBetter(j, other, m) {
+				return true
+			}
 		}
 	}
 	return false
+}
+
+// Keep all target projections on the same qualified-work comparator.
+func (q *Queue) targetPlacementBetter(j *Job, a, b *Machine) bool {
+	if j.Spec.extensionJob() {
+		return q.capabilityPlacementBetter(j, a, b)
+	}
+	return q.placementBetter(j, a, b)
 }

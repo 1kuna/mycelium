@@ -121,6 +121,9 @@ func (q *Queue) completionBetter(j *Job, a, b *Machine) (better, known bool) {
 // Only otherwise equivalent release plans use completion as their tie-break.
 func (q *Queue) completionPlanBetter(j *Job, p, other *placementPlan) bool {
 	if other != nil && p.stops == other.stops && p.cost == other.cost {
+		if value, _ := q.valueCompare(p.machine, other.machine); value != 0 {
+			return value < 0
+		}
 		if better, known := q.completionBetter(j, p.machine, other.machine); known {
 			return better
 		}

@@ -172,3 +172,38 @@ work. Failed gates still write JSON and exit nonzero. The homogeneous control
 expects equality because all pieces accept jointly; it supplies no speed claim.
 The lean simulator regression separately exercises controlled producer loss/retry
 and parent abort, outside the speed comparison.
+
+## Scarce-machine preservation (#193, slice 6)
+
+Use the same binary interface at baseline `e060a9b9` and with value placement:
+
+```sh
+myce sim --fleet examples/sim/value-placement/fleet.yaml \
+  --workload examples/sim/value-placement/workload.yaml \
+  --days 0.01 --seed 1 --json preservation.json
+myce sim --days 1 --seed 1 --json mixed.json
+```
+
+The finite fixture uses equal synthetic speeds and two differently sized cards.
+Ordinary work fits either; the 32 GiB job fits only the large card. Every stream
+is a marked batch, so the largest `batches.*.finished_seconds` is whole-workload
+makespan. The fake-clock CPU/component tests separately prove that CPU commands
+prefer the small CPU host and GPU commands retain their accelerator.
+
+Paired laptop runs on 2026-10-25 (same inputs, arrivals, policy and seed):
+
+| Workload / metric | Baseline | Value placement |
+|---|---:|---:|
+| Finite preservation: whole makespan | 300 s | 200 s |
+| Finite preservation: large-card job finishes | 300 s | 101 s |
+| Finite preservation: production wait p95 | 0 s | 0 s |
+| Finite preservation: failed / unfinished | 0 / 0 | 0 / 0 |
+| Original one-day mixed: marked batch makespan | 2,691.46 s | 2,691.46 s |
+| Original one-day mixed: production wait p95 | 1 s | 1 s |
+| Original one-day mixed: completed / failed / unfinished | 194 / 1 / 98 | 194 / 1 / 98 |
+
+The mixed metric is the marked batch's submission-to-accepted-finish interval;
+its remaining backlog prevents a whole-workload makespan claim. The existing
+simulated failure is unchanged. These runs demonstrate preservation and no
+regression on the paired examples, not native performance or a general speedup.
+The explicit speed/deadline tradeoff remains a later slice.

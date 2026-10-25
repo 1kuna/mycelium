@@ -217,7 +217,7 @@ func TestCapabilityMemoryLayoutAndHints(t *testing.T) {
 	}
 }
 
-func TestCapabilityFirstProgramUsesMostCapableFree(t *testing.T) {
+func TestCapabilityFirstProgramUsesLeastValueFree(t *testing.T) {
 	q, clock := fixture(t)
 	e := fakeExtension(t)
 	if err := q.AddExtension(e); err != nil {
@@ -229,15 +229,15 @@ func TestCapabilityFirstProgramUsesMostCapableFree(t *testing.T) {
 	check(t, q, big, nil)
 	j := submit(t, q, placementSpec(true))
 	clock.Advance(time.Second)
-	if r := check(t, q, small, nil); r.Job != nil {
-		t.Fatal("first program assigned to smaller free hypha")
+	if r := check(t, q, big, nil); r.Job != nil {
+		t.Fatal("first program consumed scarce free hypha")
 	}
-	if r := check(t, q, big, nil); r.Job == nil || r.Job.ID != j.ID {
-		t.Fatal("most capable free hypha not selected")
+	if r := check(t, q, small, nil); r.Job == nil || r.Job.ID != j.ID {
+		t.Fatal("least valuable free hypha not selected")
 	}
 }
 
-func TestCapabilityFirstProductionProgramUsesMostCapableFreeWithHold(t *testing.T) {
+func TestCapabilityFirstProductionProgramUsesLeastValueFreeWithHold(t *testing.T) {
 	q, _ := fixture(t)
 	e := fakeExtension(t)
 	if err := q.AddExtension(e); err != nil {
@@ -253,13 +253,13 @@ func TestCapabilityFirstProductionProgramUsesMostCapableFreeWithHold(t *testing.
 	s := placementSpec(true)
 	s.Priority = "production"
 	j := submit(t, q, s)
-	if got := job(t, q, j.ID).ProductionHost; got != big.ID {
-		t.Fatalf("production chose %s, want %s", got, big.ID)
+	if got := job(t, q, j.ID).ProductionHost; got != small.ID {
+		t.Fatalf("production chose %s, want %s", got, small.ID)
 	}
-	if check(t, q, small, nil).Job != nil {
-		t.Fatal("production placed on small held host")
+	if check(t, q, big, nil).Job != nil {
+		t.Fatal("production consumed scarce held host")
 	}
-	if r := check(t, q, big, nil); r.Job == nil || r.Job.ID != j.ID || r.Job.Spec.StartBy == nil {
+	if r := check(t, q, small, nil); r.Job == nil || r.Job.ID != j.ID || r.Job.Spec.StartBy == nil {
 		t.Fatal("production gate or capability placement lost", r.Job)
 	}
 }
@@ -275,8 +275,13 @@ func TestCapabilityLearnedProgramUsesSmallerFreeHypha(t *testing.T) {
 	check(t, q, small, nil)
 	check(t, q, big, nil)
 	s := placementSpec(true)
-	submit(t, q, s)
+	first := s
+	first.AllowedMachines = []string{big.ID}
+	submit(t, q, first)
 	run := check(t, q, big, nil).Job
+	if run == nil {
+		t.Fatal("restricted first measurement not assigned")
+	}
 	r := result(run, true)
 	r.Usage = &SizeHint{MemoryGB: 2, HostMemoryGB: 40}
 	if err := q.Complete(r); err != nil {

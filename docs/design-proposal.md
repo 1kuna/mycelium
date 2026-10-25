@@ -2021,3 +2021,31 @@ required in the overlap-capable case; mixed-load production p95 must be exactly
 unchanged with zero extra failures or unfinished work. Report contention
 regressions individually. Native throughput and consumer integration remain
 separate work.
+
+
+## Preserve scarce machines (slice 6, #193; MY-18)
+
+The independently authorized placement slice implements MY-18 without changing
+adapter contracts or introducing an explicit speed/deadline goal. Eligibility,
+accuracy/qualification and owner policy precede tiers and per-family project
+deficit. Free capacity and existing victim stop-count/lost-work comparisons
+precede host value. Value never selects another project, changes fair-share
+charges or preempts equal-tier work.
+
+Fresh known inventory and owner allowances define distinct accelerator backend/
+usable-memory bands and host-memory bands above the fleet minimum. Count the
+physical hosts supplying each band, not devices or worker rows. Rank hosts
+lexicographically by the count of bands supplied by one host, then two, and so
+on, fewer first. Break ties on smaller usable host RAM, existing measured
+completion/affinity, then stable target identity. Unified RAM remains one pool;
+its host and device capacities are never summed. Unknown value gets no invented
+ranking; prefer a known fitting alternative and explain an unknown-only choice.
+
+The shared planner applies this ordering to currently admissible targets across
+pulls, status and simulation. Occupancy does not redefine value. Never reserve
+or wait for a cheaper host: an idle scarce host runs the work when cheap hosts
+are busy, lost, owner-active, recovering or otherwise inadmissible. Attempt and
+cleanup custody remain authoritative across restarts. Status exposes the chosen
+host's scarcity vector and usable RAM, or why its value is unknown. Fake-clock
+inventory and simulator evidence establish laptop behavior, not native fleet
+qualification. The explicit speed/deadline tradeoff remains slice 7.

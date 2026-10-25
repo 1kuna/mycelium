@@ -2053,6 +2053,7 @@ func (q *Queue) assign(j *Job, m *Machine) Job {
 	if measured {
 		j.Timing = &WorkTiming{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: m.ID, Session: m.Session, PlacementReason: estimate.reason()}
 	}
+	q.recordValuePlacement(j, m)
 	q.refreshHostMemory()
 	return cloneJob(j)
 }
