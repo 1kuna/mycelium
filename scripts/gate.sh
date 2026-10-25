@@ -4,6 +4,7 @@ set -euo pipefail
 umask 022
 mode=${1:-quick}
 base=${2:-origin/integ/108}
+budgeted=${MYCE_GATE_BUDGET:-}
 case "$mode" in quick|full) ;; *) echo 'usage: scripts/gate.sh [quick [BASE]|full]' >&2; exit 2;; esac
 repo=$(cd "$(dirname "$0")/.." && pwd)
 cd "$repo"
@@ -25,10 +26,14 @@ cleanup() {
   chmod -R u+w "$scratch" 2>/dev/null || true
   rm -rf "$scratch" || status=1
   if [[ -d $scratch ]]; then echo "gate scratch retained: $scratch" >&2; fi
-  echo "gate $mode: exit=$status wall=$((SECONDS-started))s"
+  if [[ $budgeted != 1 ]]; then
+    echo "gate $mode: exit=$status wall=$((SECONDS-started))s"
+  fi
   exit "$status"
 }
 trap cleanup EXIT
+trap 'exit 143' TERM
+trap 'exit 130' INT
 if [[ $mode == quick ]]; then
   git rev-parse --verify "$base" >/dev/null
   python3 scripts/gate-related.py "$base" > "$scratch/selection"
