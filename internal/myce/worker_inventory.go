@@ -79,6 +79,12 @@ func (d MachineDevice) machine(base Machine) Machine {
 			profile.SystemMemoryBytes = shared.SystemMemoryBytes
 			profile.OS, profile.Arch = shared.OS, shared.Arch
 			profile.Availability = shared.Availability
+			// Onboarding runs once for the physical host. Device facts were
+			// probed before it; projecting them must retain the measured result.
+			if shared.Benchmark != nil {
+				profile.Benchmark = shared.Benchmark
+				profile.Onboarding = shared.Onboarding
+			}
 		}
 		base.CapabilityProfile = &profile
 	}

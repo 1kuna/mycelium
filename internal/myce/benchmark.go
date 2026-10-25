@@ -213,7 +213,13 @@ func RunOnboardingBenchmark(ctx context.Context, c BenchmarkConfig, p *Capabilit
 			return measureResource(ctx, c, extensions, identity, resource)
 		}
 	}
-	for _, resource := range []string{"cpu", "memory", "disk", "network", "accelerator"} {
+	resources := []string{"cpu", "memory", "disk", "network"}
+	// A CPU-only physical host has no accelerator to measure. Accelerator
+	// hosts still need their qualified reference; CPU timing cannot replace it.
+	if c.Machine.GPU != "cpu" || len(c.Machine.Devices) > 0 || len(p.Accelerators) > 0 {
+		resources = append(resources, "accelerator")
+	}
+	for _, resource := range resources {
 		if work.Err() != nil {
 			result.Measurements = append(result.Measurements, Throughput{Resource: resource, Reason: "benchmark interrupted; retry on next join"})
 			continue

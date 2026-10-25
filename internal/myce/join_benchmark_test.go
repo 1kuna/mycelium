@@ -56,7 +56,8 @@ func TestJoinBenchmarkOptIn(t *testing.T) {
 					if len(snap.Machines) != 1 || !snap.Machines[0].BenchmarkPending {
 						t.Error("benchmark ran without queue registration")
 					}
-					p.Benchmark = &BenchmarkResult{State: "partial"}
+					p.Onboarding = "measured; qualified reference replay"
+					p.Benchmark = &BenchmarkResult{State: "partial", Measurements: []Throughput{{Resource: "cpu", Rate: 100, Unit: "bytes/s"}, {Resource: "accelerator", Reason: "no qualified reference work"}}}
 					return saveWorkerJSON(root, "capability-profile.json", p)
 				},
 			}
@@ -82,6 +83,16 @@ func TestJoinBenchmarkOptIn(t *testing.T) {
 			}
 			if calls.Load() != want {
 				t.Fatalf("benchmark calls=%d, want %d", calls.Load(), want)
+			}
+			if mode == "enabled" {
+				snap, err := q.Snapshot()
+				if err != nil {
+					t.Fatal(err)
+				}
+				p := snap.Machines[0].CapabilityProfile
+				if p == nil || p.Benchmark == nil || p.Benchmark.State != "partial" || len(p.Benchmark.Measurements) != 2 || p.Benchmark.Measurements[0].Rate != 100 || p.Onboarding != "measured; qualified reference replay" {
+					t.Fatalf("completed benchmark lost from status: %+v", p)
+				}
 			}
 			data, err := os.ReadFile(cache)
 			switch mode {
