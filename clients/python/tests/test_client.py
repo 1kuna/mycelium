@@ -1,3 +1,4 @@
+import http.client
 import io
 import json
 import os
@@ -12,7 +13,7 @@ import unittest
 from unittest.mock import patch
 from urllib.error import HTTPError
 
-from mycelium import APIError, Checkpoint, Client, StopSignal
+from mycelium import APIError, Checkpoint, Client, IncompleteReplyError, StopSignal
 
 ROOT = Path(__file__).resolve().parents[3]
 
@@ -20,16 +21,30 @@ ROOT = Path(__file__).resolve().parents[3]
 class ClientTests(unittest.TestCase):
     def test_job_reply_invalid(self):
         client = Client(token="test-only")
-        for reply in ({"jobs": [{"id": "fixture", "state": "succeeded"}]},
-                      {"id": "", "state": "succeeded"},
-                      {"id": "fixture", "state": ""}):
+        for body in (b'{"jobs":[{"id":"fixture","state":"succeeded"}]}',
+                     b'{"id":"","state":"succeeded"}',
+                     b'{"id":"fixture","state":""}',
+                     b"<html>wrong endpoint</html>",
+                     b""):
             for read in (client.get, client.wait):
-                with self.subTest(reply=reply, read=read.__name__):
-                    with patch.object(client, "_call", return_value=reply), patch(
+                with self.subTest(body=body, read=read.__name__):
+                    with patch.object(client, "_urlopen", side_effect=lambda *_, **__: io.BytesIO(body)), patch(
                             "mycelium.client.time.sleep", side_effect=AssertionError("invalid reply was polled")):
                         with self.assertRaises(APIError) as caught:
                             read("fixture")
                         self.assertEqual(caught.exception.code, "job_reply_invalid")
+
+    def test_job_reply_truncated(self):
+        class Dropped(io.BytesIO):
+            def read(self, *_):
+                raise http.client.IncompleteRead(b'{"id":"fixture"')
+        bodies = [Dropped(), io.BytesIO(b'{"id":"fixture","state":'), io.BytesIO(b'{"id":"fixture","state":"succeeded"}')]
+        client = Client(token="test-only")
+        with patch.object(client, "_urlopen", side_effect=lambda *_, **__: bodies.pop(0)), patch("mycelium.client.time.sleep"):
+            self.assertEqual(client.wait("fixture")["state"], "succeeded")
+        with patch.object(client, "_urlopen", side_effect=lambda *_, **__: io.BytesIO(b'{"id":"fix')):
+            with self.assertRaises(IncompleteReplyError):
+                client.get("fixture")
 
     def test_installed_libressl_requires_openssl(self):
         with patch("ssl.OPENSSL_VERSION", "LibreSSL 2.8.3"):

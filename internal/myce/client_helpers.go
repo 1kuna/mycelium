@@ -43,6 +43,9 @@ func (c Client) Submit(ctx context.Context, spec Spec) (*Job, error) {
 	return &j, nil
 }
 
+// GetJob reads one Job. An empty, non-JSON or incomplete Job reply is the
+// typed nonretryable job_reply_invalid; a reply that ends mid-document returns
+// io.ErrUnexpectedEOF, which RetryStatusRead retries. The Python client matches.
 func (c Client) GetJob(ctx context.Context, id string) (*Job, error) {
 	var j Job
 	invalid := &HTTPError{Status: 502, Code: "job_reply_invalid", Message: "queue returned an invalid Job reply: nonempty id and state are required"}
