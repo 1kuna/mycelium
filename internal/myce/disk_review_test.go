@@ -1,8 +1,12 @@
 package myce
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -136,6 +140,41 @@ func TestDiskHeadroomCapacityRefusesImpossibleSubmission(t *testing.T) {
 	s.RequireTarget = true
 	if _, err := q.Submit(s); err != nil {
 		t.Fatal("temporary free-space shortage became refusal", err)
+	}
+}
+
+func TestDiskHeadroomHTTPRefusesImpossibleSubmission(t *testing.T) {
+	q, c := fixture(t)
+	m := reportDisk(t, machine("a", "fake"), c, "private-volume-id", []string{"data"}, 100<<30, 2<<30)
+	check(t, q, m, nil)
+	s := spec("experiment")
+	s.Disk = &DiskNeeds{OutputBytes: 100 << 30}
+	data, err := json.Marshal(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := API{Queue: q, Token: "test"}.Handler()
+	req := httptest.NewRequest(http.MethodPost, "/api/jobs", bytes.NewReader(data))
+	req.Header.Set("Authorization", "Bearer test")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, req)
+	var body struct{ Code, Error string }
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	const reason = "disk_headroom: host a data free=107374182400 bytes floor=1073741824 bytes need=107374182400 bytes total=107374182400 bytes"
+	if response.Code != http.StatusConflict || body.Code != "disk_headroom" || body.Error != reason {
+		t.Errorf("expected sanitized disk capacity refusal, got HTTP %d: %s", response.Code, response.Body.String())
+	}
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	err = (Client{URL: server.URL, Token: "test"}).Call(context.Background(), http.MethodPost, "/api/jobs", s, nil)
+	var apiError *HTTPError
+	if !errors.As(err, &apiError) || apiError.Status != http.StatusConflict || apiError.Code != "disk_headroom" || apiError.Message != reason {
+		t.Errorf("Go client lost typed disk capacity refusal: %v", err)
+	}
+	if len(q.s.Jobs) != 0 {
+		t.Error("impossible submission created a job")
 	}
 }
 
