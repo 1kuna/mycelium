@@ -39,7 +39,7 @@ func (a *memoryAttempt) peak() *AttemptMemoryPeak {
 	}
 	if b, err := a.fs.ReadFile(filepath.Join(a.path, "memory.events")); err == nil {
 		events := memoryCounters(b)
-		p.Constrained = p.Constrained || events["oom"] > 0 || events["oom_kill"] > 0 || events["oom_group_kill"] > 0
+		p.Constrained = p.Constrained || events["max"] > 0 || events["high"] > 0 || events["oom"] > 0 || events["oom_kill"] > 0 || events["oom_group_kill"] > 0
 	}
 	for _, name := range []string{"memory.swap.peak", "memory.swap.current"} {
 		if b, err := a.fs.ReadFile(filepath.Join(a.path, name)); err == nil {

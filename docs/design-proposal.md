@@ -1868,10 +1868,13 @@ Input-size/duration scaling per recipe is a follow-up slice, not part of this
 amendment.
 Reservations are frozen per attempt; stale, failed, OOM, constrained and resumed
 observations cannot shrink an envelope. Resumed jobs can use prior accepted
-estimates. An auto OOM invalidates comparable learned memory points across
-machines and families, without recording a bound or setting the performance
-Forbidden flag. The next unhinted job explores again; a successful exploration
-re-teaches the peak. One retry keeps a job-local host floor with 25% more room,
+estimates. An auto OOM or constrained attempt invalidates comparable learned
+memory points across machines and families, without recording a bound or setting the performance
+Forbidden flag. To measure the true need after a ceiling-bound run, submit the
+same comparable work with `memory: auto` and no submitter hint: that next run
+explores the available host headroom. A successful unconstrained exploration
+re-teaches the peak. Ceiling pressure alone does not retry or change the job's
+outcome. After OOM, one retry keeps a job-local host floor with 25% more room,
 on the same host if it fits, without raising its GPU reservation from a host OOM.
 If that floor exceeds every eligible host allowance or card, fail explicitly
 with the required GiB. Device reservations never exceed the card total and
@@ -1881,8 +1884,12 @@ caps remain supported and fit the job envelope.
 Linux native attempts use their existing shared parent cgroup for main and all
 sidecars, bounded/zero swap and a job OOM cause. Learn the sampled whole-parent
 anon + kernel + shmem peak from `memory.stat` every 200 ms; retain `memory.peak`
-only as a total-memory diagnostic, since it includes reclaimable page cache. OOM, swap-out
-or anonymous reclaim mark measurements constrained; file-cache reclaim does not.
+only as a total-memory diagnostic, since it includes reclaimable page cache. OOM,
+swap-out, anonymous reclaim, or `memory.events` reporting `max > 0` or `high > 0`
+mark measurements constrained. File-cache reclaim alone does not, but hitting a
+ceiling while reclaiming file pages does. This also excludes ceiling-bound peaks
+from explicit-memory runs: they cannot seed an auto estimate. Explicit memory
+admission and outcomes otherwise retain their existing behavior.
 Fully capped native groups preserve member-level OOM attribution and kill mode.
 GPU samples belong to the attempt's process inventory where supported, only for
 auto or estimate-feeding attempts, every five seconds and until unsupported.

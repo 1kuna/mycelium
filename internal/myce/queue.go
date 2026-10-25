@@ -1301,7 +1301,9 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 	ceilingFailure := !r.Success && strings.HasPrefix(ceilingDiagnostic(r.Error, ""), "exceeded its ")
 	oomFailure := !r.Success && (r.OutOfMemory || ceilingFailure)
 	outcome.OutOfMemory = oomFailure
-	if oomFailure {
+	// Ceiling pressure can hide the true need even without an OOM. Reuse
+	// auto's memory-only invalidation without changing the attempt outcome.
+	if oomFailure || j.Spec.Needs.Memory == "auto" && r.MemoryPeak != nil && r.MemoryPeak.Constrained {
 		q.recordWorkOOM(j, r)
 	}
 	stageFailure := (j.Spec.Priority == "production" || plannedPriorityStop(j)) && !r.Success && !r.Interrupted

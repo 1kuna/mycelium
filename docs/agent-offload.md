@@ -33,8 +33,15 @@ Without a prior peak or submitter hint, the first run explores using available
 host headroom. A successful solo run with an unconstrained host-memory peak
 teaches later comparable jobs. The same host uses the accepted peak with 25%
 headroom; estimates from another host use the existing larger margins. An OOM
-clears comparable memory peaks, and a subsequent successful exploration re-learns
-them. Explicit memory declarations keep their existing behavior.
+or constrained auto attempt clears comparable memory peaks. `memory.events`
+`max > 0` or `high > 0` marks the peak constrained even without OOM. To get a
+measured-need run after hitting the ceiling, submit the same comparable work with
+`memory: auto` and no submitter hint: the next run explores available headroom,
+and a successful unconstrained exploration re-learns the peak. Ceiling pressure
+alone does not retry or change the job's outcome. Ceiling-bound explicit-memory
+peaks cannot seed auto estimates; explicit declarations otherwise keep their
+existing behavior. Optional member caps still apply, so remove a binding member
+cap if the job should measure its need within the shared job envelope.
 
 Memory comparability uses the project, profile YAML `name`, and a digest of the
 normalized command/configuration, including appended arguments, the check,
