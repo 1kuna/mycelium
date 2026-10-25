@@ -113,6 +113,9 @@ type Queue struct {
 	calls            map[string]*ModelCall
 	lock             *os.File
 	mu               sync.RWMutex
+	updateHolds      queueHoldSampler
+	statusHolds      queueHoldSampler
+	logCleanupHolds  queueHoldSampler
 	db               *sql.DB
 	persisted        map[string][]byte
 	clock            Clock
@@ -356,8 +359,13 @@ func (q *Queue) updateTimed(fn func() error, timing *queueUpdateTiming) error {
 		}
 	}
 	timing.lock(&q.mu)
+	hold := q.updateHolds.start()
 	q.nasAvailable = available
-	defer q.mu.Unlock()
+	defer func() {
+		duration := queueHoldDuration(hold)
+		q.mu.Unlock()
+		logQueueHold(duration, "update", fn)
+	}()
 	if q.simulation {
 		q.usageWrites = nil
 		q.accountUsage(q.clock.Now())
@@ -1687,7 +1695,12 @@ func (q *Queue) snapshotView(forStatus, jobReply bool) (Snapshot, error) {
 		// Observation never performs maintenance, usage accounting, rollback
 		// snapshots or persistence. Tick/check-ins own those durable mutations.
 		q.mu.RLock()
-		defer q.mu.RUnlock()
+		hold := q.statusHolds.start()
+		defer func() {
+			duration := queueHoldDuration(hold)
+			q.mu.RUnlock()
+			logQueueHold(duration, "snapshotView", nil)
+		}()
 		err = project()
 		if err == nil {
 			out.Usage, err = q.usageLocked(q.clock.Now().Add(-7 * 24 * time.Hour))

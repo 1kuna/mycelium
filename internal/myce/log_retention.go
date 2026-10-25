@@ -26,7 +26,12 @@ func (q *Queue) ConfigureLogRetention(age time.Duration) error {
 
 func (q *Queue) pruneBatchLogs() error {
 	q.mu.Lock()
-	defer q.mu.Unlock()
+	hold := q.logCleanupHolds.start()
+	defer func() {
+		duration := queueHoldDuration(hold)
+		q.mu.Unlock()
+		logQueueHold(duration, "pruneBatchLogs", nil)
+	}()
 	if q.simulation {
 		return nil
 	}
