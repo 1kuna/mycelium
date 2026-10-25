@@ -566,6 +566,9 @@ func (q *Queue) retry(j *Job, why string) {
 
 // Admission refusal and planned stops do not spend infrastructure retry budgets.
 func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
+	// Snapshot identity before requeue clears it, including loss without a result.
+	outcome := attemptOutcome(j, Result{Interrupted: true, PriorityStop: priorityStop(j)})
+	defer func() { q.recordAttemptOutcome(j, outcome) }()
 	if cancelled(j) {
 		if !terminal(j.State) {
 			q.finishCancellation(j)
@@ -1267,11 +1270,13 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 		delete(q.unreported, m.ID)
 	}
 	r = withStopProvenance(r, priorityStop(j))
+	outcome := attemptOutcome(j, r)
 	j.ExecutionCause = safeRuntimeCause(r.ExecutionCause)
 	j.CleanupCause = safeRuntimeCause(r.CleanupCause)
 	// A kernel OOM is the payload's failure even if preemption raced it.
 	ceilingFailure := !r.Success && strings.HasPrefix(ceilingDiagnostic(r.Error, ""), "exceeded its ")
 	oomFailure := !r.Success && (r.OutOfMemory || ceilingFailure)
+	outcome.OutOfMemory = oomFailure
 	if oomFailure {
 		q.recordWorkOOM(j, r)
 	}
@@ -1353,6 +1358,7 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 		now := q.clock.Now()
 		j.FinishedAt = &now
 	}
+	q.recordAttemptOutcome(j, outcome)
 	q.maintain()
 	return nil
 }
@@ -1903,6 +1909,7 @@ func (q *Queue) assign(j *Job, m *Machine) Job {
 		j.Extension = &ExtensionSelection{Name: e.Name, Version: e.Version, Digest: e.Digest}
 	}
 	j.State = "running"
+	j.ExecutionCause, j.CleanupCause = nil, nil
 	j.ReleaseConfirmed = false
 	j.RequeuedByOperator = false
 	j.StartedAt = nil

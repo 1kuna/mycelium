@@ -33,6 +33,12 @@ func (q *Queue) refundOperatorStop(r Result) bool {
 			j.Losses = max(0, j.Losses-1)
 			c.LossCharged = false
 		}
+		for i := range j.AttemptHistory {
+			history := &j.AttemptHistory[i]
+			if history.Attempt == r.Attempt && history.Machine == r.Machine && history.Session == r.Session {
+				history.OperatorStop = true
+			}
+		}
 	}
 	if matched && j.State == "failed" && j.Losses < 3 && strings.HasPrefix(j.Reason, "failed after 3 infrastructure losses:") {
 		q.retry(j, "requeued: stopped by operator")

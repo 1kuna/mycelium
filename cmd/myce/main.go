@@ -671,9 +671,33 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		}
 		return printUsage(os.Stdout, report, *by)
 	case "status":
+		if f.NArg() > 1 {
+			return errors.New("usage: myce status [job]")
+		}
 		s, err := status(ctx, client)
 		if err != nil {
 			return err
+		}
+		if f.NArg() == 1 {
+			j, err := myce.FindJob(s.Jobs, f.Arg(0))
+			if err != nil {
+				return err
+			}
+			printStatus(myce.Snapshot{Jobs: []*myce.Job{j}, Now: s.Now}, *full)
+			for _, a := range j.AttemptHistory {
+				fmt.Printf("  attempt %d hypha=%s session=%s ended=%s state=%s interrupted=%t oom=%t availability=%t operator=%t: %s", a.Attempt, a.Machine, a.Session, a.EndedAt.UTC().Format(time.RFC3339), a.State, a.Interrupted, a.OutOfMemory, a.PoliteStop, a.OperatorStop, a.Reason)
+				if a.PriorityStop != nil {
+					fmt.Print("; priority_preemption")
+				}
+				if a.ExecutionCause != nil {
+					fmt.Print("; ", a.ExecutionCause.String())
+				}
+				if a.CleanupCause != nil {
+					fmt.Print("; cleanup: ", a.CleanupCause.String())
+				}
+				fmt.Println()
+			}
+			return nil
 		}
 		printStatus(s, *full)
 		return nil

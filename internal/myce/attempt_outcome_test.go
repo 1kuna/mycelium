@@ -72,6 +72,11 @@ func TestAttemptOutcomeRecordedInfrastructure(t *testing.T) {
 			if r.Interrupted != (kind != "payload-stderr" && !invalid) {
 				t.Fatal(kind, invalid, r)
 			}
+			if !invalid && (kind == launchRefused || kind == launchFailed || kind == environmentFailed) {
+				if cause := safeRuntimeCause(r.ExecutionCause); cause == nil || cause.Operation != "launch" || cause.Class != kind {
+					t.Fatal("recorded launch cause missing from diagnostics", kind, r)
+				}
+			}
 			for _, override := range []attemptCause{{OutOfMemory: true}, {Cancelled: true}, {Stale: true}} {
 				override.Infrastructure = []infrastructureFact{fact}
 				if r := classifyAttemptOutcome(Result{}, override); r.Interrupted {
