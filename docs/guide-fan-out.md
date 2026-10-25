@@ -69,6 +69,35 @@ component can safely admit that count and its resource envelope. Late attempts
 cannot replace accepted results. Parent cancellation stops its children and
 reports outstanding cleanup. Persisted membership/results survive queue restart.
 
+## Observing parents and native children
+
+Save the parent job ID returned by submission. For a keyed submission, bind that
+ID using the exact `spec.project` and `spec.submission_key` echo in the Job reply
+([identity contract](design-proposal.md#submission-identity-and-cancellation-80)).
+Read the parent with authenticated `GET /api/jobs/{id}` (Go `GetJob`/`Wait`, Python
+`get`/`wait`). Its top-level `fan_out.children` lists the native child job IDs
+materialized so far; more can appear as dispatch proceeds. Fetch those jobs by ID.
+Each child's top-level `batch.parent` is the parent job ID, and `batch.pieces`
+identifies the original piece keys in that fixed wave. A child has its own job
+ID and no `spec.submission_key`; the parent's key is not copied to children.
+One child may execute several pieces, so do not assume one child per piece.
+
+An assigned child's top-level `extension` reports the selected `name`, `version`
+and frozen `digest`. This identifies the executable selection, not the parent:
+many unrelated jobs can select the same extension. Use `fan_out.children` and
+`batch.parent` for the relationship, and `fan_out.results` for accepted per-piece
+executions and outputs. An unassigned logical parent may omit top-level
+`extension` because selection occurs when a child is assigned.
+
+GET `spec` is a redacted view, not the original submission. As documented in the
+[status/Job view contract](guide-status-v3.md), GET retains payload
+redaction while echoing project/key identity. It omits `spec.extension`,
+`spec.extension_digest` and `spec.fan_out`, including the declaration's piece
+arguments; observe top-level progress and child selection instead. These
+omissions predate s034's bundle-storage change. Retain the submitted declaration
+if you need all declared keys or arguments before dispatch: `fan_out.children`
+enumerates materialized waves, not undispatched pieces or downstream consumers.
+
 ## Binding model-call curves
 
 An extension-command sweep alone does not qualify server calls. Compute the
