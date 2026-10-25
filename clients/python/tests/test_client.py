@@ -1,3 +1,4 @@
+import io
 import json
 import os
 from pathlib import Path
@@ -9,6 +10,7 @@ import tempfile
 import time
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 from mycelium import APIError, Checkpoint, Client, StopSignal
 
@@ -16,6 +18,19 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 class ClientTests(unittest.TestCase):
+    def test_job_reply_invalid(self):
+        client = Client(token="test-only")
+        for reply in ({"jobs": [{"id": "fixture", "state": "succeeded"}]},
+                      {"id": "", "state": "succeeded"},
+                      {"id": "fixture", "state": ""}):
+            for read in (client.get, client.wait):
+                with self.subTest(reply=reply, read=read.__name__):
+                    with patch.object(client, "_call", return_value=reply), patch(
+                            "mycelium.client.time.sleep", side_effect=AssertionError("invalid reply was polled")):
+                        with self.assertRaises(APIError) as caught:
+                            read("fixture")
+                        self.assertEqual(caught.exception.code, "job_reply_invalid")
+
     def test_installed_libressl_requires_openssl(self):
         with patch("ssl.OPENSSL_VERSION", "LibreSSL 2.8.3"):
             with patch("mycelium.installed.installed_authority") as authority:
@@ -30,6 +45,22 @@ class ClientTests(unittest.TestCase):
             with patch("mycelium.installed.installed_authority", return_value=(
                     "https://queue.invalid", "fixture", object())):
                 self.assertEqual(Client.from_installed().url, "https://queue.invalid")
+
+    def test_job_reply_old_queue(self):
+        client = Client(token="fixture")
+        for body in (b"404 page not found", b'{"code":"job_unknown","error":"job is unknown"}'):
+            for read in (client.get, client.wait):
+                with self.subTest(body=body, read=read.__name__):
+                    response = HTTPError("http://queue/api/jobs/job", 404, "Not Found", {}, io.BytesIO(body))
+                    with patch.object(client, "_urlopen", side_effect=response):
+                        with self.assertRaises(APIError) as caught:
+                            read("job")
+                    self.assertEqual(caught.exception.status, 404)
+                    if b"job_unknown" in body:
+                        self.assertEqual(caught.exception.code, "job_unknown")
+                    else:
+                        self.assertEqual(caught.exception.code, "queue_upgrade_required")
+                        self.assertIn("queue too old for this client; upgrade the queue first", str(caught.exception))
 
     def test_job_spec_invalid_message(self):
         reason = "main Docker memory must fit needs.host_memory_gb"
@@ -68,7 +99,7 @@ class ClientTests(unittest.TestCase):
     def test_wait_reports_production_start_deadline(self):
         client = Client(token="test-only")
         failed = {"id": "prod", "state": "failed", "reason": "production start deadline exceeded"}
-        with patch.object(client, "_call", return_value={"jobs": [failed]}):
+        with patch.object(client, "_call", return_value=failed):
             self.assertEqual(client.wait("prod"), failed)
 
 
@@ -254,10 +285,15 @@ class DevTests(unittest.TestCase):
         self.assertEqual(self.client.get(job["id"])["attempt"], 1)
 
     def test_keyed_submission_repeat_and_conflict(self):
-        spec = self.spec([sys.executable, "-c", "print('keyed')"], submission_key="python-key")
+        spec = self.spec([sys.executable, "-c", "print('keyed')"], submission_key="Exact.Key_182:Python-01")
         first = self.client.submit(spec)
-        self.assertEqual(self.client.wait(first["id"], timeout=10)["state"], "succeeded")
-        self.assertEqual(self.client.submit(spec)["id"], first["id"])
+        final = self.client.wait(first["id"], timeout=10)
+        self.assertEqual(final["state"], "succeeded")
+        replay = self.client.submit(spec)
+        for job in (first, self.client.get(first["id"]), final, replay):
+            self.assertEqual(job["spec"]["project"], spec["project"])
+            self.assertEqual(job["spec"].get("submission_key"), spec["submission_key"])
+        self.assertEqual(replay["id"], first["id"])
         spec["name"] = "changed"
         with self.assertRaises(APIError) as caught:
             self.client.submit(spec)

@@ -3,8 +3,10 @@ package myce
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -42,15 +44,24 @@ func (c Client) Submit(ctx context.Context, spec Spec) (*Job, error) {
 }
 
 func (c Client) GetJob(ctx context.Context, id string) (*Job, error) {
-	var s Snapshot
-	if err := c.Call(ctx, "GET", "/api/status", nil, &s); err != nil {
+	var j Job
+	invalid := &HTTPError{Status: 502, Code: "job_reply_invalid", Message: "queue returned an invalid Job reply: nonempty id and state are required"}
+	if err := c.Call(ctx, "GET", "/api/jobs/"+url.PathEscape(id), nil, &j); err != nil {
+		var syntax *json.SyntaxError
+		var fieldType *json.UnmarshalTypeError
+		if errors.As(err, &syntax) || errors.As(err, &fieldType) || err == io.EOF {
+			return nil, invalid
+		}
 		return nil, err
 	}
-	return FindJob(s.Jobs, id)
+	if j.ID == "" || j.State == "" {
+		return nil, invalid
+	}
+	return &j, nil
 }
 
 // Wait observes a job through terminal state. Optional updates run on each
-// successful status read, including completion, and may drain logs. Transient
+// successful job read, including completion, and may drain logs. Transient
 // read errors from an update use the same retry policy as status reads.
 func (c Client) Wait(ctx context.Context, id string, updates ...func(*Job) error) (*Job, error) {
 	return c.wait(ctx, id, updates)
@@ -92,6 +103,10 @@ func RetryStatusRead(err error) bool {
 		return false
 	}
 	var httpErr *HTTPError
+	if errors.As(err, &httpErr) && httpErr.Code == "job_reply_invalid" {
+		// Polling cannot repair a reply from the wrong endpoint or protocol.
+		return false
+	}
 	return err != nil && (!errors.As(err, &httpErr) || httpErr.Status >= 500 || httpErr.Status == 408 || httpErr.Status == 429)
 }
 
@@ -103,8 +118,7 @@ func (c Client) wait(ctx context.Context, id string, updates []func(*Job) error)
 		if ctx.Err() != nil {
 			return last, jobWaitError(id, last, ctx.Err())
 		}
-		var snapshot Snapshot
-		err := c.Call(ctx, "GET", "/api/status", nil, &snapshot)
+		j, err := c.GetJob(ctx, id)
 		if ctx.Err() != nil {
 			return last, jobWaitError(id, last, ctx.Err())
 		}
@@ -114,10 +128,6 @@ func (c Client) wait(ctx context.Context, id string, updates []func(*Job) error)
 			}
 			delay = min(delay*2, 10*time.Second)
 		} else {
-			j, err := FindJob(snapshot.Jobs, id)
-			if err != nil {
-				return last, err
-			}
 			last = j
 			for _, update := range updates {
 				if err = update(j); err != nil {

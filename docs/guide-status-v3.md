@@ -29,7 +29,14 @@ hyphae, software preparation, and work ahead in the queue.
 The page and CLI use the queue's decisions. Reading status does not choose where
 to run work. The status API returns job summaries without submitted commands,
 environment values, program arguments, extension files, or local checkpoint
-paths. Use the existing job output and log commands when you need their results.
+paths. `GET /api/status`, the browser page, CLI `status` (including
+`status JOB`), and Python `Client.list()` also omit `spec.submission_key`. This list redaction does not
+apply to Job replies: `POST /api/jobs` and `GET /api/jobs/{id}` echo
+`spec.project` and `spec.submission_key` exactly. Go `Submit`, `GetJob`, `Wait`
+and Python `submit`, `get`, `wait` return these Job replies. GET replies keep
+the status view's payload and diagnostic redaction, except for the key echo;
+POST replies retain the submitted spec. Unkeyed jobs omit the optional key.
+Use the existing job output and log commands when you need their results.
 
 `myce status JOB` (full ID or an unambiguous prefix of at least eight characters)
 shows that job and its `attempt_history`. Put `--full` before the job ID:
@@ -51,6 +58,13 @@ terminal command failures retain `command_exit` and `exit_code`. These are
 diagnostics, not retry charges: two starts and zero losses can include a planned
 requeue followed by one command failure. A launch refusal without an availability
 flag is still charged a loss under the existing retry rules.
+
+Launch-gate transport failures use `execution_cause.operation: start_authorization`;
+the Started hand-off uses `start_handoff`. Both retain the underlying safe class
+(for example `timeout`). An interrupted result
+uses that cause in its reason, without implying a worker restart. Actual fresh
+worker-session recovery retains its separate restart diagnostic. Authorization
+failures still consume the existing infrastructure retry/loss budget.
 
 History is persisted with the job and retains the **latest four ended attempts**:
 three infrastructure endings (two production retries, or three counted losses),

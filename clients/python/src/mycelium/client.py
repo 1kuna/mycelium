@@ -40,7 +40,7 @@ class APIError(RuntimeError):
                 self.code = response.get("code")
                 self.job_id = response.get("job_id")
                 self.current_revision = response.get("current_revision")
-                if self.code in {"job_failed", "job_cancelled", "job_spec_invalid"}:
+                if self.code in {"job_failed", "job_cancelled", "job_spec_invalid", "queue_upgrade_required"}:
                     message = f"{self.code}: {response.get('error', body)}"
         except (ValueError, TypeError):
             pass
@@ -53,6 +53,17 @@ def _json_default(value: Any) -> str:
             raise ValueError("job timestamps must include a timezone")
         return value.isoformat()
     raise TypeError(f"cannot encode {type(value).__name__} as JSON")
+
+
+def _job_reply(reply: Any) -> dict[str, Any]:
+    if not isinstance(reply, dict) or any(
+            not isinstance(reply.get(field), str) or not reply[field]
+            for field in ("id", "state")):
+        raise APIError(502, json.dumps({
+            "code": "job_reply_invalid",
+            "error": "queue returned an invalid Job reply: nonempty id and state are required",
+        }))
+    return reply
 
 
 def _normalize(spec: Mapping[str, Any]) -> dict[str, Any]:
@@ -118,7 +129,14 @@ class Client:
         except HTTPError as error:
             with error:
                 body = error.read(4096).decode("utf-8", errors="replace")
-            raise APIError(error.code, body) from None
+            failure = APIError(error.code, body)
+            if (error.code == 404 and not failure.code and method == "GET"
+                    and path.startswith("/api/jobs/") and "/" not in path[len("/api/jobs/"):]):
+                failure = APIError(404, json.dumps({
+                    "code": "queue_upgrade_required",
+                    "error": "queue too old for this client; upgrade the queue first",
+                }))
+            raise failure from None
 
     def submit(self, job: Mapping[str, Any] | str | Path) -> dict[str, Any]:
         """Submit a mapping, YAML text, or a pathlib.Path to a YAML file."""
@@ -308,20 +326,8 @@ class Client:
         return self.status().get("jobs") or []
 
     def get(self, job_id: str) -> dict[str, Any]:
-        """Find a job in the snapshot; raise APIError(job_unknown) if absent."""
-        return self._find(self.list(), job_id)
-
-    @staticmethod
-    def _find(jobs: list[dict[str, Any]], job_id: str) -> dict[str, Any]:
-        for job in jobs:
-            if job["id"] == job_id:
-                return job
-        matches = [job for job in jobs if len(job_id) >= 8 and job["id"].startswith(job_id)]
-        if len(matches) == 1:
-            return matches[0]
-        if len(matches) > 1:
-            raise APIError(409, json.dumps({"code": "job_id_ambiguous", "error": "use a longer job ID"}))
-        raise APIError(404, json.dumps({"code": "job_unknown", "error": "job is unknown"}))
+        """Return a Job reply with its stable project/submission-key identity."""
+        return _job_reply(self._call("GET", f"/api/jobs/{quote(job_id, safe='')}"))
 
     def cancel(self, job_id: str) -> dict[str, Any]:
         """Acknowledge no future execution; release may still be pending."""
@@ -348,12 +354,12 @@ class Client:
             if remaining is not None and remaining <= 0:
                 raise timed_out()
             try:
-                snapshot = self._call("GET", "/api/status", timeout=self.timeout if remaining is None else min(self.timeout, remaining))
+                observed = self._call("GET", f"/api/jobs/{quote(job_id, safe='')}", timeout=self.timeout if remaining is None else min(self.timeout, remaining))
             except (TimeoutError, URLError):
                 if end is not None and time.monotonic() >= end:
                     raise timed_out() from None
                 raise
-            job = self._find(snapshot.get("jobs") or [], job_id)
+            job = _job_reply(observed)
             if job["state"] in TERMINAL:
                 return job
             time.sleep(self.poll_interval if remaining is None else min(self.poll_interval, max(0, end - time.monotonic())))

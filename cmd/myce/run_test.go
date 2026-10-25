@@ -69,7 +69,7 @@ func TestRunQueueOutcomesAndCancellation(t *testing.T) {
 					_ = json.NewEncoder(w).Encode(submitted)
 					return
 				}
-				if outcome == "interrupt" && r.URL.Path == "/api/status" {
+				if outcome == "interrupt" && strings.HasPrefix(r.URL.Path, "/api/jobs/") {
 					cancel()
 				}
 				api.ServeHTTP(w, r)
@@ -123,8 +123,8 @@ func TestRunInstalledPinnedAuthority(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/jobs":
 			io.WriteString(w, `{"id":"pinned-job"}`)
-		case "/api/status":
-			io.WriteString(w, `{"jobs":[{"id":"pinned-job","state":"succeeded"}]}`)
+		case "/api/jobs/pinned-job":
+			io.WriteString(w, `{"id":"pinned-job","state":"succeeded"}`)
 		default:
 			io.WriteString(w, `[{"seq":1,"text":"hi\n"}]`)
 		}

@@ -111,6 +111,27 @@ func (a API) handler(joiningPin string) http.Handler {
 		}
 		respondOperation(w, s, err, "status_unavailable")
 	})
+	mux.HandleFunc("GET /api/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
+		s, err := a.Queue.snapshotView(true, true)
+		var j *Job
+		if err == nil {
+			j, err = FindJob(s.Jobs, r.PathValue("id"))
+		}
+		// Keep the GET execution payload empty without changing Spec's JSON
+		// encoding, which also defines durable submission fingerprints.
+		type replySpec struct {
+			Spec
+			Run struct{} `json:"run"`
+		}
+		reply := struct {
+			*Job
+			Spec replySpec `json:"spec"`
+		}{Job: j}
+		if j != nil {
+			reply.Spec.Spec = j.Spec
+		}
+		respondOperation(w, reply, err, "status_unavailable")
+	})
 	mux.HandleFunc("POST /api/jobs", func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
 			Spec
@@ -375,6 +396,10 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 			if message := rejectionMessages[body.Code]; message != "" && body.Code != "extension_version_conflict" && body.Code != "policy_revision_conflict" && !(method == http.MethodPost && path == "/api/jobs") {
 				e.Message = message
 			}
+		}
+		if res.StatusCode == http.StatusNotFound && body.Code == "" && method == http.MethodGet && strings.HasPrefix(path, "/api/jobs/") && !strings.Contains(strings.TrimPrefix(path, "/api/jobs/"), "/") {
+			e.Code = "queue_upgrade_required"
+			e.Message = "queue too old for this client; upgrade the queue first"
 		}
 		return e
 	}

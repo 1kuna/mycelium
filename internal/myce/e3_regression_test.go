@@ -97,8 +97,8 @@ func TestClientResultAtomicReplacement(t *testing.T) {
 	ref := FileRef{SHA256: hex.EncodeToString(h[:]), SizeBytes: int64(len(body))}
 	var corrupt atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/status" {
-			json.NewEncoder(w).Encode(Snapshot{Jobs: []*Job{{ID: "job", State: "succeeded", OutputRefs: FileManifest{"result": ref}}}})
+		if r.URL.Path == "/api/jobs/job" {
+			json.NewEncoder(w).Encode(Job{ID: "job", State: "succeeded", OutputRefs: FileManifest{"result": ref}})
 			return
 		}
 		if r.Header.Get("Range") != "" {
@@ -164,11 +164,11 @@ func TestClientResultTypedErrors(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				snapshot := Snapshot{}
-				if tc.state != "" {
-					snapshot.Jobs = []*Job{{ID: "job", State: tc.state}}
+				if tc.state == "" {
+					respond(w, nil, &HTTPError{Status: 404, Code: "job_unknown", Message: "job is unknown"})
+					return
 				}
-				json.NewEncoder(w).Encode(snapshot)
+				json.NewEncoder(w).Encode(Job{ID: "job", State: tc.state})
 			}))
 			defer server.Close()
 			err := (Client{URL: server.URL, Token: "fixture"}).DownloadResult(context.Background(), "job", "result", filepath.Join(t.TempDir(), "result"))
