@@ -3,6 +3,7 @@ package myce
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
 
@@ -23,6 +24,52 @@ func TestAttemptMemoryCeilingEventsConstrainPeak(t *testing.T) {
 			}
 			if p := a.peak(); p == nil || p.HostGB == nil || *p.HostGB != 2 || !p.Constrained {
 				t.Fatalf("ceiling-bound resident peak was unconstrained: %+v", p)
+			}
+		})
+	}
+}
+
+func TestAttemptMemoryCachePressureAndMemberCaps(t *testing.T) {
+	for _, tc := range []struct {
+		name                string
+		resident, cap       int64
+		member, constrained bool
+	}{
+		{"healthy learned headroom", 8 << 30, 10 << 30, false, false},
+		{"near parent ceiling", 19 << 29, 10 << 30, false, true},
+		{"binding member cap", 19 << 29, 10 << 30, true, true},
+		{"member cache reclaim", 2 << 30, 10 << 30, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, err := fakeCeilings(t).create("attempt-parent", tc.cap, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			observed := a
+			if tc.member {
+				a.bytes = 40 << 30
+				children, err := a.children()
+				if err != nil {
+					t.Fatal(err)
+				}
+				observed, err = children.create("main", tc.cap, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(a.path, "memory.stat"), []byte("anon 10737418240\nkernel 0\nshmem 0\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for name, value := range map[string]string{
+				"memory.stat":   "anon " + strconv.FormatInt(tc.resident, 10) + "\nkernel 0\nshmem 0\n",
+				"memory.events": "max 559\noom 0\noom_kill 0\n",
+			} {
+				if err := os.WriteFile(filepath.Join(observed.path, name), []byte(value), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if p := a.peak(); p == nil || p.Constrained != tc.constrained {
+				t.Fatalf("resident pressure misclassified: %+v; want constrained=%v", p, tc.constrained)
 			}
 		})
 	}

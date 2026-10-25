@@ -33,18 +33,39 @@ func (a *memoryAttempt) peak() *AttemptMemoryPeak {
 			gb := (float64(anon) + float64(kernel) + float64(shmem)) / (1 << 30)
 			p.HostGB = &gb
 		}
-		for _, name := range []string{"pgscan_anon", "pgsteal_anon", "workingset_refault_anon", "pswpout"} {
+		for _, name := range []string{"workingset_refault_anon", "pswpout"} {
 			p.Constrained = p.Constrained || stats[name] > 0
 		}
 	}
 	if b, err := a.fs.ReadFile(filepath.Join(a.path, "memory.events")); err == nil {
 		events := memoryCounters(b)
-		p.Constrained = p.Constrained || events["max"] > 0 || events["high"] > 0 || events["oom"] > 0 || events["oom_kill"] > 0 || events["oom_group_kill"] > 0
+		// Learned envelopes add 1.25x headroom, so healthy resident use is
+		// about 80% of the cap. Use the midpoint to saturation (90%) to
+		// distinguish binding resident pressure from ordinary file-cache reclaim.
+		nearCeiling := a.bytes > 0 && p.HostGB != nil && *p.HostGB*(1<<30) >= .9*float64(a.bytes)
+		p.Constrained = p.Constrained || nearCeiling && (events["max"] > 0 || events["high"] > 0) || events["oom"] > 0 || events["oom_kill"] > 0 || events["oom_group_kill"] > 0
 	}
 	for _, name := range []string{"memory.swap.peak", "memory.swap.current"} {
 		if b, err := a.fs.ReadFile(filepath.Join(a.path, name)); err == nil {
 			n, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64)
 			p.Constrained = p.Constrained || err != nil || n > 0
+		}
+	}
+	// A member can bind well below the shared envelope. Check descendants
+	// against their own enforced caps, retaining only their pressure evidence;
+	// the parent's resident counters already include their memory.
+	if entries, err := a.fs.ReadDir(a.path); err == nil {
+		for _, entry := range entries {
+			if !entry.IsDir() {
+				continue
+			}
+			child := &memoryAttempt{fs: a.fs, path: filepath.Join(a.path, entry.Name())}
+			if b, err := a.fs.ReadFile(filepath.Join(child.path, "memory.max")); err == nil {
+				child.bytes, _ = strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
+			}
+			if peak := child.peak(); peak != nil {
+				p.Constrained = p.Constrained || peak.Constrained
+			}
 		}
 	}
 	if p.HostGB == nil && p.CgroupGB == nil && !p.Constrained {

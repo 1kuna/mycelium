@@ -769,12 +769,18 @@ memory was measured, the source names the retained GPU recipe default.
 The existing driver/system reserve and attempt slack still apply. Measurements
 never override an existing attempt or opt an explicitly declared job into auto.
 Resumed attempts may use accepted estimates but do not train them. Peaks are
-constrained by OOM, swap-out, anonymous reclaim, or `memory.events` with `max > 0`
-or `high > 0`, even when only file pages were reclaimed. Ceiling-bound peaks
+constrained by OOM, swap-out or anonymous workingset refault. `memory.events`
+`max > 0` or `high > 0` also constrains a peak when sampled anon + kernel +
+shmem reaches at least 90% of the parent's or a member's own cap. Healthy learned
+reuse sits near 80% (1 / 1.25); 90% distinguishes binding resident pressure from
+ordinary file-cache reclaim. Low resident use remains learnable with `max` hits.
+Ceiling-bound peaks
 from explicit-memory runs cannot seed auto estimates. An auto OOM or constrained
 attempt clears comparable learned memory across machines without forbidding the
 work. For a measured-need run, submit the same comparable work with `memory: auto`
-and no `size_hint`: the next run explores available headroom. Omit binding optional
+and no `size_hint`: the next run explores available headroom, with source
+`exploratory (previous peak constrained)` when a constrained peak invalidated
+the measurement. Omit binding optional
 member caps so the job can measure its need within the shared envelope. A
 successful unconstrained run teaches a new peak. Ceiling pressure alone leaves
 the job outcome unchanged; an OOM retains a job-local host floor for one retry

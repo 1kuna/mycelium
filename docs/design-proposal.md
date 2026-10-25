@@ -1869,10 +1869,12 @@ amendment.
 Reservations are frozen per attempt; stale, failed, OOM, constrained and resumed
 observations cannot shrink an envelope. Resumed jobs can use prior accepted
 estimates. An auto OOM or constrained attempt invalidates comparable learned
-memory points across machines and families, without recording a bound or setting the performance
-Forbidden flag. To measure the true need after a ceiling-bound run, submit the
+memory points across machines and families, without recording a bound or setting
+the performance Forbidden flag. To measure the true need after a ceiling-bound run, submit the
 same comparable work with `memory: auto` and no submitter hint: that next run
-explores the available host headroom. A successful unconstrained exploration
+explores the available host headroom. When a constrained peak invalidated the
+measurement, its source reads `exploratory (previous peak constrained)`. A
+successful unconstrained exploration
 re-teaches the peak. Ceiling pressure alone does not retry or change the job's
 outcome. After OOM, one retry keeps a job-local host floor with 25% more room,
 on the same host if it fits, without raising its GPU reservation from a host OOM.
@@ -1885,9 +1887,13 @@ Linux native attempts use their existing shared parent cgroup for main and all
 sidecars, bounded/zero swap and a job OOM cause. Learn the sampled whole-parent
 anon + kernel + shmem peak from `memory.stat` every 200 ms; retain `memory.peak`
 only as a total-memory diagnostic, since it includes reclaimable page cache. OOM,
-swap-out, anonymous reclaim, or `memory.events` reporting `max > 0` or `high > 0`
-mark measurements constrained. File-cache reclaim alone does not, but hitting a
-ceiling while reclaiming file pages does. This also excludes ceiling-bound peaks
+swap-out and anonymous workingset refault mark measurements constrained.
+`memory.events` reporting `max > 0` or `high > 0` also constrains a measurement
+when sampled anon + kernel + shmem reaches at least 90% of that cgroup's own
+ceiling. The 1.25× learned headroom puts healthy resident use near 80%; 90% is
+the midpoint between healthy reuse and saturation. Check capped members against
+their own ceilings as well as the parent. File-cache reclaim with low resident
+use remains learnable even with `max` events. This excludes ceiling-bound peaks
 from explicit-memory runs: they cannot seed an auto estimate. Explicit memory
 admission and outcomes otherwise retain their existing behavior.
 Fully capped native groups preserve member-level OOM attribution and kill mode.

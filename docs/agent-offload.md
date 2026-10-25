@@ -34,10 +34,14 @@ host headroom. A successful solo run with an unconstrained host-memory peak
 teaches later comparable jobs. The same host uses the accepted peak with 25%
 headroom; estimates from another host use the existing larger margins. An OOM
 or constrained auto attempt clears comparable memory peaks. `memory.events`
-`max > 0` or `high > 0` marks the peak constrained even without OOM. To get a
+`max > 0` or `high > 0` marks the peak constrained when sampled resident memory
+(anon + kernel + shmem) reaches at least 90% of the parent's or a member's own
+cap. Healthy learned reuse sits near 80% with 25% headroom; the 90% threshold
+keeps ordinary file-cache reclaim with low resident use learnable. To get a
 measured-need run after hitting the ceiling, submit the same comparable work with
 `memory: auto` and no submitter hint: the next run explores available headroom,
-and a successful unconstrained exploration re-learns the peak. Ceiling pressure
+labelled `exploratory (previous peak constrained)` when a constrained peak
+invalidated the measurement. A successful unconstrained exploration re-learns the peak. Ceiling pressure
 alone does not retry or change the job's outcome. Ceiling-bound explicit-memory
 peaks cannot seed auto estimates; explicit declarations otherwise keep their
 existing behavior. Optional member caps still apply, so remove a binding member
