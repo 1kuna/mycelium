@@ -497,11 +497,12 @@ func TestMemoryEnvelopeUnifiedAutoReusesPeakAcrossLiveDrift(t *testing.T) {
 			t.Fatalf("successful solo CUDA run lost comparability: %+v", timing)
 		}
 	}
-	if len(q.s.WorkObservations) != 2 {
-		t.Fatalf("expected both solo CUDA runs to record peaks, got %d", len(q.s.WorkObservations))
+	// Resolved auto reservations share one timing identity across live drift.
+	if len(q.s.WorkObservations) != 1 {
+		t.Fatalf("expected both solo CUDA runs to share one peak record, got %d", len(q.s.WorkObservations))
 	}
 	for _, point := range q.s.WorkObservations {
-		if point.Samples != 1 || point.StaleReason != "" || point.MemoryPeak == nil || point.MemoryLayout != "unified" {
+		if point.Samples != 2 || point.StaleReason != "" || point.MemoryPeak == nil || point.MemoryLayout != "unified" {
 			t.Fatalf("CUDA peaks not accepted: %+v", point)
 		}
 	}
