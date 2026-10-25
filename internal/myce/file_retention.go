@@ -107,7 +107,7 @@ func isResultExpired(err error) bool {
 func (q *Queue) maintainFileExpiry() {
 	now := q.clock.Now()
 	for _, j := range q.s.Jobs {
-		if !terminal(j.State) || len(j.Spec.Files)+len(j.OutputRefs) == 0 {
+		if !terminal(j.State) || !hasJobFiles(j) {
 			continue
 		}
 		// Some historical terminal paths did not stamp FinishedAt. Start their
@@ -122,7 +122,7 @@ func (q *Queue) maintainFileExpiry() {
 		if j.FilesExpired && j.FileReclamation == nil {
 			j.FileReclamation = &FileReclamation{}
 			seen := map[string]bool{}
-			for _, files := range []FileManifest{j.Spec.Files, j.OutputRefs} {
+			for _, files := range jobFileManifests(j) {
 				for _, ref := range files {
 					if !seen[ref.SHA256] {
 						j.FileReclamation.Pending = append(j.FileReclamation.Pending, ref.SHA256)
@@ -175,16 +175,18 @@ func (q *Queue) fileReferences(pendingOnly bool) (expired, keep, referenced map[
 		}
 		if terminal(j.State) && j.FilesExpired {
 			if !pendingOnly {
-				add(expired, j.Spec.Files)
-				add(expired, j.OutputRefs)
+				for _, files := range jobFileManifests(j) {
+					add(expired, files)
+				}
 			} else if j.FileReclamation != nil {
 				for _, hash := range j.FileReclamation.Pending {
 					expired[hash] = true
 				}
 			}
 		} else {
-			add(keep, j.Spec.Files)
-			add(keep, j.OutputRefs)
+			for _, files := range jobFileManifests(j) {
+				add(keep, files)
+			}
 		}
 		for _, save := range j.FileCheckpoints {
 			add(keep, save.Files)
@@ -368,4 +370,13 @@ func (q *Queue) reclaimJobFiles() error {
 		}
 		return nil
 	})
+}
+
+func hasJobFiles(j *Job) bool {
+	for _, files := range jobFileManifests(j) {
+		if len(files) > 0 {
+			return true
+		}
+	}
+	return false
 }

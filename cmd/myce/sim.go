@@ -20,15 +20,24 @@ func simCommand(args []string, out io.Writer) error {
 	days := f.Float64("days", 7, "simulated days (maximum 90)")
 	seed := f.Int64("seed", 1, "deterministic seed")
 	output := f.String("json", "sim-results.json", "JSON output path")
-	whatif := f.String("what-if", "", "comparison: split-batch or declared-batch")
+	pipelineScenario := f.String("pipeline-scenario", "", "per-piece qualification: homogeneous, heterogeneous-tail, separate-stage, shared-stage, mixed-production")
+	whatif := f.String("what-if", "", "comparison: split-batch, declared-batch or per-piece")
 	if e := f.Parse(args); e != nil {
 		return e
 	}
 	if f.NArg() != 0 {
 		return errors.New("sim accepts flags only")
 	}
-	if *whatif != "" && *whatif != "split-batch" && *whatif != "declared-batch" {
-		return errors.New("what-if must be split-batch or declared-batch")
+	if *whatif != "" && *whatif != "split-batch" && *whatif != "declared-batch" && *whatif != "per-piece" {
+		return errors.New("what-if must be split-batch, declared-batch or per-piece")
+	}
+	if *pipelineScenario != "" {
+		fleet, work, opts, err := myce.PipelineScenario(*pipelineScenario)
+		if err != nil {
+			return err
+		}
+		opts.Seed = *seed
+		return runPipelineComparison(out, *output, fleet, work, opts, *pipelineScenario == "homogeneous")
 	}
 	var fleetConfig myce.SimFleet
 	var workConfig myce.SimWorkload
@@ -55,6 +64,10 @@ func simCommand(args []string, out io.Writer) error {
 		}
 	}
 	opts := myce.SimOptions{Days: *days, Seed: *seed}
+	if *whatif == "per-piece" {
+		return runPipelineComparison(out, *output, fleetConfig, workConfig, opts, false)
+	}
+
 	baseline, e := myce.Simulate(fleetConfig, workConfig, opts)
 	if e != nil {
 		return e
@@ -155,6 +168,32 @@ func simCommand(args []string, out io.Writer) error {
 	}
 	if gateFailed {
 		return errors.New("declared fan-out simulator gate failed; see comparison JSON")
+	}
+	return nil
+}
+
+func runPipelineComparison(out io.Writer, output string, fleet myce.SimFleet, work myce.SimWorkload, opts myce.SimOptions, control bool) error {
+	comparison, err := myce.ComparePieceDependencies(fleet, work, opts)
+	if err != nil {
+		return err
+	}
+	data, err := json.MarshalIndent(comparison, "", "  ")
+	if err != nil {
+		return err
+	}
+	if err = os.WriteFile(output, append(data, '\n'), 0600); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "Per-piece gate: %t; coverage %t; earlier start %t; mean gain %.3fs; production p95 delta %+.3fs; worst regression %.3fs\n", comparison.GatePassed, comparison.Coverage, comparison.Overlap, comparison.MeanGain, comparison.ProductionDelta, comparison.WorstRegression)
+	if control {
+		a, b := comparison.Baseline, comparison.PerPiece
+		if comparison.Coverage && comparison.MeanGain == 0 && comparison.ProductionDelta == 0 && a.Failed == 0 && b.Failed == 0 && a.Unfinished == 0 && b.Unfinished == 0 {
+			return nil
+		}
+		return errors.New("homogeneous no-overlap control failed")
+	}
+	if !comparison.GatePassed {
+		return errors.New("per-piece comparison gate failed")
 	}
 	return nil
 }

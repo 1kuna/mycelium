@@ -126,3 +126,49 @@ the original stop grace expires.
 Each waiting batch needs a separate card; release credit never admits a command
 before a free-memory report. The one-production/two-experiment fixture therefore
 interrupts exactly one experiment and starts production after its one-second save.
+
+## Per-piece pipeline comparison
+
+```sh
+myce sim --pipeline-scenario separate-stage --seed 1 --json pipeline.json
+python3 scripts/sim-per-piece.py --binary ./myce --out .reports/per-piece
+```
+
+The harness uses slice 4's fast runtime (`GOMAXPROCS=1 GOGC=400`) with three
+parallel seeds. Fixed scenarios cover a homogeneous joint-acceptance control,
+heterogeneous waves and a short tail, separate stage capacity, shared stage
+capacity, and the original seven-day mixed-production workload with an identical
+predeclared downstream stage in each mode. `--what-if per-piece` also accepts a
+custom workload: add `downstream` to a stream with `batch_files` and curves:
+
+```yaml
+downstream:
+  duration_seconds: 60
+  platforms: [xpu, cuda]
+  memory_gb: 1
+  host_memory_gb: 1
+  publication_seconds: 2
+  transfer_seconds: 1
+  preparation_seconds: 1
+  intermediate_bytes: 1048576
+```
+
+These are explicit synthetic costs, not native measurements. Producer publication
+and verification cost is charged per piece after compute, before acceptance;
+input transfer and preparation precede downstream command start. Both modes
+predeclare the same jobs and use the real queue planner and dependency binding.
+Only the baseline's simulator-only eligibility barrier waits for producer gather.
+There is no downstream event handler making placement decisions.
+
+JSON records keyed coverage, first downstream start, acceptance-to-ready/start,
+full pipeline makespan, producer gather, production p95 and unstarted count,
+failed/cancelled/unfinished work, allocation utilization, and intermediate bytes.
+Retained intermediate peak includes consumed outputs; pending intermediate peak
+counts accepted pieces still waiting for their consumer. Report gather slowdown
+and every scenario's regression alongside the mean gain. The overlap gate
+requires complete output coverage, an earlier downstream start, lower makespan,
+exactly unchanged production p95 and no extra failures/cancellations/unfinished
+work. Failed gates still write JSON and exit nonzero. The homogeneous control
+expects equality because all pieces accept jointly; it supplies no speed claim.
+The lean simulator regression separately exercises controlled producer loss/retry
+and parent abort, outside the speed comparison.

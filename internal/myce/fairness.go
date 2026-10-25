@@ -389,6 +389,9 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 	return order, reasons
 }
 func (q *Queue) waitReason(j *Job) string {
+	if !dependencyReady(j) {
+		return "waiting for accepted producer piece"
+	}
 	if g := j.Spec.Needs.GPU; g != nil && g.Devices != nil {
 		found := false
 		for _, target := range q.plannerMachines() {
@@ -439,7 +442,7 @@ func (q *Queue) fairScore(j *Job, m *Machine) float64 {
 				continue
 			}
 		}
-		if r.State == "queued" && q.comparePriority(r.Spec, j.Spec) == 0 && fairResourceFamily(r.Spec) == fairResourceFamily(j.Spec) && q.capReason(r) == "" {
+		if dependencyReady(r) && r.State == "queued" && q.comparePriority(r.Spec, j.Spec) == 0 && fairResourceFamily(r.Spec) == fairResourceFamily(j.Spec) && q.capReason(r) == "" {
 			projects[r.Spec.Project] = true
 		}
 	}

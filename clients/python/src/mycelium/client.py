@@ -158,6 +158,7 @@ class Client:
 
     def run(self, extension: str, *, inputs: Mapping[str, str | Path],
             outputs: str | Path, key: str, project: str, class_: str = "",
+            after: Mapping[str, Any] | None = None,
             timeout: float | None = None) -> dict[str, Any]:
         """Upload, submit/wait by key, and download the extension's declared outputs.
 
@@ -174,7 +175,7 @@ class Client:
         files = {name: self.upload_file(source) for name, source in inputs.items()}
         job = self.submit_and_wait({"name": extension, "project": project, "class": class_,
                                     "extension": extension, "submission_key": key,
-                                    "files": files}, timeout=timeout)
+                                    "files": files, **({"after": copy.deepcopy(dict(after))} if after is not None else {})}, timeout=timeout)
         if job.get("files_expired"):
             raise APIError(410, json.dumps({"code": "result_expired", "error": "stored job files expired after the retention window"}))
         if job["state"] != "succeeded":

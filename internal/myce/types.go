@@ -139,6 +139,7 @@ func (e Environment) Key() string {
 }
 
 type Spec struct {
+	After         *PieceDependency  `json:"after,omitempty" yaml:"after,omitempty"`
 	Targets       []ExecutionTarget `json:"targets,omitempty" yaml:"targets,omitempty"`
 	RequireTarget bool              `json:"require_target,omitempty" yaml:"require_target,omitempty"`
 	FanOut        *FanOut           `json:"fan_out,omitempty" yaml:"fan_out,omitempty"`
@@ -178,6 +179,9 @@ func (s Spec) Validate() error {
 			return reject("job_placement_invalid", errors.New("targets require explicit OS, arch and platform"))
 		}
 	}
+	if err := validatePieceDependency(s); err != nil {
+		return reject("job_files_invalid", err)
+	}
 	if err := validateFanOut(s); err != nil {
 		return err
 	}
@@ -216,7 +220,7 @@ func (s Spec) Validate() error {
 	if s.extensionJob() {
 		return rejectIf("job_program_invalid", validateExtensionJob(s))
 	}
-	if s.Kind == "" && (len(s.Inputs)+len(s.Args) > 0 || (len(s.Outputs) > 0 && len(s.Files) == 0) || s.SizeHint.MemoryGB != 0 || s.SizeHint.HostMemoryGB != 0) {
+	if s.Kind == "" && (len(s.Inputs)+len(s.Args) > 0 || (len(s.Outputs) > 0 && len(s.Files) == 0 && s.After == nil) || s.SizeHint.MemoryGB != 0 || s.SizeHint.HostMemoryGB != 0) {
 		return reject("job_program_invalid", errors.New("inputs, outputs, args and size_hint require a kind/program job"))
 	}
 	if !validMemoryValue(s.Needs.MemoryGB) || (s.Needs.Memory != "auto" && ((!s.Needs.cpuOnly() && s.Needs.MemoryGB <= 0) || (s.Needs.cpuOnly() && s.Needs.HostMemoryGB <= 0))) {
@@ -305,6 +309,9 @@ type Copy struct {
 type Job struct {
 	AttemptHistory []AttemptOutcome `json:"attempt_history,omitempty"`
 
+	// Simulator-only baseline barrier; never persisted or exposed as an API.
+	simGatherWait    bool
+	Dependency       *PieceBinding   `json:"dependency,omitempty"`
 	FanOut           *FanOutProgress `json:"fan_out,omitempty"`
 	Batch            *BatchWork      `json:"batch,omitempty"`
 	Timing           *WorkTiming     `json:"timing,omitempty"`

@@ -490,6 +490,13 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		// Validate the original execution/needs, with the resolved class default.
 		// Resolution must not hide forbidden overrides or bypass deadline rules.
 		submitted.Class = s.Class
+		q.maintainFileExpiry()
+		if err := q.validatePieceSource(submitted); err != nil {
+			if isResultExpired(err) {
+				return err
+			}
+			return reject("job_files_invalid", err)
+		}
 		if err := submitted.Validate(); err != nil {
 			return specRejection(err)
 		}
@@ -525,7 +532,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		} else {
 			id = ID()
 		}
-		if s.Priority == "production" && s.StartBy == nil {
+		if s.Priority == "production" && s.StartBy == nil && s.After == nil {
 			deadline := q.clock.Now().Add(ProductionStartTimeout)
 			s.StartBy = &deadline
 		}
@@ -554,6 +561,10 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		j = &copy
 		if s.FanOut != nil {
 			j.FanOut = &FanOutProgress{Results: map[string]PieceResult{}}
+		}
+		if s.After != nil {
+			j.WaitingSince = time.Time{}
+			j.Dependency = &PieceBinding{Job: s.After.Job, Piece: s.After.Piece, State: "blocked"}
 		}
 		q.s.Jobs[id] = j
 		if s.SubmissionKey != "" {
@@ -643,6 +654,8 @@ func (q *Queue) fleetQuiet(now time.Time) bool {
 }
 
 func (q *Queue) maintain() {
+	q.maintainFanOut()
+	q.maintainPieceDependencies()
 	q.maintainFileExpiry()
 	q.maintainHostMaintenance()
 	q.maintainSubmissions()
@@ -735,6 +748,7 @@ func (q *Queue) maintain() {
 	q.maintainHolds()
 	q.refreshHostMemory()
 	q.maintainFanOut()
+	q.maintainPieceDependencies()
 	q.maintainModels()
 	q.escalateDockerCleanup()
 	q.refreshHostMemory()
@@ -1778,7 +1792,11 @@ func (q *Queue) markStarted(j *Job) {
 			j.StartWindow = j.Spec.StartBy.Sub(j.Queued)
 		}
 		j.Reason = ""
-		j.StartLatencySeconds = now.Sub(j.Queued).Seconds()
+		since := j.Queued
+		if j.Dependency != nil && j.Dependency.ReadyAt != nil {
+			since = *j.Dependency.ReadyAt
+		}
+		j.StartLatencySeconds = now.Sub(since).Seconds()
 		if j.Spec.Priority == "production" {
 			q.s.ProductionStarts = append(q.s.ProductionStarts, ProductionStart{At: now, Job: j.ID, Seconds: j.StartLatencySeconds})
 		}
@@ -1793,7 +1811,7 @@ func (q *Queue) Started(r Result) error {
 			rejected = e
 			return nil
 		}
-		if j.State != "running" || cancelled(j) || (j.Spec.StartBy != nil && j.StartedAt != nil) {
+		if j.State != "running" || !dependencyReady(j) || cancelled(j) || (j.Spec.StartBy != nil && j.StartedAt != nil) {
 			rejected = ErrStale
 			return nil
 		}
@@ -1937,7 +1955,7 @@ func (q *Queue) assign(j *Job, m *Machine) Job {
 	if j.FileTransport {
 		j.ResumeFiles = bestFileCheckpoint(j)
 	}
-	if j.Spec.extensionJob() && !j.storedFileResults() {
+	if (j.Spec.extensionJob() || j.Spec.After != nil) && !j.storedFileResults() {
 		j.OutputFiles = map[string]string{}
 		for name, prefix := range j.Spec.Outputs {
 			j.OutputFiles[name] = outputRelative(*j, name, prefix)

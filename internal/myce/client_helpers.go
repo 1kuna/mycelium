@@ -210,7 +210,7 @@ func (c Client) Run(ctx context.Context, extension string, inputs map[string]str
 		}
 		files[name] = ref
 	}
-	j, err := c.SubmitAndWait(ctx, Spec{Name: extension, Project: options.Project, Class: options.Class, Extension: extension, SubmissionKey: options.Key, Files: files})
+	j, err := c.SubmitAndWait(ctx, Spec{Name: extension, Project: options.Project, Class: options.Class, Extension: extension, SubmissionKey: options.Key, Files: files, After: options.After})
 	if err != nil {
 		return j, err
 	}
@@ -234,7 +234,10 @@ func (c Client) Run(ctx context.Context, extension string, inputs map[string]str
 	return j, nil
 }
 
-type RunOptions struct{ Key, Project, Class string }
+type RunOptions struct {
+	Key, Project, Class string
+	After               *PieceDependency
+}
 
 // Refuse symlink ancestors so automatic result placement stays in the caller's
 // directory. DownloadResult remains available for explicit arbitrary destinations.

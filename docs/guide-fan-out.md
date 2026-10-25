@@ -112,3 +112,49 @@ comparison uses the same synthetic component inventory and shared host ledger;
 virtual per-component workers retain the simulator's single-assignment transport.
 Native qualification and
 deployment require separate authorization.
+
+## Start a consumer when one piece is accepted
+
+Submit the producer first, then predeclare an ordinary next-stage job for each
+known piece. The queue owns readiness even after the submitter exits:
+
+```yaml
+name: consume-first
+project: research
+submission_key: operation-42.consume.first
+extension: summarizer@1
+after:
+  job: FULL_PRODUCER_JOB_ID
+  piece: first
+  outputs: {input.json: metrics.json}
+```
+
+`outputs` maps the consumer's local input name to the producer's declared output
+name. The full parent ID, project, piece and output names are checked at submit.
+One edge is supported; it cannot be combined with `fan_out`, checks, programs,
+Docker or a caller-selected working directory. Dependency inputs cannot collide
+with other inputs or outputs, or mix stored-file and NAS input transports.
+
+The wire state stays `queued`. `dependency.state` is `blocked` until acceptance,
+then `ready`; `dependency` records the parent, piece, exact producing `execution`,
+`ready_at`, and immutable `files` or NAS `inputs`. The submitted `spec.after`
+remains unchanged. A measured wave accepts all its pieces together after its
+complete output manifest is verified. Availability means normal scheduling
+eligibility; it reserves no resources. Consumers stage and verify the bound input
+through the existing artifact transport before command execution.
+
+The generated production start deadline and runnable wait age start at readiness.
+Explicit `start_by`, `give_up_at` and `deadline` remain absolute. Accepted pieces
+survive sibling failure; consumers of unaccepted pieces fail with structured
+`diagnostic_code: upstream_failed`. Cancelling the parent is a pipeline abort,
+including after gather: unfinished consumers stop, future consumers are cancelled,
+and the cancellation acknowledgement stays `release: pending` until all exact
+producer/consumer copies are released. Terminal results remain intact. Cancelling
+one consumer has no reverse effect.
+
+Producer gather still requires every producer piece and does not wait for
+consumers. Save the consumer IDs if the application needs all downstream results.
+Submission keys make an interrupted finite submission list safe to resume; they
+do not make the pipeline atomic. Partial parent results and bound consumer inputs
+use their existing artifact retention windows. A new binding to an expired result
+returns HTTP 410 `result_expired`; an existing key still replays its original job.
