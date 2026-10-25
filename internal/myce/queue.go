@@ -504,6 +504,9 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		if e != nil {
 			return reject("job_environment_invalid", e)
 		}
+		if !environmentPlatformsMatch(s.Needs, recipes) {
+			return reject("job_environment_platform_mismatch", nil)
+		}
 		sidecarRecipes, e := q.resolveSidecarEnvironments(s)
 		if e != nil {
 			return reject("job_environment_invalid", e)

@@ -46,6 +46,12 @@ func TestJobSpecInvalidHTTPAndQueueLog(t *testing.T) {
 			q.environments.Environments = map[string]map[string]EnvironmentRecipe{"known": {}}
 			s.Environment.Name = "missing"
 		}},
+		{"environment platform", "job_environment_platform_mismatch", "job platform and environment recipes have no compatible execution platform", func(t *testing.T, q *Queue, s *Spec) {
+			if err := q.ConfigureEnvironments(EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"cpu-tools": {"cpu": binaryRecipe(t, "cpu")}}}); err != nil {
+				t.Fatal(err)
+			}
+			s.Environment.Name = "cpu-tools"
+		}},
 		{"sidecar environment", "job_environment_invalid", "sidecar helper requires a registered environment recipe", func(_ *testing.T, _ *Queue, s *Spec) {
 			s.Needs.HostMemoryGB = 2
 			s.Run.Sidecars = []NativeSidecar{{Name: "helper", Command: []string{"echo"}, MemoryGB: 1, Environment: "missing"}}

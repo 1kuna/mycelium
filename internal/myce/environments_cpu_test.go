@@ -15,9 +15,8 @@ import (
 func TestEnvironmentCPURecipes(t *testing.T) {
 	dir := t.TempDir()
 	for name, data := range map[string]string{
-		"requirements.txt": "example==1.0\n", "uv.lock": "locked-uv", "pyproject.toml": "[project]\nname='example'\n",
+		"uv.lock": "locked-uv", "pyproject.toml": "[project]\nname='example'\n",
 		"pixi.lock": "locked-pixi", "pixi.toml": "[workspace]\nchannels=['conda-forge']\nplatforms=['linux-64','osx-arm64']\n[dependencies]\npython='>=3.12,<3.13'\nuv='*'\nffmpeg='*'\n",
-		"tool": "#!/bin/sh\necho cpu-tool\n",
 	} {
 		if err := os.WriteFile(filepath.Join(dir, name), []byte(data), 0700); err != nil {
 			t.Fatal(err)
@@ -25,8 +24,7 @@ func TestEnvironmentCPURecipes(t *testing.T) {
 	}
 	catalogFile := filepath.Join(dir, "catalog.yaml")
 	for _, recipe := range []string{
-		"python: '3.12', lock_file: requirements.txt", "python: '3.12', lock_file: uv.lock",
-		"backend: pixi, lock_file: pixi.lock", "binary: tool", "build: [build-tool, '{root}/bin']",
+		"python: '3.12', lock_file: uv.lock", "backend: pixi, lock_file: pixi.lock",
 	} {
 		if err := os.WriteFile(catalogFile, []byte("environments:\n  tools:\n    cpu: {"+recipe+"}\n"), 0600); err != nil {
 			t.Fatal(err)
