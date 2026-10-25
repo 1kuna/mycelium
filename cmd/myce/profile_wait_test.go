@@ -27,7 +27,7 @@ func TestProfileObserverTimeoutAndTransport(t *testing.T) {
 					w.WriteHeader(401)
 					return
 				}
-				io.WriteString(w, `{"jobs":[{"id":"fixture","state":"queued"}]}`)
+				io.WriteString(w, `{"id":"fixture","state":"queued"}`)
 			}))
 			defer server.Close()
 			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
@@ -108,7 +108,7 @@ func TestProfileObserverTLSIdentityFailure(t *testing.T) {
 // failure, never a failed computation or a confirmed delivered wakeup.
 func TestProfileNotifierDeliveryFailure(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, `{"jobs":[{"id":"fixture","state":"succeeded"}]}`)
+		io.WriteString(w, `{"id":"fixture","state":"succeeded"}`)
 	}))
 	defer server.Close()
 	dir := t.TempDir()
