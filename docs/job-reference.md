@@ -549,7 +549,11 @@ resumable: true
 The example's image is a substitution marker, not a runnable image. Supported
 options before the image are `--init`, explicit `--env`/`-e KEY=value`,
 `--volume`/`-v`, `--device`, `--gpus`, `--entrypoint`, `--workdir`/`-w`, and
-`--user`/`-u`. All other options are rejected before contacting Docker, including
+`--user`/`-u`, plus repeatable `--group-add <gid|name>` (also `--group-add=value`)
+for supplemental device groups with non-root images. Group values must be unsigned
+32-bit GIDs or group names starting with a letter/underscore, followed by letters,
+digits, underscores, dots or hyphens, with an optional trailing `$`.
+All other options are rejected before contacting Docker, including
 detach, auto-remove, restart policies, privileged mode, label/name/cidfile
 changes, daemon/context selection and Docker socket mounts. Image arguments
 are passed unchanged. The payload must forward TERM and implement the ordinary

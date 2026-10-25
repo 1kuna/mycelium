@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -19,6 +20,8 @@ import (
 	"syscall"
 	"time"
 )
+
+var dockerGroupName = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_.-]*[$]?$`)
 
 // A small allow-list keeps daemon selection and container lifecycle worker-owned.
 func dockerRunArgs(command []string) ([]string, error) {
@@ -42,7 +45,7 @@ func dockerRunArgs(command []string) ([]string, error) {
 			}
 			i++
 			continue
-		case "--env", "-e", "--volume", "-v", "--device", "--gpus", "--entrypoint", "--workdir", "-w", "--user", "-u":
+		case "--env", "-e", "--volume", "-v", "--device", "--gpus", "--entrypoint", "--workdir", "-w", "--user", "-u", "--group-add":
 			if !equals {
 				i++
 				if i >= len(command) {
@@ -52,6 +55,11 @@ func dockerRunArgs(command []string) ([]string, error) {
 			}
 			if value == "" || strings.Contains(value, "docker.sock") {
 				return nil, fmt.Errorf("unsupported Docker %s value", flag)
+			}
+			if flag == "--group-add" && !dockerGroupName.MatchString(value) {
+				if _, err := strconv.ParseUint(value, 10, 32); err != nil {
+					return nil, errors.New("Docker --group-add requires a numeric GID or group name")
+				}
 			}
 			if flag == "--volume" || flag == "-v" {
 				parts := strings.Split(value, ":")

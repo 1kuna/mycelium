@@ -37,6 +37,25 @@ func TestDockerCommandContract(t *testing.T) {
 	}
 }
 
+func TestDockerSupplementalGroups(t *testing.T) {
+	image := "image@sha256:" + strings.Repeat("a", 64)
+	command := []string{"docker", "run", "--user", "1000", "--device", "/dev/dri/renderD128", "--group-add", "109", "--group-add=render", image, "echo", "ok"}
+	args, err := dockerRunArgs(command)
+	if err != nil || !slices.Equal(args, command[2:]) {
+		t.Fatalf("supplemental groups not preserved: %q, %v", args, err)
+	}
+	for _, value := range []string{"", "-1", "--privileged", "render:109", "render group", "render\n", "4294967296", "/etc/group"} {
+		if _, err := dockerRunArgs([]string{"docker", "run", "--group-add=" + value, image}); err == nil {
+			t.Errorf("accepted malformed group %q", value)
+		}
+	}
+	for _, flag := range []string{"--label=x=y", "--name=x", "--cidfile=/tmp/x", "--host=unix:///tmp/docker", "--rm", "--detach", "--restart=always"} {
+		if _, err := dockerRunArgs([]string{"docker", "run", "--group-add", "render", flag, image}); err == nil {
+			t.Errorf("supplemental group allowed worker-owned flag %q", flag)
+		}
+	}
+}
+
 // Fake CLI/daemon state is separate from CLI lifetime: late starts survive timeout.
 func TestDockerCLIHelper(t *testing.T) {
 	if os.Getenv("MYCE_TEST_DOCKER") != "1" {
