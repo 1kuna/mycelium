@@ -48,9 +48,18 @@ func diskInputOutput(j *Job) (input, output uint64) {
 	}
 	return
 }
+func diskInputCacheBytes(j *Job) uint64 {
+	// NAS/path inputs are staged directly. Only immutable manifest inputs use
+	// the file cache; a hint alone does not create a second physical copy.
+	if len(jobInputFiles(j)) == 0 {
+		return 0
+	}
+	input, _ := diskInputOutput(j)
+	return input
+}
 func projectedDiskNeed(j *Job) uint64 {
 	input, output := diskInputOutput(j)
-	return addDiskBytes(addDiskBytes(input, input), output)
+	return addDiskBytes(addDiskBytes(input, output), diskInputCacheBytes(j))
 }
 func diskVolumeNeed(j *Job, v DiskVolume) (uint64, bool) {
 	input, output := diskInputOutput(j)
@@ -62,8 +71,9 @@ func diskVolumeNeed(j *Job, v DiskVolume) (uint64, bool) {
 			relevant = true
 			need = addDiskBytes(need, addDiskBytes(input, output))
 		case "file-cache":
-			relevant = relevant || input > 0
-			need = addDiskBytes(need, input)
+			cache := diskInputCacheBytes(j)
+			relevant = relevant || cache > 0
+			need = addDiskBytes(need, cache)
 		case "checkpoint":
 			if j.Spec.Resumable || j.ResumeFiles != nil || j.Spec.Disk != nil && j.Spec.Disk.CheckpointBytes > 0 {
 				relevant = true

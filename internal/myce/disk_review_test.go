@@ -122,10 +122,23 @@ func TestDiskHeadroomChargesOnlyWrittenVolumes(t *testing.T) {
 	if got := check(t, q, m, nil).Job; got == nil || got.ID != j.ID {
 		t.Fatal("unwritten checkpoint root or duplicate data input charge blocked work")
 	}
-	// A cache copy really does need room on file-cache, independently of data.
+	// Hints for NAS/path inputs do not create an immutable cache copy.
+	s.Inputs = map[string]string{"input": "shared/input"}
 	m.DiskVolumes[1].FreeBytes = 1 << 30
+	if reason := diskHeadroomReason(&Job{Spec: s}, &m); reason != "" {
+		t.Fatalf("path input charged unused file cache: %s", reason)
+	}
+	// Manifest inputs really do need a cache copy on file-cache.
+	s.Files = FileManifest{"input": {SizeBytes: 1 << 30}}
 	if reason := diskHeadroomReason(&Job{Spec: s}, &m); !strings.Contains(reason, "file-cache") {
 		t.Fatalf("cache copy was not charged to file-cache: %s", reason)
+	}
+	m.DiskVolumes[1].FreeBytes = 2 << 30
+	s.Resumable = true
+	s.Disk.CheckpointBytes = 1 << 30
+	m.DiskVolumes[2].FreeBytes = 1 << 30
+	if reason := diskHeadroomReason(&Job{Spec: s}, &m); !strings.Contains(reason, "checkpoint") {
+		t.Fatalf("declared checkpoint bytes were not charged: %s", reason)
 	}
 }
 

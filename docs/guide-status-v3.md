@@ -49,7 +49,8 @@ Input manifests and measured attempt `output_refs` supply projected bytes.
 Optional `spec.disk.input_bytes` / `output_bytes` are fallback hints when sizes
 are absent or unknown. Nothing requires a declaration; without size evidence
 admission uses the floor alone. Inputs and outputs charge the data volume; the
-input cache copy charges `file-cache`. Shared volumes sum those writes once per
+immutable input cache copy charges `file-cache`; NAS/path inputs bypass that cache.
+Shared volumes sum those writes once per
 role. Checkpoint writes charge only declared resumable/checkpoint work, using a
 measured resume manifest or optional `spec.disk.checkpoint_bytes` hint. A separate
 environment or model-cache volume checks the floor when the job uses it. The
