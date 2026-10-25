@@ -93,7 +93,7 @@ class ExtensionClientTests(unittest.TestCase):
             with self.assertRaises(APIError) as caught:
                 client.download_result("job", "result", "unused")
             self.assertEqual((caught.exception.status, caught.exception.code), (410, "result_expired"))
-        with patch.object(client, "list", return_value=[]):
+        with patch.object(client, "_call", side_effect=APIError(404, '{"code":"job_unknown","error":"job is unknown"}')):
             with self.assertRaises(APIError) as caught:
                 client.download_result("missing", "result", "unused")
             self.assertEqual((caught.exception.status, caught.exception.code), (404, "job_unknown"))
@@ -166,7 +166,7 @@ class ExtensionClientTests(unittest.TestCase):
         job = {"id": "12345678abcdef", "state": "queued",
                "reason": "no hypha has a qualified extension for this kind of work"}
         for run in (False, True):
-            with patch.object(client, "_call", return_value={"jobs": [job]}), \
+            with patch.object(client, "_call", return_value=job), \
                  patch.object(client, "submit", return_value=job), \
                  patch.object(client, "cancel_submission") as cancel, \
                  patch("mycelium.client.time.monotonic", side_effect=[0, 0, .06, .06]), \
@@ -184,7 +184,7 @@ class ExtensionClientTests(unittest.TestCase):
     def test_wait_timeout_for_running_job_does_not_claim_waiting_for_hypha(self):
         client = Client(token="fixture")
         job = {"id": "12345678abcdef", "state": "running"}
-        with patch.object(client, "_call", return_value={"jobs": [job]}), \
+        with patch.object(client, "_call", return_value=job), \
              patch("mycelium.client.time.monotonic", side_effect=[0, 0, .06, .06]), \
              patch("mycelium.client.time.sleep"):
             with self.assertRaises(TimeoutError) as caught:

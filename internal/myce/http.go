@@ -111,6 +111,14 @@ func (a API) handler(joiningPin string) http.Handler {
 		}
 		respondOperation(w, s, err, "status_unavailable")
 	})
+	mux.HandleFunc("GET /api/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
+		s, err := a.Queue.snapshotView(true, true)
+		var j *Job
+		if err == nil {
+			j, err = FindJob(s.Jobs, r.PathValue("id"))
+		}
+		respondOperation(w, j, err, "status_unavailable")
+	})
 	mux.HandleFunc("POST /api/jobs", func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
 			Spec

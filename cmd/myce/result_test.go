@@ -64,10 +64,10 @@ func TestInstalledClientDevResult(t *testing.T) {
 			w.WriteHeader(401)
 			return
 		}
-		if mode.Load() == 4 && r.URL.Path == "/api/status" {
+		if mode.Load() == 4 && r.URL.Path == "/api/jobs/"+j.ID {
 			pending := *j
 			pending.State = "running"
-			json.NewEncoder(w).Encode(myce.Snapshot{Jobs: []*myce.Job{&pending}})
+			json.NewEncoder(w).Encode(pending)
 			return
 		}
 		if mode.Load() == 3 {

@@ -188,8 +188,8 @@ func TestClientRunFailureProvidesTypedLogHint(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/jobs":
 			w.Write([]byte(`{"id":"12345678abcdef"}`))
-		case "/api/status":
-			w.Write([]byte(`{"jobs":[{"id":"12345678abcdef","state":"failed","reason":"execution failed"}]}`))
+		case "/api/jobs/12345678abcdef":
+			w.Write([]byte(`{"id":"12345678abcdef","state":"failed","reason":"execution failed"}`))
 		default:
 			t.Error("failed run attempted result download", r.URL.Path)
 			w.WriteHeader(500)
