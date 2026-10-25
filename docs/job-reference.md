@@ -590,6 +590,9 @@ Every settled main/sidecar also retains its exit code and private stderr tail
 (last 256 lines, at most 64 KiB) in the attempt record and mode-0600
 `<identity>.docker-evidence.json`. Sidecar stderr is excluded from queue logs,
 results and public status; this private evidence survives container retention.
+Stopped containers become eligible for removal 24 hours after result
+acknowledgement by default. See [Docker cleanup custody](operations.md#docker-cleanup-custody)
+for one-time reconciliation of retained containers from retired worker identities.
 
 For an existing **unmanaged** wrapper (`run.docker: false`), a cooperative
 container launch would be `docker run --label "$MYCE_DOCKER_LABEL" ...`, but

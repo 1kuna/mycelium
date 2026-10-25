@@ -525,6 +525,35 @@ acknowledgements afterward. See [managed Docker](job-reference.md#managed-docker
 for supported command/network/sidecar forms. Unmanaged containers remain outside
 this containment contract.
 
+Stopped-container retention defaults to 24 hours **after the queue result is
+acknowledged**, rather than after container exit. The normal collector covers
+the current worker's spool and identity. A completed conversion from per-device
+workers leaves their historical spools intact, so their retained containers
+need a one-time reconciliation:
+
+```sh
+myce reconcile-docker-retention --config /absolute/path/to/MACHINE_CONFIG
+```
+
+Run as the ordinary worker account. This command removes containers; it does not
+stop or restart workers or containers. It verifies the completed
+`MACHINE_CONFIG.m4-rollback.json` journal against the successor config, inventories
+only its explicitly retired worker identities on the configured Docker endpoint,
+and exclusively locks each retired spool. The successor may remain running.
+Removal uses the normal collector's exact attempt/worker label checks, matching
+acknowledgement, elapsed retention, confirmed released custody, stopped state,
+no-restart policy and private exit evidence. Removal never uses force.
+`verso-*` and `docker-render-1` containers are always protected.
+
+The JSON report lists every inventoried container, whether removal was confirmed,
+and a reason for each hold. Missing or invalid custody/acknowledgements, active
+containers and incomplete evidence stay held. Earlier archived spools are not
+searched or adopted; containers without reachable custody remain held and
+reported. Private evidence files survive removal. An operational/verification
+error returns nonzero after collecting the other results; inspect the report
+before retrying. The command never loads fleet credentials or contacts the queue,
+and adds no cross-identity scan to the steady-state collector.
+
 Each managed attempt also retains a private `ATTEMPT_ID.docker-events.json`
 in its worker spool, including with `logs: none`. A separate `docker events`
 subscription retains the last 256 lifecycle events (container ID, daemon

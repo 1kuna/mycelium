@@ -52,6 +52,10 @@ func pruneStoppedDocker(ctx context.Context, dir, worker, active string, now tim
 	if err != nil {
 		return err
 	}
+	return pruneStoppedDockerPaths(ctx, dir, worker, active, now, retention, paths, caller)
+}
+
+func pruneStoppedDockerPaths(ctx context.Context, dir, worker, active string, now time.Time, retention time.Duration, paths []string, caller func(*dockerAttempt) func(...string) ([]byte, error)) error {
 	var failures []error
 	for _, path := range paths {
 		if ctx.Err() != nil {

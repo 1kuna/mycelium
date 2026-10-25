@@ -2,11 +2,29 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
+	"io"
 	"mycelium/internal/myce"
 	"time"
 )
+
+func reconcileDockerRetentionCommand(args []string, out io.Writer) error {
+	f := flag.NewFlagSet("reconcile-docker-retention", flag.ContinueOnError)
+	config := f.String("config", "", "successor worker config with completed conversion journal")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if f.NArg() != 0 || *config == "" {
+		return errors.New("reconcile-docker-retention requires --config for a completed worker conversion")
+	}
+	report, err := myce.ReconcileRetiredDocker(context.Background(), *config, myce.RealClock{})
+	if e := json.NewEncoder(out).Encode(report); e != nil {
+		return errors.Join(err, e)
+	}
+	return err
+}
 
 // Reconciliation takes the worker spool's exclusive lock and releases only this attempt.
 func resolveDockerCommand(args []string) error {
