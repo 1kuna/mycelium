@@ -516,6 +516,9 @@ stop or restart workers or containers. It verifies the completed
 `MACHINE_CONFIG.m4-rollback.json` journal against the successor config, inventories
 only its explicitly retired worker identities on the configured Docker endpoint,
 and exclusively locks each retired spool. The successor may remain running.
+Conversions that kept the same worker name are refused by design; clean up those
+containers by hand with verified ownership and release custody, or leave them
+as they are.
 Removal uses the normal collector's exact attempt/worker label checks, matching
 acknowledgement, elapsed retention, confirmed released custody, stopped state,
 no-restart policy and private exit evidence. Removal never uses force.
@@ -525,8 +528,12 @@ The JSON report lists every inventoried container, whether removal was confirmed
 and a reason for each hold. Missing or invalid custody/acknowledgements, active
 containers and incomplete evidence stay held. Earlier archived spools are not
 searched or adopted; containers without reachable custody remain held and
-reported. Private evidence files survive removal. An operational/verification
-error returns nonzero after collecting the other results; inspect the report
+reported. After successful removal, the normal collector also deletes that
+attempt's retired-spool custody record, acknowledgement, result and cidfiles.
+Private evidence files survive removal. If a multi-container removal partly
+fails, the report confirms each ID Docker reported as removed and retains the
+attempt's custody for retry. An operational/verification error returns nonzero
+after collecting the other results; inspect the report
 before retrying. The command never loads fleet credentials or contacts the queue,
 and adds no cross-identity scan to the steady-state collector.
 

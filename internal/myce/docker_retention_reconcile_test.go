@@ -14,10 +14,12 @@ import (
 )
 
 type retentionDaemon struct {
-	t          *testing.T
-	containers map[string]dockerInspection
-	removed    []string
-	removeErr  error
+	t             *testing.T
+	containers    map[string]dockerInspection
+	removed       []string
+	removeErr     error
+	partialRemove bool
+	removeCalls   [][]string
 }
 
 func (f *retentionDaemon) caller(d *dockerAttempt) func(...string) ([]byte, error) {
@@ -52,22 +54,115 @@ func (f *retentionDaemon) caller(d *dockerAttempt) func(...string) ([]byte, erro
 			}
 			return json.Marshal(objects)
 		case "rm":
+			f.removeCalls = append(f.removeCalls, slices.Clone(args[1:]))
 			if f.removeErr != nil {
 				return nil, f.removeErr
 			}
-			for _, id := range args[1:] {
+			var out strings.Builder
+			for i, id := range args[1:] {
+				if f.partialRemove && i > 0 {
+					return []byte(out.String()), errors.New("fake daemon partial removal")
+				}
 				c := f.containers[id]
 				if c.Config.Labels["myce.worker"] != "retired" || c.Config.Labels["myce.attempt"] == "" || dockerLive(c) || strings.HasPrefix(c.Name, "/verso-") || c.Name == "/docker-render-1" {
 					f.t.Fatalf("unsafe removal: %v", args)
 				}
 				f.removed = append(f.removed, id)
 				delete(f.containers, id)
+				out.WriteString(id + "\n")
 			}
-			return nil, nil
+			return []byte(out.String()), nil
 		default:
 			f.t.Fatalf("unexpected daemon mutation: %v", args)
 			return nil, errors.New("unexpected operation")
 		}
+	}
+}
+
+func retentionPair(t *testing.T, sidecarName string) (ServiceConfig, ServiceConfig, *dockerTestClock, *retentionDaemon) {
+	t.Helper()
+	c, source := retentionConversion(t)
+	clock := &dockerTestClock{now: time.Unix(200000, 0)}
+	f := &retentionDaemon{t: t, containers: map[string]dockerInspection{}}
+	code := 143
+	members := map[string]dockerMember{}
+	for _, member := range []struct{ id, name, role string }{{"pair-main", "/myce-pair", "main"}, {"pair-sidecar", sidecarName, "sidecar"}} {
+		obj := dockerInspection{ID: member.id, Name: member.name}
+		obj.Config.Labels = map[string]string{"myce.attempt": "pair", "myce.worker": source.Name}
+		obj.State.Running = new(bool)
+		obj.State.Status, obj.State.ExitCode = "exited", code
+		obj.HostConfig.RestartPolicy = &dockerRestartPolicy{Name: "no"}
+		f.containers[obj.ID] = obj
+		members[obj.ID] = dockerMember{Name: member.role, ExitCode: &code, StderrTail: "private stderr"}
+	}
+	for name, value := range map[string]any{
+		"pair.docker.json":          dockerExecution{Identity: "pair", Endpoint: "fake", Released: true, EvidenceSaved: true, Containers: members},
+		"pair.docker-ack.json":      dockerAcknowledgement{Worker: source.Name, At: clock.Now().Add(-48 * time.Hour)},
+		"pair.docker-evidence.json": members,
+	} {
+		if err := saveWorkerJSON(source.State, name, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return c, source, clock, f
+}
+
+func TestReconcileRetiredDockerProtectsSharedAttemptSibling(t *testing.T) {
+	c, source, clock, f := retentionPair(t, "/verso-pair")
+	report, err := reconcileRetiredDocker(context.Background(), c.Config, clock, f.caller)
+	if err == nil || !strings.Contains(err.Error(), "outside verified reconciliation inventory") {
+		t.Fatal("shared-attempt removal did not reach the inventory guard", err)
+	}
+	if len(f.removeCalls) != 0 || len(f.containers) != 2 {
+		t.Fatal("shared attempt with protected sibling reached daemon removal", f.removeCalls)
+	}
+	if len(report) != 2 {
+		t.Fatal("missing shared-attempt report", report)
+	}
+	for _, r := range report {
+		if r.Removed || r.Reason == "" {
+			t.Errorf("shared attempt not held: %+v", r)
+		}
+		if r.Container == "pair-sidecar" && r.Reason != "protected container" {
+			t.Errorf("protected sibling hold missing: %+v", r)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(source.State, "pair.docker-ack.json")); err != nil {
+		t.Fatal("protected shared attempt lost custody", err)
+	}
+}
+
+func TestReconcileRetiredDockerReportsPartialRemoval(t *testing.T) {
+	c, source, clock, f := retentionPair(t, "/myce-pair-sidecar")
+	f.partialRemove = true
+	report, err := reconcileRetiredDocker(context.Background(), c.Config, clock, f.caller)
+	if err == nil || len(f.removed) != 1 {
+		t.Fatal("partial removal not reproduced", err, f.removed)
+	}
+	if len(report) != 2 {
+		t.Fatal("missing per-container report", report)
+	}
+	for _, r := range report {
+		if r.Removed != slices.Contains(f.removed, r.Container) {
+			t.Errorf("incorrect partial removal result: %+v", r)
+		}
+		if !r.Removed && r.Reason == "" {
+			t.Errorf("failed member has no reason: %+v", r)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(source.State, "pair.docker-ack.json")); err != nil {
+		t.Fatal("partial removal lost retry custody", err)
+	}
+	f.partialRemove = false
+	report, err = reconcileRetiredDocker(context.Background(), c.Config, clock, f.caller)
+	if err != nil || len(f.containers) != 0 {
+		t.Fatal("partial removal retry failed", report, err)
+	}
+	if _, err := os.Stat(filepath.Join(source.State, "pair.docker.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("successful removal retained custody", err)
+	}
+	if _, err := os.Stat(filepath.Join(source.State, "pair.docker-evidence.json")); err != nil {
+		t.Fatal("successful removal lost private evidence", err)
 	}
 }
 

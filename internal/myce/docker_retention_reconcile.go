@@ -116,8 +116,8 @@ func reconcileRetiredDockerSource(ctx context.Context, source ServiceConfig, now
 	if inventoryErr != nil {
 		return report, inventoryErr
 	}
-	// The retired spool must still be offline. Do not open a new store or create
-	// missing directories, and never take the successor's live worker lock.
+	// The retired spool must still be offline. Its lock file may be created,
+	// but the spool directory must already exist. Never lock the successor.
 	lock, err := os.OpenFile(filepath.Join(source.State, "worker.lock"), os.O_CREATE|os.O_RDWR, 0600)
 	if err == nil {
 		defer lock.Close()
@@ -153,9 +153,14 @@ func reconcileRetiredDockerSource(ctx context.Context, source ServiceConfig, now
 						}
 					}
 					out, err := attemptCall(args...)
-					if args[0] == "rm" && err == nil {
+					if args[0] == "rm" {
+						// Docker prints successfully removed IDs on stdout even when
+						// another member fails. Keep custody for retry on any error.
+						confirmed := strings.Fields(string(out))
 						for _, id := range args[1:] {
-							removed[id] = true
+							if err == nil || slices.Contains(confirmed, id) {
+								removed[id] = true
+							}
 						}
 					}
 					return out, err
