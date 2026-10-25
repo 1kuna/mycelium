@@ -59,6 +59,39 @@ expands `{extension}` and `{cache}` without shell expansion. The run command
 receives kind arguments, or the program's local input filename and arguments.
 It also receives `MYCE_WORK`, `MYCE_EXTENSION_NAME` and `MYCE_EXTENSION_VERSION`.
 
+## Use automatic memory in a native variant
+
+A composed native variant can omit both numeric memory floors:
+
+```yaml
+variants:
+  - target: {os: linux, arch: amd64, platform: cuda}
+    needs: {memory: auto}
+    execution:
+      main:
+        command: [sh, '{extension}/run.sh']
+    check: [sh, check.sh]
+    references:
+      kind:example-work: {input_shape: sample-v1, unit: records, units: 10}
+    # Bundle the matching native baseline under baselines.kind:example-work.
+```
+
+Use the usual pinned environments and native baselines. The standard
+`myce extension check` submits `needs.memory: auto` for this variant. Without
+an accepted comparable peak or a submitter hint, it explores available memory
+under the existing [memory envelope rules](design-proposal.md#amendment-job-memory-envelopes-146):
+measured host memory, a known allowance, sufficient free headroom and no
+protected memory-heavy work. Missing telemetry or headroom leaves it waiting;
+qualification still requires a successful check and matching baseline output.
+
+With an authored `references` entry, a successful solo auto check can teach
+its memory peak for later work with the same frozen variant, work type and
+input shape. Later jobs declare `workload: {input_shape: sample-v1, units: 10}`.
+Checks teach no throughput or timing data. Failed or ceiling-constrained peaks
+cannot seed an estimate. The variant's auto mode applies when the caller omits
+`needs.memory`; an explicit caller mode takes precedence. Numeric variants keep
+their existing reservations, and legacy extensions still require numeric floors.
+
 ## Bundle a native baseline, then replay it
 
 Record inputs **and actual outputs** on hardware that runs this work natively.

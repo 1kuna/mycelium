@@ -46,6 +46,19 @@ func observationAllowance(m *Machine) string {
 }
 
 func curveKey(e Extension, m *Machine, work string) (*ObservationKey, string) {
+	k, why := curveReferenceKey(e, m, work)
+	if k == nil {
+		return nil, why
+	}
+	for _, r := range m.ExtensionReports {
+		if r.Work == work && extensionQualificationReason(e, r, m) == "" {
+			return k, ""
+		}
+	}
+	return nil, "qualification unavailable"
+}
+
+func curveReferenceKey(e Extension, m *Machine, work string) (*ObservationKey, string) {
 	v := e.variant(machineTarget(m))
 	if v == nil {
 		return nil, "recipe target unavailable"
@@ -72,15 +85,6 @@ func curveKey(e Extension, m *Machine, work string) (*ObservationKey, string) {
 	}
 	if hardware == "" || m.ExtensionFingerprint == "" {
 		return nil, "component identity unavailable"
-	}
-	qualified := false
-	for _, r := range m.ExtensionReports {
-		if r.Work == work && extensionQualificationReason(e, r, m) == "" {
-			qualified = true
-		}
-	}
-	if !qualified {
-		return nil, "qualification unavailable"
 	}
 	return referenceObservationKey(e, m, ref, work, s.Needs, nil, nil, component, hardware)
 }
@@ -288,6 +292,12 @@ func curveStaleReason(p WorkObservation, e Extension, m *Machine, now time.Time)
 		return "driver or backend fingerprint changed"
 	}
 	k, why := curveKey(e, m, p.Key.Work)
+	if p.Source == "accepted work" && p.MemoryConfiguration != "" && p.Units == 0 && p.Seconds == 0 {
+		// A successful check's memory arrives before its qualification report.
+		// Keep all identity/freshness fences; this point grants no throughput
+		// estimate or qualification to an ordinary job.
+		k, why = curveReferenceKey(e, m, p.Key.Work)
+	}
 	if k == nil {
 		return why
 	}

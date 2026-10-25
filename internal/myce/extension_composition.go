@@ -56,8 +56,8 @@ func (e Extension) validateVariants() error {
 		if err := normalizeResources(&resources); err != nil {
 			return err
 		}
-		if v.Needs.CPUCores < 0 || v.Needs.Model != "" || v.Needs.MemoryGB <= 0 || !validMemoryValue(v.Needs.MemoryGB) || !validMemoryValue(v.Needs.HostMemoryGB) || v.Needs.Platform.Any || len(v.Needs.Platform.Required)+len(v.Needs.Platform.Preferred) > 0 {
-			return errors.New("variant needs require finite CPU/GPU/RAM floors; target owns platform")
+		if v.Needs.CPUCores < 0 || v.Needs.Model != "" || v.Needs.Memory != "auto" && v.Needs.MemoryGB <= 0 || !validMemoryValue(v.Needs.MemoryGB) || !validMemoryValue(v.Needs.HostMemoryGB) || v.Needs.Platform.Any || len(v.Needs.Platform.Required)+len(v.Needs.Platform.Preferred) > 0 {
+			return errors.New("variant needs require finite CPU/GPU/RAM floors or memory: auto; target owns platform")
 		}
 		if err := v.Execution.validate(); err != nil {
 			return err

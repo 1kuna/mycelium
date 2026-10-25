@@ -154,6 +154,9 @@ func CheckExtension(ctx context.Context, root string, e Extension, platform, dev
 		r := &reports[i]
 		b, hasBaseline := view.baseline(r.Work, platform)
 		selection := ResourceNeeds{}
+		if v := e.variant(machineTarget(&m)); v != nil {
+			selection.Memory = v.Needs.Memory
+		}
 		if platform != "cpu" {
 			selection.GPU = &GPUSelection{Devices: []string{m.Device}}
 		}

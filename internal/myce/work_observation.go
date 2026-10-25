@@ -90,7 +90,7 @@ func (q *Queue) workObservationKey(j *Job) (*ObservationKey, string) {
 		}
 		return nil, "declared wave; serial occupancy is not comparable"
 	}
-	if j.Spec.ExtensionCheck != nil || j.Spec.Workload == nil && !profileMemoryWork(j.Spec) {
+	if j.Spec.ExtensionCheck != nil && j.Spec.Needs.Memory != "auto" || j.Spec.ExtensionCheck == nil && j.Spec.Workload == nil && !profileMemoryWork(j.Spec) {
 		return nil, "workload/reference metadata unavailable"
 	}
 	if j.Spec.Resumable && j.Attempt > 1 {
@@ -137,7 +137,7 @@ func (q *Queue) workObservationKey(j *Job) (*ObservationKey, string) {
 		return nil, "variant reference unavailable"
 	}
 	ref, ok := v.References[j.Spec.workType()]
-	if !ok || ref.InputShape != j.Spec.Workload.InputShape {
+	if !ok || j.Spec.ExtensionCheck == nil && ref.InputShape != j.Spec.Workload.InputShape {
 		return nil, "input shape has no matching reference"
 	}
 	return referenceObservationKey(*e, m, ref, j.Spec.workType(), j.Spec.Needs, j.Spec.Args, j.Spec.Program, component, hardware)
@@ -196,7 +196,7 @@ func referenceObservationKey(e Extension, m *Machine, ref WorkReference, work st
 }
 
 func (q *Queue) beginWorkTiming(j *Job) {
-	if j.Spec.Workload == nil && !profileMemoryWork(j.Spec) {
+	if j.Spec.Workload == nil && !profileMemoryWork(j.Spec) && !(j.Spec.ExtensionCheck != nil && j.Spec.Needs.Memory == "auto") {
 		return
 	}
 	placement := ""
@@ -206,7 +206,7 @@ func (q *Queue) beginWorkTiming(j *Job) {
 	key, reason := q.workObservationKey(j)
 	j.Timing = &WorkTiming{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: j.Machine, Session: j.Session, Key: key, Reason: reason}
 	j.Timing.PlacementReason = placement
-	if key != nil && j.Spec.Workload != nil {
+	if key != nil && j.Spec.Workload != nil && j.Spec.ExtensionCheck == nil {
 		if old, ok := q.s.WorkObservations[identityHash(key)]; ok && old.StaleReason == "" && !old.Forbidden && q.clock.Now().Sub(old.RecordedAt) <= 30*24*time.Hour && validRate(old.Units) && validRate(old.Seconds) {
 			rate := old.Rate
 			if !validRate(rate) {
@@ -279,7 +279,7 @@ func (q *Queue) recordWorkObservation(j *Job, r Result) {
 		old.Rate, old.LatencySeconds = 0, 0
 		old.MemoryPeak = nil
 	}
-	if j.Spec.Workload != nil {
+	if j.Spec.Workload != nil && j.Spec.ExtensionCheck == nil {
 		seconds := q.clock.Now().Sub(*j.StartedAt).Seconds()
 		point.Units, point.Seconds = old.Units+j.Spec.Workload.Units, old.Seconds+seconds
 		if !validRate(seconds) || !validRate(point.Units) || !validRate(point.Seconds) {
@@ -289,7 +289,7 @@ func (q *Queue) recordWorkObservation(j *Job, r Result) {
 		point.Rate = ewma(old.Rate, j.Spec.Workload.Units/seconds)
 		point.LatencySeconds = ewma(old.LatencySeconds, seconds)
 	} else if r.MemoryPeak == nil || r.MemoryPeak.Constrained || r.MemoryPeak.HostGB == nil || !validRate(*r.MemoryPeak.HostGB) {
-		return // Plain profiles learn memory only, with the same solo custody fence.
+		return // Profiles and auto checks learn memory only, under the same solo custody fence.
 	}
 	point.HostMemoryGB, point.DeviceMemoryGB = old.HostMemoryGB, old.DeviceMemoryGB
 	point.IncrementalHostMemoryGB, point.IncrementalDeviceMemoryGB = old.IncrementalHostMemoryGB, old.IncrementalDeviceMemoryGB

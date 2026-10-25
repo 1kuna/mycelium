@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net/http"
 	"os"
@@ -14,6 +15,146 @@ import (
 	"testing"
 	"time"
 )
+
+func TestExtensionCheckAutoMemory(t *testing.T) {
+	t.Run("floor-free variant", func(t *testing.T) {
+		e := compositionExtension(t, false)
+		e.Variants[0].Needs = ResourceNeeds{Memory: "auto"}
+		freezeComposition(t, e)
+	})
+	for _, mode := range []string{"", "auto"} {
+		t.Run("submission/"+mode, func(t *testing.T) {
+			e := compositionExtension(t, false)
+			e.Kinds = nil
+			e.Variants[0].Needs.Memory = mode
+			if mode == "auto" {
+				e.Variants[0].Needs = ResourceNeeds{Memory: mode}
+			}
+			delete(e.Variants[0].Baselines, "kind:sample")
+			e = freezeComposition(t, e)
+			root := t.TempDir()
+			if err := InstallExtension(root, e); err != nil {
+				t.Fatal(err)
+			}
+			fingerprint, err := ExtensionFingerprint(context.Background(), "fake", "0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			m := machine("check-worker", "fake")
+			m.HostID, m.Device, m.ExtensionFingerprint = "check-host", "0", fingerprint
+			m.CapabilityProfile.OS, m.CapabilityProfile.Arch = e.Variants[0].Target.OS, e.Variants[0].Target.Arch
+			response := func(v any) (*http.Response, error) {
+				b, _ := json.Marshal(v)
+				return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(bytes.NewReader(b))}, nil
+			}
+			submitted := false
+			client := Client{URL: "http://fixture", HTTP: &http.Client{Transport: clientTestTransport(func(req *http.Request) (*http.Response, error) {
+				switch req.URL.Path {
+				case "/api/status":
+					return response(Snapshot{Machines: []*Machine{&m}})
+				case "/api/extensions":
+					return response(nil)
+				case "/api/jobs":
+					var s Spec
+					if err := json.NewDecoder(req.Body).Decode(&s); err != nil {
+						t.Fatal(err)
+					}
+					submitted = true
+					if s.Needs.Memory != mode || s.ExtensionCheck == nil {
+						t.Errorf("check submission memory = %q, want %q", s.Needs.Memory, mode)
+					}
+					return response(Job{ID: "check", State: "failed", Reason: "fixture check failure"})
+				case "/api/jobs/check":
+					return response(Job{ID: "check", State: "failed"})
+				case "/api/jobs/cancel":
+					return response(map[string]any{"release": "released"})
+				case "/api/jobs/check/logs":
+					return response([]LogChunk{})
+				}
+				t.Fatalf("unexpected request: %s", req.URL.Path)
+				return nil, os.ErrInvalid
+			})}}
+			cache := &EnvironmentCache{Root: t.TempDir(), Limit: 4 << 20}
+			reports, err := CheckExtension(context.Background(), root, e, "fake", "0", m.HostID, io.Discard, cache, client)
+			if !submitted || err == nil || len(reports) != 1 || reports[0].Qualified {
+				t.Fatalf("failed check granted qualification: %+v, %v", reports, err)
+			}
+			saved := readExtensionReports(root, e, "fake")
+			if len(saved) != 1 || saved[0].Qualified {
+				t.Fatalf("failed check persisted qualification: %+v", saved)
+			}
+		})
+	}
+}
+
+func TestExtensionCheckAutoLearnsMemoryForComparableWork(t *testing.T) {
+	for _, outcome := range []string{"accepted", "constrained", "failed"} {
+		t.Run(outcome, func(t *testing.T) {
+			q, clock, m, s := observationFixture(t)
+			e := q.s.Extensions[s.Extension]
+			e.Version = "auto"
+			e.Variants[0].Needs = ResourceNeeds{CPUCores: 1, Memory: "auto"}
+			e = freezeComposition(t, e)
+			if err := q.AddExtension(e); err != nil {
+				t.Fatal(err)
+			}
+			prepared := newExtensionReport(e, &m, "extension:sample")
+			prepared.Setup = true // Prepared but unqualified; only the check may run.
+			m.ExtensionReports = []ExtensionReport{prepared}
+			check(t, q, m, nil)
+			s.Extension = extensionKey(e)
+			probe := s
+			probe.Workload = nil
+			probe.ExtensionDigest = e.Digest
+			probe.AllowedMachines = []string{m.ID}
+			probe.Needs.Memory = "auto"
+			probe.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:sample", Directory: t.TempDir()}
+			first := startObservation(t, q, m, probe)
+			if first.MemoryEnvelope == nil || first.MemoryEnvelope.Source != "exploratory first run" {
+				t.Fatalf("check did not explore: %+v", first.MemoryEnvelope)
+			}
+			clock.Advance(time.Second)
+			host := 2.0
+			r := result(&first, outcome != "failed")
+			r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, Constrained: outcome == "constrained"}
+			if err := q.Complete(r); err != nil {
+				t.Fatal(err)
+			}
+			if outcome == "accepted" && len(q.s.WorkObservations) != 1 {
+				t.Fatalf("successful auto check did not learn memory: %+v", q.s.WorkObservations)
+			}
+			for _, point := range q.s.WorkObservations {
+				if point.Rate != 0 || point.LatencySeconds != 0 || point.Units != 0 || point.Seconds != 0 {
+					t.Fatalf("check learned throughput: %+v", point)
+				}
+			}
+			if got := job(t, q, first.ID); got.Timing != nil && (got.Timing.ActualSeconds != nil || got.Timing.PredictedSeconds != nil) {
+				t.Fatalf("check recorded timing: %+v", got.Timing)
+			}
+			queued := submit(t, q, s)
+			if reply := check(t, q, m, nil); reply.Job != nil {
+				t.Fatal("memory observation granted qualification")
+			}
+			report := newExtensionReport(e, &m, "extension:sample")
+			report.Setup, report.Qualified, report.CheckID = true, true, "successful-check"
+			m.ExtensionReports = []ExtensionReport{report}
+			next := check(t, q, m, nil).Job // Caller omits memory; variant owns auto.
+			if next == nil || next.ID != queued.ID {
+				t.Fatalf("qualified comparable work not assigned: %+v", next)
+			}
+			if next.Spec.Needs.Memory != "auto" || next.MemoryEnvelope == nil {
+				t.Fatalf("variant auto was lost: %+v", next.Spec.Needs)
+			}
+			if outcome == "accepted" {
+				if next.MemoryEnvelope.Source != "accepted peak × 1.25" || next.Spec.Needs.HostMemoryGB != 2.5 {
+					t.Fatalf("check peak not reused: %+v", next.MemoryEnvelope)
+				}
+			} else if !strings.HasPrefix(next.MemoryEnvelope.Source, "exploratory") {
+				t.Fatalf("%s check seeded a peak: %+v", outcome, next.MemoryEnvelope)
+			}
+		})
+	}
+}
 
 func TestExtensionQualificationSmokeFailureClearsPriorSuccess(t *testing.T) {
 	e := compositionExtension(t, false)

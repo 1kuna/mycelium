@@ -407,7 +407,12 @@ func extensionJobsWithRefusal(j *Job, m *Machine, qualified bool) ([]*Job, strin
 		}
 		if v := e.variant(machineTarget(m)); v != nil {
 			copy.Spec.Needs = v.Needs
-			copy.Spec.Needs.Memory = j.Spec.Needs.Memory
+			if j.Spec.Needs.Memory != "" {
+				copy.Spec.Needs.Memory = j.Spec.Needs.Memory
+			}
+			if copy.Spec.Needs.Memory == "auto" && copy.MemoryFallback == nil {
+				copy.MemoryFallback = &SizeHint{MemoryGB: j.Spec.SizeHint.MemoryGB, HostMemoryGB: j.Spec.SizeHint.HostMemoryGB}
+			}
 			floor, caller := v.Needs.GPU, j.Spec.Needs.GPU
 			if caller != nil {
 				selection := *caller
