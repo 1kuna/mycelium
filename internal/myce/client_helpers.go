@@ -3,8 +3,10 @@ package myce
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -43,8 +45,17 @@ func (c Client) Submit(ctx context.Context, spec Spec) (*Job, error) {
 
 func (c Client) GetJob(ctx context.Context, id string) (*Job, error) {
 	var j Job
+	invalid := &HTTPError{Status: 502, Code: "job_reply_invalid", Message: "queue returned an invalid Job reply: nonempty id and state are required"}
 	if err := c.Call(ctx, "GET", "/api/jobs/"+url.PathEscape(id), nil, &j); err != nil {
+		var syntax *json.SyntaxError
+		var fieldType *json.UnmarshalTypeError
+		if errors.As(err, &syntax) || errors.As(err, &fieldType) || err == io.EOF || err == io.ErrUnexpectedEOF {
+			return nil, invalid
+		}
 		return nil, err
+	}
+	if j.ID == "" || j.State == "" {
+		return nil, invalid
 	}
 	return &j, nil
 }
@@ -92,6 +103,10 @@ func RetryStatusRead(err error) bool {
 		return false
 	}
 	var httpErr *HTTPError
+	if errors.As(err, &httpErr) && httpErr.Code == "job_reply_invalid" {
+		// Polling cannot repair a reply from the wrong endpoint or protocol.
+		return false
+	}
 	return err != nil && (!errors.As(err, &httpErr) || httpErr.Status >= 500 || httpErr.Status == 408 || httpErr.Status == 429)
 }
 

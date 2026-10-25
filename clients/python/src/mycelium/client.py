@@ -55,6 +55,17 @@ def _json_default(value: Any) -> str:
     raise TypeError(f"cannot encode {type(value).__name__} as JSON")
 
 
+def _job_reply(reply: Any) -> dict[str, Any]:
+    if not isinstance(reply, dict) or any(
+            not isinstance(reply.get(field), str) or not reply[field]
+            for field in ("id", "state")):
+        raise APIError(502, json.dumps({
+            "code": "job_reply_invalid",
+            "error": "queue returned an invalid Job reply: nonempty id and state are required",
+        }))
+    return reply
+
+
 def _normalize(spec: Mapping[str, Any]) -> dict[str, Any]:
     result = copy.deepcopy(dict(spec))
     needs = result.get("needs", {})
@@ -316,7 +327,7 @@ class Client:
 
     def get(self, job_id: str) -> dict[str, Any]:
         """Return a Job reply with its stable project/submission-key identity."""
-        return self._call("GET", f"/api/jobs/{quote(job_id, safe='')}")
+        return _job_reply(self._call("GET", f"/api/jobs/{quote(job_id, safe='')}"))
 
     def cancel(self, job_id: str) -> dict[str, Any]:
         """Acknowledge no future execution; release may still be pending."""
@@ -348,7 +359,7 @@ class Client:
                 if end is not None and time.monotonic() >= end:
                     raise timed_out() from None
                 raise
-            job = observed
+            job = _job_reply(observed)
             if job["state"] in TERMINAL:
                 return job
             time.sleep(self.poll_interval if remaining is None else min(self.poll_interval, max(0, end - time.monotonic())))

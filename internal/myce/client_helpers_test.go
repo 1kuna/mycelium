@@ -207,6 +207,33 @@ func TestClientWaitUpdatesRetryLogRead(t *testing.T) {
 	}
 }
 
+func TestClientJobReplyInvalid(t *testing.T) {
+	for _, body := range []string{
+		`{"jobs":[{"id":"fixture","state":"succeeded"}]}`,
+		`{"id":"","state":"succeeded"}`,
+		`{"id":"fixture","state":""}`,
+		`<html>wrong endpoint</html>`,
+	} {
+		t.Run(body, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				io.WriteString(w, body)
+			}))
+			defer server.Close()
+			c := Client{URL: server.URL}
+			for _, read := range []func(context.Context, string) (*Job, error){c.GetJob, func(ctx context.Context, id string) (*Job, error) { return c.Wait(ctx, id) }} {
+				ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+				job, err := read(ctx, "fixture")
+				contextErr := ctx.Err()
+				cancel()
+				var api *HTTPError
+				if job != nil || !errors.As(err, &api) || api.Code != "job_reply_invalid" || contextErr != nil || RetryStatusRead(err) {
+					t.Errorf("invalid reply must fail without polling: job=%v err=%v context=%v", job, err, contextErr)
+				}
+			}
+		})
+	}
+}
+
 func TestClientJobReplyOldQueue(t *testing.T) {
 	for _, body := range []string{"404 page not found", `{"code":"job_unknown","error":"job is unknown"}`} {
 		t.Run(body, func(t *testing.T) {

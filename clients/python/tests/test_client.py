@@ -18,6 +18,19 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 class ClientTests(unittest.TestCase):
+    def test_job_reply_invalid(self):
+        client = Client(token="test-only")
+        for reply in ({"jobs": [{"id": "fixture", "state": "succeeded"}]},
+                      {"id": "", "state": "succeeded"},
+                      {"id": "fixture", "state": ""}):
+            for read in (client.get, client.wait):
+                with self.subTest(reply=reply, read=read.__name__):
+                    with patch.object(client, "_call", return_value=reply), patch(
+                            "mycelium.client.time.sleep", side_effect=AssertionError("invalid reply was polled")):
+                        with self.assertRaises(APIError) as caught:
+                            read("fixture")
+                        self.assertEqual(caught.exception.code, "job_reply_invalid")
+
     def test_installed_libressl_requires_openssl(self):
         with patch("ssl.OPENSSL_VERSION", "LibreSSL 2.8.3"):
             with patch("mycelium.installed.installed_authority") as authority:
