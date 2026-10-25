@@ -31,7 +31,7 @@ type AttemptOutcome struct {
 // These are queue-written stop records, not worker error text. This diagnostic
 // provenance does not establish signal delivery or change retry charging.
 func historyPlannedStop(j *Job) bool {
-	return j.State == "stopping" && (j.Reason == "machine leaving" ||
+	return j.State == "stopping" && priorityStop(j) == nil && (j.Reason == "machine leaving" ||
 		strings.HasPrefix(j.Reason, "hypha waiting: ") || strings.HasPrefix(j.Reason, "making room for "))
 }
 

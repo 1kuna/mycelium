@@ -143,6 +143,7 @@ func TestAttemptHistoryQueueStopWithoutResult(t *testing.T) {
 		{"heartbeat-empty", "making room for production job"},
 		{"stop-expiry", "making room for production job"},
 		{"machine-quiet", "hypha waiting: on battery"},
+		{"priority-preemption", "making room for production job"},
 	} {
 		t.Run(tc.path, func(t *testing.T) {
 			q, clock := fixture(t)
@@ -162,7 +163,9 @@ func TestAttemptHistoryQueueStopWithoutResult(t *testing.T) {
 			}
 			if err := q.update(func() error {
 				live := q.s.Jobs[first.ID]
-				if strings.HasPrefix(tc.reason, "making room for ") {
+				if tc.path == "priority-preemption" {
+					q.stopBatchFor(live, &Job{ID: "demand", Spec: spec("production")})
+				} else if strings.HasPrefix(tc.reason, "making room for ") {
 					q.stopFor(live, "production", "job")
 				} else {
 					q.stop(live, tc.reason)
@@ -171,7 +174,7 @@ func TestAttemptHistoryQueueStopWithoutResult(t *testing.T) {
 			}); err != nil {
 				t.Fatal(err)
 			}
-			if tc.path == "release-only" || heartbeat {
+			if tc.path == "release-only" || tc.path == "priority-preemption" || heartbeat {
 				r := result(first, false)
 				r.ReleaseOnly = true
 				if err := q.Complete(r); err != nil {
@@ -199,8 +202,12 @@ func TestAttemptHistoryQueueStopWithoutResult(t *testing.T) {
 				t.Fatal("stop did not requeue once without a counted loss", got)
 			}
 			a := got.AttemptHistory[0]
-			if a.Attempt != first.Attempt || a.Machine != first.Machine || a.Session != first.Session || a.State != "queued" || !a.Interrupted || !a.PoliteStop || !a.EndedAt.Equal(clock.Now()) {
-				t.Fatalf("queue-planned stop reads as infrastructure loss: %+v", a)
+			priority := tc.path == "priority-preemption"
+			if a.Attempt != first.Attempt || a.Machine != first.Machine || a.Session != first.Session || a.State != "queued" || !a.Interrupted || a.PoliteStop == priority || !a.EndedAt.Equal(clock.Now()) {
+				t.Fatalf("incorrect queue-stop provenance: %+v", a)
+			}
+			if priority && (a.PriorityStop == nil || a.PriorityStop.Cause != priorityPreemptionCause || a.PriorityStop.Demand != "demand" || a.PriorityStop.Victim != first.ID) {
+				t.Fatalf("priority preemption provenance lost: %+v", a)
 			}
 		})
 	}
