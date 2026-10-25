@@ -247,11 +247,12 @@ bypass it. Report coverage explicitly rather than claiming universal interceptio
 
 The checked-in `gate-full` profile runs the real full gate from a committed
 source snapshot with installed Go 1.25.6 or newer, Python 3.11, Git, Bash and uv. The
-profile resolves the installed Python 3.11 with `uv python find --offline
---no-python-downloads 3.11` and adds its executable directory to PATH before the
-gate isolates HOME and caches. This keeps the offline extension fixture's Python
-available even when the worker's PATH omits user-installed tool shims (#169).
-Missing Python fails before the gate starts; install it separately. Dependency
+gate's HOME/XDG isolation hides uv-managed interpreters (#169). Before isolation,
+`scripts/gate.sh` resolves installed Python 3.11 with `uv python find --offline
+--no-python-downloads 3.11` and exposes only a `python3.11` symlink in a private
+scratch bin directory on PATH. This covers both profile and local gate runs
+without letting the interpreter's installation directory shadow other tools.
+Missing Python fails during gate setup; install it separately. Dependency
 preparation happens before the gate goes offline. On Linux, Darwin CGO release
 builds explicitly skip and require separate native macOS verification; Linux
 builds, vet and the full race/dev suite still run. This is laptop proof, not

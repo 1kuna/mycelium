@@ -5,13 +5,7 @@ class: test
 source:
   git: HEAD
 run:
-  command:
-    - bash
-    - -ec
-    - |
-      python_path="$(uv python find --offline --no-python-downloads 3.11)"
-      export PATH="$(dirname "$python_path"):$PATH"
-      exec bash scripts/gate-profile.sh
+  command: [bash, scripts/gate-profile.sh]
   env:
     GOMAXPROCS: '2'
 needs:

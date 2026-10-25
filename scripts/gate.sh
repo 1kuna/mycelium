@@ -33,7 +33,12 @@ if [[ $mode == quick ]]; then
   git rev-parse --verify "$base" >/dev/null
   python3 scripts/gate-related.py "$base" > "$scratch/selection"
 fi
-mkdir -p "$scratch"/{home,tmp,gopath,bin}
+mkdir -p "$scratch"/{home,tmp,gopath,bin,python-bin}
+# HOME/XDG isolation hides uv-managed interpreters. Resolve before isolation,
+# exposing only Python 3.11 so its installation directory cannot shadow Go/tools.
+python_path="$(uv python find --offline --no-python-downloads 3.11)"
+ln -s "$python_path" "$scratch/python-bin/python3.11"
+export PATH="$scratch/python-bin:$PATH"
 export HOME="$scratch/home" USERPROFILE="$scratch/home" TMPDIR="$scratch/tmp"
 export GOCACHE="$shared_build" GOMODCACHE="$shared_modules" GOPATH="$scratch/gopath"
 export XDG_CONFIG_HOME="$HOME/.config" XDG_CACHE_HOME="$HOME/.cache" XDG_DATA_HOME="$HOME/.local/share"
