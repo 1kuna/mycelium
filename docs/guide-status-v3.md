@@ -25,7 +25,9 @@ Local probes use the existing 25 ms budget; the checkpoint/NAS probe uses the
 existing 750 ms heartbeat filesystem budget. A timeout retains the last good
 reading with its age and `retained: true`, and reports `error: disk reading
 unavailable`. Retention preserves the baseline for later rate calculation. The
-queue can use that reading for three observation cycles. A cycle is the reported
+queue can use that reading for three observation cycles plus the 850 ms sampling
+budget, since the worker timestamps before probing. At a one-second heartbeat,
+the freshness window is 3.85 seconds. A cycle is the reported
 heartbeat interval, with a minimum of 850 ms from four local probe budgets plus
 one NAS probe budget. Faster control ticks cannot expire a healthy reading
 during bounded observation and start handoff. Freshness is

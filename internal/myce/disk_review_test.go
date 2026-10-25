@@ -311,6 +311,37 @@ func TestWorkerDiskCacheVolumesAndOpaqueIdentity(t *testing.T) {
 	}
 }
 
+func TestDiskHeadroomFreshnessIncludesSamplingBudget(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		elapsed time.Duration
+		stale   bool
+	}{
+		{"healthy at 3.1 seconds", 2250 * time.Millisecond, false},
+		{"stale at 4 seconds", 3150 * time.Millisecond, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q, c := fixture(t)
+			m := reportDisk(t, machine("a", "fake"), c, "volume", []string{"data"}, 100<<30, 41<<30)
+			// The worker timestamps before probing; the sample is already 850 ms
+			// old on receipt, before queue time advances across three heartbeats.
+			m.DiskVolumes[0].AgeSeconds = 0.85
+			check(t, q, m, nil)
+			c.Advance(tc.elapsed)
+			s := spec("experiment")
+			s.Disk = &DiskNeeds{OutputBytes: 30 << 30}
+			reason := q.diskHeadroomReason(&Job{Spec: s}, q.s.Machines[m.ID])
+			if tc.stale {
+				if !strings.Contains(reason, "disk reading unavailable") {
+					t.Fatalf("expired disk reading remained usable: %q", reason)
+				}
+			} else if reason != "" {
+				t.Fatalf("sampling time expired a healthy disk reading: %s", reason)
+			}
+		})
+	}
+}
+
 func TestDiskHeadroomFreshnessUsesReceiveTimeAndReportedAge(t *testing.T) {
 	for _, skew := range []time.Duration{-24 * time.Hour, 24 * time.Hour} {
 		t.Run(skew.String(), func(t *testing.T) {

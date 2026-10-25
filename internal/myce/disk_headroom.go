@@ -125,7 +125,7 @@ func diskHeadroomReason(j *Job, m *Machine) string {
 	return ""
 }
 
-// Retained readings bridge a slow observation for three heartbeats. Beyond
+// Retained readings bridge three heartbeats plus the sampling budget. Beyond
 // that window, neither a retained value nor a still-checking-in worker proves
 // current headroom. The explicit age also remains visible in status.
 func (q *Queue) currentDiskVolume(v DiskVolume, receivedAt time.Time) DiskVolume {
@@ -136,11 +136,17 @@ func (q *Queue) currentDiskVolume(v DiskVolume, receivedAt time.Time) DiskVolume
 	// Faster control ticks cannot shorten the bounded disk-observation cycle:
 	// four local probes plus one NAS probe can consume these existing budgets.
 	// Otherwise healthy readings expire during ordinary preparation/handoff.
-	interval = max(interval, (4*localObservationBudget + heartbeatFilesystemBudget).Seconds())
+	samplingBudget := (4*localObservationBudget + heartbeatFilesystemBudget).Seconds()
+	interval = max(interval, samplingBudget)
+	// Workers timestamp before probing up to five roots, so a healthy sample
+	// can already be 850 ms old on receipt. Add that budget to three cycles
+	// to avoid false disk holds (3.85 s at a 1 s heartbeat), while still aging
+	// missing observations out after this bounded allowance.
+	window := 3*interval + samplingBudget
 	// SampledAt belongs to the worker clock. Age is measured there, then
 	// advanced only by queue time since receipt; clock skew cannot age a sample.
 	v.AgeSeconds = max(0, v.AgeSeconds) + max(0, q.clock.Now().Sub(receivedAt).Seconds())
-	if receivedAt.IsZero() || v.SampledAt.IsZero() || v.AgeSeconds > 3*interval {
+	if receivedAt.IsZero() || v.SampledAt.IsZero() || v.AgeSeconds > window {
 		v.Error = "disk reading unavailable"
 		v.Retained = false
 	}
