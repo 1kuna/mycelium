@@ -869,7 +869,7 @@
         },
         "dependency": {
           "$ref": "#/$defs/PieceBinding",
-          "x-contract": "diagnostic"
+          "x-contract": "stable"
         },
         "diagnostic_code": {
           "type": "string",
@@ -1313,7 +1313,8 @@
     "PieceBinding": {
       "properties": {
         "execution": {
-          "$ref": "#/$defs/Execution"
+          "$ref": "#/$defs/Execution",
+          "description": "Immutable producing child job ID and accepted attempt; never the latest attempt."
         },
         "files": {
           "$ref": "#/$defs/FileManifest"
@@ -1338,6 +1339,10 @@
           "type": "string"
         },
         "state": {
+          "enum": [
+            "blocked",
+            "ready"
+          ],
           "type": "string"
         }
       },
@@ -1661,7 +1666,7 @@
       "properties": {
         "after": {
           "$ref": "#/$defs/PieceDependency",
-          "x-contract": "diagnostic"
+          "x-contract": "stable"
         },
         "allowed_machines": {
           "items": {
