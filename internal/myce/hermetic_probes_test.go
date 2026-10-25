@@ -31,6 +31,9 @@ func installSyntheticWorkerHost() {
 	}
 	extensionIdentityProbe = syntheticIdentityProbe
 	workerDeviceFaultSource = func() DeviceFaultSource { return nil }
+	workerDiskProbe = func(string) (DiskReading, error) {
+		return DiskReading{Volume: "synthetic", TotalBytes: 1 << 40, FreeBytes: 1 << 39}, nil
+	}
 	workerProfileProbe = syntheticProfileProbe
 	workerHostMemorySource = func(reserve float64) (MemorySource, error) {
 		return func(context.Context) (float64, error) { return max(0, 128-reserve), nil }, nil

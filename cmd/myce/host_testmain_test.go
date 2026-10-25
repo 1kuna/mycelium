@@ -74,6 +74,9 @@ func cliTestMain(m *testing.M) int {
 func installSyntheticHost() {
 	myce.SetOnboardingMountCommand(func(context.Context, string, ...string) ([]byte, error) { return nil, nil })
 	myce.SetWorkerProbeDefaults(myce.WorkerProbeDefaults{
+		Disk: func(string) (myce.DiskReading, error) {
+			return myce.DiskReading{Volume: "synthetic", TotalBytes: 1 << 40, FreeBytes: 1 << 39}, nil
+		},
 		Profile: func() myce.ProfileProbe {
 			return myce.ProfileProbe{Machine: myce.MachineProbe{OS: runtime.GOOS, Arch: runtime.GOARCH, Files: fstest.MapFS{}, Command: func(_ context.Context, name string, _ ...string) ([]byte, error) {
 				if name == "/usr/sbin/sysctl" {

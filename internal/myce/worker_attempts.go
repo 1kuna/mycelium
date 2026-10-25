@@ -601,6 +601,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 		}
 		if retry.ready(now) {
 			m := cloneMachine(&w.Machine)
+			m.DiskVolumes = w.sampleDisks(root.dir, root.state.CheckpointRoot)
 			m.DockerCleanup, m.DockerCause = diagnostics.DockerCleanup, diagnostics.DockerCause
 			m.FileTransferError = diagnostics.FileTransferError
 			probeInventory := w.InventoryProbe

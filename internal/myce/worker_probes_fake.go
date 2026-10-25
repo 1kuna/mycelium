@@ -22,6 +22,9 @@ func init() {
 		}}
 	}
 
+	workerDiskProbe = func(string) (DiskReading, error) {
+		return DiskReading{Volume: "synthetic", TotalBytes: 1 << 40, FreeBytes: 1 << 39}, nil
+	}
 	workerProfileProbe = func() ProfileProbe {
 		return ProfileProbe{Machine: MachineProbe{OS: runtime.GOOS, Arch: runtime.GOARCH, Files: fstest.MapFS{}, Command: func(_ context.Context, name string, _ ...string) ([]byte, error) {
 			if name == "/usr/sbin/sysctl" {

@@ -545,6 +545,7 @@ func (q *Queue) validateProjectCapacity(j *Job) error {
 		}
 		for _, target := range q.machineTargets(m) {
 			copy := *target
+			copy.DiskVolumes = nil // Temporary disk pressure never makes a target permanently impossible.
 			copy.Gone = false
 			copy.Leaving = false
 			copy.MemoryError = ""

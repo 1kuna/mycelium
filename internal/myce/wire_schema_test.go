@@ -93,6 +93,7 @@ func generatedJobSchema(t *testing.T) []byte {
 	job["machine"].(map[string]any)["description"] = "Assigned execution identity; omitted before assignment or after requeue."
 	job["session"].(map[string]any)["description"] = "Worker session of the assigned execution; combine with job ID and attempt."
 	spec := defs["Spec"].(map[string]any)["properties"].(map[string]any)
+	spec["disk"].(map[string]any)["description"] = "Optional fallback input/output size hints in bytes; measured manifests take precedence. Missing size evidence uses only the volume free floor."
 	spec["priority"].(map[string]any)["enum"] = []string{"", "production", "deadline", "experiment"}
 	for _, name := range []string{"project", "submission_key"} {
 		spec[name].(map[string]any)["minLength"] = 1
@@ -219,6 +220,23 @@ func validateWireValue(t *testing.T, schema *validate.Schema, value any) {
 
 func TestWireSchemas(t *testing.T) {
 	generated := generatedJobSchema(t)
+	r := generate.Reflector{Anonymous: true, AllowAdditionalProperties: true}
+	diskSchema, err := json.MarshalIndent(r.Reflect(&DiskVolume{}), "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	diskSchema = append(diskSchema, '\n')
+	if os.Getenv("MYCE_UPDATE_SCHEMAS") == "1" {
+		if err := os.WriteFile(filepath.Join(schemaRoot, "disk-volume-v1.schema.json"), diskSchema, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	actualDisk, err := os.ReadFile(filepath.Join(schemaRoot, "disk-volume-v1.schema.json"))
+	if err != nil || !bytes.Equal(actualDisk, diskSchema) {
+		t.Fatal("disk schema drift: regenerate with MYCE_UPDATE_SCHEMAS=1", err)
+	}
+	disk := compileWireSchema(t, "disk-volume-v1.schema.json")
+	validateWireValue(t, disk, DiskVolume{Roots: []string{"data", "environment"}, TotalBytes: 100 << 30, FreeBytes: 50 << 30, SampledAt: time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)})
 	if os.Getenv("MYCE_UPDATE_SCHEMAS") == "1" {
 		if err := os.WriteFile(filepath.Join(schemaRoot, "job-v1.schema.json"), generated, 0644); err != nil {
 			t.Fatal(err)

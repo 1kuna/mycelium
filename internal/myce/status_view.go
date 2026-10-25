@@ -147,7 +147,22 @@ func CapabilityProfileLines(m *Machine) []string {
 	} else if len(p.Accelerators) == 0 {
 		lines = append(lines, "accelerator measurements not reported")
 	}
-	lines = append(lines, "local storage: "+profileSize(p.DiskFreeBytes)+" free / "+profileSize(p.DiskTotalBytes)+" total")
+	if len(m.DiskVolumes) == 0 {
+		lines = append(lines, "local storage: "+profileSize(p.DiskFreeBytes)+" free / "+profileSize(p.DiskTotalBytes)+" total (startup)")
+	} else {
+		for _, v := range m.DiskVolumes {
+			label := strings.Join(v.Roots, "+") + " disk: "
+			if v.Error != "" {
+				lines = append(lines, label+"unknown")
+				continue
+			}
+			rate := "change unknown"
+			if v.ChangeBytesPerHour != nil {
+				rate = fmt.Sprintf("%+.2f GiB/h", *v.ChangeBytesPerHour/(1<<30))
+			}
+			lines = append(lines, fmt.Sprintf("%s%.1f / %.1f GiB free; %s", label, float64(v.FreeBytes)/(1<<30), float64(v.TotalBytes)/(1<<30), rate))
+		}
+	}
 	lines = append(lines, "onboarding benchmark: "+p.Benchmark.Summary())
 	return lines
 }

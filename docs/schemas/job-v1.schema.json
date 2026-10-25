@@ -137,6 +137,17 @@
       ],
       "type": "object"
     },
+    "DiskNeeds": {
+      "properties": {
+        "input_bytes": {
+          "type": "integer"
+        },
+        "output_bytes": {
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "DockerReadiness": {
       "properties": {
         "path": {
@@ -1756,6 +1767,11 @@
         "deadline": {
           "format": "date-time",
           "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "disk": {
+          "$ref": "#/$defs/DiskNeeds",
+          "description": "Optional fallback input/output size hints in bytes; measured manifests take precedence. Missing size evidence uses only the volume free floor.",
           "x-contract": "diagnostic"
         },
         "environment": {

@@ -139,6 +139,7 @@ func (e Environment) Key() string {
 }
 
 type Spec struct {
+	Disk          *DiskNeeds        `json:"disk,omitempty" yaml:"disk,omitempty"`
 	After         *PieceDependency  `json:"after,omitempty" yaml:"after,omitempty"`
 	Targets       []ExecutionTarget `json:"targets,omitempty" yaml:"targets,omitempty"`
 	RequireTarget bool              `json:"require_target,omitempty" yaml:"require_target,omitempty"`
@@ -377,6 +378,7 @@ type Job struct {
 	Checkpoint            string                       `json:"checkpoint"`
 }
 type Machine struct {
+	DiskVolumes            []DiskVolume        `json:"disk_volumes,omitempty"`
 	Enrollment             *EnrollmentProof    `json:"enrollment,omitempty"`
 	Recovering             bool                `json:"recovering,omitempty"`
 	RecoveringSince        *time.Time          `json:"recovering_since,omitempty"`

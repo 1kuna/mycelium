@@ -10,6 +10,36 @@ memory, shared or separate memory, and local storage. Missing measurements say
 unknown. Extension reports say which kind of work or program is qualified on
 that hypha; having hardware alone does not make an extension qualified.
 
+Worker `disk_volumes` in `GET /api/status` contains current `free_bytes`,
+`total_bytes`, worker-clock `sampled_at`, and signed `change_bytes_per_hour`
+(positive means free space is growing). The rate uses successive worker samples
+and is omitted until two readings exist. `roots` identifies `data`, `environment`,
+and `checkpoint`; roots on the same filesystem share one entry. Paths and volume
+identifiers are never published. Missing/failed readings report `error` and the
+CLI says unknown; old workers without samples retain startup storage figures.
+The [disk-volume schema](schemas/disk-volume-v1.schema.json) describes each entry.
+Sampling uses at most three bounded observations per heartbeat, outside the queue.
+
+New work stays queued with `diagnostic_code: disk_headroom` when a sampled volume
+cannot retain its free floor plus the projected need. The diagnostic names the
+host, roots, free bytes, floor and need. Dispatch and launch use the same check;
+existing running work is not stopped. The floor is 1% of volume size with a
+256 MiB minimum for filesystem metadata, control state and other writers; there
+is no job-size cap. A failed current reading holds new work; absent reports from
+older workers provide no disk admission evidence. Recovery is automatic on a
+healthy heartbeat with sufficient space.
+
+Input file manifests and any measured attempt `output_refs` supply projected
+bytes (inputs include cache and staged copies). Optional `spec.disk.input_bytes` / `output_bytes` are fallback hints only
+when the respective measurement is absent. Nothing requires a declaration;
+without size evidence admission checks the floor alone. A separate environment
+volume uses only the floor because environment size is not part of job metadata.
+A separate checkpoint volume is checked for jobs that use checkpoints; input
+and output bytes are conservatively checked on both data and checkpoint volumes.
+These are estimates, not reservations against other writers or a prediction of
+unreported scratch/unpacked archive sizes. Cross-job output-size learning remains
+a follow-up; existing observation keys learn memory/throughput, not disk size.
+
 Machine `cpu_isolation` reports `select-none` after runtime qualification,
 `not-enforced` for cooperative CPU execution on macOS/Metal, or
 `cpu_accelerator_isolation_unavailable` while qualification is unavailable.

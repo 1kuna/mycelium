@@ -42,6 +42,7 @@ func (w *Worker) runBenchmark(stop context.Context, s *workerStore) error {
 	checkin := func(done string) (Reply, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
+		m.DiskVolumes = w.sampleDisks(s.dir, s.state.CheckpointRoot)
 		free, probeErr := w.HostMemorySource(ctx)
 		m.HostAvailableMemoryGB, m.HostMemoryError = free, ""
 		if probeErr != nil || !validMemoryValue(free) {

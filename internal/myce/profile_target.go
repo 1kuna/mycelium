@@ -204,6 +204,7 @@ func (q *Queue) qualifiedTarget(j *Job) (bool, string) {
 		}
 		for _, target := range q.machineTargets(m) {
 			copy := cloneMachine(target)
+			copy.DiskVolumes = nil // Submission checks capacity, not temporary disk pressure.
 			copy.Gone, copy.Leaving, copy.Recovering, copy.CheckpointUnavailable = false, false, false, false
 			copy.MemoryError, copy.HostMemoryError, copy.CPUCapacityReason = "", "", ""
 			copy.HostMemoryPolicyMismatch = false

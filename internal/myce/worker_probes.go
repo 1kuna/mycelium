@@ -13,6 +13,7 @@ var workerMachineProbe = LocalMachineProbe
 // WorkerProbeDefaults groups host sources used when a worker has no override.
 // Embedded callers may inject these before starting any worker goroutines.
 type WorkerProbeDefaults struct {
+	Disk         func(string) (DiskReading, error)
 	Profile      func() ProfileProbe
 	HostMemory   func(float64) (MemorySource, error)
 	OwnerSignals func(context.Context) OwnerSignals
@@ -22,6 +23,9 @@ type WorkerProbeDefaults struct {
 // SetWorkerProbeDefaults installs complete defaults during process setup.
 // It must not run concurrently with workers or fingerprint readers.
 func SetWorkerProbeDefaults(p WorkerProbeDefaults) {
+	if p.Disk != nil {
+		workerDiskProbe = p.Disk
+	}
 	workerProfileProbe = p.Profile
 	workerHostMemorySource = p.HostMemory
 	workerOwnerSignals = p.OwnerSignals

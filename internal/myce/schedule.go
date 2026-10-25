@@ -30,7 +30,8 @@ func fitsResources(j *Job, m *Machine, memory float64) bool {
 // A nil report retains short-circuit dispatch/launch evaluation. Qualification
 // collects failures from these very same checks, without a second fit path.
 func fitsResourcesChecked(j *Job, m *Machine, memory float64, report *targetFit) bool {
-	return report.check(executionTargetMatches(j.Spec, m), "target") &&
+	return report.check(diskHeadroomReason(j, m) == "", "disk headroom") &&
+		report.check(executionTargetMatches(j.Spec, m), "target") &&
 		report.check(j.MemoryEnvelope == nil || j.MemoryEnvelope.Refusal == "", "memory envelope") &&
 		report.check(!m.Recovering, "recovering") &&
 		report.check(deviceAllowed(j, m), "device") &&
@@ -116,6 +117,23 @@ func waitingReason(j *Job, machines map[string]*Machine, jobs map[string]*Job) s
 			}
 			return "waiting for a busy machine to make room"
 		}
+	}
+	diskReasons := []string{}
+	for _, m := range machines {
+		copy := *m
+		copy.DiskVolumes = nil
+		if fits(j, &copy, max(m.TotalMemoryGB, m.FreeMemoryGB)) {
+			if reason := diskHeadroomReason(j, m); reason != "" {
+				diskReasons = append(diskReasons, reason)
+			} else {
+				diskReasons = nil
+				break
+			}
+		}
+	}
+	if len(diskReasons) > 0 {
+		slices.Sort(diskReasons)
+		return strings.Join(slices.Compact(diskReasons), "; ")
 	}
 	unknownCapacity := []string{}
 	knownCapacity := false
