@@ -191,7 +191,7 @@ func (q *Queue) resolveEnvironment(e Environment) (map[string]EnvironmentRecipe,
 		return p, nil
 	}
 	out := map[string]EnvironmentRecipe{}
-	for _, p := range []string{"cuda", "xpu", "metal", "fake"} {
+	for _, p := range []string{"cuda", "xpu", "metal", "fake", "cpu"} {
 		if len(e.Platforms) > 0 && !slices.Contains(e.Platforms, p) {
 			continue
 		}

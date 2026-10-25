@@ -155,6 +155,57 @@ The Python library reads installed authority itself and retains the certificate
 pin. `Client(url=..., token=...)` keeps its existing explicit-credential behavior.
 Neither flow adds credentials to job environments; jobs never inherit `MYCE_TOKEN`.
 
+## CPU profile environments
+
+A CPU profile can select locked tools with `environment: cpu-tools` rather than
+depending on the worker's installed Python, uv or ffmpeg. For example, author
+`cpu-tools/pixi.toml` with:
+
+```toml
+[workspace]
+name = "cpu-tools"
+channels = ["conda-forge"]
+platforms = ["linux-64", "linux-aarch64", "osx-arm64", "osx-64"]
+
+[dependencies]
+python = ">=3.12,<3.13"
+uv = "*"
+ffmpeg = "*"
+```
+
+Run `pixi lock --manifest-path cpu-tools/pixi.toml`, then give the manifest and
+generated lock to the queue operator. To register it, place both files in
+`cpu-tools/` beside the existing NAS environment catalog, add this entry, and
+restart the queue with its existing `--environment-config` path:
+
+```yaml
+environments:
+  cpu-tools:
+    cpu: {backend: pixi, lock_file: cpu-tools/pixi.lock}
+```
+
+The catalog is loaded at queue startup; there is no consumer registration API
+or live reload command. Preserve existing entries and submit a new job after
+the reload. See [CPU tools with pixi](environments.md#cpu-tools-with-pixi) for
+the complete registration steps and workspace limits. Workers prepare the
+immutable recipe through the usual cache; they need pixi as a build prerequisite.
+
+In the consuming profile, select the registered name and CPU resources:
+
+```yaml
+environment: cpu-tools
+needs: {platform: cpu, cpu_cores: 2, memory_gb: 2}
+run:
+  command: [python, process.py]
+```
+
+Retain the profile's usual source, targets, outputs and check. Linux and Darwin
+CPU targets, including GPU hosts serving CPU work, use the locked environment's
+`bin` first on PATH. Python, uv and ffmpeg then come from that environment.
+Declare each intended OS/architecture in the pixi lock and profile targets.
+`platform: any` permits only platforms with recipes; CPU and GPU recipes never
+implicitly substitute for each other.
+
 ## Completion notification
 
 Set `MYCE_NOTIFY` or pass `--notify /path/to/executable`. This is one local

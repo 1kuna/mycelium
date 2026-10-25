@@ -33,7 +33,7 @@ environments:
       binary: binaries/metal/llama-cli
 ```
 
-Each entry is a map from platform (`cuda`, `xpu`, `metal`; `fake` for laptop
+Each entry is a map from platform (`cpu`, `cuda`, `xpu`, `metal`; `fake` for laptop
 acceptance tests) to a build recipe. Python recipes require `python` and
 `lock_file`. Use `requirements.txt`, or `uv.lock` together with the adjacent
 `pyproject.toml` (either file may be named as `lock_file`). Pin requirements;
@@ -83,6 +83,76 @@ Add the usual `name`, `project`, `priority`, and `resumable` fields. This exampl
 can run only on CUDA despite `platform: any`, because `torch-cuda` has no other
 recipe. Status describes missing platform/environment capacity.
 
+## CPU tools with pixi
+
+A `cpu` recipe supports CPU work on Linux and Darwin, including the CPU target
+of a GPU host. Python (`requirements.txt` or `uv.lock`), pixi, and binary/build
+recipes all accept `cpu`. The recipe must support the target's OS/architecture;
+`cpu` does not make a Linux binary portable to Darwin. There is no implicit
+fallback between CPU and GPU recipes. `platform: any` still permits only a
+matching recipe and does not turn a GPU job into a CPU job. Select CPU execution
+with `needs.platform: cpu` (or CPU cores without a platform selector).
+
+For Python 3.12, uv and ffmpeg from conda-forge, create `cpu-tools/pixi.toml`:
+
+```toml
+[workspace]
+name = "cpu-tools"
+channels = ["conda-forge"]
+platforms = ["linux-64", "linux-aarch64", "osx-arm64", "osx-64"]
+
+[dependencies]
+python = ">=3.12,<3.13"
+uv = "*"
+ffmpeg = "*"
+```
+
+Run `pixi lock --manifest-path cpu-tools/pixi.toml` when authoring the recipe.
+Keep the generated `pixi.lock` beside the manifest; it pins the actual tool and
+dependency versions for each declared OS/architecture. Workers install this
+lock with `pixi install --locked`; they do not solve it again. Pixi itself is a
+worker build prerequisite. The Python, uv and ffmpeg used by the job come from
+the prepared environment, independent of those tools on the host.
+
+Register it through the existing shared catalog:
+
+1. Put `cpu-tools/pixi.toml` and `cpu-tools/pixi.lock` beside the queue's existing
+   NAS catalog, in its `cpu-tools/` subdirectory. Catalog pixi recipes snapshot
+   these two files; keep bundled activation/setup inputs in an extension if
+   they need a complete workspace snapshot.
+2. Add the following entry to that catalog (preserve the other entries):
+
+   ```yaml
+   environments:
+     cpu-tools:
+       cpu:
+         backend: pixi
+         lock_file: cpu-tools/pixi.lock
+         environment: default
+   ```
+
+3. Have the queue operator start/restart the queue with that catalog selected
+   by `myce queue --environment-config /queue/nas/mycelium/environments/catalog.yaml`
+   alongside its usual options. For an installed queue, retain its configured
+   catalog path. Catalogs are read at queue startup, with no live registration
+   endpoint or reload command. Existing submitted jobs retain their snapshots;
+   changed files apply to new submissions after the catalog is reloaded.
+4. Submit a job or profile with `environment: cpu-tools` and CPU needs:
+
+   ```yaml
+   environment: cpu-tools
+   needs: {platform: cpu, cpu_cores: 2, memory_gb: 2}
+   run:
+     command: [python, process.py]
+   ```
+
+The worker uses the existing environment preparation and cache, activates the
+locked pixi environment and puts its `bin` first on `PATH`. Commands such as
+`python`, `uv` and `ffmpeg` then resolve there. Consumers add catalog entries
+through the queue operator; `join --environments` is the compatibility mode for
+preinstalled tools, not catalog registration. No worker host-tool installation
+or per-host recipe registration is needed for the job's declared dependencies.
+
 ## Project lock files
 
 A job can bypass the named catalog:
@@ -91,7 +161,7 @@ A job can bypass the named catalog:
 environment:
   lock_file: /queue/nas/project/uv.lock
   python: '3.12'
-  platforms: [cuda, xpu]
+  platforms: [cpu, cuda, xpu]
 needs:
   memory_gb: 8
   platform: {preferred: [cuda]}
