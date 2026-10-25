@@ -87,6 +87,55 @@ func TestExtensionCheckAutoMemory(t *testing.T) {
 	}
 }
 
+func TestExtensionCheckAutoPreservesThroughput(t *testing.T) {
+	q, clock, m, s := observationFixture(t)
+	e := q.s.Extensions[s.Extension]
+	e.Version = "auto"
+	e.Variants[0].Needs = ResourceNeeds{CPUCores: 1, Memory: "auto"}
+	e = freezeComposition(t, e)
+	if err := q.AddExtension(e); err != nil {
+		t.Fatal(err)
+	}
+	report := newExtensionReport(e, &m, "extension:sample")
+	report.Setup, report.Qualified, report.CheckID = true, true, "synthetic-check"
+	m.ExtensionReports = []ExtensionReport{report}
+	check(t, q, m, nil)
+	s.Extension = extensionKey(e)
+	work := startObservation(t, q, m, s)
+	clock.Advance(2 * time.Second)
+	finish(t, q, &work, true)
+	key := identityHash(q.s.Jobs[work.ID].Timing.Key)
+	before := q.s.WorkObservations[key]
+	if before.Units != 10 || before.Seconds != 2 || before.Rate != 5 || before.LatencySeconds != 2 {
+		t.Fatalf("missing throughput history: %+v", before)
+	}
+	probe := s
+	probe.Workload = nil
+	probe.ExtensionDigest = e.Digest
+	probe.AllowedMachines = []string{m.ID}
+	probe.Needs.Memory = "auto"
+	probe.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:sample", Directory: t.TempDir()}
+	job := startObservation(t, q, m, probe)
+	clock.Advance(time.Second)
+	host := 2.0
+	r := result(&job, true)
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	after := q.s.WorkObservations[key]
+	if after.Units != before.Units || after.Seconds != before.Seconds || after.Rate != before.Rate || after.LatencySeconds != before.LatencySeconds {
+		t.Errorf("auto check changed throughput: before=%+v after=%+v", before, after)
+	}
+	if len(q.s.WorkObservations) != 1 || after.Samples != before.Samples+1 || after.MemoryPeak == nil || after.MemoryPeak.HostGB == nil || *after.MemoryPeak.HostGB != host {
+		t.Errorf("auto check did not update the same observation's memory: %+v", q.s.WorkObservations)
+	}
+	timing := q.s.Jobs[job.ID].Timing
+	if timing.ActualSeconds != nil || timing.PredictedSeconds != nil {
+		t.Errorf("check learned timing: %+v", timing)
+	}
+}
+
 func TestExtensionCheckAutoLearnsMemoryForComparableWork(t *testing.T) {
 	for _, outcome := range []string{"accepted", "constrained", "failed"} {
 		t.Run(outcome, func(t *testing.T) {

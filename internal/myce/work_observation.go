@@ -290,6 +290,9 @@ func (q *Queue) recordWorkObservation(j *Job, r Result) {
 		point.LatencySeconds = ewma(old.LatencySeconds, seconds)
 	} else if r.MemoryPeak == nil || r.MemoryPeak.Constrained || r.MemoryPeak.HostGB == nil || !validRate(*r.MemoryPeak.HostGB) {
 		return // Profiles and auto checks learn memory only, under the same solo custody fence.
+	} else if old.StaleReason == "" {
+		point.Units, point.Seconds = old.Units, old.Seconds
+		point.Rate, point.LatencySeconds = old.Rate, old.LatencySeconds
 	}
 	point.HostMemoryGB, point.DeviceMemoryGB = old.HostMemoryGB, old.DeviceMemoryGB
 	point.IncrementalHostMemoryGB, point.IncrementalDeviceMemoryGB = old.IncrementalHostMemoryGB, old.IncrementalDeviceMemoryGB
