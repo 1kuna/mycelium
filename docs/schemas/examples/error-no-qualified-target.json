@@ -1,4 +1,4 @@
 {
   "code": "no_qualified_target",
-  "error": "no known qualified target with the declared platform, environment and capacity; intent retained locally"
+  "error": "host memory need 8.125 GiB (8 + 0.125 slack) exceeds allowance 8 GiB on example-machine; intent retained locally"
 }

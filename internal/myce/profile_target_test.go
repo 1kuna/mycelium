@@ -52,6 +52,26 @@ func TestProfileTargetRefusalPlatform(t *testing.T) {
 	}
 }
 
+func TestProfileTargetRefusalAutoEnvelope(t *testing.T) {
+	q, _ := fixture(t)
+	m := machine("worker", "fake")
+	m.UnifiedMemory = true
+	m.CapabilityProfile.MemoryLayout = "unified"
+	m.TotalMemoryGB = 8
+	m.HostMemoryMeasured, m.HostAvailableMemoryGB = true, 32
+	m.HostMemoryBudgetGB, m.MemoryCeilingSlackGB = 8, .125
+	check(t, q, m, nil)
+	s := Spec{Name: "profile", Project: "test", Class: "experiment", RequireTarget: true,
+		Run:   RunSpec{Command: []string{"true"}, MemoryGB: 8},
+		Needs: ResourceNeeds{Memory: "auto", Platform: Platform{Any: true}}}
+	_, err := q.Submit(s)
+	var api *HTTPError
+	want := "memory envelope unavailable within target allowance: exploratory first run needs 8.000 GiB host member memory; 7.750 GiB shared headroom available on worker"
+	if !errors.As(err, &api) || api.Code != "no_qualified_target" || !strings.Contains(api.Message, want) {
+		t.Fatalf("refusal = %v; want %q", err, want)
+	}
+}
+
 func TestProfileTargetQualificationAndReplay(t *testing.T) {
 	q, clock := fixture(t)
 	s := Spec{Name: "profile", Project: "test", Class: "experiment", SubmissionKey: "profile-key", RequireTarget: true,
