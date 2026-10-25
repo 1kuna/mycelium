@@ -218,10 +218,6 @@ func TestWorkObservationResolvedMemoryIdentity(t *testing.T) {
 	if key(needs, nil) != first {
 		t.Error("resolved memory split comparable timing evidence")
 	}
-	needs.Memory = ""
-	if key(needs, nil) != first {
-		t.Error("memory selection mode split comparable timing evidence")
-	}
 	needs.CPUCores = 2
 	if key(needs, nil) == first {
 		t.Error("CPU requirement did not invalidate timing evidence")
@@ -229,5 +225,42 @@ func TestWorkObservationResolvedMemoryIdentity(t *testing.T) {
 	needs.CPUCores = 1
 	if key(needs, []string{"different-recipe"}) == first {
 		t.Error("arguments did not invalidate timing evidence")
+	}
+}
+
+func TestWorkObservationLargerExplicitMemoryAfterOOM(t *testing.T) {
+	q, clock, m, s := observationFixture(t)
+	s.SizeHint.HostMemoryGB = .2
+	small := startObservation(t, q, m, s)
+	if small.Spec.Needs.HostMemoryGB != .2 {
+		t.Fatalf("wrong small reservation: %+v", small.Spec.Needs)
+	}
+	clock.Advance(time.Second)
+	r := result(&small, false)
+	r.OutOfMemory = true
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	forbidden := false
+	for _, point := range q.s.WorkObservations {
+		forbidden = forbidden || point.Forbidden
+	}
+	if !forbidden {
+		t.Fatal("OOM did not forbid undersized timing configuration")
+	}
+	if err := q.Cancel(small.ID); err != nil {
+		t.Fatal(err)
+	}
+	s.SizeHint.HostMemoryGB = 1
+	larger := startObservation(t, q, m, s)
+	if larger.Spec.Needs.HostMemoryGB != 1 {
+		t.Fatalf("wrong larger reservation: %+v", larger.Spec.Needs)
+	}
+	clock.Advance(2 * time.Second)
+	finish(t, q, &larger, true)
+	third := startObservation(t, q, m, s)
+	timing := q.s.Jobs[third.ID].Timing
+	if timing.PredictedSeconds == nil || *timing.PredictedSeconds != 2 {
+		t.Fatalf("larger successful reservation lost prediction after OOM: %+v", timing)
 	}
 }

@@ -173,7 +173,9 @@ func referenceObservationKey(e Extension, m *Machine, ref WorkReference, work st
 		power, mode = p.Availability.Signals.Power, p.Availability.Mode
 	}
 	// Exploratory reservations depend on live free room, not the work recipe.
-	needs.Memory, needs.MemoryGB, needs.HostMemoryGB = "", 0, 0
+	if needs.Memory == "auto" {
+		needs.MemoryGB, needs.HostMemoryGB = 0, 0
+	}
 	configuration := identityHash(struct {
 		Needs                                         ResourceNeeds
 		CPUReserve, CPUAllowance                      int
