@@ -1346,6 +1346,10 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 		// A changed disk sample can withdraw an offer before exec. This is the
 		// same temporary hold as dispatch, including for production stage failures.
 		q.requeue(j, q.diskHeadroomReason(j, q.s.Machines[j.Machine]), false)
+	} else if !r.Success && !oomFailure && j.StartedAt == nil && j.ExecutionCause != nil && (j.ExecutionCause.Operation == "start_authorization" || j.ExecutionCause.Operation == "start_handoff") && q.startPlacementRejection(j) != "" {
+		// The start fence withdrew placement before exec; like launch_refused,
+		// this is a temporary hold, not lost work or an infrastructure retry.
+		q.requeue(j, "requeued: start placement refused ("+q.startPlacementRejection(j)+")", false)
 	} else if oomFailure && j.Spec.Needs.Memory == "auto" {
 		q.retryOOM(j)
 	} else if (j.Spec.Priority == "production" || plannedPriorityStop(j)) && (stageFailure || oomFailure) {

@@ -42,8 +42,11 @@ retain its free floor plus the job's projected need. The diagnostic names the
 host, roots, free bytes, floor and need. Admission uses observed free bytes and
 does not subtract other jobs' projected writes: writes already made are included
 in the observation. One machine worker admits work per physical host; its
-component targets share the observations. Dispatch and launch use the same queue
-check. Recovery of an already-running copy bypasses admission-time disk checks.
+component targets share the observations. Dispatch applies this check. The
+launch and Started fences refuse only a current reading below the free floor; a
+stale or failed reading does not refuse there, since need was admitted at
+dispatch and staged inputs already appear in free space. Recovery of an
+already-running copy bypasses admission-time disk checks.
 Queued production work can move off a disk-held host to another fitting host,
 and its pinned-host disk reason remains visible while it waits. Disk pressure
 does not trigger preemption: stopping work does not free its files.
@@ -131,7 +134,11 @@ the Started hand-off uses `start_handoff`. Both retain the underlying safe class
 (for example `timeout`). An interrupted result
 uses that cause in its reason, without implying a worker restart. Actual fresh
 worker-session recovery retains its separate restart diagnostic. Authorization
-failures still consume the existing infrastructure retry/loss budget.
+failures still consume the existing infrastructure retry/loss budget, except
+when the queue's start fence refused placement: that attempt requeues without a
+loss or retry charge. The queue log line `event=launch_placement_rejected`
+names the failed `predicate` (`disk_floor`, `machine_unavailable`,
+`preparation_stopping`, `execution_target`, `cpu_fit` or `placement_policy`).
 
 History is persisted with the job and retains the **latest four ended attempts**:
 three infrastructure endings (two production retries, or three counted losses),

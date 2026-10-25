@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -459,5 +461,70 @@ func TestDiskHeadroomFastHeartbeatAllowsStartHandoff(t *testing.T) {
 	c.Advance(2 * localObservationBudget)
 	if err := q.Started(result(a, true)); err != nil {
 		t.Fatalf("healthy sample expired during bounded handoff: %v", err)
+	}
+}
+
+// s029: a production attempt was refused at the start fence twice (HTTP 409
+// request_stale) and charged two losses. A reading that merely aged out while
+// the attempt waited is not evidence of exhaustion; disk admission belongs at
+// dispatch, so the start fence must not refuse on staleness.
+func TestDiskHeadroomStaleReadingDoesNotRefuseStartFence(t *testing.T) {
+	q, c := fixture(t)
+	m := reportDisk(t, machine("spark", "fake"), c, "volume", []string{"data", "model-cache"}, 100<<30, 41<<30)
+	check(t, q, m, nil)
+	prod := submit(t, q, spec("production"))
+	a := check(t, q, m, nil).Job
+	if a == nil || a.ID != prod.ID {
+		t.Fatal("production not assigned")
+	}
+	c.Advance(4 * time.Second) // beyond the 3.85 s freshness window
+	launch := HostLaunch{Machine: a.Machine, Session: a.Session, Kind: "batch", Key: a.ID, Attempt: strconv.Itoa(a.Attempt)}
+	if err := q.AuthorizeLaunch(launch); err != nil {
+		t.Fatalf("stale disk reading refused launch authorization: %v", err)
+	}
+	if err := q.Started(result(a, true)); err != nil {
+		t.Fatalf("stale disk reading refused start hand-off: %v", err)
+	}
+}
+
+// A fresh observation below the floor still refuses, names its predicate, and
+// requeues without spending loss or infrastructure-retry budget, like a
+// worker-side launch_refused disk withdrawal.
+func TestDiskHeadroomStartFenceRefusalIsNotLoss(t *testing.T) {
+	q, c := fixture(t)
+	m := reportDisk(t, machine("spark", "fake"), c, "volume", []string{"data"}, 100<<30, 41<<30)
+	check(t, q, m, nil)
+	prod := submit(t, q, spec("production"))
+	a := check(t, q, m, nil).Job
+	if a == nil || a.ID != prod.ID {
+		t.Fatal("production not assigned")
+	}
+	if err := q.update(func() error {
+		owner := q.s.Machines[a.Machine]
+		owner.DiskVolumes[0].FreeBytes, owner.DiskVolumes[0].SampledAt, owner.DiskReceivedAt = 512<<20, c.Now(), c.Now()
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var logs bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(old)
+	launch := HostLaunch{Machine: a.Machine, Session: a.Session, Kind: "batch", Key: a.ID, Attempt: strconv.Itoa(a.Attempt)}
+	if err := q.AuthorizeLaunch(launch); !errors.Is(err, ErrStale) {
+		t.Fatalf("fresh below-floor reading did not refuse launch: %v", err)
+	}
+	if !strings.Contains(logs.String(), "event=launch_placement_rejected") || !strings.Contains(logs.String(), "predicate=disk_floor") {
+		t.Fatalf("placement rejection did not name its predicate: %s", logs.String())
+	}
+	r := result(a, false)
+	r.Interrupted = true
+	r.ExecutionCause = &RuntimeCause{Operation: "start_authorization", Class: "io_error"}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	got := job(t, q, prod.ID)
+	if got.State != "queued" || got.Losses != 0 || got.InfrastructureRetries != 0 {
+		t.Fatalf("start-fence placement refusal charged as a loss: state=%s losses=%d retries=%d reason=%q", got.State, got.Losses, got.InfrastructureRetries, got.Reason)
 	}
 }

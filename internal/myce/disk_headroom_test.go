@@ -48,8 +48,9 @@ func TestDiskHeadroomHoldsAndRecovers(t *testing.T) {
 	if admitted == nil || admitted.ID != j.ID {
 		t.Fatal("recovered space did not admit queued work", admitted)
 	}
-	// Launch uses the same predicate if disk pressure returns after dispatch.
-	setFree(2 << 30)
+	// Need was admitted at dispatch; the start fence refuses only a current
+	// reading below the free floor (s029).
+	setFree(512 << 20)
 	check(t, q, m, admitted)
 	if err := q.Started(result(admitted, true)); err != ErrStale {
 		t.Fatalf("launch ignored disk drift: %v", err)

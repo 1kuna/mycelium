@@ -85,14 +85,20 @@ func (q *Queue) AuthorizeLaunch(l HostLaunch) error {
 				reject("job_state")
 			case cancelled(j):
 				reject("cancelled")
-			case !q.startPlacementAllowed(j):
-				m := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
-				detail := q.dockerHoldDetail(hostID(m))
-				transition := "other"
-				if dockerStartingOrRunning(m.DockerCleanup) {
-					transition = m.DockerCleanup
+			default:
+				predicate := q.startPlacementRejection(j)
+				if predicate == "" {
+					break
 				}
-				log.Printf("event=launch_placement_rejected job=%s attempt=%d cpu_fits=%t docker_hold_kind=%q docker_transition=%q", j.ID, j.Attempt, cpuFits(j, m), detail.Kind, transition)
+				m := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
+				cpu, kind, transition := false, "", "other"
+				if m != nil {
+					cpu, kind = cpuFits(j, m), q.dockerHoldDetail(hostID(m)).Kind
+					if dockerStartingOrRunning(m.DockerCleanup) {
+						transition = m.DockerCleanup
+					}
+				}
+				log.Printf("event=launch_placement_rejected job=%s attempt=%d predicate=%s cpu_fits=%t docker_hold_kind=%q docker_transition=%q", j.ID, j.Attempt, predicate, cpu, kind, transition)
 				reject("start_placement")
 			}
 			return nil

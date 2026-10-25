@@ -169,6 +169,28 @@ func (q *Queue) diskHeadroomReason(j *Job, m *Machine) string {
 	return ""
 }
 
+// The start fence refuses only a current observation below the free floor.
+// Need was admitted at dispatch and staged inputs may already be reflected in
+// free space; an expired or failed reading is not evidence of exhaustion (s029).
+func (q *Queue) startDiskFloorReason(j *Job, m *Machine) string {
+	if m == nil {
+		return ""
+	}
+	for _, v := range m.DiskVolumes {
+		if _, relevant := diskVolumeNeed(j, v); !relevant {
+			continue
+		}
+		v = q.currentDiskVolume(v, m.DiskReceivedAt)
+		if v.Error != "" || v.TotalBytes == 0 {
+			continue
+		}
+		if reason := diskVolumeReason(m, v, 0); reason != "" {
+			return reason
+		}
+	}
+	return ""
+}
+
 // Model loads only write a cache copy when verified files are not present.
 // Calls to ready/loading slots and restarts with cached/local files write none.
 func (q *Queue) modelLoadDiskHeadroomReason(model Model, m *Machine) string {

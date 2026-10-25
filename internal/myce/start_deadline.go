@@ -149,17 +149,31 @@ func (q *Queue) allStartHostsDisabled(j *Job) bool {
 	return found
 }
 
-func (q *Queue) startPlacementAllowed(j *Job) bool {
-	return q.diskHeadroomReason(j, q.s.Machines[j.Machine]) == "" && q.startPlacementPolicyAllowed(j)
+func (q *Queue) startPlacementAllowed(j *Job) bool { return q.startPlacementRejection(j) == "" }
+
+// startPlacementRejection names the failed start-fence predicate, or "". The
+// names are fixed labels, safe to log without host, path or volume detail.
+func (q *Queue) startPlacementRejection(j *Job) string {
+	if q.startDiskFloorReason(j, q.s.Machines[j.Machine]) != "" {
+		return "disk_floor"
+	}
+	return q.startPlacementPolicyRejection(j)
 }
 
 // A worker reporting Started has already executed; retain the policy fences
 // without treating its existing files as a new disk allocation.
 func (q *Queue) startPlacementPolicyAllowed(j *Job) bool {
+	return q.startPlacementPolicyRejection(j) == ""
+}
+
+func (q *Queue) startPlacementPolicyRejection(j *Job) string {
 	owner := q.s.Machines[j.Machine]
 	m := allocationMachine(owner, j.AllocatedDevices)
-	if m == nil || q.preparationStopping(m) {
-		return false
+	if m == nil {
+		return "machine_unavailable"
+	}
+	if q.preparationStopping(m) {
+		return "preparation_stopping"
 	}
 	if j.Spec.Run.Docker && dockerStartingOrRunning(m.DockerCleanup) {
 		// A heartbeat can retain a healthy pending operation after its receipt.
@@ -168,5 +182,13 @@ func (q *Queue) startPlacementPolicyAllowed(j *Job) bool {
 		m.DockerCleanup, owner.DockerCleanup = "", ""
 		defer func() { m.DockerCleanup, owner.DockerCleanup = previous, previous }()
 	}
-	return executionTargetMatches(j.Spec, m) && cpuFits(j, m) && q.placementPolicyAllowed(j, m, false)
+	switch {
+	case !executionTargetMatches(j.Spec, m):
+		return "execution_target"
+	case !cpuFits(j, m):
+		return "cpu_fit"
+	case !q.placementPolicyAllowed(j, m, false):
+		return "placement_policy"
+	}
+	return ""
 }
