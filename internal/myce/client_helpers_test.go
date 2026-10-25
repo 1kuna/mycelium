@@ -233,6 +233,7 @@ func TestClientJobReplyInvalid(t *testing.T) {
 		`{"id":"","state":"succeeded"}`,
 		`{"id":"fixture","state":""}`,
 		`<html>wrong endpoint</html>`,
+		``,
 	} {
 		t.Run(body, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -36,7 +36,9 @@ environment strings; the client normalizes them to API objects without mutating
 inputs. YAML timestamps must include a timezone. Unknown fields and invalid
 job specifications fail through the server's validation. `APIError` retains
 HTTP status and body. Network errors propagate; submission is not retried
-implicitly. `wait` returns all terminal states, including failed/cancelled, and
+implicitly. An empty, non-JSON or incomplete Job reply raises `APIError` with
+`code == "job_reply_invalid"`; a reply that ends mid-document raises
+`IncompleteReplyError` from `get`, and `wait` retries it, as in Go. `wait` returns all terminal states, including failed/cancelled, and
 raises `TimeoutError` on timeout. Timing out does not cancel the job.
 
 Logs yield records with `seq`, `attempt`, and `text`, fetched incrementally from

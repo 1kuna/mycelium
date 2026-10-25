@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import http.client
 import tempfile
 import re
 import copy
@@ -22,6 +23,10 @@ TERMINAL = {"succeeded", "failed", "cancelled"}
 
 class UnsupportedTLSRuntimeError(RuntimeError):
     """The Python TLS runtime cannot use installed queue authority."""
+
+
+class IncompleteReplyError(ConnectionError):
+    """A Job reply ended early, as during a queue restart; the read may be retried."""
 
 
 class APIError(RuntimeError):
@@ -325,9 +330,22 @@ class Client:
         """Return all jobs, including terminal jobs."""
         return self.status().get("jobs") or []
 
+    def _read_job(self, job_id: str, *, timeout: float | None = None) -> dict[str, Any]:
+        # Matches Go GetJob: a reply that ends mid-document is retryable; an
+        # empty, non-JSON or incomplete Job is the typed job_reply_invalid.
+        try:
+            reply = self._call("GET", f"/api/jobs/{quote(job_id, safe='')}", timeout=timeout)
+        except http.client.IncompleteRead:
+            raise IncompleteReplyError(f"Job reply for {job_id} ended early") from None
+        except json.JSONDecodeError as error:
+            if error.doc.strip() and (error.pos >= len(error.doc) or error.msg.startswith("Unterminated string")):
+                raise IncompleteReplyError(f"Job reply for {job_id} ended early") from None
+            reply = None
+        return _job_reply(reply)
+
     def get(self, job_id: str) -> dict[str, Any]:
         """Return a Job reply with its stable project/submission-key identity."""
-        return _job_reply(self._call("GET", f"/api/jobs/{quote(job_id, safe='')}"))
+        return self._read_job(job_id)
 
     def cancel(self, job_id: str) -> dict[str, Any]:
         """Acknowledge no future execution; release may still be pending."""
@@ -354,14 +372,16 @@ class Client:
             if remaining is not None and remaining <= 0:
                 raise timed_out()
             try:
-                observed = self._call("GET", f"/api/jobs/{quote(job_id, safe='')}", timeout=self.timeout if remaining is None else min(self.timeout, remaining))
-            except (TimeoutError, URLError):
+                observed = self._read_job(job_id, timeout=self.timeout if remaining is None else min(self.timeout, remaining))
+            except (TimeoutError, URLError, IncompleteReplyError) as error:
                 if end is not None and time.monotonic() >= end:
                     raise timed_out() from None
-                raise
-            job = _job_reply(observed)
-            if job["state"] in TERMINAL:
-                return job
+                if not isinstance(error, IncompleteReplyError):
+                    raise
+            else:
+                job = observed
+                if job["state"] in TERMINAL:
+                    return job
             time.sleep(self.poll_interval if remaining is None else min(self.poll_interval, max(0, end - time.monotonic())))
 
     def logs(self, job_id: str, *, follow: bool = False,
