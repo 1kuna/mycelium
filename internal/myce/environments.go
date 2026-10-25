@@ -172,23 +172,34 @@ func (q *Queue) ConfigureEnvironments(c EnvironmentCatalog) error {
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
 	return q.update(func() error {
+		q.environmentRevision++
 		q.environments = c
 		return nil
 	})
 }
 func (q *Queue) resolveEnvironment(e Environment) (map[string]EnvironmentRecipe, error) {
+	return q.environments.resolveEnvironment(e)
+}
+
+// The catalog is immutable after configuration. Resolve on a captured catalog
+// outside q.mu: inline recipes read and hash local files.
+func (c EnvironmentCatalog) resolveEnvironment(e Environment) (map[string]EnvironmentRecipe, error) {
 	if e.Key() == "" {
 		return nil, nil
 	}
 	if e.Name != "" {
-		p, ok := q.environments.Environments[e.Name]
+		p, ok := c.Environments[e.Name]
 		if !ok { // Existing explicit --environments remains supported only without a catalog.
-			if len(q.environments.Environments) == 0 {
+			if len(c.Environments) == 0 {
 				return nil, nil
 			}
 			return nil, rejectFieldRule("job_environment_invalid", fmt.Errorf("unknown environment %q", e.Name))
 		}
-		return p, nil
+		out := make(map[string]EnvironmentRecipe, len(p))
+		for platform, r := range p {
+			out[platform] = r
+		}
+		return out, nil
 	}
 	out := map[string]EnvironmentRecipe{}
 	for _, p := range []string{"cuda", "xpu", "metal", "fake", "cpu"} {

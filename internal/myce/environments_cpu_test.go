@@ -122,6 +122,9 @@ func TestEnvironmentCPUWorkerBuildAndExecute(t *testing.T) {
 			}
 			if kind == "inline-uv" {
 				w.environmentRun = func(_ context.Context, argv []string, dir string, _ []string, _, _ io.Writer) error {
+					if data, err := os.ReadFile(filepath.Join(dir, "requirements.txt")); err != nil || string(data) != "example==1.0\n" {
+						return fmt.Errorf("staged recipe bytes: %q, %v", data, err)
+					}
 					if argv[0] != "uv" || (argv[1] != "venv" && argv[1] != "pip") {
 						return fmt.Errorf("unexpected builder: %v", argv)
 					}

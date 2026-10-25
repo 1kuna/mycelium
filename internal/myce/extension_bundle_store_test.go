@@ -351,3 +351,43 @@ func TestExtensionBundleStoreRejectsCorruptMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestExtensionBundleStoreRepairsCorruptBlobFromEmbeddedCopy(t *testing.T) {
+	q, clock := fixture(t)
+	e := fakeExtension(t)
+	frozen := e
+	if err := q.files.freezeExtension(&frozen); err != nil {
+		t.Fatal(err)
+	}
+	ref := *frozen.FilesRef
+	// Preserve a good embedded copy in durable state, as after an interrupted
+	// migration, while the previously published blob has been corrupted.
+	e.FilesRef = &ref
+	q.s.Extensions = map[string]Extension{extensionKey(e): e}
+	if err := q.update(func() error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(q.files.blob(ref), []byte("corrupt"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := strings.TrimSuffix(q.lock.Name(), ".lock")
+	if err := q.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(dbPath, q.root, clock, WithCheckpointAvailability(func() bool { return true }))
+	if err != nil {
+		t.Fatal("startup rejected the good embedded copy", err)
+	}
+	defer reopened.Close()
+	if err := reopened.files.verify(context.Background(), ref); err != nil {
+		t.Fatal("stored blob was not repaired", err)
+	}
+	got, err := reopened.extensionByDigest(e.Digest)
+	if err != nil || !reflect.DeepEqual(got.Files, e.Files) {
+		t.Fatal("repaired bundle differs from embedded copy", err)
+	}
+	stored := reopened.s.Extensions[extensionKey(e)]
+	if len(stored.Files) != 0 || stored.FilesRef == nil || *stored.FilesRef != ref {
+		t.Fatal("startup did not commit the repaired reference")
+	}
+}
