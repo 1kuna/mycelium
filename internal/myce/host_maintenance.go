@@ -134,9 +134,11 @@ func (q *Queue) ChangeHostMaintenance(host string, request HostMaintenanceReques
 		if policy.Mode == "" {
 			policy.Mode = "enabled"
 		}
-		// Every independent maintenance edit revokes the prior drain authority,
-		// including an operator re-drain at the same Clock timestamp.
-		policy.DrainOwner = ""
+		// Placement changes do not transfer drain authority. Other maintenance
+		// edits, including a re-drain at the same timestamp, revoke it.
+		if request.Action != "placement" {
+			policy.DrainOwner = ""
+		}
 		switch request.Action {
 		case "drain":
 			policy.Mode = "drained"
@@ -192,7 +194,11 @@ func (q *Queue) ChangeHostMaintenance(host string, request HostMaintenanceReques
 			deadline := q.clock.Now().Add(StopGrace)
 			policy.StopAt = &deadline
 		}
-		policy.UpdatedAt = q.clock.Now()
+		// Preserve the drain receipt's timestamp as well as its owner so its
+		// conditional resume remains valid after a placement-only edit.
+		if request.Action != "placement" {
+			policy.UpdatedAt = q.clock.Now()
+		}
 		q.s.HostMaintenance[host] = policy
 		q.maintain()
 		out = q.hostMaintenanceStatus(host)

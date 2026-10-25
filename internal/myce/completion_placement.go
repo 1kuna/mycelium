@@ -121,6 +121,13 @@ func (q *Queue) completionBetter(j *Job, a, b *Machine, stableTie ...bool) (bett
 // Only otherwise equivalent release plans use completion as their tie-break.
 func (q *Queue) completionPlanBetter(j *Job, p, other *placementPlan, scans ...*placementScan) bool {
 	if other != nil && p.stops == other.stops && p.cost == other.cost {
+		// Preserve call affinity before host value: use an existing engine
+		// instead of leaving a call waiting for a cheaper host to load it.
+		if c := q.calls[j.ID]; c != nil {
+			if a, b := q.modelReadiness(c.Model, p.machine), q.modelReadiness(c.Model, other.machine); a != b {
+				return a < b
+			}
+		}
 		if value, _ := q.valueCompare(p.machine, other.machine, scans...); value != 0 {
 			return value < 0
 		}

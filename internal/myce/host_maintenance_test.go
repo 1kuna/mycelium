@@ -77,6 +77,27 @@ func TestHostMaintenanceLastResortPersistsAcrossWorkerSessions(t *testing.T) {
 		}
 	}
 }
+func TestHostMaintenancePlacementPreservesDrainOwner(t *testing.T) {
+	q, clock := fixture(t)
+	a, _ := maintenanceMachines()
+	check(t, q, a, nil)
+	drained, err := q.ChangeHostMaintenance(a.HostID, HostMaintenanceRequest{Action: "drain", DrainOwner: "upgrade"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, enabled := range []bool{true, false} {
+		clock.Advance(time.Second)
+		lastResortPolicy(t, q, a.HostID, enabled)
+		status, err := q.HostMaintenanceStatus(a.HostID)
+		if err != nil || status.Policy.Mode != "drained" || status.Policy.DrainOwner != drained.Policy.DrainOwner || !status.Policy.UpdatedAt.Equal(drained.Policy.UpdatedAt) || status.Policy.LastResort != enabled {
+			t.Fatal("placement edit invalidated drain receipt", status.Policy, err)
+		}
+	}
+	if _, err := q.ChangeHostMaintenance(a.HostID, HostMaintenanceRequest{Action: "resume", IfMode: "drained", IfUpdatedAt: &drained.Policy.UpdatedAt, IfDrainOwner: drained.Policy.DrainOwner}); err != nil {
+		t.Fatal("drain owner could not conditionally resume after placement edit", err)
+	}
+}
+
 func maintenanceChange(t *testing.T, q *Queue, action string, stop bool) HostMaintenanceStatus {
 	t.Helper()
 	status, err := q.ChangeHostMaintenance("host", HostMaintenanceRequest{Action: action, Stop: stop})
