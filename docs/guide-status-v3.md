@@ -32,7 +32,8 @@ environment values, program arguments, extension files, or local checkpoint
 paths. Use the existing job output and log commands when you need their results.
 
 `myce status JOB` (full ID or an unambiguous prefix of at least eight characters)
-shows that job and its `attempt_history`. The same optional array is included
+shows that job and its `attempt_history`. Put `--full` before the job ID:
+`myce status --full JOB`. The same optional array is included
 in `GET /api/status`, the [job-v1 reply](schemas/job-v1.schema.json), and Python
 `Client.get(job_id)`. Each entry has exact `attempt`, `machine`, `session`,
 queue-clock `ended_at`, the resulting queue `state` (`queued` for a requeue),
@@ -41,13 +42,15 @@ the existing safe runtime operation/class and command exit code.
 
 History preserves the existing outcome classification: `launch` causes include
 `launch_refused`, `launch_failed` and `environment_failed`; `polite_stop` marks
-availability withdrawal, `operator_stop` marks operator/host maintenance,
+availability withdrawal or a queue-recorded planned stop (leaving or making
+room), `operator_stop` marks operator/host maintenance,
 and `priority_stop` retains priority preemption provenance. `interrupted` without
 those planned-stop flags or a launch cause records infrastructure interruption
 or loss. `out_of_memory` distinguishes OOM, with `state: queued` when retried;
 terminal command failures retain `command_exit` and `exit_code`. These are
 diagnostics, not retry charges: two starts and zero losses can include a planned
-requeue followed by one command failure.
+requeue followed by one command failure. A launch refusal without an availability
+flag is still charged a loss under the existing retry rules.
 
 History is persisted with the job and retains the **latest four ended attempts**:
 three infrastructure endings (two production retries, or three counted losses),

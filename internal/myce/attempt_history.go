@@ -1,6 +1,9 @@
 package myce
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // Three infrastructure endings (two retries), plus the one allowed OOM retry.
 // Planned requeues can repeat indefinitely; retain only this latest window.
@@ -23,6 +26,13 @@ type AttemptOutcome struct {
 	PoliteStop     bool                `json:"polite_stop,omitempty"`
 	OperatorStop   bool                `json:"operator_stop,omitempty"`
 	PriorityStop   *PriorityPreemption `json:"priority_stop,omitempty"`
+}
+
+// These are queue-written stop records, not worker error text. This diagnostic
+// provenance does not establish signal delivery or change retry charging.
+func historyPlannedStop(j *Job) bool {
+	return j.State == "stopping" && (j.Reason == "machine leaving" ||
+		strings.HasPrefix(j.Reason, "hypha waiting: ") || strings.HasPrefix(j.Reason, "making room for "))
 }
 
 func attemptOutcome(j *Job, r Result) AttemptOutcome {

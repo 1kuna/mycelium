@@ -569,7 +569,7 @@ func (q *Queue) retry(j *Job, why string) {
 // Admission refusal and planned stops do not spend infrastructure retry budgets.
 func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 	// Snapshot identity before requeue clears it, including loss without a result.
-	outcome := attemptOutcome(j, Result{Interrupted: true, PriorityStop: priorityStop(j)})
+	outcome := attemptOutcome(j, Result{Interrupted: true, PoliteStop: historyPlannedStop(j), PriorityStop: priorityStop(j)})
 	defer func() { q.recordAttemptOutcome(j, outcome) }()
 	if cancelled(j) {
 		if !terminal(j.State) {
