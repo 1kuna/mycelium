@@ -88,51 +88,86 @@ func TestExtensionCheckAutoMemory(t *testing.T) {
 }
 
 func TestExtensionCheckAutoPreservesThroughput(t *testing.T) {
-	q, clock, m, s := observationFixture(t)
-	e := q.s.Extensions[s.Extension]
-	e.Version = "auto"
-	e.Variants[0].Needs = ResourceNeeds{CPUCores: 1, Memory: "auto"}
-	e = freezeComposition(t, e)
-	if err := q.AddExtension(e); err != nil {
-		t.Fatal(err)
-	}
-	report := newExtensionReport(e, &m, "extension:sample")
-	report.Setup, report.Qualified, report.CheckID = true, true, "synthetic-check"
-	m.ExtensionReports = []ExtensionReport{report}
-	check(t, q, m, nil)
-	s.Extension = extensionKey(e)
-	work := startObservation(t, q, m, s)
-	clock.Advance(2 * time.Second)
-	finish(t, q, &work, true)
-	key := identityHash(q.s.Jobs[work.ID].Timing.Key)
-	before := q.s.WorkObservations[key]
-	if before.Units != 10 || before.Seconds != 2 || before.Rate != 5 || before.LatencySeconds != 2 {
-		t.Fatalf("missing throughput history: %+v", before)
-	}
-	probe := s
-	probe.Workload = nil
-	probe.ExtensionDigest = e.Digest
-	probe.AllowedMachines = []string{m.ID}
-	probe.Needs.Memory = "auto"
-	probe.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:sample", Directory: t.TempDir()}
-	job := startObservation(t, q, m, probe)
-	clock.Advance(time.Second)
-	host := 2.0
-	r := result(&job, true)
-	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host}
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	after := q.s.WorkObservations[key]
-	if after.Units != before.Units || after.Seconds != before.Seconds || after.Rate != before.Rate || after.LatencySeconds != before.LatencySeconds {
-		t.Errorf("auto check changed throughput: before=%+v after=%+v", before, after)
-	}
-	if len(q.s.WorkObservations) != 1 || after.Samples != before.Samples+1 || after.MemoryPeak == nil || after.MemoryPeak.HostGB == nil || *after.MemoryPeak.HostGB != host {
-		t.Errorf("auto check did not update the same observation's memory: %+v", q.s.WorkObservations)
-	}
-	timing := q.s.Jobs[job.ID].Timing
-	if timing.ActualSeconds != nil || timing.PredictedSeconds != nil {
-		t.Errorf("check learned timing: %+v", timing)
+	for _, checkAge := range []time.Duration{0, 29 * 24 * time.Hour} {
+		t.Run(checkAge.String(), func(t *testing.T) {
+			q, clock, m, s := observationFixture(t)
+			e := q.s.Extensions[s.Extension]
+			e.Version = "auto"
+			e.Variants[0].Needs = ResourceNeeds{CPUCores: 1, Memory: "auto"}
+			e = freezeComposition(t, e)
+			if err := q.AddExtension(e); err != nil {
+				t.Fatal(err)
+			}
+			report := newExtensionReport(e, &m, "extension:sample")
+			report.Setup, report.Qualified, report.CheckID = true, true, "synthetic-check"
+			m.ExtensionReports = []ExtensionReport{report}
+			check(t, q, m, nil)
+			s.Extension = extensionKey(e)
+			work := startObservation(t, q, m, s)
+			clock.Advance(2 * time.Second)
+			finish(t, q, &work, true)
+			key := identityHash(q.s.Jobs[work.ID].Timing.Key)
+			before := q.s.WorkObservations[key]
+			if before.Units != 10 || before.Seconds != 2 || before.Rate != 5 || before.LatencySeconds != 2 {
+				t.Fatalf("missing throughput history: %+v", before)
+			}
+			clock.Advance(checkAge)
+			probe := s
+			probe.Workload = nil
+			probe.ExtensionDigest = e.Digest
+			probe.AllowedMachines = []string{m.ID}
+			probe.Needs.Memory = "auto"
+			probe.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:sample", Directory: t.TempDir()}
+			job := startObservation(t, q, m, probe)
+			clock.Advance(time.Second)
+			host := 2.0
+			r := result(&job, true)
+			r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host}
+			if err := q.Complete(r); err != nil {
+				t.Fatal(err)
+			}
+			after := q.s.WorkObservations[key]
+			if !after.RecordedAt.Equal(before.RecordedAt) {
+				t.Errorf("auto check refreshed throughput age: before=%v after=%v", before.RecordedAt, after.RecordedAt)
+			}
+			if after.Job != before.Job || after.Machine != before.Machine || after.Session != before.Session || after.Attempt != before.Attempt || after.Source != before.Source || after.SampleID != before.SampleID || after.Forbidden != before.Forbidden || after.StaleReason != before.StaleReason || after.Key != before.Key {
+				t.Errorf("auto check changed observation provenance or eligibility: before=%+v after=%+v", before, after)
+			}
+			if !after.MemoryRecordedAt.Equal(clock.Now()) {
+				t.Errorf("auto check did not refresh memory age: %v", after.MemoryRecordedAt)
+			}
+			if after.Units != before.Units || after.Seconds != before.Seconds || after.Rate != before.Rate || after.LatencySeconds != before.LatencySeconds {
+				t.Errorf("auto check changed throughput: before=%+v after=%+v", before, after)
+			}
+			if len(q.s.WorkObservations) != 1 || after.Samples != before.Samples+1 || after.MemoryPeak == nil || after.MemoryPeak.HostGB == nil || *after.MemoryPeak.HostGB != host {
+				t.Errorf("auto check did not update the same observation's memory: %+v", q.s.WorkObservations)
+			}
+			timing := q.s.Jobs[job.ID].Timing
+			if timing.ActualSeconds != nil || timing.PredictedSeconds != nil {
+				t.Errorf("check learned timing: %+v", timing)
+			}
+
+			if checkAge > 0 {
+				// Work was measured on day 0; the day-29 check must not keep its
+				// throughput usable for placement or prediction on day 34.
+				clock.Advance(5 * 24 * time.Hour)
+				check(t, q, m, nil)
+				next := submit(t, q, s)
+				if estimate, ok := q.estimateCompletion(q.s.Jobs[next.ID], q.s.Machines[m.ID]); ok {
+					t.Errorf("expired throughput used for placement: %+v", estimate)
+				}
+				reply := check(t, q, m, nil)
+				if reply.Job == nil || reply.Job.ID != next.ID {
+					t.Fatalf("day-34 work not assigned: %+v", reply)
+				}
+				if err := q.Started(result(reply.Job, true)); err != nil {
+					t.Fatal(err)
+				}
+				if timing := q.s.Jobs[next.ID].Timing; timing == nil || timing.Key == nil || timing.PredictedSeconds != nil {
+					t.Errorf("expired throughput used for prediction: %+v", timing)
+				}
+			}
+		})
 	}
 }
 

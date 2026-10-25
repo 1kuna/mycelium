@@ -269,11 +269,11 @@ func (q *Queue) recordWorkObservation(j *Job, r Result) {
 		return
 	}
 	key := identityHash(t.Key)
-	old := q.s.WorkObservations[key]
+	old, exists := q.s.WorkObservations[key]
 	if q.s.WorkObservations == nil {
 		q.s.WorkObservations = map[string]WorkObservation{}
 	}
-	point := WorkObservation{Key: *t.Key, Samples: old.Samples + 1,
+	point := WorkObservation{Key: *t.Key, Samples: old.Samples + 1, Source: "accepted work",
 		RecordedAt: q.clock.Now(), Job: j.ID, Machine: r.Machine, Session: r.Session, Attempt: r.Attempt}
 	if old.StaleReason != "" {
 		old.Rate, old.LatencySeconds = 0, 0
@@ -290,13 +290,15 @@ func (q *Queue) recordWorkObservation(j *Job, r Result) {
 		point.LatencySeconds = ewma(old.LatencySeconds, seconds)
 	} else if r.MemoryPeak == nil || r.MemoryPeak.Constrained || r.MemoryPeak.HostGB == nil || !validRate(*r.MemoryPeak.HostGB) {
 		return // Profiles and auto checks learn memory only, under the same solo custody fence.
-	} else if old.StaleReason == "" {
-		point.Units, point.Seconds = old.Units, old.Seconds
-		point.Rate, point.LatencySeconds = old.Rate, old.LatencySeconds
+	} else if exists && old.StaleReason == "" {
+		// Memory-only samples leave the existing throughput and provenance
+		// untouched, including the clock that ages the throughput out.
+		point = old
+		point.Samples++
 	}
 	point.HostMemoryGB, point.DeviceMemoryGB = old.HostMemoryGB, old.DeviceMemoryGB
 	point.IncrementalHostMemoryGB, point.IncrementalDeviceMemoryGB = old.IncrementalHostMemoryGB, old.IncrementalDeviceMemoryGB
-	point.Forbidden, point.Source = old.Forbidden, "accepted work"
+	point.Forbidden = old.Forbidden
 	point.SampleID = old.SampleID
 	point.MemoryPeak = mergeMemoryPeaks(old.MemoryPeak, r.MemoryPeak)
 	point.MemoryRecordedAt = old.MemoryRecordedAt
