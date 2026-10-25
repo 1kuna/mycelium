@@ -233,7 +233,8 @@ executable, not shell text. It must:
 2. On ordinary invocation, accept JSON on stdin and exit zero only after delivery.
 3. Own its delivery timeout/retry policy; keep credentials in private configuration.
 
-Notifiers posting to an HTTP relay must send an explicit `User-Agent` header.
+Notifiers posting to relays behind bot checks, such as T3's, should send an explicit
+`User-Agent` header.
 The T3 relay is behind Cloudflare, which rejects Python urllib's default
 User-Agent with HTTP 403 `error code: 1010`. For example:
 `urllib.request.Request(url, data, headers={"User-Agent": "<project>-notifier/1"})`.
