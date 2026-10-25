@@ -29,11 +29,9 @@ the filename stem. Read the profile before submitting:
 - `run.command` is already the full command.
 - Header comments may list pre-submit steps, such as bundling a checkout input.
 
-**No profile fits:** ask the project owner (your orchestrator) for one, or author
-one from [Project profiles](https://github.com/1kuna/mycelium/blob/main/docs/agent-offload.md#project-profiles)
-and [job reference](https://github.com/1kuna/mycelium/blob/main/docs/job-reference.md).
-Profiles are strict YAML: use only fields those docs define. Plain
-`myce run -- CMD` ships no project source and is no substitute for a profile.
+**No profile fits:** set the project up with [setup-project.md](setup-project.md)
+if your task covers that, or else ask the project owner. Plain `myce run -- CMD`
+ships no project source and is no substitute for a profile.
 
 ## 2. Prepare
 
