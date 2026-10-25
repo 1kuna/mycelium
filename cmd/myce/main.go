@@ -411,7 +411,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			return err
 		}
 
-		q, err := myce.Open(*db, *checkpoint, myce.RealClock{})
+		q, err := myce.Open(*db, *checkpoint, myce.RealClock{}, myce.WithFileStore(*fileStore, *fileStoreLimit, !nasConfigured))
 		if err != nil {
 			return err
 		}
@@ -440,10 +440,6 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			}
 		}
 
-		root := *fileStore
-		if root == "" {
-			root = *db + ".files"
-		}
 		if nasConfigured && *discovery {
 			if err = q.ConfigureOnboardingNAS(ctx, probe.OS, probe.Command); err != nil {
 				return err
@@ -453,9 +449,6 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			if err = os.MkdirAll(*checkpoint, 0700); err != nil {
 				return err
 			}
-		}
-		if err = q.ConfigureFileStore(root, *fileStoreLimit, !nasConfigured); err != nil {
-			return err
 		}
 		if *hostConfig != "" {
 			if err = q.ConfigureHosts(hosts); err != nil {

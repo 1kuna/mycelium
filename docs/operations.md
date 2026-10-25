@@ -87,6 +87,21 @@ diagnostic wall time, never the scheduling clock.
 
 ### Stored job file retention
 
+Frozen extension bundle bytes and their snapshotted environment files live in
+the queue file store once per content digest. Jobs, retained keyed answers and
+the extension registry hold small references; control transactions do not copy
+the bundle bytes. Worker delivery and digest downloads verify and load the bytes
+outside the queue mutex. Keep the file store with the queue database when moving
+or backing up queue state.
+
+On startup, embedded bundles are migrated before serving traffic: verify their
+digests, durably publish the blobs, then atomically commit the references in
+SQLite. An interrupted migration repeats safely on the next startup. A digest
+mismatch or missing referenced blob stops startup rather than discarding data.
+Use the same `--file-store` root on restart (default `DATABASE.files`). Embedded
+Go callers select a custom root with `WithFileStore` in `Open`, before migration;
+changing roots after bundle references exist is refused.
+
 Queue maintenance reclaims stored job inputs and results after **7 days in a
 terminal state**. Set a positive `myce queue --file-retention DURATION`; installed
 queues accept `myce install queue --config QUEUE_CONFIG --file-retention DURATION`

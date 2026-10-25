@@ -119,6 +119,12 @@ type FileConfig struct {
 	Checkpoints bool `json:"checkpoints"`
 }
 
+type fileStoreConfiguration struct {
+	root        string
+	limit       int64
+	checkpoints bool
+}
+
 // Stored inputs and their results use the queue file store independently of
 // checkpoint mode. FileTransport continues to select file-store checkpoints.
 func (j Job) storedFileResults() bool {
@@ -184,6 +190,9 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 	defer q.fileLifecycle.RUnlock()
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	if q.files != nil && q.files.root != root && len(q.bundleReferences()) > 0 {
+		return errors.New("bundle storage already bound; select the file store with WithFileStore when opening the queue")
+	}
 	q.files = s
 	q.fileCheckpoints = checkpoints
 	return nil

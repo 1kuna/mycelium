@@ -581,3 +581,14 @@ func TestPlatformBaselineValidation(t *testing.T) {
 		t.Fatal("missing native output accepted")
 	}
 }
+
+// Re-authoring/installing a frozen fixture uses the same digest fetch as workers;
+// retained queue records deliberately contain no bundle bytes.
+func registeredExtension(t *testing.T, q *Queue, key string) Extension {
+	t.Helper()
+	e, err := q.extensionByDigest(q.s.Extensions[key].Digest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return e
+}

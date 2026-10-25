@@ -91,7 +91,7 @@ func TestExtensionCheckAutoPreservesThroughput(t *testing.T) {
 	for _, checkAge := range []time.Duration{0, 29 * 24 * time.Hour} {
 		t.Run(checkAge.String(), func(t *testing.T) {
 			q, clock, m, s := observationFixture(t)
-			e := q.s.Extensions[s.Extension]
+			e := registeredExtension(t, q, s.Extension)
 			e.Version = "auto"
 			e.Variants[0].Needs = ResourceNeeds{CPUCores: 1, Memory: "auto"}
 			e = freezeComposition(t, e)
@@ -177,7 +177,7 @@ func TestExtensionCheckAutoPreservesThroughput(t *testing.T) {
 
 func TestExtensionCheckAutoMemoryOnBenchmarkPoint(t *testing.T) {
 	q, clock, m, s := observationFixture(t)
-	e := q.s.Extensions[s.Extension]
+	e := registeredExtension(t, q, s.Extension)
 	e.Version = "auto"
 	e.Variants[0].Needs = ResourceNeeds{CPUCores: 1, Memory: "auto"}
 	e = freezeComposition(t, e)
@@ -224,7 +224,7 @@ func TestExtensionCheckAutoMemoryOnBenchmarkPoint(t *testing.T) {
 
 func TestExtensionCheckAutoMemorySurvivesOldBenchmarkReport(t *testing.T) {
 	q, clock, m, s := observationFixture(t)
-	e := q.s.Extensions[s.Extension]
+	e := registeredExtension(t, q, s.Extension)
 	e.Version = "auto"
 	e.Variants[0].Needs.Memory = "auto" // Keeps the host floor a reference point needs.
 	e.Variants[0].Sweeps = map[string]ReferenceSweep{"extension:sample": {Command: []string{"sh", "curve.sh"}, Counts: []int{1}, MaxConcurrency: 1}}
@@ -277,7 +277,7 @@ func TestExtensionCheckAutoLearnsMemoryForComparableWork(t *testing.T) {
 	for _, outcome := range []string{"accepted", "constrained", "failed"} {
 		t.Run(outcome, func(t *testing.T) {
 			q, clock, m, s := observationFixture(t)
-			e := q.s.Extensions[s.Extension]
+			e := registeredExtension(t, q, s.Extension)
 			e.Version = "auto"
 			e.Variants[0].Needs = ResourceNeeds{CPUCores: 1, Memory: "auto"}
 			e = freezeComposition(t, e)

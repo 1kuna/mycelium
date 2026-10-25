@@ -152,7 +152,7 @@ func cancelledJobForTest(j *Job) bool {
 
 func TestPieceDependencyRetention(t *testing.T) {
 	q, clock, m, s := fanOutFixture(t, 3)
-	if err := q.ConfigureFileStore(t.TempDir(), 1<<20, true); err != nil {
+	if err := q.ConfigureFileStore(q.files.root, 1<<20, true); err != nil {
 		t.Fatal(err)
 	}
 	s.Outputs = map[string]string{"out": "results"}

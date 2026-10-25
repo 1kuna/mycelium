@@ -139,6 +139,9 @@ func (q *Queue) maintainFileExpiry() {
 // checkpoint generations and catalog snapshots survive terminal file expiry.
 func (q *Queue) fileReferences(pendingOnly bool) (expired, keep, referenced map[string]bool) {
 	expired, keep, referenced = map[string]bool{}, map[string]bool{}, map[string]bool{}
+	for hash := range q.bundleReferences() {
+		keep[hash] = true
+	}
 	add := func(to map[string]bool, files FileManifest) {
 		for _, ref := range files {
 			to[ref.SHA256] = true
