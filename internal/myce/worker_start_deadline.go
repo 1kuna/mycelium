@@ -9,6 +9,10 @@ import (
 
 var errWorkerStartAuthorization = errors.New("queue start authorization unavailable")
 
+// Distinguish the Started boundary while retaining the authorization family
+// used by adapters to keep control-plane failures out of stage-failure paths.
+var errWorkerStartHandoff = fmt.Errorf("queue start hand-off unavailable: %w", errWorkerStartAuthorization)
+
 // A positive reply means this exact attempt is durably started, before execution.
 func (w Worker) authorizeStart(j Job, session string) error {
 	if err := w.checkAvailability(); err != nil {
@@ -21,7 +25,7 @@ func (w Worker) authorizeStart(j Job, session string) error {
 		StartGate string `json:"start_gate"`
 	}
 	if err := w.Client.Call(ctx, "POST", "/api/workers/started", Result{Machine: w.Machine.ID, Session: session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}, &reply); err != nil {
-		return fmt.Errorf("%w: %w", errWorkerStartAuthorization, err)
+		return fmt.Errorf("%w: %w", errWorkerStartHandoff, err)
 	}
 	if !reply.OK || reply.StartGate != startGateProtocol {
 		return fmt.Errorf("queue start-gate protocol mismatch: upgrade queue and workers together")
