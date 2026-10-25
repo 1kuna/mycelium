@@ -500,18 +500,7 @@ func (q *Queue) maintainModels() {
 		// Compare every compatible placement before mutating any victim. A free
 		// load beats interrupting a ready engine's call or another worker's build.
 		sort.SliceStable(machines, func(i, j int) bool {
-			rank := func(m *Machine) int {
-				if s := q.s.ModelSlots[targetSlotKey(m, c.Model)]; s != nil {
-					if s.State == "ready" {
-						return 0
-					}
-					if s.State == "loading" {
-						return 1
-					}
-				}
-				return 2
-			}
-			if a, b := rank(machines[i]), rank(machines[j]); a != b {
+			if a, b := q.modelReadiness(c.Model, machines[i]), q.modelReadiness(c.Model, machines[j]); a != b {
 				return a < b
 			}
 			a, b := q.loadSeconds(c.Model, machines[i]), q.loadSeconds(c.Model, machines[j])
@@ -622,6 +611,20 @@ func (q *Queue) maintainModels() {
 		handled[j.ID] = true
 	}
 }
+
+// Ready engines precede in-progress loads, then placements needing a new load.
+func (q *Queue) modelReadiness(model string, m *Machine) int {
+	if s := q.s.ModelSlots[targetSlotKey(m, model)]; s != nil {
+		switch s.State {
+		case "ready":
+			return 0
+		case "loading":
+			return 1
+		}
+	}
+	return 2
+}
+
 func callJob(c *ModelCall) *Job {
 	j := &Job{ProductionHost: c.ProductionHost, ID: c.ID, Queued: c.Queued, WaitingSince: c.WaitingSince, StartedAt: c.StartedAt, Spec: Spec{Project: c.Project, Priority: c.Priority, Class: c.Class, Deadline: c.Deadline}}
 	j.Spec.Needs.Model = c.Model
