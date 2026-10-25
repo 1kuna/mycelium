@@ -3,6 +3,7 @@
 Submit known heavy work; Mycelium chooses placement. A status read is diagnostic,
 not permission to launch locally. This MVP changes no harness configuration and
 adds no T3 dependency to Mycelium.
+Agents use the [`mycelium-offload` skill](../skills/mycelium-offload/SKILL.md).
 
 ## Project profiles
 
