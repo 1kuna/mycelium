@@ -64,7 +64,7 @@ func TestExtensionQualificationSmokeFailureClearsPriorSuccess(t *testing.T) {
 		if r.Method == "POST" && r.URL.Path == "/api/jobs" {
 			submitted.Store(true)
 		}
-		if r.Method == "GET" && r.URL.Path == "/api/status" && submitted.Load() && !failedRead.Swap(true) {
+		if r.Method == "GET" && strings.HasPrefix(r.URL.Path, "/api/jobs/") && submitted.Load() && !failedRead.Swap(true) {
 			return nil, context.DeadlineExceeded
 		}
 		return http.DefaultTransport.RoundTrip(r)

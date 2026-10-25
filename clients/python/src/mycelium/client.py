@@ -308,8 +308,8 @@ class Client:
         return self.status().get("jobs") or []
 
     def get(self, job_id: str) -> dict[str, Any]:
-        """Find a job in the snapshot; raise APIError(job_unknown) if absent."""
-        return self._find(self.list(), job_id)
+        """Return a Job reply with its stable project/submission-key identity."""
+        return self._call("GET", f"/api/jobs/{quote(job_id, safe='')}")
 
     @staticmethod
     def _find(jobs: list[dict[str, Any]], job_id: str) -> dict[str, Any]:
@@ -348,12 +348,12 @@ class Client:
             if remaining is not None and remaining <= 0:
                 raise timed_out()
             try:
-                snapshot = self._call("GET", "/api/status", timeout=self.timeout if remaining is None else min(self.timeout, remaining))
+                observed = self._call("GET", f"/api/jobs/{quote(job_id, safe='')}", timeout=self.timeout if remaining is None else min(self.timeout, remaining))
             except (TimeoutError, URLError):
                 if end is not None and time.monotonic() >= end:
                     raise timed_out() from None
                 raise
-            job = self._find(snapshot.get("jobs") or [], job_id)
+            job = observed
             if job["state"] in TERMINAL:
                 return job
             time.sleep(self.poll_interval if remaining is None else min(self.poll_interval, max(0, end - time.monotonic())))

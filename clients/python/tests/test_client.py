@@ -68,7 +68,7 @@ class ClientTests(unittest.TestCase):
     def test_wait_reports_production_start_deadline(self):
         client = Client(token="test-only")
         failed = {"id": "prod", "state": "failed", "reason": "production start deadline exceeded"}
-        with patch.object(client, "_call", return_value={"jobs": [failed]}):
+        with patch.object(client, "_call", return_value=failed):
             self.assertEqual(client.wait("prod"), failed)
 
 
@@ -254,10 +254,15 @@ class DevTests(unittest.TestCase):
         self.assertEqual(self.client.get(job["id"])["attempt"], 1)
 
     def test_keyed_submission_repeat_and_conflict(self):
-        spec = self.spec([sys.executable, "-c", "print('keyed')"], submission_key="python-key")
+        spec = self.spec([sys.executable, "-c", "print('keyed')"], submission_key="Exact.Key_182:Python-01")
         first = self.client.submit(spec)
-        self.assertEqual(self.client.wait(first["id"], timeout=10)["state"], "succeeded")
-        self.assertEqual(self.client.submit(spec)["id"], first["id"])
+        final = self.client.wait(first["id"], timeout=10)
+        self.assertEqual(final["state"], "succeeded")
+        replay = self.client.submit(spec)
+        for job in (first, self.client.get(first["id"]), final, replay):
+            self.assertEqual(job["spec"]["project"], spec["project"])
+            self.assertEqual(job["spec"].get("submission_key"), spec["submission_key"])
+        self.assertEqual(replay["id"], first["id"])
         spec["name"] = "changed"
         with self.assertRaises(APIError) as caught:
             self.client.submit(spec)

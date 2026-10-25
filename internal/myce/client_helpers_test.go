@@ -18,6 +18,47 @@ type clientTestTransport func(*http.Request) (*http.Response, error)
 
 func (f clientTestTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
+func TestClientJobIdentityEcho(t *testing.T) {
+	q, _ := fixture(t)
+	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+	defer server.Close()
+	c := Client{URL: server.URL, Token: "test"}
+	ctx := context.Background()
+	s := spec("experiment")
+	s.SubmissionKey = "Exact.Key_182:Go-01"
+	first, err := c.Submit(ctx, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertIdentity := func(j *Job, err error) {
+		t.Helper()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if j.Spec.Project != s.Project || j.Spec.SubmissionKey != s.SubmissionKey {
+			t.Errorf("identity = (%q, %q), want (%q, %q)", j.Spec.Project, j.Spec.SubmissionKey, s.Project, s.SubmissionKey)
+		}
+	}
+	assertIdentity(first, nil)
+	assertIdentity(c.Submit(ctx, s))
+	assertIdentity(c.GetJob(ctx, first.ID))
+	var wire Job
+	err = c.Call(ctx, "GET", "/api/jobs/"+first.ID, nil, &wire)
+	assertIdentity(&wire, err)
+	if _, err := c.Cancel(ctx, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	assertIdentity(c.Wait(ctx, first.ID))
+	var status Snapshot
+	if err := c.Call(ctx, "GET", "/api/status", nil, &status); err != nil {
+		t.Fatal(err)
+	}
+	if len(status.Jobs) != 1 || status.Jobs[0].Spec.SubmissionKey != "" {
+		t.Fatal("status list exposed submission key")
+	}
+}
+
 func TestClientKeyedRetryAfterLostSubmitResponse(t *testing.T) {
 	root := t.TempDir()
 	d, err := StartDev(DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "fixture", Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond})
@@ -94,7 +135,7 @@ func TestClientWaitRetriesTransientStatusWithinContext(t *testing.T) {
 			body := `{"id":"keyed-job","state":"queued"}`
 			if r.Method == "POST" && r.URL.Path == "/api/jobs" {
 				posts++
-			} else if r.Method == "GET" && r.URL.Path == "/api/status" {
+			} else if r.Method == "GET" && r.URL.Path == "/api/jobs/keyed-job" {
 				reads++
 				if reads == 2 {
 					return nil, context.DeadlineExceeded
@@ -103,7 +144,7 @@ func TestClientWaitRetriesTransientStatusWithinContext(t *testing.T) {
 				if reads >= 3 {
 					state = "succeeded"
 				}
-				body = `{"jobs":[{"id":"keyed-job","state":"` + state + `"}]}`
+				body = `{"id":"keyed-job","state":"` + state + `"}`
 			} else {
 				t.Fatalf("unexpected request %s %s", r.Method, r.URL.Path)
 			}
@@ -124,7 +165,7 @@ func TestClientWaitRetriesTransientStatusWithinContext(t *testing.T) {
 		c.HTTP.Transport = clientTestTransport(func(r *http.Request) (*http.Response, error) {
 			outageReads++
 			if outageReads == 1 {
-				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"jobs":[{"id":"keyed-job","state":"queued","reason":"preparing"}]}`))}, nil
+				return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"id":"keyed-job","state":"queued","reason":"preparing"}`))}, nil
 			}
 			return nil, context.DeadlineExceeded
 		})
@@ -145,7 +186,7 @@ func TestClientWaitRetriesTransientStatusWithinContext(t *testing.T) {
 func TestClientWaitUpdatesRetryLogRead(t *testing.T) {
 	updates := 0
 	c := Client{URL: "http://queue.invalid", HTTP: &http.Client{Transport: clientTestTransport(func(r *http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"jobs":[{"id":"updated-job","state":"succeeded"}]}`))}, nil
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"id":"updated-job","state":"succeeded"}`))}, nil
 	})}}
 	j, err := c.Wait(context.Background(), "updated-job", func(j *Job) error {
 		updates++

@@ -1413,6 +1413,11 @@ func (q *Queue) Leave(id string, now bool) error {
 func (q *Queue) Snapshot() (Snapshot, error) { return q.snapshot(false) }
 
 func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
+	return q.snapshotView(forStatus, false)
+}
+
+// Job replies share safe status diagnostics, but retain the stable key echo.
+func (q *Queue) snapshotView(forStatus, jobReply bool) (Snapshot, error) {
 	var out Snapshot
 	project := func() error {
 		out = Snapshot{HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
@@ -1650,7 +1655,11 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 						j.DiagnosticCode = "no_matching_device"
 					}
 				}
+				key := j.Spec.SubmissionKey
 				*j = statusJobCopy(j)
+				if jobReply {
+					j.Spec.SubmissionKey = key
+				}
 			}
 		}
 		sort.SliceStable(out.Jobs, func(i, k int) bool { return statusBefore(out.Jobs[i], out.Jobs[k]) })

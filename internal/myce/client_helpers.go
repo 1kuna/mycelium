@@ -42,15 +42,15 @@ func (c Client) Submit(ctx context.Context, spec Spec) (*Job, error) {
 }
 
 func (c Client) GetJob(ctx context.Context, id string) (*Job, error) {
-	var s Snapshot
-	if err := c.Call(ctx, "GET", "/api/status", nil, &s); err != nil {
+	var j Job
+	if err := c.Call(ctx, "GET", "/api/jobs/"+url.PathEscape(id), nil, &j); err != nil {
 		return nil, err
 	}
-	return FindJob(s.Jobs, id)
+	return &j, nil
 }
 
 // Wait observes a job through terminal state. Optional updates run on each
-// successful status read, including completion, and may drain logs. Transient
+// successful job read, including completion, and may drain logs. Transient
 // read errors from an update use the same retry policy as status reads.
 func (c Client) Wait(ctx context.Context, id string, updates ...func(*Job) error) (*Job, error) {
 	return c.wait(ctx, id, updates)
@@ -103,8 +103,7 @@ func (c Client) wait(ctx context.Context, id string, updates []func(*Job) error)
 		if ctx.Err() != nil {
 			return last, jobWaitError(id, last, ctx.Err())
 		}
-		var snapshot Snapshot
-		err := c.Call(ctx, "GET", "/api/status", nil, &snapshot)
+		j, err := c.GetJob(ctx, id)
 		if ctx.Err() != nil {
 			return last, jobWaitError(id, last, ctx.Err())
 		}
@@ -114,10 +113,6 @@ func (c Client) wait(ctx context.Context, id string, updates []func(*Job) error)
 			}
 			delay = min(delay*2, 10*time.Second)
 		} else {
-			j, err := FindJob(snapshot.Jobs, id)
-			if err != nil {
-				return last, err
-			}
 			last = j
 			for _, update := range updates {
 				if err = update(j); err != nil {
