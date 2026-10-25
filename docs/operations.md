@@ -58,6 +58,23 @@ succeed. Inspect owned work before using separately authorized service/container
 tools. Preserve results and custody for reconnect; there is no offline release
 guarantee. Consumer cancellation and application health remain independent.
 
+Launch authorization waits up to three worker heartbeat intervals, using at least
+the normal one-second period (three seconds by default). Faster polling does not
+shrink this budget below observed queue response latency. This allows short bursts
+of serialized queue transactions while bounding an unresponsive gate; the worker
+never launches without a positive reply. Authorization failure remains an
+infrastructure interruption under the existing bounded retry policy.
+The separate Started hand-off retains its two-second deadline.
+
+The queue emits one `event=slow_launch_authorization` line for an authorization
+taking at least 500 ms. `duration_ms` covers the authorization, including the
+checkpoint probe, queue-lock wait and persistence; `mutex_wait_ms` isolates waiting
+for `q.mu`, and `sqlite_commit_ms` measures the SQLite commit itself (excluding
+statement execution and state serialization). `ok` reports authorization success.
+The line contains no worker identity, payload, filesystem path or transport error text;
+it is written after releasing the queue lock. These timings are diagnostic wall
+time, independent of the injected scheduling clock.
+
 ### Stored job file retention
 
 Queue maintenance reclaims stored job inputs and results after **7 days in a

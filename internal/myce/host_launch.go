@@ -8,6 +8,9 @@ import (
 	"time"
 )
 
+// Normal heartbeat period used by Worker.Run when no interval is configured.
+const defaultWorkerInterval = time.Second
+
 // HostLaunch is exact queue custody for a preparation, or an engine attempt.
 // A cached reply is an offer, never permission to launch.
 type HostLaunch struct {
@@ -53,12 +56,13 @@ func (q *Queue) hostLaunchAllowed(m *Machine, session string) bool {
 	return m != nil && !m.Recovering && m.Session == session && !m.Gone && !m.Leaving && !q.unreported[m.ID] && !q.maintenanceBlocked(hostID(m)) && !availabilityBlocked(m) && !m.HostMemoryPolicyMismatch
 }
 func (q *Queue) AuthorizeLaunch(l HostLaunch) error {
+	timing := newQueueUpdateTiming()
 	var rejected error
 	reject := func(fence string) {
 		log.Printf("event=launch_rejected fence=%s", fence)
 		rejected = ErrStale
 	}
-	err := q.update(func() error {
+	err := q.updateTimed(func() error {
 		q.maintain()
 		q.refreshHostMemory()
 		if !q.hostLaunchAllowed(q.s.Machines[l.Machine], l.Session) {
@@ -121,7 +125,9 @@ func (q *Queue) AuthorizeLaunch(l HostLaunch) error {
 		}
 		q.s.PreparationPlans[l.Attempt] = p
 		return nil
-	})
+	}, timing)
+	// updateTimed has released q.mu; logging never extends the transaction.
+	timing.logLaunch(err == nil && rejected == nil)
 	if err != nil {
 		return err
 	}
@@ -164,7 +170,14 @@ func (w Worker) authorizeLaunch(l HostLaunch) error {
 	if err := w.checkAvailability(); err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	interval := max(w.Interval, defaultWorkerInterval)
+	// Allow three heartbeat periods for serialized control-plane bursts, using
+	// at least the normal one-second period: faster polling must not shrink
+	// the queue transaction budget (observed reads take 0.2–0.5s, #181). An
+	// unresponsive gate must eventually abort without executing unauthorized
+	// work; this bounds that wait (3s by default) while heartbeats continue.
+	// Abort still uses the approved, bounded infrastructure retry policy.
+	ctx, cancel := context.WithTimeout(context.Background(), 3*interval)
 	defer cancel()
 	var reply struct {
 		OK        bool   `json:"ok"`

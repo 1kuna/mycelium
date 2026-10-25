@@ -107,6 +107,9 @@ func startFailureOutcome(owner Result, err error) Result {
 	if errors.Is(err, errWorkerMemory) {
 		owner.ExecutionCause = &RuntimeCause{Operation: "launch", Class: "resource_limit"}
 	}
+	if errors.Is(err, errWorkerStartAuthorization) {
+		owner.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("start_authorization", err))
+	}
 	return classifyAttemptOutcome(owner, attemptCause{memberOutcome: facts})
 }
 
