@@ -7,11 +7,11 @@ import (
 	"strings"
 )
 
-func (q *Queue) resolveSidecarEnvironments(s Spec) (map[string]map[string]EnvironmentRecipe, error) {
+func (c EnvironmentCatalog) resolveSidecarEnvironments(s Spec) (map[string]map[string]EnvironmentRecipe, error) {
 	out := map[string]map[string]EnvironmentRecipe{}
 	for _, side := range s.Run.Sidecars {
 		if side.Environment != "" {
-			recipes, err := q.resolveEnvironment(Environment{Name: side.Environment})
+			recipes, err := c.resolveEnvironment(Environment{Name: side.Environment})
 			if err != nil {
 				return nil, err
 			}

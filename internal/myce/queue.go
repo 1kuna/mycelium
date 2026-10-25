@@ -87,6 +87,7 @@ type Queue struct {
 	productionInfrastructureRetries int
 
 	fileReferenceRevision  uint64
+	environmentRevision    uint64
 	fileLifecycle          sync.RWMutex // Reference publication versus unlink; acquire before q.mu.
 	fileRetention          time.Duration
 	fileCollectionDeferred bool // q.mu; warn once per contiguous deferred streak.
@@ -406,6 +407,7 @@ func (q *Queue) updateTimed(fn func() error, timing *queueUpdateTiming) error {
 	}
 	oldQuiet := q.networkQuiet
 	oldModels, oldEnvironments := q.models, q.environments
+	oldEnvironmentRevision := q.environmentRevision
 	q.usageWrites = nil
 	q.accountUsage(q.clock.Now())
 	err := fn()
@@ -427,6 +429,7 @@ func (q *Queue) updateTimed(fn func() error, timing *queueUpdateTiming) error {
 	}
 	if err != nil {
 		q.models, q.environments = oldModels, oldEnvironments
+		q.environmentRevision = oldEnvironmentRevision
 		q.calls = oldCalls
 		q.unreported = oldUnreported
 		q.networkQuiet = oldQuiet
@@ -484,6 +487,8 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 	// Own all client maps/slices across the unlocked verification interval.
 	s = cloneJob(&Job{Spec: s}).Spec
 	store := q.files
+	catalog := q.environments
+	environmentRevision := q.environmentRevision
 	replay := s.SubmissionKey != "" && q.s.Submissions[submissionDigest(s.Project, s.SubmissionKey)] != nil
 	if len(s.Files) > 0 && !replay && q.submitVerificationSlot == nil {
 		q.submitVerificationSlot = make(chan struct{}, 1)
@@ -493,6 +498,33 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 	var verificationErr error
 	if len(s.Files) > 0 && !replay {
 		verificationErr = verifySubmissionInputs(ctx, store, s.Files, slot)
+	}
+	// Use the same execution adapter as the transaction, on an owned copy.
+	// Validation errors are handled below in their existing order; key replay
+	// and cancellation still win over all preparation failures.
+	prepared := cloneJob(&Job{Spec: s}).Spec
+	_ = normalizeResources(&prepared)
+	if !prepared.extensionJob() {
+		_ = lowerExecution(&prepared)
+	}
+	var recipes map[string]EnvironmentRecipe
+	var sidecarRecipes map[string]map[string]EnvironmentRecipe
+	var recipeErr error
+	if !replay {
+		recipes, recipeErr = catalog.resolveEnvironment(prepared.Environment)
+		if recipeErr == nil {
+			sidecarRecipes, recipeErr = catalog.resolveSidecarEnvironments(prepared)
+		}
+		if recipeErr == nil && !q.simulation {
+			verified := map[FileRef]bool{}
+			recipeErr = store.freezeRecipes(recipes, verified)
+			for _, side := range sidecarRecipes {
+				if recipeErr != nil {
+					break
+				}
+				recipeErr = store.freezeRecipes(side, verified)
+			}
+		}
 	}
 	var out Job
 	err = q.update(func() error {
@@ -515,7 +547,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		if verificationErr != nil {
 			return reject("job_files_invalid", verificationErr)
 		}
-		if len(s.Files) > 0 && q.files != store {
+		if q.files != store || q.environmentRevision != environmentRevision {
 			return ErrStale
 		}
 		submitted := s
@@ -550,16 +582,11 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 				return specRejection(err)
 			}
 		}
-		recipes, e := q.resolveEnvironment(s.Environment)
-		if e != nil {
-			return reject("job_environment_invalid", e)
+		if recipeErr != nil {
+			return reject("job_environment_invalid", recipeErr)
 		}
 		if !environmentPlatformsMatch(s.Needs, recipes) {
 			return reject("job_environment_platform_mismatch", nil)
-		}
-		sidecarRecipes, e := q.resolveSidecarEnvironments(s)
-		if e != nil {
-			return reject("job_environment_invalid", e)
 		}
 		var id string
 		if q.simulation {

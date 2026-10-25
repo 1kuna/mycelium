@@ -36,9 +36,10 @@ func (s *FileStore) freezeFiles(files *map[string][]byte, ref **FileRef, digest 
 		*files, *ref = nil, &next
 		return nil
 	}
-	if err = s.verify(context.Background(), next); os.IsNotExist(err) {
+	if err = s.verify(context.Background(), next); err != nil {
+		missing := os.IsNotExist(err)
 		// A private temporary name cannot truncate or consume an interrupted tus
-		// upload of the same bytes. Publish without replacing an existing blob.
+		// upload of the same bytes. Preserve any existing verified blob.
 		f, e := os.CreateTemp(filepath.Join(s.root, "uploads"), ".bundle-")
 		if e != nil {
 			return e
@@ -48,11 +49,18 @@ func (s *FileStore) freezeFiles(files *map[string][]byte, ref **FileRef, digest 
 		if e = errors.Join(writeErr, f.Sync(), f.Close()); e != nil {
 			return e
 		}
-		if e = os.Link(f.Name(), s.blob(next)); e != nil && !os.IsExist(e) {
-			return e
+		if missing {
+			if e = os.Link(f.Name(), s.blob(next)); e != nil && !os.IsExist(e) {
+				return e
+			}
+		} else {
+			// The embedded bytes have passed the digest/reference checks above.
+			// Replace an unreadable or corrupt stored copy atomically; never
+			// truncate a blob that another reader may already have open.
+			if e = os.Rename(f.Name(), s.blob(next)); e != nil {
+				return e
+			}
 		}
-	} else if err != nil {
-		return err
 	}
 	if err = s.verify(context.Background(), next); err != nil {
 		return err
@@ -72,6 +80,16 @@ func (s *FileStore) freezeFiles(files *map[string][]byte, ref **FileRef, digest 
 
 func (s *FileStore) freezeRecipe(r *EnvironmentRecipe, verified map[FileRef]bool) error {
 	return s.freezeFiles(&r.Files, &r.FilesRef, "", verified)
+}
+
+func (s *FileStore) freezeRecipes(recipes map[string]EnvironmentRecipe, verified map[FileRef]bool) error {
+	for platform, r := range recipes {
+		if err := s.freezeRecipe(&r, verified); err != nil {
+			return err
+		}
+		recipes[platform] = r
+	}
+	return nil
 }
 func (s *FileStore) freezeExtension(e *Extension) error {
 	if err := s.freezeFiles(&e.Files, &e.FilesRef, e.Digest, nil); err != nil {
