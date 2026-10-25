@@ -101,14 +101,16 @@ func verifyFile(ctx context.Context, path string, ref FileRef) error {
 }
 
 type FileStore struct {
-	root      string
-	limit     int64
-	mu        sync.Mutex
-	handler   http.Handler
-	syncDir   func(string) error // Durability failure injection.
-	expired   func(string) bool
-	lifecycle *sync.RWMutex
-	clock     Clock
+	root          string
+	limit         int64
+	mu            sync.Mutex
+	handler       http.Handler
+	syncDir       func(string) error // Durability failure injection.
+	expired       func(string) bool
+	lifecycle     *sync.RWMutex
+	clock         Clock
+	recordUpload  func(hash, purpose string, created bool) error
+	publishUpload func(hash string) error
 }
 type FileConfig struct {
 	Checkpoints bool `json:"checkpoints"`
@@ -143,7 +145,7 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 			return err
 		}
 	}
-	s := &FileStore{root: root, limit: limit, syncDir: syncWorkerDir, expired: q.expiredBlob, lifecycle: &q.fileLifecycle, clock: q.clock}
+	s := &FileStore{root: root, limit: limit, syncDir: syncWorkerDir, expired: q.expiredBlob, lifecycle: &q.fileLifecycle, clock: q.clock, recordUpload: q.recordFileUpload, publishUpload: q.publishFileUpload}
 	fs := filestore.New(filepath.Join(root, "uploads"))
 	fs.DirModePerm = 0700
 	fs.FileModePerm = 0600
@@ -158,10 +160,17 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 			if err := ref.validate(); err != nil || e.Upload.SizeIsDeferred {
 				return tus.HTTPResponse{}, tus.FileInfoChanges{}, errors.New("invalid file upload identity")
 			}
+			if err := s.recordUpload(ref.SHA256, e.Upload.MetaData["purpose"], true); err != nil {
+				return tus.HTTPResponse{}, tus.FileInfoChanges{}, err
+			}
 			return tus.HTTPResponse{}, tus.FileInfoChanges{ID: ref.SHA256}, nil
 		},
 		PreFinishResponseCallback: func(e tus.HookEvent) (tus.HTTPResponse, error) {
-			return tus.HTTPResponse{}, s.publish(e.Context, FileRef{e.Upload.MetaData["sha256"], e.Upload.Size})
+			ref := FileRef{e.Upload.MetaData["sha256"], e.Upload.Size}
+			if err := s.publish(e.Context, ref); err != nil {
+				return tus.HTTPResponse{}, err
+			}
+			return tus.HTTPResponse{}, s.publishUpload(ref.SHA256)
 		},
 	})
 	if err != nil {
@@ -252,13 +261,17 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	length, err := strconv.ParseInt(r.Header.Get("Upload-Length"), 10, 64)
-	var hash string
+	var hash, purpose string
 	for _, field := range strings.Split(r.Header.Get("Upload-Metadata"), ",") {
 		k, v, _ := strings.Cut(strings.TrimSpace(field), " ")
-		if k == "sha256" {
+		if k == "sha256" || k == "purpose" {
 			b, e := base64.StdEncoding.DecodeString(v)
 			if e == nil {
-				hash = string(b)
+				if k == "sha256" {
+					hash = string(b)
+				} else {
+					purpose = string(b)
+				}
 			}
 		}
 	}
@@ -276,6 +289,10 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "storage durability unavailable", 503)
 			return
 		}
+		if e := s.recordUpload(hash, purpose, false); e != nil {
+			http.Error(w, "upload purpose persistence unavailable", 503)
+			return
+		}
 		w.Header().Set("Tus-Resumable", "1.0.0")
 		w.Header().Set("Location", "/api/files/uploads/"+hash)
 		w.WriteHeader(201)
@@ -283,6 +300,10 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	if st, e := os.Stat(filepath.Join(s.root, "uploads", hash+".info")); e == nil && st.Mode().IsRegular() {
 		// A repeated create (including a lost response) addresses the same tus upload.
+		if e := s.recordUpload(hash, purpose, false); e != nil {
+			http.Error(w, "upload purpose persistence unavailable", 503)
+			return
+		}
 		w.Header().Set("Tus-Resumable", "1.0.0")
 		w.Header().Set("Location", "/api/files/uploads/"+hash)
 		w.WriteHeader(201)
@@ -468,18 +489,25 @@ func (c Client) HasFile(ctx context.Context, ref FileRef) error {
 	return nil
 }
 func (c Client) UploadFile(ctx context.Context, path string, ref FileRef) error {
+	return c.uploadFile(ctx, path, ref, "")
+}
+
+// UploadJobInput opts newly created uploads into abandoned-input retention.
+// Generic UploadFile imports (including file put and models) remain unmarked.
+func (c Client) UploadJobInput(ctx context.Context, path string, ref FileRef) error {
+	return c.uploadFile(ctx, path, ref, jobInputUploadPurpose)
+}
+
+func (c Client) uploadFile(ctx context.Context, path string, ref FileRef, purpose string) error {
 	if err := verifyFile(ctx, path, ref); err != nil {
 		return err
 	}
-	if err := c.HasFile(ctx, ref); err == nil {
-		return nil
-	} else {
-		var he *HTTPError
-		if !errors.As(err, &he) || (he.Status != 404 && he.Status != 410) {
-			return err
-		}
-	}
+	// Always create, including deduplication, so the queue durably records the
+	// purpose before acknowledging a generic import or job-input publication.
 	headers := map[string]string{"Tus-Resumable": "1.0.0", "Upload-Length": strconv.FormatInt(ref.SizeBytes, 10), "Upload-Metadata": "sha256 " + base64.StdEncoding.EncodeToString([]byte(ref.SHA256))}
+	if purpose != "" {
+		headers["Upload-Metadata"] += ",purpose " + base64.StdEncoding.EncodeToString([]byte(purpose))
+	}
 	res, err := c.fileRequest(ctx, "POST", "/api/files/uploads/", nil, headers)
 	if err != nil {
 		return err

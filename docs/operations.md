@@ -89,8 +89,17 @@ This publication grace does not extend an expired job's result-recovery window.
 Storage removal/stat failures are logged and retried on the next pass; they do
 not stop queue maintenance. A busy publication/verification fence logs
 `file retention deferred` once per consecutive streak of skipped passes.
-Unreferenced and interrupted uploads are not swept in this round; inspect them explicitly before
-any separately authorized cleanup. Protected data or abandoned uploads can still
+Only uploads positively marked as job inputs by the CLI/profile, Go `UploadJobInput`
+or Python `upload_file` are eligible for orphan reclamation. Their eligibility and
+publish time survive restart in the existing queue SQLite state. They must have no
+job, keyed-answer, checkpoint, catalog/model, extension, environment or pending
+reclamation reference, and both publish time and mtime must be older than the
+configured retention window, outside the six-hour publication grace. A committed
+job reference clears the marker; terminal-job retention then applies. Unmarked
+imports (`myce file put`, Go `UploadFile`, models and older clients) are never
+orphan-swept, even if no model catalog is loaded or an entry is removed. Reusing an
+unmarked import as a job input cannot mark it; a generic import clears any marker.
+Interrupted uploads remain for explicit inspection. Protected data or abandoned uploads can still
 fill the configured store or disk and return HTTP 507. See [files](guide-files-v3.md).
 
 ## Install and upgrade

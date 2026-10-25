@@ -86,13 +86,10 @@ func TestFileRetention(t *testing.T) {
 			t.Fatal("download hid expiry behind identity validation", err)
 		}
 	}
-	for _, ref := range []FileRef{shared, checkpoint, model, extension, environment} {
+	for _, ref := range []FileRef{shared, checkpoint, model, extension, environment, orphan} {
 		if err := c.HasFile(context.Background(), ref); err != nil {
 			t.Fatal("keeping reference lost", ref, err)
 		}
-	}
-	if _, err := os.Stat(q.files.blob(orphan)); !os.IsNotExist(err) {
-		t.Fatal("orphan outlived retention and publication grace", err)
 	}
 	retained, err := c.GetJob(context.Background(), job.ID)
 	if err != nil || !retained.FilesExpired || retained.OutputRefs["output"] != output {
@@ -174,6 +171,16 @@ func retentionClient(t *testing.T, q *Queue) Client {
 
 func retentionUpload(t *testing.T, c Client, content string) (string, FileRef) {
 	t.Helper()
+	return retentionUploadFile(t, c.UploadFile, content)
+}
+
+func retentionJobInput(t *testing.T, c Client, content string) (string, FileRef) {
+	t.Helper()
+	return retentionUploadFile(t, c.UploadJobInput, content)
+}
+
+func retentionUploadFile(t *testing.T, upload func(context.Context, string, FileRef) error, content string) (string, FileRef) {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "input")
 	if err := os.WriteFile(path, []byte(content), 0600); err != nil {
 		t.Fatal(err)
@@ -182,7 +189,7 @@ func retentionUpload(t *testing.T, c Client, content string) (string, FileRef) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = c.UploadFile(context.Background(), path, ref); err != nil {
+	if err = upload(context.Background(), path, ref); err != nil {
 		t.Fatal(err)
 	}
 	return path, ref
@@ -191,11 +198,14 @@ func retentionUpload(t *testing.T, c Client, content string) (string, FileRef) {
 func TestFileRetentionOrphanUploads(t *testing.T) {
 	q, clock := fixture(t)
 	c := retentionClient(t, q)
-	_, orphan := retentionUpload(t, c, "uploaded but never submitted")
-	_, referenced := retentionUpload(t, c, "submitted input")
+	_, orphan := retentionJobInput(t, c, "uploaded but never submitted")
+	_, referenced := retentionJobInput(t, c, "submitted input")
 	s := spec("experiment")
 	s.Files = FileManifest{"input": referenced}
 	submit(t, q, s)
+	if _, marked := q.s.JobInputUploads[referenced.SHA256]; marked {
+		t.Fatal("job admission did not clear input upload marker")
+	}
 	clock.Advance(DefaultFileRetention - time.Nanosecond)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
@@ -203,7 +213,7 @@ func TestFileRetentionOrphanUploads(t *testing.T) {
 	if _, err := os.Stat(q.files.blob(orphan)); err != nil {
 		t.Fatal("orphan lost before retention elapsed", err)
 	}
-	_, recent := retentionUpload(t, c, "recent pre-submit upload")
+	_, recent := retentionJobInput(t, c, "recent pre-submit upload")
 	clock.Advance(2 * time.Nanosecond)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
@@ -218,13 +228,38 @@ func TestFileRetentionOrphanUploads(t *testing.T) {
 	}
 }
 
+func TestFileRetentionUnmarkedImports(t *testing.T) {
+	q, clock := fixture(t)
+	c := retentionClient(t, q)
+	_, model := retentionUpload(t, c, "operator imported model weights")
+	_, operator := retentionUpload(t, c, "operator file put without any job")
+	catalog := q.models
+	catalog.Models = []Model{{Name: "imported", Engine: "fake", FileStore: true, MemoryGB: 1, Platforms: []string{"fake"}, SHA256: model.SHA256, SizeBytes: model.SizeBytes}}
+	if err := q.ConfigureModels(catalog); err != nil {
+		t.Fatal(err)
+	}
+	catalog.Models = nil
+	if err := q.ConfigureModels(catalog); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(DefaultFileRetention + time.Nanosecond)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	for name, ref := range map[string]FileRef{"model with empty catalog": model, "operator import": operator} {
+		if _, err := os.Stat(q.files.blob(ref)); err != nil {
+			t.Errorf("%s lost: %v", name, err)
+		}
+	}
+}
+
 func TestFileRetentionOrphanPublicationGrace(t *testing.T) {
 	q, clock := fixture(t)
 	c := retentionClient(t, q)
 	if err := q.ConfigureFileRetention(time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	_, orphan := retentionUpload(t, c, "short retention still honors publish grace")
+	_, orphan := retentionJobInput(t, c, "short retention still honors publish grace")
 	clock.Advance(filePublicationGrace - time.Nanosecond)
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
@@ -246,7 +281,7 @@ func TestFileRetentionOrphanReferences(t *testing.T) {
 	c := retentionClient(t, q)
 	refs := map[string]FileRef{}
 	files := func(name string) FileManifest {
-		_, ref := retentionUpload(t, c, name)
+		_, ref := retentionJobInput(t, c, name)
 		refs[name] = ref
 		return FileManifest{"file": ref}
 	}
@@ -297,7 +332,7 @@ func TestFileRetentionOrphanBatch(t *testing.T) {
 	q, clock := fixture(t)
 	c := retentionClient(t, q)
 	for i := 0; i < fileReclaimBatch+1; i++ {
-		retentionUpload(t, c, fmt.Sprint("orphan-", i))
+		retentionJobInput(t, c, fmt.Sprint("orphan-", i))
 	}
 	clock.Advance(DefaultFileRetention + time.Nanosecond)
 	for _, want := range []int{1, 0} {
@@ -313,12 +348,10 @@ func TestFileRetentionOrphanBatch(t *testing.T) {
 
 func TestFileRetentionOrphanSubmissionFence(t *testing.T) {
 	q, clock := fixture(t)
-	s := submitVerificationInput(t, q)
-	for _, ref := range s.Files {
-		if err := os.Chtimes(q.files.blob(ref), clock.Now(), clock.Now()); err != nil {
-			t.Fatal(err)
-		}
-	}
+	c := retentionClient(t, q)
+	_, ref := retentionJobInput(t, c, "marked input awaiting verification")
+	s := spec("experiment")
+	s.Files = FileManifest{"input": ref}
 	clock.Advance(DefaultFileRetention + time.Nanosecond)
 	entered, unblock := gateSubmitVerification(t, q, nil)
 	defer unblock()
@@ -336,6 +369,67 @@ func TestFileRetentionOrphanSubmissionFence(t *testing.T) {
 		if _, err := os.Stat(q.files.blob(ref)); err != nil {
 			t.Fatal("new reference to old orphan lost", err)
 		}
+	}
+}
+
+func TestFileRetentionUploadPurposeDedup(t *testing.T) {
+	q, clock := fixture(t)
+	c := retentionClient(t, q)
+	modelPath, model := retentionUpload(t, c, "imported model reused by a job")
+	if err := c.UploadJobInput(context.Background(), modelPath, model); err != nil {
+		t.Fatal(err)
+	}
+	inputPath, input := retentionJobInput(t, c, "input later imported with file put")
+	if err := c.UploadFile(context.Background(), inputPath, input); err != nil {
+		t.Fatal(err)
+	}
+	if len(q.s.JobInputUploads) != 0 {
+		t.Fatal("generic import became collectible", q.s.JobInputUploads)
+	}
+	clock.Advance(DefaultFileRetention + time.Nanosecond)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	for _, ref := range []FileRef{model, input} {
+		if _, err := os.Stat(q.files.blob(ref)); err != nil {
+			t.Error("deduplicated generic import lost", err)
+		}
+	}
+}
+
+func TestFileRetentionMarkedUploadRestart(t *testing.T) {
+	q, clock := fixture(t)
+	c := retentionClient(t, q)
+	_, orphan := retentionJobInput(t, c, "durably marked abandoned job input")
+	_, model := retentionUpload(t, c, "model imported before queue restart")
+	if published := q.s.JobInputUploads[orphan.SHA256]; !published.Equal(clock.Now()) {
+		t.Fatal("publish time not recorded", published)
+	}
+	dbPath, root, storeRoot := strings.TrimSuffix(q.lock.Name(), ".lock"), q.root, q.files.root
+	if err := q.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(dbPath, root, clock, WithCheckpointAvailability(func() bool { return true }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { reopened.Close() })
+	if err := reopened.ConfigureFileStore(storeRoot, 1<<20, true); err != nil {
+		t.Fatal(err)
+	}
+	// No model configuration is loaded after restart.
+	clock.Advance(DefaultFileRetention + time.Nanosecond)
+	if err := reopened.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(reopened.files.blob(orphan)); !os.IsNotExist(err) {
+		t.Error("marked orphan retained after restart", err)
+	}
+	if _, err := os.Stat(reopened.files.blob(model)); err != nil {
+		t.Error("unmarked model lost without model-config", err)
+	}
+	if len(reopened.s.JobInputUploads) != 0 {
+		t.Error("collected marker retained", reopened.s.JobInputUploads)
 	}
 }
 

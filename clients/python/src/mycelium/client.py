@@ -207,7 +207,7 @@ class Client:
             raise APIError(error.code, body) from None
 
     def upload_file(self, source: str | Path) -> dict[str, Any]:
-        """Upload an input via the existing hash-addressed resumable file API."""
+        """Upload a job input, eligible for retention if never submitted."""
         source = Path(source)
         digest = hashlib.sha256()
         size = 0
@@ -220,7 +220,8 @@ class Client:
         headers = {"Tus-Resumable": "1.0.0"}
         with self._file_request("POST", "/api/files/uploads/", b"", {
                 **headers, "Upload-Length": str(size),
-                "Upload-Metadata": "sha256 " + base64.b64encode(ref["sha256"].encode()).decode()}):
+                "Upload-Metadata": "sha256 " + base64.b64encode(ref["sha256"].encode()).decode()
+                + ",purpose " + base64.b64encode(b"job-input").decode()}):
             pass
         # A repeated create may refer to an already published blob.
         try:

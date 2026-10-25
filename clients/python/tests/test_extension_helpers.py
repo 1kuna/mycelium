@@ -21,6 +21,8 @@ class ExtensionClientTests(unittest.TestCase):
 
         def request(method, endpoint, data=None, headers=None):
             calls.append((method, endpoint))
+            if method == "POST":
+                self.assertIn("purpose am9iLWlucHV0", headers["Upload-Metadata"])
             if (method, endpoint) == ("HEAD", blob) and calls.count(("HEAD", blob)) == 1:
                 raise APIError(410, '{"code":"result_expired","error":"expired"}')
             response = io.BytesIO()

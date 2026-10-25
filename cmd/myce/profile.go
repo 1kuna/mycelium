@@ -321,7 +321,7 @@ func runProfile(ctx context.Context, name string, args []string, key, notify, co
 	}
 	if r.JobID == "" {
 		for name, file := range r.Uploads {
-			if err = c.UploadFile(ctx, filepath.Join(dir, file), r.Spec.Files[name]); err != nil {
+			if err = c.UploadJobInput(ctx, filepath.Join(dir, file), r.Spec.Files[name]); err != nil {
 				return profileFailure(out, &r, 69, "queue_unavailable: input upload unconfirmed; intent retained")
 			}
 		}

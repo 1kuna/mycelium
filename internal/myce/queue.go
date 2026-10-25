@@ -40,6 +40,10 @@ type batchRelease struct {
 }
 
 type state struct {
+	// Positive orphan eligibility, persisted with the existing queue state.
+	// Zero time means an input upload has not finished publication yet.
+	JobInputUploads map[string]time.Time `json:"job_input_uploads,omitempty"`
+
 	WorkObservations  map[string]WorkObservation `json:"work_observations,omitempty"`
 	EnrollmentRelease *EnrollmentRelease         `json:"enrollment_release,omitempty"`
 	MachineConversion *MachineConversion         `json:"machine_conversion,omitempty"`
@@ -82,8 +86,6 @@ type Queue struct {
 	productionInfrastructureRetries int
 
 	fileReferenceRevision  uint64
-	fileReclaimMu          sync.Mutex   // Serializes collection and its directory cursor, before q.mu.
-	fileReclaimDir         *os.File     // fileReclaimMu; closed at EOF, store change or queue close.
 	fileLifecycle          sync.RWMutex // Reference publication versus unlink; acquire before q.mu.
 	fileRetention          time.Duration
 	fileCollectionDeferred bool // q.mu; warn once per contiguous deferred streak.
@@ -322,12 +324,9 @@ func checkpointAvailable(root string) bool {
 	return err == nil && closeErr == nil && removeErr == nil
 }
 func (q *Queue) Close() error {
-	q.fileReclaimMu.Lock()
-	defer q.fileReclaimMu.Unlock()
-	scanErr := q.closeFileReclaimDir()
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	err := errors.Join(scanErr, q.db.Close())
+	err := q.db.Close()
 	if q.uploadSpool.lock != nil {
 		err = errors.Join(err, q.uploadSpool.lock.Close())
 		q.uploadSpool.lock = nil
@@ -379,6 +378,7 @@ func (q *Queue) update(fn func() error) error {
 	}
 	if err == nil {
 		q.maintainSubmissions()
+		q.releaseFileUploadMarkers()
 		err = q.persistUsage()
 	}
 	if err == nil {
