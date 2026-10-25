@@ -34,3 +34,7 @@ To update the lock deliberately:
 ```sh
 pixi lock --manifest-path env/mycelium-gate/pixi.toml
 ```
+
+On macOS, run `./scripts/check-gate-env.sh` after environment changes. It enters
+the locked environment and builds `./cmd/myce` with CGO enabled, checking that
+the activated C compiler works with the native SDK. Requires `pixi` on PATH.

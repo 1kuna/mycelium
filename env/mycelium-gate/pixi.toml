@@ -13,3 +13,6 @@ git = "*"
 # go-cgo also brings the C compiler/sysroot rather than relying on host installs.
 [target.linux.dependencies]
 go-cgo = ">=1.25.6,<1.26"
+
+[target.osx-arm64.activation.env]
+CC = "clang"
