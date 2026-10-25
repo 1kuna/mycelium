@@ -76,14 +76,19 @@ func TestDockerMissingStateWorkerRecovery(t *testing.T) {
 			go func() { done <- w.Run(ctx) }()
 			defer func() {
 				cancel()
-				select {
-				case err := <-done:
-					if err != nil {
-						t.Error(err)
+				// Shutdown check-ins use the fake clock's retry interval too.
+				await(t, func() bool {
+					q.clock.(*workerFakeClock).Advance(time.Millisecond)
+					select {
+					case err := <-done:
+						if err != nil {
+							t.Error(err)
+						}
+						return true
+					default:
+						return false
 					}
-				case <-time.After(testWaitTimeout):
-					t.Error("worker did not stop")
-				}
+				})
 			}()
 			await(t, func() bool {
 				q.clock.(*workerFakeClock).Advance(time.Millisecond)
