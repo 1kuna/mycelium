@@ -16,11 +16,11 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 class ClientTests(unittest.TestCase):
-    def test_installed_libressl_requires_openssl3(self):
+    def test_installed_libressl_requires_openssl(self):
         with patch("ssl.OPENSSL_VERSION", "LibreSSL 2.8.3"):
             with patch("mycelium.installed.installed_authority") as authority:
                 authority.return_value = ("https://queue.invalid", "fixture", object())
-                with self.assertRaisesRegex(RuntimeError, "OpenSSL 3") as raised:
+                with self.assertRaisesRegex(RuntimeError, r"requires OpenSSL \(3 recommended\); macOS system LibreSSL is unsupported") as raised:
                     Client.from_installed()
                 from mycelium import UnsupportedTLSRuntimeError
                 self.assertIsInstance(raised.exception, UnsupportedTLSRuntimeError)

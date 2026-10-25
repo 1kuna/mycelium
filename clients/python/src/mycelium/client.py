@@ -97,8 +97,9 @@ class Client:
         """
         if ssl.OPENSSL_VERSION.startswith("LibreSSL"):
             raise UnsupportedTLSRuntimeError(
-                "Client.from_installed() requires Python linked against OpenSSL 3 "
-                "for the queue Ed25519 joining certificate; detected "
+                "Client.from_installed() requires OpenSSL (3 recommended); "
+                "macOS system LibreSSL is unsupported for the queue Ed25519 "
+                "joining certificate. Detected "
                 f"{ssl.OPENSSL_VERSION}. Use Homebrew or python.org Python.")
         from .installed import installed_authority
         address, token, opener = installed_authority(config)
