@@ -86,10 +86,13 @@ func TestFileRetention(t *testing.T) {
 			t.Fatal("download hid expiry behind identity validation", err)
 		}
 	}
-	for _, ref := range []FileRef{shared, checkpoint, model, extension, environment, orphan} {
+	for _, ref := range []FileRef{shared, checkpoint, model, extension, environment} {
 		if err := c.HasFile(context.Background(), ref); err != nil {
-			t.Fatal("keeping reference or orphan lost", ref, err)
+			t.Fatal("keeping reference lost", ref, err)
 		}
+	}
+	if _, err := os.Stat(q.files.blob(orphan)); !os.IsNotExist(err) {
+		t.Fatal("orphan outlived retention and publication grace", err)
 	}
 	retained, err := c.GetJob(context.Background(), job.ID)
 	if err != nil || !retained.FilesExpired || retained.OutputRefs["output"] != output {
@@ -183,6 +186,157 @@ func retentionUpload(t *testing.T, c Client, content string) (string, FileRef) {
 		t.Fatal(err)
 	}
 	return path, ref
+}
+
+func TestFileRetentionOrphanUploads(t *testing.T) {
+	q, clock := fixture(t)
+	c := retentionClient(t, q)
+	_, orphan := retentionUpload(t, c, "uploaded but never submitted")
+	_, referenced := retentionUpload(t, c, "submitted input")
+	s := spec("experiment")
+	s.Files = FileManifest{"input": referenced}
+	submit(t, q, s)
+	clock.Advance(DefaultFileRetention - time.Nanosecond)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(q.files.blob(orphan)); err != nil {
+		t.Fatal("orphan lost before retention elapsed", err)
+	}
+	_, recent := retentionUpload(t, c, "recent pre-submit upload")
+	clock.Advance(2 * time.Nanosecond)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	for name, ref := range map[string]FileRef{"referenced": referenced, "recent": recent} {
+		if _, err := os.Stat(q.files.blob(ref)); err != nil {
+			t.Errorf("%s upload lost: %v", name, err)
+		}
+	}
+	if _, err := os.Stat(q.files.blob(orphan)); !os.IsNotExist(err) {
+		t.Errorf("old orphan upload retained: %v", err)
+	}
+}
+
+func TestFileRetentionOrphanPublicationGrace(t *testing.T) {
+	q, clock := fixture(t)
+	c := retentionClient(t, q)
+	if err := q.ConfigureFileRetention(time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	_, orphan := retentionUpload(t, c, "short retention still honors publish grace")
+	clock.Advance(filePublicationGrace - time.Nanosecond)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(q.files.blob(orphan)); err != nil {
+		t.Fatal("orphan lost within publication grace", err)
+	}
+	clock.Advance(2 * time.Nanosecond)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(q.files.blob(orphan)); !os.IsNotExist(err) {
+		t.Fatal("old orphan retained after publication grace", err)
+	}
+}
+
+func TestFileRetentionOrphanReferences(t *testing.T) {
+	q, clock := fixture(t)
+	c := retentionClient(t, q)
+	refs := map[string]FileRef{}
+	files := func(name string) FileManifest {
+		_, ref := retentionUpload(t, c, name)
+		refs[name] = ref
+		return FileManifest{"file": ref}
+	}
+	// Include retained identities whose terminal reclamation has already
+	// completed: they are not candidates for either another job pass or orphans.
+	j := &Job{State: "succeeded", FilesExpired: true, FileReclamation: &FileReclamation{}}
+	j.Spec.Files = files("expired job input")
+	j.OutputRefs = files("expired job output")
+	j.FileCheckpoints = map[int]FileCheckpoint{1: {Files: files("checkpoint")}}
+	j.ResumeFiles = &FileCheckpoint{Files: files("resume checkpoint")}
+	j.Extensions = []Extension{{Assets: files("job extension"), Variants: []ExtensionVariant{{Environments: map[string]EnvironmentRecipe{"env": {Assets: files("job variant environment")}}}}}}
+	j.EnvironmentRecipes = map[string]EnvironmentRecipe{"env": {Assets: files("job environment")}}
+	j.SidecarEnvironmentRecipes = map[string]map[string]EnvironmentRecipe{"sidecar": {"env": {Assets: files("sidecar environment")}}}
+	j.FanOut = &FanOutProgress{Results: map[string]PieceResult{"piece": {OutputRefs: files("fan-out result")}}}
+	answer := &Job{State: "succeeded", FilesExpired: true, FileReclamation: &FileReclamation{}, Spec: Spec{Files: files("keyed answer input")}, OutputRefs: files("keyed answer output")}
+	files("pending reclamation")
+	// The pending list itself is custody even if no retained manifest names it.
+	pending := &Job{State: "queued", FileReclamation: &FileReclamation{Pending: []string{refs["pending reclamation"].SHA256}}}
+	ext := Extension{Assets: files("catalog extension"), Variants: []ExtensionVariant{{Environments: map[string]EnvironmentRecipe{"env": {Assets: files("catalog variant environment")}}}}}
+	env := EnvironmentRecipe{Assets: files("catalog environment")}
+	slotEnv := EnvironmentRecipe{Assets: files("model slot environment")}
+	files("model")
+	files("model bundle file")
+	if err := q.update(func() error {
+		q.s.Jobs["retained"] = j
+		q.s.Jobs["pending"] = pending
+		q.s.Submissions = map[string]*submissionRecord{"retained": {Kind: submissionBinding, JobID: "removed", Job: answer}}
+		q.s.Extensions = map[string]Extension{"catalog": ext}
+		q.environments.Environments = map[string]map[string]EnvironmentRecipe{"env": {"cpu": env}}
+		q.s.ModelSlots = map[string]*ModelSlot{"slot": {EnvironmentRecipe: &slotEnv}}
+		q.models.Models = []Model{{SHA256: refs["model"].SHA256, Files: []ModelFile{{SHA256: refs["model bundle file"].SHA256}}}}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(DefaultFileRetention + time.Nanosecond)
+	if err := q.reclaimJobFiles(); err != nil {
+		t.Fatal(err)
+	}
+	for name, ref := range refs {
+		if _, err := os.Stat(q.files.blob(ref)); err != nil {
+			t.Errorf("%s reference lost: %v", name, err)
+		}
+	}
+}
+
+func TestFileRetentionOrphanBatch(t *testing.T) {
+	q, clock := fixture(t)
+	c := retentionClient(t, q)
+	for i := 0; i < fileReclaimBatch+1; i++ {
+		retentionUpload(t, c, fmt.Sprint("orphan-", i))
+	}
+	clock.Advance(DefaultFileRetention + time.Nanosecond)
+	for _, want := range []int{1, 0} {
+		if err := q.Tick(); err != nil {
+			t.Fatal(err)
+		}
+		entries, err := os.ReadDir(filepath.Join(q.files.root, "blobs"))
+		if err != nil || len(entries) != want {
+			t.Fatalf("orphan batch remaining=%d, want %d: %v", len(entries), want, err)
+		}
+	}
+}
+
+func TestFileRetentionOrphanSubmissionFence(t *testing.T) {
+	q, clock := fixture(t)
+	s := submitVerificationInput(t, q)
+	for _, ref := range s.Files {
+		if err := os.Chtimes(q.files.blob(ref), clock.Now(), clock.Now()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	clock.Advance(DefaultFileRetention + time.Nanosecond)
+	entered, unblock := gateSubmitVerification(t, q, nil)
+	defer unblock()
+	done := startSubmitVerification(q, context.Background(), s)
+	submitVerificationWait(t, "orphan input verification", entered)
+	submitVerificationProgress(t, "orphan collection during verification", q.Tick)
+	unblock()
+	if got := submitVerificationWait(t, "orphan input admission", done); got.err != nil {
+		t.Fatal(got.err)
+	}
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	for _, ref := range s.Files {
+		if _, err := os.Stat(q.files.blob(ref)); err != nil {
+			t.Fatal("new reference to old orphan lost", err)
+		}
+	}
 }
 
 func TestFileCacheEvictsExpiredVictims(t *testing.T) {
