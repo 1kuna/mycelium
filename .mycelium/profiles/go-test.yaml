@@ -1,0 +1,24 @@
+# Learn the whole-attempt envelope; an 8 GiB declaration exceeds an 8 GiB host allowance once slack is added.
+name: mycelium-go-test
+project: mycelium
+class: test
+source:
+  git: HEAD
+run:
+  command: [bash, scripts/go-test-profile.sh]
+  env:
+    GOMAXPROCS: '2'
+needs:
+  cpu_cores: 2
+  memory: auto
+  platform: cpu
+targets:
+  - {os: linux, arch: amd64, platform: cpu}
+  - {os: linux, arch: arm64, platform: cpu}
+  - {os: darwin, arch: arm64, platform: cpu}
+# Locked CPU tools for every declared target (see env/mycelium-gate/README.md).
+environment: mycelium-gate
+outputs:
+  go-test-result.txt: results
+  go-test-log.jsonl: results
+check: [grep, -qx, 'go test: exit=0', go-test-result.txt]

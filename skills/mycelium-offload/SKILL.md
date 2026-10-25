@@ -33,6 +33,8 @@ the filename stem. Read the profile before submitting:
 if your task covers that, or else ask the project owner. Plain `myce run -- CMD`
 ships no project source and is no substitute for a profile.
 
+For Mycelium Go tests, use `myce run --profile go-test -- -race -run '^TestX$' ./internal/myce`; it supplies the registered Go/Python/uv/git environment.
+
 ## 2. Prepare
 
 - **Commit the intended source.** `source: {git: HEAD}` archives committed bytes

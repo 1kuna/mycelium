@@ -9,6 +9,7 @@ Agents use the [`mycelium-offload` skill](../skills/mycelium-offload/SKILL.md).
 
 `myce run --profile gate-full` reads `.mycelium/profiles/gate-full.yaml`, submits
 and prints a JSON receipt. Use `--profile path.yaml` for an explicit file.
+Use `myce run --profile go-test -- -race -run '^TestX$' ./internal/myce` for ad-hoc Go tests with the catalog-backed Go/Python/uv/git environment.
 Arguments after `--` append literally to `run.command`. The new flag belongs on
 `run`: `submit job.yaml` keeps its existing job-ID output and wire contract.
 

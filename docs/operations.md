@@ -41,7 +41,8 @@ all its worker/device views. It can be changed while enabled, persists across
 queue restarts and worker sessions, and cannot be overridden by check-ins.
 The default is `last_resort: false`. When true, ordinary admissible hosts rank
 first, followed by last-resort hosts; MY-18 value ordering remains unchanged
-within each group. If no ordinary host can admit the work in the current plan,
+within each group. For model calls, a ready or loading engine on a last-resort
+host beats a cold ordinary host (readiness before value). If no ordinary host can admit the work in the current plan,
 fallback is immediate, with no waiting or reservation. Fairness, priority,
 preemption, eligibility and cleanup custody retain their existing rules.
 
