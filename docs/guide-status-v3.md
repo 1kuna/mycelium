@@ -52,6 +52,12 @@ diagnostics, not retry charges: two starts and zero losses can include a planned
 requeue followed by one command failure. A launch refusal without an availability
 flag is still charged a loss under the existing retry rules.
 
+Start-gate transport failures use `execution_cause.operation: start_authorization`
+with the underlying safe class (for example `timeout`). An interrupted result
+uses that cause in its reason, without implying a worker restart. Actual fresh
+worker-session recovery retains its separate restart diagnostic. Authorization
+failures still consume the existing infrastructure retry/loss budget.
+
 History is persisted with the job and retains the **latest four ended attempts**:
 three infrastructure endings (two production retries, or three counted losses),
 plus the existing single OOM retry. Repeated planned requeues can exceed that

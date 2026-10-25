@@ -232,7 +232,7 @@ func maxTime(a, b time.Time) time.Time {
 	}
 	return b
 }
-func (q *Queue) persistUsage() error {
+func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
 	tx, e := q.db.Begin()
 	if e != nil {
 		return e
@@ -261,7 +261,7 @@ func (q *Queue) persistUsage() error {
 	if e != nil {
 		return e
 	}
-	if e = tx.Commit(); e != nil {
+	if e = timing.commit(tx); e != nil {
 		return e
 	}
 	q.persisted = next

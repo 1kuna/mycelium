@@ -341,6 +341,10 @@ func (q *Queue) Close() error {
 
 // Every mutation is atomic and durable; failed writes restore the previous state.
 func (q *Queue) update(fn func() error) error {
+	return q.updateTimed(fn, nil)
+}
+
+func (q *Queue) updateTimed(fn func() error, timing *queueUpdateTiming) error {
 	available := true
 	if !q.simulation {
 		if q.checkpointProbe != nil {
@@ -351,7 +355,7 @@ func (q *Queue) update(fn func() error) error {
 			})
 		}
 	}
-	q.mu.Lock()
+	timing.lock(&q.mu)
 	q.nasAvailable = available
 	defer q.mu.Unlock()
 	if q.simulation {
@@ -381,7 +385,7 @@ func (q *Queue) update(fn func() error) error {
 	if err == nil {
 		q.maintainSubmissions()
 		q.releaseFileUploadMarkers()
-		err = q.persistUsage()
+		err = q.persistUsage(timing)
 	}
 	if err == nil {
 		q.fileReferenceRevision++
@@ -1361,7 +1365,11 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 	} else if r.Interrupted {
 		j.Losses++
 		q.chargeLoss(j)
-		q.retry(j, "worker restarted after cleaning old processes")
+		reason := "execution interrupted; cause unconfirmed"
+		if j.ExecutionCause != nil {
+			reason = "execution interrupted: " + j.ExecutionCause.String()
+		}
+		q.retry(j, reason)
 	} else if r.Success {
 		if j.storedFileResults() {
 			if !outputsVerified {
