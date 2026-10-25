@@ -93,9 +93,8 @@ GET `spec` is a redacted view, not the original submission. As documented in the
 [status/Job view contract](guide-status-v3.md), GET retains payload
 redaction while echoing project/key identity. It omits `spec.extension`,
 `spec.extension_digest` and `spec.fan_out`, including the declaration's piece
-arguments; observe top-level progress and child selection instead. These
-omissions predate s034's bundle-storage change. Retain the submitted declaration
-if you need all declared keys or arguments before dispatch: `fan_out.children`
+arguments; observe top-level progress and child selection instead. Retain the
+submitted declaration if you need all declared keys or arguments before dispatch: `fan_out.children`
 enumerates materialized waves, not undispatched pieces or downstream consumers.
 
 ## Binding model-call curves
