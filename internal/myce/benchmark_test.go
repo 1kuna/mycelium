@@ -319,3 +319,31 @@ func TestBenchmarkMixedMeasurementsDoNotStrandJobs(t *testing.T) {
 		t.Fatal("comparison cycle stranded work")
 	}
 }
+
+// A physical CPU-only host has no accelerator reference to qualify. An
+// accelerator host still reports partial until its own reference is measured.
+func TestBenchmarkCPUOnlyNeedsNoAcceleratorReference(t *testing.T) {
+	for _, platform := range []string{"cpu", "fake"} {
+		t.Run(platform, func(t *testing.T) {
+			clock := &workerFakeClock{now: time.Date(2026, 10, 25, 0, 0, 0, 0, time.UTC)}
+			p := CapabilityProfile{LogicalCPUs: 4, SystemMemoryBytes: 8 << 30}
+			c := BenchmarkConfig{Clock: clock, StateDir: t.TempDir(), Machine: Machine{GPU: platform}, OwnerSignals: func(context.Context) OwnerSignals { return OwnerSignals{Power: "desktop"} }, Measure: func(_ context.Context, resource string) ([]Throughput, error) {
+				if resource == "accelerator" {
+					return nil, nil
+				}
+				clock.Advance(time.Millisecond)
+				return []Throughput{{Resource: resource, Rate: 100, Unit: "bytes/s"}}, nil
+			}}
+			if err := RunOnboardingBenchmark(context.Background(), c, &p); err != nil {
+				t.Fatal(err)
+			}
+			wantState, wantCount := "complete", 4
+			if platform != "cpu" {
+				wantState, wantCount = "partial", 5
+			}
+			if p.Benchmark.State != wantState || len(p.Benchmark.Measurements) != wantCount {
+				t.Fatalf("%s host: %+v", platform, p.Benchmark)
+			}
+		})
+	}
+}
