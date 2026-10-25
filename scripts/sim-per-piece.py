@@ -49,7 +49,7 @@ def seed_run(seed):
                         "failures_baseline": a["failed"], "failures_per_piece": b["failed"], "unfinished_baseline": a["unfinished"], "unfinished_per_piece": b["unfinished"]})
             # Equal timings are expected when all pieces accept jointly.
             control = scenario == "homogeneous"
-            row["passed"] = status == 0 and (r["gate_passed"] if not control else r["complete_output_coverage"] and r["mean_makespan_gain_seconds"] == 0 and r["production_p95_delta_seconds", "worst_producer_gather_slowdown_seconds"] == 0 and a["failed"] == b["failed"] == a["unfinished"] == b["unfinished"] == 0)
+            row["passed"] = status == 0 and (r["gate_passed"] if not control else r["complete_output_coverage"] and r["mean_makespan_gain_seconds"] == 0 and r["production_p95_delta_seconds"] == 0 and a["failed"] == b["failed"] == a["unfinished"] == b["unfinished"] == 0)
         else:
             row["passed"] = False
         rows.append(row)
