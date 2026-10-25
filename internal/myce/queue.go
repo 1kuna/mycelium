@@ -369,6 +369,7 @@ func (q *Queue) update(fn func() error) error {
 		oldUnreported[id] = v
 	}
 	oldQuiet := q.networkQuiet
+	oldModels, oldEnvironments := q.models, q.environments
 	q.usageWrites = nil
 	q.accountUsage(q.clock.Now())
 	err := fn()
@@ -389,6 +390,7 @@ func (q *Queue) update(fn func() error) error {
 		q.wake = make(chan struct{})
 	}
 	if err != nil {
+		q.models, q.environments = oldModels, oldEnvironments
 		q.calls = oldCalls
 		q.unreported = oldUnreported
 		q.networkQuiet = oldQuiet

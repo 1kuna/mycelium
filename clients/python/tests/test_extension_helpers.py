@@ -23,7 +23,7 @@ class ExtensionClientTests(unittest.TestCase):
             calls.append((method, endpoint))
             if method == "POST":
                 self.assertIn("purpose am9iLWlucHV0", headers["Upload-Metadata"])
-            if (method, endpoint) == ("HEAD", blob) and calls.count(("HEAD", blob)) == 1:
+            if (method, endpoint) == ("HEAD", blob) and calls.count(("HEAD", blob)) <= 2:
                 raise APIError(410, '{"code":"result_expired","error":"expired"}')
             response = io.BytesIO()
             response.headers = {"Upload-Offset": str(len(body) if method == "PATCH" else 0),
@@ -35,7 +35,7 @@ class ExtensionClientTests(unittest.TestCase):
             source.write_bytes(body)
             with patch.object(client, "_file_request", side_effect=request):
                 self.assertEqual(client.upload_file(source), {"sha256": sha, "size_bytes": len(body)})
-        self.assertEqual(calls, [("POST", "/api/files/uploads/"), ("HEAD", blob),
+        self.assertEqual(calls, [("HEAD", blob), ("POST", "/api/files/uploads/"), ("HEAD", blob),
                                  ("HEAD", upload), ("PATCH", upload), ("HEAD", blob)])
 
     def test_keyed_submit_wait_and_terminal_failure(self):

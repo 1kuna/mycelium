@@ -27,19 +27,23 @@ type FileReclamation struct {
 }
 
 const jobInputUploadPurpose = "job-input"
+const fileImportUploadPurpose = "import"
 
 // Creation and publication callers hold fileLifecycle.RLock. Only newly
 // created job-input identities acquire eligibility; reusing an unmarked import
 // never makes it collectible. A generic import permanently releases the marker.
 func (q *Queue) recordFileUpload(hash, purpose string, created bool) error {
+	q.mu.RLock()
+	_, marked := q.s.JobInputUploads[hash]
+	change := purpose != jobInputUploadPurpose && marked || purpose == jobInputUploadPurpose && created && !marked
+	q.mu.RUnlock()
+	if !change {
+		return nil
+	}
 	return q.update(func() error {
 		if purpose != jobInputUploadPurpose {
 			delete(q.s.JobInputUploads, hash)
-		} else if published, marked := q.s.JobInputUploads[hash]; marked {
-			if !published.IsZero() {
-				q.s.JobInputUploads[hash] = q.clock.Now()
-			}
-		} else if created {
+		} else if _, marked := q.s.JobInputUploads[hash]; created && !marked {
 			if q.s.JobInputUploads == nil {
 				q.s.JobInputUploads = map[string]time.Time{}
 			}
@@ -50,6 +54,13 @@ func (q *Queue) recordFileUpload(hash, purpose string, created bool) error {
 }
 
 func (q *Queue) publishFileUpload(hash string) error {
+	q.mu.RLock()
+	published, marked := q.s.JobInputUploads[hash]
+	unchanged := !marked || published.Equal(q.clock.Now())
+	q.mu.RUnlock()
+	if unchanged {
+		return nil
+	}
 	return q.update(func() error {
 		if _, marked := q.s.JobInputUploads[hash]; marked {
 			q.s.JobInputUploads[hash] = q.clock.Now()

@@ -207,6 +207,12 @@ class Client:
         ref = {"sha256": digest.hexdigest(), "size_bytes": size}
         endpoint = "/api/files/uploads/" + ref["sha256"]
         headers = {"Tus-Resumable": "1.0.0"}
+        try:
+            with self._file_request("HEAD", "/api/files/blobs/" + ref["sha256"]):
+                return ref
+        except APIError as error:
+            if error.status not in (404, 410):
+                raise
         with self._file_request("POST", "/api/files/uploads/", b"", {
                 **headers, "Upload-Length": str(size),
                 "Upload-Metadata": "sha256 " + base64.b64encode(ref["sha256"].encode()).decode()

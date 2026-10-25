@@ -289,54 +289,53 @@ func (q *Queue) ConfigureModels(c ModelConfig) error {
 	if e := validateModels(c); e != nil {
 		return e
 	}
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	if q.calls != nil {
-		for _, p := range q.s.Pins {
-			found := false
-			for _, m := range c.Models {
-				if m.Name == p.Model {
-					found = true
+	return q.update(func() error {
+		if q.calls != nil {
+			for _, p := range q.s.Pins {
+				found := false
+				for _, m := range c.Models {
+					if m.Name == p.Model {
+						found = true
+					}
 				}
-			}
-			if !found {
-				return fmt.Errorf("catalog removes pinned model %s; unpin first", p.Model)
-			}
-		}
-	}
-	for _, m := range c.Models {
-		if err := q.validateMachineNames(m.AllowedMachines); err != nil {
-			return err
-		}
-		if m.Environment != "" {
-			recipes, ok := q.environments.Environments[m.Environment]
-			if !ok {
-				return fmt.Errorf("model %s: unknown environment %s", m.Name, m.Environment)
-			}
-			for _, p := range m.Platforms {
-				if _, ok := recipes[p]; !ok {
-					return fmt.Errorf("model %s: environment lacks %s recipe", m.Name, p)
+				if !found {
+					return fmt.Errorf("catalog removes pinned model %s; unpin first", p.Model)
 				}
 			}
 		}
-	}
-	q.fileReferenceRevision++
-	q.models = c
-	q.calls = map[string]*ModelCall{}
-	if q.s.ModelSlots == nil {
-		q.s.ModelSlots = map[string]*ModelSlot{}
-	}
-	// HTTP requests do not survive queue restart. Reconnected workers reconcile slots.
-	for _, s := range q.s.ModelSlots {
-		m := q.s.Machines[s.Machine]
-		if m != nil {
-			if h := q.s.Hosts[hostID(m)]; h != nil && h.Policy.ProductionHold {
-				s.Recovering = true
+		for _, m := range c.Models {
+			if err := q.validateMachineNames(m.AllowedMachines); err != nil {
+				return err
+			}
+			if m.Environment != "" {
+				recipes, ok := q.environments.Environments[m.Environment]
+				if !ok {
+					return fmt.Errorf("model %s: unknown environment %s", m.Name, m.Environment)
+				}
+				for _, p := range m.Platforms {
+					if _, ok := recipes[p]; !ok {
+						return fmt.Errorf("model %s: environment lacks %s recipe", m.Name, p)
+					}
+				}
 			}
 		}
-		s.InFlight = 0
-	}
-	return nil
+		q.models = c
+		q.calls = map[string]*ModelCall{}
+		if q.s.ModelSlots == nil {
+			q.s.ModelSlots = map[string]*ModelSlot{}
+		}
+		// HTTP requests do not survive queue restart. Reconnected workers reconcile slots.
+		for _, s := range q.s.ModelSlots {
+			m := q.s.Machines[s.Machine]
+			if m != nil {
+				if h := q.s.Hosts[hostID(m)]; h != nil && h.Policy.ProductionHold {
+					s.Recovering = true
+				}
+			}
+			s.InFlight = 0
+		}
+		return nil
+	})
 }
 func (q *Queue) model(name string) (Model, bool) {
 	for _, m := range q.models.Models {

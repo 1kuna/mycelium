@@ -419,6 +419,15 @@ func (s *FileStore) serveBlob(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "file durability unavailable", 503)
 		return
 	}
+	// An explicit import HEAD promotes an eligible input to an unmarked import.
+	// Ordinary HasFile/HEAD probes never change its purpose. This avoids POST's
+	// global upload-creation lock for duplicate checkpoints and other imports.
+	if r.Method == http.MethodHead && r.Header.Get("X-Myce-Upload-Purpose") == fileImportUploadPurpose {
+		if err = s.recordUpload(hash, fileImportUploadPurpose, false); err != nil {
+			http.Error(w, "upload purpose persistence unavailable", 503)
+			return
+		}
+	}
 	if _, err = f.Seek(0, io.SeekStart); err != nil {
 		http.Error(w, "stored file seek failed", 500)
 		return
@@ -472,10 +481,18 @@ func setUploadHeaders(req *http.Request, ref FileRef) {
 	req.Header.Set("Upload-Metadata", "sha256 "+base64.StdEncoding.EncodeToString([]byte(ref.SHA256)))
 }
 func (c Client) HasFile(ctx context.Context, ref FileRef) error {
+	return c.hasFile(ctx, ref, "")
+}
+
+func (c Client) hasFile(ctx context.Context, ref FileRef, purpose string) error {
 	if err := ref.validate(); err != nil {
 		return err
 	}
-	res, err := c.fileRequest(ctx, "HEAD", "/api/files/blobs/"+ref.SHA256, nil, nil)
+	var headers map[string]string
+	if purpose != "" {
+		headers = map[string]string{"X-Myce-Upload-Purpose": purpose}
+	}
+	res, err := c.fileRequest(ctx, "HEAD", "/api/files/blobs/"+ref.SHA256, nil, headers)
 	if err != nil {
 		return err
 	}
@@ -502,8 +519,18 @@ func (c Client) uploadFile(ctx context.Context, path string, ref FileRef, purpos
 	if err := verifyFile(ctx, path, ref); err != nil {
 		return err
 	}
-	// Always create, including deduplication, so the queue durably records the
-	// purpose before acknowledging a generic import or job-input publication.
+	headPurpose := purpose
+	if headPurpose == "" {
+		headPurpose = fileImportUploadPurpose
+	}
+	if err := c.hasFile(ctx, ref, headPurpose); err == nil {
+		return nil
+	} else {
+		var he *HTTPError
+		if !errors.As(err, &he) || (he.Status != 404 && he.Status != 410) {
+			return err
+		}
+	}
 	headers := map[string]string{"Tus-Resumable": "1.0.0", "Upload-Length": strconv.FormatInt(ref.SizeBytes, 10), "Upload-Metadata": "sha256 " + base64.StdEncoding.EncodeToString([]byte(ref.SHA256))}
 	if purpose != "" {
 		headers["Upload-Metadata"] += ",purpose " + base64.StdEncoding.EncodeToString([]byte(purpose))
