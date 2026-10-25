@@ -207,6 +207,26 @@ func TestClientWaitUpdatesRetryLogRead(t *testing.T) {
 	}
 }
 
+func TestClientJobReplyTruncated(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		reads := 0
+		c := Client{URL: "http://fixture", HTTP: &http.Client{Transport: clientTestTransport(func(*http.Request) (*http.Response, error) {
+			reads++
+			body := `{"id":"fixture","state":"succeeded"}`
+			if reads == 1 {
+				body = `{"id":"fixture","state":`
+			}
+			return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+		})}}
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		job, err := c.Wait(ctx, "fixture")
+		if err != nil || job == nil || job.State != "succeeded" || reads != 2 {
+			t.Fatalf("truncated reply must retry: job=%v err=%v reads=%d", job, err, reads)
+		}
+	})
+}
+
 func TestClientJobReplyInvalid(t *testing.T) {
 	for _, body := range []string{
 		`{"jobs":[{"id":"fixture","state":"succeeded"}]}`,

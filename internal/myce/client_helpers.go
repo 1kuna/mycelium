@@ -49,7 +49,7 @@ func (c Client) GetJob(ctx context.Context, id string) (*Job, error) {
 	if err := c.Call(ctx, "GET", "/api/jobs/"+url.PathEscape(id), nil, &j); err != nil {
 		var syntax *json.SyntaxError
 		var fieldType *json.UnmarshalTypeError
-		if errors.As(err, &syntax) || errors.As(err, &fieldType) || err == io.EOF || err == io.ErrUnexpectedEOF {
+		if errors.As(err, &syntax) || errors.As(err, &fieldType) || err == io.EOF {
 			return nil, invalid
 		}
 		return nil, err
