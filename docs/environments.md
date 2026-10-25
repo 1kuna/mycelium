@@ -163,7 +163,8 @@ or per-host recipe registration is needed for the job's declared dependencies.
 
 ## Project lock files
 
-A job can bypass the named catalog:
+A job can bypass the named catalog, including when a catalog with unrelated
+entries is loaded:
 
 ```yaml
 environment:
@@ -175,8 +176,35 @@ needs:
   platform: {preferred: [cuda]}
 ```
 
-The queue must be able to read the lock and companion `pyproject.toml`. For
-requirements, use `/queue/nas/project/requirements.txt`. `platforms` is optional
+The queue process must be able to read the input files at submission time,
+using its own filesystem paths and permissions. For `requirements.txt`, only
+that file is read; for `uv.lock` or `pyproject.toml`, both adjacent files are
+required. Use an absolute path visible to the queue, such as
+`/queue/nas/project/requirements.txt`. A NAS path must use the queue's mount
+path, which may differ from the submitter's or worker's mount path. Relative
+inline paths resolve from the queue process's working directory, not beside the
+profile (relative catalog inputs instead resolve beside the catalog).
+
+`myce run --profile` sends `environment.lock_file` unchanged. Its source archive
+and `inputs` uploads do not turn that path into a queue-readable environment
+input: a submitter-local lock works only if the queue can also read that exact
+path. Put the lock on queue-readable storage before submitting, or ask the queue
+operator to register a named catalog recipe and select it with
+`environment: NAME`. The queue snapshots Python inputs for workers; workers do
+not need the original lock path.
+
+A missing, unreadable, oversized (over 1 MiB), or unsupported lock input is
+rejected before acceptance with HTTP 400 `job_environment_invalid`. Filesystem
+failures use the generic message “environment must identify one configured
+environment or supported lock_file recipe” to avoid disclosing queue-local paths.
+That message alone does not diagnose catalog lookup or platform support. Check
+the exact lock basename, required companion files, and readability as the queue
+service user. A readable `requirements.txt` with `python: '3.12'` and
+`platforms: [xpu]` is supported with or without a catalog; XPU profile acceptance
+also requires a compatible known target. Unknown named catalog entries are a
+separate rejection, reported as `unknown environment "NAME"`.
+
+`platforms` is optional
 and defaults to every platform; state it when dependencies only support a
 subset. Exactly one of `name` and `lock_file` is allowed. Changing the content,
 Python version, or platform changes the cache identity. Identical content at
