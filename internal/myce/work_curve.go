@@ -239,7 +239,7 @@ func (p WorkObservation) Summary() string {
 
 // Explicit OOMs forbid their performance point; auto OOMs and constrained peaks
 // only invalidate comparable memory measurements, so exploration can re-teach it.
-func (q *Queue) recordWorkOOM(j *Job, r Result) {
+func (q *Queue) recordWorkOOM(j *Job, r Result, oomFailure bool) {
 	var key *ObservationKey
 	if j.Timing != nil {
 		key = j.Timing.Key
@@ -258,7 +258,7 @@ func (q *Queue) recordWorkOOM(j *Job, r Result) {
 		for id, point := range q.s.WorkObservations {
 			if sameMemoryWork(point, k, configuration) {
 				point.MemoryPeak, point.MemoryRecordedAt = nil, time.Time{}
-				if !r.OutOfMemory && r.MemoryPeak != nil && r.MemoryPeak.Constrained {
+				if !oomFailure && r.MemoryPeak != nil && r.MemoryPeak.Constrained {
 					// Keep the existing diagnostic as invalidation provenance,
 					// never as a learned estimate or a new class-level bound.
 					point.MemoryPeak = r.MemoryPeak

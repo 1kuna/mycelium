@@ -150,7 +150,7 @@ func TestMemorySamplingOOMInvalidatesAndRelearns(t *testing.T) {
 	second := startObservation(t, q, m, s)
 	clock.Advance(time.Second)
 	r = result(&second, false)
-	r.OutOfMemory = true
+	r.Error, r.MemoryPeak = "exceeded its 2.5 GiB memory ceiling", &AttemptMemoryPeak{Constrained: true}
 	if err := q.Complete(r); err != nil {
 		t.Fatal(err)
 	}
