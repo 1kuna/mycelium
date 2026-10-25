@@ -550,6 +550,9 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 			j.MemoryFallback = &SizeHint{MemoryGB: max(hintSpec.Needs.MemoryGB, submitted.SizeHint.MemoryGB), HostMemoryGB: max(hintSpec.Needs.HostMemoryGB, submitted.SizeHint.HostMemoryGB)}
 		}
 		q.applyLearnedNeeds(j)
+		if reason := q.diskCapacityRefusal(j); reason != "" {
+			return &HTTPError{Status: 409, Code: "disk_headroom", Message: reason}
+		}
 		if s.RequireTarget {
 			if ok, reason := q.qualifiedTarget(j); !ok {
 				return &HTTPError{Status: 409, Code: "no_qualified_target", Message: reason + "; intent retained locally"}
@@ -1328,10 +1331,10 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 		} else {
 			q.retry(j, j.Reason)
 		}
-	} else if !r.Success && !oomFailure && j.StartedAt == nil && j.ExecutionCause != nil && j.ExecutionCause.Operation == "launch" && j.ExecutionCause.Class == "launch_refused" && diskHeadroomReason(j, q.s.Machines[j.Machine]) != "" {
+	} else if !r.Success && !oomFailure && j.StartedAt == nil && j.ExecutionCause != nil && j.ExecutionCause.Operation == "launch" && j.ExecutionCause.Class == "launch_refused" && q.diskHeadroomReason(j, q.s.Machines[j.Machine]) != "" {
 		// A changed disk sample can withdraw an offer before exec. This is the
 		// same temporary hold as dispatch, including for production stage failures.
-		q.requeue(j, diskHeadroomReason(j, q.s.Machines[j.Machine]), false)
+		q.requeue(j, q.diskHeadroomReason(j, q.s.Machines[j.Machine]), false)
 	} else if oomFailure && j.Spec.Needs.Memory == "auto" {
 		q.retryOOM(j)
 	} else if (j.Spec.Priority == "production" || plannedPriorityStop(j)) && (stageFailure || oomFailure) {
@@ -1613,6 +1616,9 @@ func (q *Queue) snapshotView(forStatus, jobReply bool) (Snapshot, error) {
 		}
 		for _, m := range q.s.Machines {
 			copy := cloneMachine(m)
+			for i, v := range copy.DiskVolumes {
+				copy.DiskVolumes[i] = q.currentDiskVolume(v)
+			}
 			copy.RecoveryNeedsAttention = m.Recovering && m.RecoveringSince != nil && q.clock.Now().Sub(*m.RecoveringSince) > recoveryAttentionDelay
 			q.machineDeviceStatus(&copy, m)
 			copy.AdmissionReason = q.machineLimitReason(m)

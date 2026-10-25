@@ -93,7 +93,7 @@ func generatedJobSchema(t *testing.T) []byte {
 	job["machine"].(map[string]any)["description"] = "Assigned execution identity; omitted before assignment or after requeue."
 	job["session"].(map[string]any)["description"] = "Worker session of the assigned execution; combine with job ID and attempt."
 	spec := defs["Spec"].(map[string]any)["properties"].(map[string]any)
-	spec["disk"].(map[string]any)["description"] = "Optional fallback input/output size hints in bytes; measured manifests take precedence. Missing size evidence uses only the volume free floor."
+	spec["disk"].(map[string]any)["description"] = "Optional fallback input/output/checkpoint size hints in bytes; known measured manifests take precedence. Missing size evidence uses only the volume free floor."
 	spec["priority"].(map[string]any)["enum"] = []string{"", "production", "deadline", "experiment"}
 	for _, name := range []string{"project", "submission_key"} {
 		spec[name].(map[string]any)["minLength"] = 1

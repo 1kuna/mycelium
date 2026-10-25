@@ -18,6 +18,9 @@ func startupPending(j *Job) bool {
 }
 
 func (q *Queue) startWaitingReason(j *Job) string {
+	if reason := q.diskWaitingReason(j, j.ProductionHost); reason != "" {
+		return reason
+	}
 	machines := q.plannerMachines()
 	for _, m := range machines {
 		if !q.projectAllows(j.Spec.Project, m.ID) || len(j.Spec.AllowedMachines) > 0 && !slices.Contains(j.Spec.AllowedMachines, m.ID) || len(j.Spec.Needs.Platform.Required) > 0 && !slices.Contains(j.Spec.Needs.Platform.Required, m.GPU) {
@@ -159,5 +162,5 @@ func (q *Queue) startPlacementAllowed(j *Job) bool {
 		m.DockerCleanup, owner.DockerCleanup = "", ""
 		defer func() { m.DockerCleanup, owner.DockerCleanup = previous, previous }()
 	}
-	return diskHeadroomReason(j, m) == "" && executionTargetMatches(j.Spec, m) && cpuFits(j, m) && q.placementAllowed(j, m)
+	return q.diskHeadroomReason(j, m) == "" && executionTargetMatches(j.Spec, m) && cpuFits(j, m) && q.placementAllowed(j, m)
 }

@@ -139,6 +139,9 @@
     },
     "DiskNeeds": {
       "properties": {
+        "checkpoint_bytes": {
+          "type": "integer"
+        },
         "input_bytes": {
           "type": "integer"
         },
@@ -1771,7 +1774,7 @@
         },
         "disk": {
           "$ref": "#/$defs/DiskNeeds",
-          "description": "Optional fallback input/output size hints in bytes; measured manifests take precedence. Missing size evidence uses only the volume free floor.",
+          "description": "Optional fallback input/output/checkpoint size hints in bytes; known measured manifests take precedence. Missing size evidence uses only the volume free floor.",
           "x-contract": "diagnostic"
         },
         "environment": {

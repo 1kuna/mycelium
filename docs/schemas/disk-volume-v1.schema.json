@@ -4,6 +4,9 @@
   "$defs": {
     "DiskVolume": {
       "properties": {
+        "id": {
+          "type": "string"
+        },
         "roots": {
           "items": {
             "type": "string"
@@ -22,6 +25,15 @@
         "sampled_at": {
           "type": "string",
           "format": "date-time"
+        },
+        "sample_interval_seconds": {
+          "type": "number"
+        },
+        "age_seconds": {
+          "type": "number"
+        },
+        "retained": {
+          "type": "boolean"
         },
         "error": {
           "type": "string"

@@ -153,14 +153,18 @@ func CapabilityProfileLines(m *Machine) []string {
 		for _, v := range m.DiskVolumes {
 			label := strings.Join(v.Roots, "+") + " disk: "
 			if v.Error != "" {
-				lines = append(lines, label+"unknown")
+				if !v.SampledAt.IsZero() {
+					lines = append(lines, fmt.Sprintf("%sdisk reading unavailable; last reported %.1f / %.1f GiB free (age %.1fs)", label, float64(v.FreeBytes)/(1<<30), float64(v.TotalBytes)/(1<<30), v.AgeSeconds))
+				} else {
+					lines = append(lines, label+"disk reading unavailable")
+				}
 				continue
 			}
 			rate := "change unknown"
 			if v.ChangeBytesPerHour != nil {
 				rate = fmt.Sprintf("%+.2f GiB/h", *v.ChangeBytesPerHour/(1<<30))
 			}
-			lines = append(lines, fmt.Sprintf("%s%.1f / %.1f GiB free; %s", label, float64(v.FreeBytes)/(1<<30), float64(v.TotalBytes)/(1<<30), rate))
+			lines = append(lines, fmt.Sprintf("%s%.1f / %.1f GiB free; %s", label, float64(v.FreeBytes)/(1<<30), float64(v.TotalBytes)/(1<<30), rate)+fmt.Sprintf(" (age %.1fs)", v.AgeSeconds))
 		}
 	}
 	lines = append(lines, "onboarding benchmark: "+p.Benchmark.Summary())

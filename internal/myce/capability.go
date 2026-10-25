@@ -49,7 +49,7 @@ func LocalProfileProbe() ProfileProbe {
 		probeguard.Check()
 		var st syscall.Statfs_t
 		err := syscall.Statfs(path, &st)
-		return st.Blocks * uint64(st.Bsize), st.Bavail * uint64(st.Bsize), err
+		return st.Blocks * diskBlockSize(&st), st.Bavail * diskBlockSize(&st), err
 	}}
 }
 func (p ProfileProbe) Detect(ctx context.Context, m Machine, disk string, now time.Time) CapabilityProfile {

@@ -173,7 +173,7 @@ func (q *Queue) placementAllowed(j *Job, m *Machine) bool {
 }
 
 func (q *Queue) placementAllowedForUse(j *Job, m *Machine, resident bool) bool {
-	if !dependencyReady(j) || m.Recovering || cancelled(j) || !dockerRuntimeFits(j, m) || q.maintenanceBlocked(hostID(m)) || m.HostMemoryPolicyMismatch || !logPolicyFits(j.Spec.Logs, m) {
+	if q.diskHeadroomReason(j, m) != "" || !dependencyReady(j) || m.Recovering || cancelled(j) || !dockerRuntimeFits(j, m) || q.maintenanceBlocked(hostID(m)) || m.HostMemoryPolicyMismatch || !logPolicyFits(j.Spec.Logs, m) {
 		return false
 	}
 	if model, ok := q.model(j.Spec.Needs.Model); ok {
@@ -297,6 +297,9 @@ func productionBlockerDetail(host, text string, class hostBlockerClass) HoldDeta
 }
 
 func (q *Queue) holdWaitReason(j *Job) string {
+	if reason := q.diskWaitingReason(j, j.ProductionHost); reason != "" {
+		return reason
+	}
 	for _, m := range q.plannerMachines() {
 		if q.projectAllows(j.Spec.Project, m.ID) && fitsWithoutHostMemory(j, m, m.TotalMemoryGB) {
 			if b := q.dockerBlocker(hostID(m)); b != "" {
@@ -340,7 +343,7 @@ func (q *Queue) productionTarget(j *Job, call *ModelCall) string {
 	var best *Machine
 	bestStops := int(^uint(0) >> 1)
 	for _, m := range machines {
-		if q.dockerBlocker(hostID(m)) != "" || q.unreported[m.ID] || !q.jobAllowsMachine(j, m.ID) || !fitsWithoutHostMemory(j, m, m.TotalMemoryGB) {
+		if q.diskHeadroomReason(j, m) != "" || q.dockerBlocker(hostID(m)) != "" || q.unreported[m.ID] || !q.jobAllowsMachine(j, m.ID) || !fitsWithoutHostMemory(j, m, m.TotalMemoryGB) {
 			continue
 		}
 		model, hasModel := q.model(j.Spec.Needs.Model)
@@ -412,7 +415,7 @@ func (q *Queue) maintainHolds() {
 	}
 	sort.Slice(jobs, func(a, b int) bool { return q.before(jobs[a], jobs[b], &Machine{}) })
 	for _, j := range jobs {
-		if j.State == "queued" && j.ProductionHost != "" && q.dockerBlocker(j.ProductionHost) != "" {
+		if j.State == "queued" && j.ProductionHost != "" && (q.dockerBlocker(j.ProductionHost) != "" || q.diskWaitingReason(j, j.ProductionHost) != "") {
 			if target := q.productionTarget(j, nil); target != "" {
 				j.ProductionHost = target
 			}

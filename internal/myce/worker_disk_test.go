@@ -21,13 +21,13 @@ func TestWorkerDiskSamplesDistinctVolumesAndRate(t *testing.T) {
 		return DiskReading{Volume: volume, TotalBytes: 100 << 30, FreeBytes: free}, nil
 	}}
 	first := w.sampleDisks("data", "checkpoint")
-	if calls != 3 || len(first) != 2 || strings.Join(first[0].Roots, "+") != "data+environment" || first[0].ChangeBytesPerHour != nil {
+	if calls != 5 || len(first) != 2 || strings.Join(first[0].Roots, "+") != "data+environment+file-cache+model-cache" || first[0].ChangeBytesPerHour != nil {
 		t.Fatalf("initial samples: %d %+v", calls, first)
 	}
 	clock.Advance(30 * time.Minute)
 	free -= 1 << 30
 	next := w.sampleDisks("data", "checkpoint")
-	if calls != 6 || len(next) != 2 {
+	if calls != 10 || len(next) != 2 {
 		t.Fatal(calls, next)
 	}
 	for _, v := range next {
@@ -37,7 +37,7 @@ func TestWorkerDiskSamplesDistinctVolumesAndRate(t *testing.T) {
 	}
 	w.Machine.DiskVolumes = next
 	text := strings.Join(CapabilityProfileLines(&w.Machine), "\n")
-	if !strings.Contains(text, "data+environment disk: 49.0 / 100.0 GiB free; -2.00 GiB/h") {
+	if !strings.Contains(text, "data+environment+file-cache+model-cache disk: 49.0 / 100.0 GiB free; -2.00 GiB/h") {
 		t.Fatal(text)
 	}
 	data, _ := json.Marshal(next)
@@ -46,7 +46,7 @@ func TestWorkerDiskSamplesDistinctVolumesAndRate(t *testing.T) {
 	}
 	w.DiskProbe = func(string) (DiskReading, error) { return DiskReading{}, errors.New("private path") }
 	failed := w.sampleDisks("data", "checkpoint")
-	if len(failed) != 3 || failed[0].Error != "disk reading unavailable" || failed[0].FreeBytes != 0 {
+	if len(failed) != 2 || failed[0].Error != "disk reading unavailable" || failed[0].FreeBytes != 49<<30 {
 		t.Fatal(failed)
 	}
 }

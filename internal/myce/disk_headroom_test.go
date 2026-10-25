@@ -8,10 +8,10 @@ import (
 
 // Fake worker inventory must withhold work temporarily, never reject submission.
 func TestDiskHeadroomHoldsAndRecovers(t *testing.T) {
-	q, _ := fixture(t)
+	q, c := fixture(t)
 	m := machine("disk-worker", "fake", "disk-host")
 	setFree := func(free uint64) {
-		b, _ := json.Marshal(map[string]any{"disk_volumes": []any{map[string]any{"roots": []string{"data"}, "total_bytes": uint64(100 << 30), "free_bytes": free}}})
+		b, _ := json.Marshal(map[string]any{"disk_volumes": []any{map[string]any{"roots": []string{"data"}, "total_bytes": uint64(100 << 30), "free_bytes": free, "sampled_at": c.Now()}}})
 		if err := json.Unmarshal(b, &m); err != nil {
 			t.Fatal(err)
 		}

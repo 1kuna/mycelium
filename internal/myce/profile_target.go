@@ -75,6 +75,8 @@ func targetFitReason(dimension string, j *Job, m *Machine) string {
 		return strings.Join(parts, "/")
 	}
 	switch dimension {
+	case "disk headroom":
+		return diskHeadroomReason(j, m)
 	case "target":
 		required := make([]string, 0, len(j.Spec.Targets))
 		for _, t := range j.Spec.Targets {
@@ -204,7 +206,7 @@ func (q *Queue) qualifiedTarget(j *Job) (bool, string) {
 		}
 		for _, target := range q.machineTargets(m) {
 			copy := cloneMachine(target)
-			copy.DiskVolumes = nil // Submission checks capacity, not temporary disk pressure.
+			copy.DiskVolumes = diskCapacityVolumes(copy.DiskVolumes)
 			copy.Gone, copy.Leaving, copy.Recovering, copy.CheckpointUnavailable = false, false, false, false
 			copy.MemoryError, copy.HostMemoryError, copy.CPUCapacityReason = "", "", ""
 			copy.HostMemoryPolicyMismatch = false
