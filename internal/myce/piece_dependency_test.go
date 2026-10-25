@@ -59,14 +59,33 @@ func TestPieceDependencyAcceptanceAndReplay(t *testing.T) {
 func TestPieceDependencyProductionWindowStartsAtReadiness(t *testing.T) {
 	q, clock, m, s := fanOutFixture(t, 3)
 	s.Outputs = map[string]string{"out": "results"}
+	if err := q.ConfigureHosts(map[string]HostPolicy{hostID(&m): {ProductionHold: true}}); err != nil {
+		t.Fatal(err)
+	}
 	parent := submit(t, q, s)
 	c := pieceConsumer(s, parent.ID, "item-0")
 	c.Priority = "production"
 	consumer := submit(t, q, c)
+	explicit := c
+	explicit.Name = "explicit-window"
+	cutoff := clock.Now().Add(time.Second)
+	explicit.StartBy = &cutoff
+	absolute := submit(t, q, explicit)
 	clock.Advance(ProductionStartTimeout + time.Second)
-	check(t, q, m, nil)
+	wave := check(t, q, m, nil).Job
 	if got := job(t, q, consumer.ID); got.State != "queued" || got.Spec.StartBy != nil || got.ProductionHost != "" {
 		t.Fatalf("blocked job earned start window/hold: %+v", got)
+	}
+	if got := job(t, q, absolute.ID); got.State != "failed" {
+		t.Fatal("explicit blocked deadline was extended")
+	}
+	if wave == nil || wave.Batch == nil {
+		t.Fatal("blocked production demand withheld producer")
+	}
+	finish(t, q, wave, true)
+	ready := job(t, q, consumer.ID)
+	if !dependencyReady(ready) || ready.Spec.StartBy == nil || !ready.Spec.StartBy.Equal(clock.Now().Add(ProductionStartTimeout)) || !ready.WaitingSince.Equal(clock.Now()) {
+		t.Fatal("readiness did not initialize one production window", ready)
 	}
 }
 

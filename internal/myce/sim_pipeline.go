@@ -44,7 +44,7 @@ type SimPipelineMetric struct {
 
 func simSubmitConsumers(q *Queue, t *simTask, epoch time.Time, barrier bool) ([]*simTask, *SimPipelineMetric, error) {
 	d := t.stream.Downstream
-	if d.Duration <= 0 || len(d.Platforms) == 0 || d.MemoryGB <= 0 || d.PublicationSeconds < 0 || d.TransferSeconds < 0 || d.PreparationSeconds < 0 || d.IntermediateBytes < 0 {
+	if !validRate(d.Duration) || len(d.Platforms) == 0 || !validRate(d.MemoryGB) || !validMemoryValue(d.HostGB) || !validMemoryValue(d.PublicationSeconds) || !validMemoryValue(d.TransferSeconds) || !validMemoryValue(d.PreparationSeconds) || d.IntermediateBytes < 0 {
 		return nil, nil, fmt.Errorf("invalid downstream synthetic assumptions")
 	}
 	metric := &SimPipelineMetric{Submitted: t.at, Pieces: map[string]*SimPieceMetric{}, PublicationSeconds: d.PublicationSeconds, TransferSeconds: d.TransferSeconds, PreparationSeconds: d.PreparationSeconds}

@@ -63,14 +63,17 @@ func generatedJobSchema(t *testing.T) []byte {
 		for _, property := range properties {
 			property.(map[string]any)["x-contract"] = "diagnostic"
 		}
-		stable := []string{"id", "spec", "state", "attempt", "machine", "session", "release_confirmed", "finished_at", "queued", "cancelled_at", "infrastructure_retries"}
+		stable := []string{"id", "spec", "state", "attempt", "machine", "session", "release_confirmed", "finished_at", "queued", "cancelled_at", "infrastructure_retries", "dependency"}
 		if definition == "Spec" {
-			stable = []string{"project", "submission_key"}
+			stable = []string{"project", "submission_key", "after"}
 		}
 		for _, name := range stable {
 			properties[name].(map[string]any)["x-contract"] = "stable"
 		}
 	}
+	binding := defs["PieceBinding"].(map[string]any)["properties"].(map[string]any)
+	binding["state"].(map[string]any)["enum"] = []string{"blocked", "ready"}
+	binding["execution"].(map[string]any)["description"] = "Immutable producing child job ID and accepted attempt; never the latest attempt."
 	job := defs["Job"].(map[string]any)["properties"].(map[string]any)
 	job["state"].(map[string]any)["enum"] = []string{"queued", "running", "stopping", "succeeded", "failed", "cancelled"}
 	for _, name := range []string{"id", "machine", "session"} {
