@@ -768,6 +768,13 @@ func status(ctx context.Context, c myce.Client) (myce.Snapshot, error) {
 	return s, err
 }
 func printStatus(s myce.Snapshot, full bool) {
+	if fs := s.FileStore; fs != nil {
+		if fs.Error != "" {
+			fmt.Printf("%s: %s\n", fs.Store, fs.Error)
+		} else {
+			fmt.Printf("%s: used=%d bytes free=%d bytes reclaimable=%d bytes\n", fs.Store, fs.UsedBytes, fs.FreeBytes, fs.ReclaimableBytes)
+		}
+	}
 	for _, host := range slices.Sorted(maps.Keys(s.HostStates)) {
 		fmt.Printf("host %s: %s\n", host, s.HostStates[host])
 	}

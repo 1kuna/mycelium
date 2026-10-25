@@ -320,9 +320,23 @@ func runProfile(ctx context.Context, name string, args []string, key, notify, co
 		defer c.HTTP.CloseIdleConnections()
 	}
 	if r.JobID == "" {
+		capacityFailure := func(cause error) error {
+			var h *myce.HTTPError
+			if errors.As(cause, &h) && h.Code == "file_store_capacity" {
+				r.RefusalCode, r.RefusalReason = h.Code, h.Message
+				if err := saveProfileJSON(filepath.Join(dir, "receipt.json"), r); err != nil {
+					return err
+				}
+				return profileFailure(out, &r, 75, h.Code+": "+h.Message)
+			}
+			return profileFailure(out, &r, 69, "queue_unavailable: input storage unconfirmed; intent retained")
+		}
+		if err = c.PreflightFileStore(ctx, r.Spec.Files); err != nil {
+			return capacityFailure(err)
+		}
 		for name, file := range r.Uploads {
 			if err = c.UploadJobInput(ctx, filepath.Join(dir, file), r.Spec.Files[name]); err != nil {
-				return profileFailure(out, &r, 69, "queue_unavailable: input upload unconfirmed; intent retained")
+				return capacityFailure(err)
 			}
 		}
 		j, e := c.Submit(ctx, r.Spec)

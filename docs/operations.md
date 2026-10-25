@@ -126,8 +126,28 @@ job reference clears the marker; terminal-job retention then applies. Unmarked
 imports (`myce file put`, Go `UploadFile`, models and older clients) are never
 orphan-swept, even if no model catalog is loaded or an entry is removed. Reusing an
 unmarked import as a job input cannot mark it; a generic import clears any marker.
-Interrupted uploads remain for explicit inspection. Protected data or abandoned uploads can still
-fill the configured store or disk and return HTTP 507. See [files](guide-files-v3.md).
+Marked interrupted tus uploads are reclaimed after an idle retention window and
+the publication grace. POST/HEAD/PATCH refresh their durable idle timestamp using
+the queue Clock; active requests and all protected references survive collection.
+Unmarked imports and unknown files remain for explicit inspection.
+
+`myce status` and `/api/status.file_store` report the queue-file-store's payload
+`used_bytes`, admission `free_bytes`, and currently `reclaimable_bytes`. Free space
+is the smaller of the configured store allowance and disk space remaining after
+existing tus lengths and the shared disk floor (1%, minimum 256 MiB). The JSON
+also exposes `limit_bytes`, `disk_free_bytes`, `floor_bytes`, and an explicit error
+when the reading is unavailable. Status never deletes files.
+
+Profiles preflight the complete input manifest through `POST /api/files/preflight`
+before the first upload. Preflight runs ordinary retention maintenance; upload creation repeats capacity
+admission. Capacity refusals use HTTP 507 with code `file_store_capacity`, the
+public store name, needed/free/shortfall byte counts and recovery instructions;
+profile receipts preserve the reason and exit 75 for retry. A failed capacity
+reading returns HTTP 503 `file_store_unavailable`. Preflight makes no reservation:
+other writers can consume space afterward, and unknown output sizes cannot be
+predicted. Protected data is never evicted to admit work; increase the configured
+store allowance or free disk space when retention cannot help. Worker file caches
+already evict reproducible copies under pressure. See [files](guide-files-v3.md).
 
 ## Install and upgrade
 

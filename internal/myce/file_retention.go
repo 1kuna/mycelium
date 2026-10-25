@@ -248,6 +248,10 @@ func (q *Queue) expiredBlob(hash string) bool {
 // custody for each unlink. Neither filesystem access nor waiting for the fence
 // holds q.mu. Only positively marked job-input uploads can be orphans.
 func (q *Queue) reclaimJobFiles() error {
+	return errors.Join(q.reclaimInterruptedUploads(), q.reclaimPublishedFiles())
+}
+
+func (q *Queue) reclaimPublishedFiles() error {
 	q.mu.RLock()
 	store := q.files
 	expired, keep, referenced := q.fileReferences(true)

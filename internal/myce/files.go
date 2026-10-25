@@ -5,9 +5,11 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -101,6 +103,7 @@ func verifyFile(ctx context.Context, path string, ref FileRef) error {
 }
 
 type FileStore struct {
+	diskProbe     func(string) (DiskReading, error)
 	root          string
 	limit         int64
 	mu            sync.Mutex
@@ -251,6 +254,9 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handler.ServeHTTP(w, r)
+		if err := s.refreshUpload(id); err != nil {
+			log.Printf("upload freshness unavailable: %v", err)
+		}
 		return
 	}
 	if r.Method != "POST" {
@@ -300,6 +306,10 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	if st, e := os.Stat(filepath.Join(s.root, "uploads", hash+".info")); e == nil && st.Mode().IsRegular() {
 		// A repeated create (including a lost response) addresses the same tus upload.
+		if e := s.refreshUpload(hash); e != nil {
+			http.Error(w, "storage freshness unavailable", 503)
+			return
+		}
 		if e := s.recordUpload(hash, purpose, false); e != nil {
 			http.Error(w, "upload purpose persistence unavailable", 503)
 			return
@@ -309,54 +319,12 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(201)
 		return
 	}
-	used := int64(0)
-	remaining := int64(0)
-	blobs, e := os.ReadDir(filepath.Join(s.root, "blobs"))
+	status, _, e := s.capacity(r.Context())
 	if e != nil {
-		http.Error(w, "storage unavailable", 503)
-		return
+		status.Error = "file store capacity unavailable"
 	}
-	for _, entry := range blobs {
-		st, e := entry.Info()
-		if e != nil || !st.Mode().IsRegular() || st.Size() > s.limit-used {
-			http.Error(w, "file store full or unavailable", 507)
-			return
-		}
-		used += st.Size()
-	}
-	entries, e := os.ReadDir(filepath.Join(s.root, "uploads"))
-	if e != nil {
-		http.Error(w, "storage unavailable", 503)
-		return
-	}
-	fs := filestore.New(filepath.Join(s.root, "uploads"))
-	for _, entry := range entries {
-		if strings.HasSuffix(entry.Name(), ".info") {
-			hash := strings.TrimSuffix(entry.Name(), ".info")
-			if _, e := os.Stat(filepath.Join(s.root, "blobs", hash)); e == nil {
-				continue
-			}
-			upload, e := fs.GetUpload(r.Context(), strings.TrimSuffix(entry.Name(), ".info"))
-			if e != nil {
-				http.Error(w, "storage metadata unavailable", 503)
-				return
-			}
-			info, e := upload.GetInfo(r.Context())
-			if e != nil || info.Size < 0 || info.Size > s.limit-used {
-				http.Error(w, "file store full", 507)
-				return
-			}
-			used += info.Size
-			remaining += max(0, info.Size-info.Offset)
-		}
-	}
-	free, e := diskFree(s.root)
-	if e != nil {
-		http.Error(w, "storage unavailable", 503)
-		return
-	}
-	if length > s.limit-used || length > free-remaining {
-		http.Error(w, "file store full", 507)
+	if err := fileStoreRefusal(status, uint64(length)); err != nil {
+		respond(w, nil, err)
 		return
 	}
 	if _, e := os.Lstat(filepath.Join(s.root, "uploads", hash)); e == nil {
@@ -365,6 +333,9 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.handler.ServeHTTP(w, r)
+	if err := s.refreshUpload(hash); err != nil {
+		log.Printf("upload freshness unavailable: %v", err)
+	}
 }
 func (s *FileStore) serveBlob(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodHead {
@@ -441,6 +412,13 @@ func (a API) registerFiles(mux *http.ServeMux) {
 	if a.Queue.files == nil {
 		return
 	}
+	mux.HandleFunc("POST /api/files/preflight", func(w http.ResponseWriter, r *http.Request) {
+		var files FileManifest
+		if !decode(w, r, &files) {
+			return
+		}
+		respondOperation(w, map[string]bool{"ok": true}, a.Queue.PreflightFileStore(r.Context(), files), "job_spec_invalid")
+	})
 	mux.HandleFunc("/api/files/uploads/", a.Queue.files.serveUpload)
 	mux.HandleFunc("GET /api/files/blobs/{hash}", a.Queue.files.serveBlob)
 	mux.HandleFunc("POST /api/files/checkpoint", a.checkpointHandler)
@@ -470,10 +448,10 @@ func (c Client) fileRequest(ctx context.Context, method, path string, body io.Re
 }
 func fileResponse(res *http.Response, want int) error {
 	defer res.Body.Close()
-	_, err := io.Copy(io.Discard, res.Body)
 	if res.StatusCode != want {
 		return fileTransferError(res, "file transfer failed")
 	}
+	_, err := io.Copy(io.Discard, res.Body)
 	return err
 }
 func setUploadHeaders(req *http.Request, ref FileRef) {
@@ -670,6 +648,14 @@ func (c Client) DownloadFile(ctx context.Context, ref FileRef, dest string) erro
 }
 
 func fileTransferError(res *http.Response, message string) error {
+	var body struct {
+		Code  string `json:"code"`
+		Error string `json:"error"`
+	}
+	if json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&body) == nil && fileCapacityCode(body.Code) {
+		return &HTTPError{Status: res.StatusCode, Code: body.Code, Message: body.Error}
+	}
+
 	if res.StatusCode == 410 && res.Header.Get("X-Myce-Error-Code") == "result_expired" {
 		return resultExpired()
 	}

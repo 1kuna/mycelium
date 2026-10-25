@@ -170,10 +170,25 @@ import of marked bytes clears the marker. The collector shares its bounded per-t
 budget between terminal reclamation and eligible marked uploads, rechecking purpose,
 custody and mtime before unlink. It does not scan the blob directory for orphans.
 
-Interrupted tus uploads and files outside the published blob namespace remain for
-explicit operator inspection and recovery. Capacity exhaustion still returns HTTP
-507: retention does not evict active data, checkpoints or catalog files to make
-room. Keep local sources until acknowledgement and retrieve results before expiry.
+Marked interrupted tus uploads are also collected after an idle retention window
+and publication grace. POST/HEAD/PATCH refresh their durable idle timestamps;
+collection excludes active requests and rechecks all protected references. Unmarked
+imports and unknown files remain for explicit operator inspection and recovery.
+
+`POST /api/files/preflight` accepts a file manifest and checks the additional bytes
+before upload; `Client.PreflightFileStore` exposes it in Go. Profiles use this for
+the complete input set, counting shared hashes once and reusing existing blobs and
+tus lengths. Upload creation repeats the check. This is advisory, with no reservation.
+`myce status` and `/api/status.file_store` expose payload used bytes, effective free
+bytes and reclaimable bytes. Effective free space respects `--file-store-bytes`,
+existing tus lengths, and #158's physical disk floor (1%, minimum 256 MiB).
+
+Capacity exhaustion returns HTTP 507 `file_store_capacity`, naming
+`queue-file-store`, required/free/shortfall bytes and the recovery action. Profiles
+retain that refusal in their receipt and exit 75. An unavailable reading returns
+503 `file_store_unavailable`. Retention never evicts active data, checkpoints or
+catalog files to admit work. Keep local sources until acknowledgement and retrieve
+results before expiry.
 One store is not a backup. Attempt folders and local spools remain for inspection,
 separate from bounded reusable caches.
 

@@ -103,7 +103,16 @@ Re-uploaded or HEAD-verified bytes receive a six-hour publication grace, coverin
 later multi-GB uploads, slow NAS, or a queue outage/deploy between the first file
 and submit/complete establishing its reference. This does not restore an
 expired job's result-recovery window. Reusable worker caches can evict expired
-copies, so expiry does not block future profile input downloads.
+copies, so expiry does not block future profile input downloads. Marked interrupted
+uploads are reclaimed after an idle retention window and publication grace;
+POST/HEAD/PATCH refresh their idle time. Unmarked imports remain protected.
+
+Before uploading, a profile preflights its complete input manifest against the
+queue file-store allowance and disk floor (1%, minimum 256 MiB). Upload creation
+rechecks capacity; preflight makes no reservation. HTTP 507 `file_store_capacity`
+names the store and needed/free/shortfall bytes with a recovery action. The saved
+receipt retains this typed refusal and the CLI exits 75 for retry. `myce status`
+reports queue file-store used, free and reclaimable bytes. See [operations](operations.md#stored-job-file-retention).
 
 Before any upload or submission, `.mycelium/receipts/` contains a synced, private
 receipt with frozen source/input hashes, argv and submission key. Gitignore this

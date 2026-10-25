@@ -562,6 +562,7 @@ type HoldDetail struct {
 }
 
 type Snapshot struct {
+	FileStore      *FileStoreStatus     `json:"file_store,omitempty"`
 	HostStates     map[string]string    `json:"host_states,omitempty"`
 	WorkCurves     []WorkObservation    `json:"work_curves"`
 	PriorityPolicy PriorityPolicyRecord `json:"priority_policy"`
