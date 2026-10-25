@@ -158,7 +158,7 @@ func TestMemoryReviewReclaimableCache(t *testing.T) {
 	for name, value := range map[string]string{
 		"memory.peak":   "8589934592",
 		"memory.stat":   "anon 1073741824\nkernel 536870912\nshmem 536870912\nfile 6442450944\npgscan_file 100\n",
-		"memory.events": "max 100\noom 0\noom_kill 0\n",
+		"memory.events": "max 0\nhigh 0\noom 0\noom_kill 0\n",
 	} {
 		if err := os.WriteFile(filepath.Join(a.path, name), []byte(value), 0600); err != nil {
 			t.Fatal(err)

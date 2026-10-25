@@ -34,6 +34,71 @@ func TestMemoryEnvelopeMeasuredAccepted(t *testing.T) {
 	}
 }
 
+func TestMemoryEnvelopeCeilingBoundThenExploratory(t *testing.T) {
+	for _, tc := range []struct {
+		name, mode string
+		success    bool
+	}{
+		{"auto success", "auto", true},
+		{"auto failure", "auto", false},
+		{"explicit success", "", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			q, clock, m, s := observationFixture(t)
+			s.Needs.Memory = tc.mode
+			if tc.mode == "auto" {
+				first := startObservation(t, q, m, s)
+				clock.Advance(time.Second)
+				r := result(&first, true)
+				host := 2.0
+				r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host}
+				if err := q.Complete(r); err != nil {
+					t.Fatal(err)
+				}
+			}
+			bound := startObservation(t, q, m, s)
+			if tc.mode == "auto" && bound.MemoryEnvelope.Source != "accepted peak × 1.25" {
+				t.Fatalf("auto run did not reuse seed peak: %+v", bound.MemoryEnvelope)
+			}
+			a, err := fakeCeilings(t).create("attempt-bound", 3<<30, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for name, value := range map[string]string{
+				"memory.stat":   "anon 2684354560\nkernel 0\nshmem 0\npgscan_file 100\n",
+				"memory.events": "max 6264\nhigh 0\noom 0\noom_kill 0\n",
+			} {
+				if err := os.WriteFile(filepath.Join(a.path, name), []byte(value), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			clock.Advance(time.Second)
+			r := result(&bound, tc.success)
+			r.MemoryPeak = a.peak()
+			if err := q.Complete(r); err != nil {
+				t.Fatal(err)
+			}
+			wantState := "failed"
+			if tc.success {
+				wantState = "succeeded"
+			}
+			if got := job(t, q, bound.ID); got.State != wantState || got.Attempt != bound.Attempt {
+				t.Fatalf("ceiling pressure changed the attempt outcome: %+v", got)
+			}
+			for _, point := range q.s.WorkObservations {
+				if point.MemoryPeak != nil || !point.MemoryRecordedAt.IsZero() || point.Forbidden {
+					t.Errorf("cap-bound result retained a learned peak or forbade work: %+v", point)
+				}
+			}
+			s.Needs.Memory = "auto"
+			next := startObservation(t, q, m, s)
+			if next.MemoryEnvelope.Source != "exploratory first run" || next.Spec.Needs.HostMemoryGB <= bound.Spec.Needs.HostMemoryGB {
+				t.Fatalf("next auto run did not explore a larger envelope: bound=%+v next=%+v", bound.MemoryEnvelope, next.MemoryEnvelope)
+			}
+		})
+	}
+}
+
 func TestMemoryEnvelopeCPUOnGPUHostReusesAndRelearnsPeak(t *testing.T) {
 	q, clock, m, s := observationFixture(t)
 	m.CPUExtensionFingerprint = m.ExtensionFingerprint

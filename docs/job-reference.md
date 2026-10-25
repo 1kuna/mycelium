@@ -768,10 +768,18 @@ while unsupported or unparseable accounting stops sampling. When only host
 memory was measured, the source names the retained GPU recipe default.
 The existing driver/system reserve and attempt slack still apply. Measurements
 never override an existing attempt or opt an explicitly declared job into auto.
-Resumed attempts may use accepted estimates but do not train them. Auto OOMs
-retain a lower-bound envelope for one retry with 25% more room; the same host is
-eligible when it has room. OOM floors persist for later jobs as well, including
-after the final retry. Shared-envelope Docker attempts end on worker-unit stop.
+Resumed attempts may use accepted estimates but do not train them. Peaks are
+constrained by OOM, swap-out, anonymous reclaim, or `memory.events` with `max > 0`
+or `high > 0`, even when only file pages were reclaimed. Ceiling-bound peaks
+from explicit-memory runs cannot seed auto estimates. An auto OOM or constrained
+attempt clears comparable learned memory across machines without forbidding the
+work. For a measured-need run, submit the same comparable work with `memory: auto`
+and no `size_hint`: the next run explores available headroom. Omit binding optional
+member caps so the job can measure its need within the shared envelope. A
+successful unconstrained run teaches a new peak. Ceiling pressure alone leaves
+the job outcome unchanged; an OOM retains a job-local host floor for one retry
+with 25% more room, without persisting a floor for later jobs.
+Shared-envelope Docker attempts end on worker-unit stop.
 Verified stopped members with a vanished parent release custody with unknown
 memory/cause and supply no learning data. A surviving parent's post-exit reading
 cannot train an estimate when the running sampler was lost during restart.
