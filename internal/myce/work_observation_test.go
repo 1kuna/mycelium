@@ -201,3 +201,33 @@ func TestWorkObservationMixedHostIntervalExcluded(t *testing.T) {
 		t.Fatal("mixed interval learned", q.s.Jobs[j.ID].Timing)
 	}
 }
+
+func TestWorkObservationResolvedMemoryIdentity(t *testing.T) {
+	m := cpuMachine("synthetic", "synthetic-host", "cpu", 8, 32)
+	needs := ResourceNeeds{CPUCores: 1, Memory: "auto", MemoryGB: 4, HostMemoryGB: 8}
+	key := func(n ResourceNeeds, args []string) string {
+		k, reason := referenceObservationKey(Extension{}, &m, WorkReference{}, "extension:sample", n, args, nil, "cpu", "synthetic")
+		if k == nil {
+			t.Fatal(reason)
+		}
+		return identityHash(k)
+	}
+	first := key(needs, nil)
+	// Different free room on a busy host changes the exploratory reservation.
+	needs.MemoryGB, needs.HostMemoryGB = 2, 3
+	if key(needs, nil) != first {
+		t.Error("resolved memory split comparable timing evidence")
+	}
+	needs.Memory = ""
+	if key(needs, nil) != first {
+		t.Error("memory selection mode split comparable timing evidence")
+	}
+	needs.CPUCores = 2
+	if key(needs, nil) == first {
+		t.Error("CPU requirement did not invalidate timing evidence")
+	}
+	needs.CPUCores = 1
+	if key(needs, []string{"different-recipe"}) == first {
+		t.Error("arguments did not invalidate timing evidence")
+	}
+}
