@@ -9,6 +9,7 @@ import copy
 import datetime as dt
 import json
 import os
+import ssl
 from pathlib import Path
 import time
 from typing import Any, Iterator, Mapping
@@ -17,6 +18,10 @@ from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
 
 TERMINAL = {"succeeded", "failed", "cancelled"}
+
+
+class UnsupportedTLSRuntimeError(RuntimeError):
+    """The Python TLS runtime cannot use installed queue authority."""
 
 
 class APIError(RuntimeError):
@@ -90,6 +95,11 @@ class Client:
         A joining authority retains its certificate pin and refuses redirects.
         Explicit Client(url, token) construction keeps its existing behavior.
         """
+        if ssl.OPENSSL_VERSION.startswith("LibreSSL"):
+            raise UnsupportedTLSRuntimeError(
+                "Client.from_installed() requires Python linked against OpenSSL 3 "
+                "for the queue Ed25519 joining certificate; detected "
+                f"{ssl.OPENSSL_VERSION}. Use Homebrew or python.org Python.")
         from .installed import installed_authority
         address, token, opener = installed_authority(config)
         client = cls(address, token, timeout=timeout, poll_interval=poll_interval)

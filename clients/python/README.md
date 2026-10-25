@@ -54,6 +54,18 @@ A cancelled key reservation returns its terminal cancelled job for any spec.
 Keep the exact original submitted spec for retries; generated defaults in the
 returned job are not part of that original request.
 
+## Installed queue authority
+
+`Client.from_installed()` reads the installed worker/queue authority and retains
+its certificate pin without exporting credentials. It requires Python linked
+against **OpenSSL 3** to use the queue's Ed25519 joining certificate. On macOS,
+Xcode Command Line Tools `/usr/bin/python3` uses LibreSSL and cannot complete
+that handshake. Use Homebrew or python.org Python; check your interpreter with
+`python3 -c 'import ssl; print(ssl.OPENSSL_VERSION)'`.
+The client raises the exported `mycelium.UnsupportedTLSRuntimeError` on LibreSSL
+before reading installed authority or connecting, with the OpenSSL 3 requirement
+and interpreter guidance. Explicit `Client(url=..., token=...)` is unchanged.
+
 ## Standard OpenAI SDK
 
 ```python

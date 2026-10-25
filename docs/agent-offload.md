@@ -152,7 +152,12 @@ client.download_result(job["id"], "result.json", "./accepted-results/result.json
 ```
 
 The Python library reads installed authority itself and retains the certificate
-pin. `Client(url=..., token=...)` keeps its existing explicit-credential behavior.
+pin. `Client.from_installed()` requires Python linked against **OpenSSL 3** for
+the queue's Ed25519 joining certificate. macOS `/usr/bin/python3` from Xcode
+Command Line Tools uses LibreSSL and cannot complete that handshake; use
+Homebrew or python.org Python. The client raises `UnsupportedTLSRuntimeError`
+on LibreSSL before reading installed authority or attempting a connection.
+`Client(url=..., token=...)` keeps its existing explicit-credential behavior.
 Neither flow adds credentials to job environments; jobs never inherit `MYCE_TOKEN`.
 
 ## CPU profile environments

@@ -16,6 +16,21 @@ ROOT = Path(__file__).resolve().parents[3]
 
 
 class ClientTests(unittest.TestCase):
+    def test_installed_libressl_requires_openssl3(self):
+        with patch("ssl.OPENSSL_VERSION", "LibreSSL 2.8.3"):
+            with patch("mycelium.installed.installed_authority") as authority:
+                authority.return_value = ("https://queue.invalid", "fixture", object())
+                with self.assertRaisesRegex(RuntimeError, "OpenSSL 3") as raised:
+                    Client.from_installed()
+                from mycelium import UnsupportedTLSRuntimeError
+                self.assertIsInstance(raised.exception, UnsupportedTLSRuntimeError)
+                self.assertIn("LibreSSL", str(raised.exception))
+                authority.assert_not_called()
+        with patch("ssl.OPENSSL_VERSION", "OpenSSL 3.5.0"):
+            with patch("mycelium.installed.installed_authority", return_value=(
+                    "https://queue.invalid", "fixture", object())):
+                self.assertEqual(Client.from_installed().url, "https://queue.invalid")
+
     def test_job_spec_invalid_message(self):
         reason = "main Docker memory must fit needs.host_memory_gb"
         error = APIError(400, json.dumps({"code": "job_spec_invalid", "error": reason}))
