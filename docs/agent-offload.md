@@ -280,8 +280,9 @@ User-Agent with HTTP 403 `error code: 1010`. For example:
 One detached `myce wait --receipt ...` observes each job. A startup handshake and
 an inherited OS lock establish observation; rerunning adopts the lock holder.
 No PID guessing is used. The receipt reports `observation: armed|not_armed` and
-`delivery: armed|not_armed|not_configured`. Both become non-armed when observation
-exits; a configured delivery then reads `not_armed`. Missing/invalid hooks never
+`delivery: armed|not_armed|not_configured|adopted_other_notifier`. Both become
+non-armed when observation exits; a configured delivery then reads `not_armed`.
+Missing/invalid hooks never
 report delivery armed. `delivery: armed` means configured, not confirmed
 delivered; the separate `delivery_status` becomes `delivered` or `failed`. A receipt
 file is a past snapshot, not proof of a live watcher; rerun with `--key` to check
@@ -300,7 +301,17 @@ Observation-failure IDs also include a nonce saved on each arm, so a later arm
 failing the same way produces a new wake. Terminal IDs remain stable across arms.
 
 A rerun adopts an already-running observer and prints its receipt directory;
-it never replaces or stops that owner. For an observer started by a build before
+it never replaces or stops that owner. If another thread in a shared checkout
+submitted the same work, the live observer may use a different notifier.
+When the caller's effective notifier differs from that observer's saved binding,
+the returned receipt reports `delivery: adopted_other_notifier`, with no notifier
+path or credentials. An omitted notifier inherits the saved binding. Observation
+remains armed and the command exits 0: the job and observer are healthy, but this
+caller must wait in the foreground with `myce wait JOB_ID` or record a hold,
+rather than expect its own wake. The owner's saved receipt and notifier are
+unchanged. Replaying while that owner is alive does not change the binding.
+
+For an observer started by a build before
 this fix that is stuck queued/armed because its installed certificate pin was
 lost, the owning session finds its
 own `myce wait --receipt RECEIPT_DIR` process in `ps` by that exact receipt path
