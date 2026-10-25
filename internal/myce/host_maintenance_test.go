@@ -24,6 +24,80 @@ func maintenanceMachines() (Machine, Machine) {
 	}
 	return a, b
 }
+
+func TestHostMaintenanceLastResortPersistsAcrossWorkerSessions(t *testing.T) {
+	clock := &fakeClock{now: time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)}
+	db, root := filepath.Join(t.TempDir(), "queue.db"), t.TempDir()
+	q, err := Open(db, root, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, b := maintenanceMachines()
+	check(t, q, a, nil)
+	check(t, q, b, nil)
+	lastResortPolicy(t, q, a.HostID, true)
+	if err := q.Close(); err != nil {
+		t.Fatal(err)
+	}
+	q, err = Open(db, root, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	previous := a.Session
+	a.Session = "new-session"
+	if _, err := q.Checkin(Checkin{Machine: a, Fresh: true, PreviousSession: previous}); err != nil {
+		t.Fatal(err)
+	}
+	check(t, q, b, nil)
+	status, err := q.HostMaintenanceStatus(a.HostID)
+	if err != nil || !status.Policy.LastResort || status.Policy.Mode != "enabled" {
+		t.Fatal("restart or check-in erased queue-owned policy", status, err)
+	}
+	snap, err := q.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range snap.Machines {
+		if !m.LastResort {
+			t.Fatal("physical host policy did not cover sibling worker", m.ID)
+		}
+	}
+	lastResortPolicy(t, q, a.HostID, false)
+	// Incoming status-only fields cannot promote or demote the physical host.
+	a.LastResort = true
+	check(t, q, a, nil)
+	snap, err = q.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, m := range snap.Machines {
+		if m.LastResort {
+			t.Fatal("worker changed queue-owned placement policy", m.ID)
+		}
+	}
+}
+func TestHostMaintenancePlacementPreservesDrainOwner(t *testing.T) {
+	q, clock := fixture(t)
+	a, _ := maintenanceMachines()
+	check(t, q, a, nil)
+	drained, err := q.ChangeHostMaintenance(a.HostID, HostMaintenanceRequest{Action: "drain", DrainOwner: "upgrade"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, enabled := range []bool{true, false} {
+		clock.Advance(time.Second)
+		lastResortPolicy(t, q, a.HostID, enabled)
+		status, err := q.HostMaintenanceStatus(a.HostID)
+		if err != nil || status.Policy.Mode != "drained" || status.Policy.DrainOwner != drained.Policy.DrainOwner || !status.Policy.UpdatedAt.Equal(drained.Policy.UpdatedAt) || status.Policy.LastResort != enabled {
+			t.Fatal("placement edit invalidated drain receipt", status.Policy, err)
+		}
+	}
+	if _, err := q.ChangeHostMaintenance(a.HostID, HostMaintenanceRequest{Action: "resume", IfMode: "drained", IfUpdatedAt: &drained.Policy.UpdatedAt, IfDrainOwner: drained.Policy.DrainOwner}); err != nil {
+		t.Fatal("drain owner could not conditionally resume after placement edit", err)
+	}
+}
+
 func maintenanceChange(t *testing.T, q *Queue, action string, stop bool) HostMaintenanceStatus {
 	t.Helper()
 	status, err := q.ChangeHostMaintenance("host", HostMaintenanceRequest{Action: action, Stop: stop})

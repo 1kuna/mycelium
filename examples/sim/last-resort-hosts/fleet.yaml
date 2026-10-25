@@ -1,0 +1,4 @@
+# Synthetic equal-speed CPU and unified-memory accelerator hosts.
+machines:
+  - {name: small, host: small, platform: cpu, memory_gb: 1, host_memory_gb: 8, speed: 1, last_resort: true}
+  - {name: ordinary, host: ordinary, platform: metal, memory_gb: 24, host_memory_gb: 24, unified: true, speed: 1}

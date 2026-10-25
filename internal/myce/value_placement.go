@@ -10,6 +10,7 @@ import (
 // Values belong to physical hosts, not worker rows, devices or free capacity.
 // This read-only inventory projection does no I/O and uses the queue Clock.
 type hostValue struct {
+	lastResort   bool
 	ram          float64
 	accelerators map[string]float64
 	bands        map[capabilityBand]bool
@@ -32,7 +33,7 @@ func (q *Queue) hostValues() map[string]*hostValue {
 		id := hostID(m)
 		h := hosts[id]
 		if h == nil {
-			h = &hostValue{known: true, accelerators: map[string]float64{}, bands: map[capabilityBand]bool{}}
+			h = &hostValue{lastResort: q.s.HostMaintenance[id].LastResort, known: true, accelerators: map[string]float64{}, bands: map[capabilityBand]bool{}}
 			hosts[id] = h
 		}
 		p := m.CapabilityProfile
@@ -135,10 +136,18 @@ func (q *Queue) hostValues() map[string]*hostValue {
 	return hosts
 }
 
-// Equal known values leave measured completion/affinity to the existing planner.
+// Ordinary hosts precede last-resort hosts. Within each group, equal known
+// values leave measured completion/affinity to the existing planner.
 // Unknown inventory is never treated as an empty (cheap) vector.
 func compareHostValue(values map[string]*hostValue, a, b *Machine) (int, bool) {
 	av, bv := values[hostID(a)], values[hostID(b)]
+	al, bl := av != nil && av.lastResort, bv != nil && bv.lastResort
+	if al != bl {
+		if al {
+			return 1, true
+		}
+		return -1, true
+	}
 	ak, bk := av != nil && av.known, bv != nil && bv.known
 	if ak != bk {
 		if ak {
@@ -320,10 +329,14 @@ func (q *Queue) projectionTargetBetter(j *Job, a, b *Machine, scan *placementSca
 }
 
 func valueReason(h *hostValue, m *Machine) string {
-	if h == nil || !h.known {
-		return "host value unknown; normal admission"
+	prefix := ""
+	if h != nil && h.lastResort {
+		prefix = "last-resort fallback: no ordinary host can admit this work now in the current plan; "
 	}
-	return fmt.Sprintf("preserve scarce machines: host %s scarcity %v (1-host bands first), usable RAM %g GiB; currently admissible targets only", hostID(m), h.vector, h.ram)
+	if h == nil || !h.known {
+		return prefix + "host value unknown; normal admission"
+	}
+	return prefix + fmt.Sprintf("preserve scarce machines: host %s scarcity %v (1-host bands first), usable RAM %g GiB; currently admissible targets only", hostID(m), h.vector, h.ram)
 }
 func (q *Queue) recordValuePlacement(j *Job, m *Machine, values map[string]*hostValue) {
 	reason := valueReason(values[hostID(m)], m)

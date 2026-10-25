@@ -31,8 +31,26 @@ myce host drain HOST --wait --timeout 30s
 myce host disable HOST --stop --wait --timeout 30s
 myce host status HOST
 myce host budget HOST --memory-budget-gb GiB
+myce host placement HOST --last-resort=true
+myce host placement HOST --last-resort=false
 myce host resume HOST
 ```
+
+`host placement` changes the queue-owned policy for a physical host, including
+all its worker/device views. It can be changed while enabled, persists across
+queue restarts and worker sessions, and cannot be overridden by check-ins.
+The default is `last_resort: false`. When true, ordinary admissible hosts rank
+first, followed by last-resort hosts; MY-18 value ordering remains unchanged
+within each group. If no ordinary host can admit the work in the current plan,
+fallback is immediate, with no waiting or reservation. Fairness, priority,
+preemption, eligibility and cleanup custody retain their existing rules.
+
+`host status HOST` reports `policy.last_resort`; status API machine rows expose
+`last_resort` when true, and CLI/web status labels the host's placement policy.
+Queued job `reason` and the assigned attempt's `timing.placement_reason` explain
+last-resort fallback and retain the value-ranking explanation. These reasons are
+diagnostic text. See the paired [simulator fixture](../examples/sim/last-resort-hosts/README.md)
+for synthetic placement and immediate overflow behavior.
 
 Drain preserves Started work. Disable with `--stop` requests bounded stops of
 exact current attempts, preparations and engines. Issued preparation plans count

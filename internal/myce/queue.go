@@ -892,6 +892,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			}
 		}
 		m.Disabled = ""
+		m.LastResort = false
 		for _, progress := range progresses {
 			if progress.err != nil {
 				m.CheckpointUnavailable = true
@@ -1692,6 +1693,7 @@ func (q *Queue) snapshotView(forStatus, jobReply bool) (Snapshot, error) {
 			q.machineDeviceStatus(&copy, m)
 			copy.AdmissionReason = q.machineLimitReason(m)
 			copy.Disabled = ""
+			copy.LastResort = q.s.HostMaintenance[hostID(m)].LastResort
 			if q.maintenanceBlocked(hostID(m)) {
 				copy.Disabled = "planned host maintenance"
 			}

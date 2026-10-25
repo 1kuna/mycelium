@@ -1,0 +1,4 @@
+# Same inventory with the default policy: MY-18 sends the first CPU job to small.
+machines:
+  - {name: small, host: small, platform: cpu, memory_gb: 1, host_memory_gb: 8, speed: 1}
+  - {name: ordinary, host: ordinary, platform: metal, memory_gb: 24, host_memory_gb: 24, unified: true, speed: 1}

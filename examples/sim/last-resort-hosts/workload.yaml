@@ -1,0 +1,4 @@
+duration_jitter: 0
+streams:
+  - {name: first, project: general, priority: production, platforms: [cpu], memory_gb: 1, duration_seconds: 100, every_hours: 24, start_hour: 0, count: 1, batch_files: 2}
+  - {name: overflow, project: general, priority: production, platforms: [cpu], memory_gb: 1, duration_seconds: 20, every_hours: 24, start_hour: 0.0002777777777777778, count: 1, batch_files: 2}
