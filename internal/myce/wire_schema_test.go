@@ -77,6 +77,8 @@ func generatedJobSchema(t *testing.T) []byte {
 		job[name].(map[string]any)["minLength"] = 1
 	}
 	job["attempt"].(map[string]any)["minimum"] = 0
+	job["attempt_history"].(map[string]any)["maxItems"] = attemptHistoryLimit
+	job["attempt_history"].(map[string]any)["description"] = "Latest four ended attempts, persisted with the job. Existing classifier facts and queue decisions, not release proof or retry charges. Older planned requeues roll off; historical causes are not reconstructed."
 	job["infrastructure_retries"].(map[string]any)["minimum"] = 0
 	job["infrastructure_retries"].(map[string]any)["description"] = "Production infrastructure requeues already used. Omitted zero; default maximum is 2, configurable by the queue. Stage failures do not consume this budget."
 	job["reason"].(map[string]any)["description"] = "Sanitized diagnostic only. Do not parse or match its text."

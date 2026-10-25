@@ -303,6 +303,8 @@ type Copy struct {
 }
 
 type Job struct {
+	AttemptHistory []AttemptOutcome `json:"attempt_history,omitempty"`
+
 	FanOut           *FanOutProgress `json:"fan_out,omitempty"`
 	Batch            *BatchWork      `json:"batch,omitempty"`
 	Timing           *WorkTiming     `json:"timing,omitempty"`

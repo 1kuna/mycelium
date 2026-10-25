@@ -1,5 +1,57 @@
 {
   "$defs": {
+    "AttemptOutcome": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "cleanup_cause": {
+          "$ref": "#/$defs/RuntimeCause"
+        },
+        "ended_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "execution_cause": {
+          "$ref": "#/$defs/RuntimeCause"
+        },
+        "interrupted": {
+          "type": "boolean"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "operator_stop": {
+          "type": "boolean"
+        },
+        "out_of_memory": {
+          "type": "boolean"
+        },
+        "polite_stop": {
+          "type": "boolean"
+        },
+        "priority_stop": {
+          "$ref": "#/$defs/PriorityPreemption"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "attempt",
+        "machine",
+        "session",
+        "ended_at",
+        "state"
+      ],
+      "type": "object"
+    },
     "BatchWork": {
       "properties": {
         "concurrency": {
@@ -839,6 +891,18 @@
           "minimum": 0,
           "type": "integer",
           "x-contract": "stable"
+        },
+        "attempt_history": {
+          "description": "Latest four ended attempts, persisted with the job. Existing classifier facts and queue decisions, not release proof or retry charges. Older planned requeues roll off; historical causes are not reconstructed.",
+          "items": {
+            "$ref": "#/$defs/AttemptOutcome"
+          },
+          "maxItems": 4,
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
         },
         "batch": {
           "$ref": "#/$defs/BatchWork",

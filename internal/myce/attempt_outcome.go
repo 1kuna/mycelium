@@ -133,6 +133,22 @@ func classifyAttemptOutcome(result Result, facts attemptCause) Result {
 	if !result.Interrupted {
 		result.Forced = false
 	}
+	// Preserve pre-execution refusal/failure facts for supported diagnostics.
+	// These are the same recorded facts that established interruption above.
+	if result.Interrupted && result.ExecutionCause == nil {
+		for _, fact := range facts.Infrastructure {
+			if fact.At.IsZero() {
+				continue
+			}
+			switch fact.Kind {
+			case launchRefused, launchFailed, environmentFailed:
+				result.ExecutionCause = &RuntimeCause{Operation: "launch", Class: fact.Kind}
+			}
+			if result.ExecutionCause != nil {
+				break
+			}
+		}
+	}
 	if facts.Exit != nil && facts.Exit.Status == 137 && !result.Interrupted && !result.OutOfMemory {
 		if result.Error != "" {
 			result.Error += "; "

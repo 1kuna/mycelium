@@ -31,6 +31,32 @@ to run work. The status API returns job summaries without submitted commands,
 environment values, program arguments, extension files, or local checkpoint
 paths. Use the existing job output and log commands when you need their results.
 
+`myce status JOB` (full ID or an unambiguous prefix of at least eight characters)
+shows that job and its `attempt_history`. The same optional array is included
+in `GET /api/status`, the [job-v1 reply](schemas/job-v1.schema.json), and Python
+`Client.get(job_id)`. Each entry has exact `attempt`, `machine`, `session`,
+queue-clock `ended_at`, the resulting queue `state` (`queued` for a requeue),
+and a diagnostic `reason`. Optional `execution_cause` and `cleanup_cause` use
+the existing safe runtime operation/class and command exit code.
+
+History preserves the existing outcome classification: `launch` causes include
+`launch_refused`, `launch_failed` and `environment_failed`; `polite_stop` marks
+availability withdrawal, `operator_stop` marks operator/host maintenance,
+and `priority_stop` retains priority preemption provenance. `interrupted` without
+those planned-stop flags or a launch cause records infrastructure interruption
+or loss. `out_of_memory` distinguishes OOM, with `state: queued` when retried;
+terminal command failures retain `command_exit` and `exit_code`. These are
+diagnostics, not retry charges: two starts and zero losses can include a planned
+requeue followed by one command failure.
+
+History is persisted with the job and retains the **latest four ended attempts**:
+three infrastructure endings (two production retries, or three counted losses),
+plus the existing single OOM retry. Repeated planned requeues can exceed that
+window; older entries roll off without changing execution or charging limits.
+Existing jobs start with no history; past causes cannot be reconstructed.
+An end time records the queue's decision, which can precede physical cleanup.
+History never proves release; use the existing exact release evidence.
+
 Production job summaries and the [job-v1 reply](schemas/job-v1.schema.json) may
 include `infrastructure_retries`, the durable number of infrastructure requeues
 already used. It is an optional nonnegative integer, omitted at zero, with a
