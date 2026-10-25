@@ -25,7 +25,10 @@ Local probes use the existing 25 ms budget; the checkpoint/NAS probe uses the
 existing 750 ms heartbeat filesystem budget. A timeout retains the last good
 reading with its age and `retained: true`, and reports `error: disk reading
 unavailable`. Retention preserves the baseline for later rate calculation. The
-queue can use that reading for three reported heartbeat intervals. Freshness is
+queue can use that reading for three observation cycles. A cycle is the reported
+heartbeat interval, with a minimum of 850 ms from four local probe budgets plus
+one NAS probe budget. Faster control ticks cannot expire a healthy reading
+during bounded observation and start handoff. Freshness is
 worker-reported `age_seconds` plus queue time since `disk_received_at`, which the
 queue stamps on check-in; worker and queue clocks need not agree. Older or
 missing readings hold new work as `disk reading unavailable`, without inventing

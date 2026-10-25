@@ -373,3 +373,21 @@ func TestDiskHeadroomNewModelLoadChargesCacheSize(t *testing.T) {
 		t.Fatal("cache space did not admit new load despite unwritten data root", slot)
 	}
 }
+
+// A short control interval cannot make a healthy reading expire before the
+// worker's existing bounded filesystem observations and start handoff finish.
+func TestDiskHeadroomFastHeartbeatAllowsStartHandoff(t *testing.T) {
+	q, c := fixture(t)
+	m := reportDisk(t, machine("fast", "fake"), c, "volume", []string{"data"}, 100<<30, 41<<30)
+	m.DiskVolumes[0].SampleIntervalSeconds = 0.01
+	check(t, q, m, nil)
+	submit(t, q, spec("experiment"))
+	a := check(t, q, m, nil).Job
+	if a == nil {
+		t.Fatal("no initial assignment")
+	}
+	c.Advance(2 * localObservationBudget)
+	if err := q.Started(result(a, true)); err != nil {
+		t.Fatalf("healthy sample expired during bounded handoff: %v", err)
+	}
+}

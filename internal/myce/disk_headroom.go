@@ -133,6 +133,10 @@ func (q *Queue) currentDiskVolume(v DiskVolume, receivedAt time.Time) DiskVolume
 	if interval <= 0 {
 		interval = 1
 	}
+	// Faster control ticks cannot shorten the bounded disk-observation cycle:
+	// four local probes plus one NAS probe can consume these existing budgets.
+	// Otherwise healthy readings expire during ordinary preparation/handoff.
+	interval = max(interval, (4*localObservationBudget + heartbeatFilesystemBudget).Seconds())
 	// SampledAt belongs to the worker clock. Age is measured there, then
 	// advanced only by queue time since receipt; clock skew cannot age a sample.
 	v.AgeSeconds = max(0, v.AgeSeconds) + max(0, q.clock.Now().Sub(receivedAt).Seconds())
