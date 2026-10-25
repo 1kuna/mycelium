@@ -160,6 +160,8 @@ and fan-out results), keyed answer, checkpoint, model, extension, environment or
 pending file-reclamation list to reference the blob. All times use the queue Clock.
 Publishing or successful HEAD verification refreshes the mtime. Job admission clears
 the marker in the same transaction; normal terminal-job retention then governs it.
+Model and environment catalog registration also clears and persists eligibility
+immediately, without waiting for a maintenance tick.
 
 Unmarked imports, including `myce file put`, Go `UploadFile`, models and existing
 uploads from older clients, are never orphan-swept, even with an empty or edited

@@ -3,9 +3,11 @@ package myce
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -394,6 +396,78 @@ func TestFileRetentionUploadPurposeDedup(t *testing.T) {
 		if _, err := os.Stat(q.files.blob(ref)); err != nil {
 			t.Error("deduplicated generic import lost", err)
 		}
+	}
+}
+
+func TestFileRetentionDuplicateUploadReadOnly(t *testing.T) {
+	q, _ := fixture(t)
+	c := retentionClient(t, q)
+	importPath, imported := retentionUpload(t, c, "duplicate checkpoint bytes")
+	inputPath, input := retentionJobInput(t, c, "duplicate marked input")
+	handler := API{Queue: q, Token: "test"}.Handler()
+	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			t.Error("duplicate reached POST-side hashing/creation")
+			http.Error(w, "unexpected duplicate POST", 500)
+			return
+		}
+		handler.ServeHTTP(w, r)
+	}))
+	defer api.Close()
+	c.URL = api.URL
+	var before, after int64
+	if err := q.db.QueryRow("SELECT total_changes()").Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	revision := q.fileReferenceRevision
+	// A slow unrelated creation cannot hold duplicate checkpoint verification.
+	q.files.mu.Lock()
+	err := c.UploadFile(context.Background(), importPath, imported)
+	inputErr := c.UploadJobInput(context.Background(), inputPath, input)
+	q.files.mu.Unlock()
+	if err != nil || inputErr != nil {
+		t.Errorf("duplicate upload failed: generic=%v input=%v", err, inputErr)
+	}
+	if err := q.db.QueryRow("SELECT total_changes()").Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if after != before || q.fileReferenceRevision != revision {
+		t.Errorf("duplicate wrote state or ran a queue transaction: writes=%d revision=%d", after-before, q.fileReferenceRevision-revision)
+	}
+}
+
+func TestFileRetentionCatalogReleasesMarker(t *testing.T) {
+	for _, catalog := range []string{"model", "environment"} {
+		t.Run(catalog, func(t *testing.T) {
+			q, _ := fixture(t)
+			c := retentionClient(t, q)
+			_, ref := retentionJobInput(t, c, "marked catalog asset")
+			var err error
+			if catalog == "model" {
+				config := q.models
+				config.Models = []Model{{Name: "imported", Engine: "fake", FileStore: true, MemoryGB: 1, Platforms: []string{"fake"}, SHA256: ref.SHA256, SizeBytes: ref.SizeBytes}}
+				err = q.ConfigureModels(config)
+			} else {
+				err = q.ConfigureEnvironments(EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"tools": {"cpu": {Assets: FileManifest{"asset": ref}}}}})
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, marked := q.s.JobInputUploads[ref.SHA256]; marked {
+				t.Error("catalog asset still marked before next tick")
+			}
+			var data []byte
+			if err := q.db.QueryRow("SELECT data FROM queue_state WHERE key='state'").Scan(&data); err != nil {
+				t.Fatal(err)
+			}
+			var durable state
+			if err := json.Unmarshal(data, &durable); err != nil {
+				t.Fatal(err)
+			}
+			if _, marked := durable.JobInputUploads[ref.SHA256]; marked {
+				t.Error("catalog marker release was not persisted")
+			}
+		})
 	}
 }
 
