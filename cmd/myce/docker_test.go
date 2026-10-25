@@ -1,9 +1,18 @@
 package main
 
 import (
+	"io"
 	"strings"
 	"testing"
 )
+
+func TestReconcileDockerRetentionCLIRequiresConversion(t *testing.T) {
+	for _, args := range [][]string{nil, {"--config", ""}, {"--config", "fixture", "extra"}, {"--force"}, {"--config", t.TempDir() + "/missing.json"}} {
+		if err := reconcileDockerRetentionCommand(args, io.Discard); err == nil {
+			t.Fatalf("accepted missing conversion custody: %v", args)
+		}
+	}
+}
 
 func TestResolveDockerCLIRejectsAssertionAndRequiresCustody(t *testing.T) {
 	t.Setenv("MYCE_TOKEN", "")
