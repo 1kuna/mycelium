@@ -222,6 +222,57 @@ func TestExtensionCheckAutoMemoryOnBenchmarkPoint(t *testing.T) {
 	}
 }
 
+func TestExtensionCheckAutoMemorySurvivesOldBenchmarkReport(t *testing.T) {
+	q, clock, m, s := observationFixture(t)
+	e := q.s.Extensions[s.Extension]
+	e.Version = "auto"
+	e.Variants[0].Needs.Memory = "auto" // Keeps the host floor a reference point needs.
+	e.Variants[0].Sweeps = map[string]ReferenceSweep{"extension:sample": {Command: []string{"sh", "curve.sh"}, Counts: []int{1}, MaxConcurrency: 1}}
+	e.Files["curve.sh"] = []byte("exit 0\n")
+	e = freezeComposition(t, e)
+	if err := q.AddExtension(e); err != nil {
+		t.Fatal(err)
+	}
+	report := newExtensionReport(e, &m, "extension:sample")
+	report.Setup, report.Qualified, report.CheckID = true, true, "synthetic-check"
+	m.ExtensionReports = []ExtensionReport{report}
+	check(t, q, m, nil)
+	s.Extension = extensionKey(e)
+	probe := s
+	probe.Workload = nil
+	probe.ExtensionDigest = e.Digest
+	probe.AllowedMachines = []string{m.ID}
+	probe.Needs.Memory = "auto"
+	probe.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:sample", Directory: t.TempDir()}
+	job := startObservation(t, q, m, probe)
+	clock.Advance(time.Second)
+	host := 2.0
+	r := result(&job, true)
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	k, why := curveKey(e, q.s.Machines[m.ID], "extension:sample")
+	if k == nil {
+		t.Fatal(why)
+	}
+	k.Concurrency = 1
+	// A distinct, otherwise valid benchmark report whose throughput is 31 days old.
+	old := WorkObservation{Key: *k, Source: "idle reference", SampleID: "old-benchmark", Units: 10, Seconds: 2, Rate: 5, LatencySeconds: 2, RecordedAt: clock.Now().Add(-31 * 24 * time.Hour)}
+	publishCurves(t, q, m, []WorkObservation{old})
+	if p := q.s.WorkObservations[identityHash(k)]; len(q.s.WorkObservations) != 1 || p.SampleID != "old-benchmark" || p.MemoryRecordedAt.IsZero() {
+		t.Fatalf("old benchmark report not accepted onto the check's point: %+v", q.s.WorkObservations)
+	}
+	queued := submit(t, q, s)
+	next := check(t, q, m, nil).Job
+	if next == nil || next.ID != queued.ID {
+		t.Fatalf("comparable work not assigned: %+v", next)
+	}
+	if next.MemoryEnvelope == nil || next.MemoryEnvelope.Source != "accepted peak × 1.25" || next.Spec.Needs.HostMemoryGB != 2.5 {
+		t.Fatalf("old benchmark report expired fresh memory: %+v", next.MemoryEnvelope)
+	}
+}
+
 func TestExtensionCheckAutoLearnsMemoryForComparableWork(t *testing.T) {
 	for _, outcome := range []string{"accepted", "constrained", "failed"} {
 		t.Run(outcome, func(t *testing.T) {

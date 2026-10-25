@@ -778,7 +778,7 @@ func printStatus(s myce.Snapshot, full bool) {
 		fmt.Println(s.Warning)
 	}
 	for _, curve := range s.WorkCurves {
-		fmt.Printf("curve: %s\n", curve.Summary())
+		fmt.Printf("curve: %s\n", curve.SummaryAt(s.Now))
 	}
 	for _, m := range s.Machines {
 		state := myce.HyphaAvailability(m)

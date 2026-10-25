@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -262,5 +263,31 @@ func TestWorkObservationLargerExplicitMemoryAfterOOM(t *testing.T) {
 	timing := q.s.Jobs[third.ID].Timing
 	if timing.PredictedSeconds == nil || *timing.PredictedSeconds != 2 {
 		t.Fatalf("larger successful reservation lost prediction after OOM: %+v", timing)
+	}
+}
+
+func TestWorkObservationStatusLabelsExpiredThroughput(t *testing.T) {
+	q, clock, m, s := observationFixture(t)
+	j := startObservation(t, q, m, s)
+	clock.Advance(2 * time.Second)
+	finish(t, q, &j, true)
+	for _, days := range []time.Duration{0, 31} {
+		clock.Advance(days * 24 * time.Hour)
+		snap, err := q.snapshot(true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var html bytes.Buffer
+		if err = statusPage.Execute(&html, snap); err != nil || len(snap.WorkCurves) != 1 {
+			t.Fatal(err, snap.WorkCurves)
+		}
+		cli := snap.WorkCurves[0].SummaryAt(snap.Now)
+		fresh := strings.Contains(cli, "5.00 records/s; measured")
+		if days == 0 && (!fresh || !strings.Contains(html.String(), "5.00 records/s; measured")) {
+			t.Fatalf("fresh rate not shown: %s", cli)
+		}
+		if days > 0 && (fresh || strings.Contains(html.String(), "records/s") || !strings.Contains(cli, "unknown; throughput expired")) {
+			t.Fatalf("expired rate presented as measured: %s", cli)
+		}
 	}
 }

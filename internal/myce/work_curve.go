@@ -210,9 +210,6 @@ func (q *Queue) acceptCurveReports(c Checkin, m *Machine) {
 				if old.StaleReason != "" {
 					p.MemoryPeak = nil
 				}
-				if p.RecordedAt.IsZero() || q.clock.Now().Sub(p.RecordedAt) > 30*24*time.Hour {
-					p.StaleReason = "measurement older than 30 days"
-				}
 				p.Machine = m.ID
 				p.Session = m.Session
 				p.Job = launch.Attempt
@@ -225,8 +222,18 @@ func (q *Queue) acceptCurveReports(c Checkin, m *Machine) {
 	}
 }
 
-func (p WorkObservation) Summary() string {
-	state := "measured"
+func (p WorkObservation) Summary() string { return p.summary("measured") }
+
+// SummaryAt labels throughput past its reader age as expired for display only;
+// stored StaleReason still records identity changes alone.
+func (p WorkObservation) SummaryAt(now time.Time) string {
+	if now.Before(p.RecordedAt) || now.Sub(p.RecordedAt) > workCurveMaxAge {
+		return p.summary("throughput expired")
+	}
+	return p.Summary()
+}
+
+func (p WorkObservation) summary(state string) string {
 	if p.StaleReason != "" {
 		state = "stale: " + p.StaleReason
 	}
