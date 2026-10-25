@@ -208,7 +208,7 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) (*AttemptMemoryPeak, float64,
 		if sameMemoryWork(point, *key, configuration) && point.StaleReason == "" && p != nil && p.Constrained && point.MemoryRecordedAt.IsZero() {
 			invalidated = true
 		}
-		if !sameMemoryWork(point, *key, configuration) || point.Source != "accepted work" || point.Samples <= 0 || point.StaleReason != "" || point.MemoryRecordedAt.IsZero() || age < 0 || age > workCurveMaxAge || p == nil || p.Constrained || p.HostGB == nil || !validRate(*p.HostGB) || !validRate(*p.HostGB*2.5) {
+		if !sameMemoryWork(point, *key, configuration) || point.StaleReason != "" || point.MemoryRecordedAt.IsZero() || age < 0 || age > workCurveMaxAge || p == nil || p.Constrained || p.HostGB == nil || !validRate(*p.HostGB) || !validRate(*p.HostGB*2.5) {
 			continue
 		}
 		if m.UnifiedMemory && !j.Spec.Needs.cpuOnly() && (p.DeviceGB == nil || !validRate(*p.DeviceGB)) {

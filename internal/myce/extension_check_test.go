@@ -166,8 +166,59 @@ func TestExtensionCheckAutoPreservesThroughput(t *testing.T) {
 				if timing := q.s.Jobs[next.ID].Timing; timing == nil || timing.Key == nil || timing.PredictedSeconds != nil {
 					t.Errorf("expired throughput used for prediction: %+v", timing)
 				}
+				// The day-29 memory evidence is fresh on its own clock.
+				if got := q.s.Jobs[next.ID]; got.MemoryEnvelope == nil || got.MemoryEnvelope.Source != "accepted peak × 1.25" || got.Spec.Needs.HostMemoryGB != 2.5 {
+					t.Errorf("fresh check peak not reused after throughput expired: %+v", got.MemoryEnvelope)
+				}
 			}
 		})
+	}
+}
+
+func TestExtensionCheckAutoMemoryOnBenchmarkPoint(t *testing.T) {
+	q, clock, m, s := observationFixture(t)
+	e := q.s.Extensions[s.Extension]
+	e.Version = "auto"
+	e.Variants[0].Needs = ResourceNeeds{CPUCores: 1, Memory: "auto"}
+	e = freezeComposition(t, e)
+	if err := q.AddExtension(e); err != nil {
+		t.Fatal(err)
+	}
+	report := newExtensionReport(e, &m, "extension:sample")
+	report.Setup, report.Qualified, report.CheckID = true, true, "synthetic-check"
+	m.ExtensionReports = []ExtensionReport{report}
+	check(t, q, m, nil)
+	k, why := curveKey(e, q.s.Machines[m.ID], "extension:sample")
+	if k == nil {
+		t.Fatal(why)
+	}
+	k.Concurrency = 1
+	q.s.WorkObservations = map[string]WorkObservation{identityHash(k): {Key: *k, Source: "idle reference", SampleID: "benchmark", Samples: 1, Units: 10, Seconds: 2, Rate: 5, LatencySeconds: 2, RecordedAt: clock.Now()}}
+	s.Extension = extensionKey(e)
+	probe := s
+	probe.Workload = nil
+	probe.ExtensionDigest = e.Digest
+	probe.AllowedMachines = []string{m.ID}
+	probe.Needs.Memory = "auto"
+	probe.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:sample", Directory: t.TempDir()}
+	job := startObservation(t, q, m, probe)
+	clock.Advance(time.Second)
+	host := 2.0
+	r := result(&job, true)
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	if len(q.s.WorkObservations) != 1 {
+		t.Fatalf("check did not share the benchmark point: %+v", q.s.WorkObservations)
+	}
+	queued := submit(t, q, s)
+	next := check(t, q, m, nil).Job
+	if next == nil || next.ID != queued.ID {
+		t.Fatalf("comparable work not assigned: %+v", next)
+	}
+	if next.MemoryEnvelope == nil || next.MemoryEnvelope.Source != "accepted peak × 1.25" || next.Spec.Needs.HostMemoryGB != 2.5 {
+		t.Fatalf("check peak on a benchmark point not reused: %+v", next.MemoryEnvelope)
 	}
 }
 

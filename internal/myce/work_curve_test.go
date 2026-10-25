@@ -354,3 +354,19 @@ func TestWorkCurveOwnerReturnRetainsMeasuredAndOOMEvidence(t *testing.T) {
 		}
 	}
 }
+
+func TestWorkCurveReportCannotPlantMemoryEvidence(t *testing.T) {
+	q, clock, m, e, _ := curveFixture(t)
+	target := cloneMachine(q.s.Machines[m.ID])
+	c := BenchmarkConfig{Clock: clock, CurveMaxConcurrency: 1, MeasureCurve: func(_ context.Context, _ BenchmarkConfig, _ Extension, _ *Machine, _ string, count int) (CurveMeasurement, error) {
+		return sampleCurve(count, 2), nil
+	}}
+	points := runReferenceSweep(context.Background(), c, e, &target, "extension:sample", curveMonitor(clock, false))
+	host := 1.0
+	points[0].MemoryPeak, points[0].MemoryRecordedAt, points[0].MemoryConfiguration = &AttemptMemoryPeak{HostGB: &host}, clock.Now(), "forged"
+	publishCurves(t, q, m, points)
+	p, ok := q.s.WorkObservations[identityHash(points[0].Key)]
+	if !ok || p.MemoryPeak != nil || !p.MemoryRecordedAt.IsZero() || p.MemoryConfiguration != "" {
+		t.Fatalf("benchmark report planted memory evidence: %+v", p)
+	}
+}

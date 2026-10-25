@@ -110,14 +110,14 @@ func (q *Queue) invalidateWorkCurves() {
 				}
 				reason = "recipe or reference changed"
 				if strings.HasPrefix(p.Key.Work, "profile:") {
-					reason = profileMemoryStaleReason(p, m, q.clock.Now())
+					reason = profileMemoryStaleReason(p, m)
 					continue
 				}
 				for _, e := range q.s.Extensions {
 					if e.Digest != p.Key.ExtensionDigest {
 						continue
 					}
-					reason = curveStaleReason(p, e, m, q.clock.Now())
+					reason = curveStaleReason(p, e, m)
 					break
 				}
 			}
@@ -129,7 +129,7 @@ func (q *Queue) invalidateWorkCurves() {
 	}
 }
 
-func profileMemoryStaleReason(p WorkObservation, m *Machine, now time.Time) string {
+func profileMemoryStaleReason(p WorkObservation, m *Machine) string {
 	if m.ExtensionFingerprint != p.Key.Fingerprint {
 		return "driver or backend fingerprint changed"
 	}
@@ -145,9 +145,6 @@ func profileMemoryStaleReason(p WorkObservation, m *Machine, now time.Time) stri
 	}
 	if observationAllowance(m) != p.Key.Allowance {
 		return "resource allowance or power mode changed"
-	}
-	if now.Sub(p.RecordedAt) > workCurveMaxAge {
-		return "measurement older than 30 days"
 	}
 	return ""
 }
@@ -208,6 +205,11 @@ func (q *Queue) acceptCurveReports(c Checkin, m *Machine) {
 				p.DeviceMemoryGB = max(old.DeviceMemoryGB, p.DeviceMemoryGB)
 				p.IncrementalHostMemoryGB = max(old.IncrementalHostMemoryGB, p.IncrementalHostMemoryGB)
 				p.IncrementalDeviceMemoryGB = max(old.IncrementalDeviceMemoryGB, p.IncrementalDeviceMemoryGB)
+				// Memory evidence comes only from accepted attempts, never a report.
+				p.MemoryPeak, p.MemoryRecordedAt, p.MemoryConfiguration, p.MemoryLayout = old.MemoryPeak, old.MemoryRecordedAt, old.MemoryConfiguration, old.MemoryLayout
+				if old.StaleReason != "" {
+					p.MemoryPeak = nil
+				}
 				if p.RecordedAt.IsZero() || q.clock.Now().Sub(p.RecordedAt) > 30*24*time.Hour {
 					p.StaleReason = "measurement older than 30 days"
 				}
@@ -287,17 +289,14 @@ func (q *Queue) recordWorkOOM(j *Job, r Result, oomFailure bool) {
 	q.s.WorkObservations[id] = p
 }
 
-func curveStaleReason(p WorkObservation, e Extension, m *Machine, now time.Time) string {
+// Identity fences only. Throughput age (RecordedAt) and memory age
+// (MemoryRecordedAt) are checked by their own readers, and ordinary readers
+// key through current qualification, so neither kind of evidence expires the other.
+func curveStaleReason(p WorkObservation, e Extension, m *Machine) string {
 	if m.ExtensionFingerprint != p.Key.Fingerprint {
 		return "driver or backend fingerprint changed"
 	}
-	k, why := curveKey(e, m, p.Key.Work)
-	if p.Source == "accepted work" && p.MemoryConfiguration != "" && p.Units == 0 && p.Seconds == 0 {
-		// A successful check's memory arrives before its qualification report.
-		// Keep all identity/freshness fences; this point grants no throughput
-		// estimate or qualification to an ordinary job.
-		k, why = curveReferenceKey(e, m, p.Key.Work)
-	}
+	k, why := curveReferenceKey(e, m, p.Key.Work)
 	if k == nil {
 		return why
 	}
@@ -310,8 +309,6 @@ func curveStaleReason(p WorkObservation, e Extension, m *Machine, now time.Time)
 		return "reference changed"
 	case k.Allowance != p.Key.Allowance:
 		return "resource allowance or power mode changed"
-	case now.Sub(p.RecordedAt) > 30*24*time.Hour:
-		return "measurement older than 30 days"
 	}
 	return ""
 }

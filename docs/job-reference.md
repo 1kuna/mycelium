@@ -749,8 +749,9 @@ A matching variant reference enables accepted slice-1 observations. Prefer
 local peaks × 1.25, then another machine's peaks for the same recipe/work/shape
 × 1.25 × 1.5 for the same OS/architecture/accelerator/memory-layout family, or
 × 1.25 × 2 for another family. Cross-machine estimates are labelled in status.
-Unknown, older than 30 days, constrained, stale or failed measurements are
-excluded; main-process RSS alone is not a whole-attempt observation. Next use
+Unknown, constrained, stale-identity or failed measurements, and peaks
+recorded more than 30 days ago, are excluded. A peak's age is its own and does
+not follow the throughput measured at the same point; main-process RSS alone is not a whole-attempt observation. Next use
 the optional hint. Otherwise an exploratory first run needs at least half the
 host allowance (physical RAM if uncapped) available and no protected attempt or
 model residency charging a quarter of it. Its envelope uses the available

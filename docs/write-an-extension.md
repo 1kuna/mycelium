@@ -87,7 +87,8 @@ qualification still requires a successful check and matching baseline output.
 With an authored `references` entry, a successful solo auto check can teach
 its memory peak for later work with the same frozen variant, work type and
 input shape. Later jobs declare `workload: {input_shape: sample-v1, units: 10}`.
-Checks teach no throughput or timing data. Failed or ceiling-constrained peaks
+Checks teach no throughput or timing data, and the peak stays usable for 30
+days from the check even after the point's throughput ages out. Failed or ceiling-constrained peaks
 cannot seed an estimate. The variant's auto mode applies when the caller omits
 `needs.memory`; an explicit caller mode takes precedence. Numeric variants keep
 their existing reservations, and legacy extensions still require numeric floors.

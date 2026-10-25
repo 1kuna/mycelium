@@ -147,7 +147,7 @@ func RunOnboardingBenchmark(ctx context.Context, c BenchmarkConfig, p *Capabilit
 			}
 			for _, e := range extensions {
 				if e.Digest == point.Key.ExtensionDigest {
-					reason = curveStaleReason(point, e, target, c.Clock.Now())
+					reason = curveStaleReason(point, e, target)
 					break
 				}
 			}

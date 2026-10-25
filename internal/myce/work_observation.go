@@ -275,8 +275,10 @@ func (q *Queue) recordWorkObservation(j *Job, r Result) {
 	}
 	point := WorkObservation{Key: *t.Key, Samples: old.Samples + 1, Source: "accepted work",
 		RecordedAt: q.clock.Now(), Job: j.ID, Machine: r.Machine, Session: r.Session, Attempt: r.Attempt}
-	if old.StaleReason != "" {
+	if old.StaleReason != "" || q.clock.Now().Sub(old.RecordedAt) > workCurveMaxAge {
 		old.Rate, old.LatencySeconds = 0, 0
+	}
+	if old.StaleReason != "" || !old.MemoryRecordedAt.IsZero() && q.clock.Now().Sub(old.MemoryRecordedAt) > workCurveMaxAge {
 		old.MemoryPeak = nil
 	}
 	if j.Spec.Workload != nil && j.Spec.ExtensionCheck == nil {
