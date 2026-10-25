@@ -27,6 +27,9 @@ def select(base):
         diff = git('diff', '--unified=0', base, '--', name)
         symbols = set(re.findall(r'^(?:@@.*?@@ |[+-])func (?:\([^)]*\) )?([A-Z]\w*)', diff, re.M))
         symbols.update(re.findall(r'^[+-](?:type|var|const) ([A-Z]\w*)', diff, re.M))
+        # Field-only struct edits need their direct tests even after test moves.
+        if not tests and not symbols:
+            symbols.update(re.findall(r'^[+-]\t([A-Z]\w*)\s+', diff, re.M))
         if symbols:
             reference = re.compile(r'\b(?:' + '|'.join(sorted(symbols)) + r')\b')
             for test_file in path.parent.glob('*_test.go'):

@@ -112,7 +112,9 @@ queue file-store allowance and disk floor (1%, minimum 256 MiB). Upload creation
 rechecks capacity; preflight makes no reservation. HTTP 507 `file_store_capacity`
 names the store and needed/free/shortfall bytes with a recovery action. The saved
 receipt retains this typed refusal and the CLI exits 75 for retry. `myce status`
-reports queue file-store used, free and reclaimable bytes. See [operations](operations.md#stored-job-file-retention).
+reports queue file-store used, free and reclaimable bytes.
+Deploy the queue before new CLIs: older queues return HTTP 404 for
+`/api/files/preflight`, causing profile submissions to exit 69. See [operations](operations.md#stored-job-file-retention).
 
 Before any upload or submission, `.mycelium/receipts/` contains a synced, private
 receipt with frozen source/input hashes, argv and submission key. Gitignore this
@@ -135,8 +137,8 @@ and launch continue to enforce live admission. No host is chosen by the caller,
 and there is no local fallback. Replay of an accepted key works after targets
 disappear. Exit codes are `64` invalid profile/source, `65` intent conflict or
 queue rejection, `69` queue/upload/authority unavailable, `74` observer/notifier
-arming failed, `75` another local submission is preparing, and `78` no qualified
-target. Failures after intent persistence print the receipt as well as a typed
+arming failed, `75` file-store capacity refusal or another local submission is
+preparing, and `78` no qualified target. Failures after intent persistence print the receipt as well as a typed
 stderr reason. An uncertain submit retains the key for safe recovery.
 
 `no_qualified_target` names the closest eligible machine and its first failed

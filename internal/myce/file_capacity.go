@@ -153,7 +153,7 @@ func fileStoreRefusal(status FileStoreStatus, need uint64) error {
 	if status.Error != "" {
 		return &HTTPError{Status: http.StatusServiceUnavailable, Code: "file_store_unavailable", Message: "queue-file-store capacity unavailable; retry when storage is healthy"}
 	}
-	if need > status.FreeBytes || status.DiskFreeBytes < status.FloorBytes {
+	if need > status.FreeBytes {
 		return &HTTPError{Status: http.StatusInsufficientStorage, Code: "file_store_capacity", Message: fmt.Sprintf("queue-file-store: need=%d bytes free=%d bytes shortfall=%d bytes used=%d bytes disk_free=%d bytes floor=%d bytes; wait for retention or increase --file-store-bytes / free space on the queue file-store volume", need, status.FreeBytes, max(need-min(need, status.FreeBytes), status.FloorBytes-min(status.FloorBytes, status.DiskFreeBytes)), status.UsedBytes, status.DiskFreeBytes, status.FloorBytes)}
 	}
 	return nil
@@ -261,7 +261,7 @@ func (q *Queue) reclaimInterruptedUploads() error {
 	revision := q.fileReferenceRevision
 	markers := map[string]time.Time{}
 	for hash, at := range q.s.JobInputUploads {
-		if !referenced[hash] {
+		if at.IsZero() && !referenced[hash] {
 			markers[hash] = at
 		}
 	}
@@ -298,7 +298,6 @@ func (q *Queue) reclaimInterruptedUploads() error {
 				return err
 			}
 			path := filepath.Join(store.root, "uploads", hash)
-			found := false
 			for _, suffix := range []string{"", ".info"} {
 				st, err := os.Lstat(path + suffix)
 				if os.IsNotExist(err) {
@@ -310,13 +309,10 @@ func (q *Queue) reclaimInterruptedUploads() error {
 				if !st.Mode().IsRegular() || st.ModTime().After(cutoff) {
 					return nil
 				}
-				found = true
 			}
-			if !found {
-				return nil
-			}
-			// Remove the metadata last, so a failed unlink can be retried safely.
-			for _, suffix := range []string{"", ".info"} {
+			// Remove metadata first: leftover data cannot be resumed or refreshed,
+			// and a later sweep can finish cleanup after a crash.
+			for _, suffix := range []string{".info", ""} {
 				if err := os.Remove(path + suffix); err != nil && !os.IsNotExist(err) {
 					return err
 				}

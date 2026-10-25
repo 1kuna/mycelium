@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -148,5 +149,100 @@ func TestFileCapacityProtectedReferencesSurvive(t *testing.T) {
 				t.Error("protected reference lost", err)
 			}
 		}
+	}
+}
+
+func TestFileCapacityStoredInputsBelowDiskFloor(t *testing.T) {
+	q, _ := fixture(t)
+	c := retentionClient(t, q)
+	_, first := retentionUpload(t, c, "first stored input")
+	_, second := retentionUpload(t, c, "second stored input")
+	q.files.diskProbe = func(string) (DiskReading, error) {
+		return DiskReading{TotalBytes: 1 << 30, FreeBytes: 1}, nil
+	}
+	if err := c.PreflightFileStore(context.Background(), FileManifest{"first": first, "second": second}); err != nil {
+		t.Fatalf("stored inputs need no new space below the disk floor: %v", err)
+	}
+}
+
+func TestFileCapacityStatus(t *testing.T) {
+	q, clock := fixture(t)
+	c := retentionClient(t, q)
+	q.files.limit = 64
+	_, expired := retentionJobInput(t, c, "expired")
+	partial := capacityPartial(t, c, "partial input", jobInputUploadPurpose)
+	_, kept := retentionUpload(t, c, "kept")
+	clock.Advance(DefaultFileRetention)
+	q.files.diskProbe = func(string) (DiskReading, error) {
+		// A filesystem probe must never execute inside the queue lock (#80).
+		if !q.mu.TryLock() {
+			t.Error("disk I/O under q.mu")
+		} else {
+			q.mu.Unlock()
+		}
+		return DiskReading{TotalBytes: 1 << 30, FreeBytes: 1 << 30}, nil
+	}
+	var snap Snapshot
+	if err := c.Call(context.Background(), http.MethodGet, "/api/status", nil, &snap); err != nil {
+		t.Fatal(err)
+	}
+	fs := snap.FileStore
+	if fs == nil || fs.Store != "queue-file-store" || fs.UsedBytes != 13 || fs.FreeBytes != 40 || fs.ReclaimableBytes != 9 || fs.DiskFreeBytes != 1<<30 || fs.FloorBytes != 256<<20 {
+		t.Fatalf("incorrect byte status: %+v", fs)
+	}
+	// Read-only status must leave even collectible data alone.
+	for _, path := range []string{q.files.blob(expired), q.files.blob(kept), filepath.Join(q.files.root, "uploads", partial.SHA256)} {
+		if _, err := os.Stat(path); err != nil {
+			t.Error("status collected data", err)
+		}
+	}
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Call(context.Background(), http.MethodGet, "/api/status", nil, &snap); err != nil {
+		t.Fatal(err)
+	}
+	if fs := snap.FileStore; fs.UsedBytes != 4 || fs.FreeBytes != 60 || fs.ReclaimableBytes != 0 {
+		t.Fatalf("post-sweep byte status: %+v", fs)
+	}
+}
+
+func TestFileCapacityInterruptedUploadPublicationGrace(t *testing.T) {
+	q, clock := fixture(t)
+	c := retentionClient(t, q)
+	q.fileRetention = time.Hour
+	ref := capacityPartial(t, c, "grace protected input", jobInputUploadPurpose)
+	clock.Advance(filePublicationGrace - time.Nanosecond)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{"", ".info"} {
+		if _, err := os.Stat(filepath.Join(q.files.root, "uploads", ref.SHA256+suffix)); err != nil {
+			t.Fatal("upload lost inside publication grace", err)
+		}
+	}
+	clock.Advance(2 * time.Nanosecond)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{"", ".info"} {
+		if _, err := os.Stat(filepath.Join(q.files.root, "uploads", ref.SHA256+suffix)); !os.IsNotExist(err) {
+			t.Error("upload retained after publication grace", err)
+		}
+	}
+}
+
+func TestFileCapacityMissingUploadMarkerCleared(t *testing.T) {
+	q, _ := fixture(t)
+	retentionClient(t, q)
+	hash := strings.Repeat("a", 64)
+	if err := q.update(func() error { q.s.JobInputUploads = map[string]time.Time{hash: {}}; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if _, marked := q.s.JobInputUploads[hash]; marked {
+		t.Fatal("missing upload still takes a reclamation slot")
 	}
 }

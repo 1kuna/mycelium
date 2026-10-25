@@ -37,6 +37,15 @@ class RelatedTests(unittest.TestCase):
                 write('accounting.go', 'package p\nfunc DiskUsage() int { return 3 }\n')
                 self.assertEqual(related.select('HEAD'), [('.', '^(TestRelated)$')])
                 git('reset', '--hard', '-q', 'HEAD')
+                # A field-only edit still selects direct field references,
+                # even when those tests live in a differently named file.
+                write('types.go', 'package p\ntype Snapshot struct {\n\tValue int\n}\n')
+                write('status_test.go', 'package p\nfunc TestStatus(t *testing.T) { var s Snapshot; _ = s.Value }\nfunc TestOtherSnapshot(t *testing.T) { var s Snapshot }\n')
+                git('add', '.')
+                git('-c', 'user.name=Fixture', '-c', 'user.email=fixture-noreply@example.invalid', 'commit', '-qm', 'status')
+                write('types.go', 'package p\ntype Snapshot struct {\n\tValue string\n}\n')
+                self.assertEqual(related.select('HEAD'), [('.', '^(TestStatus)$')])
+                git('reset', '--hard', '-q', 'HEAD')
                 write('unmapped.go', 'package p\nfunc hidden() {}\n')
                 with self.assertRaisesRegex(ValueError, 'no related tests'):
                     related.select('HEAD')

@@ -138,6 +138,9 @@ existing tus lengths and the shared disk floor (1%, minimum 256 MiB). The JSON
 also exposes `limit_bytes`, `disk_free_bytes`, `floor_bytes`, and an explicit error
 when the reading is unavailable. Status never deletes files.
 
+**Deploy order:** deploy the queue before new CLIs. Older queues return HTTP 404
+for `/api/files/preflight`, causing every profile submission to exit 69.
+
 Profiles preflight the complete input manifest through `POST /api/files/preflight`
 before the first upload. Preflight runs ordinary retention maintenance; upload creation repeats capacity
 admission. Capacity refusals use HTTP 507 with code `file_store_capacity`, the
