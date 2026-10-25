@@ -17,6 +17,101 @@ import (
 	"time"
 )
 
+// A heartbeat response can still offer a preparation that finished after its
+// report snapshot. That stale offer must not erase the unacknowledged result.
+func TestEnvironmentReadyReportSurvivesPreparationReplay(t *testing.T) {
+	q, clock := fixture(t)
+	r := binaryRecipe(t, "fake")
+	cache := &EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: clock}
+	if _, release, err := cache.Acquire(context.Background(), r); err != nil {
+		t.Fatal(err)
+	} else {
+		release()
+	}
+	if err := q.ConfigureEnvironments(EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"ready": {"fake": r}}}); err != nil {
+		t.Fatal(err)
+	}
+	s := spec("experiment")
+	s.Environment.Name = "ready"
+	job := submit(t, q, s)
+	m := machine("builder", "fake", "host")
+	m.EnvironmentBuilder = true
+	plan := check(t, q, m, nil).EnvironmentPlan
+	if len(plan) != 1 || plan[0].Launch == nil {
+		t.Fatal("missing exact preparation", plan)
+	}
+	attempt := plan[0].Launch.Attempt
+	entered, finish := make(chan struct{}), make(chan struct{})
+	replayRelease := make(chan struct{})
+	var finishOnce sync.Once
+	var calls atomic.Int32
+	rt := &environmentRuntime{dir: t.TempDir(), cache: cache, reports: map[string]EnvironmentReport{}}
+	rt.authorize = func(l HostLaunch) error {
+		if calls.Add(1) == 1 {
+			err := q.AuthorizeLaunch(l)
+			close(entered)
+			<-finish
+			return err
+		}
+		<-replayRelease
+		return q.AuthorizeLaunch(l)
+	}
+	defer func() {
+		finishOnce.Do(func() { close(finish) })
+		close(replayRelease)
+		rt.stop()
+	}()
+	done := func() <-chan struct{} {
+		rt.mu.Lock()
+		defer rt.mu.Unlock()
+		return rt.done
+	}
+	rt.sync(plan, false)
+	<-entered
+	m.Environments, m.EnvironmentReports, _ = rt.report()
+	if len(m.EnvironmentReports) != 1 || m.EnvironmentReports[0].State != "building" {
+		t.Fatal("missing building snapshot", m.EnvironmentReports)
+	}
+	stale := check(t, q, m, nil)
+	if stale.Job != nil || len(stale.EnvironmentPlan) != 1 || stale.EnvironmentPlan[0].Launch.Attempt != attempt {
+		t.Fatal("lost started preparation", stale)
+	}
+	completed := done()
+	finishOnce.Do(func() { close(finish) })
+	<-completed
+	rt.sync(stale.EnvironmentPlan, false)
+	clock.Advance(time.Second)
+	m.Environments, m.EnvironmentReports, _ = rt.report()
+	if len(m.EnvironmentReports) != 1 || m.EnvironmentReports[0].State != "ready" || m.EnvironmentReports[0].Attempt != attempt {
+		t.Fatal("replay overwrote exact ready completion", m.EnvironmentReports)
+	}
+	if calls.Load() != 1 {
+		t.Fatal("replay authorized preparation again", calls.Load())
+	}
+	reply := check(t, q, m, nil)
+	if _, held := q.s.PreparationPlans[attempt]; held || reply.Job == nil || reply.Job.ID != job.ID {
+		t.Fatal("ready report did not discharge custody and start job", reply)
+	}
+	rt.sync(reply.EnvironmentPlan, true)
+
+	// A new attempt for the same cache key still needs its own completion.
+	next := q.issuePreparation(&m, "environment", r.Key)
+	if err := q.AuthorizeLaunch(next); err != nil {
+		t.Fatal(err)
+	}
+	check(t, q, m, reply.Job)
+	if _, held := q.s.PreparationPlans[next.Attempt]; !held {
+		t.Fatal("old ready report discharged new attempt")
+	}
+	replacement := r
+	replacement.Launch = &next
+	rt.sync([]EnvironmentRecipe{replacement}, false)
+	m.Environments, m.EnvironmentReports, _ = rt.report()
+	if len(m.EnvironmentReports) != 1 || m.EnvironmentReports[0].State != "building" || m.EnvironmentReports[0].Attempt != next.Attempt {
+		t.Fatal("new attempt reused old completion", m.EnvironmentReports)
+	}
+}
+
 func TestEnvironmentRetiredPurgeProtectsReferences(t *testing.T) {
 	c := &EnvironmentCache{Root: t.TempDir(), Limit: 8 << 20}
 	r := binaryRecipe(t, "fake")

@@ -1117,7 +1117,9 @@ func (rt *environmentRuntime) sync(plan []EnvironmentRecipe, busy bool, keepActi
 	if wanted == "" {
 		return
 	}
-	if r := rt.reports[wanted]; r.State == "failed" {
+	if r := rt.reports[wanted]; r.State == "failed" || (r.State == "ready" && r.Attempt == launchAttempt(plan[0].Launch)) {
+		// Keep an exact completion visible until the queue withdraws its offer.
+		// A stale heartbeat response must not restart completed preparation.
 		return
 	}
 	r := plan[0]
