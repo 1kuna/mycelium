@@ -82,6 +82,8 @@ type Queue struct {
 	productionInfrastructureRetries int
 
 	fileReferenceRevision  uint64
+	fileReclaimMu          sync.Mutex   // Serializes collection and its directory cursor, before q.mu.
+	fileReclaimDir         *os.File     // fileReclaimMu; closed at EOF, store change or queue close.
 	fileLifecycle          sync.RWMutex // Reference publication versus unlink; acquire before q.mu.
 	fileRetention          time.Duration
 	fileCollectionDeferred bool // q.mu; warn once per contiguous deferred streak.
@@ -320,9 +322,12 @@ func checkpointAvailable(root string) bool {
 	return err == nil && closeErr == nil && removeErr == nil
 }
 func (q *Queue) Close() error {
+	q.fileReclaimMu.Lock()
+	defer q.fileReclaimMu.Unlock()
+	scanErr := q.closeFileReclaimDir()
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	err := q.db.Close()
+	err := errors.Join(scanErr, q.db.Close())
 	if q.uploadSpool.lock != nil {
 		err = errors.Join(err, q.uploadSpool.lock.Close())
 		q.uploadSpool.lock = nil

@@ -150,13 +150,21 @@ within the retention window. An expired result download returns typed HTTP 410
 reclaimed, rather than reporting an unknown file. Accepted result helpers also
 check the job's expiry marker, even if another reference keeps shared bytes.
 
-Only expired terminal-job input/result blobs are candidates. Unreferenced,
-interrupted and unindexed uploads remain for explicit operator inspection and
-recovery; abandoned pre-submission profile uploads are a known follow-up. Capacity
-exhaustion still returns HTTP 507: retention does not evict active data, checkpoints
-or catalog files to make room. Keep local sources until acknowledgement and
-retrieve results before expiry. One store is not a backup. Attempt folders and
-local spools remain for inspection, separate from bounded reusable caches.
+Published uploads abandoned before submission are also reclaimed after the same
+retention window (default `168h`), measured from their on-disk mtime using the queue
+clock, and only after the six-hour publication grace. Publishing or successful HEAD
+verification refreshes that mtime. A blob is an orphan only if no job (including
+retained expired records and fan-out results), keyed answer, checkpoint, model,
+extension, environment or pending file-reclamation list references it. Catalog and
+model bytes remain protected. The existing collector incrementally scans published
+blobs within its shared per-tick budget and rechecks custody and mtime before unlink.
+
+Interrupted tus uploads and files outside the published blob namespace remain for
+explicit operator inspection and recovery. Capacity exhaustion still returns HTTP
+507: retention does not evict active data, checkpoints or catalog files to make
+room. Keep local sources until acknowledgement and retrieve results before expiry.
+One store is not a backup. Attempt folders and local spools remain for inspection,
+separate from bounded reusable caches.
 
 The implementation uses Go HTTP range serving, SHA-256 and embedded tusd file
 storage/locking. Local failure tests cover interrupted transfers, offsets, corrupt
