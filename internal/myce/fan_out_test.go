@@ -57,7 +57,7 @@ func TestFanOutWorkerCommandAndArtifactGather(t *testing.T) {
 		t.Fatal("no measured wave")
 	}
 	root, shared, state := t.TempDir(), t.TempDir(), t.TempDir()
-	e := q.s.Extensions[s.Extension]
+	e := registeredExtension(t, q, s.Extension)
 	if err := InstallExtension(root, e); err != nil {
 		t.Fatal(err)
 	}

@@ -26,6 +26,7 @@ import (
 // EnvironmentRecipe is an immutable submission-time snapshot. Only the cache
 // destination is substituted in binary build arguments; no implicit shell.
 type EnvironmentRecipe struct {
+	FilesRef       *FileRef `json:"files_ref,omitempty" yaml:"-"`
 	prepare        func(context.Context, string, io.Writer) error
 	readyOnly      bool
 	Launch         *HostLaunch         `json:"launch,omitempty" yaml:"-"`

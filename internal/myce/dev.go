@@ -90,7 +90,11 @@ func startDev(c DevConfig, configureQueue func(*Queue)) (*Dev, error) {
 	if err := os.MkdirAll(c.Checkpoints, 0700); err != nil {
 		return nil, err
 	}
-	q, err := Open(c.Database, c.Checkpoints, clock)
+	limit := c.FileStoreLimit
+	if limit == 0 {
+		limit = 100 << 30
+	}
+	q, err := Open(c.Database, c.Checkpoints, clock, WithFileStore(c.FileStore, limit, c.FileStore != "" && !c.NASCheckpoints))
 	if err != nil {
 		return nil, err
 	}
@@ -105,16 +109,6 @@ func startDev(c DevConfig, configureQueue func(*Queue)) (*Dev, error) {
 	}
 	if c.FileRetention != 0 {
 		if err = q.ConfigureFileRetention(c.FileRetention); err != nil {
-			q.Close()
-			return nil, err
-		}
-	}
-	if c.FileStore != "" {
-		limit := c.FileStoreLimit
-		if limit == 0 {
-			limit = 100 << 30
-		}
-		if err = q.ConfigureFileStore(c.FileStore, limit, !c.NASCheckpoints); err != nil {
 			q.Close()
 			return nil, err
 		}

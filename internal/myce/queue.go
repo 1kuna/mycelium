@@ -91,6 +91,7 @@ type Queue struct {
 	fileRetention          time.Duration
 	fileCollectionDeferred bool // q.mu; warn once per contiguous deferred streak.
 	files                  *FileStore
+	startupFiles           *fileStoreConfiguration
 	fileCheckpoints        bool
 	submitVerificationSlot chan struct{}
 	nasProbe               checkpointIO[bool]
@@ -139,6 +140,14 @@ func ID() string {
 
 // QueueOption configures a queue before its startup transactions run.
 type QueueOption func(*Queue)
+
+// WithFileStore selects storage before startup migrates embedded bundle bytes.
+// An empty root uses the queue database's .files directory.
+func WithFileStore(root string, limit int64, checkpoints bool) QueueOption {
+	return func(q *Queue) {
+		q.startupFiles = &fileStoreConfiguration{root, limit, checkpoints}
+	}
+}
 
 // WithCheckpointAvailability substitutes an availability probe for synthetic
 // queues. A nil probe retains bounded real checkpoint I/O. The probe must be
@@ -211,6 +220,20 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 	if q.s.MachineConversion != nil && q.s.MachineConversion.PublicationPending {
 		db.Close()
 		return nil, errors.New("machine conversion publication incomplete; keep queue stopped and rerun install queue conversion or rollback")
+	}
+	fileRoot, fileLimit, fileCheckpoints := "", int64(100<<30), false
+	if q.startupFiles != nil {
+		fileRoot, fileLimit, fileCheckpoints = q.startupFiles.root, q.startupFiles.limit, q.startupFiles.checkpoints
+	}
+	if fileRoot == "" {
+		fileRoot = path + ".files"
+	}
+	if err = q.ConfigureFileStore(fileRoot, fileLimit, fileCheckpoints); err == nil {
+		err = q.migrateBundleFiles()
+	}
+	if err != nil {
+		db.Close()
+		return nil, err
 	}
 	q.unreported = map[string]bool{}
 	if len(data) > 0 {
@@ -594,6 +617,9 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		out = cloneJob(j)
 		return nil
 	})
+	if err == nil {
+		err = store.hydrateJob(&out) // Submit holds the publication fence through delivery.
+	}
 	return &out, err
 }
 func (q *Queue) retry(j *Job, why string) {
@@ -1141,6 +1167,9 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 			}
 			j.Checkpoint = relative
 		}
+	}
+	if err == nil {
+		err = q.hydrateReply(&reply)
 	}
 	return attemptReply(c, reply), err
 }

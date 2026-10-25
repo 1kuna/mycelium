@@ -23,7 +23,11 @@ func TestQueueHistoryDoesNotAmplifyControlWrites(t *testing.T) {
 	q.s.Extensions = map[string]Extension{}
 	for i := 0; i < 32; i++ {
 		name := fmt.Sprintf("fixture-%d", i)
-		q.s.Extensions[name] = Extension{Name: name, Files: map[string][]byte{"fixture": make([]byte, 600<<10)}}
+		e := fakeExtension(t)
+		e.Name = name
+		e.Files["fixture"] = make([]byte, 600<<10)
+		e = freezeComposition(t, e)
+		q.s.Extensions[extensionKey(e)] = e
 	}
 	want := q.s.Extensions
 	legacy, err := json.Marshal(q.s)
@@ -38,8 +42,10 @@ func TestQueueHistoryDoesNotAmplifyControlWrites(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(q.s.Extensions, want) {
-		t.Fatal("legacy history changed during upgrade")
+	for key, expected := range want {
+		if !reflect.DeepEqual(registeredExtension(t, q, key), expected) {
+			t.Fatal("legacy history changed during upgrade")
+		}
 	}
 	if err = q.Tick(); err != nil {
 		t.Fatal(err)
@@ -66,7 +72,9 @@ func TestQueueHistoryDoesNotAmplifyControlWrites(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer q.Close()
-	if !reflect.DeepEqual(q.s.Extensions, want) {
-		t.Fatal("retained history lost on restart")
+	for key, expected := range want {
+		if !reflect.DeepEqual(registeredExtension(t, q, key), expected) {
+			t.Fatal("retained history lost on restart")
+		}
 	}
 }

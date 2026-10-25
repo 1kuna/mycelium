@@ -47,7 +47,8 @@ type Extension struct {
 	Baselines         map[string]ExtensionBaseline            `json:"baselines,omitempty" yaml:"baselines,omitempty"`
 	PlatformBaselines map[string]map[string]ExtensionBaseline `json:"platform_baselines,omitempty" yaml:"platform_baselines,omitempty"`
 	Notes             string                                  `json:"notes,omitempty" yaml:"notes,omitempty"`
-	Files             map[string][]byte                       `json:"files" yaml:"-"`
+	Files             map[string][]byte                       `json:"files,omitempty" yaml:"-"`
+	FilesRef          *FileRef                                `json:"files_ref,omitempty" yaml:"-"`
 	Digest            string                                  `json:"digest" yaml:"-"`
 }
 
@@ -293,7 +294,18 @@ func (q *Queue) AddExtension(e Extension) error {
 	if err != nil {
 		return err
 	}
+	q.mu.RLock()
+	store := q.files
+	q.mu.RUnlock()
+	if !q.simulation {
+		if err := store.freezeExtension(&checked); err != nil {
+			return err
+		}
+	}
 	return q.update(func() error {
+		if q.files != store {
+			return ErrStale
+		}
 		if q.s.Extensions == nil {
 			q.s.Extensions = map[string]Extension{}
 		}

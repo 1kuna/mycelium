@@ -324,13 +324,22 @@ func extensionQualificationReason(e Extension, r ExtensionReport, m *Machine) st
 }
 
 func (q *Queue) extensionByDigest(digest string) (Extension, error) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
+	q.fileLifecycle.RLock()
+	defer q.fileLifecycle.RUnlock()
+	q.mu.RLock()
 	for _, e := range q.s.Extensions {
 		if e.Digest == digest {
-			return e, nil
+			store := q.files
+			// Detach maps before hydrating outside the queue mutex.
+			b, _ := json.Marshal(e)
+			var out Extension
+			_ = json.Unmarshal(b, &out)
+			q.mu.RUnlock()
+			err := store.hydrateExtension(&out)
+			return out, err
 		}
 	}
+	q.mu.RUnlock()
 	return Extension{}, fmt.Errorf("extension digest is not registered")
 }
 

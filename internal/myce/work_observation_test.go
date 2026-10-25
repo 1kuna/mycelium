@@ -171,7 +171,7 @@ func TestWorkObservationUnknownAndInvalidation(t *testing.T) {
 	if got := check(t, q, m, nil); got.Job != nil {
 		t.Fatal("changed fingerprint reused qualification", waiting.ID)
 	}
-	e := q.s.Extensions[s.Extension]
+	e := registeredExtension(t, q, s.Extension)
 	changed, err := extensionFromFiles(e.Files)
 	if err != nil {
 		t.Fatal(err)
