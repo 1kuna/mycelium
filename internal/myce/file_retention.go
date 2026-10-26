@@ -386,11 +386,6 @@ func (q *Queue) reclaimPublishedFiles() error {
 				return
 			}
 			q.touchJob(j.ID)
-			if q.records != nil {
-				if key := q.records.bindings[j.ID]; key != "" {
-					q.touchSubmission(key)
-				}
-			}
 			pending := j.FileReclamation.Pending[:0]
 			for _, hash := range j.FileReclamation.Pending {
 				if !gone[hash] {

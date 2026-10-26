@@ -156,7 +156,7 @@ func (q *Queue) preemptObligation(p HostObligation, demand *Job) {
 			delete(q.s.PreparationPlans, l.Attempt)
 			return
 		}
-		if j := q.s.Jobs[l.Demand]; j != nil && l.PriorityStop == nil {
+		if j := q.touchJob(l.Demand); j != nil && l.PriorityStop == nil {
 			if q.preemptionProtected(j.PreemptionCount, l.StartedAt) {
 				return
 			}
@@ -168,7 +168,7 @@ func (q *Queue) preemptObligation(p HostObligation, demand *Job) {
 		q.s.PreparationPlans[l.Attempt] = l
 	default:
 		r := p.Result
-		if j := q.s.Jobs[r.ID]; j != nil && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
+		if j := q.touchJob(r.ID); j != nil && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
 			q.stopBatchFor(j, demand)
 		}
 	}

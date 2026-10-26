@@ -273,7 +273,7 @@ func (q *Queue) fanOutCandidate(j *Job, m *Machine) *Job {
 // Called inside assignment's existing transaction, after the current planner
 // has admitted this wave. No forecast is persisted as a machine reservation.
 func (q *Queue) assignFanOut(selected *Job, m *Machine) *Job {
-	parent := q.s.Jobs[selected.ID]
+	parent := q.touchJob(selected.ID)
 	copy := cloneJob(selected)
 	copy.Spec.FanOut = nil
 	copy.Spec.SubmissionKey = ""

@@ -1243,7 +1243,7 @@ func validGPU(s string) bool {
 	return s == "cuda" || s == "xpu" || s == "metal" || s == "fake" || s == "cpu"
 }
 func (q *Queue) current(r Result) (*Job, error) {
-	j := q.s.Jobs[r.ID]
+	j := q.touchJob(r.ID)
 	if j == nil || j.Attempt != r.Attempt || j.Machine != r.Machine || j.Session != r.Session || (j.State != "running" && j.State != "stopping") {
 		return nil, ErrStale
 	}
@@ -2002,7 +2002,7 @@ type attemptProgress struct {
 // Reuse the same recovery/stop rules for each legacy or keyed report.
 func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progress attemptProgress) AttemptDirective {
 	reply := AttemptDirective{Execution: Execution{ID: report.ID, Attempt: report.Attempt}, Session: report.Session}
-	j := q.s.Jobs[report.ID]
+	j := q.touchJob(report.ID)
 	if j != nil && !terminal(j.State) && !cancelled(j) && (j.State == "queued" || j.Attempt != report.Attempt || j.Machine != m.ID || j.Session != m.Session) {
 		for _, copy := range j.Copies {
 			canRecover := q.machineRecoveryFits(m, j, copy)
@@ -2076,7 +2076,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	// The planner returns a target-specific copy. Persist its exact
 	// reservation on the live attempt before charging any resources.
 	selected := j
-	j = q.s.Jobs[selected.ID]
+	j = q.touchJob(selected.ID)
 	j.Spec.Needs = selected.Spec.Needs
 	j.MemoryEnvelope, j.MemoryFallback = selected.MemoryEnvelope, selected.MemoryFallback
 	if selected.Batch != nil {

@@ -154,6 +154,12 @@ func (q *Queue) touchJob(id string) *Job {
 				old = &v
 			}
 			q.records.jobs[id] = old
+			// Jobs and their retained answers alias the same mutable object.
+			// Journal both before exposing either pointer, even if the operation
+			// aborts before submission maintenance runs.
+			if key := q.records.bindings[id]; key != "" {
+				q.touchSubmission(key)
+			}
 		}
 	}
 	return j
@@ -188,6 +194,9 @@ func (q *Queue) touchSubmission(id string) *submissionRecord {
 				_ = json.Unmarshal(data, &old)
 			}
 			q.records.submissions[id] = old
+			if r != nil && q.s.Jobs[r.JobID] != nil {
+				q.touchJob(r.JobID)
+			}
 		}
 	}
 	return r
@@ -261,13 +270,6 @@ func (q *Queue) rollbackRecords(old []byte) {
 			delete(submissions, id)
 		} else {
 			submissions[id] = r
-		}
-	}
-	// An error may abort before maintainSubmissions journals the keyed answer.
-	// Reconnect those untouched aliases to the restored jobs as well.
-	for id, j := range q.records.jobs {
-		if r := submissions[q.records.bindings[id]]; r != nil && j != nil {
-			r.Job = j
 		}
 	}
 	q.records.jobCount, q.records.submissionCount = len(q.s.Jobs), len(q.s.Submissions)

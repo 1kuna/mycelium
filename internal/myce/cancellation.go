@@ -93,7 +93,7 @@ func (q *Queue) CancelSubmission(project, key string) (Cancellation, error) {
 			out.AcknowledgedAt = &at
 			return nil
 		}
-		j := q.s.Jobs[record.JobID]
+		j := q.touchJob(record.JobID)
 		removed := j == nil
 		if removed {
 			j = record.Job
@@ -112,11 +112,6 @@ func (q *Queue) CancelSubmission(project, key string) (Cancellation, error) {
 // even for failed jobs that an operator loss refund could otherwise requeue.
 func (q *Queue) cancelJob(j *Job) {
 	q.touchJob(j.ID)
-	if q.records != nil {
-		if key := q.records.bindings[j.ID]; key != "" {
-			q.touchSubmission(key)
-		}
-	}
 	for _, child := range q.cancellationMembers(j) {
 		if !cancelled(child) {
 			q.cancelJob(child)
@@ -200,12 +195,6 @@ func (c Client) CancelSubmission(ctx context.Context, project, key string) (Canc
 // cleanup protocol) can mark a copy released. Loss and grace expiry never do.
 func (q *Queue) confirmCopyRelease(r Result) {
 	j := q.retainedJob(r.ID)
-	q.touchJob(r.ID)
-	if q.records != nil {
-		if key := q.records.bindings[r.ID]; key != "" {
-			q.touchSubmission(key)
-		}
-	}
 	if j == nil {
 		return
 	}
@@ -284,12 +273,14 @@ func (q *Queue) confirmPreviousCopies(c Checkin) {
 }
 
 func (q *Queue) retainedJob(id string) *Job {
-	if j := q.s.Jobs[id]; j != nil {
+	if j := q.touchJob(id); j != nil {
 		return j
 	}
 	if q.records != nil && q.records.updating {
-		if r := q.s.Submissions[q.records.bindings[id]]; r != nil {
-			return r.Job
+		if key := q.records.bindings[id]; key != "" {
+			if r := q.touchSubmission(key); r != nil {
+				return r.Job
+			}
 		}
 	} else {
 		for _, record := range q.s.Submissions {

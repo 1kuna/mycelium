@@ -78,6 +78,9 @@ func (q *Queue) maintainSubmissions() {
 	for id := range q.records.jobs {
 		if digest := q.records.bindings[id]; digest != "" {
 			record := q.touchSubmission(digest)
+			if record == nil || record.Kind != submissionBinding {
+				continue
+			}
 			if j := q.s.Jobs[id]; j != nil {
 				record.Job = j
 				record.RemovedAt = nil

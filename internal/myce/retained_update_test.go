@@ -101,3 +101,17 @@ func TestRetainedOperatorRefundRollsBackOnWriteFailure(t *testing.T) {
 		t.Fatal("failed write retained an operator refund or changed its keyed answer")
 	}
 }
+
+// An unowned release acknowledgement must not create a retained answer or
+// prevent the queue from reopening.
+func TestRetainedUnknownReleaseSurvivesRestart(t *testing.T) {
+	q, c := fixture(t)
+	r := Result{Execution: Execution{ID: "missing", Attempt: 1}, Machine: "missing", Session: "missing", ReleaseOnly: true}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	q = reopenCancellationQueue(t, q, c)
+	if len(q.s.Jobs) != 0 || len(q.s.Submissions) != 0 {
+		t.Fatal("unowned release acknowledgement created a job or submission answer")
+	}
+}
