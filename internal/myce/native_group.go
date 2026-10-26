@@ -745,9 +745,10 @@ func (g *nativeGroup) run(j Job, base map[string]string, mainEnvironment string,
 		replace := replacer()
 		memberEnv := maps.Clone(env)
 		// Helpers inherit main's environment, but not main's authored env variables.
+		base := jobBaseEnvironment()
 		for k := range j.Spec.Run.Env {
 			delete(memberEnv, k)
-			if value, ok := os.LookupEnv(k); ok {
+			if value, ok := base[k]; ok {
 				memberEnv[k] = value
 			}
 		}

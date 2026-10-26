@@ -373,9 +373,12 @@ chmod +x "$MYCE_EXTENSION_CACHE/bin/extension-test-runtime"
 
 func TestExtensionSetupAndCheckFailuresClearQualification(t *testing.T) {
 	e := fakeExtension(t)
-	e.Files["check.sh"] = append([]byte("test -z \"$FAIL_CHECK\" || exit 1\n"), e.Files["check.sh"]...)
+	// Commands do not inherit test variables (#219); failures are marker files.
+	markers := t.TempDir()
+	failCheck, failSetup := filepath.Join(markers, "fail-check"), filepath.Join(markers, "fail-setup")
+	e.Files["check.sh"] = append([]byte("test ! -e '"+failCheck+"' || exit 1\n"), e.Files["check.sh"]...)
 	e.Setup = []string{"sh", "setup.sh"}
-	e.Files["setup.sh"] = []byte("test -z \"$FAIL_SETUP\"\n")
+	e.Files["setup.sh"] = []byte("test ! -e '" + failSetup + "'\n")
 	e.Files["extension.yaml"], _ = yaml.Marshal(e)
 	var err error
 	e, err = extensionFromFiles(e.Files)
@@ -384,16 +387,22 @@ func TestExtensionSetupAndCheckFailuresClearQualification(t *testing.T) {
 	}
 	root := t.TempDir()
 	installQualified(t, root, e, "")
-	t.Setenv("FAIL_CHECK", "1")
+	if err := os.WriteFile(failCheck, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
 	reports, err := PrepareExtension(context.Background(), root, e, "fake", "", true, io.Discard)
 	if err == nil || reports[0].Qualified || reports[0].Reason != "check command failed" {
 		t.Fatal(reports, err)
 	}
-	t.Setenv("FAIL_CHECK", "")
+	if err := os.Remove(failCheck); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := PrepareExtension(context.Background(), root, e, "fake", "", true, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("FAIL_SETUP", "1")
+	if err := os.WriteFile(failSetup, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
 	reports, err = PrepareExtension(context.Background(), root, e, "fake", "", false, io.Discard)
 	if err == nil || reports[0].Setup || reports[0].Qualified || reports[0].Reason != "setup failed" {
 		t.Fatal(reports, err)

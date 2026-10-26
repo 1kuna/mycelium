@@ -31,7 +31,7 @@ install)
  manifest=
  for arg in "$@"; do manifest="$arg"; done
  test "$(cat "$(dirname "$manifest")/pixi.lock")" != broken || { echo 'lock inconsistent with manifest' >&2; exit 9; }
- printf 'install\n' >> "$MYCE_TEST_PIXI_BUILDS"
+ printf 'install\n' >> "__DIR__/builds"
  prefix="$PWD/.pixi/envs/default"
  mkdir -p "$prefix/bin"
  printf '#!/bin/sh\nprintf "activated:%%s\\n" "$PIXI_ACTIVE"\n' > "$prefix/bin/tool"
@@ -40,21 +40,22 @@ install)
  ;;
 shell-hook)
  echo 'WARN deprecated manifest header' >&2
- test "${MYCE_TEST_PIXI_HOOK:-}" != invalid || { echo 'not JSON'; exit 0; }
+ hook=$(cat "__DIR__/hook" 2>/dev/null || true)
+ test "$hook" != invalid || { echo 'not JSON'; exit 0; }
  prefix="$PWD/.pixi/envs/default"
  printf '{"environment_variables":{"PATH":"%s/bin:/usr/bin:/bin","CONDA_PREFIX":"%s","PIXI_ACTIVE":"yes","MYCE_TOKEN":"forbidden","CUDA_VISIBLE_DEVICES":"wrong"},"activation_scripts":[]}' "$prefix" "$prefix"
- test "${MYCE_TEST_PIXI_HOOK:-}" != failure || exit 7
+ test "$hook" != failure || exit 7
  ;;
 *) exit 88 ;;
 esac
 `
+	// Jobs and builds do not inherit test variables (#219); markers are files.
+	script = strings.ReplaceAll(script, "__DIR__", dir)
 	if err := os.WriteFile(filepath.Join(dir, "pixi"), []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	builds := filepath.Join(dir, "builds")
-	t.Setenv("MYCE_TEST_PIXI_BUILDS", builds)
-	return builds
+	return filepath.Join(dir, "builds")
 }
 func pixiRecipe(t *testing.T, lock string) EnvironmentRecipe {
 	t.Helper()
@@ -157,8 +158,10 @@ func TestPixiEnvironmentBrokenLockAndPartialRecovery(t *testing.T) {
 func TestPixiEnvironmentActivationDiagnostics(t *testing.T) {
 	for _, mode := range []string{"warning", "invalid", "failure"} {
 		t.Run(mode, func(t *testing.T) {
-			fakePixi(t)
-			t.Setenv("MYCE_TEST_PIXI_HOOK", mode)
+			builds := fakePixi(t)
+			if err := os.WriteFile(filepath.Join(filepath.Dir(builds), "hook"), []byte(mode), 0600); err != nil {
+				t.Fatal(err)
+			}
 			r := pixiRecipe(t, "locked")
 			c := &EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20}
 			_, release, err := c.Acquire(context.Background(), r)

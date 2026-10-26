@@ -851,12 +851,9 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) erro
 	}
 	defer func() { _ = output.Sync(); _ = output.Close() }()
 	start := c.Clock.Now()
-	env := []string{}
-	for _, v := range os.Environ() {
-		if !strings.HasPrefix(v, "MYCE_TOKEN=") && !strings.HasPrefix(v, "PIXI_") && !strings.HasPrefix(v, "UV_CACHE_DIR=") && !strings.HasPrefix(v, "UV_PYTHON_INSTALL_DIR=") && !strings.HasPrefix(v, "UV_PROJECT_ENVIRONMENT=") && !strings.HasPrefix(v, "UV_HTTP_TIMEOUT=") && !strings.HasPrefix(v, "UV_HTTP_RETRIES=") && !strings.HasPrefix(v, "UV_NO_PROGRESS=") {
-			env = append(env, v)
-		}
-	}
+	// Package installers also honor the operator's safe uv settings, such as the
+	// documented UV_LINK_MODE, but never uv credentials (buildUVVariables).
+	env := environmentList(buildEnvironmentFrom(os.Environ()))
 	env = append(env, "PIXI_CACHE_DIR="+c.downloadCache("pixi"), "PIXI_NO_PROGRESS=true", "UV_CACHE_DIR="+c.downloadCache("uv"), "UV_HTTP_TIMEOUT=60", "UV_HTTP_RETRIES=3", "UV_PYTHON_INSTALL_DIR="+filepath.Join(partial, "python"), "UV_PROJECT_ENVIRONMENT="+filepath.Join(partial, "venv"))
 	run := c.Run
 	if run == nil {

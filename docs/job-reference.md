@@ -85,6 +85,33 @@ The worker also sets `MYCE_PROCESS_ID` for process ownership. It removes
 `MYCE_TOKEN`, even if supplied in `run.env`. These are plain processes with the
 worker user's permissions, not a sandbox.
 
+A job does not inherit the worker's whole environment. It starts from `PATH`,
+`HOME`, `USER`, `LOGNAME`, `LANG`, `LC_*`, `TZ`, `TMPDIR` and the GPU runtime
+controls the installer saves for the service (`LD_LIBRARY_PATH`, `CUDA_*`,
+`ZE_*`, `ONEAPI_*`, `SYCL_*`), and the proxy and CA settings `HTTPS_PROXY`,
+`HTTP_PROXY`, `NO_PROXY`, `ALL_PROXY` (and their lowercase forms),
+`SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE` and
+`NODE_EXTRA_CA_CERTS`. A proxy URL that contains `user:password@` is dropped
+and the worker logs the variable name once, without its value. Mycelium then
+adds `run.env`, environment activation, device and placement selectors and the
+`MYCE_*` attempt variables. Session variables such as `SSH_AUTH_SOCK`,
+`DISPLAY`, `DBUS_*` and `XDG_RUNTIME_DIR`, and the worker's own `MYCE_QUEUE` and
+`MYCE_JOINING_FILE`, are dropped; pass anything else a job needs, including an
+authenticated proxy, through `run.env`. The same base applies to native
+helpers, extension setup/check/run, environment builds and model servers.
+Managed Docker containers receive only explicit `--env` values.
+
+Environment builds also keep these operator uv settings: `UV_LINK_MODE`,
+`UV_CONCURRENT_BUILDS`, `UV_CONCURRENT_DOWNLOADS`, `UV_CONCURRENT_INSTALLS`,
+`UV_CONCURRENT_CACHE_READS`, `UV_COMPILE_BYTECODE`, `UV_NATIVE_TLS`,
+`UV_SYSTEM_CERTS`, `UV_INDEX_STRATEGY`, `UV_INDEX`, `UV_DEFAULT_INDEX`,
+`UV_INDEX_URL`, `UV_EXTRA_INDEX_URL`, `UV_FIND_LINKS`,
+`UV_PYTHON_INSTALL_MIRROR` and `UV_TORCH_BACKEND`. An index, find-links or
+mirror URL that contains `user:password@` is dropped. uv credentials
+(`UV_INDEX_*_USERNAME`, `UV_INDEX_*_PASSWORD`, `UV_PUBLISH_*`,
+`UV_KEYRING_PROVIDER`, `UV_GITHUB_TOKEN`) are never forwarded, because recipe
+build code is arbitrary.
+
 ## CPU example
 
 ```yaml
