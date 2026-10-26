@@ -357,7 +357,9 @@ func (q *Queue) Run(ctx context.Context) error {
 type Client struct {
 	URL   string
 	Token string
-	HTTP  *http.Client
+	HTTP  *http.Client // Its Timeout bounds API calls; file transfers use progress budgets.
+	// Tests shorten the file transfer budgets; zero uses the defaults.
+	transferIdle time.Duration
 }
 
 func (c Client) Call(ctx context.Context, method, path string, in, out any) error {
