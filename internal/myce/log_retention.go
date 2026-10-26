@@ -3,6 +3,7 @@ package myce
 import (
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -132,22 +133,38 @@ func pruneWorkerLogs(dir, pending string, now time.Time, age time.Duration) erro
 	return nil
 }
 
+// AttemptFilesGrace keeps an unclaimed attempt folder for diagnosis; failed
+// runs' work files are never uploaded. It matches stopped-container retention.
+const AttemptFilesGrace = 24 * time.Hour
+
+// unclaimedMarker records, by its modification time, when retention first saw
+// an attempt folder without custody.
+const unclaimedMarker = ".myce-unclaimed"
+
 // workerRetention is one pass of the worker's periodic local retention.
 func workerRetention(dir string, now time.Time, logAge time.Duration) error {
-	return errors.Join(pruneWorkerLogs(dir, "", now, logAge), pruneAttemptFiles(dir))
+	return errors.Join(pruneWorkerLogs(dir, "", now, logAge), pruneAttemptFiles(dir, now))
 }
 
 // pruneAttemptFiles removes job-files attempt folders that no saved attempt
-// custody claims (#201). Custody clears only after the queue accepts the
-// result, and a crash leaves orphans without custody. Folders are listed
-// before custody is read, and custody is saved before a folder is created, so
-// a listed folder without custody can never belong to a starting attempt.
-func pruneAttemptFiles(dir string) error {
+// custody claims (#201) once AttemptFilesGrace has passed since retention first
+// saw them unclaimed. Custody clears only after the queue accepts the result,
+// and a crash leaves orphans without custody. Folders are listed before custody
+// is read, and custody is saved before a folder is created, so a listed folder
+// without custody can never belong to a starting attempt.
+func pruneAttemptFiles(dir string, now time.Time) error {
 	root := filepath.Join(dir, "job-files")
-	jobs, err := os.ReadDir(root)
+	info, err := os.Lstat(root)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("attempt files: %s is not a real directory; refusing to clean it", root)
+	}
+	jobs, err := os.ReadDir(root)
 	if err != nil {
 		return err
 	}
@@ -160,11 +177,9 @@ func pruneAttemptFiles(dir string) error {
 		if err != nil {
 			return err
 		}
+		listed[job.Name()] = []string{}
 		for _, e := range entries {
 			listed[job.Name()] = append(listed[job.Name()], e.Name())
-		}
-		if len(entries) == 0 {
-			listed[job.Name()] = nil
 		}
 	}
 	custody := map[string]map[string]bool{}
@@ -192,18 +207,58 @@ func pruneAttemptFiles(dir string) error {
 		}
 	}
 	var result error
-	for job, names := range listed {
+	for _, job := range jobs {
+		names, ok := listed[job.Name()]
+		if !ok {
+			continue
+		}
 		for _, name := range names {
 			// Staging folders of a held job may belong to its current attempt.
-			if custody[job][name] || custody[job] != nil && strings.HasPrefix(name, ".") {
+			if custody[job.Name()][name] || custody[job.Name()] != nil && strings.HasPrefix(name, ".") {
 				continue
 			}
-			result = errors.Join(result, os.RemoveAll(filepath.Join(root, job, name)))
+			path := filepath.Join(root, job.Name(), name)
+			if expired, err := attemptFilesExpired(path, now); !expired {
+				result = errors.Join(result, err)
+				continue
+			}
+			// A failed removal usually takes the marker with it, so the
+			// folder gets a fresh grace and its error repeats daily, not per pass.
+			result = errors.Join(result, os.RemoveAll(path))
 		}
-		if custody[job] == nil {
+		if custody[job.Name()] == nil {
 			// Only an empty folder goes; a new attempt may have just created one.
-			_ = os.Remove(filepath.Join(root, job))
+			_ = os.Remove(filepath.Join(root, job.Name()))
 		}
 	}
 	return result
+}
+
+// attemptFilesExpired reports whether an unclaimed attempt folder has been
+// unclaimed, or unmodified for non-folders, for AttemptFilesGrace. The first
+// sighting of a folder writes its marker.
+func attemptFilesExpired(path string, now time.Time) (bool, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return false, err
+	}
+	if !info.IsDir() {
+		return !info.ModTime().After(now.Add(-AttemptFilesGrace)), nil
+	}
+	marker := filepath.Join(path, unclaimedMarker)
+	if info, err = os.Lstat(marker); err == nil {
+		return !info.ModTime().After(now.Add(-AttemptFilesGrace)), nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	// O_EXCL never follows a planted link.
+	f, err := os.OpenFile(marker, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	if err != nil {
+		return false, err
+	}
+	if err = f.Close(); err != nil {
+		return false, err
+	}
+	return false, os.Chtimes(marker, now, now)
 }

@@ -977,12 +977,17 @@ func (w Worker) Run(stop context.Context) error {
 	retentionDone := make(chan struct{})
 	go func() {
 		defer close(retentionDone)
+		var lastRetentionErr string
 		for {
 			select {
 			case <-retentionCtx.Done():
 				return
 			case request := <-retentionRequests:
-				if e := workerRetention(s.dir, request.now, w.LogRetention); e != nil {
+				// Repeat a persistent error only when it changes, not every minute.
+				if e := workerRetention(s.dir, request.now, w.LogRetention); e == nil {
+					lastRetentionErr = ""
+				} else if e.Error() != lastRetentionErr {
+					lastRetentionErr = e.Error()
 					log.Printf("worker retention: %v", e)
 				}
 				if w.DockerEndpoint == "" {

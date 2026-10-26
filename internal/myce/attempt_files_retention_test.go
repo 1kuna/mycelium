@@ -33,17 +33,39 @@ func TestWorkerRetentionRemovesUnclaimedAttemptFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := workerRetention(dir, clock.Now(), DefaultLogRetention); err != nil {
-		t.Fatal(err)
+	pass := func() {
+		t.Helper()
+		if err := workerRetention(dir, clock.Now(), DefaultLogRetention); err != nil {
+			t.Fatal(err)
+		}
 	}
+	exists := func(name string) bool {
+		_, err := os.Stat(filepath.Join(dir, "job-files", name))
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			t.Fatal(err)
+		}
+		return err == nil
+	}
+
+	// Unclaimed folders keep failed runs' files for diagnosis for a day.
+	pass()
+	clock.Advance(23 * time.Hour)
+	pass()
+	for _, name := range []string{"accepted/1/.venv", "crashed/2/.venv", "live/2/.venv", "orphan/.inputs-2/.venv"} {
+		if !exists(name) {
+			t.Fatalf("unclaimed attempt files %s removed inside the grace", name)
+		}
+	}
+	clock.Advance(time.Hour)
+	pass()
 	for _, gone := range []string{"accepted", "crashed", "live/2", "orphan"} {
-		if _, err := os.Stat(filepath.Join(dir, "job-files", gone)); !errors.Is(err, os.ErrNotExist) {
-			t.Fatalf("unclaimed attempt files %s retained: %v", gone, err)
+		if exists(gone) {
+			t.Fatalf("unclaimed attempt files %s retained after the grace", gone)
 		}
 	}
 	for _, kept := range []string{"live/3/.venv", "live/.inputs-1"} {
-		if _, err := os.Stat(filepath.Join(dir, "job-files", kept)); err != nil {
-			t.Fatalf("held attempt files %s removed: %v", kept, err)
+		if !exists(kept) {
+			t.Fatalf("held attempt files %s removed", kept)
 		}
 	}
 	if _, err := os.Stat(finished); err != nil {
@@ -52,13 +74,74 @@ func TestWorkerRetentionRemovesUnclaimedAttemptFiles(t *testing.T) {
 
 	// Custody, not age, protects attempt files; logs keep their own window.
 	clock.Advance(8 * 24 * time.Hour)
-	if err := workerRetention(dir, clock.Now(), DefaultLogRetention); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(dir, "job-files", "live", "3", ".venv")); err != nil {
+	pass()
+	if !exists("live/3/.venv") {
 		t.Fatal("long-running held attempt lost its files")
 	}
 	if _, err := os.Stat(finished); !errors.Is(err, os.ErrNotExist) {
 		t.Fatal("expired log retained")
+	}
+}
+
+func TestAttemptFilesRetentionRefusesLinkedRoot(t *testing.T) {
+	dir, target := t.TempDir(), t.TempDir()
+	victim := filepath.Join(target, "job", "1")
+	if err := os.MkdirAll(victim, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, "job-files")); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)
+	for _, at := range []time.Time{now, now.Add(48 * time.Hour)} {
+		if err := pruneAttemptFiles(dir, at); err == nil {
+			t.Fatal("linked job-files root accepted")
+		}
+	}
+	entries, err := os.ReadDir(victim)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("link target touched: %v %v", entries, err)
+	}
+}
+
+// Root-owned Docker output cannot be removed; it must not stop other cleanup
+// or report the same failure every minute.
+func TestAttemptFilesRetentionRetriesStuckFolderDaily(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root can remove read-only folders")
+	}
+	dir := t.TempDir()
+	stuck := filepath.Join(dir, "job-files", "stuck", "1", "out")
+	if err := os.MkdirAll(stuck, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stuck, "root-owned"), nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(stuck, 0500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(stuck, 0700) })
+	if err := os.MkdirAll(filepath.Join(dir, "job-files", "done", "1"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)
+	if err := pruneAttemptFiles(dir, now); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(AttemptFilesGrace)
+	if err := pruneAttemptFiles(dir, now); err == nil {
+		t.Fatal("stuck removal not reported")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "job-files", "done")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("stuck folder blocked other cleanup")
+	}
+	now = now.Add(time.Minute)
+	if err := pruneAttemptFiles(dir, now); err != nil {
+		t.Fatalf("stuck folder reported again a minute later: %v", err)
+	}
+	now = now.Add(AttemptFilesGrace)
+	if err := pruneAttemptFiles(dir, now); err == nil {
+		t.Fatal("stuck folder not retried after a day")
 	}
 }
