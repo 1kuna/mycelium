@@ -152,6 +152,13 @@ func profileMemoryWork(s Spec) bool {
 
 func profileMemoryIdentity(j *Job) string {
 	s := j.Spec
+	if s.ProfileMemory != "" {
+		return "profile:" + identityHash(struct {
+			Project, Name, Configuration, Profile string
+			Environment                           Environment
+			Recipes                               map[string]EnvironmentRecipe
+		}{s.Project, s.Name, memoryConfiguration(s.Needs, s.Args, s.Program), s.ProfileMemory, s.Environment, j.EnvironmentRecipes})
+	}
 	inputs := FileManifest{}
 	for name, ref := range s.Files {
 		if name != ".myce-source.tar" {
