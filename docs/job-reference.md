@@ -91,7 +91,7 @@ controls the installer saves for the service (`LD_LIBRARY_PATH`, `CUDA_*`,
 `ZE_*`, `ONEAPI_*`, `SYCL_*`), and the proxy and CA settings `HTTPS_PROXY`,
 `HTTP_PROXY`, `NO_PROXY`, `ALL_PROXY` (and their lowercase forms),
 `SSL_CERT_FILE`, `SSL_CERT_DIR`, `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE` and
-`NODE_EXTRA_CA_CERTS`. A proxy URL that contains `user:password@` is dropped
+`NODE_EXTRA_CA_CERTS`. Any proxy or CA setting whose value contains `@` is dropped
 and the worker logs the variable name once, without its value. Mycelium then
 adds `run.env`, environment activation, device and placement selectors and the
 `MYCE_*` attempt variables. Session variables such as `SSH_AUTH_SOCK`,
@@ -107,7 +107,7 @@ Environment builds also keep these operator uv settings: `UV_LINK_MODE`,
 `UV_SYSTEM_CERTS`, `UV_INDEX_STRATEGY`, `UV_INDEX`, `UV_DEFAULT_INDEX`,
 `UV_INDEX_URL`, `UV_EXTRA_INDEX_URL`, `UV_FIND_LINKS`,
 `UV_PYTHON_INSTALL_MIRROR` and `UV_TORCH_BACKEND`. An index, find-links or
-mirror URL that contains `user:password@` is dropped. uv credentials
+mirror setting whose value contains any `@` is dropped. uv credentials
 (`UV_INDEX_*_USERNAME`, `UV_INDEX_*_PASSWORD`, `UV_PUBLISH_*`,
 `UV_KEYRING_PROVIDER`, `UV_GITHUB_TOKEN`) are never forwarded, because recipe
 build code is arbitrary.
