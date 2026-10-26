@@ -242,3 +242,55 @@ func TestStatusViewDisabledAndResourceConstraints(t *testing.T) {
 		})
 	}
 }
+
+func TestStatusViewFloorFreeAutoMemory(t *testing.T) {
+	q, clock, m, s := floorFreeFitFixture(t, 0)
+	m.CapabilityProfile.Availability = &Availability{Mode: "daily", Reason: "on battery", CheckedAt: clock.Now()}
+	machineCheck(t, q, m)
+	j := submit(t, q, s)
+	// The status fit must identify an otherwise fitting, unavailable host.
+	body := statusViewResponse(t, q, "/api/status")
+	if !strings.Contains(body, "hypha on battery") {
+		t.Errorf("availability hidden: %s", body)
+	}
+	clock.Advance(time.Second)
+	q, clock, m, s = floorFreeFitFixture(t, 0)
+	j = submit(t, q, s)
+	clock.Advance(time.Second)
+	// Exercise the generic no-fit diagnostic with insufficient live host RAM.
+	target := q.s.Machines[m.ID]
+	target.FreeHostMemoryGB = 1
+	probe := *q.s.Jobs[j.ID]
+	probe.Reason = "no machine in the fleet can run this right now"
+	body = q.statusWaitingReason(&probe)
+	if !strings.Contains(body, "needs 3.8 GiB free accelerator memory and 2.5 GiB host RAM") || strings.Contains(body, "needs 0.0 GiB") {
+		t.Errorf("sized need missing: %s", body)
+	}
+	stored := q.s.Jobs[j.ID]
+	if stored.MemoryEnvelope != nil || stored.Spec.Needs.MemoryGB != 0 || stored.Spec.Needs.HostMemoryGB != 0 {
+		t.Fatal("status resized the stored job")
+	}
+}
+
+func TestStatusViewFloorFreeAutoMemoryWithoutHypha(t *testing.T) {
+	for _, scenario := range []string{"empty fleet", "project excludes fleet", "auto variant"} {
+		t.Run(scenario, func(t *testing.T) {
+			q, _, _, s := floorFreeFitFixture(t, 0)
+			s.Needs.Memory = "auto"
+			j := &Job{Spec: s, State: "queued", Reason: "no machine in the fleet can run this right now"}
+			if scenario == "project excludes fleet" {
+				q.s.Policies = map[string]ProjectPolicy{s.Project: {Weight: 1, AllowedMachines: []string{"other-host"}}}
+			} else {
+				clear(q.s.Machines)
+			}
+			if scenario == "auto variant" {
+				j.Spec.Needs.Memory = ""
+				j.Extensions = []Extension{{Variants: []ExtensionVariant{{Needs: ResourceNeeds{Memory: "auto"}}}}}
+			}
+			reason := q.statusWaitingReason(j)
+			if !strings.Contains(reason, "memory is sized per hypha") || !strings.Contains(reason, "hypha is available to size it against") || strings.Contains(reason, "0.0 GiB") {
+				t.Fatalf("misleading unsized memory: %s", reason)
+			}
+		})
+	}
+}

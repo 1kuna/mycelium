@@ -828,3 +828,52 @@ func envelopeCeilingPeak(t *testing.T, capGB float64) *AttemptMemoryPeak {
 	}
 	return peak
 }
+
+// A qualified floor-free variant with an accepted peak on the fake clock.
+func floorFreeFitFixture(t *testing.T, allowance float64) (*Queue, *fakeClock, Machine, Spec) {
+	t.Helper()
+	q, clock := fixture(t)
+	e := compositionExtension(t, false)
+	e.Kinds = nil
+	v := &e.Variants[0]
+	v.Target = ExecutionTarget{OS: "linux", Arch: "amd64", Platform: "fake"}
+	v.Needs = ResourceNeeds{CPUCores: 1, Memory: "auto"}
+	delete(v.Baselines, "kind:sample")
+	v.References = map[string]WorkReference{"extension:sample": {InputShape: "small-v1", Unit: "records", Units: 10}}
+	e = freezeComposition(t, e)
+	if err := q.AddExtension(e); err != nil {
+		t.Fatal(err)
+	}
+	m := cpuMachine("sized", "sized-host", "fake", 8, 64)
+	m.TotalMemoryGB = 8
+	m.ExtensionFingerprint = "synthetic-fit-v1"
+	m.MemoryEnforcement = "memory ceilings enforced (cgroup v2)"
+	m.HostMemoryBudgetGB = allowance
+	if allowance > 0 {
+		m.MemoryEnforcement = ""
+	}
+	m.Devices = []MachineDevice{{ID: "0", Platform: "fake", Identity: "synthetic-card", Fingerprint: "synthetic-card-v1", ExtensionFingerprint: m.ExtensionFingerprint, Selector: "0", MemoryMode: "fixed", MemoryMeasured: true, TotalMemoryGB: 8, BudgetGB: 8, FreeMemoryGB: 8}}
+	target := m.Devices[0].machine(m)
+	r := newExtensionReport(e, &target, "extension:sample")
+	r.Setup, r.Qualified, r.CheckID = true, true, "synthetic-check"
+	m.Devices[0].ExtensionReports = []ExtensionReport{r}
+	machineCheck(t, q, m)
+	s := Spec{Name: "floor-free", Project: "synthetic", Priority: "experiment", Extension: extensionKey(e), Workload: &Workload{InputShape: "small-v1", Units: 10}}
+	probe := &Job{State: "queued", Spec: s, Extensions: []Extension{e}, Machine: m.ID, Session: m.Session, AllocatedDevices: []string{"0"}}
+	target = m.Devices[0].machine(*q.s.Machines[m.ID])
+	candidates := extensionJobs(probe, &target, true)
+	if len(candidates) != 1 {
+		t.Fatal("synthetic variant must qualify")
+	}
+	probe = candidates[0]
+	key, why := q.workObservationKey(probe)
+	if key == nil {
+		t.Fatal(why)
+	}
+	host, device := 2.0, 3.0
+	q.s.WorkObservations = map[string]WorkObservation{identityHash(key): {
+		Key: *key, Source: "accepted work", Samples: 1, RecordedAt: clock.Now(), MemoryRecordedAt: clock.Now(), MemoryLayout: "separate",
+		MemoryConfiguration: memoryConfiguration(probe.Spec.Needs, probe.Spec.Args, probe.Spec.Program), MemoryPeak: &AttemptMemoryPeak{HostGB: &host, DeviceGB: &device},
+	}}
+	return q, clock, m, s
+}

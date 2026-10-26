@@ -1070,3 +1070,55 @@ func TestProductionDemandPreservesModelIdleUnload(t *testing.T) {
 		t.Fatal("engine idle unload deadline lost", slot.State)
 	}
 }
+
+func TestProductionHoldFloorFreeAutoMemory(t *testing.T) {
+	for _, mode := range []string{"enforced learned", "allowance exploratory", "unmeasured decoy"} {
+		t.Run(mode, func(t *testing.T) {
+			allowance := 0.0
+			if mode == "allowance exploratory" {
+				allowance = 16
+			}
+			q, clock, m, s := floorFreeFitFixture(t, allowance)
+			policies := map[string]HostPolicy{hostID(&m): {ProductionHold: true}}
+			if mode == "allowance exploratory" {
+				q.s.WorkObservations = nil
+			}
+			if mode == "unmeasured decoy" {
+				decoy := m
+				decoy.ID, decoy.HostID, decoy.Session = "a-decoy", "a-decoy-host", "decoy-session"
+				decoy.MemoryEnforcement = ""
+				decoy.Devices = append([]MachineDevice(nil), m.Devices...)
+				report := decoy.Devices[0].ExtensionReports[0]
+				report.Host = hostID(&decoy)
+				decoy.Devices[0].ExtensionReports = []ExtensionReport{report}
+				decoy.HostMemoryMeasured, decoy.HostAvailableMemoryGB = false, 0
+				machineCheck(t, q, decoy)
+				policies[hostID(&decoy)] = HostPolicy{ProductionHold: true}
+			}
+			if err := q.ConfigureHosts(policies); err != nil {
+				t.Fatal(err)
+			}
+			s.Priority = "production"
+			j := submit(t, q, s)
+			stored := q.s.Jobs[j.ID]
+			if stored.ProductionHost != hostID(&m) || !q.held(hostID(&m)) {
+				t.Errorf("auto hold bound to %q; want %q active", stored.ProductionHost, hostID(&m))
+			}
+			// A numeric declaration of the same sized work chooses the same host.
+			target := m.Devices[0].machine(*q.s.Machines[m.ID])
+			candidate := q.memoryCandidates(stored, &target)[0]
+			numeric := *candidate
+			numeric.Spec.Extension, numeric.Spec.ExtensionDigest, numeric.Extensions, numeric.MemoryEnvelope = "", "", nil, nil
+			numeric.Spec.Needs.Memory = ""
+			numeric.ProductionHost = ""
+			if target := q.productionTarget(&numeric, nil); target != hostID(&m) {
+				t.Errorf("numeric target %q envelope=%+v", target, candidate.MemoryEnvelope)
+			}
+			clock.Advance(time.Second)
+			run := assignedJob(machineCheck(t, q, m))
+			if run == nil || run.ID != j.ID || run.ProductionHost != hostID(&m) || run.Spec.Needs.HostMemoryGB <= 0 {
+				t.Fatalf("wrong pinned dispatch: %+v", run)
+			}
+		})
+	}
+}

@@ -681,3 +681,29 @@ func TestEnvironmentAdmissionCountsHardlinksOnce(t *testing.T) {
 		t.Fatal("evicting a link credited the shared wheel as freed")
 	}
 }
+
+func TestEnvironmentFailedBuildFloorFreeAutoMemory(t *testing.T) {
+	q, clock := fixture(t)
+	r := binaryRecipe(t, "fake")
+	if err := q.ConfigureEnvironments(EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"broken": {"fake": r}}}); err != nil {
+		t.Fatal(err)
+	}
+	s := spec("experiment")
+	s.Environment.Name = "broken"
+	s.Needs.Memory, s.Needs.MemoryGB = "auto", 0
+	j := submit(t, q, s)
+	clock.Advance(time.Second)
+	m := cpuMachine("builder", "builder-host", "fake", 8, 64)
+	m.TotalMemoryGB = 8
+	m.MemoryEnforcement = "memory ceilings enforced (cgroup v2)"
+	m.EnvironmentBuilder = true
+	m.EnvironmentReports = []EnvironmentReport{{Key: r.Key, State: "failed", Error: "build exit 9", Log: "compiler output\n"}}
+	check(t, q, m, nil)
+	if got := job(t, q, j.ID); got.State != "failed" || !strings.Contains(got.Reason, "build exit 9") {
+		t.Errorf("failed environment was hidden: state=%s reason=%s", got.State, got.Reason)
+	}
+	logs, err := q.Logs(j.ID, 0)
+	if err != nil || len(logs) != 1 || !strings.Contains(logs[0].Text, "compiler output") {
+		t.Fatalf("build log not surfaced: %v %v", logs, err)
+	}
+}
