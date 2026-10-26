@@ -8,12 +8,28 @@ import (
 
 // Nil counters mean unavailable. HostGB samples anon + kernel + shmem, excluding
 // reclaimable file cache. CgroupGB retains the kernel's total high-water mark.
+// Without cgroup accounting (macOS), HostGB is the sampled process-group RSS
+// and Source names that unenforced measurement.
 type AttemptMemoryPeak struct {
-	HostGB      *float64 `json:"host_gb,omitempty"`
-	CgroupGB    *float64 `json:"cgroup_gb,omitempty"`
-	DeviceGB    *float64 `json:"device_gb,omitempty"`
-	Constrained bool     `json:"constrained,omitempty"`
+	HostGB      *float64           `json:"host_gb,omitempty"`
+	CgroupGB    *float64           `json:"cgroup_gb,omitempty"`
+	DeviceGB    *float64           `json:"device_gb,omitempty"`
+	Source      string             `json:"source,omitempty"`
+	Events      *MemoryEventCounts `json:"events,omitempty"`
+	Constrained bool               `json:"constrained,omitempty"`
 }
+
+// Attempt-parent memory.events counters. Nil on the peak means they were not
+// read; zero is a read count.
+type MemoryEventCounts struct {
+	High         uint64 `json:"high"`
+	Max          uint64 `json:"max"`
+	OOM          uint64 `json:"oom"`
+	OOMKill      uint64 `json:"oom_kill"`
+	OOMGroupKill uint64 `json:"oom_group_kill"`
+}
+
+const processGroupMemorySource = "process-group RSS samples; unenforced"
 
 type JobMemoryEnvelope struct {
 	Source      string  `json:"source"`
@@ -43,6 +59,16 @@ func mergeMemoryPeaks(old, next *AttemptMemoryPeak) *AttemptMemoryPeak {
 			n := **pair[1]
 			*pair[0] = &n
 		}
+	}
+	if next.Source != "" {
+		out.Source = next.Source
+	}
+	if e := next.Events; e != nil {
+		merged := *e
+		if out.Events != nil {
+			merged = MemoryEventCounts{High: max(merged.High, out.Events.High), Max: max(merged.Max, out.Events.Max), OOM: max(merged.OOM, out.Events.OOM), OOMKill: max(merged.OOMKill, out.Events.OOMKill), OOMGroupKill: max(merged.OOMGroupKill, out.Events.OOMGroupKill)}
+		}
+		out.Events = &merged
 	}
 	if out.HostGB == nil && out.CgroupGB == nil && out.DeviceGB == nil {
 		return nil

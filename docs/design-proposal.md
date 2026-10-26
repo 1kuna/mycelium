@@ -1896,6 +1896,14 @@ their own ceilings as well as the parent. File-cache reclaim with low resident
 use remains learnable even with `max` events. This excludes ceiling-bound peaks
 from explicit-memory runs: they cannot seed an auto estimate. Explicit memory
 admission and outcomes otherwise retain their existing behavior.
+The attempt's `memory.events` max/high/OOM counts are kept beside its peak;
+absent counts mean they were not read, not zero.
+Workers without cgroups (macOS) learn the summed RSS of the attempt's process
+groups, sampled every 500 ms outside the queue lock and raised to the main
+process's exit max RSS. The sum counts shared pages per process, so it errs
+high; rusage alone reports only the largest waited process. These peaks are
+measured but unenforced. They are constrained only when host memory pressure
+reaches warning or swap use grows during the attempt.
 Fully capped native groups preserve member-level OOM attribution and kill mode.
 GPU samples belong to the attempt's process inventory where supported, only for
 auto or estimate-feeding attempts, every five seconds and until unsupported.

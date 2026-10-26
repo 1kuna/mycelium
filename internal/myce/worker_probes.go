@@ -7,6 +7,7 @@ import "context"
 var workerProfileProbe = LocalProfileProbe
 var workerHostMemorySource = NewHostMemorySource
 var workerOwnerSignals = LocalOwnerSignals
+var workerProcessMemory = localProcessMemory
 
 var workerMachineProbe = LocalMachineProbe
 
@@ -19,6 +20,8 @@ type WorkerProbeDefaults struct {
 	OwnerSignals func(context.Context) OwnerSignals
 	Identity     func() MachineProbe
 	DeviceFaults func() DeviceFaultSource
+	// Nil disables per-attempt process sampling on hosts without cgroups.
+	ProcessMemory func() *processMemoryProbe
 }
 
 // SetWorkerProbeDefaults installs complete defaults during process setup.
@@ -30,6 +33,7 @@ func SetWorkerProbeDefaults(p WorkerProbeDefaults) {
 	workerProfileProbe = p.Profile
 	workerHostMemorySource = p.HostMemory
 	workerOwnerSignals = p.OwnerSignals
+	workerProcessMemory = p.ProcessMemory
 	extensionIdentityProbe = p.Identity
 	if p.DeviceFaults != nil {
 		workerDeviceFaultSource = p.DeviceFaults

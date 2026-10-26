@@ -262,7 +262,12 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 	if w.control != nil {
 		w.control.set(p)
 	}
-	finishMemory := w.observeAttemptMemory(memory, j)
+	// A port-collision retry replaces the supervisor and its process group.
+	finishMemory := w.observeAttemptMemory(memory, j, func() []int {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return []int{g.supervisor.Process.Pid}
+	})
 	go func() {
 		defer cancel()
 		for _, release := range releases {

@@ -37,5 +37,6 @@ func init() {
 		return func(context.Context) (float64, error) { return max(0, 128-reserve), nil }, nil
 	}
 	workerOwnerSignals = func(context.Context) OwnerSignals { return OwnerSignals{Power: "desktop"} }
+	workerProcessMemory = nil
 	probeguard.Before = func() { panic("test invoked a real hardware probe; inject a fake") }
 }

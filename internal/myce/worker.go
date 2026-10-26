@@ -61,6 +61,7 @@ type Worker struct {
 	extensionFingerprint  string
 	RequireMemoryCeilings bool
 	memoryCeilings        *memoryCeilings
+	processMemory         *processMemoryProbe // Without cgroups only.
 	MemorySwapMaxBytes    int64
 	DockerEndpoint        string
 	dockerEnvelope        bool
@@ -700,7 +701,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (*proce
 	environmentStarted = true
 	extensionStarted = true
 	started = true
-	finishMemory := w.observeAttemptMemory(memoryAttempt, j)
+	finishMemory := w.observeAttemptMemory(memoryAttempt, j, func() []int { return []int{cmd.Process.Pid} })
 	go func() {
 		if extensionRelease != nil {
 			defer extensionRelease()
@@ -724,7 +725,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (*proce
 		// Descendants must not outlive the command or append to delivered output.
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		groupErr := waitWorkerGroup(cmd.Process.Pid, w.Clock)
-		peak := finishMemory()
+		peak := withExitMaxRSS(finishMemory(), cmd.ProcessState)
 		oomErr := memoryAttempt.failure()
 		groupErr = errors.Join(groupErr, memoryAttempt.cleanup(w.Clock))
 		result.MemoryPeak = peak

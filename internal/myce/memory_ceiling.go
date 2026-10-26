@@ -117,6 +117,9 @@ func (w *Worker) initMemoryCeilings() {
 		}
 	}
 	w.Machine.MemoryEnforcement = "memory ceiling not enforced on this host (" + reason + ")"
+	if w.processMemory == nil && workerProcessMemory != nil {
+		w.processMemory = workerProcessMemory()
+	}
 }
 func (w Worker) requireMemoryCeilings() error {
 	if !w.RequireMemoryCeilings {
