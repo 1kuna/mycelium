@@ -276,9 +276,10 @@ func TestStatusViewFloorFreeAutoMemoryWithoutHypha(t *testing.T) {
 	for _, scenario := range []string{"empty fleet", "project excludes fleet", "auto variant"} {
 		t.Run(scenario, func(t *testing.T) {
 			q, _, _, s := floorFreeFitFixture(t, 0)
+			s.Needs.Memory = "auto"
 			j := &Job{Spec: s, State: "queued", Reason: "no machine in the fleet can run this right now"}
 			if scenario == "project excludes fleet" {
-				q.s.Policies[s.Project] = ProjectPolicy{Weight: 1, AllowedMachines: []string{"other-host"}}
+				q.s.Policies = map[string]ProjectPolicy{s.Project: {Weight: 1, AllowedMachines: []string{"other-host"}}}
 			} else {
 				clear(q.s.Machines)
 			}
