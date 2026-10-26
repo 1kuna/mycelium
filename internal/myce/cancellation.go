@@ -73,6 +73,7 @@ func (q *Queue) CancelSubmission(project, key string) (Cancellation, error) {
 			q.s.Submissions = map[string]*submissionRecord{}
 		}
 		digest := submissionDigest(project, key)
+		q.expireSubmission(digest)
 		record := q.touchSubmission(digest)
 		if record == nil {
 			now := q.clock.Now()

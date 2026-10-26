@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -93,6 +94,54 @@ func TestQueueHistoryBurst(t *testing.T) {
 				if q.s.Machines[m.ID].Gone {
 					t.Errorf("reporting worker %s judged lost", m.ID)
 				}
+			}
+
+			// The same backlog also delayed start authorization in #223. Exercise the
+			// real launch fence concurrently with current-attempt heartbeats.
+			sp := spec("production")
+			sp.AllowedMachines = []string{workers[0].ID}
+			submitted := submit(t, q, sp)
+			active := check(t, q, workers[0], nil).Job
+			if active == nil || active.ID != submitted.ID {
+				t.Fatal("burst launch fixture was not assigned")
+			}
+			if err := q.Started(result(active, true)); err != nil {
+				t.Fatal(err)
+			}
+			waits = nil
+			holds = nil
+			q.observeUpdate = func(wait, hold time.Duration) { waits = append(waits, wait); holds = append(holds, hold) }
+			start = make(chan struct{})
+			errs = make(chan error, 16)
+			for i := range 16 {
+				wg.Add(1)
+				go func(i int) {
+					defer wg.Done()
+					<-start
+					if i%2 == 0 {
+						errs <- q.AuthorizeLaunch(HostLaunch{Kind: "batch", Key: active.ID, Machine: active.Machine, Session: active.Session, Attempt: strconv.Itoa(active.Attempt)})
+					} else {
+						m := workers[0]
+						m.FreeMemoryGB = 0
+						_, err := q.Checkin(Checkin{Machine: m, Running: &Execution{ID: active.ID, Attempt: active.Attempt}})
+						errs <- err
+					}
+				}(i)
+			}
+			close(start)
+			wg.Wait()
+			close(errs)
+			q.observeUpdate = nil
+			for err := range errs {
+				if err != nil {
+					t.Error(err)
+				}
+			}
+			slices.Sort(waits)
+			slices.Sort(holds)
+			t.Logf("history=%d launch_burst_wait_p50=%s launch_burst_wait_p95=%s launch_burst_wait_p99=%s launch_burst_hold_p99=%s", count, percentile(waits, 50), percentile(waits, 95), percentile(waits, 99), percentile(holds, 99))
+			if os.Getenv("MYCE_MEASURE_BASELINE") == "" && percentile(waits, 99) > 100*time.Millisecond {
+				t.Errorf("launch burst p99 lock wait exceeded 100ms: %s", percentile(waits, 99))
 			}
 		})
 	}

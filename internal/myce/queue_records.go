@@ -59,7 +59,9 @@ func (d *recordDeadlines) set(id string, at time.Time) {
 }
 func (d *recordDeadlines) due(now time.Time) []string {
 	var ids []string
-	for len(d.heap) > 0 && !d.heap[0].at.After(now) {
+	// Reuse the existing reclamation budget so equal-expiry producer waves do
+	// not monopolize the queue lock. Exact key lookups expire their own record.
+	for len(d.heap) > 0 && !d.heap[0].at.After(now) && len(ids) < fileReclaimBatch {
 		v := heap.Pop(&d.heap).(recordDeadline)
 		if d.scheduled[v.id] == v.at {
 			delete(d.scheduled, v.id)
@@ -250,13 +252,20 @@ func (q *Queue) rollbackRecords(old []byte) {
 		}
 	}
 	for id, r := range q.records.submissions {
+		current := submissions[id]
+		if current != nil && current.JobID != "" {
+			delete(q.records.bindings, current.JobID)
+			delete(q.records.removed, current.JobID)
+		}
 		if r == nil {
 			delete(submissions, id)
 		} else {
 			submissions[id] = r
 		}
 	}
-	q.rebuildRecords()
+	q.records.jobCount, q.records.submissionCount = len(q.s.Jobs), len(q.s.Submissions)
+	q.records.referenceAdds = nil
+	q.commitRecords()
 }
 func (q *Queue) commitRecords() {
 	for id := range q.records.jobs {
@@ -264,6 +273,11 @@ func (q *Queue) commitRecords() {
 	}
 	for id, old := range q.records.submissions {
 		r := q.s.Submissions[id]
+		if r != nil {
+			if j := q.s.Jobs[r.JobID]; j != nil {
+				r.Job = j
+			}
+		}
 		if old != nil && old.JobID != "" && (r == nil || r.JobID != old.JobID) {
 			delete(q.records.bindings, old.JobID)
 			delete(q.records.removed, old.JobID)

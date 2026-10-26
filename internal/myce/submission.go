@@ -107,7 +107,9 @@ func (q *Queue) existingSubmission(s Spec, fingerprint string) (*Job, error) {
 	if s.SubmissionKey == "" {
 		return nil, nil
 	}
-	record := q.touchSubmission(submissionDigest(s.Project, s.SubmissionKey))
+	digest := submissionDigest(s.Project, s.SubmissionKey)
+	q.expireSubmission(digest)
+	record := q.touchSubmission(digest)
 	if record == nil {
 		return nil, nil
 	}
@@ -133,4 +135,23 @@ func (q *Queue) existingSubmission(s Spec, fingerprint string) (*Job, error) {
 	}
 	copy := cloneJob(j)
 	return &copy, nil
+}
+
+// Lookup observes exact retention even while a large background expiry wave is
+// drained in small transactions. This uses only the requested record.
+func (q *Queue) expireSubmission(digest string) {
+	r := q.s.Submissions[digest]
+	if r == nil {
+		return
+	}
+	var at *time.Time
+	if r.Kind == submissionReservation {
+		at = r.Created
+	}
+	if r.Kind == submissionBinding && q.s.Jobs[r.JobID] == nil {
+		at = r.RemovedAt
+	}
+	if at != nil && !q.clock.Now().Before(at.Add(submissionRetention)) {
+		q.putSubmission(digest, &submissionRecord{Kind: submissionExpired})
+	}
 }
