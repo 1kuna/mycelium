@@ -1397,7 +1397,17 @@
       "properties": {
         "execution": {
           "$ref": "#/$defs/Execution",
-          "description": "Immutable producing child job ID and accepted attempt; never the latest attempt."
+          "description": "Immutable producing child job ID and accepted attempt for a selected-piece edge; zero value for a whole-parent edge."
+        },
+        "executions": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Execution"
+          },
+          "description": "Whole-parent edge: accepted producing executions keyed by mapped producer piece. Immutable across retry and restart.",
+          "type": [
+            "object",
+            "null"
+          ]
         },
         "files": {
           "$ref": "#/$defs/FileManifest"
@@ -1457,7 +1467,6 @@
       },
       "required": [
         "job",
-        "piece",
         "outputs"
       ],
       "type": "object"

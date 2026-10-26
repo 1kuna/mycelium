@@ -389,6 +389,9 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 }
 func (q *Queue) waitReason(j *Job) string {
 	if !dependencyReady(j) {
+		if j.Spec.After != nil && j.Spec.After.Piece == "" {
+			return "waiting for upstream fan-out parent success"
+		}
 		return "waiting for accepted producer piece"
 	}
 	if g := j.Spec.Needs.GPU; g != nil && g.Devices != nil {

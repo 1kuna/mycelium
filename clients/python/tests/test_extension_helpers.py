@@ -123,6 +123,19 @@ class ExtensionClientTests(unittest.TestCase):
                     "extension": "example@1", "submission_key": "stable", "files": {"input.json": ref}}, timeout=5)
                 download.assert_called_once_with(job["id"], "result.json", Path(directory) / "result.json")
 
+    def test_run_consumes_whole_parent_binding(self):
+        client = Client(token="fixture")
+        after = {"job": "producer", "outputs": {"first/input": "first/out"}}
+        binding = {"state": "ready", "executions": {"first": {"id": "wave", "attempt": 2}}}
+        job = {"id": "gather", "state": "succeeded", "dependency": binding}
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.object(client, "_call", return_value={"id": "gather"}) as submit, \
+                 patch.object(client, "wait", return_value=job):
+                result = client.run("example@1", inputs={}, outputs=directory,
+                                    project="demo", key="whole", after=after)
+        self.assertEqual(submit.call_args.args[2]["after"], after)
+        self.assertEqual(result["dependency"]["executions"]["first"], {"id": "wave", "attempt": 2})
+
     def test_run_failed_job_points_to_logs_and_never_downloads(self):
         client = Client(token="fixture")
         with patch.object(client, "submit_and_wait", return_value={"id": "12345678abcdef", "state": "failed", "reason": "execution failed"}), \

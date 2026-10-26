@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -262,5 +263,134 @@ func TestPieceDependencyCancelAcceptanceRace(t *testing.T) {
 		if j.Spec.After != nil && j.Spec.After.Job == parent.ID && !cancelled(j) {
 			t.Fatal("concurrent registration escaped abort")
 		}
+	}
+}
+
+func wholeParentConsumer(s Spec, parent string, fanOut bool) Spec {
+	if !fanOut {
+		s.FanOut, s.Workload = nil, nil
+	}
+	s.Name = "whole-parent-consumer"
+	s.After = &PieceDependency{Job: parent, Outputs: map[string]string{"item-0/input": "item-0/out"}}
+	return s
+}
+
+func TestPieceDependencyWholeParentAdmissionAndRestart(t *testing.T) {
+	q, clock, m, s := fanOutFixture(t, 3)
+	s.Outputs = map[string]string{"out": "results"}
+	parent := submit(t, q, s)
+	c := wholeParentConsumer(s, parent.ID, true)
+	c.SubmissionKey = "whole-consumer"
+	// Bound inputs must not overwrite either a serial output or keyed wave output.
+	invalid := c
+	invalid.After = &PieceDependency{Job: parent.ID, Outputs: map[string]string{"out": "item-0/out"}}
+	if _, err := q.Submit(invalid); err == nil {
+		t.Fatal("dependent input may overwrite serial-fallback output")
+	}
+	invalid.After.Outputs = map[string]string{"item-0/out": "item-0/out"}
+	if _, err := q.Submit(invalid); err == nil {
+		t.Fatal("dependent input may overwrite keyed wave output")
+	}
+	consumer := submit(t, q, c)
+	gather := submit(t, q, wholeParentConsumer(s, consumer.ID, false))
+	wave := check(t, q, m, nil).Job
+	finish(t, q, wave, true)
+	// Even the selected piece is accepted, but a whole-parent edge waits for all.
+	if got := job(t, q, consumer.ID); dependencyReady(got) || got.FanOut.Next != 0 || got.Attempt != 0 {
+		t.Fatal("partial producer released dependent fan-out", got)
+	}
+	q = reopenCancellationQueue(t, q, clock)
+	clock.Advance(time.Second)
+	tail := check(t, q, m, nil).Job
+	if tail == nil || tail.Batch.Parent != parent.ID {
+		t.Fatal("blocked dependent displaced producer tail", tail)
+	}
+	finish(t, q, tail, true)
+	ready := job(t, q, consumer.ID)
+	if !dependencyReady(ready) || !ready.Dependency.ReadyAt.Equal(clock.Now()) || ready.Dependency.Executions["item-0"].ID != wave.ID {
+		t.Fatal("whole-parent binding missing accepted execution/readiness", ready.Dependency)
+	}
+	if ready.Dependency.Inputs["item-0/input"] != job(t, q, parent.ID).OutputFiles["item-0/out"] {
+		t.Fatal("keyed output was not bound as local input", ready.Dependency)
+	}
+	child := check(t, q, m, nil).Job
+	if child == nil || child.Batch.Parent != consumer.ID || len(jobInputPaths(child)) != 1 {
+		t.Fatal("dependent wave lost bound inputs", child)
+	}
+	finish(t, q, child, true)
+	// Restart with the downstream's fixed membership and accepted partial gather.
+	q = reopenCancellationQueue(t, q, clock)
+	replay := submit(t, q, c)
+	if replay.ID != consumer.ID || len(replay.FanOut.Children) != 1 || replay.Dependency.Executions["item-0"].ID != wave.ID {
+		t.Fatal("restart/replay changed binding or membership", replay)
+	}
+	for job(t, q, consumer.ID).State != "succeeded" {
+		tail = check(t, q, m, nil).Job
+		if tail == nil || tail.Batch == nil || tail.Batch.Parent != consumer.ID {
+			t.Fatal("no dependent tail", tail)
+		}
+		finish(t, q, tail, true)
+	}
+	if got := job(t, q, gather.ID); !dependencyReady(got) || got.Dependency.Executions["item-0"].ID != child.ID {
+		t.Fatalf("dependent gather not ready: state=%s reason=%s after=%+v binding=%+v parent=%+v", got.State, got.Reason, got.Spec.After, got.Dependency, job(t, q, consumer.ID).FanOut)
+	}
+}
+
+func TestPieceDependencyWholeParentFailure(t *testing.T) {
+	q, clock, m, s := fanOutFixture(t, 3)
+	s.Outputs = map[string]string{"out": "results"}
+	parent := submit(t, q, s)
+	ordinary := submit(t, q, wholeParentConsumer(s, parent.ID, false))
+	fanOut := submit(t, q, wholeParentConsumer(s, parent.ID, true))
+	wave := check(t, q, m, nil).Job
+	finish(t, q, wave, true)
+	clock.Advance(time.Second)
+	tail := check(t, q, m, nil).Job
+	finish(t, q, tail, false)
+	for _, id := range []string{ordinary.ID, fanOut.ID} {
+		got := job(t, q, id)
+		if got.State != "failed" || got.DiagnosticCode != "upstream_failed" || got.Attempt != 0 || got.StartedAt != nil || !got.FinishedAt.Equal(clock.Now()) || !strings.Contains(got.Reason, "parent did not succeed") {
+			t.Error("upstream failure did not fail unattempted consumer clearly", got)
+		}
+	}
+	late := submit(t, q, wholeParentConsumer(s, parent.ID, true))
+	if late.State != "failed" || late.Attempt != 0 {
+		t.Fatal("late whole-parent consumer accepted failed parent", late)
+	}
+}
+
+func TestPieceDependencyWholeParentCancellation(t *testing.T) {
+	q, clock, m, s := fanOutFixture(t, 1)
+	s.Outputs = map[string]string{"out": "results"}
+	parent := submit(t, q, s)
+	consumer := submit(t, q, wholeParentConsumer(s, parent.ID, true))
+	gather := submit(t, q, wholeParentConsumer(s, consumer.ID, false))
+	finish(t, q, check(t, q, m, nil).Job, true)
+	child := check(t, q, m, nil).Job
+	if child == nil || child.Batch.Parent != consumer.ID {
+		t.Fatal("no downstream wave", child)
+	}
+	clock.Advance(time.Second)
+	ack, err := q.CancelJob(parent.ID)
+	if err != nil || *ack.Release != "pending" {
+		t.Fatal("upstream omitted downstream wave custody", ack, err)
+	}
+	for _, id := range []string{consumer.ID, gather.ID, child.ID} {
+		if got := job(t, q, id); !cancelledJobForTest(got) {
+			t.Error("transitive cancellation missed downstream", got)
+		}
+	}
+	if err := q.Started(result(child, true)); err != ErrStale {
+		t.Fatal("cancelled downstream wave was allowed to start", err)
+	}
+	finish(t, q, child, true)
+	ack, err = q.CancelJob(parent.ID)
+	if err != nil || *ack.Release == "pending" {
+		t.Fatal("downstream exact release did not settle upstream", ack, err)
+	}
+	q = reopenCancellationQueue(t, q, clock)
+	future := submit(t, q, wholeParentConsumer(s, consumer.ID, true))
+	if future.State != "cancelled" || future.FanOut.Next != 0 {
+		t.Fatal("future dependent escaped persisted cancellation", future)
 	}
 }

@@ -7,22 +7,23 @@ import (
 	"time"
 )
 
-// One edge to a declared piece, never to a planner-created wave.
+// One edge to a declared piece or whole fan-out parent, never an internal wave.
 type PieceDependency struct {
 	Job     string            `json:"job" yaml:"job"`
-	Piece   string            `json:"piece" yaml:"piece"`
+	Piece   string            `json:"piece,omitempty" yaml:"piece,omitempty"`
 	Outputs map[string]string `json:"outputs" yaml:"outputs"`
 }
 
 // Separate from Spec so keyed intent is unchanged by acceptance and retries.
 type PieceBinding struct {
-	Job       string            `json:"job"`
-	Piece     string            `json:"piece"`
-	State     string            `json:"state"`
-	Execution Execution         `json:"execution"`
-	ReadyAt   *time.Time        `json:"ready_at,omitempty"`
-	Files     FileManifest      `json:"files,omitempty"`
-	Inputs    map[string]string `json:"inputs,omitempty"`
+	Job        string               `json:"job"`
+	Piece      string               `json:"piece"`
+	State      string               `json:"state"`
+	Execution  Execution            `json:"execution"`
+	Executions map[string]Execution `json:"executions,omitempty"`
+	ReadyAt    *time.Time           `json:"ready_at,omitempty"`
+	Files      FileManifest         `json:"files,omitempty"`
+	Inputs     map[string]string    `json:"inputs,omitempty"`
 }
 
 func dependencyReady(j *Job) bool {
@@ -34,8 +35,8 @@ func validatePieceDependency(s Spec) error {
 	if a == nil {
 		return nil
 	}
-	if a.Job == "" || a.Piece == "" || len(a.Outputs) == 0 || s.FanOut != nil || s.ExtensionCheck != nil || s.Program != nil || s.Run.Workdir != "" || s.Run.Docker {
-		return errors.New("after requires one parent job, piece and output mapping on an ordinary batch/extension job without fan_out, check, program, workdir or Docker")
+	if a.Job == "" || len(a.Outputs) == 0 || s.FanOut != nil && a.Piece != "" || s.ExtensionCheck != nil || s.Program != nil || s.Run.Workdir != "" || s.Run.Docker {
+		return errors.New("after requires one parent job and output mapping without check, program, workdir or Docker; fan_out consumers require the whole parent (omit piece)")
 	}
 	names := []string{}
 	for name := range s.Files {
@@ -44,6 +45,8 @@ func validatePieceDependency(s Spec) error {
 	for name := range s.Inputs {
 		names = append(names, name)
 	}
+	// Serial fallback writes unkeyed output names; measured waves write keyed
+	// names (checked by validateFanOut). Neither may overwrite a bound input.
 	for name := range s.Outputs {
 		names = append(names, name)
 	}
@@ -73,14 +76,21 @@ func (q *Queue) validatePieceSource(s Spec) error {
 	if p == nil || p.Spec.Project != s.Project || p.Spec.FanOut == nil || p.FanOut == nil {
 		return errors.New("after.job must be a full fan-out parent ID in the same project")
 	}
-	found := false
+	declared := map[string]bool{}
 	for _, piece := range p.Spec.FanOut.Pieces {
-		found = found || piece.Key == s.After.Piece
+		declared[piece.Key] = true
 	}
-	if !found {
+	if s.After.Piece != "" && !declared[s.After.Piece] {
 		return errors.New("after.piece is not declared by the parent")
 	}
 	for _, name := range s.After.Outputs {
+		if s.After.Piece == "" {
+			key, output, ok := strings.Cut(name, "/")
+			if !ok || !declared[key] {
+				return errors.New("whole-parent after outputs require declared KEY/OUTPUT_NAME names")
+			}
+			name = output
+		}
 		if _, ok := p.Spec.Outputs[name]; !ok {
 			return errors.New("after output is not declared by the parent")
 		}
@@ -112,33 +122,18 @@ func (q *Queue) maintainPieceDependencies() {
 		if j.Dependency == nil {
 			j.Dependency = &PieceBinding{Job: a.Job, Piece: a.Piece, State: "blocked"}
 		}
-		if p != nil && p.FanOut != nil {
-			if r, ok := p.FanOut.Results[a.Piece]; ok && !p.FilesExpired {
-				b := PieceBinding{Job: p.ID, Piece: a.Piece, State: "ready", Execution: r.Execution, Files: FileManifest{}, Inputs: map[string]string{}}
-				complete := true
-				for local, source := range a.Outputs {
-					if ref, ok := r.OutputRefs[source]; ok {
-						b.Files[local] = ref
-					} else if path, ok := r.OutputFiles[source]; ok {
-						b.Inputs[local] = path
-					} else {
-						complete = false
-					}
-				}
-				if complete {
-					now := q.clock.Now()
-					b.ReadyAt = &now
-					j.Dependency = &b
-					j.WaitingSince = now
-					j.Reason = ""
-					if j.Spec.Priority == "production" && j.Spec.StartBy == nil {
-						deadline := now.Add(ProductionStartTimeout)
-						j.Spec.StartBy = &deadline
-						j.StartWindow = ProductionStartTimeout
-					}
-					continue
-				}
+		if b := bindPieceDependency(p, a); b != nil {
+			now := q.clock.Now()
+			b.ReadyAt = &now
+			j.Dependency = b
+			j.WaitingSince = now
+			j.Reason = ""
+			if j.Spec.Priority == "production" && j.Spec.StartBy == nil {
+				deadline := now.Add(ProductionStartTimeout)
+				j.Spec.StartBy = &deadline
+				j.StartWindow = ProductionStartTimeout
 			}
+			continue
 		}
 		if p == nil || terminal(p.State) {
 			now := q.clock.Now()
@@ -146,11 +141,54 @@ func (q *Queue) maintainPieceDependencies() {
 			if p != nil && p.FilesExpired {
 				j.DiagnosticCode, j.Reason = "result_expired", "producer outputs expired"
 			}
+			if a.Piece == "" && j.DiagnosticCode == "upstream_failed" {
+				j.Reason = "upstream fan-out parent did not succeed"
+				if p != nil && p.Reason != "" {
+					j.Reason += ": " + p.Reason
+				}
+			}
 			j.FinishedAt = &now
+		} else if a.Piece == "" {
+			j.Reason = "waiting for upstream fan-out parent success"
 		} else {
 			j.Reason = "waiting for accepted producer piece"
 		}
 	}
+}
+
+// Metadata-only binding: completion has already verified the exact accepted
+// outputs outside q.mu. A whole-parent edge never releases on partial results.
+func bindPieceDependency(p *Job, a *PieceDependency) *PieceBinding {
+	if p == nil || p.FanOut == nil || p.FilesExpired || a.Piece == "" && p.State != "succeeded" {
+		return nil
+	}
+	b := &PieceBinding{Job: p.ID, Piece: a.Piece, State: "ready", Files: FileManifest{}, Inputs: map[string]string{}}
+	if a.Piece == "" {
+		b.Executions = map[string]Execution{}
+	}
+	for local, source := range a.Outputs {
+		key := a.Piece
+		if key == "" {
+			key, source, _ = strings.Cut(source, "/")
+		}
+		r, ok := p.FanOut.Results[key]
+		if !ok {
+			return nil
+		}
+		if ref, ok := r.OutputRefs[source]; ok {
+			b.Files[local] = ref
+		} else if path, ok := r.OutputFiles[source]; ok {
+			b.Inputs[local] = path
+		} else {
+			return nil
+		}
+		if a.Piece == "" {
+			b.Executions[key] = r.Execution
+		} else {
+			b.Execution = r.Execution
+		}
+	}
+	return b
 }
 
 func jobInputFiles(j *Job) FileManifest {

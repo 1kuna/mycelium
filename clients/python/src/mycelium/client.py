@@ -155,7 +155,12 @@ class Client:
             raise failure from None
 
     def submit(self, job: Mapping[str, Any] | str | Path) -> dict[str, Any]:
-        """Submit a mapping, YAML text, or a pathlib.Path to a YAML file."""
+        """Submit a mapping, YAML text, or a pathlib.Path to a YAML file.
+
+        after={"job": parent_id, "outputs": {local: "KEY/OUTPUT_NAME"}}
+        waits for the whole fan-out parent. Set after.piece for early single-piece
+        readiness on an ordinary job. fan_out may accompany the whole-parent form.
+        """
         if not isinstance(job, Mapping):
             return self.submit_yaml(job)
         return self._call("POST", "/api/jobs", _normalize(job))

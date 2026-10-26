@@ -250,7 +250,8 @@ func (c Client) Run(ctx context.Context, extension string, inputs map[string]str
 
 type RunOptions struct {
 	Key, Project, Class string
-	After               *PieceDependency
+	// After selects one accepted piece, or the whole fan-out parent when Piece is empty.
+	After *PieceDependency
 }
 
 // Refuse symlink ancestors so automatic result placement stays in the caller's

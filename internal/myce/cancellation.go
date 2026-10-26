@@ -285,7 +285,7 @@ func (q *Queue) retainedJob(id string) *Job {
 func releaseState(state string) *string { return &state }
 
 // Producer waves and registered consumers share the existing exact-copy custody.
-// Dependency validation prohibits fan-out consumers, so this is a finite tree.
+// Sources must already exist, so dependency edges remain acyclic.
 func (q *Queue) cancellationMembers(j *Job) []*Job {
 	if j.FanOut == nil {
 		return nil
