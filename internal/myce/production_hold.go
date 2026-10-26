@@ -349,6 +349,7 @@ func (q *Queue) productionTarget(j *Job, call *ModelCall) string {
 	machines := scan.machines
 	var best *Machine
 	bestStops := int(^uint(0) >> 1)
+	bestFree := false
 	for _, m := range machines {
 		capacity := *m
 		diskReason := ""
@@ -360,52 +361,56 @@ func (q *Queue) productionTarget(j *Job, call *ModelCall) string {
 			model, _ := q.model(call.Model)
 			diskReason = q.modelLoadDiskHeadroomReason(model, m)
 		}
-		if diskReason != "" || q.dockerBlocker(hostID(m)) != "" || q.unreported[m.ID] || !q.jobAllowsMachine(j, m.ID) || !fitsWithoutHostMemory(j, &capacity, m.TotalMemoryGB) {
+		if diskReason != "" || q.dockerBlocker(hostID(m)) != "" || q.unreported[m.ID] || !q.jobAllowsMachine(j, m.ID) {
 			continue
 		}
-		model, hasModel := q.model(j.Spec.Needs.Model)
-		if hasModel && call != nil {
-			model = q.residentModel(model, m)
-		}
-		if hasModel && !q.modelFitsMachine(model, m) {
-			continue
-		}
-		if call != nil && (m.ModelURL == "" || q.callExcludes(call, m.ID, targetDevice(m))) {
-			continue
-		}
-		pinned := 0.0
-		for _, s := range q.s.ModelSlots {
-			if slotOnTarget(s, m) && (q.slotPinned(s) && q.comparePriority(q.slotSpec(s), j.Spec) <= 0 || s.State == "unload_failed") {
-				model, _ := q.model(s.Model)
-				if call == nil || s.Model != call.Model {
-					pinned += model.MemoryGB
-				}
-			}
-		}
-		if m.TotalMemoryGB-pinned < j.Spec.Needs.MemoryGB {
-			continue
-		}
-		slot := q.s.ModelSlots[targetSlotKey(m, j.Spec.Needs.Model)]
-		// Calls reuse a ready/loading model's existing host-memory reservation.
-		if call == nil || slot == nil || slot.State != "ready" && slot.State != "loading" {
-			if _, _, ok := q.hostReleases(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, "production", j.Spec); !ok {
+		for _, candidate := range q.memoryCandidates(j, m) {
+			if !fitsResources(candidate, &capacity, m.TotalMemoryGB) {
 				continue
 			}
-		}
-		stops := 0
-		for _, r := range q.s.Jobs {
-			if r.Machine == m.ID && (r.State == "running" || r.State == "stopping") {
-				stops++
+			model, hasModel := q.model(candidate.Spec.Needs.Model)
+			if hasModel && call != nil {
+				model = q.residentModel(model, m)
 			}
-		}
-		// A hold is a custody commitment even when production is already busy.
-		// Value only ranks immediately free fitting alternatives; the common
-		// release planner still governs actual preemption after binding.
-		freeNow := q.workerIdle(m, j) && !q.preparationActive(m) && !q.preparationStopping(m) && fits(j, m, m.FreeMemoryGB)
-		bestFree := best != nil && q.workerIdle(best, j) && !q.preparationActive(best) && !q.preparationStopping(best) && fits(j, best, best.FreeMemoryGB)
-		preferFreeTarget := best != nil && stops == 0 && bestStops == 0 && freeNow && (!bestFree || q.targetPlacementBetter(j, m, best, scan))
-		if best == nil || stops < bestStops || preferFreeTarget {
-			best, bestStops = m, stops
+			if hasModel && !q.modelFitsMachine(model, m) {
+				continue
+			}
+			if call != nil && (m.ModelURL == "" || q.callExcludes(call, m.ID, targetDevice(m))) {
+				continue
+			}
+			pinned := 0.0
+			for _, s := range q.s.ModelSlots {
+				if slotOnTarget(s, m) && (q.slotPinned(s) && q.comparePriority(q.slotSpec(s), candidate.Spec) <= 0 || s.State == "unload_failed") {
+					model, _ := q.model(s.Model)
+					if call == nil || s.Model != call.Model {
+						pinned += model.MemoryGB
+					}
+				}
+			}
+			if m.TotalMemoryGB-pinned < candidate.Spec.Needs.MemoryGB {
+				continue
+			}
+			slot := q.s.ModelSlots[targetSlotKey(m, candidate.Spec.Needs.Model)]
+			// Calls reuse a ready/loading model's existing host-memory reservation.
+			if call == nil || slot == nil || slot.State != "ready" && slot.State != "loading" {
+				if _, _, ok := q.hostReleases(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB, "production", candidate.Spec); !ok {
+					continue
+				}
+			}
+			stops := 0
+			for _, r := range q.s.Jobs {
+				if r.Machine == m.ID && (r.State == "running" || r.State == "stopping") {
+					stops++
+				}
+			}
+			// A hold is a custody commitment even when production is already busy.
+			// Value only ranks immediately free fitting alternatives; the common
+			// release planner still governs actual preemption after binding.
+			freeNow := q.workerIdle(m, candidate) && !q.preparationActive(m) && !q.preparationStopping(m) && hostFits(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) && fitsResources(candidate, m, m.FreeMemoryGB)
+			preferFreeTarget := best != nil && stops == 0 && bestStops == 0 && freeNow && (!bestFree || q.targetPlacementBetter(j, m, best, scan))
+			if best == nil || stops < bestStops || preferFreeTarget {
+				best, bestStops, bestFree = m, stops, freeNow
+			}
 		}
 	}
 	if best == nil {

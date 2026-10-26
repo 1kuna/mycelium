@@ -1252,7 +1252,13 @@ func (q *Queue) reconcileEnvironments(m *Machine) error {
 			continue
 		}
 		for _, j := range q.s.Jobs {
-			if j.State == "queued" && q.placementAllowed(j, m) && fits(j, m, m.FreeMemoryGB) && environmentKey(j, m) == r.Key {
+			if j.State != "queued" || !q.placementAllowed(j, m) || environmentKey(j, m) != r.Key {
+				continue
+			}
+			for _, candidate := range q.memoryCandidates(j, m) {
+				if !hostFits(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) || !fitsResources(candidate, m, m.FreeMemoryGB) {
+					continue
+				}
 				j.State = "failed"
 				j.Reason = "environment build failed on " + m.ID + ": " + r.Error
 				if e := q.copyEnvironmentLogs(j, m, r.Key); e != nil {
@@ -1261,6 +1267,7 @@ func (q *Queue) reconcileEnvironments(m *Machine) error {
 				if j.Spec.Logs != "none" {
 					j.EnvironmentFailureLog = r.Log + "\n" + j.Reason + "\n"
 				}
+				break
 			}
 		}
 	}

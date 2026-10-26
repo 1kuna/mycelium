@@ -50,6 +50,20 @@ func mergeMemoryPeaks(old, next *AttemptMemoryPeak) *AttemptMemoryPeak {
 	return &out
 }
 
+// Size qualified target copies in dispatch order, leaving the queued job intact.
+func (q *Queue) memoryCandidates(j *Job, m *Machine) []*Job {
+	candidates := extensionJobs(j, m, true)
+	for i, candidate := range candidates {
+		if candidate.State == "running" || candidate.State == "stopping" {
+			continue
+		}
+		copy := *candidate
+		q.applyLearnedNeeds(&copy)
+		candidates[i] = q.memoryCandidate(&copy, m)
+	}
+	return candidates
+}
+
 // Resolve on the existing planner's target copy. Explicit declarations retain
 // their behavior. Never resize an attempt that has acquired execution custody.
 func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {

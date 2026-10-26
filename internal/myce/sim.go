@@ -637,7 +637,7 @@ func Simulate(f SimFleet, w SimWorkload, o SimOptions) (SimReport, error) {
 					j.Needs.HostMemoryGB = model.HostGB
 					j.Needs.Platform = Platform{Required: model.Platforms}
 				}
-				if fits(&Job{Spec: j}, &m, m.TotalMemoryGB) {
+				if q.simPlaceable(&Job{Spec: j}, &m) {
 					t.placeable = true
 				}
 			}
@@ -1090,6 +1090,17 @@ func simSpec(t *simTask, epoch time.Time) Spec {
 	s.Needs.Platform = Platform{Required: t.stream.Platforms}
 	return s
 }
+
+// Diagnose capacity with the same target-specific memory sizing as dispatch.
+func (q *Queue) simPlaceable(j *Job, m *Machine) bool {
+	for _, candidate := range q.memoryCandidates(j, m) {
+		if hostFits(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) && fitsResources(candidate, m, m.TotalMemoryGB) {
+			return true
+		}
+	}
+	return false
+}
+
 func simPercentile(values []float64, p float64) float64 {
 	index := max(0, int(math.Ceil(float64(len(values))*p))-1)
 	return values[index]

@@ -185,3 +185,20 @@ func TestSimModelLoadAfterCommandRelease(t *testing.T) {
 	nearSim(t, r.LoadingSeconds, 100)
 	nearSim(t, r.Projects["call"].ExperimentFinishSeconds, 119)
 }
+
+func TestSimFloorFreeAutoMemoryFit(t *testing.T) {
+	q, clock, m, s := floorFreeFitFixture(t, 0)
+	j := submit(t, q, s)
+	view := m.Devices[0].machine(*q.s.Machines[m.ID])
+	target := &view
+	if !q.simPlaceable(q.s.Jobs[j.ID], target) {
+		t.Error("sized floor-free variant marked never placeable")
+	}
+	clock.Advance(time.Second)
+	// Raw zero needs would admit the job without telemetry on this host.
+	copy := *target
+	copy.MemoryEnforcement, copy.HostMemoryMeasured = "", false
+	if q.simPlaceable(q.s.Jobs[j.ID], &copy) {
+		t.Fatal("unsized auto job marked placeable without host telemetry")
+	}
+}
