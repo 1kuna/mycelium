@@ -139,13 +139,14 @@ func (e Environment) Key() string {
 }
 
 type Spec struct {
-	Disk          *DiskNeeds        `json:"disk,omitempty" yaml:"disk,omitempty"`
-	After         *PieceDependency  `json:"after,omitempty" yaml:"after,omitempty"`
-	Targets       []ExecutionTarget `json:"targets,omitempty" yaml:"targets,omitempty"`
-	RequireTarget bool              `json:"require_target,omitempty" yaml:"require_target,omitempty"`
-	FanOut        *FanOut           `json:"fan_out,omitempty" yaml:"fan_out,omitempty"`
-	Workload      *Workload         `json:"workload,omitempty" yaml:"workload,omitempty"`
-	SubmissionKey string            `json:"submission_key,omitempty" yaml:"submission_key,omitempty"`
+	SharedInputs  map[string]SharedInput `json:"shared_inputs,omitempty" yaml:"shared_inputs,omitempty"`
+	Disk          *DiskNeeds             `json:"disk,omitempty" yaml:"disk,omitempty"`
+	After         *PieceDependency       `json:"after,omitempty" yaml:"after,omitempty"`
+	Targets       []ExecutionTarget      `json:"targets,omitempty" yaml:"targets,omitempty"`
+	RequireTarget bool                   `json:"require_target,omitempty" yaml:"require_target,omitempty"`
+	FanOut        *FanOut                `json:"fan_out,omitempty" yaml:"fan_out,omitempty"`
+	Workload      *Workload              `json:"workload,omitempty" yaml:"workload,omitempty"`
+	SubmissionKey string                 `json:"submission_key,omitempty" yaml:"submission_key,omitempty"`
 
 	Files           FileManifest           `json:"files,omitempty" yaml:"files,omitempty"`
 	Kind            string                 `json:"kind,omitempty" yaml:"kind,omitempty"`

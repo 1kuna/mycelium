@@ -2066,3 +2066,28 @@ cleanup custody remain authoritative across restarts. Status exposes the chosen
 host's scarcity vector and usable RAM, or why its value is unknown. Fake-clock
 inventory and simulator evidence establish laptop behavior, not native fleet
 qualification. The explicit speed/deadline tradeoff remains slice 7.
+
+## Shared read-only inputs (#221)
+
+Profiles and plain native jobs may declare `shared_inputs`, independently of
+private `files`. A declaration identifies a stored blob by SHA-256 and size, or
+a NAS-relative path plus that identity. A NAS directory uses an explicit file
+manifest instead. NAS references resolve under each worker's `--checkpoint-root`
+and never upload through the queue. Profiles may import a `local` blob once;
+the submitted specification contains only its immutable identity. No environment
+catalog entry or queue restart is required.
+
+Workers publish verified cache entries atomically and expose absolute paths in
+`MYCE_INPUT_<UPPERCASE_NAME>`. Files/trees have read-only mode bits; these are
+cooperative controls, not a hostile-code sandbox. `archive: tar|tar.gz` unpacks
+once, bounded by declared `unpacked_bytes`; archives contain regular files and
+directories only. NAS trees copy only manifest members and preserve executability.
+The cache records per-file hashes, verifies them on first use after restart,
+and checks inode/change-time/size/mode metadata on reuse to detect tampering.
+Shared use locks span preparation and process cleanup; LRU eviction skips active
+entries. Admission enforces the physical disk guard before staging. Failed staging
+is disposable; authoritative NAS/store data remains untouched. Stored references
+use ordinary live-job and terminal retention. All bulk I/O runs in worker or
+unlocked submission verification paths. Transfers use size-aware, renewed socket
+deadlines, with no fixed whole-input timeout. Laptop proof and native consumer
+qualification are separate; fleet acceptance waits for the queue release gate.

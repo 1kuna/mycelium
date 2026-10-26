@@ -55,6 +55,7 @@ type Worker struct {
 	FileCacheRoot         string
 	FileCacheLimit        int64
 	fileCache             *FileCache
+	sharedInputs          *SharedInputCache
 	fileCheckpoints       bool
 	ExtensionRoot         string
 	JobFileRoot           string
@@ -331,8 +332,19 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (*proce
 			extensionRelease()
 		}
 	}()
+	sharedEnv, sharedRelease, sharedErr := w.acquireSharedInputs(ctx, j)
+	if sharedErr != nil {
+		return nil, sharedErr
+	}
+	previousRelease := extensionRelease
+	extensionRelease = func() {
+		sharedRelease()
+		if previousRelease != nil {
+			previousRelease()
+		}
+	}
 	executionWorkdir := j.Spec.Run.Workdir
-	if j.Spec.extensionJob() || len(jobInputFiles(&j))+len(jobInputPaths(&j)) > 0 {
+	if j.Spec.extensionJob() || len(jobInputFiles(&j))+len(jobInputPaths(&j))+len(j.Spec.SharedInputs) > 0 {
 		value := j
 		dir, err := s.extensionFiles.run(attemptCheckpoint(j), func() (string, error) {
 			err := w.prepareExtensionFiles(&value, s.dir)
@@ -505,6 +517,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (*proce
 	cmd.Dir = j.Spec.Run.Workdir
 	env := jobBaseEnvironment()
 	for k, v := range j.Spec.Run.Env {
+		env[k] = v
+	}
+	for k, v := range sharedEnv {
 		env[k] = v
 	}
 	for k, v := range extensionEnv {

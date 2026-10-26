@@ -162,6 +162,7 @@ func (q *Queue) fileReferences(pendingOnly bool) (expired, keep, referenced map[
 		// Retained identities, including expired answers and completed
 		// reclamations, must never be mistaken for pre-submit orphans.
 		add(referenced, j.Spec.Files)
+		add(referenced, sharedStoredFiles(j.Spec))
 		add(referenced, j.OutputRefs)
 		if j.FileReclamation != nil {
 			for _, hash := range j.FileReclamation.Pending {
