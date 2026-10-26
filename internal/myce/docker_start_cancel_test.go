@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -24,7 +25,9 @@ func TestDockerSlowStartHasIndependentBudget(t *testing.T) {
 				return nil, ctx.Err()
 			}
 		}
-		return exec.CommandContext(ctx, binary, args...).Output()
+		cmd := exec.CommandContext(ctx, binary, args...)
+		cmd.Env = dockerClientEnvironment()
+		return cmd.Output()
 	}
 	j := dockerJob()
 	j.Checkpoint = filepath.Join(t.TempDir(), "checkpoint")
@@ -47,6 +50,86 @@ func TestDockerSlowStartHasIndependentBudget(t *testing.T) {
 	}
 }
 
+func TestDockerCancelledStartRestartAfterRemoval(t *testing.T) {
+	w, s, clock, root := dockerFixture(t)
+	j := dockerJob()
+	j.Spec.Logs = "none"
+	s.state.Job, s.state.Identity = &j, "cancelled-start"
+	if err := s.save(); err != nil {
+		t.Fatal(err)
+	}
+	for name, data := range map[string]string{"created": "id1", "label": s.state.Identity} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d := &dockerAttempt{dir: s.dir, binary: filepath.Join(root, "docker"), env: dockerClientEnvironment(), clock: clock, timeout: 2 * time.Second,
+		state: dockerExecution{Identity: s.state.Identity, Endpoint: w.DockerEndpoint, Container: "id1", PendingContainer: "id1", Operation: "start", Pending: true, Stopped: true, Forced: true, LogsNone: true}}
+	d.command = func(ctx context.Context, args ...string) ([]byte, error) {
+		cmd := exec.CommandContext(ctx, d.binary, args...)
+		cmd.Env = dockerClientEnvironment()
+		out, err := cmd.Output()
+		if args[0] == "rm" && err == nil {
+			return nil, context.Canceled // Removal happened, receipt was lost.
+		}
+		return out, err
+	}
+	if err := d.saveLocked(); err != nil {
+		t.Fatal(err)
+	}
+	if done, err := d.reconcile(); done || !errors.Is(err, context.Canceled) {
+		t.Fatal("lost removal receipt not reproduced", done, err)
+	}
+	p, err := w.restoreDocker(s)
+	if err != nil || p == nil {
+		t.Fatal("restore", err)
+	}
+	t.Cleanup(p.docker.close)
+	select {
+	case f := <-p.done:
+		if f.result.Success || f.result.ReleasePending || !f.result.Interrupted {
+			t.Fatalf("restart lost exact cleanup/outcome: %+v", f)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("restart after removal retained fence")
+	}
+}
+
+func TestDockerLateStartTerminalOOMRetainsOutcome(t *testing.T) {
+	_, clock := fixture(t)
+	at := clock.Now()
+	var cs []dockerInspection
+	if err := json.Unmarshal([]byte(`[{"Id":"exact","Config":{"Labels":{"myce.attempt":"owned"}},"HostConfig":{"RestartPolicy":{"Name":"no"},"NetworkMode":"none"},"State":{"Running":false,"Status":"exited","ExitCode":137,"OOMKilled":true}}]`), &cs); err != nil {
+		t.Fatal(err)
+	}
+	cs[0].State.StartedAt = at.Add(time.Second)
+	d := &dockerAttempt{clock: clock, timeout: time.Second, state: dockerExecution{Identity: "owned", Container: "exact", PendingContainer: "exact", Operation: "start", Pending: true, Stopped: true, DispatchedAt: &at,
+		Containers: map[string]dockerMember{"exact": {Name: "main", ExitCode: new(int), StderrTail: "provisional"}}}}
+	d.command = func(_ context.Context, args ...string) ([]byte, error) {
+		switch args[0] {
+		case "ps":
+			return []byte("exact"), nil
+		case "inspect":
+			return json.Marshal(cs)
+		case "network":
+			return nil, nil
+		default:
+			t.Fatalf("terminal started object must be retained, got %v", args)
+			return nil, nil
+		}
+	}
+	if done, err := d.reconcile(); !done || err != nil {
+		t.Fatal("terminal start not settled", done, err)
+	}
+	r := dockerOutcome(d.state, Result{}, context.Canceled)
+	if r.Success || r.Interrupted || r.ExecutionCause == nil || r.ExecutionCause.Class != "oom" || !d.state.OOMKilled || !d.state.MainFinished {
+		t.Fatalf("late OOM evidence lost: %+v %+v", r, d.state)
+	}
+	if d.state.Containers["exact"].StderrTail == "provisional" {
+		t.Fatal("provisional evidence survived positive start")
+	}
+}
+
 func TestDockerCancelledStartSettlesExactContainer(t *testing.T) {
 	for _, removed := range []bool{false, true} {
 		t.Run(map[bool]string{false: "created", true: "already-removed"}[removed], func(t *testing.T) {
@@ -62,7 +145,9 @@ func TestDockerCancelledStartSettlesExactContainer(t *testing.T) {
 					}
 					return nil, context.Canceled
 				}
-				return exec.CommandContext(ctx, binary, args...).Output()
+				cmd := exec.CommandContext(ctx, binary, args...)
+				cmd.Env = dockerClientEnvironment()
+				return cmd.Output()
 			}
 			j := dockerJob()
 			j.Checkpoint = filepath.Join(t.TempDir(), "checkpoint")

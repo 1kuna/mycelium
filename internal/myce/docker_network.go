@@ -99,6 +99,7 @@ type dockerMember struct {
 	Memory         int64  `json:"memory"`
 	Swap           int64  `json:"swap"`
 	Started        bool   `json:"started"`
+	Removed        bool   `json:"removed,omitempty"`
 	TermDispatched bool   `json:"term_dispatched,omitempty"`
 	TermOutcome    string `json:"term_outcome,omitempty"`
 	ExitCode       *int   `json:"exit_code,omitempty"`

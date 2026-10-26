@@ -541,6 +541,13 @@ func (d *dockerAttempt) reconcile() (done bool, err error) {
 	if pending && d.state.Operation == "start" {
 		for _, c := range containers {
 			if (c.ID == d.state.PendingContainer || d.state.PendingContainer == "" && c.ID == d.state.Container) && (dockerLive(c) || d.state.DispatchedAt != nil && !c.State.StartedAt.IsZero() && !c.State.StartedAt.Before(*d.state.DispatchedAt)) {
+				// An earlier inactive snapshot was provisional if rm raced this
+				// start. Capture the actual terminal evidence after stopping it.
+				m := d.state.Containers[c.ID]
+				m.ExitCode, m.StderrTail = nil, ""
+				if d.state.Containers != nil {
+					d.state.Containers[c.ID] = m
+				}
 				d.state.Pending = false
 				d.state.Stopped = true
 				d.state.InfrastructureStop = true
@@ -648,17 +655,17 @@ func (d *dockerAttempt) reconcile() (done bool, err error) {
 // A lost start reply must not require a start that Docker has already cancelled
 // ever to become visible. Start addresses an existing immutable container ID:
 // removing that exact, inspected inactive object prevents a delayed start. The
-// durable removal intent survives a crash between rm and its receipt. Unlike a
-// pending create, an exact absent ID cannot materialize later from this request.
+// existing pending-start intent survives a crash between rm and its receipt.
+// Unlike a pending create, an exact absent ID cannot materialize later.
 func (d *dockerAttempt) settleFailedStart(containers []dockerInspection) (bool, error) {
 	d.mu.Lock()
 	pending := d.state.Pending && d.state.Stopped
-	op, id := d.state.Operation, d.state.PendingContainer
+	op, id, dispatched := d.state.Operation, d.state.PendingContainer, d.state.DispatchedAt
 	if id == "" {
 		id = d.state.Container
 	}
 	d.mu.Unlock()
-	if !pending || id == "" || (op != "start" && op != "remove-start") {
+	if !pending || id == "" || op != "start" {
 		return false, nil
 	}
 	for _, c := range containers {
@@ -666,22 +673,25 @@ func (d *dockerAttempt) settleFailedStart(containers []dockerInspection) (bool, 
 			continue
 		}
 		// Preserve the existing positive-start and bounded signal protocol.
-		if dockerLive(c) || op == "start" && !c.State.StartedAt.IsZero() {
+		if dockerLive(c) || dispatched != nil && !c.State.StartedAt.IsZero() && !c.State.StartedAt.Before(*dispatched) {
 			return false, nil
 		}
-		if err := d.retainEvidence([]dockerInspection{c}); err != nil {
+		if err := d.observeGroup(containers); err != nil {
 			return true, err
 		}
 		d.mu.Lock()
-		d.state.Operation = "remove-start"
-		err := d.saveLocked()
+		m := d.state.Containers[id]
+		m.ExitCode, m.StderrTail = nil, "" // Refresh after a refused prior rm.
+		if d.state.Containers != nil {
+			d.state.Containers[id] = m
+		}
 		d.mu.Unlock()
-		if err != nil {
+		if err := d.retainEvidence([]dockerInspection{c}); err != nil {
 			return true, err
 		}
 		// No force: a start racing inspection makes rm refuse, retaining custody.
-		_, err = d.call("rm", id)
-		return true, err // Re-inventory before settling even a successful removal.
+		_, err := d.call("rm", id)
+		return true, runtimeErrorFor("remove", err) // Re-inventory before settling removal.
 	}
 	// Do not treat a missing label match as proof: inspect the exact ID too.
 	_, err := d.call("inspect", id)
@@ -697,6 +707,12 @@ func (d *dockerAttempt) settleFailedStart(containers []dockerInspection) (bool, 
 	defer d.mu.Unlock()
 	d.state.Pending = false
 	d.state.Error = ""
+	if d.state.Containers == nil {
+		d.state.Containers = map[string]dockerMember{}
+	}
+	m := d.state.Containers[id]
+	m.Removed = true
+	d.state.Containers[id] = m
 	return true, d.saveLocked()
 }
 
@@ -1162,8 +1178,9 @@ func (d *dockerAttempt) run(p *process, j Job, session string, output *os.File, 
 	result = dockerOutcome(d.state, result, e)
 	container := d.state.Container
 	logsNone := d.state.LogsNone
+	mainRemoved := d.state.Containers[container].Removed
 	d.mu.Unlock()
-	if container != "" && !logsNone {
+	if container != "" && !logsNone && !mainRemoved {
 		ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
 		cmd := exec.CommandContext(ctx, d.binary, "--host", d.state.Endpoint, "logs", container)
 		cmd.Env = d.env

@@ -313,6 +313,10 @@ func TestDockerCLIHelper(t *testing.T) {
 		}
 		_ = os.Rename(filepath.Join(root, "created"), filepath.Join(root, "removed"))
 	case "logs":
+		if _, err := os.Stat(filepath.Join(root, "created")); os.IsNotExist(err) && args[len(args)-1] == "id1" {
+			fmt.Fprintln(os.Stderr, "Error: No such container: id1")
+			os.Exit(1)
+		}
 		if string(mode) == "logs-error" {
 			os.Exit(1)
 		}
@@ -575,6 +579,10 @@ func TestDockerDelayedStartSurvivesLostReply(t *testing.T) {
 	if e != nil || !strings.Contains(string(data), `"pending":true`) {
 		t.Fatalf("lost pending intent: %s %v", data, e)
 	}
+	await(t, func() bool {
+		calls, _ := os.ReadFile(filepath.Join(root, "calls"))
+		return strings.Contains(string(calls), "rm id1")
+	})
 	if err := os.WriteFile(filepath.Join(root, "release-late"), nil, 0600); err != nil {
 		t.Fatal(err)
 	}
