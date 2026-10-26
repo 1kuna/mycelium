@@ -2,22 +2,32 @@ package main
 
 import (
 	"archive/tar"
+	"bufio"
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"strconv"
 	"strings"
 
 	"mycelium/internal/myce"
 )
 
 type profileSource struct {
-	AllowDirty bool   `json:"allow_dirty,omitempty" yaml:"allow_dirty,omitempty"`
-	Git        string `json:"git,omitempty" yaml:"git,omitempty"`
-	Directory  string `json:"directory,omitempty" yaml:"directory,omitempty"`
-	Snapshot   string `json:"snapshot,omitempty" yaml:"snapshot,omitempty"`
+	Paths      []string `json:"paths,omitempty" yaml:"paths,omitempty"`
+	AllowDirty bool     `json:"allow_dirty,omitempty" yaml:"allow_dirty,omitempty"`
+	Git        string   `json:"git,omitempty" yaml:"git,omitempty"`
+	Directory  string   `json:"directory,omitempty" yaml:"directory,omitempty"`
+	Snapshot   string   `json:"snapshot,omitempty" yaml:"snapshot,omitempty"`
+}
+
+func profileInputName(name string) bool {
+	return profileRelative(name) && name != ".myce-source.tar" && name != ".myce-inputs" && !strings.HasPrefix(name, ".myce-inputs/")
 }
 
 func profileRelative(name string) bool {
@@ -34,7 +44,7 @@ func freezeProfileSource(ctx context.Context, root string, source profileSource,
 			modes++
 		}
 	}
-	if modes != 1 {
+	if modes != 1 || source.Paths != nil && (len(source.Paths) == 0 || source.Git == "") {
 		return ref, errors.New("source requires exactly one of git, directory or snapshot (uncompressed tar)")
 	}
 	out, err := os.OpenFile(dest, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
@@ -55,7 +65,13 @@ func freezeProfileSource(ctx context.Context, root string, source profileSource,
 	}
 	var cmd *exec.Cmd
 	var input io.ReadCloser
-	if source.Directory != "" {
+	if source.Git != "" && len(source.Paths) > 0 {
+		var entries []gitProfileEntry
+		entries, err = scopedGitEntries(ctx, root, source)
+		if err == nil {
+			err = archiveGitEntries(ctx, root, entries, write)
+		}
+	} else if source.Directory != "" {
 		err = walkProfileDirectory(ctx, root, source.Directory, func(name, path string, info os.FileInfo) error {
 			f, e := os.Open(path)
 			if e != nil {
@@ -131,12 +147,25 @@ func identifyProfileSource(ctx context.Context, root string, source profileSourc
 			modes++
 		}
 	}
-	if modes != 1 {
+	if modes != 1 || source.Paths != nil && (len(source.Paths) == 0 || source.Git == "") {
 		return source, "", errors.New("declare exactly one source")
 	}
 	if source.Git != "" {
 		if source.Git == "HEAD" && !source.AllowDirty {
-			dirty, err := exec.CommandContext(ctx, "git", "-C", root, "status", "--porcelain", "--untracked-files=normal", "--", ".", ":(exclude).mycelium/receipts").Output()
+			paths := []string{"."}
+			if len(source.Paths) > 0 {
+				var err error
+				paths, err = cleanProfilePaths(source.Paths)
+				if err != nil {
+					return source, "", err
+				}
+				for i := range paths {
+					paths[i] = ":(literal)" + paths[i]
+				}
+			}
+			command := append([]string{"-C", root, "status", "--porcelain", "--untracked-files=normal", "--"}, paths...)
+			command = append(command, ":(exclude).mycelium/receipts")
+			dirty, err := exec.CommandContext(ctx, "git", command...).Output()
 			if err != nil {
 				return source, "", err
 			}
@@ -146,7 +175,18 @@ func identifyProfileSource(ctx context.Context, root string, source profileSourc
 		}
 		tree, err := exec.CommandContext(ctx, "git", "-C", root, "rev-parse", "--verify", "--end-of-options", source.Git+"^{tree}").Output()
 		source.Git = strings.TrimSpace(string(tree))
-		return source, "git:" + source.Git, err
+		if err != nil {
+			return source, "", err
+		}
+		if len(source.Paths) > 0 {
+			source.Paths, err = cleanProfilePaths(source.Paths)
+			if err != nil {
+				return source, "", err
+			}
+			entries, err := scopedGitEntries(ctx, root, source)
+			return source, "git-paths:" + profileHash(entries), err
+		}
+		return source, "git:" + source.Git, nil
 	}
 	if source.Snapshot != "" {
 		path := source.Snapshot
@@ -214,4 +254,113 @@ func shellCommand(argv []string) string {
 		quoted[i] = shellArg(s)
 	}
 	return strings.Join(quoted, " ")
+}
+
+// Literal repo-relative files/directories only, never Git pathspec expressions.
+func cleanProfilePaths(paths []string) ([]string, error) {
+	result := make([]string, len(paths))
+	for i, name := range paths {
+		name = strings.TrimSuffix(name, "/")
+		if !profileRelative(name) {
+			return nil, errors.New("source.paths requires clean relative paths")
+		}
+		result[i] = name
+	}
+	slices.Sort(result)
+	return slices.Compact(result), nil
+}
+
+type gitProfileEntry struct {
+	Name, Mode, Object string
+}
+
+func scopedGitEntries(ctx context.Context, root string, source profileSource) ([]gitProfileEntry, error) {
+	paths, err := cleanProfilePaths(source.Paths)
+	if err != nil {
+		return nil, err
+	}
+	args := append([]string{"-C", root, "--literal-pathspecs", "ls-tree", "-r", "-z", "--full-tree", source.Git, "--"}, paths...)
+	data, err := exec.CommandContext(ctx, "git", args...).Output()
+	if err != nil {
+		return nil, err
+	}
+	var entries []gitProfileEntry
+	for _, row := range bytes.Split(data, []byte{0}) {
+		if len(row) == 0 {
+			continue
+		}
+		header, name, ok := strings.Cut(string(row), "\t")
+		fields := strings.Fields(header)
+		if !ok || len(fields) != 3 || fields[1] != "blob" || (fields[0] != "100644" && fields[0] != "100755") || !profileInputName(name) {
+			return nil, errors.New("source.paths requires regular files")
+		}
+		entries = append(entries, gitProfileEntry{name, fields[0], fields[2]})
+	}
+	for _, path := range paths {
+		found := false
+		for _, entry := range entries {
+			if entry.Name == path || strings.HasPrefix(entry.Name, path+"/") {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return nil, errors.New("source path missing from committed tree")
+		}
+	}
+	return entries, nil
+}
+
+// Read selected Git blobs directly: archive attributes outside source.paths
+// cannot alter selected bytes, and export-subst cannot inject a whole-tree ID.
+func archiveGitEntries(ctx context.Context, root string, entries []gitProfileEntry, write func(string, int64, int64, io.Reader) error) error {
+	cmd := exec.CommandContext(ctx, "git", "-C", root, "cat-file", "--batch")
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		return err
+	}
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		in.Close()
+		return err
+	}
+	if err = cmd.Start(); err != nil {
+		in.Close()
+		return err
+	}
+	defer func() {
+		if cmd.ProcessState == nil {
+			cmd.Process.Kill()
+			cmd.Wait()
+		}
+	}()
+	defer in.Close()
+	defer out.Close()
+	reader := bufio.NewReader(out)
+	for _, entry := range entries {
+		if _, err = fmt.Fprintln(in, entry.Object); err != nil {
+			return err
+		}
+		header, err := reader.ReadString('\n')
+		if err != nil {
+			return err
+		}
+		fields := strings.Fields(header)
+		if len(fields) != 3 || fields[0] != entry.Object || fields[1] != "blob" {
+			return errors.New("unexpected Git blob")
+		}
+		size, err := strconv.ParseInt(fields[2], 10, 64)
+		if err != nil || size < 0 {
+			return errors.New("invalid Git blob size")
+		}
+		mode, _ := strconv.ParseInt(entry.Mode, 8, 64)
+		if err = write(entry.Name, mode, size, reader); err != nil {
+			return err
+		}
+		if newline, err := reader.ReadByte(); err != nil || newline != '\n' {
+			return errors.New("invalid Git blob boundary")
+		}
+	}
+	in.Close()
+	return cmd.Wait()
 }

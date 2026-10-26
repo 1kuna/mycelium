@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -876,4 +877,68 @@ func floorFreeFitFixture(t *testing.T, allowance float64) (*Queue, *fakeClock, M
 		MemoryConfiguration: memoryConfiguration(probe.Spec.Needs, probe.Spec.Args, probe.Spec.Program), MemoryPeak: &AttemptMemoryPeak{HostGB: &host, DeviceGB: &device},
 	}}
 	return q, clock, m, s
+}
+
+func TestMemoryEnvelopePerItemProfile(t *testing.T) {
+	q, clock := fixture(t)
+	if err := q.ConfigureFileStore(t.TempDir(), 1<<20, true); err != nil {
+		t.Fatal(err)
+	}
+	m := m3Machine()
+	m.CPUExtensionFingerprint = "profile-cpu-v1"
+	m.MemoryEnforcement = "memory ceilings enforced (cgroup v2)"
+	m.HostMemoryBudgetGB, m.MemoryCeilingSlackGB = 16, 0.1
+	machineCheck(t, q, m)
+	s := cpuSpec(1, 0)
+	s.Name, s.Project, s.RequireTarget, s.Needs.Memory = "items", "synthetic", true, "auto"
+	s.Targets = []ExecutionTarget{{OS: "linux", Arch: "amd64", Platform: "cpu"}}
+	s.ProfileMemory = strings.Repeat("a", 64)
+	// Distinct source/item bytes and appended commands, with a shared base digest.
+	for i := 0; i < 3; i++ {
+		data := []byte(fmt.Sprintf("item-%d", i))
+		path := filepath.Join(t.TempDir(), "item")
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		ref, err := IdentifyFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = os.WriteFile(q.files.blob(ref), data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		s.Files = FileManifest{".myce-source.tar": ref, ".myce-inputs/item": ref}
+		s.Run.Command = []string{"sh", "-ec", fmt.Sprintf("process item-%d", i)}
+		queued := submit(t, q, s)
+		j := assignedJob(machineCheck(t, q, m))
+		if j == nil || j.ID != queued.ID {
+			t.Fatal("profile not assigned", queued)
+		}
+		expected := "accepted peak × 1.25"
+		if i == 0 {
+			expected = "exploratory first run"
+		}
+		if j.MemoryEnvelope == nil || j.MemoryEnvelope.Source != expected {
+			t.Fatalf("item %d estimate: %+v", i, j.MemoryEnvelope)
+		}
+		if err = q.Started(result(j, false)); err != nil {
+			t.Fatal(err)
+		}
+		clock.Advance(time.Second)
+		done := result(j, true)
+		peak := 2.0
+		done.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak}
+		if err = q.Complete(done); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(q.s.WorkObservations) != 1 {
+		t.Fatalf("learned %d classes for one profile", len(q.s.WorkObservations))
+	}
+	s.ProfileMemory = strings.Repeat("b", 64) // Changed base configuration or per_item identity.
+	queued := submit(t, q, s)
+	j := assignedJob(machineCheck(t, q, m))
+	if j == nil || j.ID != queued.ID || j.MemoryEnvelope == nil || j.MemoryEnvelope.Source != "exploratory first run" {
+		t.Fatalf("changed profile reused old memory: %+v", j)
+	}
 }

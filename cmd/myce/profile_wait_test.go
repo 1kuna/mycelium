@@ -65,7 +65,7 @@ func TestProfileAdoptedObserverNotifier(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var out, stderr strings.Builder
-			err := runProfile(context.Background(), path, nil, "shared", tc.notify, "", "", "http://127.0.0.1:1", "fixture-token", &out, &stderr)
+			err := runProfile(context.Background(), path, nil, nil, "shared", tc.notify, "", "", "http://127.0.0.1:1", "fixture-token", &out, &stderr)
 			if err != nil {
 				t.Fatalf("adoption must succeed: %v", err)
 			}

@@ -37,12 +37,28 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 	detach := f.Bool("detach", false, "print job ID and return without waiting")
 	profile := f.String("profile", "", "project execution profile name or YAML path (returns a JSON receipt)")
 	key := f.String("key", "", "profile submission key (default: content-derived; reuse to recover)")
+	var inputFlags []string
+	f.Func("input", "per-submission file DEST=PATH (repeatable; requires --profile)", func(value string) error {
+		inputFlags = append(inputFlags, value)
+		return nil
+	})
 	notify := f.String("notify", os.Getenv("MYCE_NOTIFY"), "local notifier executable; must support --check and JSON on stdin")
 	if err := f.Parse(args); err != nil {
 		return err
 	}
+	itemInputs := map[string]string{}
+	for _, value := range inputFlags {
+		dest, local, ok := strings.Cut(value, "=")
+		if !ok || !profileInputName(dest) || local == "" {
+			return waitError(64, "profile_input_invalid: expected a clean DEST=PATH")
+		}
+		if _, exists := itemInputs[dest]; exists {
+			return waitError(64, "profile_input_invalid: duplicate destination")
+		}
+		itemInputs[dest] = local
+	}
 	if *profile != "" {
-		return runProfile(ctx, *profile, f.Args(), *key, *notify, *config, *joining, *address, *token, out, errOut)
+		return runProfile(ctx, *profile, f.Args(), itemInputs, *key, *notify, *config, *joining, *address, *token, out, errOut)
 	}
 	explicitNotify := false
 	f.Visit(func(v *flag.Flag) {
@@ -50,8 +66,8 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 			explicitNotify = true
 		}
 	})
-	if *key != "" || explicitNotify {
-		return errors.New("--key and --notify require --profile")
+	if *key != "" || explicitNotify || len(itemInputs) > 0 {
+		return errors.New("--key, --notify and --input require --profile")
 	}
 	if f.NArg() == 0 {
 		return errors.New("usage: myce run [flags] -- <command> [args]")

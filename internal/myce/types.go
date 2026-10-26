@@ -139,6 +139,9 @@ func (e Environment) Key() string {
 }
 
 type Spec struct {
+	// ProfileMemory binds the CLI's base command/check and common input bytes.
+	// Per-item arguments and files remain in the submitted execution spec.
+	ProfileMemory string            `json:"profile_memory,omitempty" yaml:"-"`
 	Disk          *DiskNeeds        `json:"disk,omitempty" yaml:"disk,omitempty"`
 	After         *PieceDependency  `json:"after,omitempty" yaml:"after,omitempty"`
 	Targets       []ExecutionTarget `json:"targets,omitempty" yaml:"targets,omitempty"`
@@ -175,6 +178,9 @@ type Spec struct {
 }
 
 func (s Spec) Validate() error {
+	if s.ProfileMemory != "" && (!profileMemoryWork(s) || (FileRef{SHA256: s.ProfileMemory}).validate() != nil) {
+		return reject("job_profile_invalid", errors.New("profile_memory requires a profile and SHA-256 identity"))
+	}
 	for _, target := range s.Targets {
 		if !extensionName.MatchString(target.OS) || !extensionName.MatchString(target.Arch) || !validGPU(target.Platform) {
 			return reject("job_placement_invalid", errors.New("targets require explicit OS, arch and platform"))

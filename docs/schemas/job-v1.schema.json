@@ -1964,6 +1964,10 @@
           "type": "string",
           "x-contract": "diagnostic"
         },
+        "profile_memory": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
         "program": {
           "$ref": "#/$defs/Program",
           "x-contract": "diagnostic"

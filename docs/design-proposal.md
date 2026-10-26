@@ -2066,3 +2066,36 @@ cleanup custody remain authoritative across restarts. Status exposes the chosen
 host's scarcity vector and usable RAM, or why its value is unknown. Fake-clock
 inventory and simulator evidence establish laptop behavior, not native fleet
 qualification. The explicit speed/deadline tradeoff remains slice 7.
+
+## Per-item profile runs (#222)
+
+The #222 implementation task extends the existing profile contract: one
+committed profile plus a caller-owned loop submits one ordinary job per item.
+Repeatable `myce run --profile P --input DEST=PATH -- ARGS` adds frozen,
+content-addressed files alongside the profile's common inputs. Destinations must
+be clean relative filenames, distinct from common inputs and each other, with
+no file/directory overlap. Relative local paths resolve from the project root.
+Source, common inputs and item inputs use the same verified queue file store;
+existing blobs are checked and reused rather than uploaded again.
+
+Default job keys include item bytes and appended arguments. A profile's memory
+identity instead binds its base command, check, environment, resource
+configuration and common input bytes, excluding appended arguments, item input
+names/bytes and the source archive. `memory_class: per_item` opts the appended
+arguments and item input identities back into memory comparability. This is
+memory estimation only; all existing acceptance, OOM, constraint, hardware and
+allowance fences remain. The CLI supplies a frozen `profile_memory` digest in
+the job spec; it does not replace the job's full execution fingerprint.
+
+`source: {git: HEAD, paths: [scripts/, pyproject.toml]}` selects literal,
+repository-relative committed files/directories. Every selection must exist and
+contain regular files; links, submodules, escaping paths and Git pathspec magic
+are refused. The archive retains repository-relative paths, executable modes
+and raw Git blob bytes, without archive-attribute substitution. Identity covers
+only selected names, modes and blob IDs. Literal HEAD's dirty check covers only
+those selections; `allow_dirty` still explicitly means committed bytes only.
+Omitting `paths` preserves whole-tree source behavior. `paths` is unavailable
+for directory/snapshot sources. Unrelated commits cannot change the scoped
+archive, generated key or queue spec, so replay from a fresh checkout adopts the
+retained job. Changed item bytes or selected source bytes generate a new job.
+No generated per-item profile, separate manifest, planner or transport is needed.

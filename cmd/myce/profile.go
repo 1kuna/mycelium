@@ -21,9 +21,10 @@ import (
 )
 
 type executionProfile struct {
-	myce.Spec `yaml:",inline"`
-	Source    profileSource `yaml:"source"`
-	Check     []string      `yaml:"check"`
+	myce.Spec   `yaml:",inline"`
+	Source      profileSource `yaml:"source"`
+	Check       []string      `yaml:"check"`
+	MemoryClass string        `yaml:"memory_class,omitempty"`
 }
 
 type profileReceipt struct {
@@ -117,7 +118,7 @@ func profileFailure(out io.Writer, r *profileReceipt, code int, reason string) e
 	return waitError(code, reason)
 }
 
-func runProfile(ctx context.Context, name string, args []string, key, notify, config, joining, address, token string, out, errOut io.Writer) error {
+func runProfile(ctx context.Context, name string, args []string, itemInputs map[string]string, key, notify, config, joining, address, token string, out, errOut io.Writer) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return err
@@ -159,12 +160,38 @@ func runProfile(ctx context.Context, name string, args []string, key, notify, co
 	if p.Extension != "" || p.Kind != "" || p.Program != nil || p.Execution != nil || p.Run.Workdir != "" || p.Run.Docker || len(p.Run.Sidecars) > 0 || len(p.Run.DockerSidecars) > 0 || len(p.Files) > 0 || p.SubmissionKey != "" {
 		return waitError(64, "profile_invalid: profile uses plain commands in an isolated source folder")
 	}
+	if p.MemoryClass != "" && p.MemoryClass != "per_item" {
+		return waitError(64, "profile_invalid: memory_class must be per_item or omitted")
+	}
+	itemRefs := myce.FileManifest{}
+	for dest, local := range itemInputs {
+		if !profileInputName(dest) || local == "" {
+			return waitError(64, "profile_input_invalid: invalid per-submission input")
+		}
+		if _, exists := p.Inputs[dest]; exists {
+			return waitError(64, "profile_input_invalid: destination overlaps a profile input")
+		}
+		if !filepath.IsAbs(local) {
+			local = filepath.Join(root, local)
+		}
+		itemRefs[dest], err = myce.IdentifyFile(local)
+		if err != nil {
+			return waitError(64, "profile_input_invalid: cannot identify per-submission input")
+		}
+	}
 	// A profile declares its inputs as local file mappings; they lower to the
 	// existing immutable files manifest. Outputs retain their ordinary job names.
 	intent := profileHash(struct {
 		Profile string
 		Args    []string
 	}{string(data), args})
+	if len(itemRefs) > 0 {
+		// Local filenames are not identity: identical bytes at another path adopt.
+		intent = profileHash(struct {
+			Intent string
+			Inputs myce.FileManifest
+		}{intent, itemRefs})
+	}
 	receipts := filepath.Join(root, ".mycelium", "receipts")
 	if err = os.MkdirAll(receipts, 0700); err != nil {
 		return err
@@ -201,13 +228,14 @@ func runProfile(ctx context.Context, name string, args []string, key, notify, co
 	}
 	var sourceIdentity string
 	inputRefs := myce.FileManifest{}
+	commonRefs := myce.FileManifest{}
 	if r.Key == "" {
 		p.Source, sourceIdentity, err = identifyProfileSource(ctx, root, p.Source)
 		if err != nil {
 			return waitError(64, "profile_source_invalid: source unavailable or dirty HEAD; commit it or declare allow_dirty")
 		}
 		for dest, local := range p.Inputs {
-			if !profileRelative(dest) || dest == ".myce-source.tar" || dest == ".myce-inputs" || strings.HasPrefix(dest, ".myce-inputs/") {
+			if !profileInputName(dest) {
 				return waitError(64, "profile_invalid: invalid input name")
 			}
 			if !filepath.IsAbs(local) {
@@ -216,6 +244,23 @@ func runProfile(ctx context.Context, name string, args []string, key, notify, co
 			inputRefs[dest], err = myce.IdentifyFile(local)
 			if err != nil {
 				return waitError(64, "profile_input_invalid: cannot identify declared input")
+			}
+		}
+		for dest, ref := range inputRefs {
+			commonRefs[dest] = ref
+		}
+		if p.Inputs == nil {
+			p.Inputs = map[string]string{}
+		}
+		for dest, local := range itemInputs {
+			p.Inputs[dest] = local
+			inputRefs[dest] = itemRefs[dest]
+		}
+		for name := range inputRefs {
+			for parent := filepath.Dir(name); parent != "."; parent = filepath.Dir(parent) {
+				if _, exists := inputRefs[parent]; exists {
+					return waitError(64, "profile_input_invalid: input destinations overlap")
+				}
 			}
 		}
 		if key == "" {
@@ -272,6 +317,19 @@ func runProfile(ctx context.Context, name string, args []string, key, notify, co
 			uploads[stored] = filepath.Base(frozen)
 			s.Files[stored] = inputRef
 			inputCommands = append(inputCommands, "mkdir -p "+shellArg("./"+filepath.Dir(dest))+"; cp "+shellArg("./"+stored)+" "+shellArg("./"+dest))
+		}
+		s.ProfileMemory = profileHash(struct {
+			Run    myce.RunSpec
+			Check  []string
+			Inputs myce.FileManifest
+			Class  string
+		}{p.Run, p.Check, commonRefs, p.MemoryClass})
+		if p.MemoryClass == "per_item" {
+			s.ProfileMemory = profileHash(struct {
+				Base   string
+				Args   []string
+				Inputs myce.FileManifest
+			}{s.ProfileMemory, args, itemRefs})
 		}
 		s.Inputs = nil
 		command := append(append([]string{}, p.Run.Command...), args...)

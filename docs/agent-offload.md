@@ -51,10 +51,12 @@ existing behavior. Optional member caps still apply, so remove a binding member
 cap if the job should measure its need within the shared job envelope.
 
 Memory comparability uses the project, profile YAML `name`, and a digest of the
-normalized command/configuration, including appended arguments, the check,
-environment and non-source inputs. The frozen source archive digest is excluded,
+base command/configuration, the check,
+environment and common profile input bytes. Per-submission `--input` files and
+arguments appended after `--` are excluded by default. Use `memory_class: per_item`
+in the profile to include both when items differ materially. The frozen source archive digest is excluded,
 so a new commit of the same suite can reuse its peak. Changing the command or
-configuration starts a separate memory class. These observations learn memory
+base configuration starts a separate memory class. These observations learn memory
 only, without throughput or timing curves. Plain commands outside the profile
 submission contract still require hints or explore on each run.
 
@@ -65,6 +67,14 @@ Choose exactly one source:
   Mycelium's own receipts. Other Git references archive their resolved committed
   tree without checking worktree changes. Explicit `allow_dirty: true` acknowledges
   using only committed bytes; dirty/untracked changes and the Git directory are excluded.
+- `source: {git: HEAD, paths: [scripts/, pyproject.toml]}`: archive only these
+  literal committed files/directories, retaining repository-relative names and
+  executable modes. The identity covers selected names, modes and raw Git blobs;
+  Git archive attributes do not transform them. Each selection must exist and
+  contain regular files. The dirty HEAD check is scoped to these paths. An
+  unrelated commit leaves both default keys and the queue spec unchanged, so a
+  fresh checkout adopts prior jobs. An empty list, links, submodules, escaping
+  paths and pathspec magic are refused. `paths` requires a Git source.
 - `source: {snapshot: source.tar}`: an explicit uncompressed tar archive.
 - `source: {directory: prepared-source}`: explicitly upload regular files in that
   directory. `.git` and `.mycelium/receipts` are excluded. Prepare this directory
@@ -79,6 +89,47 @@ relative filenames to ordinary result prefixes. Command exit, then `check` exit,
 then existing attempt-specific output verification must all succeed. Retrieve
 accepted outputs through `Client.DownloadResult` / Python `download_result`;
 these verify their SHA-256 and size.
+
+For independent items, commit one profile and add repeatable `--input DEST=PATH`
+flags to each submission. Relative local paths resolve from the project root,
+just like common profile inputs. Destinations cannot duplicate or overlap another
+input or use Mycelium's reserved staging names. Both common and item files are
+frozen; job keys include their content identities and appended arguments.
+Identical bytes at another local path retain the same identity. Common source
+and input blobs upload once and are reused through the queue file store.
+
+```yaml
+# .mycelium/profiles/analyze.yaml
+name: analyze
+project: example
+class: experiment
+source: {git: HEAD, paths: [scripts/]}
+environment: {}
+run: {command: [sh, scripts/analyze.sh]}
+inputs: {reference.json: data/reference.json}
+needs: {platform: cpu, cpu_cores: 1, memory: auto}
+targets: [{os: darwin, arch: arm64, platform: cpu}]
+outputs: {result.json: results}
+check: [test, -s, result.json]
+```
+
+The script reads `item` and `reference.json`, takes any appended arguments and
+writes `result.json`. Set targets to the OS/architecture the script supports.
+
+```sh
+for item in data/items/*; do
+  myce run --profile analyze --input "item=$item" -- --mode scan
+done
+```
+
+Upgrade the queue before using the new CLI: the queue must accept the profile's
+`profile_memory` identity field. Older queue versions reject that field.
+
+Each receipt identifies one job. Replay unchanged items to adopt their earlier
+jobs; changing an item or selected source bytes creates new jobs. The first
+successful unconstrained auto run teaches later items in the profile's memory
+class. With `memory_class: per_item`, each distinct item/argument set learns
+separately. Job and artifact retention still apply.
 
 Profiles upload their frozen source archive and explicit inputs to the queue's
 local file store in either checkpoint mode. A NAS fleet keeps its existing
@@ -123,7 +174,7 @@ Before any upload or submission, `.mycelium/receipts/` contains a synced, privat
 receipt with frozen source/input hashes, argv and submission key. Gitignore this
 folder in each consuming project. The default key derives from profile, args and
 source/input identities; identical work adopts its previous job. Git keys use
-the resolved tree, while directory and extra inputs are hashed in place. Use
+the resolved tree (or selected paths when scoped), while directory and extra inputs are hashed in place. Use
 `--key KEY` to name an operation explicitly. Reusing it adopts the frozen intent
 even if local source changes; changed profile/args fail with a conflict. Use a new key for an
 intentional repeat. Keep receipts while recovery matters. Upload copies are
