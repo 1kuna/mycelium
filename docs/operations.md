@@ -456,7 +456,12 @@ Never put that token in URLs or copy private payloads into reports.
 ### Worker scratch retention
 
 Each worker cleans its own state directory once a minute. Finished worker logs
-go after the worker's `--log-retention` (default 7 days). Per-attempt input and
+go after the worker's `--log-retention` (default 7 days). Cleared per-attempt
+state and associated process/result/diagnostic files keep that same window after
+custody clears. Live attempts, pending result replay, indexed actors and Docker
+custody awaiting the stopped-container collector are protected. Private Docker
+evidence survives container removal until this log window expires. Unknown
+orphan records are retained for recovery. Per-attempt input and
 work folders (`job-files/JOB/ATTEMPT`, including inputs, unpacked source and a
 Python job's `.venv`) go **24 hours** after the worker first finds them without
 attempt custody, timed by the worker clock. That is after the queue accepts the
@@ -467,6 +472,12 @@ to run when `job-files` is not a real directory, for example a symlink. A folder
 it cannot remove, such as one with root-owned Docker output, gets a fresh day
 and is retried; other folders are still cleaned, and a repeated error is logged
 once rather than every minute.
+
+Successful installs keep one previous copy of each replaced artifact in the
+role's `.Trash`; older installer-owned copies are pruned after activation. The
+current install and the immediately replaced binary/config/service are preserved.
+Failed transactions do not prune. Cleanup failures are reported and retried by
+the next successful install, without undoing a healthy activation.
 
 ## Model master folder, worker cache, and production reservations
 

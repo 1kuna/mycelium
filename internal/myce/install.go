@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"html"
 	"io/fs"
+	"log"
 	"net/url"
 	"os"
 	"os/exec"
@@ -52,6 +53,9 @@ func LocalMachineProbe() MachineProbe {
 		case "systemctl", "systemd-run", "launchctl", "loginctl", "codesign", "uv", "uvx", "pixi":
 		default:
 			probeguard.Check()
+		}
+		if n == cachedMountInventoryCommand {
+			return cachedMountInventory(ctx)
 		}
 		cmd := exec.CommandContext(ctx, n, args...)
 		cmd.Env = withoutMyceToken(os.Environ())
@@ -387,6 +391,10 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 	defer func() {
 		if result != nil && len(tx.published) > 0 {
 			result = errors.Join(result, tx.restore(ctx))
+		} else if result == nil {
+			if err := tx.pruneBackups(); err != nil {
+				log.Printf("install backup retention: %v", err)
+			}
 		}
 	}()
 	if err := prepareInstallNAS(ctx, c, command); err != nil {

@@ -41,6 +41,7 @@ func (r *workerRetry) succeeded(now time.Time, interval time.Duration) {
 }
 
 type workerState struct {
+	LaunchOutcome   string                 `json:"launch_outcome,omitempty"`
 	Attempts        []string               `json:"attempts,omitempty"`
 	PriorityStop    *PriorityPreemption    `json:"priority_stop,omitempty"`
 	Accelerator     bool                   `json:"accelerator"`

@@ -33,7 +33,7 @@ func TestOnboardingSelectsOnlyClusterNAS(t *testing.T) {
 				inventory += "//different-user@storage.invalid/share on " + second + " (smbfs, nodev)\n"
 			}
 			p := myce.MachineProbe{OS: "darwin", Arch: "arm64", Command: func(_ context.Context, name string, _ ...string) ([]byte, error) {
-				if name != "/sbin/mount" {
+				if name != "myce:mounts-nowait" {
 					t.Fatalf("unexpected command %s", name)
 				}
 				return []byte(inventory), nil

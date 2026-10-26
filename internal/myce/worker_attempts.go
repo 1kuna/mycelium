@@ -233,6 +233,9 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					}
 				}
 				s.state.Job, s.state.Result = nil, nil
+				// This branch requires confirmed release and queue acknowledgement.
+				// Failed launches may still carry intent or a previously reaped PID.
+				s.state.PID, s.state.LaunchPending = 0, false
 				if e := s.save(); e != nil {
 					finish(e)
 					return

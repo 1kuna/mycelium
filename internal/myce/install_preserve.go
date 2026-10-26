@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // InstallFlags uses the same table as parsing, overlay and validation.
@@ -233,4 +234,65 @@ func (tx *installTransaction) retire(path string) error {
 	}
 	tx.published = append(tx.published, old)
 	return syncWorkerDir(filepath.Dir(path))
+}
+
+// pruneBackups keeps the immediately replaced artifact for each installed path.
+// Only committed transactions prune; current files and this transaction's exact
+// backups are never candidates. This is diagnostic retention, not rollback policy.
+func (tx *installTransaction) pruneBackups() error {
+	var result error
+	keep := map[string]string{}
+	for _, p := range tx.published {
+		if p.backup != "" {
+			keep[p.path] = p.backup
+		}
+	}
+	for path := range tx.originals {
+		trash := filepath.Join(filepath.Dir(path), ".Trash")
+		info, err := os.Lstat(trash)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			result = errors.Join(result, err)
+			continue
+		}
+		if !info.IsDir() {
+			result = errors.Join(result, errors.New("install backup root must be a real directory"))
+			continue
+		}
+		entries, err := os.ReadDir(trash)
+		if err != nil {
+			result = errors.Join(result, err)
+			continue
+		}
+		var backups []string
+		var latest time.Time
+		retained := keep[path]
+		for _, entry := range entries {
+			prefix, ok := strings.CutSuffix(entry.Name(), "-"+filepath.Base(path))
+			if !ok || !validAttemptIdentity(prefix) {
+				continue
+			}
+			info, err := entry.Info()
+			if err != nil {
+				result = errors.Join(result, err)
+				continue
+			}
+			if !info.Mode().IsRegular() {
+				continue
+			}
+			backup := filepath.Join(trash, entry.Name())
+			backups = append(backups, backup)
+			if keep[path] == "" && (retained == "" || info.ModTime().After(latest)) {
+				retained, latest = backup, info.ModTime()
+			}
+		}
+		for _, backup := range backups {
+			if backup != retained {
+				result = errors.Join(result, os.Remove(backup))
+			}
+		}
+	}
+	return result
 }

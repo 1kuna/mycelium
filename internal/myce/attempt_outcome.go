@@ -89,7 +89,8 @@ func (e *recordedStartError) Unwrap() error { return e.cause }
 
 func (s *workerStore) startFailure(j Job, kind string, cause error) error {
 	facts := memberOutcome{Infrastructure: []infrastructureFact{{Kind: kind, At: time.Now().UTC()}}}
-	if err := saveWorkerJSON(s.dir, fmt.Sprintf("launch-%s-%d.outcome.json", j.ID, j.Attempt), facts); err != nil {
+	s.state.LaunchOutcome = fmt.Sprintf("launch-%s-%d.outcome.json", j.ID, j.Attempt)
+	if err := saveWorkerJSON(s.dir, s.state.LaunchOutcome, facts); err != nil {
 		return errors.Join(cause, err)
 	}
 	return &recordedStartError{cause: cause, facts: facts}
