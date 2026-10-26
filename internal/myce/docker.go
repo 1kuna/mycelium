@@ -289,6 +289,9 @@ func (d *dockerAttempt) callWithTimeout(timeout time.Duration, args ...string) (
 	operation := "reconcile"
 	if len(args) > 0 {
 		operation = args[0]
+		if operation == "rm" {
+			operation = "reconcile"
+		}
 		if operation == "network" && len(args) > 1 {
 			operation += "." + args[1]
 		}
@@ -691,7 +694,7 @@ func (d *dockerAttempt) settleFailedStart(containers []dockerInspection) (bool, 
 		}
 		// No force: a start racing inspection makes rm refuse, retaining custody.
 		_, err := d.call("rm", id)
-		return true, runtimeErrorFor("remove", err) // Re-inventory before settling removal.
+		return true, err // Re-inventory before settling removal.
 	}
 	// Do not treat a missing label match as proof: inspect the exact ID too.
 	_, err := d.call("inspect", id)

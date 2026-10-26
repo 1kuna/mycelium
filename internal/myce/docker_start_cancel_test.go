@@ -69,6 +69,17 @@ func TestDockerCancelledStartRestartAfterRemoval(t *testing.T) {
 		cmd := exec.CommandContext(ctx, d.binary, args...)
 		cmd.Env = dockerClientEnvironment()
 		out, err := cmd.Output()
+		if args[0] == "inspect" && err == nil {
+			var objects []dockerInspection
+			if err := json.Unmarshal(out, &objects); err != nil {
+				return nil, err
+			}
+			for i := range objects {
+				objects[i].State.Status = "created"
+				objects[i].State.ExitCode = 128
+			}
+			return json.Marshal(objects)
+		}
 		if args[0] == "rm" && err == nil {
 			return nil, context.Canceled // Removal happened, receipt was lost.
 		}
