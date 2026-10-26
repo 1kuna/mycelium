@@ -1373,8 +1373,10 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 	oomFailure := !r.Success && (r.OutOfMemory || ceilingFailure)
 	outcome.OutOfMemory = oomFailure
 	// Ceiling pressure can hide the true need even without an OOM. Reuse
-	// memory-only invalidation without changing the attempt outcome.
-	if oomFailure || r.MemoryPeak != nil && r.MemoryPeak.Constrained {
+	// memory-only invalidation without changing the attempt outcome. Only
+	// attempt-scoped signals invalidate: unenforced process-group samples
+	// never do, though their real OOM still counts.
+	if oomFailure || r.MemoryPeak != nil && r.MemoryPeak.Constrained && r.MemoryPeak.Source != processGroupMemorySource {
 		q.recordWorkOOM(j, r, oomFailure)
 	}
 	stageFailure := (j.Spec.Priority == "production" || plannedPriorityStop(j)) && !r.Success && !r.Interrupted

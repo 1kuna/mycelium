@@ -61,7 +61,7 @@ func TestMemorySamplingShortHostPeak(t *testing.T) {
 	}
 	f := &memorySamplingFS{spike: true, observed: make(chan struct{})}
 	a.fs = f
-	finish := (Worker{}).observeAttemptMemory(a, Job{Spec: cpuSpec(1, 0)})
+	finish := (Worker{}).observeAttemptMemory(a, Job{Spec: cpuSpec(1, 0)}, nil)
 	defer finish()
 	select {
 	case <-f.observed:
@@ -112,7 +112,7 @@ printf 'GPU-one, 42, N/A\n'
 	a.fs = f
 	w := Worker{Machine: Machine{GPU: "cuda", Device: "GPU-one"}}
 	j := Job{Spec: Spec{Needs: ResourceNeeds{Memory: "auto", Platform: Platform{Required: []string{"cuda"}}}}}
-	finish := w.observeAttemptMemory(a, j)
+	finish := w.observeAttemptMemory(a, j, nil)
 	defer finish()
 	select {
 	case <-f.observed:
@@ -265,7 +265,7 @@ func TestMemorySamplingSubTickDoesNotLearn(t *testing.T) {
 		t.Fatal(err)
 	}
 	a.fs = &memorySamplingFS{}
-	peak := (Worker{}).observeAttemptMemory(a, Job{Spec: cpuSpec(1, 0)})()
+	peak := (Worker{}).observeAttemptMemory(a, Job{Spec: cpuSpec(1, 0)}, nil)()
 	if peak == nil || !peak.Constrained {
 		t.Fatalf("start/post-exit readings were learned as a peak: %+v", peak)
 	}

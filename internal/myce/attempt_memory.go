@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -39,6 +40,7 @@ func (a *memoryAttempt) peak() *AttemptMemoryPeak {
 	}
 	if b, err := a.fs.ReadFile(filepath.Join(a.path, "memory.events")); err == nil {
 		events := memoryCounters(b)
+		p.Events = &MemoryEventCounts{High: events["high"], Max: events["max"], OOM: events["oom"], OOMKill: events["oom_kill"], OOMGroupKill: events["oom_group_kill"]}
 		// Learned envelopes add 1.25x headroom, so healthy resident use is
 		// about 80% of the cap. Use the midpoint to saturation (90%) to
 		// distinguish binding resident pressure from ordinary file-cache reclaim.
@@ -140,9 +142,113 @@ func (a *memoryAttempt) processIDs(ids map[int]bool) error {
 	return nil
 }
 
+// processMemoryProbe samples attempts on hosts without cgroup accounting.
+type processMemoryProbe struct {
+	// Resident bytes summed over live members of the process groups, and how
+	// many members were found.
+	Resident func(groups map[int]bool) (uint64, int, error)
+}
+
+func processGroupResident(out []byte, groups map[int]bool) (uint64, int, error) {
+	var total uint64
+	members := 0
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 3 {
+			continue
+		}
+		pgid, e1 := strconv.Atoi(fields[1])
+		kib, e2 := strconv.ParseUint(fields[2], 10, 64)
+		if e1 != nil || e2 != nil {
+			return 0, 0, errors.New("invalid process inventory")
+		}
+		if groups[pgid] {
+			total += kib << 10
+			members++
+		}
+	}
+	return total, members, nil
+}
+
+// Without cgroups (macOS), the attempt boundary is its process groups, the
+// same boundary the worker signals. Periodic RSS sums cover concurrent
+// members; rusage max RSS reports only the largest waited process. Shared
+// pages count once per process, but compressed pages, members that left the
+// group and spikes shorter than the interval are missed, so it is no bound in
+// either direction. Nothing enforces it, and host-wide swap or pressure cannot
+// attribute pressure to this attempt, so these peaks are never constrained.
+func (w Worker) observeProcessMemory(groups func() []int) func() *AttemptMemoryPeak {
+	probe := w.processMemory
+	var mu sync.Mutex
+	var peak *AttemptMemoryPeak
+	sample := func() {
+		ids := map[int]bool{}
+		for _, g := range groups() {
+			if g > 0 {
+				ids[g] = true
+			}
+		}
+		bytes, members, err := probe.Resident(ids)
+		if err != nil || members == 0 {
+			return
+		}
+		gb := float64(bytes) / (1 << 30)
+		next := &AttemptMemoryPeak{HostGB: &gb, Source: processGroupMemorySource}
+		mu.Lock()
+		peak = sampledMemoryPeak(peak, next)
+		peak.Source = processGroupMemorySource
+		mu.Unlock()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		tick := time.NewTicker(500 * time.Millisecond)
+		defer tick.Stop()
+		for {
+			sample()
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+			}
+		}
+	}()
+	var once sync.Once
+	return func() *AttemptMemoryPeak {
+		once.Do(func() {
+			cancel()
+			<-done
+		})
+		mu.Lock()
+		defer mu.Unlock()
+		return peak
+	}
+}
+
+// Raise a process-group peak to the root's exit max RSS, which catches a
+// spike between samples in the main process.
+func withExitMaxRSS(peak *AttemptMemoryPeak, state *os.ProcessState) *AttemptMemoryPeak {
+	if peak == nil || peak.Source != processGroupMemorySource || state == nil {
+		return peak
+	}
+	ru, ok := state.SysUsage().(*syscall.Rusage)
+	if !ok {
+		return peak
+	}
+	if gb := rusageMaxRSSBytes(ru) / (1 << 30); validRate(gb) && (peak.HostGB == nil || gb > *peak.HostGB) {
+		peak.HostGB = &gb
+	}
+	return peak
+}
+
 // Sample only processes inside this exact attempt. Driver/device totals include
 // other workloads and cannot serve as job peaks. Sampling is a lower bound.
-func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job) func() *AttemptMemoryPeak {
+// groups names the attempt's process groups for hosts without cgroups.
+func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []int) func() *AttemptMemoryPeak {
+	if a == nil && w.processMemory != nil && groups != nil {
+		return w.observeProcessMemory(groups)
+	}
 	if a == nil {
 		return func() *AttemptMemoryPeak { return nil }
 	}

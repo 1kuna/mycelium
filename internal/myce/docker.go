@@ -1038,7 +1038,7 @@ func (d *dockerAttempt) run(p *process, j Job, session string, output *os.File, 
 	defer close(d.closed)
 	finishMemory := func() *AttemptMemoryPeak { return nil }
 	if d.memoryWorker != nil {
-		finishMemory = d.memoryWorker.observeAttemptMemory(d.envelope(), j)
+		finishMemory = d.memoryWorker.observeAttemptMemory(d.envelope(), j, nil)
 	}
 	defer finishMemory()
 	stopEvents := d.observeDockerEvents()

@@ -747,7 +747,11 @@ and main `run.memory_gb` are optional additional member caps; omit them to let
 members share the job envelope. Learn sampled whole-group anon + kernel + shmem
 from `memory.stat` every 200 ms, excluding reclaimable file cache; `memory.peak` remains a
 total-memory diagnostic. macOS remains admission-only and does not promise a kernel
-RAM ceiling. OOM is a job failure with an explicit resource-limit cause.
+RAM ceiling. There, the worker learns the summed RSS of the attempt's process
+groups every 500 ms (single-command jobs: at least main's exit max RSS), recorded
+as unenforced evidence. It omits compressed pages and members that left the group,
+so it can read low. It is never marked constrained and never invalidates learned
+peaks; a real OOM still does. Darwin Metal jobs still explore. Linux peaks keep `memory.events` max/high/OOM counts beside them. OOM is a job failure with an explicit resource-limit cause.
 
 For qualified extension work, opt into automatic sizing. A submitter hint is
 optional:
