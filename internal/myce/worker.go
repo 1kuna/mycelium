@@ -982,8 +982,8 @@ func (w Worker) Run(stop context.Context) error {
 			case <-retentionCtx.Done():
 				return
 			case request := <-retentionRequests:
-				if e := pruneWorkerLogs(s.dir, "", request.now, w.LogRetention); e != nil {
-					log.Printf("worker log retention: %v", e)
+				if e := workerRetention(s.dir, request.now, w.LogRetention); e != nil {
+					log.Printf("worker retention: %v", e)
 				}
 				if w.DockerEndpoint == "" {
 					continue

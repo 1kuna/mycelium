@@ -78,10 +78,17 @@ func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
 	} else if !os.IsNotExist(err) {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(dir), 0700); err != nil {
-		return err
+	var staged string
+	var err error
+	// Worker retention may remove an empty job folder between these calls once.
+	for range 2 {
+		if err = os.MkdirAll(filepath.Dir(dir), 0700); err != nil {
+			return err
+		}
+		if staged, err = os.MkdirTemp(filepath.Dir(dir), ".inputs-"); !errors.Is(err, os.ErrNotExist) {
+			break
+		}
 	}
-	staged, err := os.MkdirTemp(filepath.Dir(dir), ".inputs-")
 	if err != nil {
 		return err
 	}

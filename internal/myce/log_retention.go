@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -129,4 +130,80 @@ func pruneWorkerLogs(dir, pending string, now time.Time, age time.Duration) erro
 		}
 	}
 	return nil
+}
+
+// workerRetention is one pass of the worker's periodic local retention.
+func workerRetention(dir string, now time.Time, logAge time.Duration) error {
+	return errors.Join(pruneWorkerLogs(dir, "", now, logAge), pruneAttemptFiles(dir))
+}
+
+// pruneAttemptFiles removes job-files attempt folders that no saved attempt
+// custody claims (#201). Custody clears only after the queue accepts the
+// result, and a crash leaves orphans without custody. Folders are listed
+// before custody is read, and custody is saved before a folder is created, so
+// a listed folder without custody can never belong to a starting attempt.
+func pruneAttemptFiles(dir string) error {
+	root := filepath.Join(dir, "job-files")
+	jobs, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	listed := map[string][]string{}
+	for _, job := range jobs {
+		if !job.IsDir() {
+			continue
+		}
+		entries, err := os.ReadDir(filepath.Join(root, job.Name()))
+		if err != nil {
+			return err
+		}
+		for _, e := range entries {
+			listed[job.Name()] = append(listed[job.Name()], e.Name())
+		}
+		if len(entries) == 0 {
+			listed[job.Name()] = nil
+		}
+	}
+	custody := map[string]map[string]bool{}
+	paths, err := filepath.Glob(filepath.Join(dir, "state-attempt-*.json"))
+	if err != nil {
+		return err
+	}
+	for _, path := range append(paths, filepath.Join(dir, "legacy-state.json"), filepath.Join(dir, "state.json")) {
+		data, err := os.ReadFile(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		var st workerState
+		if err = decodeWorkerState(data, &st); err != nil {
+			return err
+		}
+		if st.Job != nil {
+			if custody[st.Job.ID] == nil {
+				custody[st.Job.ID] = map[string]bool{}
+			}
+			custody[st.Job.ID][strconv.Itoa(st.Job.Attempt)] = true
+		}
+	}
+	var result error
+	for job, names := range listed {
+		for _, name := range names {
+			// Staging folders of a held job may belong to its current attempt.
+			if custody[job][name] || custody[job] != nil && strings.HasPrefix(name, ".") {
+				continue
+			}
+			result = errors.Join(result, os.RemoveAll(filepath.Join(root, job, name)))
+		}
+		if custody[job] == nil {
+			// Only an empty folder goes; a new attempt may have just created one.
+			_ = os.Remove(filepath.Join(root, job))
+		}
+	}
+	return result
 }
