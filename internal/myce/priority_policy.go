@@ -317,7 +317,7 @@ func (q *Queue) slotSpec(s *ModelSlot) Spec {
 func (q *Queue) hostPrioritySpec(host string) Spec {
 	best := Spec{Priority: "production"}
 	found := false
-	for _, j := range q.s.Jobs {
+	for _, j := range q.liveJobs() {
 		if j.ProductionHost == host && j.Spec.Priority == "production" && !terminal(j.State) && !cancelled(j) {
 			if !found || q.comparePriority(j.Spec, best) < 0 {
 				best = j.Spec

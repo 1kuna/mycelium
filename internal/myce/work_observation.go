@@ -224,7 +224,7 @@ func (q *Queue) beginWorkTiming(j *Job) {
 // the competing work finishes before this attempt. Reuse exact host custody.
 func (q *Queue) invalidateWorkTimings() {
 	obligations := map[string][]HostObligation{}
-	for _, j := range q.s.Jobs {
+	for _, j := range q.liveJobs() {
 		if j.Timing == nil || j.Timing.Key == nil || j.Timing.Reason != "" || j.State != "running" {
 			continue
 		}

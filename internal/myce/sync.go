@@ -73,7 +73,7 @@ func (q *Queue) cachePins(m *Machine) []string {
 }
 func (q *Queue) modelScores(m *Machine) map[string]int {
 	scores := map[string]int{}
-	for _, j := range q.s.Jobs {
+	for _, j := range q.liveJobs() {
 		if j.Spec.Needs.Model == "" || len(j.Spec.AllowedMachines) > 0 && !contains(j.Spec.AllowedMachines, m.ID) || len(j.Spec.Needs.Platform.Required) > 0 && !contains(j.Spec.Needs.Platform.Required, m.GPU) {
 			continue
 		}
@@ -109,7 +109,7 @@ func (q *Queue) copyPlan(m *Machine) ([]CopyTask, []CopyTask, []string) {
 			}
 		}
 	}
-	for _, j := range q.s.Jobs {
+	for _, j := range q.liveJobs() {
 		if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") && j.Spec.Needs.Model != "" && !contains(pins, j.Spec.Needs.Model) {
 			pins = append(pins, j.Spec.Needs.Model)
 		}
@@ -146,7 +146,7 @@ func (q *Queue) copyPlan(m *Machine) ([]CopyTask, []CopyTask, []string) {
 	sort.Slice(usage, func(i, j int) bool { return usage[i].Model < usage[j].Model })
 	plan := []CopyTask{}
 	busy := q.dockerBlocker(hostID(m)) != "" || q.held(hostID(m)) || m.Gone || m.Leaving || q.unreported[m.ID]
-	for _, j := range q.s.Jobs {
+	for _, j := range q.liveJobs() {
 		if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") {
 			busy = true
 		}
@@ -227,7 +227,7 @@ func (q *Queue) workerBatchIdle(m *Machine) bool {
 	if m.Gone || m.Leaving || q.unreported[m.ID] {
 		return false
 	}
-	for _, j := range q.s.Jobs {
+	for _, j := range q.liveJobs() {
 		if batchOnTarget(j, m) && (j.State == "running" || j.State == "stopping") {
 			return false
 		}

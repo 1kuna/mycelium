@@ -73,11 +73,11 @@ func (q *Queue) CancelSubmission(project, key string) (Cancellation, error) {
 			q.s.Submissions = map[string]*submissionRecord{}
 		}
 		digest := submissionDigest(project, key)
-		record := q.s.Submissions[digest]
+		record := q.touchSubmission(digest)
 		if record == nil {
 			now := q.clock.Now()
 			record = &submissionRecord{Kind: submissionReservation, Project: project, Key: key, Created: &now, CancelledAt: &now}
-			q.s.Submissions[digest] = record
+			q.putSubmission(digest, record)
 		}
 		out = Cancellation{Project: project, SubmissionKey: &key, WillNotRun: true, Release: releaseState("not_applicable"), State: "absent"}
 		if record.Kind == submissionExpired {
@@ -110,6 +110,12 @@ func (q *Queue) CancelSubmission(project, key string) (Cancellation, error) {
 // Called only under update. Keep terminal state/results, but persist exclusion
 // even for failed jobs that an operator loss refund could otherwise requeue.
 func (q *Queue) cancelJob(j *Job) {
+	q.touchJob(j.ID)
+	if q.records != nil {
+		if key := q.records.bindings[j.ID]; key != "" {
+			q.touchSubmission(key)
+		}
+	}
 	for _, child := range q.cancellationMembers(j) {
 		if !cancelled(child) {
 			q.cancelJob(child)
@@ -193,6 +199,12 @@ func (c Client) CancelSubmission(ctx context.Context, project, key string) (Canc
 // cleanup protocol) can mark a copy released. Loss and grace expiry never do.
 func (q *Queue) confirmCopyRelease(r Result) {
 	j := q.retainedJob(r.ID)
+	q.touchJob(r.ID)
+	if q.records != nil {
+		if key := q.records.bindings[r.ID]; key != "" {
+			q.touchSubmission(key)
+		}
+	}
 	if j == nil {
 		return
 	}
@@ -274,9 +286,15 @@ func (q *Queue) retainedJob(id string) *Job {
 	if j := q.s.Jobs[id]; j != nil {
 		return j
 	}
-	for _, record := range q.s.Submissions {
-		if record.Kind == submissionBinding && record.JobID == id {
-			return record.Job
+	if q.records != nil {
+		if r := q.s.Submissions[q.records.bindings[id]]; r != nil {
+			return r.Job
+		}
+	} else {
+		for _, record := range q.s.Submissions {
+			if record.Kind == submissionBinding && record.JobID == id {
+				return record.Job
+			}
 		}
 	}
 	return nil

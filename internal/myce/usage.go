@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -57,7 +58,7 @@ type usageSample struct {
 func (q *Queue) deviceUsage(m *Machine) []usageSample {
 	rows := []usageSample{}
 	active, allocated := 0, 0
-	for _, j := range q.s.Jobs {
+	for _, j := range q.liveJobs() {
 		if (batchOnTarget(j, m) || m.Devices != nil && m.GPU == "cpu" && j.Machine == m.ID && j.Spec.Needs.cpuOnly()) && (j.State == "running" || j.State == "stopping") {
 			busy, fair := 0.0, 1.0
 			if j.Spec.Needs.cpuOnly() {
@@ -264,7 +265,20 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
 	if e = timing.commit(tx); e != nil {
 		return e
 	}
-	q.persisted = next
+	if q.persisted == nil {
+		q.persisted = map[string][]byte{}
+	}
+	for key, value := range next {
+		if value == nil {
+			delete(q.persisted, key)
+			delete(q.records.catalog, key)
+		} else {
+			q.persisted[key] = value
+			if key == "state" || strings.HasPrefix(key, "extensions/") || strings.HasPrefix(key, "work_observations/") {
+				q.records.catalog[key] = true
+			}
+		}
+	}
 	return nil
 }
 func (q *Queue) Usage(since time.Time) (UsageReport, error) {

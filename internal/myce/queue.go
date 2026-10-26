@@ -122,6 +122,8 @@ type Queue struct {
 	logCleanupHolds  queueHoldSampler
 	db               *sql.DB
 	persisted        map[string][]byte
+	records          *queueRecords
+	observeUpdate    func(time.Duration, time.Duration)
 	clock            Clock
 	root             string
 	restartUntil     time.Time
@@ -260,12 +262,20 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		return nil, err
 	}
 	if q.importCancellationEvidence() || q.s.FairUsageVersion == 0 {
-		if err = q.update(func() error { return nil }); err != nil {
+		if err = q.update(func() error {
+			for id := range q.s.Jobs {
+				q.touchJob(id)
+			}
+			for id := range q.s.Submissions {
+				q.touchSubmission(id)
+			}
+			return nil
+		}); err != nil {
 			db.Close()
 			return nil, err
 		}
 	}
-	for _, j := range q.s.Jobs {
+	for _, j := range q.liveJobs() {
 		if j.Timing != nil && !terminal(j.State) {
 			j.Timing.Reason = "queue restarted; occupancy unknown"
 		}
@@ -316,7 +326,7 @@ func (q *Queue) machineLossTimeout(id string) time.Duration {
 			timeout = d
 		}
 	}
-	for _, j := range q.s.Jobs {
+	for _, j := range q.liveJobs() {
 		if j.Machine == id && (j.State == "running" || j.State == "stopping") {
 			add(j.Spec.Priority)
 		}
@@ -388,11 +398,15 @@ func (q *Queue) updateTimed(fn func() error, timing *queueUpdateTiming) error {
 			})
 		}
 	}
+	if timing == nil && q.observeUpdate != nil {
+		timing = &queueUpdateTiming{}
+	}
 	timing.lock(&q.mu)
 	hold := q.updateHolds.start()
 	q.nasAvailable = available
 	defer func() {
 		duration := queueHoldDuration(hold)
+		timing.observe(q.observeUpdate)
 		q.mu.Unlock()
 		logQueueHold(duration, "update", fn)
 	}()
@@ -401,7 +415,10 @@ func (q *Queue) updateTimed(fn func() error, timing *queueUpdateTiming) error {
 		q.accountUsage(q.clock.Now())
 		return fn() // Simulation aborts on any error; it never resumes a failed mutation.
 	}
-	old, _ := json.Marshal(q.s)
+	old, err := q.beginRecords()
+	if err != nil {
+		return err
+	}
 	oldCalls := map[string]*ModelCall{}
 	for id, c := range q.calls {
 		copy := *c
@@ -416,7 +433,7 @@ func (q *Queue) updateTimed(fn func() error, timing *queueUpdateTiming) error {
 	oldEnvironmentRevision := q.environmentRevision
 	q.usageWrites = nil
 	q.accountUsage(q.clock.Now())
-	err := fn()
+	err = fn()
 	if err == nil {
 		q.invalidateWorkTimings()
 		q.invalidateWorkCurves()
@@ -439,10 +456,12 @@ func (q *Queue) updateTimed(fn func() error, timing *queueUpdateTiming) error {
 		q.calls = oldCalls
 		q.unreported = oldUnreported
 		q.networkQuiet = oldQuiet
-		q.s = state{}
-		_ = json.Unmarshal(old, &q.s)
+		q.rollbackRecords(old)
 	}
 
+	if err == nil {
+		q.commitRecords()
+	}
 	return err
 }
 func (q *Queue) Submit(s Spec) (*Job, error) {
@@ -638,13 +657,13 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 			j.WaitingSince = time.Time{}
 			j.Dependency = &PieceBinding{Job: s.After.Job, Piece: s.After.Piece, State: "blocked"}
 		}
-		q.s.Jobs[id] = j
+		q.putJob(id, j)
 		if s.SubmissionKey != "" {
 			if q.s.Submissions == nil {
 				q.s.Submissions = map[string]*submissionRecord{}
 			}
 			created := q.clock.Now()
-			q.s.Submissions[submissionDigest(s.Project, s.SubmissionKey)] = &submissionRecord{Kind: submissionBinding, Project: s.Project, Key: s.SubmissionKey, Fingerprint: fingerprint, JobID: id, Created: &created, Job: j}
+			q.putSubmission(submissionDigest(s.Project, s.SubmissionKey), &submissionRecord{Kind: submissionBinding, Project: s.Project, Key: s.SubmissionKey, Fingerprint: fingerprint, JobID: id, Created: &created, Job: j})
 		}
 		q.maintain()
 		out = cloneJob(j)
@@ -735,7 +754,7 @@ func (q *Queue) maintain() {
 	q.maintainHostMaintenance()
 	q.maintainSubmissions()
 	now := q.clock.Now()
-	for _, j := range q.s.Jobs {
+	for _, j := range q.liveJobs() {
 		if j.State == "queued" {
 			q.applyLearnedNeeds(j)
 		}
@@ -768,7 +787,7 @@ func (q *Queue) maintain() {
 			m.Gone = true
 			delete(q.unreported, m.ID)
 			m.Models = nil
-			for _, j := range q.s.Jobs {
+			for _, j := range q.liveJobs() {
 				if j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping") {
 					if cancelled(j) {
 						j.State = "cancelled"
@@ -802,7 +821,7 @@ func (q *Queue) maintain() {
 		}
 	}
 
-	for _, j := range q.s.Jobs {
+	for _, j := range q.liveJobs() {
 		// Machine attempts retain their exact device and host charge through kill;
 		// only their release acknowledgement can retire the stopping attempt.
 		m := q.s.Machines[j.Machine]
@@ -828,7 +847,7 @@ func (q *Queue) maintain() {
 	q.escalateDockerCleanup()
 	q.refreshHostMemory()
 	q.maintainHolds()
-	for _, j := range q.s.Jobs {
+	for _, j := range q.liveJobs() {
 		if startupPending(j) {
 			j.Reason = q.startStatusReason(j)
 		}
@@ -971,7 +990,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 			}
 		}
 		if c.AttemptProtocol == "" && c.Running == nil && old != nil && old.Session == m.Session {
-			for _, j := range q.s.Jobs {
+			for _, j := range q.liveJobs() {
 				if j.Machine == m.ID && j.Session == m.Session && j.State == "stopping" && !j.Spec.Run.Docker && q.held(hostID(old)) {
 					if cancelled(j) {
 						q.settleRelease(Result{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: j.Machine, Session: j.Session})
@@ -1000,7 +1019,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 			m.Leaving = old.Leaving || m.Leaving
 		}
 		if old != nil && old.Session != m.Session && c.Fresh {
-			for _, j := range q.s.Jobs {
+			for _, j := range q.liveJobs() {
 				if j.Machine == m.ID && j.Session == old.Session && (j.State == "running" || j.State == "stopping") {
 					if cancelled(j) {
 						j.State = "cancelled"
@@ -1115,7 +1134,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 			return nil
 		}
 		if m.Leaving {
-			for _, j := range q.s.Jobs {
+			for _, j := range q.liveJobs() {
 				if j.Machine == m.ID && j.Session == m.Session && j.Spec.Resumable {
 					q.stop(j, "machine leaving")
 				}
@@ -1142,7 +1161,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 			// A report for another key neither acknowledges an omitted stop nor
 			// hides it. Keep every outstanding control individually addressed.
 			if c.AttemptProtocol != "" {
-				for _, j := range q.s.Jobs {
+				for _, j := range q.liveJobs() {
 					if j.Machine == m.ID && j.Session == m.Session && j.State == "stopping" && !seen[attemptKey{j.ID, j.Attempt, j.Session}] {
 						if j.ReleaseConfirmed {
 							q.retry(j, j.Reason)
@@ -1155,7 +1174,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 			return nil
 		}
 		// Re-deliver an assignment if its HTTP response was lost before startup.
-		for _, j := range q.s.Jobs {
+		for _, j := range q.liveJobs() {
 			if j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping") {
 				if j.State == "stopping" {
 					// Omission only finishes a keyed stop after an exact release ack.
@@ -1305,7 +1324,7 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 			return errors.New("release-only acknowledgement cannot be pending")
 		}
 		q.settleRelease(r)
-		if j := q.s.Jobs[r.ID]; j != nil && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
+		if j := q.touchJob(r.ID); j != nil && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
 			j.ReleaseConfirmed = true
 			if r.Forced {
 				j.LastStopOutcome = "forced"
@@ -1339,7 +1358,7 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 	pendingTracked := false
 	if !r.ReleasePending {
 		settled = q.settleRelease(r)
-		if j := q.s.Jobs[r.ID]; j != nil && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
+		if j := q.touchJob(r.ID); j != nil && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
 			j.ReleaseConfirmed = true
 			if j.LastStopOutcome == "release pending" {
 				j.LastStopOutcome = "released"
@@ -1347,7 +1366,7 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 		}
 	}
 	if r.ReleasePending {
-		if j := q.s.Jobs[r.ID]; j != nil && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
+		if j := q.touchJob(r.ID); j != nil && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
 			q.retainRelease(j)
 		}
 		key := releaseKey(HostRelease{Job: r.ID, Machine: r.Machine, Session: r.Session, Attempt: r.Attempt})
@@ -1357,7 +1376,7 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 			q.s.HostReleases[key] = hold
 		}
 	}
-	if j := q.s.Jobs[r.ID]; j != nil && r.Forced && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
+	if j := q.touchJob(r.ID); j != nil && r.Forced && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
 		j.LastStopOutcome = "forced"
 		if r.ReleasePending {
 			j.LastStopOutcome += "; release pending"
@@ -1374,7 +1393,7 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 		}
 	}
 	// A retransmitted acknowledgement must not turn a completed job into stale work.
-	if j := q.s.Jobs[r.ID]; j != nil && terminal(j.State) && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
+	if j := q.touchJob(r.ID); j != nil && terminal(j.State) && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
 		return nil
 	}
 	j, err := q.current(r)
@@ -1502,7 +1521,7 @@ func (q *Queue) Leave(id string, now bool) error {
 			return errors.New("machine is not in the fleet")
 		}
 		m.Leaving = true
-		for _, j := range q.s.Jobs {
+		for _, j := range q.liveJobs() {
 			if j.Machine == id && (j.Spec.Resumable || now) {
 				q.stop(j, "machine leaving")
 			}
@@ -2039,7 +2058,7 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 
 // The bounded legacy adapter retains its original scalar recovery limit.
 func (q *Queue) workerHasOtherAttempt(machine, session, job string) bool {
-	for _, j := range q.s.Jobs {
+	for _, j := range q.liveJobs() {
 		if j.Machine == machine && j.Session == session && j.ID != job && (j.State == "running" || j.State == "stopping") {
 			return true
 		}

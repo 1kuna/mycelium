@@ -212,7 +212,7 @@ func (q *Queue) placementLiveness(scan *placementScan) map[string]bool {
 			timeouts[id] = d
 		}
 	}
-	for _, j := range q.s.Jobs {
+	for _, j := range q.liveJobs() {
 		if j.State == "running" || j.State == "stopping" {
 			add(j.Machine, j.Spec.Priority)
 		}

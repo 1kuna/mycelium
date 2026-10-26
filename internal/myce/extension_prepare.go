@@ -53,7 +53,7 @@ func (q *Queue) extensionPreparationPlan(m *Machine) []EnvironmentRecipe {
 	}
 	var selected *Job
 	var extension *Extension
-	for _, j := range q.s.Jobs {
+	for _, j := range q.liveJobs() {
 		if j.State != "queued" || !j.Spec.extensionJob() || !q.placementAllowed(j, m) {
 			continue
 		}

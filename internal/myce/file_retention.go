@@ -75,9 +75,10 @@ func (q *Queue) releaseFileUploadMarkers() {
 	if len(q.s.JobInputUploads) == 0 {
 		return
 	}
-	_, _, referenced := q.fileReferences(false)
+	_, _, referenced := q.fileReferences(false, q.touchedJobs())
+	q.records.referenceAdds = referenced
 	for hash := range q.s.JobInputUploads {
-		if referenced[hash] {
+		if referenced[hash] || q.records.references[hash] {
 			delete(q.s.JobInputUploads, hash)
 		}
 	}
@@ -90,6 +91,9 @@ func (q *Queue) ConfigureFileRetention(age time.Duration) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	q.fileRetention = age
+	if q.records != nil {
+		q.rebuildRecords()
+	}
 	return nil
 }
 
@@ -106,8 +110,12 @@ func isResultExpired(err error) bool {
 // answers; increasing retention later cannot restore deleted bytes.
 func (q *Queue) maintainFileExpiry() {
 	now := q.clock.Now()
-	for _, j := range q.s.Jobs {
-		if !terminal(j.State) || !hasJobFiles(j) {
+	if q.records == nil {
+		q.rebuildRecords()
+	}
+	for _, id := range q.records.files.due(now) {
+		j := q.touchJob(id)
+		if j == nil || !terminal(j.State) || !hasJobFiles(j) {
 			continue
 		}
 		// Some historical terminal paths did not stamp FinishedAt. Start their
@@ -137,9 +145,9 @@ func (q *Queue) maintainFileExpiry() {
 // q.mu must be held. Only expired terminal inputs/results are candidates.
 // Everything else with explicit custody is a keeping reference. In particular,
 // checkpoint generations and catalog snapshots survive terminal file expiry.
-func (q *Queue) fileReferences(pendingOnly bool) (expired, keep, referenced map[string]bool) {
+func (q *Queue) fileReferences(pendingOnly bool, subset ...map[string]*Job) (expired, keep, referenced map[string]bool) {
 	expired, keep, referenced = map[string]bool{}, map[string]bool{}, map[string]bool{}
-	for hash := range q.bundleReferences() {
+	for hash := range q.bundleReferences(subset...) {
 		keep[hash] = true
 	}
 	add := func(to map[string]bool, files FileManifest) {
@@ -209,11 +217,17 @@ func (q *Queue) fileReferences(pendingOnly bool) (expired, keep, referenced map[
 			}
 		}
 	}
-	for _, j := range q.s.Jobs {
+	jobs := q.s.Jobs
+	if len(subset) > 0 {
+		jobs = subset[0]
+	}
+	for _, j := range jobs {
 		job(j)
 	}
-	for _, record := range q.s.Submissions {
-		job(record.Job)
+	if len(subset) == 0 {
+		for _, record := range q.s.Submissions {
+			job(record.Job)
+		}
 	}
 	for _, e := range q.s.Extensions {
 		extension(e)
@@ -360,6 +374,22 @@ func (q *Queue) reclaimPublishedFiles() error {
 		mark := func(j *Job) {
 			if j == nil || j.FileReclamation == nil {
 				return
+			}
+			intersects := false
+			for _, hash := range j.FileReclamation.Pending {
+				if gone[hash] {
+					intersects = true
+					break
+				}
+			}
+			if !intersects {
+				return
+			}
+			q.touchJob(j.ID)
+			if q.records != nil {
+				if key := q.records.bindings[j.ID]; key != "" {
+					q.touchSubmission(key)
+				}
 			}
 			pending := j.FileReclamation.Pending[:0]
 			for _, hash := range j.FileReclamation.Pending {

@@ -246,7 +246,7 @@ func (q *Queue) initEnginePreemption(s *ModelSlot) {
 
 func (q *Queue) hostPreemptionDemand(host string) *Job {
 	spec := q.hostPrioritySpec(host)
-	for _, j := range q.s.Jobs {
+	for _, j := range q.liveJobs() {
 		if j.ProductionHost == host && !terminal(j.State) && !cancelled(j) && q.comparePriority(j.Spec, spec) == 0 {
 			return j
 		}

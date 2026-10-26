@@ -318,13 +318,21 @@ func (q *Queue) migrateBundleFiles() error {
 	if !changed {
 		return nil
 	}
-	return q.update(func() error { return nil })
+	return q.update(func() error {
+		for id := range q.s.Jobs {
+			q.touchJob(id)
+		}
+		for id := range q.s.Submissions {
+			q.touchSubmission(id)
+		}
+		return nil
+	})
 }
 
 // q.mu held. Retained history and keyed answers own bundles independently of
 // result-file expiry. Both P3-2 sweep passes recheck this set at their revision
 // fence before unlinking; publication holds the matching lifecycle read lock.
-func (q *Queue) bundleReferences() map[string]bool {
+func (q *Queue) bundleReferences(subset ...map[string]*Job) map[string]bool {
 	refs := map[string]bool{}
 	add := func(ref *FileRef) {
 		if ref != nil {
@@ -358,11 +366,17 @@ func (q *Queue) bundleReferences() map[string]bool {
 	for _, e := range q.s.Extensions {
 		extension(e)
 	}
-	for _, j := range q.s.Jobs {
+	jobs := q.s.Jobs
+	if len(subset) > 0 {
+		jobs = subset[0]
+	}
+	for _, j := range jobs {
 		job(j)
 	}
-	for _, r := range q.s.Submissions {
-		job(r.Job)
+	if len(subset) == 0 {
+		for _, r := range q.s.Submissions {
+			job(r.Job)
+		}
 	}
 	for _, slot := range q.s.ModelSlots {
 		if slot.EnvironmentRecipe != nil {

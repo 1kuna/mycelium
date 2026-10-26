@@ -111,7 +111,7 @@ func (q *Queue) refreshHostCPU() {
 func (q *Queue) hostCPUInUse(m *Machine, releasedJobs map[*Job]bool, releasedSlots map[*ModelSlot]bool, releasePreparation bool) int {
 	used := 0
 	covered := map[string]bool{}
-	for _, j := range q.s.Jobs {
+	for _, j := range q.liveJobs() {
 		owner := q.s.Machines[j.Machine]
 		if !releasedJobs[j] && !j.ReleaseConfirmed && owner != nil && hostID(owner) == hostID(m) && (j.State == "running" || j.State == "stopping") {
 			used += j.Spec.Needs.cores()
@@ -242,7 +242,7 @@ func cpuAllocationFits(m *Machine, cores int) bool {
 	return m.FreeCPUCores >= cores
 }
 func (q *Queue) workerHasExecutionCPUReservation(m *Machine) bool {
-	for _, j := range q.s.Jobs {
+	for _, j := range q.liveJobs() {
 		if j.Machine == m.ID && !j.ReleaseConfirmed && (j.State == "running" || j.State == "stopping") {
 			return true
 		}

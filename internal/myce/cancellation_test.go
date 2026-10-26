@@ -127,7 +127,7 @@ func TestCancellationKeyRecords(t *testing.T) {
 	if j.State != "cancelled" || j.CancelledAt == nil {
 		t.Fatal("reservation became runnable")
 	}
-	if err := q.update(func() error { delete(q.s.Jobs, j.ID); return nil }); err != nil {
+	if err := q.update(func() error { q.deleteJob(j.ID); return nil }); err != nil {
 		t.Fatal(err)
 	}
 	for _, byKey := range []bool{false, true} {

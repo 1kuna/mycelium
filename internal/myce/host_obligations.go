@@ -51,12 +51,19 @@ func (q *Queue) hostObligations(host string) []HostObligation {
 	pending := map[string]HostObligation{}
 	add := func(p HostObligation) { pending[obligationKey(p)] = p }
 	jobs := map[string]*Job{}
-	for id, j := range q.s.Jobs {
+	for id, j := range q.liveJobs() {
 		jobs[id] = j
 	}
-	for _, r := range q.s.Submissions {
-		if r.Job != nil && jobs[r.JobID] == nil {
-			jobs[r.JobID] = r.Job
+	if q.records == nil {
+		for _, r := range q.s.Submissions {
+			if r.Job != nil && jobs[r.JobID] == nil {
+				jobs[r.JobID] = r.Job
+			}
+		}
+	}
+	if q.records != nil {
+		for id, j := range q.records.removed {
+			jobs[id] = j
 		}
 	}
 	for _, j := range jobs {

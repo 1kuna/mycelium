@@ -98,7 +98,7 @@ func (q *Queue) refreshHostMemory() {
 		}
 		m.EffectiveHostMemoryBudgetGB = m.hostBudgetGB
 		reserved := 0.0
-		for _, j := range q.s.Jobs {
+		for _, j := range q.liveJobs() {
 			owner := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
 			if !j.ReleaseConfirmed && owner != nil && hostID(owner) == hostID(m) && (j.State == "running" || j.State == "stopping") {
 				reserved += hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
@@ -194,7 +194,7 @@ func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, r
 	}
 	var jobs []*Job
 	var slots []*ModelSlot
-	for _, j := range q.s.Jobs {
+	for _, j := range q.liveJobs() {
 		owner := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
 		if !releasedJobs[j] && !j.ReleaseConfirmed && owner != nil && hostID(owner) == hostID(m) && (j.State == "running" || j.State == "stopping") {
 			executions[j.Machine]++
@@ -346,7 +346,7 @@ func (q *Queue) reclaimableGPUMemory(m *Machine, priority string, identity ...Sp
 			room += model.MemoryGB
 		}
 	}
-	for _, j := range q.s.Jobs {
+	for _, j := range q.liveJobs() {
 		if batchOnTarget(j, m) && (j.State == "running" || j.State == "stopping") && q.batchPreemptible(j, demand) {
 			room += j.Spec.Needs.MemoryGB
 		}

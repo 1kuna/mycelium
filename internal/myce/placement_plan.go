@@ -157,7 +157,7 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool) 
 	if r, ok := q.s.BatchReleases[batchReleaseKey(m)]; ok && r.Session == m.Session && q.clock.Now().Before(r.Until) {
 		room += r.MemoryGB
 	}
-	for _, r := range q.s.Jobs {
+	for _, r := range q.liveJobs() {
 		if !batchOnTarget(r, m) || r.ReleaseConfirmed || (r.State != "running" && r.State != "stopping") {
 			continue
 		}

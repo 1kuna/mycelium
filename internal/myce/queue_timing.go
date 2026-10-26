@@ -45,6 +45,7 @@ func logQueueHold(duration time.Duration, operation string, fn func() error) {
 // are sampled independently above.
 type queueUpdateTiming struct {
 	started   time.Time
+	lockedAt  time.Time
 	mutexWait time.Duration
 	sqlCommit time.Duration
 }
@@ -61,6 +62,7 @@ func (t *queueUpdateTiming) lock(mu *sync.RWMutex) {
 	started := time.Now()
 	mu.Lock()
 	t.mutexWait = time.Since(started)
+	t.lockedAt = time.Now()
 }
 
 func (t *queueUpdateTiming) commit(tx *sql.Tx) error {
@@ -80,5 +82,12 @@ func (t *queueUpdateTiming) logLaunch(ok bool) {
 	if duration >= defaultWorkerInterval/2 {
 		log.Printf("event=slow_launch_authorization path=/api/workers/launch duration_ms=%.3f mutex_wait_ms=%.3f sqlite_commit_ms=%.3f ok=%t",
 			float64(duration)/float64(time.Millisecond), float64(t.mutexWait)/float64(time.Millisecond), float64(t.sqlCommit)/float64(time.Millisecond), ok)
+	}
+}
+
+// Optional internal observer used by the queue-history burst regression.
+func (t *queueUpdateTiming) observe(fn func(time.Duration, time.Duration)) {
+	if fn != nil {
+		fn(t.mutexWait, time.Since(t.lockedAt))
 	}
 }

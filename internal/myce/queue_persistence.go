@@ -92,12 +92,33 @@ func (q *Queue) persistState(tx *sql.Tx) (map[string][]byte, error) {
 	if err := put("state", base); err != nil {
 		return nil, err
 	}
-	for key, value := range q.s.Jobs {
+	jobs := q.s.Jobs
+	if q.persisted != nil {
+		jobs = map[string]*Job{}
+		for key := range q.records.jobs {
+			jobs[key] = q.s.Jobs[key]
+		}
+	}
+	for key, value := range jobs {
+		if value == nil {
+			next["jobs/"+key] = nil
+			if _, err := tx.Exec("DELETE FROM queue_state WHERE key=?", "jobs/"+key); err != nil {
+				return nil, err
+			}
+			continue
+		}
 		if err := put("jobs/"+key, value); err != nil {
 			return nil, err
 		}
 	}
-	for key, value := range q.s.Submissions {
+	submissions := q.s.Submissions
+	if q.persisted != nil {
+		submissions = map[string]*submissionRecord{}
+		for key := range q.records.submissions {
+			submissions[key] = q.s.Submissions[key]
+		}
+	}
+	for key, value := range submissions {
 		if err := put("submissions/"+key, value); err != nil {
 			return nil, err
 		}
@@ -112,8 +133,9 @@ func (q *Queue) persistState(tx *sql.Tx) (map[string][]byte, error) {
 			return nil, err
 		}
 	}
-	for key := range q.persisted {
+	for key := range q.records.catalog {
 		if _, ok := next[key]; !ok {
+			next[key] = nil
 			if _, err := tx.Exec("DELETE FROM queue_state WHERE key=?", key); err != nil {
 				return nil, err
 			}

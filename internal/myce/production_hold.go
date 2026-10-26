@@ -398,7 +398,7 @@ func (q *Queue) productionTarget(j *Job, call *ModelCall) string {
 				}
 			}
 			stops := 0
-			for _, r := range q.s.Jobs {
+			for _, r := range q.liveJobs() {
 				if r.Machine == m.ID && (r.State == "running" || r.State == "stopping") {
 					stops++
 				}
@@ -429,7 +429,7 @@ func (q *Queue) maintainHolds() {
 	now := q.clock.Now()
 	demand := map[string]bool{}
 	jobs := []*Job{}
-	for _, j := range q.s.Jobs {
+	for _, j := range q.liveJobs() {
 		if j.Spec.FanOut != nil && j.FanOut != nil && j.FanOut.Next > 0 {
 			continue
 		}
@@ -496,7 +496,7 @@ func (q *Queue) maintainHolds() {
 				}
 			}
 		}
-		for _, j := range q.s.Jobs {
+		for _, j := range q.liveJobs() {
 			m := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
 			if m != nil && hostID(m) == host && (j.State == "running" || j.State == "stopping") {
 				if q.comparePriority(j.Spec, q.hostPrioritySpec(host)) > 0 {
@@ -580,7 +580,7 @@ func (q *Queue) backgroundPreparing(m *Machine) bool {
 	for _, r := range m.EnvironmentReports {
 		if r.State == "building" {
 			production := false
-			for _, j := range q.s.Jobs {
+			for _, j := range q.liveJobs() {
 				if j.State == "queued" && j.Spec.Priority == "production" && j.ProductionHost == hostID(m) && q.projectAllows(j.Spec.Project, m.ID) && fitsWithoutHostMemory(j, m, m.TotalMemoryGB) && environmentKey(j, m) == r.Key {
 					production = true
 					break

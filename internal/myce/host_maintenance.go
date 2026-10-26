@@ -391,6 +391,7 @@ func (q *Queue) maintainHostObligation(p HostObligation, deadline *time.Time) {
 	default:
 		r := p.Result
 		j := q.retainedJob(r.ID)
+		q.touchJob(r.ID)
 		if j == nil || j.Attempt != r.Attempt || j.Machine != r.Machine || j.Session != r.Session || j.State != "running" && j.State != "stopping" {
 			return
 		}
