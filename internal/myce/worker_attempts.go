@@ -202,7 +202,17 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					}
 					if err == nil {
 						value, result := *s.state.Job, *s.state.Result
-						finished, e := s.fileFinish.run(attemptCheckpoint(value), func() (Result, error) { return w.finishFileResult(value, result, s.dir) })
+						logPath := ""
+						if s.state.Log != "" {
+							logPath = filepath.Join(s.dir, s.state.Log)
+						}
+						finished, e := s.fileFinish.run(attemptCheckpoint(value), func() (Result, error) {
+							finished, err := w.finishFileResult(value, result, s.dir)
+							if err != nil {
+								return finished, err
+							}
+							return w.finishFailureDiagnostics(value, finished, s.dir, logPath)
+						})
 						err = e
 						if e == nil {
 							s.fileError = ""

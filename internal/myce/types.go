@@ -139,6 +139,7 @@ func (e Environment) Key() string {
 }
 
 type Spec struct {
+	Diagnostics   *DiagnosticSpec   `json:"diagnostics,omitempty" yaml:"diagnostics,omitempty"`
 	Disk          *DiskNeeds        `json:"disk,omitempty" yaml:"disk,omitempty"`
 	After         *PieceDependency  `json:"after,omitempty" yaml:"after,omitempty"`
 	Targets       []ExecutionTarget `json:"targets,omitempty" yaml:"targets,omitempty"`
@@ -175,6 +176,9 @@ type Spec struct {
 }
 
 func (s Spec) Validate() error {
+	if err := validateDiagnosticSpec(s); err != nil {
+		return reject("job_diagnostics_invalid", err)
+	}
 	for _, target := range s.Targets {
 		if !extensionName.MatchString(target.OS) || !extensionName.MatchString(target.Arch) || !validGPU(target.Platform) {
 			return reject("job_placement_invalid", errors.New("targets require explicit OS, arch and platform"))
@@ -526,6 +530,7 @@ type AttemptDirective struct {
 	PriorityStop *PriorityPreemption `json:"priority_stop,omitempty"`
 }
 type Result struct {
+	Diagnostics          *AttemptDiagnostics `json:"diagnostics,omitempty"`
 	PriorityStop         *PriorityPreemption `json:"priority_stop,omitempty"`
 	ExecutionCause       *RuntimeCause       `json:"execution_cause,omitempty"`
 	CleanupCause         *RuntimeCause       `json:"cleanup_cause,omitempty"`

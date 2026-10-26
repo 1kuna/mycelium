@@ -1235,14 +1235,14 @@ func (q *Queue) Complete(r Result) error {
 }
 
 // CompleteContext keeps bulk output verification outside the queue transaction.
-// Only a current, publishable attempt needs verification; release acknowledgements
-// and interrupted or retransmitted results retain their normal handling.
+// Only current success outputs or opt-in failure diagnostics need verification;
+// release acknowledgements and retransmissions retain their normal handling.
 func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
 	q.mu.Lock()
 	j, err := q.current(r)
-	verify := err == nil && j.storedFileResults() && j.State == "running" && !cancelled(j) && r.Success && !r.Interrupted && !r.ReleaseOnly
+	verify := err == nil && j.storedFileResults() && j.State == "running" && !cancelled(j) && (r.Success && !r.Interrupted || !r.Success && r.Diagnostics != nil && j.Spec.Diagnostics != nil) && !r.ReleaseOnly
 	var outputs map[string]string
 	var host string
 	if verify {
@@ -1251,22 +1251,34 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 		if verify {
 			outputs = maps.Clone(j.Spec.Outputs)
 			r.OutputRefs = maps.Clone(r.OutputRefs)
+			if r.Diagnostics != nil {
+				r.Diagnostics = &AttemptDiagnostics{Files: maps.Clone(r.Diagnostics.Files)}
+			}
 		}
 	}
 	q.mu.Unlock()
 	if verify {
-		if len(outputs) != len(r.OutputRefs) {
+		if r.Success && len(outputs) != len(r.OutputRefs) {
 			return errors.New("complete output manifest required")
 		}
 		for name := range outputs {
-			if _, ok := r.OutputRefs[name]; !ok {
+			if _, ok := r.OutputRefs[name]; r.Success && !ok {
 				return errors.New("missing output")
 			}
 		}
 		verificationCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 		defer cancel()
-		if err := q.verifyManifest(verificationCtx, r.OutputRefs); err != nil {
-			return err
+		if r.Success {
+			if err := q.verifyManifest(verificationCtx, r.OutputRefs); err != nil {
+				return err
+			}
+		} else {
+			if err := validateDiagnosticManifest(r.Diagnostics); err != nil {
+				return err
+			}
+			if err := q.verifyManifest(verificationCtx, r.Diagnostics.Files); err != nil {
+				return err
+			}
 		}
 		ctx = verificationCtx
 	}
@@ -1297,7 +1309,7 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 	}
 	return rejected
 }
-func (q *Queue) complete(r Result, outputsVerified bool) error {
+func (q *Queue) complete(r Result, filesVerified bool) error {
 	q.maintainStartDeadlines()
 	operatorMatched := q.refundOperatorStop(r)
 	if r.ReleaseOnly {
@@ -1472,7 +1484,7 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 		q.retry(j, reason)
 	} else if r.Success {
 		if j.storedFileResults() {
-			if !outputsVerified {
+			if !filesVerified {
 				return ErrStale
 			}
 			j.OutputRefs = r.OutputRefs
@@ -1489,6 +1501,9 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 	if terminal(j.State) {
 		now := q.clock.Now()
 		j.FinishedAt = &now
+	}
+	if j.State == "failed" && filesVerified && !r.Success && j.Spec.Diagnostics != nil {
+		outcome.Diagnostics = r.Diagnostics
 	}
 	q.recordAttemptOutcome(j, outcome)
 	q.maintain()

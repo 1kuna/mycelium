@@ -179,6 +179,11 @@ func jobInputPaths(j *Job) map[string]string {
 // All accepted references use the existing live/terminal retention window.
 func jobFileManifests(j *Job) []FileManifest {
 	files := []FileManifest{j.Spec.Files, j.OutputRefs}
+	for _, a := range j.AttemptHistory {
+		if a.Diagnostics != nil {
+			files = append(files, a.Diagnostics.Files)
+		}
+	}
 	if j.Dependency != nil {
 		files = append(files, j.Dependency.Files)
 	}
