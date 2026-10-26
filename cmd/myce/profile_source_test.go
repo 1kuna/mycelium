@@ -147,10 +147,13 @@ func TestProfileSourceKeepsInTreeSymlinks(t *testing.T) {
 	}
 	type entry struct{ name, link string }
 	for label, entries := range map[string][]entry{
-		"absolute":           {{"abs", "/etc/passwd"}},
-		"escape via link":    {{"s", "."}, {"l", "s/.."}},
-		"entry beneath link": {{"d", "sub"}, {"d/f", ""}},
-		"loop":               {{"a", "b"}, {"b", "a"}},
+		"absolute":             {{"abs", "/etc/passwd"}},
+		"escape via link":      {{"s", "."}, {"l", "s/.."}},
+		"case alias escape":    {{"s", "."}, {"l", "S/.."}},
+		"Unicode alias escape": {{"é", "."}, {"l", "e\u0301/.."}},
+		"case alias child":     {{"d", "sub"}, {"D/f", ""}},
+		"entry beneath link":   {{"d", "sub"}, {"d/f", ""}},
+		"loop":                 {{"a", "b"}, {"b", "a"}},
 	} {
 		snapshot := filepath.Join(t.TempDir(), "snapshot.tar")
 		raw, err := os.Create(snapshot)
@@ -174,5 +177,20 @@ func TestProfileSourceKeepsInTreeSymlinks(t *testing.T) {
 		if _, err = freezeProfileSource(context.Background(), root, profileSource{Snapshot: snapshot}, filepath.Join(t.TempDir(), "source.tar")); err == nil {
 			t.Fatal("unsafe snapshot symlink accepted:", label)
 		}
+	}
+}
+
+func TestProfileSourceBoundsBranchingSymlinks(t *testing.T) {
+	names := map[string]bool{"a": true}
+	links := map[string]string{"a": "."}
+	previous := "a"
+	for i := 0; i < 35; i++ {
+		next := previous + "a"
+		names[next] = true
+		links[next] = previous + "/" + previous
+		previous = next
+	}
+	if err := checkProfileLinks(names, links); err == nil {
+		t.Fatal("accepted branching path exceeding the OS symlink expansion limit")
 	}
 }

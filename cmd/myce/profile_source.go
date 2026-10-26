@@ -10,6 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 
+	"golang.org/x/text/cases"
+	"golang.org/x/text/unicode/norm"
+
 	"mycelium/internal/myce"
 )
 
@@ -158,6 +161,21 @@ func freezeProfileSource(ctx context.Context, root string, source profileSource,
 // Every symlink must resolve inside the source, following other source links,
 // and no entry may sit beneath a symlink, so extraction cannot write elsewhere.
 func checkProfileLinks(names map[string]bool, links map[string]string) error {
+	// Sources can move from a case-sensitive submitter to macOS. Resolve the
+	// same aliases there, including decomposed Unicode, before trusting a path.
+	key := func(name string) string { return norm.NFD.String(cases.Fold().String(name)) }
+	portableNames, portableLinks := map[string]bool{}, map[string]string{}
+	for name := range names {
+		k := key(name)
+		if portableNames[k] || k == ".myce-source.tar" || k == ".myce-inputs" || strings.HasPrefix(k, ".myce-inputs/") {
+			return errors.New("source contains filesystem aliases or reserved names")
+		}
+		portableNames[k] = true
+	}
+	for name, target := range links {
+		portableLinks[key(name)] = key(target)
+	}
+	names, links = portableNames, portableLinks
 	for name := range names {
 		for dir := filepath.Dir(name); dir != "."; dir = filepath.Dir(dir) {
 			if _, ok := links[dir]; ok {
@@ -165,11 +183,8 @@ func checkProfileLinks(names map[string]bool, links map[string]string) error {
 			}
 		}
 	}
-	var resolve func(dir []string, target string, hops int) ([]string, bool)
-	resolve = func(dir []string, target string, hops int) ([]string, bool) {
-		if hops > 40 {
-			return nil, false
-		}
+	var resolve func(dir []string, target string, hops *int) ([]string, bool)
+	resolve = func(dir []string, target string, hops *int) ([]string, bool) {
 		path := append([]string(nil), dir...)
 		for _, part := range strings.Split(target, "/") {
 			switch part {
@@ -182,8 +197,14 @@ func checkProfileLinks(names map[string]bool, links map[string]string) error {
 			default:
 				path = append(path, part)
 				if next, ok := links[strings.Join(path, "/")]; ok {
+					// Count every expansion, including siblings. A depth-only
+					// limit permits exponential work and paths the OS cannot open.
+					*hops++
+					if *hops > 40 {
+						return nil, false
+					}
 					var inside bool
-					if path, inside = resolve(path[:len(path)-1], next, hops+1); !inside {
+					if path, inside = resolve(path[:len(path)-1], next, hops); !inside {
 						return nil, false
 					}
 				}
@@ -193,7 +214,8 @@ func checkProfileLinks(names map[string]bool, links map[string]string) error {
 	}
 	for name, target := range links {
 		parts := strings.Split(name, "/")
-		if _, inside := resolve(parts[:len(parts)-1], target, 0); !inside {
+		hops := 1
+		if _, inside := resolve(parts[:len(parts)-1], target, &hops); !inside {
 			return errors.New("source symlink " + name + " leaves the source tree")
 		}
 	}
