@@ -295,6 +295,15 @@ func (q *Queue) statusWaitingReason(j *Job) string {
 			slices.Sort(sizedNeeds)
 			return "no " + qualifier + "hypha can run this job right now; " + strings.Join(slices.Compact(sizedNeeds), "; ")
 		}
+		autoMemory := j.Spec.Needs.Memory == "auto"
+		for _, extension := range j.Extensions {
+			for _, variant := range extension.Variants {
+				autoMemory = autoMemory || variant.Needs.Memory == "auto"
+			}
+		}
+		if autoMemory {
+			return "memory is sized per hypha; no " + qualifier + "hypha is available to size it against"
+		}
 		resources := []string{}
 		for _, platform := range j.Spec.Needs.Platform.Required {
 			resources = append(resources, resourceWords(platform))

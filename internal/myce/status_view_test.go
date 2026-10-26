@@ -271,3 +271,25 @@ func TestStatusViewFloorFreeAutoMemory(t *testing.T) {
 		t.Fatal("status resized the stored job")
 	}
 }
+
+func TestStatusViewFloorFreeAutoMemoryWithoutHypha(t *testing.T) {
+	for _, scenario := range []string{"empty fleet", "project excludes fleet", "auto variant"} {
+		t.Run(scenario, func(t *testing.T) {
+			q, _, _, s := floorFreeFitFixture(t, 0)
+			j := &Job{Spec: s, State: "queued", Reason: "no machine in the fleet can run this right now"}
+			if scenario == "project excludes fleet" {
+				q.s.Policies[s.Project] = ProjectPolicy{Weight: 1, AllowedMachines: []string{"other-host"}}
+			} else {
+				clear(q.s.Machines)
+			}
+			if scenario == "auto variant" {
+				j.Spec.Needs.Memory = ""
+				j.Extensions = []Extension{{Variants: []ExtensionVariant{{Needs: ResourceNeeds{Memory: "auto"}}}}}
+			}
+			reason := q.statusWaitingReason(j)
+			if !strings.Contains(reason, "memory is sized per hypha") || !strings.Contains(reason, "hypha is available to size it against") || strings.Contains(reason, "0.0 GiB") {
+				t.Fatalf("misleading unsized memory: %s", reason)
+			}
+		})
+	}
+}
