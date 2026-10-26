@@ -195,7 +195,7 @@ func (a API) handler(joiningPin string) http.Handler {
 		if !decode(w, r, &c) {
 			return
 		}
-		v, err := a.Queue.Checkin(c)
+		v, err := a.Queue.CheckinContext(r.Context(), c)
 		respondOperation(w, v, err, "worker_checkin_invalid")
 	})
 	mux.HandleFunc("POST /api/workers/launch", func(w http.ResponseWriter, r *http.Request) {

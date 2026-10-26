@@ -116,7 +116,7 @@ type Queue struct {
 	lock             *os.File
 	mu               sync.RWMutex
 	contactMu        sync.Mutex
-	contacts         map[string]map[string]*workerContact
+	contacts         map[string]*workerContact
 	updateHolds      queueHoldSampler
 	statusHolds      queueHoldSampler
 	logCleanupHolds  queueHoldSampler
@@ -239,6 +239,10 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		return nil, err
 	}
 	q.unreported = map[string]bool{}
+	q.contacts = map[string]*workerContact{}
+	for id, m := range q.s.Machines {
+		q.contacts[id] = &workerContact{session: m.Session}
+	}
 	if len(data) > 0 {
 		q.restartUntil = clock.Now().Add(RestartGrace)
 		for id, m := range q.s.Machines {
@@ -837,6 +841,13 @@ func (q *Queue) Tick() error {
 	return errors.Join(q.pruneBatchLogs(), q.reclaimJobFiles())
 }
 func (q *Queue) Checkin(c Checkin) (Reply, error) {
+	return q.CheckinContext(context.Background(), c)
+}
+
+func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
+	if err := ctx.Err(); err != nil {
+		return Reply{}, err
+	}
 	var err error
 	c, err = normalizeAttemptCheckin(c)
 	if err != nil {
@@ -847,6 +858,8 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 	}
 	settle := q.beginCheckin(c.Machine.ID, c.Machine.Session)
 	defer settle(false) // No-op once settled; a panicking check-in stops counting as contact.
+	stopCancellation := context.AfterFunc(ctx, func() { settle(false) })
+	defer stopCancellation()
 	reply := Reply{FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
 	reports := c.Attempts
 	if c.AttemptProtocol == "" && c.Running != nil {
@@ -879,6 +892,9 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		}
 	}
 	err = q.update(func() error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		m := cloneMachine(&c.Machine)
 		if q.migrationInventoryBlocked(&m) {
 			return migrationError("machine_worker_conflict", "machine installation is rolled back; restore the saved legacy workers or convert forward under maintenance")

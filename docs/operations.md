@@ -88,6 +88,15 @@ never launches without a positive reply. Authorization failure remains an
 infrastructure interruption under the existing bounded retry policy.
 The separate Started hand-off retains its two-second deadline.
 
+A check-in from the current accepted worker session counts as contact before
+waiting for the queue lock, for at most 30 seconds from its arrival. Request
+cancellation or rejection removes that pending credit. An accepted check-in
+refreshes contact when processing finishes. A report rejected by later validation
+can therefore delay loss detection by at most 30 seconds, without refreshing
+`LastSeen`; an unauthenticated or mismatched-session report receives no pending
+credit. This protection does not fix the separate two-second Started hand-off
+deadline or queue capacity limits.
+
 The queue emits one `event=slow_launch_authorization` line for an authorization
 taking at least 500 ms. `duration_ms` covers the authorization, including the
 checkpoint probe, queue-lock wait and persistence; `mutex_wait_ms` isolates waiting
