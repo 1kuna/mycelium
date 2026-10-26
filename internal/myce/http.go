@@ -354,7 +354,7 @@ type Client struct {
 	Token string
 	HTTP  *http.Client // Its Timeout bounds API calls; file transfers use progress budgets.
 	// Tests shorten the file transfer budgets; zero uses the defaults.
-	transferResponse, transferIdle time.Duration
+	transferIdle time.Duration
 }
 
 func (c Client) Call(ctx context.Context, method, path string, in, out any) error {

@@ -108,13 +108,20 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) error 
 			return errors.New("unknown file in cache; refusing eviction")
 		}
 		if strings.HasSuffix(v.name, ".partial") {
-			// Partial downloads are not unique progress: the complete store copy exists.
-			res, e := c.Client.fileRequest(ctx, "HEAD", "/api/files/blobs/"+hash, nil, nil, v.size)
-			if e != nil {
-				return e
-			}
-			if e = fileResponse(res, 200); e != nil && !isResultExpired(e) {
-				return e
+			// A partial length says nothing about the full blob's hash cost.
+			// Fetch only its size first, then verify the authoritative copy with HEAD.
+			var ref FileRef
+			if e := c.Client.Call(ctx, "GET", "/api/files/blobs/"+hash+"/metadata", nil, &ref); e != nil {
+				if !isResultExpired(e) {
+					return e
+				}
+			} else {
+				if ref.SHA256 != hash || ref.validate() != nil {
+					return errors.New("invalid stored file metadata")
+				}
+				if e := c.Client.HasFile(ctx, ref); e != nil && !isResultExpired(e) {
+					return e
+				}
 			}
 		} else if e := c.Client.HasFile(ctx, FileRef{hash, v.size}); e != nil && !isResultExpired(e) {
 			return e

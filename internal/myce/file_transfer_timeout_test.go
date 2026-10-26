@@ -7,6 +7,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -45,7 +47,7 @@ func TestDownloadResultIdleTimeoutNotWholeRequest(t *testing.T) {
 	}
 	// The old fixed client timeout is shorter than the ~600 ms stream.
 	client := func(url string) Client {
-		return Client{URL: url, Token: "fixture", HTTP: &http.Client{Timeout: 200 * time.Millisecond}, transferResponse: time.Second, transferIdle: 250 * time.Millisecond}
+		return Client{URL: url, Token: "fixture", HTTP: &http.Client{Timeout: 200 * time.Millisecond}, transferIdle: 250 * time.Millisecond}
 	}
 
 	slow := serve(false)
@@ -72,4 +74,65 @@ func TestDownloadResultIdleTimeoutNotWholeRequest(t *testing.T) {
 	if entries, _ := os.ReadDir(filepath.Dir(dest)); len(entries) != 0 {
 		t.Fatal("stalled download published or leaked a file", entries)
 	}
+}
+
+// Unknown-length bodies use HTTP chunking, as UploadFile's io.LimitReader does.
+// Throttle actual socket writes rather than application reads: loopback TCP can
+// otherwise acknowledge the whole body while the server is still draining it.
+func TestFileRequestProgressingUnknownLengthUpload(t *testing.T) {
+	t.Parallel()
+	body := bytes.Repeat([]byte("upload"), 32*1024)
+	received := make(chan []byte, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ContentLength != -1 {
+			t.Errorf("expected unknown length, got %d", r.ContentLength)
+		}
+		got, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Error(err)
+		}
+		received <- got
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer server.Close()
+	transport := &http.Transport{}
+	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		conn, err := (&net.Dialer{}).DialContext(ctx, network, addr)
+		if err != nil {
+			return nil, err
+		}
+		return slowUploadConn{conn}, nil
+	}
+	defer transport.CloseIdleConnections()
+	c := Client{URL: server.URL, HTTP: &http.Client{Transport: transport, Timeout: 200 * time.Millisecond}, transferIdle: 250 * time.Millisecond}
+	start := time.Now()
+	res, err := c.fileRequest(context.Background(), "PATCH", "/upload", io.LimitReader(bytes.NewReader(body), int64(len(body))), nil, int64(len(body)))
+	if err != nil {
+		t.Fatal("progressing upload failed:", err)
+	}
+	if err := fileResponse(res, http.StatusNoContent); err != nil {
+		t.Fatal(err)
+	}
+	if time.Since(start) <= c.transferIdle {
+		t.Fatal("upload did not exceed idle budget")
+	}
+	if got := <-received; !bytes.Equal(got, body) {
+		t.Fatal("upload truncated", len(got))
+	}
+}
+
+type slowUploadConn struct{ net.Conn }
+
+func (c slowUploadConn) Write(p []byte) (int, error) {
+	total := 0
+	for len(p) > 0 {
+		n, err := c.Conn.Write(p[:min(len(p), 1024)])
+		total += n
+		p = p[n:]
+		if err != nil {
+			return total, err
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return total, nil
 }

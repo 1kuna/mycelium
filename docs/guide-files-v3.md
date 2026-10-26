@@ -80,6 +80,16 @@ myce file get --size-bytes BYTE_COUNT SHA256 ./answer.json
 beside it after interruption. Rerunning resumes it. A bad range response, byte
 count or hash is refused; a server ignoring Range causes a safe complete restart.
 Upload creation/HEAD/PATCH follow tus 1.0; retries use its acknowledged offset.
+File transfers use per-socket-operation deadlines, with no whole-request timeout.
+The idle budget is the greater of 60 seconds and 30 seconds plus two full-blob
+hash passes at 100 MiB/s. API calls retain their ordinary 10-second budget.
+A stalled result reports `result_download_failed`; Python raises
+`TransferStalledError`. Size/SHA-256 verification and atomic publication still
+apply. For partial cache eviction, the worker reads the full blob size from
+`GET /api/files/blobs/{hash}/metadata`, then performs a verified HEAD using that
+size's budget. Metadata alone never authorizes eviction; an unavailable size
+leaves the partial in place and reports the lookup error.
+
 Final size/hash verification is mandatory. Workers retain local results until
 publication is acknowledged. The queue accepts output references only from the
 current successful attempt, after every referenced file is durable. A missing
