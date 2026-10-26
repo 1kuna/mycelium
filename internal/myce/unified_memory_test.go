@@ -71,8 +71,10 @@ func TestUnifiedMacPageSizesAndCap(t *testing.T) {
 			}
 		})
 	}
-	got, err := parseVMStat([]byte("Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free: 65536.\nPages inactive: 131072.\nPages speculative: 99999999.\n"))
-	if err != nil || got != 3 {
+	got, err := parseVMStat([]byte("Mach Virtual Memory Statistics: (page size of 16384 bytes)\nPages free: 65536.\nPages inactive: 131072.\nPages speculative: 65536.\nPages purgeable: 32768.\nFile-backed pages: 131072.\nPages active: 196608.\nPages wired down: 65536.\nPages occupied by compressor: 65536.\n"))
+	// vm_stat has already removed the 1 GiB speculative cache from free.
+	// Restore it once, without adding overlapping purgeable/file-backed counts.
+	if err != nil || got != 4 {
 		t.Fatalf("reclaimable memory %v, %v", got, err)
 	}
 }

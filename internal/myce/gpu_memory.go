@@ -144,9 +144,10 @@ func parseMemAvailable(out []byte) (float64, error) {
 	return 0, errors.New("/proc/meminfo has no valid MemAvailable in kB")
 }
 
-// Free + inactive pages are a conservative reclaimable allowance. Active,
-// wired and compressed pages (including resident GPU allocations) are excluded.
-// Speculative pages are not added: they can already be included in free pages.
+// Match the conservative host_statistics64 free_count + inactive_count allowance.
+// vm_stat prints free_count MINUS speculative_count, so restore speculative pages.
+// Purgeable and file-backed counts overlap page queues; adding them here could
+// count inactive pages twice. Active, wired and compressor pages stay excluded.
 func parseVMStat(out []byte) (float64, error) {
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
 	if len(lines) == 0 {
@@ -164,7 +165,7 @@ func parseVMStat(out []byte) (float64, error) {
 	pages := map[string]uint64{}
 	for _, line := range lines[1:] {
 		key, value, ok := strings.Cut(line, ":")
-		if !ok || (key != "Pages free" && key != "Pages inactive") {
+		if !ok || (key != "Pages free" && key != "Pages inactive" && key != "Pages speculative") {
 			continue
 		}
 		if _, exists := pages[key]; exists {
@@ -176,10 +177,13 @@ func parseVMStat(out []byte) (float64, error) {
 		}
 		pages[key] = count
 	}
-	if len(pages) != 2 {
+	if _, ok := pages["Pages free"]; !ok {
 		return 0, errors.New("vm_stat missing free or inactive pages")
 	}
-	return (float64(pages["Pages free"]) + float64(pages["Pages inactive"])) * float64(pageSize) / (1024 * 1024 * 1024), nil
+	if _, ok := pages["Pages inactive"]; !ok {
+		return 0, errors.New("vm_stat missing free or inactive pages")
+	}
+	return (float64(pages["Pages free"]) + float64(pages["Pages inactive"]) + float64(pages["Pages speculative"])) * float64(pageSize) / (1024 * 1024 * 1024), nil
 }
 
 func validMemoryValue(value float64) bool {
