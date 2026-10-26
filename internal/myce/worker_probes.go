@@ -18,6 +18,7 @@ type WorkerProbeDefaults struct {
 	HostMemory   func(float64) (MemorySource, error)
 	OwnerSignals func(context.Context) OwnerSignals
 	Identity     func() MachineProbe
+	DeviceFaults func() DeviceFaultSource
 }
 
 // SetWorkerProbeDefaults installs complete defaults during process setup.
@@ -30,4 +31,7 @@ func SetWorkerProbeDefaults(p WorkerProbeDefaults) {
 	workerHostMemorySource = p.HostMemory
 	workerOwnerSignals = p.OwnerSignals
 	extensionIdentityProbe = p.Identity
+	if p.DeviceFaults != nil {
+		workerDeviceFaultSource = p.DeviceFaults
+	}
 }

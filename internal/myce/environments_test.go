@@ -288,9 +288,12 @@ func TestEnvironmentLRUEvictionProtectsUse(t *testing.T) {
 	rb()
 	os.Chtimes(filepath.Join(pa, "ready.json"), time.Unix(1, 0), time.Unix(1, 0))
 	os.Chtimes(filepath.Join(pb, "ready.json"), time.Unix(2, 0), time.Unix(2, 0))
-	sizeA, _ := environmentDiskUsage(pa)
-	sizeB, _ := environmentDiskUsage(pb)
-	c.Limit = sizeA + sizeB + 20
+	// Keep a two-installation budget, including the cache's .Trash directory
+	// blocks. The third installation must evict the unused entry to fit.
+	c.Limit, e = c.DiskUsage()
+	if e != nil {
+		t.Fatal(e)
+	}
 	_, rd, e := c.Acquire(context.Background(), d)
 	if e != nil {
 		t.Fatal(e)
@@ -598,7 +601,18 @@ func TestBuildOnlyLauncherRelocation(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	c := &EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: RealClock{}, Run: func(_ context.Context, _ []string, dir string, _ []string, _, _ io.Writer) error {
+	// Nested gate/job temporary roots can exceed Linux's shebang length limit.
+	// Keep the fixture's own-bin interpreter path short enough to execute.
+	cacheRoot, e := os.MkdirTemp("/tmp", "myce-launcher-")
+	if e != nil {
+		t.Fatal(e)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(cacheRoot); err != nil {
+			t.Error(err)
+		}
+	})
+	c := &EnvironmentCache{Root: cacheRoot, Limit: 1 << 20, Clock: RealClock{}, Run: func(_ context.Context, _ []string, dir string, _ []string, _, _ io.Writer) error {
 		// A local build can emit a launcher whose interpreter lives in its own bin.
 		if e := os.Symlink("/bin/sh", filepath.Join(dir, "bin", "interpreter")); e != nil {
 			return e
