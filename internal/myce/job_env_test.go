@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"io"
+	"log"
 	"os"
 	"path/filepath"
 	"slices"
@@ -114,6 +115,23 @@ func TestJobEnvironmentAllowlistExtensionCommand(t *testing.T) {
 func TestJobEnvironmentAllowlistEnvironmentBuild(t *testing.T) {
 	setWorkerSession(t)
 	t.Setenv("UV_LINK_MODE", "copy")
+	t.Setenv("UV_INDEX_URL", "https://pypi.mirror.invalid/simple")
+	// uv's credential settings and URL settings with userinfo stay with the
+	// operator; recipe build code is arbitrary (#219).
+	credentials := map[string]string{
+		"UV_EXTRA_INDEX_URL":        "https://builder:index-secret@private.invalid/simple",
+		"UV_INDEX_PRIVATE_USERNAME": "builder",
+		"UV_INDEX_PRIVATE_PASSWORD": "index-secret",
+		"UV_PUBLISH_USERNAME":       "publisher",
+		"UV_PUBLISH_PASSWORD":       "publish-secret",
+		"UV_PUBLISH_TOKEN":          "pypi-token",
+		"UV_KEYRING_PROVIDER":       "subprocess",
+		"UV_GITHUB_TOKEN":           "gh-token",
+		"UV_PYTHON_INSTALL_MIRROR":  "https://mirror:secret@python.invalid",
+	}
+	for k, v := range credentials {
+		t.Setenv(k, v)
+	}
 	r, err := snapshotEnvironment(EnvironmentRecipe{Build: []string{"sh", "-c", `env > "$1/build.env"`, "build", "{root}"}}, "fake")
 	if err != nil {
 		t.Fatal(err)
@@ -124,7 +142,63 @@ func TestJobEnvironmentAllowlistEnvironmentBuild(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer release()
-	requireJobEnv(t, "build", parseEnvDump(t, filepath.Join(path, "build.env")), map[string]string{"UV_LINK_MODE": "copy", "MYCE_ENVIRONMENT_DIR": "*"})
+	env := parseEnvDump(t, filepath.Join(path, "build.env"))
+	requireJobEnv(t, "build", env, map[string]string{"UV_LINK_MODE": "copy", "UV_INDEX_URL": "https://pypi.mirror.invalid/simple", "MYCE_ENVIRONMENT_DIR": "*"})
+	for k := range credentials {
+		if _, ok := env[k]; ok {
+			t.Errorf("build inherited worker %s", k)
+		}
+	}
+}
+
+func TestJobEnvironmentProxyAndCAVariables(t *testing.T) {
+	setWorkerSession(t)
+	kept := map[string]string{
+		"HTTPS_PROXY":         "http://proxy.invalid:3128",
+		"https_proxy":         "http://proxy.invalid:3128",
+		"NO_PROXY":            "localhost,.internal",
+		"no_proxy":            "localhost,.internal",
+		"SSL_CERT_FILE":       "/etc/ssl/corp.pem",
+		"SSL_CERT_DIR":        "/etc/ssl/certs",
+		"REQUESTS_CA_BUNDLE":  "/etc/ssl/corp.pem",
+		"CURL_CA_BUNDLE":      "/etc/ssl/corp.pem",
+		"NODE_EXTRA_CA_CERTS": "/etc/ssl/corp.pem",
+	}
+	dropped := map[string]string{
+		"HTTP_PROXY": "http://proxyuser:proxy-secret@proxy.invalid:3128",
+		"all_proxy":  "proxyuser:proxy-secret@proxy.invalid:1080",
+	}
+	for k, v := range kept {
+		t.Setenv(k, v)
+	}
+	for k, v := range dropped {
+		t.Setenv(k, v)
+	}
+	droppedCredentialLogged.Clear()
+	var logs strings.Builder
+	log.SetOutput(&logs)
+	defer log.SetOutput(os.Stderr)
+	s := nativeSpec(t)
+	s.Run.Sidecars = nil
+	s.Run.Command = []string{"sh", "-c", `env > "$NATIVE_TEST_DIR/proxy.env"`}
+	r := nativeStart(t, s, "fake")
+	if result := nativeFinish(t, r); !result.Success {
+		t.Fatal(result)
+	}
+	jobBaseEnvironment()
+	env := parseEnvDump(t, filepath.Join(r.dir, "proxy.env"))
+	requireJobEnv(t, "batch", env, kept)
+	for k := range dropped {
+		if _, ok := env[k]; ok {
+			t.Errorf("batch inherited credentialed %s", k)
+		}
+		if n := strings.Count(logs.String(), "dropping worker "+k+" "); n != 1 {
+			t.Errorf("%s drop logged %d times, want once: %s", k, n, logs.String())
+		}
+	}
+	if strings.Contains(logs.String(), "proxy-secret") || strings.Contains(logs.String(), "proxyuser") {
+		t.Errorf("drop log exposes credentials: %s", logs.String())
+	}
 }
 
 func TestJobEnvironmentAllowlistModelServer(t *testing.T) {

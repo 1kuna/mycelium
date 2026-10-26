@@ -851,16 +851,9 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) erro
 	}
 	defer func() { _ = output.Sync(); _ = output.Close() }()
 	start := c.Clock.Now()
-	// Package installers also honor the operator's own uv settings, such as the
-	// documented UV_LINK_MODE; Mycelium owns the cache, paths and retry knobs.
-	base := jobBaseEnvironment()
-	for _, v := range os.Environ() {
-		k, v, _ := strings.Cut(v, "=")
-		if strings.HasPrefix(k, "UV_") && !slices.Contains([]string{"UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR", "UV_PROJECT_ENVIRONMENT", "UV_HTTP_TIMEOUT", "UV_HTTP_RETRIES", "UV_NO_PROGRESS"}, k) {
-			base[k] = v
-		}
-	}
-	env := environmentList(base)
+	// Package installers also honor the operator's safe uv settings, such as the
+	// documented UV_LINK_MODE, but never uv credentials (buildUVVariables).
+	env := environmentList(buildEnvironmentFrom(os.Environ()))
 	env = append(env, "PIXI_CACHE_DIR="+c.downloadCache("pixi"), "PIXI_NO_PROGRESS=true", "UV_CACHE_DIR="+c.downloadCache("uv"), "UV_HTTP_TIMEOUT=60", "UV_HTTP_RETRIES=3", "UV_PYTHON_INSTALL_DIR="+filepath.Join(partial, "python"), "UV_PROJECT_ENVIRONMENT="+filepath.Join(partial, "venv"))
 	run := c.Run
 	if run == nil {
