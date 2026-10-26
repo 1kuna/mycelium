@@ -313,6 +313,9 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 		peak := finishMemory()
 		oom := g.memoryFailure()
 		cleanup := errors.Join(groupErr, memory.cleanup(w.Clock), g.save())
+		if cleanup == nil {
+			s.releaseSharedInputs()
+		}
 		persist := errors.Join(syncCommandOutput(output), output.Close())
 		r := Result{MemoryPeak: peak, Machine: w.Machine.ID, Session: g.session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Success: runErr == nil && oom == nil && cleanup == nil && persist == nil, Forced: forced, PoliteStop: polite, ReleasePending: cleanup != nil}
 		if runErr != nil {

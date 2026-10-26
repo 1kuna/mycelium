@@ -66,6 +66,7 @@ type workerState struct {
 	Log             string                 `json:"log,omitempty"`
 }
 type workerStore struct {
+	sharedRelease         func() // Idempotent; retained until exact process cleanup.
 	deviceFaults          checkpointIO[KernelLogSnapshot]
 	stateName             string
 	environmentLogs       checkpointIO[bool]
@@ -366,7 +367,12 @@ func waitWorkerGroup(group int, clock Clock) error {
 		<-wake.C
 	}
 }
-func (s *workerStore) cleanupOrphan(clock Clock, memoryFiles ...memoryFS) error {
+func (s *workerStore) cleanupOrphan(clock Clock, memoryFiles ...memoryFS) (cleanupErr error) {
+	defer func() {
+		if cleanupErr == nil {
+			s.releaseSharedInputs()
+		}
+	}()
 	// Native members use the ordinary attempt record, written before each exec
 	// gate opens. argv/environment markers may disappear (including env -i),
 	// so authenticate surviving PIDs by their kernel birth identity instead.
@@ -463,6 +469,12 @@ func (s *workerStore) cleanupOrphan(clock Clock, memoryFiles ...memoryFS) error 
 		return memory.cleanup(clock)
 	}
 	return errors.Join(waitWorkerGroup(s.state.PID, clock), memory.cleanup(clock))
+}
+
+func (s *workerStore) releaseSharedInputs() {
+	if s.sharedRelease != nil {
+		s.sharedRelease()
+	}
 }
 
 func cleanupAttemptGroups(st workerState, clock Clock, memoryFiles ...memoryFS) error {

@@ -101,10 +101,9 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 		c.mu.Lock()
 		previous := c.verified[key]
 		c.mu.Unlock()
-		if previous != "" && previous != signature {
-			return "", errors.New("shared input cache changed")
-		}
-		if previous == "" {
+		// Another process may legitimately evict and republish this key. Changed
+		// metadata requires full verification, just like first use after restart.
+		if previous != signature {
 			if e = verifySharedEntry(ctx, payload, record.Files); e != nil {
 				return "", e
 			}

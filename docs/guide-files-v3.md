@@ -249,8 +249,9 @@ allowance. Physical disk headroom applies across both. LRU eviction removes
 reproducible inactive copies; active attempts hold use locks through process
 cleanup. Mode bits provide cooperative read-only access, not a sandbox against
 the owning account changing permissions. First use after restart hashes every
-file; subsequent uses check inode, change time, size and mode. A changed entry
-fails preparation visibly; stop its readers and remove the damaged reproducible
+file; subsequent uses check inode, change time, size and mode. Metadata changes
+trigger full re-verification, allowing another cache instance's valid rebuild.
+A damaged entry fails preparation visibly; stop its readers and remove the reproducible
 entry before retrying. Stored shared inputs use the ordinary queue retention
 window; NAS originals remain owned by their project.
 

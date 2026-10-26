@@ -203,3 +203,38 @@ func TestSharedInputsInterruptedStagingAndNASSizeGuard(t *testing.T) {
 		t.Fatal("copy exceeded its reservation", info.Size())
 	}
 }
+
+func TestSharedInputsReuseAfterAnotherInstanceRebuilds(t *testing.T) {
+	ctx := context.Background()
+	nas := t.TempDir()
+	input := sharedArchive(t, nas)
+	a := &SharedInputCache{cache: EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20}}
+	b := &SharedInputCache{cache: EnvironmentCache{Root: a.cache.Root, Limit: 1 << 20}}
+	t.Cleanup(func() { _ = removeSharedEntry(a.cache.Root) })
+	path, done, err := a.Acquire(ctx, input, nas)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done()
+	b.cache.Limit = 1
+	if err = b.admit(ctx, "other", 10); err == nil {
+		t.Fatal("over-budget admission succeeded")
+	}
+	if _, err = os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("other instance did not evict input", err)
+	}
+	b.cache.Limit = 1 << 20
+	_, done, err = b.Acquire(ctx, input, nas)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done()
+	reused, done, err := a.Acquire(ctx, input, nas)
+	if err != nil {
+		t.Fatal("valid republication rejected", err)
+	}
+	done()
+	if reused != path {
+		t.Fatal("cache identity changed", reused, path)
+	}
+}

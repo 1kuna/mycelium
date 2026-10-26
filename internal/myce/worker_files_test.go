@@ -8,6 +8,84 @@ import (
 	"time"
 )
 
+type sharedCleanupDeniedFS struct{ fakeMemoryFS }
+
+func (f sharedCleanupDeniedFS) WriteFile(path string, data []byte) error {
+	if filepath.Base(path) == "cgroup.kill" {
+		return os.ErrPermission
+	}
+	return f.fakeMemoryFS.WriteFile(path, data)
+}
+
+func TestSharedInputsRemainProtectedUntilCleanupRetrySucceeds(t *testing.T) {
+	for _, grouped := range []bool{false, true} {
+		name := "command"
+		if grouped {
+			name = "native_group"
+		}
+		t.Run(name, func(t *testing.T) {
+			nas := t.TempDir()
+			input := sharedArchive(t, nas)
+			cache := &SharedInputCache{cache: EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20}}
+			t.Cleanup(func() { _ = removeSharedEntry(cache.cache.Root) })
+			w := recoveryWorker(t)
+			w.CheckpointRoot, w.sharedInputs = nas, cache
+			w.memoryCeilings = fakeCeilings(t)
+			w.memoryCeilings.fs = sharedCleanupDeniedFS{}
+			w.HostMemorySource = func(context.Context) (float64, error) { return 31, nil }
+			store, err := w.openStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.close()
+			j := recoveryJob(t, []string{"sh", "-ec", `test "$(cat "$MYCE_INPUT_RUNTIME/bin/run")" = hello`})
+			j.Spec.Resumable = false
+			j.Spec.Needs.HostMemoryGB = 1
+			j.Spec.SharedInputs = map[string]SharedInput{"runtime": input}
+			if grouped {
+				j.Spec.Run.MemoryGB = 1
+			}
+			p, err := w.start(store, j)
+			if err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case f := <-p.done:
+				if f.err != nil || !f.result.ReleasePending {
+					t.Fatal("expected unconfirmed cleanup", f)
+				}
+				store.state.Result, store.state.PID = &f.result, 0
+			case <-time.After(10 * time.Second):
+				p.stop(w.Clock.Now(), 0, true)
+				t.Fatal("command did not finish")
+			}
+			path := filepath.Join(cache.cache.Root, input.key(), "data")
+			cache.cache.Limit = 1
+			protected := func() {
+				t.Helper()
+				if err := cache.admit(context.Background(), "other", 10); err == nil {
+					t.Fatal("evicted input before cleanup confirmation")
+				}
+				if _, err := os.Stat(path); err != nil {
+					t.Fatal("shared input removed", err)
+				}
+			}
+			protected()
+			if err = store.cleanupOrphan(w.Clock, sharedCleanupDeniedFS{}); err == nil {
+				t.Fatal("cleanup retry ignored permission failure")
+			}
+			protected()
+			if err = store.cleanupOrphan(w.Clock, fakeMemoryFS{}); err != nil {
+				t.Fatal(err)
+			}
+			_ = cache.admit(context.Background(), "other", 10)
+			if _, err = os.Stat(path); !os.IsNotExist(err) {
+				t.Fatal("confirmed cleanup did not release cache protection", err)
+			}
+		})
+	}
+}
+
 func TestSharedInputsDevReusesTreeWithStoredSource(t *testing.T) {
 	state := t.TempDir()
 	if err := PrepareStateRoots(state); err != nil {
