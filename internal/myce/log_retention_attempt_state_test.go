@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -145,5 +146,56 @@ func TestWorkerRetentionPrunesAcknowledgedLaunchRefusals(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestWorkerRetentionNativeStartFailureAcknowledgement(t *testing.T) {
+	w := recoveryWorker(t)
+	clock := &fakeClock{now: time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)}
+	w.Clock = clock
+	w.control = &processControl{}
+	root, err := w.openStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.close()
+	job := recoveryJob(t, []string{"sh", "-c", "exit 0"})
+	job.Spec.Resumable = false
+	job.Spec.Run.Workdir = filepath.Join(t.TempDir(), "missing-directory")
+	store, err := newAttemptStore(root, job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, cause := w.start(store, job)
+	if p != nil || cause == nil || !store.state.LaunchPending {
+		t.Fatalf("did not reach native cmd.Start failure: p=%v error=%v state=%+v", p, cause, store.state)
+	}
+	result := startFailureOutcome(Result{}, cause)
+	store.state.Result = &result
+	if err := store.save(); err != nil {
+		t.Fatal(err)
+	}
+	actor := &attemptSupervisor{store: store, job: job, worker: w, connected: true, done: make(chan struct{}), wake: make(chan struct{}, 1)}
+	ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
+	defer cancel()
+	actor.run(ctx)
+	_, _, finished, err := actor.snapshot()
+	if err != nil || !finished || store.state.Job != nil || store.state.Result != nil || store.state.LaunchPending || store.state.PID != 0 {
+		t.Fatalf("acknowledged failure kept stale custody: finished=%t error=%v state=%+v", finished, err, store.state)
+	}
+	if err := os.Chtimes(filepath.Join(store.dir, store.stateName), clock.Now(), clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(filepath.Join(store.dir, store.state.LaunchOutcome), clock.Now(), clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(DefaultLogRetention)
+	if err := workerRetention(store.dir, clock.Now(), DefaultLogRetention); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{store.stateName, store.state.LaunchOutcome} {
+		if _, err := os.Stat(filepath.Join(store.dir, name)); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("acknowledged native failure retained %s: %v", name, err)
+		}
 	}
 }
