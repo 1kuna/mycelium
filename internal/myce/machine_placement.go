@@ -93,9 +93,8 @@ func (q *Queue) batchReleaseOnTarget(r HostRelease, m *Machine) bool {
 		return false
 	}
 	// A CPU attempt can retain the worker's scalar compatibility device ID.
-	// Use only an exact current attempt's type; a newer attempt may target CPU
-	// while an older GPU copy still owns a slot.
-	if j := q.s.Jobs[r.Job]; j != nil && j.Machine == r.Machine && j.Session == r.Session && j.Attempt == r.Attempt && j.Spec.Needs.cpuOnly() {
+	// Its own persisted classification survives requeue and variant changes.
+	if r.CPUOnly {
 		return false
 	}
 	if r.Device != "" {

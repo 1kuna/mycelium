@@ -90,3 +90,70 @@ func TestPlacementPlanSucceededProducerRetainsDeviceSlot(t *testing.T) {
 		t.Fatal("exact release did not free the producer's slot", got)
 	}
 }
+
+func TestPlacementPlanLostAttemptRetainsResourceClass(t *testing.T) {
+	t.Run("CPU loss keeps charges without GPU exclusion", func(t *testing.T) {
+		q, clock := fixture(t)
+		m := m3Machine()
+		m.Device = "0"
+		cpu := submit(t, q, cpuSpec(2, 3))
+		attempt := assignedJob(machineCheck(t, q, m))
+		if attempt == nil || attempt.ID != cpu.ID {
+			t.Fatal("missing CPU assignment", attempt)
+		}
+		clock.Advance(LossAfter)
+		check(t, q, observer(), nil)
+		if got := job(t, q, cpu.ID); got.State != "queued" || got.Machine != "" || got.Session != "" {
+			t.Fatal("CPU loss did not clear current custody", got)
+		}
+		q = reopenCancellationQueue(t, q, clock)
+		s := spec("production")
+		s.Needs.MemoryGB, s.Needs.HostMemoryGB = 1, 1
+		s.Needs.GPU = &GPUSelection{Devices: []string{"0"}}
+		gpu := submit(t, q, s)
+		next := assignedJob(machineCheck(t, q, m))
+		if next == nil || next.ID != gpu.ID || len(next.AllocatedDevices) != 1 || next.AllocatedDevices[0] != "0" {
+			t.Fatal("lost CPU custody fenced a GPU slot", next)
+		}
+		if host := q.s.Machines[m.ID]; host.CPUInUseCores != 3 || host.HostMemoryInUseGB != 4 {
+			t.Fatalf("lost CPU custody lost its charge: cores=%d RAM=%g", host.CPUInUseCores, host.HostMemoryInUseGB)
+		}
+	})
+	t.Run("GPU custody survives a newer CPU attempt", func(t *testing.T) {
+		q, clock := fixture(t)
+		m := m3Machine()
+		s := spec("experiment")
+		s.Needs.MemoryGB, s.Needs.HostMemoryGB = 1, 1
+		s.Needs.GPU = &GPUSelection{Devices: []string{"0"}}
+		gpu := submit(t, q, s)
+		old := assignedJob(machineCheck(t, q, m))
+		if old == nil || old.ID != gpu.ID {
+			t.Fatal("missing GPU assignment", old)
+		}
+		clock.Advance(LossAfter)
+		check(t, q, observer(), nil)
+		// Model the retry's concrete CPU variant, independently of the old copy.
+		if err := q.update(func() error {
+			q.s.Jobs[gpu.ID].Spec.Needs = ResourceNeeds{CPUCores: 1, HostMemoryGB: 1, Platform: Platform{Required: []string{"cpu"}}}
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		current := assignedJob(machineCheck(t, q, m))
+		if current == nil || current.ID != gpu.ID || current.Attempt != old.Attempt+1 || len(current.AllocatedDevices) != 0 {
+			t.Fatal("missing newer CPU attempt", current)
+		}
+		q = reopenCancellationQueue(t, q, clock)
+		s.Priority = "production"
+		blocked := submit(t, q, s)
+		if next := assignedJob(machineCheck(t, q, m, current)); next != nil {
+			t.Fatal("newer CPU attempt discharged old GPU custody", next)
+		}
+		requireState(t, q, blocked.ID, "queued")
+		s.Needs.GPU = &GPUSelection{Devices: []string{"1"}}
+		neighbor := submit(t, q, s)
+		if next := assignedJob(machineCheck(t, q, m, current)); next == nil || next.ID != neighbor.ID || len(next.AllocatedDevices) != 1 || next.AllocatedDevices[0] != "1" {
+			t.Fatal("old GPU custody fenced its free neighbor", next)
+		}
+	})
+}

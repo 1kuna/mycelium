@@ -26,6 +26,8 @@ type HostState struct {
 // Release obligations survive requeue/loss; only an execution acknowledgement or
 // a fresh worker's completed cleanup can settle them.
 type HostRelease struct {
+	// Omitted older records retain conservative GPU-slot exclusion.
+	CPUOnly                     bool       `json:"cpu_only,omitempty"`
 	CPUCores                    int        `json:"cpu_cores,omitempty"`
 	CleanupSince                *time.Time `json:"cleanup_since,omitempty"`
 	EscalatedAt                 *time.Time `json:"escalated_at,omitempty"`
@@ -126,7 +128,7 @@ func (q *Queue) retainRelease(j *Job) {
 	if q.s.HostReleases == nil {
 		q.s.HostReleases = map[string]HostRelease{}
 	}
-	r := HostRelease{CPUCores: j.Spec.Needs.cores(), HostChargeGB: hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), Docker: j.Spec.Run.Docker, Device: m.Device, MemoryGB: j.Spec.Needs.MemoryGB, HostMemoryGB: j.Spec.Needs.HostMemoryGB, Host: hostID(m), Job: j.ID, Machine: j.Machine, Session: j.Session, Attempt: j.Attempt}
+	r := HostRelease{CPUOnly: j.Spec.Needs.cpuOnly(), CPUCores: j.Spec.Needs.cores(), HostChargeGB: hostNeed(m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), Docker: j.Spec.Run.Docker, Device: m.Device, MemoryGB: j.Spec.Needs.MemoryGB, HostMemoryGB: j.Spec.Needs.HostMemoryGB, Host: hostID(m), Job: j.ID, Machine: j.Machine, Session: j.Session, Attempt: j.Attempt}
 	if j.StopAt != nil {
 		r.Until = *j.StopAt
 	}
