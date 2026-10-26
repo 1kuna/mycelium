@@ -703,7 +703,7 @@ func (d *dockerAttempt) settleFailedStart(containers []dockerInspection) (bool, 
 		return true, errors.New("pending Docker start absence unconfirmed")
 	}
 	message := strings.TrimSpace(string(exit.Stderr))
-	if message != "Error: No such object: "+id && message != "Error response from daemon: No such container: "+id {
+	if !strings.EqualFold(message, "Error: No such object: "+id) && !strings.EqualFold(message, "Error response from daemon: No such container: "+id) {
 		return true, err
 	}
 	d.mu.Lock()

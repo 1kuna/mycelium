@@ -197,7 +197,7 @@ func TestDockerCLIHelper(t *testing.T) {
 	case "inspect":
 		if len(args) == 2 && args[1] == "id1" {
 			if _, err := os.Stat(filepath.Join(root, "created")); os.IsNotExist(err) {
-				fmt.Fprintln(os.Stderr, "Error: No such object: id1")
+				fmt.Fprintln(os.Stderr, "error: no such object: id1")
 				os.Exit(1)
 			}
 		}
