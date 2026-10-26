@@ -240,3 +240,59 @@ absolute deadlines, expiry and transport checks still apply.
 Only one already submitted fan-out parent in the same project may be named.
 Ordinary-job sources, multiple-parent joins, forward references, dynamic piece
 creation, timed accumulation and atomic graph submission remain out of scope.
+
+## Per-recording stage chains
+
+For an ASR → separation → naming → render pipeline, submit a separate fan-out
+parent for **each stage of each recording**. Naming can be a one-piece fan-out;
+render is the ordinary sink. Submit stages in order using their returned parent
+IDs, then wait only on render. Different recordings' chains can progress
+independently.
+
+A stage-wide fan-out across recordings cannot feed independent per-recording
+downstream stages as each recording becomes ready: `after.piece` supports only an
+ordinary sink, ordinary results cannot be upstream sources, and a whole-parent
+edge waits for every recording in that parent. Keep the parent boundary at one
+recording when you need per-recording progress.
+
+This illustrative recipe uses two known chunks and extension-defined filenames,
+arguments and workload shapes. Supply the actual extension recipes and immutable
+ASR inputs for the recording; Mycelium does not discover chunks:
+
+```python
+project, recording = "research", "recording-1"
+
+def stage(name, pieces, outputs, *, after=None, files=None):
+    return client.submit({
+        "name": f"{recording}-{name}", "project": project,
+        "submission_key": f"operation-42.{recording}.{name}",
+        "extension": f"{name}@1",
+        "workload": {"input_shape": f"{name}-v1", "units": 1},
+        "files": files or {}, "outputs": outputs,
+        "fan_out": {"max_concurrency": 8, "pieces": pieces},
+        **({"after": after} if after else {}),
+    })
+
+asr = stage("asr", [
+    {"key": "a", "args": ["--input", "a.wav"]},
+    {"key": "b", "args": ["--input", "b.wav"]},
+], {"words.json": "results"}, files=recording_files)
+separation = stage("separation", [
+    {"key": "a", "args": ["--input", "a/input"]},
+    {"key": "b", "args": ["--input", "b/input"]},
+], {"segments.json": "results"}, after={"job": asr["id"], "outputs": {
+    "a/input": "a/words.json", "b/input": "b/words.json"}})
+naming = stage("naming", [
+    {"key": "whole", "args": ["--input", "a.json", "--input", "b.json"]},
+], {"labels.json": "results"}, after={"job": separation["id"], "outputs": {
+    "a.json": "a/segments.json", "b.json": "b/segments.json"}})
+render = client.submit({
+    "name": f"{recording}-render", "project": project,
+    "submission_key": f"operation-42.{recording}.render", "extension": "render@1",
+    "after": {"job": naming["id"], "outputs": {"input.json": "whole/labels.json"}},
+})
+result = client.wait(render["id"])
+```
+
+Repeat those submissions with a distinct recording identity/key namespace for
+each recording, registering every chain before waiting on the final sink IDs.

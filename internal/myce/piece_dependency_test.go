@@ -5,7 +5,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -349,7 +348,7 @@ func TestPieceDependencyWholeParentFailure(t *testing.T) {
 	finish(t, q, tail, false)
 	for _, id := range []string{ordinary.ID, fanOut.ID} {
 		got := job(t, q, id)
-		if got.State != "failed" || got.DiagnosticCode != "upstream_failed" || got.Attempt != 0 || got.StartedAt != nil || !got.FinishedAt.Equal(clock.Now()) || !strings.Contains(got.Reason, "parent did not succeed") {
+		if got.State != "failed" || got.DiagnosticCode != "upstream_failed" || got.Attempt != 0 || got.StartedAt != nil || !got.FinishedAt.Equal(clock.Now()) || got.Reason != "upstream fan-out parent "+parent.ID+" did not succeed" {
 			t.Error("upstream failure did not fail unattempted consumer clearly", got)
 		}
 	}

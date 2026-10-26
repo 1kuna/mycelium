@@ -2,6 +2,7 @@ package myce
 
 import (
 	"errors"
+	"fmt"
 	"maps"
 	"strings"
 	"time"
@@ -142,10 +143,7 @@ func (q *Queue) maintainPieceDependencies() {
 				j.DiagnosticCode, j.Reason = "result_expired", "producer outputs expired"
 			}
 			if a.Piece == "" && j.DiagnosticCode == "upstream_failed" {
-				j.Reason = "upstream fan-out parent did not succeed"
-				if p != nil && p.Reason != "" {
-					j.Reason += ": " + p.Reason
-				}
+				j.Reason = fmt.Sprintf("upstream fan-out parent %s did not succeed", a.Job)
 			}
 			j.FinishedAt = &now
 		} else if a.Piece == "" {
