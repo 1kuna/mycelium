@@ -14,6 +14,24 @@ import (
 // time. Fast, unsampled operations do no clock reads or stack inspection.
 type queueHoldSampler struct{ count atomic.Uint64 }
 
+func readWallStart(observer func(string, time.Duration, time.Duration)) time.Time {
+	if observer == nil {
+		return time.Time{}
+	}
+	return time.Now()
+}
+
+func observeRead(observer func(string, time.Duration, time.Duration), id string, started, locked time.Time) {
+	if observer == nil {
+		return
+	}
+	kind := "status"
+	if id != "" {
+		kind = "job"
+	}
+	observer(kind, locked.Sub(started), time.Since(locked))
+}
+
 func (s *queueHoldSampler) start() time.Time {
 	if (s.count.Add(1)-1)%16 == 0 {
 		return time.Now()

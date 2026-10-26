@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"database/sql"
 	"fmt"
 	"math"
 	"sort"
@@ -285,17 +286,26 @@ func (q *Queue) Usage(since time.Time) (UsageReport, error) {
 	if e := q.Tick(); e != nil {
 		return UsageReport{}, e
 	}
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	return q.usageLocked(since)
+	return q.usageSnapshot(since)
 }
-func (q *Queue) usageLocked(since time.Time) (UsageReport, error) {
+
+func (q *Queue) usageSnapshot(since time.Time) (UsageReport, error) {
+	q.mu.RLock()
+	v := &Queue{clock: observationClock{q.clock.Now()}, s: state{
+		Preemptions:      append([]Preemption(nil), q.s.Preemptions...),
+		ProductionStarts: append([]ProductionStart(nil), q.s.ProductionStarts...),
+	}}
+	q.mu.RUnlock()
+	return v.readUsage(q.usageReader, since)
+}
+
+func (q *Queue) readUsage(db *sql.DB, since time.Time) (UsageReport, error) {
 	now := q.clock.Now()
 	out := UsageReport{Since: since, Until: now, Projects: []UsageSummary{}, Machines: []UsageSummary{}, Daily: []DailyUsage{}, Preemptions: []Preemption{}, ProductionStarts: []ProductionStart{}}
 	if since.After(now) {
 		return out, fmt.Errorf("since must precede current time")
 	}
-	rows, e := q.db.Query(`SELECT at,span,machine,device,project,job,model,busy,idle,pinned,memory_seconds,observed FROM usage_samples WHERE at+span>? AND at<?`, since.Unix(), now.Unix()+1)
+	rows, e := db.Query(`SELECT at,span,machine,device,project,job,model,busy,idle,pinned,memory_seconds,observed FROM usage_samples WHERE at+span>? AND at<?`, since.Unix(), now.Unix()+1)
 	if e != nil {
 		return out, e
 	}

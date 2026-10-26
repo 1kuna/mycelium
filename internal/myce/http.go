@@ -83,7 +83,7 @@ func (a API) handler(joiningPin string) http.Handler {
 		mux.HandleFunc("POST "+path, a.modelCall)
 	}
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
-		s, err := a.Queue.publicSnapshot()
+		s, err := a.Queue.cachedPublicSnapshot()
 		if err != nil {
 			http.Error(w, "status unavailable", 500)
 			return
@@ -93,9 +93,10 @@ func (a API) handler(joiningPin string) http.Handler {
 		_ = statusPage.Execute(w, s)
 	})
 	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
-		s, err := a.Queue.publicSnapshot()
+		data, err := a.Queue.cachedStatusJSON()
 		w.Header().Add("Vary", "Accept-Encoding")
 		if err == nil {
+			w.Header().Set("Content-Type", "application/json")
 			for _, encoding := range strings.Split(r.Header.Get("Accept-Encoding"), ",") {
 				if strings.EqualFold(strings.TrimSpace(encoding), "gzip") {
 					// The stock Go client negotiates and decodes gzip automatically.
@@ -103,20 +104,24 @@ func (a API) handler(joiningPin string) http.Handler {
 					w.Header().Set("Content-Type", "application/json")
 					w.Header().Set("Content-Encoding", "gzip")
 					compressed := gzip.NewWriter(w)
-					_ = json.NewEncoder(compressed).Encode(s)
+					_, _ = io.WriteString(compressed, data)
 					_ = compressed.Close()
 					return
 				}
 			}
+			_, _ = io.WriteString(w, data)
+			return
 		}
+		respondOperation(w, nil, err, "status_unavailable")
+	})
+	// Administrative inspection must remain fresh for migration custody and
+	// measurement safety. It never consumes the observational status cache.
+	mux.HandleFunc("GET /api/inspection", func(w http.ResponseWriter, r *http.Request) {
+		s, err := a.Queue.publicSnapshot()
 		respondOperation(w, s, err, "status_unavailable")
 	})
 	mux.HandleFunc("GET /api/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
-		s, err := a.Queue.snapshotView(true, true)
-		var j *Job
-		if err == nil {
-			j, err = FindJob(s.Jobs, r.PathValue("id"))
-		}
+		j, err := a.Queue.jobSnapshot(r.PathValue("id"))
 		// Keep the GET execution payload empty without changing Spec's JSON
 		// encoding, which also defines durable submission fingerprints.
 		type replySpec struct {

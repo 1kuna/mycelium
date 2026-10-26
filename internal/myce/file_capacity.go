@@ -160,16 +160,36 @@ func fileStoreRefusal(status FileStoreStatus, need uint64) error {
 }
 
 // Snapshot custody before walking disk. Status is read-only and never runs GC.
-func (q *Queue) fileStoreStatus(ctx context.Context) *FileStoreStatus {
-	q.mu.RLock()
-	store := q.files
+type fileStoreObservation struct {
+	store                     *FileStore
+	expired, keep, referenced map[string]bool
+	markers                   map[string]time.Time
+	now                       time.Time
+	retention                 time.Duration
+}
+
+// The caller holds q.mu. Reference maps are newly allocated and timestamps are
+// values; the FileStore owns its separate lifecycle/inventory synchronization.
+func (q *Queue) captureFileStoreStatus() fileStoreObservation {
 	expired, keep, referenced := q.fileReferences(true)
 	markers := make(map[string]time.Time, len(q.s.JobInputUploads))
 	for hash, at := range q.s.JobInputUploads {
 		markers[hash] = at
 	}
-	now, retention := q.clock.Now(), q.fileRetention
+	return fileStoreObservation{q.files, expired, keep, referenced, markers, q.clock.Now(), q.fileRetention}
+}
+
+func (q *Queue) fileStoreStatus(ctx context.Context) *FileStoreStatus {
+	q.mu.RLock()
+	view := q.captureFileStoreStatus()
 	q.mu.RUnlock()
+	return view.status(ctx)
+}
+
+func (v fileStoreObservation) status(ctx context.Context) *FileStoreStatus {
+	store := v.store
+	expired, keep, referenced, markers := v.expired, v.keep, v.referenced, v.markers
+	now, retention := v.now, v.retention
 	if store == nil {
 		return nil
 	}

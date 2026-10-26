@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // Exercise the real runner and queue retry policy with exact probe ordering,
@@ -148,11 +149,14 @@ func TestInventoryRereviewUnmatchedSelectors(t *testing.T) {
 				t.Fatalf("partial allowance silently dropped: %+v reason=%s", w.Machine.Devices, w.inventoryReason)
 			}
 			q, _ := fixture(t)
+			clock := &workerFakeClock{now: q.clock.Now()}
+			q.clock = clock
 			// Use a separate real worker with the partial allowance for public status.
 			m := machine("selected", "fake", "selected-host")
 			m.Device = selection
 			client := runInventoryReviewWorker(t, q, Worker{Machine: m, InventoryProbe: w.InventoryProbe})
 			awaitInventoryReview(t, func() bool {
+				clock.Advance(time.Second) // Expire the observational status generation.
 				// Read the actual public wire diagnostic, without coupling the test
 				// to the machine struct added by this repair.
 				var wire struct {

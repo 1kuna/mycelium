@@ -13,6 +13,8 @@ import (
 func TestJoiningExtensionEndToEnd(t *testing.T) {
 	t.Setenv("MYCE_TOKEN", "must-not-reach-extension")
 	q, _ := fixture(t)
+	clock := &workerFakeClock{now: q.clock.Now()}
+	q.clock = clock
 	server, invitation := joiningTestServer(t, API{Queue: q, Token: "throwaway-test-only"}.Handler())
 	invitation.Address = ""
 	discovery := &fakeDiscovery{addresses: []string{server.URL}}
@@ -67,20 +69,21 @@ func TestJoiningExtensionEndToEnd(t *testing.T) {
 		}
 		var completed *Job
 		await(t, func() bool {
+			var current Job
+			if err := client.Call(ctx, "GET", "/api/jobs/"+submitted.ID, nil, &current); err != nil {
+				t.Fatal(err)
+			}
+			if !terminal(current.State) {
+				return false
+			}
+			if current.State != "succeeded" {
+				t.Fatalf("joined extension job: state=%s reason=%s", current.State, current.Reason)
+			}
+			completed = &current
+			clock.Advance(time.Second)
 			var snap Snapshot
 			if err := client.Call(ctx, "GET", "/api/status", nil, &snap); err != nil {
 				t.Fatal(err)
-			}
-			for _, j := range snap.Jobs {
-				if j.ID == submitted.ID && terminal(j.State) {
-					if j.State != "succeeded" {
-						t.Fatalf("joined extension job: state=%s reason=%s", j.State, j.Reason)
-					}
-					completed = j
-				}
-			}
-			if completed == nil {
-				return false
 			}
 			if len(snap.Machines) != 1 || snap.Machines[0].CapabilityProfile == nil || len(snap.Machines[0].ExtensionReports) != 2 || snap.Machines[0].CapabilityProfile.Onboarding != "hardware-facts-only; throughput pending" || snap.Machines[0].CapabilityProfile.Benchmark != nil {
 				t.Fatal("check-in lost profile or extension reports")

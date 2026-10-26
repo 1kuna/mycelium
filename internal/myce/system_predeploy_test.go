@@ -94,7 +94,7 @@ func TestPreDeployFullSystem(t *testing.T) {
 	snapshot := func() Snapshot {
 		t.Helper()
 		var s Snapshot
-		call("GET", "/api/status", nil, &s)
+		call("GET", "/api/inspection", nil, &s)
 		for _, j := range s.Jobs {
 			if old, ok := ledger[j.ID]; ok && j.State != old {
 				t.Fatalf("terminal job %s changed from %s to %s", j.ID, old, j.State)
@@ -663,7 +663,7 @@ func TestPreDeployModelCopyFaults(t *testing.T) {
 		t.Helper()
 		must(client.Call(context.Background(), method, path, in, out))
 	}
-	snapshot := func() Snapshot { t.Helper(); var s Snapshot; call("GET", "/api/status", nil, &s); return s }
+	snapshot := func() Snapshot { t.Helper(); var s Snapshot; call("GET", "/api/inspection", nil, &s); return s }
 	wait := func(label string, condition func() bool) {
 		t.Helper()
 		deadline := time.NewTimer(testWaitTimeout)

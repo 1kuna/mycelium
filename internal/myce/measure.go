@@ -148,9 +148,7 @@ func Measure(ctx context.Context, o MeasureOptions) (report Measurement, err err
 		status := o.Status
 		if status == nil {
 			status = func(c context.Context) (Snapshot, error) {
-				var snap Snapshot
-				e := o.Worker.Client.Call(c, "GET", "/api/status", nil, &snap)
-				return snap, e
+				return o.Worker.Client.inspectionSnapshot(c)
 			}
 		}
 		snap, e := status(ctx)

@@ -57,7 +57,7 @@ func TestM4InstallSignalJournal(t *testing.T) {
 		t.Run(sig.String(), func(t *testing.T) {
 			root := t.TempDir()
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.URL.Path == "/api/status" {
+				if r.URL.Path == "/api/inspection" {
 					json.NewEncoder(w).Encode(myce.Snapshot{Machines: []*myce.Machine{{ID: "host-gpu0", HostID: "host", Gone: true, Replacement: &myce.MachineReplacement{Machine: "host", Device: "0"}}}})
 					return
 				}

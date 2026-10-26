@@ -199,6 +199,7 @@ func TestFileCapacityStatus(t *testing.T) {
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
+	clock.Advance(time.Second) // Allow the observational status cache to expire.
 	if err := c.Call(context.Background(), http.MethodGet, "/api/status", nil, &snap); err != nil {
 		t.Fatal(err)
 	}

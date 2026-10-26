@@ -46,21 +46,15 @@ func TestM3DevTwoGPUScenario(t *testing.T) {
 	}
 	get := func(id string) *Job {
 		t.Helper()
-		var snap Snapshot
-		if err := c.Call(ctx, "GET", "/api/status", nil, &snap); err != nil {
+		var got Job
+		if err := c.Call(ctx, "GET", "/api/jobs/"+id, nil, &got); err != nil {
 			current, _ := d.Queue.Snapshot()
 			for _, job := range current.Jobs {
 				t.Logf("job=%s state=%s attempt=%d release=%t reason=%s", job.ID, job.State, job.Attempt, job.ReleaseConfirmed, job.Reason)
 			}
 			t.Fatal(err)
 		}
-		for _, j := range snap.Jobs {
-			if j.ID == id {
-				return j
-			}
-		}
-		t.Fatal("job disappeared")
-		return nil
+		return &got
 	}
 	helper := func(device string) Spec {
 		s := m3Spec("experiment", device, 8, 1)

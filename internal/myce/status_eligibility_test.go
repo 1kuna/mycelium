@@ -100,6 +100,7 @@ func TestStatusEligibleHostsLifecycle(t *testing.T) {
 	if running == nil {
 		t.Fatal("no assignment")
 	}
+	c.Advance(time.Second) // Global observations may lag by one cache lifetime.
 	assertEligibleStatus(t, q, j.ID, "running", s.AllowedMachines, []string{"host-a"}, false)
 	c.Advance(LossAfter)
 	check(t, q, b, nil)
@@ -118,10 +119,12 @@ func TestStatusEligibleHostsLifecycle(t *testing.T) {
 	if err := q.Cancel(j.ID); err != nil {
 		t.Fatal(err)
 	}
+	c.Advance(time.Second)
 	assertEligibleStatus(t, q, j.ID, "stopping", s.AllowedMachines, []string{"host-a"}, false)
 	if err := q.Complete(result(job(t, q, j.ID), false)); err != nil {
 		t.Fatal(err)
 	}
+	c.Advance(time.Second)
 	terminalJob := statusJobs(t, q)[j.ID]
 	if string(terminalJob["state"]) != `"cancelled"` || terminalJob["eligible_hosts"] != nil || terminalJob["eligible_unrestricted"] != nil || terminalJob["eligible_unknown_machines"] != nil {
 		t.Fatal("terminal eligibility must be omitted")
@@ -254,7 +257,7 @@ func TestStatusEligibleUnknownMachines(t *testing.T) {
 		{name: "intersection", job: []string{"unknown-z", "job-only", "other", "unknown-a", "unknown-z"}, project: []string{"project-only", "unknown-a", "other", "unknown-z"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			q, _ := fixture(t)
+			q, c := fixture(t)
 			m := machine("other", "fake")
 			m.HostID = "host-other"
 			check(t, q, m, nil)
@@ -271,11 +274,13 @@ func TestStatusEligibleUnknownMachines(t *testing.T) {
 			joined.HostID = "host-new"
 			joined.Leaving = true
 			check(t, q, joined, nil)
+			c.Advance(time.Second)
 			assertEligibleStatus(t, q, j.ID, "queued", tc.job, []string{"host-new", "host-other"}, false)
 			assertUnknownMachines(t, q, j.ID, []string{"unknown-z"})
 			if err := q.Cancel(j.ID); err != nil {
 				t.Fatal(err)
 			}
+			c.Advance(time.Second)
 			assertUnknownMachines(t, q, j.ID, nil)
 		})
 	}
@@ -285,7 +290,7 @@ func TestStatusEligibleUnknownMachines(t *testing.T) {
 }
 
 func TestStatusEligibleHostsRetainActiveAssignment(t *testing.T) {
-	q, _ := fixture(t)
+	q, c := fixture(t)
 	a, b := machine("a", "fake"), machine("b", "fake")
 	a.HostID, b.HostID = "host-a", "host-b"
 	check(t, q, a, nil)
@@ -298,14 +303,17 @@ func TestStatusEligibleHostsRetainActiveAssignment(t *testing.T) {
 	if err := q.ConfigureProjects(map[string]ProjectPolicy{"test": {Weight: 1, AllowedMachines: []string{"b"}}}); err != nil {
 		t.Fatal(err)
 	}
+	c.Advance(time.Second)
 	assertEligibleStatus(t, q, j.ID, "running", nil, []string{"host-a", "host-b"}, false)
 	if err := q.update(func() error { q.s.Jobs[j.ID].ProductionHost = "host-production"; return nil }); err != nil {
 		t.Fatal(err)
 	}
+	c.Advance(time.Second)
 	assertEligibleStatus(t, q, j.ID, "running", nil, []string{"host-a", "host-b", "host-production"}, false)
 	if err := q.Cancel(j.ID); err != nil {
 		t.Fatal(err)
 	}
+	c.Advance(time.Second)
 	assertEligibleStatus(t, q, j.ID, "stopping", nil, []string{"host-a", "host-b", "host-production"}, false)
 }
 

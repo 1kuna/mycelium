@@ -120,6 +120,9 @@ type Queue struct {
 	updateHolds      queueHoldSampler
 	statusHolds      queueHoldSampler
 	logCleanupHolds  queueHoldSampler
+	statusCache      statusCache
+	observeRead      func(string, time.Duration, time.Duration)
+	usageReader      *sql.DB
 	db               *sql.DB
 	persisted        map[string][]byte
 	records          *queueRecords
@@ -280,6 +283,11 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 			j.Timing.Reason = "queue restarted; occupancy unknown"
 		}
 	}
+	q.usageReader, err = openUsageReader(path)
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
 	success = true
 	return q, nil
 }
@@ -370,7 +378,11 @@ func checkpointAvailable(root string) bool {
 func (q *Queue) Close() error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	err := q.db.Close()
+	var err error
+	if q.usageReader != nil {
+		err = q.usageReader.Close()
+	}
+	err = errors.Join(err, q.db.Close())
 	if q.uploadSpool.lock != nil {
 		err = errors.Join(err, q.uploadSpool.lock.Close())
 		q.uploadSpool.lock = nil
@@ -1532,236 +1544,267 @@ func (q *Queue) Leave(id string, now bool) error {
 func (q *Queue) Snapshot() (Snapshot, error) { return q.snapshot(false) }
 
 func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
-	return q.snapshotView(forStatus, false)
+	if forStatus {
+		return q.statusSnapshot()
+	}
+	var out Snapshot
+	err := q.update(func() error { q.maintain(); out = q.projectSnapshot(false); return nil })
+	if err == nil {
+		out.Usage, err = q.usageSnapshot(out.Now.Add(-7 * 24 * time.Hour))
+	}
+	return out, err
 }
 
-// Job replies share safe status diagnostics, but retain the stable key echo.
-func (q *Queue) snapshotView(forStatus, jobReply bool) (Snapshot, error) {
-	var out Snapshot
-	project := func() error {
-		out = Snapshot{HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
-		for _, s := range q.s.ModelSlots {
-			copy := *s
-			model, _ := q.model(s.Model)
-			copy.Placement = q.modelPlacement(model)
-			if s.State == "ready" && s.InFlight == 0 {
-				copy.IdleSeconds = max(0, q.clock.Now().Sub(s.LastUsed).Seconds())
-			}
-			out.LoadedModels = append(out.LoadedModels, copy)
+// Projection runs against either the locked queue or a fully detached read view.
+func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
+	out := Snapshot{HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
+	for _, s := range q.s.ModelSlots {
+		copy := *s
+		model, _ := q.model(s.Model)
+		copy.Placement = q.modelPlacement(model)
+		if s.State == "ready" && s.InFlight == 0 {
+			copy.IdleSeconds = max(0, q.clock.Now().Sub(s.LastUsed).Seconds())
 		}
-		sort.Slice(out.LoadedModels, func(i, j int) bool {
-			return slotKey(out.LoadedModels[i].Machine, out.LoadedModels[i].Model) < slotKey(out.LoadedModels[j].Machine, out.LoadedModels[j].Model)
-		})
-		// Concurrent outages must remain visible; one probe cannot hide another.
-		warnings := []string{}
-		if q.networkQuiet {
-			warnings = append(warnings, "most workers quiet: waiting for the network to return")
+		out.LoadedModels = append(out.LoadedModels, copy)
+	}
+	sort.Slice(out.LoadedModels, func(i, j int) bool {
+		return slotKey(out.LoadedModels[i].Machine, out.LoadedModels[i].Model) < slotKey(out.LoadedModels[j].Machine, out.LoadedModels[j].Model)
+	})
+	// Concurrent outages must remain visible; one probe cannot hide another.
+	warnings := []string{}
+	if q.networkQuiet {
+		warnings = append(warnings, "most workers quiet: waiting for the network to return")
+	}
+	if q.clock.Now().Before(q.restartUntil) && len(q.unreported) > 0 {
+		warnings = append(warnings, "queue restarted: waiting for workers to report")
+	}
+	if !q.checkpointsAvailable() {
+		warnings = append(warnings, "NAS checkpoint root is unreachable; checkpoint-dependent jobs will not start")
+	}
+	for _, id := range slices.Sorted(maps.Keys(q.s.Machines)) {
+		m := q.s.Machines[id]
+		if m.Replacement == nil && !m.Gone && m.CheckpointUnavailable {
+			warnings = append(warnings, "NAS checkpoint root is unreachable on worker "+m.ID)
 		}
-		if q.clock.Now().Before(q.restartUntil) && len(q.unreported) > 0 {
-			warnings = append(warnings, "queue restarted: waiting for workers to report")
+	}
+	out.Warning = strings.Join(warnings, "; ")
+	for host := range q.s.Hosts {
+		if q.held(host) {
+			detail := q.productionHoldDetail(host)
+			out.HostHolds = append(out.HostHolds, detail.Text)
+			out.HoldsDetail = append(out.HoldsDetail, detail)
 		}
-		if !q.checkpointsAvailable() {
-			warnings = append(warnings, "NAS checkpoint root is unreachable; checkpoint-dependent jobs will not start")
-		}
-		for _, id := range slices.Sorted(maps.Keys(q.s.Machines)) {
-			m := q.s.Machines[id]
-			if m.Replacement == nil && !m.Gone && m.CheckpointUnavailable {
-				warnings = append(warnings, "NAS checkpoint root is unreachable on worker "+m.ID)
-			}
-		}
-		out.Warning = strings.Join(warnings, "; ")
-		for host := range q.s.Hosts {
-			if q.held(host) {
-				detail := q.productionHoldDetail(host)
+	}
+	hosts := map[string]bool{}
+	for _, m := range q.s.Machines {
+		hosts[hostID(m)] = true
+	}
+	for host := range hosts {
+		if detail := q.dockerHoldDetail(host); detail.Text != "" {
+			if !slices.Contains(out.HostHolds, detail.Text) {
 				out.HostHolds = append(out.HostHolds, detail.Text)
-				out.HoldsDetail = append(out.HoldsDetail, detail)
 			}
+			out.HoldsDetail = append(out.HoldsDetail, detail)
 		}
-		hosts := map[string]bool{}
-		for _, m := range q.s.Machines {
-			hosts[hostID(m)] = true
+	}
+	// Also report fences without a configured production policy or live worker.
+	for _, r := range q.s.HostReleases {
+		if _, ok := hosts[r.Host]; !ok {
+			hosts[r.Host] = false
 		}
-		for host := range hosts {
+	}
+
+	for host := range q.s.HostMaintenance {
+		if _, ok := hosts[host]; !ok {
+			hosts[host] = false
+		}
+	}
+
+	out.HostStates = make(map[string]string, len(hosts))
+	for host, hasMachine := range hosts {
+		out.HostStates[host] = q.hostMaintenanceStatus(host).State
+		if !hasMachine {
 			if detail := q.dockerHoldDetail(host); detail.Text != "" {
-				if !slices.Contains(out.HostHolds, detail.Text) {
-					out.HostHolds = append(out.HostHolds, detail.Text)
-				}
 				out.HoldsDetail = append(out.HoldsDetail, detail)
 			}
 		}
-		// Also report fences without a configured production policy or live worker.
-		for _, r := range q.s.HostReleases {
-			if _, ok := hosts[r.Host]; !ok {
-				hosts[r.Host] = false
+		if detail := q.startupReleaseDetail(host); detail.Text != "" {
+			out.HoldsDetail = append(out.HoldsDetail, detail)
+		}
+		if q.maintenanceBlocked(host) {
+			out.HoldsDetail = append(out.HoldsDetail, HoldDetail{Host: host, Kind: "host_disabled", Text: "host " + host + " disabled by operator"})
+		}
+	}
+	sort.Strings(out.HostHolds)
+	sort.Slice(out.HoldsDetail, func(i, j int) bool {
+		a, b := out.HoldsDetail[i], out.HoldsDetail[j]
+		if a.Host != b.Host {
+			return a.Host < b.Host
+		}
+		return a.Kind < b.Kind
+	})
+	for _, key := range slices.Sorted(maps.Keys(q.s.WorkObservations)) {
+		out.WorkCurves = append(out.WorkCurves, q.s.WorkObservations[key])
+	}
+	out.PriorityPolicy = q.priorityPolicyRecord()
+	out.Now = q.clock.Now()
+	order, reasons := q.queueProjection()
+	for _, stored := range q.s.Jobs {
+		out.Jobs = append(out.Jobs, q.projectJob(stored, order, reasons, forStatus))
+	}
+	for _, c := range q.calls {
+		out.Jobs = append(out.Jobs, q.projectCall(c, order, reasons))
+	}
+	for _, m := range q.s.Machines {
+		copy := cloneMachine(m)
+		for i, v := range copy.DiskVolumes {
+			copy.DiskVolumes[i] = q.currentDiskVolume(v, m.DiskReceivedAt)
+		}
+		copy.RecoveryNeedsAttention = m.Recovering && m.RecoveringSince != nil && q.clock.Now().Sub(*m.RecoveringSince) > recoveryAttentionDelay
+		q.machineDeviceStatus(&copy, m)
+		copy.AdmissionReason = q.machineLimitReason(m)
+		copy.Disabled = ""
+		copy.LastResort = q.s.HostMaintenance[hostID(m)].LastResort
+		if q.maintenanceBlocked(hostID(m)) {
+			copy.Disabled = "planned host maintenance"
+		}
+		if a := machineAvailability(m); a != nil && !a.Available {
+			copy.AdmissionReason = a.Reason
+		}
+		copy.ReservedMemoryGB = 0
+		copy.MemoryUsedGB = max(0, copy.TotalMemoryGB-copy.FreeMemoryGB)
+		for _, slot := range q.s.ModelSlots {
+			if slot.Machine == m.ID && slotReservesMemory(slot) && q.slotPinned(slot) {
+				model, _ := q.model(slot.Model)
+				copy.ReservedMemoryGB += model.MemoryGB
 			}
 		}
+		copy.ModelCopySeconds = map[string]float64{}
+		for _, model := range q.models.Models {
+			if q.modelFitsMachine(model, m) {
+				copy.ModelCopySeconds[model.Name] = q.loadSeconds(model.Name, m)
+			}
+		}
+		out.Machines = append(out.Machines, &copy)
+	}
+	for _, j := range out.Jobs {
+		q.projectJobDiagnostics(j, forStatus, false)
+	}
+	sort.SliceStable(out.Jobs, func(i, k int) bool { return statusBefore(out.Jobs[i], out.Jobs[k]) })
+	sort.Slice(out.Machines, func(i, k int) bool { return out.Machines[i].ID < out.Machines[k].ID })
+	return out
+}
 
-		for host := range q.s.HostMaintenance {
-			if _, ok := hosts[host]; !ok {
-				hosts[host] = false
-			}
+func (q *Queue) projectJob(stored *Job, order map[string]int, reasons map[string]string, forStatus bool) *Job {
+	value := *stored
+	j := &value
+	if j.State == "queued" {
+		j.Reason = reasons[j.ID]
+		if j.RequeuedByOperator {
+			j.Reason = "requeued: disabled by operator; " + j.Reason
 		}
+		if needsCheckpoint(j) && !q.checkpointsAvailable() {
+			j.Reason = "NAS checkpoint root is unreachable"
+		}
+	}
+	if startupPending(j) {
+		j.Reason = q.startStatusReason(j)
+	}
+	// Eligibility/reasons need the full diagnostic inputs until redaction.
+	copy := *j
+	if !forStatus {
+		copy = cloneJob(j)
+	}
+	copy.Spec.Class = jobClass(copy.Spec)
+	copy.PriorityPolicy = q.priorityMatch(copy.Spec)
+	copy.QueueOrder = order[j.ID]
+	if terminal(j.State) && j.LastStopOutcome == "release pending" {
+		copy.Reason += "; release pending"
+	}
+	return &copy
+}
 
-		out.HostStates = make(map[string]string, len(hosts))
-		for host, hasMachine := range hosts {
-			out.HostStates[host] = q.hostMaintenanceStatus(host).State
-			if !hasMachine {
-				if detail := q.dockerHoldDetail(host); detail.Text != "" {
-					out.HoldsDetail = append(out.HoldsDetail, detail)
-				}
-			}
-			if detail := q.startupReleaseDetail(host); detail.Text != "" {
-				out.HoldsDetail = append(out.HoldsDetail, detail)
-			}
-			if q.maintenanceBlocked(host) {
-				out.HoldsDetail = append(out.HoldsDetail, HoldDetail{Host: host, Kind: "host_disabled", Text: "host " + host + " disabled by operator"})
+func (q *Queue) projectCall(c *ModelCall, order map[string]int, reasons map[string]string) *Job {
+	call := callJob(c)
+	call.Spec.Name = "model call: " + c.Model
+	model, _ := q.model(c.Model)
+	call.Spec.Logs = model.Logs
+	call.Spec.Needs.MemoryGB = model.MemoryGB
+	call.Spec.Needs.HostMemoryGB = model.HostMemoryGB
+	call.Machine = c.Machine
+	call.State = "queued"
+	call.Reason = "waiting for model " + c.Model + " on an eligible worker"
+	if c.Machine == "" && (model.Project != "" || len(model.AllowedMachines) > 0 || model.LocalSource != "") {
+		eligible := false
+		for _, worker := range q.s.Machines {
+			if q.projectAllows(c.Project, worker.ID) && q.modelFitsMachine(model, worker) && !worker.Gone && !worker.Leaving {
+				eligible = true
+				break
 			}
 		}
-		sort.Strings(out.HostHolds)
-		sort.Slice(out.HoldsDetail, func(i, j int) bool {
-			a, b := out.HoldsDetail[i], out.HoldsDetail[j]
-			if a.Host != b.Host {
-				return a.Host < b.Host
-			}
-			return a.Kind < b.Kind
-		})
-		for _, key := range slices.Sorted(maps.Keys(q.s.WorkObservations)) {
-			out.WorkCurves = append(out.WorkCurves, q.s.WorkObservations[key])
+		if !eligible {
+			call.Reason = "waiting for model placement: entry/owner/caller allowed_machines or local_source approval excludes available workers"
 		}
-		out.PriorityPolicy = q.priorityPolicyRecord()
-		out.Now = q.clock.Now()
-		order, reasons := q.queueProjection()
-		for _, stored := range q.s.Jobs {
-			value := *stored
-			j := &value
-			if j.State == "queued" {
-				j.Reason = reasons[j.ID]
-				if j.RequeuedByOperator {
-					j.Reason = "requeued: disabled by operator; " + j.Reason
-				}
-				if needsCheckpoint(j) && !q.checkpointsAvailable() {
-					j.Reason = "NAS checkpoint root is unreachable"
-				}
-			}
-			if startupPending(j) {
-				j.Reason = q.startStatusReason(j)
-			}
-			// Status reasons/eligibility need the original spec under the lock;
-			// detach the public summary only after those calculations.
-			copy := *j
-			if !forStatus {
-				copy = cloneJob(j)
-			}
-			copy.Spec.Class = jobClass(copy.Spec)
-			copy.PriorityPolicy = q.priorityMatch(copy.Spec)
-			copy.QueueOrder = order[j.ID]
-			if terminal(j.State) && j.LastStopOutcome == "release pending" {
-				copy.Reason += "; release pending"
-			}
-			out.Jobs = append(out.Jobs, &copy)
-		}
-		for _, c := range q.calls {
-			call := callJob(c)
-			call.Spec.Name = "model call: " + c.Model
-			model, _ := q.model(c.Model)
-			call.Spec.Logs = model.Logs
-			call.Spec.Needs.MemoryGB = model.MemoryGB
-			call.Spec.Needs.HostMemoryGB = model.HostMemoryGB
-			call.Machine = c.Machine
-			call.State = "queued"
-			call.Reason = "waiting for model " + c.Model + " on an eligible worker"
-			if c.Machine == "" && (model.Project != "" || len(model.AllowedMachines) > 0 || model.LocalSource != "") {
-				eligible := false
-				for _, worker := range q.s.Machines {
-					if q.projectAllows(c.Project, worker.ID) && q.modelFitsMachine(model, worker) && !worker.Gone && !worker.Leaving {
-						eligible = true
-						break
-					}
-				}
-				if !eligible {
-					call.Reason = "waiting for model placement: entry/owner/caller allowed_machines or local_source approval excludes available workers"
-				}
-			}
-			call.QueueOrder = order[c.ID]
-			if reason := reasons[c.ID]; reason != "" {
-				call.Reason = reason
-			}
-			if reason := q.capReason(call); reason != "" {
-				call.Reason = reason
-			}
-			if reason := q.holdWaitReason(call); reason != "" {
-				call.Reason = reason
-			}
-			if c.Machine == "" && model.HostMemoryGB > 0 {
-				eligible, room := false, false
-				for _, m := range q.s.Machines {
-					if m.Gone || m.Leaving || q.callExcludes(c, m.ID) || m.ModelURL == "" || !q.modelFitsMachine(model, m) {
-						continue
-					}
-					eligible = true
-					slot := q.s.ModelSlots[targetSlotKey(m, c.Model)]
-					if slot != nil && (slot.State == "ready" || slot.State == "loading") || hostFits(m, model.MemoryGB, model.HostMemoryGB) {
-						room = true
-					}
-				}
-				if eligible && !room {
-					call.Reason = fmt.Sprintf("waiting for RAM: model %s needs %.1f GiB host memory (or telemetry unavailable)", c.Model, model.HostMemoryGB)
-				}
-			}
-			if reason := q.logsWaitingReason(call); reason != "" {
-				call.Reason = reason
-			}
-			if reason := q.engineWaitReason(c); reason != "" && call.Reason == "waiting for model "+c.Model+" on an eligible worker" {
-				call.Reason = reason
-			}
-			if c.Machine != "" {
-				call.State = "running"
-				call.Reason = "model call in flight"
-			}
-			if c.Error != "" {
-				call.State = "failed"
-				call.Reason = c.Error
-			}
-			call.Spec.Class = jobClass(call.Spec)
-			call.PriorityPolicy = q.priorityMatch(call.Spec)
-			out.Jobs = append(out.Jobs, call)
-		}
+	}
+	call.QueueOrder = order[c.ID]
+	if reason := reasons[c.ID]; reason != "" {
+		call.Reason = reason
+	}
+	if reason := q.capReason(call); reason != "" {
+		call.Reason = reason
+	}
+	if reason := q.holdWaitReason(call); reason != "" {
+		call.Reason = reason
+	}
+	if c.Machine == "" && model.HostMemoryGB > 0 {
+		eligible, room := false, false
 		for _, m := range q.s.Machines {
-			copy := cloneMachine(m)
-			for i, v := range copy.DiskVolumes {
-				copy.DiskVolumes[i] = q.currentDiskVolume(v, m.DiskReceivedAt)
+			if m.Gone || m.Leaving || q.callExcludes(c, m.ID) || m.ModelURL == "" || !q.modelFitsMachine(model, m) {
+				continue
 			}
-			copy.RecoveryNeedsAttention = m.Recovering && m.RecoveringSince != nil && q.clock.Now().Sub(*m.RecoveringSince) > recoveryAttentionDelay
-			q.machineDeviceStatus(&copy, m)
-			copy.AdmissionReason = q.machineLimitReason(m)
-			copy.Disabled = ""
-			copy.LastResort = q.s.HostMaintenance[hostID(m)].LastResort
-			if q.maintenanceBlocked(hostID(m)) {
-				copy.Disabled = "planned host maintenance"
+			eligible = true
+			slot := q.s.ModelSlots[targetSlotKey(m, c.Model)]
+			if slot != nil && (slot.State == "ready" || slot.State == "loading") || hostFits(m, model.MemoryGB, model.HostMemoryGB) {
+				room = true
 			}
-			if a := machineAvailability(m); a != nil && !a.Available {
-				copy.AdmissionReason = a.Reason
-			}
-			copy.ReservedMemoryGB = 0
-			copy.MemoryUsedGB = max(0, copy.TotalMemoryGB-copy.FreeMemoryGB)
-			for _, slot := range q.s.ModelSlots {
-				if slot.Machine == m.ID && slotReservesMemory(slot) && q.slotPinned(slot) {
-					model, _ := q.model(slot.Model)
-					copy.ReservedMemoryGB += model.MemoryGB
-				}
-			}
-			copy.ModelCopySeconds = map[string]float64{}
-			for _, model := range q.models.Models {
-				if q.modelFitsMachine(model, m) {
-					copy.ModelCopySeconds[model.Name] = q.loadSeconds(model.Name, m)
-				}
-			}
-			out.Machines = append(out.Machines, &copy)
 		}
-		for _, j := range out.Jobs {
-			if j.State == "queued" && strings.HasPrefix(j.Reason, "disk_headroom:") {
-				j.DiagnosticCode = "disk_headroom"
-			}
+		if eligible && !room {
+			call.Reason = fmt.Sprintf("waiting for RAM: model %s needs %.1f GiB host memory (or telemetry unavailable)", c.Model, model.HostMemoryGB)
+		}
+	}
+	if reason := q.logsWaitingReason(call); reason != "" {
+		call.Reason = reason
+	}
+	if reason := q.engineWaitReason(c); reason != "" && call.Reason == "waiting for model "+c.Model+" on an eligible worker" {
+		call.Reason = reason
+	}
+	if c.Machine != "" {
+		call.State = "running"
+		call.Reason = "model call in flight"
+	}
+	if c.Error != "" {
+		call.State = "failed"
+		call.Reason = c.Error
+	}
+	call.Spec.Class = jobClass(call.Spec)
+	call.PriorityPolicy = q.priorityMatch(call.Spec)
+	return call
+}
+
+func (q *Queue) projectJobDiagnostics(j *Job, forStatus, jobReply bool) {
+	if j.State == "queued" && strings.HasPrefix(j.Reason, "disk_headroom:") {
+		j.DiagnosticCode = "disk_headroom"
+	}
+	if strings.Contains(j.Reason, cpuIsolationUnavailable) {
+		j.DiagnosticCode = cpuIsolationUnavailable
+	}
+	if strings.HasPrefix(j.Reason, "no_matching_device:") {
+		j.DiagnosticCode = "no_matching_device"
+	}
+	if forStatus {
+		q.statusEligibility(j)
+		if j.State == "queued" {
+			j.Reason = q.statusWaitingReason(j)
 			if strings.Contains(j.Reason, cpuIsolationUnavailable) {
 				j.DiagnosticCode = cpuIsolationUnavailable
 			}
@@ -1769,54 +1812,16 @@ func (q *Queue) snapshotView(forStatus, jobReply bool) (Snapshot, error) {
 				j.DiagnosticCode = "no_matching_device"
 			}
 		}
-		if forStatus {
-			for _, j := range out.Jobs {
-				q.statusEligibility(j)
-				if j.State == "queued" {
-					j.Reason = q.statusWaitingReason(j)
-					if strings.Contains(j.Reason, cpuIsolationUnavailable) {
-						j.DiagnosticCode = cpuIsolationUnavailable
-					}
-					if strings.HasPrefix(j.Reason, "no_matching_device:") {
-						j.DiagnosticCode = "no_matching_device"
-					}
-				}
-				key := j.Spec.SubmissionKey
-				*j = statusJobCopy(j)
-				if jobReply {
-					j.Spec.SubmissionKey = key
-				}
-			}
-		}
-		sort.SliceStable(out.Jobs, func(i, k int) bool { return statusBefore(out.Jobs[i], out.Jobs[k]) })
-		sort.Slice(out.Machines, func(i, k int) bool { return out.Machines[i].ID < out.Machines[k].ID })
-		return nil
-	}
-	var err error
-	if forStatus {
-		// Observation never performs maintenance, usage accounting, rollback
-		// snapshots or persistence. Tick/check-ins own those durable mutations.
-		q.mu.RLock()
-		hold := q.statusHolds.start()
-		defer func() {
-			duration := queueHoldDuration(hold)
-			q.mu.RUnlock()
-			logQueueHold(duration, "snapshotView", nil)
-		}()
-		err = project()
-		if err == nil {
-			out.Usage, err = q.usageLocked(q.clock.Now().Add(-7 * 24 * time.Hour))
-		}
-	} else {
-		err = q.update(func() error { q.maintain(); return project() })
-		if err == nil {
-			q.mu.Lock()
-			out.Usage, err = q.usageLocked(q.clock.Now().Add(-7 * 24 * time.Hour))
-			q.mu.Unlock()
+		key := j.Spec.SubmissionKey
+		// Status projection owns a fully detached view. Redaction can reuse
+		// its fields without another JSON round-trip for every job.
+		*j = statusJobValue(j)
+		if jobReply {
+			j.Spec.SubmissionKey = key
 		}
 	}
-	return out, err
 }
+
 func (q *Queue) AppendLog(l LogChunk) error {
 	q.mu.Lock()
 	defer q.mu.Unlock()

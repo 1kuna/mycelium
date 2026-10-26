@@ -5,6 +5,12 @@ shows full job IDs. Open the queue address in a browser for the same information
 sign in as `myce`, using the token as the password. The page is read-only and
 refreshes every five seconds. Keep tokens in private configuration, not URLs.
 
+The page and `GET /api/status` share a snapshot for up to one second. Job receipt
+polls (`GET /api/jobs/{id}`) read the requested job afresh. Status snapshots do
+not drive start authorization, cancellation or result publication.
+Administrative tools use uncached `GET /api/inspection` for migration custody,
+local extension targeting and measurement safety checks.
+
 Each hypha shows its capability profile: CPU count, system memory, accelerator
 memory, shared or separate memory, and local storage. Missing measurements say
 unknown. Extension reports say which kind of work or program is qualified on

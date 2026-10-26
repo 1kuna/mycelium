@@ -209,7 +209,7 @@ func startNativeExtensionFixture(t *testing.T, w Worker) {
 	})
 	await(t, func() bool {
 		var snap Snapshot
-		if err := w.Client.Call(context.Background(), "GET", "/api/status", nil, &snap); err != nil {
+		if err := w.Client.Call(context.Background(), "GET", "/api/inspection", nil, &snap); err != nil {
 			t.Fatal(err)
 		}
 		for _, m := range snap.Machines {

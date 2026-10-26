@@ -50,7 +50,7 @@ func TestExtensionCheckRetainsRepairedSetupAfterPreparationFailure(t *testing.T)
 	}
 	client := Client{URL: "http://fixture", HTTP: &http.Client{Transport: clientTestTransport(func(req *http.Request) (*http.Response, error) {
 		switch req.URL.Path {
-		case "/api/status":
+		case "/api/inspection":
 			return response(Snapshot{Machines: []*Machine{&m}, Jobs: []*Job{{ID: "owned-check", State: "succeeded"}}})
 		case "/api/jobs/owned-check":
 			return response(Job{ID: "owned-check", State: "succeeded"})
