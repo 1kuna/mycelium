@@ -18,6 +18,11 @@ func TestMain(m *testing.M) {
 }
 
 func cliTestMain(m *testing.M) int {
+	// Fleet jobs inherit the hosting service's identity. These CLI fixtures
+	// run outside its worker cgroup and own their simulated service startup.
+	if err := os.Unsetenv("INVOCATION_ID"); err != nil {
+		panic(err)
+	}
 	if len(os.Args) > 1 && os.Args[1] == "_command-exec" {
 		if myce.CommandExec(os.Args[2:]) != nil {
 			return 125
@@ -74,6 +79,7 @@ func cliTestMain(m *testing.M) int {
 func installSyntheticHost() {
 	myce.SetOnboardingMountCommand(func(context.Context, string, ...string) ([]byte, error) { return nil, nil })
 	myce.SetWorkerProbeDefaults(myce.WorkerProbeDefaults{
+		DeviceFaults: func() myce.DeviceFaultSource { return nil },
 		Disk: func(string) (myce.DiskReading, error) {
 			return myce.DiskReading{Volume: "synthetic", TotalBytes: 1 << 40, FreeBytes: 1 << 39}, nil
 		},
