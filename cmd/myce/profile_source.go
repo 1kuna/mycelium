@@ -26,7 +26,8 @@ func profileRelative(name string) bool {
 
 // Only explicit source bytes travel. Tar is a standard transport, not a second
 // file store. Canonical headers make directory/tree snapshots content-stable.
-// Reject links/devices rather than following them outside the declared source.
+// Git and tar sources keep relative symlinks that resolve inside the source, as
+// a checkout would; directory walks, hardlinks and devices are still refused.
 func freezeProfileSource(ctx context.Context, root string, source profileSource, dest string) (ref myce.FileRef, err error) {
 	modes := 0
 	for _, s := range []string{source.Git, source.Directory, source.Snapshot} {
@@ -42,16 +43,39 @@ func freezeProfileSource(ctx context.Context, root string, source profileSource,
 		return ref, err
 	}
 	tw := tar.NewWriter(out)
-	write := func(name string, mode int64, size int64, r io.Reader) error {
+	names, links := map[string]bool{}, map[string]string{}
+	header := func(name string) (string, error) {
 		name = strings.TrimPrefix(name, "./")
 		if !profileRelative(name) || name == ".myce-source.tar" || name == ".myce-inputs" || strings.HasPrefix(name, ".myce-inputs/") {
-			return errors.New("source requires clean relative file names")
+			return "", errors.New("source requires clean relative file names")
+		}
+		if names[name] {
+			return "", errors.New("source repeats a file name")
+		}
+		names[name] = true
+		return name, nil
+	}
+	write := func(name string, mode int64, size int64, r io.Reader) error {
+		name, err := header(name)
+		if err != nil {
+			return err
 		}
 		if err := tw.WriteHeader(&tar.Header{Name: name, Mode: mode & 0777, Size: size, Typeflag: tar.TypeReg}); err != nil {
 			return err
 		}
-		_, err := io.CopyN(tw, r, size)
+		_, err = io.CopyN(tw, r, size)
 		return err
+	}
+	link := func(name, target string) error {
+		name, err := header(name)
+		if err != nil {
+			return err
+		}
+		if target == "" || filepath.IsAbs(target) || strings.ContainsAny(target, "\\\x00\r\n") {
+			return errors.New("source symlink target must be relative")
+		}
+		links[name] = target
+		return tw.WriteHeader(&tar.Header{Name: name, Mode: 0777, Linkname: target, Typeflag: tar.TypeSymlink})
 	}
 	var cmd *exec.Cmd
 	var input io.ReadCloser
@@ -98,13 +122,22 @@ func freezeProfileSource(ctx context.Context, root string, source profileSource,
 				if h.Typeflag == tar.TypeDir || h.Typeflag == tar.TypeXGlobalHeader {
 					continue
 				}
+				if h.Typeflag == tar.TypeSymlink {
+					if err = link(h.Name, h.Linkname); err != nil {
+						break
+					}
+					continue
+				}
 				if h.Typeflag != tar.TypeReg && h.Typeflag != tar.TypeRegA {
-					err = errors.New("source snapshot cannot contain links or special files")
+					err = errors.New("source snapshot cannot contain hardlinks or special files")
 					break
 				}
 				if err = write(h.Name, h.Mode, h.Size, tr); err != nil {
 					break
 				}
+			}
+			if err == nil {
+				err = checkProfileLinks(names, links)
 			}
 			if err == nil {
 				_, err = io.Copy(io.Discard, input)
@@ -120,6 +153,51 @@ func freezeProfileSource(ctx context.Context, root string, source profileSource,
 		return ref, err
 	}
 	return myce.IdentifyFile(dest)
+}
+
+// Every symlink must resolve inside the source, following other source links,
+// and no entry may sit beneath a symlink, so extraction cannot write elsewhere.
+func checkProfileLinks(names map[string]bool, links map[string]string) error {
+	for name := range names {
+		for dir := filepath.Dir(name); dir != "."; dir = filepath.Dir(dir) {
+			if _, ok := links[dir]; ok {
+				return errors.New("source entry " + name + " is beneath a symlink")
+			}
+		}
+	}
+	var resolve func(dir []string, target string, hops int) ([]string, bool)
+	resolve = func(dir []string, target string, hops int) ([]string, bool) {
+		if hops > 40 {
+			return nil, false
+		}
+		path := append([]string(nil), dir...)
+		for _, part := range strings.Split(target, "/") {
+			switch part {
+			case "", ".":
+			case "..":
+				if len(path) == 0 {
+					return nil, false
+				}
+				path = path[:len(path)-1]
+			default:
+				path = append(path, part)
+				if next, ok := links[strings.Join(path, "/")]; ok {
+					var inside bool
+					if path, inside = resolve(path[:len(path)-1], next, hops+1); !inside {
+						return nil, false
+					}
+				}
+			}
+		}
+		return path, true
+	}
+	for name, target := range links {
+		parts := strings.Split(name, "/")
+		if _, inside := resolve(parts[:len(parts)-1], target, 0); !inside {
+			return errors.New("source symlink " + name + " leaves the source tree")
+		}
+	}
+	return nil
 }
 
 // Resolve and hash in place before allocating staging space. Existing keys
