@@ -85,6 +85,14 @@ func generatedJobSchema(t *testing.T) []byte {
 	job["attempt"].(map[string]any)["minimum"] = 0
 	job["attempt_history"].(map[string]any)["maxItems"] = attemptHistoryLimit
 	job["attempt_history"].(map[string]any)["description"] = "Latest four ended attempts, persisted with the job. Existing classifier facts and queue decisions, not release proof or retry charges. Older planned requeues roll off; historical causes are not reconstructed."
+	job["memory_attempts"].(map[string]any)["maxItems"] = memoryAttemptsLimit
+	job["memory_attempts"].(map[string]any)["description"] = "Persisted memory facts, independent of learning and the four-entry diagnostic history. Retains the first and latest 31 rows; memory_attempts_dropped counts evicted rows. Prelaunch attempts without a peak are omitted. Exact attempt/machine/session, observed memory_peak when available, and the resolved memory_envelope. Missing counters are unknown, not zero. Historical readings cannot be reconstructed."
+	job["memory_attempts_dropped"].(map[string]any)["minimum"] = 0
+	job["memory_attempts_dropped"].(map[string]any)["description"] = "Number of memory attempt rows evicted by the 32-row limit. Omitted zero. Prelaunch attempts without a peak do not create rows or increment this count."
+	peak := defs["AttemptMemoryPeak"].(map[string]any)["properties"].(map[string]any)
+	peak["events"].(map[string]any)["description"] = "Attempt-parent hierarchical memory.events counts. Absent means not read; explicit zero means a read zero. Max per counter across samples within the attempt."
+	peak["swap_gb"].(map[string]any)["description"] = "Attempt-parent memory.swap.peak in GiB, max across samples. Absent when unavailable; zero is measured. memory.swap.current is pressure evidence only, never a substitute peak."
+	peak["constrained"].(map[string]any)["description"] = "Observed constraint evidence; omitted false. Constrained facts are retained even when learning rejects them."
 	job["infrastructure_retries"].(map[string]any)["minimum"] = 0
 	job["infrastructure_retries"].(map[string]any)["description"] = "Production infrastructure requeues already used. Omitted zero; default maximum is 2, configurable by the queue. Stage failures do not consume this budget."
 	job["reason"].(map[string]any)["description"] = "Sanitized diagnostic only. Do not parse or match its text."
@@ -151,6 +159,10 @@ func wireExamples(t *testing.T) map[string]any {
 	succeeded.State = "succeeded"
 	succeeded.FinishedAt = &now
 	succeeded.ReleaseConfirmed = true
+	host, cgroup, swap := 1.0, 2.0, 0.0
+	succeeded.MemoryAttempts = []AttemptMemoryFacts{{Attempt: 1, Machine: running.Machine, Session: running.Session,
+		MemoryPeak:     &AttemptMemoryPeak{HostGB: &host, CgroupGB: &cgroup, SwapGB: &swap, Events: &MemoryEventCounts{}},
+		MemoryEnvelope: &JobMemoryEnvelope{Source: "exploratory first run", Machine: running.Machine, HostGB: 4, Enforcement: "cgroup-v2"}}}
 	reserved := Job{ID: "example-reserved-id", Spec: Spec{Project: "example", SubmissionKey: "example-reserved-key"}, State: "cancelled", Queued: now, CancelledAt: &now, FinishedAt: &now, Reason: "cancelled before submission"}
 	ack := Cancellation{JobID: &queued.ID, Project: "example", SubmissionKey: &s.SubmissionKey, State: "cancelled", WillNotRun: true, Release: releaseState("not_applicable"), AcknowledgedAt: &now}
 	pending := ack

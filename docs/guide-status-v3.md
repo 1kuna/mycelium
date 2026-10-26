@@ -154,6 +154,32 @@ Existing jobs start with no history; past causes cannot be reconstructed.
 An end time records the queue's decision, which can precede physical cleanup.
 History never proves release; use the existing exact release evidence.
 
+`GET /api/jobs/{id}` also returns optional `memory_attempts`, available as Go
+`GetJob(...).MemoryAttempts` and Python `Client.get(id)["memory_attempts"]`.
+Each entry binds `attempt`, `machine`, and `session` to its observed
+`memory_peak` and resolved `memory_envelope`. These facts persist with the job
+independently of learning, including a constrained first run with no comparable
+learned point. Retention is bounded to 32 rows: the first and the most recent
+31. Optional `memory_attempts_dropped` counts evicted rows (omitted zero), so
+missing intermediate facts are visible. Attempts that never launched and have
+no peak do not create rows or increment the dropped count. The four-entry
+`attempt_history` window is independent. Old jobs cannot reconstruct missing
+telemetry. Launched attempts ending without a worker reading retain the
+envelope and omit the peak. Release-only kill-time acknowledgements retain
+their measured facts too.
+
+Peak fields `host_gb`, `cgroup_gb`, and `device_gb` identify the measured scopes;
+`swap_gb` is the Linux attempt parent's `memory.swap.peak`, when exposed.
+All sizes are GiB. The parent covers native or managed Docker main and sidecars;
+device memory is process-scoped. `events` holds hierarchical `memory.events`
+counts `high`, `max`, `oom`, `oom_kill`, and `oom_group_kill`, retaining the
+maximum per counter across the attempt's samples. Absent readings mean unknown;
+explicit zeros mean read zeros. `constrained` is omitted when false. Darwin
+process-group RSS has its unenforced `source` label and omits cgroup events and
+swap peaks. A zero-OOM/swap/max-hit claim requires those readings to be present
+and zero; an absent reading cannot support that claim. These observations do
+not imply acceptance into learning or prove execution release.
+
 Production job summaries and the [job-v1 reply](schemas/job-v1.schema.json) may
 include `infrastructure_retries`, the durable number of infrastructure requeues
 already used. It is an optional nonnegative integer, omitted at zero, with a

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 // The fake daemon proves both members receive the same worker-owned parent
@@ -79,5 +80,41 @@ func TestDockerEnvelopeSharedParent(t *testing.T) {
 	j.Spec.Run.DockerMemoryGB = 0
 	if dockerRuntimeFits(&j, &m) || dockerRuntimeWaitingReason(&j, map[string]*Machine{m.ID: &m}) != dockerEnvelopeUnavailable {
 		t.Fatal("unsupported envelope Docker lacks refusal")
+	}
+}
+
+// A recovered cgroup can expose event counts without resident accounting. Read
+// zeros alone must not invalidate an existing learned envelope.
+func TestDockerEnvelopeRecoveryEventsOnlyKeepsLearning(t *testing.T) {
+	q, clock, m, s := observationFixture(t)
+	s.Needs.Memory = "auto"
+	seed := startObservation(t, q, m, s)
+	host := 1.0
+	r := result(&seed, true)
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host}
+	clock.Advance(time.Second)
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	j := startObservation(t, q, m, s)
+	a, err := fakeCeilings(t).create("recovered-events-only", 4<<30, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &dockerAttempt{memory: a, clock: clock, dir: t.TempDir(), state: dockerExecution{Identity: "recovered", CgroupParent: "/synthetic", MainFinished: true, MemoryLimitBytes: 4 << 30}}
+	if err := d.releaseEnvelope(); err != nil {
+		t.Fatal(err)
+	}
+	r = dockerOutcome(d.state, result(&j, true), nil)
+	if r.MemoryPeak == nil || r.MemoryPeak.Events == nil || r.MemoryPeak.HostGB != nil || r.MemoryPeak.CgroupGB != nil {
+		t.Fatal("regression needs events without resident measurements", r.MemoryPeak)
+	}
+	clock.Advance(time.Second)
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	next := startObservation(t, q, m, s)
+	if r.MemoryPeak.Constrained || next.MemoryEnvelope.Source != "accepted peak × 1.25" || next.Spec.Needs.HostMemoryGB != 1.25 {
+		t.Fatalf("events-only recovery invalidated learning: peak=%+v next=%+v", r.MemoryPeak, next.MemoryEnvelope)
 	}
 }

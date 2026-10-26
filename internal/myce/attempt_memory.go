@@ -51,6 +51,10 @@ func (a *memoryAttempt) peak() *AttemptMemoryPeak {
 		if b, err := a.fs.ReadFile(filepath.Join(a.path, name)); err == nil {
 			n, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64)
 			p.Constrained = p.Constrained || err != nil || n > 0
+			if name == "memory.swap.peak" && err == nil {
+				gb := float64(n) / (1 << 30)
+				p.SwapGB = &gb
+			}
 		}
 	}
 	// A member can bind well below the shared envelope. Check descendants
@@ -70,7 +74,7 @@ func (a *memoryAttempt) peak() *AttemptMemoryPeak {
 			}
 		}
 	}
-	if p.HostGB == nil && p.CgroupGB == nil && !p.Constrained {
+	if p.HostGB == nil && p.CgroupGB == nil && p.SwapGB == nil && p.Events == nil && !p.Constrained {
 		return nil
 	}
 	return p
@@ -103,7 +107,16 @@ func sampledMemoryPeak(old, next *AttemptMemoryPeak) *AttemptMemoryPeak {
 	}
 	out := mergeMemoryPeaks(previous, &copy)
 	if out == nil {
-		out = &AttemptMemoryPeak{}
+		out = &AttemptMemoryPeak{Events: mergeMemoryEvents(nil, next.Events)}
+		if old != nil && old.Events != nil {
+			out.Events = mergeMemoryEvents(old.Events, next.Events)
+		}
+	}
+	for _, peak := range []*AttemptMemoryPeak{old, next} {
+		if peak != nil && peak.SwapGB != nil && validMemoryValue(*peak.SwapGB) && (out.SwapGB == nil || *peak.SwapGB > *out.SwapGB) {
+			gb := *peak.SwapGB
+			out.SwapGB = &gb
+		}
 	}
 	out.Constrained = next.Constrained || old != nil && old.Constrained
 	return out
@@ -313,7 +326,9 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 			cancel()
 			samplers.Wait()
 			record(a.peak())
-			if !hostSampled && peak != nil {
+			// Counter-only read zeros are diagnostic facts, not a new
+			// incomplete resident measurement that invalidates learning.
+			if !hostSampled && peak != nil && (peak.HostGB != nil || peak.CgroupGB != nil || peak.DeviceGB != nil || peak.Constrained) {
 				peak.Constrained = true
 			}
 		})

@@ -397,7 +397,15 @@ class Client:
         return _job_reply(reply)
 
     def get(self, job_id: str) -> dict[str, Any]:
-        """Return a Job reply with its stable project/submission-key identity."""
+        """Return a Job reply with identity and per-attempt memory_attempts.
+
+        Each entry contains attempt/machine/session, the observed memory_peak
+        (including events and swap_gb when read), and memory_envelope. Missing
+        readings are unknown; numeric zero is a measured zero. Constrained
+        observations remain available even when excluded from learning.
+        Retains the first and latest 31 rows; memory_attempts_dropped counts
+        evictions (omitted zero). Peakless prelaunch attempts create no row.
+        """
         return self._read_job(job_id)
 
     def cancel(self, job_id: str) -> dict[str, Any]:

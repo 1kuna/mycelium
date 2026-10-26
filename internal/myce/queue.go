@@ -694,6 +694,7 @@ func (q *Queue) retry(j *Job, why string) {
 func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 	// Snapshot identity before requeue clears it, including loss without a result.
 	outcome := attemptOutcome(j, Result{Interrupted: true, PoliteStop: historyPlannedStop(j), PriorityStop: priorityStop(j)})
+	recordAttemptMemory(j, Result{})
 	defer func() { q.recordAttemptOutcome(j, outcome) }()
 	if cancelled(j) {
 		if !terminal(j.State) {
@@ -1337,6 +1338,7 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 		}
 		q.settleRelease(r)
 		if j := q.touchJob(r.ID); j != nil && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
+			recordAttemptMemory(j, r)
 			j.ReleaseConfirmed = true
 			if r.Forced {
 				j.LastStopOutcome = "forced"
@@ -1418,6 +1420,7 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 	}
 	r = withStopProvenance(r, priorityStop(j))
 	outcome := attemptOutcome(j, r)
+	recordAttemptMemory(j, r) // Preserve facts before retry clears the envelope.
 	j.ExecutionCause = safeRuntimeCause(r.ExecutionCause)
 	j.CleanupCause = safeRuntimeCause(r.CleanupCause)
 	// A kernel OOM is the payload's failure even if preemption raced it.

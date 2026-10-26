@@ -31,6 +31,18 @@ print(client.get(job["id"]))
 client.cancel(job["id"])
 ```
 
+`Client.get(id)` includes optional `memory_attempts`: each recorded ended
+attempt's `attempt`/`machine`/`session`, `memory_envelope`, and observed
+`memory_peak`. Peaks include measured `host_gb`, `cgroup_gb`, `device_gb`,
+`swap_gb`, `events` (`high`, `max`, `oom`, `oom_kill`, `oom_group_kill`), and
+`constrained` (omitted false). At most 32 rows remain (first plus latest 31);
+`memory_attempts_dropped` counts evicted rows (omitted zero). Peakless prelaunch
+attempts create no row and do not count as dropped.
+Missing readings mean unknown; measured zeros
+remain explicit. Constrained first-run observations persist even when rejected
+by learning. See [memory facts](../../docs/guide-status-v3.md) for scope and
+platform limits.
+
 Dicts and YAML accept the design's platform list / `any` shorthand and named
 environment strings; the client normalizes them to API objects without mutating
 inputs. YAML timestamps must include a timezone. Unknown fields and invalid

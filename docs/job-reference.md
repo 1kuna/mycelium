@@ -804,6 +804,24 @@ allowance after existing reserves, charges and attempt slack. Existing priority
 and release rules still apply. Accepted exploratory peaks train later runs.
 Input-size/duration scaling is a follow-up. The chosen
 source, reservation and enforcement mode appear in `memory_envelope` on the job.
+Finished attempt facts are also stored in `memory_attempts` on the job GET,
+without joining `work_curves`. Each entry has exact `attempt`, `machine`,
+`session`, the envelope it ran with (`memory_envelope`), and its observed
+`memory_peak` when measured. The peak includes `host_gb`, `cgroup_gb`,
+`device_gb`, Linux `swap_gb` (`memory.swap.peak`), `events`
+(`high`, `max`, `oom`, `oom_kill`, `oom_group_kill`), and `constrained`
+(omitted false). Optional readings are absent when unavailable, distinct from
+measured zero. Event counts and swap peaks are from the hierarchical attempt
+parent, including main and sidecars, with maxima retained across samples.
+`memory.swap.current` still signals pressure but is not reported as a peak.
+Constrained and failed observations remain on the attempt even when learning
+rejects them, including constrained first runs. Records survive queue restart
+and retain at most 32 rows (the first plus the latest 31), independently of
+diagnostic history. `memory_attempts_dropped` counts evicted rows (omitted zero).
+Prelaunch attempts without a peak do not create rows or count as dropped.
+Release-only kill-time acknowledgements preserve their observations. Historical
+readings cannot be reconstructed. Go `Client.GetJob` returns
+`Job.MemoryAttempts`; Python `Client.get` returns the same array in its dict.
 GPU counters are process-scoped sampled lower bounds, using NVIDIA compute-process
 accounting or XPU DRM resident VRAM deduplicated by device/client on Linux.
 Unavailable counters remain unknown, including unsupported Metal per-attempt
