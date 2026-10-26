@@ -156,9 +156,6 @@ func freezeProfileSource(ctx context.Context, root string, source profileSource,
 				}
 			}
 			if err == nil {
-				err = checkProfileLinks(names, links)
-			}
-			if err == nil {
 				_, err = io.Copy(io.Discard, input)
 			}
 			input.Close()
@@ -167,6 +164,9 @@ func freezeProfileSource(ctx context.Context, root string, source profileSource,
 			err = errors.Join(err, cmd.Wait())
 		}
 	}
+	if err == nil {
+		err = checkProfileLinks(names, links)
+	}
 	err = errors.Join(err, tw.Close(), out.Sync(), out.Close())
 	if err != nil {
 		return ref, err
@@ -174,8 +174,8 @@ func freezeProfileSource(ctx context.Context, root string, source profileSource,
 	return myce.IdentifyFile(dest)
 }
 
-// Every symlink must resolve inside the source, following other source links,
-// and no entry may sit beneath a symlink, so extraction cannot write elsewhere.
+// Every source uses portable, nonreserved names. Symlinks must resolve inside
+// the source, with no entries beneath them, so extraction cannot write elsewhere.
 func checkProfileLinks(names map[string]bool, links map[string]string) error {
 	// Sources can move from a case-sensitive submitter to macOS. Resolve the
 	// same aliases there, including decomposed Unicode, before trusting a path.
