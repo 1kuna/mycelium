@@ -669,6 +669,8 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (*proce
 		}
 		err = w.authorizeStart(j, s.state.Session)
 		if err == nil {
+			// Queue waiting must not consume the local exec-receipt I/O budget.
+			_ = readyReader.SetReadDeadline(time.Now().Add(2 * time.Second))
 			_, err = approvalWriter.Write([]byte("S"))
 		}
 		approvalWriter.Close()

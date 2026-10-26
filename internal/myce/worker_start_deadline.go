@@ -13,12 +13,17 @@ var errWorkerStartAuthorization = errors.New("queue start authorization unavaila
 // used by adapters to keep control-plane failures out of stage-failure paths.
 var errWorkerStartHandoff = fmt.Errorf("queue start hand-off unavailable: %w", errWorkerStartAuthorization)
 
+// Match the normal control-request budget. Measured queue mutex waits reached
+// 3.54s (#225), exceeding both former start deadlines (2s and 3s). Ten seconds
+// admits those bursts while bounding a hung queue without opening either gate.
+const workerStartRequestTimeout = 10 * time.Second
+
 // A positive reply means this exact attempt is durably started, before execution.
 func (w Worker) authorizeStart(j Job, session string) error {
 	if err := w.checkAvailability(); err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), workerStartRequestTimeout)
 	defer cancel()
 	var reply struct {
 		OK        bool   `json:"ok"`

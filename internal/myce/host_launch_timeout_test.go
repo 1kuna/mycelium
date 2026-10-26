@@ -67,7 +67,7 @@ func TestHostLaunchTimeoutAttemptDiagnostic(t *testing.T) {
 	}
 }
 
-func TestHostLaunchAuthorizationHeartbeatBudget(t *testing.T) {
+func TestHostLaunchAuthorizationControlBudget(t *testing.T) {
 	for _, interval := range []time.Duration{0, time.Millisecond, 2 * time.Second} {
 		t.Run(interval.String(), func(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
@@ -90,8 +90,8 @@ func TestHostLaunchAuthorizationHeartbeatBudget(t *testing.T) {
 				})
 				started := time.Now()
 				err := w.authorizeLaunch(HostLaunch{})
-				if !errors.Is(err, context.DeadlineExceeded) || time.Since(started) != 3*heartbeat {
-					t.Fatal("hung authorization escaped its heartbeat budget", time.Since(started), err)
+				if !errors.Is(err, context.DeadlineExceeded) || time.Since(started) != 10*time.Second {
+					t.Fatal("hung authorization escaped its control-request budget", time.Since(started), err)
 				}
 			})
 		})

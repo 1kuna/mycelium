@@ -80,13 +80,15 @@ succeed. Inspect owned work before using separately authorized service/container
 tools. Preserve results and custody for reconnect; there is no offline release
 guarantee. Consumer cancellation and application health remain independent.
 
-Launch authorization waits up to three worker heartbeat intervals, using at least
-the normal one-second period (three seconds by default). Faster polling does not
-shrink this budget below observed queue response latency. This allows short bursts
-of serialized queue transactions while bounding an unresponsive gate; the worker
-never launches without a positive reply. Authorization failure remains an
-infrastructure interruption under the existing bounded retry policy.
-The separate Started hand-off retains its two-second deadline.
+Launch authorization and the separate Started hand-off each use the normal
+ten-second control-request budget. Measured queue-lock waits reached 3.54 seconds,
+exceeding the former three- and two-second deadlines. The standard budget admits
+these bursts without retrying or opening either gate before a positive reply.
+An unreachable queue still fails within ten seconds per request; the longer wait
+costs at most seven/eight extra seconds at the respective boundaries. Exact
+attempt, session, cancellation and placement checks remain authoritative.
+The local exec-receipt budget starts afresh after Started approval. Authorization
+failure remains an infrastructure interruption under the bounded retry policy.
 
 A check-in from the current accepted worker session counts as contact before
 waiting for the queue lock, for at most 30 seconds from its arrival. Request
@@ -94,8 +96,8 @@ cancellation or rejection removes that pending credit. An accepted check-in
 refreshes contact when processing finishes. A report rejected by later validation
 can therefore delay loss detection by at most 30 seconds, without refreshing
 `LastSeen`; an unauthenticated or mismatched-session report receives no pending
-credit. This protection does not fix the separate two-second Started hand-off
-deadline or queue capacity limits.
+credit. Queue capacity limits still require separate correction; start requests
+that exceed their ten-second budget remain bounded failures.
 
 The queue emits one `event=slow_launch_authorization` line for an authorization
 taking at least 500 ms. `duration_ms` covers the authorization, including the

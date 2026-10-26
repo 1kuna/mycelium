@@ -176,14 +176,9 @@ func (w Worker) authorizeLaunch(l HostLaunch) error {
 	if err := w.checkAvailability(); err != nil {
 		return err
 	}
-	interval := max(w.Interval, defaultWorkerInterval)
-	// Allow three heartbeat periods for serialized control-plane bursts, using
-	// at least the normal one-second period: faster polling must not shrink
-	// the queue transaction budget (observed reads take 0.2–0.5s, #181). An
-	// unresponsive gate must eventually abort without executing unauthorized
-	// work; this bounds that wait (3s by default) while heartbeats continue.
-	// Abort still uses the approved, bounded infrastructure retry policy.
-	ctx, cancel := context.WithTimeout(context.Background(), 3*interval)
+	// Queue contention must fit the normal control-request budget, independently
+	// of heartbeat cadence. A timeout still cannot authorize a payload (#225).
+	ctx, cancel := context.WithTimeout(context.Background(), workerStartRequestTimeout)
 	defer cancel()
 	var reply struct {
 		OK        bool   `json:"ok"`
