@@ -1286,6 +1286,7 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 		}
 		q.settleRelease(r)
 		if j := q.s.Jobs[r.ID]; j != nil && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
+			recordAttemptMemory(j, r)
 			j.ReleaseConfirmed = true
 			if r.Forced {
 				j.LastStopOutcome = "forced"

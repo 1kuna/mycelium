@@ -32,6 +32,10 @@ type MemoryEventCounts struct {
 
 const processGroupMemorySource = "process-group RSS samples; unenforced"
 
+// Bound snapshot/persistence cost while preserving the first observation and
+// the latest 31. Intermediate facts can be lost; the dropped count exposes it.
+const memoryAttemptsLimit = 32
+
 // AttemptMemoryFacts keeps observed telemetry independently of learning and the
 // bounded diagnostic history. Missing peaks/counters mean unavailable, not zero.
 type AttemptMemoryFacts struct {
@@ -45,6 +49,9 @@ type AttemptMemoryFacts struct {
 func recordAttemptMemory(j *Job, r Result) {
 	if j.Attempt == 0 || j.Machine == "" || j.Session == "" {
 		return
+	}
+	if j.StartedAt == nil && r.MemoryPeak == nil {
+		return // Prelaunch refusals have no runtime memory facts to retain.
 	}
 	facts := AttemptMemoryFacts{Attempt: j.Attempt, Machine: j.Machine, Session: j.Session,
 		MemoryPeak: sampledMemoryPeak(nil, r.MemoryPeak)}
@@ -64,6 +71,12 @@ func recordAttemptMemory(j *Job, r Result) {
 		}
 	}
 	j.MemoryAttempts = append(j.MemoryAttempts, facts)
+	if dropped := len(j.MemoryAttempts) - memoryAttemptsLimit; dropped > 0 {
+		kept := make([]AttemptMemoryFacts, 1, memoryAttemptsLimit)
+		kept[0] = j.MemoryAttempts[0]
+		j.MemoryAttempts = append(kept, j.MemoryAttempts[1+dropped:]...)
+		j.MemoryAttemptsDropped += dropped
+	}
 }
 
 func mergeMemoryEvents(old, next *MemoryEventCounts) *MemoryEventCounts {

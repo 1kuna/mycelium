@@ -816,8 +816,11 @@ parent, including main and sidecars, with maxima retained across samples.
 `memory.swap.current` still signals pressure but is not reported as a peak.
 Constrained and failed observations remain on the attempt even when learning
 rejects them, including constrained first runs. Records survive queue restart
-and are retained for all recorded attempts, independently of bounded diagnostic
-history; historical readings cannot be reconstructed. Go `Client.GetJob` returns
+and retain at most 32 rows (the first plus the latest 31), independently of
+diagnostic history. `memory_attempts_dropped` counts evicted rows (omitted zero).
+Prelaunch attempts without a peak do not create rows or count as dropped.
+Release-only kill-time acknowledgements preserve their observations. Historical
+readings cannot be reconstructed. Go `Client.GetJob` returns
 `Job.MemoryAttempts`; Python `Client.get` returns the same array in its dict.
 GPU counters are process-scoped sampled lower bounds, using NVIDIA compute-process
 accounting or XPU DRM resident VRAM deduplicated by device/client on Linux.

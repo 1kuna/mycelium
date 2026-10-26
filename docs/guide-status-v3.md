@@ -153,10 +153,14 @@ History never proves release; use the existing exact release evidence.
 Each entry binds `attempt`, `machine`, and `session` to its observed
 `memory_peak` and resolved `memory_envelope`. These facts persist with the job
 independently of learning, including a constrained first run with no comparable
-learned point. All recorded memory entries remain; the four-entry
-`attempt_history` window does not trim them. Old jobs cannot reconstruct missing
-telemetry. Queue endings without a worker reading retain the envelope and omit
-the peak.
+learned point. Retention is bounded to 32 rows: the first and the most recent
+31. Optional `memory_attempts_dropped` counts evicted rows (omitted zero), so
+missing intermediate facts are visible. Attempts that never launched and have
+no peak do not create rows or increment the dropped count. The four-entry
+`attempt_history` window is independent. Old jobs cannot reconstruct missing
+telemetry. Launched attempts ending without a worker reading retain the
+envelope and omit the peak. Release-only kill-time acknowledgements retain
+their measured facts too.
 
 Peak fields `host_gb`, `cgroup_gb`, and `device_gb` identify the measured scopes;
 `swap_gb` is the Linux attempt parent's `memory.swap.peak`, when exposed.

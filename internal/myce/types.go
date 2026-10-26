@@ -340,6 +340,7 @@ type Job struct {
 	OutputRefs            FileManifest                 `json:"output_refs,omitempty"`
 	MemoryEnvelope        *JobMemoryEnvelope           `json:"memory_envelope,omitempty"`
 	MemoryAttempts        []AttemptMemoryFacts         `json:"memory_attempts,omitempty"`
+	MemoryAttemptsDropped int                          `json:"memory_attempts_dropped,omitempty"`
 	MemoryFallback        *SizeHint                    `json:"memory_fallback,omitempty"`
 	MemoryOOMFloor        *SizeHint                    `json:"memory_oom_floor,omitempty"`
 	MeasuredNeeds         *SizeHint                    `json:"measured_needs,omitempty"`

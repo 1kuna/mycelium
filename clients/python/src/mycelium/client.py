@@ -358,6 +358,8 @@ class Client:
         (including events and swap_gb when read), and memory_envelope. Missing
         readings are unknown; numeric zero is a measured zero. Constrained
         observations remain available even when excluded from learning.
+        Retains the first and latest 31 rows; memory_attempts_dropped counts
+        evictions (omitted zero). Peakless prelaunch attempts create no row.
         """
         return self._read_job(job_id)
 

@@ -1134,14 +1134,21 @@
           "x-contract": "diagnostic"
         },
         "memory_attempts": {
-          "description": "Persisted memory facts for each ended attempt recorded by this queue version, independent of learning and the four-entry diagnostic history. Exact attempt/machine/session, observed memory_peak when available, and the resolved memory_envelope. Missing counters are unknown, not zero. Historical readings cannot be reconstructed.",
+          "description": "Persisted memory facts, independent of learning and the four-entry diagnostic history. Retains the first and latest 31 rows; memory_attempts_dropped counts evicted rows. Prelaunch attempts without a peak are omitted. Exact attempt/machine/session, observed memory_peak when available, and the resolved memory_envelope. Missing counters are unknown, not zero. Historical readings cannot be reconstructed.",
           "items": {
             "$ref": "#/$defs/AttemptMemoryFacts"
           },
+          "maxItems": 32,
           "type": [
             "array",
             "null"
           ],
+          "x-contract": "diagnostic"
+        },
+        "memory_attempts_dropped": {
+          "description": "Number of memory attempt rows evicted by the 32-row limit. Omitted zero. Prelaunch attempts without a peak do not create rows or increment this count.",
+          "minimum": 0,
+          "type": "integer",
           "x-contract": "diagnostic"
         },
         "memory_envelope": {

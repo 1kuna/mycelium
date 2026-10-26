@@ -45,6 +45,8 @@ func (c Client) Submit(ctx context.Context, spec Spec) (*Job, error) {
 
 // GetJob reads one Job, including MemoryAttempts with each ended attempt's
 // observed peak/counters and resolved envelope, independently of learning.
+// MemoryAttempts retains the first and latest 31 rows; MemoryAttemptsDropped
+// counts evictions. Peakless prelaunch attempts are omitted.
 // An empty, non-JSON or incomplete Job reply is the
 // typed nonretryable job_reply_invalid; a reply that ends mid-document returns
 // io.ErrUnexpectedEOF, which RetryStatusRead retries. The Python client

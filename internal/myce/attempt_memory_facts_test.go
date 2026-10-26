@@ -158,3 +158,82 @@ func TestAttemptMemoryFactsAcceptedGET(t *testing.T) {
 	memoryFactsGET(t, q, j, peak, true)
 	memoryFactsGET(t, q, next, unread, false)
 }
+
+// Native grace-expired cleanup reports its stored peak as release-only, even
+// after cancellation. That acknowledgement must preserve the kill-time facts.
+func TestAttemptMemoryFactsReleaseOnlyKillGET(t *testing.T) {
+	q, clock, m, s := observationFixture(t)
+	j := startObservation(t, q, m, s)
+	if _, err := q.CancelJob(j.ID); err != nil {
+		t.Fatal(err)
+	}
+	peak := &AttemptMemoryPeak{Events: &MemoryEventCounts{OOMKill: 1}, Constrained: true}
+	r := result(&j, false)
+	r.ReleaseOnly, r.Forced, r.MemoryPeak = true, true, peak
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	if got := job(t, q, j.ID); got.State != "cancelled" || !got.ReleaseConfirmed {
+		t.Fatal("release-only acknowledgement changed cancellation", got)
+	}
+	q = memoryFactsRestart(t, q, clock)
+	memoryFactsGET(t, q, j, peak, false)
+}
+
+func TestAttemptMemoryFactsRetentionGET(t *testing.T) {
+	q, clock := fixture(t)
+	m := machine("one", "fake")
+	submit(t, q, spec("experiment"))
+	refused := check(t, q, m, nil).Job
+	r := result(refused, false)
+	r.ExecutionCause = &RuntimeCause{Operation: "launch", Class: "resource_limit"}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	if got := job(t, q, refused.ID); len(got.MemoryAttempts) != 0 || got.MemoryAttemptsDropped != 0 {
+		t.Fatal("peakless prelaunch refusal created a memory row", got)
+	}
+	const launched = 36
+	for i := 1; i <= launched; i++ {
+		j := check(t, q, m, nil).Job
+		if j == nil || j.Attempt != i+1 {
+			t.Fatal("missing assignment", i, j)
+		}
+		if err := q.Started(result(j, false)); err != nil {
+			t.Fatal(err)
+		}
+		r := result(j, false)
+		r.Interrupted, r.PoliteStop = true, true
+		if i > 1 {
+			host := float64(i)
+			r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host}
+		}
+		if err := q.Complete(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	q = memoryFactsRestart(t, q, clock)
+	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+	defer server.Close()
+	got, err := (Client{URL: server.URL, Token: "test"}).GetJob(context.Background(), refused.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Starts counts dispatched offers, including the initial prelaunch refusal.
+	if len(got.MemoryAttempts) != 32 || got.MemoryAttemptsDropped != 4 || got.Starts != launched+1 || got.Losses != 0 {
+		t.Fatalf("incorrect retention count or changed retry charging: rows=%d dropped=%d starts=%d losses=%d", len(got.MemoryAttempts), got.MemoryAttemptsDropped, got.Starts, got.Losses)
+	}
+	for i, facts := range got.MemoryAttempts {
+		wantAttempt := launched - 32 + i + 2
+		if i == 0 {
+			wantAttempt = 2 // First launched attempt, even without a reading.
+		}
+		if facts.Attempt != wantAttempt || facts.Machine != m.ID || facts.Session != m.Session || facts.MemoryEnvelope == nil {
+			t.Fatalf("wrong retained row %d: %+v", i, facts)
+		}
+		if i == 0 && facts.MemoryPeak != nil || i > 0 && (facts.MemoryPeak == nil || facts.MemoryPeak.HostGB == nil || *facts.MemoryPeak.HostGB != float64(wantAttempt-1)) {
+			t.Fatalf("wrong retained peak %d: %+v", i, facts)
+		}
+	}
+	validateWireValue(t, compileWireSchema(t, "job-v1.schema.json"), got)
+}

@@ -35,7 +35,10 @@ client.cancel(job["id"])
 attempt's `attempt`/`machine`/`session`, `memory_envelope`, and observed
 `memory_peak`. Peaks include measured `host_gb`, `cgroup_gb`, `device_gb`,
 `swap_gb`, `events` (`high`, `max`, `oom`, `oom_kill`, `oom_group_kill`), and
-`constrained` (omitted false). Missing readings mean unknown; measured zeros
+`constrained` (omitted false). At most 32 rows remain (first plus latest 31);
+`memory_attempts_dropped` counts evicted rows (omitted zero). Peakless prelaunch
+attempts create no row and do not count as dropped.
+Missing readings mean unknown; measured zeros
 remain explicit. Constrained first-run observations persist even when rejected
 by learning. See [memory facts](../../docs/guide-status-v3.md) for scope and
 platform limits.
