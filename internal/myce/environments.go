@@ -851,12 +851,16 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) erro
 	}
 	defer func() { _ = output.Sync(); _ = output.Close() }()
 	start := c.Clock.Now()
-	env := []string{}
+	// Package installers also honor the operator's own uv settings, such as the
+	// documented UV_LINK_MODE; Mycelium owns the cache, paths and retry knobs.
+	base := jobBaseEnvironment()
 	for _, v := range os.Environ() {
-		if !strings.HasPrefix(v, "MYCE_TOKEN=") && !strings.HasPrefix(v, "PIXI_") && !strings.HasPrefix(v, "UV_CACHE_DIR=") && !strings.HasPrefix(v, "UV_PYTHON_INSTALL_DIR=") && !strings.HasPrefix(v, "UV_PROJECT_ENVIRONMENT=") && !strings.HasPrefix(v, "UV_HTTP_TIMEOUT=") && !strings.HasPrefix(v, "UV_HTTP_RETRIES=") && !strings.HasPrefix(v, "UV_NO_PROGRESS=") {
-			env = append(env, v)
+		k, v, _ := strings.Cut(v, "=")
+		if strings.HasPrefix(k, "UV_") && !slices.Contains([]string{"UV_CACHE_DIR", "UV_PYTHON_INSTALL_DIR", "UV_PROJECT_ENVIRONMENT", "UV_HTTP_TIMEOUT", "UV_HTTP_RETRIES", "UV_NO_PROGRESS"}, k) {
+			base[k] = v
 		}
 	}
+	env := environmentList(base)
 	env = append(env, "PIXI_CACHE_DIR="+c.downloadCache("pixi"), "PIXI_NO_PROGRESS=true", "UV_CACHE_DIR="+c.downloadCache("uv"), "UV_HTTP_TIMEOUT=60", "UV_HTTP_RETRIES=3", "UV_PYTHON_INSTALL_DIR="+filepath.Join(partial, "python"), "UV_PROJECT_ENVIRONMENT="+filepath.Join(partial, "venv"))
 	run := c.Run
 	if run == nil {

@@ -85,6 +85,18 @@ The worker also sets `MYCE_PROCESS_ID` for process ownership. It removes
 `MYCE_TOKEN`, even if supplied in `run.env`. These are plain processes with the
 worker user's permissions, not a sandbox.
 
+A job does not inherit the worker's whole environment. It starts from `PATH`,
+`HOME`, `USER`, `LOGNAME`, `LANG`, `LC_*`, `TZ`, `TMPDIR` and the GPU runtime
+controls the installer saves for the service (`LD_LIBRARY_PATH`, `CUDA_*`,
+`ZE_*`, `ONEAPI_*`, `SYCL_*`), then adds `run.env`, environment activation,
+device and placement selectors and the `MYCE_*` attempt variables. Session
+variables such as `SSH_AUTH_SOCK`, `DISPLAY`, `DBUS_*` and `XDG_RUNTIME_DIR`, and
+the worker's own `MYCE_QUEUE` and `MYCE_JOINING_FILE`, are dropped; pass anything
+else a job needs through `run.env`. The same base applies to native helpers,
+extension setup/check/run, environment builds (which also keep the operator's
+`UV_*` settings) and model servers. Managed Docker containers receive only
+explicit `--env` values.
+
 ## CPU example
 
 ```yaml

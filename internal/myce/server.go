@@ -106,13 +106,7 @@ func serverCommand(m Model, port int) ([]string, string, []string, []string, err
 	if err := validateModelEnv(m); err != nil {
 		return nil, "", nil, nil, err
 	}
-	env := map[string]string{}
-	for _, entry := range os.Environ() {
-		k, v, ok := strings.Cut(entry, "=")
-		if ok && k != "MYCE_TOKEN" {
-			env[k] = v
-		}
-	}
+	env := jobBaseEnvironment()
 	for k, v := range m.Env {
 		env[k] = v
 	}

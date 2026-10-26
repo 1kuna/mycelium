@@ -203,13 +203,7 @@ func ExtensionFingerprint(ctx context.Context, platform, device string) (string,
 	return hex.EncodeToString(h[:]), nil
 }
 func cleanExtensionEnv(extra map[string]string) []string {
-	env := map[string]string{}
-	for _, entry := range os.Environ() {
-		k, v, ok := strings.Cut(entry, "=")
-		if ok && k != "MYCE_TOKEN" {
-			env[k] = v
-		}
-	}
+	env := jobBaseEnvironment()
 	for k, v := range extra {
 		if k != "MYCE_TOKEN" {
 			env[k] = v

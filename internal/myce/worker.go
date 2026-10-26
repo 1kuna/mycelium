@@ -502,13 +502,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (*proce
 		cmd.ExtraFiles = []*os.File{readyWriter, approvalReader}
 	}
 	cmd.Dir = j.Spec.Run.Workdir
-	env := map[string]string{}
-	for _, v := range os.Environ() {
-		k, v, ok := strings.Cut(v, "=")
-		if ok {
-			env[k] = v
-		}
-	}
+	env := jobBaseEnvironment()
 	for k, v := range j.Spec.Run.Env {
 		env[k] = v
 	}
