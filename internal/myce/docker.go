@@ -167,6 +167,11 @@ type dockerAttempt struct {
 	timeout   time.Duration
 }
 
+// Starting a container includes runtime/mount setup, unlike an observation RPC.
+// The former 2s budget cancelled real starts on a loaded host (#149). Allow
+// 30s for that work; a hung start costs at most 28s more before exact cleanup.
+const dockerStartTimeout = 30 * time.Second
+
 func (d *dockerAttempt) saveLocked() error {
 	err := runtimeErrorFor("persist", d.saveState(d.state))
 	d.dirty = err != nil
@@ -340,7 +345,11 @@ func (d *dockerAttempt) operation(kind string, args ...string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	out, err := d.call(args...)
+	timeout := d.timeout
+	if kind == "start" {
+		timeout = max(timeout, dockerStartTimeout)
+	}
+	out, err := d.callWithTimeout(timeout, args...)
 	if err != nil {
 		err = d.recordInfrastructure(infrastructureFact{Kind: launchFailed, At: time.Now().UTC()}, err)
 	}
@@ -484,6 +493,9 @@ func (d *dockerAttempt) reconcile() (done bool, err error) {
 			}
 			return false, nil // Verify effective policy in the next inventory.
 		}
+	}
+	if handled, err := d.settleFailedStart(containers); handled || err != nil {
+		return false, err
 	}
 	// A positively identified network settles its accepted creation; absence cannot.
 	d.mu.Lock()
@@ -631,6 +643,61 @@ func (d *dockerAttempt) reconcile() (done bool, err error) {
 		return false, err
 	}
 	return true, nil
+}
+
+// A lost start reply must not require a start that Docker has already cancelled
+// ever to become visible. Start addresses an existing immutable container ID:
+// removing that exact, inspected inactive object prevents a delayed start. The
+// durable removal intent survives a crash between rm and its receipt. Unlike a
+// pending create, an exact absent ID cannot materialize later from this request.
+func (d *dockerAttempt) settleFailedStart(containers []dockerInspection) (bool, error) {
+	d.mu.Lock()
+	pending := d.state.Pending && d.state.Stopped
+	op, id := d.state.Operation, d.state.PendingContainer
+	if id == "" {
+		id = d.state.Container
+	}
+	d.mu.Unlock()
+	if !pending || id == "" || (op != "start" && op != "remove-start") {
+		return false, nil
+	}
+	for _, c := range containers {
+		if c.ID != id {
+			continue
+		}
+		// Preserve the existing positive-start and bounded signal protocol.
+		if dockerLive(c) || op == "start" && !c.State.StartedAt.IsZero() {
+			return false, nil
+		}
+		if err := d.retainEvidence([]dockerInspection{c}); err != nil {
+			return true, err
+		}
+		d.mu.Lock()
+		d.state.Operation = "remove-start"
+		err := d.saveLocked()
+		d.mu.Unlock()
+		if err != nil {
+			return true, err
+		}
+		// No force: a start racing inspection makes rm refuse, retaining custody.
+		_, err = d.call("rm", id)
+		return true, err // Re-inventory before settling even a successful removal.
+	}
+	// Do not treat a missing label match as proof: inspect the exact ID too.
+	_, err := d.call("inspect", id)
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) {
+		return true, errors.New("pending Docker start absence unconfirmed")
+	}
+	message := strings.TrimSpace(string(exit.Stderr))
+	if message != "Error: No such object: "+id && message != "Error response from daemon: No such container: "+id {
+		return true, err
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.state.Pending = false
+	d.state.Error = ""
+	return true, d.saveLocked()
 }
 
 // TERM intent is permanent once durable; every delivery error waits for the

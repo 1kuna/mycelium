@@ -166,7 +166,9 @@ func TestDockerCLIHelper(t *testing.T) {
 			c.Env = os.Environ()
 			c.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 			_ = c.Start()
-			time.Sleep(time.Minute)
+			// The daemon keeps the accepted request after its reply is lost.
+			fmt.Fprintln(os.Stderr, "connection closed before start reply")
+			os.Exit(1)
 		}
 		if string(mode) != "docker-oom" {
 			_ = os.WriteFile(filepath.Join(root, "running"), []byte("yes"), 0600)
@@ -193,6 +195,12 @@ func TestDockerCLIHelper(t *testing.T) {
 			}
 		}
 	case "inspect":
+		if len(args) == 2 && args[1] == "id1" {
+			if _, err := os.Stat(filepath.Join(root, "created")); os.IsNotExist(err) {
+				fmt.Fprintln(os.Stderr, "Error: No such object: id1")
+				os.Exit(1)
+			}
+		}
 		_, networkErr := os.Stat(filepath.Join(root, "network"))
 		_, removedErr := os.Stat(filepath.Join(root, "network-removed"))
 		if networkErr == nil || removedErr == nil {
@@ -296,6 +304,10 @@ func TestDockerCLIHelper(t *testing.T) {
 			_ = os.Rename(filepath.Join(root, file), filepath.Join(root, target))
 		}
 	case "rm":
+		if string(mode) == "late" {
+			fmt.Fprintln(os.Stderr, "Error response from daemon: container start in progress")
+			os.Exit(1)
+		}
 		if len(args) != 2 || args[1] != "id1" {
 			os.Exit(2)
 		}
@@ -541,7 +553,7 @@ func TestDockerDaemonRefusalRetriesWithoutRelease(t *testing.T) {
 		t.Fatal("retry did not recover")
 	}
 }
-func TestDockerDelayedStartSurvivesClientTimeout(t *testing.T) {
+func TestDockerDelayedStartSurvivesLostReply(t *testing.T) {
 	w, s, c, root := dockerFixture(t)
 	_ = os.WriteFile(filepath.Join(root, "mode"), []byte("late"), 0600)
 	j := dockerJob()
