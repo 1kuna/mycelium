@@ -45,7 +45,7 @@ class FileTransferTimeoutTests(unittest.TestCase):
                     self.end_headers()
                     self.wfile.write(reply)
                     return
-                time.sleep(0.1)  # The queue rehashes the blob before replying.
+                time.sleep(0.4)  # The queue rehashes the blob before replying.
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -64,7 +64,7 @@ class FileTransferTimeoutTests(unittest.TestCase):
         self.addCleanup(server.shutdown)
         # The old fixed client timeout is shorter than the header wait and stream.
         client = Client(f"http://127.0.0.1:{server.server_address[1]}", "fixture", timeout=0.2)
-        client._transfer_idle = 0.25
+        client._transfer_idle = 0.5
         return client
 
     def test_slow_stream_succeeds_and_stall_fails_typed(self):
