@@ -259,6 +259,7 @@ func (q *Queue) fanOutCandidate(j *Job, m *Machine) *Job {
 	// and release planning, rather than waiting for a measured but busy machine.
 	for _, candidate := range extensionJobs(q.fanOutTemplate(j), m, true) {
 		q.applyLearnedNeeds(candidate)
+		candidate = q.memoryCandidate(candidate, m)
 		if q.capReasonFor(candidate, m) == "" && q.batchResourcesFit(candidate, m) {
 			candidate.Spec.FanOut = j.Spec.FanOut
 			candidate.FanOut = j.FanOut
