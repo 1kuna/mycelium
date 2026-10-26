@@ -61,7 +61,9 @@ a stale or shared `MYCE_NOTIFY` never sends your wake to another thread. An
 already-running observer keeps the notifier it was started with.
 
 Arguments after `--` are **appended** to `run.command`. Pass only extra
-arguments, such as a test filter, and never repeat the original command.
+arguments, such as a test filter, and never repeat the original command. If the
+profile runs a wrapper script, it must forward them (`"$@"`); a usage error
+from a wrapper that rejects extra arguments is a profile bug, not a queue refusal.
 
 The command returns at once. It prints a JSON receipt on stdout and keeps it
 under `.mycelium/receipts/`. Record `key` and `job_id` in your task record, then

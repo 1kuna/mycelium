@@ -12,6 +12,11 @@ and prints a JSON receipt. Use `--profile path.yaml` for an explicit file.
 Use `myce run --profile go-test -- -race -run '^TestX$' ./internal/myce` for ad-hoc Go tests with the catalog-backed Go/Python/uv/git environment.
 Arguments after `--` append literally to `run.command`. The new flag belongs on
 `run`: `submit job.yaml` keeps its existing job-ID output and wire contract.
+A wrapper command such as `[bash, scripts/run.sh, MODE]` receives the appended
+arguments as positional parameters after `MODE` and must forward them (`"$@"`);
+a wrapper that insists on exactly one argument rejects every targeted run before
+the tool starts. With `[bash, -c, SCRIPT, NAME, MODE]`, `$0` is `NAME`, `$1` is
+`MODE` and appended arguments follow.
 
 A profile is ordinary batch YAML plus `source` and `check` (an argv array). Reuse
 `run`, `needs`, `environment`, `inputs`, `outputs`, `project`, and `class` from

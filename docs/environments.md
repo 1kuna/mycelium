@@ -204,6 +204,9 @@ service user. A readable `requirements.txt` with `python: '3.12'` and
 also requires a compatible known target. Unknown named catalog entries are a
 separate rejection, reported as `unknown environment "NAME"`.
 
+Inline recipes always use the uv backend. A pixi recipe, for example one that
+supplies Node or other conda-forge tools, needs a [catalog entry](#cpu-tools-with-pixi).
+
 `platforms` is optional
 and defaults to every platform; state it when dependencies only support a
 subset. Exactly one of `name` and `lock_file` is allowed. Changing the content,
