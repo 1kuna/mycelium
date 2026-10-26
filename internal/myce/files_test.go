@@ -422,7 +422,7 @@ func TestFileStoreCorruptUploadOffsetCapacityAndRestart(t *testing.T) {
 	ref, _ := IdentifyFile(src)
 	request := func(method, path string, data []byte, headers map[string]string) int {
 		t.Helper()
-		res, e := c.fileRequest(context.Background(), method, path, bytes.NewReader(data), headers)
+		res, e := c.fileRequest(context.Background(), method, path, bytes.NewReader(data), headers, 0)
 		if e != nil {
 			t.Fatal(e)
 		}

@@ -24,6 +24,67 @@ class Reply(io.BytesIO):
         self.headers = {} if length is None else {"Content-Length": str(length)}
 
 
+class FileTransferTimeoutTests(unittest.TestCase):
+    """#218: streamed results have progress budgets, not a whole-request timeout."""
+
+    def serve(self, body, *, stall):
+        import hashlib
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        ref = {"sha256": hashlib.sha256(body).hexdigest(), "size_bytes": len(body)}
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+
+            def do_GET(self):
+                if self.path == "/api/jobs/job":
+                    reply = json.dumps({"id": "job", "state": "succeeded", "output_refs": {"result": ref}}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(reply)))
+                    self.end_headers()
+                    self.wfile.write(reply)
+                    return
+                time.sleep(0.4)  # The queue rehashes the blob before replying.
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                chunk = len(body) // 10
+                for i in range(10):
+                    if stall and i == 5:
+                        time.sleep(2)
+                        return
+                    self.wfile.write(body[i * chunk:(i + 1) * chunk])
+                    self.wfile.flush()
+                    time.sleep(0.06)
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        # The old fixed client timeout is shorter than the header wait and stream.
+        client = Client(f"http://127.0.0.1:{server.server_address[1]}", "fixture", timeout=0.2)
+        client._transfer_response, client._transfer_idle = 1.0, 0.25
+        return client
+
+    def test_slow_stream_succeeds_and_stall_fails_typed(self):
+        from mycelium import TransferStalledError
+        body = b"frame" * 2000
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "result"
+            self.serve(body, stall=False).download_result("job", "result", destination)
+            self.assertEqual(destination.read_bytes(), body)
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "result"
+            start = time.monotonic()
+            with self.assertRaises(TransferStalledError) as caught:
+                self.serve(body, stall=True).download_result("job", "result", destination)
+            self.assertLess(time.monotonic() - start, 1.5)
+            self.assertEqual(caught.exception.code, "result_download_failed")
+            self.assertIn("result_download_failed", str(caught.exception))
+            self.assertEqual(os.listdir(directory), [])
+
+
 class ClientTests(unittest.TestCase):
     def test_job_reply_invalid(self):
         client = Client(token="test-only")

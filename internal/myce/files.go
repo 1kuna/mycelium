@@ -433,10 +433,51 @@ func (a API) registerFiles(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/files/checkpoint", a.checkpointHandler)
 }
 
-func (c Client) fileRequest(ctx context.Context, method, path string, body io.Reader, headers map[string]string) (*http.Response, error) {
+// File transfers stream artifacts of any size, so they have no whole-request
+// deadline (#218). They fail only when the queue goes quiet. Before response
+// headers the queue may be silent while it rereads the blob: it hashes every
+// byte before certifying an ETag, and twice when publishing a finished upload.
+// That budget is fileResponseBudget plus two passes at fileVerifyBytesPerSecond,
+// a spinning disk's sequential read and below unaccelerated SHA-256 (~350 MB/s).
+// After headers a transfer fails when no byte arrives for fileTransferIdle: six
+// times the queue's one-shot NAS budget and past the first five TCP
+// retransmission backoffs (~31 s), so a dead path still surfaces in a minute.
+const (
+	fileResponseBudget       = 30 * time.Second
+	fileVerifyBytesPerSecond = 100 << 20
+	fileTransferIdle         = 60 * time.Second
+)
+
+var errFileTransferStalled = errors.New("file transfer stalled")
+
+func (c Client) fileTimeouts(size int64) (response, idle time.Duration) {
+	response, idle = c.transferResponse, c.transferIdle
+	if response == 0 {
+		response = fileResponseBudget + time.Duration(float64(2*max(size, 0))/fileVerifyBytesPerSecond*float64(time.Second))
+	}
+	if idle == 0 {
+		idle = fileTransferIdle
+	}
+	return response, idle
+}
+
+// size is the blob the queue may verify before replying; 0 when it reads none.
+func (c Client) fileRequest(ctx context.Context, method, path string, body io.Reader, headers map[string]string, size int64) (*http.Response, error) {
+	response, idle := c.fileTimeouts(size)
+	ctx, cancel := context.WithCancelCause(ctx)
+	quiet := response
+	timer := time.AfterFunc(response, func() {
+		cancel(fmt.Errorf("%w: no data from the queue for %s", errFileTransferStalled, quiet))
+	})
+	stop := func() { timer.Stop(); cancel(nil) }
 	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(c.URL, "/")+path, body)
 	if err != nil {
+		stop()
 		return nil, err
+	}
+	if body != nil {
+		// Sent request bytes are progress: the budget restarts after each one.
+		req.Body = io.NopCloser(progressReader{body, func() { timer.Reset(response) }})
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	for k, v := range headers {
@@ -444,16 +485,64 @@ func (c Client) fileRequest(ctx context.Context, method, path string, body io.Re
 	}
 	hc := c.HTTP
 	if hc == nil {
-		hc = &http.Client{Timeout: 30 * time.Second}
+		hc = &http.Client{}
 	}
 	// Never redirect credentials or data to a different destination.
 	local := *hc
+	local.Timeout = 0
 	local.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 	res, err := local.Do(req)
 	if err != nil {
+		cause := context.Cause(ctx)
+		stop()
+		if errors.Is(cause, errFileTransferStalled) {
+			return nil, cause
+		}
 		return nil, errors.New("file transfer connection failed")
 	}
+	quiet = idle
+	timer.Reset(idle)
+	res.Body = &progressBody{ReadCloser: res.Body, ctx: ctx, progress: func() { timer.Reset(idle) }, stop: stop}
 	return res, nil
+}
+
+type progressReader struct {
+	io.Reader
+	progress func()
+}
+
+func (r progressReader) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	if n > 0 {
+		r.progress()
+	}
+	return n, err
+}
+
+type progressBody struct {
+	io.ReadCloser
+	ctx      context.Context
+	progress func()
+	stop     func()
+}
+
+func (b *progressBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if n > 0 {
+		b.progress()
+	}
+	if err != nil && err != io.EOF {
+		if cause := context.Cause(b.ctx); errors.Is(cause, errFileTransferStalled) {
+			err = cause
+		}
+	}
+	return n, err
+}
+
+func (b *progressBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.stop()
+	return err
 }
 func fileResponse(res *http.Response, want int) error {
 	defer res.Body.Close()
@@ -479,7 +568,7 @@ func (c Client) hasFile(ctx context.Context, ref FileRef, purpose string) error 
 	if purpose != "" {
 		headers = map[string]string{"X-Myce-Upload-Purpose": purpose}
 	}
-	res, err := c.fileRequest(ctx, "HEAD", "/api/files/blobs/"+ref.SHA256, nil, headers)
+	res, err := c.fileRequest(ctx, "HEAD", "/api/files/blobs/"+ref.SHA256, nil, headers, ref.SizeBytes)
 	if err != nil {
 		return err
 	}
@@ -522,7 +611,7 @@ func (c Client) uploadFile(ctx context.Context, path string, ref FileRef, purpos
 	if purpose != "" {
 		headers["Upload-Metadata"] += ",purpose " + base64.StdEncoding.EncodeToString([]byte(purpose))
 	}
-	res, err := c.fileRequest(ctx, "POST", "/api/files/uploads/", nil, headers)
+	res, err := c.fileRequest(ctx, "POST", "/api/files/uploads/", nil, headers, ref.SizeBytes)
 	if err != nil {
 		return err
 	}
@@ -533,7 +622,7 @@ func (c Client) uploadFile(ctx context.Context, path string, ref FileRef, purpos
 		return nil
 	}
 	endpoint := "/api/files/uploads/" + ref.SHA256
-	res, err = c.fileRequest(ctx, "HEAD", endpoint, nil, map[string]string{"Tus-Resumable": "1.0.0"})
+	res, err = c.fileRequest(ctx, "HEAD", endpoint, nil, map[string]string{"Tus-Resumable": "1.0.0"}, 0)
 	if err != nil {
 		return err
 	}
@@ -557,7 +646,7 @@ func (c Client) uploadFile(ctx context.Context, path string, ref FileRef, purpos
 	// Bounded PATCH bodies let a slow connection progress without one huge request.
 	for {
 		n := min(int64(4<<20), size-offset)
-		res, err = c.fileRequest(ctx, "PATCH", endpoint, io.LimitReader(f, n), map[string]string{"Tus-Resumable": "1.0.0", "Upload-Offset": strconv.FormatInt(offset, 10), "Content-Type": "application/offset+octet-stream"})
+		res, err = c.fileRequest(ctx, "PATCH", endpoint, io.LimitReader(f, n), map[string]string{"Tus-Resumable": "1.0.0", "Upload-Offset": strconv.FormatInt(offset, 10), "Content-Type": "application/offset+octet-stream"}, ref.SizeBytes)
 		if err != nil {
 			return err
 		}
@@ -615,7 +704,7 @@ func (c Client) DownloadFile(ctx context.Context, ref FileRef, dest string) erro
 	if offset > 0 {
 		headers["Range"] = fmt.Sprintf("bytes=%d-", offset)
 	}
-	res, err := c.fileRequest(ctx, "GET", "/api/files/blobs/"+ref.SHA256, nil, headers)
+	res, err := c.fileRequest(ctx, "GET", "/api/files/blobs/"+ref.SHA256, nil, headers, ref.SizeBytes)
 	if err != nil {
 		return err
 	}

@@ -29,6 +29,37 @@ class IncompleteReplyError(ConnectionError):
     """A Job reply ended early, as during a queue restart; the read may be retried."""
 
 
+class TransferStalledError(TimeoutError):
+    """A file transfer received no data within its progress budget.
+
+    code is "result_download_failed" for download_result, None otherwise.
+    """
+
+    def __init__(self, message: str, code: str | None = None):
+        super().__init__(f"{code}: {message}" if code else message)
+        self.code = code
+
+
+# File transfers stream artifacts of any size, so they have no whole-request
+# deadline (#218); the Go client uses the same budgets. Before response headers
+# the queue may be silent while it rereads the blob (hashing every byte before
+# certifying an ETag, twice when publishing a finished upload): 30 s plus two
+# passes at 100 MiB/s, a spinning disk's sequential read and below
+# unaccelerated SHA-256. After headers a transfer fails when no byte arrives for
+# 60 s: six times the queue's one-shot NAS budget and past the first five TCP
+# retransmission backoffs (~31 s).
+FILE_RESPONSE_BUDGET = 30.0
+FILE_VERIFY_BYTES_PER_SECOND = 100 * 1024 * 1024
+FILE_TRANSFER_IDLE = 60.0
+
+
+def _set_read_timeout(response: Any, seconds: float) -> None:
+    # urllib's timeout is per socket operation; switch it to the idle budget.
+    sock = getattr(getattr(getattr(response, "fp", None), "raw", None), "_sock", None)
+    if sock is not None:
+        sock.settimeout(seconds)
+
+
 class APIError(RuntimeError):
     """The queue rejected a request; status and response body are retained."""
 
@@ -112,6 +143,9 @@ class Client:
         self.timeout = timeout
         self.poll_interval = poll_interval
         self._urlopen = urlopen
+        # Tests shorten the file transfer budgets; None uses the defaults.
+        self._transfer_response: float | None = None
+        self._transfer_idle = FILE_TRANSFER_IDLE
 
     @classmethod
     def from_installed(cls, config: str | Path | None = None, *,
@@ -231,15 +265,27 @@ class Client:
         return job
 
     def _file_request(self, method: str, path: str, data: bytes | None = None,
-                      headers: Mapping[str, str] | None = None):
+                      headers: Mapping[str, str] | None = None, size: int = 0):
+        """size is the blob the queue may verify before replying; 0 when none."""
         request = Request(self.url + path, data=data, method=method, headers={
             "Authorization": "Bearer " + self.token, **(headers or {})})
+        response_budget = self._transfer_response
+        if response_budget is None:
+            response_budget = FILE_RESPONSE_BUDGET + 2 * max(size, 0) / FILE_VERIFY_BYTES_PER_SECOND
         try:
-            return self._urlopen(request, timeout=self.timeout)
+            response = self._urlopen(request, timeout=response_budget)
         except HTTPError as error:
             with error:
                 body = error.read(4096).decode("utf-8", errors="replace")
             raise APIError(error.code, body) from None
+        except TimeoutError:
+            raise TransferStalledError(f"no response from the queue for {response_budget:g}s") from None
+        except URLError as error:
+            if isinstance(error.reason, TimeoutError):
+                raise TransferStalledError(f"no response from the queue for {response_budget:g}s") from None
+            raise
+        _set_read_timeout(response, self._transfer_idle)
+        return response
 
     def upload_file(self, source: str | Path) -> dict[str, Any]:
         """Upload a job input, eligible for retention if never submitted."""
@@ -254,19 +300,19 @@ class Client:
         endpoint = "/api/files/uploads/" + ref["sha256"]
         headers = {"Tus-Resumable": "1.0.0"}
         try:
-            with self._file_request("HEAD", "/api/files/blobs/" + ref["sha256"]):
+            with self._file_request("HEAD", "/api/files/blobs/" + ref["sha256"], size=size):
                 return ref
         except APIError as error:
             if error.status not in (404, 410):
                 raise
-        with self._file_request("POST", "/api/files/uploads/", b"", {
+        with self._file_request("POST", "/api/files/uploads/", b"", size=size, headers={
                 **headers, "Upload-Length": str(size),
                 "Upload-Metadata": "sha256 " + base64.b64encode(ref["sha256"].encode()).decode()
                 + ",purpose " + base64.b64encode(b"job-input").decode()}):
             pass
         # A repeated create may refer to an already published blob.
         try:
-            with self._file_request("HEAD", "/api/files/blobs/" + ref["sha256"]):
+            with self._file_request("HEAD", "/api/files/blobs/" + ref["sha256"], size=size):
                 return ref
         except APIError as error:
             if error.status not in (404, 410):
@@ -284,11 +330,11 @@ class Client:
                     raise ValueError("input changed during upload")
                 with self._file_request("PATCH", endpoint, chunk, {
                         **headers, "Content-Type": "application/offset+octet-stream",
-                        "Upload-Offset": str(offset)}) as response:
+                        "Upload-Offset": str(offset)}, size) as response:
                     if int(response.headers["Upload-Offset"]) != offset + len(chunk):
                         raise ValueError("invalid upload acknowledgement")
                 offset += len(chunk)
-        with self._file_request("HEAD", "/api/files/blobs/" + ref["sha256"]):
+        with self._file_request("HEAD", "/api/files/blobs/" + ref["sha256"], size=size):
             pass
         return ref
 
@@ -316,13 +362,19 @@ class Client:
             with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as stream:
                 temporary = Path(stream.name)
                 digest, received = hashlib.sha256(), 0
-                with self._file_request("GET", "/api/files/blobs/" + sha) as response:
-                    for chunk in iter(lambda: response.read(1024 * 1024), b""):
-                        received += len(chunk)
-                        if received > size:
-                            raise ValueError("artifact exceeds declared size")
-                        digest.update(chunk)
-                        stream.write(chunk)
+                try:
+                    with self._file_request("GET", "/api/files/blobs/" + sha, size=size) as response:
+                        for chunk in iter(lambda: response.read(1024 * 1024), b""):
+                            received += len(chunk)
+                            if received > size:
+                                raise ValueError("artifact exceeds declared size")
+                            digest.update(chunk)
+                            stream.write(chunk)
+                except TransferStalledError as error:
+                    raise TransferStalledError(str(error), "result_download_failed") from None
+                except TimeoutError:
+                    raise TransferStalledError(
+                        f"no data from the queue for {self._transfer_idle:g}s", "result_download_failed") from None
                 if received != size or digest.hexdigest() != sha:
                     raise ValueError("artifact identity mismatch")
                 stream.flush()

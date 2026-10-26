@@ -109,7 +109,7 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) error 
 		}
 		if strings.HasSuffix(v.name, ".partial") {
 			// Partial downloads are not unique progress: the complete store copy exists.
-			res, e := c.Client.fileRequest(ctx, "HEAD", "/api/files/blobs/"+hash, nil, nil)
+			res, e := c.Client.fileRequest(ctx, "HEAD", "/api/files/blobs/"+hash, nil, nil, v.size)
 			if e != nil {
 				return e
 			}
