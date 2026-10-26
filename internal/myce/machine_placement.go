@@ -80,6 +80,30 @@ func batchOnTarget(j *Job, m *Machine) bool {
 	return !j.Spec.Needs.cpuOnly() && m.GPU != "cpu" && (len(j.AllocatedDevices) == 0 || slices.Contains(j.AllocatedDevices, m.Device))
 }
 
+// Retained custody owns the command slot even after a job becomes terminal or
+// advances to another attempt. Missing device evidence keeps legacy exclusion.
+func (q *Queue) batchReleaseOnTarget(r HostRelease, m *Machine) bool {
+	if r.Preparation || r.Machine != m.ID {
+		return false
+	}
+	if m.Devices == nil {
+		return true
+	}
+	if m.GPU == "cpu" {
+		return false
+	}
+	// A CPU attempt can retain the worker's scalar compatibility device ID.
+	// Use only an exact current attempt's type; a newer attempt may target CPU
+	// while an older GPU copy still owns a slot.
+	if j := q.s.Jobs[r.Job]; j != nil && j.Machine == r.Machine && j.Session == r.Session && j.Attempt == r.Attempt && j.Spec.Needs.cpuOnly() {
+		return false
+	}
+	if r.Device != "" {
+		return r.Device == m.Device
+	}
+	return true
+}
+
 func deviceAllowed(j *Job, m *Machine) bool {
 	if m.Devices != nil && j.Spec.Needs.cpuOnly() {
 		return m.GPU == "cpu"
@@ -227,14 +251,15 @@ func batchReleaseKey(m *Machine) string {
 // claim another device's slot or add capacity to the shared host allowance.
 func (q *Queue) machineRecoveryFits(m *Machine, j *Job, copy Copy) bool {
 	if m.Devices == nil || !j.Spec.Needs.cpuOnly() && len(copy.AllocatedDevices) == 0 {
-		return !q.workerHasOtherAttempt(m.ID, m.Session, j.ID)
+		return !q.workerHasOtherAttempt(m.ID, m.Session, j.ID, copy.Attempt)
 	}
 	if _, retained := q.s.HostReleases[releaseKey(HostRelease{Job: j.ID, Machine: m.ID, Session: copy.Session, Attempt: copy.Attempt})]; !retained {
 		return false
 	}
 	for _, target := range q.machineTargets(m) {
 		if j.Spec.Needs.cpuOnly() && target.GPU == "cpu" || len(copy.AllocatedDevices) == 1 && target.GPU != "cpu" && target.Device == copy.AllocatedDevices[0] {
-			return q.workerBatchIdle(target) && target.CPUCapacityReason == "" && target.CPUInUseCores <= target.EffectiveCPUCores && target.hostReservationDebtGB == 0 && target.modelReservationDebtGB == 0 && target.MemoryError == "" && deviceAllowed(j, target)
+			own := HostRelease{Job: j.ID, Machine: m.ID, Session: copy.Session, Attempt: copy.Attempt}
+			return q.workerBatchIdleExcept(target, &own) && target.CPUCapacityReason == "" && target.CPUInUseCores <= target.EffectiveCPUCores && target.hostReservationDebtGB == 0 && target.modelReservationDebtGB == 0 && target.MemoryError == "" && deviceAllowed(j, target)
 		}
 	}
 	return false
