@@ -152,6 +152,46 @@ Eligible targets rank ahead of placement mismatches, followed by the fewest
 failed checks, smallest proportional resource shortfall, then machine/device
 name. Retrying an accepted intent clears the saved refusal.
 
+## Accelerator profiles
+
+Plain commands can require `needs.platform: cuda` or `xpu` and declare matching
+`targets`. Select an existing [catalog environment](environments.md#shared-catalog)
+with a recipe for that platform; the queue freezes it and the worker prepares or
+reuses it before running. The profile grammar and output checks are the same as
+for CPU work. No extension or container is required for native GPU commands.
+
+The repository includes `cuda-smoke` and `xpu-smoke` profiles. Register the named
+`torch-cuda` / `torch-xpu` recipes with locked, target-compatible PyTorch packages
+first (or select your catalog's existing PyTorch environment in the profile).
+Then commit the profile and submit from the project root:
+
+```sh
+myce run --profile cuda-smoke
+# After that job has finished:
+myce run --profile xpu-smoke
+```
+
+Each smoke requires a real accelerator and checks a tiny PyTorch matrix product
+and its gradient, then independently checks the JSON output. There is no CPU
+fallback. Match each target's OS/architecture to the locked recipe: a CUDA
+environment for Linux amd64 does not also supply Linux arm64 packages.
+`needs.memory_gb` reserves device memory for GPU work; `host_memory_gb` reserves
+host RAM (both count against shared RAM on unified-memory hardware).
+
+Declare the platform the work actually needs; CPU-only simulations should keep
+`needs.platform: cpu`. Mycelium chooses the least valuable eligible machine that
+fits, preserving scarce accelerators for work that needs them. A profile need
+not choose a host, device ID, or machine allow-list.
+
+Results stay remote. The receipt and completion notification contain only the
+accepted manifest (names, sizes and hashes); neither automatically downloads
+outputs. Fetch selected artifacts through `Client.DownloadResult` /
+`download_result`, or explicitly fetch all with `myce result JOB_ID --out DIR`.
+Keep large simulation, checkpoint and render outputs on worker/NAS storage or
+in the queue file store until needed; stored result blobs have the usual
+seven-day retention window. Command, profile `check`, and attempt-specific
+output verification must all succeed before any result is accepted.
+
 ## Installed client commands
 
 On an enrolled machine these commands read the installed worker config, or the

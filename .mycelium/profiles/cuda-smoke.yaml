@@ -1,0 +1,14 @@
+# Register torch-cuda in the environment catalog before submitting (docs/environments.md).
+name: torch-cuda-smoke
+project: mycelium
+class: experiment
+source: {git: HEAD}
+environment: torch-cuda
+needs: {cpu_cores: 1, memory_gb: 2, host_memory_gb: 2, platform: cuda}
+targets:
+  - {os: linux, arch: arm64, platform: cuda}
+  - {os: linux, arch: amd64, platform: cuda}
+run:
+  command: [python, scripts/accelerator-smoke.py, cuda]
+outputs: {accelerator-result.json: results}
+check: [python, scripts/accelerator-smoke.py, cuda, --check]

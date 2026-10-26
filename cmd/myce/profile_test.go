@@ -39,8 +39,9 @@ class: experiment
 source: {directory: source}
 run:
   command: [sh, run.sh]
-needs: {cpu_cores: 1, memory_gb: 1}
-targets: [{os: ` + runtime.GOOS + `, arch: ` + runtime.GOARCH + `, platform: cpu}]
+needs: {cpu_cores: 1, memory_gb: 1, host_memory_gb: 1, platform: fake}
+targets: [{os: ` + runtime.GOOS + `, arch: ` + runtime.GOARCH + `, platform: fake}]
+environment: profile-tools
 outputs: {result: results}
 check: [test, -s, result]
 `
@@ -77,7 +78,26 @@ printf '\n' >> "$NOTIFICATION_FILE"
 	binary := devTestBinary(t)
 	const token = "profile-fixture-token"
 	state := t.TempDir()
-	d, err := myce.StartDev(myce.DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(state, "queue.db"), Checkpoints: filepath.Join(state, "checkpoints"), FileStore: filepath.Join(state, "files"), Token: token, GPU: "cpu", Workers: 1, Interval: 10 * time.Millisecond})
+	// Exercise the accelerator profile path without a GPU or package downloads.
+	// The command exists only in the selected immutable catalog environment.
+	catalogDir := t.TempDir()
+	tool := filepath.Join(catalogDir, "profile-command")
+	if err := os.WriteFile(tool, []byte("#!/bin/sh\nexec sh \"$@\"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	profile = strings.Replace(profile, "command: [sh, run.sh]", "command: [profile-command, run.sh]", 1)
+	if err := os.WriteFile(path, []byte(profile), 0600); err != nil {
+		t.Fatal(err)
+	}
+	catalogPath := filepath.Join(catalogDir, "catalog.yaml")
+	if err := os.WriteFile(catalogPath, []byte("environments:\n  profile-tools:\n    fake:\n      binary: profile-command\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	catalog, err := myce.ReadEnvironments(catalogPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d, err := myce.StartDev(myce.DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(state, "queue.db"), Checkpoints: filepath.Join(state, "checkpoints"), FileStore: filepath.Join(state, "files"), Token: token, GPU: "fake", MemoryGB: 8, EnvironmentConfig: catalog, Workers: 1, Interval: 10 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,6 +159,9 @@ printf '\n' >> "$NOTIFICATION_FILE"
 	}
 	if delivered.Status != "succeeded" || len(delivered.ResultReference) != 1 {
 		t.Fatal("result missing", delivered)
+	}
+	if _, err := os.Stat(filepath.Join(root, "result")); !os.IsNotExist(err) {
+		t.Fatal("remote output appeared on caller before explicit download", err)
 	}
 	dest := filepath.Join(root, "downloaded")
 	if err = d.Client().DownloadResult(ctx, r.JobID, "result", dest); err != nil {

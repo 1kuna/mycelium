@@ -20,9 +20,9 @@ versions it needs, the files it reads beyond the committed tree, what it
 produces, and how success is observed.
 
 Make one profile per command that agents or CI launch as a unit and that is
-heavy enough to matter. A quick targeted test stays local. GPU work has no
-profile path yet ([mycelium#187](https://github.com/1kuna/mycelium/issues/187)),
-and long-lived servers belong in section 4.
+heavy enough to matter. A quick targeted test stays local. Native GPU commands
+use [accelerator profiles](https://github.com/1kuna/mycelium/blob/main/docs/agent-offload.md#accelerator-profiles);
+long-lived servers belong in section 4.
 
 ## 2. Write the profile
 
@@ -52,6 +52,10 @@ check: [grep, -qx, 'NAME: exit=0', NAME-result.txt]
 
 - **Targets** list only platforms you have proven, and they must match the
   environment's locked platforms.
+- **GPU work** sets `needs.platform: cuda` or `xpu`, matching targets, device
+  `memory_gb` and `host_memory_gb`. Select a catalog recipe for that accelerator;
+  use [locked Python recipes](https://github.com/1kuna/mycelium/blob/main/docs/environments.md#shared-catalog)
+  for PyTorch packages. The CPU pixi example below is for CPU tools.
 - **`memory: auto`** learns the peak from successful runs. Match tool
   parallelism to `cpu_cores`, for example `GOMAXPROCS` in `run.env`.
 - **`check`** must prove the work passed, not just that a file exists. The
@@ -112,14 +116,14 @@ when the work is:
 - **A long-lived model server** that callers reach over HTTP, such as an
   inference, speech or OCR API. Make it a catalog model with `engine: server`
   ([general servers](https://github.com/1kuna/mycelium/blob/main/docs/guide-servers.md)).
-- **An accelerator stage, or a kind of work that needs qualification**:
+- **Work that needs extension qualification**:
   per-target variants, native baselines, benchmarks, model assets, sidecars, or
   reuse across projects. Write an extension
   ([write an extension](https://github.com/1kuna/mycelium/blob/main/docs/write-an-extension.md),
   [agent guide](https://github.com/1kuna/mycelium/blob/main/docs/extensions/AGENT-GUIDE.md)).
   Each machine must qualify the extension before it receives work.
 
-If the work is a finite CPU command that only this project runs, keep it a
+If the work is a finite native command that only this project runs, keep it a
 profile.
 
 ## 5. Prove it, then switch

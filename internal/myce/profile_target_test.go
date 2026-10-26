@@ -9,6 +9,46 @@ import (
 	"time"
 )
 
+func TestProfileAcceleratorTargets(t *testing.T) {
+	for _, target := range []ExecutionTarget{
+		{OS: "linux", Arch: "arm64", Platform: "cuda"},
+		{OS: "linux", Arch: "amd64", Platform: "xpu"},
+	} {
+		t.Run(target.Platform, func(t *testing.T) {
+			q, _ := fixture(t)
+			recipe := binaryRecipe(t, target.Platform)
+			if err := q.ConfigureEnvironments(EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"torch": {target.Platform: recipe}}}); err != nil {
+				t.Fatal(err)
+			}
+			cpu := machine("cpu", "cpu")
+			check(t, q, cpu, nil)
+			s := Spec{Name: "accelerator-profile", Project: "test", Class: "experiment", RequireTarget: true,
+				Targets: []ExecutionTarget{target}, Environment: Environment{Name: "torch"},
+				Needs: ResourceNeeds{CPUCores: 1, MemoryGB: 1, HostMemoryGB: 1, Platform: Platform{Required: []string{target.Platform}}},
+				Run:   RunSpec{Command: []string{"gpu-task"}}}
+			if _, err := q.Submit(s); err == nil {
+				t.Fatal("CPU-only fleet accepted accelerator profile")
+			}
+			gpu := machine("accelerator", target.Platform)
+			gpu.CapabilityProfile.Arch = target.Arch
+			gpu.HostMemoryMeasured, gpu.HostAvailableMemoryGB = true, 32
+			gpu.Environments = []string{recipe.Key}
+			check(t, q, gpu, nil)
+			j := submit(t, q, s)
+			if j.EnvironmentRecipes[target.Platform].Key != recipe.Key {
+				t.Fatal("catalog recipe not frozen for accelerator")
+			}
+			if assigned := check(t, q, cpu, nil).Job; assigned != nil {
+				t.Fatal("accelerator work dispatched to CPU", assigned.ID)
+			}
+			assigned := check(t, q, gpu, nil).Job
+			if assigned == nil || assigned.ID != j.ID || !q.startPlacementAllowed(assigned) {
+				t.Fatal("matching accelerator did not qualify and dispatch", assigned)
+			}
+		})
+	}
+}
+
 func TestProfileTargetRefusalHostMemorySlack(t *testing.T) {
 	q, _ := fixture(t)
 	for _, id := range []string{"small", "closest", "also-close"} {

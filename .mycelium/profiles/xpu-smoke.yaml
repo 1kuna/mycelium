@@ -1,0 +1,13 @@
+# Register torch-xpu in the environment catalog before submitting (docs/environments.md).
+name: torch-xpu-smoke
+project: mycelium
+class: experiment
+source: {git: HEAD}
+environment: torch-xpu
+needs: {cpu_cores: 1, memory_gb: 2, host_memory_gb: 2, platform: xpu}
+targets:
+  - {os: linux, arch: amd64, platform: xpu}
+run:
+  command: [python, scripts/accelerator-smoke.py, xpu]
+outputs: {accelerator-result.json: results}
+check: [python, scripts/accelerator-smoke.py, xpu, --check]

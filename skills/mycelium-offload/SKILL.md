@@ -194,10 +194,11 @@ authority fails, report the hold.
 
 ## Current limits
 
-- **CPU only.** Plain command profiles are CPU-only and declare
-  `needs.platform: cpu`. GPU work, including GPU sims, has no profile path yet
-  ([mycelium#187](https://github.com/1kuna/mycelium/issues/187)), so take it to the
-  project owner.
+- **Accelerator environments.** Native GPU profiles declare
+  `needs.platform: cuda` or `xpu`, matching OS/arch/platform `targets`, and a
+  catalog environment with a compatible recipe. CPU-only work keeps
+  `needs.platform: cpu`. See [accelerator profiles](https://github.com/1kuna/mycelium/blob/main/docs/agent-offload.md#accelerator-profiles)
+  for examples and device/host memory declarations. Placement stays with Mycelium.
 - **Targets bound relief.** Placement only uses workers that match the profile's
   `targets`. macOS-only work relieves the submitting machine only when a darwin
   worker other than that machine qualifies. If the submitter is the only match,
