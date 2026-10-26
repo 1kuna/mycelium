@@ -193,21 +193,6 @@ func TestFileCacheBoundedEvictionAndPrivateCopies(t *testing.T) {
 			t.Fatal(err)
 		}
 		refs = append(refs, ref)
-		if len(refs) == 3 {
-			// An interrupted download retains just one byte of the old full blob.
-			// Eviction must obtain the full size before asking the queue to hash it.
-			old := filepath.Join(cache.Root, refs[0].SHA256)
-			if err := os.Rename(old, old+".partial"); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.Truncate(old+".partial", 1); err != nil {
-				t.Fatal(err)
-			}
-			oldest := clock.Now().Add(-time.Second)
-			if err := os.Chtimes(old+".partial", oldest, oldest); err != nil {
-				t.Fatal(err)
-			}
-		}
 		clock.Advance(time.Second)
 		dest := filepath.Join(t.TempDir(), "private")
 		if err = cache.copyTo(context.Background(), ref, dest); err != nil {
@@ -218,9 +203,6 @@ func TestFileCacheBoundedEvictionAndPrivateCopies(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(cache.Root, refs[0].SHA256)); !os.IsNotExist(err) {
 		t.Fatal("oldest cache entry retained", err)
-	}
-	if _, err := os.Stat(filepath.Join(cache.Root, refs[0].SHA256) + ".partial"); !os.IsNotExist(err) {
-		t.Fatal("old partial cache entry retained", err)
 	}
 	entries, _ := os.ReadDir(cache.Root)
 	var total int64
@@ -440,7 +422,7 @@ func TestFileStoreCorruptUploadOffsetCapacityAndRestart(t *testing.T) {
 	ref, _ := IdentifyFile(src)
 	request := func(method, path string, data []byte, headers map[string]string) int {
 		t.Helper()
-		res, e := c.fileRequest(context.Background(), method, path, bytes.NewReader(data), headers, 0)
+		res, e := c.fileRequest(context.Background(), method, path, bytes.NewReader(data), headers)
 		if e != nil {
 			t.Fatal(e)
 		}

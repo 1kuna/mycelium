@@ -4,7 +4,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import http.client
-import io
 import tempfile
 import re
 import copy
@@ -28,25 +27,6 @@ class UnsupportedTLSRuntimeError(RuntimeError):
 
 class IncompleteReplyError(ConnectionError):
     """A Job reply ended early, as during a queue restart; the read may be retried."""
-
-
-class TransferStalledError(TimeoutError):
-    """A file transfer received no data within its progress budget.
-
-    code is "result_download_failed" for download_result, None otherwise.
-    """
-
-    def __init__(self, message: str, code: str | None = None):
-        super().__init__(f"{code}: {message}" if code else message)
-        self.code = code
-
-
-# One per-operation budget, shared with Go: at least 60 s, or 30 s plus
-# two full-blob hash passes at a conservative disk rate of 100 MiB/s (#218).
-# There is no whole-request timeout, even while waiting for response headers.
-FILE_RESPONSE_BUDGET = 30.0
-FILE_VERIFY_BYTES_PER_SECOND = 100 * 1024 * 1024
-FILE_TRANSFER_IDLE = 60.0
 
 
 class APIError(RuntimeError):
@@ -132,8 +112,6 @@ class Client:
         self.timeout = timeout
         self.poll_interval = poll_interval
         self._urlopen = urlopen
-        # Tests shorten the file transfer budgets; None uses the defaults.
-        self._transfer_idle: float | None = None
 
     @classmethod
     def from_installed(cls, config: str | Path | None = None, *,
@@ -253,32 +231,15 @@ class Client:
         return job
 
     def _file_request(self, method: str, path: str, data: bytes | None = None,
-                      headers: Mapping[str, str] | None = None, size: int = 0):
-        """size is the blob the queue may verify before replying; 0 when none."""
-        budget = self._transfer_idle
-        if budget is None:
-            budget = max(FILE_TRANSFER_IDLE,
-                         FILE_RESPONSE_BUDGET + 2 * max(size, 0) / FILE_VERIFY_BYTES_PER_SECOND)
-        headers = dict(headers or {})
-        if data is not None:
-            headers["Content-Length"] = str(len(data))
-        # http.client streams file-like bodies in blocksize chunks (8 KiB).
-        # A bytes body would use one sendall with a cumulative whole-body timeout.
-        request = Request(self.url + path, data=None if data is None else io.BytesIO(data),
-                          method=method, headers={"Authorization": "Bearer " + self.token, **headers})
+                      headers: Mapping[str, str] | None = None):
+        request = Request(self.url + path, data=data, method=method, headers={
+            "Authorization": "Bearer " + self.token, **(headers or {})})
         try:
-            response = self._urlopen(request, timeout=budget)
+            return self._urlopen(request, timeout=self.timeout)
         except HTTPError as error:
             with error:
                 body = error.read(4096).decode("utf-8", errors="replace")
             raise APIError(error.code, body) from None
-        except TimeoutError:
-            raise TransferStalledError(f"no network progress for {budget:g}s") from None
-        except URLError as error:
-            if isinstance(error.reason, TimeoutError):
-                raise TransferStalledError(f"no network progress for {budget:g}s") from None
-            raise
-        return response
 
     def upload_file(self, source: str | Path) -> dict[str, Any]:
         """Upload a job input, eligible for retention if never submitted."""
@@ -293,19 +254,19 @@ class Client:
         endpoint = "/api/files/uploads/" + ref["sha256"]
         headers = {"Tus-Resumable": "1.0.0"}
         try:
-            with self._file_request("HEAD", "/api/files/blobs/" + ref["sha256"], size=size):
+            with self._file_request("HEAD", "/api/files/blobs/" + ref["sha256"]):
                 return ref
         except APIError as error:
             if error.status not in (404, 410):
                 raise
-        with self._file_request("POST", "/api/files/uploads/", b"", size=size, headers={
+        with self._file_request("POST", "/api/files/uploads/", b"", {
                 **headers, "Upload-Length": str(size),
                 "Upload-Metadata": "sha256 " + base64.b64encode(ref["sha256"].encode()).decode()
                 + ",purpose " + base64.b64encode(b"job-input").decode()}):
             pass
         # A repeated create may refer to an already published blob.
         try:
-            with self._file_request("HEAD", "/api/files/blobs/" + ref["sha256"], size=size):
+            with self._file_request("HEAD", "/api/files/blobs/" + ref["sha256"]):
                 return ref
         except APIError as error:
             if error.status not in (404, 410):
@@ -323,11 +284,11 @@ class Client:
                     raise ValueError("input changed during upload")
                 with self._file_request("PATCH", endpoint, chunk, {
                         **headers, "Content-Type": "application/offset+octet-stream",
-                        "Upload-Offset": str(offset)}, size) as response:
+                        "Upload-Offset": str(offset)}) as response:
                     if int(response.headers["Upload-Offset"]) != offset + len(chunk):
                         raise ValueError("invalid upload acknowledgement")
                 offset += len(chunk)
-        with self._file_request("HEAD", "/api/files/blobs/" + ref["sha256"], size=size):
+        with self._file_request("HEAD", "/api/files/blobs/" + ref["sha256"]):
             pass
         return ref
 
@@ -355,19 +316,13 @@ class Client:
             with tempfile.NamedTemporaryFile(dir=destination.parent, delete=False) as stream:
                 temporary = Path(stream.name)
                 digest, received = hashlib.sha256(), 0
-                try:
-                    with self._file_request("GET", "/api/files/blobs/" + sha, size=size) as response:
-                        for chunk in iter(lambda: response.read(1024 * 1024), b""):
-                            received += len(chunk)
-                            if received > size:
-                                raise ValueError("artifact exceeds declared size")
-                            digest.update(chunk)
-                            stream.write(chunk)
-                except TransferStalledError as error:
-                    raise TransferStalledError(str(error), "result_download_failed") from None
-                except TimeoutError:
-                    raise TransferStalledError(
-                        "file transfer stalled during download", "result_download_failed") from None
+                with self._file_request("GET", "/api/files/blobs/" + sha) as response:
+                    for chunk in iter(lambda: response.read(1024 * 1024), b""):
+                        received += len(chunk)
+                        if received > size:
+                            raise ValueError("artifact exceeds declared size")
+                        digest.update(chunk)
+                        stream.write(chunk)
                 if received != size or digest.hexdigest() != sha:
                     raise ValueError("artifact identity mismatch")
                 stream.flush()
