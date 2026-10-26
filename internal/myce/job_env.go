@@ -17,13 +17,13 @@ import (
 var jobBaseVariables = []string{"PATH", "HOME", "USER", "LOGNAME", "LANG", "TZ", "TMPDIR"}
 
 // Proxy and CA settings let dependency downloads work on proxied or custom-CA
-// hosts. A proxy URL carrying user:pass@ is a credential and is dropped.
+// hosts. Any value containing @ is treated as credentialed and dropped.
 var jobNetworkVariables = strings.Fields("HTTPS_PROXY https_proxy HTTP_PROXY http_proxy NO_PROXY no_proxy ALL_PROXY all_proxy SSL_CERT_FILE SSL_CERT_DIR REQUESTS_CA_BUNDLE CURL_CA_BUNDLE NODE_EXTRA_CA_CERTS")
 
 // Environment builds also keep these operator uv settings. Each is a cache,
 // concurrency, TLS or index-selection knob; uv's credential variables
 // (UV_INDEX_*_PASSWORD/USERNAME, UV_PUBLISH_*, UV_KEYRING_PROVIDER,
-// UV_GITHUB_TOKEN) are never forwarded, and URL settings with userinfo are
+// UV_GITHUB_TOKEN) are never forwarded, and URL settings containing @ are
 // dropped. Mycelium owns the cache, paths and retry knobs.
 var buildUVVariables = strings.Fields("UV_LINK_MODE UV_CONCURRENT_BUILDS UV_CONCURRENT_DOWNLOADS UV_CONCURRENT_INSTALLS UV_CONCURRENT_CACHE_READS UV_COMPILE_BYTECODE UV_NATIVE_TLS UV_SYSTEM_CERTS UV_INDEX_STRATEGY UV_INDEX UV_DEFAULT_INDEX UV_INDEX_URL UV_EXTRA_INDEX_URL UV_FIND_LINKS UV_PYTHON_INSTALL_MIRROR UV_TORCH_BACKEND")
 
@@ -41,7 +41,7 @@ func jobEnvironmentFrom(environ []string) map[string]string {
 			continue
 		}
 		if slices.Contains(jobNetworkVariables, k) {
-			keepWithoutUserinfo(env, k, v)
+			keepWithoutCredentials(env, k, v)
 		} else if slices.Contains(jobBaseVariables, k) || strings.HasPrefix(k, "LC_") || slices.Contains(gpuRuntimeVariables, k) {
 			env[k] = v
 		}
@@ -54,35 +54,21 @@ func buildEnvironmentFrom(environ []string) map[string]string {
 	env := jobEnvironmentFrom(environ)
 	for _, entry := range environ {
 		if k, v, ok := strings.Cut(entry, "="); ok && slices.Contains(buildUVVariables, k) {
-			keepWithoutUserinfo(env, k, v)
+			keepWithoutCredentials(env, k, v)
 		}
 	}
 	return env
 }
 
-// keepWithoutUserinfo copies k unless any URL in v (space- or comma-separated,
-// optionally name=) carries user:pass@; that is logged once per name, without
-// the value.
-func keepWithoutUserinfo(env map[string]string, k, v string) {
-	if !hasURLUserinfo(v) {
+// keepWithoutCredentials treats any @ in v as credentials and drops k,
+// logging once per name without the value. This deliberately avoids parsing
+// proxy and uv URL formats, including scheme-relative and named URLs.
+func keepWithoutCredentials(env map[string]string, k, v string) {
+	if !strings.Contains(v, "@") {
 		env[k] = v
 		return
 	}
 	if _, seen := droppedCredentialLogged.LoadOrStore(k, true); !seen {
 		log.Printf("job environment: dropping worker %s because its URL contains credentials; pass it through run.env if a job needs it", k)
 	}
-}
-
-func hasURLUserinfo(v string) bool {
-	for _, field := range strings.FieldsFunc(v, func(r rune) bool { return r == ' ' || r == ',' || r == '\t' || r == '\n' }) {
-		_, rest, ok := strings.Cut(field, "://")
-		if !ok {
-			// Proxy variables may omit the scheme: user:pass@host:port.
-			rest = field
-		}
-		if authority, _, _ := strings.Cut(rest, "/"); strings.Contains(authority, "@") {
-			return true
-		}
-	}
-	return false
 }

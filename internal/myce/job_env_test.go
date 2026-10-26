@@ -166,6 +166,7 @@ func TestJobEnvironmentProxyAndCAVariables(t *testing.T) {
 	}
 	dropped := map[string]string{
 		"HTTP_PROXY": "http://proxyuser:proxy-secret@proxy.invalid:3128",
+		"http_proxy": "//proxyuser:proxy-secret@proxy.invalid:3128",
 		"all_proxy":  "proxyuser:proxy-secret@proxy.invalid:1080",
 	}
 	for k, v := range kept {
