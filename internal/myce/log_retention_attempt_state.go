@@ -65,13 +65,16 @@ func pruneAttemptState(dir string, now time.Time, age time.Duration) error {
 			result = errors.Join(result, err)
 			continue
 		}
-		if st.Job != nil || st.Result != nil || st.Pending != 0 || st.PID != 0 || st.LaunchPending || !validAttemptIdentity(st.Identity) {
+		if st.Job != nil || st.Result != nil || st.Pending != 0 || st.PID != 0 || st.LaunchPending || st.Identity != "" && !validAttemptIdentity(st.Identity) {
 			continue
 		}
 		// Docker custody and acknowledgement belong to its existing stopped-container
 		// collector; preserve evidence until that collector has finished successfully.
 		held := false
 		for _, suffix := range []string{".docker.json", ".docker-ack.json"} {
+			if st.Identity == "" {
+				continue
+			}
 			if _, err := os.Lstat(filepath.Join(dir, st.Identity+suffix)); err == nil {
 				held = true
 			} else if !errors.Is(err, os.ErrNotExist) {
@@ -90,6 +93,8 @@ func pruneAttemptState(dir string, now time.Time, age time.Duration) error {
 				owned = owned || n == st.Identity+suffix
 			}
 			owned = owned || strings.HasPrefix(n, st.Identity+"-") && strings.HasSuffix(n, ".cid")
+			owned = st.Identity != "" && owned
+			owned = owned || n == st.LaunchOutcome && filepath.Base(n) == n && strings.HasPrefix(n, "launch-") && strings.HasSuffix(n, ".outcome.json")
 			if !owned {
 				continue
 			}

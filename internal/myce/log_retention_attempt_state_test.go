@@ -83,3 +83,67 @@ func TestWorkerRetentionPrunesClearedAttemptStateAfterLogWindow(t *testing.T) {
 	assertPresent(ids["docker"]+".docker-evidence.json", false)
 	assertPresent("state-attempt-docker.json", false)
 }
+
+// Review regression: refused Docker jobs have no execution identity, and their
+// launch diagnostics use the job/attempt name rather than an execution identity.
+func TestWorkerRetentionPrunesAcknowledgedLaunchRefusals(t *testing.T) {
+	for _, docker := range []bool{false, true} {
+		t.Run(map[bool]string{false: "native", true: "docker"}[docker], func(t *testing.T) {
+			dir := t.TempDir()
+			clock := &fakeClock{now: time.Date(2026, 10, 26, 0, 0, 0, 0, time.UTC)}
+			root := &workerStore{dir: dir}
+			job := Job{ID: "refused", Attempt: 1}
+			job.Spec.Run.Docker = docker
+			store, err := newAttemptStore(root, job)
+			if err != nil {
+				t.Fatal(err)
+			}
+			cause := store.startFailure(job, launchRefused, errors.New("refused before launch"))
+			result := startFailureOutcome(Result{}, cause)
+			store.state.Result = &result
+			if err := store.save(); err != nil {
+				t.Fatal(err)
+			}
+			outcome := store.state.LaunchOutcome
+			if outcome == "" || docker && store.state.Identity != "" {
+				t.Fatal("bad refusal fixture")
+			}
+			for _, name := range []string{store.stateName, outcome} {
+				if err := os.Chtimes(filepath.Join(dir, name), clock.Now(), clock.Now()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			pass := func() {
+				t.Helper()
+				if err := workerRetention(dir, clock.Now(), DefaultLogRetention); err != nil {
+					t.Fatal(err)
+				}
+			}
+			clock.Advance(2 * DefaultLogRetention)
+			pass() // Result replay remains pending regardless of diagnostic age.
+			for _, name := range []string{store.stateName, outcome} {
+				if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+					t.Fatal("replay evidence removed", err)
+				}
+			}
+			store.state.Job, store.state.Result = nil, nil
+			if err := store.save(); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(filepath.Join(dir, store.stateName), clock.Now(), clock.Now()); err != nil {
+				t.Fatal(err)
+			}
+			pass() // Acknowledgement starts the retention window, not the refusal date.
+			if _, err := os.Stat(filepath.Join(dir, outcome)); err != nil {
+				t.Fatal(err)
+			}
+			clock.Advance(DefaultLogRetention)
+			pass()
+			for _, name := range []string{store.stateName, outcome} {
+				if _, err := os.Stat(filepath.Join(dir, name)); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("expired refusal %s retained: %v", name, err)
+				}
+			}
+		})
+	}
+}
