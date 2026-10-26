@@ -71,30 +71,37 @@ func submissionFailure(expired bool) *HTTPError {
 // Called under the update lock before lookup, from maintenance, and before
 // persistence so the retained answer includes every committed job mutation.
 func (q *Queue) maintainSubmissions() {
+	if q.records == nil {
+		q.rebuildRecords()
+	}
 	now := q.clock.Now()
-	for digest, record := range q.s.Submissions {
-		var expires time.Time
-		switch record.Kind {
-		case submissionReservation:
-			expires = record.Created.Add(submissionRetention)
-		case submissionBinding:
-			if j := q.s.Jobs[record.JobID]; j != nil {
-				record.Job = j
-				continue // The binding lives at least as long as the job.
+	for id := range q.records.jobs {
+		if digest := q.records.bindings[id]; digest != "" {
+			record := q.touchSubmission(digest)
+			if record == nil || record.Kind != submissionBinding {
+				continue
 			}
-			if record.RemovedAt == nil {
+			if j := q.s.Jobs[id]; j != nil {
+				record.Job = j
+				record.RemovedAt = nil
+			} else if record.RemovedAt == nil {
 				removed := now
 				record.RemovedAt = &removed
+				q.records.keys.set(digest, removed.Add(submissionRetention))
 			}
-			expires = record.RemovedAt.Add(submissionRetention)
-		default:
-			continue
-		}
-		// The full record is retained on [creation/removal, expiry).
-		if !now.Before(expires) {
-			q.s.Submissions[digest] = &submissionRecord{Kind: submissionExpired}
 		}
 	}
+	for _, digest := range q.records.keys.due(now) {
+		record := q.s.Submissions[digest]
+		if record == nil {
+			continue
+		}
+		if record.Kind == submissionBinding && q.s.Jobs[record.JobID] != nil {
+			continue
+		}
+		q.putSubmission(digest, &submissionRecord{Kind: submissionExpired})
+	}
+
 }
 
 // The caller holds the queue's update lock. CancelledAt remains set after a
@@ -103,7 +110,9 @@ func (q *Queue) existingSubmission(s Spec, fingerprint string) (*Job, error) {
 	if s.SubmissionKey == "" {
 		return nil, nil
 	}
-	record := q.s.Submissions[submissionDigest(s.Project, s.SubmissionKey)]
+	digest := submissionDigest(s.Project, s.SubmissionKey)
+	q.expireSubmission(digest)
+	record := q.touchSubmission(digest)
 	if record == nil {
 		return nil, nil
 	}
@@ -113,7 +122,7 @@ func (q *Queue) existingSubmission(s Spec, fingerprint string) (*Job, error) {
 	if record.Kind == submissionReservation {
 		cancelled := *record.Created
 		j := &Job{ID: ID(), Spec: Spec{Project: record.Project, SubmissionKey: record.Key}, State: "cancelled", CancelledAt: &cancelled, Queued: cancelled, FinishedAt: &cancelled, Reason: "cancelled before submission"}
-		q.s.Jobs[j.ID] = j
+		q.putJob(j.ID, j)
 		record.Kind = submissionBinding
 		record.JobID = j.ID
 		record.Fingerprint = fingerprint
@@ -129,4 +138,23 @@ func (q *Queue) existingSubmission(s Spec, fingerprint string) (*Job, error) {
 	}
 	copy := cloneJob(j)
 	return &copy, nil
+}
+
+// Lookup observes exact retention even while a large background expiry wave is
+// drained in small transactions. This uses only the requested record.
+func (q *Queue) expireSubmission(digest string) {
+	r := q.s.Submissions[digest]
+	if r == nil {
+		return
+	}
+	var at *time.Time
+	if r.Kind == submissionReservation {
+		at = r.Created
+	}
+	if r.Kind == submissionBinding && q.s.Jobs[r.JobID] == nil {
+		at = r.RemovedAt
+	}
+	if at != nil && !q.clock.Now().Before(at.Add(submissionRetention)) {
+		q.putSubmission(digest, &submissionRecord{Kind: submissionExpired})
+	}
 }

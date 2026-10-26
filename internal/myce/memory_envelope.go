@@ -298,7 +298,7 @@ func (q *Queue) exploratoryMemory(j *Job, m *Machine) (float64, string) {
 			return 0, "exploratory first run blocked by an unconfirmed memory-heavy release"
 		}
 	}
-	for _, running := range q.s.Jobs {
+	for _, running := range q.liveJobs() {
 		owner := allocationMachine(q.s.Machines[running.Machine], running.AllocatedDevices)
 		if owner == nil || hostID(owner) != hostID(m) || running.ReleaseConfirmed || (running.State != "running" && running.State != "stopping") {
 			continue

@@ -21,7 +21,7 @@ func maintenanceCLIWorker(id string) myce.Machine {
 }
 
 func TestHostMaintenancePlacementCLI(t *testing.T) {
-	q, _, _, _ := waitQueue(t)
+	q, clock, _, _ := waitQueue(t)
 	if _, err := q.Checkin(myce.Checkin{Machine: maintenanceCLIWorker("worker")}); err != nil {
 		t.Fatal(err)
 	}
@@ -44,6 +44,7 @@ func TestHostMaintenancePlacementCLI(t *testing.T) {
 		if err := hostMaintenanceCommand(context.Background(), []string{"status", "host", "--queue", server.URL}, &bytes.Buffer{}); err != nil {
 			t.Fatal(err)
 		}
+		clock.advance(time.Second) // Global status may lag by one cache lifetime.
 		output, _, err := captureUsageOutput(t, []string{"status", "--queue", server.URL, "--token", "test-only"})
 		if err != nil || strings.Contains(output, "last-resort placement") != enabled {
 			t.Fatal("CLI status hid placement policy", output, err)

@@ -41,7 +41,7 @@ func reserveSubmission(t *testing.T, q *Queue, project, key string) {
 			q.s.Submissions = map[string]*submissionRecord{}
 		}
 		created := q.clock.Now()
-		q.s.Submissions[submissionDigest(project, key)] = &submissionRecord{Kind: submissionReservation, Project: project, Key: key, Created: &created}
+		q.putSubmission(submissionDigest(project, key), &submissionRecord{Kind: submissionReservation, Project: project, Key: key, Created: &created})
 		return nil
 	}); err != nil {
 		t.Fatal(err)
@@ -136,7 +136,7 @@ func TestSubmissionRetention(t *testing.T) {
 					t.Fatal("live job binding expired")
 				}
 				// There is no product job-removal path. Model future removal under the update lock.
-				if err := q.update(func() error { delete(q.s.Jobs, original.ID); return nil }); err != nil {
+				if err := q.update(func() error { q.deleteJob(original.ID); return nil }); err != nil {
 					t.Fatal(err)
 				}
 			}

@@ -125,7 +125,7 @@ func (q *Queue) capReasonFor(j *Job, target *Machine) string {
 	p := q.s.Policies[j.Spec.Project]
 	if p.MaxConcurrent > 0 {
 		count := 0
-		for _, r := range q.s.Jobs {
+		for _, r := range q.liveJobs() {
 			if r.ID != j.ID && r.Spec.Project == j.Spec.Project && (r.State == "running" || r.State == "stopping") {
 				count++
 			}
@@ -154,7 +154,7 @@ func (q *Queue) capReasonFor(j *Job, target *Machine) string {
 			total += m.TotalMemoryGB
 		}
 	}
-	for _, r := range q.s.Jobs {
+	for _, r := range q.liveJobs() {
 		if r.Spec.Project == j.Spec.Project && r.Spec.Priority == "experiment" && (r.State == "running" || r.State == "stopping") {
 			count++
 			used += r.Spec.Needs.MemoryGB
@@ -313,7 +313,7 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 			}
 		}
 		copy := *m // Projection changes only this scalar memory value; inventory stays read-only.
-		for _, r := range q.s.Jobs {
+		for _, r := range q.liveJobs() {
 			if batchOnTarget(r, m) && (r.State == "running" || r.State == "stopping") {
 				copy.FreeMemoryGB += r.Spec.Needs.MemoryGB
 			}
@@ -322,7 +322,7 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 		// Reuse the same read-only planning pass for every projected position.
 		sets = append(sets, q.buildCandidates(&copy))
 	}
-	for _, j := range q.s.Jobs {
+	for _, j := range q.liveJobs() {
 		if j.State != "queued" {
 			continue
 		}
@@ -351,7 +351,7 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 			}
 		}
 		busy := false
-		for _, r := range q.s.Jobs {
+		for _, r := range q.liveJobs() {
 			if batchOnTarget(r, live) && (r.State == "running" || r.State == "stopping") {
 				busy = true
 			}
@@ -437,7 +437,7 @@ func (q *Queue) fairScore(j *Job, m *Machine) float64 {
 		return q.candidates(m).score(j, m)
 	}
 	projects := map[string]bool{j.Spec.Project: true}
-	for _, r := range q.s.Jobs {
+	for _, r := range q.liveJobs() {
 		if dependencyReady(r) && r.State == "queued" && q.comparePriority(r.Spec, j.Spec) == 0 && fairResourceFamily(r.Spec) == fairResourceFamily(j.Spec) && q.capReason(r) == "" {
 			projects[r.Spec.Project] = true
 		}

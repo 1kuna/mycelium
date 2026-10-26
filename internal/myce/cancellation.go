@@ -73,11 +73,12 @@ func (q *Queue) CancelSubmission(project, key string) (Cancellation, error) {
 			q.s.Submissions = map[string]*submissionRecord{}
 		}
 		digest := submissionDigest(project, key)
-		record := q.s.Submissions[digest]
+		q.expireSubmission(digest)
+		record := q.touchSubmission(digest)
 		if record == nil {
 			now := q.clock.Now()
 			record = &submissionRecord{Kind: submissionReservation, Project: project, Key: key, Created: &now, CancelledAt: &now}
-			q.s.Submissions[digest] = record
+			q.putSubmission(digest, record)
 		}
 		out = Cancellation{Project: project, SubmissionKey: &key, WillNotRun: true, Release: releaseState("not_applicable"), State: "absent"}
 		if record.Kind == submissionExpired {
@@ -92,7 +93,7 @@ func (q *Queue) CancelSubmission(project, key string) (Cancellation, error) {
 			out.AcknowledgedAt = &at
 			return nil
 		}
-		j := q.s.Jobs[record.JobID]
+		j := q.touchJob(record.JobID)
 		removed := j == nil
 		if removed {
 			j = record.Job
@@ -110,6 +111,7 @@ func (q *Queue) CancelSubmission(project, key string) (Cancellation, error) {
 // Called only under update. Keep terminal state/results, but persist exclusion
 // even for failed jobs that an operator loss refund could otherwise requeue.
 func (q *Queue) cancelJob(j *Job) {
+	q.touchJob(j.ID)
 	for _, child := range q.cancellationMembers(j) {
 		if !cancelled(child) {
 			q.cancelJob(child)
@@ -271,12 +273,20 @@ func (q *Queue) confirmPreviousCopies(c Checkin) {
 }
 
 func (q *Queue) retainedJob(id string) *Job {
-	if j := q.s.Jobs[id]; j != nil {
+	if j := q.touchJob(id); j != nil {
 		return j
 	}
-	for _, record := range q.s.Submissions {
-		if record.Kind == submissionBinding && record.JobID == id {
-			return record.Job
+	if q.records != nil && q.records.updating {
+		if key := q.records.bindings[id]; key != "" {
+			if r := q.touchSubmission(key); r != nil {
+				return r.Job
+			}
+		}
+	} else {
+		for _, record := range q.s.Submissions {
+			if record.Kind == submissionBinding && record.JobID == id {
+				return record.Job
+			}
 		}
 	}
 	return nil

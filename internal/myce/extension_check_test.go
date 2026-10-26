@@ -50,7 +50,7 @@ func TestExtensionCheckAutoMemory(t *testing.T) {
 			submitted := false
 			client := Client{URL: "http://fixture", HTTP: &http.Client{Transport: clientTestTransport(func(req *http.Request) (*http.Response, error) {
 				switch req.URL.Path {
-				case "/api/status":
+				case "/api/inspection":
 					return response(Snapshot{Machines: []*Machine{&m}})
 				case "/api/extensions":
 					return response(nil)

@@ -314,7 +314,7 @@ func (q *Queue) AddExtension(e Extension) error {
 			return frozenExtensionConflict(k, old.Digest, checked.Digest)
 		}
 		q.s.Extensions[k] = checked
-		for _, j := range q.s.Jobs {
+		for _, j := range q.liveJobs() {
 			if j.State == "queued" && j.Spec.extensionJob() && len(j.Extensions) == 0 {
 				j.Extensions, _ = q.resolveExtensions(&j.Spec)
 			}

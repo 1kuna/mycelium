@@ -30,7 +30,7 @@ func (q *Queue) machineTargets(m *Machine) []*Machine {
 	for _, d := range m.Devices {
 		target := d.machine(*m)
 		reserved := 0.0
-		for _, j := range q.s.Jobs {
+		for _, j := range q.liveJobs() {
 			if !j.ReleaseConfirmed && (j.State == "running" || j.State == "stopping") && batchOnTarget(j, &target) {
 				reserved += j.Spec.Needs.MemoryGB
 			}
@@ -115,7 +115,7 @@ func (q *Queue) checkinMachineAttempts(m *Machine, reports []AttemptReport, prog
 		owned := j != nil && j.Machine == m.ID && j.Session == a.Session && j.Attempt == a.Attempt && j.State == "stopping"
 		cleanup = cleanup || a.Stop && a.Kill && !owned
 	}
-	for _, j := range q.s.Jobs {
+	for _, j := range q.liveJobs() {
 		if j.Machine != m.ID || j.Session != m.Session || seen[jobKey(*j)] {
 			continue
 		}
@@ -135,7 +135,7 @@ func (q *Queue) checkinMachineAttempts(m *Machine, reports []AttemptReport, prog
 	// never reaching its empty collection and fresh-session handoff.
 	if m.Leaving {
 		active := len(reports) > 0
-		for _, j := range q.s.Jobs {
+		for _, j := range q.liveJobs() {
 			active = active || j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping") && !j.ReleaseConfirmed
 		}
 		if !active && len(q.modelPlan(m.ID)) == 0 {
@@ -197,7 +197,7 @@ func (q *Queue) machineDeviceStatus(copy, m *Machine) {
 				break
 			}
 		}
-		for _, j := range q.s.Jobs {
+		for _, j := range q.liveJobs() {
 			if j.Machine == m.ID && !j.ReleaseConfirmed && (j.State == "running" || j.State == "stopping") && slices.Contains(j.AllocatedDevices, d.ID) {
 				d.Attempts = append(d.Attempts, Execution{ID: j.ID, Attempt: j.Attempt})
 			}

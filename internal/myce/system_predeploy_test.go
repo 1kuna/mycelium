@@ -94,7 +94,7 @@ func TestPreDeployFullSystem(t *testing.T) {
 	snapshot := func() Snapshot {
 		t.Helper()
 		var s Snapshot
-		call("GET", "/api/status", nil, &s)
+		call("GET", "/api/inspection", nil, &s)
 		for _, j := range s.Jobs {
 			if old, ok := ledger[j.ID]; ok && j.State != old {
 				t.Fatalf("terminal job %s changed from %s to %s", j.ID, old, j.State)
@@ -427,16 +427,21 @@ echo FINISHED
 		}
 		return true
 	})
-	clock.Advance(2 * time.Minute)
-	graceEnd := clock.Now()
-	wait("healthy inventory after restart grace", func() bool {
-		for _, m := range snapshot().Machines {
-			if m.LastSeen.Before(graceEnd) {
-				return false
+	// Expire recovery while healthy peers keep checking in. One two-minute
+	// jump would fabricate worker silence beyond every loss timeout, and the
+	// first returning peer could cause another healthy attempt to be lost.
+	for elapsed := time.Duration(0); elapsed < 2*time.Minute; elapsed += 5 * time.Second {
+		clock.Advance(5 * time.Second)
+		graceEnd := clock.Now()
+		wait("healthy inventory during restart grace", func() bool {
+			for _, m := range snapshot().Machines {
+				if m.LastSeen.Before(graceEnd) {
+					return false
+				}
 			}
-		}
-		return true
-	})
+			return true
+		})
+	}
 
 	// Rename the shared backing directory: every mount alias becomes unavailable.
 	// Running commands keep their assignment, queued work cannot start/preempt,
@@ -663,7 +668,7 @@ func TestPreDeployModelCopyFaults(t *testing.T) {
 		t.Helper()
 		must(client.Call(context.Background(), method, path, in, out))
 	}
-	snapshot := func() Snapshot { t.Helper(); var s Snapshot; call("GET", "/api/status", nil, &s); return s }
+	snapshot := func() Snapshot { t.Helper(); var s Snapshot; call("GET", "/api/inspection", nil, &s); return s }
 	wait := func(label string, condition func() bool) {
 		t.Helper()
 		deadline := time.NewTimer(testWaitTimeout)

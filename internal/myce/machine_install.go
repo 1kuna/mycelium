@@ -337,8 +337,8 @@ func convertWorkerInstall(ctx context.Context, c ServiceConfig, executable strin
 	if status.Policy.Mode != "disabled" || !(status.MigrationReady || status.Quiescent && status.Healthy) {
 		return migrationError("machine_migration_incomplete", "host must be disabled, fresh and fully settled")
 	}
-	var snapshot Snapshot
-	if err := client.Call(ctx, "GET", "/api/status", nil, &snapshot); err != nil {
+	snapshot, err := client.inspectionSnapshot(ctx)
+	if err != nil {
 		return err
 	}
 	catalogData, err := machineWorkerCatalog(c.ModelCatalog, snapshot)
@@ -468,8 +468,8 @@ func convertWorkerInstall(ctx context.Context, c ServiceConfig, executable strin
 		if source.Name != c.Name {
 			continue
 		}
-		var snap Snapshot
-		if err = client.Call(ctx, "GET", "/api/status", nil, &snap); err != nil {
+		snap, err := client.inspectionSnapshot(ctx)
+		if err != nil {
 			return err
 		}
 		for _, m := range snap.Machines {
@@ -541,8 +541,8 @@ func RollbackMachineInstall(ctx context.Context, config string, dry bool, comman
 	if err != nil {
 		return err
 	}
-	var snapshot Snapshot
-	if err = client.Call(ctx, "GET", "/api/status", nil, &snapshot); err != nil {
+	snapshot, err := client.inspectionSnapshot(ctx)
+	if err != nil {
 		return err
 	}
 	if err = inspectMigrationSpool(c.State, snapshot); err != nil {

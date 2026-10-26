@@ -31,8 +31,8 @@ func TestR1MixedHostSteersCPUAndPreservesGPUBackfill(t *testing.T) {
 					// Exercise both ID tie-breaks as well as both arrival/check-in orders.
 					if err := q.update(func() error {
 						a, b := q.s.Jobs[cj.ID], q.s.Jobs[gj.ID]
-						delete(q.s.Jobs, a.ID)
-						delete(q.s.Jobs, b.ID)
+						q.deleteJob(a.ID)
+						q.deleteJob(b.ID)
 						a.ID, b.ID = "a", "z"
 						if !cpuIDFirst {
 							a.ID, b.ID = b.ID, a.ID

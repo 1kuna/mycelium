@@ -14,6 +14,24 @@ import (
 // time. Fast, unsampled operations do no clock reads or stack inspection.
 type queueHoldSampler struct{ count atomic.Uint64 }
 
+func readWallStart(observer func(string, time.Duration, time.Duration)) time.Time {
+	if observer == nil {
+		return time.Time{}
+	}
+	return time.Now()
+}
+
+func observeRead(observer func(string, time.Duration, time.Duration), id string, started, locked time.Time) {
+	if observer == nil {
+		return
+	}
+	kind := "status"
+	if id != "" {
+		kind = "job"
+	}
+	observer(kind, locked.Sub(started), time.Since(locked))
+}
+
 func (s *queueHoldSampler) start() time.Time {
 	if (s.count.Add(1)-1)%16 == 0 {
 		return time.Now()
@@ -45,6 +63,7 @@ func logQueueHold(duration time.Duration, operation string, fn func() error) {
 // are sampled independently above.
 type queueUpdateTiming struct {
 	started   time.Time
+	lockedAt  time.Time
 	mutexWait time.Duration
 	sqlCommit time.Duration
 }
@@ -61,6 +80,7 @@ func (t *queueUpdateTiming) lock(mu *sync.RWMutex) {
 	started := time.Now()
 	mu.Lock()
 	t.mutexWait = time.Since(started)
+	t.lockedAt = time.Now()
 }
 
 func (t *queueUpdateTiming) commit(tx *sql.Tx) error {
@@ -80,5 +100,12 @@ func (t *queueUpdateTiming) logLaunch(ok bool) {
 	if duration >= defaultWorkerInterval/2 {
 		log.Printf("event=slow_launch_authorization path=/api/workers/launch duration_ms=%.3f mutex_wait_ms=%.3f sqlite_commit_ms=%.3f ok=%t",
 			float64(duration)/float64(time.Millisecond), float64(t.mutexWait)/float64(time.Millisecond), float64(t.sqlCommit)/float64(time.Millisecond), ok)
+	}
+}
+
+// Optional internal observer used by the queue-history burst regression.
+func (t *queueUpdateTiming) observe(fn func(time.Duration, time.Duration)) {
+	if fn != nil {
+		fn(t.mutexWait, time.Since(t.lockedAt))
 	}
 }

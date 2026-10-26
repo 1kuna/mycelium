@@ -15,7 +15,9 @@ func (q *Queue) refundOperatorStop(r Result) bool {
 	if !r.OperatorStop {
 		return false
 	}
-	j := q.s.Jobs[r.ID]
+	// A delayed exact-attempt stop can refund an already released terminal job.
+	// Capture it before changing loss/history fields, including pending releases.
+	j := q.touchJob(r.ID)
 	if j == nil {
 		return false
 	}

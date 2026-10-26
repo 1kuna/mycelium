@@ -96,7 +96,7 @@ func (q *Queue) validatePieceSource(s Spec) error {
 }
 
 func (q *Queue) maintainPieceDependencies() {
-	for _, j := range q.s.Jobs {
+	for _, j := range q.liveJobs() {
 		if j.Spec.After == nil {
 			continue
 		}

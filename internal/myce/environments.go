@@ -1248,7 +1248,7 @@ func (q *Queue) reconcileEnvironments(m *Machine) error {
 		if r.State != "failed" {
 			continue
 		}
-		for _, j := range q.s.Jobs {
+		for _, j := range q.liveJobs() {
 			if j.State != "queued" || !q.placementAllowed(j, m) || environmentKey(j, m) != r.Key {
 				continue
 			}
@@ -1347,7 +1347,7 @@ func (q *Queue) AppendEnvironmentLog(l EnvironmentLog) error {
 	if _, e = tx.Exec("INSERT OR IGNORE INTO environment_build_logs(machine,session,key,offset,text) VALUES(?,?,?,?,?)", l.Machine, l.Session, l.Key, l.Offset, l.Text); e != nil {
 		return e
 	}
-	for _, j := range q.s.Jobs {
+	for _, j := range q.liveJobs() {
 		if j.State == "queued" && environmentKey(j, m) == l.Key {
 			if e = insertEnvironmentJobLog(tx, j, l); e != nil {
 				return e

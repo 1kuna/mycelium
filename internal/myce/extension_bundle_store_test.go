@@ -202,7 +202,7 @@ func TestExtensionBundleStoreInterruptedMigrationAndRecipes(t *testing.T) {
 	}
 	expected := cloneJob(reopened.s.Jobs[j.ID])
 	sentinel := errors.New("abort")
-	if err := reopened.update(func() error { delete(reopened.s.Jobs, j.ID); return sentinel }); !errors.Is(err, sentinel) {
+	if err := reopened.update(func() error { reopened.deleteJob(j.ID); return sentinel }); !errors.Is(err, sentinel) {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(expected, cloneJob(reopened.s.Jobs[j.ID])) {
@@ -214,7 +214,7 @@ func TestExtensionBundleStoreInterruptedMigrationAndRecipes(t *testing.T) {
 	if err := reopened.update(func() error {
 		reopened.s.Submissions = map[string]*submissionRecord{"retained": {Kind: submissionBinding, JobID: j.ID, Job: reopened.s.Jobs[j.ID]}}
 		delete(reopened.s.Extensions, extensionKey(e))
-		delete(reopened.s.Jobs, j.ID)
+		reopened.deleteJob(j.ID)
 		reopened.s.JobInputUploads = map[string]time.Time{ref.SHA256: clock.Now()}
 		return nil
 	}); err != nil {

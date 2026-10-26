@@ -1,7 +1,6 @@
 package myce
 
 import (
-	"context"
 	"sort"
 	"strings"
 )
@@ -29,9 +28,6 @@ func deviceReasonDiagnostic(reason string) string {
 
 func (q *Queue) publicSnapshot() (Snapshot, error) {
 	s, err := q.snapshot(true)
-	if err == nil {
-		s.FileStore = q.fileStoreStatus(context.Background())
-	}
 	for i := range s.LoadedModels {
 		s.LoadedModels[i].EnvironmentRecipe = nil
 		s.LoadedModels[i].Error = ceilingDiagnostic(s.LoadedModels[i].Error, "model load or unload failed")
@@ -122,7 +118,7 @@ func safeAvailabilityReason(reason string) string {
 	}
 }
 
-// Called under the queue lock on snapshot copies, never on persisted jobs.
+// Called on snapshot copies or a detached read view, never on persisted jobs.
 func (q *Queue) statusEligibility(j *Job) {
 	j.EligibleHosts, j.EligibleUnrestricted, j.EligibleUnknownMachines = nil, false, nil
 	if terminal(j.State) {
@@ -185,30 +181,18 @@ func safeDockerHoldStatus(value string) bool {
 	return false
 }
 
-// Called after eligibility/reasons are projected under the read lock. Drop private
-// payload before cloning: frozen files dominate retained history, not status.
 func statusJobCopy(job *Job) Job {
-	value := *job
+	j := statusJobValue(job)
+	return cloneJob(&j)
+}
+
+// Final redaction; nested fields remain borrowed. Observation projection already
+// owns its detached inputs; other callers use statusJobCopy before publishing.
+func statusJobValue(job *Job) Job {
+	value := statusJobInputs(job)
 	j := &value
 	j.ExecutionCause = safeRuntimeCause(j.ExecutionCause)
 	j.CleanupCause = safeRuntimeCause(j.CleanupCause)
-	// Status is a summary, never a copy of a submitted command, environment,
-	// program arguments, extension files, or local filesystem paths.
-	spec := Spec{AllowedMachines: j.Spec.AllowedMachines, Name: j.Spec.Name, Project: j.Spec.Project, Priority: j.Spec.Priority, Class: j.Spec.Class, Kind: j.Spec.Kind, Resumable: j.Spec.Resumable, Deadline: j.Spec.Deadline, StartBy: j.Spec.StartBy}
-	if j.Spec.Program != nil {
-		spec.Program = &Program{Type: j.Spec.Program.Type}
-	}
-	if j.Spec.ExtensionCheck != nil {
-		spec.ExtensionCheck = &ExtensionCheckRequest{Work: j.Spec.ExtensionCheck.Work}
-	}
-	spec.Workload = j.Spec.Workload
-	spec.Needs = j.Spec.Needs
-	j.Spec = spec
-	j.Extensions = nil
-	j.EnvironmentRecipes = nil
-	j.SidecarEnvironmentRecipes = nil
-	j.EnvironmentFailureLog = ""
-	j.Checkpoint = ""
 	if strings.HasPrefix(j.Reason, "hypha waiting: ") {
 		j.Reason = "hypha waiting: " + availabilityWords(strings.TrimPrefix(j.Reason, "hypha waiting: "))
 	}
@@ -226,5 +210,29 @@ func statusJobCopy(job *Job) Job {
 			j.Reason = ceilingDiagnostic(j.Reason, "execution failed")
 		}
 	}
-	return cloneJob(j)
+	return *j
+}
+
+// Omit execution payload from captures that need only identity and lifecycle
+// diagnostics. Keep raw diagnostic inputs until the final redaction pass:
+// sanitizing an already-sanitized reason can erase the established wording.
+// The returned value borrows fields until the caller deep-copies it.
+func statusJobInputs(job *Job) Job {
+	j := *job
+	spec := Spec{AllowedMachines: j.Spec.AllowedMachines, Name: j.Spec.Name, Project: j.Spec.Project, Priority: j.Spec.Priority, Class: j.Spec.Class, Kind: j.Spec.Kind, Resumable: j.Spec.Resumable, Deadline: j.Spec.Deadline, StartBy: j.Spec.StartBy}
+	if j.Spec.Program != nil {
+		spec.Program = &Program{Type: j.Spec.Program.Type}
+	}
+	if j.Spec.ExtensionCheck != nil {
+		spec.ExtensionCheck = &ExtensionCheckRequest{Work: j.Spec.ExtensionCheck.Work}
+	}
+	spec.Workload = j.Spec.Workload
+	spec.Needs = j.Spec.Needs
+	j.Spec = spec
+	j.Extensions = nil
+	j.EnvironmentRecipes = nil
+	j.SidecarEnvironmentRecipes = nil
+	j.EnvironmentFailureLog = ""
+	j.Checkpoint = ""
+	return j
 }

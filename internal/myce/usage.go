@@ -1,9 +1,11 @@
 package myce
 
 import (
+	"database/sql"
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -57,7 +59,7 @@ type usageSample struct {
 func (q *Queue) deviceUsage(m *Machine) []usageSample {
 	rows := []usageSample{}
 	active, allocated := 0, 0
-	for _, j := range q.s.Jobs {
+	for _, j := range q.liveJobs() {
 		if (batchOnTarget(j, m) || m.Devices != nil && m.GPU == "cpu" && j.Machine == m.ID && j.Spec.Needs.cpuOnly()) && (j.State == "running" || j.State == "stopping") {
 			busy, fair := 0.0, 1.0
 			if j.Spec.Needs.cpuOnly() {
@@ -264,24 +266,46 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
 	if e = timing.commit(tx); e != nil {
 		return e
 	}
-	q.persisted = next
+	if q.persisted == nil {
+		q.persisted = map[string][]byte{}
+	}
+	for key, value := range next {
+		if value == nil {
+			delete(q.persisted, key)
+			delete(q.records.catalog, key)
+		} else {
+			q.persisted[key] = value
+			if key == "state" || strings.HasPrefix(key, "extensions/") || strings.HasPrefix(key, "work_observations/") {
+				q.records.catalog[key] = true
+			}
+		}
+	}
 	return nil
 }
 func (q *Queue) Usage(since time.Time) (UsageReport, error) {
 	if e := q.Tick(); e != nil {
 		return UsageReport{}, e
 	}
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	return q.usageLocked(since)
+	return q.usageSnapshot(since)
 }
-func (q *Queue) usageLocked(since time.Time) (UsageReport, error) {
+
+func (q *Queue) usageSnapshot(since time.Time) (UsageReport, error) {
+	q.mu.RLock()
+	v := &Queue{clock: observationClock{q.clock.Now()}, s: state{
+		Preemptions:      append([]Preemption(nil), q.s.Preemptions...),
+		ProductionStarts: append([]ProductionStart(nil), q.s.ProductionStarts...),
+	}}
+	q.mu.RUnlock()
+	return v.readUsage(q.usageReader, since)
+}
+
+func (q *Queue) readUsage(db *sql.DB, since time.Time) (UsageReport, error) {
 	now := q.clock.Now()
 	out := UsageReport{Since: since, Until: now, Projects: []UsageSummary{}, Machines: []UsageSummary{}, Daily: []DailyUsage{}, Preemptions: []Preemption{}, ProductionStarts: []ProductionStart{}}
 	if since.After(now) {
 		return out, fmt.Errorf("since must precede current time")
 	}
-	rows, e := q.db.Query(`SELECT at,span,machine,device,project,job,model,busy,idle,pinned,memory_seconds,observed FROM usage_samples WHERE at+span>? AND at<?`, since.Unix(), now.Unix()+1)
+	rows, e := db.Query(`SELECT at,span,machine,device,project,job,model,busy,idle,pinned,memory_seconds,observed FROM usage_samples WHERE at+span>? AND at<?`, since.Unix(), now.Unix()+1)
 	if e != nil {
 		return out, e
 	}

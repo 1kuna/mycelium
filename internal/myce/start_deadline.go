@@ -56,7 +56,7 @@ func (q *Queue) startWaitingReason(j *Job) string {
 // Expire before planning any new reclaim or assignment. Release custody is independent.
 func (q *Queue) maintainStartDeadlines() {
 	now := q.clock.Now()
-	for _, j := range q.s.Jobs {
+	for _, j := range q.liveJobs() {
 		if j.Spec.Priority == "production" && j.Spec.StartBy == nil && dependencyReady(j) && !terminal(j.State) {
 			deadline := j.Queued.Add(ProductionStartTimeout)
 			j.Spec.StartBy = &deadline

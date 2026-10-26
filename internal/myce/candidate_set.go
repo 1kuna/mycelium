@@ -31,7 +31,7 @@ func (q *Queue) candidates(m *Machine, scans ...*placementScan) *candidateSet {
 func (q *Queue) buildCandidates(m *Machine) *candidateSet {
 	s := &candidateSet{q: q, m: m, scores: map[string]float64{}, actives: map[string]float64{}}
 	s.resources = map[batchResourceKey]batchResourceRoom{}
-	for _, j := range q.s.Jobs {
+	for _, j := range q.liveJobs() {
 		if candidate := q.batchCandidateWithResources(j, m, s.resources); candidate != nil {
 			s.jobs = append(s.jobs, candidate)
 		}

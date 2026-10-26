@@ -122,7 +122,7 @@ func TestMachineInstallAutomaticPreviewWithoutQueueRegistration(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/hosts/spark/maintenance":
 			json.NewEncoder(w).Encode(HostMaintenanceStatus{Policy: HostMaintenance{Mode: "disabled"}, Healthy: true, Quiescent: true})
-		case "/api/status":
+		case "/api/inspection":
 			json.NewEncoder(w).Encode(Snapshot{Machines: []*Machine{}})
 		default:
 			t.Error("unexpected queue request", r.URL.Path)

@@ -271,7 +271,7 @@ func cudaKernelFault(d MachineDevice, line string) string {
 
 // Called inside Checkin's existing transaction; all kernel I/O stays in workers.
 func (q *Queue) quarantineDeviceAttempts(m *Machine) {
-	for _, j := range q.s.Jobs {
+	for _, j := range q.liveJobs() {
 		if j.Machine != m.ID || j.Session != m.Session || j.State != "running" || j.Spec.Needs.cpuOnly() || cancelled(j) {
 			continue
 		}

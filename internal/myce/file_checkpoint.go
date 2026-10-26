@@ -97,7 +97,7 @@ func (q *Queue) publishCheckpoint(ctx context.Context, p checkpointPublication) 
 		return errors.New("checkpoint generation does not match saved bytes")
 	}
 	return q.update(func() error {
-		j := q.s.Jobs[p.ID]
+		j := q.touchJob(p.ID)
 		if j == nil || !j.FileTransport || !j.Spec.Resumable || terminal(j.State) || cancelled(j) {
 			return ErrStale
 		}

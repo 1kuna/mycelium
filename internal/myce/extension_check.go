@@ -57,8 +57,8 @@ func CheckExtension(ctx context.Context, root string, e Extension, platform, dev
 	defer unlock()
 	// Check work uses the configured queue and only this enrolled local worker.
 	// Absolute prepared paths are valid only on this exact target/host/device.
-	var snapshot Snapshot
-	if err = c.Call(ctx, "GET", "/api/status", nil, &snapshot); err != nil {
+	snapshot, err := c.inspectionSnapshot(ctx)
+	if err != nil {
 		return reports, err
 	}
 	var selected *Machine

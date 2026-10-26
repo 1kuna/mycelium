@@ -680,7 +680,8 @@ func TestModelReadyIdleReloadStatusFakeClock(t *testing.T) {
 	api := API{Queue: q, Token: "test"}.Handler()
 	status := func() Snapshot {
 		t.Helper()
-		req := httptest.NewRequest("GET", "/api/status", nil)
+		// Inspect the exact idle boundary independently of observation staleness.
+		req := httptest.NewRequest("GET", "/api/inspection", nil)
 		req.Header.Set("Authorization", "Bearer test")
 		response := httptest.NewRecorder()
 		api.ServeHTTP(response, req)

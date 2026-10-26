@@ -268,7 +268,7 @@ func m4InstallFixtureFor(t *testing.T, spark bool) ([]ServiceConfig, ServiceConf
 		}
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/status" {
+		if r.URL.Path == "/api/inspection" {
 			machines := []*Machine{}
 			for _, c := range src {
 				m := &Machine{ID: c.Name, HostID: c.HostID, Gone: true, Replacement: &MachineReplacement{Machine: c.HostID, Device: c.Device}}

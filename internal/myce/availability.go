@@ -264,7 +264,7 @@ func (q *Queue) machineLimitReason(m *Machine) string {
 	host := hostID(m)
 	count := 0
 	seen := map[string]bool{}
-	for _, j := range q.s.Jobs {
+	for _, j := range q.liveJobs() {
 		if (j.State == "running" || j.State == "stopping") && q.s.Machines[j.Machine] != nil && hostID(q.s.Machines[j.Machine]) == host {
 			count++
 			seen[releaseKey(HostRelease{Job: j.ID, Machine: j.Machine, Session: j.Session, Attempt: j.Attempt})] = true
@@ -289,7 +289,7 @@ func (q *Queue) withdrawUnavailable(m *Machine) {
 	if !availabilityBlocked(m) {
 		return
 	}
-	for _, j := range q.s.Jobs {
+	for _, j := range q.liveJobs() {
 		if j.Machine == m.ID && j.Session == m.Session && j.State == "running" {
 			reason := "capacity unavailable"
 			if a := machineAvailability(m); a != nil {
