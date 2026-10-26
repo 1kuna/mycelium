@@ -1739,6 +1739,9 @@
         "manifest": {
           "$ref": "#/$defs/FileManifest"
         },
+        "manifest_file": {
+          "type": "string"
+        },
         "nas": {
           "type": "string"
         },

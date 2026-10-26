@@ -200,6 +200,9 @@ power-loss behavior needs its own qualification.
 
 ## Large read-only inputs
 
+Deploy the queue before workers. Shared-input jobs require the advertised
+`shared_inputs_v1` capability; older workers cannot receive or start them.
+
 Profiles and plain native jobs can use `shared_inputs` beside stored source
 `files`. Names use letters, digits and underscores, unique ignoring case. Read
 `MYCE_INPUT_<UPPERCASE_NAME>` in the command; it is the absolute path of a shared
@@ -227,7 +230,13 @@ profiles should reference that hash or its NAS location. Existing `inputs`
 retain their private-copy behavior. Commands must explicitly use the environment
 paths, for example `python "$MYCE_INPUT_RUNTIME/run.py" "$MYCE_INPUT_ORIGINAL"`.
 
-For an already unpacked NAS directory, declare `nas: datasets/frozen` with
+For a large manifest already on the NAS, use `nas: runtimes/python` with
+`manifest_file: manifests/python.json`, `sha256` and `size_bytes` identifying
+that JSON file, and `unpacked_bytes` bounding the tree. The JSON is a file
+manifest mapping relative names to SHA-256 and byte counts; it stays on the NAS
+so a 12,000-file tree does not exceed the API/profile request limit.
+
+For a small already unpacked NAS directory, declare `nas: datasets/frozen` with
 `manifest: {relative/file: {sha256: HASH, size_bytes: N}, ...}`. Only listed
 regular files are copied, and executable bits are preserved. Archives support
 `tar` and `tar.gz`, regular files and directories only; links and special files

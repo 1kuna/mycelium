@@ -16,6 +16,7 @@ type SharedInput struct {
 	SizeBytes     int64        `json:"size_bytes,omitempty" yaml:"size_bytes,omitempty"`
 	Archive       string       `json:"archive,omitempty" yaml:"archive,omitempty"`
 	UnpackedBytes int64        `json:"unpacked_bytes,omitempty" yaml:"unpacked_bytes,omitempty"`
+	ManifestFile  string       `json:"manifest_file,omitempty" yaml:"manifest_file,omitempty"`
 	Manifest      FileManifest `json:"manifest,omitempty" yaml:"manifest,omitempty"`
 }
 
@@ -25,8 +26,9 @@ func (s SharedInput) key() string {
 	return identityHash(struct {
 		Ref      FileRef
 		Archive  string
+		Tree     bool
 		Manifest FileManifest
-	}{s.ref(), s.Archive, s.Manifest})
+	}{s.ref(), s.Archive, s.ManifestFile != "", s.Manifest})
 }
 func (s SharedInput) bytes() int64 {
 	if len(s.Manifest) > 0 {
@@ -36,7 +38,7 @@ func (s SharedInput) bytes() int64 {
 		}
 		return n
 	}
-	if s.Archive != "" {
+	if s.Archive != "" || s.ManifestFile != "" {
 		return s.UnpackedBytes
 	}
 	return s.SizeBytes
@@ -44,6 +46,12 @@ func (s SharedInput) bytes() int64 {
 func (s SharedInput) validate() error {
 	if s.Local != "" || s.NAS != "" && !safeRelative(s.NAS) {
 		return errors.New("shared input requires a NAS-relative path or stored hash")
+	}
+	if s.ManifestFile != "" {
+		if s.NAS == "" || !safeRelative(s.ManifestFile) || len(s.Manifest) > 0 || s.Archive != "" || s.UnpackedBytes <= 0 {
+			return errors.New("manifest_file requires NAS-relative tree and manifest paths, a manifest identity and unpacked_bytes")
+		}
+		return s.ref().validate()
 	}
 	if len(s.Manifest) > 0 {
 		if s.NAS == "" || s.Archive != "" || s.SHA256 != "" || s.SizeBytes != 0 || s.UnpackedBytes != 0 {
@@ -132,3 +140,7 @@ func (w Worker) acquireSharedInputs(ctx context.Context, j Job) (map[string]stri
 
 // StoredInputFiles returns the queue-backed input references for upload/preflight.
 func (s Spec) StoredInputFiles() FileManifest { return submissionFiles(s) }
+
+func sharedInputsFit(s Spec, m *Machine) bool {
+	return len(s.SharedInputs) == 0 || m != nil && contains(m.Capabilities, "shared_inputs_v1")
+}

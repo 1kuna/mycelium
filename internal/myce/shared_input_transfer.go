@@ -36,6 +36,23 @@ func (c Client) inputTransfer(ref FileRef) (Client, func()) {
 			return &inputConn{Conn: conn, idle: idle}, nil
 		}
 		tr.ForceAttemptHTTP2 = false
+		// A reused default transport may already advertise h2. Connection-level
+		// deadlines are isolated per transfer, so negotiate only HTTP/1.1 here.
+		if tr.TLSClientConfig != nil {
+			tr.TLSClientConfig = tr.TLSClientConfig.Clone()
+		} else {
+			tr.TLSClientConfig = &tls.Config{}
+		}
+		tr.TLSClientConfig.NextProtos = []string{"http/1.1"}
+		if dialTLS := tr.DialTLSContext; dialTLS != nil {
+			tr.DialTLSContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+				conn, err := dialTLS(ctx, network, address)
+				if err != nil {
+					return nil, err
+				}
+				return &inputConn{Conn: conn, idle: idle}, nil
+			}
+		}
 		tr.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
 		tr.ResponseHeaderTimeout = idle
 		tr.TLSHandshakeTimeout = idle

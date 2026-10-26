@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -128,6 +129,28 @@ func TestSharedInputsNASTreeAndArchiveConfinement(t *testing.T) {
 	done()
 	if got, err := os.ReadFile(filepath.Join(path, "bin/tool")); err != nil || string(got) != "tool" {
 		t.Fatal(string(got), err)
+	}
+	manifest, e := json.Marshal(FileManifest{"bin/tool": ref})
+	if e != nil {
+		t.Fatal(e)
+	}
+	manifestRef := sharedFixtureFile(t, nas, "manifests/tree.json", string(manifest))
+	byManifest := SharedInput{NAS: "tree", ManifestFile: "manifests/tree.json", SHA256: manifestRef.SHA256, SizeBytes: manifestRef.SizeBytes, UnpackedBytes: ref.SizeBytes}
+	p, done, e := cache.Acquire(context.Background(), byManifest, nas)
+	if e != nil {
+		t.Fatal(e)
+	}
+	done()
+	if e = os.Remove(filepath.Join(nas, "manifests/tree.json")); e != nil {
+		t.Fatal(e)
+	}
+	p2, done, e := cache.Acquire(context.Background(), byManifest, nas)
+	if e != nil {
+		t.Fatal(e)
+	}
+	done()
+	if p != p2 {
+		t.Fatal("manifest tree not reused")
 	}
 	var b bytes.Buffer
 	tw := tar.NewWriter(&b)

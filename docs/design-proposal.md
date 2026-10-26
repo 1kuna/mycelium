@@ -2072,7 +2072,8 @@ qualification. The explicit speed/deadline tradeoff remains slice 7.
 Profiles and plain native jobs may declare `shared_inputs`, independently of
 private `files`. A declaration identifies a stored blob by SHA-256 and size, or
 a NAS-relative path plus that identity. A NAS directory uses an explicit file
-manifest instead. NAS references resolve under each worker's `--checkpoint-root`
+manifest, inline or referenced by a NAS-relative `manifest_file` and its hash/size
+so large runtime manifests do not travel in every submission. NAS references resolve under each worker's `--checkpoint-root`
 and never upload through the queue. Profiles may import a `local` blob once;
 the submitted specification contains only its immutable identity. No environment
 catalog entry or queue restart is required.

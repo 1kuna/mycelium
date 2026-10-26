@@ -35,6 +35,22 @@ func TestSharedInputTransferRenewsProgressAndIgnoresWholeRequestCap(t *testing.T
 	if got, err := os.ReadFile(dest); err != nil || string(got) != "healthy progress" {
 		t.Fatal(string(got), err)
 	}
+	secure := httptest.NewUnstartedServer(server.Config.Handler)
+	secure.EnableHTTP2 = true
+	secure.StartTLS()
+	defer secure.Close()
+	secureClient := secure.Client()
+	secureClient.Timeout = time.Millisecond
+	transport := secureClient.Transport.(*http.Transport)
+	transport.TLSClientConfig.NextProtos = []string{"h2", "http/1.1"}
+	secureTransfer, closeSecure := (Client{URL: secure.URL, HTTP: secureClient}).inputTransfer(ref)
+	defer closeSecure()
+	if err := secureTransfer.DownloadFile(context.Background(), ref, filepath.Join(t.TempDir(), "secure")); err != nil {
+		t.Fatal("TLS transfer", err)
+	}
+	if transport.TLSClientConfig.NextProtos[0] != "h2" {
+		t.Fatal("mutated TLS authority")
+	}
 	a, b := net.Pipe()
 	defer a.Close()
 	defer b.Close()

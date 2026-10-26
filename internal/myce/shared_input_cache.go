@@ -4,6 +4,8 @@ import (
 	"archive/tar"
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -124,6 +126,40 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 		return "", err
 	}
 	defer unlockEnvironment(gate)
+	if s.ManifestFile != "" {
+		manifestPath, e := confinedPath(nasRoot, s.ManifestFile)
+		if e != nil {
+			return "", e
+		}
+		if e = verifyFile(ctx, manifestPath, s.ref()); e != nil {
+			return "", e
+		}
+		f, e := os.Open(manifestPath)
+		if e != nil {
+			return "", e
+		}
+		b, e := io.ReadAll(io.LimitReader(f, s.SizeBytes+1))
+		e = errors.Join(e, f.Close())
+		if e != nil {
+			return "", e
+		}
+		// Hash the exact bytes decoded, guarding mutation between verify and read.
+		if int64(len(b)) != s.SizeBytes || digestBytes(b) != s.SHA256 {
+			return "", errors.New("shared manifest changed")
+		}
+		if e = json.Unmarshal(b, &s.Manifest); e != nil {
+			return "", e
+		}
+		if len(s.Manifest) == 0 {
+			return "", errors.New("shared tree manifest is empty")
+		}
+		if e = s.Manifest.validate(); e != nil {
+			return "", e
+		}
+		if s.bytes() > s.UnpackedBytes {
+			return "", errors.New("shared manifest exceeds unpacked_bytes")
+		}
+	}
 	need := s.bytes()
 	if s.Archive != "" {
 		if s.SizeBytes > int64(^uint64(0)>>1)-need {
@@ -249,10 +285,28 @@ func copySharedFile(ctx context.Context, source, target string, ref FileRef) err
 	if err := noModelSymlinks(source, false); err != nil {
 		return err
 	}
-	if err := copyJobFile(source, target); err != nil {
+	in, err := os.Open(source)
+	if err != nil {
 		return err
 	}
-	info, err := os.Stat(source)
+	defer in.Close()
+	info, err := in.Stat()
+	if err != nil {
+		return err
+	}
+	if !info.Mode().IsRegular() || info.Size() != ref.SizeBytes {
+		return errors.New("shared NAS file size/type differs from manifest")
+	}
+	if err = os.MkdirAll(filepath.Dir(target), 0700); err != nil {
+		return err
+	}
+	out, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600|info.Mode().Perm()&0111)
+	if err != nil {
+		return err
+	}
+	// A changing NAS original cannot consume more than its admitted bytes.
+	_, err = io.CopyN(out, in, ref.SizeBytes)
+	err = errors.Join(err, out.Sync(), out.Close())
 	if err != nil {
 		return err
 	}
@@ -261,6 +315,7 @@ func copySharedFile(ctx context.Context, source, target string, ref FileRef) err
 	}
 	return verifyFile(ctx, target, ref)
 }
+
 func makeSharedReadOnly(root string) error {
 	return filepath.WalkDir(root, func(p string, d os.DirEntry, e error) error {
 		if e != nil {
@@ -507,3 +562,5 @@ func unpackSharedArchive(ctx context.Context, source, dest, format string, limit
 		}
 	}
 }
+
+func digestBytes(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }

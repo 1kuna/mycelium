@@ -1175,7 +1175,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 					}
 					break
 				}
-				if c.Recovering || q.maintenanceBlocked(hostID(&m)) || !logPolicyFits(j.Spec.Logs, &m) || !q.checkpointReady(j, &m) {
+				if c.Recovering || q.maintenanceBlocked(hostID(&m)) || !logPolicyFits(j.Spec.Logs, &m) || !sharedInputsFit(j.Spec, &m) || !q.checkpointReady(j, &m) {
 					return nil
 				}
 				out := cloneJob(j)
