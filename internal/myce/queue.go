@@ -115,6 +115,8 @@ type Queue struct {
 	calls            map[string]*ModelCall
 	lock             *os.File
 	mu               sync.RWMutex
+	contactMu        sync.Mutex
+	contacts         map[string]map[string]*workerContact
 	updateHolds      queueHoldSampler
 	statusHolds      queueHoldSampler
 	logCleanupHolds  queueHoldSampler
@@ -712,7 +714,7 @@ func (q *Queue) fleetQuiet(now time.Time) bool {
 	for _, m := range q.s.Machines {
 		if !m.Gone && !m.Leaving {
 			active++
-			if now.Sub(m.LastSeen) < min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2])) {
+			if now.Sub(q.lastContact(m, now)) < min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2])) {
 				healthy++
 			}
 		}
@@ -758,7 +760,7 @@ func (q *Queue) maintain() {
 		outageGrace := !q.s.NetworkRecoveryAt.IsZero() && m.LastSeen.Before(q.s.NetworkRecoveryAt) && now.Before(q.s.NetworkRecoveryAt.Add(q.machineLossTimeout(m.ID)))
 		grace := !unreported && outageGrace || unreported && now.Before(q.restartUntil)
 		restartExpired := unreported && !grace
-		if !m.Gone && !grace && (restartExpired || (!q.networkQuiet && now.Sub(m.LastSeen) >= q.machineLossTimeout(m.ID))) {
+		if !m.Gone && !grace && (restartExpired || (!q.networkQuiet && now.Sub(q.lastContact(m, now)) >= q.machineLossTimeout(m.ID))) {
 			m.Gone = true
 			delete(q.unreported, m.ID)
 			m.Models = nil
@@ -843,6 +845,8 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 	if err := validateCurrentCheckin(c); err != nil {
 		return Reply{}, err
 	}
+	settle := q.beginCheckin(c.Machine.ID, c.Machine.Session)
+	defer settle(false) // No-op once settled; a panicking check-in stops counting as contact.
 	reply := Reply{FileCheckpoints: q.fileCheckpoints, CheckpointRoot: q.root}
 	reports := c.Attempts
 	if c.AttemptProtocol == "" && c.Running != nil {
@@ -1178,6 +1182,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 		q.maintain()
 		return nil
 	})
+	settle(err == nil)
 	if reply.Job != nil {
 		relative, e := filepath.Rel(q.root, reply.Job.Checkpoint)
 		if e != nil {
