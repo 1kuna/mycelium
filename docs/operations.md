@@ -439,6 +439,21 @@ eligibility and last-reported allowance. Inspect exact jobs/logs separately when
 authorized. Status and logs require the privately configured queue credential.
 Never put that token in URLs or copy private payloads into reports.
 
+### Worker scratch retention
+
+Each worker cleans its own state directory once a minute. Finished worker logs
+go after the worker's `--log-retention` (default 7 days). Per-attempt input and
+work folders (`job-files/JOB/ATTEMPT`, including inputs, unpacked source and a
+Python job's `.venv`) go **24 hours** after the worker first finds them without
+attempt custody, timed by the worker clock. That is after the queue accepts the
+result, or after a crash orphans the folder. A failed run's work files are never
+uploaded, so collect its test logs or partial outputs from that folder within
+the day. A held attempt keeps its folder however long it runs. The pass refuses
+to run when `job-files` is not a real directory, for example a symlink. A folder
+it cannot remove, such as one with root-owned Docker output, gets a fresh day
+and is retried; other folders are still cleaned, and a repeated error is logged
+once rather than every minute.
+
 ## Model master folder, worker cache, and production reservations
 
 Models use immutable NAS masters, verified file-store imports or explicit local
