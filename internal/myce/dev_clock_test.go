@@ -198,12 +198,19 @@ func TestDevClockQueueDecisions(t *testing.T) {
 
 type accountingInterleaveClock struct {
 	base             Clock
+	queue            *Queue
 	once             sync.Once
 	entered, release chan struct{}
 }
 
 func (c *accountingInterleaveClock) Now() time.Time {
 	value := c.base.Now()
+	// Arrival contact also reads the clock before q.mu. Pause specifically at
+	// locked accounting, whose serialization with advance this test proves.
+	if c.queue.mu.TryRLock() {
+		c.queue.mu.RUnlock()
+		return value
+	}
 	c.once.Do(func() { close(c.entered); <-c.release })
 	return value
 }
@@ -215,7 +222,7 @@ func TestDevClockAdvanceDuringCheckin(t *testing.T) {
 	m := machine("clock-worker", "fake")
 	check(t, q, m, nil)
 	handler := API{Queue: q, Token: "test"}.Handler()
-	gate := &accountingInterleaveClock{base: clock, entered: make(chan struct{}), release: make(chan struct{})}
+	gate := &accountingInterleaveClock{base: clock, queue: q, entered: make(chan struct{}), release: make(chan struct{})}
 	q.clock = gate
 	done := make(chan error, 1)
 	go func() { _, err := q.Checkin(Checkin{Machine: m}); done <- err }()
