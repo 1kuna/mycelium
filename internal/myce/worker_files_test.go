@@ -34,8 +34,12 @@ func TestSharedInputsDevReusesTreeWithStoredSource(t *testing.T) {
 		t.Fatal(err)
 	}
 	var previous string
-	for i := 0; i < 2; i++ {
-		j, e := d.Client().Submit(ctx, Spec{Name: "shared", Project: "test", Run: RunSpec{Command: []string{"sh", "-ec", `test "$(cat "$MYCE_INPUT_RUNTIME/bin/run")" = hello; printf '%s' "$MYCE_INPUT_RUNTIME" > result`}}, Needs: ResourceNeeds{CPUCores: 1, MemoryGB: 0.1}, Files: FileManifest{"source": ref}, SharedInputs: map[string]SharedInput{"runtime": input}, Outputs: map[string]string{"result": "results"}})
+	for i := 0; i < 3; i++ {
+		privateFiles := FileManifest{"source": ref}
+		if i == 2 {
+			privateFiles = nil
+		}
+		j, e := d.Client().Submit(ctx, Spec{Name: "shared", Project: "test", Run: RunSpec{Command: []string{"sh", "-ec", `test "$(cat "$MYCE_INPUT_RUNTIME/bin/run")" = hello; printf '%s' "$MYCE_INPUT_RUNTIME" > result`}}, Needs: ResourceNeeds{CPUCores: 1, MemoryGB: 0.1}, Files: privateFiles, SharedInputs: map[string]SharedInput{"runtime": input}, Outputs: map[string]string{"result": "results"}})
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -64,7 +68,7 @@ func TestSharedInputsDevReusesTreeWithStoredSource(t *testing.T) {
 		if e != nil {
 			t.Fatal(e)
 		}
-		if i == 1 && string(b) != previous {
+		if i > 0 && string(b) != previous {
 			t.Fatal("per-job copy", previous, string(b))
 		}
 		previous = string(b)

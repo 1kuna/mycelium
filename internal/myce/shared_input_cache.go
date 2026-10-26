@@ -126,6 +126,10 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 		return "", err
 	}
 	defer unlockEnvironment(gate)
+	stage := root + ".partial"
+	if err = removeSharedEntry(stage); err != nil {
+		return "", err
+	}
 	if s.ManifestFile != "" {
 		manifestPath, e := confinedPath(nasRoot, s.ManifestFile)
 		if e != nil {
@@ -168,10 +172,6 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 		need += s.SizeBytes
 	}
 	if err = c.admit(ctx, key, need); err != nil {
-		return "", err
-	}
-	stage := root + ".partial"
-	if err = removeSharedEntry(stage); err != nil {
 		return "", err
 	}
 	if err = os.Mkdir(stage, 0700); err != nil {

@@ -128,7 +128,7 @@ type fileStoreConfiguration struct {
 // Stored inputs and their results use the queue file store independently of
 // checkpoint mode. FileTransport continues to select file-store checkpoints.
 func (j Job) storedFileResults() bool {
-	return j.FileTransport || len(jobInputFiles(&j)) > 0
+	return j.FileTransport || len(jobInputFiles(&j)) > 0 || len(j.Spec.SharedInputs) > 0
 }
 
 func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) error {

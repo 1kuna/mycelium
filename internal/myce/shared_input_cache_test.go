@@ -173,3 +173,33 @@ func TestSharedInputsNASTreeAndArchiveConfinement(t *testing.T) {
 		t.Fatal("wrong manifest accepted")
 	}
 }
+
+func TestSharedInputsInterruptedStagingAndNASSizeGuard(t *testing.T) {
+	ctx := context.Background()
+	nas := t.TempDir()
+	data := strings.Repeat("x", 64<<10)
+	ref := sharedFixtureFile(t, nas, "input", data)
+	cache := &SharedInputCache{cache: EnvironmentCache{Root: t.TempDir(), Limit: 100 << 10}}
+	t.Cleanup(func() { _ = removeSharedEntry(cache.cache.Root) })
+	if err := cache.cache.init(); err != nil {
+		t.Fatal(err)
+	}
+	input := SharedInput{NAS: "input", SHA256: ref.SHA256, SizeBytes: ref.SizeBytes}
+	partial := filepath.Join(cache.cache.Root, input.key()+".partial")
+	_ = sharedFixtureFile(t, partial, "interrupted", data)
+	if _, done, err := cache.Acquire(ctx, input, nas); err != nil {
+		t.Fatal("stale staging prevented recovery", err)
+	} else {
+		done()
+	}
+	// A stale source cannot write beyond the bytes reserved at admission.
+	target := filepath.Join(t.TempDir(), "bounded")
+	bad := ref
+	bad.SizeBytes = 1
+	if err := copySharedFile(ctx, filepath.Join(nas, "input"), target, bad); err == nil {
+		t.Fatal("wrong NAS size accepted")
+	}
+	if info, err := os.Stat(target); err == nil && info.Size() > bad.SizeBytes {
+		t.Fatal("copy exceeded its reservation", info.Size())
+	}
+}
