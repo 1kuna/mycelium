@@ -81,9 +81,11 @@ Choose exactly one source:
   deliberately: other ignored files are included, and no secret scan is implied.
 
 Source paths and `inputs` values resolve from the project root (the parent of
-`.mycelium` for conventional profiles, otherwise the current directory). Sources
-reject symlinks, hardlinks, special files and escaping names. File modes survive
-the source archive. Inputs map clean destination filenames to explicit local
+`.mycelium` for conventional profiles, otherwise the current directory). Git and
+snapshot sources keep relative symlinks that resolve inside the source; links that
+leave it, absolute links, link loops and entries beneath a link are refused.
+Directory sources reject symlinks. All sources reject hardlinks, special files and
+escaping names. File modes survive the source archive. Inputs map clean destination filenames to explicit local
 files; they are frozen and applied after source extraction. Outputs map required
 relative filenames to ordinary result prefixes. Command exit, then `check` exit,
 then existing attempt-specific output verification must all succeed. Retrieve
