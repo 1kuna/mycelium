@@ -18,6 +18,11 @@ func TestMain(m *testing.M) {
 }
 
 func cliTestMain(m *testing.M) int {
+	// Fleet jobs inherit the hosting service's identity. These CLI fixtures
+	// run outside its worker cgroup and own their simulated service startup.
+	if err := os.Unsetenv("INVOCATION_ID"); err != nil {
+		panic(err)
+	}
 	if len(os.Args) > 1 && os.Args[1] == "_command-exec" {
 		if myce.CommandExec(os.Args[2:]) != nil {
 			return 125
