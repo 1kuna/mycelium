@@ -137,7 +137,7 @@ func (q *Queue) rebuildRecords() {
 	_, _, q.records.references = q.fileReferences(false)
 }
 func (q *Queue) liveJobs() map[string]*Job {
-	if q.records == nil || q.simulation {
+	if q.records == nil || q.simulation || !q.records.updating {
 		return q.s.Jobs
 	}
 	return q.records.live

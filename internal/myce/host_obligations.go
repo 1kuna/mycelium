@@ -54,7 +54,7 @@ func (q *Queue) hostObligations(host string) []HostObligation {
 	for id, j := range q.liveJobs() {
 		jobs[id] = j
 	}
-	if q.records == nil {
+	if q.records == nil || !q.records.updating {
 		for _, r := range q.s.Submissions {
 			if r.Job != nil && jobs[r.JobID] == nil {
 				jobs[r.JobID] = r.Job

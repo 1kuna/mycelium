@@ -286,7 +286,7 @@ func (q *Queue) retainedJob(id string) *Job {
 	if j := q.s.Jobs[id]; j != nil {
 		return j
 	}
-	if q.records != nil {
+	if q.records != nil && q.records.updating {
 		if r := q.s.Submissions[q.records.bindings[id]]; r != nil {
 			return r.Job
 		}

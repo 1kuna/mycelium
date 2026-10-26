@@ -173,5 +173,12 @@ func (q *Queue) loadPersistedState() error {
 		}
 		q.persisted[key] = data
 	}
-	return rows.Err()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	q.rebuildRecords()
+	return nil
 }
