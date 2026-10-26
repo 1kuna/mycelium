@@ -370,3 +370,17 @@ func TestWorkCurveReportCannotPlantMemoryEvidence(t *testing.T) {
 		t.Fatalf("benchmark report planted memory evidence: %+v", p)
 	}
 }
+
+// #210: memory-only observations (auto extension checks) carry memory_peak with
+// zero legacy usage maxima; status curve lines must show the accepted peak.
+func TestWorkCurveSummaryShowsMemoryPeak(t *testing.T) {
+	host, device := 3.0, 1.5
+	point := WorkObservation{Key: ObservationKey{Work: "check", Host: "host", Component: "cpu", Concurrency: 1}, MemoryPeak: &AttemptMemoryPeak{HostGB: &host, DeviceGB: &device}, Samples: 1}
+	if line := point.Summary(); !strings.Contains(line, "peak host/device 3.00/1.50 GiB") {
+		t.Fatalf("memory-only peak not shown: %s", line)
+	}
+	point.MemoryPeak, point.HostMemoryGB = nil, 2
+	if line := point.Summary(); !strings.Contains(line, "peak host/device 2.00/0.00 GiB") {
+		t.Fatalf("legacy peak fallback lost: %s", line)
+	}
+}

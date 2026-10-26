@@ -15,12 +15,11 @@ import (
 
 func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: myce host drain|disable|resume|status|budget|placement HOST [--last-resort=true|false] [--stop] [--memory-budget-gb GiB] [--wait] [--timeout DURATION]")
+		return errors.New("usage: myce host drain|disable|resume|status|budget|placement HOST [--config PATH] [--last-resort=true|false] [--stop] [--memory-budget-gb GiB] [--wait] [--timeout DURATION]")
 	}
 	action := args[0]
 	f := flag.NewFlagSet("host "+action, flag.ContinueOnError)
-	address := f.String("queue", env("MYCE_QUEUE", "http://127.0.0.1:7331"), "queue address")
-	token := f.String("token", "", "fleet token (prefer MYCE_TOKEN)")
+	authority := installedClientFlags(f)
 	stop := f.Bool("stop", false, "disable and stop exact current attempts")
 	wait := f.Bool("wait", false, "wait for fresh workers and zero known work/cleanup")
 	timeout := f.Duration("timeout", 30*time.Second, "bounded wait; timeout never releases custody")
@@ -33,7 +32,7 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 		if strings.HasPrefix(arg, "-") {
 			flags = append(flags, arg)
 			key := strings.TrimLeft(arg, "-")
-			if (key == "queue" || key == "token" || key == "timeout" || key == "memory-budget-gb" || key == "cpu-budget-cores") && i+1 < len(args) {
+			if (key == "config" || key == "joining-file" || key == "queue" || key == "token" || key == "timeout" || key == "memory-budget-gb" || key == "cpu-budget-cores") && i+1 < len(args) {
 				i++
 				flags = append(flags, args[i])
 			}
@@ -83,13 +82,13 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 	if action == "budget" && request.MemoryBudgetGB == nil && request.CPUBudgetCores == nil {
 		return errors.New("budget requires --memory-budget-gb GiB or --cpu-budget-cores N")
 	}
-	if *token == "" {
-		*token = env("MYCE_TOKEN", "")
+	c, err := authority.client()
+	if err != nil {
+		return err
 	}
-	if *token == "" {
-		return errors.New("set MYCE_TOKEN to the shared fleet token")
+	if c.HTTP != nil {
+		defer c.HTTP.CloseIdleConnections()
 	}
-	c := myce.Client{URL: *address, Token: *token}
 	path := "/api/hosts/" + url.PathEscape(hosts[0]) + "/maintenance"
 	var status myce.HostMaintenanceStatus
 	method := "POST"
@@ -99,7 +98,7 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 		input = nil
 	}
 	callCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	err := c.Call(callCtx, method, path, input, &status)
+	err = c.Call(callCtx, method, path, input, &status)
 	cancel()
 	if err != nil {
 		return err

@@ -247,7 +247,15 @@ func (p WorkObservation) summary(state string) string {
 	if state == "measured" && validRate(p.Rate) {
 		rate = fmt.Sprintf("%.2f %s/s", p.Rate, p.Key.Reference.Unit)
 	}
-	return fmt.Sprintf("%s %s/%s c=%d: %s; %s; latency %.2fs; incremental host/device %.2f/%.2f GiB; peak %.2f/%.2f GiB; %d samples", p.Key.Work, p.Key.Host, p.Key.Component, p.Key.Concurrency, rate, state, p.LatencySeconds, p.IncrementalHostMemoryGB, p.IncrementalDeviceMemoryGB, p.HostMemoryGB, p.DeviceMemoryGB, p.Samples)
+	// Accepted memory_peak covers memory-only observations; legacy usage maxima stay the fallback.
+	hostPeak, devicePeak := p.HostMemoryGB, p.DeviceMemoryGB
+	if p.MemoryPeak != nil && p.MemoryPeak.HostGB != nil {
+		hostPeak = *p.MemoryPeak.HostGB
+	}
+	if p.MemoryPeak != nil && p.MemoryPeak.DeviceGB != nil {
+		devicePeak = *p.MemoryPeak.DeviceGB
+	}
+	return fmt.Sprintf("%s %s/%s c=%d: %s; %s; latency %.2fs; incremental host/device %.2f/%.2f GiB; peak host/device %.2f/%.2f GiB; %d samples", p.Key.Work, p.Key.Host, p.Key.Component, p.Key.Concurrency, rate, state, p.LatencySeconds, p.IncrementalHostMemoryGB, p.IncrementalDeviceMemoryGB, hostPeak, devicePeak, p.Samples)
 }
 
 // Explicit OOMs forbid their performance point; auto OOMs and constrained peaks
