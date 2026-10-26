@@ -16,6 +16,7 @@ import (
 func TestInvitePrintsCommandWithoutCredential(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("MYCE_JOINING_FILE", "")
+	t.Setenv("MYCE_QUEUE", "") // Fleet jobs inherit the worker service queue address.
 	dir := t.TempDir()
 	identity, err := myce.LoadJoiningIdentity(dir)
 	if err != nil {

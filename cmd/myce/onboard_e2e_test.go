@@ -144,6 +144,7 @@ func TestOneCommandEnrollmentEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("MYCE_JOINING_FILE", inviteFile)
+	t.Setenv("MYCE_QUEUE", "") // Fleet jobs inherit the worker service queue address.
 	pub, key, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)

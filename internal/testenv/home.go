@@ -8,9 +8,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 func Isolate(dir string) error {
+	// Fleet worker services run jobs with UMask=0077; fixtures assert the
+	// exact modes they request. Re-executed test children inherit this mask.
+	syscall.Umask(0o022)
 	originalHome, _ := os.UserHomeDir()
 	// A CLI build may read modules already fetched by the parent go test. Use
 	// Go's local file proxy to populate an owned cache, never the network or HOME.
