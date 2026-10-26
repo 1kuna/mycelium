@@ -263,6 +263,13 @@ func (q *Queue) rollbackRecords(old []byte) {
 			submissions[id] = r
 		}
 	}
+	// An error may abort before maintainSubmissions journals the keyed answer.
+	// Reconnect those untouched aliases to the restored jobs as well.
+	for id, j := range q.records.jobs {
+		if r := submissions[q.records.bindings[id]]; r != nil && j != nil {
+			r.Job = j
+		}
+	}
 	q.records.jobCount, q.records.submissionCount = len(q.s.Jobs), len(q.s.Submissions)
 	q.records.referenceAdds = nil
 	q.commitRecords()
