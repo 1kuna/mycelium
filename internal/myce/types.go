@@ -339,6 +339,7 @@ type Job struct {
 	FileReclamation       *FileReclamation             `json:"file_reclamation,omitempty"`
 	OutputRefs            FileManifest                 `json:"output_refs,omitempty"`
 	MemoryEnvelope        *JobMemoryEnvelope           `json:"memory_envelope,omitempty"`
+	MemoryAttempts        []AttemptMemoryFacts         `json:"memory_attempts,omitempty"`
 	MemoryFallback        *SizeHint                    `json:"memory_fallback,omitempty"`
 	MemoryOOMFloor        *SizeHint                    `json:"memory_oom_floor,omitempty"`
 	MeasuredNeeds         *SizeHint                    `json:"measured_needs,omitempty"`

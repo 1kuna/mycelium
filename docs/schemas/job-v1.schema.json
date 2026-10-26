@@ -1,5 +1,59 @@
 {
   "$defs": {
+    "AttemptMemoryFacts": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "memory_envelope": {
+          "$ref": "#/$defs/JobMemoryEnvelope"
+        },
+        "memory_peak": {
+          "$ref": "#/$defs/AttemptMemoryPeak"
+        },
+        "session": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "attempt",
+        "machine",
+        "session"
+      ],
+      "type": "object"
+    },
+    "AttemptMemoryPeak": {
+      "properties": {
+        "cgroup_gb": {
+          "type": "number"
+        },
+        "constrained": {
+          "description": "Observed constraint evidence; omitted false. Constrained facts are retained even when learning rejects them.",
+          "type": "boolean"
+        },
+        "device_gb": {
+          "type": "number"
+        },
+        "events": {
+          "$ref": "#/$defs/MemoryEventCounts",
+          "description": "Attempt-parent hierarchical memory.events counts. Absent means not read; explicit zero means a read zero. Max per counter across samples within the attempt."
+        },
+        "host_gb": {
+          "type": "number"
+        },
+        "source": {
+          "type": "string"
+        },
+        "swap_gb": {
+          "description": "Attempt-parent memory.swap.peak in GiB, max across samples. Absent when unavailable; zero is measured. memory.swap.current is pressure evidence only, never a substitute peak.",
+          "type": "number"
+        }
+      },
+      "type": "object"
+    },
     "AttemptOutcome": {
       "properties": {
         "attempt": {
@@ -1079,6 +1133,17 @@
           "$ref": "#/$defs/SizeHint",
           "x-contract": "diagnostic"
         },
+        "memory_attempts": {
+          "description": "Persisted memory facts for each ended attempt recorded by this queue version, independent of learning and the four-entry diagnostic history. Exact attempt/machine/session, observed memory_peak when available, and the resolved memory_envelope. Missing counters are unknown, not zero. Historical readings cannot be reconstructed.",
+          "items": {
+            "$ref": "#/$defs/AttemptMemoryFacts"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
         "memory_envelope": {
           "$ref": "#/$defs/JobMemoryEnvelope",
           "x-contract": "diagnostic"
@@ -1272,6 +1337,33 @@
         "host_gb",
         "device_gb",
         "enforcement"
+      ],
+      "type": "object"
+    },
+    "MemoryEventCounts": {
+      "properties": {
+        "high": {
+          "type": "integer"
+        },
+        "max": {
+          "type": "integer"
+        },
+        "oom": {
+          "type": "integer"
+        },
+        "oom_group_kill": {
+          "type": "integer"
+        },
+        "oom_kill": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "high",
+        "max",
+        "oom",
+        "oom_kill",
+        "oom_group_kill"
       ],
       "type": "object"
     },

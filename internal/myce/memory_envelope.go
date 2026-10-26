@@ -14,6 +14,7 @@ type AttemptMemoryPeak struct {
 	HostGB      *float64           `json:"host_gb,omitempty"`
 	CgroupGB    *float64           `json:"cgroup_gb,omitempty"`
 	DeviceGB    *float64           `json:"device_gb,omitempty"`
+	SwapGB      *float64           `json:"swap_gb,omitempty"`
 	Source      string             `json:"source,omitempty"`
 	Events      *MemoryEventCounts `json:"events,omitempty"`
 	Constrained bool               `json:"constrained,omitempty"`
@@ -30,6 +31,58 @@ type MemoryEventCounts struct {
 }
 
 const processGroupMemorySource = "process-group RSS samples; unenforced"
+
+// AttemptMemoryFacts keeps observed telemetry independently of learning and the
+// bounded diagnostic history. Missing peaks/counters mean unavailable, not zero.
+type AttemptMemoryFacts struct {
+	Attempt        int                `json:"attempt"`
+	Machine        string             `json:"machine"`
+	Session        string             `json:"session"`
+	MemoryPeak     *AttemptMemoryPeak `json:"memory_peak,omitempty"`
+	MemoryEnvelope *JobMemoryEnvelope `json:"memory_envelope,omitempty"`
+}
+
+func recordAttemptMemory(j *Job, r Result) {
+	if j.Attempt == 0 || j.Machine == "" || j.Session == "" {
+		return
+	}
+	facts := AttemptMemoryFacts{Attempt: j.Attempt, Machine: j.Machine, Session: j.Session,
+		MemoryPeak: sampledMemoryPeak(nil, r.MemoryPeak)}
+	if facts.MemoryPeak != nil && facts.MemoryPeak.Source != processGroupMemorySource {
+		facts.MemoryPeak.Source = "" // Only publish the known measurement label.
+	}
+	if j.MemoryEnvelope != nil {
+		envelope := *j.MemoryEnvelope
+		facts.MemoryEnvelope = &envelope
+	}
+	for i, old := range j.MemoryAttempts {
+		if old.Attempt == facts.Attempt && old.Machine == facts.Machine && old.Session == facts.Session {
+			if facts.MemoryPeak != nil {
+				j.MemoryAttempts[i] = facts
+			}
+			return
+		}
+	}
+	j.MemoryAttempts = append(j.MemoryAttempts, facts)
+}
+
+func mergeMemoryEvents(old, next *MemoryEventCounts) *MemoryEventCounts {
+	if next == nil {
+		next = old
+	}
+	if next == nil {
+		return nil
+	}
+	merged := *next
+	if old != nil {
+		merged.High = max(merged.High, old.High)
+		merged.Max = max(merged.Max, old.Max)
+		merged.OOM = max(merged.OOM, old.OOM)
+		merged.OOMKill = max(merged.OOMKill, old.OOMKill)
+		merged.OOMGroupKill = max(merged.OOMGroupKill, old.OOMGroupKill)
+	}
+	return &merged
+}
 
 type JobMemoryEnvelope struct {
 	Source      string  `json:"source"`
@@ -63,13 +116,7 @@ func mergeMemoryPeaks(old, next *AttemptMemoryPeak) *AttemptMemoryPeak {
 	if next.Source != "" {
 		out.Source = next.Source
 	}
-	if e := next.Events; e != nil {
-		merged := *e
-		if out.Events != nil {
-			merged = MemoryEventCounts{High: max(merged.High, out.Events.High), Max: max(merged.Max, out.Events.Max), OOM: max(merged.OOM, out.Events.OOM), OOMKill: max(merged.OOMKill, out.Events.OOMKill), OOMGroupKill: max(merged.OOMGroupKill, out.Events.OOMGroupKill)}
-		}
-		out.Events = &merged
-	}
+	out.Events = mergeMemoryEvents(out.Events, next.Events)
 	if out.HostGB == nil && out.CgroupGB == nil && out.DeviceGB == nil {
 		return nil
 	}

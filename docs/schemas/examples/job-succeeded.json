@@ -5,6 +5,32 @@
     "selector": "",
     "revision": 0
   },
+  "memory_attempts": [
+    {
+      "attempt": 1,
+      "machine": "example-worker-id",
+      "session": "example-session-id",
+      "memory_peak": {
+        "host_gb": 1,
+        "cgroup_gb": 2,
+        "swap_gb": 0,
+        "events": {
+          "high": 0,
+          "max": 0,
+          "oom": 0,
+          "oom_kill": 0,
+          "oom_group_kill": 0
+        }
+      },
+      "memory_envelope": {
+        "source": "exploratory first run",
+        "machine": "example-worker-id",
+        "host_gb": 4,
+        "device_gb": 0,
+        "enforcement": "cgroup-v2"
+      }
+    }
+  ],
   "release_confirmed": true,
   "waiting_since": "0001-01-01T00:00:00Z",
   "assigned_at": "2026-10-17T12:00:00Z",
