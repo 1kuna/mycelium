@@ -71,6 +71,16 @@ type observationState struct {
 	Unreported   map[string]bool
 }
 
+// JSON does not carry the private scalar ledger used by diagnostic planning.
+// Capture it by value alongside the encoded state, then restore only into the
+// detached machines. Probe facts and runtime preparation/secrets are worker-only.
+type observationMachineLedger struct {
+	cpuLedger              bool
+	hostBudgetGB           float64
+	modelReservationDebtGB float64
+	hostReservationDebtGB  float64
+}
+
 // Encode while protected, then decode and project outside q.mu. No mutable
 // state escapes the capture. Cold history needs only its public summary; active
 // work retains the inputs needed by the existing diagnostic planner.
@@ -141,6 +151,23 @@ func (q *Queue) captureObservation(id string) (*Queue, fileStoreObservation, err
 	if minimal {
 		inputs.Models, inputs.Environments, inputs.Calls, inputs.Unreported = ModelConfig{}, EnvironmentCatalog{}, nil, nil
 	}
+	machineLedgers := make(map[string]observationMachineLedger, len(s.Machines))
+	for key, m := range s.Machines {
+		machineLedgers[key] = observationMachineLedger{
+			cpuLedger: m.cpuLedger, hostBudgetGB: m.hostBudgetGB,
+			modelReservationDebtGB: m.modelReservationDebtGB, hostReservationDebtGB: m.hostReservationDebtGB,
+		}
+	}
+	// Simulator dependency barriers also affect the shared diagnostic planner.
+	var gatherWait map[string]bool
+	for key, j := range s.Jobs {
+		if j.simGatherWait {
+			if gatherWait == nil {
+				gatherWait = make(map[string]bool)
+			}
+			gatherWait[key] = true
+		}
+	}
 	var data []byte
 	if err == nil {
 		data, err = json.Marshal(inputs)
@@ -155,6 +182,14 @@ func (q *Queue) captureObservation(id string) (*Queue, fileStoreObservation, err
 	var detached observationState
 	if err = json.Unmarshal(data, &detached); err != nil {
 		return nil, files, err
+	}
+	for key, m := range detached.State.Machines {
+		ledger := machineLedgers[key]
+		m.cpuLedger, m.hostBudgetGB = ledger.cpuLedger, ledger.hostBudgetGB
+		m.modelReservationDebtGB, m.hostReservationDebtGB = ledger.modelReservationDebtGB, ledger.hostReservationDebtGB
+	}
+	for key := range gatherWait {
+		detached.State.Jobs[key].simGatherWait = true
 	}
 	v.s, v.models, v.environments, v.calls, v.unreported = detached.State, detached.Models, detached.Environments, detached.Calls, detached.Unreported
 	return v, files, nil

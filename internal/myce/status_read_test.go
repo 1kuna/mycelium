@@ -14,6 +14,57 @@ import (
 	"time"
 )
 
+// A diagnostic read must use the same occupied CPU ledger as admission. Four
+// admitted cores with three reserved cannot place the next two-core job.
+func TestStatusReadCPUReservation(t *testing.T) {
+	q, _ := fixture(t)
+	m := cpuMachine("cpu", "shared", "cpu", 4, 16)
+	check(t, q, m, nil)
+	first := submit(t, q, cpuSpec(3, 1))
+	assignment := check(t, q, m, nil).Job
+	if assignment == nil || assignment.ID != first.ID {
+		t.Fatal("no assignment")
+	}
+	second := submit(t, q, cpuSpec(2, 1))
+	if cpuFits(second, q.s.Machines[m.ID]) {
+		t.Fatal("fixture must exhaust CPU capacity")
+	}
+	handler := API{Queue: q, Token: "test"}.Handler()
+	for _, path := range []string{"/api/jobs/" + second.ID, "/api/status", "/api/inspection"} {
+		t.Run(path, func(t *testing.T) {
+			r := httptest.NewRequest("GET", path, nil)
+			r.Header.Set("Authorization", "Bearer test")
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, r)
+			if w.Code != 200 {
+				t.Fatal(w.Code, w.Body.String())
+			}
+			var got *Job
+			if path == "/api/jobs/"+second.ID {
+				if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				var snapshot Snapshot
+				if err := json.Unmarshal(w.Body.Bytes(), &snapshot); err != nil {
+					t.Fatal(err)
+				}
+				for _, j := range snapshot.Jobs {
+					if j.ID == second.ID {
+						got = j
+					}
+				}
+			}
+			if got == nil {
+				t.Fatal("waiting job missing from response")
+			}
+			if !strings.Contains(got.Reason, "1 cores free of 4 admitted") || got.QueueOrder != 0 {
+				t.Fatalf("occupied CPU capacity lost: reason=%q queue_order=%d", got.Reason, got.QueueOrder)
+			}
+		})
+	}
+}
+
 // Receipt polling must remain independent of both the usage reader and writer
 // connection, and must preserve private payload redaction and exact key echo.
 func TestJobReadAvoidsUsage(t *testing.T) {
