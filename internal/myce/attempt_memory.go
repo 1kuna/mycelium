@@ -147,13 +147,6 @@ type processMemoryProbe struct {
 	// Resident bytes summed over live members of the process groups, and how
 	// many members were found.
 	Resident func(groups map[int]bool) (uint64, int, error)
-	// Host-wide pressure level and swap in use; an error means no signal.
-	Signals func() (memorySignals, error)
-}
-
-type memorySignals struct {
-	Pressure uint32
-	SwapUsed uint64
 }
 
 func processGroupResident(out []byte, groups map[int]bool) (uint64, int, error) {
@@ -180,12 +173,12 @@ func processGroupResident(out []byte, groups map[int]bool) (uint64, int, error) 
 // Without cgroups (macOS), the attempt boundary is its process groups, the
 // same boundary the worker signals. Periodic RSS sums cover concurrent
 // members; rusage max RSS reports only the largest waited process. Shared
-// pages count once per process, so the sum errs high, while spikes shorter
-// than the interval are missed. Nothing enforces this measurement. Only
-// host-wide pressure or swap growth during the attempt marks it constrained.
+// pages count once per process, but compressed pages, members that left the
+// group and spikes shorter than the interval are missed, so it is no bound in
+// either direction. Nothing enforces it, and host-wide swap or pressure cannot
+// attribute pressure to this attempt, so these peaks are never constrained.
 func (w Worker) observeProcessMemory(groups func() []int) func() *AttemptMemoryPeak {
 	probe := w.processMemory
-	baseline, baselineErr := probe.Signals()
 	var mu sync.Mutex
 	var peak *AttemptMemoryPeak
 	sample := func() {
@@ -195,17 +188,12 @@ func (w Worker) observeProcessMemory(groups func() []int) func() *AttemptMemoryP
 				ids[g] = true
 			}
 		}
-		next := &AttemptMemoryPeak{Source: processGroupMemorySource}
-		if bytes, members, err := probe.Resident(ids); err == nil && members > 0 {
-			gb := float64(bytes) / (1 << 30)
-			next.HostGB = &gb
-		}
-		if signals, err := probe.Signals(); err == nil {
-			next.Constrained = signals.Pressure > 1 || baselineErr == nil && signals.SwapUsed > baseline.SwapUsed
-		}
-		if next.HostGB == nil && !next.Constrained {
+		bytes, members, err := probe.Resident(ids)
+		if err != nil || members == 0 {
 			return
 		}
+		gb := float64(bytes) / (1 << 30)
+		next := &AttemptMemoryPeak{HostGB: &gb, Source: processGroupMemorySource}
 		mu.Lock()
 		peak = sampledMemoryPeak(peak, next)
 		peak.Source = processGroupMemorySource
@@ -241,7 +229,7 @@ func (w Worker) observeProcessMemory(groups func() []int) func() *AttemptMemoryP
 // Raise a process-group peak to the root's exit max RSS, which catches a
 // spike between samples in the main process.
 func withExitMaxRSS(peak *AttemptMemoryPeak, state *os.ProcessState) *AttemptMemoryPeak {
-	if peak == nil || peak.Source != processGroupMemorySource || peak.Constrained || state == nil {
+	if peak == nil || peak.Source != processGroupMemorySource || state == nil {
 		return peak
 	}
 	ru, ok := state.SysUsage().(*syscall.Rusage)

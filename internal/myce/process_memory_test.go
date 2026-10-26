@@ -12,26 +12,18 @@ import (
 )
 
 // A worker without cgroups (macOS) samples the attempt's process group.
-func processMemoryWorker(t *testing.T, resident uint64, signals ...memorySignals) (Worker, *[]map[int]bool) {
+func processMemoryWorker(t *testing.T, resident uint64) (Worker, *[]map[int]bool) {
 	t.Helper()
 	w := recoveryWorker(t)
 	w.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
 	var mu sync.Mutex
 	var groups []map[int]bool
-	calls := 0
 	w.processMemory = &processMemoryProbe{
 		Resident: func(ids map[int]bool) (uint64, int, error) {
 			mu.Lock()
 			defer mu.Unlock()
 			groups = append(groups, ids)
 			return resident, len(ids), nil
-		},
-		Signals: func() (memorySignals, error) {
-			mu.Lock()
-			defer mu.Unlock()
-			s := signals[min(calls, len(signals)-1)]
-			calls++
-			return s, nil
 		},
 	}
 	return w, &groups
@@ -55,7 +47,7 @@ func runProcessMemoryAttempt(t *testing.T, w Worker) Result {
 }
 
 func TestProcessMemoryPeakTeachesComparableReruns(t *testing.T) {
-	w, groups := processMemoryWorker(t, 2<<30, memorySignals{Pressure: 1, SwapUsed: 1 << 20})
+	w, groups := processMemoryWorker(t, 2<<30)
 	r := runProcessMemoryAttempt(t, w)
 	peak := r.MemoryPeak
 	if !r.Success || peak == nil || peak.HostGB == nil || *peak.HostGB != 2 || peak.Constrained || peak.Source != processGroupMemorySource || peak.Events != nil {
@@ -121,23 +113,43 @@ func TestProcessMemoryPeakTeachesComparableReruns(t *testing.T) {
 	}
 }
 
-func TestProcessMemoryConstrainedOnlyWithSignal(t *testing.T) {
-	for _, tc := range []struct {
-		name        string
-		signals     []memorySignals
-		constrained bool
-	}{
-		{"quiet host", []memorySignals{{Pressure: 1, SwapUsed: 1 << 20}}, false},
-		{"pressure warning", []memorySignals{{Pressure: 1}, {Pressure: 2}}, true},
-		{"swap growth", []memorySignals{{Pressure: 1, SwapUsed: 1 << 20}, {Pressure: 1, SwapUsed: 2 << 20}}, true},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			w, _ := processMemoryWorker(t, 1<<30, tc.signals...)
-			r := runProcessMemoryAttempt(t, w)
-			if p := r.MemoryPeak; p == nil || p.Constrained != tc.constrained {
-				t.Fatalf("pressure misclassified: %+v; want constrained=%v", p, tc.constrained)
-			}
-		})
+// Host-wide macOS swap or pressure cannot say this attempt was constrained, so
+// a darwin attempt must never wipe peaks other hosts learned (#211 review).
+func TestProcessMemoryPeakNeverInvalidatesLearnedPeaks(t *testing.T) {
+	q, clock, linux, s := observationFixture(t)
+	s.Needs.Memory = "auto"
+	learn := startObservation(t, q, linux, s)
+	clock.Advance(time.Second)
+	done := result(&learn, true)
+	two := 2.0
+	done.MemoryPeak = &AttemptMemoryPeak{HostGB: &two}
+	if err := q.Complete(done); err != nil {
+		t.Fatal(err)
+	}
+
+	darwin := linux
+	darwin.ID, darwin.HostID, darwin.Session = "m4", "m4-host", "session-m4"
+	darwin.MemoryEnforcement = "memory ceiling not enforced on this host (requires Linux cgroup v2)"
+	report := newExtensionReport(learn.Extensions[0], &darwin, "extension:sample")
+	report.Setup, report.Qualified, report.CheckID = true, true, "m4-check"
+	darwin.ExtensionReports = []ExtensionReport{report}
+	check(t, q, darwin, nil)
+	onDarwin := s
+	onDarwin.AllowedMachines = []string{darwin.ID}
+	squeezed := startObservation(t, q, darwin, onDarwin)
+	clock.Advance(time.Second)
+	done = result(&squeezed, true)
+	six := 6.0
+	done.MemoryPeak = &AttemptMemoryPeak{HostGB: &six, Source: processGroupMemorySource, Constrained: true}
+	if err := q.Complete(done); err != nil {
+		t.Fatal(err)
+	}
+
+	onLinux := s
+	onLinux.AllowedMachines = []string{linux.ID}
+	next := startObservation(t, q, linux, onLinux)
+	if next.Spec.Needs.HostMemoryGB != 2.5 || next.MemoryEnvelope.Source != "accepted peak × 1.25" {
+		t.Fatalf("darwin attempt invalidated the Linux peak: %+v", next.MemoryEnvelope)
 	}
 }
 
