@@ -23,7 +23,10 @@ maintenance. Existing legacy conversion remains the explicit M4 procedure below.
 ## Queue maintenance
 
 All commands use the authenticated queue and run as an ordinary account.
-`MYCE_QUEUE` supplies its URL and `MYCE_TOKEN` supplies the private fleet token.
+On an enrolled machine they read installed authority and keep its certificate
+pin, like `myce status` and `myce cancel`, so no token is needed. Explicit
+`--queue`/`--token`, `MYCE_QUEUE`/`MYCE_TOKEN`, `--config` and `--joining-file`
+still select the endpoint or authority.
 Use the physical host ID shared by all device workers:
 
 ```sh

@@ -160,7 +160,9 @@ certificate pin; consumers do not read config files or handle credentials.
 Explicit `--queue` / `--token` and `MYCE_QUEUE` / `MYCE_TOKEN` keep working.
 `--config` and `--joining-file` remain available for explicit authority selection.
 As with `run`, `MYCE_QUEUE` overrides the invitation address for `status`, `logs`, `cancel`
-and `file get`, including when `--joining-file` is explicit.
+and `file get`, including when `--joining-file` is explicit. Operator host
+maintenance (`myce host drain|disable|resume|status|budget|placement`, see
+[operations](operations.md#queue-maintenance)) uses the same installed authority.
 
 ```sh
 myce status
