@@ -368,3 +368,39 @@ func TestServiceConfigRetiredHostSettingsOverlay(t *testing.T) {
 		}
 	}
 }
+
+// #216: repeated successful upgrades must not accumulate binary copies.
+func TestInstallBackupsRetainOnlyPreviousInstall(t *testing.T) {
+	c, source := preserveWorkerFixture(t)
+	for version := 0; version < 8; version++ {
+		if err := os.WriteFile(source, []byte(fmt.Sprintf("binary-%d", version)), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := Install(context.Background(), c, source, "fixture", fakeInstallManager); err != nil {
+			t.Fatal(err)
+		}
+		current, err := os.ReadFile(c.Binary)
+		if err != nil || string(current) != fmt.Sprintf("binary-%d", version) {
+			t.Fatalf("current install changed: %s %v", current, err)
+		}
+		for _, path := range []string{c.Binary, c.Config, c.Service} {
+			backups, err := filepath.Glob(filepath.Join(filepath.Dir(path), ".Trash", "*-"+filepath.Base(path)))
+			if err != nil {
+				t.Fatal(err)
+			}
+			expected := 0
+			if version > 0 {
+				expected = 1
+			}
+			if len(backups) != expected {
+				t.Fatalf("version %d artifact %s backups = %v", version, filepath.Base(path), backups)
+			}
+			if path == c.Binary && version > 0 {
+				previous, err := os.ReadFile(backups[0])
+				if err != nil || string(previous) != fmt.Sprintf("binary-%d", version-1) {
+					t.Fatalf("previous install lost: %s %v", previous, err)
+				}
+			}
+		}
+	}
+}

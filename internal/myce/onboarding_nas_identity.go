@@ -127,6 +127,9 @@ func resolveClusterNAS(ctx context.Context, c ServiceConfig, command func(contex
 // OS mount inventory is separate from hardware sensing. Tests install a fake
 // command once at process setup, just like the worker's other host sources.
 var onboardingMountCommand = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+	if name == cachedMountInventoryCommand {
+		return cachedMountInventory(ctx)
+	}
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = withoutMyceToken(os.Environ())
 	return cmd.Output()

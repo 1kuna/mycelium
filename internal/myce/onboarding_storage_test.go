@@ -23,7 +23,7 @@ func onboardingNAS(t *testing.T, osname string) (ServiceConfig, func(context.Con
 		if osname == "linux" && n == "cat" && len(args) == 1 && args[0] == "/proc/mounts" {
 			return []byte("credentials-must-not-print " + strings.ReplaceAll(nas, " ", `\040`) + " nfs4 rw,password=private-value 0 0\n"), nil
 		}
-		if osname == "darwin" && n == "/sbin/mount" {
+		if osname == "darwin" && n == "myce:mounts-nowait" {
 			return []byte("private-value on " + nas + " (smbfs, nodev, mounted by user)"), nil
 		}
 		t.Fatalf("unexpected command: %s %v", n, args)

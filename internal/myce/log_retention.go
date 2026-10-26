@@ -143,7 +143,7 @@ const unclaimedMarker = ".myce-unclaimed"
 
 // workerRetention is one pass of the worker's periodic local retention.
 func workerRetention(dir string, now time.Time, logAge time.Duration) error {
-	return errors.Join(pruneWorkerLogs(dir, "", now, logAge), pruneAttemptFiles(dir, now))
+	return errors.Join(pruneWorkerLogs(dir, "", now, logAge), pruneAttemptFiles(dir, now), pruneAttemptState(dir, now, logAge))
 }
 
 // pruneAttemptFiles removes job-files attempt folders that no saved attempt

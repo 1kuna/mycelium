@@ -28,6 +28,10 @@ func MountedNASRoots(ctx context.Context, osname string, command func(context.Co
 	return roots, err
 }
 
+// cachedMountInventoryCommand is an in-process probe, never an external program.
+// Both production command runners dispatch it to the native MNT_NOWAIT table.
+const cachedMountInventoryCommand = "myce:mounts-nowait"
+
 type nasMount struct{ root, fingerprint string }
 
 func mountedNASRoots(ctx context.Context, osname string, command func(context.Context, string, ...string) ([]byte, error)) ([]string, error) {
@@ -49,7 +53,7 @@ func mountedNASInventory(ctx context.Context, osname string, command func(contex
 	if osname == "linux" {
 		b, err = command(ctx, "cat", "/proc/mounts")
 	} else if osname == "darwin" {
-		b, err = command(ctx, "/sbin/mount")
+		b, err = command(ctx, cachedMountInventoryCommand)
 	} else {
 		return nil, preflightError("nas_unsupported", "storage", "NAS mount detection supports Linux and macOS")
 	}
