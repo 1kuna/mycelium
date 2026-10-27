@@ -116,7 +116,6 @@ type Queue struct {
 	simID            int64
 	uploadSpool      uploadSpool
 	logRetention     time.Duration
-	nextLogCleanup   time.Time
 	environments     EnvironmentCatalog
 	productionGrace  time.Duration
 	wake             chan struct{}
@@ -930,7 +929,7 @@ func (q *Queue) Tick() error {
 	}); err != nil {
 		return err
 	}
-	return errors.Join(q.pruneBatchLogs(), q.reclaimJobFiles())
+	return errors.Join(q.pruneBatchLogs(), q.reclaimJobFiles(), q.pruneJobHistory())
 }
 func (q *Queue) Checkin(c Checkin) (Reply, error) {
 	return q.CheckinContext(context.Background(), c)

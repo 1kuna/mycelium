@@ -20,6 +20,9 @@ type queueRecords struct {
 	bindings                  map[string]string // retained job ID -> submission digest
 	jobs                      map[string]*Job   // transaction undo; nil means absent before insertion
 	submissions               map[string]*submissionRecord
+	history                   recordDeadlines
+	logs                      recordDeadlines
+	logsDone                  map[string]bool
 	files                     recordDeadlines
 	keys                      recordDeadlines
 	jobCount, submissionCount int
@@ -86,6 +89,9 @@ func (q *Queue) indexJob(id string, j *Job) {
 	if j == nil {
 		delete(q.records.live, id)
 		q.records.files.set(id, time.Time{})
+		q.records.history.set(id, time.Time{})
+		q.records.logs.set(id, time.Time{})
+		delete(q.records.logsDone, id)
 		return
 	}
 	if mutableJob(j) {
@@ -101,6 +107,19 @@ func (q *Queue) indexJob(id string, j *Job) {
 		}
 	}
 	q.records.files.set(id, at)
+	var history, logs time.Time
+	if terminal(j.State) {
+		ended := q.clock.Now()
+		if j.FinishedAt != nil {
+			ended = *j.FinishedAt
+		}
+		history = ended.Add(max(jobHistoryRetention, q.fileRetention, q.logRetention))
+		if !q.records.logsDone[id] {
+			logs = ended.Add(q.logRetention)
+		}
+	}
+	q.records.history.set(id, history)
+	q.records.logs.set(id, logs)
 }
 func (q *Queue) indexSubmission(id string, r *submissionRecord) {
 	var at time.Time
@@ -118,7 +137,7 @@ func (q *Queue) indexSubmission(id string, r *submissionRecord) {
 	q.records.keys.set(id, at)
 }
 func (q *Queue) rebuildRecords() {
-	q.records = &queueRecords{catalog: map[string]bool{}, removed: map[string]*Job{}, live: map[string]*Job{}, bindings: map[string]string{}, jobCount: len(q.s.Jobs), submissionCount: len(q.s.Submissions)}
+	q.records = &queueRecords{catalog: map[string]bool{}, logsDone: map[string]bool{}, removed: map[string]*Job{}, live: map[string]*Job{}, bindings: map[string]string{}, jobCount: len(q.s.Jobs), submissionCount: len(q.s.Submissions)}
 	for id, j := range q.s.Jobs {
 		q.indexJob(id, j)
 	}
