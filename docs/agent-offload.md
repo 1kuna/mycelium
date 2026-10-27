@@ -5,6 +5,62 @@ not permission to launch locally. This MVP changes no harness configuration and
 adds no T3 dependency to Mycelium.
 Agents use the [`mycelium-offload` skill](../skills/mycelium-offload/SKILL.md).
 
+## Install the agent skill
+
+From this repository, copy the skill directory, including its supporting files,
+into your coding agent's skill directory. For Codex:
+
+```sh
+mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills/mycelium-offload"
+cp -R skills/mycelium-offload/. "${CODEX_HOME:-$HOME/.codex}/skills/mycelium-offload/"
+```
+
+For Claude Code, use `~/.claude/skills/mycelium-offload/` as the destination.
+Reload skills or start a new session after installation. Other harnesses can
+load `skills/mycelium-offload/SKILL.md` directly. This installs agent instructions;
+shell interception still depends on the harness integration below.
+
+## Initialize a profile
+
+From the project's root:
+
+```sh
+myce profile init --name test
+myce profile init --name render --environment render-tools -- python render.py
+```
+
+Initialization inspects `go.mod`, `uv.lock`/`pyproject.toml`, or Python
+requirements/test configuration. Go defaults to `go test ./...`. Python uses
+`uv run` and pytest, honoring the project's Python version and dependency files;
+an existing uv lock uses `--locked`. A requirements project installs pytest and
+`requirements.txt` in a uv-managed environment. Without a lock, dependency
+resolution can change: lock the project before relying on reproducible runs.
+An explicit argv after `--` selects a script or arbitrary command instead.
+Supply the managed catalog environment containing its required tools.
+
+The default environment is the existing
+[`mycelium-gate`](../env/mycelium-gate/README.md) catalog recipe (Go, Python, uv,
+Git). It must be registered on the queue; use `--environment NAME` for another
+registered recipe. Initialization neither registers recipes nor installs host
+tools. In `myce dev`, pass a catalog with `--environment-config`; the same
+registration YAML works with a local path to the recipe's lock.
+
+The command writes `.mycelium/profiles/NAME.yaml`, validates its job fields,
+and prints `myce run --profile NAME`. It does not submit or run the suite.
+Existing profiles are preserved. The starter uses one CPU core, automatic memory,
+and the current OS/architecture as a conservative target, with no host pin or
+host-specific path. `--target OS/ARCH` chooses a different starter target; add
+alternatives only after verifying the toolchain and project there.
+
+Review the profile, ignore `.mycelium/receipts/`, and commit the intended source
+before submitting. `--source-ref COMMIT` explicitly tests an existing committed
+tree without including uncommitted starter files; the default `HEAD` requires a
+clean tree. Source transport retains its normal link and special-file checks.
+The generated wrapper checks its tool, forwards appended arguments, and writes
+a result marker only after the command succeeds. The profile's `check` verifies
+that marker before accepting outputs. A green starter run proves the selected
+command; broaden the suite and its output checks for the project's needs.
+
 ## Project profiles
 
 `myce run --profile gate-full` reads `.mycelium/profiles/gate-full.yaml`, submits
