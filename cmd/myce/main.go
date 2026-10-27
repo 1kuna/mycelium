@@ -775,6 +775,9 @@ func status(ctx context.Context, c myce.Client) (myce.Snapshot, error) {
 	return s, err
 }
 func printStatus(s myce.Snapshot, full bool) {
+	if s.QueueRelease.Version != "" {
+		fmt.Printf("queue release: %s (%s)\n", s.QueueRelease.Version, s.QueueRelease.Commit)
+	}
 	if fs := s.FileStore; fs != nil {
 		if fs.Error != "" {
 			fmt.Printf("%s: %s\n", fs.Store, fs.Error)
@@ -795,6 +798,11 @@ func printStatus(s myce.Snapshot, full bool) {
 		fmt.Printf("curve: %s\n", curve.SummaryAt(s.Now))
 	}
 	for _, m := range s.Machines {
+		if m.Release != nil {
+			fmt.Printf("worker %s release: %s (%s)\n", m.ID, m.Release.Version, m.Release.Commit)
+		} else {
+			fmt.Printf("worker %s release: unknown\n", m.ID)
+		}
 		state := myce.HyphaAvailability(m)
 		if m.LastResort {
 			state += "; last-resort placement"

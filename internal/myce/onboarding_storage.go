@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 )
 
 // MountedNASRoots retains only mount paths, never source addresses/options
@@ -142,7 +144,7 @@ type onboardingStorageFS struct {
 	probeContext  func(context.Context, context.CancelCauseFunc, string) error
 }
 
-var onboardingNASIO = checkpointIO[bool]{timeout: onboardingStorageBudget}
+var onboardingNASIO = checkpointIO[bool]{timeout: -1} // Each operation cancels the sequence on stall; no aggregate cap.
 
 // PrepareOnboardingStorage validates an already resolved selection. One checkpointIO
 // guards the complete filesystem sequence, including cleanup. A blocked syscall
@@ -154,17 +156,7 @@ func prepareOnboardingStorageFS(ctx context.Context, c ServiceConfig, discover b
 	if err := ctx.Err(); err != nil {
 		return c, err
 	}
-	deadlineCtx, cancel := context.WithTimeout(ctx, onboardingStorageBudget)
-	defer cancel()
-	// Validation owns one total deadline across inventory and filesystem I/O.
-	// Standalone selection has its separate, shorter discovery deadline.
-	roots, err := mountedNASRoots(deadlineCtx, c.Detection.OS, command)
-	if errors.Is(ctx.Err(), context.Canceled) {
-		return c, context.Canceled
-	}
-	if deadlineCtx.Err() != nil || errors.Is(err, context.DeadlineExceeded) {
-		return c, preflightError("nas_unresponsive", "storage", fmt.Sprintf("NAS validation exceeded the %s total budget; restore the mount and retry", onboardingStorageBudget))
-	}
+	roots, err := MountedNASRoots(ctx, c.Detection.OS, command)
 	if err != nil {
 		return c, err
 	}
@@ -175,7 +167,7 @@ func prepareOnboardingStorageFS(ctx context.Context, c ServiceConfig, discover b
 		}
 		return c, preflightError("nas_not_mounted", "storage", "selected NAS is not mounted; restore the OS mount or supply --nas PATH")
 	}
-	ioCtx, abort := context.WithCancelCause(deadlineCtx)
+	ioCtx, abort := context.WithCancelCause(ctx)
 	defer abort(nil)
 	_, err = onboardingNASIO.runContext(ioCtx, c.NAS+"\x00"+c.Checkpoints+"\x00"+c.ModelRoot+"\x00"+c.EnvironmentRoot, func() (bool, error) {
 		return false, validateOnboardingStorageFS(ioCtx, abort, c, mount, fs)
@@ -184,7 +176,7 @@ func prepareOnboardingStorageFS(ctx context.Context, c ServiceConfig, discover b
 		return c, context.Canceled
 	}
 	if errors.Is(err, errCheckpointIOTimeout) || errors.Is(err, errCheckpointIOPending) || errors.Is(err, context.DeadlineExceeded) {
-		return c, preflightError("nas_unresponsive", "storage", fmt.Sprintf("NAS validation exceeded a %s filesystem-operation budget or the %s total budget; restore the mount and retry", networkFilesystemBudget, onboardingStorageBudget))
+		return c, preflightError("nas_unresponsive", "storage", fmt.Sprintf("NAS validation stalled beyond the %s filesystem-operation budget or another validation is still pending; restore the mount and retry", networkFilesystemBudget))
 	}
 	if err != nil {
 		return c, err
@@ -196,20 +188,27 @@ func prepareOnboardingStorageFS(ctx context.Context, c ServiceConfig, discover b
 // The operation stays in the sequence goroutine even after its deadline. The
 // outer guard therefore retains ownership until an uninterruptible syscall
 // returns, preventing retries from duplicating blocked I/O.
-func onboardingFSOperation[T any](ctx context.Context, abort context.CancelCauseFunc, fn func() (T, error)) (T, error) {
+func onboardingFSOperation[T any](ctx context.Context, abort context.CancelCauseFunc, fn func() (T, error), operation ...string) (T, error) {
 	var zero T
 	if err := context.Cause(ctx); err != nil {
 		return zero, err
 	}
+	name := "filesystem"
+	if len(operation) > 0 {
+		name = operation[0]
+	}
 	opCtx, cancel := context.WithTimeout(ctx, networkFilesystemBudget)
 	stop := context.AfterFunc(opCtx, func() {
 		if errors.Is(opCtx.Err(), context.DeadlineExceeded) {
+			log.Printf("NAS validation operation=%s stalled budget=%s", name, networkFilesystemBudget)
 			abort(errCheckpointIOTimeout)
 		}
 	})
 	defer cancel()
 	defer stop()
+	started := time.Now()
 	value, err := fn()
+	log.Printf("NAS validation operation=%s completed elapsed=%s success=%t", name, time.Since(started), err == nil && opCtx.Err() == nil)
 	if errors.Is(opCtx.Err(), context.DeadlineExceeded) {
 		abort(errCheckpointIOTimeout)
 	}
@@ -218,15 +217,18 @@ func onboardingFSOperation[T any](ctx context.Context, abort context.CancelCause
 	}
 	return value, err
 }
-func onboardingFSError(ctx context.Context, abort context.CancelCauseFunc, fn func() error) error {
-	_, err := onboardingFSOperation(ctx, abort, func() (bool, error) { return false, fn() })
+func onboardingFSError(ctx context.Context, abort context.CancelCauseFunc, fn func() error, operation ...string) error {
+	_, err := onboardingFSOperation(ctx, abort, func() (bool, error) { return false, fn() }, operation...)
 	return err
 }
 func validateOnboardingStorageFS(ctx context.Context, abort context.CancelCauseFunc, c ServiceConfig, mount string, fs onboardingStorageFS) (result error) {
 	var created []string
 	defer func() {
 		for i := len(created) - 1; i >= 0; i-- {
-			result = errors.Join(result, os.Remove(created[i]))
+			// Cleanup stays in the owned sequence, even after caller cancellation.
+			cleanup, cancel := context.WithCancelCause(context.WithoutCancel(ctx))
+			result = errors.Join(result, onboardingFSError(cleanup, func(err error) { abort(err); cancel(err) }, func() error { return os.Remove(created[i]) }))
+			cancel(nil)
 		}
 	}()
 	if err := ctx.Err(); err != nil {
@@ -234,7 +236,7 @@ func validateOnboardingStorageFS(ctx context.Context, abort context.CancelCauseF
 	}
 	// Check the mount and every ancestor before mkdir. In particular, a missing
 	// mountpoint is never created on the local disk.
-	if st, e := onboardingFSOperation(ctx, abort, func() (os.FileInfo, error) { return fs.lstat(mount) }); e != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
+	if st, e := onboardingFSOperation(ctx, abort, func() (os.FileInfo, error) { return fs.lstat(mount) }, "mount-metadata"); e != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
 		return preflightError("nas_unreachable", "storage", "mounted NAS is unavailable; restore the OS mount")
 	}
 	for _, path := range []string{c.NAS, c.Checkpoints, c.ModelRoot, c.EnvironmentRoot} {
@@ -251,7 +253,7 @@ func validateOnboardingStorageFS(ctx context.Context, abort context.CancelCauseF
 			if err := ctx.Err(); err != nil {
 				return err
 			}
-			st, e := onboardingFSOperation(ctx, abort, func() (os.FileInfo, error) { return fs.lstat(at) })
+			st, e := onboardingFSOperation(ctx, abort, func() (os.FileInfo, error) { return fs.lstat(at) }, "ancestor-metadata")
 			if errors.Is(e, os.ErrNotExist) {
 				if err := ctx.Err(); err != nil {
 					return err
@@ -262,7 +264,7 @@ func validateOnboardingStorageFS(ctx context.Context, abort context.CancelCauseF
 						created = append(created, at)
 					}
 					return err
-				}); e != nil {
+				}, "mkdir"); e != nil {
 					return preflightError("nas_unreachable", "storage", "NAS roots cannot be created; check reachability and write permission")
 				}
 			} else if e != nil || !st.IsDir() || st.Mode()&os.ModeSymlink != 0 {
@@ -270,10 +272,12 @@ func validateOnboardingStorageFS(ctx context.Context, abort context.CancelCauseF
 			}
 		}
 	}
-	for _, path := range []string{c.Checkpoints, c.ModelRoot, c.EnvironmentRoot} {
+	for i, path := range []string{c.Checkpoints, c.ModelRoot, c.EnvironmentRoot} {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		log.Printf("NAS validation root=%s started", []string{"checkpoint", "model", "environment"}[i])
+		started := time.Now()
 		var err error
 		if fs.probeContext != nil {
 			err = fs.probeContext(ctx, abort, path)
@@ -283,6 +287,7 @@ func validateOnboardingStorageFS(ctx context.Context, abort context.CancelCauseF
 		if err != nil {
 			return preflightError("nas_unreachable", "storage", "NAS write/sync/rename probe failed; restore mount reachability and permissions")
 		}
+		log.Printf("NAS validation root=%s completed elapsed=%s", []string{"checkpoint", "model", "environment"}[i], time.Since(started))
 	}
 	return ctx.Err()
 }
@@ -293,7 +298,7 @@ func probeNASDirectory(dir string) error {
 	return probeNASDirectoryContext(ctx, abort, dir)
 }
 func probeNASDirectoryContext(ctx context.Context, abort context.CancelCauseFunc, dir string) error {
-	f, err := onboardingFSOperation(ctx, abort, func() (*os.File, error) { return os.CreateTemp(dir, ".myce-install-probe-") })
+	f, err := onboardingFSOperation(ctx, abort, func() (*os.File, error) { return os.CreateTemp(dir, ".myce-install-probe-") }, "create")
 	if f != nil && err != nil {
 		_ = f.Close()
 	}
@@ -305,22 +310,22 @@ func probeNASDirectoryContext(ctx context.Context, abort context.CancelCauseFunc
 	// Cleanup also gets a bound. If cancellation prevents cleanup, retain the
 	// disposable probe for operator recovery rather than launching more NAS I/O.
 	defer func() {
-		_ = onboardingFSError(ctx, abort, func() error { return os.Remove(path) })
-		_ = onboardingFSError(ctx, abort, func() error { return os.Remove(renamed) })
+		_ = onboardingFSError(ctx, abort, func() error { return os.Remove(path) }, "delete")
+		_ = onboardingFSError(ctx, abort, func() error { return os.Remove(renamed) }, "delete")
 	}()
-	writeErr := onboardingFSError(ctx, abort, func() error { _, err := f.WriteString("myce NAS write and rename probe\n"); return err })
-	syncErr := onboardingFSError(ctx, abort, f.Sync)
+	writeErr := onboardingFSError(ctx, abort, func() error { _, err := f.WriteString("myce NAS write and rename probe\n"); return err }, "write")
+	syncErr := onboardingFSError(ctx, abort, f.Sync, "fsync")
 	// Close the owned descriptor even on timeout; it remains inside the single
 	// outstanding sequence and cannot cause a second probe to be launched.
-	closeErr := onboardingFSError(ctx, abort, f.Close)
+	closeErr := onboardingFSError(ctx, abort, f.Close, "close")
 	if ctx.Err() != nil {
 		_ = f.Close()
 	}
 	if err = errors.Join(writeErr, syncErr, closeErr); err != nil {
 		return err
 	}
-	if err = onboardingFSError(ctx, abort, func() error { return os.Rename(path, renamed) }); err != nil {
+	if err = onboardingFSError(ctx, abort, func() error { return os.Rename(path, renamed) }, "rename"); err != nil {
 		return err
 	}
-	return onboardingFSError(ctx, abort, func() error { return os.Remove(renamed) })
+	return onboardingFSError(ctx, abort, func() error { return os.Remove(renamed) }, "delete")
 }

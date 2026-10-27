@@ -95,7 +95,7 @@ type Queue struct {
 	startupFiles           *fileStoreConfiguration
 	fileCheckpoints        bool
 	submitVerificationSlot chan struct{}
-	nasProbe               checkpointIO[bool]
+	nasProbe               checkpointAvailability
 	nasProgress            checkpointIO[int64]
 	nasAvailable           bool
 
@@ -573,6 +573,9 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		if existing != nil {
 			out = *existing
 			return nil
+		}
+		if s.StartBy != nil && s.StartBy.Before(q.clock.Now()) {
+			return rejectFieldRule("job_deadline_invalid", errors.New("start_by is already past"))
 		}
 		if err := q.validateMachineNames(s.AllowedMachines); err != nil {
 			return err
@@ -1557,7 +1560,7 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 
 // Projection runs against either the locked queue or a fully detached read view.
 func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
-	out := Snapshot{HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
+	out := Snapshot{QueueRelease: CurrentRelease(), HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
 	for _, s := range q.s.ModelSlots {
 		copy := *s
 		model, _ := q.model(s.Model)

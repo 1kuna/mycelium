@@ -5,11 +5,12 @@ test "$(uname -s)/$(uname -m)" = Darwin/arm64 || { echo "native macOS arm64 rele
 test "$#" = 2 || { echo "usage: scripts/build-release.sh VERSION OUTPUT_DIR" >&2; exit 1; }
 version=$1
 output=$2
+commit=$(git rev-parse HEAD)
 mkdir -p "$output"
-CGO_ENABLED=1 go build -trimpath -buildvcs=false -ldflags "-X mycelium/internal/myce.BuildVersion=$version" -o "$output/myce-darwin-arm64" ./cmd/myce
+CGO_ENABLED=1 go build -trimpath -buildvcs=false -ldflags "-X mycelium/internal/myce.BuildVersion=$version -X mycelium/internal/myce.BuildCommit=$commit" -o "$output/myce-darwin-arm64" ./cmd/myce
 "$output/myce-darwin-arm64" release build-targets > "$output/build-targets.txt"
 while read -r os arch cgo; do
-  CGO_ENABLED=$cgo GOOS=$os GOARCH=$arch go build -trimpath -buildvcs=false -ldflags "-X mycelium/internal/myce.BuildVersion=$version" -o "$output/myce-$os-$arch" ./cmd/myce
+  CGO_ENABLED=$cgo GOOS=$os GOARCH=$arch go build -trimpath -buildvcs=false -ldflags "-X mycelium/internal/myce.BuildVersion=$version -X mycelium/internal/myce.BuildCommit=$commit" -o "$output/myce-$os-$arch" ./cmd/myce
 done < "$output/build-targets.txt"
 # Platform signing changes the bytes. It must precede manifest/hash generation.
 if test -n "${MYCE_DEVELOPER_ID:-}"; then
