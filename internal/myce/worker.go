@@ -1108,7 +1108,7 @@ func (w Worker) checkHostRAM(gpu, host float64) error {
 	}
 	free, err := w.HostMemorySource(context.Background())
 	need := hostNeed(&w.Machine, gpu, host)
-	if err != nil || !validMemoryValue(free) || free < need {
+	if err != nil || !hostMemoryAvailableFits(&w.Machine, gpu, host, free) {
 		return fmt.Errorf("%w: host RAM need %g GiB, available %g GiB: %v", errWorkerMemory, need, free, err)
 	}
 	return nil

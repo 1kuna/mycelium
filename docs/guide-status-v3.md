@@ -282,3 +282,29 @@ local-exclusion verdict.
 The optional wait reads this status until quiescent or the injected deadline.
 Timeout and queue outage fail without changing policy or release custody.
 Every host command uses queue evidence; there is no local envelope or rest verdict.
+
+### Live headroom and reservations
+
+`myce status --json` returns the status snapshot as JSON; with a job ID it
+returns that job's status view. `host_available_memory_gb` is worker-observed
+available RAM after its configured host reserve. `host_memory_in_use_gb` is
+Mycelium's reservation ledger, not measured process RSS.
+`free_host_memory_gb` is admitted headroom after reservations and any configured
+allowance. Similarly, `cpu_in_use_cores` and `free_cpu_cores` are reservations,
+not CPU utilization. Zero reserved cores does not establish an idle host.
+
+A queued job whose other resource checks fit but whose host RAM does not fit
+shows `diagnostic_code: host_memory_headroom`. Its reason names the machine,
+required RAM including slack, live available RAM, reservations and admitted
+headroom; unavailable telemetry is reported as unavailable. Dispatch and the
+worker's immediate launch recheck compare headroom with the same declared RAM
+need and slack. The worker rechecks live RAM because other programs can consume
+it after dispatch. No additional RAM ceiling or pressure threshold is introduced.
+
+The runtime does not currently report an OS pressure verdict (Linux PSI or
+macOS memory pressure), live CPU utilization, or swap rate: treat those
+measurements as **unknown**, never as healthy or zero. The controlled RAM
+headroom regression proves admission/status agreement for the existing RAM
+signal, not complete OS-pressure coverage. Native pressure qualification remains
+separate; see [the native checklist](production-test-plan.md#pressure-and-status-agreement).
+Status is diagnostic and never permission to launch work locally; submit it.

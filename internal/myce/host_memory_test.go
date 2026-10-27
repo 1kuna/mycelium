@@ -409,3 +409,51 @@ func TestHostMemoryAllowanceAggregatePreparationsAndSidecars(t *testing.T) {
 		})
 	}
 }
+
+// A controlled heartbeat changes live headroom without allocating host RAM.
+func TestHostMemoryPressureStatusAdmissionAgreement(t *testing.T) {
+	q, _ := fixture(t)
+	m := machine("pressure-fixture", "fake")
+	m.HostMemoryMeasured = true
+	m.HostAvailableMemoryGB = 12
+	check(t, q, m, nil)
+	s := spec("experiment")
+	s.Needs.HostMemoryGB = 4
+	j := submit(t, q, s)
+	m.HostAvailableMemoryGB = 3
+	if r := check(t, q, m, nil); r.Job != nil {
+		t.Fatal("dispatch ignored live pressure")
+	}
+	snapshot, err := q.snapshot(true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Machines) != 1 {
+		t.Fatal(snapshot.Machines)
+	}
+	observed := snapshot.Machines[0]
+	if observed.HostAvailableMemoryGB != 3 || observed.HostMemoryInUseGB != 0 || observed.FreeHostMemoryGB != 3 {
+		t.Fatalf("live/reserved projection: %+v", observed)
+	}
+	var held *Job
+	for _, candidate := range snapshot.Jobs {
+		if candidate.ID == j.ID {
+			held = candidate
+		}
+	}
+	if held == nil || held.State != "queued" || held.DiagnosticCode != "host_memory_headroom" || !strings.Contains(held.Reason, "live 3.0 GiB; reserved 0.0 GiB") {
+		t.Fatalf("typed pressure status: %+v", held)
+	}
+	w := Worker{Machine: m, HostMemorySource: func(context.Context) (float64, error) { return 3, nil }}
+	if err := w.checkHostRAM(s.Needs.MemoryGB, s.Needs.HostMemoryGB); err == nil {
+		t.Fatal("launch ignored pressure")
+	}
+	m.HostAvailableMemoryGB = 12
+	if r := check(t, q, m, nil); r.Job == nil || r.Job.ID != j.ID {
+		t.Fatal("recovered headroom did not admit queued job")
+	}
+	w.HostMemorySource = func(context.Context) (float64, error) { return 12, nil }
+	if err := w.checkHostRAM(s.Needs.MemoryGB, s.Needs.HostMemoryGB); err != nil {
+		t.Fatal(err)
+	}
+}

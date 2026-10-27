@@ -253,6 +253,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	fakeGPUs := f.Int("fake-gpus", 1, "GPU components per fake machine in dev mode (use --workers 1)")
 	now := f.Bool("now", false, "stop every job on leave")
 	full := f.Bool("full", false, "show full job IDs in status")
+	statusJSON := f.Bool("json", false, "show status as JSON")
 	follow := f.Bool("follow", false, "follow logs until the job is terminal")
 	if args[0] == "status" || args[0] == "logs" {
 		f.Usage = func() {
@@ -684,6 +685,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			if err != nil {
 				return err
 			}
+			if *statusJSON {
+				return json.NewEncoder(os.Stdout).Encode(j)
+			}
 			printStatus(myce.Snapshot{Jobs: []*myce.Job{j}, Now: s.Now}, *full)
 			for _, a := range j.AttemptHistory {
 				fmt.Printf("  attempt %d hypha=%s session=%s ended=%s state=%s interrupted=%t oom=%t availability=%t operator=%t: %s", a.Attempt, a.Machine, a.Session, a.EndedAt.UTC().Format(time.RFC3339), a.State, a.Interrupted, a.OutOfMemory, a.PoliteStop, a.OperatorStop, a.Reason)
@@ -699,6 +703,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 				fmt.Println()
 			}
 			return nil
+		}
+		if *statusJSON {
+			return json.NewEncoder(os.Stdout).Encode(s)
 		}
 		printStatus(s, *full)
 		return nil

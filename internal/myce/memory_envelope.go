@@ -357,7 +357,7 @@ func (q *Queue) memoryWaitingReason(j *Job, machines map[string]*Machine) string
 			if hostFits(m, n.MemoryGB, n.HostMemoryGB) {
 				return ""
 			}
-			why := fmt.Sprintf("%s: %.1f GiB needed, %.1f GiB available (live %.1f GiB; allowance %.1f GiB; %s)", m.ID, hostNeed(m, n.MemoryGB, n.HostMemoryGB), m.FreeHostMemoryGB, m.HostAvailableMemoryGB, m.EffectiveHostMemoryBudgetGB, candidate.MemoryEnvelope.Source)
+			why := fmt.Sprintf("%s: %.1f GiB needed, %.1f GiB available (live %.1f GiB; reserved %.1f GiB; allowance %.1f GiB; %s)", m.ID, hostNeed(m, n.MemoryGB, n.HostMemoryGB), m.FreeHostMemoryGB, m.HostAvailableMemoryGB, m.HostMemoryInUseGB, m.EffectiveHostMemoryBudgetGB, candidate.MemoryEnvelope.Source)
 			if m.HostMemoryPolicyMismatch {
 				why += "; host allowance policy mismatch"
 			}
