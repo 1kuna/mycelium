@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"net"
@@ -48,6 +49,37 @@ func nativeIsolationLinuxAttack() error {
 	}
 	if err := os.WriteFile(filepath.Join(os.Getenv("TMPDIR"), "own-temp"), []byte("own"), 0600); err != nil {
 		return fmt.Errorf("own temp: %w", err)
+	}
+	// Match CUDA's pthread_setname_np path: rename another live thread in
+	// this process, while the protected list below still denies worker proc.
+	threads, err := filepath.Glob("/proc/self/task/*/comm")
+	if err != nil {
+		return err
+	}
+	renamed := false
+	for _, path := range threads {
+		if filepath.Base(filepath.Dir(path)) == strconv.Itoa(os.Getpid()) {
+			continue
+		}
+		before, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if err := os.WriteFile(path, []byte("myce-gpu-test"), 0600); err != nil {
+			return fmt.Errorf("own runtime thread name: %w", err)
+		}
+		after, err := os.ReadFile(path)
+		if restoreErr := os.WriteFile(path, before, 0600); restoreErr != nil {
+			return restoreErr
+		}
+		if err != nil || strings.TrimSpace(string(after)) != "myce-gpu-test" {
+			return errors.New("own runtime thread name was not written")
+		}
+		renamed = true
+		break
+	}
+	if !renamed {
+		return errors.New("missing runtime thread for GPU naming regression")
 	}
 	for _, path := range strings.Split(os.Getenv("MYCE_NATIVE_TEST_PROTECTED"), string(os.PathListSeparator)) {
 		if _, err := os.ReadFile(path); err == nil {
@@ -212,7 +244,7 @@ func TestNativeIsolationLinuxWorkerSiblingAndControl(t *testing.T) {
 			t.Error("sibling cleanup timed out")
 		}
 	}()
-	protected := []string{filepath.Join(siblingWork, "secret"), filepath.Join(siblingWork, ".tmp", "secret"), credential, fmt.Sprintf("/proc/%d/environ", os.Getpid())}
+	protected := []string{filepath.Join(siblingWork, "secret"), filepath.Join(siblingWork, ".tmp", "secret"), credential, fmt.Sprintf("/proc/%d/environ", os.Getpid()), fmt.Sprintf("/proc/%d/task/%d/comm", os.Getpid(), os.Getpid())}
 	for _, path := range protected {
 		if _, err := os.ReadFile(path); err != nil {
 			t.Fatal("protected fixture unavailable", err)
@@ -297,6 +329,7 @@ __attribute__((constructor)) static void attack(void) {
 			if group {
 				j.Spec.Run.MemoryGB = .125
 				j.Spec.Needs.HostMemoryGB = j.Spec.Run.MemoryGB
+				w.HostMemorySource = func(context.Context) (float64, error) { return 1, nil }
 			}
 			p, err := w.start(store, j)
 			if err != nil {
@@ -349,7 +382,7 @@ func TestNativeIsolationLinuxFallback(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer unixListener.Close()
-			env := map[string]string{"TMPDIR": filepath.Join(work, ".tmp"), "MYCE_NATIVE_TEST_WORK": work, "MYCE_NATIVE_TEST_PROTECTED": strings.Join([]string{secret, sibling, fmt.Sprintf("/proc/%d/environ", os.Getpid())}, string(os.PathListSeparator)), "MYCE_NATIVE_TEST_CONTROL": control.Addr().String(), "MYCE_NATIVE_TEST_SOCKET": socket}
+			env := map[string]string{"TMPDIR": filepath.Join(work, ".tmp"), "MYCE_NATIVE_TEST_WORK": work, "MYCE_NATIVE_TEST_PROTECTED": strings.Join([]string{secret, sibling, fmt.Sprintf("/proc/%d/environ", os.Getpid()), fmt.Sprintf("/proc/%d/task/%d/comm", os.Getpid(), os.Getpid())}, string(os.PathListSeparator)), "MYCE_NATIVE_TEST_CONTROL": control.Addr().String(), "MYCE_NATIVE_TEST_SOCKET": socket}
 			ports := []string{}
 			if sidecars {
 				listener, err := net.Listen("tcp4", "127.0.0.1:0")
