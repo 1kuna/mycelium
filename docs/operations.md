@@ -875,3 +875,20 @@ No automatic rollback, downgrade, forced job stop, SSH, driver, package or OS
 changes occur. Offline or unknown custody stays a visible wait; elapsed time
 never proves release. Native service/signing qualification and the first live
 rollout remain separate from the laptop acceptance tests.
+
+## Queue history retention
+
+Maintenance retires terminal job rows after 168 hours (or longer configured
+result/log retention), once all attempts are released and file/log cleanup is
+complete. Each tick removes at most 64 jobs. Keyed replay answers remain for
+30 days after removal, followed by permanent expired-key digests; learned work
+curves remain. Expired jobs disappear from listing and ID lookup. See the
+[retention contract](design-proposal.md#submission-identity-and-cancellation-80).
+
+Deleted SQLite pages are reused. Retention bounds full history by age, not total
+bytes: permanent key digests and unresolved custody still accumulate. To reclaim
+physical disk space, stop the queue through normal maintenance, take a verified
+local backup, and compact the stopped local database using SQLite `VACUUM`.
+Never open a NAS copy with SQLite or compact the running queue. Check free space
+first: compaction needs room for a second database. Preserve the verified backup
+until the compacted database passes `PRAGMA integrity_check` and reopens normally.

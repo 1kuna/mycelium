@@ -402,9 +402,10 @@ func TestSubmissionReservationAndMarkerRestart(t *testing.T) {
 		t.Fatal("bound reservation precedence lost on restart")
 	}
 	s.SubmissionKey = "expired-key"
+	jobsBefore := len(q.s.Jobs)
 	_, err = q.Submit(s)
 	submissionError(t, err, 410, "submission_key_expired")
-	if len(q.s.Jobs) != 1 {
+	if len(q.s.Jobs) != jobsBefore {
 		t.Fatal("marker created a job after restart")
 	}
 }

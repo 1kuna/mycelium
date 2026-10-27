@@ -259,6 +259,29 @@ owned work, preserve pending results, then reconnect for exact reconciliation.
 | SHA-256 digest marker of `(project, key)` | Retained indefinitely after full-record expiry. Submit returns HTTP 410 `submission_key_expired`, never creating a job; cancel-by-key returns `unknown`. |
 | No record, with intact durable marker store | Genuinely never seen; cancel-by-key records an `absent` reservation. A cache miss alone never proves absence. |
 
+**Queue history retention amendment (#248, 2026-10-27).** Terminal jobs leave
+job listing and ID lookup after at least **168 hours from `finished_at`**, matching
+the default result window. Longer configured result or log retention extends
+this minimum. Missing terminal timestamps start their window when first observed.
+Removal waits for every known attempt's confirmed release, expired result/input
+files with completed reclamation, and completed log cleanup. Active work and
+learned work-curve observations are not pruned. Removal is automatic, in batches
+of at most 64 jobs per maintenance tick, in the existing crash-consistent SQLite
+transaction; failed commits restore both jobs and keyed answers. No bulk file or
+log-table cleanup runs under the queue mutex.
+
+The existing key contract remains: after job removal the full answer, spec
+fingerprint and cancellation/release evidence remain available by submission key
+for another **30 days**, then become permanent digest-only markers. Thus ordinary
+full history is limited to the retention windows plus cleanup backlog; unresolved
+custody and permanent markers intentionally have no age limit. This is not a
+fixed byte quota. SQLite reuses deleted pages; physical file shrinkage is an
+offline compaction operation, never an automatic `VACUUM` on the live queue.
+The retention choice was checked against the verified pre-upgrade backup: 1,898
+jobs, approximately eight days of terminal history, 500,056,064 database bytes;
+logs occupied roughly 445 MB. Keeping full history indefinitely was unnecessary
+for the seven-day result and thirty-day post-removal replay contracts.
+
 A key's acknowledged `will_not_run: true` remains true permanently, including after expiry. While a consumer operation is open, recover a lost response by retrying its stored identical spec/key within retention. Once closed, cancel by key only, never resubmit. An expired/unknown answer leaves consumer coverage unresolved and blocks its reopen. Consumers own key generation, stored specs, operation intent and acknowledgement persistence. This promises no exactly-once external effects; keep output writes safe to repeat.
 
 ### Job reply contract
