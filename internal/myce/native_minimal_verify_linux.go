@@ -74,6 +74,16 @@ func nativeVerifyMinimalRoot(p nativeLinuxPolicy) ([]string, error) {
 		}
 	}
 	expected := map[string]bool{nativeMinimalReceiptPath: true}
+	for _, path := range receipt.ReadOnlyDirectories {
+		if err := nativeMinimalDestination(path); err != nil {
+			return nil, err
+		}
+		var st unix.Stat_t
+		if path == "/tmp" || !nativePathContains("/tmp", path) || unix.Lstat(path, &st) != nil || st.Mode&unix.S_IFMT != unix.S_IFDIR || unix.Statfs(path, &fs) != nil || fs.Type != unix.TMPFS_MAGIC {
+			return nil, errors.New("minimal-root invalid imported directory skeleton")
+		}
+		expected[path] = true
+	}
 	for _, objects := range [][]nativeMinimalObject{receipt.Files, receipt.Writable, receipt.Devices, receipt.KernelDirectories} {
 		for _, o := range objects {
 			if err := nativeMinimalDestination(o.Path); err != nil {
@@ -137,9 +147,9 @@ func nativeVerifyMinimalRoot(p nativeLinuxPolicy) ([]string, error) {
 			if !expected[path] {
 				return nil, fmt.Errorf("minimal-root unexpected mount: %s", path)
 			}
-			if path == nativeMinimalReceiptPath || slices.ContainsFunc(receipt.Files, func(o nativeMinimalObject) bool { return o.Path == path }) || slices.ContainsFunc(receipt.KernelDirectories, func(o nativeMinimalObject) bool { return o.Path == path }) {
+			if path == nativeMinimalReceiptPath || slices.Contains(receipt.ReadOnlyDirectories, path) || slices.ContainsFunc(receipt.Files, func(o nativeMinimalObject) bool { return o.Path == path }) || slices.ContainsFunc(receipt.KernelDirectories, func(o nativeMinimalObject) bool { return o.Path == path }) {
 				if !slices.Contains(strings.Split(fields[5], ","), "ro") {
-					return nil, errors.New("minimal-root regular file mount is not read-only")
+					return nil, errors.New("minimal-root imported mount is not read-only")
 				}
 			}
 		}

@@ -206,7 +206,24 @@ func TestNativeMinimalRootLinuxAttacks(t *testing.T) {
 			t.Skip("disposable probe requires a static test binary (CGO_ENABLED=0); no ambient host runtime import")
 		}
 	}
-	work, cache, runtimeRoot := t.TempDir(), t.TempDir(), t.TempDir()
+	work := t.TempDir()
+	// Exercise imports on the separate writable /tmp filesystem, including
+	// nested skeleton directories; the synthetic root's remount cannot cover it.
+	cache, err := os.MkdirTemp("/tmp", "myce-minimal-model-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(cache) })
+	runtimeRoot, err := os.MkdirTemp("/tmp", "myce-minimal-runtime-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(runtimeRoot) })
+	for _, root := range []string{cache, runtimeRoot} {
+		if err := os.Mkdir(filepath.Join(root, "nested"), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for _, path := range []string{filepath.Join(work, ".tmp"), filepath.Join(work, ".scratch")} {
 		if err := os.Mkdir(path, 0700); err != nil {
 			t.Fatal(err)
@@ -426,6 +443,15 @@ func nativeMinimalAttack() error {
 			return err
 		}
 	}
+	for _, root := range []string{"/run", "/tmp", "/dev/shm", os.Getenv("TMPDIR")} {
+		dir, err := os.MkdirTemp(root, "own-")
+		if err != nil {
+			return fmt.Errorf("private temporary directory creation: %w", err)
+		}
+		if err := os.Remove(dir); err != nil {
+			return err
+		}
+	}
 	model := os.Getenv("MYCE_MINIMAL_MODEL")
 	if _, err := os.ReadFile(model); err != nil {
 		return err
@@ -447,6 +473,21 @@ func nativeMinimalAttack() error {
 	}
 	if err := exec.Command(tool, "_native-minimal-baseline").Run(); err != nil {
 		return fmt.Errorf("runtime/cache execution: %w", err)
+	}
+	for _, root := range []string{filepath.Dir(model), filepath.Dir(tool)} {
+		for _, dir := range []string{root, filepath.Join(root, "nested")} {
+			for _, mutate := range []func() error{
+				func() error { return os.WriteFile(filepath.Join(dir, "inserted"), []byte("escape"), 0700) },
+				func() error { return os.Mkdir(filepath.Join(dir, "inserted-dir"), 0700) },
+				func() error { return os.Symlink("/tmp/own", filepath.Join(dir, "inserted-link")) },
+				func() error { return os.Chmod(dir, 0777) },
+			} {
+				err := mutate()
+				if !errors.Is(err, unix.EROFS) && !errors.Is(err, unix.EACCES) && !errors.Is(err, unix.EPERM) {
+					return fmt.Errorf("imported RO/RX directory mutation not denied: %s: %v", dir, err)
+				}
+			}
+		}
 	}
 	queuePort, err := strconv.Atoi(os.Getenv("MYCE_MINIMAL_QUEUE_PORT"))
 	if err != nil {

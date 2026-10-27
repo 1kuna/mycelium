@@ -173,6 +173,7 @@ type nativeMinimalObject struct {
 type nativeMinimalReceipt struct {
 	Files, Writable, Devices []nativeMinimalObject
 	KernelDirectories        []nativeMinimalObject
+	ReadOnlyDirectories      []string // Constructed tmpfs skeletons beneath private /tmp.
 	MetricFiles              []string
 	CgroupMountinfo          []byte
 	HostNamespaces           map[string]uint64
@@ -266,7 +267,15 @@ func (b *nativeMinimalBuilder) tree(parent int, name, dest string) error {
 			return err
 		}
 		slices.Sort(names)
-		b.args = append(b.args, "--dir", dest)
+		// The root remount does not cover the separate writable /tmp mount.
+		// Give imported trees there their own empty tmpfs, then remount that
+		// skeleton read-only after construction. No host directory is bound.
+		if nativePathContains("/tmp", dest) && slices.Contains(b.read, dest) && !slices.ContainsFunc(b.receipt.ReadOnlyDirectories, func(root string) bool { return nativePathContains(root, dest) }) {
+			b.args = append(b.args, "--tmpfs", dest)
+			b.receipt.ReadOnlyDirectories = append(b.receipt.ReadOnlyDirectories, dest)
+		} else {
+			b.args = append(b.args, "--dir", dest)
+		}
 		for _, child := range names {
 			if err := b.tree(fd, child, filepath.Join(dest, child)); err != nil {
 				return err
@@ -352,6 +361,9 @@ func nativeMinimalLaunch(args []string) error {
 
 func nativeBuildMinimalRoot(p nativeLinuxPolicy, anchor bool) (*nativeMinimalBuilder, error) {
 	b := &nativeMinimalBuilder{seen: map[string]bool{}, read: append(slices.Clone(p.Read), p.ReadOnly...), write: p.Write}
+	// Parents must be constructed first: a later skeleton mount must never
+	// cover an already imported child file or directory.
+	slices.Sort(b.read)
 	ok := false
 	defer func() {
 		if !ok {
@@ -426,7 +438,7 @@ func nativeBuildMinimalRoot(p nativeLinuxPolicy, anchor bool) (*nativeMinimalBui
 		if err := nativeMinimalDestination(path); err != nil {
 			return nil, err
 		}
-		if path == "/run" || strings.HasPrefix(path, "/run/") || path == "/dev" || strings.HasPrefix(path, "/dev/") || path == "/sys/fs/cgroup" || strings.HasPrefix(path, "/sys/fs/cgroup/") {
+		if path == "/tmp" || path == "/run" || strings.HasPrefix(path, "/run/") || path == "/dev" || strings.HasPrefix(path, "/dev/") || path == "/sys/fs/cgroup" || strings.HasPrefix(path, "/sys/fs/cgroup/") {
 			return nil, fmt.Errorf("minimal-root unsafe runtime root: %s", path)
 		}
 		if _, err := os.Lstat(path); errors.Is(err, os.ErrNotExist) {
@@ -503,6 +515,9 @@ func nativeBuildMinimalRoot(p nativeLinuxPolicy, anchor bool) (*nativeMinimalBui
 		b.keep(fd, path) // Pin identity against inode reuse; /dev is operator-owned.
 		b.args = append(b.args, "--dev-bind", path, path)
 		b.receipt.Devices = append(b.receipt.Devices, nativeMinimalStat(path, &st))
+	}
+	for _, path := range b.receipt.ReadOnlyDirectories {
+		b.args = append(b.args, "--remount-ro", path)
 	}
 	data, err := json.Marshal(b.receipt)
 	if err != nil {

@@ -83,9 +83,6 @@ func NativeExec(args []string) error {
 		return fmt.Errorf("native cgroup metrics: %w", err)
 	}
 	p.ReadOnly = append(p.ReadOnly, metrics...)
-	if p.MinimalRoot {
-		p.Write = append(p.Write, "/run", "/tmp")
-	}
 	if err := nativeApplyLandlock(p); err != nil {
 		return fmt.Errorf("native Landlock: %w", err)
 	}
@@ -159,6 +156,17 @@ func nativeApplyLandlock(p nativeLinuxPolicy) error {
 	for _, path := range p.Write {
 		if err := addPath(path, write, false); err != nil {
 			return err
+		}
+	}
+	if p.MinimalRoot {
+		// Private temp remains usable, but its recursive grant must not add
+		// execution to imported RO trees beneath /tmp. Exact work and RX
+		// grants retain execution. Constructed import directories also have
+		// their own read-only mounts, preventing insertion beneath this grant.
+		for _, path := range []string{"/run", "/tmp"} {
+			if err := addPath(path, write&^unix.LANDLOCK_ACCESS_FS_EXECUTE, false); err != nil {
+				return err
+			}
 		}
 	}
 	// Resolve self inside the payload's PID namespace, not in the worker. Do

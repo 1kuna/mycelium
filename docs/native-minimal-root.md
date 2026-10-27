@@ -53,7 +53,13 @@ standard bubblewrap and Linux FDs instead:
    with `O_PATH|O_NOFOLLOW`; bind individual regular files read-only with bubblewrap
    FD-bind comparison before executable startup. Never bind a mutable artifact read-tree directory. Refuse sockets, FIFOs and other special
    files. Recreate only links contained in the declared read layout without
-   aliases to writable trees.
+   aliases to writable trees. Imports beneath private `/tmp` use separate empty
+   tmpfs skeleton mounts, remounted read-only after construction and verified by
+   the final helper; remounting `/` alone cannot protect that separate filesystem.
+   Generic private `/tmp` and `/run` Landlock grants omit execution. Declared RX
+   roots and exact writable work (including its managed `TMPDIR`) retain execution;
+   imported RO content receives no direct execution grant. An import of all `/tmp`
+   is refused so ordinary private temporary file/directory creation remains usable.
 3. Pin and bind exact attempt work/checkpoint/usage objects. Inspect existing
    content through the pinned directory; refuse special files, symlinks and
    runtime inode aliases. Existing exclusive staging, verified previous-attempt
@@ -74,8 +80,9 @@ comparison; a surviving rename can preserve the original inode, otherwise setup
 refuses before executing the helper.
 Later source-directory insertion is invisible because the directory is absent.
 This protects shared caches against socket insertion/replacement by previous or
-sibling confined attempts without claiming a pathname scan is atomic. Confined
-jobs lack content-write/MAKE/REFER grants to runtime/cache trees. Writable inode
+sibling confined attempts without claiming a pathname scan is atomic. Read-only
+constructed mounts protect runtime/cache contents and directory entries even
+beneath the generic writable private-temp Landlock grants. Writable inode
 aliases are refused. Fallback's permitted host metadata changes cannot turn a
 pinned regular inode into a socket.
 
@@ -88,7 +95,8 @@ threat model. No payload-writable shared producer or inherited host directory/
 socket handle is accepted as authority.
 
 No model/runtime bytes are copied; the receipt is the only copied metadata. Cost is traversal, directory metadata and one
-mount/open descriptor per regular artifact file; the fixed sysfs directories do
+mount/open descriptor per regular artifact file, plus a tmpfs mount per outer
+imported directory tree beneath `/tmp`; the fixed sysfs directories do
 not require expansion. `bwrap --args` consumes NUL-separated
 arguments from a sealed memfd to avoid `ARG_MAX`. Descriptor/mount exhaustion
 refuses launch. Large layouts and startup cost require measurement; no automatic
@@ -122,7 +130,16 @@ Landlock scopes remain. All Linux modes remain offline-only, without
 `native_network`; egress is #259 linked to #248.
 
 Members share the anchor, mount paths, scratch, IPC and network. Sidecar
-environments are prepared before root construction. Existing launch/start-by
+environments are prepared before root construction. Strict-mode preparation is
+registered once with the existing process controller before acquiring sidecar
+cache/build locks and links cancellation to the caller's context during synchronous
+startup only. Running groups retain controller-owned TERM/checkpoint grace.
+Cancellation/preemption can
+close that gate before an anchor exists. A startup refusal unregisters the
+preparing process and releases already-acquired sidecar cache holds; the caller
+retains ownership of main-environment and memory cleanup on startup failure.
+After successful startup the existing group goroutine owns those resources.
+Existing launch/start-by
 receipt pipes 3/4, memory attachment, TERM/checkpoint grace, pidfd custody and
 group cleanup remain. Setup FDs close at exec; stdio/receipt slots reject host
 sockets/directories. Source handles do not survive into payloads or the
@@ -134,7 +151,10 @@ helper verifies its mount identity, and joined members use `--wdns`.
 Parent owns compilation, execution and review. Suggested selectors:
 
 - Portable: `TestNativeMinimalRootLinkLayout`,
-  `TestNativeMinimalRootOperatorConfig`, `TestInstallSettingsTableComplete`,
+  `TestNativeMinimalRootOperatorConfig`,
+  `TestNativeMinimalRootCancellationPreparing` (real held build lock; user cancel
+  and priority preemption plus startup-context cancellation, no namespace or payload
+  launch), `TestInstallSettingsTableComplete`,
   `TestInstallSettingsOverlayMatrix`, `TestNativeNetworkPlacement`.
 - Linux planning/refusal: `TestNativeMinimalRootPinnedConstruction`,
   `TestNativeMinimalRootCapabilityRefusal`; retain
@@ -146,7 +166,8 @@ Parent owns compilation, execution and review. Suggested selectors:
 The attack covers live same-UID/type baselines, a read-only-mounted socket,
 sibling and foreign abstract endpoints, link escape, replacement after FD
 pinning, own abstract IPC, loopback/scratch sharing, runtime read/execute, model
-no-write/no direct execution and current/main/sidecar metrics with other/control
+no-write/no direct execution, creation/metadata denial in imported RO/RX root and
+nested directories beneath `/tmp`, and current/main/sidecar metrics with other/control
 denials. Synthetic member metric fixtures are distinct from current membership
 proof. The attack also joins a separately constructed anchor through `nsenter`; its
 sidecar is a descendant in the real constructed root; production
@@ -154,6 +175,8 @@ group attachment/custody, actual runtime layouts, checkpoints, GPU/NAS/Office an
 TERM/cleanup still need the parent's integration and approved Linux evidence.
 
 Current state: source pending parent compilation/tests and independent review;
-no Linux execution, policy exception or rollout claimed. Next owner: parent for
+the first source review's private-temp grant and pre-anchor cancellation findings
+have candidate fixes and regressions, with no build/test execution by this worker.
+No Linux execution, policy exception or rollout claimed. Next owner: parent for
 gates and stack-base integration; the maintainer for host policy. Tracking:
 [#262](https://github.com/1kuna/mycelium/issues/262).

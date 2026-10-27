@@ -571,7 +571,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (*proce
 	}
 	env["MYCE_SCRATCH_DIR"] = scratch
 	if len(j.Spec.Run.Sidecars) > 0 || j.Spec.Run.MemoryGB > 0 {
-		p, e := w.startNativeGroup(s, j, identity, memoryAttempt, env, environmentPath, extensionRelease, release)
+		p, e := w.startNativeGroup(ctx, s, j, identity, memoryAttempt, env, environmentPath, extensionRelease, release)
 		if e == nil {
 			environmentStarted, extensionStarted, started = true, true, true
 		}
