@@ -309,6 +309,9 @@ type Copy struct {
 
 type Job struct {
 	AttemptHistory []AttemptOutcome `json:"attempt_history,omitempty"`
+	// Read-only observations; never physical-release evidence for another attempt.
+	Cancellation      *Cancellation      `json:"cancellation,omitempty"`
+	CancellationScope *CancellationScope `json:"cancellation_scope,omitempty"`
 
 	// Simulator-only baseline barrier; never persisted or exposed as an API.
 	simGatherWait    bool

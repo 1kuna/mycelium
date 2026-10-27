@@ -94,8 +94,40 @@ GET `spec` is a redacted view, not the original submission. As documented in the
 redaction while echoing project/key identity. It omits `spec.extension`,
 `spec.extension_digest` and `spec.fan_out`, including the declaration's piece
 arguments; observe top-level progress and child selection instead. Retain the
-submitted declaration if you need all declared keys or arguments before dispatch: `fan_out.children`
-enumerates materialized waves, not undispatched pieces or downstream consumers.
+submitted declaration if you need arguments before dispatch. Use
+`cancellation_scope.pieces` for every declared key, including undispatched keys;
+`fan_out.children` lists only materialized waves.
+
+## Abort and wait for release
+
+Cancel the parent once with `myce cancel PARENT` or
+`myce cancel --project PROJECT --key KEY`. Both routes fence all declared pieces
+and registered dependents, including blocked/ready consumers and retried waves.
+Valid future consumers of the retained cancelled parent are cancelled on admission.
+Terminal results remain intact; cancellation adds durable exclusion metadata.
+
+Read `GET /api/jobs/PARENT` (Python `client.get(parent_id)`) to observe
+`cancellation.release`, or use `myce status PARENT`, which prints cancellation,
+pieces and members. Wait until release is `confirmed` or `not_applicable`;
+terminal job state alone does not establish release. `pending` covers all old
+and current producer/consumer copies until exact cleanup. The logical parent
+reports `confirmed` after attempted descendants settle even though its own
+`release_confirmed` stays absent. Never-attempted cancelled members explicitly
+report `not_applicable`, without manufacturing a physical release.
+
+`cancellation_scope.pieces` includes each `key`, `materialized`, `accepted`,
+optional `wave_id`, `will_not_run`, aggregate `release`, and registered dependent
+IDs in `dependents`. Its `members` lists all retained wave/dependent jobs with
+`job_id`, `state`, `will_not_run` and aggregate `release`. Empty lists are explicit.
+Before abort, release only describes attempts so far; inspect `will_not_run`
+for exclusion. No child cancellation loop is needed.
+
+Scope survives restart and includes future registered consumers on later reads.
+It enumerates retained records: jobs are not automatically removed; keyed
+tombstones expire 30 days after explicit removal, followed by permanent digest
+markers. Once the source is unavailable, GET cannot enumerate it and new
+dependencies are rejected. Artifact expiry does not erase retained scope or
+settle custody. Keep parent identity and acknowledgement locally across outages.
 
 ## Binding model-call curves
 

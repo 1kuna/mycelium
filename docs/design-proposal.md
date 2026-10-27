@@ -283,6 +283,43 @@ The [cancellation acknowledgement schema](schemas/cancel-ack-v1.schema.json) cov
 
 Reservations, tombstones and markers follow the retention table. Accept a key reservation only when the exact project/key is echoed. During queue outage, preserve exact local attempt/release evidence and pending cancellation intents; send them through the API on reconnect. Queue maintenance cannot substitute for cancellation acknowledgements.
 
+### Fan-out abort scope and read-only release (#205)
+
+Cancelling a declared parent by ID or project/key aborts every declared piece,
+materialized wave and registered dependent. Undispatched pieces stay excluded;
+valid future dependencies against a retained cancelled parent bind only cancelled
+jobs. Terminal state/results remain intact with `cancelled_at` exclusion metadata.
+Callers cancel the parent once; they need not cancel children individually.
+
+`GET /api/jobs/{id}` and status expose `cancellation` after cancellation, with
+the same acknowledgement fields and release value as repeated cancel. A logical
+parent's aggregate is `pending` for any unreleased current or old descendant
+copy/host release, `confirmed` once every attempted descendant is proven released,
+and `not_applicable` when neither it nor any descendant was attempted. Remaining
+declared work is durably excluded. Never-assigned cancelled jobs explicitly expose
+`cancellation.release: not_applicable`; this is settled exclusion, without setting
+`release_confirmed` or inventing physical cleanup evidence. The current execution's
+`release_confirmed` alone is never an aggregate acknowledgement.
+
+Every retained declared parent additionally exposes read-only `cancellation_scope`,
+even before cancellation. `pieces` enumerates all declared keys in declaration
+order, including unaccepted/undispatched keys. Each entry has `materialized`,
+`accepted`, optional `wave_id`, `will_not_run`, `release` and sorted `dependents`
+(registered dependent job IDs for that piece). Piece release aggregates its wave
+and dependents. `members` is a sorted flat list of all retained wave/dependent
+jobs with `job_id`, `state`, `will_not_run` and aggregate `release`. Before abort,
+`not_applicable` describes no attempt so far; only `will_not_run: true` establishes
+durable exclusion. No job or attempt is created for an undispatched piece.
+
+This is a snapshot of registered work, not a closed submission transaction:
+future valid dependencies appear on subsequent reads and remain fenced after
+abort. Jobs currently have no automatic record removal; retained keyed answers
+follow the existing 30-day-after-removal limit, then digest-only expiry. Once a
+source is no longer retained, new dependencies are rejected rather than inferred;
+GET cannot enumerate an expired/unknown source. Artifact expiry is independent
+and does not erase retained keys, scope or release custody. This projection adds
+no dependency types or graph scheduler.
+
 ## Upgrade and migration (#80)
 
 v3 is the only runtime; no pre-v3 worker-report, capability/profile, empty-attempt or broad host-cleared fallback. Old or missing worker/report protocol headers, including checkpoint reports and worker events, receive HTTP 426. Within host-launch-v3, current one-attempt workers remain compatible with the M1 keyed wire extension below; upgrade the queue before keyed workers. Exact execution ownership and release evidence remain mandatory across restart/loss; a keyed report never silently clears omitted obligations.

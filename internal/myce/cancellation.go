@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/url"
+	"sort"
 	"time"
 )
 
@@ -135,12 +136,14 @@ func (q *Queue) cancelJob(j *Job) {
 }
 
 func (q *Queue) finishCancellation(j *Job) {
+	outcome := attemptOutcome(j, Result{Interrupted: true})
 	j.State, j.StopAt = "cancelled", nil
 	j.Reason = "cancel requested"
 	if j.FinishedAt == nil {
 		now := q.clock.Now()
 		j.FinishedAt = &now
 	}
+	q.recordAttemptOutcome(j, outcome)
 }
 
 func (q *Queue) cancellation(j *Job, removed bool) Cancellation {
@@ -153,31 +156,110 @@ func (q *Queue) cancellation(j *Job, removed bool) Cancellation {
 	if removed {
 		out.State = "removed"
 	}
-	if j.Attempt > 0 {
-		out.Release = releaseState("confirmed")
-		if len(j.Copies) == 0 && !j.ReleaseConfirmed {
-			out.Release = releaseState("pending")
-		}
-		for _, copy := range j.Copies {
-			if !copy.ReleaseConfirmed && !(copy.Attempt == j.Attempt && j.ReleaseConfirmed) {
-				out.Release = releaseState("pending")
-			}
-		}
-	}
-	for _, r := range q.s.HostReleases {
-		if r.Job == j.ID {
-			out.Release = releaseState("pending")
-		}
-	}
-	for _, child := range q.cancellationMembers(j) {
-		if q.jobReleasePending(child) {
-			out.Release = releaseState("pending")
-		}
-	}
+	out.Release = releaseState(q.observedRelease(j))
 	// Do not return pointers into mutable queue state after unlocking.
 	id := j.ID
 	out.JobID = &id
 	return out
+}
+
+func (q *Queue) cancellationAttempted(j *Job) bool {
+	if j.Attempt > 0 {
+		return true
+	}
+	for _, child := range q.cancellationMembers(j) {
+		if q.cancellationAttempted(child) {
+			return true
+		}
+	}
+	return false
+}
+
+// CancellationScope enumerates the retained declaration and registered jobs.
+// Undispatched pieces have no invented job or attempt. Members are flat and
+// include waves and dependents (also descendants of dependent fan-outs).
+type CancellationScope struct {
+	Pieces  []CancellationPiece  `json:"pieces"`
+	Members []CancellationMember `json:"members"`
+}
+type CancellationMember struct {
+	JobID      string `json:"job_id"`
+	State      string `json:"state"`
+	WillNotRun bool   `json:"will_not_run"`
+	Release    string `json:"release"`
+}
+type CancellationPiece struct {
+	Key          string   `json:"key"`
+	Materialized bool     `json:"materialized"`
+	Accepted     bool     `json:"accepted"`
+	WaveID       string   `json:"wave_id,omitempty"`
+	WillNotRun   bool     `json:"will_not_run"`
+	Release      string   `json:"release"`
+	Dependents   []string `json:"dependents"`
+}
+
+func (q *Queue) observedRelease(j *Job) string {
+	if q.jobReleasePending(j) {
+		return "pending"
+	}
+	if q.cancellationAttempted(j) {
+		return "confirmed"
+	}
+	return "not_applicable"
+}
+
+// Only projections call this, while holding the snapshot read lock or operating
+// on detached state. It reads declaration/identity/custody only, with no I/O.
+func (q *Queue) projectCancellation(out, stored *Job) {
+	if stored.CancelledAt != nil {
+		ack := q.cancellation(stored, false)
+		out.Cancellation = &ack
+	}
+	if stored.Spec.FanOut == nil || stored.FanOut == nil {
+		return
+	}
+	scope := &CancellationScope{Pieces: []CancellationPiece{}, Members: []CancellationMember{}}
+	members := map[string]*Job{}
+	var collect func(*Job)
+	collect = func(parent *Job) {
+		for _, child := range q.cancellationMembers(parent) {
+			if members[child.ID] == nil {
+				members[child.ID] = child
+				collect(child)
+			}
+		}
+	}
+	collect(stored)
+	waves := map[string]*Job{}
+	for _, child := range members {
+		scope.Members = append(scope.Members, CancellationMember{JobID: child.ID, State: child.State, WillNotRun: cancelled(child), Release: q.observedRelease(child)})
+		if child.Batch != nil && child.Batch.Parent == stored.ID {
+			for _, p := range child.Batch.Pieces {
+				waves[p.Key] = child
+			}
+		}
+	}
+	sort.Slice(scope.Members, func(i, k int) bool { return scope.Members[i].JobID < scope.Members[k].JobID })
+	for _, p := range stored.Spec.FanOut.Pieces {
+		_, accepted := stored.FanOut.Results[p.Key]
+		piece := CancellationPiece{Key: p.Key, Accepted: accepted, WillNotRun: cancelled(stored), Release: "not_applicable", Dependents: []string{}}
+		if wave := waves[p.Key]; wave != nil {
+			piece.Materialized, piece.WaveID, piece.Release = true, wave.ID, q.observedRelease(wave)
+		}
+		for _, child := range members {
+			if a := child.Spec.After; a != nil && a.Job == stored.ID && a.Piece == p.Key {
+				piece.Dependents = append(piece.Dependents, child.ID)
+				if q.jobReleasePending(child) {
+					piece.Release = "pending"
+				} else if piece.Release == "not_applicable" && q.cancellationAttempted(child) {
+					piece.Release = "confirmed"
+				}
+			}
+		}
+		sort.Strings(piece.Dependents)
+		scope.Pieces = append(scope.Pieces, piece)
+	}
+	out.CancellationScope = scope
 }
 
 func (c Client) Cancel(ctx context.Context, id string) (Cancellation, error) {
@@ -295,7 +377,7 @@ func (q *Queue) retainedJob(id string) *Job {
 func releaseState(state string) *string { return &state }
 
 // Producer waves and registered consumers share the existing exact-copy custody.
-// Dependency validation prohibits fan-out consumers, so this is a finite tree.
+// Existing-parent dependency validation keeps the traversal finite.
 func (q *Queue) cancellationMembers(j *Job) []*Job {
 	if j.FanOut == nil {
 		return nil
@@ -308,6 +390,12 @@ func (q *Queue) cancellationMembers(j *Job) []*Job {
 	}
 	for _, child := range q.s.Jobs {
 		if child.Spec.After != nil && child.Spec.After.Job == j.ID {
+			out = append(out, child)
+		}
+	}
+	for _, record := range q.s.Submissions {
+		child := record.Job
+		if child != nil && q.s.Jobs[child.ID] == nil && child.Spec.After != nil && child.Spec.After.Job == j.ID {
 			out = append(out, child)
 		}
 	}

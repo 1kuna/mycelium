@@ -352,7 +352,7 @@ class Client:
         return _job_reply(reply)
 
     def get(self, job_id: str) -> dict[str, Any]:
-        """Return a Job reply with its stable project/submission-key identity."""
+        """Return Job identity, cancellation acknowledgement and retained fan-out scope."""
         return self._read_job(job_id)
 
     def cancel(self, job_id: str) -> dict[str, Any]:
