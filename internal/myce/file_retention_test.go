@@ -511,6 +511,10 @@ func TestFileCacheEvictsExpiredVictims(t *testing.T) {
 	for _, partial := range []bool{false, true} {
 		t.Run(fmt.Sprint("partial=", partial), func(t *testing.T) {
 			q, clock := fixture(t)
+			// Keep expiry metadata while testing eviction of expired cache bytes.
+			if err := q.ConfigureLogRetention(2 * DefaultFileRetention); err != nil {
+				t.Fatal(err)
+			}
 			c := retentionClient(t, q)
 			_, a := retentionUpload(t, c, "aaaaaaaaaaaaaaaa")
 			s := spec("experiment")
