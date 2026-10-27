@@ -458,6 +458,15 @@ func applyFleetUpdate(ctx context.Context, configPath, receiptPath string, d fle
 	if r.Phase == "restarting" {
 		return fleetAck(ctx, client, r)
 	}
+	// Activation always needs the installer's existing preflight, including
+	// when a colocated service already published the shared target binary.
+	if c.ValidateInstall() != nil || c.ValidateInstallPolicies() != nil {
+		return fail("fleet_preflight_failed")
+	}
+	roots, err := c.StateRoots()
+	if err != nil || CheckStateRoots(roots...) != nil || prepareInstallNASMode(ctx, c, d.command, true) != nil {
+		return fail("fleet_storage_preflight_failed")
+	}
 	manager := installManager{c.Detection.OS, d.command}
 	unit := installUnit{path: c.Service, label: "local.mycelium." + c.Role}
 	activate := func() error {
@@ -514,13 +523,6 @@ func applyFleetUpdate(ctx context.Context, configPath, receiptPath string, d fle
 	}
 	if before != r.BeforeSHA256 || CheckReleaseUpgrade(r.Instruction.Release.Manifest.Version, r.BeforeVersion, false, before == a.SHA256) != nil {
 		return fail("fleet_version_refused")
-	}
-	if c.ValidateInstall() != nil || c.ValidateInstallPolicies() != nil {
-		return fail("fleet_preflight_failed")
-	}
-	roots, err := c.StateRoots()
-	if err != nil || CheckStateRoots(roots...) != nil || prepareInstallNASMode(ctx, c, d.command, true) != nil {
-		return fail("fleet_storage_preflight_failed")
 	}
 	state, err := manager.inspect(ctx, unit)
 	if err != nil || !state.active || c.Detection.OS == "linux" && state.enabled == "not-found" || c.Detection.OS == "darwin" && !state.loaded {

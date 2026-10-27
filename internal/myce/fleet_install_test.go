@@ -585,27 +585,50 @@ func TestFleetInstallRecoveryRequiresAbsentHelperAndExactOldProcess(t *testing.T
 }
 
 func TestFleetInstallSharedBinaryStillRestartsOldWorker(t *testing.T) {
-	f := newFleetInstallFixture(t, "linux")
-	// A colocated queue has already replaced the shared installed pathname;
-	// the worker's retained executable mapping and session are still old.
-	if err := os.WriteFile(f.c.Binary, f.next, 0700); err != nil {
-		t.Fatal(err)
+	for _, fault := range []string{"healthy", "storage", "installed-storage"} {
+		t.Run(fault, func(t *testing.T) {
+			f := newFleetInstallFixture(t, "linux")
+			// A colocated queue has already replaced the shared installed pathname;
+			// the worker's retained executable mapping and session are still old.
+			if err := os.WriteFile(f.c.Binary, f.next, 0700); err != nil {
+				t.Fatal(err)
+			}
+			f.version = f.i.Release.Manifest.Version
+			if err := f.launch(); err != nil {
+				t.Fatal(err)
+			}
+			r, err := readFleetReceipt(filepath.Join(f.c.State, fleetUpdateReceiptFile))
+			if err != nil || r.BeforeRuntime.SHA256 == r.BeforeSHA256 {
+				t.Fatal("disk hash confused with running image", err)
+			}
+			if fault == "installed-storage" {
+				r.Phase = "installed"
+				if err := writeFleetReceipt(f.c, r); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if fault != "healthy" {
+				if err := os.Mkdir(filepath.Join(f.c.NAS, "mycelium"), 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(f.c.State, filepath.Join(f.c.NAS, "mycelium", "checkpoints")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			err = f.apply()
+			if fault != "healthy" {
+				if err == nil || err.Error() != "fleet_storage_preflight_failed" || f.restarts != 0 {
+					t.Fatal("shared binary bypassed storage preflight", err, f.restarts)
+				}
+			} else if err != nil || f.restarts != 1 {
+				t.Fatal("shared binary skipped worker activation", err, f.restarts)
+			}
+			if f.fetches != 0 {
+				t.Fatal("shared binary fetched again")
+			}
+			f.assertBinary(f.next)
+		})
 	}
-	f.version = f.i.Release.Manifest.Version
-	if err := f.launch(); err != nil {
-		t.Fatal(err)
-	}
-	r, err := readFleetReceipt(filepath.Join(f.c.State, fleetUpdateReceiptFile))
-	if err != nil || r.BeforeRuntime.SHA256 == r.BeforeSHA256 {
-		t.Fatal("disk hash confused with running image", err)
-	}
-	if err := f.apply(); err != nil {
-		t.Fatal(err)
-	}
-	if f.fetches != 0 || f.restarts != 1 {
-		t.Fatal("shared binary skipped worker activation or fetched again")
-	}
-	f.assertBinary(f.next)
 }
 
 func TestFleetInstallStopsAfterFailedManagerHealth(t *testing.T) {
