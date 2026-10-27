@@ -198,6 +198,8 @@ func TestOperatorStopRefundRevivesThirdLossAndPreservesOtherLosses(t *testing.T)
 	j := submit(t, q, s)
 	var old *Job
 	for i := 0; i < 3; i++ {
+		// Each unresolved lost copy keeps its original GPU slot.
+		m = machine(fmt.Sprintf("operator-%d", i), "fake")
 		old = check(t, q, m, nil).Job
 		if old == nil {
 			t.Fatal("no assignment")

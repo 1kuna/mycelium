@@ -41,7 +41,8 @@ func retainedLossFixture(t *testing.T) (*Queue, *fakeClock, *Job, Result) {
 	first := check(t, q, m, nil).Job
 	c.Advance(LossAfter)
 	check(t, q, observer(), nil)
-	second := check(t, q, m, nil).Job
+	// Keep the old copy unresolved until its original release below.
+	second := check(t, q, machine("retry", "fake"), nil).Job
 	if second == nil {
 		t.Fatal("lost attempt was not retried")
 	}

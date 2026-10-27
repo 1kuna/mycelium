@@ -113,6 +113,8 @@ func TestStatusEligibleHostsLifecycle(t *testing.T) {
 		t.Fatalf("infra retry: machine=%q losses=%d", requeued.Machine, requeued.Losses)
 	}
 	assertEligibleStatus(t, q, j.ID, "queued", s.AllowedMachines, []string{"host-a"}, false)
+	// Another allowed worker on the same host has a distinct free GPU slot.
+	a = machine("unknown", "fake", "host-a")
 	if check(t, q, a, nil).Job == nil {
 		t.Fatal("no retry assignment")
 	}
