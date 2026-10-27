@@ -64,3 +64,23 @@ func TestNativeNetworkExtensionDeclaration(t *testing.T) {
 		}
 	}
 }
+
+// A mixed-version fleet must never dispatch an ordinary native job to a worker
+// whose report predates isolation, even though it can execute plain commands.
+func TestNativeIsolationMixedWorkerPlacement(t *testing.T) {
+	q, _ := fixture(t)
+	old := machine("old", "fake")
+	old.Capabilities = nil
+	check(t, q, old, nil)
+	j := submit(t, q, spec("experiment"))
+	for _, caps := range [][]string{nil, {"native_isolation_unavailable"}, {"native_network"}} {
+		old.Capabilities = caps
+		if r := check(t, q, old, nil); r.Job != nil {
+			t.Fatalf("unisolated worker received job with %v", caps)
+		}
+	}
+	current := machine("current", "fake")
+	if r := check(t, q, current, nil); r.Job == nil || r.Job.ID != j.ID {
+		t.Fatal("isolated worker did not receive ordinary native job", r.Job)
+	}
+}

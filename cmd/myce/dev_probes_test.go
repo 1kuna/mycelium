@@ -131,7 +131,6 @@ func devStandaloneSmoke(t *testing.T, backend string) {
 	if err := unauthorized.Call(ctx, "GET", "/api/status", nil, nil); !errors.As(err, &apiError) || apiError.Status != 401 {
 		t.Fatal("readiness was not authenticated", err)
 	}
-	marker := filepath.Join(root, "effect")
 	spec := myce.Spec{Name: "smoke-short", Project: "probe", Priority: "experiment"}
 	spec.Needs.MemoryGB = 1
 	if backend == "cpu" {
@@ -139,7 +138,7 @@ func devStandaloneSmoke(t *testing.T, backend string) {
 	} else {
 		spec.Needs.Platform.Any = true
 	}
-	spec.Run.Command = []string{"sh", "-c", `test -z "$MYCE_TOKEN" || exit 99; printf done > "$1"`, "fixture", marker}
+	spec.Run.Command = []string{"sh", "-c", `test -z "$MYCE_TOKEN" || exit 99; printf done > effect`}
 	var job myce.Job
 	if err := client.Call(ctx, "POST", "/api/jobs", spec, &job); err != nil {
 		t.Fatal(err)
@@ -159,6 +158,7 @@ func devStandaloneSmoke(t *testing.T, backend string) {
 		}
 		return false
 	})
+	marker := filepath.Join(root, "state", "workers", "fake-1", "job-files", job.ID, "1", "effect")
 	if effect, err := os.ReadFile(marker); err != nil || string(effect) != "done" {
 		t.Fatal("short command effect missing", err)
 	}

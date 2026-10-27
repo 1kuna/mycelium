@@ -84,11 +84,11 @@ func TestRunDevEndToEnd(t *testing.T) {
 		c.Dir, c.Env = root, environment
 		return c
 	}
-	marker := filepath.Join(root, "effect")
-	output, err := command("--project", "demo", "--cpu", "1", "--mem", "1G", "--", "sh", "-c", `test -z "$MYCE_TOKEN" && printf 'hello cluster\n' && printf done > "$1"`, "sh", marker).CombinedOutput()
+	output, err := command("--project", "demo", "--cpu", "1", "--mem", "1G", "--", "sh", "-c", `test -z "$MYCE_TOKEN" && printf 'hello cluster\n' && printf done > effect`).CombinedOutput()
 	if err != nil || !strings.Contains(string(output), "hello cluster\n") || strings.Contains(string(output), token) {
 		t.Fatalf("run: %v %s", err, output)
 	}
+	marker := filepath.Join(root, "workers", "fake-1", "job-files", strings.Fields(string(output))[0], "1", "effect")
 	if data, err := os.ReadFile(marker); err != nil || string(data) != "done" {
 		t.Fatal("real command effect missing")
 	}

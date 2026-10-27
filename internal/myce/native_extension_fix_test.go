@@ -60,7 +60,7 @@ func TestNativeExtensionInstalledNASRoot(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(j.Spec.Run.Workdir, "result"), []byte("output"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.publishExtensionFiles(j); err != nil {
+	if err := w.publishExtensionFiles(j, j.Spec.Run.Workdir); err != nil {
 		t.Fatal(err)
 	}
 	if b, err := os.ReadFile(filepath.Join(saved.NAS, outputRelative(j, "result", "results"))); err != nil || string(b) != "output" {
@@ -71,7 +71,7 @@ func TestNativeExtensionInstalledNASRoot(t *testing.T) {
 	if err := (Worker{}).prepareExtensionFiles(&j, t.TempDir()); err == nil {
 		t.Fatal("input accepted empty root")
 	}
-	if err := (Worker{}).publishExtensionFiles(j); err == nil {
+	if err := (Worker{}).publishExtensionFiles(j, j.Spec.Run.Workdir); err == nil {
 		t.Fatal("output accepted empty root")
 	}
 }

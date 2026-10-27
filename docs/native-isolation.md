@@ -61,6 +61,18 @@ inputs, job secrets and `run.env` are intentional access for that job, not
 protection from the job itself. `HOME` may still name the host home; filtering
 an environment does not itself restrict filesystem access.
 
+Worker-owned gate shells and namespace utilities use a trusted launcher
+base environment. Authored loader and shell-startup variables enter only after
+confinement; they cannot run code before the boundary. Check-output publication
+opens a regular, bounded file beneath the trusted attempt root with
+escape-resistant traversal, so a payload symlink/FIFO cannot turn the worker
+into a credential reader or indefinitely block publication.
+
+Linux refuses layouts where a runtime read grant contains protected worker
+storage or configured credentials, including symlinked installation paths.
+The default `/opt` grant is limited to the oneAPI runtime; other operator
+runtime roots must be narrow and keep state and secrets elsewhere.
+
 Linux retains the selected accelerator's verified device nodes, required shared
 driver nodes and runtime roots, rather than exposing all device nodes or
 guessing a kernel minor from an ordinal. Missing device mapping refuses launch.
@@ -127,12 +139,14 @@ standalone model servers are not covered by this payload isolation contract.
 
 Both Linux modes currently withhold `native_network`: namespace egress transport
 is unqualified, and fallback reserved-port access is not an online capability.
-An online declaration routes only to a host advertising protected native
+Failed offline attempts include the outbound declaration remedy in their
+diagnostic. An online declaration routes only to a host advertising protected native
 outbound execution. If none qualifies, submission is refused immediately with
 HTTP 409 `no_qualified_target`; it must not sit in an impossible queue forever.
 Normal temporary capacity/maintenance waits on a capable host retain their
-existing semantics. Older workers with no capability report cannot supply
-protected online execution. Managed Docker retains its separate contract.
+existing semantics. Every native dispatch requires a recognized isolation capability; older
+workers with no report and unavailable workers cannot receive offline jobs
+either. Managed Docker retains its separate contract.
 
 macOS may advertise `native_network` when `sandbox-exec` is available. Its online
 profile continues to deny non-sidecar loopback, Unix control endpoints and the

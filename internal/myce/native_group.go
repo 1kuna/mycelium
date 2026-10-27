@@ -318,7 +318,7 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 		persist := errors.Join(syncCommandOutput(output), output.Close())
 		r := Result{MemoryPeak: peak, Machine: w.Machine.ID, Session: g.session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Success: runErr == nil && oom == nil && cleanup == nil && persist == nil, Forced: forced, PoliteStop: polite, ReleasePending: cleanup != nil}
 		if runErr != nil {
-			r.Error = runErr.Error()
+			r.Error = nativeAttemptError(j, runErr.Error())
 			r.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("command", runErr))
 			if stage && r.ExecutionCause.Class == "io_error" {
 				r.ExecutionCause.Class = "stage_failed"
@@ -345,7 +345,7 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 		}
 		r = classifyAttemptOutcome(r, attemptCause{PriorityStop: priorityStop, memberOutcome: facts, OutOfMemory: r.OutOfMemory || oom != nil && strings.Contains(oom.Error(), "exceeded its ")})
 		if r.Success {
-			if e := w.publishExtensionFiles(j); e != nil {
+			if e := w.publishExtensionFiles(j, filepath.Join(g.dir, "job-files", j.ID, strconv.Itoa(j.Attempt))); e != nil {
 				r.Success = false
 				r.Error = e.Error()
 				r.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("outputs", e))
@@ -372,9 +372,9 @@ func (g *nativeGroup) startSupervisor(s *workerStore, env map[string]string) (*o
 		return nil, err
 	}
 	defer reader.Close()
-	cmd := exec.Command("sh", "-c", `trap '' TERM; while read line; do :; done`, "myce-supervisor-"+g.identity)
+	cmd := exec.Command("/bin/sh", "-c", `trap '' TERM; while read line; do :; done`, "myce-supervisor-"+g.identity)
 	cmd.Stdin = reader
-	cmd.Env = environmentList(env)
+	cmd.Env = environmentList(jobBaseEnvironment())
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	work := filepath.Join(g.dir, "job-files", g.p.job.ID, strconv.Itoa(g.p.job.Attempt))
 	g.namespace, err = g.worker.prepareNativeGroupIsolation(cmd, g.dir, work, env, g.p.job.Spec.Needs.Network)
@@ -600,13 +600,13 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 	work := filepath.Join(g.dir, "job-files", g.p.job.ID, strconv.Itoa(g.p.job.Attempt))
 	env["TMPDIR"] = filepath.Join(work, ".tmp")
 	env["TMP"], env["TEMP"] = env["TMPDIR"], env["TMPDIR"]
-	if err := g.namespace.isolate(g.worker, cmd, g.dir, work, env, g.isolationPorts, g.p.job.Spec.Needs.Network); err != nil {
-		return err
-	}
 	if m.memory != nil {
 		env["MYCE_MEMORY_LIMIT_BYTES"] = strconv.FormatInt(m.memory.bytes, 10)
 	}
 	cmd.Env = environmentList(env)
+	if err := g.namespace.isolate(g.worker, cmd, g.dir, work, env, g.isolationPorts, g.p.job.Spec.Needs.Network); err != nil {
+		return err
+	}
 	cmd.Stdout = output
 	cmd.Stderr = output
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: g.supervisor.Process.Pid}

@@ -91,7 +91,7 @@ func TestProductionStartDeadlineBlockers(t *testing.T) {
 			q, c := fixture(t)
 			m := machine("b70", "xpu")
 			if blocker == "Docker" {
-				m.Capabilities = []string{"docker"}
+				m.Capabilities = append(m.Capabilities, "docker")
 				m.CapabilityProfile.OS = "linux"
 			}
 			m.TotalMemoryGB = 8

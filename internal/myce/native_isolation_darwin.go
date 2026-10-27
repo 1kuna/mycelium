@@ -161,8 +161,11 @@ func (w Worker) isolateNativeCommand(cmd *exec.Cmd, spool, work string, env map[
 		// This intentionally withholds unrelated services on the same port.
 		fmt.Fprintf(&profile, "(deny network-outbound (remote tcp %s))\n", strconv.Quote("*:"+port))
 	}
-	cmd.Args = append([]string{"/usr/bin/sandbox-exec", "-p", profile.String()}, cmd.Args...)
+	// Apply authored loader/shell variables only after Seatbelt is active.
+	args := append([]string{"/usr/bin/sandbox-exec", "-p", profile.String(), "/usr/bin/env", "-i"}, environmentList(env)...)
+	cmd.Args = append(args, cmd.Args...)
 	cmd.Path = "/usr/bin/sandbox-exec"
+	cmd.Env = environmentList(jobBaseEnvironment())
 	return nil
 }
 

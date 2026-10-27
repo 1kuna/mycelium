@@ -104,7 +104,7 @@ func TestM3ReleaseCreditStaysOnDevice(t *testing.T) {
 func TestM3DockerCreateKeepsLaunchAuthorization(t *testing.T) {
 	q, _ := fixture(t)
 	m := m3Machine()
-	m.Capabilities = []string{"docker"}
+	m.Capabilities = append(m.Capabilities, "docker")
 	s := dockerJob().Spec
 	s.Needs.GPU = &GPUSelection{Devices: []string{"1"}}
 	j := submit(t, q, s)

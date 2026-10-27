@@ -129,7 +129,7 @@ func nativeStart(t *testing.T, spec Spec, platform string, catalogs ...Environme
 	j := submit(t, q, spec)
 	m := machine("native", platform, "native-host")
 	m.Device = "1"
-	m.Capabilities = []string{"logs_none"}
+	m.Capabilities = append(m.Capabilities, "logs_none")
 	m.HostMemoryMeasured = true
 	m.FreeHostMemoryGB = 64
 	m.HostAvailableMemoryGB = 64

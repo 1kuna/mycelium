@@ -233,6 +233,75 @@ func TestNativeIsolationLinuxWorkerSiblingAndControl(t *testing.T) {
 	}
 }
 
+func TestNativeIsolationLinuxLoaderEnvironment(t *testing.T) {
+	if support := nativeLinuxDetection(); support.mode == "unavailable" {
+		t.Skipf("host confinement unavailable: %s", support.reason)
+	}
+	compiler, err := exec.LookPath("cc")
+	if err != nil {
+		t.Skip("C compiler required for real dynamic-loader attack fixture")
+	}
+	root := t.TempDir()
+	marker := filepath.Join(root, "escaped")
+	source := filepath.Join(root, "preload.c")
+	library := filepath.Join(root, "preload.so")
+	if err := os.WriteFile(source, []byte(`#include <stdio.h>
+#include <stdlib.h>
+__attribute__((constructor)) static void attack(void) {
+ const char *p = getenv("NATIVE_PRELOAD_MARKER");
+ if (p) { FILE *f = fopen(p, "w"); if (f) { fputs("escaped", f); fclose(f); } }
+}
+`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := exec.Command(compiler, "-shared", "-fPIC", "-o", library, source).CombinedOutput(); err != nil {
+		t.Fatalf("preload fixture compilation: %v\n%s", err, out)
+	}
+	baseline := exec.Command("/bin/true")
+	baseline.Env = append(os.Environ(), "LD_PRELOAD="+library, "NATIVE_PRELOAD_MARKER="+marker)
+	if err := baseline.Run(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal("constructor baseline did not execute", err)
+	}
+	for _, group := range []bool{false, true} {
+		t.Run(strconv.FormatBool(group), func(t *testing.T) {
+			w := recoveryWorker(t)
+			w.JobFileRoot = root
+			store, err := w.openStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.close()
+			j := recoveryJob(t, []string{"/bin/true"})
+			j.Spec.Resumable = false
+			j.Spec.Inputs = map[string]string{"preload.so": "preload.so"}
+			j.Spec.Run.Env = map[string]string{"LD_PRELOAD": "{work}/preload.so", "NATIVE_PRELOAD_MARKER": marker}
+			if group {
+				j.Spec.Run.MemoryGB = .125
+			}
+			p, err := w.start(store, j)
+			if err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case finish := <-p.done:
+				if finish.err != nil || !finish.result.Success || finish.result.ReleasePending {
+					out, _ := os.ReadFile(filepath.Join(store.dir, store.state.Log))
+					t.Fatalf("preload payload: %+v\n%s", finish, out)
+				}
+			case <-time.After(10 * time.Second):
+				p.stop(w.Clock.Now(), 0, true)
+				t.Fatal("preload payload timed out")
+			}
+			if _, err := os.Stat(marker); !os.IsNotExist(err) {
+				t.Fatalf("authored loader environment escaped before confinement: %v", err)
+			}
+		})
+	}
+}
+
 func TestNativeIsolationLinuxFallback(t *testing.T) {
 	abi, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET, 0, 0, unix.LANDLOCK_CREATE_RULESET_VERSION)
 	if errno != 0 || abi < 6 {

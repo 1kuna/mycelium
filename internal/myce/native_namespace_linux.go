@@ -8,10 +8,44 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/signal"
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
+
+// Ignore TERM only in bwrap's host monitor. Killing that monitor triggers
+// --die-with-parent's SIGKILL chain, bypassing the payload's checkpoint grace.
+// Exec preserves its PID, PGID, cgroup membership and inherited gate FDs.
+func nativeNamespaceMonitor(args []string) error {
+	if len(args) == 0 {
+		return errors.New("native namespace monitor requires an executable")
+	}
+	signal.Ignore(unix.SIGTERM)
+	return unix.Exec(args[0], args, os.Environ())
+}
+
+func nativeNamespaceExec(args, env []string) error {
+	if len(args) == 0 {
+		return errors.New("native namespace exec requires an executable")
+	}
+	// Install a caught disposition even if TERM was inherited as SIG_IGN.
+	// The kernel resets caught handlers to SIG_DFL at exec, unlike SIG_IGN.
+	// This also restores the readiness shell before the anchor installs its
+	// own intentional TERM trap. No signal masking leaks into the payload.
+	signal.Notify(make(chan os.Signal, 1), unix.SIGTERM)
+	return unix.Exec(args[0], args, env)
+}
+
+func nativeNamespaceMonitorArgs(bwrap string, args []string) ([]string, error) {
+	executable, err := os.Executable()
+	if err != nil {
+		return nil, err
+	}
+	return append([]string{executable, "_native-exec", "namespace-monitor", bwrap}, args...), nil
+}
 
 // The namespace init is a descendant of the existing PGID anchor. Custody,
 // cgroup attachment and recovery continue to use host PIDs and the old PGID.
@@ -28,6 +62,7 @@ func (w Worker) prepareNativeGroupIsolation(cmd *exec.Cmd, spool, work string, e
 		return nil, err
 	}
 	n := &nativeNamespace{support: s}
+	cmd.Env = environmentList(jobBaseEnvironment())
 	if s.mode != "namespace" {
 		return n, nil
 	}
@@ -45,13 +80,23 @@ func (w Worker) prepareNativeGroupIsolation(cmd *exec.Cmd, spool, work string, e
 		n.close()
 		return nil, err
 	}
+	executable, err := os.Executable()
+	if err != nil {
+		n.close()
+		return nil, err
+	}
 	args := append(nativeBwrapPolicyArgs(p), "--info-fd", "3", "--")
-	args = append(args, "/bin/sh", "-c", `printf R >&4; exec 4>&-; exec "$@"`, "myce-namespace-ready")
+	args = append(args, executable, "_native-exec", "namespace-anchor", "/bin/sh", "-c", `printf R >&4; exec 4>&-; exec "$@"`, "myce-namespace-ready")
 	args = append(args, cmd.Args...)
+	args, err = nativeNamespaceMonitorArgs(s.bwrap, args)
+	if err != nil {
+		n.close()
+		return nil, err
+	}
 	// The bwrap fork itself follows the gate: all descendants inherit the
 	// anchor's control cgroup, and a failed attach never creates namespaces.
 	cmd.Path = "/bin/sh"
-	cmd.Args = append([]string{"/bin/sh", "-c", `read gate || exit 125; exec "$@"`, "myce-namespace-anchor", s.bwrap}, args...)
+	cmd.Args = append([]string{"/bin/sh", "-c", `read gate || exit 125; exec "$@"`, "myce-namespace-anchor"}, args...)
 	cmd.ExtraFiles = append(cmd.ExtraFiles, n.infoWriter, n.readyWriter)
 	return n, nil
 }
@@ -153,7 +198,11 @@ func (n *nativeNamespace) isolate(w Worker, cmd *exec.Cmd, spool, work string, e
 	// nsenter must fork after setns(CLONE_NEWPID), its default behavior. Do not
 	// use --no-fork: that would execute the payload outside the PID namespace.
 	enter := []string{n.support.nsenter, "--target", strconv.Itoa(n.pid), "--user", "--mount", "--pid", "--ipc", "--net", "--root", "--wdns", cmd.Dir, "--preserve-credentials", "--"}
-	return nativeWrapPayload(cmd, append(enter, args...))
+	if err := nativeWrapPayload(cmd, append(enter, args...)); err != nil {
+		return err
+	}
+	cmd.Env = environmentList(jobBaseEnvironment())
+	return nil
 }
 
 func (n *nativeNamespace) probe(ctx context.Context, port string, group int, path string, listener bool) (bool, bool, error) {
