@@ -416,3 +416,28 @@ changes do not resolve the separate body-storage privacy hold.
 
 
 The [placeholder catalog](examples/atlas-server-entries.yaml) needs reviewed argv, environment recipes, measured memory and local approval output. Native runtime and application telemetry require separate qualification.
+
+### GPU selection limits and host holder checks
+
+Device masks select the accelerator for cooperative runtimes; they do not deny
+OS access to other device nodes. For example, `xpu-smi discovery` enumerates
+cards directly and can briefly open another card's DRM node even with
+`ZE_AFFINITY_MASK` set. Such an open alone does not establish out-of-mask compute.
+Docker exposure of `/dev/dri` and per-attempt memory cgroups do not provide a
+GPU device allowlist either. Apply the same limits to sidecars.
+
+For host-level holder checks on Linux, run `sudo fuser -v /dev/dri/*` (or
+`sudo lsof /dev/dri/*`) on the host, outside the attempt/container. Correlate
+PIDs with `ps -fp PID`, attempt process groups and `/proc/PID/cgroup`; map DRM
+nodes to PCI identities with `readlink -f /sys/class/drm/renderD*/device`.
+Check activity for the corresponding card with the vendor's monitoring tools.
+A holder list is a point-in-time view: short discovery opens can disappear,
+and a holder is not necessarily doing compute. Check the whole physical host,
+including external programs, before concluding a card is idle.
+
+The recorded decision in [#9](https://github.com/1kuna/mycelium/issues/9) is to
+leave hard device-cgroup isolation out for now: per-attempt masks, stable
+identities and start-time mapping checks cover the cooperative execution model,
+and no cross-card compute incident was established. Revisit if dual-GPU
+qualification shows out-of-mask access or interference. These selection controls
+are not a security boundary for hostile commands.
