@@ -87,22 +87,34 @@
       "properties": {
         "acknowledged_at": {
           "format": "date-time",
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "job_id": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "project": {
           "type": "string"
         },
         "release": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "state": {
           "type": "string"
         },
         "submission_key": {
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "will_not_run": {
           "type": "boolean"

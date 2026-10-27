@@ -84,6 +84,10 @@ func generatedJobSchema(t *testing.T) []byte {
 		props := defs[definition].(map[string]any)["properties"].(map[string]any)
 		props["release"].(map[string]any)["enum"] = []string{"not_applicable", "pending", "confirmed"}
 	}
+	ackProperties := defs["Cancellation"].(map[string]any)["properties"].(map[string]any)
+	for _, name := range []string{"job_id", "submission_key", "release", "acknowledged_at"} {
+		ackProperties[name].(map[string]any)["type"] = []string{"string", "null"}
+	}
 	job["state"].(map[string]any)["enum"] = []string{"queued", "running", "stopping", "succeeded", "failed", "cancelled"}
 	for _, name := range []string{"id", "machine", "session"} {
 		job[name].(map[string]any)["minLength"] = 1
@@ -280,6 +284,16 @@ func TestWireSchemas(t *testing.T) {
 	for _, name := range []string{"job-v1.schema.json", "cancel-ack-v1.schema.json", "error-v1.schema.json"} {
 		schemas[name] = compileWireSchema(t, name)
 	}
+	// Unkeyed cancellation and status redaction legitimately encode a null key
+	// inside the embedded acknowledgement, just like the cancel endpoint.
+	qUnkeyed, _ := fixture(t)
+	unkeyed := submit(t, qUnkeyed, spec("experiment"))
+	cancelAck(t, qUnkeyed, unkeyed.ID)
+	unkeyedGET, err := qUnkeyed.jobSnapshot(unkeyed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validateWireValue(t, schemas["job-v1.schema.json"], unkeyedGET)
 	for name, value := range wireExamples(t) {
 		t.Run(name, func(t *testing.T) {
 			kind := strings.SplitN(name, "-", 2)[0]
