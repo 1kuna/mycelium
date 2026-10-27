@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -485,7 +486,11 @@ func d5RuntimeStartFailure(t *testing.T, runtime string, kind string) Result {
 	if runtime == "native-group" {
 		j.Spec.Run.Sidecars = []NativeSidecar{{Name: "helper", Command: []string{"sleep", "600"}, MemoryGB: 1}}
 	}
-	p, err := w.start(s, j)
+	var p *process
+	await(t, func() bool {
+		p, err = w.start(s, j)
+		return !errors.Is(err, errWorkerCheckpoint) || !strings.Contains(err.Error(), "input copy pending")
+	})
 	if err != nil {
 		return startFailureOutcome(Result{Error: err.Error()}, err)
 	}
