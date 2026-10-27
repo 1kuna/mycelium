@@ -431,7 +431,7 @@ func (s *workerStore) cleanupOrphan(clock Clock, memoryFiles ...memoryFS) (clean
 		}
 	}
 	if s.state.PID <= 0 || s.state.Identity == "" {
-		if s.state.Result != nil && s.state.Result.ReleasePending {
+		if (s.state.Job == nil || !s.state.Job.Spec.Run.Docker) && s.state.Result != nil && s.state.Result.ReleasePending {
 			return errors.New("attempt cleanup custody unavailable; release pending")
 		}
 		return nil
@@ -456,7 +456,7 @@ func (s *workerStore) cleanupOrphan(clock Clock, memoryFiles ...memoryFS) (clean
 		}
 	}
 	if s.state.Job != nil && len(members) > 0 && !owned {
-		if s.state.Result != nil && s.state.Result.ReleasePending {
+		if !s.state.Job.Spec.Run.Docker && s.state.Result != nil && s.state.Result.ReleasePending {
 			return errors.New("attempt process group identity unconfirmed; release pending")
 		}
 		return nil // Preserve a live command whose identity does not match.
