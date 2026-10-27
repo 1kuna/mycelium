@@ -36,6 +36,7 @@ type fleetUpgrade struct {
 type fleetUpgradeHost struct {
 	HealthSince    time.Time `json:"health_since,omitempty"`
 	HealthIdentity string    `json:"health_identity,omitempty"`
+	HelperRevision int       `json:"helper_revision,omitempty"`
 	FleetHostStatus
 	Queue       bool               `json:"queue"`
 	QueueDone   bool               `json:"queue_done"`
@@ -103,10 +104,14 @@ func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest) (*FleetUpgradeSta
 					previous.Revision++
 				}
 				if h := q.fleetActiveHost(); h != nil {
-					if h.Phase == "queue_health" && q.fleetQueue != nil && q.fleetQueue.Proof != nil && q.fleetQueue.Proof.Session == h.QueueBefore.Session && q.fleetQueue.Proof.SHA256 == h.QueueBefore.SHA256 {
+					if previous.State == "stopped" {
+						// Explicit recovery supersedes the already reported failure.
+						h.HelperRevision = previous.Revision
+					}
+					if h.Phase == "queue_health" && h.QueueBefore.Version != approved.Manifest.Version && q.fleetQueue != nil && q.fleetQueue.Proof != nil && q.fleetQueue.Proof.Session == h.QueueBefore.Session && q.fleetQueue.Proof.SHA256 == h.QueueBefore.SHA256 {
 						h.Phase = "queue_update"
 					}
-					if h.Phase == "worker_health" {
+					if h.Phase == "worker_health" && h.Before.Fleet.Version != approved.Manifest.Version {
 						if m := q.s.Machines[h.Machine]; m != nil && m.Fleet != nil && m.Session == h.Before.Session && m.Fleet.SHA256 == h.Before.Fleet.SHA256 {
 							h.Phase = "worker_update"
 						}
@@ -348,11 +353,13 @@ func (q *Queue) maintainFleetUpgrade() {
 		}
 		if h.Queue && !h.QueueDone {
 			h.Phase = "queue_update"
+			h.HelperRevision = u.Revision
 			if h.QueueBefore.Version == u.Release.Manifest.Version {
 				h.Phase = "queue_health"
 			}
 		} else if h.Machine != "" && !h.WorkerDone {
 			h.Phase = "worker_update"
+			h.HelperRevision = u.Revision
 			if h.Before.Fleet.Version == u.Release.Manifest.Version {
 				h.Phase = "worker_health"
 			}
@@ -492,6 +499,9 @@ func (q *Queue) authorizeFleetUpdate(operation, host, machine, session string, r
 	if i.Operation == "" || i.Operation != operation {
 		return fleetError("fleet_instruction_stale")
 	}
+	if revision < q.fleetActiveHost().HelperRevision {
+		return fleetError("fleet_instruction_stale")
+	}
 	return nil
 }
 
@@ -524,7 +534,14 @@ func (q *Queue) AckFleetUpgrade(ack FleetUpgradeAck) error {
 	return q.update(func() error {
 		u := q.s.FleetUpgrade
 		h := q.fleetActiveHost()
-		if u == nil || h == nil || u.Operation != ack.Operation || (ack.Revision <= 0 || ack.Revision > u.Revision || ack.Phase == "failed" && ack.Revision != u.Revision && !q.fleetRuntimeFailureCurrent(h, ack)) || h.Host != ack.Host || u.State != "running" {
+		if u == nil || h == nil || u.Operation != ack.Operation || ack.Revision <= 0 || ack.Revision > u.Revision || h.Host != ack.Host || u.State != "running" {
+			return fleetError("fleet_ack_stale")
+		}
+		// An operator rerun permits recovery; it does not replace an active
+		// helper. Only a durable replacement receipt claims the newer attempt.
+		// Thus that helper's failure remains authoritative until superseded.
+		runtimeFailure := ack.Phase == "failed" && q.fleetRuntimeFailureCurrent(h, ack)
+		if !runtimeFailure && (ack.Revision < h.HelperRevision || ack.Phase == "failed" && ack.Revision != h.HelperRevision && ack.Revision != u.Revision) {
 			return fleetError("fleet_ack_stale")
 		}
 		queue := ack.Machine == "@queue" && h.QueueBefore != nil && ack.Session == h.QueueBefore.Session && (h.Phase == "queue_update" || h.Phase == "queue_health")
@@ -537,6 +554,11 @@ func (q *Queue) AckFleetUpgrade(ack FleetUpgradeAck) error {
 			return nil
 		}
 		switch ack.Phase {
+		case "prepared":
+			if err := q.authorizeFleetUpdate(ack.Operation, ack.Host, ack.Machine, ack.Session, ack.Revision); err != nil {
+				return err
+			}
+			h.HelperRevision = ack.Revision
 		case "failed":
 			reason := "update_failed"
 			if ack.Failure == "runner_smoke_failed" {
@@ -550,7 +572,9 @@ func (q *Queue) AckFleetUpgrade(ack FleetUpgradeAck) error {
 			}
 			q.fleetStop(h, reason)
 		case "installed": // Not proof of activation, and no phase regression on delayed ACK.
+			h.HelperRevision = ack.Revision
 		case "restarting":
+			h.HelperRevision = ack.Revision
 			if queue {
 				h.Phase = "queue_health"
 			} else {

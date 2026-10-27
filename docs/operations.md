@@ -837,6 +837,8 @@ A failed step stops the operation and preserves maintenance; later hosts remain
 untouched. Repair the cause and explicitly rerun `myce fleet upgrade` to reconcile
 that same operation. A rerun advances its recovery revision and rechecks the exact
 old runtime and maintenance receipt before recovering an interrupted helper.
+An active helper continues to report its result across reruns. Services already
+running the approved bytes receive the same stable health checks without a restart.
 It never blindly repeats a restart or resumes an operator's drain. For a stopped
 operation, `--release` may explicitly select a newly approved newer release to
 fix forward. Approval changes alone never retarget a running operation.

@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -340,6 +341,12 @@ func TestFleetUpgradeAlreadyCurrentRequiresStableEnrollmentHealth(t *testing.T) 
 	if q.s.FleetUpgrade.Hosts[0].Phase == "complete" {
 		t.Fatal("no-op queue skipped stable health")
 	}
+	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if i, err := q.fleetInstruction("queue", "@queue", "queue-current"); err != nil || i.Operation != "" {
+		t.Fatal("rerun instructed already-current queue to restart")
+	}
 	for n := 0; n < 32; n++ {
 		fleetHeartbeatAdvance(t, q, c)
 	}
@@ -349,6 +356,12 @@ func TestFleetUpgradeAlreadyCurrentRequiresStableEnrollmentHealth(t *testing.T) 
 	}
 	if i, err := q.fleetInstruction(h.Host, m.ID, m.Session); err != nil || i.Operation != "" {
 		t.Fatal("already-current worker was instructed to restart")
+	}
+	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if i, err := q.fleetInstruction(h.Host, m.ID, m.Session); err != nil || i.Operation != "" || h.Phase != "worker_health" {
+		t.Fatal("rerun instructed degraded current worker to restart")
 	}
 	for n := 0; n < 32; n++ {
 		fleetHeartbeatAdvance(t, q, c)
@@ -364,6 +377,68 @@ func TestFleetUpgradeAlreadyCurrentRequiresStableEnrollmentHealth(t *testing.T) 
 	}
 	if q.s.FleetUpgrade.State != "complete" || q.s.Machines[m.ID].Session != m.Session {
 		t.Fatal("healthy current host not reconciled without restart")
+	}
+}
+
+func TestFleetUpgradeRerunRetainsActiveHelperFailureUntilReplacement(t *testing.T) {
+	for _, worker := range []bool{false, true} {
+		for _, replace := range []bool{false, true} {
+			t.Run(fmt.Sprintf("worker=%t/replacement=%t", worker, replace), func(t *testing.T) {
+				q, c, _ := fleetFixture(t, "queue", "a", "b")
+				if worker {
+					q.fleetQueue.Proof = fleetTestProof(c, "queue-current", 100, true)
+				}
+				if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+					t.Fatal(err)
+				}
+				fleetTick(t, q)
+				if worker {
+					for n := 0; n < 32; n++ {
+						fleetHeartbeatAdvance(t, q, c)
+					}
+				}
+				i := fleetInstructionFor(t, q)
+				ack := FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "prepared"}
+				if err := q.AckFleetUpgrade(ack); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+					t.Fatal(err)
+				}
+				if err := q.authorizeFleetUpdate(i.Operation, i.Host, i.Machine, i.Session, i.Revision); err != nil {
+					t.Fatal("rerun revoked active helper", err)
+				}
+				if replace {
+					current := ack
+					current.Revision = q.s.FleetUpgrade.Revision
+					if err := q.AckFleetUpgrade(current); err != nil {
+						t.Fatal(err)
+					}
+					for _, phase := range []string{"failed", "installed", "restarting", "prepared"} {
+						ack.Phase = phase
+						if err := q.AckFleetUpgrade(ack); err == nil {
+							t.Fatalf("superseded helper %s accepted", phase)
+						}
+					}
+					if err := q.authorizeFleetUpdate(i.Operation, i.Host, i.Machine, i.Session, i.Revision); err == nil {
+						t.Fatal("superseded helper authorized")
+					}
+					ack = current
+				}
+				ack.Phase = "failed"
+				if err := q.AckFleetUpgrade(ack); err != nil {
+					t.Fatal("active helper failure hidden by rerun", err)
+				}
+				if q.s.FleetUpgrade.State != "stopped" || q.s.HostMaintenance[i.Host].Mode != "drained" {
+					t.Fatal("failure did not stop with maintenance retained")
+				}
+				for _, h := range q.s.FleetUpgrade.Hosts {
+					if h.Host != i.Host && h.Phase != "complete" && h.Phase != "pending" {
+						t.Fatal("later host advanced after failure")
+					}
+				}
+			})
+		}
 	}
 }
 

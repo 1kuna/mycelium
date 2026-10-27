@@ -338,6 +338,14 @@ func launchFleetUpdate(ctx context.Context, requested ServiceConfig, i FleetUpda
 	if err = writeFleetReceipt(c, r); err != nil {
 		return errors.New("fleet_receipt_write_failed")
 	}
+	// The local lock and (for recovery) transient-absence proof precede this
+	// durable claim. Merely receiving a newer instruction never revokes the
+	// older active helper's ability to report failure.
+	claim := r
+	claim.Phase = "prepared"
+	if err = fleetAck(ctx, client, claim); err != nil {
+		return err
+	}
 	label := fleetHelperLabel(c, i)
 	args := []string{c.Binary, "fleet-apply", "--config", c.Config, "--receipt", path}
 	if c.Detection.OS == "linux" {

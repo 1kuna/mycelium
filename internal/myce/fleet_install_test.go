@@ -175,6 +175,9 @@ func (f *fleetInstallFixture) command(_ context.Context, name string, args ...st
 		if err != nil || r.Phase != "prepared" && r.Phase != "installed" {
 			f.t.Fatal("helper launched without durable receipt", err)
 		}
+		if len(f.acks) == 0 || f.acks[len(f.acks)-1] != "prepared" {
+			f.t.Fatal("helper launched before claiming its receipt revision")
+		}
 		joined := strings.Join(args, " ")
 		if !strings.Contains(joined, f.c.Binary+" fleet-apply --config "+f.c.Config) || strings.Contains(joined, "--token") {
 			f.t.Fatal("helper did not use installed binary/saved authority", joined)
@@ -283,7 +286,7 @@ func TestFleetInstallPreservesSettingsAndRestartsOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	f.assertBinary(f.next)
-	if f.restarts != 1 || !reflect.DeepEqual(f.acks, []string{"installed", "restarting"}) {
+	if f.restarts != 1 || !reflect.DeepEqual(f.acks, []string{"prepared", "installed", "restarting"}) {
 		t.Fatal("incorrect activation", f.restarts, f.acks)
 	}
 	if err := f.apply(); err != nil || f.restarts != 1 || f.fetches != 1 {
