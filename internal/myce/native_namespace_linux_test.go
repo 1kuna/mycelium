@@ -29,8 +29,8 @@ func TestNativeNamespaceLinuxCheckpointGraceAndCleanup(t *testing.T) {
 	if support := nativeLinuxDetection(); support.mode != "namespace" {
 		t.Skipf("real namespaces unavailable: mode=%s reason=%s", support.mode, support.reason)
 	}
-	for _, group := range []bool{false, true} {
-		t.Run(strconv.FormatBool(group), func(t *testing.T) {
+	for _, mode := range []string{"accelerator-direct", "accelerator-group", "cpu-group"} {
+		t.Run(mode, func(t *testing.T) {
 			w := recoveryWorker(t)
 			w.AcceleratorStopGrace = 2 * time.Second
 			store, err := w.openStore()
@@ -47,15 +47,27 @@ func TestNativeNamespaceLinuxCheckpointGraceAndCleanup(t *testing.T) {
 			j := recoveryJob(t, []string{"/bin/sh", "-c", `
 mkfifo save-fifo || exit 1
 exec 5<> save-fifo
-trap 'printf term > term-started; read save <&5; printf checkpoint-complete > "$MYCE_CHECKPOINT_DIR/saved"; exit 0' TERM
+trap 'printf term > term-started; read save <&5; if [ "$CHECKPOINT_HELPER" = 1 ]; then printf save > helper-request; read reply < helper-answer; [ "$reply" = ready ] || exit 1; fi; printf checkpoint-complete > "$MYCE_CHECKPOINT_DIR/saved"; exit 0' TERM
 "$1" _native-namespace-lifecycle-child &
 printf ready > main-ready
 while :; do read line <&5; done
 `, "namespace-checkpoint", executable})
 			j.Spec.Resumable, j.Spec.Logs = false, "keep"
 			j.Spec.Run.Env = map[string]string{"GORACE": "atexit_sleep_ms=0"}
-			if group {
+			if mode != "accelerator-direct" {
 				j.Spec.Run.MemoryGB = .125
+			}
+			if mode == "cpu-group" {
+				j.Spec.Needs = ResourceNeeds{Platform: Platform{Required: []string{"cpu"}}, CPUCores: 1, HostMemoryGB: .25}
+				j.Spec.Run.Env["CHECKPOINT_HELPER"] = "1"
+				j.Spec.Run.Sidecars = []NativeSidecar{{Name: "checkpoint", MemoryGB: .0625, Command: []string{"/bin/sh", "-c", `
+mkfifo helper-request helper-answer || exit 1
+exec 5<> helper-request
+exec 6<> helper-answer
+trap 'exit 17' TERM
+printf ready > helper-ready
+while read request <&5; do printf 'ready\n' >&6; done
+`}}}
 			}
 			p, err := w.start(store, j)
 			if err != nil {
@@ -95,6 +107,9 @@ while :; do read line <&5; done
 			}
 			waitFile("main-ready")
 			waitFile("child-ready")
+			if mode == "cpu-group" {
+				waitFile("helper-ready")
+			}
 			saveGate, err := os.OpenFile(filepath.Join(work, "save-fifo"), os.O_RDWR, 0600)
 			if err != nil {
 				t.Fatal(err)

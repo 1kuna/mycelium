@@ -38,6 +38,8 @@ type nativeMember struct {
 	cmd      *exec.Cmd
 	done     chan struct{}
 	err      error
+
+	signalTarget *os.File // Transient pidfd for a namespace member's joined child.
 }
 type nativeGroup struct {
 	namespace              *nativeNamespace
@@ -152,10 +154,13 @@ func (g *nativeGroup) signalLocked(member *nativeMember, signal syscall.Signal) 
 		return
 	}
 	pid := -g.supervisor.Process.Pid
+	var err error
 	if member != nil {
-		pid = member.PID
+		err = member.signal(signal)
+	} else {
+		err = syscall.Kill(pid, signal)
 	}
-	if syscall.Kill(pid, signal) != nil {
+	if err != nil {
 		return
 	}
 	at := time.Now().UTC()
@@ -531,6 +536,10 @@ func (g *nativeGroup) cleanupProcesses(writer *os.File, retry bool) error {
 			m.Phase = "exited"
 			code := m.cmd.ProcessState.ExitCode()
 			m.ExitCode = &code
+			if m.signalTarget != nil {
+				m.signalTarget.Close()
+				m.signalTarget = nil
+			}
 			g.p.mu.Unlock()
 		}
 	}
@@ -604,7 +613,7 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 		env["MYCE_MEMORY_LIMIT_BYTES"] = strconv.FormatInt(m.memory.bytes, 10)
 	}
 	cmd.Env = environmentList(env)
-	if err := g.namespace.isolate(g.worker, cmd, g.dir, work, env, g.isolationPorts, g.p.job.Spec.Needs.Network); err != nil {
+	if err := g.namespace.isolate(g.worker, cmd, g.dir, work, env, g.isolationPorts, g.p.job.Spec.Needs.Network, m.Name == "main"); err != nil {
 		return err
 	}
 	cmd.Stdout = output
@@ -657,11 +666,11 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 	if err = g.worker.authorizeLaunch(l); err != nil {
 		return g.recordInfrastructureLocked(launchRefused, m.Name, "", err)
 	}
+	if err = g.releaseMember(m, writer); err != nil {
+		return err
+	}
 	if m.Name == "main" {
 		g.main = m
-	}
-	if _, err = writer.WriteString("start\n"); err != nil {
-		return err
 	}
 	m.Phase = "running"
 	return g.saveLocked()
