@@ -3,7 +3,7 @@ package myce
 import "testing"
 
 func TestFixedAcceleratorMemorySizesUnprobedDevice(t *testing.T) {
-	m := Machine{ID: "w", GPU: "xpu", FreeMemoryGB: 31, TotalMemoryGB: 31}
+	m := Machine{ID: "w", GPU: "xpu", FreeMemoryGB: 31, TotalMemoryGB: 31, Capabilities: []string{"native_isolation_landlock"}}
 	unsized := func() CapabilityProfile {
 		// ProfileProbe records logical CPUs even when accelerator probing fails.
 		return CapabilityProfile{LogicalCPUs: 8, MemoryLayout: "separate", SystemMemoryBytes: 32 << 30, Accelerators: []AcceleratorProfile{{Type: "xpu"}}, Unavailable: []string{"accelerator facts"}}
