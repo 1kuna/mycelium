@@ -504,6 +504,8 @@ type Checkin struct {
 	Running         *Execution        `json:"running,omitempty"`
 }
 type Reply struct {
+	ExtensionQualificationPlan []ExtensionQualificationPlan `json:"extension_qualification_plan,omitempty"`
+
 	AttemptProtocol   string              `json:"attempt_protocol,omitempty"`
 	Attempts          []AttemptDirective  `json:"attempts,omitempty"`
 	PriorityStop      *PriorityPreemption `json:"priority_stop,omitempty"`
