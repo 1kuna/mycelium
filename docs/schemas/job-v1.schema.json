@@ -1,5 +1,16 @@
 {
   "$defs": {
+    "AttemptDiagnostics": {
+      "properties": {
+        "files": {
+          "$ref": "#/$defs/FileManifest"
+        }
+      },
+      "required": [
+        "files"
+      ],
+      "type": "object"
+    },
     "AttemptMemoryFacts": {
       "properties": {
         "attempt": {
@@ -52,17 +63,6 @@
           "type": "number"
         }
       },
-      "type": "object"
-    },
-    "AttemptDiagnostics": {
-      "properties": {
-        "files": {
-          "$ref": "#/$defs/FileManifest"
-        }
-      },
-      "required": [
-        "files"
-      ],
       "type": "object"
     },
     "AttemptOutcome": {

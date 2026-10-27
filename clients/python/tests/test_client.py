@@ -1,4 +1,5 @@
 import http.client
+from datetime import datetime, timedelta, timezone
 import io
 import json
 import os
@@ -336,12 +337,22 @@ class DevTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "submission_key_conflict")
 
     def test_production_start_deadline(self):
-        start_by = "2000-01-01T00:00:00Z"
+        with self.assertRaises(APIError) as caught:
+            self.client.submit(self.spec(
+                [sys.executable, "-c", "raise SystemExit('must not run')"],
+                priority="production", start_by="2000-01-01T00:00:00Z",
+                needs={"memory_gb": 1, "platform": ["xpu"]}))
+        self.assertEqual(caught.exception.status, 400)
+        self.assertEqual(caught.exception.code, "job_deadline_invalid")
+        # A new submission must arrive before its deadline. Ineligible hardware
+        # keeps it queued until that accepted deadline expires.
+        start_by = (datetime.now(timezone.utc) + timedelta(seconds=2)).isoformat(
+            timespec="seconds").replace("+00:00", "Z")
         job = self.client.submit(self.spec(
             [sys.executable, "-c", "raise SystemExit('must not run')"],
             priority="production", start_by=start_by,
             needs={"memory_gb": 1, "platform": ["xpu"]}))
-        failed = self.client.wait(job["id"], timeout=2)
+        failed = self.client.wait(job["id"], timeout=10)
         self.assertEqual(failed["state"], "failed")
         # Public status strips internal placement blockers from this diagnostic.
         self.assertEqual(failed["reason"], "production start deadline exceeded")
