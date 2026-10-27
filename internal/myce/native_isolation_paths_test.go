@@ -16,6 +16,7 @@ func TestNativeIsolationReadGrantPrivateSubtrees(t *testing.T) {
 	w := Worker{JobFileRoot: nas, CheckpointRoot: filepath.Join(nas, "checkpoints"), SecretRoot: filepath.Join(state, "secrets"), ServiceConfig: &ServiceConfig{State: state}}
 	for _, private := range []string{
 		filepath.Join(state, "job-files/sibling/1/.tmp/secret"),
+		filepath.Join(state, "file-checkpoints/sibling/attempt-1/save"),
 		filepath.Join(w.SecretRoot, "nested/credential"),
 		filepath.Join(w.CheckpointRoot, "sibling/attempt-1/save"),
 	} {

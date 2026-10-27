@@ -47,6 +47,40 @@ func TestNativeIsolationModelKeychainOverlap(t *testing.T) {
 	}
 }
 
+func TestNativeIsolationModelFileCheckpointOverlap(t *testing.T) {
+	spool := t.TempDir()
+	work := filepath.Join(spool, "job-files", "own", "1")
+	checkpoint := filepath.Join(spool, "file-checkpoints", "sibling", "attempt-1", "checkpoint.json")
+	for _, path := range []string{work, filepath.Dir(checkpoint)} {
+		if err := os.MkdirAll(path, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const contents = "synthetic sibling checkpoint bytes"
+	if err := os.WriteFile(checkpoint, []byte(contents), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command("/bin/cat", checkpoint)
+	cmd.Dir = work
+	if err := (Worker{}).isolateNativeCommand(cmd, spool, work, nil, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	out, err := cmd.CombinedOutput()
+	denial := strings.ToLower(string(out))
+	if err == nil || strings.Contains(string(out), contents) || !strings.Contains(denial, "permitted") && !strings.Contains(denial, "permission denied") {
+		t.Fatalf("baseline confined checkpoint read did not fail with permission denial: %v: %s", err, out)
+	}
+	for _, grant := range []string{filepath.Dir(checkpoint), checkpoint} {
+		// Queue file-store transport leaves the configured NAS root empty.
+		w := Worker{ModelRoot: grant}
+		cmd := exec.Command("/bin/cat", checkpoint)
+		cmd.Dir = work
+		if err := w.isolateNativeCommand(cmd, spool, work, nil, nil, false); err == nil || !strings.Contains(err.Error(), "runtime_overlap") {
+			t.Fatal("model read exception exposing file-store checkpoint accepted", err)
+		}
+	}
+}
+
 func TestNativeIsolationNetworkDeclaration(t *testing.T) {
 	// Seatbelt's localhost filter includes the host's LAN addresses as well as
 	// loopback. A declaration must not expose a local control listener by alias.

@@ -28,6 +28,7 @@ func (w Worker) validateNativeReadGrants(read []string, spool string) error {
 		{filepath.Join(home, ".local/share/mycelium"), true},
 		{filepath.Join(spool, "job-files"), false},
 		{filepath.Join(spool, "checkpoints"), false},
+		{filepath.Join(spool, "file-checkpoints"), false},
 		{w.CheckpointRoot, false},
 		{w.SecretRoot, false},
 		{filepath.Join(home, ".config"), false},
