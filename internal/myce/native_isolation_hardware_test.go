@@ -35,10 +35,11 @@ import (
 //
 // The command must emit native-isolation-gpu-ok:<platform> after freeing its
 // allocations. scripts/native-isolation-gpu-* supply tiny ctypes/Swift probes.
-// ENVROOT is operator Worker.EnvironmentRoot configuration, not a run.env
-// permission or a new production path exception. Include interpreter/stdlib
-// installations there when they are outside the ordinary runtime grants. Use
-// a tools subdirectory, not the outer work root containing the test's temp/state.
+// ENVROOT is a tiny fixture tool bundle, copied into a marked managed runtime
+// root for operator Worker.EnvironmentRoot configuration, not a run.env
+// permission or a new production path exception. Interpreters/stdlib must use
+// the ordinary runtime grants. Use a tools subdirectory, not the outer work root
+// containing the test's temp/state.
 // No service, delegated cgroup, driver installation or fleet access is created.
 func TestNativeIsolationHardware(t *testing.T) {
 	platform := os.Getenv("MYCE_TEST_NATIVE_HARDWARE")
@@ -62,6 +63,30 @@ func TestNativeIsolationHardware(t *testing.T) {
 	if !filepath.IsAbs(envroot) || filepath.Clean(envroot) == string(filepath.Separator) || err != nil || !info.IsDir() {
 		t.Fatal("MYCE_TEST_NATIVE_ENVROOT must name an explicit trusted runtime/probe directory")
 	}
+	// The supplied bundle already contains probes, whereas fresh worker cache
+	// roots must be marked before receiving content. Prepare an empty managed
+	// root first and copy the tiny bundle with the standard filesystem copier.
+	runtimeRoot := newTestStateRoot(t)
+	sourceRoot, err := filepath.EvalSymlinks(envroot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	destinationRoot, err := filepath.EvalSymlinks(runtimeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rel, err := filepath.Rel(sourceRoot, destinationRoot); err != nil || rel == "." || filepath.IsLocal(rel) {
+		t.Fatal("tool bundle must not contain the test's runtime/temp directory")
+	}
+	if err := os.CopyFS(runtimeRoot, os.DirFS(envroot)); err != nil {
+		t.Fatalf("prepare managed probe runtime: %v", err)
+	}
+	for i, arg := range command {
+		if arg == envroot || strings.HasPrefix(arg, envroot+string(filepath.Separator)) {
+			command[i] = runtimeRoot + strings.TrimPrefix(arg, envroot)
+		}
+	}
+	envroot = runtimeRoot
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
