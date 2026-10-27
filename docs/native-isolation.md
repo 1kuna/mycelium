@@ -43,8 +43,30 @@ Native workdirs must resolve within the worker-managed `{work}`. Stage scripts
 and data as job inputs, or use a frozen extension whose source is copied to
 `{work}/.myce-extension`; do not depend on a host checkout being writable.
 Prepared environments and shared extension caches are available for reads and
-execution. The current job's checkpoint and usage paths receive specific write
+execution. The operator's `--model-cache` (including its default beneath the
+worker state root) and `--model-root` are also available for reads, not payload
+content writes. Keep these shared model roots free of secrets; authored
+`run.env` paths do not create new filesystem grants. Linux applies the same
+protected-storage overlap validation to these roots as other runtime grants.
+Use prepared model-file paths and libraries' offline/read-only cache options;
+place mutable indexes, lock files and generated caches in attempt scratch.
+The current job's checkpoint and usage paths receive specific write
 grants. Work and temp follow existing attempt retention and cleanup custody.
+
+NAS access uses the existing declarations: `inputs` names relative to
+`--job-file-root` are copied into `{work}` before execution, and declared
+outputs are published by the worker after execution. The payload can read and
+write its exact `MYCE_CHECKPOINT_DIR` on the configured checkpoint mount. These
+file operations need no payload outbound-network opt-in; the host owns the
+mounted filesystem connection. They do not grant access to the entire NAS or
+arbitrary host paths. An application that previously used Docker volume
+mappings must use these declarations and attempt paths for native execution.
+
+Headless office tools must put their writable user profile and scratch beneath
+`{work}` (for example LibreOffice's `-env:UserInstallation=file://...` option).
+Their own Unix-socket requirements still need qualification against the control
+boundary; being offline does not authorize host Unix endpoints. No claim of
+LibreOffice or GPU compatibility follows solely from the filesystem grants.
 
 After `run.env` and environment activation, the worker sets `TMPDIR`, `TMP` and
 `TEMP` to `{work}/.tmp` for main and helpers. These values cannot redirect temp to
@@ -125,6 +147,29 @@ address. Readiness checks that the actual listener belongs to the attempt and
 is bound to `127.0.0.1`, before accepting its response. That observation is not
 a kernel guarantee against a later rebind or another connection on that port.
 Use namespace mode when an enforced private network boundary is required.
+
+### CUDA compatibility boundary
+
+Some CUDA drivers initialize an abstract Unix seqpacket listener even for a
+tiny device allocation. The current seccomp policy denies that creation.
+Landlock before ABI 9 cannot mediate pathname Unix connections; enabling the
+same socket type would also permit attempts against host pathname controls.
+An offline job declaration does not resolve this compatibility boundary.
+Do not enable Unix sockets as an unprotected fallback.
+
+The userns exception below only permits namespace creation. The current
+read-only host-root mount and socket policy would still need changes and real
+qualification before supporting that CUDA path. The preferred candidate is a
+minimal bubblewrap filesystem containing socket-free trusted runtime/cache
+trees, exact attempt/checkpoint mounts, private runtime/temp/proc filesystems
+and assigned devices, with Unix creation enabled only inside that boundary.
+Read-only mounts alone do not prevent connections to sockets they expose.
+An alternative enforcing AppArmor payload profile needs attempt-specific file
+write grants, protected profile lifecycle and a verified enforce-mode transition:
+pathname Unix connections use file permissions, so a socket-only profile with
+broad writable paths is insufficient. Neither option is implemented or
+qualified by this document; either retains its separate administrator approval
+and hardware qualification requirements.
 
 ## Declaring outbound access
 

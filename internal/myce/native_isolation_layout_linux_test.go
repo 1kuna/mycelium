@@ -2,7 +2,9 @@ package myce
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -35,5 +37,32 @@ func TestNativeIsolationRuntimeLayout(t *testing.T) {
 	}
 	if err := (Worker{}).validateNativeReadGrants([]string{prepared}, state); err != nil {
 		t.Fatal("isolated prepared cache rejected", err)
+	}
+}
+
+func TestNativeIsolationModelRoots(t *testing.T) {
+	state, work := t.TempDir(), t.TempDir()
+	cmd := exec.Command("/bin/true")
+	cmd.Dir = work
+	for _, configured := range []bool{false, true} {
+		w := Worker{ModelRoot: filepath.Join(t.TempDir(), "models")}
+		cache := filepath.Join(state, "model-cache")
+		if configured {
+			cache = filepath.Join(t.TempDir(), "cache")
+			w.CacheRoot = cache
+		}
+		policy, err := w.nativeLinuxPolicy(cmd, state, work, nil, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, path := range []string{cache, w.ModelRoot} {
+			if !slices.Contains(policy.Read, path) || slices.Contains(policy.Write, path) {
+				t.Fatal("operator model root lacks read-only content access", path)
+			}
+		}
+		w.ServiceConfig = &ServiceConfig{JoiningFile: filepath.Join(cache, "joining.json")}
+		if _, err := w.nativeLinuxPolicy(cmd, state, work, nil, nil); err == nil || !strings.Contains(err.Error(), "runtime_overlap") {
+			t.Fatal("model cache containing worker authority accepted", err)
+		}
 	}
 }
