@@ -294,13 +294,28 @@ func nativeCompatibilitySidecars(j *Job) {
 	}
 }
 
-// Copy an already installed executable outside every default runtime/cache
+// Copy the current fixture executable outside every default runtime/cache
 // grant. No compiler, package installation, model load or external process is
 // needed to prepare this fixture. Writable owner modes make denied writes a
 // confinement assertion rather than an ordinary DAC denial.
 func nativeCompatibilityExternal(t *testing.T, w *Worker, j *Job) {
 	t.Helper()
 	runtimeRoot, modelRoot := t.TempDir(), t.TempDir()
+	if runtime.GOOS == "linux" {
+		// Exercise visibility after bubblewrap replaces /tmp even when the
+		// outer scheduler's TMPDIR points elsewhere. Direct and sidecar cases
+		// both require these model bytes, RO writes and direct-exec denial.
+		var err error
+		modelRoot, err = os.MkdirTemp("/tmp", "myce-native-models-")
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() {
+			if err := os.RemoveAll(modelRoot); err != nil {
+				t.Errorf("remove owned model fixture: %v", err)
+			}
+		})
+	}
 	copyInstalled := func(source, destination string) {
 		t.Helper()
 		data, err := os.ReadFile(source)

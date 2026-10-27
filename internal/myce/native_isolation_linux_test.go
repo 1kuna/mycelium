@@ -412,7 +412,7 @@ func TestNativeIsolationLinuxFallback(t *testing.T) {
 			}
 			// The accepted pathname-connect residual must not depend on a file
 			// grant to the fixture, even when sidecar TCP ports are present.
-			for _, grant := range append(slices.Clone(policy.Read), policy.Write...) {
+			for _, grant := range append(append(slices.Clone(policy.Read), policy.ReadOnly...), policy.Write...) {
 				canonical, err := nativeCanonical(grant)
 				if err != nil {
 					continue // Optional runtime roots need not exist.
