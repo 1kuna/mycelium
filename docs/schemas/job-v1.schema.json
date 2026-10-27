@@ -1701,7 +1701,17 @@
       "properties": {
         "execution": {
           "$ref": "#/$defs/Execution",
-          "description": "Immutable producing child job ID and accepted attempt; never the latest attempt."
+          "description": "Immutable producing child job ID and accepted attempt for a selected-piece edge; zero value for a whole-parent edge."
+        },
+        "executions": {
+          "additionalProperties": {
+            "$ref": "#/$defs/Execution"
+          },
+          "description": "Whole-parent edge: accepted producing executions keyed by mapped producer piece. Immutable across retry and restart.",
+          "type": [
+            "object",
+            "null"
+          ]
         },
         "files": {
           "$ref": "#/$defs/FileManifest"
@@ -1761,7 +1771,6 @@
       },
       "required": [
         "job",
-        "piece",
         "outputs"
       ],
       "type": "object"
@@ -2035,6 +2044,32 @@
       ],
       "type": "object"
     },
+    "SharedInput": {
+      "properties": {
+        "archive": {
+          "type": "string"
+        },
+        "manifest": {
+          "$ref": "#/$defs/FileManifest"
+        },
+        "manifest_file": {
+          "type": "string"
+        },
+        "nas": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "size_bytes": {
+          "type": "integer"
+        },
+        "unpacked_bytes": {
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "SizeHint": {
       "properties": {
         "host_memory_gb": {
@@ -2196,6 +2231,16 @@
         },
         "run": {
           "$ref": "#/$defs/RunSpec",
+          "x-contract": "diagnostic"
+        },
+        "shared_inputs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/SharedInput"
+          },
+          "type": [
+            "object",
+            "null"
+          ],
           "x-contract": "diagnostic"
         },
         "size_hint": {

@@ -2078,6 +2078,37 @@ regressions individually. Native throughput and consumer integration remain
 separate work.
 
 
+## Whole-parent dependent fan-out (#180; approved scope 2026-10-26)
+
+This task authorizes the smallest extension of #175: omit `after.piece` to
+depend on an already submitted fan-out parent **as a whole**, in the same
+project. `after.outputs` explicitly maps local input names to gathered
+`KEY/OUTPUT_NAME` names. The consumer may be an ordinary job or another declared
+fan-out. For a fan-out consumer, explicitly map keyed local inputs (for example
+`first/input: first/out` and `second/input: second/out`); its existing piece args
+and wave manifest select those inputs. All mapped inputs are immutable common
+inputs staged through the existing transport for each wave. There is no implicit
+key substitution, input discovery or per-wave input filtering.
+
+Readiness requires parent success, including every declared child, even when
+only a subset of its outputs is mapped. It binds the gathered references and
+accepted producing executions by key in `dependency.executions`; the existing
+single `dependency.execution` applies only to a selected-piece edge. The queue
+persists bindings and fixed child membership in its existing SQLite state.
+An upstream failure fails a blocked consumer with `upstream_failed` and a clear
+reason, without a runtime attempt. Upstream cancellation aborts nonterminal
+dependents and their children transitively, fences future consumers, and includes
+their exact attempts in release acknowledgement. Terminal results remain intact.
+Readiness timing, retention, transport verification and stale-attempt fencing
+retain #175's contract; no I/O is added under the queue lock.
+
+`after.piece` keeps early per-piece readiness for ordinary consumers. A fan-out
+consumer uses the whole-parent form only. There is still one existing-parent edge
+per submission: no general DAG language, multiple-parent joins, ordinary-job
+sources, forward references, dynamic enumeration, timed accumulation, atomic graph
+submission, or automatic semantic reduction. Broader stage planning remains
+outside slice 4. Native consumer qualification and deployment are separate work.
+
 ## Preserve scarce machines (slice 6, #193; MY-18)
 
 The independently authorized placement slice implements MY-18 without changing
@@ -2121,7 +2152,7 @@ existing blobs are checked and reused rather than uploaded again.
 
 Default job keys include item bytes and appended arguments. A profile's memory
 identity instead binds its base command, check, environment, resource
-configuration and common input bytes, excluding appended arguments, item input
+configuration and common input bytes (including shared read-only inputs), excluding appended arguments, item input
 names/bytes and the source archive. `memory_class: per_item` opts the appended
 arguments and item input identities back into memory comparability. This is
 memory estimation only; all existing acceptance, OOM, constraint, hardware and
@@ -2541,3 +2572,29 @@ Consumer inventory is read-only source evidence, not deployment proof.
 ruling before assigning approved slices. Conditional issues revisit on that
 ruling. #192 and #248 remain open until live acceptance; merging this document
 alone removes no consumer support.
+
+## Shared read-only inputs (#221)
+
+Profiles and plain native jobs may declare `shared_inputs`, independently of
+private `files`. A declaration identifies a stored blob by SHA-256 and size, or
+a NAS-relative path plus that identity. A NAS directory uses an explicit file
+manifest, inline or referenced by a NAS-relative `manifest_file` and its hash/size
+so large runtime manifests do not travel in every submission. NAS references resolve under each worker's `--checkpoint-root`
+and never upload through the queue. Profiles may import a `local` blob once;
+the submitted specification contains only its immutable identity. No environment
+catalog entry or queue restart is required.
+
+Workers publish verified cache entries atomically and expose absolute paths in
+`MYCE_INPUT_<UPPERCASE_NAME>`. Files/trees have read-only mode bits; these are
+cooperative controls, not a hostile-code sandbox. `archive: tar|tar.gz` unpacks
+once, bounded by declared `unpacked_bytes`; archives contain regular files and
+directories only. NAS trees copy only manifest members and preserve executability.
+The cache records per-file hashes, verifies them on first use after restart,
+and checks inode/change-time/size/mode metadata on reuse to detect tampering.
+Shared use locks span preparation and process cleanup; LRU eviction skips active
+entries. Admission enforces the physical disk guard before staging. Failed staging
+is disposable; authoritative NAS/store data remains untouched. Stored references
+use ordinary live-job and terminal retention. All bulk I/O runs in worker or
+unlocked submission verification paths. Transfers use size-aware, renewed socket
+deadlines, with no fixed whole-input timeout. Laptop proof and native consumer
+qualification are separate; fleet acceptance waits for the queue release gate.

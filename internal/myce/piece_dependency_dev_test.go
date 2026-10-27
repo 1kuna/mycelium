@@ -52,7 +52,7 @@ func TestPieceDependencyDevCPU(t *testing.T) {
 			sv.Needs = v.Needs
 			sv.Execution.Main.Command = []string{"sh", "{extension}/consume.sh"}
 			sv.Baselines = map[string]ExtensionBaseline{"extension:piece-sink": sv.Baselines["extension:sample"]}
-			sink.Files["consume.sh"] = []byte("test -z \"$MYCE_TOKEN\" || exit 99\ncat input > final\n")
+			sink.Files["consume.sh"] = []byte("test -z \"$MYCE_TOKEN\" || exit 99\nif [ -n \"$1\" ]; then cat \"$1/input\" > final; else cat input > final; fi\n")
 			sink = freezeComposition(t, sink)
 			if err := InstallExtension(c.ExtensionRoot, sink); err != nil {
 				t.Fatal(err)
@@ -88,6 +88,18 @@ func TestPieceDependencyDevCPU(t *testing.T) {
 			consumer.Extension = extensionKey(sink)
 			consumer.Run = RunSpec{}
 			consumer.Needs = ResourceNeeds{}
+			// Register an entire fan-out -> fan-out -> ordinary gather before waiting.
+			// Every child uses explicitly keyed immutable inputs through normal staging.
+			stage := Spec{Name: "dependent-stage", Project: "pieces", Priority: "experiment", SubmissionKey: "dependent-stage", Extension: extensionKey(sink), Workload: producer.Workload, Outputs: map[string]string{"final": "results"}, After: &PieceDependency{Job: p.ID, Outputs: map[string]string{"first/input": "first/out", "tail/input": "tail/out"}}, FanOut: &FanOut{MaxConcurrency: 1, Pieces: []FanOutPiece{{Key: "first", Args: []string{"first"}}, {Key: "tail", Args: []string{"tail"}}}}}
+			next, err := d.Client().Submit(ctx, stage)
+			if err != nil {
+				t.Fatal("dependent fan-out submission", err)
+			}
+			gatherSpec := Spec{Name: "dependent-gather", Project: "pieces", Priority: "experiment", SubmissionKey: "dependent-gather", Needs: ResourceNeeds{CPUCores: 1, MemoryGB: 0.1}, After: &PieceDependency{Job: next.ID, Outputs: map[string]string{"first/input": "first/final", "tail/input": "tail/final"}}, Run: RunSpec{Command: []string{"sh", "-c", "test -z \"$MYCE_TOKEN\" || exit 99; cat first/input tail/input > joined"}}, Outputs: map[string]string{"joined": "results"}}
+			gather, err := d.Client().Submit(ctx, gatherSpec)
+			if err != nil {
+				t.Fatal("whole-parent gather submission", err)
+			}
 			first, err := d.Client().SubmitAndWait(ctx, consumer)
 			if err != nil || first.State != "succeeded" {
 				t.Fatalf("consumer %v %+v", err, first)
@@ -110,12 +122,34 @@ func TestPieceDependencyDevCPU(t *testing.T) {
 			if err != nil || readErr != nil || string(data) != "first" {
 				t.Fatalf("consumed bytes %q %v %v", data, err, readErr)
 			}
+			blocked, err := d.Client().GetJob(ctx, next.ID)
+			if err != nil || blocked.Dependency.State != "blocked" || len(blocked.FanOut.Children) != 0 {
+				t.Fatal("partial producer admitted dependent fan-out", blocked, err)
+			}
 			if err := os.WriteFile(gate, []byte("release"), 0600); err != nil {
 				t.Fatal(err)
 			}
 			if p, err = d.Client().Wait(ctx, p.ID); err != nil || p.State != "succeeded" {
 				t.Fatal("gather", err)
 			}
+			joined, err := d.Client().Wait(ctx, gather.ID)
+			if err != nil || joined.State != "succeeded" {
+				t.Fatal("dependent gather", joined, err)
+			}
+			var joinedBytes []byte
+			if transport == "file-store" {
+				output := filepath.Join(root, "joined")
+				err = d.Client().DownloadResult(ctx, joined.ID, "joined", output)
+				if err == nil {
+					joinedBytes, err = os.ReadFile(output)
+				}
+			} else {
+				joinedBytes, err = os.ReadFile(filepath.Join(c.JobFileRoot, joined.OutputFiles["joined"]))
+			}
+			if err != nil || string(joinedBytes) != "firsttail" || len(joined.Dependency.Executions) != 2 {
+				t.Fatalf("dependent gather bytes/provenance: %q %+v %v", joinedBytes, joined.Dependency, err)
+			}
+			t.Logf("%s dependent gather: producer=%s stage=%s gather=%s producing_executions=%+v", transport, p.ID, next.ID, joined.ID, joined.Dependency.Executions)
 			accepted := first.Dependency.Execution
 			if err := d.Close(); err != nil {
 				t.Fatal(err)

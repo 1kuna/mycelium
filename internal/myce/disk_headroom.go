@@ -73,7 +73,7 @@ func diskVolumeNeed(j *Job, v DiskVolume) (uint64, bool) {
 			need = addDiskBytes(need, addDiskBytes(input, output))
 		case "file-cache":
 			cache := diskInputCacheBytes(j)
-			relevant = relevant || cache > 0
+			relevant = relevant || cache > 0 || len(j.Spec.SharedInputs) > 0
 			need = addDiskBytes(need, cache)
 		case "checkpoint":
 			if j.Spec.Resumable || j.ResumeFiles != nil || j.Spec.Disk != nil && j.Spec.Disk.CheckpointBytes > 0 {

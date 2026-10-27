@@ -59,6 +59,7 @@ type Worker struct {
 	FileCacheRoot         string
 	FileCacheLimit        int64
 	fileCache             *FileCache
+	sharedInputs          *SharedInputCache
 	fileCheckpoints       bool
 	ExtensionRoot         string
 	JobFileRoot           string
@@ -310,7 +311,7 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	return w.startContext(context.Background(), s, j)
 }
 
-func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (*process, error) {
+func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *process, startErr error) {
 	if err := w.verifyDevice(); err != nil {
 		return nil, s.startFailure(j, launchRefused, err)
 	}
@@ -335,8 +336,21 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (*proce
 			extensionRelease()
 		}
 	}()
+	sharedEnv, sharedRelease, sharedErr := w.acquireSharedInputs(ctx, j)
+	if sharedErr != nil {
+		return nil, sharedErr
+	}
+	if len(j.Spec.SharedInputs) > 0 {
+		s.sharedRelease = sharedRelease
+	}
+	sharedStarted := false
+	defer func() {
+		if !sharedStarted && !errors.Is(startErr, errWorkerReleasePending) {
+			sharedRelease()
+		}
+	}()
 	executionWorkdir := j.Spec.Run.Workdir
-	if j.Spec.extensionJob() || len(jobInputFiles(&j))+len(jobInputPaths(&j)) > 0 {
+	if j.Spec.extensionJob() || len(jobInputFiles(&j))+len(jobInputPaths(&j))+len(j.Spec.SharedInputs) > 0 {
 		value := j
 		dir, err := s.extensionFiles.run(attemptCheckpoint(j), func() (string, error) {
 			err := w.prepareExtensionFiles(&value, s.dir)
@@ -477,7 +491,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (*proce
 	started := false
 	defer func() {
 		if !started {
-			_ = memoryAttempt.cleanup(w.Clock)
+			if err := memoryAttempt.cleanup(w.Clock); err != nil {
+				startErr = errors.Join(startErr, fmt.Errorf("%w: %v", errWorkerReleasePending, err))
+			}
 		}
 	}()
 	args := []string{"-c", `read gate || exit 125; trap 'wait "$child"; exit $?' TERM; "$@" < /dev/null & child=$!; exec 3>&-; wait "$child"; exit $?`, "myce-supervisor-" + identity, command}
@@ -509,6 +525,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (*proce
 	cmd.Dir = j.Spec.Run.Workdir
 	env := jobBaseEnvironment()
 	for k, v := range j.Spec.Run.Env {
+		env[k] = v
+	}
+	for k, v := range sharedEnv {
 		env[k] = v
 	}
 	for k, v := range extensionEnv {
@@ -549,7 +568,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (*proce
 	if len(j.Spec.Run.Sidecars) > 0 || j.Spec.Run.MemoryGB > 0 {
 		p, e := w.startNativeGroup(s, j, identity, memoryAttempt, env, environmentPath, extensionRelease, release)
 		if e == nil {
-			environmentStarted, extensionStarted, started = true, true, true
+			environmentStarted, extensionStarted, sharedStarted, started = true, true, true, true
 		}
 		return p, e
 	}
@@ -590,6 +609,10 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (*proce
 	s.state.Result = nil
 	s.state.OperatorStopped = false
 	s.state.PID = 0
+	s.state.Cgroup = ""
+	if memoryAttempt != nil {
+		s.state.Cgroup = memoryAttempt.path
+	}
 	s.state.LaunchPending = true
 	s.state.StopGrace = acceleratorStopGrace(w.AcceleratorStopGrace)
 	s.state.StopAt, s.state.UserCancel = nil, false
@@ -631,7 +654,19 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (*proce
 	}
 	s.state.PID = cmd.Process.Pid
 	s.state.LaunchPending = false
-	if err = saveWorkerJSON(s.dir, "attempt-"+identity+".json", workerState{PID: s.state.PID, Identity: identity}); err != nil {
+	custody := workerState{PID: s.state.PID, Identity: identity, StopGrace: s.state.StopGrace}
+	if len(j.Spec.SharedInputs) > 0 {
+		// Shared readers retain group custody after the main PID exits.
+		birth, e := processBirth(cmd.Process.Pid)
+		if e != nil {
+			return nil, abort(e)
+		}
+		custody.Groups = map[int]map[int]string{cmd.Process.Pid: {cmd.Process.Pid: birth}}
+		if memoryAttempt != nil {
+			custody.Cgroup = memoryAttempt.path
+		}
+	}
+	if err = saveWorkerJSON(s.dir, "attempt-"+identity+".json", custody); err != nil {
 		return nil, abort(err)
 	}
 	if err = s.save(); err != nil {
@@ -700,6 +735,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (*proce
 	result := Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
 	environmentStarted = true
 	extensionStarted = true
+	sharedStarted = true
 	started = true
 	finishMemory := w.observeAttemptMemory(memoryAttempt, j, func() []int { return []int{cmd.Process.Pid} })
 	go func() {
@@ -730,6 +766,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (*proce
 		groupErr = errors.Join(groupErr, memoryAttempt.cleanup(w.Clock))
 		result.MemoryPeak = peak
 		result.ReleasePending = groupErr != nil
+		if !result.ReleasePending {
+			s.releaseSharedInputs()
+		}
 		syncErr := syncCommandOutput(output)
 		closeErr := output.Close()
 		result.Success = oomErr == nil && launchErr == nil && waitErr == nil && groupErr == nil && syncErr == nil && closeErr == nil

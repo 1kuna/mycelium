@@ -25,6 +25,122 @@ class Reply(io.BytesIO):
         self.headers = {} if length is None else {"Content-Length": str(length)}
 
 
+# #218: a nominal 0.4 s sleep measured 0.50–0.53 s in Darwin workers.
+# Separate the phases: old API timeout (0.2 s) < header delay < idle budget
+# < genuine stall. Three header periods leave scheduling room; the true stall
+# stays beyond both the idle deadline and the proportional completion bound.
+SLOW_HEADER_DELAY = 0.4
+TRANSFER_IDLE_BUDGET = 3 * SLOW_HEADER_DELAY
+GENUINE_STALL_DELAY = 4 * TRANSFER_IDLE_BUDGET
+STALL_COMPLETION_BOUND = 3 * TRANSFER_IDLE_BUDGET
+
+
+class FileTransferTimeoutTests(unittest.TestCase):
+    """#218: streamed results have progress budgets, not a whole-request timeout."""
+
+    def serve(self, body, *, stall):
+        import hashlib
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        ref = {"sha256": hashlib.sha256(body).hexdigest(), "size_bytes": len(body)}
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+
+            def do_GET(self):
+                if self.path == "/api/jobs/job":
+                    reply = json.dumps({"id": "job", "state": "succeeded", "output_refs": {"result": ref}}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Length", str(len(reply)))
+                    self.end_headers()
+                    self.wfile.write(reply)
+                    return
+                time.sleep(SLOW_HEADER_DELAY)  # The queue rehashes before replying.
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                chunk = len(body) // 10
+                for i in range(10):
+                    if stall and i == 5:
+                        time.sleep(GENUINE_STALL_DELAY)
+                        return
+                    self.wfile.write(body[i * chunk:(i + 1) * chunk])
+                    self.wfile.flush()
+                    time.sleep(0.06)
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        # The old fixed client timeout is shorter than the header wait and stream.
+        client = Client(f"http://127.0.0.1:{server.server_address[1]}", "fixture", timeout=0.2)
+        client._transfer_idle = TRANSFER_IDLE_BUDGET
+        return client
+
+    def test_slow_stream_succeeds_and_stall_fails_typed(self):
+        from mycelium import TransferStalledError
+        body = b"frame" * 2000
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "result"
+            self.serve(body, stall=False).download_result("job", "result", destination)
+            self.assertEqual(destination.read_bytes(), body)
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "result"
+            start = time.monotonic()
+            with self.assertRaises(TransferStalledError) as caught:
+                self.serve(body, stall=True).download_result("job", "result", destination)
+            self.assertLess(time.monotonic() - start, STALL_COMPLETION_BOUND)
+            self.assertEqual(caught.exception.code, "result_download_failed")
+            self.assertIn("result_download_failed", str(caught.exception))
+            self.assertEqual(os.listdir(directory), [])
+
+    def test_progressing_chunked_upload_succeeds(self):
+        import hashlib
+        import socket
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        body = b"data" * (1024 * 1024)  # The reported 4 MiB sendall failure.
+        received = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+
+            def do_PATCH(self):
+                remaining = int(self.headers["Content-Length"])
+                digest = hashlib.sha256()
+                while remaining:
+                    chunk = self.rfile.read(min(8192, remaining))
+                    if not chunk:
+                        return
+                    digest.update(chunk)
+                    remaining -= len(chunk)
+                    time.sleep(0.005)
+                received.append(digest.hexdigest())
+                self.send_response(204)
+                self.end_headers()
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        client = Client(f"http://127.0.0.1:{server.server_address[1]}", "fixture", timeout=0.2)
+        client._transfer_idle = TRANSFER_IDLE_BUDGET
+        connect = http.client.HTTPConnection.connect
+
+        def small_send_buffer(connection):
+            connect(connection)
+            connection.sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4096)
+
+        start = time.monotonic()
+        with patch.object(http.client.HTTPConnection, "connect", small_send_buffer):
+            with client._file_request("PATCH", "/upload", body, size=len(body)) as response:
+                self.assertEqual(response.status, 204)
+        self.assertGreater(time.monotonic() - start, client._transfer_idle)
+        self.assertEqual(received, [hashlib.sha256(body).hexdigest()])
+
+
 class ClientTests(unittest.TestCase):
     def test_job_reply_invalid(self):
         client = Client(token="test-only")

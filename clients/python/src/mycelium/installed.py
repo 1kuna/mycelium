@@ -28,9 +28,11 @@ def _pinned_handler(pin):
         def connect(self):
             # Learn only certificate bytes on an unauthenticated connection.
             # Trust them only after matching the provisioned fingerprint.
-            self._context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
-            self._context.check_hostname = False
-            self._context.verify_mode = ssl.CERT_NONE
+            context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
+            wrap = getattr(self, "_transfer_context", lambda context: context)
+            self._context = wrap(context)
             super().connect()
             cert = self.sock.getpeercert(binary_form=True)
             # Keep HTTPConnection's in-flight request state while reconnecting.
@@ -42,7 +44,7 @@ def _pinned_handler(pin):
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
             context.check_hostname = False
             context.load_verify_locations(cadata=ssl.DER_cert_to_PEM_cert(cert))
-            self._context = context
+            self._context = wrap(context)
             super().connect()
             if hashlib.sha256(self.sock.getpeercert(binary_form=True)).hexdigest() != pin:
                 self.close()
@@ -50,7 +52,15 @@ def _pinned_handler(pin):
 
     class Handler(HTTPSHandler):
         def https_open(self, req):
-            return self.do_open(Connection, req)
+            connection = Connection
+            if getattr(req, "_mycelium_file_transfer", False):
+                from .transfer import ProgressConnection
+
+                class FileConnection(ProgressConnection, Connection):
+                    pass
+
+                connection = FileConnection
+            return self.do_open(connection, req)
 
     return Handler()
 
@@ -81,6 +91,8 @@ def installed_authority(config=None):
             raise ValueError("installed joining authority requires an HTTPS queue origin")
         handlers.append(_pinned_handler(pin))
     else:
+        from .transfer import file_handlers
+        handlers.extend(file_handlers())
         values = {}
         for line in _private(saved.get("environment_file") or saved.get("credentials", "")).splitlines():
             line = line.strip()

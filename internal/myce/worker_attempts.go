@@ -108,12 +108,40 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				if s.state.OperatorStopped {
 					f.result = operatorOutcome(f.result, true)
 				}
-				s.state.Result, s.state.PID = &f.result, 0
+				s.state.Result = &f.result
+				if !f.result.ReleasePending {
+					s.state.PID = 0
+				}
 				if err := s.save(); err != nil {
 					finish(err)
 					return
 				}
 			default:
+			}
+		}
+		// A failed inventory/cleanup keeps custody, but must not freeze the
+		// finished actor until a worker restart. Reuse recovery's exact process
+		// identity checks; only confirmed cleanup can clear pending release.
+		if p == nil && s.state.Result != nil && s.state.Result.ReleasePending && !a.job.Spec.Run.Docker {
+			var fs memoryFS = osMemoryFS{}
+			if w.memoryCeilings != nil {
+				fs = w.memoryCeilings.fs
+			}
+			if err := s.cleanupOrphan(w.Clock, fs); err == nil {
+				released := *s.state.Result
+				released.ReleasePending = false
+				// Recovery reloads this receipt before state. Record confirmed
+				// release there before discarding the ordinary PID custody.
+				if err := saveWorkerJSON(s.dir, s.state.Identity+".result.json", released); err != nil {
+					finish(err)
+					return
+				}
+				s.state.Result = &released
+				s.state.PID = 0
+				if err := s.save(); err != nil {
+					finish(err)
+					return
+				}
 			}
 		}
 		if connected {
@@ -236,6 +264,20 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				err = w.Client.Call(ctx, "POST", "/api/workers/complete", s.state.Result, nil)
 			}
 			if s.state.Result != nil && (err == nil || stale(err)) && !s.state.Result.ReleasePending {
+				if err == nil {
+					published, e := w.publishedAttemptFiles(ctx, s.state)
+					if e != nil {
+						s.fileError = "result confirmation pending; local files retained"
+						// Keep custody and replay until the queue can confirm the result.
+						select {
+						case <-ctx.Done():
+						case <-a.wake:
+						case <-tick.C:
+						}
+						continue
+					}
+					s.state.PublishedAttempt = published
+				}
 				if a.job.Spec.Run.Docker {
 					if e := acknowledgeDocker(s, w.Machine.ID, now); e != nil {
 						finish(e)
@@ -307,12 +349,19 @@ func (w Worker) recoverAttempt(s *workerStore) (*process, error) {
 		r := classifyAttemptOutcome(Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Error: "worker restarted; previous process group cleaned up"}, attemptCause{memberOutcome: facts, PriorityStop: s.state.PriorityStop})
 		s.state.Result = &r
 	}
+	released := *s.state.Result
 	if !s.state.Job.Spec.Run.Docker {
-		s.state.Result.ReleasePending = false
+		released.ReleasePending = false
 	}
 	if s.state.OperatorStopped {
-		*s.state.Result = operatorOutcome(*s.state.Result, true)
+		released = operatorOutcome(released, true)
 	}
+	if !s.state.Job.Spec.Run.Docker {
+		if err := saveWorkerJSON(s.dir, s.state.Identity+".result.json", released); err != nil {
+			return nil, err
+		}
+	}
+	s.state.Result = &released
 	s.state.PID = 0
 	return nil, s.save()
 }
@@ -581,6 +630,9 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				if err = persistIndex(); err != nil {
 					return err
 				}
+				// Use the existing serialized collector immediately after release;
+				// bulk deletion never blocks a command actor or machine heartbeat.
+				requestRetention("", now)
 				retry = workerRetry{}
 				continue
 			}
@@ -742,7 +794,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				m.ModelURL = rt.url
 			}
 			m.ModelConfigHash = modelConfigHash(w.ModelConfig)
-			m.Capabilities = append(slices.DeleteFunc(slices.Clone(w.Machine.Capabilities), func(c string) bool { return c == "docker" || c == "docker_envelope" }), "logs_none")
+			m.Capabilities = append(slices.DeleteFunc(slices.Clone(w.Machine.Capabilities), func(c string) bool { return c == "docker" || c == "docker_envelope" }), "logs_none", "shared_inputs_v1")
 			if w.DockerEndpoint != "" {
 				// Refresh without allowing a slow daemon to block heartbeats.
 				if supported, err := dockerQualification.run("docker-envelope", func() (bool, error) { return probeWorker.dockerEnvelopeSupported(), nil }); err == nil {

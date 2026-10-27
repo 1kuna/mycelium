@@ -314,7 +314,7 @@ func TestProductionStartGateDetectedLoss(t *testing.T) {
 				t.Fatal(e)
 			}
 			s := spec("production")
-			s.AllowedMachines = []string{"b70"}
+			s.AllowedMachines = []string{"b70", "retry"}
 			j := submit(t, q, s)
 			m := machine("b70", "xpu")
 			a := check(t, q, m, nil).Job
@@ -338,7 +338,8 @@ func TestProductionStartGateDetectedLoss(t *testing.T) {
 				t.Fatalf("loss window: %s, want %s", got.Spec.StartBy, want)
 			}
 			c.Advance(time.Second)
-			resumed := check(t, q, m, nil).Job
+			// Loss leaves the original GPU slot in custody in both arms.
+			resumed := check(t, q, machine("retry", "xpu"), nil).Job
 			if resumed == nil || resumed.Attempt != a.Attempt+1 {
 				t.Fatal("lost worker did not resume")
 			}

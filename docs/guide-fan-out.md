@@ -25,8 +25,8 @@ fan_out:
 Keys must be unique clean names; there are at most 256 pieces. `workload.units`
 describes **one** piece, using the matching variant reference's unit and shape.
 The existing `resumable` contract applies to each fixed wave. Arbitrary programs,
-dynamic enumeration, stage graphs and timed input accumulation are outside this
-slice. Common inputs are staged through the normal file-store/NAS path for each
+dynamic enumeration, general stage graphs and timed input accumulation are outside
+this slice. Whole-parent dependencies below are the bounded #180 extension. Common inputs are staged through the normal file-store/NAS path for each
 wave; arguments select the relevant data. No private input paths go in curves.
 
 A variant opts into measured wave execution by adding `run` to its reference
@@ -191,7 +191,7 @@ after:
 
 `outputs` maps the consumer's local input name to the producer's declared output
 name. The full parent ID, project, piece and output names are checked at submit.
-One edge is supported; it cannot be combined with `fan_out`, checks, programs,
+One selected-piece edge is supported; it cannot be combined with `fan_out`, checks, programs,
 Docker or a caller-selected working directory. Dependency inputs cannot collide
 with other inputs or outputs, or mix stored-file and NAS input transports.
 
@@ -218,3 +218,113 @@ Submission keys make an interrupted finite submission list safe to resume; they
 do not make the pipeline atomic. Partial parent results and bound consumer inputs
 use their existing artifact retention windows. A new binding to an expired result
 returns HTTP 410 `result_expired`; an existing key still replays its original job.
+
+## Start a consumer after every producer piece succeeds
+
+Omit `after.piece` to wait for the whole fan-out parent. Map its gathered
+`KEY/OUTPUT_NAME` names to explicit local inputs. Even when only one output is
+mapped, every declared producer piece must succeed before the consumer is ready:
+
+```yaml
+name: reduce
+project: research
+run: {command: [sh, -c, 'cat first/input second/input > combined']}
+needs: {platform: cpu, cpu_cores: 1, memory_gb: 0.1}
+after:
+  job: FULL_PRODUCER_JOB_ID
+  outputs: {first/input: first/metrics.json, second/input: second/metrics.json}
+outputs: {combined: results}
+```
+
+The consumer may itself declare `fan_out`:
+
+```yaml
+name: next-stage
+project: research
+extension: summarizer@1
+workload: {input_shape: fixed-v1, units: 100}
+after:
+  job: FULL_PRODUCER_JOB_ID
+  outputs: {first/input: first/metrics.json, second/input: second/metrics.json}
+outputs: {summary.json: results}
+fan_out:
+  max_concurrency: 8
+  pieces:
+    - {key: first, args: [--input, first/input]}
+    - {key: second, args: [--input, second/input]}
+```
+
+Inputs are explicit immutable common inputs, staged for each wave. Piece args or
+the existing batch manifest select the keyed paths; there is no implicit key
+substitution or input filtering. A measured wave's manifest lists these bound
+inputs along with submitted common inputs. Register subsequent consumers against
+this stage's parent ID, then wait only on the final job. No caller-side gather wait
+is needed. Membership and accepted bindings survive queue restart.
+
+For this form `dependency.executions` records the exact accepted producing
+execution for each mapped source key. `dependency.execution` is zero-valued;
+it applies only to the selected-piece form. Parent failure fails a blocked
+consumer with `upstream_failed` without an attempt. Cancellation propagates through
+downstream parents, their children and ordinary consumers, and release includes
+every exact attempt. Terminal results remain intact. Existing readiness clocks,
+absolute deadlines, expiry and transport checks still apply.
+
+Only one already submitted fan-out parent in the same project may be named.
+Ordinary-job sources, multiple-parent joins, forward references, dynamic piece
+creation, timed accumulation and atomic graph submission remain out of scope.
+
+## Per-recording stage chains
+
+For an ASR → separation → naming → render pipeline, submit a separate fan-out
+parent for **each stage of each recording**. Naming can be a one-piece fan-out;
+render is the ordinary sink. Submit stages in order using their returned parent
+IDs, then wait only on render. Different recordings' chains can progress
+independently.
+
+A stage-wide fan-out across recordings cannot feed independent per-recording
+downstream stages as each recording becomes ready: `after.piece` supports only an
+ordinary sink, ordinary results cannot be upstream sources, and a whole-parent
+edge waits for every recording in that parent. Keep the parent boundary at one
+recording when you need per-recording progress.
+
+This illustrative recipe uses two known chunks and extension-defined filenames,
+arguments and workload shapes. Supply the actual extension recipes and immutable
+ASR inputs for the recording; Mycelium does not discover chunks:
+
+```python
+project, recording = "research", "recording-1"
+
+def stage(name, pieces, outputs, *, after=None, files=None):
+    return client.submit({
+        "name": f"{recording}-{name}", "project": project,
+        "submission_key": f"operation-42.{recording}.{name}",
+        "extension": f"{name}@1",
+        "workload": {"input_shape": f"{name}-v1", "units": 1},
+        "files": files or {}, "outputs": outputs,
+        "fan_out": {"max_concurrency": 8, "pieces": pieces},
+        **({"after": after} if after else {}),
+    })
+
+asr = stage("asr", [
+    {"key": "a", "args": ["--input", "a.wav"]},
+    {"key": "b", "args": ["--input", "b.wav"]},
+], {"words.json": "results"}, files=recording_files)
+separation = stage("separation", [
+    {"key": "a", "args": ["--input", "a/input"]},
+    {"key": "b", "args": ["--input", "b/input"]},
+], {"segments.json": "results"}, after={"job": asr["id"], "outputs": {
+    "a/input": "a/words.json", "b/input": "b/words.json"}})
+naming = stage("naming", [
+    {"key": "whole", "args": ["--input", "a.json", "--input", "b.json"]},
+], {"labels.json": "results"}, after={"job": separation["id"], "outputs": {
+    "a.json": "a/segments.json", "b.json": "b/segments.json"}})
+render = client.submit({
+    "name": f"{recording}-render", "project": project,
+    "submission_key": f"operation-42.{recording}.render", "extension": "render@1",
+    "after": {"job": naming["id"], "outputs": {"input.json": "whole/labels.json"}},
+})
+result = client.wait(render["id"])
+```
+
+Repeat those submissions with a distinct recording identity/key namespace for
+each recording, registering every chain before waiting on the final sink IDs.

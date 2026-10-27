@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -130,7 +132,7 @@ type fileStoreConfiguration struct {
 // Stored inputs and their results use the queue file store independently of
 // checkpoint mode. FileTransport continues to select file-store checkpoints.
 func (j Job) storedFileResults() bool {
-	return j.FileTransport || len(jobInputFiles(&j)) > 0
+	return j.FileTransport || len(jobInputFiles(&j)) > 0 || len(j.Spec.SharedInputs) > 0
 }
 
 func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) error {
@@ -371,7 +373,7 @@ func (w *uploadResponse) WriteHeader(status int) {
 	w.status = status
 	w.ResponseWriter.WriteHeader(status)
 }
-func (s *FileStore) serveBlob(w http.ResponseWriter, r *http.Request) {
+func (s *FileStore) serveBlob(w http.ResponseWriter, r *http.Request, metadata bool) {
 	if r.Method == http.MethodHead {
 		// HEAD is upload deduplication authority. Fence verification and refresh
 		// together; GET needs only its open descriptor to survive collection.
@@ -405,6 +407,12 @@ func (s *FileStore) serveBlob(w http.ResponseWriter, r *http.Request) {
 	st, err := f.Stat()
 	if err != nil || !st.Mode().IsRegular() {
 		http.NotFound(w, r)
+		return
+	}
+	if metadata {
+		// This is only a size hint for the verification budget, never durability or
+		// identity authority. Callers must still verify with HEAD before eviction.
+		respond(w, FileRef{SHA256: hash, SizeBytes: st.Size()}, nil)
 		return
 	}
 	// Recheck disk bytes before serving: an ETag must never certify corrupt data.
@@ -454,11 +462,114 @@ func (a API) registerFiles(mux *http.ServeMux) {
 		respondOperation(w, map[string]bool{"ok": true}, a.Queue.PreflightFileStore(r.Context(), files), "job_spec_invalid")
 	})
 	mux.HandleFunc("/api/files/uploads/", a.Queue.files.serveUpload)
-	mux.HandleFunc("GET /api/files/blobs/{hash}", a.Queue.files.serveBlob)
+	mux.HandleFunc("GET /api/files/blobs/{hash}", func(w http.ResponseWriter, r *http.Request) { a.Queue.files.serveBlob(w, r, false) })
+	mux.HandleFunc("GET /api/files/blobs/{hash}/metadata", func(w http.ResponseWriter, r *http.Request) { a.Queue.files.serveBlob(w, r, true) })
 	mux.HandleFunc("POST /api/files/checkpoint", a.checkpointHandler)
 }
 
-func (c Client) fileRequest(ctx context.Context, method, path string, body io.Reader, headers map[string]string) (*http.Response, error) {
+// File transfers have no whole-request timeout (#218). Each network operation
+// renews one idle budget: at least 60 s (past TCP retransmission backoffs), or
+// 30 s plus two full-blob hash passes at a conservative disk rate of 100 MiB/s.
+// The queue hashes before sending headers and twice when publishing an upload.
+const (
+	fileResponseBudget       = 30 * time.Second
+	fileVerifyBytesPerSecond = 100 << 20
+	fileTransferIdle         = 60 * time.Second
+)
+
+var errFileTransferStalled = errors.New("file transfer stalled")
+
+func (c Client) fileTimeout(size int64) time.Duration {
+	if c.transferIdle != 0 {
+		return c.transferIdle
+	}
+	return max(fileTransferIdle, fileResponseBudget+time.Duration(2*float64(max(size, 0))/fileVerifyBytesPerSecond*float64(time.Second)))
+}
+
+// Network deadlines use real time, outside queue/scheduling Clock decisions.
+// Refresh both directions: net/http can already be waiting for the response
+// while an upload is still progressing on the same connection.
+type fileTransferConn struct {
+	net.Conn
+	idle time.Duration
+}
+
+func (c fileTransferConn) Read(p []byte) (int, error) {
+	if err := c.SetDeadline(time.Now().Add(c.idle)); err != nil {
+		return 0, err
+	}
+	n, err := c.Conn.Read(p)
+	return n, fileTransferTimeout(err, c.idle)
+}
+func (c fileTransferConn) Write(p []byte) (int, error) {
+	// Observe partial socket writes, including progress within one TLS record.
+	total := 0
+	for len(p) > 0 {
+		if err := c.SetDeadline(time.Now().Add(c.idle)); err != nil {
+			return total, err
+		}
+		n, err := fileWriteSome(c.Conn, p)
+		total += n
+		p = p[n:]
+		if err != nil {
+			// Some injected in-memory connections expose partial progress only
+			// with a timeout, as handled by x/net/http2's WriteByteTimeout.
+			var timeout net.Error
+			if n > 0 && errors.As(err, &timeout) && timeout.Timeout() {
+				continue
+			}
+			return total, fileTransferTimeout(err, c.idle)
+		}
+		if n == 0 {
+			return total, io.ErrNoProgress
+		}
+	}
+	return total, nil
+}
+
+func fileTransferTimeout(err error, idle time.Duration) error {
+	var timeout net.Error
+	if errors.As(err, &timeout) && timeout.Timeout() {
+		return fmt.Errorf("%w: no network progress for %s", errFileTransferStalled, idle)
+	}
+	return err
+}
+
+// Custom hooks can perform TLS setup themselves, outside our socket wrapper.
+// Bound setup separately from transfer progress. A legacy hook cannot be
+// cancelled, so close its late result; its goroutine lasts until it returns.
+func fileTransferDial(ctx context.Context, idle time.Duration, dial func(context.Context) (net.Conn, error)) (net.Conn, error) {
+	ctx, cancel := context.WithTimeout(ctx, idle)
+	defer cancel()
+	type result struct {
+		conn net.Conn
+		err  error
+	}
+	done := make(chan result)
+	go func() {
+		conn, err := dial(ctx)
+		select {
+		case done <- result{conn, err}:
+		case <-ctx.Done():
+			if conn != nil {
+				conn.Close()
+			}
+		}
+	}()
+	select {
+	case r := <-done:
+		return r.conn, fileTransferTimeout(r.err, idle)
+	case <-ctx.Done():
+		return nil, fileTransferTimeout(ctx.Err(), idle)
+	}
+}
+
+// size is the full blob the queue may verify before replying; 0 when none.
+func (c Client) fileRequest(ctx context.Context, method, path string, body io.Reader, headers map[string]string, sizes ...int64) (*http.Response, error) {
+	var size int64
+	if len(sizes) != 0 {
+		size = sizes[0]
+	}
 	req, err := http.NewRequestWithContext(ctx, method, strings.TrimRight(c.URL, "/")+path, body)
 	if err != nil {
 		return nil, err
@@ -469,17 +580,98 @@ func (c Client) fileRequest(ctx context.Context, method, path string, body io.Re
 	}
 	hc := c.HTTP
 	if hc == nil {
-		hc = &http.Client{Timeout: 30 * time.Second}
+		hc = &http.Client{}
 	}
-	// Never redirect credentials or data to a different destination.
 	local := *hc
+	local.Timeout = 0
 	local.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	base := local.Transport
+	if base == nil {
+		// Own the dial path so file deadlines do not depend on API transport defaults.
+		base = &http.Transport{Proxy: http.ProxyFromEnvironment}
+	}
+	if transport, ok := base.(*http.Transport); ok {
+		transport = transport.Clone()
+		idle := c.fileTimeout(size)
+		dial := transport.DialContext
+		if dial == nil {
+			if legacy := transport.Dial; legacy != nil {
+				dial = func(_ context.Context, network, addr string) (net.Conn, error) {
+					return legacy(network, addr)
+				}
+			} else {
+				dial = (&net.Dialer{Timeout: idle}).DialContext
+			}
+		}
+		transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			conn, err := fileTransferDial(ctx, idle, func(ctx context.Context) (net.Conn, error) {
+				return dial(ctx, network, addr)
+			})
+			if err != nil {
+				return nil, fileTransferTimeout(err, idle)
+			}
+			return fileTransferConn{conn, idle}, nil
+		}
+		// TLS normally runs over the wrapped TCP connection. An injected TLS
+		// dialer owns its handshake and authority checks; retain that path too.
+		dialTLS := transport.DialTLSContext
+		if dialTLS == nil && transport.DialTLS != nil {
+			legacy := transport.DialTLS
+			dialTLS = func(_ context.Context, network, addr string) (net.Conn, error) {
+				return legacy(network, addr)
+			}
+		}
+		if dialTLS != nil {
+			// Let net/http handle custom ALPN using its standard HTTP/2 path.
+			transport.ForceAttemptHTTP2 = true
+			transport.DialTLSContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+				conn, err := fileTransferDial(ctx, idle, func(ctx context.Context) (net.Conn, error) {
+					conn, err := dialTLS(ctx, network, addr)
+					if err == nil {
+						if tc, ok := conn.(*tls.Conn); ok {
+							err = tc.HandshakeContext(ctx)
+						}
+						if err != nil {
+							conn.Close()
+						}
+					}
+					return conn, err
+				})
+				if err != nil {
+					return nil, err
+				}
+				// An opaque custom TLS hook owns its I/O deadlines. Keep the
+				// actual tls.Conn visible to net/http's protocol negotiation.
+				return conn, nil
+			}
+		} else {
+			// Ordinary/default and installed pinned TLS run over our raw
+			// progress connection; keep their deadlines isolated from HTTP/2.
+			transport.ForceAttemptHTTP2 = false
+			if transport.TLSClientConfig == nil {
+				transport.TLSClientConfig = &tls.Config{}
+			} else {
+				transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+			}
+			transport.TLSClientConfig.NextProtos = []string{"http/1.1"}
+			transport.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{}
+		}
+		transport.TLSHandshakeTimeout = 0
+		transport.ResponseHeaderTimeout = 0
+		// Each request owns its size budget and connection; no idle pools to retain.
+		transport.DisableKeepAlives = true
+		local.Transport = transport
+	}
 	res, err := local.Do(req)
 	if err != nil {
+		if errors.Is(err, errFileTransferStalled) {
+			return nil, fmt.Errorf("%w: no network progress for %s", errFileTransferStalled, c.fileTimeout(size))
+		}
 		return nil, errors.New("file transfer connection failed")
 	}
 	return res, nil
 }
+
 func fileResponse(res *http.Response, want int) error {
 	defer res.Body.Close()
 	if res.StatusCode != want {
@@ -504,7 +696,7 @@ func (c Client) hasFile(ctx context.Context, ref FileRef, purpose string) error 
 	if purpose != "" {
 		headers = map[string]string{"X-Myce-Upload-Purpose": purpose}
 	}
-	res, err := c.fileRequest(ctx, "HEAD", "/api/files/blobs/"+ref.SHA256, nil, headers)
+	res, err := c.fileRequest(ctx, "HEAD", "/api/files/blobs/"+ref.SHA256, nil, headers, ref.SizeBytes)
 	if err != nil {
 		return err
 	}
@@ -547,7 +739,7 @@ func (c Client) uploadFile(ctx context.Context, path string, ref FileRef, purpos
 	if purpose != "" {
 		headers["Upload-Metadata"] += ",purpose " + base64.StdEncoding.EncodeToString([]byte(purpose))
 	}
-	res, err := c.fileRequest(ctx, "POST", "/api/files/uploads/", nil, headers)
+	res, err := c.fileRequest(ctx, "POST", "/api/files/uploads/", nil, headers, ref.SizeBytes)
 	if err != nil {
 		return err
 	}
@@ -558,7 +750,7 @@ func (c Client) uploadFile(ctx context.Context, path string, ref FileRef, purpos
 		return nil
 	}
 	endpoint := "/api/files/uploads/" + ref.SHA256
-	res, err = c.fileRequest(ctx, "HEAD", endpoint, nil, map[string]string{"Tus-Resumable": "1.0.0"})
+	res, err = c.fileRequest(ctx, "HEAD", endpoint, nil, map[string]string{"Tus-Resumable": "1.0.0"}, 0)
 	if err != nil {
 		return err
 	}
@@ -582,7 +774,7 @@ func (c Client) uploadFile(ctx context.Context, path string, ref FileRef, purpos
 	// Bounded PATCH bodies let a slow connection progress without one huge request.
 	for {
 		n := min(int64(4<<20), size-offset)
-		res, err = c.fileRequest(ctx, "PATCH", endpoint, io.LimitReader(f, n), map[string]string{"Tus-Resumable": "1.0.0", "Upload-Offset": strconv.FormatInt(offset, 10), "Content-Type": "application/offset+octet-stream"})
+		res, err = c.fileRequest(ctx, "PATCH", endpoint, io.LimitReader(f, n), map[string]string{"Tus-Resumable": "1.0.0", "Upload-Offset": strconv.FormatInt(offset, 10), "Content-Type": "application/offset+octet-stream"}, ref.SizeBytes)
 		if err != nil {
 			return err
 		}
@@ -640,7 +832,7 @@ func (c Client) DownloadFile(ctx context.Context, ref FileRef, dest string) erro
 	if offset > 0 {
 		headers["Range"] = fmt.Sprintf("bytes=%d-", offset)
 	}
-	res, err := c.fileRequest(ctx, "GET", "/api/files/blobs/"+ref.SHA256, nil, headers)
+	res, err := c.fileRequest(ctx, "GET", "/api/files/blobs/"+ref.SHA256, nil, headers, ref.SizeBytes)
 	if err != nil {
 		return err
 	}

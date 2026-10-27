@@ -224,11 +224,27 @@ func (q *Queue) workerIdle(m *Machine, demand *Job) bool {
 // Preparation offers must continue while a build runs, even though that
 // worker is busy for placement steering.
 func (q *Queue) workerBatchIdle(m *Machine) bool {
+	return q.workerBatchIdleExcept(m, nil)
+}
+
+// Recovery may adopt its own exact custody, never a sibling or older copy's.
+func (q *Queue) workerBatchIdleExcept(m *Machine, own *HostRelease) bool {
 	if m.Gone || m.Leaving || q.unreported[m.ID] {
 		return false
 	}
 	for _, j := range q.liveJobs() {
+		if own != nil && j.ID == own.Job && j.Machine == own.Machine && j.Session == own.Session && j.Attempt == own.Attempt {
+			continue
+		}
 		if batchOnTarget(j, m) && (j.State == "running" || j.State == "stopping") {
+			return false
+		}
+	}
+	for _, r := range q.s.HostReleases {
+		if own != nil && releaseKey(r) == releaseKey(*own) {
+			continue
+		}
+		if q.batchReleaseOnTarget(r, m) {
 			return false
 		}
 	}

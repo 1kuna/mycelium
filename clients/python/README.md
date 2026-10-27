@@ -178,7 +178,12 @@ Give your agent the [extension creation guide](../../docs/extensions/AGENT-GUIDE
 for a complete submit/wait/result example. `upload_file` stages hash-addressed
 inputs; `submit_and_wait` requires a stable submission key and retries one lost
 transport response; `download_result` resolves accepted output and verifies its
-hash before replacing an explicit destination. `cancel_submission(project, key)`
+hash before replacing an explicit destination. File transfers have no
+whole-request timeout: they fail with `TransferStalledError` (code
+`result_download_failed` for results) when a socket operation exceeds the idle
+budget: at least 60 seconds, or 30 seconds plus two full-blob verification passes
+at 100 MiB/s, whichever is greater.
+`cancel_submission(project, key)`
 also works when the submit response was lost. HTTP conflicts propagate.
 
 ### Consume one accepted piece
@@ -204,3 +209,29 @@ contract. Read `dependency.state` (`blocked`/`ready`), `ready_at` and `execution
 for the exact producing attempt. Retries and keyed replay preserve that binding.
 See the [fan-out guide](../../docs/guide-fan-out.md) for sibling failure, parent
 abort and artifact expiry. Parent gather does not gather downstream results.
+
+### Depend on a whole fan-out stage
+
+Omit `piece` and use gathered keyed names. Submit each stage immediately after
+receiving its upstream parent ID; wait only on the final stage:
+
+```python
+next_stage = client.submit({
+    "name": "next-stage", "project": "research", "extension": "summarizer@1",
+    "submission_key": "operation-42.next",
+    "workload": {"input_shape": "fixed-v1", "units": 100},
+    "after": {"job": producer["id"], "outputs": {
+        "first/input": "first/metrics.json", "second/input": "second/metrics.json"}},
+    "outputs": {"summary.json": "results"},
+    "fan_out": {"max_concurrency": 8, "pieces": [
+        {"key": "first", "args": ["--input", "first/input"]},
+        {"key": "second", "args": ["--input", "second/input"]}]},
+})
+```
+
+An ordinary consumer uses the same whole-parent `after` mapping. `Client.run`
+and Go `RunOptions.After` accept it too; Go uses an empty `Piece`.
+Read `dependency.executions[KEY]` for immutable accepted producing attempts.
+Every producer piece must succeed; failure fails the consumer without an attempt,
+and upstream cancellation stops downstream stages and their children. Explicit
+keyed input paths are common inputs to every wave, with no automatic enumeration.

@@ -351,7 +351,7 @@ func measureResource(ctx context.Context, c BenchmarkConfig, extensions []Extens
 			return nil, err
 		}
 		start = c.Clock.Now()
-		res, err := c.Client.fileRequest(ctx, "GET", "/api/files/blobs/"+ref.SHA256, nil, nil)
+		res, err := c.Client.fileRequest(ctx, "GET", "/api/files/blobs/"+ref.SHA256, nil, nil, ref.SizeBytes)
 		if err != nil {
 			return nil, err
 		}

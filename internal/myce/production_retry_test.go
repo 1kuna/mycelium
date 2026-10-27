@@ -229,7 +229,8 @@ func TestProductionRetryRejectsOldProgressAndCompletesOnce(t *testing.T) {
 	if reply := check(t, q, m, old); !reply.Kill {
 		t.Fatal("old attempt recovered ownership", reply)
 	}
-	current := check(t, q, m, nil).Job
+	// The rejected old report does not release its original GPU slot.
+	current := check(t, q, machine("retry", "fake"), nil).Job
 	if current == nil || current.ID != old.ID || current.Attempt != 2 {
 		t.Fatal(current)
 	}

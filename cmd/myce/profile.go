@@ -230,6 +230,7 @@ func runProfile(ctx context.Context, name string, args []string, itemInputs map[
 	var sourceIdentity string
 	inputRefs := myce.FileManifest{}
 	commonRefs := myce.FileManifest{}
+	sharedRefs := myce.FileManifest{}
 	if r.Key == "" {
 		p.Source, sourceIdentity, err = identifyProfileSource(ctx, root, p.Source)
 		if err != nil {
@@ -264,11 +265,38 @@ func runProfile(ctx context.Context, name string, args []string, itemInputs map[
 				}
 			}
 		}
+		for name, input := range p.SharedInputs {
+			if input.Local != "" {
+				if input.NAS != "" || len(input.Manifest) > 0 {
+					return waitError(64, "profile_input_invalid: local shared input cannot also use NAS")
+				}
+				local := input.Local
+				if !filepath.IsAbs(local) {
+					local = filepath.Join(root, local)
+				}
+				ref, e := myce.IdentifyFile(local)
+				if e != nil {
+					return waitError(64, "profile_input_invalid: cannot identify shared input")
+				}
+				if input.SHA256 != "" && (input.SHA256 != ref.SHA256 || input.SizeBytes != ref.SizeBytes) {
+					return waitError(64, "profile_input_invalid: shared input hash differs")
+				}
+				input.SHA256, input.SizeBytes = ref.SHA256, ref.SizeBytes
+				p.SharedInputs[name] = input
+				sharedRefs[name] = ref
+			}
+		}
 		if key == "" {
 			key = "profile-" + profileHash(struct {
 				Intent, Source string
 				Inputs         myce.FileManifest
 			}{intent, sourceIdentity, inputRefs})
+			if len(p.SharedInputs) > 0 {
+				key = "profile-" + profileHash(struct {
+					Base   string
+					Shared map[string]myce.SharedInput
+				}{key, p.SharedInputs})
+			}
 		}
 		dir = filepath.Join(receipts, profileHash([]string{p.Project, key}))
 		err = readProfileJSON(filepath.Join(dir, "receipt.json"), &r)
@@ -319,12 +347,40 @@ func runProfile(ctx context.Context, name string, args []string, itemInputs map[
 			s.Files[stored] = inputRef
 			inputCommands = append(inputCommands, "mkdir -p "+shellArg("./"+filepath.Dir(dest))+"; cp "+shellArg("./"+stored)+" "+shellArg("./"+dest))
 		}
+		for name, input := range p.SharedInputs {
+			if input.Local == "" {
+				continue
+			}
+			local := input.Local
+			if !filepath.IsAbs(local) {
+				local = filepath.Join(root, local)
+			}
+			frozen := filepath.Join(stage, "shared-"+profileHash(name))
+			if e := copyProfileInput(local, frozen); e != nil {
+				return e
+			}
+			actual, e := myce.IdentifyFile(frozen)
+			if e != nil || actual != sharedRefs[name] {
+				return waitError(65, "profile_input_changed: shared input changed while freezing")
+			}
+			input.Local = ""
+			s.SharedInputs[name] = input
+			uploads["shared/"+name] = filepath.Base(frozen)
+		}
 		s.ProfileMemory = profileHash(struct {
 			Run    myce.RunSpec
 			Check  []string
 			Inputs myce.FileManifest
 			Class  string
 		}{p.Run, p.Check, commonRefs, p.MemoryClass})
+		// Shared read-only data is common to every item. Keep its identity separate
+		// from private destinations and include it in measured memory comparability.
+		if len(s.SharedInputs) > 0 {
+			s.ProfileMemory = profileHash(struct {
+				Base   string
+				Shared map[string]myce.SharedInput
+			}{s.ProfileMemory, s.SharedInputs})
+		}
 		if p.MemoryClass == "per_item" {
 			s.ProfileMemory = profileHash(struct {
 				Base   string
@@ -390,11 +446,11 @@ func runProfile(ctx context.Context, name string, args []string, itemInputs map[
 			}
 			return profileFailure(out, &r, 69, "queue_unavailable: input storage unconfirmed; intent retained")
 		}
-		if err = c.PreflightFileStore(ctx, r.Spec.Files); err != nil {
+		if err = c.PreflightFileStore(ctx, r.Spec.StoredInputFiles()); err != nil {
 			return capacityFailure(err)
 		}
 		for name, file := range r.Uploads {
-			if err = c.UploadJobInput(ctx, filepath.Join(dir, file), r.Spec.Files[name]); err != nil {
+			if err = c.UploadJobInput(ctx, filepath.Join(dir, file), profileUploadRef(r.Spec, name)); err != nil {
 				return capacityFailure(err)
 			}
 		}
@@ -476,4 +532,11 @@ func copyProfileInput(src, dest string) error {
 	}
 	_, err = io.Copy(out, in)
 	return errors.Join(err, out.Sync(), out.Close())
+}
+
+func profileUploadRef(s myce.Spec, name string) myce.FileRef {
+	if input, ok := s.SharedInputs[strings.TrimPrefix(name, "shared/")]; strings.HasPrefix(name, "shared/") && ok {
+		return myce.FileRef{SHA256: input.SHA256, SizeBytes: input.SizeBytes}
+	}
+	return s.Files[name]
 }

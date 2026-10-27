@@ -21,6 +21,7 @@ func (w *Worker) initFileTransfers(ctx context.Context, s *workerStore) error {
 		return errors.New("file cache limit must be positive")
 	}
 	w.fileCache = &FileCache{Root: root, Limit: limit, Clock: w.Clock, Client: w.Client}
+	w.sharedInputs = &SharedInputCache{cache: EnvironmentCache{Root: filepath.Join(root, "shared-inputs"), Limit: limit, Clock: w.Clock}, Client: w.Client}
 	if w.fileCheckpoints {
 		if w.CheckpointRoot != "" {
 			return errors.New("NAS checkpoint-root cannot be combined with queue file-store checkpoints")

@@ -110,6 +110,18 @@ func (q *Queue) roomPlan(j *Job, m *Machine, batch bool) *placementPlan {
 	if m.Recovering {
 		return nil
 	}
+	if batch {
+		for _, r := range q.s.HostReleases {
+			if !q.batchReleaseOnTarget(r, m) {
+				continue
+			}
+			current := q.s.Jobs[r.Job]
+			if current == nil || current.Machine != r.Machine || current.Session != r.Session || current.Attempt != r.Attempt || (current.State != "running" && current.State != "stopping") {
+				// No live attempt can be preempted to release this slot.
+				return nil
+			}
+		}
+	}
 	best := q.roomPlanWithBatch(j, m, batch, batch)
 	if !batch {
 		if p := q.roomPlanWithBatch(j, m, false, true); p != nil && p.cheaper(best) {

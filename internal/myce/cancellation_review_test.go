@@ -55,10 +55,12 @@ func TestCancellationFreshRejoinUntrackedCopies(t *testing.T) {
 		t.Run("tracked="+stringBool(tracked), func(t *testing.T) {
 			q, c := fixture(t)
 			m := machine("one", "fake")
+			// Keep both lost sessions on this machine, using distinct GPU slots.
+			m.Devices = m3Machine().Devices
 			s := spec("experiment")
 			s.AllowedMachines = []string{m.ID}
 			j := submit(t, q, s)
-			j = check(t, q, m, nil).Job
+			j = assignedJob(machineCheck(t, q, m))
 			check(t, q, machine("two", "fake"), nil)
 			check(t, q, machine("three", "fake"), nil)
 			for attempt := 1; attempt <= 2; attempt++ {
@@ -72,7 +74,7 @@ func TestCancellationFreshRejoinUntrackedCopies(t *testing.T) {
 				}
 				if attempt == 1 {
 					m.Session = "second-one"
-					j = check(t, q, m, nil).Job
+					j = assignedJob(machineCheck(t, q, m))
 					if j == nil || j.Attempt != 2 {
 						t.Fatal("missing second session attempt")
 					}
@@ -99,7 +101,7 @@ func TestCancellationFreshRejoinUntrackedCopies(t *testing.T) {
 				t.Fatal("cancellation changed unknown-copy custody", a)
 			}
 			m.Session = "fresh-one"
-			if _, err := q.Checkin(Checkin{Machine: m, Fresh: true, PreviousSession: j.Session}); err != nil {
+			if _, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Fresh: true, PreviousSession: j.Session}); err != nil {
 				t.Fatal(err)
 			}
 			if a := cancelAck(t, q, j.ID); ackRelease(a) != "pending" {

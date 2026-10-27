@@ -463,11 +463,16 @@ custody awaiting the stopped-container collector are protected. Private Docker
 evidence survives container removal until this log window expires. Unknown
 orphan records are retained for recovery. Per-attempt input and
 work folders (`job-files/JOB/ATTEMPT`, including inputs, unpacked source and a
-Python job's `.venv`) go **24 hours** after the worker first finds them without
-attempt custody, timed by the worker clock. That is after the queue accepts the
-result, or after a crash orphans the folder. A failed run's work files are never
-uploaded, so collect its test logs or partial outputs from that folder within
-the day. A held attempt keeps its folder however long it runs. The pass refuses
+Python job's `.venv`) go immediately through the existing collector once the
+worker confirms that the exact attempt succeeded with accepted, published
+outputs and confirmed release. Cancelled, released attempts with no accepted
+outputs also go immediately. The confirmation is saved with cleared custody,
+so a restart before collection does not restart a grace period. Small logs and
+process/result records keep the log-retention window. Failed attempts and
+unknown orphan folders keep **24 hours** after the worker first finds them
+without custody, timed by the worker clock. Collect failed test logs or partial
+outputs within that day; opt-in published attempt diagnostics have their own
+file retention. A held attempt keeps its folder however long it runs. The pass refuses
 to run when `job-files` is not a real directory, for example a symlink. A folder
 it cannot remove, such as one with root-owned Docker output, gets a fresh day
 and is retried; other folders are still cleaned, and a repeated error is logged

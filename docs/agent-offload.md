@@ -342,8 +342,11 @@ publishing each local file. Failed/running/cancelled jobs are refused with
 `result_not_accepted`. Server-labelled errors, such as HTTP 401 authentication
 failures or an unknown job, retain the server's code; HTTP 410 reports
 `result_expired`. Only transport or verification failures, including hash/size
-mismatches, report `result_download_failed`. All use exit code 1, with the typed
-code first on stderr and no timestamp.
+mismatches, report `result_download_failed`. Downloads of any size continue
+while bytes flow; a socket operation exceeding the idle budget (at least 60
+seconds, or 30 seconds plus two full-blob hash passes at 100 MiB/s) fails with
+`result_download_failed: file transfer stalled`. All use exit code 1, with the
+typed code first on stderr and no timestamp.
 Existing destination files are replaced only after that artifact verifies.
 Result directories may contain earlier verified artifacts if a later one fails.
 

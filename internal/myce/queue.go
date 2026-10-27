@@ -532,14 +532,14 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 	catalog := q.environments
 	environmentRevision := q.environmentRevision
 	replay := s.SubmissionKey != "" && q.s.Submissions[submissionDigest(s.Project, s.SubmissionKey)] != nil
-	if len(s.Files) > 0 && !replay && q.submitVerificationSlot == nil {
+	if len(submissionFiles(s)) > 0 && !replay && q.submitVerificationSlot == nil {
 		q.submitVerificationSlot = make(chan struct{}, 1)
 	}
 	slot := q.submitVerificationSlot
 	q.mu.Unlock()
 	var verificationErr error
-	if len(s.Files) > 0 && !replay {
-		verificationErr = verifySubmissionInputs(ctx, store, s.Files, slot)
+	if len(submissionFiles(s)) > 0 && !replay {
+		verificationErr = verifySubmissionInputs(ctx, store, submissionFiles(s), slot)
 	}
 	// Use the same execution adapter as the transaction, on an owned copy.
 	// Validation errors are handled below in their existing order; key replay
@@ -1222,7 +1222,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 					}
 					break
 				}
-				if c.Recovering || q.maintenanceBlocked(hostID(&m)) || !logPolicyFits(j.Spec.Logs, &m) || !q.checkpointReady(j, &m) {
+				if c.Recovering || q.maintenanceBlocked(hostID(&m)) || !logPolicyFits(j.Spec.Logs, &m) || !sharedInputsFit(j.Spec, &m) || !q.checkpointReady(j, &m) {
 					return nil
 				}
 				out := cloneJob(j)
@@ -2104,9 +2104,14 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 }
 
 // The bounded legacy adapter retains its original scalar recovery limit.
-func (q *Queue) workerHasOtherAttempt(machine, session, job string) bool {
+func (q *Queue) workerHasOtherAttempt(machine, session, job string, attempt int) bool {
 	for _, j := range q.liveJobs() {
-		if j.Machine == machine && j.Session == session && j.ID != job && (j.State == "running" || j.State == "stopping") {
+		if j.Machine == machine && j.Session == session && !(j.ID == job && j.Attempt == attempt) && (j.State == "running" || j.State == "stopping") {
+			return true
+		}
+	}
+	for _, r := range q.s.HostReleases {
+		if !r.Preparation && r.Machine == machine && !(r.Job == job && r.Session == session && r.Attempt == attempt) {
 			return true
 		}
 	}

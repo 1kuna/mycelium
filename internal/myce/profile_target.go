@@ -78,6 +78,9 @@ func targetFitReason(dimension string, j *Job, m *Machine) string {
 	case "disk headroom":
 		return diskHeadroomReason(j, m)
 	case "target":
+		if !sharedInputsFit(j.Spec, m) {
+			return "shared_inputs_v1 worker capability required"
+		}
 		required := make([]string, 0, len(j.Spec.Targets))
 		for _, t := range j.Spec.Targets {
 			required = append(required, formatTarget(t))
@@ -157,6 +160,9 @@ func logicalCPUs(m *Machine) int {
 }
 
 func executionTargetMatches(s Spec, m *Machine) bool {
+	if !sharedInputsFit(s, m) {
+		return false
+	}
 	if len(s.Targets) == 0 {
 		return true
 	}

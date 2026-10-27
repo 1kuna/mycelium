@@ -41,6 +41,10 @@ func (r *workerRetry) succeeded(now time.Time, interval time.Duration) {
 }
 
 type workerState struct {
+	// Written with cleared custody only after the queue confirms terminal,
+	// released publication. Survives a restart before scratch retention runs.
+	PublishedAttempt *Execution `json:"published_attempt,omitempty"`
+
 	LaunchOutcome   string                 `json:"launch_outcome,omitempty"`
 	Attempts        []string               `json:"attempts,omitempty"`
 	PriorityStop    *PriorityPreemption    `json:"priority_stop,omitempty"`
@@ -67,6 +71,7 @@ type workerState struct {
 	Log             string                 `json:"log,omitempty"`
 }
 type workerStore struct {
+	sharedRelease         func() // Idempotent; retained until exact process cleanup.
 	deviceFaults          checkpointIO[KernelLogSnapshot]
 	stateName             string
 	environmentLogs       checkpointIO[bool]
@@ -367,7 +372,30 @@ func waitWorkerGroup(group int, clock Clock) error {
 		<-wake.C
 	}
 }
-func (s *workerStore) cleanupOrphan(clock Clock, memoryFiles ...memoryFS) error {
+func (s *workerStore) cleanupOrphan(clock Clock, memoryFiles ...memoryFS) (cleanupErr error) {
+	defer func() {
+		if cleanupErr == nil {
+			s.releaseSharedInputs()
+		}
+	}()
+	var stopIntent *workerState
+	if s.state.Job != nil && s.state.Identity != "" {
+		data, err := os.ReadFile(filepath.Join(s.dir, s.state.Identity+".stop.json"))
+		if err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		if err == nil {
+			var intent workerState
+			if err := decodeWorkerJSON(data, &intent); err != nil {
+				return err
+			}
+			if intent.Identity != s.state.Identity {
+				return errors.New("mismatched stop custody")
+			}
+			stopIntent = &intent
+			s.state.StopAt, s.state.UserCancel = intent.StopAt, intent.UserCancel
+		}
+	}
 	// Native members use the ordinary attempt record, written before each exec
 	// gate opens. argv/environment markers may disappear (including env -i),
 	// so authenticate surviving PIDs by their kernel birth identity instead.
@@ -385,6 +413,14 @@ func (s *workerStore) cleanupOrphan(clock Clock, memoryFiles ...memoryFS) error 
 				return errors.New("mismatched attempt process custody")
 			}
 			if st.Groups != nil || st.Cgroup != "" {
+				if st.StopGrace == 0 {
+					st.StopGrace = s.state.StopGrace
+				}
+				// Ordinary commands record stop delivery separately; read it before
+				// group recovery so a restart cannot renew grace or forget cancel.
+				if stopIntent != nil {
+					st.StopAt, st.UserCancel = stopIntent.StopAt, stopIntent.UserCancel
+				}
 				if !s.state.Job.Spec.Needs.cpuOnly() && !st.UserCancel {
 					if err := gracefulRecoveredGroups(&st, clock, func() error { return saveWorkerJSON(s.dir, "attempt-"+s.state.Identity+".json", st) }, memoryFiles...); err != nil {
 						return err
@@ -395,23 +431,10 @@ func (s *workerStore) cleanupOrphan(clock Clock, memoryFiles ...memoryFS) error 
 		}
 	}
 	if s.state.PID <= 0 || s.state.Identity == "" {
+		if (s.state.Job == nil || !s.state.Job.Spec.Run.Docker) && s.state.Result != nil && s.state.Result.ReleasePending {
+			return errors.New("attempt cleanup custody unavailable; release pending")
+		}
 		return nil
-	}
-	if s.state.Job != nil {
-		data, err := os.ReadFile(filepath.Join(s.dir, s.state.Identity+".stop.json"))
-		if err != nil && !errors.Is(err, os.ErrNotExist) {
-			return err
-		}
-		if err == nil {
-			var intent workerState
-			if err := decodeWorkerJSON(data, &intent); err != nil {
-				return err
-			}
-			if intent.Identity != s.state.Identity {
-				return errors.New("mismatched stop custody")
-			}
-			s.state.StopAt, s.state.UserCancel = intent.StopAt, intent.UserCancel
-		}
 	}
 	members, err := workerGroupMembers(s.state.PID)
 	if err != nil {
@@ -432,13 +455,27 @@ func (s *workerStore) cleanupOrphan(clock Clock, memoryFiles ...memoryFS) error 
 			break
 		}
 	}
+	if s.state.Job != nil && len(members) > 0 && !owned {
+		if !s.state.Job.Spec.Run.Docker && s.state.Result != nil && s.state.Result.ReleasePending {
+			return errors.New("attempt process group identity unconfirmed; release pending")
+		}
+		return nil // Preserve a live command whose identity does not match.
+	}
 	var memory *memoryAttempt
-	if s.state.Cgroup != "" && s.state.Job == nil {
-		if filepath.Base(s.state.Cgroup) != "engine-"+s.state.Identity {
-			return errors.New("mismatched engine cgroup custody")
+	if s.state.Cgroup != "" {
+		prefix := "engine-"
+		if s.state.Job != nil {
+			prefix = "attempt-"
+		}
+		if filepath.Base(s.state.Cgroup) != prefix+s.state.Identity {
+			return errors.New("mismatched cgroup custody")
 		}
 		if _, err := os.Stat(s.state.Cgroup); err == nil {
-			memory = &memoryAttempt{fs: osMemoryFS{}, path: s.state.Cgroup}
+			var fs memoryFS = osMemoryFS{}
+			if len(memoryFiles) > 0 {
+				fs = memoryFiles[0]
+			}
+			memory = &memoryAttempt{fs: fs, path: s.state.Cgroup}
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
@@ -464,6 +501,12 @@ func (s *workerStore) cleanupOrphan(clock Clock, memoryFiles ...memoryFS) error 
 		return memory.cleanup(clock)
 	}
 	return errors.Join(waitWorkerGroup(s.state.PID, clock), memory.cleanup(clock))
+}
+
+func (s *workerStore) releaseSharedInputs() {
+	if s.sharedRelease != nil {
+		s.sharedRelease()
+	}
 }
 
 func cleanupAttemptGroups(st workerState, clock Clock, memoryFiles ...memoryFS) error {

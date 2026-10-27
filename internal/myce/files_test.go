@@ -193,6 +193,21 @@ func TestFileCacheBoundedEvictionAndPrivateCopies(t *testing.T) {
 			t.Fatal(err)
 		}
 		refs = append(refs, ref)
+		if len(refs) == 3 {
+			// An interrupted download retains just one byte of the old full blob.
+			// Eviction must obtain the full size before asking the queue to hash it.
+			old := filepath.Join(cache.Root, refs[0].SHA256)
+			if err := os.Rename(old, old+".partial"); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Truncate(old+".partial", 1); err != nil {
+				t.Fatal(err)
+			}
+			oldest := clock.Now().Add(-time.Second)
+			if err := os.Chtimes(old+".partial", oldest, oldest); err != nil {
+				t.Fatal(err)
+			}
+		}
 		clock.Advance(time.Second)
 		dest := filepath.Join(t.TempDir(), "private")
 		if err = cache.copyTo(context.Background(), ref, dest); err != nil {
@@ -203,6 +218,9 @@ func TestFileCacheBoundedEvictionAndPrivateCopies(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(cache.Root, refs[0].SHA256)); !os.IsNotExist(err) {
 		t.Fatal("oldest cache entry retained", err)
+	}
+	if _, err := os.Stat(filepath.Join(cache.Root, refs[0].SHA256) + ".partial"); !os.IsNotExist(err) {
+		t.Fatal("old partial cache entry retained", err)
 	}
 	entries, _ := os.ReadDir(cache.Root)
 	var total int64
@@ -422,7 +440,7 @@ func TestFileStoreCorruptUploadOffsetCapacityAndRestart(t *testing.T) {
 	ref, _ := IdentifyFile(src)
 	request := func(method, path string, data []byte, headers map[string]string) int {
 		t.Helper()
-		res, e := c.fileRequest(context.Background(), method, path, bytes.NewReader(data), headers)
+		res, e := c.fileRequest(context.Background(), method, path, bytes.NewReader(data), headers, 0)
 		if e != nil {
 			t.Fatal(e)
 		}
@@ -560,6 +578,18 @@ func TestStoredExtensionInputAndOutput(t *testing.T) {
 	got := snap.Jobs[0]
 	if got.ID != j.ID || got.State != "succeeded" || got.OutputRefs["output"] != ref {
 		t.Fatalf("extension file transport: %+v", got)
+	}
+	// #201: acknowledgement schedules the existing collector immediately;
+	// the accepted blob and small result diagnostics survive scratch removal.
+	await(t, func() bool {
+		_, err := os.Stat(filepath.Join(state, "job-files", j.ID, "1"))
+		return errors.Is(err, os.ErrNotExist)
+	})
+	if err := c.DownloadFile(ctx, ref, filepath.Join(t.TempDir(), "accepted-output")); err != nil {
+		t.Fatal("accepted output lost during scratch cleanup", err)
+	}
+	if files, err := filepath.Glob(filepath.Join(state, "*.result.json")); err != nil || len(files) == 0 {
+		t.Fatal("small result diagnostics lost during scratch cleanup", err)
 	}
 	cancel()
 	select {
