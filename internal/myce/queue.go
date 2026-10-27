@@ -572,6 +572,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		}
 		if existing != nil {
 			out = *existing
+			out.SubmissionReused = true
 			return nil
 		}
 		if err := q.validateMachineNames(s.AllowedMachines); err != nil {

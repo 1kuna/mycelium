@@ -398,3 +398,17 @@ and verify `gate-result.txt` through the accepted result API. Do not launch an
 additional full suite while two are already active.
 Add `--checkpoints DEV_CHECKPOINTS` to exercise NAS checkpoint semantics with a
 local test folder while keeping the same stored source/input/result transport.
+
+A submit reply and the saved/printed profile receipt expose
+`submission_reused: true` when the queue returned an existing project/key binding.
+The receipt preserves that submission fact on local replay; it is not a claim
+that a new attempt ran. An older receipt without the field has no recorded
+adoption diagnostic. A cancelled-before-submit binding can also be reused.
+
+A new worktree or receipt root can adopt an already-terminal job with the same
+project/key and intent. Its new receipt has a new nonce, so observing that job
+can deliver terminal status again with a different `delivery_id`. Delivery IDs
+are stable within a preserved receipt, not globally across receipt roots.
+Receivers should also recognize a job/status/result already processed across
+roots. Keep caller receipts for recovery; use a fresh explicit `--key` when a
+new execution is required (for example a release canary).

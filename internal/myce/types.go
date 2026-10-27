@@ -308,7 +308,9 @@ type Copy struct {
 }
 
 type Job struct {
-	AttemptHistory []AttemptOutcome `json:"attempt_history,omitempty"`
+	// SubmissionReused is set only on a keyed submit reply, never on stored jobs.
+	SubmissionReused bool             `json:"submission_reused,omitempty"`
+	AttemptHistory   []AttemptOutcome `json:"attempt_history,omitempty"`
 
 	// Simulator-only baseline barrier; never persisted or exposed as an API.
 	simGatherWait    bool
