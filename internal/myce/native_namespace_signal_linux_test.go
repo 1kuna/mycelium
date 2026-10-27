@@ -49,8 +49,28 @@ while :; do read line <&5; done
 	if err := helper.Start(); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = helper.Process.Kill(); _ = helper.Wait() })
+	helperMember := &nativeMember{Name: "checkpoint", PID: helper.Process.Pid, cmd: helper, done: make(chan struct{})}
+	go func() {
+		err := helper.Wait()
+		g.p.mu.Lock()
+		helperMember.err = err
+		helperMember.Exit = observedNativeExit(helper, time.Now())
+		g.p.mu.Unlock()
+		close(helperMember.done)
+	}()
+	t.Cleanup(func() { _ = helper.Process.Kill(); <-helperMember.done })
 	helperBirth, err := processBirth(helper.Process.Pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The waiter and joined child are reaped after saving. Like a real sidecar,
+	// the surviving helper must retain its own birth in custody for group cleanup.
+	g.p.mu.Lock()
+	helperMember.Birth = helperBirth
+	g.members = append(g.members, helperMember)
+	g.custody.Groups[main.PID][helperMember.PID] = helperBirth
+	err = g.saveLocked()
+	g.p.mu.Unlock()
 	if err != nil {
 		t.Fatal(err)
 	}

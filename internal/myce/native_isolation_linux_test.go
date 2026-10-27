@@ -135,6 +135,22 @@ func nativeIsolationLinuxAttack() error {
 	return nil
 }
 
+func nativeIsolationLinuxControlSocket(t *testing.T) string {
+	t.Helper()
+	// Gate/job TMPDIR paths can exceed Linux's 108-byte sockaddr_un limit.
+	// Keep a real pathname socket so the control-access attack stays covered.
+	dir, err := os.MkdirTemp("/tmp", "myce-isolation-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(dir); err != nil {
+			t.Error(err)
+		}
+	})
+	return filepath.Join(dir, "control.sock")
+}
+
 func TestNativeIsolationLinuxWorkerSiblingAndControl(t *testing.T) {
 	if support := nativeLinuxDetection(); support.mode == "unavailable" {
 		t.Skipf("host confinement unavailable: %s", support.reason)
@@ -152,7 +168,7 @@ func TestNativeIsolationLinuxWorkerSiblingAndControl(t *testing.T) {
 	if err := os.WriteFile(credential, []byte("synthetic-private"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	socket := filepath.Join(t.TempDir(), "control.sock")
+	socket := nativeIsolationLinuxControlSocket(t)
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)
@@ -280,6 +296,7 @@ __attribute__((constructor)) static void attack(void) {
 			j.Spec.Run.Env = map[string]string{"LD_PRELOAD": "{work}/preload.so", "NATIVE_PRELOAD_MARKER": marker}
 			if group {
 				j.Spec.Run.MemoryGB = .125
+				j.Spec.Needs.HostMemoryGB = j.Spec.Run.MemoryGB
 			}
 			p, err := w.start(store, j)
 			if err != nil {
@@ -326,7 +343,7 @@ func TestNativeIsolationLinuxFallback(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer control.Close()
-			socket := filepath.Join(root, "control.sock")
+			socket := nativeIsolationLinuxControlSocket(t)
 			unixListener, err := net.Listen("unix", socket)
 			if err != nil {
 				t.Fatal(err)
