@@ -21,6 +21,7 @@ const healthAlertCooldown = 15 * time.Minute
 type HealthAlert struct {
 	DeliveryID string    `json:"delivery_id"`
 	Kind       string    `json:"kind"`
+	Store      string    `json:"store,omitempty"`
 	Host       string    `json:"host,omitempty"`
 	JobID      string    `json:"job_id,omitempty"`
 	Attempt    int       `json:"attempt,omitempty"`
@@ -81,12 +82,12 @@ func (q *Queue) pruneHealthEvents() {
 	}
 }
 
-func (q *Queue) detectHealth(fileAvailable bool) {
+func (q *Queue) detectHealth() {
 	delay := q.healthStorageDelay
 	if delay <= 0 {
 		delay = DefaultHealthStorageDelay
 	}
-	q.observeHealth("queue-storage", !fileAvailable || !q.fileCheckpoints && !q.nasAvailable, delay, HealthAlert{Kind: "checkpoint_store_unavailable"})
+	q.observeHealth("queue-storage", !q.fileCheckpoints && !q.nasAvailable, delay, HealthAlert{Kind: "checkpoint_store_unavailable", Store: "nas"})
 	now := q.clock.Now()
 	for _, m := range q.s.Machines {
 		if m.Replacement != nil || q.migrationHistoricalMachine(m) {

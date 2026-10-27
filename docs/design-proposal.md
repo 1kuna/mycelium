@@ -2624,7 +2624,8 @@ An optional queue-local executable uses the existing completion notifier's
 `--check` and JSON-stdin/exit-status contract. Each delivery contains only a stable
 `delivery_id`, fixed `kind`, host/job/attempt identities and queue timestamp, plus
 `delivered: false`; no raw diagnostics, paths, job argv or fleet token. The
-operator's hook routes to their own wake or notification channel. Execution is
+operator's hook routes to their own wake or notification channel. File-store availability is sampled by the existing maintenance tick; it adds
+no probe or snapshot lock to ordinary control transactions. Execution is
 outside queue locks and never blocks worker control. Delivery is at least once:
 receivers deduplicate `delivery_id`. A successful hook acknowledgement is persisted;
 a failed/ambiguous delivery retries the same identity after one minute. Hooks are

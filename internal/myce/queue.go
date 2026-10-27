@@ -420,14 +420,6 @@ func (q *Queue) updateTimed(fn func() error, timing *queueUpdateTiming) error {
 			})
 		}
 	}
-	// Probe authoritative file storage outside the control lock as well as NAS.
-	q.mu.RLock()
-	files := q.files
-	q.mu.RUnlock()
-	fileAvailable := true
-	if !q.simulation && files != nil {
-		fileAvailable, _ = q.healthStoreProbe.run(files.root, func() (bool, error) { return checkpointAvailable(files.root), nil })
-	}
 	if timing == nil && q.observeUpdate != nil {
 		timing = &queueUpdateTiming{}
 	}
@@ -465,7 +457,7 @@ func (q *Queue) updateTimed(fn func() error, timing *queueUpdateTiming) error {
 	q.accountUsage(q.clock.Now())
 	err = fn()
 	if err == nil {
-		q.detectHealth(fileAvailable)
+		q.detectHealth()
 		q.invalidateWorkTimings()
 		q.invalidateWorkCurves()
 	}
@@ -892,7 +884,24 @@ func (q *Queue) maintain() {
 	}
 }
 func (q *Queue) Tick() error {
-	if err := q.update(func() error { q.maintain(); return nil }); err != nil {
+	// File-store health belongs to existing maintenance, not every control
+	// transaction. Snapshot under the lock, then perform bounded I/O outside it.
+	q.mu.RLock()
+	files := q.files
+	q.mu.RUnlock()
+	fileAvailable := true
+	if !q.simulation && files != nil {
+		fileAvailable, _ = q.healthStoreProbe.run(files.root, func() (bool, error) { return checkpointAvailable(files.root), nil })
+	}
+	if err := q.update(func() error {
+		delay := q.healthStorageDelay
+		if delay <= 0 {
+			delay = DefaultHealthStorageDelay
+		}
+		q.observeHealth("queue-files", !fileAvailable, delay, HealthAlert{Kind: "checkpoint_store_unavailable", Store: "queue-file-store"})
+		q.maintain()
+		return nil
+	}); err != nil {
 		return err
 	}
 	return errors.Join(q.pruneBatchLogs(), q.reclaimJobFiles())
