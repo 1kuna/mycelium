@@ -13,6 +13,7 @@ import (
 // Stable rejection codes and default messages. Submission validation returns
 // the specific field rule; other wrapped causes stay local.
 var rejectionMessages = map[string]string{
+	"queue_stopping":                        "queue is shutting down; retry the request",
 	"disk_headroom":                         "projected disk need plus free floor exceeds known disk capacity",
 	"result_expired":                        "stored job files expired after the retention window",
 	"no_qualified_target":                   "no known qualified target with the declared platform, environment and capacity; intent retained locally",

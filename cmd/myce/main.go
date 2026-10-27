@@ -555,6 +555,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 				return e
 			}
 			defer joiningServer.Close()
+			defer q.BeginShutdown()
 			withdraw, e := myce.AdvertiseJoining(tlsListener.Addr(), identity.Fingerprint())
 			if e != nil {
 				fmt.Fprintln(os.Stderr, "Discovery unavailable; use a saved HTTPS joining address")
@@ -572,6 +573,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		case <-ctx.Done():
 		case err = <-errs:
 		}
+		q.BeginShutdown()
 		stop()
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
