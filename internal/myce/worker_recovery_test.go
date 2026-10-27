@@ -476,7 +476,17 @@ func TestWorkerRelativeCommandUsesJobWorkdir(t *testing.T) {
 		t.Fatal(err)
 	}
 	j := recoveryJob(t, []string{"./run.sh"})
-	j.Spec.Run.Workdir = dir
+	w.JobFileRoot = dir
+	j.Spec.Inputs = map[string]string{"run.sh": "run.sh"}
+	if err = w.prepareExtensionFiles(&j, s.dir); err != nil {
+		t.Fatal(err)
+	}
+	// Input transport deliberately does not preserve executable permissions.
+	// Make the fixture executable before testing relative command resolution.
+	if err = os.Chmod(filepath.Join(j.Spec.Run.Workdir, "run.sh"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	j.Spec.Run.Workdir = "{work}"
 	w = workerWithPreparedCheckpoint(t, w, s, j)
 	p, err := w.start(s, j)
 	if err != nil {

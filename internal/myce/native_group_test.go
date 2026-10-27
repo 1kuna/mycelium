@@ -232,6 +232,11 @@ func nativeFinish(t *testing.T, r *nativeTestRun) Result {
 		if f.result.ReleasePending {
 			t.Fatal("cleanup unconfirmed", f.result)
 		}
+		if !f.result.Success {
+			if data, err := os.ReadFile(filepath.Join(r.s.dir, r.s.state.Log)); err == nil {
+				t.Logf("native output: %s", data)
+			}
+		}
 		return f.result
 	case <-time.After(10 * time.Second):
 		t.Fatal("native group did not finish")

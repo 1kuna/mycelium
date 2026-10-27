@@ -161,7 +161,7 @@ func TestWorkerRetentionNativeStartFailureAcknowledgement(t *testing.T) {
 	defer root.close()
 	job := recoveryJob(t, []string{"sh", "-c", "exit 0"})
 	job.Spec.Resumable = false
-	job.Spec.Run.Workdir = filepath.Join(t.TempDir(), "missing-directory")
+	job.Spec.Run.Workdir = "{work}/missing-directory"
 	store, err := newAttemptStore(root, job)
 	if err != nil {
 		t.Fatal(err)

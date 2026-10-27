@@ -336,7 +336,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (*proce
 		}
 	}()
 	executionWorkdir := j.Spec.Run.Workdir
-	if j.Spec.extensionJob() || len(jobInputFiles(&j))+len(jobInputPaths(&j)) > 0 {
+	if !j.Spec.Run.Docker || j.Spec.extensionJob() || len(jobInputFiles(&j))+len(jobInputPaths(&j)) > 0 {
 		value := j
 		dir, err := s.extensionFiles.run(attemptCheckpoint(j), func() (string, error) {
 			err := w.prepareExtensionFiles(&value, s.dir)
@@ -352,6 +352,10 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (*proce
 	}
 
 	executionWork := j.Spec.Run.Workdir
+	executionWorkdir, extensionErr = privateNativeExtension(&j, extensionEnv, executionWork, executionWorkdir)
+	if extensionErr != nil {
+		return nil, extensionErr
+	}
 	if executionWorkdir != "" {
 		j.Spec.Run.Workdir = executionWorkdir
 	}
@@ -420,6 +424,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (*proce
 		}
 	}
 	expandExecution(&j.Spec, executionWork, environmentPath, machineTarget(&w.Machine))
+	if !j.Spec.Run.Docker && j.Spec.Run.Workdir == "" {
+		j.Spec.Run.Workdir = executionWork
+	}
 	if err := w.checkHostRAM(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB); err != nil {
 		return nil, err
 	}
@@ -502,7 +509,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (*proce
 		defer approvalWriter.Close()
 		args = append(args[:3], append([]string{executable, "_command-exec"}, args[3:]...)...)
 	}
-	cmd := exec.Command("sh", args...)
+	cmd := exec.Command("/bin/sh", args...)
 	if readyWriter != nil {
 		cmd.ExtraFiles = []*os.File{readyWriter, approvalReader}
 	}
@@ -546,12 +553,22 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (*proce
 		delete(env, "MYCE_USAGE_FILE")
 	}
 	delete(env, "MYCE_TOKEN")
+	// TMPDIR is worker-owned, even when run.env or activation supplied one.
+	// Keep it with the managed attempt files so existing custody/retention owns it.
+	tmp := filepath.Join(executionWork, ".tmp")
+	if err := os.MkdirAll(tmp, 0700); err != nil {
+		return nil, err
+	}
+	env["TMPDIR"], env["TMP"], env["TEMP"] = tmp, tmp, tmp
 	if len(j.Spec.Run.Sidecars) > 0 || j.Spec.Run.MemoryGB > 0 {
 		p, e := w.startNativeGroup(s, j, identity, memoryAttempt, env, environmentPath, extensionRelease, release)
 		if e == nil {
 			environmentStarted, extensionStarted, started = true, true, true
 		}
 		return p, e
+	}
+	if err := w.isolateNativeCommand(cmd, s.dir, executionWork, env, nil, j.Spec.Needs.Network); err != nil {
+		return nil, s.startFailure(j, launchRefused, err)
 	}
 	keys := make([]string, 0, len(env))
 	for k := range env {
@@ -1039,6 +1056,9 @@ func (w Worker) Run(stop context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Payload policy protects the actual listener port, including a configured
+	// non-loopback alias and an ephemeral ModelListen port.
+	w.ModelListen = strings.TrimPrefix(rt.url, "http://")
 	rt.authorize = w.authorizeLaunch
 	modelAvailabilityDone := make(chan struct{})
 	go func() {

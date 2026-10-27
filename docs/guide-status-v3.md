@@ -103,6 +103,38 @@ Unqualified CPU targets are withheld before placement, with the same typed job
 `diagnostic_code`. If qualification changes before launch, the job is requeued
 without consuming infrastructure retries and the host's CPU readiness is withdrawn.
 
+Machine `capabilities` describes native payload confinement separately from
+`cpu_isolation` and memory enforcement:
+
+| Capability | Meaning |
+| --- | --- |
+| `native_isolation_namespace` | Linux service probe selected rootless bubblewrap namespaces plus Landlock/seccomp. Main and sidecars share an attempt namespace anchor. |
+| `native_isolation_landlock` | Namespace policy refused; Landlock ABI >= 6 plus seccomp fallback selected. File contents are protected by grants; metadata is not isolated. |
+| `native_network_partial` | Linux fallback permits exact sidecar TCP ports at any address. Off-host same-port connects and non-loopback binds are also permitted; this is not general protected outbound capability. |
+| `native_isolation_seatbelt` | macOS launcher available for targeted spool/credential/control protection. Metadata remains visible; profile acceptance is checked at launch. |
+| `native_isolation_unavailable` | No supported native confinement stack; native payload launch fails closed. |
+| `native_sidecars` | Selected mode supports the attempt's reserved sidecar ports. It does not strengthen fallback's address guarantees. |
+| `native_network` | Host offers protected native outbound execution for `needs.network: true`. Both Linux modes currently withhold this capability pending qualified namespace egress. |
+
+Capabilities report implementation availability, not completed fleet/GPU
+qualification. Linux detection is cached for the worker process; recheck after
+a service restart when policy/tools change. macOS's launcher-availability report
+does not prove every profile will load; a rejected profile fails the attempt.
+A missing capability report from an older worker is not evidence of online support.
+
+Native payloads default offline; worker-owned environment/input preparation
+remains network-capable. An online job is eligible only on `native_network`
+hosts. If none qualifies, submission returns HTTP 409 `no_qualified_target`
+with a protected-outbound capability reason, rather than creating an impossible
+queued job. A launch-time Linux mismatch reports `native_network_unavailable`;
+unsupported confinement reports `native_isolation_unavailable`. macOS online
+protection also denies the queue TCP port on every address, so unrelated
+services on that port remain unavailable. CLI machine rows label namespace
+mode as `general egress unavailable` and fallback as `partial network isolation
+(reserved sidecar TCP ports permit off-host traffic)`; an absent report says
+`native isolation unreported`. For the threat model and exact
+directory/temp/control/network guarantees, see [native isolation](native-isolation.md).
+
 Availability explains owner use, battery power, heat, missing readings,
 disabling, leaving, and loss of contact. An available hypha can still be busy.
 Running jobs show their hypha and attempt. Every waiting job has an explanation,

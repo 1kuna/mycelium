@@ -62,9 +62,6 @@ func copyJobFile(src, dst string) error {
 	return errors.Join(copyErr, syncErr, out.Close())
 }
 func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
-	if !j.Spec.extensionJob() && len(jobInputFiles(j))+len(jobInputPaths(j)) == 0 {
-		return nil
-	}
 	if len(jobInputPaths(j)) > 0 && w.JobFileRoot == "" {
 		return errors.New("job files require a root and clean relative names")
 	}
@@ -93,6 +90,30 @@ func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
 		return err
 	}
 	defer os.RemoveAll(staged)
+	if !j.Spec.Run.Docker && j.Extension != nil {
+		var files map[string][]byte
+		for _, extension := range j.Extensions {
+			if extension.Digest == j.Extension.Digest {
+				files = extension.Files
+				break
+			}
+		}
+		if len(files) == 0 {
+			return errors.New("frozen native extension source missing")
+		}
+		for name, data := range files {
+			if !safeRelative(name) {
+				return errors.New("invalid frozen extension path")
+			}
+			path := filepath.Join(staged, ".myce-extension", name)
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				return err
+			}
+			if err := os.WriteFile(path, data, 0600); err != nil {
+				return err
+			}
+		}
+	}
 	for name, ref := range jobInputFiles(j) {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		err := w.fileCache.copyTo(ctx, ref, filepath.Join(staged, name))
@@ -141,6 +162,26 @@ func outputRelative(j Job, name, prefix string) string {
 	return filepath.Join(prefix, j.ID, strconv.Itoa(j.Attempt), name)
 }
 func (w Worker) publishExtensionFiles(j Job) error {
+	if check := j.Spec.ExtensionCheck; check != nil && !j.Spec.Run.Docker && j.Spec.Run.Env["MYCE_CHECK_OUTPUT"] != "" {
+		// Only the worker publishes the bounded check result into the CLI's
+		// scratch folder. Payloads never receive write access to shared caches.
+		actual, err := readExtensionCheckOutput(filepath.Dir(j.Spec.Run.Env["MYCE_CHECK_OUTPUT"]))
+		if err != nil {
+			return err
+		}
+		f, err := os.CreateTemp(check.Directory, ".actual-")
+		if err != nil {
+			return err
+		}
+		defer os.Remove(f.Name())
+		_, writeErr := f.Write(actual)
+		if err := errors.Join(writeErr, f.Close()); err != nil {
+			return err
+		}
+		if err := os.Rename(f.Name(), filepath.Join(check.Directory, "actual")); err != nil {
+			return err
+		}
+	}
 	if err := w.validateExtensionCheckOutput(j); err != nil {
 		return err
 	}

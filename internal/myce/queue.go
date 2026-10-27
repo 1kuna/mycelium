@@ -657,7 +657,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		if reason := q.diskCapacityRefusal(j); reason != "" {
 			return &HTTPError{Status: 409, Code: "disk_headroom", Message: reason}
 		}
-		if s.RequireTarget {
+		if s.RequireTarget || nativeNetworkRequired(j) {
 			if ok, reason := q.qualifiedTarget(j); !ok {
 				return &HTTPError{Status: 409, Code: "no_qualified_target", Message: reason + "; intent retained locally"}
 			}
