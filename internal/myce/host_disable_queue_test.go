@@ -9,10 +9,11 @@ import (
 
 func TestAttemptHistoryLateRefund(t *testing.T) {
 	q, clock := fixture(t)
-	m := machine("one", "fake")
+	machines := []Machine{machine("one", "fake"), machine("two", "fake"), machine("three", "fake")}
 	j := submit(t, q, spec("experiment"))
 	var attempts []*Job
-	for range 3 {
+	// Each lost copy retains its slot while the next attempt uses a free machine.
+	for _, m := range machines {
 		a := check(t, q, m, nil).Job
 		if a == nil {
 			t.Fatal("missing attempt")
