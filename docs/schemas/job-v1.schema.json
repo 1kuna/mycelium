@@ -839,6 +839,9 @@
     },
     "ExtensionCheckRequest": {
       "properties": {
+        "automatic": {
+          "$ref": "#/$defs/ExtensionReport"
+        },
         "directory": {
           "type": "string"
         },
@@ -849,6 +852,69 @@
       "required": [
         "work",
         "directory"
+      ],
+      "type": "object"
+    },
+    "ExtensionReport": {
+      "properties": {
+        "check_digest": {
+          "type": "string"
+        },
+        "check_id": {
+          "type": "string"
+        },
+        "check_state": {
+          "type": "string"
+        },
+        "device": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string"
+        },
+        "environment_identity": {
+          "type": "string"
+        },
+        "fingerprint": {
+          "type": "string"
+        },
+        "host": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "platform": {
+          "type": "string"
+        },
+        "qualified": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "setup": {
+          "type": "boolean"
+        },
+        "target": {
+          "$ref": "#/$defs/ExecutionTarget"
+        },
+        "version": {
+          "type": "string"
+        },
+        "work": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "digest",
+        "platform",
+        "work",
+        "fingerprint",
+        "setup",
+        "qualified"
       ],
       "type": "object"
     },
@@ -2161,6 +2227,10 @@
             "object",
             "null"
           ],
+          "x-contract": "diagnostic"
+        },
+        "prepare_source": {
+          "type": "boolean",
           "x-contract": "diagnostic"
         },
         "priority": {
