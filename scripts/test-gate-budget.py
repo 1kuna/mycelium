@@ -35,7 +35,7 @@ class GateBudgetTests(unittest.TestCase):
             self.assertIn('cannot signal owned fixture', output.getvalue())
             self.assertIn('gate quick: exit=124', output.getvalue())
 
-    def test_detached_fixture_stops_before_scratch_removal(self):
+    def test_scrubbed_orphan_stops_before_scratch_removal(self):
         scripts = Path(__file__).resolve().parent
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -47,12 +47,14 @@ class GateBudgetTests(unittest.TestCase):
 root = pathlib.Path(__file__).parent
 if len(sys.argv) == 1:
     scratch = os.environ['GATE_SCRATCH']
-    # Match jobBaseEnvironment: the run marker is deliberately not inherited.
-    env = dict(HOME=scratch+'/home', TMPDIR=scratch+'/tmp')
-    subprocess.Popen([sys.executable, __file__, 'child'], env=env, start_new_session=True)
+    subprocess.Popen([sys.executable, __file__, 'child'], env={}, cwd=scratch, start_new_session=True)
+    sys.exit(0)  # Reparent before timeout cleanup; no ancestry or env remains.
 else:
-    scratch = pathlib.Path(os.environ['HOME']).parent
-    signal.signal(signal.SIGTERM, lambda *_: (root / 'saved').write_text(str(scratch.exists())))
+    scratch = pathlib.Path.cwd()
+    def term(*_):
+        (root / 'saved').write_text(str(scratch.exists()))
+        os.chdir('/')  # Escalation must remember ownership after handles change.
+    signal.signal(signal.SIGTERM, term)
     (root / 'ready').write_text(str(os.getpid()))
 while True: signal.pause()
 ''')

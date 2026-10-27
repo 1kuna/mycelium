@@ -16,28 +16,72 @@ def interrupted(signum, frame):
     raise SystemExit(128 + signum)
 
 
-def owned_processes(marker, scratch):
-    # Fixtures deliberately create new sessions/groups, and can be reparented
-    # before the gate exits. An inherited, unique marker survives both. Read ps
-    # privately: its environment output may contain credentials; never log it.
+def scratch_processes(scratch, pids):
+    """Use OS file handles for reparented fixtures, including env -i payloads."""
+    def inside(name):
+        # OS handle inventories give resolved paths. Do not stat every path in
+        # lsof's output: unrelated network mounts must not stall local cleanup.
+        return name == scratch or name.startswith(scratch + os.sep)
+    found = set()
+    if sys.platform.startswith('linux'):
+        for pid in pids:
+            for entry in ('cwd', 'exe', 'fd/0', 'fd/1', 'fd/2'):
+                try:
+                    if inside(os.readlink(f'/proc/{pid}/{entry}')):
+                        found.add(pid)
+                except (FileNotFoundError, PermissionError):
+                    pass
+    else:
+        # macOS ships lsof; inspect only working/executable/standard handles.
+        # A peer merely reading a log on another descriptor is not a fixture.
+        output = subprocess.check_output(
+            ['lsof', '-b', '-nP', '-a', '-u', str(os.getuid()), '-d', 'cwd,txt,0,1,2', '-Fpn'],
+            text=True, stderr=subprocess.DEVNULL)
+        pid = None
+        for line in output.splitlines():
+            if line.startswith('p'):
+                pid = int(line[1:])
+            elif pid in pids and line.startswith('n') and inside(line[1:]):
+                found.add(pid)
+    return found
+
+
+def owned_processes(marker, scratch, known, inspect_handles=False):
+    # Read privately: ps environments can contain credentials; never log them.
+    # Retain start identities once ownership is proven, so TERM cannot hide a
+    # scrubbed child by killing its parent or closing its inherited log handles.
     output = subprocess.check_output(
-        ['ps', 'eww', '-axo', 'pid=,uid=,stat=,command='], text=True)
-    owned = set()
-    # Real worker commands allowlist their environment (#219), retaining only
-    # HOME/TMPDIR from our isolation. Their roots still prove this run's scope.
+        ['ps', 'eww', '-axo', 'pid=,ppid=,uid=,stat=,lstart=,command='],
+        text=True, env=dict(os.environ, LC_ALL='C'))
+    processes = {}
     state = re.compile(r'(?:^|\s)(?:HOME|TMPDIR)=' + re.escape(scratch) + r'(?:/|\s|$)')
+    owned = set()
     for line in output.splitlines():
-        fields = line.split(None, 3)
-        if (len(fields) == 4 and fields[1] == str(os.getuid()) and
-                not fields[2].startswith('Z') and
-                (marker in fields[3].split() or state.search(fields[3]))):
-            owned.add(int(fields[0]))
+        fields = line.split(None, 9)
+        if len(fields) != 10 or fields[2] != str(os.getuid()) or fields[3].startswith('Z'):
+            continue
+        pid, parent = int(fields[0]), int(fields[1])
+        birth = ' '.join(fields[4:9])
+        processes[pid] = (parent, birth)
+        if (known.get(pid) == birth or marker in fields[9].split() or state.search(fields[9])):
+            owned.add(pid)
+    if inspect_handles:
+        owned.update(scratch_processes(scratch, processes))
+    # Capture descendants before delivering any signal, even when they scrub
+    # all environment and put their own cwd/output outside the scratch tree.
+    while True:
+        descendants = {pid for pid, (parent, _) in processes.items() if parent in owned}
+        if descendants <= owned:
+            break
+        owned.update(descendants)
+    known.update({pid: processes[pid][1] for pid in owned})
     return owned
 
 
-def signal_owned(marker, scratch, sig):
-    # Signal individual members, never a group which may include someone else.
-    for pid in owned_processes(marker, scratch):
+def signal_owned(marker, scratch, sig, known):
+    # Re-inventory identities before each signal phase; never signal a group.
+    pids = owned_processes(marker, scratch, known, inspect_handles=True)
+    for pid in pids:
         try:
             os.kill(pid, sig)
         except ProcessLookupError:
@@ -45,22 +89,25 @@ def signal_owned(marker, scratch, sig):
         except PermissionError:
             print(f'quick: cannot signal owned fixture {pid}; scratch retained if still active',
                   file=sys.stderr)
+    return bool(pids)
 
 
 def stop_fixtures(marker, scratch, child):
-    signal_owned(marker, scratch, signal.SIGTERM)
+    known = {}
+    if not signal_owned(marker, scratch, signal.SIGTERM, known):
+        return True
     until = time.monotonic() + 5
-    while owned_processes(marker, scratch) and time.monotonic() < until:
+    while owned_processes(marker, scratch, known) and time.monotonic() < until:
         child.poll()
         time.sleep(.05)
-    signal_owned(marker, scratch, signal.SIGKILL)
+    signal_owned(marker, scratch, signal.SIGKILL, known)
     # SIGKILL delivery is asynchronous. Verify exit before deleting working files.
     until = time.monotonic() + 1
-    while owned_processes(marker, scratch) and time.monotonic() < until:
+    while owned_processes(marker, scratch, known) and time.monotonic() < until:
         child.poll()
         time.sleep(.05)
     child.poll()
-    return not owned_processes(marker, scratch)
+    return not owned_processes(marker, scratch, known, inspect_handles=True)
 
 
 def remove_scratch(path):
@@ -97,7 +144,12 @@ def main():
     finally:
         # Keep scratch available for TERM handlers/checkpoint saves. This also
         # catches leaked fixtures after an otherwise successful shell exit.
-        if stop_fixtures(marker, scratch, child):
+        try:
+            stopped = stop_fixtures(marker, scratch, child)
+        except (OSError, subprocess.SubprocessError):
+            stopped = False
+            print('quick: fixture inventory failed; scratch retained', file=sys.stderr)
+        if stopped:
             remove_scratch(scratch)
         else:
             print(f'gate scratch retained: {scratch}', file=sys.stderr)

@@ -21,12 +21,14 @@ afterwards, and fix forward if full finds a problem. This workflow does not gran
 fleet/deployment authorization.
 
 Quick has a five-minute work/termination budget, including cache setup and builds;
-on expiry it stops its process group and suggests `./scripts/gate.sh full`
+on expiry it stops its fixture processes and suggests `./scripts/gate.sh full`
 (exit 124). It sends TERM at 295 seconds and KILL after five seconds if needed,
 then verifies fixture exit before removing scratch. Cleanup may extend the wall
-time; scratch is retained if a fixture cannot be stopped. Fixtures carry a unique
-inherited run marker or HOME/TMPDIR under the run's isolated scratch, so detached
-worker commands are included and other runs are left alone. The old 175-second
+time; scratch is retained if a fixture cannot be stopped or inventoried. Cleanup
+uses the unique inherited run marker, isolated HOME/TMPDIR, ancestry and OS file
+handles in scratch (macOS's built-in `lsof`, or Linux `/proc`). It remembers start
+identities through TERM/KILL, including environment-scrubbed or reparented
+commands, and signals individual PIDs. The old 175-second
 deadline left only 19 seconds for builds/vet after an
 observed 156-second related-test selection, and repeatedly truncated passing work
 under shared load (#204). Five minutes keeps quick below the full gate's target
