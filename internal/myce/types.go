@@ -584,6 +584,7 @@ type HoldDetail struct {
 }
 
 type Snapshot struct {
+	HealthAlerts   []HealthAlert        `json:"health_alerts,omitempty"`
 	QueueRelease   RunningRelease       `json:"queue_release"`
 	FleetUpgrade   *FleetUpgradeStatus  `json:"fleet_upgrade,omitempty"`
 	FileStore      *FileStoreStatus     `json:"file_store,omitempty"`

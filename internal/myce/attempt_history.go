@@ -54,6 +54,7 @@ func (q *Queue) recordAttemptOutcome(j *Job, outcome AttemptOutcome) {
 	outcome.State = j.State
 	// Reuse status redaction, including availability text supplied by workers.
 	outcome.Reason = statusJobCopy(&Job{State: j.State, Reason: j.Reason, ExecutionCause: outcome.ExecutionCause}).Reason
+	q.alertAttemptLoss(j, outcome, false)
 	for i, old := range j.AttemptHistory {
 		if old.Attempt == outcome.Attempt && old.Machine == outcome.Machine && old.Session == outcome.Session {
 			j.AttemptHistory[i] = outcome

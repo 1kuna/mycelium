@@ -201,6 +201,8 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	logRetention := f.Duration("log-retention", myce.DefaultLogRetention, "retention of completed batch and inactive model-server logs")
 	uploadSpoolBytes := f.Int64("upload-spool-bytes", myce.DefaultUploadSpoolBytes, "total bytes held in the queue model-upload spool")
 	fileStore := f.String("file-store", "", "authoritative file storage folder (default beside database)")
+	healthNotify := f.String("health-notify", os.Getenv("MYCE_HEALTH_NOTIFY"), "queue health notifier executable (--check and JSON stdin)")
+	healthStorageDelay := f.Duration("health-storage-delay", myce.DefaultHealthStorageDelay, "storage unavailability duration before health alert")
 	fileRetention := f.Duration("file-retention", myce.DefaultFileRetention, "terminal job input/result retention (default 168h)")
 	fileStoreLimit := f.Int64("file-store-bytes", 100<<30, "authoritative files plus upload reservations limit")
 	fileCache := f.String("file-cache", "", "local reproducible file cache folder")
@@ -427,11 +429,17 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			return err
 		}
 
-		q, err := myce.Open(*db, *checkpoint, myce.RealClock{}, myce.WithFileStore(*fileStore, *fileStoreLimit, !nasConfigured))
+		if *healthStorageDelay <= 0 {
+			return errors.New("health-storage-delay must be positive")
+		}
+		q, err := myce.Open(*db, *checkpoint, myce.RealClock{}, myce.WithFileStore(*fileStore, *fileStoreLimit, !nasConfigured), myce.WithHealthStorageDelay(*healthStorageDelay))
 		if err != nil {
 			return err
 		}
 		defer q.Close()
+		if err := q.ConfigureHealthNotifier(ctx, *healthNotify); err != nil {
+			return err
+		}
 		if *serviceConfigPath != "" {
 			c, e := myce.ReadServiceConfig(*serviceConfigPath)
 			if e != nil {
