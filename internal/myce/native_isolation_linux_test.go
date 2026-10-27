@@ -164,6 +164,9 @@ func nativeIsolationLinuxAttack() error {
 	if err := unix.Kill(os.Getppid(), unix.SIGCONT); !errors.Is(err, unix.EPERM) {
 		return errors.New("external process signal not denied")
 	}
+	if os.Getenv("MYCE_NATIVE_TEST_SEQPACKET_PATH") != "" {
+		return nativeIsolationLinuxSeqpacketAttack()
+	}
 	return nil
 }
 
@@ -383,6 +386,9 @@ func TestNativeIsolationLinuxFallback(t *testing.T) {
 			}
 			defer unixListener.Close()
 			env := map[string]string{"TMPDIR": filepath.Join(work, ".tmp"), "MYCE_NATIVE_TEST_WORK": work, "MYCE_NATIVE_TEST_PROTECTED": strings.Join([]string{secret, sibling, fmt.Sprintf("/proc/%d/environ", os.Getpid()), fmt.Sprintf("/proc/%d/task/%d/comm", os.Getpid(), os.Getpid())}, string(os.PathListSeparator)), "MYCE_NATIVE_TEST_CONTROL": control.Addr().String(), "MYCE_NATIVE_TEST_SOCKET": socket}
+			abstract, pathname := nativeIsolationLinuxSeqpacketFixtures(t)
+			env["MYCE_NATIVE_TEST_SEQPACKET_ABSTRACT"] = abstract
+			env["MYCE_NATIVE_TEST_SEQPACKET_PATH"] = pathname
 			ports := []string{}
 			if sidecars {
 				listener, err := net.Listen("tcp4", "127.0.0.1:0")
@@ -403,6 +409,17 @@ func TestNativeIsolationLinuxFallback(t *testing.T) {
 			policy, err := (Worker{}).nativeLinuxPolicy(cmd, root, work, env, ports)
 			if err != nil {
 				t.Fatal(err)
+			}
+			// The accepted pathname-connect residual must not depend on a file
+			// grant to the fixture, even when sidecar TCP ports are present.
+			for _, grant := range append(slices.Clone(policy.Read), policy.Write...) {
+				canonical, err := nativeCanonical(grant)
+				if err != nil {
+					continue // Optional runtime roots need not exist.
+				}
+				if rel, err := filepath.Rel(canonical, pathname); err == nil && (rel == "." || filepath.IsLocal(rel)) {
+					t.Fatal("pathname SEQPACKET fixture falls inside a file grant")
+				}
 			}
 			args, err := nativePolicyArgs(policy, cmd.Args[4:])
 			if err != nil {

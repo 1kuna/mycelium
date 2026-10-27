@@ -883,6 +883,7 @@ func (w Worker) Run(stop context.Context) error {
 	if err := w.requireMemoryCeilings(); err != nil {
 		return err
 	}
+	w.checkNativeSeqpacketStartup()
 	s, err := w.openStore()
 	if err != nil {
 		return err

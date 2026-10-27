@@ -109,7 +109,7 @@ Machine `capabilities` describes native payload confinement separately from
 | Capability | Meaning |
 | --- | --- |
 | `native_isolation_namespace` | Linux service probe selected rootless bubblewrap namespaces plus Landlock/seccomp. Main and sidecars share an attempt namespace anchor. |
-| `native_isolation_landlock` | Namespace policy refused; Landlock ABI >= 6 plus seccomp fallback selected. File contents are protected by grants; metadata is not isolated. |
+| `native_isolation_landlock` | Namespace policy refused; Landlock ABI >= 6 plus seccomp fallback selected. File contents are protected by grants; metadata is not isolated. Type-only Unix seqpacket creation is permitted: same-UID pathname SEQPACKET endpoints reachable (partial). |
 | `native_network_partial` | Linux fallback permits exact sidecar TCP ports at any address. Off-host same-port connects and non-loopback binds are also permitted; this is not general protected outbound capability. |
 | `native_isolation_seatbelt` | macOS launcher available for targeted spool/credential/control protection. Metadata remains visible; profile acceptance is checked at launch. |
 | `native_isolation_unavailable` | No supported native confinement stack; native payload launch fails closed. |
@@ -131,9 +131,19 @@ unsupported confinement reports `native_isolation_unavailable`. macOS online
 protection also denies the queue TCP port on every address, so unrelated
 services on that port remain unavailable. CLI machine rows label namespace
 mode as `general egress unavailable` and fallback as `partial network isolation
-(reserved sidecar TCP ports permit off-host traffic)`; an absent report says
+(reserved sidecar TCP ports permit off-host traffic)` and
+`same-UID pathname SEQPACKET endpoints reachable (partial)`; an absent report says
 `native isolation unreported`. For the threat model and exact
 directory/temp/control/network guarantees, see [native isolation](native-isolation.md).
+
+`native_isolation_warning` is the worker's compact startup inventory warning,
+shown as `WARNING` in the CLI machine row. Fallback workers scan listening Unix
+seqpacket endpoints once at startup: unexpected non-root/non-CUDA listeners,
+unknown ownership or inventory failure warn visibly. Root-owned pathname
+sockets and the observed CUDA abstract naming convention are excluded; this
+is advisory naming, not authenticated identity or continuous monitoring.
+Inspect worker logs for endpoint details. Later or other-network-namespace
+listeners remain outside that snapshot and do not strengthen the residual.
 
 Availability explains owner use, battery power, heat, missing readings,
 disabling, leaving, and loss of contact. An available hypha can still be busy.
