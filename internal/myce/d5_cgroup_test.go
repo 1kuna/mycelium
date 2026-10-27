@@ -266,7 +266,13 @@ func d5NativeStart(t *testing.T, group bool, fs *memberMemoryFS, command []strin
 		j.Spec.Run.Sidecars = []NativeSidecar{{Name: "helper", Command: []string{"/bin/sleep", "600"}, MemoryGB: 1}}
 		j.Spec.Run.MemoryGB = .5
 	}
-	p, err := w.start(s, j)
+	var p *process
+	// Preparation can outlive one observation. Reuse the pending copy as the
+	// worker does before testing TERM, cgroup outcomes or cleanup.
+	await(t, func() bool {
+		p, err = w.start(s, j)
+		return !errors.Is(err, errWorkerCheckpoint) || !strings.Contains(err.Error(), "input copy pending")
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
