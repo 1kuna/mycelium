@@ -107,7 +107,7 @@ func TestHealthAlertStorageDelay(t *testing.T) {
 	}
 }
 func TestHealthAlertProductionAttemptLoss(t *testing.T) {
-	for _, operation := range []string{"quiet", "start_authorization", "inspect", "kill"} {
+	for _, operation := range []string{"quiet", "deadline", "start_authorization", "inspect", "kill"} {
 		t.Run(operation, func(t *testing.T) {
 			q, c := fixture(t)
 			j := submit(t, q, spec("production"))
@@ -123,6 +123,11 @@ func TestHealthAlertProductionAttemptLoss(t *testing.T) {
 				check(t, q, other, nil)
 				c.Advance(q.machineLossTimeout(m.ID))
 				check(t, q, other, nil)
+			} else if operation == "deadline" {
+				c.Advance(ProductionStartTimeout)
+				if err := q.Tick(); err != nil {
+					t.Fatal(err)
+				}
 			} else {
 				r := result(assigned, false)
 				r.Interrupted = true
@@ -184,5 +189,29 @@ func TestHealthAlertNotifierPersistenceAndPrivacy(t *testing.T) {
 	}
 	if len(persisted.Health.Events) != 1 || !persisted.Health.Events[0].Delivered {
 		t.Fatal("delivery acknowledgement not durable")
+	}
+}
+
+func TestHealthAlertHealthyAndPlannedProduction(t *testing.T) {
+	for _, planned := range []bool{false, true} {
+		t.Run(map[bool]string{false: "success", true: "operator stop"}[planned], func(t *testing.T) {
+			q, c := fixture(t)
+			submit(t, q, spec("production"))
+			m := machine("worker", "cuda")
+			assigned := check(t, q, m, nil).Job
+			c.Advance(time.Second)
+			r := result(assigned, !planned)
+			if planned {
+				r.Interrupted = true
+				r.OperatorStop = true
+				r.ExecutionCause = &RuntimeCause{Operation: "inspect", Class: "timeout"}
+			}
+			if err := q.Complete(r); err != nil {
+				t.Fatal(err)
+			}
+			if len(alertsOf(q, "production_attempt_lost")) != 0 {
+				t.Fatal("healthy/planned production alerted")
+			}
+		})
 	}
 }

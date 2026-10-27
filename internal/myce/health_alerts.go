@@ -33,8 +33,9 @@ type healthCondition struct {
 	Active    bool      `json:"active"`
 }
 type healthAlerts struct {
-	Conditions map[string]healthCondition `json:"conditions,omitempty"`
-	Events     []HealthAlert              `json:"events,omitempty"`
+	DeliveryConfigured bool                       `json:"delivery_configured,omitempty"`
+	Conditions         map[string]healthCondition `json:"conditions,omitempty"`
+	Events             []HealthAlert              `json:"events,omitempty"`
 }
 
 func WithHealthStorageDelay(delay time.Duration) QueueOption {
@@ -68,15 +69,18 @@ func (q *Queue) appendHealthAlert(e HealthAlert) {
 	q.s.Health.Events = append(q.s.Health.Events, e)
 	// Keep pending deliveries. Delivered history is a diagnostic window, not an
 	// unbounded second job history. No configured notifier keeps the latest 256.
-	if len(q.s.Health.Events) > 256 {
-		for i, old := range q.s.Health.Events {
-			if old.Delivered || q.healthNotifier == "" {
-				q.s.Health.Events = slices.Delete(q.s.Health.Events, i, i+1)
-				break
-			}
+	q.pruneHealthEvents()
+}
+func (q *Queue) pruneHealthEvents() {
+	for len(q.s.Health.Events) > 256 {
+		i := slices.IndexFunc(q.s.Health.Events, func(e HealthAlert) bool { return e.Delivered || !q.s.Health.DeliveryConfigured })
+		if i < 0 {
+			return
 		}
+		q.s.Health.Events = slices.Delete(q.s.Health.Events, i, i+1)
 	}
 }
+
 func (q *Queue) detectHealth(fileAvailable bool) {
 	delay := q.healthStorageDelay
 	if delay <= 0 {
@@ -145,7 +149,7 @@ func (q *Queue) ConfigureHealthNotifier(ctx context.Context, hook string) error 
 	q.mu.Lock()
 	q.healthNotifier = resolved
 	q.mu.Unlock()
-	return nil
+	return q.update(func() error { q.s.Health.DeliveryConfigured = true; return nil })
 }
 func healthNotifierEnv() []string {
 	return slices.DeleteFunc(os.Environ(), func(s string) bool { return strings.HasPrefix(s, "MYCE_TOKEN=") })
@@ -189,6 +193,7 @@ func (q *Queue) runHealthNotifier(ctx context.Context) {
 						q.s.Health.Events[i].Delivered = true
 					}
 				}
+				q.pruneHealthEvents()
 				return nil
 			})
 			if err != nil {
