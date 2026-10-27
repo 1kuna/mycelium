@@ -13,6 +13,7 @@ const attemptHistoryLimit = max(3, DefaultProductionInfrastructureRetries+1) + 1
 // taxonomy. State is the queue decision after this attempt (queued or terminal).
 // It is diagnostic evidence, never release proof or a retry/accounting input.
 type AttemptOutcome struct {
+	Diagnostics    *AttemptDiagnostics `json:"diagnostics,omitempty"`
 	Attempt        int                 `json:"attempt"`
 	Machine        string              `json:"machine"`
 	Session        string              `json:"session"`

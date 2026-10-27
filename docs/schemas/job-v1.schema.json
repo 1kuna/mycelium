@@ -54,6 +54,17 @@
       },
       "type": "object"
     },
+    "AttemptDiagnostics": {
+      "properties": {
+        "files": {
+          "$ref": "#/$defs/FileManifest"
+        }
+      },
+      "required": [
+        "files"
+      ],
+      "type": "object"
+    },
     "AttemptOutcome": {
       "properties": {
         "attempt": {
@@ -61,6 +72,9 @@
         },
         "cleanup_cause": {
           "$ref": "#/$defs/RuntimeCause"
+        },
+        "diagnostics": {
+          "$ref": "#/$defs/AttemptDiagnostics"
         },
         "ended_at": {
           "format": "date-time",
@@ -337,6 +351,35 @@
         "attempt",
         "progress"
       ],
+      "type": "object"
+    },
+    "DiagnosticReport": {
+      "properties": {
+        "format": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "format"
+      ],
+      "type": "object"
+    },
+    "DiagnosticSpec": {
+      "properties": {
+        "reports": {
+          "items": {
+            "$ref": "#/$defs/DiagnosticReport"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
       "type": "object"
     },
     "DiskNeeds": {
@@ -2036,6 +2079,10 @@
         "deadline": {
           "format": "date-time",
           "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "diagnostics": {
+          "$ref": "#/$defs/DiagnosticSpec",
           "x-contract": "diagnostic"
         },
         "disk": {

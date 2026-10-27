@@ -142,6 +142,7 @@ type Spec struct {
 	// ProfileMemory binds the CLI's base command/check and common input bytes.
 	// Per-item arguments and files remain in the submitted execution spec.
 	ProfileMemory string            `json:"profile_memory,omitempty" yaml:"-"`
+	Diagnostics   *DiagnosticSpec   `json:"diagnostics,omitempty" yaml:"diagnostics,omitempty"`
 	Disk          *DiskNeeds        `json:"disk,omitempty" yaml:"disk,omitempty"`
 	After         *PieceDependency  `json:"after,omitempty" yaml:"after,omitempty"`
 	Targets       []ExecutionTarget `json:"targets,omitempty" yaml:"targets,omitempty"`
@@ -180,6 +181,9 @@ type Spec struct {
 func (s Spec) Validate() error {
 	if s.ProfileMemory != "" && (!profileMemoryWork(s) || (FileRef{SHA256: s.ProfileMemory}).validate() != nil) {
 		return reject("job_profile_invalid", errors.New("profile_memory requires a profile and SHA-256 identity"))
+	}
+	if err := validateDiagnosticSpec(s); err != nil {
+		return reject("job_diagnostics_invalid", err)
 	}
 	for _, target := range s.Targets {
 		if !extensionName.MatchString(target.OS) || !extensionName.MatchString(target.Arch) || !validGPU(target.Platform) {
@@ -541,6 +545,7 @@ type AttemptDirective struct {
 	PriorityStop *PriorityPreemption `json:"priority_stop,omitempty"`
 }
 type Result struct {
+	Diagnostics          *AttemptDiagnostics `json:"diagnostics,omitempty"`
 	PriorityStop         *PriorityPreemption `json:"priority_stop,omitempty"`
 	ExecutionCause       *RuntimeCause       `json:"execution_cause,omitempty"`
 	CleanupCause         *RuntimeCause       `json:"cleanup_cause,omitempty"`

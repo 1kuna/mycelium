@@ -32,7 +32,8 @@ func resultCommand(ctx context.Context, args []string, errOut io.Writer) error {
 	f := flag.NewFlagSet("result", flag.ContinueOnError)
 	f.SetOutput(errOut)
 	authority := installedClientFlags(f)
-	out := f.String("out", "", "directory for verified accepted artifacts")
+	out := f.String("out", "", "directory for verified artifacts")
+	attempt := f.Int("attempt", 0, "download failed-attempt diagnostics instead of accepted results")
 	// Support the documented job-id followed by flags, as with logs.
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		args = append(append([]string{}, args[1:]...), args[0])
@@ -41,7 +42,7 @@ func resultCommand(ctx context.Context, args []string, errOut io.Writer) error {
 		return err
 	}
 	if f.NArg() != 1 || *out == "" {
-		return errors.New("usage: myce result <job-id> --out DIR")
+		return errors.New("usage: myce result <job-id> [--attempt N] --out DIR")
 	}
 	c, err := authority.client()
 	if err != nil {
@@ -68,16 +69,22 @@ func resultCommand(ctx context.Context, args []string, errOut io.Writer) error {
 	if err != nil {
 		return failure(err)
 	}
-	if j.State != "succeeded" || len(j.OutputRefs) == 0 {
+	refs := j.OutputRefs
+	if *attempt != 0 {
+		refs, err = myce.DiagnosticFiles(j, *attempt)
+		if err != nil {
+			return failure(err)
+		}
+	} else if j.State != "succeeded" || len(j.OutputRefs) == 0 {
 		return &ResultError{Code: "result_not_accepted", Err: errors.New("job has no accepted result")}
 	}
 	// Validate every manifest key before using it as a local filename.
-	for name := range j.OutputRefs {
+	for name := range refs {
 		if name == "." || !fs.ValidPath(name) || strings.ContainsAny(name, "\\:") {
 			return &ResultError{Code: "result_invalid", Err: errors.New("result names must be clean relative paths")}
 		}
 	}
-	for name := range j.OutputRefs {
+	for name := range refs {
 		dest := filepath.Join(*out, filepath.FromSlash(name))
 		// Existing parent symlinks must not redirect automatic result placement.
 		root, err := filepath.Abs(*out)
@@ -97,7 +104,12 @@ func resultCommand(ctx context.Context, args []string, errOut io.Writer) error {
 				return &ResultError{Code: "result_invalid", Err: errors.New("result parent must be a directory")}
 			}
 		}
-		if err := c.DownloadResult(ctx, j.ID, name, dest); err != nil {
+		if *attempt != 0 {
+			err = c.DownloadDiagnostic(ctx, j.ID, *attempt, name, dest)
+		} else {
+			err = c.DownloadResult(ctx, j.ID, name, dest)
+		}
+		if err != nil {
 			return failure(err)
 		}
 	}

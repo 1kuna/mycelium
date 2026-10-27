@@ -261,6 +261,57 @@ Eligible targets rank ahead of placement mismatches, followed by the fewest
 failed checks, smallest proportional resource shortfall, then machine/device
 name. Retrying an accepted intent clears the saved refusal.
 
+## Failed-attempt diagnostics
+
+Profiles can opt into failure evidence independently of their successful outputs:
+
+```yaml
+diagnostics:
+  reports:
+    - {path: junit.xml, format: pytest-junit}
+# For Vitest: format: vitest-junit, generated with --reporter=junit --outputFile=junit.xml
+```
+
+Use `diagnostics: {}` for startup/lint/build failures with no test report. This
+contract supports plain commands with stored inputs (including profile source
+archives). A failed terminal attempt publishes `summary.json`, `log-tail.txt`
+and available raw reports as `reports/0.xml`, etc. The summary includes job ID,
+attempt, machine/session execution identity, command exit/cause, failed test
+identifiers and report errors. Missing or malformed reports keep the original
+failure and tail; startup errors never acquire invented test names. Adapter
+parsing happens in the worker, not the queue.
+
+For exact pytest node IDs, run
+`python -m pytest --junitxml=junit.xml -o junit_family=xunit1`. The adapter combines JUnit's file, classname and test name,
+including class names and parameter IDs. With xunit2, record an explicit
+`nodeid` property through pytest's `record_property("nodeid", request.node.nodeid)`
+fixture (for example in an autouse fixture). Reports without sufficient identity
+remain downloadable, with a summary error instead of a guessed node ID. Vitest
+preserves the JUnit testcase `name` verbatim as the ID and retains `classname`
+and `file` separately for disambiguation.
+
+```sh
+myce result JOB --attempt 1 --out failure-evidence
+```
+
+Select a recorded failed attempt explicitly; the default `myce result JOB --out
+DIR` still requires accepted success outputs and returns `result_not_accepted`
+for failures. `Client.DownloadDiagnostic(ctx, jobID, attempt, name, dest)` uses
+queue-recorded references, SHA-256/size verification and atomic file replacement.
+Diagnostic references live in `attempt_history[].diagnostics.files`; they never
+populate `output_refs`, satisfy a dependency, or change pass/fail acceptance.
+Stale worker completions cannot attach them to a newer execution.
+
+The tail keeps the last 64 KiB (empty when `logs: none`). Up to eight reports,
+each at most 1 MiB, bound parsing/transfer after a failure; unavailable, larger,
+or invalid reports are noted in the summary. The summary is at most 1 MiB; if
+structured identifiers exceed that limit, use the retained raw reports. These
+limits keep failure handling small for targeted runs. Existing authenticated
+file transport and terminal retention apply: **7 days after terminal completion**
+by default, configurable with `--file-retention`. Expiry returns `result_expired`
+(HTTP 410), while job/attempt metadata and hashes remain. Diagnostic contents
+include raw job logs and reports; treat them like other private job artifacts.
+
 ## Installed client commands
 
 On an enrolled machine these commands read the installed worker config, or the

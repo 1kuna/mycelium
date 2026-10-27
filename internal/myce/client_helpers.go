@@ -212,6 +212,10 @@ func (c Client) DownloadResult(ctx context.Context, id, name, dest string) error
 	if !ok {
 		return &HTTPError{Status: 404, Code: "artifact_unknown", Message: "accepted artifact not found"}
 	}
+	return c.downloadResultFile(ctx, ref, dest)
+}
+
+func (c Client) downloadResultFile(ctx context.Context, ref FileRef, dest string) error {
 	if err := os.MkdirAll(filepath.Dir(dest), 0700); err != nil {
 		return err
 	}

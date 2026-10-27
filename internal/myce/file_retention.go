@@ -197,6 +197,11 @@ func (q *Queue) fileReferences(pendingOnly bool, subset ...map[string]*Job) (exp
 		// reclamations, must never be mistaken for pre-submit orphans.
 		add(referenced, j.Spec.Files)
 		add(referenced, j.OutputRefs)
+		for _, a := range j.AttemptHistory {
+			if a.Diagnostics != nil {
+				add(referenced, a.Diagnostics.Files)
+			}
+		}
 		if j.FileReclamation != nil {
 			for _, hash := range j.FileReclamation.Pending {
 				referenced[hash] = true
