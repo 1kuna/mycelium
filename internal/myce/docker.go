@@ -102,11 +102,12 @@ func dockerRunArgs(command []string) ([]string, error) {
 
 // dockerExecution is durable custody, separate from the worker's heartbeat state.
 type dockerExecution struct {
-	Accelerator  bool                `json:"accelerator,omitempty"`
-	UserCancel   bool                `json:"user_cancel,omitempty"`
-	StopGrace    time.Duration       `json:"accelerator_stop_grace,omitempty"`
-	PriorityStop *PriorityPreemption `json:"priority_stop,omitempty"`
-	CleanupCause *RuntimeCause       `json:"cleanup_cause,omitempty"`
+	Accelerator      bool                `json:"accelerator,omitempty"`
+	UserCancel       bool                `json:"user_cancel,omitempty"`
+	StopGrace        time.Duration       `json:"accelerator_stop_grace,omitempty"`
+	PriorityStop     *PriorityPreemption `json:"priority_stop,omitempty"`
+	CleanupCause     *RuntimeCause       `json:"cleanup_cause,omitempty"`
+	ObservationRetry string              `json:"observation_retry,omitempty"`
 
 	LogsNone             bool                    `json:"logs_none,omitempty"`
 	Owner                *Result                 `json:"owner,omitempty"` // Saved job/attempt/machine/session binding; legacy custody uses opaque identity.
@@ -283,7 +284,60 @@ func (d *dockerAttempt) recordObservationLoss() error {
 }
 
 func (d *dockerAttempt) call(args ...string) ([]byte, error) {
-	return d.callWithTimeout(d.timeout, args...)
+	observation := len(args) > 0 && (args[0] == "ps" || args[0] == "inspect" || args[0] == "network" && len(args) > 1 && (args[1] == "ls" || args[1] == "inspect"))
+	if !observation {
+		return d.callWithTimeout(d.timeout, args...)
+	}
+	// A read timeout says nothing about the payload. Retry only the read,
+	// leaving exact custody and all stop/launch intent untouched. The capped
+	// backoff limits daemon load to one retry per 5s during a prolonged outage;
+	// its cost is at most 5s extra observation/cleanup latency after recovery.
+	clock := d.clock
+	if clock == nil {
+		clock = RealClock{}
+	}
+	var since time.Time
+	backoff := 100 * time.Millisecond
+	warned := false
+	for failures := 0; ; {
+		out, err := d.callWithTimeout(d.timeout, args...)
+		if !errors.Is(err, context.DeadlineExceeded) || d.ctx != nil && d.ctx.Err() != nil {
+			if failures > 0 {
+				d.mu.Lock()
+				d.state.ObservationRetry = ""
+				_ = d.saveLocked()
+				d.mu.Unlock()
+			}
+			return out, err
+		}
+		failures++
+		if failures == 1 {
+			since = clock.Now()
+		}
+		elapsed := clock.Now().Sub(since).Round(time.Second)
+		d.mu.Lock()
+		d.state.CleanupCause = runtimeDiagnostic(err)
+		d.state.ObservationRetry = fmt.Sprintf("Docker observation retry; custody retained; unavailable %s; %d timed-out reads; %s", elapsed, failures, d.state.CleanupCause.String())
+		// Heartbeats must keep their recognized launch/running transition. A
+		// read timeout is a diagnostic, not a cleanup/admission refusal (#149).
+		if d.state.Stopped {
+			d.state.Error = "Docker cleanup unconfirmed; " + d.state.CleanupCause.String()
+		}
+		_ = d.saveLocked()
+		if elapsed >= 2*time.Minute && !warned {
+			log.Printf("attempt %s: %s", d.state.Identity, d.state.ObservationRetry)
+			warned = true
+		}
+		d.mu.Unlock()
+		timer := time.NewTimer(backoff)
+		select {
+		case <-timer.C:
+		case <-d.halt:
+			timer.Stop()
+			return nil, runtimeErrorFor(args[0], context.Canceled)
+		}
+		backoff = min(2*backoff, 5*time.Second)
+	}
 }
 func (d *dockerAttempt) callWithTimeout(timeout time.Duration, args ...string) (out []byte, err error) {
 	operation := "reconcile"
