@@ -330,7 +330,13 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 		s.SubmissionKey = ""
 		s.RequireTarget = p.Native == nil
 		s.Files = myce.FileManifest{".myce-source.tar": ref}
-		uploads := map[string]string{".myce-source.tar": "source.tar"}
+		// Adapters keep public input destinations, so use StoredInputFiles keys
+		// for their uploads. Ordinary profiles retain their saved receipt format.
+		uploadPrefix := ""
+		if p.Adapter {
+			uploadPrefix = "files/"
+		}
+		uploads := map[string]string{uploadPrefix + ".myce-source.tar": "source.tar"}
 		var inputCommands []string
 		for dest, local := range p.Inputs {
 			if !profileRelative(dest) || dest == ".myce-source.tar" {
@@ -350,7 +356,7 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 				return waitError(65, "profile_input_changed: input changed while freezing")
 			}
 			stored := ".myce-inputs/" + profileHash(dest)
-			uploads[stored] = filepath.Base(frozen)
+			uploads[uploadPrefix+stored] = filepath.Base(frozen)
 			s.Files[stored] = inputRef
 			inputCommands = append(inputCommands, "mkdir -p "+shellArg("./"+filepath.Dir(dest))+"; cp "+shellArg("./"+stored)+" "+shellArg("./"+dest))
 		}
@@ -422,9 +428,9 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 			// Inputs stage after source extraction and keep their public filenames.
 			for dest := range p.Inputs {
 				stored := ".myce-inputs/" + profileHash(dest)
-				s.Files[dest], uploads[dest] = s.Files[stored], uploads[stored]
+				s.Files[dest], uploads["files/"+dest] = s.Files[stored], uploads["files/"+stored]
 				delete(s.Files, stored)
-				delete(uploads, stored)
+				delete(uploads, "files/"+stored)
 			}
 			if p.Native != nil {
 				s.ProfileMemory = ""
@@ -588,6 +594,9 @@ func copyProfileInput(src, dest string) error {
 }
 
 func profileUploadRef(s myce.Spec, name string) myce.FileRef {
+	if s.PrepareSource {
+		return s.StoredInputFiles()[name]
+	}
 	if input, ok := s.SharedInputs[strings.TrimPrefix(name, "shared/")]; strings.HasPrefix(name, "shared/") && ok {
 		return myce.FileRef{SHA256: input.SHA256, SizeBytes: input.SizeBytes}
 	}

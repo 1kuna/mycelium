@@ -4,6 +4,7 @@ import (
 	"archive/tar"
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +16,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -157,6 +159,123 @@ func TestAdapterDevCheckedArtifact(t *testing.T) {
 	j, err = d.Client().Wait(ctx, r.JobID)
 	if err != nil || j.State != "failed" || len(j.OutputRefs) != 0 {
 		t.Fatalf("failed check %+v %v", j, err)
+	}
+}
+
+func TestAdapterSharedInputUploadNamespaces(t *testing.T) {
+	binary := devTestBinary(t)
+	for _, storage := range []string{"local", "nas"} {
+		t.Run(storage, func(t *testing.T) {
+			root := t.TempDir()
+			source := filepath.Join(root, "source")
+			if err := os.Mkdir(source, 0700); err != nil {
+				t.Fatal(err)
+			}
+			privateBytes, sharedBytes := []byte("private bytes"), []byte("shared runtime bytes")
+			for name, data := range map[string][]byte{"private": privateBytes, "runtime": sharedBytes, "source/run.sh": []byte("true\n")} {
+				if err := os.WriteFile(filepath.Join(root, name), data, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			privateRef := myce.FileRef{SHA256: fmt.Sprintf("%x", sha256.Sum256(privateBytes)), SizeBytes: int64(len(privateBytes))}
+			sharedRef := myce.FileRef{SHA256: fmt.Sprintf("%x", sha256.Sum256(sharedBytes)), SizeBytes: int64(len(sharedBytes))}
+			shared := "{local: runtime}"
+			if storage == "nas" {
+				shared = fmt.Sprintf("{nas: media/runtime, sha256: %s, size_bytes: %d}", sharedRef.SHA256, sharedRef.SizeBytes)
+			}
+			path := filepath.Join(root, "adapter.yaml")
+			data := cpuAdapterYAML(source) + "    inputs: {shared/runtime: private}\n    shared_inputs: {runtime: " + shared + "}\n"
+			if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+				t.Fatal(err)
+			}
+			q, _, _, _ := waitQueue(t)
+			if err := q.ConfigureFileStore(filepath.Join(t.TempDir(), "files"), 1<<20, true); err != nil {
+				t.Fatal(err)
+			}
+			m := myce.Machine{Capabilities: []string{"native_isolation_landlock", "shared_inputs_v1"}, ID: "worker", Session: "fixture", GPU: "cpu", CPUIsolation: "select-none",
+				HostMemoryMeasured: true, HostAvailableMemoryGB: 32, HostMemoryBudgetGB: 8, MemoryCeilingSlackGB: .125,
+				CapabilityProfile: &myce.CapabilityProfile{OS: runtime.GOOS, Arch: runtime.GOARCH, LogicalCPUs: 8, MemoryLayout: "separate", SystemMemoryBytes: 32 << 30}}
+			if _, err := q.Checkin(myce.Checkin{Machine: m}); err != nil {
+				t.Fatal(err)
+			}
+			const token = "adapter-input-fixture-token"
+			var online atomic.Bool
+			handler := myce.API{Queue: q, Token: token}.Handler()
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if !online.Load() {
+					w.WriteHeader(http.StatusServiceUnavailable)
+					return
+				}
+				handler.ServeHTTP(w, r)
+			}))
+			defer server.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), devTestTimeout)
+			defer cancel()
+			invoke := func(wantExit int) profileReceipt {
+				t.Helper()
+				cmd := exec.CommandContext(ctx, binary, "run", "--adapter", path, "--queue", server.URL, "--key", "shared-input", "--notify", filepath.Join(root, "absent-notifier"))
+				cmd.Dir = root
+				cmd.Env = append(os.Environ(), "MYCE_TOKEN="+token)
+				var stderr bytes.Buffer
+				cmd.Stderr = &stderr
+				out, err := cmd.Output()
+				if exitCodeForTest(err) != wantExit {
+					t.Fatalf("exit=%v want=%d stdout=%s stderr=%s", err, wantExit, out, &stderr)
+				}
+				var receipt profileReceipt
+				if err := json.Unmarshal(out, &receipt); err != nil {
+					t.Fatal(err)
+				}
+				return receipt
+			}
+			frozen := invoke(69)
+			for _, name := range []string{"source", "private", "runtime"} {
+				if err := os.RemoveAll(filepath.Join(root, name)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			online.Store(true)
+			// An absent notifier returns 74 after submission, without starting a watcher.
+			receipt := invoke(74)
+			if receipt.JobID == "" || receipt.Key != frozen.Key || len(receipt.Uploads) != 0 {
+				t.Fatalf("saved submission not recovered: %+v", receipt)
+			}
+			client := myce.Client{URL: server.URL, Token: token}
+			snapshot, err := q.Snapshot()
+			if err != nil {
+				t.Fatal(err)
+			}
+			job, err := myce.FindJob(snapshot.Jobs, receipt.JobID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			input := job.Spec.SharedInputs["runtime"]
+			if job.Spec.Files["shared/runtime"] != privateRef || input.SHA256 != sharedRef.SHA256 || input.SizeBytes != sharedRef.SizeBytes || input.Local != "" {
+				t.Fatalf("private/shared identities changed: %+v / %+v", job.Spec.Files, input)
+			}
+			for _, blob := range []struct {
+				name string
+				ref  myce.FileRef
+				data []byte
+			}{{"private", privateRef, privateBytes}, {"shared", sharedRef, sharedBytes}} {
+				if blob.name == "shared" && storage == "nas" {
+					if input.NAS != "media/runtime" || client.HasFile(ctx, sharedRef) == nil {
+						t.Fatal("NAS input lost its reference or was uploaded")
+					}
+					continue
+				}
+				dest := filepath.Join(root, "downloaded-"+blob.name)
+				if err := client.DownloadFile(ctx, blob.ref, dest); err != nil {
+					t.Fatal(err)
+				}
+				if got, err := os.ReadFile(dest); err != nil || !bytes.Equal(got, blob.data) {
+					t.Fatalf("%s bytes=%q err=%v", blob.name, got, err)
+				}
+			}
+			if replay := invoke(74); replay.JobID != receipt.JobID {
+				t.Fatalf("replay created another job: %+v", replay)
+			}
+		})
 	}
 }
 
