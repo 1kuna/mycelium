@@ -606,6 +606,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			m := cloneMachine(&w.Machine)
 			release := CurrentRelease()
 			m.Release = &release
+			m.Fleet = w.fleet.observe(ctx, m, !recovering && !leaving)
 			m.DiskVolumes = w.sampleDisks(root.dir, root.state.CheckpointRoot)
 			m.DockerCleanup, m.DockerCause = diagnostics.DockerCleanup, diagnostics.DockerCause
 			m.FileTransferError = diagnostics.FileTransferError

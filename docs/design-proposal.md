@@ -1070,8 +1070,10 @@ Fresh installs create one `myce-worker.service`; `myce join` enumerates the
 machine in one foreground process. Explicit device flags restrict the offered
 inventory rather than create a new hypha. The existing per-device memory,
 reserve and selector settings become entries in the saved machine config;
-host policy stays host-wide. No automatic GPU driver, service or host changes
-are authorized by this spec.
+host policy stays host-wide. No automatic GPU driver, OS, package or other host changes are authorized.
+The one-command fleet-upgrade amendment below permits replacing only Mycelium's
+own installed binary and restarting only its existing service unit after an
+explicit operator command, for an approved signed release, without downgrades.
 
 **Deploy gate:** do not deploy the M2 binary to the current split per-GPU fleet
 workers before this M4 conversion. The queue refuses another inventory-reporting
@@ -2136,3 +2138,67 @@ for directory/snapshot sources. Unrelated commits cannot change the scoped
 archive, generated key or queue spec, so replay from a fresh checkout adopts the
 retained job. Changed item bytes or selected source bytes generate a new job.
 No generated per-item profile, separate manifest, planner or transport is needed.
+
+
+## Amendment: one-command seamless fleet upgrade (#244)
+
+Approved 2026-10-27 from the maintainer's request to make updates across all
+hyphae fast, easy and seamless (MY-21). An explicit authenticated
+`myce fleet upgrade [--release VERSION]` may replace only Mycelium's own installed
+binary and restart only its existing service unit on enrolled hosts. Only a
+signed release already approved with `myce release approve` is eligible. Never
+silently update, downgrade, change GPU drivers, OS or packages, or use SSH.
+The downgrade credential scope in #183 remains separate and unchanged.
+
+Freeze the signed envelope, provisioned publisher trust, origin/CA, target hashes
+and enrolled host membership in the existing SQLite queue. Retain the signed
+envelope at approval; approvals missing it need identical verified reapproval.
+An identical invocation resumes durable progress; an explicitly selected approved
+newer release can supersede a stopped operation to fix forward. Approval changes
+never silently retarget the operation. The queue continues after CLI disconnect.
+
+Upgrade one physical host at a time, restoring admission before advancing.
+Recheck production demand before selecting each remaining host and put production
+hosts last. Upgrade the queue before workers needing its new protocol and before
+its colocated worker. If that conflicts with production-last ordering, refuse
+incompatible workers before mutation; protocol migrations need a separate plan.
+Drain withdraws unstarted assignments and blocks admission. All Started work
+finishes naturally: exact attempt, preparation, engine, model-call and release
+custody must settle before restart. Offline or uncertain custody means a visible
+wait, never permission from a deadline or empty local inventory. At queue cutover,
+pause model-call admission and wait for calls/streams; preserve running batch
+attempts and buffered results through existing restart reconciliation.
+
+Each host follows drain/wait, verify, install in place, restart, health and
+running-hash verification, then conditional resume. Workers fetch and verify
+approved bytes themselves through the authenticated control path, using
+separately provisioned publisher trust, the signed manifest and size/SHA-256.
+Instructions cannot replace publisher trust. Reuse installer saved settings,
+storage preflight, identity, spool, state, catalogs, allowances and cache roots.
+Darwin preserves its installed path and exact designated signing requirement;
+never locally re-sign. A finite helper of the same binary executes outside the
+service being restarted, using its existing service manager, with local durable
+operation receipt before replacement (including queue restart intent). No extra
+daemon, peer network or database.
+
+Completion requires manager health, a new exact PID/session, compatible protocols,
+expected inventory/budgets, runner smoke and the approved running-executable hash.
+A version string or installed-file hash alone is insufficient. Resume only the
+operation's own drain via owner/timestamp CAS; preserve prior operator maintenance
+and stop on conflicting edits. Interruption/rerun rechecks the same postconditions
+rather than blindly restarting. Stop on the first download, verification, install,
+restart or health failure, leaving that host maintained and later hosts untouched.
+Fix forward; never invoke installer restore/rollback, force stop, bypass storage
+preflight or automatically retry. Status shows target, order, host phase, wait
+reason, last verified progress and failure. Decisions use the injected Clock;
+network, hashing and service probes run outside the queue lock. Retain compact
+receipts and remove owned rebuildable staging after settlement.
+
+Fake-clock tests cover ordering, production waits, interruption/resume, maintenance
+ownership and failure-stop. A `myce dev` end-to-end rolls three local command
+workers plus the queue between locally signed releases while work completes
+without identity changes, extra attempts, loss or failures; include in-flight
+model-call completion before cutover. Native manager/signature qualification and
+live fleet rollout require separate authorization. The first release containing
+this feature uses the existing installation path; later capable runtimes can
+receive updates. This amendment authorizes implementation, not a live rollout.

@@ -830,3 +830,43 @@ Historical fault records are acknowledged so clearing does not immediately
 replay the same fault. Raw kernel text remains local and is neither published
 in status nor retained in quarantine state. Fault sources and family matchers
 are injectable for laptop verification.
+
+
+## Rolling fleet upgrades
+
+After publishing a signed release and approving it with `myce release approve`,
+run `myce fleet upgrade` (or `myce fleet upgrade --release vX.Y.Z`). The command
+uses the same saved installed authority as `myce status` and returns a durable
+operation ID. It can exit immediately: the queue owns progress. Watch phases,
+wait reasons and failures with `myce status`. An approval from before signed
+envelope retention needs identical verified reapproval first.
+
+Hosts update sequentially, with production hosts last. Started commands finish
+naturally before their host restarts. At queue cutover new model calls pause and
+existing calls/streams finish; batch attempts on other hosts reconnect unchanged.
+The queue precedes its colocated worker. This implementation accepts the current
+worker protocols only, so incompatible protocol migrations need a separate plan.
+
+Each enrolled service fetches approved bytes through the authenticated queue,
+checks its locally pinned publisher key, signature, size and SHA-256, preserves
+its installed path/settings and restarts its existing service. Completion needs
+a new PID/session, running-image hash, manager and enrollment health. Publisher
+trust is pinned once during authenticated service enrollment in the private state
+root; rotation is a local provisioning operation, never an update instruction.
+A foreground queue or worker without saved service settings/runtime proof cannot
+participate; install the capable release normally before the first fleet update.
+
+A failed step stops the operation and preserves maintenance; later hosts remain
+untouched. Repair the cause and explicitly rerun `myce fleet upgrade` to reconcile
+that same operation. A rerun advances its recovery revision and rechecks the exact
+old runtime and maintenance receipt before recovering an interrupted helper.
+An active helper continues to report its result across reruns. Services already
+running the approved bytes receive the same stable health checks without a restart.
+It never blindly repeats a restart or resumes an operator's drain. For a stopped
+operation, `--release` may explicitly select a newly approved newer release to
+fix forward. Approval changes alone never retarget a running operation.
+
+No automatic rollback, downgrade, forced job stop, SSH, driver, package or OS
+changes occur. Offline or unknown custody stays a visible wait; elapsed time
+never proves release. Native service/signing qualification and the first live
+rollout remain separate from the laptop acceptance tests.

@@ -392,6 +392,7 @@ type Job struct {
 }
 type Machine struct {
 	Release                *RunningRelease     `json:"release,omitempty"`
+	Fleet                  *FleetRuntimeProof  `json:"fleet,omitempty"`
 	DiskReceivedAt         time.Time           `json:"disk_received_at,omitempty"` // Queue-owned receipt time; only disk check-ins renew it.
 	DiskVolumes            []DiskVolume        `json:"disk_volumes,omitempty"`
 	Enrollment             *EnrollmentProof    `json:"enrollment,omitempty"`
@@ -578,6 +579,7 @@ type HoldDetail struct {
 
 type Snapshot struct {
 	QueueRelease   RunningRelease       `json:"queue_release"`
+	FleetUpgrade   *FleetUpgradeStatus  `json:"fleet_upgrade,omitempty"`
 	FileStore      *FileStoreStatus     `json:"file_store,omitempty"`
 	HostStates     map[string]string    `json:"host_states,omitempty"`
 	WorkCurves     []WorkObservation    `json:"work_curves"`

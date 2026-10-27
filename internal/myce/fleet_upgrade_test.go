@@ -1,0 +1,484 @@
+package myce
+
+import (
+	"fmt"
+	"strings"
+	"testing"
+	"time"
+)
+
+func fleetTestProof(clock Clock, session string, pid int, target bool) *FleetRuntimeProof {
+	version, hash := "v1.0.0", strings.Repeat("b", 64)
+	if target {
+		version, hash = "v1.0.1", strings.Repeat("a", 64)
+	}
+	return &FleetRuntimeProof{Version: version, SHA256: hash, Session: session, PID: pid, ServiceHealthy: true, RunnerSmoke: true, StartGate: startGateProtocol, AttemptProtocol: keyedAttemptProtocol, ObservedAt: clock.Now()}
+}
+func fleetFixture(t *testing.T, queueHost string, hosts ...string) (*Queue, *fakeClock, []Machine) {
+	t.Helper()
+	q, c := fixture(t)
+	signed, key, _ := signedTestRelease(t)
+	if err := q.ConfigureEnrollmentRelease(signed, key, "https://publisher.invalid/release"); err != nil {
+		t.Fatal(err)
+	}
+	q.fleetQueue = &fleetQueueRuntime{Host: queueHost, OS: "linux", Arch: "amd64", Proof: fleetTestProof(c, "queue-old", 100, false), ObservedAt: c.Now()}
+	var workers []Machine
+	for n, host := range hosts {
+		m := machine("worker-"+host, "fake", host)
+		m.HostMemoryMeasured = true
+		m.HostAvailableMemoryGB = 32
+		m.Fleet = fleetTestProof(c, m.Session, 200+n, false)
+		check(t, q, m, nil)
+		workers = append(workers, m)
+	}
+	return q, c, workers
+}
+func fleetTick(t *testing.T, q *Queue) {
+	t.Helper()
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+}
+func fleetInstructionFor(t *testing.T, q *Queue) FleetUpdateInstruction {
+	t.Helper()
+	h := q.fleetActiveHost()
+	if h == nil {
+		t.Fatal("no active host")
+	}
+	machine, session := h.Machine, ""
+	if h.Before != nil {
+		session = h.Before.Session
+	}
+	if h.Phase == "queue_update" {
+		machine, session = "@queue", h.QueueBefore.Session
+	}
+	i, err := q.fleetInstruction(h.Host, machine, session)
+	if err != nil || i.Operation == "" {
+		t.Fatalf("instruction at %s: %+v %v", h.Phase, i, err)
+	}
+	return i
+}
+func fleetActivate(t *testing.T, q *Queue, c *fakeClock) string {
+	t.Helper()
+	i := fleetInstructionFor(t, q)
+	h := q.fleetActiveHost()
+	if err := q.AckFleetUpgrade(FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "restarting"}); err != nil {
+		t.Fatal(err)
+	}
+	if i.Machine == "@queue" {
+		q.fleetQueue.Proof = fleetTestProof(c, "queue-new", 101, true)
+	} else {
+		m := cloneMachine(q.s.Machines[i.Machine])
+		m.Session = "new-" + m.Session
+		m.Fleet = fleetTestProof(c, m.Session, h.Before.Fleet.PID+1000, true)
+		if _, err := q.Checkin(Checkin{Machine: m, Fresh: true, PreviousSession: i.Session}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fleetTick(t, q)
+	for n := 0; n < 31; n++ {
+		fleetHeartbeatAdvance(t, q, c)
+	}
+	return i.Host + "/" + i.Machine
+}
+
+func fleetHeartbeatAdvance(t *testing.T, q *Queue, c *fakeClock) {
+	t.Helper()
+	c.Advance(time.Second)
+	for _, m := range q.s.Machines {
+		m.LastSeen = c.Now()
+		if m.Fleet != nil {
+			m.Fleet.ObservedAt = c.Now()
+		}
+	}
+	q.s.LastWorkerContact = c.Now()
+	if q.fleetQueue != nil && q.fleetQueue.Proof != nil {
+		q.fleetQueue.Proof.ObservedAt = c.Now()
+	}
+	fleetTick(t, q)
+}
+
+func TestFleetUpgradeSequentialProductionLastAndNaturalCompletion(t *testing.T) {
+	q, c, workers := fleetFixture(t, "z", "a", "b", "z")
+	s := spec("production")
+	s.AllowedMachines = []string{workers[2].ID}
+	j := submit(t, q, s)
+	r := check(t, q, workers[2], nil).Job
+	if r == nil {
+		t.Fatal("production not assigned")
+	}
+	if err := q.Started(result(r, true)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	if h := q.fleetActiveHost(); h.Host != "a" || h.Phase != "worker_update" {
+		t.Fatalf("order: %+v", h)
+	}
+	if got := fleetActivate(t, q, c); got != "a/worker-a" {
+		t.Fatal(got)
+	}
+	fleetTick(t, q)
+	if got := fleetActivate(t, q, c); got != "b/worker-b" {
+		t.Fatal(got)
+	}
+	fleetTick(t, q)
+	h := q.fleetActiveHost()
+	if h.Host != "z" || h.Phase != "draining" || h.Wait == "" {
+		t.Fatalf("production must wait: %+v", h)
+	}
+	// No completion deadline. Fresh exact custody still blocks cutover hours later.
+	c.Advance(2 * time.Hour)
+	workers[2].Fleet.ObservedAt = c.Now()
+	q.fleetQueue.Proof.ObservedAt = c.Now()
+	if _, err := q.Checkin(Checkin{Machine: workers[2], Running: &Execution{ID: r.ID, Attempt: r.Attempt}, Started: true}); err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	if got := job(t, q, j.ID); got.State != "running" || got.StopAt != nil || got.Attempt != 1 || got.InfrastructureRetries != 0 {
+		t.Fatalf("upgrade interrupted Started work: %+v", got)
+	}
+	finish(t, q, r, true)
+	check(t, q, workers[2], nil)
+	fleetTick(t, q)
+	if got := fleetActivate(t, q, c); got != "z/@queue" {
+		t.Fatal(got)
+	}
+	fleetTick(t, q)
+	if got := fleetActivate(t, q, c); got != "z/worker-z" {
+		t.Fatal(got)
+	}
+	fleetTick(t, q)
+	if q.s.FleetUpgrade.State != "complete" {
+		t.Fatalf("not complete: %+v", q.fleetUpgradeStatus())
+	}
+	for _, host := range []string{"a", "b", "z"} {
+		if q.s.HostMaintenance[host].Mode != "enabled" {
+			t.Fatal("owned drain not restored", host)
+		}
+	}
+	if got := job(t, q, j.ID); got.State != "succeeded" || got.Attempt != 1 || got.Losses != 0 || got.InfrastructureRetries != 0 {
+		t.Fatalf("work lost: %+v", got)
+	}
+}
+
+func TestFleetUpgradeQueueBeforeWorkersAndCallsWait(t *testing.T) {
+	q, _, _ := fleetFixture(t, "queue", "a", "b")
+	q.calls = map[string]*ModelCall{"stream": {ID: "stream", Priority: "production", Machine: "worker-a"}}
+	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	if h := q.fleetActiveHost(); h.Host != "queue" || h.Phase != "draining" || !strings.Contains(h.Wait, "model calls") {
+		t.Fatalf("queue call cutover: %+v", h)
+	}
+	if !q.fleetPausesCalls() {
+		t.Fatal("new model-call admission not paused")
+	}
+	delete(q.calls, "stream")
+	fleetTick(t, q)
+	if i := fleetInstructionFor(t, q); i.Machine != "@queue" {
+		t.Fatal("queue must precede compatible worker activation")
+	}
+}
+
+func TestFleetUpgradeResumeDurableIntentAndReverifyHash(t *testing.T) {
+	q, c, workers := fleetFixture(t, "queue", "a")
+	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	i := fleetInstructionFor(t, q)
+	if err := q.AckFleetUpgrade(FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "restarting"}); err != nil {
+		t.Fatal(err)
+	}
+	var path string
+	if err := q.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&path); err != nil {
+		t.Fatal(err)
+	}
+	root := q.root
+	if err := q.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(path, root, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	q = reopened
+	fakeCheckpointAvailability(t, q, true)
+	q.fleetQueue = &fleetQueueRuntime{Host: "queue", OS: "linux", Arch: "amd64", Proof: fleetTestProof(c, "queue-new", 101, true), ObservedAt: c.Now()}
+	check(t, q, workers[0], nil)
+	if out, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil || out.Operation != i.Operation {
+		t.Fatalf("lost operation: %+v %v", out, err)
+	}
+	fleetTick(t, q)
+	for n := 0; n < 31; n++ {
+		fleetHeartbeatAdvance(t, q, c)
+	}
+	fleetTick(t, q)
+	if h := q.s.FleetUpgrade.Hosts[0]; h.Phase != "complete" {
+		t.Fatalf("new queue hash not reconciled: %+v", h)
+	}
+	if q.s.FleetUpgrade.Hosts[1].Phase == "pending" {
+		fleetTick(t, q)
+	}
+	worker := fleetInstructionFor(t, q)
+	if err := q.AckFleetUpgrade(FleetUpgradeAck{Operation: worker.Operation, Revision: worker.Revision, Host: worker.Host, Machine: worker.Machine, Session: worker.Session, Phase: "installed"}); err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	if q.fleetActiveHost().Phase != "worker_update" {
+		t.Fatal("disk publication falsely proved running hash")
+	}
+	fleetActivate(t, q, c)
+	fleetTick(t, q)
+	if q.s.FleetUpgrade.State != "complete" {
+		t.Fatal(q.fleetUpgradeStatus())
+	}
+}
+
+func TestFleetUpgradeStopFirstFailureAndMaintenanceCAS(t *testing.T) {
+	for _, maintenanceRace := range []bool{false, true} {
+		t.Run(map[bool]string{false: "failure", true: "operator-edit"}[maintenanceRace], func(t *testing.T) {
+			q, _, _ := fleetFixture(t, "queue", "a", "b")
+			if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+				t.Fatal(err)
+			}
+			fleetTick(t, q)
+			i := fleetInstructionFor(t, q)
+			if maintenanceRace {
+				if _, err := q.ChangeHostMaintenance(i.Host, HostMaintenanceRequest{Action: "drain", DrainOwner: "operator"}); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if err := q.AckFleetUpgrade(FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "failed", Failure: "secret must never be projected"}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			fleetTick(t, q)
+			if q.s.FleetUpgrade.State != "stopped" {
+				t.Fatal("did not stop")
+			}
+			for _, h := range q.s.FleetUpgrade.Hosts[1:] {
+				if h.Phase != "pending" || q.s.HostMaintenance[h.Host].Mode != "enabled" {
+					t.Fatal("later host touched", h)
+				}
+			}
+			if q.s.HostMaintenance[i.Host].Mode != "drained" {
+				t.Fatal("failed host resumed")
+			}
+			if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+				t.Fatal(err)
+			}
+			if err := q.AckFleetUpgrade(FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "failed"}); err == nil {
+				t.Fatal("stale revision accepted")
+			}
+			if maintenanceRace {
+				fleetTick(t, q)
+				if q.s.FleetUpgrade.State != "stopped" || q.s.HostMaintenance[i.Host].DrainOwner != "operator" {
+					t.Fatal("resumed operator drain")
+				}
+			}
+		})
+	}
+}
+
+func TestFleetUpgradeApprovalEnvelopeReapprovalAndPersistence(t *testing.T) {
+	q, _, _ := fleetFixture(t, "queue")
+	approved := cloneFleetRelease(*q.s.EnrollmentRelease)
+	q.s.EnrollmentRelease.SignedRelease = nil
+	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err == nil {
+		t.Fatal("legacy approval without envelope accepted")
+	}
+	if err := q.approveEnrollmentRelease(EnrollmentReleaseApproval{SignedRelease: approved.SignedRelease, PublicKey: approved.PublisherKey, Origin: approved.Origin}); err != nil {
+		t.Fatal("identical reapproval refused", err)
+	}
+	if len(q.s.EnrollmentRelease.SignedRelease) == 0 {
+		t.Fatal("envelope not retained")
+	}
+	if _, err := VerifyRelease(q.s.EnrollmentRelease.SignedRelease, q.s.EnrollmentRelease.PublisherKey); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestFleetUpgradeWorkerObservationAgeIgnoresClockSkew(t *testing.T) {
+	q, c, workers := fleetFixture(t, "queue", "a")
+	for _, skew := range []time.Duration{-24 * time.Hour, 24 * time.Hour} {
+		m := workers[0]
+		m.Fleet = cloneFleetProof(m.Fleet)
+		m.Fleet.ObservedAt = c.Now().Add(skew)
+		m.Fleet.ObservationAgeSeconds = 1
+		check(t, q, m, nil)
+		stored := q.s.Machines[m.ID].Fleet
+		if stored == nil || !stored.ObservedAt.Equal(c.Now().Add(-time.Second)) || !q.fleetProofFresh(stored) {
+			t.Fatal("worker wall clock affected queue freshness", stored)
+		}
+	}
+	m := workers[0]
+	m.Fleet = cloneFleetProof(m.Fleet)
+	m.Fleet.ObservedAt = c.Now().Add(time.Hour)
+	m.Fleet.ObservationAgeSeconds = 6
+	check(t, q, m, nil)
+	if q.s.Machines[m.ID].Fleet != nil {
+		t.Fatal("cached observation renewed by heartbeat")
+	}
+}
+
+func TestFleetUpgradeAlreadyCurrentRequiresStableEnrollmentHealth(t *testing.T) {
+	q, c, workers := fleetFixture(t, "queue", "a")
+	q.fleetQueue.Proof = fleetTestProof(c, "queue-current", 100, true)
+	m := workers[0]
+	m.Fleet = fleetTestProof(c, m.Session, m.Fleet.PID, true)
+	m.HostMemoryError = "memory unavailable"
+	check(t, q, m, nil)
+	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	if q.s.FleetUpgrade.Hosts[0].Phase == "complete" {
+		t.Fatal("no-op queue skipped stable health")
+	}
+	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if i, err := q.fleetInstruction("queue", "@queue", "queue-current"); err != nil || i.Operation != "" {
+		t.Fatal("rerun instructed already-current queue to restart")
+	}
+	for n := 0; n < 32; n++ {
+		fleetHeartbeatAdvance(t, q, c)
+	}
+	h := q.fleetActiveHost()
+	if h == nil || h.Host != "a" || h.Phase != "worker_health" {
+		t.Fatalf("no-op worker health path: %+v", h)
+	}
+	if i, err := q.fleetInstruction(h.Host, m.ID, m.Session); err != nil || i.Operation != "" {
+		t.Fatal("already-current worker was instructed to restart")
+	}
+	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	if i, err := q.fleetInstruction(h.Host, m.ID, m.Session); err != nil || i.Operation != "" || h.Phase != "worker_health" {
+		t.Fatal("rerun instructed degraded current worker to restart")
+	}
+	for n := 0; n < 32; n++ {
+		fleetHeartbeatAdvance(t, q, c)
+	}
+	if q.s.FleetUpgrade.State == "complete" || q.s.HostMaintenance["a"].Mode != "drained" {
+		t.Fatal("unhealthy current host resumed")
+	}
+	m.HostMemoryError = ""
+	m.Fleet.ObservedAt = c.Now()
+	check(t, q, m, nil)
+	for n := 0; n < 32; n++ {
+		fleetHeartbeatAdvance(t, q, c)
+	}
+	if q.s.FleetUpgrade.State != "complete" || q.s.Machines[m.ID].Session != m.Session {
+		t.Fatal("healthy current host not reconciled without restart")
+	}
+}
+
+func TestFleetUpgradeRerunRetainsActiveHelperFailureUntilReplacement(t *testing.T) {
+	for _, worker := range []bool{false, true} {
+		for _, replace := range []bool{false, true} {
+			t.Run(fmt.Sprintf("worker=%t/replacement=%t", worker, replace), func(t *testing.T) {
+				q, c, _ := fleetFixture(t, "queue", "a", "b")
+				if worker {
+					q.fleetQueue.Proof = fleetTestProof(c, "queue-current", 100, true)
+				}
+				if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+					t.Fatal(err)
+				}
+				fleetTick(t, q)
+				if worker {
+					for n := 0; n < 32; n++ {
+						fleetHeartbeatAdvance(t, q, c)
+					}
+				}
+				i := fleetInstructionFor(t, q)
+				ack := FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "prepared"}
+				if err := q.AckFleetUpgrade(ack); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+					t.Fatal(err)
+				}
+				if err := q.authorizeFleetUpdate(i.Operation, i.Host, i.Machine, i.Session, i.Revision); err != nil {
+					t.Fatal("rerun revoked active helper", err)
+				}
+				if replace {
+					current := ack
+					current.Revision = q.s.FleetUpgrade.Revision
+					if err := q.AckFleetUpgrade(current); err != nil {
+						t.Fatal(err)
+					}
+					for _, phase := range []string{"failed", "installed", "restarting", "prepared"} {
+						ack.Phase = phase
+						if err := q.AckFleetUpgrade(ack); err == nil {
+							t.Fatalf("superseded helper %s accepted", phase)
+						}
+					}
+					if err := q.authorizeFleetUpdate(i.Operation, i.Host, i.Machine, i.Session, i.Revision); err == nil {
+						t.Fatal("superseded helper authorized")
+					}
+					ack = current
+				}
+				ack.Phase = "failed"
+				if err := q.AckFleetUpgrade(ack); err != nil {
+					t.Fatal("active helper failure hidden by rerun", err)
+				}
+				if q.s.FleetUpgrade.State != "stopped" || q.s.HostMaintenance[i.Host].Mode != "drained" {
+					t.Fatal("failure did not stop with maintenance retained")
+				}
+				for _, h := range q.s.FleetUpgrade.Hosts {
+					if h.Host != i.Host && h.Phase != "complete" && h.Phase != "pending" {
+						t.Fatal("later host advanced after failure")
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestFleetUpgradeRunnerSmokeFailureStopsCurrentProcess(t *testing.T) {
+	q, c, workers := fleetFixture(t, "queue", "a")
+	q.fleetQueue.Proof = fleetTestProof(c, "queue-current", 100, true)
+	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	for n := 0; n < 32; n++ {
+		fleetHeartbeatAdvance(t, q, c)
+	}
+	i := fleetInstructionFor(t, q)
+	if err := q.AckFleetUpgrade(FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "restarting"}); err != nil {
+		t.Fatal(err)
+	}
+	m := workers[0]
+	m.Session = "worker-failed-smoke"
+	m.Fleet = fleetTestProof(c, m.Session, 999, true)
+	m.Fleet.RunnerSmoke = false
+	m.Fleet.Failure = "runner_smoke_failed"
+	if _, err := q.Checkin(Checkin{Machine: m, Fresh: true, PreviousSession: i.Session}); err != nil {
+		t.Fatal(err)
+	}
+	// An explicit rerun cannot erase a definitive failure by bumping revision.
+	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	ack := FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "failed", Failure: "runner_smoke_failed", Runtime: m.Fleet}
+	stale := ack
+	stale.Runtime = cloneFleetProof(m.Fleet)
+	stale.Runtime.Session = "obsolete-process"
+	if err := q.AckFleetUpgrade(stale); err == nil {
+		t.Fatal("obsolete runtime failure accepted")
+	}
+	if err := q.AckFleetUpgrade(ack); err != nil {
+		t.Fatal(err)
+	}
+	if q.s.FleetUpgrade.State != "stopped" || q.fleetActiveHost().Failure != "runner_smoke_failed" || q.s.HostMaintenance[i.Host].Mode != "drained" {
+		t.Fatal("cached smoke failure did not stop maintained host")
+	}
+}

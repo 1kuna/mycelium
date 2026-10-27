@@ -69,6 +69,12 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if args[0] == "version" {
 		return versionCommand(args[1:])
 	}
+	if args[0] == "fleet" {
+		return fleetCommand(context.Background(), args[1:], os.Stdout)
+	}
+	if args[0] == "fleet-apply" {
+		return runFleetApply(context.Background(), args[1:])
+	}
 	if args[0] == "release" {
 		return releaseCommand(args[1:])
 	}
@@ -160,6 +166,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		return modelCommand(args[1:])
 	}
 	f := flag.NewFlagSet(args[0], flag.ContinueOnError)
+	serviceConfigPath := f.String("service-config", "", "saved installed service configuration")
 	since := f.String("since", "7d", "usage lookback, up to 90d")
 	by := f.String("by", "project", "usage grouping: project or machine")
 	var clientConfig string
@@ -425,6 +432,16 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			return err
 		}
 		defer q.Close()
+		if *serviceConfigPath != "" {
+			c, e := myce.ReadServiceConfig(*serviceConfigPath)
+			if e != nil {
+				return e
+			}
+			if e = q.ConfigureFleetService(c); e != nil {
+				return e
+			}
+		}
+
 		if err = q.ConfigureFileRetention(*fileRetention); err != nil {
 			return err
 		}
@@ -630,6 +647,16 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			return errors.New("curve-max-concurrency requires onboarding-benchmark and a bound from 1 to 64")
 		}
 		w := myce.Worker{AcceleratorStopGrace: *productionGrace, Enrollment: *enrollment, DeviceSettings: deviceConfig, CurveMaxConcurrency: *curveMaxConcurrency, OnboardingBenchmark: *onboardingBenchmark, Benchmark: myce.RunOnboardingBenchmark, FileCacheRoot: *fileCache, FileCacheLimit: *fileCacheLimit, DailyUse: *dailyUse, Laptop: *laptop, Desktop: *desktop, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, DockerEndpoint: *dockerHost, ContainerRetention: containerRetention, RequireMemoryCeilings: *requireCeilings, MemorySwapMaxBytes: *memorySwap, LogRetention: *logRetention, Unit: workerUnit, SuperviseProcess: true, HostMemoryReserveGB: ramReserve, DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, SecretRoot: *secretRoot, ModelApprovalRoot: *modelApprovalRoot, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, FixedAcceleratorMemory: *memoryMode == "fixed", MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{CPUReserveCores: *cpuReserve, CPUBudgetCores: *cpuBudget, MaxJobs: *maxJobs, HostMemoryBudgetGB: *hostBudget, MemoryCeilingSlackGB: *memorySlack, HostID: *hostID, UnifiedMemory: unified, HostMemoryMeasured: true, ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, ReservedMemoryGB: *reserve, Environments: split(*environments), Models: split(*models)}}
+		if *serviceConfigPath != "" {
+			c, e := myce.ReadServiceConfig(*serviceConfigPath)
+			if e != nil {
+				return e
+			}
+			if c.Role != "worker" || c.Name != w.Machine.ID {
+				return errors.New("installed worker identity mismatch")
+			}
+			w.ServiceConfig = &c
+		}
 		fmt.Printf("Joining as %s\n", w)
 		return w.Run(ctx)
 	case "submit":
@@ -789,6 +816,13 @@ func printStatus(s myce.Snapshot, full bool) {
 	if s.QueueRelease.Version != "" {
 		fmt.Printf("queue release: %s (%s)\n", s.QueueRelease.Version, s.QueueRelease.Commit)
 	}
+	if u := s.FleetUpgrade; u != nil {
+		fmt.Printf("fleet upgrade %s: release=%s state=%s\n", u.Operation, u.Release, u.State)
+		for _, h := range u.Hosts {
+			fmt.Printf("  host %s: phase=%s wait=%s failure=%s verified_progress=%s\n", h.Host, h.Phase, h.Wait, h.Failure, h.ProgressAt.UTC().Format(time.RFC3339))
+		}
+	}
+
 	if fs := s.FileStore; fs != nil {
 		if fs.Error != "" {
 			fmt.Printf("%s: %s\n", fs.Store, fs.Error)

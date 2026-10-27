@@ -16,10 +16,12 @@ import (
 // It verifies the publisher's signature using its provisioned key, then serves
 // public approved metadata to inviters. No credential or signing key is served.
 type EnrollmentRelease struct {
-	Manifest    ReleaseManifest `json:"manifest"`
-	Origin      string          `json:"origin"`
-	CACert      string          `json:"ca_cert,omitempty"`
-	NASIdentity NASIdentity     `json:"nas_identity,omitempty"`
+	SignedRelease []byte          `json:"signed_release,omitempty"`
+	PublisherKey  []byte          `json:"publisher_key,omitempty"`
+	Manifest      ReleaseManifest `json:"manifest"`
+	Origin        string          `json:"origin"`
+	CACert        string          `json:"ca_cert,omitempty"`
+	NASIdentity   NASIdentity     `json:"nas_identity,omitempty"`
 }
 
 // EnrollmentReleaseApproval cannot provision trust. PublicKey must exactly
@@ -59,7 +61,7 @@ func verifiedEnrollmentRelease(data []byte, key ed25519.PublicKey, origin, caCer
 	if err = validateReleaseCA(caCert); err != nil {
 		return nil, reject("release_approval_invalid", err)
 	}
-	return &EnrollmentRelease{Manifest: m, Origin: origin, CACert: caCert}, nil
+	return &EnrollmentRelease{Manifest: m, Origin: origin, CACert: caCert, SignedRelease: bytes.Clone(data), PublisherKey: bytes.Clone(key)}, nil
 }
 
 func (q *Queue) configureEnrollmentRelease(data []byte, key ed25519.PublicKey, origin, caCert string, allowDowngrade, startup bool) error {
@@ -87,6 +89,10 @@ func (q *Queue) configureEnrollmentRelease(data []byte, key ed25519.PublicKey, o
 // applyEnrollmentRelease runs inside the committing queue transaction.
 func (q *Queue) applyEnrollmentRelease(approved *EnrollmentRelease, allowDowngrade bool) error {
 	if reflect.DeepEqual(q.s.EnrollmentRelease, approved) {
+		return nil
+	}
+	if current := q.s.EnrollmentRelease; current != nil && reflect.DeepEqual(current.Manifest, approved.Manifest) && current.Origin == approved.Origin && current.CACert == approved.CACert {
+		q.s.EnrollmentRelease = approved // Identical verified reapproval backfills legacy envelopes.
 		return nil
 	}
 	if current := q.s.EnrollmentRelease; current != nil && semver.Compare(approved.Manifest.Version, current.Manifest.Version) <= 0 && !allowDowngrade {
