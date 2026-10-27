@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"net/http"
@@ -257,5 +258,21 @@ func TestDevClockAdvanceDuringCheckin(t *testing.T) {
 	}
 	if samples > 10 {
 		t.Fatalf("clock advance fabricated coverage across outage: %d samples", samples)
+	}
+}
+
+func TestResolveExtensionCheckTargetInstalledCPU(t *testing.T) {
+	server := httptest.NewServer(http.NotFoundHandler())
+	defer server.Close()
+	client := Client{URL: server.URL}
+	for _, platform := range []string{"cpu", "cuda", "xpu"} {
+		target, err := ResolveExtensionCheckTarget(context.Background(), client, "installed", platform, "", "/cache")
+		if platform == "cpu" {
+			if err != nil || target.Host != "installed" || target.Platform != "cpu" || target.Device != "" || target.EnvironmentCache != "/cache" {
+				t.Fatalf("CPU target: %+v, %v", target, err)
+			}
+		} else if err == nil {
+			t.Fatalf("%s accepted missing device", platform)
+		}
 	}
 }
