@@ -14,6 +14,9 @@ type nativeNamespace struct{}
 
 func NativeExec([]string) error { return errors.New("native exec helper requires Linux") }
 func (w Worker) prepareNativeGroupIsolation(*exec.Cmd, string, string, map[string]string, bool) (*nativeNamespace, error) {
+	if w.NativeMinimalRoot {
+		return nil, errors.New("native_minimal_root_unavailable: Linux required")
+	}
 	return nil, nil
 }
 func (*nativeNamespace) close()                                   {}

@@ -16,7 +16,8 @@ but provides no boundary between jobs running as the same user.
 
 | Platform/mode | Directory and files | Temp | Environment | Control access | Network |
 | --- | --- | --- | --- | --- | --- |
-| Linux namespaces | User/mount/PID/IPC isolation; read-only host-root view plus Landlock content grants. Sibling contents denied; host metadata can remain visible. | Managed `{work}/.tmp` and shared `.scratch`; private `/tmp` and `/dev/shm` shared within the attempt. | #219 allowlist; worker overrides temp and attempt/device controls; no ambient agent/session or fleet credentials. | Private PID/network namespaces plus seccomp/Landlock deny host process, control-file and socket access. | Private network namespace, shared by the attempt's sidecars; reserved TCP loopback only. No qualified outbound transport; no `native_network`. |
+| Linux namespaces (default host-root) | User/mount/PID/IPC isolation; read-only host-root view plus Landlock content grants. Sibling contents denied; host metadata can remain visible. | Managed `{work}/.tmp` and shared `.scratch`; private `/tmp` and `/dev/shm` shared within the attempt. | #219 allowlist; worker overrides temp and attempt/device controls; no ambient agent/session or fleet credentials. | Private PID/network namespaces plus seccomp/Landlock deny host process, control-file and socket access. | Private network namespace, shared by the attempt's sidecars; reserved TCP loopback only. No qualified outbound transport; no `native_network`. |
+| Linux minimal root (operator opt-in; unqualified) | Empty root; constructed socket-free runtime/cache trees and exact attempt/device mounts; no host-root or cgroup tree. | Private `/run`, `/tmp`, `/dev/shm` and PID-namespace `/proc`, shared by main and sidecars. | Same allowlist; jobs cannot enable the mode. | Regular-file FD mounts and verified mount/namespace receipt precede the namespace-only SEQPACKET permission; Landlock scopes and syscall denials retained. | Offline; reserved sidecar loopback only, no `native_network`. |
 | Linux Landlock/seccomp fallback | Content reads/execution limited to runtime/cache/attempt grants; writes limited to attempt/checkpoint/usage grants. **Metadata is not isolated**, including permission changes. No private mount/PID view. | Managed `{work}/.tmp` and shared `.scratch`; sibling contents denied. Host `/tmp` is not replaced. | Same allowlist and overrides. | Denies other processes' sensitive procfs contents, tracing/memory access and external signals; denies Unix stream/datagram endpoints and non-reserved TCP ports. **same-UID pathname SEQPACKET endpoints reachable (partial)**. Foreign abstract endpoints remain scoped. | **Partial network isolation**: exact reserved sidecar TCP ports permit connect/bind on any address, including off-host. All other TCP ports denied; no general outbound capability. |
 | macOS Seatbelt | Targeted denial of same-spool sibling contents/writes, configured worker storage and standard credential roots. Prepared caches allow reads/execution, not writes. Metadata and unrelated host files can remain visible. | Managed `{work}/.tmp` and shared `.scratch` protected with the spool; no private system `/tmp` namespace. | Same allowlist and overrides. | Denies Unix endpoint connections, protected credential contents, cross-job process access and unwanted Mach services; retains Metal services. | Default outbound: reserved sidecar TCP loopback only. With `needs.network: true`: general outbound except other loopback endpoints and the queue's TCP port at all addresses. |
 | Missing/unsupported confinement | Required behavior: native launch fails closed. | No unconfined payload launch permitted. | An allowlist alone is insufficient. | No implied protection. | No inferred online capability. |
@@ -32,7 +33,7 @@ Landlock does not mediate all filesystem operations. In particular `stat`,
 `chmod`, `chown`, `utime`, `setxattr` and related metadata operations retain
 ordinary host permission checks. A same-UID confined job may therefore observe
 metadata or change permissions of otherwise content-protected files. Even the
-namespace mode uses a read-only host-root view plus selective content grants,
+default namespace mode uses a read-only host-root view plus selective content grants,
 not a promise that every host pathname is hidden. In fallback mode, read-only
 caches mean denied content writes, not immutable cache metadata. See the
 [kernel's Landlock limitations and TCP rules](https://www.kernel.org/doc/html/v6.12/userspace-api/landlock.html).
@@ -211,22 +212,18 @@ compact startup summary in status; endpoint details remain in worker logs.
 This advisory runs once at startup, not continuously, does not inspect other
 network namespaces and grants no authority or additional isolation.
 
-The full-isolation upgrade remains minimal-root namespaces plus the separately
-approved per-host AppArmor userns exception, pending the operator and
-non-blocking for the accepted v1 fallback. The userns exception below only
-permits namespace creation. The current
-read-only host-root mount and socket policy would still need changes and real
-qualification before supporting that CUDA path. The preferred candidate is a
-minimal bubblewrap filesystem containing socket-free trusted runtime/cache
-trees, exact attempt/checkpoint mounts, private runtime/temp/proc filesystems
-and assigned devices, with Unix creation enabled only inside that boundary.
-Read-only mounts alone do not prevent connections to sockets they expose.
-An alternative enforcing AppArmor payload profile needs attempt-specific file
-write grants, protected profile lifecycle and a verified enforce-mode transition:
-pathname Unix connections use file permissions, so a socket-only profile with
-broad writable paths is insufficient. Neither option is implemented or
-qualified by this document; either retains its separate administrator approval
-and hardware qualification requirements.
+The selected upgrade is [optional minimal-root bubblewrap](native-minimal-root.md)
+plus the separately approved per-host AppArmor userns exception, pending the operator's
+policy decision and runtime qualification. Its off-by-default worker setting
+constructs read trees as directories and FD-pinned regular-file mounts, rejects
+sockets/special files and escaping aliases, and verifies exact metrics and mount
+custody before granting its namespace-only SEQPACKET permission. Bubblewrap FD binds (0.10+) compare inodes before executable startup; ordinary
+`/proc/self/fd` source spelling is insufficient. No runtime/model contents are
+copied. Large layouts still require resource and timing measurement.
+The source includes no per-attempt AppArmor profile manager or host policy change.
+Read-only directory mounts and endpoint inventory alone do not enforce the socket
+boundary. The accepted Option B fallback and its separate qualification gates
+remain unchanged and non-blocked by this upgrade's policy decision.
 
 ## Declaring outbound access
 
@@ -243,7 +240,7 @@ network-capable and launch-gated; it is outside this payload boundary. Trust
 preparation recipes accordingly. Explicit local setup/qualification hooks and
 standalone model servers are not covered by this payload isolation contract.
 
-Both Linux modes currently withhold `native_network`: namespace egress transport
+All Linux modes currently withhold `native_network`: namespace egress transport
 is unqualified, and fallback reserved-port access is not an online capability.
 Protected namespace egress is a [post-v1 follow-up (#259)](https://github.com/1kuna/mycelium/issues/259),
 revisited earlier only for a consumer that requires it.

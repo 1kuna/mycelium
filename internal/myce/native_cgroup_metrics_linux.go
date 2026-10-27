@@ -9,6 +9,8 @@ import (
 	"strings"
 )
 
+var nativeMemoryMetricNames = []string{"memory.peak", "memory.max", "memory.events", "memory.current", "memory.stat"}
+
 // Resolve inside the disposable helper, after attachment and namespace entry.
 // The kernel supplies current membership; only the worker supplies other
 // payload leaves in the same attempt. Neither source authorizes a directory.
@@ -55,7 +57,7 @@ func nativeCgroupMetricFiles(membership, mountinfo []byte, p nativeLinuxPolicy) 
 		// memory.peak may be absent on older kernels or when the memory
 		// controller is unavailable. Landlock skips absent exact files; it
 		// must never replace them with a readable parent directory.
-		for _, name := range []string{"memory.peak", "memory.max", "memory.events", "memory.current", "memory.stat"} {
+		for _, name := range nativeMemoryMetricNames {
 			files = append(files, filepath.Join(group, name))
 		}
 	}

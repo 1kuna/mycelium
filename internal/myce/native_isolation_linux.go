@@ -25,6 +25,8 @@ type nativeLinuxPolicy struct {
 	Env                            []string
 	Ports                          []uint16
 	Namespace                      bool
+	MinimalRoot                    bool // A request only: final helper verifies the mounted receipt.
+	Workdir                        string
 }
 
 type nativeLinuxSupport struct{ mode, reason, bwrap, nsenter string }
@@ -32,10 +34,13 @@ type nativeLinuxSupport struct{ mode, reason, bwrap, nsenter string }
 var nativeLinuxDetection = sync.OnceValue(detectNativeLinuxSupport)
 
 // Capability evidence belongs to this service process: a login shell can have
-// different AppArmor/seccomp policy. Neither supported mode currently provides
-// a qualified outbound transport, so neither advertises native_network.
+// different AppArmor/seccomp policy. No Linux mode currently provides a
+// qualified outbound transport, so none advertises native_network.
 func (w Worker) nativeIsolationCapabilities() []string {
-	s := nativeLinuxDetection()
+	s := w.nativeLinuxSupport()
+	if w.NativeMinimalRoot {
+		log.Printf("native minimal-root capability: mode=%s reason=%s", s.mode, s.reason)
+	}
 	caps := []string{"native_isolation_" + s.mode}
 	if s.mode != "unavailable" {
 		caps = append(caps, "native_sidecars")
@@ -105,8 +110,8 @@ func nativeBwrapBase() []string {
 	return []string{"--unshare-user", "--unshare-pid", "--unshare-ipc", "--unshare-net", "--die-with-parent", "--cap-drop", "ALL", "--ro-bind", "/", "/", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp"}
 }
 
-func nativeIsolationSupport(network bool) (nativeLinuxSupport, error) {
-	s := nativeLinuxDetection()
+func (w Worker) nativeIsolationSupport(network bool) (nativeLinuxSupport, error) {
+	s := w.nativeLinuxSupport()
 	log.Printf("native isolation: mode=%s reason=%s network=%t", s.mode, s.reason, network)
 	if network {
 		return s, errors.New("native_network_unavailable: Linux outbound transport is not qualified; needs.network requires a capable host")
@@ -129,7 +134,8 @@ func nativeCanonical(path string) (string, error) {
 }
 
 func (w Worker) nativeLinuxPolicy(cmd *exec.Cmd, spool, work string, env map[string]string, ports []string) (nativeLinuxPolicy, error) {
-	p := nativeLinuxPolicy{Env: environmentList(env), MetricCgroups: slices.Clone(w.nativeMetricCgroups)}
+	p := nativeLinuxPolicy{MinimalRoot: w.NativeMinimalRoot, Env: environmentList(env), MetricCgroups: slices.Clone(w.nativeMetricCgroups)}
+	originalWork := work
 	work, err := nativeCanonical(work)
 	if err != nil {
 		return p, err
@@ -138,9 +144,13 @@ func (w Worker) nativeLinuxPolicy(cmd *exec.Cmd, spool, work string, env map[str
 	if err != nil {
 		return p, err
 	}
+	if p.MinimalRoot && (filepath.Clean(originalWork) != work || filepath.Clean(cmd.Dir) != dir) {
+		return p, errors.New("native_minimal_root_layout: attempt/workdir paths must be canonical; host path aliases are not mounted")
+	}
 	if rel, err := filepath.Rel(work, dir); err != nil || rel != "." && !filepath.IsLocal(rel) {
 		return p, errors.New("native isolation requires workdir beneath {work}; stage source with inputs or a profile")
 	}
+	p.Workdir = dir
 	p.Write = []string{work}
 	for _, path := range []string{env["MYCE_CHECKPOINT_DIR"], env["MYCE_USAGE_FILE"]} {
 		if path == "" {
@@ -157,6 +167,9 @@ func (w Worker) nativeLinuxPolicy(cmd *exec.Cmd, spool, work string, env map[str
 		if err != nil {
 			return p, err
 		}
+		if p.MinimalRoot && filepath.Clean(path) != canonical {
+			return p, errors.New("native_minimal_root_layout: checkpoint/usage paths must be canonical")
+		}
 		p.Write = append(p.Write, canonical)
 	}
 	// Do not grant /etc, /run, /proc, home or the worker spool recursively.
@@ -166,6 +179,14 @@ func (w Worker) nativeLinuxPolicy(cmd *exec.Cmd, spool, work string, env map[str
 	// None of these sysfs trees includes /sys/fs/cgroup; grant metrics below
 	// that mount only as exact files resolved by the attached exec helper.
 	p.Read = []string{"/usr", "/bin", "/sbin", "/lib", "/lib64", "/opt/intel/oneapi", "/sys/bus/pci", "/sys/class/drm", "/sys/devices", "/sys/module/nvidia", "/sys/module/nvidia_uvm", "/sys/module/xe", "/sys/module/i915", "/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/ld.so.conf.d", "/etc/ssl/certs", "/etc/ca-certificates", "/etc/hosts", "/etc/resolv.conf", "/etc/nsswitch.conf", "/etc/passwd", "/etc/group", "/etc/localtime", "/proc/cpuinfo", "/proc/meminfo", "/proc/stat", "/proc/loadavg", "/proc/uptime", "/proc/version", "/proc/sys/kernel/osrelease", "/proc/sys/kernel/ostype", "/proc/sys/vm/overcommit_memory", "/proc/driver/nvidia/version"}
+	if w.NativeMinimalRoot {
+		// An empty root has no ambient runtime. Operators declare the installed
+		// runtime (interpreter, loader, libraries) explicitly; do not import all
+		// of /usr and its unrelated service/control artifacts implicitly.
+		p.Read = slices.DeleteFunc(p.Read, func(path string) bool {
+			return !strings.HasPrefix(path, "/proc/") && !strings.HasPrefix(path, "/etc/") && !strings.HasPrefix(path, "/sys/")
+		})
+	}
 	modelCache := w.CacheRoot
 	if modelCache == "" {
 		modelCache = filepath.Join(spool, "model-cache")
@@ -186,6 +207,11 @@ func (w Worker) nativeLinuxPolicy(cmd *exec.Cmd, spool, work string, env map[str
 	}
 	p.ReadOnly = append(p.ReadOnly, declaredRead...)
 	p.Read = append(p.Read, declaredExecute...)
+	if w.NativeMinimalRoot {
+		// Preserve explicitly declared interpreter/loader names as exact aliases.
+		p.ReadOnly = append(p.ReadOnly, w.NativeReadRoots...)
+		p.Read = append(p.Read, w.NativeExecuteRoots...)
+	}
 	if w.environmentCache != nil {
 		p.Read = append(p.Read, w.environmentCache.Root)
 	}
@@ -371,7 +397,7 @@ func (w Worker) isolateNativeCommand(cmd *exec.Cmd, spool, work string, env map[
 	if err := nativeWrapPayloadCheck(cmd); err != nil {
 		return err
 	}
-	s, err := nativeIsolationSupport(network)
+	s, err := w.nativeIsolationSupport(network)
 	if err != nil {
 		return err
 	}
@@ -379,7 +405,7 @@ func (w Worker) isolateNativeCommand(cmd *exec.Cmd, spool, work string, env map[
 	if err != nil {
 		return err
 	}
-	p.Namespace = s.mode == "namespace"
+	p.Namespace = s.mode == "namespace" || s.mode == "minimal_root"
 	if !p.Namespace && len(p.Ports) > 0 {
 		log.Printf("native isolation: mode=landlock network=partial reserved_tcp_ports=%d", len(p.Ports))
 	}
@@ -387,7 +413,12 @@ func (w Worker) isolateNativeCommand(cmd *exec.Cmd, spool, work string, env map[
 	if err != nil {
 		return err
 	}
-	if p.Namespace {
+	if p.MinimalRoot {
+		args, err = nativeMinimalLaunchArgs(s.bwrap, p, args, false)
+		if err != nil {
+			return err
+		}
+	} else if p.Namespace {
 		bwrap := nativeBwrapPolicyArgs(p)
 		// bwrap 0.9 passes inherited descriptors to its executable by default;
 		// --preserve-fds belongs to other launchers and is not a bwrap option.

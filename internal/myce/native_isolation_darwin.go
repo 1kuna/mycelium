@@ -14,6 +14,9 @@ import (
 // worker retains process custody, signaling and memory probes.
 // sandbox-exec is deprecated: failure to install its profile fails the attempt.
 func (w Worker) isolateNativeCommand(cmd *exec.Cmd, spool, work string, env map[string]string, ports []string, network bool) error {
+	if w.NativeMinimalRoot {
+		return errors.New("native_minimal_root_unavailable: Linux required")
+	}
 	canonical := func(path string) string {
 		if path == "" {
 			return ""
@@ -194,6 +197,9 @@ func (w Worker) isolateNativeCommand(cmd *exec.Cmd, spool, work string, env map[
 }
 
 func (w Worker) nativeIsolationCapabilities() []string {
+	if w.NativeMinimalRoot {
+		return []string{"native_isolation_unavailable"}
+	}
 	if info, err := os.Stat("/usr/bin/sandbox-exec"); err == nil && info.Mode()&0111 != 0 {
 		return []string{"native_isolation_seatbelt", "native_network", "native_sidecars"}
 	}

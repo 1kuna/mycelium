@@ -139,6 +139,7 @@ type ServiceConfig struct {
 	AllowDeviceless       bool    `json:"allow_deviceless"`
 	Device                string  `json:"device"`
 
+	NativeMinimalRoot  bool     `json:"native_minimal_root"`
 	NativeReadRoots    []string `json:"native_read_roots"`
 	NativeExecuteRoots []string `json:"native_execute_roots"`
 
@@ -752,6 +753,9 @@ func (c ServiceConfig) Args() []string {
 	}
 	if c.Role == "worker" {
 		args = append(args, "--daily-use="+strconv.FormatBool(c.DailyUse), "--laptop="+strconv.FormatBool(c.Laptop), "--desktop="+strconv.FormatBool(c.Desktop))
+		if c.NativeMinimalRoot {
+			args = append(args, "--native-minimal-root")
+		}
 		for _, root := range c.NativeReadRoots {
 			args = append(args, "--native-read-root", root)
 		}

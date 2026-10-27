@@ -664,7 +664,7 @@ credential contents while unrelated host metadata/files remain visible.
 Payloads are offline by default. Add `needs.network: true` for payload-time
 downloads or API calls. Worker-owned environment/input preparation keeps its
 network access. Placement requires protected outbound capability; submission
-returns `no_qualified_target` immediately when none qualifies. Both Linux modes
+returns `no_qualified_target` immediately when none qualifies. All Linux modes
 currently withhold `native_network`, because namespace egress is unqualified.
 macOS online jobs still cannot reach other loopback endpoints or the queue's
 TCP port at any address, including unrelated services using that port.
@@ -676,7 +676,7 @@ or broken setup fail closed. Fallback allows only exact reserved sidecar TCP
 ports, **including off-host connections and any bind address on those ports**;
 this is partial network isolation. Readiness checks actual listener ownership
 and `127.0.0.1` binding, not a kernel restriction on future binds. Other TCP
-ports, UDP/raw/packet/SCTP/MPTCP and Unix endpoints are denied. macOS uses
+ports, UDP/raw/packet/SCTP/MPTCP and Unix stream/datagram endpoints are denied. macOS uses
 deprecated `sandbox-exec`/Seatbelt and refuses launch if the launcher/profile
 fails. Existing cgroup, GPU, launch and cleanup gates remain required.
 
@@ -686,6 +686,25 @@ can authorize user namespaces for the installed binary while keeping
 action, not applied here: review the intentionally permissive profile and
 kernel attack-surface cost, load with `apparmor_parser`, then restart and verify
 the actual worker service. Never disable the global restriction as a shortcut.
+
+The separate [minimal-root option (#262)](native-minimal-root.md) adds
+`--native-minimal-root` to worker/install configuration, saved as
+`native_minimal_root` and off by default. No authored environment enables it.
+Explicit true requires bubblewrap FD-bind features (0.10+), a successful probe
+from the actual service, and refuses
+startup on failure; it never selects the existing host-root/fallback path.
+Declare the installed runtime and its loader/libraries through narrow
+`--native-exec-root` entries; an empty root has no ambient `/usr` or `/bin`.
+Read trees contain only constructed directories, validated internal links and
+FD-pinned regular files, so later socket insertion/replacement cannot appear.
+No complete model/runtime copies are made; descriptor/mount costs and startup
+latency still need measurement on actual layouts. Existing staged NAS,
+checkpoint, host-memory, launch/start-by, TERM grace and cleanup custody remain.
+Only exact regular metrics are exposed; no cgroup2 directory tree is mounted.
+This mode remains unqualified. Its Linux execution waits for the operator's per-host
+userns-policy approval; the existing Option B qualification keeps its separate
+passing/released gate, production-idle and preemption conditions. No host policy
+change or per-attempt AppArmor manager is performed by this setting.
 
 ## Docker cleanup custody
 

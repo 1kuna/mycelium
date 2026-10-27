@@ -56,6 +56,7 @@ type nativeGroup struct {
 	memory                 *memoryAttempt
 	control                *memoryAttempt
 	memberMemory           map[string]*memoryAttempt
+	preparedRoots          map[string]string // Minimal-root snapshot includes all prepared sidecar runtimes.
 	custody                workerState
 	supervisor             *exec.Cmd
 }
@@ -274,8 +275,21 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 		output.Close()
 		return nil, err
 	}
+	if w.NativeMinimalRoot {
+		if err := g.prepareSidecarEnvironments(j, mainEnvironment); err != nil {
+			for _, release := range g.releases {
+				release()
+			}
+			cancel()
+			output.Close()
+			return nil, err
+		}
+	}
 	writer, err := g.startSupervisor(s, env)
 	if err != nil {
+		for _, release := range g.releases {
+			release()
+		}
 		cancel()
 		output.Close()
 		return nil, err
@@ -396,7 +410,7 @@ func (g *nativeGroup) startSupervisor(s *workerStore, env map[string]string) (*o
 	cmd.Env = environmentList(jobBaseEnvironment())
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	work := filepath.Join(g.dir, "job-files", g.p.job.ID, strconv.Itoa(g.p.job.Attempt))
-	g.namespace, err = g.worker.prepareNativeGroupIsolation(cmd, g.dir, work, env, g.p.job.Spec.Needs.Network)
+	g.namespace, err = g.metricWorker().prepareNativeGroupIsolation(cmd, g.dir, work, env, g.p.job.Spec.Needs.Network)
 	if err != nil {
 		writer.Close()
 		return nil, err
@@ -725,9 +739,7 @@ func (g *nativeGroup) independentMemberFailure() bool {
 	return false
 }
 
-func (g *nativeGroup) run(j Job, base map[string]string, mainEnvironment string, output *os.File) (error, bool) {
-	// Acquire all helper environments before starting any payload; hold cache use
-	// protections until every member has exited (the outer goroutine defers release).
+func (g *nativeGroup) prepareSidecarEnvironments(j Job, mainEnvironment string) error {
 	roots := map[string]string{}
 	for _, side := range j.Spec.Run.Sidecars {
 		root, release, err := g.sidecarEnvironment(j, side, mainEnvironment)
@@ -735,13 +747,26 @@ func (g *nativeGroup) run(j Job, base map[string]string, mainEnvironment string,
 			if !errors.Is(err, context.Canceled) {
 				err = g.recordInfrastructure(environmentFailed, side.Name, "", err)
 			}
-			return err, false
+			return err
 		}
 		roots[side.Name] = root
 		if release != nil {
 			g.releases = append(g.releases, release)
 		}
 	}
+	g.preparedRoots = roots
+	return nil
+}
+
+func (g *nativeGroup) run(j Job, base map[string]string, mainEnvironment string, output *os.File) (error, bool) {
+	// Acquire all helper environments before starting any payload; hold cache use
+	// protections until every member has exited (the outer goroutine defers release).
+	if g.preparedRoots == nil || !g.worker.NativeMinimalRoot {
+		if err := g.prepareSidecarEnvironments(j, mainEnvironment); err != nil {
+			return err, false
+		}
+	}
+	roots := g.preparedRoots
 	reservations := map[string]net.Listener{}
 	defer func() {
 		for _, l := range reservations {
