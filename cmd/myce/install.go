@@ -28,13 +28,40 @@ func setupCommandWithProbe(args []string, probe myce.MachineProbe, home string) 
 func setupCommandWithAccountLookup(args []string, probe myce.MachineProbe, home string, lookup func(string) (myce.WorkerAccount, error)) error {
 	return setupCommandWithInstaller(args, probe, home, lookup, myce.Install)
 }
+
+// Storage validation has per-operation progress bounds. Keep cancellation across
+// the install, with the existing setup allowance applied to each subprocess.
+func boundedSetupProbe(probe myce.MachineProbe) myce.MachineProbe {
+	command, commandEnv := probe.Command, probe.CommandEnv
+	if command != nil {
+		probe.Command = func(ctx context.Context, name string, args ...string) ([]byte, error) {
+			bounded, cancel := myce.SetupTimeout(ctx)
+			defer cancel()
+			return command(bounded, name, args...)
+		}
+	}
+	if commandEnv != nil {
+		probe.CommandEnv = func(ctx context.Context, env map[string]string, name string, args ...string) ([]byte, error) {
+			bounded, cancel := myce.SetupTimeout(ctx)
+			defer cancel()
+			return commandEnv(bounded, env, name, args...)
+		}
+	}
+	return probe
+}
+
 func setupCommandWithInstaller(args []string, probe myce.MachineProbe, home string, lookup func(string) (myce.WorkerAccount, error), install func(context.Context, myce.ServiceConfig, string, string, func(context.Context, string, ...string) ([]byte, error)) error) error {
+	setupContext := myce.SetupTimeout
+	if len(args) > 0 && args[0] == "install" {
+		setupContext = context.WithCancel
+		probe = boundedSetupProbe(probe)
+	}
 	return setupCommandWithInstallerTimeout(args, probe, home, lookup, func(ctx context.Context, c myce.ServiceConfig, executable, token string, command func(context.Context, string, ...string) ([]byte, error)) error {
 		if err := ensureSetupServiceSession(ctx, c, command); err != nil {
 			return err
 		}
 		return install(ctx, c, executable, token, command)
-	}, myce.SetupTimeout)
+	}, setupContext)
 }
 
 func ensureSetupServiceSession(ctx context.Context, c myce.ServiceConfig, command func(context.Context, string, ...string) ([]byte, error)) error {

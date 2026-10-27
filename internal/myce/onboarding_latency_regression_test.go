@@ -3,8 +3,6 @@ package myce
 import (
 	"context"
 	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -95,24 +93,31 @@ func TestOnboardingStalledFsyncIsBounded(t *testing.T) {
 	})
 }
 
-func TestOnboardingSlowOperationsShareTotalBound(t *testing.T) {
+// Incident replay: 30 individually healthy operations, 68.236s overall.
+func TestOnboardingProgressBeyondFormerAggregateDeadline(t *testing.T) {
 	c, command := onboardingNAS(t, "darwin")
-	st, err := os.Stat(c.NAS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	c.Checkpoints = filepath.Join(c.NAS, strings.Repeat("part/", 200), "checkpoints")
 	synctest.Test(t, func(t *testing.T) {
 		defer joinOnboardingNASSequence()
-		fs := onboardingStorageFS{lstat: func(string) (os.FileInfo, error) {
-			time.Sleep(1500 * time.Millisecond)
-			return st, nil
-		}, mkdir: func(string, os.FileMode) error { return nil }, probe: func(string) error { return nil }}
+		operations := 0
+		fs := onboardingStorageFS{lstat: os.Lstat, mkdir: os.Mkdir, probeContext: func(ctx context.Context, abort context.CancelCauseFunc, _ string) error {
+			for i := 0; i < 10; i++ {
+				if err := onboardingFSError(ctx, abort, func() error {
+					time.Sleep(2274523300 * time.Nanosecond)
+					operations++
+					return nil
+				}); err != nil {
+					return err
+				}
+			}
+			return nil
+		}}
 		start := time.Now()
-		_, err := prepareOnboardingStorageFS(context.Background(), c, false, command, fs)
-		requirePreflightCode(t, err, "nas_unresponsive")
-		if elapsed := time.Since(start); elapsed != 15*time.Second {
-			t.Errorf("whole-check deadline=%s, want 15s despite individually healthy operations", elapsed)
+		got, err := prepareOnboardingStorageFS(context.Background(), c, false, command, fs)
+		if err != nil || !got.RequireMountedNAS || operations != 30 {
+			t.Fatalf("progressing validation refused: operations=%d err=%v", operations, err)
+		}
+		if elapsed := time.Since(start); elapsed < 68*time.Second {
+			t.Fatalf("fixture did not reproduce aggregate latency: %s", elapsed)
 		}
 	})
 }

@@ -747,9 +747,21 @@ admitted on the next heartbeat; successful preparation and qualification are
 separate results.
 
 One-shot NAS install/reconfigure validation allows 10 seconds per filesystem
-operation within the existing 15-second total deadline, to accommodate SMB
-metadata/fsync latency. Heartbeat filesystem observation keeps its shorter
-budget; a stalled installation remains bounded and preserves installed state.
+operation. Successful operations advance validation without a shared total
+deadline: an observed 30-operation sequence took 68.236 seconds, with a 6.074
+second maximum operation. The 10-second stall bound is unchanged; this sample
+is not a supported-load latency qualification. Mount inventory retains its
+5-second bound, and installer subprocesses retain a 15-second bound per command.
+Cancellation remains active throughout setup. Logs report operation and root
+progress with elapsed time, without paths or mount credentials. A stalled syscall
+stays owned until it returns, so retries cannot start overlapping NAS sequences;
+refusal occurs before installed files or services change.
+
+Background checkpoint availability returns within the 750 ms control budget.
+After a successful observation, a new pending probe retains availability for
+up to the existing 10-second network allowance, accommodating the measured slow
+share without delaying heartbeats. Cold observations, completed failures and
+probes still pending after that allowance fence checkpoint-dependent work.
 
 Workers retain prepared environments for at least 24 hours after preparation or
 last use (including qualification checks and completion of long-running jobs).

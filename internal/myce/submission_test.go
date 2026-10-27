@@ -408,3 +408,23 @@ func TestSubmissionReservationAndMarkerRestart(t *testing.T) {
 		t.Fatal("marker created a job after restart")
 	}
 }
+
+func TestSubmissionPastStartByPreservesReplayAndCancellation(t *testing.T) {
+	q, clock := fixture(t)
+	s := spec("production")
+	s.SubmissionKey = "deadline-replay"
+	deadline := clock.Now().Add(time.Second)
+	s.StartBy = &deadline
+	original := submit(t, q, s)
+	clock.Advance(107 * time.Second)
+	if replay := submit(t, q, s); replay.ID != original.ID {
+		t.Fatal("expired explicit deadline changed keyed replay")
+	}
+	s.SubmissionKey = "new-deadline"
+	_, err := q.Submit(s)
+	submissionError(t, err, 400, "job_deadline_invalid")
+	reserveSubmission(t, q, s.Project, s.SubmissionKey)
+	if cancelled := submit(t, q, s); cancelled.State != "cancelled" {
+		t.Fatalf("past deadline overrode cancellation: %+v", cancelled)
+	}
+}

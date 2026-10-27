@@ -293,36 +293,6 @@ func TestRereviewCancelledIOIsNotReused(t *testing.T) {
 	}
 }
 
-func TestRereviewNASTotalBudget(t *testing.T) {
-	c, command := onboardingNAS(t, "linux")
-	st, err := os.Stat(c.NAS)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Every operation is healthy, but a very deep root would exceed the cap.
-	c.Checkpoints = filepath.Join(c.NAS, strings.Repeat("part/", 200), "checkpoints")
-	synctest.Test(t, func(t *testing.T) {
-		start := time.Now()
-		fs := onboardingStorageFS{lstat: func(string) (os.FileInfo, error) { time.Sleep(100 * time.Millisecond); return st, nil }, mkdir: func(string, os.FileMode) error { return nil }, probe: func(string) error { return nil }}
-		_, err := prepareOnboardingStorageFS(context.Background(), c, false, command, fs)
-		requirePreflightCode(t, err, "nas_unresponsive")
-		if elapsed := time.Since(start); elapsed != onboardingStorageBudget {
-			t.Fatalf("whole-check cap=%s, want %s", elapsed, onboardingStorageBudget)
-		}
-		// Drain and detach the bubble-owned channel before other tests use the
-		// process-wide guard. The syscall itself is allowed to outlive refusal.
-		onboardingNASIO.mu.Lock()
-		pending := onboardingNASIO.pending
-		onboardingNASIO.mu.Unlock()
-		if pending != nil {
-			<-pending.done
-		}
-		onboardingNASIO.mu.Lock()
-		onboardingNASIO.pending = nil
-		onboardingNASIO.mu.Unlock()
-	})
-}
-
 func TestRereviewCancellationDuringMountInventory(t *testing.T) {
 	c, _ := onboardingNAS(t, "linux")
 	ctx, cancel := context.WithCancel(context.Background())
@@ -341,18 +311,18 @@ func TestRereviewCancellationDuringMountInventory(t *testing.T) {
 	}
 }
 
-func TestRereviewMountInventorySharesTotalBudget(t *testing.T) {
+func TestRereviewMountInventoryHasIndependentBudget(t *testing.T) {
 	c, _ := onboardingNAS(t, "linux")
 	synctest.Test(t, func(t *testing.T) {
-		// The parent is longer than the documented whole-check budget.
-		ctx, cancel := context.WithTimeout(context.Background(), 2*onboardingStorageBudget)
+		// Inventory retains its own bound, independent of filesystem progress.
+		ctx, cancel := context.WithTimeout(context.Background(), 2*onboardingMountInventoryBudget)
 		defer cancel()
 		start := time.Now()
 		command := func(ctx context.Context, _ string, _ ...string) ([]byte, error) { <-ctx.Done(); return nil, ctx.Err() }
 		_, err := PrepareOnboardingStorage(ctx, c, false, command)
 		requirePreflightCode(t, err, "nas_unresponsive")
-		if elapsed := time.Since(start); elapsed != onboardingStorageBudget {
-			t.Fatalf("mount inventory exceeded total budget: %s", elapsed)
+		if elapsed := time.Since(start); elapsed != onboardingMountInventoryBudget {
+			t.Fatalf("mount inventory exceeded its budget: %s", elapsed)
 		}
 	})
 }

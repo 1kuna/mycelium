@@ -214,3 +214,62 @@ func TestWorkerPreparationCancellationRetainsSingleCall(t *testing.T) {
 		}
 	})
 }
+
+func TestCheckpointAvailabilitySlowSuccessStallAndRecovery(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		q, _ := fixture(t)
+		w := recoveryWorker(t)
+		s, err := w.openStore()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.close()
+		for _, probe := range []*checkpointAvailability{&q.nasProbe, &s.nasProbe} {
+			if ok, err := probe.run("share", func() (bool, error) { return true, nil }); !ok || err != nil {
+				t.Fatal(err)
+			}
+			var calls atomic.Int32
+			slow := func() (bool, error) { calls.Add(1); time.Sleep(6074 * time.Millisecond); return true, nil }
+			// Refresh as control requests arrive, without flapping while a healthy
+			// observation progresses. The caller still returns within one heartbeat.
+			start := time.Now()
+			for time.Since(start) < 7*time.Second {
+				if ok, err := probe.run("share", slow); !ok || err != nil {
+					t.Fatalf("slow working share fenced: %v", err)
+				}
+			}
+			if calls.Load() > 2 {
+				t.Fatalf("overlapping observations: %d", calls.Load())
+			}
+			probe.mu.Lock()
+			pending := probe.pending
+			probe.mu.Unlock()
+			if pending != nil {
+				<-pending.done
+			}
+			// Consume any late completion before fault injection.
+			_, _ = probe.run("share", slow)
+			release := make(chan struct{})
+			var blockedCalls atomic.Int32
+			blocked := func() (bool, error) { blockedCalls.Add(1); <-release; return true, nil }
+			start = time.Now()
+			for time.Since(start) < networkFilesystemBudget {
+				_, _ = probe.run("share", blocked)
+			}
+			if ok, err := probe.run("share", blocked); ok || err == nil {
+				t.Fatal("stalled share remained available")
+			}
+			if blockedCalls.Load() != 1 {
+				t.Fatalf("blocked observations accumulated: %d", blockedCalls.Load())
+			}
+			close(release)
+			if ok, err := probe.run("share", blocked); !ok || err != nil {
+				t.Fatalf("share did not recover: %v", err)
+			}
+			failure := errors.New("I/O failure")
+			if ok, err := probe.run("share", func() (bool, error) { return false, failure }); ok || !errors.Is(err, failure) {
+				t.Fatalf("failed storage accepted: %v", err)
+			}
+		}
+	})
+}

@@ -77,7 +77,7 @@ type workerStore struct {
 	fileGeneration        int64
 	extensionFiles        checkpointIO[string]
 	checkpointUnavailable bool
-	nasProbe              checkpointIO[bool]
+	nasProbe              checkpointAvailability
 	nasProgress           checkpointIO[int64]
 	nasPrepare            checkpointIO[string]
 	dir                   string

@@ -11,6 +11,13 @@ not drive start authorization, cancellation or result publication.
 Administrative tools use uncached `GET /api/inspection` for migration custody,
 local extension targeting and measurement safety checks.
 
+`myce status` and `GET /api/status` report `queue_release` (`version`, `commit`)
+from the queue process. Each machine's `release` reports the worker process's
+version and commit from its check-in. Missing worker releases mean unknown
+(older workers); they are never inferred from the queue release. Release builds
+embed the source commit even with Go VCS stamping disabled. Development builds
+use Go's VCS revision when available, otherwise `unknown`.
+
 Each hypha shows its capability profile: CPU count, system memory, accelerator
 memory, shared or separate memory, and local storage. Missing measurements say
 unknown. Extension reports say which kind of work or program is qualified on

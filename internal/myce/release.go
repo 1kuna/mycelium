@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"runtime/debug"
 	"strings"
 
 	"golang.org/x/mod/semver"
@@ -24,6 +25,30 @@ const StartGateProtocol = startGateProtocol
 const AttemptProtocol = keyedAttemptProtocol
 
 var BuildVersion = "development"
+var BuildCommit string
+
+// RunningRelease identifies the process, never the binary currently on disk.
+type RunningRelease struct {
+	Version string `json:"version"`
+	Commit  string `json:"commit"`
+}
+
+func CurrentRelease() RunningRelease {
+	commit := BuildCommit
+	if commit == "" {
+		if info, ok := debug.ReadBuildInfo(); ok {
+			for _, setting := range info.Settings {
+				if setting.Key == "vcs.revision" {
+					commit = setting.Value
+				}
+			}
+		}
+	}
+	if commit == "" {
+		commit = "unknown"
+	}
+	return RunningRelease{Version: BuildVersion, Commit: commit}
+}
 
 type ReleaseArtifact struct {
 	OS            string `json:"os"`
@@ -44,6 +69,7 @@ type SignedRelease struct {
 	Signature []byte          `json:"signature"`
 }
 type VersionInfo struct {
+	Commit          string `json:"commit"`
 	Version         string `json:"version"`
 	OS              string `json:"os"`
 	Arch            string `json:"arch"`
@@ -53,7 +79,7 @@ type VersionInfo struct {
 }
 
 func Version() VersionInfo {
-	return VersionInfo{BuildVersion, runtime.GOOS, runtime.GOARCH, startGateProtocol, keyedAttemptProtocol, NativeOwnerSignals}
+	return VersionInfo{Commit: CurrentRelease().Commit, Version: BuildVersion, OS: runtime.GOOS, Arch: runtime.GOARCH, StartGate: startGateProtocol, AttemptProtocol: keyedAttemptProtocol, NativeSensing: NativeOwnerSignals}
 }
 
 var releaseName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._+-]{0,79}$`)

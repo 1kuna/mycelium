@@ -99,7 +99,7 @@ func parseEnrollmentCLI(args []string) (enrollmentCLI, error) {
 	return o, nil
 }
 func enrollmentCommand(args []string, probe myce.MachineProbe, home string, lookup func(string) (myce.WorkerAccount, error)) (resultErr error) {
-	return enrollmentCommandWithTiming(args, probe, home, lookup, myce.RealClock{}, nil, myce.SetupTimeout)
+	return enrollmentCommandWithTiming(args, boundedSetupProbe(probe), home, lookup, myce.RealClock{}, nil, context.WithCancel)
 }
 
 func enrollmentCommandWithTiming(args []string, probe myce.MachineProbe, home string, lookup func(string) (myce.WorkerAccount, error), clock myce.Clock, wait func(context.Context, time.Duration) error, setupTimeout func(context.Context) (context.Context, context.CancelFunc)) (resultErr error) {
