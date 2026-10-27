@@ -90,8 +90,12 @@ opens a regular, bounded file beneath the trusted attempt root with
 escape-resistant traversal, so a payload symlink/FIFO cannot turn the worker
 into a credential reader or indefinitely block publication.
 
-Linux refuses layouts where a runtime read grant contains protected worker
-storage or configured credentials, including symlinked installation paths.
+Linux refuses layouts where a runtime read grant overlaps private content trees
+or contains a protected storage ancestor or configured credential. macOS applies
+the same validation to its added model read exceptions. Descendants and exact
+files within sibling work/temp, checkpoints, secret roots and credential trees
+remain private; normal cache/model subtrees beneath storage ancestors remain
+permitted. Validation resolves symlinked installation paths.
 The default `/opt` grant is limited to the oneAPI runtime; other operator
 runtime roots must be narrow and keep state and secrets elsewhere.
 
@@ -188,6 +192,8 @@ standalone model servers are not covered by this payload isolation contract.
 
 Both Linux modes currently withhold `native_network`: namespace egress transport
 is unqualified, and fallback reserved-port access is not an online capability.
+Protected namespace egress is a [post-v1 follow-up (#259)](https://github.com/1kuna/mycelium/issues/259),
+revisited earlier only for a consumer that requires it.
 Failed offline attempts include the outbound declaration remedy in their
 diagnostic. An online declaration routes only to a host advertising protected native
 outbound execution. If none qualifies, submission is refused immediately with

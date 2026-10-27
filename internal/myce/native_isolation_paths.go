@@ -16,10 +16,33 @@ func (w Worker) validateNativeReadGrants(read []string, spool string) error {
 	if err != nil {
 		return err
 	}
-	protected := []string{spool, filepath.Join(spool, "job-files"), filepath.Join(spool, "checkpoints"), w.CheckpointRoot, w.JobFileRoot, w.SecretRoot,
-		filepath.Join(home, ".local/share/mycelium"), filepath.Join(home, ".config"), filepath.Join(home, ".ssh"), filepath.Join(home, "Library/Keychains")}
+	// Storage ancestors contain legitimate cache/model subtrees. Private
+	// content trees permit neither an enclosing grant nor a grant inside them.
+	type protectedPath struct {
+		path          string
+		allowChildren bool
+	}
+	protected := []protectedPath{
+		{spool, true},
+		{w.JobFileRoot, true},
+		{filepath.Join(home, ".local/share/mycelium"), true},
+		{filepath.Join(spool, "job-files"), false},
+		{filepath.Join(spool, "checkpoints"), false},
+		{w.CheckpointRoot, false},
+		{w.SecretRoot, false},
+		{filepath.Join(home, ".config"), false},
+		{filepath.Join(home, ".ssh"), false},
+		{filepath.Join(home, "Library/Keychains"), false},
+	}
 	if c := w.ServiceConfig; c != nil {
-		protected = append(protected, c.Config, c.Credentials, c.EnvironmentFile, c.JoiningFile, c.State)
+		protected = append(protected, protectedPath{c.State, true})
+		for _, path := range []string{c.Config, c.Credentials, c.EnvironmentFile, c.JoiningFile} {
+			protected = append(protected, protectedPath{path, false})
+		}
+	}
+	contains := func(root, child string) bool {
+		rel, err := filepath.Rel(root, child)
+		return err == nil && (rel == "." || filepath.IsLocal(rel))
 	}
 	for _, grant := range read {
 		if grant == "" {
@@ -29,17 +52,16 @@ func (w Worker) validateNativeReadGrants(read []string, spool string) error {
 		if err != nil {
 			return err
 		}
-		for _, path := range protected {
-			if path == "" {
+		for _, private := range protected {
+			if private.path == "" {
 				continue
 			}
-			path, err := nativeResolvedPath(path)
+			path, err := nativeResolvedPath(private.path)
 			if err != nil {
 				return err
 			}
-			rel, err := filepath.Rel(grant, path)
-			if err == nil && (rel == "." || filepath.IsLocal(rel)) {
-				return errors.New("native_isolation_runtime_overlap: runtime read root contains protected worker storage; install state and credentials outside runtime roots")
+			if contains(grant, path) || !private.allowChildren && contains(path, grant) {
+				return errors.New("native_isolation_runtime_overlap: runtime read root overlaps protected worker storage; install state and credentials outside runtime roots")
 			}
 		}
 	}
