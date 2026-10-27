@@ -247,3 +247,63 @@ func TestFileCapacityMissingUploadMarkerCleared(t *testing.T) {
 		t.Fatal("missing upload still takes a reclamation slot")
 	}
 }
+
+func TestFileCapacityDataOnlyRetryDoesNotRefresh(t *testing.T) {
+	q, clock := fixture(t)
+	c := retentionClient(t, q)
+	ref := capacityPartial(t, c, "crash left only upload data", jobInputUploadPurpose)
+	path := filepath.Join(q.files.root, "uploads", ref.SHA256)
+	if err := os.Remove(path + ".info"); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(DefaultFileRetention + time.Nanosecond)
+	for _, method := range []string{"HEAD", "PATCH"} {
+		res, err := c.fileRequest(context.Background(), method, "/api/files/uploads/"+ref.SHA256, nil, map[string]string{"Tus-Resumable": "1.0.0", "Upload-Offset": "2", "Content-Type": "application/offset+octet-stream"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := fileResponse(res, 404); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("404 retries postponed data-only upload cleanup", err)
+	}
+}
+
+func TestFileCapacityUnpublishedBlobRecoversMarker(t *testing.T) {
+	q, clock := fixture(t)
+	c := retentionClient(t, q)
+	ref := capacityPartial(t, c, "crash between blob and marker publication", jobInputUploadPurpose)
+	path := filepath.Join(q.files.root, "uploads", ref.SHA256)
+	// Recreate the publication crash window with complete, verified bytes.
+	if err := os.WriteFile(path, []byte("crash between blob and marker publication"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.files.publish(context.Background(), ref); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(DefaultFileRetention - time.Nanosecond)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if at := q.s.JobInputUploads[ref.SHA256]; at.IsZero() {
+		t.Fatal("published blob still consumes interrupted-upload cleanup slots")
+	}
+	if err := q.files.verify(context.Background(), ref); err != nil {
+		t.Fatal("blob lost inside retention", err)
+	}
+	clock.Advance(2 * time.Nanosecond)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(q.files.blob(ref)); !os.IsNotExist(err) {
+		t.Fatal("recovered publication never reclaimed", err)
+	}
+	if _, marked := q.s.JobInputUploads[ref.SHA256]; marked {
+		t.Fatal("reclaimed publication marker retained")
+	}
+}

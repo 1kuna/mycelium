@@ -143,7 +143,7 @@ func (q *Queue) captureObservation(id string) (*Queue, fileStoreObservation, err
 		} else {
 			// Receipt diagnostics do not need global usage/event history or
 			// upload and enrollment bookkeeping.
-			s.Preemptions, s.ProductionStarts, s.JobInputUploads = nil, nil, nil
+			s.Preemptions, s.ProductionStarts, s.JobInputUploads, s.BundleUploads = nil, nil, nil, nil
 			s.EnrollmentRelease, s.EnrollmentReleaseKey = nil, nil
 		}
 	}

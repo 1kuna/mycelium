@@ -43,6 +43,8 @@ type state struct {
 	// Positive orphan eligibility, persisted with the existing queue state.
 	// Zero time means an input upload has not finished publication yet.
 	JobInputUploads map[string]time.Time `json:"job_input_uploads,omitempty"`
+	// Internally created bundles remain eligible after their last reference goes.
+	BundleUploads map[string]time.Time `json:"bundle_uploads,omitempty"`
 
 	WorkObservations     map[string]WorkObservation `json:"work_observations,omitempty"`
 	EnrollmentRelease    *EnrollmentRelease         `json:"enrollment_release,omitempty"`
@@ -1246,10 +1248,11 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 			j.Checkpoint = relative
 		}
 	}
+	reply = attemptReply(c, reply)
 	if err == nil {
 		err = q.hydrateReply(&reply)
 	}
-	return attemptReply(c, reply), err
+	return reply, err
 }
 func validGPU(s string) bool {
 	return s == "cuda" || s == "xpu" || s == "metal" || s == "fake" || s == "cpu"

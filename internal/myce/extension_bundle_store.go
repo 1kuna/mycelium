@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 )
@@ -36,8 +37,16 @@ func (s *FileStore) freezeFiles(files *map[string][]byte, ref **FileRef, digest 
 		*files, *ref = nil, &next
 		return nil
 	}
-	if err = s.verify(context.Background(), next); err != nil {
-		missing := os.IsNotExist(err)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	err = s.verify(context.Background(), next)
+	missing := os.IsNotExist(err)
+	if s.recordBundle != nil {
+		if e := s.recordBundle(next.SHA256, missing); e != nil {
+			return e
+		}
+	}
+	if err != nil {
 		// A private temporary name cannot truncate or consume an interrupted tus
 		// upload of the same bytes. Preserve any existing verified blob.
 		f, e := os.CreateTemp(filepath.Join(s.root, "uploads"), ".bundle-")
@@ -193,27 +202,79 @@ func (q *Queue) hydrateReply(reply *Reply) error {
 		return err
 	}
 	*reply = out
-	for i := range reply.EnvironmentPlan {
-		if err = store.hydrateRecipe(&reply.EnvironmentPlan[i]); err != nil {
-			return err
+	var failedJobs []*Job
+	var failedPlans []HostLaunch
+	plans := reply.EnvironmentPlan[:0]
+	for _, r := range reply.EnvironmentPlan {
+		if err := store.hydrateRecipe(&r); err != nil {
+			log.Printf("check-in environment delivery deferred key=%s: %v", r.Key, err)
+			if r.Launch != nil {
+				failedPlans = append(failedPlans, *r.Launch)
+			}
+			continue
+		}
+		plans = append(plans, r)
+	}
+	reply.EnvironmentPlan = plans
+	hydrate := func(j **Job) {
+		if *j == nil {
+			return
+		}
+		if err := store.hydrateJob(*j); err != nil {
+			log.Printf("check-in assignment delivery failed job=%s attempt=%d: %v", (*j).ID, (*j).Attempt, err)
+			failedJobs = append(failedJobs, *j)
+			*j = nil
 		}
 	}
-	if err = store.hydrateJob(reply.Job); err != nil {
-		return err
-	}
+	hydrate(&reply.Job)
 	for i := range reply.Attempts {
-		if err = store.hydrateJob(reply.Attempts[i].Job); err != nil {
-			return err
-		}
+		hydrate(&reply.Attempts[i].Job)
 	}
-	for i := range reply.ModelPlan {
-		if r := reply.ModelPlan[i].EnvironmentRecipe; r != nil {
-			if err = store.hydrateRecipe(r); err != nil {
-				return err
+	models := reply.ModelPlan[:0]
+	for _, slot := range reply.ModelPlan {
+		if r := slot.EnvironmentRecipe; r != nil {
+			if err := store.hydrateRecipe(r); err != nil {
+				log.Printf("check-in model delivery deferred model=%s: %v", slot.Model, err)
+				if slot.State == "loading" {
+					continue
+				}
+				// Unload/control decisions do not need preparation bytes.
+				slot.EnvironmentRecipe = nil
 			}
 		}
+		models = append(models, slot)
 	}
-	return nil
+	reply.ModelPlan = models
+	if len(failedJobs) == 0 && len(failedPlans) == 0 {
+		return nil
+	}
+	return q.update(func() error {
+		for _, l := range failedPlans {
+			if current, ok := q.s.PreparationPlans[l.Attempt]; ok && !current.Started && current.Machine == l.Machine && current.Session == l.Session && current.Key == l.Key && current.Kind == l.Kind {
+				delete(q.s.PreparationPlans, l.Attempt)
+			}
+		}
+		for _, offered := range failedJobs {
+			j, err := q.current(Result{Execution: Execution{ID: offered.ID, Attempt: offered.Attempt}, Machine: offered.Machine, Session: offered.Session})
+			if err != nil {
+				continue
+			} // Never stop a replacement execution.
+			// An older response might already have reached the worker. Preserve
+			// custody until exact release acknowledgement, using ordinary stops.
+			q.stop(j, "assignment files unavailable")
+			a := AttemptDirective{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Stop: true, Kill: expired(j.StopAt, q.clock.Now()), GraceSeconds: j.StopAt.Sub(q.clock.Now()).Seconds(), PriorityStop: priorityStop(j), UserCancel: cancelled(j)}
+			if reply.AttemptProtocol == "" {
+				reply.Stop, reply.Kill, reply.GraceSeconds, reply.PriorityStop, reply.UserCancel = a.Stop, a.Kill, a.GraceSeconds, a.PriorityStop, a.UserCancel
+			} else {
+				for i := range reply.Attempts {
+					if reply.Attempts[i].ID == a.ID && reply.Attempts[i].Attempt == a.Attempt && reply.Attempts[i].Session == a.Session {
+						reply.Attempts[i] = a
+					}
+				}
+			}
+		}
+		return nil
+	})
 }
 
 // Startup only, before serving traffic: publish and verify every blob first,
@@ -222,6 +283,11 @@ func (q *Queue) hydrateReply(reply *Reply) error {
 func (q *Queue) migrateBundleFiles() error {
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
+	// Enroll all new bytes in one transaction before changing any embedded
+	// record. Per-blob commits here would repeatedly copy the old large state.
+	if err := q.prepareBundleUploads(); err != nil {
+		return err
+	}
 	changed := false
 	checked := map[FileRef]bool{}
 	verify := func(ref *FileRef) error {
@@ -329,6 +395,98 @@ func (q *Queue) migrateBundleFiles() error {
 	})
 }
 
+// Startup only. Hashing and disk checks run before the small eligibility commit.
+func (q *Queue) prepareBundleUploads() error {
+	created := map[string]bool{}
+	files := func(data map[string][]byte) error {
+		if len(data) == 0 {
+			return nil
+		}
+		encoded, err := json.Marshal(data)
+		if err != nil {
+			return err
+		}
+		sum := sha256.Sum256(encoded)
+		hash := hex.EncodeToString(sum[:])
+		if _, marked := q.s.BundleUploads[hash]; marked {
+			return nil
+		}
+		if _, err := os.Lstat(q.files.blob(FileRef{SHA256: hash})); os.IsNotExist(err) {
+			created[hash] = true
+		} else if err != nil {
+			return err
+		}
+		return nil
+	}
+	extension := func(e Extension) error {
+		if err := files(e.Files); err != nil {
+			return err
+		}
+		for _, v := range e.Variants {
+			for _, r := range v.Environments {
+				if err := files(r.Files); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	job := func(j *Job) error {
+		if j == nil {
+			return nil
+		}
+		for _, e := range j.Extensions {
+			if err := extension(e); err != nil {
+				return err
+			}
+		}
+		for _, r := range j.EnvironmentRecipes {
+			if err := files(r.Files); err != nil {
+				return err
+			}
+		}
+		for _, recipes := range j.SidecarEnvironmentRecipes {
+			for _, r := range recipes {
+				if err := files(r.Files); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	for _, e := range q.s.Extensions {
+		if err := extension(e); err != nil {
+			return err
+		}
+	}
+	for _, j := range q.s.Jobs {
+		if err := job(j); err != nil {
+			return err
+		}
+	}
+	for _, record := range q.s.Submissions {
+		if err := job(record.Job); err != nil {
+			return err
+		}
+	}
+	for _, slot := range q.s.ModelSlots {
+		if r := slot.EnvironmentRecipe; r != nil {
+			if err := files(r.Files); err != nil {
+				return err
+			}
+		}
+	}
+	if len(created) == 0 {
+		return nil
+	}
+	return q.update(func() error {
+		for hash := range created {
+			q.markBundleUpload(hash)
+		}
+		return nil
+	})
+}
+
 // q.mu held. Retained history and keyed answers own bundles independently of
 // result-file expiry. Both P3-2 sweep passes recheck this set at their revision
 // fence before unlinking; publication holds the matching lifecycle read lock.
@@ -365,6 +523,11 @@ func (q *Queue) bundleReferences(subset ...map[string]*Job) map[string]bool {
 	}
 	for _, e := range q.s.Extensions {
 		extension(e)
+	}
+	for _, recipes := range q.environments.Environments {
+		for _, r := range recipes {
+			add(r.FilesRef)
+		}
 	}
 	jobs := q.s.Jobs
 	if len(subset) > 0 {

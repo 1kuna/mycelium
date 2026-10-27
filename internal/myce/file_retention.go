@@ -29,13 +29,38 @@ type FileReclamation struct {
 const jobInputUploadPurpose = "job-input"
 const fileImportUploadPurpose = "import"
 
+// Persist eligibility before creating internal bytes, so rejected submissions
+// and crashes before the reference commit still have a cleanup owner. Existing
+// unmarked imports are never enrolled merely because a recipe reuses them.
+func (q *Queue) recordBundleUpload(hash string, created bool) error {
+	if !created {
+		return nil
+	}
+	q.mu.RLock()
+	_, marked := q.s.BundleUploads[hash]
+	q.mu.RUnlock()
+	if marked {
+		return nil
+	}
+	return q.update(func() error { q.markBundleUpload(hash); return nil })
+}
+
+func (q *Queue) markBundleUpload(hash string) {
+	if q.s.BundleUploads == nil {
+		q.s.BundleUploads = map[string]time.Time{}
+	}
+	q.s.BundleUploads[hash] = q.clock.Now()
+}
+
 // Creation and publication callers hold fileLifecycle.RLock. Only newly
 // created job-input identities acquire eligibility; reusing an unmarked import
 // never makes it collectible. A generic import permanently releases the marker.
 func (q *Queue) recordFileUpload(hash, purpose string, created bool) error {
 	q.mu.RLock()
 	_, marked := q.s.JobInputUploads[hash]
+	_, bundle := q.s.BundleUploads[hash]
 	change := purpose != jobInputUploadPurpose && marked || purpose == jobInputUploadPurpose && created && !marked
+	change = change || purpose != jobInputUploadPurpose && bundle
 	q.mu.RUnlock()
 	if !change {
 		return nil
@@ -43,6 +68,7 @@ func (q *Queue) recordFileUpload(hash, purpose string, created bool) error {
 	return q.update(func() error {
 		if purpose != jobInputUploadPurpose {
 			delete(q.s.JobInputUploads, hash)
+			delete(q.s.BundleUploads, hash)
 		} else if _, marked := q.s.JobInputUploads[hash]; created && !marked {
 			if q.s.JobInputUploads == nil {
 				q.s.JobInputUploads = map[string]time.Time{}
@@ -277,6 +303,12 @@ func (q *Queue) reclaimPublishedFiles() error {
 	cutoff := q.clock.Now().Add(-filePublicationGrace)
 	orphanCutoff := q.clock.Now().Add(-q.fileRetention)
 	orphans := map[string]time.Time{}
+	bundles := map[string]time.Time{}
+	for hash, published := range q.s.BundleUploads {
+		if !published.After(orphanCutoff) && !referenced[hash] {
+			bundles[hash] = published
+		}
+	}
 	for hash, published := range q.s.JobInputUploads {
 		if !published.IsZero() && !published.After(orphanCutoff) && !referenced[hash] {
 			orphans[hash] = published
@@ -289,7 +321,7 @@ func (q *Queue) reclaimPublishedFiles() error {
 	gone := map[string]bool{}
 	checked := 0
 	deferred := false
-	reclaim := func(hash string, orphan bool) {
+	reclaim := func(hash string, orphan, bundle bool) {
 		// The same fence covers tus publication and verify-then-commit callers.
 		// Do not queue a writer behind slow hashing/uploads: RWMutex writer
 		// preference would then stall unrelated publications. Tick retries later.
@@ -309,6 +341,14 @@ func (q *Queue) reclaimPublishedFiles() error {
 			published, marked := q.s.JobInputUploads[hash]
 			remove = q.files == store && marked && published == orphans[hash] && !referenced[hash]
 		}
+		if bundle {
+			published, marked := q.s.BundleUploads[hash]
+			remove = q.files == store && marked && published == bundles[hash] && !referenced[hash]
+		}
+		bundleTime, trackedBundle := q.s.BundleUploads[hash]
+		// An expired input can share bytes with a newly created, rejected
+		// recipe. Its older job window cannot shorten the recipe's retention.
+		remove = remove && (!trackedBundle || !bundleTime.After(orphanCutoff))
 		q.mu.RUnlock()
 		var err error
 		if remove {
@@ -317,7 +357,7 @@ func (q *Queue) reclaimPublishedFiles() error {
 			st, err = os.Lstat(path)
 			// Stat inside the publication fence: a publisher/HEAD may have
 			// refreshed mtime since the collection snapshot was taken.
-			if err == nil && !st.ModTime().After(cutoff) && (!orphan || st.Mode().IsRegular() && !st.ModTime().After(orphanCutoff)) {
+			if err == nil && !st.ModTime().After(cutoff) && (!(orphan || trackedBundle) || st.Mode().IsRegular() && !st.ModTime().After(orphanCutoff)) {
 				err = os.Remove(path)
 				if err == nil {
 					gone[hash] = true
@@ -341,14 +381,21 @@ func (q *Queue) reclaimPublishedFiles() error {
 			break
 		}
 		checked++
-		reclaim(hash, false)
+		reclaim(hash, false, false)
 	}
 	for hash := range orphans {
 		if checked == fileReclaimBatch || deferred {
 			break
 		}
 		checked++
-		reclaim(hash, true)
+		reclaim(hash, true, false)
+	}
+	for hash := range bundles {
+		if checked == fileReclaimBatch || deferred {
+			break
+		}
+		checked++
+		reclaim(hash, false, true)
 	}
 	q.mu.Lock()
 	warn := deferred && !q.fileCollectionDeferred
@@ -369,6 +416,9 @@ func (q *Queue) reclaimPublishedFiles() error {
 			// marker. Never erase its eligibility/progress with an older result.
 			if q.s.JobInputUploads[hash] == orphans[hash] {
 				delete(q.s.JobInputUploads, hash)
+			}
+			if q.s.BundleUploads[hash] == bundles[hash] {
+				delete(q.s.BundleUploads, hash)
 			}
 		}
 		mark := func(j *Job) {

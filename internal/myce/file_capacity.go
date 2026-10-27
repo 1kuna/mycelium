@@ -164,6 +164,7 @@ type fileStoreObservation struct {
 	store                     *FileStore
 	expired, keep, referenced map[string]bool
 	markers                   map[string]time.Time
+	bundles                   map[string]time.Time
 	now                       time.Time
 	retention                 time.Duration
 }
@@ -173,10 +174,17 @@ type fileStoreObservation struct {
 func (q *Queue) captureFileStoreStatus() fileStoreObservation {
 	expired, keep, referenced := q.fileReferences(true)
 	markers := make(map[string]time.Time, len(q.s.JobInputUploads))
+	bundles := make(map[string]time.Time, len(q.s.BundleUploads))
 	for hash, at := range q.s.JobInputUploads {
 		markers[hash] = at
 	}
-	return fileStoreObservation{q.files, expired, keep, referenced, markers, q.clock.Now(), q.fileRetention}
+	for hash, at := range q.s.BundleUploads {
+		bundles[hash] = at
+		if _, exists := markers[hash]; !exists {
+			markers[hash] = at
+		}
+	}
+	return fileStoreObservation{q.files, expired, keep, referenced, markers, bundles, q.clock.Now(), q.fileRetention}
 }
 
 func (q *Queue) fileStoreStatus(ctx context.Context) *FileStoreStatus {
@@ -202,6 +210,9 @@ func (v fileStoreObservation) status(ctx context.Context) *FileStoreStatus {
 	}
 	for hash, p := range payloads {
 		if keep[hash] || p.modified.After(now.Add(-filePublicationGrace)) {
+			continue
+		}
+		if at, tracked := v.bundles[hash]; tracked && (at.After(now.Add(-retention)) || p.modified.After(now.Add(-retention))) {
 			continue
 		}
 		reclaimable := !p.upload && expired[hash]
@@ -314,7 +325,15 @@ func (q *Queue) reclaimInterruptedUploads() error {
 			if !remove {
 				return nil
 			}
-			if _, err := os.Lstat(store.blob(FileRef{SHA256: hash})); !os.IsNotExist(err) {
+			var published time.Time
+			if st, err := os.Lstat(store.blob(FileRef{SHA256: hash})); err == nil {
+				if !st.Mode().IsRegular() {
+					return nil
+				}
+				// Publication can crash before the SQLite marker changes. Recover
+				// its original freshness, rather than granting a new idle window.
+				published = st.ModTime()
+			} else if !os.IsNotExist(err) {
 				return err
 			}
 			path := filepath.Join(store.root, "uploads", hash)
@@ -340,7 +359,14 @@ func (q *Queue) reclaimInterruptedUploads() error {
 			if err := store.syncDir(filepath.Join(store.root, "uploads")); err != nil {
 				return err
 			}
-			return q.update(func() error { delete(q.s.JobInputUploads, hash); return nil })
+			return q.update(func() error {
+				if published.IsZero() {
+					delete(q.s.JobInputUploads, hash)
+				} else {
+					q.s.JobInputUploads[hash] = published
+				}
+				return nil
+			})
 		}()
 		q.fileLifecycle.Unlock()
 		if err != nil {
