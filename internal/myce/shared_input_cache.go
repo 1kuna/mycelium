@@ -208,9 +208,7 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 				return "", err
 			}
 		} else {
-			client, closeIdle := c.Client.inputTransfer(s.ref())
-			err = client.DownloadFile(ctx, s.ref(), target)
-			closeIdle()
+			err = c.Client.DownloadFile(ctx, s.ref(), target)
 			if err != nil {
 				return "", err
 			}

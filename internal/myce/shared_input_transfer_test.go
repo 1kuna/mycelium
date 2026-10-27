@@ -23,10 +23,8 @@ func TestSharedInputTransferRenewsProgressAndIgnoresWholeRequestCap(t *testing.T
 	}))
 	defer server.Close()
 	original := Client{URL: server.URL, HTTP: &http.Client{Timeout: time.Millisecond}}
-	c, closeIdle := original.inputTransfer(ref)
-	defer closeIdle()
 	dest := filepath.Join(t.TempDir(), "download")
-	if err := c.DownloadFile(context.Background(), ref, dest); err != nil {
+	if err := original.DownloadFile(context.Background(), ref, dest); err != nil {
 		t.Fatal(err)
 	}
 	if original.HTTP.Timeout != time.Millisecond {
@@ -43,8 +41,7 @@ func TestSharedInputTransferRenewsProgressAndIgnoresWholeRequestCap(t *testing.T
 	secureClient.Timeout = time.Millisecond
 	transport := secureClient.Transport.(*http.Transport)
 	transport.TLSClientConfig.NextProtos = []string{"h2", "http/1.1"}
-	secureTransfer, closeSecure := (Client{URL: secure.URL, HTTP: secureClient}).inputTransfer(ref)
-	defer closeSecure()
+	secureTransfer := Client{URL: secure.URL, HTTP: secureClient}
 	if err := secureTransfer.DownloadFile(context.Background(), ref, filepath.Join(t.TempDir(), "secure")); err != nil {
 		t.Fatal("TLS transfer", err)
 	}
@@ -54,7 +51,7 @@ func TestSharedInputTransferRenewsProgressAndIgnoresWholeRequestCap(t *testing.T
 	a, b := net.Pipe()
 	defer a.Close()
 	defer b.Close()
-	conn := &inputConn{Conn: a, idle: 100 * time.Millisecond}
+	conn := &fileTransferConn{Conn: a, idle: 100 * time.Millisecond}
 	go func() {
 		for i := 0; i < 4; i++ {
 			time.Sleep(40 * time.Millisecond)
