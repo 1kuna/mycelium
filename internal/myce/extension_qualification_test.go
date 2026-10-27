@@ -191,6 +191,9 @@ func TestExtensionFirstDemandQualification(t *testing.T) {
 				if err := q.Cancel(demand.ID); err != nil {
 					t.Fatal(err)
 				}
+				if !cancelled(q.s.Jobs[assigned.ID]) {
+					t.Fatal("demand cancellation did not fence its in-flight check")
+				}
 				finish(t, q, assigned, true)
 			case "identity changed":
 				w.Machine.ExtensionFingerprint = "changed-native-identity"

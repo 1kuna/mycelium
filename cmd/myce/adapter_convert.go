@@ -380,7 +380,11 @@ func validateConvertedEntry(entry map[string]any) error {
 	if err := d.Decode(&converted); err != nil {
 		return err
 	}
-	return validateAdapterEntry(converted)
+	if err := validateAdapterEntry(converted); err != nil {
+		return err
+	}
+	_, _, err = adapterProfile(projectAdapter{Project: "conversion", Entries: map[string]adapterEntry{"converted": converted}}, "converted")
+	return err
 }
 
 // Check every explicit native file reference, collecting missing bytes rather

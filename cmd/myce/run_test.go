@@ -111,6 +111,15 @@ func TestRunQueueOutcomesAndCancellation(t *testing.T) {
 }
 
 func TestRunInstalledPinnedAuthority(t *testing.T) {
+	// An explicit plain command retains installed-command behavior even in a
+	// project with an adapter; --entry/--adapter select appended entry arguments.
+	t.Chdir(t.TempDir())
+	if err := os.Mkdir(".mycelium", 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(".mycelium/adapter.yaml", []byte("not a selected adapter"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("MYCE_TOKEN", "")
 	t.Setenv("MYCE_QUEUE", "")
 	t.Setenv("MYCE_JOINING_FILE", "")

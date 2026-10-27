@@ -189,8 +189,10 @@ check: [python, '{extension}/check.py']
 platform_baselines:
   fake:
     kind:work: {input: input.json, output: fake.json, measure: exact, native: reference, variation: exact bytes}
+    extension:legacy-stage: {input: input.json, output: fake.json, measure: exact, native: direct reference, variation: exact bytes}
   cuda:
     kind:work: {input: input.json, output: cuda.json, measure: exact, native: reference, variation: exact bytes}
+    extension:legacy-stage: {input: input.json, output: cuda.json, measure: exact, native: direct reference, variation: exact bytes}
 outputs: [result.json]
 `
 
@@ -225,6 +227,24 @@ func TestAdapterConvertLegacyRequiresTargetsAndRetainsBaselines(t *testing.T) {
 		if v.Needs.MemoryGB != 1 || v.Needs.HostMemoryGB != 2 || len(v.Setup) != 2 || len(v.Check) != 2 || len(v.Execution.Main.Command) != 2 || v.Baselines["kind:work"].Output != v.Target.Platform+".json" {
 			t.Fatalf("legacy recipe changed: %+v", v)
 		}
+	}
+	if !reflect.DeepEqual(p.Native.Outputs, []string{"result.json"}) {
+		t.Fatal("registered plan lost default output filenames", p.Native.Outputs)
+	}
+	// A kind baseline is not evidence for explicit extension work. Refuse a
+	// direct caller conversion instead of advertising an entry that never runs.
+	lines := strings.Split(conversionLegacy, "\n")
+	var kindOnly []string
+	for _, line := range lines {
+		if !strings.Contains(line, "    extension:legacy-stage:") {
+			kindOnly = append(kindOnly, line)
+		}
+	}
+	conversionWrite(t, "native/extension.yaml", strings.Join(kindOnly, "\n"))
+	out.Reset()
+	report.Reset()
+	if err := adapterCommand(context.Background(), args, &out, &report); err == nil || out.Len() != 0 || !strings.Contains(report.String(), "kind/program-only") {
+		t.Fatalf("kind-only source advertised as direct executable entry: %v %s", err, report.String())
 	}
 }
 

@@ -44,6 +44,11 @@ existing `filename: results` convention; omitted outputs remain omitted.
 Legacy `benchmark` has no equivalent and is refused instead of becoming an
 invented sweep.
 
+Direct native entries require their existing `extension:NAME` baseline on every
+variant. Sources with only kind/program baselines are refused with guidance to
+retain their low-level registry callers; conversion never invents a direct-work
+baseline or relabels evidence from another work type.
+
 Legacy platform-only extensions lack exact OS/architecture. Supply explicit
 alternatives for every platform, for example:
 

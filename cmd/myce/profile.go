@@ -343,6 +343,12 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 			Inputs myce.FileManifest
 			Class  string
 		}{p.Run, p.Check, commonRefs, p.MemoryClass})
+		if p.Execution != nil {
+			s.ProfileMemory = profileHash(struct {
+				Base      string
+				Execution *myce.ExecutionSpec
+			}{s.ProfileMemory, p.Execution})
+		}
 		if p.MemoryClass == "per_item" {
 			s.ProfileMemory = profileHash(struct {
 				Base   string

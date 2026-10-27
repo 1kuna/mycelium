@@ -123,11 +123,17 @@ func decodeAdapter(data []byte) (projectAdapter, error) {
 		if err := validateAdapterEntry(e); err != nil {
 			return a, fmt.Errorf("entry %s: %w", name, err)
 		}
+		if _, _, err := adapterProfile(a, name); err != nil {
+			return a, fmt.Errorf("entry %s: %w", name, err)
+		}
 	}
 	return a, nil
 }
 func validateAdapterEntry(e adapterEntry) error {
 	s := e.Spec
+	if e.Version != "" && !adapterName.MatchString(e.Version) {
+		return errors.New("version must be a native version label of at most 64 characters")
+	}
 	if s.Project != "" || s.SubmissionKey != "" || s.Extension != "" || s.ExtensionDigest != "" || s.ExtensionCheck != nil || s.RequireTarget || len(s.Files) > 0 {
 		return errors.New("project belongs to the header; persisted selectors/files/keys are not author fields")
 	}
@@ -192,9 +198,13 @@ func adapterProfile(a projectAdapter, name string) (executionProfile, []byte, er
 	if reflect.ValueOf(p.Source).IsZero() {
 		p.Source.Git = "HEAD"
 	}
-	native := len(e.Variants) > 0 || len(e.Checks.Qualification) > 0 || len(e.Baselines) > 0 || len(e.Environments) > 0 || len(e.Setup) > 0 || len(e.Kinds)+len(e.ProgramTypes) > 0
+	native := len(e.Variants) > 0 || len(e.Checks.Qualification) > 0 || len(e.Baselines) > 0 || len(e.Environments) > 0 || len(e.Setup) > 0 || len(e.Kinds)+len(e.ProgramTypes)+len(e.Assets)+len(e.References)+len(e.Sweeps) > 0
 	if native {
 		x := myce.Extension{Name: p.Name, Version: e.Version, Purpose: e.Purpose, DefaultClass: p.Class, Resumable: p.Resumable, Kinds: e.Kinds, ProgramTypes: e.ProgramTypes, Assets: e.Assets, Notes: e.Notes}
+		for name := range e.Outputs {
+			x.Outputs = append(x.Outputs, name)
+		}
+		slices.Sort(x.Outputs)
 		if x.Version == "" {
 			x.Version = "1"
 		}
@@ -217,6 +227,9 @@ func adapterProfile(a projectAdapter, name string) (executionProfile, []byte, er
 			}
 		}
 		for _, v := range variants {
+			if _, ok := v.Baselines["extension:"+x.Name]; !ok {
+				return p, nil, fmt.Errorf("direct native entry requires its authored extension:%s baseline; kind/program-only recipes retain their low-level registry callers", x.Name)
+			}
 			execution := v.Execution
 			execution.Main.Command = checkedAdapterCommand(execution.Main.Command, v.Checks.Result)
 			sweeps := map[string]myce.ReferenceSweep{}
@@ -305,7 +318,11 @@ func freezeAdapterExtension(e myce.Extension, archive string) (myce.Extension, e
 	if err != nil {
 		return e, err
 	}
-	e.Version = e.Version + "-" + profileHash(struct {
+	label := e.Version
+	if len(label) > 47 {
+		label = label[:47]
+	}
+	e.Version = label + "-" + profileHash(struct {
 		Recipe string
 		Files  map[string][]byte
 	}{string(b), e.Files})[:16]
@@ -342,9 +359,6 @@ func runAdapter(ctx context.Context, file, entry string, args []string, inputs m
 	abs, err := filepath.Abs(file)
 	if err != nil {
 		return err
-	}
-	if filepath.Base(abs) == "adapter.yaml" && filepath.Base(filepath.Dir(abs)) == ".mycelium" {
-		root = filepath.Dir(filepath.Dir(abs))
 	}
 	data, err := os.ReadFile(abs)
 	if err != nil {

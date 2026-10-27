@@ -1373,6 +1373,7 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 }
 func (q *Queue) complete(r Result, filesVerified bool) error {
 	q.maintainStartDeadlines()
+	q.maintainExtensionQualifications()
 	operatorMatched := q.refundOperatorStop(r)
 	if r.ReleaseOnly {
 		if r.ReleasePending {

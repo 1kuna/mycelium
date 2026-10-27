@@ -14,17 +14,35 @@ import (
 // #253: an already accepted original composed bundle recovers without an
 // authoring reader, a local installation, or a submitter-owned check directory.
 func TestExtensionFirstDemandFrozenRecoveryDev(t *testing.T) {
+	for _, legacy := range []bool{false, true} {
+		name := "composed"
+		if legacy {
+			name = "legacy"
+		}
+		t.Run(name, func(t *testing.T) { extensionFrozenRecoveryDev(t, legacy) })
+	}
+}
+
+func extensionFrozenRecoveryDev(t *testing.T, legacy bool) {
 	root := newTestStateRoot(t)
 	c := DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"),
 		FileStore: filepath.Join(root, "files"), ExtensionRoot: filepath.Join(root, "extensions"), Token: "frozen-recovery-fixture",
 		Workers: 1, MemoryGB: 8, Interval: 10 * time.Millisecond}
 	t.Setenv("MYCE_TOKEN", c.Token)
 	e := compositionExtension(t, false)
-	e.Kinds = nil
-	v := &e.Variants[0]
-	delete(v.Baselines, "kind:sample")
-	v.Setup = []string{"sh", "-ec", "printf prepared > \"$MYCE_EXTENSION_CACHE/prepared\""}
-	v.Execution.Main.Command = []string{"sh", "{extension}/frozen-run.sh"}
+	setup := []string{"sh", "-ec", "printf prepared > \"$MYCE_EXTENSION_CACHE/prepared\""}
+	command := []string{"sh", "{extension}/frozen-run.sh"}
+	if legacy {
+		e = fakeExtension(t)
+		e.ProgramTypes = nil
+		delete(e.Baselines, "program:sample-script")
+		e.Setup, e.Run = setup, command
+	} else {
+		e.Kinds = nil
+		v := &e.Variants[0]
+		delete(v.Baselines, "kind:sample")
+		v.Setup, v.Execution.Main.Command = setup, command
+	}
 	e.Files["frozen-run.sh"] = []byte("test -z \"$MYCE_TOKEN\" || exit 99\nprintf 'frozen-result\\n' > output\n")
 	e = freezeComposition(t, e)
 	originalDescription := bytes.Clone(e.Files["extension.yaml"])
@@ -38,6 +56,9 @@ func TestExtensionFirstDemandFrozenRecoveryDev(t *testing.T) {
 	}
 	s := Spec{Name: "frozen-native", Project: "recovery", SubmissionKey: "accepted-before-worker", Extension: extensionKey(e), ExtensionDigest: e.Digest,
 		Outputs: map[string]string{"output": "results"}}
+	if legacy {
+		s.Extension, s.ExtensionDigest, s.Kind = "", "", "sample"
+	}
 	accepted, err := q.Submit(s)
 	if err != nil {
 		q.Close()
