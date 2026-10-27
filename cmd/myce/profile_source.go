@@ -15,18 +15,16 @@ import (
 	"strconv"
 	"strings"
 
-	"golang.org/x/text/cases"
-	"golang.org/x/text/unicode/norm"
-
 	"mycelium/internal/myce"
 )
 
 type profileSource struct {
-	Paths      []string `json:"paths,omitempty" yaml:"paths,omitempty"`
-	AllowDirty bool     `json:"allow_dirty,omitempty" yaml:"allow_dirty,omitempty"`
-	Git        string   `json:"git,omitempty" yaml:"git,omitempty"`
-	Directory  string   `json:"directory,omitempty" yaml:"directory,omitempty"`
-	Snapshot   string   `json:"snapshot,omitempty" yaml:"snapshot,omitempty"`
+	AdapterFile string   `json:"-" yaml:"-"`
+	Paths       []string `json:"paths,omitempty" yaml:"paths,omitempty"`
+	AllowDirty  bool     `json:"allow_dirty,omitempty" yaml:"allow_dirty,omitempty"`
+	Git         string   `json:"git,omitempty" yaml:"git,omitempty"`
+	Directory   string   `json:"directory,omitempty" yaml:"directory,omitempty"`
+	Snapshot    string   `json:"snapshot,omitempty" yaml:"snapshot,omitempty"`
 }
 
 func profileInputName(name string) bool {
@@ -92,14 +90,17 @@ func freezeProfileSource(ctx context.Context, root string, source profileSource,
 	}
 	var cmd *exec.Cmd
 	var input io.ReadCloser
-	if source.Git != "" && len(source.Paths) > 0 {
+	if source.Git != "" && (len(source.Paths) > 0 || source.AdapterFile != "") {
 		var entries []gitProfileEntry
 		entries, err = scopedGitEntries(ctx, root, source)
 		if err == nil {
-			err = archiveGitEntries(ctx, root, entries, write)
+			err = archiveGitEntries(ctx, root, entries, write, link)
 		}
 	} else if source.Directory != "" {
 		err = walkProfileDirectory(ctx, root, source.Directory, func(name, path string, info os.FileInfo) error {
+			if source.AdapterFile != "" && filepath.Clean(path) == filepath.Clean(filepath.Join(root, source.AdapterFile)) {
+				return nil
+			}
 			f, e := os.Open(path)
 			if e != nil {
 				return e
@@ -174,68 +175,8 @@ func freezeProfileSource(ctx context.Context, root string, source profileSource,
 	return myce.IdentifyFile(dest)
 }
 
-// Every source uses portable, nonreserved names. Symlinks must resolve inside
-// the source, with no entries beneath them, so extraction cannot write elsewhere.
 func checkProfileLinks(names map[string]bool, links map[string]string) error {
-	// Sources can move from a case-sensitive submitter to macOS. Resolve the
-	// same aliases there, including decomposed Unicode, before trusting a path.
-	key := func(name string) string { return norm.NFD.String(cases.Fold().String(name)) }
-	portableNames, portableLinks := map[string]bool{}, map[string]string{}
-	for name := range names {
-		k := key(name)
-		if portableNames[k] || k == ".myce-source.tar" || k == ".myce-inputs" || strings.HasPrefix(k, ".myce-inputs/") {
-			return errors.New("source contains filesystem aliases or reserved names")
-		}
-		portableNames[k] = true
-	}
-	for name, target := range links {
-		portableLinks[key(name)] = key(target)
-	}
-	names, links = portableNames, portableLinks
-	for name := range names {
-		for dir := filepath.Dir(name); dir != "."; dir = filepath.Dir(dir) {
-			if _, ok := links[dir]; ok {
-				return errors.New("source entry " + name + " is beneath a symlink")
-			}
-		}
-	}
-	var resolve func(dir []string, target string, hops *int) ([]string, bool)
-	resolve = func(dir []string, target string, hops *int) ([]string, bool) {
-		path := append([]string(nil), dir...)
-		for _, part := range strings.Split(target, "/") {
-			switch part {
-			case "", ".":
-			case "..":
-				if len(path) == 0 {
-					return nil, false
-				}
-				path = path[:len(path)-1]
-			default:
-				path = append(path, part)
-				if next, ok := links[strings.Join(path, "/")]; ok {
-					// Count every expansion, including siblings. A depth-only
-					// limit permits exponential work and paths the OS cannot open.
-					*hops++
-					if *hops > 40 {
-						return nil, false
-					}
-					var inside bool
-					if path, inside = resolve(path[:len(path)-1], next, hops); !inside {
-						return nil, false
-					}
-				}
-			}
-		}
-		return path, true
-	}
-	for name, target := range links {
-		parts := strings.Split(name, "/")
-		hops := 1
-		if _, inside := resolve(parts[:len(parts)-1], target, &hops); !inside {
-			return errors.New("source symlink " + name + " leaves the source tree")
-		}
-	}
-	return nil
+	return myce.ValidateSourceNames(names, links)
 }
 
 // Resolve and hash in place before allocating staging space. Existing keys
@@ -265,6 +206,9 @@ func identifyProfileSource(ctx context.Context, root string, source profileSourc
 			}
 			command := append([]string{"-C", root, "status", "--porcelain", "--untracked-files=normal", "--"}, paths...)
 			command = append(command, ":(exclude).mycelium/receipts")
+			if source.AdapterFile != "" {
+				command = append(command, ":(exclude,literal)"+source.AdapterFile)
+			}
 			dirty, err := exec.CommandContext(ctx, "git", command...).Output()
 			if err != nil {
 				return source, "", err
@@ -278,7 +222,7 @@ func identifyProfileSource(ctx context.Context, root string, source profileSourc
 		if err != nil {
 			return source, "", err
 		}
-		if len(source.Paths) > 0 {
+		if len(source.Paths) > 0 || source.AdapterFile != "" {
 			source.Paths, err = cleanProfilePaths(source.Paths)
 			if err != nil {
 				return source, "", err
@@ -302,6 +246,9 @@ func identifyProfileSource(ctx context.Context, root string, source profileSourc
 	}
 	files := map[string]entry{}
 	err := walkProfileDirectory(ctx, root, source.Directory, func(name, path string, info os.FileInfo) error {
+		if source.AdapterFile != "" && filepath.Clean(path) == filepath.Clean(filepath.Join(root, source.AdapterFile)) {
+			return nil
+		}
 		ref, err := myce.IdentifyFile(path)
 		if err != nil {
 			return err
@@ -358,6 +305,9 @@ func shellCommand(argv []string) string {
 
 // Literal repo-relative files/directories only, never Git pathspec expressions.
 func cleanProfilePaths(paths []string) ([]string, error) {
+	if paths == nil {
+		return nil, nil
+	}
 	result := make([]string, len(paths))
 	for i, name := range paths {
 		name = strings.TrimSuffix(name, "/")
@@ -391,7 +341,10 @@ func scopedGitEntries(ctx context.Context, root string, source profileSource) ([
 		}
 		header, name, ok := strings.Cut(string(row), "\t")
 		fields := strings.Fields(header)
-		if !ok || len(fields) != 3 || fields[1] != "blob" || (fields[0] != "100644" && fields[0] != "100755") || !profileInputName(name) {
+		if name == source.AdapterFile {
+			continue
+		}
+		if !ok || len(fields) != 3 || fields[1] != "blob" || (fields[0] != "100644" && fields[0] != "100755" && !(source.AdapterFile != "" && fields[0] == "120000")) || !profileInputName(name) {
 			return nil, errors.New("source.paths requires regular files")
 		}
 		entries = append(entries, gitProfileEntry{name, fields[0], fields[2]})
@@ -413,7 +366,7 @@ func scopedGitEntries(ctx context.Context, root string, source profileSource) ([
 
 // Read selected Git blobs directly: archive attributes outside source.paths
 // cannot alter selected bytes, and export-subst cannot inject a whole-tree ID.
-func archiveGitEntries(ctx context.Context, root string, entries []gitProfileEntry, write func(string, int64, int64, io.Reader) error) error {
+func archiveGitEntries(ctx context.Context, root string, entries []gitProfileEntry, write func(string, int64, int64, io.Reader) error, links ...func(string, string) error) error {
 	cmd := exec.CommandContext(ctx, "git", "-C", root, "cat-file", "--batch")
 	in, err := cmd.StdinPipe()
 	if err != nil {
@@ -454,7 +407,16 @@ func archiveGitEntries(ctx context.Context, root string, entries []gitProfileEnt
 			return errors.New("invalid Git blob size")
 		}
 		mode, _ := strconv.ParseInt(entry.Mode, 8, 64)
-		if err = write(entry.Name, mode, size, reader); err != nil {
+		if entry.Mode == "120000" && len(links) > 0 {
+			b, e := io.ReadAll(io.LimitReader(reader, size))
+			if e != nil {
+				return e
+			}
+			err = links[0](entry.Name, string(b))
+		} else {
+			err = write(entry.Name, mode, size, reader)
+		}
+		if err != nil {
 			return err
 		}
 		if newline, err := reader.ReadByte(); err != nil || newline != '\n' {

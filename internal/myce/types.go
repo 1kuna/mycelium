@@ -139,6 +139,9 @@ func (e Environment) Key() string {
 }
 
 type Spec struct {
+	// PrepareSource extracts the validated CLI snapshot before member launch,
+	// then stages explicit inputs over it. It is persisted, never an author field.
+	PrepareSource bool `json:"prepare_source,omitempty" yaml:"-"`
 	// ProfileMemory binds the CLI's base command/check and common input bytes.
 	// Per-item arguments and files remain in the submitted execution spec.
 	ProfileMemory string            `json:"profile_memory,omitempty" yaml:"-"`
@@ -179,6 +182,11 @@ type Spec struct {
 }
 
 func (s Spec) Validate() error {
+	if s.PrepareSource {
+		if _, ok := s.Files[".myce-source.tar"]; !ok {
+			return reject("job_files_invalid", errors.New("prepared source requires a frozen source archive"))
+		}
+	}
 	if s.ProfileMemory != "" && (!profileMemoryWork(s) || (FileRef{SHA256: s.ProfileMemory}).validate() != nil) {
 		return reject("job_profile_invalid", errors.New("profile_memory requires a profile and SHA-256 identity"))
 	}

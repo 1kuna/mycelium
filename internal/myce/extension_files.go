@@ -93,7 +93,31 @@ func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
 		return err
 	}
 	defer os.RemoveAll(staged)
+	if j.Spec.PrepareSource {
+		ref, ok := jobInputFiles(j)[".myce-source.tar"]
+		if !ok {
+			return errors.New("missing frozen source archive")
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		err = w.fileCache.copyTo(ctx, ref, filepath.Join(staged, ".myce-source.tar"))
+		cancel()
+		if err != nil {
+			return err
+		}
+		if err = extractJobSource(filepath.Join(staged, ".myce-source.tar"), staged); err != nil {
+			return err
+		}
+	}
 	for name, ref := range jobInputFiles(j) {
+		if j.Spec.PrepareSource && name == ".myce-source.tar" {
+			continue
+		}
+		if j.Spec.PrepareSource {
+			// Explicit inputs replace source files only after archive extraction.
+			if err := removeSourceInput(staged, name); err != nil {
+				return err
+			}
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		err := w.fileCache.copyTo(ctx, ref, filepath.Join(staged, name))
 		cancel()

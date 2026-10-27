@@ -90,6 +90,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if args[0] == "policy" {
 		return policyCommand(args[1:], os.Stdout)
 	}
+	if args[0] == "adapter" {
+		return adapterCommand(context.Background(), args[1:], os.Stdout, os.Stderr)
+	}
 	if args[0] == "extension" {
 		return extensionCommand(args[1:])
 	}

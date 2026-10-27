@@ -1,0 +1,59 @@
+default: http-stage
+entries:
+    http-stage:
+        class: batch
+        name: http-stage
+        outputs:
+            result.json: results
+        purpose: Wrap an existing CPU app with its existing HTTP service
+        source:
+            directory: examples/extensions/http-stage
+        variants:
+            - baselines:
+                extension:http-stage:
+                    input: input.json
+                    measure: exact
+                    native: CPython standard-library CPU app with its loopback HTTP service
+                    output: output.json
+                    variation: baseline-measurements.json records three identical actual outputs; exact bytes
+              checks:
+                qualification:
+                    - '{env.app.python}'
+                    - '{extension}/check.py'
+              environments:
+                app:
+                    backend: uv
+                    lock_file: requirements.txt
+                    python: "3.11"
+              execution:
+                main:
+                    command:
+                        - '{env.app.python}'
+                        - '{extension}/app.py'
+                        - input.json
+                        - result.json
+                    env:
+                        SERVICE_URL: '{sidecars.service.url}'
+                    environment: app
+                sidecars:
+                    - command:
+                        - '{env.app.python}'
+                        - '{extension}/service.py'
+                        - '{port}'
+                      environment: app
+                      memory_gb: 0.1
+                      name: service
+                      port: 0
+                      readiness:
+                        path: /health
+                        timeout: 5s
+              needs:
+                host_memory_gb: 1
+                memory_gb: 1
+              target:
+                arch: arm64
+                os: darwin
+                platform: fake
+        version: "1"
+project: adapter-example
+schema: 1

@@ -22,9 +22,11 @@ import (
 
 type executionProfile struct {
 	myce.Spec   `yaml:",inline"`
-	Source      profileSource `yaml:"source"`
-	Check       []string      `yaml:"check"`
-	MemoryClass string        `yaml:"memory_class,omitempty"`
+	Source      profileSource   `yaml:"source"`
+	Check       []string        `yaml:"check"`
+	MemoryClass string          `yaml:"memory_class,omitempty"`
+	Adapter     bool            `yaml:"-"`
+	Native      *myce.Extension `yaml:"-"`
 }
 
 type profileReceipt struct {
@@ -164,6 +166,11 @@ func runProfile(ctx context.Context, name string, args []string, itemInputs map[
 	if p.MemoryClass != "" && p.MemoryClass != "per_item" {
 		return waitError(64, "profile_invalid: memory_class must be per_item or omitted")
 	}
+	return runPreparedProfile(ctx, root, p, data, args, itemInputs, key, notify, config, joining, address, token, out, errOut)
+}
+
+func runPreparedProfile(ctx context.Context, root string, p executionProfile, data []byte, args []string, itemInputs map[string]string, key, notify, config, joining, address, token string, out, errOut io.Writer) error {
+	var err error
 	itemRefs := myce.FileManifest{}
 	for dest, local := range itemInputs {
 		if !profileInputName(dest) || local == "" {
@@ -293,7 +300,7 @@ func runProfile(ctx context.Context, name string, args []string, itemInputs map[
 		}
 		s := p.Spec
 		s.SubmissionKey = ""
-		s.RequireTarget = true
+		s.RequireTarget = p.Native == nil
 		s.Files = myce.FileManifest{".myce-source.tar": ref}
 		uploads := map[string]string{".myce-source.tar": "source.tar"}
 		var inputCommands []string
@@ -319,6 +326,17 @@ func runProfile(ctx context.Context, name string, args []string, itemInputs map[
 			s.Files[stored] = inputRef
 			inputCommands = append(inputCommands, "mkdir -p "+shellArg("./"+filepath.Dir(dest))+"; cp "+shellArg("./"+stored)+" "+shellArg("./"+dest))
 		}
+		if p.Native != nil {
+			e, err := freezeAdapterExtension(*p.Native, source)
+			if err != nil {
+				return waitError(64, "adapter_invalid: "+err.Error())
+			}
+			p.Native = &e
+			s.Extension, s.ExtensionDigest = e.Name+"@"+e.Version, e.Digest
+			if err = saveProfileJSON(filepath.Join(stage, "extension.json"), e); err != nil {
+				return err
+			}
+		}
 		s.ProfileMemory = profileHash(struct {
 			Run    myce.RunSpec
 			Check  []string
@@ -337,7 +355,27 @@ func runProfile(ctx context.Context, name string, args []string, itemInputs map[
 		// Extraction is confined by freezeProfileSource's link/path checks. Inputs
 		// are already in the attempt cwd; no checkout or caller environment is copied.
 		slices.Sort(inputCommands)
-		s.Run.Command = []string{"sh", "-ec", "tar -xf .myce-source.tar\n" + strings.Join(inputCommands, "\n") + "\n" + shellCommand(command) + "\n" + shellCommand(p.Check)}
+		if p.Adapter {
+			s.PrepareSource = true
+			// Inputs stage after source extraction and keep their public filenames.
+			for dest := range p.Inputs {
+				stored := ".myce-inputs/" + profileHash(dest)
+				s.Files[dest], uploads[dest] = s.Files[stored], uploads[stored]
+				delete(s.Files, stored)
+				delete(uploads, stored)
+			}
+			if p.Native != nil {
+				s.ProfileMemory = ""
+				s.Args = append(s.Args, args...)
+				s.Run = myce.RunSpec{}
+			} else if s.Execution != nil {
+				s.Execution.Main.Command = checkedAdapterCommand(append(s.Execution.Main.Command, args...), p.Check)
+			} else {
+				s.Run.Command = checkedAdapterCommand(command, p.Check)
+			}
+		} else {
+			s.Run.Command = []string{"sh", "-ec", "tar -xf .myce-source.tar\n" + strings.Join(inputCommands, "\n") + "\n" + shellCommand(command) + "\n" + shellCommand(p.Check)}
+		}
 
 		s.SubmissionKey = key
 		if err = s.Validate(); err != nil {
@@ -396,6 +434,15 @@ func runProfile(ctx context.Context, name string, args []string, itemInputs map[
 		for name, file := range r.Uploads {
 			if err = c.UploadJobInput(ctx, filepath.Join(dir, file), r.Spec.Files[name]); err != nil {
 				return capacityFailure(err)
+			}
+		}
+		if r.Spec.Extension != "" {
+			var e myce.Extension
+			if err = readProfileJSON(filepath.Join(dir, "extension.json"), &e); err != nil {
+				return err
+			}
+			if err = c.Call(ctx, "POST", "/api/extensions", e, nil); err != nil {
+				return profileFailure(out, &r, 69, "queue_unavailable: frozen adapter registration unconfirmed; intent retained")
 			}
 		}
 		j, e := c.Submit(ctx, r.Spec)
