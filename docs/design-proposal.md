@@ -558,13 +558,19 @@ preparation code or standalone model servers.
 Implementation and native qualification are separate; this text records the
 contract, not a completed rollout.
 
-Every native attempt gets a managed `{work}` and `.tmp` beneath it. The worker
-overrides `TMPDIR`, `TMP` and `TEMP` after authored environment/activation. Native
+Every native attempt gets a managed `{work}`, `.tmp` and `.scratch` beneath it.
+The worker overrides `TMPDIR`, `TMP`, `TEMP` and `MYCE_SCRATCH_DIR` after authored
+environment/activation; main and its own sidecars share these exact paths. Native
 workdirs must resolve inside `{work}`; stage source and data through inputs or
 the frozen extension, rather than executing from an arbitrary host checkout.
 Extension source is copied privately under `{work}/.myce-extension`.
-Prepared environments, shared extension caches and operator-configured model
-cache/store roots permit payload reads and execution, not content writes.
+Prepared environments and shared extension caches permit payload reads and
+execution, not content writes. Operator-configured model/cache roots permit
+reads without content writes or direct execution. Narrow operator declarations
+can add read-only model roots or read/execute runtime roots, refusing filesystem,
+home, NAS and installed Mycelium roots and protected-content overlaps. Linux
+exposes only the current and trusted attempt-member cgroup memory metrics,
+without ancestor/sibling cgroup contents or cgroup control writes.
 NAS inputs and outputs retain their declared worker staging/publication
 contract; only the attempt's exact checkpoint directory is writable in place.
 Neither a mounted NAS nor an authored environment path grants the payload the

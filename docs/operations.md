@@ -652,7 +652,11 @@ Stage source/data into the managed `{work}` through inputs or a frozen
 extension. Native workdirs must resolve beneath `{work}`. Extension source gets
 a private copy; prepared environment/extension caches permit reads/execution,
 not content writes. The worker overrides `TMPDIR`, `TMP` and `TEMP` to
-`{work}/.tmp` after authored env/activation. #219's environment allowlist and
+`{work}/.tmp` and `MYCE_SCRATCH_DIR` to `{work}/.scratch` after authored
+env/activation. Main and its own sidecars share both paths. Repeatable
+`--native-read-root` and `--native-exec-root` worker/install settings add narrow
+read-only model roots or read/execute runtime roots; filesystem, home, NAS and
+installed Mycelium roots and protected-content overlaps are refused. #219's environment allowlist and
 credential filtering remain in effect. Linux fallback does not protect all
 metadata operations, including `chmod`; macOS protects targeted spool and
 credential contents while unrelated host metadata/files remain visible.

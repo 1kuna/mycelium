@@ -139,6 +139,9 @@ type ServiceConfig struct {
 	AllowDeviceless       bool    `json:"allow_deviceless"`
 	Device                string  `json:"device"`
 
+	NativeReadRoots    []string `json:"native_read_roots"`
+	NativeExecuteRoots []string `json:"native_execute_roots"`
+
 	Path                  string    `json:"path"`
 	EnvironmentRoot       string    `json:"environment_root"`
 	Role                  string    `json:"role"`
@@ -749,6 +752,12 @@ func (c ServiceConfig) Args() []string {
 	}
 	if c.Role == "worker" {
 		args = append(args, "--daily-use="+strconv.FormatBool(c.DailyUse), "--laptop="+strconv.FormatBool(c.Laptop), "--desktop="+strconv.FormatBool(c.Desktop))
+		for _, root := range c.NativeReadRoots {
+			args = append(args, "--native-read-root", root)
+		}
+		for _, root := range c.NativeExecuteRoots {
+			args = append(args, "--native-exec-root", root)
+		}
 		if len(c.MachineDevices) > 0 {
 			data, _ := json.Marshal(c.MachineDevices)
 			args = append(args, "--device-settings", string(data))

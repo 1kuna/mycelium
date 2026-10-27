@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -155,7 +156,12 @@ func nativeStart(t *testing.T, spec Spec, platform string, catalogs ...Environme
 		t.Fatal(err)
 	}
 	store.state.Session = m.Session
-	p, err := w.start(store, *reply.Job)
+	var p *process
+	// Reuse the pending input copy before exercising the native lifecycle.
+	await(t, func() bool {
+		p, err = w.start(store, *reply.Job)
+		return !errors.Is(err, errWorkerCheckpoint) || !strings.Contains(err.Error(), "input copy pending")
+	})
 	if err != nil {
 		store.close()
 		server.Close()

@@ -88,10 +88,14 @@ type Worker struct {
 	environmentCache      *EnvironmentCache
 	environmentRun        func(context.Context, []string, string, []string, io.Writer, io.Writer) error
 	// Test seams for deterministic filesystem faults and audited fake engines.
-	beforeModelCopy             func(context.Context)
-	modelEngine                 func(Model) Engine
-	CopyParallel                int
-	CacheRoot, ModelRoot        string
+	beforeModelCopy      func(context.Context)
+	modelEngine          func(Model) Engine
+	CopyParallel         int
+	CacheRoot, ModelRoot string
+	// Operator-owned local runtime/model grants; never derived from run.env.
+	NativeReadRoots             []string
+	NativeExecuteRoots          []string
+	nativeMetricCgroups         []string // Trusted attempt-member cgroups only.
 	CacheLimit                  int64
 	SecretRoot                  string
 	ModelApprovalRoot           string
@@ -560,6 +564,11 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (*proce
 		return nil, err
 	}
 	env["TMPDIR"], env["TMP"], env["TEMP"] = tmp, tmp, tmp
+	scratch := filepath.Join(executionWork, ".scratch")
+	if err := os.MkdirAll(scratch, 0700); err != nil {
+		return nil, err
+	}
+	env["MYCE_SCRATCH_DIR"] = scratch
 	if len(j.Spec.Run.Sidecars) > 0 || j.Spec.Run.MemoryGB > 0 {
 		p, e := w.startNativeGroup(s, j, identity, memoryAttempt, env, environmentPath, extensionRelease, release)
 		if e == nil {

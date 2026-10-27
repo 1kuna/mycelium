@@ -60,6 +60,20 @@ type nativeGroup struct {
 	supervisor             *exec.Cmd
 }
 
+// Only this attempt's payload leaves are shared for metrics. The aggregate
+// parent and the supervisor/control leaf never become payload read grants.
+func (g *nativeGroup) metricWorker() Worker {
+	w := g.worker
+	w.nativeMetricCgroups = nil
+	for _, memory := range g.memberMemory {
+		if memory != nil {
+			w.nativeMetricCgroups = append(w.nativeMetricCgroups, memory.path)
+		}
+	}
+	slices.Sort(w.nativeMetricCgroups)
+	return w
+}
+
 func (g *nativeGroup) started() bool {
 	g.p.mu.Lock()
 	defer g.p.mu.Unlock()
@@ -609,11 +623,12 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 	work := filepath.Join(g.dir, "job-files", g.p.job.ID, strconv.Itoa(g.p.job.Attempt))
 	env["TMPDIR"] = filepath.Join(work, ".tmp")
 	env["TMP"], env["TEMP"] = env["TMPDIR"], env["TMPDIR"]
+	env["MYCE_SCRATCH_DIR"] = filepath.Join(work, ".scratch")
 	if m.memory != nil {
 		env["MYCE_MEMORY_LIMIT_BYTES"] = strconv.FormatInt(m.memory.bytes, 10)
 	}
 	cmd.Env = environmentList(env)
-	if err := g.namespace.isolate(g.worker, cmd, g.dir, work, env, g.isolationPorts, g.p.job.Spec.Needs.Network, m.Name == "main"); err != nil {
+	if err := g.namespace.isolate(g.metricWorker(), cmd, g.dir, work, env, g.isolationPorts, g.p.job.Spec.Needs.Network, m.Name == "main"); err != nil {
 		return err
 	}
 	cmd.Stdout = output

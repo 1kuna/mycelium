@@ -58,6 +58,16 @@ func (w Worker) isolateNativeCommand(cmd *exec.Cmd, spool, work string, env map[
 	if err := w.validateNativeReadGrants([]string{modelCache, w.ModelRoot}, spool); err != nil {
 		return err
 	}
+	declaredRead, declaredExecute, err := w.nativeDeclaredRoots(spool)
+	if err != nil {
+		return err
+	}
+	read = append(read, declaredRead...)
+	read = append(read, declaredExecute...)
+	readOnly := append([]string{modelCache, w.ModelRoot}, declaredRead...)
+	if err := nativeReadOnlyOverlap(readOnly, append(slices.Clone(write), declaredExecute...)); err != nil {
+		return err
+	}
 	for _, path := range []string{filepath.Join(spool, "environment-cache"), w.EnvironmentRoot, w.ExtensionRoot, modelCache, w.ModelRoot} {
 		if path != "" {
 			read = append(read, canonical(path))
@@ -117,6 +127,13 @@ func (w Worker) isolateNativeCommand(cmd *exec.Cmd, spool, work string, env map[
 	for _, path := range append([]string{home, "/System", "/usr", "/bin", "/sbin", "/Library", "/opt", "/Applications"}, read...) {
 		if path != "" {
 			fmt.Fprintf(&profile, "(deny file-write* (require-all (subpath %s) %s))\n", strconv.Quote(canonical(path)), except(write))
+		}
+	}
+	// Model data remains readable by interpreters/loaders, but cannot become
+	// a directly executed program through an overlapping default allow rule.
+	for _, path := range readOnly {
+		if path != "" {
+			fmt.Fprintf(&profile, "(deny process-exec (subpath %s))\n", strconv.Quote(canonical(path)))
 		}
 	}
 	// Protect an executable in a nonstandard installation outside the home too.

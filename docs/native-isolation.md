@@ -16,9 +16,9 @@ but provides no boundary between jobs running as the same user.
 
 | Platform/mode | Directory and files | Temp | Environment | Control access | Network |
 | --- | --- | --- | --- | --- | --- |
-| Linux namespaces | User/mount/PID/IPC isolation; read-only host-root view plus Landlock content grants. Sibling contents denied; host metadata can remain visible. | Managed `{work}/.tmp`; private `/tmp` and `/dev/shm` shared within the attempt. | #219 allowlist; worker overrides temp and attempt/device controls; no ambient agent/session or fleet credentials. | Private PID/network namespaces plus seccomp/Landlock deny host process, control-file and socket access. | Private network namespace, shared by the attempt's sidecars; reserved TCP loopback only. No qualified outbound transport; no `native_network`. |
-| Linux Landlock/seccomp fallback | Content reads/execution limited to runtime/cache/attempt grants; writes limited to attempt/checkpoint/usage grants. **Metadata is not isolated**, including permission changes. No private mount/PID view. | Managed `{work}/.tmp`; sibling temp contents denied. Host `/tmp` is not replaced. | Same allowlist and overrides. | Denies other processes' sensitive procfs contents, tracing/memory access and external signals; denies Unix stream/datagram endpoints and non-reserved TCP ports. **same-UID pathname SEQPACKET endpoints reachable (partial)**. Foreign abstract endpoints remain scoped. | **Partial network isolation**: exact reserved sidecar TCP ports permit connect/bind on any address, including off-host. All other TCP ports denied; no general outbound capability. |
-| macOS Seatbelt | Targeted denial of same-spool sibling contents/writes, configured worker storage and standard credential roots. Prepared caches allow reads/execution, not writes. Metadata and unrelated host files can remain visible. | Managed `{work}/.tmp` protected with the spool; no private system `/tmp` namespace. | Same allowlist and overrides. | Denies Unix endpoint connections, protected credential contents, cross-job process access and unwanted Mach services; retains Metal services. | Default outbound: reserved sidecar TCP loopback only. With `needs.network: true`: general outbound except other loopback endpoints and the queue's TCP port at all addresses. |
+| Linux namespaces | User/mount/PID/IPC isolation; read-only host-root view plus Landlock content grants. Sibling contents denied; host metadata can remain visible. | Managed `{work}/.tmp` and shared `.scratch`; private `/tmp` and `/dev/shm` shared within the attempt. | #219 allowlist; worker overrides temp and attempt/device controls; no ambient agent/session or fleet credentials. | Private PID/network namespaces plus seccomp/Landlock deny host process, control-file and socket access. | Private network namespace, shared by the attempt's sidecars; reserved TCP loopback only. No qualified outbound transport; no `native_network`. |
+| Linux Landlock/seccomp fallback | Content reads/execution limited to runtime/cache/attempt grants; writes limited to attempt/checkpoint/usage grants. **Metadata is not isolated**, including permission changes. No private mount/PID view. | Managed `{work}/.tmp` and shared `.scratch`; sibling contents denied. Host `/tmp` is not replaced. | Same allowlist and overrides. | Denies other processes' sensitive procfs contents, tracing/memory access and external signals; denies Unix stream/datagram endpoints and non-reserved TCP ports. **same-UID pathname SEQPACKET endpoints reachable (partial)**. Foreign abstract endpoints remain scoped. | **Partial network isolation**: exact reserved sidecar TCP ports permit connect/bind on any address, including off-host. All other TCP ports denied; no general outbound capability. |
+| macOS Seatbelt | Targeted denial of same-spool sibling contents/writes, configured worker storage and standard credential roots. Prepared caches allow reads/execution, not writes. Metadata and unrelated host files can remain visible. | Managed `{work}/.tmp` and shared `.scratch` protected with the spool; no private system `/tmp` namespace. | Same allowlist and overrides. | Denies Unix endpoint connections, protected credential contents, cross-job process access and unwanted Mach services; retains Metal services. | Default outbound: reserved sidecar TCP loopback only. With `needs.network: true`: general outbound except other loopback endpoints and the queue's TCP port at all addresses. |
 | Missing/unsupported confinement | Required behavior: native launch fails closed. | No unconfined payload launch permitted. | An allowlist alone is insufficient. | No implied protection. | No inferred online capability. |
 
 The boundary protects against confined jobs. Same-user **unsandboxed host
@@ -51,7 +51,33 @@ protected-storage overlap validation to these roots as other runtime grants.
 Use prepared model-file paths and libraries' offline/read-only cache options;
 place mutable indexes, lock files and generated caches in attempt scratch.
 The current job's checkpoint and usage paths receive specific write
-grants. Work and temp follow existing attempt retention and cleanup custody.
+grants. Work, temp and scratch follow existing attempt retention and cleanup custody.
+
+Operators can declare additional local roots with repeatable worker/install
+flags, for example:
+
+```sh
+--native-exec-root "$HOME/local-runtime/llama/bin" \
+--native-read-root "$HOME/local-models"
+```
+
+`--native-read-root` permits content reads without writes or direct program
+execution; `--native-exec-root` also permits execution. Interpreters can read
+model-tree Python sources; libraries can be mapped by an allowed runtime.
+These are trusted operator settings, saved in worker configuration, not
+permissions granted by authored `run.env`. Declare literal absolute paths;
+recursive directory grants need no glob. Filesystem, home, NAS and installed
+Mycelium roots are refused, as are private-storage overlaps and conflicting
+read-only versus executable/writable grants. A narrow model subtree on mounted
+storage is permitted. Shared roots must contain no secrets or host controls.
+
+Linux grants `/proc/self/cgroup`, `/proc/meminfo`, and exact
+`memory.peak`, `memory.max`, `memory.events`, `memory.current`, `memory.stat`
+files for the process's current cgroup and its trusted attempt members. It does
+not grant ancestor/sibling cgroup contents or cgroup control writes. Without
+per-member ceilings, members can inherit the same outer cgroup; these readings
+then describe that inherited group, not independent member usage. GPU runtime
+sysfs discovery remains separate from cgroup access.
 
 NAS access uses the existing declarations: `inputs` names relative to
 `--job-file-root` are copied into `{work}` before execution, and declared
@@ -69,7 +95,10 @@ boundary; being offline does not authorize host Unix endpoints. No claim of
 LibreOffice or GPU compatibility follows solely from the filesystem grants.
 
 After `run.env` and environment activation, the worker sets `TMPDIR`, `TMP` and
-`TEMP` to `{work}/.tmp` for main and helpers. These values cannot redirect temp to
+`TEMP` to `{work}/.tmp` and `MYCE_SCRATCH_DIR` to `{work}/.scratch` for main and
+helpers. Both directories have identical absolute paths within an attempt, so a
+main process can pass a scratch filename to its own sidecar. Other attempts
+cannot read their contents. Authored values cannot redirect either directory to
 a sibling or host directory. They do not claim that programs cannot discover
 other host metadata or that macOS's unrelated system temp contents are hidden.
 
