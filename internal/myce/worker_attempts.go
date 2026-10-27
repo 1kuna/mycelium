@@ -236,6 +236,20 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				err = w.Client.Call(ctx, "POST", "/api/workers/complete", s.state.Result, nil)
 			}
 			if s.state.Result != nil && (err == nil || stale(err)) && !s.state.Result.ReleasePending {
+				if err == nil {
+					published, e := w.publishedAttemptFiles(ctx, s.state)
+					if e != nil {
+						s.fileError = "result confirmation pending; local files retained"
+						// Keep custody and replay until the queue can confirm the result.
+						select {
+						case <-ctx.Done():
+						case <-a.wake:
+						case <-tick.C:
+						}
+						continue
+					}
+					s.state.PublishedAttempt = published
+				}
 				if a.job.Spec.Run.Docker {
 					if e := acknowledgeDocker(s, w.Machine.ID, now); e != nil {
 						finish(e)
@@ -581,6 +595,9 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				if err = persistIndex(); err != nil {
 					return err
 				}
+				// Use the existing serialized collector immediately after release;
+				// bulk deletion never blocks a command actor or machine heartbeat.
+				requestRetention("", now)
 				retry = workerRetry{}
 				continue
 			}
