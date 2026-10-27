@@ -2,8 +2,10 @@ package myce
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -45,7 +47,12 @@ func TestSharedInputsRemainProtectedUntilCleanupRetrySucceeds(t *testing.T) {
 			if grouped {
 				j.Spec.Run.MemoryGB = 1
 			}
-			p, err := w.start(store, j)
+			var p *process
+			// Reuse pending input preparation before exercising cleanup custody.
+			await(t, func() bool {
+				p, err = w.start(store, j)
+				return !errors.Is(err, errWorkerCheckpoint) || !strings.Contains(err.Error(), "input copy pending")
+			})
 			if err != nil {
 				t.Fatal(err)
 			}
