@@ -63,10 +63,6 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 		return errors.New("choose profile or adapter")
 	}
 	useAdapter := *adapter != "" || *entry != "" || f.NArg() == 0
-	if !useAdapter && *profile == "" {
-		_, err := os.Stat(filepath.Join(".mycelium", "adapter.yaml"))
-		useAdapter = err == nil
-	}
 	if *profile == "" && useAdapter {
 		return runAdapter(ctx, *adapter, *entry, f.Args(), itemInputs, *key, *notify, *config, *joining, *address, *token, out, errOut)
 	}

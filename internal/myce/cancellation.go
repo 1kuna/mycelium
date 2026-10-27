@@ -52,6 +52,7 @@ func (q *Queue) CancelJob(id string) (Cancellation, error) {
 		}
 		if j := q.retainedJob(id); j != nil {
 			q.cancelJob(j)
+			q.maintainExtensionQualifications()
 			out = q.cancellation(j, q.s.Jobs[id] == nil)
 			return nil
 		}
@@ -103,6 +104,7 @@ func (q *Queue) CancelSubmission(project, key string) (Cancellation, error) {
 			return errors.New("submission binding has no retained job")
 		}
 		q.cancelJob(j)
+		q.maintainExtensionQualifications()
 		out = q.cancellation(j, removed)
 		return nil
 	})

@@ -2,7 +2,9 @@
 
 `.mycelium/adapter.yaml` describes named entries in strict YAML. `myce run`
 selects its `default`; `myce run --entry NAME` selects another entry.
-`--adapter FILE` explicitly selects a file. Arguments after `--` append literally.
+`--adapter FILE` explicitly selects a file. Arguments after `--` append literally
+when `--entry` or `--adapter` selects the entry. Plain `myce run -- CMD` retains
+its installed-command behavior, including in a project containing an adapter.
 
 ```yaml
 schema: 1
@@ -25,8 +27,8 @@ Git `HEAD`, class to `experiment`, and resumability to false. The authored
 adapter is frozen separately, so its uncommitted edits are allowed; other selected
 Git source must be clean. An unrelated entry edit does not change selected intent
 or source identity. Directory/snapshot sources retain the existing safety rules.
-Relative source and input paths resolve from the project root for the conventional
-file, or from the invocation root for an explicitly selected file elsewhere.
+Relative source and input paths resolve from the invocation root; invoke the
+conventional file from its project root.
 
 `run` and composed `execution` are alternatives. Existing resource, allowlist,
 I/O, diagnostic and fan-out contracts still apply. `checks.result` runs after the

@@ -1,10 +1,14 @@
 package main
 
 import (
+	"archive/tar"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -50,6 +54,9 @@ func TestAdapterStrictSelectedEntryAndLiteralArgs(t *testing.T) {
 		t.Fatal("unrelated entry changed selected intent")
 	}
 	cases := []string{
+		strings.Replace(data, "    checks:", "    assets: {model.bin: {sha256: "+strings.Repeat("a", 64)+", size_bytes: 4}}\n    checks:", 1),
+		strings.Replace(data, "    checks:", "    references: {extension:work: {input_shape: fixture, unit: item, units: 1}}\n    checks:", 1),
+		strings.Replace(data, "    checks:", "    sweeps: {extension:work: {run: [echo, fixture]}}\n    checks:", 1),
 		strings.Replace(data, "schema: 1", "schema: 2", 1),
 		strings.Replace(data, "    checks:", "    unknown: value\n    checks:", 1),
 		strings.Replace(data, "    checks:", "    environment: {name: tools, lock_file: requirements.txt}\n    checks:", 1),
@@ -173,6 +180,11 @@ func TestAdapterSourceExcludesOtherEntries(t *testing.T) {
 	if err := os.WriteFile(adapter, []byte("first authored entries"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	for name, value := range map[string]string{".gitattributes": "omitted export-ignore\n", "omitted": "excluded source bytes"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(value), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	git("init", "--quiet")
 	git("add", ".")
 	git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "--quiet", "-m", "fixture")
@@ -183,6 +195,32 @@ func TestAdapterSourceExcludesOtherEntries(t *testing.T) {
 	}
 	first, err := freezeProfileSource(ctx, root, one, filepath.Join(t.TempDir(), "source.tar"))
 	if err != nil {
+		t.Fatal(err)
+	}
+	// Unscoped adapter sources retain git archive export-ignore behavior while
+	// excluding only the instruction file; selected-path sources use raw blobs.
+	checkArchive := filepath.Join(t.TempDir(), "export.tar")
+	if _, err := freezeProfileSource(ctx, root, one, checkArchive); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(checkArchive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := tar.NewReader(f)
+	for {
+		h, e := tr.Next()
+		if e == io.EOF {
+			break
+		}
+		if e != nil {
+			t.Fatal(e)
+		}
+		if h.Name == "omitted" || h.Name == ".mycelium/adapter.yaml" {
+			t.Fatal("excluded source was transferred", h.Name)
+		}
+	}
+	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if err = os.WriteFile(adapter, []byte("unrelated entry edit"), 0600); err != nil {
@@ -218,7 +256,8 @@ func TestAdapterDevNativeColdAndWarmQualification(t *testing.T) {
 		}
 	}
 	a := projectAdapter{Schema: 1, Project: "native-fixture", Default: "native-fixture", Entries: map[string]adapterEntry{"native-fixture": {
-		Source: profileSource{Directory: source}, Spec: myce.Spec{Outputs: map[string]string{"result": "results"}},
+		Version: strings.Repeat("v", 64),
+		Source:  profileSource{Directory: source}, Spec: myce.Spec{Outputs: map[string]string{"result": "results"}},
 		Variants: []adapterVariant{{Target: myce.ExecutionTarget{OS: runtime.GOOS, Arch: runtime.GOARCH, Platform: "fake"}, Needs: myce.ResourceNeeds{MemoryGB: 0.25, HostMemoryGB: 0.25}, Execution: myce.ExecutionSpec{Main: myce.ExecutionMember{Command: []string{"sh", "{extension}/run.sh"}}}, Checks: adapterChecks{Result: []string{"test", "-s", "result"}, Qualification: []string{"sh", "{extension}/check.sh"}}, Baselines: map[string]myce.ExtensionBaseline{"extension:native-fixture": {Input: "input", Output: "native", Measure: "exact", Native: "fixture shell copy", Variation: "exact deterministic bytes"}}}},
 	}}}
 	data, err := yaml.Marshal(a)
@@ -313,5 +352,39 @@ func TestAdapterDevNativeColdAndWarmQualification(t *testing.T) {
 		if !found {
 			t.Fatal("useful result has no exact native qualification")
 		}
+	}
+}
+
+// Saved auto-memory identity must distinguish materially different composed
+// commands and member environments while old plain-profile identity stays stable.
+func TestAdapterComposedMemoryIdentity(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	if err := os.Mkdir(source, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "input"), []byte("fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusServiceUnavailable) }))
+	defer server.Close()
+	base := executionProfile{Adapter: true, Source: profileSource{Directory: source}, Spec: myce.Spec{Name: "composed", Project: "fixture", Class: "test", Needs: myce.ResourceNeeds{CPUCores: 1, Memory: "auto", Platform: myce.Platform{Required: []string{"cpu"}}}, Targets: []myce.ExecutionTarget{{OS: runtime.GOOS, Arch: runtime.GOARCH, Platform: "cpu"}}}}
+	var previous string
+	for i, member := range []myce.ExecutionMember{{Command: []string{"echo", "first"}}, {Command: []string{"echo", "second"}}, {Command: []string{"echo", "second"}, Env: map[string]string{"MODE": "other"}}} {
+		p := base
+		p.Execution = &myce.ExecutionSpec{Main: member}
+		var out bytes.Buffer
+		err := runPreparedProfile(context.Background(), root, p, []byte(fmt.Sprint(i)), nil, nil, fmt.Sprint(i), "", "", "", server.URL, "fixture-token", &out, &out)
+		if exitCode(err) != 69 {
+			t.Fatalf("expected unavailable queue with saved intent: %v %s", err, out.String())
+		}
+		var r profileReceipt
+		if err := json.Unmarshal(out.Bytes(), &r); err != nil {
+			t.Fatal(err)
+		}
+		if r.Spec.ProfileMemory == "" || r.Spec.ProfileMemory == previous {
+			t.Fatal("changed composed command/environment reused memory identity")
+		}
+		previous = r.Spec.ProfileMemory
 	}
 }

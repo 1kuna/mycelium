@@ -90,7 +90,7 @@ func freezeProfileSource(ctx context.Context, root string, source profileSource,
 	}
 	var cmd *exec.Cmd
 	var input io.ReadCloser
-	if source.Git != "" && (len(source.Paths) > 0 || source.AdapterFile != "") {
+	if source.Git != "" && len(source.Paths) > 0 {
 		var entries []gitProfileEntry
 		entries, err = scopedGitEntries(ctx, root, source)
 		if err == nil {
@@ -140,6 +140,9 @@ func freezeProfileSource(ctx context.Context, root string, source profileSource,
 					break
 				}
 				if h.Typeflag == tar.TypeDir || h.Typeflag == tar.TypeXGlobalHeader {
+					continue
+				}
+				if source.AdapterFile != "" && strings.TrimPrefix(h.Name, "./") == source.AdapterFile {
 					continue
 				}
 				if h.Typeflag == tar.TypeSymlink {
