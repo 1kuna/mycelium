@@ -156,18 +156,25 @@ func TestAttemptProtocolRecoveryAdmissionSession(t *testing.T) {
 			t.Run(state+"/stale-session="+stringBool(stale), func(t *testing.T) {
 				q, clock := fixture(t)
 				m := machine("recovery-session", "fake")
+				m.Devices = m3Machine().Devices
 				check(t, q, m, nil)
 				returning := submit(t, q, spec("experiment"))
 				other := submit(t, q, spec("experiment"))
 				if err := q.update(func() error {
 					j := q.s.Jobs[returning.ID]
 					j.Attempt, j.Starts = 1, 1
-					j.Copies = []Copy{{Attempt: 1, Machine: m.ID, Session: m.Session, Recoverable: true}}
+					j.Copies = []Copy{{Attempt: 1, Machine: m.ID, Session: m.Session, Recoverable: true, AllocatedDevices: []string{"0"}}}
+					q.retainRelease(&Job{ID: j.ID, Spec: j.Spec, Machine: m.ID, Session: m.Session, Attempt: 1, AllocatedDevices: []string{"0"}})
 					blocker := q.s.Jobs[other.ID]
 					blocker.State, blocker.Attempt, blocker.Starts = state, 1, 1
 					blocker.Machine, blocker.Session = m.ID, m.Session
+					blocker.AllocatedDevices = []string{"0"}
 					if stale {
 						blocker.Session = "stale-session"
+						// #180 forbids legacy same-device recovery despite a stale session.
+						// Exercise session admission plus distinct-resource recovery while
+						// the old blocker still owns its device and release obligation.
+						blocker.AllocatedDevices = []string{"1"}
 					}
 					if state == "stopping" {
 						stopAt := clock.Now().Add(StopGrace)

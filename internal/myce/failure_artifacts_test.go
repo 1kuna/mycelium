@@ -161,7 +161,8 @@ func TestFailureArtifactsFenceRetentionAndVerification(t *testing.T) {
 	if err = q.update(func() error { q.requeue(q.s.Jobs[first.ID], "retry", false); return nil }); err != nil {
 		t.Fatal(err)
 	}
-	second := check(t, q, m, nil).Job
+	// The first copy still owns its legacy GPU slot while the retry runs.
+	second := check(t, q, machine("retry-worker", "fake"), nil).Job
 	if second == nil || second.Attempt == first.Attempt {
 		t.Fatal("missing retry")
 	}
