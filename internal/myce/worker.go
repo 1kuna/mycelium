@@ -32,6 +32,10 @@ type Worker struct {
 	Enrollment           bool
 	DeviceSettings       []DeviceInstall
 
+	// Set only by the installed-service command path, never ordinary join.
+	ServiceConfig *ServiceConfig
+	fleet         *workerFleetRuntime
+
 	DeviceFaultSource       DeviceFaultSource
 	DeviceFaultMatchers     map[string]DeviceFaultMatcher
 	faults                  *deviceQuarantine
@@ -921,6 +925,7 @@ func (w Worker) Run(stop context.Context) error {
 	if err = w.prepareEnrollment(stop, s); err != nil {
 		return err
 	}
+	w.fleet = w.newFleetRuntime()
 	// Startup may rotate an idle session after exact orphan recovery. The first
 	// queue checkin binds the recovered session before admission.
 	if w.ModelConfig.Idle <= 0 {
