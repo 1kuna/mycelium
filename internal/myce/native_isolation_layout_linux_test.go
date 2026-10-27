@@ -56,7 +56,7 @@ func TestNativeIsolationModelRoots(t *testing.T) {
 			t.Fatal(err)
 		}
 		for _, path := range []string{cache, w.ModelRoot} {
-			if !slices.Contains(policy.Read, path) || slices.Contains(policy.Write, path) {
+			if !slices.Contains(policy.ReadOnly, path) || slices.Contains(policy.Read, path) || slices.Contains(policy.Write, path) {
 				t.Fatal("operator model root lacks read-only content access", path)
 			}
 		}

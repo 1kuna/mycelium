@@ -349,7 +349,7 @@ func nativeBwrapPolicyArgs(p nativeLinuxPolicy) []string {
 	// The private /tmp must not hide an exact helper binary or a configured
 	// prepared environment beneath /tmp (including go test's build directory).
 	// Restore only trusted read grants, then put private write overlays on top.
-	for _, path := range p.Read {
+	for _, path := range append(slices.Clone(p.Read), p.ReadOnly...) {
 		canonical, err := nativeCanonical(path)
 		if err == nil && strings.HasPrefix(canonical, "/tmp/") {
 			args = append(args, "--ro-bind", canonical, canonical)
