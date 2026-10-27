@@ -25,6 +25,7 @@ type ExtensionReport struct {
 	EnvironmentIdentity string           `json:"environment_identity,omitempty"`
 	CheckDigest         string           `json:"check_digest,omitempty"`
 	CheckID             string           `json:"check_id,omitempty"`
+	CheckState          string           `json:"check_state,omitempty"`
 	Target              *ExecutionTarget `json:"target,omitempty"`
 	Name                string           `json:"name"`
 	Version             string           `json:"version"`

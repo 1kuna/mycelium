@@ -17,6 +17,9 @@ import (
 type ExtensionCheckRequest struct {
 	Work      string `json:"work" yaml:"work"`
 	Directory string `json:"directory" yaml:"directory"`
+	// Automatic binds a worker-requested check to its prepared native identity.
+	// Manual checks keep their existing request and report contract.
+	Automatic *ExtensionReport `json:"automatic,omitempty" yaml:"automatic,omitempty"`
 }
 
 // CheckExtension checks a frozen local variant on this host. Host is the local

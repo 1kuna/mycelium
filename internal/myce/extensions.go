@@ -380,6 +380,9 @@ func qualifiedExtension(j *Job, m *Machine) *Extension {
 		// Only the frozen check command may run before qualification. Its
 		// preparation still crosses E2's ordinary launch/custody boundary.
 		if j.Spec.ExtensionCheck != nil && slices.Contains(extensionWorks(*e), j.Spec.workType()) {
+			if r := automaticExtensionCheck(j); r != nil && !matchingExtensionReport(*e, m, *r) {
+				continue
+			}
 			return e
 		}
 		for _, r := range m.ExtensionReports {

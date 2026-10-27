@@ -533,6 +533,7 @@ func firstDevice(j Job, m Machine) string {
 func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*workerStore, rt *modelRuntime, environments *environmentRuntime, rawMemory MemorySource, requestRetention func(string, time.Time)) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	var qualification checkpointIO[bool]
 	events := make(chan WorkerEvent, 16)
 	w.control = &processControl{clock: w.Clock, wake: make(chan struct{}, 1), availability: w.availability}
 	controlDone := make(chan struct{})
@@ -838,6 +839,15 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 					w.Machine.HostMemoryBudgetGB = reply.HostMemoryBudget.GiB
 				}
 				fresh = false
+				qualificationWorker := w
+				qualificationPlans := slices.Clone(reply.ExtensionQualificationPlan)
+				_, _ = qualification.run("extension-qualification", func() (bool, error) {
+					var errs []error
+					for _, plan := range qualificationPlans {
+						errs = append(errs, qualificationWorker.reconcileExtensionQualification(ctx, plan))
+					}
+					return true, errors.Join(errs...)
+				})
 				root.state.Fresh = false
 				if reply.FileCheckpoints {
 					if w.CheckpointRoot != "" {

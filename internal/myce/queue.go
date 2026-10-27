@@ -614,6 +614,9 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		if e != nil {
 			return rejectFieldRule("job_program_invalid", e)
 		}
+		if err := q.validateAutomaticExtensionCheck(s, extensions); err != nil {
+			return err
+		}
 		// Validate the original execution/needs, with the resolved class default.
 		// Resolution must not hide forbidden overrides or bypass deadline rules.
 		submitted.Class = s.Class
@@ -724,6 +727,12 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 		}
 		return
 	}
+	if automaticExtensionCheck(j) != nil {
+		now := q.clock.Now()
+		j.State, j.Reason, j.FinishedAt = "failed", "native check interrupted: "+why, &now
+		j.StopAt = nil
+		return
+	}
 	if j.Spec.Priority == "production" {
 		// Fence every old copy, including a lost copy that later reports newer progress.
 		for i := range j.Copies {
@@ -791,6 +800,7 @@ func (q *Queue) maintain() {
 	q.maintainPieceDependencies()
 	q.maintainFileExpiry()
 	q.maintainHostMaintenance()
+	q.maintainExtensionQualifications()
 	q.maintainSubmissions()
 	now := q.clock.Now()
 	for _, j := range q.liveJobs() {
@@ -1092,6 +1102,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 			}
 			m.RecoveringSince = &since
 		}
+		q.acceptExtensionQualifications(&m)
 		q.s.Machines[m.ID] = &m
 		q.refreshHostMemory()
 		q.acceptCurveReports(c, &m)
@@ -1169,6 +1180,9 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 						break
 					}
 				}
+			}
+			for _, target := range q.machineTargets(&m) {
+				reply.ExtensionQualificationPlan = append(reply.ExtensionQualificationPlan, q.extensionQualificationPlan(target)...)
 			}
 			reply.ModelPlan = q.modelPlan(m.ID)
 			reply.CopyPlan, reply.CacheUsage, reply.CachePins = q.copyPlan(&m)
@@ -1497,6 +1511,8 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		} else {
 			q.retry(j, j.Reason)
 		}
+	} else if !r.Success && automaticExtensionCheck(j) != nil {
+		j.State, j.Reason = "failed", "native check failed: "+r.Error
 	} else if !r.Success && !oomFailure && j.StartedAt == nil && j.ExecutionCause != nil && j.ExecutionCause.Operation == "launch" && j.ExecutionCause.Class == "launch_refused" && q.diskHeadroomReason(j, q.s.Machines[j.Machine]) != "" {
 		// A changed disk sample can withdraw an offer before exec. This is the
 		// same temporary hold as dispatch, including for production stage failures.
