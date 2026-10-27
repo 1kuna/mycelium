@@ -198,6 +198,8 @@ func statusJobValue(job *Job) Job {
 	}
 	if j.State == "failed" {
 		switch {
+		case j.ExecutionCause != nil && j.ExecutionCause.Operation == "input_staging":
+			j.Reason = "execution failed: " + j.ExecutionCause.String()
 		case j.ExecutionCause != nil && j.ExecutionCause.Class == cpuIsolationUnavailable:
 			j.Reason = cpuIsolationUnavailable + ": " + rejectionMessages[cpuIsolationUnavailable]
 		case j.Reason == "infrastructure_retries_exhausted", j.Reason == "out of memory after one retry on a larger hypha", j.Reason == "out of memory; previous capability unavailable":

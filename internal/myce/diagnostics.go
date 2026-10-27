@@ -168,7 +168,7 @@ func runtimeErrorFor(operation string, err error) error {
 	switch {
 	case errors.As(err, &rejection) && rejection.code == cpuIsolationUnavailable:
 		c.Class = cpuIsolationUnavailable
-	case errors.Is(err, context.DeadlineExceeded):
+	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, errFileTransferStalled):
 		c.Class = "timeout"
 	case errors.Is(err, context.Canceled):
 		c.Class = "cancelled"
@@ -222,6 +222,7 @@ func safeRuntimeCause(c *RuntimeCause) *RuntimeCause {
 	classes := map[string]bool{cpuIsolationUnavailable: true, "admission_changed": true, "resource_limit": true, "stage_failed": true, "oom": true, "io_error": true, "timeout": true, "cancelled": true, "permission_denied": true, "not_found": true, "storage_full": true, "connection_refused": true, "command_exit": true, "invalid_response": true, "inventory_incomplete": true, "ownership_mismatch": true, "restart_policy_unknown": true, "disposition_unknown": true}
 	operations["start_authorization"] = true
 	operations["start_handoff"] = true
+	operations["input_staging"] = true
 	if !operations[c.Operation] || !classes[c.Class] {
 		if c.Operation != "launch" || (c.Class != launchRefused && c.Class != launchFailed && c.Class != environmentFailed) {
 			return nil
