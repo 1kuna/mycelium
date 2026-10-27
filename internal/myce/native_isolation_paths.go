@@ -17,7 +17,7 @@ func (w Worker) validateNativeReadGrants(read []string, spool string) error {
 		return err
 	}
 	protected := []string{spool, filepath.Join(spool, "job-files"), filepath.Join(spool, "checkpoints"), w.CheckpointRoot, w.JobFileRoot, w.SecretRoot,
-		filepath.Join(home, ".local/share/mycelium"), filepath.Join(home, ".config"), filepath.Join(home, ".ssh")}
+		filepath.Join(home, ".local/share/mycelium"), filepath.Join(home, ".config"), filepath.Join(home, ".ssh"), filepath.Join(home, "Library/Keychains")}
 	if c := w.ServiceConfig; c != nil {
 		protected = append(protected, c.Config, c.Credentials, c.EnvironmentFile, c.JoiningFile, c.State)
 	}
