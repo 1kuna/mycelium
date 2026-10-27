@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -9,6 +10,105 @@ import (
 	"testing"
 	"time"
 )
+
+func TestNativeMinimalRootEnvironmentFailurePreparing(t *testing.T) {
+	cache := &EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: RealClock{}}
+	recipes := map[string]EnvironmentRecipe{}
+	for _, name := range []string{"ready", "broken"} {
+		binary := filepath.Join(t.TempDir(), name)
+		if err := os.WriteFile(binary, []byte("unused fixture binary"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		r, err := snapshotEnvironment(EnvironmentRecipe{Binary: binary}, "fake")
+		if err != nil {
+			t.Fatal(err)
+		}
+		recipes[name] = r
+	}
+	_, release, err := cache.Acquire(context.Background(), recipes["ready"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	release()
+	// Fail real acquisition after its use/build locks are taken, preserving
+	// the original filesystem error through the recorded startup-error path.
+	if err := os.Remove(recipes["broken"].Binary); err != nil {
+		t.Fatal(err)
+	}
+	control := &processControl{clock: RealClock{}}
+	w := Worker{NativeMinimalRoot: true, Clock: RealClock{}, Machine: machine("prepare", "fake"), environmentCache: cache, control: control}
+	j := Job{ID: "failed-preparation", Attempt: 1, Session: "prepare-session", Spec: spec("experiment"), SidecarEnvironmentRecipes: map[string]map[string]EnvironmentRecipe{}}
+	j.Spec.Run.Sidecars = nil
+	for _, name := range []string{"ready", "broken"} {
+		j.Spec.Run.Sidecars = append(j.Spec.Run.Sidecars, NativeSidecar{Name: name, Environment: name})
+		j.SidecarEnvironmentRecipes[name] = map[string]EnvironmentRecipe{"fake": recipes[name]}
+	}
+	store := &workerStore{dir: t.TempDir(), state: workerState{Session: j.Session}}
+	p, err := w.startNativeGroup(context.Background(), store, j, "failed-preparation", nil, jobBaseEnvironment(), "")
+	var pathErr *os.PathError
+	if p != nil || !errors.Is(err, os.ErrNotExist) || !errors.As(err, &pathErr) || pathErr.Path != recipes["broken"].Binary {
+		t.Fatalf("preparation did not preserve the missing-binary error: %v", err)
+	}
+	result := startFailureOutcome(Result{}, err)
+	if result.Success || !result.Interrupted || result.ExecutionCause == nil || result.ExecutionCause.Operation != "launch" || result.ExecutionCause.Class != environmentFailed {
+		t.Fatalf("environment preparation lost its infrastructure classification: %+v", result)
+	}
+	if store.state.LaunchOutcome == "" {
+		t.Fatal("startup infrastructure cause was not recorded")
+	}
+	data, err := os.ReadFile(filepath.Join(store.dir, store.state.LaunchOutcome))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var facts memberOutcome
+	if err := json.Unmarshal(data, &facts); err != nil || !facts.recordedInfrastructure() || len(facts.Infrastructure) != 1 || facts.Infrastructure[0].Kind != environmentFailed {
+		t.Fatal("durable startup infrastructure cause missing", string(data), err)
+	}
+	// The existing group record must retain which helper failed, separately
+	// from the shared startup classifier. No member or anchor has been launched.
+	data, err = os.ReadFile(filepath.Join(store.dir, "native-failed-preparation.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var group struct {
+		Members []*nativeMember `json:"members"`
+		Outcome memberOutcome   `json:"outcome"`
+	}
+	if err := json.Unmarshal(data, &group); err != nil || len(group.Members) != 0 || len(group.Outcome.Infrastructure) != 1 {
+		t.Fatal("preparation member facts missing or a payload was registered", string(data), err)
+	}
+	fact := group.Outcome.Infrastructure[0]
+	if fact.Kind != environmentFailed || fact.Member != "broken" || fact.Group != 0 || fact.At.IsZero() || group.Outcome.Exit != nil || len(group.Outcome.Signals) != 0 {
+		t.Fatalf("wrong pre-anchor environment failure facts: %+v", group.Outcome)
+	}
+	data, err = os.ReadFile(filepath.Join(store.dir, "attempt-failed-preparation.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var custody workerState
+	if err := json.Unmarshal(data, &custody); err != nil || custody.PID != 0 || len(custody.Groups) != 0 || store.state.PID != 0 || store.state.LaunchPending {
+		t.Fatal("failed preparation launched an anchor", string(data), err)
+	}
+	control.mu.Lock()
+	remaining := len(control.processes)
+	control.mu.Unlock()
+	if remaining != 0 {
+		t.Fatal("failed preparation retained its controller registration")
+	}
+	for _, name := range []string{"ready", "broken"} {
+		for _, suffix := range []string{".use", ".build"} {
+			f, err := os.OpenFile(filepath.Join(cache.Root, "locks", recipes[name].Key+suffix), os.O_RDWR, 0600)
+			if err != nil {
+				t.Fatal(err)
+			}
+			err = syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+			unlockEnvironment(f)
+			if err != nil {
+				t.Errorf("failed preparation retained %s%s lock: %v", name, suffix, err)
+			}
+		}
+	}
+}
 
 // Pre-anchor preparation must remain reachable through the same controller as
 // running members. Hold the real build lock throughout cancellation: releasing

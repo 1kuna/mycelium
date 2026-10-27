@@ -138,6 +138,9 @@ Cancellation/preemption can
 close that gate before an anchor exists. A startup refusal unregisters the
 preparing process and releases already-acquired sidecar cache holds; the caller
 retains ownership of main-environment and memory cleanup on startup failure.
+Non-cancellation acquisition/build failures use the existing recorded startup
+error with `environment_failed`; the group record retains the failing sidecar's
+member fact. The original error remains available through error unwrapping.
 After successful startup the existing group goroutine owns those resources.
 Existing launch/start-by
 receipt pipes 3/4, memory attachment, TERM/checkpoint grace, pidfd custody and
@@ -154,7 +157,9 @@ Parent owns compilation, execution and review. Suggested selectors:
   `TestNativeMinimalRootOperatorConfig`,
   `TestNativeMinimalRootCancellationPreparing` (real held build lock; user cancel
   and priority preemption plus startup-context cancellation, no namespace or payload
-  launch), `TestInstallSettingsTableComplete`,
+  launch), `TestNativeMinimalRootEnvironmentFailurePreparing` (real missing-binary
+  acquisition failure, durable classification/member facts and released cache holds),
+  `TestInstallSettingsTableComplete`,
   `TestInstallSettingsOverlayMatrix`, `TestNativeNetworkPlacement`.
 - Linux planning/refusal: `TestNativeMinimalRootPinnedConstruction`,
   `TestNativeMinimalRootCapabilityRefusal`; retain
@@ -175,8 +180,10 @@ group attachment/custody, actual runtime layouts, checkpoints, GPU/NAS/Office an
 TERM/cleanup still need the parent's integration and approved Linux evidence.
 
 Current state: source pending parent compilation/tests and independent review;
-the first source review's private-temp grant and pre-anchor cancellation findings
-have candidate fixes and regressions, with no build/test execution by this worker.
+the two source reviews' findings have candidate fixes and regressions. The parent's
+first batch stopped at the missing Darwin import before tests/full-gate execution;
+that import and the startup environment-failure classification are now corrected
+in source, with no build/test execution by this worker.
 No Linux execution, policy exception or rollout claimed. Next owner: parent for
 gates and stack-base integration; the maintainer for host policy. Tracking:
 [#262](https://github.com/1kuna/mycelium/issues/262).

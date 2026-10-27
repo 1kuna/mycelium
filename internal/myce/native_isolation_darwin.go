@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"

@@ -314,7 +314,7 @@ func (w Worker) startNativeGroup(startCtx context.Context, s *workerStore, j Job
 			if ctx.Err() != nil {
 				return nil, s.startFailure(j, launchRefused, err)
 			}
-			return nil, err
+			return nil, s.startFailure(j, environmentFailed, err)
 		}
 	}
 	writer, err := g.startSupervisor(s, env)
