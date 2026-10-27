@@ -66,7 +66,7 @@ func generatedJobSchema(t *testing.T) []byte {
 		for _, property := range properties {
 			property.(map[string]any)["x-contract"] = "diagnostic"
 		}
-		stable := []string{"id", "spec", "state", "attempt", "machine", "session", "release_confirmed", "finished_at", "queued", "cancelled_at", "infrastructure_retries", "dependency"}
+		stable := []string{"id", "spec", "state", "attempt", "machine", "session", "release_confirmed", "finished_at", "queued", "cancelled_at", "infrastructure_retries", "dependency", "cancellation", "cancellation_scope"}
 		if definition == "Spec" {
 			stable = []string{"project", "submission_key", "after"}
 		}
@@ -78,6 +78,16 @@ func generatedJobSchema(t *testing.T) []byte {
 	binding["state"].(map[string]any)["enum"] = []string{"blocked", "ready"}
 	binding["execution"].(map[string]any)["description"] = "Immutable producing child job ID and accepted attempt; never the latest attempt."
 	job := defs["Job"].(map[string]any)["properties"].(map[string]any)
+	job["cancellation"].(map[string]any)["description"] = "Read-only cancellation acknowledgement after durable cancellation. Same aggregate release as cancel, including descendants; not_applicable explicitly settles never-attempted work without physical-release evidence."
+	job["cancellation_scope"].(map[string]any)["description"] = "Read-only retained fan-out declaration: every piece key, materialization/acceptance, optional wave ID, registered dependent IDs, and flat descendant job/release statuses. Future submissions appear on subsequent reads."
+	for _, definition := range []string{"CancellationMember", "CancellationPiece"} {
+		props := defs[definition].(map[string]any)["properties"].(map[string]any)
+		props["release"].(map[string]any)["enum"] = []string{"not_applicable", "pending", "confirmed"}
+	}
+	ackProperties := defs["Cancellation"].(map[string]any)["properties"].(map[string]any)
+	for _, name := range []string{"job_id", "submission_key", "release", "acknowledged_at"} {
+		ackProperties[name].(map[string]any)["type"] = []string{"string", "null"}
+	}
 	job["state"].(map[string]any)["enum"] = []string{"queued", "running", "stopping", "succeeded", "failed", "cancelled"}
 	for _, name := range []string{"id", "machine", "session"} {
 		job[name].(map[string]any)["minLength"] = 1
@@ -180,8 +190,24 @@ func wireExamples(t *testing.T) map[string]any {
 	expired.State = "unknown"
 	expired.Release = nil
 	expired.AcknowledgedAt = nil
+	aborted := queued
+	aborted.ID, aborted.State, aborted.CancelledAt = "example-parent", "cancelled", &now
+	parentAck := ack
+	parentAck.JobID, parentAck.Release = &aborted.ID, releaseState("confirmed")
+	aborted.Cancellation = &parentAck
+	aborted.CancellationScope = &CancellationScope{
+		Pieces: []CancellationPiece{
+			{Key: "first", Materialized: true, Accepted: true, WaveID: "example-wave", WillNotRun: true, Release: "confirmed", Dependents: []string{}},
+			{Key: "second", WillNotRun: true, Release: "not_applicable", Dependents: []string{"example-consumer"}},
+		},
+		Members: []CancellationMember{
+			{JobID: "example-consumer", State: "cancelled", WillNotRun: true, Release: "not_applicable"},
+			{JobID: "example-wave", State: "succeeded", WillNotRun: true, Release: "confirmed"},
+		},
+	}
 	revision := uint64(7)
 	return map[string]any{
+		"job-cancelled-fan-out":       aborted,
 		"job-device-selected":         deviceJob,
 		"error-no-qualified-target":   wireError(t, &HTTPError{Status: 409, Code: "no_qualified_target", Message: "host memory need 8.125 GiB (8 + 0.125 slack) exceeds allowance 8 GiB on example-machine; intent retained locally"}),
 		"error-machine-renamed":       wireError(t, &HTTPError{Status: 400, Code: "machine_renamed", Message: `machine old-gpu0 was renamed; use allowed_machines: [example-machine] plus needs.gpu.devices: ["0"]`}),
@@ -270,6 +296,16 @@ func TestWireSchemas(t *testing.T) {
 	for _, name := range []string{"job-v1.schema.json", "cancel-ack-v1.schema.json", "error-v1.schema.json"} {
 		schemas[name] = compileWireSchema(t, name)
 	}
+	// Unkeyed cancellation and status redaction legitimately encode a null key
+	// inside the embedded acknowledgement, just like the cancel endpoint.
+	qUnkeyed, _ := fixture(t)
+	unkeyed := submit(t, qUnkeyed, spec("experiment"))
+	cancelAck(t, qUnkeyed, unkeyed.ID)
+	unkeyedGET, err := qUnkeyed.jobSnapshot(unkeyed.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validateWireValue(t, schemas["job-v1.schema.json"], unkeyedGET)
 	for name, value := range wireExamples(t) {
 		t.Run(name, func(t *testing.T) {
 			kind := strings.SplitN(name, "-", 2)[0]

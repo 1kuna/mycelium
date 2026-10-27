@@ -152,6 +152,17 @@ diagnostics, not retry charges: two starts and zero losses can include a planned
 requeue followed by one command failure. A launch refusal without an availability
 flag is still charged a loss under the existing retry rules.
 
+Queue-driven cancellation and an assigned attempt's start-deadline expiry also
+record exact-attempt endings, without inventing a worker execution cause or
+physical-release evidence. Never-assigned jobs have no attempt entry. Late exact
+operator refunds refine that attempt's operator flag and, when reviving its
+failed decision, its state/reason; the original end time and other attempts stay
+intact. Cleanup-only acknowledgements do not rewrite an ended attempt.
+
+After cancellation, `cancellation` is the read-only aggregate acknowledgement.
+Declared parents also expose `cancellation_scope` for every piece and registered
+descendant, including never-dispatched work. See [abort and release](guide-fan-out.md#abort-and-wait-for-release).
+
 Launch-gate transport failures use `execution_cause.operation: start_authorization`;
 the Started hand-off uses `start_handoff`. Both retain the underlying safe class
 (for example `timeout`). An interrupted result

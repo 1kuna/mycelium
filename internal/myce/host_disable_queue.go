@@ -45,6 +45,14 @@ func (q *Queue) refundOperatorStop(r Result) bool {
 	if matched && j.State == "failed" && j.Losses < 3 && strings.HasPrefix(j.Reason, "failed after 3 infrastructure losses:") {
 		q.retry(j, "requeued: stopped by operator")
 		j.RequeuedByOperator = true
+		// Refine only the refunded execution's decision; keep its original end
+		// time and execution facts, and never rewrite a sibling/newer attempt.
+		for i := range j.AttemptHistory {
+			h := &j.AttemptHistory[i]
+			if h.Attempt == r.Attempt && h.Machine == r.Machine && h.Session == r.Session {
+				h.State, h.Reason = j.State, j.Reason
+			}
+		}
 	}
 	return matched
 }

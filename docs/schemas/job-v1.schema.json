@@ -137,6 +137,154 @@
       ],
       "type": "object"
     },
+    "Cancellation": {
+      "properties": {
+        "acknowledged_at": {
+          "format": "date-time",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "job_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "project": {
+          "type": "string"
+        },
+        "release": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "type": "string"
+        },
+        "submission_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "will_not_run": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "job_id",
+        "project",
+        "submission_key",
+        "state",
+        "will_not_run",
+        "release",
+        "acknowledged_at"
+      ],
+      "type": "object"
+    },
+    "CancellationMember": {
+      "properties": {
+        "job_id": {
+          "type": "string"
+        },
+        "release": {
+          "enum": [
+            "not_applicable",
+            "pending",
+            "confirmed"
+          ],
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "will_not_run": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "job_id",
+        "state",
+        "will_not_run",
+        "release"
+      ],
+      "type": "object"
+    },
+    "CancellationPiece": {
+      "properties": {
+        "accepted": {
+          "type": "boolean"
+        },
+        "dependents": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "key": {
+          "type": "string"
+        },
+        "materialized": {
+          "type": "boolean"
+        },
+        "release": {
+          "enum": [
+            "not_applicable",
+            "pending",
+            "confirmed"
+          ],
+          "type": "string"
+        },
+        "wave_id": {
+          "type": "string"
+        },
+        "will_not_run": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "key",
+        "materialized",
+        "accepted",
+        "will_not_run",
+        "release",
+        "dependents"
+      ],
+      "type": "object"
+    },
+    "CancellationScope": {
+      "properties": {
+        "members": {
+          "items": {
+            "$ref": "#/$defs/CancellationMember"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "pieces": {
+          "items": {
+            "$ref": "#/$defs/CancellationPiece"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "pieces",
+        "members"
+      ],
+      "type": "object"
+    },
     "Copy": {
       "properties": {
         "allocated_devices": {
@@ -980,6 +1128,16 @@
         "batch": {
           "$ref": "#/$defs/BatchWork",
           "x-contract": "diagnostic"
+        },
+        "cancellation": {
+          "$ref": "#/$defs/Cancellation",
+          "description": "Read-only cancellation acknowledgement after durable cancellation. Same aggregate release as cancel, including descendants; not_applicable explicitly settles never-attempted work without physical-release evidence.",
+          "x-contract": "stable"
+        },
+        "cancellation_scope": {
+          "$ref": "#/$defs/CancellationScope",
+          "description": "Read-only retained fan-out declaration: every piece key, materialization/acceptance, optional wave ID, registered dependent IDs, and flat descendant job/release statuses. Future submissions appear on subsequent reads.",
+          "x-contract": "stable"
         },
         "cancelled_at": {
           "format": "date-time",

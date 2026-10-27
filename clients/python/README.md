@@ -43,6 +43,17 @@ remain explicit. Constrained first-run observations persist even when rejected
 by learning. See [memory facts](../../docs/guide-status-v3.md) for scope and
 platform limits.
 
+For a fan-out abort, cancel the parent by ID or `cancel_submission(project, key)`.
+Read `client.get(parent_id)["cancellation"]["release"]` until it is `confirmed`
+or `not_applicable`; `wait()` returning a terminal state does not prove release.
+`cancellation_scope["pieces"]` enumerates every declared key with materialization,
+acceptance, optional wave ID, registered `dependents`, exclusion and release.
+`cancellation_scope["members"]` lists retained wave/consumer jobs and release.
+Children need no separate cancel calls. Future valid consumers of a retained
+cancelled parent cannot execute and appear on subsequent scope reads. Scope
+requires the retained source; artifact expiry does not settle release. See the
+[complete abort contract](../../docs/guide-fan-out.md#abort-and-wait-for-release).
+
 Dicts and YAML accept the design's platform list / `any` shorthand and named
 environment strings; the client normalizes them to API objects without mutating
 inputs. YAML timestamps must include a timezone. Unknown fields and invalid

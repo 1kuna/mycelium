@@ -149,6 +149,15 @@ func (q *Queue) captureObservation(id string) (*Queue, fileStoreObservation, err
 			s.EnrollmentRelease, s.EnrollmentReleaseKey = nil, nil
 		}
 	}
+	// Capture release/scope before receipt minimization loses descendants and
+	// cold terminal dependency edges. These values never mutate persisted jobs.
+	for key, j := range s.Jobs {
+		if original := q.s.Jobs[key]; original != nil && (original.CancelledAt != nil || original.FanOut != nil) {
+			copy := *j
+			q.projectCancellation(&copy, original)
+			s.Jobs[key] = &copy
+		}
+	}
 	inputs := observationState{State: s, Models: q.models, Environments: q.environments, Calls: q.calls, Unreported: q.unreported}
 	if minimal {
 		inputs.Models, inputs.Environments, inputs.Calls, inputs.Unreported = ModelConfig{}, EnvironmentCatalog{}, nil, nil

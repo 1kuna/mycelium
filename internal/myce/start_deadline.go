@@ -69,6 +69,7 @@ func (q *Queue) maintainStartDeadlines() {
 			continue
 		}
 		reason := q.startWaitingReason(j)
+		outcome := attemptOutcome(j, Result{Interrupted: true})
 		if j.State == "queued" && expired(j.Spec.GiveUpAt, now) && j.Spec.GiveUpAt.Before(*j.Spec.StartBy) {
 			j.State = "failed"
 			j.Reason = "give-up time reached"
@@ -94,6 +95,7 @@ func (q *Queue) maintainStartDeadlines() {
 		for i := range j.Copies {
 			j.Copies[i].Recoverable = false
 		}
+		q.recordAttemptOutcome(j, outcome)
 	}
 }
 

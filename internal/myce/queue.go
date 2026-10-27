@@ -807,8 +807,7 @@ func (q *Queue) maintain() {
 			for _, j := range q.liveJobs() {
 				if j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping") {
 					if cancelled(j) {
-						j.State = "cancelled"
-						j.StopAt = nil
+						q.finishCancellation(j)
 					} else {
 						for i := range j.Copies {
 							if j.Copies[i].Attempt == j.Attempt {
@@ -844,8 +843,7 @@ func (q *Queue) maintain() {
 		m := q.s.Machines[j.Machine]
 		if (m == nil || m.Devices == nil) && !q.networkQuiet && !q.unreported[j.Machine] && j.State == "stopping" && !plannedPriorityStop(j) && !j.Spec.Run.Docker && expired(j.StopAt, now) {
 			if cancelled(j) {
-				j.State = "cancelled"
-				j.StopAt = nil
+				q.finishCancellation(j)
 			} else {
 				q.retry(j, j.Reason)
 			}
@@ -1011,8 +1009,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 				if j.Machine == m.ID && j.Session == m.Session && j.State == "stopping" && !j.Spec.Run.Docker && q.held(hostID(old)) {
 					if cancelled(j) {
 						q.settleRelease(Result{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: j.Machine, Session: j.Session})
-						j.State = "cancelled"
-						j.StopAt = nil
+						q.finishCancellation(j)
 					} else {
 						q.retry(j, j.Reason)
 					}
@@ -1039,8 +1036,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 			for _, j := range q.liveJobs() {
 				if j.Machine == m.ID && j.Session == old.Session && (j.State == "running" || j.State == "stopping") {
 					if cancelled(j) {
-						j.State = "cancelled"
-						j.StopAt = nil
+						q.finishCancellation(j)
 						continue
 					}
 					if j.State == "running" {
@@ -1204,8 +1200,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 					}
 					if cancelled(j) {
 						q.settleRelease(Result{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: j.Machine, Session: j.Session})
-						j.State = "cancelled"
-						j.StopAt = nil
+						q.finishCancellation(j)
 					} else {
 						q.retry(j, j.Reason)
 					}
@@ -1354,7 +1349,7 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 			// an omitted attempt in the next heartbeat as release evidence.
 			if j.State == "stopping" && !j.Spec.Run.Docker {
 				if cancelled(j) {
-					j.State, j.StopAt = "cancelled", nil
+					q.finishCancellation(j)
 				} else {
 					q.retry(j, j.Reason)
 				}
@@ -1453,8 +1448,7 @@ func (q *Queue) complete(r Result, outputsVerified bool) error {
 	}
 	if cancelled(j) || j.State == "stopping" && (!r.Success || !plannedPriorityStop(j)) && !oomFailure && !stageFailure {
 		if cancelled(j) {
-			j.State = "cancelled"
-			j.StopAt = nil
+			q.finishCancellation(j)
 		} else {
 			q.retry(j, j.Reason)
 		}
@@ -1721,6 +1715,7 @@ func (q *Queue) projectJob(stored *Job, order map[string]int, reasons map[string
 	copy := *j
 	if !forStatus {
 		copy = cloneJob(j)
+		q.projectCancellation(&copy, stored)
 	}
 	copy.Spec.Class = jobClass(copy.Spec)
 	copy.PriorityPolicy = q.priorityMatch(copy.Spec)
@@ -1826,6 +1821,11 @@ func (q *Queue) projectJobDiagnostics(j *Job, forStatus, jobReply bool) {
 		// Status projection owns a fully detached view. Redaction can reuse
 		// its fields without another JSON round-trip for every job.
 		*j = statusJobValue(j)
+		if !jobReply && j.Cancellation != nil {
+			ack := *j.Cancellation
+			ack.SubmissionKey = nil
+			j.Cancellation = &ack
+		}
 		if jobReply {
 			j.Spec.SubmissionKey = key
 		}

@@ -360,6 +360,8 @@ class Client:
         observations remain available even when excluded from learning.
         Retains the first and latest 31 rows; memory_attempts_dropped counts
         evictions (omitted zero). Peakless prelaunch attempts create no row.
+
+        Also includes cancellation acknowledgement and retained fan-out scope.
         """
         return self._read_job(job_id)
 
