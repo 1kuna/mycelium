@@ -328,8 +328,9 @@ type Copy struct {
 
 type Job struct {
 	// SubmissionReused is set only on a keyed submit reply, never on stored jobs.
-	SubmissionReused bool             `json:"submission_reused,omitempty"`
-	AttemptHistory   []AttemptOutcome `json:"attempt_history,omitempty"`
+	SubmissionReused       bool             `json:"submission_reused,omitempty"`
+	LastHealthAlertAttempt int              `json:"last_health_alert_attempt,omitempty"`
+	AttemptHistory         []AttemptOutcome `json:"attempt_history,omitempty"`
 	// Read-only observations; never physical-release evidence for another attempt.
 	Cancellation      *Cancellation      `json:"cancellation,omitempty"`
 	CancellationScope *CancellationScope `json:"cancellation_scope,omitempty"`

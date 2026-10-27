@@ -2722,7 +2722,8 @@ wait for connectivity. Startup's existing restart grace applies to stale alerts.
 
 Events commit with queue state and appear in authenticated status as
 `health_alerts`. A condition emits once per episode, with a 15-minute cooldown
-across flaps; production losses emit once per exact job attempt. The queue retains
+across flaps; production losses emit once per exact job attempt. The last alerted attempt is
+persisted on the job independently of the bounded event window. The queue retains
 the latest 256 delivered events (or 256 total when no notifier is configured).
 Pending configured deliveries survive restart and remain until acknowledged;
 operators must repair a broken receiver to drain that backlog.
