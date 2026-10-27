@@ -97,6 +97,7 @@ type Worker struct {
 	NativeReadRoots             []string
 	NativeExecuteRoots          []string
 	nativeMetricCgroups         []string // Trusted attempt-member cgroups only.
+	nativeSharedInputs          []string // Verified acquired payloads, never authored environment paths.
 	CacheLimit                  int64
 	SecretRoot                  string
 	ModelApprovalRoot           string
@@ -353,6 +354,11 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	if len(j.Spec.SharedInputs) > 0 {
 		s.sharedRelease = sharedRelease
 	}
+	w.nativeSharedInputs = nil
+	for _, path := range sharedEnv {
+		w.nativeSharedInputs = append(w.nativeSharedInputs, path)
+	}
+	slices.Sort(w.nativeSharedInputs)
 	sharedStarted := false
 	defer func() {
 		if !sharedStarted && !errors.Is(startErr, errWorkerReleasePending) {

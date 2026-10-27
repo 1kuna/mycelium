@@ -63,9 +63,13 @@ func (w Worker) isolateNativeCommand(cmd *exec.Cmd, spool, work string, env map[
 		return err
 	}
 	read = append(read, declaredRead...)
-	read = append(read, declaredExecute...)
+	executableRead := append(declaredExecute, w.nativeSharedInputs...)
+	read = append(read, executableRead...)
+	if err := w.validateNativeReadGrants(w.nativeSharedInputs, spool); err != nil {
+		return err
+	}
 	readOnly := append([]string{modelCache, w.ModelRoot}, declaredRead...)
-	if err := nativeReadOnlyOverlap(readOnly, append(slices.Clone(write), declaredExecute...)); err != nil {
+	if err := nativeReadOnlyOverlap(readOnly, append(slices.Clone(write), executableRead...)); err != nil {
 		return err
 	}
 	for _, path := range []string{filepath.Join(spool, "environment-cache"), w.EnvironmentRoot, w.ExtensionRoot, modelCache, w.ModelRoot} {
