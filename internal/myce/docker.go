@@ -102,11 +102,12 @@ func dockerRunArgs(command []string) ([]string, error) {
 
 // dockerExecution is durable custody, separate from the worker's heartbeat state.
 type dockerExecution struct {
-	Accelerator  bool                `json:"accelerator,omitempty"`
-	UserCancel   bool                `json:"user_cancel,omitempty"`
-	StopGrace    time.Duration       `json:"accelerator_stop_grace,omitempty"`
-	PriorityStop *PriorityPreemption `json:"priority_stop,omitempty"`
-	CleanupCause *RuntimeCause       `json:"cleanup_cause,omitempty"`
+	Accelerator      bool                `json:"accelerator,omitempty"`
+	UserCancel       bool                `json:"user_cancel,omitempty"`
+	StopGrace        time.Duration       `json:"accelerator_stop_grace,omitempty"`
+	PriorityStop     *PriorityPreemption `json:"priority_stop,omitempty"`
+	CleanupCause     *RuntimeCause       `json:"cleanup_cause,omitempty"`
+	ObservationRetry string              `json:"observation_retry,omitempty"`
 
 	LogsNone             bool                    `json:"logs_none,omitempty"`
 	Owner                *Result                 `json:"owner,omitempty"` // Saved job/attempt/machine/session binding; legacy custody uses opaque identity.
@@ -303,8 +304,7 @@ func (d *dockerAttempt) call(args ...string) ([]byte, error) {
 		if !errors.Is(err, context.DeadlineExceeded) || d.ctx != nil && d.ctx.Err() != nil {
 			if failures > 0 {
 				d.mu.Lock()
-				d.state.Error = ""
-				d.state.CleanupCause = nil
+				d.state.ObservationRetry = ""
 				_ = d.saveLocked()
 				d.mu.Unlock()
 			}
@@ -317,10 +317,15 @@ func (d *dockerAttempt) call(args ...string) ([]byte, error) {
 		elapsed := clock.Now().Sub(since).Round(time.Second)
 		d.mu.Lock()
 		d.state.CleanupCause = runtimeDiagnostic(err)
-		d.state.Error = fmt.Sprintf("Docker observation retry; custody retained; unavailable %s; %d timed-out reads; %s", elapsed, failures, d.state.CleanupCause.String())
+		d.state.ObservationRetry = fmt.Sprintf("Docker observation retry; custody retained; unavailable %s; %d timed-out reads; %s", elapsed, failures, d.state.CleanupCause.String())
+		// Heartbeats must keep their recognized launch/running transition. A
+		// read timeout is a diagnostic, not a cleanup/admission refusal (#149).
+		if d.state.Stopped {
+			d.state.Error = "Docker cleanup unconfirmed; " + d.state.CleanupCause.String()
+		}
 		_ = d.saveLocked()
 		if elapsed >= 2*time.Minute && !warned {
-			log.Printf("attempt %s: %s", d.state.Identity, d.state.Error)
+			log.Printf("attempt %s: %s", d.state.Identity, d.state.ObservationRetry)
 			warned = true
 		}
 		d.mu.Unlock()

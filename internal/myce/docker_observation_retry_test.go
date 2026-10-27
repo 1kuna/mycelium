@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -45,14 +46,19 @@ func TestDockerObservationTimeoutRetriesHealthyAttempt(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatal("observation did not time out")
 			}
-			await(t, func() bool { return strings.Contains(p.docker.status(), "observation retry") })
+			retryStatus := func() string {
+				p.docker.mu.Lock()
+				defer p.docker.mu.Unlock()
+				return p.docker.state.ObservationRetry
+			}
+			await(t, func() bool { return strings.Contains(retryStatus(), "observation retry") })
 			clock.advance(3 * time.Minute)
 			select {
 			case <-timedOut:
 			case <-time.After(5 * time.Second):
 				t.Fatal("observation was not retried")
 			}
-			await(t, func() bool { return strings.Contains(p.docker.status(), "unavailable 3m") })
+			await(t, func() bool { return strings.Contains(retryStatus(), "unavailable 3m") })
 			p.docker.mu.Lock()
 			state := p.docker.state
 			p.docker.mu.Unlock()
@@ -64,7 +70,7 @@ func TestDockerObservationTimeoutRetriesHealthyAttempt(t *testing.T) {
 				t.Fatalf("timeout finished a healthy attempt: %+v", f)
 			default:
 			}
-			await(t, func() bool { return p.docker.status() == "running" })
+			await(t, func() bool { return retryStatus() == "" && p.docker.status() == "running" })
 			if err := os.Remove(filepath.Join(root, "running")); err != nil {
 				t.Fatal(err)
 			}
@@ -82,6 +88,68 @@ func TestDockerObservationTimeoutRetriesHealthyAttempt(t *testing.T) {
 			}
 			if strings.Contains(string(calls), "kill ") || strings.Contains(string(calls), "stop ") || strings.Count(string(calls), "start id1\n") != 1 || strings.Count(string(calls), "create --restart=no ") != 1 {
 				t.Fatalf("timeout signaled or relaunched payload: %s", calls)
+			}
+		})
+	}
+}
+
+// A heartbeat sent during a slow startup read can remain at the queue after
+// that read recovers. It must not turn observation health into stop authority.
+func TestDockerObservationRetryHeartbeatAllowsOwnedLaunch(t *testing.T) {
+	for _, protocol := range []string{"legacy", "machine"} {
+		t.Run(protocol, func(t *testing.T) {
+			q, clock := fixture(t)
+			m := dockerMachine("worker", "fake")
+			if protocol == "machine" {
+				m = m3Machine()
+				m.Capabilities = []string{"docker"}
+			}
+			submit(t, q, dockerJob().Spec)
+			var j *Job
+			if protocol == "machine" {
+				j = assignedJob(machineCheck(t, q, m))
+			} else {
+				j = check(t, q, m, nil).Job
+			}
+			if j == nil {
+				t.Fatal("missing assignment")
+			}
+			launch := HostLaunch{Machine: j.Machine, Session: j.Session, Kind: "batch", Key: j.ID, Attempt: strconv.Itoa(j.Attempt)}
+			d := &dockerAttempt{clock: clock, timeout: time.Second, state: dockerExecution{Operation: "create"}, admit: func() error { return q.AuthorizeLaunch(launch) }}
+			reads, starts := 0, 0
+			d.command = func(_ context.Context, args ...string) ([]byte, error) {
+				if args[0] == "inspect" {
+					reads++
+					if reads == 1 {
+						return nil, context.DeadlineExceeded
+					}
+					m.DockerCleanup = d.status()
+					c := Checkin{Machine: m}
+					execution := Execution{ID: j.ID, Attempt: j.Attempt}
+					if protocol == "machine" {
+						c.AttemptProtocol = keyedAttemptProtocol
+						c.Attempts = []AttemptReport{{Execution: execution, Session: j.Session}}
+					} else {
+						c.Running = &execution
+					}
+					if _, err := q.Checkin(c); err != nil {
+						t.Fatal(err)
+					}
+				} else if args[0] == "start" {
+					starts++
+				}
+				return nil, nil
+			}
+			if _, err := d.call("inspect", "owned"); err != nil {
+				t.Fatal(err)
+			}
+			// No newer heartbeat clears the queue's retry-era observation.
+			if _, err := d.operation("start", "start", "owned"); err != nil {
+				t.Fatalf("recovered observation refused owned launch: %v", err)
+			}
+			current := job(t, q, j.ID)
+			if reads != 2 || starts != 1 || d.state.Stopped || current.Attempt != 1 || current.Losses != 0 {
+				t.Fatal("observation changed launch authority", current, d.state)
 			}
 		})
 	}
