@@ -114,6 +114,16 @@ the status view's payload and diagnostic redaction, except for the key echo;
 POST replies retain the submitted spec. Unkeyed jobs omit the optional key.
 Use the existing job output and log commands when you need their results.
 
+`myce wait` resolves full IDs and unique prefixes through authenticated
+`GET /api/jobs/{id}`, so a recently submitted job is visible even while the
+aggregate status cache still shows an older generation. Go `WaitSubmitted`
+accepts the Job returned by `Submit` and retries initial `job_unknown` replies
+once per second for a five-second visibility window, until the first successful
+job read. `SubmitAndWait`, foreground `myce run`, and profile receipt observers
+use this receipt policy. A caller deadline or authentication error ends the wait
+sooner. Plain ID-only waits fail immediately for an unknown ID. Waiting never
+resubmits or cancels a job.
+
 `myce status JOB` (full ID or an unambiguous prefix of at least eight characters)
 shows that job and its `attempt_history`. Put `--full` before the job ID:
 `myce status --full JOB`. The same optional array is included

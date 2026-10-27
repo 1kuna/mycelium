@@ -216,7 +216,7 @@ func waitProfileReceipt(ctx context.Context, dir string, timeout time.Duration) 
 }
 
 func observeProfile(ctx context.Context, c myce.Client, dir string, r profileReceipt, cfg profileObserver) error {
-	j, waitErr := c.Wait(ctx, r.JobID)
+	j, waitErr := c.WaitSubmitted(ctx, &myce.Job{ID: r.JobID, State: r.Status})
 	r.Observation = "not_armed"
 	r.Delivery = "not_configured"
 	if cfg.Notify != "" {

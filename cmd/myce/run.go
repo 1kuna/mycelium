@@ -147,7 +147,7 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 	}
 	var after int64
 	lastStatus := ""
-	j, err = client.Wait(ctx, j.ID, func(j *myce.Job) error {
+	j, err = client.WaitSubmitted(ctx, j, func(j *myce.Job) error {
 		line := j.ID + " " + j.State + " " + myce.JobReason(j)
 		if line != lastStatus {
 			if _, e := fmt.Fprintln(errOut, strings.ReplaceAll(line, client.Token, "[redacted]")); e != nil {

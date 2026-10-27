@@ -172,6 +172,45 @@ func TestWaitQueueOutcomes(t *testing.T) {
 		})
 	}
 }
+
+func TestWaitImmediatelyAfterSubmitWithStaleStatus(t *testing.T) {
+	q, clock, _, _ := waitQueue(t)
+	api := myce.API{Queue: q, Token: "test-only"}.Handler()
+	var aggregateReads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/status" {
+			aggregateReads.Add(1)
+		}
+		api.ServeHTTP(w, r)
+	}))
+	defer server.Close()
+	c := myce.Client{URL: server.URL, Token: "test-only"}
+	// Freeze the fake clock with an empty aggregate cache generation, then
+	// commit a submission through the same authenticated API used in production.
+	if _, err := status(context.Background(), c); err != nil {
+		t.Fatal(err)
+	}
+	s := myce.Spec{Name: "immediate-wait", Project: "test", Priority: "experiment", Run: myce.RunSpec{Command: []string{"true"}}, Needs: myce.ResourceNeeds{MemoryGB: 1, Platform: myce.Platform{Any: true}}}
+	j, err := c.Submit(context.Background(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	pauses := 0
+	err = waitJobs(context.Background(), c, []string{j.ID[:8], j.ID}, 0, &out, &bytes.Buffer{}, clock, func(_ context.Context, _ time.Duration) error {
+		pauses++
+		if pauses > 1 {
+			t.Fatal("wait did not observe committed cancellation")
+		}
+		return q.Cancel(j.ID)
+	})
+	if exitCode(err) != 1 || out.String() != j.ID+" cancelled cancel requested\n" || pauses != 1 {
+		t.Fatalf("immediate wait: err=%v output=%q pauses=%d", err, out.String(), pauses)
+	}
+	if aggregateReads.Load() != 1 {
+		t.Fatal("wait read aggregate status", aggregateReads.Load())
+	}
+}
 func TestWaitTimeoutDoesNotCancel(t *testing.T) {
 	q, clock, _, _ := waitQueue(t)
 	j := waitSubmit(t, q)
@@ -281,7 +320,7 @@ func TestWaitTransientHTTPAndInterrupted(t *testing.T) {
 					w.WriteHeader(code)
 					return
 				}
-				fmt.Fprint(w, `{"jobs":[{"id":"job","state":"succeeded"}]}`)
+				fmt.Fprint(w, `{"id":"job","state":"succeeded"}`)
 			}))
 			defer server.Close()
 			err := waitJobs(context.Background(), myce.Client{URL: server.URL}, []string{"job"}, 0, &bytes.Buffer{}, &bytes.Buffer{}, clock, func(_ context.Context, d time.Duration) error { clock.advance(d); return nil })
@@ -309,7 +348,7 @@ func TestWaitRequestTimeoutRetriesUntilOverallDeadline(t *testing.T) {
 		if calls == 1 {
 			return nil, context.DeadlineExceeded
 		}
-		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"jobs":[{"id":"job","state":"succeeded"}]}`))}, nil
+		return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"id":"job","state":"succeeded"}`))}, nil
 	})}}
 	err := waitJobs(context.Background(), client, []string{"job"}, time.Minute, &bytes.Buffer{}, &bytes.Buffer{}, clock, func(_ context.Context, d time.Duration) error { clock.advance(d); return nil })
 	if err != nil || calls != 2 {

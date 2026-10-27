@@ -24,7 +24,7 @@ func (c Client) SubmitAndWait(ctx context.Context, spec Spec) (*Job, error) {
 	if err != nil {
 		return nil, err
 	}
-	return c.Wait(ctx, j.ID)
+	return c.WaitSubmitted(ctx, j)
 }
 
 // Submit uses the ordinary jobs API. A keyed submission can safely retry one
@@ -72,7 +72,20 @@ func (c Client) GetJob(ctx context.Context, id string) (*Job, error) {
 // successful job read, including completion, and may drain logs. Transient
 // read errors from an update use the same retry policy as status reads.
 func (c Client) Wait(ctx context.Context, id string, updates ...func(*Job) error) (*Job, error) {
-	return c.wait(ctx, id, updates)
+	return c.wait(ctx, id, nil, updates)
+}
+
+// WaitSubmitted waits using an accepted submission receipt. Until the first
+// successful GET, job_unknown is retried for at most five seconds to tolerate
+// transient visibility failures across several one-second cache generations.
+// This adds at most five retry reads/seconds of polling for a missing receipt
+// (individual reads retain their transport timeout), and never resubmits it.
+// Caller cancellation/deadlines and permanent authentication errors still win.
+func (c Client) WaitSubmitted(ctx context.Context, receipt *Job, updates ...func(*Job) error) (*Job, error) {
+	if receipt == nil || receipt.ID == "" {
+		return nil, errors.New("wait-submitted requires an accepted job receipt")
+	}
+	return c.wait(ctx, receipt.ID, receipt, updates)
 }
 
 func waitStatusPause(ctx context.Context, delay time.Duration) error {
@@ -118,10 +131,15 @@ func RetryStatusRead(err error) bool {
 	return err != nil && (!errors.As(err, &httpErr) || httpErr.Status >= 500 || httpErr.Status == 408 || httpErr.Status == 429)
 }
 
-func (c Client) wait(ctx context.Context, id string, updates []func(*Job) error) (*Job, error) {
+func (c Client) wait(ctx context.Context, id string, receipt *Job, updates []func(*Job) error) (*Job, error) {
 	const poll = time.Second
 	delay := poll
-	var last *Job
+	last := receipt
+	clock := RealClock{}
+	var unknownUntil time.Time
+	if receipt != nil {
+		unknownUntil = clock.Now().Add(5 * time.Second)
+	}
 	for {
 		if ctx.Err() != nil {
 			return last, jobWaitError(id, last, ctx.Err())
@@ -131,11 +149,16 @@ func (c Client) wait(ctx context.Context, id string, updates []func(*Job) error)
 			return last, jobWaitError(id, last, ctx.Err())
 		}
 		if err != nil {
-			if !RetryStatusRead(err) {
+			var api *HTTPError
+			if errors.As(err, &api) && api.Status == 404 && api.Code == "job_unknown" && clock.Now().Before(unknownUntil) {
+				delay = min(poll, unknownUntil.Sub(clock.Now()))
+			} else if !RetryStatusRead(err) {
 				return last, err
+			} else {
+				delay = min(delay*2, 10*time.Second)
 			}
-			delay = min(delay*2, 10*time.Second)
 		} else {
+			unknownUntil = time.Time{}
 			last = j
 			for _, update := range updates {
 				if err = update(j); err != nil {
