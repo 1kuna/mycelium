@@ -655,8 +655,8 @@ func nativeCompatibilityExternalChecks() error {
 			check(fmt.Errorf("declared external content unreadable: %s: %v", filepath.Base(path), err))
 		}
 		for _, target := range []string{path, path + ".new"} {
-			if err := os.WriteFile(target, []byte("poisoned"), 0600); !os.IsPermission(err) {
-				check(fmt.Errorf("declared external runtime/model write not permission-denied: %s: %v", filepath.Base(target), err))
+			if err := os.WriteFile(target, []byte("poisoned"), 0600); !os.IsPermission(err) && !errors.Is(err, unix.EROFS) {
+				check(fmt.Errorf("declared external runtime/model write not denied: %s: %v", filepath.Base(target), err))
 			}
 		}
 	}
@@ -792,15 +792,17 @@ func nativeCompatibilityPayload(args []string) error {
 				check(fmt.Errorf("shared model content unreadable: %s: %v", filepath.Base(path), err))
 			}
 			for _, target := range []string{path, path + ".new"} {
-				if err := os.WriteFile(target, []byte("poisoned"), 0600); !os.IsPermission(err) {
-					check(fmt.Errorf("shared cache content write not permission-denied: %v", err))
+				if err := os.WriteFile(target, []byte("poisoned"), 0600); !os.IsPermission(err) && !errors.Is(err, unix.EROFS) {
+					check(fmt.Errorf("shared cache content write not denied: %v", err))
 				}
 			}
 		}
 	case "denied":
 		for i, path := range paths {
-			if _, err := os.ReadFile(path); !os.IsPermission(err) {
-				check(fmt.Errorf("protected content %d read not permission-denied: %v", i, err))
+			// Every target was created and read before launch. Private /tmp
+			// may hide it entirely; readable grants still require exact bytes.
+			if _, err := os.ReadFile(path); !os.IsPermission(err) && !(runtime.GOOS == "linux" && os.IsNotExist(err)) {
+				check(fmt.Errorf("protected content %d read not denied: %v", i, err))
 			}
 		}
 	case "external":
