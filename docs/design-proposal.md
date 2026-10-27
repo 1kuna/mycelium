@@ -4,6 +4,8 @@ Approved design, revised 2026-10-20 by the maintainer decisions in [#80](https:/
 
 Sanitized decision rationale and supersession: [decisions](DECISIONS.md). This design remains the only product spec.
 
+The [one project instruction file amendment](#amendment-one-project-instruction-file-192) records MY-22's merge direction and proposed format. Its separate environment option remains pending the maintainer; neither is implemented by this design change.
+
 ## Why a redesign
 
 v1 tried to do too much at once and never thought about how people would use or test it. It was too heavy to run in production and too hard to test. Mycelium keeps one rule above all others: **every feature must be easy to use, and easy to test on a laptop with no GPU.** If a feature can't meet that bar, it waits.
@@ -2202,3 +2204,340 @@ model-call completion before cutover. Native manager/signature qualification and
 live fleet rollout require separate authorization. The first release containing
 this feature uses the existing installation path; later capable runtimes can
 receive updates. This amendment authorizes implementation, not a live rollout.
+
+## Amendment: one project instruction file (#192)
+
+Design amendment, 2026-10-27, for [#192](https://github.com/1kuna/mycelium/issues/192)
+and the [v1 tracker](https://github.com/1kuna/mycelium/issues/248).
+**Decision boundary:** MY-22 approves merging profiles and extensions into one
+kind of project instruction file. The format, converter and plan below await
+review before implementation. **Project-supplied environments without operator
+registration are an orchestrator recommendation, pending the maintainer.**
+Their inclusion in #248 is not approval. This PR implements no behavior and
+authorizes no consumer cutover, native qualification or fleet operation.
+
+This develops the adapter portion of the
+[earlier note at `3ffe27a6`](https://github.com/1kuna/mycelium/blob/3ffe27a6803a75eb43762d16b191d8df18595329/docs/design-simplify-adapter-placement.md).
+#193 placement and #107 measured planning stay in their own amendments. MY-17
+supplies the one-file outcome; MY-20 makes the agent the author; MY-09 requires
+standalone proof first; MY-12 keeps packages and correctness with their author.
+
+### One authored contract
+
+Use `.mycelium/adapter.yaml`: strict YAML, never prose interpreted by a model
+at execution. One file holds named command/stage entries. Proposed `myce run`
+chooses `default`; `myce run --entry analyze` chooses an entry;
+`--adapter FILE` selects another file. These forms are not implemented yet.
+
+```yaml
+schema: 1
+project: example
+default: analyze
+entries:
+  analyze:
+    source: {git: HEAD, paths: [scripts/]}
+    class: experiment
+    run: {command: [python, scripts/analyze.py]}
+    needs: {platform: cpu, cpu_cores: 1, memory: auto}
+    targets: [{os: linux, arch: amd64, platform: cpu}]
+    # Proposed project environment; pending the maintainer:
+    environment: {backend: uv, python: '3.12', lock_file: uv.lock}
+    inputs: {item.json: data/item.json}
+    outputs: {result.json: results}
+    checks:
+      result: [python, scripts/analyze.py, --check]
+```
+
+The header requires `schema: 1`, `project`, nonempty `entries` and a `default`
+that names an entry. Entries declare a command, exact targets and resource
+needs. Class defaults to `experiment`, source to committed Git `HEAD`, and
+resumability to false. `environment: {}` explicitly uses installed tools; named
+catalog recipes remain usable. A lock reference uses the pending option below.
+Application scripts, manifests, locks and data are existing software assets,
+not additional Mycelium instruction files.
+
+Reuse current field types and validation:
+
+| Field | Meaning and lowering |
+| --- | --- |
+| `run` or `execution` | Exactly one. Existing `run.command` argv or composed `execution.main` plus optional `sidecars`, lowering to the same `RunSpec` and runner. No implicit shell. |
+| `needs`, `targets` | Existing cores, RAM, auto memory, accelerator/device constraints and exact OS/arch/backend alternatives. Select one target, not a test matrix. Owner policy, allowances, maintenance and qualification intersect. |
+| `environment` | Catalog name, installed tools, or pending locked recipe. Composed execution can instead use existing named `environments` and member references; single environment and environment map cannot coexist in a recipe. |
+| `source`, `inputs`, `outputs` | Existing Git/directory/snapshot selection, client-local input mappings and required relative output-name/prefix mappings, with verified file transport. Paths resolve from the project root (invocation root for an explicitly located adapter). |
+| `fan_out`, `workload`, `after` | Existing declared pieces, measurements and accepted-output dependency fields, with their current admission restrictions, keyed gather and cancellation scope. No workflow language. |
+| `checks.result` | Per-attempt argv in the prepared environment and attempt workdir after main succeeds, before output publication. Failure fails the attempt. Omission means command exit plus required-output verification; converted profiles retain their authored check. |
+| `checks.qualification` | Native replay argv. Existing `baselines`, `references` and `sweeps` retain their comparison/measurement contracts and exact qualification identity. They never become per-run success checks. |
+
+An entry requiring different commands, environments or floors uses existing
+complete `variants`, each with one `target`, `needs`, `environments`, `execution`
+and `checks`. Flat execution/needs/targets/environment fields cannot accompany
+variants. Source, I/O, class and pieces belong to the entry; variants do not
+inherit or merge execution recipes. Existing setup, assets, work-type declarations,
+notes, explicit version labels and resumability remain optional advanced fields.
+Extension output-name lists convert into ordinary output maps without changing
+caller-visible filenames. Keep diagnostics and `memory_class: per_item`.
+
+Freeze the selected entry and its reachable recipe/source/input bytes. Its
+digest binds commands, targets, checks and environment bytes; unrelated entries'
+edits do not invalidate it. Reusable kind/program selection uses the existing
+registry/file store as a client-managed immutable upload, not another authored
+profile. Explicit extension selectors and kind/program APIs remain low-level
+interfaces to the same persisted plans. No second executor or registry is needed.
+
+Finite commands do not acquire native baseline requirements by being renamed.
+Native variants keep theirs: environment preparation is not accuracy proof.
+First-demand qualification is new work owned by #250, not behavior supplied
+by preparation today. Current `prepareRegisteredExtension` ends with “check
+required”; `CheckExtension` is host-local and creates local scratch. Extend that
+lifecycle: after preparation, the worker creates check scratch on its own host
+and requests an exact-host/device internal check job for each required work type.
+Reuse the existing check runner/comparison and normal resource, launch and owner
+availability fences; only this exact internal check can run before qualification.
+Persist its check identity so reconnect/repeated demand adopts the same in-flight
+check instead of creating duplicates. The queue keeps useful work waiting until
+the worker publishes a successful baseline comparison tied to the accepted check
+invocation, frozen entry, target, environments and host/component fingerprint.
+Stale/cancelled checks or changed identities cannot qualify. Check failure stays
+visible and unqualified without an idle retry loop; new identity or an explicit
+qualification retry can recheck. No submitter-local scratch path, operator SSH or
+manual worker setup/check command is part of this journey. References must
+already exist. A cold fake worker must prepare, qualify and run useful work from
+one invocation, and a warm repeat must reuse matching evidence. MY-19 still
+requires cross-platform parity before splitting.
+`fan_out.pieces: [{key: item-a, args: [...]}]` keeps current maximums, wave
+membership, affected-wave retries and exact-attempt publication. Result checks
+run on each ordinary attempt/wave under its execution contract, not once on the
+logical parent in place of members. Repeated `--input` still supports independent
+items. Arguments after `--` append literally as today, never replace qualified
+commands. #180 owns the existing result-check/dependent-job validation boundary;
+unsupported combinations must fail until that slice lands.
+
+Shared servers/models/pins retain their existing endpoint/catalog contracts.
+A native sidecar already fits this file; long-lived server authoring is later
+work. This merge does not require rewriting serving consumers. There remains
+one binary, SQLite queue and scheduler.
+
+### Proposed option: project-supplied environments
+
+**Pending the maintainer; do not implement this option before a ruling.**
+Recommend carrying a project's uv or Pixi lock with the adapter, without operator
+registration or queue restart. Alternative: merge the file format while retaining
+catalogs and queue-readable inline locks. That delivers MY-22 but cannot meet
+#192's no-operator first-run criterion for fresh dependencies. Until decided,
+keep current behavior and leave that part of #192 open.
+
+Reuse `EnvironmentRecipe`, composed extension bundles, the file store and the
+uv/Pixi builders. Missing behavior is client-carried finite-command recipes and
+worker-specific failure propagation, not another package manager.
+
+1. Client snapshots use `uv.lock` plus `pyproject.toml` and declared Python,
+   existing pinned `requirements.txt`, or `pixi.lock` plus adjacent `pixi.toml`
+   and optional Pixi environment name. Include referenced activation/build
+   inputs. Local workspace dependencies require explicit installable snapshots;
+   reject unavailable paths instead of using another checkout. Keep existing
+   small-description limits; large immutable inputs use file references.
+2. Existing authenticated preflight/upload verifies sizes/hashes. Queue validation
+   checks backend, companions, bytes and targets, then persists immutable recipe
+   references with accepted intent. This new form never reads the submitter's
+   `lock_file` as a queue-local path. Lock/manifest bytes, Python/backend, selected
+   Pixi environment and build inputs bind both intent and cache identity. Changing
+   bytes at an unchanged path changes intent; explicit-key reuse conflicts.
+   Identical bytes at different author paths retain identity. Accepted-key replay
+   uses its original snapshot before re-reading source/catalogs.
+3. Compatibility requires declared exact OS/architecture/backend targets, lock
+   platform coverage and successful preparation on that worker. Explicitly map
+   Pixi platform names to Go OS/arch targets. `cpu` alone does not promise binary
+   portability. uv uses frozen installation with the target interpreter; Pixi
+   uses `--locked` and rejects manifest disagreement. No re-solving, CPU fallback,
+   alternative package/backend, driver install or host-service changes.
+4. Reuse stable cache prefixes, single-flight locks, exact preparation launch
+   authorization, cancellation/maintenance custody and atomic ready publication.
+   The content-derived key includes the full locked recipe, target and relevant
+   backend/toolchain identity, not just a filename or lock hash. Successful-build
+   evidence is worker/key/fingerprint-specific; another worker must prepare or
+   verify its own usable prefix. Cached installation is not native qualification.
+5. A real build failure excludes only that worker/target for that recipe identity.
+   Status shows environment hash, worker, target, preparation failure and log
+   reference; another compatible worker can build/run. This changes today's
+   `reconcileEnvironments`, which can terminally fail waiting jobs on a fitting
+   worker's failure. If all known compatible workers fail, keep accepted demand
+   queued with an explicit no-buildable-worker reason until repair, cancellation
+   or its existing deadline. Unknown/offline capacity is neither success nor a
+   proven failure.
+6. Persist failure evidence for the same key/fingerprint across restart. New
+   recipe/relevant host identity or an explicit retry of that worker's failed
+   preparation permits another build; idle polling does not. Planned stops and
+   temporary disk-headroom refusals are visible holds that resume when their
+   admission condition changes, not permanent package failures. Retrying a
+   build never clears a native qualification failure.
+7. Bound storage with existing environment-cache allowance, free-space floor,
+   download budget, LRU eviction and use/build locks. Published, partial, retired,
+   package/download and asset bytes stay in their existing guarded budgets;
+   active prefixes cannot be evicted. No extra quota or fixed build-time cap.
+   Builders and payloads never receive `MYCE_TOKEN`. Builds remain trusted code
+   under the worker user, not a sandbox.
+
+Prepared environments are shared immutable inputs by contract. Model downloads
+and mutable caches belong in attempt scratch or explicit hashed assets, never
+the package prefix (#192's media-pilot evidence). Retain bytecode suppression
+and document cache paths; do not claim filesystem isolation of arbitrary native
+code. Hashing, transfer, installation and baseline comparison stay outside
+`q.mu`, with identity/authorization/cancellation rechecks before the small commit.
+
+### One command, verified completion
+
+Proposed `myce run` freezes, submits, waits in the foreground and downloads
+declared accepted outputs with size/SHA-256 verification into private client
+result storage. Success requires command/check success, accepted-attempt
+publication and requested local verification. Explicit large-output remote
+references remain an option and are reported as remote. Dirty Git source refuses
+with an actionable message. The instruction file and explicitly referenced locks
+may be frozen uncommitted, separately from the clean selected source. Explicit
+directory/snapshot source keeps its existing safety rules and no secret-scan
+promise.
+
+Persist keys, frozen intent and receipts before network I/O. A fresh invocation
+creates a new operation; resume uses that operation's saved key and explicit
+repeat intentionally creates another. Low-level keyed API replay, cancellation
+and expiry do not change. Keep receipt recovery during migration; new receipts
+live in private client state without requiring a project ignore rule. Optional
+async delivery retains #156/#157's observer/notifier and private harness binding;
+without a working binding, wait in the foreground. Submission is never evidence
+of an armed wake or verified result. Plain `myce run -- CMD` without an adapter
+keeps its current installed-tool behavior/defaults; it does not promise portable
+source/dependencies or checked artifacts. Queue failures never fall back locally.
+
+The earlier note counts a documented locked-CPU journey: 20 actions/20 concepts
+and three operator actions, versus a proposed six author actions/11 concepts
+and zero operator actions. These are procedure counts, not measured runtime.
+The intended user surface is agent writes one file, then runs one command;
+inventory, lock generation and deliberate source selection remain agent work.
+Re-measure a fresh CPU fixture during implementation: author commands, operator
+interventions, Mycelium files, skill instructions and verified retrieval. The
+zero-operator claim depends on approval/implementation of the environment option.
+
+### Migration: one-shot converter, fix forward
+
+Choose a **one-shot source converter**, not runtime compatibility readers for a
+deprecation window. MY-03 favors one current runtime; two permanent readers
+retain competing concepts and validation drift. Cost: one reviewed source/caller
+change per maintained consumer. Queued jobs, keys, frozen plans, output refs,
+checkpoints and exact custody remain unchanged. Retire old source-authoring
+entry points, not the internal decoder needed by saved bundles. Today preparation
+calls `extensionFromFiles` and execution calls `ReadExtension` on frozen
+`extension.yaml`; keep those paths (including the exact legacy/composed schemas,
+bytes and digest verification) for persisted job/registry snapshots. New adapter
+entries lower into the same execution representation. Internal snapshot decoding
+cannot accept a mutable author path or register a new old-format file. It remains
+while any retained snapshot needs it; consumer conversion alone cannot justify
+its deletion. This is decoding durable v3 intent, not an old runtime fallback.
+No accepted identity or digest is rewritten and no rollback layer is added.
+
+Proposed `myce adapter convert` reads explicitly selected profiles/extensions
+and emits one adapter plus field/caller-change report without overwriting its
+sources. An explicit apply publishes the reviewed output. Original sources stay
+in Git history. Refuse conflicting names, missing bytes and unrepresentable
+fields; never guess targets, references, outputs or locks. Preserve catalog names;
+copying their exact recipe bytes into a project requires approval of the pending
+option. Never invent a lock for installed tools.
+
+Profiles retain source, argv appending, env, project/class, targets/allow-lists,
+resources, memory comparability, common/item input identity, outputs/diagnostics
+and notifier recovery. Their `check` becomes `checks.result`. Extensions retain
+complete variants, setup/assets, named environments, sidecar caps/readiness,
+work types, baselines, references/sweeps and resumability; their `check` becomes
+`checks.qualification`. Changed frozen digests require fresh native qualification,
+not a relabelled old pass. Observations remain historical and reusable only when
+their complete comparability identity still matches.
+
+Stage converter/new reader first, then convert maintained callers and remove old
+YAML authoring readers/init paths in the cutover batch. This is implementation
+staging, not a supported dual-format window or automatic fallback. Retirement
+requires verified consumer conversion, not an arbitrary date. Old new-submission
+commands return typed conversion guidance; accepted-key replay, cancellation,
+receipt recovery and serialized job/registry snapshots keep working through
+the retained internal decoder. Retirement additionally requires a laptop restart
+proof: accept a native job before cutover, restart queue/worker with empty local
+extension/environment caches, fetch/decode its original snapshot, qualify that
+exact identity and execute the job, then verify accepted output and keyed replay.
+The original bundle, digest and submission fingerprint must remain unchanged.
+Incomplete conversion or failed cold-recovery proof leaves the retirement issue
+open and source-authoring entry points intact until cutover.
+
+Read-only source inventory on 2026-10-27 establishes these migration obligations,
+not native execution evidence. Keep private paths, host IDs, data and receipts
+in consumer repos; use sanitized fixtures in Mycelium.
+
+| Consumer | Preserve and prove at its existing seam |
+| --- | --- |
+| Verso | Two offline-suite entries retain Pixi CPU tools, wrapper, exact target and JUnit check. Its native naming extension retains CUDA variant, sidecar, baseline/result names and production submit/key/cancel seam. Model endpoints remain unchanged; the consumer decides Docker/native direction. |
+| Forge | Backend/frontend/tooling entries retain targeted/full distinctions, macOS-only suites, placement restrictions, Python/Node prerequisites and markers/archive. Copy exact temporary queue-side lock bytes only under the approved environment option; do not infer Linux qualification from a list. |
+| Valence | Pytest/browser-e2e entries retain explicit Git bundle input and stale-bundle check (source omits `.git`), resources/thread limits, installed Python/Node/browser prerequisites and success markers. Conversion does not substitute a new environment. |
+| video-editor | Render/canary and per-item catalog entries retain frozen scene/binary inputs, snapshot identities, large frame archives, semantic checks, private placement and existing holds. Conversion must not launch another render. |
+| Cassette | Generation/validation/evaluation entries retain the exact native CPU runtime/source closure, checksum checks, seed/candidate coverage, artifacts and holds. Historical loader alternatives stay historical; new uv/Pixi runtimes or GPU ports need separate parity/native proof. |
+
+Convert Mycelium's gate/go-test profiles and starter extensions first. Prove a
+small CPU fixture and fake native variant in `myce dev`, then compare sanitized
+consumer conversions through the same lowering. Consumer owners apply changes,
+update harness/CI callers and record one small authorized accepted-result proof
+per active entry type, requalifying changed native digests. A held consumer stays
+held with owner/next action and blocks removal of any reader it still uses.
+Retire redundant docs/examples and update the offload skill with cutover.
+
+### Implementation plan and acceptance
+
+No implementation dispatch before the orchestrator accepts this plan. Environment
+slices additionally need a maintainer ruling. Each slice gets focused behavior,
+security and incident tests plus quick; full runs once per integration batch.
+Use injected clocks for queue decisions and real small CPU commands in dev;
+native acceptance is separate. Recheck #180, #187 and #156 ownership at dispatch.
+
+1. **[Unified file/lowering (#250)](https://github.com/1kuna/mycelium/issues/250).** Strict entry/flat-or-variant parsing, validation and
+   `run --entry`, reusing source staging, runner and fan-out. Acceptance: one CPU
+   file produces a checked artifact in dev; a fake native variant keeps exact
+   qualification; result/qualification checks cannot substitute; pieces preserve
+   coverage, cancellation and stale-result fences; unknown fields, conflicting
+   recipes and unsupported dependency forms fail before launch. Use current
+   installed/catalog environments initially. Implement worker-triggered check
+   scheduling, local scratch and exact evidence publication described above:
+   one invocation on a cold fake worker prepares, qualifies the exact variant
+   and runs useful work with no manual setup/check; a warm repeat reuses evidence,
+   while failed/stale checks cannot qualify. Checks obey cancellation/maintenance.
+2. **[Portable recipe submission (#251), conditional](https://github.com/1kuna/mycelium/issues/251).** After maintainer approval,
+   snapshot/upload uv/Pixi inputs and bind them to intent. Acceptance: a lock
+   present only on the submitter works with an unrelated catalog and no restart;
+   in-place edits change intent, explicit-key mutation conflicts, corrupt bytes,
+   missing companions and Pixi mismatch fail, replay/restart keeps its snapshot.
+3. **[Per-worker preparation eligibility (#252), conditional](https://github.com/1kuna/mycelium/issues/252).** After 2, reuse builder,
+   cache/status and change failure propagation. Acceptance: two fake workers,
+   one failed build and one success, finish one accepted job on the latter;
+   all-failed status explains its queued hold; disk holds/planned stops do not
+   poison compatibility; cache reuse, fingerprint changes, explicit retry and
+   cancel/maintenance during preparation preserve custody and token exclusion.
+4. **[Converter/internal dogfood (#253)](https://github.com/1kuna/mycelium/issues/253).** After 1; use 2 only if approved. Acceptance:
+   repeatable non-destructive conversion, preserved execution/I/O/check fences,
+   reported missing/unrepresentable inputs, own gate/starter migration, and
+   unchanged recovery for accepted jobs/receipts, including the original frozen
+   extension YAML decoder and digest verification.
+5. **[Consumer cutover/reader retirement (#254)](https://github.com/1kuna/mycelium/issues/254).** After 4 and any applicable approved
+   environment slices. Acceptance: reviewed five-consumer files/callers with
+   evidence or explicit holds; no active caller requires a removed reader;
+   changed native digests requalify; old new-submission calls give conversion
+   guidance while keyed recovery works. Require the pre-cutover native job's
+   cold-cache queue/worker restart proof above; retain internal snapshot decoders
+   while referenced, even after source-authoring readers retire.
+   Update guides/examples/skill without
+   weakening checks, widening targets or consuming unaccepted results.
+6. **[One-command completion/recovery (#156)](https://github.com/1kuna/mycelium/issues/156).** Refines #156/#157; after 1 and, for fresh
+   locked-project acceptance, 2–3. Acceptance: foreground verified retrieval,
+   lost-reply resume submits once, intentional repeat twice, expiry/corruption
+   fails visibly, absent async binding waits, queue-down never runs locally.
+   Recount the fresh-project journey and shorten the skill; claim no operator
+   work only when the environment option is approved and implemented.
+
+**Current state:** design only, based on main `68d1f04e`; MY-22 committed first.
+Consumer inventory is read-only source evidence, not deployment proof.
+**Next owner:** orchestrator reviews the plan and obtains the separate environment
+ruling before assigning approved slices. Conditional issues revisit on that
+ruling. #192 and #248 remain open until live acceptance; merging this document
+alone removes no consumer support.
