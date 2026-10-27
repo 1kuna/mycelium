@@ -2104,9 +2104,14 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 }
 
 // The bounded legacy adapter retains its original scalar recovery limit.
-func (q *Queue) workerHasOtherAttempt(machine, session, job string) bool {
+func (q *Queue) workerHasOtherAttempt(machine, session, job string, attempt int) bool {
 	for _, j := range q.liveJobs() {
-		if j.Machine == machine && j.Session == session && j.ID != job && (j.State == "running" || j.State == "stopping") {
+		if j.Machine == machine && j.Session == session && !(j.ID == job && j.Attempt == attempt) && (j.State == "running" || j.State == "stopping") {
+			return true
+		}
+	}
+	for _, r := range q.s.HostReleases {
+		if !r.Preparation && r.Machine == machine && !(r.Job == job && r.Session == session && r.Attempt == attempt) {
 			return true
 		}
 	}

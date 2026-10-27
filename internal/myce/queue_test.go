@@ -470,6 +470,12 @@ func TestThreeAttempts(t *testing.T) {
 		if err := q.Tick(); err != nil {
 			t.Fatal(err)
 		}
+		// Reusing the same worker requires cleanup of its exact lost copy.
+		released := result(r, false)
+		released.ReleaseOnly = true
+		if err := q.Complete(released); err != nil {
+			t.Fatal(err)
+		}
 	}
 	requireState(t, q, j.ID, "failed")
 	if !strings.Contains(job(t, q, j.ID).Reason, "3 infrastructure losses") {
@@ -670,11 +676,18 @@ func TestResumableThreeInfrastructureLosses(t *testing.T) {
 	j := submit(t, q, spec("experiment"))
 	m := machine("one", "fake")
 	for i := 0; i < 3; i++ {
-		if check(t, q, m, nil).Job == nil {
+		r := check(t, q, m, nil).Job
+		if r == nil {
 			t.Fatal("no assignment")
 		}
 		c.Advance(LossAfter)
 		check(t, q, observer(), nil)
+		// Reusing the same worker requires cleanup of its exact lost copy.
+		released := result(r, false)
+		released.ReleaseOnly = true
+		if err := q.Complete(released); err != nil {
+			t.Fatal(err)
+		}
 	}
 	got := job(t, q, j.ID)
 	if got.Losses != 3 || got.State != "failed" {

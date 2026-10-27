@@ -2076,6 +2076,37 @@ regressions individually. Native throughput and consumer integration remain
 separate work.
 
 
+## Whole-parent dependent fan-out (#180; approved scope 2026-10-26)
+
+This task authorizes the smallest extension of #175: omit `after.piece` to
+depend on an already submitted fan-out parent **as a whole**, in the same
+project. `after.outputs` explicitly maps local input names to gathered
+`KEY/OUTPUT_NAME` names. The consumer may be an ordinary job or another declared
+fan-out. For a fan-out consumer, explicitly map keyed local inputs (for example
+`first/input: first/out` and `second/input: second/out`); its existing piece args
+and wave manifest select those inputs. All mapped inputs are immutable common
+inputs staged through the existing transport for each wave. There is no implicit
+key substitution, input discovery or per-wave input filtering.
+
+Readiness requires parent success, including every declared child, even when
+only a subset of its outputs is mapped. It binds the gathered references and
+accepted producing executions by key in `dependency.executions`; the existing
+single `dependency.execution` applies only to a selected-piece edge. The queue
+persists bindings and fixed child membership in its existing SQLite state.
+An upstream failure fails a blocked consumer with `upstream_failed` and a clear
+reason, without a runtime attempt. Upstream cancellation aborts nonterminal
+dependents and their children transitively, fences future consumers, and includes
+their exact attempts in release acknowledgement. Terminal results remain intact.
+Readiness timing, retention, transport verification and stale-attempt fencing
+retain #175's contract; no I/O is added under the queue lock.
+
+`after.piece` keeps early per-piece readiness for ordinary consumers. A fan-out
+consumer uses the whole-parent form only. There is still one existing-parent edge
+per submission: no general DAG language, multiple-parent joins, ordinary-job
+sources, forward references, dynamic enumeration, timed accumulation, atomic graph
+submission, or automatic semantic reduction. Broader stage planning remains
+outside slice 4. Native consumer qualification and deployment are separate work.
+
 ## Preserve scarce machines (slice 6, #193; MY-18)
 
 The independently authorized placement slice implements MY-18 without changing

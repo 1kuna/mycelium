@@ -54,6 +54,11 @@ func validateFanOut(s Spec) error {
 	for name := range s.Inputs {
 		names = append(names, name)
 	}
+	if s.After != nil {
+		for name := range s.After.Outputs {
+			names = append(names, name)
+		}
+	}
 	for _, p := range f.Pieces {
 		if !extensionName.MatchString(p.Key) || p.Key == "." || p.Key == ".." || seen[p.Key] {
 			return errors.New("fan_out piece keys must be unique clean names")
@@ -226,7 +231,7 @@ func (q *Queue) fanOutComponents(j *Job) ([]batchComponent, map[string]*Job) {
 }
 
 func (q *Queue) fanOutCandidate(j *Job, m *Machine) *Job {
-	if j.State != "queued" || cancelled(j) || j.FanOut == nil || j.FanOut.Next >= len(j.Spec.FanOut.Pieces) || !q.placementAllowed(j, m) || !q.checkpointReady(j, m) {
+	if j.State != "queued" || !dependencyReady(j) || cancelled(j) || j.FanOut == nil || j.FanOut.Next >= len(j.Spec.FanOut.Pieces) || !q.placementAllowed(j, m) || !q.checkpointReady(j, m) {
 		return nil
 	}
 	components, candidates := q.fanOutComponents(j)
@@ -385,5 +390,5 @@ func (q *Queue) maintainFanOut() {
 
 // A public snapshot can omit nil collections without losing keyed membership.
 func batchManifest(j *Job) map[string]any {
-	return map[string]any{"parent": j.Batch.Parent, "pieces": j.Batch.Pieces, "concurrency": j.Batch.Concurrency, "args": j.Spec.Args, "inputs": slices.Sorted(maps.Keys(j.Spec.Inputs)), "files": slices.Sorted(maps.Keys(j.Spec.Files)), "outputs": slices.Sorted(maps.Keys(j.Spec.Outputs))}
+	return map[string]any{"parent": j.Batch.Parent, "pieces": j.Batch.Pieces, "concurrency": j.Batch.Concurrency, "args": j.Spec.Args, "inputs": slices.Sorted(maps.Keys(jobInputPaths(j))), "files": slices.Sorted(maps.Keys(jobInputFiles(j))), "outputs": slices.Sorted(maps.Keys(j.Spec.Outputs))}
 }

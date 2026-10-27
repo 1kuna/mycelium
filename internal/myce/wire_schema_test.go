@@ -76,7 +76,8 @@ func generatedJobSchema(t *testing.T) []byte {
 	}
 	binding := defs["PieceBinding"].(map[string]any)["properties"].(map[string]any)
 	binding["state"].(map[string]any)["enum"] = []string{"blocked", "ready"}
-	binding["execution"].(map[string]any)["description"] = "Immutable producing child job ID and accepted attempt; never the latest attempt."
+	binding["execution"].(map[string]any)["description"] = "Immutable producing child job ID and accepted attempt for a selected-piece edge; zero value for a whole-parent edge."
+	binding["executions"].(map[string]any)["description"] = "Whole-parent edge: accepted producing executions keyed by mapped producer piece. Immutable across retry and restart."
 	job := defs["Job"].(map[string]any)["properties"].(map[string]any)
 	job["cancellation"].(map[string]any)["description"] = "Read-only cancellation acknowledgement after durable cancellation. Same aggregate release as cancel, including descendants; not_applicable explicitly settles never-attempted work without physical-release evidence."
 	job["cancellation_scope"].(map[string]any)["description"] = "Read-only retained fan-out declaration: every piece key, materialization/acceptance, optional wave ID, registered dependent IDs, and flat descendant job/release statuses. Future submissions appear on subsequent reads."
