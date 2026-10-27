@@ -104,7 +104,11 @@ func TestNativeIsolationNetworkDeclaration(t *testing.T) {
 	}
 	defer listener.Close()
 	_, port, _ := net.SplitHostPort(listener.Addr().String())
-	work := t.TempDir()
+	spool := t.TempDir()
+	work := filepath.Join(spool, "job-files", "network", "1")
+	if err := os.MkdirAll(work, 0700); err != nil {
+		t.Fatal(err)
+	}
 	for _, tc := range []struct {
 		name                      string
 		network, control, sidecar bool
@@ -121,7 +125,7 @@ func TestNativeIsolationNetworkDeclaration(t *testing.T) {
 			if tc.sidecar {
 				ports = []string{port}
 			}
-			if err := w.isolateNativeCommand(cmd, work, work, map[string]string{}, ports, tc.network); err != nil {
+			if err := w.isolateNativeCommand(cmd, spool, work, map[string]string{}, ports, tc.network); err != nil {
 				t.Fatal(err)
 			}
 			if err := cmd.Run(); (err == nil) != tc.want {
@@ -145,11 +149,15 @@ func TestNativeIsolationExternalEgress(t *testing.T) {
 		t.Fatal("external fixture unavailable", err)
 	}
 	conn.Close()
-	work := t.TempDir()
+	spool := t.TempDir()
+	work := filepath.Join(spool, "job-files", "network", "1")
+	if err := os.MkdirAll(work, 0700); err != nil {
+		t.Fatal(err)
+	}
 	for _, network := range []bool{false, true} {
 		cmd := exec.Command("/usr/bin/nc", "-z", "-w", "3", host, port)
 		cmd.Dir = work
-		if err := (Worker{}).isolateNativeCommand(cmd, work, work, map[string]string{}, nil, network); err != nil {
+		if err := (Worker{}).isolateNativeCommand(cmd, spool, work, map[string]string{}, nil, network); err != nil {
 			t.Fatal(err)
 		}
 		if err := cmd.Run(); (err == nil) != network {

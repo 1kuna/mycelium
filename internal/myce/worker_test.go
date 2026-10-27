@@ -305,7 +305,12 @@ func workerWithPreparedCheckpoint(t *testing.T, w Worker, store *workerStore, pa
 	// This fixture forces a timeout; use a short injected budget, then restore policy.
 	budget := store.nasPrepare.timeout
 	store.nasPrepare.timeout = time.Millisecond
-	process, err := w.start(store, payload)
+	var process *process
+	var err error
+	await(t, func() bool {
+		process, err = w.start(store, payload)
+		return !errors.Is(err, errWorkerCheckpoint) || !strings.Contains(err.Error(), "input copy pending")
+	})
 	store.nasPrepare.timeout = budget
 	close(release)
 	if process != nil || !errors.Is(err, errWorkerCheckpoint) || !store.checkpointUnavailable {
