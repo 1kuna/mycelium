@@ -26,10 +26,11 @@ func TestPreDeployFullSystem(t *testing.T) {
 	// Real subprocess grace periods must advance with elapsed time even when a
 	// loaded host drops ticker deliveries. Reuse dev's real-time-plus-offset
 	// clock; queue fault jumps remain independent of worker retry/grace time.
-	clock := &devClock{}
+	epoch := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	clock := &devClock{offset: epoch.Sub(RealClock{}.Now())}
 	workerClocks := map[string]*devClock{}
 	for _, gpu := range []string{"cuda", "xpu", "metal"} {
-		workerClocks[gpu] = &devClock{}
+		workerClocks[gpu] = &devClock{offset: clock.offset}
 	}
 	advance := func(c *devClock, d time.Duration) {
 		t.Helper()
