@@ -21,6 +21,13 @@ differed. Lines marked **Check:** are the least certain; confirm them with
 - Only the user's own trusted commands should run on the cluster. Jobs run with
   the installing account's permissions.
 
+## Install agent instructions
+
+Install the repository's `skills/mycelium-offload/` directory into the agent's
+skill directory using [these commands](agent-offload.md#install-the-agent-skill).
+Keep the supporting files alongside `SKILL.md`. Use this skill when preparing
+the first project profile and for subsequent heavy commands.
+
 ## 0. Ask the user
 
 1. Which computer is the **hub**? Pick one that stays on, running Linux or an

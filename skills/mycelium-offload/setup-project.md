@@ -2,9 +2,8 @@
 
 Use this when the project has no profile that fits its heavy work. The result is
 a committed profile, a locked environment handed to the queue operator, one
-proven end-to-end run, and a recorded switch. A `myce profile init` scaffold is
-planned ([mycelium#156](https://github.com/1kuna/mycelium/issues/156)) but does
-not exist yet, so write the files by hand.
+proven end-to-end run, and a recorded switch. Start with `myce profile init --name NAME` from the project root, then review
+the generated starter. See [profile initialization](https://github.com/1kuna/mycelium/blob/main/docs/agent-offload.md#initialize-a-profile) for commands, environment prerequisites and source handling.
 
 Canonical references: [agent-offload.md](https://github.com/1kuna/mycelium/blob/main/docs/agent-offload.md#project-profiles),
 [job reference](https://github.com/1kuna/mycelium/blob/main/docs/job-reference.md#batch-yaml)
