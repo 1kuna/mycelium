@@ -189,6 +189,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			p.docker.mu.Unlock()
 			if status != "running" {
 				diagnostics.DockerCleanup = status
+				report.DockerCause = diagnostics.DockerCause
 			}
 		}
 		if needsCheckpoint(&a.job) {

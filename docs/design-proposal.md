@@ -2605,7 +2605,8 @@ The queue records health events from its existing check-ins, maintenance clock a
 attempt outcomes; no agent or user polls for alerts. V1 detects only measured disk
 free space below the existing guard (1%, minimum 256 MiB), an unhealthy or stale
 host, a production attempt lost to machine silence or a start/observation/cleanup
-timeout, and checkpoint/NAS/file storage unavailable continuously for a configurable
+timeout (including diagnostics while Docker still retains custody), and
+checkpoint/NAS/file storage unavailable continuously for a configurable
 duration (default five minutes). Planned leave and host maintenance suppress host
 alerts; planned and operator stops do not count as lost production attempts.
 A wholly quiet fleet still emits stale-host alerts even while loss/retry decisions
@@ -2634,3 +2635,9 @@ a hook to deliver within 30 seconds. Health thresholds use the injected queue cl
 This slice does not implement #200's extension-configuration or architecture-caused
 workload-failure detectors, trend analysis or automatic issue filing. Those broader
 acceptance criteria remain open after v1.
+
+Docker heartbeats carry `docker_cause` on each exact attempt report, avoiding
+attribution from an aggregate host error when several jobs share a host. Legacy
+single-attempt reports can use their unambiguous host diagnostic. A pending cleanup
+result can alert before release; neither alert path changes execution state or
+releases resources. Stale attempt diagnostics cannot emit a production-loss alert.
