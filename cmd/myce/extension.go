@@ -25,10 +25,12 @@ func extensionCommand(args []string) error {
 	root := f.String("root", myce.DefaultExtensionRoot(), "local extension library and download cache")
 	environmentRoot := f.String("environment-cache", "", "existing local environment cache for variant setup/check")
 	environmentLimit := f.Int64("environment-cache-bytes", 0, "environment cache bytes (omitted: auto-size from cache disk)")
-	queue := f.String("queue", env("MYCE_QUEUE", "http://127.0.0.1:7331"), "queue address")
+	queue := f.String("queue", env("MYCE_QUEUE", ""), "queue address")
 	token := f.String("token", env("MYCE_TOKEN", ""), "queue token (prefer MYCE_TOKEN)")
 	// DefValue is only help text; keep the actual environment default private.
 	f.Lookup("token").DefValue = ""
+	config := f.String("config", "", "installed config (default: installed worker, then queue)")
+	joining := f.String("joining-file", env("MYCE_JOINING_FILE", ""), "privately supplied invitation (discovery plus saved address)")
 	static := f.Bool("static", false, "validate folder without executing or qualifying")
 	host := f.String("host", "", "this host's configured worker host ID (local execution only)")
 	digest := f.String("digest", "", "require exact extension SHA-256")
@@ -41,7 +43,16 @@ func extensionCommand(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	client := myce.Client{URL: *queue, Token: *token}
+	// Local operations remain usable without installed authority. Resolve the
+	// shared pinned client only for operations that contact the queue.
+	var client myce.Client
+	if args[0] == "add" && !*local || args[0] == "check" && !*static {
+		var err error
+		client, err = runClient(*config, *joining, *queue, *token)
+		if err != nil {
+			return err
+		}
+	}
 	switch args[0] {
 	case "add":
 		if f.NArg() != 1 {
@@ -53,9 +64,6 @@ func extensionCommand(args []string) error {
 		}
 		// Queue first: a frozen-version refusal must not leave a misleading local add.
 		if !*local {
-			if *token == "" {
-				return errors.New("set MYCE_TOKEN or use --local")
-			}
 			if err := client.Call(ctx, "POST", "/api/extensions", e, nil); err != nil {
 				return err
 			}

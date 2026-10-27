@@ -2,10 +2,17 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/tls"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -58,8 +65,23 @@ variants:
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Setenv("MYCE_QUEUE", d.URL)
-	t.Setenv("MYCE_TOKEN", "fixture-not-inherited")
-	if err := extensionCommand([]string{"add", "--local", "--root", root, folder}); err != nil {
+	t.Setenv("MYCE_TOKEN", "")
+	t.Setenv("MYCE_JOINING_FILE", "")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	config := filepath.Join(home, ".local", "share", "mycelium", "worker", "config.json")
+	if err := os.MkdirAll(filepath.Dir(config), 0700); err != nil {
+		t.Fatal(err)
+	}
+	tokenFile := filepath.Join(home, "token")
+	if err := os.WriteFile(tokenFile, []byte("MYCE_TOKEN=fixture-not-inherited\nMYCE_QUEUE="+d.URL+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	saved, _ := json.Marshal(myce.ServiceConfig{Role: "worker", Queue: d.URL, EnvironmentFile: tokenFile})
+	if err := os.WriteFile(config, saved, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := extensionCommand([]string{"add", "--root", root, folder}); err != nil {
 		t.Fatal(err)
 	}
 	for _, action := range []string{"setup", "check"} {
@@ -70,5 +92,83 @@ variants:
 	reports := myce.LocalExtensionReports(root, "fake", "")
 	if len(reports) != 1 || reports[0].Target == nil || reports[0].Target.OS != runtime.GOOS {
 		t.Fatal("variant target lost", reports)
+	}
+}
+
+func TestExtensionCLIInstalledPinnedAuthority(t *testing.T) {
+	t.Setenv("MYCE_TOKEN", "")
+	t.Setenv("MYCE_QUEUE", "")
+	t.Setenv("MYCE_JOINING_FILE", "")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	folder := filepath.Join(home, "source")
+	if err := extensionCommand([]string{"init", "--name", "fixture", folder}); err != nil {
+		t.Fatal(err)
+	}
+	requests := 0
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if r.Header.Get("Authorization") != "Bearer fixture-private-authority" {
+			t.Error("missing installed authority")
+		}
+		if r.URL.Path == "/api/extensions" && r.Method == "POST" {
+			w.Write([]byte(`{}`))
+			return
+		}
+		// Check must reach the target resolver with the same pinned authority.
+		http.Error(w, "fixture-target-stop", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	hash := sha256.Sum256(server.Certificate().Raw)
+	joining := filepath.Join(home, "joining.json")
+	if err := myce.WriteInvitation(joining, myce.Invitation{Version: 1, Fingerprint: hex.EncodeToString(hash[:]), Token: "fixture-private-authority", Address: server.URL}); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(home, ".local", "share", "mycelium", "queue", "config.json")
+	if err := os.MkdirAll(filepath.Dir(config), 0700); err != nil {
+		t.Fatal(err)
+	}
+	saved, _ := json.Marshal(myce.ServiceConfig{Role: "queue", JoiningFile: joining})
+	if err := os.WriteFile(config, saved, 0600); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	for _, flags := range [][]string{nil, {"--config", config}, {"--joining-file", joining}} {
+		args := append([]string{"add", "--root", root}, flags...)
+		if err := extensionCommand(append(args, folder)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if requests != 3 {
+		t.Fatalf("registration requests: %d", requests)
+	}
+	err := extensionCommand([]string{"check", "--root", root, "--host", "fixture-host", "fixture@1"})
+	if err == nil || !strings.Contains(err.Error(), "runtime check requires") || requests != 4 {
+		t.Fatalf("check authority: %v, requests=%d", err, requests)
+	}
+	wrong := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Error("credential sent to wrong certificate") }))
+	identity, err := myce.LoadJoiningIdentity(filepath.Join(t.TempDir(), "identity"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := identity.TLS()
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrong.TLS = &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}
+	wrong.StartTLS()
+	defer wrong.Close()
+	if err := extensionCommand([]string{"add", "--root", root, "--queue", wrong.URL, folder}); err == nil {
+		t.Fatal("accepted wrong certificate")
+	}
+	// Local commands accept authority flags without needing readable authority.
+	for _, args := range [][]string{
+		{"list", "--root", root, "--config", "missing"},
+		{"check", "--static", "--joining-file", "missing", folder},
+		{"add", "--local", "--root", root, "--config", "missing", folder},
+	} {
+		if err := extensionCommand(args); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
