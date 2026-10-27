@@ -46,7 +46,7 @@ func TestFileTransferSingleWriteProgress(t *testing.T) {
 			done := make(chan []byte, 1)
 			go func() {
 				var got []byte
-				buf := make([]byte, 256)
+				buf := make([]byte, 512)
 				for {
 					n, err := receiver.Read(buf)
 					got = append(got, buf[:n]...)
