@@ -257,10 +257,10 @@ func TestExtensionJobFilesStayRelativeAndAttemptSpecific(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(j.Spec.Run.Workdir, "output"), []byte("result"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.publishExtensionFiles(j); err != nil {
+	if err := w.publishExtensionFiles(j, j.Spec.Run.Workdir); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.publishExtensionFiles(j); err == nil {
+	if err := w.publishExtensionFiles(j, j.Spec.Run.Workdir); err == nil {
 		t.Fatal("output overwritten")
 	}
 	if _, err := os.Stat(filepath.Join(root, "results", "job", "1", "output")); err != nil {

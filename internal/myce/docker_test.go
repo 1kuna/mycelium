@@ -355,7 +355,7 @@ func (c *dockerTestClock) advance(d time.Duration) {
 // Image-job fixtures opt in explicitly; ordinary machine fixtures stay native.
 func dockerMachine(id, gpu string) Machine {
 	m := machine(id, gpu)
-	m.Capabilities = []string{"docker"}
+	m.Capabilities = append(m.Capabilities, "docker")
 	m.CapabilityProfile.OS = "linux"
 	return m
 }

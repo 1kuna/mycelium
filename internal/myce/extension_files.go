@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 // Existing shared storage is the transport in slice 1. Only relative names go
@@ -182,7 +183,27 @@ func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
 func outputRelative(j Job, name, prefix string) string {
 	return filepath.Join(prefix, j.ID, strconv.Itoa(j.Attempt), name)
 }
-func (w Worker) publishExtensionFiles(j Job) error {
+func (w Worker) publishExtensionFiles(j Job, attemptWork string) error {
+	if check := j.Spec.ExtensionCheck; check != nil && !j.Spec.Run.Docker && j.Spec.Run.Env["MYCE_CHECK_OUTPUT"] != "" {
+		// Only the worker publishes the bounded check result into the CLI's
+		// scratch folder. Payloads never receive write access to shared caches.
+		actual, err := readExtensionCheckOutputAt(attemptWork, filepath.Join(".myce-check", "actual"))
+		if err != nil {
+			return err
+		}
+		f, err := os.CreateTemp(check.Directory, ".actual-")
+		if err != nil {
+			return err
+		}
+		defer os.Remove(f.Name())
+		_, writeErr := f.Write(actual)
+		if err := errors.Join(writeErr, f.Close()); err != nil {
+			return err
+		}
+		if err := os.Rename(f.Name(), filepath.Join(check.Directory, "actual")); err != nil {
+			return err
+		}
+	}
 	if err := w.validateExtensionCheckOutput(j); err != nil {
 		return err
 	}
@@ -337,9 +358,25 @@ func (w Worker) validateExtensionCheckOutput(j Job) error {
 }
 
 func readExtensionCheckOutput(directory string) ([]byte, error) {
-	f, err := os.Open(filepath.Join(directory, "actual"))
+	return readExtensionCheckOutputAt(directory, "actual")
+}
+
+// Root traversal rejects escaping ancestor/leaf symlinks even during replacement.
+// Nonblocking open lets us reject FIFOs before any read can wait for a writer.
+func readExtensionCheckOutputAt(directory, relative string) ([]byte, error) {
+	root, err := os.OpenRoot(directory)
 	if err != nil {
 		return nil, err
+	}
+	defer root.Close()
+	f, err := root.OpenFile(relative, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		f.Close()
+		return nil, errors.Join(err, errors.New("check output must be a regular file beneath its attempt directory"))
 	}
 	actual, err := io.ReadAll(io.LimitReader(f, extensionMaxBytes+1))
 	err = errors.Join(err, f.Close())

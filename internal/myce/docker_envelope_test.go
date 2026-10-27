@@ -73,7 +73,7 @@ func TestDockerEnvelopeSharedParent(t *testing.T) {
 	j.Spec.Run.DockerSidecars = []DockerSidecar{{Name: "helper", MemoryGB: 1}}
 	j.Spec.Run.DockerMemoryGB = 1
 	m := machine("docker", "fake")
-	m.Capabilities = []string{"docker"}
+	m.Capabilities = append(m.Capabilities, "docker")
 	if !dockerRuntimeFits(&j, &m) {
 		t.Fatal("legacy capped Docker refused")
 	}

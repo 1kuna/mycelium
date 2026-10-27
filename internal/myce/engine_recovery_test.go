@@ -165,7 +165,7 @@ func TestEngineRecoveryRealProcessBothLogs(t *testing.T) {
 				t.Fatal(err)
 			}
 			m := machine("engine-worker", "fake")
-			m.Capabilities = []string{"logs_none"}
+			m.Capabilities = append(m.Capabilities, "logs_none")
 			m.ModelConfigHash = modelConfigHash(config)
 			rt, err := startModels(Worker{Machine: m, ModelConfig: config, Clock: RealClock{}, Client: Client{Token: "test"}, MemorySource: func(context.Context) (float64, error) { return 32, nil }}, t.TempDir())
 			if err != nil {

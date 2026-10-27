@@ -326,6 +326,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	if err := w.checkAvailability(); err != nil {
 		return nil, err
 	}
+	if err := w.checkHostRAM(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB); err != nil {
+		return nil, err
+	}
 	extensionEnv, extensionRelease, extensionErr := w.prepareExtensionExecution(&j)
 	if extensionErr != nil {
 		return nil, extensionErr
@@ -379,9 +382,6 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	ceilingBytes, ceilingErr := w.ceilingBytes(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
 	if ceilingErr != nil {
 		return nil, ceilingErr
-	}
-	if err := w.checkHostRAM(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB); err != nil {
-		return nil, err
 	}
 	if w.MemorySource != nil {
 		free, e := w.MemorySource(context.Background())
@@ -586,9 +586,6 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		}
 		return p, e
 	}
-	if err := w.isolateNativeCommand(cmd, s.dir, executionWork, env, nil, j.Spec.Needs.Network); err != nil {
-		return nil, s.startFailure(j, launchRefused, err)
-	}
 	keys := make([]string, 0, len(env))
 	for k := range env {
 		keys = append(keys, k)
@@ -596,6 +593,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	slices.Sort(keys)
 	for _, k := range keys {
 		cmd.Env = append(cmd.Env, k+"="+env[k])
+	}
+	if err := w.isolateNativeCommand(cmd, s.dir, executionWork, env, nil, j.Spec.Needs.Network); err != nil {
+		return nil, s.startFailure(j, launchRefused, err)
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	logName := identity + ".log"
@@ -810,7 +810,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		} else if launchErr != nil {
 			result.Error = "command start hand-off: " + launchErr.Error()
 		} else if waitErr != nil {
-			result.Error = waitErr.Error()
+			result.Error = nativeAttemptError(j, waitErr.Error())
 		} else if groupErr != nil {
 			result.Error = groupErr.Error()
 		} else if syncErr != nil {
@@ -832,7 +832,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		})
 		p.mu.Unlock()
 		if result.Success {
-			if e := w.publishExtensionFiles(j); e != nil {
+			if e := w.publishExtensionFiles(j, executionWork); e != nil {
 				result.Success = false
 				result.Error = e.Error()
 				result.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("outputs", e))

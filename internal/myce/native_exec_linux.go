@@ -21,6 +21,12 @@ import (
 // cgroup/authorization gate. Restrictions apply to this OS thread and all of
 // the payload's descendants; never call it in the worker process itself.
 func NativeExec(args []string) error {
+	if len(args) > 0 && args[0] == "namespace-monitor" {
+		return nativeNamespaceMonitor(args[1:])
+	}
+	if len(args) > 0 && args[0] == "namespace-anchor" {
+		return nativeNamespaceExec(args[1:], os.Environ())
+	}
 	if len(args) > 0 && (args[0] == "probe" || args[0] == "listener") {
 		return nativeNamespaceProbe(args)
 	}
@@ -52,11 +58,18 @@ func NativeExec(args []string) error {
 	if err := unix.CloseRange(5, ^uint(0), unix.CLOSE_RANGE_CLOEXEC); err != nil {
 		return fmt.Errorf("native descriptor hygiene: %w", err)
 	}
-	env := make([]string, 0, len(os.Environ()))
-	for _, value := range os.Environ() {
+	payloadEnv := p.Env
+	if payloadEnv == nil {
+		payloadEnv = os.Environ() // Trusted capability probe, without authored env.
+	}
+	env := make([]string, 0, len(payloadEnv))
+	for _, value := range payloadEnv {
 		if !strings.HasPrefix(value, "MYCE_TOKEN=") {
 			env = append(env, value)
 		}
+	}
+	if p.Namespace {
+		return nativeNamespaceExec(args[2:], env)
 	}
 	return unix.Exec(args[2], args[2:], env)
 }

@@ -21,6 +21,7 @@ import (
 
 type nativeLinuxPolicy struct {
 	Read, Write, Devices []string
+	Env                  []string
 	Ports                []uint16
 	Namespace            bool
 }
@@ -127,7 +128,7 @@ func nativeCanonical(path string) (string, error) {
 }
 
 func (w Worker) nativeLinuxPolicy(cmd *exec.Cmd, spool, work string, env map[string]string, ports []string) (nativeLinuxPolicy, error) {
-	p := nativeLinuxPolicy{}
+	p := nativeLinuxPolicy{Env: environmentList(env)}
 	work, err := nativeCanonical(work)
 	if err != nil {
 		return p, err
@@ -160,7 +161,7 @@ func (w Worker) nativeLinuxPolicy(cmd *exec.Cmd, spool, work string, env map[str
 	// Do not grant /etc, /run, /proc, home or the worker spool recursively.
 	// Landlock does not mediate stat/chmod and similar metadata operations;
 	// fallback contents/socket protection is not a metadata-isolation claim.
-	p.Read = []string{"/usr", "/bin", "/sbin", "/lib", "/lib64", "/opt", "/sys", "/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/ld.so.conf.d", "/etc/ssl/certs", "/etc/ca-certificates", "/etc/hosts", "/etc/resolv.conf", "/etc/nsswitch.conf", "/etc/passwd", "/etc/group", "/etc/localtime", "/proc/cpuinfo", "/proc/meminfo", "/proc/stat", "/proc/loadavg", "/proc/uptime", "/proc/version", "/proc/sys/kernel/osrelease", "/proc/sys/kernel/ostype", "/proc/sys/vm/overcommit_memory", "/proc/driver/nvidia/version"}
+	p.Read = []string{"/usr", "/bin", "/sbin", "/lib", "/lib64", "/opt/intel/oneapi", "/sys", "/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/ld.so.conf.d", "/etc/ssl/certs", "/etc/ca-certificates", "/etc/hosts", "/etc/resolv.conf", "/etc/nsswitch.conf", "/etc/passwd", "/etc/group", "/etc/localtime", "/proc/cpuinfo", "/proc/meminfo", "/proc/stat", "/proc/loadavg", "/proc/uptime", "/proc/version", "/proc/sys/kernel/osrelease", "/proc/sys/kernel/ostype", "/proc/sys/vm/overcommit_memory", "/proc/driver/nvidia/version"}
 	for _, path := range []string{filepath.Join(spool, "environment-cache"), w.EnvironmentRoot, w.ExtensionRoot} {
 		if path != "" {
 			p.Read = append(p.Read, path)
@@ -217,6 +218,9 @@ func (w Worker) nativeLinuxPolicy(cmd *exec.Cmd, spool, work string, env map[str
 		if slices.Contains(p.Ports, uint16(n)) {
 			return p, errors.New("native sidecar port conflicts with worker control port")
 		}
+	}
+	if err := w.validateNativeReadGrants(p.Read, spool); err != nil {
+		return p, err
 	}
 	p.Devices, err = w.nativeGPUDevices(env)
 	if w.selectedDevice != nil && w.selectedDevice.Platform == "cuda" {
@@ -362,7 +366,58 @@ func (w Worker) isolateNativeCommand(cmd *exec.Cmd, spool, work string, env map[
 		bwrap := nativeBwrapPolicyArgs(p)
 		// bwrap 0.9 passes inherited descriptors to its executable by default;
 		// --preserve-fds belongs to other launchers and is not a bwrap option.
-		args = append(append(append([]string{s.bwrap}, bwrap...), "--"), args...)
+		args, err = nativeNamespaceMonitorArgs(s.bwrap, append(append(bwrap, "--"), args...))
+		if err != nil {
+			return err
+		}
 	}
-	return nativeWrapPayload(cmd, args)
+	if err := nativeWrapPayload(cmd, args); err != nil {
+		return err
+	}
+	// Dynamic loader and shell startup variables are payload authority. They
+	// must not execute code in the gate, bwrap, nsenter or helper before entry.
+	cmd.Env = environmentList(jobBaseEnvironment())
+	return nil
+}
+
+// A recursive Landlock grant cannot subtract protected descendants. Reject an
+// operator layout that places worker authority or sibling storage below a
+// runtime root, including roots supplied through loader configuration.
+func (w Worker) validateNativeReadGrants(read []string, spool string) error {
+ home, err := os.UserHomeDir()
+ if err != nil { return err }
+ protected := []string{spool, filepath.Join(spool,"job-files"), filepath.Join(spool,"checkpoints"), w.CheckpointRoot, w.JobFileRoot, w.SecretRoot,
+  filepath.Join(home,".local/share/mycelium"), filepath.Join(home,".config"), filepath.Join(home,".ssh")}
+ if c := w.ServiceConfig; c != nil {
+  protected = append(protected, c.Config, c.Credentials, c.EnvironmentFile, c.JoiningFile, c.State)
+ }
+ for _, grant := range read {
+  grant, err := nativeResolvedPath(grant)
+  if err != nil { return err }
+  for _, path := range protected {
+   if path == "" { continue }
+   path, err := nativeResolvedPath(path)
+   if err != nil { return err }
+   rel, err := filepath.Rel(grant, path)
+   if err == nil && (rel == "." || filepath.IsLocal(rel)) {
+    return errors.New("native_isolation_runtime_overlap: runtime read root contains protected worker storage; install state and credentials outside runtime roots")
+   }
+  }
+ }
+ return nil
+}
+
+// Resolve existing ancestors too, so an absent credential leaf cannot evade
+// layout validation through an installation symlink.
+func nativeResolvedPath(path string) (string,error) {
+ path, err := filepath.Abs(path)
+ if err != nil { return "",err }
+ ancestor, suffix := path,""
+ for {
+  if resolved, err := filepath.EvalSymlinks(ancestor); err == nil { return filepath.Join(resolved,suffix),nil }
+  parent := filepath.Dir(ancestor)
+  if parent == ancestor { return path,nil }
+  suffix = filepath.Join(filepath.Base(ancestor),suffix)
+  ancestor = parent
+ }
 }
