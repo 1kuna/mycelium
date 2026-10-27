@@ -91,6 +91,9 @@ func TestHealthAlertStorageDelay(t *testing.T) {
 				// Simulate the queue file-store mount disappearing; no bulk I/O is involved.
 				q.files.root = filepath.Join(t.TempDir(), "missing")
 			}
+			if err := q.Tick(); err != nil {
+				t.Fatal(err)
+			}
 			check(t, q, m, nil)
 			c.Advance(DefaultHealthStorageDelay - time.Second)
 			check(t, q, m, nil)
@@ -98,6 +101,9 @@ func TestHealthAlertStorageDelay(t *testing.T) {
 				t.Fatal("short outage alerted")
 			}
 			c.Advance(time.Second)
+			if err := q.Tick(); err != nil {
+				t.Fatal(err)
+			}
 			check(t, q, m, nil)
 			check(t, q, m, nil)
 			if len(alertsOf(q, "checkpoint_store_unavailable")) != 1 {

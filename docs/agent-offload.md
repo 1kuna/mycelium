@@ -594,7 +594,8 @@ service configuration; this slice does not install a receiver or alter fleet ser
 alert (positive duration). Other kinds are `disk_below_guard`,
 `host_unhealthy_or_stale`, and `production_attempt_lost`; storage uses
 `checkpoint_store_unavailable`. A JSON event includes `delivery_id`, `kind`, `at`,
-`delivered: false`, and the relevant `host`, `job_id`, `attempt` identities. Read
+`delivered: false`, the optional fixed `store` label, and the relevant `host`,
+`job_id`, `attempt` identities. Read
 `health_alerts` in authenticated status for the durable event window and delivery
 acknowledgements. Keep host names non-sensitive. Events omit raw errors and paths,
 and the hook environment excludes `MYCE_TOKEN`. Hook output is not logged.
