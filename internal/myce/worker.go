@@ -338,7 +338,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	}()
 	sharedEnv, sharedRelease, sharedErr := w.acquireSharedInputs(ctx, j)
 	if sharedErr != nil {
-		return nil, sharedErr
+		return nil, runtimeErrorFor("input_staging", sharedErr)
 	}
 	if len(j.Spec.SharedInputs) > 0 {
 		s.sharedRelease = sharedRelease
@@ -360,7 +360,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 			if strings.HasPrefix(err.Error(), "NAS unreachable:") {
 				return nil, fmt.Errorf("%w: input copy pending", errWorkerCheckpoint)
 			}
-			return nil, err
+			return nil, runtimeErrorFor("input_staging", err)
 		}
 		j.Spec.Run.Workdir = dir
 	}

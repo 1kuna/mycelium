@@ -101,6 +101,10 @@ func startFailureOutcome(owner Result, err error) Result {
 	if errors.As(err, &recorded) {
 		facts = recorded.facts
 	}
+	var staging *runtimeError
+	if errors.As(err, &staging) && staging.diagnostic.Operation == "input_staging" {
+		owner.ExecutionCause = runtimeDiagnostic(staging)
+	}
 	var rejection *rejectionError
 	if errors.As(err, &rejection) && rejection.code == cpuIsolationUnavailable {
 		owner.ExecutionCause = &RuntimeCause{Operation: "launch", Class: cpuIsolationUnavailable}
