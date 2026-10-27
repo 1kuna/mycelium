@@ -23,32 +23,20 @@ import (
 // are fake: requests, SQLite, worker spools, signals and commands are real.
 func TestPreDeployFullSystem(t *testing.T) {
 	t.Parallel()
-	clock := &manualWorkerClock{now: time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)}
-	workerClocks := map[string]*manualWorkerClock{}
+	// Real subprocess grace periods must advance with elapsed time even when a
+	// loaded host drops ticker deliveries. Reuse dev's real-time-plus-offset
+	// clock; queue fault jumps remain independent of worker retry/grace time.
+	clock := &devClock{}
+	workerClocks := map[string]*devClock{}
 	for _, gpu := range []string{"cuda", "xpu", "metal"} {
-		workerClocks[gpu] = &manualWorkerClock{now: clock.Now()}
+		workerClocks[gpu] = &devClock{}
 	}
-	// Worker retry clocks are independent of queue loss time. Releasing a retry
-	// backoff must not artificially age healthy peers in the queue.
-	clockStop := make(chan struct{})
-	clockDone := make(chan struct{})
-	go func() {
-		defer close(clockDone)
-		ticker := time.NewTicker(5 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ticker.C:
-				clock.Advance(5 * time.Millisecond)
-				for _, wc := range workerClocks {
-					wc.Advance(5 * time.Millisecond)
-				}
-			case <-clockStop:
-				return
-			}
+	advance := func(c *devClock, d time.Duration) {
+		t.Helper()
+		if _, err := c.advance(d.Seconds()); err != nil {
+			t.Fatal(err)
 		}
-	}()
-	t.Cleanup(func() { close(clockStop); <-clockDone })
+	}
 	base := newTestStateRoot(t)
 	nas := filepath.Join(base, "nas")
 	must := func(err error) {
@@ -170,12 +158,13 @@ if [ -f "$MYCE_CHECKPOINT_DIR/progress.json" ]; then
  n=$(sed 's/.*"value":\([0-9]*\).*/\1/' "$MYCE_CHECKPOINT_DIR/progress.json")
  sequence=$(sed 's/.*"generation":\([0-9]*\).*/\1/' "$MYCE_CHECKPOINT_DIR/progress.json")
 fi
-printf 'START attempt=%s resume=%s root=%s\n' "$MYCE_ATTEMPT" "$n" "$MYCE_CHECKPOINT_DIR"
+resume=$n
 n=$((n+1))
 save() { generation=$((sequence+1)); while ! (printf '{"myce_checkpoint":{"generation":%s},"value":%s}\n' "$generation" "$n" > "$MYCE_CHECKPOINT_DIR/progress.tmp" && mv "$MYCE_CHECKPOINT_DIR/progress.tmp" "$MYCE_CHECKPOINT_DIR/progress.json") 2>/dev/null; do sleep 0.01; done; sequence=$generation; }
 save
 printf 'partial' > "$MYCE_CHECKPOINT_DIR/unfinished.tmp"
 trap 'save; echo PAUSED; exit 0' TERM
+printf 'START attempt=%s resume=%s root=%s\n' "$MYCE_ATTEMPT" "$resume" "$MYCE_CHECKPOINT_DIR"
 while [ ! -f "$FINISH" ]; do sleep 0.01; done
 save
 echo FINISHED
@@ -365,7 +354,7 @@ echo FINISHED
 	before := get(experiment.ID)
 	writeGate(metalGate)
 	metalNext := submitAPI(short("metal-successor", "experiment", []string{"metal"}))
-	clock.Advance(10 * time.Minute)
+	advance(clock, 10*time.Minute)
 	must(q.Tick())
 	s := snapshot()
 	if !strings.Contains(s.Warning, "network") {
@@ -407,7 +396,7 @@ echo FINISHED
 	for _, lw := range workers {
 		lw.transport.down.Store(false)
 	}
-	clock.Advance(time.Second)
+	advance(clock, time.Second)
 	wait("restart reconciliation and offline replay", func() bool { return get(metalJob.ID).State == "succeeded" && get(metalNext.ID).State == "succeeded" })
 	if j := get(experiment.ID); j.Attempt != before.Attempt || j.Starts != before.Starts {
 		t.Fatal("restart unnecessarily reran live command")
@@ -418,7 +407,7 @@ echo FINISHED
 	// Let all live workers report before expiring startup recovery. Scheduling
 	// intentionally remains held during restart grace, even with a healthy API.
 	reconnectTime := clock.Now()
-	clock.Advance(time.Second)
+	advance(clock, time.Second)
 	wait("all workers reconcile before grace expires", func() bool {
 		for _, m := range snapshot().Machines {
 			if m.LastSeen.Before(reconnectTime) {
@@ -431,7 +420,7 @@ echo FINISHED
 	// jump would fabricate worker silence beyond every loss timeout, and the
 	// first returning peer could cause another healthy attempt to be lost.
 	for elapsed := time.Duration(0); elapsed < 2*time.Minute; elapsed += 5 * time.Second {
-		clock.Advance(5 * time.Second)
+		advance(clock, 5*time.Second)
 		graceEnd := clock.Now()
 		wait("healthy inventory during restart grace", func() bool {
 			for _, m := range snapshot().Machines {
@@ -447,7 +436,7 @@ echo FINISHED
 	// Running commands keep their assignment, queued work cannot start/preempt,
 	// and no worker creates a replacement local mount.
 	must(os.Rename(nas, nas+"-offline"))
-	clock.Advance(time.Second)
+	advance(clock, time.Second)
 	wait("NAS status on all workers", func() bool {
 		s := snapshot()
 		if !strings.Contains(s.Warning, "NAS") {
@@ -475,7 +464,7 @@ echo FINISHED
 		t.Fatalf("created replacement NAS: %v", err)
 	}
 	must(os.Rename(nas+"-offline", nas))
-	clock.Advance(time.Second)
+	advance(clock, time.Second)
 	wait("NAS recovery and priority resume", func() bool {
 		return get(nasJob.ID).State == "succeeded" && get(experiment.ID).Attempt == 3 && strings.Contains(logs(experiment.ID), "attempt=3 resume=2")
 	})
@@ -489,7 +478,7 @@ echo FINISHED
 	// Advance in small increments so peers provide continuous evidence of health;
 	// a single fleet-wide time jump would correctly grant a reconnect grace.
 	for i := 0; i < 7; i++ {
-		clock.Advance(5 * time.Second)
+		advance(clock, 5*time.Second)
 		now := clock.Now()
 		wait("healthy peers check in", func() bool {
 			seen := 0
@@ -519,8 +508,8 @@ echo FINISHED
 	}
 	workers["cuda"].transport.down.Store(false)
 	// Release only CUDA's retry clock, without aging healthy queue peers.
-	workerClocks["cuda"].Advance(30 * time.Second)
-	clock.Advance(time.Second)
+	advance(workerClocks["cuda"], 30*time.Second)
+	advance(clock, time.Second)
 	wait("loser revoked and later experiment runs", func() bool { return get(later.ID).State == "succeeded" })
 	// A fabricated old completion is sent through the API, exercising stale-result
 	// rejection without depending on how quickly the loser uploads its spool.

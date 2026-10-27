@@ -20,10 +20,16 @@ separate dev run. For an authorized urgent hotfix: run quick, deploy, run full
 afterwards, and fix forward if full finds a problem. This workflow does not grant
 fleet/deployment authorization.
 
-Quick has a hard three-minute wall deadline, including cache setup and builds;
+Quick has a five-minute work/termination budget, including cache setup and builds;
 on expiry it stops its process group and suggests `./scripts/gate.sh full`
-(exit 124). It sends TERM at 175 seconds and KILL after five seconds if needed.
-Interrupted cleanup may leave its ignored scratch folder for recovery. The full
+(exit 124). It sends TERM at 295 seconds and KILL after five seconds if needed,
+then verifies fixture exit before removing scratch. Cleanup may extend the wall
+time; scratch is retained if a fixture cannot be stopped. Fixtures carry a unique
+inherited run marker, so detached processes are included and other runs are left
+alone. The old 175-second deadline left only 19 seconds for builds/vet after an
+observed 156-second related-test selection, and repeatedly truncated passing work
+under shared load (#204). Five minutes keeps quick below the full gate's target
+without reducing test selection. The full
 target is ten minutes. Timings
 include build, vet, the three release target builds, test execution and scratch
 cleanup.
@@ -58,3 +64,19 @@ The `gate-full` execution profile submits the full gate as a Mycelium CPU job;
 see [agent offload](agent-offload.md). Linux runs the Linux builds, vet and full
 race/dev suite. The native Darwin CGO build explicitly skips there and remains
 a separate macOS check; the Linux gate is not proof of that release target.
+
+For ad-hoc suites, `myce run --profile go-test -- -race ./...` defaults to the
+same `-timeout 15m` as the full gate. Arguments after `--` go to `go test`; an
+explicit `-timeout 20m` overrides that default. A profile selects **one** eligible
+target from its `targets`, rather than running a platform matrix. To require a
+platform, copy `.mycelium/profiles/go-test.yaml` into an ignored path such as
+`.reports/go-test-darwin.yaml` and keep only:
+
+```yaml
+targets:
+  - {os: darwin, arch: arm64, platform: cpu}
+```
+
+Retain the other profile fields, then submit with
+`myce run --profile .reports/go-test-darwin.yaml -- -race ./...` from the repo root.
+Use separate submissions with distinct target lists for cross-platform proof.
