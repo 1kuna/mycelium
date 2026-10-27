@@ -312,6 +312,9 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 }
 
 func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *process, startErr error) {
+	if j.Spec.Priority == "production" && j.Spec.StartBy == nil {
+		return nil, errors.New("queue start-gate protocol mismatch: production assignment has no start_by; upgrade queue and workers together")
+	}
 	if err := w.verifyDevice(); err != nil {
 		return nil, s.startFailure(j, launchRefused, err)
 	}
@@ -375,9 +378,6 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	}
 	if executionWorkdir != "" {
 		j.Spec.Run.Workdir = executionWorkdir
-	}
-	if j.Spec.Priority == "production" && j.Spec.StartBy == nil {
-		return nil, errors.New("queue start-gate protocol mismatch: production assignment has no start_by; upgrade queue and workers together")
 	}
 	ceilingBytes, ceilingErr := w.ceilingBytes(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
 	if ceilingErr != nil {
