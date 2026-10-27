@@ -91,7 +91,7 @@ func TestStatusEligibleHostsLifecycle(t *testing.T) {
 	check(t, q, a, nil)
 	check(t, q, b, nil)
 	s := spec("experiment")
-	s.AllowedMachines = []string{"a", "unknown"}
+	s.AllowedMachines = []string{"a", "unknown", "retry"}
 	s.Run.Command = []string{"private-command"}
 	s.Run.Env = map[string]string{"SECRET": "private-env"}
 	j := submit(t, q, s)
@@ -114,7 +114,7 @@ func TestStatusEligibleHostsLifecycle(t *testing.T) {
 	}
 	assertEligibleStatus(t, q, j.ID, "queued", s.AllowedMachines, []string{"host-a"}, false)
 	// Another allowed worker on the same host has a distinct free GPU slot.
-	a = machine("unknown", "fake", "host-a")
+	a = machine("retry", "fake", "host-a")
 	if check(t, q, a, nil).Job == nil {
 		t.Fatal("no retry assignment")
 	}
