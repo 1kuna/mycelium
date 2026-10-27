@@ -17,15 +17,25 @@ export GOTOOLCHAIN=local GOTELEMETRY=off
 shared_build=$(go env GOCACHE)
 shared_modules=$(go env GOMODCACHE)
 mkdir -p "$repo/.gate"
-scratch=$(mktemp -d "$repo/.gate/run.XXXXXX")
+supervised=
+if [[ $mode == quick && $budgeted == 1 && -n ${GATE_SCRATCH:-} ]]; then
+  scratch=$GATE_SCRATCH
+  supervised=1
+else
+  scratch=$(mktemp -d "$repo/.gate/run.XXXXXX")
+fi
+unset GATE_SCRATCH
 started=$SECONDS
 cleanup() {
   status=$?
   trap - EXIT
   # Scratch is rebuildable test state (fake HOME, temp files): delete it outright.
-  chmod -R u+w "$scratch" 2>/dev/null || true
-  rm -rf "$scratch" || status=1
-  if [[ -d $scratch ]]; then echo "gate scratch retained: $scratch" >&2; fi
+  # The quick supervisor stops detached fixture children before removing scratch.
+  if [[ $supervised != 1 ]]; then
+    chmod -R u+w "$scratch" 2>/dev/null || true
+    rm -rf "$scratch" || status=1
+    if [[ -d $scratch ]]; then echo "gate scratch retained: $scratch" >&2; fi
+  fi
   if [[ $budgeted != 1 ]]; then
     echo "gate $mode: exit=$status wall=$((SECONDS-started))s"
   fi
