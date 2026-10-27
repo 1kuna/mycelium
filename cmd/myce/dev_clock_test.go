@@ -106,8 +106,9 @@ func TestDevClockSubmissionExpiryEndToEnd(t *testing.T) {
 	if err := c.Call(ctx, "GET", "/api/status", nil, &snapshot); err != nil {
 		t.Fatal(err)
 	}
-	if len(snapshot.Jobs) != 2 {
-		t.Fatalf("expired/unseen key created a job: %d", len(snapshot.Jobs))
+	// Replay answers survive by key while the old terminal job rows retire.
+	if len(snapshot.Jobs) != 0 {
+		t.Fatalf("expired/unseen key created a job after history retirement: %d", len(snapshot.Jobs))
 	}
 }
 
