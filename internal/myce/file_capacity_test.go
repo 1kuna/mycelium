@@ -27,14 +27,14 @@ func capacityPartial(t *testing.T, c Client, content, purpose string) FileRef {
 	if purpose != "" {
 		metadata += ",purpose " + base64.StdEncoding.EncodeToString([]byte(purpose))
 	}
-	res, err := c.fileRequest(context.Background(), "POST", "/api/files/uploads/", nil, map[string]string{"Tus-Resumable": "1.0.0", "Upload-Length": strconv.FormatInt(ref.SizeBytes, 10), "Upload-Metadata": metadata})
+	res, err := c.fileRequest(context.Background(), "POST", "/api/files/uploads/", nil, map[string]string{"Tus-Resumable": "1.0.0", "Upload-Length": strconv.FormatInt(ref.SizeBytes, 10), "Upload-Metadata": metadata}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := fileResponse(res, 201); err != nil {
 		t.Fatal(err)
 	}
-	res, err = c.fileRequest(context.Background(), "PATCH", "/api/files/uploads/"+ref.SHA256, strings.NewReader(content[:2]), map[string]string{"Tus-Resumable": "1.0.0", "Upload-Offset": "0", "Content-Type": "application/offset+octet-stream"})
+	res, err = c.fileRequest(context.Background(), "PATCH", "/api/files/uploads/"+ref.SHA256, strings.NewReader(content[:2]), map[string]string{"Tus-Resumable": "1.0.0", "Upload-Offset": "0", "Content-Type": "application/offset+octet-stream"}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func TestFileCapacityAbandonedUploadSweep(t *testing.T) {
 		t.Fatal("early sweep", err)
 	}
 	// A durable progress/HEAD observation starts a fresh idle window.
-	res, err := c.fileRequest(context.Background(), "HEAD", "/api/files/uploads/"+recent.SHA256, nil, map[string]string{"Tus-Resumable": "1.0.0"})
+	res, err := c.fileRequest(context.Background(), "HEAD", "/api/files/uploads/"+recent.SHA256, nil, map[string]string{"Tus-Resumable": "1.0.0"}, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -178,7 +178,12 @@ Give your agent the [extension creation guide](../../docs/extensions/AGENT-GUIDE
 for a complete submit/wait/result example. `upload_file` stages hash-addressed
 inputs; `submit_and_wait` requires a stable submission key and retries one lost
 transport response; `download_result` resolves accepted output and verifies its
-hash before replacing an explicit destination. `cancel_submission(project, key)`
+hash before replacing an explicit destination. File transfers have no
+whole-request timeout: they fail with `TransferStalledError` (code
+`result_download_failed` for results) when a socket operation exceeds the idle
+budget: at least 60 seconds, or 30 seconds plus two full-blob verification passes
+at 100 MiB/s, whichever is greater.
+`cancel_submission(project, key)`
 also works when the submit response was lost. HTTP conflicts propagate.
 
 ### Consume one accepted piece

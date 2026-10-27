@@ -19,7 +19,7 @@ class ExtensionClientTests(unittest.TestCase):
         upload = "/api/files/uploads/" + sha
         calls = []
 
-        def request(method, endpoint, data=None, headers=None):
+        def request(method, endpoint, data=None, headers=None, size=0):
             calls.append((method, endpoint))
             if method == "POST":
                 self.assertIn("purpose am9iLWlucHV0", headers["Upload-Metadata"])
