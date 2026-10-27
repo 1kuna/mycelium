@@ -17,7 +17,7 @@ but provides no boundary between jobs running as the same user.
 | Platform/mode | Directory and files | Temp | Environment | Control access | Network |
 | --- | --- | --- | --- | --- | --- |
 | Linux namespaces | User/mount/PID/IPC isolation; read-only host-root view plus Landlock content grants. Sibling contents denied; host metadata can remain visible. | Managed `{work}/.tmp`; private `/tmp` and `/dev/shm` shared within the attempt. | #219 allowlist; worker overrides temp and attempt/device controls; no ambient agent/session or fleet credentials. | Private PID/network namespaces plus seccomp/Landlock deny host process, control-file and socket access. | Private network namespace, shared by the attempt's sidecars; reserved TCP loopback only. No qualified outbound transport; no `native_network`. |
-| Linux Landlock/seccomp fallback | Content reads/execution limited to runtime/cache/attempt grants; writes limited to attempt/checkpoint/usage grants. **Metadata is not isolated**, including permission changes. No private mount/PID view. | Managed `{work}/.tmp`; sibling temp contents denied. Host `/tmp` is not replaced. | Same allowlist and overrides. | Denies other processes' sensitive procfs contents, tracing/memory access and external signals; denies Unix endpoints and non-reserved TCP ports. | **Partial network isolation**: exact reserved sidecar TCP ports permit connect/bind on any address, including off-host. All other TCP ports denied; no general outbound capability. |
+| Linux Landlock/seccomp fallback | Content reads/execution limited to runtime/cache/attempt grants; writes limited to attempt/checkpoint/usage grants. **Metadata is not isolated**, including permission changes. No private mount/PID view. | Managed `{work}/.tmp`; sibling temp contents denied. Host `/tmp` is not replaced. | Same allowlist and overrides. | Denies other processes' sensitive procfs contents, tracing/memory access and external signals; denies Unix stream/datagram endpoints and non-reserved TCP ports. **same-UID pathname SEQPACKET endpoints reachable (partial)**. Foreign abstract endpoints remain scoped. | **Partial network isolation**: exact reserved sidecar TCP ports permit connect/bind on any address, including off-host. All other TCP ports denied; no general outbound capability. |
 | macOS Seatbelt | Targeted denial of same-spool sibling contents/writes, configured worker storage and standard credential roots. Prepared caches allow reads/execution, not writes. Metadata and unrelated host files can remain visible. | Managed `{work}/.tmp` protected with the spool; no private system `/tmp` namespace. | Same allowlist and overrides. | Denies Unix endpoint connections, protected credential contents, cross-job process access and unwanted Mach services; retains Metal services. | Default outbound: reserved sidecar TCP loopback only. With `needs.network: true`: general outbound except other loopback endpoints and the queue's TCP port at all addresses. |
 | Missing/unsupported confinement | Required behavior: native launch fails closed. | No unconfined payload launch permitted. | An allowlist alone is insufficient. | No implied protection. | No inferred online capability. |
 
@@ -136,11 +136,13 @@ silently downgrade. The current detector recognizes permission-denied errors;
 operators must inspect the service policy when diagnosing them.
 
 Fallback MUST permit connect and bind on the exact worker-reserved TCP ports
-for this attempt's sidecars. With no reserved ports, it permits no new network
+for this attempt's sidecars. With no reserved ports, it permits no new IP
 endpoints. It denies all other TCP connects/binds, UDP, raw/packet sockets,
-SCTP, MPTCP and new AF_UNIX endpoints. Private Unix stream socketpairs remain
-available for process wakeups; datagram/seqpacket pairs are denied because a
-datagram pair could reconnect to a protected pathname socket. Authored environment
+SCTP, MPTCP and AF_UNIX stream/datagram endpoint creation. The approved v1
+exception permits AF_UNIX `SOCK_SEQPACKET` creation with protocol zero and only
+the normal CLOEXEC/NONBLOCK flags, including jobs without TCP sidecars.
+Private Unix stream socketpairs remain available for process wakeups;
+datagram/seqpacket pairs remain denied. Authored environment
 values cannot add a permitted port, and a
 reserved port conflicting with the queue control port refuses launch.
 
@@ -155,13 +157,35 @@ Use namespace mode when an enforced private network boundary is required.
 ### CUDA compatibility boundary
 
 Some CUDA drivers initialize an abstract Unix seqpacket listener even for a
-tiny device allocation. The current seccomp policy denies that creation.
-Landlock before ABI 9 cannot mediate pathname Unix connections; enabling the
-same socket type would also permit attempts against host pathname controls.
-An offline job declaration does not resolve this compatibility boundary.
-Do not enable Unix sockets as an unprotected fallback.
+tiny device allocation. The [v1 ruling](https://github.com/1kuna/mycelium/issues/177#issuecomment-6453575275)
+accepts a type-only exception in Landlock fallback, retaining abstract-socket
+and signal scoping and every other denial. Namespace mode still denies new
+AF_UNIX endpoints. Permission to create this socket does not itself qualify
+CUDA execution or cleanup.
 
-The userns exception below only permits namespace creation. The current
+**same-UID pathname SEQPACKET endpoints reachable (partial)**. This is the
+explicit accepted residual: classic seccomp cannot inspect `sockaddr_un`, and
+Landlock before ABI 9 cannot mediate pathname Unix connections. The fallback
+does not enforce abstract-only creation or connection. Ordinary Unix socket
+permissions still apply; a root-owned mode-0600 socket remains inaccessible to
+the unprivileged job. Mycelium/Docker/systemd stream endpoints remain denied,
+but a same-UID pathname seqpacket control endpoint present now or added later
+would be reachable. A current inventory cannot establish its future absence.
+
+At fallback-worker startup, one `/proc/net/unix` snapshot inventories listening
+seqpacket endpoints in the current network namespace. Root-owned pathname
+sockets and the observed abstract `cuda-uvmfd-<namespace>-<pid>` naming convention
+are excluded from warnings; every other endpoint, including unknown ownership,
+is logged visibly. The CUDA name is a convention, not authenticated process
+identity. Inventory failure also warns. `native_isolation_warning` exposes a
+compact startup summary in status; endpoint details remain in worker logs.
+This advisory runs once at startup, not continuously, does not inspect other
+network namespaces and grants no authority or additional isolation.
+
+The full-isolation upgrade remains minimal-root namespaces plus the separately
+approved per-host AppArmor userns exception, pending the operator and
+non-blocking for the accepted v1 fallback. The userns exception below only
+permits namespace creation. The current
 read-only host-root mount and socket policy would still need changes and real
 qualification before supporting that CUDA path. The preferred candidate is a
 minimal bubblewrap filesystem containing socket-free trusted runtime/cache

@@ -585,10 +585,17 @@ requires Landlock ABI >= 6 and working `bwrap`/`nsenter` for this stack.
 Only namespace **policy refusal** permits the narrower Landlock ABI >= 6 plus
 seccomp fallback. Missing tools, unsupported ABI, broken setup or timeout fail
 closed. Landlock allows TCP connect/bind only on the exact worker-reserved
-sidecar ports, with none allowed for a job without ports; seccomp denies UDP,
-raw/packet, SCTP, MPTCP and new AF_UNIX endpoints. Private Unix stream
-socketpairs remain available for process wakeups; reconnectable datagram pairs
-are denied.
+sidecar ports, with no IP endpoints allowed for a job without ports; seccomp
+denies UDP, raw/packet, SCTP, MPTCP and new AF_UNIX stream/datagram endpoints.
+The [v1 exception](https://github.com/1kuna/mycelium/issues/177#issuecomment-6453575275)
+permits fallback-only AF_UNIX `SOCK_SEQPACKET` creation, protocol zero and normal
+CLOEXEC/NONBLOCK flags, retaining Landlock abstract/signal scoping and every
+other denial. **same-UID pathname SEQPACKET endpoints reachable (partial)**:
+this cannot enforce abstract-only access. Namespace mode retains its Unix
+endpoint denial. Private Unix stream socketpairs remain available for process
+wakeups; datagram and seqpacket pairs remain denied. A cheap startup inventory
+warns about unexpected non-root/non-CUDA seqpacket listeners, unknown ownership
+or inventory failure. This is advisory; future endpoints remain a residual.
 **This fallback provides partial network isolation:** a reserved port
 also permits off-host TCP on that destination port and binding that local port
 on any address. Readiness verifies actual sidecar ownership and a

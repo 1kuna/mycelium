@@ -184,16 +184,26 @@ func nativeSeccompFilter(namespace, tcp bool) ([]unix.SockFilter, error) {
 	for _, number := range blocked {
 		f = append(f, jump(number, 0, 1), deny)
 	}
-	if !tcp {
-		// No sockaddr dereferencing in classic BPF: deny every new socket in
-		// fallback instead of pretending a port-only allowlist is loopback-only.
-		f = append(f, jump(unix.SYS_SOCKET, 0, 1), deny)
-	} else {
+	socket := []unix.SockFilter{stmt(unix.BPF_LD|unix.BPF_W|unix.BPF_ABS, 16)}
+	if !namespace {
+		// CUDA needs Unix SEQPACKET listeners in fallback, even without TCP
+		// ports. Landlock scopes abstract sockets, but cannot mediate pathname
+		// connects: same-UID pathname SEQPACKET endpoints remain reachable.
+		// Classic BPF cannot dereference sockaddr to distinguish the two.
+		socket = append(socket, jump(unix.AF_UNIX, 0, 8),
+			stmt(unix.BPF_LD|unix.BPF_W|unix.BPF_ABS, 24), stmt(unix.BPF_ALU|unix.BPF_AND|unix.BPF_K, ^uint32(unix.SOCK_CLOEXEC|unix.SOCK_NONBLOCK)), jump(unix.SOCK_SEQPACKET, 1, 0), deny,
+			stmt(unix.BPF_LD|unix.BPF_W|unix.BPF_ABS, 32), jump(0, 1, 0), deny,
+			stmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_ALLOW))
+	}
+	if tcp {
 		// Only TCP (not SCTP/MPTCP, which Landlock does not promise to mediate).
 		// Fallback's reserved ports include the accepted offhost exception.
-		// Unix, packet, raw and UDP sockets have no exception.
-		f = append(f, jump(unix.SYS_SOCKET, 0, 12), stmt(unix.BPF_LD|unix.BPF_W|unix.BPF_ABS, 16), jump(unix.AF_INET, 2, 0), jump(unix.AF_INET6, 1, 0), deny, stmt(unix.BPF_LD|unix.BPF_W|unix.BPF_ABS, 24), stmt(unix.BPF_ALU|unix.BPF_AND|unix.BPF_K, 0xf), jump(unix.SOCK_STREAM, 1, 0), deny, stmt(unix.BPF_LD|unix.BPF_W|unix.BPF_ABS, 32), jump(0, 2, 0), jump(unix.IPPROTO_TCP, 1, 0), deny)
+		socket = append(socket, jump(unix.AF_INET, 2, 0), jump(unix.AF_INET6, 1, 0), deny, stmt(unix.BPF_LD|unix.BPF_W|unix.BPF_ABS, 24), stmt(unix.BPF_ALU|unix.BPF_AND|unix.BPF_K, 0xf), jump(unix.SOCK_STREAM, 1, 0), deny, stmt(unix.BPF_LD|unix.BPF_W|unix.BPF_ABS, 32), jump(0, 2, 0), jump(unix.IPPROTO_TCP, 1, 0), deny, stmt(unix.BPF_RET|unix.BPF_K, unix.SECCOMP_RET_ALLOW))
+	} else {
+		socket = append(socket, deny)
 	}
+	f = append(f, jump(unix.SYS_SOCKET, 0, uint8(len(socket))))
+	f = append(f, socket...)
 	// asyncio and ordinary process wakeups need stream socketpairs. A Unix
 	// stream pair remains ESTABLISHED after shutdown/peer close and cannot be
 	// reconnected. Datagram pairs can reconnect and must remain denied.

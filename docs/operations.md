@@ -644,6 +644,15 @@ See [native isolation](native-isolation.md) for the platform guarantee table and
 limits. This #177 minimum is a v1 requirement; documentation does not establish
 fleet qualification or rollout.
 
+Linux fallback explicitly reports **same-UID pathname SEQPACKET endpoints
+reachable (partial)**. It permits the v1 CUDA socket-type exception while
+retaining stream/datagram control denial and Landlock abstract-socket scoping.
+Check `native_isolation_warning` and worker startup logs for unexpected
+non-root/non-CUDA seqpacket listeners or inventory failure. The startup scan
+is advisory and cannot prove future endpoint absence. Minimal-root namespaces
+with the per-host AppArmor userns exception remain an unapplied operator
+upgrade; the exception alone does not qualify CUDA or the mount policy.
+
 Stage source/data into the managed `{work}` through inputs or a frozen
 extension. Native workdirs must resolve beneath `{work}`. Extension source gets
 a private copy; prepared environment/extension caches permit reads/execution,

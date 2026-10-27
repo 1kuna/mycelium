@@ -427,6 +427,7 @@ type Machine struct {
 	BenchmarkPending       bool          `json:"benchmark_pending,omitempty"`
 
 	Capabilities                []string            `json:"capabilities,omitempty"`
+	NativeIsolationWarning      string              `json:"native_isolation_warning,omitempty"`
 	MaxJobs                     int                 `json:"max_jobs,omitempty"`
 	AdmissionReason             string              `json:"admission_reason,omitempty"`
 	FileTransferError           string              `json:"file_transfer_error,omitempty"`
