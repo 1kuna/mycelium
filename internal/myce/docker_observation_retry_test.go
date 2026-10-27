@@ -94,8 +94,23 @@ func TestDockerObservationTimeoutRetriesHealthyAttempt(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if strings.Contains(string(calls), "kill ") || strings.Contains(string(calls), "stop ") || strings.Count(string(calls), "start id1\n") != 1 || strings.Count(string(calls), "create --restart=no ") != 1 {
-				t.Fatalf("timeout signaled or relaunched payload: %s", calls)
+			creates, starts := 0, 0
+			for _, line := range strings.Split(string(calls), "\n") {
+				argv := strings.Fields(line)
+				if len(argv) == 0 {
+					continue
+				}
+				switch argv[0] {
+				case "kill", "stop":
+					t.Fatalf("timeout signaled payload: %s", line)
+				case "create":
+					creates++
+				case "start":
+					starts++
+				}
+			}
+			if creates != 1 || starts != 1 {
+				t.Fatalf("timeout relaunched payload: creates=%d starts=%d", creates, starts)
 			}
 		})
 	}
