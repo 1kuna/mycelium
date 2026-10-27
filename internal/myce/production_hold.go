@@ -181,6 +181,9 @@ func (q *Queue) placementAllowedForUse(j *Job, m *Machine, resident bool) bool {
 // Recovery retains existing execution custody. Admission-time disk estimates
 // apply only to new work: its writes may already be reflected in observed free.
 func (q *Queue) placementPolicyAllowed(j *Job, m *Machine, resident bool) bool {
+	if j.State == "queued" && (j.Spec.Priority == "production" || j.Spec.Class == "production") && q.fleetPausesProduction() {
+		return false
+	}
 	if !dependencyReady(j) || m.Recovering || cancelled(j) || !dockerRuntimeFits(j, m) || q.maintenanceBlocked(hostID(m)) || m.HostMemoryPolicyMismatch || !logPolicyFits(j.Spec.Logs, m) {
 		return false
 	}

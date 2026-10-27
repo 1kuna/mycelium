@@ -677,3 +677,30 @@ func TestFleetInstallActiveApplyLockIsBenign(t *testing.T) {
 		t.Fatal("active receipt revision replaced", err)
 	}
 }
+
+func TestFleetInstallRetainsStorageFailureForQueueReconciliation(t *testing.T) {
+	f := newFleetInstallFixture(t, "linux")
+	if err := f.launch(); err != nil {
+		t.Fatal(err)
+	}
+	r, err := readFleetReceipt(filepath.Join(f.c.State, fleetUpdateReceiptFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.Phase, r.Failure = "failed", "fleet_storage_preflight_failed"
+	if err = writeFleetReceipt(f.c, r); err != nil {
+		t.Fatal(err)
+	}
+	failure, err := ReadFleetUpdateFailure(f.c)
+	if err != nil || failure == nil || failure.Failure != "fleet_storage_preflight_failed" {
+		t.Fatalf("storage failure lost: %+v %v", failure, err)
+	}
+	r.Failure = "private arbitrary error text"
+	if err = writeFleetReceipt(f.c, r); err != nil {
+		t.Fatal(err)
+	}
+	failure, err = ReadFleetUpdateFailure(f.c)
+	if err != nil || failure == nil || failure.Failure != "fleet_update_failed" {
+		t.Fatalf("untrusted failure exposed: %+v %v", failure, err)
+	}
+}

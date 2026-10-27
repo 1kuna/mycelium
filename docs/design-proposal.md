@@ -2190,6 +2190,17 @@ An identical invocation resumes durable progress; an explicitly selected approve
 newer release can supersede a stopped operation to fix forward. Approval changes
 never silently retarget the operation. The queue continues after CLI disconnect.
 
+Follow-up scope (2026-10-27 first-use findings): `--queue-only` freezes only the
+queue service as the update target; colocated workers still supply fresh drain
+custody but are not restarted. `--wait-production-idle` persists an opt-in fence
+on new production batch assignments until queue health is verified, and waits
+for production attempts and their release custody anywhere in the fleet before
+queue cutover. Assigned work finishes naturally. Recheck this fence when issuing
+and authorizing the queue instruction. Preserve scope and policy on resume;
+reject conflicting flags while unfinished. A completed queue-only update may be
+followed by a full same-release operation. Neither option bypasses signed release,
+maintenance ownership, storage preflight or running-image health checks.
+
 Upgrade one physical host at a time, restoring admission before advancing.
 Recheck production demand before selecting each remaining host and put production
 hosts last. Upgrade the queue before workers needing its new protocol and before
