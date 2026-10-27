@@ -151,6 +151,13 @@ func validateAdapterEntry(e adapterEntry) error {
 		if (len(s.Run.Command) > 0) == (s.Execution != nil) {
 			return errors.New("declare exactly one of run or execution")
 		}
+		command := s.Run.Command
+		if s.Execution != nil {
+			command = s.Execution.Main.Command
+		}
+		if len(command) == 0 || command[0] == "" {
+			return errors.New("declare application argv before result checks or appended arguments")
+		}
 		if len(s.Targets) == 0 || reflect.ValueOf(s.Needs).IsZero() {
 			return errors.New("declare exact targets and resource needs")
 		}
@@ -222,11 +229,20 @@ func adapterProfile(a projectAdapter, name string) (executionProfile, []byte, er
 			}
 			for _, target := range e.Targets {
 				needs := e.Needs
+				if len(needs.Platform.Preferred) > 0 {
+					return p, nil, errors.New("flat native platform preferences cannot be retained; declare complete variants with explicit targets")
+				}
+				if len(needs.Platform.Required) > 0 && !slices.Contains(needs.Platform.Required, target.Platform) {
+					return p, nil, errors.New("flat native targets conflict with needs.platform requirements")
+				}
 				needs.Platform = myce.Platform{}
 				variants = append(variants, adapterVariant{Target: target, Needs: needs, Execution: *execution, Environments: e.Environments, Setup: e.Setup, Checks: e.Checks, Baselines: e.Baselines, References: e.References, Sweeps: e.Sweeps})
 			}
 		}
 		for _, v := range variants {
+			if len(v.Execution.Main.Command) == 0 || v.Execution.Main.Command[0] == "" {
+				return p, nil, errors.New("native execution.main requires application argv before result checks")
+			}
 			if _, ok := v.Baselines["extension:"+x.Name]; !ok {
 				return p, nil, fmt.Errorf("direct native entry requires its authored extension:%s baseline; kind/program-only recipes retain their low-level registry callers", x.Name)
 			}
@@ -234,7 +250,9 @@ func adapterProfile(a projectAdapter, name string) (executionProfile, []byte, er
 			execution.Main.Command = checkedAdapterCommand(execution.Main.Command, v.Checks.Result)
 			sweeps := map[string]myce.ReferenceSweep{}
 			for work, sweep := range v.Sweeps {
-				sweep.Run = checkedAdapterCommand(sweep.Run, v.Checks.Result)
+				if len(sweep.Run) > 0 {
+					sweep.Run = checkedAdapterCommand(sweep.Run, v.Checks.Result)
+				}
 				sweeps[work] = sweep
 			}
 			x.Variants = append(x.Variants, myce.ExtensionVariant{Target: v.Target, Needs: v.Needs, Environments: v.Environments, Execution: execution, Setup: v.Setup, Check: v.Checks.Qualification, Baselines: v.Baselines, References: v.References, Sweeps: sweeps})
@@ -260,7 +278,7 @@ func adapterProfile(a projectAdapter, name string) (executionProfile, []byte, er
 // Check argv occupies fixed positional parameters; the main argv and later CLI
 // arguments stay separate shell parameters, including quotes and metacharacters.
 func checkedAdapterCommand(command, check []string) []string {
-	if len(check) == 0 {
+	if len(check) == 0 || len(command) == 0 || command[0] == "" {
 		return slices.Clone(command)
 	}
 	var script strings.Builder

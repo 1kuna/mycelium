@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -386,5 +387,33 @@ func TestAdapterComposedMemoryIdentity(t *testing.T) {
 			t.Fatal("changed composed command/environment reused memory identity")
 		}
 		previous = r.Spec.ProfileMemory
+	}
+}
+
+func TestAdapterNativeRecipeBeforeResultWrapping(t *testing.T) {
+	e := adapterEntry{Spec: myce.Spec{Run: myce.RunSpec{Command: []string{"echo", "work"}}, Needs: myce.ResourceNeeds{MemoryGB: 1, Platform: myce.Platform{Required: []string{"cuda"}}}, Targets: []myce.ExecutionTarget{{OS: "linux", Arch: "amd64", Platform: "cuda"}}}, Checks: adapterChecks{Result: []string{"true"}, Qualification: []string{"echo", "qualification"}}, Baselines: map[string]myce.ExtensionBaseline{"extension:work": {}}, Sweeps: map[string]myce.ReferenceSweep{"extension:work": {Command: []string{"echo", "measure"}}}}
+	lower := func(entry adapterEntry) (executionProfile, error) {
+		p, _, err := adapterProfile(projectAdapter{Project: "fixture", Default: "work", Entries: map[string]adapterEntry{"work": entry}}, "")
+		return p, err
+	}
+	p, err := lower(e)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.Native.Variants[0].Sweeps["extension:work"].Run) != 0 {
+		t.Fatal("result check manufactured an omitted wave command")
+	}
+	conflict := e
+	conflict.Targets = append(slices.Clone(e.Targets), myce.ExecutionTarget{OS: "darwin", Arch: "arm64", Platform: "metal"})
+	if _, err := lower(conflict); err == nil {
+		t.Fatal("native lowering widened required platforms")
+	}
+	v := adapterEntry{Variants: []adapterVariant{{Target: e.Targets[0], Needs: myce.ResourceNeeds{MemoryGB: 1}, Checks: e.Checks, Baselines: e.Baselines}}}
+	if _, err := lower(v); err == nil {
+		t.Fatal("result check manufactured a missing native main command")
+	}
+	v.Variants[0].Execution.Main.Command = []string{""}
+	if _, err := lower(v); err == nil {
+		t.Fatal("result check manufactured an empty native executable")
 	}
 }
