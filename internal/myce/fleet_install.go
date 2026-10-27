@@ -693,8 +693,8 @@ func ReadFleetUpdateFailure(c ServiceConfig) (*FleetUpgradeAck, error) {
 		return nil, errors.New("fleet_receipt_invalid")
 	}
 	code := "fleet_update_failed"
-	if r.Failure == "fleet_health_failed" {
-		code = "fleet_health_failed"
+	if r.Failure == "fleet_health_failed" || r.Failure == "fleet_storage_preflight_failed" {
+		code = r.Failure
 	}
 	return &FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "failed", Failure: code}, nil
 }

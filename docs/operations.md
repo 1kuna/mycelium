@@ -901,6 +901,29 @@ operation ID. It can exit immediately: the queue owns progress. Watch phases,
 wait reasons and failures with `myce status`. An approval from before signed
 envelope retention needs identical verified reapproval first.
 
+For a queue hotfix, use
+`myce fleet upgrade --release vX.Y.Z --queue-only --wait-production-idle`.
+`--queue-only` selects only the queue service, including when workers share its
+host or installed binary. It still drains that host and waits for fresh exact
+custody; worker services are not restarted or required to support self-update.
+Other hosts retain their maintenance policies and versions.
+
+`--wait-production-idle` also works for a full upgrade. It pauses new production
+batch assignments until queue running-image health is verified, and waits for
+all assigned production attempts, retained release custody and production calls
+across the fleet before queue restart. Existing work finishes naturally without
+a deadline. All model calls/streams still settle at queue cutover. A stopped
+operation keeps the admission fence until explicit recovery. Queued production
+keeps its ordinary start/give-up deadlines; choose the maintenance window with
+that in mind. Status includes both policy flags and the current wait reason.
+
+Repeat the same flags when resuming: scope and idle policy cannot change during
+an unfinished operation, including when selecting a newer fix-forward release.
+After queue-only completion, a full same-release invocation creates a separate
+operation for the workers without restarting the already-current queue.
+These options require a queue version that implements them; they cannot change
+restart behavior inside an older installed queue or helper.
+
 Hosts update sequentially, with production hosts last. Started commands finish
 naturally before their host restarts. At queue cutover new model calls pause and
 existing calls/streams finish; batch attempts on other hosts reconnect unchanged.
@@ -916,7 +939,9 @@ root; rotation is a local provisioning operation, never an update instruction.
 A foreground queue or worker without saved service settings/runtime proof cannot
 participate; install the capable release normally before the first fleet update.
 
-A failed step stops the operation and preserves maintenance; later hosts remain
+A storage preflight failure is reported as `storage_preflight_failed`, including
+when recovered from the durable helper receipt; arbitrary helper error text is
+never exposed. A failed step stops the operation and preserves maintenance; later hosts remain
 untouched. Repair the cause and explicitly rerun `myce fleet upgrade` to reconcile
 that same operation. A rerun advances its recovery revision and rechecks the exact
 old runtime and maintenance receipt before recovering an interrupted helper.

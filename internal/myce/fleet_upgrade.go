@@ -13,10 +13,12 @@ import (
 // The operation is part of the queue state transaction, never a second queue.
 // Public status deliberately excludes publisher locations and signed envelopes.
 type FleetUpgradeStatus struct {
-	Operation string            `json:"operation"`
-	Release   string            `json:"release"`
-	State     string            `json:"state"`
-	Hosts     []FleetHostStatus `json:"hosts"`
+	QueueOnly          bool              `json:"queue_only"`
+	WaitProductionIdle bool              `json:"wait_production_idle"`
+	Operation          string            `json:"operation"`
+	Release            string            `json:"release"`
+	State              string            `json:"state"`
+	Hosts              []FleetHostStatus `json:"hosts"`
 }
 type FleetHostStatus struct {
 	Host       string    `json:"host"`
@@ -26,12 +28,14 @@ type FleetHostStatus struct {
 	ProgressAt time.Time `json:"progress_at"`
 }
 type fleetUpgrade struct {
-	Revision     int                 `json:"revision"`
-	Operation    string              `json:"operation"`
-	Release      EnrollmentRelease   `json:"release"`
-	PublisherKey []byte              `json:"publisher_key"`
-	State        string              `json:"state"`
-	Hosts        []*fleetUpgradeHost `json:"hosts"`
+	QueueOnly          bool                `json:"queue_only,omitempty"`
+	WaitProductionIdle bool                `json:"wait_production_idle,omitempty"`
+	Revision           int                 `json:"revision"`
+	Operation          string              `json:"operation"`
+	Release            EnrollmentRelease   `json:"release"`
+	PublisherKey       []byte              `json:"publisher_key"`
+	State              string              `json:"state"`
+	Hosts              []*fleetUpgradeHost `json:"hosts"`
 }
 type fleetUpgradeHost struct {
 	HealthSince    time.Time `json:"health_since,omitempty"`
@@ -56,7 +60,9 @@ type fleetQueueRuntime struct {
 	ObservedAt time.Time
 }
 type FleetUpgradeRequest struct {
-	Release string `json:"release,omitempty"`
+	QueueOnly          bool   `json:"queue_only,omitempty"`
+	WaitProductionIdle bool   `json:"wait_production_idle,omitempty"`
+	Release            string `json:"release,omitempty"`
 }
 type FleetUpgradeAck struct {
 	Runtime   *FleetRuntimeProof `json:"runtime,omitempty"`
@@ -76,7 +82,7 @@ func (q *Queue) fleetUpgradeStatus() *FleetUpgradeStatus {
 	if u == nil {
 		return nil
 	}
-	out := &FleetUpgradeStatus{Operation: u.Operation, Release: u.Release.Manifest.Version, State: u.State, Hosts: []FleetHostStatus{}}
+	out := &FleetUpgradeStatus{Operation: u.Operation, Release: u.Release.Manifest.Version, State: u.State, QueueOnly: u.QueueOnly, WaitProductionIdle: u.WaitProductionIdle, Hosts: []FleetHostStatus{}}
 	for _, h := range u.Hosts {
 		out.Hosts = append(out.Hosts, h.FleetHostStatus)
 	}
@@ -97,7 +103,11 @@ func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest) (*FleetUpgradeSta
 			return fleetError("fleet_publisher_changed")
 		}
 		if previous := q.s.FleetUpgrade; previous != nil {
-			if previous.Release.Manifest.Version == approved.Manifest.Version && reflect.DeepEqual(previous.Release.Manifest, approved.Manifest) {
+			samePolicy := previous.QueueOnly == request.QueueOnly && previous.WaitProductionIdle == request.WaitProductionIdle
+			if !samePolicy && previous.State != "complete" {
+				return fleetError("fleet_upgrade_policy_conflict")
+			}
+			if samePolicy && previous.Release.Manifest.Version == approved.Manifest.Version && reflect.DeepEqual(previous.Release.Manifest, approved.Manifest) {
 				// An explicit identical rerun clears only a failure. The exact drain
 				// and old session remain fenced; health is always re-observed.
 				if previous.State != "complete" {
@@ -139,7 +149,7 @@ func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest) (*FleetUpgradeSta
 		if q.fleetQueue == nil || !q.fleetProofFresh(q.fleetQueue.Proof) {
 			return fleetError("fleet_queue_unmanaged")
 		}
-		u := &fleetUpgrade{Operation: ID(), Revision: 1, Release: *approved, PublisherKey: bytes.Clone(q.s.EnrollmentReleaseKey), State: "running"}
+		u := &fleetUpgrade{Operation: ID(), Revision: 1, Release: *approved, PublisherKey: bytes.Clone(q.s.EnrollmentReleaseKey), State: "running", QueueOnly: request.QueueOnly, WaitProductionIdle: request.WaitProductionIdle}
 		queue := q.fleetQueue
 		a, err := approved.Manifest.Select(queue.OS, queue.Arch)
 		if err != nil {
@@ -151,7 +161,7 @@ func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest) (*FleetUpgradeSta
 		qh := &fleetUpgradeHost{FleetHostStatus: FleetHostStatus{Host: queue.Host, Phase: "pending"}, Queue: true, QueueBefore: cloneFleetProof(queue.Proof)}
 		byHost := map[string]*fleetUpgradeHost{queue.Host: qh}
 		for _, m := range q.s.Machines {
-			if m.Replacement != nil || q.migrationHistoricalMachine(m) {
+			if request.QueueOnly || m.Replacement != nil || q.migrationHistoricalMachine(m) {
 				continue
 			}
 			if !q.fleetProofFresh(m.Fleet) || m.CapabilityProfile == nil {
@@ -271,6 +281,12 @@ func (q *Queue) fleetStop(h *fleetUpgradeHost, reason string) {
 }
 func (q *Queue) fleetHostQuiet(h *fleetUpgradeHost) bool {
 	if h.Machine == "" {
+		// Queue-only operations still require fresh custody from colocated workers.
+		for _, m := range q.s.Machines {
+			if hostID(m) == h.Host && m.Replacement == nil && !q.migrationHistoricalMachine(m) {
+				return q.hostMaintenanceStatus(h.Host).Quiescent
+			}
+		}
 		return h.Queue && len(q.hostObligations(h.Host)) == 0
 	}
 	return q.hostMaintenanceStatus(h.Host).Quiescent
@@ -278,6 +294,48 @@ func (q *Queue) fleetHostQuiet(h *fleetUpgradeHost) bool {
 func (q *Queue) fleetPausesCalls() bool {
 	h := q.fleetActiveHost()
 	return h != nil && h.Queue && !h.QueueDone && q.s.FleetUpgrade.State != "complete"
+}
+
+// Hold new production assignments until queue health is verified, including
+// while stopped. This closes the idle-check/admission race without draining
+// unrelated hosts or interrupting already assigned work.
+func (q *Queue) fleetPausesProduction() bool {
+	u := q.s.FleetUpgrade
+	if u == nil || !u.WaitProductionIdle || u.State == "complete" {
+		return false
+	}
+	for _, h := range u.Hosts {
+		if h.Queue && !h.QueueDone {
+			return true
+		}
+	}
+	return false
+}
+
+func (q *Queue) fleetProductionIdle() bool {
+	for _, j := range q.liveJobs() {
+		if j.Spec.Priority != "production" && j.Spec.Class != "production" {
+			continue
+		}
+		if j.State == "running" || j.State == "stopping" {
+			return false
+		}
+		// Completion/loss is not proof that the remote attempt has released custody.
+		for _, copy := range j.Copies {
+			if !copy.ReleaseConfirmed {
+				return false
+			}
+		}
+		if j.Attempt > 0 && !j.ReleaseConfirmed {
+			return false
+		}
+	}
+	for _, c := range q.calls {
+		if c.Priority == "production" || c.Class == "production" {
+			return false
+		}
+	}
+	return true
 }
 
 // Called from the normal queue transaction; only in-memory fences and custody
@@ -345,6 +403,10 @@ func (q *Queue) maintainFleetUpgrade() {
 	if h.Phase == "draining" {
 		if !q.fleetHostQuiet(h) {
 			h.Wait = "waiting for fresh exact execution and release custody"
+			return
+		}
+		if h.Queue && !h.QueueDone && u.WaitProductionIdle && !q.fleetProductionIdle() {
+			h.Wait = "waiting for production attempts and release custody across the fleet"
 			return
 		}
 		if h.Queue && !h.QueueDone && len(q.calls) > 0 {
@@ -481,7 +543,7 @@ func (q *Queue) fleetInstruction(host, machine, session string) (FleetUpdateInst
 				return FleetUpdateInstruction{}, nil
 			}
 		}
-		if !q.fleetHostQuiet(h) || h.Queue && !h.QueueDone && len(q.calls) > 0 {
+		if !q.fleetHostQuiet(h) || h.Queue && !h.QueueDone && (len(q.calls) > 0 || u.WaitProductionIdle && !q.fleetProductionIdle()) {
 			return FleetUpdateInstruction{}, nil
 		}
 		return FleetUpdateInstruction{Revision: u.Revision, Operation: u.Operation, Host: host, Machine: machine, Session: session, Release: u.Release, PublisherKey: bytes.Clone(u.PublisherKey)}, nil
@@ -566,6 +628,9 @@ func (q *Queue) AckFleetUpgrade(ack FleetUpgradeAck) error {
 					return fleetError("fleet_ack_stale")
 				}
 				reason = "runner_smoke_failed"
+			}
+			if ack.Failure == "fleet_storage_preflight_failed" {
+				reason = "storage_preflight_failed"
 			}
 			if ack.Failure == "fleet_health_failed" {
 				reason = "service_health_failed"
