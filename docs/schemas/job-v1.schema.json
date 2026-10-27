@@ -2035,6 +2035,32 @@
       ],
       "type": "object"
     },
+    "SharedInput": {
+      "properties": {
+        "archive": {
+          "type": "string"
+        },
+        "manifest": {
+          "$ref": "#/$defs/FileManifest"
+        },
+        "manifest_file": {
+          "type": "string"
+        },
+        "nas": {
+          "type": "string"
+        },
+        "sha256": {
+          "type": "string"
+        },
+        "size_bytes": {
+          "type": "integer"
+        },
+        "unpacked_bytes": {
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
     "SizeHint": {
       "properties": {
         "host_memory_gb": {
@@ -2196,6 +2222,16 @@
         },
         "run": {
           "$ref": "#/$defs/RunSpec",
+          "x-contract": "diagnostic"
+        },
+        "shared_inputs": {
+          "additionalProperties": {
+            "$ref": "#/$defs/SharedInput"
+          },
+          "type": [
+            "object",
+            "null"
+          ],
           "x-contract": "diagnostic"
         },
         "size_hint": {

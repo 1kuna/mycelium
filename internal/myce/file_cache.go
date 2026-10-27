@@ -23,6 +23,8 @@ type FileCache struct {
 func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	client, closeIdle := c.Client.inputTransfer(ref)
+	defer closeIdle()
 	if err := ref.validate(); err != nil {
 		return err
 	}
@@ -46,7 +48,7 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) error 
 	}
 	// Never replace corrupt cache bytes as if they were complete. They are disposable
 	// only after the durable authoritative copy has been checked.
-	if err = c.Client.HasFile(ctx, ref); err != nil {
+	if err = client.HasFile(ctx, ref); err != nil {
 		return err
 	}
 	if _, err = os.Lstat(p); err == nil {
@@ -68,7 +70,7 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) error 
 	used := int64(0)
 	prefix := int64(0)
 	for _, entry := range entries {
-		if entry.Name() == FormatMarker {
+		if entry.Name() == FormatMarker || entry.Name() == "shared-inputs" && entry.IsDir() {
 			continue
 		}
 		info, e := entry.Info()
@@ -109,14 +111,14 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) error 
 		}
 		if strings.HasSuffix(v.name, ".partial") {
 			// Partial downloads are not unique progress: the complete store copy exists.
-			res, e := c.Client.fileRequest(ctx, "HEAD", "/api/files/blobs/"+hash, nil, nil)
+			res, e := client.fileRequest(ctx, "HEAD", "/api/files/blobs/"+hash, nil, nil)
 			if e != nil {
 				return e
 			}
 			if e = fileResponse(res, 200); e != nil && !isResultExpired(e) {
 				return e
 			}
-		} else if e := c.Client.HasFile(ctx, FileRef{hash, v.size}); e != nil && !isResultExpired(e) {
+		} else if e := client.HasFile(ctx, FileRef{hash, v.size}); e != nil && !isResultExpired(e) {
 			return e
 		}
 		if err = os.Remove(filepath.Join(root, v.name)); err != nil {
@@ -131,7 +133,7 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) error 
 	if used+need > c.Limit || free < need {
 		return errors.New("insufficient local file cache space")
 	}
-	if err = c.Client.DownloadFile(ctx, ref, partial); err != nil {
+	if err = client.DownloadFile(ctx, ref, partial); err != nil {
 		return err
 	}
 	if err = os.Rename(partial, p); err != nil {
@@ -148,6 +150,9 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) error 
 }
 
 func validateJobFiles(s Spec) error {
+	if err := validateSharedInputs(s); err != nil {
+		return err
+	}
 	if err := s.Files.validate(); err != nil {
 		return err
 	}

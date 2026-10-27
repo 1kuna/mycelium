@@ -139,6 +139,7 @@ func (e Environment) Key() string {
 }
 
 type Spec struct {
+	SharedInputs map[string]SharedInput `json:"shared_inputs,omitempty" yaml:"shared_inputs,omitempty"`
 	// ProfileMemory binds the CLI's base command/check and common input bytes.
 	// Per-item arguments and files remain in the submitted execution spec.
 	ProfileMemory string            `json:"profile_memory,omitempty" yaml:"-"`
@@ -231,7 +232,7 @@ func (s Spec) Validate() error {
 	if s.extensionJob() {
 		return rejectIf("job_program_invalid", validateExtensionJob(s))
 	}
-	if s.Kind == "" && (len(s.Inputs)+len(s.Args) > 0 || (len(s.Outputs) > 0 && len(s.Files) == 0 && s.After == nil) || s.SizeHint.MemoryGB != 0 || s.SizeHint.HostMemoryGB != 0) {
+	if s.Kind == "" && (len(s.Inputs)+len(s.Args) > 0 || (len(s.Outputs) > 0 && len(s.Files) == 0 && len(s.SharedInputs) == 0 && s.After == nil) || s.SizeHint.MemoryGB != 0 || s.SizeHint.HostMemoryGB != 0) {
 		return reject("job_program_invalid", errors.New("inputs, outputs, args and size_hint require a kind/program job"))
 	}
 	if !validMemoryValue(s.Needs.MemoryGB) || (s.Needs.Memory != "auto" && ((!s.Needs.cpuOnly() && s.Needs.MemoryGB <= 0) || (s.Needs.cpuOnly() && s.Needs.HostMemoryGB <= 0))) {

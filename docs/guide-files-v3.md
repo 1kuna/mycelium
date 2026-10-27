@@ -213,3 +213,64 @@ storage/locking. Local failure tests cover interrupted transfers, offsets, corru
 bytes, cache eviction, filesystem sync failure, stale attempts, restart and
 resume on another hypha. Filesystem sync ordering is tested; storage hardware's
 power-loss behavior needs its own qualification.
+
+## Large read-only inputs
+
+Deploy the queue before workers. Shared-input jobs require the advertised
+`shared_inputs_v1` capability; older workers cannot receive or start them.
+
+Profiles and plain native jobs can use `shared_inputs` beside stored source
+`files`. Names use letters, digits and underscores, unique ignoring case. Read
+`MYCE_INPUT_<UPPERCASE_NAME>` in the command; it is the absolute path of a shared
+read-only file or directory, with no attempt copy or unpack.
+
+```yaml
+shared_inputs:
+  runtime:
+    nas: runtimes/python.tar.gz
+    sha256: REPLACE_WITH_ARCHIVE_SHA256
+    size_bytes: 98000000
+    archive: tar.gz
+    unpacked_bytes: 350000000
+  original:
+    nas: media/original.mov
+    sha256: REPLACE_WITH_ORIGINAL_SHA256
+    size_bytes: 2000000000
+```
+
+NAS names stay relative to each worker's `--checkpoint-root`; the queue and
+submitter need no NAS access. No NAS bytes pass through the queue store. Omit
+`nas` for a blob already imported with `myce file put`. A profile can instead
+set `local: path/to/archive` to import it, deriving SHA-256 and size; subsequent
+profiles should reference that hash or its NAS location. Existing `inputs`
+retain their private-copy behavior. Commands must explicitly use the environment
+paths, for example `python "$MYCE_INPUT_RUNTIME/run.py" "$MYCE_INPUT_ORIGINAL"`.
+
+For a large manifest already on the NAS, use `nas: runtimes/python` with
+`manifest_file: manifests/python.json`, `sha256` and `size_bytes` identifying
+that JSON file, and `unpacked_bytes` bounding the tree. The JSON is a file
+manifest mapping relative names to SHA-256 and byte counts; it stays on the NAS
+so a 12,000-file tree does not exceed the API/profile request limit.
+
+For a small already unpacked NAS directory, declare `nas: datasets/frozen` with
+`manifest: {relative/file: {sha256: HASH, size_bytes: N}, ...}`. Only listed
+regular files are copied, and executable bits are preserved. Archives support
+`tar` and `tar.gz`, regular files and directories only; links and special files
+are refused. `unpacked_bytes` bounds expanded file bytes to stop an archive from
+exhausting disk. Use a fresh hash/manifest when changing content.
+
+Workers keep entries under `file-cache/shared-inputs`, separately bounded by
+`--file-cache-bytes` (default 10 GiB), in addition to the private-file cache's
+allowance. Physical disk headroom applies across both. LRU eviction removes
+reproducible inactive copies; active attempts hold use locks through process
+cleanup. Mode bits provide cooperative read-only access, not a sandbox against
+the owning account changing permissions. First use after restart hashes every
+file; subsequent uses check inode, change time, size and mode. Metadata changes
+trigger full re-verification, allowing another cache instance's valid rebuild.
+A damaged entry fails preparation visibly; stop its readers and remove the reproducible
+entry before retrying. Stored shared inputs use the ordinary queue retention
+window; NAS originals remain owned by their project.
+
+Input downloads renew their socket deadlines on progress instead of timing out
+a whole file after 30 seconds. The idle budget is at least 60 seconds and scales
+with two hash passes at 100 MiB/s. API control calls keep their normal timeout.

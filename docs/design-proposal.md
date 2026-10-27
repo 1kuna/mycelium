@@ -2119,7 +2119,7 @@ existing blobs are checked and reused rather than uploaded again.
 
 Default job keys include item bytes and appended arguments. A profile's memory
 identity instead binds its base command, check, environment, resource
-configuration and common input bytes, excluding appended arguments, item input
+configuration and common input bytes (including shared read-only inputs), excluding appended arguments, item input
 names/bytes and the source archive. `memory_class: per_item` opts the appended
 arguments and item input identities back into memory comparability. This is
 memory estimation only; all existing acceptance, OOM, constraint, hardware and
@@ -2202,3 +2202,29 @@ model-call completion before cutover. Native manager/signature qualification and
 live fleet rollout require separate authorization. The first release containing
 this feature uses the existing installation path; later capable runtimes can
 receive updates. This amendment authorizes implementation, not a live rollout.
+
+## Shared read-only inputs (#221)
+
+Profiles and plain native jobs may declare `shared_inputs`, independently of
+private `files`. A declaration identifies a stored blob by SHA-256 and size, or
+a NAS-relative path plus that identity. A NAS directory uses an explicit file
+manifest, inline or referenced by a NAS-relative `manifest_file` and its hash/size
+so large runtime manifests do not travel in every submission. NAS references resolve under each worker's `--checkpoint-root`
+and never upload through the queue. Profiles may import a `local` blob once;
+the submitted specification contains only its immutable identity. No environment
+catalog entry or queue restart is required.
+
+Workers publish verified cache entries atomically and expose absolute paths in
+`MYCE_INPUT_<UPPERCASE_NAME>`. Files/trees have read-only mode bits; these are
+cooperative controls, not a hostile-code sandbox. `archive: tar|tar.gz` unpacks
+once, bounded by declared `unpacked_bytes`; archives contain regular files and
+directories only. NAS trees copy only manifest members and preserve executability.
+The cache records per-file hashes, verifies them on first use after restart,
+and checks inode/change-time/size/mode metadata on reuse to detect tampering.
+Shared use locks span preparation and process cleanup; LRU eviction skips active
+entries. Admission enforces the physical disk guard before staging. Failed staging
+is disposable; authoritative NAS/store data remains untouched. Stored references
+use ordinary live-job and terminal retention. All bulk I/O runs in worker or
+unlocked submission verification paths. Transfers use size-aware, renewed socket
+deadlines, with no fixed whole-input timeout. Laptop proof and native consumer
+qualification are separate; fleet acceptance waits for the queue release gate.

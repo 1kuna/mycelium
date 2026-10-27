@@ -196,6 +196,7 @@ func (q *Queue) fileReferences(pendingOnly bool, subset ...map[string]*Job) (exp
 		// Retained identities, including expired answers and completed
 		// reclamations, must never be mistaken for pre-submit orphans.
 		add(referenced, j.Spec.Files)
+		add(referenced, sharedStoredFiles(j.Spec))
 		add(referenced, j.OutputRefs)
 		for _, a := range j.AttemptHistory {
 			if a.Diagnostics != nil {

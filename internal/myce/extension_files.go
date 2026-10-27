@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 )
 
 // Existing shared storage is the transport in slice 1. Only relative names go
@@ -62,7 +61,7 @@ func copyJobFile(src, dst string) error {
 	return errors.Join(copyErr, syncErr, out.Close())
 }
 func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
-	if !j.Spec.extensionJob() && len(jobInputFiles(j))+len(jobInputPaths(j)) == 0 {
+	if !j.Spec.extensionJob() && len(jobInputFiles(j))+len(jobInputPaths(j))+len(j.Spec.SharedInputs) == 0 {
 		return nil
 	}
 	if len(jobInputPaths(j)) > 0 && w.JobFileRoot == "" {
@@ -94,9 +93,7 @@ func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
 	}
 	defer os.RemoveAll(staged)
 	for name, ref := range jobInputFiles(j) {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		err := w.fileCache.copyTo(ctx, ref, filepath.Join(staged, name))
-		cancel()
+		err := w.fileCache.copyTo(context.Background(), ref, filepath.Join(staged, name))
 		if err != nil {
 			return err
 		}

@@ -188,6 +188,9 @@ func startDev(c DevConfig, configureQueue func(*Queue)) (*Dev, error) {
 	}()
 	for i := 0; i < c.Workers; i++ {
 		w := Worker{CPUIsolationProbe: func(context.Context) error { return nil }, ExtensionRoot: c.ExtensionRoot, JobFileRoot: c.JobFileRoot, ModelConfig: c.ModelConfig, StateDir: filepath.Join(filepath.Dir(c.Database), "workers", fmt.Sprintf("fake-%d", i+1)), Client: d.client, Machine: Machine{CPUReserveCores: c.CPUReserveCores, CPUBudgetCores: c.CPUBudgetCores, HostMemoryMeasured: true, HostID: c.HostID, Device: "0", ID: fmt.Sprintf("fake-%d", i+1), GPU: c.GPU, FreeMemoryGB: c.MemoryGB, Environments: c.Environments, Models: c.Models}, Interval: c.Interval}
+		if c.NASCheckpoints {
+			w.CheckpointRoot = c.Checkpoints
+		}
 		if c.Devices > 1 {
 			w.Machine.ID, w.Machine.Device = c.HostID, ""
 			devices := []MachineDevice{}
