@@ -33,6 +33,14 @@ func TestDockerObservationTimeoutRetriesHealthyAttempt(t *testing.T) {
 			}
 			j := dockerJob()
 			j.Spec.Priority = "production"
+			q, _ := fixture(t)
+			q.clock = clock
+			submit(t, q, j.Spec)
+			assigned := check(t, q, w.Machine, nil).Job
+			if assigned == nil {
+				t.Fatal("production fixture was not assigned")
+			}
+			j = *assigned
 			j.Checkpoint = filepath.Join(t.TempDir(), "checkpoint")
 			p, err := startDockerFixture(w, store, j)
 			if err != nil {
