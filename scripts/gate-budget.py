@@ -3,6 +3,7 @@
 import os
 from pathlib import Path
 import shutil
+import re
 import signal
 import subprocess
 import sys
@@ -15,24 +16,28 @@ def interrupted(signum, frame):
     raise SystemExit(128 + signum)
 
 
-def owned_processes(marker):
+def owned_processes(marker, scratch):
     # Fixtures deliberately create new sessions/groups, and can be reparented
     # before the gate exits. An inherited, unique marker survives both. Read ps
     # privately: its environment output may contain credentials; never log it.
     output = subprocess.check_output(
         ['ps', 'eww', '-axo', 'pid=,uid=,stat=,command='], text=True)
     owned = set()
+    # Real worker commands allowlist their environment (#219), retaining only
+    # HOME/TMPDIR from our isolation. Their roots still prove this run's scope.
+    state = re.compile(r'(?:^|\s)(?:HOME|TMPDIR)=' + re.escape(scratch) + r'(?:/|\s|$)')
     for line in output.splitlines():
         fields = line.split(None, 3)
         if (len(fields) == 4 and fields[1] == str(os.getuid()) and
-                not fields[2].startswith('Z') and marker in fields[3].split()):
+                not fields[2].startswith('Z') and
+                (marker in fields[3].split() or state.search(fields[3]))):
             owned.add(int(fields[0]))
     return owned
 
 
-def signal_owned(marker, sig):
+def signal_owned(marker, scratch, sig):
     # Signal individual members, never a group which may include someone else.
-    for pid in owned_processes(marker):
+    for pid in owned_processes(marker, scratch):
         try:
             os.kill(pid, sig)
         except ProcessLookupError:
@@ -42,20 +47,20 @@ def signal_owned(marker, sig):
                   file=sys.stderr)
 
 
-def stop_fixtures(marker, child):
-    signal_owned(marker, signal.SIGTERM)
+def stop_fixtures(marker, scratch, child):
+    signal_owned(marker, scratch, signal.SIGTERM)
     until = time.monotonic() + 5
-    while owned_processes(marker) and time.monotonic() < until:
+    while owned_processes(marker, scratch) and time.monotonic() < until:
         child.poll()
         time.sleep(.05)
-    signal_owned(marker, signal.SIGKILL)
+    signal_owned(marker, scratch, signal.SIGKILL)
     # SIGKILL delivery is asynchronous. Verify exit before deleting working files.
     until = time.monotonic() + 1
-    while owned_processes(marker) and time.monotonic() < until:
+    while owned_processes(marker, scratch) and time.monotonic() < until:
         child.poll()
         time.sleep(.05)
     child.poll()
-    return not owned_processes(marker)
+    return not owned_processes(marker, scratch)
 
 
 def remove_scratch(path):
@@ -92,7 +97,7 @@ def main():
     finally:
         # Keep scratch available for TERM handlers/checkpoint saves. This also
         # catches leaked fixtures after an otherwise successful shell exit.
-        if stop_fixtures(marker, child):
+        if stop_fixtures(marker, scratch, child):
             remove_scratch(scratch)
         else:
             print(f'gate scratch retained: {scratch}', file=sys.stderr)

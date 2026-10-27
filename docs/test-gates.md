@@ -25,8 +25,9 @@ on expiry it stops its process group and suggests `./scripts/gate.sh full`
 (exit 124). It sends TERM at 295 seconds and KILL after five seconds if needed,
 then verifies fixture exit before removing scratch. Cleanup may extend the wall
 time; scratch is retained if a fixture cannot be stopped. Fixtures carry a unique
-inherited run marker, so detached processes are included and other runs are left
-alone. The old 175-second deadline left only 19 seconds for builds/vet after an
+inherited run marker or HOME/TMPDIR under the run's isolated scratch, so detached
+worker commands are included and other runs are left alone. The old 175-second
+deadline left only 19 seconds for builds/vet after an
 observed 156-second related-test selection, and repeatedly truncated passing work
 under shared load (#204). Five minutes keeps quick below the full gate's target
 without reducing test selection. The full

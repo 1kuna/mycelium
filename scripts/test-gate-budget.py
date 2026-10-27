@@ -46,9 +46,12 @@ class GateBudgetTests(unittest.TestCase):
             fixture.write_text('''import os, pathlib, signal, subprocess, sys
 root = pathlib.Path(__file__).parent
 if len(sys.argv) == 1:
-    subprocess.Popen([sys.executable, __file__, 'child'], start_new_session=True)
+    scratch = os.environ['GATE_SCRATCH']
+    # Match jobBaseEnvironment: the run marker is deliberately not inherited.
+    env = dict(HOME=scratch+'/home', TMPDIR=scratch+'/tmp')
+    subprocess.Popen([sys.executable, __file__, 'child'], env=env, start_new_session=True)
 else:
-    scratch = pathlib.Path(os.environ['GATE_SCRATCH'])
+    scratch = pathlib.Path(os.environ['HOME']).parent
     signal.signal(signal.SIGTERM, lambda *_: (root / 'saved').write_text(str(scratch.exists())))
     (root / 'ready').write_text(str(os.getpid()))
 while True: signal.pause()
