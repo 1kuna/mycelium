@@ -104,7 +104,10 @@ func TestFileRequestProgressingUnknownLengthUpload(t *testing.T) {
 		return slowUploadConn{conn}, nil
 	}
 	defer transport.CloseIdleConnections()
-	c := Client{URL: server.URL, HTTP: &http.Client{Transport: transport, Timeout: 200 * time.Millisecond}, transferIdle: 250 * time.Millisecond}
+	// This opaque fixture returns progress only after its aggregated Write.
+	// Darwin measured that operation at 312 ms despite continuing socket writes;
+	// allow three such periods while the complete upload still outlasts idle.
+	c := Client{URL: server.URL, HTTP: &http.Client{Transport: transport, Timeout: 200 * time.Millisecond}, transferIdle: time.Second}
 	start := time.Now()
 	res, err := c.fileRequest(context.Background(), "PATCH", "/upload", io.LimitReader(bytes.NewReader(body), int64(len(body))), nil, int64(len(body)))
 	if err != nil {
