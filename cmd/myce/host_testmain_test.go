@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"mycelium/internal/myce"
 	"mycelium/internal/probeguard"
 	"mycelium/internal/testenv"
@@ -18,6 +19,13 @@ func TestMain(m *testing.M) {
 }
 
 func cliTestMain(m *testing.M) int {
+	if len(os.Args) > 1 && os.Args[1] == "_native-exec" {
+		if err := myce.NativeExec(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 125
+		}
+		return 0
+	}
 	// Fleet jobs inherit the hosting service's identity. These CLI fixtures
 	// run outside its worker cgroup and own their simulated service startup.
 	if err := os.Unsetenv("INVOCATION_ID"); err != nil {

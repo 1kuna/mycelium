@@ -25,6 +25,13 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "_native-exec" {
+		if err := myce.NativeExec(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(125)
+		}
+		return
+	}
 	if err := myce.GuardRootStartup(); err != nil {
 		log.Print(err)
 		os.Exit(exitCode(err))
@@ -53,6 +60,9 @@ func run(args []string) error {
 	return runWithProbe(args, probe)
 }
 func runWithProbe(args []string, probe myce.MachineProbe) error {
+	if len(args) > 0 && args[0] == "_native-exec" {
+		return myce.NativeExec(args[1:])
+	}
 	if err := myce.GuardRootStartup(); err != nil {
 		return err
 	}
@@ -854,6 +864,7 @@ func printStatus(s myce.Snapshot, full bool) {
 			fmt.Printf("worker %s release: unknown\n", m.ID)
 		}
 		state := myce.HyphaAvailability(m)
+		state += "; " + myce.NativeIsolationStatus(*m)
 		if m.LastResort {
 			state += "; last-resort placement"
 		}

@@ -61,9 +61,6 @@ func copyJobFile(src, dst string) error {
 	return errors.Join(copyErr, syncErr, out.Close())
 }
 func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
-	if !j.Spec.extensionJob() && len(jobInputFiles(j))+len(jobInputPaths(j))+len(j.Spec.SharedInputs) == 0 {
-		return nil
-	}
 	if len(jobInputPaths(j)) > 0 && w.JobFileRoot == "" {
 		return errors.New("job files require a root and clean relative names")
 	}
@@ -92,6 +89,30 @@ func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
 		return err
 	}
 	defer os.RemoveAll(staged)
+	if !j.Spec.Run.Docker && j.Extension != nil {
+		var files map[string][]byte
+		for _, extension := range j.Extensions {
+			if extension.Digest == j.Extension.Digest {
+				files = extension.Files
+				break
+			}
+		}
+		if len(files) == 0 {
+			return errors.New("frozen native extension source missing")
+		}
+		for name, data := range files {
+			if !safeRelative(name) {
+				return errors.New("invalid frozen extension path")
+			}
+			path := filepath.Join(staged, ".myce-extension", name)
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				return err
+			}
+			if err := os.WriteFile(path, data, 0600); err != nil {
+				return err
+			}
+		}
+	}
 	if j.Spec.PrepareSource {
 		ref, ok := jobInputFiles(j)[".myce-source.tar"]
 		if !ok {

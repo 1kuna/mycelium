@@ -637,6 +637,48 @@ exact worker spool. Loads stay serial; N bounds requests after all models load.
 load and warm-up seconds and record the combined sampled peak. Brief spikes
 can be missed; real CUDA/XPU qualification remains necessary.
 
+## Native payload isolation
+
+Native commands and sidecars use a kernel boundary, not same-UID `0700` alone.
+See [native isolation](native-isolation.md) for the platform guarantee table and
+limits. This #177 minimum is a v1 requirement; documentation does not establish
+fleet qualification or rollout.
+
+Stage source/data into the managed `{work}` through inputs or a frozen
+extension. Native workdirs must resolve beneath `{work}`. Extension source gets
+a private copy; prepared environment/extension caches permit reads/execution,
+not content writes. The worker overrides `TMPDIR`, `TMP` and `TEMP` to
+`{work}/.tmp` after authored env/activation. #219's environment allowlist and
+credential filtering remain in effect. Linux fallback does not protect all
+metadata operations, including `chmod`; macOS protects targeted spool and
+credential contents while unrelated host metadata/files remain visible.
+
+Payloads are offline by default. Add `needs.network: true` for payload-time
+downloads or API calls. Worker-owned environment/input preparation keeps its
+network access. Placement requires protected outbound capability; submission
+returns `no_qualified_target` immediately when none qualifies. Both Linux modes
+currently withhold `native_network`, because namespace egress is unqualified.
+macOS online jobs still cannot reach other loopback endpoints or the queue's
+TCP port at any address, including unrelated services using that port.
+
+Linux probes `bwrap`, `nsenter`, Landlock ABI >= 6 and seccomp in the running
+service's context. Namespace mode shares one attempt anchor across sidecars.
+Only namespace policy refusal permits Landlock/seccomp fallback; missing tools
+or broken setup fail closed. Fallback allows only exact reserved sidecar TCP
+ports, **including off-host connections and any bind address on those ports**;
+this is partial network isolation. Readiness checks actual listener ownership
+and `127.0.0.1` binding, not a kernel restriction on future binds. Other TCP
+ports, UDP/raw/packet/SCTP/MPTCP and Unix endpoints are denied. macOS uses
+deprecated `sandbox-exec`/Seatbelt and refuses launch if the launcher/profile
+fails. Existing cgroup, GPU, launch and cleanup gates remain required.
+
+An optional [per-host AppArmor profile](native-isolation.md#optional-administrator-action-per-host-apparmor-user-namespaces)
+can authorize user namespaces for the installed binary while keeping
+`kernel.apparmor_restrict_unprivileged_userns=1`. It is a separate privileged
+action, not applied here: review the intentionally permissive profile and
+kernel attack-surface cost, load with `apparmor_parser`, then restart and verify
+the actual worker service. Never disable the global restriction as a shortcut.
+
 ## Docker cleanup custody
 
 Managed Docker batches use exact immutable attempt labels and a durable create/start

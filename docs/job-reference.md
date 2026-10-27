@@ -57,14 +57,15 @@ when shell expansion is needed.
 | `logs` | Omitted / `keep` | `none` discards command stdout/stderr; no queue log rows or worker attempt `.log` file |
 | `deadline` | Required for `deadline`; optional otherwise | RFC3339 time; ordering hint, not an execution timeout |
 | `run.command` | Required, nonempty argv | Executable and arguments; resolved from its environment, then worker PATH |
-| `run.workdir` | Absent: worker's working directory | Existing working directory; use an absolute shared or consistently installed path |
-| `run.env` | Empty map | String environment overrides, merged with worker environment |
+| `run.workdir` | Absent: managed `{work}` | Native cwd must resolve within the private attempt directory; stage source/data as inputs or a profile |
+| `run.env` | Empty map | String overrides over the worker's safe environment allowlist; attempt/device/temp controls remain worker-owned |
 | `needs.cpu_cores` | Default one | Admitted logical cores for the whole attempt, including sidecars; omit GPU selectors for CPU-only work |
 | `needs.memory_gb` | Finite and positive unless `memory: auto` | Host RAM GiB for CPU-only work; GPU memory for GPU work; optional hint with auto |
 | `needs.host_memory_gb` | Absent / `0`: GPU-only admission on uncapped hosts | Additional host RAM in GiB, including runtime/activation peaks; capped hosts require a positive resolved envelope; qualified Linux services enforce it plus worker slack |
 | `needs.memory` | Omitted: declared reservation | `auto`: local accepted peaks, cross-machine estimate, optional hint, or guarded exploratory first run; resolved once per attempt |
 | `needs.platform` | GPU work: required; CPU input: omitted or `cpu` | `[cuda]` shorthand, `{required: [cuda, xpu]}`, `{preferred: [metal]}`, or `any` / `{any: true}`; exactly one mode |
 | `needs.model` | Absent | Batch affinity hint; does not load a model |
+| `needs.network` | Omitted / `false` | Native payload outbound opt-in. `true` requires a host advertising protected egress or submission is refused; reserved sidecar loopback and preparation need no opt-in. [Platform limits](native-isolation.md) apply, including fallback's partial network isolation. |
 | `environment` | Absent | Catalog name, `{name: torch-cuda}`, or `{lock_file: /shared/project/requirements.txt, python: "3.12", platforms: [cuda]}`; never both name and lock file |
 | `targets` | Empty: any OS/arch | Exact `{os, arch, platform}` alternatives, enforced at dispatch and launch |
 | `require_target` | `false` | Refuse a new submission without an online qualified target of sufficient total admitted capacity; busy qualified targets may queue |

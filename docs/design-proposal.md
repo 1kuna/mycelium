@@ -36,11 +36,12 @@ class: experiment           # arbitrary job class; legacy priority is accepted
 deadline: null              # a time, required when priority is "deadline"
 run:
   command: ["python", "reindex.py", "--batch", "7"]
-  workdir: /srv/example
+  workdir: '{work}'         # worker-managed attempt directory; stage source as inputs
   env: {}
 needs:
   memory_gb: 40
   platform: [cuda]          # any of: cuda, xpu, metal
+  network: false            # payload offline by default; true requires protected outbound
   model: qwen3-32b          # optional; used to group jobs that share a model
 expected_minutes: 90        # rough guess; used for planning, never enforced
 resumable: true             # true = the job saves checkpoints and can be stopped and picked up later
@@ -544,6 +545,85 @@ the physical host's exclusion across loss/restart. Plain commands remain the
 default; no container scheduler, peer network or extra service is introduced.
 The exact supported subset and limits are in [job reference](job-reference.md#managed-docker-batch-commands)
 and [operations](operations.md#docker-cleanup-custody).
+
+## Amendment: minimum native job isolation (#177, #219, #248)
+
+The #177 minimum is a v1 requirement under [#248's clarification](https://github.com/1kuna/mycelium/issues/248#issuecomment-6447873336):
+managed job directory and temp, no ambient credentials, and no worker control
+access. Same-user jobs require a **kernel-enforced boundary**; `0700` alone
+cannot separate processes sharing a UID. This amendment covers native batch
+payloads and their sidecars, including queued extension run/check payloads. It
+does not establish isolation for local setup/qualification hooks, arbitrary
+preparation code or standalone model servers.
+Implementation and native qualification are separate; this text records the
+contract, not a completed rollout.
+
+Every native attempt gets a managed `{work}` and `.tmp` beneath it. The worker
+overrides `TMPDIR`, `TMP` and `TEMP` after authored environment/activation. Native
+workdirs must resolve inside `{work}`; stage source and data through inputs or
+the frozen extension, rather than executing from an arbitrary host checkout.
+Extension source is copied privately under `{work}/.myce-extension`.
+Prepared environments and shared extension caches permit payload reads and
+execution, not content writes. Keep #219's environment allowlist, stripping
+agent/session variables and queue credentials; `MYCE_TOKEN` never reaches a
+payload. Explicit job inputs and `run.env` are intentional disclosures to that
+job. Linux metadata limitations below also apply to cache permissions.
+
+Linux prefers rootless **bubblewrap** (`bwrap`) with user, mount, PID, IPC and
+network namespaces, a read-only host-root view, private `/tmp` and `/dev/shm`,
+and narrowly writable attempt/checkpoint paths. Landlock plus seccomp further
+restrict file contents, devices, sockets and process access. A per-attempt
+namespace anchor is shared by main and sidecars using `nsenter`; independently
+isolating each member would break sidecar loopback. The installed worker's
+service context must pass the capability probe. The current implementation
+requires Landlock ABI >= 6 and working `bwrap`/`nsenter` for this stack.
+
+Only namespace **policy refusal** permits the narrower Landlock ABI >= 6 plus
+seccomp fallback. Missing tools, unsupported ABI, broken setup or timeout fail
+closed. Landlock allows TCP connect/bind only on the exact worker-reserved
+sidecar ports, with none allowed for a job without ports; seccomp denies UDP,
+raw/packet, SCTP, MPTCP and new AF_UNIX endpoints. Private Unix stream
+socketpairs remain available for process wakeups; reconnectable datagram pairs
+are denied.
+**This fallback provides partial network isolation:** a reserved port
+also permits off-host TCP on that destination port and binding that local port
+on any address. Readiness verifies actual sidecar ownership and a
+`127.0.0.1` listener; it is not kernel enforcement of the bind address. No other
+TCP connects/binds are permitted. Landlock does not isolate metadata: `stat`,
+`chmod`, `chown`, timestamps and other unmediated operations remain subject to
+ordinary host permissions. Do not describe it as a private filesystem or as
+protection against every form of sibling interference.
+
+Both Linux modes are currently **offline-only** capabilities: namespace egress
+transport is unqualified, while the fallback's reserved-port exception does not
+qualify general outbound access. Neither advertises `native_network`.
+`needs.network: true` is the explicit declaration for payload-time downloads or
+API calls. Placement requires an online-capable host; submission returns
+`no_qualified_target` immediately if none qualifies, rather than accepting an
+impossible job indefinitely. Worker-owned environment/input preparation keeps
+its network access. A declaration never waives credential/control protection.
+
+macOS uses inherited `sandbox-exec`/Seatbelt rules to deny same-spool sibling
+contents and writes, protected worker/operator credential roots, Unix control
+sockets, cross-job process access and unwanted Mach services, while retaining
+Metal services. This is targeted protection with metadata and unrelated host
+files still visible, not a private mount/PID namespace or a full home sandbox.
+Default outbound access is limited to the attempt's reserved TCP loopback
+sidecars. `needs.network: true` permits general outbound access while denying
+other loopback endpoints and the queue control TCP port at **every** address;
+this also denies unrelated services on that port. Seatbelt is deprecated:
+missing launcher, rejected profile or failed enforcement must fail the attempt,
+never run it unconfined.
+
+Retain assigned GPU access and existing CPU/GPU qualification, cgroup placement,
+per-member/aggregate memory limits, authorization/Started gates and exact cleanup
+custody. The unsandboxed worker/supervisor performs control and observation;
+payload confinement is not a release proof. Same-user **unsandboxed host
+processes**, root, kernel/driver exploits and malicious operator runtime files
+are outside this boundary's threat model. It is not hostile multitenancy.
+See [native isolation](native-isolation.md) for the platform guarantee table,
+limitations and a separately authorized per-host AppArmor option. Broader #177
+hardening remains separate from this minimum.
 
 ## Per-attempt RAM ceilings
 

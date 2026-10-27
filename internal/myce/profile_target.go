@@ -27,7 +27,7 @@ func (f *targetFit) check(ok bool, dimension string) bool {
 		}
 		f.failures++
 		switch dimension {
-		case "target", "platform", "device", "environment", "extension", "allow-list":
+		case "target", "platform", "device", "environment", "extension", "allow-list", "native network isolation":
 			f.ineligible++
 		}
 	}
@@ -75,6 +75,8 @@ func targetFitReason(dimension string, j *Job, m *Machine) string {
 		return strings.Join(parts, "/")
 	}
 	switch dimension {
+	case "native network isolation":
+		return "needs.network: true requires protected native outbound execution; this host only supports offline native jobs or has not reported isolation capability"
 	case "disk headroom":
 		return diskHeadroomReason(j, m)
 	case "target":
