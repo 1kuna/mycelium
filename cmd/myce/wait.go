@@ -111,6 +111,7 @@ func waitPause(ctx context.Context, d time.Duration) error {
 // Clock and pause are injected so deadlines, backoff, and recovery tests do not sleep.
 func waitJobs(ctx context.Context, c myce.Client, ids []string, timeout time.Duration, out, errOut io.Writer, clock myce.Clock, pause func(context.Context, time.Duration) error) error {
 	pending := map[string]bool{}
+	completed := map[string]bool{}
 	for _, id := range ids {
 		pending[id] = true
 	}
@@ -121,33 +122,67 @@ func waitJobs(ctx context.Context, c myce.Client, ids []string, timeout time.Dur
 		if ctx.Err() != nil {
 			return waitError(4, "wait interrupted; jobs continue")
 		}
-		remaining := deadline.Sub(clock.Now())
-		if timeout > 0 && remaining <= 0 {
-			return waitError(3, "wait timed out; jobs continue")
+		// Iterate a fixed set: prefixes are replaced with exact IDs as they resolve.
+		ids := make([]string, 0, len(pending))
+		for id := range pending {
+			ids = append(ids, id)
 		}
-		requestCtx := ctx
-		cancel := func() {}
-		if timeout > 0 {
-			requestCtx, cancel = context.WithTimeout(ctx, remaining)
-		}
-		s, err := status(requestCtx, c)
-		deadlineExpired := requestCtx.Err() == context.DeadlineExceeded
-		cancel()
-		if ctx.Err() != nil {
-			return waitError(4, "wait interrupted; jobs continue")
-		}
-		if timeout > 0 && (!clock.Now().Before(deadline) || deadlineExpired) {
-			return waitError(3, "wait timed out; jobs continue")
-		}
-		if err != nil {
-			if myce.IsTLSIdentityError(err) {
-				return waitError(2, "wait: tls_identity; check installed queue authority")
+		unavailable := false
+		for _, id := range ids {
+			if !pending[id] {
+				continue
 			}
-			var httpErr *myce.HTTPError
-			if errors.As(err, &httpErr) && !myce.RetryStatusRead(err) {
-				// Do not echo a remote response body (it may contain credentials).
-				return waitError(2, fmt.Sprintf("wait: queue HTTP %d; check authentication and queue address", httpErr.Status))
+			remaining := deadline.Sub(clock.Now())
+			if timeout > 0 && remaining <= 0 {
+				return waitError(3, "wait timed out; jobs continue")
 			}
+			requestCtx := ctx
+			cancel := func() {}
+			if timeout > 0 {
+				requestCtx, cancel = context.WithTimeout(ctx, remaining)
+			}
+			j, err := c.GetJob(requestCtx, id)
+			deadlineExpired := requestCtx.Err() == context.DeadlineExceeded
+			cancel()
+			if ctx.Err() != nil {
+				return waitError(4, "wait interrupted; jobs continue")
+			}
+			if timeout > 0 && (!clock.Now().Before(deadline) || deadlineExpired) {
+				return waitError(3, "wait timed out; jobs continue")
+			}
+			if err != nil {
+				if myce.IsTLSIdentityError(err) {
+					return waitError(2, "wait: tls_identity; check installed queue authority")
+				}
+				var httpErr *myce.HTTPError
+				if errors.As(err, &httpErr) && !myce.RetryStatusRead(err) {
+					// Do not echo a remote response body (it may contain credentials).
+					return waitError(2, fmt.Sprintf("wait: queue HTTP %d; check job ID, authentication and queue address", httpErr.Status))
+				}
+				unavailable = true
+				break
+			}
+			delete(pending, id)
+			if j.State != "succeeded" && j.State != "failed" && j.State != "cancelled" {
+				pending[j.ID] = true
+				continue
+			}
+			delete(pending, j.ID)
+			if completed[j.ID] {
+				continue
+			}
+			completed[j.ID] = true
+			// A reason can contain line breaks; keep one physical line per job.
+			reason := strings.Join(strings.Fields(j.Reason), " ")
+			if reason != "" {
+				reason = " " + reason
+			}
+			if _, err := fmt.Fprintf(out, "%s %s%s\n", j.ID, j.State, reason); err != nil {
+				return &exitError{2, err}
+			}
+			failed = failed || j.State != "succeeded"
+		}
+		if unavailable {
 			if !retrying {
 				fmt.Fprintln(errOut, "wait: queue unavailable; retrying")
 				retrying = true
@@ -159,41 +194,6 @@ func waitJobs(ctx context.Context, c myce.Client, ids []string, timeout time.Dur
 				retrying = false
 			}
 			delay = 3 * time.Second
-			for id := range pending {
-				j, err := myce.FindJob(s.Jobs, id)
-				if err != nil {
-					return waitError(2, "wait: "+err.Error())
-				}
-				if j.ID != id {
-					delete(pending, id)
-					pending[j.ID] = true
-				}
-			}
-			found := map[string]bool{}
-			for _, j := range s.Jobs {
-				if !pending[j.ID] {
-					continue
-				}
-				found[j.ID] = true
-				if j.State != "succeeded" && j.State != "failed" && j.State != "cancelled" {
-					continue
-				}
-				// A reason can contain line breaks; keep one physical line per job.
-				reason := strings.Join(strings.Fields(j.Reason), " ")
-				if reason != "" {
-					reason = " " + reason
-				}
-				if _, err := fmt.Fprintf(out, "%s %s%s\n", j.ID, j.State, reason); err != nil {
-					return &exitError{2, err}
-				}
-				delete(pending, j.ID)
-				failed = failed || j.State != "succeeded"
-			}
-			for id := range pending {
-				if !found[id] {
-					return waitError(2, "wait: unknown job ID "+id)
-				}
-			}
 		}
 		if len(pending) == 0 {
 			break

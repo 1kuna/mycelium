@@ -98,6 +98,33 @@ func TestJobReadAvoidsUsage(t *testing.T) {
 	}
 }
 
+func TestJobReadCommittedSubmissionIgnoresStatusCache(t *testing.T) {
+	q, _ := fixture(t)
+	// Keep the injected clock fixed, so every aggregate read stays on this
+	// empty generation even after the submission transaction commits.
+	before, err := q.cachedStatusJSON()
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+	defer server.Close()
+	c := Client{URL: server.URL, Token: "test"}
+	j, err := c.Submit(context.Background(), spec("experiment"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{j.ID, j.ID[:8]} {
+		got, err := c.GetJob(context.Background(), id)
+		if err != nil || got.ID != j.ID || got.State != "queued" {
+			t.Fatalf("committed job missing for %s: %+v %v", id, got, err)
+		}
+	}
+	after, err := q.cachedStatusJSON()
+	if err != nil || before != after {
+		t.Fatal("fixture did not retain stale aggregate generation", err)
+	}
+}
+
 func TestJobReadEligibilityLifecycle(t *testing.T) {
 	q, _ := fixture(t)
 	a, b := machine("receipt-a", "fake", "host-a"), machine("receipt-b", "fake", "host-b")

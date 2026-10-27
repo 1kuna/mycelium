@@ -99,6 +99,8 @@ func (q *Queue) captureObservation(id string) (*Queue, fileStoreObservation, err
 	var selected *Job
 	var err error
 	if id != "" {
+		// Resolve against committed queue state while holding q.mu, never the
+		// aggregate status cache. Keep the selected job in this same capture.
 		selected, err = q.findObservationJob(id)
 		if err == nil {
 			id = selected.ID
