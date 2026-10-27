@@ -13,6 +13,16 @@ import (
 	"time"
 )
 
+func TestNativeIsolationModelCredentialOverlap(t *testing.T) {
+	work, cache := t.TempDir(), t.TempDir()
+	w := Worker{CacheRoot: cache, ServiceConfig: &ServiceConfig{JoiningFile: filepath.Join(cache, "joining.json")}}
+	cmd := exec.Command("/usr/bin/true")
+	cmd.Dir = work
+	if err := w.isolateNativeCommand(cmd, work, work, nil, nil, false); err == nil || !strings.Contains(err.Error(), "runtime_overlap") {
+		t.Fatal("model read grant exposing worker authority accepted", err)
+	}
+}
+
 func TestNativeIsolationNetworkDeclaration(t *testing.T) {
 	// Seatbelt's localhost filter includes the host's LAN addresses as well as
 	// loopback. A declaration must not expose a local control listener by alias.

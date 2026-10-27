@@ -563,8 +563,12 @@ overrides `TMPDIR`, `TMP` and `TEMP` after authored environment/activation. Nati
 workdirs must resolve inside `{work}`; stage source and data through inputs or
 the frozen extension, rather than executing from an arbitrary host checkout.
 Extension source is copied privately under `{work}/.myce-extension`.
-Prepared environments and shared extension caches permit payload reads and
-execution, not content writes. Keep #219's environment allowlist, stripping
+Prepared environments, shared extension caches and operator-configured model
+cache/store roots permit payload reads and execution, not content writes.
+NAS inputs and outputs retain their declared worker staging/publication
+contract; only the attempt's exact checkpoint directory is writable in place.
+Neither a mounted NAS nor an authored environment path grants the payload the
+whole shared filesystem. Keep #219's environment allowlist, stripping
 agent/session variables and queue credentials; `MYCE_TOKEN` never reaches a
 payload. Explicit job inputs and `run.env` are intentional disclosures to that
 job. Linux metadata limitations below also apply to cache permissions.

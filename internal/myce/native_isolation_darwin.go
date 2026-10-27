@@ -51,7 +51,14 @@ func (w Worker) isolateNativeCommand(cmd *exec.Cmd, spool, work string, env map[
 		read = append(read, canonical(path))
 	}
 	// These roots are worker configuration, never paths supplied by run.env.
-	for _, path := range []string{filepath.Join(spool, "environment-cache"), w.EnvironmentRoot, w.ExtensionRoot} {
+	modelCache := w.CacheRoot
+	if modelCache == "" {
+		modelCache = filepath.Join(spool, "model-cache")
+	}
+	if err := w.validateNativeReadGrants([]string{modelCache, w.ModelRoot}, spool); err != nil {
+		return err
+	}
+	for _, path := range []string{filepath.Join(spool, "environment-cache"), w.EnvironmentRoot, w.ExtensionRoot, modelCache, w.ModelRoot} {
 		if path != "" {
 			read = append(read, canonical(path))
 		}
