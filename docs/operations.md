@@ -879,8 +879,8 @@ rollout remain separate from the laptop acceptance tests.
 ## Queue history retention
 
 Maintenance retires terminal job rows after 168 hours (or longer configured
-result/log retention), once all attempts are released and file/log cleanup is
-complete. Each tick removes at most 64 jobs. Keyed replay answers remain for
+result/log retention), once all attempts are released, files have expired and log cleanup is
+complete. Pending file cleanup transfers to durable per-hash ownership. Each tick removes at most 64 jobs. Keyed replay answers remain for
 30 days after removal, followed by permanent expired-key digests; learned work
 curves remain. Expired jobs disappear from listing and ID lookup. See the
 [retention contract](design-proposal.md#submission-identity-and-cancellation-80).

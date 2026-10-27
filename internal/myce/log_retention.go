@@ -76,8 +76,9 @@ func (q *Queue) pruneBatchLogs() error {
 		if complete {
 			q.mu.Lock()
 			q.records.logs.set(id, time.Time{})
-			if q.s.Jobs[id] != nil {
+			if j := q.s.Jobs[id]; j != nil {
 				q.records.logsDone[id] = true
+				q.indexJob(id, j)
 			}
 			q.mu.Unlock()
 		}

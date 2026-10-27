@@ -3,6 +3,7 @@ package myce
 import (
 	"errors"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 )
@@ -119,5 +120,105 @@ func TestHistoryRetentionBatchRollbackAndCustody(t *testing.T) {
 	q = reopenCancellationQueue(t, q, c)
 	if q.s.Jobs["key-0"] == nil || len(q.s.Jobs) != 1 {
 		t.Fatal("restart lost protected custody")
+	}
+}
+
+func TestHistoryRetentionProtectedWaveDoesNotStarve(t *testing.T) {
+	q, c := fixture(t)
+	ended := c.Now().Add(-2 * jobHistoryRetention)
+	if err := q.update(func() error {
+		for i := 0; i < fileReclaimBatch; i++ {
+			id := fmt.Sprint("protected-", i)
+			q.putJob(id, &Job{ID: id, State: "failed", FinishedAt: &ended, Attempt: 1})
+		}
+		later := ended.Add(time.Hour)
+		q.putJob("eligible", &Job{ID: "eligible", State: "succeeded", FinishedAt: &later})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := q.Tick(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if q.s.Jobs["eligible"] != nil {
+		t.Fatal("protected expired wave starved eligible history")
+	}
+	if len(q.s.Jobs) != fileReclaimBatch {
+		t.Fatal("unconfirmed attempts lost")
+	}
+}
+
+func TestHistoryRetentionMissingTimestampStartsOnce(t *testing.T) {
+	q, c := fixture(t)
+	if err := q.update(func() error { q.putJob("legacy", &Job{ID: "legacy", State: "failed"}); return nil }); err != nil {
+		t.Fatal(err)
+	}
+	observed := c.Now()
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if j := q.s.Jobs["legacy"]; j == nil || j.FinishedAt == nil || !j.FinishedAt.Equal(observed) {
+		t.Fatal("first maintenance observation not durable", j)
+	}
+	c.Advance(jobHistoryRetention / 2)
+	q = reopenCancellationQueue(t, q, c)
+	if !q.s.Jobs["legacy"].FinishedAt.Equal(observed) {
+		t.Fatal("restart moved retention window")
+	}
+	c.Advance(jobHistoryRetention / 2)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if q.s.Jobs["legacy"] != nil {
+		t.Fatal("missing timestamp started a second retention window")
+	}
+}
+
+func TestHistoryRetentionTransfersSharedBlobCleanup(t *testing.T) {
+	q, c := fixture(t)
+	client := retentionClient(t, q)
+	_, ref := retentionUpload(t, client, "shared retention bytes")
+	s := spec("experiment")
+	s.Files = FileManifest{"input": ref}
+	s.SubmissionKey = "retiring-input"
+	old := submit(t, q, s)
+	s.SubmissionKey = "current-input"
+	live := submit(t, q, s)
+	if err := q.Cancel(old.ID); err != nil {
+		t.Fatal(err)
+	}
+	c.Advance(jobHistoryRetention)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if q.s.Jobs[old.ID] != nil || !q.s.RetiredJobFiles[ref.SHA256] {
+		t.Fatal("shared cleanup retained full job or lost cleanup ownership")
+	}
+	storeRoot := q.files.root
+	q = reopenCancellationQueue(t, q, c)
+	if err := q.ConfigureFileStore(storeRoot, 1<<20, true); err != nil {
+		t.Fatal(err)
+	}
+	c.Advance(submissionRetention)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if !q.s.RetiredJobFiles[ref.SHA256] {
+		t.Fatal("key expiry lost deferred cleanup")
+	}
+	if _, err := os.Stat(q.files.blob(ref)); err != nil {
+		t.Fatal("shared file deleted", err)
+	}
+	if err := q.Cancel(live.ID); err != nil {
+		t.Fatal(err)
+	}
+	c.Advance(jobHistoryRetention)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if q.s.RetiredJobFiles[ref.SHA256] {
+		t.Fatal("released shared blob cleanup did not finish")
 	}
 }
