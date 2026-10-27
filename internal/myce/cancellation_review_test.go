@@ -362,7 +362,13 @@ func TestCancellationWorkerPreparing(t *testing.T) {
 			}
 			defer store.close()
 			store.state.Session = assigned.Session
-			p, err := w.start(store, *assigned)
+			// Managed input/work preparation is bounded per heartbeat. Consume a
+			// pending observation as the worker loop does before checking cancellation.
+			var p *process
+			await(t, func() bool {
+				p, err = w.start(store, *assigned)
+				return !errors.Is(err, errWorkerCheckpoint)
+			})
 			var completed Result
 			if err != nil {
 				if !stale(err) || errors.Is(err, errWorkerReleasePending) || p != nil {
