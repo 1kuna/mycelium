@@ -47,6 +47,7 @@ type fleetUpgradeHost struct {
 	Owned       bool               `json:"owned"`
 }
 type fleetQueueRuntime struct {
+	Session    string
 	Host       string
 	OS         string
 	Arch       string
@@ -57,13 +58,14 @@ type FleetUpgradeRequest struct {
 	Release string `json:"release,omitempty"`
 }
 type FleetUpgradeAck struct {
-	Revision  int    `json:"revision"`
-	Operation string `json:"operation"`
-	Host      string `json:"host"`
-	Machine   string `json:"machine"`
-	Session   string `json:"session"`
-	Phase     string `json:"phase"`
-	Failure   string `json:"failure,omitempty"`
+	Runtime   *FleetRuntimeProof `json:"runtime,omitempty"`
+	Revision  int                `json:"revision"`
+	Operation string             `json:"operation"`
+	Host      string             `json:"host"`
+	Machine   string             `json:"machine"`
+	Session   string             `json:"session"`
+	Phase     string             `json:"phase"`
+	Failure   string             `json:"failure,omitempty"`
 }
 
 func fleetError(code string) error { return &HTTPError{Status: 409, Code: code, Message: code} }
@@ -317,15 +319,6 @@ func (q *Queue) maintainFleetUpgrade() {
 			q.s.HostMaintenance[h.Host] = policy
 		}
 		h.Policy = policy
-		// Identical installed release needs health verification, no replacement.
-		if h.Queue && h.QueueBefore.Version == u.Release.Manifest.Version {
-			a, _ := u.Release.Manifest.Select(q.fleetQueue.OS, q.fleetQueue.Arch)
-			h.QueueDone = h.QueueBefore.SHA256 == a.SHA256
-		}
-		if h.Before != nil && h.Before.Fleet.Version == u.Release.Manifest.Version {
-			a, _ := u.Release.Manifest.Select(h.Before.CapabilityProfile.OS, h.Before.CapabilityProfile.Arch)
-			h.WorkerDone = h.Before.Fleet.SHA256 == a.SHA256
-		}
 		h.Phase = "draining"
 		h.ProgressAt = q.clock.Now()
 		if policy.Mode == "enabled" {
@@ -355,8 +348,14 @@ func (q *Queue) maintainFleetUpgrade() {
 		}
 		if h.Queue && !h.QueueDone {
 			h.Phase = "queue_update"
+			if h.QueueBefore.Version == u.Release.Manifest.Version {
+				h.Phase = "queue_health"
+			}
 		} else if h.Machine != "" && !h.WorkerDone {
 			h.Phase = "worker_update"
+			if h.Before.Fleet.Version == u.Release.Manifest.Version {
+				h.Phase = "worker_health"
+			}
 		} else {
 			h.Phase = "verified"
 		}
@@ -373,7 +372,7 @@ func (q *Queue) maintainFleetUpgrade() {
 		}
 		a, _ := u.Release.Manifest.Select(p.OS, p.Arch)
 		if p.Proof.Version == u.Release.Manifest.Version && p.Proof.SHA256 == a.SHA256 {
-			if p.Proof.Session == h.QueueBefore.Session || p.Proof.PID == h.QueueBefore.PID {
+			if h.QueueBefore.Version != u.Release.Manifest.Version && (p.Proof.Session == h.QueueBefore.Session || p.Proof.PID == h.QueueBefore.PID) {
 				h.Wait = "waiting for a new queue process and session"
 				return
 			}
@@ -403,7 +402,7 @@ func (q *Queue) maintainFleetUpgrade() {
 		}
 		a, _ := u.Release.Manifest.Select(h.Before.CapabilityProfile.OS, h.Before.CapabilityProfile.Arch)
 		if m.Fleet.Version == u.Release.Manifest.Version && m.Fleet.SHA256 == a.SHA256 {
-			if m.Session == h.Before.Session || m.Fleet.PID == h.Before.Fleet.PID || m.Fleet.Session != m.Session {
+			if m.Fleet.Session != m.Session || h.Before.Fleet.Version != u.Release.Manifest.Version && (m.Session == h.Before.Session || m.Fleet.PID == h.Before.Fleet.PID) {
 				h.Wait = "waiting for new worker process and session"
 				return
 			}
@@ -495,11 +494,37 @@ func (q *Queue) authorizeFleetUpdate(operation, host, machine, session string, r
 	}
 	return nil
 }
+
+// Runtime failures carry their receipt plus the exact current process identity.
+// A prior helper revision can report a new process's cached smoke failure, but
+// an obsolete process/session cannot poison a later recovery.
+func (q *Queue) fleetRuntimeFailureCurrent(h *fleetUpgradeHost, ack FleetUpgradeAck) bool {
+	p := ack.Runtime
+	if p == nil || p.Failure != "runner_smoke_failed" || ack.Failure != "runner_smoke_failed" || p.RunnerSmoke || p.PID <= 0 || p.Session == "" || p.Version != q.s.FleetUpgrade.Release.Manifest.Version {
+		return false
+	}
+	var goos, arch string
+	if ack.Machine == "@queue" {
+		if q.fleetQueue == nil || q.fleetQueue.Host != h.Host || q.fleetQueue.Session != p.Session {
+			return false
+		}
+		goos, arch = q.fleetQueue.OS, q.fleetQueue.Arch
+	} else {
+		m := q.s.Machines[ack.Machine]
+		if m == nil || m.Session != p.Session || h.Machine != m.ID || m.CapabilityProfile == nil {
+			return false
+		}
+		goos, arch = m.CapabilityProfile.OS, m.CapabilityProfile.Arch
+	}
+	artifact, err := q.s.FleetUpgrade.Release.Manifest.Select(goos, arch)
+	return err == nil && p.SHA256 == artifact.SHA256
+}
+
 func (q *Queue) AckFleetUpgrade(ack FleetUpgradeAck) error {
 	return q.update(func() error {
 		u := q.s.FleetUpgrade
 		h := q.fleetActiveHost()
-		if u == nil || h == nil || u.Operation != ack.Operation || (ack.Revision <= 0 || ack.Revision > u.Revision || ack.Phase == "failed" && ack.Revision != u.Revision) || h.Host != ack.Host || u.State != "running" {
+		if u == nil || h == nil || u.Operation != ack.Operation || (ack.Revision <= 0 || ack.Revision > u.Revision || ack.Phase == "failed" && ack.Revision != u.Revision && !q.fleetRuntimeFailureCurrent(h, ack)) || h.Host != ack.Host || u.State != "running" {
 			return fleetError("fleet_ack_stale")
 		}
 		queue := ack.Machine == "@queue" && h.QueueBefore != nil && ack.Session == h.QueueBefore.Session && (h.Phase == "queue_update" || h.Phase == "queue_health")
@@ -514,6 +539,12 @@ func (q *Queue) AckFleetUpgrade(ack FleetUpgradeAck) error {
 		switch ack.Phase {
 		case "failed":
 			reason := "update_failed"
+			if ack.Failure == "runner_smoke_failed" {
+				if !q.fleetRuntimeFailureCurrent(h, ack) {
+					return fleetError("fleet_ack_stale")
+				}
+				reason = "runner_smoke_failed"
+			}
 			if ack.Failure == "fleet_health_failed" {
 				reason = "service_health_failed"
 			}

@@ -931,6 +931,16 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 			return err
 		}
 		m := cloneMachine(&c.Machine)
+		// Worker clocks are unrelated to queue time. Translate local proof age
+		// into a queue-owned receipt timestamp; cached observations keep aging.
+		if m.Fleet != nil {
+			age := m.Fleet.ObservationAgeSeconds
+			if math.IsNaN(age) || math.IsInf(age, 0) || age < 0 || age >= fleetRuntimeFreshFor.Seconds() {
+				m.Fleet = nil
+			} else {
+				m.Fleet.ObservedAt = q.clock.Now().Add(-time.Duration(age * float64(time.Second)))
+			}
+		}
 		if q.migrationInventoryBlocked(&m) {
 			return migrationError("machine_worker_conflict", "machine installation is rolled back; restore the saved legacy workers or convert forward under maintenance")
 		}

@@ -302,3 +302,108 @@ func TestFleetUpgradeApprovalEnvelopeReapprovalAndPersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestFleetUpgradeWorkerObservationAgeIgnoresClockSkew(t *testing.T) {
+	q, c, workers := fleetFixture(t, "queue", "a")
+	for _, skew := range []time.Duration{-24 * time.Hour, 24 * time.Hour} {
+		m := workers[0]
+		m.Fleet = cloneFleetProof(m.Fleet)
+		m.Fleet.ObservedAt = c.Now().Add(skew)
+		m.Fleet.ObservationAgeSeconds = 1
+		check(t, q, m, nil)
+		stored := q.s.Machines[m.ID].Fleet
+		if stored == nil || !stored.ObservedAt.Equal(c.Now().Add(-time.Second)) || !q.fleetProofFresh(stored) {
+			t.Fatal("worker wall clock affected queue freshness", stored)
+		}
+	}
+	m := workers[0]
+	m.Fleet = cloneFleetProof(m.Fleet)
+	m.Fleet.ObservedAt = c.Now().Add(time.Hour)
+	m.Fleet.ObservationAgeSeconds = 6
+	check(t, q, m, nil)
+	if q.s.Machines[m.ID].Fleet != nil {
+		t.Fatal("cached observation renewed by heartbeat")
+	}
+}
+
+func TestFleetUpgradeAlreadyCurrentRequiresStableEnrollmentHealth(t *testing.T) {
+	q, c, workers := fleetFixture(t, "queue", "a")
+	q.fleetQueue.Proof = fleetTestProof(c, "queue-current", 100, true)
+	m := workers[0]
+	m.Fleet = fleetTestProof(c, m.Session, m.Fleet.PID, true)
+	m.HostMemoryError = "memory unavailable"
+	check(t, q, m, nil)
+	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	if q.s.FleetUpgrade.Hosts[0].Phase == "complete" {
+		t.Fatal("no-op queue skipped stable health")
+	}
+	for n := 0; n < 32; n++ {
+		fleetHeartbeatAdvance(t, q, c)
+	}
+	h := q.fleetActiveHost()
+	if h == nil || h.Host != "a" || h.Phase != "worker_health" {
+		t.Fatalf("no-op worker health path: %+v", h)
+	}
+	if i, err := q.fleetInstruction(h.Host, m.ID, m.Session); err != nil || i.Operation != "" {
+		t.Fatal("already-current worker was instructed to restart")
+	}
+	for n := 0; n < 32; n++ {
+		fleetHeartbeatAdvance(t, q, c)
+	}
+	if q.s.FleetUpgrade.State == "complete" || q.s.HostMaintenance["a"].Mode != "drained" {
+		t.Fatal("unhealthy current host resumed")
+	}
+	m.HostMemoryError = ""
+	m.Fleet.ObservedAt = c.Now()
+	check(t, q, m, nil)
+	for n := 0; n < 32; n++ {
+		fleetHeartbeatAdvance(t, q, c)
+	}
+	if q.s.FleetUpgrade.State != "complete" || q.s.Machines[m.ID].Session != m.Session {
+		t.Fatal("healthy current host not reconciled without restart")
+	}
+}
+
+func TestFleetUpgradeRunnerSmokeFailureStopsCurrentProcess(t *testing.T) {
+	q, c, workers := fleetFixture(t, "queue", "a")
+	q.fleetQueue.Proof = fleetTestProof(c, "queue-current", 100, true)
+	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	for n := 0; n < 32; n++ {
+		fleetHeartbeatAdvance(t, q, c)
+	}
+	i := fleetInstructionFor(t, q)
+	if err := q.AckFleetUpgrade(FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "restarting"}); err != nil {
+		t.Fatal(err)
+	}
+	m := workers[0]
+	m.Session = "worker-failed-smoke"
+	m.Fleet = fleetTestProof(c, m.Session, 999, true)
+	m.Fleet.RunnerSmoke = false
+	m.Fleet.Failure = "runner_smoke_failed"
+	if _, err := q.Checkin(Checkin{Machine: m, Fresh: true, PreviousSession: i.Session}); err != nil {
+		t.Fatal(err)
+	}
+	// An explicit rerun cannot erase a definitive failure by bumping revision.
+	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	ack := FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "failed", Failure: "runner_smoke_failed", Runtime: m.Fleet}
+	stale := ack
+	stale.Runtime = cloneFleetProof(m.Fleet)
+	stale.Runtime.Session = "obsolete-process"
+	if err := q.AckFleetUpgrade(stale); err == nil {
+		t.Fatal("obsolete runtime failure accepted")
+	}
+	if err := q.AckFleetUpgrade(ack); err != nil {
+		t.Fatal(err)
+	}
+	if q.s.FleetUpgrade.State != "stopped" || q.fleetActiveHost().Failure != "runner_smoke_failed" || q.s.HostMaintenance[i.Host].Mode != "drained" {
+		t.Fatal("cached smoke failure did not stop maintained host")
+	}
+}

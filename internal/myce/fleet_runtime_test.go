@@ -15,10 +15,40 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestFleetRuntimeReportsDefinitiveSmokeFailure(t *testing.T) {
+	f := newFleetInstallFixture(t, "linux")
+	r := fleetInstallReceipt{Instruction: f.i, ConfigSHA256: strings.Repeat("a", 64), BeforeSHA256: strings.Repeat("b", 64), Phase: "restarting"}
+	if err := writeFleetReceipt(f.c, r); err != nil {
+		t.Fatal(err)
+	}
+	var got FleetUpgradeAck
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/fleet/ack" {
+			t.Error("smoke failure attempted unrelated request", r.URL.Path)
+			w.WriteHeader(404)
+			return
+		}
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Error(err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]bool{"ok": true})
+	}))
+	defer server.Close()
+	proof := &FleetRuntimeProof{Version: f.i.Release.Manifest.Version, Session: "new-failed-session", PID: 999, SHA256: strings.Repeat("a", 64), Failure: "runner_smoke_failed"}
+	collect := func(context.Context, ServiceConfig, string) (*FleetRuntimeProof, error) {
+		return proof, errors.New("cached runner smoke failure")
+	}
+	_ = pollFleetRuntime(context.Background(), f.c, Client{URL: server.URL, Token: "fixture"}, collect, nil, f.i.Host, f.i.Machine, proof.Session, false, "", nil)
+	if got.Operation != f.i.Operation || got.Revision != f.i.Revision || got.Session != f.i.Session || got.Failure != "runner_smoke_failed" || got.Runtime == nil || got.Runtime.Session != proof.Session {
+		t.Fatalf("definitive startup failure lost its fences: %+v", got)
+	}
+}
 
 // Swap the actual executable of a live subprocess before its first hash. This
 // catches both accidentally reopening os.Executable and caching the disk file

@@ -22,15 +22,17 @@ import (
 // installation path. It is separate from enrollment so missing fleet evidence
 // never prevents an ordinary worker joining or finishing its work.
 type FleetRuntimeProof struct {
-	Version         string    `json:"version"`
-	SHA256          string    `json:"sha256"`
-	Session         string    `json:"session"`
-	PID             int       `json:"pid"`
-	ServiceHealthy  bool      `json:"service_healthy"`
-	StartGate       string    `json:"start_gate"`
-	AttemptProtocol string    `json:"attempt_protocol"`
-	RunnerSmoke     bool      `json:"runner_smoke"`
-	ObservedAt      time.Time `json:"observed_at"`
+	ObservationAgeSeconds float64   `json:"observation_age_seconds"`
+	Failure               string    `json:"failure,omitempty"`
+	Version               string    `json:"version"`
+	SHA256                string    `json:"sha256"`
+	Session               string    `json:"session"`
+	PID                   int       `json:"pid"`
+	ServiceHealthy        bool      `json:"service_healthy"`
+	StartGate             string    `json:"start_gate"`
+	AttemptProtocol       string    `json:"attempt_protocol"`
+	RunnerSmoke           bool      `json:"runner_smoke"`
+	ObservedAt            time.Time `json:"observed_at"`
 }
 
 // Capture before command dispatch, including before an installed pathname can
@@ -119,6 +121,7 @@ func collectFleetRuntimeAt(ctx context.Context, c ServiceConfig, session string,
 	}
 	p := &FleetRuntimeProof{Version: BuildVersion, SHA256: hash, Session: session, PID: os.Getpid(), StartGate: startGateProtocol, AttemptProtocol: keyedAttemptProtocol}
 	if err := fleetRunnerSmoke(ctx, c.State); err != nil {
+		p.Failure = "runner_smoke_failed"
 		return p, errors.New("fleet runner smoke unavailable")
 	}
 	p.RunnerSmoke = true
@@ -228,6 +231,7 @@ func (r *workerFleetRuntime) observe(ctx context.Context, m Machine, eligible bo
 		return nil
 	}
 	p := *r.proof
+	p.ObservationAgeSeconds = now.Sub(r.proof.ObservedAt).Seconds()
 	return &p
 }
 
@@ -257,6 +261,18 @@ func pollFleetRuntime(ctx context.Context, config ServiceConfig, client Client, 
 	}
 	proof, err := collect(ctx, config, session)
 	result.proof = proof
+	if proof != nil && proof.Failure == "runner_smoke_failed" {
+		// Bind a definitive startup failure to the receipt and current process,
+		// rather than converting cached smoke failure into an endless wait.
+		if receipt, e := readFleetReceipt(filepath.Join(config.State, fleetUpdateReceiptFile)); e == nil {
+			i := receipt.Instruction
+			if i.Host == host && i.Machine == machine {
+				request, cancel := context.WithTimeout(ctx, 10*time.Second)
+				_ = client.Call(request, "POST", "/api/fleet/ack", FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: host, Machine: machine, Session: i.Session, Phase: "failed", Failure: "runner_smoke_failed", Runtime: proof}, nil)
+				cancel()
+			}
+		}
+	}
 	if err != nil || proof == nil || !proof.ServiceHealthy || !eligible || ctx.Err() != nil {
 		return result
 	}

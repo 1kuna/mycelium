@@ -16,7 +16,7 @@ func (q *Queue) ConfigureFleetService(c ServiceConfig) error {
 	defer q.mu.Unlock()
 	copy := c
 	q.fleetService = &copy
-	q.fleetQueue = &fleetQueueRuntime{Host: c.HostID, OS: c.Detection.OS, Arch: c.Detection.Arch}
+	q.fleetQueue = &fleetQueueRuntime{Session: ID(), Host: c.HostID, OS: c.Detection.OS, Arch: c.Detection.Arch}
 	return nil
 }
 
@@ -38,7 +38,10 @@ func (q *Queue) runFleetQueueRuntime(ctx context.Context) {
 		}
 		return p, err
 	}, launch: LaunchFleetUpdate}
-	machine := Machine{ID: "@queue", HostID: c.HostID, Session: ID()}
+	q.mu.RLock()
+	session := q.fleetQueue.Session
+	q.mu.RUnlock()
+	machine := Machine{ID: "@queue", HostID: c.HostID, Session: session}
 	ticker := time.NewTicker(250 * time.Millisecond)
 	defer ticker.Stop()
 	var generation uint64
