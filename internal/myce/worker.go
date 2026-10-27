@@ -609,6 +609,10 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	s.state.Result = nil
 	s.state.OperatorStopped = false
 	s.state.PID = 0
+	s.state.Cgroup = ""
+	if memoryAttempt != nil {
+		s.state.Cgroup = memoryAttempt.path
+	}
 	s.state.LaunchPending = true
 	s.state.StopGrace = acceleratorStopGrace(w.AcceleratorStopGrace)
 	s.state.StopAt, s.state.UserCancel = nil, false
@@ -650,10 +654,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	}
 	s.state.PID = cmd.Process.Pid
 	s.state.LaunchPending = false
-	custody := workerState{PID: s.state.PID, Identity: identity}
+	custody := workerState{PID: s.state.PID, Identity: identity, StopGrace: s.state.StopGrace}
 	if len(j.Spec.SharedInputs) > 0 {
-		// Reuse native-group recovery for shared readers, including cgroup
-		// cleanup retries after the main PID has exited and been cleared.
+		// Shared readers retain group custody after the main PID exits.
 		birth, e := processBirth(cmd.Process.Pid)
 		if e != nil {
 			return nil, abort(e)

@@ -108,12 +108,40 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				if s.state.OperatorStopped {
 					f.result = operatorOutcome(f.result, true)
 				}
-				s.state.Result, s.state.PID = &f.result, 0
+				s.state.Result = &f.result
+				if !f.result.ReleasePending {
+					s.state.PID = 0
+				}
 				if err := s.save(); err != nil {
 					finish(err)
 					return
 				}
 			default:
+			}
+		}
+		// A failed inventory/cleanup keeps custody, but must not freeze the
+		// finished actor until a worker restart. Reuse recovery's exact process
+		// identity checks; only confirmed cleanup can clear pending release.
+		if p == nil && s.state.Result != nil && s.state.Result.ReleasePending && !a.job.Spec.Run.Docker {
+			var fs memoryFS = osMemoryFS{}
+			if w.memoryCeilings != nil {
+				fs = w.memoryCeilings.fs
+			}
+			if err := s.cleanupOrphan(w.Clock, fs); err == nil {
+				released := *s.state.Result
+				released.ReleasePending = false
+				// Recovery reloads this receipt before state. Record confirmed
+				// release there before discarding the ordinary PID custody.
+				if err := saveWorkerJSON(s.dir, s.state.Identity+".result.json", released); err != nil {
+					finish(err)
+					return
+				}
+				s.state.Result = &released
+				s.state.PID = 0
+				if err := s.save(); err != nil {
+					finish(err)
+					return
+				}
 			}
 		}
 		if connected {
@@ -321,12 +349,19 @@ func (w Worker) recoverAttempt(s *workerStore) (*process, error) {
 		r := classifyAttemptOutcome(Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: s.state.Job.ID, Attempt: s.state.Job.Attempt}, Error: "worker restarted; previous process group cleaned up"}, attemptCause{memberOutcome: facts, PriorityStop: s.state.PriorityStop})
 		s.state.Result = &r
 	}
+	released := *s.state.Result
 	if !s.state.Job.Spec.Run.Docker {
-		s.state.Result.ReleasePending = false
+		released.ReleasePending = false
 	}
 	if s.state.OperatorStopped {
-		*s.state.Result = operatorOutcome(*s.state.Result, true)
+		released = operatorOutcome(released, true)
 	}
+	if !s.state.Job.Spec.Run.Docker {
+		if err := saveWorkerJSON(s.dir, s.state.Identity+".result.json", released); err != nil {
+			return nil, err
+		}
+	}
+	s.state.Result = &released
 	s.state.PID = 0
 	return nil, s.save()
 }
