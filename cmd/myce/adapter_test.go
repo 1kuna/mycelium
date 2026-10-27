@@ -256,9 +256,10 @@ func TestAdapterDevNativeColdAndWarmQualification(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	deadline := time.Now().Add(time.Hour)
 	a := projectAdapter{Schema: 1, Project: "native-fixture", Default: "native-fixture", Entries: map[string]adapterEntry{"native-fixture": {
 		Version: strings.Repeat("v", 64),
-		Source:  profileSource{Directory: source}, Spec: myce.Spec{Outputs: map[string]string{"result": "results"}},
+		Source:  profileSource{Directory: source}, Spec: myce.Spec{Class: "deadline", Deadline: &deadline, Outputs: map[string]string{"result": "results"}},
 		Variants: []adapterVariant{{Target: myce.ExecutionTarget{OS: runtime.GOOS, Arch: runtime.GOARCH, Platform: "fake"}, Needs: myce.ResourceNeeds{MemoryGB: 0.25, HostMemoryGB: 0.25}, Execution: myce.ExecutionSpec{Main: myce.ExecutionMember{Command: []string{"sh", "{extension}/run.sh"}}}, Checks: adapterChecks{Result: []string{"test", "-s", "result"}, Qualification: []string{"sh", "{extension}/check.sh"}}, Baselines: map[string]myce.ExtensionBaseline{"extension:native-fixture": {Input: "input", Output: "native", Measure: "exact", Native: "fixture shell copy", Variation: "exact deterministic bytes"}}}},
 	}}}
 	data, err := yaml.Marshal(a)
@@ -412,6 +413,12 @@ func TestAdapterNativeRecipeBeforeResultWrapping(t *testing.T) {
 	if _, err := lower(v); err == nil {
 		t.Fatal("result check manufactured a missing native main command")
 	}
+	v.Spec.After = &myce.PieceDependency{Job: "parent", Piece: "piece"}
+	v.Variants[0].Execution.Main.Command = []string{"echo", "work"}
+	if err := validateAdapterEntry(v); err == nil {
+		t.Fatal("variant result check bypassed after restriction")
+	}
+	v.Spec.After = nil
 	v.Variants[0].Execution.Main.Command = []string{""}
 	if _, err := lower(v); err == nil {
 		t.Fatal("result check manufactured an empty native executable")

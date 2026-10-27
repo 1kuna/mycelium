@@ -171,6 +171,13 @@ func validateAdapterEntry(e adapterEntry) error {
 	if s.After != nil && (s.FanOut != nil || len(e.Checks.Result) > 0 || s.Program != nil) {
 		return errors.New("unsupported after/check/fan_out combination (#180)")
 	}
+	if s.After != nil {
+		for _, v := range e.Variants {
+			if len(v.Checks.Result) > 0 {
+				return errors.New("unsupported after/check combination in variant (#180)")
+			}
+		}
+	}
 	if s.Kind != "" || s.Program != nil {
 		return errors.New("kind/program are low-level selectors; declare kinds/program_types on the native recipe")
 	}

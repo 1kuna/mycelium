@@ -252,7 +252,7 @@ func (w Worker) reconcileExtensionQualification(ctx context.Context, plan Extens
 		selection.GPU = &GPUSelection{Devices: []string{r.Device}}
 	}
 	var j Job
-	err = w.Client.Call(ctx, "POST", "/api/jobs", Spec{Name: "extension-check", Project: "extension-check", SubmissionKey: r.CheckID,
+	err = w.Client.Call(ctx, "POST", "/api/jobs", Spec{Name: "extension-check", Project: "extension-check", Class: "experiment", SubmissionKey: r.CheckID,
 		Extension: extensionKey(e), ExtensionDigest: e.Digest, AllowedMachines: []string{plan.Machine}, Needs: selection,
 		ExtensionCheck: &ExtensionCheckRequest{Work: r.Work, Directory: scratch, Automatic: &r}}, &j)
 	if err != nil {
