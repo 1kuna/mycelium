@@ -605,3 +605,9 @@ to at most one hook per second, retries failures after one minute and retains th
 same delivery identity across restart/ambiguous delivery; receivers must deduplicate
 that identity. The 30-second hook budget also applies to `--check`. Keep hook
 credentials in private local configuration, with delivery through a quiet channel.
+
+Upgrade the queue before workers: older queues strictly reject the new
+per-attempt `docker_cause` field when a worker reports a pending Docker diagnostic.
+Older workers remain compatible with the new queue. Their aggregate host cause
+can identify a single legacy attempt; exact concurrent-attempt diagnostics require
+upgraded workers. This notification feature does not change retry or release policy.
