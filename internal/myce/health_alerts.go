@@ -110,7 +110,7 @@ func (q *Queue) detectHealth(fileAvailable bool) {
 	}
 }
 func (q *Queue) alertAttemptLoss(j *Job, outcome AttemptOutcome, quiet bool) {
-	if j.Spec.Priority != "production" || outcome.PoliteStop || outcome.OperatorStop || outcome.PriorityStop != nil {
+	if j.Attempt == 0 || cancelled(j) || plannedStop(j) || historyPlannedStop(j) || j.Spec.Priority != "production" || outcome.PoliteStop || outcome.OperatorStop || outcome.PriorityStop != nil {
 		return
 	}
 	timeout := func(c *RuntimeCause) bool { return c != nil && c.Class == "timeout" }

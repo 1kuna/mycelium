@@ -1121,6 +1121,18 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 		}
 		q.acceptExtensionQualifications(&m)
 		q.s.Machines[m.ID] = &m
+		for _, report := range reports {
+			cause := report.DockerCause
+			// The legacy worker reports one current attempt, so its host diagnostic
+			// is unambiguous. Modern multi-attempt workers carry the exact cause.
+			if c.AttemptProtocol == "" && len(reports) == 1 {
+				cause = m.DockerCause
+			}
+			r := Result{Execution: report.Execution, Machine: m.ID, Session: report.Session, CleanupCause: cause}
+			if j, err := q.current(r); err == nil && j.Spec.Run.Docker {
+				q.alertAttemptLoss(j, attemptOutcome(j, r), false)
+			}
+		}
 		q.refreshHostMemory()
 		q.acceptCurveReports(c, &m)
 		q.reconcilePreparationPlans(c)
@@ -1473,6 +1485,9 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		}
 	}
 	if r.ReleasePending && pendingTracked && q.s.HostReleases[releaseKey(HostRelease{Job: r.ID, Machine: r.Machine, Session: r.Session, Attempt: r.Attempt})].Docker {
+		if j, err := q.current(r); err == nil {
+			q.alertAttemptLoss(j, attemptOutcome(j, r), false)
+		}
 		q.maintain()
 		return nil
 	}

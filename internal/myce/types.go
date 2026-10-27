@@ -538,6 +538,7 @@ type Reply struct {
 // AttemptReport binds heartbeat, progress and Started to an exact execution.
 // Collections have no wire cardinality limit; admission remains in the planner.
 type AttemptReport struct {
+	DockerCause *RuntimeCause `json:"docker_cause,omitempty"`
 	Execution
 	Session string `json:"session"`
 	Started bool   `json:"started,omitempty"`
