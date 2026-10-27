@@ -28,6 +28,7 @@ type executionProfile struct {
 }
 
 type profileReceipt struct {
+	SubmissionReused bool              `json:"submission_reused"`
 	Nonce            string            `json:"nonce"`
 	ArmNonce         string            `json:"arm_nonce,omitempty"`
 	Key              string            `json:"key"`
@@ -413,6 +414,7 @@ func runProfile(ctx context.Context, name string, args []string, itemInputs map[
 			return profileFailure(out, &r, 69, "queue_unavailable: submission unconfirmed; retry the saved key")
 		}
 		r.JobID, r.Status = j.ID, j.State
+		r.SubmissionReused = j.SubmissionReused
 		r.RefusalCode, r.RefusalReason = "", ""
 		if err = saveProfileJSON(filepath.Join(dir, "receipt.json"), r); err != nil {
 			return err

@@ -177,6 +177,54 @@ printf '\n' >> "$NOTIFICATION_FILE"
 		t.Fatal("notification", n, err)
 	}
 	// No notifier remains an honest not_configured, while observation is started.
+
+	// A new receipt root for the same intent adopts the terminal queue binding.
+	other := t.TempDir()
+	otherProfiles := filepath.Join(other, ".mycelium", "profiles")
+	if err = os.MkdirAll(otherProfiles, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Mkdir(filepath.Join(other, "source"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	script, err := os.ReadFile(filepath.Join(root, "source", "run.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(other, "source", "run.sh"), script, 0600); err != nil {
+		t.Fatal(err)
+	}
+	otherPath := filepath.Join(otherProfiles, "fixture.yaml")
+	if err = os.WriteFile(otherPath, []byte(profile), 0600); err != nil {
+		t.Fatal(err)
+	}
+	originalPath := path
+	path = otherPath
+	adopted, err := invoke("--key", "missing", "--notify", notifier, "--", "literal")
+	path = originalPath
+	if err != nil || !adopted.SubmissionReused || adopted.JobID != r.JobID || adopted.Nonce == r.Nonce {
+		t.Fatal("cross-root terminal adoption", adopted, err)
+	}
+	adoptedReceipt := filepath.Join(other, ".mycelium", "receipts", profileHash([]string{"test", "missing"}), "receipt.json")
+	wait(t, ctx, func() bool {
+		var saved profileReceipt
+		return readProfileJSON(adoptedReceipt, &saved) == nil && saved.DeliveryStatus == "delivered" && saved.SubmissionReused
+	})
+	notifications, err = os.ReadFile(notificationFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var events []profileNotification
+	for _, line := range bytes.Split(bytes.TrimSpace(notifications), []byte("\n")) {
+		var event profileNotification
+		if err = json.Unmarshal(line, &event); err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, event)
+	}
+	if len(events) != 2 || events[0].DeliveryID == events[1].DeliveryID || events[0].JobID != events[1].JobID {
+		t.Fatal("per-receipt delivery identity", events)
+	}
 	unconfigured, err := invoke("--key", "no-notifier", "--", "literal")
 	if err != nil || unconfigured.Delivery != "not_configured" {
 		t.Fatal(unconfigured, err)

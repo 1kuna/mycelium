@@ -29,3 +29,31 @@ overlapping warmups. Qualification stays UNQUALIFIED until native simultaneous
 peaks, runtime overhead, sidecars and OS headroom are measured. For private models
 with `logs: none`, verify actual null stdout/stderr and Docker log-driver behavior,
 including recovery; fake argv tests cannot qualify the daemon or journald.
+
+## Pressure and status agreement
+
+For #158, the laptop controlled-heartbeat fixture proves low live RAM holds
+new work with `host_memory_headroom`, exposes live RAM separately from reserved
+RAM, refuses the same need at worker launch, and admits it after headroom
+recovers. It does not qualify OS PSI, macOS pressure, swap rate or live CPU use;
+those remain unknown until implemented and measured.
+
+Native follow-up owner: admission/status maintainer, in the authorized M4
+window, one fleet check at a time. The b70 step must wait until after 10:30 ET
+Tuesday (2026-10-27). This checklist does not schedule or authorize a load run.
+
+1. Confirm no competing native test or owner workload, current binary identity,
+   free disk, memory, load and the worker's enforcement capability. Use a fresh
+   explicit key; preserve current work and tokens privately.
+2. Capture status JSON and the OS's available RAM/pressure readings at baseline.
+   Use an existing bounded workload with an approved measured RAM need; avoid
+   synthetic host exhaustion. A controlled memory-source fixture is sufficient
+   for laptop proof but must not be presented as native telemetry evidence.
+3. While available headroom is below that need, capture status, its typed queued
+   hold, and evidence that no new payload starts. For a late change after
+   assignment, capture the worker launch refusal and retry accounting. Compare
+   declared need plus slack with the same measured signal at each fence.
+4. After pressure clears, verify the same keyed job progresses, verify its
+   accepted output and release, and preserve a short sanitized evidence ledger.
+   Record unimplemented pressure signals explicitly as unknown. Keep #158 open
+   for the OS-pressure/live-CPU/swap coverage and any unrun native checks.

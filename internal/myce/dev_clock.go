@@ -97,12 +97,12 @@ type ExtensionCheckTarget struct {
 
 func ResolveExtensionCheckTarget(ctx context.Context, c Client, host, platform, device, cache string) (ExtensionCheckTarget, error) {
 	target := ExtensionCheckTarget{Host: host, Platform: platform, Device: device, EnvironmentCache: cache}
-	if host != "" && platform != "" && device != "" && cache != "" {
+	if host != "" && platform != "" && (platform == "cpu" || device != "") && cache != "" {
 		return target, nil
 	}
 	var targets []ExtensionCheckTarget
 	if err := c.Call(ctx, "GET", "/api/dev/extension-targets", nil, &targets); err != nil {
-		return target, errors.New("runtime check requires --host, --gpu, --device and --environment-cache; start myce dev for automatic local defaults")
+		return target, errors.New("runtime check requires --host, --gpu, --environment-cache and (for GPUs) --device; start myce dev for automatic local defaults")
 	}
 	if cache != "" {
 		absolute, err := filepath.Abs(cache)

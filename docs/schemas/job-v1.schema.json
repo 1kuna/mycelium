@@ -1288,6 +1288,10 @@
           "type": "string",
           "x-contract": "diagnostic"
         },
+        "submission_reused": {
+          "type": "boolean",
+          "x-contract": "diagnostic"
+        },
         "timing": {
           "$ref": "#/$defs/WorkTiming",
           "x-contract": "diagnostic"

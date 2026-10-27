@@ -47,7 +47,7 @@ func hostFitFailure(m *Machine, gpu, host float64) string {
 	if !m.HostMemoryMeasured || m.HostMemoryError != "" {
 		return "host memory capacity unavailable"
 	}
-	if !(m.FreeHostMemoryGB >= hostNeed(m, gpu, host)) {
+	if !hostMemoryAvailableFits(m, gpu, host, m.FreeHostMemoryGB) {
 		return "host memory"
 	}
 	return ""
@@ -352,4 +352,10 @@ func (q *Queue) reclaimableGPUMemory(m *Machine, priority string, identity ...Sp
 		}
 	}
 	return room
+}
+
+// Dispatch and the worker launch recheck compare measured headroom with the
+// same declared need/slack. The queue separately accounts for reservations.
+func hostMemoryAvailableFits(m *Machine, gpu, host, available float64) bool {
+	return validMemoryValue(available) && available >= hostNeed(m, gpu, host)
 }

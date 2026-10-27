@@ -572,6 +572,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		}
 		if existing != nil {
 			out = *existing
+			out.SubmissionReused = true
 			return nil
 		}
 		if err := q.validateMachineNames(s.AllowedMachines); err != nil {
@@ -1795,6 +1796,9 @@ func (q *Queue) projectCall(c *ModelCall, order map[string]int, reasons map[stri
 }
 
 func (q *Queue) projectJobDiagnostics(j *Job, forStatus, jobReply bool) {
+	if j.State == "queued" && strings.HasPrefix(j.Reason, "waiting for RAM envelope:") {
+		j.DiagnosticCode = "host_memory_headroom"
+	}
 	if j.State == "queued" && strings.HasPrefix(j.Reason, "disk_headroom:") {
 		j.DiagnosticCode = "disk_headroom"
 	}
