@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -176,7 +177,7 @@ func (n *nativeNamespace) activate(ctx context.Context, gate *os.File) error {
 	}
 }
 
-func (n *nativeNamespace) isolate(w Worker, cmd *exec.Cmd, spool, work string, env map[string]string, ports []string, network bool) error {
+func (n *nativeNamespace) isolate(w Worker, cmd *exec.Cmd, spool, work string, env map[string]string, ports []string, network, main bool) error {
 	if n == nil || n.pid == 0 {
 		return w.isolateNativeCommand(cmd, spool, work, env, ports, network)
 	}
@@ -195,6 +196,12 @@ func (n *nativeNamespace) isolate(w Worker, cmd *exec.Cmd, spool, work string, e
 	if err != nil {
 		return err
 	}
+	if main {
+		// Keep the joined child on the existing launch pipe until its host
+		// identity and pidfd are in worker custody. FD 3/4 stay untouched.
+		args = nativeNamespaceMemberArgs(args)
+		cmd.Args[2] = `read gate || exit 125; exec "$@"`
+	}
 	// nsenter must fork after setns(CLONE_NEWPID), its default behavior. Do not
 	// use --no-fork: that would execute the payload outside the PID namespace.
 	enter := []string{n.support.nsenter, "--target", strconv.Itoa(n.pid), "--user", "--mount", "--pid", "--ipc", "--net", "--root", "--wdns", cmd.Dir, "--preserve-credentials", "--"}
@@ -203,6 +210,107 @@ func (n *nativeNamespace) isolate(w Worker, cmd *exec.Cmd, spool, work string, e
 	}
 	cmd.Env = environmentList(jobBaseEnvironment())
 	return nil
+}
+
+func nativeNamespaceMemberArgs(args []string) []string {
+	return append([]string{"/bin/sh", "-c", `read gate || exit 125; exec "$@" < /dev/null`, "myce-namespace-member"}, args...)
+}
+
+// Called with p.mu held, just like the original single launch gate. Neither
+// cancellation nor cleanup can signal/reap a half-published main member.
+func (g *nativeGroup) releaseMember(m *nativeMember, gate *os.File) error {
+	if err := g.ctx.Err(); err != nil {
+		return err
+	}
+	if _, err := gate.WriteString("start\n"); err != nil {
+		return err
+	}
+	if g.namespace == nil || g.namespace.pid == 0 || m.Name != "main" {
+		return nil
+	}
+	pid, birth, target, err := nativeNamespaceChildTarget(g.ctx, m.PID, m.Birth)
+	if err != nil {
+		return fmt.Errorf("native namespace member handshake: %w", err)
+	}
+	m.signalTarget = target
+	g.custody.Groups[g.supervisor.Process.Pid][pid] = birth
+	if err := g.saveLocked(); err != nil {
+		return err
+	}
+	if err := g.ctx.Err(); err != nil {
+		return err
+	}
+	_, err = gate.WriteString("exec\n")
+	return err
+}
+
+func (m *nativeMember) signal(signal syscall.Signal) error {
+	if m.signalTarget != nil {
+		return unix.PidfdSendSignal(int(m.signalTarget.Fd()), unix.Signal(signal), nil, 0)
+	}
+	return syscall.Kill(m.PID, signal)
+}
+
+func nativeNamespaceChildTarget(ctx context.Context, parent int, parentBirth string) (int, string, *os.File, error) {
+	// Match the anchor handshake: a broken launcher must not hold the launch
+	// lock indefinitely. Normal cost is one procfs snapshot; failure costs at
+	// most two seconds before ordinary PGID/cgroup abort cleanup takes over.
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	childrenPath := fmt.Sprintf("/proc/%d/task/%d/children", parent, parent)
+	for {
+		if err := ctx.Err(); err != nil {
+			return 0, "", nil, err
+		}
+		birth, err := processBirth(parent)
+		if err != nil {
+			return 0, "", nil, err
+		}
+		if birth != parentBirth || parentBirth == "" {
+			return 0, "", nil, errors.New("namespace member parent identity changed")
+		}
+		data, err := os.ReadFile(childrenPath)
+		if err != nil {
+			return 0, "", nil, err
+		}
+		children := strings.Fields(string(data))
+		if len(children) > 1 {
+			return 0, "", nil, errors.New("namespace member has no unique joined child")
+		}
+		if len(children) == 1 {
+			pid, err := strconv.Atoi(children[0])
+			if err != nil || pid <= 0 {
+				return 0, "", nil, errors.New("invalid namespace member child PID")
+			}
+			childBirth, err := processBirth(pid)
+			if err != nil {
+				return 0, "", nil, err
+			}
+			fd, err := unix.PidfdOpen(pid, 0)
+			if err != nil {
+				return 0, "", nil, err
+			}
+			target := os.NewFile(uintptr(fd), "native-namespace-member")
+			// Recheck both births and the direct-child relation after acquiring
+			// the pidfd. Never signal a recycled numeric PID or a replacement
+			// child; the trusted joined shell is still held at its exec gate.
+			currentChild, childErr := processBirth(pid)
+			currentParent, parentErr := processBirth(parent)
+			currentChildren, childrenErr := os.ReadFile(childrenPath)
+			if childErr != nil || parentErr != nil || childrenErr != nil || currentChild != childBirth || currentParent != parentBirth || strings.TrimSpace(string(currentChildren)) != children[0] {
+				target.Close()
+				return 0, "", nil, errors.New("namespace member child identity changed")
+			}
+			return pid, childBirth, target, nil
+		}
+		select {
+		case <-ctx.Done():
+			return 0, "", nil, ctx.Err()
+		case <-tick.C:
+		}
+	}
 }
 
 func (n *nativeNamespace) probe(ctx context.Context, port string, group int, path string, listener bool) (bool, bool, error) {
