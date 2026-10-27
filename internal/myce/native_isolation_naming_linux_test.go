@@ -134,7 +134,7 @@ func TestNativeIsolationCUDANaming(t *testing.T) {
 		t.Fatal("prepare private marked worker state failed")
 	}
 	defer store.close()
-	w.EnvironmentRoot, w.ModelRoot = runtimeRoot, modelRoot
+	w.NativeExecuteRoots, w.NativeReadRoots = []string{runtimeRoot}, []string{modelRoot}
 	credential := filepath.Join(store.dir, "service", "joining.json")
 	sibling := filepath.Join(store.dir, "job-files", "sibling", "1", "secret")
 	protected := []string{credential, sibling, filepath.Join(filepath.Dir(sibling), ".tmp", "secret")}

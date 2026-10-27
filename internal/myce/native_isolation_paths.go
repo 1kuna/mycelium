@@ -4,9 +4,99 @@ package myce
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 )
+
+// Declarations are operator configuration, not authored job paths. Resolve
+// symlinks before validating or installing a rule, and require an existing
+// regular file or tree rather than a wildcard or a broad storage root.
+func (w Worker) nativeDeclaredRoots(spool string) (read, execute []string, err error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, nil, err
+	}
+	forbidden := []string{string(filepath.Separator), home, w.JobFileRoot, filepath.Join(home, ".local/share/mycelium")}
+	if c := w.ServiceConfig; c != nil {
+		forbidden = append(forbidden, c.NAS)
+		if c.Config != "" {
+			forbidden = append(forbidden, filepath.Dir(filepath.Dir(c.Config)))
+		}
+	}
+	resolve := func(paths []string) ([]string, error) {
+		var roots []string
+		for _, path := range paths {
+			if !filepath.IsAbs(path) || strings.ContainsAny(path, "\x00\r\n*?[]~") {
+				return nil, errors.New("native_isolation_grant_invalid: declare an absolute literal file or directory")
+			}
+			root, err := filepath.EvalSymlinks(path)
+			if err != nil {
+				return nil, fmt.Errorf("native_isolation_grant_invalid: %w", err)
+			}
+			info, err := os.Stat(root)
+			if err != nil || !info.IsDir() && !info.Mode().IsRegular() {
+				return nil, errors.New("native_isolation_grant_invalid: grant must name a regular file or directory")
+			}
+			for _, path := range forbidden {
+				if path == "" {
+					continue
+				}
+				protected, err := nativeResolvedPath(path)
+				if err != nil {
+					return nil, err
+				}
+				if nativePathContains(root, protected) {
+					return nil, errors.New("native_isolation_grant_too_broad: filesystem, home, NAS and installed Mycelium roots cannot be declared")
+				}
+			}
+			roots = append(roots, root)
+		}
+		if err := w.validateNativeReadGrants(roots, spool); err != nil {
+			return nil, err
+		}
+		return roots, nil
+	}
+	read, err = resolve(w.NativeReadRoots)
+	if err == nil {
+		execute, err = resolve(w.NativeExecuteRoots)
+	}
+	return read, execute, err
+}
+
+func nativePathContains(root, child string) bool {
+	rel, err := filepath.Rel(root, child)
+	return err == nil && (rel == "." || filepath.IsLocal(rel))
+}
+
+// Landlock grants are additive: a read-only declaration must not inherit
+// execute or write permission from another runtime or attempt grant.
+func nativeReadOnlyOverlap(read, other []string) error {
+	for _, root := range read {
+		if root == "" {
+			continue
+		}
+		root, err := nativeResolvedPath(root)
+		if err != nil {
+			return err
+		}
+		for _, path := range other {
+			if path == "" {
+				continue
+			}
+			path, err := nativeResolvedPath(path)
+			if err != nil {
+				return err
+			}
+			if nativePathContains(root, path) || nativePathContains(path, root) {
+				return errors.New("native_isolation_grant_overlap: read-only root overlaps an executable or writable root")
+			}
+		}
+	}
+	return nil
+}
 
 // Shared runtime read grants must not exempt protected descendants. Reject an
 // operator layout that places worker authority or sibling storage below a
@@ -34,6 +124,9 @@ func (w Worker) validateNativeReadGrants(read []string, spool string) error {
 		{filepath.Join(home, ".config"), false},
 		{filepath.Join(home, ".ssh"), false},
 		{filepath.Join(home, "Library/Keychains"), false},
+	}
+	if runtime.GOOS == "linux" {
+		protected = append(protected, protectedPath{"/sys/fs/cgroup", false})
 	}
 	if c := w.ServiceConfig; c != nil {
 		protected = append(protected, protectedPath{c.State, true})

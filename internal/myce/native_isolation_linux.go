@@ -20,10 +20,11 @@ import (
 )
 
 type nativeLinuxPolicy struct {
-	Read, Write, Devices []string
-	Env                  []string
-	Ports                []uint16
-	Namespace            bool
+	MetricCgroups                  []string // Trusted attempt member leaves, never payload env.
+	Read, ReadOnly, Write, Devices []string
+	Env                            []string
+	Ports                          []uint16
+	Namespace                      bool
 }
 
 type nativeLinuxSupport struct{ mode, reason, bwrap, nsenter string }
@@ -128,7 +129,7 @@ func nativeCanonical(path string) (string, error) {
 }
 
 func (w Worker) nativeLinuxPolicy(cmd *exec.Cmd, spool, work string, env map[string]string, ports []string) (nativeLinuxPolicy, error) {
-	p := nativeLinuxPolicy{Env: environmentList(env)}
+	p := nativeLinuxPolicy{Env: environmentList(env), MetricCgroups: slices.Clone(w.nativeMetricCgroups)}
 	work, err := nativeCanonical(work)
 	if err != nil {
 		return p, err
@@ -161,16 +162,30 @@ func (w Worker) nativeLinuxPolicy(cmd *exec.Cmd, spool, work string, env map[str
 	// Do not grant /etc, /run, /proc, home or the worker spool recursively.
 	// Landlock does not mediate stat/chmod and similar metadata operations;
 	// fallback contents/socket protection is not a metadata-isolation claim.
-	p.Read = []string{"/usr", "/bin", "/sbin", "/lib", "/lib64", "/opt/intel/oneapi", "/sys", "/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/ld.so.conf.d", "/etc/ssl/certs", "/etc/ca-certificates", "/etc/hosts", "/etc/resolv.conf", "/etc/nsswitch.conf", "/etc/passwd", "/etc/group", "/etc/localtime", "/proc/cpuinfo", "/proc/meminfo", "/proc/stat", "/proc/loadavg", "/proc/uptime", "/proc/version", "/proc/sys/kernel/osrelease", "/proc/sys/kernel/ostype", "/proc/sys/vm/overcommit_memory", "/proc/driver/nvidia/version"}
+	// CUDA/Level Zero discover PCI/DRM devices and CPU/NUMA topology here.
+	// None of these sysfs trees includes /sys/fs/cgroup; grant metrics below
+	// that mount only as exact files resolved by the attached exec helper.
+	p.Read = []string{"/usr", "/bin", "/sbin", "/lib", "/lib64", "/opt/intel/oneapi", "/sys/bus/pci", "/sys/class/drm", "/sys/devices", "/sys/module/nvidia", "/sys/module/nvidia_uvm", "/sys/module/xe", "/sys/module/i915", "/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/ld.so.conf.d", "/etc/ssl/certs", "/etc/ca-certificates", "/etc/hosts", "/etc/resolv.conf", "/etc/nsswitch.conf", "/etc/passwd", "/etc/group", "/etc/localtime", "/proc/cpuinfo", "/proc/meminfo", "/proc/stat", "/proc/loadavg", "/proc/uptime", "/proc/version", "/proc/sys/kernel/osrelease", "/proc/sys/kernel/ostype", "/proc/sys/vm/overcommit_memory", "/proc/driver/nvidia/version"}
 	modelCache := w.CacheRoot
 	if modelCache == "" {
 		modelCache = filepath.Join(spool, "model-cache")
 	}
-	for _, path := range []string{filepath.Join(spool, "environment-cache"), w.EnvironmentRoot, w.ExtensionRoot, modelCache, w.ModelRoot} {
+	for _, path := range []string{filepath.Join(spool, "environment-cache"), w.EnvironmentRoot, w.ExtensionRoot} {
 		if path != "" {
 			p.Read = append(p.Read, path)
 		}
 	}
+	for _, path := range []string{modelCache, w.ModelRoot} {
+		if path != "" {
+			p.ReadOnly = append(p.ReadOnly, path)
+		}
+	}
+	declaredRead, declaredExecute, err := w.nativeDeclaredRoots(spool)
+	if err != nil {
+		return p, err
+	}
+	p.ReadOnly = append(p.ReadOnly, declaredRead...)
+	p.Read = append(p.Read, declaredExecute...)
 	if w.environmentCache != nil {
 		p.Read = append(p.Read, w.environmentCache.Root)
 	}
@@ -224,6 +239,12 @@ func (w Worker) nativeLinuxPolicy(cmd *exec.Cmd, spool, work string, env map[str
 		}
 	}
 	if err := w.validateNativeReadGrants(p.Read, spool); err != nil {
+		return p, err
+	}
+	if err := w.validateNativeReadGrants(p.ReadOnly, spool); err != nil {
+		return p, err
+	}
+	if err := nativeReadOnlyOverlap(p.ReadOnly, append(slices.Clone(p.Read), p.Write...)); err != nil {
 		return p, err
 	}
 	p.Devices, err = w.nativeGPUDevices(env)

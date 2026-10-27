@@ -24,6 +24,11 @@ func installTestFlagValue(s InstallSetting, zero bool) string {
 	s.bind(f, &values)
 	v := f.Lookup(s.Flag).Value.(flag.Getter).Get()
 	switch v.(type) {
+	case []string:
+		if zero {
+			return ""
+		}
+		return "/fixture/changed"
 	case bool:
 		if zero {
 			return "false"

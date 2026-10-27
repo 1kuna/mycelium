@@ -47,6 +47,13 @@ func NativeExec(args []string) error {
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 		return fmt.Errorf("native no_new_privs: %w", err)
 	}
+	// Membership is meaningful only here, after the worker's attachment gate
+	// and any namespace join. Authored environment paths never select grants.
+	metrics, err := nativeCgroupMetrics(p)
+	if err != nil {
+		return fmt.Errorf("native cgroup metrics: %w", err)
+	}
+	p.ReadOnly = append(p.ReadOnly, metrics...)
 	if err := nativeApplyLandlock(p); err != nil {
 		return fmt.Errorf("native Landlock: %w", err)
 	}
@@ -109,6 +116,11 @@ func nativeApplyLandlock(p nativeLinuxPolicy) error {
 	}
 	for _, path := range p.Read {
 		if err := addPath(path, read, true); err != nil {
+			return err
+		}
+	}
+	for _, path := range p.ReadOnly {
+		if err := addPath(path, unix.LANDLOCK_ACCESS_FS_READ_FILE|unix.LANDLOCK_ACCESS_FS_READ_DIR, true); err != nil {
 			return err
 		}
 	}
