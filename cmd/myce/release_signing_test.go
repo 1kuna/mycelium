@@ -16,6 +16,8 @@ func TestReleaseSignsDarwinBeforeManifest(t *testing.T) {
 			log := filepath.Join(dir, "calls")
 			tools := map[string]string{
 				"uname": `case "$1" in -s) echo Darwin;; -m) echo arm64;; esac`,
+				"git": `test "$*" = 'rev-parse HEAD'
+echo 0123456789abcdef0123456789abcdef01234567`,
 				"go": `while test "$#" -gt 0; do if test "$1" = -o; then shift; out=$1; fi; shift; done
 cat > "$out" <<'BIN'
 #!/bin/sh
@@ -42,7 +44,8 @@ test "$TEST_SIGN_MODE" != sign-fails || exit 42`,
 			b, _ := os.ReadFile(log)
 			s := string(b)
 			if mode == "sign-fails" {
-				if err == nil || strings.Contains(s, "manifest") {
+				exit, ok := err.(*exec.ExitError)
+				if !ok || exit.ExitCode() != 42 || !strings.HasPrefix(s, "codesign ") || strings.Contains(s, "manifest") {
 					t.Fatal("signing failure did not stop manifest creation", err, s)
 				}
 				return
