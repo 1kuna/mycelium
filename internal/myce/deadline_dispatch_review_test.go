@@ -42,7 +42,7 @@ func TestReviewDeadlineDelayedGateMustNotExecute(t *testing.T) {
 	defer store.close()
 	store.state.Session = assigned.Session
 	w = workerWithPreparedCheckpoint(t, w, store, *assigned)
-	marker := filepath.Join(assigned.Checkpoint, "command-ran")
+	marker := filepath.Join(attemptCheckpoint(*assigned), "command-ran")
 	done := make(chan error, 1)
 	finished := make(chan struct{})
 	defer func() {
