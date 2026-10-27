@@ -314,7 +314,7 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	model := myce.Model{Name: "fleet-stream", Engine: "server", Path: "fleet-model", DirectNAS: true, SizeBytes: 1, SHA256: modelHash, MemoryGB: 1, Platforms: []string{"fake"}, AllowedMachines: []string{"worker-3"}, StartCommand: []string{"sh", "-c", `export MYCE_TEST_DOCKER_BIN="$1" MYCE_TEST_ISOLATED_HOME="$2"; exec "$3" -test.run=^TestFleetUpgradeModelStreamCommand$ -- "$4" "$5"`, "fleet-stream", os.Getenv("MYCE_TEST_DOCKER_BIN"), os.Getenv("MYCE_TEST_ISOLATED_HOME"), helper, "{port}", dir}, HealthURL: "http://127.0.0.1:{port}/health", Env: map[string]string{"FLEET_STREAM_CHILD": "1"}}
+	model := myce.Model{Name: "fleet-stream", Engine: "server", Path: "fleet-model", DirectNAS: true, SizeBytes: 1, SHA256: modelHash, MemoryGB: 1, Platforms: []string{"fake"}, AllowedMachines: []string{"worker-2"}, StartCommand: []string{"sh", "-c", `export MYCE_TEST_DOCKER_BIN="$1" MYCE_TEST_ISOLATED_HOME="$2"; exec "$3" -test.run=^TestFleetUpgradeModelStreamCommand$ -- "$4" "$5"`, "fleet-stream", os.Getenv("MYCE_TEST_DOCKER_BIN"), os.Getenv("MYCE_TEST_ISOLATED_HOME"), helper, "{port}", dir}, HealthURL: "http://127.0.0.1:{port}/health", Env: map[string]string{"FLEET_STREAM_CHILD": "1"}}
 	models, err := json.Marshal([]myce.Model{model})
 	if err != nil {
 		t.Fatal(err)
@@ -406,11 +406,14 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 		}
 	}
 	approve(old)
-	for i := 1; i <= 3; i++ {
+	// Two workers prove remote production, sequencing and untouched membership.
+	// The extra queue-only operation adds a 30s stable-health window; a third
+	// identical worker would exceed the standard quick-gate package budget.
+	for i := 1; i <= 2; i++ {
 		install("worker", fmt.Sprintf("worker-%d", i))
 	}
-	poll("three actual worker runtime proofs", func() bool {
-		if !status() || len(snapshot.Machines) != 3 {
+	poll("two actual worker runtime proofs", func() bool {
+		if !status() || len(snapshot.Machines) != 2 {
 			return false
 		}
 		for _, m := range snapshot.Machines {
@@ -444,7 +447,7 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 		}
 		jobs[job.ID] = job
 	}
-	poll("all three real commands started", func() bool {
+	poll("both real commands started", func() bool {
 		if !status() {
 			return false
 		}
@@ -596,7 +599,7 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 		if snapshot.FleetUpgrade != nil && snapshot.FleetUpgrade.State == "stopped" {
 			t.Fatalf("upgrade stopped: %+v", snapshot.FleetUpgrade)
 		}
-		if snapshot.FleetUpgrade == nil || snapshot.FleetUpgrade.State != "complete" {
+		if snapshot.FleetUpgrade == nil || snapshot.FleetUpgrade.Operation != operation.Operation || snapshot.FleetUpgrade.State != "complete" {
 			return false
 		}
 		for id := range jobs {
@@ -667,5 +670,5 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 		}
 		m.mu.Unlock()
 	}
-	t.Logf("two locally signed releases; queue and three real workers restarted once; queue-only waited for three production commands, preserved worker processes, then full same-release upgrade completed with unchanged attempt/session and no losses or retries")
+	t.Logf("two locally signed releases; queue and two real workers restarted once; queue-only waited for both production commands, preserved worker processes, then full same-release upgrade completed with unchanged attempt/session and no losses or retries")
 }
