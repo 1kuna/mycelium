@@ -95,6 +95,9 @@ func (q *Queue) maintainStartDeadlines() {
 		for i := range j.Copies {
 			j.Copies[i].Recoverable = false
 		}
+		if outcome.Attempt > 0 && outcome.Machine != "" && expired(j.Spec.StartBy, now) {
+			q.alertAttemptLoss(j, outcome, true)
+		}
 		q.recordAttemptOutcome(j, outcome)
 	}
 }

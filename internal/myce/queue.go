@@ -40,6 +40,7 @@ type batchRelease struct {
 }
 
 type state struct {
+	Health       healthAlerts  `json:"health_alerts,omitempty"`
 	FleetUpgrade *fleetUpgrade `json:"fleet_upgrade,omitempty"`
 	// Positive orphan eligibility, persisted with the existing queue state.
 	// Zero time means an input upload has not finished publication yet.
@@ -86,6 +87,9 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
+	healthStoreProbe                checkpointAvailability
+	healthNotifier                  string
+	healthStorageDelay              time.Duration
 	fleetQueue                      *fleetQueueRuntime
 	fleetService                    *ServiceConfig
 	onboardingNAS                   NASIdentity
@@ -202,6 +206,7 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 	}
 	db.SetMaxOpenConns(1)
 	q := &Queue{fileRetention: DefaultFileRetention, logRetention: DefaultLogRetention, uploadSpool: uploadSpool{limit: DefaultUploadSpoolBytes, defaultDir: path + ".uploads"}, productionGrace: 10 * time.Second, productionInfrastructureRetries: DefaultProductionInfrastructureRetries, wake: make(chan struct{}), lossTimeouts: [3]time.Duration{ProductionLossAfter, DeadlineLossAfter, LossAfter}, lock: lock, db: db, clock: clock, root: abs, s: state{Schema: persistedSchema, Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
+	q.healthStoreProbe.timeout = heartbeatFilesystemBudget
 	q.nasProbe.timeout = heartbeatFilesystemBudget
 	q.nasProgress.timeout = heartbeatFilesystemBudget
 	for _, option := range options {
@@ -425,6 +430,14 @@ func (q *Queue) updateTimed(fn func() error, timing *queueUpdateTiming) error {
 			})
 		}
 	}
+	// Probe authoritative file storage outside the control lock as well as NAS.
+	q.mu.RLock()
+	files := q.files
+	q.mu.RUnlock()
+	fileAvailable := true
+	if !q.simulation && files != nil {
+		fileAvailable, _ = q.healthStoreProbe.run(files.root, func() (bool, error) { return checkpointAvailable(files.root), nil })
+	}
 	if timing == nil && q.observeUpdate != nil {
 		timing = &queueUpdateTiming{}
 	}
@@ -465,6 +478,7 @@ func (q *Queue) updateTimed(fn func() error, timing *queueUpdateTiming) error {
 	q.accountUsage(q.clock.Now())
 	err = fn()
 	if err == nil {
+		q.detectHealth(fileAvailable)
 		q.invalidateWorkTimings()
 		q.invalidateWorkCurves()
 	}
@@ -719,6 +733,9 @@ func (q *Queue) retry(j *Job, why string) {
 func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 	// Snapshot identity before requeue clears it, including loss without a result.
 	outcome := attemptOutcome(j, Result{Interrupted: true, PoliteStop: historyPlannedStop(j), PriorityStop: priorityStop(j)})
+	if chargeInfrastructure && strings.HasPrefix(why, "machine quiet for ") {
+		q.alertAttemptLoss(j, outcome, true)
+	}
 	recordAttemptMemory(j, Result{})
 	defer func() { q.recordAttemptOutcome(j, outcome) }()
 	if cancelled(j) {
@@ -1623,7 +1640,7 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 
 // Projection runs against either the locked queue or a fully detached read view.
 func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
-	out := Snapshot{FleetUpgrade: q.fleetUpgradeStatus(), QueueRelease: CurrentRelease(), HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
+	out := Snapshot{HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), QueueRelease: CurrentRelease(), HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
 	for _, s := range q.s.ModelSlots {
 		copy := *s
 		model, _ := q.model(s.Model)

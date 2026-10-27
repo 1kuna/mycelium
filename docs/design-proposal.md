@@ -2706,3 +2706,39 @@ use ordinary live-job and terminal retention. All bulk I/O runs in worker or
 unlocked submission verification paths. Transfers use size-aware, renewed socket
 deadlines, with no fixed whole-input timeout. Laptop proof and native consumer
 qualification are separate; fleet acceptance waits for the queue release gate.
+
+### Minimal health alerts (v1 amendment, #200 / #248)
+
+The queue records health events from its existing check-ins, maintenance clock and
+attempt outcomes; no agent or user polls for alerts. V1 detects only measured disk
+free space below the existing guard (1%, minimum 256 MiB), an unhealthy or stale
+host, a production attempt lost to machine silence or a start/observation/cleanup
+timeout, and checkpoint/NAS/file storage unavailable continuously for a configurable
+duration (default five minutes). Planned leave and host maintenance suppress host
+alerts; planned and operator stops do not count as lost production attempts.
+A wholly quiet fleet still emits stale-host alerts even while loss/retry decisions
+wait for connectivity. Startup's existing restart grace applies to stale alerts.
+
+Events commit with queue state and appear in authenticated status as
+`health_alerts`. A condition emits once per episode, with a 15-minute cooldown
+across flaps; production losses emit once per exact job attempt. The queue retains
+the latest 256 delivered events (or 256 total when no notifier is configured).
+Pending configured deliveries survive restart and remain until acknowledged;
+operators must repair a broken receiver to drain that backlog.
+
+An optional queue-local executable uses the existing completion notifier's
+`--check` and JSON-stdin/exit-status contract. Each delivery contains only a stable
+`delivery_id`, fixed `kind`, host/job/attempt identities and queue timestamp, plus
+`delivered: false`; no raw diagnostics, paths, job argv or fleet token. The
+operator's hook routes to their own wake or notification channel. Execution is
+outside queue locks and never blocks worker control. Delivery is at least once:
+receivers deduplicate `delivery_id`. A successful hook acknowledgement is persisted;
+a failed/ambiguous delivery retries the same identity after one minute. Hooks are
+limited to one invocation per second and 30 seconds per invocation/check, preventing
+a burst or wedged hook from overwhelming delivery or stranding queue shutdown.
+These transport limits cost at most one second per queued notification and require
+a hook to deliver within 30 seconds. Health thresholds use the injected queue clock.
+
+This slice does not implement #200's extension-configuration or architecture-caused
+workload-failure detectors, trend analysis or automatic issue filing. Those broader
+acceptance criteria remain open after v1.
