@@ -76,7 +76,11 @@ runtime roots must be narrow and keep state and secrets elsewhere.
 Linux retains the selected accelerator's verified device nodes, required shared
 driver nodes and runtime roots, rather than exposing all device nodes or
 guessing a kernel minor from an ordinal. Missing device mapping refuses launch.
-macOS retains Metal/compiler services. CPU select-none qualification and
+Linux permits writes to existing files in the launching payload process's own
+`/proc/self/task` tree so driver libraries can name their threads; other process
+trees remain denied. This grant is inherited for that process, not newly created
+child process identities. macOS retains Metal/compiler services. CPU select-none
+qualification and
 macOS's cooperative Metal limitation remain unchanged. Existing aggregate and
 member cgroups, memory limits, authorization/Started gates, process identity
 records and cleanup verification still apply. The unsandboxed supervisor

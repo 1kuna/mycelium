@@ -124,6 +124,13 @@ func nativeApplyLandlock(p nativeLinuxPolicy) error {
 			return err
 		}
 	}
+	// CUDA uses pthread_setname_np on a newly created thread, which writes
+	// /proc/self/task/<tid>/comm rather than PR_SET_NAME. Permit existing
+	// files in this process's task tree only; never grant another process's
+	// proc tree or write access to the host's /proc hierarchy.
+	if err := addPath("/proc/self/task", unix.LANDLOCK_ACCESS_FS_WRITE_FILE|unix.LANDLOCK_ACCESS_FS_TRUNCATE, false); err != nil {
+		return err
+	}
 	if p.Namespace {
 		if err := addPath("/dev/shm", write, false); err != nil {
 			return err
