@@ -41,6 +41,9 @@ func TestDockerObservationTimeoutRetriesHealthyAttempt(t *testing.T) {
 				t.Fatal("production fixture was not assigned")
 			}
 			j = *assigned
+			if err := q.Started(result(assigned, false)); err != nil {
+				t.Fatal(err)
+			}
 			j.Checkpoint = filepath.Join(t.TempDir(), "checkpoint")
 			p, err := startDockerFixture(w, store, j)
 			if err != nil {
@@ -60,6 +63,19 @@ func TestDockerObservationTimeoutRetriesHealthyAttempt(t *testing.T) {
 				return p.docker.state.ObservationRetry
 			}
 			await(t, func() bool { return strings.Contains(retryStatus(), "observation retry") })
+			// Use the same worker-generated heartbeat diagnostic as the actor. The
+			// payload remains running while its observation reads are retrying.
+			cleanup, cause := dockerHeartbeatDiagnostic(p.docker)
+			if cleanup != "" || cause == nil || cause.Class != "timeout" {
+				t.Fatalf("running timeout omitted from heartbeat: cleanup=%q cause=%+v", cleanup, cause)
+			}
+			heartbeat := Checkin{AttemptProtocol: keyedAttemptProtocol, Machine: w.Machine, Attempts: []AttemptReport{{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Started: true, DockerCause: cause}}}
+			if _, err := q.Checkin(heartbeat); err != nil {
+				t.Fatal(err)
+			}
+			if len(alertsOf(q, "production_attempt_lost")) != 1 {
+				t.Fatal("running observation timeout did not alert")
+			}
 			clock.advance(3 * time.Minute)
 			select {
 			case <-timedOut:

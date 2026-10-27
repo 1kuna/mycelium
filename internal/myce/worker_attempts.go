@@ -36,6 +36,22 @@ type attemptSupervisor struct {
 	admissionBlocked bool
 }
 
+// Observation retries preserve running status. Their exact cause must still
+// reach the queue; successful recovery clears ObservationRetry and the report.
+func dockerHeartbeatDiagnostic(d *dockerAttempt) (string, *RuntimeCause) {
+	status := d.status()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var cause *RuntimeCause
+	if status != "running" || d.state.ObservationRetry != "" {
+		cause = safeRuntimeCause(d.state.CleanupCause)
+	}
+	if status == "running" {
+		status = ""
+	}
+	return status, cause
+}
+
 func jobKey(j Job) attemptKey { return attemptKey{j.ID, j.Attempt, j.Session} }
 func (a *attemptSupervisor) snapshot() (AttemptReport, Machine, bool, error) {
 	a.mu.Lock()
@@ -183,14 +199,8 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		report := AttemptReport{Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}, Session: a.job.Session, Started: p != nil && (p.docker == nil || p.docker.status() == "running") && (p.native == nil || p.native.started())}
 		diagnostics := Machine{CheckpointUnavailable: s.checkpointUnavailable, FileTransferError: s.fileError}
 		if p != nil && p.docker != nil {
-			status := p.docker.status()
-			p.docker.mu.Lock()
-			diagnostics.DockerCause = safeRuntimeCause(p.docker.state.CleanupCause)
-			p.docker.mu.Unlock()
-			if status != "running" {
-				diagnostics.DockerCleanup = status
-				report.DockerCause = diagnostics.DockerCause
-			}
+			diagnostics.DockerCleanup, diagnostics.DockerCause = dockerHeartbeatDiagnostic(p.docker)
+			report.DockerCause = diagnostics.DockerCause
 		}
 		if needsCheckpoint(&a.job) {
 			path := attemptCheckpoint(a.job)

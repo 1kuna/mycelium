@@ -117,11 +117,10 @@ func (q *Queue) alertAttemptLoss(j *Job, outcome AttemptOutcome, quiet bool) {
 	if !quiet && !strings.HasPrefix(j.Reason, "machine quiet for ") && !timeout(outcome.ExecutionCause) && !timeout(outcome.CleanupCause) {
 		return
 	}
-	for _, e := range q.s.Health.Events {
-		if e.Kind == "production_attempt_lost" && e.JobID == j.ID && e.Attempt == outcome.Attempt {
-			return
-		}
+	if outcome.Attempt <= j.LastHealthAlertAttempt {
+		return
 	}
+	j.LastHealthAlertAttempt = outcome.Attempt
 	host := outcome.Machine
 	if m := q.s.Machines[outcome.Machine]; m != nil {
 		host = hostID(m)
