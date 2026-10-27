@@ -581,15 +581,20 @@ func TestFleetUpgradeProductionIdleWaitsAcrossFleet(t *testing.T) {
 	if got := job(t, q, j.ID); got.StopAt != nil || got.State != "running" || got.Losses != 0 {
 		t.Fatalf("running production interrupted: %+v", got)
 	}
-	finish(t, q, r, true)
-	q.s.Jobs[j.ID].ReleaseConfirmed = false
-	q.s.Jobs[j.ID].Copies[0].ReleaseConfirmed = false
+	completion := result(r, true)
+	completion.ReleasePending = true
+	if err := q.Complete(completion); err != nil {
+		t.Fatal(err)
+	}
 	fleetTick(t, q)
 	if q.fleetProductionIdle() {
 		t.Fatal("completion mistaken for released remote custody")
 	}
-	q.s.Jobs[j.ID].ReleaseConfirmed = true
-	q.s.Jobs[j.ID].Copies[0].ReleaseConfirmed = true
+	release := result(r, true)
+	release.ReleaseOnly = true
+	if err := q.Complete(release); err != nil {
+		t.Fatal(err)
+	}
 	check(t, q, workers[0], nil)
 	fleetTick(t, q)
 	i := fleetInstructionFor(t, q)
