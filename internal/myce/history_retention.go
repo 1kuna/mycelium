@@ -8,7 +8,7 @@ const jobHistoryRetention = 168 * time.Hour
 
 // All changes use the existing undo journal and one FULL-synchronous commit.
 // Deadlines avoid scanning history; each Tick retires at most fileReclaimBatch
-// jobs. File reclamation and bounded log deletion finish before their owner goes.
+// jobs. Pending file cleanup transfers to a compact, durable hash set.
 func (q *Queue) pruneJobHistory() error {
 	if q.simulation {
 		return nil
@@ -25,8 +25,16 @@ func (q *Queue) pruneJobHistory() error {
 				j.FinishedAt = &ended
 				continue
 			}
-			if mutableJob(j) || hasJobFiles(j) && (!j.FilesExpired || j.FileReclamation == nil || len(j.FileReclamation.Pending) > 0) || !q.records.logs.scheduled[id].IsZero() {
+			if mutableJob(j) || hasJobFiles(j) && (!j.FilesExpired || j.FileReclamation == nil) || !q.records.logs.scheduled[id].IsZero() {
 				continue
+			}
+			if j.FileReclamation != nil {
+				for _, hash := range j.FileReclamation.Pending {
+					if q.s.RetiredJobFiles == nil {
+						q.s.RetiredJobFiles = map[string]bool{}
+					}
+					q.s.RetiredJobFiles[hash] = true
+				}
 			}
 			q.deleteJob(id)
 		}

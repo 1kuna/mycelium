@@ -114,6 +114,13 @@ func (q *Queue) indexJob(id string, j *Job) {
 			ended = *j.FinishedAt
 		}
 		history = ended.Add(max(jobHistoryRetention, q.fileRetention, q.logRetention))
+		if j.FinishedAt == nil {
+			// First maintenance observation stamps the durable terminal time.
+			history = q.clock.Now()
+		} else if mutableJob(j) || hasJobFiles(j) && (!j.FilesExpired || j.FileReclamation == nil) || !q.records.logsDone[id] {
+			// Blocked old records must not monopolize the earliest batch.
+			history = maxTime(history, q.clock.Now().Add(time.Minute))
+		}
 		if !q.records.logsDone[id] {
 			logs = ended.Add(q.logRetention)
 		}

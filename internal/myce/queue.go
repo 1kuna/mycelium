@@ -47,6 +47,8 @@ type state struct {
 	JobInputUploads map[string]time.Time `json:"job_input_uploads,omitempty"`
 	// Internally created bundles remain eligible after their last reference goes.
 	BundleUploads map[string]time.Time `json:"bundle_uploads,omitempty"`
+	// Expired blob cleanup survives removal of its job/key answer, deduplicated by hash.
+	RetiredJobFiles map[string]bool `json:"retired_job_files,omitempty"`
 
 	WorkObservations     map[string]WorkObservation `json:"work_observations,omitempty"`
 	EnrollmentRelease    *EnrollmentRelease         `json:"enrollment_release,omitempty"`

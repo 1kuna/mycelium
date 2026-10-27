@@ -263,9 +263,11 @@ owned work, preserve pending results, then reconnect for exact reconciliation.
 **Queue history retention amendment (#248, 2026-10-27).** Terminal jobs leave
 job listing and ID lookup after at least **168 hours from `finished_at`**, matching
 the default result window. Longer configured result or log retention extends
-this minimum. Missing terminal timestamps start their window when first observed.
+this minimum. Missing terminal timestamps start their durable window at the first maintenance observation.
 Removal waits for every known attempt's confirmed release, expired result/input
-files with completed reclamation, and completed log cleanup. Active work and
+files with durable reclamation ownership, and completed log cleanup. Pending
+blob cleanup transfers atomically to a deduplicated set of expired hashes; shared
+blobs remain protected by their other owners without retaining entire old jobs. Active work and
 learned work-curve observations are not pruned. Removal is automatic, in batches
 of at most 64 jobs per maintenance tick, in the existing crash-consistent SQLite
 transaction; failed commits restore both jobs and keyed answers. No bulk file or

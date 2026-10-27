@@ -173,6 +173,11 @@ func (q *Queue) maintainFileExpiry() {
 // checkpoint generations and catalog snapshots survive terminal file expiry.
 func (q *Queue) fileReferences(pendingOnly bool, subset ...map[string]*Job) (expired, keep, referenced map[string]bool) {
 	expired, keep, referenced = map[string]bool{}, map[string]bool{}, map[string]bool{}
+	if len(subset) == 0 {
+		for hash := range q.s.RetiredJobFiles {
+			expired[hash], referenced[hash] = true, true
+		}
+	}
 	for hash := range q.bundleReferences(subset...) {
 		keep[hash] = true
 	}
@@ -418,6 +423,7 @@ func (q *Queue) reclaimPublishedFiles() error {
 			return nil
 		}
 		for hash := range gone {
+			delete(q.s.RetiredJobFiles, hash)
 			// A re-publication between unlink and this transaction owns a newer
 			// marker. Never erase its eligibility/progress with an older result.
 			if q.s.JobInputUploads[hash] == orphans[hash] {
