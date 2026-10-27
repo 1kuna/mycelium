@@ -108,12 +108,14 @@ type FileStore struct {
 	limit         int64
 	mu            sync.Mutex
 	handler       http.Handler
+	uploadLocker  tus.Locker
 	syncDir       func(string) error // Durability failure injection.
 	expired       func(string) bool
 	lifecycle     *sync.RWMutex
 	clock         Clock
 	recordUpload  func(hash, purpose string, created bool) error
 	publishUpload func(hash string) error
+	recordBundle  func(hash string, created bool) error
 }
 type FileConfig struct {
 	Checkpoints bool `json:"checkpoints"`
@@ -154,13 +156,15 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 			return err
 		}
 	}
-	s := &FileStore{root: root, limit: limit, syncDir: syncWorkerDir, expired: q.expiredBlob, lifecycle: &q.fileLifecycle, clock: q.clock, recordUpload: q.recordFileUpload, publishUpload: q.publishFileUpload}
+	s := &FileStore{root: root, limit: limit, syncDir: syncWorkerDir, expired: q.expiredBlob, lifecycle: &q.fileLifecycle, clock: q.clock, recordUpload: q.recordFileUpload, publishUpload: q.publishFileUpload, recordBundle: q.recordBundleUpload}
 	fs := filestore.New(filepath.Join(root, "uploads"))
 	fs.DirModePerm = 0700
 	fs.FileModePerm = 0600
 	composer := tus.NewStoreComposer()
 	fs.UseIn(composer)
-	filelocker.New(fs.Path).UseIn(composer)
+	locker := filelocker.New(fs.Path)
+	s.uploadLocker = locker
+	locker.UseIn(composer)
 	h, err := tus.NewHandler(tus.Config{
 		BasePath: "/api/files/uploads/", StoreComposer: composer, MaxSize: limit, DisableDownload: true, DisableTermination: true, DisableConcatenation: true,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -177,6 +181,11 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 		PreFinishResponseCallback: func(e tus.HookEvent) (tus.HTTPResponse, error) {
 			ref := FileRef{e.Upload.MetaData["sha256"], e.Upload.Size}
 			if err := s.publish(e.Context, ref); err != nil {
+				return tus.HTTPResponse{}, err
+			}
+			// An internal writer may have created the same blob after this
+			// upload's POST. Publication must still honor the import's custody.
+			if err := s.recordUpload(ref.SHA256, e.Upload.MetaData["purpose"], false); err != nil {
 				return tus.HTTPResponse{}, err
 			}
 			return tus.HTTPResponse{}, s.publishUpload(ref.SHA256)
@@ -262,7 +271,11 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid upload", 400)
 			return
 		}
-		s.handler.ServeHTTP(w, r)
+		response := &uploadResponse{ResponseWriter: w}
+		s.handler.ServeHTTP(response, r)
+		if response.status >= 400 {
+			return
+		}
 		if err := s.refreshUpload(id); err != nil {
 			log.Printf("upload freshness unavailable: %v", err)
 		}
@@ -345,6 +358,18 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 	if err := s.refreshUpload(hash); err != nil {
 		log.Printf("upload freshness unavailable: %v", err)
 	}
+}
+
+// Keep tus streaming and ResponseController capabilities while observing errors.
+type uploadResponse struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *uploadResponse) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+func (w *uploadResponse) WriteHeader(status int) {
+	w.status = status
+	w.ResponseWriter.WriteHeader(status)
 }
 func (s *FileStore) serveBlob(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodHead {
@@ -529,7 +554,7 @@ func (c Client) uploadFile(ctx context.Context, path string, ref FileRef, purpos
 	if err = fileResponse(res, 201); err != nil {
 		return err
 	}
-	if err = c.HasFile(ctx, ref); err == nil {
+	if err = c.hasFile(ctx, ref, headPurpose); err == nil {
 		return nil
 	}
 	endpoint := "/api/files/uploads/" + ref.SHA256
@@ -573,7 +598,7 @@ func (c Client) uploadFile(ctx context.Context, path string, ref FileRef, purpos
 			break
 		}
 	}
-	return c.HasFile(ctx, ref)
+	return c.hasFile(ctx, ref, headPurpose)
 }
 func (c Client) DownloadFile(ctx context.Context, ref FileRef, dest string) error {
 	if err := ref.validate(); err != nil {

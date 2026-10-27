@@ -170,10 +170,26 @@ import of marked bytes clears the marker. The collector shares its bounded per-t
 budget between terminal reclamation and eligible marked uploads, rechecking purpose,
 custody and mtime before unlink. It does not scan the blob directory for orphans.
 
+Internally created recipe and extension bundle blobs also have durable eligibility
+recorded before creation, so rejected submissions and subsequently pruned history
+do not leak bytes. The same bounded collector requires no remaining reference,
+an eligibility time and blob mtime older than retention, and publication grace.
+Retained jobs and keyed answers protect these blobs independently of result expiry.
+A generic import clears this eligibility too. Existing unmarked bytes are not
+retroactively classified by their contents or swept by scanning the blob directory.
+
 Marked interrupted tus uploads are also collected after an idle retention window
-and publication grace. POST/HEAD/PATCH refresh their durable idle timestamps;
-collection excludes active requests and rechecks all protected references. Unmarked
+and publication grace. Successful POST/HEAD/PATCH refresh their durable idle
+timestamps; error replies do not. Collection excludes active requests and rechecks
+all protected references. A crash after blob creation recovers the publication
+marker from the blob's mtime and cleans up expired upload remnants. Unmarked
 imports and unknown files remain for explicit operator inspection and recovery.
+
+If assignment recipe or bundle bytes become unreadable after a check-in commits,
+the queue sends an exact stop and retains attempt custody until release is
+acknowledged. Other controls still arrive. Undelivered, unstarted environment
+preparations are withdrawn and can be offered again after storage recovers;
+unreadable model preparation bytes defer loading without dropping unload controls.
 
 `POST /api/files/preflight` accepts a file manifest and checks the additional bytes
 before upload; `Client.PreflightFileStore` exposes it in Go. Profiles use this for
