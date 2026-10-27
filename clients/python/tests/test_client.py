@@ -25,6 +25,16 @@ class Reply(io.BytesIO):
         self.headers = {} if length is None else {"Content-Length": str(length)}
 
 
+# #218: a nominal 0.4 s sleep measured 0.50–0.53 s in Darwin workers.
+# Separate the phases: old API timeout (0.2 s) < header delay < idle budget
+# < genuine stall. Three header periods leave scheduling room; the true stall
+# stays beyond both the idle deadline and the proportional completion bound.
+SLOW_HEADER_DELAY = 0.4
+TRANSFER_IDLE_BUDGET = 3 * SLOW_HEADER_DELAY
+GENUINE_STALL_DELAY = 4 * TRANSFER_IDLE_BUDGET
+STALL_COMPLETION_BOUND = 3 * TRANSFER_IDLE_BUDGET
+
+
 class FileTransferTimeoutTests(unittest.TestCase):
     """#218: streamed results have progress budgets, not a whole-request timeout."""
 
@@ -46,14 +56,14 @@ class FileTransferTimeoutTests(unittest.TestCase):
                     self.end_headers()
                     self.wfile.write(reply)
                     return
-                time.sleep(0.4)  # The queue rehashes the blob before replying.
+                time.sleep(SLOW_HEADER_DELAY)  # The queue rehashes before replying.
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 chunk = len(body) // 10
                 for i in range(10):
                     if stall and i == 5:
-                        time.sleep(2)
+                        time.sleep(GENUINE_STALL_DELAY)
                         return
                     self.wfile.write(body[i * chunk:(i + 1) * chunk])
                     self.wfile.flush()
@@ -65,7 +75,7 @@ class FileTransferTimeoutTests(unittest.TestCase):
         self.addCleanup(server.shutdown)
         # The old fixed client timeout is shorter than the header wait and stream.
         client = Client(f"http://127.0.0.1:{server.server_address[1]}", "fixture", timeout=0.2)
-        client._transfer_idle = 0.5
+        client._transfer_idle = TRANSFER_IDLE_BUDGET
         return client
 
     def test_slow_stream_succeeds_and_stall_fails_typed(self):
@@ -80,7 +90,7 @@ class FileTransferTimeoutTests(unittest.TestCase):
             start = time.monotonic()
             with self.assertRaises(TransferStalledError) as caught:
                 self.serve(body, stall=True).download_result("job", "result", destination)
-            self.assertLess(time.monotonic() - start, 1.5)
+            self.assertLess(time.monotonic() - start, STALL_COMPLETION_BOUND)
             self.assertEqual(caught.exception.code, "result_download_failed")
             self.assertIn("result_download_failed", str(caught.exception))
             self.assertEqual(os.listdir(directory), [])
@@ -116,7 +126,7 @@ class FileTransferTimeoutTests(unittest.TestCase):
         self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
         client = Client(f"http://127.0.0.1:{server.server_address[1]}", "fixture", timeout=0.2)
-        client._transfer_idle = 0.5
+        client._transfer_idle = TRANSFER_IDLE_BUDGET
         connect = http.client.HTTPConnection.connect
 
         def small_send_buffer(connection):
