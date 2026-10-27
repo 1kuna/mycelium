@@ -37,8 +37,20 @@ func (s *FileStore) freezeFiles(files *map[string][]byte, ref **FileRef, digest 
 		*files, *ref = nil, &next
 		return nil
 	}
+	// Share tus's per-identity fence: an existing PATCH must not complete
+	// import promotion between our missing check and eligibility enrollment.
+	// Creation precedes the identity lock, matching tus POST-with-upload order.
+	// Neither lock holds q.mu; an active transfer can still finish publication.
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	lock, err := s.uploadLocker.NewLock(next.SHA256)
+	if err != nil {
+		return err
+	}
+	if err = lock.Lock(context.Background(), func() {}); err != nil {
+		return err
+	}
+	defer lock.Unlock()
 	err = s.verify(context.Background(), next)
 	missing := os.IsNotExist(err)
 	if s.recordBundle != nil {

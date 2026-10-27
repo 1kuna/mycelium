@@ -108,6 +108,7 @@ type FileStore struct {
 	limit         int64
 	mu            sync.Mutex
 	handler       http.Handler
+	uploadLocker  tus.Locker
 	syncDir       func(string) error // Durability failure injection.
 	expired       func(string) bool
 	lifecycle     *sync.RWMutex
@@ -161,7 +162,9 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 	fs.FileModePerm = 0600
 	composer := tus.NewStoreComposer()
 	fs.UseIn(composer)
-	filelocker.New(fs.Path).UseIn(composer)
+	locker := filelocker.New(fs.Path)
+	s.uploadLocker = locker
+	locker.UseIn(composer)
 	h, err := tus.NewHandler(tus.Config{
 		BasePath: "/api/files/uploads/", StoreComposer: composer, MaxSize: limit, DisableDownload: true, DisableTermination: true, DisableConcatenation: true,
 		Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
@@ -551,7 +554,7 @@ func (c Client) uploadFile(ctx context.Context, path string, ref FileRef, purpos
 	if err = fileResponse(res, 201); err != nil {
 		return err
 	}
-	if err = c.HasFile(ctx, ref); err == nil {
+	if err = c.hasFile(ctx, ref, headPurpose); err == nil {
 		return nil
 	}
 	endpoint := "/api/files/uploads/" + ref.SHA256
@@ -595,7 +598,7 @@ func (c Client) uploadFile(ctx context.Context, path string, ref FileRef, purpos
 			break
 		}
 	}
-	return c.HasFile(ctx, ref)
+	return c.hasFile(ctx, ref, headPurpose)
 }
 func (c Client) DownloadFile(ctx context.Context, ref FileRef, dest string) error {
 	if err := ref.validate(); err != nil {

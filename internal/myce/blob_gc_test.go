@@ -3,9 +3,11 @@ package myce
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -258,5 +260,108 @@ func TestBlobGCExpiredInputCannotShortenRecipeRetention(t *testing.T) {
 	}
 	if _, err := os.Stat(q.files.blob(*r.FilesRef)); !os.IsNotExist(err) {
 		t.Fatal("expired shared recipe leaked", err)
+	}
+}
+
+func TestBlobGCImportCompletesBeforeEnrollment(t *testing.T) {
+	q, clock := fixture(t)
+	c := retentionClient(t, q)
+	r := EnvironmentRecipe{Files: map[string][]byte{"requirements.txt": []byte("import racing enrollment")}}
+	data, err := json.Marshal(r.Files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := capacityPartial(t, c, string(data), "")
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	t.Cleanup(unblock)
+	record := q.files.recordBundle
+	q.files.recordBundle = func(hash string, created bool) error {
+		close(entered)
+		<-release
+		return record(hash, created)
+	}
+	frozen := make(chan error, 1)
+	go func() {
+		q.fileLifecycle.RLock()
+		err := q.files.freezeRecipe(&r, nil)
+		q.fileLifecycle.RUnlock()
+		frozen <- err
+	}()
+	submitVerificationWait(t, "internal enrollment", entered)
+	upload := make(chan error, 1)
+	go func() {
+		res, err := c.fileRequest(context.Background(), "PATCH", "/api/files/uploads/"+ref.SHA256, strings.NewReader(string(data[2:])), map[string]string{"Tus-Resumable": "1.0.0", "Upload-Offset": "2", "Content-Type": "application/offset+octet-stream"})
+		if err == nil {
+			err = fileResponse(res, 204)
+		}
+		upload <- err
+	}()
+	// With the fix, PATCH reaches tus's lock and requests release. Before the
+	// fix, PATCH completes promotion before the paused writer enrolls the blob.
+	completed := false
+	var uploadErr error
+	await(t, func() bool {
+		select {
+		case uploadErr = <-upload:
+			completed = true
+			return true
+		default:
+		}
+		_, err := os.Stat(filepath.Join(q.files.root, "uploads", ref.SHA256+".stop"))
+		return err == nil
+	})
+	unblock()
+	if err := submitVerificationWait(t, "internal publication", frozen); err != nil {
+		t.Fatal(err)
+	}
+	if !completed {
+		uploadErr = submitVerificationWait(t, "import completion", upload)
+	}
+	if uploadErr != nil {
+		t.Fatal(uploadErr)
+	}
+	clock.Advance(DefaultFileRetention + time.Nanosecond)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.files.verify(context.Background(), ref); err != nil {
+		t.Fatal("acknowledged import enrolled after promotion", err)
+	}
+}
+
+func TestBlobGCImportDedupAfterPOST(t *testing.T) {
+	q, clock := fixture(t)
+	c := retentionClient(t, q)
+	files := map[string][]byte{"requirements.txt": []byte("published between POST and HEAD")}
+	data, err := json.Marshal(files)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "import")
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := IdentifyFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.HTTP = &http.Client{Transport: clientTestTransport(func(req *http.Request) (*http.Response, error) {
+		res, err := http.DefaultTransport.RoundTrip(req)
+		if err == nil && req.Method == "POST" && strings.HasSuffix(req.URL.Path, "/uploads/") {
+			gcRecipe(t, q, "published between POST and HEAD")
+		}
+		return res, err
+	})}
+	if err := c.UploadFile(context.Background(), path, ref); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(DefaultFileRetention + time.Nanosecond)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.files.verify(context.Background(), ref); err != nil {
+		t.Fatal("deduplicated import lost custody", err)
 	}
 }
