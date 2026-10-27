@@ -30,10 +30,14 @@ func TestNativeIsolationModelKeychainOverlap(t *testing.T) {
 	if err := os.MkdirAll(keychains, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(keychains, "synthetic.keychain"), []byte("synthetic private bytes"), 0600); err != nil {
+	keychain := filepath.Join(keychains, "nested", "synthetic.keychain")
+	if err := os.MkdirAll(filepath.Dir(keychain), 0700); err != nil {
 		t.Fatal(err)
 	}
-	for _, root := range []string{keychains, filepath.Dir(keychains)} {
+	if err := os.WriteFile(keychain, []byte("synthetic private bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, root := range []string{keychains, filepath.Dir(keychains), filepath.Dir(keychain), keychain} {
 		w := Worker{ModelRoot: root}
 		cmd := exec.Command("/usr/bin/true")
 		cmd.Dir = work
