@@ -340,7 +340,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	if sharedErr != nil {
 		return nil, sharedErr
 	}
-	s.sharedRelease = sharedRelease
+	if len(j.Spec.SharedInputs) > 0 {
+		s.sharedRelease = sharedRelease
+	}
 	sharedStarted := false
 	defer func() {
 		if !sharedStarted && !errors.Is(startErr, errWorkerReleasePending) {
