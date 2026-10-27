@@ -225,7 +225,13 @@ func nativePortHandoff(t *testing.T, collisions int) Result {
 	}
 	defer store.close()
 	store.state.Session = m.Session
-	p, e := w.start(store, *reply.Job)
+	var p *process
+	// Input preparation can outlive one control-path observation. Reuse its
+	// pending operation as the worker loop does before exercising port handoff.
+	await(t, func() bool {
+		p, e = w.start(store, *reply.Job)
+		return !errors.Is(e, errWorkerCheckpoint) || !strings.Contains(e.Error(), "input copy pending")
+	})
 	if e != nil {
 		t.Fatal(e)
 	}
