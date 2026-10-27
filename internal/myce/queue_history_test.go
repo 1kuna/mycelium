@@ -15,6 +15,7 @@ import (
 // #224: retained answers must not serialize heartbeats behind whole-history
 // snapshots. Use real SQLite commits, check-ins and concurrent keyed submits.
 func TestQueueHistoryBurst(t *testing.T) {
+	var burstP99At1K time.Duration
 	for _, count := range []int{1000, 5000, 10000} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
 			q, c := fixture(t)
@@ -87,8 +88,13 @@ func TestQueueHistoryBurst(t *testing.T) {
 			slices.Sort(holds)
 			percentile := func(ds []time.Duration, p int) time.Duration { return ds[(len(ds)-1)*p/100] }
 			t.Logf("history=%d update_mean=%s wait_p50=%s wait_p95=%s wait_p99=%s hold_p50=%s hold_p95=%s hold_p99=%s", count, update, percentile(waits, 50), percentile(waits, 95), percentile(waits, 99), percentile(holds, 50), percentile(holds, 95), percentile(holds, 99))
-			if os.Getenv("MYCE_MEASURE_BASELINE") == "" && percentile(waits, 99) > 100*time.Millisecond {
-				t.Errorf("burst p99 lock wait exceeded 100ms: %s", percentile(waits, 99))
+			// Catch renewed whole-history work, rather than shared-host wall time
+			// under -race. A tenfold history increase must stay within 3x of 1k.
+			burstP99 := percentile(waits, 99)
+			if count == 1000 {
+				burstP99At1K = burstP99
+			} else if count == 10000 && burstP99 > 3*burstP99At1K {
+				t.Errorf("10k-history burst p99 %s exceeded 3x 1k baseline %s", burstP99, burstP99At1K)
 			}
 			for _, m := range workers {
 				if q.s.Machines[m.ID].Gone {
