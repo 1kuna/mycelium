@@ -41,6 +41,10 @@ func (r *workerRetry) succeeded(now time.Time, interval time.Duration) {
 }
 
 type workerState struct {
+	// Written with cleared custody only after the queue confirms terminal,
+	// released publication. Survives a restart before scratch retention runs.
+	PublishedAttempt *Execution `json:"published_attempt,omitempty"`
+
 	LaunchOutcome   string                 `json:"launch_outcome,omitempty"`
 	Attempts        []string               `json:"attempts,omitempty"`
 	PriorityStop    *PriorityPreemption    `json:"priority_stop,omitempty"`

@@ -561,6 +561,18 @@ func TestStoredExtensionInputAndOutput(t *testing.T) {
 	if got.ID != j.ID || got.State != "succeeded" || got.OutputRefs["output"] != ref {
 		t.Fatalf("extension file transport: %+v", got)
 	}
+	// #201: acknowledgement schedules the existing collector immediately;
+	// the accepted blob and small result diagnostics survive scratch removal.
+	await(t, func() bool {
+		_, err := os.Stat(filepath.Join(state, "job-files", j.ID, "1"))
+		return errors.Is(err, os.ErrNotExist)
+	})
+	if err := c.DownloadFile(ctx, ref, filepath.Join(t.TempDir(), "accepted-output")); err != nil {
+		t.Fatal("accepted output lost during scratch cleanup", err)
+	}
+	if files, err := filepath.Glob(filepath.Join(state, "*.result.json")); err != nil || len(files) == 0 {
+		t.Fatal("small result diagnostics lost during scratch cleanup", err)
+	}
 	cancel()
 	select {
 	case err = <-done:

@@ -1,9 +1,11 @@
 package myce
 
 import (
+	"context"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -141,17 +143,41 @@ const AttemptFilesGrace = 24 * time.Hour
 // an attempt folder without custody.
 const unclaimedMarker = ".myce-unclaimed"
 
+// A completion POST can acknowledge release without accepting outputs (for
+// example when cancellation races success). Confirm the exact terminal attempt
+// before authorizing early scratch deletion; failed diagnostics keep their grace.
+func (w Worker) publishedAttemptFiles(ctx context.Context, st workerState) (*Execution, error) {
+	if st.Job == nil || st.Result == nil || st.Result.ReleasePending || st.Result.ReleaseOnly {
+		return nil, nil
+	}
+	j, r := st.Job, st.Result
+	if !j.Spec.extensionJob() && len(jobInputFiles(j))+len(jobInputPaths(j)) == 0 {
+		return nil, nil
+	}
+	var accepted Job
+	if err := w.Client.Call(ctx, "GET", "/api/jobs/"+j.ID, nil, &accepted); err != nil {
+		return nil, err
+	}
+	if accepted.ID != r.ID || accepted.Attempt != r.Attempt || accepted.Session != r.Session || accepted.Machine != r.Machine || !accepted.ReleaseConfirmed {
+		return nil, nil
+	}
+	if (accepted.State == "succeeded" && r.Success && !r.Interrupted && maps.Equal(accepted.OutputRefs, r.OutputRefs)) || (accepted.State == "cancelled" && len(accepted.OutputRefs) == 0) {
+		execution := r.Execution
+		return &execution, nil
+	}
+	return nil, nil
+}
+
 // workerRetention is one pass of the worker's periodic local retention.
 func workerRetention(dir string, now time.Time, logAge time.Duration) error {
 	return errors.Join(pruneWorkerLogs(dir, "", now, logAge), pruneAttemptFiles(dir, now), pruneAttemptState(dir, now, logAge))
 }
 
 // pruneAttemptFiles removes job-files attempt folders that no saved attempt
-// custody claims (#201) once AttemptFilesGrace has passed since retention first
-// saw them unclaimed. Custody clears only after the queue accepts the result,
-// and a crash leaves orphans without custody. Folders are listed before custody
-// is read, and custody is saved before a folder is created, so a listed folder
-// without custody can never belong to a starting attempt.
+// custody claims (#201). Confirmed published attempts go immediately; failed
+// attempts and unknown orphans keep AttemptFilesGrace. Folders are listed before
+// custody is read, and custody is saved before a folder is created, so a listed
+// folder without custody can never belong to a starting attempt.
 func pruneAttemptFiles(dir string, now time.Time) error {
 	root := filepath.Join(dir, "job-files")
 	info, err := os.Lstat(root)
@@ -183,6 +209,7 @@ func pruneAttemptFiles(dir string, now time.Time) error {
 		}
 	}
 	custody := map[string]map[string]bool{}
+	published := map[string]map[string]bool{}
 	paths, err := filepath.Glob(filepath.Join(dir, "state-attempt-*.json"))
 	if err != nil {
 		return err
@@ -205,6 +232,13 @@ func pruneAttemptFiles(dir string, now time.Time) error {
 			}
 			custody[st.Job.ID][strconv.Itoa(st.Job.Attempt)] = true
 		}
+		if st.PublishedAttempt != nil && st.Job == nil && st.Result == nil && st.PID == 0 && !st.LaunchPending && st.Pending == 0 {
+			e := st.PublishedAttempt
+			if published[e.ID] == nil {
+				published[e.ID] = map[string]bool{}
+			}
+			published[e.ID][strconv.Itoa(e.Attempt)] = true
+		}
 	}
 	var result error
 	for _, job := range jobs {
@@ -218,13 +252,17 @@ func pruneAttemptFiles(dir string, now time.Time) error {
 				continue
 			}
 			path := filepath.Join(root, job.Name(), name)
-			if expired, err := attemptFilesExpired(path, now); !expired {
+			if expired, err := attemptFilesExpired(path, now, published[job.Name()][name]); !expired {
 				result = errors.Join(result, err)
 				continue
 			}
-			// A failed removal usually takes the marker with it, so the
-			// folder gets a fresh grace and its error repeats daily, not per pass.
-			result = errors.Join(result, os.RemoveAll(path))
+			if err := os.RemoveAll(path); err != nil {
+				result = errors.Join(result, err)
+				// A failed removal usually takes the marker with it. Re-mark
+				// even published attempts so a stuck folder is retried daily.
+				_, markErr := attemptFilesExpired(path, now, false)
+				result = errors.Join(result, markErr)
+			}
 		}
 		if custody[job.Name()] == nil {
 			// Only an empty folder goes; a new attempt may have just created one.
@@ -236,14 +274,15 @@ func pruneAttemptFiles(dir string, now time.Time) error {
 
 // attemptFilesExpired reports whether an unclaimed attempt folder has been
 // unclaimed, or unmodified for non-folders, for AttemptFilesGrace. The first
-// sighting of a folder writes its marker.
-func attemptFilesExpired(path string, now time.Time) (bool, error) {
+// sighting of a folder writes its marker unless publication permits immediate
+// deletion. An existing marker also backs off failed published-folder removals.
+func attemptFilesExpired(path string, now time.Time, published bool) (bool, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return false, err
 	}
 	if !info.IsDir() {
-		return !info.ModTime().After(now.Add(-AttemptFilesGrace)), nil
+		return published || !info.ModTime().After(now.Add(-AttemptFilesGrace)), nil
 	}
 	marker := filepath.Join(path, unclaimedMarker)
 	if info, err = os.Lstat(marker); err == nil {
@@ -251,6 +290,9 @@ func attemptFilesExpired(path string, now time.Time) (bool, error) {
 	}
 	if !errors.Is(err, os.ErrNotExist) {
 		return false, err
+	}
+	if published {
+		return true, nil
 	}
 	// O_EXCL never follows a planted link.
 	f, err := os.OpenFile(marker, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)

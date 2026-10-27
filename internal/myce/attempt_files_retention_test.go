@@ -1,12 +1,100 @@
 package myce
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+// #201: a day of successful gates filled the M4 even though their outputs
+// were already accepted. Only durable publication confirmation shortens grace.
+func TestWorkerRetentionRemovesPublishedAttemptFiles(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 10, 27, 0, 0, 0, 0, time.UTC)
+	for _, name := range []string{"published", "failed", "live", "pending"} {
+		if err := os.MkdirAll(filepath.Join(dir, "job-files", name, "1", ".venv"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		st := workerState{PublishedAttempt: &Execution{ID: name, Attempt: 1}}
+		switch name {
+		case "failed":
+			st.PublishedAttempt = nil
+		case "live":
+			st.Job = &Job{ID: name, Attempt: 1}
+		case "pending":
+			st.Job = &Job{ID: name, Attempt: 1}
+			st.Result = &Result{ReleasePending: true}
+		}
+		if err := saveWorkerJSON(dir, "state-attempt-"+name+".json", st); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Reading saved records simulates a restart between acknowledgement and cleanup.
+	if err := workerRetention(dir, now, DefaultLogRetention); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "job-files", "published")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("published attempt retained", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "state-attempt-published.json")); err != nil {
+		t.Fatal("small diagnostic record removed", err)
+	}
+	for _, at := range []time.Time{now.Add(23 * time.Hour), now.Add(24 * time.Hour)} {
+		if err := workerRetention(dir, at, DefaultLogRetention); err != nil {
+			t.Fatal(err)
+		}
+		for _, name := range []string{"failed", "live", "pending"} {
+			_, err := os.Stat(filepath.Join(dir, "job-files", name, "1", ".venv"))
+			if name == "failed" && at.Equal(now.Add(24*time.Hour)) {
+				if !errors.Is(err, os.ErrNotExist) {
+					t.Fatal("failed scratch retained after grace", err)
+				}
+			} else if err != nil {
+				t.Fatalf("%s removed before eligible: %v", name, err)
+			}
+		}
+	}
+}
+
+// A successful process alone is insufficient: release and queue acceptance
+// belong to the exact attempt, and a cancelled success may have no accepted output.
+func TestPublishedAttemptFilesRequiresAcceptedResult(t *testing.T) {
+	q, _ := fixture(t)
+	c := retentionClient(t, q)
+	_, ref := retentionUpload(t, c, "result")
+	s := spec("experiment")
+	s.Files = FileManifest{"input": ref}
+	s.Outputs = map[string]string{"output": "results"}
+	j := submit(t, q, s)
+	m := machine("worker", "fake", "session")
+	assigned := check(t, q, m, nil).Job
+	if assigned == nil {
+		t.Fatal("not assigned")
+	}
+	r := Result{Execution: Execution{ID: j.ID, Attempt: assigned.Attempt}, Machine: m.ID, Session: m.Session, Success: true, OutputRefs: FileManifest{"output": ref}}
+	st := workerState{Job: assigned, Result: &r}
+	w := Worker{Client: c}
+	confirm := func(want bool) {
+		t.Helper()
+		published, err := w.publishedAttemptFiles(context.Background(), st)
+		if err != nil || (published != nil) != want {
+			t.Fatalf("publication=%v want=%t: %v", published, want, err)
+		}
+	}
+	confirm(false) // Uploaded bytes have not been accepted as a result.
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	confirm(true)
+	r.ReleasePending = true
+	confirm(false)
+	r.ReleasePending = false
+	r.Attempt++
+	confirm(false)
+}
 
 // #201: B70 kept every finished attempt's job-files folder (13 GB in four days).
 func TestWorkerRetentionRemovesUnclaimedAttemptFiles(t *testing.T) {
