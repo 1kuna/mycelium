@@ -138,22 +138,24 @@ func collectFleetRuntimeAt(ctx context.Context, c ServiceConfig, session string,
 // Worker-loop-owned state. Background calls receive immutable snapshots and
 // deliver a value through pending; they never write Worker or Machine fields.
 type workerFleetRuntime struct {
-	config     ServiceConfig
-	client     Client
-	collect    func(context.Context, ServiceConfig, string) (*FleetRuntimeProof, error)
-	launch     func(context.Context, ServiceConfig, FleetUpdateInstruction) error
-	pending    chan fleetPollResult
-	proof      *FleetRuntimeProof
-	attempted  string
-	failed     *fleetLaunchFailure
-	clock      Clock
-	generation uint64
+	failureReceipt string
+	config         ServiceConfig
+	client         Client
+	collect        func(context.Context, ServiceConfig, string) (*FleetRuntimeProof, error)
+	launch         func(context.Context, ServiceConfig, FleetUpdateInstruction) error
+	pending        chan fleetPollResult
+	proof          *FleetRuntimeProof
+	attempted      string
+	failed         *fleetLaunchFailure
+	clock          Clock
+	generation     uint64
 }
 
 type fleetPollResult struct {
-	proof     *FleetRuntimeProof
-	attempted string
-	failed    *fleetLaunchFailure
+	failureReceipt string
+	proof          *FleetRuntimeProof
+	attempted      string
+	failed         *fleetLaunchFailure
 }
 
 type fleetLaunchFailure struct {
@@ -197,6 +199,7 @@ func (r *workerFleetRuntime) observe(ctx context.Context, m Machine, eligible bo
 		select {
 		case result := <-r.pending:
 			r.proof, r.attempted, r.failed = result.proof, result.attempted, result.failed
+			r.failureReceipt = result.failureReceipt
 			r.generation++
 			r.pending = nil
 		default:
@@ -206,11 +209,11 @@ func (r *workerFleetRuntime) observe(ctx context.Context, m Machine, eligible bo
 		pending := make(chan fleetPollResult, 1)
 		r.pending = pending
 		config, client, collect, launch := r.config, r.client, r.collect, r.launch
-		attempted, failed := r.attempted, r.failed
+		attempted, failed, failureReceipt := r.attempted, r.failed, r.failureReceipt
 		// m is used only for scalar identity, never mutable Machine pointers.
 		host, machine, session := hostID(&m), m.ID, m.Session
 		go func() {
-			pending <- pollFleetRuntime(ctx, config, client, collect, launch, host, machine, session, eligible, attempted, failed)
+			pending <- pollFleetRuntime(ctx, config, client, collect, launch, host, machine, session, eligible, attempted, failed, failureReceipt)
 		}()
 	}
 	if r.proof == nil || r.proof.Session != m.Session {
@@ -228,8 +231,30 @@ func (r *workerFleetRuntime) observe(ctx context.Context, m Machine, eligible bo
 	return &p
 }
 
-func pollFleetRuntime(ctx context.Context, config ServiceConfig, client Client, collect func(context.Context, ServiceConfig, string) (*FleetRuntimeProof, error), launch func(context.Context, ServiceConfig, FleetUpdateInstruction) error, host, machine, session string, eligible bool, attempted string, failed *fleetLaunchFailure) fleetPollResult {
+func pollFleetRuntime(ctx context.Context, config ServiceConfig, client Client, collect func(context.Context, ServiceConfig, string) (*FleetRuntimeProof, error), launch func(context.Context, ServiceConfig, FleetUpdateInstruction) error, host, machine, session string, eligible bool, attempted string, failed *fleetLaunchFailure, handled ...string) fleetPollResult {
 	result := fleetPollResult{attempted: attempted, failed: failed}
+	if len(handled) > 0 {
+		result.failureReceipt = handled[0]
+	}
+	// A restarted service reports durable helper failure before presenting a
+	// new healthy proof. Keep the local receipt; only deduplicate delivery.
+	receipt, readErr := ReadFleetUpdateFailure(config)
+	if readErr != nil {
+		return result
+	}
+	if receipt != nil {
+		key := receipt.Operation + "/" + strconv.Itoa(receipt.Revision)
+		if result.failureReceipt != key {
+			request, cancel := context.WithTimeout(ctx, 10*time.Second)
+			err := client.Call(request, "POST", "/api/fleet/ack", receipt, nil)
+			cancel()
+			var rejection *HTTPError
+			if err == nil || errors.As(err, &rejection) && rejection.Status == 409 {
+				result.failureReceipt = key
+			}
+			return result
+		}
+	}
 	proof, err := collect(ctx, config, session)
 	result.proof = proof
 	if err != nil || proof == nil || !proof.ServiceHealthy || !eligible || ctx.Err() != nil {

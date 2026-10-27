@@ -31,6 +31,7 @@ func (a API) handler(joiningPin string) http.Handler {
 	a.registerInvites(mux, joiningPin)
 	a.registerEnrollmentRelease(mux)
 	a.registerEnrollment(mux)
+	a.registerFleetUpgrade(mux)
 	a.registerDevClock(mux)
 	a.registerHostMaintenance(mux)
 	a.registerPriorityPolicy(mux)
@@ -340,6 +341,11 @@ func respond(w http.ResponseWriter, v any, err error) {
 	_ = json.NewEncoder(w).Encode(v)
 }
 func (q *Queue) Run(ctx context.Context) error {
+	runtimeCtx, stopRuntime := context.WithCancel(ctx)
+	runtimeDone := make(chan struct{})
+	go func() { defer close(runtimeDone); q.runFleetQueueRuntime(runtimeCtx) }()
+	defer func() { stopRuntime(); <-runtimeDone }()
+
 	t := time.NewTicker(time.Second)
 	defer t.Stop()
 	for {

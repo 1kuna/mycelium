@@ -121,85 +121,9 @@ func (q *Queue) ChangeHostMaintenance(host string, request HostMaintenanceReques
 		return out, errors.New("physical host is required")
 	}
 	err := q.update(func() error {
-		if err := q.validateMachineNames([]string{host}); err != nil {
+		if err := q.changeHostMaintenance(host, request); err != nil {
 			return err
 		}
-		if q.s.HostMaintenance == nil {
-			q.s.HostMaintenance = map[string]HostMaintenance{}
-		}
-		policy := q.s.HostMaintenance[host]
-		if request.IfUpdatedAt != nil && !policy.UpdatedAt.Equal(*request.IfUpdatedAt) || request.IfMode != "" && policy.Mode != request.IfMode || request.IfDrainOwner != "" && policy.DrainOwner != request.IfDrainOwner {
-			return ErrStale
-		}
-		if policy.Mode == "" {
-			policy.Mode = "enabled"
-		}
-		// Placement changes do not transfer drain authority. Other maintenance
-		// edits, including a re-drain at the same timestamp, revoke it.
-		if request.Action != "placement" {
-			policy.DrainOwner = ""
-		}
-		switch request.Action {
-		case "drain":
-			policy.Mode = "drained"
-			policy.DrainOwner = request.DrainOwner
-		case "disable":
-			policy.Mode = "disabled"
-		case "resume":
-			policy.Mode = "enabled"
-		case "budget":
-		case "placement":
-			if request.LastResort == nil {
-				return errors.New("placement requires last_resort")
-			}
-		default:
-			return errors.New("expected drain, disable, resume, budget or placement")
-		}
-		if request.LastResort != nil {
-			if request.Action != "placement" {
-				return errors.New("last_resort requires placement")
-			}
-			policy.LastResort = *request.LastResort
-		}
-		if request.Stop && request.Action != "disable" {
-			return errors.New("--stop requires disable")
-		}
-		if request.Action == "budget" && request.MemoryBudgetGB == nil && request.CPUBudgetCores == nil {
-			return errors.New("budget requires RAM GiB or CPU cores")
-		}
-		if request.CPUBudgetCores != nil {
-			if policy.Mode == "enabled" {
-				return errors.New("drain or disable the host before changing its CPU allowance")
-			}
-			if *request.CPUBudgetCores < 0 {
-				return errors.New("CPU allowance must be nonnegative (zero uses detected capacity minus reserve)")
-			}
-			value := *request.CPUBudgetCores
-			policy.CPUBudgetCores = &value
-		}
-		if request.MemoryBudgetGB != nil {
-			if policy.Mode == "enabled" {
-				return errors.New("drain or disable the host before changing its memory allowance")
-			}
-			budget, err := hostMemoryAllowance(*request.MemoryBudgetGB)
-			if err != nil || budget.Bytes <= 0 {
-				return errors.New("host allowance must be positive finite GiB")
-			}
-			policy.MemoryBudget = &budget
-		}
-		if request.Action == "resume" || request.Action == "drain" {
-			policy.StopAt = nil
-		}
-		if request.Stop && policy.StopAt == nil {
-			deadline := q.clock.Now().Add(StopGrace)
-			policy.StopAt = &deadline
-		}
-		// Preserve the drain receipt's timestamp as well as its owner so its
-		// conditional resume remains valid after a placement-only edit.
-		if request.Action != "placement" {
-			policy.UpdatedAt = q.clock.Now()
-		}
-		q.s.HostMaintenance[host] = policy
 		q.maintain()
 		out = q.hostMaintenanceStatus(host)
 		return nil
@@ -412,4 +336,88 @@ func (q *Queue) maintainHostObligation(p HostObligation, deadline *time.Time) {
 		}
 		q.retainRelease(j)
 	}
+}
+
+// changeHostMaintenance runs inside the existing queue transaction.
+func (q *Queue) changeHostMaintenance(host string, request HostMaintenanceRequest) error {
+	if err := q.validateMachineNames([]string{host}); err != nil {
+		return err
+	}
+	if q.s.HostMaintenance == nil {
+		q.s.HostMaintenance = map[string]HostMaintenance{}
+	}
+	policy := q.s.HostMaintenance[host]
+	if request.IfUpdatedAt != nil && !policy.UpdatedAt.Equal(*request.IfUpdatedAt) || request.IfMode != "" && policy.Mode != request.IfMode || request.IfDrainOwner != "" && policy.DrainOwner != request.IfDrainOwner {
+		return ErrStale
+	}
+	if policy.Mode == "" {
+		policy.Mode = "enabled"
+	}
+	// Placement changes do not transfer drain authority. Other maintenance
+	// edits, including a re-drain at the same timestamp, revoke it.
+	if request.Action != "placement" {
+		policy.DrainOwner = ""
+	}
+	switch request.Action {
+	case "drain":
+		policy.Mode = "drained"
+		policy.DrainOwner = request.DrainOwner
+	case "disable":
+		policy.Mode = "disabled"
+	case "resume":
+		policy.Mode = "enabled"
+	case "budget":
+	case "placement":
+		if request.LastResort == nil {
+			return errors.New("placement requires last_resort")
+		}
+	default:
+		return errors.New("expected drain, disable, resume, budget or placement")
+	}
+	if request.LastResort != nil {
+		if request.Action != "placement" {
+			return errors.New("last_resort requires placement")
+		}
+		policy.LastResort = *request.LastResort
+	}
+	if request.Stop && request.Action != "disable" {
+		return errors.New("--stop requires disable")
+	}
+	if request.Action == "budget" && request.MemoryBudgetGB == nil && request.CPUBudgetCores == nil {
+		return errors.New("budget requires RAM GiB or CPU cores")
+	}
+	if request.CPUBudgetCores != nil {
+		if policy.Mode == "enabled" {
+			return errors.New("drain or disable the host before changing its CPU allowance")
+		}
+		if *request.CPUBudgetCores < 0 {
+			return errors.New("CPU allowance must be nonnegative (zero uses detected capacity minus reserve)")
+		}
+		value := *request.CPUBudgetCores
+		policy.CPUBudgetCores = &value
+	}
+	if request.MemoryBudgetGB != nil {
+		if policy.Mode == "enabled" {
+			return errors.New("drain or disable the host before changing its memory allowance")
+		}
+		budget, err := hostMemoryAllowance(*request.MemoryBudgetGB)
+		if err != nil || budget.Bytes <= 0 {
+			return errors.New("host allowance must be positive finite GiB")
+		}
+		policy.MemoryBudget = &budget
+	}
+	if request.Action == "resume" || request.Action == "drain" {
+		policy.StopAt = nil
+	}
+	if request.Stop && policy.StopAt == nil {
+		deadline := q.clock.Now().Add(StopGrace)
+		policy.StopAt = &deadline
+	}
+	// Preserve the drain receipt's timestamp as well as its owner so its
+	// conditional resume remains valid after a placement-only edit.
+	if request.Action != "placement" {
+		policy.UpdatedAt = q.clock.Now()
+	}
+	q.s.HostMaintenance[host] = policy
+	return nil
 }

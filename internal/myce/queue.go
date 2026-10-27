@@ -40,6 +40,7 @@ type batchRelease struct {
 }
 
 type state struct {
+	FleetUpgrade *fleetUpgrade `json:"fleet_upgrade,omitempty"`
 	// Positive orphan eligibility, persisted with the existing queue state.
 	// Zero time means an input upload has not finished publication yet.
 	JobInputUploads map[string]time.Time `json:"job_input_uploads,omitempty"`
@@ -83,6 +84,8 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
+	fleetQueue                      *fleetQueueRuntime
+	fleetService                    *ServiceConfig
 	onboardingNAS                   NASIdentity
 	productionInfrastructureRetries int
 
@@ -760,6 +763,7 @@ func (q *Queue) fleetQuiet(now time.Time) bool {
 }
 
 func (q *Queue) maintain() {
+	q.maintainFleetUpgrade()
 	q.maintainFanOut()
 	q.maintainPieceDependencies()
 	q.maintainFileExpiry()
@@ -1557,7 +1561,7 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 
 // Projection runs against either the locked queue or a fully detached read view.
 func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
-	out := Snapshot{HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
+	out := Snapshot{FleetUpgrade: q.fleetUpgradeStatus(), HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
 	for _, s := range q.s.ModelSlots {
 		copy := *s
 		model, _ := q.model(s.Model)

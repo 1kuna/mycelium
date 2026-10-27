@@ -2,11 +2,12 @@
 
 Proposed amendment for [#244](https://github.com/1kuna/mycelium/issues/244),
 2026-10-27. Reviewed source: `origin/main` at `0ce3bd30`.
-**Not approved or implemented.** The [approved design](../design-proposal.md)
-remains the only product spec. Its M4 installation section says: “No automatic
-GPU driver, service or host changes are authorized by this spec.” Following the
-worker brief's stop condition, this note requests the explicit exception for
-signed runtime self-update; no runtime or fleet changes accompany it.
+**Approved as an amendment on 2026-10-27 (MY-21).** The binding contract now
+lives in [the approved design](../design-proposal.md#amendment-one-command-seamless-fleet-upgrade-244).
+This research note records the proposal and deployment lessons; the product spec
+and its scoped permission boundary take precedence. Native qualification and a
+live rollout still require separate authorization.
+
 
 ## Existing coverage and deployment lessons
 
@@ -117,9 +118,8 @@ attempts, starts, loss/retry counts and successful outputs. Include in-flight
 model-call completion before queue cutover. Native signing and manager behavior
 require separate authorized acceptance; laptop proof is not fleet qualification.
 
-Current state: design note only. Next owner: orchestrator/maintainer to approve
-the self-update exception, credential boundary and fix-forward installer change
-in the product spec, then assign implementation against #244. The first release
-containing that implementation still needs the existing authorized installation
-path; only capable installed runtimes can receive later self-update instructions.
-No live fleet upgrade is authorized by this proposal.
+Current state: approved amendment incorporated into the product spec; runtime
+implementation and acceptance tracked in #244 and PR #245. The first release
+containing this feature uses the existing installation path; only capable
+installed runtimes receive later update instructions. This note does not
+authorize a live fleet rollout.

@@ -200,7 +200,7 @@ func EnrollmentServiceHealth(ctx context.Context, c ServiceConfig, command func(
 	if c.Detection.OS == "linux" {
 		b, err = command(ctx, "systemctl", "--user", "show", filepath.Base(c.Service), "--property=ActiveState,SubState,MainPID,NRestarts,Result", "--no-pager")
 	} else {
-		u := installUnit{path: c.Service, label: "local.mycelium.worker"}
+		u := installUnit{path: c.Service, label: "local.mycelium." + c.Role}
 		b, err = command(ctx, "launchctl", "print", u.target())
 	}
 	if err != nil {

@@ -694,6 +694,9 @@ func (q *Queue) addCall(c *ModelCall) error {
 		return err
 	}
 	return q.update(func() error {
+		if q.fleetPausesCalls() {
+			return errors.New("fleet upgrade queue cutover: model-call admission paused")
+		}
 		if _, ok := q.model(c.Model); !ok {
 			return errors.New("unknown model")
 		}

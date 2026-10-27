@@ -535,5 +535,6 @@ func serviceCommand(args []string) error {
 	if f.NArg() > 0 {
 		args = f.Args()
 	}
+	args = append(args, "--service-config", c.Config)
 	return run(args)
 }
