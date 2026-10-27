@@ -150,6 +150,23 @@ func TestSharedInputsDevReusesTreeWithStoredSource(t *testing.T) {
 			t.Fatal("per-job copy", previous, string(b))
 		}
 		previous = string(b)
+		// Published scratch is disposable even for the shared-only third job.
+		// The next job must still reuse the shared tree after that scratch is gone.
+		scratch := filepath.Join(state, "workers", "fake-1", "job-files", j.ID)
+		for {
+			_, e := os.Stat(scratch)
+			if os.IsNotExist(e) {
+				break
+			}
+			if e != nil {
+				t.Fatal(e)
+			}
+			select {
+			case <-ctx.Done():
+				t.Fatal("published attempt scratch retained", j.ID, ctx.Err())
+			case <-time.After(10 * time.Millisecond):
+			}
+		}
 		if i == 0 {
 			if e = os.Remove(filepath.Join(nas, "runtime.tar")); e != nil {
 				t.Fatal(e)
