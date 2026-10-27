@@ -216,10 +216,7 @@ func TestAdapterDogfoodHTTPStageDev(t *testing.T) {
 		t.Fatal("converted digest reused the original native check")
 	}
 	for id, before := range map[string][]byte{original.ID: jobBefore, oldCheck.ID: checkBefore} {
-		after, err := d.Client().GetJob(ctx, id)
-		if err != nil {
-			t.Fatal(err)
-		}
+		after := adapterDogfoodJob(t, d, id)
 		if !bytes.Equal(before, frozen(after)) {
 			t.Fatalf("conversion changed original accepted snapshot %s", id)
 		}
@@ -347,7 +344,24 @@ func adapterDogfoodWait(t *testing.T, ctx context.Context, d *myce.Dev, id strin
 	if err != nil || j.State != "succeeded" {
 		t.Fatalf("dogfood job %+v: %v", j, err)
 	}
-	return j
+	// The public terminal reply deliberately omits execution/source identity.
+	// Read the retained plan when comparing frozen recipes and qualification.
+	return adapterDogfoodJob(t, d, id)
+}
+
+func adapterDogfoodJob(t *testing.T, d *myce.Dev, id string) *myce.Job {
+	t.Helper()
+	snapshot, err := d.Queue.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, j := range snapshot.Jobs {
+		if j.ID == id {
+			return j
+		}
+	}
+	t.Fatalf("dogfood job %s is absent from the retained queue snapshot", id)
+	return nil
 }
 
 func adapterDogfoodResult(t *testing.T, ctx context.Context, d *myce.Dev, id, name string) []byte {
