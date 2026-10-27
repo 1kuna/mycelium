@@ -23,8 +23,7 @@ func TestExtensionFirstDemandFrozenRecoveryDev(t *testing.T) {
 	e.Kinds = nil
 	v := &e.Variants[0]
 	delete(v.Baselines, "kind:sample")
-	v.Environments = map[string]EnvironmentRecipe{"main": {Build: []string{"sh", "-c", "printf prepared > '{root}/bin/prepared'"}}}
-	v.Execution.Main.Environment = "main"
+	v.Setup = []string{"sh", "-ec", "printf prepared > \"$MYCE_EXTENSION_CACHE/prepared\""}
 	v.Execution.Main.Command = []string{"sh", "{extension}/frozen-run.sh"}
 	e.Files["frozen-run.sh"] = []byte("test -z \"$MYCE_TOKEN\" || exit 99\nprintf 'frozen-result\\n' > output\n")
 	e = freezeComposition(t, e)
@@ -116,8 +115,7 @@ func TestExtensionFirstDemandFrozenRecoveryDev(t *testing.T) {
 	if checks != 1 {
 		t.Fatal("cold recovery duplicated or omitted native checks", checks)
 	}
-	recipe := installed.Variants[0].Environments["main"]
-	if marker, err := os.ReadFile(filepath.Join(root, "workers", "fake-1", "environment-cache", recipe.Key, "bin", "prepared")); err != nil || string(marker) != "prepared" {
-		t.Fatal("cold environment was not prepared", err)
+	if marker, err := os.ReadFile(filepath.Join(extensionCache(c.ExtensionRoot, e, "fake"), "prepared")); err != nil || string(marker) != "prepared" {
+		t.Fatal("cold native setup was not prepared", err)
 	}
 }
