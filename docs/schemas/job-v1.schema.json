@@ -1382,6 +1382,10 @@
           "type": "integer",
           "x-contract": "stable"
         },
+        "last_health_alert_attempt": {
+          "type": "integer",
+          "x-contract": "diagnostic"
+        },
         "last_stop_outcome": {
           "type": "string",
           "x-contract": "diagnostic"
