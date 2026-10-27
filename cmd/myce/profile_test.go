@@ -407,7 +407,7 @@ check: [true]
 	if err := q.ConfigureFileStore(filepath.Join(state, "files"), 1<<20, true); err != nil {
 		t.Fatal(err)
 	}
-	m := myce.Machine{ID: "worker", Session: "fixture", GPU: "cpu", CPUIsolation: "select-none",
+	m := myce.Machine{Capabilities: []string{"native_isolation_landlock"}, ID: "worker", Session: "fixture", GPU: "cpu", CPUIsolation: "select-none",
 		HostMemoryMeasured: true, HostAvailableMemoryGB: 32, HostMemoryBudgetGB: 8, MemoryCeilingSlackGB: .125,
 		CapabilityProfile: &myce.CapabilityProfile{OS: "linux", Arch: "amd64", LogicalCPUs: 8, MemoryLayout: "separate", SystemMemoryBytes: 32 << 30}}
 	if _, err := q.Checkin(myce.Checkin{Machine: m}); err != nil {

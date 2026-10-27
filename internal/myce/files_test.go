@@ -238,7 +238,7 @@ func TestStoredCheckpointDurabilityStalenessAndOutputAcceptance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reply, err := q.Checkin(Checkin{Machine: Machine{CapabilityProfile: machine("profile", "fake").CapabilityProfile, ID: "a", Session: "a", GPU: "fake", FreeMemoryGB: 8}})
+	reply, err := q.Checkin(Checkin{Machine: Machine{Capabilities: []string{"native_isolation_landlock"}, CapabilityProfile: machine("profile", "fake").CapabilityProfile, ID: "a", Session: "a", GPU: "fake", FreeMemoryGB: 8}})
 	if err != nil || reply.Job == nil {
 		t.Fatal(err, reply)
 	}
@@ -271,7 +271,7 @@ func TestStoredCheckpointDurabilityStalenessAndOutputAcceptance(t *testing.T) {
 		t.Fatal("accepted stale publisher", err)
 	}
 	// Reconciliation ignores a worker's untransferred local generation.
-	reply, err = q.Checkin(Checkin{Machine: Machine{CapabilityProfile: machine("profile", "fake").CapabilityProfile, ID: "a", Session: "a", GPU: "fake", FreeMemoryGB: 0}, Running: &Execution{ID: j.ID, Attempt: r.Attempt, Progress: 999}})
+	reply, err = q.Checkin(Checkin{Machine: Machine{Capabilities: []string{"native_isolation_landlock"}, CapabilityProfile: machine("profile", "fake").CapabilityProfile, ID: "a", Session: "a", GPU: "fake", FreeMemoryGB: 0}, Running: &Execution{ID: j.ID, Attempt: r.Attempt, Progress: 999}})
 	if err != nil {
 		t.Fatal(err)
 	}
