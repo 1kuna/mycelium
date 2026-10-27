@@ -23,6 +23,26 @@ func TestNativeIsolationModelCredentialOverlap(t *testing.T) {
 	}
 }
 
+func TestNativeIsolationModelKeychainOverlap(t *testing.T) {
+	home, work := t.TempDir(), t.TempDir()
+	t.Setenv("HOME", home)
+	keychains := filepath.Join(home, "Library", "Keychains")
+	if err := os.MkdirAll(keychains, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(keychains, "synthetic.keychain"), []byte("synthetic private bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, root := range []string{keychains, filepath.Dir(keychains)} {
+		w := Worker{ModelRoot: root}
+		cmd := exec.Command("/usr/bin/true")
+		cmd.Dir = work
+		if err := w.isolateNativeCommand(cmd, work, work, nil, nil, false); err == nil || !strings.Contains(err.Error(), "runtime_overlap") {
+			t.Fatal("model read exception overriding Keychains protection accepted", err)
+		}
+	}
+}
+
 func TestNativeIsolationNetworkDeclaration(t *testing.T) {
 	// Seatbelt's localhost filter includes the host's LAN addresses as well as
 	// loopback. A declaration must not expose a local control listener by alias.
