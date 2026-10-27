@@ -2286,9 +2286,24 @@ interfaces to the same persisted plans. No second executor or registry is needed
 
 Finite commands do not acquire native baseline requirements by being renamed.
 Native variants keep theirs: environment preparation is not accuracy proof.
-On first compatible demand, required native checks use existing check jobs and
-normal admission; references must already exist. No operator SSH step or owner
-availability bypass. MY-19 still requires cross-platform parity before splitting.
+First-demand qualification is new work owned by #250, not behavior supplied
+by preparation today. Current `prepareRegisteredExtension` ends with “check
+required”; `CheckExtension` is host-local and creates local scratch. Extend that
+lifecycle: after preparation, the worker creates check scratch on its own host
+and requests an exact-host/device internal check job for each required work type.
+Reuse the existing check runner/comparison and normal resource, launch and owner
+availability fences; only this exact internal check can run before qualification.
+Persist its check identity so reconnect/repeated demand adopts the same in-flight
+check instead of creating duplicates. The queue keeps useful work waiting until
+the worker publishes a successful baseline comparison tied to the accepted check
+invocation, frozen entry, target, environments and host/component fingerprint.
+Stale/cancelled checks or changed identities cannot qualify. Check failure stays
+visible and unqualified without an idle retry loop; new identity or an explicit
+qualification retry can recheck. No submitter-local scratch path, operator SSH or
+manual worker setup/check command is part of this journey. References must
+already exist. A cold fake worker must prepare, qualify and run useful work from
+one invocation, and a warm repeat must reuse matching evidence. MY-19 still
+requires cross-platform parity before splitting.
 `fan_out.pieces: [{key: item-a, args: [...]}]` keeps current maximums, wave
 membership, affected-wave retries and exact-attempt publication. Result checks
 run on each ordinary attempt/wave under its execution contract, not once on the
@@ -2407,8 +2422,16 @@ Choose a **one-shot source converter**, not runtime compatibility readers for a
 deprecation window. MY-03 favors one current runtime; two permanent readers
 retain competing concepts and validation drift. Cost: one reviewed source/caller
 change per maintained consumer. Queued jobs, keys, frozen plans, output refs,
-checkpoints and exact custody remain unchanged. The runtime executes internal
-persisted plans, not retired YAML; no accepted-job rewrite or rollback layer.
+checkpoints and exact custody remain unchanged. Retire old source-authoring
+entry points, not the internal decoder needed by saved bundles. Today preparation
+calls `extensionFromFiles` and execution calls `ReadExtension` on frozen
+`extension.yaml`; keep those paths (including the exact legacy/composed schemas,
+bytes and digest verification) for persisted job/registry snapshots. New adapter
+entries lower into the same execution representation. Internal snapshot decoding
+cannot accept a mutable author path or register a new old-format file. It remains
+while any retained snapshot needs it; consumer conversion alone cannot justify
+its deletion. This is decoding durable v3 intent, not an old runtime fallback.
+No accepted identity or digest is rewritten and no rollback layer is added.
 
 Proposed `myce adapter convert` reads explicitly selected profiles/extensions
 and emits one adapter plus field/caller-change report without overwriting its
@@ -2432,8 +2455,14 @@ YAML authoring readers/init paths in the cutover batch. This is implementation
 staging, not a supported dual-format window or automatic fallback. Retirement
 requires verified consumer conversion, not an arbitrary date. Old new-submission
 commands return typed conversion guidance; accepted-key replay, cancellation,
-receipt recovery and serialized job/registry snapshots keep working. Incomplete
-conversion leaves the retirement issue open and old readers intact until cutover.
+receipt recovery and serialized job/registry snapshots keep working through
+the retained internal decoder. Retirement additionally requires a laptop restart
+proof: accept a native job before cutover, restart queue/worker with empty local
+extension/environment caches, fetch/decode its original snapshot, qualify that
+exact identity and execute the job, then verify accepted output and keyed replay.
+The original bundle, digest and submission fingerprint must remain unchanged.
+Incomplete conversion or failed cold-recovery proof leaves the retirement issue
+open and source-authoring entry points intact until cutover.
 
 Read-only source inventory on 2026-10-27 establishes these migration obligations,
 not native execution evidence. Keep private paths, host IDs, data and receipts
@@ -2469,7 +2498,11 @@ native acceptance is separate. Recheck #180, #187 and #156 ownership at dispatch
    qualification; result/qualification checks cannot substitute; pieces preserve
    coverage, cancellation and stale-result fences; unknown fields, conflicting
    recipes and unsupported dependency forms fail before launch. Use current
-   installed/catalog environments initially.
+   installed/catalog environments initially. Implement worker-triggered check
+   scheduling, local scratch and exact evidence publication described above:
+   one invocation on a cold fake worker prepares, qualifies the exact variant
+   and runs useful work with no manual setup/check; a warm repeat reuses evidence,
+   while failed/stale checks cannot qualify. Checks obey cancellation/maintenance.
 2. **[Portable recipe submission (#251), conditional](https://github.com/1kuna/mycelium/issues/251).** After maintainer approval,
    snapshot/upload uv/Pixi inputs and bind them to intent. Acceptance: a lock
    present only on the submitter works with an unrelated catalog and no restart;
@@ -2484,12 +2517,16 @@ native acceptance is separate. Recheck #180, #187 and #156 ownership at dispatch
 4. **[Converter/internal dogfood (#253)](https://github.com/1kuna/mycelium/issues/253).** After 1; use 2 only if approved. Acceptance:
    repeatable non-destructive conversion, preserved execution/I/O/check fences,
    reported missing/unrepresentable inputs, own gate/starter migration, and
-   unchanged recovery for accepted jobs/receipts.
+   unchanged recovery for accepted jobs/receipts, including the original frozen
+   extension YAML decoder and digest verification.
 5. **[Consumer cutover/reader retirement (#254)](https://github.com/1kuna/mycelium/issues/254).** After 4 and any applicable approved
    environment slices. Acceptance: reviewed five-consumer files/callers with
    evidence or explicit holds; no active caller requires a removed reader;
    changed native digests requalify; old new-submission calls give conversion
-   guidance while keyed recovery works. Update guides/examples/skill without
+   guidance while keyed recovery works. Require the pre-cutover native job's
+   cold-cache queue/worker restart proof above; retain internal snapshot decoders
+   while referenced, even after source-authoring readers retire.
+   Update guides/examples/skill without
    weakening checks, widening targets or consuming unaccepted results.
 6. **[One-command completion/recovery (#156)](https://github.com/1kuna/mycelium/issues/156).** Refines #156/#157; after 1 and, for fresh
    locked-project acceptance, 2–3. Acceptance: foreground verified retrieval,
