@@ -334,7 +334,15 @@ __attribute__((constructor)) static void attack(void) {
 				j.Spec.Needs.HostMemoryGB = j.Spec.Run.MemoryGB
 				w.HostMemorySource = func(context.Context) (float64, error) { return 1, nil }
 			}
-			p, err := w.start(store, j)
+			var p *process
+			if group {
+				await(t, func() bool {
+					p, err = w.start(store, j)
+					return !errors.Is(err, errWorkerCheckpoint) || !strings.Contains(err.Error(), "input copy pending")
+				})
+			} else {
+				p, err = w.start(store, j)
+			}
 			if err != nil {
 				t.Fatal(err)
 			}

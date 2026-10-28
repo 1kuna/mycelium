@@ -161,9 +161,17 @@ func TestWorkerRetentionNativeStartFailureAcknowledgement(t *testing.T) {
 	defer root.close()
 	job := recoveryJob(t, []string{"sh", "-c", "exit 0"})
 	job.Spec.Resumable = false
-	job.Spec.Run.Workdir = "{work}/missing-directory"
+	job.Spec.Run.Workdir = "{work}/not-a-directory"
 	store, err := newAttemptStore(root, job)
 	if err != nil {
+		t.Fatal(err)
+	}
+	work := filepath.Join(store.dir, "job-files", job.ID, "1")
+	if err := os.MkdirAll(work, 0700); err != nil {
+		t.Fatal(err)
+	}
+	// Resolve inside managed work, then fail the OS chdir after launch intent.
+	if err := os.WriteFile(filepath.Join(work, "not-a-directory"), nil, 0600); err != nil {
 		t.Fatal(err)
 	}
 	p, cause := w.start(store, job)

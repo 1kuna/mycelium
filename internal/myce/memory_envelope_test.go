@@ -433,6 +433,11 @@ func TestMemoryEnvelopeUnifiedExploratoryGPUDrift(t *testing.T) {
 	}
 	w := recoveryWorker(t)
 	w.Machine, w.Clock = *allocationMachine(&m, j.AllocatedDevices), clock
+	d := m.Devices[0]
+	w.selectedDevice = &d
+	w.DeviceBinding = d.Selector
+	w.InventoryProbe = func(context.Context) ([]MachineDevice, error) { return []MachineDevice{d}, nil }
+	w.nativeGPUDeviceProbe = syntheticNativeGPUDeviceProbe(d)
 	w.memoryCeilings = fakeCeilings(t)
 	w.HostMemorySource = func(context.Context) (float64, error) { return 100, nil }
 	w.MemorySource = func(context.Context) (float64, error) { return 59 - .0625, nil }
@@ -759,7 +764,11 @@ func TestMemoryEnvelopeNativeGroupPeak(t *testing.T) {
 	j.Spec.Needs.Platform = Platform{Required: []string{"cpu"}}
 	j.Spec.Needs.MemoryGB = 0
 	j.Spec.Run.Sidecars = []NativeSidecar{{Name: "helper", Command: []string{"sleep", "60"}}}
-	p, err := w.start(store, j)
+	var p *process
+	await(t, func() bool {
+		p, err = w.start(store, j)
+		return !errors.Is(err, errWorkerCheckpoint) || !strings.Contains(err.Error(), "input copy pending")
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
