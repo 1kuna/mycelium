@@ -335,14 +335,10 @@ __attribute__((constructor)) static void attack(void) {
 				w.HostMemorySource = func(context.Context) (float64, error) { return 1, nil }
 			}
 			var p *process
-			if group {
-				await(t, func() bool {
-					p, err = w.start(store, j)
-					return !errors.Is(err, errWorkerCheckpoint) || !strings.Contains(err.Error(), "input copy pending")
-				})
-			} else {
+			await(t, func() bool {
 				p, err = w.start(store, j)
-			}
+				return !errors.Is(err, errWorkerCheckpoint) || !strings.Contains(err.Error(), "input copy pending")
+			})
 			if err != nil {
 				t.Fatal(err)
 			}
