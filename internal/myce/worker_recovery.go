@@ -81,7 +81,7 @@ type workerStore struct {
 	fileProgress          checkpointIO[int64]
 	fileFinish            checkpointIO[Result]
 	fileGeneration        int64
-	extensionFiles        checkpointIO[string]
+	extensionFiles        checkpointIO[stagedInputs]
 	checkpointUnavailable bool
 	nasProbe              checkpointAvailability
 	nasProgress           checkpointIO[int64]

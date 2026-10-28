@@ -29,7 +29,7 @@ func (w Worker) authorizeStart(j Job, session string) error {
 		OK        bool   `json:"ok"`
 		StartGate string `json:"start_gate"`
 	}
-	if err := w.Client.Call(ctx, "POST", "/api/workers/started", Result{Machine: w.Machine.ID, Session: session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}, &reply); err != nil {
+	if err := w.Client.Call(ctx, "POST", "/api/workers/started", Result{InputsStagedAt: j.InputsStagedAt, Machine: w.Machine.ID, Session: session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}, &reply); err != nil {
 		return fmt.Errorf("%w: %w", errWorkerStartHandoff, err)
 	}
 	if !reply.OK || reply.StartGate != startGateProtocol {

@@ -390,6 +390,7 @@ type Job struct {
 	ProductionHost        string                       `json:"production_host,omitempty"`
 	WaitingSince          time.Time                    `json:"waiting_since,omitempty"`
 	AssignedAt            *time.Time                   `json:"assigned_at,omitempty"`
+	InputsStagedAt        *time.Time                   `json:"inputs_staged_at,omitempty"` // Worker clock; diagnostic only, scoped to this attempt.
 	FinishedAt            *time.Time                   `json:"finished_at,omitempty"`
 	QueueOrder            int                          `json:"queue_order,omitempty"`
 	EnvironmentFailureLog string                       `json:"environment_failure_log,omitempty"`
@@ -551,8 +552,9 @@ type Reply struct {
 type AttemptReport struct {
 	DockerCause *RuntimeCause `json:"docker_cause,omitempty"`
 	Execution
-	Session string `json:"session"`
-	Started bool   `json:"started,omitempty"`
+	InputsStagedAt *time.Time `json:"inputs_staged_at,omitempty"`
+	Session        string     `json:"session"`
+	Started        bool       `json:"started,omitempty"`
 }
 
 // AttemptDirective carries one assignment or control decision for an exact key.
@@ -569,6 +571,7 @@ type AttemptDirective struct {
 	PriorityStop *PriorityPreemption `json:"priority_stop,omitempty"`
 }
 type Result struct {
+	InputsStagedAt       *time.Time          `json:"inputs_staged_at,omitempty"`
 	Diagnostics          *AttemptDiagnostics `json:"diagnostics,omitempty"`
 	PriorityStop         *PriorityPreemption `json:"priority_stop,omitempty"`
 	ExecutionCause       *RuntimeCause       `json:"execution_cause,omitempty"`
