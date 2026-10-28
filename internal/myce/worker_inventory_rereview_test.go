@@ -306,15 +306,23 @@ func TestQCNativeGroupLaunchProbeRetry(t *testing.T) {
 							t.Fatal(err)
 						}
 						var p *process
-						if attempt == 1 {
+						// Exercise a deferred input observation before the counted launch
+						// probes on both assignments. Restore the real I/O budget immediately.
+						budget := store.extensionFiles.timeout
+						store.extensionFiles.timeout = time.Nanosecond
+						await(t, func() bool {
+							before := calls
 							p, err = bound.start(store, j)
-						} else {
-							// Match the clean retry above without changing fault-probe ordering.
-							await(t, func() bool {
-								p, err = bound.start(store, j)
-								return !errors.Is(err, errWorkerCheckpoint) || !strings.Contains(err.Error(), "input copy pending")
-							})
-						}
+							store.extensionFiles.timeout = budget
+							if errors.Is(err, errWorkerCheckpoint) && strings.Contains(err.Error(), "input copy pending") {
+								// Preparation has not reached a launch probe. Do not let
+								// its repeated entry probe shift the injected fault.
+								calls = before
+								t.Log("awaiting input preparation before counted launch probes")
+								return false
+							}
+							return true
+						})
 						var r Result
 						if attempt == 1 {
 							if p != nil {
