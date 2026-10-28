@@ -140,7 +140,7 @@ a service restart when policy/tools change. macOS's launcher-availability report
 does not prove every profile will load; a rejected profile fails the attempt.
 A missing capability report from an older worker is not evidence of online support.
 
-Native payloads default offline; worker-owned environment/input preparation
+Sandboxed native payloads default offline; worker-owned environment/input preparation
 remains network-capable. An online job is eligible only on `native_network`
 hosts. If none qualifies, submission returns HTTP 409 `no_qualified_target`
 with a protected-outbound capability reason, rather than creating an impossible
@@ -422,3 +422,7 @@ headroom regression proves admission/status agreement for the existing RAM
 signal, not complete OS-pressure coverage. Native pressure qualification remains
 separate; see [the native checklist](production-test-plan.md#pressure-and-status-agreement).
 Status is diagnostic and never permission to launch work locally; submit it.
+
+Plain native jobs without an isolation declaration remain unsandboxed in v1.
+Their `isolation` status explains the compatibility default and the one-line
+`isolation: sandboxed` opt-in. New extension registrations default sandboxed.

@@ -9,6 +9,8 @@ import (
 	"strings"
 )
 
+const plainNativeIsolationReason = "plain native job defaults to unsandboxed in v1; set isolation: sandboxed to opt in"
+
 const legacyIsolationReason = "legacy extension registration; author a new version with isolation: sandboxed to opt in"
 
 // ValidateNativeIsolation is shared by authoring and submission boundaries.
@@ -53,6 +55,8 @@ func nativeUnsandboxedReasons(j *Job) []string {
 		}
 	} else if j.Spec.Isolation == "unsandboxed" {
 		reasons = append(reasons, j.Spec.Reason)
+	} else if j.Spec.Isolation == "" {
+		reasons = append(reasons, plainNativeIsolationReason)
 	}
 	slices.Sort(reasons)
 	return slices.Compact(reasons)

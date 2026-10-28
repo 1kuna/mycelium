@@ -220,6 +220,23 @@ func TestDeclaredNativeIsolation(t *testing.T) {
 		isolationObserve(t, q, client, j.ID, "queued", reason)
 		isolationRun(t, q, client, w, &j, false, reason)
 	})
+	t.Run("plain-native-default", func(t *testing.T) {
+		q, _ := fixture(t)
+		client := isolationClient(t, q)
+		w := isolationWorker(t, client, nil)
+		s := spec("experiment")
+		s.Resumable = false
+		s.Run.Command = []string{"sh", "-ec", isolationHostProof + `echo passed > "$TMPDIR/passed"; while ! test -f "$TMPDIR/finish"; do sleep .01; done`}
+		s.Run.Env = map[string]string{"ISOLATION_HOST": filepath.Join(w.StateDir, "control", "authority"), "MYCE_TOKEN": "authored-secret", "TMPDIR": "/ignored"}
+		check(t, q, w.Machine, nil)
+		var j Job
+		if err := client.Call(context.Background(), "POST", "/api/jobs", s, &j); err != nil {
+			t.Fatal(err)
+		}
+		isolationObserve(t, q, client, j.ID, "queued", plainNativeIsolationReason)
+		isolationRun(t, q, client, w, &j, false, plainNativeIsolationReason)
+	})
+
 	t.Run("extension-main-and-sidecar", func(t *testing.T) {
 		q, _ := fixture(t)
 		client := isolationClient(t, q)

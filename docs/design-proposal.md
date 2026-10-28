@@ -575,8 +575,7 @@ and [operations](operations.md#docker-cleanup-custody).
 
 The #177 minimum is a v1 requirement under [#248's clarification](https://github.com/1kuna/mycelium/issues/248#issuecomment-6447873336):
 managed job directory and temp, no ambient credentials, and no worker control
-access for sandboxed payloads. New native entries and extension registrations
-default to a **kernel-enforced boundary**; `0700` alone
+access for sandboxed payloads. New extension registrations default to a **kernel-enforced boundary**; `0700` alone
 cannot separate processes sharing a UID. This amendment covers native batch
 payloads and their sidecars, including queued extension run/check payloads. It
 does not establish isolation for local setup/qualification hooks, arbitrary
@@ -587,7 +586,7 @@ contract, not a completed rollout.
 **Declared stage exception and legacy registration policy (batch/s047).** An
 extension's top level or an adapter entry may declare `isolation: unsandboxed`
 and a required nonempty `reason`. Invalid modes and blank reasons are rejected.
-`isolation: sandboxed` explicitly selects the default. The choice applies to
+`isolation: sandboxed` explicitly selects the kernel boundary. The choice applies to
 main, queued qualification/check payloads and every sidecar of that stage;
 there is no global switch or per-sidecar escape. Extension jobs cannot override
 the frozen registration's policy at submission.
@@ -600,6 +599,14 @@ preserves the original marker. Opt in a legacy registration by authoring a new
 version/digest with `isolation: sandboxed`; existing queued/frozen jobs retain
 their original policy across restart. No date, source revision or content
 identity rewrite determines this choice.
+
+**Plain native compatibility policy (s047 inventory gate).** Plain `run.command`
+jobs with no frozen extension registration remain unsandboxed by default in v1.
+Live consumer commands prepare dependencies and write shared home caches that
+break under the new boundary. Opt in with `isolation: sandboxed`; then the
+sandbox and offline default apply, including network capability admission.
+Status/job GET expose `unsandboxed: plain native job defaults to unsandboxed in v1; set isolation: sandboxed to opt in`, and workers warn once per attempt.
+This does not change new extension defaults or frozen registration policy.
 
 An unsandboxed stage omits kernel sandbox setup and its kernel-capability
 admission requirement, including protected native-network capability. It has

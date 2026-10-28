@@ -12,6 +12,7 @@ func TestNativeNetworkPlacement(t *testing.T) {
 	offline.Capabilities = []string{"native_isolation_landlock", "native_sidecars", "native_network_partial"}
 	check(t, q, offline, nil)
 	s := spec("experiment")
+	s.Isolation = "sandboxed"
 	s.Needs.Network = true
 	_, err := q.Submit(s)
 	var api *HTTPError
@@ -65,14 +66,16 @@ func TestNativeNetworkExtensionDeclaration(t *testing.T) {
 	}
 }
 
-// A mixed-version fleet must never dispatch an ordinary native job to a worker
+// A mixed-version fleet must never dispatch an explicitly sandboxed native job to a worker
 // whose report predates isolation, even though it can execute plain commands.
 func TestNativeIsolationMixedWorkerPlacement(t *testing.T) {
 	q, _ := fixture(t)
 	old := machine("old", "fake")
 	old.Capabilities = nil
 	check(t, q, old, nil)
-	j := submit(t, q, spec("experiment"))
+	s := spec("experiment")
+	s.Isolation = "sandboxed"
+	j := submit(t, q, s)
 	for _, caps := range [][]string{nil, {"native_isolation_unavailable"}, {"native_network"}} {
 		old.Capabilities = caps
 		if r := check(t, q, old, nil); r.Job != nil {
