@@ -12,7 +12,7 @@ func TestSharedInputsRequireWorkerCapability(t *testing.T) {
 		t.Fatal("old worker assigned shared inputs")
 	}
 	upgraded := old
-	upgraded.Capabilities = []string{"shared_inputs_v1"}
+	upgraded.Capabilities = append([]string{"shared_inputs_v1"}, old.Capabilities...)
 	r := check(t, q, upgraded, nil)
 	if r.Job == nil {
 		t.Fatal("capable worker was not assigned input")
