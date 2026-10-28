@@ -653,12 +653,15 @@ Use the exact local execution identity from the attempt custody record, not the 
 ID. The command exclusively locks the offline spool and requires a matching saved
 finished result. It independently checks every recorded process group, PID,
 native sidecar and cgroup, then checks open handles under the exact
-`job-files/JOB/ATTEMPT` scratch folder using `lsof` (included on macOS; install it
-separately on Linux). A live or reused PID, unknown identity, missing custody,
+`job-files/JOB/ATTEMPT` scratch folder using a descriptor inventory, including
+unlinked files, from `lsof` (included on macOS; install it separately on Linux).
+A live or reused PID, unknown identity, missing custody,
 failed inspection, open handle or unavailable inspector retains custody. It never
 signals processes or accepts an operator assertion. The default 30-second
 inspection budget bounds a stuck inspector; expiry retains custody. Increase
-`--timeout` for a large scratch folder after inspecting the failure.
+`--timeout` for a busy account after inspecting the failure. An incomplete
+inventory, including warnings about unavailable mounts, must be repaired before
+retrying; it cannot serve as proof of release.
 
 Success only clears the exact result's pending release locally, preserving its
 failure outcome, scratch, process evidence and other attempts. It does not contact

@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -80,7 +81,7 @@ func reconcileNativeAttempt(ctx context.Context, dir, identity string, members f
 		return errors.New("invalid native attempt custody")
 	}
 	// recoverResult fences both copies by job, attempt, worker and session.
-	if s.state.Result == nil || s.state.Result.Machine == "" {
+	if s.state.Result == nil || s.state.Result.Machine == "" || s.state.Result.Machine != j.Machine {
 		return errors.New("native reconciliation requires a saved finished result")
 	}
 	if err := s.recoverResult(s.state.Result.Machine); err != nil {
@@ -94,12 +95,26 @@ func reconcileNativeAttempt(ctx context.Context, dir, identity string, members f
 	if err := json.Unmarshal(data, &custody); err != nil {
 		return err
 	}
-	if custody.Identity != identity || len(custody.Groups) == 0 || s.state.PID != 0 && s.state.PID != custody.PID {
+	if custody.Identity != identity || s.state.PID != 0 && s.state.PID != custody.PID {
 		return errors.New("native process custody unavailable or mismatched")
 	}
+	if custody.Cgroup == "" {
+		custody.Cgroup = s.state.Cgroup // Ordinary PID-only receipts keep it in state.
+	} else if s.state.Cgroup != "" && s.state.Cgroup != custody.Cgroup {
+		return errors.New("mismatched native cgroup custody")
+	}
+	groups := custody.Groups
+	if len(groups) == 0 {
+		// Ordinary commands persist only the supervisor PID. Absence of both
+		// that PID and its process group is proof; no birth assertion is needed.
+		if custody.PID <= 0 {
+			return errors.New("native process custody unavailable")
+		}
+		groups = map[int]map[int]string{custody.PID: nil}
+	}
 	pids := map[int]bool{}
-	for group, recorded := range custody.Groups {
-		if group <= 0 || len(recorded) == 0 {
+	for group, recorded := range groups {
+		if group <= 0 || len(recorded) == 0 && group != custody.PID {
 			return errors.New("invalid native process group custody")
 		}
 		live, err := members(group)
@@ -185,22 +200,42 @@ func reconcileNativeAttempt(ctx context.Context, dir, identity string, members f
 }
 
 func nativeScratchEmpty(ctx context.Context, dir string) error {
-	if _, err := os.Stat(dir); errors.Is(err, os.ErrNotExist) {
-		return nil
-	} else if err != nil {
-		return err
+	// Resolve existing ancestors even when the scratch directory was unlinked.
+	// OS descriptor paths use canonical names (e.g. /private/var on macOS).
+	for ancestor := dir; ; ancestor = filepath.Dir(ancestor) {
+		resolved, err := filepath.EvalSymlinks(ancestor)
+		if err == nil {
+			rel, err := filepath.Rel(ancestor, dir)
+			if err != nil {
+				return err
+			}
+			dir = filepath.Join(resolved, rel)
+			break
+		}
+		if !errors.Is(err, os.ErrNotExist) || ancestor == filepath.Dir(ancestor) {
+			return err
+		}
 	}
 	// lsof is the OS handle inspector (included on macOS). Missing tools,
 	// warnings, incomplete inspection or deadline expiry all retain custody.
-	cmd := exec.CommandContext(ctx, "lsof", "-nP", "-t", "+D", dir)
+	// Inventory descriptors, rather than walking +D: unlinked open files no
+	// longer appear in a directory walk but still belong to a live process.
+	cmd := exec.CommandContext(ctx, "lsof", "-nP", "-u", strconv.Itoa(os.Geteuid()), "-Fpn")
 	cmd.WaitDelay = 100 * time.Millisecond
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
-	var exit *exec.ExitError
-	empty := err == nil || errors.As(err, &exit) && exit.ExitCode() == 1
-	if !empty || stdout.Len() != 0 || stderr.Len() != 0 || ctx.Err() != nil {
+	if err != nil || stdout.Len() == 0 || stderr.Len() != 0 || ctx.Err() != nil {
 		return errors.New("native scratch handles remain open or inspection failed; custody retained")
+	}
+	for _, line := range strings.Split(stdout.String(), "\n") {
+		if !strings.HasPrefix(line, "n") {
+			continue
+		}
+		name := strings.TrimSuffix(line[1:], " (deleted)")
+		if name == dir || strings.HasPrefix(name, dir+string(os.PathSeparator)) {
+			return errors.New("native scratch handles remain open; custody retained")
+		}
 	}
 	return nil
 }

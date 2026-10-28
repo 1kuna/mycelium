@@ -17,6 +17,13 @@ import (
 
 func nativeReconcileFixture(t *testing.T, j Job) (*workerStore, Result) {
 	t.Helper()
+	// External inspector fixture: host mounts must not decide fake-clock queue
+	// recovery tests. OS descriptor behavior is checked separately below.
+	bin := t.TempDir()
+	if err := os.WriteFile(filepath.Join(bin, "lsof"), []byte("#!/bin/sh\nprintf 'p1\\nn/dev/null\\n'\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
 	dir := t.TempDir()
 	if err := PrepareStateRoots(dir); err != nil {
 		t.Fatal(err)
@@ -31,7 +38,7 @@ func nativeReconcileFixture(t *testing.T, j Job) (*workerStore, Result) {
 	}
 	for name, value := range map[string]any{
 		"state.json":                workerState{Session: j.Session, Attempts: []string{s.stateName}},
-		"attempt-exact-native.json": workerState{Identity: s.state.Identity, PID: s.state.PID, Groups: map[int]map[int]string{s.state.PID: {s.state.PID: "recorded-kernel-birth"}}},
+		"attempt-exact-native.json": workerState{Identity: s.state.Identity, PID: s.state.PID},
 		"exact-native.result.json":  r,
 	} {
 		if err := saveWorkerJSON(dir, name, value); err != nil {
@@ -80,6 +87,13 @@ func TestReconcileNativeAttemptSettlesUpgrade(t *testing.T) {
 		t.Fatal("inspection failure released custody", err)
 	}
 	rootBefore, _ := os.ReadFile(filepath.Join(s.dir, "state.json"))
+	other := s.state
+	other.Identity = "unrelated"
+	other.PID = os.Getpid()
+	if err := saveWorkerJSON(s.dir, "state-attempt-other.json", other); err != nil {
+		t.Fatal(err)
+	}
+	otherBefore, _ := os.ReadFile(filepath.Join(s.dir, "state-attempt-other.json"))
 	if err := ReconcileNativeAttempt(context.Background(), s.dir, s.state.Identity); err != nil {
 		t.Fatal(err)
 	}
@@ -95,8 +109,9 @@ func TestReconcileNativeAttemptSettlesUpgrade(t *testing.T) {
 		t.Fatal("recovery receipt retained stale pending release", receipt, err)
 	}
 	rootAfter, _ := os.ReadFile(filepath.Join(s.dir, "state.json"))
-	if string(rootBefore) != string(rootAfter) {
-		t.Fatal("reconciliation rewrote machine index")
+	otherAfter, _ := os.ReadFile(filepath.Join(s.dir, "state-attempt-other.json"))
+	if string(rootBefore) != string(rootAfter) || string(otherBefore) != string(otherAfter) {
+		t.Fatal("reconciliation rewrote machine index or unrelated attempt")
 	}
 	// Local reconciliation alone cannot release queue custody. The unchanged
 	// installed worker replays the exact saved result on reconnect.
@@ -116,6 +131,22 @@ func TestReconcileNativeAttemptSettlesUpgrade(t *testing.T) {
 	}
 	if got := job(t, q, j.ID); got.State != "failed" || !got.ReleaseConfirmed || got.Attempt != j.Attempt {
 		t.Fatal("reconciliation changed failure or reran the attempt", got)
+	}
+}
+
+func TestReconcileNativeAttemptDeadGroupAndSidecars(t *testing.T) {
+	s, _ := nativeReconcileFixture(t, Job{ID: "job", Attempt: 1, Session: "session", Machine: "hypha"})
+	if err := saveWorkerJSON(s.dir, "attempt-exact-native.json", workerState{Identity: s.state.Identity, PID: s.state.PID, Groups: map[int]map[int]string{s.state.PID: {s.state.PID: "supervisor-birth", s.state.PID - 1: "sidecar-birth"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := saveWorkerJSON(s.dir, "native-exact-native.json", struct {
+		Identity string
+		Members  []nativeMember
+	}{s.state.Identity, []nativeMember{{Name: "main", PID: s.state.PID}, {Name: "helper", PID: s.state.PID - 1}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReconcileNativeAttempt(context.Background(), s.dir, s.state.Identity); err != nil || readNativeReconciled(t, s).Result.ReleasePending {
+		t.Fatal("verified-dead native group and sidecars did not settle", err)
 	}
 }
 
@@ -177,7 +208,36 @@ func TestReconcileNativeAttemptRequiresOfflineExactResultAndClosedScratch(t *tes
 	}
 }
 
+func TestReconcileNativeAttemptPIDOnlyRetainsPopulatedCgroup(t *testing.T) {
+	s, _ := nativeReconcileFixture(t, Job{ID: "job", Attempt: 1, Session: "session", Machine: "hypha"})
+	s.state.Cgroup = filepath.Join(t.TempDir(), "attempt-"+s.state.Identity)
+	if err := os.Mkdir(s.state.Cgroup, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.save(); err != nil {
+		t.Fatal(err)
+	}
+	events := filepath.Join(s.state.Cgroup, "cgroup.events")
+	if err := os.WriteFile(events, []byte("populated 1\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReconcileNativeAttempt(context.Background(), s.dir, s.state.Identity); err == nil || !readNativeReconciled(t, s).Result.ReleasePending {
+		t.Fatal("PID-only custody ignored populated saved cgroup", err)
+	}
+	if err := os.WriteFile(events, []byte("populated 0\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ReconcileNativeAttempt(context.Background(), s.dir, s.state.Identity); err != nil {
+		t.Fatal("empty saved cgroup did not settle PID-only custody", err)
+	}
+}
+
 func TestNativeScratchEmptyInspectsOpenHandles(t *testing.T) {
+	// Incomplete inventories (including unavailable host mounts) must refuse.
+	// Such hosts cannot supply positive OS proof for this integration check.
+	if err := nativeScratchEmpty(context.Background(), t.TempDir()); err != nil {
+		t.Skip("complete OS descriptor inventory unavailable: ", err)
+	}
 	dir := t.TempDir()
 	f, err := os.Create(filepath.Join(dir, "output"))
 	if err != nil {
@@ -187,10 +247,49 @@ func TestNativeScratchEmptyInspectsOpenHandles(t *testing.T) {
 	if err := nativeScratchEmpty(context.Background(), dir); err == nil {
 		t.Fatal("OS inspector missed open scratch handle")
 	}
+	if err := os.Remove(f.Name()); err != nil {
+		t.Fatal(err)
+	}
+	if err := nativeScratchEmpty(context.Background(), dir); err == nil {
+		t.Fatal("OS inspector missed unlinked open scratch handle")
+	}
+	if err := os.Remove(dir); err != nil {
+		t.Fatal(err)
+	}
+	if err := nativeScratchEmpty(context.Background(), dir); err == nil {
+		t.Fatal("OS inspector missed handle under unlinked scratch directory")
+	}
 	if err := f.Close(); err != nil {
 		t.Fatal(err)
 	}
 	if err := nativeScratchEmpty(context.Background(), dir); err != nil {
 		t.Fatal("closed scratch did not settle", err)
+	}
+}
+
+func TestNativeScratchEmptyRetainsUnlinkedHandlesAndInspectionFailures(t *testing.T) {
+	dir, bin := t.TempDir(), t.TempDir()
+	canonical, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inspector := filepath.Join(bin, "lsof")
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("MYCE_TEST_SCRATCH_HANDLE", canonical+"/unlinked-output (deleted)")
+	if err := os.WriteFile(inspector, []byte("#!/bin/sh\nprintf 'p123\\nn%s\\n' \"$MYCE_TEST_SCRATCH_HANDLE\"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := nativeScratchEmpty(context.Background(), dir); err == nil {
+		t.Fatal("unlinked descriptor inventory discharged scratch custody")
+	}
+	t.Setenv("MYCE_TEST_SCRATCH_HANDLE", "/dev/null")
+	if err := nativeScratchEmpty(context.Background(), dir); err != nil {
+		t.Fatal("complete empty scratch inventory failed", err)
+	}
+	if err := os.WriteFile(inspector, []byte("#!/bin/sh\nprintf 'p123\\nn/dev/null\\n'\nprintf 'incomplete inventory' >&2\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := nativeScratchEmpty(context.Background(), dir); err == nil {
+		t.Fatal("inspection warning discharged scratch custody")
 	}
 }
