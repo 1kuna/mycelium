@@ -11,6 +11,18 @@ not drive start authorization, cancellation or result publication.
 Administrative tools use uncached `GET /api/inspection` for migration custody,
 local extension targeting and measurement safety checks.
 
+Job receipts (`Client.get()` / `GET /api/jobs/{id}`) include `inputs_staged_at`
+when a worker reports completion of the current attempt's input staging. This
+worker-clock timestamp is captured after shared-input acquisition and private
+input copies finish, before launch-time RAM checks, checkpoint preparation and
+the Started handoff. It is diagnostic only and never changes admission or start
+deadlines. It survives worker/queue recovery, resets on a new attempt, and is
+absent for older workers or jobs with no staging operation. An absent value is
+unknown, not proof that copying is still running. Compare with `assigned_at`
+and `started_at`, allowing for clock differences between worker and queue.
+Upgrade the queue before workers that report this field; older queues reject
+unknown request fields.
+
 `myce status` and `GET /api/status` report `queue_release` (`version`, `commit`)
 from the queue process. Each machine's `release` reports the worker process's
 version and commit from its check-in. Missing worker releases mean unknown

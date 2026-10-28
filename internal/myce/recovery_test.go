@@ -132,52 +132,77 @@ func TestWorkerFreshRestartRetriesCleanedSession(t *testing.T) {
 }
 
 func TestLateReturnCheckpointWinner(t *testing.T) {
-	for _, olderWins := range []bool{false, true} {
-		t.Run(stringBool(olderWins), func(t *testing.T) {
-			q, c := fixture(t)
-			submit(t, q, spec("experiment"))
-			m := machine("a", "fake")
-			old := check(t, q, m, nil).Job
-			c.Advance(LossAfter)
-			check(t, q, observer(), nil)
-			n := machine("b", "fake")
-			next := check(t, q, n, nil).Job
-			if next == nil {
-				t.Fatal("lost job not reassigned")
-			}
-			dir := filepath.Join(q.root, next.Checkpoint, "attempt-2")
-			if err := os.MkdirAll(dir, 0700); err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(dir, "checkpoint.json"), []byte(`{"myce_checkpoint":{"generation":20},"value":20}`), 0600); err != nil {
-				t.Fatal(err)
-			}
-			_, err := q.Checkin(Checkin{Machine: n, Running: &Execution{ID: next.ID, Attempt: next.Attempt, Progress: 20}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			progress := int64(10)
-			if olderWins {
-				progress = 30
-			}
-			reply, err := q.Checkin(Checkin{Machine: m, Running: &Execution{ID: old.ID, Attempt: old.Attempt, Progress: progress}})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if reply.Kill == olderWins {
-				t.Fatalf("wrong winner: %+v", reply)
-			}
-			if olderWins {
-				loser := check(t, q, n, next)
-				if !loser.Kill {
-					t.Fatal("newer attempt loser continues")
+	for _, keyed := range []bool{false, true} {
+		for _, olderWins := range []bool{false, true} {
+			t.Run("keyed="+stringBool(keyed)+"/olderWins="+stringBool(olderWins), func(t *testing.T) {
+				q, c := fixture(t)
+				submit(t, q, spec("experiment"))
+				m := machine("a", "fake")
+				old := check(t, q, m, nil).Job
+				c.Advance(LossAfter)
+				check(t, q, observer(), nil)
+				n := machine("b", "fake")
+				next := check(t, q, n, nil).Job
+				if next == nil {
+					t.Fatal("lost job not reassigned")
 				}
-				finish(t, q, old, true)
-			} else {
-				finish(t, q, next, true)
-			}
-			requireState(t, q, old.ID, "succeeded")
-		})
+				dir := filepath.Join(q.root, next.Checkpoint, "attempt-2")
+				if err := os.MkdirAll(dir, 0700); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "checkpoint.json"), []byte(`{"myce_checkpoint":{"generation":20},"value":20}`), 0600); err != nil {
+					t.Fatal(err)
+				}
+				nextStaged := c.Now()
+				oldStaged := nextStaged.Add(-time.Minute)
+				_, err := q.Checkin(Checkin{Machine: n, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{{Execution: Execution{ID: next.ID, Attempt: next.Attempt, Progress: 20}, Session: next.Session, InputsStagedAt: &nextStaged}}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				progress := int64(10)
+				if olderWins {
+					progress = 30
+				}
+				report := Checkin{Machine: m, Running: &Execution{ID: old.ID, Attempt: old.Attempt, Progress: progress}}
+				if keyed {
+					report.AttemptProtocol = keyedAttemptProtocol
+					report.Attempts = []AttemptReport{{Execution: *report.Running, Session: old.Session, InputsStagedAt: &oldStaged}}
+					report.Running = nil
+				}
+				reply, err := q.Checkin(report)
+				if err != nil {
+					t.Fatal(err)
+				}
+				kill := reply.Kill
+				if keyed {
+					kill = reply.Attempts[0].Kill
+				}
+				if kill == olderWins {
+					t.Fatalf("wrong winner: %+v", reply)
+				}
+				wantStaged := &nextStaged
+				if olderWins {
+					wantStaged = nil // Legacy reports cannot supply staging evidence.
+					if keyed {
+						wantStaged = &oldStaged
+					}
+				}
+				gotStaged := job(t, q, old.ID).InputsStagedAt
+				if (gotStaged == nil) != (wantStaged == nil) || gotStaged != nil && !gotStaged.Equal(*wantStaged) {
+					t.Fatalf("winner staging time = %v, want %v", gotStaged, wantStaged)
+				}
+				if olderWins {
+					loser := check(t, q, n, next)
+					if !loser.Kill {
+						t.Fatal("newer attempt loser continues")
+					}
+					finish(t, q, old, true)
+				} else {
+					finish(t, q, next, true)
+				}
+				requireState(t, q, old.ID, "succeeded")
+			})
+		}
 	}
 }
 

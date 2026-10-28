@@ -181,6 +181,12 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			}
 		}
 		report := AttemptReport{Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}, Session: a.job.Session, Started: p != nil && (p.docker == nil || p.docker.status() == "running") && (p.native == nil || p.native.started())}
+		if s.state.Job != nil {
+			report.InputsStagedAt = s.state.Job.InputsStagedAt
+			if s.state.Result != nil {
+				s.state.Result.InputsStagedAt = s.state.Job.InputsStagedAt
+			}
+		}
 		diagnostics := Machine{CheckpointUnavailable: s.checkpointUnavailable, FileTransferError: s.fileError}
 		if p != nil && p.docker != nil {
 			status := p.docker.status()

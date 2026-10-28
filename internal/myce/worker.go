@@ -307,6 +307,11 @@ var errWorkerCheckpoint = errors.New("checkpoint storage unavailable")
 
 var errWorkerReleasePending = errors.New("command release unconfirmed")
 
+type stagedInputs struct {
+	directory string
+	at        time.Time
+}
+
 func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	return w.startContext(context.Background(), s, j)
 }
@@ -352,9 +357,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	executionWorkdir := j.Spec.Run.Workdir
 	if j.Spec.extensionJob() || len(jobInputFiles(&j))+len(jobInputPaths(&j))+len(j.Spec.SharedInputs) > 0 {
 		value := j
-		dir, err := s.extensionFiles.run(attemptCheckpoint(j), func() (string, error) {
+		staged, err := s.extensionFiles.run(attemptCheckpoint(j), func() (stagedInputs, error) {
 			err := w.prepareExtensionFiles(&value, s.dir)
-			return value.Spec.Run.Workdir, err
+			return stagedInputs{directory: value.Spec.Run.Workdir, at: w.Clock.Now()}, err
 		})
 		if err != nil {
 			if strings.HasPrefix(err.Error(), "NAS unreachable:") {
@@ -362,7 +367,15 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 			}
 			return nil, err
 		}
-		j.Spec.Run.Workdir = dir
+		j.Spec.Run.Workdir = staged.directory
+		// Timestamp the actual asynchronous completion, not the retry that
+		// consumes it. Preserve the first completion across later start retries.
+		if saved := s.state.Job; saved != nil && saved.ID == j.ID && saved.Attempt == j.Attempt && saved.Session == j.Session {
+			retainInputsStagedAt(saved, &staged.at)
+			j.InputsStagedAt = saved.InputsStagedAt
+		} else {
+			retainInputsStagedAt(&j, &staged.at)
+		}
 	}
 
 	executionWork := j.Spec.Run.Workdir
@@ -732,7 +745,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 			p.outcome.Infrastructure = recorded.facts.Infrastructure
 		}
 	}
-	result := Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
+	result := Result{InputsStagedAt: j.InputsStagedAt, Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
 	environmentStarted = true
 	extensionStarted = true
 	sharedStarted = true
