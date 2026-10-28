@@ -81,6 +81,8 @@ func TestBatchLogsNoneLifecycle(t *testing.T) {
 			want := "succeeded"
 			switch mode {
 			case "failure":
+				// The diagnostic below exercises an explicitly offline sandbox.
+				s.Isolation = "sandboxed"
 				script += "exit 7"
 				want = "failed"
 			case "cancel":
