@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 )
 
@@ -144,14 +145,14 @@ func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
 			return err
 		}
 	}
-	for name, source := range jobInputPaths(j) {
+	if err := stageJobInputs(jobInputPaths(j), func(name, source string) error {
 		p, err := confinedPath(w.JobFileRoot, source)
 		if err != nil {
 			return err
 		}
-		if err := copyJobFile(p, filepath.Join(staged, name)); err != nil {
-			return err
-		}
+		return copyJobFile(p, filepath.Join(staged, name))
+	}); err != nil {
+		return err
 	}
 	if j.Batch != nil && j.Batch.Run {
 		data, err := json.Marshal(batchManifest(j))
@@ -180,6 +181,37 @@ func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
 	j.Spec.Run.Workdir = dir
 	return nil
 }
+
+func stageJobInputs(inputs map[string]string, stage func(name, source string) error) error {
+	// Two copies overlap the independent NAS reads seen in dependent jobs,
+	// while bounding added load on shared storage. Join every active copy
+	// before the caller can publish the snapshot or clean failed scratch.
+	slots := make(chan struct{}, 2)
+	var pending sync.WaitGroup
+	var mu sync.Mutex
+	var result error
+	for name, source := range inputs {
+		slots <- struct{}{}
+		mu.Lock()
+		failed := result != nil
+		mu.Unlock()
+		if failed {
+			<-slots
+			break
+		}
+		pending.Go(func() {
+			defer func() { <-slots }()
+			if err := stage(name, source); err != nil {
+				mu.Lock()
+				result = errors.Join(result, err)
+				mu.Unlock()
+			}
+		})
+	}
+	pending.Wait()
+	return result
+}
+
 func outputRelative(j Job, name, prefix string) string {
 	return filepath.Join(prefix, j.ID, strconv.Itoa(j.Attempt), name)
 }
