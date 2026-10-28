@@ -267,7 +267,7 @@ from `served_name`, so unchanged OpenAI bodies can name the catalog entry.
 Hugging Face and transformers offline mode is enforced; missing weights fail.
 Trusted custom commands must respect the no-download contract too.
 
-See the [placeholder server catalog](../examples/):
+See the [placeholder server catalog](../examples/sim-judge-vllm.example.yaml):
 two generic servers for a roughly 35B chat model and an OCR model, both vLLM
 0.27.1. Use exact approved argv, not the vLLM preset. CPU FastEmbed stays outside
 the GPU queue. This is not deployable or Spark qualification. Read official model and
@@ -415,7 +415,7 @@ the body. Valid requests retain upload spooling; these
 changes do not resolve the separate body-storage privacy hold.
 
 
-The [placeholder server catalog](examples/) needs reviewed argv, environment recipes, measured memory and local approval output. Native runtime and application telemetry require separate qualification.
+The [placeholder server catalog](examples/sim-server-entries.yaml) needs reviewed argv, environment recipes, measured memory and local approval output. Native runtime and application telemetry require separate qualification.
 
 ### GPU selection limits and host holder checks
 

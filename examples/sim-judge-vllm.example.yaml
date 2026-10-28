@@ -1,4 +1,4 @@
-# Placeholder only: supply exact approved Atlas vLLM 0.27.1 argv and manifests.
+# Placeholder only: supply exact approved Sim vLLM 0.27.1 argv and manifests.
 # Use generic servers to preserve the inference contract; not the vLLM preset.
 idle_timeout: 10m
 max_wait: 15m
@@ -40,4 +40,4 @@ models:
     health_url: 'http://127.0.0.1:{port}/health'
 # Launchers must exec exact approved foreground argv and bind loopback.
 # Choose request limits and joint memory from approved local measurements.
-# Atlas embeddings use CPU FastEmbed and stay outside this GPU queue.
+# Sim embeddings use CPU FastEmbed and stay outside this GPU queue.
