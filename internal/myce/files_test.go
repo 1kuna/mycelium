@@ -361,6 +361,24 @@ if not stopping: pathlib.Path('output').write_text(str(n))
 	}
 	cancelA, doneA, rootA := start("a")
 	defer cancelA()
+	defer func() {
+		if !t.Failed() {
+			return
+		}
+		snap, err := q.Snapshot()
+		t.Logf("resume failure snapshot: %v", err)
+		for _, pending := range snap.Jobs {
+			t.Logf("resume failure job: %+v", *pending)
+		}
+		logs, err := q.Logs(j.ID, 0)
+		t.Logf("resume failure payload logs: %+v error=%v", logs, err)
+		select {
+		case err := <-doneA:
+			t.Logf("resume worker A returned: %v", err)
+		default:
+			t.Log("resume worker A has no unread return")
+		}
+	}()
 	await(t, func() bool { snap, _ := q.Snapshot(); return len(snap.Jobs[0].FileCheckpoints) > 0 })
 	cancelB, doneB, rootB := start("b")
 	defer cancelB()
