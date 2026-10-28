@@ -1264,10 +1264,26 @@ func TestDockerHealthyHelperStartupBudget(t *testing.T) {
 					var archive dockerEventArchive
 					return err == nil && json.Unmarshal(data, &archive) == nil && archive.EndedAt != nil
 				})
-				if _, err := os.Stat(filepath.Join(root, "calls")); !os.IsNotExist(err) {
-					calls, _ := os.ReadFile(filepath.Join(root, "calls"))
-					t.Fatalf("helper entered command before startup timeout: %s", calls)
+				calls, err := os.ReadFile(filepath.Join(root, "calls"))
+				if err != nil {
+					t.Fatal(err)
 				}
+				eventsObserved := false
+				for _, call := range strings.Split(strings.TrimSpace(string(calls)), "\n") {
+					// The subscription has a lifetime context, not the short
+					// create/control deadline. Its invocation is valid here.
+					if strings.HasPrefix(call, "events ") {
+						eventsObserved = true
+						continue
+					}
+					if call != "" {
+						t.Fatalf("helper entered command before startup timeout: %s", call)
+					}
+				}
+				if !eventsObserved {
+					t.Fatal("independent event subscription was not observed")
+				}
+				t.Log("independent events observed; no control invocation escaped startup timeout")
 				return
 			}
 			await(t, func() bool { _, err := os.Stat(filepath.Join(root, "running")); return err == nil })
