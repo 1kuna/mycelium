@@ -375,3 +375,37 @@ func TestLegacyExtensionIsolationPersistence(t *testing.T) {
 	isolationObserve(t, q, client, frozen.ID, "succeeded", legacyIsolationReason)
 	isolationObserve(t, q, client, later.ID, "succeeded", legacyIsolationReason)
 }
+
+// Public receipts may pass through capture, final redaction and CLI formatting.
+// Each pass must preserve the actual policy without leaking execution fields.
+func TestNativeIsolationObservationPreservesPolicy(t *testing.T) {
+	for _, tc := range []struct {
+		name, mode, reason, want string
+		docker                   bool
+	}{
+		{name: "plain-default", want: "unsandboxed: " + plainNativeIsolationReason},
+		{name: "sandboxed", mode: "sandboxed"},
+		{name: "authored-exception", mode: "unsandboxed", reason: "requires host IPC", want: "unsandboxed: requires host IPC"},
+		{name: "docker", docker: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			j := Job{State: "succeeded", Spec: Spec{Isolation: tc.mode, Reason: tc.reason, Run: RunSpec{Command: []string{"true"}, Docker: tc.docker}}}
+			for pass := 0; pass < 3; pass++ {
+				j = statusJobValue(&j)
+				data, err := json.Marshal(j)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := json.Unmarshal(data, &j); err != nil {
+					t.Fatal(err)
+				}
+				if j.Isolation != tc.want || JobReason(&j) != tc.want {
+					t.Fatalf("pass %d: isolation=%q reason=%q want=%q", pass, j.Isolation, JobReason(&j), tc.want)
+				}
+				if len(j.Spec.Run.Command) != 0 || j.Spec.Isolation != "" || j.Spec.Reason != "" {
+					t.Fatal("public observation retained execution policy payload")
+				}
+			}
+		})
+	}
+}

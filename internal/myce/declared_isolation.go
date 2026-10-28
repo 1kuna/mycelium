@@ -65,6 +65,12 @@ func nativeUnsandboxedReasons(j *Job) []string {
 func nativeUnsandboxed(j *Job) bool { return len(nativeUnsandboxedReasons(j)) > 0 }
 
 func jobNativeIsolationStatus(j *Job) string {
+	// Observation projection removes the executable and frozen registrations.
+	// Its retained diagnostic is authoritative even when empty (sandboxed or
+	// Docker); absence of a redacted declaration is not a plain-native default.
+	if len(j.Spec.Run.Command) == 0 && j.Spec.Execution == nil && len(j.Extensions) == 0 {
+		return j.Isolation
+	}
 	if reasons := nativeUnsandboxedReasons(j); len(reasons) > 0 {
 		return "unsandboxed: " + strings.Join(reasons, "; ")
 	}
