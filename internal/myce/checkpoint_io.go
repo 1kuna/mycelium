@@ -12,6 +12,8 @@ import (
 // a new probe progresses within the network budget. Validation bounds each syscall.
 const (
 	heartbeatFilesystemBudget      = 750 * time.Millisecond
+	// Ten seconds bounds a stalled operation above the observed 6.074-second
+	// maximum; qualification under supported share load remains outstanding.
 	networkFilesystemBudget        = 10 * time.Second
 	checkpointPreparationBudget    = networkFilesystemBudget
 	onboardingMountInventoryBudget = 5 * time.Second       // standalone selection, including dry runs
