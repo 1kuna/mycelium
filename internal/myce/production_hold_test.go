@@ -842,6 +842,12 @@ func TestProductionHoldForceStopsBlockedSaveAndResumesDurableGeneration(t *testi
 	defer productionStore.close()
 	productionStore.state.Session = run.Session
 	productionProcess, err := productionWorker.start(productionStore, *run)
+	if errors.Is(err, errWorkerCheckpoint) && strings.Contains(err.Error(), "input copy pending") {
+		await(t, func() bool {
+			productionProcess, err = productionWorker.start(productionStore, *run)
+			return !errors.Is(err, errWorkerCheckpoint) || !strings.Contains(err.Error(), "input copy pending")
+		})
+	}
 	if err != nil {
 		t.Fatal(err)
 	}
