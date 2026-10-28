@@ -97,7 +97,7 @@ worker loss release capacity. Use the same catalog on queue and workers.
 ```sh
 curl "$MYCE_QUEUE/models/speech/transcribe?language=en" \
   -H "Authorization: Bearer $MYCE_TOKEN" \
-  -H 'X-Myce-Project: verso' -H 'X-Myce-Priority: production' \
+  -H 'X-Myce-Project: transcribe' -H 'X-Myce-Priority: production' \
   -H 'Content-Type: audio/wav' --data-binary @qualification.wav
 ```
 
@@ -142,7 +142,7 @@ old OS temporary directory are not claimed automatically; handle them through
 an authorized local cleanup. Unlinking is not forensic erasure. RAM-backed
 storage needs its own swap/core-dump policy.
 
-Set `logs: none` on both Atlas entries. Server and stop-command stdout/stderr
+Set `logs: none` on both example server entries. Server and stop-command stdout/stderr
 go to the OS null device, without creating server output logs. The default
 `logs: keep` (also omitted) captures output. Queue and join accept
 `--log-retention`, default `168h` (seven days), strictly positive. Queue batch
@@ -267,7 +267,7 @@ from `served_name`, so unchanged OpenAI bodies can name the catalog entry.
 Hugging Face and transformers offline mode is enforced; missing weights fail.
 Trusted custom commands must respect the no-download contract too.
 
-See the [Atlas placeholder catalog](../examples/atlas-judge-vllm.example.yaml):
+See the [placeholder server catalog](../examples/):
 two generic servers for a roughly 35B chat model and an OCR model, both vLLM
 0.27.1. Use exact approved argv, not the vLLM preset. CPU FastEmbed stays outside
 the GPU queue. This is not deployable or Spark qualification. Read official model and
@@ -415,7 +415,7 @@ the body. Valid requests retain upload spooling; these
 changes do not resolve the separate body-storage privacy hold.
 
 
-The [placeholder catalog](examples/atlas-server-entries.yaml) needs reviewed argv, environment recipes, measured memory and local approval output. Native runtime and application telemetry require separate qualification.
+The [placeholder server catalog](examples/) needs reviewed argv, environment recipes, measured memory and local approval output. Native runtime and application telemetry require separate qualification.
 
 ### GPU selection limits and host holder checks
 

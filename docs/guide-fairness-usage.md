@@ -23,9 +23,9 @@ The legacy `--project-config projects.yaml` option (also supported by `myce dev`
 updates those same settings and revision:
 
 ```yaml
-verso:
+transcribe:
   weight: 3
-atlas:
+sim:
   weight: 1
   max_concurrent: 3
   max_concurrent_experiments: 2
@@ -43,7 +43,7 @@ when a project is alone. Policies persist in SQLite; omitting the config on queu
 restart preserves them. Supplying a config replaces the policy map.
 
 `myce status` and the page show cap or fairness reasons, for example:
-`atlas is ahead of its fair share; verso goes first`. NAS and machine fit failures
+`sim is ahead of its fair share; transcribe goes first`. NAS and machine fit failures
 remain visible. The page is available at the queue root URL; it uses no external
 assets, frontend build, or fleet token. Like the existing page, it is read-only
 and visible to anyone who can reach that URL. The API remains token-protected.

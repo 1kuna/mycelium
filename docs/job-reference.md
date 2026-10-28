@@ -527,7 +527,7 @@ command-only contract. `MYCE_TOKEN` remains removed from payload environments.
 The existing `queue/dev --project-config projects.yaml` accepts:
 
 ```yaml
-verso:
+transcribe:
   weight: 1
   allowed_machines: [b70-0, b70-1]
 study:
@@ -538,10 +538,10 @@ study:
 This restriction covers **every priority**, command and model call (including
 pin placement). It intersects a command's own `allowed_machines`; weights and
 experiment caps keep their existing meaning. An empty intersection fails
-submission with `project verso allowed_machines has no overlap with job
+submission with `project transcribe allowed_machines has no overlap with job
 allowed_machines`. If every permitted worker is known and structurally
 incompatible with the required platform, device, capacity or environment,
-submission fails with `no compatible machine in project verso allowed_machines`.
+submission fails with `no compatible machine in project transcribe allowed_machines`.
 This check uses last-known inventory, not current free memory: busy/offline
 workers can return, and unreported machine names are allowed to join later.
 Resubmit after correcting restrictions or updating incompatible inventory.
@@ -572,7 +572,7 @@ Do not put labels/name/cidfile in the submitted command: the worker owns them.
 
 ```yaml
 name: docker-experiment
-project: verso
+project: transcribe
 priority: experiment
 run:
   docker: true
@@ -680,14 +680,14 @@ the flag unset: Docker's daemon default applies (normally RAM plus an equal swap
 allowance when host swap is available). Native `--memory-swap-max-bytes` still
 defaults to zero for native cgroups; it does not configure managed Docker.
 These legacy member-only swap settings do not weaken a shared parent's zero
-swap limit. Swap-free Verso production requires separate native qualification.
+swap limit. Swap-free production transcription requires separate native qualification.
 
-A Verso-shaped production batch (replace placeholders with real local digests
+A transcription production batch (replace placeholders with real local digests
 and use measured memory/device mappings):
 
 ```yaml
-name: verso-recording-batch
-project: verso
+name: transcribe-recording-batch
+project: transcribe
 priority: production
 run:
   docker: true
@@ -715,8 +715,8 @@ resumable: false
 ```
 
 These memory values illustrate nonsummed peaks, not qualification evidence.
-Verso's CPU api/worker/render services remain outside Mycelium. This is a batch
-lifecycle, not a Docker-backed catalog model server.
+The application's CPU api/worker/render services remain outside Mycelium. This
+is a batch lifecycle, not a Docker-backed catalog model server.
 
 Main's exit code determines the result; early sidecar exit fails the job. Main
 exit stops remaining sidecars with ordinary grace (normally two minutes).
