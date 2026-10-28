@@ -3,8 +3,8 @@
 # resumes there immediately, the other returns as soon as production and its releases settle.
 duration_jitter: 0
 projects:
-  verso: {weight: 1, allowed_machines: [b70-0, b70-1]}
+  transcribe: {weight: 1, allowed_machines: [b70-0, b70-1]}
   study: {weight: 1}
 streams:
   - {name: experiment, project: study, priority: experiment, platforms: [xpu, cuda], memory_gb: 8, host_memory_gb: 2, duration_seconds: 600, checkpoint_seconds: 1, every_hours: 24, start_hour: 0, count: 2}
-  - {name: production, project: verso, priority: production, platforms: [xpu], memory_gb: 1, host_memory_gb: 2, duration_seconds: 60, every_hours: 24, start_hour: 0.016666666666666666, count: 1}
+  - {name: production, project: transcribe, priority: production, platforms: [xpu], memory_gb: 1, host_memory_gb: 2, duration_seconds: 60, every_hours: 24, start_hour: 0.016666666666666666, count: 1}

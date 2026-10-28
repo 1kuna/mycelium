@@ -10,14 +10,14 @@ Overlap is legal. Tier names must be unique and the final tier must include
 version: 1
 tiers:
   - name: urgent
-    selectors: ["verso/production"]
+    selectors: ["transcribe/production"]
   - name: shared
-    selectors: ["atlas/*", "verso/experiment"]
+    selectors: ["sim/*", "transcribe/experiment"]
   - name: other
     selectors: ["*/*"]
 projects:
-  verso: {weight: 1}
-  atlas: {weight: 1, max_concurrent: 2}
+  transcribe: {weight: 1}
+  sim: {weight: 1, max_concurrent: 2}
 ```
 
 The optional `projects` mapping uses the existing project settings, including
