@@ -37,6 +37,7 @@ func TestAdapterDogfoodOwnProfilesDev(t *testing.T) {
 		adapterDogfoodTarget(t, entry.Targets, "cpu")
 	}
 	binary := devTestBinary(t)
+	runtimeInput := adapterDogfoodRuntime(t)
 	d, ctx, _ := adapterDogfoodDev(t, "cpu")
 	for _, tc := range []struct {
 		profile, entry, result, want string
@@ -86,11 +87,33 @@ func TestAdapterDogfoodFixture(t *testing.T) {
 			// Installed tools need a writable attempt cache after the catalog
 			// environment is removed; native isolation makes HOME's cache read-only.
 			p.Run.Env["GOCACHE"] = "{work}/.go-build"
+			if runtimeInput.Local != "" {
+				// The outer gate's tools are outside this dev worker's grants.
+				p.SharedInputs = map[string]myce.SharedInput{"runtime": runtimeInput}
+				// Keep the cached tar read-only; nested Bash invocations reuse this
+				// attempt's managed scratch copy after successful extraction.
+				adapterDogfoodWrite(t, filepath.Join(source, "fixture-runtime.sh"), []byte(`export PATH="/usr/bin:/bin"
+dogfood_runtime="$MYCE_SCRATCH_DIR/runtime"
+if [ ! -f "$dogfood_runtime/.ready" ]; then
+    mkdir -p "$dogfood_runtime" || exit
+    tar -xf "$MYCE_INPUT_RUNTIME" -C "$dogfood_runtime" || exit
+    touch "$dogfood_runtime/.ready" || exit
+fi
+export PATH="$dogfood_runtime/go/bin:$dogfood_runtime/bin:/usr/bin:/bin"
+export GOROOT="$dogfood_runtime/go"
+export LD_LIBRARY_PATH="$dogfood_runtime/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+`), 0600)
+				p.Run.Env["BASH_ENV"] = "{work}/fixture-runtime.sh"
+			}
 			profile := filepath.Join(root, ".mycelium/profiles", tc.profile+".yaml")
 			adapterDogfoodYAML(t, profile, p)
 			entry := a.Entries[tc.entry]
 			entry.Source, entry.Environment = p.Source, myce.Environment{}
 			entry.Run.Env["GOCACHE"] = p.Run.Env["GOCACHE"]
+			if runtimeInput.Local != "" {
+				entry.SharedInputs = p.SharedInputs
+				entry.Run.Env["BASH_ENV"] = p.Run.Env["BASH_ENV"]
+			}
 			adapter := filepath.Join(root, ".mycelium/adapter.yaml")
 			adapterDogfoodYAML(t, adapter, projectAdapter{Schema: a.Schema, Project: a.Project, Default: tc.entry, Entries: map[string]adapterEntry{tc.entry: entry}})
 

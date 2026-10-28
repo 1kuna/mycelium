@@ -424,10 +424,14 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 		return true
 	})
 	before := map[string]myce.Machine{}
+	commandWork := map[string]string{}
+	commandCheckpoint := map[string]string{}
 	t.Cleanup(func() {
 		// Release owned command fixtures before service cleanup, even on failure.
 		for _, m := range managers[1:] {
-			fleetE2EWrite(t, filepath.Join(dir, "finish-"+m.config.Name), []byte("cleanup\n"), 0600)
+			if work := commandWork[m.config.Name]; work != "" {
+				fleetE2EWrite(t, filepath.Join(work, "finish-"+m.config.Name), []byte("cleanup\n"), 0600)
+			}
 		}
 		fleetE2EWrite(t, filepath.Join(dir, "finish-stream"), []byte("cleanup\n"), 0600)
 	})
@@ -440,7 +444,7 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 		spec := myce.Spec{Name: "rollout-command-" + m.ID, Project: "fleet-test", Priority: "production", AllowedMachines: []string{m.ID}}
 		spec.Needs.MemoryGB, spec.Needs.Platform.Any = 1, true
 		// The command controls its own completion; the rollout never signals it.
-		spec.Run.Command = []string{"sh", "-c", `test -z "${MYCE_TOKEN:-}" || exit 91; printf '%s\n' "$MYCE_ATTEMPT" >> "$1/starts-$2"; while ! test -f "$1/finish-$2"; do sleep 0.05; done; printf 'completed naturally\n'`, "fleet-command", dir, m.ID}
+		spec.Run.Command = []string{"sh", "-c", `printf 'myce fixture work: %s\n' "$PWD"; printf 'myce fixture checkpoint: %s\n' "$MYCE_CHECKPOINT_DIR"; test -z "${MYCE_TOKEN:-}" || exit 91; printf '%s\n' "$MYCE_ATTEMPT" >> "$MYCE_CHECKPOINT_DIR/starts-$2" || exit 92; while ! test -f "$1/finish-$2"; do sleep 0.05; done; printf 'completed naturally\n'`, "fleet-command", "{work}", m.ID}
 		var job myce.Job
 		if err = client.Call(ctx, "POST", "/api/jobs", spec, &job); err != nil {
 			t.Fatal(err)
@@ -462,6 +466,13 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 			if !found {
 				return false
 			}
+			work := commandFixturePath(t, ctx, client, id, "work")
+			checkpoint := commandFixturePath(t, ctx, client, id, "checkpoint")
+			if work == "" || checkpoint == "" {
+				return false
+			}
+			commandWork[jobs[id].Machine] = work
+			commandCheckpoint[jobs[id].Machine] = checkpoint
 		}
 		return true
 	})
@@ -541,7 +552,7 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 		if pid, starts := m.process(); pid != before[m.config.Name].Fleet.PID || starts != 1 {
 			t.Errorf("busy worker restarted: %s", m.config.Name)
 		}
-		fleetE2EWrite(t, filepath.Join(dir, "finish-"+m.config.Name), []byte("finish naturally\n"), 0600)
+		fleetE2EWrite(t, filepath.Join(commandWork[m.config.Name], "finish-"+m.config.Name), []byte("finish naturally\n"), 0600)
 	}
 	poll("queue-only operation completed after production released custody", func() bool {
 		if !status() {
@@ -621,7 +632,7 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 		if m.Fleet == nil || m.Fleet.SHA256 != target.hash || m.Fleet.Version != newVersion || m.Fleet.PID == old.Fleet.PID || m.Session == old.Session || m.Fleet.Session != m.Session || !m.Fleet.ServiceHealthy || !m.Fleet.RunnerSmoke {
 			t.Errorf("worker did not activate actual target runtime: %+v", m)
 		}
-		data, err := os.ReadFile(filepath.Join(dir, "starts-"+m.ID))
+		data, err := commandFixtureAppendBytes(filepath.Join(commandCheckpoint[m.ID], "starts-"+m.ID))
 		if err != nil || string(data) != "1\n" {
 			t.Errorf("real command executed more than once: %q %v", data, err)
 		}

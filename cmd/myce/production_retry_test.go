@@ -86,10 +86,10 @@ func TestProductionDevQueueCrash(t *testing.T) {
 		return client, stop
 	}
 	client, crash := start(1)
-	marker, output := filepath.Join(root, "started"), filepath.Join(root, "output")
+	marker := filepath.Join(root, "started")
 	s := myce.Spec{Name: "crash-stage", Project: "example", Priority: "production", SubmissionKey: "one-stage"}
 	s.Needs.MemoryGB, s.Needs.Platform.Any = 1, true
-	s.Run.Command = []string{"sh", "-c", `test -z "$MYCE_TOKEN" || exit 99; if [ "$MYCE_ATTEMPT" = 1 ]; then printf started > "$1"; while :; do sleep 1; done; fi; printf x >> "$2"`, "fixture", marker, output}
+	s.Run.Command = []string{"sh", "-c", `printf 'myce fixture work: %s\n' "$PWD"; printf 'myce fixture checkpoint: %s\n' "$MYCE_CHECKPOINT_DIR"; test -z "$MYCE_TOKEN" || exit 99; if [ "$MYCE_ATTEMPT" = 1 ]; then printf started > "$1"; while :; do sleep 1; done; fi; printf x >> "$MYCE_CHECKPOINT_DIR/output"`, "fixture", "{work}/started"}
 	var accepted myce.Job
 	if err := client.Call(ctx, "POST", "/api/jobs", s, &accepted); err != nil {
 		t.Fatal(err)
@@ -110,6 +110,11 @@ func TestProductionDevQueueCrash(t *testing.T) {
 	}
 	var old myce.Job
 	wait(func() bool {
+		work := commandFixturePath(t, ctx, client, accepted.ID, "work")
+		if work == "" {
+			return false
+		}
+		marker = filepath.Join(work, "started")
 		if _, err := os.Stat(marker); err != nil {
 			return false
 		}
@@ -141,7 +146,11 @@ func TestProductionDevQueueCrash(t *testing.T) {
 	if err := client.Call(ctx, "GET", "/api/status", nil, &snapshot); err != nil || len(snapshot.Jobs) != 1 || snapshot.Jobs[0].State != "succeeded" || snapshot.Jobs[0].Attempt != 2 {
 		t.Fatal("duplicate completion", snapshot.Jobs, err)
 	}
-	if data, err := os.ReadFile(output); err != nil || string(data) != "x" {
+	checkpoint := commandFixturePath(t, ctx, client, accepted.ID, "checkpoint")
+	if checkpoint == "" {
+		t.Fatal("command did not report its checkpoint dir")
+	}
+	if data, err := commandFixtureAppendBytes(filepath.Join(checkpoint, "output")); err != nil || string(data) != "x" {
 		t.Fatal("output was not produced once", string(data), err)
 	}
 	stop(false)
