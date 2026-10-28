@@ -148,6 +148,18 @@ type onboardingStorageFS struct {
 	probeContext  func(context.Context, context.CancelCauseFunc, string) error
 }
 
+// A contended delete completed in 14.90s (#289); round the observed tail to
+// 15s and allow two such intervals: one waiting behind contended I/O and one
+// completing the operation. This is a conservative measured backstop, not a
+// supported-load percentile. Go filesystem calls expose no in-call progress or
+// cancellation, and CIFS can hang indefinitely. The cost is up to 30s before
+// refusal of a stuck operation; ownership remains held until the syscall returns.
+// Completed operations reset this bound; there is no total validation deadline.
+const onboardingFilesystemStallBudget = 2 * 15 * time.Second
+
+// Preserve the former refusal threshold as an advisory, never a failure gate.
+const onboardingFilesystemSlowThreshold = 10 * time.Second
+
 var onboardingNASIO = checkpointIO[bool]{timeout: -1} // Each operation cancels the sequence on stall; no aggregate cap.
 
 // PrepareOnboardingStorage validates an already resolved selection. One checkpointIO
@@ -180,7 +192,7 @@ func prepareOnboardingStorageFS(ctx context.Context, c ServiceConfig, discover b
 		return c, context.Canceled
 	}
 	if errors.Is(err, errCheckpointIOTimeout) || errors.Is(err, errCheckpointIOPending) || errors.Is(err, context.DeadlineExceeded) {
-		return c, preflightError("nas_unresponsive", "storage", fmt.Sprintf("NAS validation stalled beyond the %s filesystem-operation budget or another validation is still pending; restore the mount and retry", networkFilesystemBudget))
+		return c, preflightError("nas_unresponsive", "storage", fmt.Sprintf("NAS validation stalled beyond the %s filesystem-operation stall bound or another validation is still pending; restore the mount and retry", onboardingFilesystemStallBudget))
 	}
 	if err != nil {
 		return c, err
@@ -201,10 +213,10 @@ func onboardingFSOperation[T any](ctx context.Context, abort context.CancelCause
 	if len(operation) > 0 {
 		name = operation[0]
 	}
-	opCtx, cancel := context.WithTimeout(ctx, networkFilesystemBudget)
+	opCtx, cancel := context.WithTimeout(ctx, onboardingFilesystemStallBudget)
 	stop := context.AfterFunc(opCtx, func() {
 		if errors.Is(opCtx.Err(), context.DeadlineExceeded) {
-			log.Printf("NAS validation operation=%s stalled budget=%s", name, networkFilesystemBudget)
+			log.Printf("NAS validation operation=%s stalled budget=%s", name, onboardingFilesystemStallBudget)
 			abort(errCheckpointIOTimeout)
 		}
 	})
@@ -212,7 +224,11 @@ func onboardingFSOperation[T any](ctx context.Context, abort context.CancelCause
 	defer stop()
 	started := time.Now()
 	value, err := fn()
-	log.Printf("NAS validation operation=%s completed elapsed=%s success=%t", name, time.Since(started), err == nil && opCtx.Err() == nil)
+	elapsed := time.Since(started)
+	log.Printf("NAS validation operation=%s completed elapsed=%s success=%t", name, elapsed, err == nil && opCtx.Err() == nil)
+	if err == nil && opCtx.Err() == nil && elapsed >= onboardingFilesystemSlowThreshold {
+		log.Printf("NAS slow: %s took %.1f s", name, elapsed.Seconds())
+	}
 	if errors.Is(opCtx.Err(), context.DeadlineExceeded) {
 		abort(errCheckpointIOTimeout)
 	}
