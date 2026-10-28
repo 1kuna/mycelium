@@ -85,8 +85,7 @@ func TestBatchLogsNoneLifecycle(t *testing.T) {
 				want = "failed"
 			case "cancel":
 				// The marker proves payload startup without relying on captured logs.
-				marker := filepath.Join(t.TempDir(), "started")
-				s.Run.Env["START_MARKER"] = marker
+				s.Run.Env["START_MARKER"] = "{work}/started"
 				script += `echo ready > "$START_MARKER"; exec sleep 60`
 				want = "cancelled"
 			case "large-output":
@@ -99,7 +98,7 @@ func TestBatchLogsNoneLifecycle(t *testing.T) {
 			j := submit(t, q, s)
 			run := workerFixture(t, q)
 			if mode == "cancel" {
-				await(t, func() bool { _, err := os.Stat(s.Run.Env["START_MARKER"]); return err == nil })
+				nativeFile(t, nativeWorkerWork(t, run.state), "started")
 				if err := q.Cancel(j.ID); err != nil {
 					t.Fatal(err)
 				}

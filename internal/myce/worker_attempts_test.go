@@ -40,16 +40,16 @@ exec "$MYCE_TEST_CLEANUP_REAL_PS" "$@"
 		}
 		t.Run(name, func(t *testing.T) {
 			h := &machineHarness{controls: map[string]AttemptDirective{}}
-			dir := t.TempDir()
+			j := harnessJob(t, "cleanup-retry", "", "true")
+			w := harnessWorker(t, h)
+			dir := filepath.Join(w.StateDir, "job-files", j.ID, "1")
 			marker, blocked := filepath.Join(dir, "executions"), filepath.Join(dir, "inventory-denied")
 			t.Setenv("MYCE_TEST_CLEANUP_PS_BLOCK", blocked)
-			j := harnessJob(t, "cleanup-retry", "", "true")
-			j.Spec.Run.Command = []string{"sh", "-c", `printf x >> "$1"; : > "$2"`, "fixture", marker, blocked}
+			j.Spec.Run.Command = []string{"sh", "-c", `printf x >> "$1"; : > "$2"`, "fixture", "{work}/executions", "{work}/inventory-denied"}
 			if grouped {
 				j.Spec.Run.MemoryGB = 1
 			}
 			h.jobs = []Job{j}
-			w := harnessWorker(t, h)
 			w.memoryCeilings = fakeCeilings(t)
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan error, 1)
@@ -332,24 +332,22 @@ func TestAttemptReportsAndReleasesDuringAdmissionDrain(t *testing.T) {
 	q, _ := fixture(t)
 	clock := &workerFakeClock{now: q.clock.Now()}
 	q.clock = clock
-	fifo := filepath.Join(t.TempDir(), "command")
-	if err := syscall.Mkfifo(fifo, 0600); err != nil {
-		t.Fatal(err)
-	}
+	s := spec("experiment")
+	s.Resumable = false
+	s.Run.Command = []string{"sh", "-c", `mkfifo -m 600 "$1" || exit 1; exec 3<> "$1"; read line <&3; echo during-drain; read line <&3`, "fixture", "{work}/command"}
+	j := submit(t, q, s)
+	run := workerFixture(t, q)
+	await(t, func() bool {
+		clock.Advance(time.Millisecond)
+		return job(t, q, j.ID).StartedAt != nil
+	})
+	fifo := filepath.Join(nativeWorkerWork(t, run.state), "command")
+	nativeFile(t, filepath.Dir(fifo), filepath.Base(fifo))
 	command, err := os.OpenFile(fifo, os.O_RDWR, 0600)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { command.Close() })
-	s := spec("experiment")
-	s.Resumable = false
-	s.Run.Command = []string{"sh", "-c", `exec 3<> "$1"; read line <&3; echo during-drain; read line <&3`, "fixture", fifo}
-	j := submit(t, q, s)
-	workerFixture(t, q)
-	await(t, func() bool {
-		clock.Advance(time.Millisecond)
-		return job(t, q, j.ID).StartedAt != nil
-	})
 	const host = "fixture-worker-host"
 	if _, err := q.ChangeHostMaintenance(host, HostMaintenanceRequest{Action: "drain"}); err != nil {
 		t.Fatal(err)
@@ -398,11 +396,11 @@ func TestAttemptReportsAndReleasesDuringAdmissionDrain(t *testing.T) {
 }
 
 func TestAttemptReleasesWhenRAMDropsBeforeEntrypoint(t *testing.T) {
-	marker := filepath.Join(t.TempDir(), "entrypoint")
 	h := &machineHarness{controls: map[string]AttemptDirective{}}
-	h.jobs = []Job{harnessJob(t, "ram-drop", "", "touch "+marker)}
+	h.jobs = []Job{harnessJob(t, "ram-drop", "", "touch {work}/entrypoint")}
 	h.jobs[0].Spec.Needs.HostMemoryGB = 22
 	w := harnessWorker(t, h)
+	marker := filepath.Join(w.StateDir, "job-files", "ram-drop", "1", "entrypoint")
 	var free atomic.Uint64
 	free.Store(math.Float64bits(64))
 	w.HostMemorySource = func(context.Context) (float64, error) {

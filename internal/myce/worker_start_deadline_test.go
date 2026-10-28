@@ -21,11 +21,10 @@ func TestWorkerStartHandoffQueueWait(t *testing.T) {
 		t.Run(state, func(t *testing.T) {
 			q, clock := fixture(t)
 			m := machine("one", "fake")
-			marker := filepath.Join(t.TempDir(), "executions")
 			s := spec("production")
 			s.Resumable = false
 			s.Run.Command = []string{"sh", "-c", `printf x >> "$MARKER"`}
-			s.Run.Env = map[string]string{"MARKER": marker}
+			s.Run.Env = map[string]string{"MARKER": "{work}/executions"}
 			submit(t, q, s)
 			a := check(t, q, m, nil).Job
 			handler := (API{Queue: q, Token: "test"}).Handler()
@@ -73,7 +72,7 @@ func TestWorkerStartHandoffQueueWait(t *testing.T) {
 			if calls.Load() != 1 || got.Starts != 1 || got.Losses != 0 || (got.StartedAt != nil) != (state == "current") {
 				t.Fatalf("handoff duplicated or escaped its fence: calls=%d job=%+v", calls.Load(), got)
 			}
-			data, err := os.ReadFile(marker)
+			data, err := os.ReadFile(filepath.Join(p.job.Spec.Run.Workdir, "executions"))
 			if state == "current" && (err != nil || string(data) != "x") || state == "cancelled" && !os.IsNotExist(err) {
 				t.Fatalf("wrong payload execution count: state=%s marker=%q err=%v", state, data, err)
 			}

@@ -24,12 +24,11 @@ func TestNativeMainMemoryCapComposition(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.close()
-	marker := filepath.Join(t.TempDir(), "main-cap")
 	j := recoveryJob(t, []string{"true"})
 	j.Spec.Resumable = false
 	j.Spec.Needs.HostMemoryGB = 2
 	j.Spec.Run = RunSpec{}
-	j.Spec.Execution = &ExecutionSpec{Main: ExecutionMember{MemoryGB: .5, Command: []string{"sh", "-c", `printf '%s' "$MYCE_MEMORY_LIMIT_BYTES" > "$1"`, "main", marker}}}
+	j.Spec.Execution = &ExecutionSpec{Main: ExecutionMember{MemoryGB: .5, Command: []string{"sh", "-c", `printf '%s' "$MYCE_MEMORY_LIMIT_BYTES" > "$1"`, "main", "{work}/main-cap"}}}
 	p, err := w.start(store, j)
 	if err != nil {
 		t.Fatal(err)
@@ -40,7 +39,7 @@ func TestNativeMainMemoryCapComposition(t *testing.T) {
 	if r := d5Finish(t, p); !r.Success || r.ReleasePending {
 		t.Fatal(r)
 	}
-	data, err := os.ReadFile(marker)
+	data, err := os.ReadFile(filepath.Join(p.job.Spec.Run.Workdir, "main-cap"))
 	if err != nil || string(data) != "536870912" {
 		t.Fatalf("main received wrong cap %s %v", data, err)
 	}
@@ -296,9 +295,7 @@ func d5Finish(t *testing.T, p *process) Result {
 func TestNativeGroupCgroupCapsAndOOM(t *testing.T) {
 	for _, member := range []string{"main", "helper"} {
 		t.Run(member, func(t *testing.T) {
-			dir := t.TempDir()
-			finish := filepath.Join(dir, "finish")
-			w, s, p := d5NativeStart(t, true, nil, []string{"sh", "-c", `while [ ! -f "$1" ]; do sleep .01; done`, "main", finish})
+			w, s, p := d5NativeStart(t, true, nil, []string{"sh", "-c", `while [ ! -f "$1" ]; do sleep .01; done`, "main", "{work}/finish"})
 			await(t, p.native.started)
 			parent := p.native.memory.path
 			for name, want := range map[string]int64{"control": 2 << 30, "main": 1 << 29, "sidecar-helper": 1 << 30} {
@@ -350,8 +347,7 @@ func TestNativeGroupCgroupFaults(t *testing.T) {
 	for _, fault := range []string{"attach", "population"} {
 		t.Run(fault, func(t *testing.T) {
 			fs := &memberMemoryFS{fault: fault}
-			marker := filepath.Join(t.TempDir(), "main")
-			command := []string{"touch", marker}
+			command := []string{"touch", "{work}/main"}
 			if fault == "population" {
 				command = []string{"sleep", "600"}
 			}
@@ -366,7 +362,7 @@ func TestNativeGroupCgroupFaults(t *testing.T) {
 				if r.Success || r.Interrupted || r.ReleasePending {
 					t.Fatal(r)
 				}
-				if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+				if _, err := os.Stat(filepath.Join(p.job.Spec.Run.Workdir, "main")); !errors.Is(err, os.ErrNotExist) {
 					t.Fatal("main ran after helper attach refusal")
 				}
 			} else {
@@ -390,9 +386,8 @@ func TestNativeGroupCgroupFaults(t *testing.T) {
 }
 
 func TestNativeGroupSharedStopDeadline(t *testing.T) {
-	dir := t.TempDir()
-	ready := filepath.Join(dir, "ready")
-	w, s, p := d5NativeStart(t, true, nil, []string{"sh", "-c", `trap '' TERM; touch "$1"; exec sleep 600`, "main", ready})
+	w, s, p := d5NativeStart(t, true, nil, []string{"sh", "-c", `trap '' TERM; touch "$1"; exec sleep 600`, "main", "{work}/ready"})
+	ready := filepath.Join(p.job.Spec.Run.Workdir, "ready")
 	await(t, func() bool { _, err := os.Stat(ready); return err == nil })
 	now := w.Clock.Now()
 	p.stop(now, 100*time.Millisecond, false)

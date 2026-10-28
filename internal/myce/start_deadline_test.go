@@ -211,8 +211,7 @@ func TestProductionStartDeadlinePermit(t *testing.T) {
 func TestProductionStartDeadlineWorkerPreparationCannotLaunchLate(t *testing.T) {
 	q, c := fixture(t)
 	s := spec("production")
-	marker := filepath.Join(t.TempDir(), "started")
-	s.Run.Command = []string{"sh", "-c", "echo started > " + marker}
+	s.Run.Command = []string{"sh", "-c", "echo started > {work}/started"}
 	j := submit(t, q, s)
 	assigned := check(t, q, machine("b70", "xpu"), nil).Job
 	if assigned == nil {
@@ -243,7 +242,7 @@ func TestProductionStartDeadlineWorkerPreparationCannotLaunchLate(t *testing.T) 
 	case <-time.After(testWaitTimeout):
 		t.Fatal("refused attempt stalled")
 	}
-	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(p.job.Spec.Run.Workdir, "started")); !os.IsNotExist(err) {
 		t.Fatalf("command ran: %v", err)
 	}
 	requireState(t, q, j.ID, "failed")

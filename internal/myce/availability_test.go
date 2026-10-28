@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -243,25 +242,15 @@ func TestPoliteWorkerCheckpointResumesElsewhere(t *testing.T) {
 	api := API{Queue: q, Token: "test"}.Handler()
 	server := httptest.NewServer(api)
 	defer server.Close()
-	dir := t.TempDir()
-	fifo := filepath.Join(dir, "gate")
-	if err := syscall.Mkfifo(fifo, 0600); err != nil {
-		t.Fatal(err)
-	}
-	gate, err := os.OpenFile(fifo, os.O_RDWR, 0600)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer gate.Close()
 	s := spec("experiment")
-	s.Run.Env = map[string]string{"GATE": fifo}
 	s.Run.Command = []string{"sh", "-c", `
  test -z "$MYCE_TOKEN" || exit 99
  if [ "$MYCE_ATTEMPT" -gt 1 ]; then
   test "$(cat "$MYCE_CHECKPOINT_DIR/saved")" = saved || exit 98
   echo "resumed=$MYCE_MACHINE"; exit 0
  fi
- exec 3<> "$GATE"
+ mkfifo -m 600 "$TMPDIR/gate" || exit 1
+ exec 3<> "$TMPDIR/gate"
  trap 'echo saved > "$MYCE_CHECKPOINT_DIR/saved"; exit 0' TERM
  echo ready
  while :; do read line <&3; done`}
@@ -393,19 +382,8 @@ func TestPoliteOwnerStopDuringBlockedCheckin(t *testing.T) {
 		api.ServeHTTP(w, r)
 	}))
 	defer server.Close()
-	dir := t.TempDir()
-	fifo := filepath.Join(dir, "gate")
-	if err := syscall.Mkfifo(fifo, 0600); err != nil {
-		t.Fatal(err)
-	}
-	gate, err := os.OpenFile(fifo, os.O_RDWR, 0600)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer gate.Close()
 	s := spec("experiment")
-	s.Run.Env = map[string]string{"GATE": fifo}
-	s.Run.Command = []string{"sh", "-c", `exec 3<> "$GATE"; trap 'echo saved > "$MYCE_CHECKPOINT_DIR/saved"; exit 0' TERM; echo ready; while :; do read line <&3; done`}
+	s.Run.Command = []string{"sh", "-c", `mkfifo -m 600 "$TMPDIR/gate" || exit 1; exec 3<> "$TMPDIR/gate"; trap 'echo saved > "$MYCE_CHECKPOINT_DIR/saved"; exit 0' TERM; echo ready; while :; do read line <&3; done`}
 	j := submit(t, q, s)
 	var active atomic.Bool
 	state := t.TempDir()

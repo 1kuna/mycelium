@@ -6,7 +6,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -741,13 +740,8 @@ func TestProductionHoldForceStopsBlockedSaveAndResumesDurableGeneration(t *testi
 	q, clock, a, b, spark := holdFleet(t, true)
 	x := submit(t, q, spec("experiment"))
 	x = check(t, q, a, nil).Job
-	blocked := filepath.Join(t.TempDir(), "nas-save")
-	if err := syscall.Mkfifo(blocked, 0600); err != nil {
-		t.Fatal(err)
-	}
 	s := spec("experiment")
-	s.Run.Env = map[string]string{"SAVE_BLOCK": blocked}
-	s.Run.Command = []string{"sh", "-c", `trap 'echo saving; cat "$SAVE_BLOCK"; exit 0' TERM; echo ready; while :; do sleep 0.01; done`}
+	s.Run.Command = []string{"sh", "-c", `mkfifo -m 600 "$TMPDIR/nas-save" || exit 1; trap 'echo saving; cat "$TMPDIR/nas-save"; exit 0' TERM; echo ready; while :; do sleep 0.01; done`}
 	y := submit(t, q, s)
 	y = check(t, q, b, nil).Job
 	if x == nil || y == nil {

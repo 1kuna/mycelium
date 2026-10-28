@@ -140,8 +140,8 @@ func TestCurrentProtocolBatchRefusalPreventsExecution(t *testing.T) {
 	}
 	defer store.close()
 	store.state.Session = worker.Machine.Session
-	marker := filepath.Join(t.TempDir(), "payload")
-	j := recoveryJob(t, []string{"sh", "-c", "printf unsafe > '" + marker + "'"})
+	j := recoveryJob(t, []string{"sh", "-c", "printf unsafe > {work}/payload"})
+	marker := filepath.Join(store.dir, "job-files", j.ID, "1", "payload")
 	j.Spec.Resumable = false
 	if _, err = worker.start(store, j); err == nil {
 		t.Fatal("refused batch executed")

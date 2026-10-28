@@ -100,13 +100,12 @@ func testGPUStopNative(t *testing.T, cooperative bool, stopPath string, directiv
 	}
 	defer store.close()
 	store.state.Session = w.Machine.Session
-	dir := t.TempDir()
 	command := func(name string, exit bool) []string {
 		trap := "trap '' TERM"
 		if exit {
 			trap = "trap 'exit 0' TERM"
 		}
-		return []string{"sh", "-c", trap + `; touch "$1"; while :; do sleep .01; done`, name, filepath.Join(dir, name)}
+		return []string{"sh", "-c", trap + `; touch "$1"; while :; do sleep .01; done`, name, "{work}/" + name}
 	}
 	j := recoveryJob(t, command("main", cooperative))
 	j.Spec.Resumable = false
@@ -120,8 +119,8 @@ func testGPUStopNative(t *testing.T, cooperative bool, stopPath string, directiv
 		t.Fatal(err)
 	}
 	defer p.stop(clock.Now(), 0, true)
-	nativeFile(t, dir, "main")
-	nativeFile(t, dir, "helper")
+	nativeFile(t, p.job.Spec.Run.Workdir, "main")
+	nativeFile(t, p.job.Spec.Run.Workdir, "helper")
 	control := processControl{clock: clock, processes: map[attemptKey]*process{jobKey(p.job): p}, pendingEvents: map[attemptKey]WorkerEvent{jobKey(p.job): {Execution: Execution{ID: p.job.ID, Attempt: p.job.Attempt}, Session: p.job.Session, UserCancel: false, PriorityStop: &PriorityPreemption{Cause: priorityPreemptionCause, Demand: "production", Victim: p.job.ID}, deadline: clock.Now().Add(10 * time.Second)}}}
 	if len(directives) > 0 {
 		d := directives[0]

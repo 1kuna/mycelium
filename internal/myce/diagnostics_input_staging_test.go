@@ -24,11 +24,11 @@ func (stagingTimeoutReader) Read([]byte) (int, error) {
 // queue must retain the safe, exact-attempt diagnosis across reopen.
 func TestInputStagingTimeoutSurvivesAcknowledgementAndReopen(t *testing.T) {
 	h := &machineHarness{controls: map[string]AttemptDirective{}}
-	marker := filepath.Join(t.TempDir(), "launched")
-	j := harnessJob(t, ID(), "", "touch "+marker)
+	j := harnessJob(t, ID(), "", "touch {work}/launched")
 	j.Spec.Files = FileManifest{"input": {SHA256: strings.Repeat("a", 64), SizeBytes: 1}}
 	h.jobs = []Job{j}
 	w := harnessWorker(t, h)
+	marker := filepath.Join(w.StateDir, "job-files", j.ID, "1", "launched")
 	w.Client.HTTP = &http.Client{Transport: fetchTransport(func(r *http.Request) (*http.Response, error) {
 		if strings.HasPrefix(r.URL.Path, "/api/files/blobs/") {
 			if r.Method == "HEAD" {

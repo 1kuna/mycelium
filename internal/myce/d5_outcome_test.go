@@ -32,13 +32,12 @@ func TestNativeOutcomeTermStop(t *testing.T) {
 	for _, group := range []bool{false, true} {
 		for _, independentExit := range []bool{false, true} {
 			t.Run(map[bool]string{false: "native", true: "native-group"}[group], func(t *testing.T) {
-				dir := t.TempDir()
 				command := `touch "$1"; exec sleep 600`
 				if independentExit {
 					command = `trap 'exit 7' TERM; touch "$1"; while :; do sleep .01; done`
 				}
-				w, _, p := d5NativeStart(t, group, nil, []string{"sh", "-c", command, "main", dir + "/ready"})
-				nativeFile(t, dir, "ready")
+				w, _, p := d5NativeStart(t, group, nil, []string{"sh", "-c", command, "main", "{work}/ready"})
+				nativeFile(t, p.job.Spec.Run.Workdir, "ready")
 				p.stop(w.Clock.Now(), time.Second, false)
 				r := d5Finish(t, p)
 				if r.Success || !r.Interrupted {
@@ -185,9 +184,9 @@ func d5RuntimeOutcome(t *testing.T, runtime string, tc outcomeRow) Result {
 	if tc.lost {
 		return d5NativeWorkerLoss(t, runtime == "native-group")
 	}
-	dir := t.TempDir()
 	script := fmt.Sprintf(`trap 'exit %d' TERM; touch "$1"; while [ ! -f "$2" ]; do sleep .01; done; exit %d`, tc.code, tc.code)
-	w, s, p := d5NativeStart(t, runtime == "native-group", nil, []string{"sh", "-c", script, "main", dir + "/ready", dir + "/finish"})
+	w, s, p := d5NativeStart(t, runtime == "native-group", nil, []string{"sh", "-c", script, "main", "{work}/ready", "{work}/finish"})
+	dir := p.job.Spec.Run.Workdir
 	nativeFile(t, dir, "ready")
 	if tc.priority {
 		if err := p.recordPriorityStop(s, &PriorityPreemption{Cause: priorityPreemptionCause}); err != nil {
@@ -344,9 +343,8 @@ func d5DockerRuntimeOutcome(t *testing.T, tc outcomeRow) Result {
 func TestNativeOutcomeIndependentExitWithStop(t *testing.T) {
 	for _, group := range []bool{false, true} {
 		t.Run(map[bool]string{false: "native", true: "native-group"}[group], func(t *testing.T) {
-			dir := t.TempDir()
-			ready, finish := dir+"/ready", dir+"/finish"
-			_, _, p := d5NativeStart(t, group, nil, []string{"sh", "-c", `touch "$1"; while [ ! -f "$2" ]; do sleep .01; done; exit 7`, "main", ready, finish})
+			_, _, p := d5NativeStart(t, group, nil, []string{"sh", "-c", `touch "$1"; while [ ! -f "$2" ]; do sleep .01; done; exit 7`, "main", "{work}/ready", "{work}/finish"})
+			dir := p.job.Spec.Run.Workdir
 			nativeFile(t, dir, "ready")
 			// Freeze intent separately from delivery, then observe a payload exit.
 			p.mu.Lock()
@@ -367,11 +365,10 @@ func d5NativeWorkerLoss(t *testing.T, group bool) Result {
 	q, _ := fixture(t)
 	q.clock = RealClock{}
 	dir := t.TempDir()
-	marker := filepath.Join(dir, "ready")
 	specification := spec("production")
 	specification.Resumable = false
 	specification.Needs.HostMemoryGB = 2
-	specification.Run.Command = []string{"sh", "-c", `touch "$1"; exec sleep 600`, "main", marker}
+	specification.Run.Command = []string{"sh", "-c", `touch "$1"; exec sleep 600`, "main", "{work}/ready"}
 	if group {
 		specification.Run.Sidecars = []NativeSidecar{{Name: "helper", Command: []string{"sleep", "600"}, MemoryGB: 1}}
 	}
@@ -418,7 +415,7 @@ func d5NativeWorkerLoss(t *testing.T, group bool) Result {
 			}
 		}
 	})
-	nativeFile(t, dir, "ready")
+	nativeFile(t, nativeWorkerWork(t, stateDir), "ready")
 	if err := child.Process.Kill(); err != nil {
 		t.Fatal(err)
 	}

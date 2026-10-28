@@ -333,8 +333,8 @@ func TestMemoryCeilingAttachFailureNeverRunsPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.close()
-	marker := filepath.Join(t.TempDir(), "started")
-	j := recoveryJob(t, []string{"touch", marker})
+	j := recoveryJob(t, []string{"touch", "{work}/started"})
+	marker := filepath.Join(s.dir, "job-files", j.ID, "1", "started")
 	j.Spec.Resumable = false
 	j.Spec.Needs.HostMemoryGB = 5
 	if p, err := w.start(s, j); err == nil || p != nil {

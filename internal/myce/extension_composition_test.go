@@ -4,13 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -315,15 +318,16 @@ func TestCompositionSidecarSeamAndCallerFences(t *testing.T) {
 func TestCompositionEnvironmentWorkerEndToEnd(t *testing.T) {
 	e := compositionExtension(t, true)
 	e.Files["run.sh"] = append([]byte(`test "$(command -v python)" = "$VIRTUAL_ENV/bin/python" || exit 96
+# The helper's HTTP listener may become ready before its child records its PID.
+while ! test -s child.pid; do sleep 0.01; done
 `), e.Files["run.sh"]...)
 	e.Variants[0].Execution.Main.Command[0] = "python"
-	nativeDir := t.TempDir()
 	executable, err := os.Executable()
 	if err != nil {
 		t.Fatal(err)
 	}
 	zero := 0
-	e.Variants[0].Execution.Sidecars = []NativeSidecar{{Name: "helper", Command: []string{executable, "-test.run=^TestNativeCPUHelper$"}, Environment: "main", Port: &zero, Readiness: &NativeReadiness{Path: "/ready", Timeout: "5s"}, MemoryGB: .05, Env: map[string]string{"NATIVE_TEST_MODE": "side", "NATIVE_TEST_DIR": nativeDir, "GORACE": "atexit_sleep_ms=0", "HELPER_ROOT": "{env.main.root}"}}}
+	e.Variants[0].Execution.Sidecars = []NativeSidecar{{Name: "helper", Command: []string{executable, "-test.run=^TestNativeCPUHelper$"}, Environment: "main", Port: &zero, Readiness: &NativeReadiness{Path: "/ready", Timeout: "5s"}, MemoryGB: .05, Env: map[string]string{"NATIVE_TEST_MODE": "side", "NATIVE_TEST_DIR": "{work}", "GORACE": "atexit_sleep_ms=0", "HELPER_ROOT": "{env.main.root}"}}}
 	e = freezeComposition(t, e)
 	root := t.TempDir()
 	if err := InstallExtension(root, e); err != nil {
@@ -373,6 +377,31 @@ func TestCompositionEnvironmentWorkerEndToEnd(t *testing.T) {
 	m.CapabilityProfile.OS = runtime.GOOS
 	m.CapabilityProfile.Arch = runtime.GOARCH
 	w := Worker{StateDir: newTestStateRoot(t), ExtensionRoot: root, JobFileRoot: shared, EnvironmentRoot: cache.Root, EnvironmentLimit: 1 << 20, Client: Client{URL: server, Token: "test"}, Machine: m, Interval: 10 * time.Millisecond}
+	// Retain exact helper evidence before the real completion API can acknowledge
+	// publication and allow immediate work reclamation. No payload grant changes.
+	nativeDir := t.TempDir()
+	work := filepath.Join(w.StateDir, "job-files", j.ID, "1")
+	evidence := make(chan error, 1)
+	var evidenceOnce sync.Once
+	w.Client.HTTP = &http.Client{Timeout: 10 * time.Second, Transport: fetchTransport(func(r *http.Request) (*http.Response, error) {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/workers/complete" {
+			evidenceOnce.Do(func() {
+				evidence <- func() error {
+					for _, name := range []string{"side.json", "child.pid"} {
+						data, err := os.ReadFile(filepath.Join(work, name))
+						if err != nil {
+							return fmt.Errorf("required helper evidence %s: %w", name, err)
+						}
+						if err := os.WriteFile(filepath.Join(nativeDir, name), data, 0600); err != nil {
+							return err
+						}
+					}
+					return nil
+				}()
+			})
+		}
+		return http.DefaultTransport.RoundTrip(r)
+	})}
 	go func() { done <- w.Run(ctx) }()
 	t.Cleanup(func() {
 		cancel()
@@ -396,6 +425,9 @@ func TestCompositionEnvironmentWorkerEndToEnd(t *testing.T) {
 		}
 		return false
 	})
+	if err := <-evidence; err != nil {
+		t.Fatal(err)
+	}
 	if j.Extension == nil || j.Extension.Digest != e.Digest {
 		t.Fatal("attempt did not retain digest")
 	}
@@ -406,6 +438,18 @@ func TestCompositionEnvironmentWorkerEndToEnd(t *testing.T) {
 	helperEnv := nativeEnv(t, nativeDir, "side")
 	if helperEnv["HELPER_ROOT"] != helperEnv["MYCE_ENVIRONMENT_DIR"] || helperEnv["MYCE_TOKEN"] != "" {
 		t.Fatal("extension helper environment mismatch")
+	}
+	// Require real positive PID records so nativeNoSurvivors cannot silently skip
+	// missing or malformed helper/grandchild evidence after completion.
+	var side struct{ PID int }
+	data, err = os.ReadFile(filepath.Join(nativeDir, "side.json"))
+	if err != nil || json.Unmarshal(data, &side) != nil || side.PID <= 0 {
+		t.Fatal("invalid required sidecar evidence", string(data), err)
+	}
+	data, err = os.ReadFile(filepath.Join(nativeDir, "child.pid"))
+	var childPID int
+	if err != nil || json.Unmarshal(data, &childPID) != nil || childPID <= 0 {
+		t.Fatal("invalid required child PID", string(data), err)
 	}
 	attempts, err := filepath.Glob(filepath.Join(w.StateDir, "attempt-*.json"))
 	if err != nil || len(attempts) != 1 {

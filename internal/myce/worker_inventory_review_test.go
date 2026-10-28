@@ -43,7 +43,10 @@ func runInventoryReviewWorker(t *testing.T, q *Queue, w Worker) Client {
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	t.Cleanup(server.Close)
 	w.Client = Client{URL: server.URL, Token: "test"}
-	w.StateDir, w.Clock, w.Interval = newTestStateRoot(t), RealClock{}, time.Millisecond
+	if w.StateDir == "" {
+		w.StateDir = newTestStateRoot(t)
+	}
+	w.Clock, w.Interval = RealClock{}, time.Millisecond
 	w.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
 	w.CPUIsolationProbe = func(context.Context) error { return nil }
 	ctx, cancel := context.WithCancel(context.Background())
@@ -73,7 +76,8 @@ func TestInventoryReviewDeviceAllowanceRealAPI(t *testing.T) {
 			q, _ := fixture(t)
 			m := machine("inventory-worker", "fake", "inventory-host")
 			m.Device = selection
-			client := runInventoryReviewWorker(t, q, Worker{Machine: m, InventoryProbe: func(context.Context) ([]MachineDevice, error) {
+			stateDir := newTestStateRoot(t)
+			client := runInventoryReviewWorker(t, q, Worker{StateDir: stateDir, Machine: m, InventoryProbe: func(context.Context) ([]MachineDevice, error) {
 				devices := inventoryReviewDevices()
 				// Runtime ordinals can differ from host-local component IDs.
 				devices[0].Selector, devices[1].Selector = "1", "0"
@@ -92,15 +96,15 @@ func TestInventoryReviewDeviceAllowanceRealAPI(t *testing.T) {
 			if !slices.Equal(ids, wantIDs) {
 				t.Fatalf("reported devices %v, want %v", ids, wantIDs)
 			}
-			marker := filepath.Join(t.TempDir(), "devices")
 			spec := spec("experiment")
 			spec.Resumable = false
-			spec.Run.Command = []string{"sh", "-c", `printf '%s' "$MYCE_DEVICES" > "$1"`, "sh", marker}
+			spec.Run.Command = []string{"sh", "-c", `printf '%s' "$MYCE_DEVICES" > "$1"`, "sh", "{work}/devices"}
 			var j Job
 			if err := client.Call(context.Background(), "POST", "/api/jobs", spec, &j); err != nil {
 				t.Fatal(err)
 			}
 			awaitInventoryReview(t, func() bool { return job(t, q, j.ID).State == "succeeded" })
+			marker := filepath.Join(stateDir, "job-files", j.ID, "1", "devices")
 			data, err := os.ReadFile(marker)
 			if err != nil || string(data) != wantIDs[0] || !slices.Equal(job(t, q, j.ID).AllocatedDevices, []string{wantIDs[0]}) {
 				t.Fatalf("payload devices=%q placement=%v err=%v", data, job(t, q, j.ID).AllocatedDevices, err)

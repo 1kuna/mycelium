@@ -352,12 +352,12 @@ func TestCancellationWorkerPreparing(t *testing.T) {
 		t.Run(priority, func(t *testing.T) {
 			q, c := fixture(t)
 			s := spec(priority)
-			marker := filepath.Join(t.TempDir(), "launched")
-			s.Run.Command = []string{"sh", "-c", "echo launched > " + marker}
+			s.Run.Command = []string{"sh", "-c", "echo launched > {work}/launched"}
 			j := submit(t, q, s)
 			m := machine("worker", "fake")
 			assigned := check(t, q, m, nil).Job
 			w := cancellationPreparingWorker(t, q, c, m, j.ID)
+			marker := filepath.Join(w.StateDir, "job-files", assigned.ID, "1", "launched")
 			store, err := w.openStore()
 			if err != nil {
 				t.Fatal(err)

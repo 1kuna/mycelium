@@ -178,20 +178,19 @@ func awaitFile(t *testing.T, path string) {
 
 func TestMachineWorkerConcurrentDevicesCPUAndNeighborStop(t *testing.T) {
 	t.Setenv("MYCE_TOKEN", "must-not-reach-payload")
-	dir := t.TempDir()
 	command := func(name, checks string) string {
-		return checks + `; echo $$ > ` + filepath.Join(dir, name) + `; echo ready; while :; do sleep 1; done`
+		return checks + `; echo $$ > {work}/` + name + `; echo ready; while :; do sleep 1; done`
 	}
 	h := &machineHarness{controls: map[string]AttemptDirective{}}
 	h.jobs = []Job{
 		harnessJob(t, "cuda", "0", command("cuda", `test "$CUDA_VISIBLE_DEVICES" = GPU-fake-a && test "$ZE_AFFINITY_MASK" = 2147483647 && test "$ONEAPI_DEVICE_SELECTOR" = '!*:*' && test "$ZE_ENABLE_PCI_ID_DEVICE_ORDER" = 1 && test -z "$MYCE_TOKEN" || exit 42`)),
 		harnessJob(t, "xpu", "1", command("xpu", `test -z "$CUDA_VISIBLE_DEVICES" && test "$ZE_AFFINITY_MASK" = 3 && test "$ONEAPI_DEVICE_SELECTOR" = level_zero:0 && test "$ZE_ENABLE_PCI_ID_DEVICE_ORDER" = 1 && test -z "$MYCE_TOKEN" || exit 42`)),
-		harnessJob(t, "cpu", "", `test -z "$CUDA_VISIBLE_DEVICES" && test "$ZE_AFFINITY_MASK" = 2147483647 && test "$ONEAPI_DEVICE_SELECTOR" = '!*:*' && test "$ZE_ENABLE_PCI_ID_DEVICE_ORDER" = 1 && test -z "$MYCE_TOKEN" && touch `+filepath.Join(dir, "cpu")),
+		harnessJob(t, "cpu", "", `test -z "$CUDA_VISIBLE_DEVICES" && test "$ZE_AFFINITY_MASK" = 2147483647 && test "$ONEAPI_DEVICE_SELECTOR" = '!*:*' && test "$ZE_ENABLE_PCI_ID_DEVICE_ORDER" = 1 && test -z "$MYCE_TOKEN" && touch {work}/cpu`),
 	}
 	w := harnessWorker(t, h)
 	startHarness(t, w, h)
 	for _, name := range []string{"cuda", "xpu", "cpu"} {
-		awaitFile(t, filepath.Join(dir, name))
+		awaitFile(t, filepath.Join(w.StateDir, "job-files", name, "1", name))
 	}
 	h.mu.Lock()
 	seen := false
@@ -215,7 +214,7 @@ func TestMachineWorkerConcurrentDevicesCPUAndNeighborStop(t *testing.T) {
 	}
 	h.stop("cuda")
 	await(t, func() bool { return h.completed("cuda") })
-	data, _ := os.ReadFile(filepath.Join(dir, "xpu"))
+	data, _ := os.ReadFile(filepath.Join(w.StateDir, "job-files", "xpu", "1", "xpu"))
 	var pid int
 	_, _ = fmt.Sscan(string(data), &pid)
 	if pid <= 0 || syscall.Kill(pid, 0) != nil || h.completed("xpu") {
@@ -229,21 +228,20 @@ func TestMachineWorkerConcurrentDevicesCPUAndNeighborStop(t *testing.T) {
 }
 
 func TestMachineWorkerParallelReadinessUploadAndControl(t *testing.T) {
-	dir := t.TempDir()
 	h := &machineHarness{controls: map[string]AttemptDirective{}, blockLog: "slow", logEntered: make(chan struct{}), unblock: make(chan struct{})}
-	h.jobs = []Job{harnessJob(t, "slow", "0", `echo ready; touch `+filepath.Join(dir, "slow-ready")+`; while :; do sleep 1; done`), harnessJob(t, "neighbor", "1", `touch `+filepath.Join(dir, "neighbor")+`; while :; do sleep 1; done`)}
+	h.jobs = []Job{harnessJob(t, "slow", "0", `echo ready; touch {work}/slow-ready; while :; do sleep 1; done`), harnessJob(t, "neighbor", "1", `touch {work}/neighbor; while :; do sleep 1; done`)}
 	w := harnessWorker(t, h)
 	startHarness(t, w, h)
 	t.Cleanup(func() { close(h.unblock) })
 	// The upload assertion starts after the payload has emitted its log, rather
 	// than charging profile/store/process startup against the upload budget.
-	awaitFile(t, filepath.Join(dir, "slow-ready"))
+	awaitFile(t, filepath.Join(w.StateDir, "job-files", "slow", "1", "slow-ready"))
 	select {
 	case <-h.logEntered:
 	case <-time.After(3 * time.Second):
 		t.Fatal("upload did not block")
 	}
-	awaitFile(t, filepath.Join(dir, "neighbor"))
+	awaitFile(t, filepath.Join(w.StateDir, "job-files", "neighbor", "1", "neighbor"))
 	h.stop("neighbor")
 	await(t, func() bool { return h.completed("neighbor") })
 	if h.completed("slow") {
@@ -262,9 +260,9 @@ func TestMachineWorkerIdentityMismatchAndCPUIsolationRefused(t *testing.T) {
 				device = ""
 				want = "cpu_accelerator_isolation_unavailable"
 			}
-			marker := filepath.Join(t.TempDir(), "ran")
-			h.jobs = []Job{harnessJob(t, "refused", device, "touch "+marker)}
+			h.jobs = []Job{harnessJob(t, "refused", device, "touch {work}/ran")}
 			w := harnessWorker(t, h)
+			marker := filepath.Join(w.StateDir, "job-files", "refused", "1", "ran")
 			if cpu {
 				w.CPUIsolationProbe = func(context.Context) error { return errors.New("visible accelerator") }
 			} else {
@@ -292,19 +290,19 @@ func TestMachineWorkerIdentityMismatchAndCPUIsolationRefused(t *testing.T) {
 }
 
 func TestMachineWorkerSidecarSharesDeviceAndMemberFailureIsLocal(t *testing.T) {
-	dir := t.TempDir()
 	h := &machineHarness{controls: map[string]AttemptDirective{}}
 	check := `test "$ZE_AFFINITY_MASK" = 3 && test "$ONEAPI_DEVICE_SELECTOR" = level_zero:0 && test -z "$CUDA_VISIBLE_DEVICES" && test "$ZE_ENABLE_PCI_ID_DEVICE_ORDER" = 1 && test -z "$MYCE_TOKEN" || exit 42; `
-	group := harnessJob(t, "group", "1", check+`touch `+filepath.Join(dir, "main")+`; while :; do sleep 1; done`)
-	group.Spec.Run.Sidecars = []NativeSidecar{{Name: "helper", MemoryGB: .1, Command: []string{"sh", "-c", check + `touch ` + filepath.Join(dir, "side") + `; while test ! -f ` + filepath.Join(dir, "fail") + `; do sleep .01; done; exit 7`}}}
-	neighbor := harnessJob(t, "neighbor", "0", `echo $$ > `+filepath.Join(dir, "neighbor")+`; while :; do sleep 1; done`)
+	group := harnessJob(t, "group", "1", check+`touch {work}/main; while :; do sleep 1; done`)
+	group.Spec.Run.Sidecars = []NativeSidecar{{Name: "helper", MemoryGB: .1, Command: []string{"sh", "-c", check + `touch {work}/side; while test ! -f {work}/fail; do sleep .01; done; exit 7`}}}
+	neighbor := harnessJob(t, "neighbor", "0", `echo $$ > {work}/neighbor; while :; do sleep 1; done`)
 	h.jobs = []Job{group, neighbor}
 	w := harnessWorker(t, h)
 	startHarness(t, w, h)
-	for _, name := range []string{"main", "side", "neighbor"} {
-		awaitFile(t, filepath.Join(dir, name))
+	for _, name := range []string{"main", "side"} {
+		awaitFile(t, filepath.Join(w.StateDir, "job-files", "group", "1", name))
 	}
-	if err := os.WriteFile(filepath.Join(dir, "fail"), nil, 0600); err != nil {
+	awaitFile(t, filepath.Join(w.StateDir, "job-files", "neighbor", "1", "neighbor"))
+	if err := os.WriteFile(filepath.Join(w.StateDir, "job-files", "group", "1", "fail"), nil, 0600); err != nil {
 		t.Fatal(err)
 	}
 	await(t, func() bool { return h.completed("group") })
@@ -407,18 +405,17 @@ func readSingleAttemptState(path string) ([]byte, error) {
 }
 
 func TestMachineWorkerSlowReadinessNeighborControls(t *testing.T) {
-	dir := t.TempDir()
 	h := &machineHarness{controls: map[string]AttemptDirective{}}
 	slow := harnessJob(t, "slow", "1", "exit 99")
 	port := 0
-	slow.Spec.Run.Sidecars = []NativeSidecar{{Name: "waiting", MemoryGB: .1, Port: &port, Readiness: &NativeReadiness{Path: "/ready", Timeout: "1m"}, Command: []string{"sh", "-c", "touch " + filepath.Join(dir, "side") + `; while :; do sleep 1; done`}}}
-	neighbor := harnessJob(t, "neighbor", "0", "touch "+filepath.Join(dir, "neighbor")+`; while :; do sleep 1; done`)
+	slow.Spec.Run.Sidecars = []NativeSidecar{{Name: "waiting", MemoryGB: .1, Port: &port, Readiness: &NativeReadiness{Path: "/ready", Timeout: "1m"}, Command: []string{"sh", "-c", `touch {work}/side; while :; do sleep 1; done`}}}
+	neighbor := harnessJob(t, "neighbor", "0", `touch {work}/neighbor; while :; do sleep 1; done`)
 	h.jobs = []Job{slow, neighbor}
 	w := harnessWorker(t, h)
 	w.memoryCeilings = fakeCeilings(t)
 	startHarness(t, w, h)
-	awaitFile(t, filepath.Join(dir, "side"))
-	awaitFile(t, filepath.Join(dir, "neighbor"))
+	awaitFile(t, filepath.Join(w.StateDir, "job-files", "slow", "1", "side"))
+	awaitFile(t, filepath.Join(w.StateDir, "job-files", "neighbor", "1", "neighbor"))
 	parents, err := filepath.Glob(filepath.Join(w.memoryCeilings.root, "attempt-*"))
 	if err != nil || len(parents) != 2 {
 		t.Fatalf("attempt cgroup parents: %v %v", parents, err)
@@ -520,11 +517,10 @@ func TestMachineWorkerCrashHelper(t *testing.T) {
 	}
 }
 func TestMachineWorkerRestartCleansTwoRunningAttempts(t *testing.T) {
-	dir := t.TempDir()
 	h := &machineHarness{controls: map[string]AttemptDirective{}}
 	for i := 0; i < 2; i++ {
 		id := fmt.Sprint(i)
-		h.jobs = append(h.jobs, harnessJob(t, "running-"+id, id, `touch `+filepath.Join(dir, id)+`; while :; do sleep 1; done`))
+		h.jobs = append(h.jobs, harnessJob(t, "running-"+id, id, `touch {work}/`+id+`; while :; do sleep 1; done`))
 	}
 	w := harnessWorker(t, h)
 	child := exec.Command(os.Args[0], "-test.run=^TestMachineWorkerCrashHelper$")
@@ -535,7 +531,7 @@ func TestMachineWorkerRestartCleansTwoRunningAttempts(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = child.Process.Kill(); _ = child.Wait() })
 	for i := 0; i < 2; i++ {
-		awaitFile(t, filepath.Join(dir, fmt.Sprint(i)))
+		awaitFile(t, filepath.Join(w.StateDir, "job-files", "running-"+fmt.Sprint(i), "1", fmt.Sprint(i)))
 	}
 	var before []workerState
 	root, err := w.openStore()
