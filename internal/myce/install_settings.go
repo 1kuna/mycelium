@@ -208,6 +208,12 @@ func InstallSettings() []InstallSetting {
 		installPath("checkpoint-root", "Checkpoints", "worker checkpoint root", func(c *ServiceConfig) *string { return &c.Checkpoints }, false),
 		installPath("checkpoints", "Checkpoints", "queue checkpoint root (alias of checkpoint-root)", func(c *ServiceConfig) *string { return &c.Checkpoints }, false),
 		installPath("model-root", "ModelRoot", "NAS model root", func(c *ServiceConfig) *string { return &c.ModelRoot }, false),
+		installContext(installSetting("native-minimal-root", "NativeMinimalRoot", "require Linux minimal-root namespaces (off by default; never changes host policy)", func(c *ServiceConfig) *bool { return &c.NativeMinimalRoot }, installAny[bool]), func(c ServiceConfig) error {
+			if c.NativeMinimalRoot && (c.Role != "worker" || c.Detection.OS != "linux") {
+				return errors.New("native-minimal-root requires a Linux worker")
+			}
+			return nil
+		}),
 		installSetting("native-read-root", "NativeReadRoots", "operator-granted native read-only root (absolute; repeat; empty clears)", func(c *ServiceConfig) *[]string { return &c.NativeReadRoots }, validateNativeRootPaths),
 		installSetting("native-exec-root", "NativeExecuteRoots", "operator-granted native read/execute root (absolute; repeat; empty clears)", func(c *ServiceConfig) *[]string { return &c.NativeExecuteRoots }, validateNativeRootPaths),
 		installPath("environment-root", "EnvironmentRoot", "NAS environment root", func(c *ServiceConfig) *string { return &c.EnvironmentRoot }, false),

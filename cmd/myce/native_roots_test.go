@@ -14,6 +14,8 @@ func TestJoinNativeRootFlags(t *testing.T) {
 		flags []string
 		want  string
 	}{
+		{"minimal-root", []string{"--native-minimal-root"}, "heartbeat must be positive"},
+		{"minimal-root-disabled", []string{"--native-minimal-root=false"}, "heartbeat must be positive"},
 		{"repeated", []string{"--native-read-root", "/fixture/models,version-2", "--native-read-root", "/fixture/other models", "--native-exec-root", "/fixture/runtime,version-2", "--native-exec-root", "/fixture/other runtime"}, "heartbeat must be positive"},
 		{"clear", []string{"--native-read-root=/fixture/models", "--native-read-root=", "--native-exec-root=/fixture/runtime", "--native-exec-root="}, "heartbeat must be positive"},
 		{"relative", []string{"--native-read-root=relative"}, "native roots must be absolute"},

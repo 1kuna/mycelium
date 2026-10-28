@@ -66,6 +66,8 @@ func savedInstallFixture(t *testing.T, roles ...string) (myce.ServiceConfig, myc
 	// Chassis declarations are exclusive; preserve both true and false policy
 	// values without constructing an invalid laptop+desktop fixture.
 	c.Desktop = false
+	// Minimal-root is worker-only; preserve its true value on the Linux worker.
+	c.NativeMinimalRoot = role == "worker"
 	if role == "worker" {
 		c.RequireMemoryCeilings = true
 

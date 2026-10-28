@@ -6,7 +6,7 @@ func nativeNetworkFits(j *Job, m *Machine) bool {
 	if j.Spec.Run.Docker {
 		return true
 	}
-	if !contains(m.Capabilities, "native_isolation_landlock") && !contains(m.Capabilities, "native_isolation_namespace") && !contains(m.Capabilities, "native_isolation_seatbelt") {
+	if !contains(m.Capabilities, "native_isolation_landlock") && !contains(m.Capabilities, "native_isolation_namespace") && !contains(m.Capabilities, "native_isolation_minimal_root") && !contains(m.Capabilities, "native_isolation_seatbelt") {
 		return false
 	}
 	if j.Spec.Needs.Network && !contains(m.Capabilities, "native_network") {

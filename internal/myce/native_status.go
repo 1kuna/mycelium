@@ -14,6 +14,8 @@ func nativeIsolationStatus(m Machine) string {
 	switch {
 	case contains(m.Capabilities, "native_isolation_landlock"):
 		return "native isolation: Landlock + seccomp; partial network isolation (reserved sidecar TCP ports permit off-host traffic); same-UID pathname SEQPACKET endpoints reachable (partial); general egress unavailable"
+	case contains(m.Capabilities, "native_isolation_minimal_root"):
+		return "native isolation: minimal-root user/mount/PID/IPC/network namespaces; socket-free runtime mounts; general egress unavailable"
 	case contains(m.Capabilities, "native_isolation_namespace"):
 		return "native isolation: user/mount/PID/IPC/network namespaces; general egress unavailable"
 	case contains(m.Capabilities, "native_isolation_seatbelt"):

@@ -58,13 +58,13 @@ type nativeNamespace struct {
 }
 
 func (w Worker) prepareNativeGroupIsolation(cmd *exec.Cmd, spool, work string, env map[string]string, network bool) (*nativeNamespace, error) {
-	s, err := nativeIsolationSupport(network)
+	s, err := w.nativeIsolationSupport(network)
 	if err != nil {
 		return nil, err
 	}
 	n := &nativeNamespace{support: s}
 	cmd.Env = environmentList(jobBaseEnvironment())
-	if s.mode != "namespace" {
+	if s.mode != "namespace" && s.mode != "minimal_root" {
 		return n, nil
 	}
 	cmd.Dir = work
@@ -89,7 +89,13 @@ func (w Worker) prepareNativeGroupIsolation(cmd *exec.Cmd, spool, work string, e
 	args := append(nativeBwrapPolicyArgs(p), "--info-fd", "3", "--")
 	args = append(args, executable, "_native-exec", "namespace-anchor", "/bin/sh", "-c", `printf R >&4; exec 4>&-; exec "$@"`, "myce-namespace-ready")
 	args = append(args, cmd.Args...)
-	args, err = nativeNamespaceMonitorArgs(s.bwrap, args)
+	if w.NativeMinimalRoot {
+		// Construct and pin mounts only after the existing attachment gate.
+		payload := append([]string{executable, "_native-exec", "minimal-anchor", "/bin/sh", "-c", `printf R >&4; exec 4>&-; exec "$@"`, "myce-namespace-ready"}, cmd.Args...)
+		args, err = nativeMinimalLaunchArgs(s.bwrap, p, payload, true)
+	} else {
+		args, err = nativeNamespaceMonitorArgs(s.bwrap, args)
+	}
 	if err != nil {
 		n.close()
 		return nil, err
@@ -125,7 +131,7 @@ func (n *nativeNamespace) close() {
 }
 
 func (n *nativeNamespace) activate(ctx context.Context, gate *os.File) error {
-	if n == nil || n.support.mode != "namespace" {
+	if n == nil || n.support.mode != "namespace" && n.support.mode != "minimal_root" {
 		return nil
 	}
 	defer n.close()
@@ -204,12 +210,16 @@ func (n *nativeNamespace) isolate(w Worker, cmd *exec.Cmd, spool, work string, e
 	}
 	// nsenter must fork after setns(CLONE_NEWPID), its default behavior. Do not
 	// use --no-fork: that would execute the payload outside the PID namespace.
-	enter := []string{n.support.nsenter, "--target", strconv.Itoa(n.pid), "--user", "--mount", "--pid", "--ipc", "--net", "--root", "--wdns", cmd.Dir, "--preserve-credentials", "--"}
+	enter := n.enterArgs(cmd.Dir)
 	if err := nativeWrapPayload(cmd, append(enter, args...)); err != nil {
 		return err
 	}
 	cmd.Env = environmentList(jobBaseEnvironment())
 	return nil
+}
+
+func (n *nativeNamespace) enterArgs(dir string) []string {
+	return []string{n.support.nsenter, "--target", strconv.Itoa(n.pid), "--user", "--mount", "--pid", "--ipc", "--net", "--root", "--wdns", dir, "--preserve-credentials", "--"}
 }
 
 func nativeNamespaceMemberArgs(args []string) []string {

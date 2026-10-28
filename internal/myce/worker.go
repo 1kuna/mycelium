@@ -93,6 +93,7 @@ type Worker struct {
 	CopyParallel         int
 	CacheRoot, ModelRoot string
 	// Operator-owned local runtime/model grants; never derived from run.env.
+	NativeMinimalRoot           bool // Operator opt-in; Linux service-context probe required.
 	NativeReadRoots             []string
 	NativeExecuteRoots          []string
 	nativeMetricCgroups         []string // Trusted attempt-member cgroups only.
@@ -570,7 +571,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (*proce
 	}
 	env["MYCE_SCRATCH_DIR"] = scratch
 	if len(j.Spec.Run.Sidecars) > 0 || j.Spec.Run.MemoryGB > 0 {
-		p, e := w.startNativeGroup(s, j, identity, memoryAttempt, env, environmentPath, extensionRelease, release)
+		p, e := w.startNativeGroup(ctx, s, j, identity, memoryAttempt, env, environmentPath, extensionRelease, release)
 		if e == nil {
 			environmentStarted, extensionStarted, started = true, true, true
 		}
@@ -915,6 +916,12 @@ func (w Worker) Run(stop context.Context) error {
 	w.environmentCache = &EnvironmentCache{Root: w.EnvironmentRoot, Limit: w.EnvironmentLimit, Clock: w.Clock, Run: w.environmentRun}
 	if err = w.environmentCache.Cleanup(context.Background()); err != nil {
 		return err
+	}
+	if w.NativeMinimalRoot {
+		w.StateDir = s.dir
+		if err := w.requireNativeMinimalRoot(); err != nil {
+			return err
+		}
 	}
 	environments := &environmentRuntime{authorize: w.authorizeLaunch, dir: s.dir, cache: w.environmentCache, reports: map[string]EnvironmentReport{}}
 	if err = environments.restore(); err != nil {

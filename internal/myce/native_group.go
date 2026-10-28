@@ -56,6 +56,7 @@ type nativeGroup struct {
 	memory                 *memoryAttempt
 	control                *memoryAttempt
 	memberMemory           map[string]*memoryAttempt
+	preparedRoots          map[string]string // Minimal-root snapshot includes all prepared sidecar runtimes.
 	custody                workerState
 	supervisor             *exec.Cmd
 }
@@ -143,6 +144,14 @@ func (g *nativeGroup) stopLocked(now time.Time, grace time.Duration, kill bool) 
 			}
 		}
 	}
+	if g.supervisor == nil {
+		// Strict mode is registered while its environments are acquired,
+		// before any anchor exists. Cancellation closes that preparation gate;
+		// there is no process group to signal or checkpoint grace to wait for.
+		p.stopped = true
+		p.killed = p.killed || kill
+		return
+	}
 	if kill {
 		if !p.killed {
 			g.signalLocked(nil, syscall.SIGKILL)
@@ -164,6 +173,9 @@ func (g *nativeGroup) stopLocked(now time.Time, grace time.Duration, kill bool) 
 }
 
 func (g *nativeGroup) signalLocked(member *nativeMember, signal syscall.Signal) {
+	if g.supervisor == nil {
+		return
+	}
 	if member != nil && member.Exit != nil {
 		return
 	}
@@ -246,7 +258,7 @@ func (g *nativeGroup) recordInfrastructureLocked(kind, member, port string, caus
 	return cause
 }
 
-func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory *memoryAttempt, env map[string]string, mainEnvironment string, releases ...func()) (*process, error) {
+func (w Worker) startNativeGroup(startCtx context.Context, s *workerStore, j Job, identity string, memory *memoryAttempt, env map[string]string, mainEnvironment string, releases ...func()) (*process, error) {
 	logName := identity + ".log"
 	output, err := openCommandOutput(s.dir, logName, j.Spec.Logs, os.O_EXCL)
 	if err != nil {
@@ -264,24 +276,57 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 	s.state.OperatorStopped = false
 	p := &process{stopGrace: w.AcceleratorStopGrace, job: j, done: make(chan workerFinish, 1), savePriorityStop: s.priorityStopRecorder()}
 	ctx, cancel := context.WithCancel(context.Background())
+	if w.NativeMinimalRoot {
+		// Link only synchronous preparation/startup to the caller's context.
+		// Running groups retain controller-owned TERM/checkpoint grace.
+		detach := context.AfterFunc(startCtx, cancel)
+		defer detach()
+	}
 	g := &nativeGroup{p: p, worker: w, dir: s.dir, identity: identity, session: s.state.Session, ctx: ctx, cancel: cancel, memory: memory, custody: workerState{Identity: identity, StopGrace: acceleratorStopGrace(w.AcceleratorStopGrace), Groups: map[int]map[int]string{}}}
 	p.native = g
+	registered, started := false, false
+	defer func() {
+		if !started {
+			if registered {
+				w.control.remove(j)
+			}
+			cancel()
+			for _, release := range g.releases {
+				release()
+			}
+			output.Close()
+		}
+	}()
 	if memory != nil {
 		g.custody.Cgroup = memory.path
 	}
 	if err := g.setupMemory(); err != nil {
-		cancel()
-		output.Close()
 		return nil, err
+	}
+	if w.NativeMinimalRoot {
+		// The existing controller owns cancellation/preemption even before
+		// anchor startup. A held cache/build lock must not hide this attempt.
+		if w.control != nil {
+			w.control.set(p)
+			registered = true
+		}
+		if err := g.prepareSidecarEnvironments(j, mainEnvironment); err != nil {
+			if ctx.Err() != nil {
+				return nil, s.startFailure(j, launchRefused, err)
+			}
+			return nil, s.startFailure(j, environmentFailed, err)
+		}
 	}
 	writer, err := g.startSupervisor(s, env)
 	if err != nil {
-		cancel()
-		output.Close()
+		if w.NativeMinimalRoot && ctx.Err() != nil {
+			return nil, s.startFailure(j, launchRefused, err)
+		}
 		return nil, err
 	}
-	if w.control != nil {
+	if w.control != nil && !registered {
 		w.control.set(p)
+		registered = true
 	}
 	// A port-collision retry replaces the supervisor and its process group.
 	finishMemory := w.observeAttemptMemory(memory, j, func() []int {
@@ -373,6 +418,7 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 		saveErr := saveWorkerJSON(g.dir, identity+".result.json", r)
 		p.done <- workerFinish{result: r, err: saveErr}
 	}()
+	started = true // The running group's goroutine now owns cancellation/releases.
 	return p, nil
 }
 
@@ -396,7 +442,7 @@ func (g *nativeGroup) startSupervisor(s *workerStore, env map[string]string) (*o
 	cmd.Env = environmentList(jobBaseEnvironment())
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	work := filepath.Join(g.dir, "job-files", g.p.job.ID, strconv.Itoa(g.p.job.Attempt))
-	g.namespace, err = g.worker.prepareNativeGroupIsolation(cmd, g.dir, work, env, g.p.job.Spec.Needs.Network)
+	g.namespace, err = g.metricWorker().prepareNativeGroupIsolation(cmd, g.dir, work, env, g.p.job.Spec.Needs.Network)
 	if err != nil {
 		writer.Close()
 		return nil, err
@@ -725,9 +771,7 @@ func (g *nativeGroup) independentMemberFailure() bool {
 	return false
 }
 
-func (g *nativeGroup) run(j Job, base map[string]string, mainEnvironment string, output *os.File) (error, bool) {
-	// Acquire all helper environments before starting any payload; hold cache use
-	// protections until every member has exited (the outer goroutine defers release).
+func (g *nativeGroup) prepareSidecarEnvironments(j Job, mainEnvironment string) error {
 	roots := map[string]string{}
 	for _, side := range j.Spec.Run.Sidecars {
 		root, release, err := g.sidecarEnvironment(j, side, mainEnvironment)
@@ -735,13 +779,26 @@ func (g *nativeGroup) run(j Job, base map[string]string, mainEnvironment string,
 			if !errors.Is(err, context.Canceled) {
 				err = g.recordInfrastructure(environmentFailed, side.Name, "", err)
 			}
-			return err, false
+			return err
 		}
 		roots[side.Name] = root
 		if release != nil {
 			g.releases = append(g.releases, release)
 		}
 	}
+	g.preparedRoots = roots
+	return nil
+}
+
+func (g *nativeGroup) run(j Job, base map[string]string, mainEnvironment string, output *os.File) (error, bool) {
+	// Acquire all helper environments before starting any payload; hold cache use
+	// protections until every member has exited (the outer goroutine defers release).
+	if g.preparedRoots == nil || !g.worker.NativeMinimalRoot {
+		if err := g.prepareSidecarEnvironments(j, mainEnvironment); err != nil {
+			return err, false
+		}
+	}
+	roots := g.preparedRoots
 	reservations := map[string]net.Listener{}
 	defer func() {
 		for _, l := range reservations {

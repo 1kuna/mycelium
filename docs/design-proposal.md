@@ -588,6 +588,20 @@ isolating each member would break sidecar loopback. The installed worker's
 service context must pass the capability probe. The current implementation
 requires Landlock ABI >= 6 and working `bwrap`/`nsenter` for this stack.
 
+The separate #262 upgrade is an off-by-default operator setting,
+`--native-minimal-root`, requiring a successful service-context anchor/join and
+confinement probe. It constructs an empty root with socket-free FD-pinned
+regular-file runtime/cache mounts, private run/tmp/shm/proc, exact attempt paths,
+verified assigned devices and exact current/main/sidecar metrics without a
+cgroup2 tree. No full runtime/model copies or per-attempt AppArmor manager are
+introduced. Additional namespace SEQPACKET permission follows final verification
+of that mounted boundary; a namespace boolean or authored environment cannot
+activate it. Explicit opt-in failures never select the old root or fallback.
+See the [construction, trusted-artifact assumptions and qualification limits](native-minimal-root.md).
+This source upgrade is unqualified, and only its Linux qualification awaits
+the operator's per-host policy approval; existing Option B qualification retains its
+separate gates. Default #257 behavior and the approved fallback residual remain.
+
 Only namespace **policy refusal** permits the narrower Landlock ABI >= 6 plus
 seccomp fallback. Missing tools, unsupported ABI, broken setup or timeout fail
 closed. Landlock allows TCP connect/bind only on the exact worker-reserved
@@ -597,7 +611,7 @@ The [v1 exception](https://github.com/1kuna/mycelium/issues/177#issuecomment-645
 permits fallback-only AF_UNIX `SOCK_SEQPACKET` creation, protocol zero and normal
 CLOEXEC/NONBLOCK flags, retaining Landlock abstract/signal scoping and every
 other denial. **same-UID pathname SEQPACKET endpoints reachable (partial)**:
-this cannot enforce abstract-only access. Namespace mode retains its Unix
+this cannot enforce abstract-only access. The default host-root namespace retains its Unix
 endpoint denial. Private Unix stream socketpairs remain available for process
 wakeups; datagram and seqpacket pairs remain denied. A cheap startup inventory
 warns about unexpected non-root/non-CUDA seqpacket listeners, unknown ownership
@@ -611,9 +625,9 @@ TCP connects/binds are permitted. Landlock does not isolate metadata: `stat`,
 ordinary host permissions. Do not describe it as a private filesystem or as
 protection against every form of sibling interference.
 
-Both Linux modes are currently **offline-only** capabilities: namespace egress
+All Linux modes are currently **offline-only** capabilities: namespace egress
 transport is unqualified, while the fallback's reserved-port exception does not
-qualify general outbound access. Neither advertises `native_network`.
+qualify general outbound access. None advertises `native_network`.
 `needs.network: true` is the explicit declaration for payload-time downloads or
 API calls. Placement requires an online-capable host; submission returns
 `no_qualified_target` immediately if none qualifies, rather than accepting an
@@ -1912,7 +1926,7 @@ placement changes require their later amendments.
 
 ## Safe sparse curves (slice 2, #107; approved 2026-10-24)
 
-The orchestrator approves this slice under Zach's delegated design authority,
+The orchestrator approves this slice under the operator's delegated design authority,
 following the [research build plan](research/benchmark-batch-placement.md#incremental-build-plan).
 Placement and ordinary admission/concurrency limits remain unchanged.
 
@@ -1954,7 +1968,7 @@ Native mixed-load curves and fleet acceptance require separate authorization.
 
 ## Completion-aware placement (slice 3, #107; approved 2026-10-24)
 
-The orchestrator approves this slice under Zach's delegated design authority,
+The orchestrator approves this slice under the operator's delegated design authority,
 following the [research build plan](research/benchmark-batch-placement.md#incremental-build-plan).
 Rank qualified extension commands using a common completion estimate: declared
 workload units divided by the exact comparable serial measured rate, plus cold
@@ -1985,7 +1999,7 @@ eligibility boundary, before completion ranking; no quality policy is added here
 
 ## Amendment: job memory envelopes (#146)
 
-Approved by the orchestrator under Zach's delegated design authority, 2026-10-24.
+Approved by the orchestrator under the operator's delegated design authority, 2026-10-24.
 Explicit `needs.host_memory_gb` and GPU `needs.memory_gb` retain their current
 admission meanings and defaults, including production. Optional `needs.memory:
 auto` first selects fresh accepted slice-1 whole-attempt peaks for the same
@@ -2080,7 +2094,7 @@ fdinfo size format (bare bytes, KiB or MiB); both remain unverified on that host
 
 ## Declared fan-out and batch planning (slice 4, #107; approved 2026-10-24)
 
-The orchestrator approves this slice under Zach's delegated design authority,
+The orchestrator approves this slice under the operator's delegated design authority,
 following the [research build plan](research/benchmark-batch-placement.md#incremental-build-plan).
 This approval covers explicit homogeneous independent pieces, measured discrete
 horizon planning, and the model-measurement binding deferred from slice 3.

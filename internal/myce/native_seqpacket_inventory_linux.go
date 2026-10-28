@@ -42,6 +42,9 @@ func nativeSeqpacketStartupWarning(data []byte, readErr error) string {
 }
 
 func (w *Worker) checkNativeSeqpacketStartup() {
+	if w.NativeMinimalRoot {
+		return
+	} // No fallback selection or advisory inventory in this opt-in path.
 	if nativeLinuxDetection().mode != "landlock" {
 		return
 	}

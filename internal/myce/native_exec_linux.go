@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"runtime"
@@ -21,6 +22,28 @@ import (
 // cgroup/authorization gate. Restrictions apply to this OS thread and all of
 // the payload's descendants; never call it in the worker process itself.
 func NativeExec(args []string) error {
+	if len(args) > 0 && args[0] == "minimal-probe-anchor" {
+		nativeMinimalCloseInfoFD()
+		ready := os.NewFile(4, "minimal-root probe ready")
+		_, err := ready.WriteString("R")
+		ready.Close()
+		if err != nil {
+			return err
+		}
+		_, err = io.Copy(io.Discard, os.Stdin)
+		return err
+	}
+	if len(args) > 0 && args[0] == "minimal-anchor" {
+		// The anchor is trusted, but must not retain setup source handles.
+		if err := unix.CloseRange(5, ^uint(0), unix.CLOSE_RANGE_CLOEXEC); err != nil {
+			return err
+		}
+		nativeMinimalCloseInfoFD() // bwrap has already delivered its host child identity.
+		return nativeNamespaceExec(args[1:], os.Environ())
+	}
+	if len(args) > 0 && args[0] == "minimal-launch" {
+		return nativeMinimalLaunch(args[1:])
+	}
 	if len(args) > 0 && args[0] == "namespace-monitor" {
 		return nativeNamespaceMonitor(args[1:])
 	}
@@ -49,7 +72,13 @@ func NativeExec(args []string) error {
 	}
 	// Membership is meaningful only here, after the worker's attachment gate
 	// and any namespace join. Authored environment paths never select grants.
-	metrics, err := nativeCgroupMetrics(p)
+	var metrics []string
+	if p.MinimalRoot {
+		// A policy boolean requests verification; it never grants SEQPACKET.
+		metrics, err = nativeVerifyMinimalRoot(p)
+	} else {
+		metrics, err = nativeCgroupMetrics(p)
+	}
 	if err != nil {
 		return fmt.Errorf("native cgroup metrics: %w", err)
 	}
@@ -57,7 +86,7 @@ func NativeExec(args []string) error {
 	if err := nativeApplyLandlock(p); err != nil {
 		return fmt.Errorf("native Landlock: %w", err)
 	}
-	if err := nativeApplySeccomp(p.Namespace, len(p.Ports) > 0); err != nil {
+	if err := nativeApplySeccompMode(p.Namespace, len(p.Ports) > 0, p.MinimalRoot); err != nil {
 		return fmt.Errorf("native seccomp: %w", err)
 	}
 	// Keep start-by receipts 3/4 alive until _command-exec consumes them. All
@@ -129,6 +158,17 @@ func nativeApplyLandlock(p nativeLinuxPolicy) error {
 			return err
 		}
 	}
+	if p.MinimalRoot {
+		// Private temp remains usable, but its recursive grant must not add
+		// execution to imported RO trees beneath /tmp. Exact work and RX
+		// grants retain execution. Constructed import directories also have
+		// their own read-only mounts, preventing insertion beneath this grant.
+		for _, path := range []string{"/run", "/tmp"} {
+			if err := addPath(path, write&^unix.LANDLOCK_ACCESS_FS_EXECUTE, false); err != nil {
+				return err
+			}
+		}
+	}
 	// Resolve self inside the payload's PID namespace, not in the worker. Do
 	// not expose other processes' environ, mem, root or descriptors via /proc.
 	for _, path := range []string{"/proc/self", "/proc/thread-self"} {
@@ -168,6 +208,10 @@ func nativeApplyLandlock(p nativeLinuxPolicy) error {
 }
 
 func nativeSeccompFilter(namespace, tcp bool) ([]unix.SockFilter, error) {
+	return nativeSeccompFilterMode(namespace, tcp, false)
+}
+
+func nativeSeccompFilterMode(namespace, tcp, minimal bool) ([]unix.SockFilter, error) {
 	var arch uint32
 	switch runtime.GOARCH {
 	case "amd64":
@@ -197,10 +241,11 @@ func nativeSeccompFilter(namespace, tcp bool) ([]unix.SockFilter, error) {
 		f = append(f, jump(number, 0, 1), deny)
 	}
 	socket := []unix.SockFilter{stmt(unix.BPF_LD|unix.BPF_W|unix.BPF_ABS, 16)}
-	if !namespace {
-		// CUDA needs Unix SEQPACKET listeners in fallback, even without TCP
-		// ports. Landlock scopes abstract sockets, but cannot mediate pathname
-		// connects: same-UID pathname SEQPACKET endpoints remain reachable.
+	if !namespace || minimal {
+		// CUDA needs Unix SEQPACKET listeners, even without TCP ports. Fallback
+		// keeps its explicit v1 residual; the minimal-root caller must first
+		// verify constructed mounts. The old host-root namespace stays denied.
+		// Landlock scopes abstract sockets, but cannot mediate pathname connects.
 		// Classic BPF cannot dereference sockaddr to distinguish the two.
 		socket = append(socket, jump(unix.AF_UNIX, 0, 8),
 			stmt(unix.BPF_LD|unix.BPF_W|unix.BPF_ABS, 24), stmt(unix.BPF_ALU|unix.BPF_AND|unix.BPF_K, ^uint32(unix.SOCK_CLOEXEC|unix.SOCK_NONBLOCK)), jump(unix.SOCK_SEQPACKET, 1, 0), deny,
@@ -228,7 +273,11 @@ func nativeSeccompFilter(namespace, tcp bool) ([]unix.SockFilter, error) {
 }
 
 func nativeApplySeccomp(namespace, tcp bool) error {
-	filter, err := nativeSeccompFilter(namespace, tcp)
+	return nativeApplySeccompMode(namespace, tcp, false)
+}
+
+func nativeApplySeccompMode(namespace, tcp, minimal bool) error {
+	filter, err := nativeSeccompFilterMode(namespace, tcp, minimal)
 	if err != nil {
 		return err
 	}
