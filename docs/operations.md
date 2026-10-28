@@ -827,7 +827,8 @@ as they are.
 Removal uses the normal collector's exact attempt/worker label checks, matching
 acknowledgement, elapsed retention, confirmed released custody, stopped state,
 no-restart policy and private exit evidence. Removal never uses force.
-`verso-*` and `docker-render-1` containers are always protected.
+Containers without matching `myce.attempt` and `myce.worker` ownership labels
+are never removed; container names do not determine ownership.
 
 The JSON report lists every inventoried container, whether removal was confirmed,
 and a reason for each hold. Missing or invalid custody/acknowledgements, active

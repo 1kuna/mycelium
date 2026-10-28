@@ -94,14 +94,11 @@ func reconcileRetiredDockerSource(ctx context.Context, source ServiceConfig, now
 	candidates := map[string]bool{}
 	for _, c := range objects {
 		reason := ""
-		name := strings.TrimPrefix(c.Name, "/")
 		switch {
 		case inventoryErr != nil:
 			reason = "incomplete Docker inventory"
 		case c.Config.Labels["myce.worker"] != source.Name:
 			reason = "worker ownership label mismatch"
-		case strings.HasPrefix(name, "verso-") || name == "docker-render-1":
-			reason = "protected container"
 		case dockerLive(c) || c.HostConfig.RestartPolicy == nil || c.HostConfig.RestartPolicy.Name != "no":
 			reason = "stopped state or no-restart policy unconfirmed"
 		default:
