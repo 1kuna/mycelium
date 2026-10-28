@@ -154,7 +154,7 @@ func TestMemoryCeilingWorkerOOMIsCommandFailure(t *testing.T) {
 	j.Spec.Resumable = false
 	j.Spec.Needs.HostMemoryGB = 5
 	w = workerWithPreparedCheckpoint(t, w, s, j)
-	p, err := w.start(s, j)
+	p, err := startAfterFixtureInputs(t, w, s, j)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +293,7 @@ func TestMemoryCeilingFinalLiveRAMGate(t *testing.T) {
 	j := recoveryJob(t, []string{"true"})
 	j.Spec.Resumable = false
 	j.Spec.Needs.HostMemoryGB = 5
-	if p, err := w.start(s, j); err == nil || p != nil || !strings.Contains(err.Error(), "host RAM") {
+	if p, err := startAfterFixtureInputs(t, w, s, j); err == nil || p != nil || !strings.Contains(err.Error(), "host RAM") {
 		t.Fatalf("preparation stale RAM admitted: %v %v", p, err)
 	}
 }
@@ -338,7 +338,7 @@ func TestMemoryCeilingAttachFailureNeverRunsPayload(t *testing.T) {
 	marker := filepath.Join(s.dir, "job-files", j.ID, "1", "started")
 	j.Spec.Resumable = false
 	j.Spec.Needs.HostMemoryGB = 5
-	if p, err := w.start(s, j); err == nil || p != nil {
+	if p, err := startAfterFixtureInputs(t, w, s, j); err == nil || p != nil {
 		t.Fatalf("attach refusal ignored: %v %v", p, err)
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
@@ -593,7 +593,7 @@ func TestRequireMemoryCeilingsStartupAndDeclarations(t *testing.T) {
 	defer s.close()
 	j := recoveryJob(t, []string{"sh", "-c", "exit 0"})
 	j.Spec.Needs.HostMemoryGB = 0
-	if _, err := w.start(s, j); err == nil || !strings.Contains(err.Error(), "host_memory_gb") {
+	if _, err := startAfterFixtureInputs(t, w, s, j); err == nil || !strings.Contains(err.Error(), "host_memory_gb") {
 		t.Fatal("undeclared job started", err)
 	}
 	rt := modelRuntime{requireMemoryCeilings: true}

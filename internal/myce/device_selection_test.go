@@ -154,7 +154,7 @@ func TestDeviceSelectionBatchEnvironment(t *testing.T) {
 				}
 				j := recoveryJob(t, []string{"sh", "-c", check})
 				w = workerWithPreparedCheckpoint(t, w, s, j)
-				p, err := w.start(s, j)
+				p, err := startAfterFixtureInputs(t, w, s, j)
 				if err != nil {
 					t.Fatal(err)
 				}

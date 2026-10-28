@@ -32,7 +32,7 @@ func testWorkerPreparationToleratesSlowMetadata(t *testing.T) {
 		return prepareCheckpoint(j)
 	}
 	defer func() { <-finished }()
-	p, err := w.start(s, j)
+	p, err := startAfterFixtureInputs(t, w, s, j)
 	if err != nil {
 		t.Fatalf("healthy slow preparation rejected: %v", err)
 	}
@@ -70,7 +70,7 @@ func testWorkerPreparationTimeoutRetainsSingleCall(t *testing.T) {
 	defer func() { close(release); <-finished }()
 	for i := 0; i < 2; i++ {
 		done := make(chan error, 1)
-		go func() { _, err := w.start(s, j); done <- err }()
+		go func() { _, err := startAfterFixtureInputs(t, w, s, j); done <- err }()
 		select {
 		case err := <-done:
 			if !errors.Is(err, errWorkerCheckpoint) || !strings.Contains(err.Error(), "NAS unreachable: filesystem operation timed out") {
@@ -206,7 +206,10 @@ func TestWorkerPreparationCancellationRetainsSingleCall(t *testing.T) {
 		defer func() { close(release); <-finished }()
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
-		go func() { _, err := w.startContext(ctx, s, recoveryJob(t, []string{"true"})); done <- err }()
+		go func() {
+			_, err := startAfterFixtureInputsContext(t, ctx, w, s, recoveryJob(t, []string{"true"}))
+			done <- err
+		}()
 		<-entered
 		cancel()
 		if err := <-done; !errors.Is(err, errWorkerCheckpoint) || s.state.PID != 0 || s.state.Result != nil {

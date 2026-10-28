@@ -55,7 +55,7 @@ func TestReviewDeadlineDelayedGateMustNotExecute(t *testing.T) {
 	}()
 	go func() {
 		defer close(finished)
-		p, err := w.start(store, *assigned)
+		p, err := startAfterFixtureInputs(t, w, store, *assigned)
 		if p != nil {
 			<-p.done
 		}

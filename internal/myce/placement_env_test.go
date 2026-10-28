@@ -29,7 +29,7 @@ func TestWorkerPlacementEnvironmentEveryAttempt(t *testing.T) {
 				j.Attempt = attempt
 				j.Spec.Run.Env = map[string]string{"MYCE_PLATFORM": "wrong", "MYCE_MACHINE": "wrong", "MYCE_DEVICES": "wrong", "EXPECTED_PLATFORM": want, "EXPECTED_MACHINE": w.Machine.ID}
 				w = workerWithPreparedCheckpoint(t, w, store, j)
-				p, e := w.start(store, j)
+				p, e := startAfterFixtureInputs(t, w, store, j)
 				if e != nil {
 					t.Fatal(e)
 				}

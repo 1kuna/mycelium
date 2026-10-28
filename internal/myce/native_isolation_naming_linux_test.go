@@ -205,7 +205,7 @@ func TestNativeIsolationCUDANaming(t *testing.T) {
 			}
 		}
 	}()
-	p, err := w.start(attempt, job)
+	p, err := startAfterFixtureInputs(t, w, attempt, job)
 	if err != nil {
 		fmt.Fprintln(logFile, err)
 		t.Fatal("real Worker.start failed; inspect private qualification log")

@@ -76,7 +76,7 @@ func TestProductionHoldDisplacesBothCardsAndReturnsImmediately(t *testing.T) {
 	payload.Checkpoint = filepath.Join(q.root, payload.Checkpoint)
 	payload.Spec.Run.Command = []string{"sh", "-c", `test "$MYCE_ATTEMPT" = 2 && test "$(cat "$MYCE_CHECKPOINT_DIR/saved")" = unit-7 && test "$MYCE_MACHINE" = spark`}
 	w = workerWithPreparedCheckpoint(t, w, store, payload)
-	process, e2 := w.start(store, payload)
+	process, e2 := startAfterFixtureInputs(t, w, store, payload)
 	if e2 != nil {
 		t.Fatal(e2)
 	}
@@ -760,7 +760,7 @@ func TestProductionHoldForceStopsBlockedSaveAndResumesDurableGeneration(t *testi
 	payload := cloneJob(y)
 	payload.Checkpoint = filepath.Join(q.root, y.Checkpoint)
 	w = workerWithPreparedCheckpoint(t, w, store, payload)
-	process, err := w.start(store, payload)
+	process, err := startAfterFixtureInputs(t, w, store, payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -884,7 +884,7 @@ func TestProductionHoldForceStopsBlockedSaveAndResumesDurableGeneration(t *testi
 	resumePayload.Spec.Run.Env = map[string]string{"EXPECTED_CHECKPOINT": string(durable)}
 	resumePayload.Spec.Run.Command = []string{"sh", "-c", `test "$MYCE_MACHINE" = spark && test "$MYCE_ATTEMPT" = 2 && test "$(cat "$MYCE_CHECKPOINT_DIR/checkpoint.json")" = "$EXPECTED_CHECKPOINT"`}
 	resumeWorker = workerWithPreparedCheckpoint(t, resumeWorker, resumeStore, resumePayload)
-	resumeProcess, err := resumeWorker.start(resumeStore, resumePayload)
+	resumeProcess, err := startAfterFixtureInputs(t, resumeWorker, resumeStore, resumePayload)
 	if err != nil {
 		t.Fatal(err)
 	}

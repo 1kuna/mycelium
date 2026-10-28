@@ -158,7 +158,7 @@ func TestSyntheticWorkerCheckpointPreparation(t *testing.T) {
 	if err := os.Symlink("absent", filepath.Join(j.Checkpoint, "attempt-1", "old-save")); err != nil {
 		t.Fatal(err)
 	}
-	p, err := w.start(store, j)
+	p, err := startAfterFixtureInputs(t, w, store, j)
 	if err != nil {
 		t.Fatalf("synthetic preparation consulted prior storage: %v", err)
 	}

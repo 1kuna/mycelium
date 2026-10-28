@@ -174,7 +174,7 @@ func TestWorkerRetentionNativeStartFailureAcknowledgement(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(work, "not-a-directory"), nil, 0600); err != nil {
 		t.Fatal(err)
 	}
-	p, cause := w.start(store, job)
+	p, cause := startAfterFixtureInputs(t, w, store, job)
 	if p != nil || cause == nil || !store.state.LaunchPending {
 		t.Fatalf("did not reach native cmd.Start failure: p=%v error=%v state=%+v", p, cause, store.state)
 	}

@@ -227,7 +227,7 @@ func TestProductionStartDeadlineWorkerPreparationCannotLaunchLate(t *testing.T) 
 	}
 	defer store.close()
 	store.state.Session = assigned.Session
-	p, err := w.start(store, *assigned)
+	p, err := startAfterFixtureInputs(t, w, store, *assigned)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,7 +336,7 @@ func TestProductionStartDeadlineRequiresSuccessfulExec(t *testing.T) {
 	}
 	defer store.close()
 	store.state.Session = assigned.Session
-	p, err := w.start(store, *assigned)
+	p, err := startAfterFixtureInputs(t, w, store, *assigned)
 	if p != nil {
 		<-p.done
 	}
@@ -358,7 +358,7 @@ func TestProductionStartDeadlineDockerLateDispatch(t *testing.T) {
 	defer server.Close()
 	w.Client = Client{URL: server.URL, Token: "test"}
 	clock.advance(ProductionStartTimeout)
-	p, err := w.start(store, *assigned)
+	p, err := startAfterFixtureInputs(t, w, store, *assigned)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -560,7 +560,7 @@ func TestProductionStartDeadlineExecErrorPreservesUnknownRelease(t *testing.T) {
 	}
 	defer store.close()
 	store.state.Session = assigned.Session
-	_, err = w.start(store, *assigned)
+	_, err = startAfterFixtureInputs(t, w, store, *assigned)
 	if err == nil || !strings.Contains(err.Error(), "command release unconfirmed") {
 		t.Fatalf("unknown group cleanup treated as released: %v", err)
 	}
