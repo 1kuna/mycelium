@@ -128,6 +128,8 @@ func TestNativeIsolationCompatibility(t *testing.T) {
 
 // Explicit operator opt-in only; no downloads, installation or model loads.
 // MYCE_TEST_NATIVE_OFFICE must be an existing absolute LibreOffice executable.
+// MYCE_TEST_NATIVE_OFFICE_RENDERER optionally selects the compiled example
+// LibreOfficeKit helper; the installed executable still identifies its runtime.
 // The already installed pdftotext command verifies text in the produced PDF.
 // An opt-in failure (including a missing tool or Linux AF_UNIX refusal) FAILS;
 // this test never weakens the boundary or substitutes an unconfined conversion.
@@ -155,6 +157,14 @@ func TestNativeIsolationLibreOffice(t *testing.T) {
 		w.NativeExecuteRoots = append(w.NativeExecuteRoots, installation)
 		nativeCompatibilityExternal(t, &w, &j)
 		j.Spec.Run.Env["NATIVE_COMPATIBILITY_OFFICE"] = office
+		if renderer, requested := os.LookupEnv("MYCE_TEST_NATIVE_OFFICE_RENDERER"); requested {
+			info, err := os.Stat(renderer)
+			if !filepath.IsAbs(renderer) || err != nil || !info.Mode().IsRegular() || info.Mode()&0111 == 0 {
+				t.Fatal("MYCE_TEST_NATIVE_OFFICE_RENDERER must name an existing absolute executable")
+			}
+			w.NativeExecuteRoots = append(w.NativeExecuteRoots, renderer)
+			j.Spec.Run.Env["NATIVE_COMPATIBILITY_OFFICE_RENDERER"] = renderer
+		}
 		j.Spec.Run.Env["HOME"] = "{work}/.scratch/office-home"
 		j.Spec.Run.Env["XDG_RUNTIME_DIR"] = "{work}/.scratch/office-runtime"
 		for key, dir := range map[string]string{"XDG_CONFIG_HOME": "config", "XDG_CACHE_HOME": "cache", "XDG_DATA_HOME": "data"} {
@@ -877,6 +887,14 @@ func nativeCompatibilityPayload(args []string) error {
 		if registry := os.Getenv("NATIVE_COMPATIBILITY_OFFICE_REGISTRY"); registry != "" {
 			uri := (&url.URL{Scheme: "file", Path: registry}).String()
 			cmd.Args = append(cmd.Args, "-env:CONFIGURATION_LAYERS=xcsxcu:"+uri+" res:"+uri+" user:!"+profile+"/user/registrymodifications.xcu")
+		}
+		if renderer := os.Getenv("NATIVE_COMPATIBILITY_OFFICE_RENDERER"); renderer != "" {
+			cmd = exec.Command(renderer, filepath.Dir(os.Getenv("NATIVE_COMPATIBILITY_OFFICE")),
+				documentPath, filepath.Join(outputDir, "document.pdf"))
+			cmd.Env = os.Environ()
+			if registry := os.Getenv("NATIVE_COMPATIBILITY_OFFICE_REGISTRY"); registry != "" {
+				cmd.Env = append(cmd.Env, "MYCE_OFFICE_REGISTRY="+registry)
+			}
 		}
 		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 		check(cmd.Run())
