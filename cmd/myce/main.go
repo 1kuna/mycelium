@@ -61,7 +61,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 
 	if len(args) == 0 {
-		return errors.New("usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|run|profile|submit|policy|status|logs|wait|result|cancel|resolve-docker|reconcile-docker-retention|dev|version|release|file|benchmark|extension|sim|detect|service|measure|model|usage\n       myce host drain|disable|resume|status|budget|placement HOST\nRun myce COMMAND --help for command options.")
+		return errors.New("usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|run|profile|submit|policy|status|logs|wait|result|cancel|resolve-native|resolve-docker|reconcile-docker-retention|dev|version|release|file|benchmark|extension|sim|detect|service|measure|model|usage\n       myce host drain|disable|resume|status|budget|placement HOST\nRun myce COMMAND --help for command options.")
 	}
 	if args[0] == "dev" && len(args) > 1 && args[1] == "clock" {
 		return devClockCommand(args[2:], os.Stdout)
@@ -101,6 +101,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 	if args[0] == "resolve-docker" {
 		return resolveDockerCommand(args[1:])
+	}
+	if args[0] == "resolve-native" {
+		return resolveNativeCommand(args[1:])
 	}
 	if args[0] == "reconcile-docker-retention" {
 		return reconcileDockerRetentionCommand(args[1:], os.Stdout)

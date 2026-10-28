@@ -637,6 +637,36 @@ exact worker spool. Loads stay serial; N bounds requests after all models load.
 load and warm-up seconds and record the combined sampled peak. Brief spikes
 can be missed; real CUDA/XPU qualification remains necessary.
 
+## Native cleanup custody
+
+If an installed worker retains a finished native attempt after a transient process
+inspection failure, its custody can prevent upgrading to the cleanup retry fix.
+During an authorized maintenance window, stop its existing worker service through
+the owning service manager. As the ordinary worker account, run a staged new binary
+without replacing the installed binary:
+
+```sh
+NEW_MYCE resolve-native --state-dir WORKER_SPOOL --attempt-id ATTEMPT_ID
+```
+
+Use the exact local execution identity from the attempt custody record, not the job
+ID. The command exclusively locks the offline spool and requires a matching saved
+finished result. It independently checks every recorded process group, PID,
+native sidecar and cgroup, then checks open handles under the exact
+`job-files/JOB/ATTEMPT` scratch folder using `lsof` (included on macOS; install it
+separately on Linux). A live or reused PID, unknown identity, missing custody,
+failed inspection, open handle or unavailable inspector retains custody. It never
+signals processes or accepts an operator assertion. The default 30-second
+inspection budget bounds a stuck inspector; expiry retains custody. Increase
+`--timeout` for a large scratch folder after inspecting the failure.
+
+Success only clears the exact result's pending release locally, preserving its
+failure outcome, scratch, process evidence and other attempts. It does not contact
+the queue, change maintenance or rerun the payload. Restart the unchanged installed
+worker and require fresh queue maintenance status confirming release before
+rerunning the normal upgrade. Preserve existing drain/disable ownership throughout.
+No manual spool or database edits are needed.
+
 ## Docker cleanup custody
 
 Managed Docker batches use exact immutable attempt labels and a durable create/start
