@@ -541,7 +541,7 @@ experiment caps keep their existing meaning. An empty intersection fails
 submission with `project transcribe allowed_machines has no overlap with job
 allowed_machines`. If every permitted worker is known and structurally
 incompatible with the required platform, device, capacity or environment,
-submission fails with `no compatible machine in project transcribe allowed_machines`.
+submission fails with `no compatible machine in project transcribe allowed_machines (last-known platform, capacity and environment)`.
 This check uses last-known inventory, not current free memory: busy/offline
 workers can return, and unreported machine names are allowed to join later.
 Resubmit after correcting restrictions or updating incompatible inventory.
