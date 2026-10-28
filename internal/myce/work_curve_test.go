@@ -68,6 +68,71 @@ func publishCurves(t *testing.T, q *Queue, m Machine, points []WorkObservation) 
 	}
 }
 
+func TestWorkCurveMemoryRecoversAfterQueueRestart(t *testing.T) {
+	for _, changed := range []bool{false, true} {
+		name := "same component"
+		if changed {
+			name = "changed fingerprint"
+		}
+		t.Run(name, func(t *testing.T) {
+			q, clock, m, s := observationFixture(t)
+			s.Needs.Memory = "auto"
+			first := startObservation(t, q, m, s)
+			clock.Advance(2 * time.Second)
+			r := result(&first, true)
+			host := 2.0
+			r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host}
+			if err := q.Complete(r); err != nil {
+				t.Fatal(err)
+			}
+			var database string
+			if err := q.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&database); err != nil {
+				t.Fatal(err)
+			}
+			if err := q.Close(); err != nil {
+				t.Fatal(err)
+			}
+			reopened, err := Open(database, q.root, clock)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reopened.Close()
+			// Initialization runs a mutation before any worker has re-reported.
+			// This also exercises recovery of the flag persisted by old releases.
+			for _, point := range reopened.s.WorkObservations {
+				if point.StaleReason != "component unavailable" {
+					t.Fatalf("expected unreported component: %+v", point)
+				}
+			}
+			if changed {
+				m.ExtensionFingerprint = "replacement-backend"
+				for i := range m.ExtensionReports {
+					m.ExtensionReports[i].Fingerprint = m.ExtensionFingerprint
+				}
+			}
+			check(t, reopened, m, nil)
+			for _, point := range reopened.s.WorkObservations {
+				want := ""
+				if changed {
+					want = "driver or backend fingerprint changed"
+				}
+				if point.StaleReason != want {
+					t.Fatalf("fresh component validation: want %q, got %+v", want, point)
+				}
+			}
+			started := startObservation(t, reopened, m, s)
+			next := job(t, reopened, started.ID)
+			if !changed {
+				if next.MemoryEnvelope.Source != "accepted peak × 1.25" || next.Spec.Needs.HostMemoryGB != 2.5 || next.Timing.Samples != 1 {
+					t.Fatalf("restart lost learned memory or timing: envelope=%+v timing=%+v", next.MemoryEnvelope, next.Timing)
+				}
+			} else if next.MemoryEnvelope.Source != "exploratory first run" {
+				t.Fatalf("changed backend reused historical peak: %+v", next.MemoryEnvelope)
+			}
+		})
+	}
+}
+
 func TestWorkCurveRisingFallingAcceptedEWMAAndStatus(t *testing.T) {
 	q, clock, m, e, s := curveFixture(t)
 	target := cloneMachine(q.s.Machines[m.ID])
