@@ -29,7 +29,12 @@ func TestNativeMainMemoryCapComposition(t *testing.T) {
 	j.Spec.Needs.HostMemoryGB = 2
 	j.Spec.Run = RunSpec{}
 	j.Spec.Execution = &ExecutionSpec{Main: ExecutionMember{MemoryGB: .5, Command: []string{"sh", "-c", `printf '%s' "$MYCE_MEMORY_LIMIT_BYTES" > "$1"`, "main", "{work}/main-cap"}}}
-	p, err := w.start(store, j)
+	var p *process
+	// Direct starts must consume asynchronous input preparation before launch.
+	await(t, func() bool {
+		p, err = w.start(store, j)
+		return !errors.Is(err, errWorkerCheckpoint) || !strings.Contains(err.Error(), "input copy pending")
+	})
 	if err != nil {
 		t.Fatal(err)
 	}

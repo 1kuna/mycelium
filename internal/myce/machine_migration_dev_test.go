@@ -3,9 +3,11 @@ package myce
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -108,7 +110,12 @@ func TestM4DevSplitConvertConcurrentRollback(t *testing.T) {
 		if !filepath.IsAbs(assigned.Checkpoint) {
 			assigned.Checkpoint = filepath.Join(c.Checkpoints, assigned.Checkpoint)
 		}
-		p, err := w.start(store, assigned)
+		var p *process
+		// Direct starts must consume asynchronous input preparation before launch.
+		await(t, func() bool {
+			p, err = w.start(store, assigned)
+			return !errors.Is(err, errWorkerCheckpoint) || !strings.Contains(err.Error(), "input copy pending")
+		})
 		if err != nil {
 			t.Fatal(err)
 		}

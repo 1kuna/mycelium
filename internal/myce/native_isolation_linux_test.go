@@ -218,7 +218,12 @@ func TestNativeIsolationLinuxWorkerSiblingAndControl(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		p, err := w.start(store, job)
+		var p *process
+		// Direct starts must consume asynchronous input preparation before launch.
+		await(t, func() bool {
+			p, err = w.start(store, job)
+			return !errors.Is(err, errWorkerCheckpoint) || !strings.Contains(err.Error(), "input copy pending")
+		})
 		if err != nil {
 			t.Fatal(err)
 		}

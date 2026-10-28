@@ -305,7 +305,16 @@ func TestQCNativeGroupLaunchProbeRetry(t *testing.T) {
 						if err != nil {
 							t.Fatal(err)
 						}
-						p, err := bound.start(store, j)
+						var p *process
+						if attempt == 1 {
+							p, err = bound.start(store, j)
+						} else {
+							// Match the clean retry above without changing fault-probe ordering.
+							await(t, func() bool {
+								p, err = bound.start(store, j)
+								return !errors.Is(err, errWorkerCheckpoint) || !strings.Contains(err.Error(), "input copy pending")
+							})
+						}
 						var r Result
 						if attempt == 1 {
 							if p != nil {
