@@ -405,7 +405,11 @@ func TestMemoryEnvelopeExploratoryLaunchWithRAMDrift(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.close()
-	p, err := w.start(store, *j)
+	var p *process
+	await(t, func() bool {
+		p, err = w.start(store, *j)
+		return !errors.Is(err, errWorkerCheckpoint) || !strings.Contains(err.Error(), "input copy pending")
+	})
 	if err != nil {
 		t.Fatalf("small RAM drift refused exploratory launch: %v", err)
 	}
@@ -727,7 +731,11 @@ func TestMemoryEnvelopeOOMIsJobCause(t *testing.T) {
 		t.Fatal(err)
 	}
 	store.state.Session = j.Session
-	p, err := w.start(store, *j)
+	var p *process
+	await(t, func() bool {
+		p, err = w.start(store, *j)
+		return !errors.Is(err, errWorkerCheckpoint) || !strings.Contains(err.Error(), "input copy pending")
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
