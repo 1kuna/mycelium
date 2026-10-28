@@ -190,6 +190,16 @@ func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest) (*FleetUpgradeSta
 					if h.Host == p.Host && p.Phase != "pending" && p.Phase != "complete" {
 						h.Policy = p.Policy
 						h.Owned = p.Owned
+						if !q.fleetPolicyMatches(p) {
+							current := q.s.HostMaintenance[h.Host]
+							if current.Mode != "drained" && current.Mode != "disabled" {
+								return &HTTPError{Status: 409, Code: "fleet_maintenance_changed", Message: "stopped upgrade maintenance was replaced; explicitly drain or disable the host before selecting a newer approved release"}
+							}
+							// Explicit newer-release intent may use the operator's current
+							// admission fence, but never inherit authority to resume it.
+							h.Policy = current
+							h.Owned = false
+						}
 						h.Phase = "draining"
 					}
 				}
@@ -267,6 +277,9 @@ func (q *Queue) fleetStop(h *fleetUpgradeHost, reason string) {
 	q.s.FleetUpgrade.State = "stopped"
 	h.Failure = reason
 	h.Wait = "fix forward, then rerun myce fleet upgrade"
+	if reason == "maintenance_changed" {
+		h.Wait = "maintenance was replaced; preserve the current operator policy and select an approved newer release with myce fleet upgrade --release VERSION to fix forward"
+	}
 	h.ProgressAt = q.clock.Now()
 }
 func (q *Queue) fleetHostQuiet(h *fleetUpgradeHost) bool {

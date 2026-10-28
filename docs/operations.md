@@ -268,6 +268,34 @@ Saved configs accept the retired local-control fields during overlay and omit
 them when rewritten; runtime options and secret references remain intact. Old state is never converted or
 silently cleared. See [fresh install](guide-fresh-install.md).
 
+### Legacy EnvironmentFile workers
+
+A compatible single-service worker with `environment_file` in its saved config
+uses the ordinary in-place installer. The printed signed upgrade line identifies
+this authority mode and gives the exact verified candidate/config command;
+it does not require split-worker conversion or new credentials. The verified
+candidate stays in the bootstrap cache. Use that candidate as `NEW_MYCE` below.
+
+First inspect `myce host status HOST`. Preserve any existing operator drain or
+disable; otherwise run `myce host drain HOST --wait` and record the drain you own.
+Preview and install the same signed candidate using the exact saved config:
+
+```sh
+NEW_MYCE install worker --config WORKER_CONFIG --dry-run
+NEW_MYCE install worker --config WORKER_CONFIG
+```
+
+The preview explicitly reports preservation of the EnvironmentFile credential
+reference and lists any configuration changes. Omit authority flags to keep the
+existing private file; never copy its token into output, argv or another config.
+The installer preserves identity, service, spool/state, catalog/cache/runtime
+settings and credential references, and restores the existing installation on
+activation failure. Inspect preview changes before proceeding. This path does
+not change queue maintenance or restart the queue. Verify the running release,
+service health and fresh worker report afterward, then resume only the drain you
+created. Existing operator maintenance remains in force. Platform mismatch is a
+separate refusal requiring the correct signed OS/architecture artifact.
+
 ## Foreground and service control
 
 `myce join` runs a worker against the configured queue. `myce service --config
@@ -870,6 +898,15 @@ running the approved bytes receive the same stable health checks without a resta
 It never blindly repeats a restart or resumes an operator's drain. For a stopped
 operation, `--release` may explicitly select a newly approved newer release to
 fix forward. Approval changes alone never retarget a running operation.
+
+If an operator has replaced a stopped operation's drain, an identical rerun
+keeps the stale receipt as a visible `maintenance_changed` conflict. Explicitly
+selecting an approved newer release uses the current drained/disabled policy,
+including its budgets and placement, without acquiring permission to resume it.
+Exact release custody and stable health are still required; already-current
+services are verified without restarting. If admission was resumed instead,
+the newer operation is refused until the operator explicitly drains or disables
+the host. No receipt or database edits are needed.
 
 No automatic rollback, downgrade, forced job stop, SSH, driver, package or OS
 changes occur. Offline or unknown custody stays a visible wait; elapsed time

@@ -1,11 +1,119 @@
 package myce
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestFleetUpgradeFixForwardPreservesNewerOperatorDrain(t *testing.T) {
+	q, c, workers := fleetFixture(t, "host", "host")
+	pub, private, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest := q.s.EnrollmentRelease.Manifest
+	sign := func() []byte {
+		data, _ := json.Marshal(manifest)
+		envelope, _ := json.Marshal(SignedRelease{Manifest: data, Signature: ed25519.Sign(private, data)})
+		return envelope
+	}
+	if err = q.ConfigureEnrollmentRelease(sign(), pub, "https://publisher.invalid/release"); err != nil {
+		t.Fatal(err)
+	}
+	// The queue was already installed; only the colocated worker helper fails.
+	q.fleetQueue.Proof = fleetTestProof(c, "queue-current", 100, true)
+	if _, err = q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	for n := 0; n < 32; n++ {
+		fleetHeartbeatAdvance(t, q, c)
+	}
+	i := fleetInstructionFor(t, q)
+	if i.Machine != workers[0].ID {
+		t.Fatal("expected worker helper", i.Machine)
+	}
+	if err = q.AckFleetUpgrade(FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "failed"}); err != nil {
+		t.Fatal(err)
+	}
+	c.Advance(time.Second)
+	if _, err = q.ChangeHostMaintenance("host", HostMaintenanceRequest{Action: "drain"}); err != nil {
+		t.Fatal(err)
+	}
+	cpu, ram, lastResort := 4, 8.0, true
+	if _, err = q.ChangeHostMaintenance("host", HostMaintenanceRequest{Action: "budget", CPUBudgetCores: &cpu, MemoryBudgetGB: &ram}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = q.ChangeHostMaintenance("host", HostMaintenanceRequest{Action: "placement", LastResort: &lastResort}); err != nil {
+		t.Fatal(err)
+	}
+	operator := q.s.HostMaintenance["host"]
+	// A same-target rerun must retain the stale receipt as a safe conflict.
+	if _, err = q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	if status := q.fleetUpgradeStatus(); status.State != "stopped" || status.Hosts[0].Failure != "maintenance_changed" || !strings.Contains(status.Hosts[0].Wait, "fleet upgrade") {
+		t.Fatalf("stale receipt lost its actionable conflict: %+v", status)
+	}
+	manifest.Version = "v1.0.2"
+	if err = q.approveEnrollmentRelease(EnrollmentReleaseApproval{SignedRelease: sign(), PublicKey: pub, Origin: "https://publisher.invalid/release"}); err != nil {
+		t.Fatal(err)
+	}
+	var path string
+	if err = q.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&path); err != nil {
+		t.Fatal(err)
+	}
+	root := q.root
+	if err = q.Close(); err != nil {
+		t.Fatal(err)
+	}
+	q, err = Open(path, root, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	fakeCheckpointAvailability(t, q, true)
+	// Ordinary supported installation finished while stopped. Both services now
+	// run the newly approved bytes; reconciliation must not restart either one.
+	proof := fleetTestProof(c, "queue-newer", 101, true)
+	proof.Version = manifest.Version
+	q.fleetQueue = &fleetQueueRuntime{Host: "host", OS: "linux", Arch: "amd64", Proof: proof, ObservedAt: c.Now()}
+	m := workers[0]
+	m.Session = "worker-newer"
+	m.Fleet = fleetTestProof(c, m.Session, 201, true)
+	m.Fleet.Version = manifest.Version
+	m.CPUBudgetCores, m.HostMemoryBudgetGB = cpu, ram
+	if _, err = q.Checkin(Checkin{Machine: m, Fresh: true, PreviousSession: i.Session}); err != nil {
+		t.Fatal(err)
+	}
+	request := FleetUpgradeRequest{Release: manifest.Version}
+	out, err := q.StartFleetUpgrade(request)
+	if err != nil || out.Operation == i.Operation {
+		t.Fatalf("explicit fix forward refused: %+v %v", out, err)
+	}
+	for n := 0; n < 70; n++ {
+		fleetHeartbeatAdvance(t, q, c)
+		for _, runtime := range []struct{ machine, session string }{{"@queue", proof.Session}, {m.ID, m.Session}} {
+			instruction, e := q.fleetInstruction("host", runtime.machine, runtime.session)
+			if e != nil || instruction.Operation != "" {
+				t.Fatal("already-current runtime instructed to restart", e)
+			}
+		}
+	}
+	if q.s.FleetUpgrade.State != "complete" || !reflect.DeepEqual(operator, q.s.HostMaintenance["host"]) || !q.maintenanceBlocked("host") {
+		t.Fatalf("operator policy not preserved through completion: %+v %+v", q.fleetUpgradeStatus(), q.s.HostMaintenance["host"])
+	}
+	if q.s.Machines[m.ID].Session != m.Session || q.fleetQueue.Proof.Session != proof.Session {
+		t.Fatal("already-current process identity changed")
+	}
+}
 
 func fleetTestProof(clock Clock, session string, pid int, target bool) *FleetRuntimeProof {
 	version, hash := "v1.0.0", strings.Repeat("b", 64)
