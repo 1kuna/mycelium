@@ -130,9 +130,7 @@ func (q *Queue) maintainPieceDependencies() {
 			j.WaitingSince = now
 			j.Reason = ""
 			if j.Spec.Priority == "production" && j.Spec.StartBy == nil {
-				deadline := now.Add(ProductionStartTimeout)
-				j.Spec.StartBy = &deadline
-				j.StartWindow = ProductionStartTimeout
+				initializeStartDeadline(j, now)
 			}
 			continue
 		}

@@ -204,6 +204,12 @@ eligibility; it reserves no resources. Consumers stage and verify the bound inpu
 through the existing artifact transport before command execution.
 
 The generated production start deadline and runnable wait age start at readiness.
+Declare `start_window: 600s` on a production consumer job to give it a ten-minute
+relative budget. Omission keeps the `150s` default; experiments omit it and have
+no start deadline. The declaration also works on a selected adapter entry in
+`.mycelium/adapter.yaml`. It accepts positive Go duration strings up to `1h`;
+the cap keeps unavailable capacity/preparation waits bounded while allowing
+contention. Longer budgets delay startup failure accordingly.
 Explicit `start_by`, `give_up_at` and `deadline` remain absolute. Accepted pieces
 survive sibling failure; consumers of unaccepted pieces fail with structured
 `diagnostic_code: upstream_failed`. Cancelling the parent is a pipeline abort,
@@ -241,6 +247,8 @@ The consumer may itself declare `fan_out`:
 ```yaml
 name: next-stage
 project: research
+class: production
+start_window: 600s
 extension: summarizer@1
 workload: {input_shape: fixed-v1, units: 100}
 after:
@@ -260,6 +268,19 @@ substitution or input filtering. A measured wave's manifest lists these bound
 inputs along with submitted common inputs. Register subsequent consumers against
 this stage's parent ID, then wait only on the final job. No caller-side gather wait
 is needed. Membership and accepted bindings survive queue restart.
+
+The logical consumer's generated deadline begins at readiness. Each executing
+child inherits `start_window` and gets that full relative budget from its own
+assignment, including later waves. An explicit absolute `start_by` takes
+precedence and is preserved by every child instead. If it expires before all
+pieces are assigned, the tail never dispatches. Materialized children keep their
+own startup/recovery windows and accepted commands may finish; the parent fails
+after those children settle.
+After a started child loses
+its machine, recovery gets the original window length from loss detection;
+unstarted retries keep their cutoff. Job GET shows `spec.start_window`, current
+`spec.start_by`, and effective top-level `start_window` in nanoseconds. See
+[production start deadline](job-reference.md#production-start-deadline).
 
 For this form `dependency.executions` records the exact accepted producing
 execution for each mapped source key. `dependency.execution` is zero-valued;

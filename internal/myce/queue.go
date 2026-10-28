@@ -664,11 +664,18 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		} else {
 			id = ID()
 		}
-		if s.Priority == "production" && s.StartBy == nil && s.After == nil {
-			deadline := q.clock.Now().Add(ProductionStartTimeout)
-			s.StartBy = &deadline
-		}
 		j := &Job{PriorityPolicy: q.priorityMatch(s), FileTransport: q.fileCheckpoints, Extensions: extensions, SidecarEnvironmentRecipes: sidecarRecipes, EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: filepath.Join(q.root, id)}
+		explicitStartBy := s.StartBy != nil
+		j.StartByExplicit = &explicitStartBy
+		if s.Priority == "production" {
+			j.StartWindow = productionStartWindow(s)
+			if s.StartBy != nil {
+				j.StartWindow = s.StartBy.Sub(j.Queued)
+			}
+			if s.After == nil {
+				initializeStartDeadline(j, j.Queued)
+			}
+		}
 		if submitted.Needs.Memory == "auto" {
 			// Capture only submitter hints, before recipe defaults can mask an
 			// undeclared first run. A non-nil empty hint explicitly means none.
@@ -906,7 +913,7 @@ func (q *Queue) maintain() {
 	q.refreshHostMemory()
 	q.maintainHolds()
 	for _, j := range q.liveJobs() {
-		if startupPending(j) {
+		if q.startupPending(j) {
 			j.Reason = q.startStatusReason(j)
 		}
 	}
@@ -1817,7 +1824,7 @@ func (q *Queue) projectJob(stored *Job, order map[string]int, reasons map[string
 			j.Reason = "NAS checkpoint root is unreachable"
 		}
 	}
-	if startupPending(j) {
+	if q.startupPending(j) {
 		j.Reason = q.startStatusReason(j)
 	}
 	// Eligibility/reasons need the full diagnostic inputs until redaction.
