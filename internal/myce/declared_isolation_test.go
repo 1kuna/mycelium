@@ -245,6 +245,12 @@ func TestDeclaredNativeIsolation(t *testing.T) {
 		isolationObserve(t, q, client, j.ID, "queued", reason)
 		// Check payloads lower through the same stage policy and retain sidecars.
 		checkSpec := Spec{Extension: extensionKey(e), ExtensionCheck: &ExtensionCheckRequest{Work: "kind:sample", Directory: t.TempDir()}}
+		// Dispatch selects the variant's whole-job reservation before lowering.
+		candidates := extensionJobs(&Job{Spec: checkSpec, Extensions: j.Extensions, State: "queued"}, &w.Machine, true)
+		if len(candidates) != 1 {
+			t.Fatal("qualification check did not select one worker variant", candidates)
+		}
+		checkSpec = candidates[0].Spec
 		if err := j.Extensions[0].lower(&checkSpec, &w.Machine); err != nil || checkSpec.Isolation != "unsandboxed" || checkSpec.Reason != reason || len(checkSpec.Run.Sidecars) != 1 {
 			t.Fatal("qualification lowering lost stage isolation", checkSpec, err)
 		}
@@ -304,14 +310,16 @@ func TestLegacyExtensionIsolationPersistence(t *testing.T) {
 	if err := client.Call(context.Background(), "GET", "/api/extensions", nil, &registered); err != nil || len(registered) != 1 || registered[0].SandboxDefault || registered[0].Digest != e.Digest {
 		t.Fatal("identical legacy registration changed policy/identity", registered, err)
 	}
+	// Finish the frozen job before submitting its peer: equal queue timestamps
+	// are ordered by ID, so check-in need not pick the first submitted job.
+	isolationObserve(t, q, client, frozen.ID, "queued", legacyIsolationReason)
+	isolationRun(t, q, client, w, &frozen, false, legacyIsolationReason)
 	var later Job
 	if err := client.Call(context.Background(), "POST", "/api/jobs", s, &later); err != nil {
 		t.Fatal(err)
 	}
-	for _, j := range []*Job{&frozen, &later} {
-		isolationObserve(t, q, client, j.ID, "queued", legacyIsolationReason)
-		isolationRun(t, q, client, w, j, false, legacyIsolationReason)
-	}
+	isolationObserve(t, q, client, later.ID, "queued", legacyIsolationReason)
+	isolationRun(t, q, client, w, &later, false, legacyIsolationReason)
 	// New registrations default sandboxed; an explicit legacy opt-in changes
 	// authored bytes/version, never the old digest or its frozen jobs.
 	optIn := e
