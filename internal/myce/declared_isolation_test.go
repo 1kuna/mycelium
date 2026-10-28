@@ -139,7 +139,17 @@ func isolationRun(t *testing.T, q *Queue, client Client, w Worker, j *Job, group
 	if group {
 		ready, finish = filepath.Join(work, "main-ready"), filepath.Join(work, "finish")
 	}
-	await(t, func() bool { _, err := os.Stat(ready); return err == nil })
+	await(t, func() bool {
+		select {
+		case f := <-p.done:
+			finished = true
+			payload, _ := os.ReadFile(filepath.Join(root.dir, root.state.Log))
+			t.Fatalf("exception payload exited before proof: %+v; log=%s", f, payload)
+		default:
+		}
+		_, err := os.Stat(ready)
+		return err == nil
+	})
 	isolationObserve(t, q, client, j.ID, "running", reason)
 	if err := os.WriteFile(finish, nil, 0600); err != nil {
 		t.Fatal(err)
@@ -226,7 +236,8 @@ func TestDeclaredNativeIsolation(t *testing.T) {
 		w := isolationWorker(t, client, nil)
 		s := spec("experiment")
 		s.Resumable = false
-		s.Run.Command = []string{"sh", "-ec", isolationHostProof + `echo passed > "$TMPDIR/passed"; while ! test -f "$TMPDIR/finish"; do sleep .01; done`}
+		s.Run.Command = []string{"sh", "-ec", `set -x
+` + isolationHostProof + `echo passed > "$TMPDIR/passed"; while ! test -f "$TMPDIR/finish"; do sleep .01; done`}
 		s.Run.Env = map[string]string{"ISOLATION_HOST": filepath.Join(w.StateDir, "control", "authority"), "MYCE_TOKEN": "authored-secret", "TMPDIR": "/ignored"}
 		check(t, q, w.Machine, nil)
 		var j Job
