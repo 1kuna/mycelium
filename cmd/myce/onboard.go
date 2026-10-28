@@ -231,8 +231,17 @@ func enrollmentCommandWithTiming(args []string, probe myce.MachineProbe, home st
 		resultErr = fmt.Errorf("upgrade failed; host resumed on previous release: %w", resultErr)
 	}()
 	if old != nil {
-		if old.Role != "worker" || old.Config != config || old.JoiningFile == "" || old.EnvironmentFile != "" || old.Detection.OS != probe.OS || old.Detection.Arch != probe.Arch {
-			return errors.New("existing installation requires its saved pinned joining authority and matching platform; use the explicit conversion path")
+		if old.Role != "worker" || old.Config != config {
+			return errors.New("existing installation is not the selected worker config; select its exact saved worker config")
+		}
+		if old.Detection.OS != probe.OS || old.Detection.Arch != probe.Arch {
+			return errors.New("existing worker platform does not match this release binary; use a release for its saved OS and architecture")
+		}
+		if old.JoiningFile == "" && old.EnvironmentFile != "" {
+			return fmt.Errorf("existing worker uses legacy EnvironmentFile authority; preserve it with the supported in-place installer: drain the host and wait, preview with %s install worker --config %s --dry-run, then repeat without --dry-run; verify health before resuming only your own drain (see docs/operations.md, Legacy EnvironmentFile workers)", shellQuote(executable), shellQuote(config))
+		}
+		if old.JoiningFile == "" || old.EnvironmentFile != "" {
+			return errors.New("existing worker requires one saved joining authority; use myce install worker --config with its exact saved config to inspect and repair authority")
 		}
 		authority, e := myce.ReadInvitation(old.JoiningFile)
 		if e != nil {

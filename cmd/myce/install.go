@@ -433,6 +433,9 @@ func setupCommandWithInstallerTimeout(args []string, probe myce.MachineProbe, ho
 			return err
 		}
 		fmt.Println("Intended configuration changes:\n" + myce.InstallConfigDiff(*installed, c))
+		if c.EnvironmentFile != "" && c.EnvironmentFile == installed.EnvironmentFile && c.JoiningFile == installed.JoiningFile {
+			fmt.Println("Joining authority: preserve saved EnvironmentFile credential reference (no authority migration).")
+		}
 	}
 	fmt.Printf("%s %s/%s: platform=%s memory=%s reserve=%.0f GiB\nQueue: %s\nNAS: %s\nCheckpoint root: %s\nModel cache: %s (%d bytes)\nEnvironment cache: %s (%d bytes)\nConfig: %s\nBoot service: %s\n", role, d.OS, d.Arch, d.Platform, d.MemoryMode, d.ReserveGB, c.Queue, c.NAS, c.Checkpoints, c.ModelCache, c.ModelCacheBytes, c.EnvironmentCache, c.EnvironmentCacheBytes, c.Config, c.Service)
 	if d.OS == "linux" && role == "queue" {
