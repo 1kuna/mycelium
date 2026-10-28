@@ -218,6 +218,7 @@ func (d *Dev) Close() error {
 	// Keep the HTTP service alive while workers leave and finish uploading.
 	d.cancel()
 	d.workerWG.Wait()
+	d.Queue.BeginShutdown()
 	d.stopQueue()
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

@@ -58,6 +58,9 @@ func fleetCommand(ctx context.Context, name string, args ...string) ([]byte, err
 	// Bound an individual OS probe/manager command, not production drain time.
 	ctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
 	defer cancel()
+	if name == cachedMountInventoryCommand {
+		return cachedMountInventory(ctx)
+	}
 	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Env = withoutMyceToken(os.Environ())
 	cmd.WaitDelay = time.Second

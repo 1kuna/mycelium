@@ -120,6 +120,7 @@ type Queue struct {
 	calls            map[string]*ModelCall
 	lock             *os.File
 	mu               sync.RWMutex
+	stopping         bool // q.mu; inhibit mutations before either API listener closes.
 	contactMu        sync.Mutex
 	contacts         map[string]*workerContact
 	updateHolds      queueHoldSampler
@@ -380,6 +381,15 @@ func checkpointAvailable(root string) bool {
 	removeErr := os.Remove(name)
 	return err == nil && closeErr == nil && removeErr == nil
 }
+
+// BeginShutdown fences maintenance and in-flight mutations before API shutdown.
+// Workers retry rejected reports against the replacement queue.
+func (q *Queue) BeginShutdown() {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	q.stopping = true
+}
+
 func (q *Queue) Close() error {
 	q.mu.Lock()
 	defer q.mu.Unlock()
@@ -427,6 +437,9 @@ func (q *Queue) updateTimed(fn func() error, timing *queueUpdateTiming) error {
 		q.mu.Unlock()
 		logQueueHold(duration, "update", fn)
 	}()
+	if q.stopping {
+		return &HTTPError{Status: 503, Code: "queue_stopping", Message: "queue is shutting down; retry the request"}
+	}
 	if q.simulation {
 		q.usageWrites = nil
 		q.accountUsage(q.clock.Now())
@@ -770,6 +783,9 @@ func (q *Queue) fleetQuiet(now time.Time) bool {
 }
 
 func (q *Queue) maintain() {
+	if q.stopping {
+		return
+	}
 	q.maintainFleetUpgrade()
 	q.maintainFanOut()
 	q.maintainPieceDependencies()
