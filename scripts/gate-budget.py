@@ -50,8 +50,10 @@ def owned_processes(marker, scratch, known, inspect_handles=False):
     # Read privately: ps environments can contain credentials; never log them.
     # Retain start identities once ownership is proven, so TERM cannot hide a
     # scrubbed child by killing its parent or closing its inherited log handles.
+    # GNU ps rejects BSD -ax combined with eww; -e selects all on Linux.
+    selection = '-eo' if sys.platform.startswith('linux') else '-axo'
     output = subprocess.check_output(
-        ['ps', 'eww', '-axo', 'pid=,ppid=,uid=,stat=,lstart=,command='],
+        ['ps', 'eww', selection, 'pid=,ppid=,uid=,stat=,lstart=,command='],
         text=True, env=dict(os.environ, LC_ALL='C'))
     processes = {}
     state = re.compile(r'(?:^|\s)(?:HOME|TMPDIR)=' + re.escape(scratch) + r'(?:/|\s|$)')
