@@ -35,7 +35,9 @@ func isolationClient(t *testing.T, q *Queue) Client {
 func isolationObserve(t *testing.T, q *Queue, client Client, id, state, reason string) {
 	t.Helper()
 	// Expire the normal public status cache through the injected queue clock.
+	q.mu.Lock()
 	q.clock.(*fakeClock).Advance(time.Second)
+	q.mu.Unlock()
 	var j Job
 	if err := client.Call(context.Background(), "GET", "/api/jobs/"+id, nil, &j); err != nil {
 		t.Fatal(err)
