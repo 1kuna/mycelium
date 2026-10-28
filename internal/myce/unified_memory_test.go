@@ -240,16 +240,20 @@ func TestUnifiedOSRecheckedBeforeCommandAndModelLoad(t *testing.T) {
 	if got, err := source(context.Background()); err != nil || got != 80 {
 		t.Fatalf("initial inventory %v, %v", got, err)
 	}
-	q, _ := fixture(t)
+	q, clock := fixture(t)
 	j := submit(t, q, spec("production"))
 	j.Attempt = 1
-	w := Worker{StateDir: newTestStateRoot(t), Machine: machine("unified", "fake"), MemorySource: source, MemoryMeasured: true}
+	w := Worker{Clock: clock, StateDir: newTestStateRoot(t), Machine: machine("unified", "fake"), MemorySource: source, MemoryMeasured: true}
 	store, err := w.openStore()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer store.close()
-	if _, err := w.start(store, *j); !errors.Is(err, errWorkerMemory) {
+	await(t, func() bool {
+		_, err = w.start(store, *j)
+		return !errors.Is(err, errWorkerCheckpoint) || !strings.Contains(err.Error(), "input copy pending")
+	})
+	if !errors.Is(err, errWorkerMemory) {
 		t.Fatalf("command started after OS memory dropped: %v", err)
 	}
 	if store.state.Job != nil {
