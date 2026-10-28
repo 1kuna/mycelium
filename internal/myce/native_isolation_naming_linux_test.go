@@ -426,9 +426,14 @@ func nativeCUDANamingPayload(args []string) error {
 	if args[0] == "side" {
 		// Exec retains the real group, physical-device mask, inherited cgroup,
 		// Landlock/seccomp and ordinary trusted loader environment ordering.
+		// The pinned runtime maps libllama INFO (offload/buffer receipts) to
+		// common TRACE (4), above its default INFO (3). Set this on argv rather
+		// than relying on operator env surviving the job environment allowlist.
+		// Keep plain text so terminal coloring cannot obscure strict receipts.
 		argv := []string{config.Server, "--model", config.Model, "--host", "127.0.0.1", "--port", port,
 			"--ctx-size", "1024", "--n-gpu-layers", "999", "--parallel", "1", "--batch-size", "128",
-			"--ubatch-size", "128", "--threads", "2", "--n-predict", "64"}
+			"--ubatch-size", "128", "--threads", "2", "--n-predict", "64",
+			"--verbosity", "4", "--log-colors", "off"}
 		return syscall.Exec(argv[0], argv, os.Environ())
 	}
 	if _, err := os.Stat(filepath.Join(tmp, "side-ready")); err != nil {
