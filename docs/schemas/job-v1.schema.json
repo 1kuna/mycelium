@@ -1391,6 +1391,11 @@
           "type": "integer",
           "x-contract": "stable"
         },
+        "inputs_staged_at": {
+          "format": "date-time",
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
         "isolation": {
           "description": "Native stage exception diagnostic: unsandboxed: followed by the author reason, or the fixed legacy registration reason. Retained across lifecycle and payload redaction.",
           "type": "string",
