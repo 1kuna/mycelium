@@ -236,12 +236,11 @@ func TestExtensionBundleStoreDevSidecarControlTraffic(t *testing.T) {
 	e.Variants[0].Needs = ResourceNeeds{Memory: "auto"}
 	delete(e.Variants[0].Baselines, "kind:sample")
 	root := t.TempDir()
-	helperMarker, mainMarker := filepath.Join(root, "helper"), filepath.Join(root, "main")
-	e.Variants[0].Execution.Sidecars = []NativeSidecar{{Name: "helper", Command: []string{"sh", "-c", `printf helper > "$1"; exec sleep 60`, "helper", helperMarker}}}
-	e.Variants[0].Check = []string{"sh", "{extension}/check.sh", mainMarker, helperMarker}
+	e.Variants[0].Execution.Sidecars = []NativeSidecar{{Name: "helper", Command: []string{"sh", "-c", `printf helper > "$MYCE_SCRATCH_DIR/helper"; exec sleep 60`}}}
+	e.Variants[0].Check = []string{"sh", "{extension}/check.sh"}
 	e.Files["check.sh"] = []byte(`test -z "$MYCE_TOKEN" || exit 99
-while test ! -f "$2"; do sleep .01; done
-printf main >> "$1"
+while test ! -f "$MYCE_SCRATCH_DIR/helper"; do sleep .01; done
+printf main >> "$MYCE_CHECKPOINT_DIR/main"
 cat "$MYCE_CHECK_INPUT" > "$MYCE_CHECK_OUTPUT"
 `)
 	e = freezeComposition(t, e)
@@ -301,10 +300,6 @@ cat "$MYCE_CHECK_INPUT" > "$MYCE_CHECK_OUTPUT"
 	if len(traffic.errs) > 0 || traffic.ticks == 0 || traffic.reads == 0 {
 		t.Errorf("control traffic: %+v", traffic)
 	}
-	ran, readErr := os.ReadFile(mainMarker)
-	if readErr != nil || string(ran) != "main" {
-		t.Errorf("main did not execute exactly once: %q %v", ran, readErr)
-	}
 	snap, snapErr := d.Queue.Snapshot()
 	if snapErr != nil {
 		t.Fatal(snapErr)
@@ -315,6 +310,27 @@ cat "$MYCE_CHECK_INPUT" > "$MYCE_CHECK_OUTPUT"
 			continue
 		}
 		checks++
+		// Preview checks use the queue's local checkpoint assignment. Unlike
+		// work/output snapshots, this ledger survives publication and replay.
+		mainMarker := filepath.Join(attemptCheckpoint(*j), "main")
+		ran, readErr := os.ReadFile(mainMarker)
+		attempts, err := os.ReadDir(j.Checkpoint)
+		readErr = errors.Join(readErr, err)
+		for _, attempt := range attempts {
+			dir := filepath.Join(j.Checkpoint, attempt.Name())
+			if !attempt.IsDir() || !strings.HasPrefix(attempt.Name(), "attempt-") || dir == filepath.Dir(mainMarker) {
+				continue
+			}
+			other, err := os.ReadFile(filepath.Join(dir, "main"))
+			if os.IsNotExist(err) {
+				continue // An attempt stopped before main may have no append.
+			}
+			readErr = errors.Join(readErr, err)
+			ran = append(ran, other...)
+		}
+		if readErr != nil || string(ran) != "main" {
+			t.Errorf("main did not execute exactly once: %q %v", ran, readErr)
+		}
 		if j.State != "succeeded" || j.Attempt != 1 || j.Starts != 1 || j.Losses != 0 || !j.ReleaseConfirmed {
 			t.Errorf("check outcome: state=%s attempts=%d starts=%d losses=%d release=%v", j.State, j.Attempt, j.Starts, j.Losses, j.ReleaseConfirmed)
 		}
