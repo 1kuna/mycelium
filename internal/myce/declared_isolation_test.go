@@ -72,6 +72,11 @@ func isolationWorker(t *testing.T, client Client, e *Extension) Worker {
 	w.Machine.CapabilityProfile.OS, w.Machine.CapabilityProfile.Arch = runtime.GOOS, runtime.GOARCH
 	w.Machine.HostMemoryMeasured, w.Machine.FreeHostMemoryGB, w.Machine.HostAvailableMemoryGB = true, 64, 64
 	if e != nil {
+		host, err := os.Hostname()
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.Machine.HostID = host // PrepareExtension qualifies this actual local host.
 		w.ExtensionRoot = t.TempDir()
 		w.Machine.ExtensionReports = installQualified(t, w.ExtensionRoot, *e, "")
 		fp, err := ExtensionFingerprint(context.Background(), "fake", "")
