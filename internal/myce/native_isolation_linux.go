@@ -265,6 +265,9 @@ func (w Worker) nativeLinuxPolicy(cmd *exec.Cmd, spool, work string, env map[str
 // Resolve exact nodes using the already selected physical device. An ordinal
 // must never be guessed to be a DRM minor or NVIDIA kernel minor.
 func (w Worker) nativeGPUDevices(env map[string]string) ([]string, error) {
+	if w.nativeGPUDeviceProbe != nil {
+		return w.nativeGPUDeviceProbe(w, env)
+	}
 	if env["CUDA_VISIBLE_DEVICES"] == "" && env["ONEAPI_DEVICE_SELECTOR"] == "!*:*" || w.Machine.GPU == "cpu" || w.Machine.GPU == "fake" || w.Machine.GPU == "" {
 		return nil, nil
 	}

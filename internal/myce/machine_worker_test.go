@@ -97,6 +97,40 @@ func fakeMachineDevices() []MachineDevice {
 		{ID: "1", Platform: "xpu", Identity: "fixture-xpu-uuid", Fingerprint: "fixture-driver", Selector: "3", MemoryMode: "fixed", TotalMemoryGB: 8, BudgetGB: 8, FreeMemoryGB: 8},
 	}
 }
+
+// These fixtures run CPU payloads with synthetic accelerator bindings. Resolve
+// only their explicit identities to no GPU nodes; keep real native confinement.
+func syntheticNativeGPUDeviceProbe(devices ...MachineDevice) func(Worker, map[string]string) ([]string, error) {
+	return func(w Worker, env map[string]string) ([]string, error) {
+		if w.cpuIsolation && w.Machine.GPU == "cpu" && env["CUDA_VISIBLE_DEVICES"] == "" && env["ONEAPI_DEVICE_SELECTOR"] == "!*:*" {
+			return nil, nil
+		}
+		selector := w.DeviceBinding
+		if selector == "" {
+			selector = w.Machine.Device
+		}
+		for _, d := range devices {
+			if (d.Platform != "cuda" && d.Platform != "xpu") || w.Machine.GPU != d.Platform || w.Machine.Device != d.ID || selector != d.Selector {
+				continue
+			}
+			selected := w.selectedDevice
+			if d.Identity != "" && selected == nil {
+				continue
+			}
+			if selected != nil && (selected.ID != d.ID || selected.Platform != d.Platform || selected.Identity != d.Identity || selected.Selector != d.Selector || selected.pciAddress != "" || selected.pciFact != nil) {
+				continue
+			}
+			for key, value := range selectedDeviceEnv(d.Platform, d.Selector) {
+				if env[key] != value {
+					return nil, fmt.Errorf("synthetic native GPU binding mismatch: %s=%q", key, env[key])
+				}
+			}
+			return nil, nil
+		}
+		return nil, fmt.Errorf("unexpected synthetic native GPU device: %s/%s/%s", w.Machine.GPU, w.Machine.Device, selector)
+	}
+}
+
 func harnessWorker(t *testing.T, h *machineHarness) Worker {
 	t.Helper()
 	server := httptest.NewServer(http.HandlerFunc(h.serve))
@@ -104,7 +138,7 @@ func harnessWorker(t *testing.T, h *machineHarness) Worker {
 	m := machine("machine", "fake", "machine")
 	m.Devices = fakeMachineDevices()
 	m.HostMemoryBudgetGB = 32
-	return Worker{Machine: m, StateDir: newTestStateRoot(t), Interval: 10 * time.Millisecond, Clock: RealClock{}, Client: Client{URL: server.URL, Token: "harness-token"}, InventoryProbe: func(context.Context) ([]MachineDevice, error) { return fakeMachineDevices(), nil }, CPUIsolationProbe: func(context.Context) error { return nil }, HostMemorySource: func(context.Context) (float64, error) { return 64, nil }}
+	return Worker{nativeGPUDeviceProbe: syntheticNativeGPUDeviceProbe(fakeMachineDevices()...), Machine: m, StateDir: newTestStateRoot(t), Interval: 10 * time.Millisecond, Clock: RealClock{}, Client: Client{URL: server.URL, Token: "harness-token"}, InventoryProbe: func(context.Context) ([]MachineDevice, error) { return fakeMachineDevices(), nil }, CPUIsolationProbe: func(context.Context) error { return nil }, HostMemorySource: func(context.Context) (float64, error) { return 64, nil }}
 }
 func harnessJob(t *testing.T, id, device, command string) Job {
 	t.Helper()
@@ -511,7 +545,7 @@ func TestMachineWorkerCrashHelper(t *testing.T) {
 	m := machine("machine", "fake", "machine")
 	m.Devices = fakeMachineDevices()
 	m.HostMemoryBudgetGB = 32
-	w := Worker{Machine: m, StateDir: os.Getenv("MYCE_MACHINE_CRASH_STATE"), Client: Client{URL: os.Getenv("MYCE_MACHINE_CRASH_URL")}, Interval: 10 * time.Millisecond, Clock: RealClock{}, InventoryProbe: func(context.Context) ([]MachineDevice, error) { return fakeMachineDevices(), nil }, CPUIsolationProbe: func(context.Context) error { return nil }, HostMemorySource: func(context.Context) (float64, error) { return 64, nil }}
+	w := Worker{nativeGPUDeviceProbe: syntheticNativeGPUDeviceProbe(fakeMachineDevices()...), Machine: m, StateDir: os.Getenv("MYCE_MACHINE_CRASH_STATE"), Client: Client{URL: os.Getenv("MYCE_MACHINE_CRASH_URL")}, Interval: 10 * time.Millisecond, Clock: RealClock{}, InventoryProbe: func(context.Context) ([]MachineDevice, error) { return fakeMachineDevices(), nil }, CPUIsolationProbe: func(context.Context) error { return nil }, HostMemorySource: func(context.Context) (float64, error) { return 64, nil }}
 	if err := w.Run(context.Background()); err != nil {
 		t.Fatal(err)
 	}

@@ -19,8 +19,8 @@ import (
 )
 
 // TestPreDeployFullSystem is a laptop acceptance scenario, not a hardware or
-// exactly-once external-side-effect guarantee. Only GPU inventory/model engines
-// are fake: requests, SQLite, worker spools, signals and commands are real.
+// exactly-once external-side-effect guarantee. GPU inventory/device-node mapping
+// and model engines are fake; requests, SQLite, spools, signals and commands are real.
 func TestPreDeployFullSystem(t *testing.T) {
 	t.Parallel()
 	// Real subprocess grace periods must advance with elapsed time even when a
@@ -218,6 +218,9 @@ echo FINISHED
 			},
 			CPUIsolationProbe: func(context.Context) error { return nil },
 			Machine:           machine(gpu, gpu, "fixture-"+gpu+"-host"), Client: Client{URL: server.URL, Token: "predeploy-token", HTTP: &http.Client{Transport: transport, Timeout: testWaitTimeout}}}
+		if gpu == "cuda" || gpu == "xpu" {
+			w.nativeGPUDeviceProbe = syntheticNativeGPUDeviceProbe(MachineDevice{ID: "0", Platform: gpu, Identity: "fixture-" + gpu, Selector: "0"})
+		}
 		go func() { lw.done <- w.Run(ctx) }()
 	}
 	// Cleanup also handles failed assertions while a NAS or network fault is active.

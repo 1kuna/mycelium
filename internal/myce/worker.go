@@ -47,6 +47,9 @@ type Worker struct {
 	cpuIsolation            bool
 	inventoryAllowance      []string
 	inventoryReason         string
+	// Synthetic harness seam; nil keeps physical native GPU resolution.
+	nativeGPUDeviceProbe func(Worker, map[string]string) ([]string, error)
+
 	// Benchmark runs only when explicitly enabled; fake inventory never loads the host.
 	CurveMaxConcurrency   int
 	OnboardingBenchmark   bool

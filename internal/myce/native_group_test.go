@@ -150,6 +150,9 @@ func nativeStart(t *testing.T, spec Spec, platform string, catalogs ...Environme
 	// Synthetic lifecycle tests own their helper. Host listener discovery is
 	// exercised directly by TestNativeGroupForeignReadinessListener.
 	w.nativeListenerProbe = func(string, int) error { return nil }
+	if platform == "cuda" || platform == "xpu" {
+		w.nativeGPUDeviceProbe = syntheticNativeGPUDeviceProbe(MachineDevice{ID: "1", Platform: platform, Selector: "1"})
+	}
 	store, err := w.openStore()
 	if err != nil {
 		server.Close()
