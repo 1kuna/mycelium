@@ -301,8 +301,13 @@ func TestStoredCheckpointDurabilityStalenessAndOutputAcceptance(t *testing.T) {
 
 func TestFilesDifferentHyphaResume(t *testing.T) {
 	t.Parallel()
-	if _, err := exec.LookPath("python3"); err != nil {
+	python, err := exec.LookPath("python3")
+	if err != nil {
 		t.Skip("python3 required for atomic checkpoint example")
+	}
+	python, err = filepath.Abs(python)
+	if err != nil {
+		t.Fatal(err)
 	}
 	q, _ := fixture(t)
 	if err := q.ConfigureFileStore(t.TempDir(), 1<<20, true); err != nil {
@@ -344,7 +349,7 @@ if not stopping: pathlib.Path('output').write_text(str(n))
 		manifest[name] = ref
 	}
 	s := spec("experiment")
-	s.Run.Command = []string{"python3", "train.py"}
+	s.Run.Command = []string{python, "train.py"}
 	s.Files = manifest
 	s.Outputs = map[string]string{"output": "results"}
 	j, err := q.Submit(s)
@@ -355,6 +360,15 @@ if not stopping: pathlib.Path('output').write_text(str(n))
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
 		root := newTestStateRoot(t)
+		// As in the prepared-Python fixture, retain the selected interpreter
+		// through a managed prefix so native isolation includes its runtime.
+		bin := filepath.Join(root, "environment-cache", "venv", "bin")
+		if err := os.MkdirAll(bin, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(python, filepath.Join(bin, "python3")); err != nil {
+			t.Fatal(err)
+		}
 		worker := Worker{Client: c, StateDir: root, Interval: 20 * time.Millisecond, Clock: RealClock{}, Machine: Machine{CapabilityProfile: machine("profile", "fake").CapabilityProfile, ID: name, HostID: name, Session: name, GPU: "fake", FreeMemoryGB: 8}, HostMemorySource: func(context.Context) (float64, error) { return 16, nil }}
 		go func() { done <- worker.Run(ctx) }()
 		return cancel, done, root
