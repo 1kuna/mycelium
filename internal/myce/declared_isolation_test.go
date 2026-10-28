@@ -191,6 +191,13 @@ func isolationRun(t *testing.T, q *Queue, client Client, w Worker, j *Job, group
 }
 
 func TestDeclaredNativeIsolation(t *testing.T) {
+	// macOS /var is a symlink; shell PWD is physical. Keep the original exact
+	// temp/scratch assertions meaningful under both direct and gate runners.
+	tmp, err := filepath.EvalSymlinks(os.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("TMPDIR", tmp)
 	t.Setenv("MYCE_TOKEN", "ambient-secret")
 	t.Setenv("SSH_AUTH_SOCK", "/synthetic-agent")
 	const reason = "native helper needs ordinary host IPC"
@@ -236,8 +243,7 @@ func TestDeclaredNativeIsolation(t *testing.T) {
 		w := isolationWorker(t, client, nil)
 		s := spec("experiment")
 		s.Resumable = false
-		s.Run.Command = []string{"sh", "-ec", `set -x
-` + isolationHostProof + `echo passed > "$TMPDIR/passed"; while ! test -f "$TMPDIR/finish"; do sleep .01; done`}
+		s.Run.Command = []string{"sh", "-ec", isolationHostProof + `echo passed > "$TMPDIR/passed"; while ! test -f "$TMPDIR/finish"; do sleep .01; done`}
 		s.Run.Env = map[string]string{"ISOLATION_HOST": filepath.Join(w.StateDir, "control", "authority"), "MYCE_TOKEN": "authored-secret", "TMPDIR": "/ignored"}
 		check(t, q, w.Machine, nil)
 		var j Job
