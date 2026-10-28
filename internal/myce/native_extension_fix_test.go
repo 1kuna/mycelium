@@ -249,6 +249,13 @@ func TestNativeExtensionPythonImportQualification(t *testing.T) {
 		if err := os.MkdirAll(bin, 0700); err != nil {
 			return err
 		}
+		if runtime.GOOS == "linux" {
+			path := filepath.Join(bin, "python")
+			if target, err := os.Readlink(path); err == nil && target == python {
+				return nil
+			}
+			return os.Symlink(python, path)
+		}
 		// Apple's python3 launcher dispatches by argv[0]; keep that name.
 		quoted := "'" + strings.ReplaceAll(python, "'", "'\"'\"'") + "'"
 		return os.WriteFile(filepath.Join(bin, "python"), []byte("#!/bin/sh\nexec "+quoted+" \"$@\"\n"), 0700)
