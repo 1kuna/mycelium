@@ -70,7 +70,8 @@ when shell expansion is needed.
 | `targets` | Empty: any OS/arch | Exact `{os, arch, platform}` alternatives, enforced at dispatch and launch |
 | `require_target` | `false` | Refuse a new submission without an online qualified target of sufficient total admitted capacity; busy qualified targets may queue |
 | `allowed_machines` | Empty: any eligible worker | Machine-name allow-list |
-| `start_by` | Production: submission + 150 seconds; absent for other priorities | Absolute RFC3339 first-start deadline, production batch only; loss recovery gets a fresh original-length window |
+| `start_by` | Production: submission + effective start window (readiness for dependents); absent for other priorities | Absolute RFC3339 first-start deadline, production batch only; takes precedence over `start_window`; loss recovery gets a fresh original-length window |
+| `start_window` | Production: `150s`; absent for other priorities | Relative Go duration string, `0 < duration <= 1h`, production batch only; inherited by physical fan-out children |
 | `give_up_at` | Absent: wait indefinitely | RFC3339 expiry while queued; not a running-job timeout |
 | `expected_minutes` | `0` | Rough planning hint, never enforced |
 | `resumable` | `false` | Set true only for a command implementing the checkpoint/stop contract |
@@ -423,18 +424,38 @@ cancels all warm-ups, waits for them to exit, and unloads every attempted engine
 
 Production jobs must acknowledge command startup before `start_by`. Set an
 absolute RFC3339 timestamp, for example `start_by: 2026-10-12T14:00:30Z`.
-If omitted, the queue saves submission time plus **150 seconds**: the ordinary
+For a relative budget, declare **`start_window: 600s`** on the job or the selected
+entry in `.mycelium/adapter.yaml`. It accepts a Go duration string (for example
+`600s` or `10m`), strictly positive and at most **1 hour**. The cap bounds the
+time production can wait on unavailable capacity or stuck preparation while
+allowing substantial contention; choosing a longer window delays failure by that
+budget. Zero, negative, malformed, overflowing and over-cap values are rejected.
+It is a startup budget, not a runtime limit. Experiments have no start deadline
+and must omit both fields. If both are supplied, the explicit absolute `start_by`
+wins, including for every physical fan-out child.
+
+Without `start_by`, the queue saves submission time plus `start_window`, which
+defaults to **150 seconds**: the ordinary
 10-second experiment grace, two-minute Docker cleanup escalation, and a small
 reporting margin. This is a bounded availability policy, not a native startup
 latency guarantee. A shorter caller-owned deadline can trigger fallback sooner.
 Unstarted retries, re-delivery and queue restarts never renew it. Older unfinished
 production records without the field receive the same default from their original submission.
+For a dependent job, its generated window starts at dependency readiness; for
+each physical fan-out child it starts at that child's assignment. The declared
+length survives both transitions. No preparation step or unstarted retry renews it.
+
+Job GET exposes the authored duration at `spec.start_window`, the current cutoff
+at `spec.start_by`, and the effective original length at top-level `start_window`
+in **nanoseconds** (`600000000000` for 600 seconds). The effective length is
+available before command startup, including while dependencies block.
 
 `give_up_at` keeps its queued-only meaning; the earlier applicable expiry wins.
 `deadline` remains an ordering hint. A command that has started may finish after
 `start_by`. After a started attempt loses its machine (including worker restart),
 the recovery attempt gets a fresh window from the queue's loss-detection time:
-loss time plus the original `start_by` minus submission time. That original window
+loss time plus the original effective window (for an absolute deadline, the
+original `start_by` minus submission time). That original window
 length is durable and does not grow across repeated losses. Brief outages can
 resume; a recovery attempt that does not start within its window fails with
 `production start deadline exceeded: <blocker>` so the caller can run fallback.

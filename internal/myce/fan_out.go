@@ -307,8 +307,10 @@ func (q *Queue) assignFanOut(selected *Job, m *Machine) *Job {
 	copy.Queued = q.clock.Now()
 	copy.WaitingSince = parent.WaitingSince
 	if copy.Spec.Priority == "production" {
-		until := q.clock.Now().Add(ProductionStartTimeout)
-		copy.Spec.StartBy = &until
+		if !copy.StartByExplicit {
+			copy.Spec.StartBy = nil
+		}
+		initializeStartDeadline(&copy, copy.Queued)
 	}
 	parent.FanOut.Next += len(copy.Batch.Pieces)
 	parent.FanOut.Children = append(parent.FanOut.Children, copy.ID)

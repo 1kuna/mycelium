@@ -10,8 +10,35 @@ import (
 // and 15s for reporting and replacement launch; grace never extends StartBy.
 const ProductionStartTimeout = maxGPUStopGrace + StopGrace + 15*time.Second
 
+// A startup availability budget may cover contended preparation, but must not
+// silently turn production admission into an unbounded capacity wait.
+const MaxProductionStartWindow = time.Hour
+
+func productionStartWindow(s Spec) time.Duration {
+	if s.StartWindow != "" {
+		window, _ := time.ParseDuration(s.StartWindow) // validated at submission
+		return window
+	}
+	return ProductionStartTimeout
+}
+
+// Keep the durable original length separate from the advancing recovery cutoff.
+// An absolute caller deadline always wins over a relative declaration.
+func initializeStartDeadline(j *Job, since time.Time) {
+	if j.Spec.Priority != "production" {
+		return
+	}
+	if j.Spec.StartBy == nil {
+		j.StartWindow = productionStartWindow(j.Spec)
+		deadline := since.Add(j.StartWindow)
+		j.Spec.StartBy = &deadline
+	} else if j.StartWindow == 0 {
+		j.StartWindow = j.Spec.StartBy.Sub(j.Queued)
+	}
+}
+
 func startupPending(j *Job) bool {
-	if j.Spec.FanOut != nil && j.FanOut != nil && j.FanOut.Next > 0 {
+	if j.Spec.FanOut != nil && j.FanOut != nil && j.FanOut.Next > 0 && (!j.StartByExplicit || j.FanOut.Next == len(j.Spec.FanOut.Pieces)) {
 		return false
 	}
 	return j.Spec.StartBy != nil && !terminal(j.State) && !cancelled(j) && (j.State == "queued" || j.StartedAt == nil)
@@ -58,8 +85,7 @@ func (q *Queue) maintainStartDeadlines() {
 	now := q.clock.Now()
 	for _, j := range q.liveJobs() {
 		if j.Spec.Priority == "production" && j.Spec.StartBy == nil && dependencyReady(j) && !terminal(j.State) {
-			deadline := j.Queued.Add(ProductionStartTimeout)
-			j.Spec.StartBy = &deadline
+			initializeStartDeadline(j, j.Queued)
 		}
 		if !startupPending(j) {
 			continue

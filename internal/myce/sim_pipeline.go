@@ -114,11 +114,7 @@ func simPipelineTransitions(q *Queue, tasks []*simTask, metrics map[string]*SimP
 			if j.simGatherWait && terminal(p.State) {
 				j.simGatherWait = false
 				j.WaitingSince = q.clock.Now()
-				if j.Spec.Priority == "production" {
-					deadline := q.clock.Now().Add(ProductionStartTimeout)
-					j.Spec.StartBy = &deadline
-					j.StartWindow = ProductionStartTimeout
-				}
+				initializeStartDeadline(j, q.clock.Now())
 				changed = true
 			}
 			if dependencyReady(j) && !cancelled(j) && piece.Ready == nil {

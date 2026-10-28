@@ -45,6 +45,14 @@ main command on each attempt or declared wave, before accepted output publicatio
 Omitting it requires command success and required-output verification. An argv is
 never evaluated as shell text unless the author explicitly chooses a shell.
 
+A production entry may declare `class: production` and `start_window: 600s`.
+This is the same [relative job start window](job-reference.md#production-start-deadline):
+positive Go duration, at most `1h`, default `150s`, inherited by executing fan-out
+children from their assignment (dependent jobs start their budget at readiness).
+An explicit absolute `start_by` takes precedence. Keep the policy on the entry,
+alongside class and fan-out, rather than in hardware variants or extension recipes.
+Experiment entries omit it and retain no start deadline.
+
 Installed tools (`environment: {}`) and named catalog environments keep their
 existing behavior. Project environment submission (#251) and worker build
 eligibility (#252) remain separate work. Existing native composed environment

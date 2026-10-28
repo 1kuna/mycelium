@@ -38,6 +38,18 @@ entries:
     checks: {result: [test, -s, result]}
 `, source, runtime.GOOS, runtime.GOARCH)
 }
+
+func TestAdapterStartWindow(t *testing.T) {
+	data := strings.Replace(cpuAdapterYAML("source"), "    source:", "    class: production\n    start_window: 600s\n    source:", 1)
+	a, err := decodeAdapter([]byte(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, _, err := adapterProfile(a, "")
+	if err != nil || p.StartWindow != "600s" || p.Class != "production" {
+		t.Fatalf("entry lost stage policy: %+v %v", p.Spec, err)
+	}
+}
 func TestAdapterStrictSelectedEntryAndLiteralArgs(t *testing.T) {
 	data := cpuAdapterYAML("source")
 	a, err := decodeAdapter([]byte(data))
