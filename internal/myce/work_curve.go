@@ -111,6 +111,12 @@ func (q *Queue) invalidateWorkCurves() {
 				if component != p.Key.Component {
 					continue
 				}
+				// Initial inventory and pending/failed backend probes can report
+				// a component before its fingerprint. Absence is not a change.
+				if m.ExtensionFingerprint == "" {
+					reason = "component unavailable"
+					continue
+				}
 				reason = "recipe or reference changed"
 				if strings.HasPrefix(p.Key.Work, "profile:") {
 					reason = profileMemoryStaleReason(p, m)

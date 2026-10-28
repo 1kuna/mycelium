@@ -256,22 +256,24 @@ func (w Worker) publishExtensionFiles(j Job, attemptWork string) error {
 	return publishJobOutputs(j, root)
 }
 
-// Non-Darwin workers retain hard-link publication. Darwin installs its SMB
-// directory publisher during package initialization.
-var publishJobOutputs = publishLinkedJobOutputs
+func publishJobOutputs(j Job, root string) error {
+	return publishDirectoryJobOutputs(j, root, os.Rename)
+}
 
-func publishLinkedJobOutputs(j Job, root string) error {
+// Publish each prefix as one complete attempt directory on local and shared
+// filesystems, including SMB (which may not support hard links). Rename refuses
+// an existing nonempty directory, so no existing result can be overwritten. Replacing an
+// empty directory publishes new results without exposing a partial file.
+func publishDirectoryJobOutputs(j Job, root string, renameDirectory func(string, string) error) error {
+	groups := map[string][]string{}
 	for name, prefix := range j.Spec.Outputs {
-		src, err := confinedPath(j.Spec.Run.Workdir, name)
-		if err != nil {
-			return err
-		}
-		relative := outputRelative(j, name, prefix)
-		dest := filepath.Join(root, relative)
-		// Refuse every existing symlink in the destination ancestry. Attempt-specific
-		// outputs never overwrite another execution's results, including late ones.
-		parent := filepath.Dir(dest)
-		for p := parent; p != root; p = filepath.Dir(p) {
+		groups[prefix] = append(groups[prefix], name)
+	}
+	for prefix, names := range groups {
+		dest := filepath.Join(root, prefix, j.ID, strconv.Itoa(j.Attempt))
+		// Apply the same ancestry confinement as file publication, including the
+		// destination attempt directory; never follow a pre-existing symlink.
+		for p := dest; p != root; p = filepath.Dir(p) {
 			rel, err := filepath.Rel(root, p)
 			if err != nil || !filepath.IsLocal(rel) {
 				return errors.New("output escapes root")
@@ -282,25 +284,35 @@ func publishLinkedJobOutputs(j Job, root string) error {
 				return e
 			}
 		}
+		parent := filepath.Dir(dest)
 		if err := os.MkdirAll(parent, 0700); err != nil {
 			return err
 		}
-		tmp, err := os.MkdirTemp(parent, ".output-")
+		staged, err := os.MkdirTemp(parent, ".output-")
 		if err != nil {
 			return err
 		}
-		staged := filepath.Join(tmp, "file")
-		err = copyJobFile(src, staged)
+		for _, name := range names {
+			var source string
+			source, err = confinedPath(j.Spec.Run.Workdir, name)
+			if err == nil {
+				err = copyJobFile(source, filepath.Join(staged, name))
+			}
+			if err != nil {
+				break
+			}
+		}
 		if err == nil {
-			err = os.Link(staged, dest)
-		} // Atomic no-overwrite publication.
-		_ = os.RemoveAll(tmp)
+			err = renameDirectory(staged, dest)
+		}
+		_ = os.RemoveAll(staged)
 		if err != nil {
 			return fmt.Errorf("attempt output publication failed: %w", err)
 		}
 	}
 	return nil
 }
+
 func validateExtensionJob(s Spec) error {
 	if err := validateExtensionSelector(s); err != nil {
 		return err
