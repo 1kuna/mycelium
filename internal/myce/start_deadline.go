@@ -37,9 +37,26 @@ func initializeStartDeadline(j *Job, since time.Time) {
 	}
 }
 
-func startupPending(j *Job) bool {
-	if j.Spec.FanOut != nil && j.FanOut != nil && j.FanOut.Next > 0 && (!j.StartByExplicit || j.FanOut.Next == len(j.Spec.FanOut.Pieces)) {
-		return false
+// Older records did not distinguish generated and caller-owned cutoffs. Keep
+// their persisted timestamp authoritative; new submissions always store the bit,
+// including false, so generated relative windows remain distinguishable.
+func absoluteStartBy(j *Job) bool {
+	return j.Spec.StartBy != nil && (j.StartByExplicit == nil || *j.StartByExplicit)
+}
+
+func (q *Queue) startupPending(j *Job) bool {
+	if j.Spec.FanOut != nil && j.FanOut != nil && j.FanOut.Next > 0 {
+		if !absoluteStartBy(j) || j.FanOut.Next == len(j.Spec.FanOut.Pieces) {
+			return false
+		}
+		// An expired tail cannot dispatch, but already materialized children
+		// retain their own startup/recovery windows and accepted-start rights.
+		// Settle them before failing the parent, whose failure cancels children.
+		for _, id := range j.FanOut.Children {
+			if child := q.s.Jobs[id]; child != nil && !terminal(child.State) {
+				return false
+			}
+		}
 	}
 	return j.Spec.StartBy != nil && !terminal(j.State) && !cancelled(j) && (j.State == "queued" || j.StartedAt == nil)
 }
@@ -84,10 +101,10 @@ func (q *Queue) startWaitingReason(j *Job) string {
 func (q *Queue) maintainStartDeadlines() {
 	now := q.clock.Now()
 	for _, j := range q.liveJobs() {
-		if j.Spec.Priority == "production" && j.Spec.StartBy == nil && dependencyReady(j) && !terminal(j.State) {
+		if j.Spec.Priority == "production" && !terminal(j.State) && (j.Spec.StartBy != nil || dependencyReady(j)) {
 			initializeStartDeadline(j, j.Queued)
 		}
-		if !startupPending(j) {
+		if !q.startupPending(j) {
 			continue
 		}
 		disabled := dependencyReady(j) && j.State == "queued" && j.Attempt == 0 && q.allStartHostsDisabled(j)

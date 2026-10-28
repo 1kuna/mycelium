@@ -665,7 +665,8 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 			id = ID()
 		}
 		j := &Job{PriorityPolicy: q.priorityMatch(s), FileTransport: q.fileCheckpoints, Extensions: extensions, SidecarEnvironmentRecipes: sidecarRecipes, EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: filepath.Join(q.root, id)}
-		j.StartByExplicit = s.StartBy != nil
+		explicitStartBy := s.StartBy != nil
+		j.StartByExplicit = &explicitStartBy
 		if s.Priority == "production" {
 			j.StartWindow = productionStartWindow(s)
 			if s.StartBy != nil {
@@ -912,7 +913,7 @@ func (q *Queue) maintain() {
 	q.refreshHostMemory()
 	q.maintainHolds()
 	for _, j := range q.liveJobs() {
-		if startupPending(j) {
+		if q.startupPending(j) {
 			j.Reason = q.startStatusReason(j)
 		}
 	}
@@ -1823,7 +1824,7 @@ func (q *Queue) projectJob(stored *Job, order map[string]int, reasons map[string
 			j.Reason = "NAS checkpoint root is unreachable"
 		}
 	}
-	if startupPending(j) {
+	if q.startupPending(j) {
 		j.Reason = q.startStatusReason(j)
 	}
 	// Eligibility/reasons need the full diagnostic inputs until redaction.

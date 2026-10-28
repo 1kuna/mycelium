@@ -1545,7 +1545,7 @@
           "x-contract": "stable"
         },
         "start_by_explicit": {
-          "description": "The submitted start_by was caller-owned and absolute; physical fan-out must preserve its cutoff.",
+          "description": "Whether submitted start_by was caller-owned and absolute. New jobs persist true or false; absent on older records means preserve their existing cutoff as absolute.",
           "type": "boolean",
           "x-contract": "diagnostic"
         },

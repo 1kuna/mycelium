@@ -138,6 +138,10 @@ func TestStartWindowFanOutLaterWave(t *testing.T) {
 				t.Fatal(err)
 			}
 			clock.Advance(601 * time.Second)
+			check(t, q, m, first)
+			if running := job(t, q, first.ID); running.State != "running" || running.StartedAt == nil {
+				t.Fatalf("deadline killed an accepted command: %+v", running)
+			}
 			finish(t, q, first, true)
 			next := check(t, q, m, nil).Job
 			if absolute {
@@ -148,6 +152,30 @@ func TestStartWindowFanOutLaterWave(t *testing.T) {
 				t.Fatalf("later wave lost its full relative budget: %+v", next)
 			}
 		})
+	}
+}
+
+func TestStartWindowRetainedAbsoluteCutoff(t *testing.T) {
+	q, clock, m, s := fanOutFixture(t, 1)
+	s.Priority = "production"
+	cutoff := clock.Now().Add(600 * time.Second)
+	s.StartBy = &cutoff
+	parent := submit(t, q, s)
+	// Encode the old persisted form, which had neither provenance nor an
+	// effective window until Started. Reopen through the real SQLite path.
+	if err := q.update(func() error {
+		stored := q.touchJob(parent.ID)
+		stored.StartByExplicit = nil
+		stored.StartWindow = 0
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	q = reopenCancellationQueue(t, q, clock)
+	clock.Advance(5 * time.Second)
+	child := check(t, q, m, nil).Job
+	if child == nil || child.Spec.StartBy == nil || !child.Spec.StartBy.Equal(cutoff) || child.StartWindow != 600*time.Second {
+		t.Fatalf("retained cutoff or original recovery length changed: %+v", child)
 	}
 }
 

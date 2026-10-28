@@ -273,7 +273,9 @@ The logical consumer's generated deadline begins at readiness. Each executing
 child inherits `start_window` and gets that full relative budget from its own
 assignment, including later waves. An explicit absolute `start_by` takes
 precedence and is preserved by every child instead. If it expires before all
-pieces are assigned, the parent fails without dispatching an expired tail.
+pieces are assigned, the tail never dispatches. Materialized children keep their
+own startup/recovery windows and accepted commands may finish; the parent fails
+after those children settle.
 After a started child loses
 its machine, recovery gets the original window length from loss detection;
 unstarted retries keep their cutoff. Job GET shows `spec.start_window`, current

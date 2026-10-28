@@ -232,7 +232,7 @@ func (q *Queue) fanOutComponents(j *Job) ([]batchComponent, map[string]*Job) {
 }
 
 func (q *Queue) fanOutCandidate(j *Job, m *Machine) *Job {
-	if j.State != "queued" || !dependencyReady(j) || cancelled(j) || j.FanOut == nil || j.FanOut.Next >= len(j.Spec.FanOut.Pieces) || !q.placementAllowed(j, m) || !q.checkpointReady(j, m) {
+	if j.State != "queued" || absoluteStartBy(j) && expired(j.Spec.StartBy, q.clock.Now()) || !dependencyReady(j) || cancelled(j) || j.FanOut == nil || j.FanOut.Next >= len(j.Spec.FanOut.Pieces) || !q.placementAllowed(j, m) || !q.checkpointReady(j, m) {
 		return nil
 	}
 	components, candidates := q.fanOutComponents(j)
@@ -307,7 +307,7 @@ func (q *Queue) assignFanOut(selected *Job, m *Machine) *Job {
 	copy.Queued = q.clock.Now()
 	copy.WaitingSince = parent.WaitingSince
 	if copy.Spec.Priority == "production" {
-		if !copy.StartByExplicit {
+		if !absoluteStartBy(&copy) {
 			copy.Spec.StartBy = nil
 		}
 		initializeStartDeadline(&copy, copy.Queued)

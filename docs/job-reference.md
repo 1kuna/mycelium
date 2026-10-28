@@ -444,6 +444,8 @@ production records without the field receive the same default from their origina
 For a dependent job, its generated window starts at dependency readiness; for
 each physical fan-out child it starts at that child's assignment. The declared
 length survives both transitions. No preparation step or unstarted retry renews it.
+Retained jobs from before this declaration existed preserve their stored cutoff
+as absolute: older records did not record whether it was generated or submitted.
 
 Job GET exposes the authored duration at `spec.start_window`, the current cutoff
 at `spec.start_by`, and the effective original length at top-level `start_window`

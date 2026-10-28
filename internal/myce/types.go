@@ -404,7 +404,7 @@ type Job struct {
 	EnvironmentRecipes    map[string]EnvironmentRecipe `json:"environment_recipes,omitempty"`
 	Copies                []Copy                       `json:"copies,omitempty"`
 	StartWindow           time.Duration                `json:"start_window,omitempty"`
-	StartByExplicit       bool                         `json:"start_by_explicit,omitempty"`
+	StartByExplicit       *bool                        `json:"start_by_explicit,omitempty"`
 	StartedAt             *time.Time                   `json:"started_at,omitempty"`
 	StartLatencySeconds   float64                      `json:"start_latency_seconds"`
 	Starts                int                          `json:"starts"`
