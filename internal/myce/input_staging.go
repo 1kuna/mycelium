@@ -10,3 +10,10 @@ func retainInputsStagedAt(j *Job, at *time.Time) {
 		j.InputsStagedAt = &copy
 	}
 }
+
+// Capture only after preparation returns: NAS copiers must all join and the
+// complete snapshot must publish before staging completion can be reported.
+func captureStagedInputs(clock Clock, prepare func() (string, error)) (stagedInputs, error) {
+	directory, err := prepare()
+	return stagedInputs{directory: directory, at: clock.Now()}, err
+}

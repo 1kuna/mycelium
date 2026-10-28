@@ -380,8 +380,10 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	if !j.Spec.Run.Docker || j.Spec.extensionJob() || len(jobInputFiles(&j))+len(jobInputPaths(&j))+len(j.Spec.SharedInputs) > 0 {
 		value := j
 		staged, err := s.extensionFiles.run(attemptCheckpoint(j), func() (stagedInputs, error) {
-			err := w.prepareExtensionFiles(&value, s.dir)
-			return stagedInputs{directory: value.Spec.Run.Workdir, at: w.Clock.Now()}, err
+			return captureStagedInputs(w.Clock, func() (string, error) {
+				err := w.prepareExtensionFiles(&value, s.dir)
+				return value.Spec.Run.Workdir, err
+			})
 		})
 		if err != nil {
 			if strings.HasPrefix(err.Error(), "NAS unreachable:") {
