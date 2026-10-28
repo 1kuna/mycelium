@@ -64,7 +64,7 @@ func (f *retentionDaemon) caller(d *dockerAttempt) func(...string) ([]byte, erro
 					return []byte(out.String()), errors.New("fake daemon partial removal")
 				}
 				c := f.containers[id]
-				if c.Config.Labels["myce.worker"] != "retired" || c.Config.Labels["myce.attempt"] == "" || dockerLive(c) || strings.HasPrefix(c.Name, "/verso-") || c.Name == "/docker-render-1" {
+				if c.Config.Labels["myce.worker"] != "retired" || c.Config.Labels["myce.attempt"] == "" || dockerLive(c) {
 					f.t.Fatalf("unsafe removal: %v", args)
 				}
 				f.removed = append(f.removed, id)
@@ -107,28 +107,28 @@ func retentionPair(t *testing.T, sidecarName string) (ServiceConfig, ServiceConf
 	return c, source, clock, f
 }
 
-func TestReconcileRetiredDockerProtectsSharedAttemptSibling(t *testing.T) {
-	c, source, clock, f := retentionPair(t, "/verso-pair")
-	report, err := reconcileRetiredDocker(context.Background(), c.Config, clock, f.caller)
-	if err == nil || !strings.Contains(err.Error(), "outside verified reconciliation inventory") {
-		t.Fatal("shared-attempt removal did not reach the inventory guard", err)
-	}
-	if len(f.removeCalls) != 0 || len(f.containers) != 2 {
-		t.Fatal("shared attempt with protected sibling reached daemon removal", f.removeCalls)
-	}
-	if len(report) != 2 {
-		t.Fatal("missing shared-attempt report", report)
-	}
-	for _, r := range report {
-		if r.Removed || r.Reason == "" {
-			t.Errorf("shared attempt not held: %+v", r)
-		}
-		if r.Container == "pair-sidecar" && r.Reason != "protected container" {
-			t.Errorf("protected sibling hold missing: %+v", r)
-		}
-	}
-	if _, err := os.Stat(filepath.Join(source.State, "pair.docker-ack.json")); err != nil {
-		t.Fatal("protected shared attempt lost custody", err)
+func TestReconcileRetiredDockerLeavesUnownedContainers(t *testing.T) {
+	for _, name := range []string{"/verso-pair", "/docker-render-1", "/unrelated-service"} {
+		t.Run(name, func(t *testing.T) {
+			c, source, clock, f := retentionPair(t, name)
+			// Even matching attempt custody cannot authorize an unowned container.
+			unowned := f.containers["pair-sidecar"]
+			unowned.Config.Labels = map[string]string{}
+			f.containers[unowned.ID] = unowned
+			report, err := reconcileRetiredDocker(context.Background(), c.Config, clock, f.caller)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(f.removed, []string{"pair-main"}) || len(f.containers) != 1 || f.containers[unowned.ID].Name != name {
+				t.Fatal("ownership did not determine removal", f.removed, f.containers)
+			}
+			if len(report) != 1 || !report[0].Removed || report[0].Container != "pair-main" {
+				t.Fatal("owned container not reconciled", report)
+			}
+			if _, err := os.Stat(filepath.Join(source.State, "pair.docker-evidence.json")); err != nil {
+				t.Fatal("private evidence lost", err)
+			}
+		})
 	}
 }
 
@@ -191,7 +191,7 @@ func TestReconcileRetiredDockerCustody(t *testing.T) {
 	now := time.Unix(200000, 0)
 	clock := &dockerTestClock{now: now}
 	f := &retentionDaemon{t: t, containers: map[string]dockerInspection{}}
-	for _, attempt := range []string{"settled", "no-ack", "unreleased", "wrong-owner", "recent", "no-evidence", "protected", "protected-render", "active"} {
+	for _, attempt := range []string{"settled", "no-ack", "unreleased", "wrong-owner", "recent", "no-evidence", "owned-consumer-name", "owned-render-name", "active"} {
 		code := 143
 		st := dockerExecution{Identity: attempt, Endpoint: "fake", Released: true, EvidenceSaved: true, Containers: map[string]dockerMember{attempt: {Name: "main", ExitCode: &code, StderrTail: "private stderr"}}}
 		if attempt == "unreleased" {
@@ -226,10 +226,10 @@ func TestReconcileRetiredDockerCustody(t *testing.T) {
 			*obj.State.Running = true
 			obj.State.Status = "running"
 		}
-		if attempt == "protected" {
+		if attempt == "owned-consumer-name" {
 			obj.Name = "/verso-fixture"
 		}
-		if attempt == "protected-render" {
+		if attempt == "owned-render-name" {
 			obj.Name = "/docker-render-1"
 		}
 		f.containers[obj.ID] = obj
@@ -257,7 +257,7 @@ func TestReconcileRetiredDockerCustody(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "private Docker evidence unavailable") {
 		t.Fatal("missing evidence failure not reported", err)
 	}
-	if !slices.Equal(f.removed, []string{"settled"}) {
+	if !slices.Equal(f.removed, []string{"owned-consumer-name", "owned-render-name", "settled"}) {
 		t.Fatalf("retired custody not reconciled: removed=%v report=%+v", f.removed, report)
 	}
 	if len(report) != 9 {

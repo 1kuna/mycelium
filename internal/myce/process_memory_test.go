@@ -192,7 +192,7 @@ func TestAttemptMemoryEventCountsPersist(t *testing.T) {
 		}
 		return data
 	}
-	complete := func(events string) {
+	complete := func(events string) Job {
 		t.Helper()
 		j := startObservation(t, q, m, s)
 		write("memory.events", events)
@@ -202,15 +202,33 @@ func TestAttemptMemoryEventCountsPersist(t *testing.T) {
 		if err := q.Complete(r); err != nil {
 			t.Fatal(err)
 		}
+		return j
 	}
 	// Low resident use with cache reclaim is learned, with its counts.
 	complete("low 0\nhigh 0\nmax 3\noom 0\noom_kill 0\noom_group_kill 0\n")
 	if data := stored(); !strings.Contains(data, `"events":{"high":0,"max":3,"oom":0,"oom_kill":0,"oom_group_kill":0}`) || strings.Contains(data, `"constrained":true`) {
 		t.Fatalf("accepted peak lost its event counts: %s", data)
 	}
+	// Status must show the memory-only curve's observed peak, rather than its
+	// zero legacy host/device usage fields.
+	snap, err := q.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snap.WorkCurves) != 1 {
+		t.Fatalf("status lost memory-only curve: %+v", snap.WorkCurves)
+	}
+	point := snap.WorkCurves[0]
+	if point.MemoryPeak == nil || point.MemoryPeak.Events == nil || point.MemoryPeak.Events.Max != 3 || point.HostMemoryGB != 0 || point.DeviceMemoryGB != 0 || !strings.Contains(point.Summary(), "peak host/device 1.00/0.00 GiB") {
+		t.Fatalf("status lost memory-only facts: %+v; %s", point, point.Summary())
+	}
 	write("memory.stat", "anon 2684354560\nkernel 0\nshmem 0\n")
-	complete("low 0\nhigh 0\nmax 6264\noom 0\noom_kill 0\noom_group_kill 0\n")
+	constrained := complete("low 0\nhigh 0\nmax 6264\noom 0\noom_kill 0\noom_group_kill 0\n")
 	if data := stored(); !strings.Contains(data, `"events":{"high":0,"max":6264,"oom":0,"oom_kill":0,"oom_group_kill":0}`) || !strings.Contains(data, `"constrained":true`) {
 		t.Fatalf("constrained run did not persist its event counts: %s", data)
 	}
+	// Constrained provenance can be invalidated in learning, but the job's
+	// attempt facts must remain available after restart independently of it.
+	q = memoryFactsRestart(t, q, clock)
+	memoryFactsGET(t, q, constrained, a.peak(), false)
 }

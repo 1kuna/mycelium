@@ -268,6 +268,34 @@ Saved configs accept the retired local-control fields during overlay and omit
 them when rewritten; runtime options and secret references remain intact. Old state is never converted or
 silently cleared. See [fresh install](guide-fresh-install.md).
 
+### Legacy EnvironmentFile workers
+
+A compatible single-service worker with `environment_file` in its saved config
+uses the ordinary in-place installer. The printed signed upgrade line identifies
+this authority mode and gives the exact verified candidate/config command;
+it does not require split-worker conversion or new credentials. The verified
+candidate stays in the bootstrap cache. Use that candidate as `NEW_MYCE` below.
+
+First inspect `myce host status HOST`. Preserve any existing operator drain or
+disable; otherwise run `myce host drain HOST --wait` and record the drain you own.
+Preview and install the same signed candidate using the exact saved config:
+
+```sh
+NEW_MYCE install worker --config WORKER_CONFIG --dry-run
+NEW_MYCE install worker --config WORKER_CONFIG
+```
+
+The preview explicitly reports preservation of the EnvironmentFile credential
+reference and lists any configuration changes. Omit authority flags to keep the
+existing private file; never copy its token into output, argv or another config.
+The installer preserves identity, service, spool/state, catalog/cache/runtime
+settings and credential references, and restores the existing installation on
+activation failure. Inspect preview changes before proceeding. This path does
+not change queue maintenance or restart the queue. Verify the running release,
+service health and fresh worker report afterward, then resume only the drain you
+created. Existing operator maintenance remains in force. Platform mismatch is a
+separate refusal requiring the correct signed OS/architecture artifact.
+
 ## Foreground and service control
 
 `myce join` runs a worker against the configured queue. `myce service --config
@@ -285,7 +313,8 @@ implied by these instructions.
 
 ## Convert split workers to one machine worker (M4)
 
-Follow the [accepted maintenance and native qualification gates](design-proposal.md#installation-checkpoints-and-rollback-m4).
+Follow the [accepted maintenance gates](design-proposal.md#installation-checkpoints-and-rollback-m4)
+and [native qualification](design-proposal.md#native-maintenance-window-qualification).
 Conversion is an operator-run maintenance action on the queue host and every
 converted worker host, including the single-card Spark worker in the same
 window. Commands below use placeholders for approved installation paths and
@@ -728,6 +757,39 @@ action, not applied here: review the intentionally permissive profile and
 kernel attack-surface cost, load with `apparmor_parser`, then restart and verify
 the actual worker service. Never disable the global restriction as a shortcut.
 
+## Native cleanup custody
+
+If an installed worker retains a finished native attempt after a transient process
+inspection failure, its custody can prevent upgrading to the cleanup retry fix.
+During an authorized maintenance window, stop its existing worker service through
+the owning service manager. As the ordinary worker account, run a staged new binary
+without replacing the installed binary:
+
+```sh
+NEW_MYCE resolve-native --state-dir WORKER_SPOOL --attempt-id ATTEMPT_ID
+```
+
+Use the exact local execution identity from the attempt custody record, not the job
+ID. The command exclusively locks the offline spool and requires a matching saved
+finished result. It independently checks every recorded process group, PID,
+native sidecar and cgroup, then checks open handles under the exact
+`job-files/JOB/ATTEMPT` scratch folder using a descriptor inventory, including
+unlinked files, from `lsof` (included on macOS; install it separately on Linux).
+A live or reused PID, unknown identity, missing custody,
+failed inspection, open handle or unavailable inspector retains custody. It never
+signals processes or accepts an operator assertion. The default 30-second
+inspection budget bounds a stuck inspector; expiry retains custody. Increase
+`--timeout` for a busy account after inspecting the failure. An incomplete
+inventory, including warnings about unavailable mounts, must be repaired before
+retrying; it cannot serve as proof of release.
+
+Success only clears the exact result's pending release locally, preserving its
+failure outcome, scratch, process evidence and other attempts. It does not contact
+the queue, change maintenance or rerun the payload. Restart the unchanged installed
+worker and require fresh queue maintenance status confirming release before
+rerunning the normal upgrade. Preserve existing drain/disable ownership throughout.
+No manual spool or database edits are needed.
+
 ## Docker cleanup custody
 
 Managed Docker batches use exact immutable attempt labels and a durable create/start
@@ -766,7 +828,8 @@ as they are.
 Removal uses the normal collector's exact attempt/worker label checks, matching
 acknowledgement, elapsed retention, confirmed released custody, stopped state,
 no-restart policy and private exit evidence. Removal never uses force.
-`verso-*` and `docker-render-1` containers are always protected.
+Containers without matching `myce.attempt` and `myce.worker` ownership labels
+are never removed; container names do not determine ownership.
 
 The JSON report lists every inventoried container, whether removal was confirmed,
 and a reason for each hold. Missing or invalid custody/acknowledgements, active
@@ -986,6 +1049,15 @@ running the approved bytes receive the same stable health checks without a resta
 It never blindly repeats a restart or resumes an operator's drain. For a stopped
 operation, `--release` may explicitly select a newly approved newer release to
 fix forward. Approval changes alone never retarget a running operation.
+
+If an operator has replaced a stopped operation's drain, an identical rerun
+keeps the stale receipt as a visible `maintenance_changed` conflict. Explicitly
+selecting an approved newer release uses the current drained/disabled policy,
+including its budgets and placement, without acquiring permission to resume it.
+Exact release custody and stable health are still required; already-current
+services are verified without restarting. If admission was resumed instead,
+the newer operation is refused until the operator explicitly drains or disables
+the host. No receipt or database edits are needed.
 
 No automatic rollback, downgrade, forced job stop, SSH, driver, package or OS
 changes occur. Offline or unknown custody stays a visible wait; elapsed time

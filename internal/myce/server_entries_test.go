@@ -420,8 +420,8 @@ func TestEntryWorkerLoadsApprovedSourceWithLocalSecrets(t *testing.T) {
 	await(t, func() bool { reports, _ := rt.report(); return len(reports) == 1 && reports[0].State == "unloaded" })
 }
 
-func TestEntryAtlasDryExample(t *testing.T) {
-	data, err := os.ReadFile("../../docs/examples/atlas-server-entries.yaml")
+func TestEntrySimDryExample(t *testing.T) {
+	data, err := os.ReadFile("../../docs/examples/sim-server-entries.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,7 +447,7 @@ func TestEntryAtlasDryExample(t *testing.T) {
 		t.Fatal("three dry entries required")
 	}
 	for _, model := range config.Models {
-		if model.Project != "atlas" || model.Logs != "none" || len(model.AllowedMachines) != 1 || model.LocalSource == "" || model.Path != "" || model.Env["VLLM_WORKER_MULTIPROC_METHOD"] != "spawn" {
+		if model.Project != "sim" || model.Logs != "none" || len(model.AllowedMachines) != 1 || model.LocalSource == "" || model.Path != "" || model.Env["VLLM_WORKER_MULTIPROC_METHOD"] != "spawn" {
 			t.Fatal("incomplete dry entry")
 		}
 	}
