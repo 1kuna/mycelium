@@ -1256,8 +1256,17 @@ func TestDockerHealthyHelperStartupBudget(t *testing.T) {
 				if !pending {
 					t.Fatal("short startup timeout did not preserve uncertain create")
 				}
+				// The event subscription runs independently of the control-call
+				// budget. Join its observation so this boundary is exercised on
+				// every run, rather than depending on which CLI is scheduled first.
+				await(t, func() bool {
+					data, err := os.ReadFile(filepath.Join(s.dir, s.state.Identity+".docker-events.json"))
+					var archive dockerEventArchive
+					return err == nil && json.Unmarshal(data, &archive) == nil && archive.EndedAt != nil
+				})
 				if _, err := os.Stat(filepath.Join(root, "calls")); !os.IsNotExist(err) {
-					t.Fatal("helper entered command before startup timeout")
+					calls, _ := os.ReadFile(filepath.Join(root, "calls"))
+					t.Fatalf("helper entered command before startup timeout: %s", calls)
 				}
 				return
 			}
