@@ -38,8 +38,12 @@ type nativeMember struct {
 	cmd      *exec.Cmd
 	done     chan struct{}
 	err      error
+
+	signalTarget *os.File // Transient pidfd for a namespace member's joined child.
 }
 type nativeGroup struct {
+	namespace              *nativeNamespace
+	isolationPorts         []string
 	stageFailure           bool // guarded by p.mu
 	p                      *process
 	worker                 Worker
@@ -54,6 +58,20 @@ type nativeGroup struct {
 	memberMemory           map[string]*memoryAttempt
 	custody                workerState
 	supervisor             *exec.Cmd
+}
+
+// Only this attempt's payload leaves are shared for metrics. The aggregate
+// parent and the supervisor/control leaf never become payload read grants.
+func (g *nativeGroup) metricWorker() Worker {
+	w := g.worker
+	w.nativeMetricCgroups = nil
+	for _, memory := range g.memberMemory {
+		if memory != nil {
+			w.nativeMetricCgroups = append(w.nativeMetricCgroups, memory.path)
+		}
+	}
+	slices.Sort(w.nativeMetricCgroups)
+	return w
 }
 
 func (g *nativeGroup) started() bool {
@@ -150,10 +168,13 @@ func (g *nativeGroup) signalLocked(member *nativeMember, signal syscall.Signal) 
 		return
 	}
 	pid := -g.supervisor.Process.Pid
+	var err error
 	if member != nil {
-		pid = member.PID
+		err = member.signal(signal)
+	} else {
+		err = syscall.Kill(pid, signal)
 	}
-	if syscall.Kill(pid, signal) != nil {
+	if err != nil {
 		return
 	}
 	at := time.Now().UTC()
@@ -319,7 +340,7 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 		persist := errors.Join(syncCommandOutput(output), output.Close())
 		r := Result{MemoryPeak: peak, Machine: w.Machine.ID, Session: g.session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Success: runErr == nil && oom == nil && cleanup == nil && persist == nil, Forced: forced, PoliteStop: polite, ReleasePending: cleanup != nil}
 		if runErr != nil {
-			r.Error = runErr.Error()
+			r.Error = nativeAttemptError(j, runErr.Error())
 			r.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("command", runErr))
 			if stage && r.ExecutionCause.Class == "io_error" {
 				r.ExecutionCause.Class = "stage_failed"
@@ -346,7 +367,7 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 		}
 		r = classifyAttemptOutcome(r, attemptCause{PriorityStop: priorityStop, memberOutcome: facts, OutOfMemory: r.OutOfMemory || oom != nil && strings.Contains(oom.Error(), "exceeded its ")})
 		if r.Success {
-			if e := w.publishExtensionFiles(j); e != nil {
+			if e := w.publishExtensionFiles(j, filepath.Join(g.dir, "job-files", j.ID, strconv.Itoa(j.Attempt))); e != nil {
 				r.Success = false
 				r.Error = e.Error()
 				r.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("outputs", e))
@@ -373,10 +394,20 @@ func (g *nativeGroup) startSupervisor(s *workerStore, env map[string]string) (*o
 		return nil, err
 	}
 	defer reader.Close()
-	cmd := exec.Command("sh", "-c", `trap '' TERM; while read line; do :; done`, "myce-supervisor-"+g.identity)
+	cmd := exec.Command("/bin/sh", "-c", `trap '' TERM; while read line; do :; done`, "myce-supervisor-"+g.identity)
 	cmd.Stdin = reader
-	cmd.Env = environmentList(env)
+	cmd.Env = environmentList(jobBaseEnvironment())
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	work := filepath.Join(g.dir, "job-files", g.p.job.ID, strconv.Itoa(g.p.job.Attempt))
+	g.namespace = nil
+	if !nativeUnsandboxed(&g.p.job) {
+		g.namespace, err = g.worker.prepareNativeGroupIsolation(cmd, g.dir, work, env, g.p.job.Spec.Needs.Network)
+	}
+	if err != nil {
+		writer.Close()
+		return nil, err
+	}
+	defer g.namespace.close()
 	if s != nil {
 		s.state.PID = 0
 		s.state.LaunchPending = true
@@ -431,6 +462,9 @@ func (g *nativeGroup) startSupervisor(s *workerStore, env map[string]string) (*o
 		return abort(err)
 	}
 	if err = g.control.attach(cmd.Process.Pid); err != nil {
+		return abort(err)
+	}
+	if err = g.namespace.activate(g.ctx, writer); err != nil {
 		return abort(err)
 	}
 	if s != nil {
@@ -522,6 +556,10 @@ func (g *nativeGroup) cleanupProcesses(writer *os.File, retry bool) error {
 			m.Phase = "exited"
 			code := m.cmd.ProcessState.ExitCode()
 			m.ExitCode = &code
+			if m.signalTarget != nil {
+				m.signalTarget.Close()
+				m.signalTarget = nil
+			}
 			g.p.mu.Unlock()
 		}
 	}
@@ -573,7 +611,7 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 		command = filepath.Join(dir, command)
 	}
 	args := append([]string{"-c", `read gate || exit 125; exec "$@" < /dev/null`, "myce-member-" + m.Name, command}, argv[1:]...)
-	cmd := exec.Command("sh", args...)
+	cmd := exec.Command("/bin/sh", args...)
 	cmd.Dir = dir
 	env = maps.Clone(env)
 	bound, e := g.worker.deviceEnvironment()
@@ -587,10 +625,18 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 		env[k] = v
 	}
 	delete(env, "MYCE_TOKEN")
+	// Helpers and main cannot replace the attempt's temp path through authored env.
+	work := filepath.Join(g.dir, "job-files", g.p.job.ID, strconv.Itoa(g.p.job.Attempt))
+	env["TMPDIR"] = filepath.Join(work, ".tmp")
+	env["TMP"], env["TEMP"] = env["TMPDIR"], env["TMPDIR"]
+	env["MYCE_SCRATCH_DIR"] = filepath.Join(work, ".scratch")
 	if m.memory != nil {
 		env["MYCE_MEMORY_LIMIT_BYTES"] = strconv.FormatInt(m.memory.bytes, 10)
 	}
 	cmd.Env = environmentList(env)
+	if err := g.metricWorker().isolateNativeAttempt(&g.p.job, g.namespace, cmd, g.dir, work, env, g.isolationPorts, m.Name == "main"); err != nil {
+		return err
+	}
 	cmd.Stdout = output
 	cmd.Stderr = output
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: g.supervisor.Process.Pid}
@@ -641,11 +687,11 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 	if err = g.worker.authorizeLaunch(l); err != nil {
 		return g.recordInfrastructureLocked(launchRefused, m.Name, "", err)
 	}
+	if err = g.releaseMember(m, writer); err != nil {
+		return err
+	}
 	if m.Name == "main" {
 		g.main = m
-	}
-	if _, err = writer.WriteString("start\n"); err != nil {
-		return err
 	}
 	m.Phase = "running"
 	return g.saveLocked()
@@ -709,8 +755,10 @@ func (g *nativeGroup) run(j Job, base map[string]string, mainEnvironment string,
 		}
 	}()
 	env := maps.Clone(base)
+	g.isolationPorts = nil
 	setPort := func(side NativeSidecar, l net.Listener) {
 		port := strconv.Itoa(l.Addr().(*net.TCPAddr).Port)
+		g.isolationPorts = append(g.isolationPorts, port)
 		key := strings.ToUpper(strings.NewReplacer("-", "_", ".", "_").Replace(side.Name))
 		env["MYCE_SIDECAR_"+key+"_PORT"] = port
 		env["MYCE_SIDECAR_"+key+"_URL"] = "http://127.0.0.1:" + port
@@ -863,7 +911,7 @@ func (g *nativeGroup) waitReady(member *nativeMember, port string, readiness Nat
 		if err := g.memberFailure(); err != nil {
 			// A failed helper plus a foreign listener on its reserved port is
 			// positive handoff-collision evidence, independent of exit codes/logs.
-			if port != "" && errors.Is(g.worker.verifyNativeListener(g.ctx, port, g.supervisor.Process.Pid), errNativeForeignListener) {
+			if port != "" && errors.Is(g.verifyIsolationListener(g.ctx, port, g.supervisor.Process.Pid), errNativeForeignListener) {
 				return g.recordInfrastructure(foreignPort, member.Name, port, errNativePortCollision)
 			}
 			return err
@@ -874,18 +922,27 @@ func (g *nativeGroup) waitReady(member *nativeMember, port string, readiness Nat
 		if !g.worker.Clock.Now().Before(deadline) {
 			return &runtimeError{diagnostic: RuntimeCause{Operation: "readiness", Class: "timeout"}, cause: errors.New("native sidecar HTTP readiness timeout")}
 		}
-		req, _ := http.NewRequestWithContext(g.ctx, "GET", "http://127.0.0.1:"+port+readiness.Path, nil)
-		response, err := client.Do(req)
-		if err == nil {
-			response.Body.Close()
-			if response.StatusCode >= 200 && response.StatusCode < 300 {
-				if err = g.worker.verifyNativeListener(g.ctx, port, g.supervisor.Process.Pid); err != nil {
-					if errors.Is(err, errNativeForeignListener) {
-						return g.recordInfrastructure(foreignPort, member.Name, port, errNativePortCollision)
-					}
-					return err
-				}
+		if handled, ready, err := g.namespace.probe(g.ctx, port, g.supervisor.Process.Pid, readiness.Path, false); handled {
+			if errors.Is(err, errNativeForeignListener) {
+				return g.recordInfrastructure(foreignPort, member.Name, port, errNativePortCollision)
+			}
+			if ready {
 				return g.memberFailure()
+			}
+		} else {
+			req, _ := http.NewRequestWithContext(g.ctx, "GET", "http://127.0.0.1:"+port+readiness.Path, nil)
+			response, err := client.Do(req)
+			if err == nil {
+				response.Body.Close()
+				if response.StatusCode >= 200 && response.StatusCode < 300 {
+					if err = g.worker.verifyNativeListener(g.ctx, port, g.supervisor.Process.Pid); err != nil {
+						if errors.Is(err, errNativeForeignListener) {
+							return g.recordInfrastructure(foreignPort, member.Name, port, errNativePortCollision)
+						}
+						return err
+					}
+					return g.memberFailure()
+				}
 			}
 		}
 		select {

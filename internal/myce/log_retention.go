@@ -23,47 +23,67 @@ func (q *Queue) ConfigureLogRetention(age time.Duration) error {
 	}
 	q.mu.Lock()
 	q.logRetention = age
-	q.nextLogCleanup = time.Time{}
+	if q.records != nil {
+		q.records.logsDone = map[string]bool{}
+	}
+	if q.records != nil {
+		for id, j := range q.s.Jobs {
+			q.indexJob(id, j)
+		}
+	}
 	q.mu.Unlock()
 	return q.pruneBatchLogs()
 }
 
+// Snapshot a bounded wave under q.mu; all log-table I/O runs outside it.
+// Terminal attempts cannot append more logs (AppendLog requires current work).
 func (q *Queue) pruneBatchLogs() error {
 	q.mu.Lock()
-	hold := q.logCleanupHolds.start()
-	defer func() {
-		duration := queueHoldDuration(hold)
-		q.mu.Unlock()
-		logQueueHold(duration, "pruneBatchLogs", nil)
-	}()
 	if q.simulation {
+		q.mu.Unlock()
 		return nil
+	}
+	if q.records == nil {
+		q.rebuildRecords()
 	}
 	now := q.clock.Now()
-	if now.Before(q.nextLogCleanup) {
-		return nil
+	ids := q.records.logs.due(now)
+	// Keep retry ownership even if a delete fails or another Tick runs.
+	for _, id := range ids {
+		q.records.logs.set(id, now.Add(time.Minute))
 	}
-	cutoff := now.Add(-q.logRetention)
-	for id, j := range q.s.Jobs {
-		if !terminal(j.State) {
-			continue
+	q.mu.Unlock()
+	var result error
+	for _, id := range ids {
+		complete := true
+		for _, table := range []string{"logs", "log_offsets", "environment_log_offsets"} {
+			r, err := q.db.Exec("DELETE FROM "+table+" WHERE rowid IN (SELECT rowid FROM "+table+" WHERE job=? LIMIT 512)", id)
+			if err != nil {
+				result = errors.Join(result, err)
+				complete = false
+				break
+			}
+			n, err := r.RowsAffected()
+			if err != nil {
+				result = errors.Join(result, err)
+				complete = false
+				break
+			}
+			if n == 512 {
+				complete = false
+			}
 		}
-		ended := j.Queued
-		if j.FinishedAt != nil {
-			ended = *j.FinishedAt
-		}
-		if ended.After(cutoff) {
-			continue
-		}
-		if _, err := q.db.Exec("DELETE FROM logs WHERE job=?", id); err != nil {
-			return err
-		}
-		if _, err := q.db.Exec("DELETE FROM log_offsets WHERE job=?", id); err != nil {
-			return err
+		if complete {
+			q.mu.Lock()
+			q.records.logs.set(id, time.Time{})
+			if j := q.s.Jobs[id]; j != nil {
+				q.records.logsDone[id] = true
+				q.indexJob(id, j)
+			}
+			q.mu.Unlock()
 		}
 	}
-	q.nextLogCleanup = now.Add(time.Minute)
-	return nil
+	return result
 }
 
 func pruneWorkerLogs(dir, pending string, now time.Time, age time.Duration) error {

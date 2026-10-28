@@ -511,6 +511,10 @@ func TestFileCacheEvictsExpiredVictims(t *testing.T) {
 	for _, partial := range []bool{false, true} {
 		t.Run(fmt.Sprint("partial=", partial), func(t *testing.T) {
 			q, clock := fixture(t)
+			// Keep expiry metadata while testing eviction of expired cache bytes.
+			if err := q.ConfigureLogRetention(2 * DefaultFileRetention); err != nil {
+				t.Fatal(err)
+			}
 			c := retentionClient(t, q)
 			_, a := retentionUpload(t, c, "aaaaaaaaaaaaaaaa")
 			s := spec("experiment")
@@ -678,6 +682,7 @@ func TestFileRetentionProgressAndBatch(t *testing.T) {
 	q, clock := fixture(t)
 	c := retentionClient(t, q)
 	s := spec("experiment")
+	s.SubmissionKey = "reclamation-batch"
 	s.Files = FileManifest{}
 	var path string
 	var ref FileRef
@@ -693,13 +698,13 @@ func TestFileRetentionProgressAndBatch(t *testing.T) {
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
-	if pending := q.s.Jobs[j.ID].FileReclamation.Pending; len(pending) != 1 {
+	if pending := q.retainedJob(j.ID).FileReclamation.Pending; len(pending) != 1 {
 		t.Fatal("filesystem work not bounded to one batch", len(pending))
 	}
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
-	if pending := q.s.Jobs[j.ID].FileReclamation.Pending; len(pending) != 0 {
+	if pending := q.retainedJob(j.ID).FileReclamation.Pending; len(pending) != 0 {
 		t.Fatal("reclamation progress not saved", pending)
 	}
 	// Progress must survive queue restart, and an old completed reclamation must

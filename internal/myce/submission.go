@@ -38,8 +38,7 @@ type submissionRecord struct {
 	Created     *time.Time `json:"created,omitempty"`
 	RemovedAt   *time.Time `json:"removed_at,omitempty"`
 	CancelledAt *time.Time `json:"cancelled_at,omitempty"`
-	// Last durable answer, retained if the job is removed. There is currently no
-	// job-pruning API; any future removal must run through Queue.update.
+	// Last durable answer, retained for 30 days after transactional job removal.
 	Job *Job `json:"job,omitempty"`
 }
 

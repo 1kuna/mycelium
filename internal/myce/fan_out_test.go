@@ -76,7 +76,7 @@ func TestFanOutWorkerCommandAndArtifactGather(t *testing.T) {
 	if err = runExtensionCommand(context.Background(), run.Spec.Run.Command, run.Spec.Run.Workdir, env, io.Discard, commandScope{Clock: clock, StateDir: state}); err != nil {
 		t.Fatal(err)
 	}
-	if err = w.publishExtensionFiles(*run); err != nil {
+	if err = w.publishExtensionFiles(*run, run.Spec.Run.Workdir); err != nil {
 		t.Fatal(err)
 	}
 	finish(t, q, run, true)

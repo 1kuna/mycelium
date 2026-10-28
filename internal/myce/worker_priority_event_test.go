@@ -6,7 +6,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"testing"
 	"time"
 )
@@ -16,9 +15,8 @@ import (
 func TestPriorityStopEventBeforeHeartbeat(t *testing.T) {
 	for _, group := range []bool{false, true} {
 		t.Run(map[bool]string{false: "native", true: "native-group"}[group], func(t *testing.T) {
-			dir := t.TempDir()
-			w, store, p := d5NativeStart(t, group, nil, []string{"sh", "-c", `trap 'echo PAUSED; exit 0' TERM; touch "$1"; while :; do sleep .01; done`, "main", filepath.Join(dir, "ready")})
-			nativeFile(t, dir, "ready")
+			w, store, p := d5NativeStart(t, group, nil, []string{"sh", "-c", `trap 'echo PAUSED; exit 0' TERM; touch "$1"; while :; do sleep .01; done`, "main", "{work}/ready"})
+			nativeFile(t, p.job.Spec.Run.Workdir, "ready")
 			data, err := json.Marshal(map[string]any{"id": p.job.ID, "attempt": p.job.Attempt, "session": p.job.Session, "priority_stop": &PriorityPreemption{Cause: priorityPreemptionCause, Demand: "deadline-model", Victim: p.job.ID}})
 			if err != nil {
 				t.Fatal(err)

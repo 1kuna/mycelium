@@ -116,17 +116,20 @@ func TestDifferentWorkerCheckpointRoots(t *testing.T) {
 	}
 }
 func TestWorkerRechecksMemoryBeforeCommand(t *testing.T) {
-	q, _ := fixture(t)
+	q, clock := fixture(t)
 	j := submit(t, q, spec("production"))
 	j.Attempt = 1
 	var calls atomic.Int32
-	w := Worker{StateDir: newTestStateRoot(t), Machine: machine("memory", "fake"), MemorySource: func(context.Context) (float64, error) { calls.Add(1); return 2, nil }}
+	w := Worker{Clock: clock, StateDir: newTestStateRoot(t), Machine: machine("memory", "fake"), MemorySource: func(context.Context) (float64, error) { calls.Add(1); return 2, nil }}
 	s, e := w.openStore()
 	if e != nil {
 		t.Fatal(e)
 	}
 	defer s.close()
-	_, e = w.start(s, *j)
+	await(t, func() bool {
+		_, e = w.start(s, *j)
+		return !errors.Is(e, errWorkerCheckpoint) || !strings.Contains(e.Error(), "input copy pending")
+	})
 	if !errors.Is(e, errWorkerMemory) || calls.Load() != 1 {
 		t.Fatalf("memory recheck: %v calls=%d", e, calls.Load())
 	}

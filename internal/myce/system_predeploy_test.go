@@ -19,8 +19,8 @@ import (
 )
 
 // TestPreDeployFullSystem is a laptop acceptance scenario, not a hardware or
-// exactly-once external-side-effect guarantee. Only GPU inventory/model engines
-// are fake: requests, SQLite, worker spools, signals and commands are real.
+// exactly-once external-side-effect guarantee. GPU inventory/device-node mapping
+// and model engines are fake; requests, SQLite, spools, signals and commands are real.
 func TestPreDeployFullSystem(t *testing.T) {
 	t.Parallel()
 	// Real subprocess grace periods must advance with elapsed time even when a
@@ -218,6 +218,9 @@ echo FINISHED
 			},
 			CPUIsolationProbe: func(context.Context) error { return nil },
 			Machine:           machine(gpu, gpu, "fixture-"+gpu+"-host"), Client: Client{URL: server.URL, Token: "predeploy-token", HTTP: &http.Client{Transport: transport, Timeout: testWaitTimeout}}}
+		if gpu == "cuda" || gpu == "xpu" {
+			w.nativeGPUDeviceProbe = syntheticNativeGPUDeviceProbe(MachineDevice{ID: "0", Platform: gpu, Identity: "fixture-" + gpu, Selector: "0"})
+		}
 		go func() { lw.done <- w.Run(ctx) }()
 	}
 	// Cleanup also handles failed assertions while a NAS or network fault is active.
@@ -616,6 +619,7 @@ func TestPreDeployModelCopyFaults(t *testing.T) {
 	t.Parallel()
 	base := newTestStateRoot(t)
 	nas, state := filepath.Join(base, "nas"), filepath.Join(base, "worker")
+	checkpoints := filepath.Join(base, "checkpoints")
 	cache := filepath.Join(state, "model-cache")
 	must := func(err error) {
 		t.Helper()
@@ -624,6 +628,7 @@ func TestPreDeployModelCopyFaults(t *testing.T) {
 		}
 	}
 	must(os.Mkdir(nas, 0700))
+	must(os.Mkdir(checkpoints, 0700))
 	makeModel := func(name string, bytes int) Model {
 		data := []byte(strings.Repeat(name[:1], bytes))
 		must(os.WriteFile(filepath.Join(nas, name), data, 0600))
@@ -718,7 +723,7 @@ func TestPreDeployModelCopyFaults(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	w := Worker{Client: Client{URL: server.URL, Token: client.Token, HTTP: &http.Client{Transport: transport, Timeout: testWaitTimeout}},
-		Machine: machine("copy-worker", "fake"), CheckpointRoot: nas, ModelRoot: nas, StateDir: state,
+		Machine: machine("copy-worker", "fake"), CheckpointRoot: checkpoints, ModelRoot: nas, StateDir: state,
 		CacheLimit: 4 * 1024 * 1024, Clock: RealClock{}, Interval: 5 * time.Millisecond, ModelConfig: cfg,
 		beforeModelCopy: hook, modelEngine: func(Model) Engine { return &auditedModelEngine{root: cache, loads: &loads, invalid: &invalid} }}
 	go func() { done <- w.Run(ctx) }()

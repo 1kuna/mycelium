@@ -252,6 +252,11 @@ printf '\n' >> "$NOTIFICATION_FILE"
 	if exitCodeForTest(err) != 78 || impossible.Status != "intent" || impossible.JobID != "" {
 		t.Fatal("impossible target did not retain typed hold", impossible, err)
 	}
+	// Keep job metadata longer than result bytes so this journey still proves
+	// the typed result_expired response and exact expired receipt recovery.
+	if err := d.Queue.ConfigureLogRetention(2 * myce.DefaultFileRetention); err != nil {
+		t.Fatal(err)
+	}
 	// The same real profile result remains recoverable until the queue's
 	// fake clock advances beyond the documented recovery window.
 	if err = d.Client().Call(ctx, "POST", "/api/dev/clock/advance", map[string]any{"seconds": (myce.DefaultFileRetention + time.Second).Seconds()}, nil); err != nil {
@@ -407,7 +412,7 @@ check: [true]
 	if err := q.ConfigureFileStore(filepath.Join(state, "files"), 1<<20, true); err != nil {
 		t.Fatal(err)
 	}
-	m := myce.Machine{ID: "worker", Session: "fixture", GPU: "cpu", CPUIsolation: "select-none",
+	m := myce.Machine{Capabilities: []string{"native_isolation_landlock"}, ID: "worker", Session: "fixture", GPU: "cpu", CPUIsolation: "select-none",
 		HostMemoryMeasured: true, HostAvailableMemoryGB: 32, HostMemoryBudgetGB: 8, MemoryCeilingSlackGB: .125,
 		CapabilityProfile: &myce.CapabilityProfile{OS: "linux", Arch: "amd64", LogicalCPUs: 8, MemoryLayout: "separate", SystemMemoryBytes: 32 << 30}}
 	if _, err := q.Checkin(myce.Checkin{Machine: m}); err != nil {

@@ -429,7 +429,7 @@ func TestMaintenancePlannedStopsDoNotConsumeRetries(t *testing.T) {
 func TestMaintenancePendingDockerCreateRetainsExactCustody(t *testing.T) {
 	q, c := fixture(t)
 	a, b := maintenanceMachines()
-	a.Capabilities = []string{"docker"}
+	a.Capabilities = append(a.Capabilities, "docker")
 	a.CapabilityProfile.OS = "linux"
 	check(t, q, b, nil)
 	s := spec("production")

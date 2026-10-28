@@ -482,3 +482,147 @@ func TestFleetUpgradeRunnerSmokeFailureStopsCurrentProcess(t *testing.T) {
 		t.Fatal("cached smoke failure did not stop maintained host")
 	}
 }
+
+func TestFleetUpgradeQueueOnlyKeepsWorkersAndResumes(t *testing.T) {
+	q, c, workers := fleetFixture(t, "queue", "queue", "other")
+	// An unrelated old/unmanaged worker is not a queue-only preflight target.
+	q.s.Machines[workers[1].ID].Fleet = nil
+	request := FleetUpgradeRequest{QueueOnly: true, WaitProductionIdle: true}
+	out, err := q.StartFleetUpgrade(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !out.QueueOnly || !out.WaitProductionIdle || len(out.Hosts) != 1 {
+		t.Fatalf("scope: %+v", out)
+	}
+	fleetTick(t, q)
+	if _, err = q.StartFleetUpgrade(FleetUpgradeRequest{}); err == nil {
+		t.Fatal("running scope changed")
+	}
+	var path string
+	if err = q.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&path); err != nil {
+		t.Fatal(err)
+	}
+	root := q.root
+	if err = q.Close(); err != nil {
+		t.Fatal(err)
+	}
+	q, err = Open(path, root, c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	fakeCheckpointAvailability(t, q, true)
+	q.fleetQueue = &fleetQueueRuntime{Host: "queue", OS: "linux", Arch: "amd64", Proof: fleetTestProof(c, "queue-old", 100, false), ObservedAt: c.Now()}
+	check(t, q, workers[0], nil)
+	resumed, err := q.StartFleetUpgrade(request)
+	if err != nil || resumed.Operation != out.Operation || !resumed.QueueOnly || !resumed.WaitProductionIdle {
+		t.Fatalf("resume: %+v %v", resumed, err)
+	}
+	if got := fleetActivate(t, q, c); got != "queue/@queue" {
+		t.Fatal(got)
+	}
+	fleetTick(t, q)
+	if q.s.FleetUpgrade.State != "complete" {
+		t.Fatal(q.fleetUpgradeStatus())
+	}
+	for _, m := range q.s.Machines {
+		if m.Fleet != nil && m.Fleet.Version != "v1.0.0" {
+			t.Fatal("queue-only updated worker", m.ID)
+		}
+	}
+	if q.s.HostMaintenance["other"].Mode == "drained" || q.s.HostMaintenance["queue"].Mode != "enabled" {
+		t.Fatal("maintenance not preserved")
+	}
+	// A completed queue-only operation must not make a later same-release fleet
+	// upgrade a no-op.
+	check(t, q, workers[1], nil)
+	full, err := q.StartFleetUpgrade(FleetUpgradeRequest{})
+	if err != nil || full.Operation == out.Operation || len(full.Hosts) != 2 {
+		t.Fatalf("full after queue-only: %+v %v", full, err)
+	}
+}
+
+func TestFleetUpgradeProductionIdleWaitsAcrossFleet(t *testing.T) {
+	q, c, workers := fleetFixture(t, "queue", "remote")
+	s := spec("production")
+	s.AllowedMachines = []string{workers[0].ID}
+	j := submit(t, q, s)
+	r := check(t, q, workers[0], nil).Job
+	if r == nil {
+		t.Fatal("production not assigned")
+	}
+	if err := q.Started(result(r, true)); err != nil {
+		t.Fatal(err)
+	}
+	request := FleetUpgradeRequest{QueueOnly: true, WaitProductionIdle: true}
+	if _, err := q.StartFleetUpgrade(request); err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	h := q.fleetActiveHost()
+	if h.Phase != "draining" || !strings.Contains(h.Wait, "production attempts") {
+		t.Fatalf("remote production not waited: %+v", h)
+	}
+	queued := submit(t, q, s)
+	if q.placementPolicyAllowed(q.s.Jobs[queued.ID], q.s.Machines[workers[0].ID], false) {
+		t.Fatal("new production admitted during idle wait")
+	}
+	if !q.placementPolicyAllowed(q.s.Jobs[j.ID], q.s.Machines[workers[0].ID], false) {
+		t.Fatal("existing execution blocked")
+	}
+	c.Advance(2 * time.Hour)
+	workers[0].Fleet.ObservedAt = c.Now()
+	q.fleetQueue.Proof.ObservedAt = c.Now()
+	if _, err := q.Checkin(Checkin{Machine: workers[0], Running: &Execution{ID: r.ID, Attempt: r.Attempt}, Started: true}); err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	if got := job(t, q, j.ID); got.StopAt != nil || got.State != "running" || got.Losses != 0 {
+		t.Fatalf("running production interrupted: %+v", got)
+	}
+	completion := result(r, true)
+	completion.ReleasePending = true
+	if err := q.Complete(completion); err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	if q.fleetProductionIdle() {
+		t.Fatal("completion mistaken for released remote custody")
+	}
+	release := result(r, true)
+	release.ReleaseOnly = true
+	if err := q.Complete(release); err != nil {
+		t.Fatal(err)
+	}
+	check(t, q, workers[0], nil)
+	fleetTick(t, q)
+	i := fleetInstructionFor(t, q)
+	// Recheck at authorization too, even after the coordinator selected cutover.
+	q.calls = map[string]*ModelCall{"late": {Priority: "production", Machine: workers[0].ID}}
+	if instruction, err := q.fleetInstruction(i.Host, i.Machine, i.Session); err != nil || instruction.Operation != "" {
+		t.Fatalf("late production bypassed fence: %+v %v", instruction, err)
+	}
+	delete(q.calls, "late")
+	fleetActivate(t, q, c)
+	fleetTick(t, q)
+	if q.fleetPausesProduction() {
+		t.Fatal("production admission not restored")
+	}
+	if got := job(t, q, j.ID); got.State != "succeeded" || got.Attempt != 1 || got.Losses != 0 {
+		t.Fatalf("attempt changed: %+v", got)
+	}
+}
+
+func TestFleetUpgradeReportsSanitizedStoragePreflightFailure(t *testing.T) {
+	q, _, _ := fleetFixture(t, "queue", "remote")
+	if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{QueueOnly: true}); err != nil {
+		t.Fatal(err)
+	}
+	fleetTick(t, q)
+	i := fleetInstructionFor(t, q)
+	err := q.AckFleetUpgrade(FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: i.Host, Machine: i.Machine, Session: i.Session, Phase: "failed", Failure: "fleet_storage_preflight_failed"})
+	if err != nil || q.fleetUpgradeStatus().Hosts[0].Failure != "storage_preflight_failed" {
+		t.Fatalf("specific safe failure lost: %+v %v", q.fleetUpgradeStatus(), err)
+	}
+}

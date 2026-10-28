@@ -352,19 +352,25 @@ func TestCancellationWorkerPreparing(t *testing.T) {
 		t.Run(priority, func(t *testing.T) {
 			q, c := fixture(t)
 			s := spec(priority)
-			marker := filepath.Join(t.TempDir(), "launched")
-			s.Run.Command = []string{"sh", "-c", "echo launched > " + marker}
+			s.Run.Command = []string{"sh", "-c", "echo launched > {work}/launched"}
 			j := submit(t, q, s)
 			m := machine("worker", "fake")
 			assigned := check(t, q, m, nil).Job
 			w := cancellationPreparingWorker(t, q, c, m, j.ID)
+			marker := filepath.Join(w.StateDir, "job-files", assigned.ID, "1", "launched")
 			store, err := w.openStore()
 			if err != nil {
 				t.Fatal(err)
 			}
 			defer store.close()
 			store.state.Session = assigned.Session
-			p, err := w.start(store, *assigned)
+			// Managed input/work preparation is bounded per heartbeat. Consume a
+			// pending observation as the worker loop does before checking cancellation.
+			var p *process
+			await(t, func() bool {
+				p, err = w.start(store, *assigned)
+				return !errors.Is(err, errWorkerCheckpoint)
+			})
 			var completed Result
 			if err != nil {
 				if !stale(err) || errors.Is(err, errWorkerReleasePending) || p != nil {

@@ -41,6 +41,7 @@ func (r *workerRetry) succeeded(now time.Time, interval time.Duration) {
 }
 
 type workerState struct {
+	IsolationWarning *Execution `json:"isolation_warning,omitempty"`
 	// Written with cleared custody only after the queue confirms terminal,
 	// released publication. Survives a restart before scratch retention runs.
 	PublishedAttempt *Execution `json:"published_attempt,omitempty"`
@@ -80,7 +81,7 @@ type workerStore struct {
 	fileProgress          checkpointIO[int64]
 	fileFinish            checkpointIO[Result]
 	fileGeneration        int64
-	extensionFiles        checkpointIO[string]
+	extensionFiles        checkpointIO[stagedInputs]
 	checkpointUnavailable bool
 	nasProbe              checkpointAvailability
 	nasProgress           checkpointIO[int64]

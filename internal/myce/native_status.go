@@ -1,0 +1,26 @@
+package myce
+
+// NativeIsolationStatus describes the kernel boundary reported by the running
+// worker. In particular, sidecar port exceptions are not full offline isolation.
+func NativeIsolationStatus(m Machine) string {
+	status := nativeIsolationStatus(m)
+	if m.NativeIsolationWarning != "" {
+		status += "; WARNING: " + m.NativeIsolationWarning
+	}
+	return status
+}
+
+func nativeIsolationStatus(m Machine) string {
+	switch {
+	case contains(m.Capabilities, "native_isolation_landlock"):
+		return "native isolation: Landlock + seccomp; partial network isolation (reserved sidecar TCP ports permit off-host traffic); same-UID pathname SEQPACKET endpoints reachable (partial); general egress unavailable"
+	case contains(m.Capabilities, "native_isolation_namespace"):
+		return "native isolation: user/mount/PID/IPC/network namespaces; general egress unavailable"
+	case contains(m.Capabilities, "native_isolation_seatbelt"):
+		return "native isolation: Seatbelt; outbound requires needs.network: true"
+	case contains(m.Capabilities, "native_isolation_unavailable"):
+		return "native isolation unavailable; sandboxed native launch refused"
+	default:
+		return "native isolation unreported"
+	}
+}

@@ -231,7 +231,10 @@ func TestDevClockAdvanceDuringCheckin(t *testing.T) {
 	// The next transaction has reached the availability seam, but the
 	// in-flight heartbeat still owns the queue and its old accounting time.
 	probeEntered := make(chan struct{})
-	q.checkpointProbe = func() bool { close(probeEntered); return true }
+	// Retention may perform a second transaction after advancing the clock.
+	// Gate only the first arrival; the interleaving assertion stays unchanged.
+	var probeOnce sync.Once
+	q.checkpointProbe = func() bool { probeOnce.Do(func() { close(probeEntered) }); return true }
 	response := make(chan *httptest.ResponseRecorder, 1)
 	go func() { response <- clockRequest(handler, `{"seconds":2592001}`, "test") }()
 	<-probeEntered

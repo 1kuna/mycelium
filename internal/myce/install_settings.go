@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -29,6 +30,8 @@ func installSetting[T any](name, field, usage string, at func(*ServiceConfig) *T
 			switch p := any(at(c)).(type) {
 			case *string:
 				f.StringVar(p, name, *p, usage)
+			case *[]string:
+				f.Var((*NativeRootPaths)(p), name, usage)
 			case *bool:
 				f.BoolVar(p, name, *p, usage)
 			case *int:
@@ -54,6 +57,42 @@ func installSetting[T any](name, field, usage string, at func(*ServiceConfig) *T
 		validate: func(c ServiceConfig) error { return valid(*at(&c)) },
 	}
 }
+
+// NativeRootPaths accepts one operator grant per flag, without splitting paths.
+// An explicit empty value clears all preceding grants for that flag.
+type NativeRootPaths []string
+
+func (p *NativeRootPaths) String() string {
+	if p == nil || len(*p) == 0 {
+		return ""
+	}
+	b, _ := json.Marshal(*p)
+	return string(b)
+}
+
+func (p *NativeRootPaths) Get() any { return []string(*p) }
+
+func (p *NativeRootPaths) Set(root string) error {
+	if root == "" {
+		*p = NativeRootPaths{}
+		return nil
+	}
+	if err := validateNativeRootPaths([]string{root}); err != nil {
+		return err
+	}
+	*p = append(*p, root)
+	return nil
+}
+
+func validateNativeRootPaths(roots []string) error {
+	for _, root := range roots {
+		if !filepath.IsAbs(root) || strings.ContainsAny(root, "\x00\n\r*?[]~") {
+			return errors.New("native roots must be absolute, nonempty, single-line paths without globs or tilde")
+		}
+	}
+	return nil
+}
+
 func installPath(name, field, usage string, at func(*ServiceConfig) *string, required bool) InstallSetting {
 	s := installSetting(name, field, usage, at, func(p string) error {
 		if required && p == "" {
@@ -169,6 +208,8 @@ func InstallSettings() []InstallSetting {
 		installPath("checkpoint-root", "Checkpoints", "worker checkpoint root", func(c *ServiceConfig) *string { return &c.Checkpoints }, false),
 		installPath("checkpoints", "Checkpoints", "queue checkpoint root (alias of checkpoint-root)", func(c *ServiceConfig) *string { return &c.Checkpoints }, false),
 		installPath("model-root", "ModelRoot", "NAS model root", func(c *ServiceConfig) *string { return &c.ModelRoot }, false),
+		installSetting("native-read-root", "NativeReadRoots", "operator-granted native read-only root (absolute; repeat; empty clears)", func(c *ServiceConfig) *[]string { return &c.NativeReadRoots }, validateNativeRootPaths),
+		installSetting("native-exec-root", "NativeExecuteRoots", "operator-granted native read/execute root (absolute; repeat; empty clears)", func(c *ServiceConfig) *[]string { return &c.NativeExecuteRoots }, validateNativeRootPaths),
 		installPath("environment-root", "EnvironmentRoot", "NAS environment root", func(c *ServiceConfig) *string { return &c.EnvironmentRoot }, false),
 		installPath("model-cache", "ModelCache", "local model cache", func(c *ServiceConfig) *string { return &c.ModelCache }, false),
 		installSetting("model-cache-bytes", "ModelCacheBytes", "local model cache bytes", func(c *ServiceConfig) *int64 { return &c.ModelCacheBytes }, installBytes),

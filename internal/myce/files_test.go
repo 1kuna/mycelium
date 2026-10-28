@@ -256,7 +256,7 @@ func TestStoredCheckpointDurabilityStalenessAndOutputAcceptance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	reply, err := q.Checkin(Checkin{Machine: Machine{CapabilityProfile: machine("profile", "fake").CapabilityProfile, ID: "a", Session: "a", GPU: "fake", FreeMemoryGB: 8}})
+	reply, err := q.Checkin(Checkin{Machine: Machine{Capabilities: []string{"native_isolation_landlock"}, CapabilityProfile: machine("profile", "fake").CapabilityProfile, ID: "a", Session: "a", GPU: "fake", FreeMemoryGB: 8}})
 	if err != nil || reply.Job == nil {
 		t.Fatal(err, reply)
 	}
@@ -289,7 +289,7 @@ func TestStoredCheckpointDurabilityStalenessAndOutputAcceptance(t *testing.T) {
 		t.Fatal("accepted stale publisher", err)
 	}
 	// Reconciliation ignores a worker's untransferred local generation.
-	reply, err = q.Checkin(Checkin{Machine: Machine{CapabilityProfile: machine("profile", "fake").CapabilityProfile, ID: "a", Session: "a", GPU: "fake", FreeMemoryGB: 0}, Running: &Execution{ID: j.ID, Attempt: r.Attempt, Progress: 999}})
+	reply, err = q.Checkin(Checkin{Machine: Machine{Capabilities: []string{"native_isolation_landlock"}, CapabilityProfile: machine("profile", "fake").CapabilityProfile, ID: "a", Session: "a", GPU: "fake", FreeMemoryGB: 0}, Running: &Execution{ID: j.ID, Attempt: r.Attempt, Progress: 999}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -301,8 +301,13 @@ func TestStoredCheckpointDurabilityStalenessAndOutputAcceptance(t *testing.T) {
 
 func TestFilesDifferentHyphaResume(t *testing.T) {
 	t.Parallel()
-	if _, err := exec.LookPath("python3"); err != nil {
+	python, err := exec.LookPath("python3")
+	if err != nil {
 		t.Skip("python3 required for atomic checkpoint example")
+	}
+	python, err = filepath.Abs(python)
+	if err != nil {
+		t.Fatal(err)
 	}
 	q, _ := fixture(t)
 	if err := q.ConfigureFileStore(t.TempDir(), 1<<20, true); err != nil {
@@ -344,7 +349,7 @@ if not stopping: pathlib.Path('output').write_text(str(n))
 		manifest[name] = ref
 	}
 	s := spec("experiment")
-	s.Run.Command = []string{"python3", "train.py"}
+	s.Run.Command = []string{python, "train.py"}
 	s.Files = manifest
 	s.Outputs = map[string]string{"output": "results"}
 	j, err := q.Submit(s)
@@ -355,12 +360,42 @@ if not stopping: pathlib.Path('output').write_text(str(n))
 		ctx, cancel := context.WithCancel(context.Background())
 		done := make(chan error, 1)
 		root := newTestStateRoot(t)
+		// As in the prepared-Python fixture, retain the selected interpreter
+		// through a managed prefix so native isolation includes its runtime.
+		if err := PrepareStateRoots(filepath.Join(root, "environment-cache")); err != nil {
+			t.Fatal(err)
+		}
+		bin := filepath.Join(root, "environment-cache", "venv", "bin")
+		if err := os.MkdirAll(bin, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(python, filepath.Join(bin, "python3")); err != nil {
+			t.Fatal(err)
+		}
 		worker := Worker{Client: c, StateDir: root, Interval: 20 * time.Millisecond, Clock: RealClock{}, Machine: Machine{CapabilityProfile: machine("profile", "fake").CapabilityProfile, ID: name, HostID: name, Session: name, GPU: "fake", FreeMemoryGB: 8}, HostMemorySource: func(context.Context) (float64, error) { return 16, nil }}
 		go func() { done <- worker.Run(ctx) }()
 		return cancel, done, root
 	}
 	cancelA, doneA, rootA := start("a")
 	defer cancelA()
+	defer func() {
+		if !t.Failed() {
+			return
+		}
+		snap, err := q.Snapshot()
+		t.Logf("resume failure snapshot: %v", err)
+		for _, pending := range snap.Jobs {
+			t.Logf("resume failure job: %+v", *pending)
+		}
+		logs, err := q.Logs(j.ID, 0)
+		t.Logf("resume failure payload logs: %+v error=%v", logs, err)
+		select {
+		case err := <-doneA:
+			t.Logf("resume worker A returned: %v", err)
+		default:
+			t.Log("resume worker A has no unread return")
+		}
+	}()
 	await(t, func() bool { snap, _ := q.Snapshot(); return len(snap.Jobs[0].FileCheckpoints) > 0 })
 	cancelB, doneB, rootB := start("b")
 	defer cancelB()

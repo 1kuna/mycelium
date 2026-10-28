@@ -142,6 +142,7 @@ func TestDeviceSelectionBatchEnvironment(t *testing.T) {
 			t.Run(platform+"/"+device, func(t *testing.T) {
 				w := recoveryWorker(t)
 				w.Machine.GPU, w.Machine.Device = platform, device
+				w.nativeGPUDeviceProbe = syntheticNativeGPUDeviceProbe(MachineDevice{ID: device, Platform: platform, Selector: device})
 				s, err := w.openStore()
 				if err != nil {
 					t.Fatal(err)

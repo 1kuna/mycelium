@@ -416,6 +416,9 @@ class Client:
         Retains the first and latest 31 rows; memory_attempts_dropped counts
         evictions (omitted zero). Peakless prelaunch attempts create no row.
 
+        inputs_staged_at, when present, is the current attempt's worker-clock
+        input-staging completion time, before launch RAM/checkpoint checks.
+        It is diagnostic only; omission means unknown or no staging operation.
         Also includes cancellation acknowledgement and retained fan-out scope.
         """
         return self._read_job(job_id)

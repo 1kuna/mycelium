@@ -344,6 +344,9 @@ func (q *Queue) Run(ctx context.Context) error {
 	runtimeCtx, stopRuntime := context.WithCancel(ctx)
 	runtimeDone := make(chan struct{})
 	go func() { defer close(runtimeDone); q.runFleetQueueRuntime(runtimeCtx) }()
+	healthDone := make(chan struct{})
+	go func() { defer close(healthDone); q.runHealthNotifier(runtimeCtx) }()
+	defer func() { stopRuntime(); <-healthDone }()
 	defer func() { stopRuntime(); <-runtimeDone }()
 
 	t := time.NewTicker(time.Second)

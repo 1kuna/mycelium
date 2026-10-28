@@ -556,6 +556,12 @@ func (q *Queue) validateProjectCapacity(j *Job) error {
 			possible := false
 			for _, candidate := range extensionJobs(j, &copy, false) {
 				value := *candidate
+				// Preserve this candidate's frozen policy before suppressing extension
+				// qualification. Public isolation text and other alternatives grant nothing.
+				value.Spec.Isolation, value.Spec.Reason = "sandboxed", ""
+				if reasons := nativeUnsandboxedReasons(candidate); len(reasons) > 0 {
+					value.Spec.Isolation, value.Spec.Reason = "unsandboxed", reasons[0]
+				}
 				value.Spec.Kind, value.Spec.Program = "", nil
 				value.Spec.Extension, value.Spec.ExtensionDigest, value.Spec.ExtensionCheck = "", "", nil
 				if fitsResources(&value, &copy, copy.TotalMemoryGB) {

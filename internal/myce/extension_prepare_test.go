@@ -67,10 +67,13 @@ func TestExtensionAutomaticPrepareTwoJobsOneBuildAndPlacement(t *testing.T) {
 		m := snap.Machines[0]
 		for _, r := range m.ExtensionReports {
 			if r.Setup {
-				if r.Qualified || r.CheckID != "" || r.Host == "" || r.EnvironmentIdentity == "" || r.CheckDigest == "" {
+				if r.Qualified || r.CheckID != "" && !strings.HasPrefix(r.CheckID, "auto-") || r.Host == "" || r.EnvironmentIdentity == "" || r.CheckDigest == "" {
 					t.Fatal("install qualified or lost identity", r)
 				}
 				for _, j := range snap.Jobs {
+					if j.Spec.ExtensionCheck != nil {
+						continue // Prepared demand may now request its internal check.
+					}
 					if j.State != "queued" || qualifiedExtension(j, m) != nil {
 						t.Fatal("unqualified job placed", j.State)
 					}

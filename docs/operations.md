@@ -637,6 +637,97 @@ exact worker spool. Loads stay serial; N bounds requests after all models load.
 load and warm-up seconds and record the combined sampled peak. Brief spikes
 can be missed; real CUDA/XPU qualification remains necessary.
 
+## Native payload isolation
+
+New native entries and extension registrations default to a kernel boundary,
+not same-UID `0700` alone.
+See [native isolation](native-isolation.md) for the platform guarantee table and
+limits. This #177 minimum is a v1 requirement; documentation does not establish
+fleet qualification or rollout.
+
+For an intentional stage exception, put these fields at the top level of
+`extension.yaml` or inside the selected adapter entry:
+
+```yaml
+isolation: unsandboxed
+reason: The native helper requires host IPC unavailable in the sandbox.
+```
+
+The reason is required, nonblank and public. Main, queued check/qualification
+payloads and all its sidecars share this choice. Invalid modes are refused;
+`isolation: sandboxed` explicitly selects the default. There is no global
+switch or per-sidecar choice. A submitted extension job cannot override its
+registration's isolation. Unsandboxed stages need no sandbox/network capability
+report and have ordinary worker-user host and network access, including access
+to sibling files and host controls. Keep the queue and workers on the same
+policy-capable release; older workers do not implement this exception.
+
+The queue's server-owned `sandbox_default` marker is registration metadata,
+outside the digest. Missing markers on persisted pre-policy registrations and
+frozen jobs preserve legacy unsandboxed behavior. Re-registering identical
+bytes preserves that choice, including after restart. To sandbox a legacy
+registration, publish a new authored version/digest with `isolation: sandboxed`.
+Already queued/frozen jobs keep their original policy. Do not edit database
+markers or bundle identities as an upgrade step.
+
+`myce status`, the status page, `GET /api/status` and job GET show
+`unsandboxed: <reason>` even for queued or terminal jobs; legacy registrations
+use a fixed public reason. The worker logs one warning per attempt rather than
+one per member/retry, with the warning receipt retained in its existing spool.
+Work/input staging, managed cwd/temp/scratch, token/environment filtering,
+device selection/binding, cgroups, launch authorization, Started, fencing and
+release checks still apply. They do not provide a kernel boundary or make
+shared caches read-only for unsandboxed code.
+
+The kernel restrictions below describe sandboxed stages.
+Linux fallback explicitly reports **same-UID pathname SEQPACKET endpoints
+reachable (partial)**. It permits the v1 CUDA socket-type exception while
+retaining stream/datagram control denial and Landlock abstract-socket scoping.
+Check `native_isolation_warning` and worker startup logs for unexpected
+non-root/non-CUDA seqpacket listeners or inventory failure. The startup scan
+is advisory and cannot prove future endpoint absence. Minimal-root namespaces
+with the per-host AppArmor userns exception remain an unapplied operator
+upgrade; the exception alone does not qualify CUDA or the mount policy.
+
+Stage source/data into the managed `{work}` through inputs or a frozen
+extension. Native workdirs must resolve beneath `{work}`. Extension source gets
+a private copy; prepared environment/extension caches permit reads/execution,
+not content writes. The worker overrides `TMPDIR`, `TMP` and `TEMP` to
+`{work}/.tmp` and `MYCE_SCRATCH_DIR` to `{work}/.scratch` after authored
+env/activation. Main and its own sidecars share both paths. Repeatable
+`--native-read-root` and `--native-exec-root` worker/install settings add narrow
+read-only model roots or read/execute runtime roots; filesystem, home, NAS and
+installed Mycelium roots and protected-content overlaps are refused. #219's environment allowlist and
+credential filtering remain in effect. Linux fallback does not protect all
+metadata operations, including `chmod`; macOS protects targeted spool and
+credential contents while unrelated host metadata/files remain visible.
+
+Payloads are offline by default. Add `needs.network: true` for payload-time
+downloads or API calls. Worker-owned environment/input preparation keeps its
+network access. Placement requires protected outbound capability; submission
+returns `no_qualified_target` immediately when none qualifies. Both Linux modes
+currently withhold `native_network`, because namespace egress is unqualified.
+macOS online jobs still cannot reach other loopback endpoints or the queue's
+TCP port at any address, including unrelated services using that port.
+
+Linux probes `bwrap`, `nsenter`, Landlock ABI >= 6 and seccomp in the running
+service's context. Namespace mode shares one attempt anchor across sidecars.
+Only namespace policy refusal permits Landlock/seccomp fallback; missing tools
+or broken setup fail closed. Fallback allows only exact reserved sidecar TCP
+ports, **including off-host connections and any bind address on those ports**;
+this is partial network isolation. Readiness checks actual listener ownership
+and `127.0.0.1` binding, not a kernel restriction on future binds. Other TCP
+ports, UDP/raw/packet/SCTP/MPTCP and Unix endpoints are denied. macOS uses
+deprecated `sandbox-exec`/Seatbelt and refuses launch if the launcher/profile
+fails. Existing cgroup, GPU, launch and cleanup gates remain required.
+
+An optional [per-host AppArmor profile](native-isolation.md#optional-administrator-action-per-host-apparmor-user-namespaces)
+can authorize user namespaces for the installed binary while keeping
+`kernel.apparmor_restrict_unprivileged_userns=1`. It is a separate privileged
+action, not applied here: review the intentionally permissive profile and
+kernel attack-surface cost, load with `apparmor_parser`, then restart and verify
+the actual worker service. Never disable the global restriction as a shortcut.
+
 ## Docker cleanup custody
 
 Managed Docker batches use exact immutable attempt labels and a durable create/start
@@ -846,6 +937,29 @@ operation ID. It can exit immediately: the queue owns progress. Watch phases,
 wait reasons and failures with `myce status`. An approval from before signed
 envelope retention needs identical verified reapproval first.
 
+For a queue hotfix, use
+`myce fleet upgrade --release vX.Y.Z --queue-only --wait-production-idle`.
+`--queue-only` selects only the queue service, including when workers share its
+host or installed binary. It still drains that host and waits for fresh exact
+custody; worker services are not restarted or required to support self-update.
+Other hosts retain their maintenance policies and versions.
+
+`--wait-production-idle` also works for a full upgrade. It pauses new production
+batch assignments until queue running-image health is verified, and waits for
+all assigned production attempts, retained release custody and production calls
+across the fleet before queue restart. Existing work finishes naturally without
+a deadline. All model calls/streams still settle at queue cutover. A stopped
+operation keeps the admission fence until explicit recovery. Queued production
+keeps its ordinary start/give-up deadlines; choose the maintenance window with
+that in mind. Status includes both policy flags and the current wait reason.
+
+Repeat the same flags when resuming: scope and idle policy cannot change during
+an unfinished operation, including when selecting a newer fix-forward release.
+After queue-only completion, a full same-release invocation creates a separate
+operation for the workers without restarting the already-current queue.
+These options require a queue version that implements them; they cannot change
+restart behavior inside an older installed queue or helper.
+
 Hosts update sequentially, with production hosts last. Started commands finish
 naturally before their host restarts. At queue cutover new model calls pause and
 existing calls/streams finish; batch attempts on other hosts reconnect unchanged.
@@ -861,7 +975,9 @@ root; rotation is a local provisioning operation, never an update instruction.
 A foreground queue or worker without saved service settings/runtime proof cannot
 participate; install the capable release normally before the first fleet update.
 
-A failed step stops the operation and preserves maintenance; later hosts remain
+A storage preflight failure is reported as `storage_preflight_failed`, including
+when recovered from the durable helper receipt; arbitrary helper error text is
+never exposed. A failed step stops the operation and preserves maintenance; later hosts remain
 untouched. Repair the cause and explicitly rerun `myce fleet upgrade` to reconcile
 that same operation. A rerun advances its recovery revision and rechecks the exact
 old runtime and maintenance receipt before recovering an interrupted helper.
@@ -875,3 +991,20 @@ No automatic rollback, downgrade, forced job stop, SSH, driver, package or OS
 changes occur. Offline or unknown custody stays a visible wait; elapsed time
 never proves release. Native service/signing qualification and the first live
 rollout remain separate from the laptop acceptance tests.
+
+## Queue history retention
+
+Maintenance retires terminal job rows after 168 hours (or longer configured
+result/log retention), once all attempts are released, files have expired and log cleanup is
+complete. Pending file cleanup transfers to durable per-hash ownership. Each tick removes at most 64 jobs. Keyed replay answers remain for
+30 days after removal, followed by permanent expired-key digests; learned work
+curves remain. Expired jobs disappear from listing and ID lookup. See the
+[retention contract](design-proposal.md#submission-identity-and-cancellation-80).
+
+Deleted SQLite pages are reused. Retention bounds full history by age, not total
+bytes: permanent key digests and unresolved custody still accumulate. To reclaim
+physical disk space, stop the queue through normal maintenance, take a verified
+local backup, and compact the stopped local database using SQLite `VACUUM`.
+Never open a NAS copy with SQLite or compact the running queue. Check free space
+first: compaction needs room for a second database. Preserve the verified backup
+until the compacted database passes `PRAGMA integrity_check` and reopens normally.

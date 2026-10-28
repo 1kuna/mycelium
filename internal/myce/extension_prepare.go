@@ -64,7 +64,7 @@ func (q *Queue) extensionPreparationPlan(m *Machine) []EnvironmentRecipe {
 			}
 			prepared := false
 			for _, r := range m.ExtensionReports {
-				if r.Digest == e.Digest && r.Setup && (len(e.Variants) == 0 || r.Host == hostID(m) && r.Fingerprint == m.ExtensionFingerprint && r.EnvironmentIdentity == extensionEnvironmentIdentity(*e, m)) {
+				if r.Digest == e.Digest && r.Setup && (len(e.Variants) == 0 && !strings.HasPrefix(r.CheckID, "auto-") || matchingExtensionReport(*e, m, r)) {
 					prepared = true
 				}
 			}
@@ -160,13 +160,13 @@ func (w Worker) prepareRegisteredExtension(ctx context.Context, plan Environment
 	}
 	// A delayed/repeated offer is not a new environment identity. Retain the
 	// exact check only while every prepared prefix is still ready and use-locked.
-	if v := e.variant(machineTarget(&w.Machine)); v != nil {
+	{
 		checked := true
 		old := readExtensionReports(w.ExtensionRoot, e, w.Machine.GPU)
 		for _, work := range extensionWorks(e) {
 			found := false
 			for _, r := range old {
-				if r.Work == work && extensionQualificationReason(e, r, &w.Machine) == "" {
+				if r.Work == work && r.Setup && matchingExtensionReport(e, &w.Machine, r) {
 					found = true
 				}
 			}
@@ -174,10 +174,13 @@ func (w Worker) prepareRegisteredExtension(ctx context.Context, plan Environment
 		}
 		if checked {
 			recipes := []EnvironmentRecipe{}
-			for _, recipe := range v.Environments {
-				recipes = append(recipes, recipe)
+			if v := e.variant(machineTarget(&w.Machine)); v != nil {
+				for _, recipe := range v.Environments {
+					recipes = append(recipes, recipe)
+				}
 			}
-			if len(v.Setup) > 0 || len(e.Assets) > 0 {
+			view, _ := e.forMachine(&w.Machine)
+			if len(view.Setup) > 0 || len(e.Assets) > 0 {
 				recipes = append(recipes, EnvironmentRecipe{Key: plan.Key})
 			}
 			for _, recipe := range recipes {
@@ -299,6 +302,9 @@ func newExtensionReport(e Extension, m *Machine, work string) ExtensionReport {
 // A successful command alone is only smoke evidence, never qualification.
 func extensionQualificationReason(e Extension, r ExtensionReport, m *Machine) string {
 	view, ok := e.forMachine(m)
+	if strings.HasPrefix(r.CheckID, "auto-") && !matchingExtensionReport(e, m, r) {
+		return "host, environment or check identity changed; check required"
+	}
 	if m.Devices != nil && (extensionReportDevice(r.Platform, r.Device) != extensionReportDevice(m.GPU, m.Device) || r.Fingerprint == "" || r.Fingerprint != m.ExtensionFingerprint) {
 		return "device identity changed; check required"
 	}

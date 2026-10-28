@@ -60,7 +60,7 @@ func TestNativeExtensionInstalledNASRoot(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(j.Spec.Run.Workdir, "result"), []byte("output"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.publishExtensionFiles(j); err != nil {
+	if err := w.publishExtensionFiles(j, j.Spec.Run.Workdir); err != nil {
 		t.Fatal(err)
 	}
 	if b, err := os.ReadFile(filepath.Join(saved.NAS, outputRelative(j, "result", "results"))); err != nil || string(b) != "output" {
@@ -71,7 +71,7 @@ func TestNativeExtensionInstalledNASRoot(t *testing.T) {
 	if err := (Worker{}).prepareExtensionFiles(&j, t.TempDir()); err == nil {
 		t.Fatal("input accepted empty root")
 	}
-	if err := (Worker{}).publishExtensionFiles(j); err == nil {
+	if err := (Worker{}).publishExtensionFiles(j, j.Spec.Run.Workdir); err == nil {
 		t.Fatal("output accepted empty root")
 	}
 }
@@ -248,6 +248,13 @@ func TestNativeExtensionPythonImportQualification(t *testing.T) {
 		bin := filepath.Join(dir, "venv", "bin")
 		if err := os.MkdirAll(bin, 0700); err != nil {
 			return err
+		}
+		if runtime.GOOS == "linux" {
+			path := filepath.Join(bin, "python")
+			if target, err := os.Readlink(path); err == nil && target == python {
+				return nil
+			}
+			return os.Symlink(python, path)
 		}
 		// Apple's python3 launcher dispatches by argv[0]; keep that name.
 		quoted := "'" + strings.ReplaceAll(python, "'", "'\"'\"'") + "'"

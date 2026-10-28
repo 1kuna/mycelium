@@ -121,7 +121,12 @@ func TestWorkerProductionWithoutNAS(t *testing.T) {
 	w.Client = Client{URL: server.URL, Token: "test"}
 	store.state.Session = j.Session
 	j.Checkpoint = filepath.Join(t.TempDir(), "missing", "job")
-	p, err := w.start(store, *j)
+	var p *process
+	// Reuse the pending input copy before checking no-NAS execution.
+	await(t, func() bool {
+		p, err = w.start(store, *j)
+		return !errors.Is(err, errWorkerCheckpoint) || !strings.Contains(err.Error(), "input copy pending")
+	})
 	if err != nil {
 		t.Fatalf("production requires NAS: %v", err)
 	}

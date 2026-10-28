@@ -168,8 +168,18 @@ func TestDevCheckpointEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The dev service has a different executable from this test helper. Stage
+	// the helper as an ordinary input instead of executing outside {work}.
+	helperRef, err := myce.IdentifyFile(helper)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.UploadJobInput(ctx, helper, helperRef); err != nil {
+		t.Fatal(err)
+	}
 	s := myce.Spec{Name: "checkpoint", Project: "test", Priority: "experiment", Resumable: true}
-	s.Run.Command = []string{helper, "-test.run=^TestCheckpointCommand$"}
+	s.Files = myce.FileManifest{"checkpoint-command": helperRef}
+	s.Run.Command = []string{"sh", "-c", `chmod u+x "$1"; exec "$@"`, "checkpoint-input", "{work}/checkpoint-command", "-test.run=^TestCheckpointCommand$"}
 	s.Run.Env = map[string]string{"MYCE_TEST_CHILD": "1"}
 	s.Needs.MemoryGB = 8
 	s.Needs.Platform.Any = true

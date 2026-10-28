@@ -16,6 +16,10 @@ func TestEnvironmentRecipeStoreSubmissionAndSweep(t *testing.T) {
 	for _, kind := range []string{"inline", "catalog", "execution-sidecar"} {
 		t.Run(kind, func(t *testing.T) {
 			q, clock := fixture(t)
+			// Inspect the expired input after sweeping, before history retirement.
+			if err := q.ConfigureLogRetention(2 * DefaultFileRetention); err != nil {
+				t.Fatal(err)
+			}
 			lock := filepath.Join(t.TempDir(), "requirements.txt")
 			want := []byte("example==1.0\n")
 			if err := os.WriteFile(lock, want, 0600); err != nil {

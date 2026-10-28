@@ -20,7 +20,7 @@ func TestDockerLaunchHeartbeatInterleaving(t *testing.T) {
 				m := dockerMachine("worker", "fake")
 				if inventory == "machine" {
 					m = m3Machine()
-					m.Capabilities = []string{"docker"}
+					m.Capabilities = append(m.Capabilities, "docker")
 				}
 				submit(t, q, dockerJob().Spec)
 				var j *Job
@@ -88,7 +88,7 @@ func TestDockerLaunchHeartbeatRetainsFences(t *testing.T) {
 		t.Run(fence, func(t *testing.T) {
 			q, _ := fixture(t)
 			m := m3Machine()
-			m.Capabilities = []string{"docker"}
+			m.Capabilities = append(m.Capabilities, "docker")
 			submit(t, q, dockerJob().Spec)
 			j := assignedJob(machineCheck(t, q, m))
 			if j == nil {

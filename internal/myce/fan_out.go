@@ -124,6 +124,7 @@ func (q *Queue) retryWaveCandidate(j *Job, m *Machine) *Job {
 	}
 	copy := *j
 	n := v.Needs
+	n.Network = n.Network || j.Spec.Needs.Network
 	n.Platform = Platform{Required: []string{m.GPU}}
 	s := Spec{Needs: n}
 	if normalizeResources(&s) != nil {

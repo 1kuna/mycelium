@@ -35,6 +35,8 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 	deadline := f.String("deadline", "", "RFC3339 deadline (required for deadline priority/class)")
 	name := f.String("name", "", "job name (default: command basename)")
 	detach := f.Bool("detach", false, "print job ID and return without waiting")
+	adapter := f.String("adapter", "", "project adapter YAML (default: .mycelium/adapter.yaml)")
+	entry := f.String("entry", "", "named adapter entry (default: adapter default)")
 	profile := f.String("profile", "", "project execution profile name or YAML path (returns a JSON receipt)")
 	key := f.String("key", "", "profile submission key (default: content-derived; reuse to recover)")
 	var inputFlags []string
@@ -56,6 +58,13 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 			return waitError(64, "profile_input_invalid: duplicate destination")
 		}
 		itemInputs[dest] = local
+	}
+	if *profile != "" && (*adapter != "" || *entry != "") {
+		return errors.New("choose profile or adapter")
+	}
+	useAdapter := *adapter != "" || *entry != "" || f.NArg() == 0
+	if *profile == "" && useAdapter {
+		return runAdapter(ctx, *adapter, *entry, f.Args(), itemInputs, *key, *notify, *config, *joining, *address, *token, out, errOut)
 	}
 	if *profile != "" {
 		return runProfile(ctx, *profile, f.Args(), itemInputs, *key, *notify, *config, *joining, *address, *token, out, errOut)

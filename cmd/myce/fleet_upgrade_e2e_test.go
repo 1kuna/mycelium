@@ -314,7 +314,7 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	model := myce.Model{Name: "fleet-stream", Engine: "server", Path: "fleet-model", DirectNAS: true, SizeBytes: 1, SHA256: modelHash, MemoryGB: 1, Platforms: []string{"fake"}, AllowedMachines: []string{"worker-3"}, StartCommand: []string{"sh", "-c", `export MYCE_TEST_DOCKER_BIN="$1" MYCE_TEST_ISOLATED_HOME="$2"; exec "$3" -test.run=^TestFleetUpgradeModelStreamCommand$ -- "$4" "$5"`, "fleet-stream", os.Getenv("MYCE_TEST_DOCKER_BIN"), os.Getenv("MYCE_TEST_ISOLATED_HOME"), helper, "{port}", dir}, HealthURL: "http://127.0.0.1:{port}/health", Env: map[string]string{"FLEET_STREAM_CHILD": "1"}}
+	model := myce.Model{Name: "fleet-stream", Engine: "server", Path: "fleet-model", DirectNAS: true, SizeBytes: 1, SHA256: modelHash, MemoryGB: 1, Platforms: []string{"fake"}, AllowedMachines: []string{"worker-2"}, StartCommand: []string{"sh", "-c", `export MYCE_TEST_DOCKER_BIN="$1" MYCE_TEST_ISOLATED_HOME="$2"; exec "$3" -test.run=^TestFleetUpgradeModelStreamCommand$ -- "$4" "$5"`, "fleet-stream", os.Getenv("MYCE_TEST_DOCKER_BIN"), os.Getenv("MYCE_TEST_ISOLATED_HOME"), helper, "{port}", dir}, HealthURL: "http://127.0.0.1:{port}/health", Env: map[string]string{"FLEET_STREAM_CHILD": "1"}}
 	models, err := json.Marshal([]myce.Model{model})
 	if err != nil {
 		t.Fatal(err)
@@ -406,11 +406,14 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 		}
 	}
 	approve(old)
-	for i := 1; i <= 3; i++ {
+	// Two workers prove remote production, sequencing and untouched membership.
+	// The extra queue-only operation adds a 30s stable-health window; a third
+	// identical worker would exceed the standard quick-gate package budget.
+	for i := 1; i <= 2; i++ {
 		install("worker", fmt.Sprintf("worker-%d", i))
 	}
-	poll("three actual worker runtime proofs", func() bool {
-		if !status() || len(snapshot.Machines) != 3 {
+	poll("two actual worker runtime proofs", func() bool {
+		if !status() || len(snapshot.Machines) != 2 {
 			return false
 		}
 		for _, m := range snapshot.Machines {
@@ -421,10 +424,14 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 		return true
 	})
 	before := map[string]myce.Machine{}
+	commandWork := map[string]string{}
+	commandCheckpoint := map[string]string{}
 	t.Cleanup(func() {
 		// Release owned command fixtures before service cleanup, even on failure.
 		for _, m := range managers[1:] {
-			fleetE2EWrite(t, filepath.Join(dir, "finish-"+m.config.Name), []byte("cleanup\n"), 0600)
+			if work := commandWork[m.config.Name]; work != "" {
+				fleetE2EWrite(t, filepath.Join(work, "finish-"+m.config.Name), []byte("cleanup\n"), 0600)
+			}
 		}
 		fleetE2EWrite(t, filepath.Join(dir, "finish-stream"), []byte("cleanup\n"), 0600)
 	})
@@ -437,14 +444,14 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 		spec := myce.Spec{Name: "rollout-command-" + m.ID, Project: "fleet-test", Priority: "production", AllowedMachines: []string{m.ID}}
 		spec.Needs.MemoryGB, spec.Needs.Platform.Any = 1, true
 		// The command controls its own completion; the rollout never signals it.
-		spec.Run.Command = []string{"sh", "-c", `test -z "${MYCE_TOKEN:-}" || exit 91; printf '%s\n' "$MYCE_ATTEMPT" >> "$1/starts-$2"; while ! test -f "$1/finish-$2"; do sleep 0.05; done; printf 'completed naturally\n'`, "fleet-command", dir, m.ID}
+		spec.Run.Command = []string{"sh", "-c", `printf 'myce fixture work: %s\n' "$PWD"; printf 'myce fixture checkpoint: %s\n' "$MYCE_CHECKPOINT_DIR"; test -z "${MYCE_TOKEN:-}" || exit 91; printf '%s\n' "$MYCE_ATTEMPT" >> "$MYCE_CHECKPOINT_DIR/starts-$2" || exit 92; while ! test -f "$1/finish-$2"; do sleep 0.05; done; printf 'completed naturally\n'`, "fleet-command", "{work}", m.ID}
 		var job myce.Job
 		if err = client.Call(ctx, "POST", "/api/jobs", spec, &job); err != nil {
 			t.Fatal(err)
 		}
 		jobs[job.ID] = job
 	}
-	poll("all three real commands started", func() bool {
+	poll("both real commands started", func() bool {
 		if !status() {
 			return false
 		}
@@ -459,6 +466,13 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 			if !found {
 				return false
 			}
+			work := commandFixturePath(t, ctx, client, id, "work")
+			checkpoint := commandFixturePath(t, ctx, client, id, "checkpoint")
+			if work == "" || checkpoint == "" {
+				return false
+			}
+			commandWork[jobs[id].Machine] = work
+			commandCheckpoint[jobs[id].Machine] = checkpoint
 		}
 		return true
 	})
@@ -482,9 +496,14 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 	approve(target)
 	// The operator is an independent, short-lived CLI process. Its exit removes
 	// the operator connection while the queue continues durable coordination.
+	queueOnly := true
 	upgrade := func() myce.FleetUpgradeStatus {
 		t.Helper()
-		cmd := exec.CommandContext(ctx, old.binary, "fleet", "upgrade", "--release", newVersion, "--queue", client.URL, "--token", token)
+		args := []string{"fleet", "upgrade", "--release", newVersion, "--queue", client.URL, "--token", token}
+		if queueOnly {
+			args = append(args, "--queue-only", "--wait-production-idle")
+		}
+		cmd := exec.CommandContext(ctx, old.binary, args...)
 		cmd.Env = fleetE2EEnv(queue.home)
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -497,7 +516,7 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 		return result
 	}
 	operation := upgrade()
-	poll("visible in-flight model-call cutover wait", func() bool {
+	poll("visible fleet-wide production cutover wait", func() bool {
 		if !status() || snapshot.FleetUpgrade == nil {
 			return false
 		}
@@ -505,7 +524,7 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 			t.Fatalf("upgrade stopped: %+v", snapshot.FleetUpgrade)
 		}
 		for _, host := range snapshot.FleetUpgrade.Hosts {
-			if host.Host == "queue" && strings.Contains(host.Wait, "model calls") {
+			if host.Host == "queue" && strings.Contains(host.Wait, "production attempts") {
 				return true
 			}
 		}
@@ -523,12 +542,24 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 	if err != nil || !bytes.Contains(rest, []byte("stream finished naturally")) || !bytes.Contains(rest, []byte("[DONE]")) {
 		t.Fatalf("admitted model stream interrupted: %q %v", rest, err)
 	}
-	poll("queue restarted while command attempts remain running", func() bool {
+	poll("production wait remains after the stream finishes", func() bool {
+		return status() && snapshot.FleetUpgrade != nil && strings.Contains(snapshot.FleetUpgrade.Hosts[0].Wait, "production attempts")
+	})
+	if pid, starts := queue.process(); pid != queuePID || starts != 1 {
+		t.Fatal("queue restarted while remote production commands were running")
+	}
+	for _, m := range managers[1:] {
+		if pid, starts := m.process(); pid != before[m.config.Name].Fleet.PID || starts != 1 {
+			t.Errorf("busy worker restarted: %s", m.config.Name)
+		}
+		fleetE2EWrite(t, filepath.Join(commandWork[m.config.Name], "finish-"+m.config.Name), []byte("finish naturally\n"), 0600)
+	}
+	poll("queue-only operation completed after production released custody", func() bool {
 		if !status() {
 			return false
 		}
 		pid, starts := queue.process()
-		return pid != 0 && pid != queuePID && starts == 2 && snapshot.FleetUpgrade != nil && snapshot.FleetUpgrade.Hosts[0].Phase == "complete"
+		return pid != 0 && pid != queuePID && starts == 2 && snapshot.FleetUpgrade != nil && snapshot.FleetUpgrade.State == "complete" && snapshot.FleetUpgrade.QueueOnly && snapshot.FleetUpgrade.WaitProductionIdle && len(snapshot.FleetUpgrade.Hosts) == 1
 	})
 	assertAttempts := func() {
 		t.Helper()
@@ -559,15 +590,19 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 	if pid, starts := queue.process(); pid == queuePID || starts != 2 {
 		t.Error("operator rerun repeated queue restart")
 	}
-	// Each worker must retain its old PID/session until its command finishes.
+	// Queue-only must leave all worker services on the old release, including
+	// after natural completion. A subsequent full operation upgrades them.
 	for _, m := range managers[1:] {
 		if pid, starts := m.process(); pid != before[m.config.Name].Fleet.PID || starts != 1 {
-			t.Errorf("busy worker restarted: %s", m.config.Name)
+			t.Errorf("queue-only restarted worker: %s", m.config.Name)
 		}
 	}
-	for _, m := range managers[1:] {
-		fleetE2EWrite(t, filepath.Join(dir, "finish-"+m.config.Name), []byte("finish naturally\n"), 0600)
+	queueOnly = false
+	full := upgrade()
+	if full.Operation == operation.Operation || full.QueueOnly {
+		t.Fatalf("full operation reused queue-only scope: %+v", full)
 	}
+	operation = full
 	poll("all commands succeeded and signed rollout completed", func() bool {
 		if !status() {
 			return false
@@ -575,7 +610,7 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 		if snapshot.FleetUpgrade != nil && snapshot.FleetUpgrade.State == "stopped" {
 			t.Fatalf("upgrade stopped: %+v", snapshot.FleetUpgrade)
 		}
-		if snapshot.FleetUpgrade == nil || snapshot.FleetUpgrade.State != "complete" {
+		if snapshot.FleetUpgrade == nil || snapshot.FleetUpgrade.Operation != operation.Operation || snapshot.FleetUpgrade.State != "complete" {
 			return false
 		}
 		for id := range jobs {
@@ -597,7 +632,7 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 		if m.Fleet == nil || m.Fleet.SHA256 != target.hash || m.Fleet.Version != newVersion || m.Fleet.PID == old.Fleet.PID || m.Session == old.Session || m.Fleet.Session != m.Session || !m.Fleet.ServiceHealthy || !m.Fleet.RunnerSmoke {
 			t.Errorf("worker did not activate actual target runtime: %+v", m)
 		}
-		data, err := os.ReadFile(filepath.Join(dir, "starts-"+m.ID))
+		data, err := commandFixtureAppendBytes(filepath.Join(commandCheckpoint[m.ID], "starts-"+m.ID))
 		if err != nil || string(data) != "1\n" {
 			t.Errorf("real command executed more than once: %q %v", data, err)
 		}
@@ -646,5 +681,5 @@ func TestFleetUpgradeDevSignedReleasesEndToEnd(t *testing.T) {
 		}
 		m.mu.Unlock()
 	}
-	t.Logf("two locally signed releases; queue and three real workers restarted once; three commands completed with unchanged attempt/session and no losses or retries")
+	t.Logf("two locally signed releases; queue and two real workers restarted once; queue-only waited for both production commands, preserved worker processes, then full same-release upgrade completed with unchanged attempt/session and no losses or retries")
 }

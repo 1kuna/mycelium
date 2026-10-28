@@ -324,7 +324,7 @@ func TestHostMemoryAllowanceAggregatePreparationsAndSidecars(t *testing.T) {
 			a, b := machine("card-a", "fake"), machine("card-b", "fake")
 			for _, m := range []*Machine{&a, &b} {
 				if docker {
-					m.Capabilities = []string{"docker"}
+					m.Capabilities = append(m.Capabilities, "docker")
 					m.CapabilityProfile.OS = "linux"
 				}
 				m.HostID = "host"

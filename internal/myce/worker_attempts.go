@@ -36,6 +36,22 @@ type attemptSupervisor struct {
 	admissionBlocked bool
 }
 
+// Observation retries preserve running status. Their exact cause must still
+// reach the queue; successful recovery clears ObservationRetry and the report.
+func dockerHeartbeatDiagnostic(d *dockerAttempt) (string, *RuntimeCause) {
+	status := d.status()
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	var cause *RuntimeCause
+	if status != "running" || d.state.ObservationRetry != "" {
+		cause = safeRuntimeCause(d.state.CleanupCause)
+	}
+	if status == "running" {
+		status = ""
+	}
+	return status, cause
+}
+
 func jobKey(j Job) attemptKey { return attemptKey{j.ID, j.Attempt, j.Session} }
 func (a *attemptSupervisor) snapshot() (AttemptReport, Machine, bool, error) {
 	a.mu.Lock()
@@ -181,15 +197,16 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			}
 		}
 		report := AttemptReport{Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}, Session: a.job.Session, Started: p != nil && (p.docker == nil || p.docker.status() == "running") && (p.native == nil || p.native.started())}
+		if s.state.Job != nil {
+			report.InputsStagedAt = s.state.Job.InputsStagedAt
+			if s.state.Result != nil {
+				s.state.Result.InputsStagedAt = s.state.Job.InputsStagedAt
+			}
+		}
 		diagnostics := Machine{CheckpointUnavailable: s.checkpointUnavailable, FileTransferError: s.fileError}
 		if p != nil && p.docker != nil {
-			status := p.docker.status()
-			p.docker.mu.Lock()
-			diagnostics.DockerCause = safeRuntimeCause(p.docker.state.CleanupCause)
-			p.docker.mu.Unlock()
-			if status != "running" {
-				diagnostics.DockerCleanup = status
-			}
+			diagnostics.DockerCleanup, diagnostics.DockerCause = dockerHeartbeatDiagnostic(p.docker)
+			report.DockerCause = diagnostics.DockerCause
 		}
 		if needsCheckpoint(&a.job) {
 			path := attemptCheckpoint(a.job)
@@ -533,6 +550,7 @@ func firstDevice(j Job, m Machine) string {
 func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*workerStore, rt *modelRuntime, environments *environmentRuntime, rawMemory MemorySource, requestRetention func(string, time.Time)) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	var qualification checkpointIO[bool]
 	events := make(chan WorkerEvent, 16)
 	w.control = &processControl{clock: w.Clock, wake: make(chan struct{}, 1), availability: w.availability}
 	controlDone := make(chan struct{})
@@ -795,6 +813,10 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			}
 			m.ModelConfigHash = modelConfigHash(w.ModelConfig)
 			m.Capabilities = append(slices.DeleteFunc(slices.Clone(w.Machine.Capabilities), func(c string) bool { return c == "docker" || c == "docker_envelope" }), "logs_none", "shared_inputs_v1")
+			m.Capabilities = slices.DeleteFunc(m.Capabilities, func(c string) bool {
+				return c == "native_network" || c == "native_sidecars" || c == "native_network_partial" || strings.HasPrefix(c, "native_isolation_")
+			})
+			m.Capabilities = append(m.Capabilities, w.nativeIsolationCapabilities()...)
 			if w.DockerEndpoint != "" {
 				// Refresh without allowing a slow daemon to block heartbeats.
 				if supported, err := dockerQualification.run("docker-envelope", func() (bool, error) { return probeWorker.dockerEnvelopeSupported(), nil }); err == nil {
@@ -838,6 +860,15 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 					w.Machine.HostMemoryBudgetGB = reply.HostMemoryBudget.GiB
 				}
 				fresh = false
+				qualificationWorker := w
+				qualificationPlans := slices.Clone(reply.ExtensionQualificationPlan)
+				_, _ = qualification.run("extension-qualification", func() (bool, error) {
+					var errs []error
+					for _, plan := range qualificationPlans {
+						errs = append(errs, qualificationWorker.reconcileExtensionQualification(ctx, plan))
+					}
+					return true, errors.Join(errs...)
+				})
 				root.state.Fresh = false
 				if reply.FileCheckpoints {
 					if w.CheckpointRoot != "" {

@@ -3,6 +3,15 @@
 For new composed extensions, hand your agent [AGENT-GUIDE.md](extensions/AGENT-GUIDE.md).
 The legacy run/setup format and native baseline rules below remain supported.
 
+New registrations default to the native sandbox. At the top level of
+`extension.yaml`, `isolation: unsandboxed` plus a required nonempty `reason`
+declares an exception for main/check payloads and all their sidecars. Status
+and job GET expose that public reason. Pre-policy registrations without the
+server-owned default marker retain legacy unsandboxed execution, even after
+identical registration replay/restart. To opt in, author a new version/digest
+with `isolation: sandboxed`; existing frozen jobs retain their original policy.
+See [native isolation](native-isolation.md) for permissions and remaining checks.
+
 An extension is one small folder: `extension.yaml`, plain notes and the few
 scripts it needs. Use it to teach Mycelium a **kind of work** (preferred) or a
 **program type**. A **hypha** must be **qualified** for that exact version and

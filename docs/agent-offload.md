@@ -320,8 +320,11 @@ certificate pin; consumers do not read config files or handle credentials.
 Explicit `--queue` / `--token` and `MYCE_QUEUE` / `MYCE_TOKEN` keep working.
 `--config` and `--joining-file` remain available for explicit authority selection.
 As with `run`, `MYCE_QUEUE` overrides the invitation address for `status`, `logs`, `cancel`
-and `file get`, including when `--joining-file` is explicit. Operator host
-maintenance (`myce host drain|disable|resume|status|budget|placement`, see
+and `file get`, including when `--joining-file` is explicit.
+Extension `add`, `check`, `list` and `setup` accept the same authority flags;
+`add` and non-static `check` resolve installed authority when contacting the queue.
+Local listing, setup, `add --local` and `check --static` need no credentials.
+Operator host maintenance (`myce host drain|disable|resume|status|budget|placement`, see
 [operations](operations.md#queue-maintenance)) uses the same installed authority.
 
 ```sh
@@ -575,3 +578,37 @@ are stable within a preserved receipt, not globally across receipt roots.
 Receivers should also recognize a job/status/result already processed across
 roots. Keep caller receipts for recovery; use a fresh explicit `--key` when a
 new execution is required (for example a release canary).
+
+## Queue health notification
+
+Queue operators can start `myce queue --health-notify /path/to/executable`
+(or set `MYCE_HEALTH_NOTIFY`). This is separate from the submitting agent's
+`MYCE_NOTIFY` / `run --notify` binding. The executable uses the same `--check`,
+JSON stdin and successful-delivery exit contract described above. Point its private
+configuration at the operator's own wake/notification receiver; no consumer polling
+or T3 dependency is added. The queue refuses startup when a configured hook fails
+its check. Queue service operators must preserve these flags/environment in their
+service configuration; this slice does not install a receiver or alter fleet services.
+
+`--health-storage-delay 5m` controls continuous storage unavailability before an
+alert (positive duration). Other kinds are `disk_below_guard`,
+`host_unhealthy_or_stale`, and `production_attempt_lost`; storage uses
+`checkpoint_store_unavailable`. A JSON event includes `delivery_id`, `kind`, `at`,
+`delivered: false`, the optional fixed `store` label, and the relevant `host`,
+`job_id`, `attempt` identities. Read
+`health_alerts` in authenticated status for the durable event window and delivery
+acknowledgements. Keep host names non-sensitive. Events omit raw errors and paths,
+and the hook environment excludes `MYCE_TOKEN`. Hook output is not logged.
+
+Condition alerts deduplicate continuously unhealthy episodes and rate-limit flaps
+for 15 minutes. Every lost production attempt has its own event. Transport is paced
+to at most one hook per second, retries failures after one minute and retains the
+same delivery identity across restart/ambiguous delivery; receivers must deduplicate
+that identity. The 30-second hook budget also applies to `--check`. Keep hook
+credentials in private local configuration, with delivery through a quiet channel.
+
+Upgrade the queue before workers: older queues strictly reject the new
+per-attempt `docker_cause` field when a worker reports a pending Docker diagnostic.
+Older workers remain compatible with the new queue. Their aggregate host cause
+can identify a single legacy attempt; exact concurrent-attempt diagnostics require
+upgraded workers. This notification feature does not change retry or release policy.

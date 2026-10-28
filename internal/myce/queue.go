@@ -40,12 +40,15 @@ type batchRelease struct {
 }
 
 type state struct {
+	Health       healthAlerts  `json:"health_alerts,omitempty"`
 	FleetUpgrade *fleetUpgrade `json:"fleet_upgrade,omitempty"`
 	// Positive orphan eligibility, persisted with the existing queue state.
 	// Zero time means an input upload has not finished publication yet.
 	JobInputUploads map[string]time.Time `json:"job_input_uploads,omitempty"`
 	// Internally created bundles remain eligible after their last reference goes.
 	BundleUploads map[string]time.Time `json:"bundle_uploads,omitempty"`
+	// Expired blob cleanup survives removal of its job/key answer, deduplicated by hash.
+	RetiredJobFiles map[string]bool `json:"retired_job_files,omitempty"`
 
 	WorkObservations     map[string]WorkObservation `json:"work_observations,omitempty"`
 	EnrollmentRelease    *EnrollmentRelease         `json:"enrollment_release,omitempty"`
@@ -86,6 +89,9 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
+	healthStoreProbe                checkpointAvailability
+	healthNotifier                  string
+	healthStorageDelay              time.Duration
 	fleetQueue                      *fleetQueueRuntime
 	fleetService                    *ServiceConfig
 	onboardingNAS                   NASIdentity
@@ -112,7 +118,6 @@ type Queue struct {
 	simID            int64
 	uploadSpool      uploadSpool
 	logRetention     time.Duration
-	nextLogCleanup   time.Time
 	environments     EnvironmentCatalog
 	productionGrace  time.Duration
 	wake             chan struct{}
@@ -202,6 +207,7 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 	}
 	db.SetMaxOpenConns(1)
 	q := &Queue{fileRetention: DefaultFileRetention, logRetention: DefaultLogRetention, uploadSpool: uploadSpool{limit: DefaultUploadSpoolBytes, defaultDir: path + ".uploads"}, productionGrace: 10 * time.Second, productionInfrastructureRetries: DefaultProductionInfrastructureRetries, wake: make(chan struct{}), lossTimeouts: [3]time.Duration{ProductionLossAfter, DeadlineLossAfter, LossAfter}, lock: lock, db: db, clock: clock, root: abs, s: state{Schema: persistedSchema, Jobs: map[string]*Job{}, Machines: map[string]*Machine{}}}
+	q.healthStoreProbe.timeout = heartbeatFilesystemBudget
 	q.nasProbe.timeout = heartbeatFilesystemBudget
 	q.nasProgress.timeout = heartbeatFilesystemBudget
 	for _, option := range options {
@@ -465,6 +471,7 @@ func (q *Queue) updateTimed(fn func() error, timing *queueUpdateTiming) error {
 	q.accountUsage(q.clock.Now())
 	err = fn()
 	if err == nil {
+		q.detectHealth()
 		q.invalidateWorkTimings()
 		q.invalidateWorkCurves()
 	}
@@ -614,6 +621,9 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		if e != nil {
 			return rejectFieldRule("job_program_invalid", e)
 		}
+		if err := q.validateAutomaticExtensionCheck(s, extensions); err != nil {
+			return err
+		}
 		// Validate the original execution/needs, with the resolved class default.
 		// Resolution must not hide forbidden overrides or bypass deadline rules.
 		submitted.Class = s.Class
@@ -670,7 +680,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		if reason := q.diskCapacityRefusal(j); reason != "" {
 			return &HTTPError{Status: 409, Code: "disk_headroom", Message: reason}
 		}
-		if s.RequireTarget {
+		if s.RequireTarget || nativeNetworkRequired(j) {
 			if ok, reason := q.qualifiedTarget(j); !ok {
 				return &HTTPError{Status: 409, Code: "no_qualified_target", Message: reason + "; intent retained locally"}
 			}
@@ -716,12 +726,21 @@ func (q *Queue) retry(j *Job, why string) {
 func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 	// Snapshot identity before requeue clears it, including loss without a result.
 	outcome := attemptOutcome(j, Result{Interrupted: true, PoliteStop: historyPlannedStop(j), PriorityStop: priorityStop(j)})
+	if chargeInfrastructure && strings.HasPrefix(why, "machine quiet for ") {
+		q.alertAttemptLoss(j, outcome, true)
+	}
 	recordAttemptMemory(j, Result{})
 	defer func() { q.recordAttemptOutcome(j, outcome) }()
 	if cancelled(j) {
 		if !terminal(j.State) {
 			q.finishCancellation(j)
 		}
+		return
+	}
+	if automaticExtensionCheck(j) != nil {
+		now := q.clock.Now()
+		j.State, j.Reason, j.FinishedAt = "failed", "native check interrupted: "+why, &now
+		j.StopAt = nil
 		return
 	}
 	if j.Spec.Priority == "production" {
@@ -746,6 +765,7 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 	j.Session = ""
 	j.StopAt = nil
 	j.StartedAt = nil
+	j.InputsStagedAt = nil
 	j.FinishedAt = nil
 	j.Reason = why
 	if chargeInfrastructure && j.Spec.Priority != "production" && j.Losses >= 3 {
@@ -791,6 +811,7 @@ func (q *Queue) maintain() {
 	q.maintainPieceDependencies()
 	q.maintainFileExpiry()
 	q.maintainHostMaintenance()
+	q.maintainExtensionQualifications()
 	q.maintainSubmissions()
 	now := q.clock.Now()
 	for _, j := range q.liveJobs() {
@@ -891,10 +912,27 @@ func (q *Queue) maintain() {
 	}
 }
 func (q *Queue) Tick() error {
-	if err := q.update(func() error { q.maintain(); return nil }); err != nil {
+	// File-store health belongs to existing maintenance, not every control
+	// transaction. Snapshot under the lock, then perform bounded I/O outside it.
+	q.mu.RLock()
+	files := q.files
+	q.mu.RUnlock()
+	fileAvailable := true
+	if !q.simulation && files != nil {
+		fileAvailable, _ = q.healthStoreProbe.run(files.root, func() (bool, error) { return checkpointAvailable(files.root), nil })
+	}
+	if err := q.update(func() error {
+		delay := q.healthStorageDelay
+		if delay <= 0 {
+			delay = DefaultHealthStorageDelay
+		}
+		q.observeHealth("queue-files", !fileAvailable, delay, HealthAlert{Kind: "checkpoint_store_unavailable", Store: "queue-file-store"})
+		q.maintain()
+		return nil
+	}); err != nil {
 		return err
 	}
-	return errors.Join(q.pruneBatchLogs(), q.reclaimJobFiles())
+	return errors.Join(q.pruneBatchLogs(), q.reclaimJobFiles(), q.pruneJobHistory())
 }
 func (q *Queue) Checkin(c Checkin) (Reply, error) {
 	return q.CheckinContext(context.Background(), c)
@@ -1092,7 +1130,20 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 			}
 			m.RecoveringSince = &since
 		}
+		q.acceptExtensionQualifications(&m)
 		q.s.Machines[m.ID] = &m
+		for _, report := range reports {
+			cause := report.DockerCause
+			// The legacy worker reports one current attempt, so its host diagnostic
+			// is unambiguous. Modern multi-attempt workers carry the exact cause.
+			if c.AttemptProtocol == "" && len(reports) == 1 {
+				cause = m.DockerCause
+			}
+			r := Result{Execution: report.Execution, Machine: m.ID, Session: report.Session, CleanupCause: cause}
+			if j, err := q.current(r); err == nil && j.Spec.Run.Docker {
+				q.alertAttemptLoss(j, attemptOutcome(j, r), false)
+			}
+		}
 		q.refreshHostMemory()
 		q.acceptCurveReports(c, &m)
 		q.reconcilePreparationPlans(c)
@@ -1169,6 +1220,9 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 						break
 					}
 				}
+			}
+			for _, target := range q.machineTargets(&m) {
+				reply.ExtensionQualificationPlan = append(reply.ExtensionQualificationPlan, q.extensionQualificationPlan(target)...)
 			}
 			reply.ModelPlan = q.modelPlan(m.ID)
 			reply.CopyPlan, reply.CacheUsage, reply.CachePins = q.copyPlan(&m)
@@ -1375,6 +1429,7 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 }
 func (q *Queue) complete(r Result, filesVerified bool) error {
 	q.maintainStartDeadlines()
+	q.maintainExtensionQualifications()
 	operatorMatched := q.refundOperatorStop(r)
 	if r.ReleaseOnly {
 		if r.ReleasePending {
@@ -1441,6 +1496,9 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		}
 	}
 	if r.ReleasePending && pendingTracked && q.s.HostReleases[releaseKey(HostRelease{Job: r.ID, Machine: r.Machine, Session: r.Session, Attempt: r.Attempt})].Docker {
+		if j, err := q.current(r); err == nil {
+			q.alertAttemptLoss(j, attemptOutcome(j, r), false)
+		}
 		q.maintain()
 		return nil
 	}
@@ -1458,6 +1516,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 	if err != nil {
 		return err
 	}
+	retainInputsStagedAt(j, r.InputsStagedAt)
 	if m := q.s.Machines[r.Machine]; m != nil {
 		m.LastSeen = q.clock.Now()
 		delete(q.unreported, m.ID)
@@ -1497,6 +1556,8 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		} else {
 			q.retry(j, j.Reason)
 		}
+	} else if !r.Success && automaticExtensionCheck(j) != nil {
+		j.State, j.Reason = "failed", "native check failed: "+r.Error
 	} else if !r.Success && !oomFailure && j.StartedAt == nil && j.ExecutionCause != nil && j.ExecutionCause.Operation == "launch" && j.ExecutionCause.Class == "launch_refused" && q.diskHeadroomReason(j, q.s.Machines[j.Machine]) != "" {
 		// A changed disk sample can withdraw an offer before exec. This is the
 		// same temporary hold as dispatch, including for production stage failures.
@@ -1606,7 +1667,7 @@ func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
 
 // Projection runs against either the locked queue or a fully detached read view.
 func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
-	out := Snapshot{FleetUpgrade: q.fleetUpgradeStatus(), QueueRelease: CurrentRelease(), HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
+	out := Snapshot{HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), QueueRelease: CurrentRelease(), HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
 	for _, s := range q.s.ModelSlots {
 		copy := *s
 		model, _ := q.model(s.Model)
@@ -2033,6 +2094,7 @@ func (q *Queue) Started(r Result) error {
 			rejected = ErrStale
 			return nil
 		}
+		retainInputsStagedAt(j, r.InputsStagedAt)
 		q.markStarted(j)
 		return nil
 	})
@@ -2077,6 +2139,7 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 				for i := range j.Copies {
 					j.Copies[i].Recoverable = false
 				}
+				j.InputsStagedAt = nil // Recovery adopts a different execution.
 				j.Attempt = copy.Attempt
 				j.Machine = m.ID
 				j.Session = m.Session
@@ -2105,6 +2168,7 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 		reply.Kill = true
 		return reply
 	}
+	retainInputsStagedAt(j, report.InputsStagedAt)
 	if report.Started && j.Spec.StartBy == nil && j.StartedAt == nil && j.State == "running" && q.startPlacementPolicyAllowed(j) {
 		q.markStarted(j)
 	}
@@ -2158,6 +2222,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	j.ReleaseConfirmed = false
 	j.RequeuedByOperator = false
 	j.StartedAt = nil
+	j.InputsStagedAt = nil
 	j.Timing = nil
 	now := q.clock.Now()
 	j.PriorityPolicy = q.priorityMatch(j.Spec)

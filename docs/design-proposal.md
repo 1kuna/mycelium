@@ -36,11 +36,12 @@ class: experiment           # arbitrary job class; legacy priority is accepted
 deadline: null              # a time, required when priority is "deadline"
 run:
   command: ["python", "reindex.py", "--batch", "7"]
-  workdir: /srv/example
+  workdir: '{work}'         # worker-managed attempt directory; stage source as inputs
   env: {}
 needs:
   memory_gb: 40
   platform: [cuda]          # any of: cuda, xpu, metal
+  network: false            # payload offline by default; true requires protected outbound
   model: qwen3-32b          # optional; used to group jobs that share a model
 expected_minutes: 90        # rough guess; used for planning, never enforced
 resumable: true             # true = the job saves checkpoints and can be stopped and picked up later
@@ -258,6 +259,31 @@ owned work, preserve pending results, then reconnect for exact reconciliation.
 | Cancelled reservation with no job | 30 days from creation; later submit can bind only a cancelled job. |
 | SHA-256 digest marker of `(project, key)` | Retained indefinitely after full-record expiry. Submit returns HTTP 410 `submission_key_expired`, never creating a job; cancel-by-key returns `unknown`. |
 | No record, with intact durable marker store | Genuinely never seen; cancel-by-key records an `absent` reservation. A cache miss alone never proves absence. |
+
+**Queue history retention amendment (#248, 2026-10-27).** Terminal jobs leave
+job listing and ID lookup after at least **168 hours from `finished_at`**, matching
+the default result window. Longer configured result or log retention extends
+this minimum. Missing terminal timestamps start their durable window at the first maintenance observation.
+Removal waits for every known attempt's confirmed release, expired result/input
+files with durable reclamation ownership, and completed log cleanup. Pending
+blob cleanup transfers atomically to a deduplicated set of expired hashes; shared
+blobs remain protected by their other owners without retaining entire old jobs. Active work and
+learned work-curve observations are not pruned. Removal is automatic, in batches
+of at most 64 jobs per maintenance tick, in the existing crash-consistent SQLite
+transaction; failed commits restore both jobs and keyed answers. No bulk file or
+log-table cleanup runs under the queue mutex.
+
+The existing key contract remains: after job removal the full answer, spec
+fingerprint and cancellation/release evidence remain available by submission key
+for another **30 days**, then become permanent digest-only markers. Thus ordinary
+full history is limited to the retention windows plus cleanup backlog; unresolved
+custody and permanent markers intentionally have no age limit. This is not a
+fixed byte quota. SQLite reuses deleted pages; physical file shrinkage is an
+offline compaction operation, never an automatic `VACUUM` on the live queue.
+The retention choice was checked against the verified pre-upgrade backup: 1,898
+jobs, approximately eight days of terminal history, 500,056,064 database bytes;
+logs occupied roughly 445 MB. Keeping full history indefinitely was unnecessary
+for the seven-day result and thirty-day post-removal replay contracts.
 
 A key's acknowledged `will_not_run: true` remains true permanently, including after expiry. While a consumer operation is open, recover a lost response by retrying its stored identical spec/key within retention. Once closed, cancel by key only, never resubmit. An expired/unknown answer leaves consumer coverage unresolved and blocks its reopen. Consumers own key generation, stored specs, operation intent and acknowledgement persistence. This promises no exactly-once external effects; keep output writes safe to repeat.
 
@@ -544,6 +570,143 @@ the physical host's exclusion across loss/restart. Plain commands remain the
 default; no container scheduler, peer network or extra service is introduced.
 The exact supported subset and limits are in [job reference](job-reference.md#managed-docker-batch-commands)
 and [operations](operations.md#docker-cleanup-custody).
+
+## Amendment: minimum native job isolation (#177, #219, #248)
+
+The #177 minimum is a v1 requirement under [#248's clarification](https://github.com/1kuna/mycelium/issues/248#issuecomment-6447873336):
+managed job directory and temp, no ambient credentials, and no worker control
+access for sandboxed payloads. New extension registrations default to a **kernel-enforced boundary**; `0700` alone
+cannot separate processes sharing a UID. This amendment covers native batch
+payloads and their sidecars, including queued extension run/check payloads. It
+does not establish isolation for local setup/qualification hooks, arbitrary
+preparation code or standalone model servers.
+Implementation and native qualification are separate; this text records the
+contract, not a completed rollout.
+
+**Declared stage exception and legacy registration policy (batch/s047).** An
+extension's top level or an adapter entry may declare `isolation: unsandboxed`
+and a required nonempty `reason`. Invalid modes and blank reasons are rejected.
+`isolation: sandboxed` explicitly selects the kernel boundary. The choice applies to
+main, queued qualification/check payloads and every sidecar of that stage;
+there is no global switch or per-sidecar escape. Extension jobs cannot override
+the frozen registration's policy at submission.
+
+The queue stamps newly created registrations with server-owned
+`sandbox_default: true`, outside the immutable bundle/digest. Persisted
+registrations and frozen job copies without that marker retain unsandboxed
+execution when no authored mode is present. Identical registration replay
+preserves the original marker. Opt in a legacy registration by authoring a new
+version/digest with `isolation: sandboxed`; existing queued/frozen jobs retain
+their original policy across restart. No date, source revision or content
+identity rewrite determines this choice.
+
+**Plain native compatibility policy (s047 inventory gate).** Plain `run.command`
+jobs with no frozen extension registration remain unsandboxed by default in v1.
+Live consumer commands prepare dependencies and write shared home caches that
+break under the new boundary. Opt in with `isolation: sandboxed`; then the
+sandbox and offline default apply, including network capability admission.
+Status/job GET expose `unsandboxed: plain native job defaults to unsandboxed in v1; set isolation: sandboxed to opt in`, and workers warn once per attempt.
+This does not change new extension defaults or frozen registration policy.
+
+An unsandboxed stage omits kernel sandbox setup and its kernel-capability
+admission requirement, including protected native-network capability. It has
+ordinary worker-user filesystem, process, IPC and network access; offline
+defaults and cache/control/sibling content denials below do **not** apply.
+Managed work/temp, private source/input staging, environment/token scrubbing,
+CPU/GPU selection and device binding, cgroup limits, authorization/Started,
+attempt fencing and release custody still apply. A managed cwd does not confine
+an unsandboxed payload's other file accesses. Status and job GET retain
+`isolation: "unsandboxed: <reason>"` through queuing, execution and terminal
+outcomes; legacy mode uses a fixed public explanation. Worker logs emit one
+warning per attempt, shared by main/sidecars and launch retries. Reasons are
+public diagnostics: authors must keep secrets and private paths out of them.
+The queue and workers must run the policy-capable release together; an older
+worker cannot implement a declared exception.
+
+The kernel guarantees in the following paragraphs apply to sandboxed stages.
+Every native attempt gets a managed `{work}`, `.tmp` and `.scratch` beneath it.
+The worker overrides `TMPDIR`, `TMP`, `TEMP` and `MYCE_SCRATCH_DIR` after authored
+environment/activation; main and its own sidecars share these exact paths. Native
+workdirs must resolve inside `{work}`; stage source and data through inputs or
+the frozen extension, rather than executing from an arbitrary host checkout.
+Extension source is copied privately under `{work}/.myce-extension`.
+Prepared environments and shared extension caches permit payload reads and
+execution, not content writes. Operator-configured model/cache roots permit
+reads without content writes or direct execution. Narrow operator declarations
+can add read-only model roots or read/execute runtime roots, refusing filesystem,
+home, NAS and installed Mycelium roots and protected-content overlaps. Linux
+exposes only the current and trusted attempt-member cgroup memory metrics,
+without ancestor/sibling cgroup contents or cgroup control writes.
+NAS inputs and outputs retain their declared worker staging/publication
+contract; only the attempt's exact checkpoint directory is writable in place.
+Neither a mounted NAS nor an authored environment path grants the payload the
+whole shared filesystem. Keep #219's environment allowlist, stripping
+agent/session variables and queue credentials; `MYCE_TOKEN` never reaches a
+payload. Explicit job inputs and `run.env` are intentional disclosures to that
+job. Linux metadata limitations below also apply to cache permissions.
+
+Linux prefers rootless **bubblewrap** (`bwrap`) with user, mount, PID, IPC and
+network namespaces, a read-only host-root view, private `/tmp` and `/dev/shm`,
+and narrowly writable attempt/checkpoint paths. Landlock plus seccomp further
+restrict file contents, devices, sockets and process access. A per-attempt
+namespace anchor is shared by main and sidecars using `nsenter`; independently
+isolating each member would break sidecar loopback. The installed worker's
+service context must pass the capability probe. The current implementation
+requires Landlock ABI >= 6 and working `bwrap`/`nsenter` for this stack.
+
+Only namespace **policy refusal** permits the narrower Landlock ABI >= 6 plus
+seccomp fallback. Missing tools, unsupported ABI, broken setup or timeout fail
+closed. Landlock allows TCP connect/bind only on the exact worker-reserved
+sidecar ports, with no IP endpoints allowed for a job without ports; seccomp
+denies UDP, raw/packet, SCTP, MPTCP and new AF_UNIX stream/datagram endpoints.
+The [v1 exception](https://github.com/1kuna/mycelium/issues/177#issuecomment-6453575275)
+permits fallback-only AF_UNIX `SOCK_SEQPACKET` creation, protocol zero and normal
+CLOEXEC/NONBLOCK flags, retaining Landlock abstract/signal scoping and every
+other denial. **same-UID pathname SEQPACKET endpoints reachable (partial)**:
+this cannot enforce abstract-only access. Namespace mode retains its Unix
+endpoint denial. Private Unix stream socketpairs remain available for process
+wakeups; datagram and seqpacket pairs remain denied. A cheap startup inventory
+warns about unexpected non-root/non-CUDA seqpacket listeners, unknown ownership
+or inventory failure. This is advisory; future endpoints remain a residual.
+**This fallback provides partial network isolation:** a reserved port
+also permits off-host TCP on that destination port and binding that local port
+on any address. Readiness verifies actual sidecar ownership and a
+`127.0.0.1` listener; it is not kernel enforcement of the bind address. No other
+TCP connects/binds are permitted. Landlock does not isolate metadata: `stat`,
+`chmod`, `chown`, timestamps and other unmediated operations remain subject to
+ordinary host permissions. Do not describe it as a private filesystem or as
+protection against every form of sibling interference.
+
+Both Linux modes are currently **offline-only** capabilities: namespace egress
+transport is unqualified, while the fallback's reserved-port exception does not
+qualify general outbound access. Neither advertises `native_network`.
+`needs.network: true` is the explicit declaration for payload-time downloads or
+API calls. Placement requires an online-capable host; submission returns
+`no_qualified_target` immediately if none qualifies, rather than accepting an
+impossible job indefinitely. Worker-owned environment/input preparation keeps
+its network access. A declaration never waives credential/control protection.
+
+macOS uses inherited `sandbox-exec`/Seatbelt rules to deny same-spool sibling
+contents and writes, protected worker/operator credential roots, Unix control
+sockets, cross-job process access and unwanted Mach services, while retaining
+Metal services. This is targeted protection with metadata and unrelated host
+files still visible, not a private mount/PID namespace or a full home sandbox.
+Default outbound access is limited to the attempt's reserved TCP loopback
+sidecars. `needs.network: true` permits general outbound access while denying
+other loopback endpoints and the queue control TCP port at **every** address;
+this also denies unrelated services on that port. Seatbelt is deprecated:
+missing launcher, rejected profile or failed enforcement must fail the attempt,
+never run it unconfined.
+
+Retain assigned GPU access and existing CPU/GPU qualification, cgroup placement,
+per-member/aggregate memory limits, authorization/Started gates and exact cleanup
+custody. The unsandboxed worker/supervisor performs control and observation;
+payload confinement is not a release proof. Same-user **unsandboxed host
+processes**, root, kernel/driver exploits and malicious operator runtime files
+are outside this boundary's threat model. It is not hostile multitenancy.
+See [native isolation](native-isolation.md) for the platform guarantee table,
+limitations and a separately authorized per-host AppArmor option. Broader #177
+hardening remains separate from this minimum.
 
 ## Per-attempt RAM ceilings
 
@@ -2190,6 +2353,17 @@ An identical invocation resumes durable progress; an explicitly selected approve
 newer release can supersede a stopped operation to fix forward. Approval changes
 never silently retarget the operation. The queue continues after CLI disconnect.
 
+Follow-up scope (2026-10-27 first-use findings): `--queue-only` freezes only the
+queue service as the update target; colocated workers still supply fresh drain
+custody but are not restarted. `--wait-production-idle` persists an opt-in fence
+on new production batch assignments until queue health is verified, and waits
+for production attempts and their release custody anywhere in the fleet before
+queue cutover. Assigned work finishes naturally. Recheck this fence when issuing
+and authorizing the queue instruction. Preserve scope and policy on resume;
+reject conflicting flags while unfinished. A completed queue-only update may be
+followed by a full same-release operation. Neither option bypasses signed release,
+maintenance ownership, storage preflight or running-image health checks.
+
 Upgrade one physical host at a time, restoring admission before advancing.
 Recheck production demand before selecting each remaining host and put production
 hosts last. Upgrade the queue before workers needing its new protocol and before
@@ -2598,3 +2772,48 @@ use ordinary live-job and terminal retention. All bulk I/O runs in worker or
 unlocked submission verification paths. Transfers use size-aware, renewed socket
 deadlines, with no fixed whole-input timeout. Laptop proof and native consumer
 qualification are separate; fleet acceptance waits for the queue release gate.
+
+### Minimal health alerts (v1 amendment, #200 / #248)
+
+The queue records health events from its existing check-ins, maintenance clock and
+attempt outcomes; no agent or user polls for alerts. V1 detects only measured disk
+free space below the existing guard (1%, minimum 256 MiB), an unhealthy or stale
+host, a production attempt lost to machine silence or a start/observation/cleanup
+timeout (including diagnostics while Docker still retains custody), and
+checkpoint/NAS/file storage unavailable continuously for a configurable
+duration (default five minutes). Planned leave and host maintenance suppress host
+alerts; planned and operator stops do not count as lost production attempts.
+A wholly quiet fleet still emits stale-host alerts even while loss/retry decisions
+wait for connectivity. Startup's existing restart grace applies to stale alerts.
+
+Events commit with queue state and appear in authenticated status as
+`health_alerts`. A condition emits once per episode, with a 15-minute cooldown
+across flaps; production losses emit once per exact job attempt. The last alerted attempt is
+persisted on the job independently of the bounded event window. The queue retains
+the latest 256 delivered events (or 256 total when no notifier is configured).
+Pending configured deliveries survive restart and remain until acknowledged;
+operators must repair a broken receiver to drain that backlog.
+
+An optional queue-local executable uses the existing completion notifier's
+`--check` and JSON-stdin/exit-status contract. Each delivery contains only a stable
+`delivery_id`, fixed `kind`, host/job/attempt identities and queue timestamp, plus
+`delivered: false`; no raw diagnostics, paths, job argv or fleet token. The
+operator's hook routes to their own wake or notification channel. File-store availability is sampled by the existing maintenance tick; it adds
+no probe or snapshot lock to ordinary control transactions. Execution is
+outside queue locks and never blocks worker control. Delivery is at least once:
+receivers deduplicate `delivery_id`. A successful hook acknowledgement is persisted;
+a failed/ambiguous delivery retries the same identity after one minute. Hooks are
+limited to one invocation per second and 30 seconds per invocation/check, preventing
+a burst or wedged hook from overwhelming delivery or stranding queue shutdown.
+These transport limits cost at most one second per queued notification and require
+a hook to deliver within 30 seconds. Health thresholds use the injected queue clock.
+
+This slice does not implement #200's extension-configuration or architecture-caused
+workload-failure detectors, trend analysis or automatic issue filing. Those broader
+acceptance criteria remain open after v1.
+
+Docker heartbeats carry `docker_cause` on each exact attempt report, avoiding
+attribution from an aggregate host error when several jobs share a host. Legacy
+single-attempt reports can use their unambiguous host diagnostic. A pending cleanup
+result can alert before release; neither alert path changes execution state or
+releases resources. Stale attempt diagnostics cannot emit a production-loss alert.

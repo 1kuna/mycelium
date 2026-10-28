@@ -8,8 +8,26 @@ refreshes every five seconds. Keep tokens in private configuration, not URLs.
 The page and `GET /api/status` share a snapshot for up to one second. Job receipt
 polls (`GET /api/jobs/{id}`) read the requested job afresh. Status snapshots do
 not drive start authorization, cancellation or result publication.
+
+Native stage exceptions appear in job `isolation` as
+`unsandboxed: <reason>` in status JSON and job GET; CLI/page reasons include the
+same text through queued, running and terminal outcomes. Legacy registrations
+use a fixed public explanation. Only this reason survives payload redaction;
+the observation never grants launch authority. See [native isolation](native-isolation.md).
 Administrative tools use uncached `GET /api/inspection` for migration custody,
 local extension targeting and measurement safety checks.
+
+Job receipts (`Client.get()` / `GET /api/jobs/{id}`) include `inputs_staged_at`
+when a worker reports completion of the current attempt's input staging. This
+worker-clock timestamp is captured after shared-input acquisition and private
+input copies finish, before launch-time RAM checks, checkpoint preparation and
+the Started handoff. It is diagnostic only and never changes admission or start
+deadlines. It survives worker/queue recovery, resets on a new attempt, and is
+absent for older workers or jobs with no staging operation. An absent value is
+unknown, not proof that copying is still running. Compare with `assigned_at`
+and `started_at`, allowing for clock differences between worker and queue.
+Upgrade the queue before workers that report this field; older queues reject
+unknown request fields.
 
 `myce status` and `GET /api/status` report `queue_release` (`version`, `commit`)
 from the queue process. Each machine's `release` reports the worker process's
@@ -102,6 +120,48 @@ CUDA/XPU select-none controls remain required. CPU/RAM accounting is unchanged.
 Unqualified CPU targets are withheld before placement, with the same typed job
 `diagnostic_code`. If qualification changes before launch, the job is requeued
 without consuming infrastructure retries and the host's CPU readiness is withdrawn.
+
+Machine `capabilities` describes native payload confinement separately from
+`cpu_isolation` and memory enforcement:
+
+| Capability | Meaning |
+| --- | --- |
+| `native_isolation_namespace` | Linux service probe selected rootless bubblewrap namespaces plus Landlock/seccomp. Main and sidecars share an attempt namespace anchor. |
+| `native_isolation_landlock` | Namespace policy refused; Landlock ABI >= 6 plus seccomp fallback selected. File contents are protected by grants; metadata is not isolated. Type-only Unix seqpacket creation is permitted: same-UID pathname SEQPACKET endpoints reachable (partial). |
+| `native_network_partial` | Linux fallback permits exact sidecar TCP ports at any address. Off-host same-port connects and non-loopback binds are also permitted; this is not general protected outbound capability. |
+| `native_isolation_seatbelt` | macOS launcher available for targeted spool/credential/control protection. Metadata remains visible; profile acceptance is checked at launch. |
+| `native_isolation_unavailable` | No supported native confinement stack; native payload launch fails closed. |
+| `native_sidecars` | Selected mode supports the attempt's reserved sidecar ports. It does not strengthen fallback's address guarantees. |
+| `native_network` | Host offers protected native outbound execution for `needs.network: true`. Both Linux modes currently withhold this capability pending qualified namespace egress. |
+
+Capabilities report implementation availability, not completed fleet/GPU
+qualification. Linux detection is cached for the worker process; recheck after
+a service restart when policy/tools change. macOS's launcher-availability report
+does not prove every profile will load; a rejected profile fails the attempt.
+A missing capability report from an older worker is not evidence of online support.
+
+Sandboxed native payloads default offline; worker-owned environment/input preparation
+remains network-capable. An online job is eligible only on `native_network`
+hosts. If none qualifies, submission returns HTTP 409 `no_qualified_target`
+with a protected-outbound capability reason, rather than creating an impossible
+queued job. A launch-time Linux mismatch reports `native_network_unavailable`;
+unsupported confinement reports `native_isolation_unavailable`. macOS online
+protection also denies the queue TCP port on every address, so unrelated
+services on that port remain unavailable. CLI machine rows label namespace
+mode as `general egress unavailable` and fallback as `partial network isolation
+(reserved sidecar TCP ports permit off-host traffic)` and
+`same-UID pathname SEQPACKET endpoints reachable (partial)`; an absent report says
+`native isolation unreported`. For the threat model and exact
+directory/temp/control/network guarantees, see [native isolation](native-isolation.md).
+
+`native_isolation_warning` is the worker's compact startup inventory warning,
+shown as `WARNING` in the CLI machine row. Fallback workers scan listening Unix
+seqpacket endpoints once at startup: unexpected non-root/non-CUDA listeners,
+unknown ownership or inventory failure warn visibly. Root-owned pathname
+sockets and the observed CUDA abstract naming convention are excluded; this
+is advisory naming, not authenticated identity or continuous monitoring.
+Inspect worker logs for endpoint details. Later or other-network-namespace
+listeners remain outside that snapshot and do not strengthen the residual.
 
 Availability explains owner use, battery power, heat, missing readings,
 disabling, leaving, and loss of contact. An available hypha can still be busy.
@@ -362,3 +422,7 @@ headroom regression proves admission/status agreement for the existing RAM
 signal, not complete OS-pressure coverage. Native pressure qualification remains
 separate; see [the native checklist](production-test-plan.md#pressure-and-status-agreement).
 Status is diagnostic and never permission to launch work locally; submit it.
+
+Plain native jobs without an isolation declaration remain unsandboxed in v1.
+Their `isolation` status explains the compatibility default and the one-line
+`isolation: sandboxed` opt-in. New extension registrations default sandboxed.

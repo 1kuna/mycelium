@@ -139,7 +139,12 @@ func (e Environment) Key() string {
 }
 
 type Spec struct {
+	Isolation    string                 `json:"isolation,omitempty" yaml:"isolation,omitempty"`
+	Reason       string                 `json:"reason,omitempty" yaml:"reason,omitempty"`
 	SharedInputs map[string]SharedInput `json:"shared_inputs,omitempty" yaml:"shared_inputs,omitempty"`
+	// PrepareSource extracts the validated CLI snapshot before member launch,
+	// then stages explicit inputs over it. It is persisted, never an author field.
+	PrepareSource bool `json:"prepare_source,omitempty" yaml:"-"`
 	// ProfileMemory binds the CLI's base command/check and common input bytes.
 	// Per-item arguments and files remain in the submitted execution spec.
 	ProfileMemory string            `json:"profile_memory,omitempty" yaml:"-"`
@@ -180,6 +185,17 @@ type Spec struct {
 }
 
 func (s Spec) Validate() error {
+	if err := ValidateNativeIsolation(s.Isolation, s.Reason); err != nil {
+		return reject("job_execution_invalid", err)
+	}
+	if s.extensionJob() && (s.Isolation != "" || s.Reason != "") {
+		return reject("job_execution_invalid", errors.New("extension registration owns isolation; job overrides are not allowed"))
+	}
+	if s.PrepareSource {
+		if _, ok := s.Files[".myce-source.tar"]; !ok {
+			return reject("job_files_invalid", errors.New("prepared source requires a frozen source archive"))
+		}
+	}
 	if s.ProfileMemory != "" && (!profileMemoryWork(s) || (FileRef{SHA256: s.ProfileMemory}).validate() != nil) {
 		return reject("job_profile_invalid", errors.New("profile_memory requires a profile and SHA-256 identity"))
 	}
@@ -319,9 +335,12 @@ type Copy struct {
 }
 
 type Job struct {
+	// Read-only diagnostic retained when execution payloads are redacted.
+	Isolation string `json:"isolation,omitempty"`
 	// SubmissionReused is set only on a keyed submit reply, never on stored jobs.
-	SubmissionReused bool             `json:"submission_reused,omitempty"`
-	AttemptHistory   []AttemptOutcome `json:"attempt_history,omitempty"`
+	SubmissionReused       bool             `json:"submission_reused,omitempty"`
+	LastHealthAlertAttempt int              `json:"last_health_alert_attempt,omitempty"`
+	AttemptHistory         []AttemptOutcome `json:"attempt_history,omitempty"`
 	// Read-only observations; never physical-release evidence for another attempt.
 	Cancellation      *Cancellation      `json:"cancellation,omitempty"`
 	CancellationScope *CancellationScope `json:"cancellation_scope,omitempty"`
@@ -371,6 +390,7 @@ type Job struct {
 	ProductionHost        string                       `json:"production_host,omitempty"`
 	WaitingSince          time.Time                    `json:"waiting_since,omitempty"`
 	AssignedAt            *time.Time                   `json:"assigned_at,omitempty"`
+	InputsStagedAt        *time.Time                   `json:"inputs_staged_at,omitempty"` // Worker clock; diagnostic only, scoped to this attempt.
 	FinishedAt            *time.Time                   `json:"finished_at,omitempty"`
 	QueueOrder            int                          `json:"queue_order,omitempty"`
 	EnvironmentFailureLog string                       `json:"environment_failure_log,omitempty"`
@@ -419,6 +439,7 @@ type Machine struct {
 	BenchmarkPending       bool          `json:"benchmark_pending,omitempty"`
 
 	Capabilities                []string            `json:"capabilities,omitempty"`
+	NativeIsolationWarning      string              `json:"native_isolation_warning,omitempty"`
 	MaxJobs                     int                 `json:"max_jobs,omitempty"`
 	AdmissionReason             string              `json:"admission_reason,omitempty"`
 	FileTransferError           string              `json:"file_transfer_error,omitempty"`
@@ -497,6 +518,8 @@ type Checkin struct {
 	Running         *Execution        `json:"running,omitempty"`
 }
 type Reply struct {
+	ExtensionQualificationPlan []ExtensionQualificationPlan `json:"extension_qualification_plan,omitempty"`
+
 	AttemptProtocol   string              `json:"attempt_protocol,omitempty"`
 	Attempts          []AttemptDirective  `json:"attempts,omitempty"`
 	PriorityStop      *PriorityPreemption `json:"priority_stop,omitempty"`
@@ -527,9 +550,11 @@ type Reply struct {
 // AttemptReport binds heartbeat, progress and Started to an exact execution.
 // Collections have no wire cardinality limit; admission remains in the planner.
 type AttemptReport struct {
+	DockerCause *RuntimeCause `json:"docker_cause,omitempty"`
 	Execution
-	Session string `json:"session"`
-	Started bool   `json:"started,omitempty"`
+	InputsStagedAt *time.Time `json:"inputs_staged_at,omitempty"`
+	Session        string     `json:"session"`
+	Started        bool       `json:"started,omitempty"`
 }
 
 // AttemptDirective carries one assignment or control decision for an exact key.
@@ -546,6 +571,7 @@ type AttemptDirective struct {
 	PriorityStop *PriorityPreemption `json:"priority_stop,omitempty"`
 }
 type Result struct {
+	InputsStagedAt       *time.Time          `json:"inputs_staged_at,omitempty"`
 	Diagnostics          *AttemptDiagnostics `json:"diagnostics,omitempty"`
 	PriorityStop         *PriorityPreemption `json:"priority_stop,omitempty"`
 	ExecutionCause       *RuntimeCause       `json:"execution_cause,omitempty"`
@@ -584,6 +610,7 @@ type HoldDetail struct {
 }
 
 type Snapshot struct {
+	HealthAlerts   []HealthAlert        `json:"health_alerts,omitempty"`
 	QueueRelease   RunningRelease       `json:"queue_release"`
 	FleetUpgrade   *FleetUpgradeStatus  `json:"fleet_upgrade,omitempty"`
 	FileStore      *FileStoreStatus     `json:"file_store,omitempty"`

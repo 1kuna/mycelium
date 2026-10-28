@@ -92,7 +92,10 @@ func curveReferenceKey(e Extension, m *Machine, work string) (*ObservationKey, s
 // Queue mutation only: retain historical evidence with an explicit reason.
 func (q *Queue) invalidateWorkCurves() {
 	for id, p := range q.s.WorkObservations {
-		if p.StaleReason != "" {
+		// Missing inventory is temporary (notably before the first check-in
+		// after a queue restart). Revalidate it against fresh identity evidence;
+		// actual recipe, hardware and environment changes remain invalidations.
+		if p.StaleReason != "" && p.StaleReason != "component unavailable" {
 			continue
 		}
 		reason := "component unavailable"
@@ -122,7 +125,7 @@ func (q *Queue) invalidateWorkCurves() {
 				}
 			}
 		}
-		if reason != "" {
+		if reason != p.StaleReason {
 			p.StaleReason = reason
 			q.s.WorkObservations[id] = p
 		}

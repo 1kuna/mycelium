@@ -225,7 +225,13 @@ func nativePortHandoff(t *testing.T, collisions int) Result {
 	}
 	defer store.close()
 	store.state.Session = m.Session
-	p, e := w.start(store, *reply.Job)
+	var p *process
+	// Input preparation can outlive one control-path observation. Reuse its
+	// pending operation as the worker loop does before exercising port handoff.
+	await(t, func() bool {
+		p, e = w.start(store, *reply.Job)
+		return !errors.Is(e, errWorkerCheckpoint) || !strings.Contains(e.Error(), "input copy pending")
+	})
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -247,7 +253,7 @@ func nativePortHandoff(t *testing.T, collisions int) Result {
 			if !finish.result.Success || finish.result.Interrupted || cur.State != "succeeded" || cur.InfrastructureRetries != 0 {
 				t.Fatal("bind collision did not recover within attempt", finish.result)
 			}
-			env := nativeEnv(t, s.Run.Env["NATIVE_TEST_DIR"], "main")
+			env := nativeEnv(t, p.job.Spec.Run.Workdir, "main")
 			for _, l := range stolen {
 				if env["MYCE_SIDECAR_HELPER_PORT"] == strconv.Itoa(l.Addr().(*net.TCPAddr).Port) {
 					t.Fatal("main used a stolen endpoint")
@@ -257,11 +263,11 @@ func nativePortHandoff(t *testing.T, collisions int) Result {
 			if finish.result.Success || !finish.result.Interrupted || cur.State != "queued" || cur.InfrastructureRetries != 1 {
 				t.Fatal("exhausted collisions did not use infrastructure requeue", finish.result)
 			}
-			if _, err := os.Stat(filepath.Join(s.Run.Env["NATIVE_TEST_DIR"], "main.json")); !os.IsNotExist(err) {
+			if _, err := os.Stat(filepath.Join(p.job.Spec.Run.Workdir, "main.json")); !os.IsNotExist(err) {
 				t.Fatal("main started before readiness")
 			}
 		}
-		nativeNoSurvivors(t, &nativeTestRun{p: p, dir: s.Run.Env["NATIVE_TEST_DIR"]})
+		nativeNoSurvivors(t, &nativeTestRun{p: p, dir: p.job.Spec.Run.Workdir})
 		return finish.result
 	case <-time.After(30 * time.Second):
 		p.stop(w.Clock.Now(), 0, true)
@@ -316,15 +322,14 @@ func TestNativeGroupZeroSelfExit(t *testing.T) {
 	s := nativeSpec(t)
 	s.Priority = "production"
 	s.SubmissionKey = "review-zero-exit"
-	dir := s.Run.Env["NATIVE_TEST_DIR"]
 	s.Run.Command = []string{"/bin/sleep", "600"}
 	s.Run.Sidecars[0].Port = nil
 	s.Run.Sidecars[0].Readiness = nil
 	s.Run.Sidecars[0].Command = []string{"sh", "-c", `while [ ! -f "$REVIEW_EXIT" ]; do sleep 0.01; done; exit 0`}
-	s.Run.Sidecars[0].Env = map[string]string{"REVIEW_EXIT": filepath.Join(dir, "self-exit")}
+	s.Run.Sidecars[0].Env = map[string]string{"REVIEW_EXIT": "{work}/self-exit"}
 	r := nativeStart(t, s, "fake")
 	await(t, func() bool { return r.p.native.started() })
-	nativeTouch(t, dir, "self-exit")
+	nativeTouch(t, r.dir, "self-exit")
 	result := nativeFinish(t, r)
 	if err := r.q.Complete(result); err != nil {
 		t.Fatal(err)

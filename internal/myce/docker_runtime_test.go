@@ -28,7 +28,7 @@ func TestDockerRuntimePlacement(t *testing.T) {
 			m := machine(tc.name, "fake")
 			m.CapabilityProfile.OS = tc.os
 			if tc.enabled {
-				m.Capabilities = []string{"docker"}
+				m.Capabilities = append(m.Capabilities, "docker")
 			}
 			if got := fits(&image, &m, 8); got != tc.fits {
 				t.Fatalf("image fits=%v, want %v", got, tc.fits)
@@ -54,7 +54,7 @@ func TestDockerRuntimePlacement(t *testing.T) {
 	}
 	m = machine("image", "fake")
 	m.CapabilityProfile.OS = "linux"
-	m.Capabilities = []string{"docker"}
+	m.Capabilities = append(m.Capabilities, "docker")
 	if r := check(t, q, m, nil); r.Job == nil || r.Job.ID != queued.ID {
 		t.Fatal("enabled Linux worker did not receive image")
 	}
@@ -107,7 +107,7 @@ func TestDockerRuntimeDisabledWorkerMakesNoCalls(t *testing.T) {
 	w := Worker{EnvironmentLimit: 1 << 20, StateDir: state, Clock: q.clock, Client: Client{URL: server.URL, Token: "test"}, Machine: machine("native", "fake"), Interval: time.Millisecond}
 	w.Machine.HostID = "test-host"
 	// A stale caller-supplied capability cannot enable an unconfigured runtime.
-	w.Machine.Capabilities = []string{"docker"}
+	w.Machine.Capabilities = append(w.Machine.Capabilities, "docker")
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()

@@ -180,22 +180,31 @@ func ExtensionStatus(r ExtensionReport) string {
 	state := "qualified"
 	if !r.Qualified {
 		state = "not qualified; setup and check required"
+		if r.CheckState != "" {
+			state = "not qualified; native check " + r.CheckState
+		}
 	}
 	return fmt.Sprintf("%s@%s · %s %s · %s", r.Name, r.Version, work, name, state)
 }
 func JobReason(j *Job) string {
-	if j.Reason != "" {
-		return j.Reason
+	reason := j.Reason
+	if reason == "" {
+		switch j.State {
+		case "queued":
+			reason = "waiting for a hypha to take this job"
+		case "running":
+			reason = "running now"
+		case "stopping":
+			reason = "waiting for this attempt to stop"
+		}
 	}
-	switch j.State {
-	case "queued":
-		return "waiting for a hypha to take this job"
-	case "running":
-		return "running now"
-	case "stopping":
-		return "waiting for this attempt to stop"
+	if isolation := jobNativeIsolationStatus(j); isolation != "" {
+		if reason != "" {
+			return isolation + "; " + reason
+		}
+		return isolation
 	}
-	return ""
+	return reason
 }
 func JobWork(j *Job) string {
 	if j.Spec.ExtensionCheck != nil {

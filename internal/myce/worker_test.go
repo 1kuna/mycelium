@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -128,21 +127,6 @@ func testWorkerGracefulStopAndCheckpoint(t *testing.T, stop string) {
 			return f()
 		})
 	}
-	dir := t.TempDir()
-	fifo := filepath.Join(dir, "save")
-	if err := syscall.Mkfifo(fifo, 0600); err != nil {
-		t.Fatal(err)
-	}
-	gate, err := os.OpenFile(fifo, os.O_RDWR, 0600)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		// Unblock a TERM handler even when an assertion fails before the save.
-		_, _ = gate.WriteString("save\n")
-		_ = gate.Close()
-	}()
-	stopping := filepath.Join(dir, "stopping")
 	s := spec("experiment")
 	// Hold the final save after observing TERM. This also makes a premature
 	// SIGKILL visible instead of racing a one-line checkpoint write.
@@ -152,11 +136,12 @@ if [ "$MYCE_ATTEMPT" -gt 1 ]; then
   echo resumed
   exit 0
 fi
+mkfifo -m 600 "$SAVE_FIFO" || exit 1
 exec 3<> "$SAVE_FIFO"
 trap 'echo term > "$STOP_FILE"; read gate <&3; echo saved > "$MYCE_CHECKPOINT_DIR/saved"; exit 0' TERM
 echo ready
 while :; do read line <&3; done`}
-	s.Run.Env = map[string]string{"SAVE_FIFO": fifo, "STOP_FILE": stopping}
+	s.Run.Env = map[string]string{"SAVE_FIFO": "{work}/save", "STOP_FILE": "{work}/stopping"}
 	j := submit(t, q, s)
 	run := workerFixture(t, q, prepareCheckpoint)
 	wait(func() bool {
@@ -168,6 +153,17 @@ while :; do read line <&3; done`}
 		}
 		return false
 	})
+	dir := nativeWorkerWork(t, run.state)
+	stopping := filepath.Join(dir, "stopping")
+	gate, err := os.OpenFile(filepath.Join(dir, "save"), os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		// Unblock a TERM handler even when an assertion fails before the save.
+		_, _ = gate.WriteString("save\n")
+		_ = gate.Close()
+	}()
 	if stop == "interrupt" {
 		run.cancel()
 	} else if err := q.Leave("worker", false); err != nil {
@@ -305,7 +301,12 @@ func workerWithPreparedCheckpoint(t *testing.T, w Worker, store *workerStore, pa
 	// This fixture forces a timeout; use a short injected budget, then restore policy.
 	budget := store.nasPrepare.timeout
 	store.nasPrepare.timeout = time.Millisecond
-	process, err := w.start(store, payload)
+	var process *process
+	var err error
+	await(t, func() bool {
+		process, err = w.start(store, payload)
+		return !errors.Is(err, errWorkerCheckpoint) || !strings.Contains(err.Error(), "input copy pending")
+	})
 	store.nasPrepare.timeout = budget
 	close(release)
 	if process != nil || !errors.Is(err, errWorkerCheckpoint) || !store.checkpointUnavailable {

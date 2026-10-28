@@ -143,13 +143,14 @@ func TestHostMemoryBudgetIncludesSlackAcrossCards(t *testing.T) {
 func TestMemoryCeilingWorkerOOMIsCommandFailure(t *testing.T) {
 	w := recoveryWorker(t)
 	w.memoryCeilings = fakeCeilings(t)
+	w.memoryCeilings.fs = envelopePeakFS{oom: true}
 	w.HostMemorySource = func(context.Context) (float64, error) { return 31, nil }
 	s, err := w.openStore()
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer s.close()
-	j := recoveryJob(t, []string{"sh", "-c", fmt.Sprintf("for file in %s/attempt-*/memory.events; do printf 'oom_kill 1\\n' > \"$file\"; done; exit 137", w.memoryCeilings.root)})
+	j := recoveryJob(t, []string{"sh", "-c", "exit 137"})
 	j.Spec.Resumable = false
 	j.Spec.Needs.HostMemoryGB = 5
 	w = workerWithPreparedCheckpoint(t, w, s, j)
@@ -333,8 +334,8 @@ func TestMemoryCeilingAttachFailureNeverRunsPayload(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.close()
-	marker := filepath.Join(t.TempDir(), "started")
-	j := recoveryJob(t, []string{"touch", marker})
+	j := recoveryJob(t, []string{"touch", "{work}/started"})
+	marker := filepath.Join(s.dir, "job-files", j.ID, "1", "started")
 	j.Spec.Resumable = false
 	j.Spec.Needs.HostMemoryGB = 5
 	if p, err := w.start(s, j); err == nil || p != nil {

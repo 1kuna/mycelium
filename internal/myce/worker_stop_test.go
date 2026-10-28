@@ -55,27 +55,9 @@ func testWorkerBlockedNetworkStop(t *testing.T, blockCheckin bool) {
 		api.ServeHTTP(w, r)
 	}))
 	defer server.Close()
-	dir := t.TempDir()
-	for _, name := range []string{"signal", "wait"} {
-		if err := syscall.Mkfifo(filepath.Join(dir, name), 0600); err != nil {
-			t.Fatal(err)
-		}
-	}
-	signal, err := os.OpenFile(filepath.Join(dir, "signal"), os.O_RDWR, 0600)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer signal.Close()
-	terms := make(chan string, 1)
-	go func() {
-		scanner := bufio.NewScanner(signal)
-		if scanner.Scan() {
-			terms <- scanner.Text()
-		}
-	}()
 	s := spec("experiment")
-	s.Run.Command = []string{"sh", "-c", `exec 3<> "$WAIT_FIFO"; trap 'echo term > "$SIGNAL_FIFO"' TERM; echo ready; while :; do read line <&3; done`}
-	s.Run.Env = map[string]string{"WAIT_FIFO": filepath.Join(dir, "wait"), "SIGNAL_FIFO": filepath.Join(dir, "signal")}
+	s.Run.Command = []string{"sh", "-c", `mkfifo -m 600 "$WAIT_FIFO" "$SIGNAL_FIFO" || exit 1; exec 3<> "$WAIT_FIFO"; trap 'echo term > "$SIGNAL_FIFO"' TERM; echo ready; while :; do read line <&3; done`}
+	s.Run.Env = map[string]string{"WAIT_FIFO": "{work}/wait", "SIGNAL_FIFO": "{work}/signal"}
 	submit(t, q, s)
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
@@ -121,6 +103,18 @@ waitingUpload:
 	if err := json.Unmarshal(data, &state); err != nil {
 		t.Fatal(err)
 	}
+	signal, err := os.OpenFile(filepath.Join(state.Job.Spec.Run.Workdir, "signal"), os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer signal.Close()
+	terms := make(chan string, 1)
+	go func() {
+		scanner := bufio.NewScanner(signal)
+		if scanner.Scan() {
+			terms <- scanner.Text()
+		}
+	}()
 	submit(t, q, spec("production"))
 	select {
 	case term := <-terms:

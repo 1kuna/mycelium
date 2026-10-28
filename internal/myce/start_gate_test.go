@@ -124,10 +124,9 @@ func TestProductionStartGateRecoveryWindow(t *testing.T) {
 
 func TestProductionStartGateUnreachableDoesNotExecute(t *testing.T) {
 	q, c := fixture(t)
-	marker := filepath.Join(t.TempDir(), "ran")
 	s := spec("production")
 	s.Resumable = false
-	s.Run.Command = []string{"/bin/sh", "-c", "echo ran > " + marker}
+	s.Run.Command = []string{"/bin/sh", "-c", "echo ran > {work}/ran"}
 	submit(t, q, s)
 	a := check(t, q, machine("b70", "xpu"), nil).Job
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
@@ -151,7 +150,7 @@ func TestProductionStartGateUnreachableDoesNotExecute(t *testing.T) {
 	case <-time.After(testWaitTimeout):
 		t.Fatal("worker stalled")
 	}
-	if _, e = os.Stat(marker); !os.IsNotExist(e) {
+	if _, e = os.Stat(filepath.Join(w.StateDir, "job-files", a.ID, "1", "ran")); !os.IsNotExist(e) {
 		t.Fatalf("payload ran or marker inaccessible: %v", e)
 	}
 	c.Advance(ProductionStartTimeout)
@@ -160,9 +159,8 @@ func TestProductionStartGateUnreachableDoesNotExecute(t *testing.T) {
 
 func TestProductionStartGateWorkerRestartReconciles(t *testing.T) {
 	q, _ := fixture(t)
-	marker := filepath.Join(t.TempDir(), "ran")
 	s := spec("production")
-	s.Run.Command = []string{"/bin/sh", "-c", "echo ran >> " + marker}
+	s.Run.Command = []string{"/bin/sh", "-c", "echo ran >> {work}/ran"}
 	submit(t, q, s)
 	a := check(t, q, machine("b70", "xpu"), nil).Job
 	if e := q.Started(result(a, true)); e != nil {
@@ -221,17 +219,16 @@ func TestProductionStartGateWorkerRestartReconciles(t *testing.T) {
 	if !reconciled.Interrupted || reconciled.ID != a.ID || reconciled.Attempt != a.Attempt {
 		t.Fatalf("not reconciled: %+v", reconciled)
 	}
-	if _, e = os.Stat(marker); !os.IsNotExist(e) {
+	if _, e = os.Stat(filepath.Join(w.StateDir, "job-files", a.ID, "1", "ran")); !os.IsNotExist(e) {
 		t.Fatalf("re-executed: %v", e)
 	}
 }
 
 func TestProductionStartGateExecutionAndReplay(t *testing.T) {
 	q, c := fixture(t)
-	marker := filepath.Join(t.TempDir(), "executions")
 	s := spec("production")
 	s.Resumable = false
-	s.Run.Command = []string{"/bin/sh", "-c", "echo ran >> " + marker}
+	s.Run.Command = []string{"/bin/sh", "-c", "echo ran >> {work}/executions"}
 	submit(t, q, s)
 	a := check(t, q, machine("b70", "xpu", "test-host"), nil).Job
 	ctx, cancel := context.WithCancel(context.Background())
@@ -259,6 +256,8 @@ func TestProductionStartGateExecutionAndReplay(t *testing.T) {
 	defer server.Close()
 	w := recoveryWorker(t)
 	w.Machine = machine("b70", "xpu", "test-host")
+	w.Machine.Device = "0"
+	w.nativeGPUDeviceProbe = syntheticNativeGPUDeviceProbe(MachineDevice{ID: "0", Platform: "xpu", Selector: "0"})
 	w.InventoryProbe = benchmarkTestInventory
 	w.CPUIsolationProbe = func(context.Context) error { return nil }
 	w.Client = Client{URL: server.URL, Token: "test"}
@@ -294,7 +293,7 @@ func TestProductionStartGateExecutionAndReplay(t *testing.T) {
 		t.Fatal("replay stalled")
 	}
 	requireState(t, q, a.ID, "succeeded")
-	data, e := os.ReadFile(marker)
+	data, e := os.ReadFile(filepath.Join(p.job.Spec.Run.Workdir, "executions"))
 	if e != nil || string(data) != "ran\n" {
 		t.Fatalf("execution count: %q, %v", data, e)
 	}
@@ -352,10 +351,9 @@ func TestProductionStartGateDetectedLoss(t *testing.T) {
 
 func TestProductionStartGateStorageFailureDoesNotExecute(t *testing.T) {
 	q, c := fixture(t)
-	marker := filepath.Join(t.TempDir(), "ran")
 	s := spec("production")
 	s.Resumable = false
-	s.Run.Command = []string{"/bin/sh", "-c", "echo ran > " + marker}
+	s.Run.Command = []string{"/bin/sh", "-c", "echo ran > {work}/ran"}
 	submit(t, q, s)
 	a := check(t, q, machine("b70", "xpu"), nil).Job
 	if _, e := q.db.Exec("PRAGMA query_only=ON"); e != nil {
@@ -382,7 +380,7 @@ func TestProductionStartGateStorageFailureDoesNotExecute(t *testing.T) {
 	case <-time.After(testWaitTimeout):
 		t.Fatal("storage refusal stalled")
 	}
-	if _, e = os.Stat(marker); !os.IsNotExist(e) {
+	if _, e = os.Stat(filepath.Join(w.StateDir, "job-files", a.ID, "1", "ran")); !os.IsNotExist(e) {
 		t.Fatalf("payload ran: %v", e)
 	}
 	if _, e = q.db.Exec("PRAGMA query_only=OFF"); e != nil {

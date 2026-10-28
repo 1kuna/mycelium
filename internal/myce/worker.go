@@ -47,6 +47,9 @@ type Worker struct {
 	cpuIsolation            bool
 	inventoryAllowance      []string
 	inventoryReason         string
+	// Synthetic harness seam; nil keeps physical native GPU resolution.
+	nativeGPUDeviceProbe func(Worker, map[string]string) ([]string, error)
+
 	// Benchmark runs only when explicitly enabled; fake inventory never loads the host.
 	CurveMaxConcurrency   int
 	OnboardingBenchmark   bool
@@ -89,10 +92,15 @@ type Worker struct {
 	environmentCache      *EnvironmentCache
 	environmentRun        func(context.Context, []string, string, []string, io.Writer, io.Writer) error
 	// Test seams for deterministic filesystem faults and audited fake engines.
-	beforeModelCopy             func(context.Context)
-	modelEngine                 func(Model) Engine
-	CopyParallel                int
-	CacheRoot, ModelRoot        string
+	beforeModelCopy      func(context.Context)
+	modelEngine          func(Model) Engine
+	CopyParallel         int
+	CacheRoot, ModelRoot string
+	// Operator-owned local runtime/model grants; never derived from run.env.
+	NativeReadRoots             []string
+	NativeExecuteRoots          []string
+	nativeMetricCgroups         []string // Trusted attempt-member cgroups only.
+	nativeSharedInputs          []string // Verified acquired payloads, never authored environment paths.
 	CacheLimit                  int64
 	SecretRoot                  string
 	ModelApprovalRoot           string
@@ -307,11 +315,19 @@ var errWorkerCheckpoint = errors.New("checkpoint storage unavailable")
 
 var errWorkerReleasePending = errors.New("command release unconfirmed")
 
+type stagedInputs struct {
+	directory string
+	at        time.Time
+}
+
 func (w Worker) start(s *workerStore, j Job) (*process, error) {
 	return w.startContext(context.Background(), s, j)
 }
 
 func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *process, startErr error) {
+	if j.Spec.Priority == "production" && j.Spec.StartBy == nil {
+		return nil, errors.New("queue start-gate protocol mismatch: production assignment has no start_by; upgrade queue and workers together")
+	}
 	if err := w.verifyDevice(); err != nil {
 		return nil, s.startFailure(j, launchRefused, err)
 	}
@@ -326,6 +342,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	if err := w.checkAvailability(); err != nil {
 		return nil, err
 	}
+	if err := w.checkHostRAM(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB); err != nil {
+		return nil, err
+	}
 	extensionEnv, extensionRelease, extensionErr := w.prepareExtensionExecution(&j)
 	if extensionErr != nil {
 		return nil, extensionErr
@@ -336,13 +355,21 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 			extensionRelease()
 		}
 	}()
+	if err := s.warnNativeIsolation(&j); err != nil {
+		return nil, err
+	}
 	sharedEnv, sharedRelease, sharedErr := w.acquireSharedInputs(ctx, j)
 	if sharedErr != nil {
-		return nil, sharedErr
+		return nil, runtimeErrorFor("input_staging", sharedErr)
 	}
 	if len(j.Spec.SharedInputs) > 0 {
 		s.sharedRelease = sharedRelease
 	}
+	w.nativeSharedInputs = nil
+	for _, path := range sharedEnv {
+		w.nativeSharedInputs = append(w.nativeSharedInputs, path)
+	}
+	slices.Sort(w.nativeSharedInputs)
 	sharedStarted := false
 	defer func() {
 		if !sharedStarted && !errors.Is(startErr, errWorkerReleasePending) {
@@ -350,34 +377,42 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		}
 	}()
 	executionWorkdir := j.Spec.Run.Workdir
-	if j.Spec.extensionJob() || len(jobInputFiles(&j))+len(jobInputPaths(&j))+len(j.Spec.SharedInputs) > 0 {
+	if !j.Spec.Run.Docker || j.Spec.extensionJob() || len(jobInputFiles(&j))+len(jobInputPaths(&j))+len(j.Spec.SharedInputs) > 0 {
 		value := j
-		dir, err := s.extensionFiles.run(attemptCheckpoint(j), func() (string, error) {
-			err := w.prepareExtensionFiles(&value, s.dir)
-			return value.Spec.Run.Workdir, err
+		staged, err := s.extensionFiles.run(attemptCheckpoint(j), func() (stagedInputs, error) {
+			return captureStagedInputs(w.Clock, func() (string, error) {
+				err := w.prepareExtensionFiles(&value, s.dir)
+				return value.Spec.Run.Workdir, err
+			})
 		})
 		if err != nil {
 			if strings.HasPrefix(err.Error(), "NAS unreachable:") {
 				return nil, fmt.Errorf("%w: input copy pending", errWorkerCheckpoint)
 			}
-			return nil, err
+			return nil, runtimeErrorFor("input_staging", err)
 		}
-		j.Spec.Run.Workdir = dir
+		j.Spec.Run.Workdir = staged.directory
+		// Timestamp the actual asynchronous completion, not the retry that
+		// consumes it. Preserve the first completion across later start retries.
+		if saved := s.state.Job; saved != nil && saved.ID == j.ID && saved.Attempt == j.Attempt && saved.Session == j.Session {
+			retainInputsStagedAt(saved, &staged.at)
+			j.InputsStagedAt = saved.InputsStagedAt
+		} else {
+			retainInputsStagedAt(&j, &staged.at)
+		}
 	}
 
 	executionWork := j.Spec.Run.Workdir
+	executionWorkdir, extensionErr = privateNativeExtension(&j, extensionEnv, executionWork, executionWorkdir)
+	if extensionErr != nil {
+		return nil, extensionErr
+	}
 	if executionWorkdir != "" {
 		j.Spec.Run.Workdir = executionWorkdir
-	}
-	if j.Spec.Priority == "production" && j.Spec.StartBy == nil {
-		return nil, errors.New("queue start-gate protocol mismatch: production assignment has no start_by; upgrade queue and workers together")
 	}
 	ceilingBytes, ceilingErr := w.ceilingBytes(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
 	if ceilingErr != nil {
 		return nil, ceilingErr
-	}
-	if err := w.checkHostRAM(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB); err != nil {
-		return nil, err
 	}
 	if w.MemorySource != nil {
 		free, e := w.MemorySource(context.Background())
@@ -434,6 +469,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		}
 	}
 	expandExecution(&j.Spec, executionWork, environmentPath, machineTarget(&w.Machine))
+	if !j.Spec.Run.Docker && j.Spec.Run.Workdir == "" {
+		j.Spec.Run.Workdir = executionWork
+	}
 	if err := w.checkHostRAM(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB); err != nil {
 		return nil, err
 	}
@@ -518,7 +556,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		defer approvalWriter.Close()
 		args = append(args[:3], append([]string{executable, "_command-exec"}, args[3:]...)...)
 	}
-	cmd := exec.Command("sh", args...)
+	cmd := exec.Command("/bin/sh", args...)
 	if readyWriter != nil {
 		cmd.ExtraFiles = []*os.File{readyWriter, approvalReader}
 	}
@@ -565,6 +603,18 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		delete(env, "MYCE_USAGE_FILE")
 	}
 	delete(env, "MYCE_TOKEN")
+	// TMPDIR is worker-owned, even when run.env or activation supplied one.
+	// Keep it with the managed attempt files so existing custody/retention owns it.
+	tmp := filepath.Join(executionWork, ".tmp")
+	if err := os.MkdirAll(tmp, 0700); err != nil {
+		return nil, err
+	}
+	env["TMPDIR"], env["TMP"], env["TEMP"] = tmp, tmp, tmp
+	scratch := filepath.Join(executionWork, ".scratch")
+	if err := os.MkdirAll(scratch, 0700); err != nil {
+		return nil, err
+	}
+	env["MYCE_SCRATCH_DIR"] = scratch
 	if len(j.Spec.Run.Sidecars) > 0 || j.Spec.Run.MemoryGB > 0 {
 		p, e := w.startNativeGroup(s, j, identity, memoryAttempt, env, environmentPath, extensionRelease, release)
 		if e == nil {
@@ -579,6 +629,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	slices.Sort(keys)
 	for _, k := range keys {
 		cmd.Env = append(cmd.Env, k+"="+env[k])
+	}
+	if err := w.isolateNativeAttempt(&j, nil, cmd, s.dir, executionWork, env, nil, true); err != nil {
+		return nil, s.startFailure(j, launchRefused, err)
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	logName := identity + ".log"
@@ -732,7 +785,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 			p.outcome.Infrastructure = recorded.facts.Infrastructure
 		}
 	}
-	result := Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
+	result := Result{InputsStagedAt: j.InputsStagedAt, Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
 	environmentStarted = true
 	extensionStarted = true
 	sharedStarted = true
@@ -793,7 +846,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		} else if launchErr != nil {
 			result.Error = "command start hand-off: " + launchErr.Error()
 		} else if waitErr != nil {
-			result.Error = waitErr.Error()
+			result.Error = nativeAttemptError(j, waitErr.Error())
 		} else if groupErr != nil {
 			result.Error = groupErr.Error()
 		} else if syncErr != nil {
@@ -815,7 +868,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		})
 		p.mu.Unlock()
 		if result.Success {
-			if e := w.publishExtensionFiles(j); e != nil {
+			if e := w.publishExtensionFiles(j, executionWork); e != nil {
 				result.Success = false
 				result.Error = e.Error()
 				result.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("outputs", e))
@@ -905,6 +958,7 @@ func (w Worker) Run(stop context.Context) error {
 	if err := w.requireMemoryCeilings(); err != nil {
 		return err
 	}
+	w.checkNativeSeqpacketStartup()
 	s, err := w.openStore()
 	if err != nil {
 		return err
@@ -1078,6 +1132,9 @@ func (w Worker) Run(stop context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Payload policy protects the actual listener port, including a configured
+	// non-loopback alias and an ephemeral ModelListen port.
+	w.ModelListen = strings.TrimPrefix(rt.url, "http://")
 	rt.authorize = w.authorizeLaunch
 	modelAvailabilityDone := make(chan struct{})
 	go func() {

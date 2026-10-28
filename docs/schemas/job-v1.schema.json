@@ -696,6 +696,9 @@
         "host_memory_gb": {
           "type": "number"
         },
+        "isolation": {
+          "type": "string"
+        },
         "kinds": {
           "items": {
             "type": "string"
@@ -759,6 +762,9 @@
         "purpose": {
           "type": "string"
         },
+        "reason": {
+          "type": "string"
+        },
         "resumable": {
           "type": "boolean"
         },
@@ -770,6 +776,9 @@
             "array",
             "null"
           ]
+        },
+        "sandbox_default": {
+          "type": "boolean"
         },
         "setup": {
           "items": {
@@ -839,6 +848,9 @@
     },
     "ExtensionCheckRequest": {
       "properties": {
+        "automatic": {
+          "$ref": "#/$defs/ExtensionReport"
+        },
         "directory": {
           "type": "string"
         },
@@ -849,6 +861,69 @@
       "required": [
         "work",
         "directory"
+      ],
+      "type": "object"
+    },
+    "ExtensionReport": {
+      "properties": {
+        "check_digest": {
+          "type": "string"
+        },
+        "check_id": {
+          "type": "string"
+        },
+        "check_state": {
+          "type": "string"
+        },
+        "device": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string"
+        },
+        "environment_identity": {
+          "type": "string"
+        },
+        "fingerprint": {
+          "type": "string"
+        },
+        "host": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "platform": {
+          "type": "string"
+        },
+        "qualified": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "setup": {
+          "type": "boolean"
+        },
+        "target": {
+          "$ref": "#/$defs/ExecutionTarget"
+        },
+        "version": {
+          "type": "string"
+        },
+        "work": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "digest",
+        "platform",
+        "work",
+        "fingerprint",
+        "setup",
+        "qualified"
       ],
       "type": "object"
     },
@@ -1315,6 +1390,20 @@
           "minimum": 0,
           "type": "integer",
           "x-contract": "stable"
+        },
+        "inputs_staged_at": {
+          "format": "date-time",
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "isolation": {
+          "description": "Native stage exception diagnostic: unsandboxed: followed by the author reason, or the fixed legacy registration reason. Retained across lifecycle and payload redaction.",
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "last_health_alert_attempt": {
+          "type": "integer",
+          "x-contract": "diagnostic"
         },
         "last_stop_outcome": {
           "type": "string",
@@ -1957,6 +2046,9 @@
         "model": {
           "type": "string"
         },
+        "network": {
+          "type": "boolean"
+        },
         "platform": {
           "$ref": "#/$defs/Platform"
         }
@@ -2172,6 +2264,10 @@
           ],
           "x-contract": "diagnostic"
         },
+        "isolation": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
         "kind": {
           "type": "string",
           "x-contract": "diagnostic"
@@ -2198,6 +2294,10 @@
           ],
           "x-contract": "diagnostic"
         },
+        "prepare_source": {
+          "type": "boolean",
+          "x-contract": "diagnostic"
+        },
         "priority": {
           "enum": [
             "",
@@ -2220,6 +2320,10 @@
           "minLength": 1,
           "type": "string",
           "x-contract": "stable"
+        },
+        "reason": {
+          "type": "string",
+          "x-contract": "diagnostic"
         },
         "require_target": {
           "type": "boolean",

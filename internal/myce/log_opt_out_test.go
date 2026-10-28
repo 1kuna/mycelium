@@ -81,12 +81,13 @@ func TestBatchLogsNoneLifecycle(t *testing.T) {
 			want := "succeeded"
 			switch mode {
 			case "failure":
+				// The diagnostic below exercises an explicitly offline sandbox.
+				s.Isolation = "sandboxed"
 				script += "exit 7"
 				want = "failed"
 			case "cancel":
 				// The marker proves payload startup without relying on captured logs.
-				marker := filepath.Join(t.TempDir(), "started")
-				s.Run.Env["START_MARKER"] = marker
+				s.Run.Env["START_MARKER"] = "{work}/started"
 				script += `echo ready > "$START_MARKER"; exec sleep 60`
 				want = "cancelled"
 			case "large-output":
@@ -99,7 +100,7 @@ func TestBatchLogsNoneLifecycle(t *testing.T) {
 			j := submit(t, q, s)
 			run := workerFixture(t, q)
 			if mode == "cancel" {
-				await(t, func() bool { _, err := os.Stat(s.Run.Env["START_MARKER"]); return err == nil })
+				nativeFile(t, nativeWorkerWork(t, run.state), "started")
 				if err := q.Cancel(j.ID); err != nil {
 					t.Fatal(err)
 				}
@@ -113,10 +114,10 @@ func TestBatchLogsNoneLifecycle(t *testing.T) {
 				return len(files) == 1
 			})
 			r := run.result(t)
-			if mode == "failure" && r.Error != "exit status 7" {
-				t.Fatalf("exit code lost: %q", r.Error)
+			if mode == "failure" && (!strings.HasPrefix(r.Error, "exit status 7; ") || !strings.Contains(r.Error, "declare needs.network: true")) {
+				t.Fatalf("exit code or offline-network remedy lost: %q", r.Error)
 			}
-			if mode == "failure" && job(t, q, j.ID).Reason != "command failed: exit status 7" {
+			if mode == "failure" && job(t, q, j.ID).Reason != "command failed: "+r.Error {
 				t.Fatal("queue lost command exit-status diagnostic")
 			}
 			if mode == "cancel" && !r.Interrupted {
@@ -356,7 +357,7 @@ const nullDescriptorAssertion = `"$NULL_ASSERT" -test.run=^TestLogsNoneChild$ --
 func logsNoneMachine(t *testing.T, id string) Machine {
 	t.Helper()
 	m := machine(id, "fake")
-	if err := json.Unmarshal([]byte(`{"capabilities":["logs_none"]}`), &m); err != nil {
+	if err := json.Unmarshal([]byte(`{"capabilities":["native_isolation_landlock","logs_none"]}`), &m); err != nil {
 		t.Fatal(err)
 	}
 	return m

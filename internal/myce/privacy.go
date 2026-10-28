@@ -198,6 +198,8 @@ func statusJobValue(job *Job) Job {
 	}
 	if j.State == "failed" {
 		switch {
+		case j.ExecutionCause != nil && j.ExecutionCause.Operation == "input_staging":
+			j.Reason = "execution failed: " + j.ExecutionCause.String()
 		case j.ExecutionCause != nil && j.ExecutionCause.Class == cpuIsolationUnavailable:
 			j.Reason = cpuIsolationUnavailable + ": " + rejectionMessages[cpuIsolationUnavailable]
 		case j.Reason == "infrastructure_retries_exhausted", j.Reason == "out of memory after one retry on a larger hypha", j.Reason == "out of memory; previous capability unavailable":
@@ -219,6 +221,7 @@ func statusJobValue(job *Job) Job {
 // The returned value borrows fields until the caller deep-copies it.
 func statusJobInputs(job *Job) Job {
 	j := *job
+	j.Isolation = jobNativeIsolationStatus(job)
 	spec := Spec{AllowedMachines: j.Spec.AllowedMachines, Name: j.Spec.Name, Project: j.Spec.Project, Priority: j.Spec.Priority, Class: j.Spec.Class, Kind: j.Spec.Kind, Resumable: j.Spec.Resumable, Deadline: j.Spec.Deadline, StartBy: j.Spec.StartBy}
 	if j.Spec.Program != nil {
 		spec.Program = &Program{Type: j.Spec.Program.Type}

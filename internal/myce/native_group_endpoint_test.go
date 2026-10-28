@@ -26,8 +26,7 @@ func TestNativeGroupEarlierConsumerEndpoint(t *testing.T) {
 	s.SubmissionKey = "round2-earlier-consumer"
 	helper := s.Run.Sidecars[0]
 	helper.Command = append(append([]string{}, helper.Command...), "--", "{port}")
-	dir := s.Run.Env["NATIVE_TEST_DIR"]
-	consumer := NativeSidecar{Name: "consumer", MemoryGB: 0.5, Command: []string{"/bin/sh", "-c", `printf '%s' "$UPSTREAM" > "$ARTIFACTS/consumer-url"; while [ ! -f "$ARTIFACTS/main-ready" ]; do sleep 0.01; done; /usr/bin/curl --silent --max-time 0.3 "$UPSTREAM/ready" > /dev/null; code=$?; printf '%s' "$code" > "$ARTIFACTS/consumer-code"; if [ "$code" != 0 ]; then exit 71; fi; touch "$ARTIFACTS/finish"; exec /bin/sleep 600`}, Env: map[string]string{"UPSTREAM": "{sidecars.helper.url}", "ARTIFACTS": dir}}
+	consumer := NativeSidecar{Name: "consumer", MemoryGB: 0.5, Command: []string{"/bin/sh", "-c", `printf '%s' "$UPSTREAM" > "$ARTIFACTS/consumer-url"; while [ ! -f "$ARTIFACTS/main-ready" ]; do sleep 0.01; done; /usr/bin/curl --silent --max-time 0.3 "$UPSTREAM/ready" > /dev/null; code=$?; printf '%s' "$code" > "$ARTIFACTS/consumer-code"; if [ "$code" != 0 ]; then exit 71; fi; touch "$ARTIFACTS/finish"; exec /bin/sleep 600`}, Env: map[string]string{"UPSTREAM": "{sidecars.helper.url}", "ARTIFACTS": "{work}"}}
 	s.Run.Sidecars = []NativeSidecar{consumer, helper}
 	j := submit(t, q, s)
 	m := machine("native", "fake", "native-host")
@@ -57,6 +56,7 @@ func TestNativeGroupEarlierConsumerEndpoint(t *testing.T) {
 			}
 		}
 		if call == 5 {
+			dir := nativeWorkerWork(t, stateDir)
 			nativeFile(t, dir, "consumer-url")
 			data, err := os.ReadFile(filepath.Join(dir, "consumer-url"))
 			if err != nil {
@@ -104,6 +104,7 @@ func TestNativeGroupEarlierConsumerEndpoint(t *testing.T) {
 		t.Fatal(e)
 	}
 	defer func() { p.stop(worker.Clock.Now(), 0, true) }()
+	dir := p.job.Spec.Run.Workdir
 	select {
 	case finish := <-p.done:
 		if n.Load() != 12 || stolen == nil || stealErr != nil {

@@ -10,6 +10,8 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
 )
 
 // Existing shared storage is the transport in slice 1. Only relative names go
@@ -61,9 +63,6 @@ func copyJobFile(src, dst string) error {
 	return errors.Join(copyErr, syncErr, out.Close())
 }
 func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
-	if !j.Spec.extensionJob() && len(jobInputFiles(j))+len(jobInputPaths(j))+len(j.Spec.SharedInputs) == 0 {
-		return nil
-	}
 	if len(jobInputPaths(j)) > 0 && w.JobFileRoot == "" {
 		return errors.New("job files require a root and clean relative names")
 	}
@@ -92,20 +91,68 @@ func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
 		return err
 	}
 	defer os.RemoveAll(staged)
+	if !j.Spec.Run.Docker && j.Extension != nil {
+		var files map[string][]byte
+		for _, extension := range j.Extensions {
+			if extension.Digest == j.Extension.Digest {
+				files = extension.Files
+				break
+			}
+		}
+		if len(files) == 0 {
+			return errors.New("frozen native extension source missing")
+		}
+		for name, data := range files {
+			if !safeRelative(name) {
+				return errors.New("invalid frozen extension path")
+			}
+			path := filepath.Join(staged, ".myce-extension", name)
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				return err
+			}
+			if err := os.WriteFile(path, data, 0600); err != nil {
+				return err
+			}
+		}
+	}
+	if j.Spec.PrepareSource {
+		ref, ok := jobInputFiles(j)[".myce-source.tar"]
+		if !ok {
+			return errors.New("missing frozen source archive")
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		err = w.fileCache.copyTo(ctx, ref, filepath.Join(staged, ".myce-source.tar"))
+		cancel()
+		if err != nil {
+			return err
+		}
+		if err = extractJobSource(filepath.Join(staged, ".myce-source.tar"), staged); err != nil {
+			return err
+		}
+	}
 	for name, ref := range jobInputFiles(j) {
+		if j.Spec.PrepareSource && name == ".myce-source.tar" {
+			continue
+		}
+		if j.Spec.PrepareSource {
+			// Explicit inputs replace source files only after archive extraction.
+			if err := removeSourceInput(staged, name); err != nil {
+				return err
+			}
+		}
 		err := w.fileCache.copyTo(context.Background(), ref, filepath.Join(staged, name))
 		if err != nil {
 			return err
 		}
 	}
-	for name, source := range jobInputPaths(j) {
+	if err := stageJobInputs(jobInputPaths(j), func(name, source string) error {
 		p, err := confinedPath(w.JobFileRoot, source)
 		if err != nil {
 			return err
 		}
-		if err := copyJobFile(p, filepath.Join(staged, name)); err != nil {
-			return err
-		}
+		return copyJobFile(p, filepath.Join(staged, name))
+	}); err != nil {
+		return err
 	}
 	if j.Batch != nil && j.Batch.Run {
 		data, err := json.Marshal(batchManifest(j))
@@ -134,10 +181,61 @@ func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
 	j.Spec.Run.Workdir = dir
 	return nil
 }
+
+func stageJobInputs(inputs map[string]string, stage func(name, source string) error) error {
+	// Two copies overlap the independent NAS reads seen in dependent jobs,
+	// while bounding added load on shared storage. Join every active copy
+	// before the caller can publish the snapshot or clean failed scratch.
+	slots := make(chan struct{}, 2)
+	var pending sync.WaitGroup
+	var mu sync.Mutex
+	var result error
+	for name, source := range inputs {
+		slots <- struct{}{}
+		mu.Lock()
+		failed := result != nil
+		mu.Unlock()
+		if failed {
+			<-slots
+			break
+		}
+		pending.Go(func() {
+			defer func() { <-slots }()
+			if err := stage(name, source); err != nil {
+				mu.Lock()
+				result = errors.Join(result, err)
+				mu.Unlock()
+			}
+		})
+	}
+	pending.Wait()
+	return result
+}
+
 func outputRelative(j Job, name, prefix string) string {
 	return filepath.Join(prefix, j.ID, strconv.Itoa(j.Attempt), name)
 }
-func (w Worker) publishExtensionFiles(j Job) error {
+func (w Worker) publishExtensionFiles(j Job, attemptWork string) error {
+	if check := j.Spec.ExtensionCheck; check != nil && !j.Spec.Run.Docker && j.Spec.Run.Env["MYCE_CHECK_OUTPUT"] != "" {
+		// Only the worker publishes the bounded check result into the CLI's
+		// scratch folder. Payloads never receive write access to shared caches.
+		actual, err := readExtensionCheckOutputAt(attemptWork, filepath.Join(".myce-check", "actual"))
+		if err != nil {
+			return err
+		}
+		f, err := os.CreateTemp(check.Directory, ".actual-")
+		if err != nil {
+			return err
+		}
+		defer os.Remove(f.Name())
+		_, writeErr := f.Write(actual)
+		if err := errors.Join(writeErr, f.Close()); err != nil {
+			return err
+		}
+		if err := os.Rename(f.Name(), filepath.Join(check.Directory, "actual")); err != nil {
+			return err
+		}
+	}
 	if err := w.validateExtensionCheckOutput(j); err != nil {
 		return err
 	}
@@ -292,9 +390,25 @@ func (w Worker) validateExtensionCheckOutput(j Job) error {
 }
 
 func readExtensionCheckOutput(directory string) ([]byte, error) {
-	f, err := os.Open(filepath.Join(directory, "actual"))
+	return readExtensionCheckOutputAt(directory, "actual")
+}
+
+// Root traversal rejects escaping ancestor/leaf symlinks even during replacement.
+// Nonblocking open lets us reject FIFOs before any read can wait for a writer.
+func readExtensionCheckOutputAt(directory, relative string) ([]byte, error) {
+	root, err := os.OpenRoot(directory)
 	if err != nil {
 		return nil, err
+	}
+	defer root.Close()
+	f, err := root.OpenFile(relative, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		f.Close()
+		return nil, errors.Join(err, errors.New("check output must be a regular file beneath its attempt directory"))
 	}
 	actual, err := io.ReadAll(io.LimitReader(f, extensionMaxBytes+1))
 	err = errors.Join(err, f.Close())

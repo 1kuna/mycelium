@@ -309,8 +309,9 @@ func TestPrivacyCompletedBatchLogRetention(t *testing.T) {
 	if err := q.Tick(); err != nil {
 		t.Fatal(err)
 	}
-	logs, err := q.Logs(j.ID, 0)
-	if err != nil || len(logs) != 0 {
+	var logs int
+	err := q.db.QueryRow("SELECT count(*) FROM logs WHERE job=?", j.ID).Scan(&logs)
+	if err != nil || logs != 0 {
 		t.Fatal("completed logs outlived default retention")
 	}
 }

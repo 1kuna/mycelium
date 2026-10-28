@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -100,13 +101,12 @@ func testGPUStopNative(t *testing.T, cooperative bool, stopPath string, directiv
 	}
 	defer store.close()
 	store.state.Session = w.Machine.Session
-	dir := t.TempDir()
 	command := func(name string, exit bool) []string {
 		trap := "trap '' TERM"
 		if exit {
 			trap = "trap 'exit 0' TERM"
 		}
-		return []string{"sh", "-c", trap + `; touch "$1"; while :; do sleep .01; done`, name, filepath.Join(dir, name)}
+		return []string{"sh", "-c", trap + `; touch "$1"; while :; do sleep .01; done`, name, "{work}/" + name}
 	}
 	j := recoveryJob(t, command("main", cooperative))
 	j.Spec.Resumable = false
@@ -115,13 +115,19 @@ func testGPUStopNative(t *testing.T, cooperative bool, stopPath string, directiv
 	// The helper exits on TERM while main may still be draining. Its exit must
 	// not trigger the unconditional cleanup KILL that bypassed group grace.
 	j.Spec.Run.Sidecars = []NativeSidecar{{Name: "helper", Command: command("helper", true), MemoryGB: 1}}
-	p, err := w.start(store, j)
+	var p *process
+	// Reuse pending input preparation, as Worker.Run does, before exercising
+	// the unchanged group TERM/grace behavior.
+	await(t, func() bool {
+		p, err = w.start(store, j)
+		return !errors.Is(err, errWorkerCheckpoint) || !strings.Contains(err.Error(), "input copy pending")
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer p.stop(clock.Now(), 0, true)
-	nativeFile(t, dir, "main")
-	nativeFile(t, dir, "helper")
+	nativeFile(t, p.job.Spec.Run.Workdir, "main")
+	nativeFile(t, p.job.Spec.Run.Workdir, "helper")
 	control := processControl{clock: clock, processes: map[attemptKey]*process{jobKey(p.job): p}, pendingEvents: map[attemptKey]WorkerEvent{jobKey(p.job): {Execution: Execution{ID: p.job.ID, Attempt: p.job.Attempt}, Session: p.job.Session, UserCancel: false, PriorityStop: &PriorityPreemption{Cause: priorityPreemptionCause, Demand: "production", Victim: p.job.ID}, deadline: clock.Now().Add(10 * time.Second)}}}
 	if len(directives) > 0 {
 		d := directives[0]

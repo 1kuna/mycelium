@@ -25,6 +25,13 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "_native-exec" {
+		if err := myce.NativeExec(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(125)
+		}
+		return
+	}
 	if err := myce.GuardRootStartup(); err != nil {
 		log.Print(err)
 		os.Exit(exitCode(err))
@@ -53,6 +60,9 @@ func run(args []string) error {
 	return runWithProbe(args, probe)
 }
 func runWithProbe(args []string, probe myce.MachineProbe) error {
+	if len(args) > 0 && args[0] == "_native-exec" {
+		return myce.NativeExec(args[1:])
+	}
 	if err := myce.GuardRootStartup(); err != nil {
 		return err
 	}
@@ -89,6 +99,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 	if args[0] == "policy" {
 		return policyCommand(args[1:], os.Stdout)
+	}
+	if args[0] == "adapter" {
+		return adapterCommand(context.Background(), args[1:], os.Stdout, os.Stderr)
 	}
 	if args[0] == "extension" {
 		return extensionCommand(args[1:])
@@ -201,6 +214,8 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	logRetention := f.Duration("log-retention", myce.DefaultLogRetention, "retention of completed batch and inactive model-server logs")
 	uploadSpoolBytes := f.Int64("upload-spool-bytes", myce.DefaultUploadSpoolBytes, "total bytes held in the queue model-upload spool")
 	fileStore := f.String("file-store", "", "authoritative file storage folder (default beside database)")
+	healthNotify := f.String("health-notify", os.Getenv("MYCE_HEALTH_NOTIFY"), "queue health notifier executable (--check and JSON stdin)")
+	healthStorageDelay := f.Duration("health-storage-delay", myce.DefaultHealthStorageDelay, "storage unavailability duration before health alert")
 	fileRetention := f.Duration("file-retention", myce.DefaultFileRetention, "terminal job input/result retention (default 168h)")
 	fileStoreLimit := f.Int64("file-store-bytes", 100<<30, "authoritative files plus upload reservations limit")
 	fileCache := f.String("file-cache", "", "local reproducible file cache folder")
@@ -214,6 +229,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	secretRoot := f.String("secret-root", "", "worker-local directory of mode-0600 named secrets")
 	modelApprovalRoot := f.String("model-approval-root", "", "worker-local approved model manifests")
 	modelRoot := f.String("model-root", "", "worker NAS model root for relative model paths")
+	var nativeReadRoots, nativeExecuteRoots myce.NativeRootPaths
+	f.Var(&nativeReadRoots, "native-read-root", "operator-granted native read-only root (absolute; repeat; empty clears)")
+	f.Var(&nativeExecuteRoots, "native-exec-root", "operator-granted native read/execute root (absolute; repeat; empty clears)")
 	copyParallel := f.Int("model-copy-parallel", 1, "maximum concurrent NAS copies per worker")
 	cacheLimit := f.Int64("model-cache-bytes", 100*1024*1024*1024, "maximum active cache bytes")
 	productionGrace := f.Duration("preemption-stop-grace", 10*time.Second, "checkpoint grace and repeated-preemption minimum runtime; worker accelerator stop grace (capped at 15s)")
@@ -427,11 +445,17 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			return err
 		}
 
-		q, err := myce.Open(*db, *checkpoint, myce.RealClock{}, myce.WithFileStore(*fileStore, *fileStoreLimit, !nasConfigured))
+		if *healthStorageDelay <= 0 {
+			return errors.New("health-storage-delay must be positive")
+		}
+		q, err := myce.Open(*db, *checkpoint, myce.RealClock{}, myce.WithFileStore(*fileStore, *fileStoreLimit, !nasConfigured), myce.WithHealthStorageDelay(*healthStorageDelay))
 		if err != nil {
 			return err
 		}
 		defer q.Close()
+		if err := q.ConfigureHealthNotifier(ctx, *healthNotify); err != nil {
+			return err
+		}
 		if *serviceConfigPath != "" {
 			c, e := myce.ReadServiceConfig(*serviceConfigPath)
 			if e != nil {
@@ -648,7 +672,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if *curveMaxConcurrency < 0 || *curveMaxConcurrency > 64 || *curveMaxConcurrency > 0 && !*onboardingBenchmark {
 			return errors.New("curve-max-concurrency requires onboarding-benchmark and a bound from 1 to 64")
 		}
-		w := myce.Worker{AcceleratorStopGrace: *productionGrace, Enrollment: *enrollment, DeviceSettings: deviceConfig, CurveMaxConcurrency: *curveMaxConcurrency, OnboardingBenchmark: *onboardingBenchmark, Benchmark: myce.RunOnboardingBenchmark, FileCacheRoot: *fileCache, FileCacheLimit: *fileCacheLimit, DailyUse: *dailyUse, Laptop: *laptop, Desktop: *desktop, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, DockerEndpoint: *dockerHost, ContainerRetention: containerRetention, RequireMemoryCeilings: *requireCeilings, MemorySwapMaxBytes: *memorySwap, LogRetention: *logRetention, Unit: workerUnit, SuperviseProcess: true, HostMemoryReserveGB: ramReserve, DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, SecretRoot: *secretRoot, ModelApprovalRoot: *modelApprovalRoot, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, FixedAcceleratorMemory: *memoryMode == "fixed", MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{CPUReserveCores: *cpuReserve, CPUBudgetCores: *cpuBudget, MaxJobs: *maxJobs, HostMemoryBudgetGB: *hostBudget, MemoryCeilingSlackGB: *memorySlack, HostID: *hostID, UnifiedMemory: unified, HostMemoryMeasured: true, ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, ReservedMemoryGB: *reserve, Environments: split(*environments), Models: split(*models)}}
+		w := myce.Worker{NativeReadRoots: []string(nativeReadRoots), NativeExecuteRoots: []string(nativeExecuteRoots), AcceleratorStopGrace: *productionGrace, Enrollment: *enrollment, DeviceSettings: deviceConfig, CurveMaxConcurrency: *curveMaxConcurrency, OnboardingBenchmark: *onboardingBenchmark, Benchmark: myce.RunOnboardingBenchmark, FileCacheRoot: *fileCache, FileCacheLimit: *fileCacheLimit, DailyUse: *dailyUse, Laptop: *laptop, Desktop: *desktop, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, DockerEndpoint: *dockerHost, ContainerRetention: containerRetention, RequireMemoryCeilings: *requireCeilings, MemorySwapMaxBytes: *memorySwap, LogRetention: *logRetention, Unit: workerUnit, SuperviseProcess: true, HostMemoryReserveGB: ramReserve, DeviceBinding: binding, EnvironmentSourceRoot: *environmentSourceRoot, EnvironmentRoot: *environmentRoot, EnvironmentLimit: *environmentLimit, SecretRoot: *secretRoot, ModelApprovalRoot: *modelApprovalRoot, CopyParallel: *copyParallel, CacheRoot: *cacheRoot, ModelRoot: *modelRoot, CacheLimit: *cacheLimit, MemorySource: source, FixedAcceleratorMemory: *memoryMode == "fixed", MemoryMeasured: *memoryMode != "fixed" && (*gpu == "cuda" || *gpu == "metal" || *memoryMode == "unified" && *gpu == "xpu"), CheckpointRoot: *workerCheckpoint, Interval: *heartbeat, ModelConfig: mc, ModelListen: *modelListen, ModelAdvertise: *modelAdvertise, StateDir: *stateDir, Client: client, Machine: myce.Machine{CPUReserveCores: *cpuReserve, CPUBudgetCores: *cpuBudget, MaxJobs: *maxJobs, HostMemoryBudgetGB: *hostBudget, MemoryCeilingSlackGB: *memorySlack, HostID: *hostID, UnifiedMemory: unified, HostMemoryMeasured: true, ID: *name, GPU: *gpu, Device: *device, FreeMemoryGB: *memory, ReservedMemoryGB: *reserve, Environments: split(*environments), Models: split(*models)}}
 		if *serviceConfigPath != "" {
 			c, e := myce.ReadServiceConfig(*serviceConfigPath)
 			if e != nil {
@@ -819,7 +843,7 @@ func printStatus(s myce.Snapshot, full bool) {
 		fmt.Printf("queue release: %s (%s)\n", s.QueueRelease.Version, s.QueueRelease.Commit)
 	}
 	if u := s.FleetUpgrade; u != nil {
-		fmt.Printf("fleet upgrade %s: release=%s state=%s\n", u.Operation, u.Release, u.State)
+		fmt.Printf("fleet upgrade %s: release=%s state=%s queue_only=%t wait_production_idle=%t\n", u.Operation, u.Release, u.State, u.QueueOnly, u.WaitProductionIdle)
 		for _, h := range u.Hosts {
 			fmt.Printf("  host %s: phase=%s wait=%s failure=%s verified_progress=%s\n", h.Host, h.Phase, h.Wait, h.Failure, h.ProgressAt.UTC().Format(time.RFC3339))
 		}
@@ -851,6 +875,7 @@ func printStatus(s myce.Snapshot, full bool) {
 			fmt.Printf("worker %s release: unknown\n", m.ID)
 		}
 		state := myce.HyphaAvailability(m)
+		state += "; " + myce.NativeIsolationStatus(*m)
 		if m.LastResort {
 			state += "; last-resort placement"
 		}

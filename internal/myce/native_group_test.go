@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -110,10 +111,11 @@ func nativeSpec(t *testing.T) Spec {
 		t.Fatal(err)
 	}
 	s := spec("experiment")
+	s.Isolation = "sandboxed"
 	s.Resumable = false
 	s.Needs.HostMemoryGB = 2
 	s.Run.Command = []string{exe, "-test.run=^TestNativeCPUHelper$"}
-	s.Run.Env = map[string]string{"NATIVE_TEST_MODE": "main", "NATIVE_TEST_DIR": t.TempDir(), "NATIVE_TEST_BLOCK": "1", "GORACE": "atexit_sleep_ms=0"}
+	s.Run.Env = map[string]string{"NATIVE_TEST_MODE": "main", "NATIVE_TEST_DIR": "{work}", "NATIVE_TEST_BLOCK": "1", "GORACE": "atexit_sleep_ms=0"}
 	zero := 0
 	s.Run.Sidecars = []NativeSidecar{{Name: "helper", Command: s.Run.Command, MemoryGB: 1, Port: &zero, Readiness: &NativeReadiness{Path: "/ready", Timeout: "5s"}, Env: map[string]string{"NATIVE_TEST_MODE": "side", "NATIVE_TEST_DIR": s.Run.Env["NATIVE_TEST_DIR"], "GORACE": "atexit_sleep_ms=0"}}}
 	return s
@@ -129,7 +131,7 @@ func nativeStart(t *testing.T, spec Spec, platform string, catalogs ...Environme
 	j := submit(t, q, spec)
 	m := machine("native", platform, "native-host")
 	m.Device = "1"
-	m.Capabilities = []string{"logs_none"}
+	m.Capabilities = append(m.Capabilities, "logs_none")
 	m.HostMemoryMeasured = true
 	m.FreeHostMemoryGB = 64
 	m.HostAvailableMemoryGB = 64
@@ -149,19 +151,27 @@ func nativeStart(t *testing.T, spec Spec, platform string, catalogs ...Environme
 	// Synthetic lifecycle tests own their helper. Host listener discovery is
 	// exercised directly by TestNativeGroupForeignReadinessListener.
 	w.nativeListenerProbe = func(string, int) error { return nil }
+	if platform == "cuda" || platform == "xpu" {
+		w.nativeGPUDeviceProbe = syntheticNativeGPUDeviceProbe(MachineDevice{ID: "1", Platform: platform, Selector: "1"})
+	}
 	store, err := w.openStore()
 	if err != nil {
 		server.Close()
 		t.Fatal(err)
 	}
 	store.state.Session = m.Session
-	p, err := w.start(store, *reply.Job)
+	var p *process
+	// Reuse the pending input copy before exercising the native lifecycle.
+	await(t, func() bool {
+		p, err = w.start(store, *reply.Job)
+		return !errors.Is(err, errWorkerCheckpoint) || !strings.Contains(err.Error(), "input copy pending")
+	})
 	if err != nil {
 		store.close()
 		server.Close()
 		t.Fatal(err)
 	}
-	run := &nativeTestRun{p: p, w: w, s: store, q: q, j: j, dir: spec.Run.Env["NATIVE_TEST_DIR"], calls: calls}
+	run := &nativeTestRun{p: p, w: w, s: store, q: q, j: j, dir: p.job.Spec.Run.Workdir, calls: calls}
 	t.Cleanup(func() {
 		if !run.finished {
 			p.stop(w.Clock.Now(), 0, true)
@@ -217,6 +227,26 @@ func nativeNoSurvivors(t *testing.T, run *nativeTestRun) {
 		}
 	}
 }
+
+// Resolve the single worker fixture's actual attempt after normal input staging.
+func nativeWorkerWork(t *testing.T, stateDir string) string {
+	t.Helper()
+	var work string
+	await(t, func() bool {
+		data, err := readSingleAttemptState(filepath.Join(stateDir, "state.json"))
+		if err != nil {
+			return false
+		}
+		var state workerState
+		if json.Unmarshal(data, &state) != nil || state.Job == nil {
+			return false
+		}
+		work = state.Job.Spec.Run.Workdir
+		return filepath.IsAbs(work)
+	})
+	return work
+}
+
 func nativeFile(t *testing.T, dir, name string) {
 	t.Helper()
 	await(t, func() bool { _, err := os.Stat(filepath.Join(dir, name)); return err == nil })
@@ -231,6 +261,11 @@ func nativeFinish(t *testing.T, r *nativeTestRun) Result {
 		}
 		if f.result.ReleasePending {
 			t.Fatal("cleanup unconfirmed", f.result)
+		}
+		if !f.result.Success {
+			if data, err := os.ReadFile(filepath.Join(r.s.dir, r.s.state.Log)); err == nil {
+				t.Logf("native output: %s", data)
+			}
 		}
 		return f.result
 	case <-time.After(10 * time.Second):
@@ -450,7 +485,7 @@ func TestNativeWorkerCancellationPreparation(t *testing.T) {
 	q.clock = &workerFakeClock{now: q.clock.Now()}
 	j := submit(t, q, s)
 	run := workerFixture(t, q)
-	dir := s.Run.Env["NATIVE_TEST_DIR"]
+	dir := nativeWorkerWork(t, run.state)
 	nativeFile(t, dir, "child.pid")
 	if value := job(t, q, j.ID); value.StartedAt != nil {
 		t.Fatal("readiness preparation marked started")

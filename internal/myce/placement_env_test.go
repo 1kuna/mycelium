@@ -11,6 +11,9 @@ func TestWorkerPlacementEnvironmentEveryAttempt(t *testing.T) {
 			w := recoveryWorker(t)
 			w.Machine.GPU = platform
 			w.Machine.Device = "0"
+			if platform == "cuda" || platform == "xpu" {
+				w.nativeGPUDeviceProbe = syntheticNativeGPUDeviceProbe(MachineDevice{ID: "0", Platform: platform, Selector: "0"})
+			}
 			store, e := w.openStore()
 			if e != nil {
 				t.Fatal(e)
