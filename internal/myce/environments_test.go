@@ -163,6 +163,10 @@ func TestEnvironmentRetiredPurgeProtectsReferences(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	allocatedBefore, err := c.DiskUsage()
+	if err != nil {
+		t.Fatal(err)
+	}
 	c.Limit = 1
 	err = c.admit("", 0)
 	after, sizeErr := environmentSize(trash)
@@ -186,6 +190,14 @@ func TestEnvironmentRetiredPurgeProtectsReferences(t *testing.T) {
 	remaining, err = environmentSize(trash)
 	if err != nil || remaining != 0 {
 		t.Fatalf("released preparation retained %d bytes: %v", remaining, err)
+	}
+	entries, err := os.ReadDir(trash)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("released retired entries remain: %v; err=%v", entries, err)
+	}
+	allocatedAfter, err := c.DiskUsage()
+	if err != nil || allocatedAfter >= allocatedBefore {
+		t.Fatalf("purge did not free allocated cache bytes: before=%d after=%d err=%v", allocatedBefore, allocatedAfter, err)
 	}
 }
 
