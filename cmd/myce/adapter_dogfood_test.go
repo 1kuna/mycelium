@@ -83,10 +83,14 @@ func TestAdapterDogfoodFixture(t *testing.T) {
 				t.Fatal(err)
 			}
 			p.Source, p.Environment = profileSource{Directory: "source"}, myce.Environment{}
+			// Installed tools need a writable attempt cache after the catalog
+			// environment is removed; native isolation makes HOME's cache read-only.
+			p.Run.Env["GOCACHE"] = "{work}/.go-build"
 			profile := filepath.Join(root, ".mycelium/profiles", tc.profile+".yaml")
 			adapterDogfoodYAML(t, profile, p)
 			entry := a.Entries[tc.entry]
 			entry.Source, entry.Environment = p.Source, myce.Environment{}
+			entry.Run.Env["GOCACHE"] = p.Run.Env["GOCACHE"]
 			adapter := filepath.Join(root, ".mycelium/adapter.yaml")
 			adapterDogfoodYAML(t, adapter, projectAdapter{Schema: a.Schema, Project: a.Project, Default: tc.entry, Entries: map[string]adapterEntry{tc.entry: entry}})
 
@@ -342,6 +346,13 @@ func adapterDogfoodWait(t *testing.T, ctx context.Context, d *myce.Dev, id strin
 	t.Helper()
 	j, err := d.Client().Wait(ctx, id)
 	if err != nil || j.State != "succeeded" {
+		logs, logErr := d.Queue.Logs(id, 0)
+		for _, log := range logs {
+			t.Logf("dogfood job %s attempt %d log: %s", id, log.Attempt, log.Text)
+		}
+		if logErr != nil {
+			t.Logf("dogfood job %s logs: %v", id, logErr)
+		}
 		t.Fatalf("dogfood job %+v: %v", j, err)
 	}
 	// The public terminal reply deliberately omits execution/source identity.
