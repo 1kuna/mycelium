@@ -1316,6 +1316,11 @@
           "type": "integer",
           "x-contract": "stable"
         },
+        "inputs_staged_at": {
+          "format": "date-time",
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
         "last_stop_outcome": {
           "type": "string",
           "x-contract": "diagnostic"
