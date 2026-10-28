@@ -3,17 +3,8 @@ package myce
 import (
 	"os"
 	"path/filepath"
-	"syscall"
 	"testing"
 )
-
-// SMB refuses both link and exclusive file rename, but supports a directory
-// rename that cannot replace an existing directory containing published output.
-type smbOutputFS struct{ links, renames int }
-
-func (f *smbOutputFS) link(string, string) error             { f.links++; return syscall.ENOTSUP }
-func (f *smbOutputFS) renameExclusive(string, string) error  { return syscall.ENOTSUP }
-func (f *smbOutputFS) renameDirectory(from, to string) error { f.renames++; return os.Rename(from, to) }
 
 func TestExtensionFilesDarwinExclusivePublication(t *testing.T) {
 	root, work := t.TempDir(), t.TempDir()
@@ -27,10 +18,10 @@ func TestExtensionFilesDarwinExclusivePublication(t *testing.T) {
 		}
 	}
 	j := Job{ID: "job", Attempt: 1, Spec: Spec{Run: RunSpec{Workdir: work}, Outputs: map[string]string{"output": "results", "nested/second": "results"}}}
-	fs := &smbOutputFS{}
+	renames := 0
 	publish := func() error {
-		return publishDarwinOutputs(j, root, func(from, to string) error {
-			if fs.renames == 0 {
+		return publishDirectoryJobOutputs(j, root, func(from, to string) error {
+			if renames == 0 {
 				if _, err := os.Stat(to); !os.IsNotExist(err) {
 					t.Fatal("output visible before publication", err)
 				}
@@ -41,11 +32,12 @@ func TestExtensionFilesDarwinExclusivePublication(t *testing.T) {
 					}
 				}
 			}
-			return fs.renameDirectory(from, to)
+			renames++
+			return os.Rename(from, to)
 		})
 	}
 	if err := publish(); err != nil {
-		t.Fatal("SMB publication", err)
+		t.Fatal("grouped publication", err)
 	}
 	if err := os.WriteFile(filepath.Join(work, "output"), []byte("late attempt"), 0600); err != nil {
 		t.Fatal(err)
@@ -59,7 +51,7 @@ func TestExtensionFilesDarwinExclusivePublication(t *testing.T) {
 			t.Fatal("published bytes changed", err)
 		}
 	}
-	if fs.links != 0 || fs.renames != 2 {
-		t.Fatal("unexpected publication operations", fs)
+	if renames != 2 {
+		t.Fatal("expected one complete publication per call", renames)
 	}
 }
