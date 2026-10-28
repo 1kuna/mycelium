@@ -842,11 +842,14 @@ cached. No state-file edit or cache deletion is needed. Preparation may be
 admitted on the next heartbeat; successful preparation and qualification are
 separate results.
 
-One-shot NAS install/reconfigure validation allows 10 seconds per filesystem
+One-shot NAS install/reconfigure validation allows 30 seconds per filesystem
 operation. Successful operations advance validation without a shared total
-deadline: an observed 30-operation sequence took 68.236 seconds, with a 6.074
-second maximum operation. The 10-second stall bound is unchanged; this sample
-is not a supported-load latency qualification. Mount inventory retains its
+deadline. Contended deletes completed in 8–15 seconds; the stall backstop allows
+two 15-second intervals (waiting behind contended I/O, then completing the call).
+An indefinitely blocked CIFS call therefore refuses after 30 seconds, while
+completed operations taking at least 10 seconds report `NAS slow`, their operation
+and elapsed seconds. These incident samples are not a supported-load percentile
+or latency qualification. Mount inventory retains its
 5-second bound, and installer subprocesses retain a 15-second bound per command.
 Cancellation remains active throughout setup. Logs report operation and root
 progress with elapsed time, without paths or mount credentials. A stalled syscall
