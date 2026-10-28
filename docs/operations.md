@@ -313,7 +313,8 @@ implied by these instructions.
 
 ## Convert split workers to one machine worker (M4)
 
-Follow the [accepted maintenance and native qualification gates](design-proposal.md#installation-checkpoints-and-rollback-m4).
+Follow the [accepted maintenance gates](design-proposal.md#installation-checkpoints-and-rollback-m4)
+and [native qualification](design-proposal.md#native-maintenance-window-qualification).
 Conversion is an operator-run maintenance action on the queue host and every
 converted worker host, including the single-card Spark worker in the same
 window. Commands below use placeholders for approved installation paths and
