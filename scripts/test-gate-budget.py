@@ -20,6 +20,25 @@ spec.loader.exec_module(budget)
 
 
 class GateBudgetTests(unittest.TestCase):
+    def test_success_cleans_fixture(self):
+        scripts = Path(__file__).resolve().parent
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'scripts').mkdir()
+            gate = root / 'scripts/gate.sh'
+            gate.write_text('cd "$GATE_SCRATCH"\nsleep 60 &\nexit 0\n')
+            other = subprocess.Popen(['sleep', '60'], start_new_session=True)
+            try:
+                run = subprocess.run([sys.executable, str(scripts / 'gate-budget.py'), str(gate)],
+                                     capture_output=True, text=True, timeout=15)
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                self.assertIn('gate quick: exit=0', run.stdout)
+                self.assertEqual(list((root / '.gate').iterdir()), [])
+                self.assertIsNone(other.poll())
+            finally:
+                other.kill()
+                other.wait()
+
     def test_permission_error_preserves_timeout(self):
         with tempfile.TemporaryDirectory() as folder:
             gate = Path(folder) / 'scripts' / 'gate.sh'
