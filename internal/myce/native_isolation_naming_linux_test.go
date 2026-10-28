@@ -177,6 +177,7 @@ func TestNativeIsolationCUDANaming(t *testing.T) {
 		t.Fatal("encode qualification configuration failed")
 	}
 	job := recoveryJob(t, []string{executable, "_native-cuda-naming-test", "main", string(data)})
+	job.Spec.Isolation = "sandboxed"
 	job.Spec.Resumable, job.Spec.Logs = false, "keep"
 	job.Spec.Needs.MemoryGB, job.Spec.Needs.HostMemoryGB, job.Spec.Needs.CPUCores = 28, 40, 2
 	job.Spec.Run.Env = map[string]string{"TMPDIR": "/tmp/ignored-authored-temp"}

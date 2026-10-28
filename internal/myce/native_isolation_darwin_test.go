@@ -219,6 +219,7 @@ func TestNativeIsolationSiblingAndControl(t *testing.T) {
 	start := func(command string, env map[string]string) (*process, *workerStore) {
 		t.Helper()
 		job := recoveryJob(t, []string{"/bin/sh", "-c", command})
+		job.Spec.Isolation = "sandboxed"
 		job.Spec.Resumable = false
 		job.Spec.Logs = "keep"
 		job.Spec.Run.Env = env

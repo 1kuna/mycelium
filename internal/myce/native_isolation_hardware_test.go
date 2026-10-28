@@ -203,6 +203,7 @@ func TestNativeIsolationHardware(t *testing.T) {
 				t.Fatal(err)
 			}
 			job := recoveryJob(t, []string{executable, "_native-hardware-test", "main", string(data)})
+			job.Spec.Isolation = "sandboxed"
 			job.Spec.Resumable, job.Spec.Logs = false, "keep"
 			job.Spec.Needs.MemoryGB = 1.0 / 1024 // Probe allocates only 4096 bytes; outer job owns the reservation.
 			job.Spec.Run.Env = map[string]string{"TMPDIR": "/tmp/ignored-authored-temp"}

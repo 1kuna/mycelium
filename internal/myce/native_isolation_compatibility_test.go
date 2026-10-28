@@ -272,6 +272,7 @@ func nativeCompatibilityFixture(t *testing.T, mode string) (Worker, *workerStore
 		t.Fatal(err)
 	}
 	j := recoveryJob(t, []string{exe, "_native-compatibility-test", mode})
+	j.Spec.Isolation = "sandboxed"
 	j.Attempt = 2
 	j.Checkpoint = filepath.Join(w.CheckpointRoot, j.ID)
 	j.Spec.Logs = "keep"

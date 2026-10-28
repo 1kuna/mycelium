@@ -212,6 +212,7 @@ func TestNativeIsolationLinuxWorkerSiblingAndControl(t *testing.T) {
 	start := func(command []string, env map[string]string) (*process, *workerStore) {
 		t.Helper()
 		job := recoveryJob(t, command)
+		job.Spec.Isolation = "sandboxed"
 		job.Spec.Resumable, job.Spec.Logs, job.Spec.Run.Env = false, "keep", env
 		store, err := newAttemptStore(root, job)
 		if err != nil {
@@ -326,6 +327,7 @@ __attribute__((constructor)) static void attack(void) {
 			}
 			defer store.close()
 			j := recoveryJob(t, []string{"/bin/true"})
+			j.Spec.Isolation = "sandboxed"
 			j.Spec.Resumable = false
 			j.Spec.Inputs = map[string]string{"preload.so": "preload.so"}
 			j.Spec.Run.Env = map[string]string{"LD_PRELOAD": "{work}/preload.so", "NATIVE_PRELOAD_MARKER": marker}

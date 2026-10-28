@@ -111,6 +111,7 @@ func nativeSpec(t *testing.T) Spec {
 		t.Fatal(err)
 	}
 	s := spec("experiment")
+	s.Isolation = "sandboxed"
 	s.Resumable = false
 	s.Needs.HostMemoryGB = 2
 	s.Run.Command = []string{exe, "-test.run=^TestNativeCPUHelper$"}
