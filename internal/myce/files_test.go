@@ -362,6 +362,9 @@ if not stopping: pathlib.Path('output').write_text(str(n))
 		root := newTestStateRoot(t)
 		// As in the prepared-Python fixture, retain the selected interpreter
 		// through a managed prefix so native isolation includes its runtime.
+		if err := PrepareStateRoots(filepath.Join(root, "environment-cache")); err != nil {
+			t.Fatal(err)
+		}
 		bin := filepath.Join(root, "environment-cache", "venv", "bin")
 		if err := os.MkdirAll(bin, 0700); err != nil {
 			t.Fatal(err)
