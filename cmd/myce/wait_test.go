@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -256,6 +257,10 @@ func TestWaitQueueRestartAndNetworkRecovery(t *testing.T) {
 				t.Fatal(d)
 			}
 			q = waitOpenQueue(t, db, checkpoints, clock)
+			// Completion precedes restored HTTP availability: the original
+			// waiter must discover it on its first successful retry, without
+			// needing a fresh process or another job state transition (#278).
+			waitFinish(t, q, true)
 			listener, e := net.Listen("tcp", address)
 			if e != nil {
 				t.Fatal(e)
@@ -265,17 +270,12 @@ func TestWaitQueueRestartAndNetworkRecovery(t *testing.T) {
 			server.Listener = listener
 			server.Start()
 			t.Cleanup(server.Close)
-		case 4:
-			if d != 3*time.Second {
-				t.Fatal(d)
-			}
-			waitFinish(t, q, true)
 		default:
 			t.Fatal("unexpected retry")
 		}
 		return nil
 	})
-	if err != nil || step != 4 || !strings.Contains(out.String(), j.ID+" succeeded") || !strings.Contains(diagnostics.String(), "restored") {
+	if err != nil || step != 3 || out.String() != j.ID+" succeeded\n" || !strings.Contains(diagnostics.String(), "restored") {
 		t.Fatalf("%v %d %s %s", err, step, &out, &diagnostics)
 	}
 }
@@ -340,6 +340,56 @@ func TestWaitTransientHTTPAndInterrupted(t *testing.T) {
 type waitTransport func(*http.Request) (*http.Response, error)
 
 func (f waitTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestWaitOutageDiagnosticsAndTerminalRecovery(t *testing.T) {
+	for _, tc := range []struct {
+		name, cause string
+		err         error
+	}{
+		{"timeout", "timeout", context.DeadlineExceeded},
+		{"truncated", "response_incomplete", io.ErrUnexpectedEOF},
+		{"transport", "read_error", errors.New("private transport details")},
+		{"http", "http_503", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := &waitClock{now: time.Date(2026, 10, 28, 0, 0, 0, 0, time.UTC)}
+			started := clock.Now()
+			calls := 0
+			client := myce.Client{URL: "http://fixture.invalid/private-endpoint", Token: "private-token", HTTP: &http.Client{Transport: waitTransport(func(r *http.Request) (*http.Response, error) {
+				calls++
+				status, body := http.StatusOK, `{"id":"job","state":"running"}`
+				if calls > 1 && clock.Now().Sub(started) < 75*time.Second {
+					if tc.err != nil {
+						return nil, tc.err
+					}
+					status, body = http.StatusServiceUnavailable, `{"error":"private response details"}`
+				} else if calls > 1 {
+					body = `{"id":"job","state":"succeeded"}`
+				}
+				return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+			})}}
+			var out, diagnostics bytes.Buffer
+			err := waitJobs(context.Background(), client, []string{"job"}, 0, &out, &diagnostics, clock, func(_ context.Context, d time.Duration) error {
+				clock.advance(d)
+				if clock.Now().Sub(started) > 90*time.Second {
+					t.Fatal("wait failed to observe terminal job after outage")
+				}
+				return nil
+			})
+			if err != nil || out.String() != "job succeeded\n" {
+				t.Fatalf("wait err=%v output=%q", err, out.String())
+			}
+			lines := strings.Split(strings.TrimSpace(diagnostics.String()), "\n")
+			if len(lines) != 3 || !strings.Contains(lines[0], "cause="+tc.cause+" attempts=1 elapsed=0s") || !strings.Contains(lines[1], "cause="+tc.cause+" attempts=8 elapsed=1m6s") || lines[2] != "wait: queue connection restored" {
+				t.Fatalf("missing sanitized retry progress or recovery: %q", diagnostics.String())
+			}
+			if strings.Contains(diagnostics.String(), "private") || strings.Contains(diagnostics.String(), "fixture.invalid") {
+				t.Fatal("retry diagnostics exposed private request or response data")
+			}
+		})
+	}
+}
+
 func TestWaitRequestTimeoutRetriesUntilOverallDeadline(t *testing.T) {
 	clock := &waitClock{now: time.Date(2026, 10, 10, 12, 0, 0, 0, time.UTC)}
 	calls := 0

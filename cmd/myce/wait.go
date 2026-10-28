@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"strings"
 	"time"
 
@@ -118,6 +119,8 @@ func waitJobs(ctx context.Context, c myce.Client, ids []string, timeout time.Dur
 	deadline := clock.Now().Add(timeout)
 	delay := 3 * time.Second
 	failed, retrying := false, false
+	var outageSince, nextRetryLog time.Time
+	outageAttempts := 0
 	for len(pending) > 0 {
 		if ctx.Err() != nil {
 			return waitError(4, "wait interrupted; jobs continue")
@@ -128,6 +131,7 @@ func waitJobs(ctx context.Context, c myce.Client, ids []string, timeout time.Dur
 			ids = append(ids, id)
 		}
 		unavailable := false
+		var readErr error
 		for _, id := range ids {
 			if !pending[id] {
 				continue
@@ -160,6 +164,7 @@ func waitJobs(ctx context.Context, c myce.Client, ids []string, timeout time.Dur
 					return waitError(2, fmt.Sprintf("wait: queue HTTP %d; check job ID, authentication and queue address", httpErr.Status))
 				}
 				unavailable = true
+				readErr = err
 				break
 			}
 			delete(pending, id)
@@ -184,8 +189,18 @@ func waitJobs(ctx context.Context, c myce.Client, ids []string, timeout time.Dur
 		}
 		if unavailable {
 			if !retrying {
-				fmt.Fprintln(errOut, "wait: queue unavailable; retrying")
+				outageSince = clock.Now()
+				nextRetryLog = outageSince
+				outageAttempts = 0
 				retrying = true
+			}
+			outageAttempts++
+			if !clock.Now().Before(nextRetryLog) {
+				// Keep evidence of progress during long outages without exposing
+				// request URLs, credentials or remote error bodies. At most one
+				// periodic line per minute keeps unattended wait logs small.
+				fmt.Fprintf(errOut, "wait: queue unavailable; retrying (cause=%s attempts=%d elapsed=%s)\n", waitReadCause(readErr), outageAttempts, clock.Now().Sub(outageSince).Truncate(time.Second))
+				nextRetryLog = clock.Now().Add(time.Minute)
 			}
 			delay = min(delay*2, 10*time.Second)
 		} else {
@@ -209,4 +224,20 @@ func waitJobs(ctx context.Context, c myce.Client, ids []string, timeout time.Dur
 		return waitError(1, "one or more jobs failed or were cancelled")
 	}
 	return nil
+}
+
+// Return only fixed categories and HTTP status numbers, never raw error text.
+func waitReadCause(err error) string {
+	var httpErr *myce.HTTPError
+	if errors.As(err, &httpErr) {
+		return fmt.Sprintf("http_%d", httpErr.Status)
+	}
+	var network net.Error
+	if errors.Is(err, context.DeadlineExceeded) || errors.As(err, &network) && network.Timeout() {
+		return "timeout"
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return "response_incomplete"
+	}
+	return "read_error"
 }
