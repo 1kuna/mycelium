@@ -154,12 +154,40 @@ func TestNativeIsolationLibreOffice(t *testing.T) {
 		}
 		w.NativeExecuteRoots = append(w.NativeExecuteRoots, installation)
 		nativeCompatibilityExternal(t, &w, &j)
-		nativeCompatibilitySidecars(&j)
 		j.Spec.Run.Env["NATIVE_COMPATIBILITY_OFFICE"] = office
-		j.Spec.Run.Env["HOME"] = "{work}/home"
+		j.Spec.Run.Env["HOME"] = "{work}/.scratch/office-home"
+		j.Spec.Run.Env["XDG_RUNTIME_DIR"] = "{work}/.scratch/office-runtime"
 		for key, dir := range map[string]string{"XDG_CONFIG_HOME": "config", "XDG_CACHE_HOME": "cache", "XDG_DATA_HOME": "data"} {
-			j.Spec.Run.Env[key] = "{work}/home/" + dir
+			j.Spec.Run.Env[key] = "{work}/.scratch/office-home/" + dir
 		}
+		// Some distributions keep the installed registry outside the program
+		// tree. Stage an explicitly selected registry as ordinary job inputs;
+		// do not add a host read exception for /etc or its configuration.
+		if registry, requested := os.LookupEnv("MYCE_TEST_NATIVE_OFFICE_REGISTRY"); requested {
+			if !filepath.IsAbs(registry) {
+				t.Fatal("MYCE_TEST_NATIVE_OFFICE_REGISTRY must name an absolute installed registry directory")
+			}
+			j.Spec.Inputs = map[string]string{}
+			if err := filepath.WalkDir(registry, func(path string, entry os.DirEntry, err error) error {
+				if err != nil || entry.IsDir() {
+					return err
+				}
+				rel, err := filepath.Rel(registry, path)
+				if err != nil {
+					return err
+				}
+				input := filepath.Join("office-registry", rel)
+				if err := copyJobFile(path, filepath.Join(w.JobFileRoot, input)); err != nil {
+					return err
+				}
+				j.Spec.Inputs[filepath.Join(".scratch", input)] = input
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			j.Spec.Run.Env["NATIVE_COMPATIBILITY_OFFICE_REGISTRY"] = "{work}/.scratch/office-registry"
+		}
+		nativeCompatibilitySidecars(&j)
 		p := nativeCompatibilityRun(t, w, root, j, time.Minute)
 		pdf := filepath.Join(p.job.Spec.Run.Workdir, ".tmp/office-output/document.pdf")
 		t.Run("pdf-bytes", func(t *testing.T) {
@@ -822,7 +850,10 @@ func nativeCompatibilityPayload(args []string) error {
 		check(nativeCompatibilityExchange(work))
 		scratch, tmp := os.Getenv("MYCE_SCRATCH_DIR"), os.Getenv("TMPDIR")
 		profileDir, outputDir := filepath.Join(scratch, "office-profile"), filepath.Join(tmp, "office-output")
-		for _, dir := range []string{"home/config", "home/cache", "home/data", profileDir, outputDir} {
+		// Fontconfig uses XDG_CACHE_HOME/fontconfig; no host cache or login
+		// runtime directory is needed. These paths do not grant Unix IPC.
+		for _, dir := range []string{os.Getenv("XDG_CONFIG_HOME"), os.Getenv("XDG_DATA_HOME"),
+			filepath.Join(os.Getenv("XDG_CACHE_HOME"), "fontconfig"), os.Getenv("XDG_RUNTIME_DIR"), profileDir, outputDir} {
 			if err := os.MkdirAll(dir, 0700); err != nil {
 				return err
 			}
@@ -843,6 +874,10 @@ func nativeCompatibilityPayload(args []string) error {
 		cmd := exec.Command(os.Getenv("NATIVE_COMPATIBILITY_OFFICE"),
 			"--headless", "--nologo", "--nodefault", "--nolockcheck", "--norestore",
 			"-env:UserInstallation="+profile, "--convert-to", "pdf:writer_pdf_Export", "--outdir", outputDir, documentPath)
+		if registry := os.Getenv("NATIVE_COMPATIBILITY_OFFICE_REGISTRY"); registry != "" {
+			uri := (&url.URL{Scheme: "file", Path: registry}).String()
+			cmd.Args = append(cmd.Args, "-env:CONFIGURATION_LAYERS=xcsxcu:"+uri+" res:"+uri+" user:!"+profile+"/user/registrymodifications.xcu")
+		}
 		cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
 		check(cmd.Run())
 	default:
