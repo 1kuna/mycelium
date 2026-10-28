@@ -19,7 +19,7 @@ func nativeIsolationStatus(m Machine) string {
 	case contains(m.Capabilities, "native_isolation_seatbelt"):
 		return "native isolation: Seatbelt; outbound requires needs.network: true"
 	case contains(m.Capabilities, "native_isolation_unavailable"):
-		return "native isolation unavailable; native launch refused"
+		return "native isolation unavailable; sandboxed native launch refused"
 	default:
 		return "native isolation unreported"
 	}

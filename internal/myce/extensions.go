@@ -27,6 +27,11 @@ var extensionName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 // Extension is one small folder. Files and Digest are immutable transport data,
 // not extra authoring fields in extension.yaml. Downloads live in its cache.
 type Extension struct {
+	Isolation string `json:"isolation,omitempty" yaml:"isolation,omitempty"`
+	Reason    string `json:"reason,omitempty" yaml:"reason,omitempty"`
+	// Server-owned registration metadata, outside immutable bundle identity.
+	// Absent on persisted pre-policy registrations and their frozen job copies.
+	SandboxDefault    bool                                    `json:"sandbox_default,omitempty" yaml:"-"`
 	Outputs           []string                                `json:"outputs,omitempty" yaml:"outputs,omitempty"`
 	Assets            FileManifest                            `json:"assets,omitempty" yaml:"assets,omitempty"`
 	DefaultClass      string                                  `json:"default_class,omitempty" yaml:"default_class,omitempty"`
@@ -115,6 +120,9 @@ func (e Extension) handles(s Spec) bool {
 	return slices.Contains(e.Kinds, s.Kind)
 }
 func (e Extension) validate() error {
+	if err := ValidateNativeIsolation(e.Isolation, e.Reason); err != nil {
+		return err
+	}
 	names := map[string]string{}
 	for _, name := range e.Outputs {
 		names[name] = "results"
@@ -310,8 +318,12 @@ func (q *Queue) AddExtension(e Extension) error {
 			q.s.Extensions = map[string]Extension{}
 		}
 		k := extensionKey(checked)
-		if old, ok := q.s.Extensions[k]; ok && old.Digest != checked.Digest {
-			return frozenExtensionConflict(k, old.Digest, checked.Digest)
+		checked.SandboxDefault = true
+		if old, ok := q.s.Extensions[k]; ok {
+			if old.Digest != checked.Digest {
+				return frozenExtensionConflict(k, old.Digest, checked.Digest)
+			}
+			checked.SandboxDefault = old.SandboxDefault
 		}
 		q.s.Extensions[k] = checked
 		for _, j := range q.liveJobs() {

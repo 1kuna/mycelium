@@ -696,6 +696,9 @@
         "host_memory_gb": {
           "type": "number"
         },
+        "isolation": {
+          "type": "string"
+        },
         "kinds": {
           "items": {
             "type": "string"
@@ -759,6 +762,9 @@
         "purpose": {
           "type": "string"
         },
+        "reason": {
+          "type": "string"
+        },
         "resumable": {
           "type": "boolean"
         },
@@ -770,6 +776,9 @@
             "array",
             "null"
           ]
+        },
+        "sandbox_default": {
+          "type": "boolean"
         },
         "setup": {
           "items": {
@@ -1381,6 +1390,11 @@
           "minimum": 0,
           "type": "integer",
           "x-contract": "stable"
+        },
+        "isolation": {
+          "description": "Native stage exception diagnostic: unsandboxed: followed by the author reason, or the fixed legacy registration reason. Retained across lifecycle and payload redaction.",
+          "type": "string",
+          "x-contract": "diagnostic"
         },
         "last_health_alert_attempt": {
           "type": "integer",
@@ -2245,6 +2259,10 @@
           ],
           "x-contract": "diagnostic"
         },
+        "isolation": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
         "kind": {
           "type": "string",
           "x-contract": "diagnostic"
@@ -2297,6 +2315,10 @@
           "minLength": 1,
           "type": "string",
           "x-contract": "stable"
+        },
+        "reason": {
+          "type": "string",
+          "x-contract": "diagnostic"
         },
         "require_target": {
           "type": "boolean",

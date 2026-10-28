@@ -350,6 +350,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 			extensionRelease()
 		}
 	}()
+	if err := s.warnNativeIsolation(&j); err != nil {
+		return nil, err
+	}
 	sharedEnv, sharedRelease, sharedErr := w.acquireSharedInputs(ctx, j)
 	if sharedErr != nil {
 		return nil, runtimeErrorFor("input_staging", sharedErr)
@@ -612,7 +615,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	for _, k := range keys {
 		cmd.Env = append(cmd.Env, k+"="+env[k])
 	}
-	if err := w.isolateNativeCommand(cmd, s.dir, executionWork, env, nil, j.Spec.Needs.Network); err != nil {
+	if err := w.isolateNativeAttempt(&j, nil, cmd, s.dir, executionWork, env, nil, true); err != nil {
 		return nil, s.startFailure(j, launchRefused, err)
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

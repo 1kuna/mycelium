@@ -3,23 +3,38 @@
 The [approved amendment](design-proposal.md#amendment-minimum-native-job-isolation-177-219-248)
 defines the #177 minimum: job-scoped work/temp, no ambient credentials, and no
 worker control access. [#248](https://github.com/1kuna/mycelium/issues/248#issuecomment-6447873336)
-makes that minimum a v1 requirement; wider executor hardening is separate.
+makes that minimum the v1 default; the [declared and legacy stage exceptions](design-proposal.md#amendment-minimum-native-job-isolation-177-219-248)
+supersede its former blanket requirement. Wider executor hardening is separate.
 These are implementation contracts and limits, **not fleet qualification or
 deployment evidence**.
 
 ## Boundary and guarantees
 
-Native batch commands and their sidecars, including queued extension run/check
+Sandboxed native batch commands and their sidecars, including queued extension run/check
 payloads, inherit kernel restrictions across fork/exec. Main and helpers in
 one attempt trust each other and share its resources. `0700` is useful hygiene,
 but provides no boundary between jobs running as the same user.
 
 | Platform/mode | Directory and files | Temp | Environment | Control access | Network |
 | --- | --- | --- | --- | --- | --- |
+| Declared unsandboxed / legacy registration | Ordinary worker-user file access; managed cwd and private staged source remain, with no kernel content denials. | Managed work/temp/scratch paths; other host temp remains accessible. | Same #219 allowlist and token scrub. | No #177 kernel control/process/IPC protection. Device binding, cgroups, launch gates, fencing and release custody remain. | Ordinary host network access; no native sandbox/network capability required. |
 | Linux namespaces | User/mount/PID/IPC isolation; read-only host-root view plus Landlock content grants. Sibling contents denied; host metadata can remain visible. | Managed `{work}/.tmp` and shared `.scratch`; private `/tmp` and `/dev/shm` shared within the attempt. | #219 allowlist; worker overrides temp and attempt/device controls; no ambient agent/session or fleet credentials. | Private PID/network namespaces plus seccomp/Landlock deny host process, control-file and socket access. | Private network namespace, shared by the attempt's sidecars; reserved TCP loopback only. No qualified outbound transport; no `native_network`. |
 | Linux Landlock/seccomp fallback | Content reads/execution limited to runtime/cache/attempt grants; writes limited to attempt/checkpoint/usage grants. **Metadata is not isolated**, including permission changes. No private mount/PID view. | Managed `{work}/.tmp` and shared `.scratch`; sibling contents denied. Host `/tmp` is not replaced. | Same allowlist and overrides. | Denies other processes' sensitive procfs contents, tracing/memory access and external signals; denies Unix stream/datagram endpoints and non-reserved TCP ports. **same-UID pathname SEQPACKET endpoints reachable (partial)**. Foreign abstract endpoints remain scoped. | **Partial network isolation**: exact reserved sidecar TCP ports permit connect/bind on any address, including off-host. All other TCP ports denied; no general outbound capability. |
 | macOS Seatbelt | Targeted denial of same-spool sibling contents/writes, configured worker storage and standard credential roots. Prepared caches allow reads/execution, not writes. Metadata and unrelated host files can remain visible. | Managed `{work}/.tmp` and shared `.scratch` protected with the spool; no private system `/tmp` namespace. | Same allowlist and overrides. | Denies Unix endpoint connections, protected credential contents, cross-job process access and unwanted Mach services; retains Metal services. | Default outbound: reserved sidecar TCP loopback only. With `needs.network: true`: general outbound except other loopback endpoints and the queue's TCP port at all addresses. |
-| Missing/unsupported confinement | Required behavior: native launch fails closed. | No unconfined payload launch permitted. | An allowlist alone is insufficient. | No implied protection. | No inferred online capability. |
+| Missing/unsupported confinement for a sandboxed stage | Required behavior: sandboxed native launch fails closed. | No implicit unconfined fallback. | An allowlist alone is insufficient. | No implied protection. | No inferred online capability. |
+
+Choose an exception at the extension top level or adapter entry with
+`isolation: unsandboxed` plus a required nonempty `reason`. Main, its sidecars
+and queued check payloads follow that stage choice. Status/job GET expose
+`unsandboxed: <reason>` across the lifecycle; workers warn once per attempt.
+The reason is intentionally public and must not contain secrets/private paths.
+New registrations receive server-owned `sandbox_default: true` metadata;
+persisted registrations and frozen jobs without it retain legacy unsandboxed
+behavior if no author mode is present. Identical re-registration preserves the
+marker. Author a new version/digest with `isolation: sandboxed` for explicit
+legacy opt-in; old queued/frozen jobs do not change. These metadata never alter
+the immutable bundle hash. Queue and workers need the policy-capable release.
+The remaining kernel guarantees on this page apply to sandboxed stages.
 
 The boundary protects against confined jobs. Same-user **unsandboxed host
 processes** can still inspect or interfere with work and listeners and are

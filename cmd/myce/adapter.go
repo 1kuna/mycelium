@@ -131,6 +131,9 @@ func decodeAdapter(data []byte) (projectAdapter, error) {
 }
 func validateAdapterEntry(e adapterEntry) error {
 	s := e.Spec
+	if err := myce.ValidateNativeIsolation(s.Isolation, s.Reason); err != nil {
+		return err
+	}
 	if e.Version != "" && !adapterName.MatchString(e.Version) {
 		return errors.New("version must be a native version label of at most 64 characters")
 	}
@@ -214,7 +217,7 @@ func adapterProfile(a projectAdapter, name string) (executionProfile, []byte, er
 	}
 	native := len(e.Variants) > 0 || len(e.Checks.Qualification) > 0 || len(e.Baselines) > 0 || len(e.Environments) > 0 || len(e.Setup) > 0 || len(e.Kinds)+len(e.ProgramTypes)+len(e.Assets)+len(e.References)+len(e.Sweeps) > 0
 	if native {
-		x := myce.Extension{Name: p.Name, Version: e.Version, Purpose: e.Purpose, DefaultClass: p.Class, Resumable: p.Resumable, Kinds: e.Kinds, ProgramTypes: e.ProgramTypes, Assets: e.Assets, Notes: e.Notes}
+		x := myce.Extension{Name: p.Name, Version: e.Version, Purpose: e.Purpose, DefaultClass: p.Class, Resumable: p.Resumable, Kinds: e.Kinds, ProgramTypes: e.ProgramTypes, Assets: e.Assets, Notes: e.Notes, Isolation: e.Isolation, Reason: e.Reason}
 		for name := range e.Outputs {
 			x.Outputs = append(x.Outputs, name)
 		}
@@ -267,6 +270,7 @@ func adapterProfile(a projectAdapter, name string) (executionProfile, []byte, er
 		}
 		p.Targets = slices.Compact(p.Targets)
 		p.Native = &x
+		p.Isolation, p.Reason = "", "" // The frozen registration owns native policy.
 		p.Execution = nil
 		p.Run = myce.RunSpec{}
 		p.Needs = myce.ResourceNeeds{}

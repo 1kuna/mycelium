@@ -575,7 +575,8 @@ and [operations](operations.md#docker-cleanup-custody).
 
 The #177 minimum is a v1 requirement under [#248's clarification](https://github.com/1kuna/mycelium/issues/248#issuecomment-6447873336):
 managed job directory and temp, no ambient credentials, and no worker control
-access. Same-user jobs require a **kernel-enforced boundary**; `0700` alone
+access for sandboxed payloads. New native entries and extension registrations
+default to a **kernel-enforced boundary**; `0700` alone
 cannot separate processes sharing a UID. This amendment covers native batch
 payloads and their sidecars, including queued extension run/check payloads. It
 does not establish isolation for local setup/qualification hooks, arbitrary
@@ -583,6 +584,39 @@ preparation code or standalone model servers.
 Implementation and native qualification are separate; this text records the
 contract, not a completed rollout.
 
+**Declared stage exception and legacy registration policy (batch/s047).** An
+extension's top level or an adapter entry may declare `isolation: unsandboxed`
+and a required nonempty `reason`. Invalid modes and blank reasons are rejected.
+`isolation: sandboxed` explicitly selects the default. The choice applies to
+main, queued qualification/check payloads and every sidecar of that stage;
+there is no global switch or per-sidecar escape. Extension jobs cannot override
+the frozen registration's policy at submission.
+
+The queue stamps newly created registrations with server-owned
+`sandbox_default: true`, outside the immutable bundle/digest. Persisted
+registrations and frozen job copies without that marker retain unsandboxed
+execution when no authored mode is present. Identical registration replay
+preserves the original marker. Opt in a legacy registration by authoring a new
+version/digest with `isolation: sandboxed`; existing queued/frozen jobs retain
+their original policy across restart. No date, source revision or content
+identity rewrite determines this choice.
+
+An unsandboxed stage omits kernel sandbox setup and its kernel-capability
+admission requirement, including protected native-network capability. It has
+ordinary worker-user filesystem, process, IPC and network access; offline
+defaults and cache/control/sibling content denials below do **not** apply.
+Managed work/temp, private source/input staging, environment/token scrubbing,
+CPU/GPU selection and device binding, cgroup limits, authorization/Started,
+attempt fencing and release custody still apply. A managed cwd does not confine
+an unsandboxed payload's other file accesses. Status and job GET retain
+`isolation: "unsandboxed: <reason>"` through queuing, execution and terminal
+outcomes; legacy mode uses a fixed public explanation. Worker logs emit one
+warning per attempt, shared by main/sidecars and launch retries. Reasons are
+public diagnostics: authors must keep secrets and private paths out of them.
+The queue and workers must run the policy-capable release together; an older
+worker cannot implement a declared exception.
+
+The kernel guarantees in the following paragraphs apply to sandboxed stages.
 Every native attempt gets a managed `{work}`, `.tmp` and `.scratch` beneath it.
 The worker overrides `TMPDIR`, `TMP`, `TEMP` and `MYCE_SCRATCH_DIR` after authored
 environment/activation; main and its own sidecars share these exact paths. Native

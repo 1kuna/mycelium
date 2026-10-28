@@ -1,5 +1,14 @@
 # Project instruction file
 
+Entries default to native sandboxing. An entry can declare top-level
+`isolation: unsandboxed` and a required nonempty `reason`; this covers its main,
+result checks, queued qualification payloads and sidecars. Use
+`isolation: sandboxed` for explicit opt-in when publishing a new version of a
+legacy registered extension. The reason is public in status/job GET. See
+[native isolation](native-isolation.md) for the ordinary host permissions of
+unsandboxed stages, retained launch/device/cleanup checks and durable legacy
+registration policy. This is an entry choice, not a global or per-sidecar flag.
+
 `.mycelium/adapter.yaml` describes named entries in strict YAML. `myce run`
 selects its `default`; `myce run --entry NAME` selects another entry.
 `--adapter FILE` explicitly selects a file. Arguments after `--` append literally

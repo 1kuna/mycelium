@@ -639,11 +639,47 @@ can be missed; real CUDA/XPU qualification remains necessary.
 
 ## Native payload isolation
 
-Native commands and sidecars use a kernel boundary, not same-UID `0700` alone.
+New native entries and extension registrations default to a kernel boundary,
+not same-UID `0700` alone.
 See [native isolation](native-isolation.md) for the platform guarantee table and
 limits. This #177 minimum is a v1 requirement; documentation does not establish
 fleet qualification or rollout.
 
+For an intentional stage exception, put these fields at the top level of
+`extension.yaml` or inside the selected adapter entry:
+
+```yaml
+isolation: unsandboxed
+reason: The native helper requires host IPC unavailable in the sandbox.
+```
+
+The reason is required, nonblank and public. Main, queued check/qualification
+payloads and all its sidecars share this choice. Invalid modes are refused;
+`isolation: sandboxed` explicitly selects the default. There is no global
+switch or per-sidecar choice. A submitted extension job cannot override its
+registration's isolation. Unsandboxed stages need no sandbox/network capability
+report and have ordinary worker-user host and network access, including access
+to sibling files and host controls. Keep the queue and workers on the same
+policy-capable release; older workers do not implement this exception.
+
+The queue's server-owned `sandbox_default` marker is registration metadata,
+outside the digest. Missing markers on persisted pre-policy registrations and
+frozen jobs preserve legacy unsandboxed behavior. Re-registering identical
+bytes preserves that choice, including after restart. To sandbox a legacy
+registration, publish a new authored version/digest with `isolation: sandboxed`.
+Already queued/frozen jobs keep their original policy. Do not edit database
+markers or bundle identities as an upgrade step.
+
+`myce status`, the status page, `GET /api/status` and job GET show
+`unsandboxed: <reason>` even for queued or terminal jobs; legacy registrations
+use a fixed public reason. The worker logs one warning per attempt rather than
+one per member/retry, with the warning receipt retained in its existing spool.
+Work/input staging, managed cwd/temp/scratch, token/environment filtering,
+device selection/binding, cgroups, launch authorization, Started, fencing and
+release checks still apply. They do not provide a kernel boundary or make
+shared caches read-only for unsandboxed code.
+
+The kernel restrictions below describe sandboxed stages.
 Linux fallback explicitly reports **same-UID pathname SEQPACKET endpoints
 reachable (partial)**. It permits the v1 CUDA socket-type exception while
 retaining stream/datagram control denial and Landlock abstract-socket scoping.

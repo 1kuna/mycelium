@@ -274,6 +274,10 @@ func (e Extension) forMachine(m *Machine) (Extension, bool) {
 	return e, true
 }
 func (e Extension) lower(s *Spec, m *Machine) error {
+	s.Isolation, s.Reason = e.Isolation, e.Reason
+	if reason := e.unsandboxedReason(); reason != "" {
+		s.Isolation, s.Reason = "unsandboxed", reason
+	}
 	legacyEnv := s.Run.Env
 	if len(e.Variants) == 0 {
 		s.Execution = &ExecutionSpec{Main: ExecutionMember{Command: slices.Clone(e.Run)}}

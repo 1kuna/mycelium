@@ -8,6 +8,12 @@ refreshes every five seconds. Keep tokens in private configuration, not URLs.
 The page and `GET /api/status` share a snapshot for up to one second. Job receipt
 polls (`GET /api/jobs/{id}`) read the requested job afresh. Status snapshots do
 not drive start authorization, cancellation or result publication.
+
+Native stage exceptions appear in job `isolation` as
+`unsandboxed: <reason>` in status JSON and job GET; CLI/page reasons include the
+same text through queued, running and terminal outcomes. Legacy registrations
+use a fixed public explanation. Only this reason survives payload redaction;
+the observation never grants launch authority. See [native isolation](native-isolation.md).
 Administrative tools use uncached `GET /api/inspection` for migration custody,
 local extension targeting and measurement safety checks.
 

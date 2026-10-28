@@ -139,6 +139,8 @@ func (e Environment) Key() string {
 }
 
 type Spec struct {
+	Isolation    string                 `json:"isolation,omitempty" yaml:"isolation,omitempty"`
+	Reason       string                 `json:"reason,omitempty" yaml:"reason,omitempty"`
 	SharedInputs map[string]SharedInput `json:"shared_inputs,omitempty" yaml:"shared_inputs,omitempty"`
 	// PrepareSource extracts the validated CLI snapshot before member launch,
 	// then stages explicit inputs over it. It is persisted, never an author field.
@@ -183,6 +185,12 @@ type Spec struct {
 }
 
 func (s Spec) Validate() error {
+	if err := ValidateNativeIsolation(s.Isolation, s.Reason); err != nil {
+		return reject("job_execution_invalid", err)
+	}
+	if s.extensionJob() && (s.Isolation != "" || s.Reason != "") {
+		return reject("job_execution_invalid", errors.New("extension registration owns isolation; job overrides are not allowed"))
+	}
 	if s.PrepareSource {
 		if _, ok := s.Files[".myce-source.tar"]; !ok {
 			return reject("job_files_invalid", errors.New("prepared source requires a frozen source archive"))
@@ -327,6 +335,8 @@ type Copy struct {
 }
 
 type Job struct {
+	// Read-only diagnostic retained when execution payloads are redacted.
+	Isolation string `json:"isolation,omitempty"`
 	// SubmissionReused is set only on a keyed submit reply, never on stored jobs.
 	SubmissionReused       bool             `json:"submission_reused,omitempty"`
 	LastHealthAlertAttempt int              `json:"last_health_alert_attempt,omitempty"`

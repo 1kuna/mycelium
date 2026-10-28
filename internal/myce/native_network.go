@@ -1,9 +1,9 @@
 package myce
 
-// Every native execution requires an explicitly advertised kernel boundary.
-// Missing reports (including old workers) never authorize relaxing isolation.
+// Sandboxed native execution requires an advertised kernel boundary. Only the
+// frozen stage policy can waive that requirement, including legacy registrations.
 func nativeNetworkFits(j *Job, m *Machine) bool {
-	if j.Spec.Run.Docker {
+	if j.Spec.Run.Docker || nativeUnsandboxed(j) {
 		return true
 	}
 	if !contains(m.Capabilities, "native_isolation_landlock") && !contains(m.Capabilities, "native_isolation_namespace") && !contains(m.Capabilities, "native_isolation_seatbelt") {
@@ -35,7 +35,7 @@ func nativeNetworkRequired(j *Job) bool {
 // A child may only report EPERM/exit status for a network refusal. Keep the
 // declaration and capability remedy in its attempt diagnostic.
 func nativeAttemptError(j Job, message string) string {
-	if message != "" && !j.Spec.Run.Docker && !j.Spec.Needs.Network {
+	if message != "" && !j.Spec.Run.Docker && !nativeUnsandboxed(&j) && !j.Spec.Needs.Network {
 		return message + "; native networking is offline except reserved sidecar ports; declare needs.network: true for general outbound access (requires a capable host)"
 	}
 	return message

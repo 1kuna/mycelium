@@ -399,7 +399,10 @@ func (g *nativeGroup) startSupervisor(s *workerStore, env map[string]string) (*o
 	cmd.Env = environmentList(jobBaseEnvironment())
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	work := filepath.Join(g.dir, "job-files", g.p.job.ID, strconv.Itoa(g.p.job.Attempt))
-	g.namespace, err = g.worker.prepareNativeGroupIsolation(cmd, g.dir, work, env, g.p.job.Spec.Needs.Network)
+	g.namespace = nil
+	if !nativeUnsandboxed(&g.p.job) {
+		g.namespace, err = g.worker.prepareNativeGroupIsolation(cmd, g.dir, work, env, g.p.job.Spec.Needs.Network)
+	}
 	if err != nil {
 		writer.Close()
 		return nil, err
@@ -631,7 +634,7 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 		env["MYCE_MEMORY_LIMIT_BYTES"] = strconv.FormatInt(m.memory.bytes, 10)
 	}
 	cmd.Env = environmentList(env)
-	if err := g.namespace.isolate(g.metricWorker(), cmd, g.dir, work, env, g.isolationPorts, g.p.job.Spec.Needs.Network, m.Name == "main"); err != nil {
+	if err := g.metricWorker().isolateNativeAttempt(&g.p.job, g.namespace, cmd, g.dir, work, env, g.isolationPorts, m.Name == "main"); err != nil {
 		return err
 	}
 	cmd.Stdout = output
