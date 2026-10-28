@@ -256,6 +256,8 @@ func TestProductionStartGateExecutionAndReplay(t *testing.T) {
 	defer server.Close()
 	w := recoveryWorker(t)
 	w.Machine = machine("b70", "xpu", "test-host")
+	w.Machine.Device = "0"
+	w.nativeGPUDeviceProbe = syntheticNativeGPUDeviceProbe(MachineDevice{ID: "0", Platform: "xpu", Selector: "0"})
 	w.InventoryProbe = benchmarkTestInventory
 	w.CPUIsolationProbe = func(context.Context) error { return nil }
 	w.Client = Client{URL: server.URL, Token: "test"}
