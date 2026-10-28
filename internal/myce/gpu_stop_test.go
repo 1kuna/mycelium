@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
@@ -114,7 +115,13 @@ func testGPUStopNative(t *testing.T, cooperative bool, stopPath string, directiv
 	// The helper exits on TERM while main may still be draining. Its exit must
 	// not trigger the unconditional cleanup KILL that bypassed group grace.
 	j.Spec.Run.Sidecars = []NativeSidecar{{Name: "helper", Command: command("helper", true), MemoryGB: 1}}
-	p, err := w.start(store, j)
+	var p *process
+	// Reuse pending input preparation, as Worker.Run does, before exercising
+	// the unchanged group TERM/grace behavior.
+	await(t, func() bool {
+		p, err = w.start(store, j)
+		return !errors.Is(err, errWorkerCheckpoint) || !strings.Contains(err.Error(), "input copy pending")
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
