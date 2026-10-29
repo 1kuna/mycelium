@@ -69,24 +69,42 @@ func TestInventoryRereviewLaunchProbeRetry(t *testing.T) {
 							t.Fatal(err)
 						}
 						var p *process
-						if attempt == 1 {
-							budget := store.extensionFiles.timeout
-							store.extensionFiles.timeout = time.Nanosecond
+						// Force an input deferral before the launch fault when it is
+						// reachable, then join completion without shifting probe order.
+						budget := store.extensionFiles.timeout
+						store.extensionFiles.timeout = time.Nanosecond
+						for {
+							before := calls
 							p, err = bound.start(store, j)
 							store.extensionFiles.timeout = budget
-							t.Logf("first start: process=%v error=%v probes=%d", p, err, calls)
-						} else {
-							// The clean retry consumes its pending inputs without
-							// changing the first attempt's counted fault probes.
-							await(t, func() bool {
-								p, err = bound.start(store, j)
-								return !errors.Is(err, errWorkerCheckpoint) || !strings.Contains(err.Error(), "input copy pending")
-							})
+							if !errors.Is(err, errWorkerCheckpoint) || !strings.Contains(err.Error(), "input copy pending") {
+								break
+							}
+							if p != nil {
+								t.Fatal("input preparation returned a process before joining")
+							}
+							// A deferred start repeats only the entry probe, not a
+							// launch probe. Keep the injected launch fault at its site.
+							calls = before
+							store.extensionFiles.mu.Lock()
+							pending := store.extensionFiles.pending
+							store.extensionFiles.mu.Unlock()
+							if pending != nil {
+								select {
+								case <-pending.done:
+								case <-time.After(testWaitTimeout):
+									t.Fatal("fixture input preparation did not finish")
+								}
+							}
+							t.Log("joined input preparation before counted launch probes")
 						}
 						var r Result
 						if attempt == 1 {
 							if p != nil || err == nil {
-								t.Fatal("launch probe did not refuse execution")
+								t.Fatalf("launch probe did not refuse execution: process=%v error=%v probes=%d", p, err, calls)
+							}
+							if calls != probe {
+								t.Fatalf("refused at probe %d; want %d: %v", calls, probe, err)
 							}
 							r = startFailureOutcome(result(&j, false), err)
 							data, e := os.ReadFile(filepath.Join(store.dir, fmt.Sprintf("launch-%s-%d.outcome.json", j.ID, j.Attempt)))
