@@ -790,7 +790,7 @@ func (c *EnvironmentCache) Acquire(ctx context.Context, r EnvironmentRecipe) (st
 	}
 	for attempt := 0; attempt < 2; attempt++ {
 		e = c.ensure(ctx, r)
-		if !errors.Is(e, errEnvironmentBuildStalled) || ctx.Err() != nil {
+		if !errors.Is(e, errEnvironmentBuildStalled) || errors.Is(e, errWorkerReleasePending) || ctx.Err() != nil {
 			break
 		}
 		if attempt == 0 {
@@ -812,7 +812,7 @@ func (c *EnvironmentCache) Acquire(ctx context.Context, r EnvironmentRecipe) (st
 	}
 	return path, release, nil
 }
-func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) error {
+func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) (ensureErr error) {
 	build, e := c.lock(ctx, r.Key+".build", syscall.LOCK_EX)
 	if e != nil {
 		return e
@@ -831,7 +831,16 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) erro
 		return e
 	}
 	defer func() {
-		if !c.ready(r.Key) && c.cleanupBuild(partial) == nil {
+		if !c.ready(r.Key) {
+			if err := c.cleanupBuild(partial); err != nil {
+				// Transfer unconfirmed helper custody while .build still fences
+				// this receipt. An attempt must not release merely because its
+				// cancelled builder returned an ordinary command error.
+				if retain, ok := ctx.Value(preparationCustodyKey{}).(func(string) error); ok {
+					ensureErr = errors.Join(ensureErr, errWorkerReleasePending, err, retain(filepath.Join(partial, "build-state.json")))
+				}
+				return
+			}
 			if errors.Is(e, errEnvironmentBuildStalled) {
 				// Only this just-created, never-published build is disposable.
 				// Its recorded process has been reaped and .build is still held;

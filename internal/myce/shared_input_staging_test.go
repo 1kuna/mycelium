@@ -1,6 +1,9 @@
 package myce
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"errors"
 	"net/http"
@@ -11,6 +14,75 @@ import (
 	"testing"
 	"time"
 )
+
+func TestSharedInputStagingArchiveProgressAndCancellation(t *testing.T) {
+	for _, format := range []string{"tar", "tar.gz"} {
+		for _, stopped := range []bool{false, true} {
+			t.Run(format+map[bool]string{false: "/progress", true: "/cancel"}[stopped], func(t *testing.T) {
+				var archive bytes.Buffer
+				tw := tar.NewWriter(&archive)
+				payload := bytes.Repeat([]byte("fixture"), 64<<10)
+				if err := tw.WriteHeader(&tar.Header{Name: "data", Mode: 0600, Size: int64(len(payload))}); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := tw.Write(payload); err != nil {
+					t.Fatal(err)
+				}
+				if err := tw.Close(); err != nil {
+					t.Fatal(err)
+				}
+				var compressed bytes.Buffer
+				if format == "tar.gz" {
+					z := gzip.NewWriter(&compressed)
+					if _, err := z.Write(archive.Bytes()); err != nil {
+						t.Fatal(err)
+					}
+					if err := z.Close(); err != nil {
+						t.Fatal(err)
+					}
+					archive = compressed
+				}
+				source := filepath.Join(t.TempDir(), "archive")
+				if err := os.WriteFile(source, archive.Bytes(), 0600); err != nil {
+					t.Fatal(err)
+				}
+				clock := &workerFakeClock{now: time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)}
+				cache := &SharedInputCache{cache: EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: clock}}
+				if err := cache.cache.init(); err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				started := clock.Now()
+				published := false
+				err := cache.stageInput(ctx, func(ctx context.Context, stage string) error {
+					progress := ctx.Value(ioProgressKey{}).(func())
+					ctx = context.WithValue(ctx, ioProgressKey{}, func() {
+						clock.Advance(20 * time.Second)
+						progress()
+						if stopped {
+							cancel()
+						}
+					})
+					dest := filepath.Join(stage, "data")
+					if err := unpackSharedArchive(ctx, source, dest, format, int64(len(payload))); err != nil {
+						return err
+					}
+					_, err := identifyFileContext(ctx, filepath.Join(dest, "data"))
+					return err
+				}, func(string) error { published = true; return nil })
+				<-cache.staging.done
+				if stopped {
+					if !errors.Is(err, context.Canceled) || published {
+						t.Fatal("archive ignored cancellation", err)
+					}
+				} else if err != nil || !published || clock.Now().Sub(started) <= checkpointAvailabilityStallBudget {
+					t.Fatal("active archive extraction/hashing did not renew progress", err, clock.Now().Sub(started))
+				}
+			})
+		}
+	}
+}
 
 // #364: stop must reach the actor while a NAS syscall has not returned. Use
 // the real queue/actor/cache locks, but block only the source-I/O fault seam.

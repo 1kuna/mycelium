@@ -268,6 +268,9 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 				return err
 			}
 			err = filepath.WalkDir(dst, func(p string, d os.DirEntry, e error) error {
+				if err := sharedInputProgress(ctx); err != nil {
+					return err
+				}
 				if e != nil {
 					return e
 				}
@@ -278,7 +281,7 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 				if e != nil {
 					return e
 				}
-				ref, e := IdentifyFile(p)
+				ref, e := identifyFileContext(ctx, p)
 				if e == nil {
 					files[filepath.ToSlash(name)] = ref
 				}
@@ -539,7 +542,7 @@ func unpackSharedArchive(ctx context.Context, source, dest, format string, limit
 	defer f.Close()
 	var reader io.Reader = contextReader{ctx, f}
 	if format == "tar.gz" {
-		z, e := gzip.NewReader(f)
+		z, e := gzip.NewReader(reader)
 		if e != nil {
 			return e
 		}
@@ -549,7 +552,7 @@ func unpackSharedArchive(ctx context.Context, source, dest, format string, limit
 	if err = os.Mkdir(dest, 0700); err != nil {
 		return err
 	}
-	tr := tar.NewReader(reader)
+	tr := tar.NewReader(contextReader{ctx, reader})
 	var used int64
 	for {
 		if err = ctx.Err(); err != nil {
