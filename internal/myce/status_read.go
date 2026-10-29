@@ -151,10 +151,14 @@ func (q *Queue) captureObservation(id string, contexts ...context.Context) (*Que
 	}
 	// Capture release/scope before receipt minimization loses descendants and
 	// cold terminal dependency edges. These values never mutate persisted jobs.
+	var cancellations *Queue
 	for key, j := range s.Jobs {
 		if original := q.s.Jobs[key]; original != nil && (original.CancelledAt != nil || original.FanOut != nil) {
+			if cancellations == nil {
+				cancellations = q.cancellationObservation()
+			}
 			copy := *j
-			q.projectCancellation(&copy, original)
+			cancellations.projectCancellation(&copy, original)
 			s.Jobs[key] = &copy
 		}
 	}

@@ -227,6 +227,12 @@ can therefore delay loss detection by at most 30 seconds, without refreshing
 credit. Queue capacity limits still require separate correction; start requests
 that exceed their ten-second budget remain bounded failures.
 
+Status capture batches retained fan-out cancellation membership once per capture,
+including removed waves and consumers. It reuses that read-only view for scope
+and release checks instead of repeatedly scanning all retained jobs/submissions
+under the queue lock. The view is discarded after capture; exact execution
+acknowledgements still determine release, and elapsed time never proves cleanup.
+
 The queue emits one `event=slow_launch_authorization` line for an authorization
 taking at least 500 ms. `duration_ms` covers the authorization, including the
 checkpoint probe, queue-lock wait and persistence; `mutex_wait_ms` isolates waiting

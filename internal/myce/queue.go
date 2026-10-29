@@ -92,6 +92,9 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
+	// Built once on a read-only cancellation projection, never on the live queue.
+	cancellationMembersByParent map[string][]*Job
+
 	requestLatencies                requestLatencies
 	healthStoreProbe                checkpointAvailability
 	healthNotifier                  string
