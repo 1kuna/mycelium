@@ -42,17 +42,18 @@ type adapterVariant struct {
 	Sweeps       map[string]myce.ReferenceSweep    `yaml:"sweeps,omitempty"`
 }
 type adapterEntry struct {
-	myce.Spec    `yaml:",inline"`
-	Source       profileSource     `yaml:"source,omitempty"`
-	Checks       adapterChecks     `yaml:"checks,omitempty"`
-	MemoryClass  string            `yaml:"memory_class,omitempty"`
-	Variants     []adapterVariant  `yaml:"variants,omitempty"`
-	Version      string            `yaml:"version,omitempty"`
-	Purpose      string            `yaml:"purpose,omitempty"`
-	Kinds        []string          `yaml:"kinds,omitempty"`
-	ProgramTypes []string          `yaml:"program_types,omitempty"`
-	Assets       myce.FileManifest `yaml:"assets,omitempty"`
-	Notes        string            `yaml:"notes,omitempty"`
+	RequirementReasons map[string]string `yaml:"requirement_reasons,omitempty"`
+	myce.Spec          `yaml:",inline"`
+	Source             profileSource     `yaml:"source,omitempty"`
+	Checks             adapterChecks     `yaml:"checks,omitempty"`
+	MemoryClass        string            `yaml:"memory_class,omitempty"`
+	Variants           []adapterVariant  `yaml:"variants,omitempty"`
+	Version            string            `yaml:"version,omitempty"`
+	Purpose            string            `yaml:"purpose,omitempty"`
+	Kinds              []string          `yaml:"kinds,omitempty"`
+	ProgramTypes       []string          `yaml:"program_types,omitempty"`
+	Assets             myce.FileManifest `yaml:"assets,omitempty"`
+	Notes              string            `yaml:"notes,omitempty"`
 	// Legacy native recipes are converted to exact variants. These shared fields
 	// also make a flat native recipe possible, using the same recipe types.
 	Environments map[string]myce.EnvironmentRecipe `yaml:"environments,omitempty"`
@@ -217,7 +218,7 @@ func adapterProfile(a projectAdapter, name string) (executionProfile, []byte, er
 	}
 	native := len(e.Variants) > 0 || len(e.Checks.Qualification) > 0 || len(e.Baselines) > 0 || len(e.Environments) > 0 || len(e.Setup) > 0 || len(e.Kinds)+len(e.ProgramTypes)+len(e.Assets)+len(e.References)+len(e.Sweeps) > 0
 	if native {
-		x := myce.Extension{Name: p.Name, Version: e.Version, Purpose: e.Purpose, DefaultClass: p.Class, Resumable: p.Resumable, Kinds: e.Kinds, ProgramTypes: e.ProgramTypes, Assets: e.Assets, Notes: e.Notes, Isolation: e.Isolation, Reason: e.Reason}
+		x := myce.Extension{RequirementReasons: e.RequirementReasons, Name: p.Name, Version: e.Version, Purpose: e.Purpose, DefaultClass: p.Class, Resumable: p.Resumable, Kinds: e.Kinds, ProgramTypes: e.ProgramTypes, Assets: e.Assets, Notes: e.Notes, Isolation: e.Isolation, Reason: e.Reason}
 		for name := range e.Outputs {
 			x.Outputs = append(x.Outputs, name)
 		}

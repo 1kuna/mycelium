@@ -28,6 +28,18 @@ func (a API) HandlerWithJoiningIdentity(pin string) http.Handler { return a.hand
 
 func (a API) handler(joiningPin string) http.Handler {
 	mux := newRequestMux()
+	mux.HandleFunc("GET /api/portability", func(w http.ResponseWriter, r *http.Request) {
+		report, err := a.Queue.Portability(PortabilityRequest{Extension: r.URL.Query().Get("extension"), Project: r.URL.Query().Get("project")})
+		respondOperation(w, report, err, "portability_invalid")
+	})
+	mux.HandleFunc("POST /api/portability", func(w http.ResponseWriter, r *http.Request) {
+		var request PortabilityRequest
+		if !decode(w, r, &request) {
+			return
+		}
+		report, err := a.Queue.Portability(request)
+		respondOperation(w, report, err, "portability_invalid")
+	})
 	a.registerInvites(mux, joiningPin)
 	a.registerEnrollmentRelease(mux)
 	a.registerEnrollment(mux)
