@@ -217,8 +217,11 @@ failure remains an infrastructure interruption under the bounded retry policy.
 
 A check-in from the current accepted worker session counts as contact before
 waiting for the queue lock, for at most 30 seconds from its arrival. Request
-cancellation or rejection removes that pending credit. An accepted check-in
-refreshes contact when processing finishes. A report rejected by later validation
+cancellation retains only that original bounded credit, so a client deadline
+during queue contention does not turn queue delay into worker silence (#343).
+It neither refreshes `LastSeen` nor extends the arrival deadline. A noncancelled
+rejection removes pending credit. An accepted check-in refreshes contact when
+processing finishes. A report rejected by later validation
 can therefore delay loss detection by at most 30 seconds, without refreshing
 `LastSeen`; an unauthenticated or mismatched-session report receives no pending
 credit. Queue capacity limits still require separate correction; start requests
