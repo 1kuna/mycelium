@@ -46,14 +46,16 @@ type EnrollmentResult struct {
 func (a API) registerEnrollment(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/workers/{id}/enrollment", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-		out, err := a.Queue.enrollmentObservation(r.PathValue("id"), r.URL.Query().Get("session"))
+		out, err := a.Queue.enrollmentObservation(r.PathValue("id"), r.URL.Query().Get("session"), r.Context())
 		respondOperation(w, out, err, "status_unavailable")
 	})
 }
 
-func (q *Queue) enrollmentObservation(id, session string) (EnrollmentObservation, error) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
+func (q *Queue) enrollmentObservation(id, session string, requestContexts ...context.Context) (EnrollmentObservation, error) {
+	requestCtx := requestContext(requestContexts)
+
+	requestUnlock1 := requestLock(requestCtx, &q.mu)
+	defer requestUnlock1()
 	m := q.s.Machines[id]
 	if m == nil || m.Session != session || session == "" {
 		return EnrollmentObservation{}, ErrStale

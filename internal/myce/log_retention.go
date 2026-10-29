@@ -37,10 +37,12 @@ func (q *Queue) ConfigureLogRetention(age time.Duration) error {
 
 // Snapshot a bounded wave under q.mu; all log-table I/O runs outside it.
 // Terminal attempts cannot append more logs (AppendLog requires current work).
-func (q *Queue) pruneBatchLogs() error {
-	q.mu.Lock()
+func (q *Queue) pruneBatchLogs(requestContexts ...context.Context) error {
+	requestCtx := requestContext(requestContexts)
+
+	requestUnlock1 := requestLock(requestCtx, &q.mu)
 	if q.simulation {
-		q.mu.Unlock()
+		requestUnlock1()
 		return nil
 	}
 	if q.records == nil {
@@ -52,7 +54,7 @@ func (q *Queue) pruneBatchLogs() error {
 	for _, id := range ids {
 		q.records.logs.set(id, now.Add(time.Minute))
 	}
-	q.mu.Unlock()
+	requestUnlock1()
 	var result error
 	for _, id := range ids {
 		complete := true
@@ -74,13 +76,13 @@ func (q *Queue) pruneBatchLogs() error {
 			}
 		}
 		if complete {
-			q.mu.Lock()
+			requestUnlock2 := requestLock(requestCtx, &q.mu)
 			q.records.logs.set(id, time.Time{})
 			if j := q.s.Jobs[id]; j != nil {
 				q.records.logsDone[id] = true
 				q.indexJob(id, j)
 			}
-			q.mu.Unlock()
+			requestUnlock2()
 		}
 	}
 	return result

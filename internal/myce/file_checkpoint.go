@@ -96,7 +96,7 @@ func (q *Queue) publishCheckpoint(ctx context.Context, p checkpointPublication) 
 	if generation != p.Checkpoint.Generation {
 		return errors.New("checkpoint generation does not match saved bytes")
 	}
-	return q.update(func() error {
+	return q.updateRequest(ctx, func() error {
 		j := q.touchJob(p.ID)
 		if j == nil || !j.FileTransport || !j.Spec.Resumable || terminal(j.State) || cancelled(j) {
 			return ErrStale
@@ -122,7 +122,7 @@ func (q *Queue) publishCheckpoint(ctx context.Context, p checkpointPublication) 
 		}
 		j.FileCheckpoints[p.Attempt] = p.Checkpoint
 		return nil
-	})
+	}, nil)
 }
 func (a API) checkpointHandler(w http.ResponseWriter, r *http.Request) {
 	var p checkpointPublication

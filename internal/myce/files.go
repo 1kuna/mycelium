@@ -112,12 +112,12 @@ type FileStore struct {
 	handler       http.Handler
 	uploadLocker  tus.Locker
 	syncDir       func(string) error // Durability failure injection.
-	expired       func(string) bool
+	expired       func(string, ...context.Context) bool
 	lifecycle     *sync.RWMutex
 	clock         Clock
-	recordUpload  func(hash, purpose string, created bool) error
-	publishUpload func(hash string) error
-	recordBundle  func(hash string, created bool) error
+	recordUpload  func(hash, purpose string, created bool, contexts ...context.Context) error
+	publishUpload func(hash string, contexts ...context.Context) error
+	recordBundle  func(hash string, created bool, contexts ...context.Context) error
 }
 type FileConfig struct {
 	Checkpoints bool `json:"checkpoints"`
@@ -175,7 +175,7 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 			if err := ref.validate(); err != nil || e.Upload.SizeIsDeferred {
 				return tus.HTTPResponse{}, tus.FileInfoChanges{}, errors.New("invalid file upload identity")
 			}
-			if err := s.recordUpload(ref.SHA256, e.Upload.MetaData["purpose"], true); err != nil {
+			if err := s.recordUpload(ref.SHA256, e.Upload.MetaData["purpose"], true, e.Context); err != nil {
 				return tus.HTTPResponse{}, tus.FileInfoChanges{}, err
 			}
 			return tus.HTTPResponse{}, tus.FileInfoChanges{ID: ref.SHA256}, nil
@@ -187,10 +187,10 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 			}
 			// An internal writer may have created the same blob after this
 			// upload's POST. Publication must still honor the import's custody.
-			if err := s.recordUpload(ref.SHA256, e.Upload.MetaData["purpose"], false); err != nil {
+			if err := s.recordUpload(ref.SHA256, e.Upload.MetaData["purpose"], false, e.Context); err != nil {
 				return tus.HTTPResponse{}, err
 			}
-			return tus.HTTPResponse{}, s.publishUpload(ref.SHA256)
+			return tus.HTTPResponse{}, s.publishUpload(ref.SHA256, e.Context)
 		},
 	})
 	if err != nil {
@@ -319,7 +319,7 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "storage durability unavailable", 503)
 			return
 		}
-		if e := s.recordUpload(hash, purpose, false); e != nil {
+		if e := s.recordUpload(hash, purpose, false, r.Context()); e != nil {
 			http.Error(w, "upload purpose persistence unavailable", 503)
 			return
 		}
@@ -334,7 +334,7 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "storage freshness unavailable", 503)
 			return
 		}
-		if e := s.recordUpload(hash, purpose, false); e != nil {
+		if e := s.recordUpload(hash, purpose, false, r.Context()); e != nil {
 			http.Error(w, "upload purpose persistence unavailable", 503)
 			return
 		}
@@ -386,7 +386,7 @@ func (s *FileStore) serveBlob(w http.ResponseWriter, r *http.Request, metadata b
 		return
 	}
 	missing := func() {
-		if s.expired != nil && s.expired(hash) {
+		if s.expired != nil && s.expired(hash, r.Context()) {
 			w.Header().Set("X-Myce-Error-Code", "result_expired")
 			respond(w, nil, resultExpired())
 		} else {
@@ -436,7 +436,7 @@ func (s *FileStore) serveBlob(w http.ResponseWriter, r *http.Request, metadata b
 	// Ordinary HasFile/HEAD probes never change its purpose. This avoids POST's
 	// global upload-creation lock for duplicate checkpoints and other imports.
 	if r.Method == http.MethodHead && r.Header.Get("X-Myce-Upload-Purpose") == fileImportUploadPurpose {
-		if err = s.recordUpload(hash, fileImportUploadPurpose, false); err != nil {
+		if err = s.recordUpload(hash, fileImportUploadPurpose, false, r.Context()); err != nil {
 			http.Error(w, "upload purpose persistence unavailable", 503)
 			return
 		}

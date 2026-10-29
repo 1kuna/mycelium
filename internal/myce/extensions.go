@@ -2,6 +2,7 @@ package myce
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -295,22 +296,24 @@ func ReadExtension(folder string) (Extension, error) {
 	}
 	return extensionFromFiles(files)
 }
-func (q *Queue) AddExtension(e Extension) error {
+func (q *Queue) AddExtension(e Extension, requestContexts ...context.Context) error {
+	requestCtx := requestContext(requestContexts)
+
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
 	checked, err := extensionFromFiles(e.Files)
 	if err != nil {
 		return err
 	}
-	q.mu.RLock()
+	requestUnlock1 := requestReadLock(requestCtx, &q.mu)
 	store := q.files
-	q.mu.RUnlock()
+	requestUnlock1()
 	if !q.simulation {
-		if err := store.freezeExtension(&checked); err != nil {
+		if err := store.freezeExtension(&checked, requestCtx); err != nil {
 			return err
 		}
 	}
-	return q.update(func() error {
+	return q.updateRequest(requestCtx, func() error {
 		if q.files != store {
 			return ErrStale
 		}
@@ -332,11 +335,13 @@ func (q *Queue) AddExtension(e Extension) error {
 			}
 		}
 		return nil
-	})
+	}, nil)
 }
-func (q *Queue) Extensions() []Extension {
-	q.mu.Lock()
-	defer q.mu.Unlock()
+func (q *Queue) Extensions(requestContexts ...context.Context) []Extension {
+	requestCtx := requestContext(requestContexts)
+
+	requestUnlock1 := requestLock(requestCtx, &q.mu)
+	defer requestUnlock1()
 	out := []Extension{}
 	for _, e := range q.s.Extensions {
 		e.Files = nil

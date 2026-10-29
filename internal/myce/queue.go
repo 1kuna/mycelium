@@ -89,6 +89,7 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
+	requestLatencies                requestLatencies
 	healthStoreProbe                checkpointAvailability
 	healthNotifier                  string
 	healthStorageDelay              time.Duration
@@ -426,6 +427,10 @@ func (q *Queue) update(fn func() error) error {
 }
 
 func (q *Queue) updateTimed(fn func() error, timing *queueUpdateTiming) error {
+	return q.updateRequest(context.Background(), fn, timing)
+}
+
+func (q *Queue) updateRequest(ctx context.Context, fn func() error, timing *queueUpdateTiming) error {
 	available := true
 	if !q.simulation {
 		if q.checkpointProbe != nil {
@@ -436,7 +441,7 @@ func (q *Queue) updateTimed(fn func() error, timing *queueUpdateTiming) error {
 			})
 		}
 	}
-	if timing == nil && q.observeUpdate != nil {
+	if timing == nil && (q.observeUpdate != nil || spanFrom(ctx) != nil) {
 		timing = &queueUpdateTiming{}
 	}
 	timing.lock(&q.mu)
@@ -445,7 +450,7 @@ func (q *Queue) updateTimed(fn func() error, timing *queueUpdateTiming) error {
 	defer func() {
 		duration := queueHoldDuration(hold)
 		timing.observe(q.observeUpdate)
-		q.mu.Unlock()
+		unlockTimedRequest(ctx, &q.mu, timing)
 		logQueueHold(duration, "update", fn)
 	}()
 	if q.stopping {
@@ -550,7 +555,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 	if err != nil {
 		return nil, err
 	}
-	q.mu.Lock()
+	unlockRequest := requestLock(ctx, &q.mu)
 	// Own all client maps/slices across the unlocked verification interval.
 	s = cloneJob(&Job{Spec: s}).Spec
 	store := q.files
@@ -561,7 +566,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		q.submitVerificationSlot = make(chan struct{}, 1)
 	}
 	slot := q.submitVerificationSlot
-	q.mu.Unlock()
+	unlockRequest()
 	var verificationErr error
 	if len(submissionFiles(s)) > 0 && !replay {
 		verificationErr = verifySubmissionInputs(ctx, store, submissionFiles(s), slot)
@@ -584,17 +589,17 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		}
 		if recipeErr == nil && !q.simulation {
 			verified := map[FileRef]bool{}
-			recipeErr = store.freezeRecipes(recipes, verified)
+			recipeErr = store.freezeRecipes(recipes, verified, ctx)
 			for _, side := range sidecarRecipes {
 				if recipeErr != nil {
 					break
 				}
-				recipeErr = store.freezeRecipes(side, verified)
+				recipeErr = store.freezeRecipes(side, verified, ctx)
 			}
 		}
 	}
 	var out Job
-	err = q.update(func() error {
+	err = q.updateRequest(ctx, func() error {
 		q.maintainSubmissions()
 		existing, err := q.existingSubmission(s, fingerprint)
 		if err != nil {
@@ -724,7 +729,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		q.maintain()
 		out = cloneJob(j)
 		return nil
-	})
+	}, nil)
 	if err == nil {
 		err = store.hydrateJob(&out) // Submit holds the publication fence through delivery.
 	}
@@ -923,17 +928,21 @@ func (q *Queue) maintain() {
 		}
 	}
 }
-func (q *Queue) Tick() error {
+func (q *Queue) Tick() error { return q.TickContext(context.Background()) }
+
+func (q *Queue) TickContext(requestContexts ...context.Context) error {
+	requestCtx := requestContext(requestContexts)
+
 	// File-store health belongs to existing maintenance, not every control
 	// transaction. Snapshot under the lock, then perform bounded I/O outside it.
-	q.mu.RLock()
+	requestUnlock1 := requestReadLock(requestCtx, &q.mu)
 	files := q.files
-	q.mu.RUnlock()
+	requestUnlock1()
 	fileAvailable := true
 	if !q.simulation && files != nil {
 		fileAvailable, _ = q.healthStoreProbe.runProgress(files.root, func(progress func()) (bool, error) { return checkpointAvailable(files.root, progress), nil })
 	}
-	if err := q.update(func() error {
+	if err := q.updateRequest(requestCtx, func() error {
 		delay := q.healthStorageDelay
 		if delay <= 0 {
 			delay = DefaultHealthStorageDelay
@@ -941,10 +950,10 @@ func (q *Queue) Tick() error {
 		q.observeHealth("queue-files", !fileAvailable, delay, HealthAlert{Kind: "checkpoint_store_unavailable", Store: "queue-file-store"})
 		q.maintain()
 		return nil
-	}); err != nil {
+	}, nil); err != nil {
 		return err
 	}
-	return errors.Join(q.pruneBatchLogs(), q.reclaimJobFiles(), q.pruneJobHistory())
+	return errors.Join(q.pruneBatchLogs(requestCtx), q.reclaimJobFilesContext(requestCtx), q.pruneJobHistory(requestCtx))
 }
 func (q *Queue) Checkin(c Checkin) (Reply, error) {
 	return q.CheckinContext(context.Background(), c)
@@ -962,7 +971,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 	if err := validateCurrentCheckin(c); err != nil {
 		return Reply{}, err
 	}
-	settle := q.beginCheckin(c.Machine.ID, c.Machine.Session)
+	settle := q.beginCheckin(c.Machine.ID, c.Machine.Session, ctx)
 	defer settle(false) // No-op once settled; a panicking check-in stops counting as contact.
 	stopCancellation := context.AfterFunc(ctx, func() { settle(false) })
 	defer stopCancellation()
@@ -974,7 +983,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 	progresses := make([]attemptProgress, len(reports))
 	for i := range reports {
 		report, progress := &reports[i], &progresses[i]
-		q.mu.Lock()
+		unlockRequest := requestLock(ctx, &q.mu)
 		if j := q.s.Jobs[report.ID]; j != nil && j.FileTransport {
 			report.Progress = 0
 			if save, ok := j.FileCheckpoints[report.Attempt]; ok {
@@ -986,7 +995,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 		} else if j != nil && j.Spec.Resumable && j.Attempt != report.Attempt {
 			progress.path = attemptCheckpoint(*j)
 		}
-		q.mu.Unlock()
+		unlockRequest()
 		if progress.path != "" {
 			progress.durable, progress.err = q.nasProgress.run(progress.path, func() (int64, error) {
 				generation, err := checkpointProgress(progress.path)
@@ -997,7 +1006,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 			})
 		}
 	}
-	err = q.update(func() error {
+	err = q.updateRequest(ctx, func() error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
@@ -1327,7 +1336,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 		}
 		q.maintain()
 		return nil
-	})
+	}, nil)
 	settle(err == nil)
 	if reply.Job != nil {
 		relative, e := filepath.Rel(q.root, reply.Job.Checkpoint)
@@ -1347,7 +1356,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 	}
 	reply = attemptReply(c, reply)
 	if err == nil {
-		err = q.hydrateReply(&reply)
+		err = q.hydrateReply(&reply, ctx)
 	}
 	return reply, err
 }
@@ -1371,7 +1380,7 @@ func (q *Queue) Complete(r Result) error {
 func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
-	q.mu.Lock()
+	unlockRequest := requestLock(ctx, &q.mu)
 	j, err := q.current(r)
 	verify := err == nil && j.storedFileResults() && j.State == "running" && !cancelled(j) && (r.Success && !r.Interrupted || !r.Success && r.Diagnostics != nil && j.Spec.Diagnostics != nil) && !r.ReleaseOnly
 	var outputs map[string]string
@@ -1387,7 +1396,7 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 			}
 		}
 	}
-	q.mu.Unlock()
+	unlockRequest()
 	if verify {
 		if r.Success && len(outputs) != len(r.OutputRefs) {
 			return errors.New("complete output manifest required")
@@ -1414,7 +1423,7 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 		ctx = verificationCtx
 	}
 	var rejected error
-	err = q.update(func() error {
+	err = q.updateRequest(ctx, func() error {
 		if verify {
 			q.maintainStartDeadlines()
 			j, err := q.current(r)
@@ -1434,7 +1443,7 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 			rejected = ErrStale
 		}
 		return q.complete(r, verify)
-	})
+	}, nil)
 	if err != nil {
 		return err
 	}
@@ -1653,8 +1662,10 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 	q.maintain()
 	return nil
 }
-func (q *Queue) Leave(id string, now bool) error {
-	return q.update(func() error {
+func (q *Queue) Leave(id string, now bool, requestContexts ...context.Context) error {
+	requestCtx := requestContext(requestContexts)
+
+	return q.updateRequest(requestCtx, func() error {
 		q.maintain()
 		m := q.s.Machines[id]
 		if m == nil || m.Gone {
@@ -1667,18 +1678,18 @@ func (q *Queue) Leave(id string, now bool) error {
 			}
 		}
 		return nil
-	})
+	}, nil)
 }
 func (q *Queue) Snapshot() (Snapshot, error) { return q.snapshot(false) }
 
-func (q *Queue) snapshot(forStatus bool) (Snapshot, error) {
+func (q *Queue) snapshot(forStatus bool, contexts ...context.Context) (Snapshot, error) {
 	if forStatus {
-		return q.statusSnapshot()
+		return q.statusSnapshot(contexts...)
 	}
 	var out Snapshot
-	err := q.update(func() error { q.maintain(); out = q.projectSnapshot(false); return nil })
+	err := q.updateRequest(requestContext(contexts), func() error { q.maintain(); out = q.projectSnapshot(false); return nil }, nil)
 	if err == nil {
-		out.Usage, err = q.usageSnapshot(out.Now.Add(-7 * 24 * time.Hour))
+		out.Usage, err = q.usageSnapshot(out.Now.Add(-7*24*time.Hour), requestContext(contexts))
 	}
 	return out, err
 }
@@ -1959,9 +1970,11 @@ func (q *Queue) projectJobDiagnostics(j *Job, forStatus, jobReply bool) {
 	}
 }
 
-func (q *Queue) AppendLog(l LogChunk) error {
-	q.mu.Lock()
-	defer q.mu.Unlock()
+func (q *Queue) AppendLog(l LogChunk, requestContexts ...context.Context) error {
+	requestCtx := requestContext(requestContexts)
+
+	requestUnlock1 := requestLock(requestCtx, &q.mu)
+	defer requestUnlock1()
 	j, err := q.current(l.Result)
 	if err != nil {
 		return err
@@ -2006,9 +2019,11 @@ type Log struct {
 	Text    string `json:"text"`
 }
 
-func (q *Queue) Logs(id string, after int64) ([]Log, error) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
+func (q *Queue) Logs(id string, after int64, requestContexts ...context.Context) ([]Log, error) {
+	requestCtx := requestContext(requestContexts)
+
+	requestUnlock1 := requestLock(requestCtx, &q.mu)
+	defer requestUnlock1()
 	if q.s.Jobs[id] == nil {
 		jobs := []*Job{}
 		for _, j := range q.s.Jobs {
@@ -2100,9 +2115,11 @@ func (q *Queue) markStarted(j *Job) {
 		}
 	}
 }
-func (q *Queue) Started(r Result) error {
+func (q *Queue) Started(r Result, requestContexts ...context.Context) error {
+	requestCtx := requestContext(requestContexts)
+
 	var rejected error
-	err := q.update(func() error {
+	err := q.updateRequest(requestCtx, func() error {
 		q.maintain()
 		j, e := q.current(r)
 		if e != nil {
@@ -2122,7 +2139,7 @@ func (q *Queue) Started(r Result) error {
 		retainInputsStagedAt(j, r.InputsStagedAt)
 		q.markStarted(j)
 		return nil
-	})
+	}, nil)
 	if err != nil {
 		return err
 	}

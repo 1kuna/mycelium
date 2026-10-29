@@ -686,14 +686,16 @@ func (q *Queue) modelPlan(machine string) []ModelSlot {
 	sort.Slice(out, func(i, j int) bool { return out[i].Model < out[j].Model })
 	return out
 }
-func (q *Queue) addCall(c *ModelCall) error {
+func (q *Queue) addCall(c *ModelCall, requestContexts ...context.Context) error {
+	requestCtx := requestContext(requestContexts)
+
 	if c.FanOut != "" && (!extensionName.MatchString(c.FanOut) || c.Workload == nil || !c.Workload.valid()) {
 		return errors.New("declared calls require a group, input shape and positive work units")
 	}
 	if err := validateProjectIdentifier(c.Project); err != nil {
 		return err
 	}
-	return q.update(func() error {
+	return q.updateRequest(requestCtx, func() error {
 		if q.fleetPausesCalls() {
 			return errors.New("fleet upgrade queue cutover: model-call admission paused")
 		}
@@ -710,10 +712,12 @@ func (q *Queue) addCall(c *ModelCall) error {
 		q.calls[c.ID] = c
 		q.maintain()
 		return nil
-	})
+	}, nil)
 }
-func (q *Queue) finishCall(id string) error {
-	return q.update(func() error {
+func (q *Queue) finishCall(id string, requestContexts ...context.Context) error {
+	requestCtx := requestContext(requestContexts)
+
+	return q.updateRequest(requestCtx, func() error {
 		c := q.calls[id]
 		if c != nil {
 			if s := q.s.ModelSlots[slotKey(c.Machine, c.Model, c.Device)]; s != nil && s.Session == c.Session && s.Attempt == c.Attempt {
@@ -728,7 +732,7 @@ func (q *Queue) finishCall(id string) error {
 		}
 		q.maintain()
 		return nil
-	})
+	}, nil)
 }
 
 // Only current use protects a model from reclamation. A completed high-priority
@@ -785,7 +789,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 	generic := strings.HasPrefix(r.URL.Path, "/models/")
 	endpoint := r.URL.RequestURI()
 	if generic {
-		if err := a.Queue.callDefaults(c, Model{}, r.Header, false); err != nil {
+		if err := a.Queue.callDefaults(c, Model{}, r.Header, false, r.Context()); err != nil {
 			modelError(w, 400, err.Error())
 			return
 		}
@@ -839,11 +843,11 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	a.Queue.mu.Lock()
+	requestUnlock1 := requestLock(r.Context(), &a.Queue.mu)
 	model, _ := a.Queue.model(body.Model)
-	a.Queue.mu.Unlock()
+	requestUnlock1()
 	if !generic {
-		if err := a.Queue.callDefaults(c, model, r.Header, true); err != nil {
+		if err := a.Queue.callDefaults(c, model, r.Header, true, r.Context()); err != nil {
 			modelError(w, 400, err.Error())
 			return
 		}
@@ -855,11 +859,11 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 		modelError(w, 400, "streaming is supported for chat only")
 		return
 	}
-	if e = a.Queue.addCall(c); e != nil {
+	if e = a.Queue.addCall(c, r.Context()); e != nil {
 		modelError(w, 400, "invalid model request")
 		return
 	}
-	defer a.Queue.finishCall(c.ID)
+	defer a.Queue.finishCall(c.ID, r.Context())
 	tick := time.NewTicker(20 * time.Millisecond)
 	defer tick.Stop()
 	attempt := 0
@@ -870,7 +874,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 		var call ModelCall
 		var target string
 		var timedOut, requestExpired, engineLost bool
-		e = a.Queue.update(func() error {
+		e = a.Queue.updateRequest(r.Context(), func() error {
 			a.Queue.maintain()
 			call = *a.Queue.calls[c.ID]
 			timedOut = a.Queue.clock.Now().Sub(call.Queued) >= a.Queue.models.Wait
@@ -880,7 +884,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 				target = m.ModelURL
 			}
 			return nil
-		})
+		}, nil)
 		if e != nil {
 			modelError(w, 503, "model call failed")
 			return
@@ -907,7 +911,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			attempt++
-			if e = a.Queue.retryCall(c.ID); e != nil {
+			if e = a.Queue.retryCall(c.ID, r.Context()); e != nil {
 				modelError(w, 503, "model call failed")
 				return
 			}
@@ -915,9 +919,9 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 		}
 		if target != "" {
 			if requestUntil.IsZero() {
-				a.Queue.mu.Lock()
+				requestUnlock2 := requestLock(r.Context(), &a.Queue.mu)
 				requestUntil = a.Queue.clock.Now().Add(model.requestTimeout())
-				a.Queue.mu.Unlock()
+				requestUnlock2()
 			}
 			proxyCtx, cancelCause := context.WithCancelCause(r.Context())
 			cancel := func() { cancelCause(context.Canceled) }
@@ -931,13 +935,13 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 					case <-proxyCtx.Done():
 						return
 					case <-wake.C:
-						a.Queue.mu.Lock()
+						requestUnlock3 := requestLock(r.Context(), &a.Queue.mu)
 						m := a.Queue.s.Machines[call.Machine]
 						live := a.Queue.calls[c.ID]
 						expired := !a.Queue.clock.Now().Before(requestUntil)
 						preempted := live != nil && live.PriorityStop != nil && live.Error != ""
 						lost := m == nil || m.Gone || m.Session != call.Session || live != nil && live.Error != "" || !a.Queue.callAttemptLive(&call)
-						a.Queue.mu.Unlock()
+						requestUnlock3()
 						if expired {
 							cancelCause(errModelRequestTimeout)
 							return
@@ -986,9 +990,9 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 
 			res, e := modelHTTPClient.Do(req)
 			notForwarded := res != nil && call.Attempt != "" && res.Header.Get("X-Myce-Engine-Rejected") == call.Attempt
-			a.Queue.mu.Lock()
+			requestUnlock4 := requestLock(r.Context(), &a.Queue.mu)
 			expired := !a.Queue.clock.Now().Before(requestUntil)
-			a.Queue.mu.Unlock()
+			requestUnlock4()
 			if expired {
 				if res != nil {
 					res.Body.Close()
@@ -998,10 +1002,10 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 				modelError(w, 504, errModelRequestTimeout.Error())
 				return
 			}
-			a.Queue.mu.Lock()
+			requestUnlock5 := requestLock(r.Context(), &a.Queue.mu)
 			attemptLost := !a.Queue.callAttemptLive(&call)
 			engineLost = a.Queue.engineAttemptLost(&call)
-			a.Queue.mu.Unlock()
+			requestUnlock5()
 			if notForwarded {
 				res.Body.Close()
 				res, e = nil, errors.New("engine rejected before forwarding")
@@ -1056,10 +1060,10 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 						}
 						if readErr != nil {
 							// Unload can close the transport before the watcher runs.
-							a.Queue.mu.Lock()
+							requestUnlock6 := requestLock(r.Context(), &a.Queue.mu)
 							live := a.Queue.calls[c.ID]
 							preempted := live != nil && live.PriorityStop != nil && live.Error != ""
-							a.Queue.mu.Unlock()
+							requestUnlock6()
 							if preempted {
 								cancelCause(errPriorityPreemption)
 							}
@@ -1109,9 +1113,9 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 			if res != nil {
 				res.Body.Close()
 			}
-			a.Queue.mu.Lock()
+			requestUnlock7 := requestLock(r.Context(), &a.Queue.mu)
 			expired = !a.Queue.clock.Now().Before(requestUntil)
-			a.Queue.mu.Unlock()
+			requestUnlock7()
 			if expired {
 				cancelCause(errModelRequestTimeout)
 			}
@@ -1124,7 +1128,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 			if r.Context().Err() != nil {
 				return
 			}
-			a.Queue.mu.Lock()
+			requestUnlock8 := requestLock(r.Context(), &a.Queue.mu)
 			live := a.Queue.calls[c.ID]
 			engineLost = engineLost || a.Queue.engineAttemptLost(&call)
 			preempted := ""
@@ -1134,7 +1138,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 					preempted = priorityPreemptionCause
 				}
 			}
-			a.Queue.mu.Unlock()
+			requestUnlock8()
 			if preempted != "" {
 				modelError(w, 503, preempted)
 				return
@@ -1144,7 +1148,7 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			attempt++
-			e = a.Queue.retryCall(c.ID)
+			e = a.Queue.retryCall(c.ID, r.Context())
 			if e != nil {
 				modelError(w, 503, "model call failed")
 				return
@@ -1158,8 +1162,10 @@ func (a API) modelCall(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (q *Queue) retryCall(id string) error {
-	return q.update(func() error {
+func (q *Queue) retryCall(id string, requestContexts ...context.Context) error {
+	requestCtx := requestContext(requestContexts)
+
+	return q.updateRequest(requestCtx, func() error {
 		live := q.calls[id]
 		if live == nil {
 			return errors.New("model call no longer active")
@@ -1179,7 +1185,7 @@ func (q *Queue) retryCall(id string) error {
 		q.refreshModelPriority(&previous)
 		q.maintain()
 		return nil
-	})
+	}, nil)
 }
 
 func modelConfigHash(c ModelConfig) string {

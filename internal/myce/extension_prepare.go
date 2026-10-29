@@ -329,10 +329,12 @@ func extensionQualificationReason(e Extension, r ExtensionReport, m *Machine) st
 	return ""
 }
 
-func (q *Queue) extensionByDigest(digest string) (Extension, error) {
+func (q *Queue) extensionByDigest(digest string, requestContexts ...context.Context) (Extension, error) {
+	requestCtx := requestContext(requestContexts)
+
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
-	q.mu.RLock()
+	requestUnlock1 := requestReadLock(requestCtx, &q.mu)
 	for _, e := range q.s.Extensions {
 		if e.Digest == digest {
 			store := q.files
@@ -340,12 +342,12 @@ func (q *Queue) extensionByDigest(digest string) (Extension, error) {
 			b, _ := json.Marshal(e)
 			var out Extension
 			_ = json.Unmarshal(b, &out)
-			q.mu.RUnlock()
+			requestUnlock1()
 			err := store.hydrateExtension(&out)
 			return out, err
 		}
 	}
-	q.mu.RUnlock()
+	requestUnlock1()
 	return Extension{}, fmt.Errorf("extension digest is not registered")
 }
 

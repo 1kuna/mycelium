@@ -2,6 +2,7 @@ package myce
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"errors"
 	"log"
@@ -102,10 +103,12 @@ func (q *Queue) applyEnrollmentRelease(approved *EnrollmentRelease, allowDowngra
 	return nil
 }
 
-func (q *Queue) approveEnrollmentRelease(approval EnrollmentReleaseApproval) error {
-	q.mu.RLock()
+func (q *Queue) approveEnrollmentRelease(approval EnrollmentReleaseApproval, requestContexts ...context.Context) error {
+	requestCtx := requestContext(requestContexts)
+
+	requestUnlock1 := requestReadLock(requestCtx, &q.mu)
 	key := ed25519.PublicKey(bytes.Clone(q.s.EnrollmentReleaseKey))
-	q.mu.RUnlock()
+	requestUnlock1()
 	if len(key) != ed25519.PublicKeySize {
 		return &HTTPError{Status: http.StatusServiceUnavailable, Code: "release_publisher_key_unavailable", Message: rejectionMessages["release_publisher_key_unavailable"]}
 	}
@@ -116,13 +119,13 @@ func (q *Queue) approveEnrollmentRelease(approval EnrollmentReleaseApproval) err
 	if err != nil {
 		return err
 	}
-	return q.update(func() error {
+	return q.updateRequest(requestCtx, func() error {
 		// Verification is outside q.mu; local rotation must invalidate the snapshot.
 		if !bytes.Equal(key, q.s.EnrollmentReleaseKey) {
 			return reject("release_publisher_key_mismatch", nil)
 		}
 		return q.applyEnrollmentRelease(approved, approval.AllowDowngrade)
-	})
+	}, nil)
 }
 func (a API) registerEnrollmentRelease(mux *http.ServeMux) {
 	mux.HandleFunc("POST /api/invites/release", func(w http.ResponseWriter, r *http.Request) {
@@ -130,7 +133,7 @@ func (a API) registerEnrollmentRelease(mux *http.ServeMux) {
 		if !decode(w, r, &approval) {
 			return
 		}
-		err := a.Queue.approveEnrollmentRelease(approval)
+		err := a.Queue.approveEnrollmentRelease(approval, r.Context())
 		var rule *rejectionError
 		var apiError *HTTPError
 		if err != nil && !errors.As(err, &rule) && !errors.As(err, &apiError) {
@@ -148,14 +151,14 @@ func (a API) registerEnrollmentRelease(mux *http.ServeMux) {
 	})
 	mux.HandleFunc("GET /api/invites/release", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-		a.Queue.mu.Lock()
+		requestUnlock1 := requestLock(r.Context(), &a.Queue.mu)
 		release := a.Queue.s.EnrollmentRelease
 		if release != nil {
 			current := *release
 			current.NASIdentity = a.Queue.onboardingNAS
 			release = &current
 		}
-		a.Queue.mu.Unlock()
+		requestUnlock1()
 		if release == nil {
 			respond(w, nil, &HTTPError{Status: 503, Code: "release_unavailable", Message: "queue administrator must configure a signed release and publisher URL before inviting"})
 			return

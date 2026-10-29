@@ -33,7 +33,9 @@ func ticketHash(ticket string) string {
 
 // Tickets grant only one TLS-pinned enrollment. SQLite keeps digests, never
 // bearer tickets or the fleet token, including after a queue restart.
-func (q *Queue) MintEnrollmentTicket(pin string, ttl time.Duration) (EnrollmentTicket, error) {
+func (q *Queue) MintEnrollmentTicket(pin string, ttl time.Duration, requestContexts ...context.Context) (EnrollmentTicket, error) {
+	requestCtx := requestContext(requestContexts)
+
 	var out EnrollmentTicket
 	if !validPin(pin) || ttl <= 0 || ttl > time.Hour {
 		return out, errors.New("invite requires a queue pin and expiry between zero and one hour")
@@ -43,8 +45,8 @@ func (q *Queue) MintEnrollmentTicket(pin string, ttl time.Duration) (EnrollmentT
 		return out, err
 	}
 	out.Ticket = hex.EncodeToString(secret[:])
-	q.mu.Lock()
-	defer q.mu.Unlock()
+	requestUnlock1 := requestLock(requestCtx, &q.mu)
+	defer requestUnlock1()
 	if _, err := q.db.Exec("DELETE FROM enrollment_tickets WHERE used=1 OR expires<=?", q.clock.Now().UnixNano()); err != nil {
 		return out, err
 	}
@@ -52,12 +54,14 @@ func (q *Queue) MintEnrollmentTicket(pin string, ttl time.Duration) (EnrollmentT
 	_, err := q.db.Exec("INSERT INTO enrollment_tickets (digest,pin,expires,used) VALUES (?,?,?,0)", ticketHash(out.Ticket), pin, out.ExpiresAt.UnixNano())
 	return out, err
 }
-func (q *Queue) RedeemEnrollmentTicket(ticket, pin string) error {
+func (q *Queue) RedeemEnrollmentTicket(ticket, pin string, requestContexts ...context.Context) error {
+	requestCtx := requestContext(requestContexts)
+
 	if len(ticket) != 64 || !validPin(pin) {
 		return enrollmentTicketRejected()
 	}
-	q.mu.Lock()
-	defer q.mu.Unlock()
+	requestUnlock1 := requestLock(requestCtx, &q.mu)
+	defer requestUnlock1()
 	result, err := q.db.Exec("UPDATE enrollment_tickets SET used=1 WHERE digest=? AND pin=? AND used=0 AND expires>?", ticketHash(ticket), pin, q.clock.Now().UnixNano())
 	if err != nil {
 		return err
@@ -77,6 +81,7 @@ func enrollmentTicketRejected() error {
 }
 
 func (a API) registerInvites(mux *http.ServeMux, pin string) {
+	mux.HandleFunc("/api/invites/redeem", func(w http.ResponseWriter, r *http.Request) { a.redeemInvite(w, r, pin) })
 	mux.HandleFunc("POST /api/invites", func(w http.ResponseWriter, r *http.Request) {
 		if r.TLS == nil || !validPin(pin) {
 			respond(w, nil, enrollmentTicketRejected())
@@ -89,7 +94,7 @@ func (a API) registerInvites(mux *http.ServeMux, pin string) {
 		if in.TTL == 0 {
 			in.TTL = 15 * time.Minute
 		}
-		out, err := a.Queue.MintEnrollmentTicket(pin, in.TTL)
+		out, err := a.Queue.MintEnrollmentTicket(pin, in.TTL, r.Context())
 		respondOperation(w, out, err, "request_invalid")
 	})
 }
@@ -107,13 +112,13 @@ func (a API) redeemInvite(w http.ResponseWriter, r *http.Request, pin string) {
 		respond(w, nil, enrollmentTicketRejected())
 		return
 	}
-	if err := a.Queue.RedeemEnrollmentTicket(in.Ticket, in.Fingerprint); err != nil {
+	if err := a.Queue.RedeemEnrollmentTicket(in.Ticket, in.Fingerprint, r.Context()); err != nil {
 		respondOperation(w, nil, err, "invite_rejected")
 		return
 	}
-	a.Queue.mu.Lock()
+	requestUnlock1 := requestLock(r.Context(), &a.Queue.mu)
 	identity := a.Queue.onboardingNAS
-	a.Queue.mu.Unlock()
+	requestUnlock1()
 	respond(w, Invitation{Version: 1, Fingerprint: pin, Token: a.Token, NASIdentity: identity}, nil)
 }
 
