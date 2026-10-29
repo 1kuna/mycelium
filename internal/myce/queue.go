@@ -372,19 +372,24 @@ func (q *Queue) checkpointsAvailable() bool { return q.simulation || q.nasAvaila
 func (q *Queue) checkpointReady(j *Job, m *Machine) bool {
 	return !needsCheckpoint(j) || (!m.CheckpointUnavailable && q.checkpointsAvailable())
 }
-func checkpointAvailable(root string) bool {
+func checkpointAvailable(root string, progress func()) bool {
 	info, err := os.Stat(root)
+	progress()
 	if err != nil || !info.IsDir() {
 		return false
 	}
 	f, err := os.CreateTemp(root, ".myce-probe-")
+	progress()
 	if err != nil {
 		return false
 	}
 	name := f.Name()
 	err = f.Sync()
+	progress()
 	closeErr := f.Close()
+	progress()
 	removeErr := os.Remove(name)
+	progress()
 	return err == nil && closeErr == nil && removeErr == nil
 }
 
@@ -426,8 +431,8 @@ func (q *Queue) updateTimed(fn func() error, timing *queueUpdateTiming) error {
 		if q.checkpointProbe != nil {
 			available = q.checkpointProbe()
 		} else {
-			available, _ = q.nasProbe.run(q.root, func() (bool, error) {
-				return checkpointAvailable(q.root), nil
+			available, _ = q.nasProbe.runProgress(q.root, func(progress func()) (bool, error) {
+				return checkpointAvailable(q.root, progress), nil
 			})
 		}
 	}
@@ -926,7 +931,7 @@ func (q *Queue) Tick() error {
 	q.mu.RUnlock()
 	fileAvailable := true
 	if !q.simulation && files != nil {
-		fileAvailable, _ = q.healthStoreProbe.run(files.root, func() (bool, error) { return checkpointAvailable(files.root), nil })
+		fileAvailable, _ = q.healthStoreProbe.runProgress(files.root, func(progress func()) (bool, error) { return checkpointAvailable(files.root, progress), nil })
 	}
 	if err := q.update(func() error {
 		delay := q.healthStorageDelay

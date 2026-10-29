@@ -760,11 +760,12 @@ func prepareCheckpointCopySync(j Job, copyFile func(io.Writer, io.Reader) (int64
 	return dest, err
 }
 
-func workerCheckpointAvailable(root string) error {
+func workerCheckpointAvailable(root string, progress func()) error {
 	if root == "" {
 		return nil
 	}
 	info, err := os.Stat(root)
+	progress()
 	if err != nil {
 		return err
 	}
@@ -772,15 +773,18 @@ func workerCheckpointAvailable(root string) error {
 		return errors.New("checkpoint root is not a directory")
 	}
 	f, err := os.CreateTemp(root, ".myce-probe-*.tmp")
+	progress()
 	if err != nil {
 		return err
 	}
 	name := f.Name()
 	err = f.Close()
+	progress()
 	// Probe files are worker-owned transient output, not user data.
 	if removeErr := os.Remove(name); err == nil {
 		err = removeErr
 	}
+	progress()
 	return err
 }
 

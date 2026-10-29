@@ -256,7 +256,7 @@ func TestCheckpointAvailabilitySlowSuccessStallAndRecovery(t *testing.T) {
 			var blockedCalls atomic.Int32
 			blocked := func() (bool, error) { blockedCalls.Add(1); <-release; return true, nil }
 			start = time.Now()
-			for time.Since(start) < networkFilesystemBudget {
+			for time.Since(start) < checkpointAvailabilityStallBudget {
 				_, _ = probe.run("share", blocked)
 			}
 			if ok, err := probe.run("share", blocked); ok || err == nil {
@@ -272,6 +272,60 @@ func TestCheckpointAvailabilitySlowSuccessStallAndRecovery(t *testing.T) {
 			failure := errors.New("I/O failure")
 			if ok, err := probe.run("share", func() (bool, error) { return false, failure }); ok || !errors.Is(err, failure) {
 				t.Fatalf("failed storage accepted: %v", err)
+			}
+		}
+	})
+}
+
+func TestCheckpointAvailabilityProgressOutlivesAggregateDeadline(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		q, _ := fixture(t)
+		w := recoveryWorker(t)
+		s, err := w.openStore()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.close()
+		for _, probe := range []*checkpointAvailability{&q.nasProbe, &s.nasProbe} {
+			if ok, err := probe.run("share", func() (bool, error) { return true, nil }); !ok || err != nil {
+				t.Fatalf("initial success: %v", err)
+			}
+			var calls atomic.Int32
+			progressDone := make(chan struct{})
+			defer func() { <-progressDone }()
+			progressing := func(progress func()) (bool, error) {
+				defer close(progressDone)
+				calls.Add(1)
+				// Reproduce the measured successful create and unlink. Together
+				// they exceed both the old total cap and the new stall backstop.
+				for _, delay := range []time.Duration{17734 * time.Millisecond, 23223 * time.Millisecond} {
+					time.Sleep(delay)
+					progress()
+				}
+				return true, nil
+			}
+			start := time.Now()
+			for {
+				ok, err := probe.runProgress("share", progressing)
+				if !ok || err != nil {
+					t.Fatalf("progressing storage fenced after %s: %v", time.Since(start), err)
+				}
+				if time.Since(start) >= 40957*time.Millisecond {
+					break
+				}
+			}
+			if calls.Load() != 1 {
+				t.Fatalf("duplicate probe: %d", calls.Load())
+			}
+			// A new root must establish its own success, even while the former
+			// root has retained healthy evidence.
+			release := make(chan struct{})
+			if ok, err := probe.runProgress("other", func(func()) (bool, error) { <-release; return true, nil }); ok || !errors.Is(err, errCheckpointIOPending) {
+				t.Fatalf("cold root accepted: %v", err)
+			}
+			close(release)
+			if ok, err := probe.run("other", func() (bool, error) { return true, nil }); !ok || err != nil {
+				t.Fatalf("cold root recovery: %v", err)
 			}
 		}
 	})
