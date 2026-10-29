@@ -95,6 +95,8 @@ Authenticated `POST /api/portability` accepts one of:
 
 `recipe` uses extension metadata including optional bundled `files` (JSON byte
 arrays use base64). It may be incomplete so missing inputs can be explained.
+The API permits the same 2 MiB JSON transport as extension registration to
+accommodate base64 encoding of the bounded description bundle.
 Advice never resolves caller-supplied filesystem paths, fetches assets or executes
 commands. The JSON result is the shared projection used by the text command.
 Unavailable authentication/API is an error, not an all-platforms pass; an empty

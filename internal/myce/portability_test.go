@@ -265,4 +265,15 @@ func TestPortabilityPlainCatalogPreparation(t *testing.T) {
 	if h.Admission != "can admit now" {
 		t.Fatalf("current plain admission: %+v", h)
 	}
+
+	q.s.Machines[m.ID].EnvironmentBuilder = true
+	q.s.Machines[m.ID].Environments = nil
+	report, err = q.Portability(PortabilityRequest{Spec: &s})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h = portabilityRow(t, report, s.Targets[0]).Hosts[0]
+	if h.Admission == "can admit now" {
+		t.Fatal("builder capacity is not an immediately ready environment")
+	}
 }

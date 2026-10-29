@@ -91,23 +91,7 @@ func TestPortabilityCLINativeMetadataDoesNotExecute(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	data := `schema: 1
-project: native-portability
-default: work
-entries:
-  work:
-    source: {directory: "` + root + `"}
-    variants:
-      - target: {os: linux, arch: arm64, platform: cuda}
-        needs: {memory_gb: 1}
-        execution:
-          main: {command: [sh, '{extension}/build.sh'], environment: main}
-        environments:
-          main: {backend: uv, python: '3.12', lock_file: uv.lock, build: [sh, '{extension}/build.sh']}
-        checks: {qualification: [sh, '{extension}/build.sh']}
-        baselines:
-          extension:work: {input: input, output: native, measure: exact, native: fixture, variation: exact}
-`
+	data := portabilityNativeAdapterYAML(root)
 	file := filepath.Join(root, "adapter.yaml")
 	if err := os.WriteFile(file, []byte(data), 0600); err != nil {
 		t.Fatal(err)
@@ -132,5 +116,60 @@ entries:
 	}
 	if _, err := os.Stat(filepath.Join(root, "must-not-run")); !os.IsNotExist(err) {
 		t.Fatal("advice executed payload")
+	}
+}
+
+func portabilityNativeAdapterYAML(root string) string {
+	return `schema: 1
+project: native-portability
+default: work
+entries:
+  work:
+    source: {directory: "` + root + `"}
+    variants:
+      - target: {os: linux, arch: arm64, platform: cuda}
+        needs: {memory_gb: 1}
+        execution:
+          main: {command: [sh, '{extension}/build.sh'], environment: main}
+        environments:
+          main: {backend: uv, python: '3.12', lock_file: uv.lock, build: [sh, '{extension}/build.sh']}
+        checks: {qualification: [sh, '{extension}/build.sh']}
+        baselines:
+          extension:work: {input: input, output: native, measure: exact, native: fixture, variation: exact}
+`
+}
+
+func TestPortabilityCLIRealAPILargeLock(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "uv.lock"), bytes.Repeat([]byte("#"), 800<<10), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "pyproject.toml"), []byte("[project]\nname='fixture'\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "build.sh"), []byte("exit 0\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(root, "adapter.yaml")
+	if err := os.WriteFile(file, []byte(portabilityNativeAdapterYAML(root)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	q, err := myce.Open(filepath.Join(t.TempDir(), "queue.db"), t.TempDir(), myce.RealClock{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	server := httptest.NewServer(myce.API{Queue: q, Token: "local-test-token"}.Handler())
+	defer server.Close()
+	var out bytes.Buffer
+	if err := portabilityCommand(context.Background(), []string{"--adapter", file, "--queue", server.URL, "--token", "local-test-token", "--json"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var report myce.PortabilityReport
+	if err := json.Unmarshal(out.Bytes(), &report); err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Targets) != 1 || len(report.Targets[0].Environments) != 1 || report.Targets[0].Environments[0].Inputs != "present" {
+		t.Fatalf("large lock lost from advice: %+v", report)
 	}
 }

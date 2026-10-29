@@ -374,6 +374,10 @@ func (q *Queue) portability(req PortabilityRequest) PortabilityReport {
 							h.Admission = "blocked: host memory"
 							continue
 						}
+						if q.immediateCandidate(candidate, target) == nil {
+							h.Admission = "blocked: preparation or environment not ready"
+							continue
+						}
 						if !q.placementAllowed(candidate, target) || !q.hostLaunchAllowed(target, target.Session) || !q.workerIdle(target, candidate) || !q.checkpointReady(candidate, target) {
 							h.Admission = "blocked by current capacity, maintenance, policy or release"
 							continue
