@@ -125,9 +125,9 @@ func diskHeadroomReason(j *Job, m *Machine) string {
 	return ""
 }
 
-// Retained readings bridge three heartbeats plus the sampling budget. Beyond
-// that window, neither a retained value nor a still-checking-in worker proves
-// current headroom. The explicit age also remains visible in status.
+// Local readings bridge three heartbeats plus the sampling budget. Checkpoint
+// readings use measured progress (completion or pending-operation age), bounded
+// by the storage stall backstop rather than the nominal heartbeat cadence.
 func (q *Queue) currentDiskVolume(v DiskVolume, receivedAt time.Time) DiskVolume {
 	interval := v.SampleIntervalSeconds
 	if interval <= 0 {
@@ -147,9 +147,16 @@ func (q *Queue) currentDiskVolume(v DiskVolume, receivedAt time.Time) DiskVolume
 	// advanced only by queue time since receipt; clock skew cannot age a sample.
 	v.AgeSeconds = max(0, v.AgeSeconds) + max(0, q.clock.Now().Sub(receivedAt).Seconds())
 	expired := v.AgeSeconds > window
-	if v.ProbeAgeSeconds != nil && slices.Contains(v.Roots, "checkpoint") && v.Retained {
-		age := max(0, *v.ProbeAgeSeconds) + max(0, q.clock.Now().Sub(receivedAt).Seconds())
-		v.ProbeAgeSeconds = &age
+	if slices.Contains(v.Roots, "checkpoint") {
+		// A successful completion is progress too. Between observations there
+		// may be no pending metadata; the nominal three-cycle window can expire
+		// before a slow but working sampler reports again (#158, #234). Keep
+		// that reading until 30s without progress, regardless of heartbeat rate.
+		age := v.AgeSeconds
+		if v.ProbeAgeSeconds != nil && v.Retained {
+			age = max(0, *v.ProbeAgeSeconds) + max(0, q.clock.Now().Sub(receivedAt).Seconds())
+			v.ProbeAgeSeconds = &age
+		}
 		expired = age >= checkpointAvailabilityStallBudget.Seconds()
 	}
 	if receivedAt.IsZero() || v.SampledAt.IsZero() || expired {
