@@ -63,7 +63,10 @@ engines and active calls. It withdraws unstarted batch offers and refuses new
 batch placements, calls, engine launches and device-specific preparation
 launches on that device. Model-cache copies use shared host storage and remain
 allowed. Healthy siblings retain their budgets and CPU work
-remains eligible. Existing work can still finish or stop under ordinary
+remains eligible. New whole-host onboarding benchmarks are deferred while any
+inventory device is disabled; ordinary worker startup continues. A later join
+after enabling the device can refresh whole-host throughput. Already authorized
+benchmarks continue as existing work. Existing work can still finish or stop under ordinary
 cancellation, failure and priority rules. This command does not edit the
 worker installation/configuration and needs no restart. Host drain/disable
 remains an independent fence; enabling a device does not resume its host.

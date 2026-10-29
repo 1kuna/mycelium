@@ -1207,7 +1207,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 				return
 			}
 			if m.BenchmarkPending || c.BenchmarkDone != "" {
-				if m.BenchmarkPending && q.hostLaunchAllowed(&m, m.Session) && q.benchmarkIdle(&m) {
+				if m.BenchmarkPending && q.hostLaunchAllowed(&m, m.Session) && q.benchmarkIdle(&m) && !q.benchmarkDeviceAdmissionBlocked(&m) {
 					l := q.issuePreparation(&m, "benchmark", "onboarding")
 					reply.BenchmarkPlan = &l
 					copy := cloneMachine(&m)
