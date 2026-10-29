@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -51,6 +52,13 @@ func devStandaloneSmoke(t *testing.T, backend string) {
 		t.Fatal(err)
 	}
 	defer log.Close()
+	// Run after the owned child has joined, while TempDir still exists.
+	t.Cleanup(func() {
+		if t.Failed() {
+			data, err := os.ReadFile(log.Name())
+			t.Log(sanitizeSmokeEvidence(fmt.Sprintf("dev stderr (read error=%v):\n%s", err, data), root, token))
+		}
+	})
 	cmd.Stderr = log
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
@@ -151,7 +159,11 @@ func devStandaloneSmoke(t *testing.T, backend string) {
 		for _, j := range s.Jobs {
 			if j.ID == job.ID {
 				if j.State == "failed" {
-					t.Fatal("smoke command failed")
+					var logs []myce.Log
+					logErr := client.Call(ctx, "GET", "/api/jobs/"+j.ID+"/logs", nil, &logs)
+					evidence := fmt.Sprintf("smoke command failed: job=%s attempt=%d machine=%s session=%s reason=%q execution_cause=%+v cleanup_cause=%+v history=%+v\njob logs (error=%v):\n%+v",
+						j.ID, j.Attempt, j.Machine, j.Session, j.Reason, j.ExecutionCause, j.CleanupCause, j.AttemptHistory, logErr, logs)
+					t.Fatal(sanitizeSmokeEvidence(evidence, root, token))
 				}
 				return j.State == "succeeded" && j.ReleaseConfirmed
 			}
@@ -170,4 +182,10 @@ func devStandaloneSmoke(t *testing.T, backend string) {
 		return client.Call(ctx, "GET", "/api/hosts/smoke-host/maintenance", nil, &maintenance) == nil && maintenance.Quiescent
 	})
 	t.Log("PASS: standalone binary, authenticated API, command effect/exact release, queue maintenance; child and listener joined")
+}
+
+// Evidence comes only from this isolated fixture, but redact its credential and
+// temporary root even if a failing child accidentally writes them to stderr.
+func sanitizeSmokeEvidence(text, root, token string) string {
+	return strings.NewReplacer(token, "[fixture token]", root, "[fixture root]").Replace(text)
 }
