@@ -311,6 +311,78 @@ between queue and workers. Model reservations include loading and draining until
 See [model guide](guide-model-calls.md) for transport retries, stream failures,
 engine setup, and the required model-card/inference-contract verification.
 
+## Retained per-job ledger
+
+`GET /api/jobs/ID/ledger?after=0&limit=100` is an authenticated, read-only
+batch execution/custody receipt. Use the full job ID. `myce ledger ID [--after N]
+[--high-water N] [--limit N]` prints one page as JSON, using the same installed
+client configuration as `status`. Go: `Client.JobLedger(ctx, id, after,
+highWater, limit)` (`highWater = -1` starts a snapshot). Python:
+`Client.ledger(id, after=0, high_water=None, limit=100)`.
+
+Job GET and Python `get()` include `ledger: {complete, high_water}` as a small
+summary; entries are returned by the ledger endpoint. The supported wire types
+are [Job](schemas/job-v1.schema.json) and
+[ledger page](schemas/job-ledger-v1.schema.json).
+
+A page contains `job_id`, `complete`, `high_water`, `next`, `has_more`, and
+`entries` (always an array). Omit `high_water` on the first request to capture
+the last durable sequence, then pass that same value with `after=next` until
+`has_more=false`. Entries through that high-water mark are immutable; new
+assignments or custody generations cannot extend that snapshot. An empty
+snapshot has `high_water=0`, `next=0`, `has_more=false`. The default page size
+is 100, maximum 256. Invalid cursors return HTTP 400
+`job_ledger_cursor_invalid`. Sequences are local to the job, start at 1, and
+never reset during retention. No total row cap applies.
+
+Each entry includes `sequence`, queue-clock `at`, `attempt`, `machine`,
+`session`, `kind`, `reason`, and `release` (`pending` or `confirmed`).
+`execution_id` is the queue's existing execution identity rendered as
+`JOB_ID/ATTEMPT`. Optional `process_id` is the worker's durable native process
+identity (`MYCE_PROCESS_ID`), shared across custody generations in that execution;
+it is unknown at assignment and omitted then. `state` is the queue state at that
+transition. Reasons explain the transition using existing
+sanitized queue diagnostics; reason text is not a machine contract.
+
+Kinds are `assigned`, `started`, `outcome`, `released`, `custody_reserved`,
+`custody_started`, and `custody_released`. Assignment does not prove execution.
+`started` records the existing durable Started authorization before payload
+execution, not proof that a payload reached its first instruction. Native
+custody is reserved durably before even the gated supervisor starts;
+`custody_started` records the created supervisor before payload gates open.
+Custody entries carry a distinct `custody_id`, optional `custody_start`, and
+optional `custody_end`. Started custody also records `supervisor_pid` and
+`supervisor_birth` from the existing process receipt, so PID reuse cannot merge
+generations. The timestamps are queue observations, avoiding
+cross-machine clock comparisons; absent timestamps are unknown, never zero.
+A reserve followed directly by release can mean launch failed or the worker
+restarted before reporting its start. Port-collision preparation retries keep
+the same attempt/execution ID and native process identity but receive distinct custody IDs. Each old group
+is verified empty and its release committed before replacement. Final cleanup
+and restart reconciliation reuse the existing exact copy-release authority to
+settle every outstanding generation; diagnostics never authorize release.
+
+`complete` describes historical coverage, independently of `has_more`.
+Jobs created with ledger support have complete coverage. Older retained jobs,
+and native attempts reported without custody receipts by an older worker,
+report `complete=false`: earlier native generations cannot be reconstructed
+from the bounded diagnostic arrays. An incomplete ledger must not be treated
+as proof of all historical execution. Docker jobs retain attempt identities and
+release transitions; native custody generations describe native supervisors.
+
+Retention follows [queue history pruning](design-proposal.md#submission-identity-and-cancellation-80):
+keep the entire ledger with its job, with no independent row eviction. Released
+terminal jobs remain for at least 168 hours after `finished_at`; longer configured
+result/log retention and cleanup backlog extend this. Never prune unresolved
+custody. A keyed job's complete ledger remains readable by ID during its extra
+30-day retained replay-answer window, even after ordinary job GET stops finding
+it. An unkeyed ledger expires with its job; a keyed ledger expires with the full
+replay answer. Thereafter this endpoint returns HTTP 410
+`job_ledger_unavailable`, also used for an unknown ID. Permanent expired-key
+digests do not retain ledger rows. Expired history is never returned as an empty
+complete page. The four-entry `attempt_history` and 32-entry `memory_attempts`
+remain bounded diagnostics with their existing contracts.
+
 ## Python client defaults
 
 `mycelium-client` imports as `mycelium`. `Client(url=None, token=None,

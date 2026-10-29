@@ -54,6 +54,21 @@ func (q *Queue) recordAttemptOutcome(j *Job, outcome AttemptOutcome) {
 	outcome.State = j.State
 	// Reuse status redaction, including availability text supplied by workers.
 	outcome.Reason = statusJobCopy(&Job{State: j.State, Reason: j.Reason, ExecutionCause: outcome.ExecutionCause}).Reason
+	e := JobLedgerEntry{Attempt: outcome.Attempt, Machine: outcome.Machine, Session: outcome.Session, Kind: "outcome", Reason: outcome.Reason, State: outcome.State}
+	if e.Reason == "" {
+		e.Reason = e.State
+	}
+	duplicate := false
+	for i := len(j.LedgerEntries) - 1; i >= 0; i-- {
+		old := j.LedgerEntries[i]
+		if old.Attempt == e.Attempt && old.Kind == e.Kind {
+			duplicate = old.State == e.State && old.Reason == e.Reason
+			break
+		}
+	}
+	if !duplicate {
+		q.appendJobLedger(j, e)
+	}
 	q.alertAttemptLoss(j, outcome, false)
 	for i, old := range j.AttemptHistory {
 		if old.Attempt == outcome.Attempt && old.Machine == outcome.Machine && old.Session == outcome.Session {

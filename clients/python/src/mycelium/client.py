@@ -419,9 +419,23 @@ class Client:
         inputs_staged_at, when present, is the current attempt's worker-clock
         input-staging completion time, before launch RAM/checkpoint checks.
         It is diagnostic only; omission means unknown or no staging operation.
-        Also includes cancellation acknowledgement and retained fan-out scope.
+        Also includes cancellation acknowledgement, retained fan-out scope and
+        ledger (complete/high_water); use ledger() for the paginated entries.
         """
         return self._read_job(job_id)
+
+    def ledger(self, job_id: str, *, after: int = 0,
+               high_water: int | None = None, limit: int = 100) -> dict[str, Any]:
+        """Read one retained ledger page; reuse high_water and next to finish a snapshot.
+
+        complete describes historical coverage, has_more describes pagination.
+        HTTP 410 means the ID is unknown or its ledger has expired. get() includes
+        the ledger completeness/high_water summary, without the entries.
+        """
+        query = f"after={after}&limit={limit}"
+        if high_water is not None:
+            query += f"&high_water={high_water}"
+        return self._call("GET", f"/api/jobs/{quote(job_id, safe='')}/ledger?{query}")
 
     def cancel(self, job_id: str) -> dict[str, Any]:
         """Acknowledge no future execution; release may still be pending."""

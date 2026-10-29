@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/JobLedgerPage",
+  "$defs": {
+    "JobLedgerEntry": {
+      "properties": {
+        "sequence": {
+          "type": "integer"
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "attempt": {
+          "type": "integer"
+        },
+        "execution_id": {
+          "type": "string"
+        },
+        "process_id": {
+          "type": "string"
+        },
+        "supervisor_pid": {
+          "type": "integer"
+        },
+        "supervisor_birth": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "release": {
+          "type": "string"
+        },
+        "custody_id": {
+          "type": "string"
+        },
+        "custody_start": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "custody_end": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "type": "object",
+      "required": [
+        "sequence",
+        "at",
+        "attempt",
+        "execution_id",
+        "machine",
+        "session",
+        "kind",
+        "reason",
+        "release"
+      ]
+    },
+    "JobLedgerPage": {
+      "properties": {
+        "job_id": {
+          "type": "string"
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "high_water": {
+          "type": "integer"
+        },
+        "next": {
+          "type": "integer"
+        },
+        "has_more": {
+          "type": "boolean"
+        },
+        "entries": {
+          "items": {
+            "$ref": "#/$defs/JobLedgerEntry"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object",
+      "required": [
+        "job_id",
+        "complete",
+        "high_water",
+        "next",
+        "has_more",
+        "entries"
+      ]
+    }
+  }
+}

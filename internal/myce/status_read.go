@@ -158,6 +158,22 @@ func (q *Queue) captureObservation(id string) (*Queue, fileStoreObservation, err
 			s.Jobs[key] = &copy
 		}
 	}
+	for key, j := range s.Jobs {
+		if len(j.LedgerEntries) > 0 {
+			copy := *j
+			copy.LedgerEntries = nil
+			s.Jobs[key] = &copy
+		}
+	}
+	for key, r := range s.Submissions {
+		if r.Job != nil && len(r.Job.LedgerEntries) > 0 {
+			copy := *r
+			job := *r.Job
+			job.LedgerEntries = nil
+			copy.Job = &job
+			s.Submissions[key] = &copy
+		}
+	}
 	inputs := observationState{State: s, Models: q.models, Environments: q.environments, Calls: q.calls, Unreported: q.unreported}
 	if minimal {
 		inputs.Models, inputs.Environments, inputs.Calls, inputs.Unreported = ModelConfig{}, EnvironmentCatalog{}, nil, nil

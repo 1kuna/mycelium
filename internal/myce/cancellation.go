@@ -3,7 +3,9 @@ package myce
 import (
 	"context"
 	"errors"
+	"maps"
 	"net/url"
+	"slices"
 	"sort"
 	"time"
 )
@@ -285,6 +287,30 @@ func (q *Queue) confirmCopyRelease(r Result) {
 	for i := range j.Copies {
 		c := &j.Copies[i]
 		if c.Attempt == r.Attempt && c.Machine == r.Machine && c.Session == r.Session {
+			if !c.ReleaseConfirmed {
+				if !j.Spec.Run.Docker && c.ProcessID == "" && j.Ledger != nil {
+					j.Ledger = &JobLedgerInfo{Complete: false, HighWater: len(j.LedgerEntries)}
+				}
+				// Existing exact release authority settles every generation in this copy.
+				latest := map[string]JobLedgerEntry{}
+				for _, e := range j.LedgerEntries {
+					if e.Attempt == r.Attempt && e.Machine == r.Machine && e.Session == r.Session && e.CustodyID != "" {
+						latest[e.CustodyID] = e
+					}
+				}
+				for _, id := range slices.Sorted(maps.Keys(latest)) {
+					e := latest[id]
+					if e.Release != "confirmed" {
+						at := q.clock.Now()
+						e.Kind = "custody_released"
+						e.Reason = "execution_acknowledged"
+						e.Release = "confirmed"
+						e.CustodyEnd = &at
+						q.appendJobLedger(j, e)
+					}
+				}
+				q.appendJobLedger(j, JobLedgerEntry{Attempt: r.Attempt, Machine: r.Machine, Session: r.Session, Kind: "released", Reason: "execution_acknowledged", Release: "confirmed"})
+			}
 			c.ReleaseConfirmed = true
 			c.ReleaseReason = "execution_acknowledged"
 			c.Recoverable = false
