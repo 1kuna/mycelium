@@ -305,7 +305,8 @@ disk: {output_bytes: 10485760}
 
 Declare the estimated total output bytes before admission. The queue durably
 reserves that estimate for queued/running tasks; unrelated uploads cannot consume
-it. After process exit, the worker copies outputs into an immutable local spool,
+it, including against extension/environment bundle writes. After process exit,
+the worker copies outputs into an immutable local spool,
 hashes/syncs it and publishes its manifest. It then declares the exact current-
 attempt manifest through `POST /api/files/result` (the Result identity plus
 `output_refs`). This exchanges the estimate for actual missing bytes. Larger
@@ -325,7 +326,8 @@ Reusing an unrelated unmarked import does not make it collectible.
 Uploads use the existing resumable verified file API. One SQLite transaction
 accepts the current result and pending delivery only after every blob is verified
 and synced. Only that commit completes the task. The worker confirms exact queue
-acceptance before reclaiming its spool. Retrieve `output_refs` immediately with
+acceptance and its prepared attempt ownership receipt before reclaiming its
+spool. Retrieve `output_refs` immediately with
 `myce file get` or the client download helper; dependent jobs use file references.
 A consumer requiring NAS paths must explicitly wait for `delivery.state` to be
 `verified` on `GET /api/jobs/ID`, and match `delivery.id`/`attempt` to the accepted

@@ -1,10 +1,12 @@
 package myce
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestOutputDeliverySpoolSurvivesRestartAndDiskRefusal(t *testing.T) {
@@ -58,5 +60,58 @@ func TestOutputDeliverySpoolSurvivesRestartAndDiskRefusal(t *testing.T) {
 	}
 	if _, _, err = captureDeliverySpool(j); !errors.Is(err, errRequiredDeliveryOutput) {
 		t.Fatalf("missing required output did not fail: %v", err)
+	}
+}
+
+func TestOutputDeliverySpoolCleanupUsesPreparedAttempt(t *testing.T) {
+	q, clock := fixture(t)
+	original := deliveryAssignment(t, q) // Default assignment has no workdir.
+	prepared := cloneJob(original)
+	prepared.Spec.Run.Workdir = t.TempDir()
+	if err := os.WriteFile(filepath.Join(prepared.Spec.Run.Workdir, "out.txt"), []byte("accepted output"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// A relative cleanup path previously deleted an unrelated directory here.
+	t.Chdir(t.TempDir())
+	unrelated := filepath.Join(".myce-result-spool", "unrelated")
+	if err := os.MkdirAll(filepath.Dir(unrelated), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(unrelated, []byte("keep"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	w := recoveryWorker(t)
+	w.Client, w.Clock, w.Machine = deliveryClient(t, q), clock, machine(prepared.Machine, "fake", prepared.Session)
+	w.control = &processControl{}
+	store, err := w.openStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.close()
+	r, err := w.finishFileResult(prepared, result(&prepared, true), store.dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wrong := prepared
+	wrong.Attempt++
+	wrongResult := r
+	wrongResult.Attempt++
+	if err := removeAcceptedDeliverySpool(wrong, wrongResult); err == nil {
+		t.Fatal("different attempt's spool removed")
+	}
+	store.state.Job, store.state.Result, store.state.Session = &prepared, &r, prepared.Session
+	actor := &attemptSupervisor{store: store, job: *original, worker: w, connected: true, done: make(chan struct{}), wake: make(chan struct{}, 1)}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	actor.run(ctx)
+	_, _, finished, err := actor.snapshot()
+	if err != nil || !finished || store.state.Job != nil || job(t, q, prepared.ID).State != "succeeded" {
+		t.Fatalf("accepted actor did not finish: finished=%t err=%v state=%+v", finished, err, store.state)
+	}
+	if _, err := os.Stat(deliverySpoolPath(prepared)); !os.IsNotExist(err) {
+		t.Fatal("owned accepted spool retained", err)
+	}
+	if data, err := os.ReadFile(unrelated); err != nil || string(data) != "keep" {
+		t.Fatal("unrelated spool deleted", err)
 	}
 }

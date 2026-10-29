@@ -79,6 +79,35 @@ func TestOutputDeliveryCapacityPreservesSpoolAndReservations(t *testing.T) {
 	}
 }
 
+func TestOutputDeliveryBundleHonorsReservation(t *testing.T) {
+	q, _ := fixture(t)
+	q.deliveryRoot = q.root
+	q.files.limit = 16
+	s := asyncDeliverySpec()
+	s.Disk.OutputBytes = 16
+	j := submit(t, q, s)
+	files := map[string][]byte{"f": []byte("x")}
+	var ref *FileRef
+	err := q.files.freezeFiles(&files, &ref, "", nil)
+	var refusal *HTTPError
+	if !errors.As(err, &refusal) || refusal.Status != http.StatusInsufficientStorage {
+		t.Fatalf("bundle consumed output reservation: %v", err)
+	}
+	status := q.fileStoreStatus(context.Background())
+	if status.UsedBytes != 0 || status.ReservedOutputBytes != 16 || ref != nil || len(files) != 1 {
+		t.Fatalf("refused bundle changed storage: %+v", status)
+	}
+	if err := q.Cancel(j.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.files.freezeFiles(&files, &ref, "", nil); err != nil {
+		t.Fatal("bundle did not resume after capacity relief", err)
+	}
+	if status := q.fileStoreStatus(context.Background()); status.UsedBytes != 12 || status.ReservedOutputBytes != 0 {
+		t.Fatalf("wrong bundle usage: %+v", status)
+	}
+}
+
 // Independent review reproduced unreferenced uploaded results without any GC
 // owner. Exercise the real worker path, then prove both reclamation and the
 // unmarked-import boundary after a lost attempt.

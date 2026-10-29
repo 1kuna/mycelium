@@ -296,9 +296,15 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 						continue
 					}
 					s.state.PublishedAttempt = published
-					if published != nil && a.job.Spec.OutputDelivery == asyncNAS {
-						if e := os.RemoveAll(deliverySpoolPath(a.job)); e != nil {
+					if published != nil && s.state.Job.Spec.OutputDelivery == asyncNAS {
+						if e := removeAcceptedDeliverySpool(*s.state.Job, *s.state.Result); e != nil {
 							s.fileError = "accepted result spool cleanup pending"
+							select {
+							case <-ctx.Done():
+							case <-a.wake:
+							case <-tick.C:
+							}
+							continue
 						}
 					}
 				}
