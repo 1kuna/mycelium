@@ -9,9 +9,9 @@ import (
 
 // NAS budgets share one policy for SMB/NFS/autofs. Background observations must
 // return within a heartbeat; availability retains a successful observation while
-// a new probe progresses within the network budget. Validation bounds each syscall.
+// a new probe makes filesystem-operation progress. Validation bounds each syscall.
 const (
-	heartbeatFilesystemBudget      = 750 * time.Millisecond
+	heartbeatFilesystemBudget = 750 * time.Millisecond
 	// Ten seconds bounds a stalled operation above the observed 6.074-second
 	// maximum; qualification under supported share load remains outstanding.
 	networkFilesystemBudget        = 10 * time.Second
@@ -35,11 +35,11 @@ type checkpointIO[T any] struct {
 	timeout time.Duration // Negative: the sequence context owns per-operation deadlines.
 }
 type checkpointIOResult[T any] struct {
-	discard bool // A timed-out/cancelled result is never reusable.
-	done    chan struct{}
-	started time.Time
-	value   T
-	err     error
+	discard    bool // A timed-out/cancelled result is never reusable.
+	done       chan struct{}
+	progressed time.Time
+	value      T
+	err        error
 }
 
 func (n *checkpointIO[T]) run(key string, fn func() (T, error)) (T, error) {
@@ -91,7 +91,7 @@ func (n *checkpointIO[T]) runBounded(parent context.Context, key string, fn func
 		}
 		if n.pending == nil {
 			n.key = key
-			r := &checkpointIOResult[T]{done: make(chan struct{}), started: time.Now()}
+			r := &checkpointIOResult[T]{done: make(chan struct{}), progressed: time.Now()}
 			n.pending = r
 			go func() { r.value, r.err = fn(); close(r.done) }()
 		}
@@ -137,10 +137,13 @@ func (n *checkpointIO[T]) runBounded(parent context.Context, key string, fn func
 
 func needsCheckpoint(j *Job) bool { return j.Spec.Priority != "production" || j.Spec.Resumable }
 
-// A healthy CIFS operation measured 6.074s during the incident. Keep the 750ms
-// control-path wait, but allow the existing 10s network budget before declaring
-// an in-flight observation stalled. Cold start and completed errors fail closed.
-// At most one syscall sequence remains outstanding, including after refusal.
+// Background availability uses the installer's measured per-operation stall
+// backstop: successful CIFS create/unlink calls took 17.73s/23.22s (#234).
+// Completed operations renew liveness; a progressing sequence has no total cap.
+// A stuck call fences admission after 30s, costing up to 30s of retained success.
+// The 750ms control wait and single outstanding sequence remain unchanged.
+const checkpointAvailabilityStallBudget = onboardingFilesystemStallBudget
+
 type checkpointAvailability struct {
 	checkpointIO[bool]
 	available   bool // protected by checkpointIO.mu
@@ -148,8 +151,17 @@ type checkpointAvailability struct {
 }
 
 func (n *checkpointAvailability) run(key string, fn func() (bool, error)) (bool, error) {
+	return n.runProgress(key, func(func()) (bool, error) { return fn() })
+}
+
+func (n *checkpointAvailability) runProgress(key string, fn func(func()) (bool, error)) (bool, error) {
 	value, err := n.checkpointIO.run(key, func() (bool, error) {
-		value, err := fn()
+		progress := func() {
+			n.mu.Lock()
+			n.pending.progressed = time.Now()
+			n.mu.Unlock()
+		}
+		value, err := fn(progress)
 		n.mu.Lock()
 		n.available, n.observedKey = value && err == nil, key
 		n.mu.Unlock()
@@ -160,7 +172,7 @@ func (n *checkpointAvailability) run(key string, fn func() (bool, error)) (bool,
 	}
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	if n.available && n.observedKey == key && n.key == key && n.pending != nil && time.Since(n.pending.started) < networkFilesystemBudget {
+	if n.available && n.observedKey == key && n.key == key && n.pending != nil && time.Since(n.pending.progressed) < checkpointAvailabilityStallBudget {
 		return true, nil
 	}
 	return false, err
