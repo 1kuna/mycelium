@@ -47,7 +47,7 @@ func runRecordedCommand(ctx context.Context, argv []string, dir string, env []st
 		return e
 	}
 	args := []string{"-c", `read gate || exit 125; "$@" < /dev/null & child=$!; wait "$child"; exit $?`, "myce-supervisor-" + identity}
-	args = append(args, argv...)
+	args = append(args, environmentCommand(argv, env)...)
 	cmd := exec.CommandContext(ctx, "sh", args...)
 	cmd.Dir = dir
 	cmd.Env = append(env, "MYCE_PROCESS_ID="+identity, "ZE_ENABLE_PCI_ID_DEVICE_ORDER=1")
