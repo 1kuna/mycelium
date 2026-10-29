@@ -14,6 +14,8 @@ var workerMachineProbe = LocalMachineProbe
 // WorkerProbeDefaults groups host sources used when a worker has no override.
 // Embedded callers may inject these before starting any worker goroutines.
 type WorkerProbeDefaults struct {
+	// Nil disables the current worker-tree RSS observation.
+	MemoryRSS    MemorySource
 	Disk         func(string) (DiskReading, error)
 	Profile      func() ProfileProbe
 	HostMemory   func(float64) (MemorySource, error)
@@ -34,6 +36,7 @@ func SetWorkerProbeDefaults(p WorkerProbeDefaults) {
 	workerHostMemorySource = p.HostMemory
 	workerOwnerSignals = p.OwnerSignals
 	workerProcessMemory = p.ProcessMemory
+	workerMemoryRSS = p.MemoryRSS
 	extensionIdentityProbe = p.Identity
 	if p.DeviceFaults != nil {
 		workerDeviceFaultSource = p.DeviceFaults

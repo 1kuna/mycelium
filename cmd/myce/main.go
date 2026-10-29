@@ -927,6 +927,9 @@ func printStatus(s myce.Snapshot, full bool) {
 		} else if m.HostMemoryBudgetGB > 0 {
 			state += fmt.Sprintf("; host ceiling budget (last reported) %.3g GiB", m.HostMemoryBudgetGB)
 		}
+		if h := m.ExternalMemory; h != nil {
+			state += fmt.Sprintf("; non-Mycelium RAM 24h p50/p95/max %s; 7d %s", h.Day.Summary(), h.Week.Summary())
+		}
 		if over := m.HostMemoryBudgetStatus(); over != "" {
 			state += "; " + over
 		}

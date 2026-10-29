@@ -113,6 +113,7 @@ type Worker struct {
 	StateDir                    string
 	CheckpointRoot              string
 	HostMemorySource            MemorySource
+	hostRawMemorySource         MemorySource
 	HostMemoryReserveGB         float64
 	MemorySource                MemorySource
 	MemoryMeasured              bool
@@ -1052,11 +1053,16 @@ func (w Worker) Run(stop context.Context) error {
 	if w.Machine.GPU == "cpu" {
 		w.Machine.HostMemoryMeasured = true
 	}
+	if !validMemoryValue(w.HostMemoryReserveGB) {
+		return errors.New("host memory reserve must be finite and nonnegative")
+	}
 	if w.HostMemorySource == nil {
-		w.HostMemorySource, err = workerHostMemorySource(w.HostMemoryReserveGB)
+		w.hostRawMemorySource, err = workerHostMemorySource(0)
 		if err != nil {
 			return err
 		}
+		raw, reserve := w.hostRawMemorySource, w.HostMemoryReserveGB
+		w.HostMemorySource = func(ctx context.Context) (float64, error) { n, e := raw(ctx); return max(0, n-reserve), e }
 	}
 	if _, err := MemoryCeilingConfig(w.Machine.HostMemoryBudgetGB, w.Machine.MemoryCeilingSlackGB, w.MemorySwapMaxBytes); err != nil {
 		return err

@@ -40,8 +40,9 @@ type batchRelease struct {
 }
 
 type state struct {
-	Health       healthAlerts  `json:"health_alerts,omitempty"`
-	FleetUpgrade *fleetUpgrade `json:"fleet_upgrade,omitempty"`
+	ExternalMemory map[string]*externalMemoryRing `json:"external_memory,omitempty"`
+	Health         healthAlerts                   `json:"health_alerts,omitempty"`
+	FleetUpgrade   *fleetUpgrade                  `json:"fleet_upgrade,omitempty"`
 	// Positive orphan eligibility, persisted with the existing queue state.
 	// Zero time means an input upload has not finished publication yet.
 	JobInputUploads map[string]time.Time `json:"job_input_uploads,omitempty"`
@@ -1018,6 +1019,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 			return err
 		}
 		m := cloneMachine(&c.Machine)
+		m.ExternalMemory = nil // Summary is queue-owned, never worker-supplied.
 		// Worker clocks are unrelated to queue time. Translate local proof age
 		// into a queue-owned receipt timestamp; cached observations keep aging.
 		if m.Fleet != nil {
@@ -1160,6 +1162,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 		}
 		q.acceptExtensionQualifications(&m)
 		q.s.Machines[m.ID] = &m
+		q.recordExternalMemory(&m)
 		for _, report := range reports {
 			cause := report.DockerCause
 			// The legacy worker reports one current attempt, so its host diagnostic
@@ -1808,6 +1811,7 @@ func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
 	}
 	for _, m := range q.s.Machines {
 		copy := cloneMachine(m)
+		copy.ExternalMemory = q.externalMemoryStatus(hostID(m))
 		for i, v := range copy.DiskVolumes {
 			copy.DiskVolumes[i] = q.currentDiskVolume(v, m.DiskReceivedAt)
 		}
