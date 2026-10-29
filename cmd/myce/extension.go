@@ -24,7 +24,7 @@ func extensionCommand(args []string) error {
 		return extensionInit(args[1:])
 	}
 	f := flag.NewFlagSet("extension "+args[0], flag.ContinueOnError)
-	root := f.String("root", myce.DefaultExtensionRoot(), "local extension library and download cache")
+	root := f.String("root", myce.DefaultExtensionRoot(), "local extension library and download cache (default: installed worker root, then user cache)")
 	environmentRoot := f.String("environment-cache", "", "existing local environment cache for variant setup/check")
 	environmentLimit := f.Int64("environment-cache-bytes", 0, "environment cache bytes (omitted: auto-size from cache disk)")
 	queue := f.String("queue", env("MYCE_QUEUE", ""), "queue address")
@@ -42,6 +42,17 @@ func extensionCommand(args []string) error {
 	timeout := f.Duration("timeout", 10*time.Minute, "setup/check time limit")
 	if err := f.Parse(args[1:]); err != nil {
 		return err
+	}
+	explicitRoot := false
+	f.Visit(func(flag *flag.Flag) {
+		if flag.Name == "root" {
+			explicitRoot = true
+		}
+	})
+	if !explicitRoot {
+		if installed := installedExtensionRoot(*config); installed != "" {
+			*root = installed
+		}
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -115,11 +126,9 @@ func extensionCommand(args []string) error {
 			return nil
 		}
 		if args[0] == "check" {
-			f.Visit(func(flag *flag.Flag) {
-				if flag.Name == "root" {
-					warnExtensionCheckRoot(os.Stderr, *config, *root)
-				}
-			})
+			if explicitRoot {
+				warnExtensionCheckRoot(os.Stderr, *config, *root)
+			}
 			target, err := myce.ResolveExtensionCheckTarget(ctx, client, *host, *platform, *device, *environmentRoot)
 			if err != nil {
 				return err
@@ -179,6 +188,26 @@ func extensionCommand(args []string) error {
 // to an installed worker. Inspect local configuration even with explicit queue
 // credentials, which bypass installed authority resolution.
 func warnExtensionCheckRoot(out io.Writer, config, root string) {
+	workerRoot := installedExtensionRoot(config)
+	if workerRoot == "" {
+		return
+	}
+	checkRoot, err := filepath.Abs(root)
+	if err != nil || checkRoot == workerRoot {
+		return
+	}
+	// Relative paths and symlink aliases to the same directory are safe.
+	checkInfo, checkErr := os.Stat(checkRoot)
+	workerInfo, workerErr := os.Stat(workerRoot)
+	if checkErr == nil && workerErr == nil && os.SameFile(checkInfo, workerInfo) {
+		return
+	}
+	fmt.Fprintf(out, "WARNING: checking extension root %q; installed worker extension root is %q. The live worker is not qualified by this check. Rerun with --root %q to qualify the worker.\n", checkRoot, workerRoot, workerRoot)
+}
+
+// Read only local worker settings, without requiring queue credentials for
+// offline extension commands. Installed workers use their spool's extensions.
+func installedExtensionRoot(config string) string {
 	home, _ := os.UserHomeDir()
 	paths := []string{config, filepath.Join(home, ".local", "share", "mycelium", "worker", "config.json")}
 	for _, path := range paths {
@@ -189,21 +218,8 @@ func warnExtensionCheckRoot(out io.Writer, config, root string) {
 		if err != nil || c.Role != "worker" || c.State == "" {
 			continue
 		}
-		workerRoot, err := filepath.Abs(filepath.Join(c.State, "extensions"))
-		if err != nil {
-			return
-		}
-		checkRoot, err := filepath.Abs(root)
-		if err != nil || checkRoot == workerRoot {
-			return
-		}
-		// Relative paths and symlink aliases to the same directory are safe.
-		checkInfo, checkErr := os.Stat(checkRoot)
-		workerInfo, workerErr := os.Stat(workerRoot)
-		if checkErr == nil && workerErr == nil && os.SameFile(checkInfo, workerInfo) {
-			return
-		}
-		fmt.Fprintf(out, "WARNING: checking extension root %q; installed worker extension root is %q. The live worker is not qualified by this check. Rerun with --root %q to qualify the worker.\n", checkRoot, workerRoot, workerRoot)
-		return
+		root, _ := filepath.Abs(filepath.Join(c.State, "extensions"))
+		return root
 	}
+	return ""
 }

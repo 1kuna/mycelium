@@ -117,6 +117,76 @@ variants:
 	if len(reports) != 1 || reports[0].Target == nil || reports[0].Target.OS != runtime.GOOS {
 		t.Fatal("variant target lost", reports)
 	}
+	// No --root must install and qualify where the installed worker reads.
+	for _, args := range [][]string{
+		{"extension", "add", folder},
+		{"extension", "setup", "--gpu", "fake", "fixture.stage@1"},
+		{"extension", "check", "--gpu", "fake", "--device", "0", "--host", "cli-host", "--environment-cache", t.TempDir(), "--environment-cache-bytes", "1048576", "fixture.stage@1"},
+	} {
+		_, stderr, err := captureUsageOutput(t, args)
+		if err != nil || strings.Contains(stderr, "WARNING:") {
+			t.Fatalf("default worker root %v: %v, %s", args, err, stderr)
+		}
+	}
+	fingerprint, err := myce.ExtensionFingerprint(context.Background(), "fake", "0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reports = myce.LocalExtensionReports(filepath.Join(workerState, "extensions"), "fake", fingerprint)
+	if len(reports) != 1 || !reports[0].Qualified {
+		t.Fatal("default check did not qualify installed worker root", reports)
+	}
+}
+
+func TestExtensionCLIInstalledRootDefault(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, "cache"))
+	folder := filepath.Join(home, "source")
+	if err := extensionCommand([]string{"init", "--name", "fixture", folder}); err != nil {
+		t.Fatal(err)
+	}
+	// Without an installed worker, retain the user-cache default.
+	if err := extensionCommand([]string{"add", "--local", folder}); err != nil {
+		t.Fatal(err)
+	}
+	if extensions, err := myce.LocalExtensions(myce.DefaultExtensionRoot()); err != nil || len(extensions) != 1 {
+		t.Fatal("user cache fallback", extensions, err)
+	}
+	state := filepath.Join(home, "worker-state")
+	config := filepath.Join(home, ".local", "share", "mycelium", "worker", "config.json")
+	if err := os.MkdirAll(filepath.Dir(config), 0700); err != nil {
+		t.Fatal(err)
+	}
+	saved, _ := json.Marshal(myce.ServiceConfig{Role: "worker", State: state})
+	if err := os.WriteFile(config, saved, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := extensionCommand([]string{"add", "--local", folder}); err != nil {
+		t.Fatal(err)
+	}
+	if extensions, err := myce.LocalExtensions(filepath.Join(state, "extensions")); err != nil || len(extensions) != 1 {
+		t.Fatal("installed root default", extensions, err)
+	}
+	// The list command remains offline and reads the same installed library.
+	output, _, err := captureUsageOutput(t, []string{"extension", "list"})
+	if err != nil || !strings.Contains(output, `"name":"fixture"`) {
+		t.Fatal("installed root list", output, err)
+	}
+	// A custom --config selects a worker outside the conventional install path.
+	custom := filepath.Join(home, "custom.json")
+	if err := os.Rename(config, custom); err != nil {
+		t.Fatal(err)
+	}
+	output, _, err = captureUsageOutput(t, []string{"extension", "list", "--config", custom})
+	if err != nil || !strings.Contains(output, `"name":"fixture"`) {
+		t.Fatal("custom installed root list", output, err)
+	}
+	other := t.TempDir()
+	output, _, err = captureUsageOutput(t, []string{"extension", "list", "--config", custom, "--root", other})
+	if err != nil || strings.Contains(output, `"name":"fixture"`) {
+		t.Fatal("explicit root ignored", output, err)
+	}
 }
 
 func TestExtensionCheckRootWarning(t *testing.T) {
