@@ -774,6 +774,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				m.HostAvailableMemoryGB = 0
 				m.HostMemoryError = "host RAM probe failed"
 			}
+			m.MemoryObservation = w.hostMemoryObservation(ctx, m, hostFree, err)
 			checkpointRoot := root.state.CheckpointRoot
 			available, _ := root.nasProbe.runProgress(checkpointRoot, func(progress func()) (bool, error) {
 				err := workerCheckpointAvailable(checkpointRoot, progress)

@@ -198,3 +198,43 @@ func TestHostMaintenanceInstalledAuthority(t *testing.T) {
 		t.Fatalf("pin refusal changed policy: %+v %v", current.Policy, err)
 	}
 }
+
+func TestHostMaintenanceBudgetDryRun(t *testing.T) {
+	q, _, _, _ := waitQueue(t)
+	m := maintenanceCLIWorker("worker")
+	m.HostMemoryBudgetGB = 6.5
+	m.MemoryObservation = &myce.HostMemoryObservation{TotalGB: 32, UsedGB: 12, MyceliumGB: 2}
+	if _, err := q.Checkin(myce.Checkin{Machine: m}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := q.HostMaintenanceStatus("host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer((myce.API{Queue: q, Token: "test-only"}).Handler())
+	defer server.Close()
+	t.Setenv("MYCE_TOKEN", "test-only")
+	var out bytes.Buffer
+	if err = hostMaintenanceCommand(context.Background(), []string{"budget", "host", "--dry-run", "--queue", server.URL, "--queue-overhead-gb", "2"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	var s myce.HostBudgetSuggestion
+	if err = json.Unmarshal(out.Bytes(), &s); err != nil || s.SuggestedGB != 16 || !s.DryRun || s.History.Samples != 1 {
+		t.Fatal(out.String(), err)
+	}
+	after, err := q.HostMaintenanceStatus("host")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Policy.MemoryBudget.GiB != before.Policy.MemoryBudget.GiB || after.Policy.Mode != before.Policy.Mode || !after.Policy.UpdatedAt.Equal(before.Policy.UpdatedAt) {
+		t.Fatal("dry-run changed policy", before, after)
+	}
+	snapshot, err := q.Snapshot()
+	if err != nil || snapshot.Machines[0].ExternalMemory.Week.MaxGB != 10 {
+		t.Fatal("status missing history", snapshot, err)
+	}
+	output, _, err := captureUsageOutput(t, []string{"status", "--queue", server.URL, "--token", "test-only"})
+	if err != nil || !strings.Contains(output, "non-Mycelium RAM 24h p50/p95/max") {
+		t.Fatal(output, err)
+	}
+}

@@ -427,18 +427,20 @@ type Job struct {
 	Checkpoint            string                       `json:"checkpoint"`
 }
 type Machine struct {
-	Release                *RunningRelease     `json:"release,omitempty"`
-	Fleet                  *FleetRuntimeProof  `json:"fleet,omitempty"`
-	DiskReceivedAt         time.Time           `json:"disk_received_at,omitempty"` // Queue-owned receipt time; only disk check-ins renew it.
-	DiskVolumes            []DiskVolume        `json:"disk_volumes,omitempty"`
-	Enrollment             *EnrollmentProof    `json:"enrollment,omitempty"`
-	Recovering             bool                `json:"recovering,omitempty"`
-	RecoveringSince        *time.Time          `json:"recovering_since,omitempty"`
-	RecoveryNeedsAttention bool                `json:"recovery_needs_attention,omitempty"` // Status-only projection.
-	Replacement            *MachineReplacement `json:"replacement,omitempty"`
-	Devices                []MachineDevice     `json:"devices"`
-	InventoryReason        string              `json:"inventory_reason,omitempty"`
-	CPUIsolation           string              `json:"cpu_isolation,omitempty"`
+	ExternalMemory         *ExternalMemoryHistory `json:"external_memory,omitempty"`
+	MemoryObservation      *HostMemoryObservation `json:"memory_observation,omitempty"`
+	Release                *RunningRelease        `json:"release,omitempty"`
+	Fleet                  *FleetRuntimeProof     `json:"fleet,omitempty"`
+	DiskReceivedAt         time.Time              `json:"disk_received_at,omitempty"` // Queue-owned receipt time; only disk check-ins renew it.
+	DiskVolumes            []DiskVolume           `json:"disk_volumes,omitempty"`
+	Enrollment             *EnrollmentProof       `json:"enrollment,omitempty"`
+	Recovering             bool                   `json:"recovering,omitempty"`
+	RecoveringSince        *time.Time             `json:"recovering_since,omitempty"`
+	RecoveryNeedsAttention bool                   `json:"recovery_needs_attention,omitempty"` // Status-only projection.
+	Replacement            *MachineReplacement    `json:"replacement,omitempty"`
+	Devices                []MachineDevice        `json:"devices"`
+	InventoryReason        string                 `json:"inventory_reason,omitempty"`
+	CPUIsolation           string                 `json:"cpu_isolation,omitempty"`
 	cpuLedger              bool
 	CPUReserveCores        int           `json:"cpu_reserve_cores,omitempty"`
 	CPUBudgetCores         int           `json:"cpu_budget_cores,omitempty"`
