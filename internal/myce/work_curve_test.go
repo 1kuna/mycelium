@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"runtime"
 	"slices"
@@ -447,5 +448,74 @@ func TestWorkCurveSummaryShowsMemoryPeak(t *testing.T) {
 	point.MemoryPeak, point.HostMemoryGB = nil, 2
 	if line := point.Summary(); !strings.Contains(line, "peak host/device 2.00/0.00 GiB") {
 		t.Fatalf("legacy peak fallback lost: %s", line)
+	}
+}
+
+// A worker upgrade reports physical inventory before its asynchronous backend
+// fingerprint probe completes. That heartbeat must not poison retained curves.
+func TestWorkCurveMemorySurvivesIncompleteUpgradeInventory(t *testing.T) {
+	for _, changed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("backend_changed=%v", changed), func(t *testing.T) {
+			q, clock, m, s := unifiedAutoFixture(t, 0)
+			queued := submit(t, q, s)
+			first := assignedJob(machineCheck(t, q, m))
+			if first == nil || first.ID != queued.ID {
+				t.Fatal("first attempt not assigned")
+			}
+			if err := q.Started(result(first, false)); err != nil {
+				t.Fatal(err)
+			}
+			clock.Advance(time.Second)
+			host, device := 2.0, 3.0
+			r := result(first, true)
+			r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, DeviceGB: &device}
+			if err := q.Complete(r); err != nil {
+				t.Fatal(err)
+			}
+			learnedAt := clock.Now()
+			fingerprint := m.Devices[0].ExtensionFingerprint
+			previousSession := m.Session
+			m.Session = ID()
+			m.Devices[0].ExtensionFingerprint = ""
+			if _, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Fresh: true, PreviousSession: previousSession}); err != nil {
+				t.Fatal(err)
+			}
+			for _, point := range q.s.WorkObservations {
+				if point.StaleReason != "component unavailable" || !point.MemoryRecordedAt.Equal(learnedAt) {
+					t.Fatalf("incomplete inventory discarded learning: %+v", point)
+				}
+			}
+			if changed {
+				m.Devices[0].ExtensionFingerprint = "replacement-backend"
+				machineCheck(t, q, m)
+			}
+			m.Devices[0].ExtensionFingerprint = fingerprint
+			machineCheck(t, q, m)
+			for _, point := range q.s.WorkObservations {
+				want := ""
+				if changed {
+					want = "driver or backend fingerprint changed"
+				}
+				if point.StaleReason != want || !point.MemoryRecordedAt.Equal(learnedAt) {
+					t.Fatalf("returned identity: want %q, got %+v", want, point)
+				}
+			}
+			next := submit(t, q, s)
+			assigned := assignedJob(machineCheck(t, q, m))
+			if assigned == nil || assigned.ID != next.ID {
+				t.Fatal("post-upgrade attempt not assigned")
+			}
+			want := "accepted peak × 1.25"
+			if changed {
+				want = "exploratory first run"
+			}
+			if err := q.Started(result(assigned, false)); err != nil {
+				t.Fatal(err)
+			}
+			actual := job(t, q, assigned.ID)
+			if actual.MemoryEnvelope.Source != want || !changed && actual.Timing.Samples != 1 {
+				t.Fatalf("post-upgrade learning: envelope=%+v timing=%+v", actual.MemoryEnvelope, actual.Timing)
+			}
+		})
 	}
 }

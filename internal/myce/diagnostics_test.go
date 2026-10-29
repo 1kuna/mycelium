@@ -176,7 +176,7 @@ func TestNativeExecutionCauseSurvivesResultAndAPI(t *testing.T) {
 	s.state.Session = w.Machine.Session
 	j := recoveryJob(t, []string{"sh", "-c", "echo private-command-text >&2; exit 7"})
 	w = workerWithPreparedCheckpoint(t, w, s, j)
-	p, err := w.start(s, j)
+	p, err := startAfterFixtureInputs(t, w, s, j)
 	if err != nil {
 		t.Fatal(err)
 	}

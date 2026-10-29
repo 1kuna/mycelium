@@ -179,6 +179,7 @@ type Spec struct {
 	Environment     Environment            `json:"environment,omitempty" yaml:"environment,omitempty"`
 	AllowedMachines []string               `json:"allowed_machines,omitempty" yaml:"allowed_machines,omitempty"`
 	StartBy         *time.Time             `json:"start_by,omitempty" yaml:"start_by,omitempty"`
+	StartWindow     string                 `json:"start_window,omitempty" yaml:"start_window,omitempty"`
 	GiveUpAt        *time.Time             `json:"give_up_at,omitempty" yaml:"give_up_at,omitempty"`
 	ExpectedMinutes float64                `json:"expected_minutes,omitempty" yaml:"expected_minutes,omitempty"`
 	Resumable       bool                   `json:"resumable" yaml:"resumable"`
@@ -238,6 +239,12 @@ func (s Spec) Validate() error {
 	}
 	if s.StartBy != nil && s.Priority != "production" {
 		return reject("job_deadline_invalid", errors.New("start_by is only supported for production"))
+	}
+	if s.StartWindow != "" {
+		window, err := time.ParseDuration(s.StartWindow)
+		if s.Priority != "production" || err != nil || window <= 0 || window > MaxProductionStartWindow {
+			return reject("job_deadline_invalid", errors.New("start_window requires production and a duration greater than 0 and at most 1h"))
+		}
 	}
 	if s.Priority == "deadline" && s.Deadline == nil {
 		return reject("job_deadline_invalid", errors.New("deadline priority requires a deadline"))
@@ -397,6 +404,7 @@ type Job struct {
 	EnvironmentRecipes    map[string]EnvironmentRecipe `json:"environment_recipes,omitempty"`
 	Copies                []Copy                       `json:"copies,omitempty"`
 	StartWindow           time.Duration                `json:"start_window,omitempty"`
+	StartByExplicit       *bool                        `json:"start_by_explicit,omitempty"`
 	StartedAt             *time.Time                   `json:"started_at,omitempty"`
 	StartLatencySeconds   float64                      `json:"start_latency_seconds"`
 	Starts                int                          `json:"starts"`

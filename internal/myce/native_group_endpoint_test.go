@@ -99,7 +99,7 @@ func TestNativeGroupEarlierConsumerEndpoint(t *testing.T) {
 	}
 	defer store.close()
 	store.state.Session = m.Session
-	p, e := worker.start(store, *reply.Job)
+	p, e := startAfterFixtureInputs(t, worker, store, *reply.Job)
 	if e != nil {
 		t.Fatal(e)
 	}

@@ -27,7 +27,7 @@ func TestNewAttemptBlockedCheckpointPreparationIsBounded(t *testing.T) {
 			return "", errors.New("NAS unreachable")
 		}
 		started := time.Now()
-		p, err := w.start(store, j)
+		p, err := startAfterFixtureInputs(t, w, store, j)
 		elapsed := time.Since(started)
 		close(release)
 		<-joined

@@ -55,7 +55,7 @@ func TestWorkerStartHandoffQueueWait(t *testing.T) {
 			}
 			defer store.close()
 			store.state.Session = a.Session
-			p, err := w.start(store, *a)
+			p, err := startAfterFixtureInputs(t, w, store, *a)
 			if err != nil || p == nil {
 				t.Fatalf("delayed %s start: process=%v err=%v", state, p, err)
 			}

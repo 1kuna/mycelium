@@ -140,6 +140,18 @@ Classification uses Mycelium-recorded facts for native, native-group and Docker 
 
 A production attempt that had started gets its original-length start window from interruption detection, including a worker interruption/release. Planned leave keeps its original start deadline. A requeued job may wait for its maintained host to resume within that window; a new production submission to only disabled eligible hosts still fails immediately. Unstarted attempts do not renew their start deadline.
 
+Production batch jobs and adapter entries may declare `start_window: 600s`, a
+positive Go duration no greater than `1h`; omission retains the `150s` default.
+This bounds availability waiting while allowing contended startup preparation;
+longer windows spend more caller latency before failure. Generated deadlines
+start at submission, dependency readiness, or physical fan-out child assignment,
+as applicable. Children inherit the declared length. Explicit absolute `start_by`
+takes precedence and passes unchanged through fan-out; its original window is
+the deadline minus original submission time. Job GET exposes the declaration in
+`spec.start_window` and the effective original length in top-level `start_window`
+(nanoseconds), including before startup. Experiments omit the fields and have no
+start deadline. Loss recovery retains that original effective length.
+
 ## Queue-owned host maintenance
 
 Maintenance is a durable queue record keyed by the physical `host_id`, shared by

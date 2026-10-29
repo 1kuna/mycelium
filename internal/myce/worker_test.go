@@ -326,3 +326,35 @@ func workerWithPreparedCheckpoint(t *testing.T, w Worker, store *workerStore, pa
 	}
 	return w
 }
+
+// Direct-start fixtures must join asynchronous inputs just as the attempt actor
+// retries them. Only input-pending is consumed: checkpoint faults and every
+// other launch result still reach the caller's original assertions unchanged.
+func startAfterFixtureInputs(t *testing.T, w Worker, store *workerStore, job Job) (*process, error) {
+	t.Helper()
+	return startAfterFixtureInputsContext(t, context.Background(), w, store, job)
+}
+
+func startAfterFixtureInputsContext(t *testing.T, ctx context.Context, w Worker, store *workerStore, job Job) (*process, error) {
+	t.Helper()
+	for {
+		p, err := w.startContext(ctx, store, job)
+		if !errors.Is(err, errWorkerCheckpoint) || !strings.Contains(err.Error(), "input copy pending") {
+			return p, err
+		}
+		if p != nil {
+			t.Fatal("input preparation returned a process before joining")
+		}
+		store.extensionFiles.mu.Lock()
+		pending := store.extensionFiles.pending
+		store.extensionFiles.mu.Unlock()
+		if pending == nil {
+			t.Fatal("input preparation lost its pending operation")
+		}
+		select {
+		case <-pending.done:
+		case <-time.After(testWaitTimeout):
+			t.Fatal("fixture input preparation did not finish")
+		}
+	}
+}

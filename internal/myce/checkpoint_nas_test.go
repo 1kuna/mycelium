@@ -202,7 +202,7 @@ func TestBlockedCheckpointPreparationIsBounded(t *testing.T) {
 	defer close(release)
 	w.checkpointPrepare = func(j Job) (string, error) { close(entered); <-release; return "", errors.New("NAS unreachable") }
 	done := make(chan error, 1)
-	go func() { _, err := w.start(store, recoveryJob(t, []string{"true"})); done <- err }()
+	go func() { _, err := startAfterFixtureInputs(t, w, store, recoveryJob(t, []string{"true"})); done <- err }()
 	select {
 	case <-entered:
 	case <-time.After(300 * time.Millisecond):
@@ -288,7 +288,7 @@ func TestWorkerForceStopsBlockedSaveAtGrace(t *testing.T) {
 	defer store.close()
 	j := recoveryJob(t, []string{"sh", "-c", `trap 'echo saving; cat "$MYCE_CHECKPOINT_DIR/save-block"; exit 0' TERM; echo ready; while :; do sleep 0.01; done`})
 	w = workerWithPreparedCheckpoint(t, w, store, j)
-	p, err := w.start(store, j)
+	p, err := startAfterFixtureInputs(t, w, store, j)
 	if err != nil {
 		t.Fatal(err)
 	}

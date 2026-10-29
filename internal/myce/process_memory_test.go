@@ -39,7 +39,7 @@ func runProcessMemoryAttempt(t *testing.T, w Worker) Result {
 	j := recoveryJob(t, []string{"sleep", "1"})
 	j.Spec.Resumable = false
 	j.Spec.Needs = ResourceNeeds{CPUCores: 1, HostMemoryGB: 1, Platform: Platform{Required: []string{"cpu"}}}
-	p, err := w.start(store, j)
+	p, err := startAfterFixtureInputs(t, w, store, j)
 	if err != nil {
 		t.Fatal(err)
 	}

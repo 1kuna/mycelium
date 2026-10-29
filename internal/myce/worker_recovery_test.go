@@ -167,7 +167,7 @@ func TestWorkerOfflineLargeOutputIsDurable(t *testing.T) {
 	s.state.Session = "offline-session"
 	j := recoveryJob(t, []string{"sh", "-c", `head -c 4194304 /dev/zero; echo done`})
 	w = workerWithPreparedCheckpoint(t, w, s, j)
-	p, err := w.start(s, j)
+	p, err := startAfterFixtureInputs(t, w, s, j)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +254,7 @@ func TestWorkerMissingCheckpointRootNotCreated(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "missing-nas")
 	j := recoveryJob(t, []string{"true"})
 	j.Checkpoint = filepath.Join(root, "job")
-	if _, err = w.start(s, j); !errors.Is(err, errWorkerCheckpoint) {
+	if _, err = startAfterFixtureInputs(t, w, s, j); !errors.Is(err, errWorkerCheckpoint) {
 		t.Fatalf("missing root error: %v", err)
 	}
 	if _, err = os.Stat(root); !errors.Is(err, os.ErrNotExist) {
@@ -271,7 +271,7 @@ func TestWorkerOrphanCleanupVerifiesIdentity(t *testing.T) {
 	s.state.Session = "old"
 	j := recoveryJob(t, []string{"sh", "-c", `sleep 30 & wait`})
 	w = workerWithPreparedCheckpoint(t, w, s, j)
-	p, err := w.start(s, j)
+	p, err := startAfterFixtureInputs(t, w, s, j)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -305,7 +305,7 @@ func TestWorkerPersistedResultReconcilesThenReplaysBeforeFresh(t *testing.T) {
 	s.state.Session = "old-session"
 	j := recoveryJob(t, []string{"sh", "-c", "echo recovered"})
 	w = workerWithPreparedCheckpoint(t, w, s, j)
-	p, err := w.start(s, j)
+	p, err := startAfterFixtureInputs(t, w, s, j)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -488,7 +488,7 @@ func TestWorkerRelativeCommandUsesJobWorkdir(t *testing.T) {
 	}
 	j.Spec.Run.Workdir = "{work}"
 	w = workerWithPreparedCheckpoint(t, w, s, j)
-	p, err := w.start(s, j)
+	p, err := startAfterFixtureInputs(t, w, s, j)
 	if err != nil {
 		t.Fatal(err)
 	}

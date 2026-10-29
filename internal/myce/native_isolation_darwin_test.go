@@ -227,7 +227,7 @@ func TestNativeIsolationSiblingAndControl(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		p, err := w.start(store, job)
+		p, err := startAfterFixtureInputs(t, w, store, job)
 		if err != nil {
 			t.Fatal(err)
 		}

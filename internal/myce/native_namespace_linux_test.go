@@ -69,7 +69,7 @@ printf ready > helper-ready
 while read request <&5; do printf 'ready\n' >&6; done
 `}}}
 			}
-			p, err := w.start(store, j)
+			p, err := startAfterFixtureInputs(t, w, store, j)
 			if err != nil {
 				t.Fatal(err)
 			}

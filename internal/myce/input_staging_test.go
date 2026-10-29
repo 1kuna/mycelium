@@ -60,7 +60,7 @@ func TestInputStagingTimestampPrecedesMemoryAndLaunch(t *testing.T) {
 	store.state.Session, store.state.Job = assigned.Session, assigned
 	store.extensionFiles.timeout = testWaitTimeout // Local fixture I/O, not a timing test.
 	want := clock.Now()
-	p, err := w.start(store, *assigned)
+	p, err := startAfterFixtureInputs(t, w, store, *assigned)
 	if err != nil || p == nil {
 		t.Fatalf("start: process=%v err=%v", p, err)
 	}

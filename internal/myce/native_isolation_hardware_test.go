@@ -215,7 +215,7 @@ func TestNativeIsolationHardware(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			p, err := w.start(attempt, job)
+			p, err := startAfterFixtureInputs(t, w, attempt, job)
 			if err != nil {
 				t.Fatalf("real Worker.start: %v", err)
 			}

@@ -138,7 +138,7 @@ func TestProductionStartGateUnreachableDoesNotExecute(t *testing.T) {
 	}
 	defer store.close()
 	store.state.Session = a.Session
-	p, e := w.start(store, *a)
+	p, e := startAfterFixtureInputs(t, w, store, *a)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -266,7 +266,7 @@ func TestProductionStartGateExecutionAndReplay(t *testing.T) {
 		t.Fatal(e)
 	}
 	store.state.Session = a.Session
-	p, e := w.start(store, *a)
+	p, e := startAfterFixtureInputs(t, w, store, *a)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -368,7 +368,7 @@ func TestProductionStartGateStorageFailureDoesNotExecute(t *testing.T) {
 	}
 	defer store.close()
 	store.state.Session = a.Session
-	p, e := w.start(store, *a)
+	p, e := startAfterFixtureInputs(t, w, store, *a)
 	if e != nil {
 		t.Fatal(e)
 	}

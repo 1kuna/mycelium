@@ -143,7 +143,7 @@ func TestCurrentProtocolBatchRefusalPreventsExecution(t *testing.T) {
 	j := recoveryJob(t, []string{"sh", "-c", "printf unsafe > {work}/payload"})
 	marker := filepath.Join(store.dir, "job-files", j.ID, "1", "payload")
 	j.Spec.Resumable = false
-	if _, err = worker.start(store, j); err == nil {
+	if _, err = startAfterFixtureInputs(t, worker, store, j); err == nil {
 		t.Fatal("refused batch executed")
 	}
 	if _, err = os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
