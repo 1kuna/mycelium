@@ -139,7 +139,7 @@ func startDev(c DevConfig, configureQueue func(*Queue)) (*Dev, error) {
 		}
 	}
 	if c.ProjectPolicies != nil {
-		if err = q.ConfigureProjects(c.ProjectPolicies); err != nil {
+		if err = q.SeedProjects(c.ProjectPolicies); err != nil {
 			q.Close()
 			return nil, err
 		}

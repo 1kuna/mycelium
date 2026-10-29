@@ -204,7 +204,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	releaseCA := f.String("release-ca", "", "provisioned publisher CA PEM (default ordinary HTTPS trust)")
 	identityDir := f.String("identity-dir", "", "durable joining identity directory (default DB.joining)")
 	hostConfig := f.String("host-config", "", "physical-host production hold policy YAML")
-	projectConfig := f.String("project-config", "", "project weights and experiment caps YAML")
+	projectConfig := f.String("project-config", "", "initial project policy YAML (later edits: myce policy set)")
 	url := f.String("queue", env("MYCE_QUEUE", "http://127.0.0.1:7331"), "queue address")
 	token := f.String("token", env("MYCE_TOKEN", ""), "shared fleet token (prefer MYCE_TOKEN)")
 	// DefValue is only help text; keep the actual environment default private.
@@ -528,7 +528,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			if e != nil {
 				return e
 			}
-			if e = q.ConfigureProjects(policies); e != nil {
+			if e = q.SeedProjects(policies); e != nil {
 				return e
 			}
 		}
