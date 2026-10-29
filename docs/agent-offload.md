@@ -5,6 +5,14 @@ not permission to launch locally. This MVP changes no harness configuration and
 adds no T3 dependency to Mycelium.
 Agents use the [`mycelium-offload` skill](../skills/mycelium-offload/SKILL.md).
 
+Before authoring or widening a project entry, run `myce portability`, then
+`myce portability --adapter .mycelium/adapter.yaml --entry NAME`. Recheck after
+inventory changes. For existing native qualification evidence use
+`myce portability --extension NAME@VERSION --project PROJECT --json`.
+See [live portability advice](portability.md); missing variants are gaps to
+investigate, not proof of hard requirements. Keep explicit CPU resources/checks
+and MY-19 parity before splitting.
+
 ## Install the agent skill
 
 From this repository, copy the skill directory, including its supporting files,

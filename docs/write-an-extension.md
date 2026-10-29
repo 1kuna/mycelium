@@ -1,6 +1,11 @@
 # Write an extension
 
 For new composed extensions, hand your agent [AGENT-GUIDE.md](extensions/AGENT-GUIDE.md).
+Use `myce portability` before choosing targets and
+`myce portability --extension NAME@VERSION --project PROJECT --json` after
+registration to compare coverage, preparation and native qualification with live
+inventory. See [live portability advice](portability.md). A missing variant is
+a portability gap; document genuine hard constraints with `requirement_reasons`.
 The legacy run/setup format and native baseline rules below remain supported.
 
 New registrations default to the native sandbox. At the top level of

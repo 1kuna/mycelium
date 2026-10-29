@@ -28,8 +28,9 @@ var extensionName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,63}$`)
 // Extension is one small folder. Files and Digest are immutable transport data,
 // not extra authoring fields in extension.yaml. Downloads live in its cache.
 type Extension struct {
-	Isolation string `json:"isolation,omitempty" yaml:"isolation,omitempty"`
-	Reason    string `json:"reason,omitempty" yaml:"reason,omitempty"`
+	RequirementReasons map[string]string `json:"requirement_reasons,omitempty" yaml:"requirement_reasons,omitempty"`
+	Isolation          string            `json:"isolation,omitempty" yaml:"isolation,omitempty"`
+	Reason             string            `json:"reason,omitempty" yaml:"reason,omitempty"`
 	// Server-owned registration metadata, outside immutable bundle identity.
 	// Absent on persisted pre-policy registrations and their frozen job copies.
 	SandboxDefault    bool                                    `json:"sandbox_default,omitempty" yaml:"-"`

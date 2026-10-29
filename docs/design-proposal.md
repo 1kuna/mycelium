@@ -2827,3 +2827,20 @@ attribution from an aggregate host error when several jobs share a host. Legacy
 single-attempt reports can use their unambiguous host diagnostic. A pending cleanup
 result can alert before release; neither alert path changes execution state or
 releases resources. Stale attempt diagnostics cannot emit a production-loss alert.
+
+
+## Amendment: live portability advice (#325, MY-26)
+
+`myce portability` and authenticated `GET/POST /api/portability` provide a
+read-only projection of live inventory and selected adapter/extension metadata.
+Exact observed and declared-but-absent targets, runtime support, recipe/lock
+coverage, preparation/build state, qualification identity and current admission
+remain distinct. Unknown or stale facts never establish support, and missing
+variants never establish hard software requirements. Advice follows the user's
+cluster, includes explicit CPU alternatives and backend-specific device/lock
+steps, and preserves MY-19 output parity before splitting. Optional authored
+`requirement_reasons` explain constraints without changing admission or identity
+of existing registrations. No payload execution, registration or placement occurs
+on an advice read. All file hydration, hashing and lock analysis happens outside
+`q.mu`. See [portability](portability.md) for interfaces and evidence limits.
+Registration warnings and scarce-host yield remain separate implementation work.
