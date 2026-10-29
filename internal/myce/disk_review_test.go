@@ -344,6 +344,63 @@ func TestDiskHeadroomFreshnessIncludesSamplingBudget(t *testing.T) {
 	}
 }
 
+// A native status snapshot lost checkpoint admission at 3.9866s even though
+// the completed capacity sample still had 3.87 TB free and no pending metadata.
+func TestDiskHeadroomCheckpointFreshnessWithoutPendingMetadata(t *testing.T) {
+	q, c := fixture(t)
+	m := reportDisk(t, machine("a", "fake"), c, "nas", []string{"checkpoint"}, 7920000000000, 3870000000000)
+	check(t, q, m, nil)
+	c.Advance(3990 * time.Millisecond)
+	j := &Job{Spec: spec("experiment")}
+	j.Spec.Resumable = true
+	j.Spec.Disk = &DiskNeeds{CheckpointBytes: 1 << 30}
+	if reason := q.diskHeadroomReason(j, q.s.Machines[m.ID]); reason != "" {
+		t.Fatalf("successful capacity reading expired between samples: %s", reason)
+	}
+	snap, err := q.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := snap.Machines[0].DiskVolumes[0]
+	if v.Error != "" || v.ProbeAgeSeconds != nil || v.Retained || v.AgeSeconds != 3.99 {
+		t.Fatalf("incorrect capacity status: %+v", v)
+	}
+	// Retention never invents free space: admission still uses the last value.
+	j.Spec.Disk.CheckpointBytes = v.FreeBytes
+	if reason := q.diskHeadroomReason(j, q.s.Machines[m.ID]); !strings.Contains(reason, "free=") || strings.Contains(reason, "unavailable") {
+		t.Fatalf("retained capacity did not enforce headroom: %s", reason)
+	}
+}
+
+func TestDiskHeadroomCheckpointWithoutPendingMetadataStalls(t *testing.T) {
+	q, c := fixture(t)
+	m := reportDisk(t, machine("a", "fake"), c, "nas", []string{"checkpoint"}, 100<<30, 41<<30)
+	// Even a long reported cadence cannot extend the 30s no-progress bound.
+	m.DiskVolumes[0].SampleIntervalSeconds = 60
+	check(t, q, m, nil)
+	j := &Job{Spec: spec("experiment")}
+	j.Spec.Resumable = true
+	c.Advance(29990 * time.Millisecond)
+	if reason := q.diskHeadroomReason(j, q.s.Machines[m.ID]); reason != "" {
+		t.Fatalf("last good reading expired before stall bound: %s", reason)
+	}
+	// Re-reporting the same observation must not reset the progress deadline.
+	m.DiskVolumes[0].AgeSeconds = 29.99
+	check(t, q, m, nil)
+	c.Advance(10 * time.Millisecond)
+	if reason := q.diskHeadroomReason(j, q.s.Machines[m.ID]); !strings.Contains(reason, "disk reading unavailable") {
+		t.Fatalf("stalled sampler did not fence at 30s: %s", reason)
+	}
+	snap, err := q.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := snap.Machines[0].DiskVolumes[0]
+	if v.Error == "" || v.Retained || v.FreeBytes != 41<<30 {
+		t.Fatalf("stall status lost evidence or retained admission: %+v", v)
+	}
+}
+
 func TestDiskHeadroomFreshnessUsesReceiveTimeAndReportedAge(t *testing.T) {
 	for _, skew := range []time.Duration{-24 * time.Hour, 24 * time.Hour} {
 		t.Run(skew.String(), func(t *testing.T) {
