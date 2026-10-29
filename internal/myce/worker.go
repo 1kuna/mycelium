@@ -1053,6 +1053,9 @@ func (w Worker) Run(stop context.Context) error {
 	if w.Machine.GPU == "cpu" {
 		w.Machine.HostMemoryMeasured = true
 	}
+	if !validMemoryValue(w.HostMemoryReserveGB) {
+		return errors.New("host memory reserve must be finite and nonnegative")
+	}
 	if w.HostMemorySource == nil {
 		w.hostRawMemorySource, err = workerHostMemorySource(0)
 		if err != nil {
