@@ -535,7 +535,16 @@ func TestDiskHeadroomStaleReadingDoesNotRefuseStartFence(t *testing.T) {
 	if a == nil || a.ID != prod.ID {
 		t.Fatal("production not assigned")
 	}
-	c.Advance(4 * time.Second) // beyond the 3.85 s freshness window
+	// Keep worker contact fresh while the disk sampler stops making progress.
+	if err := q.update(func() error {
+		q.s.Machines[m.ID].DiskVolumes[0].AgeSeconds = 31
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if reason := q.diskHeadroomReason(a, q.s.Machines[m.ID]); !strings.Contains(reason, "disk reading unavailable") {
+		t.Fatalf("disk reading did not expire before start fence: %s", reason)
+	}
 	launch := HostLaunch{Machine: a.Machine, Session: a.Session, Kind: "batch", Key: a.ID, Attempt: strconv.Itoa(a.Attempt)}
 	if err := q.AuthorizeLaunch(launch); err != nil {
 		t.Fatalf("stale disk reading refused launch authorization: %v", err)
