@@ -174,9 +174,9 @@ type fileStoreObservation struct {
 // values; the FileStore owns its separate lifecycle/inventory synchronization.
 func (q *Queue) captureFileStoreStatus() fileStoreObservation {
 	expired, keep, referenced := q.fileReferences(true)
-	markers := make(map[string]time.Time, len(q.s.JobInputUploads))
+	markers := make(map[string]time.Time, len(q.s.JobInputUploads)+len(q.s.AttemptOutputUploads))
 	bundles := make(map[string]time.Time, len(q.s.BundleUploads))
-	for hash, at := range q.s.JobInputUploads {
+	for hash, at := range q.jobUploadMarkers() {
 		markers[hash] = at
 	}
 	for hash, at := range q.s.BundleUploads {
@@ -305,7 +305,7 @@ func (q *Queue) reclaimInterruptedUploads(requestContexts ...context.Context) er
 	_, _, referenced := q.fileReferences(false)
 	revision := q.fileReferenceRevision
 	markers := map[string]time.Time{}
-	for hash, at := range q.s.JobInputUploads {
+	for hash, at := range q.jobUploadMarkers() {
 		if at.IsZero() && !referenced[hash] {
 			markers[hash] = at
 		}
@@ -332,7 +332,7 @@ func (q *Queue) reclaimInterruptedUploads(requestContexts ...context.Context) er
 			_, _, referenced = q.fileReferences(false)
 			revision = q.fileReferenceRevision
 		}
-		current, marked := q.s.JobInputUploads[hash]
+		current, marked := q.jobUploadMarker(hash)
 		remove := q.files == store && marked && current == at && !referenced[hash]
 		requestUnlock2()
 		err := func() error {
@@ -376,8 +376,13 @@ func (q *Queue) reclaimInterruptedUploads(requestContexts ...context.Context) er
 			return q.updateRequest(requestCtx, func() error {
 				if published.IsZero() {
 					delete(q.s.JobInputUploads, hash)
+					delete(q.s.AttemptOutputUploads, hash)
 				} else {
-					q.s.JobInputUploads[hash] = published
+					if _, owned := q.s.AttemptOutputUploads[hash]; owned {
+						q.s.AttemptOutputUploads[hash] = published
+					} else {
+						q.s.JobInputUploads[hash] = published
+					}
 				}
 				return nil
 			}, nil)

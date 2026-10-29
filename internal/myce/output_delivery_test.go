@@ -98,6 +98,9 @@ func TestOutputDeliveryCompletesBeforeNASAndRetriesStall(t *testing.T) {
 	if err := q.Complete(r); err != nil {
 		t.Fatal("lost acceptance ack", err)
 	}
+	if err := q.reserveDeliveryResult(context.Background(), r); err != nil {
+		t.Fatal("accepted manifest reservation replay", err)
+	}
 	c := deliveryClient(t, q)
 	dst := filepath.Join(t.TempDir(), "download")
 	if err := c.DownloadFile(context.Background(), accepted.OutputRefs["out.txt"], dst); err != nil {
@@ -264,6 +267,9 @@ func TestOutputDeliveryRejectsStaleAttempt(t *testing.T) {
 	interrupted := result(j, false)
 	interrupted.Interrupted, interrupted.PoliteStop = true, true
 	if err := q.Complete(interrupted); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.admitOutputRetries(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 	next := check(t, q, machine("publisher", "fake"), nil).Job

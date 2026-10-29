@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -75,5 +76,108 @@ func TestOutputDeliveryCapacityPreservesSpoolAndReservations(t *testing.T) {
 	// Actual pending output bytes remain charged; they cannot be called reclaimable.
 	if status.UsedBytes != 9 || status.ReclaimableBytes != 0 {
 		t.Fatalf("pending capacity missing: %+v", status)
+	}
+}
+
+// Independent review reproduced unreferenced uploaded results without any GC
+// owner. Exercise the real worker path, then prove both reclamation and the
+// unmarked-import boundary after a lost attempt.
+func TestOutputDeliveryAbandonedUploadReclaimed(t *testing.T) {
+	q, clock := fixture(t)
+	q.deliveryRoot = q.root
+	c := deliveryClient(t, q)
+	j := deliveryAssignment(t, q)
+	j.Spec.Run.Workdir = t.TempDir()
+	if err := os.WriteFile(filepath.Join(j.Spec.Run.Workdir, "out.txt"), []byte("12345678"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	w := Worker{Client: c}
+	uploaded, err := w.finishFileResult(*j, result(j, true), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, imported := retentionUpload(t, c, "unmarked import")
+	interrupted := result(j, false)
+	interrupted.Interrupted, interrupted.PoliteStop = true, true
+	if err = q.Complete(interrupted); err != nil {
+		t.Fatal(err)
+	}
+	if err = q.reserveDeliveryResult(context.Background(), uploaded); !errors.Is(err, ErrStale) {
+		t.Fatalf("abandoned attempt resurrected: %v", err)
+	}
+	clock.Advance(DefaultFileRetention + filePublicationGrace + time.Hour)
+	if err = q.reclaimJobFiles(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = os.Stat(q.files.blob(uploaded.OutputRefs["out.txt"])); !os.IsNotExist(err) {
+		t.Fatal("abandoned output permanently retained", err)
+	}
+	if err = q.files.verify(context.Background(), imported); err != nil {
+		t.Fatal("unmarked import reclaimed", err)
+	}
+}
+
+func TestOutputDeliveryRetryReacquiresCapacity(t *testing.T) {
+	q, _ := fixture(t)
+	q.deliveryRoot = q.root
+	q.files.limit = 16
+	c := deliveryClient(t, q)
+	m, other := machine("publisher", "fake"), machine("other", "fake")
+	check(t, q, m, nil)
+	check(t, q, other, nil)
+	s := asyncDeliverySpec()
+	s.Disk.OutputBytes = 16
+	s.AllowedMachines = []string{m.ID}
+	first := submit(t, q, s)
+	j := check(t, q, m, nil).Job
+	if j == nil || j.ID != first.ID {
+		t.Fatal("missing initial assignment")
+	}
+	j.Spec.Run.Workdir = t.TempDir()
+	if err := os.WriteFile(filepath.Join(j.Spec.Run.Workdir, "out.txt"), []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (Worker{Client: c}).finishFileResult(*j, result(j, true), t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	s.Disk.OutputBytes = 15
+	s.AllowedMachines = []string{other.ID}
+	second := submit(t, q, s)
+	interrupted := result(j, false)
+	interrupted.Interrupted, interrupted.PoliteStop = true, true
+	if err := q.Complete(interrupted); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.admitOutputRetries(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	status := q.fileStoreStatus(context.Background())
+	if status.UsedBytes != 1 || status.ReservedOutputBytes != 15 || status.FreeBytes != 0 {
+		t.Fatalf("retry conjured capacity: %+v", status)
+	}
+	if run := check(t, q, m, nil).Job; run != nil {
+		t.Fatal("retry dispatched without reacquiring budget")
+	}
+	if !strings.Contains(job(t, q, j.ID).Reason, "file_store_capacity") {
+		t.Fatal("capacity hold not explained")
+	}
+	// Clearing the competing reservation still leaves one stored byte; the 16-
+	// byte estimate cannot fit until that output expires or capacity increases.
+	if err := q.Cancel(second.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.admitOutputRetries(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if run := check(t, q, m, nil).Job; run != nil {
+		t.Fatal("stored byte omitted from retry admission")
+	}
+	q.files.limit = 17
+	if err := q.admitOutputRetries(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	run := check(t, q, m, nil).Job
+	if run == nil || run.ID != first.ID || run.Attempt != j.Attempt+1 {
+		t.Fatal("retry did not resume after capacity relief")
 	}
 }

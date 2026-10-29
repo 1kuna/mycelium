@@ -27,6 +27,7 @@ type FileReclamation struct {
 	Pending []string `json:"pending,omitempty"`
 }
 
+const attemptOutputUploadPurpose = "attempt-output"
 const jobInputUploadPurpose = "job-input"
 const fileImportUploadPurpose = "import"
 
@@ -59,11 +60,15 @@ func (q *Queue) markBundleUpload(hash string) {
 // never makes it collectible. A generic import permanently releases the marker.
 func (q *Queue) recordFileUpload(hash, purpose string, created bool, requestContexts ...context.Context) error {
 	requestCtx := requestContext(requestContexts)
+	if purpose == attemptOutputUploadPurpose {
+		return q.recordAttemptOutputUpload(hash, created, requestCtx)
+	}
 	unlockRequest := requestReadLock(requestCtx, &q.mu)
+	_, output := q.s.AttemptOutputUploads[hash]
 	_, marked := q.s.JobInputUploads[hash]
 	_, bundle := q.s.BundleUploads[hash]
 	change := purpose != jobInputUploadPurpose && marked || purpose == jobInputUploadPurpose && created && !marked
-	change = change || purpose != jobInputUploadPurpose && bundle
+	change = change || purpose != jobInputUploadPurpose && (bundle || output)
 	unlockRequest()
 	if !change {
 		return nil
@@ -71,6 +76,7 @@ func (q *Queue) recordFileUpload(hash, purpose string, created bool, requestCont
 	return q.updateRequest(requestCtx, func() error {
 		if purpose != jobInputUploadPurpose {
 			delete(q.s.JobInputUploads, hash)
+			delete(q.s.AttemptOutputUploads, hash)
 			delete(q.s.BundleUploads, hash)
 		} else if _, marked := q.s.JobInputUploads[hash]; created && !marked {
 			if q.s.JobInputUploads == nil {
@@ -85,7 +91,7 @@ func (q *Queue) recordFileUpload(hash, purpose string, created bool, requestCont
 func (q *Queue) publishFileUpload(hash string, requestContexts ...context.Context) error {
 	requestCtx := requestContext(requestContexts)
 	unlockRequest := requestReadLock(requestCtx, &q.mu)
-	published, marked := q.s.JobInputUploads[hash]
+	published, marked := q.jobUploadMarker(hash)
 	unchanged := !marked || published.Equal(q.clock.Now())
 	unlockRequest()
 	if unchanged {
@@ -94,6 +100,9 @@ func (q *Queue) publishFileUpload(hash string, requestContexts ...context.Contex
 	return q.updateRequest(requestCtx, func() error {
 		if _, marked := q.s.JobInputUploads[hash]; marked {
 			q.s.JobInputUploads[hash] = q.clock.Now()
+		}
+		if _, marked := q.s.AttemptOutputUploads[hash]; marked {
+			q.s.AttemptOutputUploads[hash] = q.clock.Now()
 		}
 		return nil
 	}, nil)
@@ -344,7 +353,7 @@ func (q *Queue) reclaimPublishedFilesContext(requestContexts ...context.Context)
 			bundles[hash] = published
 		}
 	}
-	for hash, published := range q.s.JobInputUploads {
+	for hash, published := range q.jobUploadMarkers() {
 		if !published.IsZero() && !published.After(orphanCutoff) && !referenced[hash] {
 			orphans[hash] = published
 		}
@@ -373,7 +382,7 @@ func (q *Queue) reclaimPublishedFilesContext(requestContexts ...context.Context)
 		}
 		remove := q.files == store && expired[hash] && !keep[hash]
 		if orphan {
-			published, marked := q.s.JobInputUploads[hash]
+			published, marked := q.jobUploadMarker(hash)
 			remove = q.files == store && marked && published == orphans[hash] && !referenced[hash]
 		}
 		if bundle {
@@ -452,6 +461,9 @@ func (q *Queue) reclaimPublishedFilesContext(requestContexts ...context.Context)
 			// marker. Never erase its eligibility/progress with an older result.
 			if q.s.JobInputUploads[hash] == orphans[hash] {
 				delete(q.s.JobInputUploads, hash)
+			}
+			if q.s.AttemptOutputUploads[hash] == orphans[hash] {
+				delete(q.s.AttemptOutputUploads, hash)
 			}
 			if q.s.BundleUploads[hash] == bundles[hash] {
 				delete(q.s.BundleUploads, hash)

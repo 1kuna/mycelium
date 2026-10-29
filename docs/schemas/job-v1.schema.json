@@ -1482,6 +1482,10 @@
           "type": "integer",
           "x-contract": "diagnostic"
         },
+        "output_admission_pending": {
+          "type": "boolean",
+          "x-contract": "diagnostic"
+        },
         "output_files": {
           "additionalProperties": {
             "type": "string"

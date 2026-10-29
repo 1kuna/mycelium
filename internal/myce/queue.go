@@ -40,8 +40,9 @@ type batchRelease struct {
 }
 
 type state struct {
-	Health       healthAlerts  `json:"health_alerts,omitempty"`
-	FleetUpgrade *fleetUpgrade `json:"fleet_upgrade,omitempty"`
+	AttemptOutputUploads map[string]time.Time `json:"attempt_output_uploads,omitempty"`
+	Health               healthAlerts         `json:"health_alerts,omitempty"`
+	FleetUpgrade         *fleetUpgrade        `json:"fleet_upgrade,omitempty"`
 	// Positive orphan eligibility, persisted with the existing queue state.
 	// Zero time means an input upload has not finished publication yet.
 	JobInputUploads map[string]time.Time `json:"job_input_uploads,omitempty"`
@@ -778,6 +779,7 @@ func (q *Queue) retry(j *Job, why string) {
 // Admission refusal and planned stops do not spend infrastructure retry budgets.
 func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 	j.PendingOutputRefs = nil
+	j.OutputAdmissionPending = j.Spec.OutputDelivery == asyncNAS
 	// Snapshot identity before requeue clears it, including loss without a result.
 	outcome := attemptOutcome(j, Result{Interrupted: true, PoliteStop: historyPlannedStop(j), PriorityStop: priorityStop(j)})
 	if chargeInfrastructure && strings.HasPrefix(why, "machine quiet for ") {
@@ -991,7 +993,7 @@ func (q *Queue) TickContext(requestContexts ...context.Context) error {
 	}, nil); err != nil {
 		return err
 	}
-	return errors.Join(q.advanceOutputDelivery(requestCtx), q.pruneBatchLogs(requestCtx), q.reclaimJobFilesContext(requestCtx), q.pruneJobHistory(requestCtx))
+	return errors.Join(q.advanceOutputDelivery(requestCtx), q.pruneBatchLogs(requestCtx), q.reclaimJobFilesContext(requestCtx), q.admitOutputRetries(requestCtx), q.pruneJobHistory(requestCtx))
 }
 func (q *Queue) Checkin(c Checkin) (Reply, error) {
 	return q.CheckinContext(context.Background(), c)

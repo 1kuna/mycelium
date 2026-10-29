@@ -347,10 +347,11 @@ type Copy struct {
 }
 
 type Job struct {
-	PendingOutputRefs FileManifest     `json:"pending_output_refs,omitempty"`
-	Delivery          *OutputDelivery  `json:"delivery,omitempty"`
-	Ledger            *JobLedgerInfo   `json:"ledger,omitempty"`
-	LedgerEntries     []JobLedgerEntry `json:"ledger_entries,omitempty"`
+	OutputAdmissionPending bool             `json:"output_admission_pending,omitempty"`
+	PendingOutputRefs      FileManifest     `json:"pending_output_refs,omitempty"`
+	Delivery               *OutputDelivery  `json:"delivery,omitempty"`
+	Ledger                 *JobLedgerInfo   `json:"ledger,omitempty"`
+	LedgerEntries          []JobLedgerEntry `json:"ledger_entries,omitempty"`
 	// Read-only diagnostic retained when execution payloads are redacted.
 	Isolation string `json:"isolation,omitempty"`
 	// SubmissionReused is set only on a keyed submit reply, never on stored jobs.

@@ -303,7 +303,7 @@ func (w Worker) finishFileResult(j Job, result Result, parent string) (Result, e
 			return result, err
 		}
 		for name, ref := range files {
-			if err = w.Client.UploadFile(ctx, filepath.Join(root, name), ref); err != nil {
+			if err = w.Client.uploadFile(ctx, filepath.Join(root, name), ref, attemptOutputUploadPurpose); err != nil {
 				return result, err
 			}
 		}

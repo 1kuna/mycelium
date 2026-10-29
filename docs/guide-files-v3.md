@@ -315,6 +315,13 @@ spool and checks actual local free space before copying; physical exhaustion
 retains unaccepted work rather than reporting success. This cannot bound disk
 writes by an arbitrary command that exceeds its declared disk needs.
 
+If an attempt is requeued, its retry must reacquire the estimated reservation
+before dispatch. Until space is available, `output_admission_pending: true` and
+the job's capacity waiting reason explain the hold; existing uploaded bytes still
+count toward usage. Abandoned attempt uploads retain a durable cleanup owner and
+become collectible after the publication grace when no job references them.
+Reusing an unrelated unmarked import does not make it collectible.
+
 Uploads use the existing resumable verified file API. One SQLite transaction
 accepts the current result and pending delivery only after every blob is verified
 and synced. Only that commit completes the task. The worker confirms exact queue
