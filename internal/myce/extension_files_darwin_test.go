@@ -34,7 +34,7 @@ func TestExtensionFilesDarwinExclusivePublication(t *testing.T) {
 			}
 			renames++
 			return os.Rename(from, to)
-		})
+		}, copyJobFileContents)
 	}
 	if err := publish(); err != nil {
 		t.Fatal("grouped publication", err)

@@ -66,7 +66,7 @@ func TestExtensionFilesOverlapNASInputsAndJoinBeforeReturn(t *testing.T) {
 			}
 			go func() {
 				defer close(finished)
-				err := stageJobInputs(inputs, func(name, source string) error {
+				err := stageJobFiles(inputs, func(name, source string) error {
 					n := active.Add(1)
 					defer active.Add(-1)
 					for old := peak.Load(); n > old && !peak.CompareAndSwap(old, n); old = peak.Load() {

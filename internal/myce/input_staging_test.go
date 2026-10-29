@@ -139,7 +139,7 @@ func TestInputStagingTimestampWaitsForBothNASCopies(t *testing.T) {
 	done := make(chan completion, 1)
 	go func() {
 		inputs, err := captureStagedInputs(clock, func() (string, error) {
-			err := stageJobInputs(map[string]string{"request": "request-source", "upstream": "upstream-source"}, func(name, source string) error {
+			err := stageJobFiles(map[string]string{"request": "request-source", "upstream": "upstream-source"}, func(name, source string) error {
 				entered <- name
 				if name == "request" {
 					close(firstDone)

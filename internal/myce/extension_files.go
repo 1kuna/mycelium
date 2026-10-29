@@ -39,6 +39,14 @@ func confinedPath(root, relative string) (string, error) {
 	return p, nil
 }
 func copyJobFile(src, dst string) error {
+	if err := os.MkdirAll(filepath.Dir(dst), 0700); err != nil {
+		return err
+	}
+	return copyJobFileContents(src, dst)
+}
+
+// The caller creates the destination parent before starting independent copies.
+func copyJobFileContents(src, dst string) error {
 	f, err := os.Open(src)
 	if err != nil {
 		return err
@@ -50,9 +58,6 @@ func copyJobFile(src, dst string) error {
 	}
 	if !info.Mode().IsRegular() {
 		return errors.New("job input/output must be a regular file")
-	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0700); err != nil {
-		return err
 	}
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
 	if err != nil {
@@ -145,7 +150,7 @@ func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
 			return err
 		}
 	}
-	if err := stageJobInputs(jobInputPaths(j), func(name, source string) error {
+	if err := stageJobFiles(jobInputPaths(j), func(name, source string) error {
 		p, err := confinedPath(w.JobFileRoot, source)
 		if err != nil {
 			return err
@@ -182,15 +187,15 @@ func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
 	return nil
 }
 
-func stageJobInputs(inputs map[string]string, stage func(name, source string) error) error {
-	// Two copies overlap the independent NAS reads seen in dependent jobs,
+func stageJobFiles(files map[string]string, stage func(name, source string) error) error {
+	// Two copies overlap the independent NAS reads/writes seen in dependent jobs,
 	// while bounding added load on shared storage. Join every active copy
 	// before the caller can publish the snapshot or clean failed scratch.
 	slots := make(chan struct{}, 2)
 	var pending sync.WaitGroup
 	var mu sync.Mutex
 	var result error
-	for name, source := range inputs {
+	for name, source := range files {
 		slots <- struct{}{}
 		mu.Lock()
 		failed := result != nil
@@ -257,17 +262,20 @@ func (w Worker) publishExtensionFiles(j Job, attemptWork string) error {
 }
 
 func publishJobOutputs(j Job, root string) error {
-	return publishDirectoryJobOutputs(j, root, os.Rename)
+	return publishDirectoryJobOutputs(j, root, os.Rename, copyJobFileContents)
 }
 
 // Publish each prefix as one complete attempt directory on local and shared
 // filesystems, including SMB (which may not support hard links). Rename refuses
 // an existing nonempty directory, so no existing result can be overwritten. Replacing an
 // empty directory publishes new results without exposing a partial file.
-func publishDirectoryJobOutputs(j Job, root string, renameDirectory func(string, string) error) error {
-	groups := map[string][]string{}
+func publishDirectoryJobOutputs(j Job, root string, renameDirectory, copyFile func(string, string) error) error {
+	groups := map[string]map[string]string{}
 	for name, prefix := range j.Spec.Outputs {
-		groups[prefix] = append(groups[prefix], name)
+		if groups[prefix] == nil {
+			groups[prefix] = map[string]string{}
+		}
+		groups[prefix][name] = name
 	}
 	for prefix, names := range groups {
 		dest := filepath.Join(root, prefix, j.ID, strconv.Itoa(j.Attempt))
@@ -292,15 +300,26 @@ func publishDirectoryJobOutputs(j Job, root string, renameDirectory func(string,
 		if err != nil {
 			return err
 		}
-		for _, name := range names {
-			var source string
-			source, err = confinedPath(j.Spec.Run.Workdir, name)
-			if err == nil {
-				err = copyJobFile(source, filepath.Join(staged, name))
+		// MkdirTemp already created the flat-output parent. Create each nested
+		// parent once, rather than rechecking it over shared storage per file.
+		parents := map[string]bool{".": true}
+		for name := range names {
+			parent := filepath.Dir(name)
+			if !parents[parent] {
+				if err = os.MkdirAll(filepath.Join(staged, parent), 0700); err != nil {
+					break
+				}
+				parents[parent] = true
 			}
-			if err != nil {
-				break
-			}
+		}
+		if err == nil {
+			err = stageJobFiles(names, func(name, source string) error {
+				path, err := confinedPath(j.Spec.Run.Workdir, source)
+				if err != nil {
+					return err
+				}
+				return copyFile(path, filepath.Join(staged, name))
+			})
 		}
 		if err == nil {
 			err = renameDirectory(staged, dest)
