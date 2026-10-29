@@ -145,8 +145,8 @@ func TestAttemptMemoryFactsAcceptedGET(t *testing.T) {
 		t.Fatal(err)
 	}
 	next := startObservation(t, q, m, s)
-	if next.MemoryEnvelope.Source != "accepted peak × 1.25" || next.Spec.Needs.HostMemoryGB != 1.25 {
-		t.Fatal("accepted learning changed", next.MemoryEnvelope)
+	if next.MemoryEnvelope.Source != "accepted peak × 1.25" || next.Spec.Needs.HostMemoryGB != 2.5 {
+		t.Fatal("accepted total peak lost headroom", next.MemoryEnvelope)
 	}
 	// A second job with an unread platform reading remains distinct from zero.
 	r = result(&next, true)

@@ -7,7 +7,8 @@ import (
 )
 
 // Nil counters mean unavailable. HostGB samples anon + kernel + shmem, excluding
-// reclaimable file cache. CgroupGB retains the kernel's total high-water mark.
+// file cache. CgroupGB retains the kernel's total high-water mark, which also
+// floors learned host reservations because the enforced parent charges it.
 // Without cgroup accounting (macOS), HostGB is the sampled process-group RSS
 // and Source names that unenforced measurement.
 type AttemptMemoryPeak struct {
@@ -28,6 +29,12 @@ type MemoryEventCounts struct {
 	OOM          uint64 `json:"oom"`
 	OOMKill      uint64 `json:"oom_kill"`
 	OOMGroupKill uint64 `json:"oom_group_kill"`
+}
+
+// Recheck counters as well as the flag: older workers and persisted curves
+// treated low-resident file-backed ceiling pressure as unconstrained (#303).
+func (p *AttemptMemoryPeak) constrained() bool {
+	return p != nil && (p.Constrained || p.Source != processGroupMemorySource && p.Events != nil && (p.Events.Max > 0 || p.Events.High > 0))
 }
 
 const processGroupMemorySource = "process-group RSS samples; unenforced"
@@ -180,7 +187,11 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 		switch {
 		case peak != nil:
 			source = label
-			host := *peak.HostGB * factor
+			host := *peak.HostGB
+			if peak.CgroupGB != nil && validMemoryValue(*peak.CgroupGB) {
+				host = max(host, *peak.CgroupGB)
+			}
+			host *= factor
 			if !n.cpuOnly() {
 				if peak.DeviceGB != nil && validRate(*peak.DeviceGB) && validRate(*peak.DeviceGB*factor) {
 					n.MemoryGB = *peak.DeviceGB * factor
@@ -305,10 +316,10 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) (*AttemptMemoryPeak, float64,
 	for _, point := range q.s.WorkObservations {
 		k, p := point.Key, point.MemoryPeak
 		age := q.clock.Now().Sub(point.MemoryRecordedAt)
-		if sameMemoryWork(point, *key, configuration) && point.StaleReason == "" && p != nil && p.Constrained && point.MemoryRecordedAt.IsZero() {
+		if sameMemoryWork(point, *key, configuration) && point.StaleReason == "" && p.constrained() {
 			invalidated = true
 		}
-		if !sameMemoryWork(point, *key, configuration) || point.StaleReason != "" || point.MemoryRecordedAt.IsZero() || age < 0 || age > workCurveMaxAge || p == nil || p.Constrained || p.HostGB == nil || !validRate(*p.HostGB) || !validRate(*p.HostGB*2.5) {
+		if !sameMemoryWork(point, *key, configuration) || point.StaleReason != "" || point.MemoryRecordedAt.IsZero() || age < 0 || age > workCurveMaxAge || p == nil || p.constrained() || p.HostGB == nil || !validRate(*p.HostGB) || !validRate(*p.HostGB*2.5) || p.CgroupGB != nil && validMemoryValue(*p.CgroupGB) && !validMemoryValue(*p.CgroupGB*2.5) {
 			continue
 		}
 		if m.UnifiedMemory && !j.Spec.Needs.cpuOnly() && (p.DeviceGB == nil || !validRate(*p.DeviceGB)) {
