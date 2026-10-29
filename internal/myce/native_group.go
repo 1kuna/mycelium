@@ -837,6 +837,11 @@ func (g *nativeGroup) run(j Job, base map[string]string, mainEnvironment string,
 				memberEnv["PATH"] = strings.TrimPrefix(memberEnv["PATH"], prefix)
 			}
 			bindEnvironment(memberEnv, root)
+		} else if root != "" {
+			// Main's authored env was removed and sidecar env may replace a
+			// loader path. Restore the inherited environment's precedence.
+			clearEnvironmentLibraries(memberEnv, root)
+			prependEnvironmentLibraries(memberEnv, root)
 		}
 		// Reserved env was validated; defensive stripping also covers direct starts.
 		delete(memberEnv, "MYCE_TOKEN")

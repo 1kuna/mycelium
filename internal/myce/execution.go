@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"slices"
 	"strings"
 	"time"
@@ -186,6 +187,7 @@ func expandExecution(s *Spec, work, root string, target ExecutionTarget) {
 	}
 }
 func bindEnvironment(env map[string]string, root string) {
+	clearEnvironmentLibraries(env, root)
 	// Switching a member's environment must not inherit main's conda activation.
 	if previous := env["MYCE_ENVIRONMENT_DIR"]; previous != "" && previous != root {
 		for k, v := range environmentActivation(previous) {
@@ -207,7 +209,69 @@ func bindEnvironment(env map[string]string, root string) {
 			}
 		}
 	}
+	prependEnvironmentLibraries(env, root)
 	env["MYCE_ENVIRONMENT_DIR"] = root
+}
+
+// Dynamic-loader paths are independent of the accelerator and its selectors.
+// Keep host paths as a fallback for drivers absent from the locked environment.
+func environmentLibraryVariables() []string {
+	if runtime.GOOS == "darwin" {
+		return []string{"DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH"}
+	}
+	if runtime.GOOS == "linux" {
+		return []string{"LD_LIBRARY_PATH"}
+	}
+	return nil
+}
+
+func environmentLibraryDirectories(root string) []string {
+	prefix := filepath.Join(root, "venv")
+	if activation := environmentActivation(root); activation["CONDA_PREFIX"] != "" {
+		prefix = activation["CONDA_PREFIX"]
+	}
+	return []string{filepath.Join(prefix, "lib"), filepath.Join(prefix, "lib64"), filepath.Join(root, "lib"), filepath.Join(root, "lib64")}
+}
+
+func clearEnvironmentLibraries(env map[string]string, root string) {
+	previous := env["MYCE_ENVIRONMENT_DIR"]
+	if previous == "" {
+		return
+	}
+	dirs := environmentLibraryDirectories(previous)
+	for _, key := range environmentLibraryVariables() {
+		paths := []string{}
+		for _, path := range filepath.SplitList(env[key]) {
+			// Rebinding is idempotent; switching must also drop package-specific
+			// directories owned by the previous member's environment.
+			rel, err := filepath.Rel(previous, path)
+			owned := err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))
+			if slices.Contains(dirs, path) || previous != root && owned {
+				continue
+			}
+			paths = append(paths, path)
+		}
+		if len(paths) == 0 {
+			delete(env, key)
+		} else {
+			env[key] = strings.Join(paths, string(os.PathListSeparator))
+		}
+	}
+}
+
+func prependEnvironmentLibraries(env map[string]string, root string) {
+	dirs := strings.Join(environmentLibraryDirectories(root), string(os.PathListSeparator))
+	for _, key := range environmentLibraryVariables() {
+		// An absent Darwin fallback variable keeps dyld's system default.
+		if key == "DYLD_FALLBACK_LIBRARY_PATH" && env[key] == "" {
+			continue
+		}
+		if env[key] == "" {
+			env[key] = dirs
+		} else {
+			env[key] = dirs + string(os.PathListSeparator) + env[key]
+		}
+	}
 }
 
 // Member ceilings fit the whole simultaneous host envelope; they are not extra

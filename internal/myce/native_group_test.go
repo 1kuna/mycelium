@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -131,6 +132,10 @@ func nativeStart(t *testing.T, spec Spec, platform string, catalogs ...Environme
 	j := submit(t, q, spec)
 	m := machine("native", platform, "native-host")
 	m.Device = "1"
+	// This fixture exercises launch/binding, rather than cold-build placement.
+	for _, recipe := range j.EnvironmentRecipes {
+		m.Environments = append(m.Environments, recipe.Key)
+	}
 	m.Capabilities = append(m.Capabilities, "logs_none")
 	m.HostMemoryMeasured = true
 	m.FreeHostMemoryGB = 64
@@ -558,5 +563,55 @@ func TestNativeGroupInfrastructureLeaveRequeues(t *testing.T) {
 	current := job(t, r.q, r.j.ID)
 	if current.State != "queued" || current.Losses != 0 {
 		t.Fatal("infrastructure stop consumed stage/loss budget", current.State, current.Losses)
+	}
+}
+
+func TestNativeGroupLockedLibraryPaths(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("Unix dynamic loader contract")
+	}
+	key := "LD_LIBRARY_PATH"
+	if runtime.GOOS == "darwin" {
+		key = "DYLD_LIBRARY_PATH"
+	}
+	ambient := t.TempDir()
+	if runtime.GOOS == "linux" {
+		t.Setenv(key, ambient)
+	}
+	for _, own := range []bool{false, true} {
+		t.Run(fmt.Sprintf("sidecar-own-environment=%t", own), func(t *testing.T) {
+			s := nativeSpec(t)
+			recipe, err := snapshotEnvironment(EnvironmentRecipe{Binary: s.Run.Command[0]}, "fake")
+			if err != nil {
+				t.Fatal(err)
+			}
+			helper, err := snapshotEnvironment(EnvironmentRecipe{Binary: s.Run.Command[0], Build: []string{"mkdir", "-p", "{root}/lib"}}, "fake")
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.Environment.Name = "main"
+			s.Run.Env[key] = "{env.main.root}/main-extra"
+			// Authored sidecar paths must replace main's extras, while the
+			// selected locked environment still precedes those paths.
+			s.Run.Sidecars[0].Env[key] = ambient
+			if own {
+				s.Run.Sidecars[0].Environment = "helper"
+			}
+			r := nativeStart(t, s, "fake", EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"main": {"fake": recipe}, "helper": {"fake": helper}}})
+			nativeFile(t, r.dir, "main-ready")
+			main, side := nativeEnv(t, r.dir, "main"), nativeEnv(t, r.dir, "side")
+			for name, env := range map[string]map[string]string{"main": main, "side": side} {
+				if !strings.HasPrefix(env[key], filepath.Join(env["MYCE_ENVIRONMENT_DIR"], "venv", "lib")+":") {
+					t.Errorf("%s lost locked precedence: %q", name, env[key])
+				}
+			}
+			if !strings.HasSuffix(side[key], ":"+ambient) || strings.Contains(side[key], "main-extra") || own && strings.Contains(side[key], main["MYCE_ENVIRONMENT_DIR"]) {
+				t.Error("sidecar retained another member's runtime", side[key])
+			}
+			nativeTouch(t, r.dir, "finish")
+			if result := nativeFinish(t, r); !result.Success {
+				t.Fatal(result)
+			}
+		})
 	}
 }

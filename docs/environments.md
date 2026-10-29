@@ -266,6 +266,76 @@ are not automatically put on the job's PATH: declare uv in the locked environmen
 when the job itself needs it. Package caches use the environment cache's shared
 download area. Model loading continues to use NAS masters only.
 
+## Command environment and native library precedence
+
+This contract applies whenever Mycelium binds a prepared environment, for CPU,
+CUDA, XPU and Metal/MPS alike. A plain native command without a prepared
+environment keeps its existing worker runtime environment (MY-25).
+
+Mycelium starts with the worker's allowlisted base environment, including its
+installed GPU runtime settings, then applies the command's authored `run.env`
+(or `execution.main.env` / sidecar `env`). Binding sets `MYCE_ENVIRONMENT_DIR`
+to the prepared cache root. For uv/binary recipes it sets `VIRTUAL_ENV` to
+`ROOT/venv` and prepends `ROOT/venv/bin`, then `ROOT/bin`, to `PATH`. Pixi's
+saved locked activation replaces authored values for the variables it sets,
+including `PATH` and `CONDA_PREFIX`; it clears `VIRTUAL_ENV`. Worker control
+variables and device ownership cannot be overridden by activation.
+
+After activation, Mycelium prepends these native library directories in order:
+
+1. `PREFIX/lib`
+2. `PREFIX/lib64`
+3. `ROOT/lib`
+4. `ROOT/lib64`
+
+`ROOT` is `MYCE_ENVIRONMENT_DIR`; `PREFIX` is `ROOT/venv` for uv/binary
+recipes, or pixi's activated `CONDA_PREFIX`. These directories are included even
+when absent; Mycelium does not recursively discover package-specific directories.
+On Linux this sets `LD_LIBRARY_PATH`. On Darwin it sets `DYLD_LIBRARY_PATH`
+and prepends to `DYLD_FALLBACK_LIBRARY_PATH` only when explicitly supplied,
+leaving dyld's default fallback intact otherwise. Darwin's loader rules still apply, including
+SIP stripping `DYLD_*` when launching protected system executables. Mycelium does
+not forward ambient worker `DYLD_*` variables. It does not alter `LIBRARY_PATH`,
+which is a compiler/linker search path, rather than a dynamic-loader control.
+
+The remaining value follows the prepended directories: pixi activation's value
+if supplied, otherwise the command's authored value if supplied, otherwise the
+allowlisted worker value. Thus an install-time system GPU runtime cannot shadow
+a library in a standard environment library directory. Retaining ambient paths
+afterward permits host drivers and other libraries absent from the environment
+to resolve. This is library precedence, not a hermetic loader or ABI-compatibility
+guarantee; the extension still owns its dependency closure and qualification.
+
+For package-specific or extra native libraries, declare the loader variable in
+the member's `env`, using its bound root; for example on Linux:
+
+```yaml
+execution:
+  main:
+    environment: main
+    command: ["{env.main.python}", app.py]
+    env:
+      LD_LIBRARY_PATH: "{env.main.root}/venv/lib/python3.12/site-packages/vendor/lib"
+```
+
+Use `DYLD_LIBRARY_PATH` on Darwin, or a locked pixi activation script when that
+backend owns the extra directories. Values are literal substitutions, not shell
+expansion: `$LD_LIBRARY_PATH` does not append the worker's path. Multiple authored
+directories use the OS path-list separator (`:` on Linux and Darwin). Declaring
+a loader value replaces its ambient value; the standard directories above still
+come first. Specify any needed nonstandard host directory explicitly. Prefer
+package-relative RPATH/RUNPATH where the package supports it.
+
+Sidecars inherit the main environment unless they select their own. Main's
+authored env is not inherited; each sidecar declares its own extra directories.
+Mycelium reapplies library precedence after sidecar env overrides. Switching
+bindings removes the previous environment's managed library directories and any
+extra paths inside its root, so another member's runtime does not remain in the
+search path. Device-selection variables such as `ZE_AFFINITY_MASK`,
+`CUDA_VISIBLE_DEVICES`, `ONEAPI_DEVICE_SELECTOR`, and `SYCL_DEVICE_FILTER` are
+kept; final worker device binding takes precedence over authored settings.
+Jobs and builders never inherit `MYCE_TOKEN`.
+
 ## Preinstalled-environment compatibility
 
 For existing installations without an environment catalog, explicit
