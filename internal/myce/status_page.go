@@ -306,14 +306,14 @@ var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
         {{if .Replacement}}<div class="detail">Historical worker; replaced by {{.Replacement.Machine}} device {{.Replacement.Device}}</div>{{end}}
         {{if .LastResort}}<div class="detail">Last-resort placement: used when no ordinary host can admit the work</div>{{end}}
         {{range .Devices}}<div class="detail"><div class="label">Device {{.ID}} · {{.Platform}}</div><div class="value">{{printf "%.1f" .FreeMemoryGB}} / {{printf "%.1f" .BudgetGB}} GiB free · {{len .Attempts}} batch attempts · {{len .Models}} engines · {{len .Releases}} outstanding releases{{if .Reason}} · {{.Reason}}{{end}}{{range .ExtensionReports}}<div>{{extensionStatus .}}</div>{{end}}</div></div>{{end}}
-        {{if .Devices}}<div class="detail"><div class="label">Shared CPU capacity</div><div class="value">{{.CPUInUseCores}} cores in use · {{.FreeCPUCores}} free · {{.EffectiveCPUCores}} admitted</div></div>{{end}}
+        {{if .Devices}}<div class="detail"><div class="label">Shared CPU capacity</div><div class="value">{{.CPUInUseCores}} cores reserved · {{.FreeCPUCores}} unreserved · {{.EffectiveCPUCores}} admitted · CPU utilization unknown</div></div>{{end}}
         {{if eq .GPU "cpu"}}<div class="metrics" aria-label="CPU capacity">
-          <div class="metric"><span class="label">In use</span><strong>{{.CPUInUseCores}} cores</strong></div>
-          <div class="metric"><span class="label">Free</span><strong>{{.FreeCPUCores}} cores</strong></div>
+          <div class="metric"><span class="label">Reserved</span><strong>{{.CPUInUseCores}} cores</strong></div>
+          <div class="metric"><span class="label">Unreserved</span><strong>{{.FreeCPUCores}} cores</strong></div>
           <div class="metric"><span class="label">Admitted</span><strong>{{.EffectiveCPUCores}} cores</strong></div>
         </div>{{else}}
         <div class="metrics" aria-label="GPU memory">
-          <div class="metric"><span class="label">Used</span><strong>{{printf "%.1f" .MemoryUsedGB}} GB</strong></div>
+          <div class="metric"><span class="label">Unavailable for admission</span><strong>{{printf "%.1f" .MemoryUsedGB}} GB</strong></div>
           <div class="metric"><span class="label">Free</span><strong>{{printf "%.1f" .FreeMemoryGB}} GB</strong></div>
 	          <div class="metric"><span class="label">Reserved</span><strong>{{printf "%.1f" .ReservedMemoryGB}} GB</strong></div>
         </div>
@@ -360,7 +360,7 @@ var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
     <div class="samples" aria-hidden="true">{{range .Usage.Daily}}<i data-day="{{.Date}}" data-project="{{.Project}}" data-machine="{{.Machine}}" data-gpu-hours="{{.GPUHours}}" data-busy-percent="{{.BusyPercent}}"></i>{{end}}</div>
     {{if or .Usage.Projects .Usage.Machines}}<div class="usage-grid">
 	      {{range .Usage.Projects}}<article class="card chart-card" data-chart-kind="project" data-chart-name="{{.Name}}"><div class="chart-meta"><div><h3>{{.Name}}</h3><span class="muted">Project GPU time</span></div><strong>{{printf "%.1f" .GPUHours}}h</strong></div><div class="chart-wrap"><svg class="chart" viewBox="0 0 280 105" role="img" aria-label="Seven day usage for {{.Name}}"></svg></div></article>{{end}}
-	      {{range .Usage.Machines}}<article class="card chart-card" data-chart-kind="machine" data-chart-name="{{.Name}}"><div class="chart-meta"><div><h3>{{.Name}}</h3><span class="muted">Hypha busy</span></div><strong>{{printf "%.0f" .BusyPercent}}%</strong></div><div class="chart-wrap"><svg class="chart" viewBox="0 0 280 105" role="img" aria-label="Seven day usage for {{.Name}}"></svg></div></article>{{end}}
+	      {{range .Usage.Machines}}<article class="card chart-card" data-chart-kind="machine" data-chart-name="{{.Name}}"><div class="chart-meta"><div><h3>{{.Name}}</h3><span class="muted">Allocation occupancy</span></div><strong>{{printf "%.0f" .BusyPercent}}%</strong></div><div class="chart-wrap"><svg class="chart" viewBox="0 0 280 105" role="img" aria-label="Seven day usage for {{.Name}}"></svg></div></article>{{end}}
     </div>{{else}}<div class="empty">No usage samples yet. Charts appear after the first recorded interval.</div>{{end}}
   </section>
 </main>

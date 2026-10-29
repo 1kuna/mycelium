@@ -184,7 +184,7 @@ func TestStatusViewProfilesAndRunningWork(t *testing.T) {
 	s.Needs.MemoryGB = 24
 	submit(t, q, s)
 	body := statusViewResponse(t, q, "/")
-	for _, want := range []string{"Hyphae", "Capability profile", "separate system and accelerator memory", "64.0 GiB", "24.0 GiB", "sample@1", "kind of work sample", "qualified", "program sample-script", "running sample", "running · attempt 1", "waiting for a free hypha"} {
+	for _, want := range []string{"Hyphae", "Capability profile", "separate system and accelerator memory", "64.0 GiB", "24.0 GiB", "sample@1", "kind of work sample", "qualified", "program sample-script", "running sample", "running · attempt 1", "waiting for reserved capacity"} {
 		if !strings.Contains(body, want) {
 			t.Errorf("missing %q; jobs=%v", want, func() []string {
 				snap, _ := q.publicSnapshot()

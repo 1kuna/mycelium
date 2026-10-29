@@ -915,7 +915,7 @@ func printStatus(s myce.Snapshot, full bool) {
 			state += "; " + over
 		}
 		if m.CapabilityProfile != nil {
-			state += fmt.Sprintf("; CPU %d/%d cores free (reserve %d)", m.FreeCPUCores, m.EffectiveCPUCores, m.CPUReserveCores)
+			state += fmt.Sprintf("; CPU %d/%d cores unreserved (owner reserve %d; utilization unknown)", m.FreeCPUCores, m.EffectiveCPUCores, m.CPUReserveCores)
 		}
 		if m.CPUCapacityReason != "" {
 			state += "; " + m.CPUCapacityReason

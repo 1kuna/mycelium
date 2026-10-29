@@ -413,6 +413,11 @@ Mycelium's reservation ledger, not measured process RSS.
 allowance. Similarly, `cpu_in_use_cores` and `free_cpu_cores` are reservations,
 not CPU utilization. Zero reserved cores does not establish an idle host.
 
+Capacity waits name the selected host's reservations and, when reported, live
+RAM availability and admission headroom. An allocated batch slot is a concurrency
+rule, not proof of GPU activity. CPU status says reserved/unreserved and reports
+utilization as unknown. Usage charts show allocation occupancy, not compute load.
+
 A queued job whose other resource checks fit but whose host RAM does not fit
 shows `diagnostic_code: host_memory_headroom`. Its reason names the machine,
 required RAM including slack, live available RAM, reservations and admitted
