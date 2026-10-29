@@ -315,3 +315,49 @@ func TestSharedInputStagingProgressAndLateSuccess(t *testing.T) {
 		})
 	}
 }
+
+func TestSharedInputStagingMetadataProgressAndCancellation(t *testing.T) {
+	for _, operation := range []struct {
+		name string
+		run  func(context.Context, string) error
+	}{
+		{"read_only", makeSharedReadOnlyContext}, {"sync", syncModelDirectoryContext},
+	} {
+		for _, stop := range []bool{false, true} {
+			name := operation.name + map[bool]string{false: "/progress", true: "/cancel"}[stop]
+			t.Run(name, func(t *testing.T) {
+				clock := &workerFakeClock{now: time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)}
+				cache := &SharedInputCache{cache: EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: clock}}
+				if err := cache.cache.init(); err != nil {
+					t.Fatal(err)
+				}
+				ctx, cancel := context.WithCancel(context.Background())
+				defer cancel()
+				published := false
+				began := clock.Now()
+				err := cache.stageInput(ctx, func(ctx context.Context, stage string) error {
+					if err := os.MkdirAll(filepath.Join(stage, "nested", "child"), 0700); err != nil {
+						return err
+					}
+					progress := ctx.Value(ioProgressKey{}).(func())
+					ctx = context.WithValue(ctx, ioProgressKey{}, func() {
+						clock.Advance(20 * time.Second)
+						progress()
+						if stop {
+							cancel()
+						}
+					})
+					return operation.run(ctx, stage)
+				}, func(string) error { published = true; return nil })
+				<-cache.staging.done
+				if stop {
+					if !errors.Is(err, context.Canceled) || published {
+						t.Fatal("metadata ignored cancellation", err)
+					}
+				} else if err != nil || !published || clock.Now().Sub(began) <= checkpointAvailabilityStallBudget {
+					t.Fatal("metadata progress capped", err, clock.Now().Sub(began))
+				}
+			})
+		}
+	}
+}

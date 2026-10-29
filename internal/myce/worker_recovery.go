@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -74,7 +75,8 @@ type workerState struct {
 	Log             string                 `json:"log,omitempty"`
 }
 type workerStore struct {
-	sharedRelease         func() // Idempotent; retained until exact process cleanup.
+	inputStaging          *atomic.Bool // Shared by all attempt stores; bounds detached ordinary staging.
+	sharedRelease         func()       // Idempotent; retained until exact process cleanup.
 	deviceFaults          checkpointIO[KernelLogSnapshot]
 	stateName             string
 	environmentLogs       checkpointIO[bool]
@@ -146,7 +148,7 @@ func (w Worker) openStore() (*workerStore, error) {
 		lock.Close()
 		return nil, fmt.Errorf("worker state already in use: %w", err)
 	}
-	s := &workerStore{dir: dir, lock: lock}
+	s := &workerStore{dir: dir, lock: lock, inputStaging: new(atomic.Bool)}
 	s.nasProbe.timeout = heartbeatFilesystemBudget
 	s.nasProgress.timeout = heartbeatFilesystemBudget
 	s.nasPrepare.timeout = checkpointPreparationBudget
@@ -487,6 +489,9 @@ func (s *workerStore) cleanupOrphan(clock Clock, memoryFiles ...memoryFS) (clean
 		}
 	}
 	if !owned && memory == nil {
+		if len(members) > 0 {
+			return errors.New("helper process group identity unconfirmed; release pending")
+		}
 		return nil
 	}
 	if (s.state.Accelerator || s.state.Job != nil && !s.state.Job.Spec.Needs.cpuOnly()) && !s.state.UserCancel {

@@ -79,6 +79,16 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 	a.mu.Unlock()
 	defer initial.control.remove(a.job)
 	s := a.store
+	// A short observation retry must not cancel the operation it will consume.
+	// Stop cancels this attempt context directly, including between start retries.
+	prepareCtx, cancelPreparation := context.WithCancel(ctx)
+	defer cancelPreparation()
+	a.mu.Lock()
+	a.preparing = cancelPreparation
+	if a.directive.Stop {
+		cancelPreparation()
+	}
+	a.mu.Unlock()
 	p := a.recovering
 	defer func() {
 		if p != nil {
@@ -172,22 +182,13 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					r = withStopProvenance(r, d.PriorityStop)
 					s.state.Result = &r
 				} else if !d.Hold && !admissionBlocked {
-					prepareCtx, cancel := context.WithCancel(ctx)
-					a.mu.Lock()
-					a.preparing = cancel
-					if a.directive.Stop {
-						cancel()
-					}
-					a.mu.Unlock()
 					bound, err := w.forAttempt(a.job)
 					if err == nil {
 						p, err = bound.startContext(prepareCtx, s, a.job)
 					} else {
 						err = s.startFailure(a.job, launchRefused, err)
 					}
-					cancel()
 					a.mu.Lock()
-					a.preparing = nil
 					d = a.directive
 					a.mu.Unlock()
 					if p == nil && d.Stop && !errors.Is(err, errWorkerReleasePending) {
@@ -492,7 +493,7 @@ func (s *workerStore) attemptStores() ([]*workerStore, error) {
 }
 
 func newAttemptStore(root *workerStore, j Job) (*workerStore, error) {
-	s := &workerStore{dir: root.dir, stateName: "state-attempt-" + ID() + ".json", state: workerState{Session: j.Session, Job: &j, CheckpointRoot: root.state.CheckpointRoot, Identity: ID()}}
+	s := &workerStore{inputStaging: root.inputStaging, dir: root.dir, stateName: "state-attempt-" + ID() + ".json", state: workerState{Session: j.Session, Job: &j, CheckpointRoot: root.state.CheckpointRoot, Identity: ID()}}
 	// Docker identity denotes durable Docker custody, not mere assignment.
 	// Refusals before startDocker must not request container recovery (#166).
 	if j.Spec.Run.Docker {

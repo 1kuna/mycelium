@@ -38,15 +38,25 @@ func confinedPath(root, relative string) (string, error) {
 	}
 	return p, nil
 }
-func copyJobFile(src, dst string) error {
+func copyJobFile(src, dst string) error { return copyJobFileContext(context.Background(), src, dst) }
+func copyJobFileContext(ctx context.Context, src, dst string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0700); err != nil {
 		return err
 	}
-	return copyJobFileContents(src, dst)
+	return copyJobFileContentsContext(ctx, src, dst)
 }
 
 // The caller creates the destination parent before starting independent copies.
 func copyJobFileContents(src, dst string) error {
+	return copyJobFileContentsContext(context.Background(), src, dst)
+}
+func copyJobFileContentsContext(ctx context.Context, src, dst string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	f, err := os.Open(src)
 	if err != nil {
 		return err
@@ -63,11 +73,17 @@ func copyJobFileContents(src, dst string) error {
 	if err != nil {
 		return err
 	}
-	_, copyErr := io.Copy(out, f)
+	_, copyErr := io.Copy(out, contextReader{ctx, f})
 	syncErr := out.Sync()
 	return errors.Join(copyErr, syncErr, out.Close())
 }
 func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
+	return w.prepareExtensionFilesContext(context.Background(), j, stateDir)
+}
+func (w Worker) prepareExtensionFilesContext(ctx context.Context, j *Job, stateDir string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if len(jobInputPaths(j)) > 0 && w.JobFileRoot == "" {
 		return errors.New("job files require a root and clean relative names")
 	}
@@ -108,6 +124,9 @@ func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
 			return errors.New("frozen native extension source missing")
 		}
 		for name, data := range files {
+			if err := sharedInputProgress(ctx); err != nil {
+				return err
+			}
 			if !safeRelative(name) {
 				return errors.New("invalid frozen extension path")
 			}
@@ -125,17 +144,18 @@ func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
 		if !ok {
 			return errors.New("missing frozen source archive")
 		}
-		ctx, cancel := context.WithCancel(context.Background())
 		err = w.fileCache.copyTo(ctx, ref, filepath.Join(staged, ".myce-source.tar"))
-		cancel()
 		if err != nil {
 			return err
 		}
-		if err = extractJobSource(filepath.Join(staged, ".myce-source.tar"), staged); err != nil {
+		if err = extractJobSourceContext(ctx, filepath.Join(staged, ".myce-source.tar"), staged); err != nil {
 			return err
 		}
 	}
 	for name, ref := range jobInputFiles(j) {
+		if err := sharedInputProgress(ctx); err != nil {
+			return err
+		}
 		if j.Spec.PrepareSource && name == ".myce-source.tar" {
 			continue
 		}
@@ -145,17 +165,17 @@ func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
 				return err
 			}
 		}
-		err := w.fileCache.copyTo(context.Background(), ref, filepath.Join(staged, name))
+		err := w.fileCache.copyTo(ctx, ref, filepath.Join(staged, name))
 		if err != nil {
 			return err
 		}
 	}
-	if err := stageJobFiles(jobInputPaths(j), func(name, source string) error {
-		p, err := confinedPath(w.JobFileRoot, source)
+	if err := stageJobFilesContext(ctx, jobInputPaths(j), func(name, source string) error {
+		p, err := sharedInputPath(ctx, w.JobFileRoot, source)
 		if err != nil {
 			return err
 		}
-		return copyJobFile(p, filepath.Join(staged, name))
+		return copyJobFileContext(ctx, p, filepath.Join(staged, name))
 	}); err != nil {
 		return err
 	}
@@ -173,7 +193,10 @@ func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
 			}
 		}
 	}
-	if err := syncModelDirectory(staged); err != nil {
+	if err := syncModelDirectoryContext(ctx, staged); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
 		return err
 	}
 	if err := os.Rename(staged, dir); err != nil {
@@ -188,6 +211,9 @@ func (w Worker) prepareExtensionFiles(j *Job, stateDir string) error {
 }
 
 func stageJobFiles(files map[string]string, stage func(name, source string) error) error {
+	return stageJobFilesContext(context.Background(), files, stage)
+}
+func stageJobFilesContext(ctx context.Context, files map[string]string, stage func(name, source string) error) error {
 	// Two copies overlap the independent NAS reads/writes seen in dependent jobs,
 	// while bounding added load on shared storage. Join every active copy
 	// before the caller can publish the snapshot or clean failed scratch.
@@ -196,9 +222,14 @@ func stageJobFiles(files map[string]string, stage func(name, source string) erro
 	var mu sync.Mutex
 	var result error
 	for name, source := range files {
-		slots <- struct{}{}
+		select {
+		case slots <- struct{}{}:
+		case <-ctx.Done():
+			pending.Wait()
+			return errors.Join(result, ctx.Err())
+		}
 		mu.Lock()
-		failed := result != nil
+		failed := result != nil || ctx.Err() != nil
 		mu.Unlock()
 		if failed {
 			<-slots
@@ -214,7 +245,7 @@ func stageJobFiles(files map[string]string, stage func(name, source string) erro
 		})
 	}
 	pending.Wait()
-	return result
+	return errors.Join(result, ctx.Err())
 }
 
 func outputRelative(j Job, name, prefix string) string {
