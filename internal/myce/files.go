@@ -58,6 +58,13 @@ func (m FileManifest) validate() error {
 	return err
 }
 func IdentifyFile(path string) (FileRef, error) {
+	return identifyFileContext(context.Background(), path)
+}
+
+func identifyFileContext(ctx context.Context, path string) (FileRef, error) {
+	if err := ctx.Err(); err != nil {
+		return FileRef{}, err
+	}
 	var err error
 	parent, err := filepath.EvalSymlinks(filepath.Dir(path))
 	if err != nil {
@@ -80,7 +87,7 @@ func IdentifyFile(path string) (FileRef, error) {
 		return FileRef{}, errors.New("file must be regular")
 	}
 	h := sha256.New()
-	n, err := io.Copy(h, f)
+	n, err := io.Copy(h, contextReader{ctx, f})
 	if err != nil {
 		return FileRef{}, err
 	}

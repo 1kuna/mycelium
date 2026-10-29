@@ -41,6 +41,7 @@ func (r *workerRetry) succeeded(now time.Time, interval time.Duration) {
 }
 
 type workerState struct {
+	Preparation      string     `json:"preparation_custody,omitempty"` // Attempt-local copy of an unconfirmed builder receipt.
 	CustodyID        string     `json:"custody_id,omitempty"`
 	IsolationWarning *Execution `json:"isolation_warning,omitempty"`
 	// Written with cleared custody only after the queue confirms terminal,
@@ -381,6 +382,9 @@ func (s *workerStore) cleanupOrphan(clock Clock, memoryFiles ...memoryFS) (clean
 			s.releaseSharedInputs()
 		}
 	}()
+	if s.state.Preparation != "" {
+		return s.cleanupPreparation(clock)
+	}
 	var stopIntent *workerState
 	if s.state.Job != nil && s.state.Identity != "" {
 		data, err := os.ReadFile(filepath.Join(s.dir, s.state.Identity+".stop.json"))

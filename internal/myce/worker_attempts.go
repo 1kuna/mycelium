@@ -142,7 +142,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		// A failed inventory/cleanup keeps custody, but must not freeze the
 		// finished actor until a worker restart. Reuse recovery's exact process
 		// identity checks; only confirmed cleanup can clear pending release.
-		if p == nil && s.state.Result != nil && s.state.Result.ReleasePending && !a.job.Spec.Run.Docker {
+		if p == nil && s.state.Result != nil && s.state.Result.ReleasePending && (!a.job.Spec.Run.Docker || s.state.Preparation != "") {
 			var fs memoryFS = osMemoryFS{}
 			if w.memoryCeilings != nil {
 				fs = w.memoryCeilings.fs
@@ -263,7 +263,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		if connected && !d.Hold {
 			var err error
 			if d.Stop && d.Kill {
-				if s.state.Result != nil && !a.job.Spec.Run.Docker {
+				if s.state.Result != nil && (!a.job.Spec.Run.Docker || s.state.Preparation != "") {
 					released := *s.state.Result
 					released.ReleaseOnly = !released.ReleasePending
 					err = w.Client.Call(ctx, "POST", "/api/workers/complete", released, nil)
@@ -341,13 +341,20 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 						return
 					}
 				}
-				s.state.Job, s.state.Result = nil, nil
+				preparation := s.state.Preparation
+				s.state.Job, s.state.Result, s.state.Preparation = nil, nil, ""
 				// This branch requires confirmed release and queue acknowledgement.
 				// Failed launches may still carry intent or a previously reaped PID.
 				s.state.PID, s.state.LaunchPending = 0, false
 				if e := s.save(); e != nil {
 					finish(e)
 					return
+				}
+				if preparation != "" {
+					if e := os.Remove(filepath.Join(s.dir, preparation)); e != nil && !errors.Is(e, os.ErrNotExist) {
+						finish(e)
+						return
+					}
 				}
 				finish(nil)
 				return
