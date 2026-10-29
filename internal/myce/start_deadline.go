@@ -45,7 +45,9 @@ func absoluteStartBy(j *Job) bool {
 }
 
 func (q *Queue) startupPending(j *Job) bool {
-	if j.Spec.FanOut != nil && j.FanOut != nil && j.FanOut.Next > 0 {
+	if j.Spec.FanOut != nil && j.FanOut != nil {
+		// A logical parent holds no launch slot. Its relative window belongs
+		// to each physical child from assignment, including the first wave.
 		if !absoluteStartBy(j) || j.FanOut.Next == len(j.Spec.FanOut.Pieces) {
 			return false
 		}
@@ -104,10 +106,14 @@ func (q *Queue) maintainStartDeadlines() {
 		if j.Spec.Priority == "production" && !terminal(j.State) && (j.Spec.StartBy != nil || dependencyReady(j)) {
 			initializeStartDeadline(j, j.Queued)
 		}
-		if !q.startupPending(j) {
+		// Disabled-host rejection is an admission decision, independent of the
+		// relative timeout exemption for logical fan-out capacity waits.
+		pending := q.startupPending(j)
+		firstWave := j.Spec.FanOut != nil && j.FanOut != nil && j.FanOut.Next == 0
+		disabled := (pending || firstWave) && j.Spec.Priority == "production" && j.Spec.StartBy != nil && !cancelled(j) && dependencyReady(j) && j.State == "queued" && j.Attempt == 0 && q.allStartHostsDisabled(j)
+		if !pending && !disabled {
 			continue
 		}
-		disabled := dependencyReady(j) && j.State == "queued" && j.Attempt == 0 && q.allStartHostsDisabled(j)
 		if !expired(j.Spec.StartBy, now) && !disabled {
 			continue
 		}
@@ -131,7 +137,7 @@ func (q *Queue) maintainStartDeadlines() {
 		}
 		j.State = "failed"
 		j.Reason = "production start deadline exceeded: " + reason
-		if disabled && !expired(j.Spec.StartBy, now) {
+		if disabled && (!pending || !expired(j.Spec.StartBy, now)) {
 			j.Reason = "production cannot start: no eligible host is enabled; " + reason
 		}
 		j.FinishedAt = &now
