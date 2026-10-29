@@ -146,7 +146,13 @@ func (q *Queue) currentDiskVolume(v DiskVolume, receivedAt time.Time) DiskVolume
 	// SampledAt belongs to the worker clock. Age is measured there, then
 	// advanced only by queue time since receipt; clock skew cannot age a sample.
 	v.AgeSeconds = max(0, v.AgeSeconds) + max(0, q.clock.Now().Sub(receivedAt).Seconds())
-	if receivedAt.IsZero() || v.SampledAt.IsZero() || v.AgeSeconds > window {
+	expired := v.AgeSeconds > window
+	if v.ProbeAgeSeconds != nil && slices.Contains(v.Roots, "checkpoint") && v.Retained {
+		age := max(0, *v.ProbeAgeSeconds) + max(0, q.clock.Now().Sub(receivedAt).Seconds())
+		v.ProbeAgeSeconds = &age
+		expired = age >= checkpointAvailabilityStallBudget.Seconds()
+	}
+	if receivedAt.IsZero() || v.SampledAt.IsZero() || expired {
 		v.Error = "disk reading unavailable"
 		v.Retained = false
 	}

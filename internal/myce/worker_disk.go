@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -23,6 +24,7 @@ type DiskVolume struct {
 	SampleIntervalSeconds float64   `json:"sample_interval_seconds,omitempty"`
 	AgeSeconds            float64   `json:"age_seconds,omitempty" jsonschema:"description=Sample age on the worker at check-in; status adds queue-clock time since receipt."`
 	Retained              bool      `json:"retained,omitempty"`
+	ProbeAgeSeconds       *float64  `json:"probe_age_seconds,omitempty" jsonschema:"description=Age of an outstanding checkpoint capacity operation; queue time since receipt advances the 30-second stall backstop."`
 	Error                 string    `json:"error,omitempty"`
 }
 type DiskReading struct {
@@ -58,9 +60,10 @@ type diskObservation struct {
 	at      time.Time
 }
 type diskRootSample struct {
-	probe checkpointIO[diskObservation]
-	path  string
-	last  diskObservation
+	probe  checkpointIO[diskObservation]
+	path   string
+	last   diskObservation
+	failed bool
 }
 type workerDiskSampler struct {
 	roots    [5]diskRootSample
@@ -76,7 +79,6 @@ func (w *Worker) sampleDisks(data, checkpoint string) []DiskVolume {
 	if probe == nil {
 		probe = workerDiskProbe
 	}
-	now := w.Clock.Now()
 	interval := w.Interval.Seconds()
 	if interval <= 0 {
 		interval = 1
@@ -98,6 +100,7 @@ func (w *Worker) sampleDisks(data, checkpoint string) []DiskVolume {
 		state := &sampler.roots[i]
 		if state.path != root.path {
 			state.path, state.last = root.path, diskObservation{}
+			state.failed = false
 		}
 		// Keep one outstanding syscall per root. Local roots cost at most 4*25ms;
 		// NAS uses the shared 750ms heartbeat budget, so network metadata latency
@@ -106,24 +109,52 @@ func (w *Worker) sampleDisks(data, checkpoint string) []DiskVolume {
 		if root.name == "checkpoint" {
 			state.probe.timeout = heartbeatFilesystemBudget
 		}
+		// Map I/O completion onto the injected clock without reading a mutable
+		// fake clock from the probe goroutine.
+		startedAt, started := w.Clock.Now(), time.Now()
 		observation, err := state.probe.run(root.path, func() (diskObservation, error) {
 			r, err := probe(root.path)
-			return diskObservation{reading: r, at: now}, err
+			return diskObservation{reading: r, at: startedAt.Add(time.Since(started))}, err
 		})
 		if err == nil {
+			if now := w.Clock.Now(); observation.at.After(now) {
+				observation.at = now
+			}
 			state.last = observation
+			state.failed = false
 		} else {
 			observation = state.last
+			if !errors.Is(err, errCheckpointIOPending) {
+				state.failed = true
+			}
 		}
 		r := observation.reading
 		v := DiskVolume{Roots: []string{root.name}, TotalBytes: r.TotalBytes, FreeBytes: r.FreeBytes, SampledAt: observation.at, SampleIntervalSeconds: interval}
 		if !observation.at.IsZero() {
 			v.ID = identityHash(struct{ Host, Volume string }{hostID(&w.Machine), r.Volume})
-			v.AgeSeconds = max(0, now.Sub(observation.at).Seconds())
+			v.AgeSeconds = max(0, w.Clock.Now().Sub(observation.at).Seconds())
 		}
 		if err != nil {
 			v.Error = "disk reading unavailable"
 			v.Retained = !observation.at.IsZero()
+			if root.name == "checkpoint" {
+				// Statfs is one operation: retain its last good reading while
+				// pending, bounded by the same 30s stall backstop as reachability.
+				// Cold roots and completed errors cannot borrow earlier success.
+				v.Retained = false
+				if errors.Is(err, errCheckpointIOPending) && !state.failed && !observation.at.IsZero() {
+					state.probe.mu.Lock()
+					if state.probe.pending != nil && state.probe.key == root.path {
+						age := time.Since(state.probe.pending.progressed).Seconds()
+						v.ProbeAgeSeconds = &age
+						v.Retained = age < checkpointAvailabilityStallBudget.Seconds()
+					}
+					state.probe.mu.Unlock()
+					if v.Retained {
+						v.Error = ""
+					}
+				}
+			}
 		}
 		if old, ok := sampler.previous[r.Volume]; ok && r.TotalBytes == old.reading.TotalBytes && observation.at.After(old.at) {
 			delta := float64(r.FreeBytes-min(r.FreeBytes, old.reading.FreeBytes)) - float64(old.reading.FreeBytes-min(r.FreeBytes, old.reading.FreeBytes))
