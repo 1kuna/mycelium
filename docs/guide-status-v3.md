@@ -411,8 +411,17 @@ Every host command uses queue evidence; there is no local envelope or rest verdi
 returns that job's status view. `host_available_memory_gb` is worker-observed
 available RAM after its configured host reserve. `host_memory_in_use_gb` is
 Mycelium's reservation ledger, not measured process RSS.
-`free_host_memory_gb` is admitted headroom after reservations and any configured
-allowance. Similarly, `cpu_in_use_cores` and `free_cpu_cores` are reservations,
+`free_host_memory_gb` is admitted headroom: the smaller of live availability
+minus running attempts' remaining growth room, and the configured allowance
+minus full reservations (when configured). Remaining growth is
+`max(0, reservation - current nonreclaimable use)` per attempt. The operator
+reserve is already removed from live availability; it is not subtracted again.
+Only fresh exact-attempt cgroup anonymous resident memory reduces growth;
+reclaimable cache, historical peaks and process RSS do not. Missing or five-second-old
+samples retain the full reservation, as do models and unconfirmed release custody.
+Queue restarts discard current-use credit. macOS uses the conservative fallback
+because its process-group RSS includes shared pages and is not a safe credit.
+Similarly, `cpu_in_use_cores` and `free_cpu_cores` are reservations,
 not CPU utilization. Zero reserved cores does not establish an idle host.
 
 Capacity waits name the selected host's reservations and, when reported, live
