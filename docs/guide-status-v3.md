@@ -476,8 +476,10 @@ No samples means unknown, never zero external use. Old workers without
 
 The worker adds a current observation to its existing heartbeat on macOS and
 Linux. Host used RAM is physical RAM minus reclaimable RAM, undoing the worker's
-admission reserve. Current worker and descendant RSS (including native jobs and
-model processes) is subtracted, clamped or invalid observations are skipped.
+admission reserve. Raw reclaimable RAM is retained before the admission clamp,
+including pressure below that reserve. Current worker and descendant RSS (including native jobs and
+model processes) is subtracted; invalid observations are skipped. Custom sources lacking raw
+RAM evidence cannot contribute while reserve-clamped.
 Reservations and attempt high-water marks are never subtracted. This is a
 sampled estimate: RSS may count shared pages more than once and miss compressed
 pages, reparented processes, or short spikes. Docker daemon children and other

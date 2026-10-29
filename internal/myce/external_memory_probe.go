@@ -77,12 +77,12 @@ func (w Worker) hostMemoryObservation(ctx context.Context, m Machine, available 
 	if probeErr != nil || m.CapabilityProfile == nil || m.CapabilityProfile.SystemMemoryBytes == 0 {
 		return nil
 	}
-	// A reserve-clamped availability cannot reconstruct physical used memory.
-	if available <= 0 {
+	// Raw availability is retained even when admission availability clamps to zero.
+	if !validMemoryValue(available) {
 		return nil
 	}
 	total := float64(m.CapabilityProfile.SystemMemoryBytes) / (1 << 30)
-	used := total - available - w.HostMemoryReserveGB
+	used := total - available
 	if !validMemoryValue(used) {
 		return nil
 	}
@@ -94,4 +94,18 @@ func (w Worker) hostMemoryObservation(ctx context.Context, m Machine, available 
 		return nil
 	}
 	return &HostMemoryObservation{TotalGB: total, UsedGB: used, MyceliumGB: rss}
+}
+
+// Preserve raw reclaimable RAM before the admission-only reserve/clamp. Explicit
+// legacy sources without raw evidence can be reconstructed only above the clamp.
+func (w Worker) sampleHostMemory(ctx context.Context) (admission, raw float64, err error) {
+	if w.hostRawMemorySource != nil {
+		raw, err = w.hostRawMemorySource(ctx)
+		return max(0, raw-w.HostMemoryReserveGB), raw, err
+	}
+	admission, err = w.HostMemorySource(ctx)
+	if admission == 0 && w.HostMemoryReserveGB > 0 {
+		return admission, -1, err
+	}
+	return admission, admission + w.HostMemoryReserveGB, err
 }
