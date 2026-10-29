@@ -20,6 +20,26 @@ and stable manager health. `polite_waiting`, `disabled` and `drained` do not mea
 use a line for a newer release to upgrade while preserving spool, identity and
 maintenance. Existing legacy conversion remains the explicit M4 procedure below.
 
+## Change live project policy
+
+`queue --project-config` (and `dev --project-config`) bootstraps project settings
+only before the first policy is stored. After first boot, the persisted SQLite
+policy is authoritative. Editing the config and restarting or reinstalling the
+queue no longer changes live policy or advances its revision.
+
+For a deliberate change, export the current policy, edit its `projects` mapping,
+and import it using the revision printed by the export:
+
+```sh
+myce policy get --yaml > policy.yaml
+# Edit policy.yaml, then replace N with the exported revision.
+myce policy set policy.yaml --if-revision N
+```
+
+If the revision is stale, export again and reconcile the newer policy before
+retrying. See [owner priority policy](guide-priority-policy.md) for the full
+import/export contract, including replacing or clearing project settings.
+
 ## Queue maintenance
 
 All commands use the authenticated queue and run as an ordinary account.
