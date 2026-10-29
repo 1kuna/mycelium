@@ -1,6 +1,9 @@
 package myce
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // workerContact is the queue's own record of one worker session's check-ins.
 // Time a check-in spends waiting behind q.mu is queue time, not worker silence
@@ -23,7 +26,7 @@ type checkinContact struct{ arrived time.Time }
 // settle is idempotent. Only the last accepted current session gets pending
 // credit. A report later rejected under q.mu can delay loss detection by at
 // most 30 s; rejection/cancellation removes its credit without refreshing it.
-func (q *Queue) beginCheckin(machine, session string) func(accepted bool) {
+func (q *Queue) beginCheckin(machine, session string, contexts ...context.Context) func(accepted bool) {
 	q.contactMu.Lock()
 	c := q.contacts[machine]
 	var pending *checkinContact
@@ -40,8 +43,8 @@ func (q *Queue) beginCheckin(machine, session string) func(accepted bool) {
 		// Recheck the authoritative session before publishing a completed
 		// contact. Never acquire q.mu while holding contactMu.
 		if accepted {
-			q.mu.RLock()
-			defer q.mu.RUnlock()
+			unlockRequest := requestReadLock(requestContext(contexts), &q.mu)
+			defer unlockRequest()
 		}
 		q.contactMu.Lock()
 		defer q.contactMu.Unlock()

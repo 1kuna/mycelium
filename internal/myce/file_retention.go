@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"errors"
 	"log"
 	"os"
@@ -32,17 +33,18 @@ const fileImportUploadPurpose = "import"
 // Persist eligibility before creating internal bytes, so rejected submissions
 // and crashes before the reference commit still have a cleanup owner. Existing
 // unmarked imports are never enrolled merely because a recipe reuses them.
-func (q *Queue) recordBundleUpload(hash string, created bool) error {
+func (q *Queue) recordBundleUpload(hash string, created bool, requestContexts ...context.Context) error {
+	requestCtx := requestContext(requestContexts)
 	if !created {
 		return nil
 	}
-	q.mu.RLock()
+	unlockRequest := requestReadLock(requestCtx, &q.mu)
 	_, marked := q.s.BundleUploads[hash]
-	q.mu.RUnlock()
+	unlockRequest()
 	if marked {
 		return nil
 	}
-	return q.update(func() error { q.markBundleUpload(hash); return nil })
+	return q.updateRequest(requestCtx, func() error { q.markBundleUpload(hash); return nil }, nil)
 }
 
 func (q *Queue) markBundleUpload(hash string) {
@@ -55,17 +57,18 @@ func (q *Queue) markBundleUpload(hash string) {
 // Creation and publication callers hold fileLifecycle.RLock. Only newly
 // created job-input identities acquire eligibility; reusing an unmarked import
 // never makes it collectible. A generic import permanently releases the marker.
-func (q *Queue) recordFileUpload(hash, purpose string, created bool) error {
-	q.mu.RLock()
+func (q *Queue) recordFileUpload(hash, purpose string, created bool, requestContexts ...context.Context) error {
+	requestCtx := requestContext(requestContexts)
+	unlockRequest := requestReadLock(requestCtx, &q.mu)
 	_, marked := q.s.JobInputUploads[hash]
 	_, bundle := q.s.BundleUploads[hash]
 	change := purpose != jobInputUploadPurpose && marked || purpose == jobInputUploadPurpose && created && !marked
 	change = change || purpose != jobInputUploadPurpose && bundle
-	q.mu.RUnlock()
+	unlockRequest()
 	if !change {
 		return nil
 	}
-	return q.update(func() error {
+	return q.updateRequest(requestCtx, func() error {
 		if purpose != jobInputUploadPurpose {
 			delete(q.s.JobInputUploads, hash)
 			delete(q.s.BundleUploads, hash)
@@ -76,23 +79,24 @@ func (q *Queue) recordFileUpload(hash, purpose string, created bool) error {
 			q.s.JobInputUploads[hash] = time.Time{}
 		}
 		return nil
-	})
+	}, nil)
 }
 
-func (q *Queue) publishFileUpload(hash string) error {
-	q.mu.RLock()
+func (q *Queue) publishFileUpload(hash string, requestContexts ...context.Context) error {
+	requestCtx := requestContext(requestContexts)
+	unlockRequest := requestReadLock(requestCtx, &q.mu)
 	published, marked := q.s.JobInputUploads[hash]
 	unchanged := !marked || published.Equal(q.clock.Now())
-	q.mu.RUnlock()
+	unlockRequest()
 	if unchanged {
 		return nil
 	}
-	return q.update(func() error {
+	return q.updateRequest(requestCtx, func() error {
 		if _, marked := q.s.JobInputUploads[hash]; marked {
 			q.s.JobInputUploads[hash] = q.clock.Now()
 		}
 		return nil
-	})
+	}, nil)
 }
 
 // Called before the transaction commits a job/reference. Terminal retention
@@ -291,9 +295,10 @@ func (q *Queue) fileReferences(pendingOnly bool, subset ...map[string]*Job) (exp
 	return expired, keep, referenced
 }
 
-func (q *Queue) expiredBlob(hash string) bool {
-	q.mu.RLock()
-	defer q.mu.RUnlock()
+func (q *Queue) expiredBlob(hash string, requestContexts ...context.Context) bool {
+	requestCtx := requestContext(requestContexts)
+	unlockRequest := requestReadLock(requestCtx, &q.mu)
+	defer unlockRequest()
 	expired, keep, _ := q.fileReferences(false)
 	return expired[hash] && !keep[hash]
 }
@@ -301,12 +306,22 @@ func (q *Queue) expiredBlob(hash string) bool {
 // Tick snapshots candidates, then fences reference publication and rechecks
 // custody for each unlink. Neither filesystem access nor waiting for the fence
 // holds q.mu. Only positively marked job-input uploads can be orphans.
-func (q *Queue) reclaimJobFiles() error {
-	return errors.Join(q.reclaimInterruptedUploads(), q.reclaimPublishedFiles())
+func (q *Queue) reclaimJobFiles() error { return q.reclaimJobFilesContext(context.Background()) }
+
+func (q *Queue) reclaimJobFilesContext(requestContexts ...context.Context) error {
+	requestCtx := requestContext(requestContexts)
+
+	return errors.Join(q.reclaimInterruptedUploads(requestCtx), q.reclaimPublishedFilesContext(requestCtx))
 }
 
 func (q *Queue) reclaimPublishedFiles() error {
-	q.mu.RLock()
+	return q.reclaimPublishedFilesContext(context.Background())
+}
+
+func (q *Queue) reclaimPublishedFilesContext(requestContexts ...context.Context) error {
+	requestCtx := requestContext(requestContexts)
+
+	requestUnlock1 := requestReadLock(requestCtx, &q.mu)
 	store := q.files
 	expired, keep, referenced := q.fileReferences(true)
 	candidates := expired
@@ -325,7 +340,7 @@ func (q *Queue) reclaimPublishedFiles() error {
 			orphans[hash] = published
 		}
 	}
-	q.mu.RUnlock()
+	requestUnlock1()
 	if store == nil {
 		return nil
 	}
@@ -340,7 +355,7 @@ func (q *Queue) reclaimPublishedFiles() error {
 			deferred = true
 			return
 		}
-		q.mu.RLock()
+		requestUnlock2 := requestReadLock(requestCtx, &q.mu)
 		// Every queue transaction and catalog change advances this fence. Reuse
 		// the reference snapshot only while it still describes current custody.
 		if revision != q.fileReferenceRevision {
@@ -360,7 +375,7 @@ func (q *Queue) reclaimPublishedFiles() error {
 		// An expired input can share bytes with a newly created, rejected
 		// recipe. Its older job window cannot shorten the recipe's retention.
 		remove = remove && (!trackedBundle || !bundleTime.After(orphanCutoff))
-		q.mu.RUnlock()
+		requestUnlock2()
 		var err error
 		if remove {
 			path := filepath.Join(store.root, "blobs", hash)
@@ -408,17 +423,17 @@ func (q *Queue) reclaimPublishedFiles() error {
 		checked++
 		reclaim(hash, false, true)
 	}
-	q.mu.Lock()
+	requestUnlock3 := requestLock(requestCtx, &q.mu)
 	warn := deferred && !q.fileCollectionDeferred
 	q.fileCollectionDeferred = deferred
-	q.mu.Unlock()
+	requestUnlock3()
 	if warn {
 		log.Printf("file retention deferred: publication or reference verification in progress; retrying next tick")
 	}
 	if len(gone) == 0 {
 		return nil
 	}
-	return q.update(func() error {
+	return q.updateRequest(requestCtx, func() error {
 		if q.files != store {
 			return nil
 		}
@@ -463,7 +478,7 @@ func (q *Queue) reclaimPublishedFiles() error {
 			mark(record.Job)
 		}
 		return nil
-	})
+	}, nil)
 }
 
 func hasJobFiles(j *Job) bool {

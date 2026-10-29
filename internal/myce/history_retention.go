@@ -1,6 +1,9 @@
 package myce
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // Match the default result window; key replay continues for submissionRetention
 // after removal. Longer configured file/log windows extend job retention.
@@ -9,11 +12,13 @@ const jobHistoryRetention = 168 * time.Hour
 // All changes use the existing undo journal and one FULL-synchronous commit.
 // Deadlines avoid scanning history; each Tick retires at most fileReclaimBatch
 // jobs. Pending file cleanup transfers to a compact, durable hash set.
-func (q *Queue) pruneJobHistory() error {
+func (q *Queue) pruneJobHistory(requestContexts ...context.Context) error {
+	requestCtx := requestContext(requestContexts)
+
 	if q.simulation {
 		return nil
 	}
-	return q.update(func() error {
+	return q.updateRequest(requestCtx, func() error {
 		now := q.clock.Now()
 		for _, id := range q.records.history.due(now) {
 			j := q.touchJob(id)
@@ -39,5 +44,5 @@ func (q *Queue) pruneJobHistory() error {
 			q.deleteJob(id)
 		}
 		return nil
-	})
+	}, nil)
 }

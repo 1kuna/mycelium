@@ -12,19 +12,19 @@ import (
 	"time"
 )
 
-func (a API) registerFleetUpgrade(mux *http.ServeMux) {
+func (a API) registerFleetUpgrade(mux *requestMux) {
 	mux.HandleFunc("POST /api/fleet/upgrade", func(w http.ResponseWriter, r *http.Request) {
 		var request FleetUpgradeRequest
 		if !decode(w, r, &request) {
 			return
 		}
-		out, err := a.Queue.StartFleetUpgrade(request)
+		out, err := a.Queue.StartFleetUpgrade(request, r.Context())
 		respond(w, out, err)
 	})
 	mux.HandleFunc("GET /api/fleet/publisher", func(w http.ResponseWriter, r *http.Request) {
-		a.Queue.mu.RLock()
+		requestUnlock1 := requestReadLock(r.Context(), &a.Queue.mu)
 		key := bytes.Clone(a.Queue.s.EnrollmentReleaseKey)
-		a.Queue.mu.RUnlock()
+		requestUnlock1()
 		w.Header().Set("Cache-Control", "no-store")
 		respond(w, struct {
 			PublicKey []byte `json:"public_key"`
@@ -33,12 +33,12 @@ func (a API) registerFleetUpgrade(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/fleet/instruction", func(w http.ResponseWriter, r *http.Request) {
 		v := r.URL.Query()
 		var out FleetUpdateInstruction
-		err := a.Queue.update(func() error {
+		err := a.Queue.updateRequest(r.Context(), func() error {
 			a.Queue.maintain()
 			var e error
 			out, e = a.Queue.fleetInstruction(v.Get("host"), v.Get("machine"), v.Get("session"))
 			return e
-		})
+		}, nil)
 		w.Header().Set("Cache-Control", "no-store")
 		respond(w, out, err)
 	})
@@ -46,7 +46,7 @@ func (a API) registerFleetUpgrade(mux *http.ServeMux) {
 		v := r.URL.Query()
 		revision, _ := strconv.Atoi(v.Get("revision"))
 		var proof *FleetRuntimeProof
-		err := a.Queue.update(func() error {
+		err := a.Queue.updateRequest(r.Context(), func() error {
 			if e := a.Queue.authorizeFleetUpdate(v.Get("operation"), v.Get("host"), v.Get("machine"), v.Get("session"), revision); e != nil {
 				return e
 			}
@@ -56,7 +56,7 @@ func (a API) registerFleetUpgrade(mux *http.ServeMux) {
 				proof = cloneFleetProof(m.Fleet)
 			}
 			return nil
-		})
+		}, nil)
 		respond(w, proof, err)
 	})
 	mux.HandleFunc("POST /api/fleet/ack", func(w http.ResponseWriter, r *http.Request) {
@@ -64,7 +64,7 @@ func (a API) registerFleetUpgrade(mux *http.ServeMux) {
 		if !decode(w, r, &ack) {
 			return
 		}
-		respond(w, map[string]bool{"ok": true}, a.Queue.AckFleetUpgrade(ack))
+		respond(w, map[string]bool{"ok": true}, a.Queue.AckFleetUpgrade(ack, r.Context()))
 	})
 	mux.HandleFunc("GET /api/fleet/artifact", a.fleetArtifact)
 }
@@ -73,7 +73,7 @@ func (a API) registerFleetUpgrade(mux *http.ServeMux) {
 // Ed25519 envelope and streamed hash/size. No fleet credential leaves the queue.
 func (a API) fleetArtifact(w http.ResponseWriter, r *http.Request) {
 	q := a.Queue
-	q.mu.RLock()
+	unlockRequest := requestReadLock(r.Context(), &q.mu)
 	u := q.s.FleetUpgrade
 	var release EnrollmentRelease
 	var artifact ReleaseArtifact
@@ -88,7 +88,7 @@ func (a API) fleetArtifact(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	q.mu.RUnlock()
+	unlockRequest()
 	if !valid {
 		respond(w, nil, fleetError("fleet_artifact_stale"))
 		return

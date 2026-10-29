@@ -432,3 +432,28 @@ Status is diagnostic and never permission to launch work locally; submit it.
 Plain native jobs without an isolation declaration remain unsandboxed in v1.
 Their `isolation` status explains the compatibility default and the one-line
 `isolation: sandboxed` opt-in. New extension registrations default sandboxed.
+
+### API request latency
+
+Authenticated status JSON includes `request_latencies`: one entry per HTTP route
+pattern with lifetime `count`, retained `samples`, and nearest-rank `p50_ms`,
+`p95_ms`, and `p99_ms` handler durations. Each route retains its latest 256
+completed requests, with a hard cap of 128 routes. Samples reset on queue restart;
+the ordinary one-second status cache also applies to this summary. These are
+server handler times, not client transport or process-budget times.
+
+The queue emits one `event=slow_request` line for each handler taking more than
+one second. It records the route pattern, response status, `duration_ms`,
+`mutex_wait_ms`, `mutex_hold_ms`, and `after_unlock_ms`. Wait and hold accumulate
+across the request's measured queue acquisitions; after-unlock measures the tail
+from the final measured unlock through response completion, including hydration
+and response writes. Work before/between acquisitions is included in total time.
+
+Mutex attribution follows request contexts through queue-backed routes, including
+hydration recovery, file-store callbacks, and model forwarding. A
+`mutex_measured=false` request reached no queue acquisition (for example a cache
+hit or early rejection). Summary timings cover every route. Instrumentation uses monotonic wall time only for observation;
+queue decisions still use the injected clock. Logging and summary publication
+run after unlocking. Labels use registered route patterns or `unmatched`, never
+request paths, query strings, tokens or bodies. Long-lived streams are recorded
+when their handler ends.

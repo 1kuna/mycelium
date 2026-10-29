@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -196,9 +197,11 @@ func (q *Queue) beforeWithFair(a, b *Job, m *Machine, score func(*Job, *Machine)
 	}
 	return beforeWithinTier(a, b, m)
 }
-func (q *Queue) PriorityPolicy() PriorityPolicyRecord {
-	q.mu.Lock()
-	defer q.mu.Unlock()
+func (q *Queue) PriorityPolicy(requestContexts ...context.Context) PriorityPolicyRecord {
+	requestCtx := requestContext(requestContexts)
+
+	requestUnlock1 := requestLock(requestCtx, &q.mu)
+	defer requestUnlock1()
 	return q.priorityPolicyRecord()
 }
 func (q *Queue) priorityPolicyRecord() PriorityPolicyRecord {
@@ -215,7 +218,9 @@ func (q *Queue) priorityPolicyRecord() PriorityPolicyRecord {
 	warnings, _ := p.validate()
 	return PriorityPolicyRecord{q.policyRevision(), p, warnings}
 }
-func (q *Queue) SetPriorityPolicy(expected uint64, p PriorityPolicy) (PriorityPolicyRecord, error) {
+func (q *Queue) SetPriorityPolicy(expected uint64, p PriorityPolicy, requestContexts ...context.Context) (PriorityPolicyRecord, error) {
+	requestCtx := requestContext(requestContexts)
+
 	var out PriorityPolicyRecord
 	if _, err := p.validate(); err != nil {
 		return out, err
@@ -241,7 +246,7 @@ func (q *Queue) SetPriorityPolicy(expected uint64, p PriorityPolicy) (PriorityPo
 		p.Tiers[i].Selectors = slices.Clone(p.Tiers[i].Selectors)
 	}
 	p.Projects = nil
-	err := q.update(func() error {
+	err := q.updateRequest(requestCtx, func() error {
 		if expected == ^uint64(0) {
 			return errors.New("policy revision exhausted")
 		}
@@ -254,11 +259,11 @@ func (q *Queue) SetPriorityPolicy(expected uint64, p PriorityPolicy) (PriorityPo
 		}
 		out = q.priorityPolicyRecord()
 		return nil // Normal planner reevaluates on its next decision; no bulk stop here.
-	})
+	}, nil)
 	return out, err
 }
-func (a API) registerPriorityPolicy(mux *http.ServeMux) {
-	mux.HandleFunc("GET /api/policy", func(w http.ResponseWriter, r *http.Request) { respond(w, a.Queue.PriorityPolicy(), nil) })
+func (a API) registerPriorityPolicy(mux *requestMux) {
+	mux.HandleFunc("GET /api/policy", func(w http.ResponseWriter, r *http.Request) { respond(w, a.Queue.PriorityPolicy(r.Context()), nil) })
 	mux.HandleFunc("PUT /api/policy", func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
 			ExpectedRevision *uint64        `json:"expected_revision"`
@@ -271,9 +276,9 @@ func (a API) registerPriorityPolicy(mux *http.ServeMux) {
 			respond(w, nil, reject("policy_invalid", errors.New("expected_revision required")))
 			return
 		}
-		record, err := a.Queue.SetPriorityPolicy(*request.ExpectedRevision, request.Policy)
+		record, err := a.Queue.SetPriorityPolicy(*request.ExpectedRevision, request.Policy, r.Context())
 		if errors.Is(err, ErrPolicyRevision) {
-			revision := a.Queue.PriorityPolicy().Revision
+			revision := a.Queue.PriorityPolicy(r.Context()).Revision
 			respond(w, nil, &HTTPError{Status: http.StatusConflict, Code: "policy_revision_conflict", CurrentRevision: &revision, Message: fmt.Sprintf("policy revision changed; current revision %d; export policy and retry with --if-revision %d", revision, revision)})
 			return
 		}

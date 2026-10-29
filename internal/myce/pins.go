@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"errors"
 	"sort"
 	"strings"
@@ -42,11 +43,13 @@ func (p ModelPin) active(now time.Time) bool {
 	hm := now.Format("15:04")
 	return hm >= p.Start && hm < p.End
 }
-func (q *Queue) Pin(p ModelPin) error {
+func (q *Queue) Pin(p ModelPin, requestContexts ...context.Context) error {
+	requestCtx := requestContext(requestContexts)
+
 	if err := validateProjectIdentifier(p.Project); err != nil {
 		return err
 	}
-	return q.update(func() error {
+	return q.updateRequest(requestCtx, func() error {
 		if strings.Contains(p.Device, ",") {
 			return reject("gpu_count_unsupported", nil)
 		}
@@ -97,10 +100,12 @@ func (q *Queue) Pin(p ModelPin) error {
 		q.s.Pins = append(q.s.Pins, p)
 		q.maintain()
 		return nil
-	})
+	}, nil)
 }
-func (q *Queue) Unpin(project, model string) error {
-	return q.update(func() error {
+func (q *Queue) Unpin(project, model string, requestContexts ...context.Context) error {
+	requestCtx := requestContext(requestContexts)
+
+	return q.updateRequest(requestCtx, func() error {
 		for i, p := range q.s.Pins {
 			if p.Project == project && p.Model == model {
 				q.s.Pins = append(q.s.Pins[:i], q.s.Pins[i+1:]...)
@@ -109,7 +114,7 @@ func (q *Queue) Unpin(project, model string) error {
 			}
 		}
 		return errors.New("pin not found")
-	})
+	}, nil)
 }
 func (q *Queue) slotPinned(s *ModelSlot) bool {
 	for _, p := range q.s.Pins {

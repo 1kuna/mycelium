@@ -2,6 +2,7 @@ package myce
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -89,9 +90,11 @@ func (q *Queue) fleetUpgradeStatus() *FleetUpgradeStatus {
 	return out
 }
 
-func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest) (*FleetUpgradeStatus, error) {
+func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest, requestContexts ...context.Context) (*FleetUpgradeStatus, error) {
+	requestCtx := requestContext(requestContexts)
+
 	var out *FleetUpgradeStatus
-	err := q.update(func() error {
+	err := q.updateRequest(requestCtx, func() error {
 		approved := q.s.EnrollmentRelease
 		if approved == nil || len(approved.SignedRelease) == 0 {
 			return fleetError("fleet_release_reapproval_required")
@@ -218,7 +221,7 @@ func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest) (*FleetUpgradeSta
 		q.s.FleetUpgrade = u
 		out = q.fleetUpgradeStatus()
 		return nil
-	})
+	}, nil)
 	return out, err
 }
 
@@ -605,8 +608,10 @@ func (q *Queue) fleetRuntimeFailureCurrent(h *fleetUpgradeHost, ack FleetUpgrade
 	return err == nil && p.SHA256 == artifact.SHA256
 }
 
-func (q *Queue) AckFleetUpgrade(ack FleetUpgradeAck) error {
-	return q.update(func() error {
+func (q *Queue) AckFleetUpgrade(ack FleetUpgradeAck, requestContexts ...context.Context) error {
+	requestCtx := requestContext(requestContexts)
+
+	return q.updateRequest(requestCtx, func() error {
 		u := q.s.FleetUpgrade
 		h := q.fleetActiveHost()
 		if u == nil || h == nil || u.Operation != ack.Operation || ack.Revision <= 0 || ack.Revision > u.Revision || h.Host != ack.Host || u.State != "running" {
@@ -663,7 +668,7 @@ func (q *Queue) AckFleetUpgrade(ack FleetUpgradeAck) error {
 			return errors.New("invalid fleet acknowledgement")
 		}
 		return nil
-	})
+	}, nil)
 }
 
 // Marshal-copy the frozen operation before handing it to network code.

@@ -1329,9 +1329,11 @@ func (rt *environmentRuntime) upload(ctx context.Context, client Client, m Machi
 	}
 	return nil
 }
-func (q *Queue) AppendEnvironmentLog(l EnvironmentLog) error {
-	q.mu.Lock()
-	defer q.mu.Unlock()
+func (q *Queue) AppendEnvironmentLog(l EnvironmentLog, requestContexts ...context.Context) error {
+	requestCtx := requestContext(requestContexts)
+
+	requestUnlock1 := requestLock(requestCtx, &q.mu)
+	defer requestUnlock1()
 	m := q.s.Machines[l.Machine]
 	if m == nil || m.Session != l.Session || m.Gone {
 		return errors.New("stale environment builder")

@@ -28,8 +28,8 @@ type statusCache struct {
 	expires time.Time
 }
 
-func (q *Queue) cachedPublicSnapshot() (Snapshot, error) {
-	data, err := q.cachedStatusJSON()
+func (q *Queue) cachedPublicSnapshot(contexts ...context.Context) (Snapshot, error) {
+	data, err := q.cachedStatusJSON(contexts...)
 	if err != nil {
 		return Snapshot{}, err
 	}
@@ -38,11 +38,11 @@ func (q *Queue) cachedPublicSnapshot() (Snapshot, error) {
 	return out, err
 }
 
-func (q *Queue) cachedStatusJSON() (string, error) {
+func (q *Queue) cachedStatusJSON(contexts ...context.Context) (string, error) {
 	c := &q.statusCache
 	c.mu.Lock()
 	if c.data == "" || !q.clock.Now().Before(c.expires) {
-		s, err := q.publicSnapshot()
+		s, err := q.publicSnapshot(contexts...)
 		if err != nil {
 			c.mu.Unlock()
 			return "", err
@@ -84,9 +84,9 @@ type observationMachineLedger struct {
 // Encode while protected, then decode and project outside q.mu. No mutable
 // state escapes the capture. Cold history needs only its public summary; active
 // work retains the inputs needed by the existing diagnostic planner.
-func (q *Queue) captureObservation(id string) (*Queue, fileStoreObservation, error) {
+func (q *Queue) captureObservation(id string, contexts ...context.Context) (*Queue, fileStoreObservation, error) {
 	started := readWallStart(q.observeRead)
-	q.mu.RLock()
+	unlockRequest := requestReadLock(requestContext(contexts), &q.mu)
 	locked := readWallStart(q.observeRead)
 	hold := q.statusHolds.start()
 	var files fileStoreObservation
@@ -200,7 +200,7 @@ func (q *Queue) captureObservation(id string) (*Queue, fileStoreObservation, err
 		data, err = json.Marshal(inputs)
 	}
 	duration := queueHoldDuration(hold)
-	q.mu.RUnlock()
+	unlockRequest()
 	observeRead(q.observeRead, id, started, locked)
 	logQueueHold(duration, "captureObservation", nil)
 	if err != nil {
@@ -247,8 +247,8 @@ func (q *Queue) findObservationJob(id string) (*Job, error) {
 	return FindJob(matches, id)
 }
 
-func (q *Queue) jobSnapshot(id string) (*Job, error) {
-	v, _, err := q.captureObservation(id)
+func (q *Queue) jobSnapshot(id string, contexts ...context.Context) (*Job, error) {
+	v, _, err := q.captureObservation(id, contexts...)
 	if err != nil {
 		return nil, err
 	}
@@ -270,12 +270,13 @@ func (q *Queue) jobSnapshot(id string) (*Job, error) {
 	return j, nil
 }
 
-func (q *Queue) statusSnapshot() (Snapshot, error) {
-	v, files, err := q.captureObservation("")
+func (q *Queue) statusSnapshot(contexts ...context.Context) (Snapshot, error) {
+	v, files, err := q.captureObservation("", contexts...)
 	if err != nil {
 		return Snapshot{}, err
 	}
 	out := v.projectSnapshot(true)
+	out.RequestLatencies = q.requestLatencies.snapshot()
 	out.Usage, err = v.readUsage(q.usageReader, out.Now.Add(-7*24*time.Hour))
 	if err == nil {
 		out.FileStore = files.status(context.Background())
