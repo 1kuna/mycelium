@@ -316,12 +316,12 @@ risks which this host move does not eliminate.
   recipes above, including explicit pinned verification and durable invitation
   placement. File a narrow tooling defect only if the actual supported overlay
   or client path fails; no new retarget command is assumed necessary.
-- **Capability redundancy through portable variants:** connect the pending
-  run-anywhere design to [#16](https://github.com/1kuna/mycelium/issues/16),
+- **Capability redundancy through portable variants:** connect the
+  [run-anywhere design (PR #331)](https://github.com/1kuna/mycelium/pull/331) to [#16](https://github.com/1kuna/mycelium/issues/16),
   [#192](https://github.com/1kuna/mycelium/issues/192) and the existing
   [extension composition contract](design-proposal.md#extension-composition-e1-98).
-  The local `design/run-anywhere` work had no published PR at sampling; these
-  durable design issues are the link until its owner publishes one. Qualify
+  PR #331 was published during this planning pass; treat its proposed phases
+  as design work, not deployed capability redundancy. Qualify
   equivalent CUDA/XPU/Metal/CPU variants and portable checkpoint formats on two
   independent hosts per important workload; apply MY-19 accuracy parity before
   routing. A platform label alone is not portability. Remove accidental machine
