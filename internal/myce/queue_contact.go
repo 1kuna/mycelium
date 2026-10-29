@@ -7,7 +7,8 @@ import (
 
 // workerContact is the queue's own record of one worker session's check-ins.
 // Time a check-in spends waiting behind q.mu is queue time, not worker silence
-// (#223): a matching-session arrival counts for at most 30 s while in flight.
+// (#223, #343): a matching-session arrival counts for at most 30 s while in
+// flight, including when queue delay causes its client to cancel.
 // Accepted check-ins count from when the queue finished processing them.
 type workerContact struct {
 	session   string
@@ -25,7 +26,9 @@ type checkinContact struct{ arrived time.Time }
 // beginCheckin records a check-in before it waits for q.mu. The returned
 // settle is idempotent. Only the last accepted current session gets pending
 // credit. A report later rejected under q.mu can delay loss detection by at
-// most 30 s; rejection/cancellation removes its credit without refreshing it.
+// most 30 s. Rejection removes its credit; cancellation retains only the
+// original bounded arrival credit, never refreshing accepted contact. Otherwise
+// a client deadline during queue contention retroactively becomes silence.
 func (q *Queue) beginCheckin(machine, session string, contexts ...context.Context) func(accepted bool) {
 	q.contactMu.Lock()
 	c := q.contacts[machine]
@@ -52,7 +55,7 @@ func (q *Queue) beginCheckin(machine, session string, contexts ...context.Contex
 			return
 		}
 		settled = true
-		if pending != nil {
+		if pending != nil && (accepted || requestContext(contexts).Err() == nil) {
 			delete(c.pending, pending)
 		}
 		if accepted {
