@@ -130,7 +130,9 @@ func TestHostMaintenanceCLIAndWaitCustody(t *testing.T) {
 // authority with no MYCE_TOKEN, like status and cancel (#207).
 func TestHostMaintenanceInstalledAuthority(t *testing.T) {
 	q, _, _, _ := waitQueue(t)
-	if _, err := q.Checkin(myce.Checkin{Machine: maintenanceCLIWorker("worker")}); err != nil {
+	m := maintenanceCLIWorker("worker")
+	m.Devices = []myce.MachineDevice{{ID: "0", Platform: "fake", Identity: "fake-stable", Selector: "0", MemoryMode: "fixed", TotalMemoryGB: 8, BudgetGB: 8, FreeMemoryGB: 8}}
+	if _, err := q.Checkin(myce.Checkin{Machine: m}); err != nil {
 		t.Fatal(err)
 	}
 	const token = "host-fixture-token"
@@ -162,6 +164,12 @@ func TestHostMaintenanceInstalledAuthority(t *testing.T) {
 		args []string
 		ok   func(myce.HostMaintenanceStatus) bool
 	}{
+		{[]string{"device", "disable", "host", "0", "--reason", "driver faults"}, func(s myce.HostMaintenanceStatus) bool {
+			return len(s.DeviceMaintenance) == 1 && s.DeviceMaintenance[0].Disabled
+		}},
+		{[]string{"device", "enable", "host", "fake-stable"}, func(s myce.HostMaintenanceStatus) bool {
+			return len(s.DeviceMaintenance) == 1 && !s.DeviceMaintenance[0].Disabled
+		}},
 		{[]string{"drain", "host"}, func(s myce.HostMaintenanceStatus) bool { return s.Policy.Mode == "drained" }},
 		{[]string{"budget", "host", "--memory-budget-gb", "4"}, func(s myce.HostMaintenanceStatus) bool {
 			return s.Policy.MemoryBudget != nil && s.Policy.MemoryBudget.Bytes == 4<<30
@@ -183,7 +191,7 @@ func TestHostMaintenanceInstalledAuthority(t *testing.T) {
 	if err = myce.WriteInvitation(joining, invitation); err != nil {
 		t.Fatal(err)
 	}
-	if err = hostMaintenanceCommand(context.Background(), []string{"drain", "host", "--config", config}, &bytes.Buffer{}); err == nil {
+	if err = hostMaintenanceCommand(context.Background(), []string{"device", "disable", "host", "0", "--config", config}, &bytes.Buffer{}); err == nil {
 		t.Fatal("host maintenance accepted a mismatched certificate pin")
 	}
 	if current, err := q.HostMaintenanceStatus("host"); err != nil || current.Policy.Mode != "enabled" {

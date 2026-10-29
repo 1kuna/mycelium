@@ -14,8 +14,11 @@ import (
 )
 
 func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) error {
+	if len(args) > 0 && args[0] == "device" {
+		return hostDeviceCommand(ctx, args[1:], out)
+	}
 	if len(args) == 0 {
-		return errors.New("usage: myce host drain|disable|resume|status|budget|placement HOST [--config PATH] [--last-resort=true|false] [--stop] [--memory-budget-gb GiB] [--wait] [--timeout DURATION]")
+		return errors.New("usage: myce host device disable|enable HOST DEVICE | myce host drain|disable|resume|status|budget|placement HOST [--config PATH] [--last-resort=true|false] [--stop] [--memory-budget-gb GiB] [--wait] [--timeout DURATION]")
 	}
 	action := args[0]
 	f := flag.NewFlagSet("host "+action, flag.ContinueOnError)

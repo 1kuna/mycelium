@@ -38,13 +38,15 @@ func automaticExtensionCheckID(machine string, r ExtensionReport) string {
 
 // Demand includes all work types of the selected extension. Never let an
 // internal check itself manufacture demand, or a cancelled useful job retain it.
+// Device admission is separate: disabling cannot cancel an existing Started
+// check while its useful demand and prepared identity still exist.
 func (q *Queue) extensionQualificationDemand(e Extension, m *Machine) bool {
 	for _, j := range q.liveJobs() {
 		if j.State != "queued" || j.Spec.ExtensionCheck != nil || j.Spec.Resumable && !e.Resumable {
 			continue
 		}
 		for _, candidate := range extensionJobs(j, m, false) {
-			if !q.placementAllowed(candidate, m) || !deviceAllowed(candidate, m) {
+			if q.diskHeadroomReason(candidate, m) != "" || !q.placementPolicyAllowed(candidate, m, false) || !deviceAllowed(candidate, m) {
 				continue
 			}
 			for _, selected := range candidate.Extensions {
@@ -58,7 +60,7 @@ func (q *Queue) extensionQualificationDemand(e Extension, m *Machine) bool {
 }
 
 func (q *Queue) extensionQualificationPlan(m *Machine) []ExtensionQualificationPlan {
-	if !q.hostLaunchAllowed(m, m.Session) {
+	if q.deviceAdmissionBlocked(m) || !q.hostLaunchAllowed(m, m.Session) {
 		return nil
 	}
 	var plans []ExtensionQualificationPlan
@@ -113,7 +115,7 @@ func (q *Queue) validateAutomaticExtensionCheck(s Spec, extensions []Extension) 
 		return ErrStale
 	}
 	for _, m := range q.machineTargets(owner) {
-		if !matchingExtensionReport(e, m, r) || !q.hostLaunchAllowed(m, m.Session) || !q.extensionQualificationDemand(e, m) {
+		if q.deviceAdmissionBlocked(m) || !matchingExtensionReport(e, m, r) || !q.hostLaunchAllowed(m, m.Session) || !q.extensionQualificationDemand(e, m) {
 			continue
 		}
 		view, ok := e.forMachine(m)

@@ -175,7 +175,7 @@ func (q *Queue) placementAllowed(j *Job, m *Machine) bool {
 }
 
 func (q *Queue) placementAllowedForUse(j *Job, m *Machine, resident bool) bool {
-	return q.diskHeadroomReason(j, m) == "" && q.placementPolicyAllowed(j, m, resident)
+	return (j.Spec.Needs.cpuOnly() || !q.deviceAdmissionBlocked(m)) && q.diskHeadroomReason(j, m) == "" && q.placementPolicyAllowed(j, m, resident)
 }
 
 // Recovery retains existing execution custody. Admission-time disk estimates

@@ -59,6 +59,49 @@ myce host placement HOST --last-resort=false
 myce host resume HOST
 ```
 
+### Set aside one accelerator
+
+```sh
+myce host device disable HOST DEVICE --reason "recurring driver faults"
+myce host device enable HOST DEVICE
+myce host status HOST
+myce status
+```
+
+`DEVICE` is the displayed inventory ID (for example `0`) or its stable
+`identity` from `myce host status HOST`. The CLI resolves it to the physical
+identity before submitting a conditional edit. The queue persists the policy
+by host, platform and identity in SQLite, independently of ordinals, worker
+sessions and health reports. Queue and worker restarts preserve it; an index
+reused by a different physical device does not inherit the old disable.
+If an inventory identity is missing or ambiguous, inspect host status and use
+the stable identity rather than guessing an index. Workers without a stable
+inventory cannot use this control.
+
+Disabling admission preserves Started batch attempts, running preparations,
+engines and active calls. It withdraws unstarted batch offers and refuses new
+batch placements, calls, engine launches and device-specific preparation
+launches on that device. Model-cache copies use shared host storage and remain
+allowed. Healthy siblings retain their budgets and CPU work
+remains eligible. New whole-host onboarding benchmarks are deferred while any
+inventory device is disabled; ordinary worker startup continues. A later join
+after enabling the device can refresh whole-host throughput. Already authorized
+benchmarks continue as existing work. Existing work can still finish or stop under ordinary
+cancellation, failure and priority rules. This command does not edit the
+worker installation/configuration and needs no restart. Host drain/disable
+remains an independent fence; enabling a device does not resume its host.
+
+Host status returns `device_maintenance` records with identity, reason,
+`updated_at` (injected queue time) and revision. CLI/web status lists disabled
+devices, including retained policies for absent devices. Enable clears the
+reason but keeps a revision record. Mutations use the same installed operator
+authority as host drain. The CLI reads the current per-device revision and
+sends `if_revision`; a concurrent edit is rejected as stale, never retried
+blindly. API clients post `action`, `platform`, `identity`, optional `reason`
+and required `if_revision` to `/api/hosts/HOST/devices/maintenance`; revision
+zero means no prior record. Device edits preserve the host drain owner's
+receipt and timestamp.
+
 `host placement` changes the queue-owned policy for a physical host, including
 all its worker/device views. It can be changed while enabled, persists across
 queue restarts and worker sessions, and cannot be overridden by check-ins.

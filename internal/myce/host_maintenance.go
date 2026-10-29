@@ -52,6 +52,8 @@ type MaintenanceAttempt struct {
 }
 
 type HostMaintenanceStatus struct {
+	DeviceMaintenance []DeviceMaintenance `json:"device_maintenance"`
+
 	MigrationReady bool            `json:"migration_ready,omitempty"`
 	Host           string          `json:"host"`
 	Policy         HostMaintenance `json:"policy"`
@@ -82,7 +84,7 @@ func (q *Queue) maintenanceBlocked(host string) bool {
 func plannedMaintenanceStop(j *Job) bool {
 	for _, c := range j.Copies {
 		if c.Attempt == j.Attempt && c.Machine == j.Machine && c.Session == j.Session {
-			return c.StopCause == maintenanceStopCause
+			return c.StopCause == maintenanceStopCause || c.StopCause == deviceMaintenanceStopCause
 		}
 	}
 	return false
@@ -149,7 +151,7 @@ func (q *Queue) HostMaintenanceStatus(host string, requestContexts ...context.Co
 	return q.hostMaintenanceStatus(host), nil
 }
 func (q *Queue) hostMaintenanceStatus(host string) HostMaintenanceStatus {
-	out := HostMaintenanceStatus{Host: host, Policy: q.s.HostMaintenance[host], Workers: []MaintenanceWorker{}, Attempts: []MaintenanceAttempt{}, PendingReleases: []HostRelease{}, PendingCleanup: []string{}}
+	out := HostMaintenanceStatus{Host: host, DeviceMaintenance: q.deviceMaintenanceStatus(host), Policy: q.s.HostMaintenance[host], Workers: []MaintenanceWorker{}, Attempts: []MaintenanceAttempt{}, PendingReleases: []HostRelease{}, PendingCleanup: []string{}}
 	if out.Policy.Mode == "" {
 		out.Policy.Mode = "enabled"
 	}

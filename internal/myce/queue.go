@@ -62,6 +62,8 @@ type state struct {
 	LastWorkerContact time.Time `json:"last_worker_contact,omitempty"`
 	NetworkRecoveryAt time.Time `json:"network_recovery_at,omitempty"`
 
+	DeviceMaintenance map[string]map[string]DeviceMaintenance `json:"device_maintenance,omitempty"`
+
 	Schema           int                        `json:"schema_version"`
 	PreparationPlans map[string]HostLaunch      `json:"preparation_plans,omitempty"`
 	HostMaintenance  map[string]HostMaintenance `json:"host_maintenance,omitempty"`
@@ -828,6 +830,7 @@ func (q *Queue) maintain() {
 	q.maintainPieceDependencies()
 	q.maintainFileExpiry()
 	q.maintainHostMaintenance()
+	q.maintainDeviceMaintenance()
 	q.maintainExtensionQualifications()
 	q.maintainSubmissions()
 	now := q.clock.Now()
@@ -1213,7 +1216,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 				return
 			}
 			if m.BenchmarkPending || c.BenchmarkDone != "" {
-				if m.BenchmarkPending && q.hostLaunchAllowed(&m, m.Session) && q.benchmarkIdle(&m) {
+				if m.BenchmarkPending && q.hostLaunchAllowed(&m, m.Session) && q.benchmarkIdle(&m) && !q.benchmarkDeviceAdmissionBlocked(&m) {
 					l := q.issuePreparation(&m, "benchmark", "onboarding")
 					reply.BenchmarkPlan = &l
 					copy := cloneMachine(&m)
@@ -1762,6 +1765,7 @@ func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
 	out.HostStates = make(map[string]string, len(hosts))
 	for host, hasMachine := range hosts {
 		out.HostStates[host] = q.hostMaintenanceStatus(host).State
+		out.DeviceMaintenance = append(out.DeviceMaintenance, q.deviceMaintenanceStatus(host)...)
 		if !hasMachine {
 			if detail := q.dockerHoldDetail(host); detail.Text != "" {
 				out.HoldsDetail = append(out.HoldsDetail, detail)
@@ -1774,6 +1778,9 @@ func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
 			out.HoldsDetail = append(out.HoldsDetail, HoldDetail{Host: host, Kind: "host_disabled", Text: "host " + host + " disabled by operator"})
 		}
 	}
+	slices.SortFunc(out.DeviceMaintenance, func(a, b DeviceMaintenance) int {
+		return strings.Compare(a.Host+"/"+deviceMaintenanceKey(a.Platform, a.Identity), b.Host+"/"+deviceMaintenanceKey(b.Platform, b.Identity))
+	})
 	sort.Strings(out.HostHolds)
 	sort.Slice(out.HoldsDetail, func(i, j int) bool {
 		a, b := out.HoldsDetail[i], out.HoldsDetail[j]
@@ -2173,11 +2180,11 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 	if j != nil && !terminal(j.State) && !cancelled(j) && (j.State == "queued" || j.Attempt != report.Attempt || j.Machine != m.ID || j.Session != m.Session) {
 		for _, copy := range j.Copies {
 			canRecover := q.machineRecoveryFits(m, j, copy)
-			if canRecover && q.placementPolicyAllowed(j, m, false) && copy.Recoverable && copy.Attempt == report.Attempt && copy.Machine == m.ID && copy.Session == m.Session && j.State != "queued" && (m.CheckpointUnavailable || !q.checkpointsAvailable() || progress.err != nil || (progress.path != "" && progress.path != attemptCheckpoint(*j))) {
+			if canRecover && q.placementPolicyAllowed(j, allocationMachine(m, copy.AllocatedDevices), false) && copy.Recoverable && copy.Attempt == report.Attempt && copy.Machine == m.ID && copy.Session == m.Session && j.State != "queued" && (m.CheckpointUnavailable || !q.checkpointsAvailable() || progress.err != nil || (progress.path != "" && progress.path != attemptCheckpoint(*j))) {
 				reply.Hold = true
 				return reply
 			}
-			if canRecover && q.placementPolicyAllowed(j, m, false) && copy.Recoverable && copy.Attempt == report.Attempt && copy.Machine == m.ID && copy.Session == m.Session && (j.State == "queued" || (j.Spec.Resumable && report.Progress > max(0, progress.durable))) {
+			if canRecover && q.placementPolicyAllowed(j, allocationMachine(m, copy.AllocatedDevices), false) && copy.Recoverable && copy.Attempt == report.Attempt && copy.Machine == m.ID && copy.Session == m.Session && (j.State == "queued" || (j.Spec.Resumable && report.Progress > max(0, progress.durable))) {
 				for i := range j.Copies {
 					j.Copies[i].Recoverable = false
 				}

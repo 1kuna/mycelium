@@ -71,7 +71,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 
 	if len(args) == 0 {
-		return errors.New("usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|run|profile|submit|policy|status|logs|ledger|wait|result|cancel|resolve-native|resolve-docker|reconcile-docker-retention|dev|version|release|file|benchmark|extension|sim|detect|service|measure|model|usage\n       myce host drain|disable|resume|status|budget|placement HOST\nRun myce COMMAND --help for command options.")
+		return errors.New("usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|run|profile|submit|policy|status|logs|ledger|wait|result|cancel|resolve-native|resolve-docker|reconcile-docker-retention|dev|version|release|file|benchmark|extension|sim|detect|service|measure|model|usage\n       myce host drain|disable|resume|status|budget|placement HOST\n       myce host device disable|enable HOST DEVICE\nRun myce COMMAND --help for command options.")
 	}
 	if args[0] == "dev" && len(args) > 1 && args[1] == "clock" {
 		return devClockCommand(args[2:], os.Stdout)
@@ -873,6 +873,11 @@ func printStatus(s myce.Snapshot, full bool) {
 	}
 	for _, host := range slices.Sorted(maps.Keys(s.HostStates)) {
 		fmt.Printf("host %s: %s\n", host, s.HostStates[host])
+	}
+	for _, d := range s.DeviceMaintenance {
+		if d.Disabled {
+			fmt.Printf("host %s device %s (%s): disabled by operator since %s; reason=%q\n", d.Host, d.Identity, d.Platform, d.UpdatedAt.UTC().Format(time.RFC3339Nano), d.Reason)
+		}
 	}
 	for _, hold := range s.HostHolds {
 		fmt.Println(hold)
