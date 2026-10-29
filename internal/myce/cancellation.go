@@ -414,6 +414,9 @@ func (q *Queue) cancellationMembers(j *Job) []*Job {
 	if j.FanOut == nil {
 		return nil
 	}
+	if q.cancellationMembersByParent != nil {
+		return q.cancellationMembersByParent[j.ID]
+	}
 	out := []*Job{}
 	for _, id := range j.FanOut.Children {
 		if child := q.retainedJob(id); child != nil {
@@ -433,6 +436,49 @@ func (q *Queue) cancellationMembers(j *Job) []*Job {
 	}
 	return out
 }
+
+// One status capture projects many retained fan-outs under q.mu. Scanning the
+// entire job/submission history for each parent (and again for release checks)
+// starved control requests during a producer burst (#343). Batch the same
+// relationships once. This view borrows state only while its caller holds q.mu;
+// it is discarded after projection, so mutations need no new index lifecycle.
+func (q *Queue) cancellationObservation() *Queue {
+	view := &Queue{s: q.s, cancellationMembersByParent: map[string][]*Job{}}
+	retained := make(map[string]*Job, len(q.s.Jobs))
+	dependents := map[string][]*Job{}
+	addDependent := func(j *Job) {
+		if j.Spec.After != nil {
+			parent := j.Spec.After.Job
+			dependents[parent] = append(dependents[parent], j)
+		}
+	}
+	for id, j := range q.s.Jobs {
+		retained[id] = j
+		addDependent(j)
+	}
+	for _, r := range q.s.Submissions {
+		if j := r.Job; j != nil && q.s.Jobs[j.ID] == nil {
+			addDependent(j)
+			if r.Kind == submissionBinding {
+				retained[r.JobID] = j
+			}
+		}
+	}
+	for id, j := range retained {
+		if j.FanOut == nil {
+			continue
+		}
+		members := make([]*Job, 0, len(j.FanOut.Children)+len(dependents[id]))
+		for _, childID := range j.FanOut.Children {
+			if child := retained[childID]; child != nil {
+				members = append(members, child)
+			}
+		}
+		view.cancellationMembersByParent[id] = append(members, dependents[id]...)
+	}
+	return view
+}
+
 func (q *Queue) jobReleasePending(j *Job) bool {
 	if j.Attempt > 0 && len(j.Copies) == 0 && !j.ReleaseConfirmed {
 		return true

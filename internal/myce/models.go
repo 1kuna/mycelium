@@ -467,7 +467,9 @@ func (q *Queue) maintainModels() {
 			c.Error = "unknown model"
 		}
 	}
-	for {
+	// With no calls there is no model demand to admit. The batch pass below
+	// still plans releases, without repeating the complete candidate scan.
+	for len(q.calls) > 0 {
 		var c *ModelCall
 		scan := q.placementScan()
 		candidates := map[string]*candidateSet{}
