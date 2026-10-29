@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -14,6 +15,43 @@ import (
 	"testing"
 	"time"
 )
+
+func TestProductionStartDeadlineQualifiedRouteDiagnostic(t *testing.T) {
+	q, clock, m, s := observationFixture(t)
+	decoy := cpuMachine("a-incompatible", "a-incompatible", "cpu", 8, 32)
+	decoy.CapabilityProfile.OS = "darwin"
+	check(t, q, decoy, nil)
+	if err := setMaintenance(t, q, decoy.ID, "drain"); err != nil {
+		t.Fatal(err)
+	}
+	// The only qualified route lacks RAM; the drained host cannot execute
+	// this extension and must not supply its startup failure explanation.
+	m.HostAvailableMemoryGB = .05
+	check(t, q, m, nil)
+	s.Priority = "production"
+	j := submit(t, q, s)
+	var logs bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previous) })
+	clock.Advance(ProductionStartTimeout)
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	failed := job(t, q, j.ID)
+	if failed.State != "failed" || failed.Attempt != 0 || !strings.Contains(failed.Reason, "waiting for RAM envelope: "+m.ID) || strings.Contains(failed.Reason, decoy.ID) {
+		t.Errorf("wrong startup diagnostic: %+v", failed)
+	}
+	if got := statusJobValue(failed); got.Reason != "production start deadline exceeded" {
+		t.Errorf("public reason leaked internal diagnostics: %q", got.Reason)
+	}
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	if got := logs.String(); strings.Count(got, "event=production_start_failed") != 1 || !strings.Contains(got, "job="+j.ID) || !strings.Contains(got, "attempt=0") || !strings.Contains(got, "waiting for RAM envelope: "+m.ID) || strings.Contains(got, decoy.ID) {
+		t.Errorf("missing or repeated deadline evidence: %s", got)
+	}
+}
 
 func TestProductionStartDeadlineDefault(t *testing.T) {
 	q, c := fixture(t)
