@@ -40,6 +40,9 @@ func TestExternalMemoryBucketingRetentionAndSuggestion(t *testing.T) {
 	}
 	clock.now = clock.now.Add(8 * 24 * time.Hour)
 	h = q.externalMemoryStatus("host")
+	if h.Week.Summary() != "unknown (no samples)" {
+		t.Fatal("missing samples displayed as measured", h)
+	}
 	if h.Week.Samples != 0 {
 		t.Fatal("offline samples did not expire", h)
 	}

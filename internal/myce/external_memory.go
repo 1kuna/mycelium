@@ -2,6 +2,7 @@ package myce
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"time"
 )
@@ -35,6 +36,15 @@ type ExternalMemoryWindow struct {
 	FirstAt time.Time `json:"first_bucket_at"`
 	LastAt  time.Time `json:"last_bucket_at"`
 }
+
+// Summary keeps missing observations visibly unknown in text status.
+func (w ExternalMemoryWindow) Summary() string {
+	if w.Samples == 0 {
+		return "unknown (no samples)"
+	}
+	return fmt.Sprintf("%.2f/%.2f/%.2f GiB (peak %s; %d samples)", w.P50GB, w.P95GB, w.MaxGB, w.PeakAt.Format(time.RFC3339), w.Samples)
+}
+
 type ExternalMemoryHistory struct {
 	Day  ExternalMemoryWindow `json:"24h"`
 	Week ExternalMemoryWindow `json:"7d"`

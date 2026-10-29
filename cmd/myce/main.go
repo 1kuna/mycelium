@@ -928,7 +928,7 @@ func printStatus(s myce.Snapshot, full bool) {
 			state += fmt.Sprintf("; host ceiling budget (last reported) %.3g GiB", m.HostMemoryBudgetGB)
 		}
 		if h := m.ExternalMemory; h != nil {
-			state += fmt.Sprintf("; non-Mycelium RAM 24h p50/p95/max %.2f/%.2f/%.2f GiB (peak %s), 7d %.2f/%.2f/%.2f GiB (peak %s)", h.Day.P50GB, h.Day.P95GB, h.Day.MaxGB, h.Day.PeakAt.Format(time.RFC3339), h.Week.P50GB, h.Week.P95GB, h.Week.MaxGB, h.Week.PeakAt.Format(time.RFC3339))
+			state += fmt.Sprintf("; non-Mycelium RAM 24h p50/p95/max %s; 7d %s", h.Day.Summary(), h.Week.Summary())
 		}
 		if over := m.HostMemoryBudgetStatus(); over != "" {
 			state += "; " + over
