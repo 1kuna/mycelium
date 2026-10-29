@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"net/http"
@@ -296,5 +297,42 @@ test "$failures" = 0 && echo isolation-passed
 	}
 	if _, err := os.Stat(filepath.Join(attack.job.Spec.Run.Workdir, ".tmp", "own")); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// #258: CoreFoundation initializes before Go's main in the CGO-linked helper.
+// With an empty inherited CF encoding, its user lookup needs notifyd and logd.
+func TestNativeIsolationCoreFoundationStartup(t *testing.T) {
+	if os.Getenv("MYCE_CF_STARTUP_HELPER") == "1" {
+		fmt.Println("core-foundation-started")
+		return
+	}
+	spool := t.TempDir()
+	work := filepath.Join(spool, "job-files", "startup", "1")
+	if err := os.MkdirAll(work, 0700); err != nil {
+		t.Fatal(err)
+	}
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Use the existing native readiness budget to bound a stuck loader. The
+	// child reports progress by reaching this test; no startup sleep is needed.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, executable, "-test.run=^TestNativeIsolationCoreFoundationStartup$")
+	cmd.Dir = work
+	env := jobBaseEnvironment()
+	env["TMPDIR"] = work
+	env["MYCE_CF_STARTUP_HELPER"] = "1"
+	env["MYCE_TEST_DOCKER_BIN"] = os.Getenv("MYCE_TEST_DOCKER_BIN")
+	env["MYCE_TEST_ISOLATED_HOME"] = work
+	env["GORACE"] = "atexit_sleep_ms=0"
+	if err := (Worker{}).isolateNativeCommand(cmd, spool, work, env, nil, false); err != nil {
+		t.Fatal(err)
+	}
+	output, err := cmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(output), "core-foundation-started") {
+		t.Fatalf("sandboxed CoreFoundation startup: %v (context: %v): %s", err, ctx.Err(), output)
 	}
 }
