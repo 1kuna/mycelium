@@ -125,41 +125,26 @@ func diskHeadroomReason(j *Job, m *Machine) string {
 	return ""
 }
 
-// Local readings bridge three heartbeats plus the sampling budget. Checkpoint
-// readings use measured progress (completion or pending-operation age), bounded
-// by the storage stall backstop rather than the nominal heartbeat cadence.
+// Capacity readings use measured progress, bounded by the storage stall
+// backstop rather than nominal heartbeat cadence. Busy workers can take several
+// seconds to report even successful local observations (#321).
 func (q *Queue) currentDiskVolume(v DiskVolume, receivedAt time.Time) DiskVolume {
-	interval := v.SampleIntervalSeconds
-	if interval <= 0 {
-		interval = 1
-	}
-	// Faster control ticks cannot shorten the bounded disk-observation cycle:
-	// four local probes plus one NAS probe can consume these existing budgets.
-	// Otherwise healthy readings expire during ordinary preparation/handoff.
-	samplingBudget := (4*localObservationBudget + heartbeatFilesystemBudget).Seconds()
-	interval = max(interval, samplingBudget)
-	// Workers timestamp before probing up to five roots, so a healthy sample
-	// can already be 850 ms old on receipt. Add that budget to three cycles
-	// to avoid false disk holds (3.85 s at a 1 s heartbeat), while still aging
-	// missing observations out after this bounded allowance.
-	window := 3*interval + samplingBudget
-	// SampledAt belongs to the worker clock. Age is measured there, then
-	// advanced only by queue time since receipt; clock skew cannot age a sample.
-	v.AgeSeconds = max(0, v.AgeSeconds) + max(0, q.clock.Now().Sub(receivedAt).Seconds())
-	expired := v.AgeSeconds > window
+	// SampledAt belongs to the worker clock. Advance its reported age only by
+	// queue time since receipt, so clock skew cannot age or renew a sample.
+	elapsed := max(0, q.clock.Now().Sub(receivedAt).Seconds())
+	v.AgeSeconds = max(0, v.AgeSeconds) + elapsed
+	age := v.AgeSeconds
 	if slices.Contains(v.Roots, "checkpoint") {
 		// A successful completion is progress too. Between observations there
 		// may be no pending metadata; the nominal three-cycle window can expire
 		// before a slow but working sampler reports again (#158, #234). Keep
 		// that reading until 30s without progress, regardless of heartbeat rate.
-		age := v.AgeSeconds
 		if v.ProbeAgeSeconds != nil && v.Retained {
-			age = max(0, *v.ProbeAgeSeconds) + max(0, q.clock.Now().Sub(receivedAt).Seconds())
+			age = max(0, *v.ProbeAgeSeconds) + elapsed
 			v.ProbeAgeSeconds = &age
 		}
-		expired = age >= checkpointAvailabilityStallBudget.Seconds()
 	}
-	if receivedAt.IsZero() || v.SampledAt.IsZero() || expired {
+	if receivedAt.IsZero() || v.SampledAt.IsZero() || age >= checkpointAvailabilityStallBudget.Seconds() {
 		v.Error = "disk reading unavailable"
 		v.Retained = false
 	}
