@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -228,23 +229,18 @@ func TestProductionStartDeadlineWorkerPreparationCannotLaunchLate(t *testing.T) 
 	defer store.close()
 	store.state.Session = assigned.Session
 	p, err := startAfterFixtureInputs(t, w, store, *assigned)
-	if err != nil {
-		t.Fatal(err)
+	// Custody reservation now refuses the expired assignment before a native
+	// supervisor exists, rather than returning a process for the later hand-off.
+	if p != nil || !errors.Is(err, errWorkerStartAuthorization) || !strings.Contains(err.Error(), "request_stale") {
+		t.Fatalf("late launch was not refused before execution: process=%v err=%v", p, err)
 	}
-	if p == nil {
-		t.Fatal("missing failed attempt")
-	}
-	select {
-	case f := <-p.done:
-		if f.result.Success || !strings.Contains(f.result.Error, "hand-off") {
-			t.Fatalf("late launch: %+v", f)
-		}
-	case <-time.After(testWaitTimeout):
-		t.Fatal("refused attempt stalled")
-	}
-	if _, err := os.Stat(filepath.Join(p.job.Spec.Run.Workdir, "started")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(w.StateDir, "job-files", assigned.ID, "1", "started")); !os.IsNotExist(err) {
 		t.Fatalf("command ran: %v", err)
 	}
+	if got := job(t, q, j.ID); got.StartedAt != nil {
+		t.Fatal("expired reservation retained start")
+	}
+
 	requireState(t, q, j.ID, "failed")
 	finish(t, q, assigned, false)
 }
