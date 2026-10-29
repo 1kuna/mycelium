@@ -220,12 +220,25 @@ func (q *Queue) touchSubmission(id string) *submissionRecord {
 		if _, ok := q.records.submissions[id]; !ok {
 			var old *submissionRecord
 			if r != nil {
-				data, _ := json.Marshal(r)
-				_ = json.Unmarshal(data, &old)
+				copy := *r // Metadata timestamps are replaced, never mutated in place.
+				copy.Job = nil
+				old = &copy
 			}
+			// Install the entry before touchJob: the two undo paths journal each
+			// other. A live job and its keyed answer share one owned snapshot,
+			// avoiding a second deep copy on every control transaction.
 			q.records.submissions[id] = old
-			if r != nil && q.s.Jobs[r.JobID] != nil {
-				q.touchJob(r.JobID)
+			if r != nil {
+				live := q.s.Jobs[r.JobID]
+				if live != nil {
+					q.touchJob(r.JobID)
+				}
+				if live != nil && r.Job == live {
+					old.Job = q.records.jobs[r.JobID]
+				} else if r.Job != nil {
+					copy := cloneJob(r.Job)
+					old.Job = &copy
+				}
 			}
 		}
 	}

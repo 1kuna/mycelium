@@ -201,7 +201,7 @@ func (q *Queue) capReasonFor(j *Job, target *Machine) string {
 
 func (q *Queue) batchCandidateWithResources(j *Job, m *Machine, resources map[batchResourceKey]batchResourceRoom) *Job {
 	if j.Spec.FanOut != nil {
-		return q.fanOutCandidate(j, m)
+		return q.fanOutCandidateWithResources(j, m, resources)
 	}
 	if j.State != "queued" || !q.placementAllowed(j, m) || !q.checkpointReady(j, m) {
 		return nil

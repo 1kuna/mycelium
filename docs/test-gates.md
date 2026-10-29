@@ -85,3 +85,24 @@ targets:
 Retain the other profile fields, then submit with
 `myce run --profile .reports/go-test-darwin.yaml -- -race ./...` from the repo root.
 Use separate submissions with distinct target lists for cross-platform proof.
+
+## Fan-out burst acceptance
+
+Run the real `myce dev` runtime burst separately from race instrumentation:
+
+```sh
+GOMAXPROCS=4 go test ./internal/myce -run '^TestDevFanOutBurst62RealTime$' -count=1 -v
+```
+
+This laptop test uses real HTTP, SQLite, CPU commands and heartbeats, with
+3,000 retained jobs (400 fan-out parents), concurrent status reads, and 62
+simultaneous keyed parent submissions. Nearest-rank p99 is the maximum of 62
+samples; all acknowledgements must be below 500ms. A running production command
+spans the burst and six subsequent seconds; no attempt may incur a loss and
+sampled accepted-heartbeat age must stay below the normal 5s quiet threshold.
+The synthetic extension explicitly uses the supported unsandboxed mode; native
+sandbox qualification remains separate. No fleet connection or GPU is needed.
+This performance test is excluded from `-race` builds: instrumented service cost
+is not release performance. Fake-clock loss and scope regressions still run
+under race in quick/full gates. Run this acceptance alongside quick when changing
+fan-out/control-path performance, and before a hotfix claims the burst target.

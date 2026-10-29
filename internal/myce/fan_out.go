@@ -232,6 +232,10 @@ func (q *Queue) fanOutComponents(j *Job) ([]batchComponent, map[string]*Job) {
 }
 
 func (q *Queue) fanOutCandidate(j *Job, m *Machine) *Job {
+	return q.fanOutCandidateWithResources(j, m, nil)
+}
+
+func (q *Queue) fanOutCandidateWithResources(j *Job, m *Machine, resources map[batchResourceKey]batchResourceRoom) *Job {
 	if j.State != "queued" || absoluteStartBy(j) && expired(j.Spec.StartBy, q.clock.Now()) || !dependencyReady(j) || cancelled(j) || j.FanOut == nil || j.FanOut.Next >= len(j.Spec.FanOut.Pieces) || !q.placementAllowed(j, m) || !q.checkpointReady(j, m) {
 		return nil
 	}
@@ -266,7 +270,7 @@ func (q *Queue) fanOutCandidate(j *Job, m *Machine) *Job {
 	for _, candidate := range extensionJobs(q.fanOutTemplate(j), m, true) {
 		q.applyLearnedNeeds(candidate)
 		candidate = q.memoryCandidate(candidate, m)
-		if q.capReasonFor(candidate, m) == "" && q.batchResourcesFit(candidate, m) {
+		if q.capReasonFor(candidate, m) == "" && q.batchResourcesFitWithScan(candidate, m, resources) {
 			candidate.Spec.FanOut = j.Spec.FanOut
 			candidate.FanOut = j.FanOut
 			candidate.Batch = &BatchWork{Parent: j.ID, Pieces: []FanOutPiece{j.Spec.FanOut.Pieces[j.FanOut.Next]}, Concurrency: 1}
