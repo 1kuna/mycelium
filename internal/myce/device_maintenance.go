@@ -147,7 +147,7 @@ func (q *Queue) maintainDeviceMaintenance() {
 	}
 }
 
-func (a API) registerDeviceMaintenance(mux *http.ServeMux) {
+func (a API) registerDeviceMaintenance(mux *requestMux) {
 	mux.HandleFunc("POST /api/hosts/{id}/devices/maintenance", func(w http.ResponseWriter, r *http.Request) {
 		var request DeviceMaintenanceRequest
 		if !decode(w, r, &request) {
