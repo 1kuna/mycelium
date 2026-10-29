@@ -1,6 +1,8 @@
 package myce
 
 import (
+	"bytes"
+	"context"
 	"fmt"
 	"maps"
 	"os"
@@ -143,10 +145,19 @@ int main(void) {
 		if step.root != "" {
 			bindEnvironment(env, step.root)
 		}
-		cmd := exec.Command(program)
-		cmd.Env = cleanExtensionEnv(env)
-		if b, err := cmd.CombinedOutput(); err != nil || string(b) != step.want {
-			t.Errorf("root %s: loader output %q, want %q: %v", step.root, b, step.want, err)
+		var output bytes.Buffer
+		var err error
+		if step.root == "" {
+			cmd := exec.Command(program)
+			cmd.Env = cleanExtensionEnv(env)
+			cmd.Stdout, cmd.Stderr = &output, &output
+			err = cmd.Run()
+		} else {
+			// Include Mycelium's real protected-shell supervisor in the proof.
+			err = runExtensionCommand(context.Background(), []string{program}, work, env, &output)
+		}
+		if err != nil || output.String() != step.want {
+			t.Errorf("root %s: loader output %q, want %q: %v", step.root, output.String(), step.want, err)
 		}
 	}
 }

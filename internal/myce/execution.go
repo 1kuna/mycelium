@@ -274,6 +274,29 @@ func prependEnvironmentLibraries(env map[string]string, root string) {
 	}
 }
 
+// macOS strips DYLD_* when the protected shell supervisor starts. Restore only
+// a bound environment's loader paths after that shell, using literal argv.
+func environmentCommand(argv, environ []string) []string {
+	if runtime.GOOS != "darwin" {
+		return argv
+	}
+	values := map[string]string{}
+	for _, entry := range environ {
+		key, value, _ := strings.Cut(entry, "=")
+		values[key] = value
+	}
+	if values["MYCE_ENVIRONMENT_DIR"] == "" {
+		return argv
+	}
+	wrapped := []string{"/usr/bin/env"}
+	for _, key := range environmentLibraryVariables() {
+		if value, ok := values[key]; ok {
+			wrapped = append(wrapped, key+"="+value)
+		}
+	}
+	return append(wrapped, argv...)
+}
+
 // Member ceilings fit the whole simultaneous host envelope; they are not extra
 // reservations or a sum of independent peaks.
 func validateNativeMemory(s *Spec) error {

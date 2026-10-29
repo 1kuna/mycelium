@@ -294,7 +294,11 @@ when absent; Mycelium does not recursively discover package-specific directories
 On Linux this sets `LD_LIBRARY_PATH`. On Darwin it sets `DYLD_LIBRARY_PATH`
 and prepends to `DYLD_FALLBACK_LIBRARY_PATH` only when explicitly supplied,
 leaving dyld's default fallback intact otherwise. Darwin's loader rules still apply, including
-SIP stripping `DYLD_*` when launching protected system executables. Mycelium does
+SIP stripping `DYLD_*` when launching protected system executables. For a bound
+environment, Mycelium restores these two loader variables with `/usr/bin/env`
+after its shell supervisor, before executing the payload. A payload that launches
+another protected executable (including a system-shell script) may lose them
+again and must use a suitable interpreter or wrapper. Mycelium does
 not forward ambient worker `DYLD_*` variables. It does not alter `LIBRARY_PATH`,
 which is a compiler/linker search path, rather than a dynamic-loader control.
 

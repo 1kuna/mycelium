@@ -650,6 +650,7 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 		env["MYCE_MEMORY_LIMIT_BYTES"] = strconv.FormatInt(m.memory.bytes, 10)
 	}
 	cmd.Env = environmentList(env)
+	cmd.Args = append(slices.Clone(cmd.Args[:4]), environmentCommand(cmd.Args[4:], cmd.Env)...)
 	if err := g.metricWorker().isolateNativeAttempt(&g.p.job, g.namespace, cmd, g.dir, work, env, g.isolationPorts, m.Name == "main"); err != nil {
 		return err
 	}
@@ -883,7 +884,9 @@ func (g *nativeGroup) run(j Job, base map[string]string, mainEnvironment string,
 		return err, !stopped || g.independentMemberFailure()
 	}
 	replace := replacer()
-	for k, v := range j.Spec.Run.Env {
+	// Expand the effective values: reapplying authored bytes here would undo
+	// environment binding (including library precedence and pixi activation).
+	for k, v := range env {
 		env[k] = replace.Replace(v)
 	}
 	main := g.members[len(g.members)-1]
