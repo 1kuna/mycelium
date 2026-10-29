@@ -378,7 +378,14 @@ func waitWorkerGroup(group int, clock Clock) error {
 		<-wake.C
 	}
 }
-func (s *workerStore) cleanupOrphan(clock Clock, memoryFiles ...memoryFS) (cleanupErr error) {
+func (s *workerStore) cleanupOrphan(clock Clock, memoryFiles ...memoryFS) error {
+	return s.cleanupOrphanCustody(clock, false, memoryFiles...)
+}
+
+// A preparation helper has an explicit outstanding release obligation. Unlike
+// an unrelated reused PID in ordinary orphan discovery, a live unidentifiable
+// helper group cannot be treated as proof of exit.
+func (s *workerStore) cleanupOrphanCustody(clock Clock, requireHelperExit bool, memoryFiles ...memoryFS) (cleanupErr error) {
 	defer func() {
 		if cleanupErr == nil {
 			s.releaseSharedInputs()
@@ -499,10 +506,10 @@ func (s *workerStore) cleanupOrphan(clock Clock, memoryFiles ...memoryFS) (clean
 			return err
 		}
 	}
+	if requireHelperExit && !owned && len(members) > 0 {
+		return errors.New("helper process group identity unconfirmed; release pending")
+	}
 	if !owned && memory == nil {
-		if len(members) > 0 {
-			return errors.New("helper process group identity unconfirmed; release pending")
-		}
 		return nil
 	}
 	if (s.state.Accelerator || s.state.Job != nil && !s.state.Job.Spec.Needs.cpuOnly()) && !s.state.UserCancel {

@@ -1089,7 +1089,7 @@ func (c *EnvironmentCache) cleanupBuild(path string) error {
 		return e
 	}
 	store := workerStore{state: state}
-	return store.cleanupOrphan(c.Clock)
+	return store.cleanupOrphanCustody(c.Clock, true)
 }
 func (c *EnvironmentCache) runBuild(ctx context.Context, argv []string, dir string, env []string, stdout, stderr io.Writer) error {
 	if len(argv) > 0 && (argv[0] == "uv" || argv[0] == "pixi") {
