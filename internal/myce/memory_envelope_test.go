@@ -959,3 +959,118 @@ func TestMemoryEnvelopePerItemProfile(t *testing.T) {
 		t.Fatalf("changed profile reused old memory: %+v", j)
 	}
 }
+
+// #303: the enforced parent charges file-backed memory too. Resident-only
+// headroom reserved less than an already measured total, then accepted the
+// ceiling-bound successor because its resident peak stayed near 80% of the cap.
+func TestMemoryEnvelopeTotalPeakAndFileBackedPressure(t *testing.T) {
+	q, clock, m, s := observationFixture(t)
+	m.HostMemoryMeasured, m.HostAvailableMemoryGB = true, 32
+	s.Needs.Memory = "auto"
+	first := startObservation(t, q, m, s)
+	clock.Advance(time.Second)
+	host, total := 8.0, 12.0
+	r := result(&first, true)
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, CgroupGB: &total}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	bound := startObservation(t, q, m, s)
+	if bound.MemoryEnvelope.Source != "accepted peak × 1.25" || bound.MemoryEnvelope.HostGB != 15 {
+		t.Errorf("envelope below measured total with headroom: %+v", bound.MemoryEnvelope)
+	}
+	clock.Advance(time.Second)
+	total = bound.MemoryEnvelope.HostGB
+	r = result(&bound, true)
+	// An older worker can send max events with Constrained still false.
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, CgroupGB: &total, Events: &MemoryEventCounts{Max: 2004}}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	if job(t, q, bound.ID).State != "succeeded" {
+		t.Fatal("pressure changed successful outcome")
+	}
+	next := startObservation(t, q, m, s)
+	if next.MemoryEnvelope.Source != "exploratory (previous peak constrained)" {
+		t.Errorf("ceiling pressure remained accepted: %+v", next.MemoryEnvelope)
+	}
+	for _, point := range q.s.WorkObservations {
+		if !point.MemoryRecordedAt.IsZero() || point.Forbidden || !validRate(point.Rate) {
+			t.Errorf("pressure must invalidate only memory, retaining throughput: %+v", point)
+		}
+	}
+	clock.Advance(time.Second)
+	r = result(&next, true)
+	total = 12
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, CgroupGB: &total, Events: &MemoryEventCounts{}}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	relearned := startObservation(t, q, m, s)
+	if relearned.MemoryEnvelope.Source != "accepted peak × 1.25" || relearned.MemoryEnvelope.HostGB != 15 {
+		t.Errorf("unconstrained exploration did not re-teach total peak: %+v", relearned.MemoryEnvelope)
+	}
+}
+
+func TestMemoryEnvelopeStoredFileBackedPressure(t *testing.T) {
+	q, clock, m, s := observationFixture(t)
+	m.HostMemoryMeasured, m.HostAvailableMemoryGB = true, 32
+	s.Needs.Memory = "auto"
+	first := startObservation(t, q, m, s)
+	clock.Advance(time.Second)
+	host, total := 8.0, 10.0
+	r := result(&first, true)
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, CgroupGB: &total}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	// Model the persisted curve accepted by the previous resident-only rule.
+	for id, point := range q.s.WorkObservations {
+		point.MemoryPeak.Events = &MemoryEventCounts{Max: 2004}
+		q.s.WorkObservations[id] = point
+	}
+	next := startObservation(t, q, m, s)
+	if next.MemoryEnvelope.Source != "exploratory (previous peak constrained)" {
+		t.Errorf("stored cap-bound curve was reused: %+v", next.MemoryEnvelope)
+	}
+	clock.Advance(time.Second)
+	r = result(&next, true)
+	total = 12
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, CgroupGB: &total, Events: &MemoryEventCounts{}}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	relearned := startObservation(t, q, m, s)
+	if relearned.MemoryEnvelope.Source != "accepted peak × 1.25" || relearned.MemoryEnvelope.HostGB != 15 {
+		t.Errorf("stored pressure poisoned fresh learning: %+v", relearned.MemoryEnvelope)
+	}
+}
+
+func TestMemoryEnvelopeTotalPeakKeepsDeviceSeparate(t *testing.T) {
+	q, clock, m, s := unifiedAutoFixture(t, 0)
+	start := func() *Job {
+		t.Helper()
+		queued := submit(t, q, s)
+		j := assignedJob(machineCheck(t, q, m))
+		if j == nil || j.ID != queued.ID {
+			t.Fatalf("not assigned: %+v", job(t, q, queued.ID))
+		}
+		if err := q.Started(result(j, false)); err != nil {
+			t.Fatal(err)
+		}
+		return j
+	}
+	first := start()
+	clock.Advance(time.Second)
+	host, total, device := 8.0, 12.0, 4.0
+	r := result(first, true)
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, CgroupGB: &total, DeviceGB: &device}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	next := start()
+	// Unified accounting still adds the separate device reservation and slack.
+	if next.MemoryEnvelope.Source != "accepted peak × 1.25" || next.Spec.Needs.HostMemoryGB != 15 || next.Spec.Needs.MemoryGB != 5 || next.MemoryEnvelope.HostGB != 20.125 {
+		t.Fatalf("total host/device peaks mixed: %+v; %+v", next.MemoryEnvelope, next.Spec.Needs)
+	}
+}

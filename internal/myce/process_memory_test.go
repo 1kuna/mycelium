@@ -204,9 +204,9 @@ func TestAttemptMemoryEventCountsPersist(t *testing.T) {
 		}
 		return j
 	}
-	// Low resident use with cache reclaim is learned, with its counts.
-	complete("low 0\nhigh 0\nmax 3\noom 0\noom_kill 0\noom_group_kill 0\n")
-	if data := stored(); !strings.Contains(data, `"events":{"high":0,"max":3,"oom":0,"oom_kill":0,"oom_group_kill":0}`) || strings.Contains(data, `"constrained":true`) {
+	// Unpressured samples remain learnable, with read zero counts retained.
+	complete("low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\n")
+	if data := stored(); !strings.Contains(data, `"events":{"high":0,"max":0,"oom":0,"oom_kill":0,"oom_group_kill":0}`) || strings.Contains(data, `"constrained":true`) {
 		t.Fatalf("accepted peak lost its event counts: %s", data)
 	}
 	// Status must show the memory-only curve's observed peak, rather than its
@@ -219,7 +219,7 @@ func TestAttemptMemoryEventCountsPersist(t *testing.T) {
 		t.Fatalf("status lost memory-only curve: %+v", snap.WorkCurves)
 	}
 	point := snap.WorkCurves[0]
-	if point.MemoryPeak == nil || point.MemoryPeak.Events == nil || point.MemoryPeak.Events.Max != 3 || point.HostMemoryGB != 0 || point.DeviceMemoryGB != 0 || !strings.Contains(point.Summary(), "peak host/device 1.00/0.00 GiB") {
+	if point.MemoryPeak == nil || point.MemoryPeak.Events == nil || point.MemoryPeak.Events.Max != 0 || point.HostMemoryGB != 0 || point.DeviceMemoryGB != 0 || !strings.Contains(point.Summary(), "peak host/device 1.00/0.00 GiB") {
 		t.Fatalf("status lost memory-only facts: %+v; %s", point, point.Summary())
 	}
 	write("memory.stat", "anon 2684354560\nkernel 0\nshmem 0\n")

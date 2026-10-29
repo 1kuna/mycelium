@@ -165,8 +165,13 @@ func TestMemoryReviewReclaimableCache(t *testing.T) {
 		}
 	}
 	p := a.peak()
-	if p == nil || p.HostGB == nil || *p.HostGB != 2 || p.Constrained {
-		t.Fatalf("reclaimable cache inflated or invalidated resident peak: %+v", p)
+	// #303 supersedes the low-resident cache exception: total pressure can
+	// hide a file-backed working set even though the resident counter stays low.
+	if p == nil || p.HostGB == nil || *p.HostGB != 2 || !p.Constrained {
+		t.Fatalf("resident counter changed or file-backed pressure was accepted: %+v", p)
+	}
+	if err := os.WriteFile(filepath.Join(a.path, "memory.events"), []byte("max 0\noom 0\noom_kill 0\n"), 0600); err != nil {
+		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(a.path, "memory.stat"), []byte("anon 1073741824\nkernel 0\nshmem 0\nworkingset_refault_anon 1\n"), 0600); err != nil {
 		t.Fatal(err)

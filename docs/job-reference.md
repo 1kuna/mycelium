@@ -795,10 +795,11 @@ files. Job GET replies continue to omit extension payloads.
 
 Native main and sidecars share one Linux attempt cgroup. Sidecar `memory_gb`
 and main `run.memory_gb` are optional additional member caps; omit them to let
-members share the job envelope. Learn sampled whole-group anon + kernel + shmem
-from `memory.stat` every 200 ms, excluding reclaimable file cache; `memory.peak` remains a
-total-memory diagnostic. macOS remains admission-only and does not promise a kernel
-RAM ceiling. There, the worker learns the summed RSS of the attempt's process
+members share the job envelope. Sample whole-group anon + kernel + shmem
+from `memory.stat` every 200 ms and retain the total `memory.peak`. Learned host
+reservations use the larger resident/total peak with the existing headroom factor,
+including file-backed memory charged to the enforced parent. macOS remains
+admission-only and does not promise a kernel RAM ceiling. There, the worker learns the summed RSS of the attempt's process
 groups every 500 ms (single-command jobs: at least main's exit max RSS), recorded
 as unenforced evidence. It omits compressed pages and members that left the group,
 so it can read low. It is never marked constrained and never invalidates learned
@@ -858,11 +859,11 @@ The existing driver/system reserve and attempt slack still apply. Measurements
 never override an existing attempt or opt an explicitly declared job into auto.
 Resumed attempts may use accepted estimates but do not train them. Peaks are
 constrained by OOM, swap-out or anonymous workingset refault. `memory.events`
-`max > 0` or `high > 0` also constrains a peak when sampled anon + kernel +
-shmem reaches at least 90% of the parent's or a member's own cap. Healthy learned
-reuse sits near 80% (1 / 1.25); 90% distinguishes binding resident pressure from
-ordinary file-cache reclaim. Low resident use remains learnable with `max` hits.
-Ceiling-bound peaks
+`max > 0` or `high > 0` also constrains a peak, including capped-member pressure
+and file-backed working sets with low resident-only use. Older-worker results
+and stored curves with these counters cannot supply accepted memory estimates.
+This supersedes #184's cache exception; file-heavy jobs may reserve more or
+explore again to avoid repeatedly learning a binding ceiling. Ceiling-bound peaks
 from explicit-memory runs cannot seed auto estimates. An auto OOM or constrained
 attempt clears comparable learned memory across machines without forbidding the
 work. For a measured-need run, submit the same comparable work with `memory: auto`

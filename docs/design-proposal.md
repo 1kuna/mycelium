@@ -2073,18 +2073,24 @@ never stand in for measured device peaks. Member caps are optional; explicit
 caps remain supported and fit the job envelope.
 
 Linux native attempts use their existing shared parent cgroup for main and all
-sidecars, bounded/zero swap and a job OOM cause. Learn the sampled whole-parent
-anon + kernel + shmem peak from `memory.stat` every 200 ms; retain `memory.peak`
-only as a total-memory diagnostic, since it includes reclaimable page cache. OOM,
-swap-out and anonymous workingset refault mark measurements constrained.
-`memory.events` reporting `max > 0` or `high > 0` also constrains a measurement
-when sampled anon + kernel + shmem reaches at least 90% of that cgroup's own
-ceiling. The 1.25× learned headroom puts healthy resident use near 80%; 90% is
-the midpoint between healthy reuse and saturation. Check capped members against
-their own ceilings as well as the parent. File-cache reclaim with low resident
-use remains learnable even with `max` events. This excludes ceiling-bound peaks
-from explicit-memory runs: they cannot seed an auto estimate. Explicit memory
-admission and outcomes otherwise retain their existing behavior.
+sidecars, bounded/zero swap and a job OOM cause. Sample whole-parent
+anon + kernel + shmem from `memory.stat` every 200 ms and retain the kernel's
+total high-water mark from `memory.peak`. Learned host reservations use the larger
+resident/total peak with the existing headroom factor: the enforced parent
+charges file-backed memory too. Device peaks remain separate, with the existing
+conservative host-plus-device accounting on unified devices.
+
+The ceiling-bound-envelope correction (#303, maintainer debugging assignment,
+2026-10-29) supersedes #184's low-resident file-cache exception. OOM, swap-out,
+anonymous workingset refault, or any `memory.events` `max > 0` / `high > 0`
+constrains the measurement, including pressure in capped members. A pressured
+sample cannot establish true need even when its resident-only peak stays low.
+The queue applies this rule to older-worker results and excludes already-stored
+pressure evidence from estimates. Successful unconstrained exploration can
+re-teach the peak. File-heavy jobs can therefore reserve more memory or explore
+again; this cost buys headroom over the measured total instead of repeatedly
+learning a binding ceiling. Ceiling-bound explicit-memory runs cannot seed an
+auto estimate. Explicit admission and job outcomes retain their existing behavior.
 The attempt's `memory.events` max/high/OOM counts are kept beside its peak;
 absent counts mean they were not read, not zero.
 Workers without cgroups (macOS) learn the summed RSS of the attempt's process

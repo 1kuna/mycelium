@@ -1435,6 +1435,11 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 	return rejected
 }
 func (q *Queue) complete(r Result, filesVerified bool) error {
+	if r.MemoryPeak.constrained() && !r.MemoryPeak.Constrained {
+		peak := *r.MemoryPeak
+		peak.Constrained = true
+		r.MemoryPeak = &peak
+	}
 	q.maintainStartDeadlines()
 	q.maintainExtensionQualifications()
 	operatorMatched := q.refundOperatorStop(r)

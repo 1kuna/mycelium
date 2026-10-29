@@ -41,11 +41,9 @@ func (a *memoryAttempt) peak() *AttemptMemoryPeak {
 	if b, err := a.fs.ReadFile(filepath.Join(a.path, "memory.events")); err == nil {
 		events := memoryCounters(b)
 		p.Events = &MemoryEventCounts{High: events["high"], Max: events["max"], OOM: events["oom"], OOMKill: events["oom_kill"], OOMGroupKill: events["oom_group_kill"]}
-		// Learned envelopes add 1.25x headroom, so healthy resident use is
-		// about 80% of the cap. Use the midpoint to saturation (90%) to
-		// distinguish binding resident pressure from ordinary file-cache reclaim.
-		nearCeiling := a.bytes > 0 && p.HostGB != nil && *p.HostGB*(1<<30) >= .9*float64(a.bytes)
-		p.Constrained = p.Constrained || nearCeiling && (events["max"] > 0 || events["high"] > 0) || events["oom"] > 0 || events["oom_kill"] > 0 || events["oom_group_kill"] > 0
+		// File-backed working sets can bind while resident-only samples retain
+		// apparent headroom. Any max/high pressure makes true need unknown.
+		p.Constrained = p.constrained() || events["oom"] > 0 || events["oom_kill"] > 0 || events["oom_group_kill"] > 0
 	}
 	for _, name := range []string{"memory.swap.peak", "memory.swap.current"} {
 		if b, err := a.fs.ReadFile(filepath.Join(a.path, name)); err == nil {
