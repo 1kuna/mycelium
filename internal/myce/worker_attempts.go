@@ -212,7 +212,9 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			path := attemptCheckpoint(a.job)
 			var err error
 			report.Progress, err = s.nasProgress.run(path, func() (int64, error) { return checkpointProgress(path) })
-			if err != nil && !errors.Is(err, os.ErrNotExist) {
+			// A scan still waiting on NAS I/O is not a completed storage
+			// failure. The independent root probe fences actual root stalls.
+			if err != nil && !errors.Is(err, os.ErrNotExist) && !errors.Is(err, errCheckpointIOPending) {
 				diagnostics.CheckpointUnavailable = true
 			}
 		}
