@@ -62,6 +62,8 @@ type state struct {
 	LastWorkerContact time.Time `json:"last_worker_contact,omitempty"`
 	NetworkRecoveryAt time.Time `json:"network_recovery_at,omitempty"`
 
+	DeviceMaintenance map[string]map[string]DeviceMaintenance `json:"device_maintenance,omitempty"`
+
 	Schema           int                        `json:"schema_version"`
 	PreparationPlans map[string]HostLaunch      `json:"preparation_plans,omitempty"`
 	HostMaintenance  map[string]HostMaintenance `json:"host_maintenance,omitempty"`
@@ -823,6 +825,7 @@ func (q *Queue) maintain() {
 	q.maintainPieceDependencies()
 	q.maintainFileExpiry()
 	q.maintainHostMaintenance()
+	q.maintainDeviceMaintenance()
 	q.maintainExtensionQualifications()
 	q.maintainSubmissions()
 	now := q.clock.Now()
@@ -1751,6 +1754,7 @@ func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
 	out.HostStates = make(map[string]string, len(hosts))
 	for host, hasMachine := range hosts {
 		out.HostStates[host] = q.hostMaintenanceStatus(host).State
+		out.DeviceMaintenance = append(out.DeviceMaintenance, q.deviceMaintenanceStatus(host)...)
 		if !hasMachine {
 			if detail := q.dockerHoldDetail(host); detail.Text != "" {
 				out.HoldsDetail = append(out.HoldsDetail, detail)
@@ -1763,6 +1767,9 @@ func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
 			out.HoldsDetail = append(out.HoldsDetail, HoldDetail{Host: host, Kind: "host_disabled", Text: "host " + host + " disabled by operator"})
 		}
 	}
+	slices.SortFunc(out.DeviceMaintenance, func(a, b DeviceMaintenance) int {
+		return strings.Compare(a.Host+"/"+deviceMaintenanceKey(a.Platform, a.Identity), b.Host+"/"+deviceMaintenanceKey(b.Platform, b.Identity))
+	})
 	sort.Strings(out.HostHolds)
 	sort.Slice(out.HoldsDetail, func(i, j int) bool {
 		a, b := out.HoldsDetail[i], out.HoldsDetail[j]

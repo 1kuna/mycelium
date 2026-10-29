@@ -105,7 +105,7 @@ func (q *Queue) AuthorizeLaunch(l HostLaunch) error {
 		}
 		if l.Kind == "engine" {
 			s := q.s.ModelSlots[slotKey(l.Machine, l.Key, l.Device)]
-			if s == nil || s.Session != l.Session || s.Attempt != l.Attempt || s.State != "loading" {
+			if s == nil || s.Session != l.Session || s.Attempt != l.Attempt || s.State != "loading" || q.deviceAdmissionBlocked(allocationMachine(q.s.Machines[l.Machine], []string{l.Device})) {
 				reject("engine_custody")
 			}
 			return nil
@@ -116,6 +116,10 @@ func (q *Queue) AuthorizeLaunch(l HostLaunch) error {
 			return nil
 		}
 		m := q.s.Machines[l.Machine]
+		if !p.Started && p.Device != "" && q.deviceAdmissionBlocked(allocationMachine(m, []string{p.Device})) {
+			reject("device_admission")
+			return nil
+		}
 		if l.Kind == "benchmark" && !q.benchmarkIdle(m) {
 			reject("benchmark_busy")
 			return nil
