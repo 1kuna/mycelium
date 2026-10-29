@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -169,6 +170,19 @@ func TestStartWindowFanOutWaitsForFirstAssignment(t *testing.T) {
 				t.Fatalf("assigned child escaped its launch cutoff: %+v", got)
 			}
 		})
+	}
+}
+
+func TestStartWindowFanOutDisabledFleetFailsPromptly(t *testing.T) {
+	q, clock, m, s := fanOutFixture(t, 1)
+	if err := setMaintenance(t, q, hostID(&m), "disable"); err != nil {
+		t.Fatal(err)
+	}
+	s.Priority = "production"
+	parent := submit(t, q, s)
+	got := job(t, q, parent.ID)
+	if got.State != "failed" || !strings.Contains(got.Reason, "no eligible host is enabled") || got.Attempt != 0 || !got.FinishedAt.Equal(clock.Now()) {
+		t.Fatalf("disabled-only fleet did not reject unassigned fan-out immediately: %+v", got)
 	}
 }
 
