@@ -18,9 +18,10 @@ type PriorityTier struct {
 	Selectors []string `json:"selectors" yaml:"selectors"`
 }
 type PriorityPolicy struct {
-	Version  int                      `json:"version" yaml:"version"`
-	Tiers    []PriorityTier           `json:"tiers" yaml:"tiers"`
-	Projects map[string]ProjectPolicy `json:"projects,omitempty" yaml:"projects,omitempty"`
+	Version int            `json:"version" yaml:"version"`
+	Tiers   []PriorityTier `json:"tiers" yaml:"tiers"`
+	// Keep an explicit empty map on the wire: nil preserves settings, {} clears them.
+	Projects map[string]ProjectPolicy `json:"projects" yaml:"projects"`
 }
 type PriorityPolicyRecord struct {
 	Revision uint64         `json:"revision" yaml:"revision"`

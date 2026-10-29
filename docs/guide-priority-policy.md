@@ -23,6 +23,7 @@ projects:
 The optional `projects` mapping uses the existing project settings, including
 weights, allowed machines and experiment caps. Omitted weights default to one.
 Omitting `projects` preserves existing settings; supplying it replaces the map.
+An explicit `projects: {}` clears all project settings and is retained by exports.
 There is no second project priority store. `queue --project-config` and
 `dev --project-config` seed settings only when no policy has been stored. Once
 stored, the live SQLite policy is authoritative: restarting or reinstalling with
