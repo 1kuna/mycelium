@@ -768,6 +768,15 @@
         "reason": {
           "type": "string"
         },
+        "requirement_reasons": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": [
+            "object",
+            "null"
+          ]
+        },
         "resumable": {
           "type": "boolean"
         },

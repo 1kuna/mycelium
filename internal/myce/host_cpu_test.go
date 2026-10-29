@@ -133,8 +133,8 @@ func TestCPUAdmissionUnknownCapacityAndOwnerReserve(t *testing.T) {
 		ram                    bool
 	}{
 		{"unknown", "linux", "logical CPU capacity unavailable", 0, 0, 0, true},
-		{"reserve", "linux", "1 cores free of 1 admitted", 4, 3, 0, true},
-		{"allowance", "darwin", "1 cores free of 1 admitted", 8, 1, 1, true},
+		{"reserve", "linux", "1 cores unreserved of 1 admitted", 4, 3, 0, true},
+		{"allowance", "darwin", "1 cores unreserved of 1 admitted", 8, 1, 1, true},
 		{"unsupported", "windows", "CPU execution requires Linux or macOS", 8, 0, 0, true},
 		{"RAM unknown", "linux", "RAM", 8, 0, 0, false},
 	} {
@@ -514,7 +514,7 @@ func TestCPUStatusNamesCoresInsteadOfAcceleratorMemory(t *testing.T) {
 	m := cpuMachine("cpu", "host", "cpu", 8, 16)
 	m.CPUReserveCores = 1
 	m.EffectiveCPUCores, m.FreeCPUCores = 7, 7
-	if got := strings.Join(CapabilityProfileLines(&m), "\n"); !strings.Contains(got, "7 free / 7 admitted") || strings.Contains(got, "accelerator measurements not reported") {
+	if got := strings.Join(CapabilityProfileLines(&m), "\n"); !strings.Contains(got, "7 unreserved / 7 admitted") || strings.Contains(got, "accelerator measurements not reported") {
 		t.Fatal(got)
 	}
 	if resourceWords("cpu") != "CPU" {

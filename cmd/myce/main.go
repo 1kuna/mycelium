@@ -71,7 +71,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 
 	if len(args) == 0 {
-		return errors.New("usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|run|profile|submit|policy|status|logs|ledger|wait|result|cancel|resolve-native|resolve-docker|reconcile-docker-retention|dev|version|release|file|benchmark|extension|sim|detect|service|measure|model|usage\n       myce host drain|disable|resume|status|budget|placement HOST\n       myce host device disable|enable HOST DEVICE\nRun myce COMMAND --help for command options.")
+		return errors.New("usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|exclude|run|profile|submit|policy|status|logs|ledger|wait|result|cancel|resolve-native|resolve-docker|reconcile-docker-retention|dev|version|release|file|benchmark|extension|portability|sim|detect|service|measure|model|usage\n       myce host drain|disable|resume|status|budget|placement HOST\n       myce host device disable|enable HOST DEVICE\nRun myce COMMAND --help for command options.")
 	}
 	if args[0] == "dev" && len(args) > 1 && args[1] == "clock" {
 		return devClockCommand(args[2:], os.Stdout)
@@ -100,6 +100,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if args[0] == "policy" {
 		return policyCommand(args[1:], os.Stdout)
 	}
+	if args[0] == "portability" {
+		return portabilityCommand(context.Background(), args[1:], os.Stdout)
+	}
 	if args[0] == "adapter" {
 		return adapterCommand(context.Background(), args[1:], os.Stdout, os.Stderr)
 	}
@@ -108,6 +111,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 	if args[0] == "device" {
 		return deviceCommand(args[1:], os.Stdout)
+	}
+	if args[0] == "exclude" {
+		return excludeCommand(context.Background(), args[1:], os.Stdout)
 	}
 	if args[0] == "host" {
 		return hostMaintenanceCommand(context.Background(), args[1:], os.Stdout)
@@ -874,6 +880,11 @@ func printStatus(s myce.Snapshot, full bool) {
 	for _, host := range slices.Sorted(maps.Keys(s.HostStates)) {
 		fmt.Printf("host %s: %s\n", host, s.HostStates[host])
 	}
+	for _, p := range s.ComponentExclusions {
+		if p.Active {
+			fmt.Printf("exclusion %s: set by %s since %s; reason=%q\n", p.Selector, p.SetBy, p.UpdatedAt.UTC().Format(time.RFC3339Nano), p.Reason)
+		}
+	}
 	for _, d := range s.DeviceMaintenance {
 		if d.Disabled {
 			fmt.Printf("host %s device %s (%s): disabled by operator since %s; reason=%q\n", d.Host, d.Identity, d.Platform, d.UpdatedAt.UTC().Format(time.RFC3339Nano), d.Reason)
@@ -920,7 +931,7 @@ func printStatus(s myce.Snapshot, full bool) {
 			state += "; " + over
 		}
 		if m.CapabilityProfile != nil {
-			state += fmt.Sprintf("; CPU %d/%d cores free (reserve %d)", m.FreeCPUCores, m.EffectiveCPUCores, m.CPUReserveCores)
+			state += fmt.Sprintf("; CPU %d/%d cores unreserved (owner reserve %d; utilization unknown)", m.FreeCPUCores, m.EffectiveCPUCores, m.CPUReserveCores)
 		}
 		if m.CPUCapacityReason != "" {
 			state += "; " + m.CPUCapacityReason

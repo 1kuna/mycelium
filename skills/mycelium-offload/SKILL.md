@@ -9,6 +9,19 @@ Run heavy commands from the project root with `myce run --profile NAME`.
 Mycelium chooses placement. Small reads and a targeted test can stay local;
 queue or capacity problems are holds with a next owner, never a local fallback.
 
+Before authoring a project adapter or changing targets, run `myce portability`
+for live cluster targets, then
+`myce portability --adapter .mycelium/adapter.yaml --entry NAME --json`.
+Recheck when inventory or requirements change. For registered native evidence,
+use `myce portability --extension NAME@VERSION --project PROJECT --json`.
+Follow the report's per-target lock/build, portable API, preparation and native
+qualification steps. Missing variants are gaps to investigate; authored
+`requirement_reasons` explain legitimate hard limits. CPU variants keep their
+own resources/checks; GPU checks must use their backend (`metal` selects `mps`
+in the application). Obtain owner-accepted MY-19 output parity before splitting.
+Advice is read-only; absent/stale inventory and unqualified recipes are not
+support claims. [Portability reference](https://github.com/1kuna/mycelium/blob/main/docs/portability.md).
+
 1. Read `.mycelium/profiles/NAME.yaml`. If none fits, use `myce profile init`
    and [setup-project.md](setup-project.md). Review the command, source,
    targets and managed environment. `git: HEAD` sends committed bytes only;

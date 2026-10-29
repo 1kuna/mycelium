@@ -117,10 +117,10 @@ func (q *Queue) deviceAdmissionBlocked(m *Machine) bool {
 	}
 	for _, d := range m.Devices {
 		if d.ID == m.Device && d.Platform == m.GPU {
-			return q.s.DeviceMaintenance[hostID(m)][deviceMaintenanceKey(d.Platform, d.Identity)].Disabled
+			return q.s.DeviceMaintenance[hostID(m)][deviceMaintenanceKey(d.Platform, d.Identity)].Disabled || q.componentExcluded(m, d.Platform, d.Identity)
 		}
 	}
-	return false
+	return q.componentExcluded(m, m.GPU, "")
 }
 
 const deviceMaintenanceStopCause = "planned_device_maintenance"

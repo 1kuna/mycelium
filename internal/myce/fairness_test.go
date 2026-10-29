@@ -247,10 +247,10 @@ func TestBusyStatusUsesDispatchOrderAndCombinedReasons(t *testing.T) {
 	if len(s.Jobs) != 4 || s.Jobs[0].ID != prod.ID || s.Jobs[1].ID != b.ID || s.Jobs[2].ID != d.ID || s.Jobs[3].ID != a.ID {
 		t.Fatalf("order: %+v", s.Jobs)
 	}
-	if s.Jobs[1].Reason != "waiting for a free machine; next in line" {
+	if !strings.Contains(s.Jobs[1].Reason, "waiting for reserved capacity on one;") || !strings.HasSuffix(s.Jobs[1].Reason, "; next in line") {
 		t.Fatal(s.Jobs[1].Reason)
 	}
-	if s.Jobs[3].Reason != "waiting for a free machine; atlas goes first (verso is ahead of its fair share)" {
+	if !strings.HasSuffix(s.Jobs[3].Reason, "; atlas goes first (verso is ahead of its fair share)") {
 		t.Fatal(s.Jobs[3].Reason)
 	}
 	c.Advance(75 * time.Second)
@@ -260,6 +260,47 @@ func TestBusyStatusUsesDispatchOrderAndCombinedReasons(t *testing.T) {
 	got := check(t, q, m, nil).Job
 	if got == nil || got.ID != b.ID {
 		t.Fatalf("status winner differs from dispatch: %+v", got)
+	}
+}
+
+func TestFairnessReservedCapacityDoesNotClaimComputeLoad(t *testing.T) {
+	q, clock := fixture(t)
+	m := machine("accelerator", "fake")
+	m.HostMemoryMeasured, m.HostAvailableMemoryGB = true, 24
+	first := spec("production")
+	first.Needs.HostMemoryGB = 4
+	submit(t, q, first)
+	running := check(t, q, m, nil).Job
+	if running == nil {
+		t.Fatal("no first assignment")
+	}
+	clock.Advance(time.Second)
+	waiting := submit(t, q, spec("experiment"))
+	snapshot, err := q.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, j := range snapshot.Jobs {
+		if j.ID != waiting.ID {
+			continue
+		}
+		for _, want := range []string{"waiting for reserved capacity on accelerator", "batch slot allocated", "utilization unknown", "RAM live 24.0 GiB available", "4.0 GiB reserved", "next in line"} {
+			if !strings.Contains(j.Reason, want) {
+				t.Errorf("missing %q: %s", want, j.Reason)
+			}
+		}
+		if strings.Contains(j.Reason, "busy") {
+			t.Errorf("allocation reported as compute load: %s", j.Reason)
+		}
+	}
+	check(t, q, m, running)
+	if job(t, q, waiting.ID).State != "queued" {
+		t.Fatal("diagnostic changed admission")
+	}
+	finish(t, q, running, true)
+	clock.Advance(time.Second)
+	if got := check(t, q, m, nil).Job; got == nil || got.ID != waiting.ID {
+		t.Fatal("released slot did not dispatch", got)
 	}
 }
 

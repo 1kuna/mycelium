@@ -370,11 +370,12 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 				busy = true
 			}
 		}
+		batchSlotAllocated := busy
 		if call := q.calls[best.ID]; call != nil {
 			busy = !q.callCanUse(live, call)
 		}
 		if busy || !fits(best, live, live.FreeMemoryGB) {
-			base = "waiting for a free machine"
+			base = reservationWaitReason(live, batchSlotAllocated)
 		}
 		if !environmentReady(best, target) {
 			if busy {
@@ -400,6 +401,22 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 		reasons[best.ID] = base + "; " + ahead
 	}
 	return order, reasons
+}
+
+// Admission reservations do not measure compute load. Keep the selected
+// planner target and its measured RAM evidence visible without claiming busy CPUs.
+func reservationWaitReason(m *Machine, batchSlot bool) string {
+	parts := []string{"waiting for reserved capacity on " + m.ID}
+	if batchSlot {
+		parts = append(parts, "batch slot allocated")
+	}
+	parts = append(parts, fmt.Sprintf("CPU %d/%d cores reserved; utilization unknown", m.CPUInUseCores, m.EffectiveCPUCores))
+	if m.HostMemoryMeasured && m.HostMemoryError == "" {
+		parts = append(parts, fmt.Sprintf("RAM live %.1f GiB available; %.1f GiB reserved; %.1f GiB admission headroom", m.HostAvailableMemoryGB, m.HostMemoryInUseGB, m.FreeHostMemoryGB))
+	} else {
+		parts = append(parts, "RAM live availability unknown")
+	}
+	return strings.Join(parts, "; ")
 }
 func (q *Queue) waitReason(j *Job) string {
 	if !dependencyReady(j) {

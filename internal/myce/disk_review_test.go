@@ -216,8 +216,8 @@ func TestDiskHeadroomChargesOnlyWrittenVolumes(t *testing.T) {
 func TestDiskHeadroomUnavailableAndStaleReadings(t *testing.T) {
 	q, c := fixture(t)
 	m := reportDisk(t, machine("a", "fake"), c, "volume", []string{"data"}, 100<<30, 41<<30)
-	c.Advance(10 * time.Second)
-	m.DiskVolumes[0].AgeSeconds = 10
+	c.Advance(31 * time.Second)
+	m.DiskVolumes[0].AgeSeconds = 31
 	check(t, q, m, nil)
 	s := spec("experiment")
 	s.Disk = &DiskNeeds{OutputBytes: 1 << 30}
@@ -230,7 +230,7 @@ func TestDiskHeadroomUnavailableAndStaleReadings(t *testing.T) {
 	if err := json.Unmarshal([]byte(statusViewResponse(t, q, "/api/status")), &status); err != nil {
 		t.Fatal(err)
 	}
-	if len(status.Machines) != 1 || status.Machines[0].DiskVolumes[0].AgeSeconds < 10 || status.Machines[0].DiskVolumes[0].Error != "disk reading unavailable" {
+	if len(status.Machines) != 1 || status.Machines[0].DiskVolumes[0].AgeSeconds < 31 || status.Machines[0].DiskVolumes[0].Error != "disk reading unavailable" {
 		t.Fatal("stale status lacks age/unavailable marker", status.Machines)
 	}
 	if !strings.Contains(held.Reason, "disk reading unavailable") {
@@ -313,20 +313,21 @@ func TestWorkerDiskCacheVolumesAndOpaqueIdentity(t *testing.T) {
 	}
 }
 
-func TestDiskHeadroomFreshnessIncludesSamplingBudget(t *testing.T) {
+func TestDiskHeadroomFreshnessToleratesReportingDelay(t *testing.T) {
 	for _, tc := range []struct {
 		name    string
 		elapsed time.Duration
 		stale   bool
 	}{
 		{"healthy at 3.1 seconds", 2250 * time.Millisecond, false},
-		{"stale at 4 seconds", 3150 * time.Millisecond, true},
+		{"healthy at 8.2 seconds", 7350 * time.Millisecond, false},
+		{"stale at 30 seconds", 29150 * time.Millisecond, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			q, c := fixture(t)
 			m := reportDisk(t, machine("a", "fake"), c, "volume", []string{"data"}, 100<<30, 41<<30)
-			// The worker timestamps before probing; the sample is already 850 ms
-			// old on receipt, before queue time advances across three heartbeats.
+			// Include observation age already accrued before queue receipt,
+			// then advance across the reporting gap.
 			m.DiskVolumes[0].AgeSeconds = 0.85
 			check(t, q, m, nil)
 			c.Advance(tc.elapsed)
@@ -534,7 +535,16 @@ func TestDiskHeadroomStaleReadingDoesNotRefuseStartFence(t *testing.T) {
 	if a == nil || a.ID != prod.ID {
 		t.Fatal("production not assigned")
 	}
-	c.Advance(4 * time.Second) // beyond the 3.85 s freshness window
+	// Keep worker contact fresh while the disk sampler stops making progress.
+	if err := q.update(func() error {
+		q.s.Machines[m.ID].DiskVolumes[0].AgeSeconds = 31
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if reason := q.diskHeadroomReason(a, q.s.Machines[m.ID]); !strings.Contains(reason, "disk reading unavailable") {
+		t.Fatalf("disk reading did not expire before start fence: %s", reason)
+	}
 	launch := HostLaunch{Machine: a.Machine, Session: a.Session, Kind: "batch", Key: a.ID, Attempt: strconv.Itoa(a.Attempt)}
 	if err := q.AuthorizeLaunch(launch); err != nil {
 		t.Fatalf("stale disk reading refused launch authorization: %v", err)
@@ -624,5 +634,37 @@ func TestDiskHeadroomStartFenceUsesCurrentFloor(t *testing.T) {
 				t.Fatalf("Started = %v, want %v", err, tc.want)
 			}
 		})
+	}
+}
+
+// Busy workers reported healthy local capacity 4.8-8.2 seconds old while the
+// three-heartbeat window held admission despite tens of GiB of free space.
+func TestDiskHeadroomLocalFreshnessUntilStall(t *testing.T) {
+	q, c := fixture(t)
+	m := reportDisk(t, machine("a", "fake"), c, "local", []string{"data", "environment", "file-cache", "model-cache"}, 245<<30, 55<<30)
+	check(t, q, m, nil)
+	j := &Job{Spec: spec("experiment")}
+	j.Spec.Disk = &DiskNeeds{OutputBytes: 1 << 30}
+	c.Advance(8200 * time.Millisecond)
+	if reason := q.diskHeadroomReason(j, q.s.Machines[m.ID]); reason != "" {
+		t.Fatalf("healthy local capacity expired between reports: %s", reason)
+	}
+	// The retained reading must still enforce actual free space.
+	j.Spec.Disk.OutputBytes = 55 << 30
+	if reason := q.diskHeadroomReason(j, q.s.Machines[m.ID]); !strings.Contains(reason, "free=") || strings.Contains(reason, "unavailable") {
+		t.Fatalf("last good local capacity did not enforce headroom: %s", reason)
+	}
+	j.Spec.Disk.OutputBytes = 1 << 30
+	c.Advance(21790 * time.Millisecond)
+	m.DiskVolumes[0].AgeSeconds = 29.99
+	// Neither re-reporting nor a long nominal cadence renews the observation.
+	m.DiskVolumes[0].SampleIntervalSeconds = 60
+	check(t, q, m, nil)
+	if reason := q.diskHeadroomReason(j, q.s.Machines[m.ID]); reason != "" {
+		t.Fatalf("local capacity expired before stall deadline: %s", reason)
+	}
+	c.Advance(10 * time.Millisecond)
+	if reason := q.diskHeadroomReason(j, q.s.Machines[m.ID]); !strings.Contains(reason, "disk reading unavailable") {
+		t.Fatalf("repeated report renewed stalled local capacity: %s", reason)
 	}
 }

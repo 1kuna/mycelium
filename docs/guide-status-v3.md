@@ -54,13 +54,15 @@ Old workers without samples retain startup storage figures.
 Sampling uses at most five bounded observations per heartbeat, outside the queue.
 Local probes use the existing 25 ms budget; the checkpoint/NAS probe uses the
 existing 750 ms heartbeat filesystem budget. Samples are timestamped at operation
-completion. Local readings retain the three-cycle freshness
-window plus the 850 ms sampling budget (3.85 seconds at a one-second heartbeat).
+completion. Successful capacity readings for every volume remain usable until
+30 seconds after completion, even without pending-probe metadata. This avoids
+false local-disk holds when busy workers report later than the former 3.85-second
+window. Freshness follows measured sampler progress rather than the nominal
+heartbeat cadence. The cost is up to 30 seconds of older local capacity evidence;
+the last good free bytes still enforce the free-space floor and projected need.
+Repeated reports and long sample intervals cannot extend that age bound.
 
-A successful checkpoint capacity reading remains usable until 30 seconds after
-completion, even without pending-probe metadata. Freshness follows measured
-sampler progress rather than the nominal heartbeat cadence. A pending checkpoint
-capacity operation retains its last good reading using the same 30-second
+A pending checkpoint capacity operation retains its last good reading using the same 30-second
 per-operation stall backstop as root reachability.
 `retained: true` and `probe_age_seconds` distinguish the pending
 operation's age from the last sample's `age_seconds`. Successful slow `Statfs`
@@ -412,6 +414,11 @@ Mycelium's reservation ledger, not measured process RSS.
 `free_host_memory_gb` is admitted headroom after reservations and any configured
 allowance. Similarly, `cpu_in_use_cores` and `free_cpu_cores` are reservations,
 not CPU utilization. Zero reserved cores does not establish an idle host.
+
+Capacity waits name the selected host's reservations and, when reported, live
+RAM availability and admission headroom. An allocated batch slot is a concurrency
+rule, not proof of GPU activity. CPU status says reserved/unreserved and reports
+utilization as unknown. Usage charts show allocation occupancy, not compute load.
 
 A queued job whose other resource checks fit but whose host RAM does not fit
 shows `diagnostic_code: host_memory_headroom`. Its reason names the machine,

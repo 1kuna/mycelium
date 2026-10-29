@@ -116,7 +116,7 @@ func waitingReason(j *Job, machines map[string]*Machine, jobs map[string]*Job) s
 				}
 				return "waiting for a worker to pull this job"
 			}
-			return "waiting for a busy machine to make room"
+			return reservationWaitReason(m, false)
 		}
 	}
 	diskReasons := []string{}

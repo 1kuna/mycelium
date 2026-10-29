@@ -85,7 +85,7 @@ func admissionWords(reason string) string {
 		return reason
 	}
 	if strings.HasPrefix(reason, "maximum simultaneous jobs reached") {
-		return "hypha is busy; its simultaneous job limit has been reached"
+		return "simultaneous job limit reached; reservations do not measure utilization"
 	}
 	return availabilityWords(reason)
 }
@@ -143,7 +143,7 @@ func CapabilityProfileLines(m *Machine) []string {
 		lines = append(lines, resource+": "+profileSize(a.MemoryBytes))
 	}
 	if m.GPU == "cpu" {
-		lines = append(lines, fmt.Sprintf("CPU capacity: %d free / %d admitted logical cores (%d reserved for owner); no accelerator required", m.FreeCPUCores, m.EffectiveCPUCores, m.CPUReserveCores))
+		lines = append(lines, fmt.Sprintf("CPU admission: %d unreserved / %d admitted logical cores (%d reserved for owner); utilization unknown; no accelerator required", m.FreeCPUCores, m.EffectiveCPUCores, m.CPUReserveCores))
 	} else if len(p.Accelerators) == 0 {
 		lines = append(lines, "accelerator measurements not reported")
 	}

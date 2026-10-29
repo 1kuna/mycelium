@@ -28,6 +28,18 @@ func (a API) HandlerWithJoiningIdentity(pin string) http.Handler { return a.hand
 
 func (a API) handler(joiningPin string) http.Handler {
 	mux := newRequestMux()
+	mux.HandleFunc("GET /api/portability", func(w http.ResponseWriter, r *http.Request) {
+		report, err := a.Queue.Portability(PortabilityRequest{Extension: r.URL.Query().Get("extension"), Project: r.URL.Query().Get("project")})
+		respondOperation(w, report, err, "portability_invalid")
+	})
+	mux.HandleFunc("POST /api/portability", func(w http.ResponseWriter, r *http.Request) {
+		var request PortabilityRequest
+		if !decode(w, r, &request) {
+			return
+		}
+		report, err := a.Queue.Portability(request)
+		respondOperation(w, report, err, "portability_invalid")
+	})
 	a.registerInvites(mux, joiningPin)
 	a.registerEnrollmentRelease(mux)
 	a.registerEnrollment(mux)
@@ -35,6 +47,7 @@ func (a API) handler(joiningPin string) http.Handler {
 	a.registerDevClock(mux)
 	a.registerHostMaintenance(mux)
 	a.registerDeviceMaintenance(mux)
+	a.registerComponentExclusions(mux)
 	a.registerPriorityPolicy(mux)
 	a.registerFiles(mux)
 	mux.HandleFunc("POST /api/extensions", func(w http.ResponseWriter, r *http.Request) {
@@ -310,7 +323,7 @@ func (a API) handler(joiningPin string) http.Handler {
 }
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	limit := int64(1 << 20)
-	if r.URL.Path == "/api/extensions" {
+	if r.URL.Path == "/api/extensions" || r.URL.Path == "/api/portability" {
 		limit = 2 << 20
 	} // base64 transport of a <=1 MiB folder
 	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit))
