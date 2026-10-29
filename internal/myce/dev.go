@@ -14,6 +14,7 @@ import (
 )
 
 type DevConfig struct {
+	OutputDeliveryRoot              string
 	Devices                         int
 	ProductionInfrastructureRetries *int
 	FileStore                       string
@@ -94,7 +95,7 @@ func startDev(c DevConfig, configureQueue func(*Queue)) (*Dev, error) {
 	if limit == 0 {
 		limit = 100 << 30
 	}
-	q, err := Open(c.Database, c.Checkpoints, clock, WithFileStore(c.FileStore, limit, c.FileStore != "" && !c.NASCheckpoints))
+	q, err := Open(c.Database, c.Checkpoints, clock, WithOutputDeliveryRoot(c.OutputDeliveryRoot), WithFileStore(c.FileStore, limit, c.FileStore != "" && !c.NASCheckpoints))
 	if err != nil {
 		return nil, err
 	}

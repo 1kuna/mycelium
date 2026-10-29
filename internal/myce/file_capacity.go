@@ -18,14 +18,15 @@ import (
 // for new payloads after declared tus lengths and the physical volume floor.
 // Store is a public role name, never a private filesystem path.
 type FileStoreStatus struct {
-	Store            string `json:"store"`
-	UsedBytes        uint64 `json:"used_bytes"`
-	FreeBytes        uint64 `json:"free_bytes"`
-	ReclaimableBytes uint64 `json:"reclaimable_bytes"`
-	LimitBytes       uint64 `json:"limit_bytes"`
-	DiskFreeBytes    uint64 `json:"disk_free_bytes"`
-	FloorBytes       uint64 `json:"floor_bytes"`
-	Error            string `json:"error,omitempty"`
+	ReservedOutputBytes uint64 `json:"reserved_output_bytes,omitempty"`
+	Store               string `json:"store"`
+	UsedBytes           uint64 `json:"used_bytes"`
+	FreeBytes           uint64 `json:"free_bytes"`
+	ReclaimableBytes    uint64 `json:"reclaimable_bytes"`
+	LimitBytes          uint64 `json:"limit_bytes"`
+	DiskFreeBytes       uint64 `json:"disk_free_bytes"`
+	FloorBytes          uint64 `json:"floor_bytes"`
+	Error               string `json:"error,omitempty"`
 }
 
 type storedPayload struct {
@@ -223,6 +224,8 @@ func (v fileStoreObservation) status(ctx context.Context) *FileStoreStatus {
 			status.ReclaimableBytes = addDiskBytes(status.ReclaimableBytes, p.size)
 		}
 	}
+	status.ReservedOutputBytes = store.reservedOutputs(payloads)
+	status.FreeBytes -= min(status.FreeBytes, status.ReservedOutputBytes)
 	return &status
 }
 
@@ -263,6 +266,15 @@ func (q *Queue) PreflightFileStore(ctx context.Context, files FileManifest) erro
 		}
 		need = addDiskBytes(need, uint64(ref.SizeBytes))
 	}
+	// Simulate the manifest's allocation so declared output reservations are
+	// counted once, while other queued/running tasks retain their budget.
+	if payloads == nil {
+		payloads = map[string]storedPayload{}
+	}
+	for _, ref := range files {
+		payloads[ref.SHA256] = storedPayload{length: uint64(ref.SizeBytes)}
+	}
+	need = addDiskBytes(need, store.reservedOutputs(payloads))
 	return fileStoreRefusal(status, need)
 }
 

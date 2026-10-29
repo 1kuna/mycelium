@@ -148,6 +148,9 @@ func (q *Queue) maintainFileExpiry() {
 		if j == nil || !terminal(j.State) || !hasJobFiles(j) {
 			continue
 		}
+		if deliveryPending(j) {
+			continue
+		}
 		// Some historical terminal paths did not stamp FinishedAt. Start their
 		// window when first observed, rather than guessing from submission time.
 		if j.FinishedAt == nil {
@@ -207,6 +210,12 @@ func (q *Queue) fileReferences(pendingOnly bool, subset ...map[string]*Job) (exp
 		add(referenced, j.Spec.Files)
 		add(referenced, sharedStoredFiles(j.Spec))
 		add(referenced, j.OutputRefs)
+		if !terminal(j.State) {
+			add(keep, j.PendingOutputRefs)
+		}
+		if deliveryPending(j) {
+			add(keep, j.OutputRefs)
+		}
 		for _, a := range j.AttemptHistory {
 			if a.Diagnostics != nil {
 				add(referenced, a.Diagnostics.Files)

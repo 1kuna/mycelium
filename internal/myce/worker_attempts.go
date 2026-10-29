@@ -296,6 +296,11 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 						continue
 					}
 					s.state.PublishedAttempt = published
+					if published != nil && a.job.Spec.OutputDelivery == asyncNAS {
+						if e := os.RemoveAll(deliverySpoolPath(a.job)); e != nil {
+							s.fileError = "accepted result spool cleanup pending"
+						}
+					}
 				}
 				if a.job.Spec.Run.Docker {
 					if e := acknowledgeDocker(s, w.Machine.ID, now); e != nil {

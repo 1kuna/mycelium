@@ -64,6 +64,9 @@ func projectedDiskNeed(j *Job) uint64 {
 }
 func diskVolumeNeed(j *Job, v DiskVolume) (uint64, bool) {
 	input, output := diskInputOutput(j)
+	if j.Spec.OutputDelivery == asyncNAS {
+		output = addDiskBytes(output, output) // Work files plus immutable unaccepted spool.
+	}
 	var need uint64
 	relevant := false
 	for _, root := range v.Roots {

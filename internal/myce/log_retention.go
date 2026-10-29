@@ -173,7 +173,7 @@ func (w Worker) publishedAttemptFiles(ctx context.Context, st workerState) (*Exe
 		return nil, nil
 	}
 	j, r := st.Job, st.Result
-	if !j.Spec.extensionJob() && len(jobInputFiles(j))+len(jobInputPaths(j))+len(j.Spec.SharedInputs) == 0 {
+	if j.Spec.OutputDelivery == "" && !j.Spec.extensionJob() && len(jobInputFiles(j))+len(jobInputPaths(j))+len(j.Spec.SharedInputs) == 0 {
 		return nil, nil
 	}
 	var accepted Job

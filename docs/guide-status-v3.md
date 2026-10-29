@@ -464,3 +464,17 @@ queue decisions still use the injected clock. Logging and summary publication
 run after unlocking. Labels use registered route patterns or `unmatched`, never
 request paths, query strings, tokens or bodies. Long-lived streams are recorded
 when their handler ends.
+
+Opted-in asynchronous NAS results expose a `delivery` object on job/status
+receipts independently of compute `state`. `state` is `pending`, `publishing`,
+`failed` or `verified`; it includes accepted `id`/`attempt`, `machine`, `session`,
+`destination_id`, `manifest_sha256`, `bytes`, `pending_at`, `last_attempt_at`,
+`last_progress_at`, `next_attempt_at`, `attempts`, `verified_at` and a sanitized `cause` as applicable.
+`myce status` prints delivery state/bytes/age/attempts even for succeeded jobs.
+`publishing` with a stall cause still owns its outstanding call; it is not a
+signal to start a second publisher. Returned errors show failed and a retry time.
+Only verified with the matching execution is a NAS receipt. `output_refs` is
+available at compute completion. `pending_output_refs` is an unaccepted upload
+reservation, never a successful result. File-store `reserved_output_bytes`
+reports missing async output reservations; `free_bytes` excludes those bytes.
+See [delivery policy](guide-files-v3.md#complete-from-queue-storage-deliver-to-nas-later-349).

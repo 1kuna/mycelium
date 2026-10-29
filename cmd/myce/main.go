@@ -222,6 +222,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	containerRetention := f.Duration("container-retention", myce.DefaultContainerRetention, "acknowledged stopped Docker container retention (0 removes immediately)")
 	logRetention := f.Duration("log-retention", myce.DefaultLogRetention, "retention of completed batch and inactive model-server logs")
 	uploadSpoolBytes := f.Int64("upload-spool-bytes", myce.DefaultUploadSpoolBytes, "total bytes held in the queue model-upload spool")
+	outputDeliveryRoot := f.String("output-delivery-root", "", "queue NAS destination root for opt-in async_nas outputs")
 	fileStore := f.String("file-store", "", "authoritative file storage folder (default beside database)")
 	healthNotify := f.String("health-notify", os.Getenv("MYCE_HEALTH_NOTIFY"), "queue health notifier executable (--check and JSON stdin)")
 	healthStorageDelay := f.Duration("health-storage-delay", myce.DefaultHealthStorageDelay, "storage unavailability duration before health alert")
@@ -434,7 +435,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if e != nil {
 			return e
 		}
-		d, err := myce.StartDev(myce.DevConfig{Devices: *fakeGPUs, ProductionInfrastructureRetries: productionRetries, FileStore: *fileStore, FileStoreLimit: *fileStoreLimit, FileRetention: *fileRetention, NASCheckpoints: nasConfigured, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, HostPolicies: hosts, HostID: *hostID, ProjectPolicies: policies, EnvironmentConfig: ec, ModelConfig: mc, Address: *address, Database: *db, Checkpoints: *checkpoint, Token: *token, GPU: *gpu, Environments: split(*environments), Models: split(*models), Workers: *workers, CPUReserveCores: *cpuReserve, CPUBudgetCores: *cpuBudget, MemoryGB: *memory})
+		d, err := myce.StartDev(myce.DevConfig{OutputDeliveryRoot: *outputDeliveryRoot, Devices: *fakeGPUs, ProductionInfrastructureRetries: productionRetries, FileStore: *fileStore, FileStoreLimit: *fileStoreLimit, FileRetention: *fileRetention, NASCheckpoints: nasConfigured, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, HostPolicies: hosts, HostID: *hostID, ProjectPolicies: policies, EnvironmentConfig: ec, ModelConfig: mc, Address: *address, Database: *db, Checkpoints: *checkpoint, Token: *token, GPU: *gpu, Environments: split(*environments), Models: split(*models), Workers: *workers, CPUReserveCores: *cpuReserve, CPUBudgetCores: *cpuBudget, MemoryGB: *memory})
 		if err != nil {
 			return err
 		}
@@ -460,7 +461,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if *healthStorageDelay <= 0 {
 			return errors.New("health-storage-delay must be positive")
 		}
-		q, err := myce.Open(*db, *checkpoint, myce.RealClock{}, myce.WithFileStore(*fileStore, *fileStoreLimit, !nasConfigured), myce.WithHealthStorageDelay(*healthStorageDelay))
+		q, err := myce.Open(*db, *checkpoint, myce.RealClock{}, myce.WithFileStore(*fileStore, *fileStoreLimit, !nasConfigured), myce.WithOutputDeliveryRoot(*outputDeliveryRoot), myce.WithHealthStorageDelay(*healthStorageDelay))
 		if err != nil {
 			return err
 		}
@@ -1010,6 +1011,9 @@ func printStatus(s myce.Snapshot, full bool) {
 		id := myce.ShortID(j.ID)
 		if full {
 			id = j.ID
+		}
+		if d := j.Delivery; d != nil {
+			fmt.Printf("delivery %s attempt=%d: %s bytes=%d age=%.1fs attempts=%d %s\n", id, d.Attempt, d.State, d.Bytes, max(0, s.Now.Sub(d.PendingAt).Seconds()), d.Attempts, d.Cause)
 		}
 		if j.StartedAt != nil && j.Spec.Priority == "production" {
 			fmt.Printf("production start latency %s: %.3fs\n", id, j.StartLatencySeconds)

@@ -75,7 +75,7 @@ func (d *recordDeadlines) due(now time.Time) []string {
 }
 
 func mutableJob(j *Job) bool {
-	if !terminal(j.State) || j.Attempt > 0 && !j.ReleaseConfirmed {
+	if deliveryPending(j) || !terminal(j.State) || j.Attempt > 0 && !j.ReleaseConfirmed {
 		return true
 	}
 	for _, c := range j.Copies {
@@ -100,7 +100,7 @@ func (q *Queue) indexJob(id string, j *Job) {
 		delete(q.records.live, id)
 	}
 	var at time.Time
-	if terminal(j.State) && hasJobFiles(j) && !j.FilesExpired {
+	if terminal(j.State) && hasJobFiles(j) && !j.FilesExpired && !deliveryPending(j) {
 		at = q.clock.Now()
 		if j.FinishedAt != nil {
 			at = j.FinishedAt.Add(q.fileRetention)

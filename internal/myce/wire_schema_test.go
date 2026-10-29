@@ -66,9 +66,9 @@ func generatedJobSchema(t *testing.T) []byte {
 		for _, property := range properties {
 			property.(map[string]any)["x-contract"] = "diagnostic"
 		}
-		stable := []string{"id", "spec", "state", "attempt", "machine", "session", "release_confirmed", "finished_at", "queued", "cancelled_at", "infrastructure_retries", "dependency", "cancellation", "cancellation_scope", "ledger"}
+		stable := []string{"id", "spec", "state", "attempt", "machine", "session", "release_confirmed", "finished_at", "queued", "cancelled_at", "infrastructure_retries", "dependency", "cancellation", "cancellation_scope", "ledger", "delivery"}
 		if definition == "Spec" {
-			stable = []string{"project", "submission_key", "after"}
+			stable = []string{"project", "submission_key", "after", "output_delivery"}
 		}
 		for _, name := range stable {
 			properties[name].(map[string]any)["x-contract"] = "stable"
