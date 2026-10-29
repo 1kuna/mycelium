@@ -2163,11 +2163,11 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 	if j != nil && !terminal(j.State) && !cancelled(j) && (j.State == "queued" || j.Attempt != report.Attempt || j.Machine != m.ID || j.Session != m.Session) {
 		for _, copy := range j.Copies {
 			canRecover := q.machineRecoveryFits(m, j, copy)
-			if canRecover && q.placementPolicyAllowed(j, m, false) && copy.Recoverable && copy.Attempt == report.Attempt && copy.Machine == m.ID && copy.Session == m.Session && j.State != "queued" && (m.CheckpointUnavailable || !q.checkpointsAvailable() || progress.err != nil || (progress.path != "" && progress.path != attemptCheckpoint(*j))) {
+			if canRecover && q.placementPolicyAllowed(j, allocationMachine(m, copy.AllocatedDevices), false) && copy.Recoverable && copy.Attempt == report.Attempt && copy.Machine == m.ID && copy.Session == m.Session && j.State != "queued" && (m.CheckpointUnavailable || !q.checkpointsAvailable() || progress.err != nil || (progress.path != "" && progress.path != attemptCheckpoint(*j))) {
 				reply.Hold = true
 				return reply
 			}
-			if canRecover && q.placementPolicyAllowed(j, m, false) && copy.Recoverable && copy.Attempt == report.Attempt && copy.Machine == m.ID && copy.Session == m.Session && (j.State == "queued" || (j.Spec.Resumable && report.Progress > max(0, progress.durable))) {
+			if canRecover && q.placementPolicyAllowed(j, allocationMachine(m, copy.AllocatedDevices), false) && copy.Recoverable && copy.Attempt == report.Attempt && copy.Machine == m.ID && copy.Session == m.Session && (j.State == "queued" || (j.Spec.Resumable && report.Progress > max(0, progress.durable))) {
 				for i := range j.Copies {
 					j.Copies[i].Recoverable = false
 				}

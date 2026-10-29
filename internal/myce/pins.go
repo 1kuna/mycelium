@@ -174,7 +174,7 @@ func (q *Queue) maintainPins() {
 			if winner := q.candidate(m, nil); winner != nil && q.comparePriority(winner.Spec, demand.Spec) < 0 {
 				continue
 			}
-			if !q.placementPolicyAllowed(demand, m, false) {
+			if q.deviceAdmissionBlocked(m) || !q.placementPolicyAllowed(demand, m, false) {
 				continue
 			}
 			if plan := q.roomPlan(demand, m, false); plan != nil && plan.cheaper(best) {

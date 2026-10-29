@@ -175,16 +175,13 @@ func (q *Queue) placementAllowed(j *Job, m *Machine) bool {
 }
 
 func (q *Queue) placementAllowedForUse(j *Job, m *Machine, resident bool) bool {
-	return q.diskHeadroomReason(j, m) == "" && q.placementPolicyAllowed(j, m, resident)
+	return (j.Spec.Needs.cpuOnly() || !q.deviceAdmissionBlocked(m)) && q.diskHeadroomReason(j, m) == "" && q.placementPolicyAllowed(j, m, resident)
 }
 
 // Recovery retains existing execution custody. Admission-time disk estimates
 // apply only to new work: its writes may already be reflected in observed free.
 func (q *Queue) placementPolicyAllowed(j *Job, m *Machine, resident bool) bool {
 	if j.State == "queued" && (j.Spec.Priority == "production" || j.Spec.Class == "production") && q.fleetPausesProduction() {
-		return false
-	}
-	if !j.Spec.Needs.cpuOnly() && q.deviceAdmissionBlocked(m) && !(j.StartedAt != nil && j.Machine == m.ID && j.Session == m.Session && batchOnTarget(j, m)) {
 		return false
 	}
 	if !dependencyReady(j) || m.Recovering || cancelled(j) || !dockerRuntimeFits(j, m) || q.maintenanceBlocked(hostID(m)) || m.HostMemoryPolicyMismatch || !logPolicyFits(j.Spec.Logs, m) {

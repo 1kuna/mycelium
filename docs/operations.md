@@ -61,7 +61,8 @@ inventory cannot use this control.
 Disabling admission preserves Started batch attempts, running preparations,
 engines and active calls. It withdraws unstarted batch offers and refuses new
 batch placements, calls, engine launches and device-specific preparation
-launches on that device. Healthy siblings retain their budgets and CPU work
+launches on that device. Model-cache copies use shared host storage and remain
+allowed. Healthy siblings retain their budgets and CPU work
 remains eligible. Existing work can still finish or stop under ordinary
 cancellation, failure and priority rules. This command does not edit the
 worker installation/configuration and needs no restart. Host drain/disable

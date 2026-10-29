@@ -321,3 +321,86 @@ func TestDeviceMaintenanceDev(t *testing.T) {
 	}
 	await(t, func() bool { return get(jobs[0].ID).State == "succeeded" })
 }
+
+func TestDeviceMaintenanceKeepsStartedQualification(t *testing.T) {
+	q, w, _, _, _, plans := qualificationFixture(t)
+	d := m3Machine().Devices[0]
+	d.ExtensionFingerprint, d.ExtensionReports = w.Machine.ExtensionFingerprint, w.Machine.ExtensionReports
+	w.Machine.Devices = []MachineDevice{d}
+	w.InventoryProbe = func(context.Context) ([]MachineDevice, error) { return w.Machine.Devices, nil }
+	machineCheck(t, q, w.Machine)
+	reconcileQualification(t, w, plans[0])
+	w.Machine.ExtensionReports = LocalExtensionReports(w.ExtensionRoot, "fake", w.extensionFingerprint, &w.Machine)
+	w.Machine.Devices[0].ExtensionReports = w.Machine.ExtensionReports
+	a := assignedJob(machineCheck(t, q, w.Machine))
+	if a == nil || automaticExtensionCheck(a) == nil {
+		t.Fatal("missing automatic qualification attempt", a)
+	}
+	if err := q.Started(result(a, false)); err != nil {
+		t.Fatal(err)
+	}
+	changeDevice(t, q, hostID(&w.Machine), "0", "disable")
+	if got := job(t, q, a.ID); got.State != "running" || cancelled(got) || got.StopAt != nil {
+		t.Fatal("device admission cancelled Started qualification", got)
+	}
+	for _, directive := range machineCheck(t, q, w.Machine, a).Attempts {
+		if directive.ID == a.ID && directive.Stop {
+			t.Fatal("Started qualification received stop", directive)
+		}
+	}
+}
+
+func TestDeviceMaintenanceRecoveryKeepsExactCopy(t *testing.T) {
+	for _, device := range []string{"0", "1"} {
+		t.Run("recover-device-"+device, func(t *testing.T) {
+			q, clock := fixture(t)
+			m := m3Machine()
+			s := m3Spec("experiment", device, 8, 1)
+			submit(t, q, s)
+			a := assignedJob(machineCheck(t, q, m))
+			if a == nil {
+				t.Fatal("missing initial attempt")
+			}
+			if err := q.Started(result(a, false)); err != nil {
+				t.Fatal(err)
+			}
+			changeDevice(t, q, m.HostID, "0", "disable")
+			clock.Advance(LossAfter)
+			check(t, q, observer(), nil)
+			requireState(t, q, a.ID, "queued")
+			for _, directive := range machineCheck(t, q, m, a).Attempts {
+				if directive.ID == a.ID && (directive.Stop || directive.Kill) {
+					t.Fatal("disabled primary rejected exact running copy", directive)
+				}
+			}
+			got := job(t, q, a.ID)
+			if got.State != "running" || got.Attempt != a.Attempt || got.StartedAt == nil || !slices.Equal(got.AllocatedDevices, []string{device}) {
+				t.Fatal("recovery changed attempt or component custody", got)
+			}
+			if err := q.Tick(); err != nil {
+				t.Fatal(err)
+			}
+			requireState(t, q, a.ID, "running")
+		})
+	}
+}
+
+func TestDeviceMaintenanceSharedModelCopy(t *testing.T) {
+	q, _, legacy := modelFixture(t)
+	legacy.Leaving = true
+	check(t, q, legacy, nil)
+	m := m3Machine()
+	m.ModelConfigHash = modelConfigHash(q.models)
+	machineCheck(t, q, m)
+	changeDevice(t, q, m.HostID, "0", "disable")
+	if err := q.SyncModel(SyncRequest{Model: "test", To: m.ID}); err != nil {
+		t.Fatal(err)
+	}
+	r := machineCheck(t, q, m)
+	if len(r.CopyPlan) != 1 || r.CopyPlan[0].Launch == nil {
+		t.Fatal("shared model copy not offered", r.CopyPlan)
+	}
+	if err := q.AuthorizeLaunch(*r.CopyPlan[0].Launch); err != nil {
+		t.Fatal("disabled component blocked host-shared model cache copy", err)
+	}
+}

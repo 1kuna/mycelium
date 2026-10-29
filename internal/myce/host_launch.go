@@ -116,7 +116,8 @@ func (q *Queue) AuthorizeLaunch(l HostLaunch) error {
 			return nil
 		}
 		m := q.s.Machines[l.Machine]
-		if !p.Started && p.Device != "" && q.deviceAdmissionBlocked(allocationMachine(m, []string{p.Device})) {
+		// A model-cache copy writes shared host storage, not the selected GPU.
+		if !p.Started && p.Kind != "copy" && p.Device != "" && q.deviceAdmissionBlocked(allocationMachine(m, []string{p.Device})) {
 			reject("device_admission")
 			return nil
 		}

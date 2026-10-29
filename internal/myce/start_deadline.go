@@ -208,6 +208,9 @@ func (q *Queue) startPlacementAllowed(j *Job) bool { return q.startPlacementReje
 // startPlacementRejection names the failed start-fence predicate, or "". The
 // names are fixed labels, safe to log without host, path or volume detail.
 func (q *Queue) startPlacementRejection(j *Job) string {
+	if j.StartedAt == nil && !j.Spec.Needs.cpuOnly() && q.deviceAdmissionBlocked(allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)) {
+		return "device_disabled"
+	}
 	if q.startDiskFloorReason(j, q.s.Machines[j.Machine]) != "" {
 		return "disk_floor"
 	}
