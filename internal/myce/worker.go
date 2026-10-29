@@ -327,6 +327,9 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 }
 
 func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *process, startErr error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if j.Spec.Priority == "production" && j.Spec.StartBy == nil {
 		return nil, errors.New("queue start-gate protocol mismatch: production assignment has no start_by; upgrade queue and workers together")
 	}
@@ -362,6 +365,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	}
 	sharedEnv, sharedRelease, sharedErr := w.acquireSharedInputs(ctx, j)
 	if sharedErr != nil {
+		if errors.Is(sharedErr, errCheckpointIOPending) {
+			return nil, fmt.Errorf("%w: shared input copy pending", errWorkerCheckpoint)
+		}
 		return nil, runtimeErrorFor("input_staging", sharedErr)
 	}
 	if len(j.Spec.SharedInputs) > 0 {
@@ -381,12 +387,15 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	executionWorkdir := j.Spec.Run.Workdir
 	if !j.Spec.Run.Docker || j.Spec.extensionJob() || len(jobInputFiles(&j))+len(jobInputPaths(&j))+len(j.Spec.SharedInputs) > 0 {
 		value := j
-		staged, err := s.extensionFiles.run(attemptCheckpoint(j), func() (stagedInputs, error) {
+		staged, err := s.extensionFiles.runBounded(ctx, attemptCheckpoint(j), func() (stagedInputs, error) {
 			return captureStagedInputs(w.Clock, func() (string, error) {
 				err := w.prepareExtensionFiles(&value, s.dir)
 				return value.Spec.Run.Workdir, err
 			})
-		})
+		}, false)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		if err != nil {
 			if strings.HasPrefix(err.Error(), "NAS unreachable:") {
 				return nil, fmt.Errorf("%w: input copy pending", errWorkerCheckpoint)
@@ -463,7 +472,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 			return nil, s.startFailure(j, environmentFailed, errors.New("environment builder unavailable"))
 		}
 		r.readyOnly = j.Spec.extensionJob()
-		environmentPath, release, err = w.environmentCache.Acquire(withLaunchGate(context.Background(), func() error {
+		environmentPath, release, err = w.environmentCache.Acquire(withLaunchGate(ctx, func() error {
 			return w.authorizeLaunch(HostLaunch{Machine: w.Machine.ID, Session: s.state.Session, Kind: "batch", Key: j.ID, Attempt: fmt.Sprint(j.Attempt)})
 		}), r)
 		if err != nil {
@@ -481,6 +490,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		return nil, err
 	}
 	if j.Spec.Run.Docker {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		p, e := w.startDocker(s, j, checkpoint, release)
 		environmentStarted = e == nil
 		return p, e
@@ -514,6 +526,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		}
 	}
 	if err := w.checkAvailability(); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if err := w.checkHostMemoryBudget(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB); err != nil {
