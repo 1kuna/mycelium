@@ -668,6 +668,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	}
 	s.state.LaunchPending = true
 	s.state.CustodyID = identity
+	s.state.Accelerator = !j.Spec.Needs.cpuOnly()
 	s.state.StopGrace = acceleratorStopGrace(w.AcceleratorStopGrace)
 	s.state.StopAt, s.state.UserCancel = nil, false
 	if err = s.save(); err != nil {
@@ -694,7 +695,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		if payloadPossible && !j.Spec.Needs.cpuOnly() {
 			var deadline *time.Time
 			if stopErr := gracefulRecoveredGroup(cmd.Process.Pid, w.Clock, &deadline, w.AcceleratorStopGrace, func() error {
-				return saveWorkerJSON(s.dir, identity+".stop.json", workerState{Identity: identity, StopAt: deadline})
+				return saveWorkerJSON(s.dir, identity+".stop.json", workerState{Identity: identity, Accelerator: !j.Spec.Needs.cpuOnly(), StopAt: deadline})
 			}); stopErr != nil {
 				return errors.Join(cause, fmt.Errorf("%w: %v", errWorkerReleasePending, stopErr))
 			}
@@ -712,7 +713,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	}
 	s.state.PID = cmd.Process.Pid
 	s.state.LaunchPending = false
-	custody := workerState{CustodyID: identity, PID: s.state.PID, Identity: identity, StopGrace: s.state.StopGrace}
+	custody := workerState{Accelerator: !j.Spec.Needs.cpuOnly(), CustodyID: identity, PID: s.state.PID, Identity: identity, StopGrace: s.state.StopGrace}
 	if len(j.Spec.SharedInputs) > 0 {
 		// Shared readers retain group custody after the main PID exits.
 		birth, e := processBirth(cmd.Process.Pid)
@@ -740,7 +741,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		if savedStopAt != nil && deadline.Equal(*savedStopAt) && savedUserCancel == userCancel {
 			return nil
 		}
-		if err := saveWorkerJSON(s.dir, identity+".stop.json", workerState{Identity: identity, StopAt: deadline, UserCancel: userCancel}); err != nil {
+		if err := saveWorkerJSON(s.dir, identity+".stop.json", workerState{Identity: identity, Accelerator: !j.Spec.Needs.cpuOnly(), StopAt: deadline, UserCancel: userCancel}); err != nil {
 			return err
 		}
 		at := *deadline

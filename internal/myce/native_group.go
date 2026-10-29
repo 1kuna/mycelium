@@ -264,7 +264,7 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 	s.state.OperatorStopped = false
 	p := &process{stopGrace: w.AcceleratorStopGrace, job: j, done: make(chan workerFinish, 1), savePriorityStop: s.priorityStopRecorder()}
 	ctx, cancel := context.WithCancel(context.Background())
-	g := &nativeGroup{p: p, worker: w, dir: s.dir, identity: identity, session: s.state.Session, ctx: ctx, cancel: cancel, memory: memory, custody: workerState{Identity: identity, StopGrace: acceleratorStopGrace(w.AcceleratorStopGrace), Groups: map[int]map[int]string{}}}
+	g := &nativeGroup{p: p, worker: w, dir: s.dir, identity: identity, session: s.state.Session, ctx: ctx, cancel: cancel, memory: memory, custody: workerState{Identity: identity, Accelerator: !j.Spec.Needs.cpuOnly(), StopGrace: acceleratorStopGrace(w.AcceleratorStopGrace), Groups: map[int]map[int]string{}}}
 	p.native = g
 	if memory != nil {
 		g.custody.Cgroup = memory.path
