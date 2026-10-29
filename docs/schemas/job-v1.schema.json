@@ -325,6 +325,9 @@
         "priority_stop": {
           "$ref": "#/$defs/PriorityPreemption"
         },
+        "process_id": {
+          "type": "string"
+        },
         "progress": {
           "type": "integer"
         },
@@ -1409,6 +1412,11 @@
           "type": "string",
           "x-contract": "diagnostic"
         },
+        "ledger": {
+          "$ref": "#/$defs/JobLedgerInfo",
+          "description": "Retained ledger summary: complete is historical coverage, high_water is the last durable sequence. GET /api/jobs/ID/ledger enumerates immutable entries to a fixed high_water. Older incomplete history is explicit; no diagnostic cap applies.",
+          "x-contract": "stable"
+        },
         "losses": {
           "type": "integer",
           "x-contract": "diagnostic"
@@ -1605,6 +1613,21 @@
         "queued",
         "front",
         "checkpoint"
+      ],
+      "type": "object"
+    },
+    "JobLedgerInfo": {
+      "properties": {
+        "complete": {
+          "type": "boolean"
+        },
+        "high_water": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "complete",
+        "high_water"
       ],
       "type": "object"
     },

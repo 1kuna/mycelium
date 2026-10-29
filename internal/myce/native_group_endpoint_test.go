@@ -113,6 +113,26 @@ func TestNativeGroupEarlierConsumerEndpoint(t *testing.T) {
 		if e = q.Complete(finish.result); e != nil {
 			t.Fatal(e)
 		}
+		ledger, err := q.JobLedger(j.ID, 0, -1, 256)
+		if err != nil || !ledger.Complete {
+			t.Fatal("native ledger incomplete", ledger, err)
+		}
+		reserved, released := map[string]bool{}, map[string]bool{}
+		for _, entry := range ledger.Entries {
+			if entry.Kind == "custody_started" && (entry.SupervisorPID == 0 || entry.SupervisorBirth == "" || entry.ProcessID == "") {
+				t.Fatal("kernel custody identity missing", entry)
+			}
+			if entry.Kind == "custody_reserved" {
+				reserved[entry.CustodyID] = true
+			}
+			if entry.Kind == "custody_released" {
+				released[entry.CustodyID] = true
+			}
+		}
+		if len(reserved) != 2 || len(released) != 2 {
+			t.Fatal("replacement native custody missing", ledger)
+		}
+
 		main := nativeEnv(t, dir, "main")
 		early, e := os.ReadFile(filepath.Join(dir, "consumer-url"))
 		if e != nil {

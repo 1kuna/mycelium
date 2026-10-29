@@ -138,6 +138,22 @@ func (a API) handler(joiningPin string) http.Handler {
 		}
 		respondOperation(w, reply, err, "status_unavailable")
 	})
+	mux.HandleFunc("GET /api/jobs/{id}/ledger", func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query()
+		values := []int{0, -1, 100}
+		for i, key := range []string{"after", "high_water", "limit"} {
+			if query.Has(key) {
+				v, err := strconv.Atoi(query.Get(key))
+				if err != nil || v < 0 {
+					respondOperation(w, nil, &HTTPError{Status: 400, Code: "job_ledger_cursor_invalid", Message: "invalid ledger pagination"}, "")
+					return
+				}
+				values[i] = v
+			}
+		}
+		page, err := a.Queue.JobLedger(r.PathValue("id"), values[0], values[1], values[2])
+		respondOperation(w, page, err, "job_ledger_unavailable")
+	})
 	mux.HandleFunc("POST /api/jobs", func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
 			Spec
@@ -157,6 +173,9 @@ func (a API) handler(joiningPin string) http.Handler {
 			}
 		}
 		j, err := a.Queue.SubmitContext(r.Context(), request.Spec)
+		if j != nil {
+			j.LedgerEntries = nil
+		}
 		respondOperation(w, j, err, "job_submit_failed")
 	})
 	mux.HandleFunc("POST /api/jobs/{id}/cancel", func(w http.ResponseWriter, r *http.Request) {
@@ -210,6 +229,13 @@ func (a API) handler(joiningPin string) http.Handler {
 			return
 		}
 		respondOperation(w, map[string]any{"ok": true, "start_gate": startGateProtocol}, a.Queue.AuthorizeLaunch(l), "worker_launch_invalid")
+	})
+	mux.HandleFunc("POST /api/workers/native-custody", func(w http.ResponseWriter, r *http.Request) {
+		var c NativeCustodyReport
+		if !decode(w, r, &c) {
+			return
+		}
+		respondOperation(w, map[string]any{"ok": true, "start_gate": startGateProtocol}, a.Queue.NativeCustody(c), "native_custody_invalid")
 	})
 	mux.HandleFunc("POST /api/workers/started", func(w http.ResponseWriter, r *http.Request) {
 		var c Result

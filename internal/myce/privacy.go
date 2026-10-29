@@ -221,6 +221,10 @@ func statusJobValue(job *Job) Job {
 // The returned value borrows fields until the caller deep-copies it.
 func statusJobInputs(job *Job) Job {
 	j := *job
+	j.LedgerEntries = nil
+	if j.Ledger == nil {
+		j.Ledger = &JobLedgerInfo{}
+	}
 	j.Isolation = jobNativeIsolationStatus(job)
 	spec := Spec{AllowedMachines: j.Spec.AllowedMachines, Name: j.Spec.Name, Project: j.Spec.Project, Priority: j.Spec.Priority, Class: j.Spec.Class, Kind: j.Spec.Kind, Resumable: j.Spec.Resumable, Deadline: j.Spec.Deadline, StartBy: j.Spec.StartBy}
 	if j.Spec.Program != nil {

@@ -66,7 +66,7 @@ func generatedJobSchema(t *testing.T) []byte {
 		for _, property := range properties {
 			property.(map[string]any)["x-contract"] = "diagnostic"
 		}
-		stable := []string{"id", "spec", "state", "attempt", "machine", "session", "release_confirmed", "finished_at", "queued", "cancelled_at", "infrastructure_retries", "dependency", "cancellation", "cancellation_scope"}
+		stable := []string{"id", "spec", "state", "attempt", "machine", "session", "release_confirmed", "finished_at", "queued", "cancelled_at", "infrastructure_retries", "dependency", "cancellation", "cancellation_scope", "ledger"}
 		if definition == "Spec" {
 			stable = []string{"project", "submission_key", "after"}
 		}
@@ -79,6 +79,9 @@ func generatedJobSchema(t *testing.T) []byte {
 	binding["execution"].(map[string]any)["description"] = "Immutable producing child job ID and accepted attempt for a selected-piece edge; zero value for a whole-parent edge."
 	binding["executions"].(map[string]any)["description"] = "Whole-parent edge: accepted producing executions keyed by mapped producer piece. Immutable across retry and restart."
 	job := defs["Job"].(map[string]any)["properties"].(map[string]any)
+	delete(job, "ledger_entries") // Persistence only; the supported read surface is paginated.
+	delete(defs, "JobLedgerEntry")
+	job["ledger"].(map[string]any)["description"] = "Retained ledger summary: complete is historical coverage, high_water is the last durable sequence. GET /api/jobs/ID/ledger enumerates immutable entries to a fixed high_water. Older incomplete history is explicit; no diagnostic cap applies."
 	job["isolation"].(map[string]any)["description"] = "Native stage exception diagnostic: unsandboxed: followed by the author reason, or the fixed legacy registration reason. Retained across lifecycle and payload redaction."
 	job["cancellation"].(map[string]any)["description"] = "Read-only cancellation acknowledgement after durable cancellation. Same aggregate release as cancel, including descendants; not_applicable explicitly settles never-attempted work without physical-release evidence."
 	job["cancellation_scope"].(map[string]any)["description"] = "Read-only retained fan-out declaration: every piece key, materialization/acceptance, optional wave ID, registered dependent IDs, and flat descendant job/release statuses. Future submissions appear on subsequent reads."
@@ -260,6 +263,24 @@ func validateWireValue(t *testing.T, schema *validate.Schema, value any) {
 
 func TestWireSchemas(t *testing.T) {
 	generated := generatedJobSchema(t)
+	ledgerReflector := generate.Reflector{Anonymous: true, AllowAdditionalProperties: true}
+	ledgerSchema, ledgerErr := json.MarshalIndent(ledgerReflector.Reflect(&JobLedgerPage{}), "", "  ")
+	if ledgerErr != nil {
+		t.Fatal(ledgerErr)
+	}
+	ledgerSchema = append(ledgerSchema, '\n')
+	ledgerPath := filepath.Join(schemaRoot, "job-ledger-v1.schema.json")
+	if os.Getenv("MYCE_UPDATE_SCHEMAS") == "1" {
+		if err := os.WriteFile(ledgerPath, ledgerSchema, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	actualLedger, ledgerErr := os.ReadFile(ledgerPath)
+	if ledgerErr != nil || !bytes.Equal(actualLedger, ledgerSchema) {
+		t.Fatal("ledger schema drift: regenerate with MYCE_UPDATE_SCHEMAS=1", ledgerErr)
+	}
+	ledgerValidation := compileWireSchema(t, "job-ledger-v1.schema.json")
+	validateWireValue(t, ledgerValidation, JobLedgerPage{JobID: "job", Complete: true, Entries: []JobLedgerEntry{}})
 	r := generate.Reflector{Anonymous: true, AllowAdditionalProperties: true}
 	diskSchema, err := json.MarshalIndent(r.Reflect(&DiskVolume{}), "", "  ")
 	if err != nil {

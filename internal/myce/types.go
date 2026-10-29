@@ -318,6 +318,7 @@ func legacyRank(p string) int {
 }
 
 type Copy struct {
+	ProcessID        string              `json:"process_id,omitempty"`
 	AllocatedDevices []string            `json:"allocated_devices,omitempty"`
 	PriorityStop     *PriorityPreemption `json:"priority_stop,omitempty"`
 	StopCause        string              `json:"stop_cause,omitempty"`
@@ -335,6 +336,8 @@ type Copy struct {
 }
 
 type Job struct {
+	Ledger        *JobLedgerInfo   `json:"ledger,omitempty"`
+	LedgerEntries []JobLedgerEntry `json:"ledger_entries,omitempty"`
 	// Read-only diagnostic retained when execution payloads are redacted.
 	Isolation string `json:"isolation,omitempty"`
 	// SubmissionReused is set only on a keyed submit reply, never on stored jobs.

@@ -235,3 +235,14 @@ Read `dependency.executions[KEY]` for immutable accepted producing attempts.
 Every producer piece must succeed; failure fails the consumer without an attempt,
 and upstream cancellation stops downstream stages and their children. Explicit
 keyed input paths are common inputs to every wave, with no automatic enumeration.
+
+### Retained execution ledger
+
+`client.get(job_id)["ledger"]` reports historical completeness and the latest
+sequence. `client.ledger(job_id, after=0, high_water=None, limit=100)` reads a page.
+Keep the first page's `high_water` and pass `after=page["next"]` until
+`has_more` is false. `complete` describes coverage, independently of pagination;
+older history may be incomplete. Entries enumerate attempts, sessions, native
+custody generations and exact releases, without diagnostic row caps. See the
+[ledger contract](../../docs/job-reference.md#retained-per-job-ledger) for fields,
+retention and explicit HTTP 410 expiration.

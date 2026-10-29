@@ -277,6 +277,21 @@ of at most 64 jobs per maintenance tick, in the existing crash-consistent SQLite
 transaction; failed commits restore both jobs and keyed answers. No bulk file or
 log-table cleanup runs under the queue mutex.
 
+**Retained execution ledger (#298).** The per-job append-only ledger shares the
+existing job/replay record and transaction, not a separate service or retention
+policy. Assignment, Started authorization, each native custody reservation/start,
+queue outcome and exact release are durable entries. New native generations are
+recorded before execution permission; port-collision replacements preserve their
+own identity and release evidence within one queue attempt. Read-only API/CLI and
+Python pages use immutable sequences and a fixed high-water mark, with no total
+row cap. Keep all entries while the job or keyed replay answer is retained,
+including the extra 30-day post-removal window below. Unresolved custody is never
+pruned. An expired or unknown ledger returns explicit HTTP 410
+`job_ledger_unavailable`, never an empty complete history. Pre-ledger history and
+older workers without native custody receipts report incomplete coverage; missing
+historical custody cannot be reconstructed. See the
+[ledger contract](job-reference.md#retained-per-job-ledger) for fields and commands.
+
 The existing key contract remains: after job removal the full answer, spec
 fingerprint and cancellation/release evidence remain available by submission key
 for another **30 days**, then become permanent digest-only markers. Thus ordinary

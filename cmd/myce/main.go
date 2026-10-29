@@ -71,7 +71,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 
 	if len(args) == 0 {
-		return errors.New("usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|run|profile|submit|policy|status|logs|wait|result|cancel|resolve-native|resolve-docker|reconcile-docker-retention|dev|version|release|file|benchmark|extension|sim|detect|service|measure|model|usage\n       myce host drain|disable|resume|status|budget|placement HOST\nRun myce COMMAND --help for command options.")
+		return errors.New("usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|run|profile|submit|policy|status|logs|ledger|wait|result|cancel|resolve-native|resolve-docker|reconcile-docker-retention|dev|version|release|file|benchmark|extension|sim|detect|service|measure|model|usage\n       myce host drain|disable|resume|status|budget|placement HOST\nRun myce COMMAND --help for command options.")
 	}
 	if args[0] == "dev" && len(args) > 1 && args[1] == "clock" {
 		return devClockCommand(args[2:], os.Stdout)
@@ -191,7 +191,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		f.StringVar(&cancelProject, "project", "", "project owning the submission key")
 		f.StringVar(&cancelKey, "key", "", "submission key to cancel (requires --project, no job ID)")
 	}
-	if args[0] == "status" || args[0] == "logs" || args[0] == "cancel" {
+	if args[0] == "status" || args[0] == "logs" || args[0] == "ledger" || args[0] == "cancel" {
 		f.StringVar(&clientConfig, "config", "", "installed config (default: installed worker, then queue)")
 	}
 	joiningFile := f.String("joining-file", env("MYCE_JOINING_FILE", ""), "privately supplied invitation (discovery plus saved address)")
@@ -285,6 +285,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	now := f.Bool("now", false, "stop every job on leave")
 	full := f.Bool("full", false, "show full job IDs in status")
 	statusJSON := f.Bool("json", false, "show status as JSON")
+	ledgerAfter := f.Int("after", 0, "ledger sequence cursor")
+	ledgerHigh := f.Int("high-water", -1, "ledger snapshot high water (-1 starts a snapshot)")
+	ledgerLimit := f.Int("limit", 100, "ledger page size (1..256)")
 	follow := f.Bool("follow", false, "follow logs until the job is terminal")
 	if args[0] == "status" || args[0] == "logs" {
 		f.Usage = func() {
@@ -309,7 +312,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 	// Accept conventional 'logs ID --follow' and 'leave --now'.
 	flags := args[1:]
-	if (args[0] == "logs" || args[0] == "submit" || args[0] == "cancel") && len(flags) > 0 && !strings.HasPrefix(flags[0], "-") {
+	if (args[0] == "logs" || args[0] == "ledger" || args[0] == "submit" || args[0] == "cancel") && len(flags) > 0 && !strings.HasPrefix(flags[0], "-") {
 		flags = append(append([]string{}, flags[1:]...), flags[0])
 	}
 	if err := f.Parse(flags); err != nil {
@@ -339,7 +342,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	defer stop()
 	var client myce.Client
 	var invitation *myce.Invitation
-	if args[0] == "status" || args[0] == "logs" || args[0] == "cancel" {
+	if args[0] == "status" || args[0] == "logs" || args[0] == "ledger" || args[0] == "cancel" {
 		// An omitted endpoint must not mask the installed queue address.
 		endpoint := os.Getenv("MYCE_QUEUE")
 		f.Visit(func(v *flag.Flag) {
@@ -817,6 +820,15 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			}
 		}
 		return client.Call(ctx, "POST", "/api/workers/"+*name+"/leave", map[string]bool{"now": *now}, nil)
+	case "ledger":
+		if f.NArg() != 1 {
+			return errors.New("usage: myce ledger ID [--after N] [--high-water N] [--limit N]")
+		}
+		page, err := client.JobLedger(ctx, f.Arg(0), *ledgerAfter, *ledgerHigh, *ledgerLimit)
+		if err != nil {
+			return err
+		}
+		return json.NewEncoder(os.Stdout).Encode(page)
 	case "logs":
 		if f.NArg() != 1 {
 			return errors.New("usage: myce logs <id> [--follow]")

@@ -191,6 +191,10 @@ func (q *Queue) touchJob(id string) *Job {
 	return j
 }
 func (q *Queue) putJob(id string, j *Job) {
+	if q.s.Jobs[id] == nil && j.Attempt == 0 {
+		j.Ledger = &JobLedgerInfo{Complete: true}
+		j.LedgerEntries = nil
+	}
 	q.touchJob(id)
 	if q.s.Jobs[id] == nil && q.records != nil {
 		q.records.jobCount++

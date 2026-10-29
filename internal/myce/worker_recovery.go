@@ -41,6 +41,7 @@ func (r *workerRetry) succeeded(now time.Time, interval time.Duration) {
 }
 
 type workerState struct {
+	CustodyID        string     `json:"custody_id,omitempty"`
 	IsolationWarning *Execution `json:"isolation_warning,omitempty"`
 	// Written with cleared custody only after the queue confirms terminal,
 	// released publication. Survives a restart before scratch retention runs.
