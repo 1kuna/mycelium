@@ -158,7 +158,7 @@ func pruneWorkerLogs(dir, pending string, now time.Time, age time.Duration) erro
 }
 
 // AttemptFilesGrace keeps an unclaimed attempt folder for diagnosis; failed
-// runs' work files are never uploaded. It matches stopped-container retention.
+// and cancelled runs' work files may not be uploaded. It matches stopped-container retention.
 const AttemptFilesGrace = 24 * time.Hour
 
 // unclaimedMarker records, by its modification time, when retention first saw
@@ -183,7 +183,7 @@ func (w Worker) publishedAttemptFiles(ctx context.Context, st workerState) (*Exe
 	if accepted.ID != r.ID || accepted.Attempt != r.Attempt || accepted.Session != r.Session || accepted.Machine != r.Machine || !accepted.ReleaseConfirmed {
 		return nil, nil
 	}
-	if (accepted.State == "succeeded" && r.Success && !r.Interrupted && maps.Equal(accepted.OutputRefs, r.OutputRefs)) || (accepted.State == "cancelled" && len(accepted.OutputRefs) == 0) {
+	if accepted.State == "succeeded" && r.Success && !r.Interrupted && maps.Equal(accepted.OutputRefs, r.OutputRefs) {
 		execution := r.Execution
 		return &execution, nil
 	}
