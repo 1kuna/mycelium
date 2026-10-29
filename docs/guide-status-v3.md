@@ -54,12 +54,15 @@ Old workers without samples retain startup storage figures.
 Sampling uses at most five bounded observations per heartbeat, outside the queue.
 Local probes use the existing 25 ms budget; the checkpoint/NAS probe uses the
 existing 750 ms heartbeat filesystem budget. Samples are timestamped at operation
-completion. Local readings and older workers retain the three-cycle freshness
+completion. Local readings retain the three-cycle freshness
 window plus the 850 ms sampling budget (3.85 seconds at a one-second heartbeat).
 
-A pending checkpoint capacity operation retains its last good reading while it
-makes progress, using the same 30-second per-operation stall backstop as root
-reachability. `retained: true` and `probe_age_seconds` distinguish the pending
+A successful checkpoint capacity reading remains usable until 30 seconds after
+completion, even without pending-probe metadata. Freshness follows measured
+sampler progress rather than the nominal heartbeat cadence. A pending checkpoint
+capacity operation retains its last good reading using the same 30-second
+per-operation stall backstop as root reachability.
+`retained: true` and `probe_age_seconds` distinguish the pending
 operation's age from the last sample's `age_seconds`. Successful slow `Statfs`
 calls have exceeded the old freshness window. The cost of retention is up to
 30 seconds of older capacity evidence; a completed I/O error, cold root or stalled

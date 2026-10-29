@@ -515,7 +515,10 @@ Unstarted retries, re-delivery and queue restarts never renew it. Older unfinish
 production records without the field receive the same default from their original submission.
 For a dependent job, its generated window starts at dependency readiness; for
 each physical fan-out child it starts at that child's assignment. The declared
-length survives both transitions. No preparation step or unstarted retry renews it.
+length survives both transitions. A logical fan-out parent's generated cutoff
+does not expire its capacity wait, even before its first child is assigned. Use
+an explicit absolute `start_by` or `give_up_at` to bound that orchestration wait.
+No preparation step or unstarted retry renews a physical child's cutoff.
 Retained jobs from before this declaration existed preserve their stored cutoff
 as absolute: older records did not record whether it was generated or submitted.
 

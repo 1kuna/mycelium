@@ -269,9 +269,10 @@ inputs along with submitted common inputs. Register subsequent consumers against
 this stage's parent ID, then wait only on the final job. No caller-side gather wait
 is needed. Membership and accepted bindings survive queue restart.
 
-The logical consumer's generated deadline begins at readiness. Each executing
-child inherits `start_window` and gets that full relative budget from its own
-assignment, including later waves. An explicit absolute `start_by` takes
+The logical consumer's generated deadline is recorded at readiness but does not
+expire the parent while it waits for capacity, including before the first wave.
+Each executing child inherits `start_window` and gets that full relative budget
+from its own assignment, including later waves. An explicit absolute `start_by` takes
 precedence and is preserved by every child instead. If it expires before all
 pieces are assigned, the tail never dispatches. Materialized children keep their
 own startup/recovery windows and accepted commands may finish; the parent fails
