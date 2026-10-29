@@ -20,7 +20,7 @@ func TestRequestTimingSlowHandler(t *testing.T) {
 	defer log.SetOutput(old)
 	waiting := make(chan struct{})
 	done := make(chan struct{})
-	mux := http.NewServeMux()
+	mux := newRequestMux()
 	mux.HandleFunc("POST /test/{id}", func(w http.ResponseWriter, r *http.Request) {
 		close(waiting)
 		err := q.updateRequest(r.Context(), func() error {
@@ -39,7 +39,7 @@ func TestRequestTimingSlowHandler(t *testing.T) {
 		defer close(done)
 		r := httptest.NewRequest("POST", "/test/private-id?token=private-query", strings.NewReader("private-body"))
 		r.Header.Set("Authorization", "Bearer private-token")
-		q.measureRequests(mux).ServeHTTP(httptest.NewRecorder(), r)
+		q.measureRequests(mux, mux.patterns).ServeHTTP(httptest.NewRecorder(), r)
 	}()
 	<-waiting
 	<-time.After(25 * time.Millisecond)
@@ -182,5 +182,47 @@ func TestRequestTimingControlTransactions(t *testing.T) {
 				t.Fatal("queue transaction was not attributed")
 			}
 		})
+	}
+}
+
+type delayedRequestResponse struct{ *httptest.ResponseRecorder }
+
+func (w delayedRequestResponse) WriteHeader(status int) {
+	<-time.After(1100 * time.Millisecond)
+	w.ResponseRecorder.WriteHeader(status)
+}
+
+func TestRequestTimingConnectRedirectPrivacy(t *testing.T) {
+	q, _ := fixture(t)
+	var logs bytes.Buffer
+	old := log.Writer()
+	log.SetOutput(&logs)
+	defer log.SetOutput(old)
+	h := API{Queue: q, Token: "secret"}.Handler()
+	for i := 0; i < requestLatencyRoutes+5; i++ {
+		// Both early unauthenticated responses and authenticated mux dispatch can
+		// obtain concrete redirect paths. Neither may enter the route table.
+		for _, token := range []string{"wrong", "secret"} {
+			r := httptest.NewRequest("CONNECT", fmt.Sprintf("http://queue/models/private-model-%d", i), nil)
+			r.Header.Set("Authorization", "Bearer "+token)
+			h.ServeHTTP(httptest.NewRecorder(), r)
+		}
+	}
+	summary := q.requestLatencies.snapshot()
+	if len(summary) != 1 || summary[0].Route != "unmatched" {
+		t.Fatal(summary)
+	}
+	r := httptest.NewRequest("CONNECT", "http://queue/models/private-model-slow", nil)
+	r.Header.Set("Authorization", "Bearer secret")
+	h.ServeHTTP(delayedRequestResponse{httptest.NewRecorder()}, r)
+	if line := logs.String(); strings.Contains(line, "private-model") || !strings.Contains(line, `event=slow_request route="unmatched"`) {
+		t.Fatal(line)
+	}
+	r = httptest.NewRequest("GET", "/api/jobs/missing", nil)
+	r.Header.Set("Authorization", "Bearer secret")
+	h.ServeHTTP(httptest.NewRecorder(), r)
+	summary = q.requestLatencies.snapshot()
+	if len(summary) != 2 || summary[0].Route != "GET /api/jobs/{id}" {
+		t.Fatal("legitimate route blocked by CONNECT traffic", summary)
 	}
 }

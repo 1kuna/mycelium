@@ -127,7 +127,7 @@ func (q *Queue) approveEnrollmentRelease(approval EnrollmentReleaseApproval, req
 		return q.applyEnrollmentRelease(approved, approval.AllowDowngrade)
 	}, nil)
 }
-func (a API) registerEnrollmentRelease(mux *http.ServeMux) {
+func (a API) registerEnrollmentRelease(mux *requestMux) {
 	mux.HandleFunc("POST /api/invites/release", func(w http.ResponseWriter, r *http.Request) {
 		var approval EnrollmentReleaseApproval
 		if !decode(w, r, &approval) {

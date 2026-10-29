@@ -138,7 +138,7 @@ func (w *requestResponse) Flush() {
 	_ = http.NewResponseController(w.ResponseWriter).Flush()
 }
 
-func (q *Queue) measureRequests(next http.Handler) http.Handler {
+func (q *Queue) measureRequests(next http.Handler, registered ...map[string]struct{}) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s := &requestSpan{started: time.Now()}
 		r = r.WithContext(context.WithValue(r.Context(), requestSpanKey{}, s))
@@ -150,9 +150,11 @@ func (q *Queue) measureRequests(next http.Handler) http.Handler {
 			wait, hold, lastUnlock, measured := s.wait, s.hold, s.lastUnlock, s.measured
 			s.mu.Unlock()
 			duration := ended.Sub(s.started)
-			route := r.Pattern
-			if route == "" {
-				route = "unmatched"
+			route := "unmatched"
+			if len(registered) > 0 {
+				if _, ok := registered[0][r.Pattern]; ok {
+					route = r.Pattern
+				}
 			}
 			q.requestLatencies.record(route, duration)
 			if duration <= requestSlowThreshold {
@@ -220,4 +222,21 @@ func (s *requestSpan) observe(wait, hold time.Duration, unlocked time.Time) {
 		s.lastUnlock = unlocked
 	}
 	s.measured = true
+}
+
+// ServeMux can return a concrete redirect path as its pattern (notably for
+// CONNECT). Record the actual registration strings and whitelist at completion,
+// after dispatch has had its final opportunity to overwrite Request.Pattern.
+// Registration finishes before any request is served; the map is read-only then.
+type requestMux struct {
+	*http.ServeMux
+	patterns map[string]struct{}
+}
+
+func newRequestMux() *requestMux {
+	return &requestMux{ServeMux: http.NewServeMux(), patterns: make(map[string]struct{})}
+}
+func (m *requestMux) HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request)) {
+	m.ServeMux.HandleFunc(pattern, handler)
+	m.patterns[pattern] = struct{}{}
 }

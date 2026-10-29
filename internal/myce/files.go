@@ -449,7 +449,7 @@ func (s *FileStore) serveBlob(w http.ResponseWriter, r *http.Request, metadata b
 	w.Header().Set("Cache-Control", "private, immutable")
 	http.ServeContent(w, r, hash, time.Time{}, f)
 }
-func (a API) registerFiles(mux *http.ServeMux) {
+func (a API) registerFiles(mux *requestMux) {
 	mux.HandleFunc("GET /api/files/config", func(w http.ResponseWriter, r *http.Request) { respond(w, FileConfig{a.Queue.fileCheckpoints}, nil) })
 	if a.Queue.files == nil {
 		return

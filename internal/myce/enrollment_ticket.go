@@ -80,7 +80,7 @@ func enrollmentTicketRejected() error {
 	return &HTTPError{Status: 403, Code: "invite_rejected", Message: "invite expired, already used, or does not match this queue"}
 }
 
-func (a API) registerInvites(mux *http.ServeMux, pin string) {
+func (a API) registerInvites(mux *requestMux, pin string) {
 	mux.HandleFunc("/api/invites/redeem", func(w http.ResponseWriter, r *http.Request) { a.redeemInvite(w, r, pin) })
 	mux.HandleFunc("POST /api/invites", func(w http.ResponseWriter, r *http.Request) {
 		if r.TLS == nil || !validPin(pin) {

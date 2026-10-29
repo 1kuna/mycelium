@@ -243,7 +243,7 @@ func (q *Queue) hostMaintenanceStatus(host string) HostMaintenanceStatus {
 	out.Quiescent = freshEvidence && len(out.Workers) > 0 && q.maintenanceBlocked(host) && len(obligations) == 0 && len(out.PendingCleanup) == 0
 	return out
 }
-func (a API) registerHostMaintenance(mux *http.ServeMux) {
+func (a API) registerHostMaintenance(mux *requestMux) {
 	mux.HandleFunc("GET /api/hosts/{id}/maintenance", func(w http.ResponseWriter, r *http.Request) {
 		status, err := a.Queue.HostMaintenanceStatus(r.PathValue("id"), r.Context())
 		respondOperation(w, status, err, "host_control_invalid")

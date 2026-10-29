@@ -44,7 +44,7 @@ func (c *devClock) advance(seconds float64) (time.Time, error) {
 	return RealClock{}.Now().Add(c.offset), nil
 }
 
-func (a API) registerDevClock(mux *http.ServeMux) {
+func (a API) registerDevClock(mux *requestMux) {
 	clock, ok := a.Queue.clock.(*devClock)
 	if !ok {
 		return

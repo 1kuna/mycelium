@@ -27,7 +27,7 @@ func (a API) Handler() http.Handler { return a.handler("") }
 func (a API) HandlerWithJoiningIdentity(pin string) http.Handler { return a.handler(pin) }
 
 func (a API) handler(joiningPin string) http.Handler {
-	mux := http.NewServeMux()
+	mux := newRequestMux()
 	a.registerInvites(mux, joiningPin)
 	a.registerEnrollmentRelease(mux)
 	a.registerEnrollment(mux)
@@ -305,7 +305,7 @@ func (a API) handler(joiningPin string) http.Handler {
 			return
 		}
 		mux.ServeHTTP(w, r)
-	}))
+	}), mux.patterns)
 }
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	limit := int64(1 << 20)

@@ -261,7 +261,7 @@ func (q *Queue) SetPriorityPolicy(expected uint64, p PriorityPolicy, requestCont
 	}, nil)
 	return out, err
 }
-func (a API) registerPriorityPolicy(mux *http.ServeMux) {
+func (a API) registerPriorityPolicy(mux *requestMux) {
 	mux.HandleFunc("GET /api/policy", func(w http.ResponseWriter, r *http.Request) { respond(w, a.Queue.PriorityPolicy(r.Context()), nil) })
 	mux.HandleFunc("PUT /api/policy", func(w http.ResponseWriter, r *http.Request) {
 		var request struct {

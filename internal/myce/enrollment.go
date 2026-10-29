@@ -43,7 +43,7 @@ type EnrollmentResult struct {
 	Maintenance HostMaintenance
 }
 
-func (a API) registerEnrollment(mux *http.ServeMux) {
+func (a API) registerEnrollment(mux *requestMux) {
 	mux.HandleFunc("GET /api/workers/{id}/enrollment", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		out, err := a.Queue.enrollmentObservation(r.PathValue("id"), r.URL.Query().Get("session"), r.Context())
