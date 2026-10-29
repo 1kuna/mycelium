@@ -23,8 +23,12 @@ projects:
 The optional `projects` mapping uses the existing project settings, including
 weights, allowed machines and experiment caps. Omitted weights default to one.
 Omitting `projects` preserves existing settings; supplying it replaces the map.
-There is no second project priority store. Existing project configuration remains
-available and advances the same revision when it changes settings.
+There is no second project priority store. `queue --project-config` and
+`dev --project-config` seed settings only when no policy has been stored. Once
+stored, the live SQLite policy is authoritative: restarting or reinstalling with
+the same or edited project config does not replace it or advance its revision.
+To deliberately change settings, export the current policy, edit its `projects`
+mapping, and import it with `myce policy set FILE --if-revision N` as below.
 
 Within each tier, fitting projects take turns by weighted recent usage before
 model/environment warmth. Usage has a 24-hour half-life and separate stable
