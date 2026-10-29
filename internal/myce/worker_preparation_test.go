@@ -124,13 +124,13 @@ func TestWorkerPreparationUnidentifiedLiveMember(t *testing.T) {
 	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
 	clock := &workerFakeClock{now: time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)}
 	store := &workerStore{state: workerState{PID: cmd.Process.Pid, Identity: ID()}}
-	if err := store.cleanupOrphan(clock); err == nil {
+	if err := store.cleanupOrphanCustody(clock, true); err == nil {
 		t.Fatal("released live helper after unavailable member inspection")
 	}
 	if err := os.Remove(filepath.Join(bin, "ps")); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.cleanupOrphan(clock); err == nil {
+	if err := store.cleanupOrphanCustody(clock, true); err == nil {
 		t.Fatal("released live helper with missing marker")
 	}
 	if err := cmd.Process.Signal(syscall.Signal(0)); err != nil {
@@ -140,7 +140,7 @@ func TestWorkerPreparationUnidentifiedLiveMember(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = cmd.Wait()
-	if err := store.cleanupOrphan(clock); err != nil {
+	if err := store.cleanupOrphanCustody(clock, true); err != nil {
 		t.Fatal("empty group retained custody", strconv.Itoa(cmd.Process.Pid), err)
 	}
 }

@@ -47,5 +47,5 @@ func (s *workerStore) cleanupPreparation(clock Clock) error {
 		return errors.New("invalid helper custody")
 	}
 	helper := &workerStore{dir: s.dir, stateName: name, state: state}
-	return helper.cleanupOrphan(clock)
+	return helper.cleanupOrphanCustody(clock, true)
 }
