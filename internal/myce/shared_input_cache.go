@@ -381,7 +381,7 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 			files["."] = s.ref()
 		}
 	}
-	if err = makeSharedReadOnly(dst); err != nil {
+	if err = makeSharedReadOnlyContext(ctx, dst); err != nil {
 		return err
 	}
 	b, err := json.Marshal(sharedEntry{files})
@@ -391,7 +391,7 @@ func (c *SharedInputCache) populateInput(ctx context.Context, s SharedInput, nas
 	if err = os.WriteFile(filepath.Join(stage, "ready.json"), b, 0400); err != nil {
 		return err
 	}
-	return syncModelDirectory(stage)
+	return syncModelDirectoryContext(ctx, stage)
 }
 
 func copySharedFile(ctx context.Context, source, target string, ref FileRef) error {
@@ -442,7 +442,13 @@ func copySharedFile(ctx context.Context, source, target string, ref FileRef) err
 }
 
 func makeSharedReadOnly(root string) error {
+	return makeSharedReadOnlyContext(context.Background(), root)
+}
+func makeSharedReadOnlyContext(ctx context.Context, root string) error {
 	return filepath.WalkDir(root, func(p string, d os.DirEntry, e error) error {
+		if err := sharedInputProgress(ctx); err != nil {
+			return err
+		}
 		if e != nil {
 			return e
 		}
@@ -450,11 +456,17 @@ func makeSharedReadOnly(root string) error {
 		if e != nil {
 			return e
 		}
+		if err := sharedInputProgress(ctx); err != nil {
+			return err
+		}
 		mode := os.FileMode(0400) | info.Mode().Perm()&0111
 		if d.IsDir() {
 			mode = 0500
 		}
-		return os.Chmod(p, mode)
+		if err := os.Chmod(p, mode); err != nil {
+			return err
+		}
+		return sharedInputProgress(ctx)
 	})
 }
 func verifySharedEntry(ctx context.Context, root string, files FileManifest) error {

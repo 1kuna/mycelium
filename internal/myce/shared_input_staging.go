@@ -23,7 +23,7 @@ func sharedInputProgress(ctx context.Context) error {
 	if progress, ok := ctx.Value(ioProgressKey{}).(func()); ok {
 		progress()
 	}
-	return nil
+	return ctx.Err()
 }
 
 func sharedInputPath(ctx context.Context, root, relative string) (string, error) {

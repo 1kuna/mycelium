@@ -2,6 +2,7 @@ package myce
 
 import (
 	"archive/tar"
+	"context"
 	"errors"
 	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
@@ -44,15 +45,24 @@ func removeSourceInput(root, name string) error {
 }
 
 func extractJobSource(archive, root string) error {
+	return extractJobSourceContext(context.Background(), archive, root)
+}
+func extractJobSourceContext(ctx context.Context, archive, root string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	f, err := os.Open(archive)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
-	tr := tar.NewReader(f)
+	tr := tar.NewReader(contextReader{ctx, f})
 	links := map[string]string{}
 	seen := map[string]bool{}
 	for {
+		if err := sharedInputProgress(ctx); err != nil {
+			return err
+		}
 		h, err := tr.Next()
 		if err == io.EOF {
 			break
@@ -100,6 +110,9 @@ func extractJobSource(archive, root string) error {
 	}
 	// Publish links after regular files, so no archive member can traverse one.
 	for name, target := range links {
+		if err := sharedInputProgress(ctx); err != nil {
+			return err
+		}
 		dest := filepath.Join(root, name)
 		if err = os.MkdirAll(filepath.Dir(dest), 0700); err != nil {
 			return err
