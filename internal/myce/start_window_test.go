@@ -119,6 +119,59 @@ func TestStartWindowSubmissionAndGET(t *testing.T) {
 	}
 }
 
+// A production burst can wait longer than one launch window before the first
+// physical wave fits. Orchestration wait must not expire the uncreated child.
+func TestStartWindowFanOutWaitsForFirstAssignment(t *testing.T) {
+	for _, mode := range []string{"submitted", "dependency-ready", "absolute"} {
+		t.Run(mode, func(t *testing.T) {
+			q, clock, m, s := fanOutFixture(t, 1)
+			s.Outputs = map[string]string{"out": "results"}
+			producer := submit(t, q, s)
+			s.Priority = "production"
+			if mode == "dependency-ready" {
+				s.After = &PieceDependency{Job: producer.ID, Outputs: map[string]string{"input": "item-0/out"}}
+			}
+			if mode == "absolute" {
+				cutoff := clock.Now().Add(ProductionStartTimeout)
+				s.StartBy = &cutoff
+			}
+			waiting := submit(t, q, s)
+			if mode == "dependency-ready" {
+				wave := check(t, q, m, nil).Job
+				if wave == nil || wave.Batch.Parent != producer.ID {
+					t.Fatal("missing producer wave")
+				}
+				finish(t, q, wave, true)
+			}
+			// No worker offers another slot until after the launch budget. Keep
+			// the real persisted parent so restart cannot grant accidental rights.
+			clock.Advance(ProductionStartTimeout + time.Second)
+			q = reopenCancellationQueue(t, q, clock)
+			parent := job(t, q, waiting.ID)
+			if mode == "absolute" {
+				next := check(t, q, m, nil).Job
+				if parent.State != "failed" || next != nil && next.Batch.Parent == waiting.ID {
+					t.Fatal("expired absolute parent dispatched a first wave")
+				}
+				return
+			}
+			if parent.State != "queued" || parent.FanOut.Next != 0 || parent.Attempt != 0 {
+				t.Fatalf("capacity wait expired an unmaterialized parent: %+v", parent)
+			}
+			child := check(t, q, m, nil).Job
+			if child == nil || child.Batch.Parent != waiting.ID || !child.Spec.StartBy.Equal(clock.Now().Add(ProductionStartTimeout)) {
+				t.Fatalf("first assignment lacks its full launch window: %+v", child)
+			}
+			// Assigned preparation is still bounded, even though parent capacity
+			// wait is excluded. A larger staging budget must be declared.
+			clock.Advance(ProductionStartTimeout)
+			if got := job(t, q, child.ID); got.State != "failed" {
+				t.Fatalf("assigned child escaped its launch cutoff: %+v", got)
+			}
+		})
+	}
+}
+
 func TestStartWindowFanOutLaterWave(t *testing.T) {
 	for _, absolute := range []bool{false, true} {
 		t.Run(map[bool]string{false: "relative", true: "absolute"}[absolute], func(t *testing.T) {

@@ -45,7 +45,9 @@ func absoluteStartBy(j *Job) bool {
 }
 
 func (q *Queue) startupPending(j *Job) bool {
-	if j.Spec.FanOut != nil && j.FanOut != nil && j.FanOut.Next > 0 {
+	if j.Spec.FanOut != nil && j.FanOut != nil {
+		// A logical parent holds no launch slot. Its relative window belongs
+		// to each physical child from assignment, including the first wave.
 		if !absoluteStartBy(j) || j.FanOut.Next == len(j.Spec.FanOut.Pieces) {
 			return false
 		}
