@@ -35,10 +35,10 @@ func TestAttemptMemoryCachePressureAndMemberCaps(t *testing.T) {
 		resident, cap       int64
 		member, constrained bool
 	}{
-		{"healthy learned headroom", 8 << 30, 10 << 30, false, false},
+		{"file-backed pressure despite resident headroom", 8 << 30, 10 << 30, false, true},
 		{"near parent ceiling", 19 << 29, 10 << 30, false, true},
 		{"binding member cap", 19 << 29, 10 << 30, true, true},
-		{"member cache reclaim", 2 << 30, 10 << 30, true, false},
+		{"member file-backed pressure", 2 << 30, 10 << 30, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a, err := fakeCeilings(t).create("attempt-parent", tc.cap, 0)

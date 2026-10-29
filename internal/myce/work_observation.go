@@ -277,6 +277,11 @@ func (q *Queue) recordWorkObservation(j *Job, r Result) {
 	}
 	key := identityHash(t.Key)
 	old, exists := q.s.WorkObservations[key]
+	if old.MemoryPeak.constrained() && !old.MemoryPeak.Constrained {
+		peak := *old.MemoryPeak
+		peak.Constrained = true
+		old.MemoryPeak = &peak
+	}
 	if q.s.WorkObservations == nil {
 		q.s.WorkObservations = map[string]WorkObservation{}
 	}

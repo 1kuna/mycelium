@@ -95,7 +95,10 @@ if [[ $mode == full ]]; then
   # Includes the real CLI dev/checkpoint/model/onboarding e2e. A separate dev
   # pair would repeat the same tests and builds.
   wait_for_race_slot
-  step race-and-dev go test -race -vet=off -json -p 2 -parallel 4 -count=1 -timeout 15m ./...
+  # The s050 two-core Linux core suite took 896.644s of a 900s budget.
+  # Observe JSON log growth instead of killing healthy package progress;
+  # the release owner stops a run stalled for 20m.
+  step race-and-dev go test -race -vet=off -json -p 2 -parallel 4 -count=1 -timeout 0 ./...
 else
   while IFS=$'\t' read -r dir names; do
     package=$(go list "./$dir")

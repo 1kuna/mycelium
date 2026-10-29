@@ -91,12 +91,12 @@ needs:
 Without a prior peak or submitter hint, the first run explores using available
 host headroom. A successful solo run with an unconstrained host-memory peak
 teaches later comparable jobs. The same host uses the accepted peak with 25%
-headroom; estimates from another host use the existing larger margins. An OOM
-or constrained auto attempt clears comparable memory peaks. `memory.events`
-`max > 0` or `high > 0` marks the peak constrained when sampled resident memory
-(anon + kernel + shmem) reaches at least 90% of the parent's or a member's own
-cap. Healthy learned reuse sits near 80% with 25% headroom; the 90% threshold
-keeps ordinary file-cache reclaim with low resident use learnable. To get a
+headroom over the larger resident/total cgroup peak; estimates from another host
+use the existing larger margins. An OOM or constrained auto attempt clears
+comparable memory peaks. Any `memory.events` `max > 0` or `high > 0` marks the
+peak constrained, including capped members and file-backed pressure with low
+resident-only use. Older-worker results and stored pressure samples are excluded
+as well. File-heavy jobs may reserve more memory or explore again. To get a
 measured-need run after hitting the ceiling, submit the same comparable work with
 `memory: auto` and no submitter hint: the next run explores available headroom,
 labelled `exploratory (previous peak constrained)` when a constrained peak

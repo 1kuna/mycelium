@@ -32,8 +32,10 @@ commands, and signals individual PIDs. The old 175-second
 deadline left only 19 seconds for builds/vet after an
 observed 156-second related-test selection, and repeatedly truncated passing work
 under shared load (#204). Five minutes keeps quick below the full gate's target
-without reducing test selection. The full
-target is ten minutes. Timings
+without reducing test selection. Full runs have no package-wide wall deadline:
+a healthy two-core Linux core suite has taken nearly fifteen minutes. Observe
+the JSON log stream and stop a run with no log growth for twenty minutes
+rather than killing active tests. Timings
 include build, vet, the three release target builds, test execution and scratch
 cleanup.
 
