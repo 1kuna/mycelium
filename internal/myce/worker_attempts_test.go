@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"encoding/json"
 	"math"
 	"os"
 	"os/exec"
@@ -324,6 +325,78 @@ func TestAttemptCleanupPreservesOrdinaryStopIntent(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// Group custody alone is not evidence of native sidecars. Cancellation in the
+// attempt record, without a separate stop receipt, must also skip helper grace.
+func TestAttemptCleanupUserCancelWithoutSidecars(t *testing.T) {
+	for _, nativeRecord := range []bool{false, true} {
+		name := "ordinary_group"
+		if nativeRecord {
+			name = "native_main_only"
+		}
+		t.Run(name, func(t *testing.T) {
+			dir, identity := t.TempDir(), ID()
+			ready, term := filepath.Join(dir, "ready"), filepath.Join(dir, "term")
+			cmd := exec.Command("sh", "-c", `trap 'touch "$2"' TERM; touch "$1"; while :; do sleep .01; done`, "fixture", ready, term)
+			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); _ = cmd.Wait() }()
+			nativeFile(t, dir, "ready")
+			birth, err := processBirth(cmd.Process.Pid)
+			if err != nil {
+				t.Fatal(err)
+			}
+			clock := &manualWorkerClock{now: time.Date(2026, 10, 29, 21, 0, 0, 0, time.UTC)}
+			deadline := clock.Now().Add(15 * time.Second)
+			st := workerState{Identity: identity, PID: cmd.Process.Pid, UserCancel: true, StopAt: &deadline, StopGrace: 15 * time.Second,
+				Groups: map[int]map[int]string{cmd.Process.Pid: {cmd.Process.Pid: birth}}}
+			if err := saveWorkerJSON(dir, "attempt-"+identity+".json", st); err != nil {
+				t.Fatal(err)
+			}
+			if nativeRecord {
+				if err := saveWorkerJSON(dir, "native-"+identity+".json", struct {
+					Identity string
+					Members  []nativeMember
+				}{identity, []nativeMember{{Name: "main", PID: cmd.Process.Pid, Birth: birth}}}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			store := &workerStore{dir: dir, state: workerState{Identity: identity, PID: cmd.Process.Pid, Job: &Job{Spec: spec("experiment")}}}
+			done := make(chan struct{})
+			var cleanupErr error
+			go func() { cleanupErr = store.cleanupOrphan(clock); close(done) }()
+			defer func() {
+				clock.Advance(time.Hour)
+				select {
+				case <-done:
+				case <-time.After(testWaitTimeout):
+					t.Error("cleanup did not join after fixture clock advanced")
+				}
+			}()
+			select {
+			case <-done:
+				if cleanupErr != nil {
+					t.Fatal(cleanupErr)
+				}
+			case <-time.After(testWaitTimeout):
+				t.Fatal("no-sidecar cancellation acquired accelerator grace")
+			}
+			if _, err := os.Stat(term); !os.IsNotExist(err) {
+				t.Fatal("no-sidecar cancellation repeated TERM", err)
+			}
+			data, err := os.ReadFile(filepath.Join(dir, "attempt-"+identity+".json"))
+			var saved workerState
+			if err != nil || json.Unmarshal(data, &saved) != nil {
+				t.Fatal("read saved cancellation", err)
+			}
+			if saved.StopAt == nil || !saved.StopAt.Equal(deadline) || !saved.UserCancel || saved.SidecarStopAt != nil {
+				t.Fatal("no-sidecar cancellation changed saved stop intent", saved)
+			}
+		})
 	}
 }
 
