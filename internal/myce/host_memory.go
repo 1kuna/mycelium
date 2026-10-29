@@ -4,6 +4,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"time"
 )
 
 func hostID(m *Machine) string {
@@ -93,15 +94,14 @@ func (q *Queue) refreshHostMemory() {
 		if allowance.Bytes > 0 {
 			m.HostMemoryQualification = "UNQUALIFIED"
 		}
-		if m.hostBudgetGB > 0 {
-			available = min(available, m.hostBudgetGB)
-		}
 		m.EffectiveHostMemoryBudgetGB = m.hostBudgetGB
-		reserved := 0.0
+		reserved, growth := 0.0, 0.0
 		for _, j := range q.liveJobs() {
 			owner := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
 			if !j.ReleaseConfirmed && owner != nil && hostID(owner) == hostID(m) && (j.State == "running" || j.State == "stopping") {
-				reserved += hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
+				need := hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
+				reserved += need
+				growth += remainingHostGrowth(need, q.hostMemorySamples[j.Machine][jobKey(*j)], q.clock.Now())
 			}
 		}
 		for _, r := range q.s.HostReleases {
@@ -113,17 +113,26 @@ func (q *Queue) refreshHostMemory() {
 				continue
 			}
 			reserved += r.HostChargeGB
+			growth += r.HostChargeGB
 		}
 		for _, s := range q.s.ModelSlots {
 			owner := slotMachine(q.s.Machines[s.Machine], s)
 			if owner != nil && slotReservesMemory(s) && hostID(owner) == hostID(m) {
 				model, _ := q.model(s.Model)
-				reserved += hostNeed(owner, model.MemoryGB, model.HostMemoryGB)
+				need := hostNeed(owner, model.MemoryGB, model.HostMemoryGB)
+				reserved += need
+				growth += need
 			}
 		}
 		m.HostMemoryInUseGB = reserved
-		m.hostReservationDebtGB = max(0, reserved-available)
-		m.FreeHostMemoryGB = max(0, available-reserved)
+		// Availability already has the operator reserve removed. Full envelopes
+		// still consume the static budget; only unused growth consumes live RAM.
+		room := available - growth
+		if m.hostBudgetGB > 0 {
+			room = min(room, m.hostBudgetGB-reserved)
+		}
+		m.hostReservationDebtGB = max(0, -room)
+		m.FreeHostMemoryGB = max(0, room)
 	}
 }
 
@@ -358,4 +367,40 @@ func (q *Queue) reclaimableGPUMemory(m *Machine, priority string, identity ...Sp
 // same declared need/slack. The queue separately accounts for reservations.
 func hostMemoryAvailableFits(m *Machine, gpu, host, available float64) bool {
 	return validMemoryValue(available) && available >= hostNeed(m, gpu, host)
+}
+
+// CurrentHostMemory credits only nonreclaimable, uniquely charged cgroup RAM.
+// Peaks and RSS (shared pages on macOS) cannot safely reduce growth room.
+type CurrentHostMemory struct {
+	NonreclaimableGB float64 `json:"nonreclaimable_gb"`
+	AgeSeconds       float64 `json:"age_seconds"`
+	sampledAt        time.Time
+}
+
+// Actors refresh every <=100 ms. Five seconds bounds cached credit through a
+// delayed heartbeat; losing credit costs utilization, never envelope protection.
+const hostMemorySampleFreshFor = 5 * time.Second
+
+type hostMemorySample struct {
+	gb float64
+	at time.Time
+}
+
+func remainingHostGrowth(reservation float64, sample hostMemorySample, now time.Time) float64 {
+	if sample.at.IsZero() || now.Before(sample.at) || now.Sub(sample.at) >= hostMemorySampleFreshFor || !validMemoryValue(sample.gb) {
+		return reservation
+	}
+	return max(0, reservation-sample.gb)
+}
+
+func currentHostMemorySamples(reports []AttemptReport, now time.Time) map[attemptKey]hostMemorySample {
+	samples := map[attemptKey]hostMemorySample{}
+	for _, r := range reports {
+		sample := r.CurrentHostMemory
+		if !r.Started || sample == nil || !validMemoryValue(sample.NonreclaimableGB) || !validMemoryValue(sample.AgeSeconds) || sample.AgeSeconds >= hostMemorySampleFreshFor.Seconds() {
+			continue
+		}
+		samples[attemptKey{r.ID, r.Attempt, r.Session}] = hostMemorySample{sample.NonreclaimableGB, now.Add(-time.Duration(sample.AgeSeconds * float64(time.Second)))}
+	}
+	return samples
 }

@@ -472,3 +472,30 @@ func drmAttemptMemory(b []byte, pci string) (string, float64, error) {
 	}
 	return pdev + "/" + client, total, nil
 }
+
+// memory.current includes reclaimable file cache that MemAvailable already
+// counts as available. Credit anonymous resident pages only, not total/peak/RSS.
+// Cgroup charging counts shared pages once across disjoint attempt subtrees.
+func (a *memoryAttempt) currentHostMemory(clock Clock) *CurrentHostMemory {
+	if a == nil {
+		return nil
+	}
+	at := clock.Now()
+	b, err := a.fs.ReadFile(filepath.Join(a.path, "memory.stat"))
+	if err != nil {
+		return nil
+	}
+	anon, ok := memoryCounters(b)["anon"]
+	if !ok {
+		return nil
+	}
+	b, err = a.fs.ReadFile(filepath.Join(a.path, "memory.current"))
+	if err != nil {
+		return nil
+	}
+	current, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64)
+	if err != nil {
+		return nil
+	}
+	return &CurrentHostMemory{NonreclaimableGB: float64(min(anon, current)) / (1 << 30), sampledAt: at}
+}

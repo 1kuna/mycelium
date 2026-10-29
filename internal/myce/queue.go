@@ -98,6 +98,9 @@ type Queue struct {
 	deliveryMu      sync.Mutex
 	deliveryActive  *deliveryOperation                          // q.mu; one outstanding NAS publication per root.
 	deliveryPublish func(Job, *FileStore, string, func()) error // Test seam; set before use.
+	// Ephemeral exact-attempt samples: restart cannot renew a cached credit.
+	hostMemorySamples map[string]map[attemptKey]hostMemorySample
+
 	// Built once on a read-only cancellation projection, never on the live queue.
 	cancellationMembersByParent map[string][]*Job
 
@@ -1004,6 +1007,7 @@ func (q *Queue) Checkin(c Checkin) (Reply, error) {
 }
 
 func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
+	memoryReceivedAt := q.clock.Now()
 	if err := ctx.Err(); err != nil {
 		return Reply{}, err
 	}
@@ -1211,6 +1215,10 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 				q.alertAttemptLoss(j, attemptOutcome(j, r), false)
 			}
 		}
+		if q.hostMemorySamples == nil {
+			q.hostMemorySamples = map[string]map[attemptKey]hostMemorySample{}
+		}
+		q.hostMemorySamples[m.ID] = currentHostMemorySamples(reports, memoryReceivedAt)
 		q.refreshHostMemory()
 		q.acceptCurveReports(c, &m)
 		q.reconcilePreparationPlans(c)

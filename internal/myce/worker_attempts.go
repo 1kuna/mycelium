@@ -197,6 +197,23 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			}
 		}
 		report := AttemptReport{Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}, Session: a.job.Session, Started: p != nil && (p.docker == nil || p.docker.status() == "running") && (p.native == nil || p.native.started())}
+
+		if report.Started {
+			var memory *memoryAttempt
+			switch {
+			case p.native != nil:
+				memory = p.native.memory
+			case p.docker != nil:
+				memory = p.docker.envelope()
+			case s.state.Cgroup != "":
+				var fs memoryFS = osMemoryFS{}
+				if w.memoryCeilings != nil {
+					fs = w.memoryCeilings.fs
+				}
+				memory = &memoryAttempt{fs: fs, path: s.state.Cgroup}
+			}
+			report.CurrentHostMemory = memory.currentHostMemory(w.Clock)
+		}
 		if s.state.Job != nil {
 			report.InputsStagedAt = s.state.Job.InputsStagedAt
 			if s.state.Result != nil {
@@ -478,9 +495,12 @@ func newAttemptStore(root *workerStore, j Job) (*workerStore, error) {
 func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport) error {
 	cores, why := cpuCapacity(&w.Machine)
 	usedCores, usedRAM := next.Spec.Needs.cores(), localJobHostNeed(w, next)
+	growth := usedRAM
 	for _, j := range jobs {
 		usedCores += j.Spec.Needs.cores()
-		usedRAM += localJobHostNeed(w, j)
+		need := localJobHostNeed(w, j)
+		usedRAM += need
+		growth += remainingHostGrowth(need, w.hostMemorySamples[jobKey(j)], w.Clock.Now())
 		if !next.Spec.Needs.cpuOnly() && slices.Contains(j.AllocatedDevices, firstDevice(next, w.Machine)) {
 			return fmt.Errorf("%w: device already has a batch attempt", errWorkerMemory)
 		}
@@ -493,7 +513,9 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport)
 			usedCores++
 			for _, m := range w.ModelConfig.Models {
 				if m.Name == r.Name {
-					usedRAM += hostNeed(allocationMachine(&w.Machine, []string{r.Device}), m.MemoryGB, m.HostMemoryGB)
+					need := hostNeed(allocationMachine(&w.Machine, []string{r.Device}), m.MemoryGB, m.HostMemoryGB)
+					usedRAM += need
+					growth += need
 				}
 			}
 		}
@@ -522,7 +544,19 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport)
 	if why != "" || usedCores > cores || w.Machine.HostMemoryBudgetGB > 0 && usedRAM > w.Machine.HostMemoryBudgetGB {
 		return fmt.Errorf("%w: aggregate CPU/RAM allowance", errWorkerMemory)
 	}
-	return w.checkHostRAM(next.Spec.Needs.MemoryGB, next.Spec.Needs.HostMemoryGB)
+	if err := w.checkHostMemoryBudget(next.Spec.Needs.MemoryGB, next.Spec.Needs.HostMemoryGB); err != nil {
+		return err
+	}
+	if next.Spec.Needs.HostMemoryGB > 0 {
+		if w.HostMemorySource == nil {
+			return fmt.Errorf("%w: host RAM source unavailable", errWorkerMemory)
+		}
+		free, err := w.HostMemorySource(context.Background())
+		if err != nil || !validMemoryValue(free) || free < growth {
+			return fmt.Errorf("%w: host RAM growth need %g GiB, available %g GiB", errWorkerMemory, growth, free)
+		}
+	}
+	return nil
 }
 func localJobHostNeed(w Worker, j Job) float64 {
 	m := w.Machine
@@ -655,6 +689,11 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				requestRetention("", now)
 				retry = workerRetry{}
 				continue
+			}
+
+			if report.CurrentHostMemory != nil {
+				sample := *report.CurrentHostMemory
+				report.CurrentHostMemory = &sample
 			}
 			reports = append(reports, report)
 			diagnostics.CheckpointUnavailable = diagnostics.CheckpointUnavailable || status.CheckpointUnavailable
@@ -854,6 +893,14 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			rt.memoryMachine, rt.session = w.Machine, w.Machine.Session
 			rt.batchJobs = slices.Clone(jobs)
 			rt.mu.Unlock()
+
+			// Age the actor snapshot at send time, including any intervening probes.
+			for i := range reports {
+				if sample := reports[i].CurrentHostMemory; sample != nil {
+					sample.AgeSeconds = w.Clock.Now().Sub(sample.sampledAt).Seconds()
+				}
+			}
+			w.hostMemorySamples = currentHostMemorySamples(reports, w.Clock.Now())
 			reply, err := w.checkin(ctx, Checkin{Machine: m, Attempts: reports, Recovering: recovering, Fresh: fresh, PreviousSession: root.state.PreviousSession, ModelReports: modelReports})
 			if err == nil {
 				if receiptErr := saveEnrollmentReceipt(root.dir, m); receiptErr != nil {
