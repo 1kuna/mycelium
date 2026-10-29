@@ -6,8 +6,10 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -113,6 +115,11 @@ func extensionCommand(args []string) error {
 			return nil
 		}
 		if args[0] == "check" {
+			f.Visit(func(flag *flag.Flag) {
+				if flag.Name == "root" {
+					warnExtensionCheckRoot(os.Stderr, *config, *root)
+				}
+			})
 			target, err := myce.ResolveExtensionCheckTarget(ctx, client, *host, *platform, *device, *environmentRoot)
 			if err != nil {
 				return err
@@ -165,5 +172,38 @@ func extensionCommand(args []string) error {
 		return errors.New("extension not installed")
 	default:
 		return errors.New("unknown extension command")
+	}
+}
+
+// Qualification reports belong to the root checked; they are not transferred
+// to an installed worker. Inspect local configuration even with explicit queue
+// credentials, which bypass installed authority resolution.
+func warnExtensionCheckRoot(out io.Writer, config, root string) {
+	home, _ := os.UserHomeDir()
+	paths := []string{config, filepath.Join(home, ".local", "share", "mycelium", "worker", "config.json")}
+	for _, path := range paths {
+		if path == "" {
+			continue
+		}
+		c, err := myce.ReadServiceConfig(path)
+		if err != nil || c.Role != "worker" || c.State == "" {
+			continue
+		}
+		workerRoot, err := filepath.Abs(filepath.Join(c.State, "extensions"))
+		if err != nil {
+			return
+		}
+		checkRoot, err := filepath.Abs(root)
+		if err != nil || checkRoot == workerRoot {
+			return
+		}
+		// Relative paths and symlink aliases to the same directory are safe.
+		checkInfo, checkErr := os.Stat(checkRoot)
+		workerInfo, workerErr := os.Stat(workerRoot)
+		if checkErr == nil && workerErr == nil && os.SameFile(checkInfo, workerInfo) {
+			return
+		}
+		fmt.Fprintf(out, "WARNING: checking extension root %q; installed worker extension root is %q. The live worker is not qualified by this check. Rerun with --root %q to qualify the worker.\n", checkRoot, workerRoot, workerRoot)
+		return
 	}
 }
