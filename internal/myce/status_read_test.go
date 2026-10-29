@@ -58,7 +58,7 @@ func TestStatusReadCPUReservation(t *testing.T) {
 			if got == nil {
 				t.Fatal("waiting job missing from response")
 			}
-			if !strings.Contains(got.Reason, "1 cores free of 4 admitted") || got.QueueOrder != 0 {
+			if !strings.Contains(got.Reason, "1 cores unreserved of 4 admitted") || got.QueueOrder != 0 {
 				t.Fatalf("occupied CPU capacity lost: reason=%q queue_order=%d", got.Reason, got.QueueOrder)
 			}
 		})

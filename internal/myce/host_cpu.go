@@ -204,7 +204,7 @@ func cpuWaitingReason(j *Job, machines map[string]*Machine) string {
 			_, reason = cpuCapacity(m)
 		}
 		if reason == "" {
-			reason = fmt.Sprintf("%d cores free of %d admitted", m.FreeCPUCores, m.EffectiveCPUCores)
+			reason = fmt.Sprintf("%d cores unreserved of %d admitted (%d reserved; CPU utilization unknown)", m.FreeCPUCores, m.EffectiveCPUCores, m.CPUInUseCores)
 		}
 		reasons = append(reasons, m.ID+": "+reason)
 	}
