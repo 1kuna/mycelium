@@ -62,7 +62,8 @@ type state struct {
 	LastWorkerContact time.Time `json:"last_worker_contact,omitempty"`
 	NetworkRecoveryAt time.Time `json:"network_recovery_at,omitempty"`
 
-	DeviceMaintenance map[string]map[string]DeviceMaintenance `json:"device_maintenance,omitempty"`
+	ComponentExclusions map[string]ComponentExclusion           `json:"component_exclusions,omitempty"`
+	DeviceMaintenance   map[string]map[string]DeviceMaintenance `json:"device_maintenance,omitempty"`
 
 	Schema           int                        `json:"schema_version"`
 	PreparationPlans map[string]HostLaunch      `json:"preparation_plans,omitempty"`
@@ -1792,6 +1793,7 @@ func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
 	for _, key := range slices.Sorted(maps.Keys(q.s.WorkObservations)) {
 		out.WorkCurves = append(out.WorkCurves, q.s.WorkObservations[key])
 	}
+	out.ComponentExclusions = q.componentExclusions()
 	out.PriorityPolicy = q.priorityPolicyRecord()
 	out.Now = q.clock.Now()
 	order, reasons := q.queueProjection()

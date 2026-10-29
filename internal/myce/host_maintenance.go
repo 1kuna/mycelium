@@ -354,6 +354,9 @@ func (q *Queue) changeHostMaintenance(host string, request HostMaintenanceReques
 		q.s.HostMaintenance = map[string]HostMaintenance{}
 	}
 	policy := q.s.HostMaintenance[host]
+	if request.Action == "resume" && q.s.ComponentExclusions["host="+host].Active {
+		return errors.New("remove the host exclusion before resuming this host")
+	}
 	if request.IfUpdatedAt != nil && !policy.UpdatedAt.Equal(*request.IfUpdatedAt) || request.IfMode != "" && policy.Mode != request.IfMode || request.IfDrainOwner != "" && policy.DrainOwner != request.IfDrainOwner {
 		return ErrStale
 	}
