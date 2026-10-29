@@ -54,6 +54,7 @@ type workerState struct {
 	StopGrace       time.Duration          `json:"stop_grace,omitempty"`
 	UserCancel      bool                   `json:"user_cancel,omitempty"`
 	StopAt          *time.Time             `json:"stop_at,omitempty"`
+	SidecarStopAt   *time.Time             `json:"sidecar_stop_at,omitempty"`
 	Schema          int                    `json:"schema_version"`
 	OperatorStopped bool                   `json:"operator_stopped,omitempty"`
 	Groups          map[int]map[int]string `json:"groups,omitempty"`
@@ -423,7 +424,12 @@ func (s *workerStore) cleanupOrphan(clock Clock, memoryFiles ...memoryFS) (clean
 				if stopIntent != nil {
 					st.StopAt, st.UserCancel = stopIntent.StopAt, stopIntent.UserCancel
 				}
-				if !s.state.Job.Spec.Needs.cpuOnly() && !st.UserCancel {
+				if !s.state.Job.Spec.Needs.cpuOnly() {
+					if st.UserCancel {
+						if err := s.drainCancelledNativeMain(&st, clock, memoryFiles...); err != nil {
+							return err
+						}
+					}
 					if err := gracefulRecoveredGroups(&st, clock, func() error { return saveWorkerJSON(s.dir, "attempt-"+s.state.Identity+".json", st) }, memoryFiles...); err != nil {
 						return err
 					}
@@ -853,6 +859,10 @@ func gracefulRecoveredGroups(st *workerState, clock Clock, persist func() error,
 		if err := persist(); err != nil {
 			return err
 		}
+	}
+	// TERM is idempotent. A crash after deadline persistence but before signal
+	// dispatch must not let cancellation recovery skip helper TERM entirely.
+	if first || st.UserCancel {
 		groups := map[int]bool{}
 		for group := range st.Groups {
 			groups[group] = true

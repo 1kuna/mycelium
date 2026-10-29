@@ -66,13 +66,27 @@ classifier. It accepts durable delivered-signal timestamps preceding the member'
 exit observation, observation loss, Mycelium-side launch/preparation failures, or
 a recorded probe proving foreign ownership of the allocated readiness port.
 Exit codes, stderr and stop intent alone never establish infrastructure cause.
-During checkpoint grace, main receives TERM while helpers stay up;
-after main exit or the shared deadline, cleanup kills and verifies the whole
-process group. Preparation cancellation prevents subsequent members starting.
+CPU checkpoint grace keeps helpers up while main receives TERM; cleanup then
+kills and verifies the subtree. Native accelerator cancellation stops main
+first (TERM, bounded grace, survivor KILL), then sends TERM to the surviving
+sidecars and descendants. Sidecars receive a fresh bounded accelerator grace
+before survivor KILL, even if main exited immediately or a repeated cancellation
+requests force. Helpers stop together after main; no helper-to-helper order is
+promised. Other accelerator stops retain the existing shared group TERM/grace.
+
+Both cancellation phases reuse the worker's accelerator stop grace: 10 seconds
+by default, capped at 15 seconds. The [retained acceptance](https://github.com/1kuna/mycelium/issues/154#issuecomment-6383952291)
+observed main and helper exit within 1.006 seconds of the stop trigger (helper
+TERM-to-exit about 0.769 seconds). The existing default leaves room for device
+work to drain; it is not a guarantee against GPU driver faults. Sequential
+cancellation can take up to 20 seconds by default, or 30 seconds at the cap,
+before subtree cleanup. Existing production start deadlines are unchanged.
+
+Preparation cancellation prevents subsequent members starting.
 Before any payload gate opens, the existing durable attempt record holds its
 PGID, member PID birth identities, and the aggregate cgroup when configured.
-Restart authenticates surviving members, kills the whole group and cgroup, and
-verifies release before reporting completion. Unconfirmed identity or cleanup
+Restart authenticates surviving members, resumes accelerator teardown, and
+verifies whole-group and cgroup release before reporting completion. Unconfirmed identity or cleanup
 retains custody.
 
 `memory_gb` is a positive member declaration bounded by the whole-job
@@ -103,8 +117,11 @@ An operator marker annotates the result and never changes a saved failure into
 an interruption. Group retry/release uses the existing attempt-wide queue
 budget: production infrastructure stops permit at most two requeues; planned
 maintenance/preemption follows the existing free-stop policy. Members have no
-retry budget or separate reservation. A repeated stop cannot extend the group's
-persisted TERM/KILL deadline. Native restart authenticates and force-cleans the
-saved whole subtree without granting fresh checkpoint grace. Missing saved
+retry budget or separate reservation. A repeated stop cannot extend a phase's
+persisted TERM/KILL deadline or shorten sidecar grace. Native restart
+authenticates the saved custody and resumes cancellation's main-then-sidecar
+phases using their original deadlines; a new sidecar deadline is granted only
+when that phase has not begun. No release is confirmed while any authenticated
+process or cgroup may remain populated. Missing saved
 Docker output finalization remains a recovery interruption; a known payload
 failure is retained.

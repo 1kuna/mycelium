@@ -209,7 +209,7 @@ func (p *process) stopLocked(now time.Time, grace time.Duration, kill bool) {
 			p.docker.dirty = true
 		}
 		p.docker.mu.Unlock()
-	} else if p.stopGroup {
+	} else if p.stopGroup || p.native != nil && !p.job.Spec.Needs.cpuOnly() {
 		if kill {
 			grace = p.stopGrace
 		}
