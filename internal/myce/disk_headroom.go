@@ -62,7 +62,7 @@ func projectedDiskNeed(j *Job) uint64 {
 	input, output := diskInputOutput(j)
 	return addDiskBytes(addDiskBytes(input, output), diskInputCacheBytes(j))
 }
-func diskVolumeNeed(j *Job, v DiskVolume) (uint64, bool) {
+func diskVolumeNeed(j *Job, v DiskVolume, machines ...*Machine) (uint64, bool) {
 	input, output := diskInputOutput(j)
 	var need uint64
 	relevant := false
@@ -75,6 +75,17 @@ func diskVolumeNeed(j *Job, v DiskVolume) (uint64, bool) {
 			cache := diskInputCacheBytes(j)
 			relevant = relevant || cache > 0 || len(j.Spec.SharedInputs) > 0
 			need = addDiskBytes(need, cache)
+			for _, input := range j.Spec.SharedInputs {
+				if len(machines) > 0 && machines[0] != nil && slices.Contains(machines[0].CachedSharedInputs, input.key()) {
+					continue
+				}
+				if input.bytes() > 0 {
+					need = addDiskBytes(need, uint64(input.bytes()))
+				}
+				if input.Archive != "" && input.SizeBytes > 0 {
+					need = addDiskBytes(need, uint64(input.SizeBytes))
+				}
+			}
 		case "checkpoint":
 			if j.Spec.Resumable || j.ResumeFiles != nil || j.Spec.Disk != nil && j.Spec.Disk.CheckpointBytes > 0 {
 				relevant = true
@@ -116,7 +127,7 @@ func diskHeadroomReason(j *Job, m *Machine) string {
 		return ""
 	}
 	for _, v := range m.DiskVolumes {
-		if need, relevant := diskVolumeNeed(j, v); relevant {
+		if need, relevant := diskVolumeNeed(j, v, m); relevant {
 			if reason := diskVolumeReason(m, v, need); reason != "" {
 				return reason
 			}
@@ -155,7 +166,7 @@ func (q *Queue) diskHeadroomReason(j *Job, m *Machine) string {
 		return ""
 	}
 	for _, v := range m.DiskVolumes {
-		need, relevant := diskVolumeNeed(j, v)
+		need, relevant := diskVolumeNeed(j, v, m)
 		if !relevant {
 			continue
 		}
