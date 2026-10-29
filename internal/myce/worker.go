@@ -667,6 +667,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		s.state.Cgroup = memoryAttempt.path
 	}
 	s.state.LaunchPending = true
+	s.state.CustodyID = identity
 	s.state.StopGrace = acceleratorStopGrace(w.AcceleratorStopGrace)
 	s.state.StopAt, s.state.UserCancel = nil, false
 	if err = s.save(); err != nil {
@@ -674,6 +675,10 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		return nil, err
 	}
 	if err = w.verifyDevice(); err != nil {
+		output.Close()
+		return nil, s.startFailure(j, launchRefused, err)
+	}
+	if err = w.reportNativeCustody(j, s.state.Session, identity, identity, "reserved"); err != nil {
 		output.Close()
 		return nil, s.startFailure(j, launchRefused, err)
 	}
@@ -707,7 +712,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	}
 	s.state.PID = cmd.Process.Pid
 	s.state.LaunchPending = false
-	custody := workerState{PID: s.state.PID, Identity: identity, StopGrace: s.state.StopGrace}
+	custody := workerState{CustodyID: identity, PID: s.state.PID, Identity: identity, StopGrace: s.state.StopGrace}
 	if len(j.Spec.SharedInputs) > 0 {
 		// Shared readers retain group custody after the main PID exits.
 		birth, e := processBirth(cmd.Process.Pid)
@@ -724,6 +729,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	}
 	if err = s.save(); err != nil {
 		return nil, abort(err)
+	}
+	if err = w.reportNativeCustody(j, s.state.Session, identity, identity, "started", cmd.Process.Pid); err != nil {
+		return nil, abort(s.startFailure(j, launchRefused, err))
 	}
 	p := &process{job: j, stopGrace: w.AcceleratorStopGrace, cmd: cmd, done: make(chan workerFinish, 1), savePriorityStop: s.priorityStopRecorder()}
 	var savedStopAt *time.Time

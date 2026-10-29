@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -139,17 +140,11 @@ func TestProductionStartGateUnreachableDoesNotExecute(t *testing.T) {
 	defer store.close()
 	store.state.Session = a.Session
 	p, e := startAfterFixtureInputs(t, w, store, *a)
-	if e != nil {
-		t.Fatal(e)
+	// The durable custody gate precedes supervisor creation and Started.
+	if p != nil || !errors.Is(e, errWorkerStartAuthorization) {
+		t.Fatalf("unreachable queue did not refuse before execution: process=%v err=%v", p, e)
 	}
-	select {
-	case f := <-p.done:
-		if f.result.Success || !strings.Contains(f.result.Error, "hand-off") {
-			t.Fatalf("result: %+v", f.result)
-		}
-	case <-time.After(testWaitTimeout):
-		t.Fatal("worker stalled")
-	}
+
 	if _, e = os.Stat(filepath.Join(w.StateDir, "job-files", a.ID, "1", "ran")); !os.IsNotExist(e) {
 		t.Fatalf("payload ran or marker inaccessible: %v", e)
 	}
@@ -369,17 +364,11 @@ func TestProductionStartGateStorageFailureDoesNotExecute(t *testing.T) {
 	defer store.close()
 	store.state.Session = a.Session
 	p, e := startAfterFixtureInputs(t, w, store, *a)
-	if e != nil {
-		t.Fatal(e)
+	// The durable custody gate precedes supervisor creation and Started.
+	if p != nil || !errors.Is(e, errWorkerStartAuthorization) {
+		t.Fatalf("storage refusal did not refuse before execution: process=%v err=%v", p, e)
 	}
-	select {
-	case f := <-p.done:
-		if f.result.Success {
-			t.Fatal("storage refusal succeeded")
-		}
-	case <-time.After(testWaitTimeout):
-		t.Fatal("storage refusal stalled")
-	}
+
 	if _, e = os.Stat(filepath.Join(w.StateDir, "job-files", a.ID, "1", "ran")); !os.IsNotExist(e) {
 		t.Fatalf("payload ran: %v", e)
 	}

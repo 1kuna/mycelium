@@ -221,6 +221,32 @@ class ClientTests(unittest.TestCase):
         self.assertEqual(error.code, "job_spec_invalid")
         self.assertEqual(str(error), "job_spec_invalid: " + reason)
 
+    def test_ledger_snapshot_pagination_and_get_summary(self):
+        client = Client(token="test-only")
+        pages = [
+            {"job_id": "job/one", "complete": True, "high_water": 2,
+             "next": 1, "has_more": True, "entries": [{"sequence": 1}]},
+            {"job_id": "job/one", "complete": True, "high_water": 2,
+             "next": 2, "has_more": False, "entries": [{"sequence": 2}]},
+        ]
+        with patch.object(client, "_call", side_effect=pages) as call:
+            first = client.ledger("job/one", limit=1)
+            second = client.ledger("job/one", after=first["next"],
+                                   high_water=first["high_water"], limit=1)
+            self.assertEqual([p["sequence"] for page in (first, second)
+                              for p in page["entries"]], [1, 2])
+            self.assertEqual(call.call_args_list[0].args,
+                             ("GET", "/api/jobs/job%2Fone/ledger?after=0&limit=1"))
+            self.assertEqual(call.call_args_list[1].args,
+                             ("GET", "/api/jobs/job%2Fone/ledger?after=1&limit=1&high_water=2"))
+        job = {"id": "job", "state": "queued", "ledger": {"complete": True, "high_water": 0}}
+        with patch.object(client, "_read_job", return_value=job):
+            self.assertEqual(client.get("job")["ledger"], job["ledger"])
+        with patch.object(client, "_call", side_effect=APIError(410, '{"code":"job_ledger_unavailable"}')):
+            with self.assertRaises(APIError) as caught:
+                client.ledger("expired")
+            self.assertEqual(caught.exception.code, "job_ledger_unavailable")
+
     def test_cancellation_acknowledgements(self):
         client = Client(token="test-only")
         ack = {"job_id": None, "project": "test", "submission_key": "key",

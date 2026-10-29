@@ -427,6 +427,13 @@ func (g *nativeGroup) startSupervisor(s *workerStore, env map[string]string) (*o
 		}
 	}
 	if err == nil {
+		g.custody.CustodyID = ID()
+		err = g.saveLocked()
+		if err == nil {
+			err = g.worker.reportNativeCustody(g.p.job, g.session, g.identity, g.custody.CustodyID, "reserved")
+		}
+	}
+	if err == nil {
 		err = cmd.Start()
 		if err != nil {
 			if s != nil {
@@ -459,6 +466,9 @@ func (g *nativeGroup) startSupervisor(s *workerStore, env map[string]string) (*o
 	}
 	g.custody.Groups[cmd.Process.Pid] = map[int]string{cmd.Process.Pid: birth}
 	if err = saveWorkerJSON(g.dir, "attempt-"+g.identity+".json", g.custody); err != nil {
+		return abort(err)
+	}
+	if err = g.worker.reportNativeCustody(g.p.job, g.session, g.identity, g.custody.CustodyID, "started", cmd.Process.Pid); err != nil {
 		return abort(err)
 	}
 	if err = g.control.attach(cmd.Process.Pid); err != nil {
@@ -566,7 +576,13 @@ func (g *nativeGroup) cleanupProcesses(writer *os.File, retry bool) error {
 	if g.supervisor != nil {
 		_ = g.supervisor.Wait()
 	}
-	return g.save()
+	if err := g.save(); err != nil {
+		return err
+	}
+	if retry {
+		return g.worker.reportNativeCustody(g.p.job, g.session, g.identity, g.custody.CustodyID, "released")
+	}
+	return nil
 }
 
 func environmentList(env map[string]string) []string {

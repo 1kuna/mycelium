@@ -1303,6 +1303,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 					return nil
 				}
 				out := cloneJob(j)
+				out.LedgerEntries = nil
 				reply.Job = &out
 				return nil
 			}
@@ -2050,9 +2051,12 @@ func contains(v []string, s string) bool {
 }
 
 func cloneJob(j *Job) Job {
-	data, _ := json.Marshal(j)
+	value := *j
+	value.LedgerEntries = nil // Immutable entries can be shared by undo/assignment snapshots.
+	data, _ := json.Marshal(&value)
 	var out Job
 	_ = json.Unmarshal(data, &out)
+	out.LedgerEntries = j.LedgerEntries
 	return out
 }
 func cloneMachine(m *Machine) Machine {
@@ -2067,6 +2071,10 @@ func (q *Queue) markStarted(j *Job) {
 	if j.StartedAt == nil {
 		now := q.clock.Now()
 		j.StartedAt = &now
+		if !j.Spec.Run.Docker {
+			q.checkLedgerNativeCoverage(j)
+		}
+		q.appendJobLedger(j, ledgerAttempt(j, "started", "start_authorized"))
 		q.beginWorkTiming(j)
 		if j.Spec.StartBy != nil && j.StartWindow == 0 {
 			j.StartWindow = j.Spec.StartBy.Sub(j.Queued)
@@ -2259,11 +2267,14 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	}
 	j.Copies = append(j.Copies, Copy{AllocatedDevices: slices.Clone(j.AllocatedDevices), Machine: m.ID, Session: m.Session, Attempt: j.Attempt, Extension: j.Extension, ReleaseReason: "awaiting_release"})
 	j.Session = m.Session
+	q.appendJobLedger(j, ledgerAttempt(j, "assigned", "scheduled"))
 	j.Reason = ""
 	if measured {
 		j.Timing = &WorkTiming{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: m.ID, Session: m.Session, PlacementReason: estimate.reason()}
 	}
 	q.recordValuePlacement(j, m, values)
 	q.refreshHostMemory()
-	return cloneJob(j)
+	out := cloneJob(j)
+	out.LedgerEntries = nil
+	return out
 }
