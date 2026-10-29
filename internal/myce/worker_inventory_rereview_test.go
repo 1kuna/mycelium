@@ -70,7 +70,11 @@ func TestInventoryRereviewLaunchProbeRetry(t *testing.T) {
 						}
 						var p *process
 						if attempt == 1 {
+							budget := store.extensionFiles.timeout
+							store.extensionFiles.timeout = time.Nanosecond
 							p, err = bound.start(store, j)
+							store.extensionFiles.timeout = budget
+							t.Logf("first start: process=%v error=%v probes=%d", p, err, calls)
 						} else {
 							// The clean retry consumes its pending inputs without
 							// changing the first attempt's counted fault probes.
