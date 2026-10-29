@@ -29,7 +29,7 @@ func (a API) workerEvent(w http.ResponseWriter, r *http.Request) {
 	timer := time.NewTimer(5 * time.Second)
 	defer timer.Stop()
 	for {
-		a.Queue.mu.Lock()
+		requestUnlock1 := requestLock(r.Context(), &a.Queue.mu)
 		wake := a.Queue.wake
 		var event WorkerEvent
 		now := a.Queue.clock.Now()
@@ -80,7 +80,7 @@ func (a API) workerEvent(w http.ResponseWriter, r *http.Request) {
 			event.Cursor = fmt.Sprintf("%x", sha256.Sum256([]byte(cursor.String())))
 			event.Events = events
 		}
-		a.Queue.mu.Unlock()
+		requestUnlock1()
 		if event.Cursor != "" && event.Cursor != r.URL.Query().Get("after") {
 			respond(w, event, nil)
 			return

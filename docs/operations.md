@@ -20,6 +20,26 @@ and stable manager health. `polite_waiting`, `disabled` and `drained` do not mea
 use a line for a newer release to upgrade while preserving spool, identity and
 maintenance. Existing legacy conversion remains the explicit M4 procedure below.
 
+## Change live project policy
+
+`queue --project-config` (and `dev --project-config`) bootstraps project settings
+only before the first policy is stored. After first boot, the persisted SQLite
+policy is authoritative. Editing the config and restarting or reinstalling the
+queue no longer changes live policy or advances its revision.
+
+For a deliberate change, export the current policy, edit its `projects` mapping,
+and import it using the revision printed by the export:
+
+```sh
+myce policy get --yaml > policy.yaml
+# Edit policy.yaml, then replace N with the exported revision.
+myce policy set policy.yaml --if-revision N
+```
+
+If the revision is stale, export again and reconcile the newer policy before
+retrying. See [owner priority policy](guide-priority-policy.md) for the full
+import/export contract, including replacing or clearing project settings.
+
 ## Queue maintenance
 
 All commands use the authenticated queue and run as an ordinary account.
@@ -38,6 +58,68 @@ myce host placement HOST --last-resort=true
 myce host placement HOST --last-resort=false
 myce host resume HOST
 ```
+
+### Exclude components with a selector
+
+```sh
+myce exclude add 'host=compute-a;devices=0' --reason 'driver investigation'
+myce exclude add 'host=compute-a;devices=0,1' --reason 'reserve two cards'
+myce exclude add 'host=compute-a;kind=gpu' --reason 'keep CPU capacity available'
+myce exclude add 'platform=xpu' --reason 'platform maintenance'
+myce exclude add 'platform=cuda' --reason 'reserve CUDA fleet capacity'
+myce exclude add 'kind=gpu' --reason 'reserve all accelerators'
+myce exclude add 'host=compute-a' --reason 'host maintenance'
+myce exclude list
+myce exclude remove 'platform=xpu'
+```
+
+Selectors are literal: `host=HOST`, `kind=gpu` (all accelerators, including
+CUDA, XPU, Metal and dev fake devices), `platform=PLATFORM`, or
+`host=HOST;devices=DEVICE,DEVICE`. A host can qualify either kind or platform,
+for example `host=compute-a;platform=cuda`. Quote selectors containing `;` so
+the shell passes them as one argument. Device lists accept displayed IDs or
+stable identities, resolve them to physical identities, sort and deduplicate
+them, and print the durable selector. Use that printed selector for removal,
+especially after a worker's ordinals change or devices leave inventory.
+Kind/platform settings remain in force for future matching devices and hosts;
+they are not expanded into a snapshot of today's inventory.
+
+These queue-owned settings persist in SQLite across restarts. They reuse the
+per-device admission fence below: new placements and unstarted launches avoid
+excluded components, while Started attempts and active model calls finish.
+They require no worker restart or configuration edit. A host's GPU exclusion
+leaves its CPU work and RAM allowances available. Whole-host exclusion calls
+the existing host drain transaction, covering CPU, RAM and accelerators together.
+Adding a whole-host exclusion to an already drained/disabled host is refused;
+manage that existing maintenance with `myce host` instead. Remove the host
+exclusion to resume its drain. If another operator has since drained or disabled
+the host independently, removal leaves that maintenance intact. `host resume`
+cannot bypass an active whole-host exclusion.
+
+`myce status` (CLI, JSON and web) and `myce exclude list` show each active
+selector, reason, queue timestamp and `set_by`. `--by OPERATOR` supplies the
+attribution; it defaults to the current OS username. This is an operator-supplied
+label under the existing shared fleet-token authority, not a separately verified
+login. The commands reuse installed pinned operator authority. The CLI resolves
+the selector and reads its revision before editing; a competing edit is rejected
+as stale. API clients use `GET /api/exclusions/resolve?selector=...`,
+`GET /api/exclusions`, and `POST /api/exclusions` with `action` (`add`/`remove`),
+the resolved `selector`, `set_by`, `if_revision`, and optional add `reason`.
+The API retains inactive revision records; `exclude list` displays active ones.
+
+Exclusions combine additively with each other, per-device disables and host
+maintenance. Removing one restores only capacity not withheld by another fence.
+Use the CPU/RAM allowances under [CPU capacity and allowances](#cpu-capacity-and-allowances-r1)
+to reserve a chunk of those resources; there is no new CPU/RAM slicing protocol.
+`--reserve-cpu-cores` and `--reserve-host-memory-gb` provide initial owner reserves;
+`myce host budget HOST --cpu-budget-cores N --memory-budget-gb GiB` durably changes
+the queue's allowances while the host is drained. Resume after the change and
+allow worker views to acknowledge the policy. Zero CPU budget means automatic
+capacity minus reserve, not zero available cores; RAM budgets must be positive.
+
+The `exclude add|remove|list` shape keeps host, fleet and list selectors in one
+small command family. The single-device controls below remain available as the
+original independent per-device setting.
 
 ### Set aside one accelerator
 

@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"slices"
@@ -117,25 +118,29 @@ func (q *Queue) registerMaintenanceHost(m *Machine) error {
 
 // ChangeHostMaintenance serializes admission, Started, cancellation and policy edits
 // with the same SQLite transaction. Acceptance alone never settles an attempt.
-func (q *Queue) ChangeHostMaintenance(host string, request HostMaintenanceRequest) (HostMaintenanceStatus, error) {
+func (q *Queue) ChangeHostMaintenance(host string, request HostMaintenanceRequest, requestContexts ...context.Context) (HostMaintenanceStatus, error) {
+	requestCtx := requestContext(requestContexts)
+
 	var out HostMaintenanceStatus
 	if strings.TrimSpace(host) == "" {
 		return out, errors.New("physical host is required")
 	}
-	err := q.update(func() error {
+	err := q.updateRequest(requestCtx, func() error {
 		if err := q.changeHostMaintenance(host, request); err != nil {
 			return err
 		}
 		q.maintain()
 		out = q.hostMaintenanceStatus(host)
 		return nil
-	})
+	}, nil)
 	return out, err
 }
 
-func (q *Queue) HostMaintenanceStatus(host string) (HostMaintenanceStatus, error) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
+func (q *Queue) HostMaintenanceStatus(host string, requestContexts ...context.Context) (HostMaintenanceStatus, error) {
+	requestCtx := requestContext(requestContexts)
+
+	requestUnlock1 := requestLock(requestCtx, &q.mu)
+	defer requestUnlock1()
 	// A closed/failed queue cannot certify health using its in-memory snapshot.
 	if !q.simulation {
 		if err := q.db.Ping(); err != nil {
@@ -240,9 +245,9 @@ func (q *Queue) hostMaintenanceStatus(host string) HostMaintenanceStatus {
 	out.Quiescent = freshEvidence && len(out.Workers) > 0 && q.maintenanceBlocked(host) && len(obligations) == 0 && len(out.PendingCleanup) == 0
 	return out
 }
-func (a API) registerHostMaintenance(mux *http.ServeMux) {
+func (a API) registerHostMaintenance(mux *requestMux) {
 	mux.HandleFunc("GET /api/hosts/{id}/maintenance", func(w http.ResponseWriter, r *http.Request) {
-		status, err := a.Queue.HostMaintenanceStatus(r.PathValue("id"))
+		status, err := a.Queue.HostMaintenanceStatus(r.PathValue("id"), r.Context())
 		respondOperation(w, status, err, "host_control_invalid")
 	})
 	mux.HandleFunc("POST /api/hosts/{id}/maintenance", func(w http.ResponseWriter, r *http.Request) {
@@ -250,7 +255,7 @@ func (a API) registerHostMaintenance(mux *http.ServeMux) {
 		if !decode(w, r, &request) {
 			return
 		}
-		status, err := a.Queue.ChangeHostMaintenance(r.PathValue("id"), request)
+		status, err := a.Queue.ChangeHostMaintenance(r.PathValue("id"), request, r.Context())
 		respondOperation(w, status, err, "host_control_invalid")
 	})
 }
@@ -349,6 +354,9 @@ func (q *Queue) changeHostMaintenance(host string, request HostMaintenanceReques
 		q.s.HostMaintenance = map[string]HostMaintenance{}
 	}
 	policy := q.s.HostMaintenance[host]
+	if request.Action == "resume" && q.s.ComponentExclusions["host="+host].Active {
+		return errors.New("remove the host exclusion before resuming this host")
+	}
 	if request.IfUpdatedAt != nil && !policy.UpdatedAt.Equal(*request.IfUpdatedAt) || request.IfMode != "" && policy.Mode != request.IfMode || request.IfDrainOwner != "" && policy.DrainOwner != request.IfDrainOwner {
 		return ErrStale
 	}

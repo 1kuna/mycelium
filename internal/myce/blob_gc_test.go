@@ -277,10 +277,10 @@ func TestBlobGCImportCompletesBeforeEnrollment(t *testing.T) {
 	unblock := func() { once.Do(func() { close(release) }) }
 	t.Cleanup(unblock)
 	record := q.files.recordBundle
-	q.files.recordBundle = func(hash string, created bool) error {
+	q.files.recordBundle = func(hash string, created bool, contexts ...context.Context) error {
 		close(entered)
 		<-release
-		return record(hash, created)
+		return record(hash, created, contexts...)
 	}
 	frozen := make(chan error, 1)
 	go func() {

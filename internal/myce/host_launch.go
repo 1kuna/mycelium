@@ -56,13 +56,17 @@ func (q *Queue) hostLaunchAllowed(m *Machine, session string) bool {
 	return m != nil && !m.Recovering && m.Session == session && !m.Gone && !m.Leaving && !q.unreported[m.ID] && !q.maintenanceBlocked(hostID(m)) && !availabilityBlocked(m) && !m.HostMemoryPolicyMismatch
 }
 func (q *Queue) AuthorizeLaunch(l HostLaunch) error {
+	return q.authorizeLaunchContext(context.Background(), l)
+}
+
+func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error {
 	timing := newQueueUpdateTiming()
 	var rejected error
 	reject := func(fence string) {
 		log.Printf("event=launch_rejected fence=%s", fence)
 		rejected = ErrStale
 	}
-	err := q.updateTimed(func() error {
+	err := q.updateRequest(ctx, func() error {
 		q.maintain()
 		q.refreshHostMemory()
 		if !q.hostLaunchAllowed(q.s.Machines[l.Machine], l.Session) {

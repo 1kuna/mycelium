@@ -117,10 +117,10 @@ func (q *Queue) deviceAdmissionBlocked(m *Machine) bool {
 	}
 	for _, d := range m.Devices {
 		if d.ID == m.Device && d.Platform == m.GPU {
-			return q.s.DeviceMaintenance[hostID(m)][deviceMaintenanceKey(d.Platform, d.Identity)].Disabled
+			return q.s.DeviceMaintenance[hostID(m)][deviceMaintenanceKey(d.Platform, d.Identity)].Disabled || q.componentExcluded(m, d.Platform, d.Identity)
 		}
 	}
-	return false
+	return q.componentExcluded(m, m.GPU, "")
 }
 
 const deviceMaintenanceStopCause = "planned_device_maintenance"
@@ -147,7 +147,7 @@ func (q *Queue) maintainDeviceMaintenance() {
 	}
 }
 
-func (a API) registerDeviceMaintenance(mux *http.ServeMux) {
+func (a API) registerDeviceMaintenance(mux *requestMux) {
 	mux.HandleFunc("POST /api/hosts/{id}/devices/maintenance", func(w http.ResponseWriter, r *http.Request) {
 		var request DeviceMaintenanceRequest
 		if !decode(w, r, &request) {

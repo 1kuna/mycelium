@@ -71,7 +71,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 
 	if len(args) == 0 {
-		return errors.New("usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|run|profile|submit|policy|status|logs|ledger|wait|result|cancel|resolve-native|resolve-docker|reconcile-docker-retention|dev|version|release|file|benchmark|extension|sim|detect|service|measure|model|usage\n       myce host drain|disable|resume|status|budget|placement HOST\n       myce host device disable|enable HOST DEVICE\nRun myce COMMAND --help for command options.")
+		return errors.New("usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|exclude|run|profile|submit|policy|status|logs|ledger|wait|result|cancel|resolve-native|resolve-docker|reconcile-docker-retention|dev|version|release|file|benchmark|extension|sim|detect|service|measure|model|usage\n       myce host drain|disable|resume|status|budget|placement HOST\n       myce host device disable|enable HOST DEVICE\nRun myce COMMAND --help for command options.")
 	}
 	if args[0] == "dev" && len(args) > 1 && args[1] == "clock" {
 		return devClockCommand(args[2:], os.Stdout)
@@ -108,6 +108,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 	if args[0] == "device" {
 		return deviceCommand(args[1:], os.Stdout)
+	}
+	if args[0] == "exclude" {
+		return excludeCommand(context.Background(), args[1:], os.Stdout)
 	}
 	if args[0] == "host" {
 		return hostMaintenanceCommand(context.Background(), args[1:], os.Stdout)
@@ -204,7 +207,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	releaseCA := f.String("release-ca", "", "provisioned publisher CA PEM (default ordinary HTTPS trust)")
 	identityDir := f.String("identity-dir", "", "durable joining identity directory (default DB.joining)")
 	hostConfig := f.String("host-config", "", "physical-host production hold policy YAML")
-	projectConfig := f.String("project-config", "", "project weights and experiment caps YAML")
+	projectConfig := f.String("project-config", "", "initial project policy YAML (later edits: myce policy set)")
 	url := f.String("queue", env("MYCE_QUEUE", "http://127.0.0.1:7331"), "queue address")
 	token := f.String("token", env("MYCE_TOKEN", ""), "shared fleet token (prefer MYCE_TOKEN)")
 	// DefValue is only help text; keep the actual environment default private.
@@ -528,7 +531,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			if e != nil {
 				return e
 			}
-			if e = q.ConfigureProjects(policies); e != nil {
+			if e = q.SeedProjects(policies); e != nil {
 				return e
 			}
 		}
@@ -873,6 +876,11 @@ func printStatus(s myce.Snapshot, full bool) {
 	}
 	for _, host := range slices.Sorted(maps.Keys(s.HostStates)) {
 		fmt.Printf("host %s: %s\n", host, s.HostStates[host])
+	}
+	for _, p := range s.ComponentExclusions {
+		if p.Active {
+			fmt.Printf("exclusion %s: set by %s since %s; reason=%q\n", p.Selector, p.SetBy, p.UpdatedAt.UTC().Format(time.RFC3339Nano), p.Reason)
+		}
 	}
 	for _, d := range s.DeviceMaintenance {
 		if d.Disabled {

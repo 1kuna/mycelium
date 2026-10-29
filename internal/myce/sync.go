@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"errors"
 	"math"
 	"sort"
@@ -32,8 +33,10 @@ type ModelUse struct {
 }
 
 func targetMatches(to string, m *Machine) bool { return to == "all" || to == m.ID || to == m.GPU }
-func (q *Queue) SyncModel(r SyncRequest) error {
-	return q.update(func() error {
+func (q *Queue) SyncModel(r SyncRequest, requestContexts ...context.Context) error {
+	requestCtx := requestContext(requestContexts)
+
+	return q.updateRequest(requestCtx, func() error {
 		model, ok := q.model(r.Model)
 		if !ok || model.SizeBytes <= 0 || model.DirectNAS {
 			return errors.New("sync requires a catalog model with verified local-cache bytes")
@@ -56,7 +59,7 @@ func (q *Queue) SyncModel(r SyncRequest) error {
 		}
 		q.s.SyncRequests = append(q.s.SyncRequests, r)
 		return nil
-	})
+	}, nil)
 }
 
 // Pins protect and warm all possible landing machines, including outside a window.

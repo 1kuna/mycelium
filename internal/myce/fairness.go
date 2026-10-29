@@ -98,11 +98,25 @@ func validateProjectPolicies(p map[string]ProjectPolicy) error {
 	}
 	return nil
 }
+
+// SeedProjects applies startup configuration only before any policy is stored.
+// Later operator edits use SetPriorityPolicy with the current revision.
+func (q *Queue) SeedProjects(p map[string]ProjectPolicy) error {
+	return q.configureProjects(p, true)
+}
+
 func (q *Queue) ConfigureProjects(p map[string]ProjectPolicy) error {
+	return q.configureProjects(p, false)
+}
+
+func (q *Queue) configureProjects(p map[string]ProjectPolicy, seedOnly bool) error {
 	if err := validateProjectPolicies(p); err != nil {
 		return err
 	}
 	return q.update(func() error {
+		if seedOnly && (q.s.PriorityPolicy != nil || len(q.s.Policies) > 0) {
+			return nil
+		}
 		copy := map[string]ProjectPolicy{}
 		for k, v := range p {
 			if err := q.validateMachineNames(v.AllowedMachines); err != nil {

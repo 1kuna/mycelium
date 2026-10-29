@@ -178,6 +178,10 @@ func TestDeviceMaintenanceRevisionAuthorityAndUnstartedFence(t *testing.T) {
 	if err := client.Call(t.Context(), "POST", "/api/hosts/machine/devices/maintenance", request, &status); err != nil {
 		t.Fatal(err)
 	}
+	latencies := q.requestLatencies.snapshot()
+	if len(latencies) != 1 || latencies[0].Route != "POST /api/hosts/{id}/devices/maintenance" || latencies[0].Count != 2 || latencies[0].Samples != 2 {
+		t.Fatal("device route lost authenticated or unauthenticated request spans", latencies)
+	}
 	if err := q.Started(result(a, false)); !errors.Is(err, ErrStale) {
 		t.Fatal("late Started bypassed device drain", err)
 	}

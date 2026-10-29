@@ -74,9 +74,11 @@ func ledgerAttempt(j *Job, kind, reason string) JobLedgerEntry {
 
 // JobLedger copies only a bounded page under the lock. Encoding/network I/O is
 // outside it. highWater == -1 begins a snapshot (including an empty snapshot).
-func (q *Queue) JobLedger(id string, after, highWater, limit int) (JobLedgerPage, error) {
-	q.mu.RLock()
-	defer q.mu.RUnlock()
+func (q *Queue) JobLedger(id string, after, highWater, limit int, requestContexts ...context.Context) (JobLedgerPage, error) {
+	requestCtx := requestContext(requestContexts)
+
+	requestUnlock1 := requestReadLock(requestCtx, &q.mu)
+	defer requestUnlock1()
 	j := q.s.Jobs[id]
 	if j == nil && q.records != nil {
 		if r := q.s.Submissions[q.records.bindings[id]]; r != nil {
@@ -135,11 +137,13 @@ type NativeCustodyReport struct {
 	Phase           string `json:"phase"` // reserved, started, released
 }
 
-func (q *Queue) NativeCustody(r NativeCustodyReport) error {
+func (q *Queue) NativeCustody(r NativeCustodyReport, requestContexts ...context.Context) error {
+	requestCtx := requestContext(requestContexts)
+
 	if r.CustodyID == "" || len(r.CustodyID) > 128 || r.ProcessID == "" || len(r.ProcessID) > 128 || !slices.Contains([]string{"reserved", "started", "released"}, r.Phase) {
 		return &HTTPError{Status: 400, Code: "native_custody_invalid", Message: "invalid native custody identity or phase"}
 	}
-	return q.update(func() error {
+	return q.updateRequest(requestCtx, func() error {
 		j, err := q.current(Result{Execution: r.Execution, Machine: r.Machine, Session: r.Session})
 		if err != nil {
 			return err
@@ -197,7 +201,7 @@ func (q *Queue) NativeCustody(r NativeCustodyReport) error {
 		}
 		q.appendJobLedger(j, e)
 		return nil
-	})
+	}, nil)
 }
 
 func (w Worker) reportNativeCustody(j Job, session, execution, custody, phase string, supervisors ...int) error {

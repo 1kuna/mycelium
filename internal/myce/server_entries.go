@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -152,9 +153,11 @@ func readModelSecrets(root string, refs map[string]string, fleetToken string) (m
 	return out, nil
 }
 
-func (q *Queue) callDefaults(c *ModelCall, model Model, h http.Header, defaults bool) error {
-	q.mu.Lock()
-	defer q.mu.Unlock()
+func (q *Queue) callDefaults(c *ModelCall, model Model, h http.Header, defaults bool, requestContexts ...context.Context) error {
+	requestCtx := requestContext(requestContexts)
+
+	requestUnlock1 := requestLock(requestCtx, &q.mu)
+	defer requestUnlock1()
 	for _, name := range []string{"X-Myce-Project", "X-Myce-Priority", "X-Myce-Class", "X-Myce-Deadline"} {
 		if values, supplied := h[name]; supplied && len(values) != 1 {
 			return errors.New("duplicate model routing header: supply each X-Myce header once")
