@@ -37,6 +37,10 @@
         "retained": {
           "type": "boolean"
         },
+        "probe_age_seconds": {
+          "type": "number",
+          "description": "Age of an outstanding checkpoint capacity operation; queue time since receipt advances the 30-second stall backstop."
+        },
         "error": {
           "type": "string"
         }
