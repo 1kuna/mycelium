@@ -628,12 +628,18 @@ orphan records are retained for recovery. Per-attempt input and
 work folders (`job-files/JOB/ATTEMPT`, including inputs, unpacked source and a
 Python job's `.venv`) go immediately through the existing collector once the
 worker confirms that the exact attempt succeeded with accepted, published
-outputs and confirmed release. Cancelled, released attempts with no accepted
-outputs also go immediately. The confirmation is saved with cleared custody,
+outputs and confirmed release. The confirmation is saved with cleared custody,
 so a restart before collection does not restart a grace period. Small logs and
 process/result records keep the log-retention window. Failed attempts and
-unknown orphan folders keep **24 hours** after the worker first finds them
-without custody, timed by the worker clock. Collect failed test logs or partial
+cancelled attempts and unknown orphan folders keep **24 hours** after the worker first finds them
+without custody, timed by the worker clock. Cancellation does not collect partial
+outputs into `output_refs`: recover them from the assigned worker's
+`job-files/JOB/ATTEMPT` directory within that day, using the job's machine and
+attempt from its status or ledger. This includes only files actually present on
+that worker; logs and process state follow the separate log-retention window.
+The grace bounds retention time, not bytes: scratch may be as large as the job's
+work and inputs, and remains on the worker rather than consuming queue file-store
+capacity. A worker outage or disk loss can prevent recovery. Collect failed test logs or partial
 outputs within that day; opt-in published attempt diagnostics have their own
 file retention. A held attempt keeps its folder however long it runs. The pass refuses
 to run when `job-files` is not a real directory, for example a symlink. A folder

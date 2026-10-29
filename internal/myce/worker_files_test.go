@@ -183,3 +183,82 @@ func TestSharedInputsDevReusesTreeWithStoredSource(t *testing.T) {
 	cacheRoot := filepath.Join(state, "workers", "fake-1", "file-cache", "shared-inputs")
 	t.Cleanup(func() { _ = removeSharedEntry(cacheRoot) })
 }
+
+// A cancelled running attempt keeps its local work for the recovery grace.
+func TestCancelledAttemptPartialFilesRemainRecoverable(t *testing.T) {
+	state := t.TempDir()
+	if err := PrepareStateRoots(state); err != nil {
+		t.Fatal(err)
+	}
+	d, err := StartDev(DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(state, "queue.db"), Checkpoints: filepath.Join(state, "checkpoints"), FileStore: filepath.Join(state, "files"), GPU: "cpu", Workers: 1, Token: "test", Interval: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	ref := sharedFixtureFile(t, t.TempDir(), "source", "source")
+	source := filepath.Join(t.TempDir(), "source")
+	if err := os.WriteFile(source, []byte("source"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Client().UploadFile(ctx, source, ref); err != nil {
+		t.Fatal(err)
+	}
+	j, err := d.Client().Submit(ctx, Spec{Name: "partial", Project: "test", Run: RunSpec{Command: []string{"sh", "-ec", "printf partial > result; exec sleep 60"}}, Needs: ResourceNeeds{CPUCores: 1, MemoryGB: 0.1}, Files: FileManifest{"source": ref}, Outputs: map[string]string{"result": "results"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(state, "workers", "fake-1", "job-files", j.ID, "1", "result")
+	for {
+		if b, e := os.ReadFile(path); e == nil && string(b) == "partial" {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("partial output not written", ctx.Err())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if _, err := d.Client().Cancel(ctx, j.ID); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		current, e := d.Client().GetJob(ctx, j.ID)
+		if e != nil {
+			t.Fatal(e)
+		}
+		if current.State == "cancelled" && current.ReleaseConfirmed {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("release not confirmed", ctx.Err())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	workerDir := filepath.Join(state, "workers", "fake-1")
+	now := time.Now()
+	for {
+		if err := workerRetention(workerDir, now, DefaultLogRetention); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(filepath.Join(filepath.Dir(path), unclaimedMarker)); err == nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("worker custody did not clear", ctx.Err())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if b, err := os.ReadFile(path); err != nil || string(b) != "partial" {
+		t.Fatalf("partial output unavailable: %q %v", b, err)
+	}
+	if err := workerRetention(workerDir, now.Add(24*time.Hour), DefaultLogRetention); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("partial output retained beyond grace: %v", err)
+	}
+}
