@@ -63,6 +63,15 @@ func affinity(j *Job, m *Machine) int {
 	if j.Spec.Environment.Key() != "" && environmentReady(j, m) {
 		n++
 	}
+	if len(j.Spec.SharedInputs) > 0 {
+		ready := true
+		for _, input := range j.Spec.SharedInputs {
+			ready = ready && slices.Contains(m.CachedSharedInputs, input.key())
+		}
+		if ready {
+			n++
+		}
+	}
 	return n
 }
 func beforeWithinTier(a, b *Job, m *Machine) bool {

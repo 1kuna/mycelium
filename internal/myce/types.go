@@ -449,6 +449,9 @@ type Machine struct {
 	DockerCause            *RuntimeCause `json:"docker_cause,omitempty"`
 	BenchmarkPending       bool          `json:"benchmark_pending,omitempty"`
 
+	CachedSharedInputs  []string             `json:"cached_shared_inputs,omitempty"`
+	SharedInputEvidence *SharedInputEvidence `json:"shared_input_evidence,omitempty"`
+
 	Capabilities                []string            `json:"capabilities,omitempty"`
 	NativeIsolationWarning      string              `json:"native_isolation_warning,omitempty"`
 	MaxJobs                     int                 `json:"max_jobs,omitempty"`

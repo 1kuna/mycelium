@@ -433,6 +433,12 @@ func extensionJobsWithRefusal(j *Job, m *Machine, qualified bool) ([]*Job, strin
 		if !e.matchesTarget(m) || !slices.Contains(e.platforms(), m.GPU) {
 			continue
 		}
+		if len(j.Spec.SharedInputs) > 0 {
+			candidate := j.Spec
+			if err := e.lower(&candidate, m); err != nil || candidate.Run.Docker {
+				continue
+			}
+		}
 		copy := *j
 		copy.Extensions = []Extension{e}
 		if qualified && qualifiedExtension(&copy, m) == nil {

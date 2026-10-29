@@ -231,8 +231,10 @@ power-loss behavior needs its own qualification.
 
 Deploy the queue before workers. Shared-input jobs require the advertised
 `shared_inputs_v1` capability; older workers cannot receive or start them.
+Extension jobs also require `extension_shared_inputs_v1`, so older workers
+cannot acknowledge success under a different output publication contract.
 
-Profiles and plain native jobs can use `shared_inputs` beside stored source
+Profiles, native extension jobs, and plain native jobs can use `shared_inputs` beside stored source
 `files`. Names use letters, digits and underscores, unique ignoring case. Read
 `MYCE_INPUT_<UPPERCASE_NAME>` in the command; it is the absolute path of a shared
 read-only file or directory, with no attempt copy or unpack.
@@ -258,6 +260,15 @@ set `local: path/to/archive` to import it, deriving SHA-256 and size; subsequent
 profiles should reference that hash or its NAS location. Existing `inputs`
 retain their private-copy behavior. Commands must explicitly use the environment
 paths, for example `python "$MYCE_INPUT_RUNTIME/run.py" "$MYCE_INPUT_ORIGINAL"`.
+Extension commands receive the same environment variables; their NAS output and
+checkpoint contracts are unchanged. Extension execution must be native.
+
+Workers report verified cache identities for placement. Their shared input
+evidence counts successful cache hits and cold stages, plus the declared NAS
+source sizes for completed cold stages; it is not a network traffic measurement.
+These counters reset when the worker restarts. Assignment, staged and started
+timestamps show the input phase, while declared input sizes remain in the job.
+After restart an entry is reverified locally before it is advertised as ready.
 
 For a large manifest already on the NAS, use `nas: runtimes/python` with
 `manifest_file: manifests/python.json`, `sha256` and `size_bytes` identifying
