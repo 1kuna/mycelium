@@ -1216,6 +1216,11 @@ func (s *workerStore) drainCancelledNativeMain(st *workerState, clock Clock, mem
 	if record.Identity != st.Identity {
 		return errors.New("mismatched native cancellation custody")
 	}
+	// A per-command memory cap also uses native custody, without sidecars.
+	// It does not authorize a second cancellation phase.
+	if !slices.ContainsFunc(record.Members, func(m nativeMember) bool { return m.Name != "main" && m.PID > 0 }) {
+		return nil
+	}
 	persist := func() error { return saveWorkerJSON(s.dir, "attempt-"+st.Identity+".json", st) }
 	if st.SidecarStopAt == nil {
 		if st.StopAt == nil {

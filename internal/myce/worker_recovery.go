@@ -430,8 +430,13 @@ func (s *workerStore) cleanupOrphan(clock Clock, memoryFiles ...memoryFS) (clean
 							return err
 						}
 					}
-					if err := gracefulRecoveredGroups(&st, clock, func() error { return saveWorkerJSON(s.dir, "attempt-"+s.state.Identity+".json", st) }, memoryFiles...); err != nil {
-						return err
+					// Only native cancellation establishes a separate sidecar phase.
+					// An ordinary command's delivered cancel must not gain another
+					// TERM or wait, even when shared inputs gave it group custody.
+					if !st.UserCancel || st.SidecarStopAt != nil {
+						if err := gracefulRecoveredGroups(&st, clock, func() error { return saveWorkerJSON(s.dir, "attempt-"+s.state.Identity+".json", st) }, memoryFiles...); err != nil {
+							return err
+						}
 					}
 				}
 				return cleanupAttemptGroups(st, clock, memoryFiles...)
