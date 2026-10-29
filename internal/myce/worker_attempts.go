@@ -32,6 +32,7 @@ type attemptSupervisor struct {
 	wake        chan struct{}
 	done        chan struct{}
 	recovering  *process
+	preparing   context.CancelFunc // Stops preparation, never abandons a started process.
 
 	admissionBlocked bool
 }
@@ -62,6 +63,9 @@ func (a *attemptSupervisor) update(w Worker, d AttemptDirective, connected, admi
 	a.mu.Lock()
 	a.worker, a.directive, a.connected = w, d, connected
 	a.admissionBlocked = admissionBlocked
+	if d.Stop && a.preparing != nil {
+		a.preparing()
+	}
 	a.mu.Unlock()
 	select {
 	case a.wake <- struct{}{}:
@@ -165,13 +169,29 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				if d.Stop {
 					cause := s.startFailure(a.job, launchRefused, errors.New("assignment withdrawn before command started"))
 					r := startFailureOutcome(Result{Machine: w.Machine.ID, Session: a.job.Session, Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}, Error: cause.Error()}, cause)
+					r = withStopProvenance(r, d.PriorityStop)
 					s.state.Result = &r
 				} else if !d.Hold && !admissionBlocked {
+					prepareCtx, cancel := context.WithCancel(ctx)
+					a.mu.Lock()
+					a.preparing = cancel
+					if a.directive.Stop {
+						cancel()
+					}
+					a.mu.Unlock()
 					bound, err := w.forAttempt(a.job)
 					if err == nil {
-						p, err = bound.startContext(ctx, s, a.job)
+						p, err = bound.startContext(prepareCtx, s, a.job)
 					} else {
 						err = s.startFailure(a.job, launchRefused, err)
+					}
+					cancel()
+					a.mu.Lock()
+					a.preparing = nil
+					d = a.directive
+					a.mu.Unlock()
+					if p == nil && d.Stop && !errors.Is(err, errWorkerReleasePending) {
+						err = s.startFailure(a.job, launchRefused, errors.New("assignment withdrawn before command started"))
 					}
 					if errors.Is(err, errWorkerMemory) {
 						// RAM may disappear after assignment or during preparation.
@@ -180,6 +200,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					}
 					if err != nil && !errors.Is(err, errWorkerCheckpoint) && !errors.Is(err, errWorkerUnavailable) {
 						r := startFailureOutcome(Result{Machine: w.Machine.ID, Session: a.job.Session, Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}, Error: err.Error(), ExtensionUnavailable: errors.Is(err, errExtensionUnavailable), ReleasePending: errors.Is(err, errWorkerReleasePending)}, err)
+						r = withStopProvenance(r, d.PriorityStop)
 						s.state.Result = &r
 					}
 				}

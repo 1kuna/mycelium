@@ -862,7 +862,7 @@ func (c Client) DownloadFile(ctx context.Context, ref FileRef, dest string) erro
 	if _, err = f.Seek(offset, io.SeekStart); err != nil {
 		return err
 	}
-	n, copyErr := io.Copy(f, io.LimitReader(res.Body, ref.SizeBytes-offset+1))
+	n, copyErr := io.Copy(f, io.LimitReader(contextReader{ctx, res.Body}, ref.SizeBytes-offset+1))
 	err = errors.Join(copyErr, f.Sync())
 	if err != nil {
 		return err
