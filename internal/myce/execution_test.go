@@ -161,3 +161,38 @@ int main(void) {
 		}
 	}
 }
+
+// A pixi activation can include both package directories and an external runtime.
+// Switching must remove the complete old activation, without losing sidecar env.
+func TestExecutionLockedLibraryActivationSwitch(t *testing.T) {
+	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" {
+		t.Skip("Unix dynamic loader contract")
+	}
+	main, side, external, authored := t.TempDir(), t.TempDir(), t.TempDir(), t.TempDir()
+	key := "LD_LIBRARY_PATH"
+	if runtime.GOOS == "darwin" {
+		key = "DYLD_LIBRARY_PATH"
+	}
+	activation := map[string]string{
+		"CONDA_PREFIX": filepath.Join(main, ".pixi", "envs", "default"),
+		"PATH":         "/usr/bin:/bin",
+		key:            filepath.Join(main, "vendor", "lib") + ":" + external,
+	}
+	if err := saveWorkerJSON(main, "activation.json", activation); err != nil {
+		t.Fatal(err)
+	}
+	for _, override := range []bool{false, true} {
+		env := map[string]string{"PATH": "/usr/bin:/bin"}
+		bindEnvironment(env, main)
+		if override {
+			env[key] = authored
+		}
+		bindEnvironment(env, side)
+		if strings.Contains(env[key], main) || strings.Contains(env[key], external) {
+			t.Errorf("override=%t: previous pixi runtime survived: %q", override, env[key])
+		}
+		if override && !strings.HasSuffix(env[key], ":"+authored) {
+			t.Errorf("sidecar-authored library path lost: %q", env[key])
+		}
+	}
+}

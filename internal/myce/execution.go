@@ -187,11 +187,17 @@ func expandExecution(s *Spec, work, root string, target ExecutionTarget) {
 	}
 }
 func bindEnvironment(env map[string]string, root string) {
-	clearEnvironmentLibraries(env, root)
 	// Switching a member's environment must not inherit main's conda activation.
 	if previous := env["MYCE_ENVIRONMENT_DIR"]; previous != "" && previous != root {
 		for k, v := range environmentActivation(previous) {
-			if !reservedActivation(k) && env[k] == v {
+			current := env[k]
+			if slices.Contains(environmentLibraryVariables(), k) {
+				// Compare the saved activation before removing its owned paths;
+				// account only for the standard prefix added by this binding.
+				prefix := strings.Join(environmentLibraryDirectories(previous), string(os.PathListSeparator)) + string(os.PathListSeparator)
+				current = strings.TrimPrefix(current, prefix)
+			}
+			if !reservedActivation(k) && current == v {
 				delete(env, k)
 			}
 		}
@@ -199,6 +205,7 @@ func bindEnvironment(env map[string]string, root string) {
 			env["PATH"] = os.Getenv("PATH")
 		}
 	}
+	clearEnvironmentLibraries(env, root)
 	env["PATH"] = filepath.Join(root, "venv", "bin") + string(os.PathListSeparator) + filepath.Join(root, "bin") + string(os.PathListSeparator) + env["PATH"]
 	env["VIRTUAL_ENV"] = filepath.Join(root, "venv")
 	if activation := environmentActivation(root); activation != nil {
