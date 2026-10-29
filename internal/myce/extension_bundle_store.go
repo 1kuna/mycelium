@@ -53,6 +53,22 @@ func (s *FileStore) freezeFiles(files *map[string][]byte, ref **FileRef, digest 
 	defer lock.Unlock()
 	err = s.verify(context.Background(), next)
 	missing := os.IsNotExist(err)
+	if err != nil {
+		status, payloads, e := s.capacity(requestContext(contexts))
+		if e != nil {
+			status.Error = "file store capacity unavailable"
+		}
+		if payloads == nil {
+			payloads = map[string]storedPayload{}
+		}
+		// Replacement of corrupt bytes can grow an existing allocation too.
+		growth := uint64(next.SizeBytes) - min(uint64(next.SizeBytes), payloads[next.SHA256].length)
+		payloads[next.SHA256] = storedPayload{length: uint64(next.SizeBytes)}
+		need := addDiskBytes(growth, s.reservedOutputs(payloads))
+		if e = fileStoreRefusal(status, need); e != nil {
+			return e
+		}
+	}
 	if s.recordBundle != nil {
 		if e := s.recordBundle(next.SHA256, missing, requestContext(contexts)); e != nil {
 			return e

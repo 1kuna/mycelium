@@ -405,3 +405,17 @@ Current state: research/design only; hardware identity and disk overlap still ne
 the owner/operator read above. Next step: independent Sol high review, then the
 orchestrator approves/scopes implementation slices. No product ruling, runtime
 implementation, native speedup, backup intervention or deployment is claimed.
+
+### Output-delivery implementation handoff (#349, 2026-10-29)
+
+The explicitly authorized output slice is now specified in
+[the approved design](design-proposal.md#opt-in-durable-asynchronous-nas-output-delivery-349-2026-10-29)
+and implemented as `output_delivery: async_nas`, with queue
+`--output-delivery-root` and positive `disk.output_bytes`. The implementation
+reuses SQLite job records, file-store reservations/verified uploads, immutable
+local result snapshots, bounded two-copy staging and ordinary retention. Pending
+and failed delivery pins results across restart/expiry; a verified attempt-specific
+receipt releases that extra pin without shortening retrieval policy. Read
+[the operational contract](guide-files-v3.md#complete-from-queue-storage-deliver-to-nas-later-349)
+before migrating a NAS-waiting consumer. Other options in this document remain
+proposals. This source change is not native NAS qualification or a deployment.

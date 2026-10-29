@@ -45,6 +45,7 @@ func (a API) handler(joiningPin string) http.Handler {
 	a.registerEnrollment(mux)
 	a.registerFleetUpgrade(mux)
 	a.registerDevClock(mux)
+	mux.HandleFunc("POST /api/files/result", a.deliveryResultHandler)
 	a.registerHostMaintenance(mux)
 	a.registerDeviceMaintenance(mux)
 	a.registerComponentExclusions(mux)

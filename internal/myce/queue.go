@@ -40,9 +40,10 @@ type batchRelease struct {
 }
 
 type state struct {
-	ExternalMemory map[string]*externalMemoryRing `json:"external_memory,omitempty"`
-	Health         healthAlerts                   `json:"health_alerts,omitempty"`
-	FleetUpgrade   *fleetUpgrade                  `json:"fleet_upgrade,omitempty"`
+	ExternalMemory       map[string]*externalMemoryRing `json:"external_memory,omitempty"`
+	AttemptOutputUploads map[string]time.Time           `json:"attempt_output_uploads,omitempty"`
+	Health               healthAlerts                   `json:"health_alerts,omitempty"`
+	FleetUpgrade         *fleetUpgrade                  `json:"fleet_upgrade,omitempty"`
 	// Positive orphan eligibility, persisted with the existing queue state.
 	// Zero time means an input upload has not finished publication yet.
 	JobInputUploads map[string]time.Time `json:"job_input_uploads,omitempty"`
@@ -93,6 +94,10 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
+	deliveryRoot    string
+	deliveryMu      sync.Mutex
+	deliveryActive  *deliveryOperation                          // q.mu; one outstanding NAS publication per root.
+	deliveryPublish func(Job, *FileStore, string, func()) error // Test seam; set before use.
 	// Built once on a read-only cancellation projection, never on the live queue.
 	cancellationMembersByParent map[string][]*Job
 
@@ -220,6 +225,13 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 	q.nasProgress.timeout = heartbeatFilesystemBudget
 	for _, option := range options {
 		option(q)
+	}
+	if q.deliveryRoot != "" {
+		q.deliveryRoot, err = filepath.Abs(q.deliveryRoot)
+		if err != nil {
+			db.Close()
+			return nil, err
+		}
 	}
 	if _, err = db.Exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS enrollment_tickets (digest TEXT PRIMARY KEY, pin TEXT NOT NULL, expires INTEGER NOT NULL, used INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS queue_state (key TEXT PRIMARY KEY, data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS queue (id INTEGER PRIMARY KEY CHECK(id=1), data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS logs (seq INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL, attempt INTEGER NOT NULL, text TEXT NOT NULL); CREATE TABLE IF NOT EXISTS log_offsets (job TEXT, attempt INTEGER, offset INTEGER, PRIMARY KEY(job,attempt,offset)); CREATE TABLE IF NOT EXISTS environment_log_offsets (job TEXT, machine TEXT, session TEXT, key TEXT, offset INTEGER, PRIMARY KEY(job,machine,session,key,offset)); CREATE TABLE IF NOT EXISTS environment_build_logs (machine TEXT, session TEXT, key TEXT, offset INTEGER, text TEXT, PRIMARY KEY(machine,session,key,offset)); CREATE INDEX IF NOT EXISTS logs_job ON logs(job,seq); CREATE TABLE IF NOT EXISTS usage_samples (at INTEGER NOT NULL, span INTEGER NOT NULL, machine TEXT NOT NULL, device TEXT NOT NULL, project TEXT NOT NULL, job TEXT NOT NULL, model TEXT NOT NULL, busy REAL NOT NULL, idle REAL NOT NULL, pinned REAL NOT NULL, memory_seconds REAL NOT NULL, observed REAL NOT NULL, PRIMARY KEY(at,span,machine,device,project,job,model));`); err != nil {
 		db.Close()
@@ -605,6 +617,17 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 			}
 		}
 	}
+	var resultCapacity FileStoreStatus
+	var resultPayloads map[string]storedPayload
+	if s.OutputDelivery == asyncNAS && !replay && store != nil {
+		// Serialize file-store admission, then snapshot disk outside q.mu.
+		store.mu.Lock()
+		defer store.mu.Unlock()
+		resultCapacity, resultPayloads, err = store.capacity(ctx)
+		if err != nil {
+			resultCapacity.Error = "file store capacity unavailable"
+		}
+	}
 	var out Job
 	err = q.updateRequest(ctx, func() error {
 		q.maintainSubmissions()
@@ -653,6 +676,17 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		}
 		if err := submitted.Validate(); err != nil {
 			return specRejection(err)
+		}
+		if s.OutputDelivery == asyncNAS {
+			if q.deliveryRoot == "" {
+				return &HTTPError{Status: 409, Code: "output_delivery_unavailable", Message: "async_nas requires queue --output-delivery-root"}
+			}
+			if store == nil {
+				return &HTTPError{Status: 503, Code: "file_store_unavailable", Message: "queue-file-store is not configured"}
+			}
+			if err := fileStoreRefusal(resultCapacity, addDiskBytes(q.outputReservations(resultPayloads, ""), s.Disk.OutputBytes)); err != nil {
+				return err
+			}
 		}
 		if e := q.validateProjectPlacement(s.Project, s.AllowedMachines); e != nil {
 			return rejectFieldRule("job_placement_invalid", e)
@@ -748,6 +782,8 @@ func (q *Queue) retry(j *Job, why string) {
 
 // Admission refusal and planned stops do not spend infrastructure retry budgets.
 func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
+	j.PendingOutputRefs = nil
+	j.OutputAdmissionPending = j.Spec.OutputDelivery == asyncNAS
 	// Snapshot identity before requeue clears it, including loss without a result.
 	outcome := attemptOutcome(j, Result{Interrupted: true, PoliteStop: historyPlannedStop(j), PriorityStop: priorityStop(j)})
 	if chargeInfrastructure && strings.HasPrefix(why, "machine quiet for ") {
@@ -961,7 +997,7 @@ func (q *Queue) TickContext(requestContexts ...context.Context) error {
 	}, nil); err != nil {
 		return err
 	}
-	return errors.Join(q.pruneBatchLogs(requestCtx), q.reclaimJobFilesContext(requestCtx), q.pruneJobHistory(requestCtx))
+	return errors.Join(q.advanceOutputDelivery(requestCtx), q.pruneBatchLogs(requestCtx), q.reclaimJobFilesContext(requestCtx), q.admitOutputRetries(requestCtx), q.pruneJobHistory(requestCtx))
 }
 func (q *Queue) Checkin(c Checkin) (Reply, error) {
 	return q.CheckinContext(context.Background(), c)
@@ -1399,6 +1435,10 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 		host = q.executionHost(r.Machine)
 		verify = q.s.Machines[r.Machine] != nil && q.s.Machines[r.Machine].Session == r.Session
 		if verify {
+			if j.Spec.OutputDelivery == asyncNAS && r.Success && !maps.Equal(j.PendingOutputRefs, r.OutputRefs) {
+				unlockRequest()
+				return errors.New("async_nas requires the reserved immutable output manifest")
+			}
 			outputs = maps.Clone(j.Spec.Outputs)
 			r.OutputRefs = maps.Clone(r.OutputRefs)
 			if r.Diagnostics != nil {
@@ -1652,6 +1692,10 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 			}
 			j.OutputRefs = r.OutputRefs
 			j.OutputFiles = nil
+			if j.Spec.OutputDelivery == asyncNAS {
+				now := q.clock.Now()
+				j.Delivery = &OutputDelivery{State: "pending", Execution: r.Execution, Machine: r.Machine, Session: r.Session, DestinationID: deliveryRootID(q.deliveryRoot), ManifestSHA256: deliveryDigest(*j), PendingAt: now, Bytes: manifestDiskBytes(r.OutputRefs)}
+			}
 		}
 		q.recordWorkObservation(j, r)
 		q.recordProgramNeeds(j, r)
@@ -1853,6 +1897,10 @@ func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
 func (q *Queue) projectJob(stored *Job, order map[string]int, reasons map[string]string, forStatus bool) *Job {
 	value := *stored
 	j := &value
+	if stored.Delivery != nil {
+		d := *stored.Delivery
+		value.Delivery = &d
+	}
 	if j.State == "queued" {
 		j.Reason = reasons[j.ID]
 		if j.RequeuedByOperator {
@@ -2292,6 +2340,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	j.Attempt = j.Starts
 	if j.storedFileResults() {
 		j.OutputRefs = nil
+		j.PendingOutputRefs = nil
 	}
 	if j.FileTransport {
 		j.ResumeFiles = bestFileCheckpoint(j)

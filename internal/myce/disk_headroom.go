@@ -64,6 +64,9 @@ func projectedDiskNeed(j *Job) uint64 {
 }
 func diskVolumeNeed(j *Job, v DiskVolume, machines ...*Machine) (uint64, bool) {
 	input, output := diskInputOutput(j)
+	if j.Spec.OutputDelivery == asyncNAS {
+		output = addDiskBytes(output, output) // Work files plus immutable unaccepted spool.
+	}
 	var need uint64
 	relevant := false
 	for _, root := range v.Roots {
@@ -123,6 +126,9 @@ func diskVolumeReason(m *Machine, v DiskVolume, need uint64) string {
 	return ""
 }
 func diskHeadroomReason(j *Job, m *Machine) string {
+	if j.OutputAdmissionPending {
+		return outputRetryHold
+	}
 	if m == nil {
 		return ""
 	}
@@ -162,6 +168,9 @@ func (q *Queue) currentDiskVolume(v DiskVolume, receivedAt time.Time) DiskVolume
 	return v
 }
 func (q *Queue) diskHeadroomReason(j *Job, m *Machine) string {
+	if j.OutputAdmissionPending {
+		return outputRetryHold
+	}
 	if m == nil {
 		return ""
 	}
@@ -253,6 +262,9 @@ func (q *Queue) diskCapacityRefusal(j *Job) string {
 	return strings.Join(slices.Compact(reasons), "; ")
 }
 func (q *Queue) diskWaitingReason(j *Job, host string) string {
+	if j.OutputAdmissionPending {
+		return outputRetryHold
+	}
 	if !q.hasDiskReports(host) {
 		return ""
 	}

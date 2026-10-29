@@ -1292,6 +1292,10 @@
           ],
           "x-contract": "diagnostic"
         },
+        "delivery": {
+          "$ref": "#/$defs/OutputDelivery",
+          "x-contract": "stable"
+        },
         "dependency": {
           "$ref": "#/$defs/PieceBinding",
           "x-contract": "stable"
@@ -1478,6 +1482,10 @@
           "type": "integer",
           "x-contract": "diagnostic"
         },
+        "output_admission_pending": {
+          "type": "boolean",
+          "x-contract": "diagnostic"
+        },
         "output_files": {
           "additionalProperties": {
             "type": "string"
@@ -1489,6 +1497,10 @@
           "x-contract": "diagnostic"
         },
         "output_refs": {
+          "$ref": "#/$defs/FileManifest",
+          "x-contract": "diagnostic"
+        },
+        "pending_output_refs": {
           "$ref": "#/$defs/FileManifest",
           "x-contract": "diagnostic"
         },
@@ -1821,6 +1833,76 @@
         "configuration",
         "concurrency",
         "batch_size"
+      ],
+      "type": "object"
+    },
+    "OutputDelivery": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "attempts": {
+          "type": "integer"
+        },
+        "bytes": {
+          "type": "integer"
+        },
+        "cause": {
+          "type": "string"
+        },
+        "destination_id": {
+          "type": "string"
+        },
+        "id": {
+          "type": "string"
+        },
+        "last_attempt_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "last_progress_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "manifest_sha256": {
+          "type": "string"
+        },
+        "next_attempt_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "pending_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "progress": {
+          "type": "integer"
+        },
+        "session": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "verified_at": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "destination_id",
+        "id",
+        "attempt",
+        "machine",
+        "session",
+        "state",
+        "manifest_sha256",
+        "bytes",
+        "pending_at",
+        "attempts"
       ],
       "type": "object"
     },
@@ -2321,6 +2403,10 @@
         "needs": {
           "$ref": "#/$defs/ResourceNeeds",
           "x-contract": "diagnostic"
+        },
+        "output_delivery": {
+          "type": "string",
+          "x-contract": "stable"
         },
         "outputs": {
           "additionalProperties": {
