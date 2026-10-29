@@ -30,7 +30,7 @@ func (q *Queue) benchmarkIdle(m *Machine) bool {
 // Defer a new attempt as a whole; ordinary worker admission can still proceed.
 func (q *Queue) benchmarkDeviceAdmissionBlocked(m *Machine) bool {
 	for _, d := range m.Devices {
-		if q.s.DeviceMaintenance[hostID(m)][deviceMaintenanceKey(d.Platform, d.Identity)].Disabled {
+		if q.s.DeviceMaintenance[hostID(m)][deviceMaintenanceKey(d.Platform, d.Identity)].Disabled || q.componentExcluded(m, d.Platform, d.Identity) {
 			return true
 		}
 	}
