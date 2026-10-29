@@ -56,13 +56,17 @@ func (q *Queue) hostLaunchAllowed(m *Machine, session string) bool {
 	return m != nil && !m.Recovering && m.Session == session && !m.Gone && !m.Leaving && !q.unreported[m.ID] && !q.maintenanceBlocked(hostID(m)) && !availabilityBlocked(m) && !m.HostMemoryPolicyMismatch
 }
 func (q *Queue) AuthorizeLaunch(l HostLaunch) error {
+	return q.authorizeLaunchContext(context.Background(), l)
+}
+
+func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error {
 	timing := newQueueUpdateTiming()
 	var rejected error
 	reject := func(fence string) {
 		log.Printf("event=launch_rejected fence=%s", fence)
 		rejected = ErrStale
 	}
-	err := q.updateTimed(func() error {
+	err := q.updateRequest(ctx, func() error {
 		q.maintain()
 		q.refreshHostMemory()
 		if !q.hostLaunchAllowed(q.s.Machines[l.Machine], l.Session) {
@@ -105,7 +109,7 @@ func (q *Queue) AuthorizeLaunch(l HostLaunch) error {
 		}
 		if l.Kind == "engine" {
 			s := q.s.ModelSlots[slotKey(l.Machine, l.Key, l.Device)]
-			if s == nil || s.Session != l.Session || s.Attempt != l.Attempt || s.State != "loading" {
+			if s == nil || s.Session != l.Session || s.Attempt != l.Attempt || s.State != "loading" || q.deviceAdmissionBlocked(allocationMachine(q.s.Machines[l.Machine], []string{l.Device})) {
 				reject("engine_custody")
 			}
 			return nil
@@ -116,6 +120,15 @@ func (q *Queue) AuthorizeLaunch(l HostLaunch) error {
 			return nil
 		}
 		m := q.s.Machines[l.Machine]
+		if !p.Started && p.Kind == "benchmark" && q.benchmarkDeviceAdmissionBlocked(m) {
+			reject("device_admission")
+			return nil
+		}
+		// A model-cache copy writes shared host storage, not the selected GPU.
+		if !p.Started && p.Kind != "copy" && p.Device != "" && q.deviceAdmissionBlocked(allocationMachine(m, []string{p.Device})) {
+			reject("device_admission")
+			return nil
+		}
 		if l.Kind == "benchmark" && !q.benchmarkIdle(m) {
 			reject("benchmark_busy")
 			return nil

@@ -233,12 +233,12 @@ func (q *Queue) PreflightFileStore(ctx context.Context, files FileManifest) erro
 	if err := files.validate(); err != nil {
 		return err
 	}
-	if err := q.reclaimJobFiles(); err != nil {
+	if err := q.reclaimJobFilesContext(ctx); err != nil {
 		log.Printf("file retention deferred: %v", err)
 	}
-	q.mu.RLock()
+	requestUnlock1 := requestReadLock(ctx, &q.mu)
 	store := q.files
-	q.mu.RUnlock()
+	requestUnlock1()
 	if store == nil {
 		return &HTTPError{Status: 503, Code: "file_store_unavailable", Message: "queue-file-store is not configured"}
 	}
@@ -285,8 +285,10 @@ func (s *FileStore) refreshUpload(hash string) error {
 // Only positively marked job-input uploads are disposable. Unknown/imported
 // files stay for operator recovery. The publication fence excludes every active
 // PATCH and verify/commit interval while custody and idle time are rechecked.
-func (q *Queue) reclaimInterruptedUploads() error {
-	q.mu.RLock()
+func (q *Queue) reclaimInterruptedUploads(requestContexts ...context.Context) error {
+	requestCtx := requestContext(requestContexts)
+
+	requestUnlock1 := requestReadLock(requestCtx, &q.mu)
 	store := q.files
 	_, _, referenced := q.fileReferences(false)
 	revision := q.fileReferenceRevision
@@ -297,7 +299,7 @@ func (q *Queue) reclaimInterruptedUploads() error {
 		}
 	}
 	cutoff := q.clock.Now().Add(-max(q.fileRetention, filePublicationGrace))
-	q.mu.RUnlock()
+	requestUnlock1()
 	if store == nil || len(markers) == 0 {
 		return nil
 	}
@@ -313,14 +315,14 @@ func (q *Queue) reclaimInterruptedUploads() error {
 		if !q.fileLifecycle.TryLock() {
 			return nil
 		}
-		q.mu.RLock()
+		requestUnlock2 := requestReadLock(requestCtx, &q.mu)
 		if revision != q.fileReferenceRevision {
 			_, _, referenced = q.fileReferences(false)
 			revision = q.fileReferenceRevision
 		}
 		current, marked := q.s.JobInputUploads[hash]
 		remove := q.files == store && marked && current == at && !referenced[hash]
-		q.mu.RUnlock()
+		requestUnlock2()
 		err := func() error {
 			if !remove {
 				return nil
@@ -359,14 +361,14 @@ func (q *Queue) reclaimInterruptedUploads() error {
 			if err := store.syncDir(filepath.Join(store.root, "uploads")); err != nil {
 				return err
 			}
-			return q.update(func() error {
+			return q.updateRequest(requestCtx, func() error {
 				if published.IsZero() {
 					delete(q.s.JobInputUploads, hash)
 				} else {
 					q.s.JobInputUploads[hash] = published
 				}
 				return nil
-			})
+			}, nil)
 		}()
 		q.fileLifecycle.Unlock()
 		if err != nil {

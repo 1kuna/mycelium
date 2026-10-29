@@ -32,9 +32,11 @@ func cancelled(j *Job) bool { return j.CancelledAt != nil || j.State == "cancell
 // Cancel preserves the queue's original Go interface for existing callers.
 func (q *Queue) Cancel(id string) error { _, err := q.CancelJob(id); return err }
 
-func (q *Queue) CancelJob(id string) (Cancellation, error) {
+func (q *Queue) CancelJob(id string, requestContexts ...context.Context) (Cancellation, error) {
+	requestCtx := requestContext(requestContexts)
+
 	var out Cancellation
-	err := q.update(func() error {
+	err := q.updateRequest(requestCtx, func() error {
 		q.maintainSubmissions()
 		if q.retainedJob(id) == nil {
 			jobs := []*Job{}
@@ -59,11 +61,13 @@ func (q *Queue) CancelJob(id string) (Cancellation, error) {
 			return nil
 		}
 		return &HTTPError{Status: 404, Code: "job_unknown", Message: "job is unknown", JobID: id}
-	})
+	}, nil)
 	return out, err
 }
 
-func (q *Queue) CancelSubmission(project, key string) (Cancellation, error) {
+func (q *Queue) CancelSubmission(project, key string, requestContexts ...context.Context) (Cancellation, error) {
+	requestCtx := requestContext(requestContexts)
+
 	if err := validateSubmissionKey(key); err != nil {
 		return Cancellation{}, err
 	}
@@ -71,7 +75,7 @@ func (q *Queue) CancelSubmission(project, key string) (Cancellation, error) {
 		return Cancellation{}, errors.New("project is required")
 	}
 	var out Cancellation
-	err := q.update(func() error {
+	err := q.updateRequest(requestCtx, func() error {
 		q.maintainSubmissions()
 		if q.s.Submissions == nil {
 			q.s.Submissions = map[string]*submissionRecord{}
@@ -109,7 +113,7 @@ func (q *Queue) CancelSubmission(project, key string) (Cancellation, error) {
 		q.maintainExtensionQualifications()
 		out = q.cancellation(j, removed)
 		return nil
-	})
+	}, nil)
 	return out, err
 }
 

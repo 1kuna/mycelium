@@ -44,7 +44,7 @@ func (c *devClock) advance(seconds float64) (time.Time, error) {
 	return RealClock{}.Now().Add(c.offset), nil
 }
 
-func (a API) registerDevClock(mux *http.ServeMux) {
+func (a API) registerDevClock(mux *requestMux) {
 	clock, ok := a.Queue.clock.(*devClock)
 	if !ok {
 		return
@@ -63,7 +63,7 @@ func (a API) registerDevClock(mux *http.ServeMux) {
 		// Advance inside the queue transaction: a heartbeat must not account at
 		// the old time and then stamp LastSeen at the new time. That would turn
 		// the skipped interval into observed usage on the next transaction.
-		err := a.Queue.update(func() error {
+		err := a.Queue.updateRequest(r.Context(), func() error {
 			var err error
 			now, err = clock.advance(request.Seconds)
 			if err == nil {
@@ -73,9 +73,9 @@ func (a API) registerDevClock(mux *http.ServeMux) {
 				a.Queue.maintain()
 			}
 			return err
-		})
+		}, nil)
 		if err == nil {
-			err = errors.Join(a.Queue.pruneBatchLogs(), a.Queue.reclaimJobFiles(), a.Queue.pruneJobHistory())
+			err = errors.Join(a.Queue.pruneBatchLogs(r.Context()), a.Queue.reclaimJobFilesContext(r.Context()), a.Queue.pruneJobHistory(r.Context()))
 		}
 		// A failed transaction cannot rewind a clock other requests observed.
 		respond(w, struct {

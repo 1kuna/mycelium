@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"sort"
 	"strings"
 )
@@ -26,8 +27,8 @@ func deviceReasonDiagnostic(reason string) string {
 	}
 }
 
-func (q *Queue) publicSnapshot() (Snapshot, error) {
-	s, err := q.snapshot(true)
+func (q *Queue) publicSnapshot(contexts ...context.Context) (Snapshot, error) {
+	s, err := q.snapshot(true, contexts...)
 	for i := range s.LoadedModels {
 		s.LoadedModels[i].EnvironmentRecipe = nil
 		s.LoadedModels[i].Error = ceilingDiagnostic(s.LoadedModels[i].Error, "model load or unload failed")

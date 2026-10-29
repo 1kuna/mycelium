@@ -226,7 +226,7 @@ func (q *Queue) maintainEngineRetry(key string, s *ModelSlot, m *Machine, model 
 
 	job := &Job{ID: "pin/" + project + "/" + s.Model, Spec: Spec{Project: project, Priority: priority}}
 	job.Spec.Needs.Model = s.Model
-	if !q.placementPolicyAllowed(job, m, false) {
+	if q.deviceAdmissionBlocked(m) || !q.placementPolicyAllowed(job, m, false) {
 		return
 	}
 	room := *m

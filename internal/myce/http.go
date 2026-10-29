@@ -27,13 +27,14 @@ func (a API) Handler() http.Handler { return a.handler("") }
 func (a API) HandlerWithJoiningIdentity(pin string) http.Handler { return a.handler(pin) }
 
 func (a API) handler(joiningPin string) http.Handler {
-	mux := http.NewServeMux()
+	mux := newRequestMux()
 	a.registerInvites(mux, joiningPin)
 	a.registerEnrollmentRelease(mux)
 	a.registerEnrollment(mux)
 	a.registerFleetUpgrade(mux)
 	a.registerDevClock(mux)
 	a.registerHostMaintenance(mux)
+	a.registerDeviceMaintenance(mux)
 	a.registerPriorityPolicy(mux)
 	a.registerFiles(mux)
 	mux.HandleFunc("POST /api/extensions", func(w http.ResponseWriter, r *http.Request) {
@@ -41,20 +42,20 @@ func (a API) handler(joiningPin string) http.Handler {
 		if !decode(w, r, &e) {
 			return
 		}
-		respondOperation(w, map[string]bool{"ok": true}, a.Queue.AddExtension(e), "extension_invalid")
+		respondOperation(w, map[string]bool{"ok": true}, a.Queue.AddExtension(e, r.Context()), "extension_invalid")
 	})
 	mux.HandleFunc("GET /api/extensions/{digest}", func(w http.ResponseWriter, r *http.Request) {
-		e, err := a.Queue.extensionByDigest(r.PathValue("digest"))
+		e, err := a.Queue.extensionByDigest(r.PathValue("digest"), r.Context())
 		respondOperation(w, e, err, "extension_unknown")
 	})
-	mux.HandleFunc("GET /api/extensions", func(w http.ResponseWriter, r *http.Request) { respond(w, a.Queue.Extensions(), nil) })
+	mux.HandleFunc("GET /api/extensions", func(w http.ResponseWriter, r *http.Request) { respond(w, a.Queue.Extensions(r.Context()), nil) })
 	mux.HandleFunc("GET /api/usage", func(w http.ResponseWriter, r *http.Request) {
 		d, e := time.ParseDuration(r.URL.Query().Get("since"))
 		if e != nil || d <= 0 || d > 90*24*time.Hour {
 			respond(w, nil, reject("usage_invalid", nil))
 			return
 		}
-		report, e := a.Queue.Usage(a.Queue.clock.Now().Add(-d))
+		report, e := a.Queue.Usage(a.Queue.clock.Now().Add(-d), r.Context())
 		respondOperation(w, report, e, "usage_unavailable")
 	})
 	mux.HandleFunc("/models/{name}/{path...}", a.modelCall)
@@ -64,27 +65,27 @@ func (a API) handler(joiningPin string) http.Handler {
 		if !decode(w, r, &s) {
 			return
 		}
-		respondOperation(w, map[string]bool{"ok": true}, a.Queue.SyncModel(s), "model_sync_invalid")
+		respondOperation(w, map[string]bool{"ok": true}, a.Queue.SyncModel(s, r.Context()), "model_sync_invalid")
 	})
 	mux.HandleFunc("POST /api/models/pin", func(w http.ResponseWriter, r *http.Request) {
 		var p ModelPin
 		if !decode(w, r, &p) {
 			return
 		}
-		respondOperation(w, map[string]bool{"ok": true}, a.Queue.Pin(p), "model_pin_invalid")
+		respondOperation(w, map[string]bool{"ok": true}, a.Queue.Pin(p, r.Context()), "model_pin_invalid")
 	})
 	mux.HandleFunc("POST /api/models/unpin", func(w http.ResponseWriter, r *http.Request) {
 		var p ModelPin
 		if !decode(w, r, &p) {
 			return
 		}
-		respondOperation(w, map[string]bool{"ok": true}, a.Queue.Unpin(p.Project, p.Model), "model_unpin_invalid")
+		respondOperation(w, map[string]bool{"ok": true}, a.Queue.Unpin(p.Project, p.Model, r.Context()), "model_unpin_invalid")
 	})
 	for _, path := range []string{"/v1/chat/completions", "/v1/completions", "/v1/embeddings"} {
 		mux.HandleFunc("POST "+path, a.modelCall)
 	}
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
-		s, err := a.Queue.cachedPublicSnapshot()
+		s, err := a.Queue.cachedPublicSnapshot(r.Context())
 		if err != nil {
 			http.Error(w, "status unavailable", 500)
 			return
@@ -94,7 +95,7 @@ func (a API) handler(joiningPin string) http.Handler {
 		_ = statusPage.Execute(w, s)
 	})
 	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
-		data, err := a.Queue.cachedStatusJSON()
+		data, err := a.Queue.cachedStatusJSON(r.Context())
 		w.Header().Add("Vary", "Accept-Encoding")
 		if err == nil {
 			w.Header().Set("Content-Type", "application/json")
@@ -118,11 +119,11 @@ func (a API) handler(joiningPin string) http.Handler {
 	// Administrative inspection must remain fresh for migration custody and
 	// measurement safety. It never consumes the observational status cache.
 	mux.HandleFunc("GET /api/inspection", func(w http.ResponseWriter, r *http.Request) {
-		s, err := a.Queue.publicSnapshot()
+		s, err := a.Queue.publicSnapshot(r.Context())
 		respondOperation(w, s, err, "status_unavailable")
 	})
 	mux.HandleFunc("GET /api/jobs/{id}", func(w http.ResponseWriter, r *http.Request) {
-		j, err := a.Queue.jobSnapshot(r.PathValue("id"))
+		j, err := a.Queue.jobSnapshot(r.PathValue("id"), r.Context())
 		// Keep the GET execution payload empty without changing Spec's JSON
 		// encoding, which also defines durable submission fingerprints.
 		type replySpec struct {
@@ -151,7 +152,7 @@ func (a API) handler(joiningPin string) http.Handler {
 				values[i] = v
 			}
 		}
-		page, err := a.Queue.JobLedger(r.PathValue("id"), values[0], values[1], values[2])
+		page, err := a.Queue.JobLedger(r.PathValue("id"), values[0], values[1], values[2], r.Context())
 		respondOperation(w, page, err, "job_ledger_unavailable")
 	})
 	mux.HandleFunc("POST /api/jobs", func(w http.ResponseWriter, r *http.Request) {
@@ -179,7 +180,7 @@ func (a API) handler(joiningPin string) http.Handler {
 		respondOperation(w, j, err, "job_submit_failed")
 	})
 	mux.HandleFunc("POST /api/jobs/{id}/cancel", func(w http.ResponseWriter, r *http.Request) {
-		ack, err := a.Queue.CancelJob(r.PathValue("id"))
+		ack, err := a.Queue.CancelJob(r.PathValue("id"), r.Context())
 		respondOperation(w, ack, err, "job_cancel_invalid")
 	})
 	mux.HandleFunc("POST /api/jobs/cancel", func(w http.ResponseWriter, r *http.Request) {
@@ -195,7 +196,7 @@ func (a API) handler(joiningPin string) http.Handler {
 			respond(w, nil, validateSubmissionKey(""))
 			return
 		}
-		ack, err := a.Queue.CancelSubmission(request.Project, key)
+		ack, err := a.Queue.CancelSubmission(request.Project, key, r.Context())
 		respondOperation(w, ack, err, "job_cancel_invalid")
 	})
 	mux.HandleFunc("GET /api/jobs/{id}/logs", func(w http.ResponseWriter, r *http.Request) {
@@ -208,7 +209,7 @@ func (a API) handler(joiningPin string) http.Handler {
 			respond(w, nil, reject("job_logs_invalid_cursor", err))
 			return
 		}
-		ls, err := a.Queue.Logs(r.PathValue("id"), after)
+		ls, err := a.Queue.Logs(r.PathValue("id"), after, r.Context())
 		respondOperation(w, ls, err, "job_logs_unavailable")
 	})
 	mux.HandleFunc("POST /api/workers/checkin", func(w http.ResponseWriter, r *http.Request) {
@@ -228,21 +229,21 @@ func (a API) handler(joiningPin string) http.Handler {
 		if !decode(w, r, &l) {
 			return
 		}
-		respondOperation(w, map[string]any{"ok": true, "start_gate": startGateProtocol}, a.Queue.AuthorizeLaunch(l), "worker_launch_invalid")
+		respondOperation(w, map[string]any{"ok": true, "start_gate": startGateProtocol}, a.Queue.authorizeLaunchContext(r.Context(), l), "worker_launch_invalid")
 	})
 	mux.HandleFunc("POST /api/workers/native-custody", func(w http.ResponseWriter, r *http.Request) {
 		var c NativeCustodyReport
 		if !decode(w, r, &c) {
 			return
 		}
-		respondOperation(w, map[string]any{"ok": true, "start_gate": startGateProtocol}, a.Queue.NativeCustody(c), "native_custody_invalid")
+		respondOperation(w, map[string]any{"ok": true, "start_gate": startGateProtocol}, a.Queue.NativeCustody(c, r.Context()), "native_custody_invalid")
 	})
 	mux.HandleFunc("POST /api/workers/started", func(w http.ResponseWriter, r *http.Request) {
 		var c Result
 		if !decode(w, r, &c) {
 			return
 		}
-		respondOperation(w, map[string]any{"ok": true, "start_gate": startGateProtocol}, a.Queue.Started(c), "worker_start_invalid")
+		respondOperation(w, map[string]any{"ok": true, "start_gate": startGateProtocol}, a.Queue.Started(c, r.Context()), "worker_start_invalid")
 	})
 	mux.HandleFunc("POST /api/workers/complete", func(w http.ResponseWriter, r *http.Request) {
 		var c Result
@@ -256,14 +257,14 @@ func (a API) handler(joiningPin string) http.Handler {
 		if !decode(w, r, &c) {
 			return
 		}
-		respondOperation(w, map[string]bool{"ok": true}, a.Queue.AppendEnvironmentLog(c), "worker_environment_log_invalid")
+		respondOperation(w, map[string]bool{"ok": true}, a.Queue.AppendEnvironmentLog(c, r.Context()), "worker_environment_log_invalid")
 	})
 	mux.HandleFunc("POST /api/workers/log", func(w http.ResponseWriter, r *http.Request) {
 		var c LogChunk
 		if !decode(w, r, &c) {
 			return
 		}
-		respondOperation(w, map[string]bool{"ok": true}, a.Queue.AppendLog(c), "worker_log_invalid")
+		respondOperation(w, map[string]bool{"ok": true}, a.Queue.AppendLog(c, r.Context()), "worker_log_invalid")
 	})
 	mux.HandleFunc("POST /api/workers/{id}/leave", func(w http.ResponseWriter, r *http.Request) {
 		var c struct {
@@ -272,9 +273,10 @@ func (a API) handler(joiningPin string) http.Handler {
 		if !decode(w, r, &c) {
 			return
 		}
-		respondOperation(w, map[string]bool{"ok": true}, a.Queue.Leave(r.PathValue("id"), c.Now), "worker_leave_invalid")
+		respondOperation(w, map[string]bool{"ok": true}, a.Queue.Leave(r.PathValue("id"), c.Now, r.Context()), "worker_leave_invalid")
 	})
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return a.Queue.measureRequests(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, r.Pattern = mux.Handler(r)
 		if r.URL.Path == "/api/invites/redeem" {
 			a.redeemInvite(w, r, joiningPin)
 			return
@@ -304,7 +306,7 @@ func (a API) handler(joiningPin string) http.Handler {
 			return
 		}
 		mux.ServeHTTP(w, r)
-	})
+	}), mux.patterns)
 }
 func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	limit := int64(1 << 20)

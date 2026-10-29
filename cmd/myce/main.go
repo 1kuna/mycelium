@@ -71,7 +71,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 
 	if len(args) == 0 {
-		return errors.New("usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|run|profile|submit|policy|status|logs|ledger|wait|result|cancel|resolve-native|resolve-docker|reconcile-docker-retention|dev|version|release|file|benchmark|extension|sim|detect|service|measure|model|usage\n       myce host drain|disable|resume|status|budget|placement HOST\nRun myce COMMAND --help for command options.")
+		return errors.New("usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|run|profile|submit|policy|status|logs|ledger|wait|result|cancel|resolve-native|resolve-docker|reconcile-docker-retention|dev|version|release|file|benchmark|extension|sim|detect|service|measure|model|usage\n       myce host drain|disable|resume|status|budget|placement HOST\n       myce host device disable|enable HOST DEVICE\nRun myce COMMAND --help for command options.")
 	}
 	if args[0] == "dev" && len(args) > 1 && args[1] == "clock" {
 		return devClockCommand(args[2:], os.Stdout)
@@ -204,7 +204,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	releaseCA := f.String("release-ca", "", "provisioned publisher CA PEM (default ordinary HTTPS trust)")
 	identityDir := f.String("identity-dir", "", "durable joining identity directory (default DB.joining)")
 	hostConfig := f.String("host-config", "", "physical-host production hold policy YAML")
-	projectConfig := f.String("project-config", "", "project weights and experiment caps YAML")
+	projectConfig := f.String("project-config", "", "initial project policy YAML (later edits: myce policy set)")
 	url := f.String("queue", env("MYCE_QUEUE", "http://127.0.0.1:7331"), "queue address")
 	token := f.String("token", env("MYCE_TOKEN", ""), "shared fleet token (prefer MYCE_TOKEN)")
 	// DefValue is only help text; keep the actual environment default private.
@@ -528,7 +528,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			if e != nil {
 				return e
 			}
-			if e = q.ConfigureProjects(policies); e != nil {
+			if e = q.SeedProjects(policies); e != nil {
 				return e
 			}
 		}
@@ -873,6 +873,11 @@ func printStatus(s myce.Snapshot, full bool) {
 	}
 	for _, host := range slices.Sorted(maps.Keys(s.HostStates)) {
 		fmt.Printf("host %s: %s\n", host, s.HostStates[host])
+	}
+	for _, d := range s.DeviceMaintenance {
+		if d.Disabled {
+			fmt.Printf("host %s device %s (%s): disabled by operator since %s; reason=%q\n", d.Host, d.Identity, d.Platform, d.UpdatedAt.UTC().Format(time.RFC3339Nano), d.Reason)
+		}
 	}
 	for _, hold := range s.HostHolds {
 		fmt.Println(hold)

@@ -26,6 +26,17 @@ func (q *Queue) benchmarkIdle(m *Machine) bool {
 	return true
 }
 
+// Onboarding is one host-wide attempt and measures every inventory device.
+// Defer a new attempt as a whole; ordinary worker admission can still proceed.
+func (q *Queue) benchmarkDeviceAdmissionBlocked(m *Machine) bool {
+	for _, d := range m.Devices {
+		if q.s.DeviceMaintenance[hostID(m)][deviceMaintenanceKey(d.Platform, d.Identity)].Disabled {
+			return true
+		}
+	}
+	return q.deviceAdmissionBlocked(m)
+}
+
 func (w *Worker) runBenchmark(stop context.Context, s *workerStore) error {
 	// Fresh-session release is truthful only after every old child is cleaned.
 	if err := cleanupEngines(s.dir, w.Clock); err != nil {
@@ -71,6 +82,14 @@ func (w *Worker) runBenchmark(stop context.Context, s *workerStore) error {
 	defer cancel()
 	ctx = withLaunchGate(ctx, func() error { return w.authorizeLaunch(launch) })
 	if err := checkLaunchGate(ctx); err != nil {
+		var rejected *HTTPError
+		if errors.As(err, &rejected) && rejected.Code == "request_stale" {
+			// A policy edit can invalidate the cached offer before its first
+			// launch. Release it and continue ordinary worker startup.
+			m.BenchmarkPending = false
+			_, ackErr := checkin(launch.Attempt)
+			return ackErr
+		}
 		return err
 	}
 	profile := *w.Machine.CapabilityProfile

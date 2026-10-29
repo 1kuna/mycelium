@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"math"
@@ -282,20 +283,24 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
 	}
 	return nil
 }
-func (q *Queue) Usage(since time.Time) (UsageReport, error) {
-	if e := q.Tick(); e != nil {
+func (q *Queue) Usage(since time.Time, requestContexts ...context.Context) (UsageReport, error) {
+	requestCtx := requestContext(requestContexts)
+
+	if e := q.TickContext(requestCtx); e != nil {
 		return UsageReport{}, e
 	}
-	return q.usageSnapshot(since)
+	return q.usageSnapshot(since, requestCtx)
 }
 
-func (q *Queue) usageSnapshot(since time.Time) (UsageReport, error) {
-	q.mu.RLock()
+func (q *Queue) usageSnapshot(since time.Time, requestContexts ...context.Context) (UsageReport, error) {
+	requestCtx := requestContext(requestContexts)
+
+	requestUnlock1 := requestReadLock(requestCtx, &q.mu)
 	v := &Queue{clock: observationClock{q.clock.Now()}, s: state{
 		Preemptions:      append([]Preemption(nil), q.s.Preemptions...),
 		ProductionStarts: append([]ProductionStart(nil), q.s.ProductionStarts...),
 	}}
-	q.mu.RUnlock()
+	requestUnlock1()
 	return v.readUsage(q.usageReader, since)
 }
 

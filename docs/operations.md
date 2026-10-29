@@ -20,6 +20,26 @@ and stable manager health. `polite_waiting`, `disabled` and `drained` do not mea
 use a line for a newer release to upgrade while preserving spool, identity and
 maintenance. Existing legacy conversion remains the explicit M4 procedure below.
 
+## Change live project policy
+
+`queue --project-config` (and `dev --project-config`) bootstraps project settings
+only before the first policy is stored. After first boot, the persisted SQLite
+policy is authoritative. Editing the config and restarting or reinstalling the
+queue no longer changes live policy or advances its revision.
+
+For a deliberate change, export the current policy, edit its `projects` mapping,
+and import it using the revision printed by the export:
+
+```sh
+myce policy get --yaml > policy.yaml
+# Edit policy.yaml, then replace N with the exported revision.
+myce policy set policy.yaml --if-revision N
+```
+
+If the revision is stale, export again and reconcile the newer policy before
+retrying. See [owner priority policy](guide-priority-policy.md) for the full
+import/export contract, including replacing or clearing project settings.
+
 ## Queue maintenance
 
 All commands use the authenticated queue and run as an ordinary account.
@@ -38,6 +58,49 @@ myce host placement HOST --last-resort=true
 myce host placement HOST --last-resort=false
 myce host resume HOST
 ```
+
+### Set aside one accelerator
+
+```sh
+myce host device disable HOST DEVICE --reason "recurring driver faults"
+myce host device enable HOST DEVICE
+myce host status HOST
+myce status
+```
+
+`DEVICE` is the displayed inventory ID (for example `0`) or its stable
+`identity` from `myce host status HOST`. The CLI resolves it to the physical
+identity before submitting a conditional edit. The queue persists the policy
+by host, platform and identity in SQLite, independently of ordinals, worker
+sessions and health reports. Queue and worker restarts preserve it; an index
+reused by a different physical device does not inherit the old disable.
+If an inventory identity is missing or ambiguous, inspect host status and use
+the stable identity rather than guessing an index. Workers without a stable
+inventory cannot use this control.
+
+Disabling admission preserves Started batch attempts, running preparations,
+engines and active calls. It withdraws unstarted batch offers and refuses new
+batch placements, calls, engine launches and device-specific preparation
+launches on that device. Model-cache copies use shared host storage and remain
+allowed. Healthy siblings retain their budgets and CPU work
+remains eligible. New whole-host onboarding benchmarks are deferred while any
+inventory device is disabled; ordinary worker startup continues. A later join
+after enabling the device can refresh whole-host throughput. Already authorized
+benchmarks continue as existing work. Existing work can still finish or stop under ordinary
+cancellation, failure and priority rules. This command does not edit the
+worker installation/configuration and needs no restart. Host drain/disable
+remains an independent fence; enabling a device does not resume its host.
+
+Host status returns `device_maintenance` records with identity, reason,
+`updated_at` (injected queue time) and revision. CLI/web status lists disabled
+devices, including retained policies for absent devices. Enable clears the
+reason but keeps a revision record. Mutations use the same installed operator
+authority as host drain. The CLI reads the current per-device revision and
+sends `if_revision`; a concurrent edit is rejected as stale, never retried
+blindly. API clients post `action`, `platform`, `identity`, optional `reason`
+and required `if_revision` to `/api/hosts/HOST/devices/maintenance`; revision
+zero means no prior record. Device edits preserve the host drain owner's
+receipt and timestamp.
 
 `host placement` changes the queue-owned policy for a physical host, including
 all its worker/device views. It can be changed while enabled, persists across

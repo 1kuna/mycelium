@@ -20,7 +20,7 @@ projects, and an indefinite allocation has no bounded-wait guarantee.
 
 Set weights and caps in the revision-CAS [owner policy](guide-priority-policy.md).
 The legacy `--project-config projects.yaml` option (also supported by `myce dev`)
-updates those same settings and revision:
+seeds those same settings only when no policy has been stored:
 
 ```yaml
 transcribe:
@@ -39,8 +39,11 @@ unlimited. The legacy experiment concurrency cap counts only experiment commands
 and assigned experiment calls. The memory cap applies to experiment reservations across online
 workers' reported memory budgets, including each active model once per project
 and worker. Production and deadlines bypass the legacy experiment caps; the all-class cap still applies. Caps are hard limits even
-when a project is alone. Policies persist in SQLite; omitting the config on queue
-restart preserves them. Supplying a config replaces the policy map.
+when a project is alone. Policies persist in SQLite; queue restarts preserve them
+even when a project config is supplied. To apply a deliberate change, export the
+current owner policy, edit its `projects` mapping, and import it with
+`myce policy set FILE --if-revision N`. Editing the startup file alone does not
+change an existing policy.
 
 `myce status` and the page show cap or fairness reasons, for example:
 `transcribe goes first (sim is ahead of its fair share)`. NAS and machine fit failures

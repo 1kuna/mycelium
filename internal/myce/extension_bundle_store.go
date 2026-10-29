@@ -15,7 +15,7 @@ import (
 // Bundle maps use the same canonical JSON as Extension.Digest. The existing
 // file store owns immutable bytes; queue transactions carry only FileRefs.
 // Callers hold fileLifecycle.RLock from publication through reference commit.
-func (s *FileStore) freezeFiles(files *map[string][]byte, ref **FileRef, digest string, verified map[FileRef]bool) error {
+func (s *FileStore) freezeFiles(files *map[string][]byte, ref **FileRef, digest string, verified map[FileRef]bool, contexts ...context.Context) error {
 	if len(*files) == 0 {
 		return nil
 	}
@@ -54,7 +54,7 @@ func (s *FileStore) freezeFiles(files *map[string][]byte, ref **FileRef, digest 
 	err = s.verify(context.Background(), next)
 	missing := os.IsNotExist(err)
 	if s.recordBundle != nil {
-		if e := s.recordBundle(next.SHA256, missing); e != nil {
+		if e := s.recordBundle(next.SHA256, missing, requestContext(contexts)); e != nil {
 			return e
 		}
 	}
@@ -99,26 +99,26 @@ func (s *FileStore) freezeFiles(files *map[string][]byte, ref **FileRef, digest 
 	return nil
 }
 
-func (s *FileStore) freezeRecipe(r *EnvironmentRecipe, verified map[FileRef]bool) error {
-	return s.freezeFiles(&r.Files, &r.FilesRef, "", verified)
+func (s *FileStore) freezeRecipe(r *EnvironmentRecipe, verified map[FileRef]bool, contexts ...context.Context) error {
+	return s.freezeFiles(&r.Files, &r.FilesRef, "", verified, contexts...)
 }
 
-func (s *FileStore) freezeRecipes(recipes map[string]EnvironmentRecipe, verified map[FileRef]bool) error {
+func (s *FileStore) freezeRecipes(recipes map[string]EnvironmentRecipe, verified map[FileRef]bool, contexts ...context.Context) error {
 	for platform, r := range recipes {
-		if err := s.freezeRecipe(&r, verified); err != nil {
+		if err := s.freezeRecipe(&r, verified, contexts...); err != nil {
 			return err
 		}
 		recipes[platform] = r
 	}
 	return nil
 }
-func (s *FileStore) freezeExtension(e *Extension) error {
-	if err := s.freezeFiles(&e.Files, &e.FilesRef, e.Digest, nil); err != nil {
+func (s *FileStore) freezeExtension(e *Extension, contexts ...context.Context) error {
+	if err := s.freezeFiles(&e.Files, &e.FilesRef, e.Digest, nil, contexts...); err != nil {
 		return err
 	}
 	for i := range e.Variants {
 		for name, r := range e.Variants[i].Environments {
-			if err := s.freezeRecipe(&r, nil); err != nil {
+			if err := s.freezeRecipe(&r, nil, contexts...); err != nil {
 				return err
 			}
 			e.Variants[i].Environments[name] = r
@@ -197,15 +197,17 @@ func (s *FileStore) hydrateJob(j *Job) error {
 	}
 	return nil
 }
-func (q *Queue) hydrateReply(reply *Reply) error {
+func (q *Queue) hydrateReply(reply *Reply, requestContexts ...context.Context) error {
+	requestCtx := requestContext(requestContexts)
+
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
-	q.mu.RLock()
+	requestUnlock1 := requestReadLock(requestCtx, &q.mu)
 	store := q.files
 	// Plans can share maps or recipe pointers with frozen state. Own the whole
 	// response before loading any bytes; assignments already carry small refs.
 	data, err := json.Marshal(reply)
-	q.mu.RUnlock()
+	requestUnlock1()
 	if err != nil {
 		return err
 	}
@@ -260,7 +262,7 @@ func (q *Queue) hydrateReply(reply *Reply) error {
 	if len(failedJobs) == 0 && len(failedPlans) == 0 {
 		return nil
 	}
-	return q.update(func() error {
+	return q.updateRequest(requestCtx, func() error {
 		for _, l := range failedPlans {
 			if current, ok := q.s.PreparationPlans[l.Attempt]; ok && !current.Started && current.Machine == l.Machine && current.Session == l.Session && current.Key == l.Key && current.Kind == l.Kind {
 				delete(q.s.PreparationPlans, l.Attempt)
@@ -286,7 +288,7 @@ func (q *Queue) hydrateReply(reply *Reply) error {
 			}
 		}
 		return nil
-	})
+	}, nil)
 }
 
 // Startup only, before serving traffic: publish and verify every blob first,
