@@ -12,6 +12,7 @@ import (
 func TestOutputDeliverySpoolSurvivesRestartAndDiskRefusal(t *testing.T) {
 	j := Job{ID: ID(), Attempt: 2, Machine: "worker", Session: "session", Spec: asyncDeliverySpec()}
 	j.Spec.Run.Workdir = t.TempDir()
+	workerRoot := t.TempDir()
 	path := filepath.Join(j.Spec.Run.Workdir, "out.txt")
 	if err := os.WriteFile(path, []byte("immutable output"), 0600); err != nil {
 		t.Fatal(err)
@@ -21,14 +22,14 @@ func TestOutputDeliverySpoolSurvivesRestartAndDiskRefusal(t *testing.T) {
 	workerDiskProbe = func(string) (DiskReading, error) {
 		return DiskReading{TotalBytes: 1 << 30, FreeBytes: diskFreeFloor(1<<30) + 1}, nil
 	}
-	if _, _, err := captureDeliverySpool(j); err == nil {
+	if _, _, err := captureDeliverySpool(j, workerRoot); err == nil {
 		t.Fatal("full disk accepted local spool")
 	}
 	if bytes, err := os.ReadFile(path); err != nil || string(bytes) != "immutable output" {
 		t.Fatal("disk refusal lost original output", err)
 	}
 	workerDiskProbe = oldProbe
-	root, files, err := captureDeliverySpool(j)
+	root, files, err := captureDeliverySpool(j, workerRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -36,7 +37,7 @@ func TestOutputDeliverySpoolSurvivesRestartAndDiskRefusal(t *testing.T) {
 		t.Fatal(err)
 	}
 	// A new capture after restart reuses verified snapshot bytes and manifest.
-	replay, again, err := captureDeliverySpool(j)
+	replay, again, err := captureDeliverySpool(j, workerRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,21 +50,21 @@ func TestOutputDeliverySpoolSurvivesRestartAndDiskRefusal(t *testing.T) {
 	if err = os.WriteFile(filepath.Join(root, "out.txt"), []byte("corrupt"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err = captureDeliverySpool(j); err == nil {
+	if _, _, err = captureDeliverySpool(j, workerRoot); err == nil {
 		t.Fatal("corrupt spool reused")
 	}
-	if err = os.RemoveAll(deliverySpoolPath(j)); err != nil {
+	if err = os.RemoveAll(deliverySpoolPath(j, workerRoot)); err != nil {
 		t.Fatal(err)
 	}
 	if err = os.Remove(path); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err = captureDeliverySpool(j); !errors.Is(err, errRequiredDeliveryOutput) {
+	if _, _, err = captureDeliverySpool(j, workerRoot); !errors.Is(err, errRequiredDeliveryOutput) {
 		t.Fatalf("missing required output did not fail: %v", err)
 	}
 }
 
-func TestOutputDeliverySpoolCleanupUsesPreparedAttempt(t *testing.T) {
+func TestOutputDeliverySpoolUsesManagedRetention(t *testing.T) {
 	q, clock := fixture(t)
 	original := deliveryAssignment(t, q) // Default assignment has no workdir.
 	prepared := cloneJob(original)
@@ -92,13 +93,6 @@ func TestOutputDeliverySpoolCleanupUsesPreparedAttempt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wrong := prepared
-	wrong.Attempt++
-	wrongResult := r
-	wrongResult.Attempt++
-	if err := removeAcceptedDeliverySpool(wrong, wrongResult); err == nil {
-		t.Fatal("different attempt's spool removed")
-	}
 	store.state.Job, store.state.Result, store.state.Session = &prepared, &r, prepared.Session
 	actor := &attemptSupervisor{store: store, job: *original, worker: w, connected: true, done: make(chan struct{}), wake: make(chan struct{}, 1)}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -108,7 +102,26 @@ func TestOutputDeliverySpoolCleanupUsesPreparedAttempt(t *testing.T) {
 	if err != nil || !finished || store.state.Job != nil || job(t, q, prepared.ID).State != "succeeded" {
 		t.Fatalf("accepted actor did not finish: finished=%t err=%v state=%+v", finished, err, store.state)
 	}
-	if _, err := os.Stat(deliverySpoolPath(prepared)); !os.IsNotExist(err) {
+	spool := deliverySpoolPath(prepared, store.dir)
+	// Cleanup authorization lives in the ordinary durable worker state, outside
+	// the deleted directory. A partial delete cannot strand the completion actor.
+	dataDir := filepath.Join(spool, "data")
+	if os.Geteuid() != 0 {
+		if err := os.Chmod(dataDir, 0500); err != nil {
+			t.Fatal(err)
+		}
+		if err := workerRetention(store.dir, clock.Now(), DefaultLogRetention); err == nil {
+			t.Fatal("read-only data did not reproduce partial deletion")
+		}
+		if err := os.Chmod(dataDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		clock.Advance(AttemptFilesGrace + time.Second)
+	}
+	if err := workerRetention(store.dir, clock.Now(), DefaultLogRetention); err != nil {
+		t.Fatal("managed cleanup did not recover", err)
+	}
+	if _, err := os.Stat(spool); !os.IsNotExist(err) {
 		t.Fatal("owned accepted spool retained", err)
 	}
 	if data, err := os.ReadFile(unrelated); err != nil || string(data) != "keep" {

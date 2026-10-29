@@ -43,14 +43,15 @@ func TestOutputDeliveryCapacityPreservesSpoolAndReservations(t *testing.T) {
 	assigned.Spec.Run.Workdir = t.TempDir()
 	os.WriteFile(filepath.Join(assigned.Spec.Run.Workdir, "out.txt"), []byte("123456789"), 0600)
 	w := Worker{Client: c}
-	_, err = w.finishFileResult(*assigned, result(assigned, true), t.TempDir())
+	workerRoot := t.TempDir()
+	_, err = w.finishFileResult(*assigned, result(assigned, true), workerRoot)
 	if !errors.As(err, &he) || he.Status != http.StatusInsufficientStorage {
 		t.Fatalf("underestimated result should wait: %v", err)
 	}
 	if job(t, q, j.ID).State != "running" {
 		t.Fatal("capacity refusal reported success")
 	}
-	spool := deliverySpoolPath(*assigned)
+	spool := deliverySpoolPath(*assigned, workerRoot)
 	if _, err = os.Stat(filepath.Join(spool, "manifest.json")); err != nil {
 		t.Fatal("unaccepted spool lost", err)
 	}
@@ -58,7 +59,7 @@ func TestOutputDeliveryCapacityPreservesSpoolAndReservations(t *testing.T) {
 	q.files.limit = 32
 	clock.Advance(time.Minute)
 	os.WriteFile(filepath.Join(assigned.Spec.Run.Workdir, "out.txt"), []byte("changed"), 0600)
-	r, err := w.finishFileResult(*assigned, result(assigned, true), t.TempDir())
+	r, err := w.finishFileResult(*assigned, result(assigned, true), workerRoot)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -326,8 +326,11 @@ Reusing an unrelated unmarked import does not make it collectible.
 Uploads use the existing resumable verified file API. One SQLite transaction
 accepts the current result and pending delivery only after every blob is verified
 and synced. Only that commit completes the task. The worker confirms exact queue
-acceptance and its prepared attempt ownership receipt before reclaiming its
-spool. Retrieve `output_refs` immediately with
+acceptance before ordinary worker retention reclaims its managed attempt
+directory and spool. Spools live under the worker state directory at
+`job-files/JOB_ID/ATTEMPT/.myce-result-spool`, independently of the command
+workdir. The existing accepted-attempt record and deletion retry handle partial
+cleanup without retaining the completion actor. Retrieve `output_refs` immediately with
 `myce file get` or the client download helper; dependent jobs use file references.
 A consumer requiring NAS paths must explicitly wait for `delivery.state` to be
 `verified` on `GET /api/jobs/ID`, and match `delivery.id`/`attempt` to the accepted

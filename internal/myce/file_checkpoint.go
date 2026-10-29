@@ -284,7 +284,7 @@ func (w Worker) finishFileResult(j Job, result Result, parent string) (Result, e
 		return result, nil
 	}
 	if j.Spec.OutputDelivery == asyncNAS {
-		root, files, err := captureDeliverySpool(j)
+		root, files, err := captureDeliverySpool(j, parent)
 		if errors.Is(err, errRequiredDeliveryOutput) {
 			result.Success, result.Error = false, errRequiredDeliveryOutput.Error()
 			return result, nil
