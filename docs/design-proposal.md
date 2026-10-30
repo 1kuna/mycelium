@@ -2137,7 +2137,14 @@ host-object allocations, deliberately double-counting any overlap with cgroup
 charges. Add absolute xe debugfs GTT-manager use on every participating card,
 conservatively double-counting its overlap with client GTT objects. This runtime
 source is required: missing, unreadable or malformed manager counters invalidate
-GPU completeness. No privilege escalation or permission change is attempted.
+GPU completeness. Direct reads use the worker's existing permissions. An optional
+operator-owned `--gpu-telemetry-helper` executable can supply the same raw manager
+text keyed by PCI, with a timestamp within its current invocation; stale, failed,
+oversized or missing evidence rejects completeness. It receives no arguments,
+job environment or fleet credentials and runs outside the resident sampler with
+the same coverage limits. The installer preserves this opt-in setting but
+installs no helper, privilege grant or permission change; service privilege
+policy is unchanged. See the [operations contract](operations.md#optional-privileged-gpu-telemetry-source).
 Retain a whole-host availability-drop floor from an empty-cgroup baseline;
 unrelated RAM release can mask that net delta, so it never replaces absolute
 driver accounting. Missing DRM client identity invalidates the entire attempt.

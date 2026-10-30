@@ -136,6 +136,7 @@ type ServiceConfig struct {
 	HostMemoryBudgetGB    float64 `json:"host_memory_budget_gb"`
 	MemoryCeilingSlackGB  float64 `json:"memory_ceiling_slack_gb"`
 	MemorySwapMaxBytes    int64   `json:"memory_swap_max_bytes"`
+	GPUTelemetryHelper    string  `json:"gpu_telemetry_helper,omitempty"`
 	AllowDeviceless       bool    `json:"allow_deviceless"`
 	Device                string  `json:"device"`
 
@@ -751,6 +752,9 @@ func (c ServiceConfig) Args() []string {
 		args = []string{"join", "--reserve-cpu-cores", strconv.Itoa(c.CPUReserveCores), "--cpu-budget-cores", strconv.Itoa(c.CPUBudgetCores), "--host-memory-budget-gb", strconv.FormatFloat(c.HostMemoryBudgetGB, 'f', -1, 64), "--memory-ceiling-slack-gb", strconv.FormatFloat(c.MemoryCeilingSlackGB, 'f', -1, 64), "--memory-swap-max-bytes", strconv.FormatInt(c.MemorySwapMaxBytes, 10), "--name", c.Name, "--gpu", c.Detection.Platform, "--memory-mode", c.Detection.MemoryMode, "--memory-gb", strconv.FormatFloat(c.Detection.MemoryGB, 'f', -1, 64), "--reserve-memory-gb", strconv.FormatFloat(c.Detection.ReserveGB, 'f', -1, 64), "--state-dir", c.State, "--checkpoint-root", c.Checkpoints, "--job-file-root", c.NAS, "--model-root", c.ModelRoot, "--model-cache", c.ModelCache, "--model-cache-bytes", strconv.FormatInt(c.ModelCacheBytes, 10), "--environment-root", c.EnvironmentRoot, "--environment-cache", c.EnvironmentCache, "--environment-cache-bytes", strconv.FormatInt(c.EnvironmentCacheBytes, 10)}
 	}
 	if c.Role == "worker" {
+		if c.GPUTelemetryHelper != "" {
+			args = append(args, "--gpu-telemetry-helper", c.GPUTelemetryHelper)
+		}
 		args = append(args, "--daily-use="+strconv.FormatBool(c.DailyUse), "--laptop="+strconv.FormatBool(c.Laptop), "--desktop="+strconv.FormatBool(c.Desktop))
 		for _, root := range c.NativeReadRoots {
 			args = append(args, "--native-read-root", root)

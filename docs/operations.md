@@ -779,6 +779,70 @@ keeps this proof separate from laptop fixtures.
 
 ## Host RAM admission and ceilings
 
+### Optional privileged GPU telemetry source
+
+Discrete xe/XPU host-envelope learning requires both per-process DRM fdinfo and
+runtime xe GTT-manager accounting. By default the worker reads debugfs with its
+existing permissions. If those reads are unavailable, sizing stays conservative.
+An administrator may instead provide an existing read-only telemetry executable:
+
+```sh
+myce join --gpu-telemetry-helper /usr/local/libexec/gpu-telemetry-client ...
+```
+
+The same optional flag is saved by worker installation as `gpu_telemetry_helper`
+and preserved by upgrades. An explicit empty value disables the helper. The
+path must be absolute. The worker executes that exact path directly, without
+shell expansion, arguments or stdin, from `/`. Its environment contains only
+`PATH=/usr/bin:/bin`, `LANG=C`, and `LC_ALL=C`; it receives no fleet token or job
+environment. The executable is operator authority, never part of a job spec.
+
+Each invocation must freshly read `/sys/kernel/debug/dri/<PCI>/gtt_mm` for all
+xe cards that an attempt might use, including its selected card and any other
+card found in its DRM clients. `<PCI>` is the full lowercase domain address,
+such as `0000:01:00.0`; numeric debugfs directories may be resolved to those PCI
+identities by the helper. Read the raw text fields `use_type: 1`, `use_tt: 1`,
+and `usage: <unsigned integer bytes>`. Do not use a net delta or substitute VRAM
+usage. Other raw fields may be included. Return one JSON object on stdout:
+
+```json
+{
+  "sampled_at": "2026-11-02T12:00:00.123456Z",
+  "gtt_mm": {
+    "0000:01:00.0": "use_type: 1\nuse_tt: 1\nusage: 167231488\n",
+    "0000:02:00.0": "use_type: 1\nuse_tt: 1\nusage: 87408640\n"
+  }
+}
+```
+
+`sampled_at` is a UTC RFC3339 timestamp with subsecond precision taken during
+that invocation's fresh reads, on the same host clock as the worker. Cached,
+missing or future timestamps are rejected. The full collection, including fdinfo
+and the helper, must finish within the existing 200 ms coverage window; gaps or
+final age over 400 ms invalidate evidence. The helper has a 200 ms execution
+deadline, bounded pipe cleanup, and a 64 KiB stdout limit. Nonzero exit, timeout,
+bad JSON, missing participating cards or malformed counters invalidates the
+attempt's GPU telemetry. A configured failing helper does not fall back to
+another source. Missing evidence never becomes zero. Manager bytes use the
+same parser and are conservatively added in full to deduplicated client totals,
+including any overlap. Resident/pressure sampling remains independent.
+
+The operator owns the helper, its executable chain and any privilege grant.
+A local wrapper may `exec /usr/bin/sudo -n -- /absolute/read-only-reader` under
+a sudoers rule limited to that exact no-argument reader; no general sudo grant
+is needed. Mycelium installs no helper or sudoers rule and changes no access
+permissions. Installed Linux workers default to `NoNewPrivileges=yes`, which
+blocks sudo/setuid elevation. Qualify the helper in the actual service context:
+where that policy is retained, use an unprivileged client of a separately
+administered read-only telemetry service instead. This flag does not relax the
+service policy. Keep the privileged reader read-only and promptly bounded even
+if its client exits. Helper readability alone does not qualify reduced sizing:
+complete fresh repeated local samples, pressure rejection, retained floors and
+the native concurrency/output proof still apply. Clearing the helper on a host
+without readable debugfs restores conservative sizing for new evidence.
+
+### Admission and enforcement
+
 Declare batch `needs.host_memory_gb` or catalog `host_memory_gb` in GiB for
 additional CPU-side memory, including the measured load and overlapping
 activation peak. Qualify the actual wrapper and workload. Unset/zero retains

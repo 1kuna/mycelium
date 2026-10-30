@@ -1,6 +1,8 @@
 package myce
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -66,7 +68,7 @@ func (f gpuHostFS) ReadDir(p string) ([]os.DirEntry, error) {
 }
 
 func TestGPUHostMemoryCompleteAttempt(t *testing.T) {
-	for _, mode := range []string{"complete", "missing host field", "swap growth", "swap churn", "host OOM", "missing driver field", "missing client identity", "missing debugfs", "malformed debugfs", "masked host drop", "missing events"} {
+	for _, mode := range []string{"complete", "helper", "helper missing card", "helper malformed manager", "helper stale", "helper failed", "missing host field", "swap growth", "swap churn", "host OOM", "missing driver field", "missing client identity", "missing debugfs", "malformed debugfs", "masked host drop", "missing events"} {
 		t.Run(mode, func(t *testing.T) {
 			a, err := fakeCeilings(t).create("attempt-xe", 16<<30, 0)
 			if err != nil {
@@ -150,6 +152,35 @@ func TestGPUHostMemoryCompleteAttempt(t *testing.T) {
 			f := &nonreclaimableSamplingFS{memoryFS: a.fs, sampled: make(chan struct{})}
 			a.fs = f
 			w := Worker{Machine: Machine{GPU: "xpu"}, selectedDevice: &MachineDevice{pciAddress: "0000:03:00.0"}}
+			if strings.HasPrefix(mode, "helper") {
+				clock := &workerFakeClock{now: time.Date(2026, 10, 30, 0, 0, 0, 0, time.UTC)}
+				w.Clock = clock
+				managers := map[string]string{"0000:03:00.0": "use_type: 1\nuse_tt: 1\nusage: 28672\n", "0000:07:00.0": "use_type: 1\nuse_tt: 1\nusage: 28672\n"}
+				if mode == "helper missing card" {
+					delete(managers, "0000:07:00.0")
+				}
+				if mode == "helper malformed manager" {
+					managers["0000:03:00.0"] = "use_type: 1\nuse_tt: 1\nusage: unknown\n"
+				}
+				at := clock.Now()
+				if mode == "helper stale" {
+					at = at.Add(-time.Second)
+				}
+				body, _ := json.Marshal(map[string]any{"sampled_at": at, "gtt_mm": managers})
+				script := "cat <<'SAMPLE'\n" + string(body) + "\nSAMPLE\n"
+				if mode == "helper failed" {
+					script += "exit 1\n"
+				}
+				w.GPUTelemetryHelper = gpuTelemetryTestHelper(t, script)
+				// A valid helper replaces unreadable debugfs, including for
+				// the client's second card. Invalid helper output must fail
+				// even when direct debugfs would have been readable.
+				if mode == "helper" {
+					if err := os.RemoveAll(filepath.Join(proc, "debug")); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
 			spec := cpuSpec(1, 0)
 			spec.Needs.Platform = Platform{Required: []string{"xpu"}}
 			finish := w.observeAttemptMemory(a, Job{Spec: spec}, nil)
@@ -160,7 +191,7 @@ func TestGPUHostMemoryCompleteAttempt(t *testing.T) {
 				t.Fatal("no sample")
 			}
 			peak := finish()
-			if mode == "missing host field" || mode == "missing driver field" || mode == "missing client identity" || mode == "missing debugfs" || mode == "malformed debugfs" || mode == "missing events" {
+			if strings.HasPrefix(mode, "helper ") || mode == "missing host field" || mode == "missing driver field" || mode == "missing client identity" || mode == "missing debugfs" || mode == "malformed debugfs" || mode == "missing events" {
 				if peak.GPUHost != nil || peak.NonreclaimableGB != nil {
 					t.Fatalf("incomplete attempt enabled GPU reduction: %+v", peak)
 				}
@@ -181,6 +212,54 @@ func TestGPUHostMemoryCompleteAttempt(t *testing.T) {
 			}
 			if peak.constrained() != (mode == "swap growth" || mode == "swap churn" || mode == "host OOM") {
 				t.Fatalf("host swap growth not retained: %+v", peak)
+			}
+		})
+	}
+}
+
+func gpuTelemetryTestHelper(t *testing.T, body string) string {
+	t.Helper()
+	// Spaces and shell metacharacters must remain literal path characters.
+	path := filepath.Join(t.TempDir(), "telemetry helper;literal")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+body), 0700); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestGPUHostMemoryTelemetryHelperBoundary(t *testing.T) {
+	t.Setenv("MYCE_TOKEN", "private-test-token")
+	t.Setenv("MYCE_JOB_ID", "must-not-inherit")
+	clock := &workerFakeClock{now: time.Date(2026, 10, 30, 0, 0, 0, 0, time.UTC)}
+	valid := `{"sampled_at":"2026-10-30T00:00:00Z","gtt_mm":{"0000:03:00.0":"use_type: 1\nuse_tt: 1\nusage: 28672\n"}}`
+	for _, mode := range []string{"fresh", "future", "missing timestamp", "malformed", "oversized", "timeout"} {
+		t.Run(mode, func(t *testing.T) {
+			body := valid
+			switch mode {
+			case "future":
+				body = strings.ReplaceAll(body, "00:00:00Z", "00:00:01Z")
+			case "missing timestamp":
+				body = `{"gtt_mm":{"0000:03:00.0":"usage: 0"}}`
+			case "malformed":
+				body = `{broken`
+			case "oversized":
+				body += strings.Repeat(" ", 64<<10)
+			}
+			script := "[ \"$#\" -eq 0 ] && [ -z \"$MYCE_TOKEN\" ] && [ -z \"$MYCE_JOB_ID\" ] || exit 7\ncat <<'SAMPLE'\n" + body + "\nSAMPLE\n"
+			if mode == "timeout" {
+				script = "exec /bin/sleep 10\n"
+			}
+			path := gpuTelemetryTestHelper(t, script)
+			start := time.Now()
+			got, err := readGPUTelemetryHelper(context.Background(), clock, path)
+			if (err == nil) != (mode == "fresh") {
+				t.Fatalf("helper %s: evidence=%v err=%v", mode, got, err)
+			}
+			if mode == "fresh" && got["0000:03:00.0"] != "use_type: 1\nuse_tt: 1\nusage: 28672\n" {
+				t.Fatal("helper did not preserve raw manager accounting")
+			}
+			if mode == "timeout" && time.Since(start) > 2*time.Second {
+				t.Fatal("helper timeout stalled telemetry")
 			}
 		})
 	}

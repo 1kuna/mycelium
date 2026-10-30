@@ -72,6 +72,7 @@ type Worker struct {
 	memoryCeilings        *memoryCeilings
 	processMemory         *processMemoryProbe // Without cgroups only.
 	MemorySwapMaxBytes    int64
+	GPUTelemetryHelper    string // Operator-owned optional read-only telemetry executable.
 	DockerEndpoint        string
 	dockerEnvelope        bool
 	nativeListenerProbe   func(port string, group int) error

@@ -319,7 +319,7 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 	sampleHost(peak)
 	var driver <-chan gpuHostCollection
 	if completeGPUHost {
-		driver = a.collectGPUHost(ctx, clock, w.selectedDevice.pciAddress)
+		driver = a.collectGPUHost(ctx, clock, w.GPUTelemetryHelper, w.selectedDevice.pciAddress)
 	}
 	var samplers sync.WaitGroup
 	hostSampled := false // Read only after joining the host sampler.
