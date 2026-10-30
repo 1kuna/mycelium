@@ -26,7 +26,12 @@ on expiry it stops its fixture processes and suggests `./scripts/gate.sh full`
 then verifies fixture exit before removing scratch. Cleanup may extend the wall
 time; scratch is retained if a fixture cannot be stopped or inventoried. Cleanup
 uses the unique inherited run marker, isolated HOME/TMPDIR, ancestry and OS file
-handles in scratch (macOS's built-in `lsof`, or Linux `/proc`). It remembers start
+handles in scratch (macOS's built-in `lsof`, or Linux `/proc`). The macOS
+probe uses `-b -O` to avoid blocking filesystem calls and helper forks while
+retaining same-user discovery of reparented fixtures. It has a five-second
+timeout and at most a 0.2s reap after killing the owned probe: stalled network filesystem I/O must not
+block the final report. A failed or timed-out inventory retains scratch and
+never authorizes fixture signals or deletion. It remembers start
 identities through TERM/KILL, including environment-scrubbed or reparented
 commands, and signals individual PIDs. The old 175-second
 deadline left only 19 seconds for builds/vet after an
