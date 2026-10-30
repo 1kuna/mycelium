@@ -85,8 +85,16 @@ class GateBudgetTests(unittest.TestCase):
             output = io.StringIO()
             started = time.monotonic()
             real_kill = os.kill
+            real_scratch_processes = budget.scratch_processes
+
+            def macos_handles(*args):
+                # Simulate only the native probe, leaving ps flags native to
+                # the host running this cross-platform regression.
+                with patch.object(sys, 'platform', 'darwin'):
+                    return real_scratch_processes(*args)
+
             with (patch.object(sys, 'argv', ['gate-budget.py', str(gate)]),
-                  patch.object(sys, 'platform', 'darwin'),
+                  patch.object(budget, 'scratch_processes', side_effect=macos_handles),
                   patch.object(budget, 'MACOS_HANDLE_PROBE', [str(probe)]),
                   patch.dict(os.environ, env),
                   patch.object(os, 'kill', wraps=real_kill) as kill,
