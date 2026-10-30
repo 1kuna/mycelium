@@ -1,9 +1,79 @@
 package myce
 
 import (
+	"errors"
 	"slices"
 	"testing"
+	"time"
 )
+
+func TestFanOutMemoryLearningAndPressure(t *testing.T) {
+	q, clock, m, s := unifiedAutoFixture(t, 0)
+	s.Args = []string{"base"}
+	s.FanOut = &FanOut{MaxConcurrency: 1, Pieces: []FanOutPiece{{Key: "piece", Args: []string{"piece-arg"}}}}
+	start := func() *Job {
+		t.Helper()
+		parent := submit(t, q, s)
+		j := assignedJob(machineCheck(t, q, m))
+		if j == nil || j.Batch == nil || j.Batch.Parent != parent.ID || j.Batch.Run || !slices.Equal(j.Spec.Args, []string{"base", "piece-arg"}) {
+			t.Fatalf("serial child/arguments: %+v", j)
+		}
+		if err := q.Started(result(j, false)); err != nil {
+			t.Fatal(err)
+		}
+		return j
+	}
+	first := start()
+	clock.Advance(time.Second)
+	host, total, device := 2.0, 19.918118, 22.318359
+	r := result(first, true)
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, CgroupGB: &total, DeviceGB: &device, Events: &MemoryEventCounts{}}
+	stale := r
+	stale.Attempt++
+	if err := q.Complete(stale); !errors.Is(err, ErrStale) || len(q.s.WorkObservations) != 0 {
+		t.Fatalf("stale child learned: %v", err)
+	}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	if len(q.s.WorkObservations) != 1 {
+		t.Fatalf("clean serial child did not learn: %+v", q.s.WorkObservations)
+	}
+	for _, p := range q.s.WorkObservations {
+		if p.MemoryPeak == nil || !p.MemoryRecordedAt.Equal(clock.Now()) || p.Rate != 0 || p.Seconds != 0 {
+			t.Fatalf("memory must learn independently of throughput: %+v", p)
+		}
+	}
+	// Existing ordinary timing must not become a prediction for the child.
+	for id, p := range q.s.WorkObservations {
+		p.Rate, p.Units, p.Seconds = 10, 10, 1
+		q.s.WorkObservations[id] = p
+	}
+	next := start()
+	if timing := job(t, q, next.ID).Timing; timing.PredictedSeconds != nil || timing.ActualSeconds != nil || timing.Reason != "declared wave; serial occupancy is not comparable" {
+		t.Fatalf("serial child invented comparable throughput: %+v", timing)
+	}
+	if next.MemoryEnvelope.Source != "accepted peak × 1.25" || next.MemoryEnvelope.HostGB != (total+device)*1.25+.125 {
+		t.Fatalf("next piece lost peak/arguments: %+v", next.MemoryEnvelope)
+	}
+	clock.Advance(time.Second)
+	r = result(next, true)
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, CgroupGB: &total, DeviceGB: &device, Events: &MemoryEventCounts{Max: 1}}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range q.s.WorkObservations {
+		if !p.MemoryRecordedAt.IsZero() || !p.MemoryPeak.constrained() {
+			t.Fatalf("pressure did not invalidate comparable child memory: %+v", p)
+		}
+	}
+	if facts := job(t, q, next.ID).MemoryAttempts; len(facts) != 1 || !facts[0].MemoryPeak.constrained() {
+		t.Fatalf("lost attempt pressure facts: %+v", facts)
+	}
+	if got := start().MemoryEnvelope.Source; got != "exploratory (previous peak constrained)" {
+		t.Fatalf("pressured child remained accepted: %s", got)
+	}
+}
 
 func TestFanOutAutoMemorySerialQualifiedDevice(t *testing.T) {
 	for _, learned := range []bool{true, false} {

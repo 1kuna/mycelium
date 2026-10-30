@@ -88,7 +88,18 @@ func (q *Queue) workObservationKey(j *Job) (*ObservationKey, string) {
 		if j.Batch.Run {
 			return q.waveObservationKey(j)
 		}
-		return nil, "declared wave; serial occupancy is not comparable"
+		if j.Batch.Concurrency != 1 || len(j.Batch.Pieces) != 1 {
+			return nil, "declared wave; serial occupancy is not comparable"
+		}
+		// A serial child runs the ordinary recipe with its piece arguments.
+		// Keep its identity for memory, without asserting comparable occupancy.
+		serial := *j
+		serial.Batch = nil
+		key, reason := q.workObservationKey(&serial)
+		if key == nil {
+			return nil, reason
+		}
+		return key, "declared wave; serial occupancy is not comparable"
 	}
 	if j.Spec.ExtensionCheck != nil && j.Spec.Needs.Memory != "auto" || j.Spec.ExtensionCheck == nil && j.Spec.Workload == nil && !profileMemoryWork(j.Spec) {
 		return nil, "workload/reference metadata unavailable"
@@ -213,7 +224,7 @@ func (q *Queue) beginWorkTiming(j *Job) {
 	key, reason := q.workObservationKey(j)
 	j.Timing = &WorkTiming{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: j.Machine, Session: j.Session, Key: key, Reason: reason}
 	j.Timing.PlacementReason = placement
-	if key != nil && j.Spec.Workload != nil && j.Spec.ExtensionCheck == nil {
+	if key != nil && reason == "" && j.Spec.Workload != nil && j.Spec.ExtensionCheck == nil {
 		if old, ok := q.s.WorkObservations[identityHash(key)]; ok && old.StaleReason == "" && !old.Forbidden && q.clock.Now().Sub(old.RecordedAt) <= 30*24*time.Hour && validRate(old.Units) && validRate(old.Seconds) {
 			rate := old.Rate
 			if !validRate(rate) {
@@ -272,7 +283,12 @@ func (q *Queue) recordWorkObservation(j *Job, r Result) {
 		return
 	}
 	q.validateWorkTiming(j, q.hostObligations(t.Key.Host))
-	if t.Reason != "" {
+	throughput := t.Reason == ""
+	current, _ := q.workObservationKey(j)
+	memory := current != nil && *current == *t.Key && t.Execution.ID == j.ID && t.Execution.Attempt == j.Attempt && t.Machine == j.Machine && t.Session == j.Session &&
+		(j.Batch == nil || !j.Batch.Run && j.Batch.Concurrency == 1 && len(j.Batch.Pieces) == 1) &&
+		r.MemoryPeak != nil && !r.MemoryPeak.constrained() && r.MemoryPeak.HostGB != nil && validRate(*r.MemoryPeak.HostGB)
+	if !throughput && !memory {
 		return
 	}
 	key := identityHash(t.Key)
@@ -290,10 +306,10 @@ func (q *Queue) recordWorkObservation(j *Job, r Result) {
 	if old.StaleReason != "" || q.clock.Now().Sub(old.RecordedAt) > workCurveMaxAge {
 		old.Rate, old.LatencySeconds = 0, 0
 	}
-	if old.StaleReason != "" || !old.MemoryRecordedAt.IsZero() && q.clock.Now().Sub(old.MemoryRecordedAt) > workCurveMaxAge {
+	if !memoryIdentityUsable(old) || !old.MemoryRecordedAt.IsZero() && q.clock.Now().Sub(old.MemoryRecordedAt) > workCurveMaxAge {
 		old.MemoryPeak = nil
 	}
-	if j.Spec.Workload != nil && j.Spec.ExtensionCheck == nil {
+	if throughput && j.Spec.Workload != nil && j.Spec.ExtensionCheck == nil {
 		seconds := q.clock.Now().Sub(*j.StartedAt).Seconds()
 		point.Units, point.Seconds = old.Units+j.Spec.Workload.Units, old.Seconds+seconds
 		if !validRate(seconds) || !validRate(point.Units) || !validRate(point.Seconds) {
@@ -302,8 +318,8 @@ func (q *Queue) recordWorkObservation(j *Job, r Result) {
 		t.ActualSeconds = &seconds
 		point.Rate = ewma(old.Rate, j.Spec.Workload.Units/seconds)
 		point.LatencySeconds = ewma(old.LatencySeconds, seconds)
-	} else if r.MemoryPeak == nil || r.MemoryPeak.Constrained || r.MemoryPeak.HostGB == nil || !validRate(*r.MemoryPeak.HostGB) {
-		return // Profiles and auto checks learn memory only, under the same solo custody fence.
+	} else if !memory {
+		return
 	} else if exists && old.StaleReason == "" {
 		// Memory-only samples leave the existing throughput and provenance
 		// untouched, including the clock that ages the throughput out.
@@ -314,14 +330,17 @@ func (q *Queue) recordWorkObservation(j *Job, r Result) {
 	point.IncrementalHostMemoryGB, point.IncrementalDeviceMemoryGB = old.IncrementalHostMemoryGB, old.IncrementalDeviceMemoryGB
 	point.Forbidden = old.Forbidden
 	point.SampleID = old.SampleID
-	point.MemoryPeak = mergeMemoryPeaks(old.MemoryPeak, r.MemoryPeak)
+	point.MemoryPeak = old.MemoryPeak
+	if memory {
+		point.MemoryPeak = mergeMemoryPeaks(old.MemoryPeak, r.MemoryPeak)
+	}
 	point.MemoryRecordedAt = old.MemoryRecordedAt
 	point.MemoryConfiguration = memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
 	point.MemoryLayout = "separate"
 	if owner := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices); owner != nil && owner.UnifiedMemory && !j.Spec.Needs.cpuOnly() {
 		point.MemoryLayout = "unified"
 	}
-	if r.MemoryPeak != nil && !r.MemoryPeak.Constrained && r.MemoryPeak.HostGB != nil && validRate(*r.MemoryPeak.HostGB) {
+	if memory {
 		point.MemoryRecordedAt = q.clock.Now()
 	}
 	if r.Usage != nil && r.Usage.valid() {

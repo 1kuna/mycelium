@@ -2068,6 +2068,14 @@ Use that available room, less existing per-attempt slack, as the envelope.
 Lower-priority work remains reclaimable through the existing release planner;
 release acknowledgement still precedes admission. Accepted exploratory peaks
 become measurements. Status shows the source, envelope and enforcement mode.
+Memory learning is independent of throughput occupancy comparability (#369):
+clean, attempt-specific single-piece serial fan-out children teach the ordinary
+recipe's memory class, including piece arguments, while their throughput stays
+unknown. Operator resource allowances and power mode remain throughput fences,
+but do not identify memory need. Existing allowance-stale memory evidence is
+revalidated through the normal curve-recovery path; hardware, backend,
+environment, recipe and reference changes still invalidate it. No stored key
+rewrite or database edit is needed.
 Input-size/duration scaling per recipe is a follow-up slice, not part of this
 amendment.
 Reservations are frozen per attempt; stale, failed, OOM, constrained and resumed
