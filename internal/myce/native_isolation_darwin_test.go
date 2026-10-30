@@ -336,3 +336,27 @@ func TestNativeIsolationCoreFoundationStartup(t *testing.T) {
 		t.Fatalf("sandboxed CoreFoundation startup: %v (context: %v): %s", err, ctx.Err(), output)
 	}
 }
+
+// #375: urllib's system proxy discovery uses this configd service before
+// opening a socket, so even a loopback request can stall on a denied lookup.
+func TestNativeIsolationSystemProxyLookup(t *testing.T) {
+	python, err := exec.LookPath("python3.11")
+	if err != nil {
+		t.Fatal(err)
+	}
+	spool := t.TempDir()
+	work := filepath.Join(spool, "job-files", "proxy-lookup", "1")
+	if err := os.MkdirAll(work, 0700); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, python, "-c", "import _scproxy; _scproxy._get_proxies()")
+	cmd.Dir = work
+	if err := (Worker{}).isolateNativeCommand(cmd, spool, work, jobBaseEnvironment(), nil, false); err != nil {
+		t.Fatal(err)
+	}
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("sandboxed system proxy lookup: %v (context: %v): %s", err, ctx.Err(), output)
+	}
+}

@@ -94,6 +94,7 @@ func (w Worker) isolateNativeCommand(cmd *exec.Cmd, spool, work string, env map[
 	var profile strings.Builder
 	// CoreFoundation user lookup initializes notifyd and unified logging before
 	// main. Denying these bootstrap lookups can stall a CGO payload in dyld.
+	// System proxy discovery also needs configd's exact bootstrap service name.
 	profile.WriteString(`(version 1)
 (allow default)
 (deny job-creation)
@@ -108,7 +109,7 @@ func (w Worker) isolateNativeCommand(cmd *exec.Cmd, spool, work string, env map[
   (global-name-prefix "com.apple.MTLCompilerService.")
   (global-name "com.apple.cvmsServ")
   (global-name "com.apple.system.opendirectoryd.libinfo")
-  (global-name "com.apple.system.configd")
+  (global-name "com.apple.SystemConfiguration.configd")
   (global-name "com.apple.mDNSResponder"))))
 (deny network-outbound (remote unix-socket))
 `)
