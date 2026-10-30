@@ -338,6 +338,22 @@ eligibility alone proves no release of existing work. Loaded model servers
 appear under `loaded_models`, not jobs, and must be checked separately. Terminal
 jobs omit all three derived eligibility fields.
 
+Lower-tier job `reason` also explains host-specific admission delays independently
+of `production_hold`. Two production preemptions of the same job on one physical
+host within twice the larger of its measured cold preparation time and the
+150-second production start window delay re-admission there for one such interval.
+The job's `production_backoff` records the last preemption and retry time by host;
+it survives queue restart and leaves other hosts eligible. Started environment
+preparations count, while revoked unstarted offers do not.
+
+When matching preparation history exists, new lower-tier setup is withheld if
+it exceeds the free window before eligible queued production or an imminent
+declared dependent production stage. Piece and whole-parent `after` edges use
+current qualified measurements of already-running production waves. Unlaunched
+pieces, unknown/stale measurements and overruns provide no forecast; only the
+preemption back-off applies. Warm environments incur no preparation cost. These
+admission checks do not enable a disabled production hold or stop Started work.
+
 Host gates should read `holds_detail`, an array (empty when there are no holds)
 whose entries have `host`, `kind`, `operator_action_required`, `text` and an
 optional `clears_at` timestamp. Entries are sorted by host and kind; a host can

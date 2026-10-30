@@ -103,6 +103,7 @@ func (q *Queue) stopBatchFor(j *Job, demand *Job) {
 			}
 		}
 		j.PreemptionCount++
+		q.recordProductionBackoff(j, allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices), demand)
 	}
 	q.stopFor(j, demand.Spec.Priority, "job")
 }
@@ -161,6 +162,7 @@ func (q *Queue) preemptObligation(p HostObligation, demand *Job) {
 				return
 			}
 			j.PreemptionCount++
+			q.recordProductionBackoff(j, allocationMachine(q.s.Machines[l.Machine], []string{l.Device}), demand)
 		}
 		l.PriorityStop = q.preemption(demand, "preparation/"+l.Attempt)
 		now := q.clock.Now()
