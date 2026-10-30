@@ -109,6 +109,8 @@ func generatedJobSchema(t *testing.T) []byte {
 	job["memory_attempts_dropped"].(map[string]any)["minimum"] = 0
 	job["memory_attempts_dropped"].(map[string]any)["description"] = "Number of memory attempt rows evicted by the 32-row limit. Omitted zero. Prelaunch attempts without a peak do not create rows or increment this count."
 	peak := defs["AttemptMemoryPeak"].(map[string]any)["properties"].(map[string]any)
+	peak["device_gb"].(map[string]any)["description"] = "Sampled per-attempt process GPU memory in GiB, not GPU-wide memory.used or an allocator high-water mark. CUDA uses nvidia-smi compute-apps even on unified-memory devices. Sampling is a lower bound; missing means unknown, not zero."
+	peak["device_unavailable"].(map[string]any)["description"] = "Diagnostic reason no usable process GPU sample was retained. New CUDA/XPU cgroup observers report this when device_gb is absent; older workers may omit both. Does not authorize reduced unified-memory accounting."
 	peak["events"].(map[string]any)["description"] = "Attempt-parent hierarchical memory.events counts. Absent means not read; explicit zero means a read zero. Max per counter across samples within the attempt."
 	peak["swap_gb"].(map[string]any)["description"] = "Attempt-parent memory.swap.peak in GiB, max across samples. Absent when unavailable; zero is measured. memory.swap.current is pressure evidence only, never a substitute peak."
 	peak["constrained"].(map[string]any)["description"] = "Observed constraint evidence; omitted false. Constrained facts are retained even when learning rejects them."

@@ -18,15 +18,16 @@ type AttemptMemoryPeak struct {
 	// evidence). Only observeAttemptMemory promotes a complete sample history.
 	nonreclaimableSampleGB *float64
 
-	GPUHost          *GPUHostMemory     `json:"gpu_host,omitempty"`
-	NonreclaimableGB *float64           `json:"nonreclaimable_gb,omitempty"`
-	HostGB           *float64           `json:"host_gb,omitempty"`
-	CgroupGB         *float64           `json:"cgroup_gb,omitempty"`
-	DeviceGB         *float64           `json:"device_gb,omitempty"`
-	SwapGB           *float64           `json:"swap_gb,omitempty"`
-	Source           string             `json:"source,omitempty"`
-	Events           *MemoryEventCounts `json:"events,omitempty"`
-	Constrained      bool               `json:"constrained,omitempty"`
+	GPUHost           *GPUHostMemory     `json:"gpu_host,omitempty"`
+	NonreclaimableGB  *float64           `json:"nonreclaimable_gb,omitempty"`
+	HostGB            *float64           `json:"host_gb,omitempty"`
+	CgroupGB          *float64           `json:"cgroup_gb,omitempty"`
+	DeviceGB          *float64           `json:"device_gb,omitempty"`
+	DeviceUnavailable string             `json:"device_unavailable,omitempty"`
+	SwapGB            *float64           `json:"swap_gb,omitempty"`
+	Source            string             `json:"source,omitempty"`
+	Events            *MemoryEventCounts `json:"events,omitempty"`
+	Constrained       bool               `json:"constrained,omitempty"`
 }
 
 // Attempt-parent memory.events counters. Nil on the peak means they were not
@@ -154,6 +155,15 @@ func mergeMemoryPeaks(old, next *AttemptMemoryPeak) *AttemptMemoryPeak {
 	if next.Source != "" {
 		out.Source = next.Source
 	}
+	if out.DeviceGB != nil {
+		out.DeviceUnavailable = ""
+	} else {
+		// Publish only worker-owned labels, never raw command errors or output.
+		switch next.DeviceUnavailable {
+		case deviceMemoryNoSample, deviceMemoryUnsupported, deviceMemoryInventory, deviceMemoryTimeout, deviceMemoryNoCgroup:
+			out.DeviceUnavailable = next.DeviceUnavailable
+		}
+	}
 	out.Events = mergeMemoryEvents(out.Events, next.Events)
 	if next.GPUHost != nil {
 		p := GPUHostMemory{}
@@ -168,7 +178,7 @@ func mergeMemoryPeaks(old, next *AttemptMemoryPeak) *AttemptMemoryPeak {
 		}
 		out.GPUHost = &p
 	}
-	if out.HostGB == nil && out.CgroupGB == nil && out.DeviceGB == nil {
+	if out.HostGB == nil && out.CgroupGB == nil && out.DeviceGB == nil && out.DeviceUnavailable == "" {
 		return nil
 	}
 	return &out
@@ -234,7 +244,9 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 					source += "; GPU recipe default"
 				}
 			}
-			// Until unified memcg/GPU overlap is qualified on Spark, count both.
+			// Shared physical RAM does not imply memcg charges CUDA allocations.
+			// GB10 exposes process GPU use absent from its job's cgroup. Until
+			// overlap and driver pins are bounded, retain both vectors.
 			// hostNeed already adds this GPU reservation to the host vector.
 			n.HostMemoryGB = max(minimumHostMemoryGB, host)
 		case j.MemoryFallback != nil && j.MemoryFallback.valid():

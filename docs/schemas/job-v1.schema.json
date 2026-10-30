@@ -90,7 +90,12 @@
           "type": "boolean"
         },
         "device_gb": {
+          "description": "Sampled per-attempt process GPU memory in GiB, not GPU-wide memory.used or an allocator high-water mark. CUDA uses nvidia-smi compute-apps even on unified-memory devices. Sampling is a lower bound; missing means unknown, not zero.",
           "type": "number"
+        },
+        "device_unavailable": {
+          "description": "Diagnostic reason no usable process GPU sample was retained. New CUDA/XPU cgroup observers report this when device_gb is absent; older workers may omit both. Does not authorize reduced unified-memory accounting.",
+          "type": "string"
         },
         "events": {
           "$ref": "#/$defs/MemoryEventCounts",

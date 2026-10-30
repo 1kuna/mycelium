@@ -144,6 +144,45 @@ func TestAttemptMemoryDeviceAccounting(t *testing.T) {
 	}
 }
 
+func TestAttemptMemoryDeviceUnavailable(t *testing.T) {
+	w := Worker{Machine: Machine{GPU: "cuda", Device: "GPU-one", UnifiedMemory: true}}
+	j := Job{Spec: Spec{Needs: ResourceNeeds{MemoryGB: 40, HostMemoryGB: 24, Platform: Platform{Required: []string{"cuda"}}}}}
+	// A short declared job can finish before the five-second device tick.
+	a, err := fakeCeilings(t).create("attempt-short-cuda", 64<<30, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		attempt *memoryAttempt
+		reason  string
+	}{{a, deviceMemoryNoSample}, {nil, deviceMemoryNoCgroup}} {
+		p := w.observeAttemptMemory(tc.attempt, j, nil)()
+		if p == nil || p.DeviceGB != nil || p.DeviceUnavailable != tc.reason {
+			t.Fatalf("missing device telemetry was silently omitted: %+v", p)
+		}
+	}
+	// NVIDIA N/A is unknown, not zero. A reason-only peak survives aggregation,
+	// but a subsequent usable process sample replaces the unavailable label.
+	for _, value := range []string{"N/A", "[N/A]", "Not Supported"} {
+		if _, err := cudaAttemptMemory([]byte("GPU-one, 42, "+value+"\n"), "GPU-one", map[int]bool{42: true}); err != errAttemptMemoryUnsupported {
+			t.Fatalf("%s became a device measurement: %v", value, err)
+		}
+	}
+	p := sampledMemoryPeak(nil, &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryUnsupported})
+	if p == nil || p.DeviceUnavailable != deviceMemoryUnsupported || p.DeviceGB != nil {
+		t.Fatal("reason-only peak lost", p)
+	}
+	gb := 18556.0 / 1024
+	p = sampledMemoryPeak(p, &AttemptMemoryPeak{DeviceGB: &gb})
+	p = sampledMemoryPeak(p, &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryUnsupported})
+	if p.DeviceUnavailable != "" || p.DeviceGB == nil || *p.DeviceGB != gb {
+		t.Fatal("unavailable label replaced a retained measurement", p)
+	}
+	if p := sampledMemoryPeak(nil, &AttemptMemoryPeak{DeviceUnavailable: "private-command-output"}); p.DeviceUnavailable != "" {
+		t.Fatal("published an unrecognized device diagnostic", p)
+	}
+}
+
 func TestAttemptMemoryNonreclaimableRetainsLockedPages(t *testing.T) {
 	a, err := fakeCeilings(t).create("attempt-cache", 16<<30, 0)
 	if err != nil {
