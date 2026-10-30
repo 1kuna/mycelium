@@ -24,7 +24,7 @@ func reserveCommand(ctx context.Context, args []string, out io.Writer) error {
 	job := f.String("job", "", "existing validation job/check ID")
 	owner := f.String("owner", "", "operator attribution, not a separate authentication identity")
 	reason := f.String("reason", "", "reason for reserving or conditionally releasing")
-	lifetime := f.Duration("max-lifetime", myce.DefaultReservationLifetime, "lost-job backstop; at most 24h; expiry never confirms physical cleanup")
+	lifetime := f.Duration("max-lifetime", myce.DefaultReservationLifetime, "lost-binding backstop; at most 24h; live jobs and pending cleanup retain the fence")
 	revision := f.Uint64("if-revision", 0, "release only this observed reservation revision")
 	var flags, positional []string
 	for i := 1; i < len(args); i++ {

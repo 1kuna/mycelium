@@ -102,12 +102,15 @@ elapsed stop grace, missing worker or queue restart never proves cleanup. Status
 distinguishes `draining`, `ready`, `in_use`, `waiting_for_release` and `released`,
 and shows `reserved for OWNER: REASON` plus pending work/evidence.
 
-The maximum lifetime is a lost-job/caller backstop: its cost is allowing new
-admission after that time even if validation is unfinished. Choose it to cover
-the expected drain, startup, execution and cleanup. At expiry the queue releases
-only this admission hold with the visible reason `maximum lifetime elapsed`;
-it never cancels the bound job or confirms physical release. Unresolved attempt
-custody, independent drains and exclusions still apply. Conditional operator
+The maximum lifetime is a lost-binding backstop, not a deadline for live work.
+Its cost is retaining reserved capacity beyond the lifetime while a queued,
+preparing or running bound job exists, or any exact cleanup is unconfirmed.
+Status then reports `reserved past max lifetime` with the blocking reason;
+expiry never cancels work or confirms physical release. Only an absent job
+binding with no retained execution custody can expire with the visible release
+reason `maximum lifetime elapsed`. A terminal bound job releases after all
+attempts physically release, whether before or after the lifetime. Independent
+drains and exclusions still apply. Conditional operator
 release has the same admission-only meaning and requires an observed revision
 and reason. Use indefinite `exclude`/host maintenance for an operator-controlled
 hardware hold instead.

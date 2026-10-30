@@ -38,7 +38,7 @@ func extensionCommand(args []string) error {
 	reserve := f.Bool("reserve", false, "reserve the target device (CPU check: host) until each check is terminal and physically released")
 	reserveOwner := f.String("owner", "", "reservation owner attribution (default: OS username)")
 	reserveReason := f.String("reason", "extension qualification", "reservation reason")
-	reserveLifetime := f.Duration("max-lifetime", myce.DefaultReservationLifetime, "reservation lost-job backstop, at most 24h; expiry does not confirm cleanup")
+	reserveLifetime := f.Duration("max-lifetime", myce.DefaultReservationLifetime, "reservation lost-binding backstop, at most 24h; live jobs and pending cleanup retain the fence")
 	static := f.Bool("static", false, "validate folder without executing or qualifying")
 	host := f.String("host", "", "this host's configured worker host ID (default: installed worker; local execution only)")
 	digest := f.String("digest", "", "require exact extension SHA-256")

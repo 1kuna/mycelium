@@ -9,8 +9,7 @@ import (
 	"time"
 )
 
-// The bound limits capacity withheld by a lost caller/job to at most one day.
-// Expiry removes admission policy only; ordinary exact custody still fences work.
+// Bound the lost-binding backstop, never a live job or unconfirmed cleanup.
 const MaxReservationLifetime = 24 * time.Hour
 const DefaultReservationLifetime = 2 * time.Hour
 
@@ -59,8 +58,8 @@ func (p ComponentExclusion) matchesTarget(m *Machine) bool {
 	return p.matchesComponent(hostID(m), m.GPU, "")
 }
 
-func (r Reservation) active(now time.Time) bool {
-	return r.ReleasedAt == nil && now.Before(r.ExpiresAt)
+func (r Reservation) active() bool {
+	return r.ReleasedAt == nil
 }
 
 // Must run in the submission/control transaction, before planning any placements.
@@ -99,7 +98,7 @@ func (q *Queue) acquireReservation(request ReservationRequest) (Reservation, err
 		return out, reservationRefusal("reservation requires an existing single job/check without dependencies")
 	}
 	for _, old := range q.s.Reservations {
-		if old.active(q.clock.Now()) && (old.Job == j.ID || reservationTargetsOverlap(old.Target, p)) {
+		if old.active() && (old.Job == j.ID || reservationTargetsOverlap(old.Target, p)) {
 			return out, reservationRefusal("job or target already has an active reservation")
 		}
 	}
@@ -218,8 +217,8 @@ func (q *Queue) maintainReservations() {
 		switch {
 		case j != nil && terminal(j.State) && !q.jobReleasePending(j):
 			q.releaseReservation(r, "bound job terminal and all attempts physically released")
-		case !now.Before(r.ExpiresAt):
-			q.releaseReservation(r, "maximum lifetime elapsed (lost-job backstop); admission hold released, execution custody unchanged")
+		case j == nil && !now.Before(r.ExpiresAt) && !q.reservationCleanupPending(r, j):
+			q.releaseReservation(r, "maximum lifetime elapsed (lost-job backstop); bound job absent and no retained execution custody")
 		}
 	}
 	// Reuse maintenance's planned, no-retry-charge withdrawal of unstarted
@@ -229,6 +228,19 @@ func (q *Queue) maintainReservations() {
 			q.maintainHostObligation(HostObligation{Result: resultIdentity(j)}, nil)
 		}
 	}
+}
+
+func (q *Queue) reservationCleanupPending(r Reservation, j *Job) bool {
+	if j != nil {
+		return q.jobReleasePending(j)
+	}
+	// A removed job must not hide the durable exact-attempt release ledger.
+	for _, release := range q.s.HostReleases {
+		if release.Job == r.Job {
+			return true
+		}
+	}
+	return false
 }
 
 func resultIdentity(j *Job) Result {
@@ -337,7 +349,7 @@ func (q *Queue) reservationAllows(j *Job, m *Machine) bool {
 		return true
 	}
 	for _, r := range q.s.Reservations {
-		if !r.active(q.clock.Now()) {
+		if !r.active() {
 			continue
 		}
 		bound := j != nil && j.ID == r.Job
@@ -351,7 +363,7 @@ func (q *Queue) reservationAllows(j *Job, m *Machine) bool {
 
 func (q *Queue) reservationWaitReason(j *Job) string {
 	for _, stored := range q.s.Reservations {
-		if !stored.active(q.clock.Now()) {
+		if !stored.active() {
 			continue
 		}
 		r := q.projectReservation(stored)
@@ -371,10 +383,17 @@ func (q *Queue) projectReservation(r Reservation) Reservation {
 	r.Target.Devices = slices.Clone(r.Target.Devices)
 	r.Text = "reserved for " + r.Owner + ": " + r.Reason
 	j := q.retainedJob(r.Job)
-	r.CleanupPending = j != nil && q.jobReleasePending(j)
+	r.CleanupPending = q.reservationCleanupPending(r, j)
 	if r.ReleasedAt != nil {
 		r.State = "released"
 		return r
+	}
+	if !q.clock.Now().Before(r.ExpiresAt) {
+		if j != nil && !terminal(j.State) {
+			r.Text += "; reserved past max lifetime: bound job still " + j.State
+		} else if r.CleanupPending {
+			r.Text += "; reserved past max lifetime: physical cleanup unconfirmed"
+		}
 	}
 	r.Pending = q.reservationPending(r)
 	switch {

@@ -195,13 +195,35 @@ func TestReservationRestartAndLifetimeExpiry(t *testing.T) {
 	clock.Advance(2 * time.Hour)
 	// Keep the attempt live to isolate reservation expiry from loss detection.
 	machineCheck(t, q, m, a)
-	r = reservationState(t, q, r.ID, "released")
-	if !strings.Contains(r.ReleaseReason, "maximum lifetime") || !r.CleanupPending || job(t, q, a.ID).State != "running" {
-		t.Fatal("expiry hid its reason, cancelled work or invented cleanup", r)
+	r = reservationState(t, q, r.ID, "in_use")
+	if r.ReleasedAt != nil || !strings.Contains(r.Text, "reserved past max lifetime: bound job still running") || !r.CleanupPending || job(t, q, a.ID).State != "running" {
+		t.Fatal("lifetime released live validation, hid its reason or cancelled work", r)
 	}
+	waiting := submit(t, q, exclusionSpec(m.ID, "0"))
+	if next := assignedJob(machineCheck(t, q, m, a)); next != nil {
+		t.Fatal("lifetime admitted unrelated work", next)
+	}
+	requireState(t, q, waiting.ID, "queued")
 	request.Selector = r.Selector
-	if replay, err := q.CreateReservation(request); err != nil || replay.ReleasedAt == nil {
-		t.Fatal("expired identity resurrected reservation", replay, err)
+	if replay, err := q.CreateReservation(request); err != nil || replay.ReleasedAt != nil || !replay.ExpiresAt.Equal(r.ExpiresAt) {
+		t.Fatal("overdue replay changed reservation", replay, err)
+	}
+	done := result(a, true)
+	done.ReleasePending = true
+	if err := q.Complete(done); err != nil {
+		t.Fatal(err)
+	}
+	r = reservationState(t, q, r.ID, "waiting_for_release")
+	if r.ReleasedAt != nil || !r.CleanupPending || !strings.Contains(r.Text, "physical cleanup unconfirmed") {
+		t.Fatal("lifetime released terminal validation before cleanup", r)
+	}
+	done.ReleasePending, done.ReleaseOnly = false, true
+	if err := q.Complete(done); err != nil {
+		t.Fatal(err)
+	}
+	reservationState(t, q, r.ID, "released")
+	if next := assignedJob(machineCheck(t, q, m)); next == nil || next.ID != waiting.ID {
+		t.Fatal("ordinary work did not follow exact cleanup", next)
 	}
 }
 
@@ -222,6 +244,85 @@ func TestReservationRetiredWorkerDoesNotBlockReplacement(t *testing.T) {
 	if a := assignedJob(machineCheck(t, q, m)); a == nil || a.ID != bound.ID {
 		t.Fatal("historical worker blocked bound check on its live replacement", a)
 	}
+}
+
+func TestReservationLifetimeOnlyReleasesLostBinding(t *testing.T) {
+	q, clock := fixture(t)
+	m := m3Machine()
+	machineCheck(t, q, m)
+	bound := submit(t, q, exclusionSpec(m.ID, "0"))
+	r, err := q.CreateReservation(reservationRequest("lost-check", "host=machine;devices=0", bound.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(2 * time.Hour)
+	r = reservationState(t, q, r.ID, "draining")
+	if r.ReleasedAt != nil || !strings.Contains(r.Text, "bound job still queued") {
+		t.Fatal("lifetime released queued validation", r)
+	}
+	// Model a lost binding with durable custody still present. The backstop
+	// must consult the exact release ledger even without the retained job.
+	release := HostRelease{Host: m.HostID, Job: bound.ID, Machine: m.ID, Session: m.Session, Attempt: 1, Device: "0"}
+	key := releaseKey(release)
+	if err := q.update(func() error {
+		q.deleteJob(bound.ID)
+		q.s.HostReleases = map[string]HostRelease{key: release}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	r = reservationState(t, q, r.ID, "waiting_for_release")
+	if !r.CleanupPending || !strings.Contains(r.Text, "physical cleanup unconfirmed") {
+		t.Fatal("lost binding hid unresolved custody", r)
+	}
+	ack := Result{Machine: m.ID, Session: "stale-session", Execution: Execution{ID: bound.ID, Attempt: 1}, ReleaseOnly: true}
+	if err := q.Complete(ack); err != nil {
+		t.Fatal(err)
+	}
+	reservationState(t, q, r.ID, "waiting_for_release")
+	ack.Session = m.Session
+	if err := q.Complete(ack); err != nil {
+		t.Fatal(err)
+	}
+	r = reservationState(t, q, r.ID, "released")
+	if r.CleanupPending || !strings.Contains(r.ReleaseReason, "maximum lifetime elapsed") {
+		t.Fatal("lost binding backstop did not retain release evidence", r)
+	}
+}
+
+func TestReservationWaitsForSupersededAttemptCleanup(t *testing.T) {
+	q, clock := fixture(t)
+	m := m3Machine()
+	machineCheck(t, q, m)
+	bound := submit(t, q, exclusionSpec(m.ID, "0"))
+	if _, err := q.CreateReservation(reservationRequest("all-attempts", "host=machine;devices=0", bound.ID)); err != nil {
+		t.Fatal(err)
+	}
+	// The current execution has succeeded and released, while an earlier
+	// lost session still owes its own exact acknowledgement.
+	if err := q.update(func() error {
+		j := q.touchJob(bound.ID)
+		j.State, j.Attempt, j.Machine, j.Session = "succeeded", 2, m.ID, m.Session
+		j.ReleaseConfirmed = true
+		j.Copies = []Copy{{Machine: m.ID, Session: "old-session", Attempt: 1}, {Machine: m.ID, Session: m.Session, Attempt: 2, ReleaseConfirmed: true}}
+		release := HostRelease{Host: m.HostID, Job: j.ID, Machine: m.ID, Session: "old-session", Attempt: 1, Device: "0"}
+		q.s.HostReleases = map[string]HostRelease{releaseKey(release): release}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(2 * time.Hour)
+	reservationState(t, q, "all-attempts", "waiting_for_release")
+	ack := Result{Machine: m.ID, Session: m.Session, Execution: Execution{ID: bound.ID, Attempt: 1}, ReleaseOnly: true}
+	if err := q.Complete(ack); err != nil {
+		t.Fatal(err)
+	}
+	reservationState(t, q, "all-attempts", "waiting_for_release")
+	ack.Session = "old-session"
+	if err := q.Complete(ack); err != nil {
+		t.Fatal(err)
+	}
+	reservationState(t, q, "all-attempts", "released")
 }
 
 func TestReservationBindingValidationAndPriority(t *testing.T) {
@@ -291,7 +392,7 @@ func TestReservationDev(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := m3Spec("experiment", "0", 8, 1)
-	s.Run.Command = []string{"sh", "-c", "printf validation-ok"}
+	s.Run.Command = []string{"sh", "-c", "test -z \"${MYCE_TOKEN+x}\" && printf validation-ok"}
 	bound, err := c.Submit(ctx, s)
 	if err != nil {
 		t.Fatal(err)
