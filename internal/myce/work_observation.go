@@ -72,6 +72,10 @@ type WorkObservation struct {
 }
 
 type WorkTiming struct {
+	HistoryReason     string     `json:"history_reason,omitempty"`
+	HistoryRecordedAt *time.Time `json:"history_recorded_at,omitempty"`
+	HistorySource     string     `json:"history_source,omitempty"`
+
 	PlacementReason  string          `json:"placement_reason,omitempty"`
 	Execution        Execution       `json:"execution"`
 	Machine          string          `json:"machine"`
@@ -224,6 +228,21 @@ func (q *Queue) beginWorkTiming(j *Job) {
 	key, reason := q.workObservationKey(j)
 	j.Timing = &WorkTiming{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: j.Machine, Session: j.Session, Key: key, Reason: reason}
 	j.Timing.PlacementReason = placement
+	j.Timing.HistoryReason = "no accepted matching measurement"
+	if key != nil {
+		if old, ok := q.s.WorkObservations[identityHash(key)]; ok {
+			switch {
+			case old.Forbidden:
+				j.Timing.HistoryReason = "measurement forbidden after resource failure"
+			case old.StaleReason != "":
+				j.Timing.HistoryReason = "measurement invalidated"
+			case q.clock.Now().Sub(old.RecordedAt) > workCurveMaxAge:
+				j.Timing.HistoryReason = "measurement older than 30 days"
+			default:
+				j.Timing.HistoryReason = "matching measurement has no qualified throughput"
+			}
+		}
+	}
 	if key != nil && reason == "" && j.Spec.Workload != nil && j.Spec.ExtensionCheck == nil {
 		if old, ok := q.s.WorkObservations[identityHash(key)]; ok && old.StaleReason == "" && !old.Forbidden && q.clock.Now().Sub(old.RecordedAt) <= 30*24*time.Hour && validRate(old.Units) && validRate(old.Seconds) {
 			rate := old.Rate
@@ -232,7 +251,9 @@ func (q *Queue) beginWorkTiming(j *Job) {
 			}
 			predicted := j.Spec.Workload.Units / rate
 			if validRate(predicted) {
+				j.Timing.HistoryReason = ""
 				j.Timing.PredictedSeconds, j.Timing.Samples = &predicted, old.Samples
+				j.Timing.HistoryRecordedAt, j.Timing.HistorySource = &old.RecordedAt, "matching measured work curve"
 			}
 		}
 	}
@@ -358,7 +379,7 @@ func JobTiming(j *Job) string {
 	}
 	t := j.Timing
 	if t == nil {
-		return "prediction unknown; actual unknown" + envelope
+		return "prediction unknown; actual unknown" + envelope + runtimeText(j)
 	}
 	prediction, actual := "unknown", "unknown"
 	if t.PredictedSeconds != nil {
@@ -374,5 +395,5 @@ func JobTiming(j *Job) string {
 	if t.PlacementReason != "" {
 		text += "; " + t.PlacementReason
 	}
-	return text + envelope
+	return text + envelope + runtimeText(j)
 }

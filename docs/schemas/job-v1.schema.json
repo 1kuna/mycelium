@@ -1,5 +1,49 @@
 {
   "$defs": {
+    "ApplicationProgress": {
+      "properties": {
+        "age_seconds": {
+          "type": "number"
+        },
+        "attempt": {
+          "type": "integer"
+        },
+        "completed": {
+          "type": "number"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "received_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "stale": {
+          "type": "boolean"
+        },
+        "total": {
+          "type": "number"
+        },
+        "unit": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "completed",
+        "total",
+        "unit",
+        "attempt",
+        "machine",
+        "session",
+        "received_at",
+        "age_seconds",
+        "stale"
+      ],
+      "type": "object"
+    },
     "AttemptDiagnostics": {
       "properties": {
         "files": {
@@ -1236,6 +1280,10 @@
           ],
           "x-contract": "diagnostic"
         },
+        "application_progress": {
+          "$ref": "#/$defs/ApplicationProgress",
+          "x-contract": "diagnostic"
+        },
         "assigned_at": {
           "format": "date-time",
           "type": "string",
@@ -1550,6 +1598,10 @@
           "$ref": "#/$defs/FileCheckpoint",
           "x-contract": "diagnostic"
         },
+        "runtime": {
+          "$ref": "#/$defs/JobRuntime",
+          "x-contract": "diagnostic"
+        },
         "session": {
           "description": "Worker session of the assigned execution; combine with job ID and attempt.",
           "minLength": 1,
@@ -1691,6 +1743,39 @@
         "host_gb",
         "device_gb",
         "enforcement"
+      ],
+      "type": "object"
+    },
+    "JobRuntime": {
+      "properties": {
+        "elapsed_seconds": {
+          "type": "number"
+        },
+        "history_age_seconds": {
+          "type": "number"
+        },
+        "limitation": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "remaining_seconds": {
+          "type": "number"
+        },
+        "samples": {
+          "type": "integer"
+        },
+        "source": {
+          "type": "string"
+        },
+        "unit": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "samples",
+        "limitation"
       ],
       "type": "object"
     },
@@ -2553,6 +2638,16 @@
         },
         "execution": {
           "$ref": "#/$defs/Execution"
+        },
+        "history_reason": {
+          "type": "string"
+        },
+        "history_recorded_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "history_source": {
+          "type": "string"
         },
         "key": {
           "$ref": "#/$defs/ObservationKey"

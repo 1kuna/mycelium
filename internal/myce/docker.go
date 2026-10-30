@@ -1101,6 +1101,8 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 	}
 	label := "myce.attempt=" + identity
 	create := []string{"create", "--restart=no", "--pull=never", "--init", "--name", "myce-" + identity, "--label", label, "--label", "myce.worker=" + w.Machine.ID, "--cidfile", filepath.Join(s.dir, identity+".cid"), "--env", "MYCE_ATTEMPT_ID=" + identity, "--env", "MYCE_DOCKER_LABEL=" + label, "--env", "MYCE_JOB_ID=" + j.ID, "--env", "MYCE_ATTEMPT=" + strconv.Itoa(j.Attempt), "--env", "MYCE_CHECKPOINT_DIR=/myce/checkpoint", "--volume", checkpoint + ":/myce/checkpoint"}
+	progressFile := applicationProgressFile(s.dir, j)
+	create = append(create, "--volume", filepath.Dir(progressFile)+":/myce/progress", "--env", "MYCE_PROGRESS_FILE=/myce/progress/"+filepath.Base(progressFile))
 	if d.state.CgroupParent != "" {
 		create = append(create, "--cgroup-parent", d.state.CgroupParent, "--memory-swap", strconv.FormatInt(ceilingBytes, 10))
 	}
