@@ -183,21 +183,18 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 				}
 			}
 		}
-		peak, factor, label := q.memoryEstimate(j, m)
+		estimate := q.memoryEstimate(j, m)
 		switch {
-		case peak != nil:
-			source = label
-			host := *peak.HostGB
-			if peak.CgroupGB != nil && validMemoryValue(*peak.CgroupGB) {
-				host = max(host, *peak.CgroupGB)
-			}
-			host *= factor
+		case estimate.host != nil:
+			source = estimate.source
+			host := hostMemoryPeakGB(estimate.host) * estimate.hostFactor
 			if !n.cpuOnly() {
+				peak, factor := estimate.device, estimate.deviceFactor
 				if peak.DeviceGB != nil && validRate(*peak.DeviceGB) && validRate(*peak.DeviceGB*factor) {
 					n.MemoryGB = *peak.DeviceGB * factor
-				} else if label == "cross-machine estimate" {
+				} else if factor > 1.25 {
 					// Unknown device counters cannot become zero reservations.
-					n.MemoryGB = max(n.MemoryGB, host)
+					n.MemoryGB = max(n.MemoryGB, hostMemoryPeakGB(peak)*factor)
 					source += "; GPU recipe default with host estimate floor"
 				} else {
 					source += "; GPU recipe default"
@@ -228,8 +225,8 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 			}
 		default:
 			source = "exploratory first run"
-			if label != "" {
-				source = label
+			if estimate.source != "" {
+				source = estimate.source
 			}
 			host, why := q.exploratoryMemory(j, m)
 			refusal = why
@@ -291,9 +288,44 @@ func sameMemoryWork(point WorkObservation, key ObservationKey, configuration str
 	return point.MemoryConfiguration != "" && point.MemoryConfiguration == configuration && a.Work == key.Work && a.ExtensionDigest == key.ExtensionDigest && a.Reference == key.Reference && a.Concurrency == key.Concurrency && a.BatchSize == key.BatchSize
 }
 
+// RAM and VRAM have independent locality: sibling cards share the host pool,
+// but a sibling's device peak still needs the existing transfer margin.
+type memoryEstimate struct {
+	host, device             *AttemptMemoryPeak
+	hostFactor, deviceFactor float64
+	source                   string
+}
+
+func hostMemoryPeakGB(p *AttemptMemoryPeak) float64 {
+	host := *p.HostGB
+	if p.CgroupGB != nil && validMemoryValue(*p.CgroupGB) {
+		host = max(host, *p.CgroupGB)
+	}
+	return host
+}
+
+func sameMemoryHost(k, target ObservationKey, m *Machine) bool {
+	if k.Host != target.Host || k.Environment != target.Environment {
+		return false
+	}
+	if k.Component == target.Component {
+		return k.Hardware == target.Hardware && k.Fingerprint == target.Fingerprint
+	}
+	// Fingerprints hash device identity together with driver/OS (including the
+	// Linux kernel). Compare the source against its own current sibling, not
+	// against the target card's necessarily different hash. This also permits
+	// existing persisted evidence without weakening fingerprint invalidation.
+	for _, d := range m.Devices {
+		if d.ID == k.Component && d.Identity == k.Hardware && d.ExtensionFingerprint != "" && d.ExtensionFingerprint == k.Fingerprint {
+			return true
+		}
+	}
+	return false
+}
+
 // Transfer only the same frozen recipe/work/shape. Prefer the same OS/arch/
 // accelerator/layout family; this is not a throughput or input-size model.
-func (q *Queue) memoryEstimate(j *Job, m *Machine) (*AttemptMemoryPeak, float64, string) {
+func (q *Queue) memoryEstimate(j *Job, m *Machine) memoryEstimate {
 	provenance := *j
 	// Resumption excludes recording, not using a prior complete-input estimate.
 	provenance.Attempt = 0
@@ -304,9 +336,9 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) (*AttemptMemoryPeak, float64,
 	}
 	key, _ := q.workObservationKey(&provenance)
 	if key == nil {
-		return nil, 0, ""
+		return memoryEstimate{}
 	}
-	var exact, family, other *AttemptMemoryPeak
+	var exact, sameHost, family, other *AttemptMemoryPeak
 	invalidated := false
 	configuration := memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
 	layout := "separate"
@@ -326,6 +358,9 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) (*AttemptMemoryPeak, float64,
 			continue
 		}
 		sameFamily := k.Target == key.Target && point.MemoryLayout != "" && point.MemoryLayout == layout
+		if sameFamily && sameMemoryHost(k, *key, m) {
+			sameHost = mergeMemoryPeaks(sameHost, p)
+		}
 		if sameFamily && k.Host == key.Host && k.Component == key.Component && k.Hardware == key.Hardware && k.Fingerprint == key.Fingerprint && k.Environment == key.Environment {
 			exact = mergeMemoryPeaks(exact, p)
 		} else if sameFamily {
@@ -334,19 +369,27 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) (*AttemptMemoryPeak, float64,
 			other = mergeMemoryPeaks(other, p)
 		}
 	}
-	if exact != nil {
-		return exact, 1.25, "accepted peak × 1.25"
+	estimate := memoryEstimate{}
+	switch {
+	case exact != nil:
+		estimate.device, estimate.deviceFactor, estimate.source = exact, 1.25, "accepted peak × 1.25"
+	case family != nil:
+		estimate.device, estimate.deviceFactor, estimate.source = family, 1.25*1.5, "cross-machine estimate"
+	case other != nil:
+		estimate.device, estimate.deviceFactor, estimate.source = other, 1.25*2, "cross-machine estimate"
+	case invalidated:
+		estimate.source = "exploratory (previous peak constrained)"
 	}
-	if family != nil {
-		return family, 1.25 * 1.5, "cross-machine estimate"
+	estimate.host, estimate.hostFactor = estimate.device, estimate.deviceFactor
+	if sameHost != nil {
+		estimate.host, estimate.hostFactor = sameHost, 1.25
+		if exact == nil {
+			estimate.source = "same-host RAM peak × 1.25; cross-machine device estimate"
+		} else if hostMemoryPeakGB(sameHost) > hostMemoryPeakGB(exact) {
+			estimate.source += "; same-host RAM peak × 1.25"
+		}
 	}
-	if other != nil {
-		return other, 1.25 * 2, "cross-machine estimate"
-	}
-	if invalidated {
-		return nil, 0, "exploratory (previous peak constrained)"
-	}
-	return nil, 0, ""
+	return estimate
 }
 
 // Telemetry already excludes the operator/driver reserve. Use the shared ledger

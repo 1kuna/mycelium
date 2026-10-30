@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -331,6 +332,127 @@ func TestMemoryEnvelopeCrossMachineEstimate(t *testing.T) {
 	}
 }
 
+func TestMemoryEnvelopeSiblingHostRAM(t *testing.T) {
+	const resident, total, device = 7.719688415527344, 13.08499526977539, 4.374309539794922
+	for _, variant := range []string{"same host", "different host", "changed fingerprint", "changed environment"} {
+		t.Run(variant, func(t *testing.T) {
+			q, clock, m, s := floorFreeFitFixture(t, 24)
+			sibling := m.Devices[0]
+			sibling.ID, sibling.Identity = "1", "sibling-card"
+			sibling.ExtensionFingerprint = "sibling-kernel-v1"
+			m.Devices = append(m.Devices, sibling)
+			machineCheck(t, q, m)
+			for id, p := range q.s.WorkObservations {
+				delete(q.s.WorkObservations, id)
+				p.Key.Component, p.Key.Hardware, p.Key.Fingerprint = sibling.ID, sibling.Identity, sibling.ExtensionFingerprint
+				host, cgroup, gpu := resident, total, device
+				p.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, CgroupGB: &cgroup, DeviceGB: &gpu}
+				switch variant {
+				case "different host":
+					p.Key.Host = "other-host"
+				case "changed fingerprint":
+					p.Key.Fingerprint = "sibling-previous-kernel"
+				case "changed environment":
+					p.Key.Environment = "other-environment"
+				}
+				q.s.WorkObservations[identityHash(p.Key)] = p
+			}
+			clock.Advance(time.Second)
+			target := m.Devices[0].machine(*q.s.Machines[m.ID])
+			probe := &Job{State: "queued", Spec: s, Extensions: []Extension{registeredExtension(t, q, s.Extension)}}
+			probe = extensionJobs(probe, &target, true)[0]
+			estimate := q.memoryCandidate(probe, &target)
+			factor := 1.25 * 1.5
+			if variant == "same host" {
+				factor = 1.25
+				if !strings.Contains(estimate.MemoryEnvelope.Source, "same-host") || !hostFits(&target, estimate.Spec.Needs.MemoryGB, estimate.Spec.Needs.HostMemoryGB) {
+					t.Fatalf("same-host sibling must fit the 24 GiB allowance: %+v", estimate.MemoryEnvelope)
+				}
+			} else if estimate.MemoryEnvelope.Source != "cross-machine estimate" {
+				t.Fatalf("nonmatching evidence lost its conservative tier: %+v", estimate.MemoryEnvelope)
+			}
+			if got := estimate.Spec.Needs.HostMemoryGB; math.Abs(got-total*factor) > 1e-9 {
+				t.Fatalf("host RAM = %.12f, want %.12f", got, total*factor)
+			}
+			if got := estimate.Spec.Needs.MemoryGB; math.Abs(got-min(device*1.25*1.5, target.TotalMemoryGB)) > 1e-9 {
+				t.Fatalf("sibling VRAM lost its transfer margin: %.12f", got)
+			}
+			if variant == "same host" {
+				// Exact-device VRAM wins independently; host RAM retains the larger
+				// same-host peak rather than dropping to this card's smaller sample.
+				key, _ := q.workObservationKey(&Job{Spec: probe.Spec, Extensions: probe.Extensions, Machine: m.ID, Session: m.Session, AllocatedDevices: []string{"0"}})
+				host, gpu := 2.0, 1.0
+				q.s.WorkObservations[identityHash(key)] = WorkObservation{Key: *key, MemoryLayout: "separate", MemoryConfiguration: memoryConfiguration(probe.Spec.Needs, probe.Spec.Args, probe.Spec.Program), MemoryRecordedAt: clock.Now(), MemoryPeak: &AttemptMemoryPeak{HostGB: &host, DeviceGB: &gpu}}
+				estimate = q.memoryCandidate(probe, &target)
+				if math.Abs(estimate.Spec.Needs.HostMemoryGB-total*1.25) > 1e-9 || estimate.Spec.Needs.MemoryGB != 1.25 {
+					t.Fatalf("host/device tiers were coupled: %+v", estimate.MemoryEnvelope)
+				}
+			}
+		})
+	}
+}
+
+func TestMemoryEnvelopeSiblingHostBudget(t *testing.T) {
+	for _, peak := range []float64{7, 13.08499526977539} {
+		t.Run(fmt.Sprint(peak), func(t *testing.T) {
+			q, clock, m, s := floorFreeFitFixture(t, 24)
+			m.CapabilityProfile.SystemMemoryBytes = 31 << 30
+			m.HostAvailableMemoryGB = 31
+			sibling := m.Devices[0]
+			sibling.ID, sibling.Identity = "1", "sibling-card"
+			sibling.ExtensionFingerprint = "sibling-backend-v1"
+			e := registeredExtension(t, q, s.Extension)
+			target := sibling.machine(m)
+			r := newExtensionReport(e, &target, "extension:sample")
+			r.Setup, r.Qualified, r.CheckID = true, true, "sibling-check"
+			sibling.ExtensionReports = []ExtensionReport{r}
+			m.Devices = append(m.Devices, sibling)
+			machineCheck(t, q, m)
+			for id, p := range q.s.WorkObservations {
+				delete(q.s.WorkObservations, id)
+				p.Key.Component, p.Key.Hardware, p.Key.Fingerprint = sibling.ID, sibling.Identity, sibling.ExtensionFingerprint
+				p.MemoryPeak.HostGB = &peak
+				q.s.WorkObservations[identityHash(p.Key)] = p
+			}
+			s.RequireTarget = true
+			s.Needs.GPU = &GPUSelection{Devices: []string{"0"}}
+			first := submit(t, q, s)
+			a := assignedJob(machineCheck(t, q, m))
+			if a == nil || a.ID != first.ID || math.Abs(a.Spec.Needs.HostMemoryGB-peak*1.25) > 1e-9 {
+				t.Fatalf("same-host estimate was not admitted: job=%+v", a)
+			}
+			clock.Advance(time.Second)
+			s.Needs.GPU = &GPUSelection{Devices: []string{"1"}}
+			second := submit(t, q, s)
+			b := assignedJob(machineCheck(t, q, m, a))
+			wantReserved := peak * 1.25
+			if 2*wantReserved > 24 {
+				if b != nil || job(t, q, second.ID).State != "queued" {
+					t.Fatalf("sibling spent RAM beyond the shared allowance: %+v", b)
+				}
+			} else {
+				if b == nil || b.ID != second.ID || math.Abs(b.Spec.Needs.HostMemoryGB-peak*1.25) > 1e-9 {
+					t.Fatalf("fitting sibling did not get its own reservation: %+v", b)
+				}
+				wantReserved *= 2
+			}
+			if got := q.s.Machines[m.ID].HostMemoryInUseGB; math.Abs(got-wantReserved) > 1e-9 {
+				t.Fatalf("host ledger charged %.12f GiB, want %.12f", got, wantReserved)
+			}
+			finish(t, q, a, true)
+			if b == nil {
+				b = assignedJob(machineCheck(t, q, m))
+				if b == nil || b.ID != second.ID {
+					t.Fatal("sibling did not start after the first reservation was released")
+				}
+			}
+			if got := q.s.Machines[m.ID].HostMemoryInUseGB; math.Abs(got-peak*1.25) > 1e-9 {
+				t.Fatalf("release removed the sibling's reservation: %.12f GiB", got)
+			}
+		})
+	}
+}
+
 func TestMemoryEnvelopeExploratoryFirstRun(t *testing.T) {
 	q, clock, m, s := observationFixture(t)
 	plain := cpuSpec(1, 0)
@@ -654,7 +776,7 @@ func TestMemoryEnvelopeUnifiedHeadroom(t *testing.T) {
 		point.MemoryPeak.DeviceGB = nil
 		q.s.WorkObservations[id] = point
 	}
-	if peak, _, _ := q.memoryEstimate(assigned, &m); peak != nil {
+	if estimate := q.memoryEstimate(assigned, &m); estimate.host != nil {
 		t.Fatal("unified exact estimate used an unknown device peak")
 	}
 	// On a separate-memory target, a host estimate is still useful, but the

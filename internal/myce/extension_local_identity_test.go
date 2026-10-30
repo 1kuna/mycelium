@@ -16,10 +16,11 @@ func TestExtensionXPUFingerprintIgnoresEnumerationOrder(t *testing.T) {
 	)
 	reordered, unavailable := false, false
 	driver := "driver:Intel GPU"
+	kernel := "test-kernel\n"
 	command := p.Command
 	p.Command = func(ctx context.Context, name string, args ...string) ([]byte, error) {
 		if name == "uname" {
-			return []byte("test-kernel\n"), nil
+			return []byte(kernel), nil
 		}
 		if name == "sycl-ls" {
 			if reordered {
@@ -60,6 +61,11 @@ func TestExtensionXPUFingerprintIgnoresEnumerationOrder(t *testing.T) {
 	if a == b {
 		t.Fatal("distinct physical GPUs share a fingerprint")
 	}
+	kernel = "new-test-kernel\n"
+	if fingerprint("1") == a || fingerprint("0") == b {
+		t.Fatal("kernel change retained a sibling's qualification identity")
+	}
+	kernel = "test-kernel\n"
 	driver = "new-driver:Intel GPU"
 	if fingerprint("1") == a {
 		t.Fatal("driver change retained qualification identity")

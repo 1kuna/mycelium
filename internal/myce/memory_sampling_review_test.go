@@ -278,7 +278,7 @@ func TestMemorySamplingSubTickDoesNotLearn(t *testing.T) {
 	if err := q.Complete(r); err != nil {
 		t.Fatal(err)
 	}
-	if p, _, _ := q.memoryEstimate(&first, q.s.Machines[m.ID]); p != nil {
+	if estimate := q.memoryEstimate(&first, q.s.Machines[m.ID]); estimate.host != nil {
 		t.Fatal("sub-tick run trained memory")
 	}
 }

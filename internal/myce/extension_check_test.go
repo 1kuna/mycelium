@@ -6,6 +6,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -60,6 +62,9 @@ func TestExtensionCheckAutoMemory(t *testing.T) {
 						t.Fatal(err)
 					}
 					submitted = true
+					if !s.RequireTarget {
+						t.Error("runtime check omitted capacity-only target validation")
+					}
 					if s.Needs.Memory != mode || s.ExtensionCheck == nil {
 						t.Errorf("check submission memory = %q, want %q", s.Needs.Memory, mode)
 					}
@@ -453,5 +458,80 @@ func TestExtensionQualificationSmokeFailureClearsPriorSuccess(t *testing.T) {
 	saved := readExtensionReports(root, e, "fake")
 	if len(saved) != 1 || saved[0].Qualified {
 		t.Fatal("failed check not persisted", saved)
+	}
+}
+
+// Same-host RAM evidence can fit a sibling even when cross-machine transfer
+// would not. Truly impossible checks still reject before entering the queue.
+func TestExtensionCheckSiblingMemoryCapacity(t *testing.T) {
+	for _, peak := range []float64{13.08499526977539, 20} {
+		t.Run(fmt.Sprint(peak), func(t *testing.T) {
+			q, _, m, s := floorFreeFitFixture(t, 24)
+			sibling := m.Devices[0]
+			sibling.ID, sibling.Identity = "1", "sibling-card"
+			sibling.ExtensionFingerprint = "sibling-backend-v1"
+			m.Devices = append(m.Devices, sibling)
+			m.HostAvailableMemoryGB = 1
+			machineCheck(t, q, m)
+			for id, p := range q.s.WorkObservations {
+				delete(q.s.WorkObservations, id)
+				p.Key.Component, p.Key.Hardware = "1", "sibling-card"
+				p.Key.Fingerprint = sibling.ExtensionFingerprint
+				p.MemoryPeak.HostGB, p.MemoryPeak.CgroupGB = &peak, &peak
+				q.s.WorkObservations[identityHash(p.Key)] = p
+			}
+			// Physical capacity exceeds the operator's allowance, and live occupancy
+			// is temporary. Qualification must compare against the whole allowance.
+			s.Workload = nil
+			s.ExtensionDigest = registeredExtension(t, q, s.Extension).Digest
+			s.RequireTarget = true
+			s.AllowedMachines = []string{m.ID}
+			s.Needs = ResourceNeeds{Memory: "auto", GPU: &GPUSelection{Devices: []string{"0"}}}
+			s.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:sample", Directory: t.TempDir()}
+			j, err := q.Submit(s)
+			if peak*1.25 > 24 {
+				var refusal *HTTPError
+				if !errors.As(err, &refusal) || refusal.Code != "no_qualified_target" || !strings.Contains(refusal.Message, "exceeds allowance 24 GiB") {
+					t.Fatalf("impossible sibling estimate was not rejected: job=%+v err=%v", j, err)
+				}
+				if len(q.s.Jobs) != 0 {
+					t.Fatal("rejected runtime check entered the queue")
+				}
+			} else {
+				if err != nil || j == nil || j.State != "queued" {
+					t.Fatalf("temporary occupancy rejected a fitting check: job=%+v err=%v", j, err)
+				}
+				if got := assignedJob(machineCheck(t, q, m)); got != nil {
+					t.Fatalf("busy-host check bypassed live admission: %+v", got)
+				}
+			}
+		})
+	}
+}
+
+func TestExtensionCheckProductionHoldStillQueues(t *testing.T) {
+	q, clock, m, s := floorFreeFitFixture(t, 24)
+	production := submit(t, q, m3Spec("production", "0", 1, 1))
+	running := assignedJob(machineCheck(t, q, m))
+	if running == nil || running.ID != production.ID {
+		t.Fatal("production was not assigned")
+	}
+	clock.Advance(time.Second)
+	s.Workload = nil
+	s.ExtensionDigest = registeredExtension(t, q, s.Extension).Digest
+	s.RequireTarget = true
+	s.AllowedMachines = []string{m.ID}
+	s.Needs = ResourceNeeds{Memory: "auto", GPU: &GPUSelection{Devices: []string{"0"}}}
+	s.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:sample", Directory: t.TempDir()}
+	j, err := q.Submit(s)
+	if err != nil || j == nil || j.State != "queued" {
+		t.Fatalf("production hold rejected a fitting runtime check: job=%+v err=%v", j, err)
+	}
+	if got := assignedJob(machineCheck(t, q, m, running)); got != nil || job(t, q, running.ID).State != "running" {
+		t.Fatalf("runtime check displaced production: %+v", got)
+	}
+	finish(t, q, running, true)
+	if got := assignedJob(machineCheck(t, q, m)); got == nil || got.ID != j.ID {
+		t.Fatalf("runtime check did not start after production released: %+v", got)
 	}
 }
