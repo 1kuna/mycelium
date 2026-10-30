@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"net/url"
 	"strings"
@@ -28,6 +29,9 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 	timeout := f.Duration("timeout", 30*time.Second, "bounded wait; timeout never releases custody")
 	cpuBudget := f.Int("cpu-budget-cores", 0, "queue-owned logical CPU allowance; zero uses detected capacity minus reserve")
 	budget := f.Float64("memory-budget-gb", 0, "queue-owned host RAM allowance; requires drained/disabled host")
+	dryRun := f.Bool("dry-run", false, "suggest a measured RAM budget without changing policy")
+	headroom := f.Float64("headroom-gb", 4, "extra RAM headroom for future external peaks (GiB)")
+	queueOverhead := f.Float64("queue-overhead-gb", 0, "additional queue RAM reserve, if not already included in measurements (GiB)")
 	lastResort := f.Bool("last-resort", false, "prefer ordinary admissible hosts before this host; use --last-resort=false to clear")
 	var flags, hosts []string
 	for i := 1; i < len(args); i++ {
@@ -35,7 +39,7 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 		if strings.HasPrefix(arg, "-") {
 			flags = append(flags, arg)
 			key := strings.TrimLeft(arg, "-")
-			if (key == "config" || key == "joining-file" || key == "queue" || key == "token" || key == "timeout" || key == "memory-budget-gb" || key == "cpu-budget-cores") && i+1 < len(args) {
+			if (key == "headroom-gb" || key == "queue-overhead-gb" || key == "config" || key == "joining-file" || key == "queue" || key == "token" || key == "timeout" || key == "memory-budget-gb" || key == "cpu-budget-cores") && i+1 < len(args) {
 				i++
 				flags = append(flags, args[i])
 			}
@@ -82,7 +86,10 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 	if action == "status" && (request.MemoryBudgetGB != nil || request.CPUBudgetCores != nil) {
 		return errors.New("status cannot change host policy")
 	}
-	if action == "budget" && request.MemoryBudgetGB == nil && request.CPUBudgetCores == nil {
+	if *dryRun && (action != "budget" || request.MemoryBudgetGB != nil || request.CPUBudgetCores != nil) {
+		return errors.New("--dry-run requires budget without explicit policy changes")
+	}
+	if action == "budget" && !*dryRun && request.MemoryBudgetGB == nil && request.CPUBudgetCores == nil {
 		return errors.New("budget requires --memory-budget-gb GiB or --cpu-budget-cores N")
 	}
 	c, err := authority.client()
@@ -96,7 +103,7 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 	var status myce.HostMaintenanceStatus
 	method := "POST"
 	var input any = request
-	if action == "status" {
+	if action == "status" || *dryRun {
 		method = "GET"
 		input = nil
 	}
@@ -105,6 +112,19 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 	cancel()
 	if err != nil {
 		return err
+	}
+	if *dryRun {
+		var total float64
+		for _, worker := range status.Workers {
+			if worker.Machine.MemoryObservation != nil && worker.Fresh {
+				total = max(total, worker.Machine.MemoryObservation.TotalGB)
+			}
+		}
+		suggestion, e := myce.SuggestHostBudget(total, *headroom, *queueOverhead, status.ExternalMemory)
+		if e != nil {
+			return fmt.Errorf("budget suggestion: %w", e)
+		}
+		return json.NewEncoder(out).Encode(suggestion)
 	}
 	if *wait {
 		status, err = waitHostMaintenance(ctx, c, hosts[0], *timeout, myce.RealClock{}, waitPause)

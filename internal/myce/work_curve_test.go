@@ -134,6 +134,83 @@ func TestWorkCurveMemoryRecoversAfterQueueRestart(t *testing.T) {
 	}
 }
 
+func TestWorkCurveMemorySurvivesBudgetChange(t *testing.T) {
+	for _, changed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("fingerprint_changed=%v", changed), func(t *testing.T) {
+			q, clock, m, s := unifiedAutoFixture(t, 0)
+			m.CapabilityProfile.Accelerators[0].MemoryBytes = 128 << 30
+			submit(t, q, s)
+			first := assignedJob(machineCheck(t, q, m))
+			if first == nil {
+				t.Fatal("not assigned")
+			}
+			if err := q.Started(result(first, false)); err != nil {
+				t.Fatal(err)
+			}
+			clock.Advance(time.Second)
+			host, device := 2.0, 3.0
+			r := result(first, true)
+			r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, DeviceGB: &device}
+			if err := q.Complete(r); err != nil {
+				t.Fatal(err)
+			}
+			learnedAt := clock.Now()
+			// A real queue-owned budget change produces the old release's
+			// allowance invalidation. Recover it through startup/check-in.
+			if _, err := q.ChangeHostMaintenance(hostID(&m), HostMaintenanceRequest{Action: "disable"}); err != nil {
+				t.Fatal(err)
+			}
+			budget := 96.0
+			if _, err := q.ChangeHostMaintenance(hostID(&m), HostMaintenanceRequest{Action: "budget", MemoryBudgetGB: &budget}); err != nil {
+				t.Fatal(err)
+			}
+			m.HostMemoryBudgetGB = budget
+			machineCheck(t, q, m)
+			if _, err := q.ChangeHostMaintenance(hostID(&m), HostMaintenanceRequest{Action: "resume"}); err != nil {
+				t.Fatal(err)
+			}
+			var database string
+			if err := q.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&database); err != nil {
+				t.Fatal(err)
+			}
+			if err := q.Close(); err != nil {
+				t.Fatal(err)
+			}
+			q, err := Open(database, q.root, clock)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer q.Close()
+			m.HostMemoryBudgetGB = 96
+			machineCheck(t, q, m)
+			if changed {
+				fingerprint := m.Devices[0].ExtensionFingerprint
+				m.Devices[0].ExtensionFingerprint = "replacement-backend"
+				machineCheck(t, q, m)
+				m.Devices[0].ExtensionFingerprint = fingerprint
+				machineCheck(t, q, m) // A real change remains sticky after return.
+			}
+			submit(t, q, s)
+			next := assignedJob(machineCheck(t, q, m))
+			if next == nil {
+				t.Fatalf("post-change attempt not assigned: %+v", q.s.Machines[m.ID])
+			}
+			want := "accepted peak × 1.25"
+			if changed {
+				want = "exploratory first run"
+			}
+			if next.MemoryEnvelope.Source != want || !changed && next.MemoryEnvelope.HostGB != 6.375 {
+				t.Fatalf("post-change memory: %+v", next.MemoryEnvelope)
+			}
+			for _, p := range q.s.WorkObservations {
+				if !p.MemoryRecordedAt.Equal(learnedAt) || p.MemoryPeak == nil || *p.MemoryPeak.HostGB != host {
+					t.Fatalf("recovery changed learned evidence: %+v", p)
+				}
+			}
+		})
+	}
+}
+
 func TestWorkCurveRisingFallingAcceptedEWMAAndStatus(t *testing.T) {
 	q, clock, m, e, s := curveFixture(t)
 	target := cloneMachine(q.s.Machines[m.ID])

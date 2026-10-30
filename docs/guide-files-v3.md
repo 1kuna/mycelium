@@ -231,8 +231,10 @@ power-loss behavior needs its own qualification.
 
 Deploy the queue before workers. Shared-input jobs require the advertised
 `shared_inputs_v1` capability; older workers cannot receive or start them.
+Extension jobs also require `extension_shared_inputs_v1`, so older workers
+cannot acknowledge success under a different output publication contract.
 
-Profiles and plain native jobs can use `shared_inputs` beside stored source
+Profiles, native extension jobs, and plain native jobs can use `shared_inputs` beside stored source
 `files`. Names use letters, digits and underscores, unique ignoring case. Read
 `MYCE_INPUT_<UPPERCASE_NAME>` in the command; it is the absolute path of a shared
 read-only file or directory, with no attempt copy or unpack.
@@ -258,6 +260,15 @@ set `local: path/to/archive` to import it, deriving SHA-256 and size; subsequent
 profiles should reference that hash or its NAS location. Existing `inputs`
 retain their private-copy behavior. Commands must explicitly use the environment
 paths, for example `python "$MYCE_INPUT_RUNTIME/run.py" "$MYCE_INPUT_ORIGINAL"`.
+Extension commands receive the same environment variables; their NAS output and
+checkpoint contracts are unchanged. Extension execution must be native.
+
+Workers report verified cache identities for placement. Their shared input
+evidence counts successful cache hits and cold stages, plus the declared NAS
+source sizes for completed cold stages; it is not a network traffic measurement.
+These counters reset when the worker restarts. Assignment, staged and started
+timestamps show the input phase, while declared input sizes remain in the job.
+After restart an entry is reverified locally before it is advertised as ready.
 
 For a large manifest already on the NAS, use `nas: runtimes/python` with
 `manifest_file: manifests/python.json`, `sha256` and `size_bytes` identifying
@@ -287,3 +298,83 @@ window; NAS originals remain owned by their project.
 Input downloads renew their socket deadlines on progress instead of timing out
 a whole file after 30 seconds. The idle budget is at least 60 seconds and scales
 with two hash passes at 100 MiB/s. API control calls keep their normal timeout.
+
+## Complete from queue storage, deliver to NAS later (#349)
+
+Tasks explicitly select `output_delivery: async_nas`. Other tasks retain their
+existing completion and publication behavior. Configure the queue (or a laptop
+`myce dev`) with `--output-delivery-root PATH`, an existing NAS destination root;
+keep its SQLite database and file store on durable local disk. This setting is
+independent of `--checkpoints` and does not change checkpoint policy. Laptop
+fixtures can use a temporary local destination instead of a NAS.
+
+```yaml
+output_delivery: async_nas
+outputs: {answer.json: results}
+disk: {output_bytes: 10485760}
+```
+
+Declare the estimated total output bytes before admission. The queue durably
+reserves that estimate for queued/running tasks; unrelated uploads cannot consume
+it, including against extension/environment bundle writes. After process exit,
+the worker copies outputs into an immutable local spool,
+hashes/syncs it and publishes its manifest. It then declares the exact current-
+attempt manifest through `POST /api/files/result` (the Result identity plus
+`output_refs`). This exchanges the estimate for actual missing bytes. Larger
+results need additional admission space; HTTP 507 retains the spool and retries.
+Missing/invalid required outputs fail. The worker budgets both work files and the
+spool and checks actual local free space before copying; physical exhaustion
+retains unaccepted work rather than reporting success. This cannot bound disk
+writes by an arbitrary command that exceeds its declared disk needs.
+
+If an attempt is requeued, its retry must reacquire the estimated reservation
+before dispatch. Until space is available, `output_admission_pending: true` and
+the job's capacity waiting reason explain the hold; existing uploaded bytes still
+count toward usage. Abandoned attempt uploads retain a durable cleanup owner and
+become collectible after the publication grace when no job references them.
+Reusing an unrelated unmarked import does not make it collectible.
+
+Uploads use the existing resumable verified file API. One SQLite transaction
+accepts the current result and pending delivery only after every blob is verified
+and synced. Only that commit completes the task. The worker confirms exact queue
+acceptance before ordinary worker retention reclaims its managed attempt
+directory and spool. Spools live under the worker state directory at
+`job-files/JOB_ID/ATTEMPT/.myce-result-spool`, independently of the command
+workdir. The existing accepted-attempt record and deletion retry handle partial
+cleanup without retaining the completion actor. Retrieve `output_refs` immediately with
+`myce file get` or the client download helper; dependent jobs use file references.
+A consumer requiring NAS paths must explicitly wait for `delivery.state` to be
+`verified` on `GET /api/jobs/ID`, and match `delivery.id`/`attempt` to the accepted
+execution. Job success by itself no longer promises a NAS path for these tasks.
+Fan-out parent aggregation and explicit plain Docker submissions do not support
+this policy; submit individual native/extension tasks instead.
+
+The queue process runs one background publisher per configured root, with the
+existing two-file staging bound. It publishes complete immutable directories at
+`PATH/PREFIX/JOB_ID/ATTEMPT/`, retaining declared local output names, plus
+`.myce-delivery.json`. That reserved filename and `.myce-result-spool` cannot be
+output names. The receipt contains execution/machine/session identity, destination
+identity, policy revision `async_nas/1`, manifest digest and files with SHA-256 and
+size. Each destination prefix is atomic; the queue reports verified only after
+all prefixes are durable. There is no mutable latest alias or stale overwrite.
+
+Replay after restart/lost acknowledgement verifies both the receipt and all
+actual destination bytes. Conflicts refuse publication and remain failed with
+source blobs pinned. Returned errors retry after one minute (limits retry load,
+costing up to a minute after recovery). A pending syscall retains its slot;
+after the existing storage stall budget without observed I/O progress, status explains the stall, without
+launching another copy or extending job completion. Queue ticks start/observe
+work and never wait for NAS I/O under the queue lock. Restoring destination
+configuration resumes pending tasks; changing the configured path does not
+silently redirect already accepted deliveries.
+
+Pending/failed delivery pins outputs through ordinary seven-day expiry and
+restart. Once verified, ordinary retrieval retention measured from compute
+completion applies, so an already overdue result may expire on the next tick.
+Verification never requests early removal. Status capacity includes pending
+blobs, upload lengths and missing-output reservations (`reserved_output_bytes`);
+no finite store permits unlimited computation during a NAS outage. Admission
+refuses before consuming reserved space; heartbeats and unrelated jobs that need
+no additional storage continue. Queue-store loss can still lose undelivered bytes;
+this is one durable authority, not a backup guarantee. Native NAS power-loss and
+concurrent-backup performance qualification remain separate from laptop tests.

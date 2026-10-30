@@ -26,6 +26,7 @@ var workerCheckpointPrepare = prepareCheckpoint
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
+	hostMemorySamples    map[attemptKey]hostMemorySample
 	DiskProbe            func(string) (DiskReading, error)
 	diskSampler          *workerDiskSampler
 	AcceleratorStopGrace time.Duration
@@ -113,6 +114,7 @@ type Worker struct {
 	StateDir                    string
 	CheckpointRoot              string
 	HostMemorySource            MemorySource
+	hostRawMemorySource         MemorySource
 	HostMemoryReserveGB         float64
 	MemorySource                MemorySource
 	MemoryMeasured              bool
@@ -209,7 +211,7 @@ func (p *process) stopLocked(now time.Time, grace time.Duration, kill bool) {
 			p.docker.dirty = true
 		}
 		p.docker.mu.Unlock()
-	} else if p.stopGroup {
+	} else if p.stopGroup || p.native != nil && !p.job.Spec.Needs.cpuOnly() {
 		if kill {
 			grace = p.stopGrace
 		}
@@ -325,6 +327,9 @@ func (w Worker) start(s *workerStore, j Job) (*process, error) {
 }
 
 func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *process, startErr error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if j.Spec.Priority == "production" && j.Spec.StartBy == nil {
 		return nil, errors.New("queue start-gate protocol mismatch: production assignment has no start_by; upgrade queue and workers together")
 	}
@@ -360,6 +365,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	}
 	sharedEnv, sharedRelease, sharedErr := w.acquireSharedInputs(ctx, j)
 	if sharedErr != nil {
+		if errors.Is(sharedErr, errCheckpointIOPending) {
+			return nil, fmt.Errorf("%w: shared input copy pending", errWorkerCheckpoint)
+		}
 		return nil, runtimeErrorFor("input_staging", sharedErr)
 	}
 	if len(j.Spec.SharedInputs) > 0 {
@@ -379,12 +387,23 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	executionWorkdir := j.Spec.Run.Workdir
 	if !j.Spec.Run.Docker || j.Spec.extensionJob() || len(jobInputFiles(&j))+len(jobInputPaths(&j))+len(j.Spec.SharedInputs) > 0 {
 		value := j
-		staged, err := s.extensionFiles.run(attemptCheckpoint(j), func() (stagedInputs, error) {
+		staged, err := s.extensionFiles.runBounded(ctx, attemptCheckpoint(j), func() (stagedInputs, error) {
+			// Keep the slot until the filesystem call really returns, even after
+			// this attempt has released. Two copies inside one stage remain allowed.
+			if s.inputStaging != nil && !s.inputStaging.CompareAndSwap(false, true) {
+				return stagedInputs{}, errCheckpointIOPending
+			}
+			if s.inputStaging != nil {
+				defer s.inputStaging.Store(false)
+			}
 			return captureStagedInputs(w.Clock, func() (string, error) {
-				err := w.prepareExtensionFiles(&value, s.dir)
+				err := w.prepareExtensionFilesContext(ctx, &value, s.dir)
 				return value.Spec.Run.Workdir, err
 			})
-		})
+		}, false)
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		if err != nil {
 			if strings.HasPrefix(err.Error(), "NAS unreachable:") {
 				return nil, fmt.Errorf("%w: input copy pending", errWorkerCheckpoint)
@@ -461,7 +480,8 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 			return nil, s.startFailure(j, environmentFailed, errors.New("environment builder unavailable"))
 		}
 		r.readyOnly = j.Spec.extensionJob()
-		environmentPath, release, err = w.environmentCache.Acquire(withLaunchGate(context.Background(), func() error {
+		buildCtx := context.WithValue(ctx, preparationCustodyKey{}, s.retainPreparation)
+		environmentPath, release, err = w.environmentCache.Acquire(withLaunchGate(buildCtx, func() error {
 			return w.authorizeLaunch(HostLaunch{Machine: w.Machine.ID, Session: s.state.Session, Kind: "batch", Key: j.ID, Attempt: fmt.Sprint(j.Attempt)})
 		}), r)
 		if err != nil {
@@ -479,6 +499,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		return nil, err
 	}
 	if j.Spec.Run.Docker {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		p, e := w.startDocker(s, j, checkpoint, release)
 		environmentStarted = e == nil
 		return p, e
@@ -512,6 +535,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		}
 	}
 	if err := w.checkAvailability(); err != nil {
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if err := w.checkHostMemoryBudget(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB); err != nil {
@@ -1052,11 +1078,16 @@ func (w Worker) Run(stop context.Context) error {
 	if w.Machine.GPU == "cpu" {
 		w.Machine.HostMemoryMeasured = true
 	}
+	if !validMemoryValue(w.HostMemoryReserveGB) {
+		return errors.New("host memory reserve must be finite and nonnegative")
+	}
 	if w.HostMemorySource == nil {
-		w.HostMemorySource, err = workerHostMemorySource(w.HostMemoryReserveGB)
+		w.hostRawMemorySource, err = workerHostMemorySource(0)
 		if err != nil {
 			return err
 		}
+		raw, reserve := w.hostRawMemorySource, w.HostMemoryReserveGB
+		w.HostMemorySource = func(ctx context.Context) (float64, error) { n, e := raw(ctx); return max(0, n-reserve), e }
 	}
 	if _, err := MemoryCeilingConfig(w.Machine.HostMemoryBudgetGB, w.Machine.MemoryCeilingSlackGB, w.MemorySwapMaxBytes); err != nil {
 		return err

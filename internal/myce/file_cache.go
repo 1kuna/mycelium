@@ -42,7 +42,7 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) error 
 		if err = os.Chtimes(p, now, now); err != nil {
 			return err
 		}
-		return copyJobFile(p, dest)
+		return copyJobFileContext(ctx, p, dest)
 	}
 	// Never replace corrupt cache bytes as if they were complete. They are disposable
 	// only after the durable authoritative copy has been checked.
@@ -151,7 +151,7 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) error 
 	if err = os.Chtimes(p, now, now); err != nil {
 		return err
 	}
-	return copyJobFile(p, dest)
+	return copyJobFileContext(ctx, p, dest)
 }
 
 func validateJobFiles(s Spec) error {

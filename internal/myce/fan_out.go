@@ -268,6 +268,7 @@ func (q *Queue) fanOutCandidateWithResources(j *Job, m *Machine, resources map[b
 	// Unknown/ineligible curves grant no slots. Reuse ordinary serial eligibility
 	// and release planning, rather than waiting for a measured but busy machine.
 	for _, candidate := range extensionJobs(q.fanOutTemplate(j), m, true) {
+		candidate.Spec.Args = append(slices.Clone(candidate.Spec.Args), j.Spec.FanOut.Pieces[j.FanOut.Next].Args...)
 		q.applyLearnedNeeds(candidate)
 		candidate = q.memoryCandidate(candidate, m)
 		if q.capReasonFor(candidate, m) == "" && q.batchResourcesFitWithScan(candidate, m, resources) {
@@ -297,9 +298,6 @@ func (q *Queue) assignFanOut(selected *Job, m *Machine) *Job {
 			}
 			copy.Spec.Outputs[local] = prefix
 		}
-	}
-	if !copy.Batch.Run {
-		copy.Spec.Args = append(slices.Clone(copy.Spec.Args), copy.Batch.Pieces[0].Args...)
 	}
 	if q.simulation {
 		q.simID++

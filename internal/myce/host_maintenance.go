@@ -54,9 +54,10 @@ type MaintenanceAttempt struct {
 type HostMaintenanceStatus struct {
 	DeviceMaintenance []DeviceMaintenance `json:"device_maintenance"`
 
-	MigrationReady bool            `json:"migration_ready,omitempty"`
-	Host           string          `json:"host"`
-	Policy         HostMaintenance `json:"policy"`
+	MigrationReady bool                   `json:"migration_ready,omitempty"`
+	ExternalMemory *ExternalMemoryHistory `json:"external_memory,omitempty"`
+	Host           string                 `json:"host"`
+	Policy         HostMaintenance        `json:"policy"`
 
 	Workers         []MaintenanceWorker  `json:"workers"`
 	Attempts        []MaintenanceAttempt `json:"attempts"`
@@ -167,6 +168,7 @@ func (q *Queue) hostMaintenanceStatus(host string) HostMaintenanceStatus {
 		budget := *out.Policy.MemoryBudget
 		out.Policy.MemoryBudget = &budget
 	}
+	out.ExternalMemory = q.externalMemoryStatus(host)
 	out.Healthy = true
 	operational := true
 	freshEvidence := true

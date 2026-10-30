@@ -58,6 +58,13 @@ func (m FileManifest) validate() error {
 	return err
 }
 func IdentifyFile(path string) (FileRef, error) {
+	return identifyFileContext(context.Background(), path)
+}
+
+func identifyFileContext(ctx context.Context, path string) (FileRef, error) {
+	if err := ctx.Err(); err != nil {
+		return FileRef{}, err
+	}
 	var err error
 	parent, err := filepath.EvalSymlinks(filepath.Dir(path))
 	if err != nil {
@@ -80,7 +87,7 @@ func IdentifyFile(path string) (FileRef, error) {
 		return FileRef{}, errors.New("file must be regular")
 	}
 	h := sha256.New()
-	n, err := io.Copy(h, f)
+	n, err := io.Copy(h, contextReader{ctx, f})
 	if err != nil {
 		return FileRef{}, err
 	}
@@ -105,19 +112,20 @@ func verifyFile(ctx context.Context, path string, ref FileRef) error {
 }
 
 type FileStore struct {
-	diskProbe     func(string) (DiskReading, error)
-	root          string
-	limit         int64
-	mu            sync.Mutex
-	handler       http.Handler
-	uploadLocker  tus.Locker
-	syncDir       func(string) error // Durability failure injection.
-	expired       func(string, ...context.Context) bool
-	lifecycle     *sync.RWMutex
-	clock         Clock
-	recordUpload  func(hash, purpose string, created bool, contexts ...context.Context) error
-	publishUpload func(hash string, contexts ...context.Context) error
-	recordBundle  func(hash string, created bool, contexts ...context.Context) error
+	reservedOutputs func(map[string]storedPayload) uint64
+	diskProbe       func(string) (DiskReading, error)
+	root            string
+	limit           int64
+	mu              sync.Mutex
+	handler         http.Handler
+	uploadLocker    tus.Locker
+	syncDir         func(string) error // Durability failure injection.
+	expired         func(string, ...context.Context) bool
+	lifecycle       *sync.RWMutex
+	clock           Clock
+	recordUpload    func(hash, purpose string, created bool, contexts ...context.Context) error
+	publishUpload   func(hash string, contexts ...context.Context) error
+	recordBundle    func(hash string, created bool, contexts ...context.Context) error
 }
 type FileConfig struct {
 	Checkpoints bool `json:"checkpoints"`
@@ -132,7 +140,15 @@ type fileStoreConfiguration struct {
 // Stored inputs and their results use the queue file store independently of
 // checkpoint mode. FileTransport continues to select file-store checkpoints.
 func (j Job) storedFileResults() bool {
-	return j.FileTransport || len(jobInputFiles(&j)) > 0 || len(j.Spec.SharedInputs) > 0
+	if j.Spec.OutputDelivery == asyncNAS || j.FileTransport || len(jobInputFiles(&j)) > 0 {
+		return true
+	}
+	for _, input := range j.Spec.SharedInputs {
+		if !j.Spec.extensionJob() || input.NAS == "" {
+			return true
+		}
+	}
+	return false
 }
 
 func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) error {
@@ -158,7 +174,7 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 			return err
 		}
 	}
-	s := &FileStore{root: root, limit: limit, syncDir: syncWorkerDir, expired: q.expiredBlob, lifecycle: &q.fileLifecycle, clock: q.clock, recordUpload: q.recordFileUpload, publishUpload: q.publishFileUpload, recordBundle: q.recordBundleUpload}
+	s := &FileStore{reservedOutputs: q.reservedOutputBytes, root: root, limit: limit, syncDir: syncWorkerDir, expired: q.expiredBlob, lifecycle: &q.fileLifecycle, clock: q.clock, recordUpload: q.recordFileUpload, publishUpload: q.publishFileUpload, recordBundle: q.recordBundleUpload}
 	fs := filestore.New(filepath.Join(root, "uploads"))
 	fs.DirModePerm = 0700
 	fs.FileModePerm = 0600
@@ -203,6 +219,13 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 	defer q.mu.Unlock()
 	if q.files != nil && q.files.root != root && len(q.bundleReferences()) > 0 {
 		return errors.New("bundle storage already bound; select the file store with WithFileStore when opening the queue")
+	}
+	if q.files != nil && q.files.root != root {
+		for _, j := range q.s.Jobs {
+			if deliveryPending(j) || j.Spec.OutputDelivery == asyncNAS && !terminal(j.State) {
+				return errors.New("asynchronous output custody binds the file store; keep its root unchanged")
+			}
+		}
 	}
 	q.files = s
 	q.fileCheckpoints = checkpoints
@@ -343,11 +366,18 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(201)
 		return
 	}
-	status, _, e := s.capacity(r.Context())
+	status, payloads, e := s.capacity(r.Context())
 	if e != nil {
 		status.Error = "file store capacity unavailable"
 	}
-	if err := fileStoreRefusal(status, uint64(length)); err != nil {
+	// A declared output becomes allocated in this creation. Preserve every
+	// other estimate/identity reservation before admitting these bytes.
+	if payloads == nil {
+		payloads = map[string]storedPayload{}
+	}
+	payloads[hash] = storedPayload{length: uint64(length)}
+	need := addDiskBytes(uint64(length), s.reservedOutputs(payloads))
+	if err := fileStoreRefusal(status, need); err != nil {
 		respond(w, nil, err)
 		return
 	}
@@ -862,7 +892,7 @@ func (c Client) DownloadFile(ctx context.Context, ref FileRef, dest string) erro
 	if _, err = f.Seek(offset, io.SeekStart); err != nil {
 		return err
 	}
-	n, copyErr := io.Copy(f, io.LimitReader(res.Body, ref.SizeBytes-offset+1))
+	n, copyErr := io.Copy(f, io.LimitReader(contextReader{ctx, res.Body}, ref.SizeBytes-offset+1))
 	err = errors.Join(copyErr, f.Sync())
 	if err != nil {
 		return err

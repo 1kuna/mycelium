@@ -92,6 +92,8 @@ func (w Worker) isolateNativeCommand(cmd *exec.Cmd, spool, work string, env map[
 		protected = append(protected, c.EnvironmentFile, c.JoiningFile, c.State)
 	}
 	var profile strings.Builder
+	// CoreFoundation user lookup initializes notifyd and unified logging before
+	// main. Denying these bootstrap lookups can stall a CGO payload in dyld.
 	profile.WriteString(`(version 1)
 (allow default)
 (deny job-creation)
@@ -100,6 +102,8 @@ func (w Worker) isolateNativeCommand(cmd *exec.Cmd, spool, work string, env map[
 (deny signal (require-not (target same-sandbox)))
 (deny mach-register)
 (deny mach-lookup (require-not (require-any
+  (global-name "com.apple.system.notification_center")
+  (global-name "com.apple.logd")
   (global-name "com.apple.MTLCompilerService")
   (global-name-prefix "com.apple.MTLCompilerService.")
   (global-name "com.apple.cvmsServ")

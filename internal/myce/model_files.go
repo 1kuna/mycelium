@@ -235,7 +235,13 @@ func (c *ModelCache) copyModelFiles(ctx context.Context, source, temp string, m 
 }
 
 func syncModelDirectory(root string) error {
+	return syncModelDirectoryContext(context.Background(), root)
+}
+func syncModelDirectoryContext(ctx context.Context, root string) error {
 	return filepath.WalkDir(root, func(p string, d os.DirEntry, e error) error {
+		if err := sharedInputProgress(ctx); err != nil {
+			return err
+		}
 		if e != nil {
 			return e
 		}
@@ -246,7 +252,11 @@ func syncModelDirectory(root string) error {
 		if e != nil {
 			return e
 		}
-		return errors.Join(f.Sync(), f.Close())
+		err := errors.Join(f.Sync(), f.Close())
+		if err != nil {
+			return err
+		}
+		return sharedInputProgress(ctx)
 	})
 }
 

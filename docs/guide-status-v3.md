@@ -411,8 +411,17 @@ Every host command uses queue evidence; there is no local envelope or rest verdi
 returns that job's status view. `host_available_memory_gb` is worker-observed
 available RAM after its configured host reserve. `host_memory_in_use_gb` is
 Mycelium's reservation ledger, not measured process RSS.
-`free_host_memory_gb` is admitted headroom after reservations and any configured
-allowance. Similarly, `cpu_in_use_cores` and `free_cpu_cores` are reservations,
+`free_host_memory_gb` is admitted headroom: the smaller of live availability
+minus running attempts' remaining growth room, and the configured allowance
+minus full reservations (when configured). Remaining growth is
+`max(0, reservation - current nonreclaimable use)` per attempt. The operator
+reserve is already removed from live availability; it is not subtracted again.
+Only fresh exact-attempt cgroup anonymous resident memory reduces growth;
+reclaimable cache, historical peaks and process RSS do not. Missing or five-second-old
+samples retain the full reservation, as do models and unconfirmed release custody.
+Queue restarts discard current-use credit. macOS uses the conservative fallback
+because its process-group RSS includes shared pages and is not a safe credit.
+Similarly, `cpu_in_use_cores` and `free_cpu_cores` are reservations,
 not CPU utilization. Zero reserved cores does not establish an idle host.
 
 Capacity waits name the selected host's reservations and, when reported, live
@@ -464,3 +473,75 @@ queue decisions still use the injected clock. Logging and summary publication
 run after unlocking. Labels use registered route patterns or `unmatched`, never
 request paths, query strings, tokens or bodies. Long-lived streams are recorded
 when their handler ends.
+
+### Non-Mycelium RAM history
+
+Each host's `external_memory` status field (also returned by host maintenance
+status) contains `24h` and `7d` summaries: `p50_gb`, `p95_gb`, exact observed
+`max_gb`, queue-clock `peak_at`, sample count, occupied bucket count and first/last
+bucket times. `myce status` prints these beside the host's current allowance.
+No samples means unknown, never zero external use. Old workers without
+`memory_observation` do not contribute. History survives queue restart.
+
+The worker adds a current observation to its existing heartbeat on macOS and
+Linux. Host used RAM is physical RAM minus reclaimable RAM, undoing the worker's
+admission reserve. Raw reclaimable RAM is retained before the admission clamp,
+including pressure below that reserve. Current worker and descendant RSS (including native jobs and
+model processes) is subtracted; invalid observations are skipped. Custom sources lacking raw
+RAM evidence cannot contribute while reserve-clamped.
+Reservations and attempt high-water marks are never subtracted. This is a
+sampled estimate: RSS may count shared pages more than once and miss compressed
+pages, reparented processes, or short spikes. Docker daemon children and other
+Mycelium processes outside the worker tree remain in the residual, conservatively
+reducing suggested budgets. Device-only GPU RAM is not host RAM.
+
+Storage is bounded to 673 fifteen-minute bucket slots per host. Each bucket has
+a fixed 64-bin logarithmic histogram, stored sparsely, plus exact maximum and its
+time. Percentiles weight heartbeat samples and use bin upper edges (up to 20%
+rounding, minimum positive bin 0.125 GiB), capped at the exact maximum. The
+boundary bucket is included, so a window can include up to fifteen extra minutes.
+Offline gaps have no invented samples. These are observations, not proof of a
+future peak or a complete week: inspect counts and first/last bucket times.
+
+### Suggesting a host allowance
+
+```sh
+myce host budget HOST --dry-run
+myce host budget HOST --dry-run --headroom-gb 4 --queue-overhead-gb 2
+```
+
+This uses a read-only GET and prints JSON; it never applies a budget, drains a
+host, or changes admission. A fresh worker observation and nonempty seven-day
+history are required. The suggested GiB allowance is:
+
+```
+max(0, physical RAM - seven-day external max - headroom - extra queue reserve)
+```
+
+It rounds down to 0.25 GiB. Headroom is the greater of `--headroom-gb` (default
+4 GiB for interactive use/new workloads) and 25% of the external maximum (the
+existing guard against external growth). This deliberate reserve costs admitted
+capacity to leave room for unsampled or future external peaks. Max, rather than
+p99, preserves observed bursts. No suggested value changes the configured budget.
+
+A queue already running on the host is included in the residual: its overhead
+is already subtracted once. `--queue-overhead-gb` defaults to zero and is an
+**additional** planning reserve for a future queue relocation or growth not
+represented by the observations; for example, 2 GiB is an explicit planning
+assumption, not a measured queue peak. Set that reserve when sizing for a queue
+that will run on the host. Inspect coverage and workload comparability before
+using a suggestion to change policy through the separate explicit budget command.
+
+Opted-in asynchronous NAS results expose a `delivery` object on job/status
+receipts independently of compute `state`. `state` is `pending`, `publishing`,
+`failed` or `verified`; it includes accepted `id`/`attempt`, `machine`, `session`,
+`destination_id`, `manifest_sha256`, `bytes`, `pending_at`, `last_attempt_at`,
+`last_progress_at`, `next_attempt_at`, `attempts`, `verified_at` and a sanitized `cause` as applicable.
+`myce status` prints delivery state/bytes/age/attempts even for succeeded jobs.
+`publishing` with a stall cause still owns its outstanding call; it is not a
+signal to start a second publisher. Returned errors show failed and a retry time.
+Only verified with the matching execution is a NAS receipt. `output_refs` is
+available at compute completion. `pending_output_refs` is an unaccepted upload
+reservation, never a successful result. File-store `reserved_output_bytes`
+reports missing async output reservations; `free_bytes` excludes those bytes.
+See [delivery policy](guide-files-v3.md#complete-from-queue-storage-deliver-to-nas-later-349).

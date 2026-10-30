@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -41,6 +42,7 @@ func (r *workerRetry) succeeded(now time.Time, interval time.Duration) {
 }
 
 type workerState struct {
+	Preparation      string     `json:"preparation_custody,omitempty"` // Attempt-local copy of an unconfirmed builder receipt.
 	CustodyID        string     `json:"custody_id,omitempty"`
 	IsolationWarning *Execution `json:"isolation_warning,omitempty"`
 	// Written with cleared custody only after the queue confirms terminal,
@@ -54,6 +56,7 @@ type workerState struct {
 	StopGrace       time.Duration          `json:"stop_grace,omitempty"`
 	UserCancel      bool                   `json:"user_cancel,omitempty"`
 	StopAt          *time.Time             `json:"stop_at,omitempty"`
+	SidecarStopAt   *time.Time             `json:"sidecar_stop_at,omitempty"`
 	Schema          int                    `json:"schema_version"`
 	OperatorStopped bool                   `json:"operator_stopped,omitempty"`
 	Groups          map[int]map[int]string `json:"groups,omitempty"`
@@ -73,7 +76,8 @@ type workerState struct {
 	Log             string                 `json:"log,omitempty"`
 }
 type workerStore struct {
-	sharedRelease         func() // Idempotent; retained until exact process cleanup.
+	inputStaging          *atomic.Bool // Shared by all attempt stores; bounds detached ordinary staging.
+	sharedRelease         func()       // Idempotent; retained until exact process cleanup.
 	deviceFaults          checkpointIO[KernelLogSnapshot]
 	stateName             string
 	environmentLogs       checkpointIO[bool]
@@ -145,7 +149,7 @@ func (w Worker) openStore() (*workerStore, error) {
 		lock.Close()
 		return nil, fmt.Errorf("worker state already in use: %w", err)
 	}
-	s := &workerStore{dir: dir, lock: lock}
+	s := &workerStore{dir: dir, lock: lock, inputStaging: new(atomic.Bool)}
 	s.nasProbe.timeout = heartbeatFilesystemBudget
 	s.nasProgress.timeout = heartbeatFilesystemBudget
 	s.nasPrepare.timeout = checkpointPreparationBudget
@@ -374,12 +378,22 @@ func waitWorkerGroup(group int, clock Clock) error {
 		<-wake.C
 	}
 }
-func (s *workerStore) cleanupOrphan(clock Clock, memoryFiles ...memoryFS) (cleanupErr error) {
+func (s *workerStore) cleanupOrphan(clock Clock, memoryFiles ...memoryFS) error {
+	return s.cleanupOrphanCustody(clock, false, memoryFiles...)
+}
+
+// A preparation helper has an explicit outstanding release obligation. Unlike
+// an unrelated reused PID in ordinary orphan discovery, a live unidentifiable
+// helper group cannot be treated as proof of exit.
+func (s *workerStore) cleanupOrphanCustody(clock Clock, requireHelperExit bool, memoryFiles ...memoryFS) (cleanupErr error) {
 	defer func() {
 		if cleanupErr == nil {
 			s.releaseSharedInputs()
 		}
 	}()
+	if s.state.Preparation != "" {
+		return s.cleanupPreparation(clock)
+	}
 	var stopIntent *workerState
 	if s.state.Job != nil && s.state.Identity != "" {
 		data, err := os.ReadFile(filepath.Join(s.dir, s.state.Identity+".stop.json"))
@@ -423,9 +437,19 @@ func (s *workerStore) cleanupOrphan(clock Clock, memoryFiles ...memoryFS) (clean
 				if stopIntent != nil {
 					st.StopAt, st.UserCancel = stopIntent.StopAt, stopIntent.UserCancel
 				}
-				if !s.state.Job.Spec.Needs.cpuOnly() && !st.UserCancel {
-					if err := gracefulRecoveredGroups(&st, clock, func() error { return saveWorkerJSON(s.dir, "attempt-"+s.state.Identity+".json", st) }, memoryFiles...); err != nil {
-						return err
+				if !s.state.Job.Spec.Needs.cpuOnly() {
+					if st.UserCancel {
+						if err := s.drainCancelledNativeMain(&st, clock, memoryFiles...); err != nil {
+							return err
+						}
+					}
+					// Only native cancellation establishes a separate sidecar phase.
+					// An ordinary command's delivered cancel must not gain another
+					// TERM or wait, even when shared inputs gave it group custody.
+					if !st.UserCancel || st.SidecarStopAt != nil {
+						if err := gracefulRecoveredGroups(&st, clock, func() error { return saveWorkerJSON(s.dir, "attempt-"+s.state.Identity+".json", st) }, memoryFiles...); err != nil {
+							return err
+						}
 					}
 				}
 				return cleanupAttemptGroups(st, clock, memoryFiles...)
@@ -481,6 +505,9 @@ func (s *workerStore) cleanupOrphan(clock Clock, memoryFiles ...memoryFS) (clean
 		} else if !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
+	}
+	if requireHelperExit && !owned && len(members) > 0 {
+		return errors.New("helper process group identity unconfirmed; release pending")
 	}
 	if !owned && memory == nil {
 		return nil
@@ -853,6 +880,10 @@ func gracefulRecoveredGroups(st *workerState, clock Clock, persist func() error,
 		if err := persist(); err != nil {
 			return err
 		}
+	}
+	// TERM is idempotent. A crash after deadline persistence but before signal
+	// dispatch must not let cancellation recovery skip helper TERM entirely.
+	if first || st.UserCancel {
 		groups := map[int]bool{}
 		for group := range st.Groups {
 			groups[group] = true

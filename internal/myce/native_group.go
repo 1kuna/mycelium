@@ -121,6 +121,11 @@ func (g *nativeGroup) saveLocked() error {
 // helpers; non-user accelerator stops terminate all members together.
 func (g *nativeGroup) stopLocked(now time.Time, grace time.Duration, kill bool) {
 	p := g.p
+	// Cancellation has two phases. Once main is gone, repeated queue force
+	// directives must not shorten the sidecars' separately persisted grace.
+	if p.userCancel && !p.job.Spec.Needs.cpuOnly() && g.custody.SidecarStopAt != nil {
+		return
+	}
 	firstDelivery := !p.stopped || p.stopAt == nil
 	if !p.stopped && !p.killed && g.memberFailure() != nil {
 		g.stageFailure = true
@@ -138,14 +143,25 @@ func (g *nativeGroup) stopLocked(now time.Time, grace time.Duration, kill bool) 
 				g.signalLocked(nil, syscall.SIGTERM)
 				p.stopped = true
 			} else {
-				g.signalLocked(nil, syscall.SIGKILL)
-				p.killed = true
+				if !p.job.Spec.Needs.cpuOnly() {
+					g.signalLocked(g.main, syscall.SIGTERM)
+					p.stopped = true
+				} else {
+					g.signalLocked(nil, syscall.SIGKILL)
+					p.killed = true
+				}
 			}
 		}
 	}
 	if kill {
 		if !p.killed {
-			g.signalLocked(nil, syscall.SIGKILL)
+			if p.userCancel && !p.job.Spec.Needs.cpuOnly() {
+				if g.main != nil {
+					g.signalLocked(g.main, syscall.SIGKILL)
+				}
+			} else {
+				g.signalLocked(nil, syscall.SIGKILL)
+			}
 			p.killed = true
 		}
 		return
@@ -331,9 +347,18 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 		priorityStop := p.priorityStop
 		p.mu.Unlock()
 		groupErr := g.cleanupProcesses(writer, false)
+		p.mu.Lock()
+		forced = forced || p.killed
+		p.mu.Unlock()
 		peak := finishMemory()
 		oom := g.memoryFailure()
-		cleanup := errors.Join(groupErr, memory.cleanup(w.Clock), g.save())
+		// A failed graceful drain retains custody. Do not bypass it through
+		// memory.cleanup's unconditional cgroup.kill on the error path.
+		cleanup := groupErr
+		if groupErr == nil {
+			cleanup = memory.cleanup(w.Clock)
+		}
+		cleanup = errors.Join(cleanup, g.save())
 		if cleanup == nil {
 			s.releaseSharedInputs()
 		}
@@ -538,6 +563,16 @@ func (g *nativeGroup) cleanupProcesses(writer *os.File, retry bool) error {
 	} else if graceful {
 		g.p.stop(g.worker.Clock.Now(), acceleratorStopGrace(g.worker.AcceleratorStopGrace), false)
 		g.p.waitStopGrace(g.worker.Clock, g.supervisor.Process.Pid, g.supervisor.Process.Pid)
+	}
+	// Cancellation may arrive while the normal completion path starts its
+	// group stop. Recheck after that wait, which cancellation can end early.
+	g.p.mu.Lock()
+	cancelGPU := !g.p.job.Spec.Needs.cpuOnly() && g.p.userCancel
+	g.p.mu.Unlock()
+	if cancelGPU {
+		if err := g.drainCancelledSidecars(); err != nil {
+			return err
+		}
 	}
 
 	// If only the anchor remains, let EOF end it without signaling an exited payload.
@@ -1105,4 +1140,182 @@ func (s *workerStore) recoverNativeCause(machine string, fs memoryFS) error {
 		return nil
 	}
 	return nil
+}
+
+// Cancellation keeps helpers available while main drains. Only after main's
+// exit do surviving helpers receive TERM and their own full accelerator grace.
+func (g *nativeGroup) drainCancelledSidecars() error {
+	g.p.stop(g.worker.Clock.Now(), acceleratorStopGrace(g.worker.AcceleratorStopGrace), false)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		g.p.mu.Lock()
+		mainDone := g.main == nil || g.main.Exit != nil
+		g.p.mu.Unlock()
+		if mainDone {
+			break
+		}
+		g.p.enforceGrace(g.worker.Clock.Now())
+		<-tick.C
+	}
+	g.p.mu.Lock()
+	if g.custody.SidecarStopAt == nil {
+		deadline := g.worker.Clock.Now().Add(acceleratorStopGrace(g.worker.AcceleratorStopGrace))
+		g.custody.SidecarStopAt = &deadline
+	}
+	deadline := *g.custody.SidecarStopAt
+	err := g.saveLocked()
+	if err == nil {
+		g.signalLocked(nil, syscall.SIGTERM)
+	}
+	g.p.mu.Unlock()
+	if err != nil {
+		return err
+	}
+	if err := g.memory.termOutsideGroups(map[int]bool{g.supervisor.Process.Pid: true}); err != nil {
+		return err
+	}
+	for {
+		members, err := workerGroupMembers(g.supervisor.Process.Pid)
+		populated, populationErr := g.memory.outsideGroups(map[int]bool{g.supervisor.Process.Pid: true}, false)
+		if err != nil || populationErr != nil {
+			return errors.Join(err, populationErr)
+		}
+		if !populated && (len(members) == 0 || len(members) == 1 && members[0] == g.supervisor.Process.Pid) {
+			return nil
+		}
+		if !g.worker.Clock.Now().Before(deadline) {
+			g.p.mu.Lock()
+			g.signalLocked(nil, syscall.SIGKILL)
+			g.p.killed = true
+			g.p.mu.Unlock()
+			return nil // The existing subtree cleanup must still prove whole-group exit.
+		}
+		<-tick.C
+	}
+}
+
+// Recovery resumes cancellation's two phases without renewing a saved helper
+// deadline. Authenticate main's birth and cgroup before touching it; ordinary
+// whole-group recovery authenticates the remaining custody before helper TERM.
+func (s *workerStore) drainCancelledNativeMain(st *workerState, clock Clock, memoryFiles ...memoryFS) error {
+	data, err := os.ReadFile(filepath.Join(s.dir, "native-"+st.Identity+".json"))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var record struct {
+		Identity string
+		Members  []nativeMember
+	}
+	if err := json.Unmarshal(data, &record); err != nil {
+		return err
+	}
+	if record.Identity != st.Identity {
+		return errors.New("mismatched native cancellation custody")
+	}
+	// A per-command memory cap also uses native custody, without sidecars.
+	// It does not authorize a second cancellation phase.
+	if !slices.ContainsFunc(record.Members, func(m nativeMember) bool { return m.Name != "main" && m.PID > 0 }) {
+		return nil
+	}
+	persist := func() error { return saveWorkerJSON(s.dir, "attempt-"+st.Identity+".json", st) }
+	if st.SidecarStopAt == nil {
+		if st.StopAt == nil {
+			deadline := clock.Now().Add(acceleratorStopGrace(st.StopGrace))
+			st.StopAt = &deadline
+			if err := persist(); err != nil {
+				return err
+			}
+		}
+		for _, main := range record.Members {
+			if main.Name != "main" || main.PID <= 0 {
+				continue
+			}
+			var memory *memoryAttempt
+			if main.Cgroup != "" {
+				if st.Cgroup == "" || main.Cgroup != filepath.Join(st.Cgroup, "main") {
+					return errors.New("mismatched native main cgroup custody")
+				}
+				if _, err := os.Stat(main.Cgroup); err == nil {
+					var fs memoryFS = osMemoryFS{}
+					if len(memoryFiles) > 0 {
+						fs = memoryFiles[0]
+					}
+					memory = &memoryAttempt{fs: fs, path: main.Cgroup}
+				} else if !errors.Is(err, os.ErrNotExist) {
+					return err
+				}
+			}
+			alive := func() (bool, error) {
+				birth, err := processBirth(main.PID)
+				if errors.Is(err, os.ErrNotExist) {
+					return false, nil
+				}
+				if err != nil {
+					return false, err
+				}
+				if birth != main.Birth || main.Birth == "" {
+					return false, nil
+				}
+				out, err := processPS("-p", strconv.Itoa(main.PID), "-o", "stat=")
+				var exited *exec.ExitError
+				if errors.As(err, &exited) && exited.ExitCode() == 1 {
+					return false, nil
+				}
+				if err != nil {
+					return false, err
+				}
+				return strings.TrimSpace(string(out)) != "" && !strings.HasPrefix(strings.TrimSpace(string(out)), "Z"), nil
+			}
+			signal := func(sig syscall.Signal) error {
+				live, err := alive()
+				if err != nil {
+					return err
+				}
+				if live {
+					if err := syscall.Kill(main.PID, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
+						return err
+					}
+				}
+				return nil
+			}
+			if err := signal(syscall.SIGTERM); err != nil {
+				return err
+			}
+			if err := memory.termOutsideGroups(map[int]bool{}); err != nil {
+				return err
+			}
+			tick := time.NewTicker(10 * time.Millisecond)
+			defer tick.Stop()
+			for {
+				live, err := alive()
+				populated, populationErr := memory.populated()
+				if err != nil || populationErr != nil {
+					return errors.Join(err, populationErr)
+				}
+				if !live && !populated {
+					break
+				}
+				if !clock.Now().Before(*st.StopAt) {
+					if err := signal(syscall.SIGKILL); err != nil {
+						return err
+					}
+					if err := memory.stop(clock); err != nil {
+						return err
+					}
+				}
+				<-tick.C
+			}
+		}
+		deadline := clock.Now().Add(acceleratorStopGrace(st.StopGrace))
+		st.SidecarStopAt = &deadline
+		if err := persist(); err != nil {
+			return err
+		}
+	}
+	st.StopAt = st.SidecarStopAt
+	return persist()
 }

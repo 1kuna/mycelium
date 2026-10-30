@@ -182,11 +182,24 @@ type contextReader struct {
 	reader io.Reader
 }
 
+// Optional byte progress lets staging use its injected clock without imposing
+// an aggregate deadline on a transfer that is still making progress.
+type ioProgressKey struct{}
+
 func (r contextReader) Read(p []byte) (int, error) {
 	if e := r.ctx.Err(); e != nil {
 		return 0, e
 	}
-	return r.reader.Read(p)
+	n, err := r.reader.Read(p)
+	if n > 0 {
+		if progress, ok := r.ctx.Value(ioProgressKey{}).(func()); ok {
+			progress()
+		}
+	}
+	if e := r.ctx.Err(); e != nil {
+		return n, e
+	}
+	return n, err
 }
 func verifyModelContext(ctx context.Context, path string, m Model) error {
 	if len(m.Files) > 0 {

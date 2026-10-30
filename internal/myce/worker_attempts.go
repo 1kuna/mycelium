@@ -32,6 +32,7 @@ type attemptSupervisor struct {
 	wake        chan struct{}
 	done        chan struct{}
 	recovering  *process
+	preparing   context.CancelFunc // Stops preparation, never abandons a started process.
 
 	admissionBlocked bool
 }
@@ -62,6 +63,9 @@ func (a *attemptSupervisor) update(w Worker, d AttemptDirective, connected, admi
 	a.mu.Lock()
 	a.worker, a.directive, a.connected = w, d, connected
 	a.admissionBlocked = admissionBlocked
+	if d.Stop && a.preparing != nil {
+		a.preparing()
+	}
 	a.mu.Unlock()
 	select {
 	case a.wake <- struct{}{}:
@@ -75,6 +79,16 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 	a.mu.Unlock()
 	defer initial.control.remove(a.job)
 	s := a.store
+	// A short observation retry must not cancel the operation it will consume.
+	// Stop cancels this attempt context directly, including between start retries.
+	prepareCtx, cancelPreparation := context.WithCancel(ctx)
+	defer cancelPreparation()
+	a.mu.Lock()
+	a.preparing = cancelPreparation
+	if a.directive.Stop {
+		cancelPreparation()
+	}
+	a.mu.Unlock()
 	p := a.recovering
 	defer func() {
 		if p != nil {
@@ -138,7 +152,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		// A failed inventory/cleanup keeps custody, but must not freeze the
 		// finished actor until a worker restart. Reuse recovery's exact process
 		// identity checks; only confirmed cleanup can clear pending release.
-		if p == nil && s.state.Result != nil && s.state.Result.ReleasePending && !a.job.Spec.Run.Docker {
+		if p == nil && s.state.Result != nil && s.state.Result.ReleasePending && (!a.job.Spec.Run.Docker || s.state.Preparation != "") {
 			var fs memoryFS = osMemoryFS{}
 			if w.memoryCeilings != nil {
 				fs = w.memoryCeilings.fs
@@ -165,13 +179,20 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				if d.Stop {
 					cause := s.startFailure(a.job, launchRefused, errors.New("assignment withdrawn before command started"))
 					r := startFailureOutcome(Result{Machine: w.Machine.ID, Session: a.job.Session, Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}, Error: cause.Error()}, cause)
+					r = withStopProvenance(r, d.PriorityStop)
 					s.state.Result = &r
 				} else if !d.Hold && !admissionBlocked {
 					bound, err := w.forAttempt(a.job)
 					if err == nil {
-						p, err = bound.startContext(ctx, s, a.job)
+						p, err = bound.startContext(prepareCtx, s, a.job)
 					} else {
 						err = s.startFailure(a.job, launchRefused, err)
+					}
+					a.mu.Lock()
+					d = a.directive
+					a.mu.Unlock()
+					if p == nil && d.Stop && !errors.Is(err, errWorkerReleasePending) {
+						err = s.startFailure(a.job, launchRefused, errors.New("assignment withdrawn before command started"))
 					}
 					if errors.Is(err, errWorkerMemory) {
 						// RAM may disappear after assignment or during preparation.
@@ -180,6 +201,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					}
 					if err != nil && !errors.Is(err, errWorkerCheckpoint) && !errors.Is(err, errWorkerUnavailable) {
 						r := startFailureOutcome(Result{Machine: w.Machine.ID, Session: a.job.Session, Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}, Error: err.Error(), ExtensionUnavailable: errors.Is(err, errExtensionUnavailable), ReleasePending: errors.Is(err, errWorkerReleasePending)}, err)
+						r = withStopProvenance(r, d.PriorityStop)
 						s.state.Result = &r
 					}
 				}
@@ -197,6 +219,23 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			}
 		}
 		report := AttemptReport{Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}, Session: a.job.Session, Started: p != nil && (p.docker == nil || p.docker.status() == "running") && (p.native == nil || p.native.started())}
+
+		if report.Started {
+			var memory *memoryAttempt
+			switch {
+			case p.native != nil:
+				memory = p.native.memory
+			case p.docker != nil:
+				memory = p.docker.envelope()
+			case s.state.Cgroup != "":
+				var fs memoryFS = osMemoryFS{}
+				if w.memoryCeilings != nil {
+					fs = w.memoryCeilings.fs
+				}
+				memory = &memoryAttempt{fs: fs, path: s.state.Cgroup}
+			}
+			report.CurrentHostMemory = memory.currentHostMemory(w.Clock)
+		}
 		if s.state.Job != nil {
 			report.InputsStagedAt = s.state.Job.InputsStagedAt
 			if s.state.Result != nil {
@@ -225,7 +264,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		if connected && !d.Hold {
 			var err error
 			if d.Stop && d.Kill {
-				if s.state.Result != nil && !a.job.Spec.Run.Docker {
+				if s.state.Result != nil && (!a.job.Spec.Run.Docker || s.state.Preparation != "") {
 					released := *s.state.Result
 					released.ReleaseOnly = !released.ReleasePending
 					err = w.Client.Call(ctx, "POST", "/api/workers/complete", released, nil)
@@ -303,13 +342,20 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 						return
 					}
 				}
-				s.state.Job, s.state.Result = nil, nil
+				preparation := s.state.Preparation
+				s.state.Job, s.state.Result, s.state.Preparation = nil, nil, ""
 				// This branch requires confirmed release and queue acknowledgement.
 				// Failed launches may still carry intent or a previously reaped PID.
 				s.state.PID, s.state.LaunchPending = 0, false
 				if e := s.save(); e != nil {
 					finish(e)
 					return
+				}
+				if preparation != "" {
+					if e := os.Remove(filepath.Join(s.dir, preparation)); e != nil && !errors.Is(e, os.ErrNotExist) {
+						finish(e)
+						return
+					}
 				}
 				finish(nil)
 				return
@@ -464,7 +510,7 @@ func (s *workerStore) attemptStores() ([]*workerStore, error) {
 }
 
 func newAttemptStore(root *workerStore, j Job) (*workerStore, error) {
-	s := &workerStore{dir: root.dir, stateName: "state-attempt-" + ID() + ".json", state: workerState{Session: j.Session, Job: &j, CheckpointRoot: root.state.CheckpointRoot, Identity: ID()}}
+	s := &workerStore{inputStaging: root.inputStaging, dir: root.dir, stateName: "state-attempt-" + ID() + ".json", state: workerState{Session: j.Session, Job: &j, CheckpointRoot: root.state.CheckpointRoot, Identity: ID()}}
 	// Docker identity denotes durable Docker custody, not mere assignment.
 	// Refusals before startDocker must not request container recovery (#166).
 	if j.Spec.Run.Docker {
@@ -478,9 +524,12 @@ func newAttemptStore(root *workerStore, j Job) (*workerStore, error) {
 func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport) error {
 	cores, why := cpuCapacity(&w.Machine)
 	usedCores, usedRAM := next.Spec.Needs.cores(), localJobHostNeed(w, next)
+	growth := usedRAM
 	for _, j := range jobs {
 		usedCores += j.Spec.Needs.cores()
-		usedRAM += localJobHostNeed(w, j)
+		need := localJobHostNeed(w, j)
+		usedRAM += need
+		growth += remainingHostGrowth(need, w.hostMemorySamples[jobKey(j)], w.Clock.Now())
 		if !next.Spec.Needs.cpuOnly() && slices.Contains(j.AllocatedDevices, firstDevice(next, w.Machine)) {
 			return fmt.Errorf("%w: device already has a batch attempt", errWorkerMemory)
 		}
@@ -493,7 +542,9 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport)
 			usedCores++
 			for _, m := range w.ModelConfig.Models {
 				if m.Name == r.Name {
-					usedRAM += hostNeed(allocationMachine(&w.Machine, []string{r.Device}), m.MemoryGB, m.HostMemoryGB)
+					need := hostNeed(allocationMachine(&w.Machine, []string{r.Device}), m.MemoryGB, m.HostMemoryGB)
+					usedRAM += need
+					growth += need
 				}
 			}
 		}
@@ -522,7 +573,19 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport)
 	if why != "" || usedCores > cores || w.Machine.HostMemoryBudgetGB > 0 && usedRAM > w.Machine.HostMemoryBudgetGB {
 		return fmt.Errorf("%w: aggregate CPU/RAM allowance", errWorkerMemory)
 	}
-	return w.checkHostRAM(next.Spec.Needs.MemoryGB, next.Spec.Needs.HostMemoryGB)
+	if err := w.checkHostMemoryBudget(next.Spec.Needs.MemoryGB, next.Spec.Needs.HostMemoryGB); err != nil {
+		return err
+	}
+	if next.Spec.Needs.HostMemoryGB > 0 {
+		if w.HostMemorySource == nil {
+			return fmt.Errorf("%w: host RAM source unavailable", errWorkerMemory)
+		}
+		free, err := w.HostMemorySource(context.Background())
+		if err != nil || !validMemoryValue(free) || free < growth {
+			return fmt.Errorf("%w: host RAM growth need %g GiB, available %g GiB", errWorkerMemory, growth, free)
+		}
+	}
+	return nil
 }
 func localJobHostNeed(w Worker, j Job) float64 {
 	m := w.Machine
@@ -656,6 +719,11 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				retry = workerRetry{}
 				continue
 			}
+
+			if report.CurrentHostMemory != nil {
+				sample := *report.CurrentHostMemory
+				report.CurrentHostMemory = &sample
+			}
 			reports = append(reports, report)
 			diagnostics.CheckpointUnavailable = diagnostics.CheckpointUnavailable || status.CheckpointUnavailable
 			if status.FileTransferError != "" {
@@ -686,6 +754,11 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 		}
 		if retry.ready(now) {
 			m := cloneMachine(&w.Machine)
+			if w.sharedInputs != nil {
+				m.CachedSharedInputs = w.sharedInputs.readyKeys()
+				evidence := w.sharedInputs.evidence()
+				m.SharedInputEvidence = &evidence
+			}
 			release := CurrentRelease()
 			m.Release = &release
 			m.Fleet = w.fleet.observe(ctx, m, !recovering && !leaving)
@@ -768,12 +841,13 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 					}
 				}
 			}
-			hostFree, err := w.HostMemorySource(ctx)
+			hostFree, rawAvailable, err := w.sampleHostMemory(ctx)
 			m.HostAvailableMemoryGB = hostFree
 			if err != nil || !validMemoryValue(hostFree) {
 				m.HostAvailableMemoryGB = 0
 				m.HostMemoryError = "host RAM probe failed"
 			}
+			m.MemoryObservation = w.hostMemoryObservation(ctx, m, rawAvailable, err)
 			checkpointRoot := root.state.CheckpointRoot
 			available, _ := root.nasProbe.runProgress(checkpointRoot, func(progress func()) (bool, error) {
 				err := workerCheckpointAvailable(checkpointRoot, progress)
@@ -814,7 +888,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				m.ModelURL = rt.url
 			}
 			m.ModelConfigHash = modelConfigHash(w.ModelConfig)
-			m.Capabilities = append(slices.DeleteFunc(slices.Clone(w.Machine.Capabilities), func(c string) bool { return c == "docker" || c == "docker_envelope" }), "logs_none", "shared_inputs_v1")
+			m.Capabilities = append(slices.DeleteFunc(slices.Clone(w.Machine.Capabilities), func(c string) bool { return c == "docker" || c == "docker_envelope" }), "logs_none", "shared_inputs_v1", "extension_shared_inputs_v1")
 			m.Capabilities = slices.DeleteFunc(m.Capabilities, func(c string) bool {
 				return c == "native_network" || c == "native_sidecars" || c == "native_network_partial" || strings.HasPrefix(c, "native_isolation_")
 			})
@@ -848,6 +922,14 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			rt.memoryMachine, rt.session = w.Machine, w.Machine.Session
 			rt.batchJobs = slices.Clone(jobs)
 			rt.mu.Unlock()
+
+			// Age the actor snapshot at send time, including any intervening probes.
+			for i := range reports {
+				if sample := reports[i].CurrentHostMemory; sample != nil {
+					sample.AgeSeconds = w.Clock.Now().Sub(sample.sampledAt).Seconds()
+				}
+			}
+			w.hostMemorySamples = currentHostMemorySamples(reports, w.Clock.Now())
 			reply, err := w.checkin(ctx, Checkin{Machine: m, Attempts: reports, Recovering: recovering, Fresh: fresh, PreviousSession: root.state.PreviousSession, ModelReports: modelReports})
 			if err == nil {
 				if receiptErr := saveEnrollmentReceipt(root.dir, m); receiptErr != nil {

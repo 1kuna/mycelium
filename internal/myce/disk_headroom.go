@@ -62,8 +62,11 @@ func projectedDiskNeed(j *Job) uint64 {
 	input, output := diskInputOutput(j)
 	return addDiskBytes(addDiskBytes(input, output), diskInputCacheBytes(j))
 }
-func diskVolumeNeed(j *Job, v DiskVolume) (uint64, bool) {
+func diskVolumeNeed(j *Job, v DiskVolume, machines ...*Machine) (uint64, bool) {
 	input, output := diskInputOutput(j)
+	if j.Spec.OutputDelivery == asyncNAS {
+		output = addDiskBytes(output, output) // Work files plus immutable unaccepted spool.
+	}
 	var need uint64
 	relevant := false
 	for _, root := range v.Roots {
@@ -75,6 +78,17 @@ func diskVolumeNeed(j *Job, v DiskVolume) (uint64, bool) {
 			cache := diskInputCacheBytes(j)
 			relevant = relevant || cache > 0 || len(j.Spec.SharedInputs) > 0
 			need = addDiskBytes(need, cache)
+			for _, input := range j.Spec.SharedInputs {
+				if len(machines) > 0 && machines[0] != nil && slices.Contains(machines[0].CachedSharedInputs, input.key()) {
+					continue
+				}
+				if input.bytes() > 0 {
+					need = addDiskBytes(need, uint64(input.bytes()))
+				}
+				if input.Archive != "" && input.SizeBytes > 0 {
+					need = addDiskBytes(need, uint64(input.SizeBytes))
+				}
+			}
 		case "checkpoint":
 			if j.Spec.Resumable || j.ResumeFiles != nil || j.Spec.Disk != nil && j.Spec.Disk.CheckpointBytes > 0 {
 				relevant = true
@@ -112,11 +126,14 @@ func diskVolumeReason(m *Machine, v DiskVolume, need uint64) string {
 	return ""
 }
 func diskHeadroomReason(j *Job, m *Machine) string {
+	if j.OutputAdmissionPending {
+		return outputRetryHold
+	}
 	if m == nil {
 		return ""
 	}
 	for _, v := range m.DiskVolumes {
-		if need, relevant := diskVolumeNeed(j, v); relevant {
+		if need, relevant := diskVolumeNeed(j, v, m); relevant {
 			if reason := diskVolumeReason(m, v, need); reason != "" {
 				return reason
 			}
@@ -151,11 +168,14 @@ func (q *Queue) currentDiskVolume(v DiskVolume, receivedAt time.Time) DiskVolume
 	return v
 }
 func (q *Queue) diskHeadroomReason(j *Job, m *Machine) string {
+	if j.OutputAdmissionPending {
+		return outputRetryHold
+	}
 	if m == nil {
 		return ""
 	}
 	for _, v := range m.DiskVolumes {
-		need, relevant := diskVolumeNeed(j, v)
+		need, relevant := diskVolumeNeed(j, v, m)
 		if !relevant {
 			continue
 		}
@@ -242,6 +262,9 @@ func (q *Queue) diskCapacityRefusal(j *Job) string {
 	return strings.Join(slices.Compact(reasons), "; ")
 }
 func (q *Queue) diskWaitingReason(j *Job, host string) string {
+	if j.OutputAdmissionPending {
+		return outputRetryHold
+	}
 	if !q.hasDiskReports(host) {
 		return ""
 	}

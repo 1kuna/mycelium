@@ -2068,6 +2068,14 @@ Use that available room, less existing per-attempt slack, as the envelope.
 Lower-priority work remains reclaimable through the existing release planner;
 release acknowledgement still precedes admission. Accepted exploratory peaks
 become measurements. Status shows the source, envelope and enforcement mode.
+Memory learning is independent of throughput occupancy comparability (#369):
+clean, attempt-specific single-piece serial fan-out children teach the ordinary
+recipe's memory class, including piece arguments, while their throughput stays
+unknown. Operator resource allowances and power mode remain throughput fences,
+but do not identify memory need. Existing allowance-stale memory evidence is
+revalidated through the normal curve-recovery path; hardware, backend,
+environment, recipe and reference changes still invalidate it. No stored key
+rewrite or database edit is needed.
 Input-size/duration scaling per recipe is a follow-up slice, not part of this
 amendment.
 Reservations are frozen per attempt; stale, failed, OOM, constrained and resumed
@@ -2844,3 +2852,29 @@ of existing registrations. No payload execution, registration or placement occur
 on an advice read. All file hydration, hashing and lock analysis happens outside
 `q.mu`. See [portability](portability.md) for interfaces and evidence limits.
 Registration warnings and scarce-host yield remain separate implementation work.
+
+## Opt-in durable asynchronous NAS output delivery (#349; 2026-10-29)
+
+Tasks may explicitly select `output_delivery: async_nas` with declared outputs
+and a positive `disk.output_bytes` estimate. Existing tasks retain their result
+semantics. The queue's `--output-delivery-root` selects the NAS destination
+independently of checkpoint mode; SQLite and the queue file store stay on durable
+local storage. This authorizes output delivery only, not local-first checkpoints.
+
+After payload exit, the worker retains an immutable synced local output spool
+until exact durable queue acceptance. Queue admission reserves estimated output
+bytes, exchanges them for the current attempt's exact missing manifest, and
+preserves physical-space/quota backpressure. Queue success atomically records
+verified file-store outputs and a pending delivery. `output_refs` retrieval and
+compute completion never wait for NAS publication. Consumers needing NAS files
+explicitly wait for verified delivery and the accepted execution identity.
+
+One queue-owned background publisher stages complete immutable job/attempt
+paths, verifies bytes and an identity/policy/manifest receipt, syncs and renames.
+A pending NAS syscall retains its slot. Returned failures retry durably using the
+injected Clock. Restart/lost-ack replay compares receipts and content; conflicts
+and stale executions cannot claim verified delivery. Pending/failed delivery pins
+blobs beyond ordinary expiry, and status exposes state, bytes, age, attempts and
+cause. Verified delivery preserves ordinary retrieval retention; no early deletion,
+rollback, new storage service or publisher election is introduced. Details and
+supported forms: [file guide](guide-files-v3.md#complete-from-queue-storage-deliver-to-nas-later-349).

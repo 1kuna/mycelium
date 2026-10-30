@@ -30,7 +30,7 @@ func (q *Queue) pruneJobHistory(requestContexts ...context.Context) error {
 				j.FinishedAt = &ended
 				continue
 			}
-			if mutableJob(j) || hasJobFiles(j) && (!j.FilesExpired || j.FileReclamation == nil) || !q.records.logs.scheduled[id].IsZero() {
+			if deliveryPending(j) || mutableJob(j) || hasJobFiles(j) && (!j.FilesExpired || j.FileReclamation == nil) || !q.records.logs.scheduled[id].IsZero() {
 				continue
 			}
 			if j.FileReclamation != nil {

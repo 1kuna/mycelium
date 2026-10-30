@@ -2,6 +2,7 @@ package myce
 
 import (
 	"fmt"
+	"log"
 	"slices"
 	"time"
 )
@@ -73,6 +74,11 @@ func (q *Queue) startWaitingReason(j *Job) string {
 			continue
 		}
 		if j.Machine != "" && j.Machine != m.ID {
+			continue
+		}
+		// A matching platform alone does not qualify an extension or satisfy
+		// its OS/architecture target. Explain only routes dispatch can use.
+		if !executionTargetMatches(j.Spec, m) || len(extensionJobs(j, m, true)) == 0 {
 			continue
 		}
 		host := hostID(m)
@@ -147,6 +153,9 @@ func (q *Queue) maintainStartDeadlines() {
 		if outcome.Attempt > 0 && outcome.Machine != "" && expired(j.Spec.StartBy, now) {
 			q.alertAttemptLoss(j, outcome, true)
 		}
+		// Public receipts deliberately redact internal placement detail. Keep
+		// one queue-local diagnostic even when no attempt was ever assigned.
+		log.Printf("event=production_start_failed job=%s attempt=%d reason=%q", j.ID, j.Attempt, j.Reason)
 		q.recordAttemptOutcome(j, outcome)
 	}
 }

@@ -20,6 +20,14 @@ type SharedInput struct {
 	Manifest      FileManifest `json:"manifest,omitempty" yaml:"manifest,omitempty"`
 }
 
+// SharedInputEvidence counts successful cache acquisitions during this worker
+// process. NASDeclaredBytes sums declared source sizes for completed cold NAS stages; it is not network traffic.
+type SharedInputEvidence struct {
+	Hits             uint64 `json:"hits"`
+	Misses           uint64 `json:"misses"`
+	NASDeclaredBytes uint64 `json:"nas_declared_bytes"`
+}
+
 func (s SharedInput) ref() FileRef { return FileRef{s.SHA256, s.SizeBytes} }
 func (s SharedInput) key() string {
 	// Source locations are not identity: identical bytes share across NAS aliases.
@@ -96,7 +104,7 @@ func validateSharedInputs(s Spec) error {
 	if len(s.SharedInputs) == 0 {
 		return nil
 	}
-	if s.Run.Docker || s.Run.Workdir != "" || s.extensionJob() {
+	if s.Run.Docker || s.Run.Workdir != "" {
 		return errors.New("shared inputs require plain native commands in an isolated work folder")
 	}
 	for n, input := range s.SharedInputs {
@@ -115,6 +123,9 @@ func validateSharedInputs(s Spec) error {
 	return nil
 }
 func (w Worker) acquireSharedInputs(ctx context.Context, j Job) (map[string]string, func(), error) {
+	if j.Spec.Run.Docker && len(j.Spec.SharedInputs) > 0 {
+		return nil, nil, errors.New("shared inputs require native execution")
+	}
 	env := map[string]string{}
 	releases := []func(){}
 	release := func() {
@@ -142,5 +153,5 @@ func (w Worker) acquireSharedInputs(ctx context.Context, j Job) (map[string]stri
 func (s Spec) StoredInputFiles() FileManifest { return submissionFiles(s) }
 
 func sharedInputsFit(s Spec, m *Machine) bool {
-	return len(s.SharedInputs) == 0 || m != nil && contains(m.Capabilities, "shared_inputs_v1")
+	return len(s.SharedInputs) == 0 || m != nil && contains(m.Capabilities, "shared_inputs_v1") && (!s.extensionJob() || contains(m.Capabilities, "extension_shared_inputs_v1"))
 }
