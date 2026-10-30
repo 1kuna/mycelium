@@ -26,6 +26,16 @@ func productionStartWindow(s Spec) time.Duration {
 // Keep the durable original length separate from the advancing recovery cutoff.
 // An absolute caller deadline always wins over a relative declaration.
 func initializeStartDeadline(j *Job, since time.Time) {
+	if j.Spec.ExtensionCheck != nil && j.Spec.ExtensionCheck.Timeout != "" {
+		// Reuse the startup fence without promoting qualification to production.
+		// One hour bounds unavailable-capacity/preparation waits at the existing
+		// maximum start window, independently of the execution budget.
+		if j.Spec.StartBy == nil {
+			deadline := since.Add(MaxProductionStartWindow)
+			j.Spec.StartBy = &deadline
+		}
+		return
+	}
 	if j.Spec.Priority != "production" {
 		return
 	}
@@ -117,10 +127,15 @@ func (q *Queue) maintainStartDeadlines() {
 		pending := q.startupPending(j)
 		firstWave := j.Spec.FanOut != nil && j.FanOut != nil && j.FanOut.Next == 0
 		disabled := (pending || firstWave) && j.Spec.Priority == "production" && j.Spec.StartBy != nil && !cancelled(j) && dependencyReady(j) && j.State == "queued" && j.Attempt == 0 && q.allStartHostsDisabled(j)
-		if !pending && !disabled {
+		executionExpired := false
+		if check := j.Spec.ExtensionCheck; check != nil && check.Timeout != "" && j.StartedAt != nil && !terminal(j.State) && !cancelled(j) {
+			timeout, _ := time.ParseDuration(check.Timeout) // validated at submission
+			executionExpired = !now.Before(j.StartedAt.Add(timeout))
+		}
+		if !pending && !disabled && !executionExpired {
 			continue
 		}
-		if !expired(j.Spec.StartBy, now) && !disabled {
+		if !expired(j.Spec.StartBy, now) && !disabled && !executionExpired {
 			continue
 		}
 		reason := q.startWaitingReason(j)
@@ -143,6 +158,12 @@ func (q *Queue) maintainStartDeadlines() {
 		}
 		j.State = "failed"
 		j.Reason = "production start deadline exceeded: " + reason
+		if j.Spec.ExtensionCheck != nil {
+			j.Reason = "never started: " + reason
+			if executionExpired {
+				j.Reason = "check execution timeout exceeded"
+			}
+		}
 		if disabled && (!pending || !expired(j.Spec.StartBy, now)) {
 			j.Reason = "production cannot start: no eligible host is enabled; " + reason
 		}
@@ -150,12 +171,16 @@ func (q *Queue) maintainStartDeadlines() {
 		for i := range j.Copies {
 			j.Copies[i].Recoverable = false
 		}
-		if outcome.Attempt > 0 && outcome.Machine != "" && expired(j.Spec.StartBy, now) {
+		if !executionExpired && outcome.Attempt > 0 && outcome.Machine != "" && expired(j.Spec.StartBy, now) {
 			q.alertAttemptLoss(j, outcome, true)
 		}
 		// Public receipts deliberately redact internal placement detail. Keep
 		// one queue-local diagnostic even when no attempt was ever assigned.
-		log.Printf("event=production_start_failed job=%s attempt=%d reason=%q", j.ID, j.Attempt, j.Reason)
+		event := "production_start_failed"
+		if j.Spec.ExtensionCheck != nil {
+			event = "extension_check_timeout"
+		}
+		log.Printf("event=%s job=%s attempt=%d reason=%q", event, j.ID, j.Attempt, j.Reason)
 		q.recordAttemptOutcome(j, outcome)
 	}
 }

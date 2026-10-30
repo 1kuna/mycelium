@@ -17,6 +17,8 @@ import (
 type ExtensionCheckRequest struct {
 	Work      string `json:"work" yaml:"work"`
 	Directory string `json:"directory" yaml:"directory"`
+	// Timeout bounds execution from queue-recorded Started, excluding admission.
+	Timeout string `json:"timeout,omitempty" yaml:"timeout,omitempty"`
 	// Automatic binds a worker-requested check to its prepared native identity.
 	// Manual checks keep their existing request and report contract.
 	Automatic *ExtensionReport `json:"automatic,omitempty" yaml:"automatic,omitempty"`
@@ -24,7 +26,14 @@ type ExtensionCheckRequest struct {
 
 // CheckExtension checks a frozen local variant on this host. Host is the local
 // worker's configured physical-host identity, not a remote execution request.
-func CheckExtension(ctx context.Context, root string, e Extension, platform, device, host string, log io.Writer, cache *EnvironmentCache, c Client) (reports []ExtensionReport, err error) {
+func CheckExtension(ctx context.Context, root string, e Extension, platform, device, host string, log io.Writer, cache *EnvironmentCache, c Client, executionTimeout ...time.Duration) (reports []ExtensionReport, err error) {
+	timeout := 10 * time.Minute
+	if len(executionTimeout) > 0 {
+		timeout = executionTimeout[0]
+	}
+	if timeout <= 0 {
+		return nil, errors.New("check timeout must be positive")
+	}
 	root, err = filepath.Abs(root)
 	if err != nil {
 		return nil, err
@@ -142,7 +151,9 @@ func CheckExtension(ctx context.Context, root string, e Extension, platform, dev
 			fmt.Fprintln(commandLog, err)
 			for i := range reports {
 				reports[i].Qualified = false
-				reports[i].Reason = "check failed; command log: " + commandLog.Name()
+				if !strings.HasPrefix(reports[i].Reason, "never started: ") {
+					reports[i].Reason = "check failed; command log: " + commandLog.Name()
+				}
 			}
 		}
 		err = errors.Join(err, writeExtensionReports(root, e, platform, reports))
@@ -167,13 +178,19 @@ func CheckExtension(ctx context.Context, root string, e Extension, platform, dev
 		// occupancy and production holds still queue through normal admission.
 		job, e2 := c.SubmitAndWait(ctx, Spec{Name: "extension-check", Project: "extension-check", SubmissionKey: r.CheckID, RequireTarget: true,
 			Extension: extensionKey(e), ExtensionDigest: e.Digest, AllowedMachines: []string{m.ID},
-			Needs: selection, ExtensionCheck: &ExtensionCheckRequest{Work: r.Work, Directory: scratch}})
+			Needs: selection, ExtensionCheck: &ExtensionCheckRequest{Work: r.Work, Directory: scratch, Timeout: timeout.String()}})
 		// Fence the exact check key and confirm cleanup, even when a terminal
 		// result reports a failure with release still pending.
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		cleanupErr := waitExtensionCheckRelease(cleanupCtx, c, r.CheckID)
 		cancel()
+		if job != nil && job.StartedAt == nil && strings.HasPrefix(job.Reason, "never started: ") {
+			r.Reason = job.Reason
+		}
 		if e2 != nil || cleanupErr != nil {
+			if strings.HasPrefix(r.Reason, "never started: ") {
+				return reports, errors.Join(errors.New(r.Reason), e2, cleanupErr)
+			}
 			return reports, errors.Join(e2, cleanupErr)
 		}
 		var chunks []LogChunk
@@ -183,6 +200,9 @@ func CheckExtension(ctx context.Context, root string, e Extension, platform, dev
 			}
 		}
 		if job.State != "succeeded" {
+			if strings.HasPrefix(r.Reason, "never started: ") {
+				return reports, errors.New(r.Reason)
+			}
 			if hasBaseline {
 				if actual, readErr := readExtensionCheckOutput(scratch); readErr == nil {
 					if mismatch := compareExtensionOutput(actual, e.Files[b.Output], b); mismatch != nil {

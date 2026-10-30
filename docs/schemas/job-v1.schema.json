@@ -866,6 +866,9 @@
         "directory": {
           "type": "string"
         },
+        "timeout": {
+          "type": "string"
+        },
         "work": {
           "type": "string"
         }

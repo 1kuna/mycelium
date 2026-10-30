@@ -241,6 +241,12 @@ func (s Spec) Validate() error {
 	if s.Priority != "" && legacyRank(s.Priority) == 3 {
 		return reject("job_priority_invalid", errors.New("priority must be production, deadline or experiment"))
 	}
+	if s.ExtensionCheck != nil && s.ExtensionCheck.Timeout != "" {
+		timeout, err := time.ParseDuration(s.ExtensionCheck.Timeout)
+		if err != nil || timeout <= 0 {
+			return reject("job_deadline_invalid", errors.New("extension check timeout must be a positive duration"))
+		}
+	}
 	if s.StartBy != nil && s.Priority != "production" {
 		return reject("job_deadline_invalid", errors.New("start_by is only supported for production"))
 	}

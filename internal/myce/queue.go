@@ -730,6 +730,9 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 				initializeStartDeadline(j, j.Queued)
 			}
 		}
+		if s.ExtensionCheck != nil && s.ExtensionCheck.Timeout != "" {
+			initializeStartDeadline(j, j.Queued)
+		}
 		if submitted.Needs.Memory == "auto" {
 			// Capture only submitter hints, before recipe defaults can mask an
 			// undeclared first run. A non-nil empty hint explicitly means none.
