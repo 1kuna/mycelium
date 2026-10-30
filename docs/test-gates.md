@@ -134,8 +134,7 @@ with `python3 scripts/test-gate-budget.py`.
 
 ## Automatic main full gates
 
-Before merging, **check main's latest status before merging** and fix a red main
-forward. Read the SHA and both contexts, not the overall combined state (which
+**Check main's latest status before merging** and fix a red main forward. Read the SHA and both contexts, not the overall combined state (which
 can include unrelated checks):
 
 ```sh
@@ -188,7 +187,7 @@ history rewrite stops discovery for explicit operator reconciliation.
 
 - One quiet Linux fleet user service using the provided
   [`deploy/myce-main-ci.service`](../deploy/myce-main-ci.service) template,
-  a dedicated non-shallow repository clone, Python 3, Git, `gh`, an installed
+  a dedicated non-shallow repository clone, Python 3.11+, Git, `gh`, an installed
   `myce` CLI and private persistent state. This is an observer/submitter; it
   does not run tests directly. The clone retains Git history for catch-up.
 - One fine-grained GitHub credential restricted to this repository, with
