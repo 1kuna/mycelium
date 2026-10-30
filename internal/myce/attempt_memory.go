@@ -41,7 +41,8 @@ func (a *memoryAttempt) peak() *AttemptMemoryPeak {
 				// can overlap anon/shmem; double counting is safer than omitting
 				// locked file pages. Dirty/writeback pages need I/O before reclaim;
 				// sum them conservatively even where the counters overlap.
-				// This is not a driver pin counter; GPU sizing keeps total peaks.
+				// This is not a driver pin counter; GPU reduction also needs
+				// complete independent xe host-object/whole-host evidence.
 				nonreclaimable := gb + (float64(unevictable)+float64(dirty)+float64(writeback))/(1<<30)
 				p.nonreclaimableSampleGB = &nonreclaimable
 			}
@@ -276,22 +277,58 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 		return func() *AttemptMemoryPeak { return nil }
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	clock := w.Clock
+	if clock == nil {
+		clock = RealClock{}
+	}
 	peak := a.peak()
-	completeNonreclaimable := peak != nil && peak.nonreclaimableSampleGB != nil
 	var mu sync.Mutex
-	var samplers sync.WaitGroup
-	hostSampled := false // Read only after joining the host sampler.
 	record := func(sample *AttemptMemoryPeak) {
 		mu.Lock()
 		peak = sampledMemoryPeak(peak, sample)
 		mu.Unlock()
 	}
+	completeNonreclaimable := peak != nil && peak.nonreclaimableSampleGB != nil
+	// The empty-cgroup baseline precedes payload launch, including for plain
+	// commands whose observer is installed just after exec. No baseline means
+	// diagnostic counters only, never permission to shrink a GPU envelope.
+	gpuHost := w.Machine.GPU == "xpu" && !w.Machine.UnifiedMemory && w.selectedDevice != nil && w.selectedDevice.pciAddress != "" && !j.Spec.Needs.cpuOnly()
+	completeGPUHost := gpuHost && a.hostBaseline != nil
+	var hostDropGB, outsideGB float64
+	sampleHost := func(component *AttemptMemoryPeak) {
+		if !completeGPUHost {
+			return
+		}
+		if component == nil || component.nonreclaimableSampleGB == nil {
+			completeGPUHost = false
+			return
+		}
+		host, err := readGPUHostState(a.fs)
+		if err != nil {
+			completeGPUHost = false
+			return
+		}
+		if host.swap > a.hostBaseline.swap || host.oom > a.hostBaseline.oom || host.swapOut > a.hostBaseline.swapOut {
+			record(&AttemptMemoryPeak{Constrained: true})
+		}
+		hostDropGB = max(hostDropGB, a.hostBaseline.available-host.available)
+		// Host and component reads stay together; DRM I/O never runs on this
+		// sampler. Its independently retained driver floor is added at finish.
+		outsideGB = max(outsideGB, a.hostBaseline.available-host.available-*component.nonreclaimableSampleGB)
+	}
+	sampleHost(peak)
+	var driver <-chan gpuHostCollection
+	if completeGPUHost {
+		driver = a.collectGPUHost(ctx, clock, w.selectedDevice.pciAddress)
+	}
+	var samplers sync.WaitGroup
+	hostSampled := false // Read only after joining the host sampler.
 	samplers.Add(1)
 	go func() {
 		defer samplers.Done()
 		// Resident memory can spike and disappear before process exit. Keep
 		// cheap cgroup reads independent of the slower driver probe cadence.
-		hostTick := time.NewTicker(200 * time.Millisecond)
+		hostTick := time.NewTicker(attemptMemorySamplePeriod)
 		defer hostTick.Stop()
 		for {
 			select {
@@ -302,13 +339,19 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 				completeNonreclaimable = completeNonreclaimable && sample != nil && sample.nonreclaimableSampleGB != nil
 				hostSampled = hostSampled || sample != nil && sample.HostGB != nil
 				record(sample)
+				sampleHost(sample)
 			}
 		}
 	}()
+	var device <-chan *AttemptMemoryPeak
 	if estimateFeedingAttempt(j) && !j.Spec.Needs.cpuOnly() && (w.Machine.GPU == "cuda" || w.Machine.GPU == "xpu") {
-		samplers.Add(1)
+		result := make(chan *AttemptMemoryPeak, 1)
+		device = result
 		go func() {
-			defer samplers.Done()
+			// Device fdinfo can block in the same driver as host collection.
+			// Own the result locally so a late read cannot change published facts.
+			var devicePeak *AttemptMemoryPeak
+			defer func() { result <- devicePeak }()
 			deviceTick := time.NewTicker(5 * time.Second)
 			defer deviceTick.Stop()
 			for {
@@ -320,14 +363,14 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 					if a.processIDs(ids) != nil || len(ids) == 0 {
 						continue
 					}
-					gb, err := w.attemptDeviceMemory(ctx, ids)
+					gb, err := w.attemptDeviceMemory(ctx, ids, a.fs)
 					if err != nil {
 						if !errors.Is(err, errAttemptMemoryPending) {
 							return
 						}
 						continue
 					}
-					record(&AttemptMemoryPeak{DeviceGB: &gb})
+					devicePeak = sampledMemoryPeak(devicePeak, &AttemptMemoryPeak{DeviceGB: &gb})
 				}
 			}
 		}()
@@ -336,11 +379,38 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 	return func() *AttemptMemoryPeak {
 		once.Do(func() {
 			cancel()
+			wait, stopWaiting := context.WithTimeout(context.Background(), attemptMemorySamplePeriod)
+			defer stopWaiting()
 			samplers.Wait()
 			final := a.peak()
 			record(final)
-			if j.Spec.Needs.cpuOnly() && peak != nil && hostSampled && completeNonreclaimable && final != nil && final.nonreclaimableSampleGB != nil {
+			sampleHost(final)
+			if device != nil {
+				select {
+				case devicePeak := <-device:
+					record(devicePeak)
+				case <-wait.Done():
+					completeGPUHost = false
+				}
+			}
+			var collected gpuHostCollection
+			if driver != nil {
+				// Proc/debugfs reads cannot be cancelled once inside the kernel.
+				// A buffered result owns no peak state, so cleanup need not wait
+				// indefinitely and a late return cannot mutate published facts.
+				select {
+				case collected = <-driver:
+				case <-wait.Done():
+				}
+			}
+			age := clock.Now().Sub(collected.last)
+			completeGPUHost = completeGPUHost && collected.complete && collected.seen && age >= 0 && age <= 2*attemptMemorySamplePeriod
+			if (j.Spec.Needs.cpuOnly() || completeGPUHost) && peak != nil && hostSampled && completeNonreclaimable && final != nil && final.nonreclaimableSampleGB != nil {
 				peak.NonreclaimableGB = peak.nonreclaimableSampleGB
+				if gpuHost {
+					outsideGB = max(outsideGB, collected.driverGB)
+					peak.GPUHost = &GPUHostMemory{DriverGB: &collected.driverGB, HostDropGB: &hostDropGB, OutsideGB: &outsideGB}
+				}
 			}
 			// Counter-only read zeros are diagnostic facts, not a new
 			// incomplete resident measurement that invalidates learning.
@@ -357,7 +427,7 @@ var (
 	errAttemptMemoryUnsupported = errors.New("attempt GPU memory accounting unsupported")
 )
 
-func (w Worker) attemptDeviceMemory(ctx context.Context, ids map[int]bool) (float64, error) {
+func (w Worker) attemptDeviceMemory(ctx context.Context, ids map[int]bool, fs memoryFS) (float64, error) {
 	if w.Machine.GPU == "cuda" {
 		selector := w.Machine.Device
 		if w.selectedDevice != nil {
@@ -381,12 +451,12 @@ func (w Worker) attemptDeviceMemory(ctx context.Context, ids map[int]bool) (floa
 	if w.Machine.GPU == "xpu" && w.selectedDevice != nil && w.selectedDevice.pciAddress != "" {
 		clients := map[string]float64{}
 		for pid := range ids {
-			entries, err := os.ReadDir(filepath.Join("/proc", strconv.Itoa(pid), "fdinfo"))
+			entries, err := fs.ReadDir(filepath.Join("/proc", strconv.Itoa(pid), "fdinfo"))
 			if err != nil {
 				continue
 			}
 			for _, entry := range entries {
-				b, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "fdinfo", entry.Name()))
+				b, err := fs.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "fdinfo", entry.Name()))
 				if err != nil {
 					continue
 				}

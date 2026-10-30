@@ -2070,8 +2070,17 @@ the existing snapshot drift floor (at least 128 MiB). Two attempts establish a
 range, not confidence in an unseen tail; retain the existing 25% allowance for
 unobserved growth between 200 ms samples. Keep all comparable resident peaks as
 a floor. Missing/incomplete local observations keep total-peak sizing. GPU work
-also keeps the larger resident/total peak times 1.25 until driver host-memory
-accounting is qualified. Without local history, use the same recipe/work/
+uses the same conservative total-peak fallback unless discrete Linux xe/XPU
+attempts also retain complete per-client driver system/GTT allocations,
+independent runtime xe debugfs GTT-manager usage, and whole-host
+MemAvailable-drop evidence from before payload launch. For that case, use the
+non-reclaimable peak plus the peak of max(driver allocations, whole-host
+drop minus synchronized current components, zero), also floored by whole-host
+drop. Retain all resident/driver floors, then the same range/25%/launch-drift
+margin. Two complete
+attempts per contributing local observation remain necessary. This is an
+observed envelope; native pressure-free concurrency and output parity require
+separate proof. Without local history, use the same recipe/work/
 shape from another machine: prefer the same
 OS/architecture/accelerator/memory-layout family, times 1.25 × 1.5; otherwise
 times 1.25 × 2. Label both as a cross-machine estimate. Next use an optional
@@ -2119,11 +2128,28 @@ anon + kernel + shmem + unevictable + file_dirty + file_writeback as a
 conservative non-reclaimable peak for CPU work. All six counters must be present.
 Retain all kernel/shmem memory and conservatively double-count overlapping
 locked/dirty/writeback pages rather than omit pages requiring I/O before reclaim.
-Clean file cache is excluded only for CPU work. The unevictable LRU counter is
+Clean file cache is excluded only with the complete local evidence above.
+The unevictable LRU counter is
 not a DMA pin counter: XPU pinned host buffers, shared USM CPU storage, CUDA
 registered/mapped host memory and driver allocations are not bounded by VRAM
-measurements. GPU work retains total-peak sizing; no reduced GPU envelope or
-GPU concurrency acceptance is claimed. Missing counters, older workers, macOS
+measurements. Discrete xe/XPU attempts additionally retain all DRM system/GTT
+host-object allocations, deliberately double-counting any overlap with cgroup
+charges. Add absolute xe debugfs GTT-manager use on every participating card,
+conservatively double-counting its overlap with client GTT objects. This runtime
+source is required: missing, unreadable or malformed manager counters invalidate
+GPU completeness. No privilege escalation or permission change is attempted.
+Retain a whole-host availability-drop floor from an empty-cgroup baseline;
+unrelated RAM release can mask that net delta, so it never replaces absolute
+driver accounting. Missing DRM client identity invalidates the entire attempt.
+Keep resident/component/host-pressure sampling independent of driver I/O. One
+driver collection has a 200 ms coverage window, matching resident cadence; a gap
+or final age beyond two periods rejects completeness. Attempt completion waits
+at most one period for a cancelled collector; late results cannot change its
+published peak. This bounds observation latency, never job execution time.
+Every host/driver sample must succeed; existing nonzero host swap is allowed,
+but swap growth, swap-out or host OOM invalidates the attempt's learning.
+Other GPU work retains total-peak sizing. Native GPU concurrency acceptance is
+separate from estimator implementation. Missing counters, older workers, macOS
 RSS evidence and cross-machine transfers retain conservative sizing. This
 refinement of #303/#399 does not relax pressure rejection. Device peaks remain separate, with the existing
 conservative host-plus-device accounting on unified devices.

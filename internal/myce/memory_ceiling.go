@@ -36,9 +36,10 @@ type memoryCeilings struct {
 	pageSize int // Zero uses the host kernel page size.
 }
 type memoryAttempt struct {
-	fs    memoryFS
-	path  string
-	bytes int64
+	fs           memoryFS
+	path         string
+	bytes        int64
+	hostBaseline *gpuHostState // Captured while the attempt cgroup is still empty.
 }
 
 var ErrMemoryCeilingsRequired = errors.New("required memory ceilings unavailable")
@@ -179,6 +180,7 @@ func (c *memoryCeilings) create(id string, bytes, swap int64) (*memoryAttempt, e
 		return nil, err
 	}
 	a := &memoryAttempt{fs: c.fs, path: filepath.Join(c.root, id), bytes: bytes}
+	a.hostBaseline, _ = readGPUHostState(c.fs)
 	if err := c.fs.Mkdir(a.path); err != nil {
 		return nil, err
 	}
