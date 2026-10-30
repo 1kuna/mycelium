@@ -223,14 +223,18 @@ func (q *Queue) componentExcluded(m *Machine, platform, identity string) bool {
 		return true
 	}
 	for _, p := range q.s.ComponentExclusions {
-		if !p.Active || p.wholeHost() || p.Host != "" && p.Host != hostID(m) {
-			continue
-		}
-		if p.Kind == "gpu" || p.Platform != "" && p.Platform == platform || slices.Contains(p.Devices, ExclusionDevice{Platform: platform, Identity: identity}) {
+		if p.Active && !p.wholeHost() && p.matchesComponent(hostID(m), platform, identity) {
 			return true
 		}
 	}
 	return false
+}
+
+func (p ComponentExclusion) matchesComponent(host, platform, identity string) bool {
+	if p.Host != "" && p.Host != host {
+		return false
+	}
+	return p.wholeHost() || platform != "cpu" && (p.Kind == "gpu" || p.Platform != "" && p.Platform == platform || slices.Contains(p.Devices, ExclusionDevice{Platform: platform, Identity: identity}))
 }
 
 func (a API) registerComponentExclusions(mux *requestMux) {

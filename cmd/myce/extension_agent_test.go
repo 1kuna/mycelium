@@ -135,7 +135,19 @@ func TestExtensionAgentDevEndToEnd(t *testing.T) {
 	}
 	run("extension", "check", "--static", folder)
 	run("extension", "add", "--root", extensionRoot, folder)
-	run("extension", "check", "--root", extensionRoot, "http-stage@1")
+	run("extension", "check", "--reserve", "--owner", "dev-agent", "--reason", "runtime qualification", "--root", extensionRoot, "http-stage@1")
+	var reservations []myce.Reservation
+	if err := (myce.Client{URL: queue, Token: token}).Call(ctx, "GET", "/api/reservations", nil, &reservations); err != nil {
+		t.Fatal(err)
+	}
+	if len(reservations) == 0 {
+		t.Fatal("--reserve check did not acquire a reservation")
+	}
+	for _, r := range reservations {
+		if r.State != "released" || r.Owner != "dev-agent" || r.Reason != "runtime qualification" || r.CleanupPending {
+			t.Fatal("--reserve did not release after check cleanup", r)
+		}
+	}
 	python, err := exec.LookPath("python3.11")
 	if err != nil {
 		python, err = exec.LookPath("python3")

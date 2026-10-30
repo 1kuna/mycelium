@@ -41,12 +41,14 @@ func automaticExtensionCheckID(machine string, r ExtensionReport) string {
 // Device admission is separate: disabling cannot cancel an existing Started
 // check while its useful demand and prepared identity still exist.
 func (q *Queue) extensionQualificationDemand(e Extension, m *Machine) bool {
+	// A new admission reservation cannot revoke useful demand and cancel a
+	// check that already Started. New check offers/submissions gate separately.
 	for _, j := range q.liveJobs() {
 		if j.State != "queued" || j.Spec.ExtensionCheck != nil || j.Spec.Resumable && !e.Resumable {
 			continue
 		}
 		for _, candidate := range extensionJobs(j, m, false) {
-			if q.diskHeadroomReason(candidate, m) != "" || !q.placementPolicyAllowed(candidate, m, false) || !deviceAllowed(candidate, m) {
+			if q.diskHeadroomReason(candidate, m) != "" || !q.placementPolicyWithoutReservation(candidate, m, false) || !deviceAllowed(candidate, m) {
 				continue
 			}
 			for _, selected := range candidate.Extensions {
@@ -60,7 +62,7 @@ func (q *Queue) extensionQualificationDemand(e Extension, m *Machine) bool {
 }
 
 func (q *Queue) extensionQualificationPlan(m *Machine) []ExtensionQualificationPlan {
-	if q.deviceAdmissionBlocked(m) || !q.hostLaunchAllowed(m, m.Session) {
+	if !q.reservationAllows(nil, m) || q.deviceAdmissionBlocked(m) || !q.hostLaunchAllowed(m, m.Session) {
 		return nil
 	}
 	var plans []ExtensionQualificationPlan
@@ -115,7 +117,7 @@ func (q *Queue) validateAutomaticExtensionCheck(s Spec, extensions []Extension) 
 		return ErrStale
 	}
 	for _, m := range q.machineTargets(owner) {
-		if q.deviceAdmissionBlocked(m) || !matchingExtensionReport(e, m, r) || !q.hostLaunchAllowed(m, m.Session) || !q.extensionQualificationDemand(e, m) {
+		if !q.reservationAllows(nil, m) || q.deviceAdmissionBlocked(m) || !matchingExtensionReport(e, m, r) || !q.hostLaunchAllowed(m, m.Session) || !q.extensionQualificationDemand(e, m) {
 			continue
 		}
 		view, ok := e.forMachine(m)

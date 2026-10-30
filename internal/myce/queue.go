@@ -64,6 +64,7 @@ type state struct {
 	LastWorkerContact time.Time `json:"last_worker_contact,omitempty"`
 	NetworkRecoveryAt time.Time `json:"network_recovery_at,omitempty"`
 
+	Reservations        map[string]Reservation                  `json:"reservations,omitempty"`
 	ComponentExclusions map[string]ComponentExclusion           `json:"component_exclusions,omitempty"`
 	DeviceMaintenance   map[string]map[string]DeviceMaintenance `json:"device_maintenance,omitempty"`
 
@@ -773,6 +774,11 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 			created := q.clock.Now()
 			q.putSubmission(submissionDigest(s.Project, s.SubmissionKey), &submissionRecord{Kind: submissionBinding, Project: s.Project, Key: s.SubmissionKey, Fingerprint: fingerprint, JobID: id, Created: &created, Job: j})
 		}
+		if check := s.ExtensionCheck; check != nil && check.Reserve != nil {
+			if _, err := q.acquireReservation(ReservationRequest{ReservationOptions: *check.Reserve, Job: j.ID}); err != nil {
+				return err
+			}
+		}
 		q.maintain()
 		out = cloneJob(j)
 		return nil
@@ -878,6 +884,7 @@ func (q *Queue) maintain() {
 	q.maintainFileExpiry()
 	q.maintainHostMaintenance()
 	q.maintainDeviceMaintenance()
+	q.maintainReservations()
 	q.maintainExtensionQualifications()
 	q.maintainSubmissions()
 	now := q.clock.Now()
@@ -969,6 +976,7 @@ func (q *Queue) maintain() {
 	q.maintainFanOut()
 	q.maintainPieceDependencies()
 	q.maintainModels()
+	q.maintainReservations()
 	q.escalateDockerCleanup()
 	q.refreshHostMemory()
 	q.maintainHolds()
@@ -1859,6 +1867,7 @@ func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
 		out.WorkCurves = append(out.WorkCurves, q.s.WorkObservations[key])
 	}
 	out.ComponentExclusions = q.componentExclusions()
+	out.Reservations = q.reservations()
 	out.PriorityPolicy = q.priorityPolicyRecord()
 	out.Now = q.clock.Now()
 	order, reasons := q.queueProjection()

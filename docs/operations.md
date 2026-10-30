@@ -42,6 +42,88 @@ for the selected extension digest, target and hardware/driver fingerprint.
 See [extension authoring](write-an-extension.md#install-and-qualify) and the
 [check guidance](extensions/AGENT-GUIDE.md) for preparation and replay criteria.
 
+Add `--reserve` to withhold unrelated new work on the selected physical device
+while the check drains, runs and cleans up:
+
+```sh
+myce extension check --reserve --owner validation-agent --reason 'driver qualification' --gpu xpu --device 0 example@1
+```
+
+The owner defaults to the local OS username; the reason defaults to `extension
+qualification`. Each work-type check acquires its own reservation in the same
+transaction as its keyed job submission. A CPU check reserves the whole host.
+Existing Started work finishes first. Reservations do not promote checks above
+production, grant qualification, bypass independent maintenance or cancel work.
+The queue owns release even if the CLI disconnects. Inspect `myce reserve list`
+after a caller restart; do not clear the hold merely because the caller exited.
+`--max-lifetime` defaults to `2h` and accepts at most `24h`; see below for expiry.
+
+### Reserve a host or its devices for an existing validation job
+
+```sh
+myce reserve add 'host=compute-a;devices=0' --id driver-check --job JOB_ID --owner validation-agent --reason 'driver qualification' --max-lifetime 2h
+myce reserve add 'host=compute-b' --id host-check --job OTHER_JOB_ID --owner validation-agent --reason 'host validation'
+myce reserve list
+myce reserve release driver-check --if-revision 1 --reason 'validation abandoned; inspect retained execution custody separately'
+```
+
+`reserve add` binds one existing single batch job/check before enabling admission
+policy. It resolves the same stable physical identities as `exclude`, accepting
+one host, its explicit devices, `host=HOST;kind=gpu`, or
+`host=HOST;platform=PLATFORM`. The bound job must fit a selected target and is
+then restricted to that target. Unknown jobs, dependencies/fan-outs, incompatible
+targets, overlapping active reservations, and another reservation for the same
+job are rejected. Already queued production takeover demand on that host must
+settle before acquiring a competing reservation, avoiding a self-blocking hold.
+The reservation admits only the bound job through its own fence; all ordinary
+priority, memory, isolation, qualification, maintenance and cleanup gates remain.
+Production work already running is never displaced by a validation reservation.
+
+Acquisition is serialized with placement, launch and Started. Cached unstarted
+offers are withdrawn using planned maintenance cleanup without spending an
+infrastructure retry. Started commands/calls and started preparations continue.
+Device reservations retain sibling-device and CPU capacity. They do not change
+host drains, device maintenance, exclusions, budgets or production-hold policy;
+automatic or conditional release removes only the reservation's own fence.
+
+The authenticated API is `POST /api/reservations` with
+`{id, selector, job, owner, reason, max_lifetime}`, `GET /api/reservations`, and
+`POST /api/reservations/{id}/release` with `{if_revision, reason}`. Keep the
+returned ID, canonical selector and revision. Retrying the same ID and binding
+does not renew or resurrect it; a different binding is stale. The owner is
+attribution under existing operator authority, not another authentication role.
+Runtime checks may include the same options under `extension_check.reserve`
+on `POST /api/jobs`; the job and reservation commit or roll back together.
+
+Queue SQLite persists the binding, stable target, original expiry and release
+receipt. Success, failure and cancellation release it automatically only after
+**every known attempt** and its Started preparations have confirmed physical
+cleanup. A terminal result, elapsed stop grace, missing worker or queue restart
+never proves cleanup. Status
+distinguishes `draining`, `ready`, `in_use`, `waiting_for_release` and `released`,
+and shows `reserved for OWNER: REASON` plus pending work/evidence.
+
+The maximum lifetime is a lost-binding backstop, not a deadline for live work.
+Its cost is retaining reserved capacity beyond the lifetime while a queued,
+preparing or running bound job exists, or any exact cleanup is unconfirmed.
+Status then reports `reserved past max lifetime` with the blocking reason;
+expiry never cancels work or confirms physical release. Only an absent job
+binding with no retained execution custody can expire with the visible release
+reason `maximum lifetime elapsed`. A terminal bound job releases after all
+attempts physically release, whether before or after the lifetime. Independent
+drains and exclusions still apply. Conditional operator
+release has the same admission-only meaning and requires an observed revision
+and reason. Use indefinite `exclude`/host maintenance for an operator-controlled
+hardware hold instead.
+
+Laptop proof uses the real API and command runner with fake inventory. Start
+`myce dev --workers 1 --devices 2` and use its printed queue settings; add a local
+example such as `examples/extensions/http-stage`, then run
+`myce extension check --reserve http-stage@1` and inspect `myce reserve list`.
+No GPU is needed. `TestReservationDev` additionally queues ordinary work on the
+reserved fake device and proves it runs after the bound validation releases;
+`TestExtensionAgentDevEndToEnd` exercises the CLI flag with the real check runner.
+
 ## Change live project policy
 
 `queue --project-config` (and `dev --project-config`) bootstraps project settings
