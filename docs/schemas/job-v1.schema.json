@@ -1569,6 +1569,16 @@
           "$ref": "#/$defs/PriorityMatch",
           "x-contract": "diagnostic"
         },
+        "production_backoff": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ProductionBackoff"
+          },
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
         "production_host": {
           "type": "string",
           "x-contract": "diagnostic"
@@ -2170,6 +2180,22 @@
         "demand",
         "victim",
         "policy"
+      ],
+      "type": "object"
+    },
+    "ProductionBackoff": {
+      "properties": {
+        "last_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "until": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "last_at"
       ],
       "type": "object"
     },
