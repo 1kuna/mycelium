@@ -28,6 +28,11 @@ func (a API) HandlerWithJoiningIdentity(pin string) http.Handler { return a.hand
 
 func (a API) handler(joiningPin string) http.Handler {
 	mux := newRequestMux()
+	// Joining needs authenticated identity/version only, never the growing status
+	// snapshot. Transport pinning authenticates this identity to joining clients.
+	mux.HandleFunc("GET /api/ping", func(w http.ResponseWriter, r *http.Request) {
+		respond(w, map[string]any{"version": 1, "fingerprint": joiningPin}, nil)
+	})
 	mux.HandleFunc("GET /api/portability", func(w http.ResponseWriter, r *http.Request) {
 		report, err := a.Queue.Portability(PortabilityRequest{Extension: r.URL.Query().Get("extension"), Project: r.URL.Query().Get("project")})
 		respondOperation(w, report, err, "portability_invalid")
