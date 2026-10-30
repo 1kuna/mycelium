@@ -461,20 +461,22 @@ func TestExtensionQualificationSmokeFailureClearsPriorSuccess(t *testing.T) {
 	}
 }
 
-// A sibling card uses the conservative family factor even on the same host.
-// Reject its impossible check up front, while retaining normal busy-host waits.
+// Same-host RAM evidence can fit a sibling even when cross-machine transfer
+// would not. Truly impossible checks still reject before entering the queue.
 func TestExtensionCheckSiblingMemoryCapacity(t *testing.T) {
-	for _, peak := range []float64{13.08499526977539, 10} {
+	for _, peak := range []float64{13.08499526977539, 20} {
 		t.Run(fmt.Sprint(peak), func(t *testing.T) {
 			q, _, m, s := floorFreeFitFixture(t, 24)
 			sibling := m.Devices[0]
 			sibling.ID, sibling.Identity = "1", "sibling-card"
+			sibling.ExtensionFingerprint = "sibling-backend-v1"
 			m.Devices = append(m.Devices, sibling)
 			m.HostAvailableMemoryGB = 1
 			machineCheck(t, q, m)
 			for id, p := range q.s.WorkObservations {
 				delete(q.s.WorkObservations, id)
 				p.Key.Component, p.Key.Hardware = "1", "sibling-card"
+				p.Key.Fingerprint = sibling.ExtensionFingerprint
 				p.MemoryPeak.HostGB, p.MemoryPeak.CgroupGB = &peak, &peak
 				q.s.WorkObservations[identityHash(p.Key)] = p
 			}
@@ -487,17 +489,17 @@ func TestExtensionCheckSiblingMemoryCapacity(t *testing.T) {
 			s.Needs = ResourceNeeds{Memory: "auto", GPU: &GPUSelection{Devices: []string{"0"}}}
 			s.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:sample", Directory: t.TempDir()}
 			j, err := q.Submit(s)
-			if peak > 13 {
+			if peak*1.25 > 24 {
 				var refusal *HTTPError
 				if !errors.As(err, &refusal) || refusal.Code != "no_qualified_target" || !strings.Contains(refusal.Message, "exceeds allowance 24 GiB") {
-					t.Fatalf("impossible sibling estimate was not rejected: job=%v err=%v", j.State, err)
+					t.Fatalf("impossible sibling estimate was not rejected: job=%+v err=%v", j, err)
 				}
 				if len(q.s.Jobs) != 0 {
 					t.Fatal("rejected runtime check entered the queue")
 				}
 			} else {
 				if err != nil || j == nil || j.State != "queued" {
-					t.Fatalf("temporary occupancy rejected a fitting check: job=%v err=%v", j.State, err)
+					t.Fatalf("temporary occupancy rejected a fitting check: job=%+v err=%v", j, err)
 				}
 				if got := assignedJob(machineCheck(t, q, m)); got != nil {
 					t.Fatalf("busy-host check bypassed live admission: %+v", got)

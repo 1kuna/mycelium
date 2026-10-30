@@ -2055,8 +2055,13 @@ Approved by the orchestrator under Zach's delegated design authority, 2026-10-24
 Explicit `needs.host_memory_gb` and GPU `needs.memory_gb` retain their current
 admission meanings and defaults, including production. Optional `needs.memory:
 auto` first selects fresh accepted slice-1 whole-attempt peaks for the same
-work, recipe, input shape and machine/component, times 1.25. Without local
-history, use the same recipe/work/shape from another machine: prefer the same
+work, recipe, input shape and machine/component, times 1.25. Host RAM uses the
+largest comparable accepted peak across sibling devices on the same host,
+target and memory layout, also times 1.25, when the environment matches and the
+source device's hardware/backend fingerprint still matches its current inventory
+(including the Linux kernel). Device-memory evidence retains its per-device
+identity and transfer margins. Without local history, use the same recipe/work/
+shape from another machine: prefer the same
 OS/architecture/accelerator/memory-layout family, times 1.25 × 1.5; otherwise
 times 1.25 × 2. Label both as a cross-machine estimate. Next use an optional
 submitter hint; a bootstrap declaration is not required and recipe defaults do
