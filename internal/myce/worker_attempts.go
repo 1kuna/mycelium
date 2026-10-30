@@ -242,6 +242,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				s.state.Result.InputsStagedAt = s.state.Job.InputsStagedAt
 			}
 		}
+		report.ApplicationProgress = readApplicationProgress(s.dir, a.job, w.Clock.Now())
 		diagnostics := Machine{CheckpointUnavailable: s.checkpointUnavailable, FileTransferError: s.fileError}
 		if p != nil && p.docker != nil {
 			diagnostics.DockerCleanup, diagnostics.DockerCause = dockerHeartbeatDiagnostic(p.docker)
@@ -928,6 +929,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 
 			// Age the actor snapshot at send time, including any intervening probes.
 			for i := range reports {
+				reports[i].ApplicationProgress = reports[i].ApplicationProgress.aged(w.Clock.Now())
 				if sample := reports[i].CurrentHostMemory; sample != nil {
 					sample.AgeSeconds = w.Clock.Now().Sub(sample.sampledAt).Seconds()
 				}

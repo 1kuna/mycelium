@@ -575,3 +575,63 @@ means no profile; compare queue policy before interpreting an old worker's row.
 CPU nice=10 is native command priority, not CPU-time enforcement. OS pressure
 and interactive-load preemption remain unimplemented (#390). See
 [shared hosts](shared-hosts.md) for measurement, eligibility and removal semantics.
+
+## Execution elapsed time, remaining estimates, and application progress
+
+Running jobs expose `runtime` in Job GET, status JSON, CLI and the read-only
+page. `elapsed_seconds` starts at the queue's Started acknowledgement, not
+assignment or input staging. It is absent before Started. Queue wait,
+preparation and delivery are separate lifecycle evidence, not predicted phases.
+Accepted-history timing includes result handoff; no separate delivery ETA is
+invented.
+
+For comparable extension work, declare a variant reference, for example
+`references: {"extension:example": {input_shape: small-v1, unit: frames, units: 10}}`,
+with the variant's check and baseline. Submit
+`workload: {input_shape: small-v1, units: 100}` in the same serial mode and unit.
+The existing qualified exact-key work curve supplies the frozen total prediction.
+`runtime.remaining_seconds` subtracts elapsed from that prediction, with
+`source`, `unit`, `samples`, `history_age_seconds`, and a `limitation`.
+It is an approximate runtime estimate, without a statistical confidence bound.
+After the prediction is reached, remaining becomes unknown with reason
+`historical estimate exceeded; remaining time unknown`; zero is never a promise
+of completion. Missing, invalidated, older-than-30-day and noncomparable history
+have explicit `runtime.reason` values. Plain commands still show elapsed time
+and explain their missing workload/reference metadata. These observations do not
+change placement or measurement qualification.
+
+Native commands and extensions can atomically replace the local JSON file named
+by `MYCE_PROGRESS_FILE` (also mounted for managed Docker commands):
+
+```sh
+printf '{"completed":25,"total":100,"unit":"frames"}\n' > "$MYCE_PROGRESS_FILE.tmp"
+mv "$MYCE_PROGRESS_FILE.tmp" "$MYCE_PROGRESS_FILE"
+```
+
+No API address or fleet token is needed. This small file uses the existing
+worker heartbeat and attempt-directory cleanup, so no new service or Python
+client call is needed. Python jobs can use `os.environ["MYCE_PROGRESS_FILE"]`
+with `json.dump` to a sibling temporary file and `os.replace` to publish it;
+Python `Client.get()` and `Client.list()` return the same JSON evidence.
+
+Both counts are required, finite and nonnegative, with `completed <= total`.
+Zero/zero is allowed. Unit is a single generic name of at most 64 characters
+using the extension-name syntax (lowercase letters, digits, `_`, `-`, `.`,
+starting with a letter or digit).
+The worker reads only regular files up to 4096 bytes. Invalid, partial, oversized
+or missing reports retain the last valid report and do not refresh its age.
+File modification age is measured by the worker; queue time since receipt adds
+to it, so worker and queue clocks need not agree. `application_progress` contains
+counts, unit, exact attempt/machine/session, receipt time, age and `stale`.
+More than 30 seconds without a file update marks it stale; this is a display
+threshold and never stops work. Rewrite even unchanged counts to indicate a
+live reporter. Worker restart preserves file age. Queue restart preserves receipt
+age. New attempts clear reports; old attempts/sessions cannot replace them.
+
+Application progress is advisory. It is separate from durable checkpoint
+`job.progress` generations and accepted `fan_out.results`. A report of 100% may
+still be finalizing outputs: it never verifies results, releases custody, proves
+portable recovery, qualifies an extension or contributes throughput history.
+The CPU case of `TestDevStandaloneSmoke` exercises credential-free reporting
+through `myce dev`, observes it in Job/status replies, then completes the command
+through the normal result and release path.

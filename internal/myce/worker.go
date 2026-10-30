@@ -429,6 +429,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	if executionWorkdir != "" {
 		j.Spec.Run.Workdir = executionWorkdir
 	}
+	if err := os.MkdirAll(filepath.Dir(applicationProgressFile(s.dir, j)), 0700); err != nil {
+		return nil, err
+	}
 	ceilingBytes, ceilingErr := w.ceilingBytes(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
 	if ceilingErr != nil {
 		return nil, ceilingErr
@@ -623,6 +626,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	env["MYCE_JOB_ID"] = j.ID
 	env["MYCE_ATTEMPT"] = strconv.Itoa(j.Attempt)
 	env["MYCE_CHECKPOINT_DIR"] = checkpoint
+	env["MYCE_PROGRESS_FILE"] = applicationProgressFile(s.dir, j)
 	if j.Spec.Program != nil {
 		env["MYCE_USAGE_FILE"] = programUsageFile(s.dir, identity)
 	} else {

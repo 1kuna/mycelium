@@ -1937,6 +1937,7 @@ func (q *Queue) projectJob(stored *Job, order map[string]int, reasons map[string
 	copy.Spec.Class = jobClass(copy.Spec)
 	copy.PriorityPolicy = q.priorityMatch(copy.Spec)
 	copy.QueueOrder = order[j.ID]
+	q.projectRuntime(&copy)
 	if terminal(j.State) && j.LastStopOutcome == "release pending" {
 		copy.Reason += "; release pending"
 	}
@@ -2294,6 +2295,7 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 		q.markStarted(j)
 	}
 	j.Progress = report.Progress
+	q.retainApplicationProgress(j, report, m)
 	if j.State == "stopping" {
 		reply.PriorityStop = priorityStop(j)
 		reply.UserCancel = cancelled(j)
@@ -2345,6 +2347,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	j.StartedAt = nil
 	j.InputsStagedAt = nil
 	j.Timing = nil
+	j.ApplicationProgress = nil
 	now := q.clock.Now()
 	j.PriorityPolicy = q.priorityMatch(j.Spec)
 	j.AssignedAt = &now

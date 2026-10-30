@@ -174,6 +174,67 @@ func devStandaloneSmoke(t *testing.T, backend string) {
 	if effect, err := os.ReadFile(marker); err != nil || string(effect) != "done" {
 		t.Fatal("short command effect missing", err)
 	}
+	if backend == "cpu" {
+		spec.Name = "smoke-progress"
+		spec.Outputs = map[string]string{"effect": "results"}
+		input := filepath.Join(root, "progress-input")
+		if err := os.WriteFile(input, []byte("done"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		ref, err := myce.IdentifyFile(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := client.UploadFile(ctx, input, ref); err != nil {
+			t.Fatal(err)
+		}
+		spec.Files = myce.FileManifest{"expected": ref}
+
+		spec.Run.Command = []string{"sh", "-c", `test -z "$MYCE_TOKEN" || exit 99
+printf '{"completed":5,"total":10,"unit":"frames"}' > "$MYCE_PROGRESS_FILE.tmp"
+mv "$MYCE_PROGRESS_FILE.tmp" "$MYCE_PROGRESS_FILE"
+while [ ! -f release ]; do sleep 0.01; done
+cat expected > effect`}
+		if err := client.Call(ctx, "POST", "/api/jobs", spec, &job); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(func() bool {
+			current, err := client.GetJob(ctx, job.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p := current.ApplicationProgress
+			return current.State == "running" && p != nil && p.Completed == 5 && p.Total == 10 && p.Unit == "frames" && !p.Stale && current.Runtime != nil && current.Runtime.ElapsedSeconds != nil
+		})
+		// Status JSON and the job reply expose the same attempt's evidence.
+		waitFor(func() bool {
+			var snapshot myce.Snapshot
+			if err := client.Call(ctx, "GET", "/api/status", nil, &snapshot); err != nil {
+				t.Fatal(err)
+			}
+			for _, current := range snapshot.Jobs {
+				if current.ID == job.ID && current.ApplicationProgress != nil {
+					return current.ApplicationProgress.Attempt == 1 && strings.Contains(myce.JobTiming(current), "reported progress 5/10 frames")
+				}
+			}
+			return false
+		})
+		work := filepath.Join(root, "state", "workers", "fake-1", "job-files", job.ID, "1")
+		if err := os.WriteFile(filepath.Join(work, "release"), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+		waitFor(func() bool {
+			current, err := client.GetJob(ctx, job.ID)
+			return err == nil && current.State == "succeeded" && current.ReleaseConfirmed && len(current.OutputRefs) == 1
+		})
+		download := filepath.Join(root, "progress-result")
+		if err := client.DownloadResult(ctx, job.ID, "effect", download); err != nil {
+			t.Fatal(err)
+		}
+		if effect, err := os.ReadFile(download); err != nil || string(effect) != "done" {
+			t.Fatal("progress job result missing", err)
+		}
+	}
 	var maintenance myce.HostMaintenanceStatus
 	if err := client.Call(ctx, "POST", "/api/hosts/smoke-host/maintenance", myce.HostMaintenanceRequest{Action: "drain"}, &maintenance); err != nil {
 		t.Fatal(err)

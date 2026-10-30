@@ -353,6 +353,9 @@ type Copy struct {
 }
 
 type Job struct {
+	Runtime             *JobRuntime          `json:"runtime,omitempty"`
+	ApplicationProgress *ApplicationProgress `json:"application_progress,omitempty"`
+
 	OutputAdmissionPending bool             `json:"output_admission_pending,omitempty"`
 	PendingOutputRefs      FileManifest     `json:"pending_output_refs,omitempty"`
 	Delivery               *OutputDelivery  `json:"delivery,omitempty"`
@@ -582,6 +585,8 @@ type Reply struct {
 // AttemptReport binds heartbeat, progress and Started to an exact execution.
 // Collections have no wire cardinality limit; admission remains in the planner.
 type AttemptReport struct {
+	ApplicationProgress *ProgressReport `json:"application_progress,omitempty"`
+
 	CurrentHostMemory *CurrentHostMemory `json:"current_host_memory,omitempty"`
 	DockerCause       *RuntimeCause      `json:"docker_cause,omitempty"`
 	Execution
