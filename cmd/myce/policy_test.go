@@ -21,12 +21,24 @@ func TestPolicyCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer q.Close()
+	if err := q.ConfigureHosts(map[string]myce.HostPolicy{"approved-host": {}}); err != nil {
+		t.Fatal(err)
+	}
 	server := httptest.NewServer(myce.API{Queue: q, Token: "owner-test"}.Handler())
 	defer server.Close()
 	t.Setenv("MYCE_QUEUE", server.URL)
 	t.Setenv("MYCE_TOKEN", "owner-test")
 	var out bytes.Buffer
 	if err := policyCommand([]string{"get", "--yaml"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	policy, err := myce.ReadPriorityPolicy(strings.NewReader(out.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.Projects = map[string]myce.ProjectPolicy{"test": {Weight: 1, ProductionParityHosts: map[string][]string{"kind:sample": {"approved-host"}}}}
+	out.Reset()
+	if err := yaml.NewEncoder(&out).Encode(policy); err != nil {
 		t.Fatal(err)
 	}
 	file := filepath.Join(t.TempDir(), "policy.yaml")
@@ -43,7 +55,7 @@ func TestPolicyCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 	var record myce.PriorityPolicyRecord
-	if err := json.Unmarshal(out.Bytes(), &record); err != nil || record.Revision != 1 {
+	if err := json.Unmarshal(out.Bytes(), &record); err != nil || record.Revision != 1 || !reflect.DeepEqual(record.Policy.Projects["test"].ProductionParityHosts, map[string][]string{"kind:sample": {"approved-host"}}) {
 		t.Fatalf("%s %v", out.String(), err)
 	}
 	if err := policyCommand([]string{"set", file, "--if-revision", "0"}, &out); err == nil {

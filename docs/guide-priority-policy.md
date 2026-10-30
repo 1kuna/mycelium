@@ -31,6 +31,44 @@ the same or edited project config does not replace it or advance its revision.
 To deliberately change settings, export the current policy, edit its `projects`
 mapping, and import it with `myce policy set FILE --if-revision N` as below.
 
+`production_parity_hosts` is an optional per-project mapping from exact work
+identifiers to physical host IDs whose outputs the consumer has approved as
+matching its reference for that work (MY-19).
+It defaults to empty. Execution qualification alone does not grant parity.
+For example, after the consumer approves `worker-b` for ASR, add this to the
+project's existing settings in the exported policy, preserving its other settings:
+
+```yaml
+projects:
+  transcribe:
+    weight: 1
+    production_parity_hosts:
+      kind:asr: [worker-b]
+```
+
+Export with `myce policy get --yaml > policy.yaml`, edit the mapping, then run
+`myce policy set policy.yaml --if-revision N`, replacing `N` with the revision
+printed by the export. The same field is supported by `PUT /api/policy`.
+Keys match the job's work identity: `kind:<kind>` for kind jobs,
+`program:<type>` for programs, or `extension:<name>` for extension-only jobs.
+Approval for `kind:asr` never approves separation or another work identity.
+Use exact physical host IDs from status or the configured host policy, rather
+than device worker IDs or globs; unknown hosts are rejected.
+Consumers own the parity criteria and must revisit approval when their work or
+platform changes; this setting does not infer parity from timing or native checks.
+
+This mapping permits **new occupancy spillover** only: a queued production job
+bound by a production hold can move when equal-or-higher production work blocks
+its RAM or device admission and an approved alternative can admit it immediately.
+The alternative must still pass placement, maintenance, freshness, memory,
+environment and exact frozen extension version/digest qualification checks.
+Running work keeps its attempt and host custody. An empty mapping (or no hosts
+for the job's work identity) preserves the existing binding behavior, with the
+RAM/device cause visible in job status.
+Existing Docker/disk recovery retargeting is unchanged and does not consult this
+mapping; its parity semantics require a separate maintainer/consumer decision
+([#400](https://github.com/1kuna/mycelium/issues/400)).
+
 Within each tier, fitting projects take turns by weighted recent usage before
 model/environment warmth. Usage has a 24-hour half-life and separate stable
 `tier/resource-family/project` keys. GPU work uses normalized allocated device
