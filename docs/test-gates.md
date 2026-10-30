@@ -5,7 +5,10 @@ base defaults to `origin/integ/108`; select the commit before your change when
 working elsewhere. Quick builds the CLI and every release target, vets all Go
 packages, and race-tests changed packages with test names from matching file
 prefixes, plus tests that directly reference changed exported symbols (using
-diff hunk function names and changed declarations). Production Go edits in
+diff hunk function names and changed declarations). Changed non-Go files, including
+docs/examples, also select tests with direct quoted paths relative to their Go
+package. Helper-only or computed paths still need explicit focused testing or
+`full`. Production Go edits in
 `internal/myce` always include `TestWireSchemas`, since the reflected Job/Spec
 schema includes nested types across that package. This is a textual heuristic,
 not a dependency analyser. Review the printed selection: shared helpers and

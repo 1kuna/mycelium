@@ -12,6 +12,42 @@ spec.loader.exec_module(related)
 
 
 class RelatedTests(unittest.TestCase):
+    def test_example_only_changes_select_direct_readers(self):
+        previous = os.getcwd()
+        with tempfile.TemporaryDirectory() as directory:
+            os.chdir(directory)
+            try:
+                def git(*args):
+                    subprocess.run(['git', *args], check=True, capture_output=True)
+                root = pathlib.Path('internal/myce')
+                root.mkdir(parents=True)
+                example = pathlib.Path('docs/examples/sim-server-entries.yaml')
+                example.parent.mkdir(parents=True)
+                example.write_text('allowed_machines: [placeholder]\n')
+                (root / 'server_entries_test.go').write_text(
+                    'package p\nfunc TestEntrySimDryExample(t *testing.T) {\n'
+                    '  os.ReadFile("../../docs/examples/sim-server-entries.yaml")\n}\n'
+                    'func TestUnrelatedEntry(t *testing.T) {}\n'
+                    'func TestNewExample(t *testing.T) {\n'
+                    '  os.ReadFile("../../docs/examples/new.yaml")\n}\n')
+                git('init', '-q')
+                git('add', '.')
+                git('-c', 'user.name=Fixture', '-c', 'user.email=fixture-noreply@example.invalid', 'commit', '-qm', 'base')
+                example.write_text('platforms: [cuda]\n')
+                self.assertEqual(related.select('HEAD'), [
+                    ('internal/myce', '^(TestEntrySimDryExample)$')])
+                git('restore', str(example))
+                # New untracked examples need the same coverage as edits.
+                example.with_name('new.yaml').write_text('platforms: [cpu]\n')
+                self.assertEqual(related.select('HEAD'), [
+                    ('internal/myce', '^(TestNewExample)$')])
+                example.with_name('new.yaml').unlink()
+                # Unrelated prose must not expand to the whole package.
+                pathlib.Path('docs/guide.md').write_text('Guide\n')
+                self.assertEqual(related.select('HEAD'), [])
+            finally:
+                os.chdir(previous)
+
     def test_wire_schema_for_field_and_nested_type_edits(self):
         previous = os.getcwd()
         with tempfile.TemporaryDirectory() as directory:

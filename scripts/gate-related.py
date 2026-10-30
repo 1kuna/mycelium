@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Conventional test files plus direct textual references, not dependency analysis."""
+import os
 import pathlib
 import re
 import subprocess
@@ -13,10 +14,12 @@ def git(*args):
 def select(base):
     if git('diff', '--name-only', base, '--', 'go.mod', 'go.sum').strip():
         raise ValueError('module dependencies changed')
-    changed = sorted(set((git('diff', '--name-only', base, '--', '*.go') +
-                          git('ls-files', '--others', '--exclude-standard', '--', '*.go')).splitlines()))
+    changed = sorted(set((git('diff', '--name-only', base) +
+                          git('ls-files', '--others', '--exclude-standard')).splitlines()))
     packages = {}
     for name in changed:
+        if not name.endswith('.go'):
+            continue
         path = pathlib.Path(name)
         tests = set()
         stem = path.stem.removesuffix('_test')
@@ -46,6 +49,20 @@ def select(base):
         if path.parent == pathlib.Path('internal/myce') and not name.endswith('_test.go'):
             tests.add('TestWireSchemas')
         packages.setdefault(path.parent, set()).update(tests)
+    # Fixture paths are relative to the Go package's working directory. Match
+    # direct literals in test bodies, including docs/examples-only changes.
+    fixtures = [name for name in changed if not name.endswith('.go')]
+    if fixtures:
+        for name in git('ls-files', '--', '*_test.go').splitlines():
+            path = pathlib.Path(name)
+            if not path.is_file():
+                continue
+            references = ['"' + os.path.relpath(fixture, path.parent) + '"'
+                          for fixture in fixtures]
+            for block in re.split(r'(?=^func )', path.read_text(), flags=re.M):
+                test = re.match(r'func (Test\w+)\(', block)
+                if test and any(reference in block for reference in references):
+                    packages.setdefault(path.parent, set()).add(test[1])
     return [(str(directory), '^(' + '|'.join(sorted(tests)) + ')$')
             for directory, tests in sorted(packages.items())]
 

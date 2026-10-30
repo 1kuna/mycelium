@@ -447,8 +447,8 @@ func TestEntrySimDryExample(t *testing.T) {
 		t.Fatal("three dry entries required")
 	}
 	for _, model := range config.Models {
-		if model.Project != "sim" || model.Logs != "none" || len(model.AllowedMachines) != 1 || model.LocalSource == "" || model.Path != "" || model.Env["VLLM_WORKER_MULTIPROC_METHOD"] != "spawn" {
-			t.Fatal("incomplete dry entry")
+		if model.Project != "sim" || model.Logs != "none" || len(model.AllowedMachines) != 0 || model.Device != "" || model.Environment == "" || len(model.Platforms) != 1 || model.Platforms[0] != "cuda" || model.LocalSource == "" || model.Path != "" || model.Env["VLLM_WORKER_MULTIPROC_METHOD"] != "spawn" {
+			t.Fatalf("incomplete or pinned dry entry: %s", model.Name)
 		}
 	}
 }
