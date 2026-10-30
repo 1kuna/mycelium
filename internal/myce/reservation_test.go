@@ -325,6 +325,59 @@ func TestReservationWaitsForSupersededAttemptCleanup(t *testing.T) {
 	reservationState(t, q, "all-attempts", "released")
 }
 
+func TestReservationTerminalPreparationCustody(t *testing.T) {
+	for _, phase := range []string{"offered", "started"} {
+		t.Run(phase, func(t *testing.T) {
+			q, clock := fixture(t)
+			recipe := binaryRecipe(t, "fake")
+			if err := q.ConfigureEnvironments(EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"validation": {"fake": recipe}}}); err != nil {
+				t.Fatal(err)
+			}
+			m := m3Machine()
+			m.EnvironmentBuilder = true
+			machineCheck(t, q, m)
+			s := exclusionSpec(m.ID, "0")
+			s.Environment.Name = "validation"
+			bound := submit(t, q, s)
+			if _, err := q.CreateReservation(reservationRequest("preparing-check", "host=machine;devices=0", bound.ID)); err != nil {
+				t.Fatal(err)
+			}
+			reply := machineCheck(t, q, m)
+			if len(reply.EnvironmentPlan) != 1 || reply.EnvironmentPlan[0].Launch == nil {
+				t.Fatal("missing bound preparation", reply.EnvironmentPlan)
+			}
+			launch := *reply.EnvironmentPlan[0].Launch
+			if launch.Demand != bound.ID {
+				t.Fatal("preparation not bound to validation", launch)
+			}
+			if phase == "started" {
+				if err := q.AuthorizeLaunch(launch); err != nil {
+					t.Fatal(err)
+				}
+			}
+			clock.Advance(2 * time.Hour)
+			cancelAck(t, q, bound.ID)
+			if phase == "offered" {
+				reservationState(t, q, "preparing-check", "released")
+				if err := q.AuthorizeLaunch(launch); !errors.Is(err, ErrStale) {
+					t.Fatal("terminal check's cached preparation passed launch", err)
+				}
+				return
+			}
+			r := reservationState(t, q, "preparing-check", "waiting_for_release")
+			if !r.CleanupPending {
+				t.Fatal("terminal job hid started preparation custody", r)
+			}
+			m.EnvironmentReports = []EnvironmentReport{{Key: launch.Key, Attempt: "stale-attempt", State: "paused"}}
+			machineCheck(t, q, m)
+			reservationState(t, q, r.ID, "waiting_for_release")
+			m.EnvironmentReports[0].Attempt = launch.Attempt
+			machineCheck(t, q, m)
+			reservationState(t, q, r.ID, "released")
+		})
+	}
+}
+
 func TestReservationBindingValidationAndPriority(t *testing.T) {
 	q, _ := fixture(t)
 	m := m3Machine()

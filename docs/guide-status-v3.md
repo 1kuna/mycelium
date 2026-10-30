@@ -415,8 +415,9 @@ uses `reservations`. Each record includes `id`, `job`, the canonical stable
 `cleanup_pending` independently reports retained bound-job execution custody;
 it may remain true for a released reservation after conditional operator release.
 Operator release never manufactures physical cleanup. All known attempts,
-including lost or superseded ones, must settle before automatic completion
-release. Missing or stale reports survive queue restarts. The maximum lifetime
+including lost or superseded ones, and the bound job's Started preparations
+must settle before automatic completion release. Missing or stale reports
+survive queue restarts. The maximum lifetime
 defaults to two hours and is bounded at 24 hours; the original expiry survives
 caller replays and queue restarts. A non-terminal bound job or unconfirmed
 cleanup retains the fence past this lifetime; `text` reports `reserved past max

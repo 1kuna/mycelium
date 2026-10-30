@@ -97,8 +97,9 @@ on `POST /api/jobs`; the job and reservation commit or roll back together.
 
 Queue SQLite persists the binding, stable target, original expiry and release
 receipt. Success, failure and cancellation release it automatically only after
-**every known attempt** has confirmed physical cleanup. A terminal result,
-elapsed stop grace, missing worker or queue restart never proves cleanup. Status
+**every known attempt** and its Started preparations have confirmed physical
+cleanup. A terminal result, elapsed stop grace, missing worker or queue restart
+never proves cleanup. Status
 distinguishes `draining`, `ready`, `in_use`, `waiting_for_release` and `released`,
 and shows `reserved for OWNER: REASON` plus pending work/evidence.
 

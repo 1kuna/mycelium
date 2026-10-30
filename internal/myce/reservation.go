@@ -214,9 +214,18 @@ func (q *Queue) maintainReservations() {
 			continue
 		}
 		j := q.retainedJob(r.Job)
+		if j == nil || terminal(j.State) {
+			// Cached preparation offers cannot start after their binding ends.
+			// Started preparations retain the existing exact completion protocol.
+			for _, launch := range q.s.PreparationPlans {
+				if launch.Demand == r.Job && !launch.Started {
+					q.maintainHostObligation(HostObligation{Launch: &launch}, nil)
+				}
+			}
+		}
 		switch {
-		case j != nil && terminal(j.State) && !q.jobReleasePending(j):
-			q.releaseReservation(r, "bound job terminal and all attempts physically released")
+		case j != nil && terminal(j.State) && !q.reservationCleanupPending(r, j):
+			q.releaseReservation(r, "bound job terminal and all attempts and preparations physically released")
 		case j == nil && !now.Before(r.ExpiresAt) && !q.reservationCleanupPending(r, j):
 			q.releaseReservation(r, "maximum lifetime elapsed (lost-job backstop); bound job absent and no retained execution custody")
 		}
@@ -231,6 +240,11 @@ func (q *Queue) maintainReservations() {
 }
 
 func (q *Queue) reservationCleanupPending(r Reservation, j *Job) bool {
+	for _, launch := range q.s.PreparationPlans {
+		if launch.Demand == r.Job && launch.Started {
+			return true
+		}
+	}
 	if j != nil {
 		return q.jobReleasePending(j)
 	}
