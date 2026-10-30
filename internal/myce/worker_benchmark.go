@@ -29,7 +29,14 @@ func (q *Queue) benchmarkIdle(m *Machine) bool {
 // Onboarding is one host-wide attempt and measures every inventory device.
 // Defer a new attempt as a whole; ordinary worker admission can still proceed.
 func (q *Queue) benchmarkDeviceAdmissionBlocked(m *Machine) bool {
+	if !q.reservationAllows(nil, m) {
+		return true
+	}
 	for _, d := range m.Devices {
+		target := d.machine(*m)
+		if !q.reservationAllows(nil, &target) {
+			return true
+		}
 		if q.s.DeviceMaintenance[hostID(m)][deviceMaintenanceKey(d.Platform, d.Identity)].Disabled || q.componentExcluded(m, d.Platform, d.Identity) {
 			return true
 		}

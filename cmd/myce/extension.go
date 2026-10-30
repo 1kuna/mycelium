@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"os/user"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -34,6 +35,10 @@ func extensionCommand(args []string) error {
 	f.Lookup("token").DefValue = ""
 	config := f.String("config", "", "installed config (default: installed worker, then queue)")
 	joining := f.String("joining-file", env("MYCE_JOINING_FILE", ""), "privately supplied invitation (discovery plus saved address)")
+	reserve := f.Bool("reserve", false, "reserve the target device (CPU check: host) until each check is terminal and physically released")
+	reserveOwner := f.String("owner", "", "reservation owner attribution (default: OS username)")
+	reserveReason := f.String("reason", "extension qualification", "reservation reason")
+	reserveLifetime := f.Duration("max-lifetime", myce.DefaultReservationLifetime, "reservation lost-job backstop, at most 24h; expiry does not confirm cleanup")
 	static := f.Bool("static", false, "validate folder without executing or qualifying")
 	host := f.String("host", "", "this host's configured worker host ID (default: installed worker; local execution only)")
 	digest := f.String("digest", "", "require exact extension SHA-256")
@@ -43,6 +48,16 @@ func extensionCommand(args []string) error {
 	timeout := f.Duration("timeout", 10*time.Minute, "setup time limit; check execution time limit per command (excludes waiting to start)")
 	if err := f.Parse(args[1:]); err != nil {
 		return err
+	}
+	if *reserve && (args[0] != "check" || *static || *reserveLifetime <= 0 || *reserveLifetime > myce.MaxReservationLifetime) {
+		return errors.New("--reserve requires a runtime check and --max-lifetime in (0, 24h]")
+	}
+	if *reserve && *reserveOwner == "" {
+		u, err := user.Current()
+		if err != nil {
+			return err
+		}
+		*reserveOwner = u.Username
 	}
 	explicitRoot := false
 	f.Visit(func(flag *flag.Flag) {
@@ -168,7 +183,11 @@ func extensionCommand(args []string) error {
 			var reports []myce.ExtensionReport
 			if args[0] == "check" {
 				cache.Fetch = client.DownloadFile
-				reports, err = myce.CheckExtension(ctx, *root, e, *platform, *device, *host, os.Stderr, cache, client, *timeout)
+				if *reserve {
+					reports, err = myce.CheckExtensionReserved(ctx, *root, e, *platform, *device, *host, os.Stderr, cache, client, *timeout, myce.ReservationOptions{Owner: *reserveOwner, Reason: *reserveReason, MaxLifetime: reserveLifetime.String()})
+				} else {
+					reports, err = myce.CheckExtension(ctx, *root, e, *platform, *device, *host, os.Stderr, cache, client, *timeout)
+				}
 			} else {
 				bounded, cancel := context.WithTimeout(ctx, *timeout)
 				defer cancel()

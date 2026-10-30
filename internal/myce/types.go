@@ -644,6 +644,7 @@ type HoldDetail struct {
 
 type Snapshot struct {
 	RequestLatencies    []RequestLatency     `json:"request_latencies,omitempty"`
+	Reservations        []Reservation        `json:"reservations,omitempty"`
 	ComponentExclusions []ComponentExclusion `json:"component_exclusions,omitempty"`
 	DeviceMaintenance   []DeviceMaintenance  `json:"device_maintenance,omitempty"`
 

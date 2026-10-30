@@ -49,6 +49,7 @@ func (a API) handler(joiningPin string) http.Handler {
 	a.registerHostMaintenance(mux)
 	a.registerDeviceMaintenance(mux)
 	a.registerComponentExclusions(mux)
+	a.registerReservations(mux)
 	a.registerPriorityPolicy(mux)
 	a.registerFiles(mux)
 	mux.HandleFunc("POST /api/extensions", func(w http.ResponseWriter, r *http.Request) {

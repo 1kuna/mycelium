@@ -181,6 +181,10 @@ func (q *Queue) placementAllowedForUse(j *Job, m *Machine, resident bool) bool {
 // Recovery retains existing execution custody. Admission-time disk estimates
 // apply only to new work: its writes may already be reflected in observed free.
 func (q *Queue) placementPolicyAllowed(j *Job, m *Machine, resident bool) bool {
+	return q.reservationAllows(j, m) && q.placementPolicyWithoutReservation(j, m, resident)
+}
+
+func (q *Queue) placementPolicyWithoutReservation(j *Job, m *Machine, resident bool) bool {
 	if j.State == "queued" && (j.Spec.Priority == "production" || j.Spec.Class == "production") && q.fleetPausesProduction() {
 		return false
 	}
@@ -366,7 +370,7 @@ func (q *Queue) productionTarget(j *Job, call *ModelCall) string {
 			model, _ := q.model(call.Model)
 			diskReason = q.modelLoadDiskHeadroomReason(model, m)
 		}
-		if diskReason != "" || q.dockerBlocker(hostID(m)) != "" || q.unreported[m.ID] || !q.jobAllowsMachine(j, m.ID) {
+		if !q.reservationAllows(j, m) || diskReason != "" || q.dockerBlocker(hostID(m)) != "" || q.unreported[m.ID] || !q.jobAllowsMachine(j, m.ID) {
 			continue
 		}
 		for _, candidate := range q.memoryCandidates(j, m) {

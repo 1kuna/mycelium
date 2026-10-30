@@ -419,6 +419,9 @@ func reservationWaitReason(m *Machine, batchSlot bool) string {
 	return strings.Join(parts, "; ")
 }
 func (q *Queue) waitReason(j *Job) string {
+	if reason := q.reservationWaitReason(j); reason != "" {
+		return reason
+	}
 	if !dependencyReady(j) {
 		if j.Spec.After != nil && j.Spec.After.Piece == "" {
 			return "waiting for upstream fan-out parent success"

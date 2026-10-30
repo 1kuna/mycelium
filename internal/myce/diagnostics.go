@@ -84,6 +84,7 @@ var rejectionMessages = map[string]string{
 	"worker_log_invalid":                    "worker log report is invalid",
 	"worker_leave_invalid":                  "worker is unknown or cannot leave",
 	"checkpoint_invalid":                    "checkpoint publication is invalid or stale",
+	"reservation_invalid":                   "reservation binding, target, owner, reason or maximum lifetime is invalid",
 	"host_control_invalid":                  "host control request is invalid",
 	"dev_clock_invalid":                     "clock advance must be positive, at least 1ns and at most 90d",
 }

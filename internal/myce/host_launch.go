@@ -113,7 +113,7 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 		}
 		if l.Kind == "engine" {
 			s := q.s.ModelSlots[slotKey(l.Machine, l.Key, l.Device)]
-			if s == nil || s.Session != l.Session || s.Attempt != l.Attempt || s.State != "loading" || q.deviceAdmissionBlocked(allocationMachine(q.s.Machines[l.Machine], []string{l.Device})) {
+			if s == nil || s.Session != l.Session || s.Attempt != l.Attempt || s.State != "loading" || !q.reservationAllows(nil, allocationMachine(q.s.Machines[l.Machine], []string{l.Device})) || q.deviceAdmissionBlocked(allocationMachine(q.s.Machines[l.Machine], []string{l.Device})) {
 				reject("engine_custody")
 			}
 			return nil
@@ -126,6 +126,10 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 		m := q.s.Machines[l.Machine]
 		if !p.Started && p.Kind == "benchmark" && q.benchmarkDeviceAdmissionBlocked(m) {
 			reject("device_admission")
+			return nil
+		}
+		if !p.Started && !q.reservationAllows(q.s.Jobs[p.Demand], allocationMachine(m, []string{p.Device})) {
+			reject("reservation")
 			return nil
 		}
 		// A model-cache copy writes shared host storage, not the selected GPU.

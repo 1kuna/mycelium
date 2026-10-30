@@ -71,7 +71,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 
 	if len(args) == 0 {
-		return errors.New("usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|exclude|run|profile|submit|policy|status|logs|ledger|wait|result|cancel|resolve-native|resolve-docker|reconcile-docker-retention|dev|version|release|file|benchmark|extension|portability|sim|detect|service|measure|model|usage\n       myce host drain|disable|resume|status|budget|placement HOST\n       myce host device disable|enable HOST DEVICE\nRun myce COMMAND --help for command options.")
+		return errors.New("usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|exclude|reserve|run|profile|submit|policy|status|logs|ledger|wait|result|cancel|resolve-native|resolve-docker|reconcile-docker-retention|dev|version|release|file|benchmark|extension|portability|sim|detect|service|measure|model|usage\n       myce host drain|disable|resume|status|budget|placement HOST\n       myce host device disable|enable HOST DEVICE\nRun myce COMMAND --help for command options.")
 	}
 	if args[0] == "dev" && len(args) > 1 && args[1] == "clock" {
 		return devClockCommand(args[2:], os.Stdout)
@@ -111,6 +111,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 	if args[0] == "device" {
 		return deviceCommand(args[1:], os.Stdout)
+	}
+	if args[0] == "reserve" {
+		return reserveCommand(context.Background(), args[1:], os.Stdout)
 	}
 	if args[0] == "exclude" {
 		return excludeCommand(context.Background(), args[1:], os.Stdout)
@@ -880,6 +883,9 @@ func printStatus(s myce.Snapshot, full bool) {
 	}
 	for _, host := range slices.Sorted(maps.Keys(s.HostStates)) {
 		fmt.Printf("host %s: %s\n", host, s.HostStates[host])
+	}
+	for _, r := range s.Reservations {
+		fmt.Printf("reservation %s %s: %s; state=%s job=%s revision=%d expires=%s %s cleanup_pending=%t\n", r.ID, r.Selector, r.Text, r.State, r.Job, r.Revision, r.ExpiresAt.UTC().Format(time.RFC3339), r.ReleaseReason, r.CleanupPending)
 	}
 	for _, p := range s.ComponentExclusions {
 		if p.Active {

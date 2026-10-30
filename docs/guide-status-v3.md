@@ -396,6 +396,33 @@ Worker memory availability and usage remain last-reported facts.
 Read the queue-owned allowance with `myce host status HOST`. Configure it while
 drained/disabled with `myce host budget HOST --memory-budget-gb GiB`.
 
+## Validation reservation status
+
+`myce reserve list`, `myce status` (CLI/JSON/web), and
+`GET /api/reservations` expose durable validation reservations. Snapshot JSON
+uses `reservations`. Each record includes `id`, `job`, the canonical stable
+`selector` and resolved `target`, `owner`, `reason`, `created_at`, `expires_at`,
+`max_lifetime` and `revision`. `text` reads `reserved for OWNER: REASON`.
+
+| State | Meaning |
+| --- | --- |
+| `draining` | Existing work, independent maintenance, production takeover, missing inventory or fresh worker/cleanup evidence still prevents validation. The reservation never cancels Started work. `pending` names the blockers. |
+| `ready` | The reserved components have no unrelated physical obligations or reservation readiness blockers. Ordinary qualification, priority and capacity checks still apply; this is not a launch grant. |
+| `in_use` | The bound job has Started and is running/stopping. |
+| `waiting_for_release` | The job is terminal with exact cleanup still pending, or its binding is unavailable. A terminal state alone does not release the reservation. |
+| `released` | Only this reservation's admission fence was removed. `released_at` and `release_reason` explain automatic terminal-plus-cleanup release, lifetime expiry or conditional operator release. |
+
+`cleanup_pending` independently reports retained bound-job execution custody;
+it may remain true for a released reservation after expiry/operator release.
+Neither kind of release manufactures physical cleanup. All known attempts,
+including lost or superseded ones, must settle before automatic completion
+release. Missing or stale reports survive queue restarts. The maximum lifetime
+defaults to two hours and is bounded at 24 hours; the original expiry survives
+caller replays and queue restarts. The reason for expiry remains in status.
+Other reservations, device exclusions and newer operator drains remain intact.
+See [operations](operations.md#reserve-a-host-or-its-devices-for-an-existing-validation-job)
+for acquisition, atomic `extension check --reserve`, and conditional release.
+
 ## Queue host maintenance status
 
 `myce host status HOST` prints authenticated `GET /api/hosts/HOST/maintenance`.

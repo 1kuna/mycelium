@@ -15,8 +15,9 @@ import (
 // ExtensionCheckRequest selects a frozen check command and a local scratch
 // directory. It never grants qualification or bypasses launch authorization.
 type ExtensionCheckRequest struct {
-	Work      string `json:"work" yaml:"work"`
-	Directory string `json:"directory" yaml:"directory"`
+	Reserve   *ReservationOptions `json:"reserve,omitempty" yaml:"reserve,omitempty"`
+	Work      string              `json:"work" yaml:"work"`
+	Directory string              `json:"directory" yaml:"directory"`
 	// Timeout bounds execution from queue-recorded Started, excluding admission.
 	Timeout string `json:"timeout,omitempty" yaml:"timeout,omitempty"`
 	// Automatic binds a worker-requested check to its prepared native identity.
@@ -31,6 +32,16 @@ func CheckExtension(ctx context.Context, root string, e Extension, platform, dev
 	if len(executionTimeout) > 0 {
 		timeout = executionTimeout[0]
 	}
+	return checkExtension(ctx, root, e, platform, device, host, log, cache, c, timeout, nil)
+}
+
+// CheckExtensionReserved acquires each check's target reservation atomically
+// with its keyed submission. The queue, rather than the caller, releases it.
+func CheckExtensionReserved(ctx context.Context, root string, e Extension, platform, device, host string, log io.Writer, cache *EnvironmentCache, c Client, timeout time.Duration, reservation ReservationOptions) ([]ExtensionReport, error) {
+	return checkExtension(ctx, root, e, platform, device, host, log, cache, c, timeout, &reservation)
+}
+
+func checkExtension(ctx context.Context, root string, e Extension, platform, device, host string, log io.Writer, cache *EnvironmentCache, c Client, timeout time.Duration, reservation *ReservationOptions) (reports []ExtensionReport, err error) {
 	if timeout <= 0 {
 		return nil, errors.New("check timeout must be positive")
 	}
@@ -176,9 +187,25 @@ func CheckExtension(ctx context.Context, root string, e Extension, platform, dev
 		}
 		// Reject checks that cannot fit the target even when idle. Temporary
 		// occupancy and production holds still queue through normal admission.
+		check := &ExtensionCheckRequest{Work: r.Work, Directory: scratch, Timeout: timeout.String()}
+		if reservation != nil {
+			options := *reservation
+			options.ID, options.Selector = r.CheckID, "host="+host
+			if platform != "cpu" {
+				for _, d := range m.Devices {
+					if d.ID == m.Device && d.Platform == platform {
+						options.Selector += ";devices=" + d.Identity
+					}
+				}
+				if !strings.Contains(options.Selector, ";devices=") {
+					return reports, errors.New("--reserve requires stable device inventory; rejoin with a current worker")
+				}
+			}
+			check.Reserve = &options
+		}
 		job, e2 := c.SubmitAndWait(ctx, Spec{Name: "extension-check", Project: "extension-check", SubmissionKey: r.CheckID, RequireTarget: true,
 			Extension: extensionKey(e), ExtensionDigest: e.Digest, AllowedMachines: []string{m.ID},
-			Needs: selection, ExtensionCheck: &ExtensionCheckRequest{Work: r.Work, Directory: scratch, Timeout: timeout.String()}})
+			Needs: selection, ExtensionCheck: check})
 		// Fence the exact check key and confirm cleanup, even when a terminal
 		// result reports a failure with release still pending.
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
