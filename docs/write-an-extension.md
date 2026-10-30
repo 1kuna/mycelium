@@ -195,16 +195,25 @@ jobs, models or precisions (#18/#34). Keep that limitation in the description.
 
 ## Install and qualify
 
-Use the same explicit local root for CLI and join. Configure caller credentials
-privately as usual; keep tokens out of argv and job environments.
+On an installed worker, run locally with the worker enrolled and its queue
+running. Authority, host ID, extension root (`state_dir/extensions`) and runtime
+check environment cache default to its installed configuration. `--config FILE`
+selects a custom installation; explicit `--host`, `--root` and
+`--environment-cache` override these defaults. Keep tokens out of argv and job
+environments. Select the qualification platform and device explicitly:
 
 ```sh
-myce extension add --root ./extension-state ./extensions/example
-myce extension setup --root ./extension-state --gpu metal example@1
-myce extension check --root ./extension-state --gpu metal example@1
-myce extension list --root ./extension-state --gpu metal
-myce join --extension-root ./extension-state --job-file-root ./shared
+myce extension add ./extensions/example
+myce extension check --gpu xpu --device 0 example@1
+myce extension list --gpu xpu --device 0
 ```
+
+Runtime check performs preparation through the enrolled worker before execution.
+For CPU qualification use `--gpu cpu` without `--device`. Without installed
+configuration, supply `--host` and `--environment-cache` as well, or start
+`myce dev` for automatic local defaults. For a manual join, use the same extension
+root for CLI and `join --extension-root`; a runtime check with a different root
+from the installed worker warns that it does not qualify the live worker.
 
 Flags precede the folder or `name@version`. `add` registers the frozen small
 folder with the queue and installs it locally. On another hypha use `add` again

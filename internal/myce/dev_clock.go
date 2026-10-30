@@ -85,7 +85,8 @@ func (a API) registerDevClock(mux *requestMux) {
 }
 
 // Only dev exposes these local process settings. Production checks require
-// explicit local host/device/cache flags and never infer a remote worker.
+// local host/cache settings from the installed config or explicit flags, and
+// explicit platform/device selection. They never infer a remote worker.
 type ExtensionCheckTarget struct {
 	Host             string `json:"host"`
 	Platform         string `json:"platform"`

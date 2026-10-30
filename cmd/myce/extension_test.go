@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -50,6 +52,20 @@ variants:
 		t.Fatal(err)
 	}
 	defer d.Close()
+	// Model an installed production queue: dev target discovery is unavailable.
+	upstream, err := url.Parse(d.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := httputil.NewSingleHostReverseProxy(upstream)
+	production := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/dev/") {
+			http.NotFound(w, r)
+			return
+		}
+		proxy.ServeHTTP(w, r)
+	}))
+	defer production.Close()
 	client := d.Client()
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -65,7 +81,7 @@ variants:
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Setenv("MYCE_QUEUE", d.URL)
+	t.Setenv("MYCE_QUEUE", "")
 	t.Setenv("MYCE_TOKEN", "")
 	t.Setenv("MYCE_JOINING_FILE", "")
 	home := t.TempDir()
@@ -75,11 +91,13 @@ variants:
 		t.Fatal(err)
 	}
 	tokenFile := filepath.Join(home, "token")
-	if err := os.WriteFile(tokenFile, []byte("MYCE_TOKEN=fixture-not-inherited\nMYCE_QUEUE="+d.URL+"\n"), 0600); err != nil {
+	if err := os.WriteFile(tokenFile, []byte("MYCE_TOKEN=fixture-not-inherited\nMYCE_QUEUE="+production.URL+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	workerState := filepath.Join(home, "worker-state")
-	saved, _ := json.Marshal(myce.ServiceConfig{Role: "worker", State: workerState, Queue: d.URL, EnvironmentFile: tokenFile})
+	workerCache := filepath.Join(home, "environment-cache")
+	// Explicit flags below must override these deliberately unusable defaults.
+	saved, _ := json.Marshal(myce.ServiceConfig{Role: "worker", State: workerState, HostID: "wrong-host", EnvironmentCache: filepath.Join(home, "wrong-cache"), Queue: production.URL, EnvironmentFile: tokenFile})
 	if err := os.WriteFile(config, saved, 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -117,16 +135,29 @@ variants:
 	if len(reports) != 1 || reports[0].Target == nil || reports[0].Target.OS != runtime.GOOS {
 		t.Fatal("variant target lost", reports)
 	}
-	// No --root must install and qualify where the installed worker reads.
+	// Omitted host/cache/root must use the installed worker, without dev discovery.
+	saved, _ = json.Marshal(myce.ServiceConfig{Role: "worker", State: workerState, HostID: "cli-host", EnvironmentCache: workerCache, Queue: production.URL, EnvironmentFile: tokenFile})
+	if err := os.WriteFile(config, saved, 0600); err != nil {
+		t.Fatal(err)
+	}
 	for _, args := range [][]string{
 		{"extension", "add", folder},
 		{"extension", "setup", "--gpu", "fake", "fixture.stage@1"},
-		{"extension", "check", "--gpu", "fake", "--device", "0", "--host", "cli-host", "--environment-cache", t.TempDir(), "--environment-cache-bytes", "1048576", "fixture.stage@1"},
+		{"extension", "check", "--gpu", "fake", "--device", "0", "--environment-cache-bytes", "1048576", "fixture.stage@1"},
 	} {
 		_, stderr, err := captureUsageOutput(t, args)
 		if err != nil || strings.Contains(stderr, "WARNING:") {
 			t.Fatalf("default worker root %v: %v, %s", args, err, stderr)
 		}
+	}
+	for _, flags := range [][]string{nil, {"--gpu", "fake"}} {
+		err := extensionCommand(append(append([]string{"check"}, flags...), "fixture.stage@1"))
+		if err == nil || !strings.Contains(err.Error(), "requires --gpu and (for GPUs) --device") {
+			t.Fatalf("installed check inferred qualification selector: %v", err)
+		}
+	}
+	if _, err := os.Stat(workerCache); err != nil {
+		t.Fatalf("installed environment cache unused: %v", err)
 	}
 	fingerprint, err := myce.ExtensionFingerprint(context.Background(), "fake", "0")
 	if err != nil {
