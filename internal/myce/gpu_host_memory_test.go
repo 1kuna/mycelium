@@ -386,6 +386,76 @@ func testGPUHostMemoryBlockedDriver(t *testing.T, blockedAtFinish bool) {
 	}
 }
 
+type blockedDeviceMemoryFS struct {
+	memoryFS
+	blocked chan struct{}
+	release chan struct{}
+	resumed chan struct{}
+}
+
+func (f *blockedDeviceMemoryFS) ReadFile(p string) ([]byte, error) {
+	if strings.Contains(p, "/fdinfo/") {
+		close(f.blocked)
+		<-f.release
+		defer close(f.resumed)
+	}
+	return f.memoryFS.ReadFile(p)
+}
+
+func TestGPUHostMemoryBlockedDeviceProbeFinishes(t *testing.T) {
+	a, err := fakeCeilings(t).create("attempt-device-block", 24<<30, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proc := t.TempDir()
+	fd := filepath.Join(proc, "7/fdinfo/3")
+	if err := os.MkdirAll(filepath.Dir(fd), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fd, []byte(xeHostFD("7", "0000:03:00.0", 83176)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(a.path, "cgroup.procs"), []byte("7\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f := &blockedDeviceMemoryFS{memoryFS: gpuHostFS{memoryFS: a.fs, proc: proc}, blocked: make(chan struct{}), release: make(chan struct{}), resumed: make(chan struct{})}
+	a.fs = f
+	a.hostBaseline = nil // Isolate the five-second device probe, without host collection.
+	w := Worker{Machine: Machine{GPU: "xpu"}, selectedDevice: &MachineDevice{pciAddress: "0000:03:00.0"}}
+	spec := cpuSpec(1, 0)
+	spec.Needs.Platform = Platform{Required: []string{"xpu"}}
+	spec.Needs.Memory = "auto"
+	finish := w.observeAttemptMemory(a, Job{Spec: spec}, nil)
+	defer finish()
+	defer func() {
+		close(f.release)
+		select {
+		case <-f.blocked:
+			select {
+			case <-f.resumed:
+			case <-time.After(time.Second):
+				t.Error("device read did not return after release")
+			}
+		default:
+		}
+	}()
+	select {
+	case <-f.blocked:
+	case <-time.After(10 * time.Second):
+		t.Fatal("device probe did not enter fdinfo")
+	}
+	done := make(chan *AttemptMemoryPeak, 1)
+	go func() { done <- finish() }()
+	select {
+	case peak := <-done:
+		if peak != nil && (peak.GPUHost != nil || peak.NonreclaimableGB != nil || peak.DeviceGB != nil) {
+			t.Fatalf("incomplete device probe published evidence: %+v", peak)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("blocked device fdinfo stalled attempt completion")
+	}
+}
+
 func gpuHostFixture(t *testing.T) (*Queue, *fakeClock, Machine, Spec) {
 	t.Helper()
 	q, clock := fixture(t)
