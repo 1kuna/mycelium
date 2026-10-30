@@ -508,3 +508,30 @@ func TestExtensionCheckSiblingMemoryCapacity(t *testing.T) {
 		})
 	}
 }
+
+func TestExtensionCheckProductionHoldStillQueues(t *testing.T) {
+	q, clock, m, s := floorFreeFitFixture(t, 24)
+	production := submit(t, q, m3Spec("production", "0", 1, 1))
+	running := assignedJob(machineCheck(t, q, m))
+	if running == nil || running.ID != production.ID {
+		t.Fatal("production was not assigned")
+	}
+	clock.Advance(time.Second)
+	s.Workload = nil
+	s.ExtensionDigest = registeredExtension(t, q, s.Extension).Digest
+	s.RequireTarget = true
+	s.AllowedMachines = []string{m.ID}
+	s.Needs = ResourceNeeds{Memory: "auto", GPU: &GPUSelection{Devices: []string{"0"}}}
+	s.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:sample", Directory: t.TempDir()}
+	j, err := q.Submit(s)
+	if err != nil || j == nil || j.State != "queued" {
+		t.Fatalf("production hold rejected a fitting runtime check: job=%+v err=%v", j, err)
+	}
+	if got := assignedJob(machineCheck(t, q, m, running)); got != nil || job(t, q, running.ID).State != "running" {
+		t.Fatalf("runtime check displaced production: %+v", got)
+	}
+	finish(t, q, running, true)
+	if got := assignedJob(machineCheck(t, q, m)); got == nil || got.ID != j.ID {
+		t.Fatalf("runtime check did not start after production released: %+v", got)
+	}
+}

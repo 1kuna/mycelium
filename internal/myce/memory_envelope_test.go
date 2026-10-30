@@ -392,6 +392,67 @@ func TestMemoryEnvelopeSiblingHostRAM(t *testing.T) {
 	}
 }
 
+func TestMemoryEnvelopeSiblingHostBudget(t *testing.T) {
+	for _, peak := range []float64{7, 13.08499526977539} {
+		t.Run(fmt.Sprint(peak), func(t *testing.T) {
+			q, clock, m, s := floorFreeFitFixture(t, 24)
+			m.CapabilityProfile.SystemMemoryBytes = 31 << 30
+			m.HostAvailableMemoryGB = 31
+			sibling := m.Devices[0]
+			sibling.ID, sibling.Identity = "1", "sibling-card"
+			sibling.ExtensionFingerprint = "sibling-backend-v1"
+			e := registeredExtension(t, q, s.Extension)
+			target := sibling.machine(m)
+			r := newExtensionReport(e, &target, "extension:sample")
+			r.Setup, r.Qualified, r.CheckID = true, true, "sibling-check"
+			sibling.ExtensionReports = []ExtensionReport{r}
+			m.Devices = append(m.Devices, sibling)
+			machineCheck(t, q, m)
+			for id, p := range q.s.WorkObservations {
+				delete(q.s.WorkObservations, id)
+				p.Key.Component, p.Key.Hardware, p.Key.Fingerprint = sibling.ID, sibling.Identity, sibling.ExtensionFingerprint
+				p.MemoryPeak.HostGB = &peak
+				q.s.WorkObservations[identityHash(p.Key)] = p
+			}
+			s.RequireTarget = true
+			s.Needs.GPU = &GPUSelection{Devices: []string{"0"}}
+			first := submit(t, q, s)
+			a := assignedJob(machineCheck(t, q, m))
+			if a == nil || a.ID != first.ID || math.Abs(a.Spec.Needs.HostMemoryGB-peak*1.25) > 1e-9 {
+				t.Fatalf("same-host estimate was not admitted: job=%+v", a)
+			}
+			clock.Advance(time.Second)
+			s.Needs.GPU = &GPUSelection{Devices: []string{"1"}}
+			second := submit(t, q, s)
+			b := assignedJob(machineCheck(t, q, m, a))
+			wantReserved := peak * 1.25
+			if 2*wantReserved > 24 {
+				if b != nil || job(t, q, second.ID).State != "queued" {
+					t.Fatalf("sibling spent RAM beyond the shared allowance: %+v", b)
+				}
+			} else {
+				if b == nil || b.ID != second.ID || math.Abs(b.Spec.Needs.HostMemoryGB-peak*1.25) > 1e-9 {
+					t.Fatalf("fitting sibling did not get its own reservation: %+v", b)
+				}
+				wantReserved *= 2
+			}
+			if got := q.s.Machines[m.ID].HostMemoryInUseGB; math.Abs(got-wantReserved) > 1e-9 {
+				t.Fatalf("host ledger charged %.12f GiB, want %.12f", got, wantReserved)
+			}
+			finish(t, q, a, true)
+			if b == nil {
+				b = assignedJob(machineCheck(t, q, m))
+				if b == nil || b.ID != second.ID {
+					t.Fatal("sibling did not start after the first reservation was released")
+				}
+			}
+			if got := q.s.Machines[m.ID].HostMemoryInUseGB; math.Abs(got-peak*1.25) > 1e-9 {
+				t.Fatalf("release removed the sibling's reservation: %.12f GiB", got)
+			}
+		})
+	}
+}
+
 func TestMemoryEnvelopeExploratoryFirstRun(t *testing.T) {
 	q, clock, m, s := observationFixture(t)
 	plain := cpuSpec(1, 0)
