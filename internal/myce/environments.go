@@ -323,6 +323,9 @@ type EnvironmentReport struct {
 }
 
 func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
+	if q.s.HostMaintenance[hostID(m)].SharedHost != nil {
+		return nil
+	}
 	if !q.hostLaunchAllowed(m, m.Session) || !q.workerBatchIdle(m) || !m.EnvironmentBuilder || q.preparationStopping(m) {
 		return nil
 	}

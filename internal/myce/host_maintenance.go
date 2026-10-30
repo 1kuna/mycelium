@@ -16,25 +16,27 @@ const maintenanceStopCause = "planned_host_maintenance"
 // A nil budget is possible before the first worker report; zero is uncapped.
 // Existing hosts bootstrap their allowance once, then worker reports cannot edit it.
 type HostMaintenance struct {
-	LastResort     bool              `json:"last_resort"`
-	DrainOwner     string            `json:"drain_owner,omitempty"`
-	CPUBudgetCores *int              `json:"cpu_budget_cores,omitempty"`
-	StopAt         *time.Time        `json:"stop_at,omitempty"`
-	Mode           string            `json:"mode"`
-	MemoryBudget   *HostMemoryBudget `json:"memory_budget,omitempty"`
-	UpdatedAt      time.Time         `json:"updated_at"`
+	SharedHost     *SharedHostProfile `json:"shared_host,omitempty"`
+	LastResort     bool               `json:"last_resort"`
+	DrainOwner     string             `json:"drain_owner,omitempty"`
+	CPUBudgetCores *int               `json:"cpu_budget_cores,omitempty"`
+	StopAt         *time.Time         `json:"stop_at,omitempty"`
+	Mode           string             `json:"mode"`
+	MemoryBudget   *HostMemoryBudget  `json:"memory_budget,omitempty"`
+	UpdatedAt      time.Time          `json:"updated_at"`
 }
 
 type HostMaintenanceRequest struct {
-	LastResort     *bool      `json:"last_resort,omitempty"`
-	DrainOwner     string     `json:"drain_owner,omitempty"`
-	IfDrainOwner   string     `json:"if_drain_owner,omitempty"`
-	IfMode         string     `json:"if_mode,omitempty"`
-	IfUpdatedAt    *time.Time `json:"if_updated_at,omitempty"`
-	CPUBudgetCores *int       `json:"cpu_budget_cores,omitempty"`
-	Action         string     `json:"action"`
-	Stop           bool       `json:"stop,omitempty"`
-	MemoryBudgetGB *float64   `json:"memory_budget_gb,omitempty"`
+	SharedHost     *SharedHostProfile `json:"shared_host,omitempty"`
+	LastResort     *bool              `json:"last_resort,omitempty"`
+	DrainOwner     string             `json:"drain_owner,omitempty"`
+	IfDrainOwner   string             `json:"if_drain_owner,omitempty"`
+	IfMode         string             `json:"if_mode,omitempty"`
+	IfUpdatedAt    *time.Time         `json:"if_updated_at,omitempty"`
+	CPUBudgetCores *int               `json:"cpu_budget_cores,omitempty"`
+	Action         string             `json:"action"`
+	Stop           bool               `json:"stop,omitempty"`
+	MemoryBudgetGB *float64           `json:"memory_budget_gb,omitempty"`
 }
 
 type MaintenanceWorker struct {
@@ -156,6 +158,7 @@ func (q *Queue) hostMaintenanceStatus(host string) HostMaintenanceStatus {
 	if out.Policy.Mode == "" {
 		out.Policy.Mode = "enabled"
 	}
+	out.Policy.SharedHost = cloneSharedHost(out.Policy.SharedHost)
 	if out.Policy.StopAt != nil {
 		deadline := *out.Policy.StopAt
 		out.Policy.StopAt = &deadline
@@ -379,12 +382,40 @@ func (q *Queue) changeHostMaintenance(host string, request HostMaintenanceReques
 	case "resume":
 		policy.Mode = "enabled"
 	case "budget":
+	case "profile":
+		if request.SharedHost == nil || request.LastResort != nil || request.MemoryBudgetGB != nil || request.CPUBudgetCores != nil {
+			return errors.New("profile requires shared_host and no other policy edits")
+		}
+		if policy.Mode == "enabled" {
+			return errors.New("drain or disable the host before changing its profile")
+		}
+		if !validMemoryValue(request.SharedHost.InteractiveReserveGB) {
+			return errors.New("interactive reserve must be finite and nonnegative")
+		}
+		policy.SharedHost = nil
+		if request.SharedHost.InteractiveReserveGB > 0 {
+			if policy.MemoryBudget == nil || policy.MemoryBudget.GiB <= 0 || policy.CPUBudgetCores == nil || *policy.CPUBudgetCores <= 0 {
+				return errors.New("shared host requires positive CPU and RAM allowances")
+			}
+			if !q.hostMaintenanceStatus(host).Quiescent {
+				return errors.New("shared host profile requires fresh quiescent custody; drain --wait first")
+			}
+			profile := *request.SharedHost
+			policy.SharedHost = &profile
+			policy.LastResort = true
+		}
 	case "placement":
 		if request.LastResort == nil {
 			return errors.New("placement requires last_resort")
 		}
 	default:
-		return errors.New("expected drain, disable, resume, budget or placement")
+		return errors.New("expected drain, disable, resume, budget, placement or profile")
+	}
+	if request.SharedHost != nil && request.Action != "profile" {
+		return errors.New("shared_host requires profile")
+	}
+	if policy.SharedHost != nil && request.LastResort != nil && !*request.LastResort {
+		return errors.New("shared hosts must remain last-resort")
 	}
 	if request.LastResort != nil {
 		if request.Action != "placement" {
@@ -401,6 +432,9 @@ func (q *Queue) changeHostMaintenance(host string, request HostMaintenanceReques
 	if request.CPUBudgetCores != nil {
 		if policy.Mode == "enabled" {
 			return errors.New("drain or disable the host before changing its CPU allowance")
+		}
+		if policy.SharedHost != nil && *request.CPUBudgetCores == 0 {
+			return errors.New("shared host requires a positive CPU allowance")
 		}
 		if *request.CPUBudgetCores < 0 {
 			return errors.New("CPU allowance must be nonnegative (zero uses detected capacity minus reserve)")

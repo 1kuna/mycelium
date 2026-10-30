@@ -481,6 +481,9 @@ func (g *nativeGroup) startSupervisor(s *workerStore, env map[string]string) (*o
 		}
 		return nil, e
 	}
+	if err = applySharedHostPriority(cmd.Process.Pid, g.worker.Machine.SharedHost); err != nil {
+		return abort(err)
+	}
 	birth, err := processBirth(cmd.Process.Pid)
 	if err != nil {
 		return abort(err)
@@ -722,6 +725,9 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 		g.p.mu.Unlock()
 		close(m.done)
 	}()
+	if err = applySharedHostPriority(m.PID, g.worker.Machine.SharedHost); err != nil {
+		return err
+	}
 	m.Birth, err = processBirth(m.PID)
 	if err != nil {
 		return err

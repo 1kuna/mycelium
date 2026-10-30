@@ -131,6 +131,7 @@ func (q *Queue) refreshHostMemory() {
 		if m.hostBudgetGB > 0 {
 			room = min(room, m.hostBudgetGB-reserved)
 		}
+		room = q.sharedHostRoom(m, room, reserved, growth)
 		m.hostReservationDebtGB = max(0, -room)
 		m.FreeHostMemoryGB = max(0, room)
 	}

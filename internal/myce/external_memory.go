@@ -64,7 +64,7 @@ func externalBinUpper(i int) float64 {
 }
 func (q *Queue) recordExternalMemory(m *Machine) {
 	o := m.MemoryObservation
-	if o == nil || !validMemoryValue(o.TotalGB) || o.TotalGB <= 0 || !validMemoryValue(o.UsedGB) || o.UsedGB > o.TotalGB || !validMemoryValue(o.MyceliumGB) || o.MyceliumGB > o.UsedGB {
+	if !validHostMemoryObservation(o) {
 		return
 	}
 	if q.s.ExternalMemory == nil {

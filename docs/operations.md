@@ -1018,6 +1018,17 @@ diagnostic observations, not proof that Mycelium delivered a signal, and cannot
 change attempt outcomes or custody. Capture failures do not stop jobs.
 
 
+## Shared orchestration and interactive hosts
+
+These hosts can run fitting light work through Mycelium. Use the opt-in
+[shared-host profile](shared-hosts.md) to combine measured interactive RAM
+reserves, #353 external peaks, native command nice=10, positive CPU/RAM budgets
+and last-resort placement. `myce host profile HOST --shared=true
+--interactive-reserve-gb GiB` requires a drained/disabled, fresh quiescent host;
+`--shared=false` removes the profile without resuming admission. Started commands
+are not pressure-preempted in this phase. Hard CPU share and OS-pressure yielding
+are follow-up #390. Existing exclusions, drain ownership and storage fences apply.
+
 ## CPU capacity and allowances (R1)
 
 `myce join --gpu cpu` enrolls a GPU-less Linux/macOS worker without GPU probes.

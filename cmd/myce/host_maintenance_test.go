@@ -238,3 +238,43 @@ func TestHostMaintenanceBudgetDryRun(t *testing.T) {
 		t.Fatal(output, err)
 	}
 }
+
+func TestHostMaintenanceSharedProfileCLI(t *testing.T) {
+	q, _, _, _ := waitQueue(t)
+	m := maintenanceCLIWorker("worker")
+	m.CPUBudgetCores, m.HostMemoryBudgetGB = 2, 8
+	if _, err := q.Checkin(myce.Checkin{Machine: m}); err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer((myce.API{Queue: q, Token: "test-only"}).Handler())
+	defer server.Close()
+	t.Setenv("MYCE_TOKEN", "test-only")
+	for _, args := range [][]string{
+		{"drain", "host"},
+		{"profile", "host", "--shared=true", "--interactive-reserve-gb", "3.5"},
+	} {
+		if err := hostMaintenanceCommand(t.Context(), append(args, "--queue", server.URL), &bytes.Buffer{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	status, err := q.HostMaintenanceStatus("host")
+	if err != nil || status.Policy.SharedHost == nil || status.Policy.SharedHost.InteractiveReserveGB != 3.5 || status.Policy.Mode != "drained" || !status.Policy.LastResort {
+		t.Fatal(status, err)
+	}
+	for _, args := range [][]string{
+		{"profile", "host"}, {"profile", "host", "--shared=true"},
+		{"profile", "host", "--shared=false", "--interactive-reserve-gb", "3"},
+		{"status", "host", "--shared=true"},
+	} {
+		if err := hostMaintenanceCommand(t.Context(), args, &bytes.Buffer{}); err == nil {
+			t.Error("accepted invalid profile options", args)
+		}
+	}
+	if err := hostMaintenanceCommand(t.Context(), []string{"profile", "host", "--shared=false", "--queue", server.URL}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	status, err = q.HostMaintenanceStatus("host")
+	if err != nil || status.Policy.SharedHost != nil || status.Policy.Mode != "drained" || !status.Policy.LastResort {
+		t.Fatal(status, err)
+	}
+}

@@ -46,7 +46,7 @@ func (g *nativeGroup) sidecarEnvironment(j Job, side NativeSidecar, inherited st
 	if recipe.BinaryRelative != "" && g.worker.EnvironmentSourceRoot != "" {
 		recipe.Binary = filepath.Join(g.worker.EnvironmentSourceRoot, recipe.BinaryRelative)
 	}
-	recipe.readyOnly = j.Extension != nil
+	recipe.readyOnly = j.Extension != nil || g.worker.Machine.SharedHost != nil
 	return g.worker.environmentCache.Acquire(withLaunchGate(g.ctx, func() error {
 		return g.worker.authorizeLaunch(HostLaunch{Machine: g.worker.Machine.ID, Session: g.session, Kind: "batch", Key: j.ID, Attempt: fmt.Sprint(j.Attempt)})
 	}), recipe)

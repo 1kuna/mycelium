@@ -37,6 +37,15 @@ the first project profile and for subsequent heavy commands.
 3. Where is the shared network drive (NAS) mounted on each machine?
 4. Which machines does someone use every day, and which are laptops?
 
+## Shared orchestration hosts
+
+A machine running agents or interactive tools can also be a worker. Measure its
+external-memory history and owner bursts, then use the [shared-host profile](shared-hosts.md)
+with positive CPU/RAM allowances. Keep ordinary fitting machines first; permit
+light native CPU work inside the shared host's limits. Do not clear an existing
+drain to make a setup appear ready. Hard CPU shares and pressure yielding require
+the separate qualification described there.
+
 ## 1. Check prerequisites on every machine
 
 - **OS:** Linux on x86-64 or ARM64, or macOS on Apple Silicon.
