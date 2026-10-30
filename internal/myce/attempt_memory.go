@@ -343,10 +343,15 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 			}
 		}
 	}()
+	var device <-chan *AttemptMemoryPeak
 	if estimateFeedingAttempt(j) && !j.Spec.Needs.cpuOnly() && (w.Machine.GPU == "cuda" || w.Machine.GPU == "xpu") {
-		samplers.Add(1)
+		result := make(chan *AttemptMemoryPeak, 1)
+		device = result
 		go func() {
-			defer samplers.Done()
+			// Device fdinfo can block in the same driver as host collection.
+			// Own the result locally so a late read cannot change published facts.
+			var devicePeak *AttemptMemoryPeak
+			defer func() { result <- devicePeak }()
 			deviceTick := time.NewTicker(5 * time.Second)
 			defer deviceTick.Stop()
 			for {
@@ -358,14 +363,14 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 					if a.processIDs(ids) != nil || len(ids) == 0 {
 						continue
 					}
-					gb, err := w.attemptDeviceMemory(ctx, ids)
+					gb, err := w.attemptDeviceMemory(ctx, ids, a.fs)
 					if err != nil {
 						if !errors.Is(err, errAttemptMemoryPending) {
 							return
 						}
 						continue
 					}
-					record(&AttemptMemoryPeak{DeviceGB: &gb})
+					devicePeak = sampledMemoryPeak(devicePeak, &AttemptMemoryPeak{DeviceGB: &gb})
 				}
 			}
 		}()
@@ -374,10 +379,20 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 	return func() *AttemptMemoryPeak {
 		once.Do(func() {
 			cancel()
+			wait, stopWaiting := context.WithTimeout(context.Background(), attemptMemorySamplePeriod)
+			defer stopWaiting()
 			samplers.Wait()
 			final := a.peak()
 			record(final)
 			sampleHost(final)
+			if device != nil {
+				select {
+				case devicePeak := <-device:
+					record(devicePeak)
+				case <-wait.Done():
+					completeGPUHost = false
+				}
+			}
 			var collected gpuHostCollection
 			if driver != nil {
 				// Proc/debugfs reads cannot be cancelled once inside the kernel.
@@ -385,7 +400,7 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 				// indefinitely and a late return cannot mutate published facts.
 				select {
 				case collected = <-driver:
-				case <-time.After(attemptMemorySamplePeriod):
+				case <-wait.Done():
 				}
 			}
 			age := clock.Now().Sub(collected.last)
@@ -412,7 +427,7 @@ var (
 	errAttemptMemoryUnsupported = errors.New("attempt GPU memory accounting unsupported")
 )
 
-func (w Worker) attemptDeviceMemory(ctx context.Context, ids map[int]bool) (float64, error) {
+func (w Worker) attemptDeviceMemory(ctx context.Context, ids map[int]bool, fs memoryFS) (float64, error) {
 	if w.Machine.GPU == "cuda" {
 		selector := w.Machine.Device
 		if w.selectedDevice != nil {
@@ -436,12 +451,12 @@ func (w Worker) attemptDeviceMemory(ctx context.Context, ids map[int]bool) (floa
 	if w.Machine.GPU == "xpu" && w.selectedDevice != nil && w.selectedDevice.pciAddress != "" {
 		clients := map[string]float64{}
 		for pid := range ids {
-			entries, err := os.ReadDir(filepath.Join("/proc", strconv.Itoa(pid), "fdinfo"))
+			entries, err := fs.ReadDir(filepath.Join("/proc", strconv.Itoa(pid), "fdinfo"))
 			if err != nil {
 				continue
 			}
 			for _, entry := range entries {
-				b, err := os.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "fdinfo", entry.Name()))
+				b, err := fs.ReadFile(filepath.Join("/proc", strconv.Itoa(pid), "fdinfo", entry.Name()))
 				if err != nil {
 					continue
 				}
