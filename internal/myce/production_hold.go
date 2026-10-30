@@ -400,7 +400,7 @@ func (q *Queue) productionOccupancyReason(j *Job) string {
 // Reuse dispatch's qualified, frozen extension and admission checks on a copy.
 // This changes only queued host affinity; it creates no release or attempt.
 func (q *Queue) productionSpilloverTarget(j *Job) string {
-	approved := q.s.Policies[j.Spec.Project].ProductionParityHosts
+	approved := q.s.Policies[j.Spec.Project].ProductionParityHosts[j.Spec.workType()]
 	if len(approved) == 0 || !j.Spec.extensionJob() || j.Spec.ExtensionCheck != nil || q.productionOccupancyReason(j) == "" {
 		return ""
 	}

@@ -16,13 +16,13 @@ import (
 
 // MaxConcurrent covers all classes; legacy experiment caps retain their scope.
 type ProjectPolicy struct {
-	DefaultCallPriority      string   `json:"default_call_priority,omitempty" yaml:"default_call_priority,omitempty"`
-	AllowedMachines          []string `json:"allowed_machines,omitempty" yaml:"allowed_machines,omitempty"`
-	ProductionParityHosts    []string `json:"production_parity_hosts,omitempty" yaml:"production_parity_hosts,omitempty"`
-	MaxConcurrent            int      `json:"max_concurrent,omitempty" yaml:"max_concurrent,omitempty"`
-	Weight                   float64  `json:"weight" yaml:"weight"`
-	MaxConcurrentExperiments int      `json:"max_concurrent_experiments" yaml:"max_concurrent_experiments"`
-	MaxMemoryShare           float64  `json:"max_memory_share" yaml:"max_memory_share"`
+	DefaultCallPriority      string              `json:"default_call_priority,omitempty" yaml:"default_call_priority,omitempty"`
+	AllowedMachines          []string            `json:"allowed_machines,omitempty" yaml:"allowed_machines,omitempty"`
+	ProductionParityHosts    map[string][]string `json:"production_parity_hosts,omitempty" yaml:"production_parity_hosts,omitempty"`
+	MaxConcurrent            int                 `json:"max_concurrent,omitempty" yaml:"max_concurrent,omitempty"`
+	Weight                   float64             `json:"weight" yaml:"weight"`
+	MaxConcurrentExperiments int                 `json:"max_concurrent_experiments" yaml:"max_concurrent_experiments"`
+	MaxMemoryShare           float64             `json:"max_memory_share" yaml:"max_memory_share"`
 }
 type FairUsage struct {
 	Seconds float64   `json:"seconds"`
@@ -93,13 +93,46 @@ func validateProjectPolicies(p map[string]ProjectPolicy) error {
 				return errors.New("project allowed_machines must contain nonempty machine names")
 			}
 		}
-		for _, host := range v.ProductionParityHosts {
-			if strings.TrimSpace(host) == "" || host != strings.TrimSpace(host) {
-				return errors.New("production_parity_hosts must contain nonempty exact host names")
+		for work, hosts := range v.ProductionParityHosts {
+			prefix, name, _ := strings.Cut(work, ":")
+			if (prefix != "kind" && prefix != "program" && prefix != "extension") || strings.TrimSpace(name) == "" || work != strings.TrimSpace(work) {
+				return errors.New("production_parity_hosts keys must be exact kind:<name>, program:<type> or extension:<name> work identifiers")
+			}
+			for _, host := range hosts {
+				if strings.TrimSpace(host) == "" || host != strings.TrimSpace(host) {
+					return errors.New("production_parity_hosts must contain nonempty exact host names")
+				}
 			}
 		}
 		if name == "" || !validMemoryValue(v.Weight) || v.Weight <= 0 || v.MaxConcurrent < 0 || v.MaxConcurrentExperiments < 0 || !validMemoryValue(v.MaxMemoryShare) || v.MaxMemoryShare > 1 {
 			return errors.New("project requires positive finite weight, nonnegative concurrency caps, and memory share in [0,1]")
+		}
+	}
+	return nil
+}
+
+func cloneProductionParityHosts(approvals map[string][]string) map[string][]string {
+	if approvals == nil {
+		return nil
+	}
+	copy := make(map[string][]string, len(approvals))
+	for work, hosts := range approvals {
+		copy[work] = slices.Clone(hosts)
+	}
+	return copy
+}
+
+// A physical host may be configured before its first worker check-in.
+func (q *Queue) validateProductionParityHosts(approvals map[string][]string) error {
+	for _, hosts := range approvals {
+		for _, host := range hosts {
+			known := q.s.Hosts[host] != nil
+			for _, m := range q.s.Machines {
+				known = known || hostID(m) == host && m.Replacement == nil
+			}
+			if !known {
+				return fmt.Errorf("production_parity_hosts: unknown host %q; use a configured or registered physical host ID", host)
+			}
 		}
 	}
 	return nil
@@ -128,8 +161,11 @@ func (q *Queue) configureProjects(p map[string]ProjectPolicy, seedOnly bool) err
 			if err := q.validateMachineNames(v.AllowedMachines); err != nil {
 				return err
 			}
+			if err := q.validateProductionParityHosts(v.ProductionParityHosts); err != nil {
+				return err
+			}
 			v.AllowedMachines = slices.Clone(v.AllowedMachines)
-			v.ProductionParityHosts = slices.Clone(v.ProductionParityHosts)
+			v.ProductionParityHosts = cloneProductionParityHosts(v.ProductionParityHosts)
 			copy[k] = v
 		}
 		if q.policyRevision() == ^uint64(0) {
