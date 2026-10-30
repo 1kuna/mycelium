@@ -12,6 +12,9 @@ import time
 import uuid
 
 
+MACOS_HANDLE_PROBE = [sys.executable, str(Path(__file__).with_name('gate-handles.py'))]
+
+
 def interrupted(signum, frame):
     raise SystemExit(128 + signum)
 
@@ -32,16 +35,13 @@ def scratch_processes(scratch, pids):
                 except (FileNotFoundError, PermissionError):
                     pass
     else:
-        # macOS ships lsof; inspect only working/executable/standard handles.
-        # A peer merely reading a log on another descriptor is not a fixture.
+        # Apple's lsof cannot exclude network mounts, and even +D scans can
+        # block on unrelated storage. libproc reads process paths directly.
         if not pids:
             return found
-        command = ['lsof', '-b', '-nP', '-O', '-a', '-u', str(os.getuid()),
-                   '-d', 'cwd,txt,0,1,2', '-Fpn']
-        # A network filesystem can strand even -b lsof in uninterruptible I/O.
-        # Avoid run/check_output's unbounded reap after timeout, and avoid pipes
-        # whose EOF could depend on the stranded probe. Five seconds bounds this
-        # optional inventory; uncertainty costs retained scratch, never safety.
+        command = [*MACOS_HANDLE_PROBE, scratch, *map(str, sorted(pids))]
+        # Keep native inspection in a bounded subprocess: an unavailable kernel
+        # probe costs retained scratch, never fixture signals or deletion.
         with tempfile.TemporaryFile(mode='w+t') as output_file:
             probe = subprocess.Popen(command, stdout=output_file, stderr=subprocess.DEVNULL)
             try:

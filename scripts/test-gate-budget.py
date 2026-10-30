@@ -7,6 +7,7 @@ import io
 from pathlib import Path
 import signal
 import shlex
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -21,6 +22,54 @@ spec.loader.exec_module(budget)
 
 
 class GateBudgetTests(unittest.TestCase):
+    def test_hung_network_mount_does_not_block_owned_scratch(self):
+        if sys.platform != 'darwin':
+            self.skipTest('native macOS process API')
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'scripts').mkdir()
+            gate = root / 'scripts/gate.sh'
+            gate.write_text('cd "$GATE_SCRATCH"\nsleep 60 &\nexit 0\n')
+            # Simulate tools stuck while examining an unrelated network mount.
+            # The native inventory must not need either tool to find fixtures.
+            for name in ('mount', 'lsof'):
+                tool = root / name
+                tool.write_text(f'#!{sys.executable}\nimport pathlib, signal\n'
+                                f'pathlib.Path({str(root / "network-touched")!r}).touch()\n'
+                                'signal.pause()\n')
+                tool.chmod(0o755)
+            env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ['PATH'])
+            run = subprocess.run([sys.executable, str(Path(budget.__file__)), str(gate)],
+                                 env=env, capture_output=True, text=True, timeout=15)
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+            self.assertEqual(list((root / '.gate').iterdir()), [])
+            self.assertFalse((root / 'network-touched').exists())
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'native macOS process API')
+    def test_native_executable_and_standard_handle_ownership(self):
+        with tempfile.TemporaryDirectory() as folder:
+            scratch = Path(folder).resolve()
+            executable = scratch / 'sleep'
+            shutil.copyfile('/bin/sleep', executable)
+            executable.chmod(0o755)
+            # A copied Apple platform binary cannot execute with its original
+            # platform signature; use an ad-hoc signature for this local fixture.
+            subprocess.run(['codesign', '--force', '--sign', '-', str(executable)],
+                           capture_output=True, check=True)
+            with (scratch / 'stdout').open('w') as output:
+                executable_child = subprocess.Popen([str(executable), '60'], cwd='/')
+                handle_child = subprocess.Popen(['/bin/sleep', '60'], cwd='/', stdout=output)
+                peer = subprocess.Popen(['/bin/sleep', '60'], cwd='/')
+                children = [executable_child, handle_child, peer]
+                try:
+                    self.assertEqual(budget.scratch_processes(str(scratch),
+                                                             {p.pid for p in children}),
+                                     {executable_child.pid, handle_child.pid})
+                finally:
+                    for child in children:
+                        child.kill()
+                        child.wait()
+
     def test_stuck_handle_probe_retains_scratch_and_reports(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -36,8 +85,17 @@ class GateBudgetTests(unittest.TestCase):
             output = io.StringIO()
             started = time.monotonic()
             real_kill = os.kill
+            real_scratch_processes = budget.scratch_processes
+
+            def macos_handles(*args):
+                # Simulate only the native probe, leaving ps flags native to
+                # the host running this cross-platform regression.
+                with patch.object(sys, 'platform', 'darwin'):
+                    return real_scratch_processes(*args)
+
             with (patch.object(sys, 'argv', ['gate-budget.py', str(gate)]),
-                  patch.object(sys, 'platform', 'darwin'),
+                  patch.object(budget, 'scratch_processes', side_effect=macos_handles),
+                  patch.object(budget, 'MACOS_HANDLE_PROBE', [str(probe)]),
                   patch.dict(os.environ, env),
                   patch.object(os, 'kill', wraps=real_kill) as kill,
                   contextlib.redirect_stdout(output), contextlib.redirect_stderr(output)):
@@ -61,7 +119,7 @@ class GateBudgetTests(unittest.TestCase):
                          [unittest.mock.call(timeout=5), unittest.mock.call(timeout=.2)])
         probe.kill.assert_called_once_with()
         command = launch.call_args.args[0]
-        self.assertIn('-O', command)
+        self.assertEqual(command[:2], budget.MACOS_HANDLE_PROBE)
 
     def test_quick_timeout_uses_remaining_budget(self):
         script = Path(__file__).with_name('gate.sh').read_text()
