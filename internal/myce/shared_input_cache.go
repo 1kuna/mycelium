@@ -95,6 +95,9 @@ func removeSharedEntry(path string) error {
 	return os.RemoveAll(path)
 }
 func (c *SharedInputCache) Acquire(ctx context.Context, s SharedInput, nasRoot string) (string, func(), error) {
+	if err := ctx.Err(); err != nil {
+		return "", nil, err
+	}
 	if err := s.validate(); err != nil {
 		return "", nil, err
 	}
@@ -115,6 +118,9 @@ func (c *SharedInputCache) Acquire(ctx context.Context, s SharedInput, nasRoot s
 		})
 	}
 	path, err := c.ensure(ctx, s, nasRoot)
+	if err == nil {
+		err = ctx.Err()
+	}
 	if err != nil {
 		release()
 		return "", nil, err
