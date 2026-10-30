@@ -12,6 +12,15 @@ Restart=on-failure
 # Avoid a hot restart loop on invalid configuration; costs 60s recovery latency.
 RestartSec=60
 UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
 [Install]
 WantedBy=default.target

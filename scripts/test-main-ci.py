@@ -29,11 +29,15 @@ class WatcherTest(unittest.TestCase):
         self.first = self.commit('initial')
         self.repo = self.root / 'clone'
         self.git(self.root, 'clone', '-q', str(self.remote), str(self.repo))
+        # Exercise real Git fetch against a local stand-in for the canonical URL.
+        self.git(self.repo, 'config', f'url.{self.remote}.insteadOf',
+                 'https://github.com/fixture/repo.git')
         self.state = self.root / 'state'
         self.state.mkdir()
         self.jobs = {}
         self.submissions = []
         self.statuses = []
+        self.descriptions = {}
         self.fail_status = None
         self.real_command = ci.command
         self.addCleanup(patch.stopall)
@@ -58,11 +62,20 @@ class WatcherTest(unittest.TestCase):
         if argv[0] == 'git':
             return self.real_command(argv, cwd, myce=myce)
         if argv[0] == 'gh':
+            if '--method' not in argv:
+                latest = {}
+                sha = argv[-1].split('/')[-2]
+                for commit, context, state in self.statuses:
+                    if commit == sha:
+                        latest[context] = {'context': context, 'state': state,
+                                           'description': self.descriptions[(sha, context)]}
+                return json.dumps({'statuses': list(latest.values())})
             fields = dict(arg.split('=', 1) for arg in argv if '=' in arg)
             sha = next(arg.rsplit('/', 1)[1] for arg in argv if '/statuses/' in arg)
             if fields['state'] == self.fail_status:
                 raise RuntimeError('synthetic publication outage')
             self.statuses.append((sha, fields['context'], fields['state']))
+            self.descriptions[(sha, fields['context'])] = fields['description']
             return '{}'
         self.assertTrue(myce)
         self.assertEqual(argv[:3], ['fake-myce', 'run', '--profile'])
@@ -167,15 +180,75 @@ class WatcherTest(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             ci.platform_profile(PROFILE.replace('git: HEAD', 'git: main'), self.first, 'linux')
 
+    def test_origin_cannot_supply_fork_or_pr_code(self):
+        # A different local origin contains a commit the canonical main lacks.
+        fork = self.root / 'fork'
+        self.git(self.root, 'clone', '-q', str(self.remote), str(fork))
+        (fork / 'change').write_text('untrusted fork')
+        self.git(fork, 'add', '.')
+        self.git(fork, '-c', 'user.name=Fixture', '-c',
+                 'user.email=fixture@example.invalid', 'commit', '-qm', 'fork')
+        fork_sha = self.git(fork, 'rev-parse', 'HEAD')
+        self.git(self.repo, 'remote', 'set-url', 'origin', str(fork))
+        self.watcher.tick()
+        self.assertEqual({key.split(':')[1] for key in self.jobs}, {self.first})
+        self.assertFalse(any(s[0] == fork_sha for s in self.statuses))
+
+    def test_downtime_publication_is_bounded_and_cursor_keeps_remaining_merges(self):
+        self.watcher.tick()
+        commits = [self.commit(f'backlog {n}') for n in range(ci.MAX_PENDING + 2)]
+        before = len(self.statuses)
+        self.watcher.tick()
+        self.assertEqual(len(self.watcher.data['pending']), ci.MAX_PENDING)
+        self.assertEqual(len(self.statuses) - before, 2 * (ci.MAX_PENDING - 1))
+        self.assertEqual(self.watcher.data['cursor'], commits[ci.MAX_PENDING - 2])
+        self.finish(self.first)
+        self.watcher.tick()
+        self.watcher = self.restart()
+        self.watcher.tick()
+        self.assertEqual(self.watcher.data['cursor'], commits[ci.MAX_PENDING - 1])
+        self.assertEqual(len(self.jobs), 4)
+
+    def test_status_retry_deduplicates_ambiguous_publication(self):
+        self.watcher.tick()
+        self.finish(self.first)
+        original = self.command
+        interrupted = False
+
+        def lose_reply(argv, cwd, *, myce=False):
+            nonlocal interrupted
+            result = original(argv, cwd, myce=myce)
+            if argv[0] == 'gh' and 'state=success' in argv and not interrupted:
+                interrupted = True
+                raise RuntimeError('reply lost after accepted status')
+            return result
+
+        # Simulate a crash immediately after posting, before local state is saved.
+        with patch.object(ci, 'command', lose_reply):
+            with self.assertRaises(RuntimeError):
+                self.watcher.status(self.first, 'darwin', 'success', 'accepted')
+        self.watcher = self.restart()
+        before = len(self.statuses)
+        self.watcher.status(self.first, 'darwin', 'success', 'accepted')
+        self.assertEqual(len(self.statuses), before)
+        for _ in range(3):
+            self.watcher.status(self.first, 'linux', 'error', 'retrying')
+        self.assertEqual(len(self.statuses), before + 1)
+
     def test_credentials_do_not_cross_command_boundaries(self):
         patch.stopall()
         with patch.dict(os.environ, {'GH_TOKEN': 'synthetic-github',
+                                    'GITHUB_TOKEN': 'synthetic-github',
+                                    'GH_ENTERPRISE_TOKEN': 'synthetic-github',
+                                    'GITHUB_ENTERPRISE_TOKEN': 'synthetic-github',
                                     'MYCE_TOKEN': 'synthetic-fleet', 'MYCE_NOTIFY': 'unused'}):
             with patch.object(ci.subprocess, 'run') as run:
                 run.return_value = subprocess.CompletedProcess([], 0, '{}', '')
                 ci.command(['myce', 'run'], self.repo, myce=True)
                 env = run.call_args.kwargs['env']
-                self.assertNotIn('GH_TOKEN', env)
+                for name in ('GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN',
+                             'GITHUB_ENTERPRISE_TOKEN'):
+                    self.assertNotIn(name, env)
                 self.assertNotIn('MYCE_NOTIFY', env)
                 self.assertEqual(env['MYCE_TOKEN'], 'synthetic-fleet')
                 ci.command(['gh', 'api'], self.repo)

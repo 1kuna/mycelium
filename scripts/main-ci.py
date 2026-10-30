@@ -11,12 +11,16 @@ import time
 
 PLATFORMS = ('darwin', 'linux')
 TERMINAL = {'succeeded': 'success', 'failed': 'failure', 'cancelled': 'failure'}
+# Bound publication work after downtime; remaining merges stay behind the cursor.
+# Costs catch-up latency, but never drops a merge or starts extra concurrent suites.
+MAX_PENDING = 16
 
 
 def command(argv: list[str], cwd: Path, *, myce: bool = False) -> str:
     env = dict(os.environ)
     for name in list(env):
-        if (myce and name in ('GH_TOKEN', 'GITHUB_TOKEN', 'MYCE_NOTIFY')) or (
+        if (myce and name in ('GH_TOKEN', 'GITHUB_TOKEN', 'GH_ENTERPRISE_TOKEN',
+                             'GITHUB_ENTERPRISE_TOKEN', 'MYCE_NOTIFY')) or (
             not myce and name.startswith('MYCE_')
         ):
             env.pop(name)
@@ -57,6 +61,15 @@ class Watcher:
         temporary.replace(self.path)
 
     def status(self, sha: str, platform: str, state: str, description: str) -> None:
+        # Compare GitHub's latest context, including after an ambiguous POST reply.
+        # Reposting an unchanged infrastructure error every minute eventually hits
+        # GitHub's per-SHA/context status limit and prevents terminal publication.
+        context = f'mycelium/full-{platform}'
+        latest = json.loads(command(['gh', 'api',
+                                    f'repos/{self.github}/commits/{sha}/status'], self.repo))
+        if any(s['context'] == context and s['state'] == state and
+               s['description'] == description for s in latest['statuses']):
+            return
         command(['gh', 'api', '--method', 'POST',
                  f'repos/{self.github}/statuses/{sha}', '-f', f'state={state}',
                  '-f', f'context=mycelium/full-{platform}', '-f',
@@ -64,7 +77,9 @@ class Watcher:
                  f'target_url=https://github.com/{self.github}/commit/{sha}'], self.repo)
 
     def discover(self) -> None:
-        self.git('fetch', '--quiet', 'origin', 'refs/heads/main:refs/remotes/origin/main')
+        # Do not trust origin: a fork clone must never supply code for real-repo statuses.
+        self.git('fetch', '--quiet', f'https://github.com/{self.github}.git',
+                 'refs/heads/main:refs/remotes/origin/main')
         head = self.git('rev-parse', 'refs/remotes/origin/main')
         if self.data is None:
             # Explicit bootstrap: test current main once, not all historical v1 commits.
@@ -75,10 +90,12 @@ class Watcher:
             history = self.git('rev-list', '--first-parent', head).splitlines()
             if cursor not in history:
                 raise RuntimeError('main history rewritten; operator must reconcile cursor')
-            commits = list(reversed(history[:history.index(cursor)]))
+            commits = list(reversed(history[:history.index(cursor)]))[
+                :max(0, MAX_PENDING - len(self.data['pending']))]
         for sha in commits:
             self.data['pending'].append({'sha': sha, 'platforms': {}})
-        self.data['cursor'] = head
+        if commits:
+            self.data['cursor'] = commits[-1]
         self.save()
         # Publish pending even for backlog; replay if publication was interrupted.
         for item in self.data['pending']:

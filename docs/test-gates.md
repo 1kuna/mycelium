@@ -157,11 +157,15 @@ Linux runs its native builds and full race/dev suite. The profile's existing
 result check determines job success. No GitHub-hosted runner, GitHub Actions
 workflow, PR trigger, test schedule or model callback is involved.
 
-The watcher checks main every 60 seconds and queues every first-parent commit,
+The watcher fetches main from the canonical GitHub repository every 60 seconds
+(never from a potentially forked `origin`) and queues every first-parent commit,
 including squash merges and direct main fixes. It does not run each constituent
 commit of a merge. Bootstrap tests current main once; it does not replay the v1
-history. A persistent cursor catches all intervening commits after downtime.
-Every discovered SHA immediately gets the two pending contexts. One commit's
+history. A persistent cursor catches all intervening commits after downtime,
+admitting at most 16 pending commits at once. This bounds status publication
+after downtime at the cost of delaying discovery of the remaining backlog; the
+cursor advances only through admitted commits. Every admitted SHA gets the two
+pending contexts. One commit's
 two platform jobs may be active at a time; later commits wait instead of
 cancelling earlier proof. Consequently a busy fleet or merge backlog can delay
 results beyond an hour; pending statuses make that visible.
@@ -172,7 +176,9 @@ same submissions after watcher restart or an ambiguous submit reply. Existing
 results and observer recovery; the watcher reopens the same receipt each pass.
 Terminal states become public `success`/`failure` commit statuses, with job IDs;
 infrastructure errors become `error` and retry the same key next pass. A failed
-test is terminal and is never automatically rerun. No agent is invoked. Public
+test is terminal and is never automatically rerun. Before posting, the watcher
+compares the latest GitHub context to avoid duplicate statuses after ambiguous
+replies or prolonged infrastructure failures. No agent is invoked. Public
 status descriptions contain no raw error output, host names, credentials or
 local paths. Inspect a failed job through the authenticated Mycelium job/log
 commands using the ID in its status. The watcher retains a small results ledger
