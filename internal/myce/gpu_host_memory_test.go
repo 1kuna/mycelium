@@ -192,9 +192,20 @@ func TestGPUHostMemoryTwoCardAdmission(t *testing.T) {
 	for _, pair := range [][2]string{{"separation", "asr"}, {"separation", "separation"}} {
 		t.Run(strings.Join(pair[:], "+"), func(t *testing.T) {
 			q, clock, m, base := gpuHostFixture(t)
-			// Component peaks from #303's complete attempts. Driver/host drops are
-			// explicit real-shaped fixtures, pending the isolated native measurement.
-			peaks := map[string][2]float64{"separation": {7.582687, 7.678570}, "asr": {3.768425, 3.768913}}
+			// Retain #303's historical resident floors and complete components.
+			// Driver, host-drop and synchronous residual values are from the
+			// public sequential measurement. Keep the unadjusted separation
+			// residual: subtracting the overlapping CPU job would understate
+			// what the production sampler conservatively charges.
+			// Both native attempts had host swap-out, so their actual records
+			// are ineligible. These pressure-free fixtures test the arithmetic
+			// if complete local repetitions establish those same bounds; they
+			// do not certify the native attempts or enable their learning.
+			peaks := map[string][2]float64{"separation": {7.645931243896484, 7.8166961669921875}, "asr": {3.725048065185547, 4.041187286376953}}
+			components := map[string][2]float64{"separation": {7.582687, 7.678570}, "asr": {3.768425, 3.768913}}
+			drivers := map[string]float64{"separation": .162628173828125, "asr": .0813140869140625}
+			drops := map[string]float64{"separation": 8.355888366699219, "asr": 3.8674354553222656}
+			outside := map[string]float64{"separation": .8351707458496094, "asr": .22780990600585938}
 			totals := map[string]float64{"separation": 13.084995, "asr": 9.590683}
 			wants := map[string]float64{}
 			for _, kind := range []string{"separation", "asr"} {
@@ -216,12 +227,13 @@ func TestGPUHostMemoryTwoCardAdmission(t *testing.T) {
 					r := result(run, true)
 					device := 8.0
 					total := totals[kind]
-					r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, NonreclaimableGB: &host, CgroupGB: &total, DeviceGB: &device, Events: &MemoryEventCounts{}, GPUHost: gpuHostFixturePeak(.16, host+.2)}
+					component, driver, drop, residual := components[kind][n], drivers[kind], drops[kind], outside[kind]
+					r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, NonreclaimableGB: &component, CgroupGB: &total, DeviceGB: &device, Events: &MemoryEventCounts{}, GPUHost: &GPUHostMemory{DriverGB: &driver, HostDropGB: &drop, OutsideGB: &residual}}
 					if err := q.Complete(r); err != nil {
 						t.Fatal(err)
 					}
 				}
-				wants[kind] = (peaks[kind][1] + .2) * 1.25
+				wants[kind] = (peaks[kind][1] + outside[kind]) * 1.25
 			}
 			// Exercise persistence and identity revalidation before using either card.
 			var db string
