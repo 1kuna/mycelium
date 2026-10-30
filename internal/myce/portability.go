@@ -167,6 +167,8 @@ func (q *Queue) portability(req PortabilityRequest) PortabilityReport {
 	}}
 	if req.Spec != nil {
 		report.Notes = append(report.Notes, PlacementAdvisories(*req.Spec, req.RequirementReasons)...)
+	} else if req.Recipe != nil {
+		report.Notes = append(report.Notes, PlacementAdvisories(Spec{}, req.RequirementReasons, req.Recipe.Variants...)...)
 	}
 	rows := map[ExecutionTarget]*PortabilityTarget{}
 	row := func(t ExecutionTarget) *PortabilityTarget {

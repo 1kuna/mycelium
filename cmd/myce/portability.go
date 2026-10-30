@@ -54,7 +54,7 @@ func portabilityCommand(ctx context.Context, args []string, out io.Writer) error
 		}
 		request.Project = p.Project
 		request.RequirementReasons = a.Entries[name].RequirementReasons
-		placementAdvice = myce.PlacementAdvisories(p.Spec, request.RequirementReasons)
+		placementAdvice = p.placementAdvisories()
 		if p.Native != nil {
 			request.Recipe = p.Native
 			root, err := os.Getwd()

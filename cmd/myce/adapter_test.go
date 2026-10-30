@@ -543,9 +543,20 @@ func TestAdapterNativeRecipeBeforeResultWrapping(t *testing.T) {
 		p, _, err := adapterProfile(projectAdapter{Project: "fixture", Default: "work", Entries: map[string]adapterEntry{"work": entry}}, "")
 		return p, err
 	}
+	e.Needs.GPU = &myce.GPUSelection{Devices: []string{"0"}}
 	p, err := lower(e)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if advice := p.placementAdvisories(); len(advice) != 1 || !strings.HasPrefix(advice[0], "Device pin") {
+		t.Fatal("lowered native device pin bypassed advice", advice)
+	}
+	if got := p.Native.Variants[0].Needs.GPU.Devices; len(got) != 1 || got[0] != "0" {
+		t.Fatal("advice changed native device restriction", got)
+	}
+	p.RequirementReasons = map[string]string{"device": "hardware diagnostic"}
+	if advice := p.placementAdvisories(); len(advice) != 0 {
+		t.Fatal("native device exception ignored", advice)
 	}
 	if len(p.Native.Variants[0].Sweeps["extension:work"].Run) != 0 {
 		t.Fatal("result check manufactured an omitted wave command")

@@ -171,8 +171,16 @@ func runProfile(ctx context.Context, name string, args []string, itemInputs map[
 	return runPreparedProfile(ctx, root, p, data, args, itemInputs, key, notify, config, joining, address, token, out, errOut)
 }
 
+func (p executionProfile) placementAdvisories() []string {
+	var variants []myce.ExtensionVariant
+	if p.Native != nil {
+		variants = p.Native.Variants
+	}
+	return myce.PlacementAdvisories(p.Spec, p.RequirementReasons, variants...)
+}
+
 func runPreparedProfile(ctx context.Context, root string, p executionProfile, data []byte, args []string, itemInputs map[string]string, key, notify, config, joining, address, token string, out, errOut io.Writer) error {
-	for _, advice := range myce.PlacementAdvisories(p.Spec, p.RequirementReasons) {
+	for _, advice := range p.placementAdvisories() {
 		fmt.Fprintln(errOut, "placement advisory: "+advice)
 	}
 	var err error

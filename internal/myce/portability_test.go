@@ -36,6 +36,18 @@ func TestPortabilityPinAdvice(t *testing.T) {
 	if err != nil || bytes.Contains(b, []byte("Host pin has no declared")) || bytes.Contains(b, []byte("private")) {
 		t.Fatalf("authored exception not respected/redacted: %s %v", b, err)
 	}
+	recipe := Extension{Variants: []ExtensionVariant{{Needs: ResourceNeeds{GPU: &GPUSelection{Devices: []string{"private-device"}}}}}}
+	r, err = q.Portability(PortabilityRequest{Recipe: &recipe})
+	b, _ = json.Marshal(r)
+	if err != nil || !bytes.Contains(b, []byte("omit needs.gpu.devices")) || bytes.Contains(b, []byte("private-device")) {
+		t.Fatalf("native device pin advice missing or private: %s %v", b, err)
+	}
+	recipe.RequirementReasons = map[string]string{"device": "private hardware requirement"}
+	r, err = q.Portability(PortabilityRequest{Recipe: &recipe})
+	b, _ = json.Marshal(r)
+	if err != nil || bytes.Contains(b, []byte("Device pin has no declared")) || bytes.Contains(b, []byte("private")) {
+		t.Fatalf("native device exception ignored or disclosed: %s %v", b, err)
+	}
 }
 func TestPortabilityLiveInventoryAndCoverage(t *testing.T) {
 	q, c := fixture(t)
