@@ -33,6 +33,18 @@ func (a *memoryAttempt) peak() *AttemptMemoryPeak {
 		if aok && kok && sok {
 			gb := (float64(anon) + float64(kernel) + float64(shmem)) / (1 << 30)
 			p.HostGB = &gb
+			unevictable, uok := stats["unevictable"]
+			dirty, dok := stats["file_dirty"]
+			writeback, wok := stats["file_writeback"]
+			if uok && dok && wok {
+				// Conservatively retain all kernel and shmem pages. Unevictable
+				// can overlap anon/shmem; double counting is safer than omitting
+				// locked file pages. Dirty/writeback pages need I/O before reclaim;
+				// sum them conservatively even where the counters overlap.
+				// This is not a driver pin counter; GPU sizing keeps total peaks.
+				nonreclaimable := gb + (float64(unevictable)+float64(dirty)+float64(writeback))/(1<<30)
+				p.nonreclaimableSampleGB = &nonreclaimable
+			}
 		}
 		for _, name := range []string{"workingset_refault_anon", "pswpout"} {
 			p.Constrained = p.Constrained || stats[name] > 0
@@ -265,6 +277,7 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	peak := a.peak()
+	completeNonreclaimable := peak != nil && peak.nonreclaimableSampleGB != nil
 	var mu sync.Mutex
 	var samplers sync.WaitGroup
 	hostSampled := false // Read only after joining the host sampler.
@@ -286,6 +299,7 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 				return
 			case <-hostTick.C:
 				sample := a.peak()
+				completeNonreclaimable = completeNonreclaimable && sample != nil && sample.nonreclaimableSampleGB != nil
 				hostSampled = hostSampled || sample != nil && sample.HostGB != nil
 				record(sample)
 			}
@@ -323,7 +337,11 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 		once.Do(func() {
 			cancel()
 			samplers.Wait()
-			record(a.peak())
+			final := a.peak()
+			record(final)
+			if j.Spec.Needs.cpuOnly() && peak != nil && hostSampled && completeNonreclaimable && final != nil && final.nonreclaimableSampleGB != nil {
+				peak.NonreclaimableGB = peak.nonreclaimableSampleGB
+			}
 			// Counter-only read zeros are diagnostic facts, not a new
 			// incomplete resident measurement that invalidates learning.
 			if !hostSampled && peak != nil && (peak.HostGB != nil || peak.CgroupGB != nil || peak.DeviceGB != nil || peak.Constrained) {

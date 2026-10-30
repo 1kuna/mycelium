@@ -2060,10 +2060,18 @@ admission meanings and defaults, including production. Optional `needs.memory:
 auto` first selects fresh accepted slice-1 whole-attempt peaks for the same
 work, recipe, input shape and machine/component, times 1.25. Host RAM uses the
 largest comparable accepted peak across sibling devices on the same host,
-target and memory layout, also times 1.25, when the environment matches and the
+target and memory layout when the environment matches and the
 source device's hardware/backend fingerprint still matches its current inventory
 (including the Linux kernel). Device-memory evidence retains its per-device
-identity and transfer margins. Without local history, use the same recipe/work/
+identity and transfer margins. For local Linux CPU work, at least two complete,
+unpressured non-reclaimable attempt peaks per contributing observation enable peak plus the largest of the
+observed range (maximum minus minimum), 25% of the retained component peak, and
+the existing snapshot drift floor (at least 128 MiB). Two attempts establish a
+range, not confidence in an unseen tail; retain the existing 25% allowance for
+unobserved growth between 200 ms samples. Keep all comparable resident peaks as
+a floor. Missing/incomplete local observations keep total-peak sizing. GPU work
+also keeps the larger resident/total peak times 1.25 until driver host-memory
+accounting is qualified. Without local history, use the same recipe/work/
 shape from another machine: prefer the same
 OS/architecture/accelerator/memory-layout family, times 1.25 × 1.5; otherwise
 times 1.25 × 2. Label both as a cross-machine estimate. Next use an optional
@@ -2106,9 +2114,18 @@ caps remain supported and fit the job envelope.
 Linux native attempts use their existing shared parent cgroup for main and all
 sidecars, bounded/zero swap and a job OOM cause. Sample whole-parent
 anon + kernel + shmem from `memory.stat` every 200 ms and retain the kernel's
-total high-water mark from `memory.peak`. Learned host reservations use the larger
-resident/total peak with the existing headroom factor: the enforced parent
-charges file-backed memory too. Device peaks remain separate, with the existing
+total high-water mark from `memory.peak`. Complete new measurements also retain
+anon + kernel + shmem + unevictable + file_dirty + file_writeback as a
+conservative non-reclaimable peak for CPU work. All six counters must be present.
+Retain all kernel/shmem memory and conservatively double-count overlapping
+locked/dirty/writeback pages rather than omit pages requiring I/O before reclaim.
+Clean file cache is excluded only for CPU work. The unevictable LRU counter is
+not a DMA pin counter: XPU pinned host buffers, shared USM CPU storage, CUDA
+registered/mapped host memory and driver allocations are not bounded by VRAM
+measurements. GPU work retains total-peak sizing; no reduced GPU envelope or
+GPU concurrency acceptance is claimed. Missing counters, older workers, macOS
+RSS evidence and cross-machine transfers retain conservative sizing. This
+refinement of #303/#399 does not relax pressure rejection. Device peaks remain separate, with the existing
 conservative host-plus-device accounting on unified devices.
 
 The ceiling-bound-envelope correction (#303, maintainer debugging assignment,
@@ -2119,8 +2136,9 @@ sample cannot establish true need even when its resident-only peak stays low.
 The queue applies this rule to older-worker results and excludes already-stored
 pressure evidence from estimates. Successful unconstrained exploration can
 re-teach the peak. File-heavy jobs can therefore reserve more memory or explore
-again; this cost buys headroom over the measured total instead of repeatedly
-learning a binding ceiling. Ceiling-bound explicit-memory runs cannot seed an
+again; pressure invalidates the measured range too, so the next comparable
+unhinted attempt explores. A smaller resident-based ceiling is not a promise
+that a file-heavy workload will avoid reclaim pressure. Ceiling-bound explicit-memory runs cannot seed an
 auto estimate. Explicit admission and job outcomes retain their existing behavior.
 The attempt's `memory.events` max/high/OOM counts are kept beside its peak;
 absent counts mean they were not read, not zero.

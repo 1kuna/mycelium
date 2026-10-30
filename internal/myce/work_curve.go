@@ -223,8 +223,10 @@ func (q *Queue) acceptCurveReports(c Checkin, m *Machine) {
 				p.IncrementalDeviceMemoryGB = max(old.IncrementalDeviceMemoryGB, p.IncrementalDeviceMemoryGB)
 				// Memory evidence comes only from accepted attempts, never a report.
 				p.MemoryPeak, p.MemoryRecordedAt, p.MemoryConfiguration, p.MemoryLayout = old.MemoryPeak, old.MemoryRecordedAt, old.MemoryConfiguration, old.MemoryLayout
+				p.MemoryRange = old.MemoryRange
 				if old.StaleReason != "" {
 					p.MemoryPeak = nil
+					p.MemoryRange = nil
 				}
 				p.Machine = m.ID
 				p.Session = m.Session
@@ -296,6 +298,7 @@ func (q *Queue) recordWorkOOM(j *Job, r Result, oomFailure bool) {
 		for id, point := range q.s.WorkObservations {
 			if sameMemoryWork(point, k, configuration) {
 				point.MemoryPeak, point.MemoryRecordedAt = nil, time.Time{}
+				point.MemoryRange = nil
 				if !oomFailure && r.MemoryPeak != nil && r.MemoryPeak.Constrained {
 					// Keep the existing diagnostic as invalidation provenance,
 					// never as a learned estimate or a new class-level bound.

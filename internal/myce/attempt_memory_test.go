@@ -4,7 +4,9 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestAttemptMemoryCeilingEventsConstrainPeak(t *testing.T) {
@@ -24,6 +26,56 @@ func TestAttemptMemoryCeilingEventsConstrainPeak(t *testing.T) {
 			}
 			if p := a.peak(); p == nil || p.HostGB == nil || *p.HostGB != 2 || !p.Constrained {
 				t.Fatalf("ceiling-bound resident peak was unconstrained: %+v", p)
+			}
+		})
+	}
+}
+
+type nonreclaimableSamplingFS struct {
+	memoryFS
+	reads   atomic.Int32
+	sampled chan struct{}
+	missing bool
+}
+
+func (f *nonreclaimableSamplingFS) ReadFile(path string) ([]byte, error) {
+	b, err := f.memoryFS.ReadFile(path)
+	if filepath.Base(path) == "memory.stat" && f.reads.Add(1) == 2 {
+		close(f.sampled)
+		if f.missing {
+			return []byte("anon 4021977088\nkernel 17985536\nshmem 4096\n"), nil
+		}
+	}
+	return b, err
+}
+
+func TestAttemptMemoryNonreclaimableRequiresCompleteSampling(t *testing.T) {
+	for _, missing := range []bool{false, true} {
+		t.Run(strconv.FormatBool(missing), func(t *testing.T) {
+			a, err := fakeCeilings(t).create("attempt-complete", 16<<30, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(a.path, "memory.stat"), []byte("anon 4021977088\nkernel 17985536\nshmem 4096\nunevictable 0\nfile_dirty 0\nfile_writeback 0\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			f := &nonreclaimableSamplingFS{memoryFS: a.fs, sampled: make(chan struct{}), missing: missing}
+			a.fs = f
+			spec := cpuSpec(1, 0)
+			spec.Needs.Platform = Platform{Required: []string{"cpu"}}
+			finish := (Worker{}).observeAttemptMemory(a, Job{Spec: spec}, nil)
+			defer finish()
+			select {
+			case <-f.sampled:
+			case <-time.After(5 * time.Second):
+				t.Fatal("host sampler did not produce a sample")
+			}
+			p := finish()
+			if (p.NonreclaimableGB == nil) != missing {
+				t.Fatalf("complete=%v peak=%+v", !missing, p)
+			}
+			if !missing && *p.NonreclaimableGB != float64(4021977088+17985536+4096)/(1<<30) {
+				t.Fatal("wrong sampled peak")
 			}
 		})
 	}
@@ -89,5 +141,42 @@ func TestAttemptMemoryDeviceAccounting(t *testing.T) {
 	}
 	if _, _, err := drmAttemptMemory([]byte("drm-client-id: 7\ndrm-pdev: 0000:03:00.0\n"), "0000:03:00.0"); err != errAttemptMemoryPending {
 		t.Fatal("uninitialised DRM counters disabled sampling", err)
+	}
+}
+
+func TestAttemptMemoryNonreclaimableRetainsLockedPages(t *testing.T) {
+	a, err := fakeCeilings(t).create("attempt-cache", 16<<30, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A live-shaped sample: 3.746 GiB anon, 1.103 GiB file, 17 MiB
+	// kernel. Include locked file pages and shmem without counting file cache.
+	for name, value := range map[string]string{
+		"memory.stat":   "anon 4021977088\nfile 1183789056\nkernel 17985536\nshmem 4096\nunevictable 67108864\nfile_dirty 134217728\nfile_writeback 33554432\nslab_reclaimable 3814504\n",
+		"memory.events": "max 0\nhigh 0\noom 0\noom_kill 0\noom_group_kill 0\n",
+	} {
+		if err := os.WriteFile(filepath.Join(a.path, name), []byte(value), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := a.peak()
+	want := float64(4021977088+17985536+4096+67108864+134217728+33554432) / (1 << 30)
+	if p.nonreclaimableSampleGB == nil || *p.nonreclaimableSampleGB != want || p.constrained() {
+		t.Fatalf("bad non-reclaimable measurement: %+v", p)
+	}
+	if p.NonreclaimableGB != nil {
+		t.Fatal("raw/release-only counter read claimed a complete peak")
+	}
+	if err := os.WriteFile(filepath.Join(a.path, "memory.stat"), []byte("anon 4021977088\nkernel 17985536\nshmem 4096\nunevictable 0\nfile_dirty 0\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if p := a.peak(); p.nonreclaimableSampleGB != nil {
+		t.Fatal("missing writeback counter became zero")
+	}
+	if err := os.WriteFile(filepath.Join(a.path, "memory.stat"), []byte("anon 4021977088\nkernel 17985536\nshmem 4096\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if p := a.peak(); p.nonreclaimableSampleGB != nil {
+		t.Fatalf("missing locked-page counter became zero: %+v", p)
 	}
 }

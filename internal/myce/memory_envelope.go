@@ -7,18 +7,25 @@ import (
 )
 
 // Nil counters mean unavailable. HostGB samples anon + kernel + shmem, excluding
-// file cache. CgroupGB retains the kernel's total high-water mark, which also
-// floors learned host reservations because the enforced parent charges it.
+// file cache. NonreclaimableGB additionally includes unevictable and dirty/
+// writeback pages; only complete CPU measurements can seed a measured margin.
+// GPU driver pins are not bounded by these counters. CgroupGB retains the
+// kernel's total high-water mark and sizes GPU/legacy/transfer estimates.
 // Without cgroup accounting (macOS), HostGB is the sampled process-group RSS
 // and Source names that unenforced measurement.
 type AttemptMemoryPeak struct {
-	HostGB      *float64           `json:"host_gb,omitempty"`
-	CgroupGB    *float64           `json:"cgroup_gb,omitempty"`
-	DeviceGB    *float64           `json:"device_gb,omitempty"`
-	SwapGB      *float64           `json:"swap_gb,omitempty"`
-	Source      string             `json:"source,omitempty"`
-	Events      *MemoryEventCounts `json:"events,omitempty"`
-	Constrained bool               `json:"constrained,omitempty"`
+	// Raw counter reads are not completed peaks (notably Docker release
+	// evidence). Only observeAttemptMemory promotes a complete sample history.
+	nonreclaimableSampleGB *float64
+
+	NonreclaimableGB *float64           `json:"nonreclaimable_gb,omitempty"`
+	HostGB           *float64           `json:"host_gb,omitempty"`
+	CgroupGB         *float64           `json:"cgroup_gb,omitempty"`
+	DeviceGB         *float64           `json:"device_gb,omitempty"`
+	SwapGB           *float64           `json:"swap_gb,omitempty"`
+	Source           string             `json:"source,omitempty"`
+	Events           *MemoryEventCounts `json:"events,omitempty"`
+	Constrained      bool               `json:"constrained,omitempty"`
 }
 
 // Attempt-parent memory.events counters. Nil on the peak means they were not
@@ -34,7 +41,17 @@ type MemoryEventCounts struct {
 // Recheck counters as well as the flag: older workers and persisted curves
 // treated low-resident file-backed ceiling pressure as unconstrained (#303).
 func (p *AttemptMemoryPeak) constrained() bool {
-	return p != nil && (p.Constrained || p.Source != processGroupMemorySource && p.Events != nil && (p.Events.Max > 0 || p.Events.High > 0))
+	if p == nil {
+		return false
+	}
+	if p.Constrained {
+		return true
+	}
+	if p.Source == processGroupMemorySource {
+		return false
+	}
+	e := p.Events
+	return p.SwapGB != nil && *p.SwapGB > 0 || e != nil && (e.Max > 0 || e.High > 0 || e.OOM > 0 || e.OOMKill > 0 || e.OOMGroupKill > 0)
 }
 
 const processGroupMemorySource = "process-group RSS samples; unenforced"
@@ -127,7 +144,7 @@ func mergeMemoryPeaks(old, next *AttemptMemoryPeak) *AttemptMemoryPeak {
 	if old != nil && !old.Constrained {
 		out = *old
 	}
-	for _, pair := range [][2]**float64{{&out.HostGB, &next.HostGB}, {&out.CgroupGB, &next.CgroupGB}, {&out.DeviceGB, &next.DeviceGB}} {
+	for _, pair := range [][2]**float64{{&out.HostGB, &next.HostGB}, {&out.CgroupGB, &next.CgroupGB}, {&out.DeviceGB, &next.DeviceGB}, {&out.NonreclaimableGB, &next.NonreclaimableGB}, {&out.nonreclaimableSampleGB, &next.nonreclaimableSampleGB}} {
 		if *pair[1] != nil && validMemoryValue(**pair[1]) && (*pair[0] == nil || **pair[1] > **pair[0]) {
 			n := **pair[1]
 			*pair[0] = &n
@@ -188,6 +205,9 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 		case estimate.host != nil:
 			source = estimate.source
 			host := hostMemoryPeakGB(estimate.host) * estimate.hostFactor
+			if estimate.measuredHostGB > 0 {
+				host = estimate.measuredHostGB
+			}
 			if !n.cpuOnly() {
 				peak, factor := estimate.device, estimate.deviceFactor
 				if peak.DeviceGB != nil && validRate(*peak.DeviceGB) && validRate(*peak.DeviceGB*factor) {
@@ -291,13 +311,45 @@ func sameMemoryWork(point WorkObservation, key ObservationKey, configuration str
 // RAM and VRAM have independent locality: sibling cards share the host pool,
 // but a sibling's device peak still needs the existing transfer margin.
 type memoryEstimate struct {
+	measuredHostGB           float64
 	host, device             *AttemptMemoryPeak
 	hostFactor, deviceFactor float64
 	source                   string
 }
 
+// Range of complete non-reclaimable attempt peaks, not instantaneous samples
+// or throughput sample counts. Two independent attempts are the minimum needed
+// to observe a range, not statistical confidence. The existing 25% headroom
+// stays as a floor for unobserved growth between the 200ms samples; a larger
+// observed range increases it. Until then total-peak sizing stays in use.
+type MemoryPeakRange struct {
+	Samples uint64  `json:"samples"`
+	MinGB   float64 `json:"min_gb"`
+	MaxGB   float64 `json:"max_gb"`
+}
+
+func (r *MemoryPeakRange) valid() bool {
+	return r != nil && r.Samples > 0 && validRate(r.MinGB) && validRate(r.MaxGB) && r.MinGB <= r.MaxGB
+}
+
+func mergeMemoryPeakRanges(a, b *MemoryPeakRange) *MemoryPeakRange {
+	if !b.valid() {
+		return a
+	}
+	r := *b
+	if a.valid() {
+		r.MinGB, r.MaxGB = min(a.MinGB, b.MinGB), max(a.MaxGB, b.MaxGB)
+		// Saturate rather than wrap after indefinitely repeated observations.
+		r.Samples = a.Samples + min(b.Samples, ^uint64(0)-a.Samples)
+	}
+	return &r
+}
+
 func hostMemoryPeakGB(p *AttemptMemoryPeak) float64 {
 	host := *p.HostGB
+	if p.NonreclaimableGB != nil && validMemoryValue(*p.NonreclaimableGB) {
+		host = max(host, *p.NonreclaimableGB)
+	}
 	if p.CgroupGB != nil && validMemoryValue(*p.CgroupGB) {
 		host = max(host, *p.CgroupGB)
 	}
@@ -339,6 +391,8 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) memoryEstimate {
 		return memoryEstimate{}
 	}
 	var exact, sameHost, family, other *AttemptMemoryPeak
+	var hostRange *MemoryPeakRange
+	completeHostRange := true
 	invalidated := false
 	configuration := memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
 	layout := "separate"
@@ -360,6 +414,8 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) memoryEstimate {
 		sameFamily := k.Target == key.Target && point.MemoryLayout != "" && point.MemoryLayout == layout
 		if sameFamily && sameMemoryHost(k, *key, m) {
 			sameHost = mergeMemoryPeaks(sameHost, p)
+			hostRange = mergeMemoryPeakRanges(hostRange, point.MemoryRange)
+			completeHostRange = completeHostRange && point.MemoryRange.valid() && point.MemoryRange.Samples >= 2
 		}
 		if sameFamily && k.Host == key.Host && k.Component == key.Component && k.Hardware == key.Hardware && k.Fingerprint == key.Fingerprint && k.Environment == key.Environment {
 			exact = mergeMemoryPeaks(exact, p)
@@ -387,6 +443,21 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) memoryEstimate {
 			estimate.source = "same-host RAM peak × 1.25; cross-machine device estimate"
 		} else if hostMemoryPeakGB(sameHost) > hostMemoryPeakGB(exact) {
 			estimate.source += "; same-host RAM peak × 1.25"
+		}
+		// No reduced GPU estimate until pinned/host-mapped driver allocations
+		// are qualified. The worker also withholds the field, but the queue
+		// must enforce this for older workers and already-persisted evidence.
+		if j.Spec.Needs.cpuOnly() && key.Target.OS == "linux" && completeHostRange && hostRange.valid() {
+			// Keep all observed resident peaks as a floor, including older
+			// attempts. A range of two peaks cannot justify eliminating the
+			// existing growth allowance; the launch-drift floor alone is tiny
+			// for multi-GiB work. Cost: at least 25% over retained components.
+			peak := max(hostRange.MaxGB, *sameHost.HostGB)
+			if sameHost.NonreclaimableGB != nil && validMemoryValue(*sameHost.NonreclaimableGB) {
+				peak = max(peak, *sameHost.NonreclaimableGB)
+			}
+			estimate.measuredHostGB = peak + max(hostRange.MaxGB-hostRange.MinGB, peak*.25, exploratoryDriftMarginGB(m))
+			estimate.source = "non-reclaimable peak + measured range (25% minimum); CPU only"
 		}
 	}
 	return estimate
