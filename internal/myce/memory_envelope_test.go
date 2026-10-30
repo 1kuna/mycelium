@@ -1196,3 +1196,129 @@ func TestMemoryEnvelopeTotalPeakKeepsDeviceSeparate(t *testing.T) {
 		t.Fatalf("total host/device peaks mixed: %+v; %+v", next.MemoryEnvelope, next.Spec.Needs)
 	}
 }
+
+// Real-shaped resident/total pairs from two discrete-GPU work types. Fresh
+// counters include unevictable; the old facts alone must never opt into this.
+func TestMemoryEnvelopeMeasuredRangeAdmissionAndPressure(t *testing.T) {
+	q, clock, m, base := observationFixture(t)
+	m.Devices = []MachineDevice{}
+	m.CPUExtensionFingerprint = m.ExtensionFingerprint
+	m.HostMemoryBudgetGB, m.HostAvailableMemoryGB = 24, 28
+	budget := 24.0
+	if _, err := q.ChangeHostMaintenance(hostID(&m), HostMaintenanceRequest{Action: "drain", MemoryBudgetGB: &budget}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := q.ChangeHostMaintenance(hostID(&m), HostMaintenanceRequest{Action: "resume"}); err != nil {
+		t.Fatal(err)
+	}
+	base.Needs.Memory = "auto"
+	specs := []Spec{base, base}
+	specs[0].Args, specs[1].Args = []string{"separation"}, []string{"asr"}
+	samples := [][2]float64{{7.645931243896484, 7.8166961669921875}, {3.725048065185547, 4.041187286376953}}
+	totals := []float64{13.08499526977539, 9.590682983398438}
+	wants := []float64{7.987461090087891, 4.357326507568359}
+	for i, spec := range specs {
+		for n, host := range samples[i] {
+			j := startObservation(t, q, m, spec)
+			if n == 1 && j.Spec.Needs.HostMemoryGB != totals[i]*1.25 {
+				t.Fatalf("single peak cannot measure variance: %+v", j.MemoryEnvelope)
+			}
+			clock.Advance(time.Second)
+			r := result(&j, true)
+			r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, NonreclaimableGB: &host, CgroupGB: &totals[i], Events: &MemoryEventCounts{}}
+			if err := q.Complete(r); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	// Round-trip through SQLite, not just an in-memory aggregate.
+	var database string
+	if err := q.db.QueryRow("SELECT file FROM pragma_database_list WHERE name='main'").Scan(&database); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(database, q.root, clock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	q = reopened
+	check(t, q, m, nil) // Fresh inventory revalidates persisted memory identities.
+	running := make([]Job, 2)
+	for i, spec := range specs {
+		queued := submit(t, q, spec)
+		var reports []*Job
+		if i > 0 {
+			reports = append(reports, &running[0])
+		}
+		assigned := assignedJob(machineCheck(t, q, m, reports...))
+		if assigned == nil || assigned.ID != queued.ID {
+			t.Fatalf("concurrent work not admitted: %+v", assigned)
+		}
+		if err := q.Started(result(assigned, false)); err != nil {
+			t.Fatal(err)
+		}
+		running[i] = *assigned
+		got := running[i].Spec.Needs.HostMemoryGB
+		if math.Abs(got-wants[i]) > 1e-9 || !strings.Contains(running[i].MemoryEnvelope.Source, "measured range") {
+			t.Fatalf("wrong measured envelope: %+v; want %.9f", running[i].MemoryEnvelope, wants[i])
+		}
+	}
+	if got := q.s.Machines[m.ID].HostMemoryInUseGB; got < wants[0]+wants[1] || got > 24 {
+		t.Fatalf("shared host ledger did not admit both inside allowance: %.9f", got)
+	}
+	clock.Advance(time.Second)
+	r := result(&running[0], true)
+	host := samples[0][1]
+	// An old worker's flag can be false even when max events prove pressure.
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, NonreclaimableGB: &host, CgroupGB: &totals[0], Events: &MemoryEventCounts{Max: 2004}}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	probe := *q.s.Jobs[running[0].ID]
+	probe.State = "queued"
+	estimate := q.memoryEstimate(&probe, q.s.Machines[m.ID])
+	if estimate.host != nil || estimate.measuredHostGB != 0 || !strings.Contains(estimate.source, "constrained") {
+		t.Fatalf("pressure preserved a reduced estimate: %+v", estimate)
+	}
+	for _, point := range q.s.WorkObservations {
+		if point.MemoryPeak.constrained() && point.MemoryRange != nil {
+			t.Fatal("pressure retained range")
+		}
+	}
+}
+
+func TestMemoryEnvelopeMeasuredRangeFloorsAndExpiry(t *testing.T) {
+	q, clock, m, s := observationFixture(t)
+	s.Needs.Memory = "auto"
+	for _, host := range []float64{8, 8} {
+		j := startObservation(t, q, m, s)
+		clock.Advance(time.Second)
+		r := result(&j, true)
+		total := 12.0
+		r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, NonreclaimableGB: &host, CgroupGB: &total, Events: &MemoryEventCounts{}}
+		if err := q.Complete(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	probe := &Job{State: "queued", Spec: s, Extensions: []Extension{registeredExtension(t, q, s.Extension)}}
+	candidate := extensionJobs(probe, &m, true)[0]
+	if got := q.memoryCandidate(candidate, &m).Spec.Needs.HostMemoryGB; got != 8.125 {
+		t.Fatalf("narrow range lost drift floor: %v", got)
+	}
+	for id, point := range q.s.WorkObservations {
+		// Even a prior larger anon/resident peak cannot be discounted by new data.
+		host := 9.0
+		point.MemoryPeak.HostGB = &host
+		q.s.WorkObservations[id] = point
+	}
+	if got := q.memoryCandidate(candidate, &m).Spec.Needs.HostMemoryGB; got < 9.125 {
+		t.Fatalf("fell below observed resident peak: %v", got)
+	}
+	clock.Advance(workCurveMaxAge + time.Second)
+	if estimate := q.memoryEstimate(candidate, &m); estimate.host != nil || estimate.measuredHostGB != 0 {
+		t.Fatalf("expired range reused: %+v", estimate)
+	}
+}

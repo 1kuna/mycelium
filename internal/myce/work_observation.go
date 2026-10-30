@@ -46,6 +46,7 @@ type ObservationKey struct {
 // One bounded aggregate per comparable key, persisted as its own SQLite row.
 // Last execution is provenance, not the duplicate fence: Queue.complete owns it.
 type WorkObservation struct {
+	MemoryRange               *MemoryPeakRange   `json:"memory_range,omitempty"`
 	MemoryLayout              string             `json:"memory_layout,omitempty"`
 	MemoryConfiguration       string             `json:"memory_configuration,omitempty"`
 	MemoryRecordedAt          time.Time          `json:"memory_recorded_at,omitempty"`
@@ -329,6 +330,7 @@ func (q *Queue) recordWorkObservation(j *Job, r Result) {
 	}
 	if !memoryIdentityUsable(old) || !old.MemoryRecordedAt.IsZero() && q.clock.Now().Sub(old.MemoryRecordedAt) > workCurveMaxAge {
 		old.MemoryPeak = nil
+		old.MemoryRange = nil
 	}
 	if throughput && j.Spec.Workload != nil && j.Spec.ExtensionCheck == nil {
 		seconds := q.clock.Now().Sub(*j.StartedAt).Seconds()
@@ -352,8 +354,14 @@ func (q *Queue) recordWorkObservation(j *Job, r Result) {
 	point.Forbidden = old.Forbidden
 	point.SampleID = old.SampleID
 	point.MemoryPeak = old.MemoryPeak
+	point.MemoryRange = old.MemoryRange
 	if memory {
 		point.MemoryPeak = mergeMemoryPeaks(old.MemoryPeak, r.MemoryPeak)
+		if p := r.MemoryPeak; p.NonreclaimableGB != nil && validRate(*p.NonreclaimableGB) && p.Events != nil && p.Source != processGroupMemorySource {
+			point.MemoryRange = mergeMemoryPeakRanges(old.MemoryRange, &MemoryPeakRange{Samples: 1, MinGB: *p.NonreclaimableGB, MaxGB: *p.NonreclaimableGB})
+		} else {
+			point.MemoryRange = nil // Missing counters cannot preserve a reduced estimate.
+		}
 	}
 	point.MemoryRecordedAt = old.MemoryRecordedAt
 	point.MemoryConfiguration = memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)

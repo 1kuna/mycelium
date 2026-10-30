@@ -2060,10 +2060,14 @@ admission meanings and defaults, including production. Optional `needs.memory:
 auto` first selects fresh accepted slice-1 whole-attempt peaks for the same
 work, recipe, input shape and machine/component, times 1.25. Host RAM uses the
 largest comparable accepted peak across sibling devices on the same host,
-target and memory layout, also times 1.25, when the environment matches and the
+target and memory layout when the environment matches and the
 source device's hardware/backend fingerprint still matches its current inventory
 (including the Linux kernel). Device-memory evidence retains its per-device
-identity and transfer margins. Without local history, use the same recipe/work/
+identity and transfer margins. For local Linux RAM, two or more complete,
+unpressured non-reclaimable attempt peaks enable peak plus an observed range
+(maximum minus minimum), with the existing snapshot drift floor (at least
+128 MiB). Keep all comparable resident peaks as a floor. Until variance is
+available, retain the larger resident/total peak times 1.25. Without local history, use the same recipe/work/
 shape from another machine: prefer the same
 OS/architecture/accelerator/memory-layout family, times 1.25 × 1.5; otherwise
 times 1.25 × 2. Label both as a cross-machine estimate. Next use an optional
@@ -2106,9 +2110,14 @@ caps remain supported and fit the job envelope.
 Linux native attempts use their existing shared parent cgroup for main and all
 sidecars, bounded/zero swap and a job OOM cause. Sample whole-parent
 anon + kernel + shmem from `memory.stat` every 200 ms and retain the kernel's
-total high-water mark from `memory.peak`. Learned host reservations use the larger
-resident/total peak with the existing headroom factor: the enforced parent
-charges file-backed memory too. Device peaks remain separate, with the existing
+total high-water mark from `memory.peak`. Complete new measurements also retain
+anon + kernel + shmem + unevictable as a conservative non-reclaimable peak.
+Retain all kernel/shmem memory and conservatively double-count any locked anon
+or shmem rather than omit locked file pages. Ordinary file cache is excluded.
+Two accepted complete attempts enable the measured-range local RAM estimator
+above; missing counters, older workers and cross-machine transfers retain the
+conservative total-peak rule. This refinement of #303/#399 does not relax
+pressure rejection. Device peaks remain separate, with the existing
 conservative host-plus-device accounting on unified devices.
 
 The ceiling-bound-envelope correction (#303, maintainer debugging assignment,
@@ -2119,8 +2128,9 @@ sample cannot establish true need even when its resident-only peak stays low.
 The queue applies this rule to older-worker results and excludes already-stored
 pressure evidence from estimates. Successful unconstrained exploration can
 re-teach the peak. File-heavy jobs can therefore reserve more memory or explore
-again; this cost buys headroom over the measured total instead of repeatedly
-learning a binding ceiling. Ceiling-bound explicit-memory runs cannot seed an
+again; pressure invalidates the measured range too, so the next comparable
+unhinted attempt explores. A smaller resident-based ceiling is not a promise
+that a file-heavy workload will avoid reclaim pressure. Ceiling-bound explicit-memory runs cannot seed an
 auto estimate. Explicit admission and job outcomes retain their existing behavior.
 The attempt's `memory.events` max/high/OOM counts are kept beside its peak;
 absent counts mean they were not read, not zero.

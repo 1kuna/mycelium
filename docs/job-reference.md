@@ -872,8 +872,13 @@ Native main and sidecars share one Linux attempt cgroup. Sidecar `memory_gb`
 and main `run.memory_gb` are optional additional member caps; omit them to let
 members share the job envelope. Sample whole-group anon + kernel + shmem
 from `memory.stat` every 200 ms and retain the total `memory.peak`. Learned host
-reservations use the larger resident/total peak with the existing headroom factor,
-including file-backed memory charged to the enforced parent. macOS remains
+reservations use a complete non-reclaimable peak (anon + kernel + shmem +
+unevictable) plus the observed range of accepted attempt peaks, after at least
+two comparable complete local measurements. The margin is at least the snapshot
+drift floor (128 MiB); all observed resident peaks remain a floor. Kernel/shmem
+and locked pages are conservatively retained; ordinary file cache is excluded.
+Older/incomplete measurements retain the larger resident/total peak times 1.25.
+Any pressure still invalidates comparable memory evidence and its range. macOS remains
 admission-only and does not promise a kernel RAM ceiling. There, the worker learns the summed RSS of the attempt's process
 groups every 500 ms (single-command jobs: at least main's exit max RSS), recorded
 as unenforced evidence. It omits compressed pages and members that left the group,
@@ -891,7 +896,8 @@ workload: {input_shape: recording-v1, units: 1500}
 ```
 
 A matching variant reference enables accepted slice-1 observations. Prefer
-local peaks × 1.25, then another machine's peaks for the same recipe/work/shape
+local non-reclaimable peaks plus the measured range as above (legacy local
+peaks × 1.25), then another machine's peaks for the same recipe/work/shape
 × 1.25 × 1.5 for the same OS/architecture/accelerator/memory-layout family, or
 × 1.25 × 2 for another family. Cross-machine estimates are labelled in status.
 Unknown, constrained, stale-identity or failed measurements, and peaks

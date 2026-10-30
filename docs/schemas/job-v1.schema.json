@@ -99,6 +99,9 @@
         "host_gb": {
           "type": "number"
         },
+        "nonreclaimable_gb": {
+          "type": "number"
+        },
         "source": {
           "type": "string"
         },
