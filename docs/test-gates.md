@@ -26,9 +26,9 @@ on expiry it stops its fixture processes and suggests `./scripts/gate.sh full`
 then verifies fixture exit before removing scratch. Cleanup may extend the wall
 time; scratch is retained if a fixture cannot be stopped or inventoried. Cleanup
 uses the unique inherited run marker, isolated HOME/TMPDIR, ancestry and OS file
-handles in scratch (macOS's built-in `lsof`, or Linux `/proc`). The macOS
-probe uses `-b -O` to avoid blocking filesystem calls and helper forks while
-retaining same-user discovery of reparented fixtures. It has a five-second
+handles in scratch (macOS's native `libproc` API, or Linux `/proc`). The macOS
+probe reads kernel process paths without walking mounts, while retaining
+same-user discovery of reparented fixtures. It has a five-second
 timeout and at most a 0.2s reap after killing the owned probe: stalled network filesystem I/O must not
 block the final report. A failed or timed-out inventory retains scratch and
 never authorizes fixture signals or deletion. It remembers start
@@ -123,3 +123,9 @@ This performance test is excluded from `-race` builds: instrumented service cost
 is not release performance. Fake-clock loss and scope regressions still run
 under race in quick/full gates. Run this acceptance alongside quick when changing
 fan-out/control-path performance, and before a hotfix claims the burst target.
+
+On macOS, the bounded helper reads cwd, executable and standard-descriptor paths
+from `libproc` without enumerating or statting mounted filesystems. Apple's lsof
+has no network-mount exclusion and even scratch-scoped scans can block on an
+unrelated mount. Native probe errors still retain scratch. Run cleanup regressions
+with `python3 scripts/test-gate-budget.py`.
