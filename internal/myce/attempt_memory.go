@@ -133,10 +133,6 @@ func sampledMemoryPeak(old, next *AttemptMemoryPeak) *AttemptMemoryPeak {
 	return out
 }
 
-func estimateFeedingAttempt(j Job) bool {
-	return j.Spec.Needs.Memory == "auto" || j.Spec.Workload != nil && j.Spec.ExtensionCheck == nil && (!j.Spec.Resumable || j.Attempt <= 1)
-}
-
 func (a *memoryAttempt) processIDs(ids map[int]bool) error {
 	if a == nil {
 		return nil
@@ -270,10 +266,14 @@ func withExitMaxRSS(peak *AttemptMemoryPeak, state *os.ProcessState) *AttemptMem
 // other workloads and cannot serve as job peaks. Sampling is a lower bound.
 // groups names the attempt's process groups for hosts without cgroups.
 func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []int) func() *AttemptMemoryPeak {
+	deviceTelemetry := !j.Spec.Needs.cpuOnly() && (w.Machine.GPU == "cuda" || w.Machine.GPU == "xpu")
 	if a == nil && w.processMemory != nil && groups != nil {
 		return w.observeProcessMemory(groups)
 	}
 	if a == nil {
+		if deviceTelemetry {
+			return func() *AttemptMemoryPeak { return &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryNoCgroup} }
+		}
 		return func() *AttemptMemoryPeak { return nil }
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -344,13 +344,15 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 		}
 	}()
 	var device <-chan *AttemptMemoryPeak
-	if estimateFeedingAttempt(j) && !j.Spec.Needs.cpuOnly() && (w.Machine.GPU == "cuda" || w.Machine.GPU == "xpu") {
+	// Attempt facts are independent of learning eligibility. Declared jobs,
+	// extension checks and resumed attempts need device diagnostics too.
+	if deviceTelemetry {
 		result := make(chan *AttemptMemoryPeak, 1)
 		device = result
 		go func() {
 			// Device fdinfo can block in the same driver as host collection.
 			// Own the result locally so a late read cannot change published facts.
-			var devicePeak *AttemptMemoryPeak
+			devicePeak := &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryNoSample}
 			defer func() { result <- devicePeak }()
 			deviceTick := time.NewTicker(5 * time.Second)
 			defer deviceTick.Stop()
@@ -360,12 +362,17 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 					return
 				case <-deviceTick.C:
 					ids := map[int]bool{}
-					if a.processIDs(ids) != nil || len(ids) == 0 {
+					if a.processIDs(ids) != nil {
+						devicePeak = sampledMemoryPeak(devicePeak, &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryInventory})
+						continue
+					}
+					if len(ids) == 0 {
 						continue
 					}
 					gb, err := w.attemptDeviceMemory(ctx, ids, a.fs)
 					if err != nil {
 						if !errors.Is(err, errAttemptMemoryPending) {
+							devicePeak = sampledMemoryPeak(devicePeak, &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryUnsupported})
 							return
 						}
 						continue
@@ -390,6 +397,7 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 				case devicePeak := <-device:
 					record(devicePeak)
 				case <-wait.Done():
+					record(&AttemptMemoryPeak{DeviceUnavailable: deviceMemoryTimeout})
 					completeGPUHost = false
 				}
 			}
@@ -427,6 +435,14 @@ var (
 	errAttemptMemoryUnsupported = errors.New("attempt GPU memory accounting unsupported")
 )
 
+const (
+	deviceMemoryNoSample    = "no usable per-process sample"
+	deviceMemoryUnsupported = "per-process accounting unsupported or invalid"
+	deviceMemoryInventory   = "attempt process inventory unavailable"
+	deviceMemoryTimeout     = "device sampler did not finish"
+	deviceMemoryNoCgroup    = "attempt cgroup unavailable"
+)
+
 func (w Worker) attemptDeviceMemory(ctx context.Context, ids map[int]bool, fs memoryFS) (float64, error) {
 	if w.Machine.GPU == "cuda" {
 		selector := w.Machine.Device
@@ -438,7 +454,12 @@ func (w Worker) attemptDeviceMemory(ctx context.Context, ids map[int]bool, fs me
 		}
 		probe, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
-		b, err := exec.CommandContext(probe, "nvidia-smi", "--query-compute-apps=gpu_uuid,pid,used_gpu_memory", "--format=csv,noheader,nounits").Output()
+		cmd := exec.CommandContext(probe, "nvidia-smi", "--query-compute-apps=gpu_uuid,pid,used_gpu_memory", "--format=csv,noheader,nounits")
+		// A descendant can retain the query's pipes after it exits or is killed.
+		// Bound that drain too, so it cannot stop future five-second samples.
+		// Incomplete output remains unknown rather than a partial measurement.
+		cmd.WaitDelay = attemptMemorySamplePeriod
+		b, err := cmd.Output()
 		if err != nil {
 			if errors.Is(err, exec.ErrNotFound) {
 				return 0, errAttemptMemoryUnsupported

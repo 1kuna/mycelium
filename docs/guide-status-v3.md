@@ -293,6 +293,19 @@ swap peaks. A zero-OOM/swap/max-hit claim requires those readings to be present
 and zero; an absent reading cannot support that claim. These observations do
 not imply acceptance into learning or prove execution release.
 
+CUDA/XPU cgroup attempts sample device use every five seconds, including declared
+jobs, checks and resumed attempts that cannot feed learning. CUDA uses NVIDIA's
+per-process `compute-apps` counters; GPU-wide `memory.used` can be unsupported
+on unified-memory devices while these process counters work. `device_gb` is a
+sampled lower bound, not a retained allocator maximum. When no usable sample is
+retained, `device_unavailable` explains missing process samples, unsupported or
+invalid accounting, unavailable process inventory/cgroups, or sampler shutdown
+timeout. Older workers may omit both fields; historical peaks cannot be recovered.
+These diagnostics grant no learning eligibility or accounting reduction. Shared
+physical RAM alone does not establish cgroup coverage: GB10 CUDA allocations can
+exceed the job's current cgroup charge. Unified admission retains conservative
+host plus device reservations and existing slack until overlap is qualified.
+
 Production job summaries and the [job-v1 reply](schemas/job-v1.schema.json) may
 include `infrastructure_retries`, the durable number of infrastructure requeues
 already used. It is an optional nonnegative integer, omitted at zero, with a

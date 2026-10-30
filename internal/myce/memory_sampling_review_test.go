@@ -74,7 +74,7 @@ func TestMemorySamplingShortHostPeak(t *testing.T) {
 	}
 }
 
-func TestMemorySamplingGPUStartsLate(t *testing.T) {
+func TestMemorySamplingDeclaredGPUStartsLate(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("MYCE_TEST_DEVICE_PROBE", dir)
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -92,7 +92,7 @@ if [ ! -e "$MYCE_TEST_DEVICE_PROBE/timeout" ]; then
 fi
 if [ ! -e "$MYCE_TEST_DEVICE_PROBE/value" ]; then
   : > "$MYCE_TEST_DEVICE_PROBE/value"
-  printf 'GPU-one, 42, 4096\n'
+  printf 'GPU-one, 42, 18556\n'
   exit 0
 fi
 printf 'GPU-one, 42, N/A\n'
@@ -110,8 +110,10 @@ printf 'GPU-one, 42, N/A\n'
 	}
 	f := &memorySamplingFS{duringQuery: true, marker: filepath.Join(dir, "measured"), observed: make(chan struct{})}
 	a.fs = f
-	w := Worker{Machine: Machine{GPU: "cuda", Device: "GPU-one"}}
-	j := Job{Spec: Spec{Needs: ResourceNeeds{Memory: "auto", Platform: Platform{Required: []string{"cuda"}}}}}
+	w := Worker{Machine: Machine{GPU: "cuda", Device: "GPU-one", UnifiedMemory: true}}
+	// #424: a declared plain CUDA job with no workload key used to skip
+	// device sampling entirely, even though GB10 compute-app counters work.
+	j := Job{Spec: Spec{Needs: ResourceNeeds{MemoryGB: 40, HostMemoryGB: 24, Platform: Platform{Required: []string{"cuda"}}}}}
 	finish := w.observeAttemptMemory(a, j, nil)
 	defer finish()
 	select {
@@ -120,7 +122,7 @@ printf 'GPU-one, 42, N/A\n'
 		t.Fatal("empty or timed-out GPU query permanently disabled sampling")
 	}
 	p := finish()
-	if p == nil || p.DeviceGB == nil || *p.DeviceGB != 4 {
+	if p == nil || p.DeviceGB == nil || *p.DeviceGB != 18556.0/1024 || p.DeviceUnavailable != "" {
 		t.Fatalf("late CUDA allocation was not retained: %+v", p)
 	}
 	if p.HostGB == nil || *p.HostGB != 8 {

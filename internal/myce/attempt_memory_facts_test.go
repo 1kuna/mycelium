@@ -159,6 +159,57 @@ func TestAttemptMemoryFactsAcceptedGET(t *testing.T) {
 	memoryFactsGET(t, q, next, unread, false)
 }
 
+func TestAttemptMemoryFactsGB10Accounting(t *testing.T) {
+	for _, available := range []bool{true, false} {
+		t.Run(map[bool]string{true: "process counters", false: "unavailable"}[available], func(t *testing.T) {
+			q, clock, m, s := unifiedAutoFixture(t, 0)
+			queued := submit(t, q, s)
+			first := assignedJob(machineCheck(t, q, m))
+			if first == nil || first.ID != queued.ID {
+				t.Fatal("CUDA exploration not assigned")
+			}
+			if err := q.Started(result(first, false)); err != nil {
+				t.Fatal(err)
+			}
+			// Synchronized read-only GB10 evidence: process device memory can
+			// far exceed CURRENT cgroup use. Retain the lifetime cgroup peak
+			// independently; neither that peak nor shared RAM proves overlap.
+			host := float64(2387402752+53055488+54992896) / (1 << 30)
+			total, device, swap := float64(21502136320)/(1<<30), 18556.0/1024, 0.0
+			peak := &AttemptMemoryPeak{HostGB: &host, CgroupGB: &total, SwapGB: &swap, Events: &MemoryEventCounts{}}
+			if available {
+				peak.DeviceGB = &device
+			} else {
+				peak.DeviceUnavailable = deviceMemoryUnsupported
+			}
+			clock.Advance(time.Second)
+			r := result(first, true)
+			r.MemoryPeak = peak
+			if err := q.Complete(r); err != nil {
+				t.Fatal(err)
+			}
+			q = memoryFactsRestart(t, q, clock)
+			memoryFactsGET(t, q, *first, peak, !available)
+			// Re-establish live component/qualification evidence after restart
+			// before requesting reuse; startup deliberately marks it unavailable.
+			machineCheck(t, q, m)
+			queued = submit(t, q, s)
+			next := assignedJob(machineCheck(t, q, m))
+			if next == nil || next.ID != queued.ID {
+				t.Fatal("next CUDA attempt not assigned")
+			}
+			if available {
+				want := (total+device)*1.25 + m.MemoryCeilingSlackGB
+				if next.MemoryEnvelope.Source != "accepted peak × 1.25" || next.MemoryEnvelope.HostGB != want || next.Spec.Needs.HostMemoryGB != total*1.25 || next.Spec.Needs.MemoryGB != device*1.25 {
+					t.Fatalf("GB10 memory lost a host/device floor: %+v; %+v", next.MemoryEnvelope, next.Spec.Needs)
+				}
+			} else if next.MemoryEnvelope.Source != "exploratory first run" {
+				t.Fatalf("unknown device use enabled a smaller unified charge: %+v", next.MemoryEnvelope)
+			}
+		})
+	}
+}
+
 // Native grace-expired cleanup reports its stored peak as release-only, even
 // after cancellation. That acknowledgement must preserve the kill-time facts.
 func TestAttemptMemoryFactsReleaseOnlyKillGET(t *testing.T) {

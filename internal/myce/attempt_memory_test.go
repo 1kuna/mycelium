@@ -1,13 +1,49 @@
 package myce
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestAttemptMemoryDeviceQueryInheritedPipe(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	pidFile := filepath.Join(dir, "child")
+	t.Setenv("MYCE_TEST_DEVICE_CHILD", pidFile)
+	// The query exits, but a descendant retains stdout/stderr. CommandContext
+	// alone cannot interrupt Output's pipe-copy goroutines after that exit.
+	script := "#!/bin/sh\nsleep 5 &\necho $! > \"$MYCE_TEST_DEVICE_CHILD\"\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(dir, "nvidia-smi"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		b, err := os.ReadFile(pidFile)
+		if err == nil {
+			pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+			if err == nil && pid > 0 {
+				p, err := os.FindProcess(pid)
+				if err == nil {
+					_ = p.Kill()
+				}
+			}
+		}
+	})
+	w := Worker{Machine: Machine{GPU: "cuda", Device: "GPU-one"}}
+	start := time.Now()
+	_, err := w.attemptDeviceMemory(context.Background(), map[int]bool{42: true}, nil)
+	if elapsed := time.Since(start); elapsed >= 4*time.Second {
+		t.Fatalf("inherited pipe stalled device query for %s", elapsed)
+	}
+	if err != errAttemptMemoryPending {
+		t.Fatalf("incomplete query must remain unknown: %v", err)
+	}
+}
 
 func TestAttemptMemoryCeilingEventsConstrainPeak(t *testing.T) {
 	for _, event := range []string{"max", "high"} {
@@ -141,6 +177,45 @@ func TestAttemptMemoryDeviceAccounting(t *testing.T) {
 	}
 	if _, _, err := drmAttemptMemory([]byte("drm-client-id: 7\ndrm-pdev: 0000:03:00.0\n"), "0000:03:00.0"); err != errAttemptMemoryPending {
 		t.Fatal("uninitialised DRM counters disabled sampling", err)
+	}
+}
+
+func TestAttemptMemoryDeviceUnavailable(t *testing.T) {
+	w := Worker{Machine: Machine{GPU: "cuda", Device: "GPU-one", UnifiedMemory: true}}
+	j := Job{Spec: Spec{Needs: ResourceNeeds{MemoryGB: 40, HostMemoryGB: 24, Platform: Platform{Required: []string{"cuda"}}}}}
+	// A short declared job can finish before the five-second device tick.
+	a, err := fakeCeilings(t).create("attempt-short-cuda", 64<<30, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		attempt *memoryAttempt
+		reason  string
+	}{{a, deviceMemoryNoSample}, {nil, deviceMemoryNoCgroup}} {
+		p := w.observeAttemptMemory(tc.attempt, j, nil)()
+		if p == nil || p.DeviceGB != nil || p.DeviceUnavailable != tc.reason {
+			t.Fatalf("missing device telemetry was silently omitted: %+v", p)
+		}
+	}
+	// NVIDIA N/A is unknown, not zero. A reason-only peak survives aggregation,
+	// but a subsequent usable process sample replaces the unavailable label.
+	for _, value := range []string{"N/A", "[N/A]", "Not Supported"} {
+		if _, err := cudaAttemptMemory([]byte("GPU-one, 42, "+value+"\n"), "GPU-one", map[int]bool{42: true}); err != errAttemptMemoryUnsupported {
+			t.Fatalf("%s became a device measurement: %v", value, err)
+		}
+	}
+	p := sampledMemoryPeak(nil, &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryUnsupported})
+	if p == nil || p.DeviceUnavailable != deviceMemoryUnsupported || p.DeviceGB != nil {
+		t.Fatal("reason-only peak lost", p)
+	}
+	gb := 18556.0 / 1024
+	p = sampledMemoryPeak(p, &AttemptMemoryPeak{DeviceGB: &gb})
+	p = sampledMemoryPeak(p, &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryUnsupported})
+	if p.DeviceUnavailable != "" || p.DeviceGB == nil || *p.DeviceGB != gb {
+		t.Fatal("unavailable label replaced a retained measurement", p)
+	}
+	if p := sampledMemoryPeak(nil, &AttemptMemoryPeak{DeviceUnavailable: "private-command-output"}); p.DeviceUnavailable != "" {
+		t.Fatal("published an unrecognized device diagnostic", p)
 	}
 }
 
