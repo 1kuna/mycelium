@@ -133,3 +133,34 @@ func TestApplicationProgressQueueRestartRetainsAge(t *testing.T) {
 		t.Fatalf("restart refreshed progress: %+v", got.ApplicationProgress)
 	}
 }
+
+func TestApplicationProgressCachedHeartbeatAge(t *testing.T) {
+	_, clock := fixture(t)
+	dir := t.TempDir()
+	j := Job{ID: "job", Attempt: 1, Session: "session"}
+	path := applicationProgressFile(dir, j)
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"completed":1,"total":2,"unit":"frames"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, clock.Now(), clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	cached := readApplicationProgress(dir, j, clock.Now())
+	if cached == nil {
+		t.Fatal("missing report")
+	}
+	// A slow actor may not collect another file sample while machine heartbeats
+	// continue. Sending its cached observation must include that intervening age.
+	clock.Advance(31 * time.Second)
+	sent := cached.aged(clock.Now())
+	if sent.AgeSeconds != 31 || cached.AgeSeconds != 0 {
+		t.Fatalf("cached report was renewed or mutated: sent=%+v cached=%+v", sent, cached)
+	}
+	clock.Advance(time.Second)
+	if cached.aged(clock.Now()).AgeSeconds != 32 {
+		t.Fatal("repeated heartbeat renewed report")
+	}
+}

@@ -18,6 +18,8 @@ const applicationProgressMaxBytes = 4096
 
 // Counts need pointers on input so missing fields cannot masquerade as zero.
 type ProgressReport struct {
+	updatedAt time.Time
+
 	Completed  *float64 `json:"completed"`
 	Total      *float64 `json:"total"`
 	Unit       string   `json:"unit"`
@@ -74,11 +76,23 @@ func readApplicationProgress(spool string, j Job, now time.Time) *ProgressReport
 	}
 	// Application timestamps/ages are not trusted. Use local file modification
 	// age and queue receipt time, avoiding worker/queue clock synchronization.
-	p.AgeSeconds = max(0, now.Sub(opened.ModTime()).Seconds())
+	p.updatedAt = opened.ModTime()
+	p.AgeSeconds = max(0, now.Sub(p.updatedAt).Seconds())
 	if !p.valid() {
 		return nil
 	}
 	return &p
+}
+
+// Age a detached actor report at heartbeat send time, even when the actor is
+// blocked in result handoff. Repeating its cached snapshot must not renew it.
+func (p *ProgressReport) aged(now time.Time) *ProgressReport {
+	if p == nil {
+		return nil
+	}
+	copy := *p
+	copy.AgeSeconds = max(0, now.Sub(p.updatedAt).Seconds())
+	return &copy
 }
 
 func (q *Queue) retainApplicationProgress(j *Job, report *AttemptReport, m *Machine) {
