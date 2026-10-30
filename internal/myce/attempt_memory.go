@@ -454,7 +454,12 @@ func (w Worker) attemptDeviceMemory(ctx context.Context, ids map[int]bool, fs me
 		}
 		probe, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
-		b, err := exec.CommandContext(probe, "nvidia-smi", "--query-compute-apps=gpu_uuid,pid,used_gpu_memory", "--format=csv,noheader,nounits").Output()
+		cmd := exec.CommandContext(probe, "nvidia-smi", "--query-compute-apps=gpu_uuid,pid,used_gpu_memory", "--format=csv,noheader,nounits")
+		// A descendant can retain the query's pipes after it exits or is killed.
+		// Bound that drain too, so it cannot stop future five-second samples.
+		// Incomplete output remains unknown rather than a partial measurement.
+		cmd.WaitDelay = attemptMemorySamplePeriod
+		b, err := cmd.Output()
 		if err != nil {
 			if errors.Is(err, exec.ErrNotFound) {
 				return 0, errAttemptMemoryUnsupported
