@@ -797,13 +797,52 @@ shell expansion, arguments or stdin, from `/`. Its environment contains only
 `PATH=/usr/bin:/bin`, `LANG=C`, and `LC_ALL=C`; it receives no fleet token or job
 environment. The executable is operator authority, never part of a job spec.
 
-Each invocation must freshly read `/sys/kernel/debug/dri/<PCI>/gtt_mm` for all
-xe cards that an attempt might use, including its selected card and any other
-card found in its DRM clients. `<PCI>` is the full lowercase domain address,
-such as `0000:01:00.0`; numeric debugfs directories may be resolved to those PCI
-identities by the helper. Read the raw text fields `use_type: 1`, `use_tt: 1`,
-and `usage: <unsigned integer bytes>`. Do not use a net delta or substitute VRAM
-usage. Other raw fields may be included. Return one JSON object on stdout:
+#### Root-owned broker and unprivileged client
+
+The privileged-source arrangement works with `NoNewPrivileges=yes` on the
+worker; it does not require changing an existing `NoNewPrivileges=no` setting.
+Inspect the actual service policy rather than assuming the installer default.
+A separate administrator-owned broker reads debugfs; the worker's helper
+is an unprivileged client. The binary provides `myce gpu-telemetry-client`, which
+connects to the Unix stream socket **`/run/mycelium/gpu-telemetry.sock`**. An
+operator-owned wrapper at the configured helper path runs:
+
+```sh
+#!/bin/sh
+exec /absolute/path/to/installed/myce gpu-telemetry-client
+```
+
+The absolute binary path is chosen at installation. `--socket PATH` on the client
+command supports an explicitly administered alternative or a laptop test socket;
+it is never derived from a job. The helper receives no arguments from the worker.
+Neither process invokes sudo, setuid or a privileged executable. This client
+needs no queue connection or credentials. Mycelium installs neither the wrapper
+nor the broker, and changes no service privilege policy.
+This change supplies the client and contract only, with no reference broker.
+
+The broker contract is:
+
+1. Listen on `AF_UNIX/SOCK_STREAM` at `/run/mycelium/gpu-telemetry.sock`. The client
+   connects and immediately closes its write half. **Zero request bytes followed
+   by EOF** is the entire request. Reject nonempty requests. There are no requested
+   paths, PIDs, commands, identities or device arguments.
+2. After accepting that request, take a UTC timestamp immediately **before the
+   first debugfs read**. Freshly read `/sys/kernel/debug/dri/<PCI>/gtt_mm` for all
+   configured xe cards. The broker owns this fixed source inventory; clients
+   cannot alter it. `<PCI>` is a full lowercase domain address, for example
+   `0000:01:00.0`; resolve numeric debugfs directories to their PCI identities.
+   Return raw text containing `use_type: 1`, `use_tt: 1`, and
+   `usage: <unsigned integer bytes>`. No net delta or VRAM substitution.
+3. Assemble the entire JSON reply before sending. On any read failure, unsupported
+   card or incomplete counter set, close without a snapshot. On success send
+   exactly one JSON object, at most 64 KiB, and close the connection. No banner,
+   status envelope or trailing stream. Use a 150 ms total connection deadline
+   from accept, including receipt of request EOF and sending the reply, leaving
+   time for client startup and delivery inside the worker's existing 200 ms
+   collection window. Do not serve a cached or periodically refreshed
+   snapshot and do not timestamp old data as fresh.
+
+The exact JSON schema is:
 
 ```json
 {
@@ -815,31 +854,66 @@ usage. Other raw fields may be included. Return one JSON object on stdout:
 }
 ```
 
-`sampled_at` is a UTC RFC3339 timestamp with subsecond precision taken during
-that invocation's fresh reads, on the same host clock as the worker. Cached,
-missing or future timestamps are rejected. The full collection, including fdinfo
-and the helper, must finish within the existing 200 ms coverage window; gaps or
-final age over 400 ms invalidate evidence. The helper has a 200 ms execution
-deadline, bounded pipe cleanup, and a 64 KiB stdout limit. Nonzero exit, timeout,
-bad JSON, missing participating cards or malformed counters invalidates the
-attempt's GPU telemetry. A configured failing helper does not fall back to
-another source. Missing evidence never becomes zero. Manager bytes use the
-same parser and are conservatively added in full to deduplicated client totals,
-including any overlap. Resident/pressure sampling remains independent.
+`sampled_at` is a UTC RFC3339 timestamp with subsecond precision, on the same
+host clock as the worker. `gtt_mm` maps each full lowercase PCI address to its
+unmodified debugfs text. Include every card an attempt can use: the worker
+requires its selected card and every other card present in its DRM clients.
+The helper forwards the broker's timestamp and text unchanged. A timestamp
+before the current helper invocation or after it finishes is rejected, so a
+cached snapshot is not accepted even when recent. A malformed, absent or stale
+reply, missing card, nonzero helper exit, oversized response or deadline expiry
+makes the attempt's GPU telemetry incomplete. A configured failing helper does
+not fall back to another source. The client emits no stdout until broker EOF
+and the size/deadline checks succeed, even for a complete-looking JSON prefix.
 
-The operator owns the helper, its executable chain and any privilege grant.
-A local wrapper may `exec /usr/bin/sudo -n -- /absolute/read-only-reader` under
-a sudoers rule limited to that exact no-argument reader; no general sudo grant
-is needed. Mycelium installs no helper or sudoers rule and changes no access
-permissions. Installed Linux workers default to `NoNewPrivileges=yes`, which
-blocks sudo/setuid elevation. Qualify the helper in the actual service context:
-where that policy is retained, use an unprivileged client of a separately
-administered read-only telemetry service instead. This flag does not relax the
-service policy. Keep the privileged reader read-only and promptly bounded even
-if its client exits. Helper readability alone does not qualify reduced sizing:
-complete fresh repeated local samples, pressure rejection, retained floors and
-the native concurrency/output proof still apply. Clearing the helper on a host
-without readable debugfs restores conservative sizing for new evidence.
+Install the broker's binary, configuration and service unit as root-owned and
+unwritable by worker/job accounts. Use a root-owned `/run/mycelium` directory
+with group `myce-telemetry` and mode **0750**, and a socket owned by
+`root:myce-telemetry` with mode **0660**. Only designated worker accounts join
+that group; their actual service must receive that supplementary group. The
+group's socket write permission permits connecting, not changing the broker's
+sources. The parent directory must have no worker/group write permission, so
+clients cannot replace the socket. Keep the wrapper and executable chain
+root-owned, mode **0755**, in directories unwritable by workers/jobs. The broker
+uses no queue authority or fleet token and provides no filesystem-write or
+administration operation to clients. Verify these owners/modes after every
+broker restart. These are operator-enforced installation requirements: the
+client does not check filesystem ownership/modes or authenticate the peer. It
+only bounds and forwards the reply; the worker parses the JSON and validates
+freshness, participating cards and counters before using it as evidence.
+
+Activate only after separately installing and qualifying a conforming broker:
+
+1. Create the dedicated `myce-telemetry` system group if absent (for example,
+   `getent group myce-telemetry || groupadd --system myce-telemetry`, as root).
+   Add only the designated worker account to it, then create the broker's runtime
+   directory/socket with the owners and modes above. Ensure the broker recreates
+   them correctly after reboot.
+2. Give the actual worker process the supplementary group. A system service can
+   use an administrator-owned `SupplementaryGroups=myce-telemetry` drop-in. For
+   a user service, refresh the user manager's group credentials through an
+   operator-controlled session/manager restart; restarting only the worker may
+   retain old groups. Verify the running worker's groups in `/proc/PID/status`;
+   a successful client call from a new login shell alone is insufficient.
+3. Qualify repeated wrapper calls under the service's actual user, groups and
+   restrictions, and additionally under `NoNewPrivileges=yes` if the service
+   currently uses `no`. Preserve the existing service policy; no sudoers grant
+   or privilege relaxation is needed. Check fresh complete per-card replies,
+   failure behavior and broker resource use before enabling the helper.
+4. With a compatible release installed, use the normal drained in-place worker
+   installation procedure, selecting the saved `--config WORKER_CONFIG` and
+   adding `--gpu-telemetry-helper /absolute/wrapper`. Inspect `--dry-run` before
+   applying it, preserving saved settings. Inspect the saved config and running
+   service, then qualify real attempt telemetry before claiming reduced sizing.
+
+The client has its own 200 ms connection/read deadline and 64 KiB response limit;
+the worker separately enforces its full driver-collection coverage window.
+Resident/pressure sampling remains independent. The same manager parser and
+conservative absolute manager-plus-client accounting apply, including overlaps.
+Missing evidence is unknown, never zero. Complete fresh repeated local samples,
+pressure rejection, retained floors and native concurrency/output proof remain
+required. Clearing the helper on a host without readable debugfs restores
+conservative sizing for new evidence; it does not revoke already learned history.
 
 ### Admission and enforcement
 

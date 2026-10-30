@@ -2144,7 +2144,10 @@ oversized or missing evidence rejects completeness. It receives no arguments,
 job environment or fleet credentials and runs outside the resident sampler with
 the same coverage limits. The installer preserves this opt-in setting but
 installs no helper, privilege grant or permission change; service privilege
-policy is unchanged. See the [operations contract](operations.md#optional-privileged-gpu-telemetry-source).
+policy is unchanged. The provided unprivileged `myce gpu-telemetry-client` uses
+`/run/mycelium/gpu-telemetry.sock`: no request payload, a fresh per-connection
+JSON snapshot, and EOF. A separately installed root-owned broker supplies the
+raw counters; no sudo/setuid is used by the worker or client. See the [operations contract](operations.md#optional-privileged-gpu-telemetry-source).
 Retain a whole-host availability-drop floor from an empty-cgroup baseline;
 unrelated RAM release can mask that net delta, so it never replaces absolute
 driver accounting. Missing DRM client identity invalidates the entire attempt.

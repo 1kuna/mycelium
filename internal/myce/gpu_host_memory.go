@@ -140,8 +140,8 @@ func validateGPUTelemetryHelper(path string) error {
 	return nil
 }
 
-// The operator supplies an executable, not a command line. A local wrapper may
-// exec a separately scoped sudo reader; neither job input nor worker credentials
+// The operator supplies an executable, not a command line. A local wrapper can
+// exec the unprivileged broker client; neither job input nor worker credentials
 // are sent to it. The timestamp must belong to this invocation, not a cache.
 func readGPUTelemetryHelper(ctx context.Context, clock Clock, path string) (map[string]string, error) {
 	if err := validateGPUTelemetryHelper(path); err != nil || path == "" {
