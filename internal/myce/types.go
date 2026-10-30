@@ -380,9 +380,12 @@ type Job struct {
 	DiagnosticCode   string          `json:"diagnostic_code,omitempty"`
 	AllocatedDevices []string        `json:"allocated_devices,omitempty"`
 	PreemptionCount  int             `json:"preemption_count,omitempty"`
-	PriorityPolicy   PriorityMatch   `json:"priority_policy"`
-	ExecutionCause   *RuntimeCause   `json:"execution_cause,omitempty"`
-	CleanupCause     *RuntimeCause   `json:"cleanup_cause,omitempty"`
+
+	ProductionBackoff map[string]ProductionBackoff `json:"production_backoff,omitempty"`
+
+	PriorityPolicy PriorityMatch `json:"priority_policy"`
+	ExecutionCause *RuntimeCause `json:"execution_cause,omitempty"`
+	CleanupCause   *RuntimeCause `json:"cleanup_cause,omitempty"`
 	// Durable cancellation fence, independent of diagnostic reason text.
 	CancelledAt *time.Time `json:"cancelled_at,omitempty"`
 

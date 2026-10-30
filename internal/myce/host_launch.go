@@ -124,6 +124,12 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 			return nil
 		}
 		m := q.s.Machines[l.Machine]
+		if !p.Started {
+			if j := q.s.Jobs[p.Demand]; j != nil && q.productionAdmissionReason(j, allocationMachine(m, []string{p.Device})) != "" {
+				reject("production_admission")
+				return nil
+			}
+		}
 		if !p.Started && p.Kind == "benchmark" && q.benchmarkDeviceAdmissionBlocked(m) {
 			reject("device_admission")
 			return nil

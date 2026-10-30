@@ -206,6 +206,9 @@ func (q *Queue) placementPolicyWithoutReservation(j *Job, m *Machine, resident b
 	if j.ProductionHost != "" && j.ProductionHost != hostID(m) {
 		return false
 	}
+	if q.productionAdmissionReason(j, m) != "" {
+		return false
+	}
 	if !q.held(hostID(m)) {
 		return true
 	}
@@ -312,6 +315,13 @@ func productionBlockerDetail(host, text string, class hostBlockerClass) HoldDeta
 }
 
 func (q *Queue) holdWaitReason(j *Job) string {
+	for _, m := range q.plannerMachines() {
+		if q.jobAllowsMachine(j, m.ID) && fitsWithoutHostMemory(j, m, m.TotalMemoryGB) {
+			if reason := q.productionAdmissionReason(j, m); reason != "" {
+				return reason
+			}
+		}
+	}
 	if reason := q.diskWaitingReason(j, j.ProductionHost); reason != "" {
 		return reason
 	}
