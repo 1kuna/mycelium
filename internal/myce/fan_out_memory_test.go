@@ -133,7 +133,8 @@ func TestFanOutAutoMemorySerialQualifiedDevice(t *testing.T) {
 				q.s.WorkObservations[identityHash(key)] = WorkObservation{Key: *key, Source: "accepted work", Samples: 1,
 					RecordedAt: clock.Now(), MemoryRecordedAt: clock.Now(), MemoryLayout: "separate",
 					MemoryConfiguration: memoryConfiguration(probe.Spec.Needs, probe.Spec.Args, probe.Spec.Program),
-					MemoryPeak:          &AttemptMemoryPeak{HostGB: &host, DeviceGB: &device}}
+					MemoryPeak:          &AttemptMemoryPeak{HostGB: &host, NonreclaimableGB: &host, DeviceGB: &device, Events: &MemoryEventCounts{}},
+					MemoryRange:         &MemoryPeakRange{Samples: 2, MinGB: host, MaxGB: host}}
 			}
 			want := q.memoryCandidate(ordinary, &target)
 			if want.MemoryEnvelope.Refusal != "" || want.Spec.Needs.HostMemoryGB <= 0 || want.Spec.Needs.MemoryGB <= 0 {

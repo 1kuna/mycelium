@@ -872,12 +872,16 @@ Native main and sidecars share one Linux attempt cgroup. Sidecar `memory_gb`
 and main `run.memory_gb` are optional additional member caps; omit them to let
 members share the job envelope. Sample whole-group anon + kernel + shmem
 from `memory.stat` every 200 ms and retain the total `memory.peak`. Learned host
-reservations use a complete non-reclaimable peak (anon + kernel + shmem +
-unevictable) plus the observed range of accepted attempt peaks, after at least
-two comparable complete local measurements. The margin is at least the snapshot
-drift floor (128 MiB); all observed resident peaks remain a floor. Kernel/shmem
-and locked pages are conservatively retained; ordinary file cache is excluded.
-Older/incomplete measurements retain the larger resident/total peak times 1.25.
+reservations for Linux CPU work use a complete non-reclaimable peak (anon +
+kernel + shmem + unevictable + file_dirty + file_writeback) plus the largest of
+the observed attempt-peak range, 25% of the retained peak, and the snapshot drift
+floor (128 MiB). At least two comparable complete measurements are required for
+every contributing local observation; two samples establish a range, not tail
+confidence. All observed resident peaks remain a floor. Kernel/shmem, locked
+and dirty/writeback pages are conservatively retained; clean file cache is
+excluded. GPU work retains the larger resident/total peak times 1.25 because
+these counters do not bound driver pins or host-mapped GPU memory. Older or
+incomplete measurements retain that conservative sizing too.
 Any pressure still invalidates comparable memory evidence and its range. macOS remains
 admission-only and does not promise a kernel RAM ceiling. There, the worker learns the summed RSS of the attempt's process
 groups every 500 ms (single-command jobs: at least main's exit max RSS), recorded
@@ -896,7 +900,7 @@ workload: {input_shape: recording-v1, units: 1500}
 ```
 
 A matching variant reference enables accepted slice-1 observations. Prefer
-local non-reclaimable peaks plus the measured range as above (legacy local
+local CPU non-reclaimable peaks plus the margin above (GPU and legacy local
 peaks × 1.25), then another machine's peaks for the same recipe/work/shape
 × 1.25 × 1.5 for the same OS/architecture/accelerator/memory-layout family, or
 × 1.25 × 2 for another family. Cross-machine estimates are labelled in status.

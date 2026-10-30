@@ -56,12 +56,14 @@ func TestAttemptMemoryNonreclaimableRequiresCompleteSampling(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(filepath.Join(a.path, "memory.stat"), []byte("anon 4021977088\nkernel 17985536\nshmem 4096\nunevictable 0\n"), 0600); err != nil {
+			if err := os.WriteFile(filepath.Join(a.path, "memory.stat"), []byte("anon 4021977088\nkernel 17985536\nshmem 4096\nunevictable 0\nfile_dirty 0\nfile_writeback 0\n"), 0600); err != nil {
 				t.Fatal(err)
 			}
 			f := &nonreclaimableSamplingFS{memoryFS: a.fs, sampled: make(chan struct{}), missing: missing}
 			a.fs = f
-			finish := (Worker{}).observeAttemptMemory(a, Job{Spec: cpuSpec(1, 0)}, nil)
+			spec := cpuSpec(1, 0)
+			spec.Needs.Platform = Platform{Required: []string{"cpu"}}
+			finish := (Worker{}).observeAttemptMemory(a, Job{Spec: spec}, nil)
 			defer finish()
 			select {
 			case <-f.sampled:
@@ -150,7 +152,7 @@ func TestAttemptMemoryNonreclaimableRetainsLockedPages(t *testing.T) {
 	// A live-shaped sample: 3.746 GiB anon, 1.103 GiB file, 17 MiB
 	// kernel. Include locked file pages and shmem without counting file cache.
 	for name, value := range map[string]string{
-		"memory.stat":   "anon 4021977088\nfile 1183789056\nkernel 17985536\nshmem 4096\nunevictable 67108864\nslab_reclaimable 3814504\n",
+		"memory.stat":   "anon 4021977088\nfile 1183789056\nkernel 17985536\nshmem 4096\nunevictable 67108864\nfile_dirty 134217728\nfile_writeback 33554432\nslab_reclaimable 3814504\n",
 		"memory.events": "max 0\nhigh 0\noom 0\noom_kill 0\noom_group_kill 0\n",
 	} {
 		if err := os.WriteFile(filepath.Join(a.path, name), []byte(value), 0600); err != nil {
@@ -158,12 +160,18 @@ func TestAttemptMemoryNonreclaimableRetainsLockedPages(t *testing.T) {
 		}
 	}
 	p := a.peak()
-	want := float64(4021977088+17985536+4096+67108864) / (1 << 30)
+	want := float64(4021977088+17985536+4096+67108864+134217728+33554432) / (1 << 30)
 	if p.nonreclaimableSampleGB == nil || *p.nonreclaimableSampleGB != want || p.constrained() {
 		t.Fatalf("bad non-reclaimable measurement: %+v", p)
 	}
 	if p.NonreclaimableGB != nil {
 		t.Fatal("raw/release-only counter read claimed a complete peak")
+	}
+	if err := os.WriteFile(filepath.Join(a.path, "memory.stat"), []byte("anon 4021977088\nkernel 17985536\nshmem 4096\nunevictable 0\nfile_dirty 0\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if p := a.peak(); p.nonreclaimableSampleGB != nil {
+		t.Fatal("missing writeback counter became zero")
 	}
 	if err := os.WriteFile(filepath.Join(a.path, "memory.stat"), []byte("anon 4021977088\nkernel 17985536\nshmem 4096\n"), 0600); err != nil {
 		t.Fatal(err)

@@ -33,11 +33,16 @@ func (a *memoryAttempt) peak() *AttemptMemoryPeak {
 		if aok && kok && sok {
 			gb := (float64(anon) + float64(kernel) + float64(shmem)) / (1 << 30)
 			p.HostGB = &gb
-			if unevictable, ok := stats["unevictable"]; ok {
+			unevictable, uok := stats["unevictable"]
+			dirty, dok := stats["file_dirty"]
+			writeback, wok := stats["file_writeback"]
+			if uok && dok && wok {
 				// Conservatively retain all kernel and shmem pages. Unevictable
 				// can overlap anon/shmem; double counting is safer than omitting
-				// locked file pages. Ordinary file cache is reclaimable.
-				nonreclaimable := gb + float64(unevictable)/(1<<30)
+				// locked file pages. Dirty/writeback pages need I/O before reclaim;
+				// sum them conservatively even where the counters overlap.
+				// This is not a driver pin counter; GPU sizing keeps total peaks.
+				nonreclaimable := gb + (float64(unevictable)+float64(dirty)+float64(writeback))/(1<<30)
 				p.nonreclaimableSampleGB = &nonreclaimable
 			}
 		}
@@ -334,7 +339,7 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 			samplers.Wait()
 			final := a.peak()
 			record(final)
-			if peak != nil && hostSampled && completeNonreclaimable && final != nil && final.nonreclaimableSampleGB != nil {
+			if j.Spec.Needs.cpuOnly() && peak != nil && hostSampled && completeNonreclaimable && final != nil && final.nonreclaimableSampleGB != nil {
 				peak.NonreclaimableGB = peak.nonreclaimableSampleGB
 			}
 			// Counter-only read zeros are diagnostic facts, not a new

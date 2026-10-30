@@ -2063,11 +2063,15 @@ largest comparable accepted peak across sibling devices on the same host,
 target and memory layout when the environment matches and the
 source device's hardware/backend fingerprint still matches its current inventory
 (including the Linux kernel). Device-memory evidence retains its per-device
-identity and transfer margins. For local Linux RAM, two or more complete,
-unpressured non-reclaimable attempt peaks enable peak plus an observed range
-(maximum minus minimum), with the existing snapshot drift floor (at least
-128 MiB). Keep all comparable resident peaks as a floor. Until variance is
-available, retain the larger resident/total peak times 1.25. Without local history, use the same recipe/work/
+identity and transfer margins. For local Linux CPU work, at least two complete,
+unpressured non-reclaimable attempt peaks per contributing observation enable peak plus the largest of the
+observed range (maximum minus minimum), 25% of the retained component peak, and
+the existing snapshot drift floor (at least 128 MiB). Two attempts establish a
+range, not confidence in an unseen tail; retain the existing 25% allowance for
+unobserved growth between 200 ms samples. Keep all comparable resident peaks as
+a floor. Missing/incomplete local observations keep total-peak sizing. GPU work
+also keeps the larger resident/total peak times 1.25 until driver host-memory
+accounting is qualified. Without local history, use the same recipe/work/
 shape from another machine: prefer the same
 OS/architecture/accelerator/memory-layout family, times 1.25 × 1.5; otherwise
 times 1.25 × 2. Label both as a cross-machine estimate. Next use an optional
@@ -2111,13 +2115,17 @@ Linux native attempts use their existing shared parent cgroup for main and all
 sidecars, bounded/zero swap and a job OOM cause. Sample whole-parent
 anon + kernel + shmem from `memory.stat` every 200 ms and retain the kernel's
 total high-water mark from `memory.peak`. Complete new measurements also retain
-anon + kernel + shmem + unevictable as a conservative non-reclaimable peak.
-Retain all kernel/shmem memory and conservatively double-count any locked anon
-or shmem rather than omit locked file pages. Ordinary file cache is excluded.
-Two accepted complete attempts enable the measured-range local RAM estimator
-above; missing counters, older workers and cross-machine transfers retain the
-conservative total-peak rule. This refinement of #303/#399 does not relax
-pressure rejection. Device peaks remain separate, with the existing
+anon + kernel + shmem + unevictable + file_dirty + file_writeback as a
+conservative non-reclaimable peak for CPU work. All six counters must be present.
+Retain all kernel/shmem memory and conservatively double-count overlapping
+locked/dirty/writeback pages rather than omit pages requiring I/O before reclaim.
+Clean file cache is excluded only for CPU work. The unevictable LRU counter is
+not a DMA pin counter: XPU pinned host buffers, shared USM CPU storage, CUDA
+registered/mapped host memory and driver allocations are not bounded by VRAM
+measurements. GPU work retains total-peak sizing; no reduced GPU envelope or
+GPU concurrency acceptance is claimed. Missing counters, older workers, macOS
+RSS evidence and cross-machine transfers retain conservative sizing. This
+refinement of #303/#399 does not relax pressure rejection. Device peaks remain separate, with the existing
 conservative host-plus-device accounting on unified devices.
 
 The ceiling-bound-envelope correction (#303, maintainer debugging assignment,
