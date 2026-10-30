@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,11 +12,15 @@ import (
 )
 
 func processPS(args ...string) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "ps", args...)
-	cmd.WaitDelay = 100 * time.Millisecond
-	return cmd.Output()
+	// A 100ms drain allowance can expire solely because the reader goroutine
+	// is starved under load, even after ps exits zero. Bound the OS probe while
+	// allowing a full second to drain its small inventory; callers recheck errors.
+	cmd.WaitDelay = time.Second
+	out, err := cmd.Output()
+	return out, errors.Join(err, ctx.Err())
 }
 
 func commandLock(dir, name string, wait bool) (func(), error) {

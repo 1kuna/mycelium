@@ -868,7 +868,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		}
 		syncErr := syncCommandOutput(output)
 		closeErr := output.Close()
-		result.Success = oomErr == nil && launchErr == nil && waitErr == nil && groupErr == nil && syncErr == nil && closeErr == nil
+		// Payload success is independent of physical release. Uncertain cleanup
+		// retains custody while normal output checks and publication proceed.
+		result.Success = oomErr == nil && launchErr == nil && waitErr == nil && syncErr == nil && closeErr == nil
 		if j.Spec.Program != nil {
 			collectProgramUsage(&result, cmd.ProcessState, programUsageFile(s.dir, identity))
 			result.OutOfMemory = result.OutOfMemory || (oomErr != nil && strings.HasPrefix(ceilingDiagnostic(oomErr.Error(), ""), "exceeded its "))
@@ -892,7 +894,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		} else if waitErr != nil {
 			result.Error = nativeAttemptError(j, waitErr.Error())
 		} else if groupErr != nil {
-			result.Error = groupErr.Error()
+			result.Error = "cleanup uncertain: " + groupErr.Error()
 		} else if syncErr != nil {
 			result.Error = syncErr.Error()
 		} else if closeErr != nil {
