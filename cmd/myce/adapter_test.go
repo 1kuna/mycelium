@@ -123,6 +123,15 @@ func TestAdapterDevCheckedArtifact(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), devTestTimeout)
 	defer cancel()
 	wait(t, ctx, func() bool { s, e := status(ctx, d.Client()); return e == nil && len(s.Machines) == 1 })
+	snapshot, err := status(ctx, d.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An advisory must leave an intentional pin intact and stdout machine-readable.
+	data = strings.Replace(data, "    source:", "    allowed_machines: ["+snapshot.Machines[0].ID+"]\n    source:", 1)
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
 	binary := devTestBinary(t)
 	invoke := func(key string) (profileReceipt, error) {
 		command := exec.CommandContext(ctx, binary, "run", "--adapter", path, "--queue", d.URL, "--key", key, "--", "literal; $()")
@@ -132,6 +141,9 @@ func TestAdapterDevCheckedArtifact(t *testing.T) {
 		command.Stdout = &out
 		command.Stderr = &stderr
 		e := command.Run()
+		if !strings.Contains(stderr.String(), "placement advisory: Host pin") {
+			t.Errorf("missing placement advisory: %s", &stderr)
+		}
 		var r profileReceipt
 		if e != nil {
 			return r, fmt.Errorf("%w: %s %s", e, out.String(), stderr.String())
@@ -146,6 +158,9 @@ func TestAdapterDevCheckedArtifact(t *testing.T) {
 	j, err := d.Client().Wait(ctx, r.JobID)
 	if err != nil || j.State != "succeeded" {
 		t.Fatalf("job %v %v", j, err)
+	}
+	if len(r.Spec.AllowedMachines) != 1 || r.Spec.AllowedMachines[0] != snapshot.Machines[0].ID {
+		t.Fatal("advisory changed the submitted host restriction")
 	}
 	dest := filepath.Join(root, "accepted")
 	if err = d.Client().DownloadResult(ctx, j.ID, "result", dest); err != nil {
@@ -528,9 +543,20 @@ func TestAdapterNativeRecipeBeforeResultWrapping(t *testing.T) {
 		p, _, err := adapterProfile(projectAdapter{Project: "fixture", Default: "work", Entries: map[string]adapterEntry{"work": entry}}, "")
 		return p, err
 	}
+	e.Needs.GPU = &myce.GPUSelection{Devices: []string{"0"}}
 	p, err := lower(e)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if advice := p.placementAdvisories(); len(advice) != 1 || !strings.HasPrefix(advice[0], "Device pin") {
+		t.Fatal("lowered native device pin bypassed advice", advice)
+	}
+	if got := p.Native.Variants[0].Needs.GPU.Devices; len(got) != 1 || got[0] != "0" {
+		t.Fatal("advice changed native device restriction", got)
+	}
+	p.RequirementReasons = map[string]string{"device": "hardware diagnostic"}
+	if advice := p.placementAdvisories(); len(advice) != 0 {
+		t.Fatal("native device exception ignored", advice)
 	}
 	if len(p.Native.Variants[0].Sweeps["extension:work"].Run) != 0 {
 		t.Fatal("result check manufactured an omitted wave command")

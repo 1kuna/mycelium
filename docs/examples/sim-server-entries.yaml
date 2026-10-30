@@ -2,13 +2,14 @@
 # Obtain files/size_bytes/sha256 separately for each approval with approve-local.
 # Preserve the consumer's approved argv/env; qualify memory and environment first.
 # Set LOOPBACK_BIND_PLACEHOLDER to the IPv4 loopback address.
-# These are shared entries. The project and entry fences intersect.
+# These are shared entries. Declare backend/environment needs; Mycelium chooses
+# the host. A host/device restriction requires a documented hardware or approved
+# production-parity exception. Project placement policy still applies.
 idle_timeout: 10m
 max_wait: 5m
 models:
   - name: sim-chat
     project: sim
-    allowed_machines: [MACHINE_PLACEHOLDER]
     engine: server
     platforms: [cuda]
     environment: CUDA_ARM64_ENV_PLACEHOLDER
@@ -31,7 +32,6 @@ models:
 
   - name: sim-glm-ocr
     project: sim
-    allowed_machines: [MACHINE_PLACEHOLDER]
     engine: server
     platforms: [cuda]
     environment: CUDA_ARM64_ENV_PLACEHOLDER
@@ -52,7 +52,6 @@ models:
 
   - name: sim-chandra
     project: sim
-    allowed_machines: [MACHINE_PLACEHOLDER]
     engine: server
     platforms: [cuda]
     environment: CUDA_ARM64_ENV_PLACEHOLDER

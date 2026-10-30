@@ -6,7 +6,13 @@ description: Send heavy tests, builds, simulations, training and transcodes thro
 # Mycelium offload
 
 Run heavy commands from the project root with `myce run --profile NAME`.
-Mycelium chooses placement. Small reads and a targeted test can stay local;
+Declare the software's platform, accelerator, memory and environment needs;
+Mycelium chooses the host. Keep host/device selectors for a specific hardware
+requirement, approved production parity or hardware qualification. Explain that
+exception in the adapter's `requirement_reasons` (see the portability reference).
+Report “Mycelium placed it on X because Y”, using the job's placement rationale;
+distinguish an authored restriction from the assigned host or `production_host`.
+Small reads and a targeted test can stay local;
 queue or capacity problems are holds with a next owner, never a local fallback.
 
 Before authoring a project adapter or changing targets, run `myce portability`

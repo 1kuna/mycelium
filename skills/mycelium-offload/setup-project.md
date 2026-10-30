@@ -12,6 +12,12 @@ Profiles are strict YAML, so use only fields those docs define.
 
 ## 1. Inventory
 
+Run `myce portability` before choosing targets. Declare what the software needs
+and let Mycelium choose a host. Review adapter coverage with
+`myce portability --adapter .mycelium/adapter.yaml --entry NAME` after authoring
+and after inventory or requirements change. See the
+[placement contract](https://github.com/1kuna/mycelium/blob/main/docs/portability.md#declare-requirements-let-mycelium-place).
+
 List the project's heavy commands from its scripts, Makefile or task runner,
 CI workflows, and README or AGENTS.md: test and race suites, builds, sims,
 training, OCR and transcodes. For each one, note the exact argv, the tools and
@@ -50,7 +56,9 @@ check: [grep, -qx, 'NAME: exit=0', NAME-result.txt]
 ```
 
 - **Targets** list only platforms you have proven, and they must match the
-  environment's locked platforms.
+  environment's locked platforms. Add missing platform recipes and prove them;
+  a missing recipe is a portability gap, not a hardware requirement. A lock
+  covering one platform limits platform coverage; it does not require a host pin.
 - **`memory: auto`** learns the peak from successful runs. Match tool
   parallelism to `cpu_cores`, for example `GOMAXPROCS` in `run.env`.
 - **`check`** must prove the work passed, not just that a file exists. The

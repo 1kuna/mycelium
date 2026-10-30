@@ -18,6 +18,7 @@ func TestPortabilityCLIAdapterReadOnly(t *testing.T) {
 	root := t.TempDir()
 	file := filepath.Join(root, "adapter.yaml")
 	data := strings.Replace(cpuAdapterYAML(root), "    source:", "    requirement_reasons: {backend:cpu: 'authored reason /private/project'}\n    source:", 1)
+	data = strings.Replace(data, "    source:", "    allowed_machines: [private-host]\n    source:", 1)
 	if err := os.WriteFile(file, []byte(data), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -51,6 +52,9 @@ func TestPortabilityCLIAdapterReadOnly(t *testing.T) {
 		}
 		if format == "json" && !json.Valid(out.Bytes()) {
 			t.Fatal(out.String())
+		}
+		if !strings.Contains(out.String(), "omit allowed_machines") || strings.Contains(out.String(), "private-host") {
+			t.Fatal("missing/private placement advice", out.String())
 		}
 	}
 	if calls != 2 {

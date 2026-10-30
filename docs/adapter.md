@@ -31,7 +31,12 @@ entries:
       result: [python3, scripts/analyze.py, --check]
 ```
 
-Use the exact targets your software supports. Source defaults to committed
+Declare the exact targets your software supports and let Mycelium choose the
+host. Add variants and lock coverage for other feasible platforms as the live
+portability report directs. Host/device selectors require a specific hardware,
+approved production parity or qualification exception; document it with
+`requirement_reasons`. See the [placement contract](portability.md#declare-requirements-let-mycelium-place).
+Source defaults to committed
 Git `HEAD`, class to `experiment`, and resumability to false. The authored
 adapter is frozen separately, so its uncommitted edits are allowed; other selected
 Git source must be clean. An unrelated entry edit does not change selected intent

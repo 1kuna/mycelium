@@ -725,6 +725,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 				return err
 			}
 		}
+		for _, advice := range myce.PlacementAdvisories(s, nil) {
+			fmt.Fprintln(os.Stderr, "placement advisory: "+advice)
+		}
 		j, err := client.Submit(ctx, s)
 		if err != nil {
 			return err

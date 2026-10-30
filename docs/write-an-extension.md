@@ -8,6 +8,11 @@ inventory. See [live portability advice](portability.md). A missing variant is
 a portability gap; document genuine hard constraints with `requirement_reasons`.
 The legacy run/setup format and native baseline rules below remain supported.
 
+Jobs declare software requirements; Mycelium selects the host and device.
+Author every feasible platform variant with its own locks and native checks.
+Reserve host/device pins for specific hardware, approved production parity or
+qualification; see the [placement contract](portability.md#declare-requirements-let-mycelium-place).
+
 New registrations default to the native sandbox. At the top level of
 `extension.yaml`, `isolation: unsandboxed` plus a required nonempty `reason`
 declares an exception for main/check payloads and all their sidecars. Status
@@ -204,6 +209,9 @@ Checks sample the bundled work: they do **not** establish similarity for unseen
 jobs, models or precisions (#18/#34). Keep that limitation in the description.
 
 ## Install and qualify
+
+The host/device selectors in this section identify hardware being qualified.
+Ordinary submissions below leave host/device choice to Mycelium.
 
 On an installed worker, run locally with the worker enrolled and its queue
 running. Authority, host ID, extension root (`state_dir/extensions`) and runtime

@@ -205,7 +205,7 @@ func adapterProfile(a projectAdapter, name string) (executionProfile, []byte, er
 	if !ok {
 		return executionProfile{}, nil, errors.New("entry does not exist")
 	}
-	p := executionProfile{Spec: e.Spec, Source: e.Source, Check: e.Checks.Result, MemoryClass: e.MemoryClass, Adapter: true}
+	p := executionProfile{Spec: e.Spec, Source: e.Source, Check: e.Checks.Result, MemoryClass: e.MemoryClass, Adapter: true, RequirementReasons: e.RequirementReasons}
 	p.Project = a.Project
 	if p.Name == "" {
 		p.Name = name
