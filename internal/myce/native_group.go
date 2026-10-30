@@ -254,7 +254,7 @@ func (g *nativeGroup) recordInfrastructureLocked(kind, member, port string, caus
 		group = g.supervisor.Process.Pid
 	}
 	prior := g.p.outcome.Infrastructure
-	g.p.outcome.Infrastructure = append(append([]infrastructureFact(nil), prior...), infrastructureFact{Kind: kind, At: time.Now().UTC(), Member: member, Port: port, Group: group})
+	g.p.outcome.Infrastructure = append(append([]infrastructureFact(nil), prior...), infrastructureFact{Kind: kind, At: time.Now().UTC(), Member: member, Port: port, Group: group, Predicate: launchFailurePredicate(kind, cause)})
 	if err := g.saveLocked(); err != nil {
 		g.p.outcome.Infrastructure = prior
 		return errors.Join(cause, err)

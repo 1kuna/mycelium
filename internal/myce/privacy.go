@@ -199,7 +199,7 @@ func statusJobValue(job *Job) Job {
 	}
 	if j.State == "failed" {
 		switch {
-		case j.ExecutionCause != nil && j.ExecutionCause.Operation == "input_staging":
+		case j.ExecutionCause != nil && (j.ExecutionCause.Operation == "input_staging" || j.ExecutionCause.Predicate != ""):
 			j.Reason = "execution failed: " + j.ExecutionCause.String()
 		case j.ExecutionCause != nil && j.ExecutionCause.Class == cpuIsolationUnavailable:
 			j.Reason = cpuIsolationUnavailable + ": " + rejectionMessages[cpuIsolationUnavailable]

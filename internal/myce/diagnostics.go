@@ -13,6 +13,7 @@ import (
 // Stable rejection codes and default messages. Submission validation returns
 // the specific field rule; other wrapped causes stay local.
 var rejectionMessages = map[string]string{
+	"native_workdir_containment":            "native isolation requires workdir beneath {work}; stage source with inputs or a profile",
 	"queue_stopping":                        "queue is shutting down; retry the request",
 	"disk_headroom":                         "projected disk need plus free floor exceeds known disk capacity",
 	"result_expired":                        "stored job files expired after the retention window",
@@ -126,13 +127,19 @@ type RuntimeCause struct {
 	Operation string `json:"operation"`
 	Class     string `json:"class"`
 	ExitCode  *int   `json:"exit_code,omitempty"`
+	Predicate string `json:"predicate,omitempty"`
+	Reason    string `json:"reason,omitempty"`
 }
 
 func (c RuntimeCause) String() string {
+	text := c.Operation + ": " + c.Class
 	if c.ExitCode != nil {
-		return fmt.Sprintf("%s: %s (exit %d)", c.Operation, c.Class, *c.ExitCode)
+		text = fmt.Sprintf("%s (exit %d)", text, *c.ExitCode)
 	}
-	return c.Operation + ": " + c.Class
+	if reason := launchPredicateMessages[c.Predicate]; reason != "" {
+		text += "; " + c.Predicate + ": " + reason
+	}
+	return text
 }
 
 type runtimeError struct {
@@ -229,6 +236,10 @@ func safeRuntimeCause(c *RuntimeCause) *RuntimeCause {
 		}
 	}
 	out := *c
+	out.Predicate, out.Reason = "", ""
+	if reason := launchPredicateMessages[c.Predicate]; reason != "" {
+		out.Predicate, out.Reason = c.Predicate, reason
+	}
 	if out.Class != "command_exit" {
 		out.ExitCode = nil
 	}

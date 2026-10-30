@@ -257,6 +257,9 @@ func (d *dockerAttempt) stopLocked(now time.Time, grace time.Duration, kill bool
 	}
 }
 func (d *dockerAttempt) recordInfrastructure(fact infrastructureFact, cause error) error {
+	if fact.Kind == launchRefused || fact.Kind == launchFailed || fact.Kind == environmentFailed {
+		fact.Predicate = launchFailurePredicate(fact.Kind, cause)
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	prior := d.state.Infrastructure

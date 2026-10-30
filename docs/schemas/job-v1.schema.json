@@ -2248,6 +2248,12 @@
         },
         "operation": {
           "type": "string"
+        },
+        "predicate": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
         }
       },
       "required": [

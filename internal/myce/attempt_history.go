@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"log"
 	"strings"
 	"time"
 )
@@ -50,6 +51,11 @@ func (q *Queue) recordAttemptOutcome(j *Job, outcome AttemptOutcome) {
 	if outcome.Attempt == 0 || outcome.Machine == "" || outcome.Session == "" {
 		return // Never manufacture an attempt for an unassigned job.
 	}
+	// Requeue records an outcome before Complete adds its full result. Carry
+	// the current safe launch detail into that immutable ledger entry too.
+	if outcome.ExecutionCause == nil && j.Attempt == outcome.Attempt && j.ExecutionCause != nil && j.ExecutionCause.Predicate != "" {
+		outcome.ExecutionCause = safeRuntimeCause(j.ExecutionCause)
+	}
 	outcome.EndedAt = q.clock.Now()
 	outcome.State = j.State
 	// Reuse status redaction, including availability text supplied by workers.
@@ -68,6 +74,9 @@ func (q *Queue) recordAttemptOutcome(j *Job, outcome AttemptOutcome) {
 	}
 	if !duplicate {
 		q.appendJobLedger(j, e)
+		if cause := outcome.ExecutionCause; cause != nil && cause.Predicate != "" {
+			log.Printf("event=launch_outcome job=%s attempt=%d predicate=%s reason=%q", j.ID, outcome.Attempt, cause.Predicate, cause.Reason)
+		}
 	}
 	q.alertAttemptLoss(j, outcome, false)
 	for i, old := range j.AttemptHistory {
