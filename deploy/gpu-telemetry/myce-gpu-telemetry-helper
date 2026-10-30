@@ -1,2 +1,2 @@
 #!/bin/sh
-exec /usr/local/libexec/mycelium-telemetry/myce gpu-telemetry-client
+exec /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C /usr/local/libexec/mycelium-telemetry/myce gpu-telemetry-client

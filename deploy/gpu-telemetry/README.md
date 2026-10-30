@@ -24,7 +24,9 @@ The standard-library 16-child limit prevents an accumulation of blocked readers;
 its overload cost is conservative client failure. Typical two-card 5 Hz collection
 needs fewer than two concurrent readers. No history or per-request files remain.
 Systemd retries a crashed broker after one second, avoiding a busy failure loop.
-The service filesystem is read-only and network families are limited to Unix.
+The service filesystem and explicit debugfs sources are read-only, network
+families are limited to Unix, and namespace creation, writable executable memory
+and foreign syscall architectures are disabled.
 
 ## Install (administrator)
 
@@ -32,7 +34,8 @@ Check load and service ownership first. Back up every existing destination and
 record socket/service enabled and active states before replacing anything.
 Check `/run/mycelium` is not used by another service before changing its metadata.
 Replace `REPLACE_PCI_1 REPLACE_PCI_2` in the service with every full lowercase PCI
-address attempts can use; add/remove arguments for other card counts. Example:
+address attempts can use in both `ExecStart` and `ReadOnlyPaths`; add/remove
+entries in both directives for other card counts. Example:
 `0000:01:00.0 0000:02:00.0`. Confirm the exact debugfs paths exist. Never broaden
 debugfs permissions or let clients choose the inventory.
 
@@ -41,7 +44,9 @@ with the built-in client at `/usr/local/libexec/mycelium-telemetry/myce`, and th
 provided no-argument wrapper at `/usr/local/libexec/myce-gpu-telemetry-helper`.
 Both and the broker must be root-owned 0755, and their parent directories must
 be root-owned and unwritable by worker/job accounts. The wrapper contains real
-newlines and execs the absolute binary path with `gpu-telemetry-client`.
+newlines and execs the absolute binary path with `gpu-telemetry-client`, clearing
+the environment to only `PATH=/usr/bin:/bin`, `LANG=C`, and `LC_ALL=C`. It forwards
+no caller arguments.
 
 From this directory, using the rendered service and chosen client binary:
 
@@ -69,8 +74,9 @@ budget. Nothing installs or modifies a Mycelium worker unit/configuration.
 Designated worker accounts need `myce-telemetry` as a supplementary group in the
 actual service process; adding account membership does not change running
 process groups. Coordinate that acquisition with separately authorized worker
-activation. Keep `NoNewPrivileges=yes`. Before activation, verify as the worker
-user in a transient systemd service with `SupplementaryGroups=myce-telemetry`,
+activation. Preserve the actual worker's existing `NoNewPrivileges` policy and
+additionally qualify `yes` if it currently uses `no`. Before activation, verify
+as the worker user in a transient systemd service with `SupplementaryGroups=myce-telemetry`,
 `NoNewPrivileges=yes`, `WorkingDirectory=/`, and the worker's other restrictions.
 Use only `PATH=/usr/bin:/bin`, `LANG=C`, `LC_ALL=C` in helper calls. Repeatedly
 check each timestamp falls between invocation start/completion, both/all PCI keys

@@ -813,7 +813,7 @@ operator-owned wrapper at the configured helper path runs:
 
 ```sh
 #!/bin/sh
-exec /absolute/path/to/installed/myce gpu-telemetry-client
+exec /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C /absolute/path/to/installed/myce gpu-telemetry-client
 ```
 
 The absolute binary path is chosen at installation. `--socket PATH` on the client
@@ -822,7 +822,8 @@ it is never derived from a job. The helper receives no arguments from the worker
 Neither process invokes sudo, setuid or a privileged executable. This client
 needs no queue connection or credentials. Mycelium installs neither the wrapper
 nor the broker, and changes no service privilege policy.
-This change supplies the client and contract only, with no reference broker.
+The separately installed [reference broker](../deploy/gpu-telemetry/README.md)
+implements this contract with fixed administrator-configured debugfs sources.
 
 The broker contract is:
 
