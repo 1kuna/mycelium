@@ -355,8 +355,13 @@ func (q *Queue) reservationPending(r Reservation) []string {
 }
 
 func (q *Queue) reservationAllows(j *Job, m *Machine) bool {
+	if m == nil && j != nil {
+		m = allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
+	}
 	if m == nil {
-		return false
+		// Missing inventory is not evidence of a reserved target. Other
+		// admission and recovery gates still own worker availability.
+		return true
 	}
 	// Existing Started work retains normal recovery/custody and priority rules.
 	if j != nil && j.StartedAt != nil && j.Machine == m.ID && (j.State == "running" || j.State == "stopping") {

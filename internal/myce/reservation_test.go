@@ -156,6 +156,61 @@ func TestReservationAcquisitionFencesCachedOfferAndPreservesOtherHolds(t *testin
 	}
 }
 
+func TestReservationUnstartedAssignmentWithoutMachine(t *testing.T) {
+	for _, missing := range []string{"absent inventory", "unknown replacement"} {
+		t.Run(missing, func(t *testing.T) {
+			q, _ := fixture(t)
+			m := m3Machine()
+			submit(t, q, exclusionSpec(m.ID, "0"))
+			offer := assignedJob(machineCheck(t, q, m))
+			if offer == nil || offer.StartedAt != nil {
+				t.Fatal("missing unstarted assignment", offer)
+			}
+			if err := q.update(func() error {
+				j := q.touchJob(offer.ID)
+				if missing == "absent inventory" {
+					delete(q.s.Machines, j.Machine)
+				} else {
+					j.Machine, j.Session = "replacement", "replacement-session"
+				}
+				q.maintainReservations()
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if got := job(t, q, offer.ID); got.State != "running" || got.Attempt != offer.Attempt {
+				t.Fatal("reservation maintenance stopped an unreserved assignment", got)
+			}
+		})
+	}
+}
+
+func TestReservationAllowsResolvesAssignedMachine(t *testing.T) {
+	q, _ := fixture(t)
+	m := m3Machine()
+	machineCheck(t, q, m)
+	bound := submit(t, q, exclusionSpec(m.ID, "0"))
+	if _, err := q.CreateReservation(reservationRequest("check", "host=machine;devices=0", bound.ID)); err != nil {
+		t.Fatal(err)
+	}
+	a := assignedJob(machineCheck(t, q, m))
+	if a == nil || a.ID != bound.ID {
+		t.Fatal("missing bound assignment", a)
+	}
+	if !q.reservationAllows(a, nil) {
+		t.Fatal("bound assignment refused without an explicit machine")
+	}
+	unrelated := *a
+	unrelated.ID = "unrelated"
+	if q.reservationAllows(&unrelated, nil) {
+		t.Fatal("known reserved assignment admitted unrelated work")
+	}
+	unrelated.Machine = "unknown"
+	if !q.reservationAllows(&unrelated, nil) || !q.reservationAllows(nil, nil) {
+		t.Fatal("unknown target treated as reserved")
+	}
+}
+
 func TestReservationRestartAndLifetimeExpiry(t *testing.T) {
 	clock := &fakeClock{now: time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)}
 	db, root := filepath.Join(t.TempDir(), "queue.db"), t.TempDir()
