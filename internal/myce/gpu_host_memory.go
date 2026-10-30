@@ -2,8 +2,11 @@ package myce
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -130,7 +133,45 @@ func drmHostMemory(b []byte) (string, float64, error) {
 	return fields["drm-pdev"] + "/" + fields["drm-client-id"], total, nil
 }
 
-func (a *memoryAttempt) gpuHostMemory(pci string) (float64, bool, error) {
+func validateGPUTelemetryHelper(path string) error {
+	if path != "" && (!filepath.IsAbs(path) || strings.ContainsAny(path, "\x00\n\r")) {
+		return errors.New("gpu-telemetry-helper must be an absolute, single-line executable path")
+	}
+	return nil
+}
+
+// The operator supplies an executable, not a command line. A local wrapper may
+// exec a separately scoped sudo reader; neither job input nor worker credentials
+// are sent to it. The timestamp must belong to this invocation, not a cache.
+func readGPUTelemetryHelper(ctx context.Context, clock Clock, path string) (map[string]string, error) {
+	if err := validateGPUTelemetryHelper(path); err != nil || path == "" {
+		return nil, errAttemptMemoryUnsupported
+	}
+	started := clock.Now()
+	ctx, cancel := context.WithTimeout(ctx, attemptMemorySamplePeriod)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, path)
+	cmd.Dir = "/"
+	cmd.Env = []string{"PATH=/usr/bin:/bin", "LANG=C", "LC_ALL=C"}
+	cmd.WaitDelay = attemptMemorySamplePeriod
+	const maxOutput = 64 << 10
+	out := &boundedProbeOutput{limit: maxOutput + 1}
+	cmd.Stdout, cmd.Stderr = out, io.Discard
+	if err := cmd.Run(); err != nil || ctx.Err() != nil || len(out.Bytes()) > maxOutput {
+		return nil, errAttemptMemoryUnsupported
+	}
+	finished := clock.Now()
+	var sample struct {
+		SampledAt time.Time         `json:"sampled_at"`
+		GTTMM     map[string]string `json:"gtt_mm"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &sample); err != nil || sample.SampledAt.IsZero() || sample.SampledAt.Before(started) || sample.SampledAt.After(finished) || finished.Sub(started) > attemptMemorySamplePeriod || len(sample.GTTMM) == 0 {
+		return nil, errAttemptMemoryUnsupported
+	}
+	return sample.GTTMM, nil
+}
+
+func (a *memoryAttempt) gpuHostMemory(ctx context.Context, clock Clock, helper, pci string) (float64, bool, error) {
 	b, err := a.fs.ReadFile(filepath.Join(a.path, "memory.events"))
 	if err != nil {
 		return 0, false, err
@@ -184,17 +225,33 @@ func (a *memoryAttempt) gpuHostMemory(pci string) (float64, bool, error) {
 		seen = seen || normalizePCIAddress(device) == normalizePCIAddress(pci)
 		cards[normalizePCIAddress(device)] = true
 	}
+	var managers map[string]string
+	if helper != "" {
+		managers, err = readGPUTelemetryHelper(ctx, clock, helper)
+		if err != nil {
+			return 0, false, err
+		}
+	}
 	for card := range cards {
 		if card == "" || card == "." || filepath.Base(card) != card {
 			return 0, false, errAttemptMemoryUnsupported
 		}
-		// Runtime corroboration is mandatory. Do not invoke sudo or change
-		// permissions: unreadable debugfs keeps conservative sizing. Count
+		// Runtime corroboration is mandatory, through direct debugfs reads
+		// or the explicitly configured helper. Missing evidence rejects it. Count
 		// the whole manager, not its net change, so unrelated allocations
 		// being freed cannot mask this card's driver-host storage.
-		b, err := a.fs.ReadFile(filepath.Join("/sys/kernel/debug/dri", card, "gtt_mm"))
-		if err != nil {
-			return 0, false, err
+		var b []byte
+		if helper != "" {
+			text, ok := managers[card]
+			if !ok {
+				return 0, false, errAttemptMemoryUnsupported
+			}
+			b = []byte(text)
+		} else {
+			b, err = a.fs.ReadFile(filepath.Join("/sys/kernel/debug/dri", card, "gtt_mm"))
+			if err != nil {
+				return 0, false, err
+			}
 		}
 		stats := memoryCounters([]byte(strings.ReplaceAll(string(b), ":", "")))
 		usage, ok := stats["usage"]
@@ -218,7 +275,7 @@ type gpuHostCollection struct {
 	last     time.Time
 }
 
-func (a *memoryAttempt) collectGPUHost(ctx context.Context, clock Clock, pci string) <-chan gpuHostCollection {
+func (a *memoryAttempt) collectGPUHost(ctx context.Context, clock Clock, helper, pci string) <-chan gpuHostCollection {
 	result := make(chan gpuHostCollection, 1)
 	go func() {
 		out := gpuHostCollection{complete: true}
@@ -230,7 +287,11 @@ func (a *memoryAttempt) collectGPUHost(ctx context.Context, clock Clock, pci str
 				return
 			}
 			start := clock.Now()
-			gb, seen, err := a.gpuHostMemory(pci)
+			// Finish the in-flight collection at teardown, as for kernel reads.
+			// The helper keeps its own deadline; cleanup still waits at most
+			// one period and rejects a missing or stale result. Cancellation
+			// stops subsequent collections, not a healthy final invocation.
+			gb, seen, err := a.gpuHostMemory(context.WithoutCancel(ctx), clock, helper, pci)
 			end := clock.Now()
 			if err != nil || end.Before(start) || end.Sub(start) > attemptMemorySamplePeriod || !out.last.IsZero() && start.Sub(out.last) > 2*attemptMemorySamplePeriod {
 				out.complete = false

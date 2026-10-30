@@ -210,6 +210,7 @@ func InstallSettings() []InstallSetting {
 		installPath("model-root", "ModelRoot", "NAS model root", func(c *ServiceConfig) *string { return &c.ModelRoot }, false),
 		installSetting("native-read-root", "NativeReadRoots", "operator-granted native read-only root (absolute; repeat; empty clears)", func(c *ServiceConfig) *[]string { return &c.NativeReadRoots }, validateNativeRootPaths),
 		installSetting("native-exec-root", "NativeExecuteRoots", "operator-granted native read/execute root (absolute; repeat; empty clears)", func(c *ServiceConfig) *[]string { return &c.NativeExecuteRoots }, validateNativeRootPaths),
+		installSetting("gpu-telemetry-helper", "GPUTelemetryHelper", "optional read-only GPU telemetry executable (absolute path; empty disables helper)", func(c *ServiceConfig) *string { return &c.GPUTelemetryHelper }, validateGPUTelemetryHelper),
 		installPath("environment-root", "EnvironmentRoot", "NAS environment root", func(c *ServiceConfig) *string { return &c.EnvironmentRoot }, false),
 		installPath("model-cache", "ModelCache", "local model cache", func(c *ServiceConfig) *string { return &c.ModelCache }, false),
 		installSetting("model-cache-bytes", "ModelCacheBytes", "local model cache bytes", func(c *ServiceConfig) *int64 { return &c.ModelCacheBytes }, installBytes),

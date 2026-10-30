@@ -898,8 +898,10 @@ a gap or final age beyond two periods makes GPU evidence incomplete. A blocked
 driver read cannot prevent resident sampling or indefinitely delay attempt
 completion. Missing DRM client identity rejects the whole GPU observation, even
 when other clients are readable. Runtime debugfs reads use the worker's existing
-permissions, without sudo or permission changes; missing, unreadable or malformed
-GTT-manager counters keep conservative sizing. Absolute driver allocations are
+permissions, or an operator-configured `--gpu-telemetry-helper` supplies fresh
+GTT-manager text through the same parser. The helper is an exact executable path,
+not a job command; see [its contract](operations.md#optional-privileged-gpu-telemetry-source).
+Missing, unreadable, stale or malformed GTT-manager evidence keeps conservative sizing. Absolute driver allocations are
 retained independently of net host deltas, which unrelated RAM release can mask.
 Other GPU drivers, CUDA, unified memory, older/incomplete samples and transfers
 retain the larger resident/total peak times 1.25. Missing readings are unknown,

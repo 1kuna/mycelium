@@ -1,15 +1,66 @@
 package myce
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestGPUTelemetryHelperInstallConfig(t *testing.T) {
+	c, err := PlanInstall("worker", "/fixture/home", "", "/fixture/nas", "http://queue.invalid", "fixture", Detection{OS: "linux", Platform: "fake", MemoryMode: "fixed", MemoryGB: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	overlay := func(base ServiceConfig, args ...string) (ServiceConfig, error) {
+		values := ServiceConfig{}
+		f := flag.NewFlagSet("install", flag.ContinueOnError)
+		RegisterInstallFlags(f, &values)
+		if err := f.Parse(args); err != nil {
+			return ServiceConfig{}, err
+		}
+		return OverlayInstallFlags(f, base, values)
+	}
+	path := "/usr/local/libexec/myce/gpu telemetry;literal"
+	c, err = overlay(c, "--gpu-telemetry-helper", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(c)
+	config := filepath.Join(t.TempDir(), "worker.json")
+	if err := os.WriteFile(config, b, 0600); err != nil {
+		t.Fatal(err)
+	}
+	saved, err := ReadServiceConfig(config)
+	if err != nil || saved.GPUTelemetryHelper != path {
+		t.Fatalf("helper did not survive saved configuration: %v", err)
+	}
+	args := saved.Args()
+	i := slices.Index(args, "--gpu-telemetry-helper")
+	if i < 0 || i+1 >= len(args) || args[i+1] != path {
+		t.Fatal("worker service omitted, split or changed helper executable")
+	}
+	unchanged, err := overlay(saved)
+	if err != nil || unchanged.GPUTelemetryHelper != path {
+		t.Fatal("upgrade discarded omitted helper setting")
+	}
+	cleared, err := overlay(saved, "--gpu-telemetry-helper=")
+	if err != nil || cleared.GPUTelemetryHelper != "" || slices.Contains(cleared.Args(), "--gpu-telemetry-helper") {
+		t.Fatal("operator could not disable helper")
+	}
+	for _, invalid := range []string{"relative", "/fixture/reader\nother", "/fixture/reader\x00other"} {
+		if _, err := overlay(saved, "--gpu-telemetry-helper", invalid); err == nil {
+			t.Fatalf("accepted invalid helper path %q", invalid)
+		}
+	}
+}
 
 func installTestField(c *ServiceConfig, path string) reflect.Value {
 	v := reflect.ValueOf(c).Elem()
