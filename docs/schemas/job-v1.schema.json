@@ -96,6 +96,9 @@
           "$ref": "#/$defs/MemoryEventCounts",
           "description": "Attempt-parent hierarchical memory.events counts. Absent means not read; explicit zero means a read zero. Max per counter across samples within the attempt."
         },
+        "gpu_host": {
+          "$ref": "#/$defs/GPUHostMemory"
+        },
         "host_gb": {
           "type": "number"
         },
@@ -1204,6 +1207,25 @@
       "required": [
         "sha256",
         "size_bytes"
+      ],
+      "type": "object"
+    },
+    "GPUHostMemory": {
+      "properties": {
+        "driver_gb": {
+          "type": "number"
+        },
+        "host_drop_gb": {
+          "type": "number"
+        },
+        "outside_gb": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "driver_gb",
+        "host_drop_gb",
+        "outside_gb"
       ],
       "type": "object"
     },

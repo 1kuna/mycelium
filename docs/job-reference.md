@@ -879,9 +879,22 @@ floor (128 MiB). At least two comparable complete measurements are required for
 every contributing local observation; two samples establish a range, not tail
 confidence. All observed resident peaks remain a floor. Kernel/shmem, locked
 and dirty/writeback pages are conservatively retained; clean file cache is
-excluded. GPU work retains the larger resident/total peak times 1.25 because
-these counters do not bound driver pins or host-mapped GPU memory. Older or
-incomplete measurements retain that conservative sizing too.
+excluded. Discrete Linux xe/XPU work can use that same margin only with
+complete per-attempt driver and whole-host evidence too. `memory_peak.gpu_host`
+retains deduplicated DRM client system/GTT allocations (including objects that
+may already be cgroup-charged) and the whole-host MemAvailable drop from an
+empty-cgroup, prelaunch baseline. At each synchronized sample, outside-cgroup
+use is conservatively estimated as max(driver allocations, host drop minus
+current non-reclaimable use, zero); `outside_gb` retains its maximum. Never
+subtract independent lifetime peaks. The base is non-reclaimable peak plus
+outside peak, also floored by the whole-host drop. Independent component,
+resident and driver maxima remain floors. At least two complete attempts per
+contributing local observation are required; `gpu_host_range` records the range separately from CPU components.
+Host swap growth/swap-out or OOM during observation rejects GPU samples too.
+Other GPU drivers, CUDA, unified memory, older/incomplete samples and transfers
+retain the larger resident/total peak times 1.25. Missing readings are unknown,
+not zero. Sampled host/DRM counters remain observations, not instantaneous
+bounds; native coexistence still requires workload output and pressure proof.
 Any pressure still invalidates comparable memory evidence and its range. macOS remains
 admission-only and does not promise a kernel RAM ceiling. There, the worker learns the summed RSS of the attempt's process
 groups every 500 ms (single-command jobs: at least main's exit max RSS), recorded
@@ -900,8 +913,9 @@ workload: {input_shape: recording-v1, units: 1500}
 ```
 
 A matching variant reference enables accepted slice-1 observations. Prefer
-local CPU non-reclaimable peaks plus the margin above (GPU and legacy local
-peaks × 1.25), then another machine's peaks for the same recipe/work/shape
+complete local CPU or discrete xe host evidence plus the margin above
+(other GPU and legacy local peaks × 1.25), then another machine's peaks for
+the same recipe/work/shape
 × 1.25 × 1.5 for the same OS/architecture/accelerator/memory-layout family, or
 × 1.25 × 2 for another family. Cross-machine estimates are labelled in status.
 Unknown, constrained, stale-identity or failed measurements, and peaks

@@ -1,0 +1,177 @@
+package myce
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+)
+
+// GPUHostMemory is complete xe host evidence, separate from device VRAM.
+// DriverGB counts all system/GTT objects, even those already charged to the
+// cgroup. This deliberate double count avoids assuming that GEM is charged.
+// HostDropGB is the whole-host MemAvailable drop since the empty cgroup was
+// created; it supplies an independent floor for allocations absent from fdinfo.
+// OutsideGB retains max(driver objects, host drop minus synchronized current
+// components, zero) across samples. It is added to the component peak; never
+// subtract independent lifetime peaks. These are observations, not instantaneous
+// allocation bounds. Unrelated host activity can conservatively increase them.
+type GPUHostMemory struct {
+	DriverGB   *float64 `json:"driver_gb"`
+	HostDropGB *float64 `json:"host_drop_gb"`
+	OutsideGB  *float64 `json:"outside_gb"`
+}
+
+func (p *AttemptMemoryPeak) gpuHostPeakGB() (float64, bool) {
+	if p == nil || p.NonreclaimableGB == nil || !validMemoryValue(*p.NonreclaimableGB) || p.GPUHost == nil || p.GPUHost.DriverGB == nil || p.GPUHost.HostDropGB == nil || p.GPUHost.OutsideGB == nil || !validMemoryValue(*p.GPUHost.DriverGB) || !validMemoryValue(*p.GPUHost.HostDropGB) || !validMemoryValue(*p.GPUHost.OutsideGB) || *p.GPUHost.OutsideGB < *p.GPUHost.DriverGB {
+		return 0, false
+	}
+	return max(*p.NonreclaimableGB+*p.GPUHost.OutsideGB, *p.GPUHost.HostDropGB), true
+}
+
+type gpuHostState struct {
+	available          float64
+	swap, oom, swapOut uint64
+}
+
+func readGPUHostState(fs memoryFS) (*gpuHostState, error) {
+	b, err := fs.ReadFile("/proc/meminfo")
+	if err != nil {
+		return nil, err
+	}
+	available, err := parseMemAvailable(b)
+	if err != nil {
+		return nil, err
+	}
+	values := map[string]uint64{}
+	for _, line := range strings.Split(string(b), "\n") {
+		f := strings.Fields(line)
+		if len(f) == 3 && f[2] == "kB" {
+			if n, e := strconv.ParseUint(f[1], 10, 64); e == nil {
+				values[f[0]] = n
+			}
+		}
+	}
+	total, tok := values["SwapTotal:"]
+	free, fok := values["SwapFree:"]
+	if !tok || !fok || free > total {
+		return nil, errors.New("host swap counters unavailable")
+	}
+	b, err = fs.ReadFile("/proc/vmstat")
+	if err != nil {
+		return nil, err
+	}
+	stats := memoryCounters(b)
+	oom, ok := stats["oom_kill"]
+	out, outOK := stats["pswpout"]
+	if !ok || !outOK {
+		return nil, errors.New("host OOM/swap-out counters unavailable")
+	}
+	return &gpuHostState{available: available, swap: total - free, oom: oom, swapOut: out}, nil
+}
+
+// Only xe discrete GPUs have been investigated. Missing fields, other drivers,
+// CUDA and unified memory keep the total-cgroup estimator.
+func drmHostMemory(b []byte) (string, float64, error) {
+	fields := map[string]string{}
+	for _, line := range strings.Split(string(b), "\n") {
+		k, v, ok := strings.Cut(line, ":")
+		if ok {
+			fields[k] = strings.TrimSpace(v)
+		}
+	}
+	if fields["drm-client-id"] == "" {
+		return "", 0, errAttemptMemoryPending
+	}
+	if fields["drm-driver"] != "xe" || fields["drm-pdev"] == "" {
+		return "", 0, errAttemptMemoryUnsupported
+	}
+	total := 0.0
+	for _, region := range []string{"system", "gtt"} {
+		var allocated, resident float64
+		for i, counter := range []string{"total", "resident"} {
+			f := strings.Fields(fields["drm-"+counter+"-"+region])
+			if len(f) < 1 || len(f) > 2 {
+				return "", 0, errAttemptMemoryUnsupported
+			}
+			n, err := strconv.ParseUint(f[0], 10, 64)
+			if err != nil {
+				return "", 0, errAttemptMemoryUnsupported
+			}
+			scale := 1.0
+			if len(f) == 2 {
+				switch f[1] {
+				case "KiB":
+					scale = 1 << 10
+				case "MiB":
+					scale = 1 << 20
+				default:
+					return "", 0, errAttemptMemoryUnsupported
+				}
+			}
+			if i == 0 {
+				allocated = float64(n) * scale / (1 << 30)
+			} else {
+				resident = float64(n) * scale / (1 << 30)
+			}
+		}
+		total += max(allocated, resident)
+	}
+	return fields["drm-pdev"] + "/" + fields["drm-client-id"], total, nil
+}
+
+func (a *memoryAttempt) gpuHostMemory(pci string) (float64, bool, error) {
+	b, err := a.fs.ReadFile(filepath.Join(a.path, "memory.events"))
+	if err != nil {
+		return 0, false, err
+	}
+	events := memoryCounters(b)
+	for _, name := range []string{"high", "max", "oom", "oom_kill", "oom_group_kill"} {
+		if _, ok := events[name]; !ok {
+			return 0, false, errors.New("incomplete cgroup pressure counters")
+		}
+	}
+	ids := map[int]bool{}
+	if err := a.processIDs(ids); err != nil {
+		return 0, false, err
+	}
+	clients := map[string]float64{}
+	for pid := range ids {
+		dir := filepath.Join("/proc", strconv.Itoa(pid), "fdinfo")
+		entries, err := a.fs.ReadDir(dir)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		} // A process exited since cgroup.procs.
+		if err != nil {
+			return 0, false, err
+		}
+		for _, entry := range entries {
+			b, err := a.fs.ReadFile(filepath.Join(dir, entry.Name()))
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			} // A descriptor closed since readdir.
+			if err != nil {
+				return 0, false, err
+			}
+			key, gb, err := drmHostMemory(b)
+			if errors.Is(err, errAttemptMemoryPending) {
+				continue
+			}
+			if err != nil {
+				return 0, false, err
+			}
+			clients[key] = max(clients[key], gb) // inherited/duplicated fds count once
+		}
+	}
+	total := 0.0
+	for _, gb := range clients {
+		total += gb
+	}
+	seen := false
+	for key := range clients {
+		device, _, _ := strings.Cut(key, "/")
+		seen = seen || normalizePCIAddress(device) == normalizePCIAddress(pci)
+	}
+	return total, seen, nil
+}

@@ -41,7 +41,8 @@ func (a *memoryAttempt) peak() *AttemptMemoryPeak {
 				// can overlap anon/shmem; double counting is safer than omitting
 				// locked file pages. Dirty/writeback pages need I/O before reclaim;
 				// sum them conservatively even where the counters overlap.
-				// This is not a driver pin counter; GPU sizing keeps total peaks.
+				// This is not a driver pin counter; GPU reduction also needs
+				// complete independent xe host-object/whole-host evidence.
 				nonreclaimable := gb + (float64(unevictable)+float64(dirty)+float64(writeback))/(1<<30)
 				p.nonreclaimableSampleGB = &nonreclaimable
 			}
@@ -278,6 +279,42 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 	ctx, cancel := context.WithCancel(context.Background())
 	peak := a.peak()
 	completeNonreclaimable := peak != nil && peak.nonreclaimableSampleGB != nil
+	// The empty-cgroup baseline precedes payload launch, including for plain
+	// commands whose observer is installed just after exec. No baseline means
+	// diagnostic counters only, never permission to shrink a GPU envelope.
+	gpuHost := w.Machine.GPU == "xpu" && !w.Machine.UnifiedMemory && w.selectedDevice != nil && w.selectedDevice.pciAddress != "" && !j.Spec.Needs.cpuOnly()
+	completeGPUHost := gpuHost && a.hostBaseline != nil
+	sawGPUHost := false
+	var driverGB, hostDropGB, outsideGB float64
+	sampleGPUHost := func(component *AttemptMemoryPeak) {
+		if !completeGPUHost {
+			return
+		}
+		if component == nil || component.nonreclaimableSampleGB == nil {
+			completeGPUHost = false
+			return
+		}
+		host, err := readGPUHostState(a.fs)
+		if err != nil {
+			completeGPUHost = false
+			return
+		}
+		if host.swap > a.hostBaseline.swap || host.oom > a.hostBaseline.oom || host.swapOut > a.hostBaseline.swapOut {
+			peak = sampledMemoryPeak(peak, &AttemptMemoryPeak{Constrained: true})
+		}
+		gb, seen, err := a.gpuHostMemory(w.selectedDevice.pciAddress)
+		if err != nil {
+			completeGPUHost = false
+			return
+		}
+		sawGPUHost = sawGPUHost || seen
+		driverGB = max(driverGB, gb)
+		hostDropGB = max(hostDropGB, a.hostBaseline.available-host.available)
+		// Compare synchronized samples, not independent lifetime peaks. Count
+		// every driver object as outside, even when it may overlap the cgroup.
+		outsideGB = max(outsideGB, gb, a.hostBaseline.available-host.available-*component.nonreclaimableSampleGB)
+	}
+	sampleGPUHost(peak)
 	var mu sync.Mutex
 	var samplers sync.WaitGroup
 	hostSampled := false // Read only after joining the host sampler.
@@ -302,6 +339,11 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 				completeNonreclaimable = completeNonreclaimable && sample != nil && sample.nonreclaimableSampleGB != nil
 				hostSampled = hostSampled || sample != nil && sample.HostGB != nil
 				record(sample)
+				// Keep host and driver sampling off q.mu and independent of
+				// the slower external device probe. The host goroutine owns it.
+				mu.Lock()
+				sampleGPUHost(sample)
+				mu.Unlock()
 			}
 		}
 	}()
@@ -339,8 +381,12 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 			samplers.Wait()
 			final := a.peak()
 			record(final)
-			if j.Spec.Needs.cpuOnly() && peak != nil && hostSampled && completeNonreclaimable && final != nil && final.nonreclaimableSampleGB != nil {
+			sampleGPUHost(final)
+			if (j.Spec.Needs.cpuOnly() || completeGPUHost && sawGPUHost) && peak != nil && hostSampled && completeNonreclaimable && final != nil && final.nonreclaimableSampleGB != nil {
 				peak.NonreclaimableGB = peak.nonreclaimableSampleGB
+				if gpuHost {
+					peak.GPUHost = &GPUHostMemory{DriverGB: &driverGB, HostDropGB: &hostDropGB, OutsideGB: &outsideGB}
+				}
 			}
 			// Counter-only read zeros are diagnostic facts, not a new
 			// incomplete resident measurement that invalidates learning.
