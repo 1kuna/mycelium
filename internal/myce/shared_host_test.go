@@ -2,8 +2,13 @@ package myce
 
 import (
 	"context"
+	"errors"
+	"io"
 	"math"
+	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -38,6 +43,10 @@ func TestSharedHostAdmissionUsesHistoryLiveReserveAndAcknowledgement(t *testing.
 	reply := check(t, q, m, nil)
 	if reply.Job != nil || reply.SharedHost == nil {
 		t.Fatal("unacknowledged profile admitted work", reply)
+	}
+	m.SharedHost = &SharedHostProfile{InteractiveReserveGB: 3}
+	if r := check(t, q, m, nil); r.Job != nil {
+		t.Fatal("inexact profile acknowledgement admitted work", r.Job.ID)
 	}
 	m.SharedHost = cloneSharedHost(reply.SharedHost)
 	reply = check(t, q, m, nil)
@@ -108,6 +117,58 @@ func TestSharedHostHistoryExpiresAndReserveIsNotDoubleCounted(t *testing.T) {
 	q.mu.Unlock()
 }
 
+func TestSharedHostMeasuredBurstAtHighExternalPeak(t *testing.T) {
+	q, clock := fixture(t)
+	m := sharedHostFixture(t, q)
+	m.SharedHost = &SharedHostProfile{InteractiveReserveGB: 4}
+	m.CapabilityProfile.SystemMemoryBytes = 64 << 30
+	m.MemoryObservation = &HostMemoryObservation{TotalGB: 64, UsedGB: 52.6}
+	m.HostMemoryBudgetGB, m.HostAvailableMemoryGB = 20, 10.4
+	budget := 20.0
+	if _, err := q.ChangeHostMaintenance(m.HostID, HostMaintenanceRequest{Action: "budget", MemoryBudgetGB: &budget}); err != nil {
+		t.Fatal(err)
+	}
+	check(t, q, m, nil)
+	// The peak already includes observed owner growth. Protect a measured
+	// additional burst, not another 25% of that accumulated baseline.
+	assertRoom := func(want float64) {
+		t.Helper()
+		s, err := q.HostMaintenanceStatus(m.HostID)
+		if err != nil || len(s.Workers) != 1 || math.Abs(s.Workers[0].Machine.FreeHostMemoryGB-want) > 1e-9 {
+			t.Fatalf("want %g GiB: %+v, %v", want, s, err)
+		}
+	}
+	assertRoom(7.25) // floor((64 - 52.6 - 4) * 4) / 4
+	clock.Advance(time.Second)
+	m.MemoryObservation.UsedGB = 40
+	m.HostAvailableMemoryGB = 23
+	check(t, q, m, nil)
+	assertRoom(7.25) // A quieter sample cannot erase the retained peak.
+	m.HostAvailableMemoryGB = 1.5
+	check(t, q, m, nil)
+	assertRoom(1.5) // The historical formula cannot exceed live admission.
+	// Worker RSS is not reclaimable headroom. It can keep the external peak
+	// unchanged while raw RAM runs out; the raw live bound must still win.
+	m.HostAvailableMemoryGB = 10.4
+	m.MemoryObservation.UsedGB, m.MemoryObservation.MyceliumGB = 60, 20
+	check(t, q, m, nil)
+	assertRoom(0)
+	m.MemoryObservation.UsedGB, m.MemoryObservation.MyceliumGB = 40, 0
+	m.HostAvailableMemoryGB = 23
+	m.HostMemoryBudgetGB, budget = 2, 2
+	if _, err := q.ChangeHostMaintenance(m.HostID, HostMaintenanceRequest{Action: "budget", MemoryBudgetGB: &budget}); err != nil {
+		t.Fatal(err)
+	}
+	check(t, q, m, nil)
+	assertRoom(2) // Nor can it increase the operator allowance.
+
+	w := Worker{Machine: m, HostMemoryReserveGB: 1, HostMemorySource: func(context.Context) (float64, error) { return 10.4, nil }}
+	free, err := w.sharedHostLiveMemory(context.Background())
+	if err != nil || math.Abs(free-7.4) > 1e-9 {
+		t.Fatalf("live launch headroom=%g, want 7.4: %v", free, err)
+	}
+}
+
 func TestSharedHostPolicyPersistsAndExclusionsRemainIndependent(t *testing.T) {
 	clock := &fakeClock{now: time.Date(2026, 10, 30, 12, 0, 0, 0, time.UTC)}
 	db, root := filepath.Join(t.TempDir(), "queue.db"), t.TempDir()
@@ -124,11 +185,23 @@ func TestSharedHostPolicyPersistsAndExclusionsRemainIndependent(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer q.Close()
+	// A new logical worker on this physical host receives the persisted policy.
+	m.ID = "replacement-worker"
+	m.MemoryObservation.UsedGB = 8
+	first := check(t, q, m, nil)
+	if first.SharedHost == nil || first.SharedHost.InteractiveReserveGB != 4 {
+		t.Fatal("physical-host profile lost after restart", first.SharedHost)
+	}
 	m.SharedHost = &SharedHostProfile{InteractiveReserveGB: 4}
 	check(t, q, m, nil)
-	status, err := q.HostMaintenanceStatus(m.ID)
+	status, err := q.HostMaintenanceStatus(m.HostID)
 	if err != nil || status.Policy.SharedHost == nil || !status.Policy.LastResort || status.Policy.Mode != "drained" {
 		t.Fatal(status, err)
+	}
+	for _, worker := range status.Workers {
+		if worker.Machine.ID == m.ID && worker.Machine.FreeHostMemoryGB != 6 {
+			t.Fatal("persisted peak lost after quieter reading", worker.Machine.FreeHostMemoryGB)
+		}
 	}
 	gpu := m
 	gpu.GPU = "metal"
@@ -139,7 +212,7 @@ func TestSharedHostPolicyPersistsAndExclusionsRemainIndependent(t *testing.T) {
 		t.Fatal("profile did not use GPU exclusion path")
 	}
 	changeExclusion(t, q, "host=interactive;kind=gpu", "add")
-	if _, err = q.ChangeHostMaintenance(m.ID, HostMaintenanceRequest{Action: "profile", SharedHost: &SharedHostProfile{}}); err != nil {
+	if _, err = q.ChangeHostMaintenance(m.HostID, HostMaintenanceRequest{Action: "profile", SharedHost: &SharedHostProfile{}}); err != nil {
 		t.Fatal(err)
 	}
 	q.mu.Lock()
@@ -148,7 +221,7 @@ func TestSharedHostPolicyPersistsAndExclusionsRemainIndependent(t *testing.T) {
 	if !blocked {
 		t.Fatal("removing profile cleared independent GPU exclusion")
 	}
-	status, err = q.HostMaintenanceStatus(m.ID)
+	status, err = q.HostMaintenanceStatus(m.HostID)
 	if err != nil || status.Policy.Mode != "drained" || !status.Policy.LastResort {
 		t.Fatal("profile removal changed maintenance/placement", status, err)
 	}
@@ -182,12 +255,112 @@ func TestSharedHostRejectsUnsafePolicyAndLaunches(t *testing.T) {
 	w := Worker{Machine: m, HostMemoryReserveGB: 1, HostMemorySource: func(context.Context) (float64, error) { return 4, nil }}
 	m.SharedHost.InteractiveReserveGB = 4
 	free, err := w.sharedHostLiveMemory(context.Background())
-	if err != nil || free != .25 {
+	if err != nil || free != 1 {
 		t.Fatal("worker reserve counted incorrectly", free, err)
 	}
 }
 
+func TestSharedHostRequiresPreparedSidecarEnvironment(t *testing.T) {
+	m := cpuMachine("worker", "physical", "cpu", 4, 16)
+	m.SharedHost = &SharedHostProfile{InteractiveReserveGB: 4}
+	side := NativeSidecar{Name: "helper", Environment: "tools", Command: []string{"sh", "-c", "exit 0"}}
+	r := binaryRecipe(t, "cpu")
+	j := Job{Spec: cpuSpec(1, 1), SidecarEnvironmentRecipes: map[string]map[string]EnvironmentRecipe{"helper": {"cpu": r}}}
+	j.Spec.Run.Sidecars = []NativeSidecar{side}
+	if err := normalizeResources(&j.Spec); err != nil {
+		t.Fatal(err)
+	}
+	if sharedHostJobFits(&j, &m) {
+		t.Error("cold sidecar environment admitted on shared host")
+	}
+	m.Environments = []string{r.Key}
+	if !sharedHostJobFits(&j, &m) {
+		t.Fatal("prepared sidecar environment refused")
+	}
+	// The advertised ready entry can disappear before launch. Do not rebuild
+	// with a batch authorization: preparations are outside phase one.
+	builds := 0
+	w := Worker{Machine: m, environmentCache: &EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Run: func(context.Context, []string, string, []string, io.Writer, io.Writer) error {
+		builds++
+		return errors.New("unexpected environment build")
+	}}}
+	g := nativeGroup{worker: w, ctx: t.Context()}
+	_, release, err := g.sidecarEnvironment(j, side, "")
+	if release != nil {
+		release()
+	}
+	if err == nil || !strings.Contains(err.Error(), "environment preparation required") || builds != 0 {
+		t.Fatalf("missing prepared sidecar rebuilt: builds=%d, err=%v", builds, err)
+	}
+}
+
+func TestSharedHostDoesNotRebuildMainEnvironment(t *testing.T) {
+	q, clock := fixture(t)
+	m := sharedHostFixture(t, q)
+	m.SharedHost = &SharedHostProfile{InteractiveReserveGB: 4}
+	r := binaryRecipe(t, "cpu")
+	m.Environments = []string{r.Key} // Readiness reported before the cache disappeared.
+	w := Worker{Machine: m, Clock: clock, StateDir: t.TempDir(), HostMemorySource: func(context.Context) (float64, error) { return 12, nil }, environmentCache: &EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: clock}}
+	store, err := w.openStore()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.close()
+	j := Job{ID: "cold-main", Attempt: 1, Spec: cpuSpec(1, 1), EnvironmentRecipes: map[string]EnvironmentRecipe{"cpu": r}}
+	if err := normalizeResources(&j.Spec); err != nil {
+		t.Fatal(err)
+	}
+	p, err := startAfterFixtureInputs(t, w, store, j)
+	if p != nil {
+		p.stop(clock.Now(), 0, true)
+		<-p.done
+	}
+	if err == nil || !strings.Contains(err.Error(), "environment preparation required") || w.environmentCache.ready(r.Key) {
+		t.Fatalf("missing prepared main environment rebuilt: %v", err)
+	}
+}
+
+func TestSharedHostCPUEnvironmentOnAcceleratorWorker(t *testing.T) {
+	q, _ := fixture(t)
+	m := sharedHostFixture(t, q)
+	m.SharedHost = &SharedHostProfile{InteractiveReserveGB: 4}
+	m.GPU = "cuda"
+	m.CapabilityProfile.Accelerators = []AcceleratorProfile{{Type: "cuda", MemoryBytes: 8 << 30}}
+	m.Devices = []MachineDevice{{ID: "0", Identity: "GPU-synthetic", Platform: "cuda", Selector: "0", TotalMemoryGB: 8, BudgetGB: 8, FreeMemoryGB: 8}}
+	r := binaryRecipe(t, "cpu")
+	m.Environments = []string{r.Key}
+	if err := q.ConfigureEnvironments(EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"tools": {"cpu": r}}}); err != nil {
+		t.Fatal(err)
+	}
+	check(t, q, m, nil)
+	if _, err := q.ChangeHostMaintenance(m.HostID, HostMaintenanceRequest{Action: "resume"}); err != nil {
+		t.Fatal(err)
+	}
+	s := cpuSpec(1, 1)
+	s.Environment = Environment{Name: "tools"}
+	j := submit(t, q, s)
+	reply, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assigned := assignedJob(reply)
+	if assigned == nil || assigned.ID != j.ID {
+		t.Fatal("prepared CPU command not assigned", assigned, job(t, q, j.ID).Reason)
+	}
+	if err := q.AuthorizeLaunch(HostLaunch{Machine: m.ID, Session: m.Session, Kind: "batch", Key: assigned.ID, Attempt: "1"}); err != nil {
+		t.Fatal("prepared CPU environment checked against accelerator platform", err)
+	}
+	if err := q.Started(result(assigned, false)); err != nil {
+		t.Fatal("prepared CPU command not authorized to start", err)
+	}
+}
+
 func TestSharedHostDevCommandPriority(t *testing.T) {
+	t.Setenv("MYCE_TOKEN", "synthetic-worker-only-token")
+	controlPriority, err := syscall.Getpriority(syscall.PRIO_PROCESS, os.Getpid())
+	if err != nil {
+		t.Fatal(err)
+	}
 	oldRSS := workerMemoryRSS
 	workerMemoryRSS = func(context.Context) (float64, error) { return 0, nil }
 	t.Cleanup(func() { workerMemoryRSS = oldRSS })
@@ -249,6 +422,25 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 	}
 	if status.Workers[0].Machine.SharedHost == nil || !status.Policy.LastResort {
 		t.Fatal("profile not acknowledged", status)
+	}
+	// Exercise the separate group/member gates, including a sidecar and the
+	// main payload. Its marker proves the helper checked priority and token too.
+	s.Run.Sidecars = []NativeSidecar{{Name: "helper", Command: []string{"sh", "-c", `n=$(ps -o nice= -p $$); test "$n" -ge 10 && test "${MYCE_TOKEN+x}" != x || exit 42; touch helper-ready; while :; do sleep 1; done`}}}
+	s.Run.Command = []string{"sh", "-c", `n=$(ps -o nice= -p $$); test "$n" -ge 10 && test "${MYCE_TOKEN+x}" != x || exit 42; while test ! -f helper-ready; do sleep .01; done`}
+	if err := c.Call(ctx, "POST", "/api/jobs", s, &j); err != nil {
+		t.Fatal(err)
+	}
+	await(t, func() bool {
+		if err := c.Call(ctx, "GET", "/api/jobs/"+j.ID, nil, &j); err != nil {
+			t.Fatal(err)
+		}
+		if j.State == "failed" {
+			t.Fatalf("native group failed: %+v", j)
+		}
+		return j.State == "succeeded"
+	})
+	if priority, err := syscall.Getpriority(syscall.PRIO_PROCESS, os.Getpid()); err != nil || priority != controlPriority {
+		t.Fatal("payload priority changed worker control", priority, controlPriority, err)
 	}
 }
 

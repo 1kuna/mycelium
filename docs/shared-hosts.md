@@ -53,11 +53,14 @@ burst. Record the workload and coverage with the sizing decision. There is no
 universal fixed reserve or machine-name rule. Until that measurement exists,
 leave the host drained rather than inventing capacity.
 
-For each admission the protected reserve is the larger of that measured
-increment and the existing #353 growth guard (25% of the seven-day external
-maximum). The historical allowance is physical RAM minus that maximum minus
-the protected reserve, clamped at zero and rounded down to 0.25 GiB, using
-`SuggestHostBudget`. Full reservations consume this allowance. It can only
+For each admission the protected reserve is that measured additional burst.
+The historical allowance is physical RAM minus the seven-day external maximum
+minus the protected reserve, clamped at zero and rounded down to 0.25 GiB.
+The peak already includes observed external growth; scaling that entire baseline
+by another percentage does not measure the next interactive burst. The generic
+#353 dry-run suggestion keeps its 25% growth guard for sizing without a measured
+burst; it is separate from this opt-in profile's measured reserve.
+Full reservations consume the historical allowance. It can only
 reduce the operator's configured RAM budget, never raise it. Live raw available
 RAM minus the protected reserve and running attempts' remaining growth is also
 an upper bound. Existing after-reserve live availability remains another upper
@@ -65,9 +68,9 @@ bound, so the old reserve is not subtracted twice. Missing live/history evidence
 or a worker policy mismatch withholds new work. History ages with the injected
 queue clock; no bulk probe or file work occurs under the queue mutex.
 
-Immediately before execution the worker rechecks raw live RAM and the configured
-interactive reserve. Its additional 25% live-used-RAM guard is conservative
-(including other Mycelium use); it cannot credit sampled RSS as available memory.
+Immediately before execution the worker rechecks raw live RAM minus the same
+configured interactive reserve, bounded by its existing after-reserve availability.
+It cannot credit sampled RSS as available memory.
 The queue still enforces the historical bound. Shared-host status reports the
 configured reserve, acknowledgement and admission reason. A full reserve can
 leave zero admitted RAM; the existing drain remains authoritative regardless.
@@ -79,7 +82,7 @@ On an authorized host, inspect `myce host status HOST` and the history first.
 The following placeholders are measured values, not defaults:
 
 ```sh
-myce host budget HOST --dry-run --headroom-gb MEASURED_BURST_GIB
+myce host budget HOST --dry-run # Generic sizing advice; retains the 25% guard.
 myce host drain HOST --wait
 myce host budget HOST --cpu-budget-cores MEASURED_LIGHT_CORES --memory-budget-gb MEASURED_ALLOWANCE_GIB
 myce host profile HOST --shared=true --interactive-reserve-gb MEASURED_BURST_GIB

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"runtime"
+	"slices"
 	"syscall"
 )
 
@@ -29,7 +31,26 @@ func sharedHostJobFits(j *Job, m *Machine) bool {
 	if m.SharedHostReason != "" {
 		return false
 	}
-	return m.SharedHost == nil || j.Spec.Needs.cpuOnly() && !j.Spec.Run.Docker && !j.Spec.extensionJob() && environmentReady(j, m)
+	if m.SharedHost == nil {
+		return true
+	}
+	// Admission and launch also receive the physical worker's accelerator
+	// view. CPU payloads use their prepared CPU recipes on either kind of host.
+	if j.Spec.Needs.cpuOnly() {
+		m = cpuMachineView(m)
+	}
+	if !j.Spec.Needs.cpuOnly() || j.Spec.Run.Docker || j.Spec.extensionJob() || !environmentReady(j, m) {
+		return false
+	}
+	for _, side := range j.Spec.Run.Sidecars {
+		if side.Environment != "" {
+			r, ok := j.SidecarEnvironmentRecipes[side.Name][m.GPU]
+			if !ok || !slices.Contains(m.Environments, r.Key) {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // Only bounded in-memory history is read here. Existing live reserves and static
@@ -54,15 +75,14 @@ func (q *Queue) sharedHostRoom(m *Machine, room, reserved, growth float64) float
 		m.SharedHostReason = "shared host requires live and historical external RAM observations"
 		return 0
 	}
-	suggestion, err := SuggestHostBudget(o.TotalGB, p.InteractiveReserveGB, 0, h)
-	if err != nil {
-		m.SharedHostReason = err.Error()
-		return 0
-	}
+	// This profile requires a measured additional burst reserve. The external
+	// peak already contains observed owner growth; a percentage of that whole
+	// baseline is not another independent burst measurement (#389).
+	historical := math.Floor(max(0, o.TotalGB-h.Week.MaxGB-p.InteractiveReserveGB)*4) / 4
 	// Raw live availability subtracts the protected reserve once. The existing
 	// after-reserve availability can only tighten this bound, never relax it.
-	live := o.TotalGB - o.UsedGB - suggestion.HeadroomGB - growth
-	return min(room, suggestion.SuggestedGB-reserved, live)
+	live := o.TotalGB - o.UsedGB - p.InteractiveReserveGB - growth
+	return min(room, historical-reserved, live)
 }
 
 func validHostMemoryObservation(o *HostMemoryObservation) bool {
@@ -105,9 +125,5 @@ func (w Worker) sharedHostLiveMemory(ctx context.Context) (float64, error) {
 	if !validMemoryValue(raw) {
 		return 0, errors.New("shared host raw memory unavailable")
 	}
-	reserve := w.Machine.SharedHost.InteractiveReserveGB
-	if c := w.Machine.CapabilityProfile; c != nil {
-		reserve = max(reserve, .25*max(0, float64(c.SystemMemoryBytes)/(1<<30)-raw))
-	}
-	return max(0, min(admission, raw-reserve)), nil
+	return max(0, min(admission, raw-w.Machine.SharedHost.InteractiveReserveGB)), nil
 }
