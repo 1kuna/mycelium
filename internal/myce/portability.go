@@ -165,6 +165,9 @@ func (q *Queue) portability(req PortabilityRequest) PortabilityReport {
 		"Shared orchestration/interactive hosts are usable for fitting light native CPU commands within their profile; submit normally, respect maintenance, and let last-resort placement choose. CPU priority/reservations are not hard shares or pressure-triggered migration.",
 		"MY-19: obtain owner-accepted output parity before splitting work across variants; preserve checkpoint compatibility.",
 	}}
+	if req.Spec != nil {
+		report.Notes = append(report.Notes, PlacementAdvisories(*req.Spec, req.RequirementReasons)...)
+	}
 	rows := map[ExecutionTarget]*PortabilityTarget{}
 	row := func(t ExecutionTarget) *PortabilityTarget {
 		t = portabilityTarget(t)

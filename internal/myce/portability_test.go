@@ -22,6 +22,21 @@ func portabilityRow(t *testing.T, r PortabilityReport, target ExecutionTarget) P
 	t.Fatalf("missing target %+v in %+v", target, r)
 	return PortabilityTarget{}
 }
+
+func TestPortabilityPinAdvice(t *testing.T) {
+	q, _ := fixture(t)
+	s := Spec{AllowedMachines: []string{"private-host"}}
+	r, err := q.Portability(PortabilityRequest{Spec: &s})
+	if err != nil || !strings.Contains(strings.Join(r.Notes, " "), "omit allowed_machines") {
+		t.Fatalf("pin advice: %+v %v", r, err)
+	}
+	reasons := map[string]string{"host": "private parity evidence"}
+	r, err = q.Portability(PortabilityRequest{Spec: &s, RequirementReasons: reasons})
+	b, _ := json.Marshal(r)
+	if err != nil || bytes.Contains(b, []byte("Host pin has no declared")) || bytes.Contains(b, []byte("private")) {
+		t.Fatalf("authored exception not respected/redacted: %s %v", b, err)
+	}
+}
 func TestPortabilityLiveInventoryAndCoverage(t *testing.T) {
 	q, c := fixture(t)
 	e := compositionExtension(t, true)

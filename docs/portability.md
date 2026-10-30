@@ -1,5 +1,63 @@
 # Live portability advice
 
+## Declare requirements, let Mycelium place
+
+Agents declare work kind or command, compatible OS/architecture/backend targets,
+accelerator count/class, memory and environment. Mycelium selects an eligible
+host using qualification, owner policy, available capacity and least-valuable-fit
+ranking (MY-18). For ordinary CPU work, for example:
+
+```yaml
+needs: {platform: cpu, cpu_cores: 2, host_memory_gb: 2}
+targets:
+  - {os: linux, arch: amd64, platform: cpu}
+  - {os: linux, arch: arm64, platform: cpu}
+  - {os: darwin, arch: arm64, platform: cpu}
+environment: portable-tools
+```
+
+Use targets whose tools and outputs you have verified. `portable-tools` stands
+for a registered catalog recipe covering those targets; native entries may use
+their existing bundled per-variant environments. A single-platform lock requires
+a platform restriction until another recipe is proven, not a particular host.
+Use a multi-platform lock where possible and separate recipes where packages
+differ. Cached packages alone prove neither command binding nor qualification;
+custom-command reuse remains [#380](https://github.com/1kuna/mycelium/issues/380).
+
+Host/device pins are exceptions for specific hardware, approved production
+parity, or hardware qualification. Record an adapter exception alongside the pin:
+
+```yaml
+requirement_reasons:
+  host: Approved production output parity currently covers this host only.
+  device: This diagnostic qualifies the selected physical accelerator.
+```
+
+Declare only the reasons that apply. These are authored explanations, not proof
+of parity or additional placement authority. A backend reason such as
+`backend:cuda` explains a backend limit; it does not explain a particular host or
+device. Keep the supporting evidence in the project's own records. Free-form
+reason text is omitted from advice output.
+
+`myce run` for adapters/profiles and `myce submit` print a non-blocking advisory
+for pins without a declared matching reason. Plain profiles and job YAML have no
+`requirement_reasons` field, so their pins receive the advisory; keep intentional
+exception evidence with the profile. `myce portability --adapter …` uses the same
+advice in its notes. This identifies an unexplained restriction, not a proven
+unnecessary pin; it changes no intent, target, qualification or production rule.
+Full live-coverage warnings at registration remain
+[#326](https://github.com/1kuna/mycelium/issues/326).
+
+Use the job's placement rationale when reporting “Mycelium placed it on X because
+Y”. `machine` and `allocated_devices` are assignment results; `production_host`
+can also be set by the scheduler and is not evidence of an agent-authored pin.
+Status already reports scarcity/admission rationale. Retained intent summaries
+and clearer origin/explanation are tracked in
+[#418](https://github.com/1kuna/mycelium/issues/418): current job/status APIs redact
+exact targets and environment recipes, so an audit cannot infer their absence.
+
+## Inspect coverage
+
 Ask before authoring an adapter, and again when inventory or requirements change:
 
 ```sh
@@ -112,6 +170,6 @@ workers accept no payloads. Advice includes their exact targets and CPU
 alternatives; adding another synthetic target changes the report. This proves
 inventory-driven guidance, not native accelerator execution or qualification.
 
-Registration/submission warnings and scarce-host yield are later phases of
-[#324](https://github.com/1kuna/mycelium/issues/324); this read-only command does
-not implement them.
+Host/device-pin advisories are described above. Automatic live-coverage warnings
+at registration and scarce-host yield remain later phases of
+[#324](https://github.com/1kuna/mycelium/issues/324); advice does not implement yield.

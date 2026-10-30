@@ -8,6 +8,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"mycelium/internal/myce"
@@ -32,6 +33,7 @@ func portabilityCommand(ctx context.Context, args []string, out io.Writer) error
 		return errors.New("usage: myce portability [--adapter FILE [--entry NAME] | --extension NAME@VERSION] [--json]")
 	}
 	request := myce.PortabilityRequest{Extension: *extension, Project: *project}
+	var placementAdvice []string
 	if *adapter != "" {
 		// Metadata read only: no source archive, Git operation, registration or setup.
 		data, err := os.ReadFile(*adapter)
@@ -52,6 +54,7 @@ func portabilityCommand(ctx context.Context, args []string, out io.Writer) error
 		}
 		request.Project = p.Project
 		request.RequirementReasons = a.Entries[name].RequirementReasons
+		placementAdvice = myce.PlacementAdvisories(p.Spec, request.RequirementReasons)
 		if p.Native != nil {
 			request.Recipe = p.Native
 			root, err := os.Getwd()
@@ -126,6 +129,13 @@ func portabilityCommand(ctx context.Context, args []string, out io.Writer) error
 	var report myce.PortabilityReport
 	if err = client.Call(ctx, "POST", "/api/portability", request, &report); err != nil {
 		return err
+	}
+	// Local pins live outside a native recipe. Also support queues predating
+	// these notes without requiring a fleet upgrade for agent guidance.
+	for _, advice := range placementAdvice {
+		if !slices.Contains(report.Notes, advice) {
+			report.Notes = append(report.Notes, advice)
+		}
 	}
 	return myce.WritePortability(out, report, *asJSON)
 }

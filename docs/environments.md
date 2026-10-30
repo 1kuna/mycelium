@@ -120,6 +120,14 @@ network access for that download and the locked dependencies. The Python, uv
 and ffmpeg used by the job come from the prepared environment, independent of
 those tools on the host.
 
+Cover every feasible target returned by `myce portability`. A one-platform lock
+limits environment coverage, not host identity: declare the matching platform
+until another recipe is verified, then widen targets. Keep distinct per-platform
+recipes when dependencies differ; native variants carry their own bundled locks.
+Package-cache readiness alone does not qualify a different command. See
+[placement and lock guidance](portability.md#declare-requirements-let-mycelium-place)
+and [custom-command environment reuse #380](https://github.com/1kuna/mycelium/issues/380).
+
 Register it through the existing shared catalog:
 
 1. Put `cpu-tools/pixi.toml` and `cpu-tools/pixi.lock` beside the queue's existing

@@ -6,6 +6,12 @@ layout, command arguments and result format. Mycelium supplies mechanisms,
 not application packages. Do not add a scheduler, retry loop, environment builder
 or service supervisor to the app.
 
+Declare the app's software requirements and let Mycelium choose placement.
+Run `myce portability` before authoring, then review the selected adapter entry
+or registered extension again when inventory or requirements change. Add missing
+target variants and multi-platform locks where feasible; document hard limits.
+See the [placement contract](../portability.md#declare-requirements-let-mycelium-place).
+
 To add a machine, use the existing one-command flow: run `myce invite` on an
 authorized installed hypha and paste its single output line on the new hypha.
 Optional `--out FILE` saves that command. Never put the fleet token in argv,
@@ -78,15 +84,7 @@ are distinct from `ready`; preserve them through upgrades and native checks.
    See [baseline keys and replay](#baseline-keys-and-replay).
    Changed files under a frozen version require a version bump and another check.
 
-   Dev automatically detects the local worker settings. The explicit equivalent is:
-
-   ```sh
-   myce extension check --root ./extension-state --gpu fake --device 0 \
-     --host dev-host --environment-cache ./state/workers/fake-1/environment-cache \
-     app-stage@1
-   ```
-
-   `fake-1` is the worker name; `0` is its simulated device selector. Dev creates
+   Dev automatically detects the local worker settings and creates
    the environment cache next to its queue database under `workers/fake-1/`;
    the worker builds the declared environments there. Main, check and helpers
    using the same declaration share that environment.
@@ -100,6 +98,10 @@ are distinct from `ready`; preserve them through upgrades and native checks.
    ```sh
    myce extension check --gpu xpu --device 0 --digest SHA256 app-stage@1
    ```
+
+   These selectors identify hardware for qualification, an intentional exception.
+   Submit useful work with software requirements and leave host/device selection
+   to Mycelium; the `Client.run` example below has no host restriction.
 
    For CPU use `--gpu cpu` without a device. Without installed worker settings,
    supply host/cache explicitly or use dev defaults. `--host` is the configured

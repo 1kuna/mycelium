@@ -4,6 +4,10 @@ Submit known heavy work; Mycelium chooses placement. A status read is diagnostic
 not permission to launch locally. This MVP changes no harness configuration and
 adds no T3 dependency to Mycelium.
 Agents use the [`mycelium-offload` skill](../skills/mycelium-offload/SKILL.md).
+Declare software requirements and compatible platforms; Mycelium chooses the
+host. Reserve pins for specific hardware, approved production parity or hardware
+qualification. See the [placement contract](portability.md#declare-requirements-let-mycelium-place)
+for exceptions, advisory messages and reporting scheduler-chosen placement.
 
 Before authoring or widening a project entry, run `myce portability`, then
 `myce portability --adapter .mycelium/adapter.yaml --entry NAME`. Recheck after

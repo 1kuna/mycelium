@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -21,12 +22,13 @@ import (
 )
 
 type executionProfile struct {
-	myce.Spec   `yaml:",inline"`
-	Source      profileSource   `yaml:"source"`
-	Check       []string        `yaml:"check"`
-	MemoryClass string          `yaml:"memory_class,omitempty"`
-	Adapter     bool            `yaml:"-"`
-	Native      *myce.Extension `yaml:"-"`
+	myce.Spec          `yaml:",inline"`
+	Source             profileSource     `yaml:"source"`
+	Check              []string          `yaml:"check"`
+	MemoryClass        string            `yaml:"memory_class,omitempty"`
+	Adapter            bool              `yaml:"-"`
+	Native             *myce.Extension   `yaml:"-"`
+	RequirementReasons map[string]string `yaml:"-" json:"-"`
 }
 
 type profileReceipt struct {
@@ -170,6 +172,9 @@ func runProfile(ctx context.Context, name string, args []string, itemInputs map[
 }
 
 func runPreparedProfile(ctx context.Context, root string, p executionProfile, data []byte, args []string, itemInputs map[string]string, key, notify, config, joining, address, token string, out, errOut io.Writer) error {
+	for _, advice := range myce.PlacementAdvisories(p.Spec, p.RequirementReasons) {
+		fmt.Fprintln(errOut, "placement advisory: "+advice)
+	}
 	var err error
 	itemRefs := myce.FileManifest{}
 	for dest, local := range itemInputs {
