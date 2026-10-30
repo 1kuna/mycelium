@@ -32,7 +32,16 @@ commands, and signals individual PIDs. The old 175-second
 deadline left only 19 seconds for builds/vet after an
 observed 156-second related-test selection, and repeatedly truncated passing work
 under shared load (#204). Five minutes keeps quick below the full gate's target
-without reducing test selection. Full runs have no package-wide wall deadline:
+without reducing test selection. Quick tests use Go's `-timeout 0`: the outer
+supervisor bounds all selected packages together, so a large related selection
+can use the remaining budget instead of hitting an independent three-minute
+package cap (#382). Selection, race instrumentation and concurrency are unchanged.
+The #379 replay on a shared macOS host selected 316 internal test names (six
+Linux-only names), with 305 passes and five existing opt-in skips. The internal
+package reported 220.406s (238s including compilation); the CLI selection and all
+build/vet steps brought the successful gate to 271s. This exceeds the former
+180s package cap while fitting the unchanged overall budget.
+Full runs have no package-wide wall deadline:
 a healthy two-core Linux core suite has taken nearly fifteen minutes. Observe
 the JSON log stream and stop a run with no log growth for twenty minutes
 rather than killing active tests. Timings

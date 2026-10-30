@@ -100,12 +100,14 @@ if [[ $mode == full ]]; then
   # the release owner stops a run stalled for 20m.
   step race-and-dev go test -race -vet=off -json -p 2 -parallel 4 -count=1 -timeout 0 ./...
 else
+  # The quick supervisor owns the five-minute budget, including builds and
+  # cleanup. A separate package cap can kill a passing large selection early.
   while IFS=$'\t' read -r dir names; do
     package=$(go list "./$dir")
     echo "quick $package: $names"
-    step race-related go test -race -vet=off -json -p 2 -parallel 4 -count=1 -timeout 3m "$package" -run "$names"
+    step race-related go test -race -vet=off -json -p 2 -parallel 4 -count=1 -timeout 0 "$package" -run "$names"
   done < "$scratch/selection"
   if [[ ! -s $scratch/selection ]]; then
-    step race-dev-smoke go test -race -vet=off -json -p 2 -parallel 4 -count=1 -timeout 3m ./cmd/myce -run '^TestDevStandaloneSmoke$'
+    step race-dev-smoke go test -race -vet=off -json -p 2 -parallel 4 -count=1 -timeout 0 ./cmd/myce -run '^TestDevStandaloneSmoke$'
   fi
 fi
