@@ -1,5 +1,9 @@
 # Service templates
 
+The optional [xe GPU telemetry broker](gpu-telemetry/README.md) is a **root system
+service**, with a read-only unprivileged helper for workers retaining
+`NoNewPrivileges=yes`. It is installed separately from the user units below.
+
 Follow [operations](../docs/operations.md) for install, start, stop, upgrade,
 and recoverable uninstall on Linux/macOS. Qualify each rendered definition before native activation. Linux files are **user** systemd units, not system
 units. Replace every `REPLACE_*` field before installing. macOS's worker filename is `local.myce.worker.plist` and its label is

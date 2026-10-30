@@ -779,6 +779,10 @@ keeps this proof separate from laptop fixtures.
 
 ## Host RAM admission and ceilings
 
+The separately installed [root broker templates and helper wrapper](../deploy/gpu-telemetry/README.md)
+implement the Unix-socket contract in follow-up PR #422, using fresh fixed-inventory
+reads after each request. They do not set the worker flag or restart the worker.
+
 ### Optional privileged GPU telemetry source
 
 Discrete xe/XPU host-envelope learning requires both per-process DRM fdinfo and

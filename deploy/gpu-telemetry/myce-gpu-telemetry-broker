@@ -1,0 +1,132 @@
+#!/usr/bin/python3 -I
+"""Socket-activated, fixed-inventory xe telemetry; no queue authority or cache."""
+
+import datetime as dt
+import json
+import os
+from pathlib import Path
+import re
+import signal
+import socket
+import socketserver
+import sys
+import time
+
+DEBUGFS = Path('/sys/kernel/debug/dri')
+MAX_BYTES = 64 << 10
+DEADLINE = 0.150
+PCI = re.compile(r'[0-9a-f]{4}:[0-9a-f]{2}:[0-1][0-9a-f]\.[0-7]\Z')
+
+
+def validate_cards(cards: list[str]) -> None:
+    if not cards or len(set(cards)) != len(cards) or any(
+            not PCI.fullmatch(card) for card in cards):
+        raise ValueError('expected unique canonical PCI addresses')
+
+
+def manager(text: str) -> None:
+    fields: dict[str, str] = {}
+    for line in text.splitlines():
+        key, sep, value = line.partition(':')
+        if sep:
+            key = key.strip()
+            if key in fields:
+                raise ValueError('duplicate manager field')
+            fields[key] = value.strip()
+    if fields.get('use_type') != '1' or fields.get('use_tt') != '1':
+        raise ValueError('unsupported manager')
+    usage = fields.get('usage', '')
+    if not re.fullmatch(r'[0-9]{1,20}', usage) or int(usage) > (1 << 64) - 1:
+        raise ValueError('invalid manager usage')
+
+
+def collect(cards: list[str], root: Path = DEBUGFS) -> bytes:
+    # Only called AFTER request EOF. Timestamp precedes every debugfs read.
+    started = dt.datetime.now(dt.timezone.utc)
+    readings: dict[str, str] = {}
+    for card in cards:
+        fd = os.open(root / card / 'gtt_mm', os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(fd, 'rb') as stream:
+            data = stream.read(MAX_BYTES + 1)
+        if not data or len(data) > MAX_BYTES:
+            raise ValueError('empty or oversized manager')
+        text = data.decode('ascii')
+        manager(text)
+        readings[card] = text
+    reply = json.dumps({'sampled_at': started.isoformat().replace('+00:00', 'Z'),
+                        'gtt_mm': readings}, separators=(',', ':')).encode() + b'\n'
+    if len(reply) > MAX_BYTES:
+        raise ValueError('oversized reply')
+    return reply
+
+
+def expired(signum: int, frame: object) -> None:
+    raise TimeoutError('connection deadline')
+
+
+def respond(conn: socket.socket, accepted: float, cards: list[str],
+            root: Path = DEBUGFS) -> None:
+    remaining = DEADLINE - (time.monotonic() - accepted)
+    if remaining <= 0:
+        return
+    # Each connection runs in a child process: SIGALRM also bounds ordinary
+    # blocking file reads, independently of socket timeouts. No background
+    # reader threads survive a connection or consume later sample timestamps.
+    old = signal.signal(signal.SIGALRM, expired)
+    signal.setitimer(signal.ITIMER_REAL, remaining)
+    try:
+        conn.settimeout(remaining)
+        if conn.recv(1) != b'':
+            return  # EOF alone is the request; never accept caller input.
+        reply = collect(cards, root)
+        remaining = DEADLINE - (time.monotonic() - accepted)
+        if remaining <= 0:
+            return
+        conn.settimeout(remaining)
+        conn.sendall(reply)
+    except (OSError, ValueError):
+        # Fail closed: no status envelope, partial collection or cached reply.
+        pass
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, old)
+
+
+class Handler(socketserver.BaseRequestHandler):
+    def handle(self) -> None:
+        respond(self.request, self.client_address, self.server.cards)
+
+
+class Broker(socketserver.ForkingMixIn, socketserver.UnixStreamServer):
+    # Two 5-Hz collectors normally require fewer than two concurrent readers.
+    # This standard-library bound prevents failed/blocked readers from spawning
+    # without limit; cost on overload is conservative client timeout, not a cache.
+    max_children = 16
+
+    def get_request(self) -> tuple[socket.socket, float]:
+        conn, _ = self.socket.accept()
+        return conn, time.monotonic()
+
+
+def main() -> int:
+    cards = sys.argv[1:]
+    validate_cards(cards)
+    if os.environ.get('LISTEN_PID') != str(os.getpid()) or os.environ.get(
+            'LISTEN_FDS') != '1':
+        raise ValueError('requires one systemd listening socket')
+    with Broker(None, Handler, bind_and_activate=False) as server:
+        server.socket.close()
+        server.socket = socket.socket(fileno=3)
+        if server.socket.family != socket.AF_UNIX or server.socket.type != socket.SOCK_STREAM:
+            raise ValueError('expected Unix stream socket')
+        server.cards = cards
+        server.serve_forever()
+    return 0
+
+
+if __name__ == '__main__':
+    try:
+        sys.exit(main())
+    except (OSError, ValueError) as exc:
+        print(f'GPU telemetry broker unavailable: {exc}', file=sys.stderr)
+        sys.exit(1)

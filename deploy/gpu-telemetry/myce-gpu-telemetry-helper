@@ -1,0 +1,2 @@
+#!/bin/sh
+exec /usr/local/libexec/mycelium-telemetry/myce gpu-telemetry-client

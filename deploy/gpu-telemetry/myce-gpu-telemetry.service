@@ -1,0 +1,35 @@
+[Unit]
+Description=Read-only Mycelium xe GPU telemetry broker
+Requires=myce-gpu-telemetry.socket
+After=myce-gpu-telemetry.socket
+
+[Service]
+Type=simple
+User=root
+Group=myce-telemetry
+ExecStart=/usr/local/libexec/myce-gpu-telemetry-broker REPLACE_PCI_1 REPLACE_PCI_2
+WorkingDirectory=/
+UMask=0027
+CPUAccounting=yes
+Restart=on-failure
+RestartSec=1
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateNetwork=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+UnsetEnvironment=MYCE_TOKEN
+
+[Install]
+WantedBy=multi-user.target
