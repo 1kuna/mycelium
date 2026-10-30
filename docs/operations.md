@@ -799,8 +799,10 @@ environment. The executable is operator authority, never part of a job spec.
 
 #### Root-owned broker and unprivileged client
 
-The supported privileged-source arrangement keeps `NoNewPrivileges=yes` on the
-worker. A separate administrator-owned broker reads debugfs; the worker's helper
+The privileged-source arrangement works with `NoNewPrivileges=yes` on the
+worker; it does not require changing an existing `NoNewPrivileges=no` setting.
+Inspect the actual service policy rather than assuming the installer default.
+A separate administrator-owned broker reads debugfs; the worker's helper
 is an unprivileged client. The binary provides `myce gpu-telemetry-client`, which
 connects to the Unix stream socket **`/run/mycelium/gpu-telemetry.sock`**. An
 operator-owned wrapper at the configured helper path runs:
@@ -816,6 +818,7 @@ it is never derived from a job. The helper receives no arguments from the worker
 Neither process invokes sudo, setuid or a privileged executable. This client
 needs no queue connection or credentials. Mycelium installs neither the wrapper
 nor the broker, and changes no service privilege policy.
+This change supplies the client and contract only, with no reference broker.
 
 The broker contract is:
 
@@ -874,8 +877,34 @@ clients cannot replace the socket. Keep the wrapper and executable chain
 root-owned, mode **0755**, in directories unwritable by workers/jobs. The broker
 uses no queue authority or fleet token and provides no filesystem-write or
 administration operation to clients. Verify these owners/modes after every
-broker restart and qualify connectivity from the actual worker service with
-`NoNewPrivileges=yes`; installing a sudoers rule is neither needed nor sufficient.
+broker restart. These are operator-enforced installation requirements: the
+client does not check filesystem ownership/modes or authenticate the peer. It
+only bounds and forwards the reply; the worker parses the JSON and validates
+freshness, participating cards and counters before using it as evidence.
+
+Activate only after separately installing and qualifying a conforming broker:
+
+1. Create the dedicated `myce-telemetry` system group if absent (for example,
+   `getent group myce-telemetry || groupadd --system myce-telemetry`, as root).
+   Add only the designated worker account to it, then create the broker's runtime
+   directory/socket with the owners and modes above. Ensure the broker recreates
+   them correctly after reboot.
+2. Give the actual worker process the supplementary group. A system service can
+   use an administrator-owned `SupplementaryGroups=myce-telemetry` drop-in. For
+   a user service, refresh the user manager's group credentials through an
+   operator-controlled session/manager restart; restarting only the worker may
+   retain old groups. Verify the running worker's groups in `/proc/PID/status`;
+   a successful client call from a new login shell alone is insufficient.
+3. Qualify repeated wrapper calls under the service's actual user, groups and
+   restrictions, and additionally under `NoNewPrivileges=yes` if the service
+   currently uses `no`. Preserve the existing service policy; no sudoers grant
+   or privilege relaxation is needed. Check fresh complete per-card replies,
+   failure behavior and broker resource use before enabling the helper.
+4. With a compatible release installed, use the normal drained in-place worker
+   installation procedure, selecting the saved `--config WORKER_CONFIG` and
+   adding `--gpu-telemetry-helper /absolute/wrapper`. Inspect `--dry-run` before
+   applying it, preserving saved settings. Inspect the saved config and running
+   service, then qualify real attempt telemetry before claiming reduced sizing.
 
 The client has its own 200 ms connection/read deadline and 64 KiB response limit;
 the worker separately enforces its full driver-collection coverage window.
