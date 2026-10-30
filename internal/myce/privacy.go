@@ -199,6 +199,10 @@ func statusJobValue(job *Job) Job {
 	}
 	if j.State == "failed" {
 		switch {
+		case j.Spec.ExtensionCheck != nil && strings.HasPrefix(j.Reason, "never started: "):
+			j.Reason = "never started: " + extensionCheckAdmissionReason(strings.TrimPrefix(j.Reason, "never started: "))
+		case j.Spec.ExtensionCheck != nil && j.Reason == "check execution timeout exceeded":
+			// Fixed queue-owned execution timeout, with no worker error suffix.
 		case j.ExecutionCause != nil && (j.ExecutionCause.Operation == "input_staging" || j.ExecutionCause.Predicate != ""):
 			j.Reason = "execution failed: " + j.ExecutionCause.String()
 		case j.ExecutionCause != nil && j.ExecutionCause.Class == cpuIsolationUnavailable:
@@ -214,6 +218,31 @@ func statusJobValue(job *Job) Job {
 		}
 	}
 	return *j
+}
+
+// A failed check keeps its admission category on the supported job API. Raw
+// placement/preparation details can contain worker errors and private paths.
+func extensionCheckAdmissionReason(reason string) string {
+	switch {
+	case strings.Contains(reason, "RAM"):
+		return "waiting for host RAM"
+	case strings.Contains(reason, "production hold"):
+		return "waiting for production hold to end"
+	case strings.Contains(reason, "maintenance"), strings.Contains(reason, "disabled by operator"):
+		return "waiting for host maintenance to end"
+	case strings.Contains(reason, "cleanup"), strings.Contains(reason, "release"), strings.Contains(reason, "work to stop"):
+		return "waiting for resource release"
+	case strings.Contains(reason, "environment"), strings.Contains(reason, "command start"):
+		return "waiting for environment or command preparation"
+	case strings.Contains(reason, "disk_headroom"), strings.Contains(reason, "disk space"):
+		return "waiting for disk space"
+	case strings.Contains(reason, "checkpoint"), strings.Contains(reason, "NAS"):
+		return "waiting for checkpoint storage"
+	case strings.Contains(reason, "worker"), strings.Contains(reason, "machine"):
+		return "waiting for an available worker"
+	default:
+		return "waiting for admission or command preparation"
+	}
 }
 
 // Omit execution payload from captures that need only identity and lifecycle
@@ -232,7 +261,7 @@ func statusJobInputs(job *Job) Job {
 		spec.Program = &Program{Type: j.Spec.Program.Type}
 	}
 	if j.Spec.ExtensionCheck != nil {
-		spec.ExtensionCheck = &ExtensionCheckRequest{Work: j.Spec.ExtensionCheck.Work}
+		spec.ExtensionCheck = &ExtensionCheckRequest{Work: j.Spec.ExtensionCheck.Work, Timeout: j.Spec.ExtensionCheck.Timeout}
 	}
 	spec.Workload = j.Spec.Workload
 	spec.Needs = j.Spec.Needs

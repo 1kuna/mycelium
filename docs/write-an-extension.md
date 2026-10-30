@@ -59,7 +59,17 @@ Setup downloads models, packages, source or installers into
 `MYCE_EXTENSION_CACHE`, once per hypha/version/platform. They stay outside the
 small folder. Use pinned versions and verify model/download hashes. Setup is
 explicit, with a bounded timeout; it is never silently started by a queued job.
-The CLI default setup/check timeout is ten minutes (`--timeout` overrides it).
+The CLI default `--timeout` is ten minutes. For setup, it bounds the whole
+operation. For `extension check`, it bounds each check command's execution,
+from the queue-recorded `Started` acknowledgement to completion. Queue admission
+and environment/command preparation do not consume that execution budget.
+Each check has a separate one-hour window to start, enforced by the existing
+start-deadline mechanism without changing its experiment priority. If that
+window expires, the command exits unsuccessfully and the local report says
+`never started: <admission reason>` (for example, waiting for host RAM), rather
+than `check failed`. It grants no qualification. An execution timeout remains a
+failed check. Both limits are enforced by the queue, including after the CLI
+disconnects; Ctrl-C still cancels the CLI's own check and confirms release.
 Keep qualification checks and memory guards intact when allowing build time.
 The cache is trusted local code, not a sandbox. Setup/check obtain an exclusive
 cache lock; running jobs hold a shared lock. A setup failure clears qualification.

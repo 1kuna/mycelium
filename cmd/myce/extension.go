@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -39,7 +40,7 @@ func extensionCommand(args []string) error {
 	local := f.Bool("local", false, "add locally without registering with the queue")
 	platform := f.String("gpu", "", "qualification platform: cuda, xpu, metal or fake")
 	device := f.String("device", "", "same selector as join --device")
-	timeout := f.Duration("timeout", 10*time.Minute, "setup/check time limit")
+	timeout := f.Duration("timeout", 10*time.Minute, "setup time limit; check execution time limit per command (excludes waiting to start)")
 	if err := f.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -157,8 +158,6 @@ func extensionCommand(args []string) error {
 			if e.Name+"@"+e.Version != f.Arg(0) {
 				continue
 			}
-			bounded, cancel := context.WithTimeout(ctx, *timeout)
-			defer cancel()
 			var cache *myce.EnvironmentCache
 			if *environmentRoot != "" {
 				cache = &myce.EnvironmentCache{Root: *environmentRoot, Limit: *environmentLimit}
@@ -169,14 +168,19 @@ func extensionCommand(args []string) error {
 			var reports []myce.ExtensionReport
 			if args[0] == "check" {
 				cache.Fetch = client.DownloadFile
-				reports, err = myce.CheckExtension(bounded, *root, e, *platform, *device, *host, os.Stderr, cache, client)
+				reports, err = myce.CheckExtension(ctx, *root, e, *platform, *device, *host, os.Stderr, cache, client, *timeout)
 			} else {
+				bounded, cancel := context.WithTimeout(ctx, *timeout)
+				defer cancel()
 				reports, err = myce.PrepareExtension(bounded, *root, e, *platform, *device, false, os.Stderr, cache)
 			}
 			for _, r := range reports {
 				fmt.Println(myce.FormatExtensionReport(r))
 			}
 			if err != nil {
+				if args[0] == "check" && strings.HasPrefix(err.Error(), "never started: ") {
+					return err
+				}
 				return fmt.Errorf("FAIL %s: %w", args[0], err)
 			}
 			if args[0] == "check" {
