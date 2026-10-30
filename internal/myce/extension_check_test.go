@@ -539,7 +539,7 @@ func TestExtensionCheckProductionHoldStillQueues(t *testing.T) {
 // Drive the real check client and queue synchronously; only the command result
 // is synthetic. Queue/admission/preparation and execution use the fake clock.
 func TestExtensionCheckExecutionTimeout(t *testing.T) {
-	for _, mode := range []string{"qualifies after occupancy", "never admitted", "preparation never starts", "execution exceeds timeout"} {
+	for _, mode := range []string{"qualifies after occupancy", "never admitted", "never admitted cleanup fails", "preparation never starts", "execution exceeds timeout"} {
 		t.Run(mode, func(t *testing.T) {
 			q, clock := fixture(t)
 			e := compositionExtension(t, false)
@@ -596,6 +596,9 @@ func TestExtensionCheckExecutionTimeout(t *testing.T) {
 					}
 					return response(submitted)
 				case req.URL.Path == "/api/jobs/cancel":
+					if mode == "never admitted cleanup fails" {
+						return nil, errors.New("release confirmation unavailable")
+					}
 					ack, err := q.CancelSubmission("extension-check", submitted.Spec.SubmissionKey)
 					if err != nil {
 						t.Fatal(err)
@@ -604,7 +607,7 @@ func TestExtensionCheckExecutionTimeout(t *testing.T) {
 				case strings.HasSuffix(req.URL.Path, "/logs"):
 					return response([]LogChunk{})
 				case req.URL.Path == "/api/jobs/"+submitted.ID:
-					if mode == "never admitted" {
+					if strings.HasPrefix(mode, "never admitted") {
 						clock.Advance(time.Hour)
 						if err := q.Tick(); err != nil {
 							t.Fatal(err)
@@ -658,6 +661,9 @@ func TestExtensionCheckExecutionTimeout(t *testing.T) {
 			reports, err := CheckExtension(context.Background(), root, e, "fake", "0", m.HostID, io.Discard, cache, client, 3*time.Minute)
 			if len(reports) != 1 {
 				t.Fatalf("missing report: %+v, %v", reports, err)
+			}
+			if mode == "never admitted cleanup fails" && (err == nil || !strings.Contains(err.Error(), "release confirmation unavailable")) {
+				t.Fatalf("lost cleanup error: %v", err)
 			}
 			got := job(t, q, submitted.ID)
 			saved := readExtensionReports(root, e, "fake")

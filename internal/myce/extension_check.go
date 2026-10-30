@@ -188,6 +188,9 @@ func CheckExtension(ctx context.Context, root string, e Extension, platform, dev
 			r.Reason = job.Reason
 		}
 		if e2 != nil || cleanupErr != nil {
+			if strings.HasPrefix(r.Reason, "never started: ") {
+				return reports, errors.Join(errors.New(r.Reason), e2, cleanupErr)
+			}
 			return reports, errors.Join(e2, cleanupErr)
 		}
 		var chunks []LogChunk
