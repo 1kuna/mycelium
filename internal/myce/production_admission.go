@@ -16,6 +16,9 @@ type ProductionBackoff struct {
 // Use only this recipe's measured preparation history. The placement estimator's
 // fleet averages/default 60s are useful for ranking, not for withholding work.
 func measuredSetupSeconds(j *Job, m *Machine, cold bool) (float64, bool) {
+	if j.Spec.Needs.cpuOnly() && m.Devices != nil {
+		m = cpuMachineView(m)
+	}
 	keys := map[string]bool{}
 	for _, r := range extensionEnvironmentRecipes(j, m) {
 		keys[r.Key] = true
@@ -65,6 +68,9 @@ func (q *Queue) productionAdmissionReason(j *Job, m *Machine) string {
 	// Revalidate offers and unstarted payloads, leaving Started custody alone.
 	if j.Spec.Priority == "production" || j.StartedAt != nil && j.State != "queued" {
 		return ""
+	}
+	if j.Spec.Needs.cpuOnly() && m.Devices != nil {
+		m = cpuMachineView(m)
 	}
 	host := hostID(m)
 	if b := j.ProductionBackoff[host]; q.clock.Now().Before(b.Until) {

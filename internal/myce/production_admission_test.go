@@ -2,6 +2,7 @@ package myce
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -125,7 +126,7 @@ func productionAdmissionFixture(t *testing.T) (*Queue, *workerFakeClock, Machine
 }
 
 func TestProductionAdmissionPredictableDependentDemand(t *testing.T) {
-	for _, edge := range []string{"piece", "whole-parent", "fan-out-stage"} {
+	for _, edge := range []string{"piece", "whole-parent", "fan-out-stage", "producer-overrun"} {
 		t.Run(edge, func(t *testing.T) {
 			q, clock, source, target, p, x := productionAdmissionFixture(t)
 			parent := submit(t, q, p)
@@ -158,6 +159,13 @@ func TestProductionAdmissionPredictableDependentDemand(t *testing.T) {
 			}
 			if q.held(hostID(&target)) {
 				t.Fatal("forecast enabled a production hold")
+			}
+			if edge == "producer-overrun" {
+				clock.Advance(91 * time.Second)
+				if reply := check(t, q, target, nil); len(reply.EnvironmentPlan) != 1 {
+					t.Fatal("forecast hold did not expire when production never arrived", reply)
+				}
+				return
 			}
 			// Withdrawing this demand immediately restores ordinary preparation.
 			if err := q.Cancel(consumer.ID); err != nil {
@@ -214,72 +222,97 @@ func TestProductionAdmissionNoDemandOrUnknownEstimate(t *testing.T) {
 }
 
 func TestProductionAdmissionCachedPreparationAndQueuedDemand(t *testing.T) {
-	q, _, source, target, p, x := productionAdmissionFixture(t)
-	parent := submit(t, q, p)
-	wave := check(t, q, source, nil).Job
-	if wave == nil {
-		t.Fatal("missing producer")
-	}
-	if err := q.Started(result(wave, false)); err != nil {
-		t.Fatal(err)
-	}
-	experiment := submit(t, q, x)
-	offer := check(t, q, target, nil).EnvironmentPlan
-	if len(offer) != 1 || offer[0].Launch == nil {
-		t.Fatal("missing initial offer", offer)
-	}
-	c := cpuSpec(1, 1)
-	c.Project, c.Priority, c.AllowedMachines = p.Project, "production", []string{target.ID}
-	c.After = &PieceDependency{Job: parent.ID, Outputs: map[string]string{"input": "item-0/out"}}
-	submit(t, q, c)
-	if err := q.AuthorizeLaunch(*offer[0].Launch); !errors.Is(err, ErrStale) {
-		t.Fatal("cached preparation bypassed new predictable demand", err)
-	}
-	// Readiness makes the expected arrival immediate, without enabling a hold.
-	finish(t, q, wave, true)
-	if reason := runtimeJob(t, q, experiment.ID).Reason; !strings.Contains(reason, "predictable production demand") || !strings.Contains(reason, "~0s") {
-		t.Fatal("ready queued production not explained", reason)
+	for _, component := range []bool{false, true} {
+		t.Run(fmt.Sprint("component=", component), func(t *testing.T) {
+			q, _, source, target, p, x := productionAdmissionFixture(t)
+			if component {
+				target.GPU = "fake"
+				target.Devices = m3Machine().Devices
+				target.CPUExtensionFingerprint = target.ExtensionFingerprint
+				check(t, q, target, nil)
+			}
+			parent := submit(t, q, p)
+			wave := check(t, q, source, nil).Job
+			if wave == nil {
+				t.Fatal("missing producer")
+			}
+			if err := q.Started(result(wave, false)); err != nil {
+				t.Fatal(err)
+			}
+			experiment := submit(t, q, x)
+			offer := check(t, q, target, nil).EnvironmentPlan
+			if len(offer) != 1 || offer[0].Launch == nil {
+				t.Fatal("missing initial offer", offer)
+			}
+			c := cpuSpec(1, 1)
+			c.Project, c.Priority, c.AllowedMachines = p.Project, "production", []string{target.ID}
+			c.After = &PieceDependency{Job: parent.ID, Outputs: map[string]string{"input": "item-0/out"}}
+			submit(t, q, c)
+			if err := q.AuthorizeLaunch(*offer[0].Launch); !errors.Is(err, ErrStale) {
+				t.Fatal("cached preparation bypassed new predictable demand", err)
+			}
+			// Readiness makes the expected arrival immediate, without enabling a hold.
+			finish(t, q, wave, true)
+			if reason := runtimeJob(t, q, experiment.ID).Reason; !strings.Contains(reason, "predictable production demand") || !strings.Contains(reason, "~0s") {
+				t.Fatal("ready queued production not explained", reason)
+			}
+		})
 	}
 }
 
 func TestProductionAdmissionPreparationPreemptionUsesMeasuredBackoff(t *testing.T) {
-	q, clock, _, target, _, x := productionAdmissionFixture(t)
-	experiment := submit(t, q, x)
-	var old HostLaunch
-	for range 2 {
-		plan := check(t, q, target, nil).EnvironmentPlan
-		if len(plan) != 1 || plan[0].Launch == nil {
-			t.Fatal("missing preparation", plan)
-		}
-		old = *plan[0].Launch
-		if err := q.AuthorizeLaunch(old); err != nil {
-			t.Fatal(err)
-		}
-		c := cpuSpec(1, 1)
-		c.Project, c.Priority, c.AllowedMachines = x.Project, "production", []string{target.ID}
-		prod := submit(t, q, c)
-		if stopped := q.s.PreparationPlans[old.Attempt]; stopped.PriorityStop == nil {
-			t.Fatal("production did not preempt preparation", stopped)
-		}
-		target.EnvironmentReports = []EnvironmentReport{{Key: old.Key, Attempt: old.Attempt, State: "paused"}}
-		run := check(t, q, target, nil).Job
-		if run == nil || run.ID != prod.ID {
-			t.Fatal("settled preparation blocked production", run)
-		}
-		finish(t, q, run, true)
-	}
-	if reply := check(t, q, target, nil); len(reply.EnvironmentPlan) != 0 {
-		t.Fatal("third preparation admitted", reply)
-	}
-	if reason := runtimeJob(t, q, experiment.ID).Reason; !strings.Contains(reason, "back-off") || !strings.Contains(reason, "200s") {
-		t.Fatal("measured setup did not size back-off", reason)
-	}
-	if err := q.AuthorizeLaunch(old); !errors.Is(err, ErrStale) {
-		t.Fatal("stale preparation accepted", err)
-	}
-	clock.Advance(200 * time.Second)
-	if reply := check(t, q, target, nil); len(reply.EnvironmentPlan) != 1 {
-		t.Fatal("measured back-off did not expire", reply)
+	for _, component := range []bool{false, true} {
+		t.Run(fmt.Sprint("component=", component), func(t *testing.T) {
+			q, clock, _, target, _, x := productionAdmissionFixture(t)
+			if component {
+				target.GPU = "fake"
+				target.Devices = m3Machine().Devices
+				target.CPUExtensionFingerprint = target.ExtensionFingerprint
+				check(t, q, target, nil)
+			}
+			experiment := submit(t, q, x)
+			var old HostLaunch
+			for range 2 {
+				plan := check(t, q, target, nil).EnvironmentPlan
+				if len(plan) != 1 || plan[0].Launch == nil {
+					t.Fatal("missing preparation", plan)
+				}
+				old = *plan[0].Launch
+				if err := q.AuthorizeLaunch(old); err != nil {
+					t.Fatal(err)
+				}
+				c := cpuSpec(1, 1)
+				c.Project, c.Priority, c.AllowedMachines = x.Project, "production", []string{target.ID}
+				prod := submit(t, q, c)
+				if stopped := q.s.PreparationPlans[old.Attempt]; stopped.PriorityStop == nil {
+					t.Fatal("production did not preempt preparation", stopped)
+				}
+				target.EnvironmentReports = []EnvironmentReport{{Key: old.Key, Attempt: old.Attempt, State: "paused"}}
+				var run *Job
+				if component {
+					run = assignedJob(machineCheck(t, q, target))
+				} else {
+					run = check(t, q, target, nil).Job
+				}
+				if run == nil || run.ID != prod.ID {
+					t.Fatal("settled preparation blocked production", run)
+				}
+				finish(t, q, run, true)
+			}
+			if reply := check(t, q, target, nil); len(reply.EnvironmentPlan) != 0 {
+				t.Fatal("third preparation admitted", reply)
+			}
+			if reason := runtimeJob(t, q, experiment.ID).Reason; !strings.Contains(reason, "back-off") || !strings.Contains(reason, "200s") {
+				t.Fatal("measured setup did not size back-off", reason)
+			}
+			if err := q.AuthorizeLaunch(old); !errors.Is(err, ErrStale) {
+				t.Fatal("stale preparation accepted", err)
+			}
+			clock.Advance(200 * time.Second)
+			if reply := check(t, q, target, nil); len(reply.EnvironmentPlan) != 1 {
+				t.Fatal("measured back-off did not expire", reply)
+			}
+		})
 	}
 }
 
