@@ -1,0 +1,15 @@
+[Unit]
+Description=Unprivileged access to read-only Mycelium GPU telemetry
+After=systemd-tmpfiles-setup.service
+
+[Socket]
+ListenStream=/run/mycelium/gpu-telemetry.sock
+SocketUser=root
+SocketGroup=myce-telemetry
+SocketMode=0660
+DirectoryMode=0750
+Accept=no
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

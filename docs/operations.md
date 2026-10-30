@@ -779,6 +779,10 @@ keeps this proof separate from laptop fixtures.
 
 ## Host RAM admission and ceilings
 
+The separately installed [root broker templates and helper wrapper](../deploy/gpu-telemetry/README.md)
+implement the Unix-socket contract in follow-up PR #422, using fresh fixed-inventory
+reads after each request. They do not set the worker flag or restart the worker.
+
 ### Optional privileged GPU telemetry source
 
 Discrete xe/XPU host-envelope learning requires both per-process DRM fdinfo and
@@ -809,7 +813,7 @@ operator-owned wrapper at the configured helper path runs:
 
 ```sh
 #!/bin/sh
-exec /absolute/path/to/installed/myce gpu-telemetry-client
+exec /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C /absolute/path/to/installed/myce gpu-telemetry-client
 ```
 
 The absolute binary path is chosen at installation. `--socket PATH` on the client
@@ -818,7 +822,8 @@ it is never derived from a job. The helper receives no arguments from the worker
 Neither process invokes sudo, setuid or a privileged executable. This client
 needs no queue connection or credentials. Mycelium installs neither the wrapper
 nor the broker, and changes no service privilege policy.
-This change supplies the client and contract only, with no reference broker.
+The separately installed [reference broker](../deploy/gpu-telemetry/README.md)
+implements this contract with fixed administrator-configured debugfs sources.
 
 The broker contract is:
 
