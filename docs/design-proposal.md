@@ -67,9 +67,12 @@ check-in through the shared planner. Prefer compatible free capacity; otherwise
 stop only useful lower-tier work, including non-resumable commands, native
 sidecar groups, model calls/loads, pinned engines and environment builds. Idle
 unpinned same-tier model cache may be evicted; active same-tier work is never
-preempted. Resumable commands receive SIGTERM and ten seconds by default to save;
-non-resumable work stops immediately. Deadline demand preserves non-resumable
-commands and gives resumable commands the existing 120-second grace.
+preempted. Production preempts lower-tier work. Accelerator work, including
+non-resumable work, receives SIGTERM with ten seconds of grace by default,
+capped at fifteen seconds, before SIGKILL if still running. Resumable CPU commands
+receive ten seconds by default to save; non-resumable CPU work stops immediately. Deadline
+demand preserves non-resumable commands and gives resumable CPU commands the
+existing 120-second grace.
 `--preemption-stop-grace` sets the other priority-stop
 grace (`--production-stop-grace` is a compatibility alias). After two planned
 preemptions, each resumed batch, build or desired engine gets at least that grace
