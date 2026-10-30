@@ -1,0 +1,26 @@
+# Optional user service. Do not install without operator approval.
+[Unit]
+Description=Mycelium main commit full gates
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=REPLACE_DEDICATED_REPO
+EnvironmentFile=REPLACE_PRIVATE_CI_ENV
+ExecStart=REPLACE_PYTHON3 REPLACE_DEDICATED_REPO/scripts/main-ci.py --repo REPLACE_DEDICATED_REPO --state REPLACE_PRIVATE_STATE --myce REPLACE_INSTALLED_MYCE
+Restart=on-failure
+# Avoid a hot restart loop on invalid configuration; costs 60s recovery latency.
+RestartSec=60
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=default.target

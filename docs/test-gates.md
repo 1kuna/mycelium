@@ -134,3 +134,113 @@ from `libproc` without enumerating or statting mounted filesystems. Apple's lsof
 has no network-mount exclusion and even scratch-scoped scans can block on an
 unrelated mount. Native probe errors still retain scratch. Run cleanup regressions
 with `python3 scripts/test-gate-budget.py`.
+
+## Automatic main full gates
+
+**Check main's latest status before merging** and fix a red main forward. Read the SHA and both contexts, not the overall combined state (which
+can include unrelated checks):
+
+```sh
+gh api repos/1kuna/mycelium/commits/main/status \
+  --jq '{sha, gates: [.statuses[] | select(.context | startswith("mycelium/full-")) | {context, state, description}]}'
+```
+
+Require `mycelium/full-darwin` and `mycelium/full-linux` for the current main SHA.
+Missing, pending or error is not passing evidence. Run the targeted local gate
+and obtain independent PR review before merging; agents do not poll or wake to
+wait for main's full suites. A failed suite is fixed forward by the next merge
+worker. Automatic main proof supplements the release full gate.
+
+The optional [`scripts/main-ci.py`](../scripts/main-ci.py) fleet-side watcher
+uses the existing `gate-full` profile at each exact main SHA. It narrows only its
+source SHA and platform targets: Darwin arm64, and Linux amd64/arm64. Each gets
+one submission, with no host pin; Mycelium chooses placement and supplies the
+existing `mycelium-gate` environment. Darwin includes the native CGO build;
+Linux runs its native builds and full race/dev suite. The profile's existing
+result check determines job success. No GitHub-hosted runner, GitHub Actions
+workflow, PR trigger, test schedule or model callback is involved.
+
+The watcher fetches main from the canonical GitHub repository every 60 seconds
+(never from a potentially forked `origin`) and queues every first-parent commit,
+including squash merges and direct main fixes. It does not run each constituent
+commit of a merge. Bootstrap tests current main once; it does not replay the v1
+history. A persistent cursor catches all intervening commits after downtime,
+admitting at most 16 pending commits at once. This bounds status publication
+after downtime at the cost of delaying discovery of the remaining backlog; the
+cursor advances only through admitted commits. Every admitted SHA gets the two
+pending contexts. One commit's
+two platform jobs may be active at a time; later commits wait instead of
+cancelling earlier proof. Consequently a busy fleet or merge backlog can delay
+results beyond an hour; pending statuses make that visible.
+
+Deterministic `main-ci:SHA:OS` keys and the CLI's existing receipts recover the
+same submissions after watcher restart or an ambiguous submit reply. Existing
+`myce run` detached observers handle queue reconnects, job completion, accepted
+results and observer recovery; the watcher reopens the same receipt each pass.
+Terminal states become public `success`/`failure` commit statuses, with job IDs;
+infrastructure errors become `error` and retry the same key next pass. A failed
+test is terminal and is never automatically rerun. Before posting, the watcher
+compares the latest GitHub context to avoid duplicate statuses after ambiguous
+replies or prolonged infrastructure failures. No agent is invoked. Public
+status descriptions contain no raw error output, host names, credentials or
+local paths. Inspect a failed job through the authenticated Mycelium job/log
+commands using the ID in its status. The watcher retains a small results ledger
+and CLI receipts, removes generated profiles after terminal publication, and
+relies on normal queue artifact retention. CLI source uploads are removed after
+confirmed submission. Do not remove pending receipts or the cursor. A main
+history rewrite stops discovery for explicit operator reconciliation.
+
+### Approval and activation
+
+**Prepared only; not activated by this PR.** Activation requires approval for:
+
+- One quiet Linux fleet user service using the provided
+  [`deploy/myce-main-ci.service`](../deploy/myce-main-ci.service) template,
+  a dedicated non-shallow repository clone, Python 3.11+, Git, `gh`, an installed
+  `myce` CLI and private persistent state. This is an observer/submitter; it
+  does not run tests directly. The clone retains Git history for catch-up.
+- One fine-grained GitHub credential restricted to this repository, with
+  **Commit statuses: write** and mandatory **Metadata: read** only. Public Git
+  fetches need no repository contents credential. Collect it through T3
+  `request_secret` only after approval, then deliver it to a private `0600`
+  environment file as `GH_TOKEN`. Do not put credentials in Git, service
+  definitions, command arguments, statuses or job payloads.
+- Access to the existing private installed Mycelium client authority on that
+  submitter, including its verified queue identity. Prefer that configuration
+  over another copy of the fleet token. If a new queue credential is necessary,
+  ask before collecting it through T3 `request_secret`. Never print it.
+
+No runner registration, host installation or secret provisioning is part of the
+PR. After approval, the activation owner chooses an ordinary available fleet
+submitter (this choice does not pin job placement), substitutes the service's
+`REPLACE_*` paths and uses its private environment file to provide `GH_TOKEN`,
+`PATH` and any existing client configuration required by `myce`. The script
+removes GitHub credentials from Mycelium subprocesses and all `MYCE_*` settings
+from Git/GitHub subprocesses. Its profile contains only the gate's authored
+runtime environment; jobs must never receive the fleet token. Run as a trusted
+service account: environment filtering is not isolation against hostile jobs
+running under the same OS user.
+
+First validate offline with `python3 scripts/test-main-ci.py`. After approval,
+run one foreground observation pass with the same private service environment:
+
+```sh
+python3 scripts/main-ci.py --repo REPO --state PRIVATE_STATE --myce MYCE --once
+```
+
+This submits actual work and writes public statuses. Verify the two pending
+contexts reference current main, then install/start the rendered user service
+using the host's normal service management. Verify both terminal statuses and
+accepted Mycelium job results before calling activation complete. Stop the
+service to suspend new submissions; already submitted jobs continue on the
+fleet. Service shutdown also stops its local detached observers. Restart with
+the same clone, state, CLI receipts and credentials to re-arm observation. Do not run a second instance against a different state directory.
+The state lock rejects concurrent instances sharing that directory.
+
+Diagnosis recorded in [#425](https://github.com/1kuna/mycelium/issues/425): Actions
+was enabled but had zero workflows and zero registered runners. The former
+workflow was moved out of `.github/workflows` on June 3, then removed during the
+v3 archive. Its final June run's hosted coverage step failed; its self-hosted GPU
+job was cancelled without taking a step. These historical runs did not provide
+today's Darwin/Linux full proof. Restoring that workflow would also restore
+hosted/PR execution contrary to current policy.
