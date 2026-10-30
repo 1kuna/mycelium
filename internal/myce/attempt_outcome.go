@@ -20,11 +20,12 @@ type memberExit struct {
 	ObservedAt time.Time `json:"observed_at"`
 }
 type infrastructureFact struct {
-	Kind   string    `json:"kind"`
-	At     time.Time `json:"at"`
-	Member string    `json:"member,omitempty"`
-	Port   string    `json:"port,omitempty"`
-	Group  int       `json:"group,omitempty"`
+	Kind      string    `json:"kind"`
+	At        time.Time `json:"at"`
+	Member    string    `json:"member,omitempty"`
+	Port      string    `json:"port,omitempty"`
+	Group     int       `json:"group,omitempty"`
+	Predicate string    `json:"predicate,omitempty"`
 }
 
 const (
@@ -88,7 +89,7 @@ func (e *recordedStartError) Error() string { return e.cause.Error() }
 func (e *recordedStartError) Unwrap() error { return e.cause }
 
 func (s *workerStore) startFailure(j Job, kind string, cause error) error {
-	facts := memberOutcome{Infrastructure: []infrastructureFact{{Kind: kind, At: time.Now().UTC()}}}
+	facts := memberOutcome{Infrastructure: []infrastructureFact{{Kind: kind, At: time.Now().UTC(), Predicate: launchFailurePredicate(kind, cause)}}}
 	s.state.LaunchOutcome = fmt.Sprintf("launch-%s-%d.outcome.json", j.ID, j.Attempt)
 	if err := saveWorkerJSON(s.dir, s.state.LaunchOutcome, facts); err != nil {
 		return errors.Join(cause, err)
@@ -150,9 +151,21 @@ func classifyAttemptOutcome(result Result, facts attemptCause) Result {
 			}
 			switch fact.Kind {
 			case launchRefused, launchFailed, environmentFailed:
-				result.ExecutionCause = &RuntimeCause{Operation: "launch", Class: fact.Kind}
+				result.ExecutionCause = safeRuntimeCause(&RuntimeCause{Operation: "launch", Class: fact.Kind, Predicate: fact.Predicate})
 			}
 			if result.ExecutionCause != nil {
+				break
+			}
+		}
+	}
+	// A more specific runtime class (for example a transport timeout) retains
+	// its classification while carrying the same recorded launch predicate.
+	if result.Interrupted && result.ExecutionCause != nil {
+		for _, fact := range facts.Infrastructure {
+			if !fact.At.IsZero() && fact.Predicate != "" {
+				cause := *result.ExecutionCause
+				cause.Predicate = fact.Predicate
+				result.ExecutionCause = safeRuntimeCause(&cause)
 				break
 			}
 		}
@@ -191,4 +204,49 @@ func observedNativeExit(cmd *exec.Cmd, at time.Time) *memberExit {
 func operatorOutcome(result Result, stopped bool) Result {
 	result.OperatorStop = result.OperatorStop || stopped
 	return result
+}
+
+// Only these fixed predicates/messages cross the worker boundary. Never derive
+// public text from Error(), paths, submitted commands or environment values.
+var launchPredicateMessages = map[string]string{
+	"native_workdir_containment":            rejectionMessages["native_workdir_containment"],
+	"native_isolation":                      "native isolation setup refused; check managed workspace and isolation support",
+	"device_probe_unavailable":              "accelerator inventory probe unavailable before launch",
+	"device_identity_mismatch":              "device runtime mapping does not match saved identity",
+	"device_budget_unavailable":             "accelerator memory budget unavailable",
+	"device_fault_xe":                       "device quarantined after an xe kernel driver fault",
+	"device_fault_i915":                     "device quarantined after an i915 kernel driver fault",
+	"device_fault_nvidia_xid":               "device quarantined after an NVIDIA Xid",
+	"no_matching_device":                    "no matching device is available",
+	"cpu_accelerator_isolation_unavailable": "CPU accelerator select-none visibility is unqualified",
+	"memory_capacity":                       "free memory unavailable or insufficient for declared needs",
+	"environment_prepare":                   "execution environment preparation failed; check environment qualification",
+	"command_start":                         "command could not start; check executable and managed environment",
+	"launch_authorization":                  "queue launch authorization or assignment was refused; refresh job and host status",
+}
+
+func launchFailurePredicate(kind string, cause error) string {
+	if kind != launchRefused && kind != launchFailed && kind != environmentFailed {
+		return ""
+	}
+	var rejection *rejectionError
+	if errors.As(cause, &rejection) && launchPredicateMessages[rejection.code] != "" {
+		if rejection.code == "native_isolation" {
+			if nested := launchFailurePredicate(kind, rejection.cause); nested != "launch_authorization" {
+				return nested
+			}
+		}
+		return rejection.code
+	}
+	if errors.Is(cause, errWorkerMemory) {
+		return "memory_capacity"
+	}
+	switch kind {
+	case environmentFailed:
+		return "environment_prepare"
+	case launchFailed:
+		return "command_start"
+	default:
+		return "launch_authorization"
+	}
 }

@@ -658,7 +658,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	}
 	cmd.Args = append(slices.Clone(cmd.Args[:4]), environmentCommand(cmd.Args[4:], cmd.Env)...)
 	if err := w.isolateNativeAttempt(&j, nil, cmd, s.dir, executionWork, env, nil, true); err != nil {
-		return nil, s.startFailure(j, launchRefused, err)
+		return nil, s.startFailure(j, launchRefused, reject("native_isolation", err))
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	logName := identity + ".log"

@@ -139,7 +139,7 @@ func (w Worker) nativeLinuxPolicy(cmd *exec.Cmd, spool, work string, env map[str
 		return p, err
 	}
 	if rel, err := filepath.Rel(work, dir); err != nil || rel != "." && !filepath.IsLocal(rel) {
-		return p, errors.New("native isolation requires workdir beneath {work}; stage source with inputs or a profile")
+		return p, reject("native_workdir_containment", nil)
 	}
 	p.Write = []string{work}
 	for _, path := range []string{env["MYCE_CHECKPOINT_DIR"], env["MYCE_USAGE_FILE"]} {

@@ -207,6 +207,23 @@ in `GET /api/status`, the [job-v1 reply](schemas/job-v1.schema.json), and Python
 queue-clock `ended_at`, the resulting queue `state` (`queued` for a requeue),
 and a diagnostic `reason`. Optional `execution_cause` and `cleanup_cause` use
 the existing safe runtime operation/class and command exit code.
+Launch causes also carry optional `predicate` and `reason`: a fixed, allowlisted
+failed launch rule and its safe explanation. For example,
+`native_workdir_containment` reports `native isolation requires workdir beneath
+{work}; stage source with inputs or a profile`. Device identity/probe, memory
+capacity, environment preparation, native isolation and queue launch authorization
+have their own predicates. Existing operation/class, retry charging and release
+semantics are unchanged. Unknown worker predicates and worker-provided reason
+text are discarded; messages never contain environment values, credentials or
+host paths. `{work}` denotes the managed attempt workspace.
+
+The same detail appears in job `execution_cause`, `attempt_history`, job GET,
+status, CLI `myce status JOB`, and each attempt's ledger outcome reason. Queue
+logs emit `event=launch_outcome` with the exact attempt, predicate and safe reason.
+The worker persists the predicate with its launch facts, so acknowledgement and
+queue reopen retain the diagnosis. Older attempts without recorded predicates
+cannot recover it. Workdir containment remains a worker-side launch check because
+it resolves the actual managed workspace and symlinks on that host.
 
 History preserves the existing outcome classification: `launch` causes include
 `launch_refused`, `launch_failed` and `environment_failed`; `polite_stop` marks

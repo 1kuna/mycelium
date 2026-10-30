@@ -110,7 +110,7 @@ func (w Worker) isolateNativeAttempt(j *Job, namespace *nativeNamespace, cmd *ex
 		return err
 	}
 	if rel, err := filepath.Rel(root, dir); err != nil || rel != "." && !filepath.IsLocal(rel) {
-		return errors.New("native isolation requires workdir beneath {work}; stage source with inputs or a profile")
+		return reject("native_workdir_containment", nil)
 	}
 	return nil
 }

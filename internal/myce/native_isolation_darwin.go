@@ -38,7 +38,7 @@ func (w Worker) isolateNativeCommand(cmd *exec.Cmd, spool, work string, env map[
 	work = canonical(work)
 	dir := canonical(cmd.Dir)
 	if rel, err := filepath.Rel(work, dir); err != nil || rel != "." && !filepath.IsLocal(rel) {
-		return fmt.Errorf("native isolation requires workdir beneath {work}; stage source with inputs or a profile")
+		return reject("native_workdir_containment", nil)
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
