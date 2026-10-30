@@ -223,9 +223,9 @@ This submits actual work and writes public statuses. Verify the two pending
 contexts reference current main, then install/start the rendered user service
 using the host's normal service management. Verify both terminal statuses and
 accepted Mycelium job results before calling activation complete. Stop the
-service to suspend new submissions; already submitted jobs and their observers
-continue. Restart with the same clone, state, CLI receipts and credentials to
-recover them. Do not run a second instance against a different state directory.
+service to suspend new submissions; already submitted jobs continue on the
+fleet. Service shutdown also stops its local detached observers. Restart with
+the same clone, state, CLI receipts and credentials to re-arm observation. Do not run a second instance against a different state directory.
 The state lock rejects concurrent instances sharing that directory.
 
 Diagnosis recorded in [#425](https://github.com/1kuna/mycelium/issues/425): Actions
