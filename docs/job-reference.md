@@ -881,8 +881,9 @@ confidence. All observed resident peaks remain a floor. Kernel/shmem, locked
 and dirty/writeback pages are conservatively retained; clean file cache is
 excluded. Discrete Linux xe/XPU work can use that same margin only with
 complete per-attempt driver and whole-host evidence too. `memory_peak.gpu_host`
-retains deduplicated DRM client system/GTT allocations (including objects that
-may already be cgroup-charged) and the whole-host MemAvailable drop from an
+retains deduplicated DRM client system/GTT allocations plus independently read
+xe debugfs GTT-manager usage for every participating card (deliberately counting
+overlap between both sources and cgroup charges), and the whole-host MemAvailable drop from an
 empty-cgroup, prelaunch baseline. At each synchronized sample, outside-cgroup
 use is conservatively estimated as max(driver allocations, host drop minus
 current non-reclaimable use, zero); `outside_gb` retains its maximum. Never
@@ -891,6 +892,15 @@ outside peak, also floored by the whole-host drop. Independent component,
 resident and driver maxima remain floors. At least two complete attempts per
 contributing local observation are required; `gpu_host_range` records the range separately from CPU components.
 Host swap growth/swap-out or OOM during observation rejects GPU samples too.
+Resident/component and host-pressure sampling remain independent of driver I/O.
+Every driver collection must finish within one 200 ms resident sampling period;
+a gap or final age beyond two periods makes GPU evidence incomplete. A blocked
+driver read cannot prevent resident sampling or indefinitely delay attempt
+completion. Missing DRM client identity rejects the whole GPU observation, even
+when other clients are readable. Runtime debugfs reads use the worker's existing
+permissions, without sudo or permission changes; missing, unreadable or malformed
+GTT-manager counters keep conservative sizing. Absolute driver allocations are
+retained independently of net host deltas, which unrelated RAM release can mask.
 Other GPU drivers, CUDA, unified memory, older/incomplete samples and transfers
 retain the larger resident/total peak times 1.25. Missing readings are unknown,
 not zero. Sampled host/DRM counters remain observations, not instantaneous

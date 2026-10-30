@@ -1,11 +1,13 @@
 package myce
 
 import (
+	"errors"
 	"fmt"
 	"math"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -30,6 +32,12 @@ func TestGPUHostMemoryDRMAccounting(t *testing.T) {
 			t.Fatal("missing host counter became zero")
 		}
 	}
+	if _, _, err := drmHostMemory([]byte(strings.ReplaceAll(raw, "drm-client-id: 211974\n", ""))); !errors.Is(err, errAttemptMemoryUnsupported) {
+		t.Fatal("DRM without client identity was treated as an ordinary descriptor")
+	}
+	if _, _, err := drmHostMemory([]byte("pos: 0\nflags: 0100000\n")); !errors.Is(err, errAttemptMemoryPending) {
+		t.Fatal("ordinary descriptor became incomplete DRM")
+	}
 	if _, _, err := drmHostMemory([]byte(strings.ReplaceAll(raw, "xe\n", "i915\n"))); err == nil {
 		t.Fatal("uninvestigated driver enabled reduction")
 	}
@@ -45,6 +53,8 @@ type gpuHostFS struct {
 func (f gpuHostFS) ReadFile(p string) ([]byte, error) {
 	if strings.HasPrefix(p, "/proc/") {
 		p = filepath.Join(f.proc, strings.TrimPrefix(p, "/proc/"))
+	} else if strings.HasPrefix(p, "/sys/kernel/debug/dri/") {
+		p = filepath.Join(f.proc, "debug", strings.TrimPrefix(p, "/sys/kernel/debug/dri/"))
 	}
 	return f.memoryFS.ReadFile(p)
 }
@@ -56,7 +66,7 @@ func (f gpuHostFS) ReadDir(p string) ([]os.DirEntry, error) {
 }
 
 func TestGPUHostMemoryCompleteAttempt(t *testing.T) {
-	for _, mode := range []string{"complete", "missing host field", "swap growth", "swap churn", "host OOM", "missing driver field", "missing events"} {
+	for _, mode := range []string{"complete", "missing host field", "swap growth", "swap churn", "host OOM", "missing driver field", "missing client identity", "missing debugfs", "malformed debugfs", "masked host drop", "missing events"} {
 		t.Run(mode, func(t *testing.T) {
 			a, err := fakeCeilings(t).create("attempt-xe", 16<<30, 0)
 			if err != nil {
@@ -103,6 +113,26 @@ func TestGPUHostMemoryCompleteAttempt(t *testing.T) {
 			// consumes host RAM and must be included, even though not selected.
 			put("8/fdinfo/3", raw)
 			put("8/fdinfo/4", xeHostFD("8", "0000:07:00.0", 40))
+			if mode == "missing client identity" {
+				put("8/fdinfo/4", strings.ReplaceAll(xeHostFD("8", "0000:07:00.0", 40), "drm-client-id: 8\n", ""))
+			}
+			for _, pci := range []string{"0000:03:00.0", "0000:07:00.0"} {
+				put("debug/"+pci+"/gtt_mm", "use_type: 1\nuse_tt: 1\nusage: 28672\n")
+			}
+			if mode == "missing debugfs" {
+				if err := os.Remove(filepath.Join(proc, "debug/0000:03:00.0/gtt_mm")); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mode == "malformed debugfs" {
+				put("debug/0000:03:00.0/gtt_mm", "use_type: 1\nuse_tt: 1\nusage: unknown\n")
+			}
+			if mode == "masked host drop" {
+				// Another workload releases 8 GiB while unreported driver
+				// storage grows by 8 GiB. A flat host delta must not hide it.
+				put("meminfo", "MemAvailable: 24000000 kB\nSwapTotal: 8388608 kB\nSwapFree: 6388608 kB\n")
+				put("debug/0000:03:00.0/gtt_mm", "use_type: 1\nuse_tt: 1\nusage: 8589934592\n")
+			}
 			if err := os.WriteFile(filepath.Join(a.path, "cgroup.procs"), []byte("7\n8\n"), 0600); err != nil {
 				t.Fatal(err)
 			}
@@ -130,16 +160,22 @@ func TestGPUHostMemoryCompleteAttempt(t *testing.T) {
 				t.Fatal("no sample")
 			}
 			peak := finish()
-			if mode == "missing host field" || mode == "missing driver field" || mode == "missing events" {
+			if mode == "missing host field" || mode == "missing driver field" || mode == "missing client identity" || mode == "missing debugfs" || mode == "malformed debugfs" || mode == "missing events" {
 				if peak.GPUHost != nil || peak.NonreclaimableGB != nil {
 					t.Fatalf("incomplete attempt enabled GPU reduction: %+v", peak)
 				}
 				return
 			}
-			if peak.GPUHost == nil || *peak.GPUHost.DriverGB != float64(83176+40)/(1<<20) || *peak.GPUHost.HostDropGB != float64(9000000)/(1<<20) {
+			driver := float64(83176+40)/(1<<20) + float64(2*28672)/(1<<30)
+			drop := float64(9000000) / (1 << 20)
+			if mode == "masked host drop" {
+				driver += 8 - float64(28672)/(1<<30)
+				drop = 0
+			}
+			if peak.GPUHost == nil || *peak.GPUHost.DriverGB != driver || *peak.GPUHost.HostDropGB != drop {
 				t.Fatalf("wrong attributed host memory: %+v", peak.GPUHost)
 			}
-			wantOutside := max(float64(83176+40)/(1<<20), float64(9000000)/(1<<20)-float64(8260000000)/(1<<30))
+			wantOutside := max(driver, drop-float64(8260000000)/(1<<30))
 			if peak.GPUHost.OutsideGB == nil || math.Abs(*peak.GPUHost.OutsideGB-wantOutside) > 1e-8 {
 				t.Fatalf("wrong synchronized outside peak %+v", peak.GPUHost)
 			}
@@ -147,6 +183,127 @@ func TestGPUHostMemoryCompleteAttempt(t *testing.T) {
 				t.Fatalf("host swap growth not retained: %+v", peak)
 			}
 		})
+	}
+}
+
+type blockedGPUHostFS struct {
+	memoryFS
+	reads    atomic.Int32
+	resident atomic.Int64
+	blocked  chan struct{}
+	release  chan struct{}
+	spike    chan struct{}
+	sawSpike atomic.Bool
+	resumed  chan struct{}
+	doneRead atomic.Bool
+}
+
+func (f *blockedGPUHostFS) ReadFile(p string) ([]byte, error) {
+	if strings.Contains(p, "/fdinfo/") && f.reads.Add(1) == 2 {
+		close(f.blocked)
+		<-f.release
+	}
+	if filepath.Base(p) == "memory.stat" {
+		resident := f.resident.Load()
+		if resident == 16 && f.sawSpike.CompareAndSwap(false, true) {
+			close(f.spike)
+		}
+		return []byte(fmt.Sprintf("anon %d\nkernel 0\nshmem 0\nunevictable 0\nfile_dirty 0\nfile_writeback 0\n", resident<<30)), nil
+	}
+	b, err := f.memoryFS.ReadFile(p)
+	if strings.HasSuffix(p, "/gtt_mm") && f.reads.Load() >= 2 && f.doneRead.CompareAndSwap(false, true) {
+		close(f.resumed)
+	}
+	return b, err
+}
+
+func TestGPUHostMemoryBlockedDriverPreservesResidentSpike(t *testing.T) {
+	for _, blockedAtFinish := range []bool{false, true} {
+		t.Run(fmt.Sprintf("blocked_at_finish=%t", blockedAtFinish), func(t *testing.T) {
+			testGPUHostMemoryBlockedDriver(t, blockedAtFinish)
+		})
+	}
+}
+
+func testGPUHostMemoryBlockedDriver(t *testing.T, blockedAtFinish bool) {
+	a, err := fakeCeilings(t).create("attempt-blocked-xe", 24<<30, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proc := t.TempDir()
+	put := func(p, text string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(text), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put(filepath.Join(proc, "meminfo"), "MemAvailable: 24000000 kB\nSwapTotal: 8388608 kB\nSwapFree: 6388608 kB\n")
+	put(filepath.Join(proc, "vmstat"), "oom_kill 0\npswpout 0\n")
+	put(filepath.Join(proc, "7/fdinfo/3"), xeHostFD("7", "0000:03:00.0", 83176))
+	put(filepath.Join(proc, "debug/0000:03:00.0/gtt_mm"), "use_type: 1\nuse_tt: 1\nusage: 28672\n")
+	put(filepath.Join(a.path, "cgroup.procs"), "7\n")
+	put(filepath.Join(a.path, "memory.events"), "high 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\n")
+	f := &blockedGPUHostFS{memoryFS: gpuHostFS{memoryFS: a.fs, proc: proc}, blocked: make(chan struct{}), release: make(chan struct{}), spike: make(chan struct{}), resumed: make(chan struct{})}
+	f.resident.Store(8)
+	a.fs = f
+	a.hostBaseline, err = readGPUHostState(a.fs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clock := &workerFakeClock{now: time.Date(2026, 10, 30, 0, 0, 0, 0, time.UTC)}
+	w := Worker{Clock: clock, Machine: Machine{GPU: "xpu"}, selectedDevice: &MachineDevice{pciAddress: "0000:03:00.0"}}
+	spec := cpuSpec(1, 0)
+	spec.Needs.Platform = Platform{Required: []string{"xpu"}}
+	finish := w.observeAttemptMemory(a, Job{Spec: spec}, nil)
+	defer finish()
+	released := false
+	defer func() {
+		if !released {
+			close(f.release)
+		}
+	}()
+	select {
+	case <-f.blocked:
+	case <-time.After(5 * time.Second):
+		t.Fatal("driver did not enter blocking read")
+	}
+	f.resident.Store(16)
+	select {
+	case <-f.spike:
+	case <-time.After(5 * time.Second):
+		t.Fatal("blocked fdinfo prevented the resident sampler from observing 16 GiB")
+	}
+	f.resident.Store(8)
+	clock.Advance(time.Second) // The driver read has missed its coverage window.
+	if !blockedAtFinish {
+		close(f.release)
+		released = true
+	}
+	done := make(chan *AttemptMemoryPeak, 1)
+	go func() { done <- finish() }()
+	var peak *AttemptMemoryPeak
+	select {
+	case peak = <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("blocked DRM read stalled attempt completion")
+	}
+	if blockedAtFinish {
+		close(f.release)
+		released = true
+		select {
+		case <-f.resumed:
+		case <-time.After(5 * time.Second):
+			t.Fatal("cancelled collector did not finish its read")
+		}
+	}
+	if peak == nil || peak.HostGB == nil || *peak.HostGB != 16 {
+		t.Fatalf("lost transient resident spike: %+v", peak)
+	}
+	if peak.GPUHost != nil || peak.NonreclaimableGB != nil {
+		t.Fatalf("slow driver telemetry enabled a reduced GPU envelope: %+v", peak)
 	}
 }
 
@@ -203,7 +360,9 @@ func TestGPUHostMemoryTwoCardAdmission(t *testing.T) {
 			// do not certify the native attempts or enable their learning.
 			peaks := map[string][2]float64{"separation": {7.645931243896484, 7.8166961669921875}, "asr": {3.725048065185547, 4.041187286376953}}
 			components := map[string][2]float64{"separation": {7.582687, 7.678570}, "asr": {3.768425, 3.768913}}
-			drivers := map[string]float64{"separation": .162628173828125, "asr": .0813140869140625}
+			// Add the independent manager maxima without discounting overlap
+			// with the client counters. The measured raw residuals are larger.
+			drivers := map[string]float64{"separation": .162628173828125 + float64(167231488)/(1<<30), "asr": .0813140869140625 + float64(87408640)/(1<<30)}
 			drops := map[string]float64{"separation": 8.355888366699219, "asr": 3.8674354553222656}
 			outside := map[string]float64{"separation": .8351707458496094, "asr": .22780990600585938}
 			totals := map[string]float64{"separation": 13.084995, "asr": 9.590683}

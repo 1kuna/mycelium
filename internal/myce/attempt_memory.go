@@ -277,16 +277,25 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 		return func() *AttemptMemoryPeak { return nil }
 	}
 	ctx, cancel := context.WithCancel(context.Background())
+	clock := w.Clock
+	if clock == nil {
+		clock = RealClock{}
+	}
 	peak := a.peak()
+	var mu sync.Mutex
+	record := func(sample *AttemptMemoryPeak) {
+		mu.Lock()
+		peak = sampledMemoryPeak(peak, sample)
+		mu.Unlock()
+	}
 	completeNonreclaimable := peak != nil && peak.nonreclaimableSampleGB != nil
 	// The empty-cgroup baseline precedes payload launch, including for plain
 	// commands whose observer is installed just after exec. No baseline means
 	// diagnostic counters only, never permission to shrink a GPU envelope.
 	gpuHost := w.Machine.GPU == "xpu" && !w.Machine.UnifiedMemory && w.selectedDevice != nil && w.selectedDevice.pciAddress != "" && !j.Spec.Needs.cpuOnly()
 	completeGPUHost := gpuHost && a.hostBaseline != nil
-	sawGPUHost := false
-	var driverGB, hostDropGB, outsideGB float64
-	sampleGPUHost := func(component *AttemptMemoryPeak) {
+	var hostDropGB, outsideGB float64
+	sampleHost := func(component *AttemptMemoryPeak) {
 		if !completeGPUHost {
 			return
 		}
@@ -300,35 +309,26 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 			return
 		}
 		if host.swap > a.hostBaseline.swap || host.oom > a.hostBaseline.oom || host.swapOut > a.hostBaseline.swapOut {
-			peak = sampledMemoryPeak(peak, &AttemptMemoryPeak{Constrained: true})
+			record(&AttemptMemoryPeak{Constrained: true})
 		}
-		gb, seen, err := a.gpuHostMemory(w.selectedDevice.pciAddress)
-		if err != nil {
-			completeGPUHost = false
-			return
-		}
-		sawGPUHost = sawGPUHost || seen
-		driverGB = max(driverGB, gb)
 		hostDropGB = max(hostDropGB, a.hostBaseline.available-host.available)
-		// Compare synchronized samples, not independent lifetime peaks. Count
-		// every driver object as outside, even when it may overlap the cgroup.
-		outsideGB = max(outsideGB, gb, a.hostBaseline.available-host.available-*component.nonreclaimableSampleGB)
+		// Host and component reads stay together; DRM I/O never runs on this
+		// sampler. Its independently retained driver floor is added at finish.
+		outsideGB = max(outsideGB, a.hostBaseline.available-host.available-*component.nonreclaimableSampleGB)
 	}
-	sampleGPUHost(peak)
-	var mu sync.Mutex
+	sampleHost(peak)
+	var driver <-chan gpuHostCollection
+	if completeGPUHost {
+		driver = a.collectGPUHost(ctx, clock, w.selectedDevice.pciAddress)
+	}
 	var samplers sync.WaitGroup
 	hostSampled := false // Read only after joining the host sampler.
-	record := func(sample *AttemptMemoryPeak) {
-		mu.Lock()
-		peak = sampledMemoryPeak(peak, sample)
-		mu.Unlock()
-	}
 	samplers.Add(1)
 	go func() {
 		defer samplers.Done()
 		// Resident memory can spike and disappear before process exit. Keep
 		// cheap cgroup reads independent of the slower driver probe cadence.
-		hostTick := time.NewTicker(200 * time.Millisecond)
+		hostTick := time.NewTicker(attemptMemorySamplePeriod)
 		defer hostTick.Stop()
 		for {
 			select {
@@ -339,11 +339,7 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 				completeNonreclaimable = completeNonreclaimable && sample != nil && sample.nonreclaimableSampleGB != nil
 				hostSampled = hostSampled || sample != nil && sample.HostGB != nil
 				record(sample)
-				// Keep host and driver sampling off q.mu and independent of
-				// the slower external device probe. The host goroutine owns it.
-				mu.Lock()
-				sampleGPUHost(sample)
-				mu.Unlock()
+				sampleHost(sample)
 			}
 		}
 	}()
@@ -381,11 +377,24 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 			samplers.Wait()
 			final := a.peak()
 			record(final)
-			sampleGPUHost(final)
-			if (j.Spec.Needs.cpuOnly() || completeGPUHost && sawGPUHost) && peak != nil && hostSampled && completeNonreclaimable && final != nil && final.nonreclaimableSampleGB != nil {
+			sampleHost(final)
+			var collected gpuHostCollection
+			if driver != nil {
+				// Proc/debugfs reads cannot be cancelled once inside the kernel.
+				// A buffered result owns no peak state, so cleanup need not wait
+				// indefinitely and a late return cannot mutate published facts.
+				select {
+				case collected = <-driver:
+				case <-time.After(attemptMemorySamplePeriod):
+				}
+			}
+			age := clock.Now().Sub(collected.last)
+			completeGPUHost = completeGPUHost && collected.complete && collected.seen && age >= 0 && age <= 2*attemptMemorySamplePeriod
+			if (j.Spec.Needs.cpuOnly() || completeGPUHost) && peak != nil && hostSampled && completeNonreclaimable && final != nil && final.nonreclaimableSampleGB != nil {
 				peak.NonreclaimableGB = peak.nonreclaimableSampleGB
 				if gpuHost {
-					peak.GPUHost = &GPUHostMemory{DriverGB: &driverGB, HostDropGB: &hostDropGB, OutsideGB: &outsideGB}
+					outsideGB = max(outsideGB, collected.driverGB)
+					peak.GPUHost = &GPUHostMemory{DriverGB: &collected.driverGB, HostDropGB: &hostDropGB, OutsideGB: &outsideGB}
 				}
 			}
 			// Counter-only read zeros are diagnostic facts, not a new

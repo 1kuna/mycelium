@@ -1,16 +1,18 @@
 package myce
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // GPUHostMemory is complete xe host evidence, separate from device VRAM.
-// DriverGB counts all system/GTT objects, even those already charged to the
-// cgroup. This deliberate double count avoids assuming that GEM is charged.
+// DriverGB counts per-client system/GTT objects plus the independently read
+// xe GTT managers, even where they overlap each other or cgroup charges.
 // HostDropGB is the whole-host MemAvailable drop since the empty cgroup was
 // created; it supplies an independent floor for allocations absent from fdinfo.
 // OutsideGB retains max(driver objects, host drop minus synchronized current
@@ -82,6 +84,13 @@ func drmHostMemory(b []byte) (string, float64, error) {
 		}
 	}
 	if fields["drm-client-id"] == "" {
+		// Ordinary descriptors have no DRM fields. A damaged DRM identity
+		// must invalidate coverage even if another client is readable.
+		for name := range fields {
+			if strings.HasPrefix(name, "drm-") {
+				return "", 0, errAttemptMemoryUnsupported
+			}
+		}
 		return "", 0, errAttemptMemoryPending
 	}
 	if fields["drm-driver"] != "xe" || fields["drm-pdev"] == "" {
@@ -137,6 +146,7 @@ func (a *memoryAttempt) gpuHostMemory(pci string) (float64, bool, error) {
 		return 0, false, err
 	}
 	clients := map[string]float64{}
+	cards := map[string]bool{normalizePCIAddress(pci): true}
 	for pid := range ids {
 		dir := filepath.Join("/proc", strconv.Itoa(pid), "fdinfo")
 		entries, err := a.fs.ReadDir(dir)
@@ -172,6 +182,67 @@ func (a *memoryAttempt) gpuHostMemory(pci string) (float64, bool, error) {
 	for key := range clients {
 		device, _, _ := strings.Cut(key, "/")
 		seen = seen || normalizePCIAddress(device) == normalizePCIAddress(pci)
+		cards[normalizePCIAddress(device)] = true
+	}
+	for card := range cards {
+		if card == "" || card == "." || filepath.Base(card) != card {
+			return 0, false, errAttemptMemoryUnsupported
+		}
+		// Runtime corroboration is mandatory. Do not invoke sudo or change
+		// permissions: unreadable debugfs keeps conservative sizing. Count
+		// the whole manager, not its net change, so unrelated allocations
+		// being freed cannot mask this card's driver-host storage.
+		b, err := a.fs.ReadFile(filepath.Join("/sys/kernel/debug/dri", card, "gtt_mm"))
+		if err != nil {
+			return 0, false, err
+		}
+		stats := memoryCounters([]byte(strings.ReplaceAll(string(b), ":", "")))
+		usage, ok := stats["usage"]
+		if !ok || stats["use_type"] != 1 || stats["use_tt"] != 1 {
+			return 0, false, errAttemptMemoryUnsupported
+		}
+		total += float64(usage) / (1 << 30)
 	}
 	return total, seen, nil
+}
+
+// Driver I/O may block in kernel locks. It must neither occupy the resident
+// sampler nor hold its peak mutex. One collection period bounds freshness,
+// not job runtime; slow/incomplete evidence costs conservative sizing only.
+const attemptMemorySamplePeriod = 200 * time.Millisecond
+
+type gpuHostCollection struct {
+	driverGB float64
+	seen     bool
+	complete bool
+	last     time.Time
+}
+
+func (a *memoryAttempt) collectGPUHost(ctx context.Context, clock Clock, pci string) <-chan gpuHostCollection {
+	result := make(chan gpuHostCollection, 1)
+	go func() {
+		out := gpuHostCollection{complete: true}
+		defer func() { result <- out }()
+		tick := time.NewTicker(attemptMemorySamplePeriod)
+		defer tick.Stop()
+		for {
+			if ctx.Err() != nil {
+				return
+			}
+			start := clock.Now()
+			gb, seen, err := a.gpuHostMemory(pci)
+			end := clock.Now()
+			if err != nil || end.Before(start) || end.Sub(start) > attemptMemorySamplePeriod || !out.last.IsZero() && start.Sub(out.last) > 2*attemptMemorySamplePeriod {
+				out.complete = false
+				return
+			}
+			out.driverGB, out.seen, out.last = max(out.driverGB, gb), out.seen || seen, end
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+			}
+		}
+	}()
+	return result
 }
