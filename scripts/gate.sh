@@ -100,14 +100,26 @@ if [[ $mode == full ]]; then
   # the release owner stops a run stalled for 20m.
   step race-and-dev go test -race -vet=off -json -p 2 -parallel 4 -count=1 -timeout 0 ./...
 else
-  # The quick supervisor owns the five-minute budget, including builds and
-  # cleanup. A separate package cap can kill a passing large selection early.
+  # Leave ten seconds before supervisor TERM for Go's timeout stack dump.
+  # Recompute for each invocation so packages share the remaining work budget.
+  quick_timeout() {
+    python3 - <<'PYTIME'
+import os
+import time
+remaining = float(os.environ['GATE_TEST_DEADLINE']) - time.monotonic()
+if remaining <= 0:
+    raise SystemExit('quick: diagnostic test budget exhausted; run ./scripts/gate.sh full')
+print(f'{remaining:.3f}s')
+PYTIME
+  }
   while IFS=$'\t' read -r dir names; do
     package=$(go list "./$dir")
     echo "quick $package: $names"
-    step race-related go test -race -vet=off -json -p 2 -parallel 4 -count=1 -timeout 0 "$package" -run "$names"
+    timeout=$(quick_timeout)
+    step race-related go test -race -vet=off -json -p 2 -parallel 4 -count=1 -timeout "$timeout" "$package" -run "$names"
   done < "$scratch/selection"
   if [[ ! -s $scratch/selection ]]; then
-    step race-dev-smoke go test -race -vet=off -json -p 2 -parallel 4 -count=1 -timeout 0 ./cmd/myce -run '^TestDevStandaloneSmoke$'
+    timeout=$(quick_timeout)
+    step race-dev-smoke go test -race -vet=off -json -p 2 -parallel 4 -count=1 -timeout "$timeout" ./cmd/myce -run '^TestDevStandaloneSmoke$'
   fi
 fi

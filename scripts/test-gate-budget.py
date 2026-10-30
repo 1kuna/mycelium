@@ -6,6 +6,7 @@ import importlib.util
 import io
 from pathlib import Path
 import signal
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -20,6 +21,23 @@ spec.loader.exec_module(budget)
 
 
 class GateBudgetTests(unittest.TestCase):
+    def test_quick_timeout_uses_remaining_budget(self):
+        script = Path(__file__).with_name('gate.sh').read_text()
+        start = script.index('  quick_timeout() {')
+        helper = script[start:script.index('  while IFS=', start)]
+        # Use the supervisor interpreter, including when PATH resolves another Python.
+        helper = helper.replace('python3 -', shlex.quote(sys.executable) + ' -')
+        helper = helper.replace('import time', 'import time; time.monotonic = lambda: 100')
+        env = dict(os.environ, GATE_TEST_DEADLINE='130')
+        run = subprocess.run(['bash', '-c', helper + '\nquick_timeout'],
+                             env=env, capture_output=True, text=True, check=True)
+        self.assertEqual(run.stdout.strip(), '30.000s')
+        env['GATE_TEST_DEADLINE'] = '99'
+        run = subprocess.run(['bash', '-c', helper + '\nquick_timeout'],
+                             env=env, capture_output=True, text=True)
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn('exhausted', run.stderr)
+
     def test_success_cleans_fixture(self):
         scripts = Path(__file__).resolve().parent
         with tempfile.TemporaryDirectory() as folder:

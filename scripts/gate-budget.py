@@ -130,6 +130,7 @@ def main():
     marker = 'GATE_RUN_ID=' + uuid.uuid4().hex
     child_env = dict(os.environ, MYCE_GATE_BUDGET='1', GATE_SCRATCH=scratch)
     child_env['GATE_RUN_ID'] = marker.split('=', 1)[1]
+    child_env['GATE_TEST_DEADLINE'] = str(started + 285)
     child = subprocess.Popen(['bash', *sys.argv[1:]], env=child_env, start_new_session=True)
     try:
         # Reported related tests alone take 156s, before builds/vet. Allow five
