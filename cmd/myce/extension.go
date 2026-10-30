@@ -25,7 +25,7 @@ func extensionCommand(args []string) error {
 	}
 	f := flag.NewFlagSet("extension "+args[0], flag.ContinueOnError)
 	root := f.String("root", myce.DefaultExtensionRoot(), "local extension library and download cache (default: installed worker root, then user cache)")
-	environmentRoot := f.String("environment-cache", "", "existing local environment cache for variant setup/check")
+	environmentRoot := f.String("environment-cache", "", "existing local environment cache for variant setup/check (check default: installed worker cache)")
 	environmentLimit := f.Int64("environment-cache-bytes", 0, "environment cache bytes (omitted: auto-size from cache disk)")
 	queue := f.String("queue", env("MYCE_QUEUE", ""), "queue address")
 	token := f.String("token", env("MYCE_TOKEN", ""), "queue token (prefer MYCE_TOKEN)")
@@ -34,7 +34,7 @@ func extensionCommand(args []string) error {
 	config := f.String("config", "", "installed config (default: installed worker, then queue)")
 	joining := f.String("joining-file", env("MYCE_JOINING_FILE", ""), "privately supplied invitation (discovery plus saved address)")
 	static := f.Bool("static", false, "validate folder without executing or qualifying")
-	host := f.String("host", "", "this host's configured worker host ID (local execution only)")
+	host := f.String("host", "", "this host's configured worker host ID (default: installed worker; local execution only)")
 	digest := f.String("digest", "", "require exact extension SHA-256")
 	local := f.Bool("local", false, "add locally without registering with the queue")
 	platform := f.String("gpu", "", "qualification platform: cuda, xpu, metal or fake")
@@ -126,6 +126,17 @@ func extensionCommand(args []string) error {
 			return nil
 		}
 		if args[0] == "check" {
+			if worker, ok := installedExtensionWorker(*config); ok {
+				if *host == "" {
+					*host = worker.HostID
+				}
+				if *environmentRoot == "" {
+					*environmentRoot = worker.EnvironmentCache
+				}
+				if *platform == "" || *platform != "cpu" && *device == "" {
+					return errors.New("runtime check requires --gpu and (for GPUs) --device on an installed worker")
+				}
+			}
 			if explicitRoot {
 				warnExtensionCheckRoot(os.Stderr, *config, *root)
 			}
@@ -208,18 +219,19 @@ func warnExtensionCheckRoot(out io.Writer, config, root string) {
 // Read only local worker settings, without requiring queue credentials for
 // offline extension commands. Installed workers use their spool's extensions.
 func installedExtensionRoot(config string) string {
-	home, _ := os.UserHomeDir()
-	paths := []string{config, filepath.Join(home, ".local", "share", "mycelium", "worker", "config.json")}
-	for _, path := range paths {
-		if path == "" {
-			continue
-		}
-		c, err := myce.ReadServiceConfig(path)
-		if err != nil || c.Role != "worker" || c.State == "" {
-			continue
-		}
-		root, _ := filepath.Abs(filepath.Join(c.State, "extensions"))
-		return root
+	c, ok := installedExtensionWorker(config)
+	if !ok || c.State == "" {
+		return ""
 	}
-	return ""
+	root, _ := filepath.Abs(filepath.Join(c.State, "extensions"))
+	return root
+}
+
+func installedExtensionWorker(config string) (myce.ServiceConfig, bool) {
+	if config == "" {
+		home, _ := os.UserHomeDir()
+		config = filepath.Join(home, ".local", "share", "mycelium", "worker", "config.json")
+	}
+	c, err := myce.ReadServiceConfig(config)
+	return c, err == nil && c.Role == "worker"
 }

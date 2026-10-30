@@ -91,9 +91,21 @@ are distinct from `ready`; preserve them through upgrades and native checks.
    the worker builds the declared environments there. Main, check and helpers
    using the same declaration share that environment.
 
-   Outside dev, supply `--host`, `--gpu`, `--device` and `--environment-cache`
-   from the local worker's configuration. `--host` is its configured host ID,
-   not an SSH destination. Run locally on each authorized target, with that
+   On an installed worker, authority (including its certificate pin), `--host`,
+   extension root (`state_dir/extensions`) and `--environment-cache` default to
+   the installed worker configuration. Use `--config FILE` for a custom install;
+   explicit flags override those defaults. Select `--gpu` and (for GPUs)
+   `--device` explicitly, for example:
+
+   ```sh
+   myce extension check --gpu xpu --device 0 --digest SHA256 app-stage@1
+   ```
+
+   For CPU use `--gpu cpu` without a device. Without installed worker settings,
+   supply host/cache explicitly or use dev defaults. `--host` is the configured
+   local host ID, not an SSH destination. An explicit `--root` different from the
+   installed worker's root warns that the live worker is not qualified.
+   Run locally on each authorized target, with that
    worker enrolled and its queue running. A mistaken selection leaves existing
    qualifications untouched. A check that executes and fails removes its prior
    qualification. A Linux check cannot qualify a Mac; environment or host

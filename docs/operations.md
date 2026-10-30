@@ -20,6 +20,28 @@ and stable manager health. `polite_waiting`, `disabled` and `drained` do not mea
 use a line for a newer release to upgrade while preserving spool, identity and
 maintenance. Existing legacy conversion remains the explicit M4 procedure below.
 
+## Check an installed worker's extension
+
+Run locally on the enrolled worker with its queue running:
+
+```sh
+myce extension check --gpu xpu --device 0 --digest SHA256 example@1
+```
+
+Runtime checks read authority (including the certificate pin), `host_id`,
+`state_dir/extensions` and `environment_cache` from the installed worker config.
+Use `--config FILE` for a custom installation. Explicit `--host`, `--root` and
+`--environment-cache` override the local defaults; authority flags work as for
+other installed commands. `--gpu` and, for GPUs, `--device` remain explicit:
+they select what to qualify. For CPU checks use `--gpu cpu` without a device.
+A different `--root` warns that the live worker is not qualified by that check.
+
+Without installed worker settings, supply host/cache explicitly or use
+`myce dev` for automatic local defaults. A successful check is evidence only
+for the selected extension digest, target and hardware/driver fingerprint.
+See [extension authoring](write-an-extension.md#install-and-qualify) and the
+[check guidance](extensions/AGENT-GUIDE.md) for preparation and replay criteria.
+
 ## Change live project policy
 
 `queue --project-config` (and `dev --project-config`) bootstraps project settings
