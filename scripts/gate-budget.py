@@ -34,9 +34,29 @@ def scratch_processes(scratch, pids):
     else:
         # macOS ships lsof; inspect only working/executable/standard handles.
         # A peer merely reading a log on another descriptor is not a fixture.
-        output = subprocess.check_output(
-            ['lsof', '-b', '-nP', '-a', '-u', str(os.getuid()), '-d', 'cwd,txt,0,1,2', '-Fpn'],
-            text=True, stderr=subprocess.DEVNULL)
+        if not pids:
+            return found
+        command = ['lsof', '-b', '-nP', '-O', '-a', '-u', str(os.getuid()),
+                   '-d', 'cwd,txt,0,1,2', '-Fpn']
+        # A network filesystem can strand even -b lsof in uninterruptible I/O.
+        # Avoid run/check_output's unbounded reap after timeout, and avoid pipes
+        # whose EOF could depend on the stranded probe. Five seconds bounds this
+        # optional inventory; uncertainty costs retained scratch, never safety.
+        with tempfile.TemporaryFile(mode='w+t') as output_file:
+            probe = subprocess.Popen(command, stdout=output_file, stderr=subprocess.DEVNULL)
+            try:
+                status = probe.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                probe.kill()  # Only the probe we just launched, never candidates.
+                try:
+                    probe.wait(timeout=.2)
+                except subprocess.TimeoutExpired:
+                    pass  # Do not wait for uninterruptible kernel I/O to return.
+                raise
+            if status != 0:
+                raise subprocess.CalledProcessError(status, command)
+            output_file.seek(0)
+            output = output_file.read()
         pid = None
         for line in output.splitlines():
             if line.startswith('p'):

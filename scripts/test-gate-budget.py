@@ -21,6 +21,48 @@ spec.loader.exec_module(budget)
 
 
 class GateBudgetTests(unittest.TestCase):
+    def test_stuck_handle_probe_retains_scratch_and_reports(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / 'scripts').mkdir()
+            gate = root / 'scripts/gate.sh'
+            gate.write_text('exit 0\n')
+            probe = root / 'lsof'
+            probe.write_text(f'#!{sys.executable}\nimport os, pathlib, signal\n'
+                             f'pathlib.Path({str(root / "probe-pid")!r}).write_text(str(os.getpid()))\n'
+                             'signal.pause()\n')
+            probe.chmod(0o755)
+            env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ['PATH'])
+            output = io.StringIO()
+            started = time.monotonic()
+            real_kill = os.kill
+            with (patch.object(sys, 'argv', ['gate-budget.py', str(gate)]),
+                  patch.object(sys, 'platform', 'darwin'),
+                  patch.dict(os.environ, env),
+                  patch.object(os, 'kill', wraps=real_kill) as kill,
+                  contextlib.redirect_stdout(output), contextlib.redirect_stderr(output)):
+                self.assertEqual(budget.main(), 1)
+            self.assertLess(time.monotonic() - started, 10)
+            self.assertIn('fixture inventory failed; scratch retained', output.getvalue())
+            self.assertIn('gate quick: exit=1', output.getvalue())
+            self.assertEqual(len(list((root / '.gate').iterdir())), 1)
+            self.assertEqual(kill.call_count, 1)  # Only the stuck probe.
+            self.assertEqual(kill.call_args.args,
+                             (int((root / 'probe-pid').read_text()), signal.SIGKILL))
+
+    def test_uninterruptible_probe_has_bounded_reap(self):
+        probe = unittest.mock.Mock()
+        probe.wait.side_effect = subprocess.TimeoutExpired('lsof', 5)
+        with (patch.object(sys, 'platform', 'darwin'),
+              patch.object(subprocess, 'Popen', return_value=probe) as launch):
+            with self.assertRaises(subprocess.TimeoutExpired):
+                budget.scratch_processes('/scratch', {123, 456})
+        self.assertEqual(probe.wait.call_args_list,
+                         [unittest.mock.call(timeout=5), unittest.mock.call(timeout=.2)])
+        probe.kill.assert_called_once_with()
+        command = launch.call_args.args[0]
+        self.assertIn('-O', command)
+
     def test_quick_timeout_uses_remaining_budget(self):
         script = Path(__file__).with_name('gate.sh').read_text()
         start = script.index('  quick_timeout() {')
@@ -99,7 +141,7 @@ while True: signal.pause()
 from unittest.mock import patch
 original = subprocess.Popen.wait
 def wait(child, timeout=None):
-    if timeout is not None:
+    if timeout is not None and child.args[0] == 'bash':
         deadline = time.monotonic() + 10
         while not pathlib.Path(ready).exists():
             if time.monotonic() >= deadline: raise RuntimeError('fixture not ready')
@@ -170,7 +212,7 @@ else:
 from unittest.mock import patch
 original = subprocess.Popen.wait
 def wait(child, timeout=None):
-    if timeout is not None:
+    if timeout is not None and child.args[0] == 'bash':
         deadline = time.monotonic() + 10
         while not pathlib.Path(ready).exists():
             if time.monotonic() >= deadline:
