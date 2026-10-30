@@ -45,6 +45,13 @@ func observationAllowance(m *Machine) string {
 	return identityHash([]any{m.CPUReserveCores, m.EffectiveCPUCores, m.EffectiveHostMemoryBudgetGB, m.TotalMemoryGB, m.ReservedMemoryGB, m.UnifiedMemory, power, mode})
 }
 
+// Operator allowances and power mode affect throughput comparability, not the
+// recipe's memory need. Retain legacy keys; the normal recovery path rechecks
+// every physical/recipe identity fence before memory readers use these rows.
+func memoryIdentityUsable(p WorkObservation) bool {
+	return p.StaleReason == "" || p.StaleReason == "resource allowance or power mode changed"
+}
+
 func curveKey(e Extension, m *Machine, work string) (*ObservationKey, string) {
 	k, why := curveReferenceKey(e, m, work)
 	if k == nil {
@@ -95,7 +102,7 @@ func (q *Queue) invalidateWorkCurves() {
 		// Missing inventory is temporary (notably before the first check-in
 		// after a queue restart). Revalidate it against fresh identity evidence;
 		// actual recipe, hardware and environment changes remain invalidations.
-		if p.StaleReason != "" && p.StaleReason != "component unavailable" {
+		if !memoryIdentityUsable(p) && p.StaleReason != "component unavailable" {
 			continue
 		}
 		reason := "component unavailable"
