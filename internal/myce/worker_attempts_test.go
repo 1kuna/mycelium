@@ -69,7 +69,7 @@ exec "$MYCE_TEST_CLEANUP_REAL_PS" "$@"
 			}()
 			await(t, func() bool { return h.completed(j.ID) })
 			pending := h.result(j.ID)
-			if !pending.ReleasePending || pending.Success || pending.CleanupCause == nil {
+			if !pending.ReleasePending || !pending.Success || pending.CleanupCause == nil {
 				t.Fatalf("cleanup failure lost pending custody or its outcome: %+v", pending)
 			}
 			h.mu.Lock()
@@ -97,8 +97,8 @@ exec "$MYCE_TEST_CLEANUP_REAL_PS" "$@"
 				defer h.mu.Unlock()
 				for _, r := range h.results {
 					if r.ID == j.ID && !r.ReleasePending {
-						if r.Success || r.Error != pending.Error || r.CleanupCause == nil {
-							t.Error("cleanup recovery changed the original failed outcome", r)
+						if !r.Success || r.Error != pending.Error || r.CleanupCause == nil {
+							t.Error("cleanup recovery changed the original successful outcome", r)
 						}
 						return len(h.reports[len(h.reports)-1].Attempts) == 0
 					}

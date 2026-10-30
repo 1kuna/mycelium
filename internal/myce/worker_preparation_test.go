@@ -63,14 +63,20 @@ func TestWorkerPreparationCancellationRetainsUnconfirmedHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 	cancel()
-	select {
-	case err := <-done:
-		if !errors.Is(err, errWorkerReleasePending) {
-			t.Fatalf("cancel released unconfirmed builder custody: %v", err)
+	// Cleanup retries use the same injected clock as the builder. Drive that
+	// backoff while waiting for cancellation, without changing custody proof.
+	await(t, func() bool {
+		clock.Advance(100 * time.Millisecond)
+		select {
+		case err := <-done:
+			if !errors.Is(err, errWorkerReleasePending) {
+				t.Fatalf("cancel released unconfirmed builder custody: %v", err)
+			}
+			return true
+		default:
+			return false
 		}
-	case <-time.After(testWaitTimeout):
-		t.Fatal("builder did not respond to cancellation")
-	}
+	})
 	if store.state.Preparation == "" {
 		t.Fatal("builder custody was not transferred to the attempt")
 	}

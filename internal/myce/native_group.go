@@ -363,7 +363,8 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 			s.releaseSharedInputs()
 		}
 		persist := errors.Join(syncCommandOutput(output), output.Close())
-		r := Result{MemoryPeak: peak, Machine: w.Machine.ID, Session: g.session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Success: runErr == nil && oom == nil && cleanup == nil && persist == nil, Forced: forced, PoliteStop: polite, ReleasePending: cleanup != nil}
+		// Cleanup uncertainty holds custody, not the successful payload result.
+		r := Result{MemoryPeak: peak, Machine: w.Machine.ID, Session: g.session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Success: runErr == nil && oom == nil && persist == nil, Forced: forced, PoliteStop: polite, ReleasePending: cleanup != nil}
 		if runErr != nil {
 			r.Error = nativeAttemptError(j, runErr.Error())
 			r.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("command", runErr))
@@ -376,7 +377,11 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 			r.ExecutionCause = &RuntimeCause{Operation: "command", Class: "resource_limit"}
 		}
 		if cleanup != nil {
-			r.Error = errors.Join(runErr, cleanup).Error()
+			if r.Success {
+				r.Error = "cleanup uncertain: " + cleanup.Error()
+			} else {
+				r.Error = errors.Join(runErr, cleanup).Error()
+			}
 			r.CleanupCause = runtimeDiagnostic(runtimeErrorFor("process_group", cleanup))
 		}
 		if persist != nil {
