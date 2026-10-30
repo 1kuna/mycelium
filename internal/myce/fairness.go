@@ -18,6 +18,7 @@ import (
 type ProjectPolicy struct {
 	DefaultCallPriority      string   `json:"default_call_priority,omitempty" yaml:"default_call_priority,omitempty"`
 	AllowedMachines          []string `json:"allowed_machines,omitempty" yaml:"allowed_machines,omitempty"`
+	ProductionParityHosts    []string `json:"production_parity_hosts,omitempty" yaml:"production_parity_hosts,omitempty"`
 	MaxConcurrent            int      `json:"max_concurrent,omitempty" yaml:"max_concurrent,omitempty"`
 	Weight                   float64  `json:"weight" yaml:"weight"`
 	MaxConcurrentExperiments int      `json:"max_concurrent_experiments" yaml:"max_concurrent_experiments"`
@@ -92,6 +93,11 @@ func validateProjectPolicies(p map[string]ProjectPolicy) error {
 				return errors.New("project allowed_machines must contain nonempty machine names")
 			}
 		}
+		for _, host := range v.ProductionParityHosts {
+			if strings.TrimSpace(host) == "" || host != strings.TrimSpace(host) {
+				return errors.New("production_parity_hosts must contain nonempty exact host names")
+			}
+		}
 		if name == "" || !validMemoryValue(v.Weight) || v.Weight <= 0 || v.MaxConcurrent < 0 || v.MaxConcurrentExperiments < 0 || !validMemoryValue(v.MaxMemoryShare) || v.MaxMemoryShare > 1 {
 			return errors.New("project requires positive finite weight, nonnegative concurrency caps, and memory share in [0,1]")
 		}
@@ -123,6 +129,7 @@ func (q *Queue) configureProjects(p map[string]ProjectPolicy, seedOnly bool) err
 				return err
 			}
 			v.AllowedMachines = slices.Clone(v.AllowedMachines)
+			v.ProductionParityHosts = slices.Clone(v.ProductionParityHosts)
 			copy[k] = v
 		}
 		if q.policyRevision() == ^uint64(0) {

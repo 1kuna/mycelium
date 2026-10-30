@@ -213,6 +213,7 @@ func (q *Queue) priorityPolicyRecord() PriorityPolicyRecord {
 	p.Projects = map[string]ProjectPolicy{}
 	for name, v := range q.s.Policies {
 		v.AllowedMachines = slices.Clone(v.AllowedMachines)
+		v.ProductionParityHosts = slices.Clone(v.ProductionParityHosts)
 		p.Projects[name] = v
 	}
 	warnings, _ := p.validate()
@@ -234,6 +235,7 @@ func (q *Queue) SetPriorityPolicy(expected uint64, p PriorityPolicy, requestCont
 				v.Weight = 1
 			}
 			v.AllowedMachines = slices.Clone(v.AllowedMachines)
+			v.ProductionParityHosts = slices.Clone(v.ProductionParityHosts)
 			projectsCopy[name] = v
 		}
 		projects = projectsCopy

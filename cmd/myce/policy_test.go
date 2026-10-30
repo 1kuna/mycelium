@@ -29,6 +29,15 @@ func TestPolicyCLI(t *testing.T) {
 	if err := policyCommand([]string{"get", "--yaml"}, &out); err != nil {
 		t.Fatal(err)
 	}
+	policy, err := myce.ReadPriorityPolicy(strings.NewReader(out.String()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy.Projects = map[string]myce.ProjectPolicy{"test": {Weight: 1, ProductionParityHosts: []string{"approved-host"}}}
+	out.Reset()
+	if err := yaml.NewEncoder(&out).Encode(policy); err != nil {
+		t.Fatal(err)
+	}
 	file := filepath.Join(t.TempDir(), "policy.yaml")
 	if err := os.WriteFile(file, out.Bytes(), 0600); err != nil {
 		t.Fatal(err)
@@ -43,7 +52,7 @@ func TestPolicyCLI(t *testing.T) {
 		t.Fatal(err)
 	}
 	var record myce.PriorityPolicyRecord
-	if err := json.Unmarshal(out.Bytes(), &record); err != nil || record.Revision != 1 {
+	if err := json.Unmarshal(out.Bytes(), &record); err != nil || record.Revision != 1 || !reflect.DeepEqual(record.Policy.Projects["test"].ProductionParityHosts, []string{"approved-host"}) {
 		t.Fatalf("%s %v", out.String(), err)
 	}
 	if err := policyCommand([]string{"set", file, "--if-revision", "0"}, &out); err == nil {

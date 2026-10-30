@@ -319,6 +319,9 @@ func (q *Queue) holdWaitReason(j *Job) string {
 		}
 	}
 	if j.ProductionHost != "" && q.held(j.ProductionHost) {
+		if reason := q.productionOccupancyReason(j); reason != "" {
+			return reason + "; production hold bound to " + j.ProductionHost + "; spillover requires production_parity_hosts approval and an immediately admissible qualified host"
+		}
 		return q.holdReason(j.ProductionHost)
 	}
 	if j.Spec.Priority == "production" && j.ProductionHost == "" {
@@ -345,6 +348,83 @@ func (q *Queue) holdWaitReason(j *Job) string {
 		}
 	}
 	return ""
+}
+
+// A bound host stays authoritative unless equal-or-higher production prevents
+// admission. Lower tiers, preparation and unresolved custody use the existing
+// release planner; they do not authorize occupancy spillover.
+func (q *Queue) productionOccupancyReason(j *Job) string {
+	if j.State != "queued" || j.Spec.Priority != "production" || j.ProductionHost == "" {
+		return ""
+	}
+	reason := ""
+	for _, m := range q.plannerMachines() {
+		if hostID(m) != j.ProductionHost || !q.placementAllowed(j, m) {
+			continue
+		}
+		for _, candidate := range q.memoryCandidates(j, m) {
+			if q.workerIdle(m, candidate) && !q.preparationActive(m) && !q.preparationStopping(m) && hostFits(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) && fitsResources(candidate, m, m.FreeMemoryGB) && environmentReady(candidate, m) {
+				return "" // Another target on the bound host can admit it now.
+			}
+			if q.roomPlan(candidate, m, true) != nil {
+				continue // Ordinary lower-tier reclamation can make room.
+			}
+			deviceBusy, productionRAM := false, false
+			for _, r := range q.liveJobs() {
+				owner := allocationMachine(q.s.Machines[r.Machine], r.AllocatedDevices)
+				if owner == nil || hostID(owner) != j.ProductionHost || r.ReleaseConfirmed || r.Spec.Priority != "production" || q.comparePriority(r.Spec, j.Spec) > 0 || r.State != "running" && r.State != "stopping" {
+					continue
+				}
+				deviceBusy = deviceBusy || batchOnTarget(r, m)
+				productionRAM = productionRAM || hostNeed(owner, r.Spec.Needs.MemoryGB, r.Spec.Needs.HostMemoryGB) > 0
+			}
+			for _, s := range q.s.ModelSlots {
+				owner := slotMachine(q.s.Machines[s.Machine], s)
+				if owner == nil || hostID(owner) != j.ProductionHost || q.slotSpec(s).Priority != "production" || q.comparePriority(q.slotSpec(s), j.Spec) > 0 || !slotReservesMemory(s) || q.slotReclaimableFor(s, j.Spec) {
+					continue
+				}
+				model, _ := q.model(s.Model)
+				deviceBusy = deviceBusy || slotOnTarget(s, m) && m.FreeMemoryGB < candidate.Spec.Needs.MemoryGB
+				productionRAM = productionRAM || hostNeed(owner, model.MemoryGB, model.HostMemoryGB) > 0
+			}
+			if productionRAM && hostFitFailure(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) == "host memory" {
+				reason = fmt.Sprintf("waiting for RAM on %s: %.1f GiB needed, %.1f GiB admission headroom; equal-or-higher production reserves host RAM", m.ID, hostNeed(m, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB), m.FreeHostMemoryGB)
+			} else if deviceBusy && !strings.HasPrefix(reason, "waiting for RAM") {
+				reason = "waiting for admission on " + m.ID + ": device occupied by equal-or-higher production"
+			}
+		}
+	}
+	return reason
+}
+
+// Reuse dispatch's qualified, frozen extension and admission checks on a copy.
+// This changes only queued host affinity; it creates no release or attempt.
+func (q *Queue) productionSpilloverTarget(j *Job) string {
+	approved := q.s.Policies[j.Spec.Project].ProductionParityHosts
+	if len(approved) == 0 || !j.Spec.extensionJob() || j.Spec.ExtensionCheck != nil || q.productionOccupancyReason(j) == "" {
+		return ""
+	}
+	copy := *j
+	copy.ProductionHost = ""
+	scan := q.placementScan()
+	var best *Machine
+	now := q.clock.Now()
+	for _, m := range scan.machines {
+		if hostID(m) == j.ProductionHost || !contains(approved, hostID(m)) || q.unreported[m.ID] || m.LastSeen.After(now) || now.Sub(m.LastSeen) >= min(q.lossTimeouts[0], min(q.lossTimeouts[1], q.lossTimeouts[2])) {
+			continue
+		}
+		candidate := q.batchCandidateWithResources(&copy, m, nil)
+		if candidate == nil || !q.workerIdle(m, candidate) || q.immediateCandidate(candidate, m) == nil {
+			continue
+		}
+		if best == nil || q.targetPlacementBetter(j, m, best, scan) {
+			best = m
+		}
+	}
+	if best == nil {
+		return ""
+	}
+	return hostID(best)
 }
 
 // Select once, before stopping anything. Occupancy is reclaimable; immutable
@@ -444,6 +524,9 @@ func (q *Queue) maintainHolds() {
 	}
 	sort.Slice(jobs, func(a, b int) bool { return q.before(jobs[a], jobs[b], &Machine{}) })
 	for _, j := range jobs {
+		if target := q.productionSpilloverTarget(j); target != "" {
+			j.ProductionHost = target
+		}
 		if j.State == "queued" && j.ProductionHost != "" && (q.dockerBlocker(j.ProductionHost) != "" || q.diskWaitingReason(j, j.ProductionHost) != "") {
 			if target := q.productionTarget(j, nil); target != "" {
 				j.ProductionHost = target
