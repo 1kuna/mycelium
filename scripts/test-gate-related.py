@@ -12,6 +12,32 @@ spec.loader.exec_module(related)
 
 
 class RelatedTests(unittest.TestCase):
+    def test_wire_schema_for_field_and_nested_type_edits(self):
+        previous = os.getcwd()
+        with tempfile.TemporaryDirectory() as directory:
+            os.chdir(directory)
+            try:
+                def git(*args):
+                    subprocess.run(['git', *args], check=True, capture_output=True)
+                root = pathlib.Path('internal/myce')
+                root.mkdir(parents=True)
+                git('init', '-q')
+                (root / 'types.go').write_text('package p\ntype Job struct {\n\tValue int\n}\n')
+                (root / 'types_test.go').write_text('package p\nfunc TestTypes(t *testing.T) {}\n')
+                (root / 'nested.go').write_text('package p\ntype Nested struct {\n\tCount int\n}\n')
+                (root / 'nested_test.go').write_text('package p\nfunc TestNested(t *testing.T) {}\n')
+                # The public test calls a helper; it never names Job or Nested.
+                (root / 'wire_schema_test.go').write_text('package p\nfunc TestWireSchemas(t *testing.T) { generatedSchema(t) }\n')
+                git('add', '.')
+                git('-c', 'user.name=Fixture', '-c', 'user.email=fixture-noreply@example.invalid', 'commit', '-qm', 'base')
+                (root / 'types.go').write_text('package p\ntype Job struct {\n\tValue string\n}\n')
+                self.assertEqual(related.select('HEAD'), [('internal/myce', '^(TestTypes|TestWireSchemas)$')])
+                git('restore', 'internal/myce/types.go')
+                (root / 'nested.go').write_text('package p\ntype Nested struct {\n\tCount string\n}\n')
+                self.assertEqual(related.select('HEAD'), [('internal/myce', '^(TestNested|TestWireSchemas)$')])
+            finally:
+                os.chdir(previous)
+
     def test_selection_and_explicit_full(self):
         previous = os.getcwd()
         with tempfile.TemporaryDirectory() as directory:

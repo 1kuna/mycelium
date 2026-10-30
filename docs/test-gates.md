@@ -5,7 +5,9 @@ base defaults to `origin/integ/108`; select the commit before your change when
 working elsewhere. Quick builds the CLI and every release target, vets all Go
 packages, and race-tests changed packages with test names from matching file
 prefixes, plus tests that directly reference changed exported symbols (using
-diff hunk function names and changed declarations). This is a textual heuristic,
+diff hunk function names and changed declarations). Production Go edits in
+`internal/myce` always include `TestWireSchemas`, since the reflected Job/Spec
+schema includes nested types across that package. This is a textual heuristic,
 not a dependency analyser. Review the printed selection: shared helpers and
 indirect callers can need `full`. If any Go file has no related tests, quick
 stops with a message requesting `full`; it never expands to a whole package.

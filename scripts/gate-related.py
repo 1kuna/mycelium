@@ -41,6 +41,10 @@ def select(base):
                         tests.add(test[1])
         if not tests:
             raise ValueError(f'no related tests for {name}')
+        # The reflected Job schema includes nested types across this package.
+        # Textual references miss field-only edits and indirect definitions (#413).
+        if path.parent == pathlib.Path('internal/myce') and not name.endswith('_test.go'):
+            tests.add('TestWireSchemas')
         packages.setdefault(path.parent, set()).update(tests)
     return [(str(directory), '^(' + '|'.join(sorted(tests)) + ')$')
             for directory, tests in sorted(packages.items())]
