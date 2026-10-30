@@ -72,8 +72,9 @@ type PortabilityWork struct {
 	CheckID string `json:"check_id,omitempty"`
 }
 type PortabilityHost struct {
-	Work       string            `json:"work,omitempty"`
-	WorkChecks []PortabilityWork `json:"work_checks,omitempty"`
+	SharedHost *SharedHostProfile `json:"shared_host,omitempty"`
+	Work       string             `json:"work,omitempty"`
+	WorkChecks []PortabilityWork  `json:"work_checks,omitempty"`
 	// Opaque ordinal avoids disclosing arbitrary host identifiers/paths.
 	Host                    string            `json:"host"`
 	LastSeen                time.Time         `json:"last_seen"`
@@ -161,6 +162,7 @@ func (q *Queue) portability(req PortabilityRequest) PortabilityReport {
 	report := PortabilityReport{ObservedAt: q.clock.Now(), Inventory: "unknown", Requirements: []PortabilityRequirement{}, Targets: []PortabilityTarget{}, Notes: []string{
 		"Read-only advice; no registration, preparation, execution or placement change. Admission is a snapshot, not a reservation.",
 		"Missing variants are portability gaps, not proof of hard software requirements. Unauthored requirement reasons remain unknown.",
+		"Shared orchestration/interactive hosts are usable for fitting light native CPU commands within their profile; submit normally, respect maintenance, and let last-resort placement choose. CPU priority/reservations are not hard shares or pressure-triggered migration.",
 		"MY-19: obtain owner-accepted output parity before splitting work across variants; preserve checkpoint compatibility.",
 	}}
 	rows := map[ExecutionTarget]*PortabilityTarget{}
@@ -236,7 +238,7 @@ func (q *Queue) portability(req PortabilityRequest) PortabilityReport {
 		for _, target := range targets {
 			r := row(machineTarget(target))
 			r.Observed = true
-			h := PortabilityHost{Host: fmt.Sprintf("host-%d", index+1), LastSeen: m.LastSeen, Freshness: "fresh", LogicalCPUs: logicalCPUs(m), FreeCPUCores: m.FreeCPUCores, AcceleratorMemoryGB: target.TotalMemoryGB, FreeAcceleratorMemoryGB: target.FreeMemoryGB, Prepared: "unknown", Builds: map[string]string{}, Qualification: "unknown", Admission: "unknown"}
+			h := PortabilityHost{SharedHost: cloneSharedHost(q.s.HostMaintenance[hostID(m)].SharedHost), Host: fmt.Sprintf("host-%d", index+1), LastSeen: m.LastSeen, Freshness: "fresh", LogicalCPUs: logicalCPUs(m), FreeCPUCores: m.FreeCPUCores, AcceleratorMemoryGB: target.TotalMemoryGB, FreeAcceleratorMemoryGB: target.FreeMemoryGB, Prepared: "unknown", Builds: map[string]string{}, Qualification: "unknown", Admission: "unknown"}
 			if m.CapabilityProfile != nil {
 				h.HardwareObservedAt = m.CapabilityProfile.RecordedAt
 			}
@@ -587,6 +589,9 @@ func WritePortability(dest io.Writer, r PortabilityReport, asJSON bool) error {
 		}
 		for _, h := range t.Hosts {
 			fmt.Fprintf(&out, "  %s: %s; CPU=%d free=%d; accelerator=%g GiB free=%g; %s; %s; admission=%s\n", h.Host, h.Freshness, h.LogicalCPUs, h.FreeCPUCores, h.AcceleratorMemoryGB, h.FreeAcceleratorMemoryGB, h.Prepared, h.Qualification, h.Admission)
+			if h.SharedHost != nil {
+				fmt.Fprintf(&out, "    shared interactive fallback: reserve=%g GiB; native CPU commands in prepared environments; nice>=10, CPU-time cap not enforced\n", h.SharedHost.InteractiveReserveGB)
+			}
 			fmt.Fprintf(&out, "    inventory last seen: %s; hardware observed: %s\n", h.LastSeen.Format(time.RFC3339), h.HardwareObservedAt.Format(time.RFC3339))
 			if h.Work != "" {
 				fmt.Fprintf(&out, "    admission work: %s\n", h.Work)

@@ -73,6 +73,10 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 			reject("host_launch")
 			return nil
 		}
+		if q.s.HostMaintenance[hostID(q.s.Machines[l.Machine])].SharedHost != nil && l.Kind != "batch" {
+			reject("shared_host_preparation")
+			return nil
+		}
 		if (l.Kind == "batch" || l.Kind == "engine") && q.preparationStopping(q.s.Machines[l.Machine]) {
 			reject("preparation_stopping")
 			return nil

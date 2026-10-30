@@ -19,7 +19,7 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 		return hostDeviceCommand(ctx, args[1:], out)
 	}
 	if len(args) == 0 {
-		return errors.New("usage: myce host device disable|enable HOST DEVICE | myce host drain|disable|resume|status|budget|placement HOST [--config PATH] [--last-resort=true|false] [--stop] [--memory-budget-gb GiB] [--wait] [--timeout DURATION]")
+		return errors.New("usage: myce host device disable|enable HOST DEVICE | myce host drain|disable|resume|status|budget|placement|profile HOST [--config PATH] [--last-resort=true|false] [--stop] [--memory-budget-gb GiB] [--wait] [--timeout DURATION]")
 	}
 	action := args[0]
 	f := flag.NewFlagSet("host "+action, flag.ContinueOnError)
@@ -32,6 +32,8 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 	dryRun := f.Bool("dry-run", false, "suggest a measured RAM budget without changing policy")
 	headroom := f.Float64("headroom-gb", 4, "extra RAM headroom for future external peaks (GiB)")
 	queueOverhead := f.Float64("queue-overhead-gb", 0, "additional queue RAM reserve, if not already included in measurements (GiB)")
+	shared := f.Bool("shared", false, "use shared interactive host profile (profile action)")
+	reserve := f.Float64("interactive-reserve-gb", 0, "measured additional interactive RAM reserve; required with --shared=true")
 	lastResort := f.Bool("last-resort", false, "prefer ordinary admissible hosts before this host; use --last-resort=false to clear")
 	var flags, hosts []string
 	for i := 1; i < len(args); i++ {
@@ -39,7 +41,7 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 		if strings.HasPrefix(arg, "-") {
 			flags = append(flags, arg)
 			key := strings.TrimLeft(arg, "-")
-			if (key == "headroom-gb" || key == "queue-overhead-gb" || key == "config" || key == "joining-file" || key == "queue" || key == "token" || key == "timeout" || key == "memory-budget-gb" || key == "cpu-budget-cores") && i+1 < len(args) {
+			if (key == "interactive-reserve-gb" || key == "headroom-gb" || key == "queue-overhead-gb" || key == "config" || key == "joining-file" || key == "queue" || key == "token" || key == "timeout" || key == "memory-budget-gb" || key == "cpu-budget-cores") && i+1 < len(args) {
 				i++
 				flags = append(flags, args[i])
 			}
@@ -53,7 +55,7 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 	if len(hosts) != 1 || f.NArg() != 0 {
 		return errors.New("exactly one physical HOST is required")
 	}
-	if action != "drain" && action != "disable" && action != "resume" && action != "status" && action != "budget" && action != "placement" {
+	if action != "drain" && action != "disable" && action != "resume" && action != "status" && action != "budget" && action != "placement" && action != "profile" {
 		return errors.New("unknown queue host action")
 	}
 	if *stop && action != "disable" {
@@ -62,11 +64,18 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 	if *timeout <= 0 {
 		return errors.New("timeout must be positive")
 	}
-	if *wait && (action == "resume" || action == "budget" || action == "placement") {
+	if *wait && (action == "resume" || action == "budget" || action == "placement" || action == "profile") {
 		return errors.New("--wait requires drain, disable or status")
 	}
 	request := myce.HostMaintenanceRequest{Action: action, Stop: *stop}
+	sharedSet, reserveSet := false, false
 	f.Visit(func(v *flag.Flag) {
+		if v.Name == "shared" {
+			sharedSet = true
+		}
+		if v.Name == "interactive-reserve-gb" {
+			reserveSet = true
+		}
 		if v.Name == "last-resort" {
 			request.LastResort = lastResort
 		}
@@ -77,6 +86,17 @@ func hostMaintenanceCommand(ctx context.Context, args []string, out io.Writer) e
 			request.MemoryBudgetGB = budget
 		}
 	})
+	if action == "profile" {
+		if !sharedSet || *shared && (!reserveSet || *reserve <= 0) || !*shared && reserveSet {
+			return errors.New("profile requires --shared=true --interactive-reserve-gb GiB, or --shared=false")
+		}
+		request.SharedHost = &myce.SharedHostProfile{}
+		if *shared {
+			request.SharedHost.InteractiveReserveGB = *reserve
+		}
+	} else if sharedSet || reserveSet {
+		return errors.New("--shared and --interactive-reserve-gb require profile")
+	}
 	if action == "placement" && request.LastResort == nil {
 		return errors.New("placement requires --last-resort=true|false")
 	}

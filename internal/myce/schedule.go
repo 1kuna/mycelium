@@ -30,7 +30,8 @@ func fitsResources(j *Job, m *Machine, memory float64) bool {
 // A nil report retains short-circuit dispatch/launch evaluation. Qualification
 // collects failures from these very same checks, without a second fit path.
 func fitsResourcesChecked(j *Job, m *Machine, memory float64, report *targetFit) bool {
-	return report.check(diskHeadroomReason(j, m) == "", "disk headroom") &&
+	return report.check(sharedHostJobFits(j, m), "shared host profile") &&
+		report.check(diskHeadroomReason(j, m) == "", "disk headroom") &&
 		report.check(executionTargetMatches(j.Spec, m), "target") &&
 		report.check(nativeNetworkFits(j, m), "native network isolation") &&
 		report.check(j.MemoryEnvelope == nil || j.MemoryEnvelope.Refusal == "", "memory envelope") &&

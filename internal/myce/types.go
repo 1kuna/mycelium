@@ -440,6 +440,8 @@ type Job struct {
 	Checkpoint            string                       `json:"checkpoint"`
 }
 type Machine struct {
+	SharedHost             *SharedHostProfile     `json:"shared_host,omitempty"`        // Worker acknowledgement.
+	SharedHostReason       string                 `json:"shared_host_reason,omitempty"` // Queue admission diagnostic.
 	ExternalMemory         *ExternalMemoryHistory `json:"external_memory,omitempty"`
 	MemoryObservation      *HostMemoryObservation `json:"memory_observation,omitempty"`
 	Release                *RunningRelease        `json:"release,omitempty"`
@@ -547,6 +549,7 @@ type Checkin struct {
 	Running         *Execution        `json:"running,omitempty"`
 }
 type Reply struct {
+	SharedHost                 *SharedHostProfile           `json:"shared_host,omitempty"`
 	ExtensionQualificationPlan []ExtensionQualificationPlan `json:"extension_qualification_plan,omitempty"`
 
 	AttemptProtocol   string              `json:"attempt_protocol,omitempty"`

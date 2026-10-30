@@ -2886,3 +2886,15 @@ blobs beyond ordinary expiry, and status exposes state, bytes, age, attempts and
 cause. Verified delivery preserves ordinary retrieval retention; no early deletion,
 rollback, new storage service or publisher election is introduced. Details and
 supported forms: [file guide](guide-files-v3.md#complete-from-queue-storage-deliver-to-nas-later-349).
+
+## Shared interactive host profile (#389)
+
+The opt-in [shared-host profile](shared-hosts.md) keeps orchestration and
+interactive machines usable for fitting native CPU commands at lower priority,
+with positive existing CPU/RAM allowances, an explicitly measured interactive
+reserve, #353 historical/live RAM admission and existing last-resort placement.
+GPU admission uses the existing component exclusion path. Drains, exact launch
+fences and cleanup remain authoritative. First phase uses prepared environments;
+Docker/extensions/new preparations and pressure-triggered yield/CPU-time
+containment remain tracked under #390. Nice and core reservations are not hard
+CPU shares; macOS memory remains admission-only.

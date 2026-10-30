@@ -562,3 +562,16 @@ available at compute completion. `pending_output_refs` is an unaccepted upload
 reservation, never a successful result. File-store `reserved_output_bytes`
 reports missing async output reservations; `free_bytes` excludes those bytes.
 See [delivery policy](guide-files-v3.md#complete-from-queue-storage-deliver-to-nas-later-349).
+
+### Shared interactive profile
+
+Host maintenance `policy.shared_host.interactive_reserve_gb` is the configured
+protected reserve. Machine `shared_host` is the worker's exact acknowledgement;
+`shared_host_reason` explains missing history/live observations or acknowledgement.
+Shared hosts retain `last_resort: true`. `free_host_memory_gb` additionally respects
+the seven-day external peak and protected reserve, without increasing the static
+allowance. No samples means withheld admission. Missing `shared_host` normally
+means no profile; compare queue policy before interpreting an old worker's row.
+CPU nice=10 is native command priority, not CPU-time enforcement. OS pressure
+and interactive-load preemption remain unimplemented (#390). See
+[shared hosts](shared-hosts.md) for measurement, eligibility and removal semantics.

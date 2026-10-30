@@ -735,6 +735,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		}
 		return cause
 	}
+	if err = applySharedHostPriority(cmd.Process.Pid, w.Machine.SharedHost); err != nil {
+		return nil, abort(err)
+	}
 	if err = memoryAttempt.attach(cmd.Process.Pid); err != nil {
 		return nil, abort(fmt.Errorf("memory ceiling attach: %w", err))
 	}
@@ -1248,7 +1251,7 @@ func (w Worker) checkHostRAM(gpu, host float64) error {
 	if w.HostMemorySource == nil {
 		return fmt.Errorf("%w: host RAM source unavailable", errWorkerMemory)
 	}
-	free, err := w.HostMemorySource(context.Background())
+	free, err := w.sharedHostLiveMemory(context.Background())
 	need := hostNeed(&w.Machine, gpu, host)
 	if err != nil || !hostMemoryAvailableFits(&w.Machine, gpu, host, free) {
 		return fmt.Errorf("%w: host RAM need %g GiB, available %g GiB: %v", errWorkerMemory, need, free, err)

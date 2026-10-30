@@ -522,6 +522,9 @@ func newAttemptStore(root *workerStore, j Job) (*workerStore, error) {
 }
 
 func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport) error {
+	if w.Machine.SharedHost != nil && !sharedHostJobFits(&next, &w.Machine) {
+		return fmt.Errorf("shared host requires a native CPU command with a prepared environment")
+	}
 	cores, why := cpuCapacity(&w.Machine)
 	usedCores, usedRAM := next.Spec.Needs.cores(), localJobHostNeed(w, next)
 	growth := usedRAM
@@ -580,7 +583,7 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport)
 		if w.HostMemorySource == nil {
 			return fmt.Errorf("%w: host RAM source unavailable", errWorkerMemory)
 		}
-		free, err := w.HostMemorySource(context.Background())
+		free, err := w.sharedHostLiveMemory(context.Background())
 		if err != nil || !validMemoryValue(free) || free < growth {
 			return fmt.Errorf("%w: host RAM growth need %g GiB, available %g GiB", errWorkerMemory, growth, free)
 		}
@@ -936,6 +939,12 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 					// Enrollment is an observer, never authority to terminate live work.
 					// Retry next successful check-in; no filesystem paths or errors in logs.
 					log.Printf("enrollment receipt unavailable; will retry")
+				}
+				if reply.SharedHost != nil {
+					w.Machine.SharedHost = cloneSharedHost(reply.SharedHost)
+					if reply.SharedHost.InteractiveReserveGB == 0 {
+						w.Machine.SharedHost = nil
+					}
 				}
 				if reply.CPUBudgetCores != nil {
 					w.Machine.CPUBudgetCores = *reply.CPUBudgetCores

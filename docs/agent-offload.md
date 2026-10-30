@@ -69,6 +69,17 @@ a result marker only after the command succeeds. The profile's `check` verifies
 that marker before accepting outputs. A green starter run proves the selected
 command; broaden the suite and its output checks for the project's needs.
 
+## Shared hosts are usable
+
+Do not avoid an orchestration or interactive host merely because it runs agents.
+Submit portable native CPU tests, CI and small builds through Mycelium with
+measured RAM and bounded application parallelism. The [shared-host profile](shared-hosts.md)
+keeps ordinary fitting hosts first and permits immediate light-work fallback
+within its live/historical RAM reserve and declared CPU allowance. Let the queue
+choose; do not pin or launch outside it. Respect drain/disable, storage warnings,
+qualification and selector exclusions. CPU-only declarations on macOS are
+cooperative; nice and core reservations do not guarantee interactive latency.
+
 ## Project profiles
 
 `myce run --profile gate-full` reads `.mycelium/profiles/gate-full.yaml`, submits

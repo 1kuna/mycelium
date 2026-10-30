@@ -72,3 +72,11 @@ support claims. [Portability reference](https://github.com/1kuna/mycelium/blob/m
 
 Commands use installed authority. Keep tokens out of commands, profiles,
 `run.env`, logs and issues. A missing CLI or failed authority is a setup hold.
+
+Shared orchestration/interactive hosts are usable within their configured limits.
+Submit fitting portable native CPU tests, CI and small builds normally; do not
+avoid or pin the host because it runs agents. The shared-host profile protects
+measured RAM reserve and uses last-resort placement plus nice=10. Respect existing
+drain/disable, storage and qualification fences. Core reservations and nice are
+not hard CPU shares; do not claim pressure-triggered migration. See
+[shared hosts](https://github.com/1kuna/mycelium/blob/main/docs/shared-hosts.md).

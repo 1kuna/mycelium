@@ -923,6 +923,12 @@ func printStatus(s myce.Snapshot, full bool) {
 		if m.MemoryEnforcement != "" {
 			state += "; " + m.MemoryEnforcement
 		}
+		if m.SharedHost != nil {
+			state += fmt.Sprintf("; shared interactive host (reserve %g GiB; native nice>=10; CPU-time cap not enforced)", m.SharedHost.InteractiveReserveGB)
+		}
+		if m.SharedHostReason != "" {
+			state += "; " + m.SharedHostReason
+		}
 		if m.EffectiveHostMemoryBudgetGB > 0 {
 			state += fmt.Sprintf("; host allowance (last reported) %d bytes (UNQUALIFIED)", m.HostMemoryAllowanceBytes)
 		} else if m.HostMemoryBudgetGB > 0 {

@@ -1133,6 +1133,10 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 		}
 		budget := *q.s.HostMaintenance[hostID(&m)].MemoryBudget
 		reply.HostMemoryBudget = &budget
+		reply.SharedHost = cloneSharedHost(q.s.HostMaintenance[hostID(&m)].SharedHost)
+		if reply.SharedHost == nil {
+			reply.SharedHost = &SharedHostProfile{} // Explicitly clear a removed profile.
+		}
 		if cores := q.s.HostMaintenance[hostID(&m)].CPUBudgetCores; cores != nil {
 			value := *cores
 			reply.CPUBudgetCores = &value

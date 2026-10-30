@@ -217,6 +217,11 @@ func (q *Queue) ChangeComponentExclusion(r ComponentExclusionRequest) (Component
 }
 
 func (q *Queue) componentExcluded(m *Machine, platform, identity string) bool {
+	// The profile uses the same kind=gpu matching/admission path, independently
+	// of operator exclusions; clearing either cannot clear the other.
+	if q.s.HostMaintenance[hostID(m)].SharedHost != nil && platform != "cpu" {
+		return true
+	}
 	for _, p := range q.s.ComponentExclusions {
 		if !p.Active || p.wholeHost() || p.Host != "" && p.Host != hostID(m) {
 			continue
