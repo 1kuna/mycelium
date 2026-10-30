@@ -163,7 +163,9 @@ func CheckExtension(ctx context.Context, root string, e Extension, platform, dev
 		if platform != "cpu" {
 			selection.GPU = &GPUSelection{Devices: []string{m.Device}}
 		}
-		job, e2 := c.SubmitAndWait(ctx, Spec{Name: "extension-check", Project: "extension-check", SubmissionKey: r.CheckID,
+		// Reject checks that cannot fit the target even when idle. Temporary
+		// occupancy and production holds still queue through normal admission.
+		job, e2 := c.SubmitAndWait(ctx, Spec{Name: "extension-check", Project: "extension-check", SubmissionKey: r.CheckID, RequireTarget: true,
 			Extension: extensionKey(e), ExtensionDigest: e.Digest, AllowedMachines: []string{m.ID},
 			Needs: selection, ExtensionCheck: &ExtensionCheckRequest{Work: r.Work, Directory: scratch}})
 		// Fence the exact check key and confirm cleanup, even when a terminal

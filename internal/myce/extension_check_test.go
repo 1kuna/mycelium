@@ -6,6 +6,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -60,6 +62,9 @@ func TestExtensionCheckAutoMemory(t *testing.T) {
 						t.Fatal(err)
 					}
 					submitted = true
+					if !s.RequireTarget {
+						t.Error("runtime check omitted capacity-only target validation")
+					}
 					if s.Needs.Memory != mode || s.ExtensionCheck == nil {
 						t.Errorf("check submission memory = %q, want %q", s.Needs.Memory, mode)
 					}
@@ -453,5 +458,51 @@ func TestExtensionQualificationSmokeFailureClearsPriorSuccess(t *testing.T) {
 	saved := readExtensionReports(root, e, "fake")
 	if len(saved) != 1 || saved[0].Qualified {
 		t.Fatal("failed check not persisted", saved)
+	}
+}
+
+// A sibling card uses the conservative family factor even on the same host.
+// Reject its impossible check up front, while retaining normal busy-host waits.
+func TestExtensionCheckSiblingMemoryCapacity(t *testing.T) {
+	for _, peak := range []float64{13.08499526977539, 10} {
+		t.Run(fmt.Sprint(peak), func(t *testing.T) {
+			q, _, m, s := floorFreeFitFixture(t, 24)
+			sibling := m.Devices[0]
+			sibling.ID, sibling.Identity = "1", "sibling-card"
+			m.Devices = append(m.Devices, sibling)
+			m.HostAvailableMemoryGB = 1
+			machineCheck(t, q, m)
+			for id, p := range q.s.WorkObservations {
+				delete(q.s.WorkObservations, id)
+				p.Key.Component, p.Key.Hardware = "1", "sibling-card"
+				p.MemoryPeak.HostGB, p.MemoryPeak.CgroupGB = &peak, &peak
+				q.s.WorkObservations[identityHash(p.Key)] = p
+			}
+			// Physical capacity exceeds the operator's allowance, and live occupancy
+			// is temporary. Qualification must compare against the whole allowance.
+			s.Workload = nil
+			s.ExtensionDigest = registeredExtension(t, q, s.Extension).Digest
+			s.RequireTarget = true
+			s.AllowedMachines = []string{m.ID}
+			s.Needs = ResourceNeeds{Memory: "auto", GPU: &GPUSelection{Devices: []string{"0"}}}
+			s.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:sample", Directory: t.TempDir()}
+			j, err := q.Submit(s)
+			if peak > 13 {
+				var refusal *HTTPError
+				if !errors.As(err, &refusal) || refusal.Code != "no_qualified_target" || !strings.Contains(refusal.Message, "exceeds allowance 24 GiB") {
+					t.Fatalf("impossible sibling estimate was not rejected: job=%v err=%v", j.State, err)
+				}
+				if len(q.s.Jobs) != 0 {
+					t.Fatal("rejected runtime check entered the queue")
+				}
+			} else {
+				if err != nil || j == nil || j.State != "queued" {
+					t.Fatalf("temporary occupancy rejected a fitting check: job=%v err=%v", j.State, err)
+				}
+				if got := assignedJob(machineCheck(t, q, m)); got != nil {
+					t.Fatalf("busy-host check bypassed live admission: %+v", got)
+				}
+			}
+		})
 	}
 }
