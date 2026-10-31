@@ -549,6 +549,11 @@ func (q *Queue) Submit(s Spec) (*Job, error) {
 // SubmitContext snapshots input custody before bulk verification. Key replay,
 // cancellation and job creation still serialize in the final update transaction.
 func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
+	if s.OutputDelivery == asyncNAS {
+		if e := q.reclaimStorageForAdmission(ctx); e != nil && ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+	}
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
 	defer func() {
@@ -696,9 +701,6 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 			if store == nil {
 				return &HTTPError{Status: 503, Code: "file_store_unavailable", Message: "queue-file-store is not configured"}
 			}
-			if err := q.fileStoreReserveRefusal(resultCapacity, addDiskBytes(q.outputReservations(resultPayloads, ""), s.Disk.OutputBytes), s.Disk.OutputBytes, q.outputReservationsFor(resultPayloads, "", true), q.priorityMatch(s).Tier == "production"); err != nil {
-				return err
-			}
 		}
 		if e := q.validateProjectPlacement(s.Project, s.AllowedMachines); e != nil {
 			return rejectFieldRule("job_placement_invalid", e)
@@ -778,6 +780,16 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		if s.After != nil {
 			j.WaitingSince = time.Time{}
 			j.Dependency = &PieceBinding{Job: s.After.Job, Piece: s.After.Piece, State: "blocked"}
+		}
+		if s.OutputDelivery == asyncNAS {
+			if e := q.admitSharedOutput(j, resultCapacity, resultPayloads); e != nil {
+				if jobClass(s) != "production" {
+					return e
+				}
+				j.OutputAdmissionPending = true
+				j.Reason = q.storageHoldReason(j, resultCapacity, resultPayloads)
+				q.storageCapacityAlert(j, true)
+			}
 		}
 		q.putJob(id, j)
 		if s.SubmissionKey != "" {

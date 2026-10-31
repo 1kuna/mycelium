@@ -249,7 +249,7 @@ func (q *Queue) PreflightFileStore(ctx context.Context, files FileManifest) erro
 	if err := files.validate(); err != nil {
 		return err
 	}
-	if err := q.reclaimJobFilesContext(ctx); err != nil {
+	if err := q.reclaimStorageForAdmission(ctx); err != nil {
 		log.Printf("file retention deferred: %v", err)
 	}
 	requestUnlock1 := requestReadLock(ctx, &q.mu)

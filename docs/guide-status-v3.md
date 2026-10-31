@@ -983,3 +983,34 @@ The opt-in [backed storage integration](guide-storage-boundaries.md) adds
 `storage_allocation` to protected assignments. It is an exact worker budget,
 not a native qualification claim or a local-spool retrieval promise. Physical
 accounting remains shadow status; existing cap/reserve settings remain active.
+
+Shared async output admission freezes `output_reservation_bytes` from comparable
+learned logical output demand (the cold prior is used for unknown variants).
+The commitment funds every compatible qualified variant without pinning a host;
+actual manifest identities replace it at result reservation. Later observations
+cannot silently resize an accepted commitment. Retry and yielded commitments
+reacquire in configured owner-tier order. Only queued, unassigned estimates with
+no pending manifest or installed boundary yield synchronously. Assigned work may
+already have writers before `Started`, so its storage remains charged.
+
+Production that cannot fit remains queued with `output_admission_pending` and a
+`file_store_capacity` reason naming bytes needed, available space, the exact
+deficit, protected holders, destination observation and next action. A
+`publication_fence_wait` means collection must retry after a publisher releases
+its fence. Admission repeats bounded authorized collector batches only while
+observed committed payload bytes decrease. It grants no new expiry permission.
+The `orderStorageReclaim` seam orders eligible candidates by owner tier and
+replacement cost; collection-side integration belongs to #508.
+
+`production_storage_capacity` health events include `project`, `job_id`, a
+sanitized `reason` and `recipients: ["operator", "project"]`. The configured
+queue health notifier routes that event to the queue operator and the affected
+project's agent/owner, deduplicating its delivery ID. Without a configured route,
+the event remains visible in status; no external notification is claimed. A full
+protected backing similarly reports byte/inode deficits and retained allocation
+holders, after considering other qualified compatible hosts. Compute completion,
+stop or cancellation never releases an installed storage boundary.
+
+These admission changes keep configured file-store caps, the production reserve,
+legacy disk floor and shared-credential attribution rules. They do not activate
+native enforcement, complete worker-local delivery or retire migration guards.

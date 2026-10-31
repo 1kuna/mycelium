@@ -19,6 +19,9 @@ const healthAlertCooldown = 15 * time.Minute
 // HealthAlert contains identities and fixed diagnostic codes, never worker text.
 // Receivers deduplicate DeliveryID, including after an ambiguous hook exit.
 type HealthAlert struct {
+	Project    string    `json:"project,omitempty"`
+	Reason     string    `json:"reason,omitempty"`
+	Recipients []string  `json:"recipients,omitempty"`
 	DeliveryID string    `json:"delivery_id"`
 	Kind       string    `json:"kind"`
 	Store      string    `json:"store,omitempty"`
@@ -83,6 +86,34 @@ func (q *Queue) pruneHealthEvents() {
 }
 
 func (q *Queue) detectHealth() {
+	// Job-specific pressure conditions follow live demand, rather than growing
+	// with retained job history. Project input conditions are bounded by policy.
+	for key := range q.s.Health.Conditions {
+		id, jobKey := strings.CutPrefix(key, "storage-admission/")
+		if !jobKey {
+			id, jobKey = strings.CutPrefix(key, "storage-write/job/")
+		}
+		if jobKey {
+			if j := q.s.Jobs[id]; j == nil || terminal(j.State) || cancelled(j) {
+				delete(q.s.Health.Conditions, key)
+			}
+		}
+	}
+	for _, j := range q.liveJobs() {
+		if jobClass(j.Spec) != "production" {
+			continue
+		}
+		if j.State == "queued" && j.OutputAdmissionPending && !cancelled(j) {
+			continue
+		}
+		reason := ""
+		if j.State == "queued" && !cancelled(j) {
+			reason = q.protectedStorageWaitingReason(j, "")
+		}
+		copy := *j
+		copy.Reason = reason
+		q.storageCapacityAlert(&copy, reason != "")
+	}
 	delay := q.healthStorageDelay
 	if delay <= 0 {
 		delay = DefaultHealthStorageDelay
