@@ -177,6 +177,9 @@ func (q *Queue) diskHeadroomReason(j *Job, m *Machine) string {
 		}
 		return outputRetryHold
 	}
+	if q.automaticStorage() {
+		return ""
+	} // Qualified complete boundaries replace the legacy percentage floor.
 	if m == nil {
 		return ""
 	}
@@ -197,6 +200,9 @@ func (q *Queue) diskHeadroomReason(j *Job, m *Machine) string {
 // floor. Need was admitted at dispatch and staged inputs may already be
 // reflected in free space; an expired reading is not evidence of exhaustion (s029).
 func (q *Queue) startDiskFloorReason(j *Job, m *Machine) string {
+	if q.automaticStorage() {
+		return q.protectedStorageLaunchReason(j)
+	}
 	if m == nil {
 		return ""
 	}

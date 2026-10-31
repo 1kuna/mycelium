@@ -12,6 +12,7 @@ import (
 // enter through touchJob/touchSubmission; insertions use putJob/putSubmission.
 // This is an in-memory index, rebuilt from the same SQLite records on startup.
 type queueRecords struct {
+	migration                 *storageMigrationIndex
 	catalog                   map[string]bool
 	removed                   map[string]*Job
 	references                map[string]bool
@@ -154,9 +155,10 @@ func (q *Queue) indexSubmission(id string, r *submissionRecord) {
 	q.records.keys.set(id, at)
 }
 func (q *Queue) rebuildRecords() {
-	q.records = &queueRecords{catalog: map[string]bool{}, logsDone: map[string]bool{}, removed: map[string]*Job{}, live: map[string]*Job{}, bindings: map[string]string{}, jobCount: len(q.s.Jobs), submissionCount: len(q.s.Submissions)}
+	q.records = &queueRecords{migration: &storageMigrationIndex{holders: map[string]storageMigrationContribution{}, policyRevision: q.policyRevision()}, catalog: map[string]bool{}, logsDone: map[string]bool{}, removed: map[string]*Job{}, live: map[string]*Job{}, bindings: map[string]string{}, jobCount: len(q.s.Jobs), submissionCount: len(q.s.Submissions)}
 	for id, j := range q.s.Jobs {
 		q.indexJob(id, j)
+		q.indexStorageMigration(id, j)
 	}
 	for key := range q.persisted {
 		if key == "state" || strings.HasPrefix(key, "extensions/") || strings.HasPrefix(key, "work_observations/") || strings.HasPrefix(key, "storage_observations/") {
@@ -168,6 +170,9 @@ func (q *Queue) rebuildRecords() {
 			r.Job = j
 		}
 		q.indexSubmission(id, r)
+		if q.s.Jobs[r.JobID] == nil {
+			q.indexStorageMigration(r.JobID, r.Job)
+		}
 		if q.s.Jobs[r.JobID] == nil && r.Job != nil && mutableJob(r.Job) {
 			q.records.removed[r.JobID] = r.Job
 		}
@@ -330,8 +335,11 @@ func (q *Queue) rollbackRecords(old []byte) {
 	q.commitRecords()
 }
 func (q *Queue) commitRecords() {
+	q.records.migration.revision.Add(1)
+	defer q.records.migration.revision.Add(1)
 	for id := range q.records.jobs {
 		q.indexJob(id, q.s.Jobs[id])
+		q.indexStorageMigration(id, q.s.Jobs[id])
 	}
 	for id, old := range q.records.submissions {
 		r := q.s.Submissions[id]
@@ -343,14 +351,34 @@ func (q *Queue) commitRecords() {
 		if old != nil && old.JobID != "" && (r == nil || r.JobID != old.JobID) {
 			delete(q.records.bindings, old.JobID)
 			delete(q.records.removed, old.JobID)
+			if q.s.Jobs[old.JobID] == nil {
+				q.indexStorageMigration(old.JobID, nil)
+			}
 		}
 		q.indexSubmission(id, r)
+		if r != nil && q.s.Jobs[r.JobID] == nil {
+			q.indexStorageMigration(r.JobID, r.Job)
+		}
 		if r != nil && r.JobID != "" {
 			delete(q.records.removed, r.JobID)
 			if q.s.Jobs[r.JobID] == nil && r.Job != nil && mutableJob(r.Job) {
 				q.records.removed[r.JobID] = r.Job
 			}
 		}
+	}
+	// A policy edit changes the tier of every affected retained holder. Reclassify
+	// those facts here, never in status; ordinary mutations visit only touched IDs.
+	if q.records.migration.policyRevision != q.policyRevision() {
+		for id := range q.records.migration.holders {
+			j := q.s.Jobs[id]
+			if j == nil {
+				if r := q.s.Submissions[q.records.bindings[id]]; r != nil {
+					j = r.Job
+				}
+			}
+			q.indexStorageMigration(id, j)
+		}
+		q.records.migration.policyRevision = q.policyRevision()
 	}
 	for hash := range q.records.referenceAdds {
 		q.records.references[hash] = true

@@ -1021,7 +1021,8 @@ No store cap, reservation, delivery contract, retry or placement policy changes.
 The opt-in [backed storage integration](guide-storage-boundaries.md) adds
 `storage_allocation` to protected assignments. It is an exact worker budget,
 not a native qualification claim or a local-spool retrieval promise. Physical
-accounting remains shadow status; existing cap/reserve settings remain active.
+accounting remains shadow status and cap/reserve settings stay active until the
+explicit qualified migration below.
 
 Shared async output admission freezes `output_reservation_bytes` from comparable
 learned logical output demand (the cold prior is used for unknown variants).
@@ -1050,6 +1051,17 @@ protected backing similarly reports byte/inode deficits and retained allocation
 holders, after considering other qualified compatible hosts. Compute completion,
 stop or cancellation never releases an installed storage boundary.
 
-These admission changes keep configured file-store caps, the production reserve,
-legacy disk floor and shared-credential attribution rules. They do not activate
-native enforcement, complete worker-local delivery or retire migration guards.
+Shadow admission keeps configured file-store caps, the production reserve,
+legacy disk floor and shared-credential attribution rules. Worker-local delivery
+and the explicit migration below are separate gates; shadow alone retires no guard.
+
+The explicit [storage migration](operations.md#migrate-storage-guards-to-automatic-admission)
+adds `file_store.admission.migration`: saved effective settings, whether they are
+active, sampled comparisons/disagreements, the consistent streak, the measured
+required period and its source job, complete delivery/collection cycles and
+activation blockers. In qualified automatic mode, `limit_bytes`,
+`production_reserve_bytes` and `floor_bytes` are zero, the physical observation
+reports `mode: active`, and `protected_free_bytes` equals current free admission
+capacity after unwritten commitments. Saved values stay visible and inactive.
+Restart retains mode/custody but requires fresh backing verification; status must
+not interpret an unavailable observation as permission to write.
