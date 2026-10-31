@@ -136,6 +136,13 @@ func VerifyCurvePreservation(before, after Snapshot, pages []JobLedgerPage) (Cur
 			continue
 		}
 		delta := next.Samples - prev.Samples
+		if !exists && next.Samples == 0 && next.Forbidden {
+			if evidence, ok := failureCurveEvidence(before.Now, after, next); ok {
+				receipt.Changes = append(receipt.Changes, CurvePreservationDiff{Key: key, Evidence: []CurvePreservationEvidence{evidence}})
+				continue
+			}
+			return fail("missing exact post-cutover failure-invalidation provenance", key)
+		}
 		if delta <= 0 {
 			return fail("changed measurement without new accepted samples", key)
 		}
@@ -169,4 +176,26 @@ func VerifyCurvePreservation(before, after Snapshot, pages []JobLedgerPage) (Cur
 		receipt.Changes = append(receipt.Changes, diff)
 	}
 	return receipt, nil
+}
+
+// Failure records live in the authenticated full-status attempt history. Unlike
+// accepted samples they have no work_learning ledger sequence (Sequence is zero).
+func failureCurveEvidence(cutover time.Time, after Snapshot, p WorkObservation) (CurvePreservationEvidence, bool) {
+	// A new explicit OOM rejection contains no fitted or accepted measurements.
+	expected := WorkObservation{Key: p.Key, Forbidden: true, RecordedAt: p.RecordedAt,
+		Job: p.Job, Attempt: p.Attempt, Machine: p.Machine, Session: p.Session}
+	if curveMeasurementDigest(p) != curveMeasurementDigest(expected) || p.Job == "" || p.Attempt < 1 || p.Machine == "" || p.Session == "" || !p.RecordedAt.After(cutover) || p.RecordedAt.After(after.Now) {
+		return CurvePreservationEvidence{}, false
+	}
+	for _, j := range after.Jobs {
+		if j == nil || j.ID != p.Job || j.State != "failed" || j.Attempt != p.Attempt || j.Machine != p.Machine || j.Session != p.Session || j.Timing == nil || j.Timing.Key == nil || *j.Timing.Key != p.Key || j.FinishedAt == nil || !j.FinishedAt.After(cutover) || j.FinishedAt.After(after.Now) {
+			continue
+		}
+		for _, a := range j.AttemptHistory {
+			if a.Attempt == p.Attempt && a.Machine == p.Machine && a.Session == p.Session && a.State == "failed" && !a.EndedAt.Before(p.RecordedAt) && !a.EndedAt.After(*j.FinishedAt) && (a.OutOfMemory || a.ExecutionCause != nil && a.ExecutionCause.Class == "resource_limit") {
+				return CurvePreservationEvidence{Job: j.ID, Attempt: a.Attempt, At: a.EndedAt}, true
+			}
+		}
+	}
+	return CurvePreservationEvidence{}, false
 }
