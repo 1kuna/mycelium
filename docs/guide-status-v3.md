@@ -126,6 +126,33 @@ host's volume; no paths or raw filesystem IDs are published.
 The [disk-volume schema](schemas/disk-volume-v1.schema.json) describes each entry.
 Old workers without samples retain startup storage figures.
 
+Queue `file_store.physical` is shadow accounting for #506. `disk_free_bytes`
+comes from the physical probe; `remaining_upload_bytes` counts only unwritten
+tus lengths, and `reserved_output_bytes` counts existing output commitments not
+already covered by those lengths or stored blobs. `uncommitted_bytes` is their
+saturating subtraction from physical free space. Existing payloads, control files
+and allocated backing already reduce physical free space and are not deducted
+again. This upper bound ignores unqualified expansion and is not admission credit.
+
+`control` measures allocated database, WAL and shared-memory bytes, counting
+hardlinks once. Job/environment logs live in SQLite. `upload_metadata_bytes`
+measures existing tus metadata allocation. These are current working-set
+observations, not measured future sync/checkpoint headroom or an enforced floor.
+`sampled_at` uses the queue's injected clock at status capture. Errors are sanitized
+and set the shadow uncommitted value to zero. No filesystem paths are published.
+
+`mode` remains `shadow` and `protected_free_bytes` remains zero: native denial,
+complete writable-path confinement, measured/enforced control expansion and
+independent worker-custody backing remain unimplemented/unqualified. No setting
+activates automatic admission here; the configured cap/reserve and legacy disk
+floor still govern writes until #509's explicit migration.
+
+A typed quota denial is `disk_limit_exceeded`. It fails that exact attempt even
+if a stop races it, without spending an infrastructure retry or classifying the
+denial as memory OOM. Larger execution needs fresh storage admission. An ordinary
+`ENOSPC` remains `storage_full`; stderr and exit codes alone do not prove a
+contained quota denial. This diagnostic support does not qualify native quotas.
+
 Sampling uses at most five bounded observations per heartbeat, outside the queue.
 Local probes use the existing 25 ms budget; the checkpoint/NAS probe uses the
 existing 750 ms heartbeat filesystem budget. Samples are timestamped at operation
