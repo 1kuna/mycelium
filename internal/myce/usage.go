@@ -289,7 +289,7 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
 			delete(q.records.catalog, key)
 		} else {
 			q.persisted[key] = value
-			if key == "state" || strings.HasPrefix(key, "extensions/") || strings.HasPrefix(key, "work_observations/") {
+			if key == "state" || strings.HasPrefix(key, "extensions/") || strings.HasPrefix(key, "work_observations/") || strings.HasPrefix(key, "storage_observations/") {
 				q.records.catalog[key] = true
 			}
 		}

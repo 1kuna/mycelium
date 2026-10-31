@@ -290,12 +290,13 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 					}
 					if err == nil {
 						value, result := *s.state.Job, *s.state.Result
+						metadata := []string{workerStorageMetadata(s), s.state.Identity + ".result.json"}
 						logPath := ""
 						if s.state.Log != "" {
 							logPath = filepath.Join(s.dir, s.state.Log)
 						}
 						finished, e := s.fileFinish.run(attemptCheckpoint(value), func() (Result, error) {
-							finished, err := w.finishFileResult(value, result, s.dir)
+							finished, err := w.finishFileResult(value, result, s.dir, metadata...)
 							if err != nil {
 								return finished, err
 							}

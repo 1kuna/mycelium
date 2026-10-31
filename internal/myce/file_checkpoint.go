@@ -277,7 +277,7 @@ func (w Worker) prepareFileCheckpoint(j Job, stateDir string) (string, error) {
 	}
 	return dest, syncWorkerDir(j.Checkpoint)
 }
-func (w Worker) finishFileResult(j Job, result Result, parent string) (Result, error) {
+func (w Worker) finishFileResult(j Job, result Result, parent string, metadata ...string) (Result, error) {
 	// Docker mount writers must be proven stopped before any checkpoint/output I/O.
 	if j.Spec.Run.Docker && result.ReleasePending {
 		return result, nil
@@ -286,7 +286,7 @@ func (w Worker) finishFileResult(j Job, result Result, parent string) (Result, e
 		return result, err
 	}
 	if !result.Success || result.Interrupted || len(j.Spec.Outputs) == 0 || !j.storedFileResults() {
-		return result, nil
+		return samplePublishedStorage(j, result, parent, metadata...), nil
 	}
 	if j.Spec.OutputDelivery == asyncNAS || dockerFileJob(j.Spec) {
 		root, files, err := captureDeliverySpool(j, parent)
@@ -316,6 +316,7 @@ func (w Worker) finishFileResult(j Job, result Result, parent string) (Result, e
 			}
 		}
 		result.OutputRefs = files
+		result = samplePublishedStorage(j, result, parent, metadata...)
 		return result, nil
 	}
 	output := FileManifest{}
@@ -341,5 +342,6 @@ func (w Worker) finishFileResult(j Job, result Result, parent string) (Result, e
 		output[name] = ref
 	}
 	result.OutputRefs = output
+	result = samplePublishedStorage(j, result, parent, metadata...)
 	return result, nil
 }

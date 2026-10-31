@@ -343,6 +343,7 @@ var statusPage = template.Must(template.New("status").Funcs(template.FuncMap{
     {{end}}</div>{{else}}<div class="empty">No hyphae have joined your mycelium.</div>{{end}}
   </section>
 
+  {{if .StorageObservations}}<section aria-labelledby="storage-evidence-title"><div class="section-head"><h2 id="storage-evidence-title">Storage evidence</h2></div>{{range .StorageObservations}}<div class="card">{{.Summary}}</div>{{end}}</section>{{end}}
   {{if .WorkCurves}}<section aria-labelledby="curves-title"><div class="section-head"><h2 id="curves-title">Work curves</h2></div>{{range .WorkCurves}}<div class="card">{{.SummaryAt $.Now}}</div>{{end}}</section>{{end}}
   <section aria-labelledby="queue-title">
     <div class="section-head"><h2 id="queue-title">Queue</h2><p>Grouped by scheduling priority · policy revision {{.PriorityPolicy.Revision}}</p></div>

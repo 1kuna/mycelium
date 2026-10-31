@@ -40,6 +40,7 @@ type batchRelease struct {
 }
 
 type state struct {
+	StorageObservations  map[string]StorageObservation  `json:"storage_observations,omitempty"`
 	ExternalMemory       map[string]*externalMemoryRing `json:"external_memory,omitempty"`
 	AttemptOutputUploads map[string]time.Time           `json:"attempt_output_uploads,omitempty"`
 	Health               healthAlerts                   `json:"health_alerts,omitempty"`
@@ -842,6 +843,7 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 		}
 	}
 	j.Machine = ""
+	j.StorageEnvelope = nil
 	j.MemoryEnvelope = nil // Re-resolve variants and live sizing for every retry.
 	j.Session = ""
 	j.StopAt = nil
@@ -1637,6 +1639,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 	}
 	r = withStopProvenance(r, priorityStop(j))
 	outcome := attemptOutcome(j, r)
+	q.recordAttemptStorage(j, r)
 	q.recordAttemptMemory(j, r) // Preserve facts before retry clears the envelope.
 	j.ExecutionCause = safeRuntimeCause(r.ExecutionCause)
 	j.CleanupCause = safeRuntimeCause(r.CleanupCause)
@@ -1877,6 +1880,9 @@ func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
 	})
 	// Existing release guards and consumer audits read curves from default
 	// status. Bound job history without changing that independent contract.
+	for _, key := range slices.Sorted(maps.Keys(q.s.StorageObservations)) {
+		out.StorageObservations = append(out.StorageObservations, q.s.StorageObservations[key])
+	}
 	for _, key := range slices.Sorted(maps.Keys(q.s.WorkObservations)) {
 		out.WorkCurves = append(out.WorkCurves, q.s.WorkObservations[key])
 	}
@@ -2416,6 +2422,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	}
 	j.Copies = append(j.Copies, Copy{AllocatedDevices: slices.Clone(j.AllocatedDevices), Machine: m.ID, Session: m.Session, Attempt: j.Attempt, Extension: j.Extension, ReleaseReason: "awaiting_release"})
 	j.Session = m.Session
+	j.StorageEnvelope = q.storageEnvelope(j, m)
 	j.Reason = ""
 	if measured {
 		j.Timing = &WorkTiming{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: m.ID, Session: m.Session, PlacementReason: estimate.reason()}

@@ -148,18 +148,19 @@ type dockerExecution struct {
 	ExitCode             int                     `json:"exit_code"`
 }
 type dockerAttempt struct {
-	memory       *memoryAttempt
-	memoryWorker *Worker
-	command      func(context.Context, ...string) ([]byte, error) // Injectable daemon boundary.
-	persist      func(dockerExecution) error                      // Optional custody store for fault injection.
-	admit        func() error
-	dirty        bool
-	closed       chan struct{}
-	halt         chan struct{}
-	haltOnce     sync.Once
-	mu           sync.Mutex
-	state        dockerExecution
-	dir, binary  string
+	memory          *memoryAttempt
+	storageObserver *storageObserver
+	memoryWorker    *Worker
+	command         func(context.Context, ...string) ([]byte, error) // Injectable daemon boundary.
+	persist         func(dockerExecution) error                      // Optional custody store for fault injection.
+	admit           func() error
+	dirty           bool
+	closed          chan struct{}
+	halt            chan struct{}
+	haltOnce        sync.Once
+	mu              sync.Mutex
+	state           dockerExecution
+	dir, binary     string
 
 	ctx       context.Context
 	inventory func([]string)
@@ -1010,6 +1011,12 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 		return nil, err
 	}
 	identity := ID()
+	observer := w.observeAttemptStorage(j, s.dir, checkpoint, identity, workerStorageMetadata(s))
+	defer func() {
+		if proc == nil {
+			observer.finish()
+		}
+	}()
 	endpoint := w.DockerEndpoint
 	if os.Getenv("DOCKER_CONTEXT") != "" {
 		return nil, errors.New("managed Docker requires --docker-host, not DOCKER_CONTEXT")
@@ -1023,7 +1030,7 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 			return err
 		}
 		return w.authorizeLaunch(launch)
-	}, closed: make(chan struct{}), halt: make(chan struct{}), dir: s.dir, workdir: j.Spec.Run.Workdir, binary: binary, clock: w.Clock, timeout: w.dockerCallTimeout, state: dockerExecution{Identity: identity, Endpoint: endpoint, MemoryLimitBytes: ceilingBytes, MemorySwapBytes: 0}}
+	}, storageObserver: observer, closed: make(chan struct{}), halt: make(chan struct{}), dir: s.dir, workdir: j.Spec.Run.Workdir, binary: binary, clock: w.Clock, timeout: w.dockerCallTimeout, state: dockerExecution{Identity: identity, Endpoint: endpoint, MemoryLimitBytes: ceilingBytes, MemorySwapBytes: 0}}
 	launched := false
 	defer func() {
 		if !launched && d.memory != nil {
@@ -1302,6 +1309,7 @@ func (d *dockerAttempt) run(p *process, j Job, session string, output *os.File, 
 		}
 	}
 	stopEvents()
+	result.StoragePeak = d.storageObserver.finish()
 	err := saveWorkerJSON(d.dir, d.state.Identity+".result.json", result)
 	p.done <- workerFinish{result: result, err: err}
 }
