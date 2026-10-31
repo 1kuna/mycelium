@@ -153,7 +153,7 @@ func (q *Queue) rebuildRecords() {
 		q.indexJob(id, j)
 	}
 	for key := range q.persisted {
-		if key == "state" || strings.HasPrefix(key, "extensions/") || strings.HasPrefix(key, "work_observations/") {
+		if key == "state" || strings.HasPrefix(key, "extensions/") || strings.HasPrefix(key, "work_observations/") || strings.HasPrefix(key, "storage_observations/") {
 			q.records.catalog[key] = true
 		}
 	}

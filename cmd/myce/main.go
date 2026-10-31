@@ -919,6 +919,9 @@ func printStatus(s myce.Snapshot, full bool) {
 	if s.Warning != "" {
 		fmt.Println(s.Warning)
 	}
+	for _, evidence := range s.StorageObservations {
+		fmt.Printf("storage: %s\n", evidence.Summary())
+	}
 	for _, curve := range s.WorkCurves {
 		fmt.Printf("curve: %s\n", curve.SummaryAt(s.Now))
 	}

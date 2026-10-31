@@ -9,6 +9,7 @@ package myce
 // Diagnostics, throughput, OOM lower bounds and idle reference reports are not
 // successful-attempt memory learning.
 type eligibleMemorySample struct {
+	storageKey   *StorageKey
 	gateBuilt    bool
 	job          *Job
 	result       Result
@@ -61,10 +62,11 @@ func (q *Queue) memoryLearningSample(j *Job, r Result) (*eligibleMemorySample, s
 			}
 		}
 	}
-	if workReason != "eligible" && programKey == "" {
+	storageKey := q.storageKey(j, allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices))
+	if workReason != "eligible" && programKey == "" && storageKey == nil {
 		return nil, workReason
 	}
-	return &eligibleMemorySample{gateBuilt: true, job: j, result: r, work: workReason == "eligible", programKey: programKey, programFloor: floor}, "eligible"
+	return &eligibleMemorySample{storageKey: storageKey, gateBuilt: true, job: j, result: r, work: workReason == "eligible", programKey: programKey, programFloor: floor}, "eligible"
 }
 
 // One dispatch for all successful-attempt learners. Throughput can still learn
@@ -74,6 +76,7 @@ func (q *Queue) recordAttemptLearning(j *Job, r Result) {
 	q.recordWorkObservation(j, r, sample)
 	if sample != nil {
 		q.recordProgramNeeds(*sample)
+		q.recordStorageNeeds(*sample)
 	}
 }
 
@@ -143,4 +146,42 @@ func (q *Queue) recordProgramNeeds(sample eligibleMemorySample) {
 	q.s.ProgramNeeds[sample.programKey] = SizeHint{MemoryGB: max(old.MemoryGB, floor.MemoryGB, usage.MemoryGB*1.25), HostMemoryGB: max(old.HostMemoryGB, floor.HostMemoryGB, usage.HostMemoryGB*1.25)}
 	observation := *usage
 	sample.job.MeasuredNeeds = &observation
+}
+
+// Storage is a further narrowing of the same custody/outcome/pressure gate.
+// Keep the runtime marker check here alongside the other accepted-state writers.
+func (q *Queue) recordStorageNeeds(sample eligibleMemorySample) {
+	if !sample.gateBuilt {
+		return
+	}
+	reason := storageLearningReason(&sample, "", sample.job, sample.result)
+	if !storageOutputEligible(reason) {
+		return
+	}
+	j, r := sample.job, sample.result
+	key := *sample.storageKey
+	id := identityHash(key)
+	old := q.s.StorageObservations[id]
+	p := r.StoragePeak
+	e := j.StorageEnvelope
+	old.Key = key
+	old.Output = old.Output.add(manifestDiskBytes(r.OutputRefs), e.OutputBytes)
+	old.OutputRecordedAt = q.clock.Now()
+	old.OutputExecution = r.Execution
+	if reason == "eligible" {
+		old.Staging = old.Staging.add(p.StagedInputBytes, nil)
+		old.Scratch = old.Scratch.add(p.ScratchBytes, e.ScratchBytes)
+		old.Spool = old.Spool.add(p.SpoolBytes, e.SpoolBytes)
+		old.Checkpoint = old.Checkpoint.add(p.CheckpointBytes, e.CheckpointBytes)
+		old.Metadata = old.Metadata.add(p.MetadataBytes, e.MetadataBytes)
+		old.Managed = old.Managed.add(p.ManagedBytes, e.ManagedBytes)
+		old.Files = old.Files.add(p.Files, e.Files)
+		old.AllocationUnit = max(old.AllocationUnit, p.AllocationUnit)
+		old.RecordedAt = q.clock.Now()
+		old.Execution = r.Execution
+	}
+	if q.s.StorageObservations == nil {
+		q.s.StorageObservations = map[string]StorageObservation{}
+	}
+	q.s.StorageObservations[id] = old
 }

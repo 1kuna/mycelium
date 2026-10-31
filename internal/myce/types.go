@@ -364,7 +364,10 @@ type SpecProjection struct {
 }
 
 type Job struct {
-	SpecProjection *SpecProjection `json:"spec_projection,omitempty"`
+	StorageEnvelope        *JobStorageEnvelope   `json:"storage_envelope,omitempty"`
+	StorageAttempts        []AttemptStorageFacts `json:"storage_attempts,omitempty"`
+	StorageAttemptsDropped int                   `json:"storage_attempts_dropped,omitempty"`
+	SpecProjection         *SpecProjection       `json:"spec_projection,omitempty"`
 
 	RecoveredResults    []RecoveredResult    `json:"recovered_results,omitempty"`
 	PlacementIntent     *PlacementIntent     `json:"placement_intent,omitempty"`
@@ -632,6 +635,7 @@ type AttemptDirective struct {
 	PriorityStop *PriorityPreemption `json:"priority_stop,omitempty"`
 }
 type Result struct {
+	StoragePeak          *AttemptStoragePeak `json:"storage_peak,omitempty"`
 	InputsStagedAt       *time.Time          `json:"inputs_staged_at,omitempty"`
 	Diagnostics          *AttemptDiagnostics `json:"diagnostics,omitempty"`
 	PriorityStop         *PriorityPreemption `json:"priority_stop,omitempty"`
@@ -671,6 +675,7 @@ type HoldDetail struct {
 }
 
 type Snapshot struct {
+	StorageObservations []StorageObservation `json:"storage_observations,omitempty"`
 	JobsPage            *StatusJobsPage      `json:"jobs_page,omitempty"`
 	RequestLatencies    []RequestLatency     `json:"request_latencies,omitempty"`
 	Reservations        []Reservation        `json:"reservations,omitempty"`

@@ -922,3 +922,59 @@ status does not reconstruct intent from `production_host` or current eligibility
 These fields are observational and do not change placement or qualification.
 See [the job schema](schemas/job-v1.schema.json) and
 [ledger schema](schemas/job-ledger-v1.schema.json).
+
+## Learned storage evidence
+
+Status JSON includes `storage_observations`, also shown by CLI/HTML status as
+Storage evidence. Each aggregate identifies the program/profile, frozen recipe
+and source, qualified OS/architecture/platform variant, hashed output-affecting
+configuration and input shape. There is no host in the comparison key; evidence
+does not qualify another variant or change placement. Plain commands need a
+frozen source manifest; unversioned external software stays unknown.
+
+Assigned jobs expose `storage_envelope`; job GET also retains `storage_attempts`
+(first and latest 31, with `storage_attempts_dropped`). These facts carry exact
+execution/machine/session, allocated-block peaks, the assignment's prediction,
+and `learning_reason`. The existing memory-learning gate checks success,
+exact custody, complete pressure coverage and clean memory before storage's
+additional identity/verified-manifest checks. Verified output can teach its logical
+size when scratch coverage is incomplete; `output_learned` records that subset.
+Accepted scratch additionally requires complete managed-root sampling. Rejected facts
+cannot overwrite clean ranges. The largest rejected managed-byte sample and its
+exact execution/reason/time remain separate `lower_bound` evidence for fresh
+admission; they do not grant an automatic larger retry.
+
+Output is the **logical sum of verified manifest entries**, including repeated
+content hashes. It is independent of the file store's physical deduplicated
+increment. Scratch is allocated mutable workspace/output above the measured
+staged-input baseline; spool, checkpoint/stop writes, metadata and file/inode
+counts (including staged-input inodes) are retained separately. `managed_bytes`
+comes directly from all allocated blocks in the attempt's workspace, checkpoint,
+private publication root and exact-attempt metadata, rather than summing selected
+categories or peaks observed at different times. Staging is charged additionally in `predicted_need`,
+using known input bytes and the measured staging range. Hardlinks/aliased roots
+count once within a scan; symlinks are not followed. Publication sampling includes
+the simultaneously retained work files, immutable spool and manifest, original
+checkpoint plus its immutable publication copy, and exact-attempt custody metadata
+(including temporary replacements). Checkpoint copies live under a private
+per-attempt publication root outside payload write grants. Live and final
+publication take a synchronous root sample before deleting staging, retaining
+byte/inode peaks even on upload failure. Final completion waits for any outstanding
+live checkpoint publication to finish sampling and cleanup.
+
+Each dimension predicts its largest accepted complete peak plus
+`max(observed range, positive prediction error)`, rounding allocated bytes to the
+observed filesystem allocation unit. `evidence` exposes samples/minimum/peak/error;
+`margin` and `multiplier` explain the managed-byte prediction. A single complete
+4-unit sample with no error predicts exactly 4 units. Evidence expires for reuse
+after 30 days according to the queue's injected clock. `spec.disk.output_bytes`
+is only a cold output prior: scratch, total need and file counts remain unknown
+until measured. Output hints never seed scratch or silently become hard limits.
+
+This slice is observation only: `hard_limit` is absent/unknown and `enforcement`
+says `unenforced; observation only`. Unknown shapes require bounded exploration
+and fresh storage admission from the subsequent accounting/admission slices.
+Native metadata sampling can miss writes deleted between scans. External writable
+work/checkpoint roots and Docker overlay coverage remain incomplete, with no
+accepted scratch estimate; native denial/confinement qualification is separate.
+No store cap, reservation, delivery contract, retry or placement policy changes.

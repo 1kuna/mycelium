@@ -135,7 +135,7 @@ func (a API) checkpointHandler(w http.ResponseWriter, r *http.Request) {
 // captureCheckpoint copies a complete atomic save to immutable private staging.
 // Generations and content are checked again after the copy to reject concurrent
 // replacements. Writers use immutable payloads plus one atomic JSON manifest.
-func captureCheckpoint(root, parent string) (string, FileCheckpoint, error) {
+func captureCheckpoint(root, parent string, observers ...*storageObserver) (string, FileCheckpoint, error) {
 	before, err := checkpointProgress(root)
 	if err != nil {
 		return "", FileCheckpoint{}, err
@@ -147,6 +147,16 @@ func captureCheckpoint(root, parent string) (string, FileCheckpoint, error) {
 	if err != nil {
 		return "", FileCheckpoint{}, err
 	}
+	defer func() {
+		// Capture the simultaneous original and immutable copy before cleanup,
+		// including partially copied generations when capture fails.
+		for _, observer := range observers {
+			observer.sample()
+		}
+		if err != nil {
+			_ = os.RemoveAll(stage)
+		}
+	}()
 	manifest := FileManifest{}
 	err = filepath.WalkDir(root, func(p string, d os.DirEntry, e error) error {
 		if e != nil {
@@ -207,7 +217,6 @@ func captureCheckpoint(root, parent string) (string, FileCheckpoint, error) {
 		}
 	}
 	if err != nil {
-		_ = os.RemoveAll(stage)
 		return "", FileCheckpoint{}, err
 	}
 	return stage, FileCheckpoint{before, manifest}, nil
@@ -216,14 +225,23 @@ func (w Worker) publishFileCheckpoint(j Job, parent string) (int64, error) {
 	if !j.FileTransport || !j.Spec.Resumable {
 		return 0, nil
 	}
-	stage, save, err := captureCheckpoint(attemptCheckpoint(j), parent)
+	// Publication is attempt-owned allocation, outside payload write grants.
+	// Scan the entire root, including temporary copies, rather than named files.
+	stagingRoot := attemptPublicationRoot(j, parent)
+	if err := os.MkdirAll(stagingRoot, 0700); err != nil {
+		return 0, err
+	}
+	stage, save, err := captureCheckpoint(attemptCheckpoint(j), stagingRoot, w.storageObserver)
 	if err != nil {
 		return 0, err
 	}
 	if stage == "" {
 		return 0, nil
 	}
-	defer os.RemoveAll(stage)
+	defer func() {
+		w.storageObserver.sample()
+		_ = os.RemoveAll(stage)
+	}()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	ctx = withFileStoreAttempt(ctx, j)
@@ -277,10 +295,19 @@ func (w Worker) prepareFileCheckpoint(j Job, stateDir string) (string, error) {
 	}
 	return dest, syncWorkerDir(j.Checkpoint)
 }
-func (w Worker) finishFileResult(j Job, result Result, parent string) (Result, error) {
+func (w Worker) finishFileResult(j Job, result Result, parent string, metadata ...string) (finished Result, err error) {
 	// Docker mount writers must be proven stopped before any checkpoint/output I/O.
 	if j.Spec.Run.Docker && result.ReleasePending {
 		return result, nil
+	}
+	if result.StoragePeak != nil {
+		if w.storageObserver == nil {
+			w.storageObserver = publicationStorageObserver(j, result, parent, metadata...)
+		}
+		defer func() {
+			w.storageObserver.sample()
+			finished.StoragePeak = w.storageObserver.snapshot()
+		}()
 	}
 	if _, err := w.publishFileCheckpoint(j, parent); err != nil && !stale(err) {
 		return result, err
@@ -289,7 +316,7 @@ func (w Worker) finishFileResult(j Job, result Result, parent string) (Result, e
 		return result, nil
 	}
 	if j.Spec.OutputDelivery == asyncNAS || dockerFileJob(j.Spec) {
-		root, files, err := captureDeliverySpool(j, parent)
+		root, files, err := captureDeliverySpool(j, parent, w.storageObserver)
 		if errors.Is(err, errRequiredDeliveryOutput) || dockerFileJob(j.Spec) && errors.Is(err, os.ErrPermission) {
 			result.Success, result.Error = false, errRequiredDeliveryOutput.Error()
 			return result, nil

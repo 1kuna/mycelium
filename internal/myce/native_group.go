@@ -396,6 +396,7 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 			}
 		}
 		r = classifyAttemptOutcome(r, attemptCause{PriorityStop: priorityStop, memberOutcome: facts, OutOfMemory: r.OutOfMemory || oom != nil && strings.Contains(oom.Error(), "exceeded its ")})
+		r.StoragePeak = w.storageObserver.finish()
 		if r.Success {
 			if e := w.publishExtensionFiles(j, filepath.Join(g.dir, "job-files", j.ID, strconv.Itoa(j.Attempt))); e != nil {
 				r.Success = false

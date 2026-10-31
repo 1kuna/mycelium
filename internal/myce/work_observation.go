@@ -358,8 +358,11 @@ func (q *Queue) recordWorkObservation(j *Job, r Result, sample *eligibleMemorySa
 // Shared by the CLI and HTML status. A missing old field is explicitly unknown.
 func JobTiming(j *Job) string {
 	envelope := ""
+	if j.StorageEnvelope != nil {
+		envelope += "; " + j.StorageEnvelope.Summary()
+	}
 	if j.MemoryEnvelope != nil && j.Spec.Needs.Memory == "auto" {
-		envelope = fmt.Sprintf("; memory %.2f GiB (%s; %s)", j.MemoryEnvelope.HostGB, j.MemoryEnvelope.Source, j.MemoryEnvelope.Enforcement)
+		envelope += fmt.Sprintf("; memory %.2f GiB (%s; %s)", j.MemoryEnvelope.HostGB, j.MemoryEnvelope.Source, j.MemoryEnvelope.Enforcement)
 	}
 	t := j.Timing
 	if t == nil {

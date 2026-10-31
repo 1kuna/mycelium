@@ -19,7 +19,7 @@ func deliverySpoolPath(j Job, workerRoot string) string {
 // Retained until exact queue acceptance, including upload/capacity failures.
 // Manifest publication follows file sync and directory sync; restart always
 // verifies the saved snapshot rather than re-reading potentially changed work.
-func captureDeliverySpool(j Job, workerRoot string) (string, FileManifest, error) {
+func captureDeliverySpool(j Job, workerRoot string, observers ...*storageObserver) (string, FileManifest, error) {
 	if !filepath.IsAbs(j.Spec.Run.Workdir) || !filepath.IsAbs(workerRoot) {
 		return "", nil, errors.New("result spool requires a prepared absolute workdir")
 	}
@@ -92,7 +92,12 @@ func captureDeliverySpool(j Job, workerRoot string) (string, FileManifest, error
 	if err != nil {
 		return "", nil, err
 	}
-	defer os.RemoveAll(stage)
+	defer func() {
+		for _, observer := range observers {
+			observer.sample()
+		}
+		_ = os.RemoveAll(stage)
+	}()
 	files := FileManifest{}
 	for name, src := range sources {
 		path := filepath.Join(stage, "data", name)

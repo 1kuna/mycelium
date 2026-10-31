@@ -278,6 +278,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				err = w.replay(ctx, s)
 			}
 			if err == nil && a.job.storedFileResults() {
+				w.storageObserver = s.storageObserver
 				if s.state.Result != nil {
 					if !s.state.Result.ReleasePending {
 						released := *s.state.Result
@@ -288,14 +289,19 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 							err = nil
 						}
 					}
+					if err == nil && s.fileProgress.inFlight() {
+						err = errCheckpointIOPending
+						s.fileError = "checkpoint publication pending; local results retained"
+					}
 					if err == nil {
 						value, result := *s.state.Job, *s.state.Result
+						metadata := []string{workerStorageMetadata(s), s.state.Identity + ".result.json"}
 						logPath := ""
 						if s.state.Log != "" {
 							logPath = filepath.Join(s.dir, s.state.Log)
 						}
 						finished, e := s.fileFinish.run(attemptCheckpoint(value), func() (Result, error) {
-							finished, err := w.finishFileResult(value, result, s.dir)
+							finished, err := w.finishFileResult(value, result, s.dir, metadata...)
 							if err != nil {
 								return finished, err
 							}

@@ -224,6 +224,96 @@
       ],
       "type": "object"
     },
+    "AttemptStorageFacts": {
+      "properties": {
+        "envelope": {
+          "$ref": "#/$defs/JobStorageEnvelope"
+        },
+        "execution": {
+          "$ref": "#/$defs/Execution"
+        },
+        "learning_reason": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "output_learned": {
+          "type": "boolean"
+        },
+        "peak": {
+          "$ref": "#/$defs/AttemptStoragePeak"
+        },
+        "session": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "execution",
+        "machine",
+        "session",
+        "learning_reason"
+      ],
+      "type": "object"
+    },
+    "AttemptStoragePeak": {
+      "properties": {
+        "allocation_unit": {
+          "type": "integer"
+        },
+        "checkpoint_bytes": {
+          "type": "integer"
+        },
+        "complete": {
+          "type": "boolean"
+        },
+        "constrained": {
+          "type": "boolean"
+        },
+        "files": {
+          "type": "integer"
+        },
+        "managed_bytes": {
+          "type": "integer"
+        },
+        "metadata_bytes": {
+          "type": "integer"
+        },
+        "samples": {
+          "type": "integer"
+        },
+        "scratch_bytes": {
+          "type": "integer"
+        },
+        "source": {
+          "type": "string"
+        },
+        "spool_bytes": {
+          "type": "integer"
+        },
+        "staged_input_bytes": {
+          "type": "integer"
+        },
+        "staged_input_files": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "scratch_bytes",
+        "spool_bytes",
+        "checkpoint_bytes",
+        "metadata_bytes",
+        "managed_bytes",
+        "files",
+        "staged_input_files",
+        "staged_input_bytes",
+        "allocation_unit",
+        "samples",
+        "complete",
+        "source"
+      ],
+      "type": "object"
+    },
     "BatchWork": {
       "properties": {
         "concurrency": {
@@ -1788,6 +1878,24 @@
           "type": "string",
           "x-contract": "diagnostic"
         },
+        "storage_attempts": {
+          "items": {
+            "$ref": "#/$defs/AttemptStorageFacts"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
+        "storage_attempts_dropped": {
+          "type": "integer",
+          "x-contract": "diagnostic"
+        },
+        "storage_envelope": {
+          "$ref": "#/$defs/JobStorageEnvelope",
+          "x-contract": "diagnostic"
+        },
         "submission_reused": {
           "type": "boolean",
           "x-contract": "diagnostic"
@@ -1896,6 +2004,77 @@
       "required": [
         "samples",
         "limitation"
+      ],
+      "type": "object"
+    },
+    "JobStorageEnvelope": {
+      "properties": {
+        "checkpoint_bytes": {
+          "type": "integer"
+        },
+        "enforcement": {
+          "type": "string"
+        },
+        "evidence": {
+          "$ref": "#/$defs/StorageObservation"
+        },
+        "exploration": {
+          "type": "string"
+        },
+        "files": {
+          "type": "integer"
+        },
+        "hard_limit": {
+          "type": "integer"
+        },
+        "input_bytes": {
+          "type": "integer"
+        },
+        "key": {
+          "$ref": "#/$defs/StorageKey"
+        },
+        "managed_bytes": {
+          "type": "integer"
+        },
+        "margin": {
+          "type": "integer"
+        },
+        "metadata_bytes": {
+          "type": "integer"
+        },
+        "multiplier": {
+          "type": "number"
+        },
+        "output_bytes": {
+          "type": "integer"
+        },
+        "positive_error": {
+          "type": "integer"
+        },
+        "predicted_need": {
+          "type": "integer"
+        },
+        "samples": {
+          "type": "integer"
+        },
+        "scratch_bytes": {
+          "type": "integer"
+        },
+        "source": {
+          "type": "string"
+        },
+        "spool_bytes": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "source",
+        "samples",
+        "input_bytes",
+        "margin",
+        "positive_error",
+        "multiplier",
+        "enforcement"
       ],
       "type": "object"
     },
@@ -3144,6 +3323,146 @@
       "required": [
         "projected",
         "omitted"
+      ],
+      "type": "object"
+    },
+    "StorageKey": {
+      "properties": {
+        "configuration": {
+          "type": "string"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "input_shape": {
+          "type": "string"
+        },
+        "program": {
+          "type": "string"
+        },
+        "recipe": {
+          "type": "string"
+        },
+        "shape": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        },
+        "variant": {
+          "$ref": "#/$defs/ExecutionTarget"
+        }
+      },
+      "required": [
+        "program",
+        "recipe",
+        "source",
+        "variant",
+        "configuration",
+        "environment",
+        "shape",
+        "input_shape"
+      ],
+      "type": "object"
+    },
+    "StorageObservation": {
+      "properties": {
+        "allocation_unit": {
+          "type": "integer"
+        },
+        "checkpoint": {
+          "$ref": "#/$defs/StorageRange"
+        },
+        "execution": {
+          "$ref": "#/$defs/Execution"
+        },
+        "files": {
+          "$ref": "#/$defs/StorageRange"
+        },
+        "key": {
+          "$ref": "#/$defs/StorageKey"
+        },
+        "lower_bound": {
+          "$ref": "#/$defs/AttemptStoragePeak"
+        },
+        "lower_bound_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "lower_bound_execution": {
+          "$ref": "#/$defs/Execution"
+        },
+        "lower_bound_reason": {
+          "type": "string"
+        },
+        "managed": {
+          "$ref": "#/$defs/StorageRange"
+        },
+        "metadata": {
+          "$ref": "#/$defs/StorageRange"
+        },
+        "output": {
+          "$ref": "#/$defs/StorageRange"
+        },
+        "output_execution": {
+          "$ref": "#/$defs/Execution"
+        },
+        "output_recorded_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "recorded_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "scratch": {
+          "$ref": "#/$defs/StorageRange"
+        },
+        "spool": {
+          "$ref": "#/$defs/StorageRange"
+        },
+        "staging": {
+          "$ref": "#/$defs/StorageRange"
+        }
+      },
+      "required": [
+        "key",
+        "staging",
+        "output",
+        "scratch",
+        "spool",
+        "checkpoint",
+        "metadata",
+        "managed",
+        "files",
+        "allocation_unit",
+        "recorded_at",
+        "output_execution",
+        "output_recorded_at",
+        "execution"
+      ],
+      "type": "object"
+    },
+    "StorageRange": {
+      "properties": {
+        "min": {
+          "type": "integer"
+        },
+        "peak": {
+          "type": "integer"
+        },
+        "positive_error": {
+          "type": "integer"
+        },
+        "samples": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "samples",
+        "min",
+        "peak",
+        "positive_error"
       ],
       "type": "object"
     },

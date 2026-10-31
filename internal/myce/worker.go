@@ -26,6 +26,7 @@ var workerCheckpointPrepare = prepareCheckpoint
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
+	storageObserver      *storageObserver
 	hostMemorySamples    map[attemptKey]hostMemorySample
 	DiskProbe            func(string) (DiskReading, error)
 	diskSampler          *workerDiskSampler
@@ -650,6 +651,13 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		return nil, err
 	}
 	env["MYCE_SCRATCH_DIR"] = scratch
+	w.storageObserver = w.observeAttemptStorage(j, s.dir, checkpoint, identity, workerStorageMetadata(s))
+	s.storageObserver = w.storageObserver
+	defer func() {
+		if !started {
+			w.storageObserver.finish()
+		}
+	}()
 	if len(j.Spec.Run.Sidecars) > 0 || j.Spec.Run.MemoryGB > 0 {
 		p, e := w.startNativeGroup(s, j, identity, memoryAttempt, env, environmentPath, extensionRelease, release)
 		if e == nil {
@@ -924,6 +932,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 				result.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("outputs", e))
 			}
 		}
+		result.StoragePeak = w.storageObserver.finish()
 		// Persist independently of the reconnect loop, which may be in a network
 		// request when the command finishes. Restart replays this exact session.
 		saveErr := errors.Join(observationErr, saveWorkerJSON(s.dir, identity+".result.json", result))
