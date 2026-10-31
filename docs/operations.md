@@ -1400,6 +1400,17 @@ are injectable for laptop verification.
 
 ## Rolling fleet upgrades
 
+> **Before deploying bounded status (#439), migrate preservation checks.**
+> Default `GET /api/status` includes active/cleanup-pending jobs and only the
+> newest 100 other terminal jobs. Before/after preservation, protected-job,
+> history and curve-provenance checks must request `/api/status?detail=full`
+> (Python: `client.status(full=True)`, CLI: `myce status --history --json`) or
+> collect every `jobs=all` page through `jobs_page.next_before`. Existing complete
+> `/api/inspection` collectors remain supported. Migrate private release-script
+> copies before queue cutover; a passing pre-upgrade read does not prove the
+> post-upgrade collector is complete. Curves remain included by default, but
+> missing historical jobs must never count as preservation or confirmed release.
+
 After publishing a signed release and approving it with `myce release approve`,
 run `myce fleet upgrade` (or `myce fleet upgrade --release vX.Y.Z`). The command
 uses the same saved installed authority as `myce status` and returns a durable
@@ -1487,3 +1498,73 @@ local backup, and compact the stopped local database using SQLite `VACUUM`.
 Never open a NAS copy with SQLite or compact the running queue. Check free space
 first: compaction needs room for a second database. Preserve the verified backup
 until the compacted database passes `PRAGMA integrity_check` and reopens normally.
+
+### Verify the loaded environment catalog
+
+`myce env list` returns a JSON array; `myce env get NAME` returns one entry
+(or `environment_unknown` when absent). Both use installed client authority;
+`--config`, `--joining-file`, `--queue` and `--token` precede NAME when supplied.
+The authenticated GET endpoints are `/api/environments` and
+`/api/environments/{name}`. They do not prepare environments or submit work.
+
+Each entry has its name and sorted platform recipes with effective backend
+(`uv`, `pixi`, or `binary`), immutable recipe `key`, and `input_digests`: SHA-256
+of loaded lock/manifest bytes under canonical labels. Compare these with the
+expected inputs to verify registration, even after the original files change.
+Raw recipes, commands, file contents and local paths are omitted. Binary recipes
+report the digest of the `binary.sha256` identity input. See the
+[entry schema](schemas/environment-v1.schema.json).
+
+### Preserve learned curves across a release
+
+Use the versioned `scripts/verify-curve-preservation.sh` guard (or
+`myce release verify-curves`) instead of private release-script equality checks:
+
+```sh
+MYCE_BIN=/path/to/myce scripts/verify-curve-preservation.sh \
+  --before before-status.json --after after-status.json \
+  --ledgers learning-ledger-pages.json > curve-diff.json 2> curve-guard.stderr
+rc=$? # retain this status, stderr and the diff receipt, including on failure
+```
+
+Capture authenticated **`/api/status?detail=full`** snapshots before and after
+cutover, using the canonical helper's read-only capture mode:
+
+```sh
+MYCE_BIN=/path/to/myce scripts/verify-curve-preservation.sh capture \
+  --config CONFIG > before-status.json 2> before-capture.stderr
+# Perform the separately authorized cutover, then capture the after snapshot:
+MYCE_BIN=/path/to/myce scripts/verify-curve-preservation.sh capture \
+  --config CONFIG > after-status.json 2> after-capture.stderr
+# Require exit 0 for each capture before verifying.
+```
+
+The default `/api/status` view is bounded: it can omit older terminal jobs and
+work curves. Never use that view to collect either side of preservation proof.
+Capture requests full detail for **both jobs and curves**, and preserves the
+server completeness metadata. Capture and verification reject bounded or
+incomplete job pages and missing jobs/curves fields; a queue predating page
+metadata can still return its original full snapshot. Collect accepted-learning
+ledger pages from the complete job inventory, not the default recent-job list.
+The **before response's server `now`** is the learning boundary, never the local
+save time or installer launch. The ledger file is a JSON array of pages from
+`GET /api/jobs/{id}/ledger`; collect pages covering the interval for jobs that
+could have learned, including pagination. Use the after snapshot's `now` as the
+upper boundary; later ledger entries are ignored.
+
+The guard preserves every key, sample count and throughput/memory evidence
+clock. It ignores only derived `stale_reason` labels. Changed values and new
+keys require a complete chain of accepted sample records, with exact job,
+attempt, key and queue-time provenance. Each record binds before/after digests
+of the actual learning mutation in the same SQLite transaction as completion;
+the guard shares the runtime's measurement digest and does not reimplement
+EWMA or memory merges. Memory-only samples may advance their sample count and
+memory clock while preserving the old throughput and its provenance.
+
+Removed keys, resets, backward clocks, changed measurements without new
+samples, missing/ambiguous provenance and unexplained final values fail closed.
+Older jobs have no such learning ledger proof: an unchanged curve still passes,
+but an unproven change stops the release for investigation. Reference sweep or
+OOM invalidation changes are not accepted job samples and also stop this guard.
+Ledger records follow existing job history retention; collect evidence before
+it expires. No release, install or fleet operation is performed by the guard.

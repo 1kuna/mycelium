@@ -37,6 +37,9 @@ func versionCommand(args []string) error {
 	return json.NewEncoder(os.Stdout).Encode(info)
 }
 func releaseCommand(args []string) error {
+	if len(args) > 0 && args[0] == "verify-curves" {
+		return curvePreservationCommand(args[1:], os.Stdout)
+	}
 	if len(args) > 0 && args[0] == "approve" {
 		return releaseApproveCommand(args[1:])
 	}

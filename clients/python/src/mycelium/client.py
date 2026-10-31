@@ -16,7 +16,7 @@ from pathlib import Path
 import time
 from typing import Any, Iterator, Mapping
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 from urllib.request import Request, urlopen
 
 TERMINAL = {"succeeded", "failed", "cancelled"}
@@ -423,13 +423,31 @@ class Client:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
 
-    def status(self) -> dict[str, Any]:
-        """Return the queue snapshot, including waiting reasons and machines."""
-        return self._call("GET", "/api/status")
+    def status(self, *, full: bool = False, jobs: str | None = None,
+               project: str | None = None, since: str | None = None,
+               limit: int | None = None, before: str | None = None) -> dict[str, Any]:
+        """Return active jobs plus 100 recent terminal jobs and fleet health.
 
-    def list(self) -> list[dict[str, Any]]:
-        """Return all jobs, including terminal jobs."""
-        return self.status().get("jobs") or []
+        Work curves remain included. full=True restores all jobs. jobs="all" pages history;
+        jobs="active" includes nonterminal work and pending cleanup. Optional
+        project/since (queued-at RFC3339) filters apply only to jobs.
+        """
+        query = {key: value for key, value in {
+            "detail": "full" if full else None, "jobs": jobs, "project": project,
+            "since": since, "limit": limit, "before": before,
+        }.items() if value is not None}
+        return self._call("GET", "/api/status" + ("?" + urlencode(query) if query else ""))
+
+    def list(self, *, project: str | None = None) -> list[dict[str, Any]]:
+        """Return all jobs, including terminal history, using bounded pages."""
+        result = []
+        before = None
+        while True:
+            snapshot = self.status(jobs="all", project=project, before=before)
+            result.extend(snapshot.get("jobs") or [])
+            before = (snapshot.get("jobs_page") or {}).get("next_before")
+            if not before:
+                return result
 
     def _read_job(self, job_id: str, *, timeout: float | None = None) -> dict[str, Any]:
         # A 2xx body cut short in transport is retryable; a complete body that

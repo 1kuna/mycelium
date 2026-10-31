@@ -316,6 +316,7 @@ func (q *Queue) recordWorkObservation(j *Job, r Result) {
 	}
 	key := identityHash(t.Key)
 	old, exists := q.s.WorkObservations[key]
+	original := old
 	if old.MemoryPeak.constrained() && !old.MemoryPeak.Constrained {
 		peak := *old.MemoryPeak
 		peak.Constrained = true
@@ -385,6 +386,7 @@ func (q *Queue) recordWorkObservation(j *Job, r Result) {
 		point.DeviceMemoryGB = max(point.DeviceMemoryGB, r.Usage.MemoryGB)
 	}
 	q.s.WorkObservations[key] = point
+	q.recordCurveLearning(j, original, exists, point)
 }
 
 // Shared by the CLI and HTML status. A missing old field is explicitly unknown.

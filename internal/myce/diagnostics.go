@@ -13,6 +13,7 @@ import (
 // Stable rejection codes and default messages. Submission validation returns
 // the specific field rule; other wrapped causes stay local.
 var rejectionMessages = map[string]string{
+	"status_query_invalid":                  "status requires jobs=recent|active|all, limit=1..1000, an RFC3339 since, an existing before cursor and detail=full when requested",
 	"recovery_invalid":                      "recovery requires valid metadata, declared outputs and matching execution identity",
 	"recovery_stale":                        "recovery requires the exact retained failed execution",
 	"recovery_conflict":                     "recovery key already identifies different evidence; use a new key to append another record",
@@ -68,6 +69,7 @@ var rejectionMessages = map[string]string{
 	"extension_version_conflict":            "extension version is frozen; bump the version",
 	"extension_invalid":                     "extension folder or schema is invalid; run extension check --static",
 	"extension_unknown":                     "extension digest is not registered",
+	"environment_unknown":                   "unknown environment",
 	"job_id_ambiguous":                      "job ID prefix is ambiguous; use a longer ID",
 	"policy_revision_conflict":              "policy revision changed",
 	"policy_invalid":                        "policy or expected_revision is invalid; export the current policy before editing",

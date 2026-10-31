@@ -28,7 +28,11 @@ func deviceReasonDiagnostic(reason string) string {
 }
 
 func (q *Queue) publicSnapshot(contexts ...context.Context) (Snapshot, error) {
-	s, err := q.snapshot(true, contexts...)
+	return q.publicStatusSnapshot(nil, contexts...)
+}
+
+func (q *Queue) publicStatusSnapshot(options *statusOptions, contexts ...context.Context) (Snapshot, error) {
+	s, err := q.statusSnapshotOptions(options, contexts...)
 	for i := range s.LoadedModels {
 		s.LoadedModels[i].EnvironmentRecipe = nil
 		s.LoadedModels[i].Error = ceilingDiagnostic(s.LoadedModels[i].Error, "model load or unload failed")
@@ -256,7 +260,7 @@ func statusJobInputs(job *Job) Job {
 		j.Ledger = &JobLedgerInfo{}
 	}
 	j.Isolation = jobNativeIsolationStatus(job)
-	spec := Spec{AllowedMachines: j.Spec.AllowedMachines, Name: j.Spec.Name, Project: j.Spec.Project, Priority: j.Spec.Priority, Class: j.Spec.Class, Kind: j.Spec.Kind, Resumable: j.Spec.Resumable, Deadline: j.Spec.Deadline, StartBy: j.Spec.StartBy, StartWindow: j.Spec.StartWindow}
+	spec := Spec{Logs: j.Spec.Logs, AllowedMachines: j.Spec.AllowedMachines, Name: j.Spec.Name, Project: j.Spec.Project, Priority: j.Spec.Priority, Class: j.Spec.Class, Kind: j.Spec.Kind, Resumable: j.Spec.Resumable, Deadline: j.Spec.Deadline, StartBy: j.Spec.StartBy, StartWindow: j.Spec.StartWindow}
 	if j.Spec.Program != nil {
 		spec.Program = &Program{Type: j.Spec.Program.Type}
 	}

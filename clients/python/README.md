@@ -246,3 +246,11 @@ older history may be incomplete. Entries enumerate attempts, sessions, native
 custody generations and exact releases, without diagnostic row caps. See the
 [ledger contract](../../docs/job-reference.md#retained-per-job-ledger) for fields,
 retention and explicit HTTP 410 expiration.
+
+Status defaults to active/cleanup-pending work and the newest 100 terminal jobs.
+Work curves remain included in default status. `client.status(full=True)` restores all history.
+`client.status(jobs="active", project="example")` filters work;
+`jobs="all"`, `limit=100`, and `before=reply["jobs_page"]["next_before"]`
+page history. `since` accepts an inclusive submission timestamp in RFC3339.
+`client.list(project="example")` collects all pages automatically. Older queues
+ignore these parameters and keep returning their legacy full snapshot.

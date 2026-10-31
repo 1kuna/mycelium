@@ -95,10 +95,12 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
-	deliveryRoot    string
-	deliveryMu      sync.Mutex
-	deliveryActive  *deliveryOperation                          // q.mu; one outstanding NAS publication per root.
-	deliveryPublish func(Job, *FileStore, string, func()) error // Test seam; set before use.
+	// Only detached observation views set this page selection.
+	observationSelection *statusSelection
+	deliveryRoot         string
+	deliveryMu           sync.Mutex
+	deliveryActive       *deliveryOperation                          // q.mu; one outstanding NAS publication per root.
+	deliveryPublish      func(Job, *FileStore, string, func()) error // Test seam; set before use.
 	// Ephemeral exact-attempt samples: restart cannot renew a cached credit.
 	hostMemorySamples map[string]map[attemptKey]hostMemorySample
 
@@ -1865,8 +1867,14 @@ func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
 		}
 		return a.Kind < b.Kind
 	})
+	// Existing release guards and consumer audits read curves from default
+	// status. Bound job history without changing that independent contract.
 	for _, key := range slices.Sorted(maps.Keys(q.s.WorkObservations)) {
 		out.WorkCurves = append(out.WorkCurves, q.s.WorkObservations[key])
+	}
+	if q.observationSelection != nil {
+		page := q.observationSelection.page
+		out.JobsPage = &page
 	}
 	out.ComponentExclusions = q.componentExclusions()
 	out.Reservations = q.reservations()
@@ -1874,9 +1882,15 @@ func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
 	out.Now = q.clock.Now()
 	order, reasons := q.queueProjection()
 	for _, stored := range q.s.Jobs {
+		if q.observationSelection != nil && !q.observationSelection.ids[stored.ID] {
+			continue
+		}
 		out.Jobs = append(out.Jobs, q.projectJob(stored, order, reasons, forStatus))
 	}
 	for _, c := range q.calls {
+		if q.observationSelection != nil && !q.observationSelection.ids[c.ID] {
+			continue
+		}
 		out.Jobs = append(out.Jobs, q.projectCall(c, order, reasons))
 	}
 	for _, m := range q.s.Machines {
