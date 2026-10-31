@@ -23,6 +23,9 @@
     },
     "JobLedgerEntry": {
       "properties": {
+        "placement": {
+          "$ref": "#/$defs/PlacementDecision"
+        },
         "work_learning": {
           "$ref": "#/$defs/WorkLearningChange"
         },
@@ -76,9 +79,6 @@
         "custody_end": {
           "type": "string",
           "format": "date-time"
-        },
-        "placement": {
-          "$ref": "#/$defs/PlacementDecision"
         }
       },
       "type": "object",
@@ -189,44 +189,6 @@
         "batch_size"
       ]
     },
-    "WorkLearningChange": {
-      "properties": {
-        "key": {
-          "$ref": "#/$defs/ObservationKey"
-        },
-        "before": {
-          "type": "string"
-        },
-        "after": {
-          "type": "string"
-        }
-      },
-      "type": "object",
-      "required": [
-        "key",
-        "before",
-        "after"
-      ]
-    },
-    "WorkReference": {
-      "properties": {
-        "input_shape": {
-          "type": "string"
-        },
-        "unit": {
-          "type": "string"
-        },
-        "units": {
-          "type": "number"
-        }
-      },
-      "type": "object",
-      "required": [
-        "input_shape",
-        "unit",
-        "units"
-      ]
-    },
     "PlacementDecision": {
       "properties": {
         "origin": {
@@ -274,6 +236,44 @@
         "device_choice",
         "reason",
         "limited_by"
+      ]
+    },
+    "WorkLearningChange": {
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/ObservationKey"
+        },
+        "before": {
+          "type": "string"
+        },
+        "after": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "key",
+        "before",
+        "after"
+      ]
+    },
+    "WorkReference": {
+      "properties": {
+        "input_shape": {
+          "type": "string"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "units": {
+          "type": "number"
+        }
+      },
+      "type": "object",
+      "required": [
+        "input_shape",
+        "unit",
+        "units"
       ]
     }
   }

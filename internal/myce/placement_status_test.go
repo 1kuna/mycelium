@@ -38,7 +38,7 @@ func TestPlacementStatusAuthoredAndScheduler(t *testing.T) {
 			server := httptest.NewServer(API{Queue: q, Token: "fixture"}.Handler())
 			defer server.Close()
 			client := Client{URL: server.URL, Token: "fixture"}
-			for _, path := range []string{"/api/jobs/" + submitted.ID, "/api/inspection", "/api/status"} {
+			for _, path := range []string{"/api/jobs/" + submitted.ID, "/api/inspection", "/api/status", "/api/status?detail=full"} {
 				var got Job
 				if strings.HasPrefix(path, "/api/jobs/") {
 					if err := client.Call(context.Background(), "GET", path, nil, &got); err != nil {
@@ -108,6 +108,51 @@ func TestPlacementStatusAuthoredAndScheduler(t *testing.T) {
 				t.Fatal("placement not persisted", err)
 			}
 		})
+	}
+}
+
+func TestPlacementStatusRetainsEachAttempt(t *testing.T) {
+	q, clock := fixture(t)
+	submit(t, q, spec("experiment"))
+	first := check(t, q, machine("one", "fake"), nil).Job
+	if first == nil || first.Placement == nil {
+		t.Fatal("missing first placement")
+	}
+	if err := q.update(func() error {
+		q.requeue(q.touchJob(first.ID), "planned", false)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	second := check(t, q, machine("two", "fake"), nil).Job
+	if second == nil || second.Placement == nil || second.Attempt <= first.Attempt {
+		t.Fatal("missing replacement placement")
+	}
+	got, err := q.jobSnapshot(first.ID)
+	if err != nil || !reflect.DeepEqual(got.Placement, second.Placement) || len(got.AttemptHistory) != 1 || !reflect.DeepEqual(got.AttemptHistory[0].Placement, first.Placement) {
+		t.Fatal("replacement changed historical placement", got, err)
+	}
+	page, err := q.JobLedger(first.ID, 0, -1, 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assigned := 0
+	for _, entry := range page.Entries {
+		if entry.Kind != "assigned" {
+			continue
+		}
+		assigned++
+		want := first.Placement
+		if entry.Attempt == second.Attempt {
+			want = second.Placement
+		}
+		if !reflect.DeepEqual(entry.Placement, want) {
+			t.Fatal("ledger placement belongs to another attempt", entry)
+		}
+	}
+	if assigned != 2 {
+		t.Fatal("missing assigned ledger entries", assigned)
 	}
 }
 
