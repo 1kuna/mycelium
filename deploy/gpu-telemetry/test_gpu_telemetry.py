@@ -1,5 +1,6 @@
 """Laptop checks: python3 -B -m unittest discover -s deploy/gpu-telemetry -v."""
 
+import configparser
 import datetime as dt
 import importlib.machinery
 import importlib.util
@@ -155,6 +156,32 @@ class TelemetryTest(unittest.TestCase):
         self.assertEqual(env['PATH'], '/usr/bin:/bin')
         self.assertEqual(env['LANG'], 'C')
         self.assertEqual(env['LC_ALL'], 'C')
+
+
+
+
+class ClientGroupTemplateTest(unittest.TestCase):
+    def test_rendered_client_group_permissions(self):
+        root = Path(__file__).parent
+        # Run the documented sed rendering for both a primary-group style name
+        # and an already-held dedicated supplementary group.
+        for group in ('worker-primary', 'myce-telemetry'):
+            with self.subTest(group=group):
+                def render(name):
+                    return subprocess.check_output(
+                        ['sed', f's/REPLACE_CLIENT_GROUP/{group}/g', str(root / name)],
+                        text=True)
+                unit = configparser.ConfigParser()
+                unit.read_string(render('myce-gpu-telemetry.socket'))
+                socket_unit = unit['Socket']
+                self.assertEqual(socket_unit['SocketGroup'], group)
+                self.assertEqual(socket_unit['SocketUser'], 'root')
+                self.assertEqual(socket_unit['SocketMode'], '0660')
+                self.assertEqual(socket_unit['DirectoryMode'], '0750')
+                rule = next(line.split() for line in render('myce-gpu-telemetry.conf').splitlines()
+                            if line and not line.startswith('#'))
+                self.assertEqual(rule, ['d', '/run/mycelium', '0750', 'root', group, '-', '-'])
+                self.assertEqual(socket_unit['ListenStream'], rule[1] + '/gpu-telemetry.sock')
 
 
 if __name__ == '__main__':
