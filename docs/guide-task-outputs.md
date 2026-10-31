@@ -89,9 +89,13 @@ retains charged worker custody; a saved receipt cannot authorize deletion.
 ## Retention and collection
 
 `until_delivered` enrolls verified outputs in #479's durable expiry/ledger and
-collector automatically. `retained` waits for the configured recovery window
-(168 hours by default), unless explicitly released through the existing owner
-release operation. Pending or failed delivery cannot expire unique results.
+collector automatically. Collection of delivered local copies is lazy: it starts
+only when a qualified queued task needs the same worker backing, or at the
+configured retention deadline (168 hours by default). Copies are selected in
+MY-18 order, least valuable owner tier first. `retained` also requires the
+configured recovery window or explicit owner release before becoming legally
+reclaimable; release alone does not trigger eager collection. Pending or failed
+delivery cannot expire unique results.
 
 Verification alone does not authorize immediate deletion: collection rechecks
 exact attempt/destination/manifest fences, confirmed compute release, six-hour
@@ -103,12 +107,20 @@ capacity admission.
 
 Every collection invocation, including saved-intent replay and SQLite restart,
 re-verifies current destination content outside the queue lock, then rechecks
-the live attempt and reference fences before unlinking. Missing, corrupt or
-unreachable destination data clears verified delivery, retains worker custody,
+the live attempt and reference fences before unlinking. The accepted residual is
+that single operation's own verify-to-delete span: after verified delivery, the
+destination is authoritative and its NAS/backups own subsequent durability. No
+verify-then-delete across independent filesystems can prevent destination loss
+immediately afterward. See [operations](operations.md#worker-local-task-delivery-508).
+Missing, corrupt or unreachable destination data, or a changed collection fence,
+clears verified delivery, retains worker custody,
 and raises `output_destination_preservation_lost` to operator/project owners.
 Delivery retry/reconciliation follows the existing path; conflicting destination
 trees remain protected from overwrite until repaired. A historical receipt is
 never a substitute for the payload.
+A missing submitter destination can be restored with `deliver_outputs` from
+retained worker bytes even after ordinary result expiry, until actual collection.
+Ordinary expired-result downloads still return `result_expired`.
 Failed verification advances a durable verification round, so replaying an old
 success receipt cannot restore verified state or clear that alert after restart.
 

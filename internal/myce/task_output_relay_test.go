@@ -81,7 +81,7 @@ func TestTaskOutputsSubmitterHTTPStreamingAndPartialPull(t *testing.T) {
 	if err = os.WriteFile(filepath.Join(dest, j.ID, fmt.Sprint(j.Attempt), "out.txt"), data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	f.c.Advance(filePublicationGrace)
+	f.c.Advance(DefaultFileRetention)
 	if err = f.q.Tick(); err != nil {
 		t.Fatal(err)
 	}

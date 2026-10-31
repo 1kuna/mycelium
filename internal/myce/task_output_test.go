@@ -238,7 +238,7 @@ func TestTaskOutputsLocalCustodyCannotExpireUnknownSharedImport(t *testing.T) {
 	if err := os.Chtimes(f.q.files.blob(ref), old, old); err != nil {
 		t.Fatal(err)
 	}
-	f.c.Advance(filePublicationGrace)
+	f.c.Advance(DefaultFileRetention)
 	if err := f.q.Tick(); err != nil {
 		t.Fatal(err)
 	}
@@ -318,14 +318,12 @@ func TestTaskOutputsRetentionGraceReferencesAndBackingRelease(t *testing.T) {
 			f.pending(t) // Six-hour local publication grace, or explicit recovery.
 			taskOutputAssertSpool(t, f, true)
 			f.c.Advance(filePublicationGrace)
-			if retention == "retained" {
-				if err := f.q.Tick(); err != nil {
-					t.Fatal(err)
-				}
-				f.pending(t)
-				taskOutputAssertSpool(t, f, true)
-				f.c.Advance(DefaultFileRetention)
+			if err := f.q.Tick(); err != nil {
+				t.Fatal(err)
 			}
+			f.pending(t) // Delivery plus grace alone never triggers collection.
+			taskOutputAssertSpool(t, f, true)
+			f.c.Advance(DefaultFileRetention)
 			// A different retained reference keeps its shared/worker copy. The
 			// collector rechecks the live graph rather than trusting an old plan.
 			j := job(t, f.q, f.j.ID)
@@ -492,7 +490,7 @@ func TestTaskOutputsWorkerActorReleasesComputeAndCollects(t *testing.T) {
 			t.Fatal("output custody was treated as a live process")
 		}
 	}
-	clock.Advance(filePublicationGrace)
+	clock.Advance(DefaultFileRetention)
 	if err := f.q.Tick(); err != nil {
 		t.Fatal(err)
 	}

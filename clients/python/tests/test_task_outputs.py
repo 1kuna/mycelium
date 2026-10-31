@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest.mock import patch
 
-from mycelium import Client
+from mycelium import APIError, Client
 
 
 class TaskOutputTests(unittest.TestCase):
@@ -96,3 +96,29 @@ class TaskOutputTests(unittest.TestCase):
                 patch.object(client, "_file_request", side_effect=AssertionError("must not stream")):
             with self.assertRaisesRegex(ValueError, "task-output/1"):
                 client.deliver_outputs("job", root)
+
+    def test_delivery_restores_retained_worker_bytes_after_result_expiry(self):
+        payload = b"retained unique result"
+        files = {"out.txt": {"sha256": hashlib.sha256(payload).hexdigest(), "size_bytes": len(payload)}}
+        receipt = {"execution": {"id": "job", "attempt": 1}, "files": files,
+                   "manifest_sha256": "a" * 64, "verified": True}
+        task = {"protocol": "task-output/1", "kind": "submitter", "receipt": receipt,
+                "directory_receipt": {"files": files}}
+        expired = {"state": "succeeded", "files_expired": True,
+                   "local_outputs": {"files": files, "state": "worker_local_pending_delivery"}}
+        client = Client(token="fixture")
+        with tempfile.TemporaryDirectory() as root, \
+                patch.object(client, "get", return_value=expired), \
+                patch.object(client, "_call", return_value=task) as calls, \
+                patch.object(client, "_file_request", return_value=io.BytesIO(payload)) as transfer:
+            # Ordinary expired retrieval stays typed and cannot transfer bytes.
+            with self.assertRaises(APIError) as caught:
+                client.download_result("job", "out.txt", Path(root) / "ordinary")
+            self.assertEqual(caught.exception.code, "result_expired")
+            transfer.assert_not_called()
+            # A missing whole-task destination can still be restored from custody.
+            target = client.deliver_outputs("job", root)
+            self.assertEqual((target / "out.txt").read_bytes(), payload)
+            transfer.assert_called_once_with("GET", "/api/task-outputs/job/files/out.txt?manifest=" + "a" * 64,
+                                             size=len(payload))
+            self.assertEqual(sum(call.args[0] == "POST" for call in calls.call_args_list), 1)

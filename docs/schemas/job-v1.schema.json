@@ -3574,6 +3574,10 @@
           "format": "date-time",
           "type": "string"
         },
+        "collection_requested_at": {
+          "format": "date-time",
+          "type": "string"
+        },
         "files": {
           "$ref": "#/$defs/FileManifest"
         },

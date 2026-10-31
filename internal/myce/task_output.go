@@ -41,11 +41,12 @@ type OutputDestination struct {
 // Files are deliberately separate from ordinary file-store output_refs. A
 // successful versioned computation can have only worker-local availability.
 type TaskOutputCustody struct {
-	State       string       `json:"state"`
-	Allocation  string       `json:"allocation"`
-	Files       FileManifest `json:"files"`
-	StoredAt    time.Time    `json:"stored_at"`
-	CollectedAt *time.Time   `json:"collected_at,omitempty"`
+	State                 string       `json:"state"`
+	Allocation            string       `json:"allocation"`
+	Files                 FileManifest `json:"files"`
+	StoredAt              time.Time    `json:"stored_at"`
+	CollectedAt           *time.Time   `json:"collected_at,omitempty"`
+	CollectionRequestedAt *time.Time   `json:"collection_requested_at,omitempty"`
 }
 
 func validateTaskOutputs(s Spec) error {
@@ -118,10 +119,10 @@ type taskOutputWork struct {
 	PreservationID string `json:"preservation_id,omitempty"`
 }
 
-// Collection permission is a durable expiry, not a health probe or a completed
-// command. It uses the same keeping-reference graph as #479's collector.
+// Collection requires legal expiry plus actual demand, never delivery alone.
+// It uses the same keeping-reference graph as #479's collector.
 func (q *Queue) taskOutputCollectible(j *Job) bool {
-	return q.taskOutputCollectionPolicyReady(j) && j.Delivery.State == "verified" && j.Delivery.VerifiedAt != nil
+	return q.taskOutputCollectionPolicyReady(j) && q.taskOutputCollectionDue(j) && j.Delivery.State == "verified" && j.Delivery.VerifiedAt != nil
 }
 
 func (q *Queue) taskOutputCollectionPolicyReady(j *Job) bool {
@@ -139,6 +140,58 @@ func (q *Queue) taskOutputCollectionPolicyReady(j *Job) bool {
 	return len(j.FileCheckpoints) == 0 && j.ResumeFiles == nil && len(j.RecoveredResults) == 0
 }
 
+// Caller holds q.mu. A durable collection intent records why collection began,
+// not a reusable destination verification. It lets partial deletion/ACK replay
+// finish even if the waiting task is cancelled after space has been reclaimed.
+func (q *Queue) taskOutputCollectionDue(j *Job) bool {
+	if j.LocalOutputs.CollectionRequestedAt != nil {
+		return true
+	}
+	expired := j.FinishedAt != nil && !q.clock.Now().Before(j.FinishedAt.Add(q.fileRetention))
+	if !expired && !q.taskOutputStoragePressure(j) {
+		return false
+	}
+	// Only the least valuable legally reclaimable copy on this backing starts
+	// next (MY-18). Already started operations retain their own intent/fences.
+	for _, other := range q.liveJobs() {
+		if other.ID == j.ID || other.StorageAllocation == nil || j.StorageAllocation == nil || other.StorageAllocation.Backing != j.StorageAllocation.Backing || !q.taskOutputCollectionPolicyReady(other) || other.Delivery.State != "verified" || other.Delivery.VerifiedAt == nil {
+			continue
+		}
+		otherExpired := other.FinishedAt != nil && !q.clock.Now().Before(other.FinishedAt.Add(q.fileRetention))
+		if other.LocalOutputs.CollectionRequestedAt == nil && !otherExpired && !q.taskOutputStoragePressure(other) {
+			continue
+		}
+		a, b := q.priorityMatch(other.Spec).Index, q.priorityMatch(j.Spec).Index
+		if a > b || a == b && (other.LocalOutputs.StoredAt.Before(j.LocalOutputs.StoredAt) || other.LocalOutputs.StoredAt.Equal(j.LocalOutputs.StoredAt) && other.ID < j.ID) {
+			return false
+		}
+	}
+	return true
+}
+
+// Reuse #507's qualified placement/backing shortage check. Pressure in shared
+// storage or independent production backing cannot evict this worker's copies.
+// This is metadata only; neither admission nor backend I/O runs here.
+func (q *Queue) taskOutputStoragePressure(j *Job) bool {
+	if j.StorageAllocation == nil {
+		return false
+	}
+	m := q.s.Machines[j.Machine]
+	if m == nil {
+		return false
+	}
+	for _, waiting := range q.liveJobs() {
+		if waiting.State != "queued" {
+			continue
+		}
+		request, reason := q.storageRequest(waiting, m)
+		if reason == "" && request.Backing == j.StorageAllocation.Backing && q.protectedStorageWaitingReason(waiting, hostID(m)) != "" {
+			return true
+		}
+	}
+	return false
+}
+
 func (q *Queue) TaskOutputWork(ctx context.Context, r StorageCustodyReceipt) (taskOutputWork, error) {
 	var out taskOutputWork
 	err := q.updateRequest(ctx, func() error {
@@ -153,6 +206,11 @@ func (q *Queue) TaskOutputWork(ctx context.Context, r StorageCustodyReceipt) (ta
 			return nil
 		}
 		if q.taskOutputCollectible(j) {
+			if j.LocalOutputs.CollectionRequestedAt == nil {
+				now := q.clock.Now()
+				j.LocalOutputs.CollectionRequestedAt = &now
+				out.Job = cloneJob(j)
+			}
 			out.Action = "collect"
 			return nil
 		}
@@ -201,7 +259,16 @@ func taskOutputReceipt(j Job) TaskOutputReceipt {
 func (q *Queue) ConfirmTaskOutputs(ctx context.Context, r TaskOutputReceipt) error {
 	return q.updateRequest(ctx, func() error {
 		j := q.touchJob(r.Execution.ID)
-		if !exactTaskOutputs(j, r.StorageCustodyReceipt) || j.Delivery == nil || !sameDelivery(j, *j) || j.Delivery.DestinationID != r.DestinationID || j.Delivery.ManifestSHA256 != r.ManifestSHA256 || j.Delivery.VerificationRound != r.VerificationRound {
+		// A negative collection result may follow a changed control fence. It
+		// can invalidate only the still-recorded custody/delivery, never a newer
+		// execution or verification round. Positive receipts require all fences.
+		if j == nil || j.LocalOutputs == nil || j.StorageAllocation == nil || j.Delivery == nil ||
+			r.Protocol != workerCustodyProtocol || j.LocalOutputs.Allocation != r.Allocation ||
+			j.StorageAllocation.ID != r.Allocation || !maps.Equal(j.LocalOutputs.Files, r.Files) ||
+			j.Delivery.Execution != r.Execution || j.Delivery.Machine != r.Machine || j.Delivery.Session != r.Session ||
+			j.Delivery.DestinationID != r.DestinationID || j.Delivery.ManifestSHA256 != r.ManifestSHA256 ||
+			j.Delivery.VerificationRound != r.VerificationRound ||
+			r.Verified && (!exactTaskOutputs(j, r.StorageCustodyReceipt) || !sameDelivery(j, *j)) {
 			return ErrStale
 		}
 		now := q.clock.Now()
@@ -519,21 +586,21 @@ func (w Worker) collectTaskOutputs(j Job, receipt TaskOutputReceipt, parent stri
 		verifyErr = w.verifySubmitterPreservation(work)
 	}
 	if verifyErr != nil {
-		receipt.Verified = false
-		if err := w.Client.Call(context.Background(), "POST", "/api/task-outputs/verified", receipt, nil); err != nil {
-			return err
-		}
-		return errStorageCustodyPending
+		return w.rejectTaskOutputCollection(receipt)
 	}
 	// Recheck exact execution/manifest and the live retention/reference fences
 	// inside the queue transaction after verification, immediately before unlink.
 	var current taskOutputWork
 	if err := w.Client.Call(context.Background(), "POST", "/api/workers/task-output-work", receipt.StorageCustodyReceipt, &current); err != nil {
-		return err
+		return errors.Join(err, w.rejectTaskOutputCollection(receipt))
 	}
 	if current.Action != "collect" || !sameDelivery(&current.Job, work.Job) || current.PreservationID != work.PreservationID {
-		return errStorageCustodyPending
+		return w.rejectTaskOutputCollection(receipt)
 	}
+	// Accepted residual: this one operation's fresh hash -> fence -> unlink
+	// span. Once delivered, the destination is authoritative; its NAS/backups
+	// own subsequent durability. No verify-then-delete can prevent destination
+	// loss immediately afterward. Never carry a proof across calls or replay.
 	if err := os.RemoveAll(workdir); err != nil {
 		return err
 	}
@@ -544,4 +611,12 @@ func (w Worker) collectTaskOutputs(j Job, receipt TaskOutputReceipt, parent stri
 		return err
 	}
 	return w.Client.Call(context.Background(), "POST", "/api/workers/task-outputs-collected", receipt, nil)
+}
+
+func (w Worker) rejectTaskOutputCollection(receipt TaskOutputReceipt) error {
+	receipt.Verified = false
+	if err := w.Client.Call(context.Background(), "POST", "/api/task-outputs/verified", receipt, nil); err != nil {
+		return err
+	}
+	return errStorageCustodyPending
 }

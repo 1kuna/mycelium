@@ -50,7 +50,7 @@ func (a API) taskOutputRelayHandlers(mux *requestMux) {
 			return
 		}
 		out := TaskOutputDownload{Protocol: taskOutputProtocol, Kind: j.Spec.OutputDestination.Kind, Receipt: taskOutputReceipt(*j), DirectoryReceipt: taskOutputDirectoryReceipt(*j)}
-		out.CollectionPending = q.taskOutputCollectionPolicyReady(j)
+		out.CollectionPending = q.taskOutputCollectionPolicyReady(j) && q.taskOutputCollectionDue(j)
 		q.mu.RUnlock()
 		respondOperation(w, out, nil, "")
 	})

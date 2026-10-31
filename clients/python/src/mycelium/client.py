@@ -399,6 +399,11 @@ class Client:
                 ref = (job.get("output_refs") or {}).get(artifact)
         if ref is None:
             raise APIError(404, json.dumps({"code": "artifact_unknown", "error": "accepted artifact not found"}))
+        path = (f"/api/task-outputs/{quote(job_id, safe='')}/files/{quote(artifact, safe='')}"
+                f"?manifest={task_receipt['manifest_sha256']}") if task_receipt else f"/api/files/blobs/{ref['sha256']}"
+        return self._download_verified_artifact(path, ref, destination)
+
+    def _download_verified_artifact(self, path: str, ref: dict, destination: str | Path) -> Path:
         sha, size = ref["sha256"], ref["size_bytes"]
         if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{64}", sha) or not isinstance(size, int) or size < 0:
             raise ValueError("invalid artifact identity")
@@ -410,8 +415,6 @@ class Client:
                 temporary = Path(stream.name)
                 digest, received = hashlib.sha256(), 0
                 try:
-                    path = (f"/api/task-outputs/{quote(job_id, safe='')}/files/{quote(artifact, safe='')}"
-                            f"?manifest={task_receipt['manifest_sha256']}") if task_receipt else "/api/files/blobs/" + sha
                     with self._file_request("GET", path, size=size) as response:
                         for chunk in iter(lambda: response.read(1024 * 1024), b""):
                             received += len(chunk)
@@ -505,7 +508,12 @@ class Client:
             stage = Path(tempfile.mkdtemp(prefix=".myce-delivery-", dir=parent))
             try:
                 for name in files:
-                    self.download_result(job_id, name, stage / name)
+                    # Whole-task restoration uses the retained custody manifest,
+                    # even after ordinary result expiry. The task-output endpoint
+                    # remains available until actual worker collection.
+                    path = (f"/api/task-outputs/{quote(job_id, safe='')}/files/{quote(name, safe='')}"
+                            f"?manifest={receipt['manifest_sha256']}")
+                    self._download_verified_artifact(path, files[name], stage / name)
                 with (stage / ".myce-delivery.json").open("x", encoding="utf-8") as stream:
                     json.dump(directory_receipt, stream, separators=(",", ":"), ensure_ascii=False)
                     stream.flush()
