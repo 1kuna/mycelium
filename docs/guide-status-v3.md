@@ -11,7 +11,8 @@ not drive start authorization, cancellation or result publication.
 
 Default status keeps the existing JSON fields and job shape, but includes all
 nonterminal jobs and terminal jobs with pending cleanup/delivery, plus the newest
-100 other terminal jobs by submission time. Work curves are omitted (`null`).
+100 other terminal jobs by submission time. Work curves remain included for
+existing consumer audits and release-preservation guards.
 This bounds retained-history detail without hiding control-plane custody.
 `jobs_page` ([schema](schemas/status-jobs-page-v1.schema.json)) reports the
 filtered `total`, `returned`, `mode`, and optional `next_before` job ID.
@@ -38,6 +39,11 @@ contain the bounded history. Upgrade the CLI for access to older historical IDs:
 `myce status JOB` and `myce logs JOB --follow` read the job endpoint directly,
 including prefix resolution, independently of aggregate status retention/cache.
 Logs follow polls only the selected job and drains a final log page on completion.
+
+Release-preservation tools should request `GET /api/status?detail=full` (or
+Python `client.status(full=True)`) for both snapshots: curve provenance can
+depend on completed jobs outside the default history window. Curves remain in
+default status for existing callers, but that view is not a complete job ledger.
 
 Only the unfiltered default shares the one-second cache. Filtered/full reads are
 fresh. Snapshot capture keeps scheduling inputs and dependency state under the

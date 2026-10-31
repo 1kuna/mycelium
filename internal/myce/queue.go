@@ -1865,10 +1865,10 @@ func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
 		}
 		return a.Kind < b.Kind
 	})
-	if q.observationSelection == nil || q.observationSelection.full {
-		for _, key := range slices.Sorted(maps.Keys(q.s.WorkObservations)) {
-			out.WorkCurves = append(out.WorkCurves, q.s.WorkObservations[key])
-		}
+	// Existing release guards and consumer audits read curves from default
+	// status. Bound job history without changing that independent contract.
+	for _, key := range slices.Sorted(maps.Keys(q.s.WorkObservations)) {
+		out.WorkCurves = append(out.WorkCurves, q.s.WorkObservations[key])
 	}
 	if q.observationSelection != nil {
 		page := q.observationSelection.page

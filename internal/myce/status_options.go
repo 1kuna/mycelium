@@ -28,7 +28,6 @@ type statusOptions struct {
 type statusSelection struct {
 	ids  map[string]bool
 	page StatusJobsPage
-	full bool
 }
 
 func parseStatusOptions(v url.Values) (statusOptions, error) {
@@ -70,7 +69,7 @@ func parseStatusOptions(v url.Values) (statusOptions, error) {
 // Called under q.mu. Select before serializing history; keep the full scheduling
 // context separately so filters cannot alter eligibility or queue order.
 func (q *Queue) selectStatusJobs(o statusOptions) (*statusSelection, error) {
-	s := &statusSelection{ids: map[string]bool{}, page: StatusJobsPage{Mode: o.jobs}, full: o.full}
+	s := &statusSelection{ids: map[string]bool{}, page: StatusJobsPage{Mode: o.jobs}}
 	var jobs []*Job
 	add := func(j *Job) {
 		if o.project != "" && j.Spec.Project != o.project || !o.since.IsZero() && j.Queued.Before(o.since) {

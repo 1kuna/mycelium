@@ -393,7 +393,7 @@ class Client:
                limit: int | None = None, before: str | None = None) -> dict[str, Any]:
         """Return active jobs plus 100 recent terminal jobs and fleet health.
 
-        full=True restores all jobs and work curves. jobs="all" pages history;
+        Work curves remain included. full=True restores all jobs. jobs="all" pages history;
         jobs="active" includes nonterminal work and pending cleanup. Optional
         project/since (queued-at RFC3339) filters apply only to jobs.
         """

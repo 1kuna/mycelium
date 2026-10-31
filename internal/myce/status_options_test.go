@@ -40,7 +40,7 @@ func TestStatusOptionsBoundedHistoryAndPaging(t *testing.T) {
 	q.s.Jobs["active"] = &Job{ID: "active", State: "running", Spec: Spec{Project: "active"}}
 	q.s.WorkObservations = map[string]WorkObservation{"point": {Job: "history-0000"}}
 	s := readStatusOptions(t, q, "")
-	if len(s.Jobs) != defaultStatusJobs+2 || s.JobsPage.Total != 1202 || len(s.WorkCurves) != 0 {
+	if len(s.Jobs) != defaultStatusJobs+2 || s.JobsPage.Total != 1202 || len(s.WorkCurves) != 1 || s.WorkCurves[0].Job != "history-0000" {
 		t.Fatalf("unbounded summary: %+v", s.JobsPage)
 	}
 	data, _ := json.Marshal(s)
@@ -61,7 +61,7 @@ func TestStatusOptionsBoundedHistoryAndPaging(t *testing.T) {
 		t.Fatalf("history growth amplified summary: %d -> %d", len(data), len(more))
 	}
 	active := readStatusOptions(t, q, "?jobs=active")
-	if len(active.Jobs) != 2 {
+	if len(active.Jobs) != 2 || len(active.WorkCurves) != 1 {
 		t.Fatalf("active/cleanup hidden: %d", len(active.Jobs))
 	}
 	// Walk a project-filtered page set, with a timestamp filter and no duplicates.
