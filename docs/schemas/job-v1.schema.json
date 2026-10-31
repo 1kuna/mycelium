@@ -2364,6 +2364,9 @@
         "state": {
           "type": "string"
         },
+        "verification_round": {
+          "type": "integer"
+        },
         "verified_at": {
           "format": "date-time",
           "type": "string"

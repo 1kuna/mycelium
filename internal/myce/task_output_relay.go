@@ -28,10 +28,11 @@ type taskOutputRelay struct {
 }
 
 type TaskOutputDownload struct {
-	Protocol         string            `json:"protocol"`
-	Kind             string            `json:"kind"`
-	Receipt          TaskOutputReceipt `json:"receipt"`
-	DirectoryReceipt deliveryReceipt   `json:"directory_receipt"`
+	CollectionPending bool              `json:"collection_pending,omitempty"`
+	Protocol          string            `json:"protocol"`
+	Kind              string            `json:"kind"`
+	Receipt           TaskOutputReceipt `json:"receipt"`
+	DirectoryReceipt  deliveryReceipt   `json:"directory_receipt"`
 }
 
 func taskOutputDirectoryReceipt(j Job) deliveryReceipt {
@@ -49,6 +50,7 @@ func (a API) taskOutputRelayHandlers(mux *requestMux) {
 			return
 		}
 		out := TaskOutputDownload{Protocol: taskOutputProtocol, Kind: j.Spec.OutputDestination.Kind, Receipt: taskOutputReceipt(*j), DirectoryReceipt: taskOutputDirectoryReceipt(*j)}
+		out.CollectionPending = q.taskOutputCollectionPolicyReady(j)
 		q.mu.RUnlock()
 		respondOperation(w, out, nil, "")
 	})
@@ -236,7 +238,19 @@ func (c Client) DeliverTaskOutputs(ctx context.Context, id, root string) error {
 	if err := publishOutputDeliverySource(j, root, open); err != nil {
 		return err
 	}
-	return c.Call(ctx, "POST", "/api/task-outputs/verified", r, nil)
+	if err := c.Call(ctx, "POST", "/api/task-outputs/verified", r, nil); err != nil {
+		return err
+	}
+	// Re-evaluate after confirming a formerly failed delivery: its own pending
+	// custody pins disappear only in that transaction. Other pins still win.
+	var collection TaskOutputDownload
+	if err := c.Call(ctx, "GET", "/api/task-outputs/"+url.PathEscape(id), nil, &collection); err != nil {
+		return err
+	}
+	if collection.CollectionPending {
+		return c.preserveTaskOutputs(ctx, j, root)
+	}
+	return nil
 }
 
 // Root identities are explicitly qualified by the operator; a missing NAS

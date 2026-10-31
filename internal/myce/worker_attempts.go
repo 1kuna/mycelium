@@ -39,6 +39,7 @@ type attemptSupervisor struct {
 	admissionBlocked bool
 	outputProgress   atomic.Uint64
 	outputVerified   atomic.Bool
+	outputAccepted   atomic.Bool
 }
 
 // Observation retries preserve running status. Their exact cause must still
@@ -131,6 +132,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		a.mu.Unlock()
 		w.outputDeliveryProgress = func() { a.outputProgress.Add(1) }
 		w.outputCustodyVerified = &a.outputVerified
+		w.outputCustodyAccepted = &a.outputAccepted
 		now := w.Clock.Now()
 		if p != nil {
 			p.enforceGrace(now)
@@ -752,6 +754,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 		return jobs
 	}
 	recovering := len(stores) > 0
+	recoveringSession := recovering
 	spawn := func(s *workerStore, p *process) {
 		j := *s.state.Job
 		a := &attemptSupervisor{store: s, job: j, worker: w, report: AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session}, wake: make(chan struct{}, 1), done: make(chan struct{}), recovering: p}
@@ -851,8 +854,20 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			}
 		}
 		w.batchMemory.Store(math.Float64bits(batch))
-		if recovering && len(actors) == 0 {
+		if recovering {
 			recovering = false
+			for _, a := range actors {
+				if !a.outputAccepted.Load() {
+					recovering = true
+					break
+				}
+			}
+		}
+		// Retained delivery actors keep their exact saved session, but accepted
+		// output custody has already released compute. Do not gate independent
+		// production admission on destination recovery or publication grace.
+		if recoveringSession && len(actors) == 0 {
+			recoveringSession = false
 			root.state.PreviousSession, root.state.Session, root.state.Fresh = root.state.Session, ID(), true
 			w.Machine.Session = root.state.Session
 			if err := root.save(); err != nil {

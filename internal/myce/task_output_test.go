@@ -63,7 +63,7 @@ func newTaskOutputFixture(t *testing.T, kind, retention string) *taskOutputFixtu
 		t.Fatal(err)
 	}
 	w := Worker{Clock: c, Machine: m, StorageBoundary: boundary, Client: deliveryClient(t, q), OutputDestinations: map[string]OutputDestinationRoot{"archive": {Path: nas, NativeIdentity: identity}}, outputDeliverySlots: make(chan struct{}, 1)}
-	root := &workerStore{dir: t.TempDir(), state: workerState{Session: m.Session}}
+	root := &workerStore{dir: newTestStateRoot(t), state: workerState{Session: m.Session}}
 	store, err := newAttemptStore(root, *assigned, w)
 	if err != nil {
 		t.Fatal(err)

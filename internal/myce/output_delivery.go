@@ -35,6 +35,7 @@ func deliveryRootID(root string) string {
 }
 
 type OutputDelivery struct {
+	VerificationRound  uint64 `json:"verification_round,omitempty"`
 	ProgressOperations uint64 `json:"progress_operations,omitempty"`
 	Protocol           string `json:"protocol,omitempty"`
 	Kind               string `json:"kind,omitempty"`
@@ -124,6 +125,7 @@ func sameDelivery(current *Job, snapshot Job) bool {
 		current.Delivery != nil && snapshot.Delivery != nil &&
 		current.Delivery.Execution.ID == current.ID && current.Delivery.Execution.Attempt == current.Attempt &&
 		current.Delivery.Execution == snapshot.Delivery.Execution &&
+		current.Delivery.VerificationRound == snapshot.Delivery.VerificationRound &&
 		current.Delivery.Machine == snapshot.Machine && current.Delivery.Session == snapshot.Session &&
 		current.Delivery.ManifestSHA256 == snapshot.Delivery.ManifestSHA256 &&
 		current.Delivery.DestinationID == snapshot.Delivery.DestinationID &&
@@ -266,7 +268,14 @@ func publishTaskOutputDelivery(j Job, source, path string, callbacks ...func()) 
 }
 
 func publishQualifiedTaskOutputDelivery(j Job, source string, destination OutputDestinationRoot, callbacks ...func()) error {
-	check := func(root *os.Root) error {
+	return publishTaskOutputDeliveryRoot(j, source, destination.Path, qualifiedOutputDestinationCheck(destination), callbacks...)
+}
+
+func qualifiedOutputDestinationCheck(destination OutputDestinationRoot) func(*os.Root) error {
+	return func(root *os.Root) error {
+		if !filepath.IsAbs(destination.Path) || destination.NativeIdentity == "" {
+			return errors.New("worker destination is not qualified")
+		}
 		f, err := root.Open(".")
 		if err != nil {
 			return err
@@ -278,10 +287,45 @@ func publishQualifiedTaskOutputDelivery(j Job, source string, destination Output
 		}
 		return nil
 	}
-	if !filepath.IsAbs(destination.Path) || destination.NativeIdentity == "" {
-		return errors.New("worker destination is not qualified")
+}
+
+// Receipts describe the expected tree; only hashing its current files proves
+// preservation. This is deliberately separate from publication and never repairs
+// or creates a missing destination while authorizing last-copy collection.
+func verifyQualifiedTaskOutputDelivery(j Job, destination OutputDestinationRoot, callbacks ...func()) error {
+	root, err := os.OpenRoot(destination.Path)
+	if err != nil {
+		return err
 	}
-	return publishTaskOutputDeliveryRoot(j, source, destination.Path, check, callbacks...)
+	defer root.Close()
+	if err = qualifiedOutputDestinationCheck(destination)(root); err != nil {
+		return err
+	}
+	for path, receipt := range deliveryDirectories(j) {
+		if err = verifyDeliveryDirectory(root, path, receipt, callbacks...); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func deliveryDirectories(j Job) map[string]deliveryReceipt {
+	groups := map[string]FileManifest{}
+	for name, prefix := range j.Spec.Outputs {
+		if groups[prefix] == nil {
+			groups[prefix] = FileManifest{}
+		}
+		groups[prefix][name] = taskOutputFiles(j)[name]
+	}
+	directories := map[string]deliveryReceipt{}
+	for prefix, files := range groups {
+		receipt := deliveryReceipt{DestinationID: j.Delivery.DestinationID, Execution: j.Delivery.Execution, Machine: j.Machine, Session: j.Session, Policy: asyncNAS + "/1", ManifestSHA256: j.Delivery.ManifestSHA256, Files: files}
+		if j.Spec.OutputDestination != nil {
+			receipt.Policy = taskOutputProtocol
+		}
+		directories[filepath.Join(prefix, j.ID, strconv.Itoa(j.Attempt))] = receipt
+	}
+	return directories
 }
 
 func publishTaskOutputDeliveryRoot(j Job, source, path string, check func(*os.Root) error, callbacks ...func()) error {
@@ -314,20 +358,10 @@ func publishOutputDeliverySourceRoot(j Job, path string, open func(string) (io.R
 		}
 	}
 	progress()
-	groups := map[string]FileManifest{}
-	for name, prefix := range j.Spec.Outputs {
-		if groups[prefix] == nil {
-			groups[prefix] = FileManifest{}
-		}
-		groups[prefix][name] = taskOutputFiles(j)[name]
-	}
-	for _, prefix := range slices.Sorted(maps.Keys(groups)) {
-		files := groups[prefix]
-		dest := filepath.Join(prefix, j.ID, strconv.Itoa(j.Attempt))
-		receipt := deliveryReceipt{DestinationID: j.Delivery.DestinationID, Execution: j.Delivery.Execution, Machine: j.Machine, Session: j.Session, Policy: asyncNAS + "/1", ManifestSHA256: j.Delivery.ManifestSHA256, Files: files}
-		if j.Spec.OutputDestination != nil {
-			receipt.Policy = taskOutputProtocol
-		}
+	directories := deliveryDirectories(j)
+	for _, dest := range slices.Sorted(maps.Keys(directories)) {
+		receipt := directories[dest]
+		files := receipt.Files
 		if _, e := root.Lstat(dest); e == nil {
 			if err = verifyDeliveryDirectory(root, dest, receipt, progress); err != nil {
 				return err

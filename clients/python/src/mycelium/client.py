@@ -258,7 +258,7 @@ class Client:
             self.download_result(job["id"], name, destination)
         return job
 
-    def _file_request(self, method: str, path: str, data: bytes | None = None,
+    def _file_request(self, method: str, path: str, data: bytes | io.RawIOBase | None = None,
                       headers: Mapping[str, str] | None = None, size: int = 0):
         """size is the blob the queue may verify before replying; 0 when none."""
         budget = self._transfer_idle
@@ -266,11 +266,11 @@ class Client:
             budget = max(FILE_TRANSFER_IDLE,
                          FILE_RESPONSE_BUDGET + 2 * max(size, 0) / FILE_VERIFY_BYTES_PER_SECOND)
         headers = dict(headers or {})
-        if data is not None:
+        if isinstance(data, bytes):
             headers["Content-Length"] = str(len(data))
         # Bound memory used by http.client; the transfer connection also sends
         # partial buffers separately so no sendall has a cumulative timeout.
-        request = Request(self.url + path, data=None if data is None else io.BytesIO(data),
+        request = Request(self.url + path, data=io.BytesIO(data) if isinstance(data, bytes) else data,
                           method=method, headers={"Authorization": "Bearer " + self.token, **headers})
         request._mycelium_file_transfer = True
         opener = self._urlopen
@@ -522,6 +522,43 @@ class Client:
         for directory in [parent, root, *root.parents]:
             sync_directory(directory)
         self._call("POST", "/api/task-outputs/verified", receipt)
+        collection = self._call("GET", f"/api/task-outputs/{quote(job_id, safe='')}")
+        if collection.get("collection_pending"):
+            # The worker cannot reach this private destination. Send current
+            # bytes on a live, bounded stream so it can hash them immediately
+            # before collection; historical receipts are never sufficient.
+            class PreservationStream(io.RawIOBase):
+                def __init__(self):
+                    self.names = iter(sorted(files))
+                    self.source = None
+
+                def read(self, size=-1):
+                    if size == 0:
+                        return b""
+                    size = min(size, 1024 * 1024) if size > 0 else 1024 * 1024
+                    while True:
+                        if self.source is None:
+                            name = next(self.names, None)
+                            if name is None:
+                                return b""
+                            self.source = (target / name).open("rb")
+                        data = self.source.read(size)
+                        if data:
+                            return data
+                        self.source.close()
+                        self.source = None
+
+                def close(self):
+                    if self.source is not None:
+                        self.source.close()
+                    super().close()
+
+            size = sum(ref["size_bytes"] for ref in files.values())
+            with PreservationStream() as source:
+                with self._file_request("PUT", f"/api/task-outputs/{quote(job_id, safe='')}/preservation", data=source,
+                                        headers={"Content-Length": str(size), "X-Myce-Delivery": receipt["manifest_sha256"],
+                                                 "X-Myce-Session": receipt["session"], "X-Myce-Machine": receipt["machine"]}, size=size) as response:
+                    _read_reply(response)
         return target
 
     def status(self, *, full: bool = False, jobs: str | None = None,

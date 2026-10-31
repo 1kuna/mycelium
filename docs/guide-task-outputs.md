@@ -79,6 +79,13 @@ existing tree must verify exactly. Individual `download_result` calls and partia
 pulls never acknowledge whole-task delivery. After worker collection, further
 streams return typed `result_expired`; keep the delivered submitter copy.
 
+When collection is due, repeat `deliver` / `deliver_outputs` from the same root.
+The client verifies the tree again and streams its current bytes back over a
+bounded HTTP connection. The worker hashes that live stream immediately before
+collection. This extra verification transfer is necessary because the worker
+cannot reach a private submitter path. An absent submitter or interrupted stream
+retains charged worker custody; a saved receipt cannot authorize deletion.
+
 ## Retention and collection
 
 `until_delivered` enrolls verified outputs in #479's durable expiry/ledger and
@@ -93,6 +100,23 @@ pins. Registry/environment assets, unknown imports and required diagnostics keep
 their existing protections. Expired results cannot acquire new references via
 the expired task; acquiring an independent protected reference still uses normal
 capacity admission.
+
+Every collection invocation, including saved-intent replay and SQLite restart,
+re-verifies current destination content outside the queue lock, then rechecks
+the live attempt and reference fences before unlinking. Missing, corrupt or
+unreachable destination data clears verified delivery, retains worker custody,
+and raises `output_destination_preservation_lost` to operator/project owners.
+Delivery retry/reconciliation follows the existing path; conflicting destination
+trees remain protected from overwrite until repaired. A historical receipt is
+never a substitute for the payload.
+Failed verification advances a durable verification round, so replaying an old
+success receipt cannot restore verified state or clear that alert after restart.
+
+After a worker restart, successful compute with reconciled queue custody no
+longer gates compute recovery/admission. Delivery actors retain their original
+session, saved spool, allocation charge and bounded I/O slot independently;
+production using independent backing can be assigned during destination outage,
+publication grace or retained recovery.
 
 Worker collection persists an intent before deleting its authorized attempt
 work/spool and calls the storage backend's idempotent

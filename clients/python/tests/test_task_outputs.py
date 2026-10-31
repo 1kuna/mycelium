@@ -42,6 +42,18 @@ class TaskOutputTests(unittest.TestCase):
                 return {}
 
             def transfer(method, path, **kwargs):
+                if path.endswith("/preservation"):
+                    self.assertEqual(method, "PUT")
+                    self.assertEqual(kwargs["headers"]["X-Myce-Delivery"], receipt["manifest_sha256"])
+                    chunks = []
+                    while chunk := kwargs["data"].read(4):
+                        self.assertLessEqual(len(chunk), 4)
+                        chunks.append(chunk)
+                    self.assertEqual(b"".join(chunks), b"".join(payloads[name] for name in sorted(files)))
+                    self.assertEqual(int(kwargs["headers"]["Content-Length"]), sum(map(len, payloads.values())))
+                    response = io.BytesIO(b"{}")
+                    response.headers = {}
+                    return response
                 requests.append(path)
                 self.assertTrue(path.startswith("/api/task-outputs/job/files/"))
                 self.assertIn("?manifest=" + "a" * 64, path)
@@ -56,10 +68,14 @@ class TaskOutputTests(unittest.TestCase):
                 self.assertEqual(client.deliver_outputs("job", root), target)
                 self.assertEqual(len(requests), 2)  # Lost ACK replay verifies the local tree.
                 self.assertEqual(len(acknowledgements), 2)
+                task["collection_pending"] = True
+                self.assertEqual(client.deliver_outputs("job", root), target)
+                self.assertEqual(len(requests), 2)
+                self.assertEqual(len(acknowledgements), 3)
                 (target / "out.txt").write_bytes(b"corrupt")
                 with self.assertRaisesRegex(ValueError, "content mismatch"):
                     client.deliver_outputs("job", root)
-                self.assertEqual(len(acknowledgements), 2)
+                self.assertEqual(len(acknowledgements), 3)
 
         # A partial multi-file pull removes only its own temporary stage and
         # leaves no whole-task acknowledgement or falsely exposed directory.

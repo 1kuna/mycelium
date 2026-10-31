@@ -73,6 +73,7 @@ type Worker struct {
 	outputDeliverySlots     chan struct{}
 	outputDeliveryProgress  func()
 	outputCustodyVerified   *atomic.Bool // Attempt-local; reset on supervisor restart.
+	outputCustodyAccepted   *atomic.Bool // Exact queue custody reconciled; independent of delivery recovery.
 	extensionFingerprint    string
 	RequireMemoryCeilings   bool
 	memoryCeilings          *memoryCeilings

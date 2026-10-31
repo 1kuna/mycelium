@@ -253,6 +253,11 @@ acknowledgement; existing files and the exact receipt must verify. Individual
 [task output guide](../../docs/guide-task-outputs.md) for NAS, retention and
 protected-storage prerequisites. Legacy result contracts remain unchanged.
 
+Repeat `deliver_outputs` when local collection is due. The client streams the
+current destination bytes back for a fresh worker-side hash before collection;
+this uses bounded memory and no shared-disk staging. An absent submitter keeps
+the worker copy charged. A historical receipt cannot authorize its deletion.
+
 ### Retained execution ledger
 
 `client.get(job_id)["ledger"]` reports historical completeness and the latest

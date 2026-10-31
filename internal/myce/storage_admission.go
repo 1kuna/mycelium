@@ -643,6 +643,8 @@ func (q *Queue) outputDeliveryHealth() string {
 			cause = "publication_or_receipt_verification_failed"
 		case "destination publication or verification failed; worker custody retained":
 			cause = "publication_or_receipt_verification_failed"
+		case "destination preservation verification failed; worker custody retained":
+			cause = "preservation_verification_failed"
 		case "NAS destination configuration missing or changed; restore the original output-delivery-root":
 			cause = "destination_configuration_changed"
 		}

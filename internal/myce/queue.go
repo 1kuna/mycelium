@@ -103,13 +103,14 @@ type Queue struct {
 	storageProtectionMu       sync.Mutex
 	storageProtectionVerified bool // Restart never renews native verification.
 	// Only detached observation views set this page selection.
-	observationSelection *statusSelection
-	deliveryRoot         string
-	deliveryMu           sync.Mutex
-	taskOutputMu         sync.Mutex
-	taskOutputRelays     map[string]*taskOutputRelay
-	deliveryActive       *deliveryOperation                          // q.mu; one outstanding NAS publication per root.
-	deliveryPublish      func(Job, *FileStore, string, func()) error // Test seam; set before use.
+	observationSelection   *statusSelection
+	deliveryRoot           string
+	deliveryMu             sync.Mutex
+	taskOutputMu           sync.Mutex
+	taskOutputRelays       map[string]*taskOutputRelay
+	taskOutputPreservation *taskOutputPreservation                     // Ephemeral live submitter stream; never a durable receipt.
+	deliveryActive         *deliveryOperation                          // q.mu; one outstanding NAS publication per root.
+	deliveryPublish        func(Job, *FileStore, string, func()) error // Test seam; set before use.
 	// Ephemeral exact-attempt samples: restart cannot renew a cached credit.
 	hostMemorySamples map[string]map[attemptKey]hostMemorySample
 

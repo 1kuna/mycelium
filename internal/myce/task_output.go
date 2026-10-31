@@ -111,16 +111,21 @@ func (q *Queue) acceptTaskOutputCustody(j *Job, r StorageCustodyReceipt) error {
 }
 
 type taskOutputWork struct {
-	Job     Job    `json:"job"`
-	Action  string `json:"action"`
-	RelayID string `json:"relay_id,omitempty"`
-	Name    string `json:"name,omitempty"`
+	Job            Job    `json:"job"`
+	Action         string `json:"action"`
+	RelayID        string `json:"relay_id,omitempty"`
+	Name           string `json:"name,omitempty"`
+	PreservationID string `json:"preservation_id,omitempty"`
 }
 
 // Collection permission is a durable expiry, not a health probe or a completed
 // command. It uses the same keeping-reference graph as #479's collector.
 func (q *Queue) taskOutputCollectible(j *Job) bool {
-	if j == nil || j.LocalOutputs == nil || j.Delivery == nil || !j.FilesExpired || !sameDelivery(j, *j) || j.Delivery.State != "verified" || j.Delivery.VerifiedAt == nil || q.jobReleasePending(j) || q.clock.Now().Before(j.LocalOutputs.StoredAt.Add(filePublicationGrace)) {
+	return q.taskOutputCollectionPolicyReady(j) && j.Delivery.State == "verified" && j.Delivery.VerifiedAt != nil
+}
+
+func (q *Queue) taskOutputCollectionPolicyReady(j *Job) bool {
+	if j == nil || j.LocalOutputs == nil || j.LocalOutputs.CollectedAt != nil || j.Delivery == nil || !j.FilesExpired || !sameDelivery(j, *j) || q.jobReleasePending(j) || q.clock.Now().Before(j.LocalOutputs.StoredAt.Add(filePublicationGrace)) {
 		return false
 	}
 	_, keep, _ := q.fileReferences(false)
@@ -161,6 +166,13 @@ func (q *Queue) TaskOutputWork(ctx context.Context, r StorageCustodyReceipt) (ta
 		}
 		return nil
 	}, nil)
+	if err == nil && out.Action == "collect" && out.Job.Spec.OutputDestination.Kind == "submitter" {
+		q.taskOutputMu.Lock()
+		if p := q.taskOutputPreservation; p != nil && sameDelivery(&out.Job, p.job) {
+			out.PreservationID = p.id
+		}
+		q.taskOutputMu.Unlock()
+	}
 	if err == nil && out.Action == "wait" && out.Job.Spec.OutputDestination.Kind == "submitter" {
 		q.taskOutputMu.Lock()
 		for id, relay := range q.taskOutputRelays {
@@ -176,29 +188,44 @@ func (q *Queue) TaskOutputWork(ctx context.Context, r StorageCustodyReceipt) (ta
 
 type TaskOutputReceipt struct {
 	StorageCustodyReceipt
-	DestinationID  string `json:"destination_id"`
-	ManifestSHA256 string `json:"manifest_sha256"`
-	Verified       bool   `json:"verified"`
+	VerificationRound uint64 `json:"verification_round,omitempty"`
+	DestinationID     string `json:"destination_id"`
+	ManifestSHA256    string `json:"manifest_sha256"`
+	Verified          bool   `json:"verified"`
 }
 
 func taskOutputReceipt(j Job) TaskOutputReceipt {
-	return TaskOutputReceipt{StorageCustodyReceipt: StorageCustodyReceipt{Protocol: workerCustodyProtocol, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: j.Machine, Session: j.Session, Allocation: j.LocalOutputs.Allocation, Files: maps.Clone(j.LocalOutputs.Files)}, DestinationID: j.Delivery.DestinationID, ManifestSHA256: j.Delivery.ManifestSHA256, Verified: true}
+	return TaskOutputReceipt{StorageCustodyReceipt: StorageCustodyReceipt{Protocol: workerCustodyProtocol, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: j.Machine, Session: j.Session, Allocation: j.LocalOutputs.Allocation, Files: maps.Clone(j.LocalOutputs.Files)}, DestinationID: j.Delivery.DestinationID, ManifestSHA256: j.Delivery.ManifestSHA256, VerificationRound: j.Delivery.VerificationRound, Verified: true}
 }
 
 func (q *Queue) ConfirmTaskOutputs(ctx context.Context, r TaskOutputReceipt) error {
 	return q.updateRequest(ctx, func() error {
 		j := q.touchJob(r.Execution.ID)
-		if !exactTaskOutputs(j, r.StorageCustodyReceipt) || j.Delivery == nil || !sameDelivery(j, *j) || j.Delivery.DestinationID != r.DestinationID || j.Delivery.ManifestSHA256 != r.ManifestSHA256 {
+		if !exactTaskOutputs(j, r.StorageCustodyReceipt) || j.Delivery == nil || !sameDelivery(j, *j) || j.Delivery.DestinationID != r.DestinationID || j.Delivery.ManifestSHA256 != r.ManifestSHA256 || j.Delivery.VerificationRound != r.VerificationRound {
 			return ErrStale
-		}
-		if j.Delivery.State == "verified" {
-			return nil
 		}
 		now := q.clock.Now()
 		j.Delivery.LastProgressAt = &now
 		if !r.Verified {
-			j.Delivery.State, j.Delivery.Cause = "failed", "destination publication or verification failed; worker custody retained"
+			if j.LocalOutputs.CollectedAt != nil {
+				return ErrStale
+			}
+			preservationLost := j.Delivery.State == "verified" || j.FilesExpired
+			// Invalidate historical success/negative receipts for this execution,
+			// including after SQLite restart. Only a fresh work/download snapshot
+			// can acknowledge redelivery; collection rechecks the same round.
+			j.Delivery.VerificationRound++
+			j.Delivery.State, j.Delivery.Cause, j.Delivery.VerifiedAt = "failed", "destination publication or verification failed; worker custody retained", nil
+			j.LocalOutputs.State = "worker_local_pending_delivery"
 			j.Delivery.NextAttemptAt = now.Add(deliveryRetryDelay)
+			if preservationLost {
+				j.Delivery.Cause = "destination preservation verification failed; worker custody retained"
+				j.Reason = "destination copy unavailable or invalid; worker outputs retained for redelivery"
+				q.observeHealth("output-preservation/"+j.ID, true, 0, HealthAlert{Kind: "output_destination_preservation_lost", JobID: j.ID, Attempt: j.Attempt, Host: j.Machine, Project: j.Spec.Project, Recipients: []string{"operator", "project"}, Reason: j.Reason})
+			}
+			return nil
+		}
+		if j.Delivery.State == "verified" {
 			return nil
 		}
 		j.Delivery.State, j.Delivery.Cause, j.Delivery.VerifiedAt = "verified", "", &now
@@ -206,6 +233,7 @@ func (q *Queue) ConfirmTaskOutputs(ctx context.Context, r TaskOutputReceipt) err
 		j.Delivery.NextAttemptAt = time.Time{}
 		j.Reason = "outputs verified at destination; local collection follows retention and reference policy"
 		q.appendJobLedger(j, ledgerAttempt(j, "output_delivery_verified", r.ManifestSHA256))
+		q.observeHealth("output-preservation/"+j.ID, false, 0, HealthAlert{})
 		return nil
 	}, nil)
 }
@@ -215,7 +243,7 @@ func (q *Queue) ConfirmTaskOutputs(ctx context.Context, r TaskOutputReceipt) err
 func (q *Queue) CollectedTaskOutputs(ctx context.Context, r TaskOutputReceipt) error {
 	return q.updateRequest(ctx, func() error {
 		j := q.touchJob(r.Execution.ID)
-		if !exactTaskOutputs(j, r.StorageCustodyReceipt) || j.Delivery == nil || j.Delivery.ManifestSHA256 != r.ManifestSHA256 || j.Delivery.DestinationID != r.DestinationID {
+		if !exactTaskOutputs(j, r.StorageCustodyReceipt) || j.Delivery == nil || j.Delivery.ManifestSHA256 != r.ManifestSHA256 || j.Delivery.DestinationID != r.DestinationID || j.Delivery.VerificationRound != r.VerificationRound {
 			return ErrStale
 		}
 		if j.LocalOutputs.CollectedAt != nil {
@@ -274,6 +302,7 @@ func (a API) taskOutputHandlers(mux *requestMux) {
 		respondOperation(w, nil, a.Queue.CollectedTaskOutputs(r.Context(), req), "task_output_invalid")
 	})
 	a.taskOutputRelayHandlers(mux)
+	a.taskOutputPreservationHandlers(mux)
 }
 
 // The native backend must retire the exact installed write boundary after all
@@ -318,6 +347,12 @@ func (w Worker) finishTaskOutputs(j Job, r Result, parent string) (Result, error
 		err = w.Client.Call(context.Background(), "POST", "/api/workers/task-output-work", receipt, &work)
 		if err == nil {
 			haveWork = true
+			if !exactTaskOutputs(&work.Job, receipt) || !sameDelivery(&work.Job, work.Job) {
+				return r, ErrStale
+			}
+			if w.outputCustodyAccepted != nil {
+				w.outputCustodyAccepted.Store(true)
+			}
 		} else if !stale(err) {
 			return r, err
 		}
@@ -333,7 +368,7 @@ func (w Worker) finishTaskOutputs(j Job, r Result, parent string) (Result, error
 		}
 		return r, errStorageCustodyPending
 	}
-	if w.outputDeliverySlots != nil {
+	if w.outputDeliverySlots != nil && (!haveWork || work.Action != "collect") {
 		select {
 		case w.outputDeliverySlots <- struct{}{}:
 			defer func() { <-w.outputDeliverySlots }()
@@ -368,6 +403,12 @@ func (w Worker) finishTaskOutputs(j Job, r Result, parent string) (Result, error
 			}
 			if err = w.Client.Call(context.Background(), "POST", "/api/workers/task-output-work", receipt, &work); err != nil {
 				return r, err
+			}
+			if !exactTaskOutputs(&work.Job, receipt) || !sameDelivery(&work.Job, work.Job) {
+				return r, ErrStale
+			}
+			if w.outputCustodyAccepted != nil {
+				w.outputCustodyAccepted.Store(true)
 			}
 		}
 	}
@@ -413,11 +454,50 @@ func (w Worker) collectTaskOutputs(j Job, receipt TaskOutputReceipt, parent stri
 	if err := w.Client.Call(context.Background(), "POST", "/api/workers/task-output-work", receipt.StorageCustodyReceipt, &work); err != nil {
 		return err
 	}
+	if !exactTaskOutputs(&work.Job, receipt.StorageCustodyReceipt) || !sameDelivery(&work.Job, work.Job) || receipt.ManifestSHA256 != work.Job.Delivery.ManifestSHA256 || receipt.DestinationID != work.Job.Delivery.DestinationID {
+		return ErrStale
+	}
+	if w.outputCustodyAccepted != nil {
+		w.outputCustodyAccepted.Store(true)
+	}
+	// An intent carries immutable execution/content identity, never a reusable
+	// preservation proof. Bind this invocation to the queue's current round.
+	receipt = taskOutputReceipt(work.Job)
 	if work.Action == "collected" {
 		return nil
 	}
+	// Reconcile custody before waiting for the shared I/O slot: a blocked NAS
+	// verifier must not keep another released actor in compute recovery.
+	if w.outputDeliverySlots != nil {
+		select {
+		case w.outputDeliverySlots <- struct{}{}:
+			defer func() { <-w.outputDeliverySlots }()
+		default:
+			return errStorageCustodyPending
+		}
+	}
 	if work.Action != "collect" {
+		// A failed fresh preservation check can resume publication only while
+		// the entire immutable local spool still exists. Partial unlink replay
+		// must keep its intent and can never recapture missing command outputs.
+		if work.Action == "publish" || work.Action == "relay" || work.Action == "wait" && work.Job.Delivery.State == "failed" {
+			if _, err := os.Stat(filepath.Join(deliverySpoolPath(j, parent), "manifest.json")); err == nil {
+				_, files, verifyErr := captureDeliverySpool(j, parent, w.storageObserver)
+				if verifyErr == nil && maps.Equal(files, receipt.Files) {
+					if err = os.Remove(filepath.Join(parent, "task-output-collection.json")); err != nil && !os.IsNotExist(err) {
+						return err
+					}
+					if err = syncWorkerDir(parent); err != nil {
+						return err
+					}
+					return errStorageCustodyPending
+				}
+			}
+		}
 		return errStorageCustodyPending
+	}
+	if work.PreservationID != "" {
+		defer w.Client.Call(context.Background(), "DELETE", "/api/task-output-preservation/"+work.PreservationID, nil, nil)
 	}
 	collector, ok := w.StorageBoundary.(StorageAttemptCollector)
 	if !ok {
@@ -428,6 +508,31 @@ func (w Worker) collectTaskOutputs(j Job, receipt TaskOutputReceipt, parent stri
 	workdir := filepath.Dir(deliverySpoolPath(j, parent))
 	if err := noModelSymlinks(workdir, true); err != nil && !os.IsNotExist(err) {
 		return err
+	}
+	// Historical receipts cannot authorize deleting the last local copy. Hash
+	// the destination now on every invocation, including collection-intent
+	// replay after restart. Neither this I/O nor the HTTP stream owns q.mu.
+	var verifyErr error
+	if work.Job.Spec.OutputDestination.Kind == "nas" {
+		verifyErr = verifyQualifiedTaskOutputDelivery(work.Job, w.OutputDestinations[work.Job.Spec.OutputDestination.ID], w.outputDeliveryProgress)
+	} else {
+		verifyErr = w.verifySubmitterPreservation(work)
+	}
+	if verifyErr != nil {
+		receipt.Verified = false
+		if err := w.Client.Call(context.Background(), "POST", "/api/task-outputs/verified", receipt, nil); err != nil {
+			return err
+		}
+		return errStorageCustodyPending
+	}
+	// Recheck exact execution/manifest and the live retention/reference fences
+	// inside the queue transaction after verification, immediately before unlink.
+	var current taskOutputWork
+	if err := w.Client.Call(context.Background(), "POST", "/api/workers/task-output-work", receipt.StorageCustodyReceipt, &current); err != nil {
+		return err
+	}
+	if current.Action != "collect" || !sameDelivery(&current.Job, work.Job) || current.PreservationID != work.PreservationID {
+		return errStorageCustodyPending
 	}
 	if err := os.RemoveAll(workdir); err != nil {
 		return err
