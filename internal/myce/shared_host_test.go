@@ -394,14 +394,10 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 	// Darwin's background scheduler band has maximum priority 4; nice alone
 	// remains above it. Inspect actual payloads across fork/exec, not just the
 	// worker's report that policy application succeeded.
-	controlBand := ""
+	controlBackground := ""
 	backgroundCheck := ""
 	if runtime.GOOS == "darwin" {
-		b, err := exec.Command("ps", "-o", "pri=", "-p", fmt.Sprint(os.Getpid())).Output()
-		if err != nil {
-			t.Fatal(err)
-		}
-		controlBand = strings.TrimSpace(string(b))
+		controlBackground = sharedHostDarwinBackground(t, os.Getpid())
 		backgroundCheck = `test "$(ps -o pri= -p $$)" -le 4 && sh -c 'test "$(ps -o pri= -p $$)" -le 4' || exit 43; `
 	}
 	oldRSS := workerMemoryRSS
@@ -466,7 +462,14 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 	change(HostMaintenanceRequest{Action: "resume"})
 	s := cpuSpec(1, .01)
 	s.Run.Env = map[string]string{"GOMAXPROCS": "64"}
-	s.Run.Command = []string{"sh", "-c", backgroundCheck + `n=$(ps -o nice= -p $$); test "$n" -ge 10 && test "$GOMAXPROCS" = 1 && test "${MYCE_TOKEN+x}" != x && printf shared-host-ok`}
+	priorityCheck := backgroundCheck + `n=$(ps -o nice= -p $$); test "$n" -ge 10 && test "$GOMAXPROCS" = 1 && test "${MYCE_TOKEN+x}" != x || { printf 'priority check: nice=%s GOMAXPROCS=%s token-present=%s\n' "$n" "$GOMAXPROCS" "${MYCE_TOKEN+x}" >&2; exit 42; }; `
+	failed := func(kind string, j Job) {
+		t.Helper()
+		var logs []Log
+		err := c.Call(ctx, "GET", "/api/jobs/"+j.ID+"/logs", nil, &logs)
+		t.Fatalf("%s failed: %+v; logs=%+v (read: %v)", kind, j, logs, err)
+	}
+	s.Run.Command = []string{"sh", "-c", priorityCheck + `printf shared-host-ok`}
 	var j Job
 	if err := c.Call(ctx, "POST", "/api/jobs", s, &j); err != nil {
 		t.Fatal(err)
@@ -476,7 +479,7 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 			t.Fatal(err)
 		}
 		if j.State == "failed" {
-			t.Fatalf("native command failed: %+v", j)
+			failed("native command", j)
 		}
 		return j.State == "succeeded"
 	})
@@ -488,8 +491,8 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 	}
 	// Exercise the separate group/member gates, including a sidecar and the
 	// main payload. Its marker proves the helper checked priority and token too.
-	s.Run.Sidecars = []NativeSidecar{{Name: "helper", Env: map[string]string{"GOMAXPROCS": "64"}, Command: []string{"sh", "-c", backgroundCheck + `n=$(ps -o nice= -p $$); test "$n" -ge 10 && test "$GOMAXPROCS" = 1 && test "${MYCE_TOKEN+x}" != x || exit 42; touch helper-ready; while :; do sleep 1; done`}}}
-	s.Run.Command = []string{"sh", "-c", backgroundCheck + `n=$(ps -o nice= -p $$); test "$n" -ge 10 && test "$GOMAXPROCS" = 1 && test "${MYCE_TOKEN+x}" != x || exit 42; while test ! -f helper-ready; do sleep .01; done`}
+	s.Run.Sidecars = []NativeSidecar{{Name: "helper", Env: map[string]string{"GOMAXPROCS": "64"}, Command: []string{"sh", "-c", priorityCheck + `touch helper-ready; while :; do sleep 1; done`}}}
+	s.Run.Command = []string{"sh", "-c", priorityCheck + `while test ! -f helper-ready; do sleep .01; done`}
 	if err := c.Call(ctx, "POST", "/api/jobs", s, &j); err != nil {
 		t.Fatal(err)
 	}
@@ -498,7 +501,7 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 			t.Fatal(err)
 		}
 		if j.State == "failed" {
-			t.Fatalf("native group failed: %+v", j)
+			failed("native group", j)
 		}
 		return j.State == "succeeded"
 	})
@@ -506,11 +509,34 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 		t.Fatal("payload priority changed worker control", priority, controlPriority, err)
 	}
 	if runtime.GOOS == "darwin" {
-		b, err := exec.Command("ps", "-o", "pri=", "-p", fmt.Sprint(os.Getpid())).Output()
-		if err != nil || strings.TrimSpace(string(b)) != controlBand {
-			t.Fatal("payload background policy changed worker control", string(b), controlBand, err)
+		if background := sharedHostDarwinBackground(t, os.Getpid()); background != controlBackground {
+			t.Fatal("payload background policy changed worker control", background, controlBackground)
 		}
 	}
+}
+
+func sharedHostDarwinBackground(t *testing.T, pid int) string {
+	t.Helper()
+	// ps pri is a dynamic scheduling priority: an ordinary process can move
+	// from 31 to 46 under load without a policy change (#473). Read libproc's
+	// actual internal AND externally imposed Darwin background flags instead.
+	// getpriority(PRIO_DARWIN_PROCESS) alone only reports internal policy when
+	// querying self, so it misses the external policy applied to payload PIDs.
+	b, err := exec.Command("python3", "-c", `import ctypes as c, sys
+lib = c.CDLL('/usr/lib/libproc.dylib', use_errno=True)
+lib.proc_pidinfo.argtypes = [c.c_int, c.c_int, c.c_uint64, c.c_void_p, c.c_int]
+# sys/proc_info.h: PROC_PIDTBSDINFO=3, sizeof(proc_bsdinfo)=136;
+# pbi_flags is its first uint32. mach/task_policy.h defines both flag bits.
+info = c.create_string_buffer(136)
+n = lib.proc_pidinfo(int(sys.argv[1]), 3, 0, info, len(info))
+if n != len(info):
+    raise OSError(c.get_errno(), 'proc_pidinfo returned %d bytes' % n)
+print(c.c_uint32.from_buffer(info).value & (0x8000 | 0x10000))
+`, fmt.Sprint(pid)).CombinedOutput()
+	if err != nil {
+		t.Fatalf("read Darwin background policy: %v: %s", err, b)
+	}
+	return strings.TrimSpace(string(b))
 }
 
 func TestSharedHostPrefersOrdinaryAndFallsBackImmediately(t *testing.T) {
