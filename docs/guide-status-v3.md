@@ -58,6 +58,26 @@ state. Ordinary `output_refs`, attempt outcomes, cleanup causes and dependency
 eligibility remain unchanged. See [recover failed-attempt outputs](guide-files-v3.md#recover-outputs-from-a-failed-terminal-attempt)
 for the explicit recovery/download commands and independent byte retention.
 
+Job GET and status job rows expose a privacy projection in `spec`, not the
+submitted spec. They include `spec_projection: {"projected": true, "omitted": [...]}`.
+`omitted` lists paths relative to `spec` that the projection strips, regardless
+of whether those fields were submitted. In particular, absent `spec.files`
+**does not mean no files were submitted**. The same metadata is available through
+Python `Client.get()` and `Client.list()`.
+
+The projection strips these entire fields: `after`, `args`, `diagnostics`,
+`disk`, `environment`, `execution`, `expected_minutes`, `extension`,
+`extension_digest`, `fan_out`, `files`, `give_up_at`, `inputs`, `isolation`,
+`output_delivery`, `outputs`, `prepare_source`, `profile_memory`,
+`reason`, `require_target`, `run`, `shared_inputs`, `size_hint`, and `targets`.
+Status rows additionally strip `submission_key`; job GET retains it. Within `program`, it strips `args` and `file`, retaining only
+`type`. Within `extension_check`, it strips `automatic`, `directory` and
+`reserve`, retaining only `work` and `timeout`. Some stripped fields encode
+empty or zero placeholders because of their JSON types; those placeholders do
+not preserve submitted values. Other retained fields still follow normal JSON
+`omitempty` rules. This metadata does not expose commands, environment values,
+file references or credentials. There is no full-spec read mode.
+
 Native stage exceptions appear in job `isolation` as
 `unsandboxed: <reason>` in status JSON and job GET; CLI/page reasons include the
 same text through queued, running and terminal outcomes. Legacy registrations

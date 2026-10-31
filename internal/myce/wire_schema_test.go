@@ -56,7 +56,7 @@ func generatedJobSchema(t *testing.T) []byte {
 	}
 	nullableCollections(schema)
 	schema["title"] = "Mycelium Job reply v1"
-	schema["description"] = "Generated from Job and Spec JSON types by TestWireSchemas. This is a reply schema, not submission validation: a cancelled reservation has a minimal zero-valued spec. x-contract marks stable identity/lifecycle fields versus diagnostic projections; reason text is never a machine contract. Optional fields follow Go omitempty; GET replies also omit execution payloads, including run.command. Additional diagnostics may grow."
+	schema["description"] = "Generated from Job and Spec JSON types by TestWireSchemas. This is a reply schema, not submission validation: a cancelled reservation has a minimal zero-valued spec. x-contract marks stable identity/lifecycle fields versus diagnostic projections; reason text is never a machine contract. Optional fields follow Go omitempty; observation replies include spec_projection describing omitted spec fields, including files and run. Additional diagnostics may grow."
 	defs := schema["$defs"].(map[string]any)
 	// GET Job replies redact execution payloads, including run.command.
 	// Spec encoding itself stays unchanged for durable submission fingerprints.
@@ -66,7 +66,7 @@ func generatedJobSchema(t *testing.T) []byte {
 		for _, property := range properties {
 			property.(map[string]any)["x-contract"] = "diagnostic"
 		}
-		stable := []string{"id", "spec", "state", "attempt", "machine", "session", "release_confirmed", "finished_at", "queued", "cancelled_at", "infrastructure_retries", "dependency", "cancellation", "cancellation_scope", "ledger", "delivery", "recovered_results"}
+		stable := []string{"id", "spec", "spec_projection", "state", "attempt", "machine", "session", "release_confirmed", "finished_at", "queued", "cancelled_at", "infrastructure_retries", "dependency", "cancellation", "cancellation_scope", "ledger", "delivery", "recovered_results"}
 		if definition == "Spec" {
 			stable = []string{"project", "submission_key", "after", "output_delivery"}
 		}
@@ -85,6 +85,7 @@ func generatedJobSchema(t *testing.T) []byte {
 	recovered["recovered_by"].(map[string]any)["const"] = "operator"
 	recovered["requested_by"].(map[string]any)["description"] = "Operator-asserted requester label, not a separately authenticated user identity."
 	recovered["manifest_sha256"].(map[string]any)["description"] = "SHA-256 of canonical Go JSON for files (sorted keys, compact encoding), verified at recovery time."
+	job["spec_projection"].(map[string]any)["description"] = "Observation privacy policy: projected is true; omitted lists stripped paths relative to spec, regardless of submitted presence. Empty placeholders do not retain submitted values. Absence of spec.files is not evidence that no files were submitted."
 	job["start_window"].(map[string]any)["description"] = "Effective original production start-window length in nanoseconds, retained across recovery. Available before startup; absent for experiments."
 	job["start_by_explicit"].(map[string]any)["description"] = "Whether submitted start_by was caller-owned and absolute. New jobs persist true or false; absent on older records means preserve their existing cutoff as absolute."
 	specProperties := defs["Spec"].(map[string]any)["properties"].(map[string]any)

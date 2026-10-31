@@ -462,6 +462,10 @@ class Client:
     def get(self, job_id: str) -> dict[str, Any]:
         """Return a Job reply with identity and per-attempt memory_attempts.
 
+        spec is a privacy projection. spec_projection.omitted lists stripped
+        paths relative to spec, regardless of submitted presence. In particular,
+        absent spec.files does not mean that no files were submitted.
+
         Each entry contains attempt/machine/session, the observed memory_peak
         (including events and swap_gb when read), and memory_envelope. Missing
         readings are unknown; numeric zero is a measured zero. Constrained

@@ -352,7 +352,16 @@ type Copy struct {
 	ReleaseReason    string `json:"release_reason,omitempty"`
 }
 
+// SpecProjection describes fields stripped by the observation privacy policy.
+// Omitted paths are relative to spec and do not disclose submitted presence.
+type SpecProjection struct {
+	Projected bool     `json:"projected"`
+	Omitted   []string `json:"omitted"`
+}
+
 type Job struct {
+	SpecProjection *SpecProjection `json:"spec_projection,omitempty"`
+
 	RecoveredResults    []RecoveredResult    `json:"recovered_results,omitempty"`
 	PlacementIntent     *PlacementIntent     `json:"placement_intent,omitempty"`
 	Placement           *PlacementDecision   `json:"placement,omitempty"`

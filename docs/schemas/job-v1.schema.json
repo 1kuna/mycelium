@@ -1697,6 +1697,11 @@
           "$ref": "#/$defs/Spec",
           "x-contract": "stable"
         },
+        "spec_projection": {
+          "$ref": "#/$defs/SpecProjection",
+          "description": "Observation privacy policy: projected is true; omitted lists stripped paths relative to spec, regardless of submitted presence. Empty placeholders do not retain submitted values. Absence of spec.files is not evidence that no files were submitted.",
+          "x-contract": "stable"
+        },
         "start_by_explicit": {
           "description": "Whether submitted start_by was caller-owned and absolute. New jobs persist true or false; absent on older records means preserve their existing cutoff as absolute.",
           "type": "boolean",
@@ -2993,6 +2998,27 @@
       ],
       "type": "object"
     },
+    "SpecProjection": {
+      "properties": {
+        "omitted": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "projected": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "projected",
+        "omitted"
+      ],
+      "type": "object"
+    },
     "WorkLearningChange": {
       "properties": {
         "after": {
@@ -3097,6 +3123,6 @@
   },
   "$ref": "#/$defs/Job",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "Generated from Job and Spec JSON types by TestWireSchemas. This is a reply schema, not submission validation: a cancelled reservation has a minimal zero-valued spec. x-contract marks stable identity/lifecycle fields versus diagnostic projections; reason text is never a machine contract. Optional fields follow Go omitempty; GET replies also omit execution payloads, including run.command. Additional diagnostics may grow.",
+  "description": "Generated from Job and Spec JSON types by TestWireSchemas. This is a reply schema, not submission validation: a cancelled reservation has a minimal zero-valued spec. x-contract marks stable identity/lifecycle fields versus diagnostic projections; reason text is never a machine contract. Optional fields follow Go omitempty; observation replies include spec_projection describing omitted spec fields, including files and run. Additional diagnostics may grow.",
   "title": "Mycelium Job reply v1"
 }

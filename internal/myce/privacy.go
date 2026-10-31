@@ -271,6 +271,17 @@ func statusJobInputs(job *Job) Job {
 	spec.Workload = j.Spec.Workload
 	spec.Needs = j.Spec.Needs
 	j.Spec = spec
+	// This policy list is independent of submitted values, including on a
+	// second redaction pass. Empty wire placeholders still omit original values.
+	j.SpecProjection = &SpecProjection{Projected: true, Omitted: []string{
+		"after", "args", "diagnostics", "disk", "environment", "execution",
+		"expected_minutes", "extension", "extension_check.automatic",
+		"extension_check.directory", "extension_check.reserve", "extension_digest",
+		"fan_out", "files", "give_up_at", "inputs", "isolation",
+		"output_delivery", "outputs", "prepare_source", "profile_memory",
+		"program.args", "program.file", "reason", "require_target", "run",
+		"shared_inputs", "size_hint", "submission_key", "targets",
+	}}
 	j.Extensions = nil
 	j.EnvironmentRecipes = nil
 	j.SidecarEnvironmentRecipes = nil
