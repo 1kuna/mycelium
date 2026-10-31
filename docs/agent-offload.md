@@ -17,6 +17,13 @@ See [live portability advice](portability.md); missing variants are gaps to
 investigate, not proof of hard requirements. Keep explicit CPU resources/checks
 and MY-19 parity before splitting.
 
+When authoring a job YAML/JSON for `myce submit`, first run
+`myce spec check FILE` and correct any reported errors until it exits 0.
+This offline check uses submit's strict decoding and static validation without
+fleet authority or uploads. Passing establishes static validity only; check live
+eligibility, admission and qualification separately. See the
+[job reference](job-reference.md#batch-yaml) for exit codes and scope.
+
 ## Install the agent skill
 
 From this repository, copy the skill directory, including its supporting files,
