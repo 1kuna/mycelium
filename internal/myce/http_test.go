@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -79,8 +80,11 @@ func TestAPIRejectsMalformedRequests(t *testing.T) {
 func TestAPIJobReplyRedactsExecutionPayload(t *testing.T) {
 	q, _ := fixture(t)
 	s := spec("experiment")
+	s.SubmissionKey = "projection-test"
 	s.Run.Command = []string{"echo", "private-command"}
-	s.Run.Env = map[string]string{"PRIVATE": "private-env"}
+	s.Run.Env = map[string]string{"PRIVATE": "private-env", "MYCE_TOKEN": "private-token"}
+	_, ref := retentionUpload(t, retentionClient(t, q), "submitted input")
+	s.Files = FileManifest{"private-input.txt": ref}
 	j := submit(t, q, s)
 	if err := q.update(func() error {
 		stored := q.s.Jobs[j.ID]
@@ -93,15 +97,42 @@ func TestAPIJobReplyRedactsExecutionPayload(t *testing.T) {
 	}
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer server.Close()
+	// Metadata does not bypass the existing fleet-token read authorization.
+	for _, token := range []string{"", "wrong"} {
+		r := httptest.NewRequest("GET", "/api/jobs/"+j.ID, nil)
+		if token != "" {
+			r.Header.Set("Authorization", "Bearer "+token)
+		}
+		w := httptest.NewRecorder()
+		API{Queue: q, Token: "test"}.Handler().ServeHTTP(w, r)
+		if w.Code != http.StatusUnauthorized || strings.Contains(w.Body.String(), "spec_projection") {
+			t.Errorf("unauthorized GET: status=%d body=%s", w.Code, w.Body.String())
+		}
+	}
 	var reply map[string]json.RawMessage
 	c := Client{URL: server.URL, Token: "test"}
 	if err := c.Call(context.Background(), "GET", "/api/jobs/"+j.ID, nil, &reply); err != nil {
 		t.Fatal(err)
 	}
 	validateWireValue(t, compileWireSchema(t, "job-v1.schema.json"), reply)
+	var projection SpecProjection
+	if err := json.Unmarshal(reply["spec_projection"], &projection); err != nil {
+		t.Fatal(err)
+	}
+	if !projection.Projected {
+		t.Error("GET must explicitly mark spec as projected")
+	}
+	for _, field := range []string{"files", "run", "args", "environment"} {
+		if !slices.Contains(projection.Omitted, field) {
+			t.Errorf("GET did not declare omitted %s", field)
+		}
+	}
 	var specView map[string]json.RawMessage
 	if err := json.Unmarshal(reply["spec"], &specView); err != nil {
 		t.Fatal(err)
+	}
+	if string(specView["submission_key"]) != `"projection-test"` || slices.Contains(projection.Omitted, "submission_key") {
+		t.Error("GET must retain submission_key without declaring it omitted")
 	}
 	var run map[string]json.RawMessage
 	if raw, present := specView["run"]; present {
@@ -114,6 +145,26 @@ func TestAPIJobReplyRedactsExecutionPayload(t *testing.T) {
 			t.Errorf("GET exposed run.%s", field)
 		}
 	}
+	if _, exposed := specView["files"]; exposed {
+		t.Error("GET exposed submitted file references")
+	}
+	var status Snapshot
+	if err := c.Call(context.Background(), "GET", "/api/status", nil, &status); err != nil {
+		t.Fatal(err)
+	}
+	if len(status.Jobs) != 1 || status.Jobs[0].SpecProjection == nil {
+		t.Fatal("status must declare its spec projection")
+	}
+	if !slices.Contains(status.Jobs[0].SpecProjection.Omitted, "submission_key") || status.Jobs[0].Spec.SubmissionKey != "" {
+		t.Error("status must declare submission_key omitted")
+	}
+	q.mu.Lock()
+	stored := q.s.Jobs[j.ID]
+	unchanged := stored.Spec.Files["private-input.txt"] == ref && stored.Spec.Run.Env["MYCE_TOKEN"] == "private-token"
+	q.mu.Unlock()
+	if !unchanged {
+		t.Fatal("projection changed submitted payload")
+	}
 	if _, exposed := specView["args"]; exposed {
 		t.Error("GET exposed args")
 	}
@@ -121,7 +172,7 @@ func TestAPIJobReplyRedactsExecutionPayload(t *testing.T) {
 		t.Error("GET exposed environment recipe")
 	}
 	body, _ := json.Marshal(reply)
-	for _, private := range []string{"private-command", "private-env", "private-args", "/private/recipe.lock"} {
+	for _, private := range []string{"private-command", "private-env", "private-token", "private-args", "/private/recipe.lock", "private-input.txt", ref.SHA256} {
 		if strings.Contains(string(body), private) {
 			t.Errorf("GET exposed %q", private)
 		}

@@ -2072,6 +2072,9 @@ func (q *Queue) projectJobDiagnostics(j *Job, forStatus, jobReply bool) {
 		}
 		if jobReply {
 			j.Spec.SubmissionKey = key
+			j.SpecProjection.Omitted = slices.DeleteFunc(j.SpecProjection.Omitted, func(path string) bool {
+				return path == "submission_key"
+			})
 		}
 	}
 }
