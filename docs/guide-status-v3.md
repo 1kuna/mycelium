@@ -681,9 +681,16 @@ Shared hosts retain `last_resort: true`. `free_host_memory_gb` additionally resp
 the seven-day external peak and protected reserve, without increasing the static
 allowance. No samples means withheld admission. Missing `shared_host` normally
 means no profile; compare queue policy before interpreting an old worker's row.
-CPU nice=10 is native command priority, not CPU-time enforcement. OS pressure
-and interactive-load preemption remain unimplemented (#390). See
-[shared hosts](shared-hosts.md) for measurement, eligibility and removal semantics.
+
+Shared-profile hosts also report `shared_host_pressure` (OS memory level/PSI,
+foreground wake lateness, local age and queue receipt time),
+`shared_host_yield_reason` (the queue-owned hysteresis latch), and
+`shared_cpu_enforcement`. A pressure reason withholds admission and marks exact
+attempts with `shared_host_pressure` planned-stop provenance. Unknown/stale
+observations block admission without becoming measured pressure. Linux reports
+the actual delegated quota/weight; macOS explicitly reports CPU time unenforced.
+See [shared-host thresholds and qualification](shared-hosts.md#pressure-response).
+
 
 ## Execution elapsed time, remaining estimates, and application progress
 

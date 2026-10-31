@@ -2949,6 +2949,14 @@ with positive existing CPU/RAM allowances, an explicitly measured interactive
 reserve, #353 historical/live RAM admission and existing last-resort placement.
 GPU admission uses the existing component exclusion path. Drains, exact launch
 fences and cleanup remain authoritative. First phase uses prepared environments;
-Docker/extensions/new preparations and pressure-triggered yield/CPU-time
-containment remain tracked under #390. Nice and core reservations are not hard
-CPU shares; macOS memory remains admission-only.
+Docker/extensions/new preparations remain withheld. Shared-profile commands and
+sidecars use background taskpolicy on macOS; common runtime concurrency is bounded
+by declared cores. Linux's delegated execution subtree enforces aggregate CPU
+weight/quota outside worker control threads. Fresh OS memory-pressure/PSI and
+foreground-class scheduling-latency measurements with amplitude hysteresis stop
+work through exact-attempt planned preemption and the existing checkpoint grace,
+then requeue the same logical job without infrastructure loss. Unknown/stale
+samples withhold admission. Status names the pressure reason and enforcement mode.
+macOS CPU time and RAM remain unenforced; QoS/concurrency hints are cooperative,
+and native Linux/representative owner-pressure qualification remains separate.
+See the shared-host guide for thresholds, evidence and costs.

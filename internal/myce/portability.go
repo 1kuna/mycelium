@@ -595,7 +595,7 @@ func WritePortability(dest io.Writer, r PortabilityReport, asJSON bool) error {
 		for _, h := range t.Hosts {
 			fmt.Fprintf(&out, "  %s: %s; CPU=%d free=%d; accelerator=%g GiB free=%g; %s; %s; admission=%s\n", h.Host, h.Freshness, h.LogicalCPUs, h.FreeCPUCores, h.AcceleratorMemoryGB, h.FreeAcceleratorMemoryGB, h.Prepared, h.Qualification, h.Admission)
 			if h.SharedHost != nil {
-				fmt.Fprintf(&out, "    shared interactive fallback: reserve=%g GiB; native CPU commands in prepared environments; nice>=10, CPU-time cap not enforced\n", h.SharedHost.InteractiveReserveGB)
+				fmt.Fprintf(&out, "    shared interactive fallback: reserve=%g GiB; native CPU commands in prepared environments; nice>=10; inspect worker CPU enforcement and pressure status\n", h.SharedHost.InteractiveReserveGB)
 			}
 			fmt.Fprintf(&out, "    inventory last seen: %s; hardware observed: %s\n", h.LastSeen.Format(time.RFC3339), h.HardwareObservedAt.Format(time.RFC3339))
 			if h.Work != "" {

@@ -467,7 +467,7 @@ Drain/disable admission before installing an upgrade. Matching queue and workers
 must use the current protocol. The installer updates only the selected service,
 enables/starts it and restarts an existing Linux service. It installs no local
 start condition or timer. Linux units retain GPU EnvironmentFile,
-`Restart=on-failure`, `Delegate=memory`, `KillMode=control-group` and bounded stop.
+`Restart=on-failure`, `Delegate=memory cpu`, `KillMode=control-group` and bounded stop.
 macOS uses the generated launchd service. Configuration and secret files stay
 private. Never run the ordinary binary as root.
 
@@ -955,7 +955,7 @@ explicit `--memory-mode unified` and Metal always use this rule.
 
 
 Linux cgroup v2 workers installed as systemd user services enforce declared
-ceilings. The generated and manual worker units use `Delegate=memory` and retain
+ceilings. The generated and manual worker units use `Delegate=memory cpu` and retain
 `KillMode=control-group`. At startup the worker moves itself into the service's
 `worker` leaf, then enables the delegated memory controller in the service
 parent. Each native batch attempt and model-server execution gets a unique
@@ -1250,9 +1250,15 @@ These hosts can run fitting light work through Mycelium. Use the opt-in
 reserves, #353 external peaks, native command nice=10, positive CPU/RAM budgets
 and last-resort placement. `myce host profile HOST --shared=true
 --interactive-reserve-gb GiB` requires a drained/disabled, fresh quiescent host;
-`--shared=false` removes the profile without resuming admission. Started commands
-are not pressure-preempted in this phase. Hard CPU share and OS-pressure yielding
-are follow-up #390. Existing exclusions, drain ownership and storage fences apply.
+`--shared=false` removes the profile without resuming admission. Measured OS
+memory pressure or foreground scheduling latency stops work through planned
+checkpoint/requeue with hysteresis. Linux execution cgroups cap aggregate CPU
+time. macOS applies `taskpolicy -b` (background CPU and I/O priority), caps
+aggregate declared cores at the CPU allowance, and clamps common runtime thread
+counts to each command's declared cores. Payloads can ignore those thread hints:
+aggregate CPU time and RAM ceilings remain unenforced on macOS. See the
+shared-host guide for thresholds and qualification limits. Existing exclusions,
+drain ownership and storage fences apply.
 
 ## CPU capacity and allowances (R1)
 

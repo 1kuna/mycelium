@@ -463,7 +463,7 @@ func TestUserUnitLiteralPaths(t *testing.T) {
 				t.Errorf("quoted or unescaped EnvironmentFile: %s", text)
 			}
 		}
-		if role == "worker" && (!strings.Contains(text, "Delegate=memory\n") || strings.Contains(text, "PrivateDevices=") || strings.Contains(text, "PrivateUsers=")) {
+		if role == "worker" && (!strings.Contains(text, "Delegate=memory cpu\n") || strings.Contains(text, "PrivateDevices=") || strings.Contains(text, "PrivateUsers=")) {
 			t.Fatal("worker device access/delegation changed")
 		}
 		for _, bad := range []string{" ", "\t", "'", "\"", "\\", "\n", "\r", "\u00a0"} {

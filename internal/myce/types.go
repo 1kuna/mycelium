@@ -452,6 +452,9 @@ type Job struct {
 type Machine struct {
 	SharedHost             *SharedHostProfile     `json:"shared_host,omitempty"`        // Worker acknowledgement.
 	SharedHostReason       string                 `json:"shared_host_reason,omitempty"` // Queue admission diagnostic.
+	SharedHostPressure     *SharedHostPressure    `json:"shared_host_pressure,omitempty"`
+	SharedHostYieldReason  string                 `json:"shared_host_yield_reason,omitempty"` // Queue-owned hysteresis.
+	SharedCPUEnforcement   string                 `json:"shared_cpu_enforcement,omitempty"`
 	ExternalMemory         *ExternalMemoryHistory `json:"external_memory,omitempty"`
 	MemoryObservation      *HostMemoryObservation `json:"memory_observation,omitempty"`
 	Release                *RunningRelease        `json:"release,omitempty"`
