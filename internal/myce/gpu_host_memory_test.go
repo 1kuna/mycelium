@@ -68,12 +68,13 @@ func (f gpuHostFS) ReadDir(p string) ([]os.DirEntry, error) {
 }
 
 func TestGPUHostMemoryCompleteAttempt(t *testing.T) {
-	for _, mode := range []string{"complete", "helper", "helper missing card", "helper malformed manager", "helper stale", "helper failed", "missing host field", "swap growth", "swap churn", "host OOM", "missing driver field", "missing client identity", "missing debugfs", "malformed debugfs", "masked host drop", "missing events"} {
+	for _, mode := range []string{"complete", "b70 212 KiB", "b70 startup pages", "host PSI", "cgroup PSI", "low available", "missing host PSI", "missing cgroup PSI", "helper", "helper missing card", "helper malformed manager", "helper stale", "helper failed", "missing host field", "swap growth", "swap churn", "host OOM", "missing driver field", "missing client identity", "missing debugfs", "malformed debugfs", "masked host drop", "missing events"} {
 		t.Run(mode, func(t *testing.T) {
 			a, err := fakeCeilings(t).create("attempt-xe", 16<<30, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
+			a.pageSize = 4096 // b70 kernel pages, independent of the test host.
 			proc := t.TempDir()
 			put := func(p, v string) {
 				t.Helper()
@@ -86,7 +87,12 @@ func TestGPUHostMemoryCompleteAttempt(t *testing.T) {
 				}
 			}
 			put("meminfo", "MemAvailable: 24000000 kB\nSwapTotal: 8388608 kB\nSwapFree: 6388608 kB\n")
+			if strings.HasPrefix(mode, "b70 ") {
+				// The issue's carried swap baseline is 2,069,843,968 bytes.
+				put("meminfo", "MemAvailable: 24000000 kB\nSwapTotal: 8388608 kB\nSwapFree: 6367276 kB\n")
+			}
 			put("vmstat", "oom_kill 3\npswpout 100\n")
+			put("pressure/memory", "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n")
 			a.fs = gpuHostFS{memoryFS: a.fs, proc: proc}
 			a.hostBaseline, err = readGPUHostState(a.fs)
 			if err != nil {
@@ -97,13 +103,47 @@ func TestGPUHostMemoryCompleteAttempt(t *testing.T) {
 				put("meminfo", "MemAvailable: 15000000 kB\n")
 			}
 			if mode == "swap growth" {
-				put("meminfo", "MemAvailable: 15000000 kB\nSwapTotal: 8388608 kB\nSwapFree: 6388607 kB\n")
+				put("meminfo", "MemAvailable: 15000000 kB\nSwapTotal: 8388608 kB\nSwapFree: 6257536 kB\n") // +128 MiB
 			}
 			if mode == "host OOM" {
 				put("vmstat", "oom_kill 4\npswpout 100\n")
 			}
 			if mode == "swap churn" {
-				put("vmstat", "oom_kill 3\npswpout 101\n")
+				put("vmstat", "oom_kill 3\npswpout 32868\n") // 128 MiB out, even with flat swap used.
+			}
+			if mode == "b70 212 KiB" {
+				// #303 incident: 212 KiB growth, 23 pages out, >=17.8 GiB
+				// MemAvailable, zero attempt swap/events. Carried swap is baseline.
+				put("meminfo", "MemAvailable: 18664653 kB\nSwapTotal: 8388608 kB\nSwapFree: 6367064 kB\n")
+				put("vmstat", "oom_kill 3\npswpout 123\n")
+				for _, name := range []string{"memory.swap.current", "memory.swap.peak"} {
+					if err := os.WriteFile(filepath.Join(a.path, name), []byte("0\n"), 0600); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			if mode == "b70 startup pages" {
+				put("meminfo", "MemAvailable: 15000000 kB\nSwapTotal: 8388608 kB\nSwapFree: 6367276 kB\n")
+				put("vmstat", "oom_kill 3\npswpout 102\n")
+			}
+			if mode == "host PSI" {
+				put("pressure/memory", "some avg10=1.00 avg60=0.00 avg300=0.00 total=100000\n")
+			}
+			if mode == "cgroup PSI" {
+				if err := os.WriteFile(filepath.Join(a.path, "memory.pressure"), []byte("some avg10=1.00 avg60=0.00 avg300=0.00 total=100000\nfull avg10=1.00 avg60=0.00 avg300=0.00 total=100000\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mode == "low available" {
+				put("meminfo", "MemAvailable: 131072 kB\nSwapTotal: 8388608 kB\nSwapFree: 6388608 kB\n")
+			}
+			if mode == "missing host PSI" {
+				put("pressure/memory", "some avg10=unknown\n")
+			}
+			if mode == "missing cgroup PSI" {
+				if err := os.Remove(filepath.Join(a.path, "memory.pressure")); err != nil {
+					t.Fatal(err)
+				}
 			}
 			raw := xeHostFD("7", "0000:03:00.0", 83176)
 			if mode == "missing driver field" {
@@ -191,7 +231,7 @@ func TestGPUHostMemoryCompleteAttempt(t *testing.T) {
 				t.Fatal("no sample")
 			}
 			peak := finish()
-			if strings.HasPrefix(mode, "helper ") || mode == "missing host field" || mode == "missing driver field" || mode == "missing client identity" || mode == "missing debugfs" || mode == "malformed debugfs" || mode == "missing events" {
+			if strings.HasPrefix(mode, "helper ") || mode == "missing host field" || mode == "missing host PSI" || mode == "missing cgroup PSI" || mode == "missing driver field" || mode == "missing client identity" || mode == "missing debugfs" || mode == "malformed debugfs" || mode == "missing events" {
 				if peak.GPUHost != nil || peak.NonreclaimableGB != nil {
 					t.Fatalf("incomplete attempt enabled GPU reduction: %+v", peak)
 				}
@@ -199,6 +239,12 @@ func TestGPUHostMemoryCompleteAttempt(t *testing.T) {
 			}
 			driver := float64(83176+40)/(1<<20) + float64(2*28672)/(1<<30)
 			drop := float64(9000000) / (1 << 20)
+			if mode == "b70 212 KiB" {
+				drop = float64(24000000-18664653) / (1 << 20)
+			}
+			if mode == "low available" {
+				drop = float64(24000000-131072) / (1 << 20)
+			}
 			if mode == "masked host drop" {
 				driver += 8 - float64(28672)/(1<<30)
 				drop = 0
@@ -210,8 +256,28 @@ func TestGPUHostMemoryCompleteAttempt(t *testing.T) {
 			if peak.GPUHost.OutsideGB == nil || math.Abs(*peak.GPUHost.OutsideGB-wantOutside) > 1e-8 {
 				t.Fatalf("wrong synchronized outside peak %+v", peak.GPUHost)
 			}
-			if peak.constrained() != (mode == "swap growth" || mode == "swap churn" || mode == "host OOM") {
+			if peak.constrained() != (mode == "swap growth" || mode == "swap churn" || mode == "host OOM" || mode == "host PSI" || mode == "cgroup PSI" || mode == "low available") {
 				t.Fatalf("host swap growth not retained: %+v", peak)
+			}
+			if mode == "b70 212 KiB" || mode == "host PSI" || mode == "swap growth" || mode == "low available" {
+				// Send the actual sampler result through learning, rather than
+				// stopping at the diagnostic flag. Identity/timing use fake time.
+				q, clock, m, spec := observationFixture(t)
+				spec.Needs.Memory = "auto"
+				run := startObservation(t, q, m, spec)
+				clock.Advance(time.Second)
+				r := result(&run, true)
+				r.MemoryPeak = peak
+				if err := q.Complete(r); err != nil {
+					t.Fatal(err)
+				}
+				learned := false
+				for _, point := range q.s.WorkObservations {
+					learned = learned || !point.MemoryRecordedAt.IsZero()
+				}
+				if learned != (mode == "b70 212 KiB") {
+					t.Fatalf("pressure eligibility %s: learned=%t", mode, learned)
+				}
 			}
 		})
 	}
@@ -321,6 +387,7 @@ func testGPUHostMemoryBlockedDriver(t *testing.T, blockedAtFinish bool) {
 	}
 	put(filepath.Join(proc, "meminfo"), "MemAvailable: 24000000 kB\nSwapTotal: 8388608 kB\nSwapFree: 6388608 kB\n")
 	put(filepath.Join(proc, "vmstat"), "oom_kill 0\npswpout 0\n")
+	put(filepath.Join(proc, "pressure/memory"), "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\n")
 	put(filepath.Join(proc, "7/fdinfo/3"), xeHostFD("7", "0000:03:00.0", 83176))
 	put(filepath.Join(proc, "debug/0000:03:00.0/gtt_mm"), "use_type: 1\nuse_tt: 1\nusage: 28672\n")
 	put(filepath.Join(a.path, "cgroup.procs"), "7\n")

@@ -2171,8 +2171,28 @@ driver collection has a 200 ms coverage window, matching resident cadence; a gap
 or final age beyond two periods rejects completeness. Attempt completion waits
 at most one period for a cancelled collector; late results cannot change its
 published peak. This bounds observation latency, never job execution time.
-Every host/driver sample must succeed; existing nonzero host swap is allowed,
-but swap growth, swap-out or host OOM invalidates the attempt's learning.
+Every host/driver sample must succeed; existing nonzero host swap is allowed.
+Host OOM or memory PSI `some avg10 >= 1%` rejects learning. This reuses the
+shared-host pressure band: approximately 100 ms of reclaim stalls per ten
+seconds. Attempt-cgroup PSI uses the same band (`some` includes `full` stalls),
+including capped descendants. Missing or malformed PSI prevents complete
+component/GPU evidence and keeps conservative sizing.
+
+Host swap-used growth and cumulative swap-out bytes are compared independently
+with a budget of 1% of the smaller of the attempt's resident peak and the
+minimum host MemAvailable. Reject if either exceeds that budget. Compare
+whole-attempt maxima against the prelaunch baseline at finish, rather than
+against startup's near-zero RSS; historical swap is never new pressure.
+One percent bounds the potentially hidden resident error far below the existing
+25% growth margin, while the availability bound prevents large jobs excusing
+swap churn as headroom disappears. Also reject if minimum MemAvailable falls
+below max(operator host reserve, 25% of resident peak, 128 MiB): preserve the
+existing growth and minimum launch-drift headroom even without a PSI spike.
+The #303 separation incident's 212 KiB growth and 23 4-KiB pages out, with at
+least 17.8 GiB available and no attempt swap/events, are below these limits.
+These thresholds bound measurement error and available growth room; they are
+not a claim of native two-card qualification. This supersedes the strict
+any-host-page rule, following the #303 operator ruling and corrective assignment.
 Other GPU work retains total-peak sizing. Native GPU concurrency acceptance is
 separate from estimator implementation. Missing counters, older workers, macOS
 RSS evidence and cross-machine transfers retain conservative sizing. This
@@ -2200,9 +2220,14 @@ sum counts shared pages once per process but omits compressed pages, members
 that left the group and spikes between samples, so it can read high or low;
 rusage alone reports only the largest waited process. These peaks are
 measured but unenforced. Host swap and pressure are machine-wide and cannot
-show that this attempt was constrained, so a darwin process-group peak is
-never constrained and never invalidates learned peaks on any host; a real OOM
-still does. The next run's ×1.25 or larger headroom covers a squeezed sample.
+attribute the cause to this attempt. Darwin warning/critical memory-pressure
+levels (2/4), swap-out bytes beyond the same 1% budget, or available RAM below
+the same headroom floor reject that attempt's learning. Normal level 1 and
+small swap-out remain eligible; missing pressure/swap-out readings reject
+learning. These host signals never invalidate other hosts' learned peaks; a
+real OOM still does. Pressure reads share a 200 ms observation budget, bounding
+extra sampling/teardown work; failure costs only learning eligibility. The next
+run retains its existing ×1.25 or larger headroom.
 Darwin Metal/unified-memory jobs still explore, since no device peak is
 measured.
 Fully capped native groups preserve member-level OOM attribution and kill mode.

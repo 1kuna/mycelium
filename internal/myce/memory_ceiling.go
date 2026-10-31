@@ -39,6 +39,7 @@ type memoryAttempt struct {
 	fs           memoryFS
 	path         string
 	bytes        int64
+	pageSize     int
 	hostBaseline *gpuHostState // Captured while the attempt cgroup is still empty.
 }
 
@@ -179,7 +180,7 @@ func (c *memoryCeilings) create(id string, bytes, swap int64) (*memoryAttempt, e
 	if err != nil {
 		return nil, err
 	}
-	a := &memoryAttempt{fs: c.fs, path: filepath.Join(c.root, id), bytes: bytes}
+	a := &memoryAttempt{fs: c.fs, path: filepath.Join(c.root, id), bytes: bytes, pageSize: pageSize}
 	a.hostBaseline, _ = readGPUHostState(c.fs)
 	if err := c.fs.Mkdir(a.path); err != nil {
 		return nil, err

@@ -30,7 +30,7 @@ func (f fakeMemoryFS) Mkdir(p string) error {
 	if err := os.Mkdir(p, 0700); err != nil {
 		return err
 	}
-	for name, value := range map[string]string{"cgroup.procs": "", "cgroup.events": "populated 0\n", "memory.max": "max", "memory.swap.max": "max", "memory.oom.group": "0", "memory.events": "oom 0\noom_kill 0\n", "cgroup.kill": ""} {
+	for name, value := range map[string]string{"cgroup.procs": "", "cgroup.events": "populated 0\n", "memory.max": "max", "memory.swap.max": "max", "memory.oom.group": "0", "memory.events": "oom 0\noom_kill 0\n", "memory.pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n", "cgroup.kill": ""} {
 		if err := os.WriteFile(filepath.Join(p, name), []byte(value), 0600); err != nil {
 			return err
 		}

@@ -38,6 +38,29 @@ func (p *AttemptMemoryPeak) gpuHostPeakGB() (float64, bool) {
 type gpuHostState struct {
 	available          float64
 	swap, oom, swapOut uint64
+	psi                float64
+	level              int // Darwin: normal=1, warning=2, critical=4.
+}
+
+// A one-percent RSS error is small beside the existing 25% sizing margin.
+// Also bound swap by one percent of remaining headroom; plentiful RAM must
+// not excuse material swap churn. Compare whole-attempt maxima at finish so
+// startup's tiny RSS cannot turn a few unrelated pages into pressure.
+func hostMemoryPressured(base, worst *gpuHostState, residentGB, reserveGB float64, pageSize int) bool {
+	floor := max(reserveGB, .125, residentGB*.25)
+	budgetGB := min(residentGB, worst.available) * .01
+	swapGB := float64(worst.swap-base.swap) / (1 << 20) // meminfo is KiB
+	outGB := float64(worst.swapOut-base.swapOut) * float64(pageSize) / (1 << 30)
+	return worst.oom > base.oom || worst.psi >= sharedPSIHigh || worst.level >= 2 || worst.available < floor || max(swapGB, outGB) > budgetGB
+}
+
+func (s *gpuHostState) retainPressure(next *gpuHostState) {
+	s.available = min(s.available, next.available)
+	s.swap = max(s.swap, next.swap)
+	s.swapOut = max(s.swapOut, next.swapOut)
+	s.oom = max(s.oom, next.oom)
+	s.psi = max(s.psi, next.psi)
+	s.level = max(s.level, next.level)
 }
 
 func readGPUHostState(fs memoryFS) (*gpuHostState, error) {
@@ -73,7 +96,15 @@ func readGPUHostState(fs memoryFS) (*gpuHostState, error) {
 	if !ok || !outOK {
 		return nil, errors.New("host OOM/swap-out counters unavailable")
 	}
-	return &gpuHostState{available: available, swap: total - free, oom: oom, swapOut: out}, nil
+	b, err = fs.ReadFile("/proc/pressure/memory")
+	if err != nil {
+		return nil, err
+	}
+	psi, err := sharedMemoryPSI(b)
+	if err != nil {
+		return nil, err
+	}
+	return &gpuHostState{available: available, swap: total - free, oom: oom, swapOut: out, psi: psi}, nil
 }
 
 // Only xe discrete GPUs have been investigated. Missing fields, other drivers,

@@ -17,6 +17,7 @@ type AttemptMemoryPeak struct {
 	// Raw counter reads are not completed peaks (notably Docker release
 	// evidence). Only observeAttemptMemory promotes a complete sample history.
 	nonreclaimableSampleGB *float64
+	pressureUnknown        bool
 
 	GPUHost           *GPUHostMemory     `json:"gpu_host,omitempty"`
 	NonreclaimableGB  *float64           `json:"nonreclaimable_gb,omitempty"`
