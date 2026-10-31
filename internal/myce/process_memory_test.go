@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -258,7 +259,8 @@ func TestAttemptMemoryEventCountsPersist(t *testing.T) {
 		return j
 	}
 	// Unpressured samples remain learnable, with read zero counts retained.
-	complete("low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\n")
+	accepted := complete("low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 0\n")
+	acceptedPeak := a.peak()
 	if data := stored(); !strings.Contains(data, `"events":{"high":0,"max":0,"oom":0,"oom_kill":0,"oom_group_kill":0}`) || strings.Contains(data, `"constrained":true`) {
 		t.Fatalf("accepted peak lost its event counts: %s", data)
 	}
@@ -277,11 +279,23 @@ func TestAttemptMemoryEventCountsPersist(t *testing.T) {
 	}
 	write("memory.stat", "anon 2684354560\nkernel 0\nshmem 0\n")
 	constrained := complete("low 0\nhigh 0\nmax 6264\noom 0\noom_kill 0\noom_group_kill 0\n")
-	if data := stored(); !strings.Contains(data, `"events":{"high":0,"max":6264,"oom":0,"oom_kill":0,"oom_group_kill":0}`) || !strings.Contains(data, `"constrained":true`) {
-		t.Fatalf("constrained run did not persist its event counts: %s", data)
+	// #486: successful constrained samples are diagnostic only. Throughput can
+	// learn, but accepted memory and its event counts/timestamp must stay exact.
+	assertAccepted := func() {
+		t.Helper()
+		var learned WorkObservation
+		if err := json.Unmarshal([]byte(stored()), &learned); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(learned.MemoryPeak, point.MemoryPeak) || !learned.MemoryRecordedAt.Equal(point.MemoryRecordedAt) || learned.Samples != point.Samples+1 {
+			t.Fatalf("constrained success changed accepted memory or lost throughput: %+v", learned)
+		}
 	}
-	// Constrained provenance can be invalidated in learning, but the job's
-	// attempt facts must remain available after restart independently of it.
+	assertAccepted()
+	// Both eligible zero counters and rejected nonzero counters persist as job
+	// facts after restart, independently of the reusable accepted observation.
 	q = memoryFactsRestart(t, q, clock)
+	assertAccepted()
+	memoryFactsGET(t, q, accepted, acceptedPeak, false, "eligible")
 	memoryFactsGET(t, q, constrained, a.peak(), false)
 }
