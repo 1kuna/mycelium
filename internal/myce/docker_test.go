@@ -1256,6 +1256,11 @@ func TestDockerHealthyHelperStartupBudget(t *testing.T) {
 				if !pending {
 					t.Fatal("short startup timeout did not preserve uncertain create")
 				}
+				select {
+				case <-p.done:
+					t.Fatal("uncertain create released a result")
+				default:
+				}
 				// The event subscription runs independently of the control-call
 				// budget. Join its observation so this boundary is exercised on
 				// every run, rather than depending on which CLI is scheduled first.
@@ -1283,6 +1288,11 @@ func TestDockerHealthyHelperStartupBudget(t *testing.T) {
 				if !eventsObserved {
 					t.Fatal("independent event subscription was not observed")
 				}
+				data, err := os.ReadFile(filepath.Join(s.dir, s.state.Identity+".docker.json"))
+				var state dockerExecution
+				if err != nil || json.Unmarshal(data, &state) != nil || state.Identity != s.state.Identity || state.Operation != "create" || !state.Pending || state.Released {
+					t.Fatalf("uncertain create lost durable custody: %s (%v)", data, err)
+				}
 				t.Log("independent events observed; no control invocation escaped startup timeout")
 				return
 			}
@@ -1290,11 +1300,79 @@ func TestDockerHealthyHelperStartupBudget(t *testing.T) {
 			p.stop(w.Clock.Now(), 0, true)
 			expireDockerStop(t, p)
 			select {
-			case <-p.done:
-			case <-time.After(5 * time.Second):
-				t.Fatal("production budget failed healthy delayed startup/cleanup")
+			case finish := <-p.done:
+				if finish.err != nil || finish.result.ReleasePending {
+					t.Fatalf("healthy delayed helper failed: %+v", finish)
+				}
+			// The production budget applies to each CLI call. Cleanup joins
+			// several delayed helpers and durable writes; use the suite's I/O
+			// synchronization bound rather than a five-second aggregate budget.
+			case <-time.After(testWaitTimeout):
+				t.Fatalf("healthy delayed helper did not finish: %s", p.docker.status())
+			}
+			data, err := os.ReadFile(filepath.Join(s.dir, s.state.Identity+".docker.json"))
+			var state dockerExecution
+			if err != nil || json.Unmarshal(data, &state) != nil || state.Identity != s.state.Identity || !state.Released || state.Pending || !state.EvidenceSaved {
+				t.Fatalf("healthy helper finished without durable release proof: %s (%v)", data, err)
 			}
 		})
+	}
+}
+
+// A longer result join must not turn an incomplete cleanup observation into
+// release proof. Hold the final inventory at the daemon boundary, then permit it.
+func TestDockerHealthyHelperCleanupNeedsFinalInventory(t *testing.T) {
+	w, s, _, root := dockerFixture(t)
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	unblock := sync.OnceFunc(func() { close(release) })
+	w.dockerCommand = func(ctx context.Context, args ...string) ([]byte, error) {
+		if len(args) > 1 && args[0] == "network" && args[1] == "ls" {
+			once.Do(func() { close(entered) })
+			select {
+			case <-release:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		cmd := exec.CommandContext(ctx, filepath.Join(root, "docker"), args...)
+		cmd.Env = dockerClientEnvironment()
+		return cmd.Output()
+	}
+	j := dockerJob()
+	j.Checkpoint = t.TempDir()
+	p, err := startDockerFixture(w, s, j)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(p.docker.close)
+	t.Cleanup(unblock)
+	await(t, func() bool { _, err := os.Stat(filepath.Join(root, "running")); return err == nil })
+	p.stop(w.Clock.Now(), 0, true)
+	expireDockerStop(t, p)
+	select {
+	case <-entered:
+	case <-time.After(testWaitTimeout):
+		t.Fatal("cleanup did not reach final inventory")
+	}
+	select {
+	case <-p.done:
+		t.Fatal("cleanup finished without final inventory")
+	default:
+	}
+	data, err := os.ReadFile(filepath.Join(s.dir, s.state.Identity+".docker.json"))
+	var state dockerExecution
+	if err != nil || json.Unmarshal(data, &state) != nil || state.Identity != s.state.Identity || state.Released || state.Pending || !state.EvidenceSaved {
+		t.Fatalf("custody not retained at final inventory: %s (%v)", data, err)
+	}
+	unblock()
+	select {
+	case finish := <-p.done:
+		if finish.err != nil || finish.result.ReleasePending {
+			t.Fatalf("cleanup failed after final inventory: %+v", finish)
+		}
+	case <-time.After(testWaitTimeout):
+		t.Fatal("cleanup did not finish after final inventory")
 	}
 }
 
