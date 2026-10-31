@@ -62,6 +62,73 @@ func TestGPUTelemetryHelperInstallConfig(t *testing.T) {
 	}
 }
 
+func TestInstallQueueFileStoreDefaults(t *testing.T) {
+	for _, platform := range []string{"linux", "darwin"} {
+		t.Run(platform, func(t *testing.T) {
+			c, err := PlanInstall("queue", "/fixture/home", "", "/fixture/nas", "http://queue.invalid", "fixture", Detection{OS: platform})
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Older saved configs lack both fields; upgrades retain runtime defaults.
+			b, err := json.Marshal(c)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var legacy map[string]json.RawMessage
+			if err := json.Unmarshal(b, &legacy); err != nil {
+				t.Fatal(err)
+			}
+			delete(legacy, "file_store_bytes")
+			delete(legacy, "file_store_production_reserve")
+			b, err = json.Marshal(legacy)
+			if err != nil {
+				t.Fatal(err)
+			}
+			config := filepath.Join(t.TempDir(), "queue.json")
+			if err := os.WriteFile(config, b, 0600); err != nil {
+				t.Fatal(err)
+			}
+			saved, err := ReadServiceConfig(config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, got := range []ServiceConfig{c, saved} {
+				if got.FileStoreBytes != 100<<30 || got.FileStoreProductionReserve != 0 {
+					t.Fatal("fresh/legacy install changed file-store defaults")
+				}
+			}
+			values := ServiceConfig{}
+			f := flag.NewFlagSet("install", flag.ContinueOnError)
+			RegisterInstallFlags(f, &values)
+			if err := f.Parse([]string{"--file-store-bytes=12", "--file-store-production-reserve=6"}); err != nil {
+				t.Fatal(err)
+			}
+			configured, err := OverlayInstallFlags(f, c, values)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// launchd reads Args from the saved config; systemd also embeds them.
+			args := configured.Args()
+			for _, pair := range [][2]string{{"--file-store-bytes", "12"}, {"--file-store-production-reserve", "6"}} {
+				i := slices.Index(args, pair[0])
+				if i < 0 || i+1 >= len(args) || args[i+1] != pair[1] {
+					t.Errorf("service args omitted %v", pair)
+				}
+				if platform == "linux" && !strings.Contains(configured.ServiceText(), fmt.Sprintf("%q %q", pair[0], pair[1])) {
+					t.Errorf("generated unit omitted %v", pair)
+				}
+			}
+			for _, limits := range [][2]int64{{0, 0}, {-1, 0}, {12, -1}, {12, 13}} {
+				invalid := configured
+				invalid.FileStoreBytes, invalid.FileStoreProductionReserve = limits[0], limits[1]
+				if invalid.ValidateInstall() == nil {
+					t.Errorf("accepted invalid file-store capacity/reserve %v", limits)
+				}
+			}
+		})
+	}
+}
+
 func installTestField(c *ServiceConfig, path string) reflect.Value {
 	v := reflect.ValueOf(c).Elem()
 	for _, part := range strings.Split(path, ".") {

@@ -97,6 +97,9 @@ type ServiceConfig struct {
 
 	ProductionInfrastructureRetries int `json:"production_infrastructure_retries"`
 
+	FileStoreBytes             int64 `json:"file_store_bytes"`
+	FileStoreProductionReserve int64 `json:"file_store_production_reserve"`
+
 	Version int `json:"version"`
 
 	DockerEndpoint        string         `json:"docker_endpoint"`
@@ -217,6 +220,7 @@ func PlanInstall(role, home, root, nas, queue, name string, d Detection, account
 	c.Heartbeat = time.Second
 	c.LogRetention = DefaultLogRetention
 	c.FileRetention = DefaultFileRetention
+	c.FileStoreBytes = 100 << 30
 	c.RestartGrace = RestartGrace
 	c.ProductionInfrastructureRetries = DefaultProductionInfrastructureRetries
 	c.ProductionLossTimeout, c.DeadlineLossTimeout, c.ExperimentLossTimeout = ProductionLossAfter, DeadlineLossAfter, LossAfter
@@ -500,7 +504,7 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 }
 
 func ReadServiceConfig(path string) (ServiceConfig, error) {
-	c := ServiceConfig{ProductionInfrastructureRetries: DefaultProductionInfrastructureRetries, FileRetention: DefaultFileRetention}
+	c := ServiceConfig{ProductionInfrastructureRetries: DefaultProductionInfrastructureRetries, FileRetention: DefaultFileRetention, FileStoreBytes: 100 << 30}
 	b, e := os.ReadFile(path)
 	if e != nil {
 		return c, e
@@ -787,6 +791,7 @@ func (c ServiceConfig) Args() []string {
 		if c.FileRetention > 0 {
 			args = append(args, "--file-retention", c.FileRetention.String())
 		}
+		args = append(args, "--file-store-bytes", strconv.FormatInt(c.FileStoreBytes, 10), "--file-store-production-reserve", strconv.FormatInt(c.FileStoreProductionReserve, 10))
 		for _, v := range [][2]string{{"--project-config", c.ProjectConfig}, {"--host-config", c.HostConfig}, {"--upload-spool-dir", c.UploadSpoolDir}} {
 			if v[1] != "" {
 				args = append(args, v[0], v[1])
