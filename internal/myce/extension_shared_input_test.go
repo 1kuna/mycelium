@@ -252,7 +252,7 @@ func TestConcurrentSharedBuildsReserveRemainingBytes(t *testing.T) {
 	a := sharedFixtureFile(t, nas, "a", strings.Repeat("a", size))
 	b := sharedFixtureFile(t, nas, "b", strings.Repeat("b", size))
 	c := sharedFixtureFile(t, nas, "c", strings.Repeat("c", size))
-	cache := &SharedInputCache{cache: EnvironmentCache{Root: t.TempDir(), Limit: 2*size + 64<<10}}
+	cache := &SharedInputCache{cache: EnvironmentCache{Root: t.TempDir(), Limit: 2*size + 64<<10, Clock: &workerFakeClock{now: time.Date(2026, 10, 31, 0, 0, 0, 0, time.UTC)}}}
 	t.Cleanup(func() { _ = removeSharedEntry(cache.cache.Root) })
 	ready, publish := make(chan struct{}, 2), make(chan struct{})
 	var arrivals atomic.Int32
@@ -267,30 +267,47 @@ func TestConcurrentSharedBuildsReserveRemainingBytes(t *testing.T) {
 		err  error
 	}
 	results := make(chan result, 2)
+	pending := 0
+	t.Cleanup(func() {
+		close(publish)
+		for ; pending > 0; pending-- {
+			r := <-results
+			if r.done != nil {
+				r.done()
+			}
+			if r.err != nil {
+				t.Error(r.err)
+			}
+		}
+	})
 	for _, pair := range []struct {
 		name string
 		ref  FileRef
 	}{{"a", a}, {"b", b}} {
+		pending++
 		go func() {
 			_, done, err := cache.Acquire(context.Background(), SharedInput{NAS: pair.name, SHA256: pair.ref.SHA256, SizeBytes: pair.ref.SizeBytes}, nas)
 			results <- result{done, err}
 		}()
+		// Admission measures remaining reservations before allocated bytes. Let
+		// this copy finish before starting the next: growth between those scans
+		// can conservatively refuse a build that would fit after copying stops.
+		// Both writers still hold their reservations and remain unpublished.
+		select {
+		case <-ready:
+		case r := <-results:
+			pending--
+			if r.done != nil {
+				r.done()
+			}
+			t.Fatalf("build %s returned before publication barrier: %v", pair.name, r.err)
+		}
 	}
-	<-ready
-	<-ready
 	// Both in-progress files already occupy their reservation. A third does
 	// not fit and cannot evict either active build.
 	_, done, err := cache.Acquire(context.Background(), SharedInput{NAS: "c", SHA256: c.SHA256, SizeBytes: c.SizeBytes}, nas)
 	if err == nil {
 		done()
-		close(publish)
 		t.Fatal("admitted third build beyond cache capacity")
 	}
-	close(publish)
-	first, second := <-results, <-results
-	if first.err != nil || second.err != nil {
-		t.Fatal(first.err, second.err)
-	}
-	first.done()
-	second.done()
 }
