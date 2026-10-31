@@ -12,8 +12,11 @@ import (
 )
 
 func fileCommand(args []string) error {
+	if len(args) > 0 && args[0] == "release" {
+		return fileReleaseCommand(context.Background(), args[1:], os.Stdout)
+	}
 	if len(args) == 0 {
-		return errors.New("usage: myce file put [flags] FILE | get [flags] SHA256 DEST")
+		return errors.New("usage: myce file put [flags] FILE | get [flags] SHA256 DEST | release plan|apply")
 	}
 	f := flag.NewFlagSet("file "+args[0], flag.ContinueOnError)
 	authority := installedClientFlags(f)

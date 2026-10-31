@@ -78,6 +78,7 @@ func (a API) handler(joiningPin string) http.Handler {
 	a.registerReservations(mux)
 	a.registerPriorityPolicy(mux)
 	a.registerFiles(mux)
+	a.registerFileRelease(mux)
 	mux.HandleFunc("POST /api/extensions", func(w http.ResponseWriter, r *http.Request) {
 		var e Extension
 		if !decode(w, r, &e) {

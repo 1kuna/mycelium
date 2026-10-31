@@ -536,6 +536,84 @@ allocation, including incomplete uploads, not bytes transferred or current usage
 Preflight, resumable replay and deduplicated reuse do not increment it. It resets
 on queue restart and decreases neither on completion nor on ordinary expiry.
 
+### Project-owner early file release (#465)
+
+Use explicit job IDs to release terminal input/result files before their normal
+retention deadline. **Ownership means project attribution under the shared fleet
+credential, not an authorization boundary.** Any holder of that credential can
+act for a project; this does not add individual owner authentication. Global
+retention and capacity admission remain unchanged.
+
+First close the application operation: all downstream consumers and controller
+reconciliation must have finished using these files. Include every owning
+terminal reference you want to expire, including fan-out parents, children and
+keyed answers' job IDs. Other retained owners continue to protect shared content.
+A successful stage alone does not establish that application completion boundary.
+For ordinary tasks, accepting expiry explicitly gives up queue recovery of the
+selected data, including unsuccessful tasks you select. Preserve any required
+source/result copies with verified identities before doing so. Unselected work
+keeps its ordinary retention. For tasks using `output_delivery: async_nas`, the
+queue additionally requires its existing verified delivery receipt to match the
+accepted execution and manifest; pending/failed or mismatched delivery blocks
+release. An unavailable NAS is handled by the existing asynchronous delivery
+retries; release never tries to copy or wait on the NAS.
+
+```sh
+# Read-only: save and inspect the returned JSON before applying it.
+myce file release plan --project example JOB_ID_1 JOB_ID_2 > release-plan.json
+# Irreversible expiry acceptance for exactly the reviewed project/jobs.
+myce file release apply --accept-expiry release-plan.json
+```
+
+Both commands accept the usual installed authority options (`--config`,
+`--joining-file`, `--queue`). Keep the saved plan/receipt private when it contains
+private project or file names. The API equivalents are
+`POST /api/files/release/plan` with `{project, jobs}` and
+`POST /api/files/release/apply` with
+`{selection: {project, jobs}, plan_id, accept_expiry: true}`. A plan is a
+read-only snapshot, not a reservation. Its digest identifies the reviewed state;
+it is not a signature or an authorization token.
+
+The plan lists each job's state, release/retention state, original expiry deadline,
+input/result/shared-input/dependency/diagnostic/fan-out manifests, and delivery
+evidence where applicable. Each content identity appears once in the byte total,
+using its current stored size. `reclaimable_bytes` counts only bytes removable
+now after selection: retained job references, checkpoints/resume generations,
+model/catalog assets, extension/environment assets and bundles, pending output
+and unresolved custody remain protected. The plan lists the references that
+block each identity and flags publication grace or bundle retention separately.
+Absent blobs contribute zero. Recently published/HEAD-refreshed blobs retain the
+ordinary six-hour publication grace. An eligible plan can reclaim zero bytes
+while still expiring the selected identities.
+
+`collection_eligible` uses the collector's pending reclamation and keeping
+references. Importing identical bytes after completed reclamation does not
+re-enroll them through the old job's manifests, so a new plan counts zero bytes
+for that content unless another pending reclamation owns it.
+
+Apply requires explicit acceptance and recomputes the reviewed plan, then fences
+custody and reference metadata again in the expiry transaction. HTTP 409
+`file_release_stale` means regenerate and review a new plan; nothing was expired.
+HTTP 409 `file_release_protected` means a selected job is live, has unresolved
+physical custody or lacks required verified delivery. Include only eligible jobs
+in the next plan. Other projects' retained references can block physical removal
+without blocking expiry of your selected job references.
+
+A successful apply returns `collection: scheduled`: it durably sets the existing
+job file-expiry/reclamation state, preserving identities, manifests and a small
+`file_expiry_accepted` ledger receipt (plan digest in `reason`, acceptance time
+in `at`) in the job/keyed answer.
+The existing bounded maintenance collector rechecks references and publication
+grace before unlinking, retries failures, and resumes after restart. This is
+asynchronous reclamation, not a promise that capacity is immediately available.
+No new deletion daemon or global retention change is involved. Repeating the
+same apply after a lost response returns the original receipt while the selected
+job/keyed answers remain retained, even after the blobs are gone or a restart.
+Ordinary history/key expiry still applies afterward; unknown/expired selections
+are refused without creating jobs. Retrieval retains typed HTTP 410
+`result_expired` behavior for expired, unshared content. Save the plan and apply
+response for the application's audit record.
+
 ## Install and upgrade
 
 Build the single binary and inspect a plan before installation:
