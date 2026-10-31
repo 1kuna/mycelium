@@ -150,6 +150,9 @@
         "out_of_memory": {
           "type": "boolean"
         },
+        "placement": {
+          "$ref": "#/$defs/PlacementDecision"
+        },
         "polite_stop": {
           "type": "boolean"
         },
@@ -1588,6 +1591,14 @@
           "$ref": "#/$defs/FileManifest",
           "x-contract": "diagnostic"
         },
+        "placement": {
+          "$ref": "#/$defs/PlacementDecision",
+          "x-contract": "diagnostic"
+        },
+        "placement_intent": {
+          "$ref": "#/$defs/PlacementIntent",
+          "x-contract": "diagnostic"
+        },
         "preemption_count": {
           "type": "integer",
           "x-contract": "diagnostic"
@@ -1604,6 +1615,10 @@
             "object",
             "null"
           ],
+          "x-contract": "diagnostic"
+        },
+        "production_binding": {
+          "$ref": "#/$defs/PlacementBinding",
           "x-contract": "diagnostic"
         },
         "production_host": {
@@ -2146,6 +2161,184 @@
       },
       "required": [
         "execution"
+      ],
+      "type": "object"
+    },
+    "PlacementBinding": {
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "origin": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "origin",
+        "host",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "PlacementCoverage": {
+      "properties": {
+        "origin": {
+          "type": "string"
+        },
+        "platforms": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "state": {
+          "type": "string"
+        },
+        "targets": {
+          "items": {
+            "$ref": "#/$defs/ExecutionTarget"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "origin",
+        "state"
+      ],
+      "type": "object"
+    },
+    "PlacementDecision": {
+      "properties": {
+        "assigned_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "attempt": {
+          "type": "integer"
+        },
+        "device_choice": {
+          "type": "string"
+        },
+        "devices": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "host": {
+          "type": "string"
+        },
+        "host_choice": {
+          "type": "string"
+        },
+        "limited_by": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "origin": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "origin",
+        "attempt",
+        "assigned_at",
+        "host",
+        "host_choice",
+        "device_choice",
+        "reason",
+        "limited_by"
+      ],
+      "type": "object"
+    },
+    "PlacementIntent": {
+      "properties": {
+        "device_constraint": {
+          "type": "string"
+        },
+        "environment": {
+          "$ref": "#/$defs/PlacementCoverage"
+        },
+        "host_constraint": {
+          "type": "string"
+        },
+        "origin": {
+          "type": "string"
+        },
+        "parity": {
+          "type": "string"
+        },
+        "preferred_backends": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "qualification": {
+          "type": "string"
+        },
+        "recipe_device_targets": {
+          "items": {
+            "$ref": "#/$defs/ExecutionTarget"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "required_backends": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "scope": {
+          "type": "string"
+        },
+        "targets": {
+          "items": {
+            "$ref": "#/$defs/ExecutionTarget"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "origin",
+        "scope",
+        "host_constraint",
+        "device_constraint",
+        "environment",
+        "qualification",
+        "parity"
       ],
       "type": "object"
     },

@@ -255,6 +255,7 @@ func extensionCheckAdmissionReason(reason string) string {
 // The returned value borrows fields until the caller deep-copies it.
 func statusJobInputs(job *Job) Job {
 	j := *job
+	placementStatus(&j)
 	j.LedgerEntries = nil
 	if j.Ledger == nil {
 		j.Ledger = &JobLedgerInfo{}

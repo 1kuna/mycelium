@@ -744,3 +744,47 @@ portable recovery, qualifies an extension or contributes throughput history.
 The CPU case of `TestDevStandaloneSmoke` exercises credential-free reporting
 through `myce dev`, observes it in Job/status replies, then completes the command
 through the normal result and release path.
+
+### Authored intent and retained placement
+
+Job GET, status and inspection expose `placement_intent`, frozen at submission
+before recipe defaults or scheduler assignment change the executable spec:
+
+- `scope`: `work_resources`, `platform_constraints`, or `host_device_restriction`,
+  describing caller constraints; recipe metadata remains separate.
+- `origin: authored`; `host_constraint` distinguishes no restriction, a single
+  pin, and an allowlist. `device_constraint` identifies an explicit selector.
+- Exact authored `targets` (OS/architecture/backend), required/preferred backends,
+  and recipe targets with authored device selectors. These finite platform
+  fields omit commands, local paths, environment contents and arbitrary reasons.
+- `environment` records coverage and its catalog, inline submission, or extension snapshot origin.
+  `targets` means exact target coverage; `platforms_only` means backend coverage
+  with OS/architecture unknown; `unknown` and `not_required` are explicit.
+  Main/sidecar catalog coverage is their intersection. Extension coverage is its
+  frozen variant target list, not proof that a worker is ready now.
+- `qualification` records whether qualified execution is required. Owner output
+  `parity` stays `unknown`: neither a pin nor registration proves MY-19 parity.
+
+`placement` records the historical scheduler assignment: attempt, assignment
+queue time, host/devices, the existing scarcity/completion planner `reason`, and
+`limited_by` constraint categories. `host_choice` distinguishes `authored_pin`,
+`scheduler_with_authored_constraint`, and `scheduler`; `device_choice` similarly
+identifies authored selectors (including recipe selectors) versus scheduler
+selection. A selector/allowlist restricts alternatives; the scheduler still
+chooses within the permitted set. Project policy and production binding appear
+as separate limiting categories.
+
+Each assigned ledger entry and retained attempt outcome carries that same
+historical decision. Requeues retain it with its original attempt number; a new
+assignment replaces the job's latest decision. The existing paginated job ledger
+retains older assignments under normal history retention. `eligible_hosts` and
+related fields remain a **current policy/eligibility projection**, not evidence
+of what was eligible at a past assignment or a promise of current capacity.
+
+`production_binding` reports the current queue binding with `origin: scheduler`;
+it never establishes an authored host pin. Old jobs lacking submission/assignment
+provenance explicitly report unknown intent and omit historical placement;
+status does not reconstruct intent from `production_host` or current eligibility.
+These fields are observational and do not change placement or qualification.
+See [the job schema](schemas/job-v1.schema.json) and
+[ledger schema](schemas/job-ledger-v1.schema.json).

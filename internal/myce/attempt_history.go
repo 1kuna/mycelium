@@ -14,6 +14,7 @@ const attemptHistoryLimit = max(3, DefaultProductionInfrastructureRetries+1) + 1
 // taxonomy. State is the queue decision after this attempt (queued or terminal).
 // It is diagnostic evidence, never release proof or a retry/accounting input.
 type AttemptOutcome struct {
+	Placement      *PlacementDecision  `json:"placement,omitempty"`
 	Diagnostics    *AttemptDiagnostics `json:"diagnostics,omitempty"`
 	Attempt        int                 `json:"attempt"`
 	Machine        string              `json:"machine"`
@@ -39,7 +40,8 @@ func historyPlannedStop(j *Job) bool {
 
 func attemptOutcome(j *Job, r Result) AttemptOutcome {
 	return AttemptOutcome{
-		Attempt: j.Attempt, Machine: j.Machine, Session: j.Session,
+		Placement: j.Placement,
+		Attempt:   j.Attempt, Machine: j.Machine, Session: j.Session,
 		ExecutionCause: safeRuntimeCause(r.ExecutionCause), CleanupCause: safeRuntimeCause(r.CleanupCause),
 		Interrupted: r.Interrupted, OutOfMemory: r.OutOfMemory,
 		PoliteStop: r.PoliteStop, OperatorStop: r.OperatorStop || plannedMaintenanceStop(j),
@@ -55,6 +57,9 @@ func (q *Queue) recordAttemptOutcome(j *Job, outcome AttemptOutcome) {
 	// the current safe launch detail into that immutable ledger entry too.
 	if outcome.ExecutionCause == nil && j.Attempt == outcome.Attempt && j.ExecutionCause != nil && j.ExecutionCause.Predicate != "" {
 		outcome.ExecutionCause = safeRuntimeCause(j.ExecutionCause)
+	}
+	if j.Placement != nil && j.Placement.Attempt == outcome.Attempt {
+		outcome.Placement = j.Placement
 	}
 	outcome.EndedAt = q.clock.Now()
 	outcome.State = j.State
