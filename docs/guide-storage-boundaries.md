@@ -35,15 +35,29 @@ all existing data and boundaries before reporting usable budget capacity; unknow
 or legacy custody cannot be silently treated as free capacity.
 
 Canonical capacity-pool and backing identities deduplicate aliases, including
-volumes sharing an APFS container. Each backing also supplies `native_identity`,
-a SHA-256 fingerprint of observed native volume, mount incarnation and backing
-root/boundary identifiers as supported by the platform. Configured names/paths
-alone do not identify a volume. Backends must detect real replacement/remount,
-without including usage, free bytes or unused reservations in that fingerprint.
-Refresh/restart compares this identity and installed capacity independently of
+volumes sharing an APFS container. Backends call
+`ObserveStorageBackingIdentity(root)` outside `q.mu` and supply its SHA-256
+fingerprint as `native_identity`. It uses one open directory descriptor and
+unprivileged native APIs:
+
+| Platform | Identity fields | Observation |
+| --- | --- | --- |
+| macOS / APFS | Volume UUID | `fgetattrlist` with `ATTR_VOL_UUID` |
+| Linux | Filesystem ID plus device | `fstatfs.f_fsid` and `fstat.st_dev` |
+
+macOS `f_fsid` alone was reused when distinct APFS images occupied the same path
+in native testing, so it does not provide the required replacement fence here.
+Configured paths, directory inodes, mount-incarnation tokens, usage, free bytes
+and unused reservations do not participate in identity. Reattaching the **same
+volume** is valid; a **different volume** at the path must be fenced. This is the
+narrow #506 identity requirement, not detection of every mount event.
+
+Refresh/restart compares volume identity and installed capacity independently of
 fresh funding/overhead/reservation observations, which are validated each time.
-Consuming an unchanged reserve preserves retained allocations and production
-publication. Missing native identity grants no protection verification.
+Filling and emptying an unchanged reserve preserve retained allocations and
+production publication. Missing/unavailable native identity grants no protection
+verification. The observer identifies a volume, not quota, confinement or
+availability enforcement.
 Allocated backing already reduced `statfs`
 free space. Only unused native reservations still included in that free reading
 are subtracted, once. Fresh file-store inventory/tus lengths, configured caps,
@@ -118,3 +132,28 @@ rehearsal/provisioning, block/inode/confinement qualification on each host, #508
 source-local destination delivery/client contracts and verified release, and #509
 legacy-custody drain/migration/activation. No fleet, quota/mount provisioning on
 fleet hosts, service change, merge or deployment is part of this implementation.
+
+### Native identity replay
+
+The opt-in platform tests use two disposable filesystems at one mountpoint. They
+fill the first to real ENOSPC, empty it, reattach it across SQLite restart, swap
+in the second, then restore the first. Same-volume observations keep verification
+and publication capacity; a different volume fails closed without dropping
+retained allocations. macOS provisions APFS with `hdiutil` without root. Linux
+uses disposable ext4 loop images only when loop devices and mount permissions
+are already available; it never invokes sudo or changes host configuration.
+
+```sh
+mkdir -p .reports/storage-identity
+MYCE_TEST_STORAGE_IDENTITY_NATIVE=1 \
+MYCE_TEST_STORAGE_IDENTITY_SCRATCH="$PWD/.reports/storage-identity" \
+go test -race ./internal/myce -run '^TestStorageIdentity' -count=1 -v
+```
+
+Ordinary gates skip native image/loop provisioning. Linux unit tests check actual
+`f_fsid`/`st_dev` extraction and usage independence without loop devices. A skipped
+loop test supplies no native ext4 qualification; XFS volume replacement, Linux
+loop remount/device assignment, and all native quota/inode/confinement guarantees
+remain separately unqualified. The APFS identity replay likewise does not qualify
+quota enforcement or complete control backing. Provisioning tests remove their
+owned images after detach, and retain scratch if detach cannot be verified.

@@ -62,11 +62,9 @@ type StoragePool struct {
 // Project quotas alone are never availability backing.
 type StorageBacking struct {
 	ID string `json:"id"`
-	// NativeIdentity is a SHA-256 fingerprint of the observed native volume,
-	// mount incarnation and backing root/boundary identity, as supported by the
-	// platform. It must detect replacement/remount even at the same configured
-	// path/ID. Never include usage, free bytes or unused reservation measurements.
-	// Hash native identifiers so local paths/device details are not persisted.
+	// NativeIdentity comes from ObserveStorageBackingIdentity. A different volume
+	// at the configured path is replacement; reattaching the same volume is not.
+	// Usage/free/reservation measurements never participate in volume identity.
 	NativeIdentity    string `json:"native_identity"`
 	Pool              string `json:"pool"`
 	Kind              string `json:"kind"` // independent, allocated, native-reserve
