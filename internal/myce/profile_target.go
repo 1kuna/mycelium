@@ -197,7 +197,7 @@ func (q *Queue) hasQualifiedTarget(j *Job) bool {
 func (q *Queue) qualifiedTarget(j *Job) (bool, string) {
 	// Resolve envelopes with the planner's code, but without temporary
 	// occupancy or release holds. Retain observations for learned needs.
-	capacity := Queue{clock: q.clock, s: q.s}
+	capacity := Queue{clock: q.clock, s: q.s, memoryOrigin: q}
 	capacity.s.Jobs, capacity.s.ModelSlots, capacity.s.HostReleases = nil, nil, nil
 	var best *targetFit
 	reason := "no known machine targets"
@@ -224,35 +224,7 @@ func (q *Queue) qualifiedTarget(j *Job) (bool, string) {
 			continue
 		}
 		for _, target := range q.machineTargets(m) {
-			copy := cloneMachine(target)
-			copy.DiskVolumes = diskCapacityVolumes(copy.DiskVolumes)
-			copy.Gone, copy.Leaving, copy.Recovering, copy.CheckpointUnavailable = false, false, false, false
-			copy.MemoryError, copy.HostMemoryError, copy.CPUCapacityReason = "", "", ""
-			copy.HostMemoryPolicyMismatch = false
-			policy := q.s.HostMaintenance[hostID(m)]
-			if policy.CPUBudgetCores != nil {
-				copy.CPUBudgetCores = *policy.CPUBudgetCores
-			}
-			copy.EffectiveCPUCores, _ = cpuCapacity(&copy)
-			if availability := machineAvailability(&copy); availability != nil {
-				availability.Available = true
-			}
-			copy.cpuLedger = true
-			copy.CPUInUseCores = 0
-			copy.FreeCPUCores = copy.EffectiveCPUCores
-			if copy.CapabilityProfile != nil {
-				copy.FreeHostMemoryGB = float64(copy.CapabilityProfile.SystemMemoryBytes) / (1 << 30)
-				allowance := copy.HostMemoryBudgetGB
-				if policy.MemoryBudget != nil {
-					allowance = policy.MemoryBudget.GiB
-				}
-				copy.EffectiveHostMemoryBudgetGB = allowance
-				if allowance > 0 {
-					copy.FreeHostMemoryGB = min(copy.FreeHostMemoryGB, allowance)
-				}
-				copy.HostMemoryMeasured = true
-			}
-			copy.FreeMemoryGB = copy.TotalMemoryGB
+			copy := q.qualificationCapacity(target)
 			// Observation identity must see the same available target copy,
 			// including when the live owner is temporarily unavailable.
 			capacity.s.Machines = map[string]*Machine{copy.ID: &copy}
@@ -277,7 +249,41 @@ func (q *Queue) qualifiedTarget(j *Job) (bool, string) {
 		}
 	}
 	if best != nil && (best.first == "host memory" || best.first == "GPU memory" || best.first == "memory envelope") {
-		reason += "; no qualified target can fit this job; reduce the workload's memory use, obtain a clean target-platform measurement for auto memory, or have the operator approve a sufficient allowance on a capable host; retrying unchanged cannot fix capacity"
+		reason += "; " + memoryCapacityRemedies
 	}
 	return false, reason
+}
+
+// Shared permanent-capacity projection for qualification and bounded exploration.
+func (q *Queue) qualificationCapacity(target *Machine) Machine {
+	copy := cloneMachine(target)
+	copy.DiskVolumes = diskCapacityVolumes(copy.DiskVolumes)
+	copy.Gone, copy.Leaving, copy.Recovering, copy.CheckpointUnavailable = false, false, false, false
+	copy.MemoryError, copy.HostMemoryError, copy.CPUCapacityReason = "", "", ""
+	copy.HostMemoryPolicyMismatch = false
+	policy := q.s.HostMaintenance[hostID(target)]
+	if policy.CPUBudgetCores != nil {
+		copy.CPUBudgetCores = *policy.CPUBudgetCores
+	}
+	copy.EffectiveCPUCores, _ = cpuCapacity(&copy)
+	if availability := machineAvailability(&copy); availability != nil {
+		availability.Available = true
+	}
+	copy.cpuLedger = true
+	copy.CPUInUseCores = 0
+	copy.FreeCPUCores = copy.EffectiveCPUCores
+	if copy.CapabilityProfile != nil {
+		copy.FreeHostMemoryGB = float64(copy.CapabilityProfile.SystemMemoryBytes) / (1 << 30)
+		allowance := copy.HostMemoryBudgetGB
+		if policy.MemoryBudget != nil {
+			allowance = policy.MemoryBudget.GiB
+		}
+		copy.EffectiveHostMemoryBudgetGB = allowance
+		if allowance > 0 {
+			copy.FreeHostMemoryGB = min(copy.FreeHostMemoryGB, allowance)
+		}
+		copy.HostMemoryMeasured = true
+	}
+	copy.FreeMemoryGB = copy.TotalMemoryGB
+	return copy
 }

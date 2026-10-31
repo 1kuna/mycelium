@@ -150,6 +150,10 @@ func (q *Queue) unmeasuredProgram(j *Job, m *Machine) bool {
 }
 
 func (q *Queue) retryOOM(j *Job) {
+	if j.MemoryEnvelope != nil && j.MemoryEnvelope.Source == boundedMemoryExploration {
+		j.State, j.Reason = "failed", "bounded cross-OS exploration exhausted after out of memory; "+memoryCapacityRemedies
+		return
+	}
 	if j.Spec.Needs.Memory == "auto" {
 		if j.OOMRetries > 0 {
 			j.State, j.Reason = "failed", "out of memory after one retry above the OOM envelope"

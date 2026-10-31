@@ -302,32 +302,7 @@ func TestMemoryEnvelopeProfileIdentityAndLifecycle(t *testing.T) {
 // #519: an accepted Linux cgroup peak times 2.5 used to strand Darwin
 // despite its only local peak being constrained (and therefore no upper bound).
 func TestMemoryEnvelopeCPUForeignOSPeak(t *testing.T) {
-	q, clock := fixture(t)
-	if err := q.ConfigureFileStore(t.TempDir(), 1<<20, true); err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(t.TempDir(), "source")
-	if err := os.WriteFile(path, []byte("source"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	ref, err := IdentifyFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(q.files.blob(ref), []byte("source"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	linux := cpuMachine("linux-worker", "linux-host", "cpu", 8, 32)
-	darwin := cpuMachine("darwin-worker", "darwin-host", "cpu", 8, 32)
-	darwin.CapabilityProfile.OS, darwin.CapabilityProfile.Arch = "darwin", "arm64"
-	for _, m := range []*Machine{&linux, &darwin} {
-		m.ExtensionFingerprint = "cpu-v1"
-		m.HostMemoryBudgetGB, m.MemoryCeilingSlackGB = 8, .125
-		check(t, q, *m, nil)
-	}
-	s := cpuSpec(2, 0)
-	s.Name, s.RequireTarget, s.Needs.Memory = "gate-full", true, "auto"
-	s.Files = FileManifest{".myce-source.tar": ref}
+	q, clock, linux, darwin, s := memoryExplorationFixture(t)
 	start := func(m Machine, source string, hostGB float64) *Job {
 		t.Helper()
 		s.Targets = []ExecutionTarget{machineTarget(&m)}
@@ -358,12 +333,15 @@ func TestMemoryEnvelopeCPUForeignOSPeak(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// Retained constrained evidence predates the foreign prior; it cannot
+	// itself become an accepted estimate or shrink an accepted foreign prior.
+	s.Needs.Memory, s.Needs.HostMemoryGB = "", 7.75
+	first := start(darwin, "declared", 7.75)
+	complete(first, 3, true)
+	s.Needs.Memory, s.Needs.HostMemoryGB = "auto", 0
 	const linuxPeak = 3.634326934814453
-	complete(start(linux, "exploratory first run", 7.75), linuxPeak, false)
-	// A foreign peak alone must not prevent a qualified local exploration.
-	first := start(darwin, "exploratory first run", 7.75)
-	complete(first, 2, true)
-	if facts := job(t, q, first.ID).MemoryAttempts; len(facts) != 1 || facts[0].LearningReason != "constrained" || *facts[0].MemoryPeak.HostGB != 2 {
+	complete(start(linux, "exploratory first run", 31.75), linuxPeak, false)
+	if facts := job(t, q, first.ID).MemoryAttempts; len(facts) != 1 || facts[0].LearningReason != "constrained" || *facts[0].MemoryPeak.HostGB != 3 {
 		t.Fatal("constrained diagnostic was not retained", facts)
 	}
 	for _, p := range q.s.WorkObservations {
@@ -378,12 +356,12 @@ func TestMemoryEnvelopeCPUForeignOSPeak(t *testing.T) {
 	}
 	check(t, q, linux, nil)
 	check(t, q, darwin, nil)
-	// Restart must neither revive the foreign estimate nor turn 2 GiB into a cap.
-	complete(start(darwin, "exploratory first run", 7.75), 4, false)
+	// The lower bound permits one full-allowance measurement, not a 3 GiB cap.
+	complete(start(darwin, boundedMemoryExploration, 7.75), 4, false)
 	complete(start(darwin, "accepted peak × 1.25", 5), 2, true)
 	// Rejected local success cannot erase the accepted 4 GiB peak (#490).
 	complete(start(darwin, "accepted peak × 1.25", 5), 6.5, false)
-	_, err = q.Submit(s)
+	_, err := q.Submit(s)
 	var api *HTTPError
 	if !errors.As(err, &api) || api.Code != "no_qualified_target" {
 		t.Fatalf("real local requirement must still refuse: %v", err)

@@ -40,6 +40,7 @@ type batchRelease struct {
 }
 
 type state struct {
+	MemoryExplorations   map[string]memoryExploration   `json:"memory_explorations,omitempty"`
 	StorageProtection    *storageProtectionState        `json:"storage_protection,omitempty"`
 	StorageObservations  map[string]StorageObservation  `json:"storage_observations,omitempty"`
 	ExternalMemory       map[string]*externalMemoryRing `json:"external_memory,omitempty"`
@@ -97,6 +98,8 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
+	// Qualification removes occupancy, but retains diagnostic history/inventory.
+	memoryOrigin              *Queue
 	storageProtectionMu       sync.Mutex
 	storageProtectionVerified bool // Restart never renews native verification.
 	// Only detached observation views set this page selection.
@@ -2442,6 +2445,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	}
 	j.Copies = append(j.Copies, Copy{AllocatedDevices: slices.Clone(j.AllocatedDevices), Machine: m.ID, Session: m.Session, Attempt: j.Attempt, Extension: j.Extension, ReleaseReason: "awaiting_release"})
 	j.Session = m.Session
+	q.claimMemoryExploration(j, m)
 	j.StorageEnvelope = q.storageEnvelope(j, m)
 	q.assignStorage(j, storage)
 	j.Reason = ""

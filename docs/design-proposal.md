@@ -2099,11 +2099,20 @@ separate proof. Without local history, use the same recipe/work/
 shape from another machine: prefer the same
 OS/architecture/accelerator/memory-layout family, times 1.25 × 1.5; otherwise
 times 1.25 × 2. Label both as a cross-machine estimate.
-For CPU work, transfer peaks only within the same OS: Linux cgroup totals and
-Darwin process RSS measure different scopes. Without an accepted target-OS peak,
-use a submitter hint or the existing exploratory path. A constrained target-OS
-sample remains diagnostic lower-bound evidence, never an upper bound or an
-accepted reservation. This does not change variant qualification or output parity.
+For CPU work, accepted same-OS evidence takes precedence over the conservative
+foreign-OS prior. Constrained same-OS observations are lower bounds only and
+cannot replace that prior. If the prior exceeds every qualified target-OS
+allowance, fresh comparable same-OS lower-bound evidence (with the existing 25%
+margin) and any submitter hint must fit before permitting one bounded exploration
+on the largest qualified allowance. Keep normal launch slack, drift margin and
+live admission guards. Assignment durably consumes this exception per frozen
+work/configuration and target OS, including across resubmission, history
+collection and restart. A clean result learns through the single eligibility
+gate; OOM gets no retry, and constrained or otherwise ineligible results cannot
+reopen the exception. Successful constrained attempts retain their ordinary job
+outcome. The foreign prior remains available with the capacity-remedy diagnostic.
+Claiming at assignment may spend a probe before launch, preventing duplicate
+launches after a lost offer. Qualification and output parity remain unchanged.
 Next use an optional submitter hint; a bootstrap declaration is not required and
 recipe defaults do not count as submitter hints. Without either, allow an
 exploratory first run only with measured memory, a known allowance (physical RAM if uncapped), at
