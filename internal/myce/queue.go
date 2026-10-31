@@ -533,6 +533,7 @@ func (q *Queue) updateRequest(ctx context.Context, fn func() error, timing *queu
 	}
 
 	if err == nil {
+		q.invalidateTerminalStatus()
 		q.commitRecords()
 	}
 	return err

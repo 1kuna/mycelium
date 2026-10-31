@@ -65,6 +65,93 @@ func TestStatusReadCPUReservation(t *testing.T) {
 	}
 }
 
+func TestStatusReadTerminalCommitInvalidatesCache(t *testing.T) {
+	q, _ := fixture(t)
+	j := submit(t, q, spec("experiment"))
+	a := check(t, q, machine("status-worker", "fake"), nil).Job
+	if a == nil || a.ID != j.ID {
+		t.Fatal("no assignment")
+	}
+	if err := q.Started(result(a, true)); err != nil {
+		t.Fatal(err)
+	}
+	before, err := q.cachedPublicSnapshot()
+	if err != nil || len(before.Jobs) != 1 || before.Jobs[0].State != "running" {
+		t.Fatal("running generation missing", err)
+	}
+	finish(t, q, a, true)
+	// No clock advance: even the ordinary one-second cache must not retain
+	// a running projection after the terminal/release transaction commits.
+	for _, query := range []string{"", "?jobs=all", "?detail=full"} {
+		s := readStatusOptions(t, q, query)
+		if len(s.Jobs) != 1 || s.Jobs[0].State != "succeeded" || !s.Jobs[0].ReleaseConfirmed {
+			t.Errorf("%s: terminal released job projected as active: %+v", query, s.Jobs)
+		}
+	}
+	page, err := q.cachedPublicSnapshot()
+	if err != nil || len(page.Jobs) != 1 || page.Jobs[0].State != "succeeded" {
+		t.Fatal("HTML snapshot retained running job", err)
+	}
+}
+
+func TestStatusReadTerminalCommitDuringProjection(t *testing.T) {
+	for _, cached := range []bool{false, true} {
+		t.Run(strconv.FormatBool(cached), func(t *testing.T) {
+			q, clock := fixture(t)
+			j := submit(t, q, spec("experiment"))
+			a := check(t, q, machine("status-worker", "fake"), nil).Job
+			if a == nil || a.ID != j.ID {
+				t.Fatal("no assignment")
+			}
+			if err := q.Started(result(a, true)); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			reader, err := q.usageReader.Conn(ctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer reader.Close()
+			captured := make(chan struct{})
+			var captures atomic.Int32
+			q.observeRead = func(kind string, _, _ time.Duration) {
+				if kind == "status" && captures.Add(1) == 1 {
+					close(captured)
+				}
+			}
+			done := make(chan struct{})
+			var got Snapshot
+			go func() {
+				defer close(done)
+				if cached {
+					got, err = q.cachedPublicSnapshot(ctx)
+				} else {
+					got, err = q.publicSnapshot(ctx)
+				}
+			}()
+			select {
+			case <-captured:
+			case <-ctx.Done():
+				t.Fatal("status never captured")
+			}
+			finish(t, q, a, true)
+			// Reproduce the incident's 41 seconds with the injected clock while
+			// the detached observation waits for usage I/O, outside q.mu.
+			clock.Advance(41 * time.Second)
+			reader.Close()
+			select {
+			case <-done:
+			case <-ctx.Done():
+				t.Fatal("status did not finish")
+			}
+			if err != nil || len(got.Jobs) != 1 || got.Jobs[0].State != "succeeded" || !got.Jobs[0].ReleaseConfirmed {
+				t.Fatalf("delayed status returned pre-completion state: %+v, %v", got.Jobs, err)
+			}
+		})
+	}
+}
+
 // Receipt polling must remain independent of both the usage reader and writer
 // connection, and must preserve private payload redaction and exact key echo.
 func TestJobReadAvoidsUsage(t *testing.T) {
@@ -364,5 +451,48 @@ func TestStatusReadRace(t *testing.T) {
 	close(errs)
 	for err := range errs {
 		t.Error(err)
+	}
+}
+
+func TestStatusReadTerminalCommitDuringJobProjection(t *testing.T) {
+	q, clock := fixture(t)
+	j := submit(t, q, spec("experiment"))
+	a := check(t, q, machine("status-worker", "fake", "status-host"), nil).Job
+	if a == nil || a.ID != j.ID {
+		t.Fatal("no assignment")
+	}
+	if err := q.Started(result(a, true)); err != nil {
+		t.Fatal(err)
+	}
+	captured := false
+	q.observeRead = func(kind string, _, _ time.Duration) {
+		if kind == "job" && !captured {
+			captured = true
+			finish(t, q, a, true)
+			clock.Advance(41 * time.Second)
+		}
+	}
+	handler := API{Queue: q, Token: "test"}.Handler()
+	r := httptest.NewRequest("GET", "/api/jobs/"+j.ID, nil)
+	r.Header.Set("Authorization", "Bearer test")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+	var got Job
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != 200 || got.State != "succeeded" || !got.ReleaseConfirmed {
+		t.Fatalf("delayed job GET returned pre-completion state: status=%d state=%s released=%t", w.Code, got.State, got.ReleaseConfirmed)
+	}
+	r = httptest.NewRequest("GET", "/api/hosts/status-host/maintenance", nil)
+	r.Header.Set("Authorization", "Bearer test")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+	var host HostMaintenanceStatus
+	if err := json.Unmarshal(w.Body.Bytes(), &host); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != 200 || len(host.Attempts) != 0 || len(host.PendingReleases) != 0 {
+		t.Fatalf("released job retained by host GET: status=%d %+v", w.Code, host)
 	}
 }
