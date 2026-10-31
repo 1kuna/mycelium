@@ -235,6 +235,7 @@ func TestStorageMigrationReadinessIncludesHiddenLegacyOutputs(t *testing.T) {
 				t.Fatal("protected legacy output did not block activation", err)
 			}
 			exact := migrationAction(t, q, "status")
+			assertStorageMigrationIndex(t, q)
 			if exact.Ready || !strings.Contains(strings.Join(exact.Blockers, ";"), "legacy shared experiment backlog") {
 				t.Fatalf("missing activation blocker: %+v", exact)
 			}

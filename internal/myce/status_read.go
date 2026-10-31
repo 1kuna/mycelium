@@ -127,6 +127,14 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 		productionInfrastructureRetries: q.productionInfrastructureRetries,
 		restartUntil:                    q.restartUntil, networkQuiet: q.networkQuiet, root: q.root}
 	s := q.s
+	if m := s.StorageMigration; m != nil {
+		// Readiness uses the immutable persisted snapshot outside q.mu. The
+		// diagnostic planner needs only the scalar mode/settings, not a copy of
+		// the retained comparison cohort in this locked observation.
+		copy := *m
+		copy.Cohort = nil
+		s.StorageMigration = &copy
+	}
 	s.Jobs, s.Submissions = map[string]*Job{}, map[string]*submissionRecord{}
 	var selected *Job
 	var err error

@@ -2,9 +2,11 @@ package myce
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"reflect"
 	"slices"
 	"time"
 )
@@ -139,32 +141,34 @@ func (q *Queue) sampleStorageMigration(status FileStoreStatus, payloads map[stri
 		m.Cohort = map[string]bool{}
 	}
 	m.CompletedCycles = 0
-	for _, j := range q.s.Jobs {
-		if j.LocalOutputs == nil || j.LocalOutputs.CollectedAt == nil || j.Delivery == nil || j.Delivery.State != "verified" || j.Delivery.VerifiedAt == nil || !sameDelivery(j, *j) {
-			continue
-		}
-		end := *j.LocalOutputs.CollectedAt
-		duration := end.Sub(j.Queued)
-		if duration > m.RequiredPeriod {
-			m.RequiredPeriod, m.PeriodJob = duration, j.ID
-		}
-		if !mismatch && m.Cohort[j.ID] && !j.Queued.Before(m.Since) && !end.After(now) && duration > 0 {
+	x := q.records.migration
+	if x.period > m.RequiredPeriod {
+		m.RequiredPeriod, m.PeriodJob = x.period, x.periodJob
+	}
+	for id := range m.Cohort {
+		c := x.holders[id]
+		if !mismatch && !c.queued.Before(m.Since) && !c.collected.After(now) && c.cycle > 0 {
 			m.CompletedCycles++
 		}
 	}
 	q.s.StorageMigration = m
 }
 
-// Capture complete migration metadata under q.mu, before any status paging or
-// redaction. Only owned scalars and produced digests escape; inventory I/O stays
-// outside q.mu. Activation and every status view use the same evaluator below.
+// Status borrows an immutable base snapshot and journal aggregates; activation
+// independently rebuilds the same inputs from SQLite, outside q.mu.
 type storageMigrationObservation struct {
-	report        StorageMigrationStatus
-	legacyOutputs map[string]bool
+	report                           StorageMigrationStatus
+	legacyOutputs                    map[string]uint64
+	writers                          uint64
+	base                             []byte
+	continuity, verified             bool
+	index                            *storageMigrationIndex
+	revision                         uint64
+	referencedCount, referencedBytes uint64
 }
 
-func (q *Queue) captureStorageMigration() storageMigrationObservation {
-	v := storageMigrationObservation{legacyOutputs: map[string]bool{}}
+func (q *Queue) recomputeStorageMigration() storageMigrationObservation {
+	v := storageMigrationObservation{legacyOutputs: map[string]uint64{}}
 	out := &v.report
 	out.SavedSettingsActive, out.Blockers = !q.automaticStorage(), []string{}
 	if m := q.s.StorageMigration; m != nil {
@@ -201,44 +205,14 @@ func (q *Queue) captureStorageMigration() storageMigrationObservation {
 			}
 		}
 	}
-	// Legacy shared experiment output must actually leave shared storage through
-	// the existing preservation/release/collector path. No new deletion authority.
+	// The same per-holder projection updates the transaction index and audits it.
 	visit := func(j *Job) {
-		if j == nil {
-			return
+		c := q.storageMigrationContribution(j)
+		if c.writer {
+			v.writers++
 		}
-		if !terminal(j.State) && (j.Spec.StorageProtocol != workerCustodyProtocol || len(j.Spec.Outputs) > 0 && j.Spec.OutputDestination == nil) {
-			out.Blockers = append(out.Blockers, "legacy output writer must drain without policy rewrite: "+j.ID)
-		}
-		if q.priorityMatch(j.Spec).Tier == "production" {
-			return
-		}
-		// Inputs/registry assets may remain protected shared data. Every kind of
-		// legacy produced progress, including failed attempts, must be drained.
-		outputs := []FileManifest{j.OutputRefs, j.PendingOutputRefs}
-		for _, attempt := range j.AttemptHistory {
-			if attempt.Diagnostics != nil {
-				outputs = append(outputs, attempt.Diagnostics.Files)
-			}
-		}
-		if j.FanOut != nil {
-			for _, piece := range j.FanOut.Results {
-				outputs = append(outputs, piece.OutputRefs)
-			}
-		}
-		for _, checkpoint := range j.FileCheckpoints {
-			outputs = append(outputs, checkpoint.Files)
-		}
-		if j.ResumeFiles != nil {
-			outputs = append(outputs, j.ResumeFiles.Files)
-		}
-		for _, recovered := range j.RecoveredResults {
-			outputs = append(outputs, recovered.Files)
-		}
-		for _, refs := range outputs {
-			for _, ref := range refs {
-				v.legacyOutputs[ref.SHA256] = true
-			}
+		for hash, size := range c.outputs {
+			v.legacyOutputs[hash] = size
 		}
 	}
 	for _, j := range q.s.Jobs {
@@ -253,14 +227,36 @@ func (q *Queue) captureStorageMigration() storageMigrationObservation {
 }
 
 func (v storageMigrationObservation) status(status FileStoreStatus, payloads map[string]storedPayload) *StorageMigrationStatus {
+	if v.base != nil {
+		projected := &Queue{storageShadowContinuity: v.continuity, storageProtectionVerified: v.verified}
+		if err := json.Unmarshal(v.base, &projected.s); err != nil {
+			return &StorageMigrationStatus{Blockers: []string{"migration metadata unavailable"}}
+		}
+		inputs := projected.recomputeStorageMigration() // Base snapshot contains no jobs/answers.
+		inputs.index, inputs.revision, inputs.writers = v.index, v.revision, v.writers
+		return inputs.status(status, payloads)
+	}
 	out := v.report
 	out.Blockers = slices.Clone(out.Blockers)
 	var count, bytes uint64
-	for hash := range v.legacyOutputs {
-		if p, exists := payloads[hash]; exists {
+	// Physical presence/partial-upload size is sampled by the capacity inventory
+	// already required for status. Intersect its payloads with the maintained
+	// digest index here, outside q.mu; missing blobs must not count as held space.
+	for hash, p := range payloads {
+		_, present := v.legacyOutputs[hash]
+		if v.index != nil {
+			_, present = v.index.outputs.Load(hash)
+		}
+		if present {
 			count++
 			bytes = addDiskBytes(bytes, p.size)
 		}
+	}
+	if v.writers > 0 {
+		out.Blockers = append(out.Blockers, fmt.Sprintf("legacy output writer must drain without policy rewrite: %d writers", v.writers))
+	}
+	if v.index != nil && v.index.revision.Load() != v.revision {
+		out.Blockers = append(out.Blockers, "migration inputs changed during observation; retry status")
 	}
 	if count > 0 {
 		out.Blockers = append(out.Blockers, fmt.Sprintf("legacy shared experiment backlog must be preserved and legally collected: %d stored payloads (%d bytes)", count, bytes))
@@ -273,10 +269,6 @@ func (v storageMigrationObservation) status(status FileStoreStatus, payloads map
 	out.Ready = len(out.Blockers) == 0
 	out.ManualWriterLimitsRetirable = !out.SavedSettingsActive && out.Ready && out.CompletedCycles > 0
 	return &out
-}
-
-func (q *Queue) storageMigrationStatus(status FileStoreStatus, payloads map[string]storedPayload) *StorageMigrationStatus {
-	return q.captureStorageMigration().status(status, payloads)
 }
 
 // StorageAdmissionMigration serializes cutover with every upload/submission and
@@ -297,13 +289,14 @@ func (q *Queue) StorageAdmissionMigration(ctx context.Context, action string) (*
 	if err != nil {
 		status.Error = "file store capacity unavailable"
 	}
-	var out *StorageMigrationStatus
-	var refusal error
-	if action == "status" {
+	read := func() *StorageMigrationStatus {
 		q.mu.RLock()
-		out = q.storageMigrationStatus(status, payloads)
+		inputs := q.captureStorageMigration()
 		q.mu.RUnlock()
-		return out, nil
+		return inputs.status(status, payloads)
+	}
+	if action == "status" {
+		return read(), nil
 	}
 	err = q.updateRequest(ctx, func() error {
 		if store != q.files {
@@ -315,7 +308,6 @@ func (q *Queue) StorageAdmissionMigration(ctx context.Context, action string) (*
 			}
 			q.s.StorageAdmissionActive = false
 			q.storageShadowContinuity = false
-			out = q.storageMigrationStatus(status, payloads)
 			return nil
 		}
 		if q.s.StorageMigration == nil {
@@ -325,27 +317,95 @@ func (q *Queue) StorageAdmissionMigration(ctx context.Context, action string) (*
 			q.s.StorageMigration = &storageMigration{Saved: StorageLegacySettings{uint64(store.limit), uint64(q.fileStoreProductionReserve)}, Cohort: map[string]bool{}}
 		}
 		q.sampleStorageMigration(status, payloads)
-		out = q.storageMigrationStatus(status, payloads)
-		if action == "activate" && !q.automaticStorage() {
-			if !out.Ready {
-				refusal = &HTTPError{Status: 409, Code: "storage_migration_incomplete", Message: "storage migration incomplete; inspect file admission status blockers and measured shadow evidence"}
-				return nil // Persist the failed comparison; refusal grants no activation.
-			}
-			now := q.clock.Now()
-			m := *q.s.StorageMigration
-			m.ActivatedAt = &now
-			q.s.StorageMigration = &m
-			q.s.StorageAdmissionActive = true
-			out = q.storageMigrationStatus(status, payloads)
-		}
 		return nil
 	}, nil)
 	if err != nil {
 		q.mu.Lock()
 		q.storageShadowContinuity = false
 		q.mu.Unlock()
+		return nil, err
 	}
-	return out, errors.Join(err, refusal)
+	if action != "activate" {
+		return read(), nil
+	}
+	// The SQLite statement owns a consistent full snapshot. Decoding, retained
+	// holder traversal, inventory comparison and qualification run outside q.mu.
+	q.mu.RLock()
+	inputs := q.captureStorageMigration()
+	revision := q.fileReferenceRevision
+	q.mu.RUnlock()
+	full, err := q.recomputeStorageMigrationSnapshot(inputs)
+	if err != nil {
+		return nil, err
+	}
+	maintained := inputs.status(status, payloads)
+	exact := full.status(status, payloads)
+	agrees := reflect.DeepEqual(maintained, exact) && inputs.agreesWith(full)
+	var refusal error
+	err = q.updateRequest(ctx, func() error {
+		if store != q.files || revision != q.fileReferenceRevision || inputs.continuity != q.storageShadowContinuity || inputs.verified != q.storageProtectionVerified {
+			return ErrStale
+		}
+		if !agrees || !exact.Ready {
+			if !agrees {
+				q.storageShadowContinuity = false
+			}
+			refusal = &HTTPError{Status: 409, Code: "storage_migration_incomplete", Message: "storage migration incomplete or maintained inputs disagree with full audit; inspect admission status"}
+			return nil
+		}
+		if !q.automaticStorage() {
+			now := q.clock.Now()
+			m := *q.s.StorageMigration
+			m.ActivatedAt = &now
+			q.s.StorageMigration = &m
+			q.s.StorageAdmissionActive = true
+		}
+		return nil
+	}, nil)
+	if err != nil {
+		return nil, err
+	}
+	return read(), refusal
+}
+
+func (q *Queue) recomputeStorageMigrationSnapshot(inputs storageMigrationObservation) (storageMigrationObservation, error) {
+	data, err := readQueueState(q.usageReader, normalizedQueueMarker)
+	if err != nil {
+		return storageMigrationObservation{}, err
+	}
+	full := &Queue{storageShadowContinuity: inputs.continuity, storageProtectionVerified: inputs.verified}
+	if err = json.Unmarshal(data, &full.s); err != nil {
+		return storageMigrationObservation{}, err
+	}
+	// Independently check the maintained lifecycle evidence against retained
+	// jobs. The required period is a durable high-water mark: pruning a measured
+	// cycle must not shorten it, and restart must not invent continuity.
+	if m := full.s.StorageMigration; m != nil {
+		copy := *m
+		copy.CompletedCycles = 0
+		for id, j := range full.s.Jobs {
+			c := full.storageMigrationContribution(j)
+			if c.cycle > copy.RequiredPeriod {
+				copy.RequiredPeriod, copy.PeriodJob = c.cycle, id
+			}
+			if m.Cohort[id] && c.cycle > 0 && !c.queued.Before(m.Since) && !c.collected.After(m.Last) {
+				copy.CompletedCycles++
+			}
+		}
+		full.s.StorageMigration = &copy
+	}
+	return full.recomputeStorageMigration(), nil
+}
+
+func (v storageMigrationObservation) agreesWith(full storageMigrationObservation) bool {
+	var bytes uint64
+	for hash, size := range full.legacyOutputs {
+		if _, ok := v.index.outputs.Load(hash); !ok {
+			return false
+		}
+		bytes = addDiskBytes(bytes, size)
+	}
+	return v.index.revision.Load() == v.revision && uint64(len(full.legacyOutputs)) == v.referencedCount && bytes == v.referencedBytes && full.writers == v.writers
 }
 
 func (a API) registerStorageMigration(mux *requestMux) {
