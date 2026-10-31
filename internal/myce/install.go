@@ -475,10 +475,8 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 				return err
 			}
 		}
-		if c.Role == "worker" {
-			if err = validateInstallDropIns(ctx, c, command); err != nil {
-				return err
-			}
+		if err = validateInstallDropIns(ctx, c, command); err != nil {
+			return err
 		}
 		if _, err = command(ctx, "systemctl", "--user", "enable", "--now", filepath.Base(c.Service)); err != nil {
 			return err
