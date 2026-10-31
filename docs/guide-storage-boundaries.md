@@ -35,7 +35,16 @@ all existing data and boundaries before reporting usable budget capacity; unknow
 or legacy custody cannot be silently treated as free capacity.
 
 Canonical capacity-pool and backing identities deduplicate aliases, including
-volumes sharing an APFS container. Allocated backing already reduced `statfs`
+volumes sharing an APFS container. Each backing also supplies `native_identity`,
+a SHA-256 fingerprint of observed native volume, mount incarnation and backing
+root/boundary identifiers as supported by the platform. Configured names/paths
+alone do not identify a volume. Backends must detect real replacement/remount,
+without including usage, free bytes or unused reservations in that fingerprint.
+Refresh/restart compares this identity and installed capacity independently of
+fresh funding/overhead/reservation observations, which are validated each time.
+Consuming an unchanged reserve preserves retained allocations and production
+publication. Missing native identity grants no protection verification.
+Allocated backing already reduced `statfs`
 free space. Only unused native reservations still included in that free reading
 are subtracted, once. Fresh file-store inventory/tus lengths, configured caps,
 production reserve and the old disk floor continue to restrict actual uploads.

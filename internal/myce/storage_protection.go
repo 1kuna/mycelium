@@ -2,6 +2,8 @@ package myce
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -59,7 +61,13 @@ type StoragePool struct {
 // unused portion may still be included there: subtract only ExcludedFreeBytes.
 // Project quotas alone are never availability backing.
 type StorageBacking struct {
-	ID                string `json:"id"`
+	ID string `json:"id"`
+	// NativeIdentity is a SHA-256 fingerprint of the observed native volume,
+	// mount incarnation and backing root/boundary identity, as supported by the
+	// platform. It must detect replacement/remount even at the same configured
+	// path/ID. Never include usage, free bytes or unused reservation measurements.
+	// Hash native identifiers so local paths/device details are not persisted.
+	NativeIdentity    string `json:"native_identity"`
 	Pool              string `json:"pool"`
 	Kind              string `json:"kind"` // independent, allocated, native-reserve
 	CapacityBytes     uint64 `json:"capacity_bytes"`
@@ -237,7 +245,7 @@ func (q *Queue) ConfigureStorageProtection(ctx context.Context, backend StorageP
 		for _, a := range p.Allocations {
 			old, _ := storageBacking(p.Snapshot, a.Backing)
 			current, ok := storageBacking(snapshot, a.Backing)
-			if !ok || old != current {
+			if !ok || !old.sameBoundary(current) {
 				return errors.New("retained storage backing changed")
 			}
 		}
@@ -254,6 +262,15 @@ func (q *Queue) ConfigureStorageProtection(ctx context.Context, backend StorageP
 		q.mu.Unlock()
 	}
 	return err
+}
+
+// Capacity is the installed boundary, not current usage. Funding and overhead
+// observations are freshly validated below; unused reservation must be allowed
+// to change as the same native volume fills without invalidating retained data.
+func (b StorageBacking) sameBoundary(other StorageBacking) bool {
+	return b.ID == other.ID && b.NativeIdentity == other.NativeIdentity &&
+		b.Pool == other.Pool && b.Kind == other.Kind &&
+		b.CapacityBytes == other.CapacityBytes && b.CapacityFiles == other.CapacityFiles
 }
 
 func storageBacking(snapshot StorageProtectionSnapshot, id string) (StorageBacking, bool) {
@@ -283,7 +300,8 @@ func validateStorageProtection(s StorageProtectionSnapshot, c ControlStorageDema
 	}
 	backings := map[string]StorageBacking{}
 	for _, b := range s.Backings {
-		if !extensionName.MatchString(b.ID) || !b.Verified || b.CapacityBytes == 0 || b.CapacityFiles == 0 || b.BackedBytes < addDiskBytes(b.CapacityBytes, b.OverheadBytes) || b.ExcludedFreeBytes > b.BackedBytes || (b.Kind != "independent" && b.Kind != "allocated" && b.Kind != "native-reserve") {
+		nativeID, identityErr := hex.DecodeString(b.NativeIdentity)
+		if identityErr != nil || len(nativeID) != sha256.Size || !extensionName.MatchString(b.ID) || !b.Verified || b.CapacityBytes == 0 || b.CapacityFiles == 0 || b.BackedBytes < addDiskBytes(b.CapacityBytes, b.OverheadBytes) || b.ExcludedFreeBytes > b.BackedBytes || (b.Kind != "independent" && b.Kind != "allocated" && b.Kind != "native-reserve") {
 			return errors.New("storage availability backing unqualified")
 		}
 		if _, ok := pools[b.Pool]; !ok {

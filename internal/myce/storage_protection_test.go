@@ -63,6 +63,10 @@ func protectionBackend(machines ...Machine) *fakeStorageProtection {
 		b.snapshot.Backings = append(b.snapshot.Backings, StorageBacking{ID: prod, Pool: "shared", Kind: "allocated", CapacityBytes: 100 << 20, CapacityFiles: 10000, BackedBytes: 101 << 20, OverheadBytes: 1 << 20, Verified: true})
 		b.snapshot.Workers = append(b.snapshot.Workers, StorageWorkerBacking{ProductionBacking: prod, Machine: m.ID, Session: m.Session, Backing: id, Confined: true, ExplorationBytes: 96 << 20, ExplorationFiles: 100})
 	}
+	for i := range b.snapshot.Backings {
+		// Fake native volume/mount/root identity; never derived from accounting.
+		b.snapshot.Backings[i].NativeIdentity = identityHash("fake-native-" + b.snapshot.Backings[i].ID)
+	}
 	return b
 }
 
@@ -179,6 +183,187 @@ func TestStorageProtectionMeasuredControlBacking(t *testing.T) {
 	}
 }
 
+// Regression for #506 comment 6547502293: consuming a native reserve changes
+// unused reservation and physical free together, not the backing's identity.
+func TestStorageProtectionNativeReserveRefresh(t *testing.T) {
+	for _, restart := range []bool{false, true} {
+		t.Run(fmt.Sprintf("restart=%v", restart), func(t *testing.T) {
+			q, c, dbpath := protectionQueue(t)
+			m, producer := protectionMachine("experiment", "fake"), protectionMachine("production", "fake")
+			b := protectionBackend(m, producer)
+			b.snapshot.Pools[0].FreeBytes = 600 << 20
+			b.snapshot.Backings[1].Kind = "native-reserve"
+			b.snapshot.Backings[1].ExcludedFreeBytes = 100 << 20
+			control := protectionControlWork(t, c)
+			if err := q.ConfigureStorageProtection(context.Background(), b, control); err != nil {
+				t.Fatal(err)
+			}
+			submit(t, q, protectionSpec("experiment"))
+			experiment := check(t, q, m, nil).Job
+			if experiment == nil {
+				t.Fatal("missing allocation")
+			}
+			refs := FileManifest{"out.txt": {SHA256: identityHash("unique experiment"), SizeBytes: 13}}
+			receipt := StorageCustodyReceipt{Protocol: workerCustodyProtocol, Execution: Execution{ID: experiment.ID, Attempt: experiment.Attempt}, Machine: m.ID, Session: m.Session, Allocation: experiment.StorageAllocation.ID, Files: refs}
+			if err := q.RecordStorageCustody(context.Background(), receipt); err != nil {
+				t.Fatal(err)
+			}
+			allocations, custody := maps.Clone(q.s.StorageProtection.Allocations), maps.Clone(q.s.StorageProtection.Custody)
+			// Partially consume, then fully consume the unchanged reserve. Reopen
+			// SQLite before each verification in the restart case.
+			for _, used := range []uint64{20 << 20, 80 << 20} {
+				b.snapshot.Pools[0].FreeBytes -= used
+				b.snapshot.Backings[1].ExcludedFreeBytes -= used
+				if restart {
+					root, files := q.root, q.files.root
+					if err := q.Close(); err != nil {
+						t.Fatal(err)
+					}
+					var err error
+					q, err = Open(dbpath, root, c, WithFileStore(files, 185<<30, true))
+					if err != nil {
+						t.Fatal(err)
+					}
+					t.Cleanup(func() { _ = q.Close() })
+					fakeCheckpointAvailability(t, q, true)
+				}
+				q.files.diskProbe = func(string) (DiskReading, error) {
+					return DiskReading{TotalBytes: 1 << 30, FreeBytes: b.snapshot.Pools[0].FreeBytes}, nil
+				}
+				err := q.ConfigureStorageProtection(context.Background(), b, control)
+				status, _, uploadErr := q.files.capacity(context.Background())
+				if err != nil || uploadErr != nil || !q.storageProtectionVerified {
+					t.Fatalf("same native backing cannot refresh: configure=%v; file capacity=%v; verified=%v", err, uploadErr, q.storageProtectionVerified)
+				}
+				if q.protectedSharedFree() != 500<<20 || status.FreeBytes != (500<<20)-diskFreeFloor(1<<30) {
+					t.Fatal("reserve consumption changed shared production capacity", status.FreeBytes)
+				}
+				if !reflect.DeepEqual(allocations, q.s.StorageProtection.Allocations) || !reflect.DeepEqual(custody, q.s.StorageProtection.Custody) {
+					t.Fatal("refresh lost retained allocation or custody")
+				}
+			}
+			// Exercise real production HTTP upload and completion after the reserve
+			// is entirely consumed, rather than checking the verification flag only.
+			production := submit(t, q, protectionSpec("production"))
+			assigned := check(t, q, producer, nil).Job
+			if assigned == nil || assigned.ID != production.ID {
+				t.Fatal("production held behind unchanged experiment backing", assigned)
+			}
+			if err := q.Started(result(assigned, false)); err != nil {
+				t.Fatal(err)
+			}
+			client := deliveryClient(t, q)
+			ctx := withFileStoreAttempt(context.Background(), *assigned)
+			_, ref := retentionUploadFile(t, func(_ context.Context, path string, ref FileRef) error {
+				return client.UploadFile(ctx, path, ref)
+			}, "production output after native reserve consumption")
+			completed := result(assigned, true)
+			completed.OutputRefs = FileManifest{"out.txt": ref}
+			if err := q.Complete(completed); err != nil {
+				t.Fatal("production publication failed", err)
+			}
+			if job(t, q, assigned.ID).State != "succeeded" {
+				t.Fatal("production did not complete")
+			}
+		})
+	}
+}
+
+func TestStorageProtectionBackingReplacementAndRemount(t *testing.T) {
+	q, c, dbpath := protectionQueue(t)
+	m := protectionMachine("producer", "fake")
+	b := protectionBackend(m)
+	parent := t.TempDir()
+	root := filepath.Join(parent, "backing")
+	if err := os.Mkdir(root, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "progress"), []byte("unique progress"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// Real device/root inode evidence, with a fake mount-incarnation token.
+	// Native mount provisioning and extraction remain the backend's obligation.
+	identity := func(mount string) string {
+		info, err := os.Stat(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		st := info.Sys().(*syscall.Stat_t)
+		return identityHash(struct {
+			Device, Root uint64
+			Mount        string
+		}{uint64(st.Dev), uint64(st.Ino), mount})
+	}
+	b.snapshot.Backings[1].NativeIdentity = identity("mount-1")
+	control := protectionControlWork(t, c)
+	if err := q.ConfigureStorageProtection(context.Background(), b, control); err != nil {
+		t.Fatal(err)
+	}
+	submit(t, q, protectionSpec("experiment"))
+	if check(t, q, m, nil).Job == nil {
+		t.Fatal("missing allocation")
+	}
+	original := q.s.StorageProtection
+	queueRoot, files := q.root, q.files.root
+	if err := q.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var err error
+	q, err = Open(dbpath, queueRoot, c, WithFileStore(files, 185<<30, true))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	reject := func(t *testing.T) {
+		t.Helper()
+		if err := q.ConfigureStorageProtection(context.Background(), b, control); err == nil || err.Error() != "retained storage backing changed" {
+			t.Fatal("replacement was not fenced", err)
+		}
+		if q.storageProtectionVerified {
+			t.Fatal("replacement renewed native verification")
+		}
+		if _, _, err := q.files.capacity(context.Background()); err == nil {
+			t.Fatal("replacement granted unverified capacity")
+		}
+		if !reflect.DeepEqual(original, q.s.StorageProtection) {
+			t.Fatal("rejected replacement changed retained accounting")
+		}
+	}
+	t.Run("replaced-root", func(t *testing.T) {
+		// Keep the original data intact while replacing its configured path.
+		if err := os.Rename(root, filepath.Join(parent, "retained")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Mkdir(root, 0700); err != nil {
+			t.Fatal(err)
+		}
+		b.snapshot.Backings[1].NativeIdentity = identity("mount-1")
+		if b.snapshot.Backings[1].NativeIdentity == original.Snapshot.Backings[1].NativeIdentity {
+			t.Fatal("replacement reused original root identity")
+		}
+		reject(t)
+		if data, err := os.ReadFile(filepath.Join(parent, "retained", "progress")); err != nil || string(data) != "unique progress" {
+			t.Fatal("replacement lost original progress", err)
+		}
+	})
+	t.Run("remount", func(t *testing.T) {
+		// The original volume/root can return under a new mount incarnation.
+		if err := os.Rename(root, filepath.Join(parent, "replacement")); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Rename(filepath.Join(parent, "retained"), root); err != nil {
+			t.Fatal(err)
+		}
+		b.snapshot.Backings[1].NativeIdentity = identity("mount-2")
+		reject(t)
+	})
+	t.Run("installed-capacity-change", func(t *testing.T) {
+		b.snapshot.Backings[1].NativeIdentity = identity("mount-1")
+		b.snapshot.Backings[1].CapacityBytes--
+		reject(t)
+	})
+}
+
 func TestStorageProtectionRejectsUnqualifiedBacking(t *testing.T) {
 	c := &fakeClock{now: time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC)}
 	control := protectionControlWork(t, c)
@@ -192,6 +377,7 @@ func TestStorageProtectionRejectsUnqualifiedBacking(t *testing.T) {
 		{"unrelated writers", func(s *StorageProtectionSnapshot) { s.UnrelatedWritersIsolated = false }},
 		{"unconfined", func(s *StorageProtectionSnapshot) { s.Workers[0].Confined = false }},
 		{"unverified", func(s *StorageProtectionSnapshot) { s.Backings[1].Verified = false }},
+		{"missing native identity", func(s *StorageProtectionSnapshot) { s.Backings[1].NativeIdentity = "" }},
 		{"shared control", func(s *StorageProtectionSnapshot) { s.Workers[0].Backing = s.ControlBacking }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
