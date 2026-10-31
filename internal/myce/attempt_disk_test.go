@@ -1,13 +1,135 @@
 package myce
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 )
+
+func TestAttemptDiskDiagnosticsStopRace(t *testing.T) {
+	for _, stopAt := range []string{"before-verification", "during-verification", "after-completion"} {
+		t.Run(stopAt, func(t *testing.T) {
+			q, clock := fixture(t)
+			c := retentionClient(t, q)
+			_, input := retentionUpload(t, c, "input")
+			s := spec("experiment")
+			s.Files = FileManifest{"input": input}
+			s.Diagnostics = &DiagnosticSpec{}
+			submit(t, q, s)
+			m := machine("disk-worker", "fake")
+			assigned := check(t, q, m, nil).Job
+			if assigned == nil {
+				t.Fatal("missing assignment")
+			}
+			r := result(assigned, false)
+			if err := q.Started(r); err != nil {
+				t.Fatal(err)
+			}
+			r.Interrupted = true // Reported stop intent cannot hide a quota failure.
+			r.ExecutionCause = &RuntimeCause{Operation: "outputs", Class: diskLimitExceeded}
+			summary, err := json.Marshal(FailureSummary{Execution: r.Execution, Machine: r.Machine, Session: r.Session, ExecutionCause: r.ExecutionCause, FailedTests: []FailedTest{}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, summaryRef := retentionUploadFile(t, c.UploadJobInput, string(summary))
+			_, tailRef := retentionUploadFile(t, c.UploadJobInput, "quota failure log tail")
+			r.Diagnostics = &AttemptDiagnostics{Files: FileManifest{"summary.json": summaryRef, "log-tail.txt": tailRef}}
+			syncDir := q.files.syncDir
+			stop := func() {
+				t.Helper()
+				clock.Advance(time.Second)
+				if err := q.Leave(m.ID, true); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if stopAt == "before-verification" {
+				stop()
+			}
+			if stopAt == "during-verification" {
+				entered, release := make(chan struct{}), make(chan struct{})
+				var once sync.Once
+				unblock := func() { once.Do(func() { close(release) }) }
+				defer unblock()
+				q.files.syncDir = func(path string) error {
+					close(entered)
+					<-release
+					return syncWorkerDir(path)
+				}
+				done := make(chan error, 1)
+				go func() { done <- q.Complete(r) }()
+				select {
+				case <-entered:
+				case <-time.After(testWaitTimeout):
+					t.Fatal("diagnostic verification did not reach durability barrier")
+				}
+				stopped := make(chan error, 1)
+				clock.Advance(time.Second)
+				go func() { stopped <- q.Leave(m.ID, true) }()
+				select {
+				case err := <-stopped:
+					if err != nil {
+						t.Fatal(err)
+					}
+				case <-time.After(testWaitTimeout):
+					t.Fatal("stop blocked behind diagnostic I/O under q.mu")
+				}
+				unblock()
+				select {
+				case err := <-done:
+					if err != nil {
+						t.Fatal(err)
+					}
+				case <-time.After(testWaitTimeout):
+					t.Fatal("diagnostic completion did not finish")
+				}
+			} else if err := q.Complete(r); err != nil {
+				t.Fatal(err)
+			}
+			if stopAt == "after-completion" {
+				stop()
+			}
+			// Terminal replay must leave the same accepted manifest available.
+			// The single-use verification barrier also detects needless rehashing.
+			for replay := 0; replay < 2; replay++ {
+				if replay > 0 {
+					if err := q.Complete(r); err != nil {
+						t.Fatal("terminal completion replay", err)
+					}
+				}
+				j, err := c.GetJob(context.Background(), assigned.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				files, err := DiagnosticFiles(j, assigned.Attempt)
+				if err != nil || !maps.Equal(files, r.Diagnostics.Files) || j.State != "failed" || len(j.AttemptHistory) != 1 {
+					t.Fatalf("quota diagnostics lost/replaced: files=%v err=%v job=%+v", files, err, j)
+				}
+			}
+			q.files.syncDir = syncDir // Downloads have their own durability barrier.
+			dest := filepath.Join(t.TempDir(), "tail")
+			if err := c.DownloadDiagnostic(context.Background(), assigned.ID, assigned.Attempt, "log-tail.txt", dest); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(dest)
+			if err != nil || string(data) != "quota failure log tail" {
+				t.Fatalf("diagnostics retrieval changed: %q %v", data, err)
+			}
+			stale := r
+			stale.Attempt++
+			if err := q.Complete(stale); err != ErrStale {
+				t.Fatalf("stale quota diagnostics acknowledged: %v", err)
+			}
+		})
+	}
+}
 
 func TestAttemptDiskLimitFailure(t *testing.T) {
 	for _, stopping := range []bool{false, true} {
