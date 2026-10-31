@@ -43,6 +43,7 @@
         "extension_version_conflict",
         "extension_invalid",
         "extension_unknown",
+        "environment_unknown",
         "job_id_ambiguous",
         "policy_revision_conflict",
         "policy_invalid",

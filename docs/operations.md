@@ -1481,3 +1481,19 @@ local backup, and compact the stopped local database using SQLite `VACUUM`.
 Never open a NAS copy with SQLite or compact the running queue. Check free space
 first: compaction needs room for a second database. Preserve the verified backup
 until the compacted database passes `PRAGMA integrity_check` and reopens normally.
+
+### Verify the loaded environment catalog
+
+`myce env list` returns a JSON array; `myce env get NAME` returns one entry
+(or `environment_unknown` when absent). Both use installed client authority;
+`--config`, `--joining-file`, `--queue` and `--token` precede NAME when supplied.
+The authenticated GET endpoints are `/api/environments` and
+`/api/environments/{name}`. They do not prepare environments or submit work.
+
+Each entry has its name and sorted platform recipes with effective backend
+(`uv`, `pixi`, or `binary`), immutable recipe `key`, and `input_digests`: SHA-256
+of loaded lock/manifest bytes under canonical labels. Compare these with the
+expected inputs to verify registration, even after the original files change.
+Raw recipes, commands, file contents and local paths are omitted. Binary recipes
+report the digest of the `binary.sha256` identity input. See the
+[entry schema](schemas/environment-v1.schema.json).

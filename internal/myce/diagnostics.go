@@ -68,6 +68,7 @@ var rejectionMessages = map[string]string{
 	"extension_version_conflict":            "extension version is frozen; bump the version",
 	"extension_invalid":                     "extension folder or schema is invalid; run extension check --static",
 	"extension_unknown":                     "extension digest is not registered",
+	"environment_unknown":                   "unknown environment",
 	"job_id_ambiguous":                      "job ID prefix is ambiguous; use a longer ID",
 	"policy_revision_conflict":              "policy revision changed",
 	"policy_invalid":                        "policy or expected_revision is invalid; export the current policy before editing",
