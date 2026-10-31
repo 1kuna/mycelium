@@ -211,7 +211,8 @@ func verifiedJoining(ctx context.Context, i Invitation, address string) (Client,
 }
 
 // probeJoining authenticates via pinned TLS and the normal bearer credential.
-// A 404 alone permits the existing status route during a rolling upgrade.
+// A 404 or 403 permits one attempt at the existing status route during a rolling
+// upgrade. The status route must still accept the same credential.
 // Neither response body is read: status size must never govern joining latency.
 func (c Client) probeJoining(ctx context.Context) error {
 	for _, path := range []string{"/api/ping", "/api/status"} {
@@ -227,7 +228,7 @@ func (c Client) probeJoining(ctx context.Context) error {
 			return err
 		}
 		_ = res.Body.Close()
-		if res.StatusCode == http.StatusNotFound && path == "/api/ping" {
+		if path == "/api/ping" && (res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusForbidden) {
 			continue
 		}
 		if res.StatusCode < 200 || res.StatusCode >= 300 {

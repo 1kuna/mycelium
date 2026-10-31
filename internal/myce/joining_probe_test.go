@@ -3,6 +3,8 @@ package myce
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -66,44 +68,75 @@ func TestJoiningProbeIndependentOfLargeStatus(t *testing.T) {
 }
 
 func TestJoiningProbeOldQueueNeverDrainsLargeStatus(t *testing.T) {
-	payload := `{"padding":"` + strings.Repeat("x", 15<<20) + `"}`
-	var pings, statuses atomic.Int32
-	server, invitation := joiningTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get("Authorization") != "Bearer throwaway-test-only" {
-			w.WriteHeader(http.StatusUnauthorized)
-			return
-		}
+	for _, pingStatus := range []int{http.StatusNotFound, http.StatusForbidden} {
+		t.Run(fmt.Sprint(pingStatus), func(t *testing.T) {
+			payload := `{"padding":"` + strings.Repeat("x", 15<<20) + `"}`
+			var pings, statuses atomic.Int32
+			server, invitation := joiningTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Header.Get("Authorization") != "Bearer throwaway-test-only" {
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+				if r.URL.Path == "/api/ping" {
+					pings.Add(1)
+					w.WriteHeader(pingStatus)
+					return
+				}
+				statuses.Add(1)
+				// A healthy old queue may spend more than the former one-second
+				// deadline generating headers. This is transport time, not queue time.
+				timer := time.NewTimer(1100 * time.Millisecond)
+				defer timer.Stop()
+				select {
+				case <-r.Context().Done():
+					return
+				case <-timer.C:
+				}
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusOK)
+				w.(http.Flusher).Flush()
+				_, _ = io.WriteString(w, payload)
+				w.(http.Flusher).Flush()
+				// Withhold EOF: draining this body cannot succeed within any budget.
+				<-r.Context().Done()
+			}))
+			ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+			defer cancel()
+			client, err := ResolveJoining(ctx, invitation, "", &fakeDiscovery{})
+			if err != nil || client.URL != server.URL {
+				t.Fatalf("joining old queue: %v", err)
+			}
+			defer client.HTTP.CloseIdleConnections()
+			if pings.Load() != 1 || statuses.Load() != 1 {
+				t.Fatalf("ping=%d status=%d", pings.Load(), statuses.Load())
+			}
+		})
+	}
+}
+
+func TestJoiningProbeForbiddenStatusRejectsCredential(t *testing.T) {
+	var pings, statuses, requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
 		if r.URL.Path == "/api/ping" {
 			pings.Add(1)
-			http.NotFound(w, r)
-			return
 		}
-		statuses.Add(1)
-		// A healthy old queue may spend more than the former one-second
-		// deadline generating headers. This is transport time, not queue time.
-		timer := time.NewTimer(1100 * time.Millisecond)
-		defer timer.Stop()
-		select {
-		case <-r.Context().Done():
-			return
-		case <-timer.C:
+		if r.URL.Path == "/api/status" {
+			statuses.Add(1)
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.(http.Flusher).Flush()
-		_, _ = io.WriteString(w, payload)
-		w.(http.Flusher).Flush()
-		// Withhold EOF: draining this body cannot succeed within any budget.
-		<-r.Context().Done()
+		if r.Header.Get("Authorization") != "Bearer wrong" {
+			t.Error("probe changed credential")
+		}
+		w.WriteHeader(http.StatusForbidden)
 	}))
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
-	defer cancel()
-	client, err := ResolveJoining(ctx, invitation, "", &fakeDiscovery{})
-	if err != nil || client.URL != server.URL {
-		t.Fatalf("joining old queue: %v", err)
+	defer server.Close()
+	client := Client{URL: server.URL, Token: "wrong", HTTP: server.Client()}
+	err := client.probeJoining(context.Background())
+	var rejected *HTTPError
+	if !errors.As(err, &rejected) || rejected.Status != http.StatusForbidden {
+		t.Fatalf("forbidden status accepted: %v", err)
 	}
-	defer client.HTTP.CloseIdleConnections()
-	if pings.Load() != 1 || statuses.Load() != 1 {
-		t.Fatalf("ping=%d status=%d", pings.Load(), statuses.Load())
+	if requests.Load() != 2 || pings.Load() != 1 || statuses.Load() != 1 {
+		t.Fatalf("requests=%d ping=%d status=%d", requests.Load(), pings.Load(), statuses.Load())
 	}
 }
