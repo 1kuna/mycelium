@@ -666,9 +666,13 @@ myce install worker --config WORKER_CONFIG --queue https://queue.example:7443
 ```
 
 This verifies the new endpoint against the installed joining authority's existing
-certificate pin, then updates both the worker config's `queue` and the authority's
-saved `address` in the install transaction. It preserves the pin and credentials
-exactly. A pin mismatch refuses the repair without changing installed files; this
+certificate pin, then publishes the authority's saved `address` before the worker
+config's `queue`. On its next start the service reads `--joining-file`, so an
+interruption between those writes leaves it able to use the verified new address
+even while the config still shows the old one. Re-run the same repair command to reconcile
+the config and finish installation. This also repairs older interrupted installs
+that wrote only the config. The pin and credentials are preserved exactly.
+A pin mismatch refuses the repair without changing installed files; this
 path cannot replace the authority or rotate its pin. Changing an address requires
 the new queue endpoint to be reachable. Preview with `--dry-run` to inspect the
 config change without verification or writes.

@@ -5,8 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
+	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 
@@ -32,6 +35,113 @@ func preserveWorkerFixture(t *testing.T) (ServiceConfig, string) {
 	return c, source
 }
 func fakeInstallManager(context.Context, string, ...string) ([]byte, error) { return nil, nil }
+
+func TestInstallJoiningAddressRepairSurvivesInterruption(t *testing.T) {
+	// Use the same saved-config/--queue overlay for the interrupted attempt and
+	// the retry, as the install worker command does.
+	repair := func(path, address, source string, files installFiles) error {
+		c, err := ReadServiceConfig(path)
+		if err != nil {
+			return err
+		}
+		var values ServiceConfig
+		flags := flag.NewFlagSet("install worker", flag.ContinueOnError)
+		RegisterInstallFlags(flags, &values)
+		if err := flags.Parse([]string{"--queue", address}); err != nil {
+			return err
+		}
+		c, err = OverlayInstallFlags(flags, c, values)
+		if err != nil {
+			return err
+		}
+		return installWithFiles(context.Background(), c, source, "", fakeInstallManager, files)
+	}
+	if path := os.Getenv("MYCE_TEST_REPAIR_CONFIG"); path != "" {
+		c, err := ReadServiceConfig(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		publications := 0
+		err = repair(path, os.Getenv("MYCE_TEST_REPAIR_ADDRESS"), os.Getenv("MYCE_TEST_REPAIR_SOURCE"), installFiles{publication: func(path string, _ []byte, _ os.FileMode, _ bool) error {
+			if path == c.Config || path == c.JoiningFile {
+				publications++
+				if publications == 2 {
+					// The first address file is fully synced. Die before publishing
+					// the second, bypassing the installer's deferred rollback.
+					if err := syscall.Kill(os.Getpid(), syscall.SIGKILL); err != nil {
+						return err
+					}
+					select {}
+				}
+			}
+			return nil
+		}})
+		t.Fatal("interruption seam was not reached", err)
+	}
+	c, source := preserveWorkerFixture(t)
+	server, authority := joiningTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer throwaway-test-only" {
+			w.WriteHeader(http.StatusUnauthorized)
+		}
+	}))
+	address := server.URL
+	authority.Address = "https://old-queue.invalid:7443"
+	c.Queue = authority.Address
+	c.JoiningFile = filepath.Join(c.NAS, "invitation.json")
+	if err := WriteInvitation(c.JoiningFile, authority); err != nil {
+		t.Fatal(err)
+	}
+	if err := Install(context.Background(), c, source, "", fakeInstallManager); err != nil {
+		t.Fatal(err)
+	}
+	c, err := ReadServiceConfig(c.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	child := exec.Command(os.Args[0], "-test.run=^TestInstallJoiningAddressRepairSurvivesInterruption$")
+	child.Env = append(os.Environ(), "MYCE_TEST_REPAIR_CONFIG="+c.Config, "MYCE_TEST_REPAIR_ADDRESS="+address, "MYCE_TEST_REPAIR_SOURCE="+source)
+	output, err := child.CombinedOutput()
+	var exit *exec.ExitError
+	if !errors.As(err, &exit) || exit.Sys().(syscall.WaitStatus).Signal() != syscall.SIGKILL {
+		t.Fatalf("installer did not die at the publication seam: %v\n%s", err, output)
+	}
+	interrupted, err := ReadServiceConfig(c.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadInvitation(interrupted.JoiningFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Fingerprint != authority.Fingerprint {
+		t.Fatal("interruption changed the installed pin")
+	}
+	if got.Address != address {
+		t.Fatal("interrupted repair left the service using the old queue address")
+	}
+	if interrupted.Queue != c.Queue {
+		t.Fatal("test did not interrupt between the two address publications")
+	}
+	// The service's --joining-file reconnect path uses this authority even while
+	// the config still has the old address; no discovery is available here.
+	client, err := ResolveJoining(context.Background(), got, "", &fakeDiscovery{})
+	if err != nil {
+		t.Fatal("worker cannot reconnect after interruption", err)
+	}
+	client.HTTP.CloseIdleConnections()
+	if err := repair(c.Config, address, source, installFiles{}); err != nil {
+		t.Fatal("repeating the repair failed", err)
+	}
+	saved, err := ReadServiceConfig(c.Config)
+	if err != nil || saved.Queue != address {
+		t.Fatal("repeated repair did not reconcile the config address", err)
+	}
+	got, err = ReadInvitation(saved.JoiningFile)
+	authority.Address = address
+	if err != nil || got != authority {
+		t.Fatal("repeated repair lost the address or changed the installed authority", err)
+	}
+}
 
 type inactiveInstallUnit struct{}
 

@@ -450,9 +450,9 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 	if err != nil {
 		return err
 	}
-	if err = tx.put(c.Config, configData, 0600); err != nil {
-		return err
-	}
+	// The service reconnects through --joining-file. Publish that address first
+	// so an interrupted repair can reconnect; repeating the same repair then
+	// reconciles a config publication that did not finish.
 	if invitation != nil {
 		invitationData, err := json.Marshal(invitation)
 		if err != nil {
@@ -461,6 +461,9 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 		if err = tx.put(c.JoiningFile, invitationData, 0600); err != nil {
 			return err
 		}
+	}
+	if err = tx.put(c.Config, configData, 0600); err != nil {
+		return err
 	}
 	if c.EnvironmentFile == "" && !existing && invitation == nil && !files.machineConversion {
 		if token == "" {
