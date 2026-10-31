@@ -40,6 +40,7 @@ type batchRelease struct {
 }
 
 type state struct {
+	StorageProtection    *storageProtectionState        `json:"storage_protection,omitempty"`
 	StorageObservations  map[string]StorageObservation  `json:"storage_observations,omitempty"`
 	ExternalMemory       map[string]*externalMemoryRing `json:"external_memory,omitempty"`
 	AttemptOutputUploads map[string]time.Time           `json:"attempt_output_uploads,omitempty"`
@@ -96,6 +97,8 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
+	storageProtectionMu       sync.Mutex
+	storageProtectionVerified bool // Restart never renews native verification.
 	// Only detached observation views set this page selection.
 	observationSelection *statusSelection
 	deliveryRoot         string
@@ -1468,6 +1471,10 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 	quotaFailure := attemptDiskLimitFailure(r)
 	unlockRequest := requestLock(ctx, &q.mu)
 	j, err := q.current(r)
+	if err == nil && !r.ReleaseOnly && r.Success && j.StorageAllocation != nil && j.StorageAllocation.WorkerCustody {
+		unlockRequest()
+		return storageCustodyRefusal()
+	}
 	// A quota failure remains terminal when a stop races it. Verify its opt-in
 	// diagnostics in either live state, with the same identity fences as outputs.
 	verify := err == nil && j.storedFileResults() && (j.State == "running" || j.State == "stopping" && quotaFailure) && !cancelled(j) && (r.Success && !r.Interrupted || !r.Success && r.Diagnostics != nil && j.Spec.Diagnostics != nil) && !r.ReleaseOnly
@@ -2384,6 +2391,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	if j.Spec.FanOut != nil {
 		j = q.assignFanOut(j, m)
 	}
+	storage, _ := q.storageRequest(j, m)
 	estimate, measured := q.estimateCompletion(j, m)
 	// The planner returns a target-specific copy. Persist its exact
 	// reservation on the live attempt before charging any resources.
@@ -2435,6 +2443,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	j.Copies = append(j.Copies, Copy{AllocatedDevices: slices.Clone(j.AllocatedDevices), Machine: m.ID, Session: m.Session, Attempt: j.Attempt, Extension: j.Extension, ReleaseReason: "awaiting_release"})
 	j.Session = m.Session
 	j.StorageEnvelope = q.storageEnvelope(j, m)
+	q.assignStorage(j, storage)
 	j.Reason = ""
 	if measured {
 		j.Timing = &WorkTiming{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: m.ID, Session: m.Session, PlacementReason: estimate.reason()}

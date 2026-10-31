@@ -1878,6 +1878,10 @@
           "type": "string",
           "x-contract": "diagnostic"
         },
+        "storage_allocation": {
+          "$ref": "#/$defs/StorageAllocation",
+          "x-contract": "diagnostic"
+        },
         "storage_attempts": {
           "items": {
             "$ref": "#/$defs/AttemptStorageFacts"
@@ -3272,6 +3276,10 @@
           "type": "string",
           "x-contract": "diagnostic"
         },
+        "storage_protocol": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
         "submission_key": {
           "description": "Exact project-scoped submission identity echo. Omitted for an unkeyed job.",
           "maxLength": 128,
@@ -3323,6 +3331,50 @@
       "required": [
         "projected",
         "omitted"
+      ],
+      "type": "object"
+    },
+    "StorageAllocation": {
+      "properties": {
+        "at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "backing": {
+          "type": "string"
+        },
+        "bytes": {
+          "type": "integer"
+        },
+        "execution": {
+          "$ref": "#/$defs/Execution"
+        },
+        "files": {
+          "type": "integer"
+        },
+        "id": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "worker_custody": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "id",
+        "execution",
+        "machine",
+        "session",
+        "backing",
+        "bytes",
+        "files",
+        "worker_custody",
+        "at"
       ],
       "type": "object"
     },

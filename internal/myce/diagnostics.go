@@ -13,6 +13,8 @@ import (
 // Stable rejection codes and default messages. Submission validation returns
 // the specific field rule; other wrapped causes stay local.
 var rejectionMessages = map[string]string{
+	"worker_custody_required":               "unique experiment outputs must remain on their producing worker; destination delivery is pending",
+	"storage_custody_invalid":               "worker custody requires the exact admitted execution and an immutable bounded output manifest",
 	"status_query_invalid":                  "status requires jobs=recent|active|all, limit=1..1000, an RFC3339 since, an existing before cursor and detail=full when requested",
 	"recovery_invalid":                      "recovery requires valid metadata, declared outputs and matching execution identity",
 	"recovery_stale":                        "recovery requires the exact retained failed execution",

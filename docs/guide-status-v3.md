@@ -978,3 +978,8 @@ Native metadata sampling can miss writes deleted between scans. External writabl
 work/checkpoint roots and Docker overlay coverage remain incomplete, with no
 accepted scratch estimate; native denial/confinement qualification is separate.
 No store cap, reservation, delivery contract, retry or placement policy changes.
+
+The opt-in [backed storage integration](guide-storage-boundaries.md) adds
+`storage_allocation` to protected assignments. It is an exact worker budget,
+not a native qualification claim or a local-spool retrieval promise. Physical
+accounting remains shadow status; existing cap/reserve settings remain active.

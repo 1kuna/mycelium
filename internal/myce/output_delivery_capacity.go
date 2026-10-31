@@ -82,6 +82,9 @@ func (q *Queue) reserveDeliveryResult(ctx context.Context, r Result) error {
 		if err != nil || j.State != "running" || cancelled(j) || j.Spec.OutputDelivery != asyncNAS || m == nil || m.Session != r.Session || q.files != store {
 			return ErrStale
 		}
+		if j.StorageAllocation != nil && j.StorageAllocation.WorkerCustody {
+			return storageCustodyRefusal()
+		}
 		if len(r.OutputRefs) != len(j.Spec.Outputs) {
 			return errors.New("complete output manifest required")
 		}

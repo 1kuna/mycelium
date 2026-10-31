@@ -139,11 +139,12 @@ func (e Environment) Key() string {
 }
 
 type Spec struct {
-	Portable       bool                   `json:"portable,omitempty" yaml:"portable,omitempty"`
-	OutputDelivery string                 `json:"output_delivery,omitempty" yaml:"output_delivery,omitempty"`
-	Isolation      string                 `json:"isolation,omitempty" yaml:"isolation,omitempty"`
-	Reason         string                 `json:"reason,omitempty" yaml:"reason,omitempty"`
-	SharedInputs   map[string]SharedInput `json:"shared_inputs,omitempty" yaml:"shared_inputs,omitempty"`
+	StorageProtocol string                 `json:"storage_protocol,omitempty" yaml:"storage_protocol,omitempty"`
+	Portable        bool                   `json:"portable,omitempty" yaml:"portable,omitempty"`
+	OutputDelivery  string                 `json:"output_delivery,omitempty" yaml:"output_delivery,omitempty"`
+	Isolation       string                 `json:"isolation,omitempty" yaml:"isolation,omitempty"`
+	Reason          string                 `json:"reason,omitempty" yaml:"reason,omitempty"`
+	SharedInputs    map[string]SharedInput `json:"shared_inputs,omitempty" yaml:"shared_inputs,omitempty"`
 	// PrepareSource extracts the validated CLI snapshot before member launch,
 	// then stages explicit inputs over it. It is persisted, never an author field.
 	PrepareSource bool `json:"prepare_source,omitempty" yaml:"-"`
@@ -188,6 +189,9 @@ type Spec struct {
 }
 
 func (s Spec) Validate() error {
+	if s.StorageProtocol != "" && (s.StorageProtocol != workerCustodyProtocol || s.OutputDelivery != "") {
+		return errors.New("storage_protocol must be worker-custody/1 with output_delivery omitted")
+	}
 	if err := validateOutputDelivery(s); err != nil {
 		return reject("job_files_invalid", err)
 	}
@@ -269,7 +273,7 @@ func (s Spec) Validate() error {
 	if s.extensionJob() {
 		return rejectIf("job_program_invalid", validateExtensionJob(s))
 	}
-	if s.Kind == "" && (len(s.Inputs)+len(s.Args) > 0 || (len(s.Outputs) > 0 && !s.Run.Docker && len(s.Files) == 0 && len(s.SharedInputs) == 0 && s.After == nil && s.OutputDelivery == "") || s.SizeHint.MemoryGB != 0 || s.SizeHint.HostMemoryGB != 0) {
+	if s.Kind == "" && (len(s.Inputs)+len(s.Args) > 0 || (len(s.Outputs) > 0 && !s.Run.Docker && len(s.Files) == 0 && len(s.SharedInputs) == 0 && s.After == nil && s.OutputDelivery == "" && s.StorageProtocol == "") || s.SizeHint.MemoryGB != 0 || s.SizeHint.HostMemoryGB != 0) {
 		return reject("job_program_invalid", errors.New("inputs, outputs, args and size_hint require a kind/program job"))
 	}
 	if !validMemoryValue(s.Needs.MemoryGB) || (s.Needs.Memory != "auto" && ((!s.Needs.cpuOnly() && s.Needs.MemoryGB <= 0) || (s.Needs.cpuOnly() && s.Needs.HostMemoryGB <= 0))) {
@@ -364,6 +368,7 @@ type SpecProjection struct {
 }
 
 type Job struct {
+	StorageAllocation      *StorageAllocation    `json:"storage_allocation,omitempty"`
 	StorageEnvelope        *JobStorageEnvelope   `json:"storage_envelope,omitempty"`
 	StorageAttempts        []AttemptStorageFacts `json:"storage_attempts,omitempty"`
 	StorageAttemptsDropped int                   `json:"storage_attempts_dropped,omitempty"`

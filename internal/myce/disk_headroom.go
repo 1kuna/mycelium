@@ -168,6 +168,9 @@ func (q *Queue) currentDiskVolume(v DiskVolume, receivedAt time.Time) DiskVolume
 	return v
 }
 func (q *Queue) diskHeadroomReason(j *Job, m *Machine) string {
+	if reason := q.protectedStorageReason(j, m); reason != "" {
+		return reason
+	}
 	if j.OutputAdmissionPending {
 		return outputRetryHold
 	}
