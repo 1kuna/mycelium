@@ -1253,12 +1253,20 @@ and last-resort placement. `myce host profile HOST --shared=true
 `--shared=false` removes the profile without resuming admission. Measured OS
 memory pressure or foreground scheduling latency stops work through planned
 checkpoint/requeue with hysteresis. Linux execution cgroups cap aggregate CPU
-time. macOS applies `taskpolicy -b` (background CPU and I/O priority), caps
-aggregate declared cores at the CPU allowance, and clamps common runtime thread
+time. macOS applies `setpriority(PRIO_DARWIN_PROCESS, pid, PRIO_DARWIN_BG)`
+(equivalent to `taskpolicy -b`) to gated main payloads and native sidecars.
+Children inherit background CPU/I/O scheduling and lower timer/network priority;
+worker control stays outside background mode. Hosts without the profile retain
+their existing policy. macOS also caps aggregate declared cores at the CPU allowance, and clamps common runtime thread
 counts to each command's declared cores. Payloads can ignore those thread hints:
 aggregate CPU time and RAM ceilings remain unenforced on macOS. See the
-shared-host guide for thresholds and qualification limits. Existing exclusions,
-drain ownership and storage fences apply.
+shared-host guide for thresholds and qualification limits. To compare nice-only
+and background scheduling through an isolated CPU dev worker, build the CLI and
+run `python3 scripts/measure-shared-host.py --myce ./myce`. The canary uses two
+CPU children and one second of foreground samples per mode; each payload
+self-expires after three seconds to bound interference if the probe fails.
+It measures a light workload, not saturation or a latency guarantee. Existing
+exclusions, drain ownership and storage fences apply.
 
 ## CPU capacity and allowances (R1)
 

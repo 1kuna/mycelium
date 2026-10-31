@@ -4,12 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"math"
-	"os/exec"
 	"runtime"
 	"slices"
 	"syscall"
-	"time"
 )
 
 // SharedHostProfile protects additional interactive use. Size the reserve from
@@ -113,6 +112,11 @@ func validHostMemoryObservation(o *HostMemoryObservation) bool {
 	return o != nil && validMemoryValue(o.TotalGB) && o.TotalGB > 0 && validMemoryValue(o.UsedGB) && o.UsedGB <= o.TotalGB && validMemoryValue(o.MyceliumGB) && o.MyceliumGB <= o.UsedGB
 }
 
+var sharedHostSetBackgroundPriority = func(pid int) error {
+	// Darwin sys/resource.h: PRIO_DARWIN_PROCESS, PRIO_DARWIN_BG.
+	return syscall.Setpriority(4, pid, 0x1000)
+}
+
 // The supervisor is still behind its execution gate. Its payload/descendants
 // inherit nice=10, leaving the worker's control goroutines at normal priority.
 func applySharedHostPriority(pid int, p *SharedHostProfile) error {
@@ -133,10 +137,10 @@ func applySharedHostPriority(pid int, p *SharedHostProfile) error {
 		}
 	}
 	if runtime.GOOS == "darwin" {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		if err := exec.CommandContext(ctx, "/usr/sbin/taskpolicy", "-b", "-p", fmt.Sprint(pid)).Run(); err != nil {
-			return fmt.Errorf("shared host background task policy: %w", err)
+		// Darwin sys/resource.h. Apply only to the gated payload PID;
+		// background CPU/I/O/timer/network policy survives fork/exec.
+		if err := sharedHostSetBackgroundPriority(pid); err != nil {
+			log.Printf("warning: shared host background task policy for payload pid %d: %v", pid, err)
 		}
 	}
 	return nil

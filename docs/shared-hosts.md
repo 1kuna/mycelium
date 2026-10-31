@@ -26,9 +26,13 @@ until their execution budgets and priority are covered. A job's own shell can
 still compile code: that work inherits its command's priority.
 
 Commands and native sidecars receive nice >= 10 before their execution gates
-open. macOS additionally applies `taskpolicy -b` to every gated supervisor and
-member, inherited by descendants. Worker heartbeats and queue control retain
-their original priority. The existing physical-host CPU ledger caps aggregate
+open. macOS additionally applies
+`setpriority(PRIO_DARWIN_PROCESS, pid, PRIO_DARWIN_BG)` (equivalent to
+`taskpolicy -b`) to every gated supervisor and member, inherited by descendants.
+This lowers CPU, I/O, timer and network priority. Worker heartbeats and queue
+control retain their original priority. A failed background-policy application
+logs a warning and the job continues with its existing nice priority.
+The existing physical-host CPU ledger caps aggregate
 **declared cores** at `cpu_budget_cores`. Common Go, OpenMP, BLAS and Rayon runtime
 thread-count variables are clamped to each command's declared cores, including
 sidecars. A payload can ignore these variables or start more processes.
