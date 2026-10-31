@@ -130,3 +130,59 @@ func TestCurvePreservationAcceptedLearning(t *testing.T) {
 		t.Fatal("guard mutated input")
 	}
 }
+
+func TestCurvePreservationFailureInvalidation(t *testing.T) {
+	q, clock, m, s := observationFixture(t)
+	s.Priority = "production"
+	before := preservationSnapshot(t, q)
+	j := startObservation(t, q, m, s)
+	clock.Advance(time.Second)
+	r := result(&j, false)
+	r.OutOfMemory = true
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	after := preservationSnapshot(t, q)
+	// This explicit-resource fixture ends failed, with a new zero-sample key.
+	if len(after.WorkCurves) != 1 || !after.WorkCurves[0].Forbidden {
+		t.Fatal(after.WorkCurves)
+	}
+	verify := func(s Snapshot) error { _, err := VerifyCurvePreservation(before, s, nil); return err }
+	if err := verify(after); err != nil {
+		t.Fatal(err)
+	}
+	for name, mutate := range map[string]func(*Snapshot){
+		"missing job":             func(s *Snapshot) { s.Jobs = nil },
+		"key":                     func(s *Snapshot) { s.WorkCurves[0].Key.Work = "other" },
+		"attempt":                 func(s *Snapshot) { s.WorkCurves[0].Attempt++ },
+		"machine":                 func(s *Snapshot) { s.WorkCurves[0].Machine = "other" },
+		"session":                 func(s *Snapshot) { s.WorkCurves[0].Session = "other" },
+		"precutover":              func(s *Snapshot) { s.WorkCurves[0].RecordedAt = before.Now },
+		"unexplained measurement": func(s *Snapshot) { s.WorkCurves[0].Rate = 10 },
+		"unexplained failure": func(s *Snapshot) {
+			s.Jobs[0].AttemptHistory[0].OutOfMemory = false
+			s.Jobs[0].AttemptHistory[0].ExecutionCause = nil
+		},
+		"old failure": func(s *Snapshot) { s.Jobs[0].AttemptHistory[0].EndedAt = before.Now },
+	} {
+		t.Run(name, func(t *testing.T) {
+			data, _ := json.Marshal(after)
+			var changed Snapshot
+			if err := json.Unmarshal(data, &changed); err != nil {
+				t.Fatal(err)
+			}
+			mutate(&changed)
+			if err := verify(changed); err == nil {
+				t.Fatal("unproven failure accepted")
+			}
+		})
+	}
+	data, _ := json.Marshal(after)
+	var ceiling Snapshot
+	json.Unmarshal(data, &ceiling)
+	ceiling.Jobs[0].AttemptHistory[0].OutOfMemory = false
+	ceiling.Jobs[0].AttemptHistory[0].ExecutionCause = &RuntimeCause{Class: "resource_limit"}
+	if err := verify(ceiling); err != nil {
+		t.Fatal(err)
+	}
+}
