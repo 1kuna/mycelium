@@ -158,110 +158,114 @@ with `python3 scripts/test-gate-budget.py`.
 
 ## Automatic main full gates
 
-**Check main's latest status before merging** and fix a red main forward. Read the SHA and both contexts, not the overall combined state (which
-can include unrelated checks):
+The [`main-full` workflow](../.github/workflows/main-full.yml) runs only on pushes
+to `main`, once for each merge result (or direct main fix). There are no PR,
+manual-dispatch or schedule triggers. It selects `[self-hosted, mycelium-ci]`;
+GitHub-hosted runners are never used. Do not add workflow concurrency grouping:
+GitHub may replace a pending run in a group, losing proof for an intervening merge.
+One repository-scoped runner accepts jobs sequentially without cancelling older
+merges. A backlog waits in Actions; no model callbacks, polls or wakes are needed.
+
+**Check main's latest run before merging**, including its head SHA:
 
 ```sh
-gh api repos/1kuna/mycelium/commits/main/status \
-  --jq '{sha, gates: [.statuses[] | select(.context | startswith("mycelium/full-")) | {context, state, description}]}'
+gh api repos/1kuna/mycelium/commits/main --jq .sha
+gh run list --repo 1kuna/mycelium --workflow main-full.yml --branch main --limit 1 \
+  --json headSha,status,conclusion,url
 ```
 
-Require `mycelium/full-darwin` and `mycelium/full-linux` for the current main SHA.
-Missing, pending or error is not passing evidence. Run the targeted local gate
-and obtain independent PR review before merging; agents do not poll or wake to
-wait for main's full suites. A failed suite is fixed forward by the next merge
-worker. Automatic main proof supplements the release full gate.
+A completed successful run must match current main. Missing, queued, running or
+failed is not passing evidence. Before merging, run targeted tests and obtain
+independent PR review. The next merge worker fixes a red main forward; agents do
+not wait on or poll CI. Automatic main proof supplements the release full gate.
+Use the run's job summary to inspect both platform outcomes and Mycelium job IDs.
+The workflow's own check reports success/failure; no commit-status credential or
+personal access token is needed.
 
-The optional [`scripts/main-ci.py`](../scripts/main-ci.py) fleet-side watcher
-uses the existing `gate-full` profile at each exact main SHA. It narrows only its
-source SHA and platform targets: Darwin arm64, and Linux amd64/arm64. Each gets
-one submission, with no host pin; Mycelium chooses placement and supplies the
-existing `mycelium-gate` environment. Darwin includes the native CGO build;
-Linux runs its native builds and full race/dev suite. The profile's existing
-result check determines job success. No GitHub-hosted runner, GitHub Actions
-workflow, PR trigger, test schedule or model callback is involved.
+[`scripts/actions-full.py`](../scripts/actions-full.py) narrows the existing
+`gate-full` profile to the exact push SHA and submits it once for Darwin arm64
+and once for Linux amd64/arm64. Resources, environment, output contract and check
+remain unchanged. There are no host pins; Mycelium chooses each worker and
+provides the existing `mycelium-gate` environment. Both submissions happen
+before `myce wait` waits for all jobs, even if one fails. Successful jobs also
+require `myce result` to download the accepted, verified `gate-result.txt` marker.
+The runner does only source transport, waiting and small-result verification;
+full suites never run on it directly. Darwin proves the native CGO target; Linux
+proves its native builds and full race/dev suite.
 
-The watcher fetches main from the canonical GitHub repository every 60 seconds
-(never from a potentially forked `origin`) and queues every first-parent commit,
-including squash merges and direct main fixes. It does not run each constituent
-commit of a merge. Bootstrap tests current main once; it does not replay the v1
-history. A persistent cursor catches all intervening commits after downtime,
-admitting at most 16 pending commits at once. This bounds status publication
-after downtime at the cost of delaying discovery of the remaining backlog; the
-cursor advances only through admitted commits. Every admitted SHA gets the two
-pending contexts. One commit's
-two platform jobs may be active at a time; later commits wait instead of
-cancelling earlier proof. Consequently a busy fleet or merge backlog can delay
-results beyond an hour; pending statuses make that visible.
+The deterministic `main-ci:SHA:OS` keys adopt the same jobs on a workflow rerun,
+including after an uncertain submit. A failed suite is not automatically rerun.
+The CLI handles immutable source uploads, idempotent submission and reconnects;
+there is no custom watcher, cursor or status publisher. An interrupted workflow
+leaves submitted fleet jobs running; rerun it to adopt those jobs. No custom
+wall deadline kills healthy full suites. GitHub's own runner/job service limits
+still apply. Inspect failures privately with `myce logs JOB_ID`; public logs and
+the summary contain only job IDs, fixed states and exit codes, never raw CLI
+receipts, remote reasons or host paths.
 
-Deterministic `main-ci:SHA:OS` keys and the CLI's existing receipts recover the
-same submissions after watcher restart or an ambiguous submit reply. Existing
-`myce run` detached observers handle queue reconnects, job completion, accepted
-results and observer recovery; the watcher reopens the same receipt each pass.
-Terminal states become public `success`/`failure` commit statuses, with job IDs;
-infrastructure errors become `error` and retry the same key next pass. A failed
-test is terminal and is never automatically rerun. Before posting, the watcher
-compares the latest GitHub context to avoid duplicate statuses after ambiguous
-replies or prolonged infrastructure failures. No agent is invoked. Public
-status descriptions contain no raw error output, host names, credentials or
-local paths. Inspect a failed job through the authenticated Mycelium job/log
-commands using the ID in its status. The watcher retains a small results ledger
-and CLI receipts, removes generated profiles after terminal publication, and
-relies on normal queue artifact retention. CLI source uploads are removed after
-confirmed submission. Do not remove pending receipts or the cursor. A main
-history rewrite stops discovery for explicit operator reconciliation.
+### Public repository and private authority
 
-### Approval and activation
+The runner is registered to **this repository**, not an organization-wide pool.
+Only reviewed code merged to main is eligible: the workflow has neither
+`pull_request` nor `pull_request_target`, and fork/feature pushes cannot trigger
+this repository's runner. Fork copies cannot address the upstream runner.
+Under Settings → Actions → General, require approval for **all outside
+contributors** (`approval_policy: all_external_contributors`). Keep that setting
+when changing workflows. Repository administrators and main writers remain
+trusted: review any workflow or submitter change before merging it.
 
-**Prepared only; not activated by this PR.** Activation requires approval for:
+The workflow grants only `contents: read` to the built-in `GITHUB_TOKEN` and
+pins checkout to an immutable action SHA, with `persist-credentials: false`.
+The service environment contains **no fleet token**. `myce` reads the host's
+existing private installed worker/queue configuration and authority files;
+credentials are not copied into the workspace, workflow, Actions secrets or
+step environment. Start/configure the runner with a clean environment and no
+`MYCE_*`, `GH_TOKEN` or `GITHUB_TOKEN` variables. Launch the service through
+`env -i` with explicit HOME, USER, LOGNAME, PATH and locale settings, so it cannot
+inherit credentials from the user service manager either. The submitter gives CLI children
+only HOME, PATH, temporary/locale settings and GitHub's process-cleanup marker;
+no GitHub token, fleet token or notifier is inherited. Profiles contain only
+the gate's authored environment. Mycelium's worker also filters `MYCE_TOKEN`
+from payload environments. This is a trusted-main service, not an isolation
+boundary against a malicious main writer or another process under the host user.
 
-- One quiet Linux fleet user service using the provided
-  [`deploy/myce-main-ci.service`](../deploy/myce-main-ci.service) template,
-  a dedicated non-shallow repository clone, Python 3.11+, Git, `gh`, an installed
-  `myce` CLI and private persistent state. This is an observer/submitter; it
-  does not run tests directly. The clone retains Git history for catch-up.
-- One fine-grained GitHub credential restricted to this repository, with
-  **Commit statuses: write** and mandatory **Metadata: read** only. Public Git
-  fetches need no repository contents credential. Collect it through T3
-  `request_secret` only after approval, then deliver it to a private `0600`
-  environment file as `GH_TOKEN`. Do not put credentials in Git, service
-  definitions, command arguments, statuses or job payloads.
-- Access to the existing private installed Mycelium client authority on that
-  submitter, including its verified queue identity. Prefer that configuration
-  over another copy of the fleet token. If a new queue credential is necessary,
-  ask before collecting it through T3 `request_secret`. Never print it.
+### Runner operation
 
-No runner registration, host installation or secret provisioning is part of the
-PR. After approval, the activation owner chooses an ordinary available fleet
-submitter (this choice does not pin job placement), substitutes the service's
-`REPLACE_*` paths and uses its private environment file to provide `GH_TOKEN`,
-`PATH` and any existing client configuration required by `myce`. The script
-removes GitHub credentials from Mycelium subprocesses and all `MYCE_*` settings
-from Git/GitHub subprocesses. Its profile contains only the gate's authored
-runtime environment; jobs must never receive the fleet token. Run as a trusted
-service account: environment filtering is not isolation against hostile jobs
-running under the same OS user.
+Install the standard GitHub Actions runner release for the host OS/architecture
+in a hidden, stable directory. Before downloading, check free disk, memory
+pressure, load and active work; this submitter should be light enough for an
+always-on control host. Verify the release archive's SHA-256 against GitHub's
+published asset digest. Obtain a short-lived registration token using existing
+`gh` authentication (`POST repos/1kuna/mycelium/actions/runners/registration-token`)
+and pass it directly to `config.sh` without printing or retaining it. Register
+with repository URL `https://github.com/1kuna/mycelium`, label `mycelium-ci` and a
+clear name such as `mycelium-ci-control`. Registration is persistent; no PAT or
+registration token stays in a service definition. Leave automatic runner updates
+enabled so they update the same installation in place.
 
-First validate offline with `python3 scripts/test-main-ci.py`. After approval,
-run one foreground observation pass with the same private service environment:
+Install/start the runner with its standard `svc.sh` user-service integration
+on macOS (or equivalent user service on Linux). Use background/low-priority
+service settings, a private installation directory and a minimal PATH containing
+installed `myce`, Python 3 and Git. Keep the service identity/path stable and
+avoid GUI windows or notifications. Use a generic private work directory outside
+the personal home path, since checkout prints its workspace in public logs.
+Confirm its repository scope and `online`
+status using `gh api repos/1kuna/mycelium/actions/runners`, and inspect the local
+service/process without dumping its environment or credential files.
 
-```sh
-python3 scripts/main-ci.py --repo REPO --state PRIVATE_STATE --myce MYCE --once
-```
+Generated platform profiles and downloaded result markers live in job temp and
+are deleted on exit. Only small CLI recovery receipts remain in the checkout;
+GitHub terminates job-owned observers at job completion, then the next checkout
+cleans old workspace state. Source-upload staging is removed by the CLI after
+confirmed submission. Runner diagnostic logs stay private; do not upload them
+as public artifacts. Use normal queue artifact retention for fleet outputs.
 
-This submits actual work and writes public statuses. Verify the two pending
-contexts reference current main, then install/start the rendered user service
-using the host's normal service management. Verify both terminal statuses and
-accepted Mycelium job results before calling activation complete. Stop the
-service to suspend new submissions; already submitted jobs continue on the
-fleet. Service shutdown also stops its local detached observers. Restart with
-the same clone, state, CLI receipts and credentials to re-arm observation. Do not run a second instance against a different state directory.
-The state lock rejects concurrent instances sharing that directory.
+Validate the submitter offline with `python3 scripts/test-actions-full.py` and
+the quick gate. After independent review and merge, verify the push-to-main run
+uses the registered self-hosted runner and reports both accepted platform results
+before calling activation complete. No full suite runs on a PR push.
 
-Diagnosis recorded in [#425](https://github.com/1kuna/mycelium/issues/425): Actions
-was enabled but had zero workflows and zero registered runners. The former
-workflow was moved out of `.github/workflows` on June 3, then removed during the
-v3 archive. Its final June run's hosted coverage step failed; its self-hosted GPU
-job was cancelled without taking a step. These historical runs did not provide
-today's Darwin/Linux full proof. Restoring that workflow would also restore
-hosted/PR execution contrary to current policy.
+The unactivated watcher from [#427](https://github.com/1kuna/mycelium/pull/427)
+was retired in favor of the standard Actions runner under
+[#425](https://github.com/1kuna/mycelium/issues/425), following the maintainer's
+2026-10-31 ruling: “i use self hosted runners only”.
