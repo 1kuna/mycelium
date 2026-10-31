@@ -200,6 +200,8 @@ func runtimeErrorFor(operation string, err error) error {
 		c.Class = "permission_denied"
 	case errors.Is(err, fs.ErrNotExist):
 		c.Class = "not_found"
+	case errors.Is(err, syscall.EDQUOT):
+		c.Class = diskLimitExceeded
 	case errors.Is(err, syscall.ENOSPC):
 		c.Class = "storage_full"
 	case errors.Is(err, syscall.ECONNREFUSED):
@@ -244,6 +246,7 @@ func safeRuntimeCause(c *RuntimeCause) *RuntimeCause {
 	}
 	operations := map[string]bool{"main": true, "group": true, "command": true, "process_group": true, "outputs": true, "launch": true, "readiness": true, "reconcile": true, "persist": true, "ps": true, "inspect": true, "create": true, "start": true, "update": true, "unpause": true, "kill": true, "stop": true, "logs": true, "network.ls": true, "network.inspect": true, "network.rm": true, "network.create": true, "network.disconnect": true, "retain_evidence": true, "observe_group": true, "remove_networks": true}
 	classes := map[string]bool{cpuIsolationUnavailable: true, "admission_changed": true, "resource_limit": true, "stage_failed": true, "oom": true, "io_error": true, "timeout": true, "cancelled": true, "permission_denied": true, "not_found": true, "storage_full": true, "connection_refused": true, "command_exit": true, "invalid_response": true, "inventory_incomplete": true, "ownership_mismatch": true, "restart_policy_unknown": true, "disposition_unknown": true}
+	classes[diskLimitExceeded] = true
 	operations["start_authorization"] = true
 	operations["start_handoff"] = true
 	operations["input_staging"] = true

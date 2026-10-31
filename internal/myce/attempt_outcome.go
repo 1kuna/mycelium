@@ -138,6 +138,7 @@ func startFailureOutcome(owner Result, err error) Result {
 
 func classifyAttemptOutcome(result Result, facts attemptCause) Result {
 	result.OutOfMemory = result.OutOfMemory || facts.OutOfMemory
+	diskFailure := attemptDiskLimitFailure(result)
 	result.Interrupted = false
 	result.PriorityStop = nil
 	if facts.Stale || facts.Cancelled {
@@ -150,10 +151,10 @@ func classifyAttemptOutcome(result Result, facts attemptCause) Result {
 	// A checkpoint handler can exit zero after TERM. Delivered priority stops
 	// interrupt that partial attempt; intent or a signal after observed exit
 	// cannot override an already completed payload.
-	if facts.PriorityStop != nil && facts.deliveredBeforeExit() && !result.OutOfMemory {
+	if facts.PriorityStop != nil && facts.deliveredBeforeExit() && !result.OutOfMemory && !diskFailure {
 		result.Success = false
 	}
-	if !result.Success && !result.OutOfMemory {
+	if !result.Success && !result.OutOfMemory && !diskFailure {
 		result.Interrupted = facts.ObservationLost || facts.deliveredBeforeExit() || facts.recordedInfrastructure()
 	}
 	if !result.Interrupted {

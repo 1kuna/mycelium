@@ -128,6 +128,7 @@ type FileStore struct {
 	admit                       func(context.Context, FileStoreStatus, map[string]storedPayload, FileManifest, uint64, uint64) (uint64, error)
 	reservedOutputs             func(map[string]storedPayload) uint64
 	diskProbe                   func(string) (DiskReading, error)
+	controlFiles                controlStorageFiles
 	root                        string
 	limit                       int64
 	mu                          sync.Mutex
@@ -192,6 +193,10 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 		}
 	}
 	s := &FileStore{checkAttempt: q.checkFileStoreAttempt, productionReserve: uint64(q.fileStoreProductionReserve), admit: q.admitFileUpload, reservedOutputs: q.reservedOutputBytes, root: root, limit: limit, syncDir: syncWorkerDir, expired: q.expiredBlob, lifecycle: &q.fileLifecycle, clock: q.clock, recordUpload: q.recordFileUpload, publishUpload: q.publishFileUpload, recordBundle: q.recordBundleUpload}
+	if q.lock != nil {
+		database := strings.TrimSuffix(q.lock.Name(), ".lock")
+		s.controlFiles = controlStorageFiles{database: database, wal: database + "-wal", shared: database + "-shm"}
+	}
 	fs := filestore.New(filepath.Join(root, "uploads"))
 	fs.DirModePerm = 0700
 	fs.FileModePerm = 0600

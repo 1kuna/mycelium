@@ -2,8 +2,34 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$ref": "#/$defs/FileStoreStatus",
   "$defs": {
+    "ControlStorageStatus": {
+      "properties": {
+        "database_bytes": {
+          "type": "integer"
+        },
+        "wal_bytes": {
+          "type": "integer"
+        },
+        "shared_bytes": {
+          "type": "integer"
+        },
+        "allocated_bytes": {
+          "type": "integer"
+        }
+      },
+      "type": "object",
+      "required": [
+        "database_bytes",
+        "wal_bytes",
+        "shared_bytes",
+        "allocated_bytes"
+      ]
+    },
     "FileStoreStatus": {
       "properties": {
+        "physical": {
+          "$ref": "#/$defs/PhysicalStorageStatus"
+        },
         "unidentified_writes_may_use_reserve": {
           "type": "boolean"
         },
@@ -53,6 +79,58 @@
         "limit_bytes",
         "disk_free_bytes",
         "floor_bytes"
+      ]
+    },
+    "PhysicalStorageStatus": {
+      "properties": {
+        "mode": {
+          "type": "string"
+        },
+        "sampled_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "disk_free_bytes": {
+          "type": "integer"
+        },
+        "remaining_upload_bytes": {
+          "type": "integer"
+        },
+        "reserved_output_bytes": {
+          "type": "integer"
+        },
+        "uncommitted_bytes": {
+          "type": "integer",
+          "description": "Upper bound only: physical free minus remaining tus lengths and known output commitments. Excludes unqualified control expansion and worker backing; not usable for protected admission."
+        },
+        "protected_free_bytes": {
+          "type": "integer"
+        },
+        "control": {
+          "$ref": "#/$defs/ControlStorageStatus"
+        },
+        "upload_metadata_bytes": {
+          "type": "integer"
+        },
+        "qualification": {
+          "type": "string"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "mode",
+        "sampled_at",
+        "disk_free_bytes",
+        "remaining_upload_bytes",
+        "reserved_output_bytes",
+        "uncommitted_bytes",
+        "protected_free_bytes",
+        "control",
+        "upload_metadata_bytes",
+        "qualification"
       ]
     }
   }

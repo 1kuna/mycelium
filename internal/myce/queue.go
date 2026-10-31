@@ -1635,6 +1635,13 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		m.LastSeen = q.clock.Now()
 		delete(q.unreported, m.ID)
 	}
+	diskFailure := attemptDiskLimitFailure(r)
+	if diskFailure {
+		// A denied attempt bound is a payload failure, including during a stop.
+		// Retain its exact custody/evidence; never retry it as infrastructure loss
+		// or reuse the memory OOM retry without fresh storage admission.
+		r.Interrupted, r.PriorityStop = false, nil
+	}
 	r = withStopProvenance(r, priorityStop(j))
 	outcome := attemptOutcome(j, r)
 	q.recordAttemptMemory(j, r) // Preserve facts before retry clears the envelope.
@@ -1663,12 +1670,14 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 			q.s.BatchReleases[batchReleaseKey(owner)] = batchRelease{Session: j.Session, MemoryGB: j.Spec.Needs.MemoryGB, Until: until}
 		}
 	}
-	if cancelled(j) || j.State == "stopping" && (!r.Success || !plannedPriorityStop(j)) && !oomFailure && !stageFailure {
+	if cancelled(j) || j.State == "stopping" && (!r.Success || !plannedPriorityStop(j)) && !oomFailure && !stageFailure && !diskFailure {
 		if cancelled(j) {
 			q.finishCancellation(j)
 		} else {
 			q.retry(j, j.Reason)
 		}
+	} else if diskFailure {
+		j.State, j.Reason = "failed", "execution failed: "+j.ExecutionCause.String()
 	} else if !r.Success && automaticExtensionCheck(j) != nil {
 		j.State, j.Reason = "failed", "native check failed: "+r.Error
 	} else if !r.Success && !oomFailure && j.StartedAt == nil && j.ExecutionCause != nil && j.ExecutionCause.Operation == "launch" && j.ExecutionCause.Class == "launch_refused" && q.diskHeadroomReason(j, q.s.Machines[j.Machine]) != "" {
