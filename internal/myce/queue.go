@@ -107,11 +107,14 @@ type Queue struct {
 	storageProtectionMu       sync.Mutex
 	storageProtectionVerified bool // Restart never renews native verification.
 	// Only detached observation views set this page selection.
-	observationSelection *statusSelection
-	deliveryRoot         string
-	deliveryMu           sync.Mutex
-	deliveryActive       *deliveryOperation                          // q.mu; one outstanding NAS publication per root.
-	deliveryPublish      func(Job, *FileStore, string, func()) error // Test seam; set before use.
+	observationSelection   *statusSelection
+	deliveryRoot           string
+	deliveryMu             sync.Mutex
+	taskOutputMu           sync.Mutex
+	taskOutputRelays       map[string]*taskOutputRelay
+	taskOutputPreservation *taskOutputPreservation                     // Ephemeral live submitter stream; never a durable receipt.
+	deliveryActive         *deliveryOperation                          // q.mu; one outstanding NAS publication per root.
+	deliveryPublish        func(Job, *FileStore, string, func()) error // Test seam; set before use.
 	// Ephemeral exact-attempt samples: restart cannot renew a cached credit.
 	hostMemorySamples map[string]map[attemptKey]hostMemorySample
 
@@ -681,6 +684,9 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 			return ErrStale
 		}
 		submitted := s
+		if s.OutputDestination != nil && s.OutputRetention == "" {
+			s.OutputRetention = "until_delivered"
+		}
 		extensions, e := q.resolveExtensions(&s)
 		if e != nil {
 			return rejectFieldRule("job_program_invalid", e)
@@ -1046,6 +1052,7 @@ func (q *Queue) TickContext(requestContexts ...context.Context) error {
 		}
 		q.observeHealth("queue-files", !fileAvailable, delay, HealthAlert{Kind: "checkpoint_store_unavailable", Store: "queue-file-store"})
 		q.maintain()
+		q.observeTaskOutputCustody()
 		return nil
 	}, nil); err != nil {
 		return err
@@ -1495,7 +1502,7 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 	quotaFailure := attemptDiskLimitFailure(r)
 	unlockRequest := requestLock(ctx, &q.mu)
 	j, err := q.current(r)
-	if err == nil && !r.ReleaseOnly && r.Success && j.StorageAllocation != nil && j.StorageAllocation.WorkerCustody {
+	if err == nil && !r.ReleaseOnly && r.Success && j.StorageAllocation != nil && (j.StorageAllocation.WorkerCustody || j.Spec.OutputDestination != nil) {
 		unlockRequest()
 		return storageCustodyRefusal()
 	}
@@ -2338,6 +2345,16 @@ type attemptProgress struct {
 func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progress attemptProgress) AttemptDirective {
 	reply := AttemptDirective{Execution: Execution{ID: report.ID, Attempt: report.Attempt}, Session: report.Session}
 	j := q.touchJob(report.ID)
+	// Retained output custody is not a live process to kill. Its independently
+	// charged spool is driven through the existing worker control HTTP path.
+	if j != nil && j.LocalOutputs != nil && j.Attempt == report.Attempt && j.Machine == m.ID && j.Session == report.Session && j.Session == m.Session && j.ReleaseConfirmed && !report.Started {
+		if deliveryPending(j) && report.OutputDeliveryProgress > j.Delivery.ProgressOperations {
+			now := q.clock.Now()
+			j.Delivery.ProgressOperations = report.OutputDeliveryProgress
+			j.Delivery.LastProgressAt = &now
+		}
+		return reply
+	}
 	if j != nil && !terminal(j.State) && !cancelled(j) && (j.State == "queued" || j.Attempt != report.Attempt || j.Machine != m.ID || j.Session != m.Session) {
 		for _, copy := range j.Copies {
 			canRecover := q.machineRecoveryFits(m, j, copy)

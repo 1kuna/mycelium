@@ -536,6 +536,38 @@ allocation, including incomplete uploads, not bytes transferred or current usage
 Preflight, resumable replay and deduplicated reuse do not increment it. It resets
 on queue restart and decreases neither on completion nor on ordinary expiry.
 
+### Worker-local task delivery (#508)
+
+The versioned `output_destination` contract keeps unique outputs on a charged
+worker spool through verified NAS or submitter delivery. Collection is lazy:
+verified local copies remain until a qualified queued task needs space on that
+same worker backing, or the configured retention window expires. Eligible copies
+are collected in MY-18 order (least valuable owner tier first), preserving #479's
+expiry ledger, six-hour publication grace and keeping-reference fences.
+`until_delivered` grants expiry authority after delivery; it does not trigger
+eager local collection. Independent production backing does not create pressure
+on retained experiment outputs.
+
+Each collection operation takes its intent, freshly hashes the destination
+outside `q.mu`, rechecks the exact execution/verification-round/reference fences,
+then deletes. Saved intents and historical receipts never supply reusable proof.
+Failed verification or a changed fence retains the worker copy, marks redelivery
+and raises an operator/project alert. An intent can finish interrupted deletion
+and acknowledgement even if its original capacity demand has disappeared.
+
+The accepted residual is this one operation's own verify-to-delete span. Once
+delivery is verified, the destination is authoritative; its NAS, backups and other
+durability mechanisms are responsible for subsequent preservation. No
+verify-then-delete operation across independent filesystems can eliminate the
+possibility of destination loss a moment after local deletion. Lazy collection
+reduces exposure; it does not promise continued destination durability.
+
+Submitter `deliver_outputs` can restore a missing destination from retained
+worker bytes after ordinary result expiry, until actual local collection.
+Ordinary expired-result downloads still return `result_expired`. See the
+[task output guide](guide-task-outputs.md) for destination identity configuration,
+client commands, truthful local availability and native qualification limits.
+
 ### Project-owner early file release (#465)
 
 Use explicit job IDs to release terminal input/result files before their normal

@@ -361,6 +361,9 @@ func (q *Queue) storageRequest(j *Job, m *Machine) (StorageAllocation, string) {
 	if !ok || !w.Confined {
 		return StorageAllocation{}, "storage protection: worker backing/confinement unqualified"
 	}
+	if reason := taskOutputCapabilityReason(j.Spec, m); reason != "" {
+		return StorageAllocation{}, reason
+	}
 	if j.Spec.StorageProtocol != workerCustodyProtocol {
 		return StorageAllocation{}, "storage protection: versioned worker custody protocol required; frozen policy unchanged"
 	}
@@ -512,6 +515,7 @@ const workerCustodyProtocol = "worker-custody/1"
 var errStorageCustodyPending = errors.New("worker-local custody retained; verified destination delivery required")
 
 type StorageCustodyReceipt struct {
+	Result     *Result      `json:"result,omitempty"`
 	Protocol   string       `json:"protocol"`
 	Execution  Execution    `json:"execution"`
 	Machine    string       `json:"machine"`
@@ -527,9 +531,12 @@ func (q *Queue) RecordStorageCustody(ctx context.Context, r StorageCustodyReceip
 		return errors.New("invalid worker custody receipt")
 	}
 	return q.updateRequest(ctx, func() error {
+		if j := q.s.Jobs[r.Execution.ID]; exactTaskOutputs(j, r) {
+			return nil // Exact terminal replay, even after collection or worker loss.
+		}
 		j, err := q.current(Result{Execution: r.Execution, Machine: r.Machine, Session: r.Session})
 		p := q.s.StorageProtection
-		if err != nil || p == nil || j.StorageAllocation == nil || j.StorageAllocation.ID != r.Allocation || !j.StorageAllocation.WorkerCustody {
+		if err != nil || p == nil || j.StorageAllocation == nil || j.StorageAllocation.ID != r.Allocation || !j.StorageAllocation.WorkerCustody && j.Spec.OutputDestination == nil {
 			return ErrStale
 		}
 		m := q.s.Machines[r.Machine]
@@ -559,7 +566,7 @@ func (q *Queue) RecordStorageCustody(ctx context.Context, r StorageCustodyReceip
 		copy.Custody[a.ID] = StorageCustody{Allocation: a.ID, Files: maps.Clone(r.Files), At: q.clock.Now()}
 		j.Reason = "worker-local custody pending verified destination delivery"
 		q.s.StorageProtection = &copy
-		return nil
+		return q.acceptTaskOutputCustody(j, r)
 	}, nil)
 }
 func (a API) storageCustodyHandler(w http.ResponseWriter, r *http.Request) {
@@ -575,6 +582,9 @@ func (w Worker) retainStorageCustody(j Job, r Result, parent string) (Result, er
 	// checkpoint, diagnostic or output upload can spill it into shared storage.
 	if !r.Success || r.Interrupted {
 		return r, nil
+	}
+	if j.Spec.OutputDestination != nil {
+		return w.finishTaskOutputs(j, r, parent)
 	}
 	_, files, err := captureDeliverySpool(j, parent, w.storageObserver)
 	if err != nil {
@@ -645,8 +655,14 @@ func (q *Queue) storageExcludedFree() (uint64, error) {
 }
 
 func (q *Queue) protectedStorageLaunchReason(j *Job) string {
+	if reason := taskOutputCapabilityReason(j.Spec, q.s.Machines[j.Machine]); reason != "" {
+		return reason
+	}
 	p := q.s.StorageProtection
 	if p == nil || !p.Enabled {
+		if j.Spec.OutputDestination != nil {
+			return "storage_boundary_unverified"
+		}
 		return ""
 	}
 	if !q.storageProtectionVerified || j.StorageAllocation == nil {

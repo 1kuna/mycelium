@@ -160,14 +160,20 @@ func (q *Queue) maintainFileExpiry() {
 		if deliveryPending(j) {
 			continue
 		}
+		if j.Spec.OutputDestination != nil && (j.Delivery == nil || j.Delivery.VerifiedAt == nil || !sameDelivery(j, *j)) {
+			continue
+		}
 		// Some historical terminal paths did not stamp FinishedAt. Start their
 		// window when first observed, rather than guessing from submission time.
 		if j.FinishedAt == nil {
 			ended := now
 			j.FinishedAt = &ended
 		}
-		if !now.Before(j.FinishedAt.Add(q.fileRetention)) {
+		if !now.Before(j.FinishedAt.Add(q.fileRetention)) || j.Spec.OutputDestination != nil && j.Spec.OutputRetention == "until_delivered" && j.Delivery != nil && j.Delivery.State == "verified" && j.Delivery.VerifiedAt != nil && sameDelivery(j, *j) && !q.jobReleasePending(j) {
 			j.FilesExpired = true
+			if j.Spec.OutputDestination != nil {
+				q.acceptFileExpiry(j, "automatic destination retention: "+j.Delivery.ManifestSHA256)
+			}
 		}
 		enrollFileReclamation(j)
 	}
@@ -258,6 +264,14 @@ func (q *Queue) collectFileReferences(pendingOnly bool, releasing map[string]boo
 		add(referenced, j.Spec.Files)
 		add(referenced, sharedStoredFiles(j.Spec))
 		add(referenced, j.OutputRefs)
+		if j.LocalOutputs != nil {
+			// Local custody can pin an existing shared identity, but never grants
+			// authority to collect an unrelated import with matching content.
+			add(referenced, j.LocalOutputs.Files)
+			if !terminal(j.State) || !filesExpired || protected {
+				keepFiles("worker_local_custody", j.LocalOutputs.Files)
+			}
+		}
 		// Recoveries have their own immutable retention deadline. They can be
 		// attached after the original job's ordinary files have already expired.
 		for _, r := range j.RecoveredResults {
@@ -277,6 +291,9 @@ func (q *Queue) collectFileReferences(pendingOnly bool, releasing map[string]boo
 		for _, a := range j.AttemptHistory {
 			if a.Diagnostics != nil {
 				add(referenced, a.Diagnostics.Files)
+				if j.Spec.OutputDestination != nil && j.FinishedAt != nil && q.clock.Now().Before(j.FinishedAt.Add(q.fileRetention)) {
+					keepFiles("retained_attempt_diagnostics", a.Diagnostics.Files)
+				}
 			}
 		}
 		if j.FileReclamation != nil {
@@ -392,7 +409,13 @@ func (q *Queue) reclaimPublishedFilesContext(requestContexts ...context.Context)
 	requestUnlock1 := requestReadLock(requestCtx, &q.mu)
 	store := q.files
 	expired, keep, referenced := q.fileReferences(true)
-	candidates := expired
+	candidates := make([]string, 0, len(expired))
+	for hash := range expired {
+		if (FileRef{SHA256: hash}).validate() == nil && !keep[hash] {
+			candidates = append(candidates, hash)
+		}
+	}
+	q.orderStorageReclaim(candidates)
 	revision := q.fileReferenceRevision
 	cutoff := q.clock.Now().Add(-filePublicationGrace)
 	orphanCutoff := q.clock.Now().Add(-q.fileRetention)
@@ -467,10 +490,7 @@ func (q *Queue) reclaimPublishedFilesContext(requestContexts ...context.Context)
 			log.Printf("file retention deferred hash=%s error=%q; retrying next tick", hash, err)
 		}
 	}
-	for hash := range candidates {
-		if (FileRef{SHA256: hash}).validate() != nil || keep[hash] {
-			continue
-		}
+	for _, hash := range candidates {
 		if checked == fileReclaimBatch || deferred {
 			break
 		}
@@ -559,6 +579,9 @@ func filePayloadAgeEligible(st os.FileInfo, publicationCutoff, orphanCutoff time
 }
 
 func hasJobFiles(j *Job) bool {
+	if j.LocalOutputs != nil && len(j.LocalOutputs.Files) > 0 {
+		return true
+	}
 	for _, files := range jobFileManifests(j) {
 		if len(files) > 0 {
 			return true

@@ -297,6 +297,7 @@ func (a API) handler(joiningPin string) http.Handler {
 		respondOperation(w, map[string]any{"ok": true, "start_gate": startGateProtocol}, a.Queue.NativeCustody(c, r.Context()), "native_custody_invalid")
 	})
 	mux.HandleFunc("POST /api/workers/storage-custody", a.storageCustodyHandler)
+	a.taskOutputHandlers(mux)
 	mux.HandleFunc("POST /api/workers/started", func(w http.ResponseWriter, r *http.Request) {
 		var c Result
 		if !decode(w, r, &c) {

@@ -827,6 +827,17 @@ reservation, never a successful result. File-store `reserved_output_bytes`
 reports missing async output reservations; `free_bytes` excludes those bytes.
 See [delivery policy](guide-files-v3.md#complete-from-queue-storage-deliver-to-nas-later-349).
 
+New versioned `output_destination` tasks expose `local_outputs` instead of
+ordinary `output_refs`. It reports the exact allocation and manifest, `stored_at`,
+`worker_local_pending_delivery`, `destination_verified` or `collected`, and
+`collected_at` when applicable. `delivery.protocol: task-output/1` and `kind`
+distinguish this contract from legacy async NAS; `progress_operations` and
+`last_progress_at` report worker copy/verification progress independently of
+compute completion. Machines advertise `task_outputs_v1` only with supported
+collection, plus configured `output_destination_ids`. Allocation/custody stays
+charged until verified delivery and legal, acknowledged collection. See the
+[task output guide](guide-task-outputs.md).
+
 ### Shared interactive profile
 
 Host maintenance `policy.shared_host.interactive_reserve_gb` is the configured

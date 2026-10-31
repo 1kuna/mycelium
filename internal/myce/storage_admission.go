@@ -375,7 +375,7 @@ func (q *Queue) orderStorageReclaim(hashes []string) {
 		if j.Delivery != nil && j.Delivery.State == "verified" {
 			cost = 0
 		}
-		for _, files := range []FileManifest{j.OutputRefs, jobInputFiles(j)} {
+		for _, files := range []FileManifest{taskOutputFiles(*j), jobInputFiles(j)} {
 			for _, ref := range files {
 				old, ok := values[ref.SHA256]
 				if !ok {
@@ -621,6 +621,9 @@ func (q *Queue) outputDeliveryHealth() string {
 			return
 		}
 		d := j.Delivery
+		if j.Spec.OutputDestination != nil && (j.LocalOutputs == nil || !sameDelivery(j, *j)) {
+			return // A superseded local receipt cannot describe this destination.
+		}
 		state, cause := "unknown", ""
 		switch d.State {
 		case "failed":
@@ -638,6 +641,10 @@ func (q *Queue) outputDeliveryHealth() string {
 		switch d.Cause {
 		case "NAS publication or receipt verification failed; source files retained":
 			cause = "publication_or_receipt_verification_failed"
+		case "destination publication or verification failed; worker custody retained":
+			cause = "publication_or_receipt_verification_failed"
+		case "destination preservation verification failed; worker custody retained":
+			cause = "preservation_verification_failed"
 		case "NAS destination configuration missing or changed; restore the original output-delivery-root":
 			cause = "destination_configuration_changed"
 		}

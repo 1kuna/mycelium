@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -36,6 +37,9 @@ type attemptSupervisor struct {
 	preparing   context.CancelFunc // Stops preparation, never abandons a started process.
 
 	admissionBlocked bool
+	outputProgress   atomic.Uint64
+	outputVerified   atomic.Bool
+	outputAccepted   atomic.Bool
 }
 
 // Observation retries preserve running status. Their exact cause must still
@@ -90,6 +94,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		cancelPreparation()
 	}
 	a.mu.Unlock()
+	var nextOutputPoll time.Time
 	p := a.recovering
 	defer func() {
 		if p != nil {
@@ -125,6 +130,9 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		a.mu.Lock()
 		w, d, connected, admissionBlocked := a.worker, a.directive, a.connected, a.admissionBlocked
 		a.mu.Unlock()
+		w.outputDeliveryProgress = func() { a.outputProgress.Add(1) }
+		w.outputCustodyVerified = &a.outputVerified
+		w.outputCustodyAccepted = &a.outputAccepted
 		now := w.Clock.Now()
 		if p != nil {
 			p.enforceGrace(now)
@@ -221,6 +229,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		}
 		report := AttemptReport{Execution: Execution{ID: a.job.ID, Attempt: a.job.Attempt}, Session: a.job.Session, Started: p != nil && (p.docker == nil || p.docker.status() == "running") && (p.native == nil || p.native.started())}
 
+		report.OutputDeliveryProgress = a.outputProgress.Load()
 		if report.Started {
 			var memory *memoryAttempt
 			switch {
@@ -264,6 +273,50 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 		a.released = p == nil && s.state.Result != nil && !s.state.Result.ReleasePending
 		a.mu.Unlock()
 		if connected && !d.Hold {
+			if p == nil && s.state.Result != nil && s.state.Result.Success && !s.state.Result.Interrupted && !s.state.Result.ReleasePending && a.job.Spec.OutputDestination != nil {
+				if now.Before(nextOutputPoll) {
+					select {
+					case <-ctx.Done():
+					case <-a.wake:
+					case <-tick.C:
+					}
+					continue
+				}
+				value, result := *s.state.Job, *s.state.Result
+				if s.storageObserver == nil && result.StoragePeak != nil {
+					s.storageObserver = publicationStorageObserver(value, result, s.dir, workerStorageMetadata(s), s.state.Identity+".result.json")
+				}
+				w.storageObserver = s.storageObserver
+				_, err := s.fileFinish.run(attemptCheckpoint(value), func() (Result, error) {
+					return w.finishTaskOutputs(value, result, s.dir)
+				})
+				if err == nil {
+					s.state.Job, s.state.Result = nil, nil
+					s.state.PID, s.state.LaunchPending = 0, false
+					if err = s.save(); err != nil {
+						finish(err)
+						return
+					}
+					finish(nil)
+					return
+				}
+				if !errors.Is(err, errCheckpointIOPending) {
+					interval := w.Interval
+					if interval <= 0 {
+						interval = time.Second
+					}
+					nextOutputPoll = now.Add(interval)
+				}
+				// Even a stale/conflicting answer cannot authorize deletion of a
+				// unique local result. Retain it for reconciliation and alerting.
+				s.fileError = "worker outputs retained pending destination delivery or authorized collection"
+				select {
+				case <-ctx.Done():
+				case <-a.wake:
+				case <-tick.C:
+				}
+				continue
+			}
 			var err error
 			if d.Stop && d.Kill {
 				if s.state.Result != nil && (!a.job.Spec.Run.Docker || s.state.Preparation != "") {
@@ -666,6 +719,7 @@ func firstDevice(j Job, m Machine) string {
 }
 
 func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*workerStore, rt *modelRuntime, environments *environmentRuntime, rawMemory MemorySource, requestRetention func(string, time.Time)) error {
+	w.outputDeliverySlots = make(chan struct{}, 1) // Shared by all retained-output actors until their I/O returns.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var qualification checkpointIO[bool]
@@ -700,6 +754,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 		return jobs
 	}
 	recovering := len(stores) > 0
+	recoveringSession := recovering
 	spawn := func(s *workerStore, p *process) {
 		j := *s.state.Job
 		a := &attemptSupervisor{store: s, job: j, worker: w, report: AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session}, wake: make(chan struct{}, 1), done: make(chan struct{}), recovering: p}
@@ -799,8 +854,20 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			}
 		}
 		w.batchMemory.Store(math.Float64bits(batch))
-		if recovering && len(actors) == 0 {
+		if recovering {
 			recovering = false
+			for _, a := range actors {
+				if !a.outputAccepted.Load() {
+					recovering = true
+					break
+				}
+			}
+		}
+		// Retained delivery actors keep their exact saved session, but accepted
+		// output custody has already released compute. Do not gate independent
+		// production admission on destination recovery or publication grace.
+		if recoveringSession && len(actors) == 0 {
+			recoveringSession = false
 			root.state.PreviousSession, root.state.Session, root.state.Fresh = root.state.Session, ID(), true
 			w.Machine.Session = root.state.Session
 			if err := root.save(); err != nil {
@@ -1005,9 +1072,17 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				return c == "native_network" || c == "native_sidecars" || c == "native_network_partial" || strings.HasPrefix(c, "native_isolation_")
 			})
 			m.Capabilities = append(m.Capabilities, w.nativeIsolationCapabilities()...)
-			m.Capabilities = slices.DeleteFunc(m.Capabilities, func(c string) bool { return c == boundedStorageCapability })
+			m.Capabilities = slices.DeleteFunc(m.Capabilities, func(c string) bool { return c == boundedStorageCapability || c == taskOutputCapability })
 			if w.StorageBoundary != nil {
 				m.Capabilities = append(m.Capabilities, boundedStorageCapability)
+			}
+			m.OutputDestinationIDs = nil
+			if _, ok := w.StorageBoundary.(StorageAttemptCollector); ok {
+				m.Capabilities = append(m.Capabilities, taskOutputCapability)
+				for id := range w.OutputDestinations {
+					m.OutputDestinationIDs = append(m.OutputDestinationIDs, id)
+				}
+				slices.Sort(m.OutputDestinationIDs)
 			}
 			if w.DockerEndpoint != "" {
 				// Refresh without allowing a slow daemon to block heartbeats.

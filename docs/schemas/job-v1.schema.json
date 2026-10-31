@@ -1653,6 +1653,10 @@
           "description": "Retained ledger summary: complete is historical coverage, high_water is the last durable sequence. GET /api/jobs/ID/ledger enumerates immutable entries to a fixed high_water. Older incomplete history is explicit; no diagnostic cap applies.",
           "x-contract": "stable"
         },
+        "local_outputs": {
+          "$ref": "#/$defs/TaskOutputCustody",
+          "x-contract": "diagnostic"
+        },
         "losses": {
           "type": "integer",
           "x-contract": "diagnostic"
@@ -2320,6 +2324,9 @@
         "id": {
           "type": "string"
         },
+        "kind": {
+          "type": "string"
+        },
         "last_attempt_at": {
           "format": "date-time",
           "type": "string"
@@ -2345,11 +2352,20 @@
         "progress": {
           "type": "integer"
         },
+        "progress_operations": {
+          "type": "integer"
+        },
+        "protocol": {
+          "type": "string"
+        },
         "session": {
           "type": "string"
         },
         "state": {
           "type": "string"
+        },
+        "verification_round": {
+          "type": "integer"
         },
         "verified_at": {
           "format": "date-time",
@@ -2367,6 +2383,25 @@
         "bytes",
         "pending_at",
         "attempts"
+      ],
+      "type": "object"
+    },
+    "OutputDestination": {
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "protocol": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "protocol",
+        "kind",
+        "id"
       ],
       "type": "object"
     },
@@ -3198,6 +3233,14 @@
           "type": "string",
           "x-contract": "stable"
         },
+        "output_destination": {
+          "$ref": "#/$defs/OutputDestination",
+          "x-contract": "diagnostic"
+        },
+        "output_retention": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
         "outputs": {
           "additionalProperties": {
             "type": "string"
@@ -3519,6 +3562,38 @@
         "min",
         "peak",
         "positive_error"
+      ],
+      "type": "object"
+    },
+    "TaskOutputCustody": {
+      "properties": {
+        "allocation": {
+          "type": "string"
+        },
+        "collected_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "collection_requested_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "files": {
+          "$ref": "#/$defs/FileManifest"
+        },
+        "state": {
+          "type": "string"
+        },
+        "stored_at": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "state",
+        "allocation",
+        "files",
+        "stored_at"
       ],
       "type": "object"
     },
