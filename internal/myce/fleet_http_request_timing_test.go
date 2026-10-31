@@ -170,7 +170,7 @@ func TestFleetInstructionPruneAndQueueWrite(t *testing.T) {
 
 func TestFleetInstructionSlowSpanWriterPhases(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
-		q, _, _ := fleetFixture(t, "host", "host")
+		q, c, _ := fleetFixture(t, "host", "host")
 		if _, err := q.StartFleetUpgrade(FleetUpgradeRequest{}); err != nil {
 			t.Fatal(err)
 		}
@@ -191,8 +191,9 @@ func TestFleetInstructionSlowSpanWriterPhases(t *testing.T) {
 			q.measureRequests(mux, mux.patterns).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest("GET", "/api/fleet/instruction?host=private-host", nil))
 		}()
 		synctest.Wait()
-		// synctest advances virtual wall time; no real sleep or queue-clock
-		// change is involved in this observational timing check.
+		// Advance the injected writer clock and synctest's virtual span time;
+		// neither clock requires a real sleep.
+		c.Advance(2 * time.Second)
 		<-time.After(2 * time.Second)
 		if err := writer.Close(); err != nil {
 			t.Fatal(err)

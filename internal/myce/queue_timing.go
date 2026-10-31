@@ -59,7 +59,7 @@ func logQueueHold(duration time.Duration, operation string, fn func() error) {
 	log.Printf("event=slow_queue_mutex_hold operation=%s duration_ms=%.3f sample_every=16", operation, float64(duration)/float64(time.Millisecond))
 }
 
-// Monotonic wall time is observational only: queue decisions still use q.clock.
+// Timing is observational only: queue decisions still use q.clock.
 // Launch requests and instruction polls opt into detailed request/commit
 // timing; mutex holds are sampled independently above.
 type queueUpdateTiming struct {
@@ -72,10 +72,10 @@ type queueUpdateTiming struct {
 	writerWait    time.Duration
 }
 
-func (t *queueUpdateTiming) writer(db *sql.DB) (*sql.Conn, error) {
-	started := time.Now()
+func (t *queueUpdateTiming) writer(db *sql.DB, clock Clock) (*sql.Conn, error) {
+	started := clock.Now()
 	conn, err := db.Conn(context.Background())
-	t.writerWait += time.Since(started)
+	t.writerWait += clock.Now().Sub(started)
 	return conn, err
 }
 

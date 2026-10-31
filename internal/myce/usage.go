@@ -241,7 +241,7 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
 	if timing != nil && timing.measureWriter {
 		// Keep the existing transaction and lock order; only separate pool
 		// acquisition from SQL work for the instruction request's slow span.
-		conn, err := timing.writer(q.db)
+		conn, err := timing.writer(q.db, q.clock)
 		if err != nil {
 			return err
 		}
