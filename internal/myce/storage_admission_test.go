@@ -267,7 +267,7 @@ func TestStorageAdmissionCollectionValueOrderDoesNotAuthorizeDeletion(t *testing
 	q.s.Jobs = map[string]*Job{
 		"production": {ID: "production", Spec: Spec{Class: "production"}, OutputRefs: FileManifest{"out": {SHA256: refs[0]}}},
 		"terminal":   {ID: "terminal", Spec: Spec{Class: "experiment"}, OutputRefs: FileManifest{"out": {SHA256: refs[1]}}},
-		"delivered":  {ID: "delivered", Spec: Spec{Class: "experiment"}, Delivery: &OutputDelivery{State: "verified"}, OutputRefs: FileManifest{"out": {SHA256: refs[2]}}},
+		"delivered":  {ID: "delivered", Spec: Spec{Class: "experiment"}, Delivery: &OutputDelivery{State: "verified"}, LocalOutputs: &TaskOutputCustody{Files: FileManifest{"out": {SHA256: refs[2]}}}},
 	}
 	order := append([]string(nil), refs...)
 	q.orderStorageReclaim(order)

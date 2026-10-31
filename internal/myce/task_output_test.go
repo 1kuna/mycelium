@@ -390,7 +390,7 @@ func TestTaskOutputsCustodyRestartLossAndLegacyPolicy(t *testing.T) {
 	}
 	found := false
 	for _, e := range q.s.Health.Events {
-		found = found || e.Kind == "worker_output_custodian_unavailable" && e.JobID == j.ID
+		found = found || e.Kind == "worker_output_custodian_unavailable" && e.JobID == j.ID && e.Project == j.Spec.Project && len(e.Recipients) == 2
 	}
 	if !found {
 		t.Fatal("missing custodian did not alert owner")

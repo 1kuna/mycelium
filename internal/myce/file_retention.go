@@ -6,7 +6,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"slices"
 	"time"
 )
 
@@ -21,13 +20,6 @@ const filePublicationGrace = 6 * time.Hour
 // Bound filesystem work while draining a large expiry backlog so maintenance
 // remains responsive. Durable per-job progress avoids repeating completed work.
 const fileReclaimBatch = 64
-
-// #507 supplies tier/replacement-cost ordering. Keep this optional until that
-// independent slice is integrated; eligibility and deletion remain here. The
-// hook only reads queue metadata while the snapshot's read lock is held.
-type storageReclaimOrderer interface {
-	orderStorageReclaim([]string)
-}
 
 // Stored on the existing job record, not a separate blob index. A non-nil value
 // with no pending hashes means this job's input/result reclamation is complete.
@@ -423,11 +415,7 @@ func (q *Queue) reclaimPublishedFilesContext(requestContexts ...context.Context)
 			candidates = append(candidates, hash)
 		}
 	}
-	if orderer, ok := any(q).(storageReclaimOrderer); ok {
-		orderer.orderStorageReclaim(candidates)
-	} else {
-		slices.Sort(candidates)
-	}
+	q.orderStorageReclaim(candidates)
 	revision := q.fileReferenceRevision
 	cutoff := q.clock.Now().Add(-filePublicationGrace)
 	orphanCutoff := q.clock.Now().Add(-q.fileRetention)

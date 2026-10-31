@@ -361,6 +361,9 @@ func (q *Queue) storageRequest(j *Job, m *Machine) (StorageAllocation, string) {
 	if !ok || !w.Confined {
 		return StorageAllocation{}, "storage protection: worker backing/confinement unqualified"
 	}
+	if reason := taskOutputCapabilityReason(j.Spec, m); reason != "" {
+		return StorageAllocation{}, reason
+	}
 	if j.Spec.StorageProtocol != workerCustodyProtocol {
 		return StorageAllocation{}, "storage protection: versioned worker custody protocol required; frozen policy unchanged"
 	}

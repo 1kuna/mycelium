@@ -118,7 +118,16 @@ func deliveryDigest(j Job) string {
 }
 
 func sameDelivery(current *Job, snapshot Job) bool {
-	return current != nil && current.State == "succeeded" && current.Attempt == snapshot.Attempt && current.Machine == snapshot.Machine && current.Session == snapshot.Session && current.Delivery != nil && current.Delivery.Execution == snapshot.Delivery.Execution && current.Delivery.Machine == snapshot.Machine && current.Delivery.Session == snapshot.Session && current.Delivery.ManifestSHA256 == snapshot.Delivery.ManifestSHA256 && current.Delivery.DestinationID == snapshot.Delivery.DestinationID && deliveryDigest(*current) == snapshot.Delivery.ManifestSHA256
+	return current != nil && current.State == "succeeded" &&
+		current.ID == snapshot.ID && current.Attempt == snapshot.Attempt &&
+		current.Machine == snapshot.Machine && current.Session == snapshot.Session &&
+		current.Delivery != nil && snapshot.Delivery != nil &&
+		current.Delivery.Execution.ID == current.ID && current.Delivery.Execution.Attempt == current.Attempt &&
+		current.Delivery.Execution == snapshot.Delivery.Execution &&
+		current.Delivery.Machine == snapshot.Machine && current.Delivery.Session == snapshot.Session &&
+		current.Delivery.ManifestSHA256 == snapshot.Delivery.ManifestSHA256 &&
+		current.Delivery.DestinationID == snapshot.Delivery.DestinationID &&
+		deliveryDigest(*current) == snapshot.Delivery.ManifestSHA256
 }
 
 // Tick only starts/observes background work. NAS I/O never owns a queue lock,

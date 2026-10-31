@@ -16,8 +16,7 @@ import (
 const taskOutputProtocol = "task-output/1"
 const taskOutputCapability = "task_outputs_v1"
 
-// #507 can use this metadata-only capability filter before placing a task.
-// The independent start fence below enforces it even for a stale assignment.
+// Admission and the independent start fence share this metadata-only filter.
 func taskOutputCapabilityReason(s Spec, m *Machine) string {
 	if s.OutputDestination == nil {
 		return ""
@@ -247,7 +246,7 @@ func (q *Queue) observeTaskOutputCustody() {
 		}
 		m := q.s.Machines[j.Machine]
 		lost := m == nil || m.Session != j.Session || m.Gone || q.clock.Now().Sub(q.lastContact(m, q.clock.Now())) >= q.machineLossTimeout(m.ID)
-		q.observeHealth("output-custody/"+j.ID, lost, 0, HealthAlert{Kind: "worker_output_custodian_unavailable", JobID: j.ID, Attempt: j.Attempt, Host: j.Machine})
+		q.observeHealth("output-custody/"+j.ID, lost, 0, HealthAlert{Kind: "worker_output_custodian_unavailable", JobID: j.ID, Attempt: j.Attempt, Host: j.Machine, Project: j.Spec.Project, Recipients: []string{"operator", "project"}})
 	}
 }
 

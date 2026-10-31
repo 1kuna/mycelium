@@ -104,6 +104,9 @@ the queue's allocation/custody charge; the delivery and collection ledger surviv
 Shared copies use #479's publication fences, reference graph and bounded batches.
 
 Laptop tests use fake clocks, small files, real HTTP and SQLite; they do not
-qualify native mounts, isolated backing or aggregate filesystem denial. #507
-consumes the delivery capability filter during placement; #509 owns integrated
+qualify native mounts, isolated backing or aggregate filesystem denial. Placement
+requires the delivery capability and matching NAS destination ID before assigning
+an attempt. Delivery state and sanitized failures feed #507's production storage
+alerts; collector ordering recognizes worker-local manifests and respects the
+existing shadow/activation latch. #509 owns integrated
 migration and activation. No cap/reserve retirement is implied by this contract.
