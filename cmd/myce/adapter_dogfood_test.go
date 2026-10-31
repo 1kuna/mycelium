@@ -38,7 +38,7 @@ func TestAdapterDogfoodOwnProfilesDev(t *testing.T) {
 	}
 	binary := devTestBinary(t)
 	runtimeInput := adapterDogfoodRuntime(t)
-	d, ctx, _ := adapterDogfoodDev(t, "cpu")
+	d, _, _ := adapterDogfoodDev(t, "cpu")
 	for _, tc := range []struct {
 		profile, entry, result, want string
 		args                         []string
@@ -119,6 +119,11 @@ export LD_LIBRARY_PATH="$dogfood_runtime/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH
 
 			var original []byte
 			for _, converted := range []bool{false, true} {
+				// Each execution owns the normal dev budget. Previously the
+				// startup context covered all four executions: a measured 35s
+				// first profile left only 25s for go-test under load (#417).
+				ctx, cancel := context.WithTimeout(context.Background(), devTestTimeout)
+				defer cancel()
 				selector := []string{"--profile", profile, "--key", tc.profile + "-original"}
 				if converted {
 					selector = []string{"--adapter", adapter, "--entry", tc.entry, "--key", tc.profile + "-converted"}
@@ -345,7 +350,7 @@ func adapterDogfoodRun(t *testing.T, ctx context.Context, d *myce.Dev, binary, r
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		t.Fatalf("dogfood run: %v\n%s\n%s", err, out, stderr.String())
+		t.Fatalf("dogfood run: %v (context: %v)\n%s\n%s", err, context.Cause(ctx), out, stderr.String())
 	}
 	var receipt profileReceipt
 	if err := json.Unmarshal(out, &receipt); err != nil {

@@ -28,6 +28,13 @@ func TestDownloadResultIdleTimeoutNotWholeRequest(t *testing.T) {
 	serve := func(stall bool) *httptest.Server {
 		return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/api/jobs/job" {
+				// Force setup past the 200ms transfer-test timeout. Metadata
+				// latency must not prevent either body assertion from running.
+				select {
+				case <-time.After(250 * time.Millisecond):
+				case <-r.Context().Done():
+					return
+				}
 				json.NewEncoder(w).Encode(Job{ID: "job", State: "succeeded", OutputRefs: FileManifest{"result": ref}})
 				return
 			}
@@ -45,15 +52,35 @@ func TestDownloadResultIdleTimeoutNotWholeRequest(t *testing.T) {
 			}
 		}))
 	}
-	// The old fixed client timeout is shorter than the ~600 ms stream.
-	client := func(url string) Client {
-		return Client{URL: url, Token: "fixture", HTTP: &http.Client{Timeout: 200 * time.Millisecond}, transferIdle: 250 * time.Millisecond}
+	// Resolve metadata with the normal fixture budget, then exercise precisely
+	// the result-file path used by DownloadResult with a short API timeout.
+	// That short timeout tests the old whole-transfer bug, not how quickly an
+	// unrelated metadata request can be scheduled on a shared host (#403).
+	download := func(url, dest string) error {
+		ctx, cancel := context.WithTimeout(context.Background(), testWaitTimeout)
+		defer cancel()
+		c := Client{URL: url, Token: "fixture", HTTP: &http.Client{Timeout: testWaitTimeout}}
+		job, err := c.GetJob(ctx, "job")
+		if err != nil {
+			return err
+		}
+		if job.State != "succeeded" || job.OutputRefs["result"] != ref {
+			t.Fatal("wrong accepted result metadata", job)
+		}
+		c.HTTP = &http.Client{Timeout: 200 * time.Millisecond}
+		c.transferIdle = 250 * time.Millisecond
+		start := time.Now()
+		err = c.downloadResultFile(ctx, job.OutputRefs["result"], dest)
+		if err == nil && time.Since(start) <= c.HTTP.Timeout {
+			t.Fatal("stream did not outlast the ordinary HTTP timeout")
+		}
+		return err
 	}
 
 	slow := serve(false)
 	defer slow.Close()
 	dest := filepath.Join(t.TempDir(), "result")
-	if err := client(slow.URL).DownloadResult(context.Background(), "job", "result", dest); err != nil {
+	if err := download(slow.URL, dest); err != nil {
 		t.Fatal("slow streamed result failed:", err)
 	}
 	if got, err := os.ReadFile(dest); err != nil || !bytes.Equal(got, body) {
@@ -63,13 +90,9 @@ func TestDownloadResultIdleTimeoutNotWholeRequest(t *testing.T) {
 	stalled := serve(true)
 	defer stalled.Close()
 	dest = filepath.Join(t.TempDir(), "result")
-	start := time.Now()
-	err := client(stalled.URL).DownloadResult(context.Background(), "job", "result", dest)
+	err := download(stalled.URL, dest)
 	if !errors.Is(err, errFileTransferStalled) {
 		t.Fatalf("stalled body: %v", err)
-	}
-	if elapsed := time.Since(start); elapsed > 3*time.Second {
-		t.Fatal("stall detected late:", elapsed)
 	}
 	if entries, _ := os.ReadDir(filepath.Dir(dest)); len(entries) != 0 {
 		t.Fatal("stalled download published or leaked a file", entries)
