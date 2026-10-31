@@ -299,6 +299,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	now := f.Bool("now", false, "stop every job on leave")
 	full := f.Bool("full", false, "show full job IDs in status")
 	statusJSON := f.Bool("json", false, "show status as JSON")
+	statusHistory := f.Bool("history", false, "include all retained jobs and work curves in status")
 	ledgerAfter := f.Int("after", 0, "ledger sequence cursor")
 	ledgerHigh := f.Int("high-water", -1, "ledger snapshot high water (-1 starts a snapshot)")
 	ledgerLimit := f.Int("limit", 100, "ledger page size (1..256)")
@@ -311,7 +312,11 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			if args[0] == "logs" {
 				option = "follow"
 			}
-			for _, name := range []string{"queue", "token", "config", "joining-file", option} {
+			names := []string{"queue", "token", "config", "joining-file", option}
+			if args[0] == "status" {
+				names = append(names, "history", "json")
+			}
+			for _, name := range names {
 				v := f.Lookup(name)
 				help.Var(v.Value, v.Name, v.Usage)
 				help.Lookup(name).DefValue = v.DefValue
@@ -755,15 +760,18 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if f.NArg() > 1 {
 			return errors.New("usage: myce status [job]")
 		}
-		s, err := status(ctx, client)
-		if err != nil {
-			return err
-		}
+		var s myce.Snapshot
 		if f.NArg() == 1 {
-			j, err := myce.FindJob(s.Jobs, f.Arg(0))
+			j, err := client.GetJob(ctx, f.Arg(0))
 			if err != nil {
 				return err
 			}
+			// Status list views never echo submission keys, including job selectors.
+			j.Spec.SubmissionKey = ""
+			if j.Cancellation != nil {
+				j.Cancellation.SubmissionKey = nil
+			}
+			s = myce.Snapshot{Now: time.Now(), Jobs: []*myce.Job{j}}
 			if *statusJSON {
 				return json.NewEncoder(os.Stdout).Encode(j)
 			}
@@ -783,6 +791,15 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 				fmt.Println()
 			}
 			return nil
+		}
+		var err error
+		if *statusHistory {
+			err = client.Call(ctx, "GET", "/api/status?detail=full", nil, &s)
+		} else {
+			s, err = status(ctx, client)
+		}
+		if err != nil {
+			return err
 		}
 		if *statusJSON {
 			return json.NewEncoder(os.Stdout).Encode(s)
@@ -1052,20 +1069,14 @@ func printStatus(s myce.Snapshot, full bool) {
 	}
 }
 func logs(ctx context.Context, c myce.Client, id string, follow bool) error {
-	s, err := status(ctx, c)
-	if err != nil {
-		return err
-	}
-	resolved, err := myce.FindJob(s.Jobs, id)
+	resolved, err := c.GetJob(ctx, id)
 	if err != nil {
 		return err
 	}
 	id = resolved.ID
-	for _, j := range s.Jobs {
-		if j.ID == id && j.Spec.Logs == "none" {
-			fmt.Println("logs are disabled for this job (logs: none)")
-			return nil
-		}
+	if resolved.Spec.Logs == "none" {
+		fmt.Println("logs are disabled for this job (logs: none)")
+		return nil
 	}
 	var after int64
 	for {
@@ -1075,14 +1086,14 @@ func logs(ctx context.Context, c myce.Client, id string, follow bool) error {
 		if !follow {
 			return nil
 		}
-		s, err := status(ctx, c)
+		j, err := c.GetJob(ctx, id)
 		if err != nil {
 			return err
 		}
-		for _, j := range s.Jobs {
-			if j.ID == id && (j.State == "succeeded" || j.State == "failed" || j.State == "cancelled") { // Drain logs once more after observing completion.
-				follow = false
-			}
+		if j.State == "succeeded" || j.State == "failed" || j.State == "cancelled" {
+			// Drain once more after observing completion, including the last
+			// worker log page published before its terminal result.
+			return drainJobLogs(ctx, c, id, &after, os.Stdout)
 		}
 		select {
 		case <-ctx.Done():

@@ -42,7 +42,7 @@ func (q *Queue) cachedStatusJSON(contexts ...context.Context) (string, error) {
 	c := &q.statusCache
 	c.mu.Lock()
 	if c.data == "" || !q.clock.Now().Before(c.expires) {
-		s, err := q.publicSnapshot(contexts...)
+		s, err := q.publicStatusSnapshot(&statusOptions{jobs: "recent", limit: defaultStatusJobs}, contexts...)
 		if err != nil {
 			c.mu.Unlock()
 			return "", err
@@ -85,6 +85,10 @@ type observationMachineLedger struct {
 // state escapes the capture. Cold history needs only its public summary; active
 // work retains the inputs needed by the existing diagnostic planner.
 func (q *Queue) captureObservation(id string, contexts ...context.Context) (*Queue, fileStoreObservation, error) {
+	return q.captureStatusObservation(id, nil, contexts...)
+}
+
+func (q *Queue) captureStatusObservation(id string, options *statusOptions, contexts ...context.Context) (*Queue, fileStoreObservation, error) {
 	started := readWallStart(q.observeRead)
 	unlockRequest := requestReadLock(requestContext(contexts), &q.mu)
 	locked := readWallStart(q.observeRead)
@@ -98,6 +102,9 @@ func (q *Queue) captureObservation(id string, contexts ...context.Context) (*Que
 	s.Jobs, s.Submissions = map[string]*Job{}, map[string]*submissionRecord{}
 	var selected *Job
 	var err error
+	if options != nil {
+		v.observationSelection, err = q.selectStatusJobs(*options)
+	}
 	if id != "" {
 		// Resolve against committed queue state while holding q.mu, never the
 		// aggregate status cache. Keep the selected job in this same capture.
@@ -127,6 +134,10 @@ func (q *Queue) captureObservation(id string, contexts ...context.Context) (*Que
 				if id == "" || mutableJob(j) || key == id {
 					if !mutableJob(j) {
 						copy := statusJobInputs(j)
+						if v.observationSelection != nil && !v.observationSelection.ids[key] {
+							s.Jobs[key] = statusDependencyJob(j)
+							continue
+						}
 						copy.Spec.SubmissionKey = j.Spec.SubmissionKey
 						s.Jobs[key] = &copy
 					} else {
@@ -153,12 +164,16 @@ func (q *Queue) captureObservation(id string, contexts ...context.Context) (*Que
 	// cold terminal dependency edges. These values never mutate persisted jobs.
 	var cancellations *Queue
 	for key, j := range s.Jobs {
-		if original := q.s.Jobs[key]; original != nil && (original.CancelledAt != nil || original.FanOut != nil) {
-			if cancellations == nil {
-				cancellations = q.cancellationObservation()
+		if original := q.s.Jobs[key]; original != nil && (original.CancelledAt != nil || original.FanOut != nil) && (v.observationSelection == nil || v.observationSelection.ids[key]) {
+			view := q
+			if original.FanOut != nil {
+				if cancellations == nil {
+					cancellations = q.cancellationObservation()
+				}
+				view = cancellations
 			}
 			copy := *j
-			cancellations.projectCancellation(&copy, original)
+			view.projectCancellation(&copy, original)
 			s.Jobs[key] = &copy
 		}
 	}
@@ -275,7 +290,11 @@ func (q *Queue) jobSnapshot(id string, contexts ...context.Context) (*Job, error
 }
 
 func (q *Queue) statusSnapshot(contexts ...context.Context) (Snapshot, error) {
-	v, files, err := q.captureObservation("", contexts...)
+	return q.statusSnapshotOptions(nil, contexts...)
+}
+
+func (q *Queue) statusSnapshotOptions(options *statusOptions, contexts ...context.Context) (Snapshot, error) {
+	v, files, err := q.captureStatusObservation("", options, contexts...)
 	if err != nil {
 		return Snapshot{}, err
 	}

@@ -13,6 +13,7 @@ import (
 // Stable rejection codes and default messages. Submission validation returns
 // the specific field rule; other wrapped causes stay local.
 var rejectionMessages = map[string]string{
+	"status_query_invalid":                  "status requires jobs=recent|active|all, limit=1..1000, an RFC3339 since, an existing before cursor and detail=full when requested",
 	"native_workdir_containment":            "native isolation requires workdir beneath {work}; stage source with inputs or a profile",
 	"queue_stopping":                        "queue is shutting down; retry the request",
 	"disk_headroom":                         "projected disk need plus free floor exceeds known disk capacity",
