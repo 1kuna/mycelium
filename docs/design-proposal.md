@@ -2098,10 +2098,15 @@ observed envelope; native pressure-free concurrency and output parity require
 separate proof. Without local history, use the same recipe/work/
 shape from another machine: prefer the same
 OS/architecture/accelerator/memory-layout family, times 1.25 × 1.5; otherwise
-times 1.25 × 2. Label both as a cross-machine estimate. Next use an optional
-submitter hint; a bootstrap declaration is not required and recipe defaults do
-not count as submitter hints. Without either, allow an exploratory first run
-only with measured memory, a known allowance (physical RAM if uncapped), at
+times 1.25 × 2. Label both as a cross-machine estimate.
+For CPU work, transfer peaks only within the same OS: Linux cgroup totals and
+Darwin process RSS measure different scopes. Without an accepted target-OS peak,
+use a submitter hint or the existing exploratory path. A constrained target-OS
+sample remains diagnostic lower-bound evidence, never an upper bound or an
+accepted reservation. This does not change variant qualification or output parity.
+Next use an optional submitter hint; a bootstrap declaration is not required and
+recipe defaults do not count as submitter hints. Without either, allow an
+exploratory first run only with measured memory, a known allowance (physical RAM if uncapped), at
 least half that allowance available after existing reserves and charges, and
 no protected attempt or model residency charging a quarter of the allowance.
 Use that available room, less existing per-attempt slack, as the envelope.

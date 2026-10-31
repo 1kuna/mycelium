@@ -276,5 +276,8 @@ func (q *Queue) qualifiedTarget(j *Job) (bool, string) {
 			}
 		}
 	}
+	if best != nil && (best.first == "host memory" || best.first == "GPU memory" || best.first == "memory envelope") {
+		reason += "; no qualified target can fit this job; reduce the workload's memory use, obtain a clean target-platform measurement for auto memory, or have the operator approve a sufficient allowance on a capable host; retrying unchanged cannot fix capacity"
+	}
 	return false, reason
 }

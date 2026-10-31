@@ -299,6 +299,104 @@ func TestMemoryEnvelopeProfileIdentityAndLifecycle(t *testing.T) {
 	}
 }
 
+// #519: an accepted Linux cgroup peak times 2.5 used to strand Darwin
+// despite its only local peak being constrained (and therefore no upper bound).
+func TestMemoryEnvelopeCPUForeignOSPeak(t *testing.T) {
+	q, clock := fixture(t)
+	if err := q.ConfigureFileStore(t.TempDir(), 1<<20, true); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "source")
+	if err := os.WriteFile(path, []byte("source"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := IdentifyFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(q.files.blob(ref), []byte("source"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	linux := cpuMachine("linux-worker", "linux-host", "cpu", 8, 32)
+	darwin := cpuMachine("darwin-worker", "darwin-host", "cpu", 8, 32)
+	darwin.CapabilityProfile.OS, darwin.CapabilityProfile.Arch = "darwin", "arm64"
+	for _, m := range []*Machine{&linux, &darwin} {
+		m.ExtensionFingerprint = "cpu-v1"
+		m.HostMemoryBudgetGB, m.MemoryCeilingSlackGB = 8, .125
+		check(t, q, *m, nil)
+	}
+	s := cpuSpec(2, 0)
+	s.Name, s.RequireTarget, s.Needs.Memory = "gate-full", true, "auto"
+	s.Files = FileManifest{".myce-source.tar": ref}
+	start := func(m Machine, source string, hostGB float64) *Job {
+		t.Helper()
+		s.Targets = []ExecutionTarget{machineTarget(&m)}
+		queued := submit(t, q, s)
+		run := check(t, q, m, nil).Job
+		if run == nil || run.ID != queued.ID {
+			t.Fatal("profile not assigned", job(t, q, queued.ID))
+		}
+		if run.MemoryEnvelope.Source != source || math.Abs(run.Spec.Needs.HostMemoryGB-hostGB) > 1e-9 {
+			t.Fatalf("wrong target envelope: %+v", run.MemoryEnvelope)
+		}
+		if err := q.Started(result(run, false)); err != nil {
+			t.Fatal(err)
+		}
+		return run
+	}
+	complete := func(run *Job, peak float64, constrained bool) {
+		t.Helper()
+		clock.Advance(time.Second)
+		r := result(run, true)
+		r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak, Constrained: constrained}
+		if run.Machine == linux.ID {
+			r.MemoryPeak.CgroupGB = &peak
+		} else {
+			r.MemoryPeak.Source = processGroupMemorySource
+		}
+		if err := q.Complete(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	const linuxPeak = 3.634326934814453
+	complete(start(linux, "exploratory first run", 7.75), linuxPeak, false)
+	// A foreign peak alone must not prevent a qualified local exploration.
+	first := start(darwin, "exploratory first run", 7.75)
+	complete(first, 2, true)
+	if facts := job(t, q, first.ID).MemoryAttempts; len(facts) != 1 || facts[0].LearningReason != "constrained" || *facts[0].MemoryPeak.HostGB != 2 {
+		t.Fatal("constrained diagnostic was not retained", facts)
+	}
+	for _, p := range q.s.WorkObservations {
+		if p.Key.Target.OS == "darwin" && (!p.MemoryRecordedAt.IsZero() || p.MemoryPeak != nil) {
+			t.Fatal("constrained diagnostic became learned memory", p)
+		}
+	}
+	store := q.files.root
+	q = memoryFactsRestart(t, q, clock)
+	if err := q.ConfigureFileStore(store, 1<<20, true); err != nil {
+		t.Fatal(err)
+	}
+	check(t, q, linux, nil)
+	check(t, q, darwin, nil)
+	// Restart must neither revive the foreign estimate nor turn 2 GiB into a cap.
+	complete(start(darwin, "exploratory first run", 7.75), 4, false)
+	complete(start(darwin, "accepted peak × 1.25", 5), 2, true)
+	// Rejected local success cannot erase the accepted 4 GiB peak (#490).
+	complete(start(darwin, "accepted peak × 1.25", 5), 6.5, false)
+	_, err = q.Submit(s)
+	var api *HTTPError
+	if !errors.As(err, &api) || api.Code != "no_qualified_target" {
+		t.Fatalf("real local requirement must still refuse: %v", err)
+	}
+	for _, want := range []string{"no qualified target can fit this job", "8.25 GiB", "allowance 8 GiB", "reduce the workload", "clean target-platform measurement", "operator approve", "retrying unchanged cannot fix capacity"} {
+		if !strings.Contains(api.Message, want) {
+			t.Errorf("refusal %q missing %q", api.Message, want)
+		}
+	}
+	// The accepted source-OS peak and its original margin remain usable.
+	complete(start(linux, "accepted peak × 1.25", linuxPeak*1.25), linuxPeak, false)
+}
+
 func TestMemoryEnvelopeCrossMachineEstimate(t *testing.T) {
 	q, clock, m, s := observationFixture(t)
 	first := startObservation(t, q, m, s)

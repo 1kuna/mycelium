@@ -470,6 +470,14 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) memoryEstimate {
 	}
 	for _, point := range q.s.WorkObservations {
 		k, p := point.Key, point.MemoryPeak
+		// CPU accounting is not portable across OSes: Linux cgroup totals
+		// include file cache absent from Darwin process RSS. An arbitrary
+		// transfer margin can make every target permanently ineligible (#519).
+		// Use target-OS accepted evidence or the existing exploratory path;
+		// a constrained local sample still cannot supply an upper bound.
+		if j.Spec.Needs.cpuOnly() && k.Target.OS != key.Target.OS {
+			continue
+		}
 		age := q.clock.Now().Sub(point.MemoryRecordedAt)
 		if sameMemoryWork(point, *key, configuration) && memoryIdentityUsable(point) && p.constrained() {
 			invalidated = true
