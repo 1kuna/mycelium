@@ -178,6 +178,9 @@ func readDiagnostic(path string, limit int64, tail bool) ([]byte, error) {
 }
 
 func (w Worker) finishFailureDiagnostics(j Job, result Result, parent, logPath string) (Result, error) {
+	if j.StorageAllocation != nil && j.StorageAllocation.WorkerCustody {
+		return result, nil
+	}
 	if j.Spec.Diagnostics == nil || result.Success || result.ReleaseOnly {
 		return result, nil
 	}

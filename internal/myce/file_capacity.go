@@ -150,6 +150,13 @@ func (s *FileStore) capacity(ctx context.Context) (FileStoreStatus, map[string]s
 	status.DiskFreeBytes, status.FloorBytes = disk.FreeBytes, diskFreeFloor(disk.TotalBytes)
 	storeFree := status.LimitBytes - min(status.LimitBytes, allocated)
 	unavailable := addDiskBytes(status.FloorBytes, remaining)
+	if s.storageExcludedFree != nil {
+		excluded, err := s.storageExcludedFree()
+		if err != nil {
+			return status, payloads, err
+		}
+		unavailable = addDiskBytes(unavailable, excluded)
+	}
 	status.FreeBytes = min(storeFree, disk.FreeBytes-min(disk.FreeBytes, unavailable))
 	return status, payloads, nil
 }

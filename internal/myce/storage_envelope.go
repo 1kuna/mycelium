@@ -178,10 +178,11 @@ func (q *Queue) storageKey(j *Job, m *Machine) *StorageKey {
 		Outputs                  map[string]string
 		Inputs                   map[string]string
 		Shared                   map[string]SharedInput
+		StorageProtocol          string `json:"storage_protocol,omitempty"`
 		Delivery                 string
 		Resumable, FileTransport bool
 		Diagnostics              *DiagnosticSpec
-	}{s.Project, s.Args, s.Program, programSource, memoryConfiguration(s.Needs, nil, nil), s.Run.Env, s.Outputs, s.Inputs, s.SharedInputs, s.OutputDelivery, s.Resumable, j.FileTransport, s.Diagnostics})
+	}{s.Project, s.Args, s.Program, programSource, memoryConfiguration(s.Needs, nil, nil), s.Run.Env, s.Outputs, s.Inputs, s.SharedInputs, s.StorageProtocol, s.OutputDelivery, s.Resumable, j.FileTransport, s.Diagnostics})
 
 	shape := map[string]int64{}
 	for name, ref := range jobInputFiles(j) {

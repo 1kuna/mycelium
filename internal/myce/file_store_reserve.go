@@ -115,6 +115,9 @@ func (q *Queue) fileStoreWriteClass(ctx context.Context, files FileManifest, gro
 	if j, err := q.fileStoreAttemptJob(ctx, growth > 0); err != nil {
 		return false, true, err
 	} else if j != nil {
+		if j.StorageAllocation != nil && j.StorageAllocation.WorkerCustody {
+			return false, true, storageCustodyRefusal()
+		}
 		return q.priorityMatch(j.Spec).Tier == "production", true, nil
 	}
 	if ctx.Value(fileStoreOrdinaryKey{}) != nil {

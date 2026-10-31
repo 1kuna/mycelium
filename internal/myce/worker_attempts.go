@@ -381,6 +381,9 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 }
 
 func (w Worker) recoverAttempt(s *workerStore) (*process, error) {
+	if err := w.bindStorage(context.Background(), s, *s.state.Job); err != nil {
+		return nil, err
+	}
 	if err := s.restorePriorityStop(); err != nil {
 		return nil, err
 	}
@@ -497,9 +500,19 @@ func (s *workerStore) attemptStores() ([]*workerStore, error) {
 		if err = decodeWorkerState(data, &child.state); err != nil {
 			return nil, err
 		}
+		if child.state.StorageDirectory != "" {
+			if err = child.restoreStorageDirectory(s.dir); err != nil {
+				return nil, err
+			}
+		}
 		if child.state.Job != nil {
 			stores = append(stores, child)
 		}
+	}
+	// A crash may precede the root discovery record. Reconstruct protected
+	// children from their synced local state too, without dropping custody.
+	if err := recoverUnindexedStorageStores(s, &stores); err != nil {
+		return nil, err
 	}
 	seen := map[attemptKey]bool{}
 	for _, child := range stores {
@@ -517,8 +530,31 @@ func (s *workerStore) attemptStores() ([]*workerStore, error) {
 	return stores, nil
 }
 
-func newAttemptStore(root *workerStore, j Job) (*workerStore, error) {
+func newAttemptStore(root *workerStore, j Job, workers ...Worker) (*workerStore, error) {
 	s := &workerStore{inputStaging: root.inputStaging, dir: root.dir, stateName: "state-attempt-" + ID() + ".json", state: workerState{Session: j.Session, Job: &j, CheckpointRoot: root.state.CheckpointRoot, Identity: ID()}}
+	if j.StorageAllocation != nil {
+		if len(workers) != 1 {
+			return nil, errors.New("protected attempt boundary required")
+		}
+		s.indexRoot = root.dir
+		s.state.StorageDirectory = j.StorageAllocation.ID
+		if len(s.state.StorageDirectory) != 64 || filepath.Base(s.state.StorageDirectory) != s.state.StorageDirectory {
+			return nil, errors.New("invalid storage allocation")
+		}
+		physicalRoot, err := filepath.EvalSymlinks(root.dir)
+		if err != nil {
+			return nil, err
+		}
+		s.dir = filepath.Join(physicalRoot, "protected-attempts", s.state.StorageDirectory)
+		j.Checkpoint = filepath.Join(s.dir, "checkpoints", j.ID, fmt.Sprintf("attempt-%d", j.Attempt))
+		s.state.Job = &j
+		if err := workers[0].bindStorage(context.Background(), s, j); err != nil {
+			return nil, err
+		}
+		if err := os.MkdirAll(s.dir, 0700); err != nil {
+			return nil, err
+		}
+	}
 	// Docker identity denotes durable Docker custody, not mere assignment.
 	// Refusals before startDocker must not request container recovery (#166).
 	if j.Spec.Run.Docker {
@@ -969,6 +1005,10 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				return c == "native_network" || c == "native_sidecars" || c == "native_network_partial" || strings.HasPrefix(c, "native_isolation_")
 			})
 			m.Capabilities = append(m.Capabilities, w.nativeIsolationCapabilities()...)
+			m.Capabilities = slices.DeleteFunc(m.Capabilities, func(c string) bool { return c == boundedStorageCapability })
+			if w.StorageBoundary != nil {
+				m.Capabilities = append(m.Capabilities, boundedStorageCapability)
+			}
 			if w.DockerEndpoint != "" {
 				// Refresh without allowing a slow daemon to block heartbeats.
 				if supported, err := dockerQualification.run("docker-envelope", func() (bool, error) { return probeWorker.dockerEnvelopeSupported(), nil }); err == nil {
@@ -1072,10 +1112,11 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 							}
 							j.Checkpoint = filepath.Join(root.state.CheckpointRoot, rel)
 						}
-						s, e := newAttemptStore(root, j)
+						s, e := newAttemptStore(root, j, w)
 						if e != nil {
 							return e
 						}
+						j = *s.state.Job
 						if leaving {
 							r := Result{Machine: m.ID, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Interrupted: true, Error: "worker leaving before command started"}
 							s.state.Result = &r
