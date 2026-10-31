@@ -1508,3 +1508,57 @@ expected inputs to verify registration, even after the original files change.
 Raw recipes, commands, file contents and local paths are omitted. Binary recipes
 report the digest of the `binary.sha256` identity input. See the
 [entry schema](schemas/environment-v1.schema.json).
+
+### Preserve learned curves across a release
+
+Use the versioned `scripts/verify-curve-preservation.sh` guard (or
+`myce release verify-curves`) instead of private release-script equality checks:
+
+```sh
+MYCE_BIN=/path/to/myce scripts/verify-curve-preservation.sh \
+  --before before-status.json --after after-status.json \
+  --ledgers learning-ledger-pages.json > curve-diff.json 2> curve-guard.stderr
+rc=$? # retain this status, stderr and the diff receipt, including on failure
+```
+
+Capture authenticated **`/api/status?detail=full`** snapshots before and after
+cutover, using the canonical helper's read-only capture mode:
+
+```sh
+MYCE_BIN=/path/to/myce scripts/verify-curve-preservation.sh capture \
+  --config CONFIG > before-status.json 2> before-capture.stderr
+# Perform the separately authorized cutover, then capture the after snapshot:
+MYCE_BIN=/path/to/myce scripts/verify-curve-preservation.sh capture \
+  --config CONFIG > after-status.json 2> after-capture.stderr
+# Require exit 0 for each capture before verifying.
+```
+
+The default `/api/status` view is bounded: it can omit older terminal jobs and
+work curves. Never use that view to collect either side of preservation proof.
+Capture requests full detail for **both jobs and curves**, and preserves the
+server completeness metadata. Capture and verification reject bounded or
+incomplete job pages and missing jobs/curves fields; a queue predating page
+metadata can still return its original full snapshot. Collect accepted-learning
+ledger pages from the complete job inventory, not the default recent-job list.
+The **before response's server `now`** is the learning boundary, never the local
+save time or installer launch. The ledger file is a JSON array of pages from
+`GET /api/jobs/{id}/ledger`; collect pages covering the interval for jobs that
+could have learned, including pagination. Use the after snapshot's `now` as the
+upper boundary; later ledger entries are ignored.
+
+The guard preserves every key, sample count and throughput/memory evidence
+clock. It ignores only derived `stale_reason` labels. Changed values and new
+keys require a complete chain of accepted sample records, with exact job,
+attempt, key and queue-time provenance. Each record binds before/after digests
+of the actual learning mutation in the same SQLite transaction as completion;
+the guard shares the runtime's measurement digest and does not reimplement
+EWMA or memory merges. Memory-only samples may advance their sample count and
+memory clock while preserving the old throughput and its provenance.
+
+Removed keys, resets, backward clocks, changed measurements without new
+samples, missing/ambiguous provenance and unexplained final values fail closed.
+Older jobs have no such learning ledger proof: an unchanged curve still passes,
+but an unproven change stops the release for investigation. Reference sweep or
+OOM invalidation changes are not accepted job samples and also stop this guard.
+Ledger records follow existing job history retention; collect evidence before
+it expires. No release, install or fleet operation is performed by the guard.

@@ -2800,6 +2800,25 @@
       ],
       "type": "object"
     },
+    "WorkLearningChange": {
+      "properties": {
+        "after": {
+          "type": "string"
+        },
+        "before": {
+          "type": "string"
+        },
+        "key": {
+          "$ref": "#/$defs/ObservationKey"
+        }
+      },
+      "required": [
+        "key",
+        "before",
+        "after"
+      ],
+      "type": "object"
+    },
     "WorkReference": {
       "properties": {
         "input_shape": {
