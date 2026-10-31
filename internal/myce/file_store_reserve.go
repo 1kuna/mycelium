@@ -157,6 +157,11 @@ func (q *Queue) fileStoreWriteClass(ctx context.Context, files FileManifest, gro
 
 // Return only the unidentified portion admitted across the production floor.
 // Preflight observes it; successful tus creation counts it once, not per PATCH.
+// The reserve is a capacity guard against accidental fill by fleet workers
+// sharing one credential, not an authorization boundary. Upload requests have
+// no independently authenticated worker identity: copying a production attempt
+// can claim its tier, and unidentified legacy writes can also use the reserve.
+// Attempt checks fence stale executions; they do not bind bytes to their owner.
 func (q *Queue) admitFileUpload(ctx context.Context, status FileStoreStatus, projected map[string]storedPayload, files FileManifest, need, growth uint64) (uint64, error) {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
