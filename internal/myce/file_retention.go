@@ -169,15 +169,19 @@ func (q *Queue) maintainFileExpiry() {
 		if !now.Before(j.FinishedAt.Add(q.fileRetention)) {
 			j.FilesExpired = true
 		}
-		if j.FilesExpired && j.FileReclamation == nil {
-			j.FileReclamation = &FileReclamation{}
-			seen := map[string]bool{}
-			for _, files := range jobFileManifests(j) {
-				for _, ref := range files {
-					if !seen[ref.SHA256] {
-						j.FileReclamation.Pending = append(j.FileReclamation.Pending, ref.SHA256)
-						seen[ref.SHA256] = true
-					}
+		enrollFileReclamation(j)
+	}
+}
+
+func enrollFileReclamation(j *Job) {
+	if j.FilesExpired && j.FileReclamation == nil {
+		j.FileReclamation = &FileReclamation{}
+		seen := map[string]bool{}
+		for _, files := range jobFileManifests(j) {
+			for _, ref := range files {
+				if !seen[ref.SHA256] {
+					j.FileReclamation.Pending = append(j.FileReclamation.Pending, ref.SHA256)
+					seen[ref.SHA256] = true
 				}
 			}
 		}
@@ -188,14 +192,31 @@ func (q *Queue) maintainFileExpiry() {
 // Everything else with explicit custody is a keeping reference. In particular,
 // checkpoint generations and catalog snapshots survive terminal file expiry.
 func (q *Queue) fileReferences(pendingOnly bool, subset ...map[string]*Job) (expired, keep, referenced map[string]bool) {
+	return q.collectFileReferences(pendingOnly, nil, nil, subset...)
+}
+
+// The release planner uses the collector itself, treating only eligible selected
+// jobs as expired. Explanations therefore follow the same protection decisions.
+func (q *Queue) collectFileReferences(pendingOnly bool, releasing map[string]bool, report func(string, FileKeepingReference), subset ...map[string]*Job) (expired, keep, referenced map[string]bool) {
 	expired, keep, referenced = map[string]bool{}, map[string]bool{}, map[string]bool{}
 	if len(subset) == 0 {
 		for hash := range q.s.RetiredJobFiles {
 			expired[hash], referenced[hash] = true, true
 		}
 	}
+	owner := FileKeepingReference{}
+	keepFiles := func(kind string, files FileManifest) {
+		for name, ref := range files {
+			keep[ref.SHA256] = true
+			if report != nil {
+				r := owner
+				r.Kind, r.Name = kind, name
+				report(ref.SHA256, r)
+			}
+		}
+	}
 	for hash := range q.bundleReferences(subset...) {
-		keep[hash] = true
+		keepFiles("extension_environment_bundle", FileManifest{"bundle": {SHA256: hash}})
 	}
 	add := func(to map[string]bool, files FileManifest) {
 		for _, ref := range files {
@@ -203,27 +224,55 @@ func (q *Queue) fileReferences(pendingOnly bool, subset ...map[string]*Job) (exp
 		}
 	}
 	extension := func(e Extension) {
-		add(keep, e.Assets)
+		keepFiles("extension_asset", e.Assets)
 		for _, v := range e.Variants {
 			for _, r := range v.Environments {
-				add(keep, r.Assets)
+				keepFiles("environment_asset", r.Assets)
 			}
 		}
 	}
+	var custody *Queue
 	job := func(j *Job) {
 		if j == nil {
 			return
+		}
+		if releasing[j.ID] {
+			// Project exactly the enrollment that apply would perform without
+			// re-enrolling historical manifests after completed reclamation.
+			planned := *j
+			planned.FilesExpired = true
+			enrollFileReclamation(&planned)
+			j = &planned
+		}
+		owner = FileKeepingReference{JobID: j.ID, Project: j.Spec.Project}
+		filesExpired := j.FilesExpired
+		protected := deliveryPending(j)
+		if terminal(j.State) && filesExpired {
+			if custody == nil {
+				custody = q.cancellationObservation()
+			}
+			protected = protected || custody.jobReleasePending(j)
 		}
 		// Retained identities, including expired answers and completed
 		// reclamations, must never be mistaken for pre-submit orphans.
 		add(referenced, j.Spec.Files)
 		add(referenced, sharedStoredFiles(j.Spec))
 		add(referenced, j.OutputRefs)
+		// Recoveries have their own immutable retention deadline. They can be
+		// attached after the original job's ordinary files have already expired.
+		for _, r := range j.RecoveredResults {
+			add(referenced, r.Files)
+			if q.clock.Now().Before(r.ExpiresAt) {
+				keepFiles("recovered_result", r.Files)
+			} else {
+				add(expired, r.Files)
+			}
+		}
 		if !terminal(j.State) {
-			add(keep, j.PendingOutputRefs)
+			keepFiles("pending_output", j.PendingOutputRefs)
 		}
 		if deliveryPending(j) {
-			add(keep, j.OutputRefs)
+			keepFiles("pending_delivery", j.OutputRefs)
 		}
 		for _, a := range j.AttemptHistory {
 			if a.Diagnostics != nil {
@@ -238,12 +287,12 @@ func (q *Queue) fileReferences(pendingOnly bool, subset ...map[string]*Job) (exp
 		if j.FanOut != nil {
 			for _, result := range j.FanOut.Results {
 				add(referenced, result.OutputRefs)
-				if !terminal(j.State) || !j.FilesExpired {
-					add(keep, result.OutputRefs)
+				if !terminal(j.State) || !filesExpired || protected {
+					keepFiles("fan_out_result", result.OutputRefs)
 				}
 			}
 		}
-		if terminal(j.State) && j.FilesExpired {
+		if terminal(j.State) && filesExpired && !protected {
 			if !pendingOnly {
 				for _, files := range jobFileManifests(j) {
 					add(expired, files)
@@ -255,24 +304,24 @@ func (q *Queue) fileReferences(pendingOnly bool, subset ...map[string]*Job) (exp
 			}
 		} else {
 			for _, files := range jobFileManifests(j) {
-				add(keep, files)
+				keepFiles("retained_job_files", files)
 			}
 		}
 		for _, save := range j.FileCheckpoints {
-			add(keep, save.Files)
+			keepFiles("checkpoint", save.Files)
 		}
 		if j.ResumeFiles != nil {
-			add(keep, j.ResumeFiles.Files)
+			keepFiles("resume_checkpoint", j.ResumeFiles.Files)
 		}
 		for _, e := range j.Extensions {
 			extension(e)
 		}
 		for _, r := range j.EnvironmentRecipes {
-			add(keep, r.Assets)
+			keepFiles("environment_asset", r.Assets)
 		}
 		for _, recipes := range j.SidecarEnvironmentRecipes {
 			for _, r := range recipes {
-				add(keep, r.Assets)
+				keepFiles("environment_asset", r.Assets)
 			}
 		}
 	}
@@ -288,23 +337,24 @@ func (q *Queue) fileReferences(pendingOnly bool, subset ...map[string]*Job) (exp
 			job(record.Job)
 		}
 	}
+	owner = FileKeepingReference{}
 	for _, e := range q.s.Extensions {
 		extension(e)
 	}
 	for _, recipes := range q.environments.Environments {
 		for _, r := range recipes {
-			add(keep, r.Assets)
+			keepFiles("environment_asset", r.Assets)
 		}
 	}
 	for _, m := range q.models.Models {
-		keep[m.SHA256] = true
+		keepFiles("model_catalog", FileManifest{m.Name: {SHA256: m.SHA256}})
 		for _, f := range m.Files {
-			keep[f.SHA256] = true
+			keepFiles("model_catalog", FileManifest{"file": {SHA256: f.SHA256}})
 		}
 	}
 	for _, slot := range q.s.ModelSlots {
 		if slot.EnvironmentRecipe != nil {
-			add(keep, slot.EnvironmentRecipe.Assets)
+			keepFiles("model_environment_asset", slot.EnvironmentRecipe.Assets)
 		}
 	}
 	for hash := range keep {
@@ -401,7 +451,7 @@ func (q *Queue) reclaimPublishedFilesContext(requestContexts ...context.Context)
 			st, err = os.Lstat(path)
 			// Stat inside the publication fence: a publisher/HEAD may have
 			// refreshed mtime since the collection snapshot was taken.
-			if err == nil && !st.ModTime().After(cutoff) && (!(orphan || trackedBundle) || st.Mode().IsRegular() && !st.ModTime().After(orphanCutoff)) {
+			if err == nil && filePayloadAgeEligible(st, cutoff, orphanCutoff, orphan || trackedBundle) {
 				err = os.Remove(path)
 				if err == nil {
 					gone[hash] = true
@@ -500,6 +550,12 @@ func (q *Queue) reclaimPublishedFilesContext(requestContexts ...context.Context)
 		}
 		return nil
 	}, nil)
+}
+
+// The planner and collector must agree on both publication grace and the
+// longer blob-age rule for positively marked orphan/bundle uploads.
+func filePayloadAgeEligible(st os.FileInfo, publicationCutoff, orphanCutoff time.Time, marked bool) bool {
+	return !st.ModTime().After(publicationCutoff) && (!marked || st.Mode().IsRegular() && !st.ModTime().After(orphanCutoff))
 }
 
 func hasJobFiles(j *Job) bool {

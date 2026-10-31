@@ -56,7 +56,7 @@ func generatedJobSchema(t *testing.T) []byte {
 	}
 	nullableCollections(schema)
 	schema["title"] = "Mycelium Job reply v1"
-	schema["description"] = "Generated from Job and Spec JSON types by TestWireSchemas. This is a reply schema, not submission validation: a cancelled reservation has a minimal zero-valued spec. x-contract marks stable identity/lifecycle fields versus diagnostic projections; reason text is never a machine contract. Optional fields follow Go omitempty; GET replies also omit execution payloads, including run.command. Additional diagnostics may grow."
+	schema["description"] = "Generated from Job and Spec JSON types by TestWireSchemas. This is a reply schema, not submission validation: a cancelled reservation has a minimal zero-valued spec. x-contract marks stable identity/lifecycle fields versus diagnostic projections; reason text is never a machine contract. Optional fields follow Go omitempty; observation replies include spec_projection describing omitted spec fields, including files and run. Additional diagnostics may grow."
 	defs := schema["$defs"].(map[string]any)
 	// GET Job replies redact execution payloads, including run.command.
 	// Spec encoding itself stays unchanged for durable submission fingerprints.
@@ -66,7 +66,7 @@ func generatedJobSchema(t *testing.T) []byte {
 		for _, property := range properties {
 			property.(map[string]any)["x-contract"] = "diagnostic"
 		}
-		stable := []string{"id", "spec", "state", "attempt", "machine", "session", "release_confirmed", "finished_at", "queued", "cancelled_at", "infrastructure_retries", "dependency", "cancellation", "cancellation_scope", "ledger", "delivery"}
+		stable := []string{"id", "spec", "spec_projection", "state", "attempt", "machine", "session", "release_confirmed", "finished_at", "queued", "cancelled_at", "infrastructure_retries", "dependency", "cancellation", "cancellation_scope", "ledger", "delivery", "recovered_results"}
 		if definition == "Spec" {
 			stable = []string{"project", "submission_key", "after", "output_delivery"}
 		}
@@ -79,9 +79,20 @@ func generatedJobSchema(t *testing.T) []byte {
 	binding["execution"].(map[string]any)["description"] = "Immutable producing child job ID and accepted attempt for a selected-piece edge; zero value for a whole-parent edge."
 	binding["executions"].(map[string]any)["description"] = "Whole-parent edge: accepted producing executions keyed by mapped producer piece. Immutable across retry and restart."
 	job := defs["Job"].(map[string]any)["properties"].(map[string]any)
+	job["recovered_results"].(map[string]any)["description"] = "Append-only recovery-time evidence linked to exact failed executions. Never changes state, native outcome, ordinary output_refs or dependency eligibility. Metadata and original provenance survive history pruning; bytes expire at each record's expires_at."
+	recovered := defs["RecoveredResult"].(map[string]any)["properties"].(map[string]any)
+	recovered["kind"].(map[string]any)["const"] = "recovered"
+	recovered["recovered_by"].(map[string]any)["const"] = "operator"
+	recovered["requested_by"].(map[string]any)["description"] = "Operator-asserted requester label, not a separately authenticated user identity."
+	recovered["manifest_sha256"].(map[string]any)["description"] = "SHA-256 of canonical Go JSON for files (sorted keys, compact encoding), verified at recovery time."
+	job["spec_projection"].(map[string]any)["description"] = "Observation privacy policy: projected is true; omitted lists stripped paths relative to spec, regardless of submitted presence. Empty placeholders do not retain submitted values. Absence of spec.files is not evidence that no files were submitted."
 	job["start_window"].(map[string]any)["description"] = "Effective original production start-window length in nanoseconds, retained across recovery. Available before startup; absent for experiments."
 	job["start_by_explicit"].(map[string]any)["description"] = "Whether submitted start_by was caller-owned and absolute. New jobs persist true or false; absent on older records means preserve their existing cutoff as absolute."
 	specProperties := defs["Spec"].(map[string]any)["properties"].(map[string]any)
+	specProperties["files"].(map[string]any)["description"] = "SHA-256/size-addressed inputs. Native jobs stage into work; managed Docker file batches require docker_files_v1 and mount private copies read-only at /myce/inputs, preserving relative names. Cannot mix NAS inputs, caller workdir or shared_inputs with Docker."
+	specProperties["outputs"].(map[string]any)["description"] = "Declared relative output names to relative publication prefixes. Managed Docker file batches write beneath /myce/work; only verified current-attempt outputs become output_refs after all writers settle."
+	dockerProperties := defs["RunSpec"].(map[string]any)["properties"].(map[string]any)
+	dockerProperties["docker"].(map[string]any)["description"] = "Opt-in managed direct docker run argv with a local digest-pinned image. With files or outputs: worker-owned mounts, UID/GID, /myce/work working directory and environment only; caller mounts/env/workdir/user and shared_inputs are rejected. Requires Linux docker_files_v1 worker capability."
 	specProperties["start_window"].(map[string]any)["description"] = "Optional production relative start duration (Go duration string), greater than zero and at most 1h. Defaults to 150s; explicit start_by takes precedence."
 	delete(job, "ledger_entries") // Persistence only; the supported read surface is paginated.
 	delete(defs, "JobLedgerEntry")
@@ -109,9 +120,12 @@ func generatedJobSchema(t *testing.T) []byte {
 	job["memory_attempts_dropped"].(map[string]any)["minimum"] = 0
 	job["memory_attempts_dropped"].(map[string]any)["description"] = "Number of memory attempt rows evicted by the 32-row limit. Omitted zero. Prelaunch attempts without a peak do not create rows or increment this count."
 	peak := defs["AttemptMemoryPeak"].(map[string]any)["properties"].(map[string]any)
+	peak["device_gb"].(map[string]any)["description"] = "Sampled per-attempt process GPU memory in GiB, not GPU-wide memory.used or an allocator high-water mark. CUDA uses nvidia-smi compute-apps even on unified-memory devices. Sampling is a lower bound; missing means unknown, not zero."
+	peak["device_unavailable"].(map[string]any)["description"] = "Diagnostic reason no usable process GPU sample was retained. New CUDA/XPU cgroup observers report this when device_gb is absent; older workers may omit both. Does not authorize reduced unified-memory accounting."
 	peak["events"].(map[string]any)["description"] = "Attempt-parent hierarchical memory.events counts. Absent means not read; explicit zero means a read zero. Max per counter across samples within the attempt."
 	peak["swap_gb"].(map[string]any)["description"] = "Attempt-parent memory.swap.peak in GiB, max across samples. Absent when unavailable; zero is measured. memory.swap.current is pressure evidence only, never a substitute peak."
 	peak["constrained"].(map[string]any)["description"] = "Observed constraint evidence; omitted false. Constrained facts are retained even when learning rejects them."
+	peak["pressure_unavailable"].(map[string]any)["description"] = "Pressure coverage was missing, malformed or had no valid cumulative-counter time window. Rejects this attempt's memory learning while preserving prior qualified evidence; raw diagnostic peaks remain."
 	job["infrastructure_retries"].(map[string]any)["minimum"] = 0
 	job["infrastructure_retries"].(map[string]any)["description"] = "Production infrastructure requeues already used. Omitted zero; default maximum is 2, configurable by the queue. Stage failures do not consume this budget."
 	job["reason"].(map[string]any)["description"] = "Sanitized diagnostic only. Do not parse or match its text."
@@ -220,6 +234,7 @@ func wireExamples(t *testing.T) map[string]any {
 		"job-device-selected":         deviceJob,
 		"error-no-qualified-target":   wireError(t, &HTTPError{Status: 409, Code: "no_qualified_target", Message: "host memory need 8.125 GiB (8 + 0.125 slack) exceeds allowance 8 GiB on example-machine; intent retained locally"}),
 		"error-machine-renamed":       wireError(t, &HTTPError{Status: 400, Code: "machine_renamed", Message: `machine old-gpu0 was renamed; use allowed_machines: [example-machine] plus needs.gpu.devices: ["0"]`}),
+		"error-environment-unknown":   wireError(t, &HTTPError{Status: 404, Code: "environment_unknown", Message: rejectionMessages["environment_unknown"]}),
 		"error-gpu-count-unsupported": wireError(t, &HTTPError{Status: 400, Code: "gpu_count_unsupported", Message: rejectionMessages["gpu_count_unsupported"]}),
 		"job-queued-keyed":            queued, "job-running": running, "job-succeeded": succeeded, "job-reserved-cancelled": reserved,
 		"cancel-queued": ack, "cancel-running-pending": pending, "cancel-terminal": terminal, "cancel-removed": removed, "cancel-absent": absent, "cancel-expired-unknown": expired,
@@ -266,6 +281,42 @@ func validateWireValue(t *testing.T, schema *validate.Schema, value any) {
 }
 
 func TestWireSchemas(t *testing.T) {
+
+	environmentReflector := generate.Reflector{Anonymous: true, AllowAdditionalProperties: true}
+	environmentSchema, err := json.MarshalIndent(environmentReflector.Reflect(&EnvironmentEntry{}), "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	environmentSchema = append(environmentSchema, '\n')
+	environmentPath := filepath.Join(schemaRoot, "environment-v1.schema.json")
+	if os.Getenv("MYCE_UPDATE_SCHEMAS") == "1" {
+		if err := os.WriteFile(environmentPath, environmentSchema, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	actualEnvironment, err := os.ReadFile(environmentPath)
+	if err != nil || !bytes.Equal(actualEnvironment, environmentSchema) {
+		t.Fatal("environment schema drift: regenerate with MYCE_UPDATE_SCHEMAS=1", err)
+	}
+	validateWireValue(t, compileWireSchema(t, "environment-v1.schema.json"), EnvironmentEntry{Name: "tools", Platforms: []EnvironmentPlatform{{Platform: "cpu", Backend: "uv", Key: "digest", InputDigests: map[string]string{"requirements.txt": "digest"}}}})
+
+	receiptReflector := generate.Reflector{Anonymous: true, AllowAdditionalProperties: true}
+	receiptSchema, receiptErr := json.MarshalIndent(receiptReflector.Reflect(&CurvePreservationReceipt{}), "", "  ")
+	if receiptErr != nil {
+		t.Fatal(receiptErr)
+	}
+	receiptSchema = append(receiptSchema, '\n')
+	receiptPath := filepath.Join(schemaRoot, "curve-preservation-v1.schema.json")
+	if os.Getenv("MYCE_UPDATE_SCHEMAS") == "1" {
+		if err := os.WriteFile(receiptPath, receiptSchema, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	actualReceipt, receiptErr := os.ReadFile(receiptPath)
+	if receiptErr != nil || !bytes.Equal(actualReceipt, receiptSchema) {
+		t.Fatal("curve preservation schema drift: regenerate with MYCE_UPDATE_SCHEMAS=1", receiptErr)
+	}
+	validateWireValue(t, compileWireSchema(t, "curve-preservation-v1.schema.json"), CurvePreservationReceipt{Changes: []CurvePreservationDiff{}})
 	generated := generatedJobSchema(t)
 	ledgerReflector := generate.Reflector{Anonymous: true, AllowAdditionalProperties: true}
 	ledgerSchema, ledgerErr := json.MarshalIndent(ledgerReflector.Reflect(&JobLedgerPage{}), "", "  ")
@@ -274,6 +325,23 @@ func TestWireSchemas(t *testing.T) {
 	}
 	ledgerSchema = append(ledgerSchema, '\n')
 	ledgerPath := filepath.Join(schemaRoot, "job-ledger-v1.schema.json")
+	fileStoreReflector := generate.Reflector{Anonymous: true, AllowAdditionalProperties: true}
+	fileStoreSchema, err := json.MarshalIndent(fileStoreReflector.Reflect(&FileStoreStatus{}), "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileStoreSchema = append(fileStoreSchema, '\n')
+	fileStorePath := filepath.Join(schemaRoot, "file-store-v1.schema.json")
+	if os.Getenv("MYCE_UPDATE_SCHEMAS") == "1" {
+		if err := os.WriteFile(fileStorePath, fileStoreSchema, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	actualFileStore, err := os.ReadFile(fileStorePath)
+	if err != nil || !bytes.Equal(actualFileStore, fileStoreSchema) {
+		t.Fatal("file store schema drift: regenerate with MYCE_UPDATE_SCHEMAS=1", err)
+	}
+	validateWireValue(t, compileWireSchema(t, "file-store-v1.schema.json"), FileStoreStatus{Store: "queue-file-store", UsedBytes: 8, FreeBytes: 24, LimitBytes: 32, ProductionReserveBytes: 8, UnidentifiedWritesMayUseReserve: true, UnidentifiedReserveAdmittedBytes: 4})
 	if os.Getenv("MYCE_UPDATE_SCHEMAS") == "1" {
 		if err := os.WriteFile(ledgerPath, ledgerSchema, 0644); err != nil {
 			t.Fatal(err)
@@ -286,6 +354,22 @@ func TestWireSchemas(t *testing.T) {
 	ledgerValidation := compileWireSchema(t, "job-ledger-v1.schema.json")
 	validateWireValue(t, ledgerValidation, JobLedgerPage{JobID: "job", Complete: true, Entries: []JobLedgerEntry{}})
 	r := generate.Reflector{Anonymous: true, AllowAdditionalProperties: true}
+	pageSchema, err := json.MarshalIndent(r.Reflect(&StatusJobsPage{}), "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pageSchema = append(pageSchema, '\n')
+	pagePath := filepath.Join(schemaRoot, "status-jobs-page-v1.schema.json")
+	if os.Getenv("MYCE_UPDATE_SCHEMAS") == "1" {
+		if err := os.WriteFile(pagePath, pageSchema, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	actualPage, err := os.ReadFile(pagePath)
+	if err != nil || !bytes.Equal(actualPage, pageSchema) {
+		t.Fatal("status jobs page schema drift: regenerate with MYCE_UPDATE_SCHEMAS=1", err)
+	}
+	validateWireValue(t, compileWireSchema(t, "status-jobs-page-v1.schema.json"), StatusJobsPage{Mode: "all", Total: 1001, Returned: 100, NextBefore: "example-job"})
 	diskSchema, err := json.MarshalIndent(r.Reflect(&DiskVolume{}), "", "  ")
 	if err != nil {
 		t.Fatal(err)
@@ -347,6 +431,12 @@ func TestWireSchemas(t *testing.T) {
 	s.SubmissionKey = "schema-key"
 	j := submit(t, q, s)
 	validateWireValue(t, schemas["job-v1.schema.json"], j)
+	dockerFiles := dockerJob()
+	dockerFiles.State = "queued"
+	dockerFiles.Spec.Files = FileManifest{"scripts/run.sh": {SHA256: strings.Repeat("a", 64), SizeBytes: 12}}
+	dockerFiles.Spec.Outputs = map[string]string{"result.json": "results"}
+	dockerFiles.Spec.SubmissionKey = "docker-files-schema"
+	validateWireValue(t, schemas["job-v1.schema.json"], dockerFiles)
 	// The retry counter is additive: old zero/omitted replies and new nonzero
 	// replies validate against the same v1 reply contract.
 	retried := cloneJob(j)

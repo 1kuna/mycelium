@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
 	"os"
 
 	"path/filepath"
@@ -160,6 +164,117 @@ func TestInstallExplicitZeroFalse(t *testing.T) {
 	preserved, err := myce.ReadServiceConfig(c.Config)
 	if err != nil || !reflect.DeepEqual(got, preserved) {
 		t.Fatal("omitted flags reset saved zero/false values", err)
+	}
+}
+
+func TestInstallQueueFileStoreSettings(t *testing.T) {
+	c, p := savedInstallFixture(t)
+	// Exercise the real install command, then the saved-config upgrade path.
+	for i, flags := range [][]string{
+		{"--file-store-bytes=12", "--file-store-production-reserve=6"},
+		nil,
+		{"--file-store-production-reserve=0"},
+		nil,
+	} {
+		args := append([]string{"install", "queue", "--config", c.Config}, flags...)
+		if err := setupCommandWithProbe(args, p, c.NAS); err != nil {
+			t.Fatal(err)
+		}
+		got, err := myce.ReadServiceConfig(c.Config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reserve := int64(6)
+		if i >= 2 {
+			reserve = 0
+		}
+		if got.FileStoreBytes != 12 || got.FileStoreProductionReserve != reserve {
+			t.Fatalf("install %d lost file-store settings: capacity=%d reserve=%d", i, got.FileStoreBytes, got.FileStoreProductionReserve)
+		}
+		unit, err := os.ReadFile(c.Service)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, pair := range []string{
+			`"--file-store-bytes" "12"`,
+			fmt.Sprintf(`"--file-store-production-reserve" "%d"`, reserve),
+		} {
+			if !strings.Contains(string(unit), pair) {
+				t.Errorf("install %d service omitted %s", i, pair)
+			}
+		}
+	}
+}
+
+func TestInstallQueueFileStoreWithExecStartOverride(t *testing.T) {
+	c, p := savedInstallFixture(t)
+	if !c.Enrollment {
+		t.Fatal("fixture must exercise enrollment preflight")
+	}
+	path := filepath.Join(t.TempDir(), "override.conf")
+	override := []byte("[Service]\nExecStart=\nExecStart=/fixture/myce queue --file-store-bytes 12 --file-store-production-reserve 6\n")
+	if err := os.WriteFile(path, override, 0600); err != nil {
+		t.Fatal(err)
+	}
+	before := map[string][]byte{}
+	for _, path := range []string{c.Config, c.Service} {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		before[path] = data
+	}
+	var warnings bytes.Buffer
+	writer := log.Writer()
+	log.SetOutput(&warnings)
+	defer log.SetOutput(writer)
+	injected := errors.New("injected reload failure before cutover")
+	fail := true
+	p.Command = func(_ context.Context, _ string, args ...string) ([]byte, error) {
+		switch strings.Join(args, " ") {
+		case "--user show myce-queue.service --property=DropInPaths --value":
+			return []byte(path), nil
+		case "--user daemon-reload":
+			if fail {
+				fail = false
+				return nil, injected
+			}
+		}
+		return nil, nil
+	}
+	args := []string{"install", "queue", "--config", c.Config, "--file-store-bytes=12", "--file-store-production-reserve=6"}
+	if err := setupCommandWithProbe(args, p, c.NAS); !errors.Is(err, injected) {
+		t.Fatalf("did not reach install with override present: %v", err)
+	}
+	for path, want := range before {
+		if got, err := os.ReadFile(path); err != nil || !bytes.Equal(got, want) {
+			t.Fatal("failed install did not restore previous config/unit", err)
+		}
+	}
+	if data, err := os.ReadFile(path); err != nil || !bytes.Equal(data, override) {
+		t.Fatal("failed install changed the effective override", err)
+	}
+	if err := setupCommandWithProbe(args, p, c.NAS); err != nil {
+		t.Fatal(err)
+	}
+	got, err := myce.ReadServiceConfig(c.Config)
+	if err != nil || got.FileStoreBytes != 12 || got.FileStoreProductionReserve != 6 {
+		t.Fatal("override prevented saving replacement settings", err)
+	}
+	unit, err := os.ReadFile(c.Service)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, pair := range []string{`"--file-store-bytes" "12"`, `"--file-store-production-reserve" "6"`} {
+		if strings.Count(string(unit), pair) != 1 {
+			t.Errorf("generated base unit must carry %s exactly once", pair)
+		}
+	}
+	if data, err := os.ReadFile(path); err != nil || !bytes.Equal(data, override) {
+		t.Fatal("installer changed the effective override", err)
+	}
+	if !strings.Contains(warnings.String(), "ExecStart drop-in still takes precedence") {
+		t.Fatal("installer did not warn that the override remains authoritative")
 	}
 }
 

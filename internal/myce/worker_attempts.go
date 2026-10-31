@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -523,6 +524,9 @@ func newAttemptStore(root *workerStore, j Job) (*workerStore, error) {
 }
 
 func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport) error {
+	if w.Machine.SharedHost != nil && runtime.GOOS == "linux" && !w.sharedCPUDev && w.sharedExecutionCeilings == nil {
+		return refuseAdmission("shared_cpu_controller", "controllers", 1, 0, true)
+	}
 	if w.Machine.SharedHost != nil && !sharedHostJobFits(&next, &w.Machine) {
 		return fmt.Errorf("shared host requires a native CPU command with a prepared environment")
 	}
@@ -533,13 +537,13 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport)
 		usedCores += j.Spec.Needs.cores()
 		need := localJobHostNeed(w, j)
 		usedRAM += need
-		growth += remainingHostGrowth(need, w.hostMemorySamples[jobKey(j)], w.Clock.Now())
+		growth += remainingAllocationGrowth(allocationMachine(&w.Machine, j.AllocatedDevices), j.Spec.Needs.MemoryGB, need, w.hostMemorySamples[jobKey(j)], w.Clock.Now())
 		if !next.Spec.Needs.cpuOnly() && slices.Contains(j.AllocatedDevices, firstDevice(next, w.Machine)) {
-			return fmt.Errorf("%w: device already has a batch attempt", errWorkerMemory)
+			return refuseAdmission("local_device_reservation", "slots", 1, 0, false)
 		}
 	}
 	if w.Machine.MaxJobs > 0 && len(jobs) >= w.Machine.MaxJobs {
-		return fmt.Errorf("%w: max-jobs", errWorkerMemory)
+		return refuseAdmission("local_max_jobs", "jobs", float64(len(jobs)+1), float64(w.Machine.MaxJobs), false)
 	}
 	for _, r := range models {
 		if r.State == "ready" || r.State == "draining" || r.State == "loading" {
@@ -570,23 +574,26 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport)
 				}
 			}
 			if usedGPU > d.BudgetGB {
-				return fmt.Errorf("%w: selected device budget", errWorkerMemory)
+				return refuseAdmission("device_budget", "GiB", usedGPU, d.BudgetGB, false)
 			}
 		}
 	}
-	if why != "" || usedCores > cores || w.Machine.HostMemoryBudgetGB > 0 && usedRAM > w.Machine.HostMemoryBudgetGB {
-		return fmt.Errorf("%w: aggregate CPU/RAM allowance", errWorkerMemory)
+	if why != "" || usedCores > cores {
+		return refuseAdmission("aggregate_cpu_allowance", "cores", float64(usedCores), float64(cores), why != "")
+	}
+	if w.Machine.HostMemoryBudgetGB > 0 && usedRAM > w.Machine.HostMemoryBudgetGB {
+		return refuseAdmission("aggregate_host_allowance", "GiB", usedRAM, w.Machine.HostMemoryBudgetGB, false)
 	}
 	if err := w.checkHostMemoryBudget(next.Spec.Needs.MemoryGB, next.Spec.Needs.HostMemoryGB); err != nil {
 		return err
 	}
-	if next.Spec.Needs.HostMemoryGB > 0 {
+	if next.Spec.Needs.HostMemoryGB > 0 || unifiedCUDA(&w.Machine) && next.Spec.Needs.MemoryGB > 0 {
 		if w.HostMemorySource == nil {
-			return fmt.Errorf("%w: host RAM source unavailable", errWorkerMemory)
+			return refuseAdmission("live_host_growth", "GiB", growth, 0, true)
 		}
 		free, err := w.sharedHostLiveMemory(context.Background())
 		if err != nil || !validMemoryValue(free) || free < growth {
-			return fmt.Errorf("%w: host RAM growth need %g GiB, available %g GiB", errWorkerMemory, growth, free)
+			return refuseAdmission("live_host_growth", "GiB", growth, free, err != nil)
 		}
 	}
 	return nil
@@ -620,6 +627,11 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var qualification checkpointIO[bool]
+	var pressureProbe checkpointIO[SharedHostPressure]
+	var cpuProbe checkpointIO[*memoryCeilings]
+	var pressure *SharedHostPressure
+	var nextPressureProbe time.Time
+	sharedCPUAllowance := 0
 	events := make(chan WorkerEvent, 16)
 	w.control = &processControl{clock: w.Clock, wake: make(chan struct{}, 1), availability: w.availability}
 	controlDone := make(chan struct{})
@@ -852,6 +864,60 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				m.HostMemoryError = "host RAM probe failed"
 			}
 			m.MemoryObservation = w.hostMemoryObservation(ctx, m, rawAvailable, err)
+			m.SharedHostPressure = nil
+			if w.Machine.SharedHost != nil {
+				if !w.Clock.Now().Before(nextPressureProbe) {
+					source := w.SharedPressureSource
+					if source == nil {
+						source = localSharedHostPressure
+					}
+					clock := w.Clock
+					reading, probeErr := pressureProbe.run("shared-pressure", func() (SharedHostPressure, error) {
+						sampledAt := clock.Now()
+						reading, err := source(ctx)
+						reading.sampledAt = sampledAt
+						return reading, err
+					})
+					if probeErr == nil {
+						pressure = &reading
+						nextPressureProbe = w.Clock.Now().Add(signalRefresh)
+					} else if !errors.Is(probeErr, errCheckpointIOPending) {
+						pressure = nil
+						nextPressureProbe = w.Clock.Now().Add(signalRefresh)
+					}
+				}
+				if pressure != nil {
+					copy := *pressure
+					copy.AgeSeconds = w.Clock.Now().Sub(copy.sampledAt).Seconds()
+					m.SharedHostPressure = &copy
+				}
+				switch runtime.GOOS {
+				case "darwin":
+					m.SharedCPUEnforcement = "background task policy; declared-core cap; CPU time unenforced"
+				case "linux":
+					m.SharedCPUEnforcement = "CPU time unenforced: delegated CPU controller unavailable"
+					ceilings, cores := w.memoryCeilings, w.Machine.CPUBudgetCores
+					configured, configErr := cpuProbe.run(fmt.Sprint(cores), func() (*memoryCeilings, error) { return sharedCPUCeilings(ceilings, cores) })
+					if configErr == nil {
+						w.sharedExecutionCeilings, sharedCPUAllowance = configured, cores
+					} else if !errors.Is(configErr, errCheckpointIOPending) {
+						w.sharedExecutionCeilings, sharedCPUAllowance = nil, 0
+					}
+					if w.sharedExecutionCeilings != nil && sharedCPUAllowance == w.Machine.CPUBudgetCores {
+						m.SharedCPUEnforcement = fmt.Sprintf("cgroup v2 cpu.weight=10 cpu.max=%d/100000", sharedCPUAllowance*100000)
+					}
+					if w.sharedCPUDev {
+						m.SharedCPUEnforcement = "CPU time unenforced: dev admission-only"
+					}
+				}
+				w.Machine.SharedHostPressure = m.SharedHostPressure
+				w.Machine.SharedCPUEnforcement = m.SharedCPUEnforcement
+			} else {
+				pressure, nextPressureProbe = nil, time.Time{}
+				w.sharedExecutionCeilings, sharedCPUAllowance = nil, 0
+				m.SharedCPUEnforcement = ""
+			}
+
 			checkpointRoot := root.state.CheckpointRoot
 			available, _ := root.nasProbe.runProgress(checkpointRoot, func(progress func()) (bool, error) {
 				err := workerCheckpointAvailable(checkpointRoot, progress)
@@ -892,7 +958,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				m.ModelURL = rt.url
 			}
 			m.ModelConfigHash = modelConfigHash(w.ModelConfig)
-			m.Capabilities = append(slices.DeleteFunc(slices.Clone(w.Machine.Capabilities), func(c string) bool { return c == "docker" || c == "docker_envelope" }), "logs_none", "shared_inputs_v1", "extension_shared_inputs_v1")
+			m.Capabilities = append(slices.DeleteFunc(slices.Clone(w.Machine.Capabilities), func(c string) bool { return c == "docker" || c == "docker_envelope" || c == dockerFilesCapability }), "logs_none", "shared_inputs_v1", "extension_shared_inputs_v1")
 			m.Capabilities = slices.DeleteFunc(m.Capabilities, func(c string) bool {
 				return c == "native_network" || c == "native_sidecars" || c == "native_network_partial" || strings.HasPrefix(c, "native_isolation_")
 			})
@@ -902,7 +968,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				if supported, err := dockerQualification.run("docker-envelope", func() (bool, error) { return probeWorker.dockerEnvelopeSupported(), nil }); err == nil {
 					w.dockerEnvelope = supported
 				}
-				m.Capabilities = append(m.Capabilities, "docker")
+				m.Capabilities = append(m.Capabilities, "docker", dockerFilesCapability)
 				if w.dockerEnvelope {
 					m.Capabilities = append(m.Capabilities, "docker_envelope")
 				}

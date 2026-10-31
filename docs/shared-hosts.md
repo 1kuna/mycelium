@@ -7,7 +7,7 @@ portable light work normally; the queue chooses an ordinary fitting host first
 and uses a shared host immediately when ordinary hosts cannot admit it.
 Existing project restrictions, priorities, exclusions and maintenance still win.
 
-## First phase
+## Supported work
 
 The queue stores `policy.shared_host.interactive_reserve_gb` per physical host.
 Enabling it requires positive CPU/RAM allowances and fresh quiescent custody
@@ -16,7 +16,7 @@ to already running processes. It sets the existing `last_resort` policy; that
 flag cannot be cleared while the profile is active. Profile removal leaves
 placement, budgets, independent exclusions and drain/disable in place.
 
-The first phase admits native CPU commands with already prepared environments,
+The profile admits native CPU commands with already prepared environments,
 including CI/tests and small builds. It withholds accelerator work through the
 existing `kind=gpu` exclusion matching path, including future devices, without
 creating or editing an operator's selector. Explicit selector exclusions remain
@@ -25,14 +25,34 @@ model loading/copying and onboarding benchmarks are withheld on this profile
 until their execution budgets and priority are covered. A job's own shell can
 still compile code: that work inherits its command's priority.
 
-Commands and native sidecars receive nice=10 before their execution gates open
-on macOS and Linux. Their descendants inherit it. Worker heartbeats and queue
-control stay at normal priority. The existing CPU allowance limits aggregate
-**declared cores**, not actual CPU time. Set application parallelism to the
-declaration (for example `GOMAXPROCS` and build/test worker counts). Nice=10
-reduces competition under load and may slow completion; it is a scheduling
-policy, not a measured CPU share or a hard cap. macOS Metal isolation and RAM
-ceilings remain unenforced. Trusted CPU-only declarations are cooperative there.
+Commands and native sidecars receive nice >= 10 before their execution gates
+open. macOS additionally applies
+`setpriority(PRIO_DARWIN_PROCESS, pid, PRIO_DARWIN_BG)` (equivalent to
+`taskpolicy -b`) to every gated supervisor and member, inherited by descendants.
+This lowers CPU, I/O, timer and network priority. Worker heartbeats and queue
+control retain their original priority. A failed background-policy application
+logs a warning and the job continues with its existing nice priority.
+The existing physical-host CPU ledger caps aggregate
+**declared cores** at `cpu_budget_cores`. Common Go, OpenMP, BLAS and Rayon runtime
+thread-count variables are clamped to each command's declared cores, including
+sidecars. A payload can ignore these variables or start more processes.
+
+Linux installed workers use delegated cgroup v2 CPU controls. Generated/manual
+units delegate `memory cpu`; the worker remains in its existing `worker` leaf.
+Only attempts enter the sibling `shared-execution` subtree, with `cpu.weight=10`
+and `cpu.max=CPU_BUDGET_CORES*100000 100000`. The quota aggregates main commands,
+sidecars and descendants across attempts. Existing per-attempt/member memory
+limits and exact cleanup custody remain underneath it. Controls are read back
+before admission and rechecked in the bounded worker observation lane. Missing
+CPU delegation withholds production admission. Aggregate containment requires
+one machine worker per physical host; legacy multiple workers are withheld.
+The dev harness explicitly reports admission-only CPU simulation on Linux.
+
+macOS has no qualified aggregate CPU-time containment backend here. Status says
+`background task policy; declared-core cap; CPU time unenforced`. Background QoS,
+runtime concurrency hints and declared reservations protect fitting cooperative
+work; they are not a hard share or stall-proof guarantee. macOS RAM ceilings
+also remain unenforced. No profile is enabled by installation or upgrade.
 
 ## Measure the memory reserve
 
@@ -103,23 +123,86 @@ A checkpoint-unavailable warning remains a separate storage constraint.
 Resumable/checkpoint-dependent work waits under the existing contract. A profile
 does not repair storage or authorize clearing maintenance.
 
-## Pressure response and remaining choices
+## Pressure response
 
-Phase one withholds **new** work as live RAM shrinks; it does not stop Started
-commands on owner activity or OS pressure. Existing owner tiers still preempt
-through their normal exact-attempt path. Follow-up [#390](https://github.com/1kuna/mycelium/issues/390)
-tracks Linux PSI/macOS memory_pressure and interactive-load sampling, measured
-thresholds/recovery hysteresis, checkpoint and requeue through planned preemption,
-and CPU containment (Linux cgroup weight/quota; qualified macOS QoS/share options).
-Unknown samples must remain unknown, and release must still be acknowledged
-before replacement work starts. Broader preparation/Docker/extension eligibility
-belongs to that follow-up. Parent: [#389](https://github.com/1kuna/mycelium/issues/389).
+Only shared-profile workers collect pressure samples. A bounded background lane
+reads `kern.memorystatus_vm_pressure_level` (the macOS memory-pressure notification
+level) or Linux `/proc/pressure/memory` `some avg10`, then measures twenty normal-
+priority 5 ms timer wakes. The maximum lateness measures scheduling interference,
+including competing owner/agent work, without recording apps or owner input.
+It cannot attribute contention to a particular process. Probes never run under
+the queue mutex or synchronously block heartbeat delivery for their full duration.
 
-The owner chooses the measured interactive reserve and CPU allowance: larger
-reserves protect more bursts and admit less work. Seven-day maxima retain bursts
-but can withhold capacity after an unusually busy day; increasing throughput by
-using percentiles needs separate evidence. A strict CPU cap costs completion
-time even when the owner is idle, while weight/priority alone cannot guarantee
-latency. Pressure preemption adds checkpoint/restart cost and needs interference
-measurements. Keep the conservative first phase until those choices are qualified;
-no native stall-prevention guarantee follows from laptop tests.
+Thresholds and recovery bands:
+
+| Signal | Yield | Recover |
+| --- | --- | --- |
+| macOS memory level | warning (2) or critical (4) | normal (1) |
+| Linux memory PSI `some avg10` | >= 1% | <= 0.1% |
+| Foreground-class wake lateness | >= 20 ms | <= 5 ms |
+
+macOS uses the OS's pressure warning rather than inventing a free-RAM percentage.
+The PSI bands represent 100 ms / 10 ms of stalled time per ten seconds. They are
+conservative latency budgets; native Linux interference calibration remains
+unverified. The wake bands use the canary below: its observed p99 was below
+3 ms and maximum below 7 ms; 5 ms permits recovery above normal p99, while
+20 ms detects a delay exceeding a 60 Hz interaction frame and well above the
+observed maximum. This is limited local evidence, not representative long-term
+owner qualification. Native pressure-stress calibration remains outstanding;
+this task intentionally does not manufacture memory pressure on a shared host.
+
+Samples refresh at the existing 5-second owner-signal cadence and expire at its
+15-second freshness bound. Worker-local age is translated to queue receipt time;
+worker wall timestamps cannot renew evidence. Missing, malformed, failed or
+stale observations remain **unknown** and withhold new work. Unknown alone does
+not stop running work or clear a pressure latch. A fresh low sample for every
+signal clears the latch; middling samples retain it. There is no extra recovery
+sleep. This amplitude hysteresis avoids stopping/restarting at one threshold.
+
+On measured pressure, the queue withholds new work on the physical host and
+attaches `shared_host_pressure` planned-stop provenance to each exact running
+attempt. The existing preemption path grants resumable work its configured stop
+grace (normally 10 seconds); nonresumable CPU work stops immediately. Existing
+checkpoint preparation resumes the same logical job and submission key, without
+infrastructure retry/loss charges. Independent command/OOM failure, cancellation,
+stale results and exact cleanup acknowledgement retain their existing precedence.
+Elapsed grace never proves release. Status exposes the sample, latch reason,
+admission diagnostic and actual CPU enforcement mode.
+
+The response can cost one sampling interval plus checkpoint grace, and pressure
+can stop useful progress. PSI's averaged recovery may withhold capacity after
+stalls end. Larger RAM reserves and a smaller CPU allowance reduce interference
+but admit less work; a Linux hard quota also costs throughput while the owner is
+idle. Keep existing operator drains authoritative. Docker, extension execution,
+new environment/extension preparation and models remain withheld; this change
+does not broaden execution eligibility or qualify their pressure handling.
+
+## Local interference evidence (2026-10-30)
+
+`python3 scripts/measure-shared-host.py` runs a normal-priority foreground 5 ms
+wake probe and a fixed CPU burst, first at baseline and then beside two CPU-bound
+commands with native background taskpolicy and nice=10. It lasts three seconds
+per phase, leaves owner capacity, and kills/reaps its own commands. On an 18-core
+Darwin machine, with existing concurrent owner/agent work:
+
+| Foreground measurement | Baseline | Two background commands |
+| --- | ---: | ---: |
+| Wake-delay p99 | 2.583 ms | 2.539 ms |
+| Wake-delay maximum | 6.271 ms | 3.001 ms |
+| Fixed CPU-burst p99 | 0.533 ms | 0.573 ms |
+| Samples | 422 | 423 |
+
+The foreground remained at nice=0. This bounded two-command canary observed no
+foreground starvation. It does not test all-core saturation, a hostile payload,
+memory pressure, or Linux native containment. It neither installs services nor
+enables any profile. Repeat with representative owner work before authorizing
+native enablement; parent [#389](https://github.com/1kuna/mycelium/issues/389)
+retains that operational qualification.
+
+Laptop regressions use fake-clock yield/recovery/stale samples and aggregate CPU
+admission/cgroup files. `TestSharedHostDevPressureCheckpointRequeueAndCancel`
+starts the real `myce dev` API/worker/command runner with injected OS pressure and
+real local checkpoint copying. It verifies checkpoint, planned requeue, resume on
+attempt 2 and cancellation/release. `TestSharedHostDevCommandPriority` verifies
+real main/sidecar nice values, concurrency hints, token filtering and unchanged
+worker-control priority. No GPU, Docker or fleet changes are involved.

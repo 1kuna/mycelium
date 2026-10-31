@@ -13,6 +13,12 @@ import (
 // Stable rejection codes and default messages. Submission validation returns
 // the specific field rule; other wrapped causes stay local.
 var rejectionMessages = map[string]string{
+	"status_query_invalid":                  "status requires jobs=recent|active|all, limit=1..1000, an RFC3339 since, an existing before cursor and detail=full when requested",
+	"recovery_invalid":                      "recovery requires valid metadata, declared outputs and matching execution identity",
+	"recovery_stale":                        "recovery requires the exact retained failed execution",
+	"recovery_conflict":                     "recovery key already identifies different evidence; use a new key to append another record",
+	"recovery_verification_failed":          "recovery bytes are missing or do not match SHA-256 and size",
+	"recovery_unknown":                      "recovered result not found",
 	"native_workdir_containment":            "native isolation requires workdir beneath {work}; stage source with inputs or a profile",
 	"queue_stopping":                        "queue is shutting down; retry the request",
 	"disk_headroom":                         "projected disk need plus free floor exceeds known disk capacity",
@@ -63,6 +69,7 @@ var rejectionMessages = map[string]string{
 	"extension_version_conflict":            "extension version is frozen; bump the version",
 	"extension_invalid":                     "extension folder or schema is invalid; run extension check --static",
 	"extension_unknown":                     "extension digest is not registered",
+	"environment_unknown":                   "unknown environment",
 	"job_id_ambiguous":                      "job ID prefix is ambiguous; use a longer ID",
 	"policy_revision_conflict":              "policy revision changed",
 	"policy_invalid":                        "policy or expected_revision is invalid; export the current policy before editing",
@@ -125,11 +132,13 @@ func specRejection(err error) error {
 // RuntimeCause retains safe operation/class information, never daemon stderr,
 // command arguments, environment values, endpoint URLs, or filesystem paths.
 type RuntimeCause struct {
-	Operation string `json:"operation"`
-	Class     string `json:"class"`
-	ExitCode  *int   `json:"exit_code,omitempty"`
-	Predicate string `json:"predicate,omitempty"`
-	Reason    string `json:"reason,omitempty"`
+	Admission        *AdmissionDetail `json:"admission,omitempty"`
+	PrelaunchRefused bool             `json:"prelaunch_refused,omitempty"`
+	Operation        string           `json:"operation"`
+	Class            string           `json:"class"`
+	ExitCode         *int             `json:"exit_code,omitempty"`
+	Predicate        string           `json:"predicate,omitempty"`
+	Reason           string           `json:"reason,omitempty"`
 }
 
 func (c RuntimeCause) String() string {
@@ -139,6 +148,13 @@ func (c RuntimeCause) String() string {
 	}
 	if reason := launchPredicateMessages[c.Predicate]; reason != "" {
 		text += "; " + c.Predicate + ": " + reason
+	}
+	if d := safeAdmissionDetail(c.Admission); d != nil {
+		available := "unavailable"
+		if d.Available != nil {
+			available = fmt.Sprintf("%g", *d.Available)
+		}
+		text += fmt.Sprintf("; %s required=%g available=%s unit=%s envelope_source=%q host_gb=%g device_gb=%g", d.Subcheck, d.Required, available, d.Unit, d.EnvelopeSource, d.EnvelopeHostGB, d.EnvelopeDeviceGB)
 	}
 	return text
 }
@@ -237,6 +253,11 @@ func safeRuntimeCause(c *RuntimeCause) *RuntimeCause {
 		}
 	}
 	out := *c
+	out.Admission = nil
+	out.PrelaunchRefused = c.PrelaunchRefused && c.Operation == "launch" && (c.Class == launchRefused || c.Class == "resource_limit") && launchPredicateMessages[c.Predicate] != ""
+	if c.Operation == "launch" && c.Predicate == "memory_capacity" {
+		out.Admission = safeAdmissionDetail(c.Admission)
+	}
 	out.Predicate, out.Reason = "", ""
 	if reason := launchPredicateMessages[c.Predicate]; reason != "" {
 		out.Predicate, out.Reason = c.Predicate, reason

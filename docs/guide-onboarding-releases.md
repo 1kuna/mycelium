@@ -1,5 +1,12 @@
 # Publish and approve an onboarding release
 
+> **Release checklist: migrate preservation collectors before queue cutover.**
+> With bounded status (#439), preservation and curve-provenance checks must use
+> `/api/status?detail=full` or complete `jobs=all` pagination, including private
+> release-script copies. Default status can omit old completed jobs even though
+> curves remain present. Existing complete `/api/inspection` collectors remain
+> supported. See [the upgrade requirement](operations.md#rolling-fleet-upgrades).
+
 The queue administrator provisions a trusted publisher HTTPS directory and an
 Ed25519 public key independently of the release manifest. The signing key stays
 with the publisher in a mode-0600 PKCS8 PEM file. Never distribute it with a release.

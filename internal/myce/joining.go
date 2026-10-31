@@ -161,7 +161,9 @@ func ResolveJoining(ctx context.Context, i Invitation, explicit string, d Discov
 			continue
 		}
 		seen[address] = true
-		attempt, cancel := context.WithTimeout(ctx, time.Second)
+		// Allow TLS and an older queue's status headers to arrive under load.
+		// The incident's healthy status request took 2.55s; no body is drained.
+		attempt, cancel := context.WithTimeout(ctx, 5*time.Second)
 		c, err := verifiedJoining(attempt, i, address)
 		cancel()
 		if err == nil {
@@ -178,7 +180,7 @@ func ResolveJoining(ctx context.Context, i Invitation, explicit string, d Discov
 			if response.Status == http.StatusUnauthorized || response.Status == http.StatusForbidden {
 				stage = "credential rejected"
 			} else {
-				stage = "queue status request failed"
+				stage = "queue probe request failed"
 			}
 		}
 		if !seen[stage] {
@@ -201,11 +203,40 @@ func verifiedJoining(ctx context.Context, i Invitation, address string) (Client,
 	if err != nil {
 		return c, err
 	}
-	err = c.Call(ctx, "GET", "/api/status", nil, nil)
+	err = c.probeJoining(ctx)
 	if err != nil {
 		c.HTTP.CloseIdleConnections()
 	}
 	return c, err
+}
+
+// probeJoining authenticates via pinned TLS and the normal bearer credential.
+// A 404 or 403 permits one attempt at the existing status route during a rolling
+// upgrade. The status route must still accept the same credential.
+// Neither response body is read: status size must never govern joining latency.
+func (c Client) probeJoining(ctx context.Context) error {
+	for _, path := range []string{"/api/ping", "/api/status"} {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(c.URL, "/")+path, nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", "Bearer "+c.Token)
+		// Avoid spending queue CPU compressing a body this probe will not read.
+		req.Header.Set("Accept-Encoding", "identity")
+		res, err := c.HTTP.Do(req)
+		if err != nil {
+			return err
+		}
+		_ = res.Body.Close()
+		if path == "/api/ping" && (res.StatusCode == http.StatusNotFound || res.StatusCode == http.StatusForbidden) {
+			continue
+		}
+		if res.StatusCode < 200 || res.StatusCode >= 300 {
+			return &HTTPError{Status: res.StatusCode, Message: "queue probe request failed"}
+		}
+		return nil
+	}
+	return &HTTPError{Status: http.StatusNotFound, Message: "queue probe request failed"}
 }
 
 type JoiningIdentity struct {

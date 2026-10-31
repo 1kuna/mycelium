@@ -438,6 +438,182 @@ predicted. Protected data is never evicted to admit work; increase the configure
 store allowance or free disk space when retention cannot help. Worker file caches
 already evict reproducible copies under pressure. See [files](guide-files-v3.md).
 
+## Production file-store reserve
+
+`myce queue --file-store-production-reserve BYTES` (also supported by `myce dev`)
+protects part of the existing `--file-store-bytes` allowance for production-tier
+work. Zero, the default, preserves existing admission. The reserve must be
+nonnegative and no larger than the store limit. It adds no disk space and changes
+neither retention nor deletion behavior. Existing blobs and admitted resumable
+uploads remain usable.
+
+For an installed queue, set both values through the supported installer (byte
+counts, not GiB suffixes). For example, a 200 GiB limit with a 16 GiB reserve:
+
+```sh
+myce install queue --config QUEUE_CONFIG \
+  --file-store-bytes 214748364800 --file-store-production-reserve 17179869184 --dry-run
+myce install queue --config QUEUE_CONFIG \
+  --file-store-bytes 214748364800 --file-store-production-reserve 17179869184
+```
+
+These flags also work on a fresh queue install. They are saved as
+`file_store_bytes` and `file_store_production_reserve` and included in the
+generated service. Omitted flags preserve saved values across reinstalls and
+upgrades. Fresh installs and older configs without these fields keep the
+existing defaults: 100 GiB capacity and zero reserve. Set
+`--file-store-production-reserve 0` explicitly to disable the reserve.
+
+To retire an existing systemd `ExecStart` drop-in during an authorized upgrade:
+
+1. Inspect `systemctl --user cat myce-queue.service` and record the effective
+   capacity, reserve and any other custom arguments. Pass the existing byte
+   values explicitly to the installer; it does not import drop-in arguments.
+2. Preview the install with those flags and the exact saved config. Drain/disable
+   admission using the normal upgrade procedure. Preserve a private copy of
+   the drop-in outside the unit's `.d` directory. **Keep the override in place**
+   and run the install with those flags to save both replacement settings. The
+   installer warns that the override still takes precedence; any restart during
+   installation continues to use that override.
+3. Check the saved config's `file_store_bytes` and
+   `file_store_production_reserve`, and inspect the generated base unit at the
+   saved `service` path. Verify that its `ExecStart` includes both flags with the
+   intended values. If installation or verification fails, leave the override
+   in place and fix the problem before proceeding.
+4. Remove only the overriding `ExecStart` directives (including the empty reset),
+   or the whole file if it contains nothing else. Preserve unrelated settings;
+   migrate any other custom arguments before removing their override. Run
+   `systemctl --user daemon-reload`, then
+   `systemctl --user restart myce-queue.service`.
+5. Verify the effective unit with `systemctl --user cat myce-queue.service` and
+   `systemctl --user show myce-queue.service --property=ExecStart`. Confirm both
+   values in the running command and `myce status --json` file-store fields
+   (`limit_bytes`, `production_reserve_bytes`) before resuming admission.
+   If verification fails after removal, put the old drop-in back at its original
+   path, run `systemctl --user daemon-reload`, restart the queue, and verify the
+   restored values before resuming admission.
+
+A full `ExecStart` override hides new arguments in the generated base unit;
+future capacity/reserve changes should use install flags instead.
+
+New identified non-production allocations that would consume the reserve receive
+HTTP 507 `file_store_capacity`, naming the reserve. Preflight, upload creation,
+internal registry bundles and declared async output reservations use this check.
+Production output commitments back the reserve rather than being charged twice.
+Production still needs actual store/disk space above the physical floor and
+existing commitments.
+
+**Unidentified writes can use the production reserve.** Deployed input clients
+and old native workers send the shared token without a project or attempt
+identity; the queue cannot distinguish their production bytes from experimental
+bytes. The compatibility exception favors production admission and also permits
+unidentified experiments/imports to consume protected capacity. A configured
+reserve therefore does not guarantee isolation from those legacy writers.
+Input-client identity is follow-up work under #464; quotas remain a separate PR.
+
+New workers send `X-Myce-File-Attempt` containing the job ID, attempt, machine and
+session on native/async result and checkpoint uploads. The authenticated queue
+checks that identity against the current execution and derives the tier from the
+job, ignoring project/class claims for those outputs. Replaced/lost/cancelled
+attempts cannot allocate or resume uploads; an exactly accepted attempt can reuse
+its blobs after a lost completion acknowledgement. Existing async workers' exact
+pending-result identities are also classified from their owning jobs. Known
+experiment writes and internal registry bundles cannot use the exception.
+
+For inputs, Go callers may wrap preflight/upload contexts with
+`myce.WithFileStoreSubmission(ctx, spec)`; the profile CLI supplies these hints.
+HTTP callers can send `X-Myce-Project` and optionally `X-Myce-Class`. The queue uses
+the project's `default_call_priority` (experiment when absent) and effective
+policy tier. Class hints can narrow that decision, never promote it; claiming
+`production` cannot upgrade a server-known experimental project. These are
+shared-token accounting hints, not per-project authorization credentials.
+
+`myce status` and `file_store` JSON report `production_reserve_bytes`,
+`unidentified_writes_may_use_reserve`, and `unidentified_reserve_admitted_bytes`.
+The last counter is the cumulative portion of successful unidentified tus create
+admissions crossing the protected floor **since queue start**. It counts declared
+allocation, including incomplete uploads, not bytes transferred or current usage.
+Preflight, resumable replay and deduplicated reuse do not increment it. It resets
+on queue restart and decreases neither on completion nor on ordinary expiry.
+
+### Project-owner early file release (#465)
+
+Use explicit job IDs to release terminal input/result files before their normal
+retention deadline. **Ownership means project attribution under the shared fleet
+credential, not an authorization boundary.** Any holder of that credential can
+act for a project; this does not add individual owner authentication. Global
+retention and capacity admission remain unchanged.
+
+First close the application operation: all downstream consumers and controller
+reconciliation must have finished using these files. Include every owning
+terminal reference you want to expire, including fan-out parents, children and
+keyed answers' job IDs. Other retained owners continue to protect shared content.
+A successful stage alone does not establish that application completion boundary.
+For ordinary tasks, accepting expiry explicitly gives up queue recovery of the
+selected data, including unsuccessful tasks you select. Preserve any required
+source/result copies with verified identities before doing so. Unselected work
+keeps its ordinary retention. For tasks using `output_delivery: async_nas`, the
+queue additionally requires its existing verified delivery receipt to match the
+accepted execution and manifest; pending/failed or mismatched delivery blocks
+release. An unavailable NAS is handled by the existing asynchronous delivery
+retries; release never tries to copy or wait on the NAS.
+
+```sh
+# Read-only: save and inspect the returned JSON before applying it.
+myce file release plan --project example JOB_ID_1 JOB_ID_2 > release-plan.json
+# Irreversible expiry acceptance for exactly the reviewed project/jobs.
+myce file release apply --accept-expiry release-plan.json
+```
+
+Both commands accept the usual installed authority options (`--config`,
+`--joining-file`, `--queue`). Keep the saved plan/receipt private when it contains
+private project or file names. The API equivalents are
+`POST /api/files/release/plan` with `{project, jobs}` and
+`POST /api/files/release/apply` with
+`{selection: {project, jobs}, plan_id, accept_expiry: true}`. A plan is a
+read-only snapshot, not a reservation. Its digest identifies the reviewed state;
+it is not a signature or an authorization token.
+
+The plan lists each job's state, release/retention state, original expiry deadline,
+input/result/shared-input/dependency/diagnostic/fan-out manifests, and delivery
+evidence where applicable. Each content identity appears once in the byte total,
+using its current stored size. `reclaimable_bytes` counts only bytes removable
+now after selection: retained job references, checkpoints/resume generations,
+model/catalog assets, extension/environment assets and bundles, pending output
+and unresolved custody remain protected. The plan lists the references that
+block each identity and flags publication grace or bundle retention separately.
+Absent blobs contribute zero. Recently published/HEAD-refreshed blobs retain the
+ordinary six-hour publication grace. An eligible plan can reclaim zero bytes
+while still expiring the selected identities.
+
+`collection_eligible` uses the collector's pending reclamation and keeping
+references. Importing identical bytes after completed reclamation does not
+re-enroll them through the old job's manifests, so a new plan counts zero bytes
+for that content unless another pending reclamation owns it.
+
+Apply requires explicit acceptance and recomputes the reviewed plan, then fences
+custody and reference metadata again in the expiry transaction. HTTP 409
+`file_release_stale` means regenerate and review a new plan; nothing was expired.
+HTTP 409 `file_release_protected` means a selected job is live, has unresolved
+physical custody or lacks required verified delivery. Include only eligible jobs
+in the next plan. Other projects' retained references can block physical removal
+without blocking expiry of your selected job references.
+
+A successful apply returns `collection: scheduled`: it durably sets the existing
+job file-expiry/reclamation state, preserving identities, manifests and a small
+`file_expiry_accepted` ledger receipt (plan digest in `reason`, acceptance time
+in `at`) in the job/keyed answer.
+The existing bounded maintenance collector rechecks references and publication
+grace before unlinking, retries failures, and resumes after restart. This is
+asynchronous reclamation, not a promise that capacity is immediately available.
+No new deletion daemon or global retention change is involved. Repeating the
+same apply after a lost response returns the original receipt while the selected
+job/keyed answers remain retained, even after the blobs are gone or a restart.
+Ordinary history/key expiry still applies afterward; unknown/expired selections
+are refused without creating jobs. Retrieval retains typed HTTP 410
+`result_expired` behavior for expired, unshared content. Save the plan and apply
+response for the application's audit record.
+
 ## Install and upgrade
 
 Build the single binary and inspect a plan before installation:
@@ -467,7 +643,7 @@ Drain/disable admission before installing an upgrade. Matching queue and workers
 must use the current protocol. The installer updates only the selected service,
 enables/starts it and restarts an existing Linux service. It installs no local
 start condition or timer. Linux units retain GPU EnvironmentFile,
-`Restart=on-failure`, `Delegate=memory`, `KillMode=control-group` and bounded stop.
+`Restart=on-failure`, `Delegate=memory cpu`, `KillMode=control-group` and bounded stop.
 macOS uses the generated launchd service. Configuration and secret files stay
 private. Never run the ordinary binary as root.
 
@@ -475,8 +651,10 @@ The transaction snapshots binary, config, credentials, GPU environment and
 service files/modes plus actual manager registration/activity. Failure restores
 that snapshot and verifies it independently. Incomplete rollback stops affected
 services and reports differences; preserve the snapshot for recovery. Effective
-drop-ins that override execution, credentials or containment block activation;
-consumer files are preserved. Check health and exact cleanup before resuming.
+drop-ins that override execution, credentials or containment block activation,
+except queue `ExecStart` overrides: these are preserved with a warning so their
+settings can be migrated before removal. Consumer files are preserved. Check
+health and exact cleanup before resuming.
 
 For a signed-release deployment, installing the queue/worker bytes alone leaves
 the default onboarding approval unchanged. After verifying the updated queue,
@@ -801,13 +979,53 @@ shell expansion, arguments or stdin, from `/`. Its environment contains only
 `PATH=/usr/bin:/bin`, `LANG=C`, and `LC_ALL=C`; it receives no fleet token or job
 environment. The executable is operator authority, never part of a job spec.
 
-Each invocation must freshly read `/sys/kernel/debug/dri/<PCI>/gtt_mm` for all
-xe cards that an attempt might use, including its selected card and any other
-card found in its DRM clients. `<PCI>` is the full lowercase domain address,
-such as `0000:01:00.0`; numeric debugfs directories may be resolved to those PCI
-identities by the helper. Read the raw text fields `use_type: 1`, `use_tt: 1`,
-and `usage: <unsigned integer bytes>`. Do not use a net delta or substitute VRAM
-usage. Other raw fields may be included. Return one JSON object on stdout:
+#### Root-owned broker and unprivileged client
+
+The privileged-source arrangement works with `NoNewPrivileges=yes` on the
+worker; it does not require changing an existing `NoNewPrivileges=no` setting.
+Inspect the actual service policy rather than assuming the installer default.
+A separate administrator-owned broker reads debugfs; the worker's helper
+is an unprivileged client. The binary provides `myce gpu-telemetry-client`, which
+connects to the Unix stream socket **`/run/mycelium/gpu-telemetry.sock`**. An
+operator-owned wrapper at the configured helper path runs:
+
+```sh
+#!/bin/sh
+exec /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C /absolute/path/to/installed/myce gpu-telemetry-client
+```
+
+The absolute binary path is chosen at installation. `--socket PATH` on the client
+command supports an explicitly administered alternative or a laptop test socket;
+it is never derived from a job. The helper receives no arguments from the worker.
+Neither process invokes sudo, setuid or a privileged executable. This client
+needs no queue connection or credentials. Mycelium installs neither the wrapper
+nor the broker, and changes no service privilege policy.
+The separately installed [reference broker](../deploy/gpu-telemetry/README.md)
+implements this contract with fixed administrator-configured debugfs sources.
+
+The broker contract is:
+
+1. Listen on `AF_UNIX/SOCK_STREAM` at `/run/mycelium/gpu-telemetry.sock`. The client
+   connects and immediately closes its write half. **Zero request bytes followed
+   by EOF** is the entire request. Reject nonempty requests. There are no requested
+   paths, PIDs, commands, identities or device arguments.
+2. After accepting that request, take a UTC timestamp immediately **before the
+   first debugfs read**. Freshly read `/sys/kernel/debug/dri/<PCI>/gtt_mm` for all
+   configured xe cards. The broker owns this fixed source inventory; clients
+   cannot alter it. `<PCI>` is a full lowercase domain address, for example
+   `0000:01:00.0`; resolve numeric debugfs directories to their PCI identities.
+   Return raw text containing `use_type: 1`, `use_tt: 1`, and
+   `usage: <unsigned integer bytes>`. No net delta or VRAM substitution.
+3. Assemble the entire JSON reply before sending. On any read failure, unsupported
+   card or incomplete counter set, close without a snapshot. On success send
+   exactly one JSON object, at most 64 KiB, and close the connection. No banner,
+   status envelope or trailing stream. Use a 150 ms total connection deadline
+   from accept, including receipt of request EOF and sending the reply, leaving
+   time for client startup and delivery inside the worker's existing 200 ms
+   collection window. Do not serve a cached or periodically refreshed
+   snapshot and do not timestamp old data as fresh.
+
+The exact JSON schema is:
 
 ```json
 {
@@ -819,31 +1037,70 @@ usage. Other raw fields may be included. Return one JSON object on stdout:
 }
 ```
 
-`sampled_at` is a UTC RFC3339 timestamp with subsecond precision taken during
-that invocation's fresh reads, on the same host clock as the worker. Cached,
-missing or future timestamps are rejected. The full collection, including fdinfo
-and the helper, must finish within the existing 200 ms coverage window; gaps or
-final age over 400 ms invalidate evidence. The helper has a 200 ms execution
-deadline, bounded pipe cleanup, and a 64 KiB stdout limit. Nonzero exit, timeout,
-bad JSON, missing participating cards or malformed counters invalidates the
-attempt's GPU telemetry. A configured failing helper does not fall back to
-another source. Missing evidence never becomes zero. Manager bytes use the
-same parser and are conservatively added in full to deduplicated client totals,
-including any overlap. Resident/pressure sampling remains independent.
+`sampled_at` is a UTC RFC3339 timestamp with subsecond precision, on the same
+host clock as the worker. `gtt_mm` maps each full lowercase PCI address to its
+unmodified debugfs text. Include every card an attempt can use: the worker
+requires its selected card and every other card present in its DRM clients.
+The helper forwards the broker's timestamp and text unchanged. A timestamp
+before the current helper invocation or after it finishes is rejected, so a
+cached snapshot is not accepted even when recent. A malformed, absent or stale
+reply, missing card, nonzero helper exit, oversized response or deadline expiry
+makes the attempt's GPU telemetry incomplete. A configured failing helper does
+not fall back to another source. The client emits no stdout until broker EOF
+and the size/deadline checks succeed, even for a complete-looking JSON prefix.
 
-The operator owns the helper, its executable chain and any privilege grant.
-A local wrapper may `exec /usr/bin/sudo -n -- /absolute/read-only-reader` under
-a sudoers rule limited to that exact no-argument reader; no general sudo grant
-is needed. Mycelium installs no helper or sudoers rule and changes no access
-permissions. Installed Linux workers default to `NoNewPrivileges=yes`, which
-blocks sudo/setuid elevation. Qualify the helper in the actual service context:
-where that policy is retained, use an unprivileged client of a separately
-administered read-only telemetry service instead. This flag does not relax the
-service policy. Keep the privileged reader read-only and promptly bounded even
-if its client exits. Helper readability alone does not qualify reduced sizing:
-complete fresh repeated local samples, pressure rejection, retained floors and
-the native concurrency/output proof still apply. Clearing the helper on a host
-without readable debugfs restores conservative sizing for new evidence.
+Install the broker's binary, configuration and service unit as root-owned and
+unwritable by worker/job accounts. Use a root-owned `/run/mycelium` directory
+with the configured client group and mode **0750**, and a socket owned by
+`root:<client-group>` with mode **0660**. Render `REPLACE_CLIENT_GROUP` identically
+in the broker socket and tmpfiles templates. Prefer the worker's existing primary
+group, avoiding account mutation and user-manager credential refresh. The
+group's socket write permission permits connecting, not changing the broker's
+sources. The parent directory must have no worker/group write permission, so
+clients cannot replace the socket. Keep the wrapper and executable chain
+root-owned, mode **0755**, in directories unwritable by workers/jobs. The broker
+uses no queue authority or fleet token and provides no filesystem-write or
+administration operation to clients. Verify these owners/modes after every
+broker restart. These are operator-enforced installation requirements: the
+client does not check filesystem ownership/modes or authenticate the peer. It
+only bounds and forwards the reply; the worker parses the JSON and validates
+freshness, participating cards and counters before using it as evidence.
+
+Activate only after separately installing and qualifying a conforming broker:
+
+1. Read `Uid`, `Gid`, and `Groups` from the actual worker's `/proc/PID/status`.
+   Select its existing primary group (or an existing supplementary group already
+   held by that PID), and resolve the numeric GID with `getent group`. Render
+   `REPLACE_CLIENT_GROUP` in both broker templates with that group. Create the
+   root-owned directory and socket with the matching group and modes above;
+   verify them after boot/socket recreation. No account change is required.
+2. Verify access with one fresh complete two-card client call under the actual
+   worker PID's exact numeric Uid/Gid/Groups and service restrictions. A fresh
+   login shell alone is insufficient. A worker-only restart does not refresh a
+   persistent user manager's supplementary groups; using its existing primary
+   group avoids any user-manager restart. The b70 release #421 override uses
+   this arrangement (#444): a `60-worker-primary-group.conf` socket drop-in and
+   matching tmpfiles override. Preserve it until a future reviewed deployment
+   replaces it; see the [template instructions](../deploy/gpu-telemetry/README.md#existing-primary-group-override-444).
+3. Qualify repeated wrapper calls under the service's actual user, groups and
+   restrictions, and additionally under `NoNewPrivileges=yes` if the service
+   currently uses `no`. Preserve the existing service policy; no sudoers grant
+   or privilege relaxation is needed. Check fresh complete per-card replies,
+   failure behavior and broker resource use before enabling the helper.
+4. With a compatible release installed, use the normal drained in-place worker
+   installation procedure, selecting the saved `--config WORKER_CONFIG` and
+   adding `--gpu-telemetry-helper /absolute/wrapper`. Inspect `--dry-run` before
+   applying it, preserving saved settings. Inspect the saved config and running
+   service, then qualify real attempt telemetry before claiming reduced sizing.
+
+The client has its own 200 ms connection/read deadline and 64 KiB response limit;
+the worker separately enforces its full driver-collection coverage window.
+Resident/pressure sampling remains independent. The same manager parser and
+conservative absolute manager-plus-client accounting apply, including overlaps.
+Missing evidence is unknown, never zero. Complete fresh repeated local samples,
+pressure rejection, retained floors and native concurrency/output proof remain
+required. Clearing the helper on a host without readable debugfs restores
+conservative sizing for new evidence; it does not revoke already learned history.
 
 ### Admission and enforcement
 
@@ -880,7 +1137,7 @@ explicit `--memory-mode unified` and Metal always use this rule.
 
 
 Linux cgroup v2 workers installed as systemd user services enforce declared
-ceilings. The generated and manual worker units use `Delegate=memory` and retain
+ceilings. The generated and manual worker units use `Delegate=memory cpu` and retain
 `KillMode=control-group`. At startup the worker moves itself into the service's
 `worker` leaf, then enables the delegated memory controller in the service
 parent. Each native batch attempt and model-server execution gets a unique
@@ -1175,9 +1432,23 @@ These hosts can run fitting light work through Mycelium. Use the opt-in
 reserves, #353 external peaks, native command nice=10, positive CPU/RAM budgets
 and last-resort placement. `myce host profile HOST --shared=true
 --interactive-reserve-gb GiB` requires a drained/disabled, fresh quiescent host;
-`--shared=false` removes the profile without resuming admission. Started commands
-are not pressure-preempted in this phase. Hard CPU share and OS-pressure yielding
-are follow-up #390. Existing exclusions, drain ownership and storage fences apply.
+`--shared=false` removes the profile without resuming admission. Measured OS
+memory pressure or foreground scheduling latency stops work through planned
+checkpoint/requeue with hysteresis. Linux execution cgroups cap aggregate CPU
+time. macOS applies `setpriority(PRIO_DARWIN_PROCESS, pid, PRIO_DARWIN_BG)`
+(equivalent to `taskpolicy -b`) to gated main payloads and native sidecars.
+Children inherit background CPU/I/O scheduling and lower timer/network priority;
+worker control stays outside background mode. Hosts without the profile retain
+their existing policy. macOS also caps aggregate declared cores at the CPU allowance, and clamps common runtime thread
+counts to each command's declared cores. Payloads can ignore those thread hints:
+aggregate CPU time and RAM ceilings remain unenforced on macOS. See the
+shared-host guide for thresholds and qualification limits. To compare nice-only
+and background scheduling through an isolated CPU dev worker, build the CLI and
+run `python3 scripts/measure-shared-host.py --myce ./myce`. The canary uses two
+CPU children and one second of foreground samples per mode; each payload
+self-expires after three seconds to bound interference if the probe fails.
+It measures a light workload, not saturation or a latency guarantee. Existing
+exclusions, drain ownership and storage fences apply.
 
 ## CPU capacity and allowances (R1)
 
@@ -1254,6 +1525,35 @@ Active attempt/build locks also protect them. If protected entries fill the
 configured limit, preparation refuses capacity rather than evicting them.
 Evictions record the environment key and cache-limit reason in the worker log.
 
+To reclaim unused prepared environments without admitting a new preparation,
+run locally on the worker:
+
+```sh
+myce worker env prune
+myce worker env prune --apply
+```
+
+The default is a dry-run. Each ready prefix is listed with its age since
+preparation/last use, allocated size in bytes, queue reference state, use/build
+lock state and recent-use protection. `--apply` uses the same eviction path and
+24-hour minimum retention as pressure eviction. Locked, recently used, and
+queue-referenced environments are preserved, including queued work, sidecars,
+extension variants and attempts still awaiting physical release. Reference
+state is queried again under the candidate's local locks before retirement;
+an unavailable queue refuses deletion. The queue must support this command's
+reference API. Shared downloads and unrelated retired prefixes are preserved.
+Pruning does not auto-size preparation capacity or require its 24 GiB free-space
+floor; both dry-run and apply remain available below that floor.
+
+`--config FILE` selects an installed worker; `--environment-cache DIR` overrides
+its cache directory. Without installed settings, supply that directory and queue
+authority using `--queue`, `--joining-file` or `MYCE_TOKEN` as appropriate.
+The summary reports `reclaimed_bytes`, measured as the decrease in allocated
+blocks across prepared/retired environments and shared downloads, counting
+hardlinked inodes once. Candidate sizes can therefore exceed reclaimed bytes.
+Apply appends synced retirement intents and a final timestamped report to
+`prune-audit.jsonl` in the cache root, including partial progress on failure.
+
 Package downloads use persistent worker-wide `.downloads/uv` and
 `.downloads/pixi` caches under the configured environment-cache root. These bytes
 are excluded from the prepared-environment budget and have a separate 16 GiB
@@ -1318,6 +1618,17 @@ are injectable for laptop verification.
 
 
 ## Rolling fleet upgrades
+
+> **Before deploying bounded status (#439), migrate preservation checks.**
+> Default `GET /api/status` includes active/cleanup-pending jobs and only the
+> newest 100 other terminal jobs. Before/after preservation, protected-job,
+> history and curve-provenance checks must request `/api/status?detail=full`
+> (Python: `client.status(full=True)`, CLI: `myce status --history --json`) or
+> collect every `jobs=all` page through `jobs_page.next_before`. Existing complete
+> `/api/inspection` collectors remain supported. Migrate private release-script
+> copies before queue cutover; a passing pre-upgrade read does not prove the
+> post-upgrade collector is complete. Curves remain included by default, but
+> missing historical jobs must never count as preservation or confirmed release.
 
 After publishing a signed release and approving it with `myce release approve`,
 run `myce fleet upgrade` (or `myce fleet upgrade --release vX.Y.Z`). The command
@@ -1406,3 +1717,73 @@ local backup, and compact the stopped local database using SQLite `VACUUM`.
 Never open a NAS copy with SQLite or compact the running queue. Check free space
 first: compaction needs room for a second database. Preserve the verified backup
 until the compacted database passes `PRAGMA integrity_check` and reopens normally.
+
+### Verify the loaded environment catalog
+
+`myce env list` returns a JSON array; `myce env get NAME` returns one entry
+(or `environment_unknown` when absent). Both use installed client authority;
+`--config`, `--joining-file`, `--queue` and `--token` precede NAME when supplied.
+The authenticated GET endpoints are `/api/environments` and
+`/api/environments/{name}`. They do not prepare environments or submit work.
+
+Each entry has its name and sorted platform recipes with effective backend
+(`uv`, `pixi`, or `binary`), immutable recipe `key`, and `input_digests`: SHA-256
+of loaded lock/manifest bytes under canonical labels. Compare these with the
+expected inputs to verify registration, even after the original files change.
+Raw recipes, commands, file contents and local paths are omitted. Binary recipes
+report the digest of the `binary.sha256` identity input. See the
+[entry schema](schemas/environment-v1.schema.json).
+
+### Preserve learned curves across a release
+
+Use the versioned `scripts/verify-curve-preservation.sh` guard (or
+`myce release verify-curves`) instead of private release-script equality checks:
+
+```sh
+MYCE_BIN=/path/to/myce scripts/verify-curve-preservation.sh \
+  --before before-status.json --after after-status.json \
+  --ledgers learning-ledger-pages.json > curve-diff.json 2> curve-guard.stderr
+rc=$? # retain this status, stderr and the diff receipt, including on failure
+```
+
+Capture authenticated **`/api/status?detail=full`** snapshots before and after
+cutover, using the canonical helper's read-only capture mode:
+
+```sh
+MYCE_BIN=/path/to/myce scripts/verify-curve-preservation.sh capture \
+  --config CONFIG > before-status.json 2> before-capture.stderr
+# Perform the separately authorized cutover, then capture the after snapshot:
+MYCE_BIN=/path/to/myce scripts/verify-curve-preservation.sh capture \
+  --config CONFIG > after-status.json 2> after-capture.stderr
+# Require exit 0 for each capture before verifying.
+```
+
+The default `/api/status` view is bounded: it can omit older terminal jobs and
+work curves. Never use that view to collect either side of preservation proof.
+Capture requests full detail for **both jobs and curves**, and preserves the
+server completeness metadata. Capture and verification reject bounded or
+incomplete job pages and missing jobs/curves fields; a queue predating page
+metadata can still return its original full snapshot. Collect accepted-learning
+ledger pages from the complete job inventory, not the default recent-job list.
+The **before response's server `now`** is the learning boundary, never the local
+save time or installer launch. The ledger file is a JSON array of pages from
+`GET /api/jobs/{id}/ledger`; collect pages covering the interval for jobs that
+could have learned, including pagination. Use the after snapshot's `now` as the
+upper boundary; later ledger entries are ignored.
+
+The guard preserves every key, sample count and throughput/memory evidence
+clock. It ignores only derived `stale_reason` labels. Changed values and new
+keys require a complete chain of accepted sample records, with exact job,
+attempt, key and queue-time provenance. Each record binds before/after digests
+of the actual learning mutation in the same SQLite transaction as completion;
+the guard shares the runtime's measurement digest and does not reimplement
+EWMA or memory merges. Memory-only samples may advance their sample count and
+memory clock while preserving the old throughput and its provenance.
+
+Removed keys, resets, backward clocks, changed measurements without new
+samples, missing/ambiguous provenance and unexplained final values fail closed.
+Older jobs have no such learning ledger proof: an unchanged curve still passes,
+but an unproven change stops the release for investigation. Reference sweep or
+OOM invalidation changes are not accepted job samples and also stop this guard.
+Ledger records follow existing job history retention; collect evidence before
+it expires. No release, install or fleet operation is performed by the guard.

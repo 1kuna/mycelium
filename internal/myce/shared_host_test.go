@@ -1,12 +1,17 @@
 package myce
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"log"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -18,6 +23,8 @@ func sharedHostFixture(t *testing.T, q *Queue) Machine {
 	m := cpuMachine("interactive", "interactive", "cpu", 8, 12)
 	m.CapabilityProfile.SystemMemoryBytes = 24 << 30
 	m.HostMemoryBudgetGB, m.CPUBudgetCores = 8, 2
+	m.SharedHostPressure = &SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 1}
+	m.SharedCPUEnforcement = "cgroup v2 cpu.weight=10 cpu.max=200000/100000"
 	m.MemoryObservation = &HostMemoryObservation{TotalGB: 24, UsedGB: 14, MyceliumGB: 0}
 	check(t, q, m, nil)
 	if _, err := q.ChangeHostMaintenance(m.ID, HostMaintenanceRequest{Action: "drain", DrainOwner: "operator"}); err != nil {
@@ -355,17 +362,51 @@ func TestSharedHostCPUEnvironmentOnAcceleratorWorker(t *testing.T) {
 	}
 }
 
+func TestSharedHostBackgroundPriorityFailureWarns(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin background policy")
+	}
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	old := sharedHostSetBackgroundPriority
+	writer := log.Writer()
+	var warnings bytes.Buffer
+	log.SetOutput(&warnings)
+	sharedHostSetBackgroundPriority = func(int) error { return syscall.EPERM }
+	t.Cleanup(func() { sharedHostSetBackgroundPriority = old; log.SetOutput(writer) })
+	if err := applySharedHostPriority(cmd.Process.Pid, &SharedHostProfile{}); err != nil {
+		t.Fatalf("background policy failure must not abort launch: %v", err)
+	}
+	if !strings.Contains(warnings.String(), "warning: shared host background task policy") || !strings.Contains(warnings.String(), syscall.EPERM.Error()) {
+		t.Fatalf("missing policy warning: %s", &warnings)
+	}
+}
+
 func TestSharedHostDevCommandPriority(t *testing.T) {
 	t.Setenv("MYCE_TOKEN", "synthetic-worker-only-token")
 	controlPriority, err := syscall.Getpriority(syscall.PRIO_PROCESS, os.Getpid())
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Darwin's background scheduler band has maximum priority 4; nice alone
+	// remains above it. Inspect actual payloads across fork/exec, not just the
+	// worker's report that policy application succeeded.
+	controlBackground := ""
+	backgroundCheck := ""
+	if runtime.GOOS == "darwin" {
+		controlBackground = sharedHostDarwinBackground(t, os.Getpid())
+		backgroundCheck = `test "$(ps -o pri= -p $$)" -le 4 && sh -c 'test "$(ps -o pri= -p $$)" -le 4' || exit 43; `
+	}
 	oldRSS := workerMemoryRSS
 	workerMemoryRSS = func(context.Context) (float64, error) { return 0, nil }
 	t.Cleanup(func() { workerMemoryRSS = oldRSS })
 	root := t.TempDir()
-	d, err := StartDev(DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "dev-fixture", GPU: "cpu", Workers: 1, Interval: 20 * time.Millisecond})
+	d, err := StartDev(DevConfig{SharedPressureSource: func(context.Context) (SharedHostPressure, error) {
+		return SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 1}, nil
+	}, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "dev-fixture", GPU: "cpu", Workers: 1, Interval: 20 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -391,6 +432,23 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if runtime.GOOS == "darwin" {
+		ordinary := cpuSpec(1, .01)
+		ordinary.Run.Command = []string{"sh", "-c", `test "$(ps -o pri= -p $$)" -gt 4 && sh -c 'test "$(ps -o pri= -p $$)" -gt 4'`}
+		var j Job
+		if err := c.Call(ctx, "POST", "/api/jobs", ordinary, &j); err != nil {
+			t.Fatal(err)
+		}
+		await(t, func() bool {
+			if err := c.Call(ctx, "GET", "/api/jobs/"+j.ID, nil, &j); err != nil {
+				t.Fatal(err)
+			}
+			if j.State == "failed" {
+				t.Fatal("unprofiled payload entered background band", j)
+			}
+			return j.State == "succeeded"
+		})
+	}
 	change(HostMaintenanceRequest{Action: "drain"})
 	await(t, func() bool {
 		if err := c.Call(ctx, "GET", path, nil, &status); err != nil {
@@ -403,7 +461,15 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 	change(HostMaintenanceRequest{Action: "profile", SharedHost: &SharedHostProfile{InteractiveReserveGB: .125}})
 	change(HostMaintenanceRequest{Action: "resume"})
 	s := cpuSpec(1, .01)
-	s.Run.Command = []string{"sh", "-c", `n=$(ps -o nice= -p $$); test "$n" -ge 10 && test "${MYCE_TOKEN+x}" != x && printf shared-host-ok`}
+	s.Run.Env = map[string]string{"GOMAXPROCS": "64"}
+	priorityCheck := backgroundCheck + `n=$(ps -o nice= -p $$); test "$n" -ge 10 && test "$GOMAXPROCS" = 1 && test "${MYCE_TOKEN+x}" != x || { printf 'priority check: nice=%s GOMAXPROCS=%s token-present=%s\n' "$n" "$GOMAXPROCS" "${MYCE_TOKEN+x}" >&2; exit 42; }; `
+	failed := func(kind string, j Job) {
+		t.Helper()
+		var logs []Log
+		err := c.Call(ctx, "GET", "/api/jobs/"+j.ID+"/logs", nil, &logs)
+		t.Fatalf("%s failed: %+v; logs=%+v (read: %v)", kind, j, logs, err)
+	}
+	s.Run.Command = []string{"sh", "-c", priorityCheck + `printf shared-host-ok`}
 	var j Job
 	if err := c.Call(ctx, "POST", "/api/jobs", s, &j); err != nil {
 		t.Fatal(err)
@@ -413,7 +479,7 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 			t.Fatal(err)
 		}
 		if j.State == "failed" {
-			t.Fatalf("native command failed: %+v", j)
+			failed("native command", j)
 		}
 		return j.State == "succeeded"
 	})
@@ -425,8 +491,8 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 	}
 	// Exercise the separate group/member gates, including a sidecar and the
 	// main payload. Its marker proves the helper checked priority and token too.
-	s.Run.Sidecars = []NativeSidecar{{Name: "helper", Command: []string{"sh", "-c", `n=$(ps -o nice= -p $$); test "$n" -ge 10 && test "${MYCE_TOKEN+x}" != x || exit 42; touch helper-ready; while :; do sleep 1; done`}}}
-	s.Run.Command = []string{"sh", "-c", `n=$(ps -o nice= -p $$); test "$n" -ge 10 && test "${MYCE_TOKEN+x}" != x || exit 42; while test ! -f helper-ready; do sleep .01; done`}
+	s.Run.Sidecars = []NativeSidecar{{Name: "helper", Env: map[string]string{"GOMAXPROCS": "64"}, Command: []string{"sh", "-c", priorityCheck + `touch helper-ready; while :; do sleep 1; done`}}}
+	s.Run.Command = []string{"sh", "-c", priorityCheck + `while test ! -f helper-ready; do sleep .01; done`}
 	if err := c.Call(ctx, "POST", "/api/jobs", s, &j); err != nil {
 		t.Fatal(err)
 	}
@@ -435,13 +501,42 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 			t.Fatal(err)
 		}
 		if j.State == "failed" {
-			t.Fatalf("native group failed: %+v", j)
+			failed("native group", j)
 		}
 		return j.State == "succeeded"
 	})
 	if priority, err := syscall.Getpriority(syscall.PRIO_PROCESS, os.Getpid()); err != nil || priority != controlPriority {
 		t.Fatal("payload priority changed worker control", priority, controlPriority, err)
 	}
+	if runtime.GOOS == "darwin" {
+		if background := sharedHostDarwinBackground(t, os.Getpid()); background != controlBackground {
+			t.Fatal("payload background policy changed worker control", background, controlBackground)
+		}
+	}
+}
+
+func sharedHostDarwinBackground(t *testing.T, pid int) string {
+	t.Helper()
+	// ps pri is a dynamic scheduling priority: an ordinary process can move
+	// from 31 to 46 under load without a policy change (#473). Read libproc's
+	// actual internal AND externally imposed Darwin background flags instead.
+	// getpriority(PRIO_DARWIN_PROCESS) alone only reports internal policy when
+	// querying self, so it misses the external policy applied to payload PIDs.
+	b, err := exec.Command("python3", "-c", `import ctypes as c, sys
+lib = c.CDLL('/usr/lib/libproc.dylib', use_errno=True)
+lib.proc_pidinfo.argtypes = [c.c_int, c.c_int, c.c_uint64, c.c_void_p, c.c_int]
+# sys/proc_info.h: PROC_PIDTBSDINFO=3, sizeof(proc_bsdinfo)=136;
+# pbi_flags is its first uint32. mach/task_policy.h defines both flag bits.
+info = c.create_string_buffer(136)
+n = lib.proc_pidinfo(int(sys.argv[1]), 3, 0, info, len(info))
+if n != len(info):
+    raise OSError(c.get_errno(), 'proc_pidinfo returned %d bytes' % n)
+print(c.c_uint32.from_buffer(info).value & (0x8000 | 0x10000))
+`, fmt.Sprint(pid)).CombinedOutput()
+	if err != nil {
+		t.Fatalf("read Darwin background policy: %v: %s", err, b)
+	}
+	return strings.TrimSpace(string(b))
 }
 
 func TestSharedHostPrefersOrdinaryAndFallsBackImmediately(t *testing.T) {

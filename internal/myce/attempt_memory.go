@@ -19,6 +19,14 @@ func (a *memoryAttempt) peak() *AttemptMemoryPeak {
 		return nil
 	}
 	p := &AttemptMemoryPeak{}
+	// PSI some includes full stalls. The same 1% avg10 band used for shared
+	// hosts bounds reclaim stalls to about 100 ms per ten seconds.
+	b, err := a.fs.ReadFile(filepath.Join(a.path, "memory.pressure"))
+	psi, psiErr := sharedMemoryPSI(b)
+	total, totalErr := memoryPSITotal(b)
+	p.pressureTotalUS = total
+	p.PressureUnavailable = err != nil || psiErr != nil || totalErr != nil
+	p.Constrained = !p.PressureUnavailable && psi >= sharedPSIHigh
 	if b, err := a.fs.ReadFile(filepath.Join(a.path, "memory.peak")); err == nil {
 		if n, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64); err == nil {
 			gb := float64(n) / (1 << 30)
@@ -82,6 +90,7 @@ func (a *memoryAttempt) peak() *AttemptMemoryPeak {
 			}
 			if peak := child.peak(); peak != nil {
 				p.Constrained = p.Constrained || peak.Constrained
+				p.PressureUnavailable = p.PressureUnavailable || peak.PressureUnavailable
 			}
 		}
 	}
@@ -130,11 +139,8 @@ func sampledMemoryPeak(old, next *AttemptMemoryPeak) *AttemptMemoryPeak {
 		}
 	}
 	out.Constrained = next.Constrained || old != nil && old.Constrained
+	out.PressureUnavailable = next.PressureUnavailable || old != nil && old.PressureUnavailable
 	return out
-}
-
-func estimateFeedingAttempt(j Job) bool {
-	return j.Spec.Needs.Memory == "auto" || j.Spec.Workload != nil && j.Spec.ExtensionCheck == nil && (!j.Spec.Resumable || j.Attempt <= 1)
 }
 
 func (a *memoryAttempt) processIDs(ids map[int]bool) error {
@@ -171,6 +177,7 @@ type processMemoryProbe struct {
 	// Resident bytes summed over live members of the process groups, and how
 	// many members were found.
 	Resident func(groups map[int]bool) (uint64, int, error)
+	Pressure func(context.Context) (*gpuHostState, error)
 }
 
 func processGroupResident(out []byte, groups map[int]bool) (uint64, int, error) {
@@ -199,13 +206,33 @@ func processGroupResident(out []byte, groups map[int]bool) (uint64, int, error) 
 // members; rusage max RSS reports only the largest waited process. Shared
 // pages count once per process, but compressed pages, members that left the
 // group and spikes shorter than the interval are missed, so it is no bound in
-// either direction. Nothing enforces it, and host-wide swap or pressure cannot
-// attribute pressure to this attempt, so these peaks are never constrained.
+// either direction. Host pressure rejects this sample's learning, but cannot
+// attribute the cause to this attempt or invalidate other hosts' learned peaks.
 func (w Worker) observeProcessMemory(groups func() []int) func() *AttemptMemoryPeak {
 	probe := w.processMemory
 	var mu sync.Mutex
 	var peak *AttemptMemoryPeak
+	readPressure := func() (*gpuHostState, error) {
+		if probe.Pressure == nil {
+			return nil, errAttemptMemoryUnsupported
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), attemptMemorySamplePeriod)
+		defer cancel()
+		return probe.Pressure(ctx)
+	}
+	baseline, err := readPressure()
+	complete := err == nil && baseline != nil
+	var worst gpuHostState
+	if complete {
+		worst = *baseline
+	}
 	sample := func() {
+		host, err := readPressure()
+		if err != nil || host == nil || baseline == nil || host.swapOut < baseline.swapOut {
+			complete = false
+		} else {
+			worst.retainPressure(host)
+		}
 		ids := map[int]bool{}
 		for _, g := range groups() {
 			if g > 0 {
@@ -243,9 +270,13 @@ func (w Worker) observeProcessMemory(groups func() []int) func() *AttemptMemoryP
 		once.Do(func() {
 			cancel()
 			<-done
+			sample() // Include teardown pressure even after the process groups exit.
 		})
 		mu.Lock()
 		defer mu.Unlock()
+		if peak != nil && peak.HostGB != nil {
+			peak.Constrained = !complete || hostMemoryPressured(baseline, &worst, *peak.HostGB, w.HostMemoryReserveGB, os.Getpagesize())
+		}
 		return peak
 	}
 }
@@ -270,10 +301,14 @@ func withExitMaxRSS(peak *AttemptMemoryPeak, state *os.ProcessState) *AttemptMem
 // other workloads and cannot serve as job peaks. Sampling is a lower bound.
 // groups names the attempt's process groups for hosts without cgroups.
 func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []int) func() *AttemptMemoryPeak {
+	deviceTelemetry := !j.Spec.Needs.cpuOnly() && (w.Machine.GPU == "cuda" || w.Machine.GPU == "xpu")
 	if a == nil && w.processMemory != nil && groups != nil {
 		return w.observeProcessMemory(groups)
 	}
 	if a == nil {
+		if deviceTelemetry {
+			return func() *AttemptMemoryPeak { return &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryNoCgroup} }
+		}
 		return func() *AttemptMemoryPeak { return nil }
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -288,28 +323,40 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 		peak = sampledMemoryPeak(peak, sample)
 		mu.Unlock()
 	}
-	completeNonreclaimable := peak != nil && peak.nonreclaimableSampleGB != nil
+	completeNonreclaimable := peak != nil && peak.nonreclaimableSampleGB != nil && !peak.PressureUnavailable
 	// The empty-cgroup baseline precedes payload launch, including for plain
 	// commands whose observer is installed just after exec. No baseline means
 	// diagnostic counters only, never permission to shrink a GPU envelope.
 	gpuHost := w.Machine.GPU == "xpu" && !w.Machine.UnifiedMemory && w.selectedDevice != nil && w.selectedDevice.pciAddress != "" && !j.Spec.Needs.cpuOnly()
 	completeGPUHost := gpuHost && a.hostBaseline != nil
+	var worstHost gpuHostState
+	pressureKnown := a.hostBaseline != nil && a.pressureBaseline != nil && !a.pressureStart.IsZero()
+	var groupTotal uint64
+	if a.pressureBaseline != nil {
+		groupTotal = *a.pressureBaseline
+	}
+	if a.hostBaseline != nil {
+		worstHost = *a.hostBaseline
+	}
 	var hostDropGB, outsideGB float64
 	sampleHost := func(component *AttemptMemoryPeak) {
-		if !completeGPUHost {
-			return
-		}
-		if component == nil || component.nonreclaimableSampleGB == nil {
-			completeGPUHost = false
-			return
+		// Pressure eligibility applies to ordinary learning on every Linux
+		// cgroup attempt, independently of complete DRM/component evidence.
+		if component == nil || component.PressureUnavailable || component.pressureTotalUS < groupTotal {
+			pressureKnown = false
+		} else {
+			groupTotal = component.pressureTotalUS
 		}
 		host, err := readGPUHostState(a.fs)
-		if err != nil {
+		if err != nil || a.hostBaseline == nil || host.oom < worstHost.oom || host.swapOut < worstHost.swapOut || host.psiTotalUS < worstHost.psiTotalUS {
+			pressureKnown = false
 			completeGPUHost = false
 			return
 		}
-		if host.swap > a.hostBaseline.swap || host.oom > a.hostBaseline.oom || host.swapOut > a.hostBaseline.swapOut {
-			record(&AttemptMemoryPeak{Constrained: true})
+		worstHost.retainPressure(host)
+		if !completeGPUHost || component == nil || component.nonreclaimableSampleGB == nil || component.PressureUnavailable {
+			completeGPUHost = false
+			return
 		}
 		hostDropGB = max(hostDropGB, a.hostBaseline.available-host.available)
 		// Host and component reads stay together; DRM I/O never runs on this
@@ -336,7 +383,7 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 				return
 			case <-hostTick.C:
 				sample := a.peak()
-				completeNonreclaimable = completeNonreclaimable && sample != nil && sample.nonreclaimableSampleGB != nil
+				completeNonreclaimable = completeNonreclaimable && sample != nil && sample.nonreclaimableSampleGB != nil && !sample.PressureUnavailable
 				hostSampled = hostSampled || sample != nil && sample.HostGB != nil
 				record(sample)
 				sampleHost(sample)
@@ -344,13 +391,15 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 		}
 	}()
 	var device <-chan *AttemptMemoryPeak
-	if estimateFeedingAttempt(j) && !j.Spec.Needs.cpuOnly() && (w.Machine.GPU == "cuda" || w.Machine.GPU == "xpu") {
+	// Attempt facts are independent of learning eligibility. Declared jobs,
+	// extension checks and resumed attempts need device diagnostics too.
+	if deviceTelemetry {
 		result := make(chan *AttemptMemoryPeak, 1)
 		device = result
 		go func() {
 			// Device fdinfo can block in the same driver as host collection.
 			// Own the result locally so a late read cannot change published facts.
-			var devicePeak *AttemptMemoryPeak
+			devicePeak := &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryNoSample}
 			defer func() { result <- devicePeak }()
 			deviceTick := time.NewTicker(5 * time.Second)
 			defer deviceTick.Stop()
@@ -360,12 +409,17 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 					return
 				case <-deviceTick.C:
 					ids := map[int]bool{}
-					if a.processIDs(ids) != nil || len(ids) == 0 {
+					if a.processIDs(ids) != nil {
+						devicePeak = sampledMemoryPeak(devicePeak, &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryInventory})
+						continue
+					}
+					if len(ids) == 0 {
 						continue
 					}
 					gb, err := w.attemptDeviceMemory(ctx, ids, a.fs)
 					if err != nil {
 						if !errors.Is(err, errAttemptMemoryPending) {
+							devicePeak = sampledMemoryPeak(devicePeak, &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryUnsupported})
 							return
 						}
 						continue
@@ -382,14 +436,25 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 			wait, stopWaiting := context.WithTimeout(context.Background(), attemptMemorySamplePeriod)
 			defer stopWaiting()
 			samplers.Wait()
+			// Timestamp before final I/O, so sensor latency cannot dilute the
+			// pressure ratio. Counter resets and nonpositive windows are unknown.
+			elapsed := clock.Now().Sub(a.pressureStart)
 			final := a.peak()
 			record(final)
 			sampleHost(final)
+			if !pressureKnown || elapsed <= 0 {
+				record(&AttemptMemoryPeak{PressureUnavailable: true})
+				completeGPUHost = false
+			} else if peak != nil && peak.HostGB != nil && (hostMemoryPressured(a.hostBaseline, &worstHost, *peak.HostGB, w.HostMemoryReserveGB, a.pageSize) ||
+				memoryStallPressure(a.hostBaseline.psiTotalUS, worstHost.psiTotalUS, elapsed) || memoryStallPressure(*a.pressureBaseline, groupTotal, elapsed)) {
+				record(&AttemptMemoryPeak{Constrained: true})
+			}
 			if device != nil {
 				select {
 				case devicePeak := <-device:
 					record(devicePeak)
 				case <-wait.Done():
+					record(&AttemptMemoryPeak{DeviceUnavailable: deviceMemoryTimeout})
 					completeGPUHost = false
 				}
 			}
@@ -405,7 +470,7 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 			}
 			age := clock.Now().Sub(collected.last)
 			completeGPUHost = completeGPUHost && collected.complete && collected.seen && age >= 0 && age <= 2*attemptMemorySamplePeriod
-			if (j.Spec.Needs.cpuOnly() || completeGPUHost) && peak != nil && hostSampled && completeNonreclaimable && final != nil && final.nonreclaimableSampleGB != nil {
+			if (j.Spec.Needs.cpuOnly() || completeGPUHost) && peak != nil && !peak.PressureUnavailable && hostSampled && completeNonreclaimable && final != nil && final.nonreclaimableSampleGB != nil && !final.PressureUnavailable {
 				peak.NonreclaimableGB = peak.nonreclaimableSampleGB
 				if gpuHost {
 					outsideGB = max(outsideGB, collected.driverGB)
@@ -427,6 +492,14 @@ var (
 	errAttemptMemoryUnsupported = errors.New("attempt GPU memory accounting unsupported")
 )
 
+const (
+	deviceMemoryNoSample    = "no usable per-process sample"
+	deviceMemoryUnsupported = "per-process accounting unsupported or invalid"
+	deviceMemoryInventory   = "attempt process inventory unavailable"
+	deviceMemoryTimeout     = "device sampler did not finish"
+	deviceMemoryNoCgroup    = "attempt cgroup unavailable"
+)
+
 func (w Worker) attemptDeviceMemory(ctx context.Context, ids map[int]bool, fs memoryFS) (float64, error) {
 	if w.Machine.GPU == "cuda" {
 		selector := w.Machine.Device
@@ -438,7 +511,12 @@ func (w Worker) attemptDeviceMemory(ctx context.Context, ids map[int]bool, fs me
 		}
 		probe, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
-		b, err := exec.CommandContext(probe, "nvidia-smi", "--query-compute-apps=gpu_uuid,pid,used_gpu_memory", "--format=csv,noheader,nounits").Output()
+		cmd := exec.CommandContext(probe, "nvidia-smi", "--query-compute-apps=gpu_uuid,pid,used_gpu_memory", "--format=csv,noheader,nounits")
+		// A descendant can retain the query's pipes after it exits or is killed.
+		// Bound that drain too, so it cannot stop future five-second samples.
+		// Incomplete output remains unknown rather than a partial measurement.
+		cmd.WaitDelay = attemptMemorySamplePeriod
+		b, err := cmd.Output()
 		if err != nil {
 			if errors.Is(err, exec.ErrNotFound) {
 				return 0, errAttemptMemoryUnsupported

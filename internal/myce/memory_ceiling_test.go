@@ -19,6 +19,15 @@ import (
 type fakeMemoryFS struct{ osMemoryFS }
 
 func (f fakeMemoryFS) ReadFile(p string) ([]byte, error) {
+	// Worker memory sensors stay synthetic on every laptop platform.
+	switch p {
+	case "/proc/meminfo":
+		return []byte("MemAvailable: 67108864 kB\nSwapTotal: 8388608 kB\nSwapFree: 8388608 kB\n"), nil
+	case "/proc/vmstat":
+		return []byte("oom_kill 0\npswpout 0\n"), nil
+	case "/proc/pressure/memory":
+		return []byte("some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"), nil
+	}
 	b, err := f.osMemoryFS.ReadFile(p)
 	if errors.Is(err, os.ErrNotExist) && filepath.Base(p) == "memory.events.local" {
 		return f.osMemoryFS.ReadFile(filepath.Join(filepath.Dir(p), "memory.events"))
@@ -30,7 +39,7 @@ func (f fakeMemoryFS) Mkdir(p string) error {
 	if err := os.Mkdir(p, 0700); err != nil {
 		return err
 	}
-	for name, value := range map[string]string{"cgroup.procs": "", "cgroup.events": "populated 0\n", "memory.max": "max", "memory.swap.max": "max", "memory.oom.group": "0", "memory.events": "oom 0\noom_kill 0\n", "cgroup.kill": ""} {
+	for name, value := range map[string]string{"cgroup.procs": "", "cgroup.events": "populated 0\n", "memory.max": "max", "memory.swap.max": "max", "memory.oom.group": "0", "memory.events": "oom 0\noom_kill 0\n", "memory.pressure": "some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n", "cgroup.kill": ""} {
 		if err := os.WriteFile(filepath.Join(p, name), []byte(value), 0600); err != nil {
 			return err
 		}
@@ -267,7 +276,7 @@ func TestMemoryCeilingDockerContract(t *testing.T) {
 
 func TestMemoryCeilingInstallerDelegation(t *testing.T) {
 	c := ServiceConfig{Role: "worker", Detection: Detection{OS: "linux"}}
-	if !strings.Contains(c.ServiceText(), "Delegate=memory\n") {
+	if !strings.Contains(c.ServiceText(), "Delegate=memory cpu\n") {
 		t.Fatal("worker has no delegated memory controller")
 	}
 	status := WorkerMemoryDelegationStatus(context.Background(), c, func(context.Context, string, ...string) ([]byte, error) { return []byte("Delegate=no\n"), nil })

@@ -95,10 +95,12 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
-	deliveryRoot    string
-	deliveryMu      sync.Mutex
-	deliveryActive  *deliveryOperation                          // q.mu; one outstanding NAS publication per root.
-	deliveryPublish func(Job, *FileStore, string, func()) error // Test seam; set before use.
+	// Only detached observation views set this page selection.
+	observationSelection *statusSelection
+	deliveryRoot         string
+	deliveryMu           sync.Mutex
+	deliveryActive       *deliveryOperation                          // q.mu; one outstanding NAS publication per root.
+	deliveryPublish      func(Job, *FileStore, string, func()) error // Test seam; set before use.
 	// Ephemeral exact-attempt samples: restart cannot renew a cached credit.
 	hostMemorySamples map[string]map[attemptKey]hostMemorySample
 
@@ -114,18 +116,19 @@ type Queue struct {
 	onboardingNAS                   NASIdentity
 	productionInfrastructureRetries int
 
-	fileReferenceRevision  uint64
-	environmentRevision    uint64
-	fileLifecycle          sync.RWMutex // Reference publication versus unlink; acquire before q.mu.
-	fileRetention          time.Duration
-	fileCollectionDeferred bool // q.mu; warn once per contiguous deferred streak.
-	files                  *FileStore
-	startupFiles           *fileStoreConfiguration
-	fileCheckpoints        bool
-	submitVerificationSlot chan struct{}
-	nasProbe               checkpointAvailability
-	nasProgress            checkpointIO[int64]
-	nasAvailable           bool
+	fileReferenceRevision      uint64
+	environmentRevision        uint64
+	fileLifecycle              sync.RWMutex // Reference publication versus unlink; acquire before q.mu.
+	fileRetention              time.Duration
+	fileCollectionDeferred     bool // q.mu; warn once per contiguous deferred streak.
+	files                      *FileStore
+	startupFiles               *fileStoreConfiguration
+	fileStoreProductionReserve int64
+	fileCheckpoints            bool
+	submitVerificationSlot     chan struct{}
+	nasProbe                   checkpointAvailability
+	nasProgress                checkpointIO[int64]
+	nasAvailable               bool
 
 	nextApprovalWarning time.Time
 
@@ -688,7 +691,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 			if store == nil {
 				return &HTTPError{Status: 503, Code: "file_store_unavailable", Message: "queue-file-store is not configured"}
 			}
-			if err := fileStoreRefusal(resultCapacity, addDiskBytes(q.outputReservations(resultPayloads, ""), s.Disk.OutputBytes)); err != nil {
+			if err := q.fileStoreReserveRefusal(resultCapacity, addDiskBytes(q.outputReservations(resultPayloads, ""), s.Disk.OutputBytes), s.Disk.OutputBytes, q.outputReservationsFor(resultPayloads, "", true), q.priorityMatch(s).Tier == "production"); err != nil {
 				return err
 			}
 		}
@@ -720,6 +723,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 			id = ID()
 		}
 		j := &Job{PriorityPolicy: q.priorityMatch(s), FileTransport: q.fileCheckpoints, Extensions: extensions, SidecarEnvironmentRecipes: sidecarRecipes, EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: filepath.Join(q.root, id)}
+		j.PlacementIntent = submissionPlacementIntent(submitted, j)
 		explicitStartBy := s.StartBy != nil
 		j.StartByExplicit = &explicitStartBy
 		if s.Priority == "production" {
@@ -883,6 +887,7 @@ func (q *Queue) maintain() {
 	q.maintainPieceDependencies()
 	q.maintainFileExpiry()
 	q.maintainHostMaintenance()
+	q.maintainSharedHosts()
 	q.maintainDeviceMaintenance()
 	q.maintainReservations()
 	q.maintainExtensionQualifications()
@@ -1216,6 +1221,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 			m.RecoveringSince = &since
 		}
 		q.acceptExtensionQualifications(&m)
+		q.acceptSharedPressure(&m, old)
 		q.s.Machines[m.ID] = &m
 		q.recordExternalMemory(&m)
 		for _, report := range reports {
@@ -1364,6 +1370,9 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 		}
 		// Re-deliver an assignment if its HTTP response was lost before startup.
 		for _, j := range q.liveJobs() {
+			if j.State == "running" && j.ReleaseConfirmed {
+				continue // Final result publication is not an execution offer.
+			}
 			if j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping") {
 				if j.State == "stopping" {
 					// Omission only finishes a keyed stop after an exact release ack.
@@ -1863,8 +1872,14 @@ func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
 		}
 		return a.Kind < b.Kind
 	})
+	// Existing release guards and consumer audits read curves from default
+	// status. Bound job history without changing that independent contract.
 	for _, key := range slices.Sorted(maps.Keys(q.s.WorkObservations)) {
 		out.WorkCurves = append(out.WorkCurves, q.s.WorkObservations[key])
+	}
+	if q.observationSelection != nil {
+		page := q.observationSelection.page
+		out.JobsPage = &page
 	}
 	out.ComponentExclusions = q.componentExclusions()
 	out.Reservations = q.reservations()
@@ -1872,9 +1887,15 @@ func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
 	out.Now = q.clock.Now()
 	order, reasons := q.queueProjection()
 	for _, stored := range q.s.Jobs {
+		if q.observationSelection != nil && !q.observationSelection.ids[stored.ID] {
+			continue
+		}
 		out.Jobs = append(out.Jobs, q.projectJob(stored, order, reasons, forStatus))
 	}
 	for _, c := range q.calls {
+		if q.observationSelection != nil && !q.observationSelection.ids[c.ID] {
+			continue
+		}
 		out.Jobs = append(out.Jobs, q.projectCall(c, order, reasons))
 	}
 	for _, m := range q.s.Machines {
@@ -1936,6 +1957,9 @@ func (q *Queue) projectJob(stored *Job, order map[string]int, reasons map[string
 	}
 	if q.startupPending(j) {
 		j.Reason = q.startStatusReason(j)
+	}
+	if j.State == "running" && j.ReleaseConfirmed {
+		j.Reason = "execution released; awaiting final result publication"
 	}
 	// Eligibility/reasons need the full diagnostic inputs until redaction.
 	copy := *j
@@ -2055,6 +2079,9 @@ func (q *Queue) projectJobDiagnostics(j *Job, forStatus, jobReply bool) {
 		}
 		if jobReply {
 			j.Spec.SubmissionKey = key
+			j.SpecProjection.Omitted = slices.DeleteFunc(j.SpecProjection.Omitted, func(path string) bool {
+				return path == "submission_key"
+			})
 		}
 	}
 }
@@ -2215,7 +2242,7 @@ func (q *Queue) Started(r Result, requestContexts ...context.Context) error {
 			rejected = e
 			return nil
 		}
-		if j.State != "running" || !dependencyReady(j) || cancelled(j) || (j.Spec.StartBy != nil && j.StartedAt != nil) {
+		if j.State != "running" || j.ReleaseConfirmed || !dependencyReady(j) || cancelled(j) || (j.Spec.StartBy != nil && j.StartedAt != nil) {
 			rejected = ErrStale
 			return nil
 		}
@@ -2318,7 +2345,7 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 // The bounded legacy adapter retains its original scalar recovery limit.
 func (q *Queue) workerHasOtherAttempt(machine, session, job string, attempt int) bool {
 	for _, j := range q.liveJobs() {
-		if j.Machine == machine && j.Session == session && !(j.ID == job && j.Attempt == attempt) && (j.State == "running" || j.State == "stopping") {
+		if j.Machine == machine && j.Session == session && !(j.ID == job && j.Attempt == attempt) && batchReservesCapacity(j) {
 			return true
 		}
 	}
@@ -2386,12 +2413,15 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	}
 	j.Copies = append(j.Copies, Copy{AllocatedDevices: slices.Clone(j.AllocatedDevices), Machine: m.ID, Session: m.Session, Attempt: j.Attempt, Extension: j.Extension, ReleaseReason: "awaiting_release"})
 	j.Session = m.Session
-	q.appendJobLedger(j, ledgerAttempt(j, "assigned", "scheduled"))
 	j.Reason = ""
 	if measured {
 		j.Timing = &WorkTiming{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: m.ID, Session: m.Session, PlacementReason: estimate.reason()}
 	}
 	q.recordValuePlacement(j, m, values)
+	q.recordPlacementDecision(j, m)
+	entry := ledgerAttempt(j, "assigned", "scheduled")
+	entry.Placement = j.Placement
+	q.appendJobLedger(j, entry)
 	q.refreshHostMemory()
 	out := cloneJob(j)
 	out.LedgerEntries = nil

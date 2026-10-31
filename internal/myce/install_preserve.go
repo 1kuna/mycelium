@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,6 +34,7 @@ func ValidateInstallIdentity(old, next ServiceConfig) error {
 }
 
 func validateInstallDropIns(ctx context.Context, c ServiceConfig, command func(context.Context, string, ...string) ([]byte, error)) error {
+	warned := false
 	for _, unit := range []string{filepath.Base(c.Service)} {
 		b, err := command(ctx, "systemctl", "--user", "show", unit, "--property=DropInPaths", "--value")
 		if err != nil {
@@ -56,6 +58,13 @@ func validateInstallDropIns(ctx context.Context, c ServiceConfig, command func(c
 					continue
 				}
 				key = strings.TrimSpace(key)
+				if c.Role == "queue" && key == "ExecStart" {
+					if !warned {
+						log.Print("warning: queue ExecStart drop-in still takes precedence over saved settings and the generated unit; verify the generated arguments before retiring the override")
+						warned = true
+					}
+					continue
+				}
 				if strings.HasPrefix(key, "Exec") || strings.HasPrefix(key, "Condition") || strings.HasPrefix(key, "Assert") || strings.HasPrefix(key, "Environment") || key == "User" || key == "Group" || key == "WorkingDirectory" || key == "RootDirectory" || key == "RootImage" || key == "KillMode" || key == "SendSIGKILL" || key == "Delegate" || key == "Restart" || key == "TimeoutStopSec" {
 					return errors.New("effective service drop-in conflicts with installed service contract; preserve it and resolve before activation")
 				}

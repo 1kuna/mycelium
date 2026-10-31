@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"math"
 	"net/http"
@@ -23,6 +24,7 @@ type requestSpan struct {
 	finished   bool
 	started    time.Time
 	wait, hold time.Duration
+	writerWait time.Duration
 	lastUnlock time.Time
 	measured   bool
 }
@@ -148,6 +150,7 @@ func (q *Queue) measureRequests(next http.Handler, registered ...map[string]stru
 			s.mu.Lock()
 			s.finished = true
 			wait, hold, lastUnlock, measured := s.wait, s.hold, s.lastUnlock, s.measured
+			writerWait := s.writerWait
 			s.mu.Unlock()
 			duration := ended.Sub(s.started)
 			route := "unmatched"
@@ -168,7 +171,11 @@ func (q *Queue) measureRequests(next http.Handler, registered ...map[string]stru
 			if !lastUnlock.IsZero() {
 				after = ended.Sub(lastUnlock)
 			}
-			log.Printf("event=slow_request route=%q status=%d duration_ms=%.3f mutex_measured=%t mutex_wait_ms=%.3f mutex_hold_ms=%.3f after_unlock_ms=%.3f", route, status, float64(duration)/float64(time.Millisecond), measured, float64(wait)/float64(time.Millisecond), float64(hold)/float64(time.Millisecond), float64(after)/float64(time.Millisecond))
+			phases := ""
+			if route == "GET /api/fleet/instruction" {
+				phases = fmt.Sprintf(" writer_wait_ms=%.3f work_ms=%.3f", float64(writerWait)/float64(time.Millisecond), float64(max(0, hold-writerWait))/float64(time.Millisecond))
+			}
+			log.Printf("event=slow_request route=%q status=%d duration_ms=%.3f mutex_measured=%t mutex_wait_ms=%.3f mutex_hold_ms=%.3f after_unlock_ms=%.3f%s", route, status, float64(duration)/float64(time.Millisecond), measured, float64(wait)/float64(time.Millisecond), float64(hold)/float64(time.Millisecond), float64(after)/float64(time.Millisecond), phases)
 		}()
 		next.ServeHTTP(response, r)
 	})
@@ -183,6 +190,13 @@ func unlockTimedRequest(ctx context.Context, mu *sync.RWMutex, timing *queueUpda
 	end := time.Now()
 	mu.Unlock()
 	s.observe(timing.mutexWait, end.Sub(timing.lockedAt), end)
+	if timing.measureWriter {
+		s.mu.Lock()
+		if !s.finished {
+			s.writerWait += timing.writerWait
+		}
+		s.mu.Unlock()
+	}
 }
 
 func requestContext(contexts []context.Context) context.Context {

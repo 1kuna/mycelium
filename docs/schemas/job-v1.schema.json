@@ -1,5 +1,41 @@
 {
   "$defs": {
+    "AdmissionDetail": {
+      "properties": {
+        "available": {
+          "type": "number"
+        },
+        "envelope_device_gb": {
+          "type": "number"
+        },
+        "envelope_host_gb": {
+          "type": "number"
+        },
+        "envelope_source": {
+          "type": "string"
+        },
+        "required": {
+          "type": "number"
+        },
+        "subcheck": {
+          "type": "string"
+        },
+        "unavailable": {
+          "type": "boolean"
+        },
+        "unit": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "subcheck",
+        "unit",
+        "required",
+        "envelope_host_gb",
+        "envelope_device_gb"
+      ],
+      "type": "object"
+    },
     "ApplicationProgress": {
       "properties": {
         "age_seconds": {
@@ -90,7 +126,12 @@
           "type": "boolean"
         },
         "device_gb": {
+          "description": "Sampled per-attempt process GPU memory in GiB, not GPU-wide memory.used or an allocator high-water mark. CUDA uses nvidia-smi compute-apps even on unified-memory devices. Sampling is a lower bound; missing means unknown, not zero.",
           "type": "number"
+        },
+        "device_unavailable": {
+          "description": "Diagnostic reason no usable process GPU sample was retained. New CUDA/XPU cgroup observers report this when device_gb is absent; older workers may omit both. Does not authorize reduced unified-memory accounting.",
+          "type": "string"
         },
         "events": {
           "$ref": "#/$defs/MemoryEventCounts",
@@ -104,6 +145,10 @@
         },
         "nonreclaimable_gb": {
           "type": "number"
+        },
+        "pressure_unavailable": {
+          "description": "Pressure coverage was missing, malformed or had no valid cumulative-counter time window. Rejects this attempt's memory learning while preserving prior qualified evidence; raw diagnostic peaks remain.",
+          "type": "boolean"
         },
         "source": {
           "type": "string"
@@ -144,6 +189,9 @@
         },
         "out_of_memory": {
           "type": "boolean"
+        },
+        "placement": {
+          "$ref": "#/$defs/PlacementDecision"
         },
         "polite_stop": {
           "type": "boolean"
@@ -1583,6 +1631,14 @@
           "$ref": "#/$defs/FileManifest",
           "x-contract": "diagnostic"
         },
+        "placement": {
+          "$ref": "#/$defs/PlacementDecision",
+          "x-contract": "diagnostic"
+        },
+        "placement_intent": {
+          "$ref": "#/$defs/PlacementIntent",
+          "x-contract": "diagnostic"
+        },
         "preemption_count": {
           "type": "integer",
           "x-contract": "diagnostic"
@@ -1599,6 +1655,10 @@
             "object",
             "null"
           ],
+          "x-contract": "diagnostic"
+        },
+        "production_binding": {
+          "$ref": "#/$defs/PlacementBinding",
           "x-contract": "diagnostic"
         },
         "production_host": {
@@ -1622,6 +1682,17 @@
           "description": "Sanitized diagnostic only. Do not parse or match its text.",
           "type": "string",
           "x-contract": "diagnostic"
+        },
+        "recovered_results": {
+          "description": "Append-only recovery-time evidence linked to exact failed executions. Never changes state, native outcome, ordinary output_refs or dependency eligibility. Metadata and original provenance survive history pruning; bytes expire at each record's expires_at.",
+          "items": {
+            "$ref": "#/$defs/RecoveredResult"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "stable"
         },
         "release_confirmed": {
           "description": "Exact current execution release proof when true. Omitted false is not confirmation; older copies may still have pending custody. Use the cancellation acknowledgement for aggregate release.",
@@ -1664,6 +1735,11 @@
         },
         "spec": {
           "$ref": "#/$defs/Spec",
+          "x-contract": "stable"
+        },
+        "spec_projection": {
+          "$ref": "#/$defs/SpecProjection",
+          "description": "Observation privacy policy: projected is true; omitted lists stripped paths relative to spec, regardless of submitted presence. Empty placeholders do not retain submitted values. Absence of spec.files is not evidence that no files were submitted.",
           "x-contract": "stable"
         },
         "start_by_explicit": {
@@ -2133,6 +2209,184 @@
       ],
       "type": "object"
     },
+    "PlacementBinding": {
+      "properties": {
+        "host": {
+          "type": "string"
+        },
+        "origin": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "origin",
+        "host",
+        "reason"
+      ],
+      "type": "object"
+    },
+    "PlacementCoverage": {
+      "properties": {
+        "origin": {
+          "type": "string"
+        },
+        "platforms": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "state": {
+          "type": "string"
+        },
+        "targets": {
+          "items": {
+            "$ref": "#/$defs/ExecutionTarget"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "origin",
+        "state"
+      ],
+      "type": "object"
+    },
+    "PlacementDecision": {
+      "properties": {
+        "assigned_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "attempt": {
+          "type": "integer"
+        },
+        "device_choice": {
+          "type": "string"
+        },
+        "devices": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "host": {
+          "type": "string"
+        },
+        "host_choice": {
+          "type": "string"
+        },
+        "limited_by": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "origin": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "origin",
+        "attempt",
+        "assigned_at",
+        "host",
+        "host_choice",
+        "device_choice",
+        "reason",
+        "limited_by"
+      ],
+      "type": "object"
+    },
+    "PlacementIntent": {
+      "properties": {
+        "device_constraint": {
+          "type": "string"
+        },
+        "environment": {
+          "$ref": "#/$defs/PlacementCoverage"
+        },
+        "host_constraint": {
+          "type": "string"
+        },
+        "origin": {
+          "type": "string"
+        },
+        "parity": {
+          "type": "string"
+        },
+        "preferred_backends": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "qualification": {
+          "type": "string"
+        },
+        "recipe_device_targets": {
+          "items": {
+            "$ref": "#/$defs/ExecutionTarget"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "required_backends": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "scope": {
+          "type": "string"
+        },
+        "targets": {
+          "items": {
+            "$ref": "#/$defs/ExecutionTarget"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "origin",
+        "scope",
+        "host_constraint",
+        "device_constraint",
+        "environment",
+        "qualification",
+        "parity"
+      ],
+      "type": "object"
+    },
     "Platform": {
       "properties": {
         "any": {
@@ -2242,6 +2496,97 @@
       "required": [
         "type",
         "file"
+      ],
+      "type": "object"
+    },
+    "RecoveredResult": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "expires_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "files": {
+          "$ref": "#/$defs/FileManifest"
+        },
+        "id": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "kind": {
+          "const": "recovered",
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "manifest_sha256": {
+          "description": "SHA-256 of canonical Go JSON for files (sorted keys, compact encoding), verified at recovery time.",
+          "type": "string"
+        },
+        "progress": {
+          "type": "integer"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "recovered_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "recovered_by": {
+          "const": "operator",
+          "type": "string"
+        },
+        "requested_by": {
+          "description": "Operator-asserted requester label, not a separately authenticated user identity.",
+          "type": "string"
+        },
+        "result_id": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/RecoverySource"
+        }
+      },
+      "required": [
+        "id",
+        "attempt",
+        "machine",
+        "session",
+        "key",
+        "requested_by",
+        "source",
+        "reason",
+        "files",
+        "result_id",
+        "kind",
+        "recovered_by",
+        "recovered_at",
+        "expires_at",
+        "manifest_sha256"
+      ],
+      "type": "object"
+    },
+    "RecoverySource": {
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "location": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "location"
       ],
       "type": "object"
     },
@@ -2360,6 +2705,7 @@
           ]
         },
         "docker": {
+          "description": "Opt-in managed direct docker run argv with a local digest-pinned image. With files or outputs: worker-owned mounts, UID/GID, /myce/work working directory and environment only; caller mounts/env/workdir/user and shared_inputs are rejected. Requires Linux docker_files_v1 worker capability.",
           "type": "boolean"
         },
         "docker_memory_gb": {
@@ -2409,6 +2755,9 @@
     },
     "RuntimeCause": {
       "properties": {
+        "admission": {
+          "$ref": "#/$defs/AdmissionDetail"
+        },
         "class": {
           "type": "string"
         },
@@ -2420,6 +2769,9 @@
         },
         "predicate": {
           "type": "string"
+        },
+        "prelaunch_refused": {
+          "type": "boolean"
         },
         "reason": {
           "type": "string"
@@ -2542,6 +2894,7 @@
         },
         "files": {
           "$ref": "#/$defs/FileManifest",
+          "description": "SHA-256/size-addressed inputs. Native jobs stage into work; managed Docker file batches require docker_files_v1 and mount private copies read-only at /myce/inputs, preserving relative names. Cannot mix NAS inputs, caller workdir or shared_inputs with Docker.",
           "x-contract": "diagnostic"
         },
         "give_up_at": {
@@ -2587,6 +2940,7 @@
           "additionalProperties": {
             "type": "string"
           },
+          "description": "Declared relative output names to relative publication prefixes. Managed Docker file batches write beneath /myce/work; only verified current-attempt outputs become output_refs after all writers settle.",
           "type": [
             "object",
             "null"
@@ -2693,6 +3047,46 @@
       ],
       "type": "object"
     },
+    "SpecProjection": {
+      "properties": {
+        "omitted": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "projected": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "projected",
+        "omitted"
+      ],
+      "type": "object"
+    },
+    "WorkLearningChange": {
+      "properties": {
+        "after": {
+          "type": "string"
+        },
+        "before": {
+          "type": "string"
+        },
+        "key": {
+          "$ref": "#/$defs/ObservationKey"
+        }
+      },
+      "required": [
+        "key",
+        "before",
+        "after"
+      ],
+      "type": "object"
+    },
     "WorkReference": {
       "properties": {
         "input_shape": {
@@ -2778,6 +3172,6 @@
   },
   "$ref": "#/$defs/Job",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "Generated from Job and Spec JSON types by TestWireSchemas. This is a reply schema, not submission validation: a cancelled reservation has a minimal zero-valued spec. x-contract marks stable identity/lifecycle fields versus diagnostic projections; reason text is never a machine contract. Optional fields follow Go omitempty; GET replies also omit execution payloads, including run.command. Additional diagnostics may grow.",
+  "description": "Generated from Job and Spec JSON types by TestWireSchemas. This is a reply schema, not submission validation: a cancelled reservation has a minimal zero-valued spec. x-contract marks stable identity/lifecycle fields versus diagnostic projections; reason text is never a machine contract. Optional fields follow Go omitempty; observation replies include spec_projection describing omitted spec fields, including files and run. Additional diagnostics may grow.",
   "title": "Mycelium Job reply v1"
 }

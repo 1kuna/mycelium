@@ -76,6 +76,9 @@ func (q *Queue) productionAdmissionReason(j *Job, m *Machine) string {
 	if b := j.ProductionBackoff[host]; q.clock.Now().Before(b.Until) {
 		return fmt.Sprintf("host %s: production preemption back-off; retry in %.0fs", host, b.Until.Sub(q.clock.Now()).Seconds())
 	}
+	if reason := q.unifiedCUDAProductionReason(j, m); reason != "" {
+		return reason
+	}
 	setup, known := measuredSetupSeconds(j, m, false)
 	if !known || setup <= 0 {
 		return ""

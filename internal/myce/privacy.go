@@ -28,7 +28,11 @@ func deviceReasonDiagnostic(reason string) string {
 }
 
 func (q *Queue) publicSnapshot(contexts ...context.Context) (Snapshot, error) {
-	s, err := q.snapshot(true, contexts...)
+	return q.publicStatusSnapshot(nil, contexts...)
+}
+
+func (q *Queue) publicStatusSnapshot(options *statusOptions, contexts ...context.Context) (Snapshot, error) {
+	s, err := q.statusSnapshotOptions(options, contexts...)
 	for i := range s.LoadedModels {
 		s.LoadedModels[i].EnvironmentRecipe = nil
 		s.LoadedModels[i].Error = ceilingDiagnostic(s.LoadedModels[i].Error, "model load or unload failed")
@@ -251,12 +255,13 @@ func extensionCheckAdmissionReason(reason string) string {
 // The returned value borrows fields until the caller deep-copies it.
 func statusJobInputs(job *Job) Job {
 	j := *job
+	placementStatus(&j)
 	j.LedgerEntries = nil
 	if j.Ledger == nil {
 		j.Ledger = &JobLedgerInfo{}
 	}
 	j.Isolation = jobNativeIsolationStatus(job)
-	spec := Spec{AllowedMachines: j.Spec.AllowedMachines, Name: j.Spec.Name, Project: j.Spec.Project, Priority: j.Spec.Priority, Class: j.Spec.Class, Kind: j.Spec.Kind, Resumable: j.Spec.Resumable, Deadline: j.Spec.Deadline, StartBy: j.Spec.StartBy, StartWindow: j.Spec.StartWindow}
+	spec := Spec{Logs: j.Spec.Logs, AllowedMachines: j.Spec.AllowedMachines, Name: j.Spec.Name, Project: j.Spec.Project, Priority: j.Spec.Priority, Class: j.Spec.Class, Kind: j.Spec.Kind, Resumable: j.Spec.Resumable, Deadline: j.Spec.Deadline, StartBy: j.Spec.StartBy, StartWindow: j.Spec.StartWindow}
 	if j.Spec.Program != nil {
 		spec.Program = &Program{Type: j.Spec.Program.Type}
 	}
@@ -266,6 +271,17 @@ func statusJobInputs(job *Job) Job {
 	spec.Workload = j.Spec.Workload
 	spec.Needs = j.Spec.Needs
 	j.Spec = spec
+	// This policy list is independent of submitted values, including on a
+	// second redaction pass. Empty wire placeholders still omit original values.
+	j.SpecProjection = &SpecProjection{Projected: true, Omitted: []string{
+		"after", "args", "diagnostics", "disk", "environment", "execution",
+		"expected_minutes", "extension", "extension_check.automatic",
+		"extension_check.directory", "extension_check.reserve", "extension_digest",
+		"fan_out", "files", "give_up_at", "inputs", "isolation",
+		"output_delivery", "outputs", "prepare_source", "profile_memory",
+		"program.args", "program.file", "reason", "require_target", "run",
+		"shared_inputs", "size_hint", "submission_key", "targets",
+	}}
 	j.Extensions = nil
 	j.EnvironmentRecipes = nil
 	j.SidecarEnvironmentRecipes = nil

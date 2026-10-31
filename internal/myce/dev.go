@@ -14,11 +14,13 @@ import (
 )
 
 type DevConfig struct {
+	SharedPressureSource            func(context.Context) (SharedHostPressure, error)
 	OutputDeliveryRoot              string
 	Devices                         int
 	ProductionInfrastructureRetries *int
 	FileStore                       string
 	FileStoreLimit                  int64
+	FileStoreProductionReserve      int64
 	FileRetention                   time.Duration
 	NASCheckpoints                  bool
 	ExtensionRoot, JobFileRoot      string
@@ -95,7 +97,7 @@ func startDev(c DevConfig, configureQueue func(*Queue)) (*Dev, error) {
 	if limit == 0 {
 		limit = 100 << 30
 	}
-	q, err := Open(c.Database, c.Checkpoints, clock, WithOutputDeliveryRoot(c.OutputDeliveryRoot), WithFileStore(c.FileStore, limit, c.FileStore != "" && !c.NASCheckpoints))
+	q, err := Open(c.Database, c.Checkpoints, clock, WithFileStoreProductionReserve(c.FileStoreProductionReserve), WithOutputDeliveryRoot(c.OutputDeliveryRoot), WithFileStore(c.FileStore, limit, c.FileStore != "" && !c.NASCheckpoints))
 	if err != nil {
 		return nil, err
 	}
@@ -188,7 +190,7 @@ func startDev(c DevConfig, configureQueue func(*Queue)) (*Dev, error) {
 		}
 	}()
 	for i := 0; i < c.Workers; i++ {
-		w := Worker{CPUIsolationProbe: func(context.Context) error { return nil }, ExtensionRoot: c.ExtensionRoot, JobFileRoot: c.JobFileRoot, ModelConfig: c.ModelConfig, StateDir: filepath.Join(filepath.Dir(c.Database), "workers", fmt.Sprintf("fake-%d", i+1)), Client: d.client, Machine: Machine{CPUReserveCores: c.CPUReserveCores, CPUBudgetCores: c.CPUBudgetCores, HostMemoryMeasured: true, HostID: c.HostID, Device: "0", ID: fmt.Sprintf("fake-%d", i+1), GPU: c.GPU, FreeMemoryGB: c.MemoryGB, Environments: c.Environments, Models: c.Models}, Interval: c.Interval}
+		w := Worker{sharedCPUDev: true, SharedPressureSource: c.SharedPressureSource, CPUIsolationProbe: func(context.Context) error { return nil }, ExtensionRoot: c.ExtensionRoot, JobFileRoot: c.JobFileRoot, ModelConfig: c.ModelConfig, StateDir: filepath.Join(filepath.Dir(c.Database), "workers", fmt.Sprintf("fake-%d", i+1)), Client: d.client, Machine: Machine{CPUReserveCores: c.CPUReserveCores, CPUBudgetCores: c.CPUBudgetCores, HostMemoryMeasured: true, HostID: c.HostID, Device: "0", ID: fmt.Sprintf("fake-%d", i+1), GPU: c.GPU, FreeMemoryGB: c.MemoryGB, Environments: c.Environments, Models: c.Models}, Interval: c.Interval}
 		if c.NASCheckpoints {
 			w.CheckpointRoot = c.Checkpoints
 		}

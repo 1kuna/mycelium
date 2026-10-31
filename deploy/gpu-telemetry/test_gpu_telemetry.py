@@ -1,12 +1,16 @@
 """Laptop checks: python3 -B -m unittest discover -s deploy/gpu-telemetry -v."""
 
+import configparser
 import datetime as dt
 import importlib.machinery
 import importlib.util
 import json
 import multiprocessing
+import os
 from pathlib import Path
 import socket
+import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -90,7 +94,6 @@ class TelemetryTest(unittest.TestCase):
 
     def test_blocked_read_shares_connection_deadline(self) -> None:
         # A FIFO emulates a blocking driver read. No reader survives its budget.
-        import os
         path = self.root / CARDS[1] / 'gtt_mm'
         path.unlink()
         os.mkfifo(path)
@@ -129,6 +132,56 @@ class TelemetryTest(unittest.TestCase):
                       ['../../bad'], ['0000:01:ff.0']):
             with self.subTest(cards=cards), self.assertRaises(ValueError):
                 telemetry.validate_cards(cards)
+
+    def test_wrapper_clears_environment_and_ignores_caller_arguments(self) -> None:
+        # Substitute only the installed binary location; execute the real shell
+        # wrapper against a harmless client that reports its environment/argv.
+        client = self.root / 'myce'
+        client.write_text(f'#!{sys.executable}\n'
+                          'import json, os, sys\n'
+                          'print(json.dumps([sys.argv[1:], dict(os.environ)]))\n')
+        client.chmod(0o755)
+        wrapper = Path(__file__).with_name('myce-gpu-telemetry-helper').read_text()
+        wrapper = wrapper.replace('/usr/local/libexec/mycelium-telemetry/myce', str(client))
+        result = subprocess.run(['/bin/sh', '-c', wrapper, 'helper', '--socket', '/untrusted'],
+                                env={'PATH': '/untrusted', 'MYCE_TOKEN': 'test-only'},
+                                check=True, capture_output=True, text=True)
+        args, env = json.loads(result.stdout)
+        self.assertEqual(args, ['gpu-telemetry-client'])
+        # Interpreter/platform startup may add locale/encoding metadata.
+        runtime_keys = {'LC_CTYPE'}
+        if sys.platform == 'darwin':
+            runtime_keys.add('__CF_USER_TEXT_ENCODING')
+        self.assertLessEqual(set(env), {'PATH', 'LANG', 'LC_ALL'} | runtime_keys)
+        self.assertEqual(env['PATH'], '/usr/bin:/bin')
+        self.assertEqual(env['LANG'], 'C')
+        self.assertEqual(env['LC_ALL'], 'C')
+
+
+
+
+class ClientGroupTemplateTest(unittest.TestCase):
+    def test_rendered_client_group_permissions(self):
+        root = Path(__file__).parent
+        # Run the documented sed rendering for both a primary-group style name
+        # and an already-held dedicated supplementary group.
+        for group in ('worker-primary', 'myce-telemetry'):
+            with self.subTest(group=group):
+                def render(name):
+                    return subprocess.check_output(
+                        ['sed', f's/REPLACE_CLIENT_GROUP/{group}/g', str(root / name)],
+                        text=True)
+                unit = configparser.ConfigParser()
+                unit.read_string(render('myce-gpu-telemetry.socket'))
+                socket_unit = unit['Socket']
+                self.assertEqual(socket_unit['SocketGroup'], group)
+                self.assertEqual(socket_unit['SocketUser'], 'root')
+                self.assertEqual(socket_unit['SocketMode'], '0660')
+                self.assertEqual(socket_unit['DirectoryMode'], '0750')
+                rule = next(line.split() for line in render('myce-gpu-telemetry.conf').splitlines()
+                            if line and not line.startswith('#'))
+                self.assertEqual(rule, ['d', '/run/mycelium', '0750', 'root', group, '-', '-'])
+                self.assertEqual(socket_unit['ListenStream'], rule[1] + '/gpu-telemetry.sock')
 
 
 if __name__ == '__main__':

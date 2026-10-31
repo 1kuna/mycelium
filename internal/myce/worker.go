@@ -52,30 +52,33 @@ type Worker struct {
 	nativeGPUDeviceProbe func(Worker, map[string]string) ([]string, error)
 
 	// Benchmark runs only when explicitly enabled; fake inventory never loads the host.
-	CurveMaxConcurrency   int
-	OnboardingBenchmark   bool
-	Benchmark             func(context.Context, BenchmarkConfig, *CapabilityProfile) error
-	DailyUse              bool
-	Laptop                bool
-	Desktop               bool
-	OwnerSignals          OwnerSignalSource
-	availability          *availabilityMonitor
-	FileCacheRoot         string
-	FileCacheLimit        int64
-	fileCache             *FileCache
-	sharedInputs          *SharedInputCache
-	fileCheckpoints       bool
-	ExtensionRoot         string
-	JobFileRoot           string
-	extensionFingerprint  string
-	RequireMemoryCeilings bool
-	memoryCeilings        *memoryCeilings
-	processMemory         *processMemoryProbe // Without cgroups only.
-	MemorySwapMaxBytes    int64
-	GPUTelemetryHelper    string // Operator-owned optional read-only telemetry executable.
-	DockerEndpoint        string
-	dockerEnvelope        bool
-	nativeListenerProbe   func(port string, group int) error
+	CurveMaxConcurrency     int
+	OnboardingBenchmark     bool
+	Benchmark               func(context.Context, BenchmarkConfig, *CapabilityProfile) error
+	DailyUse                bool
+	Laptop                  bool
+	Desktop                 bool
+	OwnerSignals            OwnerSignalSource
+	availability            *availabilityMonitor
+	FileCacheRoot           string
+	FileCacheLimit          int64
+	fileCache               *FileCache
+	sharedInputs            *SharedInputCache
+	fileCheckpoints         bool
+	ExtensionRoot           string
+	JobFileRoot             string
+	extensionFingerprint    string
+	RequireMemoryCeilings   bool
+	memoryCeilings          *memoryCeilings
+	sharedExecutionCeilings *memoryCeilings
+	sharedCPUDev            bool
+	SharedPressureSource    func(context.Context) (SharedHostPressure, error)
+	processMemory           *processMemoryProbe // Without cgroups only.
+	MemorySwapMaxBytes      int64
+	GPUTelemetryHelper      string // Operator-owned optional read-only telemetry executable.
+	DockerEndpoint          string
+	dockerEnvelope          bool
+	nativeListenerProbe     func(port string, group int) error
 
 	ContainerRetention *time.Duration
 	LogRetention       time.Duration
@@ -386,7 +389,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		}
 	}()
 	executionWorkdir := j.Spec.Run.Workdir
-	if !j.Spec.Run.Docker || j.Spec.extensionJob() || len(jobInputFiles(&j))+len(jobInputPaths(&j))+len(j.Spec.SharedInputs) > 0 {
+	if !j.Spec.Run.Docker || dockerFileJob(j.Spec) || j.Spec.extensionJob() || len(jobInputFiles(&j))+len(jobInputPaths(&j))+len(j.Spec.SharedInputs) > 0 {
 		value := j
 		staged, err := s.extensionFiles.runBounded(ctx, attemptCheckpoint(j), func() (stagedInputs, error) {
 			// Keep the slot until the filesystem call really returns, even after
@@ -440,7 +443,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	if w.MemorySource != nil {
 		free, e := w.MemorySource(context.Background())
 		if e != nil || !validMemoryValue(free) || free < j.Spec.Needs.MemoryGB {
-			return nil, fmt.Errorf("%w: need %.1f GB, available %.1f GB: %v", errWorkerMemory, j.Spec.Needs.MemoryGB, free, e)
+			return nil, refuseAdmission("live_gpu_memory", "GiB", j.Spec.Needs.MemoryGB, free, e != nil)
 		}
 	}
 	prepare := workerCheckpointPrepare
@@ -548,7 +551,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		return nil, err
 	}
 	identity := ID()
-	memoryAttempt, err := w.memoryCeilings.create("attempt-"+identity, ceilingBytes, w.MemorySwapMaxBytes)
+	memoryAttempt, err := w.executionCeilings().create("attempt-"+identity, ceilingBytes, w.MemorySwapMaxBytes)
 	if err != nil {
 		return nil, fmt.Errorf("memory ceiling setup: %w", err)
 	}
@@ -634,6 +637,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		delete(env, "MYCE_USAGE_FILE")
 	}
 	delete(env, "MYCE_TOKEN")
+	sharedCPUEnvironment(env, w.Machine.SharedHost, j.Spec.Needs.cores())
 	// TMPDIR is worker-owned, even when run.env or activation supplied one.
 	// Keep it with the managed attempt files so existing custody/retention owns it.
 	tmp := filepath.Join(executionWork, ".tmp")
@@ -868,7 +872,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		}
 		syncErr := syncCommandOutput(output)
 		closeErr := output.Close()
-		result.Success = oomErr == nil && launchErr == nil && waitErr == nil && groupErr == nil && syncErr == nil && closeErr == nil
+		// Payload success is independent of physical release. Uncertain cleanup
+		// retains custody while normal output checks and publication proceed.
+		result.Success = oomErr == nil && launchErr == nil && waitErr == nil && syncErr == nil && closeErr == nil
 		if j.Spec.Program != nil {
 			collectProgramUsage(&result, cmd.ProcessState, programUsageFile(s.dir, identity))
 			result.OutOfMemory = result.OutOfMemory || (oomErr != nil && strings.HasPrefix(ceilingDiagnostic(oomErr.Error(), ""), "exceeded its "))
@@ -892,7 +898,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		} else if waitErr != nil {
 			result.Error = nativeAttemptError(j, waitErr.Error())
 		} else if groupErr != nil {
-			result.Error = groupErr.Error()
+			result.Error = "cleanup uncertain: " + groupErr.Error()
 		} else if syncErr != nil {
 			result.Error = syncErr.Error()
 		} else if closeErr != nil {
@@ -1250,16 +1256,16 @@ func (w Worker) checkHostRAM(gpu, host float64) error {
 	if err := w.checkHostMemoryBudget(gpu, host); err != nil {
 		return err
 	}
-	if host == 0 {
+	if host == 0 && (!unifiedCUDA(&w.Machine) || gpu == 0) {
 		return nil
 	}
 	if w.HostMemorySource == nil {
-		return fmt.Errorf("%w: host RAM source unavailable", errWorkerMemory)
+		return refuseAdmission("live_host_ram", "GiB", hostNeed(&w.Machine, gpu, host), 0, true)
 	}
 	free, err := w.sharedHostLiveMemory(context.Background())
 	need := hostNeed(&w.Machine, gpu, host)
 	if err != nil || !hostMemoryAvailableFits(&w.Machine, gpu, host, free) {
-		return fmt.Errorf("%w: host RAM need %g GiB, available %g GiB: %v", errWorkerMemory, need, free, err)
+		return refuseAdmission("live_host_ram", "GiB", need, free, err != nil)
 	}
 	return nil
 }

@@ -265,7 +265,7 @@ func (s Spec) Validate() error {
 	if s.extensionJob() {
 		return rejectIf("job_program_invalid", validateExtensionJob(s))
 	}
-	if s.Kind == "" && (len(s.Inputs)+len(s.Args) > 0 || (len(s.Outputs) > 0 && len(s.Files) == 0 && len(s.SharedInputs) == 0 && s.After == nil && s.OutputDelivery == "") || s.SizeHint.MemoryGB != 0 || s.SizeHint.HostMemoryGB != 0) {
+	if s.Kind == "" && (len(s.Inputs)+len(s.Args) > 0 || (len(s.Outputs) > 0 && !s.Run.Docker && len(s.Files) == 0 && len(s.SharedInputs) == 0 && s.After == nil && s.OutputDelivery == "") || s.SizeHint.MemoryGB != 0 || s.SizeHint.HostMemoryGB != 0) {
 		return reject("job_program_invalid", errors.New("inputs, outputs, args and size_hint require a kind/program job"))
 	}
 	if !validMemoryValue(s.Needs.MemoryGB) || (s.Needs.Memory != "auto" && ((!s.Needs.cpuOnly() && s.Needs.MemoryGB <= 0) || (s.Needs.cpuOnly() && s.Needs.HostMemoryGB <= 0))) {
@@ -352,7 +352,20 @@ type Copy struct {
 	ReleaseReason    string `json:"release_reason,omitempty"`
 }
 
+// SpecProjection describes fields stripped by the observation privacy policy.
+// Omitted paths are relative to spec and do not disclose submitted presence.
+type SpecProjection struct {
+	Projected bool     `json:"projected"`
+	Omitted   []string `json:"omitted"`
+}
+
 type Job struct {
+	SpecProjection *SpecProjection `json:"spec_projection,omitempty"`
+
+	RecoveredResults    []RecoveredResult    `json:"recovered_results,omitempty"`
+	PlacementIntent     *PlacementIntent     `json:"placement_intent,omitempty"`
+	Placement           *PlacementDecision   `json:"placement,omitempty"`
+	ProductionBinding   *PlacementBinding    `json:"production_binding,omitempty"`
 	Runtime             *JobRuntime          `json:"runtime,omitempty"`
 	ApplicationProgress *ApplicationProgress `json:"application_progress,omitempty"`
 
@@ -448,6 +461,9 @@ type Job struct {
 type Machine struct {
 	SharedHost             *SharedHostProfile     `json:"shared_host,omitempty"`        // Worker acknowledgement.
 	SharedHostReason       string                 `json:"shared_host_reason,omitempty"` // Queue admission diagnostic.
+	SharedHostPressure     *SharedHostPressure    `json:"shared_host_pressure,omitempty"`
+	SharedHostYieldReason  string                 `json:"shared_host_yield_reason,omitempty"` // Queue-owned hysteresis.
+	SharedCPUEnforcement   string                 `json:"shared_cpu_enforcement,omitempty"`
 	ExternalMemory         *ExternalMemoryHistory `json:"external_memory,omitempty"`
 	MemoryObservation      *HostMemoryObservation `json:"memory_observation,omitempty"`
 	Release                *RunningRelease        `json:"release,omitempty"`
@@ -651,6 +667,7 @@ type HoldDetail struct {
 }
 
 type Snapshot struct {
+	JobsPage            *StatusJobsPage      `json:"jobs_page,omitempty"`
 	RequestLatencies    []RequestLatency     `json:"request_latencies,omitempty"`
 	Reservations        []Reservation        `json:"reservations,omitempty"`
 	ComponentExclusions []ComponentExclusion `json:"component_exclusions,omitempty"`

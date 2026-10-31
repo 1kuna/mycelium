@@ -14,9 +14,15 @@ import (
 // immutable spool is known, reserve the actual missing identities instead. Tus
 // lengths already counted by capacity() are not charged twice. Call under q.mu.
 func (q *Queue) outputReservations(payloads map[string]storedPayload, exclude string) uint64 {
+	return q.outputReservationsFor(payloads, exclude, false)
+}
+func (q *Queue) outputReservationsFor(payloads map[string]storedPayload, exclude string, productionOnly bool) uint64 {
 	var bytes uint64
 	seen := map[string]bool{}
 	for _, j := range q.liveJobs() {
+		if productionOnly && q.priorityMatch(j.Spec).Tier != "production" {
+			continue
+		}
 		if j.OutputAdmissionPending || j.ID == exclude || terminal(j.State) || j.Spec.OutputDelivery != asyncNAS {
 			continue
 		}
@@ -106,8 +112,9 @@ func (q *Queue) reserveDeliveryResult(ctx context.Context, r Result) error {
 			}
 			projected[ref.SHA256] = storedPayload{length: uint64(ref.SizeBytes)}
 		}
+		growth := need
 		need = addDiskBytes(need, q.outputReservations(projected, j.ID))
-		if err := fileStoreRefusal(status, need); err != nil {
+		if err := q.fileStoreReserveRefusal(status, need, growth, q.outputReservationsFor(projected, j.ID, true), q.priorityMatch(j.Spec).Tier == "production"); err != nil {
 			return err
 		}
 		j = q.touchJob(j.ID)
@@ -177,7 +184,7 @@ func (q *Queue) admitOutputRetries(ctx context.Context) error {
 		})
 		for _, j := range jobs {
 			need := addDiskBytes(q.outputReservations(payloads, ""), j.Spec.Disk.OutputBytes)
-			if fileStoreRefusal(status, need) != nil {
+			if q.fileStoreReserveRefusal(status, need, j.Spec.Disk.OutputBytes, q.outputReservationsFor(payloads, "", true), q.priorityMatch(j.Spec).Tier == "production") != nil {
 				continue
 			}
 			j = q.touchJob(j.ID)

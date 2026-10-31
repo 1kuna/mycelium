@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -286,42 +287,77 @@ func TestEngineRecoveryRejectedBeforeForwarding(t *testing.T) {
 func TestEngineRecoveryRejectedUnsafeCallRetries(t *testing.T) {
 	for _, generic := range []bool{false, true} {
 		t.Run(fmt.Sprint(generic), func(t *testing.T) {
-			q, _, m := modelFixture(t)
-			warm := addModelCall(t, q, "experiment")
-			s := q.s.ModelSlots[slotKey(m.ID, "test")]
-			recoveryReport(t, q, m, s, "ready")
-			q.finishCall(warm.ID)
-			var forwards atomic.Int32
-			rejected := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				// Race the rejection receipt with the heartbeat withdrawing this attempt.
-				recoveryReport(t, q, m, s, "failed")
-				w.Header().Set("X-Myce-Engine-Rejected", r.Header.Get("X-Myce-Engine-Attempt"))
-				w.WriteHeader(503)
-			}))
-			defer rejected.Close()
-			other := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { forwards.Add(1); fmt.Fprint(w, "accepted") }))
-			defer other.Close()
-			m.ModelURL = rejected.URL
-			check(t, q, m, nil)
-			n := machine("two", "fake")
-			n.ModelURL = other.URL
-			n.ModelConfigHash = m.ModelConfigHash
-			check(t, q, n, nil)
-			q.s.ModelSlots[slotKey(n.ID, "test")] = &ModelSlot{Model: "test", Machine: n.ID, Session: n.Session, State: "ready", Attempt: "other", LastUsed: q.clock.Now()}
-			path, body := "/models/test/work", "synthetic"
-			if !generic {
-				path, body = "/v1/chat/completions", `{"model":"test"}`
-			}
-			req := httptest.NewRequest("POST", path, strings.NewReader(body))
-			req.Header.Set("Authorization", "Bearer test")
-			req.Header.Set("X-Myce-Project", "test")
-			req.Header.Set("X-Myce-Priority", "experiment")
-			ctx, cancel := context.WithTimeout(req.Context(), testWaitTimeout)
-			defer cancel()
-			result := httptest.NewRecorder()
-			API{Queue: q, Token: "test"}.Handler().ServeHTTP(result, req.WithContext(ctx))
-			if result.Code != 200 || result.Body.String() != "accepted" || forwards.Load() != 1 || result.Header().Get("X-Myce-Engine-Rejected") != "" {
-				t.Fatalf("unsafe never-forwarded call lost retry: %d %s", result.Code, result.Body.String())
+			for _, receipt := range []bool{true, false} {
+				t.Run(fmt.Sprintf("receipt=%t", receipt), func(t *testing.T) {
+					q, _, m := modelFixture(t)
+					warm := addModelCall(t, q, "experiment")
+					s := q.s.ModelSlots[slotKey(m.ID, "test")]
+					recoveryReport(t, q, m, s, "ready")
+					q.finishCall(warm.ID)
+					var forwards atomic.Int32
+					rejected := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+						io.Copy(io.Discard, r.Body)
+						if !receipt {
+							// Withdraw before headers and wait for the proxy's cancellation.
+							// Without the rejection receipt an unsafe call cannot be retried.
+							recoveryReport(t, q, m, s, "failed")
+							<-r.Context().Done()
+							return
+						}
+						w.Header().Set("X-Myce-Engine-Rejected", r.Header.Get("X-Myce-Engine-Attempt"))
+						w.WriteHeader(503)
+					}))
+					defer rejected.Close()
+					previous := modelHTTPClient
+					local := *previous
+					transport := local.Transport
+					if transport == nil {
+						transport = http.DefaultTransport
+					}
+					local.Transport = clientTestTransport(func(r *http.Request) (*http.Response, error) {
+						res, err := transport.RoundTrip(r)
+						if receipt && err == nil && res.Header.Get("X-Myce-Engine-Rejected") != "" {
+							// Observe the real HTTP receipt before withdrawing the attempt,
+							// but withdraw before the proxy checks liveness. Racing these
+							// events in the handler sometimes canceled away the only proof
+							// that retrying this unsafe call was permitted (#384).
+							recoveryReport(t, q, m, s, "failed")
+						}
+						return res, err
+					})
+					modelHTTPClient = &local
+					defer func() { modelHTTPClient = previous }()
+					other := workerTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { forwards.Add(1); fmt.Fprint(w, "accepted") }))
+					defer other.Close()
+					m.ModelURL = rejected.URL
+					check(t, q, m, nil)
+					n := machine("two", "fake")
+					n.ModelURL = other.URL
+					n.ModelConfigHash = m.ModelConfigHash
+					check(t, q, n, nil)
+					q.s.ModelSlots[slotKey(n.ID, "test")] = &ModelSlot{Model: "test", Machine: n.ID, Session: n.Session, State: "ready", Attempt: "other", LastUsed: q.clock.Now()}
+					path, body := "/models/test/work", "synthetic"
+					if !generic {
+						path, body = "/v1/chat/completions", `{"model":"test"}`
+					}
+					req := httptest.NewRequest("POST", path, strings.NewReader(body))
+					req.Header.Set("Authorization", "Bearer test")
+					req.Header.Set("X-Myce-Project", "test")
+					req.Header.Set("X-Myce-Priority", "experiment")
+					ctx, cancel := context.WithTimeout(req.Context(), testWaitTimeout)
+					defer cancel()
+					result := httptest.NewRecorder()
+					API{Queue: q, Token: "test"}.Handler().ServeHTTP(result, req.WithContext(ctx))
+					if !receipt {
+						if result.Code != 503 || forwards.Load() != 0 {
+							t.Fatalf("unsafe call retried without rejection proof: %d %s; forwards=%d", result.Code, result.Body.String(), forwards.Load())
+						}
+						return
+					}
+					if result.Code != 200 || result.Body.String() != "accepted" || forwards.Load() != 1 || result.Header().Get("X-Myce-Engine-Rejected") != "" {
+						t.Fatalf("unsafe never-forwarded call lost retry: %d %s", result.Code, result.Body.String())
+					}
+				})
 			}
 		})
 	}

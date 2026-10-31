@@ -363,7 +363,8 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 			s.releaseSharedInputs()
 		}
 		persist := errors.Join(syncCommandOutput(output), output.Close())
-		r := Result{MemoryPeak: peak, Machine: w.Machine.ID, Session: g.session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Success: runErr == nil && oom == nil && cleanup == nil && persist == nil, Forced: forced, PoliteStop: polite, ReleasePending: cleanup != nil}
+		// Cleanup uncertainty holds custody, not the successful payload result.
+		r := Result{MemoryPeak: peak, Machine: w.Machine.ID, Session: g.session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Success: runErr == nil && oom == nil && persist == nil, Forced: forced, PoliteStop: polite, ReleasePending: cleanup != nil}
 		if runErr != nil {
 			r.Error = nativeAttemptError(j, runErr.Error())
 			r.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("command", runErr))
@@ -376,7 +377,11 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 			r.ExecutionCause = &RuntimeCause{Operation: "command", Class: "resource_limit"}
 		}
 		if cleanup != nil {
-			r.Error = errors.Join(runErr, cleanup).Error()
+			if r.Success {
+				r.Error = "cleanup uncertain: " + cleanup.Error()
+			} else {
+				r.Error = errors.Join(runErr, cleanup).Error()
+			}
 			r.CleanupCause = runtimeDiagnostic(runtimeErrorFor("process_group", cleanup))
 		}
 		if persist != nil {
@@ -887,6 +892,7 @@ func (g *nativeGroup) run(j Job, base map[string]string, mainEnvironment string,
 		}
 		// Reserved env was validated; defensive stripping also covers direct starts.
 		delete(memberEnv, "MYCE_TOKEN")
+		sharedCPUEnvironment(memberEnv, g.worker.Machine.SharedHost, j.Spec.Needs.cores())
 		reference := side.Environment
 		if reference == "" {
 			reference = j.Spec.Environment.Name
@@ -969,6 +975,7 @@ func (g *nativeGroup) waitReady(member *nativeMember, port string, readiness Nat
 	client := &http.Client{Transport: transport, Timeout: 200 * time.Millisecond, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	wake := time.NewTicker(20 * time.Millisecond)
 	defer wake.Stop()
+	var ownershipErr error
 	for {
 		if err := g.memberFailure(member); err != nil {
 			return err
@@ -985,7 +992,7 @@ func (g *nativeGroup) waitReady(member *nativeMember, port string, readiness Nat
 			return err
 		}
 		if !g.worker.Clock.Now().Before(deadline) {
-			return &runtimeError{diagnostic: RuntimeCause{Operation: "readiness", Class: "timeout"}, cause: errors.New("native sidecar HTTP readiness timeout")}
+			return &runtimeError{diagnostic: RuntimeCause{Operation: "readiness", Class: "timeout"}, cause: errors.Join(errors.New("native sidecar HTTP readiness timeout"), ownershipErr)}
 		}
 		if handled, ready, err := g.namespace.probe(g.ctx, port, g.supervisor.Process.Pid, readiness.Path, false); handled {
 			if errors.Is(err, errNativeForeignListener) {
@@ -1004,9 +1011,13 @@ func (g *nativeGroup) waitReady(member *nativeMember, port string, readiness Nat
 						if errors.Is(err, errNativeForeignListener) {
 							return g.recordInfrastructure(foreignPort, member.Name, port, errNativePortCollision)
 						}
-						return err
+						// Inspection can fail transiently under load (#356). Keep
+						// main gated and retry within the existing readiness budget;
+						// a 2xx alone never authorizes an unverified listener.
+						ownershipErr = err
+					} else {
+						return g.memberFailure()
 					}
-					return g.memberFailure()
 				}
 			}
 		}

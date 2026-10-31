@@ -78,6 +78,10 @@ func TestStatusShowsProfileQualificationAndEveryWaitingReason(t *testing.T) {
 
 func TestLogsNoneOperatorOutput(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/jobs/private-job" {
+			fmt.Fprint(w, `{"id":"private-job","state":"succeeded","spec":{"logs":"none"}}`)
+			return
+		}
 		if r.URL.Path == "/api/status" {
 			fmt.Fprint(w, `{"jobs":[{"id":"private-job","state":"succeeded","spec":{"name":"private","logs":"none"}},{"id":"default-job","state":"queued","spec":{"name":"default"}}]}`)
 			return

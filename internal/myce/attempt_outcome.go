@@ -20,12 +20,14 @@ type memberExit struct {
 	ObservedAt time.Time `json:"observed_at"`
 }
 type infrastructureFact struct {
-	Kind      string    `json:"kind"`
-	At        time.Time `json:"at"`
-	Member    string    `json:"member,omitempty"`
-	Port      string    `json:"port,omitempty"`
-	Group     int       `json:"group,omitempty"`
-	Predicate string    `json:"predicate,omitempty"`
+	Kind             string           `json:"kind"`
+	At               time.Time        `json:"at"`
+	Member           string           `json:"member,omitempty"`
+	Port             string           `json:"port,omitempty"`
+	Group            int              `json:"group,omitempty"`
+	Predicate        string           `json:"predicate,omitempty"`
+	Admission        *AdmissionDetail `json:"admission,omitempty"`
+	PrelaunchRefused bool             `json:"prelaunch_refused,omitempty"`
 }
 
 const (
@@ -89,7 +91,12 @@ func (e *recordedStartError) Error() string { return e.cause.Error() }
 func (e *recordedStartError) Unwrap() error { return e.cause }
 
 func (s *workerStore) startFailure(j Job, kind string, cause error) error {
-	facts := memberOutcome{Infrastructure: []infrastructureFact{{Kind: kind, At: time.Now().UTC(), Predicate: launchFailurePredicate(kind, cause)}}}
+	// Identity alone is assigned before admission. Custody/launch intent, in
+	// contrast, is written before any process can start and is never inferred
+	// from an absent Started report. Persist this positive refusal proof with
+	// the facts so release-only replay carries it too.
+	prelaunch := kind == launchRefused && !j.Spec.Run.Docker && s.state.CustodyID == "" && s.state.PID == 0 && !s.state.LaunchPending && len(s.state.Groups) == 0 && s.state.Preparation == "" && s.state.Cgroup == ""
+	facts := memberOutcome{Infrastructure: []infrastructureFact{{Kind: kind, At: time.Now().UTC(), Predicate: launchFailurePredicate(kind, cause), Admission: admissionDetail(cause, j), PrelaunchRefused: prelaunch}}}
 	s.state.LaunchOutcome = fmt.Sprintf("launch-%s-%d.outcome.json", j.ID, j.Attempt)
 	if err := saveWorkerJSON(s.dir, s.state.LaunchOutcome, facts); err != nil {
 		return errors.Join(cause, err)
@@ -151,7 +158,7 @@ func classifyAttemptOutcome(result Result, facts attemptCause) Result {
 			}
 			switch fact.Kind {
 			case launchRefused, launchFailed, environmentFailed:
-				result.ExecutionCause = safeRuntimeCause(&RuntimeCause{Operation: "launch", Class: fact.Kind, Predicate: fact.Predicate})
+				result.ExecutionCause = safeRuntimeCause(&RuntimeCause{Operation: "launch", Class: fact.Kind, Predicate: fact.Predicate, Admission: fact.Admission, PrelaunchRefused: fact.PrelaunchRefused})
 			}
 			if result.ExecutionCause != nil {
 				break
@@ -165,6 +172,8 @@ func classifyAttemptOutcome(result Result, facts attemptCause) Result {
 			if !fact.At.IsZero() && fact.Predicate != "" {
 				cause := *result.ExecutionCause
 				cause.Predicate = fact.Predicate
+				cause.Admission = fact.Admission
+				cause.PrelaunchRefused = fact.PrelaunchRefused
 				result.ExecutionCause = safeRuntimeCause(&cause)
 				break
 			}

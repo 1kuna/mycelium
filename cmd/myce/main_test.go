@@ -23,7 +23,7 @@ import (
 
 func TestCLIHelp(t *testing.T) {
 	_, _, err := captureUsageOutput(t, nil)
-	for _, command := range []string{"install", "uninstall", "invite", "doctor", "host", "resume", "version", "release", "file", "benchmark", "extension", "sim", "detect", "service", "measure", "model", "usage"} {
+	for _, command := range []string{"install", "uninstall", "invite", "doctor", "host", "resume", "version", "release", "file", "benchmark", "extension", "sim", "detect", "service", "measure", "model", "gpu-telemetry-client", "usage"} {
 		if err == nil || !strings.Contains(err.Error(), command) {
 			t.Fatalf("usage omits %s: %v", command, err)
 		}

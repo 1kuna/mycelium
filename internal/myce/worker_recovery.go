@@ -360,12 +360,33 @@ func signalWorkerGroupUsing(group int, signal syscall.Signal, kill func(int, sys
 	return fmt.Errorf("signal process group %d: %w", group, err)
 }
 
+// Three observations tolerate transient inspector failures without indefinitely
+// delaying result publication. Backoff costs at most 300ms of clock time, plus
+// three bounded OS probes; exhaustion retains custody for the actor to retry.
+func inspectWorkerGroup(group int, clock Clock) ([]int, error) {
+	return inspectWorkerGroupUsing(group, clock, workerGroupMembers)
+}
+func inspectWorkerGroupUsing(group int, clock Clock, inspect func(int) ([]int, error)) ([]int, error) {
+	for attempt := 0; ; attempt++ {
+		members, err := inspect(group)
+		if err == nil || attempt == 2 {
+			return members, err
+		}
+		next := clock.Now().Add((100 * time.Millisecond) << attempt)
+		tick := time.NewTicker(5 * time.Millisecond)
+		for clock.Now().Before(next) {
+			<-tick.C
+		}
+		tick.Stop()
+	}
+}
+
 func waitWorkerGroup(group int, clock Clock) error {
 	deadline := clock.Now().Add(5 * time.Second)
 	wake := time.NewTicker(5 * time.Millisecond)
 	defer wake.Stop()
 	for {
-		members, err := workerGroupMembers(group)
+		members, err := inspectWorkerGroup(group, clock)
 		if err != nil {
 			return err
 		}
@@ -468,7 +489,7 @@ func (s *workerStore) cleanupOrphanCustody(clock Clock, requireHelperExit bool, 
 	}
 	owned := false
 	for _, pid := range members {
-		out, err := exec.Command("ps", "eww", "-p", strconv.Itoa(pid), "-o", "command=").Output()
+		out, err := processPS("eww", "-p", strconv.Itoa(pid), "-o", "command=")
 		if err != nil {
 			var e *exec.ExitError
 			if errors.As(err, &e) && e.ExitCode() == 1 {
@@ -558,7 +579,7 @@ func cleanupAttemptGroups(st workerState, clock Clock, memoryFiles ...memoryFS) 
 		}
 	}
 	for group, births := range st.Groups {
-		members, err := workerGroupMembers(group)
+		members, err := inspectWorkerGroup(group, clock)
 		if err != nil {
 			return err
 		}
@@ -851,7 +872,7 @@ func gracefulRecoveredGroups(st *workerState, clock Clock, persist func() error,
 		}
 	}
 	for group, births := range st.Groups {
-		members, err := workerGroupMembers(group)
+		members, err := inspectWorkerGroup(group, clock)
 		if err != nil {
 			return err
 		}

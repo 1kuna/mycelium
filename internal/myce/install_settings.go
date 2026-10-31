@@ -235,6 +235,13 @@ func InstallSettings() []InstallSetting {
 			return nil
 		}),
 		installSetting("file-retention", "FileRetention", "terminal job input/result retention", func(c *ServiceConfig) *time.Duration { return &c.FileRetention }, installPositiveDuration),
+		installSetting("file-store-bytes", "FileStoreBytes", "authoritative files plus upload reservations limit", func(c *ServiceConfig) *int64 { return &c.FileStoreBytes }, installBytes),
+		installContext(installSetting("file-store-production-reserve", "FileStoreProductionReserve", "file-store bytes reserved for production-tier submissions (zero disables)", func(c *ServiceConfig) *int64 { return &c.FileStoreProductionReserve }, installAny[int64]), func(c ServiceConfig) error {
+			if c.FileStoreProductionReserve < 0 || c.FileStoreProductionReserve > c.FileStoreBytes {
+				return errors.New("must be between zero and the file-store byte limit")
+			}
+			return nil
+		}),
 		installSetting("log-retention", "LogRetention", "completed log retention", func(c *ServiceConfig) *time.Duration { return &c.LogRetention }, installPositiveDuration),
 		installPath("upload-spool-dir", "UploadSpoolDir", "local upload spool", func(c *ServiceConfig) *string { return &c.UploadSpoolDir }, false),
 		installSetting("upload-spool-bytes", "UploadSpoolBytes", "total upload spool bytes", func(c *ServiceConfig) *int64 { return &c.UploadSpoolBytes }, installBytes),

@@ -54,7 +54,8 @@ local source paths. Only explicitly mapped inputs are uploaded, never a whole
 project or home folder. Inputs are copied into a private working folder before
 running. Programs cannot mutate shared cached blobs. Plain commands can also
 use `files` with relative command arguments and declared outputs; stored inputs
-cannot be combined with a workdir, Docker or NAS input mappings.
+cannot be combined with a caller workdir or NAS input mappings. Managed Docker
+batches support stored files with separate input/output roots, described below.
 A NAS-mode job declaring any stored `files` returns all its outputs through the
 file store rather than the worker's `--job-file-root` (`JobFileRoot`).
 
@@ -75,6 +76,86 @@ job's `output_refs` maps output names to identities; retrieve an output with:
 ```sh
 myce file get --size-bytes BYTE_COUNT SHA256 ./answer.json
 ```
+
+### Managed Docker files
+
+A plain `run.docker: true` batch with `files` or `outputs` requires a Linux
+worker advertising `docker_files_v1` as well as `docker`. Older workers cannot
+receive it. The worker stages verified private copies at `/myce/inputs`,
+read-only in main and every managed sidecar, preserving relative input names.
+`/myce/work` is a separate private read-write output/scratch directory and the
+container's working directory. Outputs are relative to this directory.
+`MYCE_INPUT_DIR=/myce/inputs`, `MYCE_OUTPUT_DIR=/myce/work` and
+`MYCE_SCRATCH_DIR=/myce/work` describe these roots. Inputs are not copied into
+work. The durable result spool is outside all container mounts.
+
+All bind mounts are worker-owned attempt directories, including the existing
+checkpoint and progress mounts. Caller bind mounts, `run.workdir`, Docker
+`--workdir`, `--user`, `--group-add`, all authored environment (`run.env`, sidecar
+`env`, Docker `--env`), NAS `inputs`, `shared_inputs`, prepared source and native
+environments are refused for this contract. Put configuration in hashed files
+or payload arguments. Images must already be local and digest-pinned; image
+defaults remain part of those immutable image bytes.
+
+The worker sets the container user to its own numeric UID:GID, drops all Linux
+capabilities and sets `no-new-privileges`. Private directories stay mode 0700;
+inputs are private copies, never writable shared cache blobs. Images must
+support this non-root numeric identity, readable application files and writable
+state beneath work/checkpoint/progress. A fixed image `USER` is overridden.
+Root-only entrypoints or incompatible user-namespace mappings fail visibly;
+the worker never widens permissions or uses privileged helpers to repair
+root-owned output. Existing device selection, limits, offline/private networks,
+start authorization and exact-attempt custody still apply.
+
+The daemon must access the worker's local paths. `--mount` refuses missing
+source directories; inspection checks exact sources, destinations and read-only
+mode before start and during observation. Images declaring `VOLUME` are refused
+before creation, avoiding anonymous host volumes. Remote-daemon and Docker Desktop path sharing are not assumed. Check
+the worker-local Docker refusal when a mount cannot be created.
+
+After every writer is proven stopped, the worker validates declared regular
+files, hashes and durably spools them, uploads through the normal verified file
+store and submits an attempt-specific result. Missing, escaping, non-regular or
+unreadable outputs fail the job. Upload/acknowledgement failures retain the
+spool and custody for replay, including restart; stale attempts cannot publish.
+Cleanup uses existing attempt-file and Docker retention after queue settlement.
+
+For a CPU example, use a joined Linux worker with `--docker-host
+unix:///var/run/docker.sock`. Prepare its image explicitly:
+
+```sh
+docker pull busybox:1.37.0
+docker image inspect busybox:1.37.0 --format '{{index .RepoDigests 0}}'
+printf 'hash-in hash-out\n' > data.txt
+myce file put data.txt
+```
+
+Substitute the returned file identity and image digest in `docker-files.yaml`
+(including the actual byte count printed by `myce file put`):
+
+```yaml
+name: docker-files
+project: demo
+priority: experiment
+submission_key: docker-files-example-v1
+files:
+  data.txt: {sha256: REPLACE_WITH_FILE_SHA256, size_bytes: 17}
+outputs: {answer.txt: results}
+run:
+  docker: true
+  command: [docker, run, "busybox@sha256:REPLACE_WITH_IMAGE_DIGEST", sh, -ec,
+            'cat /myce/inputs/data.txt > /myce/work/answer.txt']
+needs: {cpu_cores: 1, memory_gb: 0.125, platform: [cpu]}
+resumable: false
+```
+
+Run `myce submit docker-files.yaml`, wait for success, then use `myce result
+JOB_ID --out ./download`. The accepted `output_refs.answer.txt` must match
+`files.data.txt`. Reusing the same submission key and spec returns the same job;
+use a new key for changed inputs or commands. This proves CPU file transport;
+GPU runtime and application parity require their own qualification.
+
+## Transfer behavior
 
 `get` refuses an existing destination and retains a `.myce-partial` download
 beside it after interruption. Rerunning resumes it. A bad range response, byte
@@ -97,6 +178,93 @@ Final size/hash verification is mandatory. Workers retain local results until
 publication is acknowledged. The queue accepts output references only from the
 current successful attempt, after every referenced file is durable. A missing
 required output fails visibly. Late attempts cannot replace accepted output.
+
+## Recover outputs from a failed terminal attempt
+
+`myce result recover` attaches retained bytes as a **separate recovered result**,
+without rerunning the payload. The failed status, native outcome, cleanup and
+execution causes, release evidence and ordinary `output_refs` stay unchanged.
+Recovery verifies bytes **now**; it is not evidence of acceptance at execution
+completion or of application quality. Recovered results never satisfy
+dependencies or make `wait` succeed.
+
+Run from a machine with the retained regular files, including a mounted NAS.
+This uses installed queue authority; keep credentials out of argv. The directory
+contains declared output names, including relative subfolders:
+
+```sh
+myce result recover JOB_ID --files-from ./retained-outputs \
+  --key cleanup-recovery --by project-owner \
+  --source nas:project/results/attempt \
+  --reason 'Payload exited zero; cleanup inspection prevented output publication'
+```
+
+For different filenames or a subset of outputs, use repeated
+`--file 'answer.json=/mounted/source/answer.json'` instead of `--files-from`.
+Sources are read and uploaded, never changed. Symlinks and special files are
+refused. Automatic selection stays beneath `--files-from`, including parent
+directory resolution, and uploads retain the opened source file even if its
+pathname changes. `--source upload:LABEL` is the default source kind; `nas:RELATIVE_PATH`
+records an operator-asserted NAS origin. Source labels must be relative and omit
+private host paths and credentials. The queue does not open caller-selected NAS
+paths. Requester labels and reasons must be nonempty, without control characters.
+
+The CLI captures the exact job/attempt/machine/session before uploading; optional
+`--attempt N` checks an additional caller expectation. The queue checks that this
+is still the current failed terminal attempt and every name is a declared output,
+independently verifies SHA-256 and size in its store, then rechecks identity in
+the SQLite transaction. Hashing and filesystem sync happen outside the queue
+mutex. Ordinary upload capacity admission applies. Uploads abandoned before
+attachment use normal job-input orphan retention.
+
+The current API authenticates one fleet **operator** credential, without separate
+owner/project credentials. Recovery requires that authority, like existing queue
+mutations. `recovered_by: operator` is server assigned; `requested_by` (`--by`)
+identifies the requester asserted by that operator, not a separately authenticated
+account. Naming a project or requester grants no authority.
+
+The command prints immutable JSON with `kind: recovered`, `result_id`, exact
+execution identity, requester/source/reason, `recovered_at`, `expires_at`, file
+identities and `manifest_sha256` (SHA-256 of compact Go JSON for `files`, with
+sorted keys). Status and job GET expose `recovered_results` separately from
+ordinary accepted outputs. Repeat the same key and identical evidence to recover
+the same record, including after a lost response or byte expiry. Different
+evidence under the same key returns `409 recovery_conflict`. A new key appends
+evidence; it cannot replace or delete an earlier record.
+
+Download by explicitly selecting its ID through the usual verified transport:
+
+```sh
+myce result JOB_ID --recovered RESULT_ID --out ./recovered
+```
+
+This labels the download as recovered. Unqualified `myce result JOB_ID` continues
+to refuse the failed job. Bytes have a fresh `--file-retention` window (default
+seven days) beginning at recovery, even if original job files expired. Each
+`expires_at` is fixed at acceptance; changing retention does not revive expired
+bytes. Expired downloads return `410 result_expired`. Metadata and original job
+provenance remain indefinitely, exempt from history pruning. Keep unique source
+bytes separately: the queue store is one copy, not a backup.
+
+API:
+
+- `GET /api/jobs/JOB_ID/recovery-plan` returns exact failed execution identity and
+  declared output names, without worker paths or commands.
+- Upload bytes with the existing file API, then
+  `POST /api/jobs/JOB_ID/recovered-results` with `id`, `attempt`, `machine`,
+  `session`, `key`, `requested_by`, `source: {kind, location}`, `reason`, and
+  `files: {name: {sha256, size_bytes}}`. Caller hashes are expectations: the queue
+  hashes every referenced blob before acceptance.
+- `GET /api/jobs/JOB_ID/recovered-results/RESULT_ID` returns immutable metadata.
+  `?require_files=true` additionally enforces the recovery retention deadline.
+  Metadata lookup still works after expiry.
+
+Go provides `Client.RecoverResult`, `GetRecoveredResult`, and
+`DownloadRecoveredResult`. Python provides `Client.recover_result(job_id,
+files={name: local_path}, key=..., requested_by=..., reason=...,
+source={"kind": "nas", "location": "project/results/attempt"})`; download with
+`download_result(job_id, name, destination, recovered_result_id=result_id)`.
+Both helpers fence identity before uploads and allow size-based hashing time.
 
 ## Checkpoints and interrupted connections
 

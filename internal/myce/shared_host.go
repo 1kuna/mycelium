@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"runtime"
 	"slices"
@@ -69,6 +70,28 @@ func (q *Queue) sharedHostRoom(m *Machine, room, reserved, growth float64) float
 		m.SharedHostReason = "shared host profile awaiting worker acknowledgement"
 		return 0
 	}
+	if m.CapabilityProfile != nil && m.CapabilityProfile.OS == "linux" {
+		if _, dev := q.clock.(*devClock); !dev && m.SharedCPUEnforcement != fmt.Sprintf("cgroup v2 cpu.weight=10 cpu.max=%d/100000", m.CPUBudgetCores*100000) {
+			m.SharedHostReason = "shared host CPU time enforcement unavailable"
+			return 0
+		}
+	}
+	workers := 0
+	for _, other := range q.s.Machines {
+		if hostID(other) == hostID(m) && !other.Gone && !q.unreported[other.ID] && other.Replacement == nil {
+			workers++
+			if reason := q.sharedPressureReason(other); reason != "" {
+				m.SharedHostReason = reason
+				return 0
+			}
+		}
+	}
+	if m.CapabilityProfile != nil && m.CapabilityProfile.OS == "linux" && workers > 1 {
+		if _, dev := q.clock.(*devClock); !dev {
+			m.SharedHostReason = "shared host aggregate CPU control requires one machine worker"
+			return 0
+		}
+	}
 	h := q.externalMemoryStatus(hostID(m))
 	o := m.MemoryObservation
 	if !validHostMemoryObservation(o) || h == nil || h.Week.Samples == 0 {
@@ -89,6 +112,11 @@ func validHostMemoryObservation(o *HostMemoryObservation) bool {
 	return o != nil && validMemoryValue(o.TotalGB) && o.TotalGB > 0 && validMemoryValue(o.UsedGB) && o.UsedGB <= o.TotalGB && validMemoryValue(o.MyceliumGB) && o.MyceliumGB <= o.UsedGB
 }
 
+var sharedHostSetBackgroundPriority = func(pid int) error {
+	// Darwin sys/resource.h: PRIO_DARWIN_PROCESS, PRIO_DARWIN_BG.
+	return syscall.Setpriority(4, pid, 0x1000)
+}
+
 // The supervisor is still behind its execution gate. Its payload/descendants
 // inherit nice=10, leaving the worker's control goroutines at normal priority.
 func applySharedHostPriority(pid int, p *SharedHostProfile) error {
@@ -103,11 +131,17 @@ func applySharedHostPriority(pid int, p *SharedHostProfile) error {
 	if runtime.GOOS == "linux" {
 		priority = 20 - priority
 	}
-	if priority >= 10 {
-		return nil
+	if priority < 10 {
+		if err := syscall.Setpriority(syscall.PRIO_PROCESS, pid, 10); err != nil {
+			return fmt.Errorf("shared host command priority: %w", err)
+		}
 	}
-	if err := syscall.Setpriority(syscall.PRIO_PROCESS, pid, 10); err != nil {
-		return fmt.Errorf("shared host command priority: %w", err)
+	if runtime.GOOS == "darwin" {
+		// Darwin sys/resource.h. Apply only to the gated payload PID;
+		// background CPU/I/O/timer/network policy survives fork/exec.
+		if err := sharedHostSetBackgroundPriority(pid); err != nil {
+			log.Printf("warning: shared host background task policy for payload pid %d: %v", pid, err)
+		}
 	}
 	return nil
 }
@@ -115,7 +149,8 @@ func applySharedHostPriority(pid int, p *SharedHostProfile) error {
 // Launch rechecks current raw RAM. The queue retains the historical bound;
 // this check protects owner growth between assignment and execution.
 func (w Worker) sharedHostLiveMemory(ctx context.Context) (float64, error) {
-	if w.Machine.SharedHost == nil {
+	cuda := hostHasUnifiedCUDA(&w.Machine)
+	if w.Machine.SharedHost == nil && !cuda {
 		return w.HostMemorySource(ctx)
 	}
 	admission, raw, err := w.sampleHostMemory(ctx)
@@ -123,7 +158,18 @@ func (w Worker) sharedHostLiveMemory(ctx context.Context) (float64, error) {
 		return 0, err
 	}
 	if !validMemoryValue(raw) {
-		return 0, errors.New("shared host raw memory unavailable")
+		return 0, errors.New("raw host memory unavailable")
 	}
-	return max(0, min(admission, raw-w.Machine.SharedHost.InteractiveReserveGB)), nil
+	reserve := 0.0
+	if w.Machine.SharedHost != nil {
+		reserve = w.Machine.SharedHost.InteractiveReserveGB
+	}
+	if cuda {
+		floor, ok := unifiedCUDAFloor(&w.Machine)
+		if !ok {
+			return 0, errors.New("unified CUDA physical capacity unavailable")
+		}
+		reserve = max(reserve, floor)
+	}
+	return max(0, min(admission, raw-reserve)), nil
 }

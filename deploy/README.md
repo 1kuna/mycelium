@@ -1,5 +1,11 @@
 # Service templates
 
+> **Before queue cutover:** migrate preservation checks, including private
+> release scripts, to `/api/status?detail=full` or complete `jobs=all` pagination.
+> Bounded default status (#439) omits older completed jobs. Existing complete
+> `/api/inspection` collectors remain supported; see
+> [rolling fleet upgrades](../docs/operations.md#rolling-fleet-upgrades).
+
 The optional [xe GPU telemetry broker](gpu-telemetry/README.md) is a **root system
 service**, with a read-only unprivileged helper for workers retaining
 `NoNewPrivileges=yes`. It is installed separately from the user units below.
@@ -39,7 +45,7 @@ politeness settings. Device namespaces (even with
 The queue never opens GPU devices and refuses inherited GPU descriptors at
 startup; this is not an OS device-access sandbox. Verify it holds no GPU
 descriptors before accepting a queue. Worker units retain GPU access and
-`Delegate=memory`.
+`Delegate=memory cpu`.
 CUDA dedicated/auto inventory requires one selected device (or one device in
 unselected output); use a configured device and unique worker names on multi-GPU
 hosts. Unified-memory workers use OS telemetry; missing/invalid telemetry blocks

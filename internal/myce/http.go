@@ -28,6 +28,31 @@ func (a API) HandlerWithJoiningIdentity(pin string) http.Handler { return a.hand
 
 func (a API) handler(joiningPin string) http.Handler {
 	mux := newRequestMux()
+	// Joining needs authenticated identity/version only, never the growing status
+	// snapshot. Transport pinning authenticates this identity to joining clients.
+	mux.HandleFunc("GET /api/ping", func(w http.ResponseWriter, r *http.Request) {
+		respond(w, map[string]any{"version": 1, "fingerprint": joiningPin}, nil)
+	})
+	mux.HandleFunc("GET /api/environments", func(w http.ResponseWriter, r *http.Request) {
+		respond(w, a.Queue.EnvironmentEntries(), nil)
+	})
+	mux.HandleFunc("GET /api/environments/{name}", func(w http.ResponseWriter, r *http.Request) {
+		for _, entry := range a.Queue.EnvironmentEntries() {
+			if entry.Name == r.PathValue("name") {
+				respond(w, entry, nil)
+				return
+			}
+		}
+		respond(w, nil, &HTTPError{Status: 404, Code: "environment_unknown", Message: "unknown environment"})
+	})
+	mux.HandleFunc("GET /api/environments/{key}/reference", func(w http.ResponseWriter, r *http.Request) {
+		key := r.PathValue("key")
+		if (FileRef{SHA256: key}).validate() != nil {
+			respond(w, nil, errors.New("invalid environment key"))
+			return
+		}
+		respond(w, map[string]bool{"referenced": a.Queue.environmentReferenced(r.Context(), key)}, nil)
+	})
 	mux.HandleFunc("GET /api/portability", func(w http.ResponseWriter, r *http.Request) {
 		report, err := a.Queue.Portability(PortabilityRequest{Extension: r.URL.Query().Get("extension"), Project: r.URL.Query().Get("project")})
 		respondOperation(w, report, err, "portability_invalid")
@@ -46,12 +71,14 @@ func (a API) handler(joiningPin string) http.Handler {
 	a.registerFleetUpgrade(mux)
 	a.registerDevClock(mux)
 	mux.HandleFunc("POST /api/files/result", a.deliveryResultHandler)
+	a.registerRecoveredResults(mux)
 	a.registerHostMaintenance(mux)
 	a.registerDeviceMaintenance(mux)
 	a.registerComponentExclusions(mux)
 	a.registerReservations(mux)
 	a.registerPriorityPolicy(mux)
 	a.registerFiles(mux)
+	a.registerFileRelease(mux)
 	mux.HandleFunc("POST /api/extensions", func(w http.ResponseWriter, r *http.Request) {
 		var e Extension
 		if !decode(w, r, &e) {
@@ -110,7 +137,23 @@ func (a API) handler(joiningPin string) http.Handler {
 		_ = statusPage.Execute(w, s)
 	})
 	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
-		data, err := a.Queue.cachedStatusJSON(r.Context())
+		options, err := parseStatusOptions(r.URL.Query())
+		if err != nil {
+			respond(w, nil, err)
+			return
+		}
+		var data string
+		if len(r.URL.Query()) == 0 {
+			data, err = a.Queue.cachedStatusJSON(r.Context())
+		} else {
+			var snapshot Snapshot
+			snapshot, err = a.Queue.publicStatusSnapshot(&options, r.Context())
+			if err == nil {
+				var encoded []byte
+				encoded, err = json.Marshal(snapshot)
+				data = string(encoded)
+			}
+		}
 		w.Header().Add("Vary", "Accept-Encoding")
 		if err == nil {
 			w.Header().Set("Content-Type", "application/json")
@@ -428,6 +471,7 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
+	fileStoreSubmissionHeaders(ctx, req)
 	req.Header.Set("Content-Type", "application/json")
 	if workerProtocolEndpoint(path) {
 		req.Header.Set("X-Myce-Start-Gate", startGateProtocol)

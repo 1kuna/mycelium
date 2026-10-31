@@ -9,6 +9,75 @@ The page and `GET /api/status` share a snapshot for up to one second. Job receip
 polls (`GET /api/jobs/{id}`) read the requested job afresh. Status snapshots do
 not drive start authorization, cancellation or result publication.
 
+Default status keeps the existing JSON fields and job shape, but includes all
+nonterminal jobs and terminal jobs with pending cleanup/delivery, plus the newest
+100 other terminal jobs by submission time. Work curves remain included for
+existing consumer audits and release-preservation guards.
+This bounds retained-history detail without hiding control-plane custody.
+`jobs_page` ([schema](schemas/status-jobs-page-v1.schema.json)) reports the
+filtered `total`, `returned`, `mode`, and optional `next_before` job ID.
+
+- `GET /api/status?jobs=active` returns all active/cleanup-pending jobs.
+- `?jobs=all&limit=100` pages all history, newest submission first; append
+  `&before=NEXT_BEFORE` from each reply until that field is absent. `limit` is
+  1–1000 and defaults to 100. The normal status presentation order is retained
+  within each page; use the returned cursor rather than the last displayed ID.
+- `?project=example&since=2026-10-30T00:00:00Z` filters jobs by project and
+  inclusive submission timestamp. Filters do not alter fleet health, eligibility
+  or queue order. Keep filters and mode unchanged when paging. Cursors require
+  their job to remain retained; an expired/unknown cursor returns HTTP 400
+  `status_query_invalid`, so restart that listing.
+- `?detail=full` restores all retained jobs and work curves without a job limit.
+  CLI `myce status --history` and Python `client.status(full=True)` use this
+  supported expensive view. `--full` still means full job IDs.
+
+Python `client.status()` uses the bounded default; `client.list()` walks bounded
+`jobs=all` pages and retains its all-jobs contract. Both also work with older
+queues, which ignore the new query parameters and return their legacy snapshot.
+Old clients can decode the new status shape, but their list/status views now
+contain the bounded history. Upgrade the CLI for access to older historical IDs:
+`myce status JOB` and `myce logs JOB --follow` read the job endpoint directly,
+including prefix resolution, independently of aggregate status retention/cache.
+Logs follow polls only the selected job and drains a final log page on completion.
+
+Release-preservation tools should request `GET /api/status?detail=full` (or
+Python `client.status(full=True)`) for both snapshots: curve provenance can
+depend on completed jobs outside the default history window. Curves remain in
+default status for existing callers, but that view is not a complete job ledger.
+
+Only the unfiltered default shares the one-second cache. Filtered/full reads are
+fresh. Snapshot capture keeps scheduling inputs and dependency state under the
+queue lock; projection, usage queries, file inventory, encoding the reply and
+compression run after release. No bulk file or network I/O runs under `q.mu`.
+
+Jobs with explicitly recovered outputs expose an append-only `recovered_results`
+list in status and job GET. Each record has `kind: recovered`, its own result ID,
+exact failed execution, recovery-time verification identities and operator
+provenance. CLI status lists these separately and keeps the original failed
+state. Ordinary `output_refs`, attempt outcomes, cleanup causes and dependency
+eligibility remain unchanged. See [recover failed-attempt outputs](guide-files-v3.md#recover-outputs-from-a-failed-terminal-attempt)
+for the explicit recovery/download commands and independent byte retention.
+
+Job GET and status job rows expose a privacy projection in `spec`, not the
+submitted spec. They include `spec_projection: {"projected": true, "omitted": [...]}`.
+`omitted` lists paths relative to `spec` that the projection strips, regardless
+of whether those fields were submitted. In particular, absent `spec.files`
+**does not mean no files were submitted**. The same metadata is available through
+Python `Client.get()` and `Client.list()`.
+
+The projection strips these entire fields: `after`, `args`, `diagnostics`,
+`disk`, `environment`, `execution`, `expected_minutes`, `extension`,
+`extension_digest`, `fan_out`, `files`, `give_up_at`, `inputs`, `isolation`,
+`output_delivery`, `outputs`, `prepare_source`, `profile_memory`,
+`reason`, `require_target`, `run`, `shared_inputs`, `size_hint`, and `targets`.
+Status rows additionally strip `submission_key`; job GET retains it. Within `program`, it strips `args` and `file`, retaining only
+`type`. Within `extension_check`, it strips `automatic`, `directory` and
+`reserve`, retaining only `work` and `timeout`. Some stripped fields encode
+empty or zero placeholders because of their JSON types; those placeholders do
+not preserve submitted values. Other retained fields still follow normal JSON
+`omitempty` rules. This metadata does not expose commands, environment values,
+file references or credentials. There is no full-spec read mode.
+
 Native stage exceptions appear in job `isolation` as
 `unsandboxed: <reason>` in status JSON and job GET; CLI/page reasons include the
 same text through queued, running and terminal outcomes. Legacy registrations
@@ -225,6 +294,23 @@ queue reopen retain the diagnosis. Older attempts without recorded predicates
 cannot recover it. Workdir containment remains a worker-side launch check because
 it resolves the actual managed workspace and symlinks on that host.
 
+Memory admission refusals additionally retain `execution_cause.admission` with
+the worker's failed `subcheck`, `required`, `available` and `unit`, plus the
+attempt's `envelope_source`, `envelope_host_gb` and `envelope_device_gb`.
+Subchecks distinguish local device/job reservations, device budget, aggregate
+CPU/host allowances, configured host allowance, live host RAM/growth, live GPU
+memory and unavailable shared CPU control. An unavailable probe/configuration
+sets `unavailable: true` and omits `available`; no raw probe errors are retained.
+These values are captured on the worker outside the queue lock and survive
+requeue, acknowledgement and replacement of the current envelope. Queue logs
+include the same comparison in `detail`.
+
+A modern worker also records `prelaunch_refused: true` only for a persisted
+native refusal before custody or launch intent. An exact released copy with
+that proof and no queue-recorded start/custody preserves ledger completeness,
+including a release-only acknowledgement before the final outcome. Missing
+process identity without this proof remains conservatively incomplete.
+
 History preserves the existing outcome classification: `launch` causes include
 `launch_refused`, `launch_failed` and `environment_failed`; `polite_stop` marks
 availability withdrawal or a queue-recorded planned stop (leaving or making
@@ -293,6 +379,19 @@ swap peaks. A zero-OOM/swap/max-hit claim requires those readings to be present
 and zero; an absent reading cannot support that claim. These observations do
 not imply acceptance into learning or prove execution release.
 
+CUDA/XPU cgroup attempts sample device use every five seconds, including declared
+jobs, checks and resumed attempts that cannot feed learning. CUDA uses NVIDIA's
+per-process `compute-apps` counters; GPU-wide `memory.used` can be unsupported
+on unified-memory devices while these process counters work. `device_gb` is a
+sampled lower bound, not a retained allocator maximum. When no usable sample is
+retained, `device_unavailable` explains missing process samples, unsupported or
+invalid accounting, unavailable process inventory/cgroups, or sampler shutdown
+timeout. Older workers may omit both fields; historical peaks cannot be recovered.
+These diagnostics grant no learning eligibility or accounting reduction. Shared
+physical RAM alone does not establish cgroup coverage: GB10 CUDA allocations can
+exceed the job's current cgroup charge. Unified admission retains conservative
+host plus device reservations and existing slack until overlap is qualified.
+
 Production job summaries and the [job-v1 reply](schemas/job-v1.schema.json) may
 include `infrastructure_retries`, the durable number of infrastructure requeues
 already used. It is an optional nonnegative integer, omitted at zero, with a
@@ -353,6 +452,43 @@ current qualified measurements of already-running production waves. Unlaunched
 pieces, unknown/stale measurements and overruns provide no forecast; only the
 preemption back-off applies. Warm environments incur no preparation cost. These
 admission checks do not enable a disabled production hold or stop Started work.
+
+Unified CUDA admission also protects memory for queued production whose sole
+qualified physical destination is that host, including declared dependent stages
+with an existing production-arrival forecast. The co-tenant charge plus the
+production envelope must fit the host ledger and live physical headroom. The
+envelope retains declared host/device floors and accepted measured peaks with
+the estimator's existing margins (at least 1.25), plus per-attempt slack. A bound
+production job recognizes alternatives only under the existing exact-work
+`production_parity_hosts` approval and fresh, immediate admission proof. Smaller co-tenants can fit; cancellation
+removes the demand. Envelopes that exceed the host's maximum physical admission
+capacity do not withhold co-tenants indefinitely. A dependent-stage forecast
+expires when the measured producer overruns. No prediction of future,
+unsubmitted jobs is made.
+
+The physical free-RAM floor is **max(existing unified-CUDA reserve, physical RAM
+minus the configured host allowance)**. The existing OS/driver reserve is at
+least 16 GiB; a larger configured device reserve is retained. Similarly,
+a tighter operator allowance retains the larger remainder, providing additional
+room for driver allocations, fragmentation and outside growth. For example,
+121.064556 GiB physical RAM and a 96 GiB allowance yield a 25.064556 GiB floor
+(9.064556 GiB beyond the existing reserve). This is a conservative admission
+policy, not a measured guarantee against driver allocation failures. It costs
+co-tenancy capacity when unmanaged memory uses that remainder. Native
+coexistence/fragmentation qualification remains separate.
+
+The queue checks raw physical availability from the existing host-memory
+observation, subtracting this floor and outstanding reservation growth; the
+worker rechecks raw RAM before command/model launch. Missing or five-second-old
+check-in observations withhold new admission until refreshed, bounding stale
+credit at the cost of temporarily idle capacity. Full reservations still bound
+the static allowance. Cgroup current memory can credit only the host portion of
+a unified CUDA reservation: the device portion always remains charged in full,
+including when device telemetry is missing. No CUDA/cgroup overlap is qualified.
+The external-RSS history is not added to reservations; raw available RAM already
+reflects both managed and unmanaged usage. Discrete CUDA and other platforms
+retain their existing memory admission rules. Production priority and takeover
+rules are unchanged.
 
 Host gates should read `holds_detail`, an array (empty when there are no holds)
 whose entries have `host`, `kind`, `operator_action_required`, `text` and an
@@ -619,9 +755,16 @@ Shared hosts retain `last_resort: true`. `free_host_memory_gb` additionally resp
 the seven-day external peak and protected reserve, without increasing the static
 allowance. No samples means withheld admission. Missing `shared_host` normally
 means no profile; compare queue policy before interpreting an old worker's row.
-CPU nice=10 is native command priority, not CPU-time enforcement. OS pressure
-and interactive-load preemption remain unimplemented (#390). See
-[shared hosts](shared-hosts.md) for measurement, eligibility and removal semantics.
+
+Shared-profile hosts also report `shared_host_pressure` (OS memory level/PSI,
+foreground wake lateness, local age and queue receipt time),
+`shared_host_yield_reason` (the queue-owned hysteresis latch), and
+`shared_cpu_enforcement`. A pressure reason withholds admission and marks exact
+attempts with `shared_host_pressure` planned-stop provenance. Unknown/stale
+observations block admission without becoming measured pressure. Linux reports
+the actual delegated quota/weight; macOS explicitly reports CPU time unenforced.
+See [shared-host thresholds and qualification](shared-hosts.md#pressure-response).
+
 
 ## Execution elapsed time, remaining estimates, and application progress
 
@@ -682,3 +825,47 @@ portable recovery, qualifies an extension or contributes throughput history.
 The CPU case of `TestDevStandaloneSmoke` exercises credential-free reporting
 through `myce dev`, observes it in Job/status replies, then completes the command
 through the normal result and release path.
+
+### Authored intent and retained placement
+
+Job GET, status and inspection expose `placement_intent`, frozen at submission
+before recipe defaults or scheduler assignment change the executable spec:
+
+- `scope`: `work_resources`, `platform_constraints`, or `host_device_restriction`,
+  describing caller constraints; recipe metadata remains separate.
+- `origin: authored`; `host_constraint` distinguishes no restriction, a single
+  pin, and an allowlist. `device_constraint` identifies an explicit selector.
+- Exact authored `targets` (OS/architecture/backend), required/preferred backends,
+  and recipe targets with authored device selectors. These finite platform
+  fields omit commands, local paths, environment contents and arbitrary reasons.
+- `environment` records coverage and its catalog, inline submission, or extension snapshot origin.
+  `targets` means exact target coverage; `platforms_only` means backend coverage
+  with OS/architecture unknown; `unknown` and `not_required` are explicit.
+  Main/sidecar catalog coverage is their intersection. Extension coverage is its
+  frozen variant target list, not proof that a worker is ready now.
+- `qualification` records whether qualified execution is required. Owner output
+  `parity` stays `unknown`: neither a pin nor registration proves MY-19 parity.
+
+`placement` records the historical scheduler assignment: attempt, assignment
+queue time, host/devices, the existing scarcity/completion planner `reason`, and
+`limited_by` constraint categories. `host_choice` distinguishes `authored_pin`,
+`scheduler_with_authored_constraint`, and `scheduler`; `device_choice` similarly
+identifies authored selectors (including recipe selectors) versus scheduler
+selection. A selector/allowlist restricts alternatives; the scheduler still
+chooses within the permitted set. Project policy and production binding appear
+as separate limiting categories.
+
+Each assigned ledger entry and retained attempt outcome carries that same
+historical decision. Requeues retain it with its original attempt number; a new
+assignment replaces the job's latest decision. The existing paginated job ledger
+retains older assignments under normal history retention. `eligible_hosts` and
+related fields remain a **current policy/eligibility projection**, not evidence
+of what was eligible at a past assignment or a promise of current capacity.
+
+`production_binding` reports the current queue binding with `origin: scheduler`;
+it never establishes an authored host pin. Old jobs lacking submission/assignment
+provenance explicitly report unknown intent and omit historical placement;
+status does not reconstruct intent from `production_host` or current eligibility.
+These fields are observational and do not change placement or qualification.
+See [the job schema](schemas/job-v1.schema.json) and
+[ledger schema](schemas/job-ledger-v1.schema.json).

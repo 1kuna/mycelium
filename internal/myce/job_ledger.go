@@ -16,22 +16,24 @@ type JobLedgerInfo struct {
 }
 
 type JobLedgerEntry struct {
-	Sequence        int        `json:"sequence"`
-	At              time.Time  `json:"at"`
-	Attempt         int        `json:"attempt"`
-	ExecutionID     string     `json:"execution_id"`
-	ProcessID       string     `json:"process_id,omitempty"`
-	SupervisorPID   int        `json:"supervisor_pid,omitempty"`
-	SupervisorBirth string     `json:"supervisor_birth,omitempty"`
-	Machine         string     `json:"machine"`
-	Session         string     `json:"session"`
-	Kind            string     `json:"kind"`
-	Reason          string     `json:"reason"`
-	State           string     `json:"state,omitempty"`
-	Release         string     `json:"release"`
-	CustodyID       string     `json:"custody_id,omitempty"`
-	CustodyStart    *time.Time `json:"custody_start,omitempty"`
-	CustodyEnd      *time.Time `json:"custody_end,omitempty"`
+	Placement       *PlacementDecision  `json:"placement,omitempty"`
+	WorkLearning    *WorkLearningChange `json:"work_learning,omitempty"`
+	Sequence        int                 `json:"sequence"`
+	At              time.Time           `json:"at"`
+	Attempt         int                 `json:"attempt"`
+	ExecutionID     string              `json:"execution_id"`
+	ProcessID       string              `json:"process_id,omitempty"`
+	SupervisorPID   int                 `json:"supervisor_pid,omitempty"`
+	SupervisorBirth string              `json:"supervisor_birth,omitempty"`
+	Machine         string              `json:"machine"`
+	Session         string              `json:"session"`
+	Kind            string              `json:"kind"`
+	Reason          string              `json:"reason"`
+	State           string              `json:"state,omitempty"`
+	Release         string              `json:"release"`
+	CustodyID       string              `json:"custody_id,omitempty"`
+	CustodyStart    *time.Time          `json:"custody_start,omitempty"`
+	CustodyEnd      *time.Time          `json:"custody_end,omitempty"`
 }
 
 type JobLedgerPage struct {
@@ -101,6 +103,16 @@ func (q *Queue) JobLedger(id string, after, highWater, limit int, requestContext
 	copy(entries, j.LedgerEntries[after:end])
 	// Timestamp pointers belong to immutable entries and are copied for callers.
 	for i := range entries {
+		if entries[i].WorkLearning != nil {
+			change := *entries[i].WorkLearning
+			entries[i].WorkLearning = &change
+		}
+		if entries[i].Placement != nil {
+			p := *entries[i].Placement
+			p.Devices = slices.Clone(p.Devices)
+			p.LimitedBy = slices.Clone(p.LimitedBy)
+			entries[i].Placement = &p
+		}
 		if entries[i].CustodyStart != nil {
 			at := *entries[i].CustodyStart
 			entries[i].CustodyStart = &at

@@ -2,8 +2,33 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$ref": "#/$defs/JobLedgerPage",
   "$defs": {
+    "ExecutionTarget": {
+      "properties": {
+        "os": {
+          "type": "string"
+        },
+        "arch": {
+          "type": "string"
+        },
+        "platform": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "os",
+        "arch",
+        "platform"
+      ]
+    },
     "JobLedgerEntry": {
       "properties": {
+        "placement": {
+          "$ref": "#/$defs/PlacementDecision"
+        },
+        "work_learning": {
+          "$ref": "#/$defs/WorkLearningChange"
+        },
         "sequence": {
           "type": "integer"
         },
@@ -101,6 +126,154 @@
         "next",
         "has_more",
         "entries"
+      ]
+    },
+    "ObservationKey": {
+      "properties": {
+        "server_digest": {
+          "type": "string"
+        },
+        "allowance": {
+          "type": "string"
+        },
+        "work": {
+          "type": "string"
+        },
+        "extension_digest": {
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/ExecutionTarget"
+        },
+        "reference": {
+          "$ref": "#/$defs/WorkReference"
+        },
+        "host": {
+          "type": "string"
+        },
+        "component": {
+          "type": "string"
+        },
+        "hardware": {
+          "type": "string"
+        },
+        "fingerprint": {
+          "type": "string"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "configuration": {
+          "type": "string"
+        },
+        "concurrency": {
+          "type": "integer"
+        },
+        "batch_size": {
+          "type": "integer"
+        }
+      },
+      "type": "object",
+      "required": [
+        "work",
+        "extension_digest",
+        "target",
+        "reference",
+        "host",
+        "component",
+        "hardware",
+        "fingerprint",
+        "environment",
+        "configuration",
+        "concurrency",
+        "batch_size"
+      ]
+    },
+    "PlacementDecision": {
+      "properties": {
+        "origin": {
+          "type": "string"
+        },
+        "attempt": {
+          "type": "integer"
+        },
+        "assigned_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "host": {
+          "type": "string"
+        },
+        "devices": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "host_choice": {
+          "type": "string"
+        },
+        "device_choice": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "limited_by": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object",
+      "required": [
+        "origin",
+        "attempt",
+        "assigned_at",
+        "host",
+        "host_choice",
+        "device_choice",
+        "reason",
+        "limited_by"
+      ]
+    },
+    "WorkLearningChange": {
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/ObservationKey"
+        },
+        "before": {
+          "type": "string"
+        },
+        "after": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "key",
+        "before",
+        "after"
+      ]
+    },
+    "WorkReference": {
+      "properties": {
+        "input_shape": {
+          "type": "string"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "units": {
+          "type": "number"
+        }
+      },
+      "type": "object",
+      "required": [
+        "input_shape",
+        "unit",
+        "units"
       ]
     }
   }

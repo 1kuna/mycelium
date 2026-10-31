@@ -61,7 +61,7 @@ func (q *Queue) deviceUsage(m *Machine) []usageSample {
 	rows := []usageSample{}
 	active, allocated := 0, 0
 	for _, j := range q.liveJobs() {
-		if (batchOnTarget(j, m) || m.Devices != nil && m.GPU == "cpu" && j.Machine == m.ID && j.Spec.Needs.cpuOnly()) && (j.State == "running" || j.State == "stopping") {
+		if (batchOnTarget(j, m) || m.Devices != nil && m.GPU == "cpu" && j.Machine == m.ID && j.Spec.Needs.cpuOnly()) && batchReservesCapacity(j) {
 			busy, fair := 0.0, 1.0
 			if j.Spec.Needs.cpuOnly() {
 				fair = float64(j.Spec.Needs.cores())
@@ -236,7 +236,20 @@ func maxTime(a, b time.Time) time.Time {
 	return b
 }
 func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
-	tx, e := q.db.Begin()
+	var tx *sql.Tx
+	var e error
+	if timing != nil && timing.measureWriter {
+		// Keep the existing transaction and lock order; only separate pool
+		// acquisition from SQL work for the instruction request's slow span.
+		conn, err := timing.writer(q.db, q.clock)
+		if err != nil {
+			return err
+		}
+		defer conn.Close()
+		tx, e = conn.BeginTx(context.Background(), nil)
+	} else {
+		tx, e = q.db.Begin()
+	}
 	if e != nil {
 		return e
 	}

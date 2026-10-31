@@ -43,7 +43,9 @@ func hostFitFailure(m *Machine, gpu, host float64) string {
 		if strings.HasPrefix(m.MemoryEnforcement, "memory ceilings enforced") || m.HostMemoryBudgetGB != 0 || m.hostBudgetGB != 0 {
 			return "host memory declaration is 0 GiB; allowance or enforced ceilings require a positive declaration"
 		}
-		return ""
+		if !unifiedCUDA(m) || gpu == 0 {
+			return ""
+		}
 	}
 	if !m.HostMemoryMeasured || m.HostMemoryError != "" {
 		return "host memory capacity unavailable"
@@ -101,7 +103,7 @@ func (q *Queue) refreshHostMemory() {
 			if !j.ReleaseConfirmed && owner != nil && hostID(owner) == hostID(m) && (j.State == "running" || j.State == "stopping") {
 				need := hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
 				reserved += need
-				growth += remainingHostGrowth(need, q.hostMemorySamples[j.Machine][jobKey(*j)], q.clock.Now())
+				growth += remainingAllocationGrowth(owner, j.Spec.Needs.MemoryGB, need, q.hostMemorySamples[j.Machine][jobKey(*j)], q.clock.Now())
 			}
 		}
 		for _, r := range q.s.HostReleases {
@@ -109,7 +111,7 @@ func (q *Queue) refreshHostMemory() {
 				continue
 			}
 			j := q.s.Jobs[r.Job]
-			if j != nil && j.Machine == r.Machine && j.Session == r.Session && j.Attempt == r.Attempt && (j.State == "running" || j.State == "stopping") {
+			if j != nil && j.Machine == r.Machine && j.Session == r.Session && j.Attempt == r.Attempt && batchReservesCapacity(j) {
 				continue
 			}
 			reserved += r.HostChargeGB
@@ -128,6 +130,7 @@ func (q *Queue) refreshHostMemory() {
 		// Availability already has the operator reserve removed. Full envelopes
 		// still consume the static budget; only unused growth consumes live RAM.
 		room := available - growth
+		room = q.unifiedCUDAHostRoom(m, room, growth)
 		if m.hostBudgetGB > 0 {
 			room = min(room, m.hostBudgetGB-reserved)
 		}
@@ -357,7 +360,7 @@ func (q *Queue) reclaimableGPUMemory(m *Machine, priority string, identity ...Sp
 		}
 	}
 	for _, j := range q.liveJobs() {
-		if batchOnTarget(j, m) && (j.State == "running" || j.State == "stopping") && q.batchPreemptible(j, demand) {
+		if batchOnTarget(j, m) && q.batchPreemptible(j, demand) {
 			room += j.Spec.Needs.MemoryGB
 		}
 	}

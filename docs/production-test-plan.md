@@ -4,6 +4,13 @@ Use an explicitly authorized maintenance window. Laptop fixtures prove queue,
 API and command mechanics. Native GPU, daemon, manager, memory and boot behavior
 need separate evidence. Keep host identity, paths, payloads and secrets private.
 
+> **Before queue cutover:** preservation checks must use
+> `/api/status?detail=full` or complete `jobs=all` pagination, including private
+> release-script copies. Default status (#439) can omit older completed jobs;
+> omissions cannot prove preservation or release. Existing complete
+> `/api/inspection` collectors remain supported. See
+> [rolling fleet upgrades](operations.md#rolling-fleet-upgrades).
+
 Record binary SHA/digest, config and secret references, device selection, manager
 state and a recoverable rollback snapshot. Preserve current work and competing
 owners. Verify NAS mount identity or verified file transport; qualify actual

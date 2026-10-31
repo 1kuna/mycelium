@@ -596,5 +596,29 @@ print(f"saved {n}", flush=True)
         self.assertRegex(logs, r"loaded [1-9][0-9]*; attempt 2")
 
 
+
+
+class StatusPagingTests(unittest.TestCase):
+    def test_status_default_full_and_paged_list(self):
+        client = Client("http://queue.example", "fixture")
+        with patch.object(client, "_call", return_value={}) as call:
+            client.status()
+            call.assert_called_with("GET", "/api/status")
+            client.status(full=True)
+            call.assert_called_with("GET", "/api/status?detail=full")
+        with patch.object(client, "_call", side_effect=[
+                {"jobs": [{"id": "new"}], "jobs_page": {"next_before": "new"}},
+                {"jobs": [{"id": "old"}], "jobs_page": {}},
+        ]) as call:
+            self.assertEqual([j["id"] for j in client.list(project="example")], ["new", "old"])
+            self.assertEqual([c.args[1] for c in call.call_args_list], [
+                "/api/status?jobs=all&project=example",
+                "/api/status?jobs=all&project=example&before=new",
+            ])
+        # Older queues ignore the filter but return their complete legacy list.
+        with patch.object(client, "_call", return_value={"jobs": [{"id": "old-queue"}]}):
+            self.assertEqual(client.list(), [{"id": "old-queue"}])
+
+
 if __name__ == "__main__":
     unittest.main()

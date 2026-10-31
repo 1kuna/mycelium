@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tus/tusd/v2/pkg/filelocker"
@@ -79,6 +80,15 @@ func identifyFileContext(ctx context.Context, path string) (FileRef, error) {
 		return FileRef{}, err
 	}
 	defer f.Close()
+	return IdentifyOpenFile(ctx, f)
+}
+
+// IdentifyOpenFile hashes a regular file through its already-open handle.
+// The caller retains ownership; identification starts at offset zero.
+func IdentifyOpenFile(ctx context.Context, f *os.File) (FileRef, error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return FileRef{}, err
+	}
 	st, err := f.Stat()
 	if err != nil {
 		return FileRef{}, err
@@ -112,20 +122,24 @@ func verifyFile(ctx context.Context, path string, ref FileRef) error {
 }
 
 type FileStore struct {
-	reservedOutputs func(map[string]storedPayload) uint64
-	diskProbe       func(string) (DiskReading, error)
-	root            string
-	limit           int64
-	mu              sync.Mutex
-	handler         http.Handler
-	uploadLocker    tus.Locker
-	syncDir         func(string) error // Durability failure injection.
-	expired         func(string, ...context.Context) bool
-	lifecycle       *sync.RWMutex
-	clock           Clock
-	recordUpload    func(hash, purpose string, created bool, contexts ...context.Context) error
-	publishUpload   func(hash string, contexts ...context.Context) error
-	recordBundle    func(hash string, created bool, contexts ...context.Context) error
+	unidentifiedReserveAdmitted atomic.Uint64
+	checkAttempt                func(context.Context) error
+	productionReserve           uint64
+	admit                       func(context.Context, FileStoreStatus, map[string]storedPayload, FileManifest, uint64, uint64) (uint64, error)
+	reservedOutputs             func(map[string]storedPayload) uint64
+	diskProbe                   func(string) (DiskReading, error)
+	root                        string
+	limit                       int64
+	mu                          sync.Mutex
+	handler                     http.Handler
+	uploadLocker                tus.Locker
+	syncDir                     func(string) error // Durability failure injection.
+	expired                     func(string, ...context.Context) bool
+	lifecycle                   *sync.RWMutex
+	clock                       Clock
+	recordUpload                func(hash, purpose string, created bool, contexts ...context.Context) error
+	publishUpload               func(hash string, contexts ...context.Context) error
+	recordBundle                func(hash string, created bool, contexts ...context.Context) error
 }
 type FileConfig struct {
 	Checkpoints bool `json:"checkpoints"`
@@ -140,7 +154,7 @@ type fileStoreConfiguration struct {
 // Stored inputs and their results use the queue file store independently of
 // checkpoint mode. FileTransport continues to select file-store checkpoints.
 func (j Job) storedFileResults() bool {
-	if j.Spec.OutputDelivery == asyncNAS || j.FileTransport || len(jobInputFiles(&j)) > 0 {
+	if dockerFileJob(j.Spec) || j.Spec.OutputDelivery == asyncNAS || j.FileTransport || len(jobInputFiles(&j)) > 0 {
 		return true
 	}
 	for _, input := range j.Spec.SharedInputs {
@@ -152,6 +166,9 @@ func (j Job) storedFileResults() bool {
 }
 
 func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) error {
+	if q.fileStoreProductionReserve < 0 || q.fileStoreProductionReserve > limit {
+		return errors.New("file store production reserve must be between zero and the store limit")
+	}
 	if limit <= 0 {
 		return errors.New("file store limit must be positive")
 	}
@@ -174,7 +191,7 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 			return err
 		}
 	}
-	s := &FileStore{reservedOutputs: q.reservedOutputBytes, root: root, limit: limit, syncDir: syncWorkerDir, expired: q.expiredBlob, lifecycle: &q.fileLifecycle, clock: q.clock, recordUpload: q.recordFileUpload, publishUpload: q.publishFileUpload, recordBundle: q.recordBundleUpload}
+	s := &FileStore{checkAttempt: q.checkFileStoreAttempt, productionReserve: uint64(q.fileStoreProductionReserve), admit: q.admitFileUpload, reservedOutputs: q.reservedOutputBytes, root: root, limit: limit, syncDir: syncWorkerDir, expired: q.expiredBlob, lifecycle: &q.fileLifecycle, clock: q.clock, recordUpload: q.recordFileUpload, publishUpload: q.publishFileUpload, recordBundle: q.recordBundleUpload}
 	fs := filestore.New(filepath.Join(root, "uploads"))
 	fs.DirModePerm = 0700
 	fs.FileModePerm = 0600
@@ -287,6 +304,16 @@ func (s *FileStore) publish(ctx context.Context, ref FileRef) error {
 	return s.syncDir(filepath.Join(s.root, "uploads"))
 }
 func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
+	var err error
+	r, err = fileStoreSubmissionRequest(r)
+	if err != nil {
+		respond(w, nil, reject("job_spec_invalid", err))
+		return
+	}
+	if err := s.checkAttempt(r.Context()); err != nil {
+		respond(w, nil, err)
+		return
+	}
 	// Fence upload publication against unlink without serializing other uploads.
 	s.lifecycle.RLock()
 	defer s.lifecycle.RUnlock()
@@ -377,7 +404,8 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	payloads[hash] = storedPayload{length: uint64(length)}
 	need := addDiskBytes(uint64(length), s.reservedOutputs(payloads))
-	if err := fileStoreRefusal(status, need); err != nil {
+	unidentified, err := s.admit(r.Context(), status, payloads, FileManifest{"upload": ref}, need, uint64(length))
+	if err != nil {
 		respond(w, nil, err)
 		return
 	}
@@ -386,7 +414,11 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unindexed upload requires operator recovery", 409)
 		return
 	}
-	s.handler.ServeHTTP(w, r)
+	response := &uploadResponse{ResponseWriter: w}
+	s.handler.ServeHTTP(response, r)
+	if response.status == http.StatusCreated {
+		s.unidentifiedReserveAdmitted.Add(unidentified)
+	}
 	if err := s.refreshUpload(hash); err != nil {
 		log.Printf("upload freshness unavailable: %v", err)
 	}
@@ -485,6 +517,12 @@ func (a API) registerFiles(mux *requestMux) {
 		return
 	}
 	mux.HandleFunc("POST /api/files/preflight", func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		r, err = fileStoreSubmissionRequest(r)
+		if err != nil {
+			respond(w, nil, reject("job_spec_invalid", err))
+			return
+		}
 		var files FileManifest
 		if !decode(w, r, &files) {
 			return
@@ -604,6 +642,7 @@ func (c Client) fileRequest(ctx context.Context, method, path string, body io.Re
 	if err != nil {
 		return nil, err
 	}
+	fileStoreSubmissionHeaders(ctx, req)
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	for k, v := range headers {
 		req.Header.Set(k, v)
@@ -749,10 +788,32 @@ func (c Client) UploadJobInput(ctx context.Context, path string, ref FileRef) er
 	return c.uploadFile(ctx, path, ref, jobInputUploadPurpose)
 }
 
+// UploadJobInputFile uploads from an open handle without reopening a pathname.
+// The caller owns the handle. Its bytes must still match the identified ref.
+func (c Client) UploadJobInputFile(ctx context.Context, f *os.File, ref FileRef) error {
+	actual, err := IdentifyOpenFile(ctx, f)
+	if err != nil {
+		return err
+	}
+	if actual != ref {
+		return errors.New("file changed before upload")
+	}
+	return c.uploadFileReader(ctx, f, ref, jobInputUploadPurpose)
+}
+
 func (c Client) uploadFile(ctx context.Context, path string, ref FileRef, purpose string) error {
 	if err := verifyFile(ctx, path, ref); err != nil {
 		return err
 	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return c.uploadFileReader(ctx, f, ref, purpose)
+}
+
+func (c Client) uploadFileReader(ctx context.Context, f io.ReadSeeker, ref FileRef, purpose string) error {
 	headPurpose := purpose
 	if headPurpose == "" {
 		headPurpose = fileImportUploadPurpose
@@ -793,11 +854,6 @@ func (c Client) uploadFile(ctx context.Context, path string, ref FileRef, purpos
 	if e != nil || se != nil || size != ref.SizeBytes || offset < 0 || offset > size {
 		return errors.New("invalid resumable upload offset/size")
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
 	if _, err = f.Seek(offset, io.SeekStart); err != nil {
 		return err
 	}

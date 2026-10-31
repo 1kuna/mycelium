@@ -7,10 +7,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"maps"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -276,6 +278,17 @@ func TestDeclaredNativeIsolation(t *testing.T) {
 		qualified := isolationWorker(t, client, &e)
 		qualified.StateDir = w.StateDir
 		w = qualified
+		// #356: a transient inspector failure during readiness must not stop
+		// this live sidecar. After that failure, prove real listener ownership
+		// before main is allowed to start; #434 only retried cleanup inspection.
+		probes := 0
+		w.nativeListenerProbe = func(port string, group int) error {
+			probes++
+			if probes == 1 {
+				return fmt.Errorf("inspect process groups: %w", exec.ErrWaitDelay)
+			}
+			return verifyNativeListener(port, group)
+		}
 		if err := client.Call(context.Background(), "POST", "/api/extensions", e, nil); err != nil {
 			t.Fatal(err)
 		}
@@ -296,6 +309,9 @@ func TestDeclaredNativeIsolation(t *testing.T) {
 			t.Fatal("qualification lowering lost stage isolation", checkSpec, err)
 		}
 		isolationRun(t, q, client, w, &j, true, reason)
+		if probes < 2 {
+			t.Fatal("main ran without retrying and verifying listener ownership")
+		}
 		path := strings.TrimSuffix(q.lock.Name(), ".lock")
 		if err := q.Close(); err != nil {
 			t.Fatal(err)
