@@ -190,7 +190,12 @@ provides the existing `mycelium-gate` environment. Both submissions happen
 before `myce wait` waits for all jobs, even if one fails. Successful jobs also
 require `myce result` to download the accepted, verified `gate-result.txt` marker.
 The runner does only source transport, waiting and small-result verification;
-full suites never run on it directly. Darwin proves the native CGO target; Linux
+full suites never run on it directly. A profile exit 78 with `no_qualified_target`
+is a qualification/total-allowance refusal, not a busy-worker indication. Busy
+qualified hosts accept queued jobs and `myce wait` waits for them. CI reports
+host-memory need and allowance numerically for that refusal; other qualification
+details remain in the private receipt. It does not retry an impossible allowance
+or weaken the learned memory envelope. Darwin proves the native CGO target; Linux
 proves its native builds and full race/dev suite.
 
 The deterministic `main-ci:SHA:OS` keys adopt the same jobs on a workflow rerun,
