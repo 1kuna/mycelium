@@ -141,7 +141,15 @@ func (q *Queue) unifiedCUDAProductionReason(j *Job, m *Machine) string {
 				if estimate.device != nil && estimate.device.DeviceGB != nil {
 					n.MemoryGB = max(n.MemoryGB, *estimate.device.DeviceGB*estimate.deviceFactor)
 				}
-				need = max(need, hostNeed(target, n.MemoryGB, n.HostMemoryGB))
+				envelope := hostNeed(target, n.MemoryGB, n.HostMemoryGB)
+				floor, known := unifiedCUDAFloor(target)
+				// An envelope that can never fit must not reserve this host
+				// forever. Ignore live usage here: transient pressure still
+				// deserves protection for production that can eventually fit.
+				if !known || envelope > float64(target.CapabilityProfile.SystemMemoryBytes)/(1<<30)-floor {
+					continue
+				}
+				need = max(need, envelope)
 			}
 		}
 		if sole && need > 0 && charge+need > room {

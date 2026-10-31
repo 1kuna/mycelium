@@ -461,7 +461,10 @@ envelope retains declared host/device floors and accepted measured peaks with
 the estimator's existing margins (at least 1.25), plus per-attempt slack. A bound
 production job recognizes alternatives only under the existing exact-work
 `production_parity_hosts` approval and fresh, immediate admission proof. Smaller co-tenants can fit; cancellation
-removes the demand. No prediction of future, unsubmitted jobs is made.
+removes the demand. Envelopes that exceed the host's maximum physical admission
+capacity do not withhold co-tenants indefinitely. A dependent-stage forecast
+expires when the measured producer overruns. No prediction of future,
+unsubmitted jobs is made.
 
 The physical free-RAM floor is **max(existing unified-CUDA reserve, physical RAM
 minus the configured host allowance)**. The existing OS/driver reserve is at

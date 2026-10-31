@@ -174,6 +174,11 @@ func TestUnifiedCUDAAdmissionProtectsExpectedProduction(t *testing.T) {
 	if q.held(m.HostID) {
 		t.Fatal("forecast changed production takeover")
 	}
+	productionCandidate := *job(t, q, j.ID)
+	productionCandidate.Spec.Priority = "production"
+	if reason := q.productionAdmissionReason(&productionCandidate, q.s.Machines[m.ID]); reason != "" {
+		t.Fatal("co-tenant guard refused production itself", reason)
+	}
 	// A smaller co-tenant fits with the production envelope and physical floor.
 	small := *job(t, q, j.ID)
 	small.Spec.Needs.MemoryGB, small.Spec.Needs.HostMemoryGB = 8, 4
@@ -207,6 +212,10 @@ func TestUnifiedCUDAAdmissionProtectsExpectedProduction(t *testing.T) {
 	}
 	if reason := q.productionAdmissionReason(job(t, q, j.ID), q.s.Machines[m.ID]); reason == "" {
 		t.Fatal("unavailable alternative bypassed production headroom")
+	}
+	clock.Advance(100 * time.Second)
+	if reason := q.productionAdmissionReason(job(t, q, j.ID), q.s.Machines[m.ID]); reason != "" {
+		t.Fatal("overrunning producer permanently withheld CUDA", reason)
 	}
 	if err := q.Cancel(demand.ID); err != nil {
 		t.Fatal(err)
@@ -250,5 +259,26 @@ func TestUnifiedCUDAAdmissionMeasuredProductionEnvelope(t *testing.T) {
 	}
 	if reason := q.productionAdmissionReason(experiment, target); reason != "" {
 		t.Fatal("cancelled production still protects an envelope", reason)
+	}
+}
+
+func TestUnifiedCUDAAdmissionImpossibleProductionDoesNotStarve(t *testing.T) {
+	q, clock := fixture(t)
+	m := unifiedCUDAAdmissionMachine()
+	check(t, q, m, nil)
+	production := spec("production")
+	production.Needs.MemoryGB, production.Needs.HostMemoryGB = 24, 80
+	production.AllowedMachines = []string{m.ID}
+	demand := submit(t, q, production) // 104.125 GiB can never fit the 96 GiB allowance.
+	experiment := spec("experiment")
+	experiment.Needs.MemoryGB, experiment.Needs.HostMemoryGB = 2, 1
+	experiment.AllowedMachines = []string{m.ID}
+	waiting := submit(t, q, experiment)
+	clock.Advance(time.Second)
+	if run := check(t, q, m, nil).Job; run == nil || run.ID != waiting.ID {
+		t.Fatal("impossible production permanently withheld a fitting co-tenant", run, job(t, q, waiting.ID).Reason)
+	}
+	if job(t, q, demand.ID).State != "queued" {
+		t.Fatal("impossible production was admitted")
 	}
 }
