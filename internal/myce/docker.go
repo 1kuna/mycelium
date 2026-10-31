@@ -102,6 +102,7 @@ func dockerRunArgs(command []string) ([]string, error) {
 
 // dockerExecution is durable custody, separate from the worker's heartbeat state.
 type dockerExecution struct {
+	FileMounts       []dockerFileMount   `json:"file_mounts,omitempty"`
 	Accelerator      bool                `json:"accelerator,omitempty"`
 	UserCancel       bool                `json:"user_cancel,omitempty"`
 	StopGrace        time.Duration       `json:"accelerator_stop_grace,omitempty"`
@@ -419,6 +420,10 @@ func (d *dockerAttempt) operation(kind string, args ...string) ([]byte, error) {
 		d.state.Pending = false
 		d.state.Error = ""
 	} else if refusal := new(exec.ExitError); errors.As(err, &refusal) && strings.HasPrefix(strings.TrimSpace(string(refusal.Stderr)), "Error response from daemon:") {
+		if kind == "create" && len(d.state.FileMounts) > 0 {
+			// Daemon paths and refusal details stay in the worker-local log.
+			log.Printf("attempt %s: Docker file create refused: %s", d.state.Identity, strings.TrimSpace(string(refusal.Stderr)))
+		}
 		d.state.Pending = false
 		d.state.Error = "Docker " + kind + " refused"
 	} else {
@@ -443,10 +448,10 @@ type dockerInspection struct {
 	NetworkSettings struct {
 		Networks map[string]struct{ IPAddress string }
 	} `json:"NetworkSettings"`
-	Mounts []struct{ Source, Destination string } `json:"Mounts"`
-	ID     string                                 `json:"Id"`
-	Name   string                                 `json:"Name"`
-	Config struct{ Labels map[string]string }     `json:"Config"`
+	Mounts []dockerFileMount                  `json:"Mounts"`
+	ID     string                             `json:"Id"`
+	Name   string                             `json:"Name"`
+	Config struct{ Labels map[string]string } `json:"Config"`
 	State  struct {
 		Pid        int
 		StartedAt  time.Time
@@ -1052,6 +1057,12 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 	d.state.Owner = &Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
 	d.command = w.dockerCommand
 	d.state.LogsNone = j.Spec.Logs == "none"
+	if dockerFileJob(j.Spec) {
+		d.state.FileMounts, err = dockerFileMounts(j, s.dir, checkpoint)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if j.Spec.Run.DockerNetwork == "private" {
 		d.state.Network = "myce-" + identity
 		d.state.Containers = map[string]dockerMember{}
@@ -1100,9 +1111,24 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 		w.control.set(p)
 	}
 	label := "myce.attempt=" + identity
-	create := []string{"create", "--restart=no", "--pull=never", "--init", "--name", "myce-" + identity, "--label", label, "--label", "myce.worker=" + w.Machine.ID, "--cidfile", filepath.Join(s.dir, identity+".cid"), "--env", "MYCE_ATTEMPT_ID=" + identity, "--env", "MYCE_DOCKER_LABEL=" + label, "--env", "MYCE_JOB_ID=" + j.ID, "--env", "MYCE_ATTEMPT=" + strconv.Itoa(j.Attempt), "--env", "MYCE_CHECKPOINT_DIR=/myce/checkpoint", "--volume", checkpoint + ":/myce/checkpoint"}
+	create := []string{"create", "--restart=no", "--pull=never", "--init", "--name", "myce-" + identity, "--label", label, "--label", "myce.worker=" + w.Machine.ID, "--cidfile", filepath.Join(s.dir, identity+".cid"), "--env", "MYCE_ATTEMPT_ID=" + identity, "--env", "MYCE_DOCKER_LABEL=" + label, "--env", "MYCE_JOB_ID=" + j.ID, "--env", "MYCE_ATTEMPT=" + strconv.Itoa(j.Attempt), "--env", "MYCE_CHECKPOINT_DIR=/myce/checkpoint"}
 	progressFile := applicationProgressFile(s.dir, j)
-	create = append(create, "--volume", filepath.Dir(progressFile)+":/myce/progress", "--env", "MYCE_PROGRESS_FILE=/myce/progress/"+filepath.Base(progressFile))
+	create = append(create, "--env", "MYCE_PROGRESS_FILE=/myce/progress/"+filepath.Base(progressFile))
+	if !dockerFileJob(j.Spec) {
+		create = append(create, "--volume", checkpoint+":/myce/checkpoint", "--volume", filepath.Dir(progressFile)+":/myce/progress")
+	}
+	if dockerFileJob(j.Spec) {
+		// --mount refuses a missing source instead of creating a root-owned
+		// directory on an incompatible/remote daemon. Never bind cache blobs.
+		for _, mount := range d.state.FileMounts {
+			value := "type=bind,src=" + mount.Source + ",dst=" + mount.Destination
+			if !mount.RW {
+				value += ",readonly"
+			}
+			create = append(create, "--mount", value)
+		}
+		create = append(create, "--user", strconv.Itoa(os.Geteuid())+":"+strconv.Itoa(os.Getegid()), "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--workdir", "/myce/work", "--env", "MYCE_INPUT_DIR=/myce/inputs", "--env", "MYCE_OUTPUT_DIR=/myce/work", "--env", "MYCE_SCRATCH_DIR=/myce/work")
+	}
 	if d.state.CgroupParent != "" {
 		create = append(create, "--cgroup-parent", d.state.CgroupParent, "--memory-swap", strconv.FormatInt(ceilingBytes, 10))
 	}
@@ -1128,7 +1154,7 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 		create = append(create, "--env", k+"="+v)
 	}
 	for k, v := range j.Spec.Run.Env {
-		if !strings.HasPrefix(k, "MYCE_") && !strings.HasPrefix(k, "DOCKER_") && !dockerDeviceEnvironment(k) {
+		if !dockerFileJob(j.Spec) && !strings.HasPrefix(k, "MYCE_") && !strings.HasPrefix(k, "DOCKER_") && !dockerDeviceEnvironment(k) {
 			create = append(create, "--env", k+"="+v)
 		}
 	}
@@ -1137,6 +1163,12 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 	go d.run(p, j, s.state.Session, output, release, func() error {
 		if e := w.authorizeStart(j, j.Session); e != nil {
 			return d.recordInfrastructure(infrastructureFact{Kind: launchRefused, At: time.Now().UTC()}, e)
+		}
+		if dockerFileJob(j.Spec) {
+			// Refuse automatic anonymous volumes before create can allocate them.
+			if e := d.checkFileImages(j); e != nil {
+				return e
+			}
 		}
 		if d.state.Network != "" {
 			out, e := d.operation("network-create", "network", "create", "--driver", "bridge", "--internal", "--label", label, "--label", "myce.worker="+w.Machine.ID, d.state.Network)
@@ -1301,6 +1333,9 @@ func dockerOutcome(state dockerExecution, owner Result, e error) Result {
 		}
 		if strings.HasPrefix(e.Error(), "Docker memory ceiling not enforced") {
 			result.Error = "Docker memory ceiling not enforced"
+		}
+		if errors.Is(e, errDockerFileImageVolumes) {
+			result.Error = errDockerFileImageVolumes.Error()
 		}
 	}
 	result.Forced = state.Forced

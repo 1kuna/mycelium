@@ -696,13 +696,25 @@ changes, daemon/context selection and Docker socket mounts. Image arguments
 are passed unchanged. The payload must forward TERM and implement the ordinary
 checkpoint contract; `--init` is not a checkpoint implementation.
 
+Plain batches can declare hashed `files` and `outputs` with the
+[`docker_files_v1` contract](guide-files-v3.md#managed-docker-files): private
+read-only `/myce/inputs`, writable `/myce/work`, and current-attempt verified
+`output_refs`. The worker owns all mounts, numeric UID:GID, working directory
+and environment for these jobs; the authored volume/env/workdir/user/group
+options above are rejected. Image `USER` is overridden, capabilities are dropped
+and privilege escalation is disabled. Native environments, `shared_inputs` and
+NAS input mixing remain unsupported. Main and managed sidecars share these
+attempt roots. Outputs are captured only after every writer has settled and
+retained across upload/acknowledgement failures and restart.
+
 The container receives `MYCE_ATTEMPT_ID` (opaque, unique across attempts),
 `MYCE_DOCKER_LABEL` (`myce.attempt=<ID>`), `MYCE_JOB_ID`, `MYCE_ATTEMPT`,
 placement environment, selected-device environment, and `MYCE_MEMORY_LIMIT_BYTES`
 when host RAM is declared. The adapter installs and inspects this limit before
 start; payload arguments cannot override it. `MYCE_CHECKPOINT_DIR`
 is `/myce/checkpoint`, bind-mounted from the worker's prepared attempt directory.
-`run.env` ordinary entries are also explicit container env; `MYCE_TOKEN` is
+For batches without managed files/outputs, `run.env` ordinary entries are also
+explicit container env; `MYCE_TOKEN` is
 removed from the Docker client and never forwarded. MYCE identity overrides
 in Docker `--env` are rejected. `CUDA_VISIBLE_DEVICES`, `ONEAPI_DEVICE_SELECTOR`
 and `ZE_AFFINITY_MASK` are worker-owned: neither `run.env` nor Docker `--env`

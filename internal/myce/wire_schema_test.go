@@ -89,6 +89,10 @@ func generatedJobSchema(t *testing.T) []byte {
 	job["start_window"].(map[string]any)["description"] = "Effective original production start-window length in nanoseconds, retained across recovery. Available before startup; absent for experiments."
 	job["start_by_explicit"].(map[string]any)["description"] = "Whether submitted start_by was caller-owned and absolute. New jobs persist true or false; absent on older records means preserve their existing cutoff as absolute."
 	specProperties := defs["Spec"].(map[string]any)["properties"].(map[string]any)
+	specProperties["files"].(map[string]any)["description"] = "SHA-256/size-addressed inputs. Native jobs stage into work; managed Docker file batches require docker_files_v1 and mount private copies read-only at /myce/inputs, preserving relative names. Cannot mix NAS inputs, caller workdir or shared_inputs with Docker."
+	specProperties["outputs"].(map[string]any)["description"] = "Declared relative output names to relative publication prefixes. Managed Docker file batches write beneath /myce/work; only verified current-attempt outputs become output_refs after all writers settle."
+	dockerProperties := defs["RunSpec"].(map[string]any)["properties"].(map[string]any)
+	dockerProperties["docker"].(map[string]any)["description"] = "Opt-in managed direct docker run argv with a local digest-pinned image. With files or outputs: worker-owned mounts, UID/GID, /myce/work working directory and environment only; caller mounts/env/workdir/user and shared_inputs are rejected. Requires Linux docker_files_v1 worker capability."
 	specProperties["start_window"].(map[string]any)["description"] = "Optional production relative start duration (Go duration string), greater than zero and at most 1h. Defaults to 150s; explicit start_by takes precedence."
 	delete(job, "ledger_entries") // Persistence only; the supported read surface is paginated.
 	delete(defs, "JobLedgerEntry")
@@ -409,6 +413,12 @@ func TestWireSchemas(t *testing.T) {
 	s.SubmissionKey = "schema-key"
 	j := submit(t, q, s)
 	validateWireValue(t, schemas["job-v1.schema.json"], j)
+	dockerFiles := dockerJob()
+	dockerFiles.State = "queued"
+	dockerFiles.Spec.Files = FileManifest{"scripts/run.sh": {SHA256: strings.Repeat("a", 64), SizeBytes: 12}}
+	dockerFiles.Spec.Outputs = map[string]string{"result.json": "results"}
+	dockerFiles.Spec.SubmissionKey = "docker-files-schema"
+	validateWireValue(t, schemas["job-v1.schema.json"], dockerFiles)
 	// The retry counter is additive: old zero/omitted replies and new nonzero
 	// replies validate against the same v1 reply contract.
 	retried := cloneJob(j)

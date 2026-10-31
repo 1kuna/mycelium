@@ -2665,6 +2665,7 @@
           ]
         },
         "docker": {
+          "description": "Opt-in managed direct docker run argv with a local digest-pinned image. With files or outputs: worker-owned mounts, UID/GID, /myce/work working directory and environment only; caller mounts/env/workdir/user and shared_inputs are rejected. Requires Linux docker_files_v1 worker capability.",
           "type": "boolean"
         },
         "docker_memory_gb": {
@@ -2847,6 +2848,7 @@
         },
         "files": {
           "$ref": "#/$defs/FileManifest",
+          "description": "SHA-256/size-addressed inputs. Native jobs stage into work; managed Docker file batches require docker_files_v1 and mount private copies read-only at /myce/inputs, preserving relative names. Cannot mix NAS inputs, caller workdir or shared_inputs with Docker.",
           "x-contract": "diagnostic"
         },
         "give_up_at": {
@@ -2892,6 +2894,7 @@
           "additionalProperties": {
             "type": "string"
           },
+          "description": "Declared relative output names to relative publication prefixes. Managed Docker file batches write beneath /myce/work; only verified current-attempt outputs become output_refs after all writers settle.",
           "type": [
             "object",
             "null"

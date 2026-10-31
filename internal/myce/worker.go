@@ -389,7 +389,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		}
 	}()
 	executionWorkdir := j.Spec.Run.Workdir
-	if !j.Spec.Run.Docker || j.Spec.extensionJob() || len(jobInputFiles(&j))+len(jobInputPaths(&j))+len(j.Spec.SharedInputs) > 0 {
+	if !j.Spec.Run.Docker || dockerFileJob(j.Spec) || j.Spec.extensionJob() || len(jobInputFiles(&j))+len(jobInputPaths(&j))+len(j.Spec.SharedInputs) > 0 {
 		value := j
 		staged, err := s.extensionFiles.runBounded(ctx, attemptCheckpoint(j), func() (stagedInputs, error) {
 			// Keep the slot until the filesystem call really returns, even after

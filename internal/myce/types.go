@@ -265,7 +265,7 @@ func (s Spec) Validate() error {
 	if s.extensionJob() {
 		return rejectIf("job_program_invalid", validateExtensionJob(s))
 	}
-	if s.Kind == "" && (len(s.Inputs)+len(s.Args) > 0 || (len(s.Outputs) > 0 && len(s.Files) == 0 && len(s.SharedInputs) == 0 && s.After == nil && s.OutputDelivery == "") || s.SizeHint.MemoryGB != 0 || s.SizeHint.HostMemoryGB != 0) {
+	if s.Kind == "" && (len(s.Inputs)+len(s.Args) > 0 || (len(s.Outputs) > 0 && !s.Run.Docker && len(s.Files) == 0 && len(s.SharedInputs) == 0 && s.After == nil && s.OutputDelivery == "") || s.SizeHint.MemoryGB != 0 || s.SizeHint.HostMemoryGB != 0) {
 		return reject("job_program_invalid", errors.New("inputs, outputs, args and size_hint require a kind/program job"))
 	}
 	if !validMemoryValue(s.Needs.MemoryGB) || (s.Needs.Memory != "auto" && ((!s.Needs.cpuOnly() && s.Needs.MemoryGB <= 0) || (s.Needs.cpuOnly() && s.Needs.HostMemoryGB <= 0))) {

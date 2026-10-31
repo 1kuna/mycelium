@@ -108,6 +108,14 @@ mounted filesystem connection. They do not grant access to the entire NAS or
 arbitrary host paths. An application that previously used Docker volume
 mappings must use these declarations and attempt paths for native execution.
 
+Managed Docker batches have a separate [hashed-file contract](guide-files-v3.md#managed-docker-files):
+private inputs bind-mounted read-only at `/myce/inputs`, output/scratch at
+`/myce/work`, and worker-owned attempt checkpoint/progress mounts. Native jobs
+retain their existing single-workdir staging semantics. Docker file batches
+reject caller host mounts and environment, use the worker's numeric UID:GID
+with all capabilities dropped and `no-new-privileges`, and publish only after
+all container writers settle. This does not qualify an image or GPU runtime.
+
 Headless office tools must put their writable user profile and scratch beneath
 `{work}` (for example LibreOffice's `-env:UserInstallation=file://...` option).
 Their own Unix-socket requirements still need qualification against the control

@@ -88,11 +88,15 @@ func (w Worker) prepareExtensionFilesContext(ctx context.Context, j *Job, stateD
 		return errors.New("job files require a root and clean relative names")
 	}
 	dir := filepath.Join(stateDir, "job-files", j.ID, strconv.Itoa(j.Attempt))
+	workdir := dir
+	if dockerFileJob(j.Spec) {
+		workdir = filepath.Join(dir, "work")
+	}
 	if info, err := os.Lstat(dir); err == nil {
 		if !info.IsDir() {
 			return errors.New("attempt input folder is not a directory")
 		}
-		j.Spec.Run.Workdir = dir
+		j.Spec.Run.Workdir = workdir
 		return nil // Atomic publication makes retries idempotent.
 	} else if !os.IsNotExist(err) {
 		return err
@@ -112,6 +116,15 @@ func (w Worker) prepareExtensionFilesContext(ctx context.Context, j *Job, stateD
 		return err
 	}
 	defer os.RemoveAll(staged)
+	inputRoot := staged
+	if dockerFileJob(j.Spec) {
+		inputRoot = filepath.Join(staged, "inputs")
+		for _, path := range []string{inputRoot, filepath.Join(staged, "work")} {
+			if err := os.Mkdir(path, 0700); err != nil {
+				return err
+			}
+		}
+	}
 	if !j.Spec.Run.Docker && j.Extension != nil {
 		var files map[string][]byte
 		for _, extension := range j.Extensions {
@@ -165,7 +178,7 @@ func (w Worker) prepareExtensionFilesContext(ctx context.Context, j *Job, stateD
 				return err
 			}
 		}
-		err := w.fileCache.copyTo(ctx, ref, filepath.Join(staged, name))
+		err := w.fileCache.copyTo(ctx, ref, filepath.Join(inputRoot, name))
 		if err != nil {
 			return err
 		}
@@ -206,7 +219,7 @@ func (w Worker) prepareExtensionFilesContext(ctx context.Context, j *Job, stateD
 	if err := syncWorkerDir(filepath.Dir(dir)); err != nil {
 		return err
 	}
-	j.Spec.Run.Workdir = dir
+	j.Spec.Run.Workdir = workdir
 	return nil
 }
 
