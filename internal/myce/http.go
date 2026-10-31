@@ -128,7 +128,23 @@ func (a API) handler(joiningPin string) http.Handler {
 		_ = statusPage.Execute(w, s)
 	})
 	mux.HandleFunc("GET /api/status", func(w http.ResponseWriter, r *http.Request) {
-		data, err := a.Queue.cachedStatusJSON(r.Context())
+		options, err := parseStatusOptions(r.URL.Query())
+		if err != nil {
+			respond(w, nil, err)
+			return
+		}
+		var data string
+		if len(r.URL.Query()) == 0 {
+			data, err = a.Queue.cachedStatusJSON(r.Context())
+		} else {
+			var snapshot Snapshot
+			snapshot, err = a.Queue.publicStatusSnapshot(&options, r.Context())
+			if err == nil {
+				var encoded []byte
+				encoded, err = json.Marshal(snapshot)
+				data = string(encoded)
+			}
+		}
 		w.Header().Add("Vary", "Accept-Encoding")
 		if err == nil {
 			w.Header().Set("Content-Type", "application/json")

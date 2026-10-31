@@ -21,10 +21,10 @@ func TestAttemptHistoryStatusCLI(t *testing.T) {
 		{ID: "unrelated-job", State: "queued", Spec: myce.Spec{Name: "unrelated"}},
 	}}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/status" {
+		if r.URL.Path != "/api/jobs/12345678" {
 			t.Errorf("unexpected API path %s", r.URL.Path)
 		}
-		_ = json.NewEncoder(w).Encode(snapshot)
+		_ = json.NewEncoder(w).Encode(snapshot.Jobs[0])
 	}))
 	defer server.Close()
 	t.Setenv("MYCE_TOKEN", "test")

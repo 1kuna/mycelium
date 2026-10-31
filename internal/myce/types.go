@@ -652,6 +652,7 @@ type HoldDetail struct {
 }
 
 type Snapshot struct {
+	JobsPage            *StatusJobsPage      `json:"jobs_page,omitempty"`
 	RequestLatencies    []RequestLatency     `json:"request_latencies,omitempty"`
 	Reservations        []Reservation        `json:"reservations,omitempty"`
 	ComponentExclusions []ComponentExclusion `json:"component_exclusions,omitempty"`

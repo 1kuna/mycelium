@@ -9,6 +9,47 @@ The page and `GET /api/status` share a snapshot for up to one second. Job receip
 polls (`GET /api/jobs/{id}`) read the requested job afresh. Status snapshots do
 not drive start authorization, cancellation or result publication.
 
+Default status keeps the existing JSON fields and job shape, but includes all
+nonterminal jobs and terminal jobs with pending cleanup/delivery, plus the newest
+100 other terminal jobs by submission time. Work curves remain included for
+existing consumer audits and release-preservation guards.
+This bounds retained-history detail without hiding control-plane custody.
+`jobs_page` ([schema](schemas/status-jobs-page-v1.schema.json)) reports the
+filtered `total`, `returned`, `mode`, and optional `next_before` job ID.
+
+- `GET /api/status?jobs=active` returns all active/cleanup-pending jobs.
+- `?jobs=all&limit=100` pages all history, newest submission first; append
+  `&before=NEXT_BEFORE` from each reply until that field is absent. `limit` is
+  1–1000 and defaults to 100. The normal status presentation order is retained
+  within each page; use the returned cursor rather than the last displayed ID.
+- `?project=example&since=2026-10-30T00:00:00Z` filters jobs by project and
+  inclusive submission timestamp. Filters do not alter fleet health, eligibility
+  or queue order. Keep filters and mode unchanged when paging. Cursors require
+  their job to remain retained; an expired/unknown cursor returns HTTP 400
+  `status_query_invalid`, so restart that listing.
+- `?detail=full` restores all retained jobs and work curves without a job limit.
+  CLI `myce status --history` and Python `client.status(full=True)` use this
+  supported expensive view. `--full` still means full job IDs.
+
+Python `client.status()` uses the bounded default; `client.list()` walks bounded
+`jobs=all` pages and retains its all-jobs contract. Both also work with older
+queues, which ignore the new query parameters and return their legacy snapshot.
+Old clients can decode the new status shape, but their list/status views now
+contain the bounded history. Upgrade the CLI for access to older historical IDs:
+`myce status JOB` and `myce logs JOB --follow` read the job endpoint directly,
+including prefix resolution, independently of aggregate status retention/cache.
+Logs follow polls only the selected job and drains a final log page on completion.
+
+Release-preservation tools should request `GET /api/status?detail=full` (or
+Python `client.status(full=True)`) for both snapshots: curve provenance can
+depend on completed jobs outside the default history window. Curves remain in
+default status for existing callers, but that view is not a complete job ledger.
+
+Only the unfiltered default shares the one-second cache. Filtered/full reads are
+fresh. Snapshot capture keeps scheduling inputs and dependency state under the
+queue lock; projection, usage queries, file inventory, encoding the reply and
+compression run after release. No bulk file or network I/O runs under `q.mu`.
+
 Jobs with explicitly recovered outputs expose an append-only `recovered_results`
 list in status and job GET. Each record has `kind: recovered`, its own result ID,
 exact failed execution, recovery-time verification identities and operator

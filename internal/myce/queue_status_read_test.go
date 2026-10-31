@@ -64,7 +64,7 @@ func TestQueueStatusReadsDoNotWriteRetainedHistory(t *testing.T) {
 	}
 	defer response.Body.Close()
 	var received Snapshot
-	if err := json.NewDecoder(response.Body).Decode(&received); err != nil || !response.Uncompressed || len(received.Jobs) != 300 {
+	if err := json.NewDecoder(response.Body).Decode(&received); err != nil || !response.Uncompressed || len(received.Jobs) != defaultStatusJobs {
 		t.Fatalf("compressed read-only status: gzip=%v jobs=%d error=%v", response.Uncompressed, len(received.Jobs), err)
 	}
 	result := testing.Benchmark(func(b *testing.B) {

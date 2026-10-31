@@ -1,5 +1,11 @@
 # Service templates
 
+> **Before queue cutover:** migrate preservation checks, including private
+> release scripts, to `/api/status?detail=full` or complete `jobs=all` pagination.
+> Bounded default status (#439) omits older completed jobs. Existing complete
+> `/api/inspection` collectors remain supported; see
+> [rolling fleet upgrades](../docs/operations.md#rolling-fleet-upgrades).
+
 The optional [xe GPU telemetry broker](gpu-telemetry/README.md) is a **root system
 service**, with a read-only unprivileged helper for workers retaining
 `NoNewPrivileges=yes`. It is installed separately from the user units below.

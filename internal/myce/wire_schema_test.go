@@ -313,6 +313,22 @@ func TestWireSchemas(t *testing.T) {
 	ledgerValidation := compileWireSchema(t, "job-ledger-v1.schema.json")
 	validateWireValue(t, ledgerValidation, JobLedgerPage{JobID: "job", Complete: true, Entries: []JobLedgerEntry{}})
 	r := generate.Reflector{Anonymous: true, AllowAdditionalProperties: true}
+	pageSchema, err := json.MarshalIndent(r.Reflect(&StatusJobsPage{}), "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pageSchema = append(pageSchema, '\n')
+	pagePath := filepath.Join(schemaRoot, "status-jobs-page-v1.schema.json")
+	if os.Getenv("MYCE_UPDATE_SCHEMAS") == "1" {
+		if err := os.WriteFile(pagePath, pageSchema, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	actualPage, err := os.ReadFile(pagePath)
+	if err != nil || !bytes.Equal(actualPage, pageSchema) {
+		t.Fatal("status jobs page schema drift: regenerate with MYCE_UPDATE_SCHEMAS=1", err)
+	}
+	validateWireValue(t, compileWireSchema(t, "status-jobs-page-v1.schema.json"), StatusJobsPage{Mode: "all", Total: 1001, Returned: 100, NextBefore: "example-job"})
 	diskSchema, err := json.MarshalIndent(r.Reflect(&DiskVolume{}), "", "  ")
 	if err != nil {
 		t.Fatal(err)

@@ -5,12 +5,19 @@ import (
 	"mycelium/internal/myce"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
 func TestStatusJSONPressureView(t *testing.T) {
 	snapshot := myce.Snapshot{Machines: []*myce.Machine{{ID: "host", HostAvailableMemoryGB: 3, HostMemoryInUseGB: 1, FreeHostMemoryGB: 2}}, Jobs: []*myce.Job{{ID: "1234567890abcdef", State: "queued", DiagnosticCode: "host_memory_headroom"}}}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _ = json.NewEncoder(w).Encode(snapshot) }))
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/api/jobs/") {
+			_ = json.NewEncoder(w).Encode(snapshot.Jobs[0])
+			return
+		}
+		_ = json.NewEncoder(w).Encode(snapshot)
+	}))
 	defer server.Close()
 	t.Setenv("MYCE_TOKEN", "test")
 	out := captureJoiningOutput(t, func() error { return run([]string{"status", "--queue", server.URL, "--json"}) })
