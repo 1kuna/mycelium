@@ -115,6 +115,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if args[0] == "extension" {
 		return extensionCommand(args[1:])
 	}
+	if args[0] == "worker" {
+		return workerEnvCommand(context.Background(), args[1:], os.Stdout)
+	}
 	if args[0] == "device" {
 		return deviceCommand(args[1:], os.Stdout)
 	}
