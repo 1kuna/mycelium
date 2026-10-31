@@ -20,6 +20,7 @@ func storageAdmissionSpec(tier string, bytes uint64) Spec {
 
 func TestStorageAdmissionYieldsQueuedCommitmentsAndReacquiresAfterRestart(t *testing.T) {
 	q, c, dbpath := protectionQueue(t)
+	q.s.StorageAdmissionActive = true
 	q.deliveryRoot = q.root
 	q.files.limit = 16
 	low := submit(t, q, storageAdmissionSpec("experiment", 8))
@@ -45,7 +46,7 @@ func TestStorageAdmissionYieldsQueuedCommitmentsAndReacquiresAfterRestart(t *tes
 	}
 	defer reopened.Close()
 	restored := job(t, reopened, high.ID)
-	if !job(t, reopened, newer.ID).OutputAdmissionPending || restored.OutputReservationBytes == nil || *restored.OutputReservationBytes != 8 {
+	if !reopened.s.StorageAdmissionActive || !job(t, reopened, newer.ID).OutputAdmissionPending || restored.OutputReservationBytes == nil || *restored.OutputReservationBytes != 8 {
 		t.Fatal("restart lost reservations")
 	}
 	if err = reopened.Cancel(high.ID); err != nil {
@@ -64,6 +65,7 @@ func TestStorageAdmissionYieldsQueuedCommitmentsAndReacquiresAfterRestart(t *tes
 
 func TestStorageAdmissionProtectsAssignedWritersAndAlertsProduction(t *testing.T) {
 	q, c := fixture(t)
+	q.s.StorageAdmissionActive = true
 	q.deliveryRoot = q.root
 	q.files.limit = 8
 	low := submit(t, q, storageAdmissionSpec("experiment", 8))
@@ -105,6 +107,7 @@ func TestStorageAdmissionProtectsAssignedWritersAndAlertsProduction(t *testing.T
 
 func TestStorageAdmissionRetryOrderUsesOwnerPolicy(t *testing.T) {
 	q, c := fixture(t)
+	q.s.StorageAdmissionActive = true
 	q.deliveryRoot = q.root
 	q.files.limit = 16
 	low := submit(t, q, storageAdmissionSpec("experiment", 8))
@@ -135,6 +138,7 @@ func TestStorageAdmissionRetryOrderUsesOwnerPolicy(t *testing.T) {
 
 func TestStorageAdmissionLearnsQualifiedDemandAndFreezesCommitment(t *testing.T) {
 	q, c := fixture(t)
+	q.s.StorageAdmissionActive = true
 	q.deliveryRoot = q.root
 	client := deliveryClient(t, q)
 	_, source := retentionUpload(t, client, "")
@@ -169,6 +173,7 @@ func TestStorageAdmissionLearnsQualifiedDemandAndFreezesCommitment(t *testing.T)
 
 func TestStorageAdmissionProductionInputYieldsOnlyUnassignedEstimates(t *testing.T) {
 	q, _ := fixture(t)
+	q.s.StorageAdmissionActive = true
 	q.deliveryRoot = q.root
 	q.files.limit = 8
 	low := submit(t, q, storageAdmissionSpec("experiment", 8))
@@ -197,6 +202,7 @@ func TestStorageAdmissionProductionInputYieldsOnlyUnassignedEstimates(t *testing
 
 func TestStorageAdmissionCollectionProgressAndPublicationFence(t *testing.T) {
 	q, c := fixture(t)
+	q.s.StorageAdmissionActive = true
 	q.deliveryRoot = q.root
 	client := retentionClient(t, q)
 	// More than one collector batch, each small file already explicitly eligible
@@ -234,6 +240,7 @@ func TestStorageAdmissionCollectionProgressAndPublicationFence(t *testing.T) {
 
 func TestStorageAdmissionWorkerCustodyDoesNotReserveSharedStore(t *testing.T) {
 	q, c, _ := protectionQueue(t)
+	q.s.StorageAdmissionActive = true
 	m := protectionMachine("local", "fake")
 	backend := protectionBackend(m)
 	if err := q.ConfigureStorageProtection(context.Background(), backend, protectionControlWork(t, c)); err != nil {
@@ -255,6 +262,7 @@ func TestStorageAdmissionWorkerCustodyDoesNotReserveSharedStore(t *testing.T) {
 
 func TestStorageAdmissionCollectionValueOrderDoesNotAuthorizeDeletion(t *testing.T) {
 	q, _ := fixture(t)
+	q.s.StorageAdmissionActive = true
 	refs := []string{strings.Repeat("a", 64), strings.Repeat("b", 64), strings.Repeat("c", 64)}
 	q.s.Jobs = map[string]*Job{
 		"production": {ID: "production", Spec: Spec{Class: "production"}, OutputRefs: FileManifest{"out": {SHA256: refs[0]}}},
@@ -283,6 +291,7 @@ func TestStorageAdmissionCollectionValueOrderDoesNotAuthorizeDeletion(t *testing
 
 func TestStorageAdmissionOriginalNinetyFiveTenReplay(t *testing.T) {
 	q, c, _ := protectionQueue(t)
+	q.s.StorageAdmissionActive = true
 	m := protectionMachine("producer", "fake")
 	b := protectionBackend(m)
 	b.snapshot.Pools[0].FreeBytes = 100
@@ -329,6 +338,7 @@ func TestStorageAdmissionOriginalNinetyFiveTenReplay(t *testing.T) {
 
 func TestStorageAdmissionProtectedDeficitConsidersOtherQualifiedHosts(t *testing.T) {
 	q, c, _ := protectionQueue(t)
+	q.s.StorageAdmissionActive = true
 	m, other := protectionMachine("full", "fake"), protectionMachine("available", "fake")
 	b := protectionBackend(m, other)
 	for i := range b.snapshot.Workers {
@@ -358,6 +368,7 @@ func TestStorageAdmissionProtectedDeficitConsidersOtherQualifiedHosts(t *testing
 
 func TestStorageAdmissionActualProductionResultYieldsEstimate(t *testing.T) {
 	q, _ := fixture(t)
+	q.s.StorageAdmissionActive = true
 	q.deliveryRoot = q.root
 	q.files.limit = 16
 	client := deliveryClient(t, q)
@@ -389,6 +400,7 @@ func TestStorageAdmissionActualProductionResultYieldsEstimate(t *testing.T) {
 
 func TestStorageAdmissionProductionInputPressureAlertAndRecovery(t *testing.T) {
 	q, c := fixture(t)
+	q.s.StorageAdmissionActive = true
 	client := retentionClient(t, q)
 	q.files.limit = 8
 	_, unique := retentionUpload(t, client, "12345678")
@@ -423,6 +435,7 @@ func TestStorageAdmissionProductionInputPressureAlertAndRecovery(t *testing.T) {
 
 func TestStorageAdmissionProductionResultPressurePreservesUniqueBytes(t *testing.T) {
 	q, _ := fixture(t)
+	q.s.StorageAdmissionActive = true
 	q.deliveryRoot = q.root
 	q.files.limit = 16
 	client := deliveryClient(t, q)
@@ -459,6 +472,7 @@ func TestStorageAdmissionProductionResultPressurePreservesUniqueBytes(t *testing
 
 func TestStorageAdmissionResultReclaimsBeforeRefusal(t *testing.T) {
 	q, c := fixture(t)
+	q.s.StorageAdmissionActive = true
 	q.deliveryRoot = q.root
 	q.files.limit = 16
 	client := deliveryClient(t, q)

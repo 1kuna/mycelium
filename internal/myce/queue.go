@@ -40,12 +40,15 @@ type batchRelease struct {
 }
 
 type state struct {
-	StorageProtection    *storageProtectionState        `json:"storage_protection,omitempty"`
-	StorageObservations  map[string]StorageObservation  `json:"storage_observations,omitempty"`
-	ExternalMemory       map[string]*externalMemoryRing `json:"external_memory,omitempty"`
-	AttemptOutputUploads map[string]time.Time           `json:"attempt_output_uploads,omitempty"`
-	Health               healthAlerts                   `json:"health_alerts,omitempty"`
-	FleetUpgrade         *fleetUpgrade                  `json:"fleet_upgrade,omitempty"`
+	// #509 owns explicit migration activation. Missing/false preserves legacy
+	// cap/reserve admission, including declared estimates and FIFO retries.
+	StorageAdmissionActive bool                           `json:"storage_admission_active,omitempty"`
+	StorageProtection      *storageProtectionState        `json:"storage_protection,omitempty"`
+	StorageObservations    map[string]StorageObservation  `json:"storage_observations,omitempty"`
+	ExternalMemory         map[string]*externalMemoryRing `json:"external_memory,omitempty"`
+	AttemptOutputUploads   map[string]time.Time           `json:"attempt_output_uploads,omitempty"`
+	Health                 healthAlerts                   `json:"health_alerts,omitempty"`
+	FleetUpgrade           *fleetUpgrade                  `json:"fleet_upgrade,omitempty"`
 	// Positive orphan eligibility, persisted with the existing queue state.
 	// Zero time means an input upload has not finished publication yet.
 	JobInputUploads map[string]time.Time `json:"job_input_uploads,omitempty"`
@@ -549,7 +552,7 @@ func (q *Queue) Submit(s Spec) (*Job, error) {
 // SubmitContext snapshots input custody before bulk verification. Key replay,
 // cancellation and job creation still serialize in the final update transaction.
 func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
-	if s.OutputDelivery == asyncNAS {
+	if s.OutputDelivery == asyncNAS && q.storageAdmissionActive() {
 		if e := q.reclaimStorageForAdmission(ctx); e != nil && ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -702,6 +705,11 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 				return &HTTPError{Status: 503, Code: "file_store_unavailable", Message: "queue-file-store is not configured"}
 			}
 		}
+		if s.OutputDelivery == asyncNAS && !q.s.StorageAdmissionActive {
+			if err := q.fileStoreReserveRefusal(resultCapacity, addDiskBytes(q.outputReservations(resultPayloads, ""), s.Disk.OutputBytes), s.Disk.OutputBytes, q.outputReservationsFor(resultPayloads, "", true), q.priorityMatch(s).Tier == "production"); err != nil {
+				return err
+			}
+		}
 		if e := q.validateProjectPlacement(s.Project, s.AllowedMachines); e != nil {
 			return rejectFieldRule("job_placement_invalid", e)
 		}
@@ -781,7 +789,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 			j.WaitingSince = time.Time{}
 			j.Dependency = &PieceBinding{Job: s.After.Job, Piece: s.After.Piece, State: "blocked"}
 		}
-		if s.OutputDelivery == asyncNAS {
+		if s.OutputDelivery == asyncNAS && q.s.StorageAdmissionActive {
 			if e := q.admitSharedOutput(j, resultCapacity, resultPayloads); e != nil {
 				if jobClass(s) != "production" {
 					return e

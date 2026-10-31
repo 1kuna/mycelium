@@ -18,19 +18,20 @@ import (
 // for new payloads after declared tus lengths and the physical volume floor.
 // Store is a public role name, never a private filesystem path.
 type FileStoreStatus struct {
-	Physical                         *PhysicalStorageStatus `json:"physical,omitempty"`
-	UnidentifiedWritesMayUseReserve  bool                   `json:"unidentified_writes_may_use_reserve"`
-	UnidentifiedReserveAdmittedBytes uint64                 `json:"unidentified_reserve_admitted_bytes"`
-	ProductionReserveBytes           uint64                 `json:"production_reserve_bytes"`
-	ReservedOutputBytes              uint64                 `json:"reserved_output_bytes,omitempty"`
-	Store                            string                 `json:"store"`
-	UsedBytes                        uint64                 `json:"used_bytes"`
-	FreeBytes                        uint64                 `json:"free_bytes"`
-	ReclaimableBytes                 uint64                 `json:"reclaimable_bytes"`
-	LimitBytes                       uint64                 `json:"limit_bytes"`
-	DiskFreeBytes                    uint64                 `json:"disk_free_bytes"`
-	FloorBytes                       uint64                 `json:"floor_bytes"`
-	Error                            string                 `json:"error,omitempty"`
+	Admission                        *StorageAdmissionStatus `json:"admission,omitempty"`
+	Physical                         *PhysicalStorageStatus  `json:"physical,omitempty"`
+	UnidentifiedWritesMayUseReserve  bool                    `json:"unidentified_writes_may_use_reserve"`
+	UnidentifiedReserveAdmittedBytes uint64                  `json:"unidentified_reserve_admitted_bytes"`
+	ProductionReserveBytes           uint64                  `json:"production_reserve_bytes"`
+	ReservedOutputBytes              uint64                  `json:"reserved_output_bytes,omitempty"`
+	Store                            string                  `json:"store"`
+	UsedBytes                        uint64                  `json:"used_bytes"`
+	FreeBytes                        uint64                  `json:"free_bytes"`
+	ReclaimableBytes                 uint64                  `json:"reclaimable_bytes"`
+	LimitBytes                       uint64                  `json:"limit_bytes"`
+	DiskFreeBytes                    uint64                  `json:"disk_free_bytes"`
+	FloorBytes                       uint64                  `json:"floor_bytes"`
+	Error                            string                  `json:"error,omitempty"`
 }
 
 type storedPayload struct {
@@ -173,6 +174,7 @@ func fileStoreRefusal(status FileStoreStatus, need uint64) error {
 
 // Snapshot custody before walking disk. Status is read-only and never runs GC.
 type fileStoreObservation struct {
+	admission                 *Queue // Detached status inputs only; never the live queue.
 	store                     *FileStore
 	expired, keep, referenced map[string]bool
 	markers                   map[string]time.Time
@@ -196,7 +198,7 @@ func (q *Queue) captureFileStoreStatus() fileStoreObservation {
 			markers[hash] = at
 		}
 	}
-	return fileStoreObservation{q.files, expired, keep, referenced, markers, bundles, q.clock.Now(), q.fileRetention}
+	return fileStoreObservation{store: q.files, expired: expired, keep: keep, referenced: referenced, markers: markers, bundles: bundles, now: q.clock.Now(), retention: q.fileRetention}
 }
 
 func (q *Queue) fileStoreStatus(ctx context.Context) *FileStoreStatus {
@@ -235,6 +237,9 @@ func (v fileStoreObservation) status(ctx context.Context) *FileStoreStatus {
 		if reclaimable {
 			status.ReclaimableBytes = addDiskBytes(status.ReclaimableBytes, p.size)
 		}
+	}
+	if v.admission != nil {
+		status.Admission = v.admission.storageAdmissionStatus(status, payloads)
 	}
 	status.ReservedOutputBytes = store.reservedOutputs(payloads)
 	status.FreeBytes -= min(status.FreeBytes, status.ReservedOutputBytes)

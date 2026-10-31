@@ -147,6 +147,25 @@ independent worker-custody backing remain unimplemented/unqualified. No setting
 activates automatic admission here; the configured cap/reserve and legacy disk
 floor still govern writes until #509's explicit migration.
 
+`file_store.admission` separately reports the tier-admission proposal. Its mode
+is `shadow` by default: each queued shared-output job reports its owner tier,
+learned output demand and proposed admission/hold against the observed cap and
+reserve. `yielded_commitments` names currently accepted queued estimates that
+would lose admission in that replay. Assigned writers, actual pending manifests
+and installed allocations remain commitments. Status never collects files or
+changes live reservations; its collector-order hook also preserves the caller's
+order until activation. Live submissions still use declared output estimates,
+legacy refusal and FIFO retry admission until #509 explicitly activates the
+persisted `storage_admission_active` migration latch. There is no activation
+command in this slice; storage-protection qualification alone does not set it.
+The migration must use this same latch when retiring cap/reserve together.
+
+Storage-pressure diagnostics report output-delivery ledger observations, including
+failed/publishing/pending/verified state, holder job and stable destination ID,
+with sanitized cause codes. Without an output observation they report `unknown`;
+checkpoint-root health is independent. Offline, stale, leaving or otherwise
+ineligible workers cannot hide a protected-capacity shortage on online workers.
+
 A typed quota denial is `disk_limit_exceeded`. It fails that exact attempt even
 if a stop races it, without spending an infrastructure retry or classifying the
 denial as memory OOM. Larger execution needs fresh storage admission. An ordinary

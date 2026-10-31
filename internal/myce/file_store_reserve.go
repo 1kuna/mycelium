@@ -171,7 +171,10 @@ func (q *Queue) admitFileUpload(ctx context.Context, status FileStoreStatus, pro
 	q.mu.RLock()
 	production, identified, classErr := q.fileStoreWriteClass(ctx, files, growth)
 	reserved := q.outputReservationsFor(projected, "", true)
-	need = addDiskBytes(growth, q.outputReservations(projected, ""))
+	active := q.s.StorageAdmissionActive
+	if active {
+		need = addDiskBytes(growth, q.outputReservations(projected, ""))
+	}
 	refusal := q.fileStoreReserveRefusal(status, need, growth, reserved, production)
 	var ordinary uint64
 	if !identified {
@@ -186,7 +189,7 @@ func (q *Queue) admitFileUpload(ctx context.Context, status FileStoreStatus, pro
 		q.recordStorageWritePressure(ctx, status, projected, files, growth, false, "")
 		return ordinary, nil
 	}
-	if !production || !identified {
+	if !active || !production || !identified {
 		return 0, refusal
 	}
 	var unidentified uint64

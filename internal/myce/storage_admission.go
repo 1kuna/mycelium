@@ -24,7 +24,11 @@ func (q *Queue) outputReservationsFor(payloads map[string]storedPayload, exclude
 			continue
 		}
 		if j.PendingOutputRefs == nil {
-			bytes = addDiskBytes(bytes, outputCommitment(j))
+			commitment := j.Spec.Disk.OutputBytes
+			if q.s.StorageAdmissionActive {
+				commitment = outputCommitment(j)
+			}
+			bytes = addDiskBytes(bytes, commitment)
 			continue
 		}
 		for _, ref := range j.PendingOutputRefs {
@@ -117,7 +121,7 @@ func (q *Queue) yieldSharedOutput(demand *Job, status FileStoreStatus, payloads 
 		return q.fileStoreReserveRefusal(status, need, growth, q.outputReservationsFor(payloads, exclude, true), q.priorityMatch(demand.Spec).Tier == "production")
 	}
 	err := check()
-	if err == nil || status.Error != "" {
+	if err == nil || status.Error != "" || !q.s.StorageAdmissionActive {
 		return err
 	}
 	var victims []*Job
@@ -150,6 +154,9 @@ func outputAdmissionReason(j *Job) string {
 }
 
 func (q *Queue) admitSharedOutput(j *Job, status FileStoreStatus, payloads map[string]storedPayload) error {
+	if !q.s.StorageAdmissionActive {
+		return q.yieldSharedOutput(j, status, payloads, j.Spec.Disk.OutputBytes, j.ID)
+	}
 	if q.workerLocalOutput(j) {
 		j.OutputReservationBytes = storageValue(0)
 		j.OutputAdmissionPending = false
@@ -169,10 +176,19 @@ func (q *Queue) admitSharedOutput(j *Job, status FileStoreStatus, payloads map[s
 	return nil
 }
 
-// Reclaim only through the existing authority/fences, in bounded collector
-// batches. A new pass requires observed committed-byte progress; a publication fence or
-// zero progress returns immediately for ordinary maintenance to retry.
+func (q *Queue) storageAdmissionActive() bool {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	return q.s.StorageAdmissionActive
+}
+
+// Reclaim only through existing authority/fences. Another bounded batch
+// requires observed committed-byte progress; zero progress or a publication
+// fence returns immediately. Shadow preserves the original single preflight pass.
 func (q *Queue) reclaimStorageForAdmission(ctx context.Context) error {
+	if !q.storageAdmissionActive() {
+		return q.reclaimJobFilesContext(ctx)
+	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -220,6 +236,9 @@ func (q *Queue) reclaimStorageForAdmission(ctx context.Context) error {
 // tier keeps lower tiers from taking its remaining shared room; independent
 // worker custody continues through the normal planner.
 func (q *Queue) admitOutputRetries(ctx context.Context) error {
+	if !q.storageAdmissionActive() {
+		return q.admitLegacyOutputRetries(ctx)
+	}
 	q.mu.RLock()
 	pending := false
 	for _, j := range q.liveJobs() {
@@ -318,10 +337,7 @@ func (q *Queue) storagePressureReason(j *Job, status FileStoreStatus, need uint6
 	}
 	slices.Sort(holders)
 	holders = slices.Compact(holders)
-	destination := "available"
-	if !q.nasAvailable {
-		destination = "unavailable"
-	}
+	destination := q.outputDeliveryHealth()
 	return fmt.Sprintf("file_store_capacity: need=%d bytes free=%d bytes deficit=%d bytes stored=%d bytes holders=%s destination=%s; wait for authorized delivery/retention or add capacity%s", need, status.FreeBytes, need-min(need, status.FreeBytes), status.UsedBytes, strings.Join(holders, ","), destination, wait)
 }
 
@@ -342,6 +358,10 @@ func (q *Queue) storageCapacityAlert(j *Job, bad bool) {
 // selected by retention; it cannot authorize deletion or shorten protection.
 // Caller holds q.mu. A digest shared by owners inherits its most valuable tier.
 func (q *Queue) orderStorageReclaim(hashes []string) {
+	if !q.s.StorageAdmissionActive {
+		return
+	}
+
 	type value struct{ tier, cost int }
 	values := map[string]value{}
 	for _, hash := range hashes {
@@ -396,12 +416,19 @@ func (q *Queue) protectedStorageWaitingReason(j *Job, host string) string {
 		return ""
 	}
 	var reasons []string
-	for _, m := range q.plannerMachines() {
-		if !q.jobAllowsMachine(j, m.ID) || host != "" && hostID(m) != host {
+	scan := q.placementScan()
+	live := q.placementLiveness(scan)
+	for _, m := range scan.machines {
+		if !live[m.ID] || q.unreported[m.ID] || !q.placementPolicyAllowed(j, m, false) || !q.checkpointReady(j, m) || !j.Spec.Needs.cpuOnly() && q.deviceAdmissionBlocked(m) || host != "" && hostID(m) != host {
 			continue
 		}
 		for _, candidate := range extensionJobs(j, m, true) {
 			if !executionTargetMatches(candidate.Spec, m) || !deviceAllowed(candidate, m) || !candidate.Spec.Needs.cpuOnly() && (m.GPU == "cpu" || len(candidate.Spec.Needs.Platform.Required) > 0 && !slices.Contains(candidate.Spec.Needs.Platform.Required, m.GPU)) {
+				continue
+			}
+			q.applyLearnedNeeds(candidate)
+			candidate = q.memoryCandidate(candidate, m)
+			if q.capReasonFor(candidate, m) != "" || (!sharedHostJobFits(candidate, m) || !fitsTargetResourcesChecked(candidate, m, m.TotalMemoryGB, nil)) {
 				continue
 			}
 			if _, reason := q.storageRequest(candidate, m); reason != "" {
@@ -418,10 +445,7 @@ func (q *Queue) protectedStorageWaitingReason(j *Job, host string) string {
 	if len(reasons) == 0 {
 		return ""
 	}
-	destination := "available"
-	if !q.nasAvailable {
-		destination = "unavailable"
-	}
+	destination := q.outputDeliveryHealth()
 	return strings.Join(slices.Compact(reasons), "; ") + "; destination=" + destination
 }
 
@@ -470,4 +494,173 @@ func (q *Queue) recordStorageWritePressure(ctx context.Context, status FileStore
 		q.observeHealth(key, bad, 0, HealthAlert{Kind: "production_storage_capacity", Store: "queue-file-store", JobID: demand.ID, Attempt: demand.Attempt, Project: demand.Spec.Project, Reason: reason, Recipients: []string{"operator", "project"}})
 		return nil
 	}, nil)
+}
+
+// Requeue never conjures a fresh estimate. Tick reacquires the retry's budget
+// through the same serialized file-store admission used for new tasks/uploads.
+func (q *Queue) admitLegacyOutputRetries(ctx context.Context) error {
+	q.fileLifecycle.RLock()
+	defer q.fileLifecycle.RUnlock()
+	q.mu.RLock()
+	store := q.files
+	pending := false
+	for _, j := range q.liveJobs() {
+		if j.State == "queued" && j.OutputAdmissionPending {
+			pending = true
+			break
+		}
+	}
+	q.mu.RUnlock()
+	if !pending || store == nil {
+		return nil
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	status, payloads, err := store.capacity(ctx)
+	if err != nil {
+		status.Error = "file store capacity unavailable"
+	}
+	return q.updateRequest(ctx, func() error {
+		if store != q.files {
+			return ErrStale
+		}
+		jobs := []*Job{}
+		for _, j := range q.liveJobs() {
+			if j.State == "queued" && j.OutputAdmissionPending {
+				jobs = append(jobs, j)
+			}
+		}
+		slices.SortFunc(jobs, func(a, b *Job) int {
+			if c := a.Queued.Compare(b.Queued); c != 0 {
+				return c
+			}
+			return strings.Compare(a.ID, b.ID)
+		})
+		for _, j := range jobs {
+			need := addDiskBytes(q.outputReservations(payloads, ""), j.Spec.Disk.OutputBytes)
+			if q.fileStoreReserveRefusal(status, need, j.Spec.Disk.OutputBytes, q.outputReservationsFor(payloads, "", true), q.priorityMatch(j.Spec).Tier == "production") != nil {
+				continue
+			}
+			j = q.touchJob(j.ID)
+			j.OutputAdmissionPending = false
+		}
+		return nil
+	}, nil)
+}
+
+// These are proposals against the observed legacy cap/reserve, with every
+// compatible learned estimate. Reporting does not run collection or release a
+// live commitment. #509 must qualify and activate the policy before cutover.
+type StorageAdmissionStatus struct {
+	Mode               string                     `json:"mode"`
+	YieldedCommitments []string                   `json:"yielded_commitments,omitempty"`
+	Proposals          []StorageAdmissionProposal `json:"proposals"`
+}
+type StorageAdmissionProposal struct {
+	JobID       string `json:"job_id"`
+	Tier        string `json:"tier"`
+	OutputBytes uint64 `json:"output_bytes"`
+	Admitted    bool   `json:"admitted"`
+	Reason      string `json:"reason,omitempty"`
+}
+
+// q is a detached observation. The second copy isolates hypothetical yielding
+// and learned commitments even from the rest of the status projection.
+func (q *Queue) storageAdmissionStatus(status FileStoreStatus, payloads map[string]storedPayload) *StorageAdmissionStatus {
+	out := &StorageAdmissionStatus{Mode: "shadow", Proposals: []StorageAdmissionProposal{}}
+	if q.s.StorageAdmissionActive {
+		out.Mode = "active"
+	}
+	proposed := &Queue{s: q.s, clock: q.clock, models: q.models, fileStoreProductionReserve: q.fileStoreProductionReserve}
+	proposed.s.Jobs = map[string]*Job{}
+	proposed.s.Submissions = nil
+	proposed.s.StorageAdmissionActive = true
+	var queued []*Job
+	accepted := map[string]bool{}
+	for _, original := range q.liveJobs() {
+		j := *original
+		accepted[j.ID] = !j.OutputAdmissionPending
+		if j.Spec.OutputDelivery != asyncNAS || terminal(j.State) || cancelled(&j) {
+			continue
+		}
+		if j.State == "queued" && j.PendingOutputRefs == nil && j.StorageAllocation == nil {
+			j.OutputReservationBytes = storageValue(q.sharedOutputDemand(&j))
+			queued = append(queued, &j)
+		}
+		proposed.s.Jobs[j.ID] = &j
+	}
+	proposed.storageQueueOrder(queued)
+	// Replay proposed acquisitions in tier order, retaining writers and their
+	// actual manifests. A failed acquisition remains a hold for lower tiers.
+	for _, j := range queued {
+		j.OutputAdmissionPending = true
+	}
+	for _, j := range queued {
+		decision := StorageAdmissionProposal{JobID: j.ID, Tier: q.priorityMatch(j.Spec).Tier, OutputBytes: proposed.sharedOutputDemand(j)}
+		if err := proposed.admitSharedOutput(j, status, payloads); err != nil {
+			decision.Reason = proposed.storageHoldReason(j, status, payloads)
+		} else {
+			decision.Admitted = true
+		}
+		out.Proposals = append(out.Proposals, decision)
+	}
+	for _, j := range queued {
+		if j.OutputAdmissionPending && accepted[j.ID] {
+			out.YieldedCommitments = append(out.YieldedCommitments, j.ID)
+		}
+	}
+	return out
+}
+
+// Read-only #508 observation seam: the queue's exact output-delivery ledger is
+// authoritative. No observation means unknown, regardless of checkpoint health.
+func (q *Queue) outputDeliveryHealth() string {
+	var observations []string
+	visit := func(j *Job) {
+		if j == nil || j.Delivery == nil {
+			return
+		}
+		d := j.Delivery
+		state, cause := "unknown", ""
+		switch d.State {
+		case "failed":
+			state = "failed"
+		case "publishing":
+			state = "publishing"
+			if d.Cause != "" {
+				cause = "publication_stalled"
+			}
+		case "pending":
+			state = "pending"
+		case "verified":
+			state = "verified"
+		}
+		switch d.Cause {
+		case "NAS publication or receipt verification failed; source files retained":
+			cause = "publication_or_receipt_verification_failed"
+		case "NAS destination configuration missing or changed; restore the original output-delivery-root":
+			cause = "destination_configuration_changed"
+		}
+		observation := state + "/" + j.ID
+		if d.DestinationID != "" {
+			observation += "@" + d.DestinationID
+		}
+		if cause != "" {
+			observation += ":" + cause
+		}
+		observations = append(observations, observation)
+	}
+	for _, j := range q.s.Jobs {
+		visit(j)
+	}
+	for _, r := range q.s.Submissions {
+		if q.s.Jobs[r.JobID] == nil {
+			visit(r.Job)
+		}
+	}
+	if len(observations) == 0 {
+		return "unknown"
+	}
+	slices.Sort(observations)
+	return strings.Join(slices.Compact(observations), ",")
 }

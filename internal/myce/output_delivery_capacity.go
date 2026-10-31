@@ -25,8 +25,10 @@ func (q *Queue) reserveDeliveryResult(ctx context.Context, r Result) (err error)
 	if err := r.OutputRefs.validate(); err != nil {
 		return err
 	}
-	if e := q.reclaimStorageForAdmission(ctx); e != nil && ctx.Err() != nil {
-		return ctx.Err()
+	if q.storageAdmissionActive() {
+		if e := q.reclaimStorageForAdmission(ctx); e != nil && ctx.Err() != nil {
+			return ctx.Err()
+		}
 	}
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()

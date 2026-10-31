@@ -127,7 +127,7 @@ func diskVolumeReason(m *Machine, v DiskVolume, need uint64) string {
 }
 func diskHeadroomReason(j *Job, m *Machine) string {
 	if j.OutputAdmissionPending {
-		return outputAdmissionReason(j)
+		return outputRetryHold
 	}
 	if m == nil {
 		return ""
@@ -172,7 +172,10 @@ func (q *Queue) diskHeadroomReason(j *Job, m *Machine) string {
 		return reason
 	}
 	if j.OutputAdmissionPending {
-		return outputAdmissionReason(j)
+		if q.s.StorageAdmissionActive {
+			return outputAdmissionReason(j)
+		}
+		return outputRetryHold
 	}
 	if m == nil {
 		return ""
@@ -266,10 +269,15 @@ func (q *Queue) diskCapacityRefusal(j *Job) string {
 }
 func (q *Queue) diskWaitingReason(j *Job, host string) string {
 	if j.OutputAdmissionPending {
-		return outputAdmissionReason(j)
+		if q.s.StorageAdmissionActive {
+			return outputAdmissionReason(j)
+		}
+		return outputRetryHold
 	}
-	if reason := q.protectedStorageWaitingReason(j, host); reason != "" {
-		return reason
+	if q.s.StorageAdmissionActive {
+		if reason := q.protectedStorageWaitingReason(j, host); reason != "" {
+			return reason
+		}
 	}
 	if !q.hasDiskReports(host) {
 		return ""
