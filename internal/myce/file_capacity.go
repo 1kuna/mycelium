@@ -127,6 +127,18 @@ func (s *FileStore) inventory(ctx context.Context) (map[string]storedPayload, er
 
 func (s *FileStore) capacity(ctx context.Context) (FileStoreStatus, map[string]storedPayload, error) {
 	status := FileStoreStatus{Store: "queue-file-store", LimitBytes: uint64(s.limit), ProductionReserveBytes: s.productionReserve, UnidentifiedWritesMayUseReserve: s.productionReserve > 0, UnidentifiedReserveAdmittedBytes: s.unidentifiedReserveAdmitted.Load()}
+	automatic := false
+	if s.storageCapacitySettings != nil {
+		var err error
+		status.LimitBytes, status.ProductionReserveBytes, automatic, err = s.storageCapacitySettings(status.LimitBytes, status.ProductionReserveBytes)
+		if err != nil {
+			return status, nil, err
+		}
+	}
+	if automatic {
+		status.LimitBytes, status.ProductionReserveBytes = 0, 0
+	}
+	status.UnidentifiedWritesMayUseReserve = status.ProductionReserveBytes > 0
 	payloads, err := s.inventory(ctx)
 	if err != nil {
 		return status, nil, err
@@ -149,6 +161,9 @@ func (s *FileStore) capacity(ctx context.Context) (FileStoreStatus, map[string]s
 		return status, payloads, errors.New("disk capacity unavailable")
 	}
 	status.DiskFreeBytes, status.FloorBytes = disk.FreeBytes, diskFreeFloor(disk.TotalBytes)
+	if automatic {
+		status.FloorBytes = 0
+	}
 	storeFree := status.LimitBytes - min(status.LimitBytes, allocated)
 	unavailable := addDiskBytes(status.FloorBytes, remaining)
 	if s.storageExcludedFree != nil {
@@ -158,7 +173,10 @@ func (s *FileStore) capacity(ctx context.Context) (FileStoreStatus, map[string]s
 		}
 		unavailable = addDiskBytes(unavailable, excluded)
 	}
-	status.FreeBytes = min(storeFree, disk.FreeBytes-min(disk.FreeBytes, unavailable))
+	status.FreeBytes = disk.FreeBytes - min(disk.FreeBytes, unavailable)
+	if !automatic {
+		status.FreeBytes = min(storeFree, status.FreeBytes)
+	}
 	return status, payloads, nil
 }
 
@@ -174,7 +192,8 @@ func fileStoreRefusal(status FileStoreStatus, need uint64) error {
 
 // Snapshot custody before walking disk. Status is read-only and never runs GC.
 type fileStoreObservation struct {
-	admission                 *Queue // Detached status inputs only; never the live queue.
+	admission                 *Queue                       // Detached status inputs only; never the live queue.
+	migration                 *storageMigrationObservation // Complete inputs, independent of job paging.
 	store                     *FileStore
 	expired, keep, referenced map[string]bool
 	markers                   map[string]time.Time
@@ -198,7 +217,12 @@ func (q *Queue) captureFileStoreStatus() fileStoreObservation {
 			markers[hash] = at
 		}
 	}
-	return fileStoreObservation{store: q.files, expired: expired, keep: keep, referenced: referenced, markers: markers, bundles: bundles, now: q.clock.Now(), retention: q.fileRetention}
+	var migration *storageMigrationObservation
+	if q.s.StorageMigration != nil {
+		capture := q.captureStorageMigration()
+		migration = &capture
+	}
+	return fileStoreObservation{migration: migration, store: q.files, expired: expired, keep: keep, referenced: referenced, markers: markers, bundles: bundles, now: q.clock.Now(), retention: q.fileRetention}
 }
 
 func (q *Queue) fileStoreStatus(ctx context.Context) *FileStoreStatus {
@@ -220,6 +244,9 @@ func (v fileStoreObservation) status(ctx context.Context) *FileStoreStatus {
 	status, payloads, err := store.capacity(ctx)
 	if err != nil {
 		status.Error = "file store capacity unavailable"
+		if v.admission != nil {
+			status.Admission = v.admission.storageAdmissionStatus(status, payloads, v.migration)
+		}
 		status.Physical = store.physicalStorageStatus(ctx, status, nil, now)
 		return &status
 	}
@@ -239,7 +266,7 @@ func (v fileStoreObservation) status(ctx context.Context) *FileStoreStatus {
 		}
 	}
 	if v.admission != nil {
-		status.Admission = v.admission.storageAdmissionStatus(status, payloads)
+		status.Admission = v.admission.storageAdmissionStatus(status, payloads, v.migration)
 	}
 	status.ReservedOutputBytes = store.reservedOutputs(payloads)
 	status.FreeBytes -= min(status.FreeBytes, status.ReservedOutputBytes)

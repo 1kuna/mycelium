@@ -12,6 +12,9 @@ import (
 )
 
 func fileCommand(args []string) error {
+	if len(args) > 0 && args[0] == "admission" {
+		return fileAdmissionCommand(context.Background(), args[1:], os.Stdout)
+	}
 	if len(args) > 0 && args[0] == "release" {
 		return fileReleaseCommand(context.Background(), args[1:], os.Stdout)
 	}

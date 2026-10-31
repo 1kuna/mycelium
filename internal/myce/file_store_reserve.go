@@ -86,8 +86,19 @@ func (q *Queue) checkFileStoreAttempt(ctx context.Context) error {
 	_, err := q.fileStoreAttemptJob(ctx, false)
 	return err
 }
-func (q *Queue) nonProductionFileStoreFree(status FileStoreStatus, productionReserved uint64) uint64 {
+func (q *Queue) effectiveProductionReserve() uint64 {
 	reserve := uint64(q.fileStoreProductionReserve)
+	if m := q.s.StorageMigration; m != nil {
+		reserve = m.Saved.ProductionReserveBytes
+	}
+	if q.automaticStorage() {
+		reserve = 0
+	}
+	return reserve
+}
+
+func (q *Queue) nonProductionFileStoreFree(status FileStoreStatus, productionReserved uint64) uint64 {
+	reserve := q.effectiveProductionReserve()
 	uncommitted := reserve - min(reserve, productionReserved)
 	return status.FreeBytes - min(status.FreeBytes, uncommitted)
 }
@@ -103,7 +114,7 @@ func (q *Queue) fileStoreReserveRefusal(status FileStoreStatus, need, growth, pr
 	}
 	available := q.nonProductionFileStoreFree(status, productionReserved)
 	if need > available {
-		return &HTTPError{Status: http.StatusInsufficientStorage, Code: "file_store_capacity", Message: fmt.Sprintf("queue-file-store: need=%d bytes non_production_free=%d bytes; production reserve=%d bytes (--file-store-production-reserve); production and unidentified legacy writes may use the reserve", need, available, q.fileStoreProductionReserve)}
+		return &HTTPError{Status: http.StatusInsufficientStorage, Code: "file_store_capacity", Message: fmt.Sprintf("queue-file-store: need=%d bytes non_production_free=%d bytes; production reserve=%d bytes (--file-store-production-reserve); production and unidentified legacy writes may use the reserve", need, available, q.effectiveProductionReserve())}
 	}
 	return nil
 }

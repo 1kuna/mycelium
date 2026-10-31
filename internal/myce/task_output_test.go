@@ -37,7 +37,7 @@ type taskOutputFixture struct {
 	boundary *taskOutputBoundary
 }
 
-func newTaskOutputFixture(t *testing.T, kind, retention string) *taskOutputFixture {
+func newTaskOutputFixture(t *testing.T, kind, retention string, queued ...func(*Queue, Machine)) *taskOutputFixture {
 	t.Helper()
 	q, c, db := protectionQueue(t)
 	m := protectionMachine("producer", "fake")
@@ -46,12 +46,18 @@ func newTaskOutputFixture(t *testing.T, kind, retention string) *taskOutputFixtu
 	if err := q.ConfigureStorageProtection(context.Background(), protectionBackend(m), protectionControlWork(t, c)); err != nil {
 		t.Fatal(err)
 	}
+	if len(queued) > 0 {
+		check(t, q, m, nil)
+	}
 	s := protectionSpec("experiment")
 	s.SubmissionKey = "destination-result"
 	s.OutputDestination = &OutputDestination{Protocol: taskOutputProtocol, Kind: kind, ID: "archive"}
 	s.OutputRetention = retention
 	s.Outputs["second.txt"] = "other"
 	submitted := submit(t, q, s)
+	for _, hook := range queued {
+		hook(q, m)
+	}
 	assigned := check(t, q, m, nil).Job
 	if assigned == nil || assigned.ID != submitted.ID {
 		t.Fatal("not assigned")
