@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Offline contract tests: no fleet submissions or full suites."""
+from contextlib import redirect_stdout
+import io
 import importlib.util
 import json
 import os
@@ -17,7 +19,7 @@ SHA = 'a' * 40
 
 
 class ActionsFullTest(unittest.TestCase):
-    def exercise(self, linux='succeeded', submission_failure=False, bad_marker=False):
+    def exercise(self, linux='succeeded', submission_failure=False, bad_marker=False, refusal=None):
         submitted, waited, results = [], [], []
 
         def command(*args):
@@ -31,9 +33,11 @@ class ActionsFullTest(unittest.TestCase):
                 self.assertNotIn('host:', profile)
                 self.assertIn('check: [grep, -qx,', profile)
                 if submission_failure and platform == 'darwin':
-                    code, output = 69, 'PRIVATE ERROR'
+                    code, output = ((78, json.dumps(refusal)) if refusal is not None
+                                    else (69, 'PRIVATE ERROR'))
                 else:
-                    output = json.dumps({'job_id': platform})
+                    # A busy qualified host returns a queued receipt; wait owns the delay.
+                    output = json.dumps({'job_id': platform, 'status': 'queued'})
             elif args[0] == 'wait':
                 waited.extend(args[1:])
                 output = '\n'.join(f'{job} {linux if job == "linux" else "succeeded"} PRIVATE REASON'
@@ -50,10 +54,13 @@ class ActionsFullTest(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             scratch = Path(directory)
-            with patch.object(ci, 'command', command), patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': str(scratch / 'summary')}):
+            with redirect_stdout(io.StringIO()) as public, patch.object(ci, 'command', command), patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': str(scratch / 'summary')}):
                 status = ci.run(ROOT, SHA, scratch)
             summary = (scratch / 'summary').read_text()
-            self.assertNotIn('PRIVATE', summary)
+            self.assertNotIn('PRIVATE', summary + public.getvalue())
+            if refusal is not None:
+                self.assertIn('no qualified target', summary)
+                self.assertIn('no qualified target', public.getvalue())
             self.assertIn('| darwin |', summary)
             self.assertIn('| linux |', summary)
         self.assertEqual(submitted, ['darwin', 'linux'])
@@ -68,6 +75,25 @@ class ActionsFullTest(unittest.TestCase):
     def test_failure_does_not_skip_other_platform(self):
         self.assertEqual(self.exercise(linux='failed'), (1, ['darwin', 'linux'], ['darwin']))
         self.assertEqual(self.exercise(submission_failure=True), (1, ['linux'], ['linux']))
+
+    def test_permanent_memory_refusal_is_clear_and_private(self):
+        refusal = {
+            'refusal_code': 'no_qualified_target',
+            'refusal_reason': ('host memory need 9.210817337036133 GiB '
+                               '(9.085817337036133 + 0.125 slack) exceeds allowance '
+                               '8 GiB on PRIVATE-HOST; intent retained locally'),
+        }
+        reply = subprocess.CompletedProcess([], 78, json.dumps(refusal), 'PRIVATE ERROR')
+        self.assertEqual(ci.submission_failure(reply),
+                         'no qualified target: host memory need 9.211 GiB exceeds allowance 8.000 GiB')
+        self.assertEqual(self.exercise(submission_failure=True, refusal=refusal),
+                         (1, ['linux'], ['linux']))
+        refusal['refusal_reason'] = 'PRIVATE unsupported environment or host path'
+        self.assertEqual(ci.submission_failure(subprocess.CompletedProcess([], 78, json.dumps(refusal))),
+                         'no qualified target; inspect private receipt for eligibility requirements')
+        for output in ('PRIVATE malformed', '[]', '{"refusal_reason": "PRIVATE"}'):
+            self.assertEqual(ci.submission_failure(subprocess.CompletedProcess([], 78, output)),
+                             'submission unavailable (exit 78)')
 
     def test_no_credentials_or_notifier_in_cli_environment(self):
         with patch.dict(os.environ, {'MYCE_TOKEN': 'synthetic-fleet', 'MYCE_NOTIFY': 'unused',

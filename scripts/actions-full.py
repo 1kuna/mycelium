@@ -32,9 +32,30 @@ def command(*args):
     return subprocess.run(['myce', *args], env=env, capture_output=True, text=True)
 
 
+def submission_failure(reply):
+    """Publish fixed classifications and numeric capacity only, never raw reasons."""
+    if reply.returncode == 78:
+        try:
+            receipt = json.loads(reply.stdout)
+            if receipt.get('refusal_code') == 'no_qualified_target':
+                reason = receipt.get('refusal_reason', '')
+                match = re.fullmatch(
+                    r'host memory need ([0-9]+(?:\.[0-9]+)?) GiB '
+                    r'\([0-9.]+ \+ [0-9.]+ slack\) exceeds allowance '
+                    r'([0-9]+(?:\.[0-9]+)?) GiB on .+', reason)
+                if match:
+                    need, allowance = map(float, match.groups())
+                    return (f'no qualified target: host memory need {need:.3f} GiB '
+                            f'exceeds allowance {allowance:.3f} GiB')
+                return 'no qualified target; inspect private receipt for eligibility requirements'
+        except (ValueError, TypeError, AttributeError):
+            pass
+    return f'submission unavailable (exit {reply.returncode})'
+
+
 def run(root, sha, scratch):
     profile = (root / '.mycelium/profiles/gate-full.yaml').read_text()
-    jobs, states = {}, {}
+    jobs, states, refusals = {}, {}, {}
     failed = False
     # Submit both before waiting. An error on one platform must not skip the other.
     for platform in PLATFORMS:
@@ -49,7 +70,8 @@ def run(root, sha, scratch):
             jobs[platform] = job
             print(f'{platform}: submitted job {job}', flush=True)
         except (ValueError, KeyError, TypeError):
-            print(f'{platform}: submission unavailable (exit {reply.returncode})', flush=True)
+            refusals[platform] = submission_failure(reply)
+            print(f'{platform}: {refusals[platform]}', flush=True)
             failed = True
         if reply.returncode:
             failed = True
@@ -67,7 +89,7 @@ def run(root, sha, scratch):
     rows = []
     for platform in PLATFORMS:
         job = jobs.get(platform)
-        state = states.get(job, 'unavailable')
+        state = states.get(job, refusals.get(platform, 'unavailable'))
         if state == 'succeeded':
             destination = scratch / f'{platform}-result'
             reply = command('result', job, '--out', str(destination))
