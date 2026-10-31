@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"maps"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -72,7 +73,7 @@ type observationState struct {
 }
 
 // JSON does not carry the private scalar ledger used by diagnostic planning.
-// Capture it by value alongside the encoded state, then restore only into the
+// Capture it by value alongside the public inputs, then restore only into the
 // detached machines. Probe facts and runtime preparation/secrets are worker-only.
 type observationMachineLedger struct {
 	cpuLedger              bool
@@ -81,7 +82,7 @@ type observationMachineLedger struct {
 	hostReservationDebtGB  float64
 }
 
-// Encode while protected, then decode and project outside q.mu. No mutable
+// Copy while protected, then encode and project outside q.mu. No mutable
 // state escapes the capture. Cold history needs only its public summary; active
 // work retains the inputs needed by the existing diagnostic planner.
 func (q *Queue) captureObservation(id string, contexts ...context.Context) (*Queue, fileStoreObservation, error) {
@@ -90,7 +91,10 @@ func (q *Queue) captureObservation(id string, contexts ...context.Context) (*Que
 
 func (q *Queue) captureStatusObservation(id string, options *statusOptions, contexts ...context.Context) (*Queue, fileStoreObservation, error) {
 	started := readWallStart(q.observeRead)
-	unlockRequest := requestReadLock(requestContext(contexts), &q.mu)
+	// Serialize just the memory copy. Parallel read-locked captures can all
+	// consume CPU while a waiting heartbeat writer must wait for every one.
+	// Projection/encoding below remain concurrent outside the queue lock.
+	unlockRequest := requestLock(requestContext(contexts), &q.mu)
 	locked := readWallStart(q.observeRead)
 	hold := q.statusHolds.start()
 	var files fileStoreObservation
@@ -160,21 +164,25 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 			s.EnrollmentRelease, s.EnrollmentReleaseKey = nil, nil
 		}
 	}
-	// Capture release/scope before receipt minimization loses descendants and
-	// cold terminal dependency edges. These values never mutate persisted jobs.
-	var cancellations *Queue
-	for key, j := range s.Jobs {
+	// Preserve declaration/custody inputs before receipt minimization. Build
+	// the descendant index and project cancellation only after unlocking.
+	cancellations := map[string]cancellationObservationInput{}
+	cancellationSubmissions := map[string]cancellationSubmissionInput{}
+	fullCancellation := false
+	for key := range s.Jobs {
 		if original := q.s.Jobs[key]; original != nil && (original.CancelledAt != nil || original.FanOut != nil) && (v.observationSelection == nil || v.observationSelection.ids[key]) {
-			view := q
-			if original.FanOut != nil {
-				if cancellations == nil {
-					cancellations = q.cancellationObservation()
-				}
-				view = cancellations
+			cancellations[key] = cancellationInputs(original)
+			fullCancellation = fullCancellation || original.FanOut != nil
+		}
+	}
+	if fullCancellation {
+		for key, j := range q.s.Jobs {
+			cancellations[key] = cancellationInputs(j)
+		}
+		for key, r := range q.s.Submissions {
+			if r.Job != nil && q.s.Jobs[r.JobID] == nil {
+				cancellationSubmissions[key] = cancellationSubmissionInput{Kind: r.Kind, JobID: r.JobID, Job: cancellationInputs(r.Job)}
 			}
-			copy := *j
-			view.projectCancellation(&copy, original)
-			s.Jobs[key] = &copy
 		}
 	}
 	for key, j := range s.Jobs {
@@ -214,9 +222,10 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 			gatherWait[key] = true
 		}
 	}
-	var data []byte
+	cancellationReleases := maps.Clone(q.s.HostReleases)
+	var detached observationState
 	if err == nil {
-		data, err = json.Marshal(inputs)
+		detached = copyObservation(inputs)
 	}
 	duration := queueHoldDuration(hold)
 	unlockRequest()
@@ -225,9 +234,20 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 	if err != nil {
 		return nil, files, err
 	}
-	var detached observationState
-	if err = json.Unmarshal(data, &detached); err != nil {
-		return nil, files, err
+	custody := &Queue{s: state{Jobs: map[string]*Job{}, Submissions: map[string]*submissionRecord{}, HostReleases: cancellationReleases}}
+	for key, input := range cancellations {
+		custody.s.Jobs[key] = input.job()
+	}
+	for key, input := range cancellationSubmissions {
+		custody.s.Submissions[key] = &submissionRecord{Kind: input.Kind, JobID: input.JobID, Job: input.Job.job()}
+	}
+	if fullCancellation {
+		custody = custody.cancellationObservation()
+	}
+	for key, job := range detached.State.Jobs {
+		if original := custody.s.Jobs[key]; original != nil && (original.CancelledAt != nil || original.FanOut != nil) && (v.observationSelection == nil || v.observationSelection.ids[key]) {
+			custody.projectCancellation(job, original)
+		}
 	}
 	for key, m := range detached.State.Machines {
 		ledger := machineLedgers[key]

@@ -129,6 +129,21 @@ is not release performance. Fake-clock loss and scope regressions still run
 under race in quick/full gates. Run this acceptance alongside quick when changing
 fan-out/control-path performance, and before a hotfix claims the burst target.
 
+For queue observation/check-in contention, also run:
+
+```sh
+GOMAXPROCS=4 go test ./internal/myce -run '^TestStatusReadCheckinContention$' -count=1 -v
+```
+
+This separate `!race` regression measures 100 real SQLite check-ins alongside
+62 concurrent readers (queued receipts and uncached bounded status), 5,000
+retained jobs including 400 fan-out parents, 200 queued jobs and 1,000 curves.
+Nearest-rank p99 must remain below 500ms, half the default one-second heartbeat
+interval. A running production attempt must retain its original attempt with no
+losses. Queue decisions use a fixed injected clock; this is a laptop contention
+bound, while fake-clock contact/loss tests cover elapsed-time decisions under
+race. It does not establish fleet capacity or native release qualification.
+
 On macOS, the bounded helper reads cwd, executable and standard-descriptor paths
 from `libproc` without enumerating or statting mounted filesystems. Apple's lsof
 has no network-mount exclusion and even scratch-scoped scans can block on an
