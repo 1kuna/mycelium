@@ -59,6 +59,11 @@ sed "s/REPLACE_CLIENT_GROUP/$client_group/g" myce-gpu-telemetry.conf > "$rendere
 Use these rendered files in the install commands below, after replacing
 `WORKER_EFFECTIVE_GID` with the effective GID read from the running worker.
 
+Create the dedicated `myce-telemetry` system group if absent
+(`getent group myce-telemetry || sudo groupadd --system myce-telemetry`).
+The broker service still uses this group; it is separate from the configurable
+socket client group and workers do not need membership in it.
+
 Install the binary
 with the built-in client at `/usr/local/libexec/mycelium-telemetry/myce`, and the
 provided no-argument wrapper at `/usr/local/libexec/myce-gpu-telemetry-helper`.
