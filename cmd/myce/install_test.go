@@ -290,29 +290,53 @@ func TestInstallQueueStartsAndReportsLocally(t *testing.T) {
 		}
 		return nil, nil
 	}
-	if err = myce.Install(context.Background(), c, os.Args[0], "", runner); err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		child.Process.Signal(syscall.SIGTERM)
-		if err := child.Wait(); err != nil {
-			t.Error("queue shutdown", err)
-		}
-	}()
 	client := myce.Client{URL: "http://" + address, Token: "private-test-only"}
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		var snapshot myce.Snapshot
-		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
-		err = client.Call(ctx, "GET", "/api/status", nil, &snapshot)
-		cancel()
-		if err == nil {
-			break
+	var joiningBind string
+	for start := 0; start < 2; start++ {
+		if err = myce.Install(context.Background(), c, os.Args[0], "", runner); err != nil {
+			t.Fatal(err)
 		}
-		if time.Now().After(deadline) {
-			t.Fatal("installed queue did not report", err)
-		}
-		time.Sleep(10 * time.Millisecond)
+		func() {
+			defer func() {
+				child.Process.Signal(syscall.SIGTERM)
+				if err := child.Wait(); err != nil {
+					t.Error("queue shutdown", err)
+				}
+			}()
+			deadline := time.Now().Add(5 * time.Second)
+			for {
+				var snapshot myce.Snapshot
+				ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+				err = client.Call(ctx, "GET", "/api/status", nil, &snapshot)
+				cancel()
+				if err == nil {
+					break
+				}
+				if time.Now().After(deadline) {
+					t.Fatal("installed queue did not report", err)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+			c, err = myce.ReadServiceConfig(c.Config)
+			if err != nil || c.DiscoveryListen == "" {
+				t.Fatal("queue did not save its joining bind", err)
+			}
+			if start == 0 {
+				joiningBind = c.DiscoveryListen
+			} else if c.DiscoveryListen != joiningBind {
+				t.Fatal("queue reinstall/restart changed its joining port")
+			}
+			identity, err := myce.LoadJoiningIdentity(c.DB + ".joining")
+			if err != nil {
+				t.Fatal(err)
+			}
+			invitation := myce.Invitation{Version: 1, Token: "private-test-only", Fingerprint: identity.Fingerprint()}
+			joined, err := myce.ResolveJoining(context.Background(), invitation, "https://"+joiningBind, nil)
+			if err != nil {
+				t.Fatal("saved HTTPS joining address failed after startup", err)
+			}
+			joined.HTTP.CloseIdleConnections()
+		}()
 	}
 }
 

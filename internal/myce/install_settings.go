@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -173,6 +174,13 @@ func InstallSettings() []InstallSetting {
 			return nil
 		}),
 		installSetting("listen", "Listen", "queue bind address", func(c *ServiceConfig) *string { return &c.Listen }, installName),
+		installSetting("discovery-listen", "DiscoveryListen", "saved TLS joining bind address (empty selects and saves an automatic port)", func(c *ServiceConfig) *string { return &c.DiscoveryListen }, func(v string) error {
+			if v == "" {
+				return nil
+			}
+			_, _, err := net.SplitHostPort(v)
+			return err
+		}),
 		installSetting("name", "Name", "stable worker name", func(c *ServiceConfig) *string { return &c.Name }, installName),
 		installContext(installSetting("gpu", "Detection.Platform", "GPU platform override", func(c *ServiceConfig) *string { return &c.Detection.Platform }, installAny[string]), func(c ServiceConfig) error {
 			if c.Role == "worker" && !validGPU(c.Detection.Platform) {

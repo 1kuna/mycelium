@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
+	"net/http"
 	"os"
 
 	"path/filepath"
@@ -17,6 +19,95 @@ import (
 
 	"mycelium/internal/myce"
 )
+
+func TestInstallWorkerRepairsJoiningAddressWithSavedPin(t *testing.T) {
+	for _, tc := range []struct {
+		name                    string
+		mismatch, configUpdated bool
+	}{{name: "new address"}, {name: "config already updated", configUpdated: true}, {name: "pin mismatch", mismatch: true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, probe := savedInstallFixture(t, "worker")
+			c.AllowDeviceless, c.Enrollment = true, false
+			c.Queue = "https://old-queue.invalid:7443"
+			c.JoiningFile = filepath.Join(filepath.Dir(c.Config), "joining.json")
+			identity, err := myce.LoadJoiningIdentity(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			invitation := myce.Invitation{Version: 1, Fingerprint: identity.Fingerprint(), Token: "synthetic-install-fixture", Address: c.Queue}
+			if err := myce.WriteInvitation(c.JoiningFile, invitation); err != nil {
+				t.Fatal(err)
+			}
+			data, _ := json.Marshal(c)
+			if err := os.WriteFile(c.Config, data, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if tc.mismatch {
+				identity, err = myce.LoadJoiningIdentity(t.TempDir())
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			server, _, err := myce.ServeJoining(listener, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if tc.mismatch {
+					t.Error("sent a request to a queue with the wrong pin")
+				}
+				if r.URL.Path != "/api/ping" || r.Header.Get("Authorization") != "Bearer synthetic-install-fixture" {
+					w.WriteHeader(http.StatusUnauthorized)
+				}
+			}), identity)
+			if err != nil {
+				listener.Close()
+				t.Fatal(err)
+			}
+			defer server.Close()
+			address := "https://" + listener.Addr().String()
+			if tc.configUpdated {
+				c.Queue = address
+				data, _ := json.Marshal(c)
+				if err := os.WriteFile(c.Config, data, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := map[string][]byte{}
+			for _, path := range []string{c.Config, c.JoiningFile, c.Binary, c.Service} {
+				before[path], err = os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			err = setupCommandWithProbe([]string{"install", "worker", "--config", c.Config, "--queue", address}, probe, c.NAS)
+			if tc.mismatch {
+				if err == nil || !strings.Contains(err.Error(), "saved certificate pin") || !strings.Contains(err.Error(), "identity does not match") {
+					t.Fatal("pin mismatch was not clearly refused", err)
+				}
+				for path, want := range before {
+					got, err := os.ReadFile(path)
+					if err != nil || !bytes.Equal(got, want) {
+						t.Fatal("refused pin mismatch changed installed files", err)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			saved, err := myce.ReadServiceConfig(c.Config)
+			if err != nil || saved.Queue != address {
+				t.Fatal("worker config did not save the new address", err)
+			}
+			got, err := myce.ReadInvitation(saved.JoiningFile)
+			invitation.Address = address
+			if err != nil || got != invitation {
+				t.Fatal("joining address repair changed the pin/authority or lost the address", err)
+			}
+		})
+	}
+}
 
 func savedInstallFixture(t *testing.T, roles ...string) (myce.ServiceConfig, myce.MachineProbe) {
 	t.Helper()
@@ -41,6 +132,8 @@ func savedInstallFixture(t *testing.T, roles ...string) (myce.ServiceConfig, myc
 		switch f.Kind() {
 		case reflect.String:
 			switch name {
+			case "DiscoveryListen":
+				f.SetString("127.0.0.1:7443")
 			case "CPUQuota":
 				f.SetString("37%")
 			case "MemoryMax":

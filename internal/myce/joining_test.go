@@ -3,9 +3,12 @@ package myce
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,6 +18,81 @@ import (
 	"testing"
 	"time"
 )
+
+func TestJoiningListenPersistsAndFallsBack(t *testing.T) {
+	for _, installed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("installed=%t", installed), func(t *testing.T) {
+			dir := t.TempDir()
+			configPath := ""
+			if installed {
+				c, err := PlanInstall("queue", dir, "", dir, "http://queue.invalid", "queue", Detection{OS: "linux"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.MkdirAll(filepath.Dir(c.Config), 0700); err != nil {
+					t.Fatal(err)
+				}
+				data, err := json.Marshal(c)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(c.Config, data, 0600); err != nil {
+					t.Fatal(err)
+				}
+				configPath = c.Config
+			}
+			queue := &net.TCPAddr{IP: net.ParseIP("127.0.0.1")}
+			listen := func(bind string) (net.Listener, error) { return net.Listen("tcp", bind) }
+			warnings := 0
+			warn := func(format string, args ...any) {
+				warnings++
+				if !strings.Contains(format, "Saved TLS joining port is busy") {
+					t.Error("missing actionable port warning")
+				}
+			}
+			first, err := ListenJoining(queue, "", configPath, dir, listen, warn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			address := first.Addr().String()
+			first.Close()
+			restarted, err := ListenJoining(queue, "", configPath, dir, listen, warn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer restarted.Close()
+			if restarted.Addr().String() != address || warnings != 0 {
+				t.Fatal("foreground restart lost its saved joining port")
+			}
+			if occupied, err := ListenJoining(queue, address, configPath, dir, listen, warn); err == nil {
+				occupied.Close()
+				t.Fatal("explicit busy bind silently fell back")
+			}
+			fallback, err := ListenJoining(queue, "", configPath, dir, listen, warn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			newAddress := fallback.Addr().String()
+			fallback.Close()
+			if newAddress == address || warnings != 1 {
+				t.Fatal("saved busy bind did not fall back with a warning")
+			}
+			again, err := ListenJoining(queue, "", configPath, dir, listen, warn)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer again.Close()
+			if again.Addr().String() != newAddress {
+				t.Fatal("fallback port was not saved")
+			}
+			explicit, err := ListenJoining(queue, "127.0.0.1:0", configPath, dir, listen, warn)
+			if err != nil {
+				t.Fatal("explicit bind did not override saved port", err)
+			}
+			explicit.Close()
+		})
+	}
+}
 
 type fakeDiscovery struct {
 	addresses []string

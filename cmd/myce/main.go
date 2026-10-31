@@ -214,7 +214,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 	joiningFile := f.String("joining-file", env("MYCE_JOINING_FILE", ""), "privately supplied invitation (discovery plus saved address)")
 	discovery := f.Bool("discovery", true, "advertise a pinned TLS joining endpoint over DNS-SD")
-	discoveryListen := f.String("discovery-listen", "", "TLS joining listen address (default same interface as queue, automatic port)")
+	discoveryListen := f.String("discovery-listen", "", "TLS joining listen address (default saved port, or select and save an automatic port)")
 	allowReleaseDowngrade := f.Bool("allow-downgrade", false, "explicitly re-approve an equal or older enrollment release")
 	releaseManifest := f.String("release-manifest", "", "approved signed enrollment release manifest")
 	releaseKey := f.String("release-key", "", "provisioned publisher Ed25519 public key PEM")
@@ -590,15 +590,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			if e != nil {
 				return e
 			}
-			bind := *discoveryListen
-			if bind == "" {
-				host, _, e := net.SplitHostPort(listener.Addr().String())
-				if e != nil {
-					return e
-				}
-				bind = net.JoinHostPort(host, "0")
-			}
-			tlsListener, e := listenWithRetry(ctx, bind, net.Listen, myce.RealClock{}, waitForBind, log.Printf)
+			tlsListener, e := myce.ListenJoining(listener.Addr(), *discoveryListen, *serviceConfigPath, dir, func(bind string) (net.Listener, error) {
+				return listenWithRetry(ctx, bind, net.Listen, myce.RealClock{}, waitForBind, log.Printf)
+			}, log.Printf)
 			if e != nil {
 				if errors.Is(e, context.Canceled) {
 					return nil
