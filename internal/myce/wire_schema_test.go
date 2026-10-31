@@ -324,6 +324,23 @@ func TestWireSchemas(t *testing.T) {
 	}
 	ledgerSchema = append(ledgerSchema, '\n')
 	ledgerPath := filepath.Join(schemaRoot, "job-ledger-v1.schema.json")
+	fileStoreReflector := generate.Reflector{Anonymous: true, AllowAdditionalProperties: true}
+	fileStoreSchema, err := json.MarshalIndent(fileStoreReflector.Reflect(&FileStoreStatus{}), "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileStoreSchema = append(fileStoreSchema, '\n')
+	fileStorePath := filepath.Join(schemaRoot, "file-store-v1.schema.json")
+	if os.Getenv("MYCE_UPDATE_SCHEMAS") == "1" {
+		if err := os.WriteFile(fileStorePath, fileStoreSchema, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	actualFileStore, err := os.ReadFile(fileStorePath)
+	if err != nil || !bytes.Equal(actualFileStore, fileStoreSchema) {
+		t.Fatal("file store schema drift: regenerate with MYCE_UPDATE_SCHEMAS=1", err)
+	}
+	validateWireValue(t, compileWireSchema(t, "file-store-v1.schema.json"), FileStoreStatus{Store: "queue-file-store", UsedBytes: 8, FreeBytes: 24, LimitBytes: 32, ProductionReserveBytes: 8})
 	if os.Getenv("MYCE_UPDATE_SCHEMAS") == "1" {
 		if err := os.WriteFile(ledgerPath, ledgerSchema, 0644); err != nil {
 			t.Fatal(err)

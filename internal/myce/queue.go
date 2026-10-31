@@ -116,18 +116,19 @@ type Queue struct {
 	onboardingNAS                   NASIdentity
 	productionInfrastructureRetries int
 
-	fileReferenceRevision  uint64
-	environmentRevision    uint64
-	fileLifecycle          sync.RWMutex // Reference publication versus unlink; acquire before q.mu.
-	fileRetention          time.Duration
-	fileCollectionDeferred bool // q.mu; warn once per contiguous deferred streak.
-	files                  *FileStore
-	startupFiles           *fileStoreConfiguration
-	fileCheckpoints        bool
-	submitVerificationSlot chan struct{}
-	nasProbe               checkpointAvailability
-	nasProgress            checkpointIO[int64]
-	nasAvailable           bool
+	fileReferenceRevision      uint64
+	environmentRevision        uint64
+	fileLifecycle              sync.RWMutex // Reference publication versus unlink; acquire before q.mu.
+	fileRetention              time.Duration
+	fileCollectionDeferred     bool // q.mu; warn once per contiguous deferred streak.
+	files                      *FileStore
+	startupFiles               *fileStoreConfiguration
+	fileStoreProductionReserve int64
+	fileCheckpoints            bool
+	submitVerificationSlot     chan struct{}
+	nasProbe                   checkpointAvailability
+	nasProgress                checkpointIO[int64]
+	nasAvailable               bool
 
 	nextApprovalWarning time.Time
 
@@ -690,7 +691,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 			if store == nil {
 				return &HTTPError{Status: 503, Code: "file_store_unavailable", Message: "queue-file-store is not configured"}
 			}
-			if err := fileStoreRefusal(resultCapacity, addDiskBytes(q.outputReservations(resultPayloads, ""), s.Disk.OutputBytes)); err != nil {
+			if err := q.fileStoreReserveRefusal(resultCapacity, addDiskBytes(q.outputReservations(resultPayloads, ""), s.Disk.OutputBytes), s.Disk.OutputBytes, q.outputReservationsFor(resultPayloads, "", true), q.priorityMatch(s).Tier == "production"); err != nil {
 				return err
 			}
 		}

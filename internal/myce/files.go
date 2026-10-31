@@ -121,20 +121,22 @@ func verifyFile(ctx context.Context, path string, ref FileRef) error {
 }
 
 type FileStore struct {
-	reservedOutputs func(map[string]storedPayload) uint64
-	diskProbe       func(string) (DiskReading, error)
-	root            string
-	limit           int64
-	mu              sync.Mutex
-	handler         http.Handler
-	uploadLocker    tus.Locker
-	syncDir         func(string) error // Durability failure injection.
-	expired         func(string, ...context.Context) bool
-	lifecycle       *sync.RWMutex
-	clock           Clock
-	recordUpload    func(hash, purpose string, created bool, contexts ...context.Context) error
-	publishUpload   func(hash string, contexts ...context.Context) error
-	recordBundle    func(hash string, created bool, contexts ...context.Context) error
+	productionReserve uint64
+	admit             func(context.Context, FileStoreStatus, map[string]storedPayload, FileManifest, uint64, uint64) error
+	reservedOutputs   func(map[string]storedPayload) uint64
+	diskProbe         func(string) (DiskReading, error)
+	root              string
+	limit             int64
+	mu                sync.Mutex
+	handler           http.Handler
+	uploadLocker      tus.Locker
+	syncDir           func(string) error // Durability failure injection.
+	expired           func(string, ...context.Context) bool
+	lifecycle         *sync.RWMutex
+	clock             Clock
+	recordUpload      func(hash, purpose string, created bool, contexts ...context.Context) error
+	publishUpload     func(hash string, contexts ...context.Context) error
+	recordBundle      func(hash string, created bool, contexts ...context.Context) error
 }
 type FileConfig struct {
 	Checkpoints bool `json:"checkpoints"`
@@ -161,6 +163,9 @@ func (j Job) storedFileResults() bool {
 }
 
 func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) error {
+	if q.fileStoreProductionReserve < 0 || q.fileStoreProductionReserve > limit {
+		return errors.New("file store production reserve must be between zero and the store limit")
+	}
 	if limit <= 0 {
 		return errors.New("file store limit must be positive")
 	}
@@ -183,7 +188,7 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 			return err
 		}
 	}
-	s := &FileStore{reservedOutputs: q.reservedOutputBytes, root: root, limit: limit, syncDir: syncWorkerDir, expired: q.expiredBlob, lifecycle: &q.fileLifecycle, clock: q.clock, recordUpload: q.recordFileUpload, publishUpload: q.publishFileUpload, recordBundle: q.recordBundleUpload}
+	s := &FileStore{productionReserve: uint64(q.fileStoreProductionReserve), admit: q.admitFileUpload, reservedOutputs: q.reservedOutputBytes, root: root, limit: limit, syncDir: syncWorkerDir, expired: q.expiredBlob, lifecycle: &q.fileLifecycle, clock: q.clock, recordUpload: q.recordFileUpload, publishUpload: q.publishFileUpload, recordBundle: q.recordBundleUpload}
 	fs := filestore.New(filepath.Join(root, "uploads"))
 	fs.DirModePerm = 0700
 	fs.FileModePerm = 0600
@@ -296,6 +301,12 @@ func (s *FileStore) publish(ctx context.Context, ref FileRef) error {
 	return s.syncDir(filepath.Join(s.root, "uploads"))
 }
 func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
+	var err error
+	r, err = fileStoreSubmissionRequest(r)
+	if err != nil {
+		respond(w, nil, reject("job_spec_invalid", err))
+		return
+	}
 	// Fence upload publication against unlink without serializing other uploads.
 	s.lifecycle.RLock()
 	defer s.lifecycle.RUnlock()
@@ -386,7 +397,7 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	payloads[hash] = storedPayload{length: uint64(length)}
 	need := addDiskBytes(uint64(length), s.reservedOutputs(payloads))
-	if err := fileStoreRefusal(status, need); err != nil {
+	if err := s.admit(r.Context(), status, payloads, FileManifest{"upload": ref}, need, uint64(length)); err != nil {
 		respond(w, nil, err)
 		return
 	}
@@ -494,6 +505,12 @@ func (a API) registerFiles(mux *requestMux) {
 		return
 	}
 	mux.HandleFunc("POST /api/files/preflight", func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		r, err = fileStoreSubmissionRequest(r)
+		if err != nil {
+			respond(w, nil, reject("job_spec_invalid", err))
+			return
+		}
 		var files FileManifest
 		if !decode(w, r, &files) {
 			return
@@ -613,6 +630,7 @@ func (c Client) fileRequest(ctx context.Context, method, path string, body io.Re
 	if err != nil {
 		return nil, err
 	}
+	fileStoreSubmissionHeaders(ctx, req)
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	for k, v := range headers {
 		req.Header.Set(k, v)

@@ -438,6 +438,37 @@ predicted. Protected data is never evicted to admit work; increase the configure
 store allowance or free disk space when retention cannot help. Worker file caches
 already evict reproducible copies under pressure. See [files](guide-files-v3.md).
 
+## Production file-store reserve
+
+`myce queue --file-store-production-reserve BYTES` (also supported by `myce dev`)
+protects part of the existing `--file-store-bytes` allowance for submissions whose
+effective policy tier is named `production`. Zero, the default, preserves existing
+admission. The reserve must be nonnegative and no larger than the store limit.
+It adds no disk space and changes neither retention nor deletion behavior.
+Activate it before other writers consume the desired headroom; existing files
+and allocated resumable uploads remain protected and usable.
+
+New non-production allocations that would consume the reserve receive HTTP 507
+`file_store_capacity`, naming the reserve and `--file-store-production-reserve`.
+Preflight, upload creation, registry bundle creation and declared async output
+reservations use this check. Production output commitments back the reserve
+rather than being charged twice. Production still needs actual store/disk space
+above the physical floor and existing commitments. Status exposes
+`file_store.production_reserve_bytes` in JSON and prints it in `myce status`.
+
+Pre-submission inputs need attribution: Go callers wrap preflight/upload contexts
+with `myce.WithFileStoreSubmission(ctx, spec)`, and this version's profile CLI does
+so automatically. HTTP callers send `X-Myce-Project` and `X-Myce-Class`; the queue
+resolves the effective tier from its live policy. These shared-token hints are
+accounting policy, not an authorization boundary. Unscoped uploads use ordinary
+capacity. For a queue-only upgrade, existing workers can use the reserve for
+production async outputs because the queue recognizes their already declared
+exact result identities. Legacy unscoped pre-submission inputs and undeclared
+native outputs/checkpoints cannot be identified as production: their callers need
+the scope headers or updated client. A queue-only rollout must check the
+production consumer's upload path before promising reserve access. Per-project
+usage and soft quotas are separate follow-up work under #464.
+
 ## Install and upgrade
 
 Build the single binary and inspect a plan before installation:

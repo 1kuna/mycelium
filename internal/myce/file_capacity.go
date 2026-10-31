@@ -18,15 +18,16 @@ import (
 // for new payloads after declared tus lengths and the physical volume floor.
 // Store is a public role name, never a private filesystem path.
 type FileStoreStatus struct {
-	ReservedOutputBytes uint64 `json:"reserved_output_bytes,omitempty"`
-	Store               string `json:"store"`
-	UsedBytes           uint64 `json:"used_bytes"`
-	FreeBytes           uint64 `json:"free_bytes"`
-	ReclaimableBytes    uint64 `json:"reclaimable_bytes"`
-	LimitBytes          uint64 `json:"limit_bytes"`
-	DiskFreeBytes       uint64 `json:"disk_free_bytes"`
-	FloorBytes          uint64 `json:"floor_bytes"`
-	Error               string `json:"error,omitempty"`
+	ProductionReserveBytes uint64 `json:"production_reserve_bytes"`
+	ReservedOutputBytes    uint64 `json:"reserved_output_bytes,omitempty"`
+	Store                  string `json:"store"`
+	UsedBytes              uint64 `json:"used_bytes"`
+	FreeBytes              uint64 `json:"free_bytes"`
+	ReclaimableBytes       uint64 `json:"reclaimable_bytes"`
+	LimitBytes             uint64 `json:"limit_bytes"`
+	DiskFreeBytes          uint64 `json:"disk_free_bytes"`
+	FloorBytes             uint64 `json:"floor_bytes"`
+	Error                  string `json:"error,omitempty"`
 }
 
 type storedPayload struct {
@@ -121,7 +122,7 @@ func (s *FileStore) inventory(ctx context.Context) (map[string]storedPayload, er
 }
 
 func (s *FileStore) capacity(ctx context.Context) (FileStoreStatus, map[string]storedPayload, error) {
-	status := FileStoreStatus{Store: "queue-file-store", LimitBytes: uint64(s.limit)}
+	status := FileStoreStatus{Store: "queue-file-store", LimitBytes: uint64(s.limit), ProductionReserveBytes: s.productionReserve}
 	payloads, err := s.inventory(ctx)
 	if err != nil {
 		return status, nil, err
@@ -274,8 +275,9 @@ func (q *Queue) PreflightFileStore(ctx context.Context, files FileManifest) erro
 	for _, ref := range files {
 		payloads[ref.SHA256] = storedPayload{length: uint64(ref.SizeBytes)}
 	}
+	growth := need
 	need = addDiskBytes(need, store.reservedOutputs(payloads))
-	return fileStoreRefusal(status, need)
+	return store.admit(ctx, status, payloads, files, need, growth)
 }
 
 func (c Client) PreflightFileStore(ctx context.Context, files FileManifest) error {

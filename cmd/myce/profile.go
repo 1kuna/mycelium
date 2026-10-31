@@ -509,6 +509,7 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 			}
 			return profileFailure(out, &r, 69, "queue_unavailable: input storage unconfirmed; intent retained")
 		}
+		ctx = myce.WithFileStoreSubmission(ctx, r.Spec)
 		if err = c.PreflightFileStore(ctx, r.Spec.StoredInputFiles()); err != nil {
 			return capacityFailure(err)
 		}

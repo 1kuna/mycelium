@@ -236,6 +236,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	healthNotify := f.String("health-notify", os.Getenv("MYCE_HEALTH_NOTIFY"), "queue health notifier executable (--check and JSON stdin)")
 	healthStorageDelay := f.Duration("health-storage-delay", myce.DefaultHealthStorageDelay, "storage unavailability duration before health alert")
 	fileRetention := f.Duration("file-retention", myce.DefaultFileRetention, "terminal job input/result retention (default 168h)")
+	fileStoreProductionReserve := f.Int64("file-store-production-reserve", 0, "file-store bytes reserved for production-tier submissions")
 	fileStoreLimit := f.Int64("file-store-bytes", 100<<30, "authoritative files plus upload reservations limit")
 	fileCache := f.String("file-cache", "", "local reproducible file cache folder")
 	fileCacheLimit := f.Int64("file-cache-bytes", 10<<30, "maximum local file cache bytes")
@@ -450,7 +451,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if e != nil {
 			return e
 		}
-		d, err := myce.StartDev(myce.DevConfig{OutputDeliveryRoot: *outputDeliveryRoot, Devices: *fakeGPUs, ProductionInfrastructureRetries: productionRetries, FileStore: *fileStore, FileStoreLimit: *fileStoreLimit, FileRetention: *fileRetention, NASCheckpoints: nasConfigured, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, HostPolicies: hosts, HostID: *hostID, ProjectPolicies: policies, EnvironmentConfig: ec, ModelConfig: mc, Address: *address, Database: *db, Checkpoints: *checkpoint, Token: *token, GPU: *gpu, Environments: split(*environments), Models: split(*models), Workers: *workers, CPUReserveCores: *cpuReserve, CPUBudgetCores: *cpuBudget, MemoryGB: *memory})
+		d, err := myce.StartDev(myce.DevConfig{OutputDeliveryRoot: *outputDeliveryRoot, Devices: *fakeGPUs, ProductionInfrastructureRetries: productionRetries, FileStore: *fileStore, FileStoreLimit: *fileStoreLimit, FileStoreProductionReserve: *fileStoreProductionReserve, FileRetention: *fileRetention, NASCheckpoints: nasConfigured, ExtensionRoot: *extensionRoot, JobFileRoot: *jobFileRoot, HostPolicies: hosts, HostID: *hostID, ProjectPolicies: policies, EnvironmentConfig: ec, ModelConfig: mc, Address: *address, Database: *db, Checkpoints: *checkpoint, Token: *token, GPU: *gpu, Environments: split(*environments), Models: split(*models), Workers: *workers, CPUReserveCores: *cpuReserve, CPUBudgetCores: *cpuBudget, MemoryGB: *memory})
 		if err != nil {
 			return err
 		}
@@ -476,7 +477,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if *healthStorageDelay <= 0 {
 			return errors.New("health-storage-delay must be positive")
 		}
-		q, err := myce.Open(*db, *checkpoint, myce.RealClock{}, myce.WithFileStore(*fileStore, *fileStoreLimit, !nasConfigured), myce.WithOutputDeliveryRoot(*outputDeliveryRoot), myce.WithHealthStorageDelay(*healthStorageDelay))
+		q, err := myce.Open(*db, *checkpoint, myce.RealClock{}, myce.WithFileStoreProductionReserve(*fileStoreProductionReserve), myce.WithFileStore(*fileStore, *fileStoreLimit, !nasConfigured), myce.WithOutputDeliveryRoot(*outputDeliveryRoot), myce.WithHealthStorageDelay(*healthStorageDelay))
 		if err != nil {
 			return err
 		}
@@ -906,6 +907,7 @@ func printStatus(s myce.Snapshot, full bool) {
 			fmt.Printf("%s: %s\n", fs.Store, fs.Error)
 		} else {
 			fmt.Printf("%s: used=%d bytes free=%d bytes reclaimable=%d bytes\n", fs.Store, fs.UsedBytes, fs.FreeBytes, fs.ReclaimableBytes)
+			fmt.Printf("  production reserve=%d bytes\n", fs.ProductionReserveBytes)
 		}
 	}
 	for _, host := range slices.Sorted(maps.Keys(s.HostStates)) {
