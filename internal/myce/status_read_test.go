@@ -453,3 +453,46 @@ func TestStatusReadRace(t *testing.T) {
 		t.Error(err)
 	}
 }
+
+func TestStatusReadTerminalCommitDuringJobProjection(t *testing.T) {
+	q, clock := fixture(t)
+	j := submit(t, q, spec("experiment"))
+	a := check(t, q, machine("status-worker", "fake", "status-host"), nil).Job
+	if a == nil || a.ID != j.ID {
+		t.Fatal("no assignment")
+	}
+	if err := q.Started(result(a, true)); err != nil {
+		t.Fatal(err)
+	}
+	captured := false
+	q.observeRead = func(kind string, _, _ time.Duration) {
+		if kind == "job" && !captured {
+			captured = true
+			finish(t, q, a, true)
+			clock.Advance(41 * time.Second)
+		}
+	}
+	handler := API{Queue: q, Token: "test"}.Handler()
+	r := httptest.NewRequest("GET", "/api/jobs/"+j.ID, nil)
+	r.Header.Set("Authorization", "Bearer test")
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+	var got Job
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != 200 || got.State != "succeeded" || !got.ReleaseConfirmed {
+		t.Fatalf("delayed job GET returned pre-completion state: status=%d state=%s released=%t", w.Code, got.State, got.ReleaseConfirmed)
+	}
+	r = httptest.NewRequest("GET", "/api/hosts/status-host/maintenance", nil)
+	r.Header.Set("Authorization", "Bearer test")
+	w = httptest.NewRecorder()
+	handler.ServeHTTP(w, r)
+	var host HostMaintenanceStatus
+	if err := json.Unmarshal(w.Body.Bytes(), &host); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != 200 || len(host.Attempts) != 0 || len(host.PendingReleases) != 0 {
+		t.Fatalf("released job retained by host GET: status=%d %+v", w.Code, host)
+	}
+}

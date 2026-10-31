@@ -311,6 +311,19 @@ func (q *Queue) findObservationJob(id string) (*Job, error) {
 }
 
 func (q *Queue) jobSnapshot(id string, contexts ...context.Context) (*Job, error) {
+	for {
+		revision := q.statusCache.terminalRevision.Load()
+		out, err := q.jobSnapshotGeneration(id, contexts...)
+		if err != nil || q.statusCache.terminalRevision.Load() == revision {
+			return out, err
+		}
+		if err := requestContext(contexts).Err(); err != nil {
+			return nil, err
+		}
+	}
+}
+
+func (q *Queue) jobSnapshotGeneration(id string, contexts ...context.Context) (*Job, error) {
 	v, _, err := q.captureObservation(id, contexts...)
 	if err != nil {
 		return nil, err

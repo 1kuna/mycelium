@@ -11,8 +11,8 @@ not drive start authorization, cancellation or result publication.
 Terminal job commits and their release acknowledgements invalidate the shared
 snapshot immediately. If one commits while status is projecting or waiting for
 usage/file-store I/O, status recaptures before returning, including uncached
-filtered and full views. This can repeat observation work during completions;
-ordinary worker check-ins do not invalidate the cache. Snapshot `now` is the
+filtered and full views and per-job GET. This can repeat observation work during
+completions; ordinary worker check-ins do not invalidate the cache. Snapshot `now` is the
 injected queue time at capture, rather than the response completion time.
 
 Default status keeps the existing JSON fields and job shape, but includes all
