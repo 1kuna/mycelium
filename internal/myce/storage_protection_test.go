@@ -642,6 +642,10 @@ func TestStorageProtectionPredictionMissReacquiresIndependentProduction(t *testi
 // independent HTTP/SQLite progress. It does NOT qualify confinement of arbitrary
 // main/sidecar/OS writes, per-attempt quotas, inode denial or fleet backends.
 func TestStorageProtectionNativeBoundedVolume(t *testing.T) {
+	proveStorageProtectionNativeBoundedVolume(t, nil)
+}
+
+func proveStorageProtectionNativeBoundedVolume(t *testing.T, q *Queue) {
 	root := os.Getenv("MYCE_TEST_BOUNDED_VOLUME_ROOT")
 	backing := os.Getenv("MYCE_TEST_BOUNDED_VOLUME_BACKING")
 	if root == "" || backing == "" {
@@ -687,7 +691,9 @@ func TestStorageProtectionNativeBoundedVolume(t *testing.T) {
 		t.Fatalf("bounded volume failed to deny inter-probe write: bytes=%d err=%v", written, err)
 	}
 	// The exhausted filesystem is still full during both publication and WAL sync.
-	q, _, _ := protectionQueue(t)
+	if q == nil {
+		q, _, _ = protectionQueue(t)
+	}
 	client := deliveryClient(t, q)
 	_, ref := retentionUpload(t, client, "production publication after experiment volume denial")
 	if ref.SizeBytes == 0 {

@@ -164,6 +164,9 @@
     },
     "StorageAdmissionStatus": {
       "properties": {
+        "migration": {
+          "$ref": "#/$defs/StorageMigrationStatus"
+        },
         "mode": {
           "type": "string"
         },
@@ -184,6 +187,87 @@
       "required": [
         "mode",
         "proposals"
+      ]
+    },
+    "StorageLegacySettings": {
+      "properties": {
+        "limit_bytes": {
+          "type": "integer"
+        },
+        "production_reserve_bytes": {
+          "type": "integer"
+        }
+      },
+      "type": "object",
+      "required": [
+        "limit_bytes",
+        "production_reserve_bytes"
+      ]
+    },
+    "StorageMigrationStatus": {
+      "properties": {
+        "saved": {
+          "$ref": "#/$defs/StorageLegacySettings"
+        },
+        "saved_settings_active": {
+          "type": "boolean"
+        },
+        "since": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "last": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "samples": {
+          "type": "integer"
+        },
+        "comparisons": {
+          "type": "integer"
+        },
+        "disagreements": {
+          "type": "integer"
+        },
+        "consistent_seconds": {
+          "type": "number"
+        },
+        "required_seconds": {
+          "type": "number"
+        },
+        "period_job": {
+          "type": "string"
+        },
+        "completed_cycles": {
+          "type": "integer"
+        },
+        "manual_writer_limits_retirable": {
+          "type": "boolean"
+        },
+        "ready": {
+          "type": "boolean"
+        },
+        "blockers": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object",
+      "required": [
+        "saved_settings_active",
+        "since",
+        "last",
+        "samples",
+        "comparisons",
+        "disagreements",
+        "consistent_seconds",
+        "required_seconds",
+        "completed_cycles",
+        "manual_writer_limits_retirable",
+        "ready",
+        "blockers"
       ]
     }
   }

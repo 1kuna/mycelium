@@ -79,6 +79,7 @@ func (a API) handler(joiningPin string) http.Handler {
 	a.registerPriorityPolicy(mux)
 	a.registerFiles(mux)
 	a.registerFileRelease(mux)
+	a.registerStorageMigration(mux)
 	mux.HandleFunc("POST /api/extensions", func(w http.ResponseWriter, r *http.Request) {
 		var e Extension
 		if !decode(w, r, &e) {

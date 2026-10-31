@@ -127,6 +127,18 @@ func (s *FileStore) inventory(ctx context.Context) (map[string]storedPayload, er
 
 func (s *FileStore) capacity(ctx context.Context) (FileStoreStatus, map[string]storedPayload, error) {
 	status := FileStoreStatus{Store: "queue-file-store", LimitBytes: uint64(s.limit), ProductionReserveBytes: s.productionReserve, UnidentifiedWritesMayUseReserve: s.productionReserve > 0, UnidentifiedReserveAdmittedBytes: s.unidentifiedReserveAdmitted.Load()}
+	automatic := false
+	if s.storageCapacitySettings != nil {
+		var err error
+		status.LimitBytes, status.ProductionReserveBytes, automatic, err = s.storageCapacitySettings(status.LimitBytes, status.ProductionReserveBytes)
+		if err != nil {
+			return status, nil, err
+		}
+	}
+	if automatic {
+		status.LimitBytes, status.ProductionReserveBytes = 0, 0
+	}
+	status.UnidentifiedWritesMayUseReserve = status.ProductionReserveBytes > 0
 	payloads, err := s.inventory(ctx)
 	if err != nil {
 		return status, nil, err
@@ -149,6 +161,9 @@ func (s *FileStore) capacity(ctx context.Context) (FileStoreStatus, map[string]s
 		return status, payloads, errors.New("disk capacity unavailable")
 	}
 	status.DiskFreeBytes, status.FloorBytes = disk.FreeBytes, diskFreeFloor(disk.TotalBytes)
+	if automatic {
+		status.FloorBytes = 0
+	}
 	storeFree := status.LimitBytes - min(status.LimitBytes, allocated)
 	unavailable := addDiskBytes(status.FloorBytes, remaining)
 	if s.storageExcludedFree != nil {
@@ -158,7 +173,10 @@ func (s *FileStore) capacity(ctx context.Context) (FileStoreStatus, map[string]s
 		}
 		unavailable = addDiskBytes(unavailable, excluded)
 	}
-	status.FreeBytes = min(storeFree, disk.FreeBytes-min(disk.FreeBytes, unavailable))
+	status.FreeBytes = disk.FreeBytes - min(disk.FreeBytes, unavailable)
+	if !automatic {
+		status.FreeBytes = min(storeFree, status.FreeBytes)
+	}
 	return status, payloads, nil
 }
 
@@ -220,6 +238,9 @@ func (v fileStoreObservation) status(ctx context.Context) *FileStoreStatus {
 	status, payloads, err := store.capacity(ctx)
 	if err != nil {
 		status.Error = "file store capacity unavailable"
+		if v.admission != nil {
+			status.Admission = v.admission.storageAdmissionStatus(status, nil)
+		}
 		status.Physical = store.physicalStorageStatus(ctx, status, nil, now)
 		return &status
 	}

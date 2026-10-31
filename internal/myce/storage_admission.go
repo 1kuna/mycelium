@@ -552,6 +552,7 @@ func (q *Queue) admitLegacyOutputRetries(ctx context.Context) error {
 // compatible learned estimate. Reporting does not run collection or release a
 // live commitment. #509 must qualify and activate the policy before cutover.
 type StorageAdmissionStatus struct {
+	Migration          *StorageMigrationStatus    `json:"migration,omitempty"`
 	Mode               string                     `json:"mode"`
 	YieldedCommitments []string                   `json:"yielded_commitments,omitempty"`
 	Proposals          []StorageAdmissionProposal `json:"proposals"`
@@ -567,7 +568,22 @@ type StorageAdmissionProposal struct {
 // q is a detached observation. The second copy isolates hypothetical yielding
 // and learned commitments even from the rest of the status projection.
 func (q *Queue) storageAdmissionStatus(status FileStoreStatus, payloads map[string]storedPayload) *StorageAdmissionStatus {
+	out := q.storageAdmissionProposals(status, payloads)
+	if q.s.StorageMigration != nil {
+		out.Migration = q.storageMigrationStatus(payloads)
+		if status.Error != "" {
+			out.Migration.Ready = false
+			out.Migration.Blockers = append(out.Migration.Blockers, status.Error)
+		}
+	}
+	return out
+}
+
+func (q *Queue) storageAdmissionProposals(status FileStoreStatus, payloads map[string]storedPayload) *StorageAdmissionStatus {
 	out := &StorageAdmissionStatus{Mode: "shadow", Proposals: []StorageAdmissionProposal{}}
+	if q.s.StorageMigration != nil {
+		status = q.automaticStorageCapacity(status, payloads)
+	}
 	if q.s.StorageAdmissionActive {
 		out.Mode = "active"
 	}

@@ -43,6 +43,7 @@ type state struct {
 	MemoryExplorations map[string]memoryExploration `json:"memory_explorations,omitempty"`
 	// #509 owns explicit migration activation. Missing/false preserves legacy
 	// cap/reserve admission, including declared estimates and FIFO retries.
+	StorageMigration       *storageMigration              `json:"storage_migration,omitempty"`
 	StorageAdmissionActive bool                           `json:"storage_admission_active,omitempty"`
 	StorageProtection      *storageProtectionState        `json:"storage_protection,omitempty"`
 	StorageObservations    map[string]StorageObservation  `json:"storage_observations,omitempty"`
@@ -104,6 +105,7 @@ type state struct {
 type Queue struct {
 	// Qualification removes occupancy, but retains diagnostic history/inventory.
 	memoryOrigin              *Queue
+	storageShadowContinuity   bool // Process-local: downtime never earns shadow evidence.
 	storageProtectionMu       sync.Mutex
 	storageProtectionVerified bool // Restart never renews native verification.
 	// Only detached observation views set this page selection.
@@ -1057,7 +1059,7 @@ func (q *Queue) TickContext(requestContexts ...context.Context) error {
 	}, nil); err != nil {
 		return err
 	}
-	return errors.Join(q.advanceOutputDelivery(requestCtx), q.pruneBatchLogs(requestCtx), q.reclaimJobFilesContext(requestCtx), q.admitOutputRetries(requestCtx), q.pruneJobHistory(requestCtx))
+	return errors.Join(q.advanceOutputDelivery(requestCtx), q.pruneBatchLogs(requestCtx), q.reclaimJobFilesContext(requestCtx), q.admitOutputRetries(requestCtx), q.pruneJobHistory(requestCtx), q.observeStorageMigration(requestCtx))
 }
 func (q *Queue) Checkin(c Checkin) (Reply, error) {
 	return q.CheckinContext(context.Background(), c)
