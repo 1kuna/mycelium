@@ -126,6 +126,10 @@ func (q *Queue) indexJob(id string, j *Job) {
 		}
 	}
 	q.records.history.set(id, history)
+	// Recovered evidence and its original provenance are append-only history.
+	if len(j.RecoveredResults) > 0 {
+		q.records.history.set(id, time.Time{})
+	}
 	q.records.logs.set(id, logs)
 }
 func (q *Queue) indexSubmission(id string, r *submissionRecord) {

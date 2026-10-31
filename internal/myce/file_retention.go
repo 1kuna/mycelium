@@ -219,6 +219,16 @@ func (q *Queue) fileReferences(pendingOnly bool, subset ...map[string]*Job) (exp
 		add(referenced, j.Spec.Files)
 		add(referenced, sharedStoredFiles(j.Spec))
 		add(referenced, j.OutputRefs)
+		// Recoveries have their own immutable retention deadline. They can be
+		// attached after the original job's ordinary files have already expired.
+		for _, r := range j.RecoveredResults {
+			add(referenced, r.Files)
+			if q.clock.Now().Before(r.ExpiresAt) {
+				add(keep, r.Files)
+			} else {
+				add(expired, r.Files)
+			}
+		}
 		if !terminal(j.State) {
 			add(keep, j.PendingOutputRefs)
 		}

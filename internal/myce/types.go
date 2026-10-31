@@ -353,6 +353,7 @@ type Copy struct {
 }
 
 type Job struct {
+	RecoveredResults    []RecoveredResult    `json:"recovered_results,omitempty"`
 	Runtime             *JobRuntime          `json:"runtime,omitempty"`
 	ApplicationProgress *ApplicationProgress `json:"application_progress,omitempty"`
 
