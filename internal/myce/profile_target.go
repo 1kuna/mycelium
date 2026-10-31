@@ -88,6 +88,12 @@ func targetFitReason(dimension string, j *Job, m *Machine) string {
 		}
 		required := make([]string, 0, len(j.Spec.Targets))
 		for _, t := range j.Spec.Targets {
+			if t.Arch == "" {
+				t.Arch = "any"
+			}
+			if t.Platform == "" {
+				t.Platform = "any"
+			}
 			required = append(required, formatTarget(t))
 		}
 		slices.Sort(required)
@@ -175,7 +181,9 @@ func executionTargetMatches(s Spec, m *Machine) bool {
 	if s.Needs.cpuOnly() {
 		target.Platform = "cpu"
 	}
-	return slices.Contains(s.Targets, target)
+	return slices.ContainsFunc(s.Targets, func(requirement ExecutionTarget) bool {
+		return requirement.matches(target)
+	})
 }
 
 // Submission checks qualification and total admitted capacity, not free slots.

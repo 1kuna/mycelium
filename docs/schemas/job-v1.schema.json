@@ -3022,6 +3022,10 @@
           ],
           "x-contract": "diagnostic"
         },
+        "portable": {
+          "type": "boolean",
+          "x-contract": "diagnostic"
+        },
         "prepare_source": {
           "type": "boolean",
           "x-contract": "diagnostic"

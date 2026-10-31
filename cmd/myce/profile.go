@@ -459,6 +459,9 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 		}
 
 		s.SubmissionKey = key
+		if err := myce.ValidateTargetPortability(s); err != nil {
+			return waitError(64, "profile_invalid: "+err.Error())
+		}
 		if err = s.Validate(); err != nil {
 			return waitError(64, "profile_invalid: job fields failed validation")
 		}

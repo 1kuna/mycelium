@@ -12,12 +12,17 @@ import (
 	"strings"
 )
 
-// A target is exact, never a fallback or inheritance rule. Platform is the
-// existing accelerator backend (cuda/xpu/metal/fake), not an OS package set.
+// Extension variant targets are exact. Job targets require OS and may omit
+// arch/platform to declare portable requirements. Platform is the accelerator
+// backend (or cpu), not an OS package set.
 type ExecutionTarget struct {
 	OS       string `json:"os" yaml:"os"`
 	Arch     string `json:"arch" yaml:"arch"`
 	Platform string `json:"platform" yaml:"platform"`
+}
+
+func (t ExecutionTarget) matches(actual ExecutionTarget) bool {
+	return t.OS == actual.OS && (t.Arch == "" || t.Arch == actual.Arch) && (t.Platform == "" || t.Platform == actual.Platform)
 }
 
 type ExtensionVariant struct {

@@ -123,7 +123,17 @@ func startFailureOutcome(owner Result, err error) Result {
 	if errors.Is(err, errWorkerStartAuthorization) {
 		owner.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("start_authorization", err))
 	}
-	return classifyAttemptOutcome(owner, attemptCause{memberOutcome: facts})
+	owner = classifyAttemptOutcome(owner, attemptCause{memberOutcome: facts})
+	if execFormatFailure(err) && !owner.OutOfMemory {
+		// The payload cannot execute: this is an ordinary command failure, not
+		// infrastructure loss. Preserve existing cancellation and stop authority.
+		if !facts.deliveredBeforeExit() {
+			owner.Interrupted = false
+			owner.ExecutionCause = &RuntimeCause{Operation: "command", Class: "command_exit"}
+			owner.Error = execFormatMessage
+		}
+	}
+	return owner
 }
 
 func classifyAttemptOutcome(result Result, facts attemptCause) Result {

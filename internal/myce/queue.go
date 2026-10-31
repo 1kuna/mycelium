@@ -711,6 +711,10 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 			}
 		}
 		if recipeErr != nil {
+			var rule *rejectionError
+			if errors.As(recipeErr, &rule) {
+				return rule
+			}
 			return reject("job_environment_invalid", recipeErr)
 		}
 		if !environmentPlatformsMatch(s.Needs, recipes) {

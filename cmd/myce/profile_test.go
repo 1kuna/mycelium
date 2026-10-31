@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -40,7 +41,8 @@ source: {directory: source}
 run:
   command: [sh, run.sh]
 needs: {cpu_cores: 1, memory_gb: 1}
-targets: [{os: ` + runtime.GOOS + `, arch: ` + runtime.GOARCH + `, platform: cpu}]
+portable: true
+targets: [{os: ` + runtime.GOOS + `}]
 outputs: {result: results}
 check: [test, -s, result]
 `
@@ -448,5 +450,27 @@ check: [true]
 	}
 	if strings.Contains(stderr.String(), token) || bytes.Contains(out, []byte(token)) || strings.Contains(receipt.RefusalReason, root) {
 		t.Fatal("refusal leaked credential or private path")
+	}
+}
+
+func TestProfileOSOnlyPrebuiltError(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "source"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	// A native amd64 ELF payload, without a compiler or a runnable Linux host.
+	data := make([]byte, 64)
+	copy(data, "\x7fELF\x02\x01\x01")
+	binary.LittleEndian.PutUint16(data[16:], 2)
+	binary.LittleEndian.PutUint16(data[18:], 62)
+	binary.LittleEndian.PutUint32(data[20:], 1)
+	binary.LittleEndian.PutUint16(data[52:], 64)
+	if err := os.WriteFile(filepath.Join(root, "source", "program"), data, 0700); err != nil {
+		t.Fatal(err)
+	}
+	p := executionProfile{Spec: myce.Spec{Name: "binary", Project: "test", Class: "experiment", Targets: []myce.ExecutionTarget{{OS: "linux"}}, Run: myce.RunSpec{Command: []string{"./program"}}}, Source: profileSource{Directory: "source"}, Check: []string{"true"}}
+	err := runPreparedProfile(context.Background(), root, p, []byte("binary-fixture"), nil, nil, "", "", "", "", "", "", io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "declare portable: true if this runs on any arch, or name the arch") || strings.Contains(err.Error(), root) {
+		t.Fatalf("CLI lost actionable/sanitized reason: %v", err)
 	}
 }

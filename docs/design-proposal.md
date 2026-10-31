@@ -2595,7 +2595,7 @@ entries:
 ```
 
 The header requires `schema: 1`, `project`, nonempty `entries` and a `default`
-that names an entry. Entries declare a command, exact targets and resource
+that names an entry. Entries declare a command, target requirements and resource
 needs. Class defaults to `experiment`, source to committed Git `HEAD`, and
 resumability to false. `environment: {}` explicitly uses installed tools; named
 catalog recipes remain usable. A lock reference uses the pending option below.
@@ -2607,7 +2607,7 @@ Reuse current field types and validation:
 | Field | Meaning and lowering |
 | --- | --- |
 | `run` or `execution` | Exactly one. Existing `run.command` argv or composed `execution.main` plus optional `sidecars`, lowering to the same `RunSpec` and runner. No implicit shell. |
-| `needs`, `targets` | Existing cores, RAM, auto memory, accelerator/device constraints and exact OS/arch/backend alternatives. Select one target, not a test matrix. Owner policy, allowances, maintenance and qualification intersect. |
+| `needs`, `targets` | Existing cores, RAM, auto memory, accelerator/device constraints and OS/arch/backend alternatives. Job targets require OS; omitting arch requires the author's `portable: true` declaration covering the complete payload, including NAS inputs, archives, environments and runtime downloads. Without it, name the arch or declare portability. No payload inspection or build inference establishes portability. Backend may be omitted when needs already constrains it. Extension variants remain exact. Select one target, not a test matrix. Owner policy, allowances, maintenance, qualification and MY-19 parity intersect. |
 | `environment` | Catalog name, installed tools, or pending locked recipe. Composed execution can instead use existing named `environments` and member references; single environment and environment map cannot coexist in a recipe. |
 | `source`, `inputs`, `outputs` | Existing Git/directory/snapshot selection, client-local input mappings and required relative output-name/prefix mappings, with verified file transport. Paths resolve from the project root (invocation root for an explicitly located adapter). |
 | `fan_out`, `workload`, `after` | Existing declared pieces, measurements and accepted-output dependency fields, with their current admission restrictions, keyed gather and cancellation scope. No workflow language. |

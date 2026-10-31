@@ -4,6 +4,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"strings"
 	"syscall"
 )
 
@@ -33,4 +34,24 @@ func CommandExec(args []string) error {
 	}
 	_, _ = ready.WriteString("command exec failed: " + err.Error())
 	return err
+}
+
+const execFormatMessage = "program was built for another architecture; name its required arch in targets, or declare portable: true if this runs on any arch"
+
+// Only an exec/launch error, never captured stderr, can supply this explanation.
+// It changes the failure message, not placement or future submissions.
+func execFormatFailure(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.ENOEXEC) {
+		return true
+	}
+	text := strings.ToLower(err.Error())
+	for _, diagnostic := range []string{"exec format error", "bad cpu type in executable"} {
+		if text == diagnostic || strings.HasSuffix(text, ": "+diagnostic) {
+			return true
+		}
+	}
+	return false
 }

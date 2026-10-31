@@ -46,16 +46,22 @@ needs:
   cpu_cores: 2
   memory: auto
   platform: cpu
-targets:                      # exact os/arch/platform alternatives, and only ones that work
-  - {os: linux, arch: amd64, platform: cpu}
-  - {os: linux, arch: arm64, platform: cpu}
+portable: true                # author verified source, dependencies and downloads across arches
+targets:                      # requirements, not host selections
+  - {os: linux}               # any compatible arch; needs already requests CPU
 environment: PROJECT-tools    # locked recipe (section 3); {} means the worker's installed tools
 outputs:
   NAME-result.txt: results    # required relative file -> result prefix
 check: [grep, -qx, 'NAME: exit=0', NAME-result.txt]
 ```
 
-- **Targets** list only platforms you have proven, and they must match the
+- **Targets** state software requirements, not host choices. Omit `arch` only
+  with the author's `portable: true` declaration after verifying the complete
+  payload across matching architectures, including source builds, environments,
+  uploaded/NAS inputs, archives and runtime downloads. Otherwise name the required
+  arch. Omit `platform` when `needs` already declares it. Extension variant targets
+  remain exact; qualification and MY-19 parity still apply.
+  List only platforms you have proven, and they must match the
   environment's locked platforms. Add missing platform recipes and prove them;
   a missing recipe is a portability gap, not a hardware requirement. A lock
   covering one platform limits platform coverage; it does not require a host pin.

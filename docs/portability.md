@@ -2,7 +2,7 @@
 
 ## Declare requirements, let Mycelium place
 
-Agents declare work kind or command, compatible OS/architecture/backend targets,
+Agents state requirements rather than hosts: work kind or command, compatible OS/architecture/backend targets,
 accelerator count/class, memory and environment. Mycelium selects an eligible
 host using qualification, owner policy, available capacity and least-valuable-fit
 ranking (MY-18). For ordinary CPU work, for example:
@@ -10,11 +10,38 @@ ranking (MY-18). For ordinary CPU work, for example:
 ```yaml
 needs: {platform: cpu, cpu_cores: 2, host_memory_gb: 2}
 targets:
-  - {os: linux, arch: amd64, platform: cpu}
-  - {os: linux, arch: arm64, platform: cpu}
-  - {os: darwin, arch: arm64, platform: cpu}
+  - {os: linux}
+  - {os: darwin}
 environment: portable-tools
+portable: true             # verified complete environment/payload coverage
 ```
+
+Job targets require `os`. To omit `arch`, declare `portable: true` after verifying
+that the complete payload runs on every matching architecture. This includes
+plain commands (such as worker-built `go test`), scripts, environments, uploaded
+and NAS inputs, archives, and runtime downloads. Mycelium uses the author's
+declaration rather than inspecting payloads or inferring portability from builds.
+Omit `platform` when `needs` already expresses the backend.
+
+```yaml
+portable: true
+targets: [{os: linux}]
+```
+
+Without the declaration, an OS-only target receives: “declare portable: true if
+this runs on any arch, or name the arch”. For an architecture-specific program,
+state the requirement, for example `targets: [{os: linux, arch: arm64}]`.
+
+Matching hosts still pass all resource, environment and qualification checks;
+MY-18 chooses the least valuable fit among them. The declaration does not create
+missing extension variants, bypass qualification or ignore environment coverage.
+Extension variants retain complete, exact OS/arch/platform targets. MY-19 output
+parity still applies before a production variant joins a split.
+
+An exec-format failure is an ordinary command failure. Its launch diagnostic
+explains that the program was built for another architecture and suggests
+stating the required arch or declaring verified portability. Mycelium learns no
+architecture exclusions and does not move the job in response to that error.
 
 Use targets whose tools and outputs you have verified. `portable-tools` stands
 for a registered catalog recipe covering those targets; native entries may use
@@ -89,7 +116,7 @@ adapter metadata has no frozen registration digest, so it cannot establish that
 an existing worker is prepared or qualified. Use the registered extension form
 for that evidence. Variant digests describe the recipe metadata supplied to the
 report, not a new registration. Plain entries retain their own resource needs,
-exact targets, catalog environment and existing result checks.
+target requirements, catalog environment and existing result checks.
 
 Registered extension mode reads the exact immutable queue registration and its
 verified bundled inputs. Per-work check states remain separate; admission names the direct extension

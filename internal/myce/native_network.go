@@ -35,6 +35,9 @@ func nativeNetworkRequired(j *Job) bool {
 // A child may only report EPERM/exit status for a network refusal. Keep the
 // declaration and capability remedy in its attempt diagnostic.
 func nativeAttemptError(j Job, message string) string {
+	if message == "exit status 126" {
+		message += "; program could not execute; check whether it was built for another architecture, name its required arch in targets, or declare portable: true if it runs on any arch"
+	}
 	if message != "" && !j.Spec.Run.Docker && !nativeUnsandboxed(&j) && !j.Spec.Needs.Network {
 		return message + "; native networking is offline except reserved sidecar ports; declare needs.network: true for general outbound access (requires a capable host)"
 	}

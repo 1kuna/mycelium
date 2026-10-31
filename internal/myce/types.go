@@ -139,6 +139,7 @@ func (e Environment) Key() string {
 }
 
 type Spec struct {
+	Portable       bool                   `json:"portable,omitempty" yaml:"portable,omitempty"`
 	OutputDelivery string                 `json:"output_delivery,omitempty" yaml:"output_delivery,omitempty"`
 	Isolation      string                 `json:"isolation,omitempty" yaml:"isolation,omitempty"`
 	Reason         string                 `json:"reason,omitempty" yaml:"reason,omitempty"`
@@ -208,9 +209,12 @@ func (s Spec) Validate() error {
 		return reject("job_diagnostics_invalid", err)
 	}
 	for _, target := range s.Targets {
-		if !extensionName.MatchString(target.OS) || !extensionName.MatchString(target.Arch) || !validGPU(target.Platform) {
-			return reject("job_placement_invalid", errors.New("targets require explicit OS, arch and platform"))
+		if !extensionName.MatchString(target.OS) || target.Arch != "" && !extensionName.MatchString(target.Arch) || target.Platform != "" && !validGPU(target.Platform) {
+			return reject("job_placement_invalid", errors.New("targets require an OS; arch and platform may be omitted for portable payloads"))
 		}
+	}
+	if err := ValidateTargetPortability(s); err != nil {
+		return err
 	}
 	if err := validatePieceDependency(s); err != nil {
 		return reject("job_files_invalid", err)
