@@ -1,182 +1,178 @@
 # Learned storage admission
 
-Proposal for [#504](https://github.com/1kuna/mycelium/issues/504), 2026-10-31.
-The [approved design](design-proposal.md) remains the only product spec; this
-proposal needs acceptance before implementation. No deployment is implied.
+Revision 2 for [#504](https://github.com/1kuna/mycelium/issues/504), 2026-10-31.
+The [approved design](design-proposal.md) remains the only product spec. This
+proposal requires acceptance, implementation and native qualification; the
+filesystem inspection below was read-only, with no quota or fleet changes.
 
-## Predict work, rather than prescribe capacity
+## Learn demand; protect the next production batch
 
-Reuse memory envelopes' accepted-attempt evidence, identity checks, exploratory
-bootstrap and SQLite observations; extend that path with storage facts, not a
-second learner. Record complete verified output-manifest bytes per program,
-recipe/source digest, variant, output-affecting arguments and input shape
-(known bytes, item count or declared work units). For plain commands use their
-frozen command/environment/input identity. Keep logical output size separate
-from newly allocated, deduplicated store bytes. Cache hits teach output size,
-not a misleading zero. Track worker scratch/spool peaks separately.
+Extend memory envelopes' accepted-attempt observations, identity fences and
+SQLite persistence. Learn logical output bytes, allocated scratch/spool peak and
+file count by program, frozen recipe/source, variant, output-affecting arguments
+and input shape. Deduplication reduces physical allocation, not learned logical
+size. Complete verified manifests teach output size; incomplete, stale or
+quota-constrained attempts cannot lower accepted need or erase clean neighbours
+(#303). Preserve rejected lower bounds and provenance independently.
 
-Initially use the largest comparable complete output plus the larger of its
-observed range and largest positive prediction error, rounded to allocation
-units. Only interpolate across measured input shapes; an unseen size or variant
-uses `spec.disk.output_bytes` as an optional first-run prior, then exploration.
-With neither evidence nor prior, serialize exploration on the affected volume,
-using remaining uncommitted room as its provisional envelope. Unknown is not
-zero. Final manifests replace estimates with exact missing bytes. Neither the
-memory multipliers nor pressure-tainted peaks become storage sizing constants.
+Use the largest comparable complete peak, with margin equal to the larger of
+observed range and positive prediction error: `limit = peak × (1 + margin/peak)`,
+rounded to filesystem units. Size scratch, simultaneous immutable spool,
+checkpoint-on-stop writes and metadata together; input staging is additional.
+Unknown shapes use optional `spec.disk.output_bytes` as a first-run output prior,
+then serialized exploration inside an enforceable allocation. Unknown scratch
+never inherits an output-only estimate. Status shows source, shape, samples,
+limit, error and enforcement. MY-27/MY-26 consider every qualified compatible
+variant/host; MY-18 still selects the least valuable fit.
 
-Failed, truncated, stale or disk-constrained attempts cannot teach a smaller
-need or erase accepted neighbours (#303's lesson). Keep their lower bounds and
-rejection reasons for the next exploration. Persist sample count, shape, source,
-prediction/error, logical bytes and physical increment; show these per program
-in status. Reuse evidence across machines only for equivalent qualified output
-variants. MY-27/MY-26 placement still considers every compatible host, choosing
-MY-18's least valuable fit; storage evidence never qualifies a variant.
+Before experiment admission, protect **queued production plus the next expected
+batch**, not just already-running jobs. Learn next-batch program mix, item sizes,
+overlapping count and cadence from accepted production/fan-out history; size its
+outputs and scratch using those envelopes, including measured error margins.
+Use the largest comparable observed burst, not average arrival bytes; expose the
+forecast and its evidence. Count queued/running members once, and keep the next
+batch's uncommitted allowance separate from accepted commitments. Unknown next
+batch evidence withholds experiment growth on the protected volume until a
+production exploration/prior supplies it; other eligible storage/hosts remain
+usable. Recompute on submissions, retries, forecast changes and delivery progress.
+Do not decay the forecast during an outage.
 
-## One admission and reclamation path
+For each physical volume, experiments fit only inside:
+`free - measured_control_floor - unwritten_hard_limits - uncommitted_production_forecast`.
+Merge aliased roots, including queue and worker roles. Existing bytes already
+reduce `free`; charge missing digests/tus remaining lengths and scratch expansion
+once. Persist commitments before Started; retain them through restart and exact
+cleanup. Extend existing async-NAS reservations and owner-tier/fairness planning
+across input, native/Docker results, checkpoints and retries, rather than creating
+another scheduler. Input/import lengths are known; preflight remains advisory.
 
-On submission/dispatch and each new allocation:
+A destination outage immediately pauses **new experiment admissions** producing
+outputs for that destination, including local scratch/spool allocations; running
+attempts finish only within their fixed limits. Production takes precedence.
+Undelivered unique data remains protected and charged. Resume experiments only
+after destination health, backlog and forecast fit are verified. A prediction
+miss within the production hard limit is already funded; exceeding that limit
+fails the attempt like OOM. Larger future envelopes require fresh admission.
+If even production cannot fit after collection/yield, hold with exact deficit
+and preserve existing start deadlines/retry rules. Emit a deduplicated health
+alert to the queue operator and affected production project's agent/owner through
+existing configured notification routes; status names protected backlog, failed
+destination, forecast and next action. Never delete unique data to make the
+promise true. Forecasts cover the next expected batch, not arbitrary unbounded
+future arrivals; a prolonged outage eventually needs restored delivery or capacity.
 
-1. Probe physical free space and snapshot references/commitments. Run existing
-   retention and #479's collector before a capacity refusal. Continue its bounded
-   batches while they make useful progress; a busy publication fence means a
-   visible wait and retry, not zero reclaimable space.
-2. Expedite eligible delivery and expiry. Among legally disposable bytes prefer
-   already delivered copies, then expired terminal data and rebuildable inactive
-   caches, using tier and measured recomputation/transfer cost to break ties.
-   This applies MY-18's opportunity-cost principle; class alone never permits
-   deletion. Stop after enough measured space is reclaimed.
-3. Admit in existing owner-tier/fairness order. Persist the selected attempt's
-   predicted output commitment before Started, extending today's async-NAS
-   reservations to every managed file-output path. Queued production demand is
-   considered before new experiment commitments. Revoke lower-tier unstarted
-   commitments or use supported checkpoint/stop/requeue; keep already-written
-   bytes and uncertain custody charged until verified release/collection.
-4. Exchange predictions for exact manifest/tus commitments without double
-   charging shared digests. Inputs and imports use their known lengths. Apply
-   the same accounting to preflight, tus creation, native/Docker/async results,
-   checkpoints and retries. Preflight remains advisory; allocation is serialized.
+## Enforce writes with standard filesystem boundaries
 
-Production gets a demand-sized commitment, not a standing 16 GiB pool. Accepted
-commitments survive restart and cannot be consumed by later Mycelium writes,
-including unidentified clients. With no production demand, no idle production
-reserve remains. A prediction miss first reclaims and yields lower-tier work,
-then acquires the delta; an immutable worker spool survives until acceptance.
-If it still cannot fit, hold publication/start with the exact deficit and owner
-of protected bytes. Stopping compute does not free retained results.
+Read-only `findmnt`/superblock and `diskutil` inspection found:
 
-**Guarantee:** admitted production has priority-backed space for its committed
-bytes. Predictions cannot guarantee unlimited future output, arbitrary future
-arrivals or writes by unrelated OS users. If all bytes are uniquely protected,
-production must wait for delivery/expiry or more storage; deleting them would
-violate the spec. Keep start deadlines and infrastructure retry budgets intact.
-
-## Follow the disk; deliver, then discard
-
-For each physical volume, `admissible = max(0, free - safety_floor - unwritten
-commitments)`. Existing bytes are already absent from `free`; count tus remaining
-lengths and predicted/exact missing outputs once. Merge aliased roots, including
-queue and worker roles sharing a volume. Project attribution remains visible
-(shared physical digests counted once), but #464 gets no project quota or daily
-write budget. Fairness and tiers reuse the scheduler.
-
-Measure the floor from control-state/WAL/log/sync working space plus the largest
-observed unaccounted free-space fall over a reaction interval: sample age plus
-measured stop/reclaim latency. Retain burst maxima, not average retained growth;
-include filesystem allocation overhead. This protects control transactions while
-writes are stopped, at the cost of that measured headroom. Missing/stale probes
-withhold new allocations; unknown cold-start measurements retain today's
-`max(1% of volume, 256 MiB)` bootstrap floor until replay validates its measured
-replacement. Sample/measure with the existing disk probes and injected Clock.
-Monitor growing scratch between admission and completion; request more room or
-stop through the existing contract before the floor, without claiming a hard
-filesystem quota against arbitrary external writers.
-
-Tasks select a destination; newly authored tasks with a destination default to
-`until_delivered`, with explicit retained recovery available. This is the
-orchestrator's decided default under #201 and MY-27, not an open question.
-Preservation semantics express ownership, not guessed sizes. NAS
-uses the existing single publisher; submitter delivery uses a resumable client
-pull, checksum verification, sync and exact execution/manifest acknowledgement
-recorded in the job ledger. Never connect a queue publisher to arbitrary client
-paths. For `until_delivered`, verified delivery plus terminal/released custody
-authorizes #479's existing expiry transaction and collector automatically.
-Preserve downstream/shared references, checkpoints, registry assets, publication
-grace (six hours) and unknown imports. The policy explicitly gives up queue
-recovery of expired job files. Expired retrieval remains typed; keep receipts and
-keyed answers. Legacy retention remains 168 hours. Operators set storage roots,
-priority policy and genuine external capacity constraints, not admission sizes.
-
-## Evidence, failures and cutover
-
-The 2026-10-31 incident was a configured-ceiling exhaustion: maintenance freed
-zero because retained/protected references held the bytes. A roughly 35-hour
-inventory measured 1.55 GB/hour net growth, but only 0.28 GB conditional expiry
-in the following day. A one-off large registry import distorted that average;
-short bursts were much faster. These sanitized observations motivate demand
-accounting and delivery, not another rate-derived quota. Do not delete private
-evidence or unrelated filesystem data.
-
-| Retire | Replacement evidence / condition |
+| Inspected deployment role | Finding and implication |
 | --- | --- |
-| 100 GiB default; historical 150 GiB and live s061 185 GiB caps | Fresh physical free space, remaining commitments and measured floor; replay the ceiling incident. |
-| Flat 16 GiB production reserve, manually sized as two batches plus retries | Actual queued/admitted tier demand; each retry reacquires its own commitment. |
-| Message-agreed daily budgets, including 1 and 2 GB/day; proposed #464 quotas | Known upload lengths, learned output demand, tier/fairness ordering and verified reclamation. |
-| Mandatory output-size guesses | Optional `disk.output_bytes` cold prior; complete manifest history thereafter. RAM hints are outside this change. |
-| Fixed 1% / 256 MiB floor after bootstrap qualification | Measured control footprint and worst observed consumption during reaction latency. |
+| Linux queue/worker and accelerator worker | ext4; project quotas not active. The inspected queue-host superblock lacks project/quota features; the other superblock was unreadable without additional privilege. No current project-quota capability is claimed. |
+| Two reachable macOS workers | APFS; their Data volumes have no quota/reserve. A third worker was unreachable directly and via a verified SSH relay; its filesystem/enforcement remains unverified. |
 
-Burst requests serialize reservations; sustained retention exceeding disk becomes
-an explicit hold. NAS outage pins undelivered outputs, reduces admission and
-leaves local-input non-NAS work eligible; it never invents a delivered receipt or
-changes checkpoint mode. Restart reconstructs commitments and rechecks exact
-attempts. All probes, hashing, delivery and deletion run outside `q.mu`, followed
-by reference/attempt fence checks. One binary, one SQLite queue, existing workers
-and collector suffice; no peer storage service or replicated registry.
+Prefer [ext4/XFS project quotas](https://man7.org/linux/man-pages/man5/ext4.5.html)
+when genuinely enabled: an inherited project ID per attempt, hard block/inode
+limits, and no writable uncharged paths. Do not enable features or remount root
+as a runtime fallback. On APFS use standard
+[volume quota/reserve](https://support.apple.com/guide/disk-utility/add-delete-or-erase-apfs-volumes-dskua9e6a110/mac)
+for bounded writable volumes; APFS is not a directory project-quota filesystem.
+A quota bounds growth; a reserve backs availability. Provision/control them
+through a narrowly scoped, owner-authorized installer path, not payload authority.
+Neither filesystem identification nor the manuals qualify enforcement: #506 must
+prove actual allocation, metadata and denial behavior before advertising support.
 
-Migrate in stages: add observation/status in shadow mode under s061's 185/16 GiB
-settings; finish s061h1's supported installer migration (#477/#485), saving and
-verifying those same values before the release owner retires the exact ExecStart
-drop-in. That removes an override, not the capacity policy. Subsequently introduce
-explicit automatic admission, persist/reconstruct existing tus and output
-commitments, upgrade input clients (including Python), and compare shadow demand,
-floor and collector progress. Enable only after incident/miss/burst/outage/restart
-replays pass; atomically switch off the cap/reserve checks and report legacy
-values as inactive. Preserve 168-hour legacy data and never rewrite keyed specs.
-Retire manual budgets after verified delivery/reclaim progress. Any rollout is
-separately authorized; this design performs none.
+Where directory quotas are unavailable, prefer a fixed-capacity, fully allocated
+loop filesystem (Linux) or bounded APFS volume (macOS). Count its complete backing
+allocation/reserve and filesystem overhead up front; no sparse-image maximum,
+per-file `RLIMIT_FSIZE`, cgroup I/O throttle or sampled kill substitutes for a
+total bound. This standard fallback costs allocation/mount time and temporarily
+unused disk, but prevents an inter-probe write from consuming another job's space.
+Without a qualified bounded backend, allow only work whose writable storage is
+physically separate from protected volumes; otherwise its protected-volume write
+allowance is zero and placement waits/routes elsewhere. Merely serializing an
+unbounded writer is insufficient. This is a capability hold, not a host pin.
 
-The `until_delivered` default applies only to newly authored destination tasks.
-Preserve existing frozen/keyed specs and their retention policies; replay or
-upgrade never silently opts legacy data into early expiry.
+Bind all main/sidecar work, temp, output, spool and local checkpoint paths to the
+attempt boundary using existing sandbox write grants; stage shared inputs/caches
+read-only and charge worker-mediated publication separately. Legacy unsandboxed
+specs are not rewritten: they cannot claim protected shared-volume admission
+without equivalent write confinement. Retain unique progress and pending spools
+within their charged boundary until authorized collection. Quota/contained-full
+write failures fail the attempt as `disk_limit_exceeded`, retain diagnostic/lower
+bound evidence and require larger exploration next time, not unlimited retries.
+A payload cannot raise its limit. Stop/checkpoint allowance is funded before launch.
+
+Derive the control floor from measured SQLite/WAL/checkpoint/log/sync working
+space and backend allocation/metadata overhead, not historical payload burst rate
+or a new chosen percentage. Enforce it by leaving that capacity outside the sum
+of all possible managed hard-limit expansions; use native control-volume reserves
+or physically allocated backing where supported. Count already allocated backing
+once; availability probes and reservations must not deduct native reserves twice.
+Missing measurements/backend enforcement withhold shared-volume admission;
+the old 1%/256 MiB bootstrap is not production proof. Probes guide placement and
+learning, not write safety. Protection against unrelated unbounded OS writers
+requires separate capacity isolation; never advertise a root-volume guarantee.
+
+## Reclaim legally; deliver and discard
+
+Before refusing capacity, reuse retention and #479's collector, advancing bounded
+batches while they make useful progress. A busy publication fence means wait,
+not zero reclaimable bytes. Prefer authorized delivered copies, expired terminal
+files and inactive rebuildable caches, ordered by tier and measured replacement
+cost. Count only observed freed space. Yield lower-tier unstarted allocations or
+use existing stop/checkpoint/requeue; stopping compute cannot free retained blobs.
+
+New destination tasks default to `until_delivered`; explicit retained recovery
+and frozen/keyed legacy policies remain. NAS uses the existing publisher;
+submitter delivery uses verified/synced client pull and an exact execution/manifest
+receipt in the job ledger. After terminal/released custody and verified delivery,
+reuse #479's expiry transaction/collector. Preserve downstream/shared references,
+checkpoints, registry assets, unknown imports, six-hour publication grace,
+168-hour legacy retention and typed expired retrieval. Roots, destination,
+preservation semantics and owner tiers remain settings because they express
+ownership; agents do not choose byte budgets.
+
+## Retire stopgaps and prove the change
+
+The 2026-10-31 incident had zero eligible reclaim despite retained growth and
+physical room beyond its configured ceiling. Removing that ceiling alone simply
+moves the failure to the physical disk; forecast protection and enforced writes
+are prerequisites, not optional refinements.
+
+| Retire | Replacement evidence |
+| --- | --- |
+| Default 100, historical 150 and s061 185 GiB caps | Fresh physical capacity minus enforceable allocations, forecast and measured control space. |
+| Flat 16 GiB production reserve | Learned queued demand plus the next batch, including measured miss margin. |
+| 1/2 GB daily write agreements; proposed #464 quotas | Tier admission, destination outage holds and per-attempt filesystem limits; retain project attribution. |
+| Mandatory output guesses; 1%/256 MiB safety floor | Optional cold prior, accepted peaks/error and measured, enforced control footprint. |
+
+Shadow under s061's 185/16 GiB settings first. s061h1/#477/#485 saves/verifies
+those values before retiring the exact ExecStart drop-in; this preserves policy.
+After bounded-backend qualification, client upgrades (including Python), forecast
+coverage and restart reconstruction, explicitly switch off legacy cap/reserve
+checks together; show saved legacy values as inactive. Retire manual budgets only
+after delivery/collection progress. No legacy spec rewrite or fleet change here.
+
+Laptop proof uses injected Clock/probes, small files, real HTTP/SQLite/CPU commands
+and local bounded-volume write tests. Replay 100 usable units with 10 forecast
+production units: a 95-unit experiment cannot start. Replay a 4-unit production
+prediction whose measured margin funds 6: 96 experiment units cannot be committed;
+the 6-unit result fits without NAS recovery. Inject a 12-unit managed
+write between probes into a 2-unit boundary beside 8 production/2 control units:
+the write fails inside its boundary; production publication and WAL sync succeed.
+Test outage, restart, spool duplication, shared refs and exhausted production
+alerts. Fake quota tests prove scheduling only; native backend denial is a separate
+qualification gate. One binary/SQLite queue and existing workers/collector suffice;
+all I/O stays outside `q.mu`, followed by fence checks.
 
 ## Implementation sub-issues
 
-Each phase uses byte-sized temp volumes, real HTTP/SQLite/CPU commands and fake
-Clock/probes; quick per change and full once before a separately authorized
-deployment. Hardware qualification is separate.
-
-Land #505 and #506 before integrating their estimates/accounting into #507.
-The #508 delivery lifecycle can proceed independently against the existing
-publisher/collector. #509 integrates all four slices before automatic cutover.
-
-- **[Learning #505](https://github.com/1kuna/mycelium/issues/505).** Outcome: per-program output envelopes/status.
-  Current state: manifests and memory observations exist. Next: extend them.
-  Acceptance: shape/variant fences, optional prior/exploration, constrained-sample
-  preservation, dedup distinction and restart visibility.
-- **[Physical accounting #506](https://github.com/1kuna/mycelium/issues/506).** Outcome: free-disk admission/floor.
-  Current state: probes and tus lengths exist. Next: unify volume commitments.
-  Acceptance: aliased roles, measured floor/bootstrap, stale probes and external
-  growth leave control space without double charges.
-- **[Tier admission #507](https://github.com/1kuna/mycelium/issues/507).** Outcome: production demand displaces lower
-  tiers. Current state: reserve and async commitments exist. Next: extend the
-  planner. Acceptance: concurrent bursts, misses, retries, stale attempts and
-  restart preserve commitments; protected bytes cause truthful holds.
-- **[Delivery/discard #508](https://github.com/1kuna/mycelium/issues/508).** Outcome: #201 completion lifecycle.
-  Current state: NAS publisher and #479 explicit release exist. Next: add task
-  policy and submitter receipts. Acceptance: no deletion before verified delivery,
-  custody release and reference checks; NAS/client outage/replay remain safe;
-  new destination tasks default to `until_delivered` while explicit retained
-  recovery and legacy policies remain available.
-- **[Migration/proof #509](https://github.com/1kuna/mycelium/issues/509).** Outcome: retire stopgaps. Current state:
-  s061h1 migrates settings only. Next: shadow, replay, then explicit mode cutover.
-  Acceptance: 185/16 GiB/drop-in migration, old-client visibility and the incident
-  reproduce on a laptop; no legacy retention or keyed-answer changes.
+Each filed issue retains Outcome, Current state, Next step and Acceptance criteria.
+Land learning [#505](https://github.com/1kuna/mycelium/issues/505) and enforceable
+accounting [#506](https://github.com/1kuna/mycelium/issues/506) before tier integration
+[#507](https://github.com/1kuna/mycelium/issues/507). Delivery/discard
+[#508](https://github.com/1kuna/mycelium/issues/508) proceeds independently on the
+existing publisher/collector. Migration/proof [#509](https://github.com/1kuna/mycelium/issues/509)
+integrates all four, including both bounded starvation scenarios and inter-probe
+write denial. Quick per change, full once per integrated batch before separately
+authorized deployment. Open product questions: none.
