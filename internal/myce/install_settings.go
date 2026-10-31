@@ -278,6 +278,17 @@ func InstallSettings() []InstallSetting {
 			return nil
 		}),
 		installSetting("cpu-quota", "CPUQuota", "queue systemd CPUQuota", func(c *ServiceConfig) *string { return &c.CPUQuota }, validateInstallQuota),
+		installContext(installSetting("io-weight", "IOWeight", "Linux systemd service I/O weight (1..10000; 0 leaves the system default; requires native qualification)", func(c *ServiceConfig) *int { return &c.IOWeight }, func(v int) error {
+			if v < 0 || v > 10000 {
+				return errors.New("must be 0 (system default) or between 1 and 10000")
+			}
+			return nil
+		}), func(c ServiceConfig) error {
+			if c.IOWeight != 0 && c.Detection.OS != "linux" {
+				return errors.New("io-weight requires Linux systemd")
+			}
+			return nil
+		}),
 		installSetting("memory-max", "MemoryMax", "queue systemd MemoryMax", func(c *ServiceConfig) *string { return &c.MemoryMax }, func(v string) error { return validateInstallLimit(v, true) }),
 		installSetting("tasks-max", "TasksMax", "queue systemd TasksMax", func(c *ServiceConfig) *string { return &c.TasksMax }, func(v string) error { return validateInstallLimit(v, false) }),
 		installPath("model-config", "ModelCatalog", "NAS model catalog", func(c *ServiceConfig) *string { return &c.ModelCatalog }, false),

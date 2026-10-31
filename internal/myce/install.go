@@ -128,6 +128,7 @@ type ServiceConfig struct {
 	NoNewPrivileges       bool           `json:"no_new_privileges"`
 	Nice                  int            `json:"nice"`
 	CPUQuota              string         `json:"cpu_quota"`
+	IOWeight              int            `json:"io_weight,omitempty"`
 	MemoryMax             string         `json:"memory_max"`
 	TasksMax              string         `json:"tasks_max"`
 
@@ -273,6 +274,11 @@ func (c ServiceConfig) ServiceText() string {
 			stopSettings = "EnvironmentFile=" + unitConditionPath(c.GPUEnvironmentFile()) + "\nDelegate=memory cpu\nKillMode=control-group\nSendSIGKILL=yes\nTimeoutStopSec=45s\n"
 		}
 		settings := ""
+		if c.IOWeight != 0 {
+			// Relative service-subtree policy, including payload preparation and
+			// descendants. Native controller/scheduler qualification is separate.
+			settings += fmt.Sprintf("IOAccounting=yes\nIOWeight=%d\n", c.IOWeight)
+		}
 		if c.EnvironmentFile != "" {
 			settings += "EnvironmentFile=" + unitConditionPath(c.EnvironmentFile) + "\n"
 		}
