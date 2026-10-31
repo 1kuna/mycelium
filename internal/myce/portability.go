@@ -200,6 +200,9 @@ func (q *Queue) portability(req PortabilityRequest) PortabilityReport {
 	}
 	if req.Spec != nil {
 		for _, t := range req.Spec.Targets {
+			if t.Arch == "" || t.Platform == "" {
+				continue
+			}
 			r := row(t)
 			r.Declared = true
 			needs := portabilityResources(req.Spec.Needs)
@@ -243,6 +246,11 @@ func (q *Queue) portability(req PortabilityRequest) PortabilityReport {
 		for _, target := range targets {
 			r := row(machineTarget(target))
 			r.Observed = true
+			if req.Spec != nil && slices.ContainsFunc(req.Spec.Targets, func(t ExecutionTarget) bool { return t.matches(machineTarget(target)) }) {
+				r.Declared = true
+				needs := portabilityResources(req.Spec.Needs)
+				r.Needs = &needs
+			}
 			h := PortabilityHost{SharedHost: cloneSharedHost(q.s.HostMaintenance[hostID(m)].SharedHost), Host: fmt.Sprintf("host-%d", index+1), LastSeen: m.LastSeen, Freshness: "fresh", LogicalCPUs: logicalCPUs(m), FreeCPUCores: m.FreeCPUCores, AcceleratorMemoryGB: target.TotalMemoryGB, FreeAcceleratorMemoryGB: target.FreeMemoryGB, Prepared: "unknown", Builds: map[string]string{}, Qualification: "unknown", Admission: "unknown"}
 			if m.CapabilityProfile != nil {
 				h.HardwareObservedAt = m.CapabilityProfile.RecordedAt

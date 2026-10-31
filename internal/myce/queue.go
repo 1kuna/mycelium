@@ -597,6 +597,14 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 	if len(submissionFiles(s)) > 0 && !replay {
 		verificationErr = verifySubmissionInputs(ctx, store, submissionFiles(s), slot)
 	}
+	var payloadErr error
+	if verificationErr == nil && !replay && store != nil && hasAnyArchTarget(s) {
+		for name, ref := range submissionFiles(s) {
+			if payloadErr = ValidateTargetPayload(ctx, s, store.blob(ref), name == "files/.myce-source.tar"); payloadErr != nil {
+				break
+			}
+		}
+	}
 	// Use the same execution adapter as the transaction, on an owned copy.
 	// Validation errors are handled below in their existing order; key replay
 	// and cancellation still win over all preparation failures.
@@ -612,6 +620,12 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		recipes, recipeErr = catalog.resolveEnvironment(prepared.Environment)
 		if recipeErr == nil {
 			sidecarRecipes, recipeErr = catalog.resolveSidecarEnvironments(prepared)
+		}
+		if recipeErr == nil && hasAnyArchTarget(s) {
+			payloadErr = errors.Join(payloadErr, validateTargetRecipes(ctx, prepared, recipes))
+			for _, side := range sidecarRecipes {
+				payloadErr = errors.Join(payloadErr, validateTargetRecipes(ctx, prepared, side))
+			}
 		}
 		if recipeErr == nil && !q.simulation {
 			verified := map[FileRef]bool{}
@@ -683,6 +697,16 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		}
 		if err := submitted.Validate(); err != nil {
 			return specRejection(err)
+		}
+		if payloadErr != nil {
+			var rule *rejectionError
+			if errors.As(payloadErr, &rule) {
+				return rule
+			}
+			return reject("job_files_invalid", payloadErr)
+		}
+		if err := validateTargetExtensions(s, extensions); err != nil {
+			return err
 		}
 		if s.OutputDelivery == asyncNAS {
 			if q.deliveryRoot == "" {

@@ -208,8 +208,8 @@ func (s Spec) Validate() error {
 		return reject("job_diagnostics_invalid", err)
 	}
 	for _, target := range s.Targets {
-		if !extensionName.MatchString(target.OS) || !extensionName.MatchString(target.Arch) || !validGPU(target.Platform) {
-			return reject("job_placement_invalid", errors.New("targets require explicit OS, arch and platform"))
+		if !extensionName.MatchString(target.OS) || target.Arch != "" && !extensionName.MatchString(target.Arch) || target.Platform != "" && !validGPU(target.Platform) {
+			return reject("job_placement_invalid", errors.New("targets require an OS; arch and platform may be omitted for portable payloads"))
 		}
 	}
 	if err := validatePieceDependency(s); err != nil {

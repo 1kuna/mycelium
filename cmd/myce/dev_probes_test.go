@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -139,7 +140,10 @@ func devStandaloneSmoke(t *testing.T, backend string) {
 	if err := unauthorized.Call(ctx, "GET", "/api/status", nil, nil); !errors.As(err, &apiError) || apiError.Status != 401 {
 		t.Fatal("readiness was not authenticated", err)
 	}
-	spec := myce.Spec{Name: "smoke-short", Project: "probe", Priority: "experiment"}
+	// Regression #480: the real dev API/runner must accept an OS-only target
+	// for both CPU commands and fake accelerator inventory.
+	spec := myce.Spec{Name: "smoke-os-only", Project: "probe", Priority: "experiment", RequireTarget: true,
+		Targets: []myce.ExecutionTarget{{OS: runtime.GOOS}}}
 	spec.Needs.MemoryGB = 1
 	if backend == "cpu" {
 		spec.Needs.CPUCores = 1

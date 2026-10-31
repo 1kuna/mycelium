@@ -68,7 +68,9 @@ func targetFitReason(dimension string, j *Job, m *Machine) string {
 		// environment lock paths, command arguments or recipe contents.
 		parts := []string{t.OS, t.Arch, t.Platform}
 		for i, p := range parts {
-			if !extensionName.MatchString(p) {
+			if p == "" {
+				parts[i] = "any"
+			} else if !extensionName.MatchString(p) {
 				parts[i] = "unknown"
 			}
 		}
@@ -175,7 +177,9 @@ func executionTargetMatches(s Spec, m *Machine) bool {
 	if s.Needs.cpuOnly() {
 		target.Platform = "cpu"
 	}
-	return slices.Contains(s.Targets, target)
+	return slices.ContainsFunc(s.Targets, func(requirement ExecutionTarget) bool {
+		return requirement.matches(target)
+	})
 }
 
 // Submission checks qualification and total admitted capacity, not free slots.

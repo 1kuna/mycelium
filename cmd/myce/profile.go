@@ -335,6 +335,9 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 		if err != nil {
 			return waitError(64, "profile_source_invalid: cannot snapshot declared source")
 		}
+		if err := myce.ValidateTargetPayload(ctx, p.Spec, source, true); err != nil {
+			return waitError(64, "profile_invalid: "+err.Error())
+		}
 		_, afterIdentity, err := identifyProfileSource(ctx, root, p.Source)
 		if err != nil || afterIdentity != sourceIdentity {
 			return waitError(65, "profile_source_changed: source changed while freezing")

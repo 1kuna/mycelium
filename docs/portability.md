@@ -2,7 +2,7 @@
 
 ## Declare requirements, let Mycelium place
 
-Agents declare work kind or command, compatible OS/architecture/backend targets,
+Agents state requirements rather than hosts: work kind or command, compatible OS/architecture/backend targets,
 accelerator count/class, memory and environment. Mycelium selects an eligible
 host using qualification, owner policy, available capacity and least-valuable-fit
 ranking (MY-18). For ordinary CPU work, for example:
@@ -10,11 +10,24 @@ ranking (MY-18). For ordinary CPU work, for example:
 ```yaml
 needs: {platform: cpu, cpu_cores: 2, host_memory_gb: 2}
 targets:
-  - {os: linux, arch: amd64, platform: cpu}
-  - {os: linux, arch: arm64, platform: cpu}
-  - {os: darwin, arch: arm64, platform: cpu}
+  - {os: linux}
+  - {os: darwin}
 environment: portable-tools
 ```
+
+Job targets require `os`; omit `arch` when the payload is portable across that
+OS's architectures, and omit `platform` when `needs` already expresses the backend.
+For example, `{os: linux}` suits `go test` compiled on the worker, scripts with
+compatible installed tools, and environments whose locks cover multiple arches.
+Matching hosts still pass all resource, environment and qualification checks;
+MY-18 chooses the least valuable fit among them.
+
+Prebuilt native binaries, a single-arch extension, or a single-arch environment
+need an explicit `arch`. Submission explains the required architecture and why;
+add that requirement or supply portable source/multi-arch variants. Mycelium
+inspects frozen files/source and declared recipe/lock coverage; authors still
+own dependencies downloaded by scripts and tools already installed on workers.
+Extension variants retain complete, exact OS/arch/platform targets.
 
 Use targets whose tools and outputs you have verified. `portable-tools` stands
 for a registered catalog recipe covering those targets; native entries may use
@@ -89,7 +102,7 @@ adapter metadata has no frozen registration digest, so it cannot establish that
 an existing worker is prepared or qualified. Use the registered extension form
 for that evidence. Variant digests describe the recipe metadata supplied to the
 report, not a new registration. Plain entries retain their own resource needs,
-exact targets, catalog environment and existing result checks.
+target requirements, catalog environment and existing result checks.
 
 Registered extension mode reads the exact immutable queue registration and its
 verified bundled inputs. Per-work check states remain separate; admission names the direct extension
