@@ -75,6 +75,9 @@ func (d *recordDeadlines) due(now time.Time) []string {
 }
 
 func mutableJob(j *Job) bool {
+	if j.LocalOutputs != nil && j.LocalOutputs.CollectedAt == nil {
+		return true
+	}
 	if deliveryPending(j) || !terminal(j.State) || j.Attempt > 0 && !j.ReleaseConfirmed {
 		return true
 	}
@@ -104,6 +107,9 @@ func (q *Queue) indexJob(id string, j *Job) {
 		at = q.clock.Now()
 		if j.FinishedAt != nil {
 			at = j.FinishedAt.Add(q.fileRetention)
+		}
+		if j.Spec.OutputDestination != nil && j.Spec.OutputRetention == "until_delivered" && j.Delivery != nil && j.Delivery.VerifiedAt != nil {
+			at = *j.Delivery.VerifiedAt
 		}
 	}
 	q.records.files.set(id, at)

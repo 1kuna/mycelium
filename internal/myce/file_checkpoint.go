@@ -223,7 +223,10 @@ func captureCheckpoint(root, parent string, observers ...*storageObserver) (stri
 	return stage, FileCheckpoint{before, manifest}, nil
 }
 func (w Worker) publishFileCheckpoint(j Job, parent string) (int64, error) {
-	if j.StorageAllocation != nil && j.StorageAllocation.WorkerCustody {
+	if j.Spec.OutputDestination != nil && j.StorageAllocation == nil {
+		return 0, errors.New("task outputs require a charged storage allocation")
+	}
+	if j.StorageAllocation != nil && (j.StorageAllocation.WorkerCustody || j.Spec.OutputDestination != nil) {
 		return 0, nil
 	}
 	if !j.FileTransport || !j.Spec.Resumable {
@@ -344,7 +347,10 @@ func (w Worker) finishFileResult(j Job, result Result, parent string, metadata .
 			finished.StoragePeak = w.storageObserver.snapshot()
 		}()
 	}
-	if j.StorageAllocation != nil && j.StorageAllocation.WorkerCustody {
+	if j.Spec.OutputDestination != nil && j.StorageAllocation == nil {
+		return result, errors.New("task outputs require a charged storage allocation")
+	}
+	if j.StorageAllocation != nil && (j.StorageAllocation.WorkerCustody || j.Spec.OutputDestination != nil) {
 		return w.retainStorageCustody(j, result, parent)
 	}
 	if _, err := w.publishFileCheckpoint(j, parent); err != nil && !stale(err) {

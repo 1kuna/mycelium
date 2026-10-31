@@ -69,6 +69,10 @@ type Worker struct {
 	fileCheckpoints         bool
 	ExtensionRoot           string
 	JobFileRoot             string
+	OutputDestinations      map[string]OutputDestinationRoot // Stable NAS ID -> operator-qualified local root.
+	outputDeliverySlots     chan struct{}
+	outputDeliveryProgress  func()
+	outputCustodyVerified   *atomic.Bool // Attempt-local; reset on supervisor restart.
 	extensionFingerprint    string
 	RequireMemoryCeilings   bool
 	memoryCeilings          *memoryCeilings

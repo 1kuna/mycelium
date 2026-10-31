@@ -74,6 +74,16 @@ type FileReleasePlan struct {
 // answers. Overlapping selections cannot overwrite a previous apply receipt.
 const fileReleaseLedgerKind = "file_expiry_accepted"
 
+// Both explicit owner release and authored delivery retention enroll the same
+// durable collector transaction. Neither path deletes bytes or bypasses pins.
+func (q *Queue) acceptFileExpiry(j *Job, reason string) {
+	e := ledgerAttempt(j, fileReleaseLedgerKind, reason)
+	e.Release = q.observedRelease(j)
+	q.appendJobLedger(j, e)
+	j.FilesExpired = true
+	enrollFileReclamation(j)
+}
+
 func fileReleaseEntry(j *Job, planID string) *JobLedgerEntry {
 	for i := len(j.LedgerEntries) - 1; i >= 0; i-- {
 		e := &j.LedgerEntries[i]
@@ -175,7 +185,7 @@ func (q *Queue) fileReleaseMetadata(selection FileReleaseSelection) (FileRelease
 			}
 			// Required preservation uses the queue's supported verified delivery evidence,
 			// bound to the exact accepted execution and manifest, never an owner assertion.
-			if d.State == "verified" && (d.VerifiedAt == nil || j.Spec.OutputDelivery != asyncNAS || d.Execution != (Execution{ID: j.ID, Attempt: j.Attempt}) || !sameDelivery(j, *j)) {
+			if d.State == "verified" && (d.VerifiedAt == nil || j.Spec.OutputDelivery != asyncNAS && j.Spec.OutputDestination == nil || d.Execution != (Execution{ID: j.ID, Attempt: j.Attempt}) || !sameDelivery(j, *j)) {
 				item.Blockers = append(item.Blockers, "delivery_evidence_mismatch")
 			}
 		} else if j.Spec.OutputDelivery != "" && len(j.OutputRefs) > 0 {
@@ -190,6 +200,9 @@ func (q *Queue) fileReleaseMetadata(selection FileReleaseSelection) (FileRelease
 		add("input", j.Spec.Files)
 		add("shared_input", sharedStoredFiles(j.Spec))
 		add("result", j.OutputRefs)
+		if j.LocalOutputs != nil {
+			add("worker_local_result", j.LocalOutputs.Files)
+		}
 		if j.Dependency != nil {
 			add("dependency_input", j.Dependency.Files)
 		}
@@ -326,11 +339,7 @@ func (q *Queue) ApplyFileRelease(ctx context.Context, req FileReleaseApply) (Fil
 		}
 		for _, id := range selection.Jobs {
 			j := q.retainedJob(id)
-			e := ledgerAttempt(j, fileReleaseLedgerKind, req.PlanID)
-			e.Release = q.observedRelease(j)
-			q.appendJobLedger(j, e)
-			j.FilesExpired = true
-			enrollFileReclamation(j)
+			q.acceptFileExpiry(j, req.PlanID)
 		}
 		result, _ = q.fileReleaseReplay(selection, req.PlanID)
 		return nil

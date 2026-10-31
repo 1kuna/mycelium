@@ -56,6 +56,16 @@ func captureDeliverySpool(j Job, workerRoot string, observers ...*storageObserve
 			if err = verifyFile(context.Background(), filepath.Join(dest, "data", name), ref); err != nil {
 				return "", nil, err
 			}
+			f, e := os.Open(filepath.Join(dest, "data", name))
+			if e != nil {
+				return "", nil, e
+			}
+			if e = errors.Join(f.Sync(), f.Close()); e != nil {
+				return "", nil, e
+			}
+		}
+		if err = syncModelDirectory(dest); err != nil {
+			return "", nil, err
 		}
 		if err = syncWorkerDir(parent); err != nil {
 			return "", nil, err

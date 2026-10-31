@@ -236,6 +236,23 @@ Every producer piece must succeed; failure fails the consumer without an attempt
 and upstream cancellation stops downstream stages and their children. Explicit
 keyed input paths are common inputs to every wave, with no automatic enumeration.
 
+### Worker-local destination outputs
+
+For individually submitted `task-output/1` jobs, set `storage_protocol` to
+`worker-custody/1` and `output_destination` to
+`{"protocol": "task-output/1", "kind": "submitter", "id": "results"}`.
+These new tasks default to `output_retention: until_delivered`.
+Compute `succeeded` may still mean pending worker custody: inspect `local_outputs`
+and `delivery`, rather than expecting ordinary `output_refs`.
+
+`client.deliver_outputs(job_id, destination)` pulls, verifies and syncs the full
+tree into local `destination/JOB/ATTEMPT`, then acknowledges delivery. The local
+path never goes to the queue. Retry the same destination after an uncertain
+acknowledgement; existing files and the exact receipt must verify. Individual
+`download_result` calls do not acknowledge delivery. See the
+[task output guide](../../docs/guide-task-outputs.md) for NAS, retention and
+protected-storage prerequisites. Legacy result contracts remain unchanged.
+
 ### Retained execution ledger
 
 `client.get(job_id)["ledger"]` reports historical completeness and the latest

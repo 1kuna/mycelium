@@ -536,6 +536,14 @@ allocation, including incomplete uploads, not bytes transferred or current usage
 Preflight, resumable replay and deduplicated reuse do not increment it. It resets
 on queue restart and decreases neither on completion nor on ordinary expiry.
 
+### Worker-local task delivery (#508)
+
+The versioned `output_destination` contract keeps unique outputs on a charged
+worker spool through verified NAS or submitter delivery, then automatically
+collects copies allowed by retention and references. See the
+[task output guide](guide-task-outputs.md) for destination identity configuration,
+client commands, truthful local availability and native qualification limits.
+
 ### Project-owner early file release (#465)
 
 Use explicit job IDs to release terminal input/result files before their normal

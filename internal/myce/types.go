@@ -139,12 +139,14 @@ func (e Environment) Key() string {
 }
 
 type Spec struct {
-	StorageProtocol string                 `json:"storage_protocol,omitempty" yaml:"storage_protocol,omitempty"`
-	Portable        bool                   `json:"portable,omitempty" yaml:"portable,omitempty"`
-	OutputDelivery  string                 `json:"output_delivery,omitempty" yaml:"output_delivery,omitempty"`
-	Isolation       string                 `json:"isolation,omitempty" yaml:"isolation,omitempty"`
-	Reason          string                 `json:"reason,omitempty" yaml:"reason,omitempty"`
-	SharedInputs    map[string]SharedInput `json:"shared_inputs,omitempty" yaml:"shared_inputs,omitempty"`
+	OutputDestination *OutputDestination     `json:"output_destination,omitempty" yaml:"output_destination,omitempty"`
+	OutputRetention   string                 `json:"output_retention,omitempty" yaml:"output_retention,omitempty"`
+	StorageProtocol   string                 `json:"storage_protocol,omitempty" yaml:"storage_protocol,omitempty"`
+	Portable          bool                   `json:"portable,omitempty" yaml:"portable,omitempty"`
+	OutputDelivery    string                 `json:"output_delivery,omitempty" yaml:"output_delivery,omitempty"`
+	Isolation         string                 `json:"isolation,omitempty" yaml:"isolation,omitempty"`
+	Reason            string                 `json:"reason,omitempty" yaml:"reason,omitempty"`
+	SharedInputs      map[string]SharedInput `json:"shared_inputs,omitempty" yaml:"shared_inputs,omitempty"`
 	// PrepareSource extracts the validated CLI snapshot before member launch,
 	// then stages explicit inputs over it. It is persisted, never an author field.
 	PrepareSource bool `json:"prepare_source,omitempty" yaml:"-"`
@@ -368,6 +370,7 @@ type SpecProjection struct {
 }
 
 type Job struct {
+	LocalOutputs           *TaskOutputCustody    `json:"local_outputs,omitempty"`
 	StorageAllocation      *StorageAllocation    `json:"storage_allocation,omitempty"`
 	StorageEnvelope        *JobStorageEnvelope   `json:"storage_envelope,omitempty"`
 	StorageAttempts        []AttemptStorageFacts `json:"storage_attempts,omitempty"`
@@ -472,6 +475,7 @@ type Job struct {
 	Checkpoint            string                       `json:"checkpoint"`
 }
 type Machine struct {
+	OutputDestinationIDs   []string               `json:"output_destination_ids,omitempty"`
 	SharedHost             *SharedHostProfile     `json:"shared_host,omitempty"`        // Worker acknowledgement.
 	SharedHostReason       string                 `json:"shared_host_reason,omitempty"` // Queue admission diagnostic.
 	SharedHostPressure     *SharedHostPressure    `json:"shared_host_pressure,omitempty"`
@@ -617,7 +621,8 @@ type Reply struct {
 // AttemptReport binds heartbeat, progress and Started to an exact execution.
 // Collections have no wire cardinality limit; admission remains in the planner.
 type AttemptReport struct {
-	ApplicationProgress *ProgressReport `json:"application_progress,omitempty"`
+	OutputDeliveryProgress uint64          `json:"output_delivery_progress,omitempty"`
+	ApplicationProgress    *ProgressReport `json:"application_progress,omitempty"`
 
 	CurrentHostMemory *CurrentHostMemory `json:"current_host_memory,omitempty"`
 	DockerCause       *RuntimeCause      `json:"docker_cause,omitempty"`
