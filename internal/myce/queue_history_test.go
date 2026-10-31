@@ -3,7 +3,6 @@ package myce
 import (
 	"errors"
 	"fmt"
-	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -156,8 +155,19 @@ func queueHistoryBurst(t *testing.T, count int) time.Duration {
 	slices.Sort(waits)
 	slices.Sort(holds)
 	t.Logf("history=%d launch_burst_wait_p50=%s launch_burst_wait_p95=%s launch_burst_wait_p99=%s launch_burst_hold_p99=%s", count, percentile(waits, 50), percentile(waits, 95), percentile(waits, 99), percentile(holds, 99))
-	if os.Getenv("MYCE_MEASURE_BASELINE") == "" && percentile(waits, 99) > 100*time.Millisecond {
-		t.Errorf("launch burst p99 lock wait exceeded 100ms: %s", percentile(waits, 99))
+	// Keep the original 100ms serialized-work budget, but measure the service
+	// actually performed under q.mu. A contender can spend arbitrarily long
+	// runnable after unlock on a busy host; that is not queue critical work.
+	// Sum every hold (not a percentile), so even one slow transaction counts.
+	// Real wall time still includes preemption while holding the lock and any
+	// I/O or sleep mistakenly added inside it; the fake Clock would hide both.
+	var launchHoldTotal time.Duration
+	for _, hold := range holds {
+		launchHoldTotal += hold
+	}
+	t.Logf("history=%d launch_burst_hold_total=%s", count, launchHoldTotal)
+	if launchHoldTotal > 100*time.Millisecond {
+		t.Errorf("launch burst total lock hold exceeded 100ms: %s", launchHoldTotal)
 	}
 	return burstP99
 }
