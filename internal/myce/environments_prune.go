@@ -93,7 +93,7 @@ func (c *EnvironmentCache) Prune(ctx context.Context, apply bool, references fun
 	if references == nil {
 		return report, errors.New("environment prune requires queue reference state")
 	}
-	if err = c.init(); err != nil {
+	if err = c.initStorage(); err != nil {
 		return report, err
 	}
 	gate, err := c.lock(ctx, "admission", syscall.LOCK_EX)

@@ -133,6 +133,43 @@ func TestEnvironmentPruneReferenceRecheck(t *testing.T) {
 	}
 }
 
+func TestEnvironmentPruneBelowPreparationFreeSpaceFloor(t *testing.T) {
+	_, clock := fixture(t)
+	capacityChecks := 0
+	c := &EnvironmentCache{Root: t.TempDir(), Clock: clock, sizeLimit: func(string) (int64, error) {
+		capacityChecks++
+		return environmentCacheSize(23 << 30)
+	}}
+	// The same low-space cache must still refuse new preparation, but that
+	// failure must not poison maintenance of an already prepared environment.
+	if err := c.init(); err == nil || !strings.Contains(err.Error(), "24 GiB free") {
+		t.Fatal("preparation did not enforce its free-space floor", err)
+	}
+	key := pruneFixture(t, c, 1, 48*time.Hour)
+	refs := func(context.Context, string) (bool, error) { return false, nil }
+	report, err := c.Prune(context.Background(), false, refs)
+	if err != nil || len(report.Entries) != 1 || report.Entries[0].Key != key || report.Entries[0].Removed || report.ReclaimedBytes != 0 {
+		t.Fatal("low-space dry-run failed", report, err)
+	}
+	if _, err := os.Stat(filepath.Join(c.Root, key)); err != nil {
+		t.Fatal("dry-run removed candidate", err)
+	}
+	report, err = c.Prune(context.Background(), true, refs)
+	if err != nil || !report.Entries[0].Removed || report.ReclaimedBytes <= 0 {
+		t.Fatal("low-space apply failed", report, err)
+	}
+	if _, err := os.Stat(filepath.Join(c.Root, key)); !os.IsNotExist(err) {
+		t.Fatal("low-space apply retained candidate", err)
+	}
+	if capacityChecks != 1 {
+		t.Fatal("prune attempted capacity sizing", capacityChecks)
+	}
+	audit, err := os.ReadFile(filepath.Join(c.Root, "prune-audit.jsonl"))
+	if err != nil || !strings.Contains(string(audit), `"removed":true`) {
+		t.Fatal("low-space apply omitted audit", string(audit), err)
+	}
+}
+
 func TestEnvironmentPruneRetainedReferences(t *testing.T) {
 	q, _ := fixture(t)
 	ctx := context.Background()

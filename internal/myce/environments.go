@@ -395,14 +395,17 @@ func environmentSeconds(j *Job, m *Machine) float64 {
 // EnvironmentCache uses OS file locks, atomic publication and shared use leases.
 // Partial builds and evictions are retired, then purged once use/build locks allow it.
 type EnvironmentCache struct {
-	Tools   *EnvironmentToolSource
-	once    sync.Once
-	initErr error
-	Root    string
-	Limit   int64
-	Clock   Clock
-	Fetch   func(context.Context, FileRef, string) error
-	Run     func(context.Context, []string, string, []string, io.Writer, io.Writer) error
+	Tools       *EnvironmentToolSource
+	once        sync.Once
+	initErr     error
+	storageOnce sync.Once
+	storageErr  error
+	sizeLimit   func(string) (int64, error) // Test seam for preparation capacity sizing.
+	Root        string
+	Limit       int64
+	Clock       Clock
+	Fetch       func(context.Context, FileRef, string) error
+	Run         func(context.Context, []string, string, []string, io.Writer, io.Writer) error
 	// DownloadLimit is separate from the prepared-environment limit.
 	DownloadLimit int64
 }
@@ -415,12 +418,16 @@ func (c *EnvironmentCache) recent(path string) bool {
 }
 
 func (c *EnvironmentCache) init() error {
+	if err := c.initStorage(); err != nil {
+		return err
+	}
 	c.once.Do(func() {
-		if c.Clock == nil {
-			c.Clock = RealClock{}
-		}
 		if c.Limit == 0 && c.Root != "" {
-			c.Limit, c.initErr = AutoEnvironmentCacheLimit(c.Root)
+			size := c.sizeLimit
+			if size == nil {
+				size = AutoEnvironmentCacheLimit
+			}
+			c.Limit, c.initErr = size(c.Root)
 			if c.initErr != nil {
 				return
 			}
@@ -429,22 +436,33 @@ func (c *EnvironmentCache) init() error {
 			c.initErr = errors.New("environment-cache-bytes must be positive")
 			return
 		}
+	})
+	return c.initErr
+}
+
+// Existing-cache maintenance needs the same roots and locks as preparation,
+// but no capacity admission or free-space floor.
+func (c *EnvironmentCache) initStorage() error {
+	c.storageOnce.Do(func() {
+		if c.Clock == nil {
+			c.Clock = RealClock{}
+		}
 		if c.Root == "" {
-			c.initErr = errors.New("environment cache root is required")
+			c.storageErr = errors.New("environment cache root is required")
 			return
 		}
 		if e := PrepareStateRoots(c.Root); e != nil {
-			c.initErr = e
+			c.storageErr = e
 			return
 		}
 		root, e := filepath.EvalSymlinks(c.Root)
 		if e != nil {
-			c.initErr = e
+			c.storageErr = e
 			return
 		}
 		root, e = filepath.Abs(root)
 		if e != nil {
-			c.initErr = e
+			c.storageErr = e
 			return
 		}
 		c.Root = root
@@ -453,12 +471,12 @@ func (c *EnvironmentCache) init() error {
 		}
 		for _, p := range []string{filepath.Join(c.Root, "locks"), filepath.Join(c.Root, ".Trash")} {
 			if e := os.MkdirAll(p, 0700); e != nil {
-				c.initErr = e
+				c.storageErr = e
 				return
 			}
 		}
 	})
-	return c.initErr
+	return c.storageErr
 }
 
 func (c *EnvironmentCache) lock(ctx context.Context, key string, op int) (*os.File, error) {

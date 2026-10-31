@@ -1464,6 +1464,8 @@ extension variants and attempts still awaiting physical release. Reference
 state is queried again under the candidate's local locks before retirement;
 an unavailable queue refuses deletion. The queue must support this command's
 reference API. Shared downloads and unrelated retired prefixes are preserved.
+Pruning does not auto-size preparation capacity or require its 24 GiB free-space
+floor; both dry-run and apply remain available below that floor.
 
 `--config FILE` selects an installed worker; `--environment-cache DIR` overrides
 its cache directory. Without installed settings, supply that directory and queue
