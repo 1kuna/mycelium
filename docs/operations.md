@@ -873,9 +873,10 @@ and the size/deadline checks succeed, even for a complete-looking JSON prefix.
 
 Install the broker's binary, configuration and service unit as root-owned and
 unwritable by worker/job accounts. Use a root-owned `/run/mycelium` directory
-with group `myce-telemetry` and mode **0750**, and a socket owned by
-`root:myce-telemetry` with mode **0660**. Only designated worker accounts join
-that group; their actual service must receive that supplementary group. The
+with the configured client group and mode **0750**, and a socket owned by
+`root:<client-group>` with mode **0660**. Render `REPLACE_CLIENT_GROUP` identically
+in the broker socket and tmpfiles templates. Prefer the worker's existing primary
+group, avoiding account mutation and user-manager credential refresh. The
 group's socket write permission permits connecting, not changing the broker's
 sources. The parent directory must have no worker/group write permission, so
 clients cannot replace the socket. Keep the wrapper and executable chain
@@ -889,17 +890,20 @@ freshness, participating cards and counters before using it as evidence.
 
 Activate only after separately installing and qualifying a conforming broker:
 
-1. Create the dedicated `myce-telemetry` system group if absent (for example,
-   `getent group myce-telemetry || groupadd --system myce-telemetry`, as root).
-   Add only the designated worker account to it, then create the broker's runtime
-   directory/socket with the owners and modes above. Ensure the broker recreates
-   them correctly after reboot.
-2. Give the actual worker process the supplementary group. A system service can
-   use an administrator-owned `SupplementaryGroups=myce-telemetry` drop-in. For
-   a user service, refresh the user manager's group credentials through an
-   operator-controlled session/manager restart; restarting only the worker may
-   retain old groups. Verify the running worker's groups in `/proc/PID/status`;
-   a successful client call from a new login shell alone is insufficient.
+1. Read `Uid`, `Gid`, and `Groups` from the actual worker's `/proc/PID/status`.
+   Select its existing primary group (or an existing supplementary group already
+   held by that PID), and resolve the numeric GID with `getent group`. Render
+   `REPLACE_CLIENT_GROUP` in both broker templates with that group. Create the
+   root-owned directory and socket with the matching group and modes above;
+   verify them after boot/socket recreation. No account change is required.
+2. Verify access with one fresh complete two-card client call under the actual
+   worker PID's exact numeric Uid/Gid/Groups and service restrictions. A fresh
+   login shell alone is insufficient. A worker-only restart does not refresh a
+   persistent user manager's supplementary groups; using its existing primary
+   group avoids any user-manager restart. The b70 release #421 override uses
+   this arrangement (#444): a `60-worker-primary-group.conf` socket drop-in and
+   matching tmpfiles override. Preserve it until a future reviewed deployment
+   replaces it; see the [template instructions](../deploy/gpu-telemetry/README.md#existing-primary-group-override-444).
 3. Qualify repeated wrapper calls under the service's actual user, groups and
    restrictions, and additionally under `NoNewPrivileges=yes` if the service
    currently uses `no`. Preserve the existing service policy; no sudoers grant
