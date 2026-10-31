@@ -204,6 +204,9 @@ func (d *dockerAttempt) containerLimit(id string) (int64, int64) {
 	return d.state.MemoryLimitBytes, d.state.MemorySwapBytes
 }
 func (d *dockerAttempt) containerViolation(c dockerInspection) string {
+	if why := d.fileMountViolation(c); why != "" {
+		return why
+	}
 	if d.state.CgroupParent != "" && c.HostConfig.CgroupParent != d.state.CgroupParent {
 		return "Docker shared parent not enforced"
 	}

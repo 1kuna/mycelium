@@ -277,15 +277,19 @@ func (w Worker) prepareFileCheckpoint(j Job, stateDir string) (string, error) {
 	return dest, syncWorkerDir(j.Checkpoint)
 }
 func (w Worker) finishFileResult(j Job, result Result, parent string) (Result, error) {
+	// Docker mount writers must be proven stopped before any checkpoint/output I/O.
+	if j.Spec.Run.Docker && result.ReleasePending {
+		return result, nil
+	}
 	if _, err := w.publishFileCheckpoint(j, parent); err != nil && !stale(err) {
 		return result, err
 	}
 	if !result.Success || result.Interrupted || len(j.Spec.Outputs) == 0 || !j.storedFileResults() {
 		return result, nil
 	}
-	if j.Spec.OutputDelivery == asyncNAS {
+	if j.Spec.OutputDelivery == asyncNAS || dockerFileJob(j.Spec) {
 		root, files, err := captureDeliverySpool(j, parent)
-		if errors.Is(err, errRequiredDeliveryOutput) {
+		if errors.Is(err, errRequiredDeliveryOutput) || dockerFileJob(j.Spec) && errors.Is(err, os.ErrPermission) {
 			result.Success, result.Error = false, errRequiredDeliveryOutput.Error()
 			return result, nil
 		}
@@ -294,13 +298,15 @@ func (w Worker) finishFileResult(j Job, result Result, parent string) (Result, e
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-		reservation := result
-		reservation.OutputRefs = files
-		if err = w.Client.Call(ctx, "POST", "/api/files/result", reservation, nil); err != nil {
-			return result, err
-		}
-		if err = w.Client.PreflightFileStore(ctx, files); err != nil {
-			return result, err
+		if j.Spec.OutputDelivery == asyncNAS {
+			reservation := result
+			reservation.OutputRefs = files
+			if err = w.Client.Call(ctx, "POST", "/api/files/result", reservation, nil); err != nil {
+				return result, err
+			}
+			if err = w.Client.PreflightFileStore(ctx, files); err != nil {
+				return result, err
+			}
 		}
 		for name, ref := range files {
 			if err = w.Client.uploadFile(ctx, filepath.Join(root, name), ref, attemptOutputUploadPurpose); err != nil {

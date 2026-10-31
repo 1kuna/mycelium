@@ -955,7 +955,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				m.ModelURL = rt.url
 			}
 			m.ModelConfigHash = modelConfigHash(w.ModelConfig)
-			m.Capabilities = append(slices.DeleteFunc(slices.Clone(w.Machine.Capabilities), func(c string) bool { return c == "docker" || c == "docker_envelope" }), "logs_none", "shared_inputs_v1", "extension_shared_inputs_v1")
+			m.Capabilities = append(slices.DeleteFunc(slices.Clone(w.Machine.Capabilities), func(c string) bool { return c == "docker" || c == "docker_envelope" || c == dockerFilesCapability }), "logs_none", "shared_inputs_v1", "extension_shared_inputs_v1")
 			m.Capabilities = slices.DeleteFunc(m.Capabilities, func(c string) bool {
 				return c == "native_network" || c == "native_sidecars" || c == "native_network_partial" || strings.HasPrefix(c, "native_isolation_")
 			})
@@ -965,7 +965,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				if supported, err := dockerQualification.run("docker-envelope", func() (bool, error) { return probeWorker.dockerEnvelopeSupported(), nil }); err == nil {
 					w.dockerEnvelope = supported
 				}
-				m.Capabilities = append(m.Capabilities, "docker")
+				m.Capabilities = append(m.Capabilities, "docker", dockerFilesCapability)
 				if w.dockerEnvelope {
 					m.Capabilities = append(m.Capabilities, "docker_envelope")
 				}

@@ -605,6 +605,21 @@ default; no container scheduler, peer network or extra service is introduced.
 The exact supported subset and limits are in [job reference](job-reference.md#managed-docker-batch-commands)
 and [operations](operations.md#docker-cleanup-custody).
 
+For plain managed Docker batches, hashed `files` and declared `outputs` use the
+existing verified v3 file transport (#453). The `docker_files_v1` capability
+gates assignments. Inputs are attempt-private read-only mounts at
+`/myce/inputs`; `/myce/work` is a separate writable output/scratch mount and
+working directory. Main and managed sidecars receive the same roots. Bind
+mounts, numeric UID:GID and injected environment are worker-owned; authored
+mount/env/workdir/user overrides, NAS inputs, shared inputs and native
+environments remain rejected. File containers drop all capabilities and enable
+`no-new-privileges`. After every writer is proven stopped, existing durable
+spooling, hashing/upload and current-attempt verification publish outputs.
+Custody and local files survive uncertain operations and publication replay.
+The [file guide](guide-files-v3.md#managed-docker-files) specifies permissions,
+mount verification and daemon-local path requirements; no GPU qualification
+follows from laptop proof.
+
 ## Amendment: minimum native job isolation (#177, #219, #248)
 
 The #177 minimum is a v1 requirement under [#248's clarification](https://github.com/1kuna/mycelium/issues/248#issuecomment-6447873336):

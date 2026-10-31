@@ -45,7 +45,13 @@ func (p *ProgressReport) valid() bool {
 // Reuse the attempt's existing local input-directory retention and custody.
 // Session is in the file name so a replacement worker cannot read its predecessor.
 func applicationProgressFile(spool string, j Job) string {
-	return filepath.Join(spool, "job-files", j.ID, strconv.Itoa(j.Attempt), ".myce-progress-"+identityHash(j.Session)+".json")
+	dir := filepath.Join(spool, "job-files", j.ID, strconv.Itoa(j.Attempt))
+	if dockerFileJob(j.Spec) {
+		// The writable progress bind must not alias read-only inputs or expose
+		// the result spool through the parent attempt directory.
+		dir = filepath.Join(dir, "progress")
+	}
+	return filepath.Join(dir, ".myce-progress-"+identityHash(j.Session)+".json")
 }
 
 // Only the worker reads the small local file; no filesystem I/O occurs at q.mu.

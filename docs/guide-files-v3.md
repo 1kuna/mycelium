@@ -54,7 +54,8 @@ local source paths. Only explicitly mapped inputs are uploaded, never a whole
 project or home folder. Inputs are copied into a private working folder before
 running. Programs cannot mutate shared cached blobs. Plain commands can also
 use `files` with relative command arguments and declared outputs; stored inputs
-cannot be combined with a workdir, Docker or NAS input mappings.
+cannot be combined with a caller workdir or NAS input mappings. Managed Docker
+batches support stored files with separate input/output roots, described below.
 A NAS-mode job declaring any stored `files` returns all its outputs through the
 file store rather than the worker's `--job-file-root` (`JobFileRoot`).
 
@@ -75,6 +76,86 @@ job's `output_refs` maps output names to identities; retrieve an output with:
 ```sh
 myce file get --size-bytes BYTE_COUNT SHA256 ./answer.json
 ```
+
+### Managed Docker files
+
+A plain `run.docker: true` batch with `files` or `outputs` requires a Linux
+worker advertising `docker_files_v1` as well as `docker`. Older workers cannot
+receive it. The worker stages verified private copies at `/myce/inputs`,
+read-only in main and every managed sidecar, preserving relative input names.
+`/myce/work` is a separate private read-write output/scratch directory and the
+container's working directory. Outputs are relative to this directory.
+`MYCE_INPUT_DIR=/myce/inputs`, `MYCE_OUTPUT_DIR=/myce/work` and
+`MYCE_SCRATCH_DIR=/myce/work` describe these roots. Inputs are not copied into
+work. The durable result spool is outside all container mounts.
+
+All bind mounts are worker-owned attempt directories, including the existing
+checkpoint and progress mounts. Caller bind mounts, `run.workdir`, Docker
+`--workdir`, `--user`, `--group-add`, all authored environment (`run.env`, sidecar
+`env`, Docker `--env`), NAS `inputs`, `shared_inputs`, prepared source and native
+environments are refused for this contract. Put configuration in hashed files
+or payload arguments. Images must already be local and digest-pinned; image
+defaults remain part of those immutable image bytes.
+
+The worker sets the container user to its own numeric UID:GID, drops all Linux
+capabilities and sets `no-new-privileges`. Private directories stay mode 0700;
+inputs are private copies, never writable shared cache blobs. Images must
+support this non-root numeric identity, readable application files and writable
+state beneath work/checkpoint/progress. A fixed image `USER` is overridden.
+Root-only entrypoints or incompatible user-namespace mappings fail visibly;
+the worker never widens permissions or uses privileged helpers to repair
+root-owned output. Existing device selection, limits, offline/private networks,
+start authorization and exact-attempt custody still apply.
+
+The daemon must access the worker's local paths. `--mount` refuses missing
+source directories; inspection checks exact sources, destinations and read-only
+mode before start and during observation. Images declaring `VOLUME` are refused
+before creation, avoiding anonymous host volumes. Remote-daemon and Docker Desktop path sharing are not assumed. Check
+the worker-local Docker refusal when a mount cannot be created.
+
+After every writer is proven stopped, the worker validates declared regular
+files, hashes and durably spools them, uploads through the normal verified file
+store and submits an attempt-specific result. Missing, escaping, non-regular or
+unreadable outputs fail the job. Upload/acknowledgement failures retain the
+spool and custody for replay, including restart; stale attempts cannot publish.
+Cleanup uses existing attempt-file and Docker retention after queue settlement.
+
+For a CPU example, use a joined Linux worker with `--docker-host
+unix:///var/run/docker.sock`. Prepare its image explicitly:
+
+```sh
+docker pull busybox:1.37.0
+docker image inspect busybox:1.37.0 --format '{{index .RepoDigests 0}}'
+printf 'hash-in hash-out\n' > data.txt
+myce file put data.txt
+```
+
+Substitute the returned file identity and image digest in `docker-files.yaml`
+(including the actual byte count printed by `myce file put`):
+
+```yaml
+name: docker-files
+project: demo
+priority: experiment
+submission_key: docker-files-example-v1
+files:
+  data.txt: {sha256: REPLACE_WITH_FILE_SHA256, size_bytes: 17}
+outputs: {answer.txt: results}
+run:
+  docker: true
+  command: [docker, run, "busybox@sha256:REPLACE_WITH_IMAGE_DIGEST", sh, -ec,
+            'cat /myce/inputs/data.txt > /myce/work/answer.txt']
+needs: {cpu_cores: 1, memory_gb: 0.125, platform: [cpu]}
+resumable: false
+```
+
+Run `myce submit docker-files.yaml`, wait for success, then use `myce result
+JOB_ID --out ./download`. The accepted `output_refs.answer.txt` must match
+`files.data.txt`. Reusing the same submission key and spec returns the same job;
+use a new key for changed inputs or commands. This proves CPU file transport;
+GPU runtime and application parity require their own qualification.
+
+## Transfer behavior
 
 `get` refuses an existing destination and retains a `.myce-partial` download
 beside it after interruption. Rerunning resumes it. A bad range response, byte

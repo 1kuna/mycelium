@@ -149,7 +149,7 @@ type fileStoreConfiguration struct {
 // Stored inputs and their results use the queue file store independently of
 // checkpoint mode. FileTransport continues to select file-store checkpoints.
 func (j Job) storedFileResults() bool {
-	if j.Spec.OutputDelivery == asyncNAS || j.FileTransport || len(jobInputFiles(&j)) > 0 {
+	if dockerFileJob(j.Spec) || j.Spec.OutputDelivery == asyncNAS || j.FileTransport || len(jobInputFiles(&j)) > 0 {
 		return true
 	}
 	for _, input := range j.Spec.SharedInputs {
