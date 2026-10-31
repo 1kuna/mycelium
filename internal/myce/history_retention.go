@@ -22,7 +22,7 @@ func (q *Queue) pruneJobHistory(requestContexts ...context.Context) error {
 		now := q.clock.Now()
 		for _, id := range q.records.history.due(now) {
 			j := q.touchJob(id)
-			if j == nil || !terminal(j.State) {
+			if j == nil || !terminal(j.State) || len(j.RecoveredResults) > 0 {
 				continue
 			}
 			if j.FinishedAt == nil {

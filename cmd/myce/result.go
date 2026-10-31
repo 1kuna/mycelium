@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
@@ -29,11 +30,15 @@ func (e *ResultError) Error() string {
 func (e *ResultError) Unwrap() error { return e.Err }
 
 func resultCommand(ctx context.Context, args []string, errOut io.Writer) error {
+	if len(args) > 0 && args[0] == "recover" {
+		return recoverResultCommand(ctx, args[1:], errOut)
+	}
 	f := flag.NewFlagSet("result", flag.ContinueOnError)
 	f.SetOutput(errOut)
 	authority := installedClientFlags(f)
 	out := f.String("out", "", "directory for verified artifacts")
 	attempt := f.Int("attempt", 0, "download failed-attempt diagnostics instead of accepted results")
+	recovered := f.String("recovered", "", "explicit recovered-result ID; separate from execution success")
 	// Support the documented job-id followed by flags, as with logs.
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		args = append(append([]string{}, args[1:]...), args[0])
@@ -41,8 +46,8 @@ func resultCommand(ctx context.Context, args []string, errOut io.Writer) error {
 	if err := f.Parse(args); err != nil {
 		return err
 	}
-	if f.NArg() != 1 || *out == "" {
-		return errors.New("usage: myce result <job-id> [--attempt N] --out DIR")
+	if f.NArg() != 1 || *out == "" || (*attempt != 0 && *recovered != "") {
+		return errors.New("usage: myce result <job-id> [--attempt N | --recovered RESULT_ID] --out DIR")
 	}
 	c, err := authority.client()
 	if err != nil {
@@ -70,7 +75,14 @@ func resultCommand(ctx context.Context, args []string, errOut io.Writer) error {
 		return failure(err)
 	}
 	refs := j.OutputRefs
-	if *attempt != 0 {
+	if *recovered != "" {
+		r, e := c.GetRecoveredResult(ctx, j.ID, *recovered)
+		if e != nil {
+			return failure(e)
+		}
+		refs = r.Files
+		fmt.Fprintf(errOut, "recovered result %s; original job state: %s\n", r.ResultID, j.State)
+	} else if *attempt != 0 {
 		refs, err = myce.DiagnosticFiles(j, *attempt)
 		if err != nil {
 			return failure(err)
@@ -104,7 +116,9 @@ func resultCommand(ctx context.Context, args []string, errOut io.Writer) error {
 				return &ResultError{Code: "result_invalid", Err: errors.New("result parent must be a directory")}
 			}
 		}
-		if *attempt != 0 {
+		if *recovered != "" {
+			err = c.DownloadRecoveredResult(ctx, j.ID, *recovered, name, dest)
+		} else if *attempt != 0 {
 			err = c.DownloadDiagnostic(ctx, j.ID, *attempt, name, dest)
 		} else {
 			err = c.DownloadResult(ctx, j.ID, name, dest)

@@ -1628,6 +1628,17 @@
           "type": "string",
           "x-contract": "diagnostic"
         },
+        "recovered_results": {
+          "description": "Append-only recovery-time evidence linked to exact failed executions. Never changes state, native outcome, ordinary output_refs or dependency eligibility. Metadata and original provenance survive history pruning; bytes expire at each record's expires_at.",
+          "items": {
+            "$ref": "#/$defs/RecoveredResult"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "stable"
+        },
         "release_confirmed": {
           "description": "Exact current execution release proof when true. Omitted false is not confirmation; older copies may still have pending custody. Use the cancellation acknowledgement for aggregate release.",
           "type": "boolean",
@@ -2247,6 +2258,97 @@
       "required": [
         "type",
         "file"
+      ],
+      "type": "object"
+    },
+    "RecoveredResult": {
+      "properties": {
+        "attempt": {
+          "type": "integer"
+        },
+        "expires_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "files": {
+          "$ref": "#/$defs/FileManifest"
+        },
+        "id": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "kind": {
+          "const": "recovered",
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "manifest_sha256": {
+          "description": "SHA-256 of canonical Go JSON for files (sorted keys, compact encoding), verified at recovery time.",
+          "type": "string"
+        },
+        "progress": {
+          "type": "integer"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "recovered_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "recovered_by": {
+          "const": "operator",
+          "type": "string"
+        },
+        "requested_by": {
+          "description": "Operator-asserted requester label, not a separately authenticated user identity.",
+          "type": "string"
+        },
+        "result_id": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/RecoverySource"
+        }
+      },
+      "required": [
+        "id",
+        "attempt",
+        "machine",
+        "session",
+        "key",
+        "requested_by",
+        "source",
+        "reason",
+        "files",
+        "result_id",
+        "kind",
+        "recovered_by",
+        "recovered_at",
+        "expires_at",
+        "manifest_sha256"
+      ],
+      "type": "object"
+    },
+    "RecoverySource": {
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "location": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "location"
       ],
       "type": "object"
     },

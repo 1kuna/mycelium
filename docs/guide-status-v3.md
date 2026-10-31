@@ -9,6 +9,14 @@ The page and `GET /api/status` share a snapshot for up to one second. Job receip
 polls (`GET /api/jobs/{id}`) read the requested job afresh. Status snapshots do
 not drive start authorization, cancellation or result publication.
 
+Jobs with explicitly recovered outputs expose an append-only `recovered_results`
+list in status and job GET. Each record has `kind: recovered`, its own result ID,
+exact failed execution, recovery-time verification identities and operator
+provenance. CLI status lists these separately and keeps the original failed
+state. Ordinary `output_refs`, attempt outcomes, cleanup causes and dependency
+eligibility remain unchanged. See [recover failed-attempt outputs](guide-files-v3.md#recover-outputs-from-a-failed-terminal-attempt)
+for the explicit recovery/download commands and independent byte retention.
+
 Native stage exceptions appear in job `isolation` as
 `unsandboxed: <reason>` in status JSON and job GET; CLI/page reasons include the
 same text through queued, running and terminal outcomes. Legacy registrations
