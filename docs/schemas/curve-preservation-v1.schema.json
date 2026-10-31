@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/CurvePreservationReceipt",
+  "$defs": {
+    "CurvePreservationDiff": {
+      "properties": {
+        "key": {
+          "$ref": "#/$defs/ObservationKey"
+        },
+        "samples_before": {
+          "type": "integer"
+        },
+        "samples_after": {
+          "type": "integer"
+        },
+        "evidence": {
+          "items": {
+            "$ref": "#/$defs/CurvePreservationEvidence"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object",
+      "required": [
+        "key",
+        "samples_before",
+        "samples_after",
+        "evidence"
+      ]
+    },
+    "CurvePreservationEvidence": {
+      "properties": {
+        "job": {
+          "type": "string"
+        },
+        "attempt": {
+          "type": "integer"
+        },
+        "sequence": {
+          "type": "integer"
+        },
+        "at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "type": "object",
+      "required": [
+        "job",
+        "attempt",
+        "sequence",
+        "at"
+      ]
+    },
+    "CurvePreservationReceipt": {
+      "properties": {
+        "failure": {
+          "type": "string"
+        },
+        "failed_key": {
+          "$ref": "#/$defs/ObservationKey"
+        },
+        "keys_before": {
+          "type": "integer"
+        },
+        "keys_after": {
+          "type": "integer"
+        },
+        "changes": {
+          "items": {
+            "$ref": "#/$defs/CurvePreservationDiff"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object",
+      "required": [
+        "keys_before",
+        "keys_after",
+        "changes"
+      ]
+    },
+    "ExecutionTarget": {
+      "properties": {
+        "os": {
+          "type": "string"
+        },
+        "arch": {
+          "type": "string"
+        },
+        "platform": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "os",
+        "arch",
+        "platform"
+      ]
+    },
+    "ObservationKey": {
+      "properties": {
+        "server_digest": {
+          "type": "string"
+        },
+        "allowance": {
+          "type": "string"
+        },
+        "work": {
+          "type": "string"
+        },
+        "extension_digest": {
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/ExecutionTarget"
+        },
+        "reference": {
+          "$ref": "#/$defs/WorkReference"
+        },
+        "host": {
+          "type": "string"
+        },
+        "component": {
+          "type": "string"
+        },
+        "hardware": {
+          "type": "string"
+        },
+        "fingerprint": {
+          "type": "string"
+        },
+        "environment": {
+          "type": "string"
+        },
+        "configuration": {
+          "type": "string"
+        },
+        "concurrency": {
+          "type": "integer"
+        },
+        "batch_size": {
+          "type": "integer"
+        }
+      },
+      "type": "object",
+      "required": [
+        "work",
+        "extension_digest",
+        "target",
+        "reference",
+        "host",
+        "component",
+        "hardware",
+        "fingerprint",
+        "environment",
+        "configuration",
+        "concurrency",
+        "batch_size"
+      ]
+    },
+    "WorkReference": {
+      "properties": {
+        "input_shape": {
+          "type": "string"
+        },
+        "unit": {
+          "type": "string"
+        },
+        "units": {
+          "type": "number"
+        }
+      },
+      "type": "object",
+      "required": [
+        "input_shape",
+        "unit",
+        "units"
+      ]
+    }
+  }
+}

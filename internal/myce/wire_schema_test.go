@@ -293,6 +293,24 @@ func TestWireSchemas(t *testing.T) {
 		t.Fatal("environment schema drift: regenerate with MYCE_UPDATE_SCHEMAS=1", err)
 	}
 	validateWireValue(t, compileWireSchema(t, "environment-v1.schema.json"), EnvironmentEntry{Name: "tools", Platforms: []EnvironmentPlatform{{Platform: "cpu", Backend: "uv", Key: "digest", InputDigests: map[string]string{"requirements.txt": "digest"}}}})
+
+	receiptReflector := generate.Reflector{Anonymous: true, AllowAdditionalProperties: true}
+	receiptSchema, receiptErr := json.MarshalIndent(receiptReflector.Reflect(&CurvePreservationReceipt{}), "", "  ")
+	if receiptErr != nil {
+		t.Fatal(receiptErr)
+	}
+	receiptSchema = append(receiptSchema, '\n')
+	receiptPath := filepath.Join(schemaRoot, "curve-preservation-v1.schema.json")
+	if os.Getenv("MYCE_UPDATE_SCHEMAS") == "1" {
+		if err := os.WriteFile(receiptPath, receiptSchema, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	actualReceipt, receiptErr := os.ReadFile(receiptPath)
+	if receiptErr != nil || !bytes.Equal(actualReceipt, receiptSchema) {
+		t.Fatal("curve preservation schema drift: regenerate with MYCE_UPDATE_SCHEMAS=1", receiptErr)
+	}
+	validateWireValue(t, compileWireSchema(t, "curve-preservation-v1.schema.json"), CurvePreservationReceipt{Changes: []CurvePreservationDiff{}})
 	generated := generatedJobSchema(t)
 	ledgerReflector := generate.Reflector{Anonymous: true, AllowAdditionalProperties: true}
 	ledgerSchema, ledgerErr := json.MarshalIndent(ledgerReflector.Reflect(&JobLedgerPage{}), "", "  ")

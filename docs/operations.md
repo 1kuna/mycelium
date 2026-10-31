@@ -1508,3 +1508,39 @@ expected inputs to verify registration, even after the original files change.
 Raw recipes, commands, file contents and local paths are omitted. Binary recipes
 report the digest of the `binary.sha256` identity input. See the
 [entry schema](schemas/environment-v1.schema.json).
+
+### Preserve learned curves across a release
+
+Use the versioned `scripts/verify-curve-preservation.sh` guard (or
+`myce release verify-curves`) instead of private release-script equality checks:
+
+```sh
+MYCE_BIN=/path/to/myce scripts/verify-curve-preservation.sh \
+  --before before-inspection.json --after after-inspection.json \
+  --ledgers learning-ledger-pages.json > curve-diff.json 2> curve-guard.stderr
+rc=$? # retain this status, stderr and the diff receipt, including on failure
+```
+
+Capture authenticated `/api/inspection` snapshots before and after cutover.
+The **before response's server `now`** is the learning boundary, never the local
+save time or installer launch. The ledger file is a JSON array of pages from
+`GET /api/jobs/{id}/ledger`; collect pages covering the interval for jobs that
+could have learned, including pagination. Use the after snapshot's `now` as the
+upper boundary; later ledger entries are ignored.
+
+The guard preserves every key, sample count and throughput/memory evidence
+clock. It ignores only derived `stale_reason` labels. Changed values and new
+keys require a complete chain of accepted sample records, with exact job,
+attempt, key and queue-time provenance. Each record binds before/after digests
+of the actual learning mutation in the same SQLite transaction as completion;
+the guard shares the runtime's measurement digest and does not reimplement
+EWMA or memory merges. Memory-only samples may advance their sample count and
+memory clock while preserving the old throughput and its provenance.
+
+Removed keys, resets, backward clocks, changed measurements without new
+samples, missing/ambiguous provenance and unexplained final values fail closed.
+Older jobs have no such learning ledger proof: an unchanged curve still passes,
+but an unproven change stops the release for investigation. Reference sweep or
+OOM invalidation changes are not accepted job samples and also stop this guard.
+Ledger records follow existing job history retention; collect evidence before
+it expires. No release, install or fleet operation is performed by the guard.
