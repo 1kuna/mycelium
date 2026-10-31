@@ -1394,6 +1394,17 @@ are injectable for laptop verification.
 
 ## Rolling fleet upgrades
 
+> **Before deploying bounded status (#439), migrate preservation checks.**
+> Default `GET /api/status` includes active/cleanup-pending jobs and only the
+> newest 100 other terminal jobs. Before/after preservation, protected-job,
+> history and curve-provenance checks must request `/api/status?detail=full`
+> (Python: `client.status(full=True)`, CLI: `myce status --history --json`) or
+> collect every `jobs=all` page through `jobs_page.next_before`. Existing complete
+> `/api/inspection` collectors remain supported. Migrate private release-script
+> copies before queue cutover; a passing pre-upgrade read does not prove the
+> post-upgrade collector is complete. Curves remain included by default, but
+> missing historical jobs must never count as preservation or confirmed release.
+
 After publishing a signed release and approving it with `myce release approve`,
 run `myce fleet upgrade` (or `myce fleet upgrade --release vX.Y.Z`). The command
 uses the same saved installed authority as `myce status` and returns a durable
