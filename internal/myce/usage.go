@@ -236,7 +236,20 @@ func maxTime(a, b time.Time) time.Time {
 	return b
 }
 func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
-	tx, e := q.db.Begin()
+	var tx *sql.Tx
+	var e error
+	if timing != nil && timing.measureWriter {
+		// Keep the existing transaction and lock order; only separate pool
+		// acquisition from SQL work for the instruction request's slow span.
+		conn, err := timing.writer(q.db)
+		if err != nil {
+			return err
+		}
+		defer conn.Close()
+		tx, e = conn.BeginTx(context.Background(), nil)
+	} else {
+		tx, e = q.db.Begin()
+	}
 	if e != nil {
 		return e
 	}

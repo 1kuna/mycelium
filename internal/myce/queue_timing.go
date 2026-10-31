@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"context"
 	"database/sql"
 	"log"
 	"reflect"
@@ -59,13 +60,23 @@ func logQueueHold(duration time.Duration, operation string, fn func() error) {
 }
 
 // Monotonic wall time is observational only: queue decisions still use q.clock.
-// Only launch requests opt into detailed request/commit timing; mutex holds
-// are sampled independently above.
+// Launch requests and instruction polls opt into detailed request/commit
+// timing; mutex holds are sampled independently above.
 type queueUpdateTiming struct {
 	started   time.Time
 	lockedAt  time.Time
 	mutexWait time.Duration
 	sqlCommit time.Duration
+	// Instruction polls opt in to distinguish pool acquisition from work.
+	measureWriter bool
+	writerWait    time.Duration
+}
+
+func (t *queueUpdateTiming) writer(db *sql.DB) (*sql.Conn, error) {
+	started := time.Now()
+	conn, err := db.Conn(context.Background())
+	t.writerWait += time.Since(started)
+	return conn, err
 }
 
 func newQueueUpdateTiming() *queueUpdateTiming {
