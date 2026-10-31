@@ -111,7 +111,7 @@ func (q *Queue) refreshHostMemory() {
 				continue
 			}
 			j := q.s.Jobs[r.Job]
-			if j != nil && j.Machine == r.Machine && j.Session == r.Session && j.Attempt == r.Attempt && (j.State == "running" || j.State == "stopping") {
+			if j != nil && j.Machine == r.Machine && j.Session == r.Session && j.Attempt == r.Attempt && batchReservesCapacity(j) {
 				continue
 			}
 			reserved += r.HostChargeGB
@@ -360,7 +360,7 @@ func (q *Queue) reclaimableGPUMemory(m *Machine, priority string, identity ...Sp
 		}
 	}
 	for _, j := range q.liveJobs() {
-		if batchOnTarget(j, m) && (j.State == "running" || j.State == "stopping") && q.batchPreemptible(j, demand) {
+		if batchOnTarget(j, m) && q.batchPreemptible(j, demand) {
 			room += j.Spec.Needs.MemoryGB
 		}
 	}

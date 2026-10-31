@@ -150,7 +150,7 @@ func (q *Queue) copyPlan(m *Machine) ([]CopyTask, []CopyTask, []string) {
 	plan := []CopyTask{}
 	busy := q.dockerBlocker(hostID(m)) != "" || q.held(hostID(m)) || m.Gone || m.Leaving || q.unreported[m.ID]
 	for _, j := range q.liveJobs() {
-		if j.Machine == m.ID && (j.State == "running" || j.State == "stopping") {
+		if j.Machine == m.ID && batchReservesCapacity(j) {
 			busy = true
 		}
 	}
@@ -239,7 +239,7 @@ func (q *Queue) workerBatchIdleExcept(m *Machine, own *HostRelease) bool {
 		if own != nil && j.ID == own.Job && j.Machine == own.Machine && j.Session == own.Session && j.Attempt == own.Attempt {
 			continue
 		}
-		if batchOnTarget(j, m) && (j.State == "running" || j.State == "stopping") {
+		if batchOnTarget(j, m) && batchReservesCapacity(j) {
 			return false
 		}
 	}

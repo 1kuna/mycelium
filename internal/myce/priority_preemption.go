@@ -67,7 +67,7 @@ func (q *Queue) batchCreditUntil(j *Job) time.Time {
 // make progress. Strict tiers still win after that bounded interval. Unstarted
 // offers are always revocable; the protection begins only at Started.
 func (q *Queue) batchPreemptible(j *Job, demand Spec) bool {
-	if j.State != "running" && j.State != "stopping" || q.comparePriority(j.Spec, demand) <= 0 {
+	if !batchReservesCapacity(j) || q.comparePriority(j.Spec, demand) <= 0 {
 		return false
 	}
 	// Deadline retains its cooperative-only legacy interruption contract.
