@@ -68,7 +68,7 @@ Python `Client.get()` and `Client.list()`.
 The projection strips these entire fields: `after`, `args`, `diagnostics`,
 `disk`, `environment`, `execution`, `expected_minutes`, `extension`,
 `extension_digest`, `fan_out`, `files`, `give_up_at`, `inputs`, `isolation`,
-`logs`, `output_delivery`, `outputs`, `prepare_source`, `profile_memory`,
+`output_delivery`, `outputs`, `prepare_source`, `profile_memory`,
 `reason`, `require_target`, `run`, `shared_inputs`, `size_hint`, and `targets`.
 Status rows additionally strip `submission_key`; job GET retains it. Within `program`, it strips `args` and `file`, retaining only
 `type`. Within `extension_check`, it strips `automatic`, `directory` and

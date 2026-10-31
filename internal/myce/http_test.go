@@ -81,6 +81,7 @@ func TestAPIJobReplyRedactsExecutionPayload(t *testing.T) {
 	q, _ := fixture(t)
 	s := spec("experiment")
 	s.SubmissionKey = "projection-test"
+	s.Logs = "keep"
 	s.Run.Command = []string{"echo", "private-command"}
 	s.Run.Env = map[string]string{"PRIVATE": "private-env", "MYCE_TOKEN": "private-token"}
 	_, ref := retentionUpload(t, retentionClient(t, q), "submitted input")
@@ -134,6 +135,9 @@ func TestAPIJobReplyRedactsExecutionPayload(t *testing.T) {
 	if string(specView["submission_key"]) != `"projection-test"` || slices.Contains(projection.Omitted, "submission_key") {
 		t.Error("GET must retain submission_key without declaring it omitted")
 	}
+	if string(specView["logs"]) != `"keep"` || slices.Contains(projection.Omitted, "logs") {
+		t.Error("GET must retain logs policy without declaring it omitted")
+	}
 	var run map[string]json.RawMessage
 	if raw, present := specView["run"]; present {
 		if err := json.Unmarshal(raw, &run); err != nil {
@@ -158,6 +162,9 @@ func TestAPIJobReplyRedactsExecutionPayload(t *testing.T) {
 	if !slices.Contains(status.Jobs[0].SpecProjection.Omitted, "submission_key") || status.Jobs[0].Spec.SubmissionKey != "" {
 		t.Error("status must declare submission_key omitted")
 	}
+	if status.Jobs[0].Spec.Logs != "keep" || slices.Contains(status.Jobs[0].SpecProjection.Omitted, "logs") {
+		t.Error("status must retain logs policy without declaring it omitted")
+	}
 	q.mu.Lock()
 	stored := q.s.Jobs[j.ID]
 	unchanged := stored.Spec.Files["private-input.txt"] == ref && stored.Spec.Run.Env["MYCE_TOKEN"] == "private-token"
@@ -172,9 +179,13 @@ func TestAPIJobReplyRedactsExecutionPayload(t *testing.T) {
 		t.Error("GET exposed environment recipe")
 	}
 	body, _ := json.Marshal(reply)
+	statusBody, _ := json.Marshal(status)
 	for _, private := range []string{"private-command", "private-env", "private-token", "private-args", "/private/recipe.lock", "private-input.txt", ref.SHA256} {
 		if strings.Contains(string(body), private) {
 			t.Errorf("GET exposed %q", private)
+		}
+		if strings.Contains(string(statusBody), private) {
+			t.Errorf("status exposed %q", private)
 		}
 	}
 }

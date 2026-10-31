@@ -277,7 +277,7 @@ func statusJobInputs(job *Job) Job {
 		"after", "args", "diagnostics", "disk", "environment", "execution",
 		"expected_minutes", "extension", "extension_check.automatic",
 		"extension_check.directory", "extension_check.reserve", "extension_digest",
-		"fan_out", "files", "give_up_at", "inputs", "isolation", "logs",
+		"fan_out", "files", "give_up_at", "inputs", "isolation",
 		"output_delivery", "outputs", "prepare_source", "profile_memory",
 		"program.args", "program.file", "reason", "require_target", "run",
 		"shared_inputs", "size_hint", "submission_key", "targets",
