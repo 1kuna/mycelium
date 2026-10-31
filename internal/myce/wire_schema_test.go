@@ -125,6 +125,7 @@ func generatedJobSchema(t *testing.T) []byte {
 	peak["events"].(map[string]any)["description"] = "Attempt-parent hierarchical memory.events counts. Absent means not read; explicit zero means a read zero. Max per counter across samples within the attempt."
 	peak["swap_gb"].(map[string]any)["description"] = "Attempt-parent memory.swap.peak in GiB, max across samples. Absent when unavailable; zero is measured. memory.swap.current is pressure evidence only, never a substitute peak."
 	peak["constrained"].(map[string]any)["description"] = "Observed constraint evidence; omitted false. Constrained facts are retained even when learning rejects them."
+	peak["pressure_unavailable"].(map[string]any)["description"] = "Pressure coverage was missing, malformed or had no valid cumulative-counter time window. Rejects this attempt's memory learning while preserving prior qualified evidence; raw diagnostic peaks remain."
 	job["infrastructure_retries"].(map[string]any)["minimum"] = 0
 	job["infrastructure_retries"].(map[string]any)["description"] = "Production infrastructure requeues already used. Omitted zero; default maximum is 2, configurable by the queue. Stage failures do not consume this budget."
 	job["reason"].(map[string]any)["description"] = "Sanitized diagnostic only. Do not parse or match its text."

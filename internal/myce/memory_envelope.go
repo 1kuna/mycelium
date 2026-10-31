@@ -17,17 +17,19 @@ type AttemptMemoryPeak struct {
 	// Raw counter reads are not completed peaks (notably Docker release
 	// evidence). Only observeAttemptMemory promotes a complete sample history.
 	nonreclaimableSampleGB *float64
+	pressureTotalUS        uint64
 
-	GPUHost           *GPUHostMemory     `json:"gpu_host,omitempty"`
-	NonreclaimableGB  *float64           `json:"nonreclaimable_gb,omitempty"`
-	HostGB            *float64           `json:"host_gb,omitempty"`
-	CgroupGB          *float64           `json:"cgroup_gb,omitempty"`
-	DeviceGB          *float64           `json:"device_gb,omitempty"`
-	DeviceUnavailable string             `json:"device_unavailable,omitempty"`
-	SwapGB            *float64           `json:"swap_gb,omitempty"`
-	Source            string             `json:"source,omitempty"`
-	Events            *MemoryEventCounts `json:"events,omitempty"`
-	Constrained       bool               `json:"constrained,omitempty"`
+	GPUHost             *GPUHostMemory     `json:"gpu_host,omitempty"`
+	NonreclaimableGB    *float64           `json:"nonreclaimable_gb,omitempty"`
+	HostGB              *float64           `json:"host_gb,omitempty"`
+	CgroupGB            *float64           `json:"cgroup_gb,omitempty"`
+	DeviceGB            *float64           `json:"device_gb,omitempty"`
+	DeviceUnavailable   string             `json:"device_unavailable,omitempty"`
+	SwapGB              *float64           `json:"swap_gb,omitempty"`
+	Source              string             `json:"source,omitempty"`
+	Events              *MemoryEventCounts `json:"events,omitempty"`
+	Constrained         bool               `json:"constrained,omitempty"`
+	PressureUnavailable bool               `json:"pressure_unavailable,omitempty"`
 }
 
 // Attempt-parent memory.events counters. Nil on the peak means they were not
@@ -437,7 +439,7 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) memoryEstimate {
 		if sameMemoryWork(point, *key, configuration) && memoryIdentityUsable(point) && p.constrained() {
 			invalidated = true
 		}
-		if !sameMemoryWork(point, *key, configuration) || !memoryIdentityUsable(point) || point.MemoryRecordedAt.IsZero() || age < 0 || age > workCurveMaxAge || p == nil || p.constrained() || p.HostGB == nil || !validRate(*p.HostGB) || !validRate(*p.HostGB*2.5) || p.CgroupGB != nil && validMemoryValue(*p.CgroupGB) && !validMemoryValue(*p.CgroupGB*2.5) {
+		if !sameMemoryWork(point, *key, configuration) || !memoryIdentityUsable(point) || point.MemoryRecordedAt.IsZero() || age < 0 || age > workCurveMaxAge || p == nil || p.constrained() || p.PressureUnavailable || p.HostGB == nil || !validRate(*p.HostGB) || !validRate(*p.HostGB*2.5) || p.CgroupGB != nil && validMemoryValue(*p.CgroupGB) && !validMemoryValue(*p.CgroupGB*2.5) {
 			continue
 		}
 		if m.UnifiedMemory && !j.Spec.Needs.cpuOnly() && (p.DeviceGB == nil || !validRate(*p.DeviceGB)) {

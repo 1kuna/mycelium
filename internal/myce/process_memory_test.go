@@ -3,13 +3,63 @@ package myce
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestProcessMemoryPressureEligibility(t *testing.T) {
+	for _, mode := range []string{"small swap", "large swap", "warning", "critical", "missing"} {
+		t.Run(mode, func(t *testing.T) {
+			var reads atomic.Int32
+			sampled := make(chan struct{}, 1)
+			w := Worker{processMemory: &processMemoryProbe{
+				Pressure: func(context.Context) (*gpuHostState, error) {
+					n := reads.Add(1)
+					p := &gpuHostState{available: 12, swapOut: 100, level: 1}
+					if n == 2 { // In-flight pressure, followed by a clean final read.
+						switch mode {
+						case "small swap":
+							p.swapOut += 23
+						case "large swap":
+							p.swapOut += uint64((128 << 20) / os.Getpagesize())
+						case "warning":
+							p.level = 2
+						case "critical":
+							p.level = 4
+						case "missing":
+							return nil, errors.New("unavailable")
+						}
+					}
+					return p, nil
+				},
+				Resident: func(map[int]bool) (uint64, int, error) {
+					select {
+					case sampled <- struct{}{}:
+					default:
+					}
+					return 2 << 30, 1, nil
+				},
+			}}
+			finish := w.observeProcessMemory(func() []int { return []int{7} })
+			defer finish()
+			select {
+			case <-sampled:
+			case <-time.After(5 * time.Second):
+				t.Fatal("process sampler did not run")
+			}
+			p := finish()
+			if p == nil || p.HostGB == nil || *p.HostGB != 2 || p.constrained() != (mode != "small swap") {
+				t.Fatalf("process pressure eligibility %s: %+v", mode, p)
+			}
+		})
+	}
+}
 
 // A worker without cgroups (macOS) samples the attempt's process group.
 func processMemoryWorker(t *testing.T, resident uint64) (Worker, *[]map[int]bool) {
@@ -19,6 +69,9 @@ func processMemoryWorker(t *testing.T, resident uint64) (Worker, *[]map[int]bool
 	var mu sync.Mutex
 	var groups []map[int]bool
 	w.processMemory = &processMemoryProbe{
+		Pressure: func(context.Context) (*gpuHostState, error) {
+			return &gpuHostState{available: 64, level: 1}, nil
+		},
 		Resident: func(ids map[int]bool) (uint64, int, error) {
 			mu.Lock()
 			defer mu.Unlock()

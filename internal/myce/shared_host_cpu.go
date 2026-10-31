@@ -40,7 +40,7 @@ func sharedCPUCeilings(c *memoryCeilings, cores int) (*memoryCeilings, error) {
 			return nil, fmt.Errorf("shared CPU %s not confirmed", v.name)
 		}
 	}
-	return &memoryCeilings{fs: c.fs, root: root, pageSize: c.pageSize}, nil
+	return &memoryCeilings{fs: c.fs, root: root, pageSize: c.pageSize, clock: c.clock}, nil
 }
 
 func (w Worker) executionCeilings() *memoryCeilings {
