@@ -31,6 +31,9 @@ class ActionsFullTest(unittest.TestCase):
                 self.assertIn(f'git: {SHA}', profile)
                 self.assertNotIn('os: ' + ('linux' if platform == 'darwin' else 'darwin'), profile)
                 self.assertNotIn('host:', profile)
+                self.assertNotIn('allowed_machines:', profile)
+                self.assertNotIn('arch: amd64', profile)
+                self.assertIn(f'  - {{os: {platform}, arch: arm64, platform: cpu}}', profile)
                 self.assertIn('check: [grep, -qx,', profile)
                 if submission_failure and platform == 'darwin':
                     code, output = ((78, json.dumps(refusal)) if refusal is not None
