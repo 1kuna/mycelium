@@ -443,7 +443,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	if w.MemorySource != nil {
 		free, e := w.MemorySource(context.Background())
 		if e != nil || !validMemoryValue(free) || free < j.Spec.Needs.MemoryGB {
-			return nil, fmt.Errorf("%w: need %.1f GB, available %.1f GB: %v", errWorkerMemory, j.Spec.Needs.MemoryGB, free, e)
+			return nil, refuseAdmission("live_gpu_memory", "GiB", j.Spec.Needs.MemoryGB, free, e != nil)
 		}
 	}
 	prepare := workerCheckpointPrepare
@@ -1260,12 +1260,12 @@ func (w Worker) checkHostRAM(gpu, host float64) error {
 		return nil
 	}
 	if w.HostMemorySource == nil {
-		return fmt.Errorf("%w: host RAM source unavailable", errWorkerMemory)
+		return refuseAdmission("live_host_ram", "GiB", hostNeed(&w.Machine, gpu, host), 0, true)
 	}
 	free, err := w.sharedHostLiveMemory(context.Background())
 	need := hostNeed(&w.Machine, gpu, host)
 	if err != nil || !hostMemoryAvailableFits(&w.Machine, gpu, host, free) {
-		return fmt.Errorf("%w: host RAM need %g GiB, available %g GiB: %v", errWorkerMemory, need, free, err)
+		return refuseAdmission("live_host_ram", "GiB", need, free, err != nil)
 	}
 	return nil
 }
