@@ -40,6 +40,7 @@ type batchRelease struct {
 }
 
 type state struct {
+	MemoryExplorations map[string]memoryExploration `json:"memory_explorations,omitempty"`
 	// #509 owns explicit migration activation. Missing/false preserves legacy
 	// cap/reserve admission, including declared estimates and FIFO retries.
 	StorageAdmissionActive bool                           `json:"storage_admission_active,omitempty"`
@@ -49,6 +50,7 @@ type state struct {
 	AttemptOutputUploads   map[string]time.Time           `json:"attempt_output_uploads,omitempty"`
 	Health                 healthAlerts                   `json:"health_alerts,omitempty"`
 	FleetUpgrade           *fleetUpgrade                  `json:"fleet_upgrade,omitempty"`
+
 	// Positive orphan eligibility, persisted with the existing queue state.
 	// Zero time means an input upload has not finished publication yet.
 	JobInputUploads map[string]time.Time `json:"job_input_uploads,omitempty"`
@@ -100,6 +102,8 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
+	// Qualification removes occupancy, but retains diagnostic history/inventory.
+	memoryOrigin              *Queue
 	storageProtectionMu       sync.Mutex
 	storageProtectionVerified bool // Restart never renews native verification.
 	// Only detached observation views set this page selection.
@@ -2479,6 +2483,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	}
 	j.Copies = append(j.Copies, Copy{AllocatedDevices: slices.Clone(j.AllocatedDevices), Machine: m.ID, Session: m.Session, Attempt: j.Attempt, Extension: j.Extension, ReleaseReason: "awaiting_release"})
 	j.Session = m.Session
+	q.claimMemoryExploration(j, m)
 	j.StorageEnvelope = q.storageEnvelope(j, m)
 	q.assignStorage(j, storage)
 	j.Reason = ""

@@ -33,6 +33,9 @@ func TestProfileTargetRefusalHostMemorySlack(t *testing.T) {
 		if !errors.As(err, &api) || api.Code != "no_qualified_target" || !strings.Contains(api.Message, want) {
 			t.Fatalf("refusal = %v; want %q", err, want)
 		}
+		if !strings.Contains(api.Message, "no qualified target can fit this job") || !strings.Contains(api.Message, "operator approve a sufficient allowance") {
+			t.Fatalf("permanent capacity refusal lacks remedies: %v", err)
+		}
 	}
 }
 
