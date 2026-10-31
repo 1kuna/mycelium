@@ -32,7 +32,7 @@ func fitsResources(j *Job, m *Machine, memory float64) bool {
 func fitsResourcesChecked(j *Job, m *Machine, memory float64, report *targetFit) bool {
 	return report.check(sharedHostJobFits(j, m), "shared host profile") &&
 		report.check(diskHeadroomReason(j, m) == "", "disk headroom") &&
-		report.check(executionJobTargetMatches(j, m), "target") &&
+		report.check(executionTargetMatches(j.Spec, m), "target") &&
 		report.check(nativeNetworkFits(j, m), "native network isolation") &&
 		report.check(j.MemoryEnvelope == nil || j.MemoryEnvelope.Refusal == "", "memory envelope") &&
 		report.check(!m.Recovering, "recovering") &&

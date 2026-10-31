@@ -123,11 +123,16 @@ func startFailureOutcome(owner Result, err error) Result {
 	if errors.Is(err, errWorkerStartAuthorization) {
 		owner.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("start_authorization", err))
 	}
-	if architectureExecError(err) {
-		owner.ExecutionCause = &RuntimeCause{Operation: "launch", Class: architectureMismatch}
-	}
 	owner = classifyAttemptOutcome(owner, attemptCause{memberOutcome: facts})
-	classifyArchitectureFailure(&owner, false)
+	if execFormatFailure(err) && !owner.OutOfMemory {
+		// The payload cannot execute: this is an ordinary command failure, not
+		// infrastructure loss. Preserve existing cancellation and stop authority.
+		if !facts.deliveredBeforeExit() {
+			owner.Interrupted = false
+			owner.ExecutionCause = &RuntimeCause{Operation: "command", Class: "command_exit"}
+			owner.Error = execFormatMessage
+		}
+	}
 	return owner
 }
 

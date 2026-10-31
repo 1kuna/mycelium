@@ -470,7 +470,7 @@ func TestProfileOSOnlyPrebuiltError(t *testing.T) {
 	}
 	p := executionProfile{Spec: myce.Spec{Name: "binary", Project: "test", Class: "experiment", Targets: []myce.ExecutionTarget{{OS: "linux"}}, Run: myce.RunSpec{Command: []string{"./program"}}}, Source: profileSource{Directory: "source"}, Check: []string{"true"}}
 	err := runPreparedProfile(context.Background(), root, p, []byte("binary-fixture"), nil, nil, "", "", "", "", "", "", io.Discard, io.Discard)
-	if err == nil || !strings.Contains(err.Error(), "explicit arch or portable: true") || !strings.Contains(err.Error(), "uploaded") || strings.Contains(err.Error(), root) {
+	if err == nil || !strings.Contains(err.Error(), "declare portable: true if this runs on any arch, or name the arch") || strings.Contains(err.Error(), root) {
 		t.Fatalf("CLI lost actionable/sanitized reason: %v", err)
 	}
 }

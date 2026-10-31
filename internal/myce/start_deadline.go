@@ -88,7 +88,7 @@ func (q *Queue) startWaitingReason(j *Job) string {
 		}
 		// A matching platform alone does not qualify an extension or satisfy
 		// its OS/architecture target. Explain only routes dispatch can use.
-		if !executionJobTargetMatches(j, m) || len(extensionJobs(j, m, true)) == 0 {
+		if !executionTargetMatches(j.Spec, m) || len(extensionJobs(j, m, true)) == 0 {
 			continue
 		}
 		host := hostID(m)
@@ -276,7 +276,7 @@ func (q *Queue) startPlacementPolicyRejection(j *Job) string {
 	switch {
 	case j.StartedAt == nil && !sharedHostJobFits(j, m):
 		return "shared_host_profile"
-	case !executionJobTargetMatches(j, m):
+	case !executionTargetMatches(j.Spec, m):
 		return "execution_target"
 	case !cpuFits(j, m):
 		return "cpu_fit"

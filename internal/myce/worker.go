@@ -687,18 +687,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	defer gateWriter.Close()
 	cmd.Stdin = gateReader
 	cmd.Stdout = output
-	stderr, err := newArchitectureStderr(output)
-	if err != nil {
-		output.Close()
-		return nil, err
-	}
-	cmd.Stderr = stderr.writer
-	defer stderr.writer.Close()
-	defer func() {
-		if !started {
-			stderr.finish(false)
-		}
-	}()
+	cmd.Stderr = output
 	// Record intent before creating even the gated process. It cannot execute
 	// the command until its group identity has been durably recorded.
 	s.state.Job = &j
@@ -881,7 +870,6 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		if !result.ReleasePending {
 			s.releaseSharedInputs()
 		}
-		stderrMismatch := stderr.finish(groupErr == nil)
 		syncErr := syncCommandOutput(output)
 		closeErr := output.Close()
 		// Payload success is independent of physical release. Uncertain cleanup
@@ -929,7 +917,6 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 			OutOfMemory:   result.OutOfMemory || oomErr != nil && strings.HasPrefix(ceilingDiagnostic(oomErr.Error(), ""), "exceeded its "),
 		})
 		p.mu.Unlock()
-		classifyArchitectureFailure(&result, stderrMismatch)
 		if result.Success {
 			if e := w.publishExtensionFiles(j, executionWork); e != nil {
 				result.Success = false

@@ -23,6 +23,7 @@ func TestTargetPayloadOSOnlyPlacement(t *testing.T) {
 			s := cpuSpec(1, 1)
 			s.Targets = []ExecutionTarget{{OS: "linux"}}
 			s.RequireTarget = true
+			s.Portable = true
 			s.Run.Command = []string{"go", "test", "./..."}
 			if err := s.Validate(); err != nil {
 				t.Fatal(err)
@@ -107,7 +108,7 @@ func TestTargetPayloadPrebuiltRejection(t *testing.T) {
 			s.Files = FileManifest{name: ref}
 			_, err = q.Submit(s)
 			var api *HTTPError
-			if !errors.As(err, &api) || api.Code != "job_placement_invalid" || !strings.Contains(api.Message, "explicit arch or portable: true") || !strings.Contains(api.Message, "uploaded") || strings.Contains(api.Message, "private-name") {
+			if !errors.As(err, &api) || api.Code != "job_placement_invalid" || !strings.Contains(api.Message, "declare portable: true if this runs on any arch, or name the arch") || strings.Contains(api.Message, "private-name") {
 				t.Fatalf("not actionable/sanitized: %v", err)
 			}
 			s.Targets[0].Arch = "amd64"
@@ -118,51 +119,6 @@ func TestTargetPayloadPrebuiltRejection(t *testing.T) {
 			s.Portable = true
 			if _, err := q.Submit(s); err != nil {
 				t.Fatal("author portability declaration refused", err)
-			}
-		})
-	}
-}
-
-func TestTargetPayloadExtensionAndEnvironmentCoverage(t *testing.T) {
-	s := cpuSpec(1, 1)
-	if err := normalizeResources(&s); err != nil {
-		t.Fatal(err)
-	}
-	s.Targets = []ExecutionTarget{{OS: "linux"}}
-	for _, kind := range []string{"extension", "environment"} {
-		t.Run(kind, func(t *testing.T) {
-			validate := func(multi bool) error {
-				if kind == "extension" {
-					variants := []ExtensionVariant{{Target: ExecutionTarget{OS: "linux", Arch: "amd64", Platform: "cpu"}}}
-					if multi {
-						variants = append(variants, ExtensionVariant{Target: ExecutionTarget{OS: "linux", Arch: "arm64", Platform: "fake"}})
-					}
-					// Backend-specific variants can collectively cover multiple arches.
-					mixed := s
-					mixed.Needs.Platform = Platform{Required: []string{"cpu", "fake"}}
-					return validateTargetExtensions(mixed, []Extension{{Variants: variants}})
-				}
-				lock := "environments:\n  default:\n    packages:\n      linux-64: []\n"
-				if multi {
-					lock += "      linux-aarch64: []\n"
-				}
-				return validateTargetRecipes(s, map[string]EnvironmentRecipe{"cpu": {Backend: "pixi", Files: map[string][]byte{"pixi.lock": []byte(lock)}}})
-			}
-			if err := validate(false); err == nil || !strings.Contains(err.Error(), "portable: true") {
-				t.Fatalf("missing architecture/reason: %v", err)
-			}
-			if err := validate(true); kind == "extension" && err != nil {
-				t.Fatal("multi-arch variant coverage refused", err)
-			} else if kind == "environment" && err == nil {
-				t.Fatal("unproven locked environment accepted")
-			}
-			declared := s
-			declared.Portable = true
-			if err := validateTargetRecipes(declared, map[string]EnvironmentRecipe{"cpu": {Binary: "opaque", Build: []string{"true"}}}); err != nil {
-				t.Fatal(err)
-			}
-			if err := validateTargetRecipes(s, map[string]EnvironmentRecipe{"cpu": {Build: []string{"go", "build", "-o", "{cache}/program", "./cmd/program"}}}); err != nil {
-				t.Fatal("source-only worker build refused", err)
 			}
 		})
 	}
@@ -239,5 +195,69 @@ func TestTargetPayloadReviewBypasses(t *testing.T) {
 				t.Fatal("author's explicit portability assertion not honored", got)
 			}
 		})
+	}
+}
+
+func TestTargetPayloadDeclarationRequired(t *testing.T) {
+	q, _ := fixture(t)
+	s := cpuSpec(1, 1)
+	s.Targets = []ExecutionTarget{{OS: "linux"}}
+	s.Run.Command = []string{"go", "test", "./..."}
+	_, err := q.Submit(s)
+	var api *HTTPError
+	if !errors.As(err, &api) || api.Code != "job_placement_invalid" || !strings.Contains(api.Message, "declare portable: true if this runs on any arch, or name the arch") {
+		t.Fatalf("plain commands also need the author's declaration: %v", err)
+	}
+	s.Targets[0].Arch = "amd64"
+	if _, err := q.Submit(s); err != nil {
+		t.Fatal("explicit arch now requires a declaration", err)
+	}
+}
+
+func TestTargetPayloadNASDeclarationRequired(t *testing.T) {
+	q, _ := fixture(t)
+	e := compositionExtension(t, false)
+	v := e.Variants[0]
+	v.Target = ExecutionTarget{OS: "linux", Arch: "amd64", Platform: "fake"}
+	v.Execution.Main.Command = []string{"sh", "-c", "chmod +x program && ./program"}
+	other := v
+	other.Target.Arch = "arm64"
+	e.Variants = []ExtensionVariant{v, other}
+	e = freezeComposition(t, e)
+	if err := q.AddExtension(e); err != nil {
+		t.Fatal(err)
+	}
+	data := targetPayloadELF()
+	binary.LittleEndian.PutUint16(data[18:], 183)
+	if err := os.WriteFile(filepath.Join(q.root, "arm64-program"), data, 0700); err != nil {
+		t.Fatal(err)
+	}
+	m := placementMachine("amd64", "separate", 64, 8, e)
+	m.CapabilityProfile.OS, m.CapabilityProfile.Arch = "linux", "amd64"
+	for i := range m.ExtensionReports {
+		r := newExtensionReport(e, &m, m.ExtensionReports[i].Work)
+		r.Setup, r.Qualified, r.CheckID = true, true, "test-check"
+		m.ExtensionReports[i] = r
+	}
+	check(t, q, m, nil)
+	s := placementSpec(false)
+	s.Extension = extensionKey(e)
+	s.Targets = []ExecutionTarget{{OS: "linux"}}
+	s.Inputs = map[string]string{"program": "arm64-program"}
+	_, err := q.Submit(s)
+	var api *HTTPError
+	if !errors.As(err, &api) || api.Code != "job_placement_invalid" || !strings.Contains(api.Message, "declare portable: true") {
+		t.Fatalf("NAS payload admitted without declaration: %v", err)
+	}
+	if got := check(t, q, m, nil).Job; got != nil {
+		t.Fatal("undeclared NAS payload assigned", got)
+	}
+	s.Targets[0].Arch = "arm64"
+	j := submit(t, q, s)
+	if got := check(t, q, m, nil).Job; got != nil {
+		t.Fatal("explicit arm64 NAS payload assigned to amd64", got)
+	}
+	if job(t, q, j.ID).State != "queued" {
+		t.Fatal("explicit target lost its normal placement behavior")
 	}
 }

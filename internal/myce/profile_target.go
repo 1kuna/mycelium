@@ -83,9 +83,6 @@ func targetFitReason(dimension string, j *Job, m *Machine) string {
 	case "disk headroom":
 		return diskHeadroomReason(j, m)
 	case "target":
-		if j.Architecture != nil && len(j.Architecture.Excluded) > 0 && !executionJobTargetMatches(j, m) {
-			return "architecture mismatch: this target is excluded by a previous execution; correct targets.arch or the portable declaration"
-		}
 		if !sharedInputsFit(j.Spec, m) {
 			return "shared_inputs_v1 worker capability required"
 		}

@@ -58,7 +58,6 @@ type nativeGroup struct {
 	memberMemory           map[string]*memoryAttempt
 	custody                workerState
 	supervisor             *exec.Cmd
-	stderr                 []*architectureStderr
 }
 
 // Only this attempt's payload leaves are shared for metrics. The aggregate
@@ -363,10 +362,6 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 		if cleanup == nil {
 			s.releaseSharedInputs()
 		}
-		stderrMismatch := false
-		for _, capture := range g.stderr {
-			stderrMismatch = capture.finish(groupErr == nil) || stderrMismatch
-		}
 		persist := errors.Join(syncCommandOutput(output), output.Close())
 		// Cleanup uncertainty holds custody, not the successful payload result.
 		r := Result{MemoryPeak: peak, Machine: w.Machine.ID, Session: g.session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Success: runErr == nil && oom == nil && persist == nil, Forced: forced, PoliteStop: polite, ReleasePending: cleanup != nil}
@@ -401,7 +396,6 @@ func (w Worker) startNativeGroup(s *workerStore, j Job, identity string, memory 
 			}
 		}
 		r = classifyAttemptOutcome(r, attemptCause{PriorityStop: priorityStop, memberOutcome: facts, OutOfMemory: r.OutOfMemory || oom != nil && strings.Contains(oom.Error(), "exceeded its ")})
-		classifyArchitectureFailure(&r, stderrMismatch)
 		if r.Success {
 			if e := w.publishExtensionFiles(j, filepath.Join(g.dir, "job-files", j.ID, strconv.Itoa(j.Attempt))); e != nil {
 				r.Success = false
@@ -704,18 +698,7 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 		return err
 	}
 	cmd.Stdout = output
-	stderr, err := newArchitectureStderr(output)
-	if err != nil {
-		return err
-	}
-	cmd.Stderr = stderr.writer
-	defer stderr.writer.Close()
-	handedOff := false
-	defer func() {
-		if !handedOff {
-			stderr.finish(false)
-		}
-	}()
+	cmd.Stderr = output
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: g.supervisor.Process.Pid}
 	reader, writer, err := os.Pipe()
 	if err != nil {
@@ -730,8 +713,6 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 	if err = cmd.Start(); err != nil {
 		return g.recordInfrastructureLocked(launchFailed, m.Name, "", err)
 	}
-	g.stderr = append(g.stderr, stderr)
-	handedOff = true
 	m.cmd = cmd
 	m.PID = cmd.Process.Pid
 	m.Phase = "gated"

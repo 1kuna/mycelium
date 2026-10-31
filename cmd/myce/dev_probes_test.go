@@ -142,7 +142,7 @@ func devStandaloneSmoke(t *testing.T, backend string) {
 	}
 	// Regression #480: the real dev API/runner must accept an OS-only target
 	// for both CPU commands and fake accelerator inventory.
-	spec := myce.Spec{Name: "smoke-os-only", Project: "probe", Priority: "experiment", RequireTarget: true,
+	spec := myce.Spec{Name: "smoke-os-only", Project: "probe", Priority: "experiment", RequireTarget: true, Portable: true,
 		Targets: []myce.ExecutionTarget{{OS: runtime.GOOS}}}
 	spec.Needs.MemoryGB = 1
 	if backend == "cpu" {

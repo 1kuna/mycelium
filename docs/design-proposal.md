@@ -2607,7 +2607,7 @@ Reuse current field types and validation:
 | Field | Meaning and lowering |
 | --- | --- |
 | `run` or `execution` | Exactly one. Existing `run.command` argv or composed `execution.main` plus optional `sidecars`, lowering to the same `RunSpec` and runner. No implicit shell. |
-| `needs`, `targets` | Existing cores, RAM, auto memory, accelerator/device constraints and OS/arch/backend alternatives. Job targets require OS; portable payloads may omit arch and backend (needs still constrains the backend). Automatic expansion requires positive portability evidence: plain commands without opaque inputs or a worker source build without a shipped binary. Uploaded payloads/archives, prebuilt artifacts and single-arch variants require an explicit arch or the author's `portable: true` assertion, with an actionable refusal. Extension variants remain exact. Select one target, not a test matrix. Owner policy, allowances, maintenance and qualification intersect. |
+| `needs`, `targets` | Existing cores, RAM, auto memory, accelerator/device constraints and OS/arch/backend alternatives. Job targets require OS; omitting arch requires the author's `portable: true` declaration covering the complete payload, including NAS inputs, archives, environments and runtime downloads. Without it, name the arch or declare portability. No payload inspection or build inference establishes portability. Backend may be omitted when needs already constrains it. Extension variants remain exact. Select one target, not a test matrix. Owner policy, allowances, maintenance, qualification and MY-19 parity intersect. |
 | `environment` | Catalog name, installed tools, or pending locked recipe. Composed execution can instead use existing named `environments` and member references; single environment and environment map cannot coexist in a recipe. |
 | `source`, `inputs`, `outputs` | Existing Git/directory/snapshot selection, client-local input mappings and required relative output-name/prefix mappings, with verified file transport. Paths resolve from the project root (invocation root for an explicitly located adapter). |
 | `fan_out`, `workload`, `after` | Existing declared pieces, measurements and accepted-output dependency fields, with their current admission restrictions, keyed gather and cancellation scope. No workflow language. |
@@ -3025,16 +3025,3 @@ samples withhold admission. Status names the pressure reason and enforcement mod
 macOS CPU time and RAM remain unenforced; QoS/concurrency hints are cooperative,
 and native Linux/representative owner-pressure qualification remains separate.
 See the shared-host guide for thresholds, evidence and costs.
-
-
-### Architecture mismatch recovery (#480)
-
-A clear exec-format or wrong-architecture diagnostic classifies the attempt as
-`arch_mismatch`. The queue records the assigned OS/arch (not later inventory),
-excludes it, and allows one requeue through normal placement after exact release.
-A second mismatch ends this recovery. Cancellation, OOM and qualification fences
-remain authoritative; infrastructure retry budgets are unchanged. Learned
-OS/arch exclusions persist with the queue and are inherited by later submissions
-of the same frozen executable contract; changing payload bytes, commands,
-environment recipes or extension digest establishes a new identity. Neither
-exit codes alone nor missing diagnostics prove an architecture mismatch.

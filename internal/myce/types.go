@@ -364,8 +364,7 @@ type SpecProjection struct {
 }
 
 type Job struct {
-	Architecture   *JobArchitecture `json:"architecture,omitempty"`
-	SpecProjection *SpecProjection  `json:"spec_projection,omitempty"`
+	SpecProjection *SpecProjection `json:"spec_projection,omitempty"`
 
 	RecoveredResults    []RecoveredResult    `json:"recovered_results,omitempty"`
 	PlacementIntent     *PlacementIntent     `json:"placement_intent,omitempty"`

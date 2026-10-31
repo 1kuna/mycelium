@@ -243,9 +243,6 @@ func (q *Queue) capReasonFor(j *Job, target *Machine) string {
 }
 
 func (q *Queue) batchCandidateWithResources(j *Job, m *Machine, resources map[batchResourceKey]batchResourceRoom) *Job {
-	if j.Architecture != nil && j.Architecture.Moved && q.jobReleasePending(j) {
-		return nil
-	}
 	if j.Spec.FanOut != nil {
 		return q.fanOutCandidateWithResources(j, m, resources)
 	}

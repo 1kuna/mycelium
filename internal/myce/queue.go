@@ -40,11 +40,10 @@ type batchRelease struct {
 }
 
 type state struct {
-	ArchitectureConstraints map[string][]ExecutionTarget   `json:"architecture_constraints,omitempty"`
-	ExternalMemory          map[string]*externalMemoryRing `json:"external_memory,omitempty"`
-	AttemptOutputUploads    map[string]time.Time           `json:"attempt_output_uploads,omitempty"`
-	Health                  healthAlerts                   `json:"health_alerts,omitempty"`
-	FleetUpgrade            *fleetUpgrade                  `json:"fleet_upgrade,omitempty"`
+	ExternalMemory       map[string]*externalMemoryRing `json:"external_memory,omitempty"`
+	AttemptOutputUploads map[string]time.Time           `json:"attempt_output_uploads,omitempty"`
+	Health               healthAlerts                   `json:"health_alerts,omitempty"`
+	FleetUpgrade         *fleetUpgrade                  `json:"fleet_upgrade,omitempty"`
 	// Positive orphan eligibility, persisted with the existing queue state.
 	// Zero time means an input upload has not finished publication yet.
 	JobInputUploads map[string]time.Time `json:"job_input_uploads,omitempty"`
@@ -615,14 +614,6 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		if recipeErr == nil {
 			sidecarRecipes, recipeErr = catalog.resolveSidecarEnvironments(prepared)
 		}
-		if recipeErr == nil && needsPortabilityProof(s) {
-			recipeErr = validateTargetRecipes(prepared, recipes)
-			for _, side := range sidecarRecipes {
-				if recipeErr == nil {
-					recipeErr = validateTargetRecipes(prepared, side)
-				}
-			}
-		}
 		if recipeErr == nil && !q.simulation {
 			verified := map[FileRef]bool{}
 			recipeErr = store.freezeRecipes(recipes, verified, ctx)
@@ -694,9 +685,6 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		if err := submitted.Validate(); err != nil {
 			return specRejection(err)
 		}
-		if err := validateTargetExtensions(s, extensions); err != nil {
-			return err
-		}
 		if s.OutputDelivery == asyncNAS {
 			if q.deliveryRoot == "" {
 				return &HTTPError{Status: 409, Code: "output_delivery_unavailable", Message: "async_nas requires queue --output-delivery-root"}
@@ -762,7 +750,6 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 			_ = normalizeResources(&hintSpec) // submitted.Validate already checked it.
 			j.MemoryFallback = &SizeHint{MemoryGB: max(hintSpec.Needs.MemoryGB, submitted.SizeHint.MemoryGB), HostMemoryGB: max(hintSpec.Needs.HostMemoryGB, submitted.SizeHint.HostMemoryGB)}
 		}
-		q.applyLearnedArchitecture(j)
 		q.applyLearnedNeeds(j)
 		if reason := q.diskCapacityRefusal(j); reason != "" {
 			return &HTTPError{Status: 409, Code: "disk_headroom", Message: reason}
@@ -1682,8 +1669,6 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		} else {
 			q.retry(j, j.Reason)
 		}
-	} else if !r.Success && !oomFailure && j.ExecutionCause != nil && j.ExecutionCause.Class == architectureMismatch {
-		q.recordArchitectureMismatch(j)
 	} else if !r.Success && automaticExtensionCheck(j) != nil {
 		j.State, j.Reason = "failed", "native check failed: "+r.Error
 	} else if !r.Success && !oomFailure && j.StartedAt == nil && j.ExecutionCause != nil && j.ExecutionCause.Operation == "launch" && j.ExecutionCause.Class == "launch_refused" && q.diskHeadroomReason(j, q.s.Machines[j.Machine]) != "" {
@@ -2394,10 +2379,6 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	if e := qualifiedExtension(selected, m); e != nil {
 		j.Extension = &ExtensionSelection{Name: e.Name, Version: e.Version, Digest: e.Digest}
 	}
-	if j.Architecture == nil {
-		j.Architecture = &JobArchitecture{}
-	}
-	j.Architecture.Target = machineTarget(m)
 	j.State = "running"
 	j.ExecutionCause, j.CleanupCause = nil, nil
 	j.ReleaseConfirmed = false

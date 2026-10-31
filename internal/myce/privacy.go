@@ -209,8 +209,8 @@ func statusJobValue(job *Job) Job {
 			// Fixed queue-owned execution timeout, with no worker error suffix.
 		case j.ExecutionCause != nil && (j.ExecutionCause.Operation == "input_staging" || j.ExecutionCause.Predicate != ""):
 			j.Reason = "execution failed: " + j.ExecutionCause.String()
-		case j.ExecutionCause != nil && j.ExecutionCause.Class == architectureMismatch:
-			j.Reason = "architecture mismatch; correct targets.arch or the portable declaration (no further architecture moves)"
+		case j.Reason == "command failed: "+execFormatMessage || j.Reason == "native check failed: "+execFormatMessage:
+			// Fixed exec failure guidance contains no payload or machine paths.
 		case j.ExecutionCause != nil && j.ExecutionCause.Class == cpuIsolationUnavailable:
 			j.Reason = cpuIsolationUnavailable + ": " + rejectionMessages[cpuIsolationUnavailable]
 		case j.Reason == "infrastructure_retries_exhausted", j.Reason == "out of memory after one retry on a larger hypha", j.Reason == "out of memory; previous capability unavailable":
