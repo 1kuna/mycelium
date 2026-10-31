@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -24,9 +25,25 @@ func (c Client) inspectionSnapshot(ctx context.Context) (Snapshot, error) {
 // the queue itself. Encoded JSON is immutable; callers that need a struct decode
 // a private copy, so even an HTML renderer cannot mutate the cached generation.
 type statusCache struct {
-	mu      sync.Mutex
-	data    string
-	expires time.Time
+	mu               sync.Mutex
+	data             string
+	expires          time.Time
+	generation       uint64
+	terminalRevision atomic.Uint64
+}
+
+// Called only after a successful durable transaction, before discarding its
+// undo records. Do not take the cache mutex here: refreshes acquire q.mu.
+// Ordinary check-ins keep the one-second cache useful; terminal commits and
+// their release acknowledgements must invalidate even an in-flight refresh.
+func (q *Queue) invalidateTerminalStatus() {
+	for id, old := range q.records.jobs {
+		j := q.s.Jobs[id]
+		if j != nil && terminal(j.State) && (old == nil || old.State != j.State || old.ReleaseConfirmed != j.ReleaseConfirmed) {
+			q.statusCache.terminalRevision.Add(1)
+			return
+		}
+	}
 }
 
 func (q *Queue) cachedPublicSnapshot(contexts ...context.Context) (Snapshot, error) {
@@ -42,22 +59,29 @@ func (q *Queue) cachedPublicSnapshot(contexts ...context.Context) (Snapshot, err
 func (q *Queue) cachedStatusJSON(contexts ...context.Context) (string, error) {
 	c := &q.statusCache
 	c.mu.Lock()
-	if c.data == "" || !q.clock.Now().Before(c.expires) {
+	defer c.mu.Unlock()
+	for {
+		revision := c.terminalRevision.Load()
+		if c.data != "" && c.generation == revision && q.clock.Now().Before(c.expires) {
+			return c.data, nil
+		}
 		s, err := q.publicStatusSnapshot(&statusOptions{jobs: "recent", limit: defaultStatusJobs}, contexts...)
 		if err != nil {
-			c.mu.Unlock()
 			return "", err
 		}
 		data, err := json.Marshal(s)
 		if err != nil {
-			c.mu.Unlock()
 			return "", err
 		}
-		c.data, c.expires = string(data), s.Now.Add(statusCacheLifetime)
+		if c.terminalRevision.Load() != revision {
+			if err := requestContext(contexts).Err(); err != nil {
+				return "", err
+			}
+			continue
+		}
+		c.data, c.expires, c.generation = string(data), s.Now.Add(statusCacheLifetime), revision
+		return c.data, nil
 	}
-	data := c.data
-	c.mu.Unlock()
-	return data, nil
 }
 
 type observationClock struct{ at time.Time }
@@ -287,6 +311,19 @@ func (q *Queue) findObservationJob(id string) (*Job, error) {
 }
 
 func (q *Queue) jobSnapshot(id string, contexts ...context.Context) (*Job, error) {
+	for {
+		revision := q.statusCache.terminalRevision.Load()
+		out, err := q.jobSnapshotGeneration(id, contexts...)
+		if err != nil || q.statusCache.terminalRevision.Load() == revision {
+			return out, err
+		}
+		if err := requestContext(contexts).Err(); err != nil {
+			return nil, err
+		}
+	}
+}
+
+func (q *Queue) jobSnapshotGeneration(id string, contexts ...context.Context) (*Job, error) {
 	v, _, err := q.captureObservation(id, contexts...)
 	if err != nil {
 		return nil, err
@@ -314,6 +351,19 @@ func (q *Queue) statusSnapshot(contexts ...context.Context) (Snapshot, error) {
 }
 
 func (q *Queue) statusSnapshotOptions(options *statusOptions, contexts ...context.Context) (Snapshot, error) {
+	for {
+		revision := q.statusCache.terminalRevision.Load()
+		out, err := q.statusSnapshotGeneration(options, contexts...)
+		if err != nil || q.statusCache.terminalRevision.Load() == revision {
+			return out, err
+		}
+		if err := requestContext(contexts).Err(); err != nil {
+			return Snapshot{}, err
+		}
+	}
+}
+
+func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...context.Context) (Snapshot, error) {
 	v, files, err := q.captureStatusObservation("", options, contexts...)
 	if err != nil {
 		return Snapshot{}, err

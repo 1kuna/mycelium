@@ -1,0 +1,19 @@
+name: main-full
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  full:
+    if: github.repository == '1kuna/mycelium' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, mycelium-ci]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Submit and wait for Darwin and Linux full gates
+        run: python3 scripts/actions-full.py
