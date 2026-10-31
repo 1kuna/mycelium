@@ -98,6 +98,93 @@ publication is acknowledged. The queue accepts output references only from the
 current successful attempt, after every referenced file is durable. A missing
 required output fails visibly. Late attempts cannot replace accepted output.
 
+## Recover outputs from a failed terminal attempt
+
+`myce result recover` attaches retained bytes as a **separate recovered result**,
+without rerunning the payload. The failed status, native outcome, cleanup and
+execution causes, release evidence and ordinary `output_refs` stay unchanged.
+Recovery verifies bytes **now**; it is not evidence of acceptance at execution
+completion or of application quality. Recovered results never satisfy
+dependencies or make `wait` succeed.
+
+Run from a machine with the retained regular files, including a mounted NAS.
+This uses installed queue authority; keep credentials out of argv. The directory
+contains declared output names, including relative subfolders:
+
+```sh
+myce result recover JOB_ID --files-from ./retained-outputs \
+  --key cleanup-recovery --by project-owner \
+  --source nas:project/results/attempt \
+  --reason 'Payload exited zero; cleanup inspection prevented output publication'
+```
+
+For different filenames or a subset of outputs, use repeated
+`--file 'answer.json=/mounted/source/answer.json'` instead of `--files-from`.
+Sources are read and uploaded, never changed. Symlinks and special files are
+refused. Automatic selection stays beneath `--files-from`, including parent
+directory resolution, and uploads retain the opened source file even if its
+pathname changes. `--source upload:LABEL` is the default source kind; `nas:RELATIVE_PATH`
+records an operator-asserted NAS origin. Source labels must be relative and omit
+private host paths and credentials. The queue does not open caller-selected NAS
+paths. Requester labels and reasons must be nonempty, without control characters.
+
+The CLI captures the exact job/attempt/machine/session before uploading; optional
+`--attempt N` checks an additional caller expectation. The queue checks that this
+is still the current failed terminal attempt and every name is a declared output,
+independently verifies SHA-256 and size in its store, then rechecks identity in
+the SQLite transaction. Hashing and filesystem sync happen outside the queue
+mutex. Ordinary upload capacity admission applies. Uploads abandoned before
+attachment use normal job-input orphan retention.
+
+The current API authenticates one fleet **operator** credential, without separate
+owner/project credentials. Recovery requires that authority, like existing queue
+mutations. `recovered_by: operator` is server assigned; `requested_by` (`--by`)
+identifies the requester asserted by that operator, not a separately authenticated
+account. Naming a project or requester grants no authority.
+
+The command prints immutable JSON with `kind: recovered`, `result_id`, exact
+execution identity, requester/source/reason, `recovered_at`, `expires_at`, file
+identities and `manifest_sha256` (SHA-256 of compact Go JSON for `files`, with
+sorted keys). Status and job GET expose `recovered_results` separately from
+ordinary accepted outputs. Repeat the same key and identical evidence to recover
+the same record, including after a lost response or byte expiry. Different
+evidence under the same key returns `409 recovery_conflict`. A new key appends
+evidence; it cannot replace or delete an earlier record.
+
+Download by explicitly selecting its ID through the usual verified transport:
+
+```sh
+myce result JOB_ID --recovered RESULT_ID --out ./recovered
+```
+
+This labels the download as recovered. Unqualified `myce result JOB_ID` continues
+to refuse the failed job. Bytes have a fresh `--file-retention` window (default
+seven days) beginning at recovery, even if original job files expired. Each
+`expires_at` is fixed at acceptance; changing retention does not revive expired
+bytes. Expired downloads return `410 result_expired`. Metadata and original job
+provenance remain indefinitely, exempt from history pruning. Keep unique source
+bytes separately: the queue store is one copy, not a backup.
+
+API:
+
+- `GET /api/jobs/JOB_ID/recovery-plan` returns exact failed execution identity and
+  declared output names, without worker paths or commands.
+- Upload bytes with the existing file API, then
+  `POST /api/jobs/JOB_ID/recovered-results` with `id`, `attempt`, `machine`,
+  `session`, `key`, `requested_by`, `source: {kind, location}`, `reason`, and
+  `files: {name: {sha256, size_bytes}}`. Caller hashes are expectations: the queue
+  hashes every referenced blob before acceptance.
+- `GET /api/jobs/JOB_ID/recovered-results/RESULT_ID` returns immutable metadata.
+  `?require_files=true` additionally enforces the recovery retention deadline.
+  Metadata lookup still works after expiry.
+
+Go provides `Client.RecoverResult`, `GetRecoveredResult`, and
+`DownloadRecoveredResult`. Python provides `Client.recover_result(job_id,
+files={name: local_path}, key=..., requested_by=..., reason=...,
+source={"kind": "nas", "location": "project/results/attempt"})`; download with
+`download_result(job_id, name, destination, recovered_result_id=result_id)`.
+Both helpers fence identity before uploads and allow size-based hashing time.
+
 ## Checkpoints and interrupted connections
 
 Jobs still use `MYCE_CHECKPOINT_DIR` and the existing atomic generation contract

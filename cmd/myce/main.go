@@ -1051,6 +1051,9 @@ func printStatus(s myce.Snapshot, full bool) {
 		if full {
 			id = j.ID
 		}
+		for _, r := range j.RecoveredResults {
+			fmt.Printf("recovered result %s job=%s attempt=%d by=%s requester=%q at=%s expires=%s files=%d; original state=%s\n", r.ResultID, id, r.Attempt, r.RecoveredBy, r.RequestedBy, r.RecoveredAt.UTC().Format(time.RFC3339), r.ExpiresAt.UTC().Format(time.RFC3339), len(r.Files), j.State)
+		}
 		if d := j.Delivery; d != nil {
 			fmt.Printf("delivery %s attempt=%d: %s bytes=%d age=%.1fs attempts=%d %s\n", id, d.Attempt, d.State, d.Bytes, max(0, s.Now.Sub(d.PendingAt).Seconds()), d.Attempts, d.Cause)
 		}

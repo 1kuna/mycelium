@@ -66,7 +66,7 @@ func generatedJobSchema(t *testing.T) []byte {
 		for _, property := range properties {
 			property.(map[string]any)["x-contract"] = "diagnostic"
 		}
-		stable := []string{"id", "spec", "state", "attempt", "machine", "session", "release_confirmed", "finished_at", "queued", "cancelled_at", "infrastructure_retries", "dependency", "cancellation", "cancellation_scope", "ledger", "delivery"}
+		stable := []string{"id", "spec", "state", "attempt", "machine", "session", "release_confirmed", "finished_at", "queued", "cancelled_at", "infrastructure_retries", "dependency", "cancellation", "cancellation_scope", "ledger", "delivery", "recovered_results"}
 		if definition == "Spec" {
 			stable = []string{"project", "submission_key", "after", "output_delivery"}
 		}
@@ -79,6 +79,12 @@ func generatedJobSchema(t *testing.T) []byte {
 	binding["execution"].(map[string]any)["description"] = "Immutable producing child job ID and accepted attempt for a selected-piece edge; zero value for a whole-parent edge."
 	binding["executions"].(map[string]any)["description"] = "Whole-parent edge: accepted producing executions keyed by mapped producer piece. Immutable across retry and restart."
 	job := defs["Job"].(map[string]any)["properties"].(map[string]any)
+	job["recovered_results"].(map[string]any)["description"] = "Append-only recovery-time evidence linked to exact failed executions. Never changes state, native outcome, ordinary output_refs or dependency eligibility. Metadata and original provenance survive history pruning; bytes expire at each record's expires_at."
+	recovered := defs["RecoveredResult"].(map[string]any)["properties"].(map[string]any)
+	recovered["kind"].(map[string]any)["const"] = "recovered"
+	recovered["recovered_by"].(map[string]any)["const"] = "operator"
+	recovered["requested_by"].(map[string]any)["description"] = "Operator-asserted requester label, not a separately authenticated user identity."
+	recovered["manifest_sha256"].(map[string]any)["description"] = "SHA-256 of canonical Go JSON for files (sorted keys, compact encoding), verified at recovery time."
 	job["start_window"].(map[string]any)["description"] = "Effective original production start-window length in nanoseconds, retained across recovery. Available before startup; absent for experiments."
 	job["start_by_explicit"].(map[string]any)["description"] = "Whether submitted start_by was caller-owned and absolute. New jobs persist true or false; absent on older records means preserve their existing cutoff as absolute."
 	specProperties := defs["Spec"].(map[string]any)["properties"].(map[string]any)

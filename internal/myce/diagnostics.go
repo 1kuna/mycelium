@@ -14,6 +14,11 @@ import (
 // the specific field rule; other wrapped causes stay local.
 var rejectionMessages = map[string]string{
 	"status_query_invalid":                  "status requires jobs=recent|active|all, limit=1..1000, an RFC3339 since, an existing before cursor and detail=full when requested",
+	"recovery_invalid":                      "recovery requires valid metadata, declared outputs and matching execution identity",
+	"recovery_stale":                        "recovery requires the exact retained failed execution",
+	"recovery_conflict":                     "recovery key already identifies different evidence; use a new key to append another record",
+	"recovery_verification_failed":          "recovery bytes are missing or do not match SHA-256 and size",
+	"recovery_unknown":                      "recovered result not found",
 	"native_workdir_containment":            "native isolation requires workdir beneath {work}; stage source with inputs or a profile",
 	"queue_stopping":                        "queue is shutting down; retry the request",
 	"disk_headroom":                         "projected disk need plus free floor exceeds known disk capacity",

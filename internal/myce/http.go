@@ -51,6 +51,7 @@ func (a API) handler(joiningPin string) http.Handler {
 	a.registerFleetUpgrade(mux)
 	a.registerDevClock(mux)
 	mux.HandleFunc("POST /api/files/result", a.deliveryResultHandler)
+	a.registerRecoveredResults(mux)
 	a.registerHostMaintenance(mux)
 	a.registerDeviceMaintenance(mux)
 	a.registerComponentExclusions(mux)

@@ -50,6 +50,14 @@ fresh. Snapshot capture keeps scheduling inputs and dependency state under the
 queue lock; projection, usage queries, file inventory, encoding the reply and
 compression run after release. No bulk file or network I/O runs under `q.mu`.
 
+Jobs with explicitly recovered outputs expose an append-only `recovered_results`
+list in status and job GET. Each record has `kind: recovered`, its own result ID,
+exact failed execution, recovery-time verification identities and operator
+provenance. CLI status lists these separately and keeps the original failed
+state. Ordinary `output_refs`, attempt outcomes, cleanup causes and dependency
+eligibility remain unchanged. See [recover failed-attempt outputs](guide-files-v3.md#recover-outputs-from-a-failed-terminal-attempt)
+for the explicit recovery/download commands and independent byte retention.
+
 Native stage exceptions appear in job `isolation` as
 `unsandboxed: <reason>` in status JSON and job GET; CLI/page reasons include the
 same text through queued, running and terminal outcomes. Legacy registrations
