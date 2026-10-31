@@ -52,7 +52,7 @@ type CurvePreservationReceipt struct {
 	Changes    []CurvePreservationDiff `json:"changes"`
 }
 
-// VerifyCurvePreservation requires authenticated inspection snapshots plus exact
+// VerifyCurvePreservation requires authenticated full-status snapshots plus exact
 // job-ledger pages captured by the release caller. It never contacts a worker,
 // changes placement or accepts a guessed explanation from final job status.
 func VerifyCurvePreservation(before, after Snapshot, pages []JobLedgerPage) (CurvePreservationReceipt, error) {

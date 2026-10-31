@@ -1516,12 +1516,30 @@ Use the versioned `scripts/verify-curve-preservation.sh` guard (or
 
 ```sh
 MYCE_BIN=/path/to/myce scripts/verify-curve-preservation.sh \
-  --before before-inspection.json --after after-inspection.json \
+  --before before-status.json --after after-status.json \
   --ledgers learning-ledger-pages.json > curve-diff.json 2> curve-guard.stderr
 rc=$? # retain this status, stderr and the diff receipt, including on failure
 ```
 
-Capture authenticated `/api/inspection` snapshots before and after cutover.
+Capture authenticated **`/api/status?detail=full`** snapshots before and after
+cutover, using the canonical helper's read-only capture mode:
+
+```sh
+MYCE_BIN=/path/to/myce scripts/verify-curve-preservation.sh capture \
+  --config CONFIG > before-status.json 2> before-capture.stderr
+# Perform the separately authorized cutover, then capture the after snapshot:
+MYCE_BIN=/path/to/myce scripts/verify-curve-preservation.sh capture \
+  --config CONFIG > after-status.json 2> after-capture.stderr
+# Require exit 0 for each capture before verifying.
+```
+
+The default `/api/status` view is bounded: it can omit older terminal jobs and
+work curves. Never use that view to collect either side of preservation proof.
+Capture requests full detail for **both jobs and curves**, and preserves the
+server completeness metadata. Capture and verification reject bounded or
+incomplete job pages and missing jobs/curves fields; a queue predating page
+metadata can still return its original full snapshot. Collect accepted-learning
+ledger pages from the complete job inventory, not the default recent-job list.
 The **before response's server `now`** is the learning boundary, never the local
 save time or installer launch. The ledger file is a JSON array of pages from
 `GET /api/jobs/{id}/ledger`; collect pages covering the interval for jobs that
