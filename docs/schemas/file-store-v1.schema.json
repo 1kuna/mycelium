@@ -27,6 +27,9 @@
     },
     "FileStoreStatus": {
       "properties": {
+        "admission": {
+          "$ref": "#/$defs/StorageAdmissionStatus"
+        },
         "physical": {
           "$ref": "#/$defs/PhysicalStorageStatus"
         },
@@ -131,6 +134,56 @@
         "control",
         "upload_metadata_bytes",
         "qualification"
+      ]
+    },
+    "StorageAdmissionProposal": {
+      "properties": {
+        "job_id": {
+          "type": "string"
+        },
+        "tier": {
+          "type": "string"
+        },
+        "output_bytes": {
+          "type": "integer"
+        },
+        "admitted": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "job_id",
+        "tier",
+        "output_bytes",
+        "admitted"
+      ]
+    },
+    "StorageAdmissionStatus": {
+      "properties": {
+        "mode": {
+          "type": "string"
+        },
+        "yielded_commitments": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "proposals": {
+          "items": {
+            "$ref": "#/$defs/StorageAdmissionProposal"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object",
+      "required": [
+        "mode",
+        "proposals"
       ]
     }
   }

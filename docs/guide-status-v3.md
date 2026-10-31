@@ -147,6 +147,25 @@ independent worker-custody backing remain unimplemented/unqualified. No setting
 activates automatic admission here; the configured cap/reserve and legacy disk
 floor still govern writes until #509's explicit migration.
 
+`file_store.admission` separately reports the tier-admission proposal. Its mode
+is `shadow` by default: each queued shared-output job reports its owner tier,
+learned output demand and proposed admission/hold against the observed cap and
+reserve. `yielded_commitments` names currently accepted queued estimates that
+would lose admission in that replay. Assigned writers, actual pending manifests
+and installed allocations remain commitments. Status never collects files or
+changes live reservations; its collector-order hook also preserves the caller's
+order until activation. Live submissions still use declared output estimates,
+legacy refusal and FIFO retry admission until #509 explicitly activates the
+persisted `storage_admission_active` migration latch. There is no activation
+command in this slice; storage-protection qualification alone does not set it.
+The migration must use this same latch when retiring cap/reserve together.
+
+Storage-pressure diagnostics report output-delivery ledger observations, including
+failed/publishing/pending/verified state, holder job and stable destination ID,
+with sanitized cause codes. Without an output observation they report `unknown`;
+checkpoint-root health is independent. Offline, stale, leaving or otherwise
+ineligible workers cannot hide a protected-capacity shortage on online workers.
+
 A typed quota denial is `disk_limit_exceeded`. It fails that exact attempt even
 if a stop races it, without spending an infrastructure retry or classifying the
 denial as memory OOM. Larger execution needs fresh storage admission. An ordinary
@@ -983,3 +1002,34 @@ The opt-in [backed storage integration](guide-storage-boundaries.md) adds
 `storage_allocation` to protected assignments. It is an exact worker budget,
 not a native qualification claim or a local-spool retrieval promise. Physical
 accounting remains shadow status; existing cap/reserve settings remain active.
+
+Shared async output admission freezes `output_reservation_bytes` from comparable
+learned logical output demand (the cold prior is used for unknown variants).
+The commitment funds every compatible qualified variant without pinning a host;
+actual manifest identities replace it at result reservation. Later observations
+cannot silently resize an accepted commitment. Retry and yielded commitments
+reacquire in configured owner-tier order. Only queued, unassigned estimates with
+no pending manifest or installed boundary yield synchronously. Assigned work may
+already have writers before `Started`, so its storage remains charged.
+
+Production that cannot fit remains queued with `output_admission_pending` and a
+`file_store_capacity` reason naming bytes needed, available space, the exact
+deficit, protected holders, destination observation and next action. A
+`publication_fence_wait` means collection must retry after a publisher releases
+its fence. Admission repeats bounded authorized collector batches only while
+observed committed payload bytes decrease. It grants no new expiry permission.
+The `orderStorageReclaim` seam orders eligible candidates by owner tier and
+replacement cost; collection-side integration belongs to #508.
+
+`production_storage_capacity` health events include `project`, `job_id`, a
+sanitized `reason` and `recipients: ["operator", "project"]`. The configured
+queue health notifier routes that event to the queue operator and the affected
+project's agent/owner, deduplicating its delivery ID. Without a configured route,
+the event remains visible in status; no external notification is claimed. A full
+protected backing similarly reports byte/inode deficits and retained allocation
+holders, after considering other qualified compatible hosts. Compute completion,
+stop or cancellation never releases an installed storage boundary.
+
+These admission changes keep configured file-store caps, the production reserve,
+legacy disk floor and shared-credential attribution rules. They do not activate
+native enforcement, complete worker-local delivery or retire migration guards.

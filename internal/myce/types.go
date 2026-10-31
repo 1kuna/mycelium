@@ -381,6 +381,7 @@ type Job struct {
 	Runtime             *JobRuntime          `json:"runtime,omitempty"`
 	ApplicationProgress *ApplicationProgress `json:"application_progress,omitempty"`
 
+	OutputReservationBytes *uint64          `json:"output_reservation_bytes,omitempty"`
 	OutputAdmissionPending bool             `json:"output_admission_pending,omitempty"`
 	PendingOutputRefs      FileManifest     `json:"pending_output_refs,omitempty"`
 	Delivery               *OutputDelivery  `json:"delivery,omitempty"`
