@@ -91,8 +91,10 @@ Monitor growing scratch between admission and completion; request more room or
 stop through the existing contract before the floor, without claiming a hard
 filesystem quota against arbitrary external writers.
 
-Tasks still select a destination and preservation semantics: retained recovery
-or proposed `until_delivered`. These express ownership, not guessed sizes. NAS
+Tasks select a destination; newly authored tasks with a destination default to
+`until_delivered`, with explicit retained recovery available. This is the
+orchestrator's decided default under #201 and MY-27, not an open question.
+Preservation semantics express ownership, not guessed sizes. NAS
 uses the existing single publisher; submitter delivery uses a resumable client
 pull, checksum verification, sync and exact execution/manifest acknowledgement
 recorded in the job ledger. Never connect a queue publisher to arbitrary client
@@ -142,15 +144,19 @@ values as inactive. Preserve 168-hour legacy data and never rewrite keyed specs.
 Retire manual budgets after verified delivery/reclaim progress. Any rollout is
 separately authorized; this design performs none.
 
-Open question: For newly authored tasks with a destination, should
-`until_delivered` become the default? Recommend yes, with explicit retained
-recovery available; until decided, require opt-in and preserve all old policies.
+The `until_delivered` default applies only to newly authored destination tasks.
+Preserve existing frozen/keyed specs and their retention policies; replay or
+upgrade never silently opts legacy data into early expiry.
 
 ## Implementation sub-issues
 
 Each phase uses byte-sized temp volumes, real HTTP/SQLite/CPU commands and fake
 Clock/probes; quick per change and full once before a separately authorized
 deployment. Hardware qualification is separate.
+
+Land #505 and #506 before integrating their estimates/accounting into #507.
+The #508 delivery lifecycle can proceed independently against the existing
+publisher/collector. #509 integrates all four slices before automatic cutover.
 
 - **[Learning #505](https://github.com/1kuna/mycelium/issues/505).** Outcome: per-program output envelopes/status.
   Current state: manifests and memory observations exist. Next: extend them.
@@ -167,7 +173,9 @@ deployment. Hardware qualification is separate.
 - **[Delivery/discard #508](https://github.com/1kuna/mycelium/issues/508).** Outcome: #201 completion lifecycle.
   Current state: NAS publisher and #479 explicit release exist. Next: add task
   policy and submitter receipts. Acceptance: no deletion before verified delivery,
-  custody release and reference checks; NAS/client outage/replay remain safe.
+  custody release and reference checks; NAS/client outage/replay remain safe;
+  new destination tasks default to `until_delivered` while explicit retained
+  recovery and legacy policies remain available.
 - **[Migration/proof #509](https://github.com/1kuna/mycelium/issues/509).** Outcome: retire stopgaps. Current state:
   s061h1 migrates settings only. Next: shadow, replay, then explicit mode cutover.
   Acceptance: 185/16 GiB/drop-in migration, old-client visibility and the incident
