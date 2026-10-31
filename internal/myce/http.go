@@ -45,6 +45,14 @@ func (a API) handler(joiningPin string) http.Handler {
 		}
 		respond(w, nil, &HTTPError{Status: 404, Code: "environment_unknown", Message: "unknown environment"})
 	})
+	mux.HandleFunc("GET /api/environments/{key}/reference", func(w http.ResponseWriter, r *http.Request) {
+		key := r.PathValue("key")
+		if (FileRef{SHA256: key}).validate() != nil {
+			respond(w, nil, errors.New("invalid environment key"))
+			return
+		}
+		respond(w, map[string]bool{"referenced": a.Queue.environmentReferenced(r.Context(), key)}, nil)
+	})
 	mux.HandleFunc("GET /api/portability", func(w http.ResponseWriter, r *http.Request) {
 		report, err := a.Queue.Portability(PortabilityRequest{Extension: r.URL.Query().Get("extension"), Project: r.URL.Query().Get("project")})
 		respondOperation(w, report, err, "portability_invalid")

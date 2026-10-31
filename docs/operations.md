@@ -1447,6 +1447,35 @@ Active attempt/build locks also protect them. If protected entries fill the
 configured limit, preparation refuses capacity rather than evicting them.
 Evictions record the environment key and cache-limit reason in the worker log.
 
+To reclaim unused prepared environments without admitting a new preparation,
+run locally on the worker:
+
+```sh
+myce worker env prune
+myce worker env prune --apply
+```
+
+The default is a dry-run. Each ready prefix is listed with its age since
+preparation/last use, allocated size in bytes, queue reference state, use/build
+lock state and recent-use protection. `--apply` uses the same eviction path and
+24-hour minimum retention as pressure eviction. Locked, recently used, and
+queue-referenced environments are preserved, including queued work, sidecars,
+extension variants and attempts still awaiting physical release. Reference
+state is queried again under the candidate's local locks before retirement;
+an unavailable queue refuses deletion. The queue must support this command's
+reference API. Shared downloads and unrelated retired prefixes are preserved.
+Pruning does not auto-size preparation capacity or require its 24 GiB free-space
+floor; both dry-run and apply remain available below that floor.
+
+`--config FILE` selects an installed worker; `--environment-cache DIR` overrides
+its cache directory. Without installed settings, supply that directory and queue
+authority using `--queue`, `--joining-file` or `MYCE_TOKEN` as appropriate.
+The summary reports `reclaimed_bytes`, measured as the decrease in allocated
+blocks across prepared/retired environments and shared downloads, counting
+hardlinked inodes once. Candidate sizes can therefore exceed reclaimed bytes.
+Apply appends synced retirement intents and a final timestamped report to
+`prune-audit.jsonl` in the cache root, including partial progress on failure.
+
 Package downloads use persistent worker-wide `.downloads/uv` and
 `.downloads/pixi` caches under the configured environment-cache root. These bytes
 are excluded from the prepared-environment budget and have a separate 16 GiB

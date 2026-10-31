@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -396,14 +395,17 @@ func environmentSeconds(j *Job, m *Machine) float64 {
 // EnvironmentCache uses OS file locks, atomic publication and shared use leases.
 // Partial builds and evictions are retired, then purged once use/build locks allow it.
 type EnvironmentCache struct {
-	Tools   *EnvironmentToolSource
-	once    sync.Once
-	initErr error
-	Root    string
-	Limit   int64
-	Clock   Clock
-	Fetch   func(context.Context, FileRef, string) error
-	Run     func(context.Context, []string, string, []string, io.Writer, io.Writer) error
+	Tools       *EnvironmentToolSource
+	once        sync.Once
+	initErr     error
+	storageOnce sync.Once
+	storageErr  error
+	sizeLimit   func(string) (int64, error) // Test seam for preparation capacity sizing.
+	Root        string
+	Limit       int64
+	Clock       Clock
+	Fetch       func(context.Context, FileRef, string) error
+	Run         func(context.Context, []string, string, []string, io.Writer, io.Writer) error
 	// DownloadLimit is separate from the prepared-environment limit.
 	DownloadLimit int64
 }
@@ -416,12 +418,16 @@ func (c *EnvironmentCache) recent(path string) bool {
 }
 
 func (c *EnvironmentCache) init() error {
+	if err := c.initStorage(); err != nil {
+		return err
+	}
 	c.once.Do(func() {
-		if c.Clock == nil {
-			c.Clock = RealClock{}
-		}
 		if c.Limit == 0 && c.Root != "" {
-			c.Limit, c.initErr = AutoEnvironmentCacheLimit(c.Root)
+			size := c.sizeLimit
+			if size == nil {
+				size = AutoEnvironmentCacheLimit
+			}
+			c.Limit, c.initErr = size(c.Root)
 			if c.initErr != nil {
 				return
 			}
@@ -430,22 +436,33 @@ func (c *EnvironmentCache) init() error {
 			c.initErr = errors.New("environment-cache-bytes must be positive")
 			return
 		}
+	})
+	return c.initErr
+}
+
+// Existing-cache maintenance needs the same roots and locks as preparation,
+// but no capacity admission or free-space floor.
+func (c *EnvironmentCache) initStorage() error {
+	c.storageOnce.Do(func() {
+		if c.Clock == nil {
+			c.Clock = RealClock{}
+		}
 		if c.Root == "" {
-			c.initErr = errors.New("environment cache root is required")
+			c.storageErr = errors.New("environment cache root is required")
 			return
 		}
 		if e := PrepareStateRoots(c.Root); e != nil {
-			c.initErr = e
+			c.storageErr = e
 			return
 		}
 		root, e := filepath.EvalSymlinks(c.Root)
 		if e != nil {
-			c.initErr = e
+			c.storageErr = e
 			return
 		}
 		root, e = filepath.Abs(root)
 		if e != nil {
-			c.initErr = e
+			c.storageErr = e
 			return
 		}
 		c.Root = root
@@ -454,12 +471,12 @@ func (c *EnvironmentCache) init() error {
 		}
 		for _, p := range []string{filepath.Join(c.Root, "locks"), filepath.Join(c.Root, ".Trash")} {
 			if e := os.MkdirAll(p, 0700); e != nil {
-				c.initErr = e
+				c.storageErr = e
 				return
 			}
 		}
 	})
-	return c.initErr
+	return c.storageErr
 }
 
 func (c *EnvironmentCache) lock(ctx context.Context, key string, op int) (*os.File, error) {
@@ -521,6 +538,10 @@ func (c *EnvironmentCache) tryLock(key string) (*os.File, error) {
 // purgeRetired runs under admission. The remaining bytes still count toward
 // the limit, including entries protected by an attempt or preparation.
 func (c *EnvironmentCache) purgeRetired() (int64, error) {
+	return c.purgeRetiredKey("")
+}
+
+func (c *EnvironmentCache) purgeRetiredKey(onlyKey string) (int64, error) {
 	root := filepath.Join(c.Root, ".Trash")
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -529,6 +550,9 @@ func (c *EnvironmentCache) purgeRetired() (int64, error) {
 	for _, d := range entries {
 		_, key, ok := strings.Cut(d.Name(), "-")
 		key = strings.TrimSuffix(key, ".partial")
+		if onlyKey != "" && key != onlyKey {
+			continue
+		}
 		if !ok || (FileRef{SHA256: key}).validate() != nil {
 			continue
 		}
@@ -692,56 +716,24 @@ func (c *EnvironmentCache) admit(key string, size int64) error {
 	if e != nil {
 		return e
 	}
-	entries, e := os.ReadDir(c.Root)
+	candidates, e := c.evictionCandidates(key)
 	if e != nil {
 		return e
 	}
-	type entry struct {
-		key string
-		at  time.Time
-	}
-	candidates := []entry{}
 	total, e := c.DiskUsage()
 	if e != nil {
 		return e
 	}
 	total += size
-	for _, d := range entries {
-		if !d.IsDir() || len(d.Name()) != 64 || d.Name() == key {
-			continue
-		}
-		path := filepath.Join(c.Root, d.Name())
-		s, e := os.Stat(filepath.Join(path, "ready.json"))
-		if errors.Is(e, os.ErrNotExist) {
-			// Unready stable prefixes are builds, never eviction candidates.
-			continue
-		}
-		if e != nil {
-			return e
-		}
-		candidates = append(candidates, entry{d.Name(), s.ModTime()})
-	}
-	sort.Slice(candidates, func(i, j int) bool { return candidates[i].at.Before(candidates[j].at) })
 	for _, v := range candidates {
 		if total <= c.Limit {
 			break
 		}
-		f, e := os.OpenFile(filepath.Join(c.Root, "locks", v.key+".use"), os.O_CREATE|os.O_RDWR, 0600)
+		removed, e := c.evict(v.Key, "cache_limit", nil)
 		if e != nil {
 			return e
 		}
-		if syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) == nil {
-			// Recheck after locking: a just-finished attempt may have refreshed use.
-			if c.recent(filepath.Join(c.Root, v.key)) {
-				unlockEnvironment(f)
-				continue
-			}
-			log.Printf("environment eviction key=%s reason=cache_limit", v.key)
-			e = c.trash(filepath.Join(c.Root, v.key))
-			unlockEnvironment(f)
-			if e != nil {
-				return e
-			}
+		if removed {
 			if _, e = c.purgeRetired(); e != nil {
 				return e
 			}
@@ -751,8 +743,6 @@ func (c *EnvironmentCache) admit(key string, size int64) error {
 				return e
 			}
 			total += size
-		} else {
-			f.Close()
 		}
 	}
 	if total > c.Limit {
