@@ -1,6 +1,7 @@
 package myce
 
 const boundedMemoryExploration = "bounded cross-OS exploration"
+const spentMemoryExploration = "foreign-OS prior; bounded exploration already used"
 const memoryCapacityRemedies = "no qualified target can fit this job; reduce the workload's memory use, obtain a clean target-platform measurement for auto memory, or have the operator approve a sufficient allowance on a capable host; retrying unchanged cannot fix capacity"
 
 // One durable claim per comparable CPU work/target OS. Unlike diagnostic job

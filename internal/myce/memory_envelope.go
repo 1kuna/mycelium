@@ -533,7 +533,7 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) memoryEstimate {
 			}
 			estimate.host = &AttemptMemoryPeak{HostGB: &prior}
 			estimate.hostFactor, estimate.foreign = 1, true
-			estimate.source = "foreign-OS prior; bounded exploration already used"
+			estimate.source = spentMemoryExploration
 		}
 	}
 	if sameHost != nil {
@@ -647,6 +647,9 @@ func (q *Queue) memoryWaitingReason(j *Job, machines map[string]*Machine) string
 				return ""
 			}
 			why := fmt.Sprintf("%s: %.1f GiB needed, %.1f GiB available (live %.1f GiB; reserved %.1f GiB; allowance %.1f GiB; %s)", m.ID, hostNeed(m, n.MemoryGB, n.HostMemoryGB), m.FreeHostMemoryGB, m.HostAvailableMemoryGB, m.HostMemoryInUseGB, m.EffectiveHostMemoryBudgetGB, candidate.MemoryEnvelope.Source)
+			if candidate.MemoryEnvelope.Source == spentMemoryExploration {
+				why += "; " + memoryCapacityRemedies
+			}
 			if unifiedCUDA(m) {
 				if floor, ok := unifiedCUDAFloor(m); ok {
 					why += fmt.Sprintf("; unified CUDA physical RAM floor %.3f GiB", floor)

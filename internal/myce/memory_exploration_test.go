@@ -125,8 +125,13 @@ func TestMemoryExplorationLargestEligibleHost(t *testing.T) {
 	large.ID, large.HostID, large.Session = "large-worker", "large-host", "large-session"
 	large.HostMemoryBudgetGB = 32
 	check(t, q, large, nil)
+	occupancy := s
+	occupancy.Name = "unrelated-occupant"
+	occupancy.Needs.Memory, occupancy.Needs.HostMemoryGB = "", 1
+	occupancy.AllowedMachines = []string{darwin.ID}
+	busy := memoryExplorationRun(t, q, darwin, occupancy)
 	first := submit(t, q, s)
-	if run := check(t, q, darwin, nil).Job; run != nil {
+	if run := check(t, q, darwin, busy).Job; run != nil {
 		t.Fatal("explored even though a qualified host fits the foreign prior", run)
 	}
 	// The largest physical host is not eligible when it cannot fit the CPU need.
@@ -139,6 +144,10 @@ func TestMemoryExplorationLargestEligibleHost(t *testing.T) {
 	if run := check(t, q, small, nil).Job; run != nil {
 		t.Fatal("probe chose a smaller eligible allowance", run)
 	}
+	if run := check(t, q, darwin, busy).Job; run != nil || len(q.s.MemoryExplorations) != 0 {
+		t.Fatal("probe ignored occupancy or qualification spent its claim", run)
+	}
+	memoryExplorationComplete(t, q, clock, busy, 1, false, false)
 	run := check(t, q, darwin, nil).Job
 	if run == nil || run.ID != first.ID || run.MemoryEnvelope.Source != boundedMemoryExploration || run.Spec.Needs.HostMemoryGB != 7.75 || run.MemoryEnvelope.HostGB > 8 {
 		t.Fatal("missing full-allowance bounded attempt", run, job(t, q, first.ID).State, job(t, q, first.ID).Reason)
@@ -204,7 +213,7 @@ func TestMemoryExplorationFailureCannotLoop(t *testing.T) {
 			if next := check(t, q, darwin, nil).Job; next != nil {
 				t.Fatal("already queued successor repeated the exploration", next)
 			}
-			if got := job(t, q, pending.ID); got.Attempt != 0 || got.State != "queued" {
+			if got := job(t, q, pending.ID); got.Attempt != 0 || got.State != "queued" || !strings.Contains(got.Reason, memoryCapacityRemedies) {
 				t.Fatal("pending successor acquired another attempt", got)
 			}
 			memoryExplorationRefused(t, q, s)
