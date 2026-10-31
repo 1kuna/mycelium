@@ -59,6 +59,8 @@ def submission_failure(reply):
 
 def run(root, sha, scratch):
     profile = (root / '.mycelium/profiles/gate-full.yaml').read_text()
+    print('Linux amd64 native full-suite coverage is deferred: profiles lack a negative host selector; '
+          'the queue host must be excluded during #527: https://github.com/1kuna/mycelium/issues/527', flush=True)
     jobs, states, refusals = {}, {}, {}
     failed = False
     # Submit both before waiting. An error on one platform must not skip the other.

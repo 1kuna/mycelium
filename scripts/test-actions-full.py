@@ -60,6 +60,9 @@ class ActionsFullTest(unittest.TestCase):
             with redirect_stdout(io.StringIO()) as public, patch.object(ci, 'command', command), patch.dict(os.environ, {'GITHUB_STEP_SUMMARY': str(scratch / 'summary')}):
                 status = ci.run(ROOT, SHA, scratch)
             summary = (scratch / 'summary').read_text()
+            self.assertIn('Linux amd64 native full-suite coverage is deferred', public.getvalue())
+            self.assertIn('profiles lack a negative host selector', public.getvalue())
+            self.assertIn('https://github.com/1kuna/mycelium/issues/527', public.getvalue())
             self.assertNotIn('PRIVATE', summary + public.getvalue())
             if refusal is not None:
                 self.assertIn('no qualified target', summary)
