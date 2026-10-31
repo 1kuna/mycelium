@@ -3,10 +3,13 @@ package myce
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"math"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -363,6 +366,19 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Darwin's background scheduler band has maximum priority 4; nice alone
+	// remains above it. Inspect actual payloads across fork/exec, not just the
+	// worker's report that policy application succeeded.
+	controlBand := ""
+	backgroundCheck := ""
+	if runtime.GOOS == "darwin" {
+		b, err := exec.Command("ps", "-o", "pri=", "-p", fmt.Sprint(os.Getpid())).Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		controlBand = strings.TrimSpace(string(b))
+		backgroundCheck = `test "$(ps -o pri= -p $$)" -le 4 && sh -c 'test "$(ps -o pri= -p $$)" -le 4' || exit 43; `
+	}
 	oldRSS := workerMemoryRSS
 	workerMemoryRSS = func(context.Context) (float64, error) { return 0, nil }
 	t.Cleanup(func() { workerMemoryRSS = oldRSS })
@@ -395,6 +411,23 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	if runtime.GOOS == "darwin" {
+		ordinary := cpuSpec(1, .01)
+		ordinary.Run.Command = []string{"sh", "-c", `test "$(ps -o pri= -p $$)" -gt 4 && sh -c 'test "$(ps -o pri= -p $$)" -gt 4'`}
+		var j Job
+		if err := c.Call(ctx, "POST", "/api/jobs", ordinary, &j); err != nil {
+			t.Fatal(err)
+		}
+		await(t, func() bool {
+			if err := c.Call(ctx, "GET", "/api/jobs/"+j.ID, nil, &j); err != nil {
+				t.Fatal(err)
+			}
+			if j.State == "failed" {
+				t.Fatal("unprofiled payload entered background band", j)
+			}
+			return j.State == "succeeded"
+		})
+	}
 	change(HostMaintenanceRequest{Action: "drain"})
 	await(t, func() bool {
 		if err := c.Call(ctx, "GET", path, nil, &status); err != nil {
@@ -408,7 +441,7 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 	change(HostMaintenanceRequest{Action: "resume"})
 	s := cpuSpec(1, .01)
 	s.Run.Env = map[string]string{"GOMAXPROCS": "64"}
-	s.Run.Command = []string{"sh", "-c", `n=$(ps -o nice= -p $$); test "$n" -ge 10 && test "$GOMAXPROCS" = 1 && test "${MYCE_TOKEN+x}" != x && printf shared-host-ok`}
+	s.Run.Command = []string{"sh", "-c", backgroundCheck + `n=$(ps -o nice= -p $$); test "$n" -ge 10 && test "$GOMAXPROCS" = 1 && test "${MYCE_TOKEN+x}" != x && printf shared-host-ok`}
 	var j Job
 	if err := c.Call(ctx, "POST", "/api/jobs", s, &j); err != nil {
 		t.Fatal(err)
@@ -430,8 +463,8 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 	}
 	// Exercise the separate group/member gates, including a sidecar and the
 	// main payload. Its marker proves the helper checked priority and token too.
-	s.Run.Sidecars = []NativeSidecar{{Name: "helper", Env: map[string]string{"GOMAXPROCS": "64"}, Command: []string{"sh", "-c", `n=$(ps -o nice= -p $$); test "$n" -ge 10 && test "$GOMAXPROCS" = 1 && test "${MYCE_TOKEN+x}" != x || exit 42; touch helper-ready; while :; do sleep 1; done`}}}
-	s.Run.Command = []string{"sh", "-c", `n=$(ps -o nice= -p $$); test "$n" -ge 10 && test "$GOMAXPROCS" = 1 && test "${MYCE_TOKEN+x}" != x || exit 42; while test ! -f helper-ready; do sleep .01; done`}
+	s.Run.Sidecars = []NativeSidecar{{Name: "helper", Env: map[string]string{"GOMAXPROCS": "64"}, Command: []string{"sh", "-c", backgroundCheck + `n=$(ps -o nice= -p $$); test "$n" -ge 10 && test "$GOMAXPROCS" = 1 && test "${MYCE_TOKEN+x}" != x || exit 42; touch helper-ready; while :; do sleep 1; done`}}}
+	s.Run.Command = []string{"sh", "-c", backgroundCheck + `n=$(ps -o nice= -p $$); test "$n" -ge 10 && test "$GOMAXPROCS" = 1 && test "${MYCE_TOKEN+x}" != x || exit 42; while test ! -f helper-ready; do sleep .01; done`}
 	if err := c.Call(ctx, "POST", "/api/jobs", s, &j); err != nil {
 		t.Fatal(err)
 	}
@@ -446,6 +479,12 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 	})
 	if priority, err := syscall.Getpriority(syscall.PRIO_PROCESS, os.Getpid()); err != nil || priority != controlPriority {
 		t.Fatal("payload priority changed worker control", priority, controlPriority, err)
+	}
+	if runtime.GOOS == "darwin" {
+		b, err := exec.Command("ps", "-o", "pri=", "-p", fmt.Sprint(os.Getpid())).Output()
+		if err != nil || strings.TrimSpace(string(b)) != controlBand {
+			t.Fatal("payload background policy changed worker control", string(b), controlBand, err)
+		}
 	}
 }
 

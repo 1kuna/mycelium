@@ -5,11 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"os/exec"
 	"runtime"
 	"slices"
 	"syscall"
-	"time"
 )
 
 // SharedHostProfile protects additional interactive use. Size the reserve from
@@ -133,9 +131,10 @@ func applySharedHostPriority(pid int, p *SharedHostProfile) error {
 		}
 	}
 	if runtime.GOOS == "darwin" {
-		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-		defer cancel()
-		if err := exec.CommandContext(ctx, "/usr/sbin/taskpolicy", "-b", "-p", fmt.Sprint(pid)).Run(); err != nil {
+		// Darwin sys/resource.h. Apply only to the gated payload PID;
+		// background CPU/I/O/timer/network policy survives fork/exec.
+		const prioDarwinProcess, prioDarwinBG = 4, 0x1000
+		if err := syscall.Setpriority(prioDarwinProcess, pid, prioDarwinBG); err != nil {
 			return fmt.Errorf("shared host background task policy: %w", err)
 		}
 	}
