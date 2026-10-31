@@ -18,16 +18,18 @@ import (
 // for new payloads after declared tus lengths and the physical volume floor.
 // Store is a public role name, never a private filesystem path.
 type FileStoreStatus struct {
-	ProductionReserveBytes uint64 `json:"production_reserve_bytes"`
-	ReservedOutputBytes    uint64 `json:"reserved_output_bytes,omitempty"`
-	Store                  string `json:"store"`
-	UsedBytes              uint64 `json:"used_bytes"`
-	FreeBytes              uint64 `json:"free_bytes"`
-	ReclaimableBytes       uint64 `json:"reclaimable_bytes"`
-	LimitBytes             uint64 `json:"limit_bytes"`
-	DiskFreeBytes          uint64 `json:"disk_free_bytes"`
-	FloorBytes             uint64 `json:"floor_bytes"`
-	Error                  string `json:"error,omitempty"`
+	UnidentifiedWritesMayUseReserve  bool   `json:"unidentified_writes_may_use_reserve"`
+	UnidentifiedReserveAdmittedBytes uint64 `json:"unidentified_reserve_admitted_bytes"`
+	ProductionReserveBytes           uint64 `json:"production_reserve_bytes"`
+	ReservedOutputBytes              uint64 `json:"reserved_output_bytes,omitempty"`
+	Store                            string `json:"store"`
+	UsedBytes                        uint64 `json:"used_bytes"`
+	FreeBytes                        uint64 `json:"free_bytes"`
+	ReclaimableBytes                 uint64 `json:"reclaimable_bytes"`
+	LimitBytes                       uint64 `json:"limit_bytes"`
+	DiskFreeBytes                    uint64 `json:"disk_free_bytes"`
+	FloorBytes                       uint64 `json:"floor_bytes"`
+	Error                            string `json:"error,omitempty"`
 }
 
 type storedPayload struct {
@@ -122,7 +124,7 @@ func (s *FileStore) inventory(ctx context.Context) (map[string]storedPayload, er
 }
 
 func (s *FileStore) capacity(ctx context.Context) (FileStoreStatus, map[string]storedPayload, error) {
-	status := FileStoreStatus{Store: "queue-file-store", LimitBytes: uint64(s.limit), ProductionReserveBytes: s.productionReserve}
+	status := FileStoreStatus{Store: "queue-file-store", LimitBytes: uint64(s.limit), ProductionReserveBytes: s.productionReserve, UnidentifiedWritesMayUseReserve: s.productionReserve > 0, UnidentifiedReserveAdmittedBytes: s.unidentifiedReserveAdmitted.Load()}
 	payloads, err := s.inventory(ctx)
 	if err != nil {
 		return status, nil, err
@@ -277,7 +279,8 @@ func (q *Queue) PreflightFileStore(ctx context.Context, files FileManifest) erro
 	}
 	growth := need
 	need = addDiskBytes(need, store.reservedOutputs(payloads))
-	return store.admit(ctx, status, payloads, files, need, growth)
+	_, err = store.admit(ctx, status, payloads, files, need, growth)
+	return err
 }
 
 func (c Client) PreflightFileStore(ctx context.Context, files FileManifest) error {

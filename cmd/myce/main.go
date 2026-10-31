@@ -907,7 +907,7 @@ func printStatus(s myce.Snapshot, full bool) {
 			fmt.Printf("%s: %s\n", fs.Store, fs.Error)
 		} else {
 			fmt.Printf("%s: used=%d bytes free=%d bytes reclaimable=%d bytes\n", fs.Store, fs.UsedBytes, fs.FreeBytes, fs.ReclaimableBytes)
-			fmt.Printf("  production reserve=%d bytes\n", fs.ProductionReserveBytes)
+			fmt.Printf("  production reserve=%d bytes; unidentified writes may use reserve=%t; unidentified reserve admitted=%d bytes (since queue start)\n", fs.ProductionReserveBytes, fs.UnidentifiedWritesMayUseReserve, fs.UnidentifiedReserveAdmittedBytes)
 		}
 	}
 	for _, host := range slices.Sorted(maps.Keys(s.HostStates)) {

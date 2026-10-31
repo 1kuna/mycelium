@@ -4,6 +4,12 @@
   "$defs": {
     "FileStoreStatus": {
       "properties": {
+        "unidentified_writes_may_use_reserve": {
+          "type": "boolean"
+        },
+        "unidentified_reserve_admitted_bytes": {
+          "type": "integer"
+        },
         "production_reserve_bytes": {
           "type": "integer"
         },
@@ -37,6 +43,8 @@
       },
       "type": "object",
       "required": [
+        "unidentified_writes_may_use_reserve",
+        "unidentified_reserve_admitted_bytes",
         "production_reserve_bytes",
         "store",
         "used_bytes",

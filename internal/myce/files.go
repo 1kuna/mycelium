@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/tus/tusd/v2/pkg/filelocker"
@@ -121,22 +122,24 @@ func verifyFile(ctx context.Context, path string, ref FileRef) error {
 }
 
 type FileStore struct {
-	productionReserve uint64
-	admit             func(context.Context, FileStoreStatus, map[string]storedPayload, FileManifest, uint64, uint64) error
-	reservedOutputs   func(map[string]storedPayload) uint64
-	diskProbe         func(string) (DiskReading, error)
-	root              string
-	limit             int64
-	mu                sync.Mutex
-	handler           http.Handler
-	uploadLocker      tus.Locker
-	syncDir           func(string) error // Durability failure injection.
-	expired           func(string, ...context.Context) bool
-	lifecycle         *sync.RWMutex
-	clock             Clock
-	recordUpload      func(hash, purpose string, created bool, contexts ...context.Context) error
-	publishUpload     func(hash string, contexts ...context.Context) error
-	recordBundle      func(hash string, created bool, contexts ...context.Context) error
+	unidentifiedReserveAdmitted atomic.Uint64
+	checkAttempt                func(context.Context) error
+	productionReserve           uint64
+	admit                       func(context.Context, FileStoreStatus, map[string]storedPayload, FileManifest, uint64, uint64) (uint64, error)
+	reservedOutputs             func(map[string]storedPayload) uint64
+	diskProbe                   func(string) (DiskReading, error)
+	root                        string
+	limit                       int64
+	mu                          sync.Mutex
+	handler                     http.Handler
+	uploadLocker                tus.Locker
+	syncDir                     func(string) error // Durability failure injection.
+	expired                     func(string, ...context.Context) bool
+	lifecycle                   *sync.RWMutex
+	clock                       Clock
+	recordUpload                func(hash, purpose string, created bool, contexts ...context.Context) error
+	publishUpload               func(hash string, contexts ...context.Context) error
+	recordBundle                func(hash string, created bool, contexts ...context.Context) error
 }
 type FileConfig struct {
 	Checkpoints bool `json:"checkpoints"`
@@ -188,7 +191,7 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 			return err
 		}
 	}
-	s := &FileStore{productionReserve: uint64(q.fileStoreProductionReserve), admit: q.admitFileUpload, reservedOutputs: q.reservedOutputBytes, root: root, limit: limit, syncDir: syncWorkerDir, expired: q.expiredBlob, lifecycle: &q.fileLifecycle, clock: q.clock, recordUpload: q.recordFileUpload, publishUpload: q.publishFileUpload, recordBundle: q.recordBundleUpload}
+	s := &FileStore{checkAttempt: q.checkFileStoreAttempt, productionReserve: uint64(q.fileStoreProductionReserve), admit: q.admitFileUpload, reservedOutputs: q.reservedOutputBytes, root: root, limit: limit, syncDir: syncWorkerDir, expired: q.expiredBlob, lifecycle: &q.fileLifecycle, clock: q.clock, recordUpload: q.recordFileUpload, publishUpload: q.publishFileUpload, recordBundle: q.recordBundleUpload}
 	fs := filestore.New(filepath.Join(root, "uploads"))
 	fs.DirModePerm = 0700
 	fs.FileModePerm = 0600
@@ -307,6 +310,10 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 		respond(w, nil, reject("job_spec_invalid", err))
 		return
 	}
+	if err := s.checkAttempt(r.Context()); err != nil {
+		respond(w, nil, err)
+		return
+	}
 	// Fence upload publication against unlink without serializing other uploads.
 	s.lifecycle.RLock()
 	defer s.lifecycle.RUnlock()
@@ -397,7 +404,8 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	payloads[hash] = storedPayload{length: uint64(length)}
 	need := addDiskBytes(uint64(length), s.reservedOutputs(payloads))
-	if err := s.admit(r.Context(), status, payloads, FileManifest{"upload": ref}, need, uint64(length)); err != nil {
+	unidentified, err := s.admit(r.Context(), status, payloads, FileManifest{"upload": ref}, need, uint64(length))
+	if err != nil {
 		respond(w, nil, err)
 		return
 	}
@@ -406,7 +414,11 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unindexed upload requires operator recovery", 409)
 		return
 	}
-	s.handler.ServeHTTP(w, r)
+	response := &uploadResponse{ResponseWriter: w}
+	s.handler.ServeHTTP(response, r)
+	if response.status == http.StatusCreated {
+		s.unidentifiedReserveAdmitted.Add(unidentified)
+	}
 	if err := s.refreshUpload(hash); err != nil {
 		log.Printf("upload freshness unavailable: %v", err)
 	}

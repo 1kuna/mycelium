@@ -340,7 +340,7 @@ func TestWireSchemas(t *testing.T) {
 	if err != nil || !bytes.Equal(actualFileStore, fileStoreSchema) {
 		t.Fatal("file store schema drift: regenerate with MYCE_UPDATE_SCHEMAS=1", err)
 	}
-	validateWireValue(t, compileWireSchema(t, "file-store-v1.schema.json"), FileStoreStatus{Store: "queue-file-store", UsedBytes: 8, FreeBytes: 24, LimitBytes: 32, ProductionReserveBytes: 8})
+	validateWireValue(t, compileWireSchema(t, "file-store-v1.schema.json"), FileStoreStatus{Store: "queue-file-store", UsedBytes: 8, FreeBytes: 24, LimitBytes: 32, ProductionReserveBytes: 8, UnidentifiedWritesMayUseReserve: true, UnidentifiedReserveAdmittedBytes: 4})
 	if os.Getenv("MYCE_UPDATE_SCHEMAS") == "1" {
 		if err := os.WriteFile(ledgerPath, ledgerSchema, 0644); err != nil {
 			t.Fatal(err)

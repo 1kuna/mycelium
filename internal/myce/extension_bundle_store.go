@@ -65,7 +65,7 @@ func (s *FileStore) freezeFiles(files *map[string][]byte, ref **FileRef, digest 
 		growth := uint64(next.SizeBytes) - min(uint64(next.SizeBytes), payloads[next.SHA256].length)
 		payloads[next.SHA256] = storedPayload{length: uint64(next.SizeBytes)}
 		need := addDiskBytes(growth, s.reservedOutputs(payloads))
-		if e = s.admit(requestContext(contexts), status, payloads, FileManifest{"bundle": next}, need, growth); e != nil {
+		if _, e = s.admit(context.WithValue(requestContext(contexts), fileStoreOrdinaryKey{}, true), status, payloads, FileManifest{"bundle": next}, need, growth); e != nil {
 			return e
 		}
 	}
