@@ -7,6 +7,16 @@ import subprocess
 import sys
 
 
+# Private learning writers have consumers in differently named files (#493).
+# Keep this explicit and bounded; this is not a transitive call graph.
+MEMORY_CONSUMERS = ('process_memory_test.go', 'attempt_memory_facts_test.go')
+SUPPLEMENTAL_CONSUMERS = {
+    f'internal/myce/{source}.go': MEMORY_CONSUMERS
+    for source in ('attempt_memory', 'memory_learning', 'memory_envelope',
+                   'gpu_host_memory', 'capability_placement', 'work_observation', 'queue')
+}
+
+
 def git(*args):
     return subprocess.check_output(['git', *args], text=True)
 
@@ -25,6 +35,10 @@ def select(base):
         stem = path.stem.removesuffix('_test')
         for test_file in path.parent.glob(stem + '*_test.go'):
             tests.update(re.findall(r'^func (Test\w+)\(', test_file.read_text(), re.M))
+        for consumer in SUPPLEMENTAL_CONSUMERS.get(name, ()):
+            test_file = path.parent / consumer
+            if test_file.exists():
+                tests.update(re.findall(r'^func (Test\w+)\(', test_file.read_text(), re.M))
         # Hunk headers identify the enclosing function; +/- declarations also
         # cover renamed functions and exported types/variables/constants.
         diff = git('diff', '--unified=0', base, '--', name)
