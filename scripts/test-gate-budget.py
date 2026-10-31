@@ -22,6 +22,58 @@ spec.loader.exec_module(budget)
 
 
 class GateBudgetTests(unittest.TestCase):
+    def test_quick_overlaps_packages_and_collects_failure(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            scripts = root / 'scripts'
+            scripts.mkdir()
+            shutil.copyfile(Path(__file__).with_name('gate.sh'), scripts / 'gate.sh')
+            (scripts / 'gate-related.py').write_text('print("a\\t^TestA$")\nprint("b\\t^TestB$")\n')
+            bin_dir = root / 'bin'
+            bin_dir.mkdir()
+            git = bin_dir / 'git'
+            git.write_text('#!/bin/sh\nexit 0\n')
+            git.chmod(0o755)
+            uv = bin_dir / 'uv'
+            uv.write_text('#!/bin/sh\necho ' + shlex.quote(sys.executable) + '\n')
+            uv.chmod(0o755)
+            go = bin_dir / 'go'
+            go.write_text(f'''#!{sys.executable}
+import os, pathlib, sys, time
+args = sys.argv[1:]
+root = pathlib.Path(os.environ['TEST_MARKERS'])
+if args[0] == 'env':
+    print(root)
+elif args[0] == 'build':
+    output = pathlib.Path(args[args.index('-o') + 1])
+    output.write_text('#!/bin/sh\\nexit 0\\n')
+    output.chmod(0o755)
+elif args[0] == 'list':
+    print(args[1].removeprefix('./'))
+elif args[0] == 'test':
+    package = next(arg for arg in args if arg in ('a', 'b'))
+    other = 'b' if package == 'a' else 'a'
+    (root / (package + '-started')).touch()
+    deadline = time.monotonic() + 5
+    while not (root / (other + '-started')).exists():
+        if time.monotonic() > deadline:
+            sys.exit(2)
+        time.sleep(.01)
+    (root / (package + '-finished')).touch()
+    sys.exit(1 if package == 'a' else 0)
+''')
+            go.chmod(0o755)
+            scratch = root / 'scratch'
+            scratch.mkdir()
+            env = dict(os.environ, PATH=str(bin_dir) + os.pathsep + os.environ['PATH'],
+                       MYCE_GATE_BUDGET='1', GATE_SCRATCH=str(scratch),
+                       GATE_TEST_DEADLINE=str(time.monotonic() + 30), TEST_MARKERS=str(root))
+            run = subprocess.run(['bash', str(scripts / 'gate.sh'), 'quick', 'base'],
+                                 env=env, capture_output=True, text=True, timeout=15)
+            self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
+            self.assertTrue((root / 'a-finished').exists(), run.stdout + run.stderr)
+            self.assertTrue((root / 'b-finished').exists(), run.stdout + run.stderr)
+
     def test_hung_network_mount_does_not_block_owned_scratch(self):
         if sys.platform != 'darwin':
             self.skipTest('native macOS process API')

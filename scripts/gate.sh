@@ -112,12 +112,25 @@ if remaining <= 0:
 print(f'{remaining:.3f}s')
 PYTIME
   }
+  # Each selected package has its own expression, so run separate go test
+  # commands. Overlap at most two packages, as the full gate already does;
+  # limit each command to one build slot to retain the same total bound.
+  pending_pid=
+  related_status=0
+  wait_related() {
+    if wait "$1"; then :; else related_status=1; fi
+  }
   while IFS=$'\t' read -r dir names; do
     package=$(go list "./$dir")
     echo "quick $package: $names"
     timeout=$(quick_timeout)
-    step race-related go test -race -vet=off -json -p 2 -parallel 4 -count=1 -timeout "$timeout" "$package" -run "$names"
+    step race-related go test -race -vet=off -json -p 1 -parallel 4 -count=1 -timeout "$timeout" "$package" -run "$names" &
+    current_pid=$!
+    if [[ -n $pending_pid ]]; then wait_related "$pending_pid"; fi
+    pending_pid=$current_pid
   done < "$scratch/selection"
+  if [[ -n $pending_pid ]]; then wait_related "$pending_pid"; fi
+  if (( related_status )); then exit "$related_status"; fi
   if [[ ! -s $scratch/selection ]]; then
     timeout=$(quick_timeout)
     step race-dev-smoke go test -race -vet=off -json -p 2 -parallel 4 -count=1 -timeout "$timeout" ./cmd/myce -run '^TestDevStandaloneSmoke$'

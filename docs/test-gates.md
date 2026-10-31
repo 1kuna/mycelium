@@ -81,6 +81,9 @@ Before a full run, use `pgrep -fl 'go test'` and wait if two full race suites ar
 already active. Do not terminate another worker's tests. The gate allows two
 Go packages at once (`-p 2`), rather than unbounded compiler parallelism. The
 suite runs at most four independent tests concurrently within each package.
+Quick overlaps up to two selected packages with their individual test-name
+expressions; it waits for both results even if one fails. Each quick test
+command uses one Go build slot, keeping the total at two.
 Tests that mutate process environment remain serial.
 `GORACE=atexit_sleep_ms=0` omits the race runtime's artificial one-second delay
 on each helper-process exit; product code and assertions remain race-instrumented
