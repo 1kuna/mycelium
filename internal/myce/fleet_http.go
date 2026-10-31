@@ -33,13 +33,25 @@ func (a API) registerFleetUpgrade(mux *requestMux) {
 	mux.HandleFunc("GET /api/fleet/instruction", func(w http.ResponseWriter, r *http.Request) {
 		v := r.URL.Query()
 		var out FleetUpdateInstruction
+		unlock := requestReadLock(r.Context(), &a.Queue.mu)
+		// No instruction can be issued without a running upgrade. Ordinary
+		// maintenance belongs to Tick, not these otherwise read-only polls.
+		inactive := a.Queue.s.FleetUpgrade == nil || a.Queue.s.FleetUpgrade.State != "running"
+		stopping := a.Queue.stopping
+		unlock()
+		w.Header().Set("Cache-Control", "no-store")
+		if inactive && !stopping {
+			respond(w, out, nil)
+			return
+		}
+		// Active upgrades retain the atomic maintenance/selection transaction,
+		// which rechecks policy, custody and session fences under the lock.
 		err := a.Queue.updateRequest(r.Context(), func() error {
 			a.Queue.maintain()
 			var e error
 			out, e = a.Queue.fleetInstruction(v.Get("host"), v.Get("machine"), v.Get("session"))
 			return e
-		}, nil)
-		w.Header().Set("Cache-Control", "no-store")
+		}, &queueUpdateTiming{measureWriter: true})
 		respond(w, out, err)
 	})
 	mux.HandleFunc("GET /api/fleet/authorize", func(w http.ResponseWriter, r *http.Request) {
