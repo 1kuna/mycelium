@@ -1369,6 +1369,9 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 		}
 		// Re-deliver an assignment if its HTTP response was lost before startup.
 		for _, j := range q.liveJobs() {
+			if j.State == "running" && j.ReleaseConfirmed {
+				continue // Final result publication is not an execution offer.
+			}
 			if j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping") {
 				if j.State == "stopping" {
 					// Omission only finishes a keyed stop after an exact release ack.
@@ -1954,6 +1957,9 @@ func (q *Queue) projectJob(stored *Job, order map[string]int, reasons map[string
 	if q.startupPending(j) {
 		j.Reason = q.startStatusReason(j)
 	}
+	if j.State == "running" && j.ReleaseConfirmed {
+		j.Reason = "execution released; awaiting final result publication"
+	}
 	// Eligibility/reasons need the full diagnostic inputs until redaction.
 	copy := *j
 	if !forStatus {
@@ -2235,7 +2241,7 @@ func (q *Queue) Started(r Result, requestContexts ...context.Context) error {
 			rejected = e
 			return nil
 		}
-		if j.State != "running" || !dependencyReady(j) || cancelled(j) || (j.Spec.StartBy != nil && j.StartedAt != nil) {
+		if j.State != "running" || j.ReleaseConfirmed || !dependencyReady(j) || cancelled(j) || (j.Spec.StartBy != nil && j.StartedAt != nil) {
 			rejected = ErrStale
 			return nil
 		}
@@ -2338,7 +2344,7 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 // The bounded legacy adapter retains its original scalar recovery limit.
 func (q *Queue) workerHasOtherAttempt(machine, session, job string, attempt int) bool {
 	for _, j := range q.liveJobs() {
-		if j.Machine == machine && j.Session == session && !(j.ID == job && j.Attempt == attempt) && (j.State == "running" || j.State == "stopping") {
+		if j.Machine == machine && j.Session == session && !(j.ID == job && j.Attempt == attempt) && batchReservesCapacity(j) {
 			return true
 		}
 	}

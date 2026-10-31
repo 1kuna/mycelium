@@ -61,7 +61,7 @@ func (q *Queue) deviceUsage(m *Machine) []usageSample {
 	rows := []usageSample{}
 	active, allocated := 0, 0
 	for _, j := range q.liveJobs() {
-		if (batchOnTarget(j, m) || m.Devices != nil && m.GPU == "cpu" && j.Machine == m.ID && j.Spec.Needs.cpuOnly()) && (j.State == "running" || j.State == "stopping") {
+		if (batchOnTarget(j, m) || m.Devices != nil && m.GPU == "cpu" && j.Machine == m.ID && j.Spec.Needs.cpuOnly()) && batchReservesCapacity(j) {
 			busy, fair := 0.0, 1.0
 			if j.Spec.Needs.cpuOnly() {
 				fair = float64(j.Spec.Needs.cores())

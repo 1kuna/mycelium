@@ -91,6 +91,8 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 				reject("attempt_custody")
 			case j.State != "running":
 				reject("job_state")
+			case j.ReleaseConfirmed:
+				reject("execution_released")
 			case cancelled(j):
 				reject("cancelled")
 			default:

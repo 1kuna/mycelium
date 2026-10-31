@@ -31,7 +31,7 @@ func (q *Queue) machineTargets(m *Machine) []*Machine {
 		target := d.machine(*m)
 		reserved := 0.0
 		for _, j := range q.liveJobs() {
-			if !j.ReleaseConfirmed && (j.State == "running" || j.State == "stopping") && batchOnTarget(j, &target) {
+			if batchReservesCapacity(j) && batchOnTarget(j, &target) {
 				reserved += j.Spec.Needs.MemoryGB
 			}
 		}
@@ -67,6 +67,13 @@ func (q *Queue) machineTargets(m *Machine) []*Machine {
 func targetKey(m *Machine) string { return m.ID + "/" + m.Device }
 
 func sameTarget(a, b *Machine) bool { return a.ID == b.ID && a.Device == b.Device }
+
+// The current offer/execution reserves capacity until exact release. A job
+// awaiting result publication stays running without retaining compute; a fresh
+// attempt reserves again even when an earlier copy has confirmed release.
+func batchReservesCapacity(j *Job) bool {
+	return !j.ReleaseConfirmed && (j.State == "running" || j.State == "stopping")
+}
 
 func batchOnTarget(j *Job, m *Machine) bool {
 	if j.Machine != m.ID {
@@ -148,7 +155,7 @@ func (q *Queue) checkinMachineAttempts(m *Machine, reports []AttemptReport, prog
 				continue
 			}
 			reply.Attempts = append(reply.Attempts, AttemptDirective{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Stop: true, Kill: expired(j.StopAt, q.clock.Now()), GraceSeconds: max(0, j.StopAt.Sub(q.clock.Now()).Seconds()), PriorityStop: priorityStop(j), UserCancel: cancelled(j)})
-		} else if !recovering && j.State == "running" && !q.maintenanceBlocked(hostID(m)) && logPolicyFits(j.Spec.Logs, m) && sharedInputsFit(j.Spec, m) && q.checkpointReady(j, m) {
+		} else if !recovering && j.State == "running" && !j.ReleaseConfirmed && !q.maintenanceBlocked(hostID(m)) && logPolicyFits(j.Spec.Logs, m) && sharedInputsFit(j.Spec, m) && q.checkpointReady(j, m) {
 			out := cloneJob(j)
 			out.LedgerEntries = nil
 			reply.Attempts = append(reply.Attempts, AttemptDirective{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Job: &out})

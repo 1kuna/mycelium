@@ -371,7 +371,7 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 		}
 		copy := *m // Projection changes only this scalar memory value; inventory stays read-only.
 		for _, r := range q.liveJobs() {
-			if batchOnTarget(r, m) && (r.State == "running" || r.State == "stopping") {
+			if batchOnTarget(r, m) && batchReservesCapacity(r) {
 				copy.FreeMemoryGB += r.Spec.Needs.MemoryGB
 			}
 		}
@@ -407,12 +407,7 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 				break
 			}
 		}
-		busy := false
-		for _, r := range q.liveJobs() {
-			if batchOnTarget(r, live) && (r.State == "running" || r.State == "stopping") {
-				busy = true
-			}
-		}
+		busy := !q.workerBatchIdle(live)
 		batchSlotAllocated := busy
 		if call := q.calls[best.ID]; call != nil {
 			busy = !q.callCanUse(live, call)

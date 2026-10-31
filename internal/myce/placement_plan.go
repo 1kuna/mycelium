@@ -170,7 +170,7 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool) 
 		room += r.MemoryGB
 	}
 	for _, r := range q.liveJobs() {
-		if !batchOnTarget(r, m) || r.ReleaseConfirmed || (r.State != "running" && r.State != "stopping") {
+		if !batchOnTarget(r, m) || !batchReservesCapacity(r) {
 			continue
 		}
 		if !q.batchPreemptible(r, j.Spec) {
