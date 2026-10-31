@@ -10,7 +10,13 @@ docs/examples, also select tests with direct quoted paths relative to their Go
 package. Helper-only or computed paths still need explicit focused testing or
 `full`. Production Go edits in
 `internal/myce` always include `TestWireSchemas`, since the reflected Job/Spec
-schema includes nested types across that package. This is a textual heuristic,
+schema includes nested types across that package. Edits to the shared memory
+writers `attempt_memory.go`, `memory_learning.go`, `memory_envelope.go`,
+`gpu_host_memory.go`, `capability_placement.go`, `work_observation.go` and
+`queue.go` also include the tests in `process_memory_test.go` and
+`attempt_memory_facts_test.go`: their private-method consumers escape direct
+symbol matching (#493). This explicit consumer set does not follow transitive
+calls or expand to a whole package. This is a textual heuristic,
 not a dependency analyser. Review the printed selection: shared helpers and
 indirect callers can need `full`. If any Go file has no related tests, quick
 stops with a message requesting `full`; it never expands to a whole package.

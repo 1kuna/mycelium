@@ -74,6 +74,37 @@ class RelatedTests(unittest.TestCase):
             finally:
                 os.chdir(previous)
 
+    def test_private_memory_writers_include_unchanged_consumers(self):
+        previous = os.getcwd()
+        with tempfile.TemporaryDirectory() as directory:
+            os.chdir(directory)
+            try:
+                def git(*args):
+                    subprocess.run(['git', *args], check=True, capture_output=True)
+                root = pathlib.Path('internal/myce')
+                root.mkdir(parents=True)
+                git('init', '-q')
+                # #490 changed private peak/complete; neither is an exported
+                # symbol, and the consumers call helpers rather than name them.
+                for source, method in [('attempt_memory', 'peak'), ('queue', 'complete')]:
+                    (root / f'{source}.go').write_text(f'package p\nfunc (q *Queue) {method}() int {{ return 1 }}\n')
+                    (root / f'{source}_test.go').write_text(f'package p\nfunc Test{source.title().replace("_", "")}(t *testing.T) {{}}\n')
+                (root / 'process_memory_test.go').write_text('package p\nfunc TestAttemptMemoryEventCountsPersist(t *testing.T) { helper(t) }\n')
+                (root / 'attempt_memory_facts_test.go').write_text('package p\nfunc TestAttemptMemoryFactsAcceptedGET(t *testing.T) { helper(t) }\n')
+                (root / 'unrelated_test.go').write_text('package p\nfunc TestUnrelated(t *testing.T) {}\n')
+                git('add', '.')
+                git('-c', 'user.name=Fixture', '-c', 'user.email=fixture-noreply@example.invalid', 'commit', '-qm', 'base')
+                for source, method in [('attempt_memory', 'peak'), ('queue', 'complete')]:
+                    (root / f'{source}.go').write_text(f'package p\nfunc (q *Queue) {method}() int {{ return 2 }}\n')
+                    selected = related.select('HEAD')
+                    self.assertEqual(len(selected), 1)
+                    self.assertIn('TestAttemptMemoryEventCountsPersist', selected[0][1])
+                    self.assertIn('TestAttemptMemoryFactsAcceptedGET', selected[0][1])
+                    self.assertNotIn('TestUnrelated', selected[0][1])
+                    git('restore', f'internal/myce/{source}.go')
+            finally:
+                os.chdir(previous)
+
     def test_selection_and_explicit_full(self):
         previous = os.getcwd()
         with tempfile.TemporaryDirectory() as directory:
