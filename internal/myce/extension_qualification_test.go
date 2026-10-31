@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -237,5 +239,40 @@ func TestExtensionFirstDemandQualification(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// #459's post-restart queue had 149 registered extensions and 194 queued
+// plain commands, each with three shared inputs (608, 637 and 4063 bytes).
+// Qualification demand used to rehash those inputs for every catalogue entry
+// on every target, despite none of these commands using an extension. Keep
+// this fixture synthetic: no deployment identities, paths or payloads.
+func BenchmarkExtensionQualificationPlainBacklog(b *testing.B) {
+	clock := &fakeClock{now: time.Date(2026, 10, 31, 0, 0, 0, 0, time.UTC)}
+	m := machine("worker", "fake")
+	m.LastSeen, m.DiskReceivedAt = clock.Now(), clock.Now()
+	m.DiskVolumes = []DiskVolume{{ID: "local", Roots: []string{"data", "file-cache", "checkpoint"}, TotalBytes: 1 << 40, FreeBytes: 1 << 39, SampledAt: clock.Now()}}
+	for i := range 48 {
+		m.CachedSharedInputs = append(m.CachedSharedInputs, fmt.Sprintf("%064x", i))
+	}
+	q := &Queue{clock: clock, s: state{Jobs: map[string]*Job{}, Extensions: map[string]Extension{}, Machines: map[string]*Machine{m.ID: &m}}}
+	for i := range 149 {
+		id := fmt.Sprint(i)
+		q.s.Extensions[id] = Extension{Name: "extension-" + id, Version: "1", Digest: fmt.Sprintf("%064x", i), Resumable: true}
+	}
+	for i := range 194 {
+		id := fmt.Sprint(i)
+		s := spec("experiment")
+		s.SharedInputs = map[string]SharedInput{}
+		for k, size := range []int64{608, 637, 4063} {
+			s.SharedInputs[fmt.Sprint(k)] = SharedInput{SHA256: strings.Repeat(fmt.Sprint(k+1), 64), SizeBytes: size}
+		}
+		q.s.Jobs[id] = &Job{ID: id, Spec: s, State: "queued", Queued: clock.Now()}
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		if plans := q.extensionQualificationPlan(&m); len(plans) != 0 {
+			b.Fatal("plain commands manufactured qualification demand", plans)
+		}
 	}
 }
