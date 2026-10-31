@@ -16,6 +16,46 @@ import (
 	"time"
 )
 
+func TestFilesOpenHandleSurvivesPathReplacement(t *testing.T) {
+	q, _ := fixture(t)
+	if err := q.ConfigureFileStore(t.TempDir(), 1<<20, false); err != nil {
+		t.Fatal(err)
+	}
+	api := httptest.NewServer(API{Queue: q, Token: "fixture"}.Handler())
+	defer api.Close()
+	c := Client{URL: api.URL, Token: "fixture"}
+	path := filepath.Join(t.TempDir(), "source")
+	if err := os.WriteFile(path, []byte("retained bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	ctx := context.Background()
+	ref, err := IdentifyOpenFile(ctx, f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.Rename(path, path+".original"); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(path, []byte("replaced bytes"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err = c.UploadJobInputFile(ctx, f, ref); err != nil {
+		t.Fatal(err)
+	}
+	dest := filepath.Join(t.TempDir(), "download")
+	if err = c.DownloadFile(ctx, ref, dest); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(dest); err != nil || string(data) != "retained bytes" {
+		t.Fatalf("upload followed replacement pathname: %q %v", data, err)
+	}
+}
+
 func TestFilesResumableAndHashRefusal(t *testing.T) {
 	t.Parallel()
 	q, _ := fixture(t)

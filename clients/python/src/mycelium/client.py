@@ -341,18 +341,53 @@ class Client:
             pass
         return ref
 
-    def download_result(self, job_id: str, artifact: str, destination: str | Path) -> Path:
-        """Fetch one accepted current-attempt artifact, verify, then publish.
+    def recover_result(self, job_id: str, *, files: Mapping[str, str | Path],
+                       key: str, requested_by: str, reason: str,
+                       source: Mapping[str, str]) -> dict[str, Any]:
+        """Upload and append recovery evidence under operator authority.
+
+        source is {kind: upload|nas, location: relative-label}. requested_by is
+        an operator assertion. The queue independently verifies every byte and
+        fences the exact failed execution captured before uploads begin.
+        """
+        endpoint = f"/api/jobs/{quote(job_id, safe='')}"
+        plan = self._call("GET", endpoint + "/recovery-plan")
+        if not files or not set(files).issubset(plan["outputs"]):
+            raise ValueError("recovery requires declared output names")
+        for path in files.values():
+            source_path = Path(path)
+            if source_path.is_symlink() or not source_path.is_file():
+                raise ValueError("recovery sources must be regular files, not symlinks or special files")
+        refs = {name: self.upload_file(path) for name, path in files.items()}
+        request = {field: plan[field] for field in ("id", "attempt", "machine", "session")}
+        request.update(key=key, requested_by=requested_by, reason=reason,
+                       source=dict(source), files=refs)
+        with self._file_request("POST", endpoint + "/recovered-results",
+                                json.dumps(request).encode(),
+                                {"Content-Type": "application/json"},
+                                sum(ref["size_bytes"] for ref in refs.values())) as response:
+            return json.load(response)
+
+    def download_result(self, job_id: str, artifact: str, destination: str | Path,
+                        *, recovered_result_id: str | None = None) -> Path:
+        """Fetch an accepted artifact or an explicitly selected recovered result.
 
         artifact is a manifest key; destination is an explicit caller path.
         Queue/worker paths are never interpreted as local paths.
         """
-        job = self.get(job_id)
-        if job.get("files_expired"):
-            raise APIError(410, json.dumps({"code": "result_expired", "error": "stored job files expired after the retention window"}))
-        if job["state"] != "succeeded":
-            raise APIError(409, json.dumps({"code": "request_stale", "error": "job has no accepted result"}))
-        ref = job.get("output_refs", {}).get(artifact)
+        if recovered_result_id is not None:
+            record = self._call("GET", f"/api/jobs/{quote(job_id, safe='')}/recovered-results/"
+                                f"{quote(recovered_result_id, safe='')}?require_files=true")
+            if record.get("kind") != "recovered":
+                raise ValueError("expected recovered result evidence")
+            ref = record.get("files", {}).get(artifact)
+        else:
+            job = self.get(job_id)
+            if job.get("files_expired"):
+                raise APIError(410, json.dumps({"code": "result_expired", "error": "stored job files expired after the retention window"}))
+            if job["state"] != "succeeded":
+                raise APIError(409, json.dumps({"code": "request_stale", "error": "job has no accepted result"}))
+            ref = (job.get("output_refs") or {}).get(artifact)
         if ref is None:
             raise APIError(404, json.dumps({"code": "artifact_unknown", "error": "accepted artifact not found"}))
         sha, size = ref["sha256"], ref["size_bytes"]
