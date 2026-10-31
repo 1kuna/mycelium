@@ -1723,6 +1723,10 @@
           "$ref": "#/$defs/FileManifest",
           "x-contract": "diagnostic"
         },
+        "output_reservation_bytes": {
+          "type": "integer",
+          "x-contract": "diagnostic"
+        },
         "pending_output_refs": {
           "$ref": "#/$defs/FileManifest",
           "x-contract": "diagnostic"

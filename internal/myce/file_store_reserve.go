@@ -166,19 +166,62 @@ func (q *Queue) fileStoreWriteClass(ctx context.Context, files FileManifest, gro
 // can claim its tier, and unidentified legacy writes can also use the reserve.
 // Attempt checks fence stale executions; they do not bind bytes to their owner.
 func (q *Queue) admitFileUpload(ctx context.Context, status FileStoreStatus, projected map[string]storedPayload, files FileManifest, need, growth uint64) (uint64, error) {
+	// Most uploads need no queue mutation. Keep ordinary preflight/creation on
+	// the existing read path; journal only an actual commitment yield.
 	q.mu.RLock()
-	defer q.mu.RUnlock()
-	production, identified, err := q.fileStoreWriteClass(ctx, files, growth)
-	if err != nil {
-		return 0, err
-	}
+	production, identified, classErr := q.fileStoreWriteClass(ctx, files, growth)
 	reserved := q.outputReservationsFor(projected, "", true)
-	if err := q.fileStoreReserveRefusal(status, need, growth, reserved, production); err != nil {
-		return 0, err
+	active := q.s.StorageAdmissionActive
+	if active {
+		need = addDiskBytes(growth, q.outputReservations(projected, ""))
 	}
-	if identified {
-		return 0, nil
+	refusal := q.fileStoreReserveRefusal(status, need, growth, reserved, production)
+	var ordinary uint64
+	if !identified {
+		available := q.nonProductionFileStoreFree(status, reserved)
+		ordinary = min(growth, need-min(need, available))
 	}
-	available := q.nonProductionFileStoreFree(status, reserved)
-	return min(growth, need-min(need, available)), nil
+	q.mu.RUnlock()
+	if classErr != nil {
+		return 0, classErr
+	}
+	if refusal == nil {
+		q.recordStorageWritePressure(ctx, status, projected, files, growth, false, "")
+		return ordinary, nil
+	}
+	if !active || !production || !identified {
+		return 0, refusal
+	}
+	var unidentified uint64
+	err := q.updateRequest(ctx, func() error {
+		production, identified, err := q.fileStoreWriteClass(ctx, files, growth)
+		if err != nil {
+			return err
+		}
+		if production && identified && growth > 0 {
+			demand := q.storageWriteDemand(ctx)
+			if demand != nil {
+				if err = q.yieldSharedOutput(demand, status, projected, growth, ""); err != nil {
+					return err
+				}
+			}
+		}
+		need = addDiskBytes(growth, q.outputReservations(projected, ""))
+		reserved := q.outputReservationsFor(projected, "", true)
+		// Re-evaluate classification unchanged, including unidentified legacy writes.
+		production, identified, err = q.fileStoreWriteClass(ctx, files, growth)
+		if err != nil {
+			return err
+		}
+		if err = q.fileStoreReserveRefusal(status, need, growth, reserved, production); err != nil {
+			return err
+		}
+		if !identified {
+			available := q.nonProductionFileStoreFree(status, reserved)
+			unidentified = min(growth, need-min(need, available))
+		}
+		return nil
+	}, nil)
+	q.recordStorageWritePressure(ctx, status, projected, files, growth, err != nil, "")
+	return unidentified, err
 }

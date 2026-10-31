@@ -32,7 +32,13 @@ func fitsResources(j *Job, m *Machine, memory float64) bool {
 func fitsResourcesChecked(j *Job, m *Machine, memory float64, report *targetFit) bool {
 	return report.check(sharedHostJobFits(j, m), "shared host profile") &&
 		report.check(diskHeadroomReason(j, m) == "", "disk headroom") &&
-		report.check(executionTargetMatches(j.Spec, m), "target") &&
+		fitsTargetResourcesChecked(j, m, memory, report)
+}
+
+// Shared target eligibility without the disk check. Storage diagnostics must
+// evaluate a shortage instead of discarding its host because of that shortage.
+func fitsTargetResourcesChecked(j *Job, m *Machine, memory float64, report *targetFit) bool {
+	return report.check(executionTargetMatches(j.Spec, m), "target") &&
 		report.check(nativeNetworkFits(j, m), "native network isolation") &&
 		report.check(j.MemoryEnvelope == nil || j.MemoryEnvelope.Refusal == "", "memory envelope") &&
 		report.check(!m.Recovering, "recovering") &&

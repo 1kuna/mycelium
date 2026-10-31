@@ -122,7 +122,7 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 	locked := readWallStart(q.observeRead)
 	hold := q.statusHolds.start()
 	var files fileStoreObservation
-	v := &Queue{clock: observationClock{q.clock.Now()}, nasAvailable: q.nasAvailable,
+	v := &Queue{clock: observationClock{q.clock.Now()}, nasAvailable: q.nasAvailable, fileStoreProductionReserve: q.fileStoreProductionReserve,
 		simulation: q.simulation, productionGrace: q.productionGrace, lossTimeouts: q.lossTimeouts,
 		productionInfrastructureRetries: q.productionInfrastructureRetries,
 		restartUntil:                    q.restartUntil, networkQuiet: q.networkQuiet, root: q.root}
@@ -282,6 +282,7 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 		detached.State.Jobs[key].simGatherWait = true
 	}
 	v.s, v.models, v.environments, v.calls, v.unreported = detached.State, detached.Models, detached.Environments, detached.Calls, detached.Unreported
+	files.admission = v
 	return v, files, nil
 }
 

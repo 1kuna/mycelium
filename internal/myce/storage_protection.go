@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -425,7 +426,15 @@ func (q *Queue) protectedStorageReason(j *Job, m *Machine) string {
 		}
 	}
 	if request.Bytes > b.CapacityBytes-min(b.CapacityBytes, bytes) || request.Files > b.CapacityFiles-min(b.CapacityFiles, files) {
-		return fmt.Sprintf("storage protection: worker custody budget full; need=%d bytes/%d files; retained=%d bytes/%d files", request.Bytes, request.Files, bytes, files)
+		freeBytes, freeFiles := b.CapacityBytes-min(b.CapacityBytes, bytes), b.CapacityFiles-min(b.CapacityFiles, files)
+		var holders []string
+		for _, a := range p.Allocations {
+			if a.Backing == b.ID {
+				holders = append(holders, a.Execution.ID)
+			}
+		}
+		slices.Sort(holders)
+		return fmt.Sprintf("storage protection: worker custody budget full; backing=%s need=%d bytes/%d files; retained=%d bytes/%d files; free=%d bytes/%d files deficit=%d bytes/%d files holders=%s; wait for verified delivery and legal release or route to another qualified worker", b.ID, request.Bytes, request.Files, bytes, files, freeBytes, freeFiles, request.Bytes-min(request.Bytes, freeBytes), request.Files-min(request.Files, freeFiles), strings.Join(slices.Compact(holders), ","))
 	}
 	return ""
 }
