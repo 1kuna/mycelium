@@ -206,6 +206,49 @@ func fleetHeartbeatAdvance(t *testing.T, q *Queue, c *fakeClock) {
 	fleetTick(t, q)
 }
 
+func TestFleetUpgradeFreshQueueWithoutWorkers(t *testing.T) {
+	q, c, _ := fleetFixture(t, "queue")
+	upgrade, err := q.StartFleetUpgrade(FleetUpgradeRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Retained custody must block even when no worker is currently enrolled.
+	q.s.HostReleases = map[string]HostRelease{"retained": {
+		Host: "queue", Job: "job", Machine: "former-worker", Session: "old", Attempt: 1,
+	}}
+	fleetTick(t, q)
+	h := q.fleetActiveHost()
+	policy := q.s.HostMaintenance["queue"]
+	if h == nil || h.Phase != "draining" || !h.Owned || policy.Mode != "drained" || policy.DrainOwner != upgrade.Operation {
+		t.Fatalf("queue did not acquire its upgrade drain: %+v %+v", h, policy)
+	}
+	if i, err := q.fleetInstruction("queue", "@queue", "queue-old"); err != nil || i.Operation != "" {
+		t.Fatalf("unreleased custody allowed cutover: %+v %v", i, err)
+	}
+	delete(q.s.HostReleases, "retained")
+	c.Advance(time.Second)
+	fleetTick(t, q)
+	if h.Phase != "queue_update" {
+		t.Fatalf("queue did not progress after custody cleared: %+v", h)
+	}
+	if i := fleetInstructionFor(t, q); i.Machine != "@queue" || i.Operation != upgrade.Operation {
+		t.Fatalf("wrong queue instruction: %+v", i)
+	}
+	// A newer operator drain must fence the previously authorized upgrade.
+	c.Advance(time.Second)
+	if _, err := q.ChangeHostMaintenance("queue", HostMaintenanceRequest{Action: "drain", DrainOwner: "operator"}); err != nil {
+		t.Fatal(err)
+	}
+	if i, err := q.fleetInstruction("queue", "@queue", "queue-old"); i.Operation != "" {
+		t.Fatalf("replaced drain allowed cutover: %+v %v", i, err)
+	}
+	fleetTick(t, q)
+	policy = q.s.HostMaintenance["queue"]
+	if q.s.FleetUpgrade.State != "stopped" || h.Failure != "maintenance_changed" || policy.Mode != "drained" || policy.DrainOwner != "operator" {
+		t.Fatalf("operator drain not preserved: %+v %+v", h, policy)
+	}
+}
+
 func TestFleetUpgradeSequentialProductionLastAndNaturalCompletion(t *testing.T) {
 	q, c, workers := fleetFixture(t, "z", "a", "b", "z")
 	s := spec("production")
