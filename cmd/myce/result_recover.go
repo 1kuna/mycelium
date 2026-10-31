@@ -52,9 +52,15 @@ func recoverResultCommand(ctx context.Context, args []string, errOut io.Writer) 
 		return fail(errors.New("failed attempt no longer matches --attempt"))
 	}
 	selected := map[string]string{}
+	var sourceRoot *os.Root
 	if len(paths) == 0 {
+		sourceRoot, err = os.OpenRoot(*root)
+		if err != nil {
+			return fail(err)
+		}
+		defer sourceRoot.Close()
 		for _, name := range plan.Outputs {
-			selected[name] = filepath.Join(*root, filepath.FromSlash(name))
+			selected[name] = filepath.FromSlash(name)
 		}
 	} else {
 		for _, pair := range paths {
@@ -69,6 +75,7 @@ func recoverResultCommand(ctx context.Context, args []string, errOut io.Writer) 
 		return fail(errors.New("job has no declared outputs"))
 	}
 	p := myce.RecoveryRequest{Execution: plan.Execution, Machine: plan.Machine, Session: plan.Session, Key: *key, RequestedBy: *by, Reason: *reason, Source: myce.RecoverySource{Kind: kind, Location: location}, Files: myce.FileManifest{}}
+	sources := map[string]*os.File{}
 	for name, path := range selected {
 		if name == "." || !fs.ValidPath(name) || strings.ContainsAny(name, "\\:") {
 			return fail(errors.New("output names must be clean relative paths"))
@@ -82,14 +89,24 @@ func recoverResultCommand(ctx context.Context, args []string, errOut io.Writer) 
 		if !declared {
 			return fail(errors.New("--file must name a declared output"))
 		}
-		info, err := os.Lstat(path)
+		lstat, open := os.Lstat, os.Open
+		if sourceRoot != nil {
+			lstat, open = sourceRoot.Lstat, sourceRoot.Open
+		}
+		info, err := lstat(path)
 		if err != nil {
 			return fail(err)
 		}
 		if !info.Mode().IsRegular() {
 			return fail(errors.New("recovery sources must be regular files, not symlinks or special files"))
 		}
-		ref, err := myce.IdentifyFile(path)
+		file, err := open(path)
+		if err != nil {
+			return fail(err)
+		}
+		defer file.Close()
+		sources[name] = file
+		ref, err := myce.IdentifyOpenFile(ctx, file)
 		if err != nil {
 			return fail(err)
 		}
@@ -98,8 +115,8 @@ func recoverResultCommand(ctx context.Context, args []string, errOut io.Writer) 
 	if err = c.PreflightFileStore(ctx, p.Files); err != nil {
 		return fail(err)
 	}
-	for name, path := range selected {
-		if err = c.UploadJobInput(ctx, path, p.Files[name]); err != nil {
+	for name, file := range sources {
+		if err = c.UploadJobInputFile(ctx, file, p.Files[name]); err != nil {
 			return fail(err)
 		}
 	}

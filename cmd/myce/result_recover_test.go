@@ -4,15 +4,42 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	"mycelium/internal/myce"
 )
+
+func TestResultRecoverSourceContainment(t *testing.T) {
+	root, outside := t.TempDir(), t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "out.txt"), []byte("outside source root"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "nested")); err != nil {
+		t.Fatal(err)
+	}
+	var fileRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/jobs/job/recovery-plan" {
+			_ = json.NewEncoder(w).Encode(myce.RecoveryPlan{Execution: myce.Execution{ID: "job", Attempt: 1}, Machine: "worker", Session: "session", Outputs: []string{"nested/out.txt"}})
+			return
+		}
+		fileRequests.Add(1)
+		http.Error(w, "unexpected file transfer", http.StatusBadRequest)
+	}))
+	defer server.Close()
+	err := resultCommand(context.Background(), []string{"recover", "job", "--queue", server.URL, "--token", "fixture", "--files-from", root, "--key", "containment", "--by", "owner", "--reason", "retained bytes"}, io.Discard)
+	if err == nil || fileRequests.Load() != 0 {
+		t.Fatalf("source escaped --files-from: err=%v file requests=%d", err, fileRequests.Load())
+	}
+}
 
 func TestResultRecoverCLI(t *testing.T) {
 	root := t.TempDir()
@@ -23,7 +50,10 @@ func TestResultRecoverCLI(t *testing.T) {
 	defer d.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), devTestTimeout)
 	defer cancel()
-	input := filepath.Join(root, "out.txt")
+	if err = os.Mkdir(filepath.Join(root, "nested"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	input := filepath.Join(root, "nested", "out.txt")
 	if err = os.WriteFile(input, []byte("retained output"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -35,7 +65,7 @@ func TestResultRecoverCLI(t *testing.T) {
 	if err = c.UploadFile(ctx, input, ref); err != nil {
 		t.Fatal(err)
 	}
-	j, err := c.SubmitAndWait(ctx, myce.Spec{Name: "recovery", Project: "demo", SubmissionKey: "recovery-cli", Files: myce.FileManifest{"input": ref}, Outputs: map[string]string{"out.txt": "results"}, Run: myce.RunSpec{Command: []string{"sh", "-c", "cat input > out.txt; exit 1"}}, Needs: myce.ResourceNeeds{CPUCores: 1, MemoryGB: 1, Platform: myce.Platform{Required: []string{"cpu"}}}})
+	j, err := c.SubmitAndWait(ctx, myce.Spec{Name: "recovery", Project: "demo", SubmissionKey: "recovery-cli", Files: myce.FileManifest{"input": ref}, Outputs: map[string]string{"nested/out.txt": "results"}, Run: myce.RunSpec{Command: []string{"sh", "-c", "mkdir nested; cat input > nested/out.txt; exit 1"}}, Needs: myce.ResourceNeeds{CPUCores: 1, MemoryGB: 1, Platform: myce.Platform{Required: []string{"cpu"}}}})
 	if err != nil || j.State != "failed" {
 		t.Fatalf("failed native attempt: %+v %v", j, err)
 	}
@@ -57,7 +87,7 @@ func TestResultRecoverCLI(t *testing.T) {
 	if !strings.Contains(message.String(), "recovered result") {
 		t.Fatal("download did not identify recovery")
 	}
-	if data, err := os.ReadFile(filepath.Join(dest, "out.txt")); err != nil || string(data) != "retained output" {
+	if data, err := os.ReadFile(filepath.Join(dest, "nested", "out.txt")); err != nil || string(data) != "retained output" {
 		t.Fatalf("download: %q %v", data, err)
 	}
 	status := captureJoiningOutput(t, func() error { return run([]string{"status", "--queue", d.URL, "--token", c.Token, j.ID}) })
@@ -77,7 +107,7 @@ func TestResultRecoverCLI(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err = resultCommand(ctx, []string{"recover", j.ID, "--queue", d.URL, "--token", c.Token, "--key", "invalid-source", "--by", "owner", "--reason", "source validation", "--file", "out.txt=" + path}, io.Discard); err == nil || !strings.Contains(err.Error(), "regular files") {
+		if err = resultCommand(ctx, []string{"recover", j.ID, "--queue", d.URL, "--token", c.Token, "--key", "invalid-source", "--by", "owner", "--reason", "source validation", "--file", "nested/out.txt=" + path}, io.Discard); err == nil || !strings.Contains(err.Error(), "regular files") {
 			t.Fatalf("special source %s: %v", kind, err)
 		}
 	}

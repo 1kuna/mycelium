@@ -79,6 +79,15 @@ func identifyFileContext(ctx context.Context, path string) (FileRef, error) {
 		return FileRef{}, err
 	}
 	defer f.Close()
+	return IdentifyOpenFile(ctx, f)
+}
+
+// IdentifyOpenFile hashes a regular file through its already-open handle.
+// The caller retains ownership; identification starts at offset zero.
+func IdentifyOpenFile(ctx context.Context, f *os.File) (FileRef, error) {
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return FileRef{}, err
+	}
 	st, err := f.Stat()
 	if err != nil {
 		return FileRef{}, err
@@ -749,10 +758,32 @@ func (c Client) UploadJobInput(ctx context.Context, path string, ref FileRef) er
 	return c.uploadFile(ctx, path, ref, jobInputUploadPurpose)
 }
 
+// UploadJobInputFile uploads from an open handle without reopening a pathname.
+// The caller owns the handle. Its bytes must still match the identified ref.
+func (c Client) UploadJobInputFile(ctx context.Context, f *os.File, ref FileRef) error {
+	actual, err := IdentifyOpenFile(ctx, f)
+	if err != nil {
+		return err
+	}
+	if actual != ref {
+		return errors.New("file changed before upload")
+	}
+	return c.uploadFileReader(ctx, f, ref, jobInputUploadPurpose)
+}
+
 func (c Client) uploadFile(ctx context.Context, path string, ref FileRef, purpose string) error {
 	if err := verifyFile(ctx, path, ref); err != nil {
 		return err
 	}
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return c.uploadFileReader(ctx, f, ref, purpose)
+}
+
+func (c Client) uploadFileReader(ctx context.Context, f io.ReadSeeker, ref FileRef, purpose string) error {
 	headPurpose := purpose
 	if headPurpose == "" {
 		headPurpose = fileImportUploadPurpose
@@ -793,11 +824,6 @@ func (c Client) uploadFile(ctx context.Context, path string, ref FileRef, purpos
 	if e != nil || se != nil || size != ref.SizeBytes || offset < 0 || offset > size {
 		return errors.New("invalid resumable upload offset/size")
 	}
-	f, err := os.Open(path)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
 	if _, err = f.Seek(offset, io.SeekStart); err != nil {
 		return err
 	}

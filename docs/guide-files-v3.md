@@ -121,7 +121,9 @@ myce result recover JOB_ID --files-from ./retained-outputs \
 For different filenames or a subset of outputs, use repeated
 `--file 'answer.json=/mounted/source/answer.json'` instead of `--files-from`.
 Sources are read and uploaded, never changed. Symlinks and special files are
-refused. `--source upload:LABEL` is the default source kind; `nas:RELATIVE_PATH`
+refused. Automatic selection stays beneath `--files-from`, including parent
+directory resolution, and uploads retain the opened source file even if its
+pathname changes. `--source upload:LABEL` is the default source kind; `nas:RELATIVE_PATH`
 records an operator-asserted NAS origin. Source labels must be relative and omit
 private host paths and credentials. The queue does not open caller-selected NAS
 paths. Requester labels and reasons must be nonempty, without control characters.
