@@ -180,6 +180,8 @@ func installTestFlagValue(s InstallSetting, zero bool) string {
 			return "/fixture/changed"
 		}
 		switch s.Flag {
+		case "discovery-listen":
+			return "127.0.0.1:7443"
 		case "queue":
 			return "https://changed.invalid"
 		case "gpu":

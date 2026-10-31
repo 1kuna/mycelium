@@ -316,6 +316,82 @@ func LoadJoiningIdentity(dir string) (JoiningIdentity, error) {
 	return i, err
 }
 
+// ListenJoining preserves the selected bind in installed settings, or beside
+// the durable identity for a foreground queue. Only a saved bind may fall back;
+// an explicit command-line address retains ordinary listen error semantics.
+func ListenJoining(queueAddress net.Addr, explicit, configPath, identityDir string, listen func(string) (net.Listener, error), warn func(string, ...any)) (net.Listener, error) {
+	var config ServiceConfig
+	saved := struct {
+		Listen string `json:"listen"`
+	}{}
+	path := filepath.Join(identityDir, "listen.json")
+	var err error
+	if configPath != "" {
+		config, err = ReadServiceConfig(configPath)
+		if err != nil {
+			return nil, err
+		}
+		if config.Role != "queue" {
+			return nil, errors.New("joining listener settings require a queue config")
+		}
+		path, saved.Listen = configPath, config.DiscoveryListen
+	} else {
+		data, e := os.ReadFile(path)
+		if e == nil {
+			if err := json.Unmarshal(data, &saved); err != nil {
+				return nil, err
+			}
+		} else if !errors.Is(e, os.ErrNotExist) {
+			return nil, e
+		}
+	}
+	host, _, err := net.SplitHostPort(queueAddress.String())
+	if err != nil {
+		return nil, err
+	}
+	automatic := net.JoinHostPort(host, "0")
+	bind := explicit
+	if bind == "" {
+		bind = saved.Listen
+	}
+	if bind == "" {
+		bind = automatic
+	}
+	listener, err := listen(bind)
+	if explicit == "" && saved.Listen != "" && errors.Is(err, syscall.EADDRINUSE) {
+		warn("Saved TLS joining port is busy; selecting and saving an automatic port. Saved HTTPS addresses may need repair with myce install worker --config FILE --queue HTTPS_ORIGIN")
+		bind = automatic
+		listener, err = listen(automatic)
+	}
+	if err != nil {
+		return nil, err
+	}
+	// Keep an explicitly configured interface/hostname, replacing only port 0.
+	host, _, err = net.SplitHostPort(bind)
+	if err == nil {
+		_, port, e := net.SplitHostPort(listener.Addr().String())
+		err = e
+		saved.Listen = net.JoinHostPort(host, port)
+	}
+	var data []byte
+	if err == nil {
+		if configPath != "" {
+			config.DiscoveryListen = saved.Listen
+			data, err = json.MarshalIndent(config, "", "  ")
+		} else {
+			data, err = json.Marshal(saved)
+		}
+	}
+	if err == nil {
+		err = writeInstallFile(path, data, 0600, installFiles{}, nil)
+	}
+	if err != nil {
+		listener.Close()
+		return nil, fmt.Errorf("save TLS joining listen address: %w", err)
+	}
+	return listener, nil
+}
+
 // ServeJoining shares the existing API, with authenticated transport for discovery.
 func ServeJoining(listener net.Listener, handler http.Handler, identity JoiningIdentity) (*http.Server, <-chan error, error) {
 	cert, err := identity.TLS()

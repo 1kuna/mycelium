@@ -639,6 +639,44 @@ over an existing installation. Fresh Linux installs use one `myce-worker.service
 conversion below before installing this version.
 Docker is optional (`--docker-host` opts in); ambient `DOCKER_HOST` is not adopted.
 
+The queue saves its selected TLS joining bind as `discovery_listen` in the queue
+install config on first start and reuses it across restarts and reinstalls.
+Older configs select and save a port on their next start. Foreground queues save
+the same setting in `listen.json` beside their durable joining identity (default
+`DB.joining`). Keep that directory with the database when restarting or moving it.
+To set or change the installed bind, use:
+
+```sh
+myce install queue --config QUEUE_CONFIG --discovery-listen 0.0.0.0:7443
+```
+
+An empty setting or port `0` selects and saves an automatic port. If a saved port
+is busy, the queue warns, selects and saves another automatic port, and continues;
+saved HTTPS addresses may then need repair. A runtime `myce queue
+--discovery-listen ADDRESS` overrides the saved setting and saves the selected
+bind; an explicit busy address fails instead of falling back. Queue services read
+this setting from the config at startup so generated service arguments cannot
+retain an old automatic port.
+
+If an enrolled worker has a stale HTTPS queue address and discovery is unavailable,
+repair it through the supported reinstall path:
+
+```sh
+myce install worker --config WORKER_CONFIG --queue https://queue.example:7443
+```
+
+This verifies the new endpoint against the installed joining authority's existing
+certificate pin, then publishes the authority's saved `address` before the worker
+config's `queue`. On its next start the service reads `--joining-file`, so an
+interruption between those writes leaves it able to use the verified new address
+even while the config still shows the old one. Re-run the same repair command to reconcile
+the config and finish installation. This also repairs older interrupted installs
+that wrote only the config. The pin and credentials are preserved exactly.
+A pin mismatch refuses the repair without changing installed files; this
+path cannot replace the authority or rotate its pin. Changing an address requires
+the new queue endpoint to be reachable. Preview with `--dry-run` to inspect the
+config change without verification or writes.
+
 Drain/disable admission before installing an upgrade. Matching queue and workers
 must use the current protocol. The installer updates only the selected service,
 enables/starts it and restarts an existing Linux service. It installs no local

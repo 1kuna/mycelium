@@ -153,6 +153,7 @@ type ServiceConfig struct {
 	Name                  string    `json:"name"`
 	Queue                 string    `json:"queue"`
 	Listen                string    `json:"listen"`
+	DiscoveryListen       string    `json:"discovery_listen,omitempty"`
 	NAS                   string    `json:"nas"`
 	Checkpoints           string    `json:"checkpoint_root"`
 	ModelRoot             string    `json:"model_root"`
@@ -347,6 +348,7 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 	}
 	c.Version = 1
 	existing := false
+	var installed ServiceConfig
 	if _, err := os.Lstat(c.Config); err == nil {
 		old, err := ReadServiceConfig(c.Config)
 		if err != nil {
@@ -356,6 +358,7 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 			return err
 		}
 		existing = true
+		installed = old
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -365,6 +368,25 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 		}
 	}
 	var invitation *Invitation
+	if existing && installed.JoiningFile != "" {
+		if c.JoiningFile != installed.JoiningFile {
+			return errors.New("address repair must preserve the installed joining authority and certificate pin")
+		}
+		i, err := ReadInvitation(installed.JoiningFile)
+		if err != nil {
+			return err
+		}
+		// Also repair a previous reinstall that changed config.Queue alone.
+		if c.Queue != installed.Queue || strings.HasPrefix(c.Queue, "https://") && c.Queue != i.Address {
+			client, err := ResolveJoining(ctx, i, c.Queue, nil)
+			if err != nil {
+				return fmt.Errorf("cannot update joining address using the saved certificate pin: %w", err)
+			}
+			client.HTTP.CloseIdleConnections()
+			i.Address = c.Queue
+			invitation = &i
+		}
+	}
 	if c.JoiningFile != "" && !existing {
 		if c.Role != "worker" || c.EnvironmentFile != "" {
 			return errors.New("joining invitation requires a worker without EnvironmentFile")
@@ -428,9 +450,9 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 	if err != nil {
 		return err
 	}
-	if err = tx.put(c.Config, configData, 0600); err != nil {
-		return err
-	}
+	// The service reconnects through --joining-file. Publish that address first
+	// so an interrupted repair can reconnect; repeating the same repair then
+	// reconciles a config publication that did not finish.
 	if invitation != nil {
 		invitationData, err := json.Marshal(invitation)
 		if err != nil {
@@ -439,6 +461,9 @@ func installWithFiles(ctx context.Context, c ServiceConfig, executable, token st
 		if err = tx.put(c.JoiningFile, invitationData, 0600); err != nil {
 			return err
 		}
+	}
+	if err = tx.put(c.Config, configData, 0600); err != nil {
+		return err
 	}
 	if c.EnvironmentFile == "" && !existing && invitation == nil && !files.machineConversion {
 		if token == "" {
@@ -750,6 +775,9 @@ func (c ServiceConfig) Args() []string {
 	args := []string{}
 	if c.Role == "queue" {
 		args = []string{"queue", "--listen", c.Listen, "--db", c.DB, "--checkpoints", c.Checkpoints, "--queue", c.Queue}
+		// Read the saved joining bind at startup, rather than embedding an
+		// automatic port in systemd's argv that can become stale after fallback.
+		args = append(args, "--service-config", c.Config)
 	} else {
 		args = []string{"join", "--reserve-cpu-cores", strconv.Itoa(c.CPUReserveCores), "--cpu-budget-cores", strconv.Itoa(c.CPUBudgetCores), "--host-memory-budget-gb", strconv.FormatFloat(c.HostMemoryBudgetGB, 'f', -1, 64), "--memory-ceiling-slack-gb", strconv.FormatFloat(c.MemoryCeilingSlackGB, 'f', -1, 64), "--memory-swap-max-bytes", strconv.FormatInt(c.MemorySwapMaxBytes, 10), "--name", c.Name, "--gpu", c.Detection.Platform, "--memory-mode", c.Detection.MemoryMode, "--memory-gb", strconv.FormatFloat(c.Detection.MemoryGB, 'f', -1, 64), "--reserve-memory-gb", strconv.FormatFloat(c.Detection.ReserveGB, 'f', -1, 64), "--state-dir", c.State, "--checkpoint-root", c.Checkpoints, "--job-file-root", c.NAS, "--model-root", c.ModelRoot, "--model-cache", c.ModelCache, "--model-cache-bytes", strconv.FormatInt(c.ModelCacheBytes, 10), "--environment-root", c.EnvironmentRoot, "--environment-cache", c.EnvironmentCache, "--environment-cache-bytes", strconv.FormatInt(c.EnvironmentCacheBytes, 10)}
 	}
