@@ -18,18 +18,43 @@ type AttemptMemoryPeak struct {
 	// evidence). Only observeAttemptMemory promotes a complete sample history.
 	nonreclaimableSampleGB *float64
 	pressureTotalUS        uint64
+	pressureAvg10          float64
 
-	GPUHost             *GPUHostMemory     `json:"gpu_host,omitempty"`
-	NonreclaimableGB    *float64           `json:"nonreclaimable_gb,omitempty"`
-	HostGB              *float64           `json:"host_gb,omitempty"`
-	CgroupGB            *float64           `json:"cgroup_gb,omitempty"`
-	DeviceGB            *float64           `json:"device_gb,omitempty"`
-	DeviceUnavailable   string             `json:"device_unavailable,omitempty"`
-	SwapGB              *float64           `json:"swap_gb,omitempty"`
-	Source              string             `json:"source,omitempty"`
-	Events              *MemoryEventCounts `json:"events,omitempty"`
-	Constrained         bool               `json:"constrained,omitempty"`
-	PressureUnavailable bool               `json:"pressure_unavailable,omitempty"`
+	GPUHost             *GPUHostMemory          `json:"gpu_host,omitempty"`
+	NonreclaimableGB    *float64                `json:"nonreclaimable_gb,omitempty"`
+	HostGB              *float64                `json:"host_gb,omitempty"`
+	CgroupGB            *float64                `json:"cgroup_gb,omitempty"`
+	DeviceGB            *float64                `json:"device_gb,omitempty"`
+	DeviceUnavailable   string                  `json:"device_unavailable,omitempty"`
+	SwapGB              *float64                `json:"swap_gb,omitempty"`
+	Source              string                  `json:"source,omitempty"`
+	Events              *MemoryEventCounts      `json:"events,omitempty"`
+	Constrained         bool                    `json:"constrained,omitempty"`
+	PressureUnavailable bool                    `json:"pressure_unavailable,omitempty"`
+	Pressure            *MemoryPressureEvidence `json:"pressure,omitempty"`
+}
+
+// One bounded comparison per physical attempt, retained on Result and job GET.
+// Nil totals mean unavailable/reset, never zero stalls. avg10 is detail only.
+// The stall threshold is 1% of ElapsedUS; swap/floor thresholds are in GiB.
+type MemoryPressureEvidence struct {
+	Reason              string   `json:"reason"`
+	ElapsedUS           float64  `json:"elapsed_us"`
+	HostStallUS         *uint64  `json:"host_stall_us,omitempty"`
+	CgroupStallUS       *uint64  `json:"cgroup_stall_us,omitempty"`
+	HostAvg10           float64  `json:"host_avg10"`
+	CgroupAvg10         float64  `json:"cgroup_avg10"`
+	HostSwapGrowthBytes uint64   `json:"host_swap_growth_bytes"`
+	HostSwapOutBytes    uint64   `json:"host_swap_out_bytes"`
+	ResidentGB          float64  `json:"resident_gb"`
+	MinAvailableGB      *float64 `json:"min_available_gb,omitempty"`
+	ReserveGB           float64  `json:"reserve_gb"`
+	AvailableFloorGB    float64  `json:"available_floor_gb"`
+	SwapBudgetGB        float64  `json:"swap_budget_gb"`
+	HostOOMDelta        uint64   `json:"host_oom_delta"`
+	HostPressureLevel   int      `json:"host_pressure_level,omitempty"`
+	CgroupRefaultAnon   uint64   `json:"cgroup_refault_anon,omitempty"`
+	CgroupSwapOutPages  uint64   `json:"cgroup_swap_out_pages,omitempty"`
 }
 
 // Attempt-parent memory.events counters. Nil on the peak means they were not
@@ -72,17 +97,19 @@ type AttemptMemoryFacts struct {
 	Session        string             `json:"session"`
 	MemoryPeak     *AttemptMemoryPeak `json:"memory_peak,omitempty"`
 	MemoryEnvelope *JobMemoryEnvelope `json:"memory_envelope,omitempty"`
+	LearningReason string             `json:"learning_reason,omitempty"`
 }
 
-func recordAttemptMemory(j *Job, r Result) {
+func (q *Queue) recordAttemptMemory(j *Job, r Result) {
 	if j.Attempt == 0 || j.Machine == "" || j.Session == "" {
 		return
 	}
 	if j.StartedAt == nil && r.MemoryPeak == nil {
 		return // Prelaunch refusals have no runtime memory facts to retain.
 	}
+	_, reason := q.memoryLearningSample(j, r)
 	facts := AttemptMemoryFacts{Attempt: j.Attempt, Machine: j.Machine, Session: j.Session,
-		MemoryPeak: sampledMemoryPeak(nil, r.MemoryPeak)}
+		MemoryPeak: sampledMemoryPeak(nil, r.MemoryPeak), LearningReason: reason}
 	if facts.MemoryPeak != nil && facts.MemoryPeak.Source != processGroupMemorySource {
 		facts.MemoryPeak.Source = "" // Only publish the known measurement label.
 	}
@@ -93,6 +120,14 @@ func recordAttemptMemory(j *Job, r Result) {
 	for i, old := range j.MemoryAttempts {
 		if old.Attempt == facts.Attempt && old.Machine == facts.Machine && old.Session == facts.Session {
 			if facts.MemoryPeak != nil {
+				// Cleanup acknowledgements add telemetry, never rewrite the
+				// eligibility decision of the accepted completion.
+				if r.ReleaseOnly && old.LearningReason != "" {
+					facts.LearningReason = old.LearningReason
+					if old.MemoryPeak != nil && old.MemoryPeak.Pressure != nil {
+						facts.MemoryPeak.Pressure = old.MemoryPeak.Pressure
+					}
+				}
 				j.MemoryAttempts[i] = facts
 			}
 			return

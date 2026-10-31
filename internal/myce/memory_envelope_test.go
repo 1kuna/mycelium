@@ -88,6 +88,12 @@ func TestMemoryEnvelopeCeilingBoundThenExploratory(t *testing.T) {
 				t.Fatalf("ceiling pressure changed the attempt outcome: %+v", got)
 			}
 			for _, point := range q.s.WorkObservations {
+				if tc.success && tc.mode == "auto" {
+					if point.MemoryRecordedAt.IsZero() || point.MemoryPeak == nil || *point.MemoryPeak.HostGB != 2 {
+						t.Errorf("successful constrained sample erased accepted peak: %+v", point)
+					}
+					continue
+				}
 				if point.MemoryPeak != nil && !point.MemoryPeak.Constrained || !point.MemoryRecordedAt.IsZero() || point.Forbidden {
 					t.Errorf("cap-bound result retained a learned peak or forbade work: %+v", point)
 				}
@@ -97,6 +103,12 @@ func TestMemoryEnvelopeCeilingBoundThenExploratory(t *testing.T) {
 			wantSource := "exploratory first run"
 			if tc.mode == "auto" {
 				wantSource = "exploratory (previous peak constrained)"
+			}
+			if tc.success && tc.mode == "auto" {
+				if next.MemoryEnvelope.Source != "accepted peak × 1.25" || next.Spec.Needs.HostMemoryGB != 2.5 {
+					t.Fatalf("rejected sample changed accepted envelope: %+v", next.MemoryEnvelope)
+				}
+				return
 			}
 			if next.MemoryEnvelope.Source != wantSource || next.Spec.Needs.HostMemoryGB <= bound.Spec.Needs.HostMemoryGB {
 				t.Fatalf("next auto run did not explore a larger envelope: bound=%+v next=%+v", bound.MemoryEnvelope, next.MemoryEnvelope)
@@ -913,7 +925,7 @@ func TestMemoryEnvelopeNativeGroupPeak(t *testing.T) {
 }
 
 // A previously accepted explicit-cap peak must stop seeding auto once a
-// comparable explicit attempt demonstrates that the ceiling is binding.
+// comparable explicit attempt fails at its ceiling.
 func TestMemoryEnvelopeExplicitPressureInvalidatesSeed(t *testing.T) {
 	q, clock, m, s := observationFixture(t)
 	s.SizeHint.HostMemoryGB = 4
@@ -927,7 +939,7 @@ func TestMemoryEnvelopeExplicitPressureInvalidatesSeed(t *testing.T) {
 	}
 	bound := startObservation(t, q, m, s)
 	clock.Advance(time.Second)
-	r = result(&bound, true)
+	r = result(&bound, false)
 	r.MemoryPeak = envelopeCeilingPeak(t, host)
 	if err := q.Complete(r); err != nil {
 		t.Fatal(err)
@@ -938,9 +950,9 @@ func TestMemoryEnvelopeExplicitPressureInvalidatesSeed(t *testing.T) {
 	if next.MemoryEnvelope.Source != "exploratory (previous peak constrained)" {
 		t.Errorf("constrained explicit attempt left its old seed usable: %+v", next.MemoryEnvelope)
 	}
-	// Subsequent auto pressure must continue to invalidate comparable evidence.
+	// Subsequent failed auto pressure still invalidates comparable evidence.
 	clock.Advance(time.Second)
-	r = result(&next, true)
+	r = result(&next, false)
 	r.MemoryPeak = envelopeCeilingPeak(t, next.MemoryEnvelope.HostGB)
 	if err := q.Complete(r); err != nil {
 		t.Fatal(err)
@@ -1116,12 +1128,12 @@ func TestMemoryEnvelopeTotalPeakAndFileBackedPressure(t *testing.T) {
 		t.Fatal("pressure changed successful outcome")
 	}
 	next := startObservation(t, q, m, s)
-	if next.MemoryEnvelope.Source != "exploratory (previous peak constrained)" {
-		t.Errorf("ceiling pressure remained accepted: %+v", next.MemoryEnvelope)
+	if next.MemoryEnvelope.Source != "accepted peak × 1.25" || next.MemoryEnvelope.HostGB != 15 {
+		t.Errorf("successful constrained sample changed accepted envelope: %+v", next.MemoryEnvelope)
 	}
 	for _, point := range q.s.WorkObservations {
-		if !point.MemoryRecordedAt.IsZero() || point.Forbidden || !validRate(point.Rate) {
-			t.Errorf("pressure must invalidate only memory, retaining throughput: %+v", point)
+		if point.MemoryRecordedAt.IsZero() || point.Forbidden || !validRate(point.Rate) || *point.MemoryPeak.CgroupGB != 12 {
+			t.Errorf("rejected sample must preserve accepted memory and throughput: %+v", point)
 		}
 	}
 	clock.Advance(time.Second)
@@ -1277,9 +1289,10 @@ func TestMemoryEnvelopeMeasuredRangeAdmissionAndPressure(t *testing.T) {
 		t.Fatalf("shared host ledger did not admit both inside allowance: %.9f", got)
 	}
 	clock.Advance(time.Second)
-	r := result(&running[0], true)
+	r := result(&running[0], false)
 	host := samples[0][1]
-	// An old worker's flag can be false even when max events prove pressure.
+	// A failed old-worker attempt can omit the flag even when max events prove
+	// pressure. Failed-attempt invalidation still discards the reduced range.
 	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, NonreclaimableGB: &host, CgroupGB: &totals[0], Events: &MemoryEventCounts{Max: 2004}}
 	if err := q.Complete(r); err != nil {
 		t.Fatal(err)

@@ -18,15 +18,14 @@ func (a *memoryAttempt) peak() *AttemptMemoryPeak {
 	if a == nil {
 		return nil
 	}
-	p := &AttemptMemoryPeak{}
-	// PSI some includes full stalls. The same 1% avg10 band used for shared
-	// hosts bounds reclaim stalls to about 100 ms per ten seconds.
+	p := &AttemptMemoryPeak{Pressure: &MemoryPressureEvidence{Reason: "eligible"}}
+	// PSI some includes full stalls. Eligibility uses baselined cumulative
+	// totals over the attempt window; avg10 is diagnostic only.
 	b, err := a.fs.ReadFile(filepath.Join(a.path, "memory.pressure"))
 	psi, psiErr := sharedMemoryPSI(b)
 	total, totalErr := memoryPSITotal(b)
-	p.pressureTotalUS = total
+	p.pressureTotalUS, p.pressureAvg10 = total, psi
 	p.PressureUnavailable = err != nil || psiErr != nil || totalErr != nil
-	p.Constrained = !p.PressureUnavailable && psi >= sharedPSIHigh
 	if b, err := a.fs.ReadFile(filepath.Join(a.path, "memory.peak")); err == nil {
 		if n, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64); err == nil {
 			gb := float64(n) / (1 << 30)
@@ -58,6 +57,10 @@ func (a *memoryAttempt) peak() *AttemptMemoryPeak {
 		for _, name := range []string{"workingset_refault_anon", "pswpout"} {
 			p.Constrained = p.Constrained || stats[name] > 0
 		}
+		p.Pressure.CgroupRefaultAnon, p.Pressure.CgroupSwapOutPages = stats["workingset_refault_anon"], stats["pswpout"]
+		if p.Constrained {
+			p.Pressure.Reason = "cgroup_refault_or_swap_out"
+		}
 	}
 	if b, err := a.fs.ReadFile(filepath.Join(a.path, "memory.events")); err == nil {
 		events := memoryCounters(b)
@@ -65,11 +68,17 @@ func (a *memoryAttempt) peak() *AttemptMemoryPeak {
 		// File-backed working sets can bind while resident-only samples retain
 		// apparent headroom. Any max/high pressure makes true need unknown.
 		p.Constrained = p.constrained() || events["oom"] > 0 || events["oom_kill"] > 0 || events["oom_group_kill"] > 0
+		if p.Constrained && p.Pressure.Reason == "eligible" {
+			p.Pressure.Reason = "cgroup_events"
+		}
 	}
 	for _, name := range []string{"memory.swap.peak", "memory.swap.current"} {
 		if b, err := a.fs.ReadFile(filepath.Join(a.path, name)); err == nil {
 			n, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64)
 			p.Constrained = p.Constrained || err != nil || n > 0
+			if (err != nil || n > 0) && p.Pressure.Reason == "eligible" {
+				p.Pressure.Reason = "cgroup_swap"
+			}
 			if name == "memory.swap.peak" && err == nil {
 				gb := float64(n) / (1 << 30)
 				p.SwapGB = &gb
@@ -89,6 +98,9 @@ func (a *memoryAttempt) peak() *AttemptMemoryPeak {
 				child.bytes, _ = strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
 			}
 			if peak := child.peak(); peak != nil {
+				if peak.Constrained && !p.Constrained {
+					p.Pressure.Reason = "descendant_" + strings.TrimPrefix(peak.Pressure.Reason, "descendant_")
+				}
 				p.Constrained = p.Constrained || peak.Constrained
 				p.PressureUnavailable = p.PressureUnavailable || peak.PressureUnavailable
 			}
@@ -96,6 +108,9 @@ func (a *memoryAttempt) peak() *AttemptMemoryPeak {
 	}
 	if p.HostGB == nil && p.CgroupGB == nil && p.SwapGB == nil && p.Events == nil && !p.Constrained {
 		return nil
+	}
+	if !p.Constrained {
+		p.Pressure.Reason = "counter_snapshot_only" // No baselined observation window yet.
 	}
 	return p
 }
@@ -140,6 +155,22 @@ func sampledMemoryPeak(old, next *AttemptMemoryPeak) *AttemptMemoryPeak {
 	}
 	out.Constrained = next.Constrained || old != nil && old.Constrained
 	out.PressureUnavailable = next.PressureUnavailable || old != nil && old.PressureUnavailable
+	if next.Pressure != nil {
+		e := *next.Pressure
+		out.Pressure = &e
+	}
+	if old != nil && old.Pressure != nil {
+		if out.Pressure == nil {
+			e := *old.Pressure
+			out.Pressure = &e
+		} else {
+			out.Pressure.CgroupRefaultAnon = max(out.Pressure.CgroupRefaultAnon, old.Pressure.CgroupRefaultAnon)
+			out.Pressure.CgroupSwapOutPages = max(out.Pressure.CgroupSwapOutPages, old.Pressure.CgroupSwapOutPages)
+			if old.Constrained {
+				out.Pressure.Reason = old.Pressure.Reason
+			}
+		}
+	}
 	return out
 }
 
@@ -275,7 +306,11 @@ func (w Worker) observeProcessMemory(groups func() []int) func() *AttemptMemoryP
 		mu.Lock()
 		defer mu.Unlock()
 		if peak != nil && peak.HostGB != nil {
-			peak.Constrained = !complete || hostMemoryPressured(baseline, &worst, *peak.HostGB, w.HostMemoryReserveGB, os.Getpagesize())
+			peak.Pressure = hostPressureEvidence(baseline, &worst, *peak.HostGB, w.HostMemoryReserveGB, os.Getpagesize())
+			if !complete {
+				peak.Pressure.Reason = "host_pressure_unavailable"
+			}
+			peak.Constrained = peak.Pressure.Reason != "eligible"
 		}
 		return peak
 	}
@@ -331,6 +366,8 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 	completeGPUHost := gpuHost && a.hostBaseline != nil
 	var worstHost gpuHostState
 	pressureKnown := a.hostBaseline != nil && a.pressureBaseline != nil && !a.pressureStart.IsZero()
+	unknownReason := "pressure_baseline_unavailable"
+	var groupAvg10 float64
 	var groupTotal uint64
 	if a.pressureBaseline != nil {
 		groupTotal = *a.pressureBaseline
@@ -344,12 +381,17 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 		// cgroup attempt, independently of complete DRM/component evidence.
 		if component == nil || component.PressureUnavailable || component.pressureTotalUS < groupTotal {
 			pressureKnown = false
+			unknownReason = "cgroup_psi_unavailable_or_reset"
 		} else {
 			groupTotal = component.pressureTotalUS
+		}
+		if component != nil {
+			groupAvg10 = max(groupAvg10, component.pressureAvg10)
 		}
 		host, err := readGPUHostState(a.fs)
 		if err != nil || a.hostBaseline == nil || host.oom < worstHost.oom || host.swapOut < worstHost.swapOut || host.psiTotalUS < worstHost.psiTotalUS {
 			pressureKnown = false
+			unknownReason = "host_pressure_unavailable_or_reset"
 			completeGPUHost = false
 			return
 		}
@@ -445,9 +487,39 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 			if !pressureKnown || elapsed <= 0 {
 				record(&AttemptMemoryPeak{PressureUnavailable: true})
 				completeGPUHost = false
-			} else if peak != nil && peak.HostGB != nil && (hostMemoryPressured(a.hostBaseline, &worstHost, *peak.HostGB, w.HostMemoryReserveGB, a.pageSize) ||
-				memoryStallPressure(a.hostBaseline.psiTotalUS, worstHost.psiTotalUS, elapsed) || memoryStallPressure(*a.pressureBaseline, groupTotal, elapsed)) {
-				record(&AttemptMemoryPeak{Constrained: true})
+			}
+			if peak != nil {
+				resident := 0.0
+				if peak.HostGB != nil {
+					resident = *peak.HostGB
+				}
+				e := hostPressureEvidence(a.hostBaseline, &worstHost, resident, w.HostMemoryReserveGB, a.pageSize)
+				e.ElapsedUS, e.CgroupAvg10 = float64(elapsed)/float64(time.Microsecond), groupAvg10
+				if peak.Pressure != nil {
+					e.CgroupRefaultAnon, e.CgroupSwapOutPages = peak.Pressure.CgroupRefaultAnon, peak.Pressure.CgroupSwapOutPages
+					if peak.Constrained {
+						e.Reason = peak.Pressure.Reason
+					}
+				}
+				if pressureKnown {
+					hostDelta, groupDelta := worstHost.psiTotalUS-a.hostBaseline.psiTotalUS, groupTotal-*a.pressureBaseline
+					e.HostStallUS, e.CgroupStallUS = &hostDelta, &groupDelta
+					if e.Reason == "eligible" && memoryStallPressure(a.hostBaseline.psiTotalUS, worstHost.psiTotalUS, elapsed) {
+						e.Reason = "host_psi_total"
+					}
+					if e.Reason == "eligible" && memoryStallPressure(*a.pressureBaseline, groupTotal, elapsed) {
+						e.Reason = "cgroup_psi_total"
+					}
+				}
+				if !pressureKnown {
+					e.Reason = unknownReason
+				} else if elapsed <= 0 {
+					e.Reason = "invalid_pressure_window"
+				}
+				peak.Pressure = e
+				if pressureKnown && elapsed > 0 && e.Reason != "eligible" {
+					peak.Constrained = true
+				}
 			}
 			if device != nil {
 				select {
@@ -481,6 +553,7 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 			// incomplete resident measurement that invalidates learning.
 			if !hostSampled && peak != nil && (peak.HostGB != nil || peak.CgroupGB != nil || peak.DeviceGB != nil || peak.Constrained) {
 				peak.Constrained = true
+				peak.Pressure.Reason = "resident_sampling_incomplete"
 			}
 		})
 		return peak

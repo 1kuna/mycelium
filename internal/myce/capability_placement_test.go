@@ -55,6 +55,12 @@ func TestCapabilityLearnedNeedsPersistAndScope(t *testing.T) {
 	}
 	r := result(run, true)
 	r.Usage = &SizeHint{MemoryGB: 40, HostMemoryGB: 4}
+	// Accepted learning requires a started, pressure-qualified attempt.
+	if err := q.Started(result(run, false)); err != nil {
+		t.Fatal(err)
+	}
+	host := r.Usage.HostMemoryGB
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host}
 	stale := r
 	stale.Attempt++
 	if err := q.Complete(stale); !errors.Is(err, ErrStale) {
@@ -284,6 +290,12 @@ func TestCapabilityLearnedProgramUsesSmallerFreeHypha(t *testing.T) {
 	}
 	r := result(run, true)
 	r.Usage = &SizeHint{MemoryGB: 2, HostMemoryGB: 40}
+	// Accepted learning requires a started, pressure-qualified attempt.
+	if err := q.Started(result(run, false)); err != nil {
+		t.Fatal(err)
+	}
+	host := r.Usage.HostMemoryGB
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host}
 	if err := q.Complete(r); err != nil {
 		t.Fatal(err)
 	}

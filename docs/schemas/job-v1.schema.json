@@ -96,6 +96,9 @@
         "attempt": {
           "type": "integer"
         },
+        "learning_reason": {
+          "type": "string"
+        },
         "machine": {
           "type": "string"
         },
@@ -145,6 +148,9 @@
         },
         "nonreclaimable_gb": {
           "type": "number"
+        },
+        "pressure": {
+          "$ref": "#/$defs/MemoryPressureEvidence"
         },
         "pressure_unavailable": {
           "description": "Pressure coverage was missing, malformed or had no valid cumulative-counter time window. Rejects this attempt's memory learning while preserving prior qualified evidence; raw diagnostic peaks remain.",
@@ -1917,6 +1923,75 @@
         "oom",
         "oom_kill",
         "oom_group_kill"
+      ],
+      "type": "object"
+    },
+    "MemoryPressureEvidence": {
+      "properties": {
+        "available_floor_gb": {
+          "type": "number"
+        },
+        "cgroup_avg10": {
+          "type": "number"
+        },
+        "cgroup_refault_anon": {
+          "type": "integer"
+        },
+        "cgroup_stall_us": {
+          "type": "integer"
+        },
+        "cgroup_swap_out_pages": {
+          "type": "integer"
+        },
+        "elapsed_us": {
+          "type": "number"
+        },
+        "host_avg10": {
+          "type": "number"
+        },
+        "host_oom_delta": {
+          "type": "integer"
+        },
+        "host_pressure_level": {
+          "type": "integer"
+        },
+        "host_stall_us": {
+          "type": "integer"
+        },
+        "host_swap_growth_bytes": {
+          "type": "integer"
+        },
+        "host_swap_out_bytes": {
+          "type": "integer"
+        },
+        "min_available_gb": {
+          "type": "number"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "reserve_gb": {
+          "type": "number"
+        },
+        "resident_gb": {
+          "type": "number"
+        },
+        "swap_budget_gb": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "reason",
+        "elapsed_us",
+        "host_avg10",
+        "cgroup_avg10",
+        "host_swap_growth_bytes",
+        "host_swap_out_bytes",
+        "resident_gb",
+        "reserve_gb",
+        "available_floor_gb",
+        "swap_budget_gb",
+        "host_oom_delta"
       ],
       "type": "object"
     },

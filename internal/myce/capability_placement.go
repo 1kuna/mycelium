@@ -149,33 +149,6 @@ func (q *Queue) unmeasuredProgram(j *Job, m *Machine) bool {
 	return !learned
 }
 
-func (q *Queue) recordProgramNeeds(j *Job, r Result) {
-	if j.Spec.Program == nil || j.Extension == nil || r.Usage == nil || !r.Usage.valid() {
-		return
-	}
-	if !validMemoryValue(r.Usage.MemoryGB*1.25) || !validMemoryValue(r.Usage.HostMemoryGB*1.25) {
-		return
-	}
-	m := allocationMachine(q.s.Machines[r.Machine], j.AllocatedDevices)
-	if m == nil {
-		return
-	}
-	for _, e := range j.Extensions {
-		if e.Digest != j.Extension.Digest {
-			continue
-		}
-		if q.s.ProgramNeeds == nil {
-			q.s.ProgramNeeds = map[string]SizeHint{}
-		}
-		key := programNeedsKey(j, e, m.GPU)
-		old := q.s.ProgramNeeds[key]
-		// Floors and 25% headroom remain conservative; observations never shrink.
-		q.s.ProgramNeeds[key] = SizeHint{MemoryGB: max(old.MemoryGB, e.MemoryGB, r.Usage.MemoryGB*1.25), HostMemoryGB: max(old.HostMemoryGB, e.HostMemoryGB, r.Usage.HostMemoryGB*1.25)}
-		observation := *r.Usage
-		j.MeasuredNeeds = &observation
-	}
-}
-
 func (q *Queue) retryOOM(j *Job) {
 	if j.Spec.Needs.Memory == "auto" {
 		if j.OOMRetries > 0 {

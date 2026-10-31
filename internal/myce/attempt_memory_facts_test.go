@@ -34,7 +34,7 @@ func memoryFactsRestart(t *testing.T, q *Queue, clock Clock) *Queue {
 	return reopened
 }
 
-func memoryFactsGET(t *testing.T, q *Queue, j Job, peak *AttemptMemoryPeak, python bool) {
+func memoryFactsGET(t *testing.T, q *Queue, j Job, peak *AttemptMemoryPeak, python bool, expectedReason ...string) {
 	t.Helper()
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer server.Close()
@@ -43,7 +43,18 @@ func memoryFactsGET(t *testing.T, q *Queue, j Job, peak *AttemptMemoryPeak, pyth
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []AttemptMemoryFacts{{Attempt: j.Attempt, Machine: j.Machine, Session: j.Session, MemoryPeak: peak, MemoryEnvelope: j.MemoryEnvelope}}
+	reason := "eligible"
+	if peak == nil {
+		reason = "peak_unavailable"
+	} else if peak.constrained() {
+		reason = "constrained"
+	} else if peak.PressureUnavailable {
+		reason = "pressure_unavailable"
+	}
+	if len(expectedReason) > 0 {
+		reason = expectedReason[0]
+	}
+	want := []AttemptMemoryFacts{{LearningReason: reason, Attempt: j.Attempt, Machine: j.Machine, Session: j.Session, MemoryPeak: peak, MemoryEnvelope: j.MemoryEnvelope}}
 	if !reflect.DeepEqual(got.MemoryAttempts, want) {
 		t.Fatalf("GET lost attempt memory facts: got %+v, want %+v", got.MemoryAttempts, want)
 	}
@@ -228,7 +239,7 @@ func TestAttemptMemoryFactsReleaseOnlyKillGET(t *testing.T) {
 		t.Fatal("release-only acknowledgement changed cancellation", got)
 	}
 	q = memoryFactsRestart(t, q, clock)
-	memoryFactsGET(t, q, j, peak, false)
+	memoryFactsGET(t, q, j, peak, false, "release_only")
 }
 
 func TestAttemptMemoryFactsRetentionGET(t *testing.T) {

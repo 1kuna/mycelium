@@ -367,6 +367,26 @@ telemetry. Launched attempts ending without a worker reading retain the
 envelope and omit the peak. Release-only kill-time acknowledgements retain
 their measured facts too.
 
+New attempt rows include `learning_reason`: `eligible` means the queue's memory
+learning predicates passed; other values name the failed predicate (for example
+`constrained`, `pressure_unavailable`, `identity_changed`, or `attempt_failed`).
+The same gate authorizes accepted work peaks, resident/GPU host ranges, legacy
+Usage maxima and program needs/`measured_needs`. Each learner retains its own
+identity rules: programs can learn without reference timing, while work curves
+require a matching timing key. Missing peaks cannot authorize Usage learning.
+Throughput eligibility is independent. The optional `memory_peak.pressure`
+records the worker's first failing pressure predicate, or `eligible`, together
+with baselined host/cgroup `some` stall deltas and elapsed time in microseconds,
+diagnostic avg10 maxima in percent, host swap growth/out in bytes, and resident,
+minimum available RAM, reserve and comparison thresholds in GiB. Cumulative
+stalls at least 1% of elapsed time reject learning; avg10 alone does not.
+Nil stall deltas mean unavailable/reset coverage. Missing/reset counters and
+invalid observation windows have explicit reasons. Raw cleanup counter reads
+say `counter_snapshot_only`, rather than claiming complete eligibility. Cgroup
+events and swap peaks remain in their existing fields; refault/swap-out counts
+are retained in `pressure`. Old attempts omit these details. A successful
+constrained attempt retains diagnostics but cannot alter accepted envelopes.
+
 Peak fields `host_gb`, `cgroup_gb`, and `device_gb` identify the measured scopes;
 `swap_gb` is the Linux attempt parent's `memory.swap.peak`, when exposed.
 All sizes are GiB. The parent covers native or managed Docker main and sidecars;

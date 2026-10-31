@@ -69,12 +69,36 @@ func memoryStallPressure(start, end uint64, elapsed time.Duration) bool {
 // Also bound swap by one percent of remaining headroom; plentiful RAM must
 // not excuse material swap churn. Compare whole-attempt maxima at finish so
 // startup's tiny RSS cannot turn a few unrelated pages into pressure.
-func hostMemoryPressured(base, worst *gpuHostState, residentGB, reserveGB float64, pageSize int) bool {
-	floor := max(reserveGB, .125, residentGB*.25)
-	budgetGB := min(residentGB, worst.available) * .01
-	swapGB := float64(worst.swap-base.swap) / (1 << 20) // meminfo is KiB
-	outGB := float64(worst.swapOut-base.swapOut) * float64(pageSize) / (1 << 30)
-	return worst.oom > base.oom || worst.psi >= sharedPSIHigh || worst.level >= 2 || worst.available < floor || max(swapGB, outGB) > budgetGB
+func hostPressureEvidence(base, worst *gpuHostState, residentGB, reserveGB float64, pageSize int) *MemoryPressureEvidence {
+	e := &MemoryPressureEvidence{Reason: "eligible", ResidentGB: residentGB, ReserveGB: reserveGB,
+		AvailableFloorGB: max(reserveGB, .125, residentGB*.25)}
+	if base == nil || worst == nil {
+		e.Reason = "host_pressure_unavailable"
+		return e
+	}
+	available := worst.available
+	e.MinAvailableGB, e.HostAvg10, e.HostPressureLevel = &available, worst.psi, worst.level
+	e.SwapBudgetGB = min(residentGB, available) * .01
+	if worst.swap > base.swap {
+		e.HostSwapGrowthBytes = (worst.swap - base.swap) * 1024 // meminfo is KiB.
+	}
+	if worst.swapOut > base.swapOut {
+		e.HostSwapOutBytes = (worst.swapOut - base.swapOut) * uint64(pageSize)
+	}
+	if worst.oom > base.oom {
+		e.HostOOMDelta = worst.oom - base.oom
+	}
+	switch {
+	case e.HostOOMDelta > 0:
+		e.Reason = "host_oom"
+	case worst.level >= 2:
+		e.Reason = "host_pressure_level"
+	case available < e.AvailableFloorGB:
+		e.Reason = "available_below_floor"
+	case float64(max(e.HostSwapGrowthBytes, e.HostSwapOutBytes))/(1<<30) > e.SwapBudgetGB:
+		e.Reason = "host_swap_growth"
+	}
+	return e
 }
 
 func (s *gpuHostState) retainPressure(next *gpuHostState) {
