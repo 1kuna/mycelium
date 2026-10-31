@@ -144,7 +144,7 @@ type Queue struct {
 	models           ModelConfig
 	calls            map[string]*ModelCall
 	lock             *os.File
-	mu               sync.RWMutex
+	mu               queueMutex
 	stopping         bool // q.mu; inhibit mutations before either API listener closes.
 	contactMu        sync.Mutex
 	contacts         map[string]*workerContact

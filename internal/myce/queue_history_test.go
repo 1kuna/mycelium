@@ -126,6 +126,10 @@ func queueHistoryBurst(t *testing.T, count int) time.Duration {
 	waits = nil
 	holds = nil
 	q.observeUpdate = func(wait, hold time.Duration) { waits = append(waits, wait); holds = append(holds, hold) }
+	// Observe q.mu itself: Checkin also locks before updateRequest. Counting
+	// only update holds would conceal a regression in that earlier section.
+	var launchHoldTotal time.Duration
+	q.mu.observeHold = func(hold time.Duration) { launchHoldTotal += hold }
 	start = make(chan struct{})
 	errs = make(chan error, 16)
 	for i := range 16 {
@@ -147,6 +151,7 @@ func queueHistoryBurst(t *testing.T, count int) time.Duration {
 	wg.Wait()
 	close(errs)
 	q.observeUpdate = nil
+	q.mu.observeHold = nil
 	for err := range errs {
 		if err != nil {
 			t.Error(err)
@@ -154,7 +159,7 @@ func queueHistoryBurst(t *testing.T, count int) time.Duration {
 	}
 	slices.Sort(waits)
 	slices.Sort(holds)
-	t.Logf("history=%d launch_burst_wait_p50=%s launch_burst_wait_p95=%s launch_burst_wait_p99=%s launch_burst_hold_p99=%s", count, percentile(waits, 50), percentile(waits, 95), percentile(waits, 99), percentile(holds, 99))
+	t.Logf("history=%d launch_burst_wait_p50=%s launch_burst_wait_p95=%s launch_burst_wait_p99=%s launch_burst_update_hold_p99=%s", count, percentile(waits, 50), percentile(waits, 95), percentile(waits, 99), percentile(holds, 99))
 	// A long waiter alone can mean the host left it runnable after unlock.
 	// Require enough measured critical work to explain the latency before
 	// reporting a queue-lock regression. Conversely, Checkin can perform
@@ -162,10 +167,6 @@ func queueHistoryBurst(t *testing.T, count int) time.Duration {
 	// contender even on a healthy queue: total holds alone are not latency.
 	// Keep both budgets at the original 100ms. Sum every real-time hold,
 	// including I/O/sleep or preemption inside q.mu; never use the fake Clock.
-	var launchHoldTotal time.Duration
-	for _, hold := range holds {
-		launchHoldTotal += hold
-	}
 	t.Logf("history=%d launch_burst_hold_total=%s", count, launchHoldTotal)
 	if waitP99 := percentile(waits, 99); waitP99 > 100*time.Millisecond && launchHoldTotal > 100*time.Millisecond {
 		t.Errorf("launch burst p99 lock wait %s and total lock hold %s both exceeded 100ms", waitP99, launchHoldTotal)
