@@ -586,6 +586,11 @@ Absent blobs contribute zero. Recently published/HEAD-refreshed blobs retain the
 ordinary six-hour publication grace. An eligible plan can reclaim zero bytes
 while still expiring the selected identities.
 
+`collection_eligible` uses the collector's pending reclamation and keeping
+references. Importing identical bytes after completed reclamation does not
+re-enroll them through the old job's manifests, so a new plan counts zero bytes
+for that content unless another pending reclamation owns it.
+
 Apply requires explicit acceptance and recomputes the reviewed plan, then fences
 custody and reference metadata again in the expiry transaction. HTTP 409
 `file_release_stale` means regenerate and review a new plan; nothing was expired.

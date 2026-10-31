@@ -53,6 +53,7 @@ type FileReleaseBlob struct {
 	SizeBytes            int64                  `json:"size_bytes"`
 	Present              bool                   `json:"present"`
 	ModifiedAt           time.Time              `json:"modified_at"`
+	CollectionEligible   bool                   `json:"collection_eligible"`
 	ReclaimableBytes     int64                  `json:"reclaimable_bytes"`
 	References           []FileKeepingReference `json:"references"`
 	BundleTracked        bool                   `json:"bundle_tracked"`
@@ -207,7 +208,7 @@ func (q *Queue) fileReleaseMetadata(selection FileReleaseSelection) (FileRelease
 		releasing[id] = len(item.Blockers) == 0
 	}
 	refs := map[string][]FileKeepingReference{}
-	q.collectFileReferences(false, releasing, func(hash string, ref FileKeepingReference) {
+	pending, keep, _ := q.collectFileReferences(true, releasing, func(hash string, ref FileKeepingReference) {
 		if hashes[hash] {
 			refs[hash] = append(refs[hash], ref)
 		}
@@ -220,7 +221,7 @@ func (q *Queue) fileReleaseMetadata(selection FileReleaseSelection) (FileRelease
 		slices.SortFunc(r, func(a, b FileKeepingReference) int { return compareReleaseJSON(a, b) })
 		r = slices.Compact(r) // Job and keyed answer may alias the same reference.
 		at, marked := q.s.BundleUploads[hash]
-		plan.Blobs = append(plan.Blobs, FileReleaseBlob{SHA256: hash, References: r, BundleTracked: marked, BundleProtected: marked && at.After(q.clock.Now().Add(-q.fileRetention))})
+		plan.Blobs = append(plan.Blobs, FileReleaseBlob{SHA256: hash, CollectionEligible: pending[hash] && !keep[hash], References: r, BundleTracked: marked, BundleProtected: marked && at.After(q.clock.Now().Add(-q.fileRetention))})
 	}
 	slices.SortFunc(plan.Blobs, func(a, b FileReleaseBlob) int { return compareReleaseJSON(a.SHA256, b.SHA256) })
 	return plan, nil
@@ -263,7 +264,7 @@ func (q *Queue) fileReleasePlan(ctx context.Context, selection FileReleaseSelect
 		publicationCutoff, orphanCutoff := now.Add(-filePublicationGrace), now.Add(-retention)
 		b.PublicationProtected = st.ModTime().After(publicationCutoff)
 		b.BundleProtected = b.BundleProtected || b.BundleTracked && st.ModTime().After(orphanCutoff)
-		if len(b.References) == 0 && !b.BundleProtected && filePayloadAgeEligible(st, publicationCutoff, orphanCutoff, b.BundleTracked) {
+		if b.CollectionEligible && !b.BundleProtected && filePayloadAgeEligible(st, publicationCutoff, orphanCutoff, b.BundleTracked) {
 			b.ReclaimableBytes = b.SizeBytes
 			plan.ReclaimableBytes += b.SizeBytes
 		}

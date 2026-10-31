@@ -236,8 +236,16 @@ func (q *Queue) collectFileReferences(pendingOnly bool, releasing map[string]boo
 		if j == nil {
 			return
 		}
+		if releasing[j.ID] {
+			// Project exactly the enrollment that apply would perform without
+			// re-enrolling historical manifests after completed reclamation.
+			planned := *j
+			planned.FilesExpired = true
+			enrollFileReclamation(&planned)
+			j = &planned
+		}
 		owner = FileKeepingReference{JobID: j.ID, Project: j.Spec.Project}
-		filesExpired := j.FilesExpired || releasing[j.ID]
+		filesExpired := j.FilesExpired
 		protected := deliveryPending(j)
 		if terminal(j.State) && filesExpired {
 			if custody == nil {

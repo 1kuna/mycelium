@@ -516,3 +516,48 @@ func TestFileReleaseOverlappingGroupsRetainReplay(t *testing.T) {
 		}
 	}
 }
+
+func TestFileReleaseReintroducedContentAccounting(t *testing.T) {
+	q, clock := fixture(t)
+	c := retentionClient(t, q)
+	j, _, ref := releaseTerminal(t, q, c, "reintroduced")
+	clock.Advance(filePublicationGrace + time.Second)
+	first := releasePlan(t, q, releaseSelection(j))
+	if first.ReclaimableBytes != ref.SizeBytes {
+		t.Fatal("initial plan omitted reclaimable bytes", first)
+	}
+	if _, err := releaseApply(q, first); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.reclaimPublishedFiles(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(q.files.blob(ref)); !os.IsNotExist(err) {
+		t.Fatal("first collection did not remove content", err)
+	}
+	// Importing identical bytes after completed reclamation does not enroll
+	// them again under the retained job's historical manifests.
+	retentionUpload(t, c, "reintroduced")
+	clock.Advance(filePublicationGrace + time.Second)
+	second := releasePlan(t, q, releaseSelection(j))
+	if _, err := releaseApply(q, second); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := q.reclaimPublishedFiles(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var reclaimed int64
+	if _, err := os.Stat(q.files.blob(ref)); os.IsNotExist(err) {
+		reclaimed = ref.SizeBytes
+	} else if err != nil {
+		t.Fatal(err)
+	}
+	if second.ReclaimableBytes != reclaimed || second.Blobs[0].ReclaimableBytes != reclaimed {
+		t.Fatalf("plan claimed %d reclaimable bytes; apply+collection reclaimed %d", second.ReclaimableBytes, reclaimed)
+	}
+	if reclaimed != 0 {
+		t.Fatal("reintroduced content was re-enrolled for collection")
+	}
+}
