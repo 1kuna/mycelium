@@ -146,6 +146,10 @@
         "nonreclaimable_gb": {
           "type": "number"
         },
+        "pressure_unavailable": {
+          "description": "Pressure coverage was missing, malformed or had no valid cumulative-counter time window. Rejects this attempt's memory learning while preserving prior qualified evidence; raw diagnostic peaks remain.",
+          "type": "boolean"
+        },
         "source": {
           "type": "string"
         },

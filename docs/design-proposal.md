@@ -2172,11 +2172,29 @@ or final age beyond two periods rejects completeness. Attempt completion waits
 at most one period for a cancelled collector; late results cannot change its
 published peak. This bounds observation latency, never job execution time.
 Every host/driver sample must succeed; existing nonzero host swap is allowed.
-Host OOM or memory PSI `some avg10 >= 1%` rejects learning. This reuses the
-shared-host pressure band: approximately 100 ms of reclaim stalls per ten
-seconds. Attempt-cgroup PSI uses the same band (`some` includes `full` stalls),
-including capped descendants. Missing or malformed PSI prevents complete
-component/GPU evidence and keeps conservative sizing.
+Host OOM or memory PSI `some avg10 >= 1%` rejects learning. Additionally,
+baseline the host and attempt-cgroup cumulative `some total` counters before
+payload/sidecar launch, while the attempt cgroup is empty. Reject learning if
+either counter's increase in microseconds is at least 1% of the elapsed attempt
+window measured with the injected Clock. `some` includes `full` stalls, so do
+not add those totals again. The total-delta check catches short stalls before
+Linux refreshes avg10 (roughly every two seconds); avg10 is an extra signal,
+never the only check. Exclude baseline/final sensor-read time from the elapsed
+denominator, conservatively counting any stalls during those reads. The same
+1% band means 2 ms stalled in a 200 ms attempt, or 100 ms in ten seconds.
+Hierarchical parent PSI covers descendants; capped members retain their own
+pressure/event checks.
+
+Missing/unreadable/malformed host or cgroup PSI, counter resets, or a nonpositive
+observation window makes the Linux sample ineligible for **all** memory-envelope
+learning, including ordinary RSS/total fallback. Preserve raw diagnostic peaks
+with `pressure_unavailable: true` on the result and attempt facts, across the
+worker/queue JSON boundary and SQLite restart. Unknown pressure cannot refresh
+or replace prior qualified memory evidence and does not invalidate it. Real
+pressure still invalidates comparable peaks under the existing policy. Missing
+coverage also prevents complete component/GPU evidence. No swap allowance can
+override either stall check or missing coverage. Queue support for this additive
+result field must precede workers sending it.
 
 Host swap-used growth and cumulative swap-out bytes are compared independently
 with a budget of 1% of the smaller of the attempt's resident peak and the

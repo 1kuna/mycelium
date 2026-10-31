@@ -39,7 +39,30 @@ type gpuHostState struct {
 	available          float64
 	swap, oom, swapOut uint64
 	psi                float64
+	psiTotalUS         uint64
 	level              int // Darwin: normal=1, warning=2, critical=4.
+}
+
+// some includes full stalls, so use its cumulative total once, without adding
+// full again. avg10 can stay zero before the kernel's next averaging update.
+func memoryPSITotal(b []byte) (uint64, error) {
+	for _, line := range strings.Split(string(b), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || fields[0] != "some" {
+			continue
+		}
+		for _, field := range fields[1:] {
+			if value, ok := strings.CutPrefix(field, "total="); ok {
+				return strconv.ParseUint(value, 10, 64)
+			}
+		}
+	}
+	return 0, errors.New("memory PSI total unavailable")
+}
+
+func memoryStallPressure(start, end uint64, elapsed time.Duration) bool {
+	// Compare microseconds with one percent of the injected-clock interval.
+	return end >= start && elapsed > 0 && float64(end-start) >= float64(elapsed)/float64(time.Microsecond)*.01
 }
 
 // A one-percent RSS error is small beside the existing 25% sizing margin.
@@ -60,6 +83,7 @@ func (s *gpuHostState) retainPressure(next *gpuHostState) {
 	s.swapOut = max(s.swapOut, next.swapOut)
 	s.oom = max(s.oom, next.oom)
 	s.psi = max(s.psi, next.psi)
+	s.psiTotalUS = max(s.psiTotalUS, next.psiTotalUS)
 	s.level = max(s.level, next.level)
 }
 
@@ -104,7 +128,11 @@ func readGPUHostState(fs memoryFS) (*gpuHostState, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &gpuHostState{available: available, swap: total - free, oom: oom, swapOut: out, psi: psi}, nil
+	psiTotal, err := memoryPSITotal(b)
+	if err != nil {
+		return nil, err
+	}
+	return &gpuHostState{available: available, swap: total - free, oom: oom, swapOut: out, psi: psi, psiTotalUS: psiTotal}, nil
 }
 
 // Only xe discrete GPUs have been investigated. Missing fields, other drivers,

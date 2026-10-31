@@ -34,13 +34,17 @@ type memoryCeilings struct {
 	fs       memoryFS
 	root     string
 	pageSize int // Zero uses the host kernel page size.
+	clock    Clock
 }
 type memoryAttempt struct {
-	fs           memoryFS
-	path         string
-	bytes        int64
-	pageSize     int
-	hostBaseline *gpuHostState // Captured while the attempt cgroup is still empty.
+	fs               memoryFS
+	path             string
+	bytes            int64
+	pageSize         int
+	hostBaseline     *gpuHostState // Captured while the attempt cgroup is still empty.
+	pressureStart    time.Time
+	pressureBaseline *uint64
+	clock            Clock
 }
 
 var ErrMemoryCeilingsRequired = errors.New("required memory ceilings unavailable")
@@ -83,6 +87,7 @@ func delegateMemory(fs memoryFS, root string, pid int) (*memoryCeilings, error) 
 }
 func (w *Worker) initMemoryCeilings() {
 	if w.memoryCeilings != nil {
+		w.memoryCeilings.clock = w.Clock
 		w.Machine.MemoryEnforcement = "memory ceilings enforced (cgroup v2)"
 		return
 	}
@@ -106,6 +111,7 @@ func (w *Worker) initMemoryCeilings() {
 					}
 					w.memoryCeilings, err = delegateMemory(osMemoryFS{}, filepath.Join("/sys/fs/cgroup", p), os.Getpid())
 					if err == nil {
+						w.memoryCeilings.clock = w.Clock
 						w.Machine.MemoryEnforcement = "memory ceilings enforced (cgroup v2)"
 						return
 					}
@@ -181,7 +187,6 @@ func (c *memoryCeilings) create(id string, bytes, swap int64) (*memoryAttempt, e
 		return nil, err
 	}
 	a := &memoryAttempt{fs: c.fs, path: filepath.Join(c.root, id), bytes: bytes, pageSize: pageSize}
-	a.hostBaseline, _ = readGPUHostState(c.fs)
 	if err := c.fs.Mkdir(a.path); err != nil {
 		return nil, err
 	}
@@ -196,6 +201,21 @@ func (c *memoryCeilings) create(id string, bytes, swap int64) (*memoryAttempt, e
 			return nil, errors.New("memory ceiling write did not take effect")
 		}
 	}
+	// Baselines precede every payload/sidecar launch. Exclude baseline-read
+	// overhead from the denominator, conservatively overcounting stalls if
+	// those reads themselves stall. All elapsed decisions use the worker Clock.
+	a.clock = c.clock
+	if a.clock == nil {
+		a.clock = RealClock{}
+	}
+	a.hostBaseline, _ = readGPUHostState(c.fs)
+	if b, err := c.fs.ReadFile(filepath.Join(a.path, "memory.pressure")); err == nil {
+		_, avgErr := sharedMemoryPSI(b)
+		if total, err := memoryPSITotal(b); err == nil && avgErr == nil {
+			a.pressureBaseline = &total
+		}
+	}
+	a.pressureStart = a.clock.Now()
 	return a, nil
 }
 func (a *memoryAttempt) attach(pid int) error {
@@ -308,7 +328,7 @@ func (a *memoryAttempt) children() (*memoryCeilings, error) {
 			return nil, errors.New("child memory delegation not confirmed")
 		}
 	}
-	return &memoryCeilings{fs: a.fs, root: a.path}, nil
+	return &memoryCeilings{fs: a.fs, root: a.path, clock: a.clock}, nil
 }
 
 // cgroup.kill empties descendants but leaves directories. Recovery uses the

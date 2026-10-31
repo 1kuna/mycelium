@@ -19,6 +19,15 @@ import (
 type fakeMemoryFS struct{ osMemoryFS }
 
 func (f fakeMemoryFS) ReadFile(p string) ([]byte, error) {
+	// Worker memory sensors stay synthetic on every laptop platform.
+	switch p {
+	case "/proc/meminfo":
+		return []byte("MemAvailable: 67108864 kB\nSwapTotal: 8388608 kB\nSwapFree: 8388608 kB\n"), nil
+	case "/proc/vmstat":
+		return []byte("oom_kill 0\npswpout 0\n"), nil
+	case "/proc/pressure/memory":
+		return []byte("some avg10=0.00 avg60=0.00 avg300=0.00 total=0\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=0\n"), nil
+	}
 	b, err := f.osMemoryFS.ReadFile(p)
 	if errors.Is(err, os.ErrNotExist) && filepath.Base(p) == "memory.events.local" {
 		return f.osMemoryFS.ReadFile(filepath.Join(filepath.Dir(p), "memory.events"))

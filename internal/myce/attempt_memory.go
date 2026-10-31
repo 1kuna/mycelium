@@ -23,8 +23,10 @@ func (a *memoryAttempt) peak() *AttemptMemoryPeak {
 	// hosts bounds reclaim stalls to about 100 ms per ten seconds.
 	b, err := a.fs.ReadFile(filepath.Join(a.path, "memory.pressure"))
 	psi, psiErr := sharedMemoryPSI(b)
-	p.pressureUnknown = err != nil || psiErr != nil
-	p.Constrained = !p.pressureUnknown && psi >= sharedPSIHigh
+	total, totalErr := memoryPSITotal(b)
+	p.pressureTotalUS = total
+	p.PressureUnavailable = err != nil || psiErr != nil || totalErr != nil
+	p.Constrained = !p.PressureUnavailable && psi >= sharedPSIHigh
 	if b, err := a.fs.ReadFile(filepath.Join(a.path, "memory.peak")); err == nil {
 		if n, err := strconv.ParseUint(strings.TrimSpace(string(b)), 10, 64); err == nil {
 			gb := float64(n) / (1 << 30)
@@ -88,7 +90,7 @@ func (a *memoryAttempt) peak() *AttemptMemoryPeak {
 			}
 			if peak := child.peak(); peak != nil {
 				p.Constrained = p.Constrained || peak.Constrained
-				p.pressureUnknown = p.pressureUnknown || peak.pressureUnknown
+				p.PressureUnavailable = p.PressureUnavailable || peak.PressureUnavailable
 			}
 		}
 	}
@@ -137,6 +139,7 @@ func sampledMemoryPeak(old, next *AttemptMemoryPeak) *AttemptMemoryPeak {
 		}
 	}
 	out.Constrained = next.Constrained || old != nil && old.Constrained
+	out.PressureUnavailable = next.PressureUnavailable || old != nil && old.PressureUnavailable
 	return out
 }
 
@@ -320,31 +323,41 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 		peak = sampledMemoryPeak(peak, sample)
 		mu.Unlock()
 	}
-	completeNonreclaimable := peak != nil && peak.nonreclaimableSampleGB != nil && !peak.pressureUnknown
+	completeNonreclaimable := peak != nil && peak.nonreclaimableSampleGB != nil && !peak.PressureUnavailable
 	// The empty-cgroup baseline precedes payload launch, including for plain
 	// commands whose observer is installed just after exec. No baseline means
 	// diagnostic counters only, never permission to shrink a GPU envelope.
 	gpuHost := w.Machine.GPU == "xpu" && !w.Machine.UnifiedMemory && w.selectedDevice != nil && w.selectedDevice.pciAddress != "" && !j.Spec.Needs.cpuOnly()
 	completeGPUHost := gpuHost && a.hostBaseline != nil
 	var worstHost gpuHostState
+	pressureKnown := a.hostBaseline != nil && a.pressureBaseline != nil && !a.pressureStart.IsZero()
+	var groupTotal uint64
+	if a.pressureBaseline != nil {
+		groupTotal = *a.pressureBaseline
+	}
 	if a.hostBaseline != nil {
 		worstHost = *a.hostBaseline
 	}
 	var hostDropGB, outsideGB float64
 	sampleHost := func(component *AttemptMemoryPeak) {
-		if !completeGPUHost {
-			return
-		}
-		if component == nil || component.nonreclaimableSampleGB == nil || component.pressureUnknown {
-			completeGPUHost = false
-			return
+		// Pressure eligibility applies to ordinary learning on every Linux
+		// cgroup attempt, independently of complete DRM/component evidence.
+		if component == nil || component.PressureUnavailable || component.pressureTotalUS < groupTotal {
+			pressureKnown = false
+		} else {
+			groupTotal = component.pressureTotalUS
 		}
 		host, err := readGPUHostState(a.fs)
-		if err != nil || host.oom < a.hostBaseline.oom || host.swapOut < a.hostBaseline.swapOut {
+		if err != nil || a.hostBaseline == nil || host.oom < worstHost.oom || host.swapOut < worstHost.swapOut || host.psiTotalUS < worstHost.psiTotalUS {
+			pressureKnown = false
 			completeGPUHost = false
 			return
 		}
 		worstHost.retainPressure(host)
+		if !completeGPUHost || component == nil || component.nonreclaimableSampleGB == nil || component.PressureUnavailable {
+			completeGPUHost = false
+			return
+		}
 		hostDropGB = max(hostDropGB, a.hostBaseline.available-host.available)
 		// Host and component reads stay together; DRM I/O never runs on this
 		// sampler. Its independently retained driver floor is added at finish.
@@ -370,7 +383,7 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 				return
 			case <-hostTick.C:
 				sample := a.peak()
-				completeNonreclaimable = completeNonreclaimable && sample != nil && sample.nonreclaimableSampleGB != nil && !sample.pressureUnknown
+				completeNonreclaimable = completeNonreclaimable && sample != nil && sample.nonreclaimableSampleGB != nil && !sample.PressureUnavailable
 				hostSampled = hostSampled || sample != nil && sample.HostGB != nil
 				record(sample)
 				sampleHost(sample)
@@ -423,10 +436,17 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 			wait, stopWaiting := context.WithTimeout(context.Background(), attemptMemorySamplePeriod)
 			defer stopWaiting()
 			samplers.Wait()
+			// Timestamp before final I/O, so sensor latency cannot dilute the
+			// pressure ratio. Counter resets and nonpositive windows are unknown.
+			elapsed := clock.Now().Sub(a.pressureStart)
 			final := a.peak()
 			record(final)
 			sampleHost(final)
-			if gpuHost && a.hostBaseline != nil && peak != nil && peak.HostGB != nil && hostMemoryPressured(a.hostBaseline, &worstHost, *peak.HostGB, w.HostMemoryReserveGB, a.pageSize) {
+			if !pressureKnown || elapsed <= 0 {
+				record(&AttemptMemoryPeak{PressureUnavailable: true})
+				completeGPUHost = false
+			} else if peak != nil && peak.HostGB != nil && (hostMemoryPressured(a.hostBaseline, &worstHost, *peak.HostGB, w.HostMemoryReserveGB, a.pageSize) ||
+				memoryStallPressure(a.hostBaseline.psiTotalUS, worstHost.psiTotalUS, elapsed) || memoryStallPressure(*a.pressureBaseline, groupTotal, elapsed)) {
 				record(&AttemptMemoryPeak{Constrained: true})
 			}
 			if device != nil {
@@ -450,7 +470,7 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 			}
 			age := clock.Now().Sub(collected.last)
 			completeGPUHost = completeGPUHost && collected.complete && collected.seen && age >= 0 && age <= 2*attemptMemorySamplePeriod
-			if (j.Spec.Needs.cpuOnly() || completeGPUHost) && peak != nil && hostSampled && completeNonreclaimable && final != nil && final.nonreclaimableSampleGB != nil && !final.pressureUnknown {
+			if (j.Spec.Needs.cpuOnly() || completeGPUHost) && peak != nil && !peak.PressureUnavailable && hostSampled && completeNonreclaimable && final != nil && final.nonreclaimableSampleGB != nil && !final.PressureUnavailable {
 				peak.NonreclaimableGB = peak.nonreclaimableSampleGB
 				if gpuHost {
 					outsideGB = max(outsideGB, collected.driverGB)
