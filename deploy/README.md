@@ -39,7 +39,7 @@ politeness settings. Device namespaces (even with
 The queue never opens GPU devices and refuses inherited GPU descriptors at
 startup; this is not an OS device-access sandbox. Verify it holds no GPU
 descriptors before accepting a queue. Worker units retain GPU access and
-`Delegate=memory`.
+`Delegate=memory cpu`.
 CUDA dedicated/auto inventory requires one selected device (or one device in
 unselected output); use a configured device and unique worker names on multi-GPU
 hosts. Unified-memory workers use OS telemetry; missing/invalid telemetry blocks

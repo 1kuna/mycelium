@@ -5,9 +5,11 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"os/exec"
 	"runtime"
 	"slices"
 	"syscall"
+	"time"
 )
 
 // SharedHostProfile protects additional interactive use. Size the reserve from
@@ -69,6 +71,28 @@ func (q *Queue) sharedHostRoom(m *Machine, room, reserved, growth float64) float
 		m.SharedHostReason = "shared host profile awaiting worker acknowledgement"
 		return 0
 	}
+	if m.CapabilityProfile != nil && m.CapabilityProfile.OS == "linux" {
+		if _, dev := q.clock.(*devClock); !dev && m.SharedCPUEnforcement != fmt.Sprintf("cgroup v2 cpu.weight=10 cpu.max=%d/100000", m.CPUBudgetCores*100000) {
+			m.SharedHostReason = "shared host CPU time enforcement unavailable"
+			return 0
+		}
+	}
+	workers := 0
+	for _, other := range q.s.Machines {
+		if hostID(other) == hostID(m) && !other.Gone && !q.unreported[other.ID] && other.Replacement == nil {
+			workers++
+			if reason := q.sharedPressureReason(other); reason != "" {
+				m.SharedHostReason = reason
+				return 0
+			}
+		}
+	}
+	if m.CapabilityProfile != nil && m.CapabilityProfile.OS == "linux" && workers > 1 {
+		if _, dev := q.clock.(*devClock); !dev {
+			m.SharedHostReason = "shared host aggregate CPU control requires one machine worker"
+			return 0
+		}
+	}
 	h := q.externalMemoryStatus(hostID(m))
 	o := m.MemoryObservation
 	if !validHostMemoryObservation(o) || h == nil || h.Week.Samples == 0 {
@@ -103,11 +127,17 @@ func applySharedHostPriority(pid int, p *SharedHostProfile) error {
 	if runtime.GOOS == "linux" {
 		priority = 20 - priority
 	}
-	if priority >= 10 {
-		return nil
+	if priority < 10 {
+		if err := syscall.Setpriority(syscall.PRIO_PROCESS, pid, 10); err != nil {
+			return fmt.Errorf("shared host command priority: %w", err)
+		}
 	}
-	if err := syscall.Setpriority(syscall.PRIO_PROCESS, pid, 10); err != nil {
-		return fmt.Errorf("shared host command priority: %w", err)
+	if runtime.GOOS == "darwin" {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		if err := exec.CommandContext(ctx, "/usr/sbin/taskpolicy", "-b", "-p", fmt.Sprint(pid)).Run(); err != nil {
+			return fmt.Errorf("shared host background task policy: %w", err)
+		}
 	}
 	return nil
 }

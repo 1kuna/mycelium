@@ -937,7 +937,7 @@ func printStatus(s myce.Snapshot, full bool) {
 			state += "; " + m.MemoryEnforcement
 		}
 		if m.SharedHost != nil {
-			state += fmt.Sprintf("; shared interactive host (reserve %g GiB; native nice>=10; CPU-time cap not enforced)", m.SharedHost.InteractiveReserveGB)
+			state += fmt.Sprintf("; shared interactive host (reserve %g GiB; native nice>=10; %s)", m.SharedHost.InteractiveReserveGB, m.SharedCPUEnforcement)
 		}
 		if m.SharedHostReason != "" {
 			state += "; " + m.SharedHostReason

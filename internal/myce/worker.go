@@ -52,30 +52,33 @@ type Worker struct {
 	nativeGPUDeviceProbe func(Worker, map[string]string) ([]string, error)
 
 	// Benchmark runs only when explicitly enabled; fake inventory never loads the host.
-	CurveMaxConcurrency   int
-	OnboardingBenchmark   bool
-	Benchmark             func(context.Context, BenchmarkConfig, *CapabilityProfile) error
-	DailyUse              bool
-	Laptop                bool
-	Desktop               bool
-	OwnerSignals          OwnerSignalSource
-	availability          *availabilityMonitor
-	FileCacheRoot         string
-	FileCacheLimit        int64
-	fileCache             *FileCache
-	sharedInputs          *SharedInputCache
-	fileCheckpoints       bool
-	ExtensionRoot         string
-	JobFileRoot           string
-	extensionFingerprint  string
-	RequireMemoryCeilings bool
-	memoryCeilings        *memoryCeilings
-	processMemory         *processMemoryProbe // Without cgroups only.
-	MemorySwapMaxBytes    int64
-	GPUTelemetryHelper    string // Operator-owned optional read-only telemetry executable.
-	DockerEndpoint        string
-	dockerEnvelope        bool
-	nativeListenerProbe   func(port string, group int) error
+	CurveMaxConcurrency     int
+	OnboardingBenchmark     bool
+	Benchmark               func(context.Context, BenchmarkConfig, *CapabilityProfile) error
+	DailyUse                bool
+	Laptop                  bool
+	Desktop                 bool
+	OwnerSignals            OwnerSignalSource
+	availability            *availabilityMonitor
+	FileCacheRoot           string
+	FileCacheLimit          int64
+	fileCache               *FileCache
+	sharedInputs            *SharedInputCache
+	fileCheckpoints         bool
+	ExtensionRoot           string
+	JobFileRoot             string
+	extensionFingerprint    string
+	RequireMemoryCeilings   bool
+	memoryCeilings          *memoryCeilings
+	sharedExecutionCeilings *memoryCeilings
+	sharedCPUDev            bool
+	SharedPressureSource    func(context.Context) (SharedHostPressure, error)
+	processMemory           *processMemoryProbe // Without cgroups only.
+	MemorySwapMaxBytes      int64
+	GPUTelemetryHelper      string // Operator-owned optional read-only telemetry executable.
+	DockerEndpoint          string
+	dockerEnvelope          bool
+	nativeListenerProbe     func(port string, group int) error
 
 	ContainerRetention *time.Duration
 	LogRetention       time.Duration
@@ -548,7 +551,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		return nil, err
 	}
 	identity := ID()
-	memoryAttempt, err := w.memoryCeilings.create("attempt-"+identity, ceilingBytes, w.MemorySwapMaxBytes)
+	memoryAttempt, err := w.executionCeilings().create("attempt-"+identity, ceilingBytes, w.MemorySwapMaxBytes)
 	if err != nil {
 		return nil, fmt.Errorf("memory ceiling setup: %w", err)
 	}
@@ -634,6 +637,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		delete(env, "MYCE_USAGE_FILE")
 	}
 	delete(env, "MYCE_TOKEN")
+	sharedCPUEnvironment(env, w.Machine.SharedHost, j.Spec.Needs.cores())
 	// TMPDIR is worker-owned, even when run.env or activation supplied one.
 	// Keep it with the managed attempt files so existing custody/retention owns it.
 	tmp := filepath.Join(executionWork, ".tmp")

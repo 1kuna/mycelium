@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -523,6 +524,9 @@ func newAttemptStore(root *workerStore, j Job) (*workerStore, error) {
 }
 
 func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport) error {
+	if w.Machine.SharedHost != nil && runtime.GOOS == "linux" && !w.sharedCPUDev && w.sharedExecutionCeilings == nil {
+		return fmt.Errorf("%w: shared host CPU controller unavailable", errWorkerMemory)
+	}
 	if w.Machine.SharedHost != nil && !sharedHostJobFits(&next, &w.Machine) {
 		return fmt.Errorf("shared host requires a native CPU command with a prepared environment")
 	}
@@ -620,6 +624,11 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var qualification checkpointIO[bool]
+	var pressureProbe checkpointIO[SharedHostPressure]
+	var cpuProbe checkpointIO[*memoryCeilings]
+	var pressure *SharedHostPressure
+	var nextPressureProbe time.Time
+	sharedCPUAllowance := 0
 	events := make(chan WorkerEvent, 16)
 	w.control = &processControl{clock: w.Clock, wake: make(chan struct{}, 1), availability: w.availability}
 	controlDone := make(chan struct{})
@@ -852,6 +861,60 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				m.HostMemoryError = "host RAM probe failed"
 			}
 			m.MemoryObservation = w.hostMemoryObservation(ctx, m, rawAvailable, err)
+			m.SharedHostPressure = nil
+			if w.Machine.SharedHost != nil {
+				if !w.Clock.Now().Before(nextPressureProbe) {
+					source := w.SharedPressureSource
+					if source == nil {
+						source = localSharedHostPressure
+					}
+					clock := w.Clock
+					reading, probeErr := pressureProbe.run("shared-pressure", func() (SharedHostPressure, error) {
+						sampledAt := clock.Now()
+						reading, err := source(ctx)
+						reading.sampledAt = sampledAt
+						return reading, err
+					})
+					if probeErr == nil {
+						pressure = &reading
+						nextPressureProbe = w.Clock.Now().Add(signalRefresh)
+					} else if !errors.Is(probeErr, errCheckpointIOPending) {
+						pressure = nil
+						nextPressureProbe = w.Clock.Now().Add(signalRefresh)
+					}
+				}
+				if pressure != nil {
+					copy := *pressure
+					copy.AgeSeconds = w.Clock.Now().Sub(copy.sampledAt).Seconds()
+					m.SharedHostPressure = &copy
+				}
+				switch runtime.GOOS {
+				case "darwin":
+					m.SharedCPUEnforcement = "background task policy; declared-core cap; CPU time unenforced"
+				case "linux":
+					m.SharedCPUEnforcement = "CPU time unenforced: delegated CPU controller unavailable"
+					ceilings, cores := w.memoryCeilings, w.Machine.CPUBudgetCores
+					configured, configErr := cpuProbe.run(fmt.Sprint(cores), func() (*memoryCeilings, error) { return sharedCPUCeilings(ceilings, cores) })
+					if configErr == nil {
+						w.sharedExecutionCeilings, sharedCPUAllowance = configured, cores
+					} else if !errors.Is(configErr, errCheckpointIOPending) {
+						w.sharedExecutionCeilings, sharedCPUAllowance = nil, 0
+					}
+					if w.sharedExecutionCeilings != nil && sharedCPUAllowance == w.Machine.CPUBudgetCores {
+						m.SharedCPUEnforcement = fmt.Sprintf("cgroup v2 cpu.weight=10 cpu.max=%d/100000", sharedCPUAllowance*100000)
+					}
+					if w.sharedCPUDev {
+						m.SharedCPUEnforcement = "CPU time unenforced: dev admission-only"
+					}
+				}
+				w.Machine.SharedHostPressure = m.SharedHostPressure
+				w.Machine.SharedCPUEnforcement = m.SharedCPUEnforcement
+			} else {
+				pressure, nextPressureProbe = nil, time.Time{}
+				w.sharedExecutionCeilings, sharedCPUAllowance = nil, 0
+				m.SharedCPUEnforcement = ""
+			}
+
 			checkpointRoot := root.state.CheckpointRoot
 			available, _ := root.nasProbe.runProgress(checkpointRoot, func(progress func()) (bool, error) {
 				err := workerCheckpointAvailable(checkpointRoot, progress)

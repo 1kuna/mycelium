@@ -18,6 +18,8 @@ func sharedHostFixture(t *testing.T, q *Queue) Machine {
 	m := cpuMachine("interactive", "interactive", "cpu", 8, 12)
 	m.CapabilityProfile.SystemMemoryBytes = 24 << 30
 	m.HostMemoryBudgetGB, m.CPUBudgetCores = 8, 2
+	m.SharedHostPressure = &SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 1}
+	m.SharedCPUEnforcement = "cgroup v2 cpu.weight=10 cpu.max=200000/100000"
 	m.MemoryObservation = &HostMemoryObservation{TotalGB: 24, UsedGB: 14, MyceliumGB: 0}
 	check(t, q, m, nil)
 	if _, err := q.ChangeHostMaintenance(m.ID, HostMaintenanceRequest{Action: "drain", DrainOwner: "operator"}); err != nil {
@@ -365,7 +367,9 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 	workerMemoryRSS = func(context.Context) (float64, error) { return 0, nil }
 	t.Cleanup(func() { workerMemoryRSS = oldRSS })
 	root := t.TempDir()
-	d, err := StartDev(DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "dev-fixture", GPU: "cpu", Workers: 1, Interval: 20 * time.Millisecond})
+	d, err := StartDev(DevConfig{SharedPressureSource: func(context.Context) (SharedHostPressure, error) {
+		return SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 1}, nil
+	}, Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "dev-fixture", GPU: "cpu", Workers: 1, Interval: 20 * time.Millisecond})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -403,7 +407,8 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 	change(HostMaintenanceRequest{Action: "profile", SharedHost: &SharedHostProfile{InteractiveReserveGB: .125}})
 	change(HostMaintenanceRequest{Action: "resume"})
 	s := cpuSpec(1, .01)
-	s.Run.Command = []string{"sh", "-c", `n=$(ps -o nice= -p $$); test "$n" -ge 10 && test "${MYCE_TOKEN+x}" != x && printf shared-host-ok`}
+	s.Run.Env = map[string]string{"GOMAXPROCS": "64"}
+	s.Run.Command = []string{"sh", "-c", `n=$(ps -o nice= -p $$); test "$n" -ge 10 && test "$GOMAXPROCS" = 1 && test "${MYCE_TOKEN+x}" != x && printf shared-host-ok`}
 	var j Job
 	if err := c.Call(ctx, "POST", "/api/jobs", s, &j); err != nil {
 		t.Fatal(err)
@@ -425,8 +430,8 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 	}
 	// Exercise the separate group/member gates, including a sidecar and the
 	// main payload. Its marker proves the helper checked priority and token too.
-	s.Run.Sidecars = []NativeSidecar{{Name: "helper", Command: []string{"sh", "-c", `n=$(ps -o nice= -p $$); test "$n" -ge 10 && test "${MYCE_TOKEN+x}" != x || exit 42; touch helper-ready; while :; do sleep 1; done`}}}
-	s.Run.Command = []string{"sh", "-c", `n=$(ps -o nice= -p $$); test "$n" -ge 10 && test "${MYCE_TOKEN+x}" != x || exit 42; while test ! -f helper-ready; do sleep .01; done`}
+	s.Run.Sidecars = []NativeSidecar{{Name: "helper", Env: map[string]string{"GOMAXPROCS": "64"}, Command: []string{"sh", "-c", `n=$(ps -o nice= -p $$); test "$n" -ge 10 && test "$GOMAXPROCS" = 1 && test "${MYCE_TOKEN+x}" != x || exit 42; touch helper-ready; while :; do sleep 1; done`}}}
+	s.Run.Command = []string{"sh", "-c", `n=$(ps -o nice= -p $$); test "$n" -ge 10 && test "$GOMAXPROCS" = 1 && test "${MYCE_TOKEN+x}" != x || exit 42; while test ! -f helper-ready; do sleep .01; done`}
 	if err := c.Call(ctx, "POST", "/api/jobs", s, &j); err != nil {
 		t.Fatal(err)
 	}

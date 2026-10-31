@@ -265,7 +265,7 @@ func (c ServiceConfig) ServiceText() string {
 	if c.Detection.OS == "linux" {
 		stopSettings := ""
 		if c.Role == "worker" {
-			stopSettings = "EnvironmentFile=" + unitConditionPath(c.GPUEnvironmentFile()) + "\nDelegate=memory\nKillMode=control-group\nSendSIGKILL=yes\nTimeoutStopSec=45s\n"
+			stopSettings = "EnvironmentFile=" + unitConditionPath(c.GPUEnvironmentFile()) + "\nDelegate=memory cpu\nKillMode=control-group\nSendSIGKILL=yes\nTimeoutStopSec=45s\n"
 		}
 		settings := ""
 		if c.EnvironmentFile != "" {

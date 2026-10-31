@@ -267,7 +267,7 @@ func TestMemoryCeilingDockerContract(t *testing.T) {
 
 func TestMemoryCeilingInstallerDelegation(t *testing.T) {
 	c := ServiceConfig{Role: "worker", Detection: Detection{OS: "linux"}}
-	if !strings.Contains(c.ServiceText(), "Delegate=memory\n") {
+	if !strings.Contains(c.ServiceText(), "Delegate=memory cpu\n") {
 		t.Fatal("worker has no delegated memory controller")
 	}
 	status := WorkerMemoryDelegationStatus(context.Background(), c, func(context.Context, string, ...string) ([]byte, error) { return []byte("Delegate=no\n"), nil })

@@ -892,6 +892,7 @@ func (g *nativeGroup) run(j Job, base map[string]string, mainEnvironment string,
 		}
 		// Reserved env was validated; defensive stripping also covers direct starts.
 		delete(memberEnv, "MYCE_TOKEN")
+		sharedCPUEnvironment(memberEnv, g.worker.Machine.SharedHost, j.Spec.Needs.cores())
 		reference := side.Environment
 		if reference == "" {
 			reference = j.Spec.Environment.Name

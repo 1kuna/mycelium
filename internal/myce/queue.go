@@ -883,6 +883,7 @@ func (q *Queue) maintain() {
 	q.maintainPieceDependencies()
 	q.maintainFileExpiry()
 	q.maintainHostMaintenance()
+	q.maintainSharedHosts()
 	q.maintainDeviceMaintenance()
 	q.maintainReservations()
 	q.maintainExtensionQualifications()
@@ -1216,6 +1217,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 			m.RecoveringSince = &since
 		}
 		q.acceptExtensionQualifications(&m)
+		q.acceptSharedPressure(&m, old)
 		q.s.Machines[m.ID] = &m
 		q.recordExternalMemory(&m)
 		for _, report := range reports {
