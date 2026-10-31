@@ -294,6 +294,23 @@ queue reopen retain the diagnosis. Older attempts without recorded predicates
 cannot recover it. Workdir containment remains a worker-side launch check because
 it resolves the actual managed workspace and symlinks on that host.
 
+Memory admission refusals additionally retain `execution_cause.admission` with
+the worker's failed `subcheck`, `required`, `available` and `unit`, plus the
+attempt's `envelope_source`, `envelope_host_gb` and `envelope_device_gb`.
+Subchecks distinguish local device/job reservations, device budget, aggregate
+CPU/host allowances, configured host allowance, live host RAM/growth, live GPU
+memory and unavailable shared CPU control. An unavailable probe/configuration
+sets `unavailable: true` and omits `available`; no raw probe errors are retained.
+These values are captured on the worker outside the queue lock and survive
+requeue, acknowledgement and replacement of the current envelope. Queue logs
+include the same comparison in `detail`.
+
+A modern worker also records `prelaunch_refused: true` only for a persisted
+native refusal before custody or launch intent. An exact released copy with
+that proof and no queue-recorded start/custody preserves ledger completeness,
+including a release-only acknowledgement before the final outcome. Missing
+process identity without this proof remains conservatively incomplete.
+
 History preserves the existing outcome classification: `launch` causes include
 `launch_refused`, `launch_failed` and `environment_failed`; `polite_stop` marks
 availability withdrawal or a queue-recorded planned stop (leaving or making

@@ -1,5 +1,41 @@
 {
   "$defs": {
+    "AdmissionDetail": {
+      "properties": {
+        "available": {
+          "type": "number"
+        },
+        "envelope_device_gb": {
+          "type": "number"
+        },
+        "envelope_host_gb": {
+          "type": "number"
+        },
+        "envelope_source": {
+          "type": "string"
+        },
+        "required": {
+          "type": "number"
+        },
+        "subcheck": {
+          "type": "string"
+        },
+        "unavailable": {
+          "type": "boolean"
+        },
+        "unit": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "subcheck",
+        "unit",
+        "required",
+        "envelope_host_gb",
+        "envelope_device_gb"
+      ],
+      "type": "object"
+    },
     "ApplicationProgress": {
       "properties": {
         "age_seconds": {
@@ -2715,6 +2751,9 @@
     },
     "RuntimeCause": {
       "properties": {
+        "admission": {
+          "$ref": "#/$defs/AdmissionDetail"
+        },
         "class": {
           "type": "string"
         },
@@ -2726,6 +2765,9 @@
         },
         "predicate": {
           "type": "string"
+        },
+        "prelaunch_refused": {
+          "type": "boolean"
         },
         "reason": {
           "type": "string"

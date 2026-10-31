@@ -80,7 +80,7 @@ func (q *Queue) recordAttemptOutcome(j *Job, outcome AttemptOutcome) {
 	if !duplicate {
 		q.appendJobLedger(j, e)
 		if cause := outcome.ExecutionCause; cause != nil && cause.Predicate != "" {
-			log.Printf("event=launch_outcome job=%s attempt=%d predicate=%s reason=%q", j.ID, outcome.Attempt, cause.Predicate, cause.Reason)
+			log.Printf("event=launch_outcome job=%s attempt=%d predicate=%s reason=%q detail=%q", j.ID, outcome.Attempt, cause.Predicate, cause.Reason, cause.String())
 		}
 	}
 	q.alertAttemptLoss(j, outcome, false)

@@ -28,7 +28,7 @@ func hostMemoryAllowance(gib float64) (HostMemoryBudget, error) {
 func (w Worker) checkHostMemoryBudget(gpu, host float64) error {
 	bytes, err := MemoryCeilingConfig(w.Machine.HostMemoryBudgetGB, 0, 0)
 	if err != nil || bytes > 0 && (host <= 0 || hostNeed(&w.Machine, gpu, host) > w.Machine.HostMemoryBudgetGB) {
-		return fmt.Errorf("%w: allocation exceeds queue host allowance", errWorkerMemory)
+		return refuseAdmission("configured_host_allowance", "GiB", hostNeed(&w.Machine, gpu, host), w.Machine.HostMemoryBudgetGB, err != nil || host <= 0)
 	}
 	return nil
 }

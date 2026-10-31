@@ -132,11 +132,13 @@ func specRejection(err error) error {
 // RuntimeCause retains safe operation/class information, never daemon stderr,
 // command arguments, environment values, endpoint URLs, or filesystem paths.
 type RuntimeCause struct {
-	Operation string `json:"operation"`
-	Class     string `json:"class"`
-	ExitCode  *int   `json:"exit_code,omitempty"`
-	Predicate string `json:"predicate,omitempty"`
-	Reason    string `json:"reason,omitempty"`
+	Admission        *AdmissionDetail `json:"admission,omitempty"`
+	PrelaunchRefused bool             `json:"prelaunch_refused,omitempty"`
+	Operation        string           `json:"operation"`
+	Class            string           `json:"class"`
+	ExitCode         *int             `json:"exit_code,omitempty"`
+	Predicate        string           `json:"predicate,omitempty"`
+	Reason           string           `json:"reason,omitempty"`
 }
 
 func (c RuntimeCause) String() string {
@@ -146,6 +148,13 @@ func (c RuntimeCause) String() string {
 	}
 	if reason := launchPredicateMessages[c.Predicate]; reason != "" {
 		text += "; " + c.Predicate + ": " + reason
+	}
+	if d := safeAdmissionDetail(c.Admission); d != nil {
+		available := "unavailable"
+		if d.Available != nil {
+			available = fmt.Sprintf("%g", *d.Available)
+		}
+		text += fmt.Sprintf("; %s required=%g available=%s unit=%s envelope_source=%q host_gb=%g device_gb=%g", d.Subcheck, d.Required, available, d.Unit, d.EnvelopeSource, d.EnvelopeHostGB, d.EnvelopeDeviceGB)
 	}
 	return text
 }
@@ -244,6 +253,11 @@ func safeRuntimeCause(c *RuntimeCause) *RuntimeCause {
 		}
 	}
 	out := *c
+	out.Admission = nil
+	out.PrelaunchRefused = c.PrelaunchRefused && c.Operation == "launch" && (c.Class == launchRefused || c.Class == "resource_limit") && launchPredicateMessages[c.Predicate] != ""
+	if c.Operation == "launch" && c.Predicate == "memory_capacity" {
+		out.Admission = safeAdmissionDetail(c.Admission)
+	}
 	out.Predicate, out.Reason = "", ""
 	if reason := launchPredicateMessages[c.Predicate]; reason != "" {
 		out.Predicate, out.Reason = c.Predicate, reason

@@ -2,12 +2,163 @@ package myce
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
+
+// #455: release-only can precede the final refused outcome. Only the new
+// durable no-custody proof preserves coverage; legacy launch facts cannot.
+func TestJobLedgerPrelaunchRefusalThenSuccess(t *testing.T) {
+	for _, mode := range []string{"final", "release first", "legacy", "started without custody"} {
+		t.Run(mode, func(t *testing.T) {
+			path, root := filepath.Join(t.TempDir(), "queue.db"), t.TempDir()
+			clock := &fakeClock{now: time.Date(2026, 10, 31, 0, 0, 0, 0, time.UTC)}
+			q, err := Open(path, root, clock)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { q.Close() })
+			fakeCheckpointAvailability(t, q, true)
+			m := machine("refusal", "fake")
+			m.HostMemoryMeasured, m.HostAvailableMemoryGB = true, 64
+			s := spec("experiment")
+			s.Needs.HostMemoryGB = 22
+			submitted := submit(t, q, s)
+			j := check(t, q, m, nil).Job
+			if j == nil || !j.Ledger.Complete {
+				t.Fatal("missing complete assignment", j)
+			}
+			w := recoveryWorker(t)
+			w.Machine, w.Clock = m, clock
+			store, err := w.openStore()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.close()
+			// Persist a modern refusal before any payload or custody, then
+			// reconstruct its result solely from the durable receipt.
+			_ = store.startFailure(*j, launchRefused, refuseAdmission("live_host_ram", "GiB", 22, 21.9, false))
+			data, err := os.ReadFile(filepath.Join(store.dir, store.state.LaunchOutcome))
+			if err != nil {
+				t.Fatal(err)
+			}
+			var facts memberOutcome
+			if err := json.Unmarshal(data, &facts); err != nil {
+				t.Fatal(err)
+			}
+			if mode == "legacy" {
+				facts.Infrastructure[0].PrelaunchRefused = false
+			}
+			r := classifyAttemptOutcome(result(j, false), attemptCause{memberOutcome: facts})
+			if mode == "started without custody" {
+				if err := q.Started(result(j, true)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if mode != "final" {
+				ack := r
+				ack.ReleaseOnly = true
+				ack.Session = "stale-session"
+				if err := q.Complete(ack); err != nil {
+					t.Fatal(err)
+				}
+				if job(t, q, j.ID).ReleaseConfirmed {
+					t.Fatal("stale acknowledgement released copy")
+				}
+				ack.Session = r.Session
+				if err := q.Complete(ack); err != nil {
+					t.Fatal(err)
+				}
+				wantComplete := mode == "release first"
+				if job(t, q, j.ID).Ledger.Complete != wantComplete {
+					t.Fatal("wrong coverage after early release", job(t, q, j.ID).Ledger)
+				}
+				if err := q.Close(); err != nil {
+					t.Fatal(err)
+				}
+				q, err = Open(path, root, clock)
+				if err != nil {
+					t.Fatal(err)
+				}
+				fakeCheckpointAvailability(t, q, true)
+			}
+			if err := q.Complete(r); err != nil {
+				t.Fatal(err)
+			}
+			clock.Advance(time.Second)
+			next := check(t, q, m, nil).Job
+			if next == nil || next.Attempt != 2 {
+				t.Fatal("missing second attempt", next)
+			}
+			ledgerCustody(t, q, next, "executed-once", "reserved")
+			ledgerCustody(t, q, next, "executed-once", "started")
+			if err := q.Started(result(next, true)); err != nil {
+				t.Fatal(err)
+			}
+			finish(t, q, next, true)
+			if job(t, q, j.ID).State != "succeeded" {
+				t.Fatal("job did not succeed")
+			}
+			page, err := q.JobLedger(submitted.ID, 0, -1, 2)
+			if err != nil {
+				t.Fatal(err)
+			}
+			high := page.HighWater
+			wantComplete := mode == "final" || mode == "release first"
+			if page.Complete != wantComplete {
+				t.Fatal("wrong historical coverage", page)
+			}
+			if err := q.Close(); err != nil {
+				t.Fatal(err)
+			}
+			q, err = Open(path, root, clock)
+			if err != nil {
+				t.Fatal(err)
+			}
+			entries := page.Entries
+			for page.HasMore {
+				page, err = q.JobLedger(submitted.ID, page.Next, high, 2)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if page.Complete != wantComplete || page.HighWater != high {
+					t.Fatal("snapshot changed", page)
+				}
+				entries = append(entries, page.Entries...)
+			}
+			counts := map[string]int{}
+			for i, e := range entries {
+				if e.Sequence != i+1 {
+					t.Fatal("gap in ledger", e)
+				}
+				counts[e.Kind]++
+			}
+			for _, copy := range job(t, q, j.ID).Copies {
+				if !copy.ReleaseConfirmed {
+					t.Fatal("unreleased copy", copy)
+				}
+			}
+			if counts["assigned"] != 2 || counts["released"] != 2 || counts["outcome"] != 2 || counts["custody_reserved"] != 1 || counts["custody_started"] != 1 || counts["custody_released"] != 1 {
+				t.Fatal("lost or duplicated ledger entries", counts)
+			}
+			if wantComplete && (len(entries) != 10 || counts["started"] != 1) {
+				t.Fatal("refusal invented a start", counts)
+			}
+			// Local intent/custody prevents manufacturing prelaunch proof.
+			store.state.LaunchPending = true
+			cause := store.startFailure(*next, launchRefused, errWorkerMemory)
+			if startFailureOutcome(result(next, false), cause).ExecutionCause.PrelaunchRefused {
+				t.Fatal("custody intent claimed prelaunch proof")
+			}
+		})
+	}
+}
 
 func ledgerCustody(t *testing.T, q *Queue, j *Job, id, phase string) {
 	t.Helper()

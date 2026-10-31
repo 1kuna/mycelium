@@ -292,7 +292,7 @@ func (q *Queue) confirmCopyRelease(r Result) {
 		c := &j.Copies[i]
 		if c.Attempt == r.Attempt && c.Machine == r.Machine && c.Session == r.Session {
 			if !c.ReleaseConfirmed {
-				if !j.Spec.Run.Docker && c.ProcessID == "" && j.Ledger != nil {
+				if !j.Spec.Run.Docker && c.ProcessID == "" && j.Ledger != nil && !provenPrelaunchRefusal(j, r) {
 					j.Ledger = &JobLedgerInfo{Complete: false, HighWater: len(j.LedgerEntries)}
 				}
 				// Existing exact release authority settles every generation in this copy.
@@ -323,6 +323,21 @@ func (q *Queue) confirmCopyRelease(r Result) {
 	if j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
 		j.ReleaseConfirmed = true
 	}
+}
+
+// Only a modern worker's durable refusal receipt proves an unstarted copy.
+// Absence of a PID or Started alone says nothing about legacy execution.
+func provenPrelaunchRefusal(j *Job, r Result) bool {
+	cause := safeRuntimeCause(r.ExecutionCause)
+	if r.Success || !r.Interrupted || r.ReleasePending || cause == nil || !cause.PrelaunchRefused {
+		return false
+	}
+	for _, e := range j.LedgerEntries {
+		if e.Attempt == r.Attempt && e.Machine == r.Machine && e.Session == r.Session && (e.Kind == "started" || e.CustodyID != "" || e.ProcessID != "") {
+			return false
+		}
+	}
+	return true
 }
 
 // Import only copies without S03 evidence. New copies carry an explicit pending

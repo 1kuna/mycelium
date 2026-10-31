@@ -525,7 +525,7 @@ func newAttemptStore(root *workerStore, j Job) (*workerStore, error) {
 
 func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport) error {
 	if w.Machine.SharedHost != nil && runtime.GOOS == "linux" && !w.sharedCPUDev && w.sharedExecutionCeilings == nil {
-		return fmt.Errorf("%w: shared host CPU controller unavailable", errWorkerMemory)
+		return refuseAdmission("shared_cpu_controller", "controllers", 1, 0, true)
 	}
 	if w.Machine.SharedHost != nil && !sharedHostJobFits(&next, &w.Machine) {
 		return fmt.Errorf("shared host requires a native CPU command with a prepared environment")
@@ -539,11 +539,11 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport)
 		usedRAM += need
 		growth += remainingHostGrowth(need, w.hostMemorySamples[jobKey(j)], w.Clock.Now())
 		if !next.Spec.Needs.cpuOnly() && slices.Contains(j.AllocatedDevices, firstDevice(next, w.Machine)) {
-			return fmt.Errorf("%w: device already has a batch attempt", errWorkerMemory)
+			return refuseAdmission("local_device_reservation", "slots", 1, 0, false)
 		}
 	}
 	if w.Machine.MaxJobs > 0 && len(jobs) >= w.Machine.MaxJobs {
-		return fmt.Errorf("%w: max-jobs", errWorkerMemory)
+		return refuseAdmission("local_max_jobs", "jobs", float64(len(jobs)+1), float64(w.Machine.MaxJobs), false)
 	}
 	for _, r := range models {
 		if r.State == "ready" || r.State == "draining" || r.State == "loading" {
@@ -574,23 +574,26 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport)
 				}
 			}
 			if usedGPU > d.BudgetGB {
-				return fmt.Errorf("%w: selected device budget", errWorkerMemory)
+				return refuseAdmission("device_budget", "GiB", usedGPU, d.BudgetGB, false)
 			}
 		}
 	}
-	if why != "" || usedCores > cores || w.Machine.HostMemoryBudgetGB > 0 && usedRAM > w.Machine.HostMemoryBudgetGB {
-		return fmt.Errorf("%w: aggregate CPU/RAM allowance", errWorkerMemory)
+	if why != "" || usedCores > cores {
+		return refuseAdmission("aggregate_cpu_allowance", "cores", float64(usedCores), float64(cores), why != "")
+	}
+	if w.Machine.HostMemoryBudgetGB > 0 && usedRAM > w.Machine.HostMemoryBudgetGB {
+		return refuseAdmission("aggregate_host_allowance", "GiB", usedRAM, w.Machine.HostMemoryBudgetGB, false)
 	}
 	if err := w.checkHostMemoryBudget(next.Spec.Needs.MemoryGB, next.Spec.Needs.HostMemoryGB); err != nil {
 		return err
 	}
 	if next.Spec.Needs.HostMemoryGB > 0 {
 		if w.HostMemorySource == nil {
-			return fmt.Errorf("%w: host RAM source unavailable", errWorkerMemory)
+			return refuseAdmission("live_host_growth", "GiB", growth, 0, true)
 		}
 		free, err := w.sharedHostLiveMemory(context.Background())
 		if err != nil || !validMemoryValue(free) || free < growth {
-			return fmt.Errorf("%w: host RAM growth need %g GiB, available %g GiB", errWorkerMemory, growth, free)
+			return refuseAdmission("live_host_growth", "GiB", growth, free, err != nil)
 		}
 	}
 	return nil
