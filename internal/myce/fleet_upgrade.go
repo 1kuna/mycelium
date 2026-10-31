@@ -394,6 +394,9 @@ func (q *Queue) maintainFleetUpgrade() {
 		u.Hosts = append(ordered, pending...)
 		policy := q.s.HostMaintenance[h.Host]
 		if policy.Mode == "" && h.Machine == "" {
+			if q.s.HostMaintenance == nil {
+				q.s.HostMaintenance = map[string]HostMaintenance{}
+			}
 			policy.Mode = "enabled"
 			q.s.HostMaintenance[h.Host] = policy
 		}
