@@ -445,8 +445,56 @@ protects part of the existing `--file-store-bytes` allowance for production-tier
 work. Zero, the default, preserves existing admission. The reserve must be
 nonnegative and no larger than the store limit. It adds no disk space and changes
 neither retention nor deletion behavior. Existing blobs and admitted resumable
-uploads remain usable. Configure the queue's service arguments with the existing
-ExecStart drop-in; persistent installer support is tracked in #471.
+uploads remain usable.
+
+For an installed queue, set both values through the supported installer (byte
+counts, not GiB suffixes). For example, a 200 GiB limit with a 16 GiB reserve:
+
+```sh
+myce install queue --config QUEUE_CONFIG \
+  --file-store-bytes 214748364800 --file-store-production-reserve 17179869184 --dry-run
+myce install queue --config QUEUE_CONFIG \
+  --file-store-bytes 214748364800 --file-store-production-reserve 17179869184
+```
+
+These flags also work on a fresh queue install. They are saved as
+`file_store_bytes` and `file_store_production_reserve` and included in the
+generated service. Omitted flags preserve saved values across reinstalls and
+upgrades. Fresh installs and older configs without these fields keep the
+existing defaults: 100 GiB capacity and zero reserve. Set
+`--file-store-production-reserve 0` explicitly to disable the reserve.
+
+To retire an existing systemd `ExecStart` drop-in during an authorized upgrade:
+
+1. Inspect `systemctl --user cat myce-queue.service` and record the effective
+   capacity, reserve and any other custom arguments. Pass the existing byte
+   values explicitly to the installer; it does not import drop-in arguments.
+2. Preview the install with those flags and the exact saved config. Drain/disable
+   admission using the normal upgrade procedure. Preserve a private copy of
+   the drop-in outside the unit's `.d` directory. **Keep the override in place**
+   and run the install with those flags to save both replacement settings. The
+   installer warns that the override still takes precedence; any restart during
+   installation continues to use that override.
+3. Check the saved config's `file_store_bytes` and
+   `file_store_production_reserve`, and inspect the generated base unit at the
+   saved `service` path. Verify that its `ExecStart` includes both flags with the
+   intended values. If installation or verification fails, leave the override
+   in place and fix the problem before proceeding.
+4. Remove only the overriding `ExecStart` directives (including the empty reset),
+   or the whole file if it contains nothing else. Preserve unrelated settings;
+   migrate any other custom arguments before removing their override. Run
+   `systemctl --user daemon-reload`, then
+   `systemctl --user restart myce-queue.service`.
+5. Verify the effective unit with `systemctl --user cat myce-queue.service` and
+   `systemctl --user show myce-queue.service --property=ExecStart`. Confirm both
+   values in the running command and `myce status --json` file-store fields
+   (`limit_bytes`, `production_reserve_bytes`) before resuming admission.
+   If verification fails after removal, put the old drop-in back at its original
+   path, run `systemctl --user daemon-reload`, restart the queue, and verify the
+   restored values before resuming admission.
+
+A full `ExecStart` override hides new arguments in the generated base unit;
+future capacity/reserve changes should use install flags instead.
 
 New identified non-production allocations that would consume the reserve receive
 HTTP 507 `file_store_capacity`, naming the reserve. Preflight, upload creation,
@@ -525,8 +573,10 @@ The transaction snapshots binary, config, credentials, GPU environment and
 service files/modes plus actual manager registration/activity. Failure restores
 that snapshot and verifies it independently. Incomplete rollback stops affected
 services and reports differences; preserve the snapshot for recovery. Effective
-drop-ins that override execution, credentials or containment block activation;
-consumer files are preserved. Check health and exact cleanup before resuming.
+drop-ins that override execution, credentials or containment block activation,
+except queue `ExecStart` overrides: these are preserved with a warning so their
+settings can be migrated before removal. Consumer files are preserved. Check
+health and exact cleanup before resuming.
 
 For a signed-release deployment, installing the queue/worker bytes alone leaves
 the default onboarding approval unchanged. After verifying the updated queue,
