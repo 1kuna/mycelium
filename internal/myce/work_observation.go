@@ -300,66 +300,20 @@ func (q *Queue) validateWorkTiming(j *Job, obligations []HostObligation) {
 	}
 }
 
-// Shared with per-attempt diagnostics so the exported predicate is the one
-// that actually gates memory learning, independently of throughput learning.
-func (q *Queue) memoryLearningReason(j *Job, r Result) string {
-	switch {
-	case r.ReleaseOnly:
-		return "release_only"
-	case r.OutOfMemory:
-		return "oom"
-	case !r.Success:
-		return "attempt_failed"
-	case j.StartedAt == nil:
-		return "not_started"
-	case r.ReleasePending:
-		return "release_pending"
-	case j.State != "running":
-		return "attempt_not_running"
-	case r.Interrupted:
-		return "interrupted"
-	case r.Forced:
-		return "forced"
-	case j.Timing == nil || j.Timing.Key == nil:
-		return "timing_unavailable"
-	case r.MemoryPeak == nil:
-		return "peak_unavailable"
-	case r.MemoryPeak.constrained():
-		return "constrained"
-	case r.MemoryPeak.PressureUnavailable:
-		return "pressure_unavailable"
-	case r.MemoryPeak.HostGB == nil || !validRate(*r.MemoryPeak.HostGB):
-		return "host_peak_unavailable"
-	case j.Batch != nil && (j.Batch.Run || j.Batch.Concurrency != 1 || len(j.Batch.Pieces) != 1):
-		return "batch_not_comparable"
-	}
-	t := j.Timing
-	current, _ := q.workObservationKey(j)
-	if current == nil || *current != *t.Key || t.Execution.ID != j.ID || t.Execution.Attempt != j.Attempt || t.Machine != j.Machine || t.Session != j.Session {
-		return "identity_changed"
-	}
-	return "eligible"
-}
-
-func (q *Queue) recordWorkObservation(j *Job, r Result) {
+func (q *Queue) recordWorkObservation(j *Job, r Result, sample *eligibleMemorySample) {
 	t := j.Timing
 	if t == nil || t.Key == nil || j.StartedAt == nil || r.ReleasePending || j.State != "running" || r.Interrupted || r.OutOfMemory || r.Forced {
 		return
 	}
 	q.validateWorkTiming(j, q.hostObligations(t.Key.Host))
 	throughput := t.Reason == ""
-	memory := q.memoryLearningReason(j, r) == "eligible"
+	memory := sample != nil && sample.work
 	if !throughput && !memory {
 		return
 	}
 	key := identityHash(t.Key)
 	old, exists := q.s.WorkObservations[key]
 	original := old
-	if memory && old.MemoryPeak.constrained() && !old.MemoryPeak.Constrained {
-		peak := *old.MemoryPeak
-		peak.Constrained = true
-		old.MemoryPeak = &peak
-	}
 	if q.s.WorkObservations == nil {
 		q.s.WorkObservations = map[string]WorkObservation{}
 	}
@@ -367,11 +321,6 @@ func (q *Queue) recordWorkObservation(j *Job, r Result) {
 		RecordedAt: q.clock.Now(), Job: j.ID, Machine: r.Machine, Session: r.Session, Attempt: r.Attempt}
 	if old.StaleReason != "" || q.clock.Now().Sub(old.RecordedAt) > workCurveMaxAge {
 		old.Rate, old.LatencySeconds = 0, 0
-	}
-	if memory && (!memoryIdentityUsable(old) || !old.MemoryRecordedAt.IsZero() && q.clock.Now().Sub(old.MemoryRecordedAt) > workCurveMaxAge) {
-		old.MemoryPeak = nil
-		old.MemoryRange = nil
-		old.GPUHostRange = nil
 	}
 	if throughput && j.Spec.Workload != nil && j.Spec.ExtensionCheck == nil {
 		seconds := q.clock.Now().Sub(*j.StartedAt).Seconds()
@@ -397,32 +346,10 @@ func (q *Queue) recordWorkObservation(j *Job, r Result) {
 	point.MemoryPeak = old.MemoryPeak
 	point.MemoryRange = old.MemoryRange
 	point.GPUHostRange = old.GPUHostRange
-	if memory {
-		point.MemoryPeak = mergeMemoryPeaks(old.MemoryPeak, r.MemoryPeak)
-		if p := r.MemoryPeak; p.NonreclaimableGB != nil && validRate(*p.NonreclaimableGB) && p.Events != nil && p.Source != processGroupMemorySource {
-			point.MemoryRange = mergeMemoryPeakRanges(old.MemoryRange, &MemoryPeakRange{Samples: 1, MinGB: *p.NonreclaimableGB, MaxGB: *p.NonreclaimableGB})
-		} else {
-			point.MemoryRange = nil // Missing counters cannot preserve a reduced estimate.
-		}
-		if peak, ok := r.MemoryPeak.gpuHostPeakGB(); ok && r.MemoryPeak.Events != nil && r.MemoryPeak.Source != processGroupMemorySource {
-			point.GPUHostRange = mergeMemoryPeakRanges(old.GPUHostRange, &MemoryPeakRange{Samples: 1, MinGB: peak, MaxGB: peak})
-		} else {
-			point.GPUHostRange = nil
-		}
-	}
 	point.MemoryRecordedAt = old.MemoryRecordedAt
 	point.MemoryConfiguration, point.MemoryLayout = old.MemoryConfiguration, old.MemoryLayout
 	if memory {
-		point.MemoryConfiguration = memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
-		point.MemoryLayout = "separate"
-		if owner := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices); owner != nil && owner.UnifiedMemory && !j.Spec.Needs.cpuOnly() {
-			point.MemoryLayout = "unified"
-		}
-		point.MemoryRecordedAt = q.clock.Now()
-	}
-	if r.Usage != nil && r.Usage.valid() {
-		point.HostMemoryGB = max(point.HostMemoryGB, r.Usage.HostMemoryGB)
-		point.DeviceMemoryGB = max(point.DeviceMemoryGB, r.Usage.MemoryGB)
+		q.recordWorkMemory(*sample, old, &point)
 	}
 	q.s.WorkObservations[key] = point
 	q.recordCurveLearning(j, original, exists, point)

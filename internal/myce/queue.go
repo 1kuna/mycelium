@@ -1728,8 +1728,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 				j.Delivery = &OutputDelivery{State: "pending", Execution: r.Execution, Machine: r.Machine, Session: r.Session, DestinationID: deliveryRootID(q.deliveryRoot), ManifestSHA256: deliveryDigest(*j), PendingAt: now, Bytes: manifestDiskBytes(r.OutputRefs)}
 			}
 		}
-		q.recordWorkObservation(j, r)
-		q.recordProgramNeeds(j, r)
+		q.recordAttemptLearning(j, r)
 		q.recordModelUse(j.Spec.Needs.Model)
 		j.State = "succeeded"
 	} else {

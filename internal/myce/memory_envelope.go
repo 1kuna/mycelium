@@ -107,8 +107,9 @@ func (q *Queue) recordAttemptMemory(j *Job, r Result) {
 	if j.StartedAt == nil && r.MemoryPeak == nil {
 		return // Prelaunch refusals have no runtime memory facts to retain.
 	}
+	_, reason := q.memoryLearningSample(j, r)
 	facts := AttemptMemoryFacts{Attempt: j.Attempt, Machine: j.Machine, Session: j.Session,
-		MemoryPeak: sampledMemoryPeak(nil, r.MemoryPeak), LearningReason: q.memoryLearningReason(j, r)}
+		MemoryPeak: sampledMemoryPeak(nil, r.MemoryPeak), LearningReason: reason}
 	if facts.MemoryPeak != nil && facts.MemoryPeak.Source != processGroupMemorySource {
 		facts.MemoryPeak.Source = "" // Only publish the known measurement label.
 	}

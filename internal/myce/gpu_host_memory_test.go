@@ -870,7 +870,7 @@ func TestGPUHostMemoryFallbackAndFloors(t *testing.T) {
 // #486: a rejected successful neighbour must not replace any accepted memory,
 // even when throughput can still learn. True OOMs retain class invalidation.
 func TestGPUHostMemoryConstrainedNeighbourPreservesAccepted(t *testing.T) {
-	for _, outcome := range []string{"constrained success", "OOM", "ceiling failure"} {
+	for _, outcome := range []string{"constrained success", "pressure unavailable success", "OOM", "ceiling failure"} {
 		t.Run(outcome, func(t *testing.T) {
 			q, clock, m, spec := gpuHostFixture(t)
 			start := func() *Job {
@@ -889,6 +889,7 @@ func TestGPUHostMemoryConstrainedNeighbourPreservesAccepted(t *testing.T) {
 			clock.Advance(time.Second)
 			host, total, device, component, drop, outside := 7.79, 9.54, 5.67, 8.48, 7.79, .31464340209961
 			r := result(seed, true)
+			r.Usage = &SizeHint{MemoryGB: 2, HostMemoryGB: 4}
 			r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, CgroupGB: &total, DeviceGB: &device, NonreclaimableGB: &component, Events: &MemoryEventCounts{}, GPUHost: &GPUHostMemory{DriverGB: &outside, HostDropGB: &drop, OutsideGB: &outside}}
 			if err := q.Complete(r); err != nil {
 				t.Fatal(err)
@@ -911,13 +912,15 @@ func TestGPUHostMemoryConstrainedNeighbourPreservesAccepted(t *testing.T) {
 			run := start()
 			before := preservationSnapshot(t, q)
 			clock.Advance(time.Second)
-			r = result(run, outcome == "constrained success")
+			success := strings.HasSuffix(outcome, "success")
+			r = result(run, success)
+			r.Usage = &SizeHint{MemoryGB: 40, HostMemoryGB: 20}
 			r.OutOfMemory = outcome == "OOM"
 			if outcome == "ceiling failure" {
 				r.Error = "exceeded its 16 GiB memory ceiling"
 			}
 			host = 20 // Rejected measurements cannot overwrite accepted peaks.
-			r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, Constrained: true, Events: &MemoryEventCounts{}}
+			r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, Constrained: outcome != "pressure unavailable success", PressureUnavailable: outcome == "pressure unavailable success", Events: &MemoryEventCounts{}}
 			body, err := json.Marshal(r)
 			if err != nil {
 				t.Fatal(err)
@@ -938,15 +941,15 @@ func TestGPUHostMemoryConstrainedNeighbourPreservesAccepted(t *testing.T) {
 				if !ok {
 					t.Fatal("curve key removed", old.Key)
 				}
-				if outcome == "constrained success" {
-					if !reflect.DeepEqual(old.MemoryPeak, point.MemoryPeak) || !reflect.DeepEqual(old.MemoryRange, point.MemoryRange) || !reflect.DeepEqual(old.GPUHostRange, point.GPUHostRange) || !old.MemoryRecordedAt.Equal(point.MemoryRecordedAt) || old.MemoryConfiguration != point.MemoryConfiguration || old.MemoryLayout != point.MemoryLayout {
+				if success {
+					if !reflect.DeepEqual(old.MemoryPeak, point.MemoryPeak) || !reflect.DeepEqual(old.MemoryRange, point.MemoryRange) || !reflect.DeepEqual(old.GPUHostRange, point.GPUHostRange) || !old.MemoryRecordedAt.Equal(point.MemoryRecordedAt) || old.MemoryConfiguration != point.MemoryConfiguration || old.MemoryLayout != point.MemoryLayout || old.HostMemoryGB != point.HostMemoryGB || old.DeviceMemoryGB != point.DeviceMemoryGB || old.IncrementalHostMemoryGB != point.IncrementalHostMemoryGB || old.IncrementalDeviceMemoryGB != point.IncrementalDeviceMemoryGB {
 						t.Fatal("constrained neighbour changed accepted memory", old, point)
 					}
 				} else if !point.MemoryRecordedAt.IsZero() || point.MemoryRange != nil || point.GPUHostRange != nil {
 					t.Fatal("failure retained accepted memory", point)
 				}
 			}
-			if outcome == "constrained success" {
+			if success {
 				page, err := q.JobLedger(run.ID, 0, -1, 256)
 				if err != nil {
 					t.Fatal(err)

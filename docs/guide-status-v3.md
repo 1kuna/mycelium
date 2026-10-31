@@ -370,6 +370,10 @@ their measured facts too.
 New attempt rows include `learning_reason`: `eligible` means the queue's memory
 learning predicates passed; other values name the failed predicate (for example
 `constrained`, `pressure_unavailable`, `identity_changed`, or `attempt_failed`).
+The same gate authorizes accepted work peaks, resident/GPU host ranges, legacy
+Usage maxima and program needs/`measured_needs`. Each learner retains its own
+identity rules: programs can learn without reference timing, while work curves
+require a matching timing key. Missing peaks cannot authorize Usage learning.
 Throughput eligibility is independent. The optional `memory_peak.pressure`
 records the worker's first failing pressure predicate, or `eligible`, together
 with baselined host/cgroup `some` stall deltas and elapsed time in microseconds,
