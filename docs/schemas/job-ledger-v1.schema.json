@@ -76,6 +76,9 @@
         "custody_end": {
           "type": "string",
           "format": "date-time"
+        },
+        "placement": {
+          "$ref": "#/$defs/PlacementDecision"
         }
       },
       "type": "object",
@@ -222,6 +225,55 @@
         "input_shape",
         "unit",
         "units"
+      ]
+    },
+    "PlacementDecision": {
+      "properties": {
+        "origin": {
+          "type": "string"
+        },
+        "attempt": {
+          "type": "integer"
+        },
+        "assigned_at": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "host": {
+          "type": "string"
+        },
+        "devices": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "host_choice": {
+          "type": "string"
+        },
+        "device_choice": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "limited_by": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object",
+      "required": [
+        "origin",
+        "attempt",
+        "assigned_at",
+        "host",
+        "host_choice",
+        "device_choice",
+        "reason",
+        "limited_by"
       ]
     }
   }

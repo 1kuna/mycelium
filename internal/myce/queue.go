@@ -722,6 +722,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 			id = ID()
 		}
 		j := &Job{PriorityPolicy: q.priorityMatch(s), FileTransport: q.fileCheckpoints, Extensions: extensions, SidecarEnvironmentRecipes: sidecarRecipes, EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: filepath.Join(q.root, id)}
+		j.PlacementIntent = submissionPlacementIntent(submitted, j)
 		explicitStartBy := s.StartBy != nil
 		j.StartByExplicit = &explicitStartBy
 		if s.Priority == "production" {
@@ -2400,12 +2401,15 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	}
 	j.Copies = append(j.Copies, Copy{AllocatedDevices: slices.Clone(j.AllocatedDevices), Machine: m.ID, Session: m.Session, Attempt: j.Attempt, Extension: j.Extension, ReleaseReason: "awaiting_release"})
 	j.Session = m.Session
-	q.appendJobLedger(j, ledgerAttempt(j, "assigned", "scheduled"))
 	j.Reason = ""
 	if measured {
 		j.Timing = &WorkTiming{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: m.ID, Session: m.Session, PlacementReason: estimate.reason()}
 	}
 	q.recordValuePlacement(j, m, values)
+	q.recordPlacementDecision(j, m)
+	entry := ledgerAttempt(j, "assigned", "scheduled")
+	entry.Placement = j.Placement
+	q.appendJobLedger(j, entry)
 	q.refreshHostMemory()
 	out := cloneJob(j)
 	out.LedgerEntries = nil

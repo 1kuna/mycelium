@@ -354,6 +354,9 @@ type Copy struct {
 
 type Job struct {
 	RecoveredResults    []RecoveredResult    `json:"recovered_results,omitempty"`
+	PlacementIntent     *PlacementIntent     `json:"placement_intent,omitempty"`
+	Placement           *PlacementDecision   `json:"placement,omitempty"`
+	ProductionBinding   *PlacementBinding    `json:"production_binding,omitempty"`
 	Runtime             *JobRuntime          `json:"runtime,omitempty"`
 	ApplicationProgress *ApplicationProgress `json:"application_progress,omitempty"`
 

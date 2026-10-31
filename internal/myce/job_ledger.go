@@ -16,6 +16,7 @@ type JobLedgerInfo struct {
 }
 
 type JobLedgerEntry struct {
+	Placement       *PlacementDecision  `json:"placement,omitempty"`
 	WorkLearning    *WorkLearningChange `json:"work_learning,omitempty"`
 	Sequence        int                 `json:"sequence"`
 	At              time.Time           `json:"at"`
@@ -105,6 +106,12 @@ func (q *Queue) JobLedger(id string, after, highWater, limit int, requestContext
 		if entries[i].WorkLearning != nil {
 			change := *entries[i].WorkLearning
 			entries[i].WorkLearning = &change
+		}
+		if entries[i].Placement != nil {
+			p := *entries[i].Placement
+			p.Devices = slices.Clone(p.Devices)
+			p.LimitedBy = slices.Clone(p.LimitedBy)
+			entries[i].Placement = &p
 		}
 		if entries[i].CustodyStart != nil {
 			at := *entries[i].CustodyStart
