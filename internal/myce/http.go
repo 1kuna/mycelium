@@ -462,6 +462,7 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
+	fileStoreSubmissionHeaders(ctx, req)
 	req.Header.Set("Content-Type", "application/json")
 	if workerProtocolEndpoint(path) {
 		req.Header.Set("X-Myce-Start-Gate", startGateProtocol)

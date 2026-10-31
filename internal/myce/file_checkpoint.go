@@ -226,6 +226,7 @@ func (w Worker) publishFileCheckpoint(j Job, parent string) (int64, error) {
 	defer os.RemoveAll(stage)
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	ctx = withFileStoreAttempt(ctx, j)
 	for name, ref := range save.Files {
 		if err = w.Client.UploadFile(ctx, filepath.Join(stage, name), ref); err != nil {
 			return 0, err
@@ -298,6 +299,7 @@ func (w Worker) finishFileResult(j Job, result Result, parent string) (Result, e
 		}
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
+		ctx = withFileStoreAttempt(ctx, j)
 		if j.Spec.OutputDelivery == asyncNAS {
 			reservation := result
 			reservation.OutputRefs = files
@@ -319,6 +321,7 @@ func (w Worker) finishFileResult(j Job, result Result, parent string) (Result, e
 	output := FileManifest{}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	ctx = withFileStoreAttempt(ctx, j)
 	for name := range j.Spec.Outputs {
 		src, err := confinedPath(j.Spec.Run.Workdir, name)
 		if err != nil {

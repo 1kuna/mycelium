@@ -438,6 +438,56 @@ predicted. Protected data is never evicted to admit work; increase the configure
 store allowance or free disk space when retention cannot help. Worker file caches
 already evict reproducible copies under pressure. See [files](guide-files-v3.md).
 
+## Production file-store reserve
+
+`myce queue --file-store-production-reserve BYTES` (also supported by `myce dev`)
+protects part of the existing `--file-store-bytes` allowance for production-tier
+work. Zero, the default, preserves existing admission. The reserve must be
+nonnegative and no larger than the store limit. It adds no disk space and changes
+neither retention nor deletion behavior. Existing blobs and admitted resumable
+uploads remain usable. Configure the queue's service arguments with the existing
+ExecStart drop-in; persistent installer support is tracked in #471.
+
+New identified non-production allocations that would consume the reserve receive
+HTTP 507 `file_store_capacity`, naming the reserve. Preflight, upload creation,
+internal registry bundles and declared async output reservations use this check.
+Production output commitments back the reserve rather than being charged twice.
+Production still needs actual store/disk space above the physical floor and
+existing commitments.
+
+**Unidentified writes can use the production reserve.** Deployed input clients
+and old native workers send the shared token without a project or attempt
+identity; the queue cannot distinguish their production bytes from experimental
+bytes. The compatibility exception favors production admission and also permits
+unidentified experiments/imports to consume protected capacity. A configured
+reserve therefore does not guarantee isolation from those legacy writers.
+Input-client identity is follow-up work under #464; quotas remain a separate PR.
+
+New workers send `X-Myce-File-Attempt` containing the job ID, attempt, machine and
+session on native/async result and checkpoint uploads. The authenticated queue
+checks that identity against the current execution and derives the tier from the
+job, ignoring project/class claims for those outputs. Replaced/lost/cancelled
+attempts cannot allocate or resume uploads; an exactly accepted attempt can reuse
+its blobs after a lost completion acknowledgement. Existing async workers' exact
+pending-result identities are also classified from their owning jobs. Known
+experiment writes and internal registry bundles cannot use the exception.
+
+For inputs, Go callers may wrap preflight/upload contexts with
+`myce.WithFileStoreSubmission(ctx, spec)`; the profile CLI supplies these hints.
+HTTP callers can send `X-Myce-Project` and optionally `X-Myce-Class`. The queue uses
+the project's `default_call_priority` (experiment when absent) and effective
+policy tier. Class hints can narrow that decision, never promote it; claiming
+`production` cannot upgrade a server-known experimental project. These are
+shared-token accounting hints, not per-project authorization credentials.
+
+`myce status` and `file_store` JSON report `production_reserve_bytes`,
+`unidentified_writes_may_use_reserve`, and `unidentified_reserve_admitted_bytes`.
+The last counter is the cumulative portion of successful unidentified tus create
+admissions crossing the protected floor **since queue start**. It counts declared
+allocation, including incomplete uploads, not bytes transferred or current usage.
+Preflight, resumable replay and deduplicated reuse do not increment it. It resets
+on queue restart and decreases neither on completion nor on ordinary expiry.
+
 ## Install and upgrade
 
 Build the single binary and inspect a plan before installation:

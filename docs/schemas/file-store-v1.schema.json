@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/FileStoreStatus",
+  "$defs": {
+    "FileStoreStatus": {
+      "properties": {
+        "unidentified_writes_may_use_reserve": {
+          "type": "boolean"
+        },
+        "unidentified_reserve_admitted_bytes": {
+          "type": "integer"
+        },
+        "production_reserve_bytes": {
+          "type": "integer"
+        },
+        "reserved_output_bytes": {
+          "type": "integer"
+        },
+        "store": {
+          "type": "string"
+        },
+        "used_bytes": {
+          "type": "integer"
+        },
+        "free_bytes": {
+          "type": "integer"
+        },
+        "reclaimable_bytes": {
+          "type": "integer"
+        },
+        "limit_bytes": {
+          "type": "integer"
+        },
+        "disk_free_bytes": {
+          "type": "integer"
+        },
+        "floor_bytes": {
+          "type": "integer"
+        },
+        "error": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "unidentified_writes_may_use_reserve",
+        "unidentified_reserve_admitted_bytes",
+        "production_reserve_bytes",
+        "store",
+        "used_bytes",
+        "free_bytes",
+        "reclaimable_bytes",
+        "limit_bytes",
+        "disk_free_bytes",
+        "floor_bytes"
+      ]
+    }
+  }
+}
