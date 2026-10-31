@@ -146,14 +146,30 @@ func TestBlockedNASDoesNotHoldQueue(t *testing.T) {
 		_, err := q.nasProbe.run(q.root, func() (bool, error) { return true, nil })
 		return err == nil
 	})
-	entered, release := make(chan struct{}), make(chan struct{})
-	defer close(release)
+	entered, release, exited := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	defer func() {
+		close(release)
+		// Join the uncancellable fake syscall before fixture cleanup.
+		select {
+		case <-entered:
+			<-exited
+		default:
+		}
+	}()
 	var calls atomic.Int32
 	// This fixture is about blocked storage, so retain the real bounded I/O
 	// adapter explicitly rather than the synchronous availability fake.
 	q.checkpointProbe = func() bool {
+		// Check at the synchronous probe boundary, before its timeout can
+		// release a wrongly held lock. No scheduler/timer race decides this.
+		if !q.mu.TryLock() {
+			t.Error("NAS probe called while queue lock is held")
+		} else {
+			q.mu.Unlock()
+		}
 		available, _ := q.nasProbe.run(q.root, func() (bool, error) {
 			if calls.Add(1) == 1 {
+				defer close(exited)
 				close(entered)
 			}
 			<-release
@@ -165,7 +181,7 @@ func TestBlockedNASDoesNotHoldQueue(t *testing.T) {
 	go func() { r, _ := q.Checkin(Checkin{Machine: machine("worker", "fake")}); done <- r }()
 	select {
 	case <-entered:
-	case <-time.After(300 * time.Millisecond):
+	case <-time.After(5 * time.Second):
 		t.Fatal("filesystem fault did not enter")
 	}
 	select {
@@ -173,7 +189,7 @@ func TestBlockedNASDoesNotHoldQueue(t *testing.T) {
 		if r.Job == nil {
 			t.Fatal("production blocked by hung NAS")
 		}
-	case <-time.After(heartbeatFilesystemBudget + time.Second):
+	case <-time.After(q.nasProbe.timeout + 5*time.Second):
 		t.Fatal("checkin hangs behind NAS syscall")
 	}
 	tick := make(chan error, 1)
@@ -183,7 +199,9 @@ func TestBlockedNASDoesNotHoldQueue(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(heartbeatFilesystemBudget + time.Second):
+	// Tick performs two bounded availability waits. This is only a hang
+	// backstop; the direct lock assertion above detects the regression.
+	case <-time.After(2*q.nasProbe.timeout + 5*time.Second):
 		t.Fatal("NAS holds queue loop")
 	}
 	if calls.Load() != 1 {
