@@ -2,11 +2,14 @@ package myce
 
 // eligibleMemorySample is the input to every successful-attempt memory writer.
 // Only memoryLearningSample constructs it, after checking outcome, custody and
-// pressure. Writers may further narrow comparability, never relax eligibility.
+// pressure. gateBuilt rejects zero/field-built values at runtime; the source
+// regression keeps production construction here (not a Go package boundary).
+// Writers may further narrow comparability, never relax eligibility.
 // Keep new attempt-memory writers here and call them from recordAttemptLearning.
 // Diagnostics, throughput, OOM lower bounds and idle reference reports are not
 // successful-attempt memory learning.
 type eligibleMemorySample struct {
+	gateBuilt    bool
 	job          *Job
 	result       Result
 	work         bool
@@ -61,7 +64,7 @@ func (q *Queue) memoryLearningSample(j *Job, r Result) (*eligibleMemorySample, s
 	if workReason != "eligible" && programKey == "" {
 		return nil, workReason
 	}
-	return &eligibleMemorySample{job: j, result: r, work: workReason == "eligible", programKey: programKey, programFloor: floor}, "eligible"
+	return &eligibleMemorySample{gateBuilt: true, job: j, result: r, work: workReason == "eligible", programKey: programKey, programFloor: floor}, "eligible"
 }
 
 // One dispatch for all successful-attempt learners. Throughput can still learn
@@ -93,7 +96,7 @@ func (q *Queue) workMemoryComparison(j *Job) string {
 // batch/model placement, require the same token as ProgramNeeds. Readers derive
 // envelopes from these accepted fields; they never learn from diagnostic facts.
 func (q *Queue) recordWorkMemory(sample eligibleMemorySample, old WorkObservation, point *WorkObservation) {
-	if !sample.work {
+	if !sample.gateBuilt || !sample.work {
 		return
 	}
 	j, r := sample.job, sample.result
@@ -129,7 +132,7 @@ func (q *Queue) recordWorkMemory(sample eligibleMemorySample, old WorkObservatio
 }
 
 func (q *Queue) recordProgramNeeds(sample eligibleMemorySample) {
-	if sample.programKey == "" {
+	if !sample.gateBuilt || sample.programKey == "" {
 		return
 	}
 	if q.s.ProgramNeeds == nil {

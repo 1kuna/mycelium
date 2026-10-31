@@ -37,6 +37,19 @@ func TestProgramUsageRejectsInvalidOrUnownedReports(t *testing.T) {
 	}
 }
 
+// The hermetic harness disables hardware probes. Supply clean attempt telemetry
+// through the existing sampler seam; Usage alone must never authorize learning.
+func programUsageMemoryProbe() *processMemoryProbe {
+	return &processMemoryProbe{
+		Resident: func(groups map[int]bool) (uint64, int, error) {
+			return 512 << 20, len(groups), nil
+		},
+		Pressure: func(context.Context) (*gpuHostState, error) {
+			return &gpuHostState{available: 64, level: 1}, nil
+		},
+	}
+}
+
 func TestProgramUsageRealRunnerLearnsWithoutHardware(t *testing.T) {
 	q, _ := fixture(t)
 	server := httptest.NewServer(API{Queue: q, Token: "throwaway"}.Handler())
@@ -61,6 +74,7 @@ printf useful-result > output
 	j := submit(t, q, s)
 	ctx, cancel := context.WithCancel(context.Background())
 	w := Worker{Client: Client{URL: server.URL, Token: "throwaway"}, Machine: machine("fake-hypha", "fake"), ExtensionRoot: root, JobFileRoot: shared, StateDir: newTestStateRoot(t), Interval: 5 * time.Millisecond}
+	w.processMemory = programUsageMemoryProbe()
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
 	t.Cleanup(func() {
@@ -78,6 +92,9 @@ printf useful-result > output
 	completed := job(t, q, j.ID)
 	if completed.State != "succeeded" || completed.MeasuredNeeds == nil || completed.MeasuredNeeds.MemoryGB != 2 || completed.MeasuredNeeds.HostMemoryGB < .5 {
 		t.Fatal("real runner did not measure", completed)
+	}
+	if len(completed.MemoryAttempts) != 1 || completed.MemoryAttempts[0].LearningReason != "eligible" {
+		t.Fatal("runner did not supply eligible memory telemetry", completed.MemoryAttempts)
 	}
 	learned := submit(t, q, s)
 	if learned.Spec.Needs.MemoryGB != 2.5 || learned.Spec.Needs.HostMemoryGB < .625 {
@@ -144,6 +161,7 @@ printf useful-result > output
 		t.Fatal(err)
 	}
 	w := Worker{Client: c, Machine: machine("relative-state", "fake"), ExtensionRoot: root, StateDir: state, Interval: 5 * time.Millisecond}
+	w.processMemory = programUsageMemoryProbe()
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- w.Run(ctx) }()
@@ -162,6 +180,9 @@ printf useful-result > output
 	completed := job(t, q, j.ID)
 	if completed.State != "succeeded" || completed.MeasuredNeeds == nil || completed.MeasuredNeeds.MemoryGB != 2 {
 		t.Fatalf("relative spool: state=%s reason=%s usage=%v", completed.State, completed.Reason, completed.MeasuredNeeds)
+	}
+	if len(completed.MemoryAttempts) != 1 || completed.MemoryAttempts[0].LearningReason != "eligible" {
+		t.Fatal("runner did not supply eligible memory telemetry", completed.MemoryAttempts)
 	}
 	dest := filepath.Join(t.TempDir(), "output")
 	if err = c.DownloadFile(context.Background(), completed.OutputRefs["output"], dest); err != nil {
