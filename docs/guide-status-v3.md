@@ -439,6 +439,15 @@ events and swap peaks remain in their existing fields; refault/swap-out counts
 are retained in `pressure`. Old attempts omit these details. A successful
 constrained attempt retains diagnostics but cannot alter accepted envelopes.
 
+CPU memory estimates prefer accepted same-OS evidence and retain foreign-OS
+evidence as a conservative prior. If no qualified target-OS allowance fits that
+prior, fresh comparable same-OS constrained evidence and a fitting hint may
+permit one `bounded cross-OS exploration` on the largest qualified allowance.
+The attempt retains normal slack, drift and launch guards. Assignment consumes
+the exception durably across restart and resubmission; OOM has no retry, and a
+constrained result cannot authorize another probe. Only clean evidence accepted
+by the same learning gate supersedes the prior. Refusals name capacity remedies.
+
 Peak fields `host_gb`, `cgroup_gb`, and `device_gb` identify the measured scopes;
 `swap_gb` is the Linux attempt parent's `memory.swap.peak`, when exposed.
 All sizes are GiB. The parent covers native or managed Docker main and sidecars;

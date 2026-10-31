@@ -298,6 +298,9 @@ func (q *Queue) recordWorkOOM(j *Job, r Result, oomFailure bool) {
 	if memoryOnly {
 		configuration := memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
 		for id, point := range q.s.WorkObservations {
+			if j.MemoryEnvelope != nil && j.MemoryEnvelope.Source == boundedMemoryExploration && point.Key.Target.OS != k.Target.OS {
+				continue // A target-OS probe cannot disprove the foreign prior.
+			}
 			if sameMemoryWork(point, k, configuration) {
 				point.MemoryPeak, point.MemoryRecordedAt = nil, time.Time{}
 				point.MemoryRange = nil

@@ -2098,10 +2098,24 @@ observed envelope; native pressure-free concurrency and output parity require
 separate proof. Without local history, use the same recipe/work/
 shape from another machine: prefer the same
 OS/architecture/accelerator/memory-layout family, times 1.25 × 1.5; otherwise
-times 1.25 × 2. Label both as a cross-machine estimate. Next use an optional
-submitter hint; a bootstrap declaration is not required and recipe defaults do
-not count as submitter hints. Without either, allow an exploratory first run
-only with measured memory, a known allowance (physical RAM if uncapped), at
+times 1.25 × 2. Label both as a cross-machine estimate.
+For CPU work, accepted same-OS evidence takes precedence over the conservative
+foreign-OS prior. Constrained same-OS observations are lower bounds only and
+cannot replace that prior. If the prior exceeds every qualified target-OS
+allowance, fresh comparable same-OS lower-bound evidence (with the existing 25%
+margin) and any submitter hint must fit before permitting one bounded exploration
+on the largest qualified allowance. Keep normal launch slack, drift margin and
+live admission guards. Assignment durably consumes this exception per frozen
+work/configuration and target OS, including across resubmission, history
+collection and restart. A clean result learns through the single eligibility
+gate; OOM gets no retry, and constrained or otherwise ineligible results cannot
+reopen the exception. Successful constrained attempts retain their ordinary job
+outcome. The foreign prior remains available with the capacity-remedy diagnostic.
+Claiming at assignment may spend a probe before launch, preventing duplicate
+launches after a lost offer. Qualification and output parity remain unchanged.
+Next use an optional submitter hint; a bootstrap declaration is not required and
+recipe defaults do not count as submitter hints. Without either, allow an
+exploratory first run only with measured memory, a known allowance (physical RAM if uncapped), at
 least half that allowance available after existing reserves and charges, and
 no protected attempt or model residency charging a quarter of the allowance.
 Use that available room, less existing per-attempt slack, as the envelope.

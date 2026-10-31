@@ -262,6 +262,10 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 			}
 		}
 		estimate := q.memoryEstimate(j, m)
+		if host, why, ok := q.boundedMemoryCandidate(j, m, estimate); ok {
+			estimate.measuredHostGB, estimate.source = host, boundedMemoryExploration
+			refusal = why
+		}
 		switch {
 		case estimate.host != nil:
 			source = estimate.source
@@ -374,6 +378,8 @@ func sameMemoryWork(point WorkObservation, key ObservationKey, configuration str
 // RAM and VRAM have independent locality: sibling cards share the host pool,
 // but a sibling's device peak still needs the existing transfer margin.
 type memoryEstimate struct {
+	key                      *ObservationKey
+	foreign                  bool
 	measuredHostGB           float64
 	host, device             *AttemptMemoryPeak
 	hostFactor, deviceFactor float64
@@ -458,7 +464,7 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) memoryEstimate {
 	if key == nil {
 		return memoryEstimate{}
 	}
-	var exact, sameHost, family, other *AttemptMemoryPeak
+	var exact, sameHost, family, sameOS, other *AttemptMemoryPeak
 	var hostRange *MemoryPeakRange
 	completeHostRange := true
 	gpuHost := !j.Spec.Needs.cpuOnly() && key.Target.Platform == "xpu" && !m.UnifiedMemory
@@ -496,22 +502,40 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) memoryEstimate {
 			exact = mergeMemoryPeaks(exact, p)
 		} else if sameFamily {
 			family = mergeMemoryPeaks(family, p)
+		} else if j.Spec.Needs.cpuOnly() && k.Target.OS == key.Target.OS {
+			sameOS = mergeMemoryPeaks(sameOS, p)
 		} else {
 			other = mergeMemoryPeaks(other, p)
 		}
 	}
-	estimate := memoryEstimate{}
+	estimate := memoryEstimate{key: key}
 	switch {
 	case exact != nil:
 		estimate.device, estimate.deviceFactor, estimate.source = exact, 1.25, "accepted peak × 1.25"
 	case family != nil:
 		estimate.device, estimate.deviceFactor, estimate.source = family, 1.25*1.5, "cross-machine estimate"
+	case sameOS != nil:
+		estimate.device, estimate.deviceFactor, estimate.source = sameOS, 1.25*2, "cross-machine estimate"
 	case other != nil:
 		estimate.device, estimate.deviceFactor, estimate.source = other, 1.25*2, "cross-machine estimate"
+		estimate.foreign = j.Spec.Needs.cpuOnly()
 	case invalidated:
 		estimate.source = "exploratory (previous peak constrained)"
 	}
 	estimate.host, estimate.hostFactor = estimate.device, estimate.deviceFactor
+	// A spent probe cannot lose its prior through OOM invalidation, history
+	// collection or restart. Only accepted same-OS evidence supersedes it.
+	if j.Spec.Needs.cpuOnly() && exact == nil && family == nil && sameOS == nil {
+		if spent, ok := q.s.MemoryExplorations[memoryExplorationKey(*key, configuration)]; ok {
+			prior := spent.PriorGB
+			if estimate.host != nil {
+				prior = max(prior, hostMemoryPeakGB(estimate.host)*estimate.hostFactor)
+			}
+			estimate.host = &AttemptMemoryPeak{HostGB: &prior}
+			estimate.hostFactor, estimate.foreign = 1, true
+			estimate.source = spentMemoryExploration
+		}
+	}
 	if sameHost != nil {
 		estimate.host, estimate.hostFactor = sameHost, 1.25
 		if exact == nil {
@@ -623,6 +647,9 @@ func (q *Queue) memoryWaitingReason(j *Job, machines map[string]*Machine) string
 				return ""
 			}
 			why := fmt.Sprintf("%s: %.1f GiB needed, %.1f GiB available (live %.1f GiB; reserved %.1f GiB; allowance %.1f GiB; %s)", m.ID, hostNeed(m, n.MemoryGB, n.HostMemoryGB), m.FreeHostMemoryGB, m.HostAvailableMemoryGB, m.HostMemoryInUseGB, m.EffectiveHostMemoryBudgetGB, candidate.MemoryEnvelope.Source)
+			if candidate.MemoryEnvelope.Source == spentMemoryExploration {
+				why += "; " + memoryCapacityRemedies
+			}
 			if unifiedCUDA(m) {
 				if floor, ok := unifiedCUDAFloor(m); ok {
 					why += fmt.Sprintf("; unified CUDA physical RAM floor %.3f GiB", floor)
