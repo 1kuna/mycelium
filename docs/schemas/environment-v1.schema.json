@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$ref": "#/$defs/EnvironmentEntry",
+  "$defs": {
+    "EnvironmentEntry": {
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "platforms": {
+          "items": {
+            "$ref": "#/$defs/EnvironmentPlatform"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object",
+      "required": [
+        "name",
+        "platforms"
+      ]
+    },
+    "EnvironmentPlatform": {
+      "properties": {
+        "platform": {
+          "type": "string"
+        },
+        "backend": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "input_digests": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "type": "object"
+        }
+      },
+      "type": "object",
+      "required": [
+        "platform",
+        "backend",
+        "key",
+        "input_digests"
+      ]
+    }
+  }
+}

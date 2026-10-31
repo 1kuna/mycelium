@@ -228,6 +228,7 @@ func wireExamples(t *testing.T) map[string]any {
 		"job-device-selected":         deviceJob,
 		"error-no-qualified-target":   wireError(t, &HTTPError{Status: 409, Code: "no_qualified_target", Message: "host memory need 8.125 GiB (8 + 0.125 slack) exceeds allowance 8 GiB on example-machine; intent retained locally"}),
 		"error-machine-renamed":       wireError(t, &HTTPError{Status: 400, Code: "machine_renamed", Message: `machine old-gpu0 was renamed; use allowed_machines: [example-machine] plus needs.gpu.devices: ["0"]`}),
+		"error-environment-unknown":   wireError(t, &HTTPError{Status: 404, Code: "environment_unknown", Message: rejectionMessages["environment_unknown"]}),
 		"error-gpu-count-unsupported": wireError(t, &HTTPError{Status: 400, Code: "gpu_count_unsupported", Message: rejectionMessages["gpu_count_unsupported"]}),
 		"job-queued-keyed":            queued, "job-running": running, "job-succeeded": succeeded, "job-reserved-cancelled": reserved,
 		"cancel-queued": ack, "cancel-running-pending": pending, "cancel-terminal": terminal, "cancel-removed": removed, "cancel-absent": absent, "cancel-expired-unknown": expired,
@@ -274,6 +275,24 @@ func validateWireValue(t *testing.T, schema *validate.Schema, value any) {
 }
 
 func TestWireSchemas(t *testing.T) {
+
+	environmentReflector := generate.Reflector{Anonymous: true, AllowAdditionalProperties: true}
+	environmentSchema, err := json.MarshalIndent(environmentReflector.Reflect(&EnvironmentEntry{}), "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	environmentSchema = append(environmentSchema, '\n')
+	environmentPath := filepath.Join(schemaRoot, "environment-v1.schema.json")
+	if os.Getenv("MYCE_UPDATE_SCHEMAS") == "1" {
+		if err := os.WriteFile(environmentPath, environmentSchema, 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	actualEnvironment, err := os.ReadFile(environmentPath)
+	if err != nil || !bytes.Equal(actualEnvironment, environmentSchema) {
+		t.Fatal("environment schema drift: regenerate with MYCE_UPDATE_SCHEMAS=1", err)
+	}
+	validateWireValue(t, compileWireSchema(t, "environment-v1.schema.json"), EnvironmentEntry{Name: "tools", Platforms: []EnvironmentPlatform{{Platform: "cpu", Backend: "uv", Key: "digest", InputDigests: map[string]string{"requirements.txt": "digest"}}}})
 	generated := generatedJobSchema(t)
 	ledgerReflector := generate.Reflector{Anonymous: true, AllowAdditionalProperties: true}
 	ledgerSchema, ledgerErr := json.MarshalIndent(ledgerReflector.Reflect(&JobLedgerPage{}), "", "  ")
