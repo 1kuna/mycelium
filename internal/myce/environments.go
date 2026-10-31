@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -521,6 +520,10 @@ func (c *EnvironmentCache) tryLock(key string) (*os.File, error) {
 // purgeRetired runs under admission. The remaining bytes still count toward
 // the limit, including entries protected by an attempt or preparation.
 func (c *EnvironmentCache) purgeRetired() (int64, error) {
+	return c.purgeRetiredKey("")
+}
+
+func (c *EnvironmentCache) purgeRetiredKey(onlyKey string) (int64, error) {
 	root := filepath.Join(c.Root, ".Trash")
 	entries, err := os.ReadDir(root)
 	if err != nil {
@@ -529,6 +532,9 @@ func (c *EnvironmentCache) purgeRetired() (int64, error) {
 	for _, d := range entries {
 		_, key, ok := strings.Cut(d.Name(), "-")
 		key = strings.TrimSuffix(key, ".partial")
+		if onlyKey != "" && key != onlyKey {
+			continue
+		}
 		if !ok || (FileRef{SHA256: key}).validate() != nil {
 			continue
 		}
@@ -692,56 +698,24 @@ func (c *EnvironmentCache) admit(key string, size int64) error {
 	if e != nil {
 		return e
 	}
-	entries, e := os.ReadDir(c.Root)
+	candidates, e := c.evictionCandidates(key)
 	if e != nil {
 		return e
 	}
-	type entry struct {
-		key string
-		at  time.Time
-	}
-	candidates := []entry{}
 	total, e := c.DiskUsage()
 	if e != nil {
 		return e
 	}
 	total += size
-	for _, d := range entries {
-		if !d.IsDir() || len(d.Name()) != 64 || d.Name() == key {
-			continue
-		}
-		path := filepath.Join(c.Root, d.Name())
-		s, e := os.Stat(filepath.Join(path, "ready.json"))
-		if errors.Is(e, os.ErrNotExist) {
-			// Unready stable prefixes are builds, never eviction candidates.
-			continue
-		}
-		if e != nil {
-			return e
-		}
-		candidates = append(candidates, entry{d.Name(), s.ModTime()})
-	}
-	sort.Slice(candidates, func(i, j int) bool { return candidates[i].at.Before(candidates[j].at) })
 	for _, v := range candidates {
 		if total <= c.Limit {
 			break
 		}
-		f, e := os.OpenFile(filepath.Join(c.Root, "locks", v.key+".use"), os.O_CREATE|os.O_RDWR, 0600)
+		removed, e := c.evict(v.Key, "cache_limit", nil)
 		if e != nil {
 			return e
 		}
-		if syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB) == nil {
-			// Recheck after locking: a just-finished attempt may have refreshed use.
-			if c.recent(filepath.Join(c.Root, v.key)) {
-				unlockEnvironment(f)
-				continue
-			}
-			log.Printf("environment eviction key=%s reason=cache_limit", v.key)
-			e = c.trash(filepath.Join(c.Root, v.key))
-			unlockEnvironment(f)
-			if e != nil {
-				return e
-			}
+		if removed {
 			if _, e = c.purgeRetired(); e != nil {
 				return e
 			}
@@ -751,8 +725,6 @@ func (c *EnvironmentCache) admit(key string, size int64) error {
 				return e
 			}
 			total += size
-		} else {
-			f.Close()
 		}
 	}
 	if total > c.Limit {
