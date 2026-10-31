@@ -310,7 +310,7 @@ func (q *Queue) recordWorkObservation(j *Job, r Result) {
 	current, _ := q.workObservationKey(j)
 	memory := current != nil && *current == *t.Key && t.Execution.ID == j.ID && t.Execution.Attempt == j.Attempt && t.Machine == j.Machine && t.Session == j.Session &&
 		(j.Batch == nil || !j.Batch.Run && j.Batch.Concurrency == 1 && len(j.Batch.Pieces) == 1) &&
-		r.MemoryPeak != nil && !r.MemoryPeak.constrained() && r.MemoryPeak.HostGB != nil && validRate(*r.MemoryPeak.HostGB)
+		r.MemoryPeak != nil && !r.MemoryPeak.constrained() && !r.MemoryPeak.PressureUnavailable && r.MemoryPeak.HostGB != nil && validRate(*r.MemoryPeak.HostGB)
 	if !throughput && !memory {
 		return
 	}
