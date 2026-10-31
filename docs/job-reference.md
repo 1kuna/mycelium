@@ -48,6 +48,14 @@ rejects unknown fields. Its output is the job ID. No field is a hidden shell
 command: `run.command` is an argument array. Use `[sh, -c, '...']` explicitly
 when shell expansion is needed.
 
+Check a YAML or JSON job before submission with `myce spec check job.yaml`.
+This uses submit's strict decoder and `Spec.Validate()` offline, without fleet
+authority, network requests, uploads or fleet changes. Exit status is 0 for a
+valid spec, 1 for an invalid or unreadable spec, and 2 for incorrect usage.
+Errors identify the file and rejected field or rule. This checks static validity
+only: live eligibility, admission and qualification, registered extensions,
+input availability and current fleet policy still require live checks.
+
 | Field | Required / default | Meaning |
 |---|---|---|
 | `name` | Required, nonempty | Human-readable job name; not a deduplication key |

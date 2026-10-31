@@ -7,7 +7,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"maps"
 	"net"
@@ -20,7 +19,6 @@ import (
 	"syscall"
 	"time"
 
-	"gopkg.in/yaml.v3"
 	"mycelium/internal/myce"
 )
 
@@ -71,7 +69,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 
 	if len(args) == 0 {
-		return errors.New("usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|exclude|reserve|run|profile|submit|policy|status|logs|ledger|wait|result|cancel|resolve-native|resolve-docker|reconcile-docker-retention|dev|version|release|file|benchmark|extension|env|portability|sim|detect|service|measure|model|gpu-telemetry-client|usage\n       myce host drain|disable|resume|status|budget|placement HOST\n       myce host device disable|enable HOST DEVICE\nRun myce COMMAND --help for command options.")
+		return errors.New("usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|exclude|reserve|run|profile|submit|spec|policy|status|logs|ledger|wait|result|cancel|resolve-native|resolve-docker|reconcile-docker-retention|dev|version|release|file|benchmark|extension|env|portability|sim|detect|service|measure|model|gpu-telemetry-client|usage\n       myce host drain|disable|resume|status|budget|placement HOST\n       myce host device disable|enable HOST DEVICE\nRun myce COMMAND --help for command options.")
 	}
 	if args[0] == "dev" && len(args) > 1 && args[1] == "clock" {
 		return devClockCommand(args[2:], os.Stdout)
@@ -93,6 +91,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 	if args[0] == "invite" {
 		return inviteCommand(args[1:])
+	}
+	if args[0] == "spec" {
+		return specCommand(args[1:], os.Stdout, os.Stderr)
 	}
 	if args[0] == "file" {
 		return fileCommand(args[1:])
@@ -715,20 +716,9 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if f.NArg() != 1 {
 			return errors.New("usage: myce submit job.yaml")
 		}
-		file, err := os.Open(f.Arg(0))
+		s, err := readJobSpec(f.Arg(0))
 		if err != nil {
 			return err
-		}
-		defer file.Close()
-		d := yaml.NewDecoder(io.LimitReader(file, 1<<20))
-		d.KnownFields(true)
-		var s myce.Spec
-		if err := d.Decode(&s); err != nil {
-			return err
-		}
-		var extra any
-		if d.Decode(&extra) != io.EOF {
-			return errors.New("expected one YAML job")
 		}
 		if *filesFrom != "" {
 			if err := uploadJobInputs(ctx, client, &s, *filesFrom); err != nil {
