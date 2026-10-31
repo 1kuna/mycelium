@@ -805,7 +805,7 @@ func (q *Queue) requeue(j *Job, why string, chargeInfrastructure bool) {
 	if chargeInfrastructure && strings.HasPrefix(why, "machine quiet for ") {
 		q.alertAttemptLoss(j, outcome, true)
 	}
-	recordAttemptMemory(j, Result{})
+	q.recordAttemptMemory(j, Result{})
 	defer func() { q.recordAttemptOutcome(j, outcome) }()
 	if cancelled(j) {
 		if !terminal(j.State) {
@@ -1546,7 +1546,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		}
 		q.settleRelease(r)
 		if j := q.touchJob(r.ID); j != nil && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
-			recordAttemptMemory(j, r)
+			q.recordAttemptMemory(j, r)
 			j.ReleaseConfirmed = true
 			if r.Forced {
 				j.LastStopOutcome = "forced"
@@ -1632,18 +1632,17 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 	}
 	r = withStopProvenance(r, priorityStop(j))
 	outcome := attemptOutcome(j, r)
-	recordAttemptMemory(j, r) // Preserve facts before retry clears the envelope.
+	q.recordAttemptMemory(j, r) // Preserve facts before retry clears the envelope.
 	j.ExecutionCause = safeRuntimeCause(r.ExecutionCause)
 	j.CleanupCause = safeRuntimeCause(r.CleanupCause)
 	// A kernel OOM is the payload's failure even if preemption raced it.
 	ceilingFailure := !r.Success && strings.HasPrefix(ceilingDiagnostic(r.Error, ""), "exceeded its ")
 	oomFailure := !r.Success && (r.OutOfMemory || ceilingFailure)
 	outcome.OutOfMemory = oomFailure
-	// Ceiling pressure can hide the true need even without an OOM. Reuse
-	// memory-only invalidation without changing the attempt outcome. Only
-	// attempt-scoped signals invalidate: unenforced process-group samples
-	// never do, though their real OOM still counts.
-	if oomFailure || r.MemoryPeak != nil && r.MemoryPeak.Constrained && r.MemoryPeak.Source != processGroupMemorySource {
+	// Failed ceiling-bound attempts can hide true need. Successful constrained
+	// samples are diagnostic only: they cannot invalidate accepted neighbours.
+	// Unenforced process-group pressure never invalidates; a real OOM still does.
+	if oomFailure || !r.Success && r.MemoryPeak != nil && r.MemoryPeak.Constrained && r.MemoryPeak.Source != processGroupMemorySource {
 		q.recordWorkOOM(j, r, oomFailure)
 	}
 	stageFailure := (j.Spec.Priority == "production" || plannedPriorityStop(j)) && !r.Success && !r.Interrupted

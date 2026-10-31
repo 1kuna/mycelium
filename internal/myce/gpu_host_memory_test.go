@@ -8,6 +8,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -76,7 +77,7 @@ func (f gpuHostFS) ReadDir(p string) ([]os.DirEntry, error) {
 }
 
 func TestGPUHostMemoryCompleteAttempt(t *testing.T) {
-	for _, mode := range []string{"complete", "b70 212 KiB", "b70 startup pages", "host PSI", "cgroup PSI", "low available", "missing host PSI", "missing cgroup PSI", "host PSI total", "cgroup PSI total", "helper", "helper missing card", "helper malformed manager", "helper stale", "helper failed", "missing host field", "swap growth", "swap churn", "host OOM", "missing driver field", "missing client identity", "missing debugfs", "malformed debugfs", "masked host drop", "missing events"} {
+	for _, mode := range []string{"complete", "b70 212 KiB", "b70 startup pages", "host PSI", "cgroup PSI", "host avg10 only", "cgroup avg10 only", "host PSI reset", "cgroup PSI reset", "invalid window", "low available", "missing host PSI", "missing cgroup PSI", "host PSI total", "cgroup PSI total", "helper", "helper missing card", "helper malformed manager", "helper stale", "helper failed", "missing host field", "swap growth", "swap churn", "host OOM", "missing driver field", "missing client identity", "missing debugfs", "malformed debugfs", "masked host drop", "missing events"} {
 		t.Run(mode, func(t *testing.T) {
 			clock := &workerFakeClock{now: time.Date(2026, 10, 30, 0, 0, 0, 0, time.UTC)}
 			c := fakeCeilings(t)
@@ -153,6 +154,15 @@ func TestGPUHostMemoryCompleteAttempt(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
+			if strings.HasSuffix(mode, "avg10 only") {
+				// #487: avg10=1.44% but only 120 us / 200 ms = 0.06% stalls.
+				psi := "some avg10=1.44 avg60=0.00 avg300=0.00 total=120\nfull avg10=1.44 avg60=0.00 avg300=0.00 total=120\n"
+				if mode == "host avg10 only" {
+					put("pressure/memory", psi)
+				} else {
+					memoryFactsFile(t, a, "memory.pressure", psi)
+				}
+			}
 			if mode == "low available" {
 				put("meminfo", "MemAvailable: 131072 kB\nSwapTotal: 8388608 kB\nSwapFree: 6388608 kB\n")
 			}
@@ -210,6 +220,12 @@ func TestGPUHostMemoryCompleteAttempt(t *testing.T) {
 			}
 			f := &nonreclaimableSamplingFS{memoryFS: a.fs, sampled: make(chan struct{})}
 			a.fs = f
+			if mode == "host PSI reset" {
+				a.hostBaseline.psiTotalUS = 1000
+			}
+			if mode == "cgroup PSI reset" {
+				*a.pressureBaseline = 1000
+			}
 			a.pressureStart = clock.Now()
 			w := Worker{Clock: clock, Machine: Machine{GPU: "xpu"}, selectedDevice: &MachineDevice{pciAddress: "0000:03:00.0"}}
 			if strings.HasPrefix(mode, "helper") {
@@ -252,17 +268,17 @@ func TestGPUHostMemoryCompleteAttempt(t *testing.T) {
 				// Static helper timestamps still belong to every invocation;
 				// the empty-cgroup baseline precedes this 200 ms window.
 				a.pressureStart = clock.Now().Add(-200 * time.Millisecond)
-			} else {
+			} else if mode != "invalid window" {
 				clock.Advance(200 * time.Millisecond)
 			}
 			peak := finish()
-			if mode == "b70 212 KiB" || mode == "host PSI" || mode == "swap growth" || mode == "low available" || mode == "missing host PSI" || mode == "missing cgroup PSI" || strings.HasSuffix(mode, "PSI total") {
+			if strings.HasSuffix(mode, "PSI reset") || mode == "invalid window" || strings.HasSuffix(mode, "avg10 only") || mode == "b70 212 KiB" || mode == "host PSI" || mode == "swap growth" || mode == "low available" || mode == "missing host PSI" || mode == "missing cgroup PSI" || strings.HasSuffix(mode, "PSI total") {
 				// Send the actual sampler result through learning, rather than
 				// stopping at the diagnostic flag. Identity/timing use fake time.
 				q, clock, m, spec := observationFixture(t)
 				spec.Needs.Memory = "auto"
 				var before time.Time
-				missing := mode == "missing host PSI" || mode == "missing cgroup PSI"
+				missing := mode == "missing host PSI" || mode == "missing cgroup PSI" || strings.HasSuffix(mode, "PSI reset") || mode == "invalid window"
 				if missing {
 					// Unknown telemetry must preserve an existing qualified peak.
 					seed := startObservation(t, q, m, spec)
@@ -298,12 +314,38 @@ func TestGPUHostMemoryCompleteAttempt(t *testing.T) {
 						t.Fatalf("missing pressure discarded qualified evidence: %+v", point)
 					}
 				}
-				if learned != (mode == "b70 212 KiB") {
+				if learned != (mode == "b70 212 KiB" || strings.HasSuffix(mode, "avg10 only")) {
 					t.Fatalf("pressure eligibility %s: learned=%t", mode, learned)
 				}
+				expectedReason := map[string]string{
+					"b70 212 KiB": "eligible", "host avg10 only": "eligible", "cgroup avg10 only": "eligible",
+					"host PSI": "host_psi_total", "host PSI total": "host_psi_total", "cgroup PSI total": "cgroup_psi_total",
+					"swap growth": "host_swap_growth", "low available": "available_below_floor",
+					"missing host PSI": "host_pressure_unavailable_or_reset", "missing cgroup PSI": "cgroup_psi_unavailable_or_reset",
+					"host PSI reset": "host_pressure_unavailable_or_reset", "cgroup PSI reset": "cgroup_psi_unavailable_or_reset", "invalid window": "invalid_pressure_window",
+				}[mode]
+				expectedUS := float64(200000)
+				if mode == "invalid window" {
+					expectedUS = 0
+				}
+				if peak.Pressure == nil || peak.Pressure.Reason != expectedReason || peak.Pressure.ElapsedUS != expectedUS {
+					t.Fatalf("unexplained pressure decision: %+v want %s", peak.Pressure, expectedReason)
+				}
+				if strings.HasSuffix(mode, "avg10 only") {
+					e := peak.Pressure
+					if e.HostStallUS == nil || e.CgroupStallUS == nil || *e.HostStallUS+*e.CgroupStallUS != 120 || max(e.HostAvg10, e.CgroupAvg10) != 1.44 {
+						t.Fatalf("lost PSI operands: %+v", e)
+					}
+				}
+				if mode == "b70 212 KiB" {
+					e := peak.Pressure
+					if e.HostSwapGrowthBytes != 212*1024 || e.HostSwapOutBytes != 23*4096 || e.MinAvailableGB == nil || *e.MinAvailableGB != float64(18664653)/(1<<20) || e.SwapBudgetGB != min(e.ResidentGB, *e.MinAvailableGB)*.01 {
+						t.Fatalf("lost swap/headroom operands: %+v", e)
+					}
+				}
+				q = memoryFactsRestart(t, q, clock)
+				memoryFactsGET(t, q, run, wire.MemoryPeak, false)
 				if missing {
-					q = memoryFactsRestart(t, q, clock)
-					memoryFactsGET(t, q, run, wire.MemoryPeak, false)
 					if !peak.PressureUnavailable || peak.HostGB == nil {
 						t.Fatalf("lost diagnostic peak or unknown pressure: %+v", peak)
 					}
@@ -314,7 +356,7 @@ func TestGPUHostMemoryCompleteAttempt(t *testing.T) {
 					}
 				}
 			}
-			if strings.HasPrefix(mode, "helper ") || mode == "missing host field" || mode == "missing host PSI" || mode == "missing cgroup PSI" || mode == "missing driver field" || mode == "missing client identity" || mode == "missing debugfs" || mode == "malformed debugfs" || mode == "missing events" {
+			if peak.PressureUnavailable || strings.HasPrefix(mode, "helper ") || mode == "missing host field" || mode == "missing host PSI" || mode == "missing cgroup PSI" || mode == "missing driver field" || mode == "missing client identity" || mode == "missing debugfs" || mode == "malformed debugfs" || mode == "missing events" {
 				if peak.GPUHost != nil || peak.NonreclaimableGB != nil {
 					t.Fatalf("incomplete attempt enabled GPU reduction: %+v", peak)
 				}
@@ -713,9 +755,10 @@ func TestGPUHostMemoryTwoCardAdmission(t *testing.T) {
 			if got := q.s.Machines[m.ID].HostMemoryInUseGB; math.Abs(got-want) > 1e-8 || got > 24 {
 				t.Fatalf("under-reserved concurrent jobs: got %v want %v", got, want)
 			}
-			// Existing pressure policy must discard the new range too.
+			// A true OOM must still discard the comparable accepted ranges.
 			clock.Advance(time.Second)
-			r := result(runs[0], true)
+			r := result(runs[0], false)
+			r.OutOfMemory = true
 			host := 7.7
 			total := 13.1
 			r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, NonreclaimableGB: &host, CgroupGB: &total, Events: &MemoryEventCounts{Max: 1}, GPUHost: &GPUHostMemory{}}
@@ -818,6 +861,103 @@ func TestGPUHostMemoryFallbackAndFloors(t *testing.T) {
 				}
 				if mode == "transfer" && (estimate.host == nil || hostMemoryPeakGB(estimate.host)*estimate.hostFactor < (host+20)*1.25) {
 					t.Fatalf("transfer discarded observed outside-cgroup memory: %+v", estimate)
+				}
+			}
+		})
+	}
+}
+
+// #486: a rejected successful neighbour must not replace any accepted memory,
+// even when throughput can still learn. True OOMs retain class invalidation.
+func TestGPUHostMemoryConstrainedNeighbourPreservesAccepted(t *testing.T) {
+	for _, outcome := range []string{"constrained success", "OOM", "ceiling failure"} {
+		t.Run(outcome, func(t *testing.T) {
+			q, clock, m, spec := gpuHostFixture(t)
+			start := func() *Job {
+				t.Helper()
+				queued := submit(t, q, spec)
+				run := assignedJob(machineCheck(t, q, m))
+				if run == nil || run.ID != queued.ID {
+					t.Fatal("no GPU attempt", queued.ID)
+				}
+				if err := q.Started(result(run, false)); err != nil {
+					t.Fatal(err)
+				}
+				return run
+			}
+			seed := start()
+			clock.Advance(time.Second)
+			host, total, device, component, drop, outside := 7.79, 9.54, 5.67, 8.48, 7.79, .31464340209961
+			r := result(seed, true)
+			r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, CgroupGB: &total, DeviceGB: &device, NonreclaimableGB: &component, Events: &MemoryEventCounts{}, GPUHost: &GPUHostMemory{DriverGB: &outside, HostDropGB: &drop, OutsideGB: &outside}}
+			if err := q.Complete(r); err != nil {
+				t.Fatal(err)
+			}
+			// Model already accepted comparable observations on another card
+			// and another host; the invalidator formerly swept all these keys.
+			for _, point := range q.s.WorkObservations {
+				if point.GPUHostRange == nil || point.MemoryRange == nil {
+					t.Fatal("fixture did not accept complete memory", point)
+				}
+				sibling := point
+				sibling.Key.Component = m.Devices[1].ID
+				sibling.Key.Hardware = m.Devices[1].Identity
+				q.s.WorkObservations[identityHash(sibling.Key)] = sibling
+				remote := point
+				remote.Key.Host = "another-host"
+				q.s.WorkObservations[identityHash(remote.Key)] = remote
+				break
+			}
+			run := start()
+			before := preservationSnapshot(t, q)
+			clock.Advance(time.Second)
+			r = result(run, outcome == "constrained success")
+			r.OutOfMemory = outcome == "OOM"
+			if outcome == "ceiling failure" {
+				r.Error = "exceeded its 16 GiB memory ceiling"
+			}
+			host = 20 // Rejected measurements cannot overwrite accepted peaks.
+			r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, Constrained: true, Events: &MemoryEventCounts{}}
+			body, err := json.Marshal(r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var wire Result
+			if err := json.Unmarshal(body, &wire); err != nil {
+				t.Fatal(err)
+			}
+			if err := q.Complete(wire); err != nil {
+				t.Fatal(err)
+			}
+			after := preservationSnapshot(t, q)
+			if len(before.WorkCurves) != len(after.WorkCurves) {
+				t.Fatal("curve key removed")
+			}
+			for _, old := range before.WorkCurves {
+				point, ok := q.s.WorkObservations[identityHash(old.Key)]
+				if !ok {
+					t.Fatal("curve key removed", old.Key)
+				}
+				if outcome == "constrained success" {
+					if !reflect.DeepEqual(old.MemoryPeak, point.MemoryPeak) || !reflect.DeepEqual(old.MemoryRange, point.MemoryRange) || !reflect.DeepEqual(old.GPUHostRange, point.GPUHostRange) || !old.MemoryRecordedAt.Equal(point.MemoryRecordedAt) || old.MemoryConfiguration != point.MemoryConfiguration || old.MemoryLayout != point.MemoryLayout {
+						t.Fatal("constrained neighbour changed accepted memory", old, point)
+					}
+				} else if !point.MemoryRecordedAt.IsZero() || point.MemoryRange != nil || point.GPUHostRange != nil {
+					t.Fatal("failure retained accepted memory", point)
+				}
+			}
+			if outcome == "constrained success" {
+				page, err := q.JobLedger(run.ID, 0, -1, 256)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := VerifyCurvePreservation(before, after, []JobLedgerPage{page}); err != nil {
+					t.Fatal(err)
+				}
+				q = memoryFactsRestart(t, q, clock)
+				memoryFactsGET(t, q, *run, wire.MemoryPeak, false)
+				if _, err := VerifyCurvePreservation(after, preservationSnapshot(t, q), nil); err != nil {
+					t.Fatal("restart", err)
 				}
 			}
 		})

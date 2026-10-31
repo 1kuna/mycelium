@@ -300,6 +300,47 @@ func (q *Queue) validateWorkTiming(j *Job, obligations []HostObligation) {
 	}
 }
 
+// Shared with per-attempt diagnostics so the exported predicate is the one
+// that actually gates memory learning, independently of throughput learning.
+func (q *Queue) memoryLearningReason(j *Job, r Result) string {
+	switch {
+	case r.ReleaseOnly:
+		return "release_only"
+	case r.OutOfMemory:
+		return "oom"
+	case !r.Success:
+		return "attempt_failed"
+	case j.StartedAt == nil:
+		return "not_started"
+	case r.ReleasePending:
+		return "release_pending"
+	case j.State != "running":
+		return "attempt_not_running"
+	case r.Interrupted:
+		return "interrupted"
+	case r.Forced:
+		return "forced"
+	case j.Timing == nil || j.Timing.Key == nil:
+		return "timing_unavailable"
+	case r.MemoryPeak == nil:
+		return "peak_unavailable"
+	case r.MemoryPeak.constrained():
+		return "constrained"
+	case r.MemoryPeak.PressureUnavailable:
+		return "pressure_unavailable"
+	case r.MemoryPeak.HostGB == nil || !validRate(*r.MemoryPeak.HostGB):
+		return "host_peak_unavailable"
+	case j.Batch != nil && (j.Batch.Run || j.Batch.Concurrency != 1 || len(j.Batch.Pieces) != 1):
+		return "batch_not_comparable"
+	}
+	t := j.Timing
+	current, _ := q.workObservationKey(j)
+	if current == nil || *current != *t.Key || t.Execution.ID != j.ID || t.Execution.Attempt != j.Attempt || t.Machine != j.Machine || t.Session != j.Session {
+		return "identity_changed"
+	}
+	return "eligible"
+}
+
 func (q *Queue) recordWorkObservation(j *Job, r Result) {
 	t := j.Timing
 	if t == nil || t.Key == nil || j.StartedAt == nil || r.ReleasePending || j.State != "running" || r.Interrupted || r.OutOfMemory || r.Forced {
@@ -307,17 +348,14 @@ func (q *Queue) recordWorkObservation(j *Job, r Result) {
 	}
 	q.validateWorkTiming(j, q.hostObligations(t.Key.Host))
 	throughput := t.Reason == ""
-	current, _ := q.workObservationKey(j)
-	memory := current != nil && *current == *t.Key && t.Execution.ID == j.ID && t.Execution.Attempt == j.Attempt && t.Machine == j.Machine && t.Session == j.Session &&
-		(j.Batch == nil || !j.Batch.Run && j.Batch.Concurrency == 1 && len(j.Batch.Pieces) == 1) &&
-		r.MemoryPeak != nil && !r.MemoryPeak.constrained() && !r.MemoryPeak.PressureUnavailable && r.MemoryPeak.HostGB != nil && validRate(*r.MemoryPeak.HostGB)
+	memory := q.memoryLearningReason(j, r) == "eligible"
 	if !throughput && !memory {
 		return
 	}
 	key := identityHash(t.Key)
 	old, exists := q.s.WorkObservations[key]
 	original := old
-	if old.MemoryPeak.constrained() && !old.MemoryPeak.Constrained {
+	if memory && old.MemoryPeak.constrained() && !old.MemoryPeak.Constrained {
 		peak := *old.MemoryPeak
 		peak.Constrained = true
 		old.MemoryPeak = &peak
@@ -330,7 +368,7 @@ func (q *Queue) recordWorkObservation(j *Job, r Result) {
 	if old.StaleReason != "" || q.clock.Now().Sub(old.RecordedAt) > workCurveMaxAge {
 		old.Rate, old.LatencySeconds = 0, 0
 	}
-	if !memoryIdentityUsable(old) || !old.MemoryRecordedAt.IsZero() && q.clock.Now().Sub(old.MemoryRecordedAt) > workCurveMaxAge {
+	if memory && (!memoryIdentityUsable(old) || !old.MemoryRecordedAt.IsZero() && q.clock.Now().Sub(old.MemoryRecordedAt) > workCurveMaxAge) {
 		old.MemoryPeak = nil
 		old.MemoryRange = nil
 		old.GPUHostRange = nil
@@ -373,12 +411,13 @@ func (q *Queue) recordWorkObservation(j *Job, r Result) {
 		}
 	}
 	point.MemoryRecordedAt = old.MemoryRecordedAt
-	point.MemoryConfiguration = memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
-	point.MemoryLayout = "separate"
-	if owner := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices); owner != nil && owner.UnifiedMemory && !j.Spec.Needs.cpuOnly() {
-		point.MemoryLayout = "unified"
-	}
+	point.MemoryConfiguration, point.MemoryLayout = old.MemoryConfiguration, old.MemoryLayout
 	if memory {
+		point.MemoryConfiguration = memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
+		point.MemoryLayout = "separate"
+		if owner := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices); owner != nil && owner.UnifiedMemory && !j.Spec.Needs.cpuOnly() {
+			point.MemoryLayout = "unified"
+		}
 		point.MemoryRecordedAt = q.clock.Now()
 	}
 	if r.Usage != nil && r.Usage.valid() {

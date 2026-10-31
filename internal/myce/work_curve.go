@@ -278,8 +278,8 @@ func (p WorkObservation) summary(state string) string {
 	return fmt.Sprintf("%s %s/%s c=%d: %s; %s; latency %.2fs; incremental host/device %.2f/%.2f GiB; peak host/device %.2f/%.2f GiB; %d samples", p.Key.Work, p.Key.Host, p.Key.Component, p.Key.Concurrency, rate, state, p.LatencySeconds, p.IncrementalHostMemoryGB, p.IncrementalDeviceMemoryGB, hostPeak, devicePeak, p.Samples)
 }
 
-// Explicit OOMs forbid their performance point; auto OOMs and constrained peaks
-// only invalidate comparable memory measurements, so exploration can re-teach it.
+// Explicit OOMs forbid their performance point; auto OOMs and failed constrained
+// attempts invalidate comparable memory so exploration can re-teach it.
 func (q *Queue) recordWorkOOM(j *Job, r Result, oomFailure bool) {
 	memoryOnly := j.Spec.Needs.Memory == "auto" || !oomFailure
 	var key *ObservationKey
