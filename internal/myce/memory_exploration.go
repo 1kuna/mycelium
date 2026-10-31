@@ -45,7 +45,7 @@ func (q *Queue) sameOSMemoryLowerBound(key ObservationKey, configuration string)
 			continue
 		}
 		owner := history.s.Machines[j.Timing.Machine]
-		if owner == nil || owner.Session != j.Timing.Session || history.unreported[owner.ID] {
+		if owner == nil || owner.Gone || history.unreported[owner.ID] {
 			continue
 		}
 		m := owner

@@ -355,7 +355,11 @@ func TestMemoryEnvelopeCPUForeignOSPeak(t *testing.T) {
 		t.Fatal(err)
 	}
 	check(t, q, linux, nil)
-	check(t, q, darwin, nil)
+	previousSession := darwin.Session
+	darwin.Session = "restarted-darwin-session"
+	if _, err := q.Checkin(Checkin{Machine: darwin, Fresh: true, PreviousSession: previousSession}); err != nil {
+		t.Fatal(err)
+	}
 	// The lower bound permits one full-allowance measurement, not a 3 GiB cap.
 	complete(start(darwin, boundedMemoryExploration, 7.75), 4, false)
 	complete(start(darwin, "accepted peak × 1.25", 5), 2, true)
