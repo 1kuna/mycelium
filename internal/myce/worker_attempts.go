@@ -537,7 +537,7 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport)
 		usedCores += j.Spec.Needs.cores()
 		need := localJobHostNeed(w, j)
 		usedRAM += need
-		growth += remainingHostGrowth(need, w.hostMemorySamples[jobKey(j)], w.Clock.Now())
+		growth += remainingAllocationGrowth(allocationMachine(&w.Machine, j.AllocatedDevices), j.Spec.Needs.MemoryGB, need, w.hostMemorySamples[jobKey(j)], w.Clock.Now())
 		if !next.Spec.Needs.cpuOnly() && slices.Contains(j.AllocatedDevices, firstDevice(next, w.Machine)) {
 			return refuseAdmission("local_device_reservation", "slots", 1, 0, false)
 		}
@@ -587,7 +587,7 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport)
 	if err := w.checkHostMemoryBudget(next.Spec.Needs.MemoryGB, next.Spec.Needs.HostMemoryGB); err != nil {
 		return err
 	}
-	if next.Spec.Needs.HostMemoryGB > 0 {
+	if next.Spec.Needs.HostMemoryGB > 0 || unifiedCUDA(&w.Machine) && next.Spec.Needs.MemoryGB > 0 {
 		if w.HostMemorySource == nil {
 			return refuseAdmission("live_host_growth", "GiB", growth, 0, true)
 		}

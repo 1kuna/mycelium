@@ -586,6 +586,11 @@ func (q *Queue) memoryWaitingReason(j *Job, machines map[string]*Machine) string
 				return ""
 			}
 			why := fmt.Sprintf("%s: %.1f GiB needed, %.1f GiB available (live %.1f GiB; reserved %.1f GiB; allowance %.1f GiB; %s)", m.ID, hostNeed(m, n.MemoryGB, n.HostMemoryGB), m.FreeHostMemoryGB, m.HostAvailableMemoryGB, m.HostMemoryInUseGB, m.EffectiveHostMemoryBudgetGB, candidate.MemoryEnvelope.Source)
+			if unifiedCUDA(m) {
+				if floor, ok := unifiedCUDAFloor(m); ok {
+					why += fmt.Sprintf("; unified CUDA physical RAM floor %.3f GiB", floor)
+				}
+			}
 			if m.HostMemoryPolicyMismatch {
 				why += "; host allowance policy mismatch"
 			}

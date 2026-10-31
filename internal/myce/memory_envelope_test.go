@@ -565,6 +565,8 @@ func TestMemoryEnvelopeUnifiedExploratoryGPUDrift(t *testing.T) {
 	w.InventoryProbe = func(context.Context) ([]MachineDevice, error) { return []MachineDevice{d}, nil }
 	w.nativeGPUDeviceProbe = syntheticNativeGPUDeviceProbe(d)
 	w.memoryCeilings = fakeCeilings(t)
+	// The declared 64 GiB allowance leaves a 64 GiB physical reserve.
+	w.hostRawMemorySource = func(context.Context) (float64, error) { return 128, nil }
 	w.HostMemorySource = func(context.Context) (float64, error) { return 100, nil }
 	w.MemorySource = func(context.Context) (float64, error) { return 59 - .0625, nil }
 	store, err := w.openStore()
@@ -623,6 +625,7 @@ func unifiedAutoFixture(t *testing.T, memberCap float64) (*Queue, *fakeClock, Ma
 	m.MemoryEnforcement = "memory ceilings enforced (cgroup v2)"
 	m.CapabilityProfile.Arch, m.CapabilityProfile.MemoryLayout = "arm64", "unified"
 	m.CapabilityProfile.SystemMemoryBytes = 128 << 30
+	m.MemoryObservation = &HostMemoryObservation{TotalGB: 128}
 	d := MachineDevice{ID: "0", Platform: "cuda", Identity: "synthetic-gb10", Selector: "0", MemoryMode: "unified", ReserveMemoryGB: 16, BudgetGB: 101, FreeMemoryGB: 101, UnifiedMemory: true, MemoryMeasured: true, ExtensionFingerprint: "unified-v1"}
 	target := d.machine(m)
 	report := newExtensionReport(e, &target, "extension:sample")

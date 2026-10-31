@@ -567,7 +567,16 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 	rt.environmentSourceRoot = w.EnvironmentSourceRoot
 	rt.memoryCeilings, rt.memoryMachine, rt.memorySwapMaxBytes = w.memoryCeilings, w.Machine, w.MemorySwapMaxBytes
 	rt.requireMemoryCeilings = w.RequireMemoryCeilings
-	rt.hostMemorySource = w.HostMemorySource
+	if w.HostMemorySource != nil {
+		rt.hostMemorySource = func(ctx context.Context) (float64, error) {
+			rt.mu.Lock()
+			machine := rt.memoryMachine
+			rt.mu.Unlock()
+			bound := w
+			bound.Machine = machine
+			return bound.sharedHostLiveMemory(ctx)
+		}
+	}
 	rt.unifiedMemory = w.Machine.UnifiedMemory
 	rt.memorySource = w.MemorySource
 	rt.memoryMeasured = w.MemoryMeasured
@@ -897,7 +906,7 @@ func (rt *modelRuntime) checkLoadMemory(ctx context.Context, loading *workerMode
 		return errors.New("worker requires positive host_memory_gb")
 	}
 
-	if loading.model.HostMemoryGB > 0 {
+	if loading.model.HostMemoryGB > 0 || unifiedCUDA(&machine) && loading.model.MemoryGB > 0 {
 		if rt.hostMemorySource == nil {
 			return errors.New("model load requires host RAM source")
 		}

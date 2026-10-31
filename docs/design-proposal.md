@@ -2222,6 +2222,13 @@ unified hosts. An unknown device peak cannot supply an exact unified estimate.
 Keep the existing operator/driver reserve and
 per-attempt slack; do not invent another fixed reserve. Live available RAM and
 the shared machine allowance both bound admission, with a visible refusal reason.
+For unified CUDA, retain a physical free-RAM floor equal to the larger of the
+existing OS/driver reserve (at least 16 GiB) and physical RAM minus the configured
+host allowance. Fresh raw host observations and outstanding growth bound queue
+admission; workers recheck raw RAM at launch. Cgroup credit never reduces the
+device vector. Lower tiers must also leave room for a sole qualified host's
+queued or forecast production envelope with existing estimator margins. Existing
+production holds, preemption and work-scoped parity approvals remain authoritative.
 
 Envelope-only Docker groups require a verified local shared cgroup parent
 (cgroupfs with worker delegation). Unsupported daemons refuse with an explicit
