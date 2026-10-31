@@ -162,6 +162,21 @@ func TestSharedHostPressureDedicatedHostsUnchanged(t *testing.T) {
 	}
 }
 
+func TestSharedHostPressureRetiredWorkerDoesNotStopReplacement(t *testing.T) {
+	q, _, m, run := sharedRunning(t, true)
+	q.mu.Lock()
+	retired := *q.s.Machines[m.ID]
+	retired.ID = "retired-worker"
+	retired.Gone = true
+	retired.SharedHostYieldReason = "shared host memory pressure"
+	q.s.Machines[retired.ID] = &retired
+	q.mu.Unlock()
+	r := check(t, q, m, run)
+	if r.Stop || r.Kill || job(t, q, run.ID).State != "running" {
+		t.Fatal("retired pressure stopped healthy replacement", r)
+	}
+}
+
 func TestSharedHostPressurePSIParsing(t *testing.T) {
 	for _, value := range []string{"", "some avg10=NaN", "some avg10=101", "full avg10=1.00"} {
 		if _, err := sharedMemoryPSI([]byte(value)); err == nil {

@@ -1250,10 +1250,15 @@ These hosts can run fitting light work through Mycelium. Use the opt-in
 reserves, #353 external peaks, native command nice=10, positive CPU/RAM budgets
 and last-resort placement. `myce host profile HOST --shared=true
 --interactive-reserve-gb GiB` requires a drained/disabled, fresh quiescent host;
-`--shared=false` removes the profile without resuming admission. Measured OS memory pressure or foreground scheduling latency now stops work
-through planned checkpoint/requeue with hysteresis. Linux execution cgroups cap
-aggregate CPU time; macOS adds background taskpolicy and reports CPU time
-unenforced. See the shared-host guide for thresholds and qualification limits. Existing exclusions, drain ownership and storage fences apply.
+`--shared=false` removes the profile without resuming admission. Measured OS
+memory pressure or foreground scheduling latency stops work through planned
+checkpoint/requeue with hysteresis. Linux execution cgroups cap aggregate CPU
+time. macOS applies `taskpolicy -b` (background CPU and I/O priority), caps
+aggregate declared cores at the CPU allowance, and clamps common runtime thread
+counts to each command's declared cores. Payloads can ignore those thread hints:
+aggregate CPU time and RAM ceilings remain unenforced on macOS. See the
+shared-host guide for thresholds and qualification limits. Existing exclusions,
+drain ownership and storage fences apply.
 
 ## CPU capacity and allowances (R1)
 

@@ -84,7 +84,7 @@ func (q *Queue) sharedPressureReason(m *Machine) string {
 // checkpoint grace, cancellation precedence and cleanup custody remain in charge.
 func (q *Queue) maintainSharedHosts() {
 	for _, m := range q.s.Machines {
-		if q.s.HostMaintenance[hostID(m)].SharedHost == nil || m.SharedHostYieldReason == "" {
+		if m.Gone || q.unreported[m.ID] || m.Replacement != nil || q.s.HostMaintenance[hostID(m)].SharedHost == nil || m.SharedHostYieldReason == "" {
 			continue
 		}
 		for _, j := range q.liveJobs() {
