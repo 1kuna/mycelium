@@ -8,6 +8,12 @@ refreshes every five seconds. Keep tokens in private configuration, not URLs.
 The page and `GET /api/status` share a snapshot for up to one second. Job receipt
 polls (`GET /api/jobs/{id}`) read the requested job afresh. Status snapshots do
 not drive start authorization, cancellation or result publication.
+Terminal job commits and their release acknowledgements invalidate the shared
+snapshot immediately. If one commits while status is projecting or waiting for
+usage/file-store I/O, status recaptures before returning, including uncached
+filtered and full views. This can repeat observation work during completions;
+ordinary worker check-ins do not invalidate the cache. Snapshot `now` is the
+injected queue time at capture, rather than the response completion time.
 
 Default status keeps the existing JSON fields and job shape, but includes all
 nonterminal jobs and terminal jobs with pending cleanup/delivery, plus the newest
