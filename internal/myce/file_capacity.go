@@ -192,7 +192,8 @@ func fileStoreRefusal(status FileStoreStatus, need uint64) error {
 
 // Snapshot custody before walking disk. Status is read-only and never runs GC.
 type fileStoreObservation struct {
-	admission                 *Queue // Detached status inputs only; never the live queue.
+	admission                 *Queue                       // Detached status inputs only; never the live queue.
+	migration                 *storageMigrationObservation // Complete inputs, independent of job paging.
 	store                     *FileStore
 	expired, keep, referenced map[string]bool
 	markers                   map[string]time.Time
@@ -216,7 +217,12 @@ func (q *Queue) captureFileStoreStatus() fileStoreObservation {
 			markers[hash] = at
 		}
 	}
-	return fileStoreObservation{store: q.files, expired: expired, keep: keep, referenced: referenced, markers: markers, bundles: bundles, now: q.clock.Now(), retention: q.fileRetention}
+	var migration *storageMigrationObservation
+	if q.s.StorageMigration != nil {
+		capture := q.captureStorageMigration()
+		migration = &capture
+	}
+	return fileStoreObservation{migration: migration, store: q.files, expired: expired, keep: keep, referenced: referenced, markers: markers, bundles: bundles, now: q.clock.Now(), retention: q.fileRetention}
 }
 
 func (q *Queue) fileStoreStatus(ctx context.Context) *FileStoreStatus {
@@ -239,7 +245,7 @@ func (v fileStoreObservation) status(ctx context.Context) *FileStoreStatus {
 	if err != nil {
 		status.Error = "file store capacity unavailable"
 		if v.admission != nil {
-			status.Admission = v.admission.storageAdmissionStatus(status, nil)
+			status.Admission = v.admission.storageAdmissionStatus(status, payloads, v.migration)
 		}
 		status.Physical = store.physicalStorageStatus(ctx, status, nil, now)
 		return &status
@@ -260,7 +266,7 @@ func (v fileStoreObservation) status(ctx context.Context) *FileStoreStatus {
 		}
 	}
 	if v.admission != nil {
-		status.Admission = v.admission.storageAdmissionStatus(status, payloads)
+		status.Admission = v.admission.storageAdmissionStatus(status, payloads, v.migration)
 	}
 	status.ReservedOutputBytes = store.reservedOutputs(payloads)
 	status.FreeBytes -= min(status.FreeBytes, status.ReservedOutputBytes)

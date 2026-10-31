@@ -3,7 +3,9 @@ package myce
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -181,6 +183,93 @@ func TestStorageMigrationLegacyBacklogAndMismatch(t *testing.T) {
 	migrationAction(t, q, "status") // Read-only status must expose the committed failed comparison.
 	if q.s.StorageMigration.Disagreements <= before || q.s.StorageMigration.CompletedCycles != 0 {
 		t.Fatal("mismatch did not reset evidence", q.s.StorageMigration)
+	}
+}
+
+func TestStorageMigrationReadinessIncludesHiddenLegacyOutputs(t *testing.T) {
+	for _, retainedAnswer := range []bool{false, true} {
+		t.Run(fmt.Sprintf("keyed_answer=%t", retainedAnswer), func(t *testing.T) {
+			f := migrationQualifiedCycle(t)
+			q := f.q
+			client := deliveryClient(t, q)
+			if !migrationAction(t, q, "status").Ready {
+				t.Fatal("fixture has not qualified for activation")
+			}
+			var before Snapshot
+			if err := client.Call(context.Background(), "GET", "/api/status?jobs=active", nil, &before); err != nil {
+				t.Fatal(err)
+			}
+			if !before.FileStore.Admission.Migration.Ready {
+				t.Fatal("paged status hides qualified readiness before the legacy output arrives")
+			}
+			_, ref := retentionUpload(t, client, "protected experiment result")
+			s := spec("experiment")
+			s.SubmissionKey = "legacy-result"
+			legacy := submit(t, q, s)
+			if err := q.Cancel(legacy.ID); err != nil {
+				t.Fatal(err)
+			}
+			f.c.Advance(time.Second)
+			if err := q.update(func() error {
+				j := q.touchJob(legacy.ID)
+				j.OutputRefs = FileManifest{"old": ref, "alias": ref}
+				if retainedAnswer {
+					q.deleteJob(legacy.ID)
+				}
+				// Push the retained holder beyond even the default bounded page.
+				for i := range defaultStatusJobs + 1 {
+					id := fmt.Sprintf("recent-%03d", i)
+					q.putJob(id, &Job{ID: id, State: "succeeded", ReleaseConfirmed: true, Queued: f.c.Now(), Spec: Spec{Project: "recent"}})
+				}
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if retainedAnswer && (q.s.Jobs[legacy.ID] != nil || q.s.Submissions[submissionDigest(s.Project, s.SubmissionKey)].Job.OutputRefs["old"] != ref) {
+				t.Fatal("fixture did not retain an answer outside job history")
+			}
+			var activation StorageMigrationStatus
+			err := client.Call(context.Background(), "POST", "/api/files/admission/activate", nil, &activation)
+			var api *HTTPError
+			if !errors.As(err, &api) || api.Status != 409 || api.Code != "storage_migration_incomplete" || q.s.StorageAdmissionActive {
+				t.Fatal("protected legacy output did not block activation", err)
+			}
+			exact := migrationAction(t, q, "status")
+			if exact.Ready || !strings.Contains(strings.Join(exact.Blockers, ";"), "legacy shared experiment backlog") {
+				t.Fatalf("missing activation blocker: %+v", exact)
+			}
+			if !strings.Contains(strings.Join(exact.Blockers, ";"), fmt.Sprintf("1 stored payloads (%d bytes)", ref.SizeBytes)) {
+				t.Fatalf("missing deduplicated protected output count/bytes: %+v", exact)
+			}
+			for _, path := range []string{
+				"/api/status", "/api/status?jobs=active", "/api/status?jobs=recent&limit=1",
+				"/api/status?jobs=all&limit=1", "/api/status?project=recent", "/api/status?detail=full", "/api/inspection",
+			} {
+				t.Run(path, func(t *testing.T) {
+					var snapshot Snapshot
+					if err := client.Call(context.Background(), "GET", path, nil, &snapshot); err != nil {
+						t.Fatal(err)
+					}
+					if snapshot.FileStore == nil || snapshot.FileStore.Admission == nil || snapshot.FileStore.Admission.Migration == nil {
+						t.Fatal("missing migration readiness")
+					}
+					got := snapshot.FileStore.Admission.Migration
+					if got.Ready != exact.Ready || got.ManualWriterLimitsRetirable != exact.ManualWriterLimitsRetirable || !slices.Equal(got.Blockers, exact.Blockers) {
+						t.Fatalf("status disagrees with activation: got %+v; dedicated %+v", got, exact)
+					}
+					if !strings.Contains(path, "full") && path != "/api/inspection" {
+						for _, j := range snapshot.Jobs {
+							if j.ID == legacy.ID {
+								t.Fatal("fixture did not hide retained holder from paged status")
+							}
+						}
+					}
+				})
+			}
+			if _, err := os.Stat(q.files.blob(ref)); err != nil {
+				t.Fatal("readiness checks lost protected output", err)
+			}
+		})
 	}
 }
 

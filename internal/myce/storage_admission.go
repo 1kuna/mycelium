@@ -567,14 +567,10 @@ type StorageAdmissionProposal struct {
 
 // q is a detached observation. The second copy isolates hypothetical yielding
 // and learned commitments even from the rest of the status projection.
-func (q *Queue) storageAdmissionStatus(status FileStoreStatus, payloads map[string]storedPayload) *StorageAdmissionStatus {
+func (q *Queue) storageAdmissionStatus(status FileStoreStatus, payloads map[string]storedPayload, migration *storageMigrationObservation) *StorageAdmissionStatus {
 	out := q.storageAdmissionProposals(status, payloads)
-	if q.s.StorageMigration != nil {
-		out.Migration = q.storageMigrationStatus(payloads)
-		if status.Error != "" {
-			out.Migration.Ready = false
-			out.Migration.Blockers = append(out.Migration.Blockers, status.Error)
-		}
+	if migration != nil {
+		out.Migration = migration.status(status, payloads)
 	}
 	return out
 }

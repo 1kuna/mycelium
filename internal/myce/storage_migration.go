@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"slices"
 	"time"
@@ -154,8 +155,18 @@ func (q *Queue) sampleStorageMigration(status FileStoreStatus, payloads map[stri
 	q.s.StorageMigration = m
 }
 
-func (q *Queue) storageMigrationStatus(payloads map[string]storedPayload) *StorageMigrationStatus {
-	out := &StorageMigrationStatus{SavedSettingsActive: !q.automaticStorage(), Blockers: []string{}}
+// Capture complete migration metadata under q.mu, before any status paging or
+// redaction. Only owned scalars and produced digests escape; inventory I/O stays
+// outside q.mu. Activation and every status view use the same evaluator below.
+type storageMigrationObservation struct {
+	report        StorageMigrationStatus
+	legacyOutputs map[string]bool
+}
+
+func (q *Queue) captureStorageMigration() storageMigrationObservation {
+	v := storageMigrationObservation{legacyOutputs: map[string]bool{}}
+	out := &v.report
+	out.SavedSettingsActive, out.Blockers = !q.automaticStorage(), []string{}
 	if m := q.s.StorageMigration; m != nil {
 		saved := m.Saved
 		out.Saved, out.Since, out.Last, out.Samples = &saved, m.Since, m.Last, m.Samples
@@ -226,10 +237,7 @@ func (q *Queue) storageMigrationStatus(payloads map[string]storedPayload) *Stora
 		}
 		for _, refs := range outputs {
 			for _, ref := range refs {
-				if _, exists := payloads[ref.SHA256]; exists {
-					out.Blockers = append(out.Blockers, "legacy shared experiment backlog must be preserved and legally collected: "+j.ID)
-					return
-				}
+				v.legacyOutputs[ref.SHA256] = true
 			}
 		}
 	}
@@ -241,11 +249,34 @@ func (q *Queue) storageMigrationStatus(payloads map[string]storedPayload) *Stora
 			visit(r.Job)
 		}
 	}
+	return v
+}
+
+func (v storageMigrationObservation) status(status FileStoreStatus, payloads map[string]storedPayload) *StorageMigrationStatus {
+	out := v.report
+	out.Blockers = slices.Clone(out.Blockers)
+	var count, bytes uint64
+	for hash := range v.legacyOutputs {
+		if p, exists := payloads[hash]; exists {
+			count++
+			bytes = addDiskBytes(bytes, p.size)
+		}
+	}
+	if count > 0 {
+		out.Blockers = append(out.Blockers, fmt.Sprintf("legacy shared experiment backlog must be preserved and legally collected: %d stored payloads (%d bytes)", count, bytes))
+	}
+	if status.Error != "" {
+		out.Blockers = append(out.Blockers, status.Error)
+	}
 	slices.Sort(out.Blockers)
 	out.Blockers = slices.Compact(out.Blockers)
 	out.Ready = len(out.Blockers) == 0
-	out.ManualWriterLimitsRetirable = q.automaticStorage() && out.Ready && out.CompletedCycles > 0
-	return out
+	out.ManualWriterLimitsRetirable = !out.SavedSettingsActive && out.Ready && out.CompletedCycles > 0
+	return &out
+}
+
+func (q *Queue) storageMigrationStatus(status FileStoreStatus, payloads map[string]storedPayload) *StorageMigrationStatus {
+	return q.captureStorageMigration().status(status, payloads)
 }
 
 // StorageAdmissionMigration serializes cutover with every upload/submission and
@@ -270,11 +301,7 @@ func (q *Queue) StorageAdmissionMigration(ctx context.Context, action string) (*
 	var refusal error
 	if action == "status" {
 		q.mu.RLock()
-		out = q.storageMigrationStatus(payloads)
-		if status.Error != "" {
-			out.Ready = false
-			out.Blockers = append(out.Blockers, status.Error)
-		}
+		out = q.storageMigrationStatus(status, payloads)
 		q.mu.RUnlock()
 		return out, nil
 	}
@@ -288,7 +315,7 @@ func (q *Queue) StorageAdmissionMigration(ctx context.Context, action string) (*
 			}
 			q.s.StorageAdmissionActive = false
 			q.storageShadowContinuity = false
-			out = q.storageMigrationStatus(payloads)
+			out = q.storageMigrationStatus(status, payloads)
 			return nil
 		}
 		if q.s.StorageMigration == nil {
@@ -298,9 +325,9 @@ func (q *Queue) StorageAdmissionMigration(ctx context.Context, action string) (*
 			q.s.StorageMigration = &storageMigration{Saved: StorageLegacySettings{uint64(store.limit), uint64(q.fileStoreProductionReserve)}, Cohort: map[string]bool{}}
 		}
 		q.sampleStorageMigration(status, payloads)
-		out = q.storageMigrationStatus(payloads)
+		out = q.storageMigrationStatus(status, payloads)
 		if action == "activate" && !q.automaticStorage() {
-			if !out.Ready || status.Error != "" {
+			if !out.Ready {
 				refusal = &HTTPError{Status: 409, Code: "storage_migration_incomplete", Message: "storage migration incomplete; inspect file admission status blockers and measured shadow evidence"}
 				return nil // Persist the failed comparison; refusal grants no activation.
 			}
@@ -309,7 +336,7 @@ func (q *Queue) StorageAdmissionMigration(ctx context.Context, action string) (*
 			m.ActivatedAt = &now
 			q.s.StorageMigration = &m
 			q.s.StorageAdmissionActive = true
-			out = q.storageMigrationStatus(payloads)
+			out = q.storageMigrationStatus(status, payloads)
 		}
 		return nil
 	}, nil)
