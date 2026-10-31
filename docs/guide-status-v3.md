@@ -453,6 +453,40 @@ pieces, unknown/stale measurements and overruns provide no forecast; only the
 preemption back-off applies. Warm environments incur no preparation cost. These
 admission checks do not enable a disabled production hold or stop Started work.
 
+Unified CUDA admission also protects memory for queued production whose sole
+qualified physical destination is that host, including declared dependent stages
+with an existing production-arrival forecast. The co-tenant charge plus the
+production envelope must fit the host ledger and live physical headroom. The
+envelope retains declared host/device floors and accepted measured peaks with
+the estimator's existing margins (at least 1.25), plus per-attempt slack. A bound
+production job recognizes alternatives only under the existing exact-work
+`production_parity_hosts` approval and fresh, immediate admission proof. Smaller co-tenants can fit; cancellation
+removes the demand. No prediction of future, unsubmitted jobs is made.
+
+The physical free-RAM floor is **max(existing unified-CUDA reserve, physical RAM
+minus the configured host allowance)**. The existing OS/driver reserve is at
+least 16 GiB; a larger configured device reserve is retained. Similarly,
+a tighter operator allowance retains the larger remainder, providing additional
+room for driver allocations, fragmentation and outside growth. For example,
+121.064556 GiB physical RAM and a 96 GiB allowance yield a 25.064556 GiB floor
+(9.064556 GiB beyond the existing reserve). This is a conservative admission
+policy, not a measured guarantee against driver allocation failures. It costs
+co-tenancy capacity when unmanaged memory uses that remainder. Native
+coexistence/fragmentation qualification remains separate.
+
+The queue checks raw physical availability from the existing host-memory
+observation, subtracting this floor and outstanding reservation growth; the
+worker rechecks raw RAM before command/model launch. Missing or five-second-old
+check-in observations withhold new admission until refreshed, bounding stale
+credit at the cost of temporarily idle capacity. Full reservations still bound
+the static allowance. Cgroup current memory can credit only the host portion of
+a unified CUDA reservation: the device portion always remains charged in full,
+including when device telemetry is missing. No CUDA/cgroup overlap is qualified.
+The external-RSS history is not added to reservations; raw available RAM already
+reflects both managed and unmanaged usage. Discrete CUDA and other platforms
+retain their existing memory admission rules. Production priority and takeover
+rules are unchanged.
+
 Host gates should read `holds_detail`, an array (empty when there are no holds)
 whose entries have `host`, `kind`, `operator_action_required`, `text` and an
 optional `clears_at` timestamp. Entries are sorted by host and kind; a host can

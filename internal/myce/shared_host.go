@@ -149,7 +149,8 @@ func applySharedHostPriority(pid int, p *SharedHostProfile) error {
 // Launch rechecks current raw RAM. The queue retains the historical bound;
 // this check protects owner growth between assignment and execution.
 func (w Worker) sharedHostLiveMemory(ctx context.Context) (float64, error) {
-	if w.Machine.SharedHost == nil {
+	cuda := hostHasUnifiedCUDA(&w.Machine)
+	if w.Machine.SharedHost == nil && !cuda {
 		return w.HostMemorySource(ctx)
 	}
 	admission, raw, err := w.sampleHostMemory(ctx)
@@ -157,7 +158,18 @@ func (w Worker) sharedHostLiveMemory(ctx context.Context) (float64, error) {
 		return 0, err
 	}
 	if !validMemoryValue(raw) {
-		return 0, errors.New("shared host raw memory unavailable")
+		return 0, errors.New("raw host memory unavailable")
 	}
-	return max(0, min(admission, raw-w.Machine.SharedHost.InteractiveReserveGB)), nil
+	reserve := 0.0
+	if w.Machine.SharedHost != nil {
+		reserve = w.Machine.SharedHost.InteractiveReserveGB
+	}
+	if cuda {
+		floor, ok := unifiedCUDAFloor(&w.Machine)
+		if !ok {
+			return 0, errors.New("unified CUDA physical capacity unavailable")
+		}
+		reserve = max(reserve, floor)
+	}
+	return max(0, min(admission, raw-reserve)), nil
 }

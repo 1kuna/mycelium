@@ -1256,7 +1256,7 @@ func (w Worker) checkHostRAM(gpu, host float64) error {
 	if err := w.checkHostMemoryBudget(gpu, host); err != nil {
 		return err
 	}
-	if host == 0 {
+	if host == 0 && (!unifiedCUDA(&w.Machine) || gpu == 0) {
 		return nil
 	}
 	if w.HostMemorySource == nil {
