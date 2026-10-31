@@ -1,10 +1,12 @@
 package myce
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"os"
 	"os/exec"
@@ -357,6 +359,29 @@ func TestSharedHostCPUEnvironmentOnAcceleratorWorker(t *testing.T) {
 	}
 	if err := q.Started(result(assigned, false)); err != nil {
 		t.Fatal("prepared CPU command not authorized to start", err)
+	}
+}
+
+func TestSharedHostBackgroundPriorityFailureWarns(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("Darwin background policy")
+	}
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	old := sharedHostSetBackgroundPriority
+	writer := log.Writer()
+	var warnings bytes.Buffer
+	log.SetOutput(&warnings)
+	sharedHostSetBackgroundPriority = func(int) error { return syscall.EPERM }
+	t.Cleanup(func() { sharedHostSetBackgroundPriority = old; log.SetOutput(writer) })
+	if err := applySharedHostPriority(cmd.Process.Pid, &SharedHostProfile{}); err != nil {
+		t.Fatalf("background policy failure must not abort launch: %v", err)
+	}
+	if !strings.Contains(warnings.String(), "warning: shared host background task policy") || !strings.Contains(warnings.String(), syscall.EPERM.Error()) {
+		t.Fatalf("missing policy warning: %s", &warnings)
 	}
 }
 
