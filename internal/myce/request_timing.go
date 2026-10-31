@@ -34,7 +34,7 @@ func spanFrom(ctx context.Context) *requestSpan {
 	return s
 }
 
-func requestLock(ctx context.Context, mu *sync.RWMutex) func() {
+func requestLock(ctx context.Context, mu sync.Locker) func() {
 	s := spanFrom(ctx)
 	if s == nil {
 		mu.Lock()
@@ -181,7 +181,7 @@ func (q *Queue) measureRequests(next http.Handler, registered ...map[string]stru
 	})
 }
 
-func unlockTimedRequest(ctx context.Context, mu *sync.RWMutex, timing *queueUpdateTiming) {
+func unlockTimedRequest(ctx context.Context, mu sync.Locker, timing *queueUpdateTiming) {
 	s := spanFrom(ctx)
 	if s == nil {
 		mu.Unlock()
@@ -206,7 +206,10 @@ func requestContext(contexts []context.Context) context.Context {
 	return context.Background()
 }
 
-func requestReadLock(ctx context.Context, mu *sync.RWMutex) func() {
+func requestReadLock(ctx context.Context, mu interface {
+	RLock()
+	RUnlock()
+}) func() {
 	s := spanFrom(ctx)
 	if s == nil {
 		mu.RLock()

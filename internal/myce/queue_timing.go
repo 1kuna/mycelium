@@ -83,7 +83,7 @@ func newQueueUpdateTiming() *queueUpdateTiming {
 	return &queueUpdateTiming{started: time.Now()}
 }
 
-func (t *queueUpdateTiming) lock(mu *sync.RWMutex) {
+func (t *queueUpdateTiming) lock(mu sync.Locker) {
 	if t == nil {
 		mu.Lock()
 		return
