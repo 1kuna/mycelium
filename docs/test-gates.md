@@ -187,7 +187,14 @@ personal access token is needed.
 
 [`scripts/actions-full.py`](../scripts/actions-full.py) narrows the existing
 `gate-full` profile to the exact push SHA and submits it once for Darwin arm64
-and once for Linux amd64/arm64. Resources, environment, output contract and check
+and once for Linux arm64. As a temporary mitigation for
+[#527](https://github.com/1kuna/mycelium/issues/527), the generated CI profiles
+exclude the Linux amd64 target to keep full suites off the current queue host.
+Profiles have no negative host selector; target exclusion is the smallest
+supported exclusion and also excludes other Linux amd64 workers. Native Linux
+amd64 full-suite coverage is deferred; cross-build checks still run. Restore that
+target only after the production hold ends and queue I/O protection is qualified.
+Resources, environment, output contract and check
 remain unchanged. There are no host pins; Mycelium chooses each worker and
 provides the existing `mycelium-gate` environment. Both submissions happen
 before `myce wait` waits for all jobs, even if one fails. Successful jobs also

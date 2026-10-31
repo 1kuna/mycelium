@@ -14,9 +14,13 @@ TERMINAL = {'succeeded', 'failed', 'cancelled'}
 def platform_profile(text, sha, platform):
     """Narrow the existing profile without changing its resources or acceptance."""
     text, sources = re.subn(r'(?m)^  git: HEAD$', f'  git: {sha}', text)
+    # https://github.com/1kuna/mycelium/issues/527: exclude the queue host's
+    # Linux amd64 target while heavy jobs must stay off it. Profiles have no
+    # negative host selector; excluding this target is the smallest supported
+    # exclusion, at the cost of native amd64 full-suite coverage. Keep placement
+    # open to every eligible arm64 worker rather than pinning a replacement host.
     targets = ('  - {os: darwin, arch: arm64, platform: cpu}\n' if platform == 'darwin'
-               else '  - {os: linux, arch: amd64, platform: cpu}\n'
-                    '  - {os: linux, arch: arm64, platform: cpu}\n')
+               else '  - {os: linux, arch: arm64, platform: cpu}\n')
     text, matrices = re.subn(r'(?m)^targets:\n(?:  - .*\n)+', 'targets:\n' + targets, text)
     if sources != 1 or matrices != 1:
         raise ValueError('gate-full profile format changed')
@@ -55,6 +59,8 @@ def submission_failure(reply):
 
 def run(root, sha, scratch):
     profile = (root / '.mycelium/profiles/gate-full.yaml').read_text()
+    print('Linux amd64 native full-suite coverage is deferred: profiles lack a negative host selector; '
+          'the queue host must be excluded during #527: https://github.com/1kuna/mycelium/issues/527', flush=True)
     jobs, states, refusals = {}, {}, {}
     failed = False
     # Submit both before waiting. An error on one platform must not skip the other.
