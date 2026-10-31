@@ -41,24 +41,43 @@ func automaticExtensionCheckID(machine string, r ExtensionReport) string {
 // Device admission is separate: disabling cannot cancel an existing Started
 // check while its useful demand and prepared identity still exist.
 func (q *Queue) extensionQualificationDemand(e Extension, m *Machine) bool {
+	return q.extensionQualificationDemands(m, &e)[e.Digest]
+}
+
+// One planning pass collects demand by frozen digest, rather than running disk
+// and policy checks for every registered extension times every queued job.
+// In particular, plain commands cannot demand extension qualification. The
+// optional selection keeps authoritative single-check validation equally cheap.
+// This map belongs only to this locked pass; it never survives a queue mutation.
+func (q *Queue) extensionQualificationDemands(m *Machine, only *Extension) map[string]bool {
+	demand := map[string]bool{}
 	// A new admission reservation cannot revoke useful demand and cancel a
 	// check that already Started. New check offers/submissions gate separately.
 	for _, j := range q.liveJobs() {
-		if j.State != "queued" || j.Spec.ExtensionCheck != nil || j.Spec.Resumable && !e.Resumable {
+		if j.State != "queued" || j.Spec.ExtensionCheck != nil || len(j.Extensions) == 0 {
 			continue
 		}
 		for _, candidate := range extensionJobs(j, m, false) {
+			eligible := func(e Extension) bool {
+				return (!j.Spec.Resumable || e.Resumable) && (only == nil || e.Digest == only.Digest)
+			}
+			if !slices.ContainsFunc(candidate.Extensions, eligible) {
+				continue
+			}
 			if q.diskHeadroomReason(candidate, m) != "" || !q.placementPolicyWithoutReservation(candidate, m, false) || !deviceAllowed(candidate, m) {
 				continue
 			}
 			for _, selected := range candidate.Extensions {
-				if selected.Digest == e.Digest {
-					return true
+				if eligible(selected) {
+					demand[selected.Digest] = true
 				}
+			}
+			if only != nil && demand[only.Digest] {
+				return demand
 			}
 		}
 	}
-	return false
+	return demand
 }
 
 func (q *Queue) extensionQualificationPlan(m *Machine) []ExtensionQualificationPlan {
@@ -66,8 +85,9 @@ func (q *Queue) extensionQualificationPlan(m *Machine) []ExtensionQualificationP
 		return nil
 	}
 	var plans []ExtensionQualificationPlan
+	demand := q.extensionQualificationDemands(m, nil)
 	for _, e := range q.s.Extensions {
-		if !q.extensionQualificationDemand(e, m) {
+		if !demand[e.Digest] {
 			continue
 		}
 		view, ok := e.forMachine(m)
