@@ -42,6 +42,22 @@ type checkpointIOResult[T any] struct {
 	err        error
 }
 
+// Final result publication must not overtake a still-writing live checkpoint
+// publication. Its allocation sample and cleanup precede attempt completion.
+func (n *checkpointIO[T]) inFlight() bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.pending == nil {
+		return false
+	}
+	select {
+	case <-n.pending.done:
+		return false
+	default:
+		return true
+	}
+}
+
 func (n *checkpointIO[T]) run(key string, fn func() (T, error)) (T, error) {
 	// Durable worker operations consume late completion rather than repeat
 	// side effects. Context-bound validation checks must instead run afresh.

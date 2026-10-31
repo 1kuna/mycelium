@@ -16,17 +16,17 @@ const managedStorageSource = "managed allocated-block samples; unenforced"
 // The observer reads metadata only on attempt-local roots, never NAS or payload
 // contents. It does not enforce a limit or claim to see deleted-between-scan data.
 type storageObserver struct {
-	mu                                sync.Mutex
-	root, checkpoint, state, identity string
-	peak                              AttemptStoragePeak
-	baselineBytes                     uint64
-	metadata                          []string
-	stop                              chan struct{}
-	done                              chan struct{}
-	once                              sync.Once
+	mu                                             sync.Mutex
+	root, checkpoint, publication, state, identity string
+	peak                                           AttemptStoragePeak
+	baselineBytes                                  uint64
+	metadata                                       []string
+	stop                                           chan struct{}
+	done                                           chan struct{}
+	once                                           sync.Once
 }
 
-type storageScan struct{ scratch, spool, checkpoint, metadata, files uint64 }
+type storageScan struct{ allocated, scratch, spool, checkpoint, metadata, files uint64 }
 type storageInode struct{ dev, ino uint64 }
 
 func (o *storageObserver) scan() (storageScan, error) {
@@ -57,9 +57,14 @@ func (o *storageObserver) scan() (storageScan, error) {
 			}
 			seen[inode] = true
 			bytes := uint64(max(0, st.Blocks)) * 512 // POSIX st_blocks is in 512-byte units.
+			// The physical total comes from every inode in the managed roots.
+			// Categories explain that total; they never decide what is charged.
+			out.allocated = addDiskBytes(out.allocated, bytes)
 			bucket := kind
 			if kind == "scratch" && (strings.Contains(path, string(filepath.Separator)+".myce-result-spool") || strings.Contains(path, string(filepath.Separator)+".result-spool-")) {
 				bucket = "spool"
+			} else if strings.Contains(path, string(filepath.Separator)+".file-checkpoint-") {
+				bucket = "checkpoint"
 			}
 			switch bucket {
 			case "spool":
@@ -84,6 +89,11 @@ func (o *storageObserver) scan() (storageScan, error) {
 			return out, err
 		}
 	}
+	if o.publication != "" {
+		if err := walk(o.publication, "metadata"); err != nil {
+			return out, err
+		}
+	}
 	paths := []string{}
 	if o.identity != "" {
 		var err error
@@ -94,7 +104,7 @@ func (o *storageObserver) scan() (storageScan, error) {
 	}
 	for _, name := range o.metadata {
 		if name != "" && filepath.Base(name) == name {
-			paths = append(paths, filepath.Join(o.state, name))
+			paths = append(paths, filepath.Join(o.state, name), filepath.Join(o.state, name+".tmp"))
 		}
 	}
 
@@ -106,6 +116,9 @@ func (o *storageObserver) scan() (storageScan, error) {
 	return out, nil
 }
 func (o *storageObserver) sample() {
+	if o == nil {
+		return
+	}
 	scan, err := o.scan()
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -113,17 +126,15 @@ func (o *storageObserver) sample() {
 		o.peak.Complete = false
 		return
 	}
-	if o.identity == "" {
-		scan.metadata = max(scan.metadata, o.peak.MetadataBytes)
-	}
-	scratch := scan.scratch - min(scan.scratch, o.baselineBytes)
+	staged := min(scan.scratch, o.baselineBytes)
+	scratch := scan.scratch - staged
 	files := scan.files // Include staged-input inodes; only their bytes are separate.
 	p := &o.peak
 	p.ScratchBytes = max(p.ScratchBytes, scratch)
 	p.SpoolBytes = max(p.SpoolBytes, scan.spool)
 	p.CheckpointBytes = max(p.CheckpointBytes, scan.checkpoint)
 	p.MetadataBytes = max(p.MetadataBytes, scan.metadata)
-	p.ManagedBytes = max(p.ManagedBytes, addDiskBytes(addDiskBytes(scratch, scan.spool), addDiskBytes(scan.checkpoint, scan.metadata)))
+	p.ManagedBytes = max(p.ManagedBytes, scan.allocated-staged)
 	p.Files = max(p.Files, files)
 	p.Samples = addDiskBytes(p.Samples, 1)
 }
@@ -132,14 +143,28 @@ func (o *storageObserver) finish() *AttemptStoragePeak {
 		return nil
 	}
 	o.once.Do(func() { close(o.stop); <-o.done; o.sample() })
+	return o.snapshot()
+}
+func (o *storageObserver) snapshot() *AttemptStoragePeak {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	p := o.peak
 	return &p
 }
+
+func attemptStorageRoot(j Job, state string) string {
+	return filepath.Join(state, "job-files", j.ID, strconv.Itoa(j.Attempt))
+}
+
+// Keep live checkpoint snapshots outside the payload's writable workspace and
+// checkpoint grants, but inside one exact-attempt root for all publication I/O.
+func attemptPublicationRoot(j Job, state string) string {
+	return filepath.Join(state, "attempt-publication", j.ID, strconv.Itoa(j.Attempt))
+}
+
 func (w Worker) observeAttemptStorage(j Job, state, checkpoint, identity string, metadata ...string) *storageObserver {
-	root := filepath.Join(state, "job-files", j.ID, strconv.Itoa(j.Attempt))
-	o := &storageObserver{root: root, state: state, identity: identity, metadata: metadata, peak: AttemptStoragePeak{Complete: true, Source: managedStorageSource}, stop: make(chan struct{}), done: make(chan struct{})}
+	root := attemptStorageRoot(j, state)
+	o := &storageObserver{root: root, publication: attemptPublicationRoot(j, state), state: state, identity: identity, metadata: metadata, peak: AttemptStoragePeak{Complete: true, Source: managedStorageSource}, stop: make(chan struct{}), done: make(chan struct{})}
 	// Only known managed roots can claim complete sampling. Docker overlay writes
 	// and external checkpoint/work paths need #506 accounting before they can learn.
 	if j.Spec.Run.Docker || filepath.Clean(j.Spec.Run.Workdir) != filepath.Clean(root) {
@@ -189,11 +214,25 @@ func (w Worker) observeAttemptStorage(j Job, state, checkpoint, identity string,
 // Publication can allocate a second immutable copy after compute exits. Keep
 // that simultaneous workspace+spool peak in the same exact result, on replay too.
 func samplePublishedStorage(j Job, r Result, state string, metadata ...string) Result {
+	o := publicationStorageObserver(j, r, state, metadata...)
+	if o != nil {
+		o.sample()
+		r.StoragePeak = o.snapshot()
+	}
+	return r
+}
+
+func publicationStorageObserver(j Job, r Result, state string, metadata ...string) *storageObserver {
 	if r.StoragePeak == nil {
-		return r
+		return nil
 	} // Recovery cannot invent missing lifetime coverage.
 	p := *r.StoragePeak
-	o := &storageObserver{root: filepath.Join(state, "job-files", j.ID, strconv.Itoa(j.Attempt)), state: state, identity: "", metadata: metadata, peak: p, baselineBytes: p.StagedInputBytes}
+	o := &storageObserver{root: attemptStorageRoot(j, state), publication: attemptPublicationRoot(j, state), state: state, metadata: metadata, peak: p, baselineBytes: p.StagedInputBytes}
+	for _, name := range metadata {
+		if strings.HasSuffix(name, ".result.json") {
+			o.identity = strings.TrimSuffix(name, ".result.json")
+		}
+	}
 	path := attemptCheckpoint(j)
 	if !needsCheckpoint(&j) {
 		path = filepath.Join(state, "checkpoints", j.ID, "attempt-"+strconv.Itoa(j.Attempt))
@@ -205,9 +244,7 @@ func samplePublishedStorage(j Job, r Result, state string, metadata ...string) R
 		o.peak.Complete = false
 	}
 
-	o.sample()
-	r.StoragePeak = &o.peak
-	return r
+	return o
 }
 
 func workerStorageMetadata(s *workerStore) string {

@@ -1012,6 +1012,7 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 	}
 	identity := ID()
 	observer := w.observeAttemptStorage(j, s.dir, checkpoint, identity, workerStorageMetadata(s))
+	s.storageObserver = observer
 	defer func() {
 		if proc == nil {
 			observer.finish()

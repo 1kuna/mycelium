@@ -278,6 +278,7 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				err = w.replay(ctx, s)
 			}
 			if err == nil && a.job.storedFileResults() {
+				w.storageObserver = s.storageObserver
 				if s.state.Result != nil {
 					if !s.state.Result.ReleasePending {
 						released := *s.state.Result
@@ -287,6 +288,10 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 						if stale(err) {
 							err = nil
 						}
+					}
+					if err == nil && s.fileProgress.inFlight() {
+						err = errCheckpointIOPending
+						s.fileError = "checkpoint publication pending; local results retained"
 					}
 					if err == nil {
 						value, result := *s.state.Job, *s.state.Result

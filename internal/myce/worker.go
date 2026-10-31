@@ -652,6 +652,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	}
 	env["MYCE_SCRATCH_DIR"] = scratch
 	w.storageObserver = w.observeAttemptStorage(j, s.dir, checkpoint, identity, workerStorageMetadata(s))
+	s.storageObserver = w.storageObserver
 	defer func() {
 		if !started {
 			w.storageObserver.finish()

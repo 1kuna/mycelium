@@ -921,12 +921,19 @@ Output is the **logical sum of verified manifest entries**, including repeated
 content hashes. It is independent of the file store's physical deduplicated
 increment. Scratch is allocated mutable workspace/output above the measured
 staged-input baseline; spool, checkpoint/stop writes, metadata and file/inode
-counts (including staged-input inodes) are retained separately. `managed_bytes` is the maximum simultaneous
-scratch + spool + checkpoint + metadata allocation, rather than a sum of peaks
-observed at different times. Staging is charged additionally in `predicted_need`,
+counts (including staged-input inodes) are retained separately. `managed_bytes`
+comes directly from all allocated blocks in the attempt's workspace, checkpoint,
+private publication root and exact-attempt metadata, rather than summing selected
+categories or peaks observed at different times. Staging is charged additionally in `predicted_need`,
 using known input bytes and the measured staging range. Hardlinks/aliased roots
 count once within a scan; symlinks are not followed. Publication sampling includes
-the simultaneously retained work files, immutable spool and manifest and exact-attempt custody metadata.
+the simultaneously retained work files, immutable spool and manifest, original
+checkpoint plus its immutable publication copy, and exact-attempt custody metadata
+(including temporary replacements). Checkpoint copies live under a private
+per-attempt publication root outside payload write grants. Live and final
+publication take a synchronous root sample before deleting staging, retaining
+byte/inode peaks even on upload failure. Final completion waits for any outstanding
+live checkpoint publication to finish sampling and cleanup.
 
 Each dimension predicts its largest accepted complete peak plus
 `max(observed range, positive prediction error)`, rounding allocated bytes to the
