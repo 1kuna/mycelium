@@ -1,5 +1,9 @@
 # Operating Mycelium v3
 
+For a queue sharing a disk with jobs, see [queue I/O contention](queue-io-contention.md)
+for the opt-in systemd `--io-weight` setting, enforcement prerequisites and
+latency qualification. A configured weight alone is not proof of protection.
+
 ## Add a hypha with one command
 
 On an authorized installed hypha, run `myce invite` and paste its single output
