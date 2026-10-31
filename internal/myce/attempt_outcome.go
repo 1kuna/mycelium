@@ -123,7 +123,12 @@ func startFailureOutcome(owner Result, err error) Result {
 	if errors.Is(err, errWorkerStartAuthorization) {
 		owner.ExecutionCause = runtimeDiagnostic(runtimeErrorFor("start_authorization", err))
 	}
-	return classifyAttemptOutcome(owner, attemptCause{memberOutcome: facts})
+	if architectureExecError(err) {
+		owner.ExecutionCause = &RuntimeCause{Operation: "launch", Class: architectureMismatch}
+	}
+	owner = classifyAttemptOutcome(owner, attemptCause{memberOutcome: facts})
+	classifyArchitectureFailure(&owner, false)
+	return owner
 }
 
 func classifyAttemptOutcome(result Result, facts attemptCause) Result {

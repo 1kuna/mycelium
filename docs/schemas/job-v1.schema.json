@@ -1366,6 +1366,10 @@
           "$ref": "#/$defs/ApplicationProgress",
           "x-contract": "diagnostic"
         },
+        "architecture": {
+          "$ref": "#/$defs/JobArchitecture",
+          "x-contract": "diagnostic"
+        },
         "assigned_at": {
           "format": "date-time",
           "type": "string",
@@ -1815,6 +1819,29 @@
         "queued",
         "front",
         "checkpoint"
+      ],
+      "type": "object"
+    },
+    "JobArchitecture": {
+      "properties": {
+        "excluded": {
+          "items": {
+            "$ref": "#/$defs/ExecutionTarget"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "moved": {
+          "type": "boolean"
+        },
+        "target": {
+          "$ref": "#/$defs/ExecutionTarget"
+        }
+      },
+      "required": [
+        "target"
       ],
       "type": "object"
     },
@@ -3020,6 +3047,10 @@
             "object",
             "null"
           ],
+          "x-contract": "diagnostic"
+        },
+        "portable": {
+          "type": "boolean",
           "x-contract": "diagnostic"
         },
         "prepare_source": {

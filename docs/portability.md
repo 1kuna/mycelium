@@ -13,21 +13,46 @@ targets:
   - {os: linux}
   - {os: darwin}
 environment: portable-tools
+portable: true             # verified complete environment/payload coverage
 ```
 
 Job targets require `os`; omit `arch` when the payload is portable across that
 OS's architectures, and omit `platform` when `needs` already expresses the backend.
 For example, `{os: linux}` suits `go test` compiled on the worker, scripts with
-compatible installed tools, and environments whose locks cover multiple arches.
+compatible installed tools, and environments built from source on the worker.
 Matching hosts still pass all resource, environment and qualification checks;
 MY-18 chooses the least valuable fit among them.
 
-Prebuilt native binaries, a single-arch extension, or a single-arch environment
-need an explicit `arch`. Submission explains the required architecture and why;
-add that requirement or supply portable source/multi-arch variants. Mycelium
-inspects frozen files/source and declared recipe/lock coverage; authors still
-own dependencies downloaded by scripts and tools already installed on workers.
+OS-only targets expand automatically only for plain commands without opaque
+inputs and environments built from source on the worker without a shipped
+binary. Uploaded files (including generated source archives), shared/inherited
+payloads, container images, locked environments without a source build, and
+single-arch extension variants need an explicit `arch` or the author's
+`portable: true` declaration. File manifests do not prove which inputs are
+executables or archives, so every uploaded payload requires that assertion.
+A build hook beside a prebuilt environment binary does not establish portability.
+Mycelium checks declarations, not binary signatures or runtime downloads.
+
+For a verified source-only profile, for example:
+
+```yaml
+portable: true
+targets: [{os: linux}]
+```
+
+`portable: true` asserts that the complete payload, including downloads and
+nested archives, can run on every matching architecture. It does not create
+missing extension variants, bypass qualification or ignore environment coverage.
 Extension variants retain complete, exact OS/arch/platform targets.
+
+A clear exec-format/wrong-architecture failure is reported as `arch_mismatch`.
+Mycelium excludes that attempt's OS/arch and requeues once using normal placement
+after exact cleanup. A second architecture mismatch ends recovery; it does not
+spend infrastructure retries or loop through hosts. Exclusions survive restart
+and later submissions of the same frozen executable contract inherit them.
+Changed source/artifacts, commands, environment recipes or extension digests
+establish a new contract. Exit codes alone are insufficient evidence. The worker checks stderr even with
+`logs: none`; stdout text does not establish an architecture mismatch.
 
 Use targets whose tools and outputs you have verified. `portable-tools` stands
 for a registered catalog recipe covering those targets; native entries may use

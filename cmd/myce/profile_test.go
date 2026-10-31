@@ -41,6 +41,7 @@ source: {directory: source}
 run:
   command: [sh, run.sh]
 needs: {cpu_cores: 1, memory_gb: 1}
+portable: true
 targets: [{os: ` + runtime.GOOS + `}]
 outputs: {result: results}
 check: [test, -s, result]
@@ -469,7 +470,7 @@ func TestProfileOSOnlyPrebuiltError(t *testing.T) {
 	}
 	p := executionProfile{Spec: myce.Spec{Name: "binary", Project: "test", Class: "experiment", Targets: []myce.ExecutionTarget{{OS: "linux"}}, Run: myce.RunSpec{Command: []string{"./program"}}}, Source: profileSource{Directory: "source"}, Check: []string{"true"}}
 	err := runPreparedProfile(context.Background(), root, p, []byte("binary-fixture"), nil, nil, "", "", "", "", "", "", io.Discard, io.Discard)
-	if err == nil || !strings.Contains(err.Error(), "arch: amd64") || !strings.Contains(err.Error(), "prebuilt native binary") || strings.Contains(err.Error(), root) {
+	if err == nil || !strings.Contains(err.Error(), "explicit arch or portable: true") || !strings.Contains(err.Error(), "uploaded") || strings.Contains(err.Error(), root) {
 		t.Fatalf("CLI lost actionable/sanitized reason: %v", err)
 	}
 }

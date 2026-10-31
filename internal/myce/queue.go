@@ -40,10 +40,11 @@ type batchRelease struct {
 }
 
 type state struct {
-	ExternalMemory       map[string]*externalMemoryRing `json:"external_memory,omitempty"`
-	AttemptOutputUploads map[string]time.Time           `json:"attempt_output_uploads,omitempty"`
-	Health               healthAlerts                   `json:"health_alerts,omitempty"`
-	FleetUpgrade         *fleetUpgrade                  `json:"fleet_upgrade,omitempty"`
+	ArchitectureConstraints map[string][]ExecutionTarget   `json:"architecture_constraints,omitempty"`
+	ExternalMemory          map[string]*externalMemoryRing `json:"external_memory,omitempty"`
+	AttemptOutputUploads    map[string]time.Time           `json:"attempt_output_uploads,omitempty"`
+	Health                  healthAlerts                   `json:"health_alerts,omitempty"`
+	FleetUpgrade            *fleetUpgrade                  `json:"fleet_upgrade,omitempty"`
 	// Positive orphan eligibility, persisted with the existing queue state.
 	// Zero time means an input upload has not finished publication yet.
 	JobInputUploads map[string]time.Time `json:"job_input_uploads,omitempty"`
@@ -598,14 +599,6 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 	if len(submissionFiles(s)) > 0 && !replay {
 		verificationErr = verifySubmissionInputs(ctx, store, submissionFiles(s), slot)
 	}
-	var payloadErr error
-	if verificationErr == nil && !replay && store != nil && hasAnyArchTarget(s) {
-		for name, ref := range submissionFiles(s) {
-			if payloadErr = ValidateTargetPayload(ctx, s, store.blob(ref), name == "files/.myce-source.tar"); payloadErr != nil {
-				break
-			}
-		}
-	}
 	// Use the same execution adapter as the transaction, on an owned copy.
 	// Validation errors are handled below in their existing order; key replay
 	// and cancellation still win over all preparation failures.
@@ -622,10 +615,12 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		if recipeErr == nil {
 			sidecarRecipes, recipeErr = catalog.resolveSidecarEnvironments(prepared)
 		}
-		if recipeErr == nil && hasAnyArchTarget(s) {
-			payloadErr = errors.Join(payloadErr, validateTargetRecipes(ctx, prepared, recipes))
+		if recipeErr == nil && needsPortabilityProof(s) {
+			recipeErr = validateTargetRecipes(prepared, recipes)
 			for _, side := range sidecarRecipes {
-				payloadErr = errors.Join(payloadErr, validateTargetRecipes(ctx, prepared, side))
+				if recipeErr == nil {
+					recipeErr = validateTargetRecipes(prepared, side)
+				}
 			}
 		}
 		if recipeErr == nil && !q.simulation {
@@ -699,13 +694,6 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		if err := submitted.Validate(); err != nil {
 			return specRejection(err)
 		}
-		if payloadErr != nil {
-			var rule *rejectionError
-			if errors.As(payloadErr, &rule) {
-				return rule
-			}
-			return reject("job_files_invalid", payloadErr)
-		}
 		if err := validateTargetExtensions(s, extensions); err != nil {
 			return err
 		}
@@ -735,6 +723,10 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 			}
 		}
 		if recipeErr != nil {
+			var rule *rejectionError
+			if errors.As(recipeErr, &rule) {
+				return rule
+			}
 			return reject("job_environment_invalid", recipeErr)
 		}
 		if !environmentPlatformsMatch(s.Needs, recipes) {
@@ -770,6 +762,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 			_ = normalizeResources(&hintSpec) // submitted.Validate already checked it.
 			j.MemoryFallback = &SizeHint{MemoryGB: max(hintSpec.Needs.MemoryGB, submitted.SizeHint.MemoryGB), HostMemoryGB: max(hintSpec.Needs.HostMemoryGB, submitted.SizeHint.HostMemoryGB)}
 		}
+		q.applyLearnedArchitecture(j)
 		q.applyLearnedNeeds(j)
 		if reason := q.diskCapacityRefusal(j); reason != "" {
 			return &HTTPError{Status: 409, Code: "disk_headroom", Message: reason}
@@ -1689,6 +1682,8 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		} else {
 			q.retry(j, j.Reason)
 		}
+	} else if !r.Success && !oomFailure && j.ExecutionCause != nil && j.ExecutionCause.Class == architectureMismatch {
+		q.recordArchitectureMismatch(j)
 	} else if !r.Success && automaticExtensionCheck(j) != nil {
 		j.State, j.Reason = "failed", "native check failed: "+r.Error
 	} else if !r.Success && !oomFailure && j.StartedAt == nil && j.ExecutionCause != nil && j.ExecutionCause.Operation == "launch" && j.ExecutionCause.Class == "launch_refused" && q.diskHeadroomReason(j, q.s.Machines[j.Machine]) != "" {
@@ -2399,6 +2394,10 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	if e := qualifiedExtension(selected, m); e != nil {
 		j.Extension = &ExtensionSelection{Name: e.Name, Version: e.Version, Digest: e.Digest}
 	}
+	if j.Architecture == nil {
+		j.Architecture = &JobArchitecture{}
+	}
+	j.Architecture.Target = machineTarget(m)
 	j.State = "running"
 	j.ExecutionCause, j.CleanupCause = nil, nil
 	j.ReleaseConfirmed = false

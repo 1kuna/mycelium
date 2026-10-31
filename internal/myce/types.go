@@ -139,6 +139,7 @@ func (e Environment) Key() string {
 }
 
 type Spec struct {
+	Portable       bool                   `json:"portable,omitempty" yaml:"portable,omitempty"`
 	OutputDelivery string                 `json:"output_delivery,omitempty" yaml:"output_delivery,omitempty"`
 	Isolation      string                 `json:"isolation,omitempty" yaml:"isolation,omitempty"`
 	Reason         string                 `json:"reason,omitempty" yaml:"reason,omitempty"`
@@ -211,6 +212,9 @@ func (s Spec) Validate() error {
 		if !extensionName.MatchString(target.OS) || target.Arch != "" && !extensionName.MatchString(target.Arch) || target.Platform != "" && !validGPU(target.Platform) {
 			return reject("job_placement_invalid", errors.New("targets require an OS; arch and platform may be omitted for portable payloads"))
 		}
+	}
+	if err := ValidateTargetPortability(s); err != nil {
+		return err
 	}
 	if err := validatePieceDependency(s); err != nil {
 		return reject("job_files_invalid", err)
@@ -360,7 +364,8 @@ type SpecProjection struct {
 }
 
 type Job struct {
-	SpecProjection *SpecProjection `json:"spec_projection,omitempty"`
+	Architecture   *JobArchitecture `json:"architecture,omitempty"`
+	SpecProjection *SpecProjection  `json:"spec_projection,omitempty"`
 
 	RecoveredResults    []RecoveredResult    `json:"recovered_results,omitempty"`
 	PlacementIntent     *PlacementIntent     `json:"placement_intent,omitempty"`

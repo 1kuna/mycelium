@@ -192,6 +192,7 @@ func devStandaloneSmoke(t *testing.T, backend string) {
 		if err := client.UploadFile(ctx, input, ref); err != nil {
 			t.Fatal(err)
 		}
+		spec.Portable = true // This fixture carries verified architecture-independent data.
 		spec.Files = myce.FileManifest{"expected": ref}
 
 		spec.Run.Command = []string{"sh", "-c", `test -z "$MYCE_TOKEN" || exit 99

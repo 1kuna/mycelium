@@ -68,9 +68,7 @@ func targetFitReason(dimension string, j *Job, m *Machine) string {
 		// environment lock paths, command arguments or recipe contents.
 		parts := []string{t.OS, t.Arch, t.Platform}
 		for i, p := range parts {
-			if p == "" {
-				parts[i] = "any"
-			} else if !extensionName.MatchString(p) {
+			if !extensionName.MatchString(p) {
 				parts[i] = "unknown"
 			}
 		}
@@ -85,11 +83,20 @@ func targetFitReason(dimension string, j *Job, m *Machine) string {
 	case "disk headroom":
 		return diskHeadroomReason(j, m)
 	case "target":
+		if j.Architecture != nil && len(j.Architecture.Excluded) > 0 && !executionJobTargetMatches(j, m) {
+			return "architecture mismatch: this target is excluded by a previous execution; correct targets.arch or the portable declaration"
+		}
 		if !sharedInputsFit(j.Spec, m) {
 			return "shared_inputs_v1 worker capability required"
 		}
 		required := make([]string, 0, len(j.Spec.Targets))
 		for _, t := range j.Spec.Targets {
+			if t.Arch == "" {
+				t.Arch = "any"
+			}
+			if t.Platform == "" {
+				t.Platform = "any"
+			}
 			required = append(required, formatTarget(t))
 		}
 		slices.Sort(required)

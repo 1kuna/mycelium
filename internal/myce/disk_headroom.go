@@ -247,7 +247,7 @@ func (q *Queue) diskCapacityRefusal(j *Job) string {
 	}
 	reasons := []string{}
 	for _, m := range q.plannerMachines() {
-		if !q.jobAllowsMachine(j, m.ID) || !executionTargetMatches(j.Spec, m) || !deviceAllowed(j, m) || !j.Spec.Needs.cpuOnly() && (m.GPU == "cpu" || len(j.Spec.Needs.Platform.Required) > 0 && !slices.Contains(j.Spec.Needs.Platform.Required, m.GPU)) {
+		if !q.jobAllowsMachine(j, m.ID) || !executionJobTargetMatches(j, m) || !deviceAllowed(j, m) || !j.Spec.Needs.cpuOnly() && (m.GPU == "cpu" || len(j.Spec.Needs.Platform.Required) > 0 && !slices.Contains(j.Spec.Needs.Platform.Required, m.GPU)) {
 			continue
 		}
 		copy := *m
@@ -273,7 +273,7 @@ func (q *Queue) diskWaitingReason(j *Job, host string) string {
 		if !q.jobAllowsMachine(j, m.ID) || host != "" && hostID(m) != host {
 			continue
 		}
-		if !executionTargetMatches(j.Spec, m) || !deviceAllowed(j, m) || !j.Spec.Needs.cpuOnly() && (m.GPU == "cpu" || len(j.Spec.Needs.Platform.Required) > 0 && !slices.Contains(j.Spec.Needs.Platform.Required, m.GPU)) {
+		if !executionJobTargetMatches(j, m) || !deviceAllowed(j, m) || !j.Spec.Needs.cpuOnly() && (m.GPU == "cpu" || len(j.Spec.Needs.Platform.Required) > 0 && !slices.Contains(j.Spec.Needs.Platform.Required, m.GPU)) {
 			continue
 		}
 		reason := ""

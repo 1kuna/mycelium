@@ -46,6 +46,7 @@ needs:
   cpu_cores: 2
   memory: auto
   platform: cpu
+portable: true                # author verified source, dependencies and downloads across arches
 targets:                      # requirements, not host selections
   - {os: linux}               # any compatible arch; needs already requests CPU
 environment: PROJECT-tools    # locked recipe (section 3); {} means the worker's installed tools
@@ -57,9 +58,11 @@ check: [grep, -qx, 'NAME: exit=0', NAME-result.txt]
 - **Targets** state software requirements, not host choices. Omit `arch` for
   portable source built on the worker (for example `go test`), scripts and
   multi-arch environments. Omit `platform` when `needs` already declares it.
-  Prebuilt binaries or single-arch extension/environment recipes require the
-  explicit arch named by the submission error; provide multi-arch variants to
-  remove that restriction. Extension variant targets remain exact.
+  Uploaded payloads (including the generated source archive), prebuilt binaries,
+  locked environments and single-arch variants need an explicit arch or the
+  author's `portable: true` assertion. A build hook beside a prebuilt binary is
+  insufficient. Declare portability only after verifying the entire payload,
+  including nested archives and downloads. Extension variant targets remain exact.
   List only platforms you have proven, and they must match the
   environment's locked platforms. Add missing platform recipes and prove them;
   a missing recipe is a portability gap, not a hardware requirement. A lock
