@@ -1076,6 +1076,10 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				if reply.Leave && !recovering {
 					leaving, leaveSent = true, true
 				}
+				// Admit against the readiness advertised in this check-in. Keep
+				// cache discoveries out of the configured environment list.
+				admissionWorker := w
+				admissionWorker.Machine.Environments = m.Environments
 				for _, d := range reply.Attempts {
 					key := attemptKey{d.ID, d.Attempt, d.Session}
 					if d.Job != nil {
@@ -1100,7 +1104,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 							r := Result{Machine: m.ID, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Interrupted: true, Error: "worker leaving before command started"}
 							s.state.Result = &r
 						}
-						if e = localAttemptAdmission(w, activeJobs(), j, modelReports); e != nil {
+						if e = localAttemptAdmission(admissionWorker, activeJobs(), j, modelReports); e != nil {
 							e = s.startFailure(j, launchRefused, e)
 							r := startFailureOutcome(Result{Machine: m.ID, Session: j.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Error: e.Error()}, e)
 							s.state.Result = &r
