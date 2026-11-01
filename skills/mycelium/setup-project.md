@@ -29,13 +29,13 @@ From this repository, copy the skill directory, including its supporting files,
 into your coding agent's skill directory. For Codex:
 
 ```sh
-mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills/mycelium-offload"
-cp -R skills/mycelium-offload/. "${CODEX_HOME:-$HOME/.codex}/skills/mycelium-offload/"
+mkdir -p "${CODEX_HOME:-$HOME/.codex}/skills/mycelium"
+cp -R skills/mycelium/. "${CODEX_HOME:-$HOME/.codex}/skills/mycelium/"
 ```
 
-For Claude Code, use `~/.claude/skills/mycelium-offload/` as the destination.
+For Claude Code, use `~/.claude/skills/mycelium/` as the destination.
 Reload skills or start a new session after installation. Other harnesses can
-load `skills/mycelium-offload/SKILL.md` directly. This installs agent instructions;
+load `skills/mycelium/SKILL.md` directly. This installs agent instructions;
 shell interception depends on the harness integration linked below.
 
 
