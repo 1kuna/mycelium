@@ -905,6 +905,7 @@ func (q *Queue) maintain() {
 	if q.stopping {
 		return
 	}
+	q.maintainJobPauses()
 	q.maintainFleetUpgrade()
 	q.maintainFanOut()
 	q.maintainPieceDependencies()
@@ -993,7 +994,7 @@ func (q *Queue) maintain() {
 				q.retry(j, j.Reason)
 			}
 		}
-		if j.State == "queued" && !(j.Spec.FanOut != nil && j.FanOut != nil && j.FanOut.Next > 0) && expired(j.Spec.GiveUpAt, now) {
+		if (j.State == "queued" || j.State == "paused") && !(j.Spec.FanOut != nil && j.FanOut != nil && j.FanOut.Next > 0) && expired(j.Spec.GiveUpAt, now) {
 			j.State = "failed"
 			j.Reason = "give-up time reached"
 		}
@@ -1003,6 +1004,7 @@ func (q *Queue) maintain() {
 	q.refreshHostMemory()
 	q.maintainFanOut()
 	q.maintainPieceDependencies()
+	q.maintainJobPauses()
 	q.maintainModels()
 	q.maintainReservations()
 	q.escalateDockerCleanup()
@@ -1551,7 +1553,7 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 		// Release evidence still settles custody. Every superseded result is
 		// rejected after committing that settlement, without publishing its payload.
 		if j := q.s.Jobs[r.ID]; j != nil && !r.ReleaseOnly &&
-			(j.Attempt != r.Attempt || j.Machine != r.Machine || j.Session != r.Session || j.State == "queued") {
+			(j.Attempt != r.Attempt || j.Machine != r.Machine || j.Session != r.Session || !terminal(j.State) && j.State != "running" && j.State != "stopping") {
 			rejected = ErrStale
 		}
 		return q.complete(r, verify)
@@ -2327,7 +2329,7 @@ type attemptProgress struct {
 func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progress attemptProgress) AttemptDirective {
 	reply := AttemptDirective{Execution: Execution{ID: report.ID, Attempt: report.Attempt}, Session: report.Session}
 	j := q.touchJob(report.ID)
-	if j != nil && !terminal(j.State) && !cancelled(j) && (j.State == "queued" || j.Attempt != report.Attempt || j.Machine != m.ID || j.Session != m.Session) {
+	if j != nil && (j.State == "queued" || j.State == "running" || j.State == "stopping") && !cancelled(j) && (j.State == "queued" || j.Attempt != report.Attempt || j.Machine != m.ID || j.Session != m.Session) {
 		for _, copy := range j.Copies {
 			canRecover := q.machineRecoveryFits(m, j, copy)
 			if canRecover && q.placementPolicyAllowed(j, allocationMachine(m, copy.AllocatedDevices), false) && copy.Recoverable && copy.Attempt == report.Attempt && copy.Machine == m.ID && copy.Session == m.Session && j.State != "queued" && (m.CheckpointUnavailable || !q.checkpointsAvailable() || progress.err != nil || (progress.path != "" && progress.path != attemptCheckpoint(*j))) {
@@ -2355,7 +2357,7 @@ func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progre
 	if j != nil {
 		reply.UserCancel = cancelled(j)
 	}
-	if j == nil || j.Attempt != report.Attempt || j.Machine != m.ID || j.Session != m.Session || terminal(j.State) || j.State == "queued" {
+	if j == nil || j.Attempt != report.Attempt || j.Machine != m.ID || j.Session != m.Session || (j.State != "running" && j.State != "stopping") {
 		if j != nil {
 			for i := range j.Copies {
 				if j.Copies[i].Attempt == report.Attempt {

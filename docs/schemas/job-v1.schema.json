@@ -1779,6 +1779,14 @@
           "type": "integer",
           "x-contract": "diagnostic"
         },
+        "pause": {
+          "$ref": "#/$defs/JobPause",
+          "x-contract": "stable"
+        },
+        "pause_revision": {
+          "type": "integer",
+          "x-contract": "stable"
+        },
         "pending_output_refs": {
           "$ref": "#/$defs/FileManifest",
           "x-contract": "diagnostic"
@@ -1920,6 +1928,8 @@
         "state": {
           "enum": [
             "queued",
+            "paused",
+            "waiting",
             "running",
             "stopping",
             "succeeded",
@@ -2031,6 +2041,24 @@
         "host_gb",
         "device_gb",
         "enforcement"
+      ],
+      "type": "object"
+    },
+    "JobPause": {
+      "properties": {
+        "parent": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "until": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "reason"
       ],
       "type": "object"
     },

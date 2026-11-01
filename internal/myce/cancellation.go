@@ -133,7 +133,7 @@ func (q *Queue) cancelJob(j *Job) {
 	for i := range j.Copies {
 		j.Copies[i].Recoverable = false
 	}
-	if j.State == "queued" {
+	if j.State == "queued" || j.State == "paused" || j.State == "waiting" {
 		q.finishCancellation(j)
 	} else if !terminal(j.State) {
 		if j.State == "running" {
