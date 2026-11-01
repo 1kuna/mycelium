@@ -61,7 +61,7 @@ list in status and job GET. Each record has `kind: recovered`, its own result ID
 exact failed execution, recovery-time verification identities and operator
 provenance. CLI status lists these separately and keeps the original failed
 state. Ordinary `output_refs`, attempt outcomes, cleanup causes and dependency
-eligibility remain unchanged. See [recover failed-attempt outputs](guide-files-v3.md#recover-outputs-from-a-failed-terminal-attempt)
+eligibility remain unchanged. See [recover failed-attempt outputs](files.md#recover-outputs-from-a-failed-terminal-attempt)
 for the explicit recovery/download commands and independent byte retention.
 
 Job GET and status job rows expose a privacy projection in `spec`, not the
@@ -384,7 +384,7 @@ intact. Cleanup-only acknowledgements do not rewrite an ended attempt.
 
 After cancellation, `cancellation` is the read-only aggregate acknowledgement.
 Declared parents also expose `cancellation_scope` for every piece and registered
-descendant, including never-dispatched work. See [abort and release](guide-fan-out.md#abort-and-wait-for-release).
+descendant, including never-dispatched work. See [abort and release](jobs.md#abort-and-wait-for-release).
 
 Launch-gate transport failures use `execution_cause.operation: start_authorization`;
 the Started hand-off uses `start_handoff`. Both retain the underlying safe class
@@ -723,7 +723,7 @@ macOS memory pressure), live CPU utilization, or swap rate: treat those
 measurements as **unknown**, never as healthy or zero. The controlled RAM
 headroom regression proves admission/status agreement for the existing RAM
 signal, not complete OS-pressure coverage. Native pressure qualification remains
-separate; see [the native checklist](production-test-plan.md#pressure-and-status-agreement).
+separate; see [the native checklist](development.md#pressure-and-status-agreement).
 Status is diagnostic and never permission to launch work locally; submit it.
 
 Plain native jobs without an isolation declaration remain unsandboxed in v1.
@@ -825,7 +825,7 @@ Only verified with the matching execution is a NAS receipt. `output_refs` is
 available at compute completion. `pending_output_refs` is an unaccepted upload
 reservation, never a successful result. File-store `reserved_output_bytes`
 reports missing async output reservations; `free_bytes` excludes those bytes.
-See [delivery policy](guide-files-v3.md#complete-from-queue-storage-deliver-to-nas-later-349).
+See [delivery policy](files.md#complete-from-queue-storage-deliver-to-nas-later-349).
 
 New versioned `output_destination` tasks expose `local_outputs` instead of
 ordinary `output_refs`. It reports the exact allocation and manifest, `stored_at`,
@@ -836,7 +836,7 @@ distinguish this contract from legacy async NAS; `progress_operations` and
 compute completion. Machines advertise `task_outputs_v1` only with supported
 collection, plus configured `output_destination_ids`. Allocation/custody stays
 charged until verified delivery and legal, acknowledged collection. See the
-[task output guide](guide-task-outputs.md).
+[task output guide](files.md).
 
 ### Shared interactive profile
 
@@ -855,7 +855,7 @@ foreground wake lateness, local age and queue receipt time),
 attempts with `shared_host_pressure` planned-stop provenance. Unknown/stale
 observations block admission without becoming measured pressure. Linux reports
 the actual delegated quota/weight; macOS explicitly reports CPU time unenforced.
-See [shared-host thresholds and qualification](shared-hosts.md#pressure-response).
+See [shared-host thresholds and qualification](operations.md#pressure-response).
 
 
 ## Execution elapsed time, remaining estimates, and application progress
@@ -1018,7 +1018,7 @@ work/checkpoint roots and Docker overlay coverage remain incomplete, with no
 accepted scratch estimate; native denial/confinement qualification is separate.
 No store cap, reservation, delivery contract, retry or placement policy changes.
 
-The opt-in [backed storage integration](guide-storage-boundaries.md) adds
+The opt-in [backed storage integration](development.md) adds
 `storage_allocation` to protected assignments. It is an exact worker budget,
 not a native qualification claim or a local-spool retrieval promise. Physical
 accounting remains shadow status and cap/reserve settings stay active until the

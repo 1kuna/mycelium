@@ -19,8 +19,7 @@ of your computers is a branch.
 - **Run any command or script** on whichever machine is free and has the
   hardware it needs.
 - **Put idle computers to work** instead of leaving their power unused.
-- **Share files between machines** through your network drive, without copying
-  them by hand.
+- **Share files between machines** through verified file transport or your network drive.
 - **Keep the computers you use responsive.** Mark a machine as in daily use,
   and it only takes work while you're away.
 - **Grow easily.** Your agent adds each new machine with one command.
@@ -38,7 +37,7 @@ the hub (one that stays on), and paste this:
 
 ```text
 Set up Mycelium on my computers. Clone https://github.com/1kuna/mycelium,
-then read docs/agent-setup.md and follow it step by step. Ask me which
+then read docs/operations.md and follow its setup steps. Ask me which
 computer is the hub, which others to add, and where my shared network drive
 is mounted on each. Show me every install plan before running it, and never
 print or commit the secret token.
@@ -48,7 +47,7 @@ The agent installs the hub, adds your other machines, checks that each one shows
 up, and runs a test job. Before you start, you need:
 
 - Linux or Apple Silicon Mac computers on the same local network
-- A shared network drive (NAS) mounted on each one
+- A shared network drive (NAS) mounted on each one for this automated setup route
 - Working GPU drivers, if a machine has a GPU
 
 ## Try it without any setup
@@ -66,6 +65,9 @@ If you see "queued waiting for a hypha", the job is waiting for a worker machine
 
 ## More
 
-[Guides](docs/START-HERE.md) · [Agent setup](docs/agent-setup.md) ·
-[Laptop walkthrough](docs/try-it-locally.md) · [Running jobs](docs/job-reference.md) ·
-[Operations](docs/operations.md) · [Design](docs/design-proposal.md)
+[Start here](docs/START-HERE.md) · [Author reusable work](docs/adapter.md) ·
+[Jobs](docs/jobs.md) · [Operations](docs/operations.md) · [Design](docs/design-proposal.md)
+
+`extensions/` contains runnable starter integrations; `examples/` contains caller
+and scheduler scenarios. `env/` holds reproducible environment recipes, and
+`skills/` provides installable agent instructions.

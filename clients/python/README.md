@@ -40,7 +40,7 @@ attempt's `attempt`/`machine`/`session`, `memory_envelope`, and observed
 attempts create no row and do not count as dropped.
 Missing readings mean unknown; measured zeros
 remain explicit. Constrained first-run observations persist even when rejected
-by learning. See [memory facts](../../docs/guide-status-v3.md) for scope and
+by learning. See [memory facts](../../docs/status.md) for scope and
 platform limits.
 
 For a fan-out abort, cancel the parent by ID or `cancel_submission(project, key)`.
@@ -52,7 +52,7 @@ acceptance, optional wave ID, registered `dependents`, exclusion and release.
 Children need no separate cancel calls. Future valid consumers of a retained
 cancelled parent cannot execute and appear on subsequent scope reads. Scope
 requires the retained source; artifact expiry does not settle release. See the
-[complete abort contract](../../docs/guide-fan-out.md#abort-and-wait-for-release).
+[complete abort contract](../../docs/jobs.md#abort-and-wait-for-release).
 
 Dicts and YAML accept the design's platform list / `any` shorthand and named
 environment strings; the client normalizes them to API objects without mutating
@@ -145,7 +145,7 @@ your command; do not claim progress was saved. Failed temp files remain for
 inspection. Periodic saves protect against abrupt loss; signals only help with
 planned pauses. `StopSignal` sets `requested` on SIGTERM/SIGINT and restores
 previous handlers on exit. Use it on the main thread and save outside the signal
-handler. See `docs/guide-resumable-jobs.md` for NAS and retry requirements.
+handler. See `docs/files.md` for NAS and retry requirements.
 
 ## Tests (no GPU)
 
@@ -169,12 +169,12 @@ Saves contain `{"myce_checkpoint": {"generation": N}, "value": ...}`; `load()`
 returns the original value. Each save increments the highest generation retained
 in the attempt directory, including after worker resume or helper restart. Use one
 writer per attempt; file mtimes and machine clocks do not affect resume ordering.
-Existing unwrapped JSON checkpoints still load. See `docs/guide-resumable-jobs.md`
+Existing unwrapped JSON checkpoints still load. See `docs/files.md`
 for worker selection and non-JSON atomic-manifest rules.
 
 ## Wrap an existing finite app stage
 
-Give your agent the [extension creation guide](../../docs/extensions/AGENT-GUIDE.md)
+Give your agent the [extension creation guide](../../docs/adapter.md)
 for a complete submit/wait/result example. `upload_file` stages hash-addressed
 inputs; `submit_and_wait` requires a stable submission key and retries one lost
 transport response; `download_result` resolves accepted output and verifies its
@@ -207,7 +207,7 @@ accepted results. `run` waits synchronously; use `submit` to register the full
 finite list before waiting. Go `Spec.After` and `RunOptions.After` expose the same
 contract. Read `dependency.state` (`blocked`/`ready`), `ready_at` and `execution`
 for the exact producing attempt. Retries and keyed replay preserve that binding.
-See the [fan-out guide](../../docs/guide-fan-out.md) for sibling failure, parent
+See the [fan-out guide](../../docs/jobs.md) for sibling failure, parent
 abort and artifact expiry. Parent gather does not gather downstream results.
 
 ### Depend on a whole fan-out stage
@@ -250,7 +250,7 @@ tree into local `destination/JOB/ATTEMPT`, then acknowledges delivery. The local
 path never goes to the queue. Retry the same destination after an uncertain
 acknowledgement; existing files and the exact receipt must verify. Individual
 `download_result` calls do not acknowledge delivery. See the
-[task output guide](../../docs/guide-task-outputs.md) for NAS, retention and
+[task output guide](../../docs/files.md) for NAS, retention and
 protected-storage prerequisites. Legacy result contracts remain unchanged.
 
 Repeat `deliver_outputs` when local collection is due. The client streams the
@@ -266,7 +266,7 @@ Keep the first page's `high_water` and pass `after=page["next"]` until
 `has_more` is false. `complete` describes coverage, independently of pagination;
 older history may be incomplete. Entries enumerate attempts, sessions, native
 custody generations and exact releases, without diagnostic row caps. See the
-[ledger contract](../../docs/job-reference.md#retained-per-job-ledger) for fields,
+[ledger contract](../../docs/jobs.md#retained-per-job-ledger) for fields,
 retention and explicit HTTP 410 expiration.
 
 Status defaults to active/cleanup-pending work and the newest 100 terminal jobs.
