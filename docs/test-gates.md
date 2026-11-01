@@ -101,6 +101,24 @@ see [agent offload](agent-offload.md). Linux runs the Linux builds, vet and full
 race/dev suite. The native Darwin CGO build explicitly skips there and remains
 a separate macOS check; the Linux gate is not proof of that release target.
 
+The full-gate profile and its converted adapter entry declare 7 GiB of CPU host
+memory. Successful unconstrained attempt telemetry inspected on 2026-11-01 had
+Linux total cgroup peaks of 2.699532–4.472893 GiB and Darwin sampled process-group
+RSS up to 2.999222 GiB. Linux resident counters alone reached only 2.816639 GiB;
+the total peak also covers file-backed charges. The budget is the largest total
+peak plus the larger of its observed range (1.773361 GiB) and 25% of that peak,
+rounded up: 6.246254 GiB becomes 7 GiB, with ordinary launch slack additional.
+This margin prevents ceiling pressure or OOM from observed run-to-run variation
+and growth between samples, at a cost of 2.527107 GiB above the largest total
+peak. It is an observed envelope; revisit it if the suite grows, hits its ceiling,
+or approaches the budget. On Linux workers with enforced cgroups, the memory
+ceiling includes the declaration and configured launch slack; a confirmed OOM
+on the final attempt appears as `failed (out of memory)` in CI. Other workers,
+including Darwin, use admission-only accounting. Unhinted `memory: auto`
+intentionally explores available host headroom after unusable constrained evidence, which made this repeatedly
+measured CPU gate reserve scarce accelerator capacity; see
+[#559](https://github.com/1kuna/mycelium/issues/559) for evidence and follow-up.
+
 For ad-hoc suites, `myce run --profile go-test -- -race ./...` defaults to the
 same `-timeout 15m` as the full gate. Arguments after `--` go to `go test`; an
 explicit `-timeout 20m` overrides that default. A profile selects **one** eligible

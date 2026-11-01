@@ -1,4 +1,5 @@
-# Learn the whole-attempt envelope; an 8 GiB declaration exceeds an 8 GiB host allowance once slack is added.
+# Measured total peak + observed range, rounded up; see #559 and docs/test-gates.md.
+# Keep this explicit: constrained auto peaks otherwise explore all host headroom.
 name: mycelium-gate-full
 project: mycelium
 class: test
@@ -10,7 +11,7 @@ run:
     GOMAXPROCS: '2'
 needs:
   cpu_cores: 2
-  memory: auto
+  memory_gb: 7
   platform: cpu
 targets:
   - {os: linux, arch: amd64, platform: cpu}
