@@ -57,6 +57,10 @@ def select(base):
                     if test and reference.search(block):
                         tests.add(test[1])
         if not tests:
+            # Removed implementations/tests have nothing left to execute. Keep
+            # surviving symbol consumers above, and still reject unmapped live code.
+            if not path.exists():
+                continue
             raise ValueError(f'no related tests for {name}')
         # The reflected Job schema includes nested types across this package.
         # Textual references miss field-only edits and indirect definitions (#413).

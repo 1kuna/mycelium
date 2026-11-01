@@ -1,7 +1,7 @@
 # Learned storage admission
 
 > Pending storage review under [#564](https://github.com/1kuna/mycelium/issues/564), item 3.
-> This note is unchanged pending the parallel storage decision; it does not activate protection.
+> The native implementation is parked on [`park/storage-protection`](https://github.com/1kuna/mycelium/tree/park/storage-protection); this proposal does not activate protection.
 
 Revision 3 for [#504](https://github.com/1kuna/mycelium/issues/504), 2026-10-31.
 The [approved design](design-proposal.md) remains the only product spec. This

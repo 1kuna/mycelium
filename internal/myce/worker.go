@@ -26,7 +26,6 @@ var workerCheckpointPrepare = prepareCheckpoint
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
-	StorageBoundary      StorageAttemptBoundary
 	storageObserver      *storageObserver
 	hostMemorySamples    map[attemptKey]hostMemorySample
 	DiskProbe            func(string) (DiskReading, error)
@@ -69,11 +68,6 @@ type Worker struct {
 	fileCheckpoints         bool
 	ExtensionRoot           string
 	JobFileRoot             string
-	OutputDestinations      map[string]OutputDestinationRoot // Stable NAS ID -> operator-qualified local root.
-	outputDeliverySlots     chan struct{}
-	outputDeliveryProgress  func()
-	outputCustodyVerified   *atomic.Bool // Attempt-local; reset on supervisor restart.
-	outputCustodyAccepted   *atomic.Bool // Exact queue custody reconciled; independent of delivery recovery.
 	extensionFingerprint    string
 	RequireMemoryCeilings   bool
 	memoryCeilings          *memoryCeilings
@@ -344,8 +338,8 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	if j.Spec.Priority == "production" && j.Spec.StartBy == nil {
 		return nil, errors.New("queue start-gate protocol mismatch: production assignment has no start_by; upgrade queue and workers together")
 	}
-	if err := w.bindStorage(ctx, s, j); err != nil {
-		return nil, s.startFailure(j, launchRefused, err)
+	if parkedStorage(&j) {
+		return nil, s.startFailure(j, launchRefused, errors.New(parkedStorageReason))
 	}
 	if err := w.verifyDevice(); err != nil {
 		return nil, s.startFailure(j, launchRefused, err)

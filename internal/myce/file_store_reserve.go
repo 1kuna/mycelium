@@ -86,19 +86,8 @@ func (q *Queue) checkFileStoreAttempt(ctx context.Context) error {
 	_, err := q.fileStoreAttemptJob(ctx, false)
 	return err
 }
-func (q *Queue) effectiveProductionReserve() uint64 {
-	reserve := uint64(q.fileStoreProductionReserve)
-	if m := q.s.StorageMigration; m != nil {
-		reserve = m.Saved.ProductionReserveBytes
-	}
-	if q.automaticStorage() {
-		reserve = 0
-	}
-	return reserve
-}
-
 func (q *Queue) nonProductionFileStoreFree(status FileStoreStatus, productionReserved uint64) uint64 {
-	reserve := q.effectiveProductionReserve()
+	reserve := uint64(q.fileStoreProductionReserve)
 	uncommitted := reserve - min(reserve, productionReserved)
 	return status.FreeBytes - min(status.FreeBytes, uncommitted)
 }
@@ -114,7 +103,7 @@ func (q *Queue) fileStoreReserveRefusal(status FileStoreStatus, need, growth, pr
 	}
 	available := q.nonProductionFileStoreFree(status, productionReserved)
 	if need > available {
-		return &HTTPError{Status: http.StatusInsufficientStorage, Code: "file_store_capacity", Message: fmt.Sprintf("queue-file-store: need=%d bytes non_production_free=%d bytes; production reserve=%d bytes (--file-store-production-reserve); production and unidentified legacy writes may use the reserve", need, available, q.effectiveProductionReserve())}
+		return &HTTPError{Status: http.StatusInsufficientStorage, Code: "file_store_capacity", Message: fmt.Sprintf("queue-file-store: need=%d bytes non_production_free=%d bytes; production reserve=%d bytes (--file-store-production-reserve); production and unidentified legacy writes may use the reserve", need, available, q.fileStoreProductionReserve)}
 	}
 	return nil
 }
@@ -126,9 +115,6 @@ func (q *Queue) fileStoreWriteClass(ctx context.Context, files FileManifest, gro
 	if j, err := q.fileStoreAttemptJob(ctx, growth > 0); err != nil {
 		return false, true, err
 	} else if j != nil {
-		if j.StorageAllocation != nil && j.StorageAllocation.WorkerCustody {
-			return false, true, storageCustodyRefusal()
-		}
 		return q.priorityMatch(j.Spec).Tier == "production", true, nil
 	}
 	if ctx.Value(fileStoreOrdinaryKey{}) != nil {
@@ -182,10 +168,6 @@ func (q *Queue) admitFileUpload(ctx context.Context, status FileStoreStatus, pro
 	q.mu.RLock()
 	production, identified, classErr := q.fileStoreWriteClass(ctx, files, growth)
 	reserved := q.outputReservationsFor(projected, "", true)
-	active := q.s.StorageAdmissionActive
-	if active {
-		need = addDiskBytes(growth, q.outputReservations(projected, ""))
-	}
 	refusal := q.fileStoreReserveRefusal(status, need, growth, reserved, production)
 	var ordinary uint64
 	if !identified {
@@ -200,39 +182,5 @@ func (q *Queue) admitFileUpload(ctx context.Context, status FileStoreStatus, pro
 		q.recordStorageWritePressure(ctx, status, projected, files, growth, false, "")
 		return ordinary, nil
 	}
-	if !active || !production || !identified {
-		return 0, refusal
-	}
-	var unidentified uint64
-	err := q.updateRequest(ctx, func() error {
-		production, identified, err := q.fileStoreWriteClass(ctx, files, growth)
-		if err != nil {
-			return err
-		}
-		if production && identified && growth > 0 {
-			demand := q.storageWriteDemand(ctx)
-			if demand != nil {
-				if err = q.yieldSharedOutput(demand, status, projected, growth, ""); err != nil {
-					return err
-				}
-			}
-		}
-		need = addDiskBytes(growth, q.outputReservations(projected, ""))
-		reserved := q.outputReservationsFor(projected, "", true)
-		// Re-evaluate classification unchanged, including unidentified legacy writes.
-		production, identified, err = q.fileStoreWriteClass(ctx, files, growth)
-		if err != nil {
-			return err
-		}
-		if err = q.fileStoreReserveRefusal(status, need, growth, reserved, production); err != nil {
-			return err
-		}
-		if !identified {
-			available := q.nonProductionFileStoreFree(status, reserved)
-			unidentified = min(growth, need-min(need, available))
-		}
-		return nil
-	}, nil)
-	q.recordStorageWritePressure(ctx, status, projected, files, growth, err != nil, "")
-	return unidentified, err
+	return 0, refusal
 }

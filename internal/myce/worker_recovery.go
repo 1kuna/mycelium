@@ -42,7 +42,7 @@ func (r *workerRetry) succeeded(now time.Time, interval time.Duration) {
 }
 
 type workerState struct {
-	StorageDirectory string     `json:"storage_directory,omitempty"`
+	StorageDirectory string     `json:"storage_directory,omitempty"`   // Decode retained parked state; never relocate it.
 	Preparation      string     `json:"preparation_custody,omitempty"` // Attempt-local copy of an unconfirmed builder receipt.
 	CustodyID        string     `json:"custody_id,omitempty"`
 	IsolationWarning *Execution `json:"isolation_warning,omitempty"`
@@ -77,7 +77,6 @@ type workerState struct {
 	Log             string                 `json:"log,omitempty"`
 }
 type workerStore struct {
-	indexRoot             string           // Protected attempt state has a small root discovery record.
 	storageObserver       *storageObserver // Exact attempt; shared with its publication callbacks.
 	inputStaging          *atomic.Bool     // Shared by all attempt stores; bounds detached ordinary staging.
 	sharedRelease         func()           // Idempotent; retained until exact process cleanup.
@@ -276,13 +275,7 @@ func (s *workerStore) save() error {
 	if name == "" {
 		name = "state.json"
 	}
-	if err := saveWorkerJSON(s.dir, name, s.state); err != nil {
-		return err
-	}
-	if s.indexRoot != "" {
-		return saveWorkerJSON(s.indexRoot, name, workerState{StorageDirectory: s.state.StorageDirectory, Session: s.state.Session})
-	}
-	return nil
+	return saveWorkerJSON(s.dir, name, s.state)
 }
 func decodeWorkerJSON(data []byte, v any) error { return json.Unmarshal(data, v) }
 func saveWorkerJSON(dir, name string, v any) error {

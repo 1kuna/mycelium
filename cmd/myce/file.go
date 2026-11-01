@@ -12,35 +12,17 @@ import (
 )
 
 func fileCommand(args []string) error {
-	if len(args) > 0 && args[0] == "admission" {
-		return fileAdmissionCommand(context.Background(), args[1:], os.Stdout)
-	}
 	if len(args) > 0 && args[0] == "release" {
 		return fileReleaseCommand(context.Background(), args[1:], os.Stdout)
 	}
 	if len(args) == 0 {
-		return errors.New("usage: myce file put [flags] FILE | get [flags] SHA256 DEST | deliver [flags] JOB DEST | destination-identity --destination-id ID ROOT | release plan|apply")
+		return errors.New("usage: myce file put [flags] FILE | get [flags] SHA256 DEST | release plan|apply")
 	}
 	f := flag.NewFlagSet("file "+args[0], flag.ContinueOnError)
 	authority := installedClientFlags(f)
 	size := f.Int64("size-bytes", -1, "expected file byte count for get")
-	destinationID := f.String("destination-id", "", "stable operator-owned output destination ID")
 	if err := f.Parse(args[1:]); err != nil {
 		return err
-	}
-	if args[0] == "destination-identity" {
-		if f.NArg() != 1 || *destinationID == "" {
-			return errors.New("destination-identity requires --destination-id ID ROOT")
-		}
-		root, err := filepath.Abs(f.Arg(0))
-		if err != nil {
-			return err
-		}
-		identity, err := myce.ObserveStorageBackingIdentity(root)
-		if err != nil {
-			return err
-		}
-		return json.NewEncoder(os.Stdout).Encode(map[string]myce.OutputDestinationRoot{*destinationID: {Path: root, NativeIdentity: identity}})
 	}
 	c, err := authority.client()
 	if err != nil {
@@ -51,11 +33,6 @@ func fileCommand(args []string) error {
 	}
 	ctx := context.Background()
 	switch args[0] {
-	case "deliver":
-		if f.NArg() != 2 {
-			return errors.New("deliver requires JOB and a submitter-local destination root")
-		}
-		return c.DeliverTaskOutputs(ctx, f.Arg(0), f.Arg(1))
 	case "put":
 		if f.NArg() != 1 {
 			return errors.New("put requires one file")

@@ -823,37 +823,21 @@ allocation, including incomplete uploads, not bytes transferred or current usage
 Preflight, resumable replay and deduplicated reuse do not increment it. It resets
 on queue restart and decreases neither on completion nor on ordinary expiry.
 
-### Worker-local task delivery (#508)
+### Parked native storage integration (#564)
 
-The versioned `output_destination` contract keeps unique outputs on a charged
-worker spool through verified NAS or submitter delivery. Collection is lazy:
-verified local copies remain until a qualified queued task needs space on that
-same worker backing, or the configured retention window expires. Eligible copies
-are collected in MY-18 order (least valuable owner tier first), preserving #479's
-expiry ledger, six-hour publication grace and keeping-reference fences.
-`until_delivered` grants expiry authority after delivery; it does not trigger
-eager local collection. Independent production backing does not create pressure
-on retained experiment outputs.
+The unfinished native protection, automatic-admission migration and versioned
+worker-local task-output implementation is preserved on [`park/storage-protection`](https://github.com/1kuna/mycelium/tree/park/storage-protection).
+Main has no backend/activation command or worker-local delivery client.
+Use ordinary accepted file-store outputs or `output_delivery: async_nas`.
+Configured file-store caps, production reserve, declared-output commitments,
+legacy disk floor, checkpoint transfer and custody fences remain active.
 
-Each collection operation takes its intent, freshly hashes the destination
-outside `q.mu`, rechecks the exact execution/verification-round/reference fences,
-then deletes. Saved intents and historical receipts never supply reusable proof.
-Failed verification or a changed fence retains the worker copy, marks redelivery
-and raises an operator/project alert. An intent can finish interrupted deletion
-and acknowledgement even if its original capacity demand has disappeared.
-
-The accepted residual is this one operation's own verify-to-delete span. Once
-delivery is verified, the destination is authoritative; its NAS, backups and other
-durability mechanisms are responsible for subsequent preservation. No
-verify-then-delete operation across independent filesystems can eliminate the
-possibility of destination loss a moment after local deletion. Lazy collection
-reduces exposure; it does not promise continued destination durability.
-
-Submitter `deliver_outputs` can restore a missing destination from retained
-worker bytes after ordinary result expiry, until actual local collection.
-Ordinary expired-result downloads still return `result_expired`. See the
-[task output guide](files.md) for destination identity configuration,
-client commands, truthful local availability and native qualification limits.
+Retained database fields remain readable and preserved across updates/reopens.
+A retained protected task is held rather than silently executed without its
+boundary; retained worker-local manifests stay protected from collection.
+Readiness/activation flags retained from the parked implementation cannot retire
+the configured guards. Future native implementation/qualification is tracked in
+[#504](https://github.com/1kuna/mycelium/issues/504).
 
 ### Project-owner early file release (#465)
 
@@ -2227,120 +2211,12 @@ it expires. No release, install or fleet operation is performed by the guard.
 
 ## Migrate storage guards to automatic admission
 
-This is an explicit queue operation, separate from saving installer settings,
-retiring an `ExecStart` override, upgrading clients, or enabling storage protection.
-The default remains shadow. There is currently **no production native
-quota/confinement backend**: installation alone cannot satisfy the qualification
-blocker. Native setup, denial/isolation qualification and fleet activation require
-a separately authorized operation. Laptop fake backends never qualify a host.
-
-During that operation:
-
-1. Keep the effective cap and reserve unchanged while qualifying independent
-   worker custody, production staging, complete write confinement and measured,
-   enforced SQLite/WAL/log/sync/checkpoint/metadata backing. Inspect actual
-   ext4/XFS quota/features or fully allocated bounded filesystems on Linux;
-   inspect actual APFS quota/reserve behavior on macOS. A filesystem name,
-   directory quota, sparse maximum, sampled kill or unreachable host is not
-   qualification. Reconstruct exact allocations/custody after a queue and worker
-   restart; restart requires fresh backend verification. Upgrade destination
-   workers and clients, including Python, to the versioned custody/result contract.
-2. Start the supported observer using installed queue client authority:
-
-   ```sh
-   myce file admission observe --config QUEUE_CONFIG
-   myce file admission status --config QUEUE_CONFIG
-   ```
-
-   The first observation saves the **effective running** `file-store-bytes` and
-   `file-store-production-reserve` values in the queue's existing SQLite state.
-   Thus it preserves saved installer arguments or the overriding drop-in's
-   arguments without parsing/removing the drop-in or rewriting the config. Compare
-   `saved` with the effective unit/argv. Until activation those values remain active.
-   The installer/drop-in retirement procedure above still applies independently.
-3. Existing queue maintenance now samples shadow decisions automatically; `observe`
-   can also request a sample. It does not collect/delete data. Status reports
-   comparisons, disagreements, streak timestamps, `consistent_seconds`,
-   `required_seconds`, `period_job`, completed cycles and precise blockers under
-   `file_store.admission.migration` or the dedicated command. Reading status does
-   not earn evidence. The required period is the longest measured
-   queued-to-verified-delivery-to-authorized-collection lifecycle in retained
-   evidence, including actual waiting/retention, rather than a chosen number of
-   hours. At least one whole lifecycle must have its queued decision compared in
-   the current consistent streak. Idle time cannot qualify it. A disagreement,
-   restart, clock reversal or changed installed backing/control/worker boundary
-   requires new evidence; free-space changes on the same boundary do not.
-4. Preserve legacy shared experiment outputs, then release them only through the
-   existing owner release/retention/collector authority. Wait for actual collection,
-   not just a successful destination probe or an expired job flag. Incompatible
-   live writers and remaining shared experiment backlog report migration incomplete.
-   Frozen/keyed policies, six-hour publication grace, 168-hour legacy retention,
-   checkpoints, registry/shared references, unknown imports and unique data keep
-   their existing protection. Do not edit stored policies or delete unique bytes
-   to clear a blocker. Inspect configured operator and production-project alert
-   routes; unconfigured notifications remain visible events, not sent messages.
-5. When status reports `ready: true`, explicitly activate:
-
-   ```sh
-   myce file admission activate --config QUEUE_CONFIG
-   myce file admission status --config QUEUE_CONFIG
-   myce status --json --config QUEUE_CONFIG
-   ```
-
-   A single SQLite transaction sets the existing admission latch and marks the
-   saved cap/reserve inactive together. Uploads/submissions serialize with cutover.
-   Active `limit_bytes`, `production_reserve_bytes` and the historical percentage
-   `floor_bytes` are zero; `free_bytes` comes from fresh physical capacity minus
-   remaining accepted upload lengths, unused backed reserves and unwritten output
-   commitments. Zero limit here means no artificial ceiling, not unlimited disk.
-   The measured enforced control boundary replaces the old 1%/256 MiB floor.
-   Per-attempt byte/inode boundaries still deny growth between observations.
-   Retained experiment spools remain charged to independent worker capacity;
-   neither a healthy destination nor stopping compute permits a shared spill.
-6. Retire external daily writer agreements only when
-   `manual_writer_limits_retirable` is true, backed by actual verified delivery
-   and collection progress. Keep the previous agreement record for rollback;
-   these human agreements were never queue settings and the command does not
-   edit them. Keep attribution and owner tiers. Production/input exhaustion can
-   still hold with an exact deficit and operator/project alerts; cap removal does
-   not make protected data reclaimable or provide unlimited production space.
-
-Rollback is explicit and does not delete data or undo delivery:
-
-```sh
-myce file admission rollback --config QUEUE_CONFIG
-myce file admission status --config QUEUE_CONFIG
-myce status --json --config QUEUE_CONFIG
-```
-
-Verify `saved_settings_active: true` and the **exact** saved cap/reserve in file
-store status, then reinstate the unchanged external writer agreements if retired.
-Already stored bytes may exceed the restored cap; new allocations hold until they
-fit, while existing data stays protected. Saved settings and active/inactive mode
-survive reinstall/restart even when service arguments contain different defaults.
-Backend verification is never renewed by restart, and rollback cannot make an
-unverified retained boundary safe. Preserve/repair its backing before resuming work.
-Do not remove the SQLite migration record to change settings. A new activation
-following rollback requires a new measured observation streak.
-
-The evidence replacing fixed 100/150/185 GiB ceilings is fresh physical capacity
-and persisted enforced commitments; structural worker custody replaces the flat
-16 GiB reserve; observed delivery/collection and tier placement replace daily byte
-agreements. Largest comparable accepted peaks plus observed range/prediction error
-replace mandatory output guesses (an optional cold output prior remains). Operators
-still set roots/destination identities, preservation policy, owner tiers and alert
-routes. Backend provisioning supplies measured limits and bounded exploration;
-agents do not choose per-job production byte budgets.
-
-Laptop acceptance uses injected clocks, HTTP/SQLite, CPU-generated small files
-and fake boundaries for the original 100/95/10 and 4/96/outage/6 schedules, the
-October 31 zero-reclaim incident, burst denial and production surge. The opt-in
-`TestStorageIncidentReplayNativeBurstAPFS` creates/detaches one disposable fully
-allocated APFS image and proves real bounded-volume ENOSPC with independent
-publication/WAL progress. It does **not** qualify per-attempt aggregate quotas,
-inode denial, arbitrary sidecar confinement, APFS native reserves, Linux backends
-or fleet hosts. Full integrated and native backend gates remain deployment work.
-
+The unfinished migration is parked on [`park/storage-protection`](https://github.com/1kuna/mycelium/tree/park/storage-protection).
+`myce file admission` and its activation/rollback endpoints are removed from main.
+Retained activation metadata cannot disable configured caps/reserve/floors.
+See [the current storage behavior](#parked-native-storage-integration-564) and
+[#504](https://github.com/1kuna/mycelium/issues/504) for the backend qualification
+and preservation requirements before any future replacement.
 
 ## Automatic joining
 

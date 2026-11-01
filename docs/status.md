@@ -151,24 +151,11 @@ independent worker-custody backing remain unimplemented/unqualified. No setting
 activates automatic admission here; the configured cap/reserve and legacy disk
 floor still govern writes until #509's explicit migration.
 
-`file_store.admission` separately reports the tier-admission proposal. Its mode
-is `shadow` by default: each queued shared-output job reports its owner tier,
-learned output demand and proposed admission/hold against the observed cap and
-reserve. `yielded_commitments` names currently accepted queued estimates that
-would lose admission in that replay. Assigned writers, actual pending manifests
-and installed allocations remain commitments. Status never collects files or
-changes live reservations; its collector-order hook also preserves the caller's
-order until activation. Live submissions still use declared output estimates,
-legacy refusal and FIFO retry admission until #509 explicitly activates the
-persisted `storage_admission_active` migration latch. There is no activation
-command in this slice; storage-protection qualification alone does not set it.
-The migration must use this same latch when retiring cap/reserve together.
-
-Storage-pressure diagnostics report output-delivery ledger observations, including
-failed/publishing/pending/verified state, holder job and stable destination ID,
-with sanitized cause codes. Without an output observation they report `unknown`;
-checkpoint-root health is independent. Offline, stale, leaving or otherwise
-ineligible workers cannot hide a protected-capacity shortage on online workers.
+The native protection/migration and shadow-admission proposal are parked under
+[#564](https://github.com/1kuna/mycelium/issues/564). `file_store.admission` is no
+longer emitted. Retained policy fields remain readable but do not activate
+admission or disable the configured cap/reserve. Storage learning below remains
+observational.
 
 A typed quota denial is `disk_limit_exceeded`. It fails that exact attempt even
 if a stop races it, without spending an infrastructure retry or classifying the
@@ -831,16 +818,11 @@ reservation, never a successful result. File-store `reserved_output_bytes`
 reports missing async output reservations; `free_bytes` excludes those bytes.
 See [delivery policy](files.md#complete-from-queue-storage-deliver-to-nas-later-349).
 
-New versioned `output_destination` tasks expose `local_outputs` instead of
-ordinary `output_refs`. It reports the exact allocation and manifest, `stored_at`,
-`worker_local_pending_delivery`, `destination_verified` or `collected`, and
-`collected_at` when applicable. `delivery.protocol: task-output/1` and `kind`
-distinguish this contract from legacy async NAS; `progress_operations` and
-`last_progress_at` report worker copy/verification progress independently of
-compute completion. Machines advertise `task_outputs_v1` only with supported
-collection, plus configured `output_destination_ids`. Allocation/custody stays
-charged until verified delivery and legal, acknowledged collection. See the
-[task output guide](files.md).
+Historical `output_destination`, `storage_allocation` and `local_outputs` fields
+remain readable. Their native implementation is parked; new submissions cannot
+request it. A retained protected task holds with an explicit parked-storage
+reason, and historical local custody is never treated as ordinary `output_refs`
+or permission to discard its files. See [operations](operations.md#parked-native-storage-integration-564).
 
 ### Shared interactive profile
 
@@ -1017,58 +999,23 @@ until measured. Output hints never seed scratch or silently become hard limits.
 This slice is observation only: `hard_limit` is absent/unknown and `enforcement`
 says `unenforced; observation only`. Unknown shapes require bounded exploration
 and fresh storage admission from the subsequent accounting/admission slices.
-Native metadata sampling can miss writes deleted between scans. External writable
+Managed roots are sampled every five seconds, plus initial/final and explicit
+publication-before-cleanup measurements. This cuts scheduled metadata traversals
+25-fold from the former 200 ms cadence; transient peaks between samples can be
+missed. End-only measurement would also miss longer-lived scratch removed before
+exit. Neither cadence enforces a bound. Native metadata sampling can miss writes
+deleted between scans. External writable
 work/checkpoint roots and Docker overlay coverage remain incomplete, with no
 accepted scratch estimate; native denial/confinement qualification is separate.
 No store cap, reservation, delivery contract, retry or placement policy changes.
 
-The opt-in [backed storage integration](development.md) adds
-`storage_allocation` to protected assignments. It is an exact worker budget,
-not a native qualification claim or a local-spool retrieval promise. Physical
-accounting remains shadow status and cap/reserve settings stay active until the
-explicit qualified migration below.
-
-Shared async output admission freezes `output_reservation_bytes` from comparable
-learned logical output demand (the cold prior is used for unknown variants).
-The commitment funds every compatible qualified variant without pinning a host;
-actual manifest identities replace it at result reservation. Later observations
-cannot silently resize an accepted commitment. Retry and yielded commitments
-reacquire in configured owner-tier order. Only queued, unassigned estimates with
-no pending manifest or installed boundary yield synchronously. Assigned work may
-already have writers before `Started`, so its storage remains charged.
-
-Production that cannot fit remains queued with `output_admission_pending` and a
-`file_store_capacity` reason naming bytes needed, available space, the exact
-deficit, protected holders, destination observation and next action. A
-`publication_fence_wait` means collection must retry after a publisher releases
-its fence. Admission repeats bounded authorized collector batches only while
-observed committed payload bytes decrease. It grants no new expiry permission.
-The `orderStorageReclaim` seam orders eligible candidates by owner tier and
-replacement cost; collection-side integration belongs to #508.
-
-`production_storage_capacity` health events include `project`, `job_id`, a
-sanitized `reason` and `recipients: ["operator", "project"]`. The configured
-queue health notifier routes that event to the queue operator and the affected
-project's agent/owner, deduplicating its delivery ID. Without a configured route,
-the event remains visible in status; no external notification is claimed. A full
-protected backing similarly reports byte/inode deficits and retained allocation
-holders, after considering other qualified compatible hosts. Compute completion,
-stop or cancellation never releases an installed storage boundary.
-
-Shadow admission keeps configured file-store caps, the production reserve,
-legacy disk floor and shared-credential attribution rules. Worker-local delivery
-and the explicit migration below are separate gates; shadow alone retires no guard.
-
-The explicit [storage migration](operations.md#migrate-storage-guards-to-automatic-admission)
-adds `file_store.admission.migration`: saved effective settings, whether they are
-active, sampled comparisons/disagreements, the consistent streak, the measured
-required period and its source job, complete delivery/collection cycles and
-activation blockers. In qualified automatic mode, `limit_bytes`,
-`production_reserve_bytes` and `floor_bytes` are zero, the physical observation
-reports `mode: active`, and `protected_free_bytes` equals current free admission
-capacity after unwritten commitments. Saved values stay visible and inactive.
-Restart retains mode/custody but requires fresh backing verification; status must
-not interpret an unavailable observation as permission to write.
+The unfinished native-backed protection, task-output delivery and migration
+paths live on [`park/storage-protection`](https://github.com/1kuna/mycelium/tree/park/storage-protection).
+They do not activate from retained flags on main. Shared async output admission
+uses declared estimates and exact pending manifests; retry reservations reacquire
+in legacy FIFO order. The configured cap, reserve and physical free-space floor
+remain active. Accepted logical-output and managed-storage evidence remains
+visible for diagnostics and future qualification; it does not change admission.
 
 ## Deadline priority guidance
 

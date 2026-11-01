@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
-	"syscall"
 	"time"
 )
 
@@ -223,12 +222,6 @@ func captureCheckpoint(root, parent string, observers ...*storageObserver) (stri
 	return stage, FileCheckpoint{before, manifest}, nil
 }
 func (w Worker) publishFileCheckpoint(j Job, parent string) (int64, error) {
-	if j.Spec.OutputDestination != nil && j.StorageAllocation == nil {
-		return 0, errors.New("task outputs require a charged storage allocation")
-	}
-	if j.StorageAllocation != nil && (j.StorageAllocation.WorkerCustody || j.Spec.OutputDestination != nil) {
-		return 0, nil
-	}
 	if !j.FileTransport || !j.Spec.Resumable {
 		return 0, nil
 	}
@@ -303,37 +296,6 @@ func (w Worker) prepareFileCheckpoint(j Job, stateDir string) (string, error) {
 	return dest, syncWorkerDir(j.Checkpoint)
 }
 func (w Worker) finishFileResult(j Job, result Result, parent string, metadata ...string) (finished Result, err error) {
-	// Preserve native denial evidence from payload, sidecar and worker-copy writes.
-	defer func() {
-		if j.StorageAllocation != nil {
-			if err != nil {
-				finished = result
-			}
-			denied := errors.Is(err, syscall.EDQUOT)
-			if w.StorageBoundary == nil {
-				if err == nil {
-					err = errors.New("storage boundary observation unavailable")
-				}
-				return
-			}
-			native, observeErr := w.StorageBoundary.Denied(context.Background(), *j.StorageAllocation)
-			if observeErr != nil {
-				err = errors.New("storage boundary observation unavailable")
-				return
-			}
-			if denied || native {
-				finished.Success, finished.Interrupted, finished.OutputRefs = false, false, nil
-				finished.Error = diskLimitExceeded
-				finished.ExecutionCause = &RuntimeCause{Operation: "outputs", Class: diskLimitExceeded}
-				if finished.StoragePeak != nil {
-					peak := *finished.StoragePeak
-					peak.Constrained = true
-					finished.StoragePeak = &peak
-				}
-				err = nil
-			}
-		}
-	}()
 	// Docker mount writers must be proven stopped before any checkpoint/output I/O.
 	if j.Spec.Run.Docker && result.ReleasePending {
 		return result, nil
@@ -346,12 +308,6 @@ func (w Worker) finishFileResult(j Job, result Result, parent string, metadata .
 			w.storageObserver.sample()
 			finished.StoragePeak = w.storageObserver.snapshot()
 		}()
-	}
-	if j.Spec.OutputDestination != nil && j.StorageAllocation == nil {
-		return result, errors.New("task outputs require a charged storage allocation")
-	}
-	if j.StorageAllocation != nil && (j.StorageAllocation.WorkerCustody || j.Spec.OutputDestination != nil) {
-		return w.retainStorageCustody(j, result, parent)
 	}
 	if _, err := w.publishFileCheckpoint(j, parent); err != nil && !stale(err) {
 		return result, err

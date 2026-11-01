@@ -1,0 +1,143 @@
+{
+  "fair_usage_version": 1,
+  "jobs": {
+    "retained": {
+      "id": "retained",
+      "attempt": 1,
+      "machine": "worker",
+      "session": "saved",
+      "state": "succeeded",
+      "release_confirmed": true,
+      "finished_at": "2026-10-31T12:00:00Z",
+      "queued": "2026-10-31T11:00:00Z",
+      "spec": {
+        "project": "example",
+        "storage_protocol": "worker-custody/1",
+        "output_destination": {
+          "protocol": "task-output/1",
+          "kind": "nas",
+          "id": "archive"
+        },
+        "output_retention": "until_delivered",
+        "outputs": {
+          "result": "results"
+        }
+      },
+      "storage_allocation": {
+        "id": "allocation",
+        "execution": {
+          "id": "retained",
+          "attempt": 1
+        },
+        "machine": "worker",
+        "session": "saved",
+        "backing": "bounded",
+        "bytes": 8,
+        "files": 4,
+        "worker_custody": true,
+        "at": "2026-10-31T12:00:00Z"
+      },
+      "local_outputs": {
+        "state": "destination_verified",
+        "allocation": "allocation",
+        "files": {
+          "result": {
+            "sha256": "79f076abdd19a752db7267bfff2f9022161d120dea919fdaca2ffdfc24ca8c96",
+            "size_bytes": 4
+          }
+        },
+        "stored_at": "2026-10-31T12:00:00Z"
+      },
+      "output_reservation_bytes": 8,
+      "delivery": {
+        "id": "retained",
+        "attempt": 1,
+        "machine": "worker",
+        "session": "saved",
+        "protocol": "task-output/1",
+        "kind": "nas",
+        "destination_id": "archive",
+        "state": "verified",
+        "manifest_sha256": "saved-manifest",
+        "verification_round": 2,
+        "progress_operations": 3,
+        "verified_at": "2026-10-31T12:01:00Z"
+      },
+      "files_expired": true,
+      "file_reclamation": {
+        "pending": [
+          "79f076abdd19a752db7267bfff2f9022161d120dea919fdaca2ffdfc24ca8c96"
+        ]
+      }
+    },
+    "ordinary": {
+      "id": "ordinary",
+      "attempt": 1,
+      "state": "succeeded",
+      "machine": "worker",
+      "session": "saved",
+      "release_confirmed": true,
+      "queued": "2026-10-31T11:00:00Z",
+      "finished_at": "2026-10-31T12:00:00Z",
+      "spec": {
+        "project": "example"
+      },
+      "output_refs": {
+        "result": {
+          "sha256": "79f076abdd19a752db7267bfff2f9022161d120dea919fdaca2ffdfc24ca8c96",
+          "size_bytes": 4
+        }
+      }
+    }
+  },
+  "machines": {},
+  "storage_admission_active": true,
+  "storage_migration": {
+    "mode": "active",
+    "saved": {
+      "limit_bytes": 1024,
+      "production_reserve_bytes": 0
+    },
+    "future_field": {
+      "preserve": true
+    }
+  },
+  "storage_protection": {
+    "enabled": true,
+    "control": {
+      "required_bytes": 4
+    },
+    "snapshot": {
+      "control_isolated": true
+    },
+    "allocations": {
+      "allocation": {
+        "id": "allocation",
+        "execution": {
+          "id": "retained",
+          "attempt": 1
+        },
+        "machine": "worker",
+        "session": "saved",
+        "backing": "bounded",
+        "bytes": 8,
+        "files": 4,
+        "worker_custody": true,
+        "at": "2026-10-31T12:00:00Z"
+      }
+    },
+    "custody": {
+      "allocation": {
+        "allocation": "allocation",
+        "files": {
+          "result": {
+            "sha256": "79f076abdd19a752db7267bfff2f9022161d120dea919fdaca2ffdfc24ca8c96",
+            "size_bytes": 4
+          }
+        },
+        "at": "2026-10-31T12:00:00Z"
+      }
+    }
+  },
+  "schema_version": 3
+}
