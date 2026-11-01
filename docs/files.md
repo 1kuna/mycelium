@@ -11,11 +11,11 @@ NAS mount. Failed-attempt diagnostics are separate from accepted outputs.
 - [Asynchronous NAS delivery](#complete-from-queue-storage-deliver-to-nas-later-349)
 - [Worker-local destination tasks](#worker-local-task-outputs-508)
 
-The protected worker-custody/destination contract below requires an integrated
-native storage backend and activation; it is not the default output route.
-[Pending storage design](design-learned-storage.md) remains under separate review;
-[developer integration](development.md#backed-storage-admission-integration) is
-laptop proof, not automatic protection.
+The versioned worker-local destination route is parked. Ordinary accepted outputs
+and asynchronous NAS publication remain active. See the
+[pending storage proposal](design-learned-storage.md) and
+[parked integration](development.md#backed-storage-admission-integration) for
+future backend work.
 
 The queue's always-on hypha stores immutable files. Every execution hypha has
 its own bounded cache and private attempt folders. No shared mount is needed.
