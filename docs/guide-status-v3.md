@@ -1065,3 +1065,34 @@ reports `mode: active`, and `protected_free_bytes` equals current free admission
 capacity after unwritten commitments. Saved values stay visible and inactive.
 Restart retains mode/custody but requires fresh backing verification; status must
 not interpret an unavailable observation as permission to write.
+
+## Deadline priority guidance
+
+Submission and job GET replies include `priority_policy` (effective tier,
+selector and revision) and `deadline_guidance`. The latter contains advisory
+`code`, the `deadline_policy` match for a new deadline-class submission,
+`precedence_change` (`higher`, `same` or `lower` tier precedence), current
+`blockers`, `eta`, an `example`, `next_action` and explanatory `message`.
+These are live observations, separate from immutable submission intent and job
+holds. They do not change the accepted class or submission key.
+
+`myce submit` writes this advice to stderr and keeps the job ID on stdout.
+`myce wait` writes advice when it changes to stderr, preserving final-state
+lines on stdout; `myce status JOB` shows it alongside job details.
+
+For deadline work, author a **new submission** with, for example:
+
+```yaml
+class: deadline
+deadline: 2030-01-02T15:04:05Z
+```
+
+Choose the desired RFC3339 deadline, replace legacy `priority` if present,
+and choose a new `submission_key` for keyed work. An experiment carrying only a
+`deadline` remains in its effective owner tier. The example's proposed match
+uses the same owner policy matcher as scheduling: a project selector or catchall
+can give deadline class equal or lower precedence. A deadline is an ordering
+hint, not a completion guarantee or production `start_by`. Deadline demand does
+not preempt non-resumable commands. Blocker duration estimates use comparable
+observations when available; missing estimates and overruns remain explicitly
+unknown. An estimated remaining duration does not assure a queue start time.

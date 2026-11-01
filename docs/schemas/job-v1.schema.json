@@ -550,6 +550,50 @@
       ],
       "type": "object"
     },
+    "DeadlineGuidance": {
+      "properties": {
+        "blockers": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "code": {
+          "type": "string"
+        },
+        "deadline_policy": {
+          "$ref": "#/$defs/PriorityMatch"
+        },
+        "eta": {
+          "type": "string"
+        },
+        "example": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "next_action": {
+          "type": "string"
+        },
+        "precedence_change": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "deadline_policy",
+        "precedence_change",
+        "eta",
+        "example",
+        "next_action",
+        "message"
+      ],
+      "type": "object"
+    },
     "DiagnosticReport": {
       "properties": {
         "format": {
@@ -1513,6 +1557,10 @@
             "array",
             "null"
           ],
+          "x-contract": "diagnostic"
+        },
+        "deadline_guidance": {
+          "$ref": "#/$defs/DeadlineGuidance",
           "x-contract": "diagnostic"
         },
         "delivery": {

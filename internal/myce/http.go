@@ -233,6 +233,9 @@ func (a API) handler(joiningPin string) http.Handler {
 			}
 		}
 		j, err := a.Queue.SubmitContext(r.Context(), request.Spec)
+		if j != nil && err == nil {
+			a.Queue.submissionDeadlineGuidance(j, r.Context())
+		}
 		if j != nil {
 			j.LedgerEntries = nil
 		}

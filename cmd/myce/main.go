@@ -737,6 +737,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		if err != nil {
 			return err
 		}
+		fmt.Fprintln(os.Stderr, myce.DeadlineGuidanceText(j))
 		fmt.Println(j.ID)
 		return nil
 	case "usage":
@@ -772,6 +773,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 				return json.NewEncoder(os.Stdout).Encode(j)
 			}
 			printStatus(myce.Snapshot{Jobs: []*myce.Job{j}, Now: s.Now}, *full)
+			fmt.Fprintln(os.Stdout, myce.DeadlineGuidanceText(j))
 			printCancellationScope(os.Stdout, j)
 			for _, a := range j.AttemptHistory {
 				fmt.Printf("  attempt %d hypha=%s session=%s ended=%s state=%s interrupted=%t oom=%t availability=%t operator=%t: %s", a.Attempt, a.Machine, a.Session, a.EndedAt.UTC().Format(time.RFC3339), a.State, a.Interrupted, a.OutOfMemory, a.PoliteStop, a.OperatorStop, a.Reason)
