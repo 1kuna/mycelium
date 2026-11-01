@@ -158,7 +158,7 @@ limits environment coverage, not host identity: declare the matching platform
 until another recipe is verified, then widen targets. Keep distinct per-platform
 recipes when dependencies differ; native variants carry their own bundled locks.
 Package-cache readiness alone does not qualify a different command. See
-[placement and lock guidance](portability.md#declare-requirements-let-mycelium-place)
+[placement and lock guidance](scheduling.md#declare-requirements-let-mycelium-place)
 and [custom-command environment reuse #380](https://github.com/1kuna/mycelium/issues/380).
 
 Register it through the existing shared catalog:
@@ -236,7 +236,7 @@ Register it through the existing shared catalog:
    managed work directory. `task.py`, `input.wav` and `result.wav` are relative
    to that directory; there is no authored absolute workdir or host pin.
    Outputs are collected through the profile receipt into local `results/`.
-   See [profile staging and receipts](agent-offload.md). For direct job specs,
+   See [profile staging and receipts](adapter.md). For direct job specs,
    use `files`/`myce file put` for small bytes and managed input paths; large
    immutable trees use `shared_inputs`.
 

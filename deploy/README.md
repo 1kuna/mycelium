@@ -23,7 +23,7 @@ state. Service definitions contain placeholders, not credentials.
 [Installer overlay and rollback](../docs/operations.md#install-and-upgrade)
 preserve omitted settings, artifacts and service state. Nonempty old state
 without `.myce-format` returns `legacy_state_present`: follow
-[archive plus fresh install](../docs/guide-fresh-install.md), preserving local data.
+[archive plus fresh install](../docs/operations.md), preserving local data.
 
 Queue and worker NAS mount paths may differ while mapping the same shared root.
 A checkpoint-root directory probe is not verification of the remote mount's identity.
@@ -50,7 +50,7 @@ CUDA dedicated/auto inventory requires one selected device (or one device in
 unselected output); use a configured device and unique worker names on multi-GPU
 hosts. Unified-memory workers use OS telemetry; missing/invalid telemetry blocks
 work. Qualify memory policy independently of installation.
-See [the production test plan](../docs/production-test-plan.md).
+See [the production test plan](../docs/development.md).
 
 Linux manual worker templates load the selected `gpu.env` file. Include only the GPU runtime
 variables your foreground detection needs (for example `LD_LIBRARY_PATH` and

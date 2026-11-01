@@ -421,7 +421,7 @@ func TestEntryWorkerLoadsApprovedSourceWithLocalSecrets(t *testing.T) {
 }
 
 func TestEntrySimDryExample(t *testing.T) {
-	data, err := os.ReadFile("../../docs/examples/sim-server-entries.yaml")
+	data, err := os.ReadFile("../../examples/sim-server-entries.yaml")
 	if err != nil {
 		t.Fatal(err)
 	}

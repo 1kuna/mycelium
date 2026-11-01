@@ -1,4 +1,21 @@
-# Files with or without a NAS (v3)
+# Files, results and checkpoints
+
+Use immutable `files` for private inputs, `shared_inputs` for verified read-only
+large assets, and accepted `output_refs` for successful results. A NAS is optional
+for standalone file transport; the automated installer still requires a verified
+NAS mount. Failed-attempt diagnostics are separate from accepted outputs.
+
+- [Submit and transfer files](#start-and-submit)
+- [Failed-attempt recovery](#recover-outputs-from-a-failed-terminal-attempt)
+- [Atomic checkpoints and resume](#resumable-jobs)
+- [Asynchronous NAS delivery](#complete-from-queue-storage-deliver-to-nas-later-349)
+- [Worker-local destination tasks](#worker-local-task-outputs-508)
+
+The protected worker-custody/destination contract below requires an integrated
+native storage backend and activation; it is not the default output route.
+[Pending storage design](design-learned-storage.md) remains under separate review;
+[developer integration](development.md#backed-storage-admission-integration) is
+laptop proof, not automatic protection.
 
 The queue's always-on hypha stores immutable files. Every execution hypha has
 its own bounded cache and private attempt folders. No shared mount is needed.
@@ -48,7 +65,7 @@ myce submit --files-from ./source job.yaml
 ```
 
 The extension still needs explicit setup and qualification on each hypha, as
-explained in [write an extension](write-an-extension.md). The CLI sends the
+explained in [write an extension](adapter.md). The CLI sends the
 relative job filenames, byte counts and SHA-256 identities; it does not send
 local source paths. Only explicitly mapped inputs are uploaded, never a whole
 project or home folder. Inputs are copied into a private working folder before
@@ -269,7 +286,7 @@ Both helpers fence identity before uploads and allow size-based hashing time.
 ## Checkpoints and interrupted connections
 
 Jobs still use `MYCE_CHECKPOINT_DIR` and the existing atomic generation contract
-in [resumable jobs](guide-resumable-jobs.md). In no-NAS mode that folder is local
+in [resumable jobs](files.md). In no-NAS mode that folder is local
 to the attempt. Mycelium captures a consistent save, uploads its immutable files,
 verifies SHA-256 and size at the store, syncs files and directories, then records
 the generation in SQLite. It never publishes a manifest before its payloads.
@@ -546,3 +563,294 @@ refuses before consuming reserved space; heartbeats and unrelated jobs that need
 no additional storage continue. Queue-store loss can still lose undelivered bytes;
 this is one durable authority, not a backup guarantee. Native NAS power-loss and
 concurrent-backup performance qualification remain separate from laptop tests.
+
+
+## Resumable jobs
+
+On v3, [files without a NAS](files.md) adds local saves transferred to
+the queue hypha before publication. The atomic generation contract below is the
+same; newer local-only saves cannot resume elsewhere. Explicit NAS configuration
+keeps the path described below.
+
+Stored job inputs (`files`, including a profile's frozen source archive) and
+their verified results use the queue file store in both modes. Uploading inputs
+does not switch NAS checkpoints to file-store generations; workers fetch and
+verify those inputs through the queue API. See [file transport](files.md).
+
+Set `resumable: true` only when the command can safely restart. Mycelium sends
+SIGTERM to the command's process group, allows 10 seconds for production preemption (configurable), or two minutes for
+deadline preemption and planned leave, to save and exit,
+then sends SIGKILL if necessary. Do not daemonize or leave that group. Save
+periodically too: a machine that loses power cannot save on demand.
+
+Each attempt receives `MYCE_JOB_ID`, `MYCE_ATTEMPT`, and `MYCE_CHECKPOINT_DIR`.
+Each worker sets `--checkpoint-root` to its own local mount of the same NAS
+checkpoint directory, configured privately per host. For example, use a generic
+`NAS_ROOT/checkpoints` under each machine's verified mount. Queue `--checkpoints`
+uses the queue's local path. Jobs carry relative checkpoint paths; the worker
+resolves them before setting `MYCE_CHECKPOINT_DIR`. Create the root on the
+mounted NAS before starting the queue. Dev creates a local root.
+The stable job folder holds `attempt-1`, `attempt-2`, etc.; the environment points
+to the current attempt's folder. Before starting, the worker copies checkpoints
+from the attempt with the highest durable checkpoint generation.
+Temporary files and directories ending in `.tmp` never count as complete and are never copied.
+Workers stage a complete attempt copy in an ignored temporary directory, then
+rename it into place, so a failed copy cannot publish a manifest without its payloads.
+Failed staging directories remain available for inspection; retries preserve an
+already prepared attempt's saves. If a writer publishes a new generation during
+copying, preparation retries rather than combining its manifest with an older payload list.
+This isolates disconnected copies so they cannot overwrite each other's saves.
+Old step-1 checkpoint files directly in the job folder are also preserved when
+resuming. Checkpoints remain after completion or failure.
+
+**Every save must be atomic:** write to a temporary file in the same directory,
+flush and fsync it, rename it into place, then fsync the directory (except the
+Linux CIFS no-op described below). Use one
+self-contained checkpoint file, or a single atomic manifest referencing immutable
+files, so readers never combine pieces from different saves. The newest complete
+save is determined by a positive monotonic `generation` recorded inside the
+atomic JSON save, never by file times or wall clocks:
+
+```json
+{"myce_checkpoint": {"generation": 9}, "value": {"step": 42}}
+```
+
+Increment the highest retained generation on every save, including after resume.
+The Python `Checkpoint` helper does this automatically and returns only `value`
+when loading. Keep a single writer per attempt. For non-JSON payloads, atomically
+publish one JSON manifest with the same `myce_checkpoint` metadata referencing
+immutable payload files; publish the manifest only after its payload is durable.
+Temporary `.tmp` files never count. Unsequenced legacy saves still load at
+generation zero: Python chooses the lexicographically greatest JSON filename on
+a tie; worker resume chooses the greatest numeric prior attempt (direct job-folder
+saves lose a tie). Reconciliation retains the current execution on a tie. These
+are deterministic compatibility rules, not estimates of legacy progress.
+Invalid generation metadata fails visibly instead of using timestamps. A job must also make its output writes safe to retry.
+
+On Linux CIFS/SMB mounts, the Go checkpoint-copy path and Python helper skip
+only directory fsync: Linux `cifs_dir_fsync` is explicitly a dummy operation
+because directory operations are synchronous. Go identifies CIFS on the opened
+directory with `fstatfs`; Python uses the most specific resolved mount in
+`/proc/self/mountinfo`. Unknown filesystems and other platforms retain directory
+fsync. File fsync and same-directory atomic rename remain mandatory. A mount
+using `nostrictsync` may omit the server flush for files; avoid that option for
+durable checkpoints. Server acknowledgements do not independently prove power-loss
+survival of NAS caches: qualify server/storage guarantees and power-loss behavior
+separately. Neither helper returns early from a still-running file flush.
+
+Resume copies now sync each copied file, then each staged directory once,
+children before parents, before atomically publishing the entire attempt and
+syncing its parent. This removes per-file directory barriers on local filesystems
+without weakening publication ordering. This does not establish a fixed
+latency bound for a large checkpoint.
+File flushes, copying, generation scanning and remote I/O can still be slow or
+block. A timeout after rename on a filesystem requiring directory fsync must not
+be reported as a durable save; visibility alone does not prove durability.
+
+Size checkpoint intervals from measured worst-case/p99 save duration and
+acceptable lost work, including time spent doing the next bounded work unit.
+Avoid overlapping saves. Measure resume-copy latency separately, including file
+count and payload size. Stop grace must exceed the longest bounded work unit plus
+a complete final save and process-exit margin; the 10-second production default
+is not a NAS latency guarantee. Increase configured grace only within the agreed
+production-start budget; otherwise reduce checkpoint payload/file count or save
+more frequently so the previous complete generation is sufficient after forced
+stop. The queue's 25 ms wait budget does not bound a command's save syscall.
+Run the large ext4 fixture separately with a qualified storage-duration budget
+and memory/cache accounting; preserve all file-count/hash/heap assertions.
+
+For a small restartable command use [examples/resumable.py](../examples/resumable.py)
+and the [Python checkpoint helper](../clients/python/README.md#resumable-commands).
+The helper owns atomic generation publication, including the CIFS exception above.
+Test stop/save/restart on a later attempt and verify complete output.
+
+Non-resumable production (`priority: production`, `resumable: false`) starts
+without NAS checkpoint access and receives a local scratch checkpoint directory
+under the worker state directory. Declare `resumable: true` when production needs
+NAS checkpoints. Experiments and resumable production still wait for NAS recovery.
+
+The worker heartbeat allows 750 ms for its checkpoint-root probe, including
+creating and removing a temporary file; slower or blocked probes report the root
+unavailable. One-shot onboarding allows ten seconds per filesystem operation
+and has a cancellable 15-second total validation limit, including mount inventory.
+Standalone mount selection retains its five-second limit, including dry runs.
+Probe failures and recovery are logged on state changes. Worker
+attempt preparation also allows 250 ms for network-filesystem metadata and cold
+automount access. Queue I/O and checkpoint progress reads retain their 25 ms
+waits; the queue performs them outside its lock. An outstanding filesystem
+operation is reused on retry rather than duplicated. A blocked filesystem syscall
+may continue in the background, with at most one outstanding call per operation;
+commands never start from an incomplete preparation. Status reports the NAS as
+unreachable while a probe fails or exceeds its budget.
+
+Production preemption has a 10-second default grace; deadline preemption and
+planned leave have two minutes. If the NAS stays down beyond that allowance,
+the worker force-stops the displaced process group, reports it interrupted, and
+production proceeds after physical release is reported. The next experiment
+attempt resumes the previous complete save. Planned pauses do not exhaust
+retries. All jobs fail loudly after three counted infrastructure losses;
+a command's own failure fails immediately.
+
+Workers keep commands running through network loss. Logs and results are spooled
+on local disk, then delivered after reconnect. Acknowledged per-execution `.log` and
+`.result.json` files remain in the local spool for inspection; monitor disk usage
+and archive them according to your retention needs. The worker does not start another
+command while disconnected. A restarted worker kills its recorded old process
+group before checking in fresh. If two copies meet after a partition, the queue
+keeps the one with the newest complete checkpoint and stops the other. If the NAS is unavailable,
+conflict reconciliation and uploads wait until checkpoints can be compared. No system
+can send a stop through a disconnected network: copies can overlap until they
+reconnect. Commands must not rely on exactly-once external side effects.
+
+For a laptop demonstration, use `myce dev --workers 1`, submit the script as an
+experiment, then submit production requiring the same memory. Follow the logs to
+see stop/save and resumption. See `deploy/README.md` for optional boot services.
+
+## Worker-local task outputs (#508)
+
+New, individually submitted destination tasks can opt into the versioned result
+contract below. This requires the protected storage protocol from #506/#516 and
+a worker advertising `task_outputs_v1`. Native isolation and activation remain
+separate qualification work; configuring a destination does not qualify storage.
+Legacy `output_delivery: async_nas`, frozen jobs and keyed replays retain their
+existing contract and recovery window.
+
+```yaml
+storage_protocol: worker-custody/1
+output_destination:
+  protocol: task-output/1
+  kind: nas
+  id: archive
+outputs:
+  result.txt: results
+# Default for this new contract; retained preserves the configured recovery window.
+output_retention: until_delivered
+```
+
+Unique outputs stay in the producing worker's immutable, synced attempt spool
+even when the NAS is healthy. No health probe, full local budget or destination
+failure permits shared-store staging. The installed attempt boundary funds work,
+spool duplication, checkpoints and metadata together. A full worker budget keeps
+new writers from starting there; compute completion alone never frees it.
+
+The queue records the exact execution, machine, session, allocation and manifest
+in SQLite. Compute can become `succeeded` after confirmed process cleanup while
+`local_outputs.state` is `worker_local_pending_delivery`. Ordinary `output_refs`
+are absent. Inspect `delivery` independently: it identifies the destination,
+manifest, pending/failed/publishing/verified state, bytes, attempts, progress and
+retry times. Workers retain custody across restart and uncertain acknowledgements.
+A lost worker remains the recorded custodian and raises the existing health
+alert `worker_output_custodian_unavailable`; its output is not reported durable.
+
+## NAS destination
+
+The stable destination ID maps to an operator-owned root and its native volume
+identity on each worker. With the intended destination mounted, generate a
+private local configuration:
+
+```sh
+myce file destination-identity --destination-id archive /srv/archive > destinations.json
+myce join --output-destinations-config destinations.json # plus normal join flags
+```
+
+Keep the configuration private: it contains that worker's local path. Jobs carry
+only the stable ID. Copy opens the configured root and checks the actual opened
+filesystem identity before publication, so a missing mount cannot silently use
+the worker's underlying disk. A NAS task also requires its destination ID in the
+worker's advertised `output_destination_ids`.
+
+The worker stages, verifies and syncs each complete prefix tree before publishing
+`ROOT/PREFIX/JOB/ATTEMPT`, with `.myce-delivery.json`. Partial publication remains
+pending. Retry verifies both existing receipts and every file before accepting
+the whole task. One worker publication/verification runs at a time; destination
+I/O never holds the queue lock. Failed publication retains custody and uses the
+existing retry delay, resuming when the destination returns.
+
+## Submitter destination
+
+Use `kind: submitter` and a stable submitter-owned destination ID. Pull from the
+submitter machine with either supported client:
+
+```sh
+myce file deliver JOB /srv/results
+```
+
+```python
+path = client.deliver_outputs(job_id, "/srv/results")
+```
+
+The explicit local path stays on the submitter. Queue HTTP relays a single
+backpressured stream at a time, without disk staging. The client verifies hashes,
+syncs the complete tree and receipt, atomically exposes `ROOT/JOB/ATTEMPT`, then
+acknowledges delivery. Retry the same root after a lost acknowledgement: an
+existing tree must verify exactly. Individual `download_result` calls and partial
+pulls never acknowledge whole-task delivery. After worker collection, further
+streams return typed `result_expired`; keep the delivered submitter copy.
+
+When collection is due, repeat `deliver` / `deliver_outputs` from the same root.
+The client verifies the tree again and streams its current bytes back over a
+bounded HTTP connection. The worker hashes that live stream immediately before
+collection. This extra verification transfer is necessary because the worker
+cannot reach a private submitter path. An absent submitter or interrupted stream
+retains charged worker custody; a saved receipt cannot authorize deletion.
+
+## Retention and collection
+
+`until_delivered` enrolls verified outputs in #479's durable expiry/ledger and
+collector automatically. Collection of delivered local copies is lazy: it starts
+only when a qualified queued task needs the same worker backing, or at the
+configured retention deadline (168 hours by default). Copies are selected in
+MY-18 order, least valuable owner tier first. `retained` also requires the
+configured recovery window or explicit owner release before becoming legally
+reclaimable; release alone does not trigger eager collection. Pending or failed
+delivery cannot expire unique results.
+
+Verification alone does not authorize immediate deletion: collection rechecks
+exact attempt/destination/manifest fences, confirmed compute release, six-hour
+local publication grace, downstream/shared references and checkpoint/recovery
+pins. Registry/environment assets, unknown imports and required diagnostics keep
+their existing protections. Expired results cannot acquire new references via
+the expired task; acquiring an independent protected reference still uses normal
+capacity admission.
+
+Every collection invocation, including saved-intent replay and SQLite restart,
+re-verifies current destination content outside the queue lock, then rechecks
+the live attempt and reference fences before unlinking. The accepted residual is
+that single operation's own verify-to-delete span: after verified delivery, the
+destination is authoritative and its NAS/backups own subsequent durability. No
+verify-then-delete across independent filesystems can prevent destination loss
+immediately afterward. See [operations](operations.md#worker-local-task-delivery-508).
+Missing, corrupt or unreachable destination data, or a changed collection fence,
+clears verified delivery, retains worker custody,
+and raises `output_destination_preservation_lost` to operator/project owners.
+Delivery retry/reconciliation follows the existing path; conflicting destination
+trees remain protected from overwrite until repaired. A historical receipt is
+never a substitute for the payload.
+A missing submitter destination can be restored with `deliver_outputs` from
+retained worker bytes even after ordinary result expiry, until actual collection.
+Ordinary expired-result downloads still return `result_expired`.
+Failed verification advances a durable verification round, so replaying an old
+success receipt cannot restore verified state or clear that alert after restart.
+
+After a worker restart, successful compute with reconciled queue custody no
+longer gates compute recovery/admission. Delivery actors retain their original
+session, saved spool, allocation charge and bounded I/O slot independently;
+production using independent backing can be assigned during destination outage,
+publication grace or retained recovery.
+
+Worker collection persists an intent before deleting its authorized attempt
+work/spool and calls the storage backend's idempotent
+`StorageAttemptCollector.Collect` to retire that exact bound. The backend must
+preserve active control state and collection intent through acknowledgement and
+independently fund required diagnostics. Missing support or interrupted retirement
+keeps the allocation charged. Only the exact collection acknowledgement removes
+the queue's allocation/custody charge; the delivery and collection ledger survives.
+Shared copies use #479's publication fences, reference graph and bounded batches.
+
+Laptop tests use fake clocks, small files, real HTTP and SQLite; they do not
+qualify native mounts, isolated backing or aggregate filesystem denial. Placement
+requires the delivery capability and matching NAS destination ID before assigning
+an attempt. Delivery state and sanitized failures feed #507's production storage
+alerts; collector ordering recognizes worker-local manifests and respects the
+existing shadow/activation latch. #509 owns integrated
+migration and activation. No cap/reserve retirement is implied by this contract.
