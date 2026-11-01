@@ -113,23 +113,39 @@ see [agent offload](adapter.md). Linux runs the Linux builds, vet and full
 race/dev suite. The native Darwin CGO build explicitly skips there and remains
 a separate macOS check; the Linux gate is not proof of that release target.
 
-The full-gate profile and its converted adapter entry declare 7 GiB of CPU host
-memory. Successful unconstrained attempt telemetry inspected on 2026-11-01 had
-Linux total cgroup peaks of 2.699532–4.472893 GiB and Darwin sampled process-group
-RSS up to 2.999222 GiB. Linux resident counters alone reached only 2.816639 GiB;
-the total peak also covers file-backed charges. The budget is the largest total
-peak plus the larger of its observed range (1.773361 GiB) and 25% of that peak,
-rounded up: 6.246254 GiB becomes 7 GiB, with ordinary launch slack additional.
-This margin prevents ceiling pressure or OOM from observed run-to-run variation
-and growth between samples, at a cost of 2.527107 GiB above the largest total
-peak. It is an observed envelope; revisit it if the suite grows, hits its ceiling,
-or approaches the budget. On Linux workers with enforced cgroups, the memory
-ceiling includes the declaration and configured launch slack; a confirmed OOM
-on the final attempt appears as `failed (out of memory)` in CI. Other workers,
-including Darwin, use admission-only accounting. Unhinted `memory: auto`
-intentionally explores available host headroom after unusable constrained evidence, which made this repeatedly
-measured CPU gate reserve scarce accelerator capacity; see
-[#559](https://github.com/1kuna/mycelium/issues/559) for evidence and follow-up.
+Full-gate profiles and their converted adapter entries declare CPU host memory
+per platform: `gate-full` supports Linux at 7 GiB; `gate-full-darwin` supports
+Darwin arm64 at 4 GiB. CI selects the corresponding profile before freezing the
+source SHA. Commands, concurrency, environment and result acceptance are identical.
+
+Successful unconstrained attempt telemetry inspected on 2026-11-01 included
+20 Linux total cgroup peaks of 2.699532–4.472893 GiB. The Linux budget remains
+max peak + max(observed range, 25% of max), rounded up:
+4.472893 + max(1.773361, 1.118223) = 6.246254 GiB becomes 7 GiB.
+Linux resident counters alone reached only 2.816639 GiB; total cgroup peaks also
+cover file-backed charges.
+
+A fresh read-API inspection found 34 successful final Darwin attempts, of which
+32 had unconstrained sampled process-group RSS: 2.362656–3.001328 GiB.
+The maximum is accepted attempt 1 of `424f3aa36122087656f8636038cff66d`.
+The same formula gives 3.001328 + max(0.638672, 0.750332) = 3.751659 GiB,
+rounded up to 4 GiB. This leaves 0.998672 GiB above the observed maximum.
+Older records lack explicit learning reasons; these are successful unconstrained
+observations, not a claim that every record passes every current learning fence.
+
+Darwin samples process-group RSS every 200 ms: short-lived processes and bursts
+between samples can be missed, and RSS does not measure total cgroup file-cache
+or kernel charges. The 25% margin and rounding provide headroom for observed
+variation and missed bursts; there is no measured Darwin total-charge delta to
+justify another fixed surcharge. This is an observed envelope, not a bound on
+all future growth or a Linux-equivalent total-memory measurement. Ordinary launch
+slack is additional on both platforms. Revisit sizing if the suite grows, pressure
+appears or peaks approach the declaration. Linux cgroups enforce the declaration
+plus configured slack; Darwin is admission-only. A confirmed final-attempt OOM
+appears as `failed (out of memory)` in CI. Unhinted `memory: auto` intentionally
+explores available host headroom after unusable constrained evidence, which made
+this repeatedly measured CPU gate reserve scarce accelerator capacity; see
+[#559](https://github.com/1kuna/mycelium/issues/559).
 
 For ad-hoc suites, `myce run --profile go-test -- -race ./...` defaults to the
 same `-timeout 15m` as the full gate. Arguments after `--` go to `go test`; an
@@ -215,8 +231,8 @@ Use the run's job summary to inspect both platform outcomes and Mycelium job IDs
 The workflow's own check reports success/failure; no commit-status credential or
 personal access token is needed.
 
-[`scripts/actions-full.py`](../scripts/actions-full.py) narrows the existing
-`gate-full` profile to the exact push SHA and submits it once for Darwin arm64
+[`scripts/actions-full.py`](../scripts/actions-full.py) narrows the corresponding
+platform full-gate profile to the exact push SHA and submits it once for Darwin arm64
 and once for Linux arm64. As a temporary mitigation for
 [#527](https://github.com/1kuna/mycelium/issues/527), the generated CI profiles
 exclude the Linux amd64 target to keep full suites off the current queue host.

@@ -31,6 +31,31 @@ entries:
             - arch: arm64
               os: linux
               platform: cpu
+    mycelium-gate-full-darwin:
+        checks:
+            result:
+                - grep
+                - -qx
+                - 'gate full: exit=0'
+                - gate-result.txt
+        class: test
+        environment: mycelium-gate
+        name: mycelium-gate-full-darwin
+        needs:
+            cpu_cores: 2
+            memory_gb: 4
+            platform: cpu
+        outputs:
+            gate-result.txt: results
+        run:
+            command:
+                - bash
+                - scripts/gate-profile.sh
+            env:
+                GOMAXPROCS: "2"
+        source:
+            git: HEAD
+        targets:
             - arch: arm64
               os: darwin
               platform: cpu
