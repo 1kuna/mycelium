@@ -866,7 +866,10 @@ Main keeps decode-only compatibility for retained state, ordinary output
 reservations/upload admission, caps/reserve, accepted manifests, checkpoint
 transfer, async NAS publication and exact-attempt custody. New protected-storage
 and worker-local task-output submissions are rejected; historical protected
-records remain held and protected from collection.
+records with unresolved custody remain held and protected from collection.
+Settled collection acknowledgements retain provenance while allowing ordinary
+file release, retention and history cleanup. Protected child-state discovery
+remains a read-only startup fence, including the pre-index crash window.
 
 The usefulness verdict and future backend slice are tracked in
 [#564](https://github.com/1kuna/mycelium/issues/564) and

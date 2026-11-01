@@ -449,6 +449,10 @@ func (s *workerStore) attemptStores() ([]*workerStore, error) {
 	if s.state.StorageDirectory != "" || parkedStorage(s.state.Job) {
 		return nil, errors.New(parkedStorageReason)
 	}
+	cleared, err := clearedParkedStorageChildren(s.dir)
+	if err != nil {
+		return nil, err
+	}
 	stores := []*workerStore{}
 	for _, name := range s.state.Attempts {
 		if filepath.Base(name) != name || name != "legacy-state.json" && (!strings.HasPrefix(name, "state-attempt-") || !strings.HasSuffix(name, ".json")) {
@@ -503,7 +507,14 @@ func (s *workerStore) attemptStores() ([]*workerStore, error) {
 		if err = decodeWorkerState(data, &child.state); err != nil {
 			return nil, err
 		}
-		if child.state.StorageDirectory != "" || parkedStorage(child.state.Job) {
+		if id := child.state.StorageDirectory; id != "" {
+			session, found := cleared[id+"/"+child.stateName]
+			if !found || session != child.state.Session || child.state.Job != nil || child.state.Result != nil || child.state.PID != 0 || child.state.LaunchPending {
+				return nil, errors.New(parkedStorageReason)
+			}
+			continue // Exact child state already cleared; retain its historical index.
+		}
+		if parkedStorage(child.state.Job) {
 			return nil, errors.New(parkedStorageReason)
 		}
 		if child.state.Job != nil {

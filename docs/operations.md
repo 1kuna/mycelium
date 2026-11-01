@@ -834,7 +834,12 @@ legacy disk floor, checkpoint transfer and custody fences remain active.
 
 Retained database fields remain readable and preserved across updates/reopens.
 A retained protected task is held rather than silently executed without its
-boundary; retained worker-local manifests stay protected from collection.
+boundary. A persisted, exact collected acknowledgement allows ordinary owner
+file release, retention and history cleanup to drain settled records. Uncollected
+or mismatched custody stays protected; reconcile it with the preserved parked
+implementation before switching that worker to main. Startup reads protected
+child state even if a crash preceded the root discovery/index write, and refuses
+unresolved custody before changing the session or claiming the worker is empty.
 Readiness/activation flags retained from the parked implementation cannot retire
 the configured guards. Future native implementation/qualification is tracked in
 [#504](https://github.com/1kuna/mycelium/issues/504).

@@ -822,7 +822,9 @@ Historical `output_destination`, `storage_allocation` and `local_outputs` fields
 remain readable. Their native implementation is parked; new submissions cannot
 request it. A retained protected task holds with an explicit parked-storage
 reason, and historical local custody is never treated as ordinary `output_refs`
-or permission to discard its files. See [operations](operations.md#parked-native-storage-integration-564).
+or permission to discard its files. An exact persisted collected acknowledgement
+permits ordinary file release/retention and history expiry; unresolved custody
+continues to hold. See [operations](operations.md#parked-native-storage-integration-564).
 
 ### Shared interactive profile
 

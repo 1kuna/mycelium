@@ -75,8 +75,8 @@ func (d *recordDeadlines) due(now time.Time) []string {
 }
 
 func mutableJob(j *Job) bool {
-	// Retained parked custody cannot be retired by ordinary history/key expiry.
-	if parkedStorage(j) {
+	// Unresolved parked custody cannot be retired by ordinary history/key expiry.
+	if parkedStorageCustody(j) {
 		return true
 	}
 	if deliveryPending(j) || !terminal(j.State) || j.Attempt > 0 && !j.ReleaseConfirmed {

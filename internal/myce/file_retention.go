@@ -157,7 +157,7 @@ func (q *Queue) maintainFileExpiry() {
 		if j == nil || !terminal(j.State) || !hasJobFiles(j) {
 			continue
 		}
-		if parkedStorage(j) || deliveryPending(j) {
+		if parkedStorageCustody(j) || deliveryPending(j) {
 			continue
 		}
 		if j.Spec.OutputDestination != nil && (j.Delivery == nil || j.Delivery.VerifiedAt == nil || !sameDelivery(j, *j)) {
@@ -249,7 +249,7 @@ func (q *Queue) collectFileReferences(pendingOnly bool, releasing map[string]boo
 		}
 		owner = FileKeepingReference{JobID: j.ID, Project: j.Spec.Project}
 		filesExpired := j.FilesExpired
-		protected := parkedStorage(j) || deliveryPending(j)
+		protected := parkedStorageCustody(j) || deliveryPending(j)
 		if terminal(j.State) && filesExpired {
 			if custody == nil {
 				custody = q.cancellationObservation()
@@ -282,7 +282,7 @@ func (q *Queue) collectFileReferences(pendingOnly bool, releasing map[string]boo
 		if !terminal(j.State) {
 			keepFiles("pending_output", j.PendingOutputRefs)
 		}
-		if parkedStorage(j) || deliveryPending(j) {
+		if parkedStorageCustody(j) || deliveryPending(j) {
 			keepFiles("pending_delivery", j.OutputRefs)
 		}
 		for _, a := range j.AttemptHistory {
