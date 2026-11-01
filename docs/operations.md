@@ -1094,9 +1094,22 @@ window. Commands below use placeholders for approved installation paths and
 accounts. Load authentication through the existing private secret mechanism;
 never print a token or pass it on the command line.
 
-Pause ordinary submissions and disable both physical hosts through the current
-queue. Record source identities/sessions, actual unit enablement/activity,
-config/binary digests, device identities and settled spool evidence. Keep the
+Pause ordinary submissions and inspect the source queue's maintenance controls.
+An older source may not have queue-owned host maintenance: use its confirmed
+host-close/discharge route or the [verified-empty alternative](#verified-empty-conversion-and-publication).
+On the source lineage supporting `host close --local --wait-released`, exit 1
+with `release_not_confirmed` means re-check status; it is not permission to
+release custody. Require confirmed settlement and zero custody, or independently
+prove the verified-empty alternative's conditions. Record source identities,
+sessions, unit enablement/activity, config and binary digests, device identities
+and spool evidence. Stop the exact units and snapshot binaries (including any
+root-owned binary separately), configs, units, registries and database. Upgrade
+the stopped queue first; only
+then use the new queue's host-maintenance commands below. Its one-time import
+preserves closed `host_intents` as disabled maintenance; disagreeing per-worker
+host memory allowances refuse migration with `machine_migration_conflict`.
+
+Disable all affected physical hosts through the upgraded queue. Keep the
 current binaries and a queue/database/config backup as well as the installer's
 rollback journals. Require fresh reports and no attempts, preparations, engines,
 buffered results, releases or queued jobs resolved to retiring names:

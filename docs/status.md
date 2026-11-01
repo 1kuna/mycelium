@@ -15,6 +15,10 @@ filtered and full views and per-job GET. This can repeat observation work during
 completions; ordinary worker check-ins do not invalidate the cache. Snapshot `now` is the
 injected queue time at capture, rather than the response completion time.
 
+Machine `cpu_extension_fingerprint` identifies the CPU qualification identity;
+device entries carry their own extension fingerprints and reports. The scalar
+`extension_fingerprint` and reports retain a first-device compatibility view.
+
 Default status keeps the existing JSON fields and job shape, but includes all
 nonterminal jobs and terminal jobs with pending cleanup/delivery, plus the newest
 100 other terminal jobs by submission time. Work curves remain included for
