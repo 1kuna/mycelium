@@ -180,9 +180,6 @@ func (q *Queue) placementAllowedForUse(j *Job, m *Machine, resident bool) bool {
 func (q *Queue) placementPolicyAllowed(j *Job, m *Machine, resident bool) bool {
 	return q.evaluateAdmission(admissionRequest{Job: j, Target: m, Phase: admissionRecovery, Resident: resident}).Allowed
 }
-func (q *Queue) placementPolicyWithoutReservation(j *Job, m *Machine, resident bool) bool {
-	return q.evaluateAdmission(admissionRequest{Job: j, Target: m, Phase: admissionQualificationDemand, Resident: resident}).Allowed
-}
 func (q *Queue) hostBlockers(host string) string {
 	text, _ := q.hostBlockerState(host)
 	return text

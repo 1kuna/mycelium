@@ -42,7 +42,7 @@ func automaticExtensionCheckID(machine string, r ExtensionReport) string {
 // Device admission is separate: disabling cannot cancel an existing Started
 // check while its useful demand and prepared identity still exist.
 func (q *Queue) extensionQualificationDemand(e Extension, m *Machine) bool {
-	return q.extensionQualificationDemands(m, &e)[e.Digest]
+	return q.extensionQualificationJobs(m, &e)[e.Digest] != nil
 }
 
 // One planning pass collects demand by frozen digest, rather than running disk
@@ -82,14 +82,6 @@ func (q *Queue) extensionQualificationJobs(m *Machine, only *Extension) map[stri
 	}
 	return demand
 }
-func (q *Queue) extensionQualificationDemands(m *Machine, only *Extension) map[string]bool {
-	out := map[string]bool{}
-	for digest := range q.extensionQualificationJobs(m, only) {
-		out[digest] = true
-	}
-	return out
-}
-
 func (q *Queue) extensionQualificationPlan(m *Machine) []ExtensionQualificationPlan {
 	if !q.evaluateAdmission(admissionRequest{Target: m, Phase: admissionHost, Session: m.Session}).Allowed {
 		return nil
@@ -205,9 +197,11 @@ func (q *Queue) maintainExtensionQualifications() {
 			if owner := q.s.Machines[j.Spec.AllowedMachines[0]]; owner != nil {
 				for _, m := range q.machineTargets(owner) {
 					for _, e := range j.Extensions {
-						eligible := q.extensionQualificationDemand(e, m)
+						var eligible bool
 						if j.Spec.ExtensionCheck.Demand != "" {
 							eligible = q.qualificationDemandEligible(q.s.Jobs[j.Spec.ExtensionCheck.Demand], e, m, j)
+						} else {
+							eligible = q.extensionQualificationDemand(e, m)
 						}
 						wanted = wanted || matchingExtensionReport(e, m, *r) && eligible
 					}

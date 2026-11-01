@@ -20,7 +20,6 @@ const (
 
 type admissionRequest struct {
 	Job       *Job // Physical work, including its exact attempt/session when assigned.
-	Demand    *Job // Useful logical job selected by preparation/qualification.
 	Target    *Machine
 	Phase     admissionPhase
 	Resident  bool
@@ -32,7 +31,6 @@ type admissionDecision struct {
 	Allowed bool
 	Code    string
 	Detail  HoldDetail
-	Fit     targetFit
 }
 
 func deniedAdmission(m *Machine, code, text string) admissionDecision {
@@ -40,7 +38,6 @@ func deniedAdmission(m *Machine, code, text string) admissionDecision {
 	if m != nil {
 		d.Detail.Host = hostID(m)
 	}
-	d.Fit.check(false, code)
 	return d
 }
 
@@ -73,10 +70,7 @@ func (q *Queue) evaluateAdmission(r admissionRequest) admissionDecision {
 			return admissionDecision{Allowed: true}
 		}
 	}
-	demand := r.Demand
-	if demand == nil {
-		demand = q.admissionDemand(j)
-	}
+	demand := q.admissionDemand(j)
 	if j != nil && automaticExtensionCheck(j) != nil && j.Spec.ExtensionCheck.Demand != "" && demand == nil {
 		return deny("useful_demand", "qualification demand no longer exists")
 	}
