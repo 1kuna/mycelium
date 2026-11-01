@@ -54,10 +54,12 @@ exit 7
             env = dict(os.environ, PATH=str(root) + os.pathsep + os.environ['PATH'])
             for args in (['./...'], ['-timeout', '22m', './...'], ['-timeout=22m', './...']):
                 with self.subTest(args=args):
-                    run = subprocess.run(['bash', str(script), *args], cwd=root, env=env,
+                    forwarded = [*args, '-args', 'dogfood argument with spaces']
+                    run = subprocess.run(['bash', str(script), *forwarded], cwd=root, env=env,
                                          capture_output=True, text=True)
                     self.assertEqual(run.returncode, 7, run.stderr)
                     argv = (root / 'args').read_text().splitlines()
+                    self.assertEqual(argv[-len(forwarded):], forwarded)
                     timeouts = [arg.split('=', 1)[1] if '=' in arg else argv[i+1]
                                 for i, arg in enumerate(argv) if arg == '-timeout' or arg.startswith('-timeout=')]
                     self.assertEqual(timeouts[-1], '15m' if len(args) == 1 else '22m')
