@@ -1,0 +1,22 @@
+# Darwin sampled RSS peak + 25%, rounded up; see docs/development.md.
+# Keep this explicit: constrained auto peaks otherwise explore all host headroom.
+name: mycelium-gate-full-darwin
+project: mycelium
+class: test
+source:
+  git: HEAD
+run:
+  command: [bash, scripts/gate-profile.sh]
+  env:
+    GOMAXPROCS: '2'
+needs:
+  cpu_cores: 2
+  memory_gb: 4
+  platform: cpu
+targets:
+  - {os: darwin, arch: arm64, platform: cpu}
+# Locked CPU tools for every declared target (see env/mycelium-gate/README.md).
+environment: mycelium-gate
+outputs:
+  gate-result.txt: results
+check: [grep, -qx, 'gate full: exit=0', gate-result.txt]

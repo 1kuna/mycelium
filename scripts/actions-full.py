@@ -64,13 +64,14 @@ def failure_state(job):
 
 
 def run(root, sha, scratch):
-    profile = (root / '.mycelium/profiles/gate-full.yaml').read_text()
     print('Linux amd64 native full-suite coverage is deferred: profiles lack a negative host selector; '
           'the queue host must be excluded during #527: https://github.com/1kuna/mycelium/issues/527', flush=True)
     jobs, states, refusals = {}, {}, {}
     failed = False
     # Submit both before waiting. An error on one platform must not skip the other.
     for platform in PLATFORMS:
+        name = 'gate-full-darwin' if platform == 'darwin' else 'gate-full'
+        profile = (root / f'.mycelium/profiles/{name}.yaml').read_text()
         path = scratch / f'{platform}.yaml'
         path.write_text(platform_profile(profile, sha, platform))
         reply = command('run', '--profile', str(path), '--key', f'main-ci:{sha}:{platform}')
