@@ -1,4 +1,269 @@
-# Calling general model servers
+# Model calls, servers and sidecars
+
+Use [OpenAI-compatible calls](#calling-openai-models) for chat/completions/embeddings,
+[general HTTP servers](#calling-general-model-servers) for other protocols, and
+[native sidecars](#native-job-sidecars) for helpers owned by one attempt.
+Servers share managed engines/pins; sidecars share their attempt's cleanup and
+resource envelope. They are different runtime contracts. Preserve model identity,
+local secret handling and no replay after streaming output begins. Environment
+locks live in [environments](environments.md); trust limits in
+[native isolation](native-isolation.md).
+
+## Calling OpenAI models
+
+General speech, OCR, face and other HTTP APIs use [general servers](services.md).
+
+Apps send one OpenAI request at a time to the queue. They never own a GPU or
+manage a model process. The queue loads a configured model on an eligible
+worker, waits for readiness, and forwards the original JSON unchanged.
+
+## Try it without a GPU
+
+```sh
+go build -o myce ./cmd/myce
+./myce dev --workers 1 --model-idle 5s
+```
+
+Dev offers `dev-model`, an explicitly fake engine producing `fake answer` or a
+fixed embedding. Batch commands still run as real processes. Call the model:
+
+```sh
+curl http://127.0.0.1:7331/v1/chat/completions \
+  -H "Authorization: Bearer dev-token" \
+  -H "Content-Type: application/json" \
+  -H "X-Myce-Project: demo" \
+  -H "X-Myce-Priority: production" \
+  -d '{"model":"dev-model","messages":[{"role":"user","content":"Hello"}]}'
+./myce status
+```
+
+After five seconds without calls, status shows the model draining and then
+absent. A second call loads it again. `dev --model-config fake-models.yaml`
+accepts a custom catalog only when every engine is `fake`.
+
+## Request contract
+
+The queue supports `POST /v1/chat/completions`, `POST /v1/completions`, and
+`POST /v1/embeddings`. Chat supports `"stream": true`, forwarding and flushing
+server-sent events. Other endpoints use complete JSON responses.
+
+All calls require the fleet token and these headers:
+
+| Header | Value |
+|---|---|
+| `Authorization` | `Bearer <MYCE_TOKEN>` |
+| `X-Myce-Project` | A nonempty project name |
+| `X-Myce-Priority` | `production`, `deadline`, or `experiment` |
+| `X-Myce-Deadline` | RFC3339 timestamp, required for `deadline` priority |
+
+Priority metadata stays out of the OpenAI body. The body must name a model in
+the catalog. The engine validates its remaining OpenAI fields; Mycelium does
+not rewrite sampling settings, prompts, tools, or model responses. Request
+bodies are limited to 64 MiB. Errors have an OpenAI-style `error.message`.
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://127.0.0.1:7331/v1",
+    api_key="dev-token",                 # use your fleet token outside dev
+    default_headers={
+        "X-Myce-Project": "atlas",
+        "X-Myce-Priority": "production",
+    },
+    timeout=600,                         # include your configured load wait
+    max_retries=0,                       # Mycelium already retries worker loss once
+)
+response = client.chat.completions.create(
+    model="dev-model",
+    messages=[{"role": "user", "content": "Hello"}],
+)
+print(response.choices[0].message.content)
+
+for chunk in client.chat.completions.create(
+    model="dev-model",
+    messages=[{"role": "user", "content": "Hello"}],
+    stream=True,
+):
+    print(chunk.choices[0].delta.content or "", end="", flush=True)
+```
+
+Embeddings and text completions use `client.embeddings.create(model=..., input=...)`
+and `client.completions.create(model=..., prompt=...)` with the same headers.
+
+## Model catalog and worker setup
+
+Queue and workers read the same short YAML file via `--model-config`:
+
+```yaml
+idle_timeout: 10m
+max_wait: 5m
+models:
+  - name: chat
+    engine: llama.cpp
+    path: chat.gguf
+    size_bytes: REPLACE_WITH_EXACT_BYTES
+    sha256: REPLACE_WITH_APPROVED_SHA256
+    memory_gb: 24
+    platforms: [cuda, metal, xpu]
+    args: [--ctx-size, "32768"]
+```
+
+`max_in_flight` is an optional nonnegative per-loaded-copy request limit.
+Omitted or `0` retains unlimited concurrency; `1` serializes a server. Calls
+wait in the existing priority/deadline order when all copies are full, and
+completion, cancellation or worker loss frees capacity.
+
+Names are unique. `path` names a NAS master GGUF, relative to `--model-root`
+or an absolute mount path. Supply trusted exact `size_bytes` and `sha256` in
+place of the placeholders above. Workers verify and cache it locally before
+loading; `direct_nas: true` explicitly permits a small model to bypass the cache.
+Loading never downloads model weights; a declared software environment may
+build on demand. `memory_gb` is the operator's total GPU memory
+budget for weights, KV cache, and concurrent engine slots. `platforms` limits
+placement. `args` supplies model-specific llama-server options, including
+context/template/sampling flags and `--embedding` for embedding models. The
+adapter owns `--host`, `--port`, `--model`, and `--alias`; args cannot override
+those. It supplies `--n-gpu-layers 99` by default. Supply the intended GPU-layer
+count in args when the model needs another value.
+
+Provide an appropriate GPU-enabled `llama-server` build on PATH or through a
+declared environment recipe: CUDA, Metal, or Intel SYCL for `xpu`. Before running
+a real model, verify its official model card, recommended generation settings, effective context/output limits,
+reasoning mode, and chat template; record those with any evaluation. The
+adapter does not guess generation settings or download a different model.
+No real GPU/model validation is implied by laptop tests.
+
+For a LAN worker, bind its authenticated model proxy to an address reachable
+by the queue and advertise that exact URL:
+
+```sh
+# Set MYCE_TOKEN securely in both terminals; never put it in the catalog.
+myce queue --model-config models.yaml --listen QUEUE_ADDRESS:7331 \
+  --checkpoints /shared/checkpoints
+myce join --queue http://QUEUE_ADDRESS:7331 --name gpu-worker --gpu cuda \
+  --memory-gb 48 --model-config models.yaml --model-root /shared/models \
+  --model-cache /local/disk/myce-models --model-cache-bytes 107374182400 \
+  --model-listen WORKER_ADDRESS:7332 --model-advertise http://WORKER_ADDRESS:7332
+```
+
+The default proxy binds loopback on a random port for dev/local workers.
+The actual engine always binds loopback; only the token-protected worker proxy
+is LAN-visible. Model configuration hashes must match between queue and workers,
+so a mismatched catalog fails visibly rather than loading another model silently.
+`--model-idle` and `--model-wait` override YAML timeouts. These timeouts are not
+part of the model identity hash. Queue and worker wait values should agree.
+General `server` engines and the `vllm` preset are described in the [server guide](services.md).
+
+## Scheduling, draining, and recovery
+
+Calls share batch priority, combined environment/model readiness, earliest
+deadline, and waiting-age ordering; competing experiment projects first share
+by weighted recent usage. An already loaded eligible model is preferred. Otherwise
+all fitting free workers are considered before making room. CUDA workers report
+live dedicated GPU memory from `nvidia-smi`, or Linux `MemAvailable` when
+CUDA memory fields are unsupported (`[N/A]` on Spark). Metal uses macOS
+`vm_stat` free + inactive pages. Both are optionally capped with `--memory-gb`,
+then reduced by `--reserve-memory-gb` (start with 16 GiB on Spark). Resident models and
+running commands are
+already reflected in that reading; only not-yet-reflected loading reservations
+are subtracted by the queue. XPU/fake and explicit `--memory-mode fixed` use
+a configured budget minus reserve and account for our batch/model reservations
+once. Fixed budgets cannot observe external allocations: choose and maintain a
+conservative allowance. Live probe failures block new work and appear in status;
+see [memory modes and sources](operations.md#host-ram-admission-and-ceilings).
+Workers recheck before every command or
+model load. Each worker runs at most one batch, alongside models that fit.
+
+Idle time starts after load readiness or the most recent call finishes.
+`idle_timeout` defaults to ten minutes. A higher-priority batch or call can drain
+lower-priority models to reclaim memory. Protection follows the highest priority
+of currently admitted calls, not historical use; an idle model is reclaimable
+as experiment priority. Draining stops new queue admissions;
+already admitted calls may finish. The worker unloads only when both the queue's
+admitted calls and its local in-flight calls reach zero. Memory is released only
+after the worker reports successful unload. Failed unload retains its reservation
+and appears in status. Lower-priority resumable batches may save and pause for
+calls, following the batch stop-grace rule: production grants 10 seconds and
+also stops non-resumable lower-priority batches immediately; deadlines grant
+2 minutes and preserve non-resumable work. Pinned models never idle-unload
+or surrender their memory to other work.
+
+`max_wait` defaults to five minutes and bounds queue/load waiting (including a
+retry's placement). Inference has a separate per-model `request_timeout`
+(default `10m`). Clients should use
+a timeout that includes loading and inference. The load process itself has the
+worker's configured maximum wait. A failed load returns a clear error and a
+later request can try loading again.
+
+Quiet-worker timeouts follow the highest-priority active workload (including
+model loading/calls): production 5s, deadline 20s, experiment 60s, configurable
+on the queue. Worker check-ins default to 1s. When a worker is marked lost, its
+model slots disappear. A transport failure or worker loss retries a call once on a
+different worker. Complete responses are buffered, so a partial non-streaming
+response can be retried before returning any bytes. A chat stream can retry
+before its first bytes; after it starts, a stream error event explains that
+retry is unsafe. Callers must discard failed streams and decide whether a new
+request is appropriate. If no alternative worker fits, the remaining wait
+expires with a clear error. A strict-majority network outage retains assignments
+rather than pretending every machine died.
+
+Worker startup locks its spool, checks saved engine process identities, and
+kills leftover owned engine process groups before reporting fresh. Engine logs
+and identity records live in the worker spool. Engines never inherit `MYCE_TOKEN`.
+Planned leave drains model calls before the worker disappears.
+
+Model inventory is durable in the queue's SQLite state, but active HTTP bodies
+and response streams are not replayable across queue restart. Those clients
+receive a connection failure and must decide whether to resubmit. Restart
+recovery waits for workers to report their loaded engines; stale sessions cannot
+serve newly assigned calls. This is one queue and plain-command workers, with
+no peer registry, leases, containers, or continuously reserved app GPUs.
+
+`myce status`, `/api/status` (`loaded_models`), and the status page show each
+model's worker, loading/ready/draining state, idle seconds, calls in flight, and
+unload errors. In-flight calls show zero idle seconds.
+
+## Explicit master download and pins
+
+```sh
+myce model fetch chat.gguf --model-root /shared/models \
+  --url https://huggingface.co/OWNER/REPO/resolve/REVISION/chat.gguf \
+  --size-bytes EXACT_BYTES --sha256 APPROVED_HASH
+myce model pin chat --project atlas --machine gpu-host-a
+# Or choose one eligible machine on a platform, optionally during work hours:
+myce model pin chat --project atlas --platform cuda \
+  --weekdays 1,2,3,4,5 --start 08:00 --end 20:00 --timezone America/New_York
+myce status
+myce model unpin chat --project atlas
+```
+
+Use one pin command per project/model; unpin before changing its target. Wait
+for assigned ready state before expecting calls without load wait. Copy time
+counts as load time; the queue prefers ready, then locally cached, then cold
+placements. Cache eviction protects loaded models and preserves removed files in
+Trash. See [operations](operations.md) for physical disk space and recovery.
+
+
+Before the first real call, pre-copy the immutable master:
+
+```sh
+myce model sync chat --to gpu-worker
+myce status  # wait for verified cached_models and copy_reports state=ready
+myce model pin chat --project atlas --machine gpu-worker
+myce status  # additionally wait for the loaded slot to be ready
+```
+
+`sync --cancel` preserves partial bytes, and queue/worker restarts retain requests
+and resumable prefixes respectively. The worker rehashes the prefix and verifies
+the complete file before the engine can load it. Pins protect every compatible
+landing cache, even outside a reservation window. Real work and queue disconnection
+pause background copies without blocking worker check-ins; an outstanding NAS
+syscall remains subject to the mount's timeout. Copy speed in status measures NAS
+transfer; a cached model still needs engine startup. Follow the single ordered
+[first-machine checklist](development.md) for hardware acceptance.
+
+## Calling general model servers
 
 A catalog model can run any trusted local HTTP server. Speech, separation,
 alignment, OCR and face APIs share the queue's model loading, pins, priority,
@@ -45,20 +310,17 @@ kills the owned group and returns a visible error. The optional stop command
 and TERM share `stop_timeout` (default 10 seconds), followed by KILL and group
 verification. Failed unload retains its memory reservation and environment lease.
 
-Until package M migration, start one worker per physical card, using
-`join --name b70-gpu0 --gpu xpu --device 0 --memory-mode fixed
---memory-gb REVIEWED_ALLOWANCE`. Device selectors
-apply to batch commands and server processes without changing global env.
-For XPU, `ZE_AFFINITY_MASK` names physical cards while `ONEAPI_DEVICE_SELECTOR`
-uses indices after that mask: physical device `1` becomes `level_zero:0` /
-PyTorch `xpu:0`. `MYCE_DEVICES` always retains the physical selector.
-Under the [package M target](design-proposal.md#one-machine-one-worker-m0m4-100-decision-2026-10-20),
-one worker owns the machine inventory and a server selects at most one card.
-Existing multi-card worker or model masks such as `0,1` (including inputs to
-`WithModelDevice`) must fail at install/config load with typed
-`gpu_count_unsupported`, before launching anything; do not silently truncate or
-split them. This is the M2 target, not a claim that the legacy worker already
-rejects them. One job using multiple GPUs on the same machine is deferred to
+Use one machine worker for all offered devices. For an XPU example,
+`join --name gpu-host-a --gpu xpu --device 0,1 --memory-mode fixed
+--memory-gb REVIEWED_ALLOWANCE` offers two independent cards. Each server execution
+selects at most one. Device selectors apply per execution without changing global
+environment. For XPU, `ZE_AFFINITY_MASK` names physical cards while
+`ONEAPI_DEVICE_SELECTOR` uses indices after that mask: physical device `1`
+becomes `level_zero:0` / PyTorch `xpu:0`. `MYCE_DEVICES` retains the physical selector.
+[The machine contract](design-proposal.md#one-machine-one-worker) distinguishes
+a worker inventory allowance from unsupported multi-card attempt/model masks.
+The latter fail at config load with `gpu_count_unsupported`; never silently
+truncate or split them. Multi-device execution remains
 [#105](https://github.com/1kuna/mycelium/issues/105). CUDA visibility also
 renumbers selected cards from zero; a single selected card is `cuda:0` inside
 the process.
@@ -70,11 +332,11 @@ CUDA selectors resolve to a stable GPU UUID used by both server execution and
 `nvidia-smi --id` inventory; numeric CUDA ordering cannot change the measured card. XPU admission remains
 an explicit conservative fixed allowance, not a live external-allocation guard.
 Catalog `device` restricts placement to workers advertising that selector.
-Every card worker on one machine shares `--host-id` (default OS hostname).
+One machine worker uses the physical `--host-id` (default OS hostname).
 Optional catalog `host_memory_gb` and batch `needs.host_memory_gb` reserve RAM
 from that shared host allowance, rather than independently per card. See
 [host admission](operations.md#host-ram-admission-and-ceilings) for the unified-memory rule.
-No second worker/controller may own that card. Under M2, XPU identity is PCI BDF
+No second worker/controller may own that card. XPU identity is PCI BDF
 or Level Zero UUID; the worker and every member force
 `ZE_ENABLE_PCI_ID_DEVICE_ORDER=1`. Verify ordinal-to-identity mapping at worker
 and member start; a mismatch withholds that device with
@@ -154,14 +416,14 @@ erase SQLite/WAL, backups or disk remnants. Environment build logs remain under
 their own environment records; they are not copied to jobs with `logs: none`.
 Batch jobs also accept top-level `logs: none`, with the same null-device output
 behavior and no queue log rows or worker attempt log; see the
-[job reference](job-reference.md#scheduling-and-results). Keep confidential
+[job reference](jobs.md#scheduling-and-results). Keep confidential
 inputs/outputs out of captured batch output.
 
 `logs: none` server entries require a worker advertising `logs_none`; older
 workers cannot receive their load plans or serve their calls. A queue-first
 upgrade drains live opted-out servers until each host's worker is upgraded.
 Upgrade queue and workers together, and drain opted-out work before any downgrade. See the
-[job reference](job-reference.md#scheduling-and-results) for downgrade behavior.
+[job reference](jobs.md#scheduling-and-results) for downgrade behavior.
 
 Before claiming native Docker qualification, use an authorized disposable daemon
 and a retained managed container with `logs: none` to verify:
@@ -415,7 +677,7 @@ the body. Valid requests retain upload spooling; these
 changes do not resolve the separate body-storage privacy hold.
 
 
-The [placeholder server catalog](examples/sim-server-entries.yaml) needs reviewed argv, environment recipes, measured memory and local approval output. Native runtime and application telemetry require separate qualification.
+The [placeholder server catalog](../examples/sim-server-entries.yaml) needs reviewed argv, environment recipes, measured memory and local approval output. Native runtime and application telemetry require separate qualification.
 
 ### GPU selection limits and host holder checks
 
@@ -441,3 +703,131 @@ identities and start-time mapping checks cover the cooperative execution model,
 and no cross-card compute incident was established. Revisit if dual-GPU
 qualification shows out-of-mask access or interference. These selection controls
 are not a security boundary for hostile commands.
+
+## Native job sidecars
+
+A native job may launch trusted helper processes with `run.sidecars`, or use
+`execution.main` and `execution.sidecars`. Extensions use the same execution
+schema. No Docker daemon is needed. For example, with these scripts already
+available in the job workdir:
+
+```yaml
+name: native-example
+project: example
+priority: experiment
+resumable: false
+needs:
+  memory_gb: 1
+  host_memory_gb: 2
+  platform: any
+run:
+  command: [python, job.py]
+  env:
+    HELPER_URL: '{sidecars.helper.url}'
+  sidecars:
+    - name: helper
+      command: [python, -m, http.server, '{port}', --bind, 127.0.0.1]
+      port: 0
+      readiness: {path: /, timeout: 10s}
+      memory_gb: 1
+```
+
+Names must be unique after uppercasing and replacing dots/hyphens with
+underscores; `main` is reserved. Commands are argv arrays. Helpers inherit
+main's workdir and environment, but use their own authored `env`. A named helper
+`environment` references an existing catalog recipe (ordinary jobs) or variant
+environment (extensions). All environments are acquired before any helper
+starts and protected from eviction until group teardown. Extension/work and
+member environment substitutions use the same existing cache/recipe mechanism.
+
+A missing `port` declares a plain helper. `port: 0` allocates a free loopback
+port; positive ports must be available. Reservations remain held until that
+member's dispatch. HTTP readiness requires a port, absolute local path and
+positive timeout. The worker verifies listener ownership before accepting 2xx;
+a competing listener during handoff retries that member up to three times
+before readiness, allocating a fresh port for `port: 0`. Exhaustion or an
+unavailable fixed port uses the bounded infrastructure requeue. Unknown
+listener ownership fails preparation.
+Linux uses procfs; macOS uses libproc. Neither HTTP proxies nor redirects are
+used. Loopback does not isolate the helper from other local users/processes.
+
+For a helper named `my-helper`, main and all helpers receive:
+
+- `MYCE_SIDECAR_MY_HELPER_PORT`: allocated port as decimal text.
+- `MYCE_SIDECAR_MY_HELPER_URL`: `http://127.0.0.1:PORT`.
+
+That helper additionally receives `MYCE_SIDECAR_PORT` and `MYCE_SIDECAR_URL`.
+Literal `{port}` in its argv/env expands to its port. All members may use
+`{sidecars.NAME.url}` and `{sidecars.NAME.port}` in argv/env. There is no shell
+expansion. Identity, `MYCE_*` controls and accelerator selectors cannot be
+replaced by authored env. All members receive the same worker-selected device
+and exact attempt identity; the fleet token is stripped from every child.
+
+Helpers start in order and become ready before main starts. Every launch uses
+the shared authorization gate; readiness does not extend the start window.
+Without recorded infrastructure evidence, a helper exiting before main, even
+successfully, fails the attempt. Readiness
+timeouts also fail the attempt. Infrastructure stops use the existing requeue
+classifier. It accepts durable delivered-signal timestamps preceding the member's
+exit observation, observation loss, Mycelium-side launch/preparation failures, or
+a recorded probe proving foreign ownership of the allocated readiness port.
+Exit codes, stderr and stop intent alone never establish infrastructure cause.
+CPU checkpoint grace keeps helpers up while main receives TERM; cleanup then
+kills and verifies the subtree. Native accelerator cancellation stops main
+first (TERM, bounded grace, survivor KILL), then sends TERM to the surviving
+sidecars and descendants. Sidecars receive a fresh bounded accelerator grace
+before survivor KILL, even if main exited immediately or a repeated cancellation
+requests force. Helpers stop together after main; no helper-to-helper order is
+promised. Other accelerator stops retain the existing shared group TERM/grace.
+
+Both cancellation phases reuse the worker's accelerator stop grace: 10 seconds
+by default, capped at 15 seconds. The [retained acceptance](https://github.com/1kuna/mycelium/issues/154#issuecomment-6383952291)
+observed main and helper exit within 1.006 seconds of the stop trigger (helper
+TERM-to-exit about 0.769 seconds). The existing default leaves room for device
+work to drain; it is not a guarantee against GPU driver faults. Sequential
+cancellation can take up to 20 seconds by default, or 30 seconds at the cap,
+before subtree cleanup. Existing production start deadlines are unchanged.
+
+Preparation cancellation prevents subsequent members starting.
+Before any payload gate opens, the existing durable attempt record holds its
+PGID, member PID birth identities, and the aggregate cgroup when configured.
+Restart authenticates surviving members, resumes accelerator teardown, and
+verifies whole-group and cgroup release before reporting completion. Unconfirmed identity or cleanup
+retains custody.
+
+`memory_gb` is a positive member declaration bounded by the whole-job
+`needs.host_memory_gb`. It is accounted within that reservation, not charged
+again. With delegated Linux cgroup v2, the attempt parent retains that aggregate
+cap and contains `control`, `main` and `sidecar-NAME` leaves. Each member is
+attached before exec, with its declared cap as `memory.max`; omitted main RAM
+uses the parent cap. Set main RAM with `execution.main.memory_gb` (or
+`run.memory_gb`). Member OOM fails the attempt and identifies the member.
+Cleanup kills the subtree, verifies population, and removes empty leaves before
+the parent; unconfirmed release retains custody. macOS and foreground workers
+without delegation remain admission-only; `--require-memory-ceilings` refuses
+hosts without enforcement.
+Native Windows is a separate slice. All member output uses the existing attempt
+log policy, including `logs: none`.
+
+All runtimes use the same outcome precedence:
+
+| Observed evidence | Outcome |
+| --- | --- |
+| Member OOM, independent nonzero exit, early helper exit, readiness timeout | Stage failure, even with concurrent stop intent |
+| Successful main completion, including completion observed during recovery | Success, after confirmed cleanup and output finalization |
+| Operator or planned stop without independent failure/completion | Interruption with its own stop provenance |
+| SIGKILL without stop evidence | Stage failure with an ambiguity diagnostic |
+| Queue cancellation | Cancelled; takes precedence over a late runtime result |
+
+An operator marker annotates the result and never changes a saved failure into
+an interruption. Group retry/release uses the existing attempt-wide queue
+budget: production infrastructure stops permit at most two requeues; planned
+maintenance/preemption follows the existing free-stop policy. Members have no
+retry budget or separate reservation. A repeated stop cannot extend a phase's
+persisted TERM/KILL deadline or shorten sidecar grace. Native restart
+authenticates the saved custody and resumes cancellation's main-then-sidecar
+phases using their original deadlines; a new sidecar deadline is granted only
+when that phase has not begun. No release is confirmed while any authenticated
+process or cgroup may remain populated. Missing saved
+Docker output finalization remains a recovery interruption; a known payload
+failure is retained.

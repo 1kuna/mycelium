@@ -25,9 +25,9 @@
 - `internal/myce`: queue/HTTP API, scheduler, worker, queue maintenance, installer, dev.
 - `clients/python`: submission/cancellation and checkpoint client.
 - `docs/operations.md`: canonical install, queue maintenance and recovery.
-- `docs/guide-status-v3.md`: worker freshness, maintenance and status fields.
-- `deploy`: manual service templates; `docs/guide-fresh-install.md`: old-state archives.
-- `docs/guide-resumable-jobs.md`: checkpoint contract and Python example.
+- `docs/status.md`: worker freshness, maintenance and status fields.
+- `deploy`: manual service templates; `docs/operations.md`: old-state archives.
+- `docs/files.md`: checkpoint contract and Python example.
 
 ## Build and verify
 
@@ -38,12 +38,12 @@
 ```
 
 Hotfix: quick, deploy, then full, fixing forward. At most two full race suites
-at once on one Mac (more causes false failures). Details: `docs/test-gates.md`.
+at once on one Mac (more causes false failures). Details: `docs/development.md`.
 
 Test behavior, security invariants and real incidents; add a focused regression
 per observed bug. No speculative edge-case matrices, implementation-detail pins,
 duplicate journeys or process self-audits (maintainer, 2026-10-22). Native GPU/daemon/identity/boot checks are separate
-from laptop proof; see `docs/production-test-plan.md`.
+from laptop proof; see `docs/development.md`.
 
 Work locally, stage explicit paths, and commit completed changes. Do not push
 or touch fleet hardware without current task authorization.

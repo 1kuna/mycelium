@@ -1,8 +1,199 @@
-# Operating Mycelium v3
+# Operate Mycelium
 
-For a queue sharing a disk with jobs, see [queue I/O contention](queue-io-contention.md)
-for the opt-in systemd `--io-weight` setting, enforcement prerequisites and
-latency qualification. A configured weight alone is not proof of protection.
+Start with [setup prerequisites](#1-check-prerequisites-on-every-machine),
+[hub installation](#2-install-the-hub), then [add machines](#4-add-each-other-machine).
+The automated install/onboarding route requires a verified NAS mount. Standalone
+`myce dev` and file-store execution work without a NAS; see [start here](START-HERE.md)
+and [files](files.md). No installer mounts storage, changes drivers or opens firewalls.
+
+For an existing installation use [maintenance](#queue-maintenance),
+[install/upgrade](#install-and-upgrade), [backup/recovery](#queue-backup-restore-and-relocation),
+[signed releases](#publish-and-approve-an-onboarding-release),
+[polite participation](#polite-part-time-hyphae) or [shared-host sizing](#shared-interactive-hosts).
+Detailed [status fields](status.md), [native qualification](development.md#native-acceptance-checklist)
+and [isolation limits](native-isolation.md) distinguish readiness from enforcement.
+Agent skill/harness installation lives [beside the skill](../skills/mycelium-offload/setup-project.md).
+
+You are a coding agent setting up Mycelium on a user's own computers. Follow
+these steps in order. Commands are written for a POSIX shell. Text in CAPITALS
+is a placeholder that you fill in. If a flag here is rejected, run
+`myce COMMAND --help`, use the closest current option, and tell the user what
+differed. Use the supported client version for these commands.
+
+## Rules
+
+- Run every `myce` command as the user's ordinary account. Never run `myce` with
+  `sudo` or as root, because it refuses to start that way.
+- The fleet token is a password for the whole cluster. Never print, echo, log,
+  paste into chat or commit it, and never put it on a command line. Keep the
+  files that hold it at mode `0600`.
+- Run every `install` with `--dry-run` first, show the user the plan, then run
+  it for real.
+- Don't install drivers, mount drives, change firewalls or touch machines the
+  user didn't name without asking first.
+- Only the user's own trusted commands should run on the cluster. Plain native
+  jobs retain the v1 unsandboxed default; new adapters/extensions default to the
+  native sandbox. See [isolation](native-isolation.md) for exceptions and limits.
+
+## 0. Ask the user
+
+1. Which computer is the **hub**? Pick one that stays on, running Linux or an
+   Apple Silicon Mac. It keeps the job list and can also run jobs.
+2. Which other computers should join, and how can you reach each one (a terminal
+   on it, SSH, or the user pasting commands)?
+3. Where is the shared network drive (NAS) mounted on each machine?
+4. Which machines does someone use every day, and which are laptops?
+
+## Shared orchestration hosts
+
+A machine running agents or interactive tools can also be a worker. Measure its
+external-memory history and owner bursts, then use the [shared-host profile](operations.md)
+with positive CPU/RAM allowances. Keep ordinary fitting machines first; permit
+light native CPU work inside the shared host's limits. Do not clear an existing
+drain to make a setup appear ready. Hard CPU shares and pressure yielding require
+the separate qualification described there.
+
+## 1. Check prerequisites on every machine
+
+- **OS:** Linux on x86-64 or ARM64, or macOS on Apple Silicon.
+- **Network:** the same local network, with the hub reachable from the others.
+- **Shared drive:** the same NAS share (NFS, SMB or autofs) mounted on every
+  machine. The defaults are `/mnt/nas` on Linux and `/Volumes/NAS` on macOS;
+  otherwise pass `--nas PATH`. Mycelium never mounts a drive or falls back to
+  local disk, so a missing mount stops the install with `nas_not_configured`.
+  The dry run does not check the mount. Run `ls NAS_PATH` yourself and confirm
+  it shows the shared drive's contents before installing.
+- **GPU drivers already working:** for Nvidia, `nvidia-smi` lists the card. For
+  Intel GPUs on Linux, the Level Zero/oneAPI runtime is installed. Apple GPUs
+  need nothing. CPU-only machines are fine.
+- **Hub only:** Git and Go 1.25.6 or newer (`go version`) to build `myce`.
+
+## 2. Install the hub
+
+On the hub, from a checkout of this repository:
+
+```sh
+go build -o myce ./cmd/myce
+```
+
+Find the hub's local network address (HUB_IP, for example from `ip -4 addr` or
+`ipconfig getifaddr en0`). Then create the private fleet credential without
+displaying it:
+
+```sh
+mkdir -p ~/.config/myce && umask 077
+printf 'MYCE_TOKEN=%s\nMYCE_QUEUE=http://HUB_IP:7331\n' "$(openssl rand -hex 32)" \
+  > ~/.config/myce/fleet.env
+chmod 600 ~/.config/myce/fleet.env
+```
+
+Install the hub service, which listens on the local network, so other machines can reach it:
+
+```sh
+./myce install queue --listen HUB_IP:7331 --queue http://HUB_IP:7331 --nas NAS_PATH --dry-run
+./myce install queue --listen HUB_IP:7331 --queue http://HUB_IP:7331 --nas NAS_PATH
+```
+
+Then run `./myce doctor` to check prerequisites. On Linux, if the installer
+reports `lingering_permission_required`, ask the user to run
+`sudo loginctl enable-linger USER` once, then repeat the install.
+
+## 3. Create the first invitation
+
+Load the credential into the environment without printing it, then write a
+private invitation file. This bootstraps the first worker without requiring a
+signed release; later workers can use the one-time invitations in step 4:
+
+```sh
+set -a; . ~/.config/myce/fleet.env; set +a
+./myce invite --identity-dir ~/.local/share/mycelium/queue/state/myce.db.joining \
+  --private-file --out invitation.json
+```
+
+The identity directory is the hub database path (shown in the
+`install queue` plan) plus `.joining`. `invitation.json` contains the fleet
+token: keep it mode `0600`, move it only by private means such as `scp`, and
+delete every copy once installs are done.
+
+Install a worker on the hub with it, so the hub also runs jobs. Add
+`--daily-use` if someone uses this computer, so jobs wait until they step away.
+
+```sh
+./myce install worker --joining-file invitation.json --nas NAS_PATH --dry-run
+./myce install worker --joining-file invitation.json --nas NAS_PATH
+```
+
+The new worker finds the hub on the local network by itself. If it can't (for
+example, across subnets), see [address and network behavior](operations.md#address-and-network-behavior).
+
+## 4. Add each other machine
+
+**Option A: one pasted line.** On the hub, or any machine that has joined, run:
+
+```sh
+./myce invite
+```
+
+It prints one line. Run that exact line in a terminal on the new machine. It
+downloads and verifies `myce`, installs the worker and waits until the hub sees
+it. The line has a one-time ticket that expires after 15 minutes
+(`--expires` allows up to 1h). It needs no Go or Git on the new machine, and it
+never contains the fleet token. If it fails with `release_unavailable`, the hub
+has no approved signed release. Either set one up with the user
+([publish and approve a release](operations.md)), or use option B.
+
+**Option B: copy the invitation file.** This option needs no release. Copy
+`invitation.json` and a `myce` binary for the new machine privately. Build the
+binary on that machine, or cross-build it on the hub, for example
+`GOOS=linux GOARCH=amd64 go build -o myce ./cmd/myce`. Build a Mac binary on a
+Mac. On the new machine:
+
+```sh
+./myce install worker --joining-file invitation.json --nas NAS_PATH --dry-run
+./myce install worker --joining-file invitation.json --nas NAS_PATH
+rm invitation.json   # the installer keeps its own private copy
+```
+
+With either option, add `--daily-use` for computers someone uses, and
+`--laptop` for laptops. With `--laptop`, the machine only works while plugged in.
+with option A, append these flags to the end of the pasted line only
+if `myce install worker --help` on that machine lists them.
+
+## 5. Verify
+
+On the hub, with the credential loaded as in step 3:
+
+```sh
+./myce status
+```
+
+Every machine should appear with its GPUs, CPU and memory. A machine reporting
+`ready` takes work now. `polite_waiting` means it's waiting for its user to step
+away, which is also a success. `disabled` or `drained` means someone paused it
+(`myce host resume HOST` turns it back on). See [status fields](status.md).
+
+## 6. Run a first job
+
+```sh
+./myce run -- echo hello
+./myce run --gpu cuda --mem 4G -- nvidia-smi
+```
+
+The first command runs on any free machine and prints `hello`. The second needs
+an Nvidia GPU. Use `--gpu xpu` for Intel or `--gpu metal` for Apple, with a
+command that exists there. `run` waits and streams the output. Add `--detach` to
+get a job ID instead, then use `myce wait ID` and `myce logs ID`.
+
+Use a supported client with plain `myce run`; installed older clients need an
+explicit upgrade through the normal installer. See [jobs](jobs.md) for submit YAML.
+
+## 7. Report back to the user
+
+List each machine, its hardware and its state from `myce status`, plus the
+output of the test jobs. Say where the credential file lives, but not its
+contents. Mention anything you skipped or had to change. For upkeep (pausing a
+machine, upgrades, uninstalling), point them to [operations](operations.md).
+
 
 ## Queue backup, restore and relocation
 
@@ -45,7 +236,7 @@ and permissions; generate native service metadata rather than copying units.
    created by this operation so unrelated drains/disables remain authoritative.
 2. A pre-copy of large immutable payloads with rsync can reduce downtime. An
    online filesystem copy of the DB is not a SQLite-consistent backup. Python's
-   backup sleep argument is not a bandwidth limit; see [I/O controls](queue-io-contention.md).
+   backup sleep argument is not a bandwidth limit; see [I/O controls](operations.md).
 3. Record config/root hashes and authenticated history, policy/revision, curve
    and authority baselines. Stop and disable the source queue service; verify its
    process and listeners are gone and it cannot auto-restart. Never serve two
@@ -116,26 +307,6 @@ under the recovery policy and remove only verified rebuildable staging. Keep the
 source service disabled. A cold restore still requires positive source fencing;
 backup age defines possible data loss, not a promise of seamless failover.
 
-## Add a hypha with one command
-
-On an authorized installed hypha, run `myce invite` and paste its single output
-line on the new machine. `--out FILE` optionally saves the same command. The queue
-must approve a [signed release](guide-onboarding-releases.md) first. The bootstrap
-needs no Go or Git and never prints the fleet token. See
-[joining](guide-joining-v3.md) for prerequisites, ticket expiry and recovery.
-
-Fresh invitations carry a credential-free server/share fingerprint and a
-share-relative checkpoint location. The joining machine automatically selects
-exactly one matching OS mount; missing or duplicate matches require mounting
-the share or choosing `--nas PATH`. Different server aliases or storage protocols
-require an explicit selection. Saved paths and explicit storage flags are preserved.
-
-Completion checks exact session/protocol/components, CPU/RAM budgets, runner smoke
-and stable manager health. `polite_waiting`, `disabled` and `drained` do not mean
-`ready`. Repeat a release's line for an interrupted install or health check;
-use a line for a newer release to upgrade while preserving spool, identity and
-maintenance. Existing legacy conversion remains the explicit M4 procedure below.
-
 ## Check an installed worker's extension
 
 Run locally on the enrolled worker with its queue running:
@@ -155,8 +326,8 @@ A different `--root` warns that the live worker is not qualified by that check.
 Without installed worker settings, supply host/cache explicitly or use
 `myce dev` for automatic local defaults. A successful check is evidence only
 for the selected extension digest, target and hardware/driver fingerprint.
-See [extension authoring](write-an-extension.md#install-and-qualify) and the
-[check guidance](extensions/AGENT-GUIDE.md) for preparation and replay criteria.
+See [extension authoring](adapter.md#install-and-qualify) and the
+[check guidance](adapter.md) for preparation and replay criteria.
 
 Add `--reserve` to withhold unrelated new work on the selected physical device
 while the check drains, runs and cleans up:
@@ -257,7 +428,7 @@ myce policy set policy.yaml --if-revision N
 ```
 
 If the revision is stale, export again and reconcile the newer policy before
-retrying. See [owner priority policy](guide-priority-policy.md) for the full
+retrying. See [owner priority policy](scheduling.md) for the full
 import/export contract, including replacing or clearing project settings.
 
 ## Queue maintenance
@@ -552,7 +723,7 @@ reading returns HTTP 503 `file_store_unavailable`. Preflight makes no reservatio
 other writers can consume space afterward, and unknown output sizes cannot be
 predicted. Protected data is never evicted to admit work; increase the configured
 store allowance or free disk space when retention cannot help. Worker file caches
-already evict reproducible copies under pressure. See [files](guide-files-v3.md).
+already evict reproducible copies under pressure. See [files](files.md).
 
 ## Production file-store reserve
 
@@ -681,7 +852,7 @@ reduces exposure; it does not promise continued destination durability.
 Submitter `deliver_outputs` can restore a missing destination from retained
 worker bytes after ordinary result expiry, until actual local collection.
 Ordinary expired-result downloads still return `result_expired`. See the
-[task output guide](guide-task-outputs.md) for destination identity configuration,
+[task output guide](files.md) for destination identity configuration,
 client commands, truthful local availability and native qualification limits.
 
 ### Project-owner early file release (#465)
@@ -854,7 +1025,7 @@ key refuses until its local command is restarted with the existing `--release-*`
 flags (and usual catalog/service settings) to provision it.
 Identical reruns are idempotent; older or changed equal-version API approvals
 require `--allow-downgrade`. Do this before fresh invites or one-command onboarding;
-see the [signed-release deployment step](guide-onboarding-releases.md#advance-the-default-after-a-signed-update).
+see the [signed-release deployment step](operations.md#advance-the-default-after-a-signed-update).
 
 Queue startup verifies retained `--release-*` flags, then logs and skips manifests
 older than or equal to the persisted default. This preserves a newer API approval
@@ -868,7 +1039,7 @@ manifest signed by it. Approval storage failures return HTTP 500
 
 Saved configs accept the retired local-control fields during overlay and omit
 them when rewritten; runtime options and secret references remain intact. Old state is never converted or
-silently cleared. See [fresh install](guide-fresh-install.md).
+silently cleared. See [fresh install](operations.md).
 
 ### Legacy EnvironmentFile workers
 
@@ -915,17 +1086,30 @@ implied by these instructions.
 
 ## Convert split workers to one machine worker (M4)
 
-Follow the [accepted maintenance gates](design-proposal.md#installation-checkpoints-and-rollback-m4)
-and [native qualification](design-proposal.md#native-maintenance-window-qualification).
+Follow the [accepted maintenance gates](operations.md#convert-split-workers-to-one-machine-worker-m4)
+and [native qualification](development.md#machine-worker-native-qualification).
 Conversion is an operator-run maintenance action on the queue host and every
 converted worker host, including the single-card worker in the same
 window. Commands below use placeholders for approved installation paths and
 accounts. Load authentication through the existing private secret mechanism;
 never print a token or pass it on the command line.
 
-Pause ordinary submissions and disable both physical hosts through the current
-queue. Record source identities/sessions, actual unit enablement/activity,
-config/binary digests, device identities and settled spool evidence. Keep the
+Pause ordinary submissions and inspect the source queue's maintenance controls.
+An older source may not have queue-owned host maintenance: use its confirmed
+host-close/discharge route or the [verified-empty alternative](#verified-empty-conversion-and-publication).
+On the source lineage supporting `host close --local --wait-released`, exit 1
+with `release_not_confirmed` means re-check status; it is not permission to
+release custody. Require confirmed settlement and zero custody, or independently
+prove the verified-empty alternative's conditions. Record source identities,
+sessions, unit enablement/activity, config and binary digests, device identities
+and spool evidence. Stop the exact units and snapshot binaries (including any
+root-owned binary separately), configs, units, registries and database. Upgrade
+the stopped queue first; only
+then use the new queue's host-maintenance commands below. Its one-time import
+preserves closed `host_intents` as disabled maintenance; disagreeing per-worker
+host memory allowances refuse migration with `machine_migration_conflict`.
+
+Disable all affected physical hosts through the upgraded queue. Keep the
 current binaries and a queue/database/config backup as well as the installer's
 rollback journals. Require fresh reports and no attempts, preparations, engines,
 buffered results, releases or queued jobs resolved to retiring names:
@@ -995,7 +1179,7 @@ source cannot be combined with other source workers. Preview does not require
 queue registration; installation still requires the source in the maintained
 queue with the existing identity and settlement checks. For a source absent from
 the queue, use the ordinary in-place install path and the
-[fresh-state procedure](guide-fresh-install.md) when required; a successful
+[fresh-state procedure](operations.md) when required; a successful
 conversion preview does not authorize bypassing those checks.
 
 The source manager stop must complete the same-name worker's normal leave.
@@ -1047,6 +1231,99 @@ repeating the completed conversion is idempotent. An old split config or an
 unselected split unit fails the deploy gate with `machine_worker_conflict` or
 `machine_migration_incomplete`.
 
+### Verified-empty conversion and publication
+
+This is an explicit alternative to persisted source-session close/discharge
+receipts for supported split installations, never a normal admission shortcut.
+Freeze producers, stop source user units, disable mapped hosts, and stop the
+queue before its offline exclusive-lock conversion. Supply every mapped source
+config, including a single-worker host:
+
+```sh
+myce install queue --config QUEUE_CONFIG --machine-map PRIVATE_MAP \
+  --drain-evidence=verified-empty \
+  --from-worker-config SOURCE_0 --from-worker-config SOURCE_1 --dry-run
+```
+
+After reviewing the plan, repeat without `--dry-run`. The local systemd user
+manager and source spools provide the evidence; copied remote attestations do
+not authorize conversion. The supported locked database must be readable and
+contain zero queued/running/stopping/preparing jobs, including retained submission
+records, plus zero mapped-host releases/obligations. Age never proves discharge.
+
+For each exact source/session, require the loaded unit identity/fragment,
+`ActiveState=inactive`, `MainPID=0`, no pending unit job and empty cgroup-v2
+`cgroup.procs` throughout its subtree. If systemd cleared `ControlGroup`, derive
+the normal path from its reported containing slice and unit name; an absent
+subtree requires a readable containing slice. Hold the existing `worker.lock`
+through conversion/publication. Require a marked v3 spool and exact saved session.
+Use the read-only supported sparse-spool inspector; no cleanup or inferred ack.
+
+Retained results/released Docker records are settled history only when the locked
+queue confirms the exact job/attempt/worker/session release (or that superseded
+copy's own release). A retention ack, newer attempt or terminal state alone is
+insufficient. At each configured Docker endpoint, including the explicit local
+default when Docker was not configured, successful `docker ps` must show zero
+running containers with the source `myce.worker` label and zero with any
+`myce.attempt` label. Disabling future Docker use does not waive this check.
+Unknown/unreadable evidence refuses. Blocking spool files retain individual reasons.
+
+Typed refusals distinguish `machine_drain_queue_not_empty`,
+`machine_drain_obligations_pending`, `machine_drain_unit_active`,
+`machine_drain_unit_unreadable`, `machine_drain_cgroup_populated`,
+`machine_drain_cgroup_unreadable`, `machine_drain_spool_unsettled`,
+`machine_drain_evidence_missing`, `machine_drain_queue_unreadable`,
+`machine_drain_docker_inaccessible` and `machine_drain_container_running`.
+Preview/refusal persists no receipt. Successful retirement atomically records
+`verified_empty_drains`: injected-Clock time, exact machine/host/session, inactive
+unit/substate/PID, cgroup evidence, sorted length-delimited top-level spool/format
+SHA-256, Docker observations and six zero queue/custody counts. These receipts
+are installation history, never reusable health/admission authority. They can
+retire a same-name source to Gone without inventing a previous-session chain.
+
+Queue retirement commits a pending-publication fence; startup refuses partial
+policy publication. Identical-command retry finishes files or the journal
+restores them, never a database snapshot. Unknown policy edits or mode/content
+changes block with `machine_migration_conflict`. Project policies cannot express
+partial-card allowlists and must refuse widening; a pin/single-host server can
+retain its card restriction. Queue conversion records only model/placement
+identities and file hashes, never model secret/environment values. Private
+mode-0600 journals retain exact bytes, modes and manager state; referenced secrets
+remain references. Retire only matching selected source-unit/config/spool/host/
+queue enable records, including supported `worker-*.json` records. Unknown or
+unselected split units block ordinary redeploy as well as conversion. Write-ahead
+receipts cover each publication and preserve original modes.
+
+### Additional rollback fences
+
+Worker rollback inspects both source and reused destination spools, exact
+process/cgroup/session custody, buffered results and Docker records before any
+manager mutation. Dry rollback is read-only; real restoration holds the exclusive
+spool lock after stop. Unknown changed file/mode blocks restoration; unchanged
+shared catalogs are not rewritten. Interrupted plans use journaled source identity;
+a missing destination unit is valid rollback input. CLI cancellation invokes
+bounded restoration independently of the cancelled operation. A reused machine
+spool survives forward/rollback/forward with its historical custody intact.
+
+Queue rollback refuses any queued/failed/cancelled machine-era allowlist intent
+that would disappear, including resumable work; cancellation alone cannot clear
+that fence. Succeeded history remains exact. Representable pin additions/removals
+and preemption counters survive; unrepresentable host-wide pins require an
+explicit card/removal decision. Retired source sessions may report exact late
+custody but cannot revive themselves. Fresh evidence is required for a new
+forward conversion after rollback; committed publication retry uses its existing
+conversion receipt.
+
+A full production-snapshot abort is stricter than worker/topology rollback:
+require no accepted new business intent, stop all new writers, archive synthetic
+probe evidence, restore the entire pre-window DB/config/registry/enablement and
+each separately hashed binary. Never open mutated state with an old binary or
+overwrite newer checkpoints. Otherwise remain disabled and repair forward.
+Verify actual legacy reconnect/refusal, not merely wire compatibility.
+`RestartPreventExitStatus=78` contains only an actual exit 78, not a retrying HTTP
+refusal. Preserve checkpoint IDs, attempts and highest complete generations;
+missing accepted progress holds resumable work rather than restarting it empty.
+
 ### Roll back without losing accepted intent
 
 Pause ordinary submissions and disable/stop/wait on both hosts. Require all new
@@ -1079,7 +1356,7 @@ Forward conversion can be repeated under the same maintenance gates.
 ## Monitoring and failures
 
 `myce status`, the HTML page and `GET /api/status` show queue projections with
-redacted job specifications. Use [typed status](guide-status-v3.md) for holds,
+redacted job specifications. Use [typed status](status.md) for holds,
 eligibility and last-reported allowance. Inspect exact jobs/logs separately when
 authorized. Status and logs require the privately configured queue credential.
 Never put that token in URLs or copy private payloads into reports.
@@ -1127,18 +1404,18 @@ Models use immutable NAS masters, verified file-store imports or explicit local
 source approvals. Loading never downloads weights. Catalog hashes and byte counts
 identify content; cache verification precedes publication. Protect loaded/pinned
 files from eviction and keep recoverable copies. Use `model sync` for pre-copy;
-partial transfers and pins persist through restart. See [models](guide-model-calls.md)
-and [files](guide-files-v3.md) for transfer, retention and cache limits.
+partial transfers and pins persist through restart. See [models](services.md)
+and [files](files.md) for transfer, retention and cache limits.
 
 ## General model servers and joint measurement
 
 General HTTP servers, llama.cpp and vLLM share the queue's engine lifecycle,
-placement, pins and release custody. See [servers](guide-servers.md) for routing,
+placement, pins and release custody. See [servers](services.md) for routing,
 local secrets, approved folders, timeout/retry behavior and log policy.
 `myce measure` loads declared models together, optionally overlaps warm-ups,
 records observations, and unloads. Use explicit runtime/device/worker identity
 and an authorized maintenance window. Measured peaks and headroom, not model-file
-sizes or a guessed budget, qualify native admission. The [native test plan](production-test-plan.md)
+sizes or a guessed budget, qualify native admission. The [native test plan](development.md)
 keeps this proof separate from laptop fixtures.
 
 ## Host RAM admission and ceilings
@@ -1557,7 +1834,7 @@ Use `myce resolve-docker --state-dir WORKER_SPOOL --attempt-id ATTEMPT_ID`
 (as the ordinary worker account) to reconcile exact offline
 custody. This uses the same worker executor and inspection path; it does not
 accept an operator assertion or launch work. Reconnect workers and require fresh queue maintenance status and exact release
-acknowledgements afterward. See [managed Docker](job-reference.md#managed-docker-batch-commands)
+acknowledgements afterward. See [managed Docker](jobs.md#managed-docker-batch-commands)
 for supported command/network/sidecar forms. Unmanaged containers remain outside
 this containment contract.
 
@@ -1609,31 +1886,6 @@ interruptions and Docker's finite replay history can leave gaps. These are
 diagnostic observations, not proof that Mycelium delivered a signal, and cannot
 change attempt outcomes or custody. Capture failures do not stop jobs.
 
-
-## Shared orchestration and interactive hosts
-
-These hosts can run fitting light work through Mycelium. Use the opt-in
-[shared-host profile](shared-hosts.md) to combine measured interactive RAM
-reserves, #353 external peaks, native command nice=10, positive CPU/RAM budgets
-and last-resort placement. `myce host profile HOST --shared=true
---interactive-reserve-gb GiB` requires a drained/disabled, fresh quiescent host;
-`--shared=false` removes the profile without resuming admission. Measured OS
-memory pressure or foreground scheduling latency stops work through planned
-checkpoint/requeue with hysteresis. Linux execution cgroups cap aggregate CPU
-time. macOS applies `setpriority(PRIO_DARWIN_PROCESS, pid, PRIO_DARWIN_BG)`
-(equivalent to `taskpolicy -b`) to gated main payloads and native sidecars.
-Children inherit background CPU/I/O scheduling and lower timer/network priority;
-worker control stays outside background mode. Hosts without the profile retain
-their existing policy. macOS also caps aggregate declared cores at the CPU allowance, and clamps common runtime thread
-counts to each command's declared cores. Payloads can ignore those thread hints:
-aggregate CPU time and RAM ceilings remain unenforced on macOS. See the
-shared-host guide for thresholds and qualification limits. To compare nice-only
-and background scheduling through an isolated CPU dev worker, build the CLI and
-run `python3 scripts/measure-shared-host.py --myce ./myce`. The canary uses two
-CPU children and one second of foreground samples per mode; each payload
-self-expires after three seconds to bound interference if the probe fails.
-It measures a light workload, not saturation or a latency guarantee. Existing
-exclusions, drain ownership and storage fences apply.
 
 ## CPU capacity and allowances (R1)
 
@@ -2088,3 +2340,1029 @@ allocated APFS image and proves real bounded-volume ENOSPC with independent
 publication/WAL progress. It does **not** qualify per-attempt aggregate quotas,
 inode denial, arbitrary sidecar confinement, APFS native reserves, Linux backends
 or fleet hosts. Full integrated and native backend gates remain deployment work.
+
+
+## Automatic joining
+
+Run `myce invite` on an installed, authorized hypha and paste its output on the
+new machine. The earlier [setup steps](#4-add-each-other-machine) cover the first
+invitation; [signed release publishing](#publish-and-approve-an-onboarding-release)
+explains artifact approval. `--out FILE` saves the line mode 0600 without
+overwriting an existing file. Installed authority is the default; an explicit
+`MYCE_JOINING_FILE`/`--joining-file` or queue-local `--identity-dir` selects another.
+The bootstrap needs curl, a SHA-256 tool and OS shell utilities, not Go/Git.
+It verifies approved artifact bytes before execution and redeems a pinned-TLS
+one-time enrollment ticket, never the fleet token.
+
+Enrollment binds the receipt to the current service PID and release, then waits
+for the queue to observe the exact local session, compatible
+protocols, every expected device, CPU/RAM and acknowledged budgets, a small runner
+smoke, and five seconds of stable service-manager health. The final line contains
+the hypha name, OS/arch, components, allowances, participation and enforcement.
+`ready`, `polite_waiting`, `disabled` and `drained` are separate successful states.
+A queue outage, HTTP 426, unavailable component or restarting service leaves
+enrollment incomplete. A smoke proves the command runner; project extensions
+still need their own native checks.
+
+Keep the printed command to resume an interrupted install or repeat a health
+check. It uses private saved authority after installation, even when the original
+ticket is spent or expired. A same-release rerun preserves files and service PID.
+A command for a newer approved release drains only this hypha, waits for custody
+to settle, upgrades through the existing installer and rechecks readiness. Spools,
+identity, settings and operator-disabled policy persist. Failure leaves custody
+and maintenance in place for repair. Printed commands freeze a release; a newer
+release needs a newly printed line, whose ticket an installed host does not use.
+
+NAS mode is required by [#109](https://github.com/1kuna/mycelium/issues/109).
+Hardware preflight, NAS/tool setup and saved participation/service policy use the
+normal installer options; those slices are integrated separately under #108.
+Automatic legacy conversion, installed extension qualification and native MacBook
+sleep/travel acceptance remain separate slices. No onboarding command grants
+permission to operate other hyphae or bypass storage/device prerequisites.
+
+## Private file compatibility and foreground join
+
+For explicit credential-file transfer, use:
+
+```sh
+myce invite --private-file --out invitation.json
+myce install worker --joining-file invitation.json
+```
+
+This older mode requires a separately delivered binary. Its mode-0600 file
+contains the shared credential: transfer privately and keep it out of Git,
+messages, argv, history and logs. The installer copies it into its private
+installation directory. Foreground operation and status use the same pinned client:
+
+```sh
+myce join --joining-file invitation.json
+myce status --joining-file invitation.json
+```
+
+`MYCE_JOINING_FILE` also selects that file. Queue host maintenance remains effective
+across joining and rejoin. Preserve the queue's identity directory with its SQLite
+state; replacing the identity invalidates existing certificate pins.
+
+## Onboarding storage and tools
+
+The NAS selection is saved configuration, `--nas PATH`, or the default
+`/mnt/nas` (Linux) / `/Volumes/NAS` (macOS). The installer never selects an
+unrelated mounted share. When the default is absent, `nas_not_configured` lists
+candidate mounts with an explicit selection hint before either install plan.
+Dry-run resolves the same selection without creating roots or running write
+probes. Real installation requires a visible network/automount and validates
+all NAS filesystem operations in a single 250 ms I/O budget; `nas_unresponsive`
+means the mount did not answer within that budget (#63). A kernel call may
+remain blocked, but retries cannot duplicate the outstanding validation.
+NFS/SMB, autofs (including autofs-managed NFS) and the known network FUSE types
+`fuse.sshfs`, `fuse.rclone`, `fuse.smbnetfs` are eligible; generic/local FUSE is
+not. Mycelium does not mount a share or fall back to local storage.
+
+On Linux, missing-runtime refusal applies to NVIDIA display controllers and
+Intel discrete PCIe display endpoints (Intel vendor ID and positive
+[`current_link_width`](https://github.com/torvalds/linux/blob/master/Documentation/ABI/testing/sysfs-bus-pci)
+from the PCI sysfs ABI). Integrated root-complex graphics have no discrete
+PCIe link. This device-class rule avoids a model list; actual runtime inventory
+still qualifies the accelerator. Other displays, including BMC, VM and AMD
+controllers, are ignored with one informational PCI identity line. Apple Silicon
+without Metal returns a typed runtime failure.
+
+Onboarding does not download uv/pixi or require them for an idle command worker.
+A native environment build resolves its required backend from the service's
+saved PATH first. A suitable tool identifies itself with a numeric version via
+`--version`; existing installs retain precedence on upgrades. If unavailable,
+only that backend's pinned vendor archive is fetched, checksum-verified and
+installed under the user's Mycelium tool directory, then invoked by absolute
+path. uv archives also install uvx when present. Download failure fails that
+requested environment build with a typed reason. It does not retroactively fail
+onboarding. Probe commands strip `MYCE_TOKEN` and never print raw stderr.
+
+## Address and network behavior
+
+The queue keeps the existing HTTP API and adds a TLS endpoint for joining.
+It advertises `_mycelium._tcp.local.` with an opaque instance name and protocol
+version only. Neither the token, a personal name nor the capability profile is
+advertised. The TLS endpoint defaults to the same listening interface as the
+HTTP queue, with an automatically selected port. A loopback-only queue remains
+local: configure the queue's `--listen` for its intended interface when other
+hyphae need to reach it. `--discovery-listen ADDRESS:PORT` selects a fixed TLS
+port; `--discovery=false` disables both advertising and the joining endpoint.
+These queue flags are available for foreground queue runs; the existing
+installer uses the default discovery settings.
+
+Joining first browses for two seconds, authenticates candidates against the
+privately provisioned pin, then tries the saved HTTPS address. The whole CLI
+resolution has a bounded deadline. A wrong certificate receives no credential;
+a wrong credential cannot join; redirects are never followed. Several discovered
+mycelia are safe to encounter: only the one matching the invitation can admit
+the hypha. Failure never creates another mycelium or changes the pin. Errors identify a
+failed mDNS browse or zero compatible addresses, connection failure, identity
+verification rejection, or credential rejection without exposing candidate
+addresses or the credential. A started advertisement does not prove that
+other machines can see it.
+
+For a network that blocks multicast, supply a reachable HTTPS queue origin
+with `invite --queue HTTPS_ORIGIN`, or `join --queue HTTPS_ORIGIN` together with
+the invitation. A supplied address bypasses discovery but still checks the pin.
+Use a fixed TLS port for a saved address that must survive queue restarts.
+The hypha retries its selected endpoint while running; rediscovery happens at
+its next join/start, rather than migrating an active worker between URLs.
+
+macOS uses the system mDNSResponder through `/usr/bin/dns-sd` for proxy
+registration, browsing and address resolution. Linux uses the running Avahi
+daemon through `avahi-browse`, `avahi-publish-service` and
+`avahi-publish-address`. These client tools must be available when Avahi is
+running; a missing tool or daemon failure reports discovery unavailable rather
+than starting a competing responder. Only Linux without a running Avahi daemon
+(and other platforms) uses the existing pure-Go fallback. Mycelium does not
+install packages, start daemons or alter their configuration.
+
+Native publication uses opaque proxy host/service names and `version=1`, with
+one service per usable listener address; no machine name, token or profile is
+published. Registration waits for the daemon's acknowledgement. Browse commands
+have the same two-second bound; advertisement commands live with the queue and
+are stopped and reaped when it exits. The daemon owns multicast sockets.
+
+mDNS needs local-link UDP 5353 multicast; joining also needs the queue's selected
+TCP port. Segmented networks, guest isolation and firewalls can block either
+separately. Do not disable firewalls to fix discovery.
+
+[Apple TN3179](https://developer.apple.com/documentation/technotes/tn3179-understanding-local-network-privacy)
+says macOS automatically allows local-network access for command-line tools
+started in Terminal or over SSH, including their children. SSH alone therefore
+does not require a Local Network permission grant. App-launched helpers and
+launch agents can instead require user approval for the responsible app in
+System Settings > Privacy & Security > Local Network. Allow Mycelium in its normal
+consent alert or that panel. The signed agent stays alive and retries blocked
+routes after approval; it does not grant or reset the permission itself.
+The foreground installer can reach its readiness deadline while consent is
+pending; rerun the same command to wait again without reinstalling or spending
+another ticket. It prints enrollment success only after readiness passes.
+A successful foreground/SSH check does not establish launch-agent,
+login/reboot or app-launch behavior.
+
+WSL2 default NAT does not reliably carry mDNS. Use a saved/supplied address, or
+mirrored networking with appropriate private-network and Hyper-V firewall rules.
+Mycelium does not change WSL networking or firewall configuration. Windows host owner-presence and power signals use the
+[host bridge](operations.md). Joining runs no throughput benchmark
+unless explicitly requested; see the benchmark section below.
+
+Explicit `MYCE_QUEUE` plus `MYCE_TOKEN` joining continues to work as before,
+including the existing HTTP transport. The pinned transport applies to the
+invitation path; it does not convert existing model callback transports to TLS.
+This is still a shared credential, without per-hypha revocation or approval.
+Treat an invitation leak as a shared-credential incident; individual keys and
+revocation remain work for #32.
+
+## Capability profile v0
+
+Each hypha records hardware facts at startup and sends them on check-in.
+Opted-in benchmarks save `capability-profile.json` in the private worker spool;
+default joins leave that cache untouched. `myce status` shows:
+
+- OS, architecture and logical CPU count;
+- accelerator type/name and reachable memory size;
+- one unified memory pool for Apple silicon and DGX Spark, or separate system
+  memory and accelerator memory for discrete GPUs;
+- total and available bytes on the spool filesystem;
+- unavailable facts, which remain unknown instead of becoming guessed budgets.
+
+One machine worker reports all configured devices and the shared CPU/RAM
+capacity. Fake resources remain explicitly fake. The queue
+stores the profile with the normal SQLite machine state. These facts are distinct
+from the live free-memory admission readings and operator caps.
+
+Without a benchmark, the profile reports `hardware-facts-only; throughput pending`.
+Facts refresh when the hypha starts again. Joining does not run or wait for
+throughput measurement by default; placement still uses declared resources and
+hardware profiles with the existing fallback rules.
+
+For throughput measurement before admission, pass `myce join --onboarding-benchmark`
+(or add it to the join argv after `service ... --`). Installed worker configs can
+set `"onboarding_benchmark": true`. For personal or polite hyphae, also pass
+`--daily-use` and the appropriate `--laptop` or `--desktop` declaration. Operators
+following an invitation can instead run `myce benchmark` explicitly with their
+private queue credentials and prepared extensions. See the
+[benchmark guide](development.md) for its bounds and cache behavior.
+
+Discovery, pinned authority and profile checks are covered by laptop fixtures.
+Native cross-machine evidence and outstanding boundaries are owned by
+[#48](https://github.com/1kuna/mycelium/issues/48); WSL2, installed-service,
+login/reboot and native backend checks remain separate. See
+[development](development.md#native-acceptance-checklist).
+
+## Publish and approve an onboarding release
+
+> **Release checklist: migrate preservation collectors before queue cutover.**
+> With bounded status (#439), preservation and curve-provenance checks must use
+> `/api/status?detail=full` or complete `jobs=all` pagination, including private
+> release-script copies. Default status can omit old completed jobs even though
+> curves remain present. Existing complete `/api/inspection` collectors remain
+> supported. See [the upgrade requirement](operations.md#rolling-fleet-upgrades).
+
+The queue administrator provisions a trusted publisher HTTPS directory and an
+Ed25519 public key independently of the release manifest. The signing key stays
+with the publisher in a mode-0600 PKCS8 PEM file. Never distribute it with a release.
+No release tooling existed before this flow; the script uses Go and standard
+Ed25519/SHA-256 rather than adding a distribution service.
+
+On an Apple Silicon macOS build host with Go and Xcode command-line tools:
+
+```sh
+scripts/release.sh v3.1.0 OUTPUT_DIR PRIVATE_SIGNING_KEY
+```
+
+For native LaunchAgent distribution, set `MYCE_DEVELOPER_ID` to the provisioned
+Developer ID Application identity. The build embeds Mycelium's stable identifier,
+Local Network usage description and Bonjour service declaration in the single
+Darwin executable. The script applies and verifies a timestamped hardened-runtime
+signature before manifest generation, so Ed25519 authenticates the codesigned
+bytes. Linux artifacts use the same CGO-disabled builds and are not codesigned.
+Tests replace the signing tool and never access a real keychain.
+
+When the Ed25519 key lives on a different publisher host, use
+`sh scripts/build-release.sh VERSION OUTPUT_DIR` on the Mac, then generate and
+sign the manifest on the key's host without modifying the artifacts. Never copy
+the private key to the build host just to run the combined script.
+
+Versions must be semver values, monotonically increasing for normal upgrades.
+Build metadata (`+build`) does not change version precedence.
+The shared `ReleaseTargets` data drives validation, manifest creation and
+`myce release build-targets`, which the build script consumes.
+This builds `myce-linux-amd64`, `myce-linux-arm64` (CGO disabled), and
+`myce-darwin-arm64` (CGO enabled with the Apple SDK). The native Mac binary must
+report real owner-sensing support. `myce release manifest` checks executable
+headers, the Mac release version/protocol/sensing, and writes a signed
+`release.json` plus `SHA256SUMS`. Publish the artifacts unchanged at an HTTPS
+directory that serves them directly without redirects. Mac distribution signing,
+Gatekeeper/notarization and actual launchd login/network behavior need their own
+native release acceptance; never disable those controls to make onboarding pass.
+
+Add these options to the existing queue command with its usual private credential,
+database, checkpoint and joining-listener configuration:
+
+```sh
+myce queue --release-manifest RELEASE_JSON --release-key PUBLIC_PEM \
+  --release-url HTTPS_PUBLISHER_DIRECTORY
+```
+
+The queue refuses invalid signatures, incomplete target matrices, incompatible
+protocols or a Mac artifact lacking native sensing. It persists both approval and
+the locally provisioned publisher public key in SQLite. Only queue-host startup
+can provision or rotate that key; fleet-token API callers cannot establish trust.
+On restart, a verified startup manifest older than or equal to the stored approval
+is skipped and logged, preserving a default advanced through `release approve`.
+The local publisher key is still provisioned when the flag manifest is skipped,
+so existing queues can acquire the stored trust without reverting their default.
+Invalid startup manifests still fail verification, even when old enough to skip.
+To deliberately apply an older or changed equal-version approval, append
+`--allow-downgrade` to the queue command. Remove that override after the intended
+change: leaving it with stale service flags explicitly reapplies their old release
+on future restarts. Signature and manifest validation still apply. A pinned authenticated
+`myce invite` fetches the approved public metadata; a queue without release
+configuration returns `release_unavailable` and cannot mint a bootstrap command.
+The publisher certificate trust is ordinary HTTPS. The LAN queue's full
+certificate-DER pin is checked separately by the existing joining client;
+it is not a curl SPKI `--pinnedpubkey` value.
+
+For a private LAN HTTPS directory, the administrator may additionally pass
+`--release-ca PUBLIC_CERTIFICATE_PEM` to the queue command. This explicitly
+provisions the publisher's public CA certificate (or self-signed server
+certificate); never pass its private key. The queue persists this certificate
+with the approved release and supplies it to authenticated inviters. The inviter
+must run a version supporting `--release-ca`. Its pinned queue connection
+authenticates this trust material, which the bootstrap supplies to curl through
+a private temporary `--cacert` file. TLS certificate validity and the publisher
+URL's hostname/IP SAN are still verified; redirects remain refused. The temporary
+certificate is removed before the executable runs and on download failure.
+No system trust-store changes or TLS-verification bypass is used. Without this
+option, ordinary HTTPS trust is unchanged. Existing joining certificates have no
+hostname SAN and cannot serve as ordinary HTTPS publisher certificates; provision
+a separate publisher certificate with the correct SAN. A static HTTPS directory
+can serve the signed release without changing the queue's joining identity.
+
+## Advance the default after a signed update
+
+Installing signed runtime bytes on the queue or workers does **not** change the
+queue's persisted default onboarding release. After publishing the artifacts and
+installing/verifying the new queue runtime, advance that default as a deployment
+step, before issuing fresh invites or using one-command onboarding:
+
+```sh
+myce release approve --config QUEUE_CONFIG \
+  --release-manifest RELEASE_JSON --release-key PUBLIC_PEM \
+  --release-url HTTPS_PUBLISHER_DIRECTORY
+```
+
+Run as the ordinary queue administrator. `--config` reads the existing saved
+queue authority; no credential extraction or service reconfiguration is needed.
+Installed hypha authority is also supported when `--config` is omitted. The queue
+must already run a version supporting this command's approval endpoint.
+Supply the independently provisioned publisher public key, never a key obtained
+from the manifest. It must exactly match the key already persisted by the queue
+host. The command verifies the signed manifest locally; the authenticated queue
+verifies it again against its own stored key using the existing signature,
+protocol, target-matrix and native-sensing checks before committing to SQLite.
+The API cannot provision or rotate publisher keys, even with `--allow-downgrade`.
+If the queue has no stored key (including an existing approval created by an older
+version), the command refuses with `release_publisher_key_unavailable`. On the
+queue host, restart the existing queue command with `--release-manifest`,
+`--release-key` and `--release-url` as above to provision it. Retain the usual
+catalog, database and service flags. Key rotation uses that same local procedure
+with a valid manifest signed by the replacement key.
+This approves the manifest; it does not download or install artifacts.
+
+For a private publisher, add `--release-ca PUBLIC_CERTIFICATE_PEM` on each approval;
+omitting it selects ordinary HTTPS trust. The command updates only the default
+release, publisher URL and public CA. It preserves the loaded environment/model
+catalogs, saved service settings, queue database path and joining identity, and
+does not restart the queue or reinstall workers. Success prints the approved
+version and publisher URL. Identical reruns are safe after a lost response;
+older versions or changed metadata at equal version precedence require explicit
+`--allow-downgrade`, which never bypasses signature or manifest validation.
+Invalid approval input returns a 4xx code; queue storage/commit failures return
+HTTP 500 `release_approval_failed` and leave the previous default and key intact.
+
+After success, `GET /api/invites/release` over the authenticated queue connection
+returns the new default. Run ordinary `myce invite` without release overrides for
+fresh machines; one-command onboarding uses the same default. Previously printed
+invitation lines remain bound to their original release.
+
+## Invite and upgrade machines
+
+An inviter can explicitly override the configured distribution with
+`--release-manifest FILE --release-key PUBLIC_PEM --release-url HTTPS_DIRECTORY`.
+For that local override, `--release-ca PUBLIC_CERTIFICATE_PEM` is also supported.
+That verifies the signature locally with the independently provisioned key.
+The output embeds approved hashes instead of fetching and running a remote script.
+The bootstrap resumes private hash-addressed `.partial` files, rejects redirect
+responses and checks exact size/SHA-256 before running even `myce version`.
+The version command then checks version, OS/arch, both protocols and Mac sensing
+before install or ticket redemption. A corrupt full-size partial, a redirect body
+or a checksum mismatch is discarded with a typed reason so a rerun can recover.
+The ticket is supplied to the installer through stdin and is absent from its
+argv/environment. The temporary private invitation is deleted once the installed
+joining file is durable.
+
+Each line binds one approved release. Repeat it after an interrupted download or
+installation; print a line for a newer release to upgrade. An already-installed
+hypha reuses its saved authority and does not spend a new ticket. A new host
+cannot reuse a spent ticket. If redemption succeeds but the response is lost
+before private authority is saved, issue a fresh ticket; replay stays refused.
+
+See [joining](operations.md) for the user flow and successful enrollment states.
+
+An older invitation line cannot silently downgrade an installed binary. The target
+compares the signed release version with the installed executable's version and
+refuses an older version unless `--allow-downgrade` is explicitly appended.
+An equal version with different bytes also requires that flag; `+build` metadata
+counts as equal. Identical-byte same-version reruns remain idempotent.
+
+Existing fleet installations may report `development` or another non-semver
+version. To replace one, use a currently approved semver release's printed line
+with `--allow-downgrade` appended explicitly. This overrides the unordered installed
+version, while retaining checksum, protocol, saved-authority, custody and readiness
+checks. It does not convert an incompatible legacy installation; use the explicit
+conversion path where required.
+Same-version reruns explain that installer flags are not reapplied; use the normal
+`myce install worker --config CONFIG` path to change those settings.
+
+Hardware, NAS, policy, state-root, manager-session and candidate service-environment
+preflights finish before onboarding drains or stops the installed worker.
+Upgrade preflight also refuses busy hosts before changing policy. If work races with
+the drain, a wait timeout restores the exact self-made drain through CAS, with a
+separate cleanup budget. A mode-0600 intent receipt is written before the drain
+POST, carrying a unique owner ID that the queue stores atomically with the drain.
+A rerun requires that queue-side owner to match before recording a resume receipt.
+Resume checks both owner and timestamp in the queue transaction. Independent
+maintenance edits revoke ownership, even at the same clock timestamp. Old receipts
+or queues without ownership proof cannot authorize resume: maintenance stays in
+place and the error names the recorded drain owner and prints the exact
+`myce host resume HOST` command for the operator. A drained same-release rerun
+prints that recovery information even if its local intent receipt was lost.
+
+Installer failure restores the existing install transaction and resumes only the
+self-made drain. If newly installed bytes never become ready, that same transaction
+restores the previous binary/config/service and verifies its enrolled readiness
+before resuming. The error states the
+recovery outcome. Failed rollback or conditional resume reports why the host could
+not be resumed and asks for a rerun. A process crash loses the in-memory install
+snapshot: if already-installed bytes fail readiness on rerun, the command explicitly
+reports that rollback is unavailable and preserves maintenance for recovery.
+Drain waiting, installation and readiness have separate timeout budgets.
+
+## Archive old state and install fresh
+
+Old formats are refused; there is no converter. Every queue/worker/cache root
+has `.myce-format` containing `v3` and a newline. Startup validates every root
+before writing. Nonempty unmarked roots fail with `legacy_state_present`;
+contents, checkpoints and unique evidence are preserved for operator handling.
+
+Stop old services and prevent their restart before archiving whole data roots
+outside active lookup paths. Inventory saved database, worker state and cache
+paths, including custom roots. Preserve old configuration, credentials and GPU
+environment. An old shared host-control directory and reconcile timer are retired
+assets: preserve the directory. A worker installer upgrade stops, disables and
+retires the obsolete user reconcile service/timer and `_host-start-check`
+drop-ins, retaining backups and restoring their prior state if the upgrade fails. Do not start old binaries against new data or fabricate format markers.
+
+Default data lives under `~/.local/share/mycelium/queue/state/` and
+`~/.local/share/mycelium/worker[-INSTANCE]/state/`. Keep checkpoints and archives;
+a fresh queue cannot adopt old attempts. Render configuration in the current
+schema, retaining runtime options and secret references and removing retired
+local-control settings. Run `myce install ROLE --config CONFIG --dry-run`, inspect
+the plan, then perform the authorized install for matching queue and workers.
+
+Queue maintenance controls admission from the first report. To stage a host,
+set `myce host disable HOST` on the queue before starting its workers; the policy
+persists across their first registration and rejoin. Configure its queue allowance
+while disabled, inspect `myce host status HOST`, then explicitly resume. A new
+host without prior policy is enabled by default. No local close/open operation,
+root copy or timer is installed. Native activation and qualification remain a
+separate operator task.
+
+## Polite part-time hyphae
+
+Dedicated hyphae keep the existing default: offer resources whenever awake.
+For a daily-use machine, add `--daily-use` to its usual `myce join` command.
+No GPU, power, fan, sleep or screen settings are changed. No input is recorded.
+
+```sh
+myce join --daily-use --max-jobs 1
+```
+
+Daily-use hyphae take work after **five idle minutes**, on confirmed external
+power when battery-equipped, with a known safe heat signal. Batteryless desktops
+need a confirmed batteryless power report. Plugging in never overrides owner
+activity. An unknown required signal means waiting with a reason in CLI/HTML
+status and `capability_profile.availability` in the status API. Aggregate idle
+seconds, power source and thermal state are reported; input contents aren't.
+
+A detected laptop needs external power even in dedicated mode. `--laptop`
+explicitly enforces that rule when automatic battery detection is unavailable.
+Use dedicated mode for batteryless servers; daily-use mode for personal machines.
+The battery-equipped classification is retained throughout a worker session
+if a subsequent power read fails. Daily-use flags are available on foreground `join`; installed services can
+pass them through `service ... -- join`. Installation alone is not an opt-in.
+
+Signals refresh every five seconds independently of queue connectivity.
+Required readings older than 15 seconds withhold work. A sampling gap, including
+sleep, starts a fresh five-minute awake window; the worker never prevents sleep.
+Owner return, battery use, unsafe heat or unknown required signals stop admission
+locally and through the queue. Resumable commands get SIGTERM and up to ten
+seconds to checkpoint, then are killed if needed. Non-resumable commands stop
+immediately and later restart from scratch. These planned stops don't spend the
+infrastructure-loss retry budget. Checkpoints use explicit NAS roots or the
+[verified file transport](files.md) when no shared storage is configured.
+
+Model loads and calls also stop when availability is withdrawn. Pins never
+override owner availability. Engines stay reserved until cleanup confirms
+release; queued callers may retry another hypha. Withholding remains temporary:
+fresh eligible signals allow new work without rejoining.
+
+`--max-jobs N` is the **one optional per-machine limit** (default zero: unlimited).
+It counts simultaneous batch jobs plus in-flight model calls across all workers
+with the same `--host-id`. A stopping batch continues to count until acknowledged.
+Ready idle model servers aren't jobs. If workers report different positive
+limits, the smallest is used; configure the same limit on every worker of a
+physical machine. Lowering a limit blocks new work rather than killing existing
+jobs. Memory capacity remains an independent admission constraint. This limits
+concurrency, not watts, GPU percentage, fan speed or noise.
+
+## OS signals and limits
+
+- **macOS:** the binary links CoreGraphics' combined-session aggregate event age,
+  IOKit's power-source snapshot, and Foundation's process thermal state. It needs
+  no event tap, keylogging, screen capture or sensor permission. Daily work
+  withholds at fair/serious/critical; nominal must persist for 60 seconds after
+  a heat hold. Building on macOS needs cgo and the usual Xcode command-line SDK.
+  A macOS binary built without cgo reports unknown signals and waits in daily mode.
+  The aggregate query covers the worker's login session; fast user switching
+  and coverage of other logged-in users remain unverified.
+- **Linux:** logind, queried through `loginctl`, covers every listed user session.
+  Work waits five minutes after every user session's idle hint, which is more
+  conservative than claiming it is a last-input timer. Hint age uses the same
+  OS monotonic clock as logind, rather than boot uptime that includes sleep. No user session, an
+  uncovered session, denied access or missing desktop idle hints means waiting.
+  Power comes from read-only kernel `power_supply` attributes. Heat comes from
+  recognized CPU/GPU hwmon sensors with valid max/critical limits and no faults.
+  All discovered relevant sensors must be usable. A max alarm/limit holds work;
+  a critical-only sensor uses critical minus 10°C. Recovery needs readings at
+  least 5°C below the guard (or a more conservative supplied hysteresis) for
+  60 seconds. Unknown heat holds work. The recognized sensor list is intentionally
+  small; unsensed accelerators and these margins are not hardware-qualified.
+- **WSL2:** owner activity, power and physical heat must come from the **Windows
+  host**, never the Linux guest. The [per-user Windows host bridge](operations.md)
+  supplies authenticated host idle/power over mirrored-network IPv4 loopback,
+  with verified single-console-session coverage or explicit unknowns. Missing,
+  stopped or unauthenticated helpers never fall back to guest signals. Windows
+  CPU thermal coverage remains **unknown**. An externally powered desktop
+  explicitly joined with `--daily-use --desktop` may use nominal measured GPU
+  heat, with status **CPU thermal coverage waived for desktop**. A detected
+  battery vetoes the waiver; without `--desktop`, CPU coverage stays required.
+  Use `--daily-use --laptop` for a laptop; the flags are mutually exclusive.
+  Native session, logon, networking and install behavior require the separate acceptance plan.
+
+Thresholds follow #25's research where compatible with #43. Unlike the research
+note's proposed missing-heat exception, missing required heat **withholds** daily
+work, with the explicit-desktop CPU waiver described above. These OS observations
+aren't a
+promise that a machine is silent, that a motionless owner is absent, or that all
+physical components have thermal coverage. No quietness claim is made.
+
+Laptop fixtures prove signal policy and fake-clock decisions. Actual OS owner,
+power and thermal signals require native qualification; see
+[development](development.md#native-acceptance-checklist).
+
+## Shared interactive hosts
+
+
+These hosts can run fitting light work through Mycelium. Use the opt-in
+[shared-host profile](operations.md) to combine measured interactive RAM
+reserves, #353 external peaks, native command nice=10, positive CPU/RAM budgets
+and last-resort placement. `myce host profile HOST --shared=true
+--interactive-reserve-gb GiB` requires a drained/disabled, fresh quiescent host;
+`--shared=false` removes the profile without resuming admission. Measured OS
+memory pressure or foreground scheduling latency stops work through planned
+checkpoint/requeue with hysteresis. Linux execution cgroups cap aggregate CPU
+time. macOS applies `setpriority(PRIO_DARWIN_PROCESS, pid, PRIO_DARWIN_BG)`
+(equivalent to `taskpolicy -b`) to gated main payloads and native sidecars.
+Children inherit background CPU/I/O scheduling and lower timer/network priority;
+worker control stays outside background mode. Hosts without the profile retain
+their existing policy. macOS also caps aggregate declared cores at the CPU allowance, and clamps common runtime thread
+counts to each command's declared cores. Payloads can ignore those thread hints:
+aggregate CPU time and RAM ceilings remain unenforced on macOS. See the
+shared-host guide for thresholds and qualification limits. To compare nice-only
+and background scheduling through an isolated CPU dev worker, build the CLI and
+run `python3 scripts/measure-shared-host.py --myce ./myce`. The canary uses two
+CPU children and one second of foreground samples per mode; each payload
+self-expires after three seconds to bound interference if the probe fails.
+It measures a light workload, not saturation or a latency guarantee. Existing
+exclusions, drain ownership and storage fences apply.
+
+
+An orchestration machine, developer workstation or interactive server is usable
+compute capacity. Opt it into the shared-host profile when protecting its owner
+matters more than throughput. Any number of hosts can use it. Agents submit
+portable light work normally; the queue chooses an ordinary fitting host first
+and uses a shared host immediately when ordinary hosts cannot admit it.
+Existing project restrictions, priorities, exclusions and maintenance still win.
+
+## Supported work
+
+The queue stores `policy.shared_host.interactive_reserve_gb` per physical host.
+Enabling it requires positive CPU/RAM allowances and fresh quiescent custody
+while drained or disabled. This avoids applying a new execution-priority policy
+to already running processes. It sets the existing `last_resort` policy; that
+flag cannot be cleared while the profile is active. Profile removal leaves
+placement, budgets, independent exclusions and drain/disable in place.
+
+The profile admits native CPU commands with already prepared environments,
+including CI/tests and small builds. It withholds accelerator work through the
+existing `kind=gpu` exclusion matching path, including future devices, without
+creating or editing an operator's selector. Explicit selector exclusions remain
+independent. Docker, extension execution, new environment/extension preparation,
+model loading/copying and onboarding benchmarks are withheld on this profile
+until their execution budgets and priority are covered. A job's own shell can
+still compile code: that work inherits its command's priority.
+
+Commands and native sidecars receive nice >= 10 before their execution gates
+open. macOS additionally applies
+`setpriority(PRIO_DARWIN_PROCESS, pid, PRIO_DARWIN_BG)` (equivalent to
+`taskpolicy -b`) to every gated supervisor and member. Because a successful external
+request does not always leave the payload at its requested priority, each
+profiled payload runs through the system `/usr/bin/nice -n 10` and
+`/usr/sbin/taskpolicy -b` after its gate opens, establishing nice >= 10 and its
+own inheritable background policy before executing the command. The nice
+increment can further lower inherited priority; it never raises it. This covers ordinary
+commands, native main commands and sidecars, including their descendants.
+It lowers CPU, I/O, timer and network priority. Worker heartbeats and queue
+control retain their original priority. A failed external background-policy
+application logs a warning; the payload still establishes its own policy.
+If the system helper cannot establish policy or execute the command, that
+execution fails rather than launching the command without its policy.
+The existing physical-host CPU ledger caps aggregate
+**declared cores** at `cpu_budget_cores`. Common Go, OpenMP, BLAS and Rayon runtime
+thread-count variables are clamped to each command's declared cores, including
+sidecars. A payload can ignore these variables or start more processes.
+
+Linux installed workers use delegated cgroup v2 CPU controls. Generated/manual
+units delegate `memory cpu`; the worker remains in its existing `worker` leaf.
+Only attempts enter the sibling `shared-execution` subtree, with `cpu.weight=10`
+and `cpu.max=CPU_BUDGET_CORES*100000 100000`. The quota aggregates main commands,
+sidecars and descendants across attempts. Existing per-attempt/member memory
+limits and exact cleanup custody remain underneath it. Controls are read back
+before admission and rechecked in the bounded worker observation lane. Missing
+CPU delegation withholds production admission. Aggregate containment requires
+one machine worker per physical host; legacy multiple workers are withheld.
+The dev harness explicitly reports admission-only CPU simulation on Linux.
+
+macOS has no qualified aggregate CPU-time containment backend here. Status says
+`background task policy; declared-core cap; CPU time unenforced`. Background QoS,
+runtime concurrency hints and declared reservations protect fitting cooperative
+work; they are not a hard share or stall-proof guarantee. macOS RAM ceilings
+also remain unenforced. No profile is enabled by installation or upgrade.
+
+## Measure the memory reserve
+
+Use [external-memory history](status.md#non-mycelium-ram-history)
+from #353: physical-minus-reclaimable RAM minus simultaneous worker-tree RSS.
+Observe representative overlapping agents, interactive apps and external work;
+check sample coverage and bucket times. A short window is partial evidence,
+not a measured week or a future bound. Do not add another OS/queue baseline:
+those processes are already in the residual. RSS can overcount shared pages,
+miss compressed memory and miss spikes, so this is admission evidence rather
+than hard isolation.
+
+Measure the **additional** RAM needed by representative owner activity beyond
+the retained external peak, using the same observation method before/during that
+activity. Supply that positive increment as `--interactive-reserve-gb`. If the
+activity was already observed, retain an explicit allowance for another such
+burst. Record the workload and coverage with the sizing decision. There is no
+universal fixed reserve or machine-name rule. Until that measurement exists,
+leave the host drained rather than inventing capacity.
+
+For each admission the protected reserve is that measured additional burst.
+The historical allowance is physical RAM minus the seven-day external maximum
+minus the protected reserve, clamped at zero and rounded down to 0.25 GiB.
+The peak already includes observed external growth; scaling that entire baseline
+by another percentage does not measure the next interactive burst. The generic
+#353 dry-run suggestion keeps its 25% growth guard for sizing without a measured
+burst; it is separate from this opt-in profile's measured reserve.
+Full reservations consume the historical allowance. It can only
+reduce the operator's configured RAM budget, never raise it. Live raw available
+RAM minus the protected reserve and running attempts' remaining growth is also
+an upper bound. Existing after-reserve live availability remains another upper
+bound, so the old reserve is not subtracted twice. Missing live/history evidence
+or a worker policy mismatch withholds new work. History ages with the injected
+queue clock; no bulk probe or file work occurs under the queue mutex.
+
+Immediately before execution the worker rechecks raw live RAM minus the same
+configured interactive reserve, bounded by its existing after-reserve availability.
+It cannot credit sampled RSS as available memory.
+The queue still enforces the historical bound. Shared-host status reports the
+configured reserve, acknowledgement and admission reason. A full reserve can
+leave zero admitted RAM; the existing drain remains authoritative regardless.
+
+## Configure deliberately
+
+Upgrade the queue and workers together before using the additive check-in fields.
+On an authorized host, inspect `myce host status HOST` and the history first.
+The following placeholders are measured values, not defaults:
+
+```sh
+myce host budget HOST --dry-run # Generic sizing advice; retains the 25% guard.
+myce host drain HOST --wait
+myce host budget HOST --cpu-budget-cores MEASURED_LIGHT_CORES --memory-budget-gb MEASURED_ALLOWANCE_GIB
+myce host profile HOST --shared=true --interactive-reserve-gb MEASURED_BURST_GIB
+myce host status HOST
+# Resume only when authorized to release this drain.
+myce host resume HOST
+```
+
+`myce host profile HOST --shared=false` removes the profile while drained or
+disabled. It never resumes admission or clears last-resort placement. API clients
+POST `action: profile` and `shared_host: {interactive_reserve_gb: N}` to the
+existing maintenance endpoint; zero explicitly removes the profile.
+Workers acknowledge the exact profile through check-in before new admission.
+`myce dev --gpu cpu --workers 1` supports these same API/CLI operations and runs
+real commands; no GPU, production service or fleet edits are required.
+
+A checkpoint-unavailable warning remains a separate storage constraint.
+Resumable/checkpoint-dependent work waits under the existing contract. A profile
+does not repair storage or authorize clearing maintenance.
+
+## Pressure response
+
+Only shared-profile workers collect pressure samples. A bounded background lane
+reads `kern.memorystatus_vm_pressure_level` (the macOS memory-pressure notification
+level) or Linux `/proc/pressure/memory` `some avg10`, then measures twenty normal-
+priority 5 ms timer wakes. The maximum lateness measures scheduling interference,
+including competing owner/agent work, without recording apps or owner input.
+It cannot attribute contention to a particular process. Probes never run under
+the queue mutex or synchronously block heartbeat delivery for their full duration.
+
+Thresholds and recovery bands:
+
+| Signal | Yield | Recover |
+| --- | --- | --- |
+| macOS memory level | warning (2) or critical (4) | normal (1) |
+| Linux memory PSI `some avg10` | >= 1% | <= 0.1% |
+| Foreground-class wake lateness | >= 20 ms | <= 5 ms |
+
+macOS uses the OS's pressure warning rather than inventing a free-RAM percentage.
+The PSI bands represent 100 ms / 10 ms of stalled time per ten seconds. They are
+conservative latency budgets; native Linux interference calibration remains
+unverified. The wake bands use a 5 ms recovery allowance and a 20 ms yield threshold;
+20 ms exceeds a 60 Hz interaction frame. A short local canary observed no
+foreground starvation, but cannot establish a universal latency guarantee.
+Native pressure-stress calibration and representative owner qualification remain
+outstanding; repeat the probe for the intended workload before enablement.
+
+Samples refresh at the existing 5-second owner-signal cadence and expire at its
+15-second freshness bound. Worker-local age is translated to queue receipt time;
+worker wall timestamps cannot renew evidence. Missing, malformed, failed or
+stale observations remain **unknown** and withhold new work. Unknown alone does
+not stop running work or clear a pressure latch. A fresh low sample for every
+signal clears the latch; middling samples retain it. There is no extra recovery
+sleep. This amplitude hysteresis avoids stopping/restarting at one threshold.
+
+On measured pressure, the queue withholds new work on the physical host and
+attaches `shared_host_pressure` planned-stop provenance to each exact running
+attempt. The existing preemption path grants resumable work its configured stop
+grace (normally 10 seconds); nonresumable CPU work stops immediately. Existing
+checkpoint preparation resumes the same logical job and submission key, without
+infrastructure retry/loss charges. Independent command/OOM failure, cancellation,
+stale results and exact cleanup acknowledgement retain their existing precedence.
+Elapsed grace never proves release. Status exposes the sample, latch reason,
+admission diagnostic and actual CPU enforcement mode.
+
+The response can cost one sampling interval plus checkpoint grace, and pressure
+can stop useful progress. PSI's averaged recovery may withhold capacity after
+stalls end. Larger RAM reserves and a smaller CPU allowance reduce interference
+but admit less work; a Linux hard quota also costs throughput while the owner is
+idle. Keep existing operator drains authoritative. Docker, extension execution,
+new environment/extension preparation and models remain withheld; this change
+does not broaden execution eligibility or qualify their pressure handling.
+
+## Qualification and laptop checks
+
+`python3 scripts/measure-shared-host.py` compares a normal-priority foreground
+5 ms wake probe and fixed CPU burst at baseline and beside two CPU-bound
+background commands. It runs for three seconds per phase and reaps its own
+commands. It neither installs services nor enables a profile. This bounded
+canary does not qualify all-core saturation, hostile payloads, memory pressure
+or Linux containment. Check local headroom before running it; use representative
+owner work for native qualification. [#389](https://github.com/1kuna/mycelium/issues/389)
+tracks that acceptance separately.
+
+Laptop regressions use fake-clock yield/recovery/stale samples and aggregate CPU
+admission/cgroup files. `TestSharedHostDevPressureCheckpointRequeueAndCancel`
+starts the real `myce dev` API/worker/command runner with injected OS pressure and
+real local checkpoint copying. It verifies checkpoint, planned requeue, resume on
+attempt 2 and cancellation/release. `TestSharedHostDevCommandPriority` verifies
+real main/sidecar nice values, concurrency hints, token filtering and unchanged
+worker-control priority. No GPU, Docker or fleet changes are involved.
+
+## Windows host signals for WSL2
+
+The `myce-host-bridge` companion runs as the Windows user at interactive logon.
+The Linux `myce` worker stays in WSL2. The companion reads aggregate idle time
+and actual system power state; it never reads input contents, raw input devices,
+window contents, process/application names, screenshots, or user names. Session
+IDs and connection states are checked locally and are never sent to WSL or the
+hub. There is no service, driver, administrator requirement, or firewall change.
+Elevated invocation is refused.
+
+**Thermal coverage remains conservative.** The helper queries the driver-installed
+Windows system-directory `nvidia-smi.exe` (never PATH/current-directory lookup):
+`--query-gpu=temperature.gpu,temperature.gpu.tlimit --format=csv,noheader`.
+All GPU rows must parse; missing/unsupported values remain unknown. NVIDIA
+T.Limit is signed **remaining headroom**, not an absolute ceiling: at/below zero
+means serious, below five degrees means fair, otherwise nominal. This follows
+the Linux probe's five-degree recovery margin; the existing 60-second cooling
+dwell still applies. See [NVIDIA temperature semantics](https://docs.nvidia.com/deploy/nvidia-smi/index.html#temperature).
+The query is hidden, bounded by a 750 ms deadline and invoked only when sampled.
+
+GPU heat appears in `gpu_heat`, with `heat_coverage=gpu-only`. It cannot certify
+CPU/host thermal coverage; host `heat` remains `unknown`. On an externally
+powered desktop explicitly declared with `--desktop` (and no detected battery),
+daily admission uses GPU heat and reports **CPU thermal coverage waived for desktop**. Laptops
+still wait with **host CPU thermal coverage unavailable**. Unknown power,
+unknown owner activity, and unknown or hot GPU heat continue to withhold work.
+Generic ACPI thermal zones do not establish CPU coverage; no nominal CPU
+reading is inferred from an unidentified zone. No driver, service, third-party
+sensor install or guest fallback is required for the desktop exemption.
+
+## Build on a Mac or Linux laptop
+
+```sh
+CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build \
+  -ldflags='-H=windowsgui' -o myce-host-bridge.exe ./cmd/myce-host-bridge
+go build -o myce ./cmd/myce
+```
+
+This small Go executable intentionally imports only `internal/hostbridge` and
+Windows syscall wrappers. The queue and command runner use Unix process APIs;
+the Windows companion does not cross-compile that whole runtime or run jobs.
+The GUI subsystem prevents a terminal opening at each Windows logon. It has no
+window, UI, input hooks, or access log. Use `Start-Process -Wait -PassThru` to
+check install/uninstall exit codes with a GUI binary; errors do not have a
+console. A console build without `-ldflags` is useful for troubleshooting.
+
+## One-step install and uninstall
+
+Stage `scripts/windows-host-bridge/*` and the Windows executable together in
+`%USERPROFILE%\Downloads\MyceliumHostBridge-Setup`. From the regular Windows
+desktop double-click **Install.cmd**; double-click **Uninstall.cmd** to remove
+the installed helper. Setup checks each binary exit code, starts the installed
+helper immediately, and leaves a failed window open. Do not run as administrator.
+The original downloaded executable must remain outside the installed directory.
+
+PowerShell one-line alternative:
+
+```powershell
+& "$env:USERPROFILE\Downloads\MyceliumHostBridge-Setup\Setup.ps1" -Action Install
+```
+
+For an authorized remote operator using the same account as the logged-on owner:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "$env:USERPROFILE\Downloads\MyceliumHostBridge-Setup\Remote-Setup.ps1" -Action Install
+```
+
+This uses the standard Windows Task Scheduler COM API: InteractiveToken (no
+password) and LUA/limited run level. The one-shot task runs the **same Setup.ps1**
+in the existing desktop session and is deleted after completion. Aggregate
+receipt fields verify exit code, session and elevation; no credential is logged.
+The exact task name is `MyceliumHostBridge-Setup`. Setup deletes it as its
+last step on success or failure, even after a launcher timeout. A retry first
+removes an inactive leftover with that exact name and refuses a running or queued
+setup; it never kills an active installer. Replace Install with Uninstall for
+either command. Downloads files and aggregate receipts are intentionally retained after uninstall.
+No logoff, service, persistent task, administrator install or settings change
+is required. The helper also refuses installation outside the covered console.
+
+Installation creates only that previously absent directory with the executable
+and `bridge.json`, plus the single `MyceliumHostBridge` value in
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`. It refuses an existing
+directory or startup entry. Before writing the random 256-bit credential, the
+directory gets a protected DACL granting only this user's SID access; children
+inherit it. No credential is put in the Run value, arguments, output, or fleet
+token. Installation does not start a session-0 helper, change WSL, or alter any
+other startup values. Windows Startup policy can disable/delay Run entries;
+natural logon operation needs native verification.
+
+Keep `bridge.json` private. Do not print/copy it into a report, issue, shell
+history, job environment, or repository. Programs with the same Windows user
+rights (including that user's WSL/root processes) can read it: this is a local
+user trust boundary, not isolation from hostile code running as the owner.
+
+## Connect from WSL2
+
+The bridge listens **only** on IPv4 `127.0.0.1:47353`. WSL2 **mirrored** networking
+is required for WSL-to-Windows IPv4 loopback. NAT fallback, a LAN listener,
+portproxy, firewall exceptions and administrator changes are not provided.
+If loopback is unavailable, work waits.
+
+Set `MYCE_HOST_BRIDGE_CONFIG` to the WSL path of the installed Windows config
+(using the actual local profile path privately):
+
+```sh
+export MYCE_HOST_BRIDGE_CONFIG='/mnt/c/Users/<owner>/AppData/Local/MyceliumHostBridge/bridge.json'
+./myce join --daily-use --laptop --max-jobs 1 --joining-file '<private invitation path>'
+```
+
+For a desktop, use `--desktop`; it is mutually exclusive with `--laptop`.
+Without `--desktop`, CPU coverage is required. Detected battery hardware still
+requires CPU thermal coverage and confirmed AC.
+
+The path is explicit to avoid guessing Windows user/session identity. WSL reads
+the file through its existing Windows filesystem access. No credential is
+passed in argv or HTTP. Each request has a random nonce and HMAC-SHA256 request
+authentication; the response signs the nonce and entire body with a separate
+direction tag. A replayed response, impersonator, modified response or wrong credential
+fails closed. Requests are read-only; request nonces are not an access-audit or
+server-side replay ledger. The loopback transport relies on OS isolation from
+packet capture by other users; same-user code and administrators are trusted. Proxies, redirects, DNS hostnames and non-loopback config addresses
+are rejected. Requests have a 1.5-second deadline and 4 KiB response limit.
+Only `GET /v1/signals` is exposed. No remote control/stop endpoint exists.
+
+Each authenticated request samples fresh signals, never a cached observation.
+Windows `ProcessIdToSessionId`, `WTSEnumerateSessions` and
+`WTSGetActiveConsoleSessionId` must establish one active console session matching
+the helper, both before and after the `GetLastInputInfo` query. Session 0, RDP,
+additional/disconnected sessions, denied enumeration and transitions are unknown.
+This deliberately conservative first version does not aggregate helpers across
+multiple sessions. Idle arithmetic handles tick wrap and rejects future tick
+anomalies. It counts at most the continuously observed awake interval, resets
+on changed last-input ticks, and resets after gaps over 15 seconds/clock rollback.
+Startup/reconnect therefore requires five newly observed idle minutes. This is
+aggregate input inactivity, not proof that a motionless owner or controller user
+is absent; no claim of covering every input device is made.
+
+`GetSystemPowerStatus` supplies actual AC/DC and battery classification. Failed,
+unknown or invalid values stay unknown. Battery saver vetoes work through the
+existing battery hold. A desktop is not declared externally powered merely
+because it has no battery. `--laptop` conservatively requires confirmed AC even
+when battery detection fails. Native hardware/API behavior remains to be tested.
+
+Missing config, stopped helper, read/auth/transport failure or uncovered session
+never falls back to guest readings. Existing five-second sampling, local job
+withdrawal, 15-second staleness, cooling dwell and checkpoint behavior apply.
+The normal Linux probes are unchanged on non-WSL kernels. Dedicated mode retains
+its existing policy; use `--daily-use` for a personal machine.
+
+## Uninstall and undo
+
+Double-click **Uninstall.cmd**, or use Setup.ps1/Remote-Setup.ps1 with
+`-Action Uninstall`. Both use the original downloaded executable.
+
+Uninstall checks ownership of the Run command, removes that one value, revokes
+`bridge.json`, waits up to five seconds for the executable to become removable,
+and removes only its two known files and the empty installation directory. The
+running helper notices config revocation within a second and closes its server.
+If the binary stays locked or unrelated files exist, it reports failure and
+preserves them; inspect, then retry. It never kills an unrelated PID or removes
+a folder recursively. Reinstall creates a fresh key. Remove the WSL environment
+setting (`unset MYCE_HOST_BRIDGE_CONFIG`) and any explicit shell configuration
+you added. No system startup/service/driver setting needs undoing.
+
+## Native verification
+
+Use an isolated Mac-hosted hub with saved-address joining and the real WSL
+worker. Discovery is a separate concern; do not change firewall/networking
+settings to test this helper. Verify artifact hashes before installation.
+Check limited interactive install, protected directory/config ACL, Run value,
+loopback listener, real authenticated signals, continuous five-minute idle
+sampling, fail-closed CPU coverage, easy uninstall residue checks and reinstall.
+Leave the helper installed when requested and stop the owned worker, hub,
+forwarding processes and test distro. Never synthesize owner input or treat a
+GPU-only nominal reading as host coverage. Native sleep, battery unplug, RDP,
+fast user switching and natural logon require separate checks.
+
+Laptop bridge fixtures cannot qualify Windows session, power or firewall behavior.
+Use the native verification above before claiming a WSL daily-use host ready.
+
+## Queue disk contention (#527)
+
+Keep bulk copies, heavy tests and maintenance off the queue's backing device
+while qualifying I/O protection. Another directory or partition on the same
+device provides no physical isolation. Native protection remains unqualified;
+[#527](https://github.com/1kuna/mycelium/issues/527) owns measured acceptance.
+
+## SQLite backup and commit limits
+
+Python `Connection.backup(pages=256, sleep=0.05)` does not throttle successful
+steps: CPython sleeps only on BUSY/LOCKED. Concurrent source changes can restart
+the copy and increase writes beyond the database size. See
+[CPython's implementation](https://github.com/python/cpython/blob/v3.14.0/Modules/_sqlite/connection.c)
+and [SQLite backup semantics](https://sqlite.org/c3ref/backup_finish.html).
+Use a progress callback or external I/O controls when bounding an online copy;
+use the [stopped-state backup procedure](operations.md#queue-backup-restore-and-relocation)
+for a complete queue recovery generation.
+
+Queue mutations commit under the queue mutex with WAL and `synchronous=FULL`.
+Synchronization and automatic checkpoints can delay other control calls.
+Unlocking before commit would break durable publication/rollback semantics.
+Mutable state and WAL checkpointing can cause sustained write amplification
+without database growth. Process counters do not distinguish database, WAL,
+logs and payload writes; whole-disk averages do not establish a safe I/O ceiling.
+
+## Standard systemd policy
+
+The installer accepts `--io-weight=1..10000` for Linux queue and worker services,
+emitting `IOAccounting=yes` and `IOWeight=VALUE` on the existing service. Zero
+leaves system defaults, emits neither directive and clears an explicit setting.
+Omitted settings survive upgrades; existing installations default to zero.
+macOS rejects nonzero values rather than silently claiming enforcement.
+
+A worker weight of 10 versus the queue's system default 100 is an initial
+relative-priority candidate, **not a measured latency guarantee**. Weighting
+costs competing jobs throughput under contention; measure the ratio natively.
+The aggregate service policy covers preparation, output collection and existing
+attempt descendants, without adding more share per additional job. It also
+lowers worker control-file write priority; qualify contact and those writes too.
+Configure every worker service instance sharing the device through the installer.
+
+Weights require an available/enabled cgroup-v2 I/O controller and an effective
+weighting implementation such as BFQ or configured io.cost. `none`/`mq-deadline`
+alone do not supply proportional weighting. Check the common-ancestor hierarchy:
+weights compare siblings and do not prioritize a service over an uncontrolled
+competing branch. A `systemctl show` property is not enforcement evidence.
+An SSH backup outside the worker subtree is not covered by its policy.
+
+If effective weights miss the existing deadline, use standard `io.max`/systemd
+`IOWriteBandwidthMax` and `IOReadBandwidthMax` at the aggregate worker subtree
+on the actual backing device. Derive caps from a measured latency sweep under
+representative read/write bursts and fsync, rather than advertised sequential
+bandwidth. Caps cost stage time: measure that too. Put bulk operator tools in
+controlled scopes or keep them off that disk. No unmeasured cap is proposed.
+For relocation, use the [queue recovery procedure](operations.md#queue-backup-restore-and-relocation).
+
+## Laptop experiment and native acceptance
+
+Check free space, memory and active work before opting in:
+
+```sh
+MYCE_TEST_QUEUE_DISK_IO=1 GOMAXPROCS=4 go test ./internal/myce \
+  -run '^TestQueueDiskIOReproduction$' -count=1 -v
+```
+
+The real dev HTTP API, SQLite queue and CPU command runner share one filesystem.
+Four finite writers fsync every 4 MiB, write 2 GiB total and occupy at most
+256 MiB of payload space. Test-owned scratch is removed after worker shutdown.
+The two-minute harness context bounds a broken local experiment's resource
+cost; it does not change ordinary fleet-job timeouts. Plain native execution
+uses existing unsandboxed dev behavior. A passing test proves execution/cleanup,
+not reproduction of the incident or native I/O protection.
+
+Run an authorized Linux experiment through Mycelium with platform
+targets and no host pins, with a disposable queue on the job's filesystem. Record
+device/controller/scheduler readback, actual job I/O rates, commit duration,
+check-in p99/max and losses before/after policy. Include an isolated, bounded
+live-backup reproduction and verify competing writers' scope membership.
+The unchanged ten-second check-in deadline must hold under representative
+production bursts, without false quiet losses. Collect every workload failure,
+retain a compact receipt and remove disposable payloads after process release.
+Native Linux proof and #527's measured-protection acceptance remain open.

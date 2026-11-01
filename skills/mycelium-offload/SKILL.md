@@ -1,11 +1,13 @@
 ---
 name: mycelium-offload
-description: Send heavy tests, builds, simulations, training and transcodes through Mycelium project profiles; wait for completion, inspect failures and fetch verified results.
+description: Send heavy tests, builds, simulations, training and transcodes through Mycelium project adapters or existing profiles; wait for completion, inspect failures and fetch verified results.
 ---
 
 # Mycelium offload
 
-Run heavy commands from the project root with `myce run --profile NAME`.
+Run heavy commands from the project root with `myce run --entry NAME`.
+For an existing profile use `myce run --profile NAME`. New reusable integrations
+use [the adapter reference](https://github.com/1kuna/mycelium/blob/main/docs/adapter.md).
 Declare the software's platform, accelerator, memory and environment needs;
 Mycelium chooses the host. Keep host/device selectors for a specific hardware
 requirement, approved production parity or hardware qualification. Explain that
@@ -26,24 +28,25 @@ qualification steps. Missing variants are gaps to investigate; authored
 own resources/checks; GPU checks must use their backend (`metal` selects `mps`
 in the application). Obtain owner-accepted MY-19 output parity before splitting.
 Advice is read-only; absent/stale inventory and unqualified recipes are not
-support claims. [Portability reference](https://github.com/1kuna/mycelium/blob/main/docs/portability.md).
+support claims. [Portability reference](https://github.com/1kuna/mycelium/blob/main/docs/scheduling.md).
 
-1. Read `.mycelium/profiles/NAME.yaml`. If none fits, use `myce profile init`
-   and [setup-project.md](setup-project.md). Review the command, source,
+1. Read the selected entry in `.mycelium/adapter.yaml`, or the existing
+   `.mycelium/profiles/NAME.yaml`. If none fits, author an adapter using the
+   reference above; [setup-project.md](setup-project.md) covers compatibility profiles. Review the command, source,
    targets and managed environment. `git: HEAD` sends committed bytes only;
    commit intended changes and ignore `.mycelium/receipts/` before submitting.
    Directory sources include ignored files: prepare them deliberately.
 2. Submit once. Extra arguments append literally:
 
    ```sh
-   myce run --profile NAME --key OPERATION
-   myce run --profile NAME --key OPERATION -- EXTRA_ARGS
+   myce run --entry NAME --key OPERATION
+   myce run --entry NAME --key OPERATION -- EXTRA_ARGS
    ```
 
    Save the receipt's `key` and `job_id`. Same-key replay recovers the existing
    job; a changed intent needs a new key. To repeat identical work deliberately,
    use a new key. Read typed failures and receipt details in
-   [agent-offload.md](https://github.com/1kuna/mycelium/blob/main/docs/agent-offload.md).
+   [agent-offload.md](https://github.com/1kuna/mycelium/blob/main/docs/adapter.md).
 3. Wait with `myce wait JOB_ID`, or bind this thread's completion notifier
    using [t3-binding.md](t3-binding.md) and pass `--notify /path/to/notifier`
    on every submit and replay. End a turn waiting for a wake only when both
@@ -63,12 +66,11 @@ support claims. [Portability reference](https://github.com/1kuna/mycelium/blob/m
    `wait` exits 0 only for success. A wake alone proves no result. `result`
    verifies SHA-256 and size; apply the project's own acceptance check too.
    Download within the queue's retention window (default seven days).
-   Failed jobs have no accepted outputs. Once
-   [#220](https://github.com/1kuna/mycelium/issues/220) is deployed, use
-   `myce result JOB_ID --attempt N --out DIAGNOSTICS_DIR` for that failed
-   attempt's diagnostics. These are failure details, not accepted success.
-   Until then use logs; check installed `myce result --help` before using
-   `--attempt`. Keep attempt/execution identity when reporting a failure.
+   Failed jobs have no accepted outputs. Supported clients provide
+   `myce result JOB_ID --attempt N --out DIAGNOSTICS_DIR` for failed-attempt
+   diagnostics. Use a compatible installed client/queue; `myce result --help`
+   identifies the client interface. Diagnostics are not accepted success.
+   Keep attempt/execution identity when reporting a failure.
 5. If Mycelium or the adapter fails, search the Mycelium issue tracker for a
    duplicate, then update it or file a sanitized issue. Include expected versus
    observed behavior, version, target, job/attempt identity, minimal command and
@@ -85,4 +87,4 @@ avoid or pin the host because it runs agents. The shared-host profile protects
 measured RAM reserve and uses last-resort placement plus nice=10. Respect existing
 drain/disable, storage and qualification fences. Core reservations and nice are
 not hard CPU shares; do not claim pressure-triggered migration. See
-[shared hosts](https://github.com/1kuna/mycelium/blob/main/docs/shared-hosts.md).
+[shared hosts](https://github.com/1kuna/mycelium/blob/main/docs/operations.md).
