@@ -29,9 +29,11 @@ Commands and native sidecars receive nice >= 10 before their execution gates
 open. macOS additionally applies
 `setpriority(PRIO_DARWIN_PROCESS, pid, PRIO_DARWIN_BG)` (equivalent to
 `taskpolicy -b`) to every gated supervisor and member. Because a successful external
-request does not always leave the payload backgrounded, each profiled payload runs
-through the system `/usr/sbin/taskpolicy -b` after its gate opens, establishing
-its own inheritable policy before executing the command. This covers ordinary
+request does not always leave the payload at its requested priority, each
+profiled payload runs through the system `/usr/bin/nice -n 10` and
+`/usr/sbin/taskpolicy -b` after its gate opens, establishing nice >= 10 and its
+own inheritable background policy before executing the command. The nice
+increment can further lower inherited priority; it never raises it. This covers ordinary
 commands, native main commands and sidecars, including their descendants.
 It lowers CPU, I/O, timer and network priority. Worker heartbeats and queue
 control retain their original priority. A failed external background-policy
