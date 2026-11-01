@@ -101,3 +101,30 @@ func TestSubmissionFilesystemCausesStayLocal(t *testing.T) {
 		})
 	}
 }
+
+func TestEnvironmentPathDiagnosticStatusPrivacy(t *testing.T) {
+	q, _ := fixture(t)
+	m := machine("synthetic-worker", "cpu")
+	m.EnvironmentReports = []EnvironmentReport{{
+		Key: "tools", State: "failed",
+		PathDiagnostic: &PathDiagnostic{
+			Field: "environment.binary", Side: "worker", Path: "/synthetic/private/tool",
+			ResolutionBase: "worker-environment-library", Cause: "missing",
+		},
+	}}
+	q.s.Machines[m.ID] = &m
+	h := API{Queue: q, Token: "test"}.Handler()
+	for _, path := range []string{"/api/status", "/api/environments"} {
+		req := httptest.NewRequest("GET", path, nil)
+		req.Header.Set("Authorization", "Bearer test")
+		response := httptest.NewRecorder()
+		h.ServeHTTP(response, req)
+		if response.Code != http.StatusOK || strings.Contains(response.Body.String(), "/synthetic/private") {
+			t.Fatalf("%s exposed worker diagnostic: %s", path, response.Body.String())
+		}
+	}
+	// Redaction must operate on detached status data, preserving local evidence.
+	if q.s.Machines[m.ID].EnvironmentReports[0].PathDiagnostic == nil {
+		t.Fatal("status redaction changed queue evidence")
+	}
+}

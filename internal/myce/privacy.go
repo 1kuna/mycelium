@@ -87,6 +87,7 @@ func (q *Queue) publicStatusSnapshot(options *statusOptions, contexts ...context
 		}
 		for i := range m.EnvironmentReports {
 			m.EnvironmentReports[i].Error = diagnostic(m.EnvironmentReports[i].Error, "environment build failed")
+			m.EnvironmentReports[i].PathDiagnostic = safeWorkerPathDiagnostic(m.EnvironmentReports[i].PathDiagnostic)
 		}
 	}
 	// Hold text is derived from worker reports too. Sanitize that projection,
