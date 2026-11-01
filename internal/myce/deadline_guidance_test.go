@@ -114,3 +114,32 @@ func TestDeadlineGuidanceNonResumableAndOverrun(t *testing.T) {
 		t.Fatalf("deadline interrupted non-resumable work: %+v", reply)
 	}
 }
+
+func TestDeadlineGuidanceNonResumableSaturatedHost(t *testing.T) {
+	q, _ := fixture(t)
+	s := spec("experiment")
+	s.Resumable = false
+	s.Needs.CPUCores, s.Needs.HostMemoryGB = 4, 8
+	running := submit(t, q, s)
+	m := cpuMachine("worker", "host", "fake", 4, 8)
+	assigned := check(t, q, m, nil).Job
+	if assigned == nil || assigned.ID != running.ID {
+		t.Fatal(assigned)
+	}
+	if err := q.Started(Result{Machine: assigned.Machine, Session: assigned.Session, Execution: Execution{ID: assigned.ID, Attempt: assigned.Attempt}}); err != nil {
+		t.Fatal(err)
+	}
+	s = spec("deadline")
+	s.Needs.CPUCores, s.Needs.HostMemoryGB = 1, 1
+	demand := submit(t, q, s)
+	got, err := q.jobSnapshot(demand.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if blockers := strings.Join(got.DeadlineGuidance.Blockers, "; "); !strings.Contains(blockers, "non-resumable command "+running.ID) {
+		t.Fatal("saturated host lost its non-resumable blocker:", blockers)
+	}
+	if reply := check(t, q, m, assigned); reply.Job != nil || reply.Stop {
+		t.Fatalf("deadline interrupted non-resumable work: %+v", reply)
+	}
+}

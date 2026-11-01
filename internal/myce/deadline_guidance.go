@@ -64,12 +64,24 @@ func (q *Queue) deadlineGuidance(j *Job) *DeadlineGuidance {
 	// Explain the deadline interruption contract only on otherwise fitting
 	// targets with a reserved command slot. General slot diagnostics remain #537.
 	for _, m := range q.plannerMachines() {
-		if !q.jobAllowsMachine(j, m.ID) || !fits(j, m, max(m.TotalMemoryGB, m.FreeMemoryGB)) {
+		if !q.jobAllowsMachine(j, m.ID) {
 			continue
 		}
+		fitsCurrent := fits(j, m, max(m.TotalMemoryGB, m.FreeMemoryGB))
 		for _, r := range q.s.Jobs {
 			if r.ID == j.ID || !batchReservesCapacity(r) || !batchOnTarget(r, m) || r.Spec.Resumable {
 				continue
+			}
+			// A blocking command can occupy the cores and host RAM needed by
+			// this demand. Test fit after its exact release, as placement does,
+			// rather than hiding the blocker when current capacity is full.
+			if !fitsCurrent {
+				projected := q.cpuAfterReleases(m, []*Job{r}, nil, 0)
+				owner := allocationMachine(q.s.Machines[r.Machine], r.AllocatedDevices)
+				projected.FreeHostMemoryGB += hostNeed(owner, r.Spec.Needs.MemoryGB, r.Spec.Needs.HostMemoryGB)
+				if !fits(j, &projected, max(m.TotalMemoryGB, m.FreeMemoryGB+r.Spec.Needs.MemoryGB)) {
+					continue
+				}
 			}
 			timing := "ETA unknown: no comparable duration observation"
 			if r.Timing != nil && r.Timing.Reason == "" && r.Timing.PredictedSeconds != nil && r.StartedAt != nil {
