@@ -1,6 +1,7 @@
 # Mycelium v3
 
-- `docs/design-proposal.md` is the approved design and the only product spec.
+- `docs/design-proposal.md` is the approved design and the only product spec;
+  `docs/DECISIONS.md` holds the maintainer's rulings.
 - Keep every feature easy to use and testable on a laptop with no GPU.
 - One binary, one SQLite queue, plain-command workers. No peer network,
   leases, replicated registry, or restored v1 architecture.
@@ -18,12 +19,17 @@
   Output verification under the lock once stalled every host's control
   transactions (#80). The SQLite commit and small local state files are fine.
 - Never expose or commit the fleet token. Jobs must not inherit `MYCE_TOKEN`.
+- `skills/mycelium/SKILL.md` is the one guide every project's agents load to use
+  Mycelium. When a change alters how consumers submit, wait, read status, fetch
+  results or hold work, update that skill in the same change, so no project has
+  to be told separately.
 
 ## Map
 
 - `cmd/myce`: CLI and executable dev end-to-end test.
 - `internal/myce`: queue/HTTP API, scheduler, worker, queue maintenance, installer, dev.
 - `clients/python`: submission/cancellation and checkpoint client.
+- `skills/mycelium`: the consumer skill (setup, harness and T3 binding references beside it).
 - `docs/operations.md`: canonical install, queue maintenance and recovery.
 - `docs/status.md`: worker freshness, maintenance and status fields.
 - `deploy`: manual service templates; `docs/operations.md`: old-state archives.
@@ -45,5 +51,12 @@ per observed bug. No speculative edge-case matrices, implementation-detail pins,
 duplicate journeys or process self-audits (maintainer, 2026-10-22). Native GPU/daemon/identity/boot checks are separate
 from laptop proof; see `docs/development.md`.
 
-Work locally, stage explicit paths, and commit completed changes. Do not push
-or touch fleet hardware without current task authorization.
+Stage explicit paths and commit completed changes; push your own branches.
+Tested fixes deploy to the fleet without a separate task (MY-28): bundle them
+into one release at a time, deploy only while no customer or production job is
+running and outside every consumer project's recorded customer window, and roll
+back if the queue doesn't come back healthy. Fleet hardware changes still need a
+task that authorizes them.
+
+This repository is public: keep host names, addresses, fleet layout, private
+paths and other projects' details out of commits, issues and docs.
