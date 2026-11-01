@@ -92,11 +92,11 @@ func validateScheduledHolds(p PriorityPolicy) error {
 					return errors.New("one-shot window requires start_at < end_at and no weekly fields")
 				}
 			} else {
-				if _, err := time.Parse("15:04", w.Start); err != nil {
-					return err
+				if parsed, err := time.Parse("15:04", w.Start); err != nil || parsed.Format("15:04") != w.Start {
+					return errors.New("weekly start requires HH:MM")
 				}
-				if _, err := time.Parse("15:04", w.End); err != nil && w.End != "24:00" {
-					return err
+				if parsed, err := time.Parse("15:04", w.End); w.End != "24:00" && (err != nil || parsed.Format("15:04") != w.End) {
+					return errors.New("weekly end requires HH:MM or 24:00")
 				}
 				if w.Start >= w.End || len(w.Weekdays) == 0 {
 					return errors.New("weekly window requires weekdays and start < end; split overnight windows")

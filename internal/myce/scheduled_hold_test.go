@@ -220,6 +220,8 @@ func TestScheduledHoldPolicyCASPreservationAndValidation(t *testing.T) {
 		name   string
 		mutate func(*ScheduledHold)
 	}{
+		{"unpadded start", func(h *ScheduledHold) { h.Windows = []HoldWindow{{Weekdays: []int{0}, Start: "1:00", End: "02:00"}} }},
+		{"unpadded end", func(h *ScheduledHold) { h.Windows = []HoldWindow{{Weekdays: []int{0}, Start: "01:00", End: "2:00"}} }},
 		{"overnight", func(h *ScheduledHold) { h.Windows = []HoldWindow{{Weekdays: []int{1}, Start: "23:00", End: "01:00"}} }},
 		{"timezone", func(h *ScheduledHold) { h.Timezone = "invalid-zone" }},
 		{"selector", func(h *ScheduledHold) { h.Beneficiary = "[/*" }},
