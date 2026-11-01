@@ -21,13 +21,6 @@ import (
 	"time"
 )
 
-func d5InterruptedOutcome(t *testing.T, runtime string, owner Result) Result {
-	t.Helper()
-	r := d5RuntimeOutcome(t, runtime, outcomeRow{name: "delivered-stop", code: 143, delivered: true})
-	r.Machine, r.Session, r.Execution = owner.Machine, owner.Session, owner.Execution
-	return r
-}
-
 func TestNativeOutcomeTermStop(t *testing.T) {
 	for _, group := range []bool{false, true} {
 		for _, independentExit := range []bool{false, true} {
@@ -48,86 +41,82 @@ func TestNativeOutcomeTermStop(t *testing.T) {
 	}
 }
 
+// Adapter production of these Results remains covered by TestOutcomeRuntimeTable.
 func TestOutcomeRequeueExhaustionAndNoDoubleCharge(t *testing.T) {
-	for _, runtime := range []string{"native", "native-group", "docker"} {
-		t.Run(runtime, func(t *testing.T) {
-			q, _ := fixture(t)
-			m := machine("worker", "fake")
-			m.HostMemoryMeasured = true
-			m.HostAvailableMemoryGB = 8
-			m.FreeHostMemoryGB = 8
-			s := spec("production")
-			s.Needs.HostMemoryGB = 2
-			s.SubmissionKey = "d5-requeue"
-			// Member caps share the two-GiB parent; their sum is not a charge.
-			s.Run.MemoryGB = 1.5
-			s.Run.Sidecars = []NativeSidecar{{Name: "helper", Command: []string{"sleep", "600"}, MemoryGB: 1.5}}
-			j := submit(t, q, s)
-			var previous Result
-			for attempt := 1; attempt <= 3; attempt++ {
-				running := check(t, q, m, nil).Job
-				if running == nil || running.Attempt != attempt {
-					t.Fatal("missing assignment", attempt)
-				}
-				if err := q.Started(result(running, false)); err != nil {
-					t.Fatal(err)
-				}
-				q.refreshHostMemory()
-				if got := q.s.Machines[m.ID].HostMemoryInUseGB; got != 2 {
-					t.Fatal("member caps double charged", got)
-				}
-				if attempt > 1 {
-					if err := q.Complete(previous); !errors.Is(err, ErrStale) {
-						t.Fatal("stale outcome accepted", err)
-					}
-				}
-				r := d5InterruptedOutcome(t, runtime, result(running, false))
-				if err := q.Complete(r); err != nil {
-					t.Fatal(err)
-				}
-				if err := q.Complete(r); err != nil && !errors.Is(err, ErrStale) {
-					t.Fatal(err)
-				}
-				got := job(t, q, j.ID)
-				want := "queued"
-				if attempt == 3 {
-					want = "failed"
-				}
-				if got.State != want || got.InfrastructureRetries != min(attempt, 2) {
-					t.Fatal("retry budget charged twice", got)
-				}
-				q.refreshHostMemory()
-				if got := q.s.Machines[m.ID].HostMemoryInUseGB; got != 0 {
-					t.Fatal("settled attempt retained charge", got)
-				}
-				previous = r
+	q, _ := fixture(t)
+	m := machine("worker", "fake")
+	m.HostMemoryMeasured = true
+	m.HostAvailableMemoryGB = 8
+	m.FreeHostMemoryGB = 8
+	s := spec("production")
+	s.Needs.HostMemoryGB = 2
+	s.SubmissionKey = "d5-requeue"
+	// Member caps share the two-GiB parent; their sum is not a charge.
+	s.Run.MemoryGB = 1.5
+	s.Run.Sidecars = []NativeSidecar{{Name: "helper", Command: []string{"sleep", "600"}, MemoryGB: 1.5}}
+	j := submit(t, q, s)
+	var previous Result
+	for attempt := 1; attempt <= 3; attempt++ {
+		running := check(t, q, m, nil).Job
+		if running == nil || running.Attempt != attempt {
+			t.Fatal("missing assignment", attempt)
+		}
+		if err := q.Started(result(running, false)); err != nil {
+			t.Fatal(err)
+		}
+		q.refreshHostMemory()
+		if got := q.s.Machines[m.ID].HostMemoryInUseGB; got != 2 {
+			t.Fatal("member caps double charged", got)
+		}
+		if attempt > 1 {
+			if err := q.Complete(previous); !errors.Is(err, ErrStale) {
+				t.Fatal("stale outcome accepted", err)
 			}
-		})
+		}
+		r := result(running, false)
+		r.Interrupted = true
+		if err := q.Complete(r); err != nil {
+			t.Fatal(err)
+		}
+		if err := q.Complete(r); err != nil && !errors.Is(err, ErrStale) {
+			t.Fatal(err)
+		}
+		got := job(t, q, j.ID)
+		want := "queued"
+		if attempt == 3 {
+			want = "failed"
+		}
+		if got.State != want || got.InfrastructureRetries != min(attempt, 2) {
+			t.Fatal("retry budget charged twice", got)
+		}
+		q.refreshHostMemory()
+		if got := q.s.Machines[m.ID].HostMemoryInUseGB; got != 0 {
+			t.Fatal("settled attempt retained charge", got)
+		}
+		previous = r
 	}
 }
 
+// Adapter production of these Results remains covered by TestOutcomeRuntimeTable.
 func TestOutcomeCancellationPrecedence(t *testing.T) {
-	for _, runtime := range []string{"native", "native-group", "docker"} {
-		t.Run(runtime, func(t *testing.T) {
-			q, _ := fixture(t)
-			m := machine("worker", "fake")
-			j := submit(t, q, spec("production"))
-			running := check(t, q, m, nil).Job
-			if err := q.Started(result(running, false)); err != nil {
-				t.Fatal(err)
-			}
-			if err := q.Cancel(j.ID); err != nil {
-				t.Fatal(err)
-			}
-			r := operatorOutcome(d5InterruptedOutcome(t, runtime, result(running, false)), true)
-			if err := q.Complete(r); err != nil {
-				t.Fatal(err)
-			}
-			got := job(t, q, j.ID)
-			if got.State != "cancelled" || got.InfrastructureRetries != 0 {
-				t.Fatal("stop bypassed cancellation", got)
-			}
-		})
+	q, _ := fixture(t)
+	m := machine("worker", "fake")
+	j := submit(t, q, spec("production"))
+	running := check(t, q, m, nil).Job
+	if err := q.Started(result(running, false)); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Cancel(j.ID); err != nil {
+		t.Fatal(err)
+	}
+	r := result(running, false)
+	r.Interrupted, r.OperatorStop = true, true
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+	got := job(t, q, j.ID)
+	if got.State != "cancelled" || got.InfrastructureRetries != 0 {
+		t.Fatal("stop bypassed cancellation", got)
 	}
 }
 

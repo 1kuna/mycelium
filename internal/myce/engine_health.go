@@ -35,6 +35,10 @@ func (f *serverProbeFailures) observe(healthy bool, started, now time.Time) bool
 // It never releases custody or starts another process; the heartbeat owns that
 // transition. Completion remains observable even with logs directed to /dev/null.
 func (l *LlamaEngine) startHealthMonitor(health string) {
+	l.startHealthMonitorTimeout(health, serverProbeTimeout)
+}
+
+func (l *LlamaEngine) startHealthMonitorTimeout(health string, timeout time.Duration) {
 	ctx, cancel := context.WithCancel(context.Background())
 	l.monitorCancel = cancel
 	l.monitorDone = make(chan struct{})
@@ -46,7 +50,7 @@ func (l *LlamaEngine) startHealthMonitor(health string) {
 		defer close(l.monitorDone)
 		tick := time.NewTicker(serverProbeInterval)
 		defer tick.Stop()
-		client := &http.Client{Timeout: serverProbeTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+		client := &http.Client{Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 		failures := serverProbeFailures{}
 		for {
 			select {

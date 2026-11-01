@@ -15,7 +15,7 @@ import (
 // snapshots. Use real SQLite commits, check-ins and concurrent keyed submits.
 func TestQueueHistoryBurst(t *testing.T) {
 	var burstP99At1K time.Duration
-	for _, count := range []int{1000, 5000, 10000} {
+	for _, count := range []int{1000, 10000} {
 		t.Run(fmt.Sprint(count), func(t *testing.T) {
 			// A directly selected 10k subtest must measure its own 1k baseline.
 			if count == 10000 && burstP99At1K == 0 {

@@ -7,6 +7,36 @@ import unittest
 
 
 class GoTestProfileTests(unittest.TestCase):
+    def test_gate_wrapper(self):
+        script = Path(__file__).resolve().with_name('gate-profile.sh')
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            for tool in ('git', 'uv'):
+                (root / tool).write_text('#!/bin/sh\nexit 0\n')
+                (root / tool).chmod(0o755)
+            (root / 'go').write_text(
+                '#!/bin/sh\nif [ "$1" = env ]; then echo go1.25.6; '
+                'else printf "%s\\n" "$*" > go-args; fi\n')
+            (root / 'go').chmod(0o755)
+            (root / 'scripts').mkdir()
+            (root / 'scripts/gate.sh').write_text(
+                '#!/bin/sh\nprintf "%s\\n" "$@" > gate-args\nexit 0\n')
+            (root / 'scripts/gate.sh').chmod(0o755)
+            run = subprocess.run(['bash', str(script)], cwd=root,
+                                 env=dict(os.environ, PATH=str(root) + os.pathsep + os.environ['PATH']),
+                                 capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertEqual((root / 'go-args').read_text(), 'mod download\n')
+            self.assertEqual((root / 'gate-args').read_text(), 'full\n')
+            self.assertEqual((root / 'gate-result.txt').read_text(), 'gate full: exit=0\n')
+            (root / 'scripts/gate.sh').write_text('#!/bin/sh\nexit 7\n')
+            (root / 'gate-result.txt').unlink()
+            run = subprocess.run(['bash', str(script)], cwd=root,
+                                 env=dict(os.environ, PATH=str(root) + os.pathsep + os.environ['PATH']),
+                                 capture_output=True, text=True)
+            self.assertEqual(run.returncode, 7, run.stderr)
+            self.assertFalse((root / 'gate-result.txt').exists())
+
     def test_timeout_and_exit(self):
         script = Path(__file__).resolve().with_name('go-test-profile.sh')
         with tempfile.TemporaryDirectory() as folder:

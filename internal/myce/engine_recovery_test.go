@@ -167,7 +167,9 @@ func TestEngineRecoveryRealProcessBothLogs(t *testing.T) {
 			m := machine("engine-worker", "fake")
 			m.Capabilities = append(m.Capabilities, "logs_none")
 			m.ModelConfigHash = modelConfigHash(config)
-			rt, err := startModels(Worker{Machine: m, ModelConfig: config, Clock: RealClock{}, Client: Client{Token: "test"}, MemorySource: func(context.Context) (float64, error) { return 32, nil }}, t.TempDir())
+			engineClock := &devClock{}
+			engineDir := t.TempDir()
+			rt, err := startModels(Worker{modelEngine: func(m Model) Engine { return NewModelEngine(m, engineDir, engineClock) }, Machine: m, ModelConfig: config, Clock: RealClock{}, Client: Client{Token: "test"}, MemorySource: func(context.Context) (float64, error) { return 32, nil }}, t.TempDir())
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -223,6 +225,10 @@ func TestEngineRecoveryRealProcessBothLogs(t *testing.T) {
 					t.Fatal(err)
 				}
 				res.Body.Close()
+				await(t, func() bool { _, _, degraded := engine.runtimeHealth(); return degraded })
+				if _, err := engineClock.advance(serverHealthWindow.Seconds()); err != nil {
+					t.Fatal(err)
+				}
 				await(t, func() bool { err, _, _ := engine.runtimeHealth(); return err != nil })
 				if err := syscall.Kill(engine.cmd.Process.Pid, 0); err != nil {
 					t.Fatal("health fixture process exited before withdrawal")
@@ -298,7 +304,7 @@ func TestEngineRecoveryHealthThresholdAndTimeout(t *testing.T) {
 			defer health.Close()
 			clock := &manualWorkerClock{now: time.Unix(0, 0)}
 			e := &LlamaEngine{exited: make(chan struct{}), Clock: clock}
-			e.startHealthMonitor(health.URL)
+			e.startHealthMonitorTimeout(health.URL, 250*time.Millisecond)
 			defer func() { e.monitorCancel(); <-e.monitorDone }()
 			// Two failures, then a success: failure count must start over.
 			for _, healthy := range []bool{false, false, true, false, false} {

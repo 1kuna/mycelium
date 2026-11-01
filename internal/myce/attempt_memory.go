@@ -336,6 +336,10 @@ func withExitMaxRSS(peak *AttemptMemoryPeak, state *os.ProcessState) *AttemptMem
 // other workloads and cannot serve as job peaks. Sampling is a lower bound.
 // groups names the attempt's process groups for hosts without cgroups.
 func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []int) func() *AttemptMemoryPeak {
+	return w.observeAttemptMemoryEvery(a, j, groups, 5*time.Second)
+}
+
+func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func() []int, devicePeriod time.Duration) func() *AttemptMemoryPeak {
 	deviceTelemetry := !j.Spec.Needs.cpuOnly() && (w.Machine.GPU == "cuda" || w.Machine.GPU == "xpu")
 	if a == nil && w.processMemory != nil && groups != nil {
 		return w.observeProcessMemory(groups)
@@ -443,7 +447,7 @@ func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []in
 			// Own the result locally so a late read cannot change published facts.
 			devicePeak := &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryNoSample}
 			defer func() { result <- devicePeak }()
-			deviceTick := time.NewTicker(5 * time.Second)
+			deviceTick := time.NewTicker(devicePeriod)
 			defer deviceTick.Stop()
 			for {
 				select {

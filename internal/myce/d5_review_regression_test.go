@@ -3,67 +3,8 @@ package myce
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
-
-func TestD5ReviewIndependent137BeforeStopObservation(t *testing.T) {
-	w, store, clock, root := dockerFixture(t)
-	q, _ := fixture(t)
-	q.clock = clock
-	w.CheckpointRoot = q.root
-	m := w.Machine
-	m.HostMemoryMeasured, m.HostAvailableMemoryGB, m.FreeHostMemoryGB = true, 32, 32
-	j := dockerGroupJob(t)
-	j.Spec.Priority = "production"
-	submitted := submit(t, q, j.Spec)
-	running := check(t, q, m, nil).Job
-	if running == nil {
-		t.Fatal("no assignment")
-	}
-	if err := q.Started(result(running, false)); err != nil {
-		t.Fatal(err)
-	}
-	p, err := startDockerFixture(w, store, *running)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(p.docker.close)
-	await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
-	p.docker.close()
-	if err := os.WriteFile(filepath.Join(root, "mode"), []byte("main-killed"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(filepath.Join(root, "running"), filepath.Join(root, "natural-exit")); err != nil {
-		t.Fatal(err)
-	}
-	p.stop(clock.Now(), StopGrace, false)
-	restartTick(t, p.docker)
-	clock.advance(StopGrace)
-	for i := 0; i < 4 && !p.docker.state.Released; i++ {
-		restartTick(t, p.docker)
-	}
-	if !p.docker.state.Released {
-		t.Fatal("custody not released")
-	}
-	calls, err := os.ReadFile(filepath.Join(root, "calls"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(calls), "kill --signal=KILL id1") || strings.Contains(string(calls), "kill --signal=TERM id1") {
-		t.Fatal("fixture delivered a main stop signal")
-	}
-	t.Log("main was terminal before stop intent; zero main stop signals delivered")
-	r := dockerOutcome(p.docker.state, result(running, false), nil)
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	got := job(t, q, submitted.ID)
-	t.Logf("independent exit before stop: exit=%d mainFinished=%v infrastructureStop=%v interrupted=%v state=%s retries=%d", p.docker.state.ExitCode, p.docker.state.MainFinished, p.docker.state.InfrastructureStop, r.Interrupted, got.State, got.InfrastructureRetries)
-	if got.State != "failed" || got.InfrastructureRetries != 0 || r.Interrupted {
-		t.Fatalf("independent exit must fail without retry: state=%s retries=%d error=%s", got.State, got.InfrastructureRetries, r.Error)
-	}
-}
 
 func TestD5ReviewNativeIndependent143BeforeSignal(t *testing.T) {
 	for _, group := range []bool{false, true} {

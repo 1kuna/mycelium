@@ -114,11 +114,11 @@ printf 'GPU-one, 42, N/A\n'
 	// #424: a declared plain CUDA job with no workload key used to skip
 	// device sampling entirely, even though GB10 compute-app counters work.
 	j := Job{Spec: Spec{Needs: ResourceNeeds{MemoryGB: 40, HostMemoryGB: 24, Platform: Platform{Required: []string{"cuda"}}}}}
-	finish := w.observeAttemptMemory(a, j, nil)
+	finish := w.observeAttemptMemoryEvery(a, j, nil, 50*time.Millisecond)
 	defer finish()
 	select {
 	case <-f.observed:
-	case <-time.After(25 * time.Second):
+	case <-time.After(testWaitTimeout):
 		t.Fatal("empty or timed-out GPU query permanently disabled sampling")
 	}
 	p := finish()

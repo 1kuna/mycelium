@@ -8,19 +8,21 @@ Fake inventory never qualifies native hardware. The [worker protocol](#current-w
 and [storage integration](#backed-storage-admission-integration) are developer
 contracts, with unsupported/native gaps explicit.
 
-Choose `BASE` explicitly when running `./scripts/gate.sh quick BASE`; the script's
-historical default is not a suitable change base for every branch. Known heavy
+Quick defaults to the merge base of the current branch and `origin/main`;
+pass `BASE` explicitly to check a wider batch. Known heavy
 runs use the project's Mycelium submission path. Inspect host load/memory/disk
 before local heavy work; do not exceed two full race suites on one Mac.
 
 ## Laptop test gates
 
 Run `./scripts/gate.sh` (or `./scripts/gate.sh quick BASE`) for a change. The
-base defaults to `origin/integ/108`; select the commit before your change when
-working elsewhere. Quick builds the CLI and every release target, vets all Go
-packages, and race-tests changed packages with test names from matching file
+base defaults to the branch merge base with `origin/main`. Quick builds the CLI
+and every release target, vets all Go packages, and race-tests changed packages with test names from matching file
 prefixes, plus tests that directly reference changed exported symbols (using
-diff hunk function names and changed declarations). Changed non-Go files, including
+diff hunk function names and changed declarations). Exported methods on private
+receiver types match the concrete type rather than generic interface names such
+as `Read` and `Close`, which otherwise select unrelated readers and entire dev
+journeys. Changed non-Go files, including
 docs/examples, also select tests with direct quoted paths relative to their Go
 package. Helper-only or computed paths still need explicit focused testing or
 `full`. Production Go edits in

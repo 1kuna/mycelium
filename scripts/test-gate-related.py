@@ -12,6 +12,31 @@ spec.loader.exec_module(related)
 
 
 class RelatedTests(unittest.TestCase):
+    def test_private_interface_methods_match_the_receiver(self):
+        previous = os.getcwd()
+        with tempfile.TemporaryDirectory() as directory:
+            os.chdir(directory)
+            try:
+                def git(*args):
+                    subprocess.run(['git', *args], check=True, capture_output=True)
+                git('init', '-q')
+                pathlib.Path('reader.go').write_text(
+                    'package p\ntype preservationReader struct{}\n'
+                    'func (r *preservationReader) Close() error { return nil }\n')
+                pathlib.Path('reader_test.go').write_text(
+                    'package p\nfunc TestReader(t *testing.T) { helper(t) }\n')
+                pathlib.Path('consumer_test.go').write_text(
+                    'package p\nfunc TestReaderConsumer(t *testing.T) { var r preservationReader; r.Close() }\n'
+                    'func TestUnrelated(t *testing.T) { file.Close() }\n')
+                git('add', '.')
+                git('-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+                    'commit', '-qm', 'base')
+                # A removed private adapter must not select every io.Closer.
+                git('rm', 'reader.go', 'reader_test.go')
+                self.assertEqual(related.select('HEAD'), [('.', '^(TestReaderConsumer)$')])
+            finally:
+                os.chdir(previous)
+
     def test_example_only_changes_select_direct_readers(self):
         previous = os.getcwd()
         with tempfile.TemporaryDirectory() as directory:

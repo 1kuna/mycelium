@@ -3,7 +3,7 @@
 set -euo pipefail
 umask 022
 mode=${1:-quick}
-base=${2:-origin/integ/108}
+base=${2:-}
 budgeted=${MYCE_GATE_BUDGET:-}
 case "$mode" in quick|full) ;; *) echo 'usage: scripts/gate.sh [quick [BASE]|full]' >&2; exit 2;; esac
 repo=$(cd "$(dirname "$0")/.." && pwd)
@@ -45,6 +45,8 @@ trap cleanup EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
 if [[ $mode == quick ]]; then
+  # Compare this branch's changes, excluding later unrelated main merges.
+  if [[ -z $base ]]; then base=$(git merge-base HEAD origin/main); fi
   git rev-parse --verify "$base" >/dev/null
   python3 scripts/gate-related.py "$base" > "$scratch/selection"
 fi
