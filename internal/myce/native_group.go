@@ -694,7 +694,7 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 		env["MYCE_MEMORY_LIMIT_BYTES"] = strconv.FormatInt(m.memory.bytes, 10)
 	}
 	cmd.Env = environmentList(env)
-	cmd.Args = append(slices.Clone(cmd.Args[:4]), environmentCommand(cmd.Args[4:], cmd.Env)...)
+	cmd.Args = append(slices.Clone(cmd.Args[:4]), sharedHostCommand(environmentCommand(cmd.Args[4:], cmd.Env), g.worker.Machine.SharedHost)...)
 	if err := g.metricWorker().isolateNativeAttempt(&g.p.job, g.namespace, cmd, g.dir, work, env, g.isolationPorts, m.Name == "main"); err != nil {
 		return err
 	}

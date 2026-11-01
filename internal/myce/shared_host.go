@@ -112,6 +112,17 @@ func validHostMemoryObservation(o *HostMemoryObservation) bool {
 	return o != nil && validMemoryValue(o.TotalGB) && o.TotalGB > 0 && validMemoryValue(o.UsedGB) && o.UsedGB <= o.TotalGB && validMemoryValue(o.MyceliumGB) && o.MyceliumGB <= o.UsedGB
 }
 
+// Establish Darwin payload priority after its execution gate opens. Successful
+// external requests on the launching shell do not always survive to the payload.
+// Standard tools apply nice and inheritable background policy from the payload
+// itself without changing the worker's control process.
+func sharedHostCommand(argv []string, p *SharedHostProfile) []string {
+	if p == nil || runtime.GOOS != "darwin" {
+		return argv
+	}
+	return append([]string{"/usr/bin/nice", "-n", "10", "/usr/sbin/taskpolicy", "-b"}, argv...)
+}
+
 var sharedHostSetBackgroundPriority = func(pid int) error {
 	// Darwin sys/resource.h: PRIO_DARWIN_PROCESS, PRIO_DARWIN_BG.
 	return syscall.Setpriority(4, pid, 0x1000)
@@ -137,8 +148,8 @@ func applySharedHostPriority(pid int, p *SharedHostProfile) error {
 		}
 	}
 	if runtime.GOOS == "darwin" {
-		// Darwin sys/resource.h. Apply only to the gated payload PID;
-		// background CPU/I/O/timer/network policy survives fork/exec.
+		// Apply to the gated process too. sharedHostCommand establishes
+		// policy again from inside the payload before executing its command.
 		if err := sharedHostSetBackgroundPriority(pid); err != nil {
 			log.Printf("warning: shared host background task policy for payload pid %d: %v", pid, err)
 		}
