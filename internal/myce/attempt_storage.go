@@ -24,6 +24,7 @@ type storageObserver struct {
 	stop                                           chan struct{}
 	done                                           chan struct{}
 	once                                           sync.Once
+	walkDir                                        func(string, fs.WalkDirFunc) error // Defaults to filepath.WalkDir.
 }
 
 type storageScan struct{ allocated, scratch, spool, checkpoint, metadata, files uint64 }
@@ -32,8 +33,12 @@ type storageInode struct{ dev, ino uint64 }
 func (o *storageObserver) scan() (storageScan, error) {
 	var out storageScan
 	seen := map[storageInode]bool{}
+	walkDir := o.walkDir
+	if walkDir == nil {
+		walkDir = filepath.WalkDir
+	}
 	walk := func(root string, kind string) error {
-		return filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		return walkDir(root, func(path string, d fs.DirEntry, err error) error {
 			if os.IsNotExist(err) {
 				return nil
 			}
@@ -41,6 +46,9 @@ func (o *storageObserver) scan() (storageScan, error) {
 				return err
 			}
 			info, err := d.Info()
+			if os.IsNotExist(err) {
+				return nil // Publication cleanup can remove an entry after discovery.
+			}
 			if err != nil {
 				return err
 			}
