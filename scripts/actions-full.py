@@ -37,24 +37,30 @@ def command(*args):
 
 
 def submission_failure(reply):
-    """Publish fixed classifications and numeric capacity only, never raw reasons."""
+    """Publish fixed classifications only, never raw reasons or host capacity."""
     if reply.returncode == 78:
         try:
             receipt = json.loads(reply.stdout)
             if receipt.get('refusal_code') == 'no_qualified_target':
-                reason = receipt.get('refusal_reason', '')
-                match = re.fullmatch(
-                    r'host memory need ([0-9]+(?:\.[0-9]+)?) GiB '
-                    r'\([0-9.]+ \+ [0-9.]+ slack\) exceeds allowance '
-                    r'([0-9]+(?:\.[0-9]+)?) GiB on .+', reason)
-                if match:
-                    need, allowance = map(float, match.groups())
-                    return (f'no qualified target: host memory need {need:.3f} GiB '
-                            f'exceeds allowance {allowance:.3f} GiB')
                 return 'no qualified target; inspect private receipt for eligibility requirements'
         except (ValueError, TypeError, AttributeError):
             pass
     return f'submission unavailable (exit {reply.returncode})'
+
+
+def failure_state(job):
+    """Expose only a confirmed OOM on the terminal attempt, never job details."""
+    reply = command('status', '--json', job)
+    try:
+        record = json.loads(reply.stdout)
+        if reply.returncode == 0 and record.get('state') == 'failed':
+            for attempt in record.get('attempt_history', []):
+                if (attempt.get('attempt') == record.get('attempt') and
+                        attempt.get('out_of_memory') is True):
+                    return 'failed (out of memory)'
+    except (ValueError, TypeError, AttributeError):
+        pass
+    return 'failed'
 
 
 def run(root, sha, scratch):
@@ -96,6 +102,8 @@ def run(root, sha, scratch):
     for platform in PLATFORMS:
         job = jobs.get(platform)
         state = states.get(job, refusals.get(platform, 'unavailable'))
+        if state == 'failed':
+            state = failure_state(job)
         if state == 'succeeded':
             destination = scratch / f'{platform}-result'
             reply = command('result', job, '--out', str(destination))

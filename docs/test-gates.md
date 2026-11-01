@@ -111,8 +111,11 @@ rounded up: 6.246254 GiB becomes 7 GiB, with ordinary launch slack additional.
 This margin prevents ceiling pressure or OOM from observed run-to-run variation
 and growth between samples, at a cost of 2.527107 GiB above the largest total
 peak. It is an observed envelope; revisit it if the suite grows, hits its ceiling,
-or approaches the budget. Unhinted `memory: auto` intentionally explores available
-host headroom after unusable constrained evidence, which made this repeatedly
+or approaches the budget. On Linux workers with enforced cgroups, the memory
+ceiling includes the declaration and configured launch slack; a confirmed OOM
+on the final attempt appears as `failed (out of memory)` in CI. Other workers,
+including Darwin, use admission-only accounting. Unhinted `memory: auto`
+intentionally explores available host headroom after unusable constrained evidence, which made this repeatedly
 measured CPU gate reserve scarce accelerator capacity; see
 [#559](https://github.com/1kuna/mycelium/issues/559) for evidence and follow-up.
 

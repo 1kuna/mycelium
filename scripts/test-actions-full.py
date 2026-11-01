@@ -19,7 +19,7 @@ SHA = 'a' * 40
 
 
 class ActionsFullTest(unittest.TestCase):
-    def exercise(self, linux='succeeded', submission_failure=False, bad_marker=False, refusal=None):
+    def exercise(self, linux='succeeded', submission_failure=False, bad_marker=False, refusal=None, status_record=None):
         submitted, waited, results = [], [], []
 
         def command(*args):
@@ -53,6 +53,8 @@ class ActionsFullTest(unittest.TestCase):
                 path = Path(args[-1])
                 path.mkdir()
                 (path / 'gate-result.txt').write_text('wrong\n' if bad_marker else 'gate full: exit=0\n')
+            elif args[0] == 'status':
+                output = json.dumps(status_record or {})
             else:
                 self.fail(args)
             return subprocess.CompletedProcess(args, code, output, 'PRIVATE ERROR')
@@ -66,6 +68,8 @@ class ActionsFullTest(unittest.TestCase):
             self.assertIn('profiles lack a negative host selector', public.getvalue())
             self.assertIn('https://github.com/1kuna/mycelium/issues/527', public.getvalue())
             self.assertNotIn('PRIVATE', summary + public.getvalue())
+            if status_record and status_record.get('attempt_history', [{}])[-1].get('out_of_memory'):
+                self.assertIn('failed (out of memory)', summary + public.getvalue())
             if refusal is not None:
                 self.assertIn('no qualified target', summary)
                 self.assertIn('no qualified target', public.getvalue())
@@ -82,7 +86,23 @@ class ActionsFullTest(unittest.TestCase):
 
     def test_failure_does_not_skip_other_platform(self):
         self.assertEqual(self.exercise(linux='failed'), (1, ['darwin', 'linux'], ['darwin']))
+        self.assertEqual(self.exercise(linux='failed', status_record={
+            'state': 'failed', 'attempt': 2, 'attempt_history': [
+                {'attempt': 1, 'out_of_memory': False},
+                {'attempt': 2, 'out_of_memory': True, 'reason': 'PRIVATE'},
+            ]}), (1, ['darwin', 'linux'], ['darwin']))
         self.assertEqual(self.exercise(submission_failure=True), (1, ['linux'], ['linux']))
+
+    def test_oom_requires_current_attempt_and_readable_status(self):
+        for output, code in [
+            (json.dumps({'state': 'failed', 'attempt': 2, 'attempt_history': [
+                {'attempt': 1, 'out_of_memory': True}]}), 0),
+            ('PRIVATE malformed', 0),
+            (json.dumps({'state': 'failed', 'attempt': 1, 'attempt_history': [
+                {'attempt': 1, 'out_of_memory': True}]}), 1),
+        ]:
+            with patch.object(ci, 'command', return_value=subprocess.CompletedProcess([], code, output)):
+                self.assertEqual(ci.failure_state('linux'), 'failed')
 
     def test_permanent_memory_refusal_is_clear_and_private(self):
         refusal = {
@@ -93,7 +113,7 @@ class ActionsFullTest(unittest.TestCase):
         }
         reply = subprocess.CompletedProcess([], 78, json.dumps(refusal), 'PRIVATE ERROR')
         self.assertEqual(ci.submission_failure(reply),
-                         'no qualified target: host memory need 9.211 GiB exceeds allowance 8.000 GiB')
+                         'no qualified target; inspect private receipt for eligibility requirements')
         self.assertEqual(self.exercise(submission_failure=True, refusal=refusal),
                          (1, ['linux'], ['linux']))
         refusal['refusal_reason'] = 'PRIVATE unsupported environment or host path'
