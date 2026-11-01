@@ -166,6 +166,9 @@ func (q *Queue) copyPlan(m *Machine) ([]CopyTask, []CopyTask, []string) {
 				for _, target := range targets {
 					if q.modelFitsMachine(model, target) {
 						l := q.issuePreparation(target, "copy", name)
+						if l.Attempt == "" {
+							continue
+						}
 						plan = append(plan, CopyTask{Model: name, Score: scores[name], Launch: &l})
 						break // The verified cache is shared by every component.
 					}

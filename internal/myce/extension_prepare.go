@@ -54,7 +54,7 @@ func (q *Queue) extensionPreparationPlan(m *Machine) []EnvironmentRecipe {
 	var selected *Job
 	var extension *Extension
 	for _, j := range q.liveJobs() {
-		if j.State != "queued" || !j.Spec.extensionJob() || !q.placementAllowed(j, m) {
+		if j.State != "queued" || !j.Spec.extensionJob() || !q.evaluateAdmission(admissionRequest{Job: j, Target: m, Phase: admissionPreparationOffer}).Allowed {
 			continue
 		}
 		for i := range j.Extensions {
@@ -101,17 +101,20 @@ func (q *Queue) extensionPreparationPlan(m *Machine) []EnvironmentRecipe {
 	if extension == nil {
 		return nil
 	}
-	return q.extensionPreparationOffer(*extension, m)
+	return q.extensionPreparationOffer(*extension, m, selected)
 }
 
-func (q *Queue) extensionPreparationOffer(e Extension, m *Machine) []EnvironmentRecipe {
+func (q *Queue) extensionPreparationOffer(e Extension, m *Machine, demand *Job) []EnvironmentRecipe {
 	key := extensionPreparationKey(e, m)
 	for _, r := range m.EnvironmentReports {
 		if r.Key == key && (r.State == "failed" || r.State == "uploading") {
 			return nil
 		}
 	}
-	launch := q.issuePreparation(m, "environment", key)
+	launch := q.issuePreparation(m, "environment", key, demand)
+	if launch.Attempt == "" {
+		return nil
+	}
 	return []EnvironmentRecipe{{Key: key, Platform: m.GPU, Preparation: &ExtensionSelection{Name: e.Name, Version: e.Version, Digest: e.Digest}, Launch: &launch}}
 }
 

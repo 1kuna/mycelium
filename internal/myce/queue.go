@@ -103,6 +103,7 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
+	holdCalendar *holdCalendar // Immutable compiled inputs, shared by detached observations.
 	// Qualification removes occupancy, but retains diagnostic history/inventory.
 	memoryOrigin              *Queue
 	storageShadowContinuity   bool // Process-local: downtime never earns shadow evidence.
@@ -273,6 +274,11 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		return nil, err
 	}
 	if err = q.loadPersistedState(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	q.holdCalendar, err = compileHoldCalendar(q.effectivePriorityPolicy().ScheduledHolds)
+	if err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -1340,7 +1346,9 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 			if m.BenchmarkPending || c.BenchmarkDone != "" {
 				if m.BenchmarkPending && q.hostLaunchAllowed(&m, m.Session) && q.benchmarkIdle(&m) && !q.benchmarkDeviceAdmissionBlocked(&m) {
 					l := q.issuePreparation(&m, "benchmark", "onboarding")
-					reply.BenchmarkPlan = &l
+					if l.Attempt != "" {
+						reply.BenchmarkPlan = &l
+					}
 					copy := cloneMachine(&m)
 					reply.BenchmarkMachine = &copy
 					for _, point := range q.s.WorkObservations {
@@ -1847,7 +1855,7 @@ func (q *Queue) snapshot(forStatus bool, contexts ...context.Context) (Snapshot,
 
 // Projection runs against either the locked queue or a fully detached read view.
 func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
-	out := Snapshot{HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), QueueRelease: CurrentRelease(), HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
+	out := Snapshot{ScheduledHolds: q.scheduledHoldStatuses(), HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), QueueRelease: CurrentRelease(), HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
 	for _, s := range q.s.ModelSlots {
 		copy := *s
 		model, _ := q.model(s.Model)
@@ -2009,6 +2017,11 @@ func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
 
 func (q *Queue) projectJob(stored *Job, order map[string]int, reasons map[string]string, forStatus bool) *Job {
 	value := *stored
+	if stored.Hold != nil {
+		h := *stored.Hold
+		h.Active = !terminal(stored.State) && !cancelled(stored) && h.active(q.clock.Now())
+		value.Hold = &h
+	}
 	j := &value
 	if stored.Delivery != nil {
 		d := *stored.Delivery

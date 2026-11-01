@@ -286,6 +286,7 @@ func (q *Queue) fanOutCandidateWithResources(j *Job, m *Machine, resources map[b
 func (q *Queue) assignFanOut(selected *Job, m *Machine) *Job {
 	parent := q.touchJob(selected.ID)
 	copy := cloneJob(selected)
+	copy.Hold = nil // A child has its own admission revision.
 	copy.Spec.FanOut = nil
 	copy.Spec.SubmissionKey = ""
 	copy.FanOut = nil

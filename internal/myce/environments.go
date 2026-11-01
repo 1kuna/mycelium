@@ -359,7 +359,7 @@ func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
 		}
 		if j := q.s.Jobs[l.Demand]; j != nil && j.State == "queued" && !cancelled(j) {
 			if e := qualifiedExtension(j, m); e != nil {
-				return q.extensionPreparationOffer(*e, m)
+				return q.extensionPreparationOffer(*e, m, j)
 			}
 			r := j.EnvironmentRecipes[m.GPU]
 			if r.Key == l.Key {
@@ -373,7 +373,7 @@ func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
 	j := q.candidate(m, nil, scan)
 	if j != nil && j.Spec.extensionJob() && !environmentReady(j, m) {
 		if e := qualifiedExtension(j, m); e != nil {
-			return q.extensionPreparationOffer(*e, m)
+			return q.extensionPreparationOffer(*e, m, j)
 		}
 	}
 	if j == nil || environmentReady(j, m) {
@@ -390,7 +390,10 @@ func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
 		}
 	}
 	r := j.EnvironmentRecipes[m.GPU]
-	l := q.issuePreparation(m, "environment", r.Key)
+	l := q.issuePreparation(m, "environment", r.Key, j)
+	if l.Attempt == "" {
+		return nil
+	}
 	r.Launch = &l
 	return []EnvironmentRecipe{r}
 }

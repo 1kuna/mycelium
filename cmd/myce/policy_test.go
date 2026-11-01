@@ -161,3 +161,56 @@ func TestPolicyCLIExplicitConfigChangeAfterRestart(t *testing.T) {
 		})
 	}
 }
+
+func TestPolicyCLIScheduledHolds(t *testing.T) {
+	q, err := myce.Open(filepath.Join(t.TempDir(), "queue.db"), t.TempDir(), &bindClock{now: time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	server := httptest.NewServer(myce.API{Queue: q, Token: "owner-test"}.Handler())
+	defer server.Close()
+	t.Setenv("MYCE_QUEUE", server.URL)
+	t.Setenv("MYCE_TOKEN", "owner-test")
+	body := `version: 1
+tiers:
+  - name: shared
+    selectors: ['*/*']
+host_roles:
+  synthetic-host: [accelerator]
+scheduled_holds:
+  - id: synthetic-window
+    enabled: true
+    beneficiary: 'sample/production'
+    role: accelerator
+    reason: owner configured window
+    timezone: UTC
+    windows:
+      - weekdays: [1]
+        start: '12:00'
+        end: '13:00'
+`
+	file := filepath.Join(t.TempDir(), "policy.yaml")
+	if err := os.WriteFile(file, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	if err := policyCommand([]string{"set", file, "--if-revision", "0"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	if err := policyCommand([]string{"get", "--yaml"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	p, err := myce.ReadPriorityPolicy(strings.NewReader(out.String()))
+	if err != nil || len(p.ScheduledHolds) != 1 || p.ScheduledHolds[0].ID != "synthetic-window" || p.HostRoles["synthetic-host"][0] != "accelerator" {
+		t.Fatal(out.String(), err)
+	}
+	if err := policyCommand([]string{"set", file, "--if-revision", "0"}, &out); err == nil {
+		t.Fatal("stale schedule overwritten")
+	}
+	out.Reset()
+	if err := policyCommand([]string{"suggest-holds"}, &out); err != nil || strings.TrimSpace(out.String()) != "[]" {
+		t.Fatal(out.String(), err)
+	}
+}

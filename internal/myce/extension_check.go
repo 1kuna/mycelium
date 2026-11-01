@@ -22,6 +22,8 @@ type ExtensionCheckRequest struct {
 	Timeout string `json:"timeout,omitempty" yaml:"timeout,omitempty"`
 	// Automatic binds a worker-requested check to its prepared native identity.
 	// Manual checks keep their existing request and report contract.
+	// Demand is the useful logical job, revalidated by the queue, never a blanket exemption.
+	Demand    string           `json:"demand,omitempty" yaml:"-"`
 	Automatic *ExtensionReport `json:"automatic,omitempty" yaml:"automatic,omitempty"`
 }
 

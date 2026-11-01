@@ -103,7 +103,7 @@ func (q *Queue) acquireReservation(request ReservationRequest) (Reservation, err
 		}
 	}
 	for _, demand := range q.liveJobs() {
-		if demand.ID != j.ID && demand.State == "queued" && demand.ProductionHost == p.Host {
+		if q.jobHoldReason(demand) == "" && demand.ID != j.ID && demand.State == "queued" && demand.ProductionHost == p.Host {
 			return out, reservationRefusal("production already waiting on this host; reserve after its demand settles")
 		}
 	}

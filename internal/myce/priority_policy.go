@@ -19,8 +19,10 @@ type PriorityTier struct {
 	Selectors []string `json:"selectors" yaml:"selectors"`
 }
 type PriorityPolicy struct {
-	Version int            `json:"version" yaml:"version"`
-	Tiers   []PriorityTier `json:"tiers" yaml:"tiers"`
+	ScheduledHolds []ScheduledHold     `json:"scheduled_holds" yaml:"scheduled_holds"`
+	HostRoles      map[string][]string `json:"host_roles" yaml:"host_roles"`
+	Version        int                 `json:"version" yaml:"version"`
+	Tiers          []PriorityTier      `json:"tiers" yaml:"tiers"`
 	// Keep an explicit empty map on the wire: nil preserves settings, {} clears them.
 	Projects map[string]ProjectPolicy `json:"projects" yaml:"projects"`
 }
@@ -82,6 +84,9 @@ func normalizeJobClass(s *Spec) error {
 	return nil
 }
 func (p PriorityPolicy) validate() ([]string, error) {
+	if err := validateScheduledHolds(p); err != nil {
+		return nil, err
+	}
 	if p.Version != 1 || len(p.Tiers) == 0 {
 		return nil, errors.New("policy requires version 1 and ordered tiers")
 	}
@@ -205,7 +210,7 @@ func (q *Queue) PriorityPolicy(requestContexts ...context.Context) PriorityPolic
 	return q.priorityPolicyRecord()
 }
 func (q *Queue) priorityPolicyRecord() PriorityPolicyRecord {
-	p := q.effectivePriorityPolicy()
+	p := cloneHoldPolicy(q.effectivePriorityPolicy())
 	p.Tiers = slices.Clone(p.Tiers)
 	for i := range p.Tiers {
 		p.Tiers[i].Selectors = slices.Clone(p.Tiers[i].Selectors)
@@ -216,14 +221,22 @@ func (q *Queue) priorityPolicyRecord() PriorityPolicyRecord {
 		v.ProductionParityHosts = cloneProductionParityHosts(v.ProductionParityHosts)
 		p.Projects[name] = v
 	}
-	warnings, _ := p.validate()
+	var warnings []string
+	if q.s.PriorityPolicy != nil {
+		warnings = slices.Clone(q.s.PriorityPolicy.Warnings)
+	}
 	return PriorityPolicyRecord{q.policyRevision(), p, warnings}
 }
 func (q *Queue) SetPriorityPolicy(expected uint64, p PriorityPolicy, requestContexts ...context.Context) (PriorityPolicyRecord, error) {
 	requestCtx := requestContext(requestContexts)
 
 	var out PriorityPolicyRecord
-	if _, err := p.validate(); err != nil {
+	warnings, err := p.validate()
+	if err != nil {
+		return out, err
+	}
+	calendar, err := compileHoldCalendar(p.ScheduledHolds)
+	if err != nil {
 		return out, err
 	}
 	// Reuse the existing project settings, validation and store.
@@ -248,7 +261,8 @@ func (q *Queue) SetPriorityPolicy(expected uint64, p PriorityPolicy, requestCont
 		p.Tiers[i].Selectors = slices.Clone(p.Tiers[i].Selectors)
 	}
 	p.Projects = nil
-	err := q.updateRequest(requestCtx, func() error {
+	p = cloneHoldPolicy(p)
+	err = q.updateRequest(requestCtx, func() error {
 		if expected == ^uint64(0) {
 			return errors.New("policy revision exhausted")
 		}
@@ -260,7 +274,24 @@ func (q *Queue) SetPriorityPolicy(expected uint64, p PriorityPolicy, requestCont
 				return err
 			}
 		}
-		q.s.PriorityPolicy = &PriorityPolicyRecord{Revision: expected + 1, Policy: p}
+		previous := q.effectivePriorityPolicy()
+		if p.ScheduledHolds == nil {
+			p.ScheduledHolds = previous.ScheduledHolds
+		}
+		if p.HostRoles == nil {
+			p.HostRoles = previous.HostRoles
+		}
+		for i := range p.ScheduledHolds {
+			if p.ScheduledHolds[i].Resource.Selector != "" {
+				resolved, err := q.resolveComponentSelector(p.ScheduledHolds[i].Resource.Selector)
+				if err != nil {
+					return err
+				}
+				p.ScheduledHolds[i].Resource = resolved
+			}
+		}
+		q.retainHoldCalendar(calendar)
+		q.s.PriorityPolicy = &PriorityPolicyRecord{Revision: expected + 1, Policy: p, Warnings: warnings}
 		if projects != nil {
 			q.s.Policies = projects
 		}

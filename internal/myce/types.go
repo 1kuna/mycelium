@@ -370,6 +370,7 @@ type SpecProjection struct {
 }
 
 type Job struct {
+	Hold                   *JobHold              `json:"hold,omitempty"`
 	LocalOutputs           *TaskOutputCustody    `json:"local_outputs,omitempty"`
 	StorageAllocation      *StorageAllocation    `json:"storage_allocation,omitempty"`
 	StorageEnvelope        *JobStorageEnvelope   `json:"storage_envelope,omitempty"`
@@ -687,12 +688,13 @@ type HoldDetail struct {
 }
 
 type Snapshot struct {
-	StorageObservations []StorageObservation `json:"storage_observations,omitempty"`
-	JobsPage            *StatusJobsPage      `json:"jobs_page,omitempty"`
-	RequestLatencies    []RequestLatency     `json:"request_latencies,omitempty"`
-	Reservations        []Reservation        `json:"reservations,omitempty"`
-	ComponentExclusions []ComponentExclusion `json:"component_exclusions,omitempty"`
-	DeviceMaintenance   []DeviceMaintenance  `json:"device_maintenance,omitempty"`
+	ScheduledHolds      []ScheduledHoldStatus `json:"scheduled_holds,omitempty"`
+	StorageObservations []StorageObservation  `json:"storage_observations,omitempty"`
+	JobsPage            *StatusJobsPage       `json:"jobs_page,omitempty"`
+	RequestLatencies    []RequestLatency      `json:"request_latencies,omitempty"`
+	Reservations        []Reservation         `json:"reservations,omitempty"`
+	ComponentExclusions []ComponentExclusion  `json:"component_exclusions,omitempty"`
+	DeviceMaintenance   []DeviceMaintenance   `json:"device_maintenance,omitempty"`
 
 	HealthAlerts   []HealthAlert        `json:"health_alerts,omitempty"`
 	QueueRelease   RunningRelease       `json:"queue_release"`

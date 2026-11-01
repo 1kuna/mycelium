@@ -457,6 +457,12 @@ func reservationWaitReason(m *Machine, batchSlot bool) string {
 	return strings.Join(parts, "; ")
 }
 func (q *Queue) waitReason(j *Job) string {
+	if reason := q.jobHoldReason(q.admissionDemand(j)); reason != "" {
+		return reason
+	}
+	if reason := q.scheduledWaitReason(j); reason != "" {
+		return reason
+	}
 	if reason := q.reservationWaitReason(j); reason != "" {
 		return reason
 	}

@@ -169,53 +169,19 @@ func (q *Queue) reconcileHostReleases(c Checkin) {
 	}
 }
 
-// Placement policy is shared by batch, model, preparation and projections.
+// Compatibility seams for callers that need only a boolean. All policy and
+// diagnostic composition lives in evaluateAdmission.
 func (q *Queue) placementAllowed(j *Job, m *Machine) bool {
-	return q.placementAllowedForUse(j, m, false)
+	return q.evaluateAdmission(admissionRequest{Job: j, Target: m, Phase: admissionPlacement}).Allowed
 }
-
 func (q *Queue) placementAllowedForUse(j *Job, m *Machine, resident bool) bool {
-	return (j.Spec.Needs.cpuOnly() || !q.deviceAdmissionBlocked(m)) && q.diskHeadroomReason(j, m) == "" && q.placementPolicyAllowed(j, m, resident)
+	return q.evaluateAdmission(admissionRequest{Job: j, Target: m, Phase: admissionPlacement, Resident: resident}).Allowed
 }
-
-// Recovery retains existing execution custody. Admission-time disk estimates
-// apply only to new work: its writes may already be reflected in observed free.
 func (q *Queue) placementPolicyAllowed(j *Job, m *Machine, resident bool) bool {
-	return q.reservationAllows(j, m) && q.placementPolicyWithoutReservation(j, m, resident)
+	return q.evaluateAdmission(admissionRequest{Job: j, Target: m, Phase: admissionRecovery, Resident: resident}).Allowed
 }
-
 func (q *Queue) placementPolicyWithoutReservation(j *Job, m *Machine, resident bool) bool {
-	if j.State == "queued" && (j.Spec.Priority == "production" || j.Spec.Class == "production") && q.fleetPausesProduction() {
-		return false
-	}
-	if !dependencyReady(j) || m.Recovering || cancelled(j) || !dockerRuntimeFits(j, m) || q.maintenanceBlocked(hostID(m)) || m.HostMemoryPolicyMismatch || !logPolicyFits(j.Spec.Logs, m) {
-		return false
-	}
-	if model, ok := q.model(j.Spec.Needs.Model); ok {
-		if resident {
-			model = q.residentModel(model, m)
-		}
-		if !logPolicyFits(model.Logs, m) || !modelFenceAllows(model, m) || !q.projectAllows(model.Project, m.ID) {
-			return false
-		}
-	}
-
-	if availabilityBlocked(m) || (q.machineLimitReason(m) != "" && !(j.Machine == m.ID && j.Session == m.Session && (j.State == "running" || j.State == "stopping"))) || q.startupReleaseBlocker(hostID(m)) != "" || q.dockerBlocker(hostID(m)) != "" || !q.jobAllowsMachine(j, m.ID) {
-		return false
-	}
-	if j.ProductionHost != "" && j.ProductionHost != hostID(m) {
-		return false
-	}
-	if q.productionAdmissionReason(j, m) != "" {
-		return false
-	}
-	if !q.held(hostID(m)) {
-		return true
-	}
-	if j.Spec.Priority != "production" {
-		return false
-	}
-	return q.hostBlockers(hostID(m)) == ""
+	return q.evaluateAdmission(admissionRequest{Job: j, Target: m, Phase: admissionQualificationDemand, Resident: resident}).Allowed
 }
 func (q *Queue) hostBlockers(host string) string {
 	text, _ := q.hostBlockerState(host)
@@ -460,7 +426,7 @@ func (q *Queue) productionTarget(j *Job, call *ModelCall) string {
 			model, _ := q.model(call.Model)
 			diskReason = q.modelLoadDiskHeadroomReason(model, m)
 		}
-		if !q.reservationAllows(j, m) || diskReason != "" || q.dockerBlocker(hostID(m)) != "" || q.unreported[m.ID] || !q.jobAllowsMachine(j, m.ID) {
+		if !q.evaluateAdmission(admissionRequest{Job: j, Target: m, Phase: admissionTakeover}).Allowed || diskReason != "" || q.dockerBlocker(hostID(m)) != "" || q.unreported[m.ID] || !q.jobAllowsMachine(j, m.ID) {
 			continue
 		}
 		for _, candidate := range q.memoryCandidates(j, m) {
@@ -532,7 +498,7 @@ func (q *Queue) maintainHolds() {
 		if j.Spec.FanOut != nil && j.FanOut != nil && j.FanOut.Next > 0 {
 			continue
 		}
-		if dependencyReady(j) && j.Spec.Priority == "production" && !terminal(j.State) && !cancelled(j) && !(j.State == "queued" && expired(j.Spec.GiveUpAt, now)) {
+		if q.jobHoldReason(j) == "" && !q.scheduledDemandBlocked(j) && dependencyReady(j) && j.Spec.Priority == "production" && !terminal(j.State) && !cancelled(j) && !(j.State == "queued" && expired(j.Spec.GiveUpAt, now)) {
 			jobs = append(jobs, j)
 		}
 	}
@@ -561,7 +527,7 @@ func (q *Queue) maintainHolds() {
 		demand[j.ProductionHost] = true
 	}
 	for _, c := range q.calls {
-		if c.Priority == "production" && c.Error == "" {
+		if c.Priority == "production" && c.Error == "" && (c.StartedAt != nil || !q.scheduledDemandBlocked(callJob(c))) {
 			if c.ProductionHost == "" {
 				j := callJob(c)
 				model, _ := q.model(c.Model)

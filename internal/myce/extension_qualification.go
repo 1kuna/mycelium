@@ -13,6 +13,7 @@ import (
 // ordinary frozen check job, which still needs admission and launch authority.
 type ExtensionQualificationPlan struct {
 	Machine string          `json:"machine"`
+	Demand  string          `json:"demand"`
 	Report  ExtensionReport `json:"report"`
 }
 
@@ -49,45 +50,54 @@ func (q *Queue) extensionQualificationDemand(e Extension, m *Machine) bool {
 // In particular, plain commands cannot demand extension qualification. The
 // optional selection keeps authoritative single-check validation equally cheap.
 // This map belongs only to this locked pass; it never survives a queue mutation.
-func (q *Queue) extensionQualificationDemands(m *Machine, only *Extension) map[string]bool {
-	demand := map[string]bool{}
-	// A new admission reservation cannot revoke useful demand and cancel a
-	// check that already Started. New check offers/submissions gate separately.
-	for _, j := range q.liveJobs() {
-		if j.State != "queued" || j.Spec.ExtensionCheck != nil || len(j.Extensions) == 0 {
+func (q *Queue) qualificationDemandEligible(j *Job, e Extension, m *Machine, execution ...*Job) bool {
+	if j == nil || j.State != "queued" || j.Spec.ExtensionCheck != nil || len(j.Extensions) == 0 || j.Spec.Resumable && !e.Resumable {
+		return false
+	}
+	var accepted *Job
+	if len(execution) > 0 {
+		accepted = execution[0]
+	}
+	for _, candidate := range extensionJobs(j, m, false) {
+		if !slices.ContainsFunc(candidate.Extensions, func(selected Extension) bool { return selected.Digest == e.Digest }) {
 			continue
 		}
-		for _, candidate := range extensionJobs(j, m, false) {
-			eligible := func(e Extension) bool {
-				return (!j.Spec.Resumable || e.Resumable) && (only == nil || e.Digest == only.Digest)
-			}
-			if !slices.ContainsFunc(candidate.Extensions, eligible) {
+		if q.diskHeadroomReason(candidate, m) == "" && q.evaluateAdmission(admissionRequest{Job: candidate, Target: m, Phase: admissionQualificationDemand, Execution: accepted}).Allowed && deviceAllowed(candidate, m) {
+			return true
+		}
+	}
+	return false
+}
+func (q *Queue) extensionQualificationJobs(m *Machine, only *Extension) map[string]*Job {
+	demand := map[string]*Job{}
+	for _, j := range q.liveJobs() {
+		for _, e := range j.Extensions {
+			if only != nil && e.Digest != only.Digest {
 				continue
 			}
-			if q.diskHeadroomReason(candidate, m) != "" || !q.placementPolicyWithoutReservation(candidate, m, false) || !deviceAllowed(candidate, m) {
-				continue
-			}
-			for _, selected := range candidate.Extensions {
-				if eligible(selected) {
-					demand[selected.Digest] = true
-				}
-			}
-			if only != nil && demand[only.Digest] {
-				return demand
+			if q.qualificationDemandEligible(j, e, m) && (demand[e.Digest] == nil || q.before(j, demand[e.Digest], m)) {
+				demand[e.Digest] = j
 			}
 		}
 	}
 	return demand
 }
+func (q *Queue) extensionQualificationDemands(m *Machine, only *Extension) map[string]bool {
+	out := map[string]bool{}
+	for digest := range q.extensionQualificationJobs(m, only) {
+		out[digest] = true
+	}
+	return out
+}
 
 func (q *Queue) extensionQualificationPlan(m *Machine) []ExtensionQualificationPlan {
-	if !q.reservationAllows(nil, m) || q.deviceAdmissionBlocked(m) || !q.hostLaunchAllowed(m, m.Session) {
+	if !q.evaluateAdmission(admissionRequest{Target: m, Phase: admissionHost, Session: m.Session}).Allowed {
 		return nil
 	}
 	var plans []ExtensionQualificationPlan
-	demand := q.extensionQualificationDemands(m, nil)
+	demand := q.extensionQualificationJobs(m, nil)
 	for _, e := range q.s.Extensions {
-		if !demand[e.Digest] {
+		if demand[e.Digest] == nil || !q.evaluateAdmission(admissionRequest{Job: demand[e.Digest], Target: m, Phase: admissionQualificationOffer}).Allowed {
 			continue
 		}
 		view, ok := e.forMachine(m)
@@ -112,7 +122,7 @@ func (q *Queue) extensionQualificationPlan(m *Machine) []ExtensionQualificationP
 				r = newExtensionReport(e, m, work)
 				r.Setup, r.Reason = true, ""
 				r.CheckID = automaticExtensionCheckID(m.ID, r)
-				plans = append(plans, ExtensionQualificationPlan{Machine: m.ID, Report: r})
+				plans = append(plans, ExtensionQualificationPlan{Machine: m.ID, Demand: demand[e.Digest].ID, Report: r})
 				break
 			}
 		}
@@ -137,7 +147,8 @@ func (q *Queue) validateAutomaticExtensionCheck(s Spec, extensions []Extension) 
 		return ErrStale
 	}
 	for _, m := range q.machineTargets(owner) {
-		if !q.reservationAllows(nil, m) || q.deviceAdmissionBlocked(m) || !matchingExtensionReport(e, m, r) || !q.hostLaunchAllowed(m, m.Session) || !q.extensionQualificationDemand(e, m) {
+		demand := q.s.Jobs[s.ExtensionCheck.Demand]
+		if !q.qualificationDemandEligible(demand, e, m) || !q.evaluateAdmission(admissionRequest{Job: demand, Target: m, Phase: admissionQualificationOffer}).Allowed || !matchingExtensionReport(e, m, r) {
 			continue
 		}
 		view, ok := e.forMachine(m)
@@ -194,7 +205,11 @@ func (q *Queue) maintainExtensionQualifications() {
 			if owner := q.s.Machines[j.Spec.AllowedMachines[0]]; owner != nil {
 				for _, m := range q.machineTargets(owner) {
 					for _, e := range j.Extensions {
-						wanted = wanted || matchingExtensionReport(e, m, *r) && q.extensionQualificationDemand(e, m)
+						eligible := q.extensionQualificationDemand(e, m)
+						if j.Spec.ExtensionCheck.Demand != "" {
+							eligible = q.qualificationDemandEligible(q.s.Jobs[j.Spec.ExtensionCheck.Demand], e, m, j)
+						}
+						wanted = wanted || matchingExtensionReport(e, m, *r) && eligible
 					}
 				}
 			}
@@ -278,7 +293,7 @@ func (w Worker) reconcileExtensionQualification(ctx context.Context, plan Extens
 	var j Job
 	err = w.Client.Call(ctx, "POST", "/api/jobs", Spec{Name: "extension-check", Project: "extension-check", Class: "experiment", SubmissionKey: r.CheckID,
 		Extension: extensionKey(e), ExtensionDigest: e.Digest, AllowedMachines: []string{plan.Machine}, Needs: selection,
-		ExtensionCheck: &ExtensionCheckRequest{Work: r.Work, Directory: scratch, Automatic: &r}}, &j)
+		ExtensionCheck: &ExtensionCheckRequest{Work: r.Work, Directory: scratch, Automatic: &r, Demand: plan.Demand}}, &j)
 	if err != nil {
 		return err // An uncertain reply must not destroy scratch or create a new key.
 	}

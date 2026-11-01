@@ -34,26 +34,35 @@ func launchAttempt(l *HostLaunch) string {
 	}
 	return l.Attempt
 }
-func (q *Queue) issuePreparation(m *Machine, kind, key string) HostLaunch {
+func (q *Queue) issuePreparation(m *Machine, kind, key string, demands ...*Job) HostLaunch {
 	if q.s.PreparationPlans == nil {
 		q.s.PreparationPlans = map[string]HostLaunch{}
 	}
 	for _, l := range q.s.PreparationPlans {
-		if l.Machine == m.ID && l.Session == m.Session && l.Kind == kind && l.Key == key && (kind == "copy" || l.Device == targetDevice(m)) {
-			return l
+		if l.Machine == m.ID && l.Session == m.Session && l.Kind == kind && l.Key == key && (kind == "copy" || l.Device == targetDevice(m)) && (len(demands) == 0 || l.Started || demands[0] != nil && l.Demand == demands[0].ID) {
+			if q.evaluateAdmission(admissionRequest{Job: q.s.Jobs[l.Demand], Target: m, Phase: admissionPreparationOffer, Launch: &l, Session: m.Session}).Allowed {
+				return l
+			}
 		}
 	}
 	l := HostLaunch{Device: targetDevice(m), Machine: m.ID, Session: m.Session, Kind: kind, Key: key, Attempt: ID()}
-	if j := q.candidate(m, nil); j != nil {
+	var j *Job
+	if len(demands) > 0 {
+		j = demands[0]
+	}
+	if j != nil {
 		spec := Spec{Project: j.Spec.Project, Priority: j.Spec.Priority, Class: j.Spec.Class}
 		l.Spec = &spec
 		l.Demand = j.ID
+	}
+	if !q.evaluateAdmission(admissionRequest{Job: j, Target: m, Phase: admissionPreparationOffer, Launch: &l, Session: m.Session}).Allowed {
+		return HostLaunch{}
 	}
 	q.s.PreparationPlans[l.Attempt] = l
 	return l
 }
 func (q *Queue) hostLaunchAllowed(m *Machine, session string) bool {
-	return m != nil && !m.Recovering && m.Session == session && !m.Gone && !m.Leaving && !q.unreported[m.ID] && !q.maintenanceBlocked(hostID(m)) && !availabilityBlocked(m) && !m.HostMemoryPolicyMismatch
+	return q.evaluateAdmission(admissionRequest{Target: m, Phase: admissionHost, Session: session}).Allowed
 }
 func (q *Queue) AuthorizeLaunch(l HostLaunch) error {
 	return q.authorizeLaunchContext(context.Background(), l)
@@ -115,7 +124,7 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 		}
 		if l.Kind == "engine" {
 			s := q.s.ModelSlots[slotKey(l.Machine, l.Key, l.Device)]
-			if s == nil || s.Session != l.Session || s.Attempt != l.Attempt || s.State != "loading" || !q.reservationAllows(nil, allocationMachine(q.s.Machines[l.Machine], []string{l.Device})) || q.deviceAdmissionBlocked(allocationMachine(q.s.Machines[l.Machine], []string{l.Device})) {
+			if s == nil || !q.evaluateAdmission(admissionRequest{Job: &Job{Spec: q.slotSpec(s)}, Target: allocationMachine(q.s.Machines[l.Machine], []string{l.Device}), Phase: admissionPreparationAuthorize}).Allowed || s.Session != l.Session || s.Attempt != l.Attempt || s.State != "loading" {
 				reject("engine_custody")
 			}
 			return nil
@@ -126,22 +135,11 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 			return nil
 		}
 		m := q.s.Machines[l.Machine]
-		if !p.Started {
-			if j := q.s.Jobs[p.Demand]; j != nil && q.productionAdmissionReason(j, allocationMachine(m, []string{p.Device})) != "" {
-				reject("production_admission")
-				return nil
-			}
+		if d := q.evaluateAdmission(admissionRequest{Job: q.s.Jobs[p.Demand], Target: allocationMachine(m, []string{p.Device}), Phase: admissionPreparationAuthorize, Launch: &p, Session: p.Session}); !d.Allowed {
+			reject(d.Code)
+			return nil
 		}
 		if !p.Started && p.Kind == "benchmark" && q.benchmarkDeviceAdmissionBlocked(m) {
-			reject("device_admission")
-			return nil
-		}
-		if !p.Started && !q.reservationAllows(q.s.Jobs[p.Demand], allocationMachine(m, []string{p.Device})) {
-			reject("reservation")
-			return nil
-		}
-		// A model-cache copy writes shared host storage, not the selected GPU.
-		if !p.Started && p.Kind != "copy" && p.Device != "" && q.deviceAdmissionBlocked(allocationMachine(m, []string{p.Device})) {
 			reject("device_admission")
 			return nil
 		}

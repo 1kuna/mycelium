@@ -95,7 +95,7 @@ func (q *Queue) unifiedCUDAProductionReason(j *Job, m *Machine) string {
 		room += remainingAllocationGrowth(owner, j.Spec.Needs.MemoryGB, hostNeed(owner, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), q.hostMemorySamples[j.Machine][jobKey(*j)], q.clock.Now())
 	}
 	for _, demand := range q.liveJobs() {
-		if demand.State != "queued" || demand.Spec.Priority != "production" || cancelled(demand) || expired(demand.Spec.GiveUpAt, q.clock.Now()) || q.comparePriority(j.Spec, demand.Spec) <= 0 {
+		if q.jobHoldReason(demand) != "" || demand.State != "queued" || demand.Spec.Priority != "production" || cancelled(demand) || expired(demand.Spec.GiveUpAt, q.clock.Now()) || q.comparePriority(j.Spec, demand.Spec) <= 0 {
 			continue
 		}
 		if demand.FanOut != nil && demand.Spec.FanOut != nil && demand.FanOut.Next >= len(demand.Spec.FanOut.Pieces) {
@@ -106,7 +106,7 @@ func (q *Queue) unifiedCUDAProductionReason(j *Job, m *Machine) string {
 		}
 		need, sole := 0.0, true
 		for _, target := range q.plannerMachines() {
-			if !q.jobAllowsMachine(demand, target.ID) || !q.reservationAllows(demand, target) {
+			if !q.jobAllowsMachine(demand, target.ID) || !q.evaluateAdmission(admissionRequest{Job: demand, Target: target, Phase: admissionTakeover}).Allowed {
 				continue
 			}
 			// A production binding can move only to a work-scoped parity approval.

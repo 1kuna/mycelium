@@ -1101,6 +1101,9 @@
         "automatic": {
           "$ref": "#/$defs/ExtensionReport"
         },
+        "demand": {
+          "type": "string"
+        },
         "directory": {
           "type": "string"
         },
@@ -1667,6 +1670,11 @@
           "type": "integer",
           "x-contract": "diagnostic"
         },
+        "hold": {
+          "$ref": "#/$defs/JobHold",
+          "description": "Revisioned owner admission hold outside immutable spec. paused retains the last instruction; active is Clock-derived and false after expiry or terminal state. Resume uses expected_revision and cannot clear policy, maintenance or cleanup holds.",
+          "x-contract": "stable"
+        },
         "id": {
           "minLength": 1,
           "type": "string",
@@ -1983,6 +1991,32 @@
         "queued",
         "front",
         "checkpoint"
+      ],
+      "type": "object"
+    },
+    "JobHold": {
+      "properties": {
+        "active": {
+          "type": "boolean"
+        },
+        "paused": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "integer"
+        },
+        "until": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "revision",
+        "paused",
+        "active"
       ],
       "type": "object"
     },

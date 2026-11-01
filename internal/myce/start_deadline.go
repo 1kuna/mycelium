@@ -242,49 +242,13 @@ func (q *Queue) startPlacementAllowed(j *Job) bool { return q.startPlacementReje
 // startPlacementRejection names the failed start-fence predicate, or "". The
 // names are fixed labels, safe to log without host, path or volume detail.
 func (q *Queue) startPlacementRejection(j *Job) string {
-	if reason := q.protectedStorageLaunchReason(j); reason != "" {
-		return reason
-	}
-	if j.StartedAt == nil && !j.Spec.Needs.cpuOnly() && q.deviceAdmissionBlocked(allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)) {
-		return "device_disabled"
-	}
-	if q.startDiskFloorReason(j, q.s.Machines[j.Machine]) != "" {
-		return "disk_floor"
-	}
-	return q.startPlacementPolicyRejection(j)
+	return q.evaluateAdmission(admissionRequest{Job: j, Target: allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices), Phase: admissionLaunch}).Code
 }
 
-// A worker reporting Started has already executed; retain the policy fences
-// without treating its existing files as a new disk allocation.
+// Started reports retain policy fences without estimating a new disk allocation.
 func (q *Queue) startPlacementPolicyAllowed(j *Job) bool {
 	return q.startPlacementPolicyRejection(j) == ""
 }
-
 func (q *Queue) startPlacementPolicyRejection(j *Job) string {
-	owner := q.s.Machines[j.Machine]
-	m := allocationMachine(owner, j.AllocatedDevices)
-	if m == nil {
-		return "machine_unavailable"
-	}
-	if q.preparationStopping(m) {
-		return "preparation_stopping"
-	}
-	if j.Spec.Run.Docker && dockerStartingOrRunning(m.DockerCleanup) {
-		// A heartbeat can retain a healthy pending operation after its receipt.
-		// Reuse the exact-custody classifier; sibling and old-copy holds still fence.
-		previous := owner.DockerCleanup
-		m.DockerCleanup, owner.DockerCleanup = "", ""
-		defer func() { m.DockerCleanup, owner.DockerCleanup = previous, previous }()
-	}
-	switch {
-	case j.StartedAt == nil && !sharedHostJobFits(j, m):
-		return "shared_host_profile"
-	case !executionTargetMatches(j.Spec, m):
-		return "execution_target"
-	case !cpuFits(j, m):
-		return "cpu_fit"
-	case !q.placementPolicyAllowed(j, m, false):
-		return "placement_policy"
-	}
-	return ""
+	return q.evaluateAdmission(admissionRequest{Job: j, Target: allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices), Phase: admissionStarted}).Code
 }
