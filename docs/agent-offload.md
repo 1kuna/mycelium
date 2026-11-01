@@ -107,9 +107,11 @@ an isolated working folder; extension/Docker/sidecar profiles are outside this
 MVP. `environment` selects an existing immutable catalog recipe; `{}` explicitly
 uses installed tools. The gate profile selects the locked `mycelium-gate` catalog
 environment and checks the toolchain before running. It declares two CPU cores,
-matches Go parallelism to that declaration,
-and uses measured automatic memory so it also fits an 8 GiB host allowance.
-Profiles opt into measured memory with:
+matches Go parallelism to that declaration, and explicitly reserves 7 GiB of
+host memory based on accepted full-gate peaks plus measured variation; see
+[test-gate sizing](test-gates.md). This prevents unhinted exploration from
+reserving most of an otherwise idle host. Other profiles can opt into measured
+automatic memory with:
 
 ```yaml
 needs:
