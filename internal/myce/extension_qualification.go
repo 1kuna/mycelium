@@ -181,26 +181,42 @@ func (q *Queue) acceptExtensionQualifications(owner *Machine) {
 	}
 }
 
-// No automatic retries of an interrupted check. Losing useful demand or the
-// prepared identity fences in-flight checks through the existing cancellation.
+// Recompute shared demand from queued work. A reversible pause parks unstarted
+// checks without poisoning their immutable key. Assigned checks drain; actual
+// cancellation or a changed prepared identity keeps the existing failure fence.
 func (q *Queue) maintainExtensionQualifications() {
 	for _, j := range q.liveJobs() {
 		r := automaticExtensionCheck(j)
 		if r == nil || terminal(j.State) || cancelled(j) {
 			continue
 		}
-		wanted := false
+		wanted, identityValid := false, false
 		if len(j.Spec.AllowedMachines) == 1 {
 			if owner := q.s.Machines[j.Spec.AllowedMachines[0]]; owner != nil {
 				for _, m := range q.machineTargets(owner) {
 					for _, e := range j.Extensions {
-						wanted = wanted || matchingExtensionReport(e, m, *r) && q.extensionQualificationDemand(e, m)
+						if matchingExtensionReport(e, m, *r) {
+							identityValid = true
+							wanted = wanted || q.extensionQualificationDemand(e, m)
+						}
 					}
 				}
 			}
 		}
-		if !wanted {
+		// Paused owners retain the invocation, but contribute no runnable demand.
+		// Identity changes still fence it, even while the owner is paused.
+		retained := false
+		if !wanted && identityValid {
+			for _, owner := range q.liveJobs() {
+				retained = retained || owner.State == "paused" && owner.Spec.ExtensionCheck == nil && slices.ContainsFunc(owner.Extensions, func(e Extension) bool { return e.Digest == r.Digest })
+			}
+		}
+		if !wanted && !retained {
 			q.cancelJob(j)
+		} else if !wanted && j.State == "queued" {
+			j.State, j.Reason = "waiting", "waiting for runnable extension demand"
+		} else if wanted && j.State == "waiting" {
+			j.State, j.Reason = "queued", ""
 		}
 	}
 }

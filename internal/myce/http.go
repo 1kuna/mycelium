@@ -240,6 +240,22 @@ func (a API) handler(joiningPin string) http.Handler {
 		}
 		respondOperation(w, j, err, "job_submit_failed")
 	})
+	mux.HandleFunc("POST /api/jobs/{id}/pause", func(w http.ResponseWriter, r *http.Request) {
+		var request PauseJobRequest
+		if !decode(w, r, &request) {
+			return
+		}
+		j, err := a.Queue.PauseJob(r.PathValue("id"), request, r.Context())
+		respondOperation(w, j, err, "job_pause_invalid")
+	})
+	mux.HandleFunc("POST /api/jobs/{id}/resume", func(w http.ResponseWriter, r *http.Request) {
+		var request ResumeJobRequest
+		if !decode(w, r, &request) {
+			return
+		}
+		j, err := a.Queue.ResumeJob(r.PathValue("id"), request.IfRevision, r.Context())
+		respondOperation(w, j, err, "job_resume_invalid")
+	})
 	mux.HandleFunc("POST /api/jobs/{id}/cancel", func(w http.ResponseWriter, r *http.Request) {
 		ack, err := a.Queue.CancelJob(r.PathValue("id"), r.Context())
 		respondOperation(w, ack, err, "job_cancel_invalid")

@@ -165,17 +165,32 @@ func TestM4QueueRewriteRetirementAndRollback(t *testing.T) {
 	check(t, q, machine("host-gpu0", "fake", "host"), nil)
 }
 func TestM4QueueRefusesQueuedNamesAndConflictingFences(t *testing.T) {
-	t.Run("queued", func(t *testing.T) {
-		q, _, mapping := m4Queue(t)
-		s := spec("experiment")
-		s.AllowedMachines = []string{"host-gpu1"}
-		j := submit(t, q, s)
-		_, err := q.ConvertMachines(mapping, ModelConfig{}, false)
-		var typed *QueuedRetiredMachinesError
-		if !errors.As(err, &typed) || !reflect.DeepEqual(typed.Jobs, []string{j.ID}) || !reflect.DeepEqual(typed.Machines, []string{"host-gpu1"}) {
-			t.Fatal(err)
-		}
-	})
+	for _, state := range []string{"queued", "paused", "waiting"} {
+		t.Run(state, func(t *testing.T) {
+			q, clock, mapping := m4Queue(t)
+			s := spec("experiment")
+			s.AllowedMachines = []string{"host-gpu1"}
+			j := submit(t, q, s)
+			if state == "paused" {
+				pauseForTest(t, q, j.ID, nil)
+			} else if state == "waiting" {
+				if err := q.update(func() error { q.touchJob(j.ID).State = state; return nil }); err != nil {
+					t.Fatal(err)
+				}
+			}
+			q = reopenCancellationQueue(t, q, clock)
+			for _, dry := range []bool{true, false} {
+				_, err := q.ConvertMachines(mapping, ModelConfig{}, dry)
+				var typed *QueuedRetiredMachinesError
+				if !errors.As(err, &typed) || !reflect.DeepEqual(typed.Jobs, []string{j.ID}) || !reflect.DeepEqual(typed.Machines, []string{"host-gpu1"}) {
+					t.Fatal(err)
+				}
+			}
+			if got := job(t, q, j.ID); got.State != state || !reflect.DeepEqual(got.Spec, j.Spec) || q.s.Machines["host-gpu1"].Replacement != nil {
+				t.Fatal("refusal changed job intent or retired its target", got)
+			}
+		})
+	}
 	t.Run("project-partial", func(t *testing.T) {
 		q, _, mapping := m4Queue(t)
 		if err := q.ConfigureProjects(map[string]ProjectPolicy{"p": {Weight: 1, AllowedMachines: []string{"host-gpu0"}}}); err != nil {

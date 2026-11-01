@@ -66,7 +66,7 @@ func generatedJobSchema(t *testing.T) []byte {
 		for _, property := range properties {
 			property.(map[string]any)["x-contract"] = "diagnostic"
 		}
-		stable := []string{"id", "spec", "spec_projection", "state", "attempt", "machine", "session", "release_confirmed", "finished_at", "queued", "cancelled_at", "infrastructure_retries", "dependency", "cancellation", "cancellation_scope", "ledger", "delivery", "recovered_results"}
+		stable := []string{"id", "spec", "spec_projection", "state", "attempt", "machine", "session", "release_confirmed", "finished_at", "queued", "pause", "pause_revision", "cancelled_at", "infrastructure_retries", "dependency", "cancellation", "cancellation_scope", "ledger", "delivery", "recovered_results"}
 		if definition == "Spec" {
 			stable = []string{"project", "submission_key", "after", "output_delivery"}
 		}
@@ -108,7 +108,7 @@ func generatedJobSchema(t *testing.T) []byte {
 	for _, name := range []string{"job_id", "submission_key", "release", "acknowledged_at"} {
 		ackProperties[name].(map[string]any)["type"] = []string{"string", "null"}
 	}
-	job["state"].(map[string]any)["enum"] = []string{"queued", "running", "stopping", "succeeded", "failed", "cancelled"}
+	job["state"].(map[string]any)["enum"] = []string{"queued", "paused", "waiting", "running", "stopping", "succeeded", "failed", "cancelled"}
 	for _, name := range []string{"id", "machine", "session"} {
 		job[name].(map[string]any)["minLength"] = 1
 	}

@@ -125,7 +125,7 @@ func (q *Queue) machineConversionPlan(mapping []MachineRename, models ModelConfi
 	}
 	blocked := &QueuedRetiredMachinesError{}
 	for _, j := range q.s.Jobs {
-		if j.State != "queued" {
+		if j.State != "queued" && j.State != "paused" && j.State != "waiting" {
 			continue
 		}
 		names := append(slices.Clone(j.Spec.AllowedMachines), j.Machine)

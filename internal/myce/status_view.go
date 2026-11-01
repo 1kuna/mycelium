@@ -188,6 +188,12 @@ func ExtensionStatus(r ExtensionReport) string {
 }
 func JobReason(j *Job) string {
 	reason := j.Reason
+	if j.State == "paused" && j.Pause != nil {
+		reason = j.Pause.Reason
+		if j.Pause.Until != nil {
+			reason += "; until " + j.Pause.Until.Format(time.RFC3339)
+		}
+	}
 	if reason == "" {
 		switch j.State {
 		case "queued":

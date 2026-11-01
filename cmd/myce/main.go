@@ -69,7 +69,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 
 	if len(args) == 0 {
-		return errors.New("usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|exclude|reserve|run|profile|submit|spec|policy|status|logs|ledger|wait|result|cancel|resolve-native|resolve-docker|reconcile-docker-retention|dev|version|release|file|benchmark|extension|env|portability|sim|detect|service|measure|model|gpu-telemetry-client|usage\n       myce host drain|disable|resume|status|budget|placement HOST\n       myce host device disable|enable HOST DEVICE\nRun myce COMMAND --help for command options.")
+		return errors.New("usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|exclude|reserve|run|profile|submit|spec|policy|status|logs|ledger|wait|result|cancel|pause|resume|resolve-native|resolve-docker|reconcile-docker-retention|dev|version|release|file|benchmark|extension|env|portability|sim|detect|service|measure|model|gpu-telemetry-client|usage\n       myce host drain|disable|resume|status|budget|placement HOST\n       myce host device disable|enable HOST DEVICE\nRun myce COMMAND --help for command options.")
 	}
 	if args[0] == "dev" && len(args) > 1 && args[1] == "clock" {
 		return devClockCommand(args[2:], os.Stdout)
@@ -185,6 +185,11 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 		defer stop()
 		return resultCommand(ctx, args[1:], os.Stderr)
+	}
+	if args[0] == "pause" || args[0] == "resume" {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		return pauseCommand(ctx, args[0], args[1:], os.Stdout)
 	}
 	if args[0] == "wait" {
 		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

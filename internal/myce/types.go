@@ -370,6 +370,8 @@ type SpecProjection struct {
 }
 
 type Job struct {
+	Pause                  *JobPause             `json:"pause,omitempty"`
+	PauseRevision          uint64                `json:"pause_revision,omitempty"`
 	LocalOutputs           *TaskOutputCustody    `json:"local_outputs,omitempty"`
 	StorageAllocation      *StorageAllocation    `json:"storage_allocation,omitempty"`
 	StorageEnvelope        *JobStorageEnvelope   `json:"storage_envelope,omitempty"`

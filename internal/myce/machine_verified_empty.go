@@ -66,18 +66,21 @@ func (q *Queue) verifyEmptyDrain(ctx context.Context, mapping []MachineRename, o
 		}
 	}()
 	refuse := func(kind, detail string) error { return migrationError("machine_drain_"+kind, detail) }
-	counts := map[string]int{"queued": 0, "running": 0, "stopping": 0, "preparing": 0, "host_releases": 0, "obligations": 0}
+	counts := map[string]int{"queued": 0, "paused": 0, "waiting": 0, "running": 0, "stopping": 0, "preparing": 0, "host_releases": 0, "obligations": 0}
+	pending := 0
 	for _, j := range q.s.Jobs {
-		if _, tracked := counts[j.State]; tracked && j.State != "host_releases" && j.State != "obligations" {
+		if !terminal(j.State) {
 			counts[j.State]++
+			pending++
 		}
 	}
 	for _, s := range q.s.Submissions {
-		if s.Job != nil && q.s.Jobs[s.JobID] == nil && slices.Contains([]string{"queued", "running", "stopping", "preparing"}, s.Job.State) {
+		if s.Job != nil && q.s.Jobs[s.JobID] == nil && !terminal(s.Job.State) {
 			counts[s.Job.State]++
+			pending++
 		}
 	}
-	if counts["queued"]+counts["running"]+counts["stopping"]+counts["preparing"] != 0 {
+	if pending != 0 {
 		return nil, release, refuse("queue_not_empty", "queue contains pending jobs; freeze intake and settle first")
 	}
 	hosts := map[string]bool{}

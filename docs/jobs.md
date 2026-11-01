@@ -49,6 +49,45 @@ For repeatable project commands with frozen source, recoverable JSON receipts an
 a detached completion notifier, use `myce run --profile NAME`; see
 [agent offload](adapter.md).
 
+## Pause queued work
+
+```sh
+myce pause JOB --reason "review new inputs"
+myce pause JOB --reason "wait for review" --until 2026-12-01T15:00:00Z
+myce resume JOB
+```
+
+Pause moves a queued job to `paused`, outside scheduling, preparation demand,
+qualification demand and fairness. Its ID, submission key, frozen inputs,
+submission time and fairness age/position remain intact. Assigned/running
+attempts return HTTP 409 `job_pause_conflict`; this does not suspend execution.
+Cancellation also works while paused. Production `start_by` and `give_up_at`
+continue to advance and may fail a paused job. Clock maintenance resumes at
+`until` (RFC3339 absolute time); omission requires an explicit resume.
+
+`POST /api/jobs/JOB/pause` accepts `{"reason":"review inputs","until":"2026-12-01T15:00:00Z"}`
+with optional `until`. Status and job GET expose `state: paused`, `pause.reason`,
+optional `pause.until`, and `pause_revision`. To resume, post
+`{"if_revision":1}` to `/api/jobs/JOB/resume` using the current revision.
+Stale revisions return 409 `job_pause_revision_conflict`. The CLI reads that
+revision before resuming. Both commands accept the installed-client flags above.
+
+Pausing a fan-out parent pauses its queued children, including later retries;
+assigned children finish. Parent-owned children resume with their parent, while
+independently paused children retain their own pause. A parent can settle if all
+already assigned children finish while it is paused. Shared preparation and
+qualification are recomputed from the remaining queued jobs. Unstarted
+preparation offers are revoked and reissued on the next check-in. Started
+preparation retains its existing interruption/cleanup rules; assigned
+qualification checks drain. An unstarted
+automatic qualification with only paused demand waits in `waiting` and resumes
+the same invocation when runnable demand returns. Real failures retain their
+existing negative cache.
+
+Pause metadata is additive JSON in the existing SQLite job record; no table
+rewrite is needed. Reopen preserves pauses and revisions. Use forward fixes:
+older binaries do not understand these non-runnable states.
+
 ## Batch YAML
 
 `myce submit job.yaml` accepts exactly one YAML document, at most 1 MiB, and
