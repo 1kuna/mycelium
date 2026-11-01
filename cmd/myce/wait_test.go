@@ -481,3 +481,32 @@ func TestWaitProductionStartDeadline(t *testing.T) {
 		t.Fatalf("exit=%d output=%s err=%v", exitCode(err), out.String(), err)
 	}
 }
+
+func TestWaitDeadlineGuidance(t *testing.T) {
+	q, clock, _, _ := waitQueue(t)
+	server := httptest.NewServer(myce.API{Queue: q, Token: "test-only"}.Handler())
+	defer server.Close()
+	client := myce.Client{URL: server.URL, Token: "test-only"}
+	s := myce.Spec{Name: "deadline-advice", Project: "synthetic", Class: "experiment"}
+	s.Run.Command = []string{"echo", "done"}
+	s.Needs.CPUCores = 1
+	s.Needs.MemoryGB = 1
+	j, err := client.Submit(context.Background(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out, diagnostics bytes.Buffer
+	err = waitJobs(context.Background(), client, []string{j.ID}, 7*time.Second, &out, &diagnostics, clock, func(_ context.Context, d time.Duration) error { clock.advance(d); return nil })
+	if exitCode(err) != 3 || out.Len() != 0 {
+		t.Fatal(err, out.String())
+	}
+	text := diagnostics.String()
+	for _, want := range []string{"tier experiment selector */* revision 0", "tier deadline selector */deadline revision 0", "higher tier precedence", "Blockers:", "ETA unknown", "class: deadline; deadline:", "does not preempt non-resumable"} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("missing %q: %s", want, text)
+		}
+	}
+	if strings.Count(text, "priority advisory:") != 1 {
+		t.Fatal("unchanged guidance repeated", text)
+	}
+}

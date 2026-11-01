@@ -352,6 +352,7 @@ func (q *Queue) jobSnapshotGeneration(id string, contexts ...context.Context) (*
 		j = v.projectJob(j, nil, reasons, true)
 	}
 	v.projectJobDiagnostics(j, true, true)
+	j.DeadlineGuidance = v.deadlineGuidance(j)
 	return j, nil
 }
 

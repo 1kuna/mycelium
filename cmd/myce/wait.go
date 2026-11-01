@@ -113,6 +113,7 @@ func waitPause(ctx context.Context, d time.Duration) error {
 func waitJobs(ctx context.Context, c myce.Client, ids []string, timeout time.Duration, out, errOut io.Writer, clock myce.Clock, pause func(context.Context, time.Duration) error) error {
 	pending := map[string]bool{}
 	completed := map[string]bool{}
+	lastGuidance := map[string]string{}
 	for _, id := range ids {
 		pending[id] = true
 	}
@@ -166,6 +167,10 @@ func waitJobs(ctx context.Context, c myce.Client, ids []string, timeout time.Dur
 				unavailable = true
 				readErr = err
 				break
+			}
+			if guidance := myce.DeadlineGuidanceText(j); guidance != "" && guidance != lastGuidance[j.ID] {
+				fmt.Fprintf(errOut, "wait: %s %s\n", j.ID, guidance)
+				lastGuidance[j.ID] = guidance
 			}
 			delete(pending, id)
 			if j.State != "succeeded" && j.State != "failed" && j.State != "cancelled" {
