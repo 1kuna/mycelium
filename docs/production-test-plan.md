@@ -45,9 +45,10 @@ RAM, refuses the same need at worker launch, and admits it after headroom
 recovers. It does not qualify OS PSI, macOS pressure, swap rate or live CPU use;
 those remain unknown until implemented and measured.
 
-Native follow-up owner: admission/status maintainer, in the authorized M4
-window, one fleet check at a time. The b70 step must wait until after 10:30 ET
-Tuesday (2026-10-27). This checklist does not schedule or authorize a load run.
+Native follow-up owner: admission/status maintainer, in an explicitly authorized
+maintenance window, one fleet check at a time. Confirm any operational holds
+have been released before testing. This checklist does not schedule or authorize
+a load run.
 
 1. Confirm no competing native test or owner workload, current binary identity,
    free disk, memory, load and the worker's enforcement capability. Use a fresh

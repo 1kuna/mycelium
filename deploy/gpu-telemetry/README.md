@@ -125,15 +125,15 @@ Preserve operator backups.
 
 ## Existing primary-group override (#444)
 
-Release #421 applied this arrangement on b70: the socket drop-in
+An installation can use a socket drop-in
 `/etc/systemd/system/myce-gpu-telemetry.socket.d/60-worker-primary-group.conf`
-sets `SocketGroup` to the worker's existing primary group and `SocketMode=0660`;
-`/etc/tmpfiles.d/myce-gpu-telemetry.conf` sets the same group on the root-owned
-0750 parent. Fresh complete two-card access under the actual worker PID's
-credentials was recorded in #444; the worker's effective `NoNewPrivileges=no`
-was preserved. This is helper connectivity proof, not native workload acceptance.
-Preserve that installed override until a future reviewed deployment replaces it;
-a drop-in overrides a newly rendered base unit. When changing an installation,
+to set `SocketGroup` to the worker's existing primary group and `SocketMode=0660`.
+Set the same group on the root-owned 0750 parent in
+`/etc/tmpfiles.d/myce-gpu-telemetry.conf`. Verify fresh complete replies under the
+actual worker PID's credentials and preserve existing service restrictions.
+Helper connectivity does not qualify native workloads. Preserve applicable
+installed overrides until deliberately replaced; a drop-in overrides a newly
+rendered base unit. When changing an installation,
 stop the broker service and socket together, apply tmpfiles, daemon-reload, then
 start both and recheck ownership, modes and exact-PID credential access. Keep the
 same group in both files so reboot and socket recreation preserve permissions.

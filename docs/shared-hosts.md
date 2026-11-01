@@ -152,12 +152,11 @@ Thresholds and recovery bands:
 macOS uses the OS's pressure warning rather than inventing a free-RAM percentage.
 The PSI bands represent 100 ms / 10 ms of stalled time per ten seconds. They are
 conservative latency budgets; native Linux interference calibration remains
-unverified. The wake bands use the canary below: its observed p99 was below
-3 ms and maximum below 7 ms; 5 ms permits recovery above normal p99, while
-20 ms detects a delay exceeding a 60 Hz interaction frame and well above the
-observed maximum. This is limited local evidence, not representative long-term
-owner qualification. Native pressure-stress calibration remains outstanding;
-this task intentionally does not manufacture memory pressure on a shared host.
+unverified. The wake bands use a 5 ms recovery allowance and a 20 ms yield threshold;
+20 ms exceeds a 60 Hz interaction frame. A short local canary observed no
+foreground starvation, but cannot establish a universal latency guarantee.
+Native pressure-stress calibration and representative owner qualification remain
+outstanding; repeat the probe for the intended workload before enablement.
 
 Samples refresh at the existing 5-second owner-signal cadence and expire at its
 15-second freshness bound. Worker-local age is translated to queue receipt time;
@@ -185,27 +184,16 @@ idle. Keep existing operator drains authoritative. Docker, extension execution,
 new environment/extension preparation and models remain withheld; this change
 does not broaden execution eligibility or qualify their pressure handling.
 
-## Local interference evidence (2026-10-30)
+## Qualification and laptop checks
 
-`python3 scripts/measure-shared-host.py` runs a normal-priority foreground 5 ms
-wake probe and a fixed CPU burst, first at baseline and then beside two CPU-bound
-commands with native background taskpolicy and nice=10. It lasts three seconds
-per phase, leaves owner capacity, and kills/reaps its own commands. On an 18-core
-Darwin machine, with existing concurrent owner/agent work:
-
-| Foreground measurement | Baseline | Two background commands |
-| --- | ---: | ---: |
-| Wake-delay p99 | 2.583 ms | 2.539 ms |
-| Wake-delay maximum | 6.271 ms | 3.001 ms |
-| Fixed CPU-burst p99 | 0.533 ms | 0.573 ms |
-| Samples | 422 | 423 |
-
-The foreground remained at nice=0. This bounded two-command canary observed no
-foreground starvation. It does not test all-core saturation, a hostile payload,
-memory pressure, or Linux native containment. It neither installs services nor
-enables any profile. Repeat with representative owner work before authorizing
-native enablement; parent [#389](https://github.com/1kuna/mycelium/issues/389)
-retains that operational qualification.
+`python3 scripts/measure-shared-host.py` compares a normal-priority foreground
+5 ms wake probe and fixed CPU burst at baseline and beside two CPU-bound
+background commands. It runs for three seconds per phase and reaps its own
+commands. It neither installs services nor enables a profile. This bounded
+canary does not qualify all-core saturation, hostile payloads, memory pressure
+or Linux containment. Check local headroom before running it; use representative
+owner work for native qualification. [#389](https://github.com/1kuna/mycelium/issues/389)
+tracks that acceptance separately.
 
 Laptop regressions use fake-clock yield/recovery/stale samples and aggregate CPU
 admission/cgroup files. `TestSharedHostDevPressureCheckpointRequeueAndCancel`

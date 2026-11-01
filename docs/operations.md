@@ -4,6 +4,118 @@ For a queue sharing a disk with jobs, see [queue I/O contention](queue-io-conten
 for the opt-in systemd `--io-weight` setting, enforcement prerequisites and
 latency qualification. A configured weight alone is not proof of protection.
 
+## Queue backup, restore and relocation
+
+Mycelium has one SQLite writer. Queue loss stops submissions, new starts,
+acknowledged cancellation and queue-mediated routing. Running commands may
+continue, subject to their inputs and external dependencies. Moving the queue
+changes its failure domain; it does not provide automatic failover or replicated
+availability. Keep the database on a local filesystem, not a network share.
+
+Use the installer, service manager, a verified stopped-state backup and SQLite
+integrity checking. There is no `myce backup` or `myce restore` command.
+Rehearse on an isolated queue fixture before an authorized cutover. Measure disk
+headroom, transfer and verification time, and restore/rejoin time for the actual
+roots; derive downtime and recovery expectations from that rehearsal.
+
+### Preserve one complete generation
+
+Inventory the active configuration and every referenced root. Preserve privately:
+
+- SQLite DB and any WAL/SHM companions, including job/key/attempt/custody history,
+  learned curves, live policy, maintenance and release approvals.
+- Queue file store (`DB.files` by default), implicit `DB.uploads`, any configured
+  upload spool, retained logs and other referenced roots. `QueueStateRoots` in
+  `internal/myce/queue_roots.go` enumerates startup roots.
+- Joining identity (`DB.joining` by default), certificate/private key, enrollment
+  authority and existing credential. An identity change invalidates existing pins.
+- Saved config, catalogs, policy/bootstrap files, publisher trust, credential
+  references and service metadata. Record effective limits, retention and timeouts;
+  persisted live policy must not be replaced with stale bootstrap YAML.
+
+Shared checkpoints/models stay on their existing storage with relative
+assignments. Configure destination-local mount roots and preserve worker spools
+and identities in place. Across operating systems, preserve configuration meaning
+and permissions; generate native service metadata rather than copying units.
+
+### Consistent copy and restore
+
+1. Pause producers and drain workers to exact settlement, including preparation,
+   engines, pending releases, buffered results and uploads. Record maintenance
+   created by this operation so unrelated drains/disables remain authoritative.
+2. A pre-copy of large immutable payloads with rsync can reduce downtime. An
+   online filesystem copy of the DB is not a SQLite-consistent backup. Python's
+   backup sleep argument is not a bandwidth limit; see [I/O controls](queue-io-contention.md).
+3. Record config/root hashes and authenticated history, policy/revision, curve
+   and authority baselines. Stop and disable the source queue service; verify its
+   process and listeners are gone and it cannot auto-restart. Never serve two
+   queues with the same identity. If source fencing is uncertain, do not activate
+   the destination.
+4. Copy the stopped DB and companions together with the complete root set. Final
+   sync must reconcile removals in an owned destination mirror, so pre-copy cannot
+   resurrect reclaimed uploads. Keep an independent backup outside that mirror;
+   never apply a destructive sync to the backup. Compare SHA-256 manifests,
+   including non-default roots, and verify permissions/modes separately.
+5. Run SQLite `PRAGMA integrity_check` on the local restored DB before activation.
+   Do not vacuum as part of relocation. Restore all state before starting a fresh
+   installation; never expose an empty DB or newly generated identity. Use the
+   approved native release and the installer's dry-run with every preserved
+   non-default setting. Confirm that the release can express custom roots and
+   trust settings; resolve any gap before activation.
+
+A SQLite online backup alone does not freeze referenced files or authority. A
+complete online recovery scheme needs a consistent referenced-file snapshot too;
+plain rsync of a live DB is insufficient.
+
+### Preserve endpoint authority and verify cutover
+
+Inventory direct endpoint configurations, environment overrides, explicit client
+URLs and pinned joining files. Queue HTTP origin and joining TLS origin are
+distinct; `--queue` is not a TLS listener flag. Preserve the certificate identity:
+the pin is SHA-256 of certificate DER, not an SPKI pin. Discovery supplies
+candidate addresses; the existing pin and credential authenticate them.
+
+Direct-endpoint workers can use the supported saved-config overlay:
+
+```sh
+myce install worker --config WORKER_CONFIG --queue NEW_QUEUE_ORIGIN --dry-run
+myce install worker --config WORKER_CONFIG --queue NEW_QUEUE_ORIGIN
+```
+
+For pinned workers, changing saved `queue` alone is insufficient: their service
+uses `--joining-file`. On restart, discovery can locate the preserved identity
+and refresh the authenticated address in that file. Rehearse with discovery
+unavailable too: export a mode-0600 private invitation from the preserved identity
+using `myce invite --private-file --identity-dir IDENTITY_DIR --queue NEW_TLS_ORIGIN
+--out NEW_AUTHORITY`, transfer it privately to a persistent worker-local path,
+and verify before installation:
+
+```sh
+myce status --joining-file NEW_AUTHORITY --queue NEW_TLS_ORIGIN
+myce install worker --config WORKER_CONFIG --joining-file NEW_AUTHORITY --queue NEW_TLS_ORIGIN --dry-run
+myce install worker --config WORKER_CONFIG --joining-file NEW_AUTHORITY --queue NEW_TLS_ORIGIN
+```
+
+Keep the original authority until recovery is verified. Refresh saved CLI,
+environment and consumer endpoints too; discovery does not retarget an already
+running client on every check-in. Do not disable pin checking, hand-edit authority
+JSON or reuse a spent bootstrap ticket to force migration.
+
+Before reopening admission, verify the release, local/shared storage, listener,
+TLS fingerprint and authenticated API. Compare original history/key samples,
+curves, live policy/revision, release approvals and publisher trust. Account for
+expected age-based retention. Verify each expected worker identity, fresh session,
+devices, service health and exact cleanup custody, then release only maintenance
+created for the move. Compare output count/quality and control-call latency under
+matched workloads. Keep admission closed and repair forward if preservation fails.
+
+Restart grace is not an endpoint migration or proof of release. Restoring an older
+backup can lose accepted jobs, cancellations, keys, policy and custody; reconcile
+exact attempts before resuming. Keep the verified recovery generation privately
+under the recovery policy and remove only verified rebuildable staging. Keep the
+source service disabled. A cold restore still requires positive source fencing;
+backup age defines possible data loss, not a promise of seamless failover.
+
 ## Add a hypha with one command
 
 On an authorized installed hypha, run `myce invite` and paste its single output
@@ -806,7 +918,7 @@ implied by these instructions.
 Follow the [accepted maintenance gates](design-proposal.md#installation-checkpoints-and-rollback-m4)
 and [native qualification](design-proposal.md#native-maintenance-window-qualification).
 Conversion is an operator-run maintenance action on the queue host and every
-converted worker host, including the single-card Spark worker in the same
+converted worker host, including the single-card worker in the same
 window. Commands below use placeholders for approved installation paths and
 accounts. Load authentication through the existing private secret mechanism;
 never print a token or pass it on the command line.
@@ -849,7 +961,7 @@ NEW_MYCE install queue --config QUEUE_CONFIG
 ```
 
 The last command installs the compatible queue binary and restarts its recorded
-unit. Verify durable disables, job/key/retry/checkpoint/release state and Spark's
+unit. Verify durable disables, job/key/retry/checkpoint/release state and the single-card worker's
 legacy reconnect before changing workers. `machine_migration_queued_jobs` lists
 jobs to cancel/resubmit through clients; accepted specs are never rewritten.
 Partial-card project fences and unrepresentable intersections refuse with
@@ -890,7 +1002,7 @@ The source manager stop must complete the same-name worker's normal leave.
 Failure restores the previous install and keeps queue maintenance active.
 Worker-local catalog placement fences are rewritten from explicit queue retirement
 records, preserving local environment/secret values and original bytes for rollback.
-The exact legacy Spark session may reconnect with its old catalog hash only while
+The exact legacy single-card session may reconnect with its old catalog hash only while
 disabled with no obligations; its model endpoint is withheld. New machine workers
 still require the current catalog hash.
 Source definitions are retired recoverably and persistent wants links removed;
@@ -960,7 +1072,7 @@ and verified prior activity; never merge spools. Current pin additions/removals
 and counters survive when their card restriction is representable. A new
 host-wide pin or an unknown policy edit blocks restoration until explicitly
 reconciled, preserving that intent. Unknown cleanup/restoration keeps admission
-disabled. Verify both source workers and Spark reconnect, device isolation,
+disabled. Verify both source workers and the single-card worker reconnect, device isolation,
 secret/root custody and consumer health before the operator accepts rollback.
 Forward conversion can be repeated under the same maintenance gates.
 
@@ -1152,10 +1264,9 @@ Activate only after separately installing and qualifying a conforming broker:
    worker PID's exact numeric Uid/Gid/Groups and service restrictions. A fresh
    login shell alone is insufficient. A worker-only restart does not refresh a
    persistent user manager's supplementary groups; using its existing primary
-   group avoids any user-manager restart. The b70 release #421 override uses
-   this arrangement (#444): a `60-worker-primary-group.conf` socket drop-in and
-   matching tmpfiles override. Preserve it until a future reviewed deployment
-   replaces it; see the [template instructions](../deploy/gpu-telemetry/README.md#existing-primary-group-override-444).
+   group avoids any user-manager restart. Existing installations may use
+   a `60-worker-primary-group.conf` socket drop-in and matching tmpfiles override.
+   Preserve applicable overrides until deliberately replaced; see the [template instructions](../deploy/gpu-telemetry/README.md#existing-primary-group-override-444).
 3. Qualify repeated wrapper calls under the service's actual user, groups and
    restrictions, and additionally under `NoNewPrivileges=yes` if the service
    currently uses `no`. Preserve the existing service policy; no sudoers grant
@@ -1198,8 +1309,8 @@ report can temporarily reduce admission until its next check-in. This is
 aggregate admission; external allocations can still race it. Workers repeat
 live refusal after preparation and before batch/model starts.
 
-On dedicated GPUs the host pool charges only `host_memory_gb`. On unified
-Metal/Spark/integrated machines, GPU and CPU allocations share one host pool:
+On dedicated GPUs the host pool charges only `host_memory_gb`. On unified-memory
+machines, GPU and CPU allocations share one host pool:
 charge `memory_gb + host_memory_gb` once per allocation, not two independent
 RAM budgets. `host_memory_gb` means additional CPU-side memory, never the
 combined GPU-plus-CPU footprint. Existing GPU-only allocations also reserve
