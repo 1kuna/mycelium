@@ -112,6 +112,17 @@ func validHostMemoryObservation(o *HostMemoryObservation) bool {
 	return o != nil && validMemoryValue(o.TotalGB) && o.TotalGB > 0 && validMemoryValue(o.UsedGB) && o.UsedGB <= o.TotalGB && validMemoryValue(o.MyceliumGB) && o.MyceliumGB <= o.UsedGB
 }
 
+// Apply Darwin background policy from the payload itself after its execution
+// gate opens. A successful external request on the launching shell does not
+// always leave the payload backgrounded; taskpolicy establishes the policy
+// synchronously before exec without changing the worker's control process.
+func sharedHostCommand(argv []string, p *SharedHostProfile) []string {
+	if p == nil || runtime.GOOS != "darwin" {
+		return argv
+	}
+	return append([]string{"/usr/sbin/taskpolicy", "-b"}, argv...)
+}
+
 var sharedHostSetBackgroundPriority = func(pid int) error {
 	// Darwin sys/resource.h: PRIO_DARWIN_PROCESS, PRIO_DARWIN_BG.
 	return syscall.Setpriority(4, pid, 0x1000)

@@ -28,10 +28,16 @@ still compile code: that work inherits its command's priority.
 Commands and native sidecars receive nice >= 10 before their execution gates
 open. macOS additionally applies
 `setpriority(PRIO_DARWIN_PROCESS, pid, PRIO_DARWIN_BG)` (equivalent to
-`taskpolicy -b`) to every gated supervisor and member, inherited by descendants.
-This lowers CPU, I/O, timer and network priority. Worker heartbeats and queue
-control retain their original priority. A failed background-policy application
-logs a warning and the job continues with its existing nice priority.
+`taskpolicy -b`) to every gated supervisor and member. Because a successful external
+request does not always leave the payload backgrounded, each profiled payload runs
+through the system `/usr/sbin/taskpolicy -b` after its gate opens, establishing
+its own inheritable policy before executing the command. This covers ordinary
+commands, native main commands and sidecars, including their descendants.
+It lowers CPU, I/O, timer and network priority. Worker heartbeats and queue
+control retain their original priority. A failed external background-policy
+application logs a warning; the payload still establishes its own policy.
+If the system helper cannot establish policy or execute the command, that
+execution fails rather than launching the command without its policy.
 The existing physical-host CPU ledger caps aggregate
 **declared cores** at `cpu_budget_cores`. Common Go, OpenMP, BLAS and Rayon runtime
 thread-count variables are clamped to each command's declared cores, including

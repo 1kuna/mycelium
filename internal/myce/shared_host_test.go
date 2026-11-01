@@ -398,6 +398,12 @@ func TestSharedHostDevCommandPriority(t *testing.T) {
 	backgroundCheck := ""
 	if runtime.GOOS == "darwin" {
 		controlBackground = sharedHostDarwinBackground(t, os.Getpid())
+		// Reproduce a successful external request absent from the running
+		// payload. The real payload must establish its own background
+		// policy; nice, both payload paths, descendants and control stay checked.
+		oldBackground := sharedHostSetBackgroundPriority
+		sharedHostSetBackgroundPriority = func(int) error { return nil }
+		t.Cleanup(func() { sharedHostSetBackgroundPriority = oldBackground })
 		backgroundCheck = `test "$(ps -o pri= -p $$)" -le 4 && sh -c 'test "$(ps -o pri= -p $$)" -le 4' || exit 43; `
 	}
 	oldRSS := workerMemoryRSS
