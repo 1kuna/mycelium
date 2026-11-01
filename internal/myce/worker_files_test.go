@@ -237,6 +237,11 @@ func TestCancelledAttemptPartialFilesRemainRecoverable(t *testing.T) {
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
+	// Release confirmation does not join asynchronous retention. Stop and join
+	// the worker (including retentionDone) before observing the marker timestamp
+	// or advancing retention manually, so a pending Chtimes cannot move it.
+	d.cancel()
+	d.workerWG.Wait()
 	workerDir := filepath.Join(state, "workers", "fake-1")
 	now := time.Now()
 	var unclaimedAt time.Time
