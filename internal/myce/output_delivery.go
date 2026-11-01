@@ -77,9 +77,6 @@ func deliveryPending(j *Job) bool {
 }
 
 func validateOutputDelivery(s Spec) error {
-	if err := validateTaskOutputs(s); err != nil {
-		return err
-	}
 	if s.OutputDelivery == "" {
 		return nil
 	}
@@ -142,7 +139,7 @@ func (q *Queue) advanceOutputDelivery(ctx context.Context) error {
 	eligible := active != nil
 	if !eligible {
 		for _, j := range q.liveJobs() {
-			if j.Spec.OutputDestination == nil && deliveryPending(j) && !q.clock.Now().Before(j.Delivery.NextAttemptAt) {
+			if !parkedStorage(j) && deliveryPending(j) && !q.clock.Now().Before(j.Delivery.NextAttemptAt) {
 				eligible = true
 				break
 			}
@@ -208,7 +205,7 @@ func (q *Queue) advanceOutputDelivery(ctx context.Context) error {
 		// Stable oldest-first ordering, without letting a failed task block others.
 		jobs := []*Job{}
 		for _, j := range q.liveJobs() {
-			if j.Spec.OutputDestination == nil && deliveryPending(j) && !q.clock.Now().Before(j.Delivery.NextAttemptAt) {
+			if !parkedStorage(j) && deliveryPending(j) && !q.clock.Now().Before(j.Delivery.NextAttemptAt) {
 				jobs = append(jobs, j)
 			}
 		}
@@ -257,111 +254,27 @@ func (q *Queue) advanceOutputDelivery(ctx context.Context) error {
 // Complete directories include their receipt before rename; replay verifies both
 // receipt identity AND destination content, never just the existence of a file.
 func publishOutputDelivery(j Job, store *FileStore, path string, callbacks ...func()) error {
+	progress := outputDeliveryProgress(callbacks)
 	if store == nil || j.Delivery == nil || deliveryDigest(j) != j.Delivery.ManifestSHA256 || deliveryRootID(path) != j.Delivery.DestinationID {
 		return ErrStale
 	}
-	return publishOutputDeliverySource(j, path, func(name string) (io.ReadCloser, error) { return os.Open(store.blob(j.OutputRefs[name])) }, callbacks...)
-}
-
-func publishTaskOutputDelivery(j Job, source, path string, callbacks ...func()) error {
-	return publishTaskOutputDeliveryRoot(j, source, path, nil, callbacks...)
-}
-
-func publishQualifiedTaskOutputDelivery(j Job, source string, destination OutputDestinationRoot, callbacks ...func()) error {
-	return publishTaskOutputDeliveryRoot(j, source, destination.Path, qualifiedOutputDestinationCheck(destination), callbacks...)
-}
-
-func qualifiedOutputDestinationCheck(destination OutputDestinationRoot) func(*os.Root) error {
-	return func(root *os.Root) error {
-		if !filepath.IsAbs(destination.Path) || destination.NativeIdentity == "" {
-			return errors.New("worker destination is not qualified")
-		}
-		f, err := root.Open(".")
-		if err != nil {
-			return err
-		}
-		defer f.Close()
-		identity, err := nativeStorageFilesystemIdentity(int(f.Fd()))
-		if err != nil || identityHash(identity) != destination.NativeIdentity {
-			return errors.New("destination volume identity mismatch")
-		}
-		return nil
-	}
-}
-
-// Receipts describe the expected tree; only hashing its current files proves
-// preservation. This is deliberately separate from publication and never repairs
-// or creates a missing destination while authorizing last-copy collection.
-func verifyQualifiedTaskOutputDelivery(j Job, destination OutputDestinationRoot, callbacks ...func()) error {
-	root, err := os.OpenRoot(destination.Path)
-	if err != nil {
-		return err
-	}
-	defer root.Close()
-	if err = qualifiedOutputDestinationCheck(destination)(root); err != nil {
-		return err
-	}
-	for path, receipt := range deliveryDirectories(j) {
-		if err = verifyDeliveryDirectory(root, path, receipt, callbacks...); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func deliveryDirectories(j Job) map[string]deliveryReceipt {
-	groups := map[string]FileManifest{}
-	for name, prefix := range j.Spec.Outputs {
-		if groups[prefix] == nil {
-			groups[prefix] = FileManifest{}
-		}
-		groups[prefix][name] = taskOutputFiles(j)[name]
-	}
-	directories := map[string]deliveryReceipt{}
-	for prefix, files := range groups {
-		receipt := deliveryReceipt{DestinationID: j.Delivery.DestinationID, Execution: j.Delivery.Execution, Machine: j.Machine, Session: j.Session, Policy: asyncNAS + "/1", ManifestSHA256: j.Delivery.ManifestSHA256, Files: files}
-		if j.Spec.OutputDestination != nil {
-			receipt.Policy = taskOutputProtocol
-		}
-		directories[filepath.Join(prefix, j.ID, strconv.Itoa(j.Attempt))] = receipt
-	}
-	return directories
-}
-
-func publishTaskOutputDeliveryRoot(j Job, source, path string, check func(*os.Root) error, callbacks ...func()) error {
-	if j.Spec.OutputDestination == nil || j.Delivery == nil || j.LocalOutputs == nil || deliveryDigest(j) != j.Delivery.ManifestSHA256 {
-		return ErrStale
-	}
-	return publishOutputDeliverySourceRoot(j, path, func(name string) (io.ReadCloser, error) {
-		p, err := confinedPath(source, name)
-		if err != nil {
-			return nil, err
-		}
-		return os.Open(p)
-	}, check, callbacks...)
-}
-
-func publishOutputDeliverySource(j Job, path string, open func(string) (io.ReadCloser, error), callbacks ...func()) error {
-	return publishOutputDeliverySourceRoot(j, path, open, nil, callbacks...)
-}
-
-func publishOutputDeliverySourceRoot(j Job, path string, open func(string) (io.ReadCloser, error), check func(*os.Root) error, callbacks ...func()) error {
-	progress := outputDeliveryProgress(callbacks)
 	root, err := os.OpenRoot(path)
 	if err != nil {
 		return err
 	}
 	defer root.Close()
-	if check != nil {
-		if err = check(root); err != nil {
-			return err
-		}
-	}
 	progress()
-	directories := deliveryDirectories(j)
-	for _, dest := range slices.Sorted(maps.Keys(directories)) {
-		receipt := directories[dest]
-		files := receipt.Files
+	groups := map[string]FileManifest{}
+	for name, prefix := range j.Spec.Outputs {
+		if groups[prefix] == nil {
+			groups[prefix] = FileManifest{}
+		}
+		groups[prefix][name] = j.OutputRefs[name]
+	}
+	for _, prefix := range slices.Sorted(maps.Keys(groups)) {
+		files := groups[prefix]
+		dest := filepath.Join(prefix, j.ID, strconv.Itoa(j.Attempt))
+		receipt := deliveryReceipt{DestinationID: j.Delivery.DestinationID, Execution: j.Delivery.Execution, Machine: j.Machine, Session: j.Session, Policy: asyncNAS + "/1", ManifestSHA256: j.Delivery.ManifestSHA256, Files: files}
 		if _, e := root.Lstat(dest); e == nil {
 			if err = verifyDeliveryDirectory(root, dest, receipt, progress); err != nil {
 				return err
@@ -382,13 +295,8 @@ func publishOutputDeliverySourceRoot(j Job, path string, open func(string) (io.R
 		// Deterministic stage is queue-owned and reusable after a crash. Nothing is
 		// deleted until a fresh complete directory has been durably exposed.
 		stage := filepath.Join(parent, ".delivery-"+strconv.Itoa(j.Attempt))
-		if j.Spec.OutputDestination != nil && j.Spec.OutputDestination.Kind == "submitter" {
-			stage += "." + ID()
-		}
-		if j.Spec.OutputDestination == nil || j.Spec.OutputDestination.Kind != "submitter" {
-			if err = root.RemoveAll(stage); err != nil {
-				return err
-			}
+		if err = root.RemoveAll(stage); err != nil {
+			return err
 		}
 		progress()
 		if err = root.Mkdir(stage, 0700); err != nil {
@@ -400,29 +308,18 @@ func publishOutputDeliverySourceRoot(j Job, path string, open func(string) (io.R
 		for name := range files {
 			names[name] = name
 		}
-		stageFile := func(name, _ string) error {
+		err = stageJobFiles(names, func(name, _ string) error {
 			if err := root.MkdirAll(filepath.Join(stage, filepath.Dir(name)), 0700); err != nil {
 				return err
 			}
 			progress()
-			src, err := open(name)
+			src, err := os.Open(store.blob(files[name]))
 			if err != nil {
 				return err
 			}
 			defer src.Close()
 			return writeDeliveryFile(root, filepath.Join(stage, name), io.LimitReader(src, files[name].SizeBytes+1), progress)
-		}
-		if j.Spec.OutputDestination != nil && j.Spec.OutputDestination.Kind == "submitter" {
-			// One demand-driven relay per queue; serial pulls also bound the
-			// submitter's simultaneous partial allocation to a single file.
-			for _, name := range slices.Sorted(maps.Keys(names)) {
-				if err = stageFile(name, name); err != nil {
-					break
-				}
-			}
-		} else {
-			err = stageJobFiles(names, stageFile)
-		}
+		})
 		if err != nil {
 			return err
 		}
@@ -483,11 +380,11 @@ func syncDeliveryDirectory(root *os.Root, path string, callbacks ...func()) erro
 
 func verifyDeliveryDirectory(root *os.Root, path string, receipt deliveryReceipt, callbacks ...func()) error {
 	progress := outputDeliveryProgress(callbacks)
-	expected, _ := json.Marshal(receipt)
 	f, err := root.Open(filepath.Join(path, deliveryReceiptName))
 	if err != nil {
 		return err
 	}
+	expected, _ := json.Marshal(receipt)
 	actual, e := io.ReadAll(io.LimitReader(f, int64(len(expected))+1))
 	err = errors.Join(e, f.Sync(), f.Close())
 	if err != nil {

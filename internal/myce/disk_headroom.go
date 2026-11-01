@@ -168,18 +168,12 @@ func (q *Queue) currentDiskVolume(v DiskVolume, receivedAt time.Time) DiskVolume
 	return v
 }
 func (q *Queue) diskHeadroomReason(j *Job, m *Machine) string {
-	if reason := q.protectedStorageReason(j, m); reason != "" {
-		return reason
+	if parkedStorage(j) {
+		return parkedStorageReason
 	}
 	if j.OutputAdmissionPending {
-		if q.s.StorageAdmissionActive {
-			return outputAdmissionReason(j)
-		}
 		return outputRetryHold
 	}
-	if q.automaticStorage() {
-		return ""
-	} // Qualified complete boundaries replace the legacy percentage floor.
 	if m == nil {
 		return ""
 	}
@@ -200,8 +194,8 @@ func (q *Queue) diskHeadroomReason(j *Job, m *Machine) string {
 // floor. Need was admitted at dispatch and staged inputs may already be
 // reflected in free space; an expired reading is not evidence of exhaustion (s029).
 func (q *Queue) startDiskFloorReason(j *Job, m *Machine) string {
-	if q.automaticStorage() {
-		return q.protectedStorageLaunchReason(j)
+	if parkedStorage(j) {
+		return parkedStorageReason
 	}
 	if m == nil {
 		return ""
@@ -274,16 +268,11 @@ func (q *Queue) diskCapacityRefusal(j *Job) string {
 	return strings.Join(slices.Compact(reasons), "; ")
 }
 func (q *Queue) diskWaitingReason(j *Job, host string) string {
-	if j.OutputAdmissionPending {
-		if q.s.StorageAdmissionActive {
-			return outputAdmissionReason(j)
-		}
-		return outputRetryHold
+	if parkedStorage(j) {
+		return parkedStorageReason
 	}
-	if q.s.StorageAdmissionActive {
-		if reason := q.protectedStorageWaitingReason(j, host); reason != "" {
-			return reason
-		}
+	if j.OutputAdmissionPending {
+		return outputRetryHold
 	}
 	if !q.hasDiskReports(host) {
 		return ""

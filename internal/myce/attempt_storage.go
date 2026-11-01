@@ -13,6 +13,11 @@ import (
 
 const managedStorageSource = "managed allocated-block samples; unenforced"
 
+// Storage learning is diagnostic, not enforcement. Five seconds reduces full
+// metadata walks 25-fold versus memory sampling; explicit publication and final
+// samples retain known simultaneous copies even on short attempts.
+const attemptStorageSamplePeriod = 5 * time.Second
+
 // The observer reads metadata only on attempt-local roots, never NAS or payload
 // contents. It does not enforce a limit or claim to see deleted-between-scan data.
 type storageObserver struct {
@@ -202,7 +207,7 @@ func (w Worker) observeAttemptStorage(j Job, state, checkpoint, identity string,
 	o.sample()
 	go func() {
 		defer close(o.done)
-		tick := time.NewTicker(attemptMemorySamplePeriod)
+		tick := time.NewTicker(attemptStorageSamplePeriod)
 		defer tick.Stop()
 		// This ticker schedules metadata I/O only. Learning/age decisions use
 		// the queue's injected Clock; never read a mutable queue clock here.

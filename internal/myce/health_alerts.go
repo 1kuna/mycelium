@@ -99,21 +99,7 @@ func (q *Queue) detectHealth() {
 			}
 		}
 	}
-	for _, j := range q.liveJobs() {
-		if jobClass(j.Spec) != "production" {
-			continue
-		}
-		if j.State == "queued" && j.OutputAdmissionPending && !cancelled(j) {
-			continue
-		}
-		reason := ""
-		if j.State == "queued" && !cancelled(j) {
-			reason = q.protectedStorageWaitingReason(j, "")
-		}
-		copy := *j
-		copy.Reason = reason
-		q.storageCapacityAlert(&copy, reason != "")
-	}
+
 	delay := q.healthStorageDelay
 	if delay <= 0 {
 		delay = DefaultHealthStorageDelay

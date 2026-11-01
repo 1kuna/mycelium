@@ -168,6 +168,9 @@ func (q *Queue) fileReleaseMetadata(selection FileReleaseSelection) (FileRelease
 			at := j.FinishedAt.Add(q.fileRetention)
 			item.ExpiresAt = &at
 		}
+		if parkedStorageCustody(j) {
+			item.Blockers = append(item.Blockers, "parked_storage_custody")
+		}
 		if !terminal(j.State) {
 			item.Blockers = append(item.Blockers, "live_job")
 		}

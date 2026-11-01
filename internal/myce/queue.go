@@ -40,12 +40,12 @@ type batchRelease struct {
 }
 
 type state struct {
-	MemoryExplorations map[string]memoryExploration `json:"memory_explorations,omitempty"`
-	// #509 owns explicit migration activation. Missing/false preserves legacy
-	// cap/reserve admission, including declared estimates and FIFO retries.
-	StorageMigration       *storageMigration              `json:"storage_migration,omitempty"`
+	// Read-only parked policy. Preserve retained DB records; these fields no
+	// longer activate admission or replace the configured file-store guards.
+	StorageMigration       json.RawMessage                `json:"storage_migration,omitempty"`
+	StorageProtection      json.RawMessage                `json:"storage_protection,omitempty"`
 	StorageAdmissionActive bool                           `json:"storage_admission_active,omitempty"`
-	StorageProtection      *storageProtectionState        `json:"storage_protection,omitempty"`
+	MemoryExplorations     map[string]memoryExploration   `json:"memory_explorations,omitempty"`
 	StorageObservations    map[string]StorageObservation  `json:"storage_observations,omitempty"`
 	ExternalMemory         map[string]*externalMemoryRing `json:"external_memory,omitempty"`
 	AttemptOutputUploads   map[string]time.Time           `json:"attempt_output_uploads,omitempty"`
@@ -104,19 +104,13 @@ type state struct {
 }
 type Queue struct {
 	// Qualification removes occupancy, but retains diagnostic history/inventory.
-	memoryOrigin              *Queue
-	storageShadowContinuity   bool // Process-local: downtime never earns shadow evidence.
-	storageProtectionMu       sync.Mutex
-	storageProtectionVerified bool // Restart never renews native verification.
+	memoryOrigin *Queue
 	// Only detached observation views set this page selection.
-	observationSelection   *statusSelection
-	deliveryRoot           string
-	deliveryMu             sync.Mutex
-	taskOutputMu           sync.Mutex
-	taskOutputRelays       map[string]*taskOutputRelay
-	taskOutputPreservation *taskOutputPreservation                     // Ephemeral live submitter stream; never a durable receipt.
-	deliveryActive         *deliveryOperation                          // q.mu; one outstanding NAS publication per root.
-	deliveryPublish        func(Job, *FileStore, string, func()) error // Test seam; set before use.
+	observationSelection *statusSelection
+	deliveryRoot         string
+	deliveryMu           sync.Mutex
+	deliveryActive       *deliveryOperation                          // q.mu; one outstanding NAS publication per root.
+	deliveryPublish      func(Job, *FileStore, string, func()) error // Test seam; set before use.
 	// Ephemeral exact-attempt samples: restart cannot renew a cached credit.
 	hostMemorySamples map[string]map[attemptKey]hostMemorySample
 
@@ -561,11 +555,6 @@ func (q *Queue) Submit(s Spec) (*Job, error) {
 // SubmitContext snapshots input custody before bulk verification. Key replay,
 // cancellation and job creation still serialize in the final update transaction.
 func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
-	if s.OutputDelivery == asyncNAS && q.storageAdmissionActive() {
-		if e := q.reclaimStorageForAdmission(ctx); e != nil && ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-	}
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
 	defer func() {
@@ -693,9 +682,6 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 			return ErrStale
 		}
 		submitted := s
-		if s.OutputDestination != nil && s.OutputRetention == "" {
-			s.OutputRetention = "until_delivered"
-		}
 		extensions, e := q.resolveExtensions(&s)
 		if e != nil {
 			return rejectFieldRule("job_program_invalid", e)
@@ -723,8 +709,6 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 			if store == nil {
 				return &HTTPError{Status: 503, Code: "file_store_unavailable", Message: "queue-file-store is not configured"}
 			}
-		}
-		if s.OutputDelivery == asyncNAS && !q.s.StorageAdmissionActive {
 			if err := q.fileStoreReserveRefusal(resultCapacity, addDiskBytes(q.outputReservations(resultPayloads, ""), s.Disk.OutputBytes), s.Disk.OutputBytes, q.outputReservationsFor(resultPayloads, "", true), q.priorityMatch(s).Tier == "production"); err != nil {
 				return err
 			}
@@ -807,16 +791,6 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		if s.After != nil {
 			j.WaitingSince = time.Time{}
 			j.Dependency = &PieceBinding{Job: s.After.Job, Piece: s.After.Piece, State: "blocked"}
-		}
-		if s.OutputDelivery == asyncNAS && q.s.StorageAdmissionActive {
-			if e := q.admitSharedOutput(j, resultCapacity, resultPayloads); e != nil {
-				if jobClass(s) != "production" {
-					return e
-				}
-				j.OutputAdmissionPending = true
-				j.Reason = q.storageHoldReason(j, resultCapacity, resultPayloads)
-				q.storageCapacityAlert(j, true)
-			}
 		}
 		q.putJob(id, j)
 		if s.SubmissionKey != "" {
@@ -1061,12 +1035,11 @@ func (q *Queue) TickContext(requestContexts ...context.Context) error {
 		}
 		q.observeHealth("queue-files", !fileAvailable, delay, HealthAlert{Kind: "checkpoint_store_unavailable", Store: "queue-file-store"})
 		q.maintain()
-		q.observeTaskOutputCustody()
 		return nil
 	}, nil); err != nil {
 		return err
 	}
-	return errors.Join(q.advanceOutputDelivery(requestCtx), q.pruneBatchLogs(requestCtx), q.reclaimJobFilesContext(requestCtx), q.admitOutputRetries(requestCtx), q.pruneJobHistory(requestCtx), q.observeStorageMigration(requestCtx))
+	return errors.Join(q.advanceOutputDelivery(requestCtx), q.pruneBatchLogs(requestCtx), q.reclaimJobFilesContext(requestCtx), q.admitOutputRetries(requestCtx), q.pruneJobHistory(requestCtx))
 }
 func (q *Queue) Checkin(c Checkin) (Reply, error) {
 	return q.CheckinContext(context.Background(), c)
@@ -1511,9 +1484,9 @@ func (q *Queue) CompleteContext(ctx context.Context, r Result) error {
 	quotaFailure := attemptDiskLimitFailure(r)
 	unlockRequest := requestLock(ctx, &q.mu)
 	j, err := q.current(r)
-	if err == nil && !r.ReleaseOnly && r.Success && j.StorageAllocation != nil && (j.StorageAllocation.WorkerCustody || j.Spec.OutputDestination != nil) {
+	if err == nil && parkedStorage(j) && !r.ReleaseOnly {
 		unlockRequest()
-		return storageCustodyRefusal()
+		return errors.New(parkedStorageReason)
 	}
 	// A quota failure remains terminal when a stop races it. Verify its opt-in
 	// diagnostics in either live state, with the same identity fences as outputs.
@@ -2354,16 +2327,6 @@ type attemptProgress struct {
 func (q *Queue) reconcileAttemptReport(m *Machine, report *AttemptReport, progress attemptProgress) AttemptDirective {
 	reply := AttemptDirective{Execution: Execution{ID: report.ID, Attempt: report.Attempt}, Session: report.Session}
 	j := q.touchJob(report.ID)
-	// Retained output custody is not a live process to kill. Its independently
-	// charged spool is driven through the existing worker control HTTP path.
-	if j != nil && j.LocalOutputs != nil && j.Attempt == report.Attempt && j.Machine == m.ID && j.Session == report.Session && j.Session == m.Session && j.ReleaseConfirmed && !report.Started {
-		if deliveryPending(j) && report.OutputDeliveryProgress > j.Delivery.ProgressOperations {
-			now := q.clock.Now()
-			j.Delivery.ProgressOperations = report.OutputDeliveryProgress
-			j.Delivery.LastProgressAt = &now
-		}
-		return reply
-	}
 	if j != nil && !terminal(j.State) && !cancelled(j) && (j.State == "queued" || j.Attempt != report.Attempt || j.Machine != m.ID || j.Session != m.Session) {
 		for _, copy := range j.Copies {
 			canRecover := q.machineRecoveryFits(m, j, copy)
@@ -2441,7 +2404,6 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	if j.Spec.FanOut != nil {
 		j = q.assignFanOut(j, m)
 	}
-	storage, _ := q.storageRequest(j, m)
 	estimate, measured := q.estimateCompletion(j, m)
 	// The planner returns a target-specific copy. Persist its exact
 	// reservation on the live attempt before charging any resources.
@@ -2494,7 +2456,6 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	j.Session = m.Session
 	q.claimMemoryExploration(j, m)
 	j.StorageEnvelope = q.storageEnvelope(j, m)
-	q.assignStorage(j, storage)
 	j.Reason = ""
 	if measured {
 		j.Timing = &WorkTiming{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: m.ID, Session: m.Session, PlacementReason: estimate.reason()}

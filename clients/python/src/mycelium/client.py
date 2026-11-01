@@ -12,7 +12,6 @@ import datetime as dt
 import json
 import os
 import ssl
-import shutil
 from pathlib import Path
 import time
 from typing import Any, Iterator, Mapping
@@ -258,7 +257,7 @@ class Client:
             self.download_result(job["id"], name, destination)
         return job
 
-    def _file_request(self, method: str, path: str, data: bytes | io.RawIOBase | None = None,
+    def _file_request(self, method: str, path: str, data: bytes | None = None,
                       headers: Mapping[str, str] | None = None, size: int = 0):
         """size is the blob the queue may verify before replying; 0 when none."""
         budget = self._transfer_idle
@@ -266,11 +265,11 @@ class Client:
             budget = max(FILE_TRANSFER_IDLE,
                          FILE_RESPONSE_BUDGET + 2 * max(size, 0) / FILE_VERIFY_BYTES_PER_SECOND)
         headers = dict(headers or {})
-        if isinstance(data, bytes):
+        if data is not None:
             headers["Content-Length"] = str(len(data))
         # Bound memory used by http.client; the transfer connection also sends
         # partial buffers separately so no sendall has a cumulative timeout.
-        request = Request(self.url + path, data=io.BytesIO(data) if isinstance(data, bytes) else data,
+        request = Request(self.url + path, data=None if data is None else io.BytesIO(data),
                           method=method, headers={"Authorization": "Bearer " + self.token, **headers})
         request._mycelium_file_transfer = True
         opener = self._urlopen
@@ -376,7 +375,6 @@ class Client:
         artifact is a manifest key; destination is an explicit caller path.
         Queue/worker paths are never interpreted as local paths.
         """
-        task_receipt = None
         if recovered_result_id is not None:
             record = self._call("GET", f"/api/jobs/{quote(job_id, safe='')}/recovered-results/"
                                 f"{quote(recovered_result_id, safe='')}?require_files=true")
@@ -389,21 +387,9 @@ class Client:
                 raise APIError(410, json.dumps({"code": "result_expired", "error": "stored job files expired after the retention window"}))
             if job["state"] != "succeeded":
                 raise APIError(409, json.dumps({"code": "request_stale", "error": "job has no accepted result"}))
-            if job.get("local_outputs") is not None:
-                task = self._call("GET", f"/api/task-outputs/{quote(job_id, safe='')}")
-                if task.get("protocol") != "task-output/1" or task.get("kind") != "submitter":
-                    raise ValueError("worker-local results require submitter task-output/1")
-                task_receipt = task["receipt"]
-                ref = task_receipt["files"].get(artifact)
-            else:
-                ref = (job.get("output_refs") or {}).get(artifact)
+            ref = (job.get("output_refs") or {}).get(artifact)
         if ref is None:
             raise APIError(404, json.dumps({"code": "artifact_unknown", "error": "accepted artifact not found"}))
-        path = (f"/api/task-outputs/{quote(job_id, safe='')}/files/{quote(artifact, safe='')}"
-                f"?manifest={task_receipt['manifest_sha256']}") if task_receipt else f"/api/files/blobs/{ref['sha256']}"
-        return self._download_verified_artifact(path, ref, destination)
-
-    def _download_verified_artifact(self, path: str, ref: dict, destination: str | Path) -> Path:
         sha, size = ref["sha256"], ref["size_bytes"]
         if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-f]{64}", sha) or not isinstance(size, int) or size < 0:
             raise ValueError("invalid artifact identity")
@@ -415,7 +401,7 @@ class Client:
                 temporary = Path(stream.name)
                 digest, received = hashlib.sha256(), 0
                 try:
-                    with self._file_request("GET", path, size=size) as response:
+                    with self._file_request("GET", "/api/files/blobs/" + sha, size=size) as response:
                         for chunk in iter(lambda: response.read(1024 * 1024), b""):
                             received += len(chunk)
                             if received > size:
@@ -436,138 +422,6 @@ class Client:
         finally:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
-
-    def deliver_outputs(self, job_id: str, destination: str | Path) -> Path:
-        """Pull task-output/1 to this submitter, verify and sync, then acknowledge.
-
-        The queue never receives destination. Results are atomically exposed at
-        destination/JOB/ATTEMPT. Retry the same path after an uncertain response:
-        an existing tree must match every file and the exact attempt receipt.
-        A partial/individual download never acknowledges whole-task delivery.
-        """
-        task = self._call("GET", f"/api/task-outputs/{quote(job_id, safe='')}")
-        if task.get("protocol") != "task-output/1" or task.get("kind") != "submitter":
-            raise ValueError("submitter task-output/1 required")
-        receipt, directory_receipt = task["receipt"], task["directory_receipt"]
-        execution = receipt["execution"]
-        if execution["id"] != job_id or not re.fullmatch(r"[A-Za-z0-9_-]+", job_id) or not isinstance(execution["attempt"], int) or execution["attempt"] <= 0:
-            raise ValueError("invalid output execution")
-        files = receipt["files"]
-        for name, ref in files.items():
-            if (not name or "\\" in name or ":" in name or any(part in {"", ".", ".."} for part in name.split("/"))
-                    or not re.fullmatch(r"[0-9a-f]{64}", ref.get("sha256", "")) or not isinstance(ref.get("size_bytes"), int) or ref["size_bytes"] < 0):
-                raise ValueError("invalid output manifest")
-        root = Path(destination).resolve()
-        parent = root / job_id
-        target = parent / str(execution["attempt"])
-        for path in [target, *target.parents]:
-            if path.is_symlink():
-                raise ValueError("output destination cannot contain symlinks")
-        parent.mkdir(parents=True, exist_ok=True)
-
-        def sync_directory(path: Path) -> None:
-            descriptor = os.open(path, os.O_RDONLY)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-
-        def verify_tree(path: Path) -> None:
-            if json.loads((path / ".myce-delivery.json").read_text()) != directory_receipt:
-                raise ValueError("conflicting delivery receipt")
-            seen = set()
-            for entry in path.rglob("*"):
-                if entry.is_symlink():
-                    raise ValueError("delivery symlink refused")
-                if entry.is_dir():
-                    continue
-                name = entry.relative_to(path).as_posix()
-                if name == ".myce-delivery.json":
-                    continue
-                if name not in files or not entry.is_file():
-                    raise ValueError("unexpected delivery file")
-                digest, size = hashlib.sha256(), 0
-                with entry.open("rb") as source:
-                    for chunk in iter(lambda: source.read(1024 * 1024), b""):
-                        size += len(chunk)
-                        digest.update(chunk)
-                    os.fsync(source.fileno())
-                if size != files[name]["size_bytes"] or digest.hexdigest() != files[name]["sha256"]:
-                    raise ValueError("delivery content mismatch")
-                seen.add(name)
-            if seen != set(files):
-                raise ValueError("incomplete delivery")
-            with (path / ".myce-delivery.json").open("rb") as source:
-                os.fsync(source.fileno())
-            for directory in sorted([path, *(p for p in path.rglob("*") if p.is_dir())], key=lambda p: len(p.parts), reverse=True):
-                sync_directory(directory)
-
-        if target.exists():
-            verify_tree(target)
-        else:
-            stage = Path(tempfile.mkdtemp(prefix=".myce-delivery-", dir=parent))
-            try:
-                for name in files:
-                    # Whole-task restoration uses the retained custody manifest,
-                    # even after ordinary result expiry. The task-output endpoint
-                    # remains available until actual worker collection.
-                    path = (f"/api/task-outputs/{quote(job_id, safe='')}/files/{quote(name, safe='')}"
-                            f"?manifest={receipt['manifest_sha256']}")
-                    self._download_verified_artifact(path, files[name], stage / name)
-                with (stage / ".myce-delivery.json").open("x", encoding="utf-8") as stream:
-                    json.dump(directory_receipt, stream, separators=(",", ":"), ensure_ascii=False)
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                verify_tree(stage)
-                # Refuse a concurrently published tree, rather than replacing it.
-                if target.exists():
-                    verify_tree(target)
-                else:
-                    stage.rename(target)
-            finally:
-                if stage.exists():
-                    shutil.rmtree(stage)
-        for directory in [parent, root, *root.parents]:
-            sync_directory(directory)
-        self._call("POST", "/api/task-outputs/verified", receipt)
-        collection = self._call("GET", f"/api/task-outputs/{quote(job_id, safe='')}")
-        if collection.get("collection_pending"):
-            # The worker cannot reach this private destination. Send current
-            # bytes on a live, bounded stream so it can hash them immediately
-            # before collection; historical receipts are never sufficient.
-            class PreservationStream(io.RawIOBase):
-                def __init__(self):
-                    self.names = iter(sorted(files))
-                    self.source = None
-
-                def read(self, size=-1):
-                    if size == 0:
-                        return b""
-                    size = min(size, 1024 * 1024) if size > 0 else 1024 * 1024
-                    while True:
-                        if self.source is None:
-                            name = next(self.names, None)
-                            if name is None:
-                                return b""
-                            self.source = (target / name).open("rb")
-                        data = self.source.read(size)
-                        if data:
-                            return data
-                        self.source.close()
-                        self.source = None
-
-                def close(self):
-                    if self.source is not None:
-                        self.source.close()
-                    super().close()
-
-            size = sum(ref["size_bytes"] for ref in files.values())
-            with PreservationStream() as source:
-                with self._file_request("PUT", f"/api/task-outputs/{quote(job_id, safe='')}/preservation", data=source,
-                                        headers={"Content-Length": str(size), "X-Myce-Delivery": receipt["manifest_sha256"],
-                                                 "X-Myce-Session": receipt["session"], "X-Myce-Machine": receipt["machine"]}, size=size) as response:
-                    _read_reply(response)
-        return target
 
     def status(self, *, full: bool = False, jobs: str | None = None,
                project: str | None = None, since: str | None = None,

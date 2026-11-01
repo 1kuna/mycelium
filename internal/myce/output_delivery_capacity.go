@@ -5,8 +5,49 @@ import (
 	"errors"
 	"maps"
 	"net/http"
+	"slices"
+	"strings"
 	"time"
 )
+
+// The job record durably reserves its estimate before admission. Once its local
+// immutable spool is known, reserve the actual missing identities instead. Tus
+// lengths already counted by capacity() are not charged twice. Call under q.mu.
+func (q *Queue) outputReservations(payloads map[string]storedPayload, exclude string) uint64 {
+	return q.outputReservationsFor(payloads, exclude, false)
+}
+func (q *Queue) outputReservationsFor(payloads map[string]storedPayload, exclude string, productionOnly bool) uint64 {
+	var bytes uint64
+	seen := map[string]bool{}
+	for _, j := range q.liveJobs() {
+		if productionOnly && q.priorityMatch(j.Spec).Tier != "production" {
+			continue
+		}
+		if j.OutputAdmissionPending || j.ID == exclude || terminal(j.State) || j.Spec.OutputDelivery != asyncNAS {
+			continue
+		}
+		if j.PendingOutputRefs == nil {
+			bytes = addDiskBytes(bytes, j.Spec.Disk.OutputBytes)
+			continue
+		}
+		for _, ref := range j.PendingOutputRefs {
+			if seen[ref.SHA256] {
+				continue
+			}
+			seen[ref.SHA256] = true
+			if p, ok := payloads[ref.SHA256]; !ok || p.length != uint64(ref.SizeBytes) {
+				bytes = addDiskBytes(bytes, uint64(ref.SizeBytes))
+			}
+		}
+	}
+	return bytes
+}
+
+func (q *Queue) reservedOutputBytes(payloads map[string]storedPayload) uint64 {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	return q.outputReservations(payloads, "")
+}
 
 // Reservation is attempt-specific and replayable. No blob is accepted here;
 // CompleteContext still hashes and syncs all bytes before success.
@@ -24,11 +65,6 @@ func (q *Queue) reserveDeliveryResult(ctx context.Context, r Result) (err error)
 	}()
 	if err := r.OutputRefs.validate(); err != nil {
 		return err
-	}
-	if q.storageAdmissionActive() {
-		if e := q.reclaimStorageForAdmission(ctx); e != nil && ctx.Err() != nil {
-			return ctx.Err()
-		}
 	}
 	q.fileLifecycle.RLock()
 	defer q.fileLifecycle.RUnlock()
@@ -57,8 +93,8 @@ func (q *Queue) reserveDeliveryResult(ctx context.Context, r Result) (err error)
 		if err != nil || j.State != "running" || cancelled(j) || j.Spec.OutputDelivery != asyncNAS || m == nil || m.Session != r.Session || q.files != store {
 			return ErrStale
 		}
-		if j.StorageAllocation != nil && j.StorageAllocation.WorkerCustody {
-			return storageCustodyRefusal()
+		if parkedStorage(j) {
+			return errors.New(parkedStorageReason)
 		}
 		if len(r.OutputRefs) != len(j.Spec.Outputs) {
 			return errors.New("complete output manifest required")
@@ -91,7 +127,9 @@ func (q *Queue) reserveDeliveryResult(ctx context.Context, r Result) (err error)
 			projected[ref.SHA256] = storedPayload{length: uint64(ref.SizeBytes)}
 		}
 		pressureStatus, pressurePayloads, pressureGrowth, measured = status, projected, need, true
-		if err := q.yieldSharedOutput(j, status, projected, need, j.ID); err != nil {
+		growth := need
+		need = addDiskBytes(need, q.outputReservations(projected, j.ID))
+		if err := q.fileStoreReserveRefusal(status, need, growth, q.outputReservationsFor(projected, j.ID, true), q.priorityMatch(j.Spec).Tier == "production"); err != nil {
 			return err
 		}
 		j = q.touchJob(j.ID)
@@ -115,6 +153,60 @@ func (a API) deliveryResultHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respondOperation(w, map[string]bool{"ok": true}, a.Queue.reserveDeliveryResult(r.Context(), result), "result_reservation_invalid")
+}
+
+const outputRetryHold = "file_store_capacity: waiting to reacquire output reservation after retry"
+
+// Requeue never conjures a fresh estimate. Tick reacquires the retry's budget
+// through the same serialized file-store admission used for new tasks/uploads.
+func (q *Queue) admitOutputRetries(ctx context.Context) error {
+	q.fileLifecycle.RLock()
+	defer q.fileLifecycle.RUnlock()
+	q.mu.RLock()
+	store := q.files
+	pending := false
+	for _, j := range q.liveJobs() {
+		if j.State == "queued" && j.OutputAdmissionPending {
+			pending = true
+			break
+		}
+	}
+	q.mu.RUnlock()
+	if !pending || store == nil {
+		return nil
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	status, payloads, err := store.capacity(ctx)
+	if err != nil {
+		status.Error = "file store capacity unavailable"
+	}
+	return q.updateRequest(ctx, func() error {
+		if store != q.files {
+			return ErrStale
+		}
+		jobs := []*Job{}
+		for _, j := range q.liveJobs() {
+			if j.State == "queued" && j.OutputAdmissionPending {
+				jobs = append(jobs, j)
+			}
+		}
+		slices.SortFunc(jobs, func(a, b *Job) int {
+			if c := a.Queued.Compare(b.Queued); c != 0 {
+				return c
+			}
+			return strings.Compare(a.ID, b.ID)
+		})
+		for _, j := range jobs {
+			need := addDiskBytes(q.outputReservations(payloads, ""), j.Spec.Disk.OutputBytes)
+			if q.fileStoreReserveRefusal(status, need, j.Spec.Disk.OutputBytes, q.outputReservationsFor(payloads, "", true), q.priorityMatch(j.Spec).Tier == "production") != nil {
+				continue
+			}
+			j = q.touchJob(j.ID)
+			j.OutputAdmissionPending = false
+		}
+		return nil
+	}, nil)
 }
 
 // Positive ownership is recorded only on creation, or transferred from an

@@ -90,15 +90,13 @@ func captureDeliverySpool(j Job, workerRoot string, observers ...*storageObserve
 		sources[name] = src
 		bytes = addDiskBytes(bytes, uint64(st.Size()))
 	}
-	if j.StorageAllocation == nil {
-		disk, err := workerDiskProbe(parent)
-		if err != nil {
-			return "", nil, err
-		}
-		floor := diskFreeFloor(disk.TotalBytes)
-		if disk.TotalBytes == 0 || disk.FreeBytes < floor || bytes > disk.FreeBytes-floor {
-			return "", nil, fmt.Errorf("local result spool capacity: need=%d bytes; work files retained", bytes)
-		}
+	disk, err := workerDiskProbe(parent)
+	if err != nil {
+		return "", nil, err
+	}
+	floor := diskFreeFloor(disk.TotalBytes)
+	if disk.TotalBytes == 0 || disk.FreeBytes < floor || bytes > disk.FreeBytes-floor {
+		return "", nil, fmt.Errorf("local result spool capacity: need=%d bytes; work files retained", bytes)
 	}
 	stage, err := os.MkdirTemp(parent, ".result-spool-")
 	if err != nil {

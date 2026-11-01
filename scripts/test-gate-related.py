@@ -105,6 +105,26 @@ class RelatedTests(unittest.TestCase):
             finally:
                 os.chdir(previous)
 
+    def test_removed_feature_keeps_surviving_consumers(self):
+        previous = os.getcwd()
+        with tempfile.TemporaryDirectory() as directory:
+            os.chdir(directory)
+            try:
+                def git(*args):
+                    subprocess.run(['git', *args], check=True, capture_output=True)
+                git('init', '-q')
+                pathlib.Path('feature.go').write_text('package p\nfunc Feature() {}\n')
+                pathlib.Path('feature_test.go').write_text('package p\nfunc TestFeature(t *testing.T) { Feature() }\n')
+                pathlib.Path('consumer_test.go').write_text('package p\nfunc TestConsumer(t *testing.T) { Feature() }\nfunc TestUnrelated(t *testing.T) {}\n')
+                git('add', '.')
+                git('-c', 'user.name=Fixture', '-c', 'user.email=fixture-noreply@example.invalid', 'commit', '-qm', 'base')
+                git('rm', 'feature.go', 'feature_test.go')
+                self.assertEqual(related.select('HEAD'), [('.', '^(TestConsumer)$')])
+                git('rm', 'consumer_test.go')
+                self.assertEqual(related.select('HEAD'), [])
+            finally:
+                os.chdir(previous)
+
     def test_selection_and_explicit_full(self):
         previous = os.getcwd()
         with tempfile.TemporaryDirectory() as directory:

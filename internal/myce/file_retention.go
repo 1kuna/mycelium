@@ -157,7 +157,7 @@ func (q *Queue) maintainFileExpiry() {
 		if j == nil || !terminal(j.State) || !hasJobFiles(j) {
 			continue
 		}
-		if deliveryPending(j) {
+		if parkedStorageCustody(j) || deliveryPending(j) {
 			continue
 		}
 		if j.Spec.OutputDestination != nil && (j.Delivery == nil || j.Delivery.VerifiedAt == nil || !sameDelivery(j, *j)) {
@@ -169,11 +169,8 @@ func (q *Queue) maintainFileExpiry() {
 			ended := now
 			j.FinishedAt = &ended
 		}
-		if !now.Before(j.FinishedAt.Add(q.fileRetention)) || j.Spec.OutputDestination != nil && j.Spec.OutputRetention == "until_delivered" && j.Delivery != nil && j.Delivery.State == "verified" && j.Delivery.VerifiedAt != nil && sameDelivery(j, *j) && !q.jobReleasePending(j) {
+		if !now.Before(j.FinishedAt.Add(q.fileRetention)) {
 			j.FilesExpired = true
-			if j.Spec.OutputDestination != nil {
-				q.acceptFileExpiry(j, "automatic destination retention: "+j.Delivery.ManifestSHA256)
-			}
 		}
 		enrollFileReclamation(j)
 	}
@@ -252,7 +249,7 @@ func (q *Queue) collectFileReferences(pendingOnly bool, releasing map[string]boo
 		}
 		owner = FileKeepingReference{JobID: j.ID, Project: j.Spec.Project}
 		filesExpired := j.FilesExpired
-		protected := deliveryPending(j)
+		protected := parkedStorageCustody(j) || deliveryPending(j)
 		if terminal(j.State) && filesExpired {
 			if custody == nil {
 				custody = q.cancellationObservation()
@@ -285,7 +282,7 @@ func (q *Queue) collectFileReferences(pendingOnly bool, releasing map[string]boo
 		if !terminal(j.State) {
 			keepFiles("pending_output", j.PendingOutputRefs)
 		}
-		if deliveryPending(j) {
+		if parkedStorageCustody(j) || deliveryPending(j) {
 			keepFiles("pending_delivery", j.OutputRefs)
 		}
 		for _, a := range j.AttemptHistory {
@@ -415,7 +412,6 @@ func (q *Queue) reclaimPublishedFilesContext(requestContexts ...context.Context)
 			candidates = append(candidates, hash)
 		}
 	}
-	q.orderStorageReclaim(candidates)
 	revision := q.fileReferenceRevision
 	cutoff := q.clock.Now().Add(-filePublicationGrace)
 	orphanCutoff := q.clock.Now().Add(-q.fileRetention)

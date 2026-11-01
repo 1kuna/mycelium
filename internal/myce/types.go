@@ -191,8 +191,8 @@ type Spec struct {
 }
 
 func (s Spec) Validate() error {
-	if s.StorageProtocol != "" && (s.StorageProtocol != workerCustodyProtocol || s.OutputDelivery != "") {
-		return errors.New("storage_protocol must be worker-custody/1 with output_delivery omitted")
+	if s.StorageProtocol != "" || s.OutputDestination != nil || s.OutputRetention != "" {
+		return errors.New(parkedStorageReason)
 	}
 	if err := validateOutputDelivery(s); err != nil {
 		return reject("job_files_invalid", err)

@@ -10,10 +10,10 @@ import (
 	"time"
 )
 
-// PhysicalStorageStatus remains shadow until the explicit qualified migration.
+// PhysicalStorageStatus is a shadow observation, never an admission credit.
 // Existing allocations already reduce statfs free space; only unwritten
-// commitments are deducted again. ProtectedFreeBytes is zero without active,
-// freshly verified backing/control/custody and write confinement.
+// commitments are deducted again. Native backing/control reserves and complete
+// worker custody are not yet qualified, so ProtectedFreeBytes is always zero.
 type PhysicalStorageStatus struct {
 	Mode                 string               `json:"mode"`
 	SampledAt            time.Time            `json:"sampled_at"`
@@ -121,10 +121,6 @@ func (s *FileStore) physicalStorageStatus(ctx context.Context, status FileStoreS
 		// remain diagnostic, but an incomplete observation grants no headroom.
 		v.Error = "physical storage accounting unavailable"
 		v.UncommittedBytes = 0
-	}
-	if status.LimitBytes == 0 && status.Error == "" && v.Error == "" {
-		v.Mode, v.ProtectedFreeBytes = "active", status.FreeBytes
-		v.Qualification = "verified backing/control/confinement; admitted unwritten limits remain charged"
 	}
 	return v
 }
