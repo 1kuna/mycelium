@@ -239,11 +239,13 @@ func TestCancelledAttemptPartialFilesRemainRecoverable(t *testing.T) {
 	}
 	workerDir := filepath.Join(state, "workers", "fake-1")
 	now := time.Now()
+	var unclaimedAt time.Time
 	for {
 		if err := workerRetention(workerDir, now, DefaultLogRetention); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := os.Stat(filepath.Join(filepath.Dir(path), unclaimedMarker)); err == nil {
+		if info, err := os.Stat(filepath.Join(filepath.Dir(path), unclaimedMarker)); err == nil {
+			unclaimedAt = info.ModTime()
 			break
 		}
 		select {
@@ -252,10 +254,15 @@ func TestCancelledAttemptPartialFilesRemainRecoverable(t *testing.T) {
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
-	if b, err := os.ReadFile(path); err != nil || string(b) != "partial" {
-		t.Fatalf("partial output unavailable: %q %v", b, err)
+	// The live worker can mark the folder after our initial retention time.
+	// Measure the recovery grace from that observed marker, as retention does.
+	if err := workerRetention(workerDir, unclaimedAt.Add(AttemptFilesGrace-time.Nanosecond), DefaultLogRetention); err != nil {
+		t.Fatal(err)
 	}
-	if err := workerRetention(workerDir, now.Add(24*time.Hour), DefaultLogRetention); err != nil {
+	if b, err := os.ReadFile(path); err != nil || string(b) != "partial" {
+		t.Fatalf("partial output unavailable during grace: %q %v", b, err)
+	}
+	if err := workerRetention(workerDir, unclaimedAt.Add(AttemptFilesGrace), DefaultLogRetention); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
