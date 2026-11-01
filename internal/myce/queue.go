@@ -572,8 +572,8 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		if err == nil {
 			return
 		}
-		// Only explicitly marked field rules may publish their reason. A coded
-		// rejection alone does not make a wrapped filesystem cause public.
+		// Only marked field rules and sanitized read diagnostics may publish their
+		// reason. A code alone does not make a wrapped filesystem cause public.
 		var rule *rejectionError
 		if errors.As(err, &rule) {
 			message := rejectionMessages[rule.code]
@@ -581,12 +581,19 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 			if errors.As(err, &field) {
 				message = field.Error()
 			}
-			err = &HTTPError{Status: 400, Code: rule.code, Message: message}
+			detail := pathDiagnostic(err)
+			if detail != nil {
+				message = detail.String()
+			}
+			err = &HTTPError{Status: 400, Code: rule.code, Message: message, PathDiagnostic: detail}
 		}
 		code, reason := "request_failed", rejectionMessages["request_failed"]
 		var apiError *HTTPError
 		if errors.As(err, &apiError) {
 			code, reason = apiError.Code, apiError.Message
+			if apiError.PathDiagnostic != nil {
+				reason = rejectionMessages[code]
+			}
 		} else if errors.Is(err, ErrStale) {
 			code, reason = "request_stale", rejectionMessages["request_stale"]
 		}

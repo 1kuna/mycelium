@@ -4,6 +4,15 @@
   "$defs": {
     "EnvironmentEntry": {
       "properties": {
+        "library": {
+          "type": "string"
+        },
+        "reading_side": {
+          "type": "string"
+        },
+        "resolution_base": {
+          "type": "string"
+        },
         "name": {
           "type": "string"
         },
@@ -16,12 +25,21 @@
       },
       "type": "object",
       "required": [
+        "library",
+        "reading_side",
+        "resolution_base",
         "name",
         "platforms"
       ]
     },
     "EnvironmentPlatform": {
       "properties": {
+        "worker_reads": {
+          "items": {
+            "$ref": "#/$defs/EnvironmentReadObservation"
+          },
+          "type": "array"
+        },
         "platform": {
           "type": "string"
         },
@@ -44,6 +62,54 @@
         "backend",
         "key",
         "input_digests"
+      ]
+    },
+    "EnvironmentReadObservation": {
+      "properties": {
+        "worker": {
+          "type": "string"
+        },
+        "state": {
+          "type": "string"
+        },
+        "path_diagnostic": {
+          "$ref": "#/$defs/PathDiagnostic"
+        }
+      },
+      "type": "object",
+      "required": [
+        "worker",
+        "state"
+      ]
+    },
+    "PathDiagnostic": {
+      "properties": {
+        "field": {
+          "type": "string"
+        },
+        "side": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "resolution_base": {
+          "type": "string"
+        },
+        "cause": {
+          "type": "string"
+        },
+        "companion": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "field",
+        "side",
+        "path",
+        "resolution_base",
+        "cause"
       ]
     }
   }

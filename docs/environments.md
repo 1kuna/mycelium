@@ -5,7 +5,37 @@ no containers, GPU emulation, or automatic platform fallbacks. A platform
 requirement stays strict; a preference permits other supported platforms; `any`
 permits only platforms for which the environment has a recipe.
 
-## Shared catalog
+## Queue-visible environment library
+
+The library is the directory containing the queue-selected catalog and its
+adjacent recipe inputs. It is not a new catalog service. A generic layout is:
+
+```text
+library/catalog.yaml
+library/cpu-tools/pixi.toml
+library/cpu-tools/pixi.lock
+library/python-tools/requirements.txt
+library/project-tools/uv.lock
+library/project-tools/pyproject.toml
+```
+
+Select it with `myce queue --environment-config library/catalog.yaml`, alongside
+normal queue options. The queue reads the catalog at startup; relative inputs
+resolve beside it. Restart the queue to reload it. Already submitted jobs retain
+their frozen recipes; new submissions use the newly loaded catalog bytes.
+Editing a loaded catalog's lock file alone does not reload it.
+
+`myce env list` and `myce env get cpu-tools` (authenticated
+`GET /api/environments` and `GET /api/environments/cpu-tools`) return the logical
+library ID `environment-library`, reading side `queue`, resolution base
+`environment-library`, backend, platform, immutable key and input digests.
+Record that logical ID's mapping to the selected catalog in **local** queue
+policy/operations notes. The physical selection remains in local
+`--environment-config`/installed configuration; inspect it privately on the queue
+host. Readback does not return roots, recipes, file contents or hostnames.
+A recipe key identifies content, Python/backend/build settings and platform,
+not the library's physical mount path. Cache readiness is separate from source
+visibility, runtime coverage and output qualification.
 
 Keep the catalog and its inputs on the NAS, for example
 `NAS/mycelium/environments/catalog.yaml`. Start the queue with
@@ -64,8 +94,11 @@ Relative catalog inputs resolve beside the catalog. For binary inputs on
 machines with different NAS mount paths, set worker `--environment-root` to its
 local catalog directory. The binary's content digest is checked before copying;
 a changed NAS executable fails clearly. Absolute binary paths require the same
-path on every eligible worker. Python files are snapshotted at submission, so
-workers do not read the submitting machine's paths.
+path on every eligible worker. Named Python/Pixi inputs are read when the queue loads the catalog; submission
+retains those immutable bytes. Inline Python inputs are read by the queue during
+submission. Workers build from those snapshots and do not read the submitter's
+lock paths. Neither route requires identical absolute NAS mounts for lock files.
+Binary recipes still require the worker-readable binary described above.
 
 Select the environment in a job:
 
@@ -153,14 +186,59 @@ Register it through the existing shared catalog:
    catalog path. Catalogs are read at queue startup, with no live registration
    endpoint or reload command. Existing submitted jobs retain their snapshots;
    changed files apply to new submissions after the catalog is reloaded.
-4. Submit a job or profile with `environment: cpu-tools` and CPU needs:
+4. Stage the application and data with a profile, using the named environment.
+   For example, create `task.py` in the project root:
+
+   ```python
+   import subprocess
+   import sys
+   from pathlib import Path
+
+   assert sys.version_info[:2] == (3, 12)
+   subprocess.run([
+       "ffmpeg", "-nostdin", "-y", "-i", "input.wav",
+       "-ac", "1", "-ar", "16000", "result.wav",
+   ], check=True)
+   assert Path("result.wav").stat().st_size > 44
+   ```
+
+   Create `.mycelium/profiles/audio.yaml`:
 
    ```yaml
+   name: audio
+   project: example
+   class: experiment
+   source: {git: HEAD, paths: [task.py]}
    environment: cpu-tools
    needs: {platform: cpu, cpu_cores: 2, memory_gb: 2}
-   run:
-     command: [python, process.py]
+   targets:
+     - {os: linux, arch: amd64, platform: cpu}
+     - {os: linux, arch: arm64, platform: cpu}
+     - {os: darwin, arch: arm64, platform: cpu}
+     - {os: darwin, arch: amd64, platform: cpu}
+   run: {command: [python, task.py]}
+   inputs: {input.wav: data/input.wav}
+   outputs: {result.wav: results}
+   check: [python, -c, "from pathlib import Path; assert Path('result.wav').stat().st_size > 44"]
    ```
+
+   Commit the script/profile, provide a small WAV at `data/input.wav`, then run:
+
+   ```sh
+   myce env get cpu-tools
+   myce portability
+   myce run --profile audio
+   ```
+
+   Keep only targets where this recipe and output check have been verified.
+   The profile client reads source/data on the **submitter**, freezes/uploads
+   them through the existing file store, and the worker stages them in its
+   managed work directory. `task.py`, `input.wav` and `result.wav` are relative
+   to that directory; there is no authored absolute workdir or host pin.
+   Outputs are collected through the profile receipt into local `results/`.
+   See [profile staging and receipts](agent-offload.md). For direct job specs,
+   use `files`/`myce file put` for small bytes and managed input paths; large
+   immutable trees use `shared_inputs`.
 
 The worker uses the existing environment preparation and cache, activates the
 locked pixi environment and puts its `bin` first on `PATH`. Commands such as
@@ -172,7 +250,8 @@ or per-host recipe registration is needed for the job's declared dependencies.
 ## Project lock files
 
 A job can bypass the named catalog, including when a catalog with unrelated
-entries is loaded:
+entries is loaded. This is the existing queue-local inline mechanism; it is not
+approval for a project-carried recipe registration service (#251/#252):
 
 ```yaml
 environment:
@@ -196,18 +275,50 @@ profile (relative catalog inputs instead resolve beside the catalog).
 `myce run --profile` sends `environment.lock_file` unchanged. Its source archive
 and `inputs` uploads do not turn that path into a queue-readable environment
 input: a submitter-local lock works only if the queue can also read that exact
-path. Put the lock on queue-readable storage before submitting, or ask the queue
-operator to register a named catalog recipe and select it with
+path. The snapshot-at-submission behavior included in s062 (#526) freezes inputs
+already readable by the queue; it does **not** upload arbitrary submitter-local
+lock files, their companions, or a dependency workspace. Put the lock on
+queue-readable storage before submitting, or ask the queue operator to register a named catalog recipe and select it with
 `environment: NAME`. The queue snapshots Python inputs for workers; workers do
 not need the original lock path.
 
 A missing, unreadable, oversized (over 1 MiB), or unsupported lock input is
-rejected before acceptance with HTTP 400 `job_environment_invalid`. Filesystem
-failures use the generic message “environment must identify one configured
-environment or supported lock_file recipe” to avoid disclosing queue-local paths.
-That message alone does not diagnose catalog lookup or platform support. Check
-the exact lock basename, required companion files, and readability as the queue
-service user. A readable `requirements.txt` with `python: '3.12'` and
+rejected before acceptance with HTTP 400 `job_environment_invalid`. Actual failed
+reads carry a `path_diagnostic` with `field`, `side`, `path`, `resolution_base`,
+`cause` and, when required, `companion`. The CLI renders the same information.
+For example, a caller-supplied `locks/uv.lock` missing its adjacent manifest gives:
+
+```json
+{
+  "field": "environment.lock_file",
+  "side": "queue",
+  "path": "locks/uv.lock",
+  "resolution_base": "queue-working-directory",
+  "cause": "companion_absent",
+  "companion": "pyproject.toml"
+}
+```
+
+`missing`, `unreadable`, `wrong_type` (for example a non-directory parent) and
+`read_failed` describe the failing operation. A missing path on the reading side
+does not prove that the spelling is wrong on another machine. Check the named
+side/base; stage the bytes or correct the queue-visible recipe instead of pinning
+a host. This diagnostic performs no speculative visibility check.
+
+Authenticated inline errors may echo exactly the path you supplied, including an
+absolute one. Catalog recipe errors instead use `environment:NAME/PLATFORM` and
+base `environment-library`; worker binary reads use `binary` and
+`worker-environment-library`. Expanded roots and OS error strings stay out of
+these diagnostics. Queue API rejection logs keep the generic message when a
+caller path is present. Private local configuration maps logical bases to roots.
+
+`env list/get` may include `worker_reads` for actual reported binary read failures.
+These are observations, not a visibility probe: after worker evidence expires,
+state is `unknown` and the previous diagnostic is withheld. No report or a ready
+cache establishes that the original source path is currently readable.
+
+Check the exact lock basename, required companion files, and readability as the
+queue service user. A readable `requirements.txt` with `python: '3.12'` and
 `platforms: [xpu]` is supported with or without a catalog; XPU profile acceptance
 also requires a compatible known target. Unknown named catalog entries are a
 separate rejection, reported as `unknown environment "NAME"`.
