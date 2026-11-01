@@ -103,6 +103,37 @@
     "current_revision": {
       "type": "integer",
       "minimum": 0
+    },
+    "path_diagnostic": {
+      "description": "Actual failed read. Paths are caller-authored spellings or logical labels; resolution_base never discloses a private root.",
+      "type": "object",
+      "properties": {
+        "field": {
+          "type": "string"
+        },
+        "side": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "resolution_base": {
+          "type": "string"
+        },
+        "cause": {
+          "type": "string"
+        },
+        "companion": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "field",
+        "side",
+        "path",
+        "resolution_base",
+        "cause"
+      ]
     }
   },
   "required": [

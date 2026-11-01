@@ -45,6 +45,9 @@ func TestEnvironmentCatalogReadback(t *testing.T) {
 	if len(entries) != 1 || len(entries[0].Platforms) != 1 {
 		t.Fatal(entries)
 	}
+	if entries[0].Library != "environment-library" || entries[0].ReadingSide != "queue" || entries[0].ResolutionBase != "environment-library" {
+		t.Fatal(entries[0])
+	}
 	p := entries[0].Platforms[0]
 	if p.Backend != "uv" || p.Platform != "cpu" || p.Key != recipe.Key || p.InputDigests["requirements.txt"] != fmt.Sprintf("%x", sha256.Sum256(data)) {
 		t.Fatal(p)

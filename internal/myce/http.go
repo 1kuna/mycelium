@@ -413,6 +413,9 @@ func respond(w http.ResponseWriter, v any, err error) {
 		if errors.As(err, &apiError) && (fileCapacityCode(apiError.Code) || rejectionMessages[apiError.Code] != "" || apiError.Code == "job_spec_invalid" || apiError.Code == "worker_protocol_invalid" || apiError.Code == "submission_key_conflict" || apiError.Code == "submission_key_expired" || apiError.Code == "submission_key_invalid" || apiError.Code == "job_unknown") {
 			status = apiError.Status
 			body = map[string]any{"error": apiError.Message, "code": apiError.Code}
+			if apiError.PathDiagnostic != nil {
+				body["path_diagnostic"] = apiError.PathDiagnostic
+			}
 			if apiError.CurrentRevision != nil {
 				body["current_revision"] = *apiError.CurrentRevision
 			}
@@ -491,12 +494,14 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 	if res.StatusCode >= 300 {
 		e := &HTTPError{Status: res.StatusCode, Message: "request failed"}
 		var body struct {
-			Code            string  `json:"code"`
-			Error           string  `json:"error"`
-			CurrentRevision *uint64 `json:"current_revision"`
+			PathDiagnostic  *PathDiagnostic `json:"path_diagnostic"`
+			Code            string          `json:"code"`
+			Error           string          `json:"error"`
+			CurrentRevision *uint64         `json:"current_revision"`
 		}
 		if json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&body) == nil && (fileCapacityCode(body.Code) || rejectionMessages[body.Code] != "" || body.Code == "job_spec_invalid" || body.Code == "submission_key_invalid" || body.Code == "worker_protocol_mismatch" || body.Code == "worker_protocol_invalid" || body.Code == "submission_key_conflict" || body.Code == "submission_key_expired" || body.Code == "job_unknown") {
 			e.Code, e.Message = body.Code, body.Error
+			e.PathDiagnostic = body.PathDiagnostic
 			e.CurrentRevision = body.CurrentRevision
 			// The queue returns specific, safe submission validation reasons.
 			if message := rejectionMessages[body.Code]; message != "" && body.Code != "extension_version_conflict" && body.Code != "policy_revision_conflict" && !(method == http.MethodPost && path == "/api/jobs") {
@@ -517,6 +522,7 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 }
 
 type HTTPError struct {
+	PathDiagnostic  *PathDiagnostic
 	CurrentRevision *uint64
 	JobID           string // Requested or failed job identity, when applicable.
 	Code            string

@@ -32,24 +32,25 @@ type executionProfile struct {
 }
 
 type profileReceipt struct {
-	SubmissionReused bool              `json:"submission_reused"`
-	Nonce            string            `json:"nonce"`
-	ArmNonce         string            `json:"arm_nonce,omitempty"`
-	Key              string            `json:"key"`
-	Project          string            `json:"project"`
-	Intent           string            `json:"intent"`
-	JobID            string            `json:"job_id,omitempty"`
-	Status           string            `json:"status"`
-	Observation      string            `json:"observation"`
-	Delivery         string            `json:"delivery"`
-	ObservationError string            `json:"observation_error,omitempty"`
-	DeliveryStatus   string            `json:"delivery_status,omitempty"`
-	FilesExpired     bool              `json:"files_expired,omitempty"`
-	RefusalCode      string            `json:"refusal_code,omitempty"`
-	RefusalReason    string            `json:"refusal_reason,omitempty"`
-	ResultReference  myce.FileManifest `json:"result_reference,omitempty"`
-	Spec             myce.Spec         `json:"spec"`
-	Uploads          map[string]string `json:"uploads"`
+	PathDiagnostic   *myce.PathDiagnostic `json:"path_diagnostic,omitempty"`
+	SubmissionReused bool                 `json:"submission_reused"`
+	Nonce            string               `json:"nonce"`
+	ArmNonce         string               `json:"arm_nonce,omitempty"`
+	Key              string               `json:"key"`
+	Project          string               `json:"project"`
+	Intent           string               `json:"intent"`
+	JobID            string               `json:"job_id,omitempty"`
+	Status           string               `json:"status"`
+	Observation      string               `json:"observation"`
+	Delivery         string               `json:"delivery"`
+	ObservationError string               `json:"observation_error,omitempty"`
+	DeliveryStatus   string               `json:"delivery_status,omitempty"`
+	FilesExpired     bool                 `json:"files_expired,omitempty"`
+	RefusalCode      string               `json:"refusal_code,omitempty"`
+	RefusalReason    string               `json:"refusal_reason,omitempty"`
+	ResultReference  myce.FileManifest    `json:"result_reference,omitempty"`
+	Spec             myce.Spec            `json:"spec"`
+	Uploads          map[string]string    `json:"uploads"`
 }
 
 type profileObserver struct {
@@ -113,9 +114,10 @@ func profileLock(path string) (*os.File, error) {
 	return f, nil
 }
 
-// Typed failures always print the recoverable receipt; remote messages, local
-// paths and transport diagnostics never become the public failure reason.
-// Qualified-target refusals use the queue's sanitized fit diagnostic.
+// Typed failures always print the recoverable receipt. Only explicit safe
+// diagnostics may become the failure reason; raw transport errors stay local.
+// Qualified-target and path refusals use the queue's sanitized diagnostics.
+// Path refusals may echo caller-authored paths in this private receipt.
 func profileFailure(out io.Writer, r *profileReceipt, code int, reason string) error {
 	if r != nil {
 		_ = json.NewEncoder(out).Encode(r)
@@ -144,7 +146,7 @@ func runProfile(ctx context.Context, name string, args []string, itemInputs map[
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return waitError(64, "profile_invalid: cannot read profile")
+		return waitError(64, "profile_invalid: "+myce.PathReadError("profile", "submitter", name, "submitter-working-directory", "", err).Error())
 	}
 	if len(data) > 1<<20 {
 		return waitError(64, "profile_invalid: profile exceeds 1 MiB")
@@ -186,6 +188,7 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 	var err error
 	itemRefs := myce.FileManifest{}
 	for dest, local := range itemInputs {
+		authored := local
 		if !profileInputName(dest) || local == "" {
 			return waitError(64, "profile_input_invalid: invalid per-submission input")
 		}
@@ -197,7 +200,7 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 		}
 		itemRefs[dest], err = myce.IdentifyFile(local)
 		if err != nil {
-			return waitError(64, "profile_input_invalid: cannot identify per-submission input")
+			return waitError(64, "profile_input_invalid: "+myce.PathReadError("inputs."+dest, "submitter", authored, "project-root", "", err).Error())
 		}
 	}
 	// A profile declares its inputs as local file mappings; they lower to the
@@ -257,6 +260,7 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 			return waitError(64, "profile_source_invalid: source unavailable or dirty HEAD; commit it or declare allow_dirty")
 		}
 		for dest, local := range p.Inputs {
+			authored := local
 			if !profileInputName(dest) {
 				return waitError(64, "profile_invalid: invalid input name")
 			}
@@ -265,7 +269,7 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 			}
 			inputRefs[dest], err = myce.IdentifyFile(local)
 			if err != nil {
-				return waitError(64, "profile_input_invalid: cannot identify declared input")
+				return waitError(64, "profile_input_invalid: "+myce.PathReadError("inputs."+dest, "submitter", authored, "project-root", "", err).Error())
 			}
 		}
 		for dest, ref := range inputRefs {
@@ -534,7 +538,8 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 		if e != nil {
 			var h *myce.HTTPError
 			if errors.As(e, &h) {
-				if h.Code == "no_qualified_target" {
+				if h.Code == "no_qualified_target" || h.Code == "job_environment_invalid" && h.PathDiagnostic != nil {
+					r.PathDiagnostic = h.PathDiagnostic
 					r.RefusalCode, r.RefusalReason = h.Code, h.Message
 					if err = saveProfileJSON(filepath.Join(dir, "receipt.json"), r); err != nil {
 						return err
@@ -548,6 +553,7 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 		r.JobID, r.Status = j.ID, j.State
 		r.SubmissionReused = j.SubmissionReused
 		r.RefusalCode, r.RefusalReason = "", ""
+		r.PathDiagnostic = nil
 		if err = saveProfileJSON(filepath.Join(dir, "receipt.json"), r); err != nil {
 			return err
 		}

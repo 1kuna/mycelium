@@ -56,7 +56,7 @@ func ReadEnvironments(path string) (EnvironmentCatalog, error) {
 	}
 	f, e := os.Open(path)
 	if e != nil {
-		return c, e
+		return c, PathReadError("environment_config", "queue", path, "queue-working-directory", "", e)
 	}
 	defer f.Close()
 	d := yaml.NewDecoder(io.LimitReader(f, 1<<20))
@@ -86,7 +86,7 @@ func ReadEnvironments(path string) (EnvironmentCatalog, error) {
 				r.BinaryRelative = r.Binary
 				r.Binary = filepath.Join(filepath.Dir(path), r.Binary)
 			}
-			r, e = snapshotEnvironment(r, platform)
+			r, e = snapshotEnvironmentAt(r, platform, "environment-library", "environment:"+name+"/"+platform)
 			if e != nil {
 				return c, fmt.Errorf("environment %s/%s: %w", name, platform, e)
 			}
@@ -96,6 +96,10 @@ func ReadEnvironments(path string) (EnvironmentCatalog, error) {
 	return c, nil
 }
 func snapshotEnvironment(r EnvironmentRecipe, platform string) (EnvironmentRecipe, error) {
+	return snapshotEnvironmentAt(r, platform, "queue-working-directory", "")
+}
+
+func snapshotEnvironmentAt(r EnvironmentRecipe, platform, base, label string) (EnvironmentRecipe, error) {
 	if r.Backend != "" && r.Backend != "uv" && r.Backend != "pixi" {
 		return r, errors.New("unsupported environment backend")
 	}
@@ -130,7 +134,17 @@ func snapshotEnvironment(r EnvironmentRecipe, platform string) (EnvironmentRecip
 		for _, n := range names {
 			b, e := os.ReadFile(filepath.Join(filepath.Dir(r.LockFile), n))
 			if e != nil {
-				return r, e
+				field, authored, companion := "environment.lock_file", r.LockFile, ""
+				if n != name {
+					companion = n
+				}
+				if label != "" {
+					authored = label
+				}
+				if n == "pixi.toml" {
+					field = "environment.manifest"
+				}
+				return r, PathReadError(field, "queue", authored, base, companion, e)
 			}
 			if len(b) > 1<<20 {
 				return r, errors.New("environment input exceeds 1 MiB")
@@ -141,13 +155,21 @@ func snapshotEnvironment(r EnvironmentRecipe, platform string) (EnvironmentRecip
 		// Binaries stay on NAS; include verified content identity, not its mount path.
 		f, e := os.Open(r.Binary)
 		if e != nil {
-			return r, e
+			authored := r.Binary
+			if label != "" {
+				authored = label
+			}
+			return r, PathReadError("environment.binary", "queue", authored, base, "", e)
 		}
 		h := sha256.New()
 		_, e = io.Copy(h, f)
 		f.Close()
 		if e != nil {
-			return r, e
+			authored := r.Binary
+			if label != "" {
+				authored = label
+			}
+			return r, PathReadError("environment.binary", "queue", authored, base, "", e)
 		}
 		r.Files["binary.name"] = []byte(filepath.Base(r.Binary))
 		r.Files["binary.sha256"] = []byte(hex.EncodeToString(h.Sum(nil)))
@@ -312,13 +334,14 @@ func environmentCanRun(j *Job, m *Machine) bool {
 }
 
 type EnvironmentReport struct {
-	Kind         string  `json:"kind,omitempty"`
-	Attempt      string  `json:"attempt,omitempty"`
-	Key          string  `json:"key"`
-	State        string  `json:"state"`
-	Error        string  `json:"error,omitempty"`
-	Log          string  `json:"log,omitempty"`
-	BuildSeconds float64 `json:"build_seconds,omitempty"`
+	PathDiagnostic *PathDiagnostic `json:"path_diagnostic,omitempty"`
+	Kind           string          `json:"kind,omitempty"`
+	Attempt        string          `json:"attempt,omitempty"`
+	Key            string          `json:"key"`
+	State          string          `json:"state"`
+	Error          string          `json:"error,omitempty"`
+	Log            string          `json:"log,omitempty"`
+	BuildSeconds   float64         `json:"build_seconds,omitempty"`
 }
 
 func (q *Queue) environmentPlan(m *Machine) []EnvironmentRecipe {
@@ -998,6 +1021,9 @@ func (c *EnvironmentCache) ensure(ctx context.Context, r EnvironmentRecipe) (ens
 	if r.Binary != "" {
 		var b []byte
 		b, e = os.ReadFile(r.Binary)
+		if e != nil {
+			e = PathReadError("environment.binary", "worker", "binary", "worker-environment-library", "", e)
+		}
 		if e == nil {
 			h := sha256.Sum256(b)
 			if hex.EncodeToString(h[:]) != string(r.Files["binary.sha256"]) {
@@ -1179,6 +1205,7 @@ func (rt *environmentRuntime) sync(plan []EnvironmentRecipe, busy bool, keepActi
 		if e != nil {
 			report.State = "failed"
 			report.Error = e.Error()
+			report.PathDiagnostic = pathDiagnostic(e)
 		}
 		b, _ := os.ReadFile(filepath.Join(rt.cache.Root, r.Key+".build.log"))
 		if len(b) > 32768 {
@@ -1188,6 +1215,7 @@ func (rt *environmentRuntime) sync(plan []EnvironmentRecipe, busy bool, keepActi
 		if ctx.Err() != nil {
 			report.State = "paused"
 			report.Error = ""
+			report.PathDiagnostic = nil
 		}
 		if e == nil {
 			b, _ := os.ReadFile(filepath.Join(rt.cache.Root, r.Key, "ready.json"))

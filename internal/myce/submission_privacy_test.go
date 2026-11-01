@@ -6,10 +6,12 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -18,6 +20,10 @@ func TestSubmissionFilesystemCausesStayLocal(t *testing.T) {
 	for _, name := range []string{"missing lock_file", "directory lock_file", "files sync"} {
 		t.Run(name, func(t *testing.T) {
 			q, _ := fixture(t)
+			var logs bytes.Buffer
+			old := log.Writer()
+			log.SetOutput(&logs)
+			defer log.SetOutput(old)
 			s := spec("experiment")
 			code := "job_environment_invalid"
 			privateRoot := t.TempDir()
@@ -46,24 +52,50 @@ func TestSubmissionFilesystemCausesStayLocal(t *testing.T) {
 			response := httptest.NewRecorder()
 			handler := API{Queue: q, Token: "test"}.Handler()
 			handler.ServeHTTP(response, req)
-			var body struct{ Code, Error string }
+			var body struct {
+				Code, Error    string
+				PathDiagnostic *PathDiagnostic `json:"path_diagnostic"`
+			}
 			if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
 				t.Fatal(err)
 			}
-			if response.Code != http.StatusBadRequest || body.Code != code || body.Error != rejectionMessages[code] {
+			want := rejectionMessages[code]
+			if name != "files sync" {
+				if body.PathDiagnostic == nil {
+					t.Fatal("missing path diagnostic", response.Body.String())
+				}
+				want = body.PathDiagnostic.String()
+				if body.PathDiagnostic.Side != "queue" || body.PathDiagnostic.Path != s.Environment.LockFile || body.PathDiagnostic.Field != "environment.lock_file" {
+					t.Fatal(body.PathDiagnostic)
+				}
+			}
+			if response.Code != http.StatusBadRequest || body.Code != code || body.Error != want {
 				t.Errorf("expected fixed %s rejection, got HTTP %d: %s", code, response.Code, response.Body.String())
 			}
-			if strings.Contains(response.Body.String(), privateRoot) {
+			if name == "files sync" && strings.Contains(response.Body.String(), privateRoot) {
 				t.Error("HTTP response exposed queue-host path")
 			}
 			server := httptest.NewServer(handler)
 			defer server.Close()
 			err = (Client{URL: server.URL, Token: "test"}).Call(context.Background(), "POST", "/api/jobs", s, nil)
 			var apiError *HTTPError
-			if !errors.As(err, &apiError) || apiError.Code != code || apiError.Message != rejectionMessages[code] {
+			if !errors.As(err, &apiError) || apiError.Code != code || apiError.Message != want {
 				t.Errorf("Go client did not receive fixed %s rejection: %v", code, err)
 			}
-			if err != nil && strings.Contains(err.Error(), privateRoot) {
+			if apiError != nil && !reflect.DeepEqual(apiError.PathDiagnostic, body.PathDiagnostic) {
+				t.Error("structured client/HTTP mismatch")
+			}
+			if strings.Contains(logs.String(), privateRoot) {
+				t.Error("caller or hidden path leaked into rejection logs")
+			}
+			// Authentication must precede any path diagnosis.
+			req = httptest.NewRequest("POST", "/api/jobs", bytes.NewReader(data))
+			response = httptest.NewRecorder()
+			handler.ServeHTTP(response, req)
+			if response.Code != http.StatusUnauthorized || strings.Contains(response.Body.String(), "path_diagnostic") {
+				t.Fatal(response.Body.String())
+			}
+			if name == "files sync" && err != nil && strings.Contains(err.Error(), privateRoot) {
 				t.Error("Go client error exposed queue-host path")
 			}
 		})
