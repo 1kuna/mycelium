@@ -16,6 +16,26 @@ SUPPLEMENTAL_CONSUMERS = {
                    'gpu_host_memory', 'capability_placement', 'work_observation', 'queue')
 }
 
+# The monitor's tests predate the source split; it has no matching test filename.
+SUPPLEMENTAL_CONSUMERS['internal/myce/engine_health.go'] = (
+    'engine_recovery_test.go', 'engine_recovery_round3_test.go')
+
+
+def changed_symbols(diff):
+    symbols = set()
+    for receiver, method in re.findall(
+            r'^(?:@@.*?@@ |[+-])func (?:\(([^)]*)\) )?([A-Z]\w*)', diff, re.M):
+        # Read/Close/etc on private interface implementations are not references
+        # to every unrelated reader/closer in the package. Match the concrete
+        # receiver instead; conventional tests still cover helper-only callers.
+        types = re.findall(r'[A-Za-z_]\w*', receiver)
+        if types and types[-1][0].islower():
+            symbols.add(types[-1])
+        else:
+            symbols.add(method)
+    symbols.update(re.findall(r'^[+-](?:type|var|const) ([A-Z]\w*)', diff, re.M))
+    return symbols
+
 
 def git(*args):
     return subprocess.check_output(['git', *args], text=True)
@@ -31,6 +51,11 @@ def select(base):
         if not name.endswith('.go'):
             continue
         path = pathlib.Path(name)
+        # The shared fixture lifecycle is exercised through both real TestMains.
+        if name == 'internal/testenv/lifecycle.go':
+            for directory in ('internal/myce', 'cmd/myce'):
+                packages.setdefault(pathlib.Path(directory), set()).add('TestPackageFixtureLifecycle')
+            continue
         tests = set()
         stem = path.stem.removesuffix('_test')
         for test_file in path.parent.glob(stem + '*_test.go'):
@@ -42,8 +67,7 @@ def select(base):
         # Hunk headers identify the enclosing function; +/- declarations also
         # cover renamed functions and exported types/variables/constants.
         diff = git('diff', '--unified=0', base, '--', name)
-        symbols = set(re.findall(r'^(?:@@.*?@@ |[+-])func (?:\([^)]*\) )?([A-Z]\w*)', diff, re.M))
-        symbols.update(re.findall(r'^[+-](?:type|var|const) ([A-Z]\w*)', diff, re.M))
+        symbols = changed_symbols(diff)
         # Field-only struct edits need their direct tests even after test moves.
         if not tests and not symbols:
             symbols.update(re.findall(r'^[+-]\t([A-Z]\w*)\s+', diff, re.M))

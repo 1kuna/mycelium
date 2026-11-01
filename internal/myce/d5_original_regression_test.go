@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -75,52 +76,70 @@ func TestRQv2WorkerRecoversRunningContainer(t *testing.T) {
 // Exit precedes stop intent and every signal. Observation order cannot turn
 // this independent exit into an infrastructure-caused termination.
 func TestRQv2IndependentExitBeforeStopObservation(t *testing.T) {
-	w, store, clock, root := dockerFixture(t)
-	q, _ := fixture(t)
-	q.clock = clock
-	w.CheckpointRoot = q.root
-	m := w.Machine
-	m.HostMemoryMeasured, m.HostAvailableMemoryGB, m.FreeHostMemoryGB = true, 32, 32
-	j := dockerGroupJob(t)
-	j.Spec.Priority = "production"
-	submitted := submit(t, q, j.Spec)
-	running := check(t, q, m, nil).Job
-	if running == nil {
-		t.Fatal("no assignment")
-	}
-	if err := q.Started(result(running, false)); err != nil {
-		t.Fatal(err)
-	}
-	p, err := startDockerFixture(w, store, *running)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(p.docker.close)
-	await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
-	p.docker.close()
-	if err := os.WriteFile(filepath.Join(root, "mode"), []byte("main-nonzero"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Rename(filepath.Join(root, "running"), filepath.Join(root, "natural-exit")); err != nil {
-		t.Fatal(err)
-	}
-	p.stop(clock.Now(), StopGrace, false)
-	restartTick(t, p.docker)
-	clock.advance(StopGrace)
-	for i := 0; i < 4 && !p.docker.state.Released; i++ {
-		restartTick(t, p.docker)
-	}
-	if !p.docker.state.Released {
-		t.Fatal("custody not released")
-	}
-	r := dockerOutcome(p.docker.state, result(running, false), nil)
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	got := job(t, q, submitted.ID)
-	t.Logf("independent exit 7 before stop: exit=%d mainFinished=%v infrastructureStop=%v interrupted=%v state=%s retries=%d", p.docker.state.ExitCode, p.docker.state.MainFinished, p.docker.state.InfrastructureStop, r.Interrupted, got.State, got.InfrastructureRetries)
-	if got.State != "failed" || got.InfrastructureRetries != 0 || r.Interrupted {
-		t.Fatalf("independent exit must fail without retry: state=%s retries=%d error=%s", got.State, got.InfrastructureRetries, r.Error)
+	for _, tc := range []struct {
+		mode string
+		code int
+	}{{"main-nonzero", 7}, {"main-killed", 137}} {
+		t.Run(fmt.Sprint(tc.code), func(t *testing.T) {
+			w, store, clock, root := dockerFixture(t)
+			q, _ := fixture(t)
+			q.clock = clock
+			w.CheckpointRoot = q.root
+			m := w.Machine
+			m.HostMemoryMeasured, m.HostAvailableMemoryGB, m.FreeHostMemoryGB = true, 32, 32
+			j := dockerGroupJob(t)
+			j.Spec.Priority = "production"
+			submitted := submit(t, q, j.Spec)
+			running := check(t, q, m, nil).Job
+			if running == nil {
+				t.Fatal("no assignment")
+			}
+			if err := q.Started(result(running, false)); err != nil {
+				t.Fatal(err)
+			}
+			p, err := startDockerFixture(w, store, *running)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(p.docker.close)
+			await(t, func() bool { _, e := os.Stat(filepath.Join(root, "running")); return e == nil })
+			p.docker.close()
+			if err := os.WriteFile(filepath.Join(root, "mode"), []byte(tc.mode), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Rename(filepath.Join(root, "running"), filepath.Join(root, "natural-exit")); err != nil {
+				t.Fatal(err)
+			}
+			p.stop(clock.Now(), StopGrace, false)
+			restartTick(t, p.docker)
+			clock.advance(StopGrace)
+			for i := 0; i < 4 && !p.docker.state.Released; i++ {
+				restartTick(t, p.docker)
+			}
+			if !p.docker.state.Released {
+				t.Fatal("custody not released")
+			}
+
+			calls, err := os.ReadFile(filepath.Join(root, "calls"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(calls), "kill --signal=KILL id1") || strings.Contains(string(calls), "kill --signal=TERM id1") {
+				t.Fatal("fixture delivered a main stop signal")
+			}
+			if p.docker.state.ExitCode != tc.code {
+				t.Fatal("lost independent exit status", p.docker.state.ExitCode)
+			}
+			r := dockerOutcome(p.docker.state, result(running, false), nil)
+			if err := q.Complete(r); err != nil {
+				t.Fatal(err)
+			}
+			got := job(t, q, submitted.ID)
+			t.Logf("independent exit before stop: exit=%d mainFinished=%v infrastructureStop=%v interrupted=%v state=%s retries=%d", p.docker.state.ExitCode, p.docker.state.MainFinished, p.docker.state.InfrastructureStop, r.Interrupted, got.State, got.InfrastructureRetries)
+			if got.State != "failed" || got.InfrastructureRetries != 0 || r.Interrupted {
+				t.Fatalf("independent exit must fail without retry: state=%s retries=%d error=%s", got.State, got.InfrastructureRetries, r.Error)
+			}
+		})
 	}
 }
 

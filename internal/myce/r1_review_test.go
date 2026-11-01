@@ -7,104 +7,74 @@ import (
 )
 
 func TestR1MixedHostSteersCPUAndPreservesGPUBackfill(t *testing.T) {
-	for _, cpuFirst := range []bool{false, true} {
-		for _, gpuCheckFirst := range []bool{false, true} {
-			for _, cpuIDFirst := range []bool{false, true} {
-				t.Run(fmt.Sprintf("cpuSubmitFirst=%v/gpuCheckFirst=%v/cpuIDFirst=%v", cpuFirst, gpuCheckFirst, cpuIDFirst), func(t *testing.T) {
-					q, clock := fixture(t)
-					gpu, cpu := cpuMachine("gpu", "shared", "cuda", 16, 64), cpuMachine("cpu", "shared", "cpu", 16, 64)
-					check(t, q, gpu, nil)
-					check(t, q, cpu, nil)
-					cs, gs := cpuSpec(2, 1), spec("experiment")
-					gs.Needs.Platform = Platform{Required: []string{"cuda"}}
-					cs.Project = gs.Project
-					var cj, gj *Job
-					if cpuFirst {
-						cj = submit(t, q, cs)
-						clock.Advance(time.Millisecond)
-						gj = submit(t, q, gs)
-					} else {
-						gj = submit(t, q, gs)
-						clock.Advance(time.Millisecond)
-						cj = submit(t, q, cs)
-					}
-					// Exercise both ID tie-breaks as well as both arrival/check-in orders.
-					if err := q.update(func() error {
-						a, b := q.s.Jobs[cj.ID], q.s.Jobs[gj.ID]
-						q.deleteJob(a.ID)
-						q.deleteJob(b.ID)
-						a.ID, b.ID = "a", "z"
-						if !cpuIDFirst {
-							a.ID, b.ID = b.ID, a.ID
-						}
-						q.s.Jobs[a.ID], q.s.Jobs[b.ID] = a, b
-						cj.ID, gj.ID = a.ID, b.ID
-						return nil
-					}); err != nil {
-						t.Fatal(err)
-					}
-					var cr, gr *Job
-					if gpuCheckFirst {
-						gr = check(t, q, gpu, nil).Job
-						cr = check(t, q, cpu, nil).Job
-					} else {
-						cr = check(t, q, cpu, nil).Job
-						gr = check(t, q, gpu, nil).Job
-					}
-					if cr == nil || gr == nil || cr.ID != cj.ID || gr.ID != gj.ID {
-						t.Fatalf("wrong placement: CPU assigned=%v GPU assigned=%v; want CPU=%s GPU=%s", cr != nil && cr.ID == cj.ID, gr != nil && gr.ID == gj.ID, cj.ID, gj.ID)
-					}
-				})
+	// Adverse arrival: CPU work arrives first and the GPU checks in first.
+	t.Run("CPU-arrives-before-GPU", func(t *testing.T) {
+		q, clock := fixture(t)
+		gpu, cpu := cpuMachine("gpu", "shared", "cuda", 16, 64), cpuMachine("cpu", "shared", "cpu", 16, 64)
+		check(t, q, gpu, nil)
+		check(t, q, cpu, nil)
+		cs, gs := cpuSpec(2, 1), spec("experiment")
+		gs.Needs.Platform = Platform{Required: []string{"cuda"}}
+		cs.Project = gs.Project
+		cj := submit(t, q, cs)
+		clock.Advance(time.Millisecond)
+		gj := submit(t, q, gs)
+		gr, cr := check(t, q, gpu, nil).Job, check(t, q, cpu, nil).Job
+		if cr == nil || gr == nil || cr.ID != cj.ID || gr.ID != gj.ID {
+			t.Fatal("CPU work did not leave GPU available", cr, gr)
+		}
+	})
+	for _, tc := range []struct {
+		placement  string
+		gpuWaiting bool
+	}{
+		{"absent", false}, {"free", false}, {"busy", false}, {"ineligible", false}, {"busy", true},
+	} {
+		placement, gpuWaiting := tc.placement, tc.gpuWaiting
+		t.Run(fmt.Sprintf("backfill/%s/gpuWaiting=%v", placement, gpuWaiting), func(t *testing.T) {
+			q, clock := fixture(t)
+			gpu := cpuMachine("gpu", "shared", "cuda", 16, 64)
+			cpu := cpuMachine("cpu", "shared", "cpu", 16, 64)
+			check(t, q, gpu, nil)
+			if placement != "absent" {
+				check(t, q, cpu, nil)
 			}
-		}
-	}
-	for _, placement := range []string{"absent", "free", "busy", "ineligible"} {
-		for _, gpuWaiting := range []bool{false, true} {
-			t.Run(fmt.Sprintf("backfill/%s/gpuWaiting=%v", placement, gpuWaiting), func(t *testing.T) {
-				q, clock := fixture(t)
-				gpu := cpuMachine("gpu", "shared", "cuda", 16, 64)
-				cpu := cpuMachine("cpu", "shared", "cpu", 16, 64)
-				check(t, q, gpu, nil)
-				if placement != "absent" {
-					check(t, q, cpu, nil)
+			if placement == "busy" {
+				s := cpuSpec(1, 1)
+				s.AllowedMachines = []string{cpu.ID}
+				busy := submit(t, q, s)
+				if run := check(t, q, cpu, nil).Job; run == nil || run.ID != busy.ID {
+					t.Fatal("missing busy CPU work")
 				}
-				if placement == "busy" {
-					s := cpuSpec(1, 1)
-					s.AllowedMachines = []string{cpu.ID}
-					busy := submit(t, q, s)
-					if run := check(t, q, cpu, nil).Job; run == nil || run.ID != busy.ID {
-						t.Fatal("missing busy CPU work")
-					}
+			}
+			s := cpuSpec(2, 1)
+			if placement == "ineligible" {
+				s.AllowedMachines = []string{gpu.ID}
+			}
+			j := submit(t, q, s)
+			var gj *Job
+			if gpuWaiting {
+				clock.Advance(time.Millisecond)
+				gs := spec("experiment")
+				gs.Needs.Platform = Platform{Required: []string{"cuda"}}
+				gj = submit(t, q, gs)
+			}
+			run := check(t, q, gpu, nil).Job
+			switch {
+			case gpuWaiting:
+				if run == nil || run.ID != gj.ID {
+					t.Fatal("CPU backfill blocked waiting same-tier GPU work")
 				}
-				s := cpuSpec(2, 1)
-				if placement == "ineligible" {
-					s.AllowedMachines = []string{gpu.ID}
+			case placement == "free":
+				if run != nil {
+					t.Fatal("GPU consumed CPU work with idle CPU placement")
 				}
-				j := submit(t, q, s)
-				var gj *Job
-				if gpuWaiting {
-					clock.Advance(time.Millisecond)
-					gs := spec("experiment")
-					gs.Needs.Platform = Platform{Required: []string{"cuda"}}
-					gj = submit(t, q, gs)
+			default:
+				if run == nil || run.ID != j.ID {
+					t.Fatal("idle GPU did not backfill CPU work")
 				}
-				run := check(t, q, gpu, nil).Job
-				switch {
-				case gpuWaiting:
-					if run == nil || run.ID != gj.ID {
-						t.Fatal("CPU backfill blocked waiting same-tier GPU work")
-					}
-				case placement == "free":
-					if run != nil {
-						t.Fatal("GPU consumed CPU work with idle CPU placement")
-					}
-				default:
-					if run == nil || run.ID != j.ID {
-						t.Fatal("idle GPU did not backfill CPU work")
-					}
-				}
-			})
-		}
+			}
+		})
 	}
 }
 

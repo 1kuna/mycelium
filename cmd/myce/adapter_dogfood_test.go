@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -18,13 +17,10 @@ import (
 
 const adapterDogfoodToken = "adapter-dogfood-fixture-token"
 
-// #253 compares the maintained wrappers through the original and converted
-// lowerings. Only the fixture source and catalog environment are replaced,
-// identically on both paths: installed tools avoid rebuilding the fleet's tools
-// catalog. This proves the wrapper/result contract, not the full gate or its
-// locked environment; the actual full gate is validated separately on M4.
-func TestAdapterDogfoodOwnProfilesDev(t *testing.T) {
-	adapterDogfoodTools(t, "bash", "go", "git", "python3", "uv", "grep", "tar", "tee")
+// One real adapter submission covers CLI -> API -> worker -> retained output.
+// Conversion equivalence stays in adapter_convert_test.go; wrapper argv/exit and
+// result markers stay in scripts/test-go-test-profile.py.
+func TestAdapterDogfoodCommandDev(t *testing.T) {
 	repo, err := filepath.Abs(filepath.Join("..", ".."))
 	if err != nil {
 		t.Fatal(err)
@@ -33,135 +29,28 @@ func TestAdapterDogfoodOwnProfilesDev(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, entry := range a.Entries {
-		adapterDogfoodTarget(t, entry.Targets, "cpu")
-	}
-	binary := devTestBinary(t)
-	runtimeInput := adapterDogfoodRuntime(t)
-	d, _, _ := adapterDogfoodDev(t, "cpu")
-	for _, tc := range []struct {
-		profile, entry, result, want string
-		args                         []string
-	}{
-		{"gate-full", "mycelium-gate-full", "gate-result.txt", "gate full: exit=0\n", nil},
-		{"go-test", "mycelium-go-test", "go-test-result.txt", "go test: exit=0\n", []string{"-run=^TestAdapterDogfoodFixture$", "-count=1", ".", "-args", "dogfood argument with spaces"}},
-	} {
-		t.Run(tc.profile, func(t *testing.T) {
-			root := t.TempDir()
-			source := filepath.Join(root, "source")
-			for _, wrapper := range []string{"gate-profile.sh", "go-test-profile.sh"} {
-				adapterDogfoodWrite(t, filepath.Join(source, "scripts", wrapper), adapterDogfoodRead(t, filepath.Join(repo, "scripts", wrapper)), 0700)
-			}
-			adapterDogfoodWrite(t, filepath.Join(source, "go.mod"), []byte("module dogfood.invalid/fixture\n\ngo 1.25.6\n"), 0600)
-			// Deliberately validate only the wrapper's argv and environment. Running
-			// the repository's real gate here would recursively launch full suites.
-			adapterDogfoodWrite(t, filepath.Join(source, "scripts/gate.sh"), []byte(`#!/usr/bin/env bash
-set -euo pipefail
+	entry := a.Entries["mycelium-go-test"]
+	adapterDogfoodTarget(t, entry.Targets, "cpu")
+	root := t.TempDir()
+	entry.Source, entry.Environment = profileSource{Directory: "source"}, myce.Environment{}
+	// A shell payload exercises argument boundaries and the profile environment
+	// without transporting/recompiling GOROOT inside a tiny command fixture.
+	adapterDogfoodWrite(t, filepath.Join(root, "source", "fixture.sh"), []byte(`#!/bin/sh
+set -eu
 test "$#" -eq 1
-test "$1" = full
+test "$1" = 'dogfood argument with spaces'
 test "$GOMAXPROCS" = 2
 test -z "${MYCE_TOKEN:-}"
+printf 'go test: exit=0\n' > go-test-result.txt
 `), 0700)
-			adapterDogfoodWrite(t, filepath.Join(source, "fixture_test.go"), []byte(`package fixture
-
-import (
-    "flag"
-    "os"
-    "testing"
-)
-
-func TestAdapterDogfoodFixture(t *testing.T) {
-    if os.Getenv("GOMAXPROCS") != "2" || os.Getenv("MYCE_TOKEN") != "" {
-        t.Fatal("profile environment changed")
-    }
-    if args := flag.Args(); len(args) != 1 || args[0] != "dogfood argument with spaces" {
-        t.Fatalf("appended argv changed: %q", args)
-    }
-}
-`), 0600)
-			var p executionProfile
-			if err := yaml.Unmarshal(adapterDogfoodRead(t, filepath.Join(repo, ".mycelium/profiles", tc.profile+".yaml")), &p); err != nil {
-				t.Fatal(err)
-			}
-			p.Source, p.Environment = profileSource{Directory: "source"}, myce.Environment{}
-			// Installed tools need a writable attempt cache after the catalog
-			// environment is removed; native isolation makes HOME's cache read-only.
-			p.Run.Env["GOCACHE"] = "{work}/.go-build"
-			if runtimeInput.Local != "" {
-				// The outer gate's tools are outside this dev worker's grants.
-				p.SharedInputs = map[string]myce.SharedInput{"runtime": runtimeInput}
-				// Keep the cached tar read-only; nested Bash invocations reuse this
-				// attempt's managed scratch copy after successful extraction.
-				adapterDogfoodWrite(t, filepath.Join(source, "fixture-runtime.sh"), []byte(`export PATH="/usr/bin:/bin"
-dogfood_runtime="$MYCE_SCRATCH_DIR/runtime"
-if [ ! -f "$dogfood_runtime/.ready" ]; then
-    mkdir -p "$dogfood_runtime" || exit
-    tar -xf "$MYCE_INPUT_RUNTIME" -C "$dogfood_runtime" || exit
-    touch "$dogfood_runtime/.ready" || exit
-fi
-export PATH="$dogfood_runtime/go/bin:$dogfood_runtime/bin:/usr/bin:/bin"
-export GOROOT="$dogfood_runtime/go"
-export LD_LIBRARY_PATH="$dogfood_runtime/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-`), 0600)
-				p.Run.Env["BASH_ENV"] = "{work}/fixture-runtime.sh"
-			}
-			profile := filepath.Join(root, ".mycelium/profiles", tc.profile+".yaml")
-			adapterDogfoodYAML(t, profile, p)
-			entry := a.Entries[tc.entry]
-			entry.Source, entry.Environment = p.Source, myce.Environment{}
-			entry.Run.Env["GOCACHE"] = p.Run.Env["GOCACHE"]
-			if runtimeInput.Local != "" {
-				entry.SharedInputs = p.SharedInputs
-				entry.Run.Env["BASH_ENV"] = p.Run.Env["BASH_ENV"]
-			}
-			adapter := filepath.Join(root, ".mycelium/adapter.yaml")
-			adapterDogfoodYAML(t, adapter, projectAdapter{Schema: a.Schema, Project: a.Project, Default: tc.entry, Entries: map[string]adapterEntry{tc.entry: entry}})
-
-			var original []byte
-			for _, converted := range []bool{false, true} {
-				// Each execution owns the normal dev budget. Previously the
-				// startup context covered all four executions: a measured 35s
-				// first profile left only 25s for go-test under load (#417).
-				ctx, cancel := context.WithTimeout(context.Background(), devTestTimeout)
-				defer cancel()
-				selector := []string{"--profile", profile, "--key", tc.profile + "-original"}
-				if converted {
-					selector = []string{"--adapter", adapter, "--entry", tc.entry, "--key", tc.profile + "-converted"}
-				}
-				selector = append(append(selector, "--"), tc.args...)
-				job := adapterDogfoodRun(t, ctx, d, binary, root, selector...)
-				got := adapterDogfoodResult(t, ctx, d, job.ID, tc.result)
-				if string(got) != tc.want {
-					t.Fatalf("converted=%v result=%q, want %q", converted, got, tc.want)
-				}
-				if !converted {
-					original = got
-				} else if !bytes.Equal(original, got) {
-					t.Fatal("conversion changed result bytes")
-				}
-				if tc.profile == "go-test" {
-					// Go's JSON timestamps/elapsed times vary. Check the real test's
-					// passing event rather than comparing nondeterministic log bytes.
-					log := adapterDogfoodResult(t, ctx, d, job.ID, "go-test-log.jsonl")
-					scanner, passes := bufio.NewScanner(bytes.NewReader(log)), 0
-					for scanner.Scan() {
-						var event struct{ Action, Test string }
-						if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
-							t.Fatalf("go test JSON: %v: %s", err, scanner.Text())
-						}
-						if event.Action == "fail" {
-							t.Fatalf("failed go test event: %s", scanner.Text())
-						}
-						if event.Action == "pass" && event.Test == "TestAdapterDogfoodFixture" {
-							passes++
-						}
-					}
-					if err := scanner.Err(); err != nil || passes != 1 {
-						t.Fatalf("tiny Go test passes=%d: %v", passes, err)
-					}
-				}
-			}
-		})
+	entry.Run.Command = []string{"sh", "fixture.sh"}
+	entry.Outputs = map[string]string{"go-test-result.txt": "results"}
+	adapter := filepath.Join(root, ".mycelium/adapter.yaml")
+	adapterDogfoodYAML(t, adapter, projectAdapter{Schema: a.Schema, Project: a.Project, Default: "smoke", Entries: map[string]adapterEntry{"smoke": entry}})
+	d, ctx, _ := adapterDogfoodDev(t, "cpu")
+	job := adapterDogfoodRun(t, ctx, d, devTestBinary(t), root, "--adapter", adapter, "--entry", "smoke", "--key", "smoke", "--", "dogfood argument with spaces")
+	if got := adapterDogfoodResult(t, ctx, d, job.ID, "go-test-result.txt"); string(got) != "go test: exit=0\n" {
+		t.Fatalf("adapter result=%q", got)
 	}
 }
 

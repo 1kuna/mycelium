@@ -26,16 +26,21 @@ func TestDarwinUpgradePreservesCodeIdentity(t *testing.T) {
 				t.Fatal(err)
 			}
 			const requirement = `designated => identifier "io.github.1kuna.mycelium" and anchor apple generic and certificate leaf[subject.OU] = "SYNTHETIC"`
-			checks, swaps := 0, 0
+			verifiedOld, verifiedCandidate := false, false
+			swaps := 0
 			run := func(ctx context.Context, name string, args ...string) ([]byte, error) {
 				if name != "codesign" {
 					return f.manager.run(ctx, name, args...)
 				}
-				checks++
 				candidate := args[len(args)-1] == f.source
 				if args[0] == "--verify" {
 					if candidate && change == "invalid" {
 						return nil, errors.New("synthetic invalid signature")
+					}
+					if candidate {
+						verifiedCandidate = true
+					} else {
+						verifiedOld = true
 					}
 					return nil, nil
 				}
@@ -57,7 +62,7 @@ func TestDarwinUpgradePreservesCodeIdentity(t *testing.T) {
 			}
 			files := installFiles{rename: func(source, destination string) error {
 				if destination == f.c.Binary {
-					if checks < 6 || filepath.Dir(source) != filepath.Dir(destination) {
+					if !verifiedOld || !verifiedCandidate || filepath.Dir(source) != filepath.Dir(destination) {
 						t.Fatal("binary swap preceded identity verification or crossed directories")
 					}
 					got, err := os.ReadFile(destination)
