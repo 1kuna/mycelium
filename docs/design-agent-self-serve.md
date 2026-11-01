@@ -294,5 +294,6 @@ no cancellation/resubmission or orchestrator messages and no start before cleanu
 Packaging proof: two synthetic roots, one staged media input, pinned environment
 and an old system Python; resolve explains missing pieces and both qualified
 targets execute without a data-driven host pin. No heavy gates for this document.
-The reported generic registration 400 lacks request evidence: next owner is the
-support worker to obtain a sanitized request/error; no speculative fix ticket.
+The reported generic registration 400 has an exact error and replay context, but
+the serialized request is missing. Next owner: support worker obtains a sanitized
+request before diagnosing the defect; no speculative fix ticket.
