@@ -177,11 +177,11 @@ func TestM4VerifiedEmptyConversionReceipt(t *testing.T) {
 				t.Fatal("incomplete receipt", r)
 			}
 			counts, ok := r["queue_counts"].(map[string]any)
-			if !ok || len(counts) != 6 {
+			if !ok {
 				t.Fatal("missing queue counts", r)
 			}
-			for _, count := range counts {
-				if count != float64(0) {
+			for _, state := range []string{"queued", "paused", "waiting", "running", "stopping", "preparing", "host_releases", "obligations"} {
+				if counts[state] != float64(0) {
 					t.Fatal("nonzero receipt", r)
 				}
 			}
@@ -190,7 +190,7 @@ func TestM4VerifiedEmptyConversionReceipt(t *testing.T) {
 }
 
 func TestM4VerifiedEmptyRefusals(t *testing.T) {
-	for _, kind := range []string{"queue", "running", "stopping", "preparing", "obligations", "unit_active", "unit_unreadable", "cgroup_populated", "cgroup_unreadable", "spool_unsettled", "spool_missing", "container_running", "docker_inaccessible"} {
+	for _, kind := range []string{"queue", "paused", "waiting", "retained-paused", "retained-waiting", "running", "stopping", "preparing", "obligations", "unit_active", "unit_unreadable", "cgroup_populated", "cgroup_unreadable", "spool_unsettled", "spool_missing", "container_running", "docker_inaccessible"} {
 		t.Run(kind, func(t *testing.T) {
 			c, clock, mapping, opts, run := m4EmptyFixture(t)
 			q, err := openConversionQueue(c, clock)
@@ -199,12 +199,17 @@ func TestM4VerifiedEmptyRefusals(t *testing.T) {
 			}
 			want := "machine_drain_" + kind
 			switch kind {
-			case "queue", "running", "stopping", "preparing":
-				state := kind
+			case "queue", "paused", "waiting", "retained-paused", "retained-waiting", "running", "stopping", "preparing":
+				state := strings.TrimPrefix(kind, "retained-")
 				if kind == "queue" {
 					state = "queued"
 				}
-				q.s.Jobs["pending"] = &Job{ID: "pending", State: state}
+				pending := &Job{ID: "pending", State: state}
+				if strings.HasPrefix(kind, "retained-") {
+					q.s.Submissions = map[string]*submissionRecord{"pending-key": {JobID: pending.ID, Job: pending}}
+				} else {
+					q.s.Jobs[pending.ID] = pending
+				}
 				want = "machine_drain_queue_not_empty"
 			case "obligations":
 				q.s.HostReleases = map[string]HostRelease{"pending": {Host: "host", Machine: "host-gpu0", Session: "session-host-gpu0", Job: "old", Attempt: 1}}

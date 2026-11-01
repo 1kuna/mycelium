@@ -214,7 +214,9 @@ roots; derive downtime and recovery expectations from that rehearsal.
 Inventory the active configuration and every referenced root. Preserve privately:
 
 - SQLite DB and any WAL/SHM companions, including job/key/attempt/custody history,
-  learned curves, live policy, maintenance and release approvals.
+  learned curves, live policy, maintenance and release approvals. Paused jobs,
+  their reason/expiry/revision and waiting qualification jobs are live state;
+  preserve them with their original submission keys, inputs and queue age.
 - Queue file store (`DB.files` by default), implicit `DB.uploads`, any configured
   upload spool, retained logs and other referenced roots. `QueueStateRoots` in
   `internal/myce/queue_roots.go` enumerates startup roots.
@@ -1101,7 +1103,8 @@ host memory allowances refuse migration with `machine_migration_conflict`.
 Disable all affected physical hosts through the upgraded queue. Keep the
 current binaries and a queue/database/config backup as well as the installer's
 rollback journals. Require fresh reports and no attempts, preparations, engines,
-buffered results, releases or queued jobs resolved to retiring names:
+buffered results, releases or queued/paused/waiting jobs resolved to retiring
+names:
 
 ```sh
 myce host disable HOST --stop --wait --timeout 5m
@@ -1136,7 +1139,9 @@ NEW_MYCE install queue --config QUEUE_CONFIG
 The last command installs the compatible queue binary and restarts its recorded
 unit. Verify durable disables, job/key/retry/checkpoint/release state and the single-card worker's
 legacy reconnect before changing workers. `machine_migration_queued_jobs` lists
-jobs to cancel/resubmit through clients; accepted specs are never rewritten.
+queued, paused or waiting jobs to settle or cancel/resubmit through clients;
+accepted specs are never rewritten. Unrestricted paused jobs survive conversion
+and reopen with their pause metadata, submission key and original queue age.
 Partial-card project fences and unrepresentable intersections refuse with
 `machine_migration_conflict`. Reconcile those policies explicitly before retry.
 A partial file publication blocks queue startup: rerun the identical offline
@@ -1237,8 +1242,10 @@ myce install queue --config QUEUE_CONFIG --machine-map PRIVATE_MAP \
 After reviewing the plan, repeat without `--dry-run`. The local systemd user
 manager and source spools provide the evidence; copied remote attestations do
 not authorize conversion. The supported locked database must be readable and
-contain zero queued/running/stopping/preparing jobs, including retained submission
-records, plus zero mapped-host releases/obligations. Age never proves discharge.
+contain zero nonterminal jobs (including queued, paused, waiting, running,
+stopping and preparing jobs, and retained submission records), plus zero
+mapped-host releases/obligations. Pausing work does not make a queue empty; age
+never proves discharge.
 
 For each exact source/session, require the loaded unit identity/fragment,
 `ActiveState=inactive`, `MainPID=0`, no pending unit job and empty cgroup-v2
