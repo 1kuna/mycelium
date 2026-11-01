@@ -19,8 +19,10 @@ type PriorityTier struct {
 	Selectors []string `json:"selectors" yaml:"selectors"`
 }
 type PriorityPolicy struct {
-	Version int            `json:"version" yaml:"version"`
-	Tiers   []PriorityTier `json:"tiers" yaml:"tiers"`
+	ScheduledHolds []ScheduledHold     `json:"scheduled_holds" yaml:"scheduled_holds"`
+	HostRoles      map[string][]string `json:"host_roles" yaml:"host_roles"`
+	Version        int                 `json:"version" yaml:"version"`
+	Tiers          []PriorityTier      `json:"tiers" yaml:"tiers"`
 	// Keep an explicit empty map on the wire: nil preserves settings, {} clears them.
 	Projects map[string]ProjectPolicy `json:"projects" yaml:"projects"`
 }
@@ -82,6 +84,9 @@ func normalizeJobClass(s *Spec) error {
 	return nil
 }
 func (p PriorityPolicy) validate() ([]string, error) {
+	if err := validateScheduledHolds(p); err != nil {
+		return nil, err
+	}
 	if p.Version != 1 || len(p.Tiers) == 0 {
 		return nil, errors.New("policy requires version 1 and ordered tiers")
 	}
@@ -205,7 +210,7 @@ func (q *Queue) PriorityPolicy(requestContexts ...context.Context) PriorityPolic
 	return q.priorityPolicyRecord()
 }
 func (q *Queue) priorityPolicyRecord() PriorityPolicyRecord {
-	p := q.effectivePriorityPolicy()
+	p := cloneHoldPolicy(q.effectivePriorityPolicy())
 	p.Tiers = slices.Clone(p.Tiers)
 	for i := range p.Tiers {
 		p.Tiers[i].Selectors = slices.Clone(p.Tiers[i].Selectors)
@@ -248,6 +253,7 @@ func (q *Queue) SetPriorityPolicy(expected uint64, p PriorityPolicy, requestCont
 		p.Tiers[i].Selectors = slices.Clone(p.Tiers[i].Selectors)
 	}
 	p.Projects = nil
+	p = cloneHoldPolicy(p)
 	err := q.updateRequest(requestCtx, func() error {
 		if expected == ^uint64(0) {
 			return errors.New("policy revision exhausted")
@@ -259,6 +265,13 @@ func (q *Queue) SetPriorityPolicy(expected uint64, p PriorityPolicy, requestCont
 			if err := q.validateProductionParityHosts(v.ProductionParityHosts); err != nil {
 				return err
 			}
+		}
+		previous := q.effectivePriorityPolicy()
+		if p.ScheduledHolds == nil {
+			p.ScheduledHolds = previous.ScheduledHolds
+		}
+		if p.HostRoles == nil {
+			p.HostRoles = previous.HostRoles
 		}
 		q.s.PriorityPolicy = &PriorityPolicyRecord{Revision: expected + 1, Policy: p}
 		if projects != nil {

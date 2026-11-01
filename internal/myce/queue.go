@@ -1840,7 +1840,7 @@ func (q *Queue) snapshot(forStatus bool, contexts ...context.Context) (Snapshot,
 
 // Projection runs against either the locked queue or a fully detached read view.
 func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
-	out := Snapshot{HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), QueueRelease: CurrentRelease(), HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
+	out := Snapshot{ScheduledHolds: q.scheduledHoldStatuses(), HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), QueueRelease: CurrentRelease(), HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
 	for _, s := range q.s.ModelSlots {
 		copy := *s
 		model, _ := q.model(s.Model)
@@ -2002,6 +2002,11 @@ func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
 
 func (q *Queue) projectJob(stored *Job, order map[string]int, reasons map[string]string, forStatus bool) *Job {
 	value := *stored
+	if stored.Hold != nil {
+		h := *stored.Hold
+		h.Active = !terminal(stored.State) && !cancelled(stored) && h.active(q.clock.Now())
+		value.Hold = &h
+	}
 	j := &value
 	if stored.Delivery != nil {
 		d := *stored.Delivery

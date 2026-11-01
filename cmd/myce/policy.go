@@ -17,7 +17,7 @@ import (
 
 func policyCommand(args []string, out io.Writer) error {
 	if len(args) == 0 {
-		return errors.New("usage: myce policy get [--yaml] | set policy.yaml --if-revision N")
+		return errors.New("usage: myce policy get [--yaml] | set policy.yaml --if-revision N | suggest-holds")
 	}
 	// Accept the documented filename-before-flags form as well as Go flag order.
 	rest := args[1:]
@@ -43,6 +43,15 @@ func policyCommand(args []string, out io.Writer) error {
 	defer cancel()
 	var record myce.PriorityPolicyRecord
 	switch args[0] {
+	case "suggest-holds":
+		if f.NArg() != 0 || *revision != "" || *asYAML {
+			return errors.New("policy suggest-holds accepts no file, revision or YAML flag")
+		}
+		var suggestions []myce.HoldSuggestion
+		if err := client.Call(ctx, "GET", "/api/policy/hold-suggestions", nil, &suggestions); err != nil {
+			return err
+		}
+		return json.NewEncoder(out).Encode(suggestions)
 	case "get":
 		if f.NArg() != 0 || *revision != "" {
 			return errors.New("policy get accepts no file or revision")
@@ -80,7 +89,7 @@ func policyCommand(args []string, out io.Writer) error {
 			return err
 		}
 	default:
-		return errors.New("policy command must be get or set")
+		return errors.New("policy command must be get, set or suggest-holds")
 	}
 	if *asYAML {
 		fmt.Fprintf(os.Stderr, "policy revision %d\n", record.Revision)

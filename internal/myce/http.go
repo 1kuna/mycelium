@@ -77,6 +77,8 @@ func (a API) handler(joiningPin string) http.Handler {
 	a.registerComponentExclusions(mux)
 	a.registerReservations(mux)
 	a.registerPriorityPolicy(mux)
+	a.registerJobHolds(mux)
+	a.registerHoldSuggestions(mux)
 	a.registerFiles(mux)
 	a.registerFileRelease(mux)
 	a.registerStorageMigration(mux)
@@ -502,7 +504,7 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 			e.Code, e.Message = body.Code, body.Error
 			e.CurrentRevision = body.CurrentRevision
 			// The queue returns specific, safe submission validation reasons.
-			if message := rejectionMessages[body.Code]; message != "" && body.Code != "extension_version_conflict" && body.Code != "policy_revision_conflict" && !(method == http.MethodPost && path == "/api/jobs") {
+			if message := rejectionMessages[body.Code]; message != "" && body.Code != "extension_version_conflict" && body.Code != "policy_revision_conflict" && body.Code != "job_hold_revision_conflict" && !(method == http.MethodPost && path == "/api/jobs") {
 				e.Message = message
 			}
 		}

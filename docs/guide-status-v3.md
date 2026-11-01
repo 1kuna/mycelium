@@ -1096,3 +1096,55 @@ hint, not a completion guarantee or production `start_by`. Deadline demand does
 not preempt non-resumable commands. Blocker duration estimates use comparable
 observations when available; missing estimates and overruns remain explicitly
 unknown. An estimated remaining duration does not assure a queue start time.
+
+## Queued-job holds and scheduled admission
+
+`myce pause JOB --reason TEXT --if-revision N [--until RFC3339]` holds queued
+work without changing its submission, input identities, queue age or retry/loss
+accounting. Use revision `0` before the first hold; read subsequent revisions
+from `hold.revision` in job GET or status. `myce resume JOB --if-revision N`
+clears only that job's hold. Without `--until`, an explicit resume is required.
+Expiry uses the queue clock; production `start_by` and `give_up` still advance.
+Assigned/running jobs return `job_hold_state_conflict`; stale revisions return
+`job_hold_revision_conflict` with `current_revision`. A fan-out parent remains
+queued while its children run: its hold gates further children and unstarted
+waves, while Started waves finish. Job GET and status expose the last instruction
+(`paused`, `reason`, `until`, `revision`) and the derived current `active` flag.
+
+The authenticated endpoints are `POST /api/jobs/{id}/hold` with
+`expected_revision`, `reason`, optional `until`, and `/resume` with only
+`expected_revision`. They return the new hold record. Existing submission keys
+continue to return the original logical job.
+
+Owner calendars live in local `myce policy get --yaml` / `set FILE --if-revision N`
+records (`GET/PUT /api/policy`), never in project submission specs. `scheduled_holds`
+is a list of rules with unique `id`, explicit `enabled`, `beneficiary` in the
+existing `project/class` selector syntax, `reason`, IANA `timezone`, `resource`
+and `windows`. Resource fields `host`, `machine`, canonical `device`, `platform`
+and `role` intersect. `host_roles` maps local physical host IDs to role names.
+Omitted/null collections preserve existing values; explicit `[]` / `{}` clear
+holds / role mappings, respectively.
+
+Each window has either absolute `start_at` / `end_at`, or `weekdays` (Sunday=0)
+and local `start` / `end` in HH:MM. Starts are inclusive and ends exclusive.
+Split overnight weekly windows at midnight; `24:00` is allowed only as an end.
+Weekly windows follow wall-clock time: repeated DST minutes occur twice and
+nonexistent minutes do not occur. Multiple active rules intersect, including
+rules with different beneficiaries. Other resources remain eligible.
+
+Status `scheduled_holds` reports each selected target as `scheduled`, `draining`
+with retained obligation blockers, or `exclusive_after_release`. Existing Started
+work drains; beneficiary demand keeps the ordinary owner tiers and preemption
+contracts. A hold does not promote its beneficiary. Ending/removing a window
+adds no cooldown and cannot clear maintenance, reservations or cleanup custody.
+Measured environment setup can withhold a cold launch that would exceed the next
+free interval; unknown setup does not invent a cutoff. Existing declared
+production dependency forecasts continue to apply.
+
+`myce policy suggest-holds` (`GET /api/policy/hold-suggestions`) returns disabled
+weekly suggestions from repeated retained successful production executions, with
+source job IDs and uncertainty. These observed UTC envelopes are incomplete
+history, not promises of recurrence or future setup duration. Suggestions never
+edit policy: the owner must review the resource and window and explicitly set
+`enabled: true` through revision-CAS policy set. Actual schedules, roles and
+reasons belong only in private local policy/SQLite.

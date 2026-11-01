@@ -115,7 +115,7 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 		}
 		if l.Kind == "engine" {
 			s := q.s.ModelSlots[slotKey(l.Machine, l.Key, l.Device)]
-			if s == nil || s.Session != l.Session || s.Attempt != l.Attempt || s.State != "loading" || !q.reservationAllows(nil, allocationMachine(q.s.Machines[l.Machine], []string{l.Device})) || q.deviceAdmissionBlocked(allocationMachine(q.s.Machines[l.Machine], []string{l.Device})) {
+			if s == nil || q.scheduledHoldReason(&Job{Spec: q.slotSpec(s)}, allocationMachine(q.s.Machines[l.Machine], []string{l.Device})) != "" || s.Session != l.Session || s.Attempt != l.Attempt || s.State != "loading" || !q.reservationAllows(nil, allocationMachine(q.s.Machines[l.Machine], []string{l.Device})) || q.deviceAdmissionBlocked(allocationMachine(q.s.Machines[l.Machine], []string{l.Device})) {
 				reject("engine_custody")
 			}
 			return nil
@@ -127,6 +127,11 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 		}
 		m := q.s.Machines[l.Machine]
 		if !p.Started {
+			j := q.s.Jobs[p.Demand]
+			if q.jobHoldReason(j) != "" || q.scheduledHoldReason(j, allocationMachine(m, []string{p.Device})) != "" {
+				reject("admission_hold")
+				return nil
+			}
 			if j := q.s.Jobs[p.Demand]; j != nil && q.productionAdmissionReason(j, allocationMachine(m, []string{p.Device})) != "" {
 				reject("production_admission")
 				return nil

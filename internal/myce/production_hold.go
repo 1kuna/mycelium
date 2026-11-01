@@ -185,6 +185,9 @@ func (q *Queue) placementPolicyAllowed(j *Job, m *Machine, resident bool) bool {
 }
 
 func (q *Queue) placementPolicyWithoutReservation(j *Job, m *Machine, resident bool) bool {
+	if q.jobHoldReason(j) != "" || q.scheduledHoldReason(j, m) != "" {
+		return false
+	}
 	if j.State == "queued" && (j.Spec.Priority == "production" || j.Spec.Class == "production") && q.fleetPausesProduction() {
 		return false
 	}
@@ -460,7 +463,7 @@ func (q *Queue) productionTarget(j *Job, call *ModelCall) string {
 			model, _ := q.model(call.Model)
 			diskReason = q.modelLoadDiskHeadroomReason(model, m)
 		}
-		if !q.reservationAllows(j, m) || diskReason != "" || q.dockerBlocker(hostID(m)) != "" || q.unreported[m.ID] || !q.jobAllowsMachine(j, m.ID) {
+		if q.jobHoldReason(j) != "" || q.scheduledHoldReason(j, m) != "" || !q.reservationAllows(j, m) || diskReason != "" || q.dockerBlocker(hostID(m)) != "" || q.unreported[m.ID] || !q.jobAllowsMachine(j, m.ID) {
 			continue
 		}
 		for _, candidate := range q.memoryCandidates(j, m) {
@@ -532,7 +535,7 @@ func (q *Queue) maintainHolds() {
 		if j.Spec.FanOut != nil && j.FanOut != nil && j.FanOut.Next > 0 {
 			continue
 		}
-		if dependencyReady(j) && j.Spec.Priority == "production" && !terminal(j.State) && !cancelled(j) && !(j.State == "queued" && expired(j.Spec.GiveUpAt, now)) {
+		if q.jobHoldReason(j) == "" && !q.scheduledDemandBlocked(j) && dependencyReady(j) && j.Spec.Priority == "production" && !terminal(j.State) && !cancelled(j) && !(j.State == "queued" && expired(j.Spec.GiveUpAt, now)) {
 			jobs = append(jobs, j)
 		}
 	}
@@ -561,7 +564,7 @@ func (q *Queue) maintainHolds() {
 		demand[j.ProductionHost] = true
 	}
 	for _, c := range q.calls {
-		if c.Priority == "production" && c.Error == "" {
+		if c.Priority == "production" && c.Error == "" && (c.StartedAt != nil || !q.scheduledDemandBlocked(callJob(c))) {
 			if c.ProductionHost == "" {
 				j := callJob(c)
 				model, _ := q.model(c.Model)
