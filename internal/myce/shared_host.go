@@ -148,8 +148,8 @@ func applySharedHostPriority(pid int, p *SharedHostProfile) error {
 		}
 	}
 	if runtime.GOOS == "darwin" {
-		// Darwin sys/resource.h. Apply only to the gated payload PID;
-		// background CPU/I/O/timer/network policy survives fork/exec.
+		// Apply to the gated process too. sharedHostCommand establishes
+		// policy again from inside the payload before executing its command.
 		if err := sharedHostSetBackgroundPriority(pid); err != nil {
 			log.Printf("warning: shared host background task policy for payload pid %d: %v", pid, err)
 		}
