@@ -26,6 +26,46 @@ func pauseError(t *testing.T, err error, code string) {
 		t.Fatalf("wanted %s conflict, got %v", code, err)
 	}
 }
+
+func TestJobPauseHTTPAuthorizationAndErrors(t *testing.T) {
+	q, _ := fixture(t)
+	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
+	defer server.Close()
+	j := submit(t, q, spec("experiment"))
+	client := Client{URL: server.URL, Token: "wrong"}
+	for _, action := range []string{"pause", "resume"} {
+		err := client.Call(context.Background(), "POST", "/api/jobs/"+j.ID+"/"+action, PauseJobRequest{Reason: "review"}, nil)
+		var api *HTTPError
+		if !errors.As(err, &api) || api.Status != 401 || api.Code != "authentication_required" {
+			t.Fatalf("%s bypassed authentication: %v", action, err)
+		}
+	}
+	client.Token = "test"
+	err := client.Call(context.Background(), "POST", "/api/jobs/"+j.ID+"/pause", PauseJobRequest{}, nil)
+	var api *HTTPError
+	if !errors.As(err, &api) || api.Status != 400 || api.Code != "job_pause_invalid" {
+		t.Fatalf("lost pause validation error: %v", err)
+	}
+	paused := pauseForTest(t, q, j.ID, nil)
+	err = client.Call(context.Background(), "POST", "/api/jobs/"+j.ID+"/resume", ResumeJobRequest{IfRevision: paused.PauseRevision + 1}, nil)
+	pauseError(t, err, "job_pause_revision_conflict")
+	if _, err := q.ResumeJob(j.ID, paused.PauseRevision); err != nil {
+		t.Fatal(err)
+	}
+	assigned := check(t, q, machine("review-worker", "fake"), nil).Job
+	if assigned == nil {
+		t.Fatal("missing assignment")
+	}
+	for _, started := range []bool{false, true} {
+		if started {
+			if err := q.Started(result(assigned, true)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		err := client.Call(context.Background(), "POST", "/api/jobs/"+j.ID+"/pause", PauseJobRequest{Reason: "review"}, nil)
+		pauseError(t, err, "job_pause_conflict")
+	}
+}
 func TestJobPauseResumeReopen(t *testing.T) {
 	q, clock := fixture(t)
 	s := spec("experiment")
