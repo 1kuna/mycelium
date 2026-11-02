@@ -111,6 +111,7 @@ func TestWorkerRootsProductionAdmissionAndExactCustody(t *testing.T) {
 }
 
 func TestWorkerRootsDependencyChecks(t *testing.T) {
+	q, _ := fixture(t)
 	input := SharedInput{NAS: "input", SHA256: strings.Repeat("a", 64), SizeBytes: 1}
 	base := Job{Spec: cpuSpec(1, 1)}
 	base.Spec.Priority = "production"
@@ -123,13 +124,17 @@ func TestWorkerRootsDependencyChecks(t *testing.T) {
 			j.Spec.ModelSnapshots = map[string]ModelSnapshot{"base": {Repo: "org/model"}}
 		}},
 		{"environment", func(j *Job, m *Machine) { j.Spec.Environment.Name = "runtime" }},
+		{"extension", func(j *Job, m *Machine) { j.Spec.Extension = "fixture@1" }},
+		{"file-cache", func(j *Job, m *Machine) {
+			j.Spec.ModelSnapshots = map[string]ModelSnapshot{"base": {Repo: "org/model"}}
+		}},
 	} {
 		t.Run(tc.root, func(t *testing.T) {
 			m := cpuMachine("worker", "worker", "cpu", 4, 16)
 			m.UnavailableRoots = []UnavailableRoot{{Root: tc.root, Reason: "configured NAS mount missing"}}
 			j := cloneJob(&base)
 			tc.edit(&j, &m)
-			if storageRootReason(&j, &m) == "" {
+			if q.storageRootReason(&j, &m) == "" {
 				t.Fatal("NAS dependency bypassed admission")
 			}
 			if err := localAttemptAdmission(Worker{Machine: m}, nil, j, nil); err == nil {
@@ -141,7 +146,36 @@ func TestWorkerRootsDependencyChecks(t *testing.T) {
 					t.Fatal("verified local input blocked", reason)
 				}
 			}
+			m.UnavailableRoots = nil
+			if tc.root == "file-cache" {
+				// Snapshot bytes live in FileCacheRoot, independently of the
+				// engine model cache configured by CacheRoot.
+				m.UnavailableRoots = []UnavailableRoot{{Root: "model-cache", Reason: "configured NAS mount missing"}}
+			}
+			if reason := q.storageRootReason(&j, &m); reason != "" {
+				t.Fatal("recovered dependency still blocked", reason)
+			}
+			if err := localAttemptAdmission(Worker{Machine: m}, nil, j, nil); err != nil {
+				t.Fatal("recovered dependency refused locally", err)
+			}
 		})
+	}
+}
+
+func TestWorkerRootsMissingExtensionAllowsPlainCommand(t *testing.T) {
+	q, _ := fixture(t)
+	m := cpuMachine("worker", "worker", "cpu", 4, 16)
+	m.UnavailableRoots = []UnavailableRoot{{Root: "extension", Reason: "configured NAS mount missing"}}
+	s := cpuSpec(1, 1)
+	s.Priority = "production"
+	j := submit(t, q, s)
+	assigned := check(t, q, m, nil).Job
+	if assigned == nil || assigned.ID != j.ID {
+		t.Fatal("plain command blocked by unrelated extension storage")
+	}
+	w := Worker{Machine: m, HostMemorySource: func(context.Context) (float64, error) { return 16, nil }}
+	if err := localAttemptAdmission(w, nil, *assigned, nil); err != nil {
+		t.Fatal("plain command refused locally", err)
 	}
 }
 

@@ -122,8 +122,10 @@ func storageRootReason(j *Job, m *Machine) string {
 	for _, root := range m.UnavailableRoots {
 		needs := false
 		switch root.Root {
-		case "data", "extension":
+		case "data":
 			needs = true
+		case "extension":
+			needs = j.Spec.extensionJob() || len(j.Extensions) > 0
 		case "checkpoint":
 			needs = needsCheckpoint(j)
 			for _, input := range j.Spec.SharedInputs {
@@ -134,9 +136,9 @@ func storageRootReason(j *Job, m *Machine) string {
 		case "model":
 			needs = len(j.Spec.ModelSnapshots) > 0 || j.Spec.Needs.Model != ""
 		case "model-cache":
-			needs = len(j.Spec.ModelSnapshots) > 0 || j.Spec.Needs.Model != ""
+			needs = j.Spec.Needs.Model != ""
 		case "file-cache":
-			needs = len(jobInputFiles(j)) > 0 || len(j.Spec.SharedInputs) > 0 || j.ResumeFiles != nil
+			needs = len(jobInputFiles(j)) > 0 || len(j.Spec.SharedInputs) > 0 || len(j.Spec.ModelSnapshots) > 0 || j.ResumeFiles != nil
 		case "environment-source":
 			needs = j.Spec.Environment.Key() != "" && !environmentReady(j, m)
 		case "environment":
