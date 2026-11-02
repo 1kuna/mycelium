@@ -41,6 +41,12 @@ type ObservationKey struct {
 	Configuration   string          `json:"configuration"`
 	Concurrency     int             `json:"concurrency"`
 	BatchSize       int             `json:"batch_size"`
+	// Check marks a qualification check's memory evidence (#618). A check runs
+	// its small reference fixture, not the workload, so neither is sized from
+	// the other's peaks; see memoryEstimate for the one-way seed. Omitted when
+	// false, so existing keys keep their identity. Rows recorded before this
+	// field stay shared.
+	Check bool `json:"check,omitempty"`
 }
 
 // One bounded aggregate per comparable key, persisted as its own SQLite row.
@@ -161,7 +167,11 @@ func (q *Queue) workObservationKey(j *Job) (*ObservationKey, string) {
 	if !ok || j.Spec.ExtensionCheck == nil && ref.InputShape != j.Spec.Workload.InputShape {
 		return nil, "input shape has no matching reference"
 	}
-	return referenceObservationKey(*e, m, ref, j.Spec.workType(), j.Spec.Needs, j.Spec.Args, j.Spec.Program, component, hardware)
+	key, reason := referenceObservationKey(*e, m, ref, j.Spec.workType(), j.Spec.Needs, j.Spec.Args, j.Spec.Program, component, hardware)
+	if key != nil {
+		key.Check = j.Spec.ExtensionCheck != nil
+	}
+	return key, reason
 }
 
 // Plain auto-memory commands are comparable by project, name, run, environment

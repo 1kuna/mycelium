@@ -14,11 +14,15 @@ type memoryExploration struct {
 }
 
 func memoryExplorationKey(k ObservationKey, configuration string) string {
+	work := k.Work
+	if k.Check {
+		work = "check:" + work // existing workload claims keep their key
+	}
 	return identityHash(struct {
 		Work, Extension, OS, Configuration string
 		Reference                          WorkReference
 		Concurrency, BatchSize             int
-	}{k.Work, k.ExtensionDigest, k.Target.OS, configuration, k.Reference, k.Concurrency, k.BatchSize})
+	}{work, k.ExtensionDigest, k.Target.OS, configuration, k.Reference, k.Concurrency, k.BatchSize})
 }
 
 func (q *Queue) memoryHistory() *Queue {
