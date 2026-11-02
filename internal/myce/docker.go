@@ -123,6 +123,7 @@ type dockerExecution struct {
 	Infrastructure       []infrastructureFact    `json:"infrastructure_facts,omitempty"`
 	ObservationLost      bool                    `json:"observation_lost,omitempty"`
 	InfrastructureStop   bool                    `json:"infrastructure_stop,omitempty"`
+	Shutdown             bool                    `json:"shutdown,omitempty"`
 	AmbiguousKill        bool                    `json:"ambiguous_kill,omitempty"`
 	Failure              string                  `json:"failure,omitempty"`
 	CgroupParent         string                  `json:"cgroup_parent,omitempty"`
@@ -846,7 +847,7 @@ func (d *dockerAttempt) signalContainer(id string, kill bool) ([]byte, error) {
 	m = d.state.Containers[id]
 	m.TermOutcome = "sent"
 	if err == nil {
-		m.Signals = append(m.Signals, deliveredSignal{Signal: "TERM", At: at})
+		m.Signals = append(m.Signals, deliveredSignal{Signal: "TERM", At: at, Shutdown: d.state.Shutdown})
 	}
 	if err != nil {
 		m.TermOutcome = "error"
@@ -872,7 +873,7 @@ func (d *dockerAttempt) recordSignal(id, name string, at time.Time) error {
 	defer d.mu.Unlock()
 	m := d.state.Containers[id]
 	prior := m.memberOutcome
-	m.Signals = append(append([]deliveredSignal(nil), m.Signals...), deliveredSignal{Signal: name, At: at})
+	m.Signals = append(append([]deliveredSignal(nil), m.Signals...), deliveredSignal{Signal: name, At: at, Shutdown: d.state.Shutdown})
 	if d.state.Containers == nil {
 		d.state.Containers = map[string]dockerMember{}
 	}
