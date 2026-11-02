@@ -828,6 +828,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				nextFaultProbe = now.Add(5 * time.Second)
 			}
 			m.Devices = slices.Clone(w.Machine.Devices)
+			m.FaultMonitorError = w.Machine.FaultMonitorError
 			// Slow runtime enumeration must not block heartbeats or stop delivery.
 			probeWorker := w
 			isolation, isolationErr := cpuQualification.run("cpu-isolation", func() (string, error) {
