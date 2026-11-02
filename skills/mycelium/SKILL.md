@@ -39,6 +39,15 @@ Mycelium runs CPU and GPU work for every project through one queue. It places ea
 
 `myce result JOB_ID --out DIR` verifies each output's SHA-256 and size; then run your project's own acceptance check, since a wake or a zero exit proves no result. Download within the retention window (default seven days). Failed jobs have no accepted outputs; `myce result JOB_ID --attempt N --out DIR` fetches failed-attempt diagnostics. Report placement as "Mycelium placed it on X because Y", from the job's placement rationale.
 
+**Release results early** to free shared store space once your project is completely done with them, rather than waiting out retention. Select only your own project's terminal jobs, after every downstream use has finished and any copy you must keep is saved and verified; include fan-out parents, children and keyed answers you want expired. The project name is attribution, not a permission check, so never select another project's jobs. Plan, review, then apply:
+
+```sh
+myce file release plan --project P JOB_ID... > release-plan.json   # read-only snapshot
+myce file release apply --accept-expiry release-plan.json          # irreversible
+```
+
+The plan lists each job's files, what still protects them and `reclaimable_bytes` (it can be zero while still expiring your references). Apply rechecks the plan: `file_release_stale` means re-plan and review again, nothing was expired; `file_release_protected` means a selected job is still live, has unresolved custody or lacks a verified delivery, so drop it from the next plan. Success schedules asynchronous collection, so freed space isn't immediate, and the released results then return `result_expired`. Keep the plan and apply response as your audit record. API: `POST /api/files/release/plan` and `/api/files/release/apply`; see [operations](https://github.com/1kuna/mycelium/blob/main/docs/operations.md#project-owner-early-file-release-465).
+
 ## Urgency and holds
 
 - **Urgency is the class.** When your work must go first, submit it with the class it truly has and read its waiting reason. A message asking another project to stop can't change queue order, and their queued jobs would take the freed slot anyway.
