@@ -106,6 +106,7 @@ func TestWorkerServiceShutdownPreservesPayloadFailure(t *testing.T) {
 		t.Run(map[bool]string{false: "command", true: "native-group"}[grouped], func(t *testing.T) {
 			w := recoveryWorker(t)
 			w.memoryCeilings = fakeCeilings(t)
+			w.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
 			store, err := w.openStore()
 			if err != nil {
 				t.Fatal(err)
