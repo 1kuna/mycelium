@@ -428,6 +428,7 @@ func (q *Queue) machineRecoveryFits(m *Machine, j *Job, copy Copy) bool {
 		if j.Spec.Needs.cpuOnly() && target.GPU == "cpu" || len(copy.AllocatedDevices) > 0 && target.GPU != "cpu" && slices.Equal(targetDevices(target), copy.AllocatedDevices) {
 			own := HostRelease{Job: j.ID, Machine: m.ID, Session: copy.Session, Attempt: copy.Attempt}
 			_, shared := q.deviceCoTenants(target, j, false)
+			shared = shared && !target.Gone && !target.Leaving && !q.unreported[target.ID]
 			return (q.workerBatchIdleExcept(target, &own) || shared) && target.CPUCapacityReason == "" && target.CPUInUseCores <= target.EffectiveCPUCores && target.hostReservationDebtGB == 0 && target.modelReservationDebtGB == 0 && target.MemoryError == "" && deviceAllowed(j, target)
 		}
 	}

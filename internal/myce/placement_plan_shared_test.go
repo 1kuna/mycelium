@@ -236,3 +236,23 @@ func TestSharedDeviceUnifiedDeviceDefaultKeepsCard(t *testing.T) {
 	}
 	requireState(t, q, small.ID, "queued")
 }
+
+// A leaving worker never re-adopts lost copies; sharing must not change that.
+func TestSharedDeviceLeavingWorkerDoesNotReadopt(t *testing.T) {
+	q, clock := fixture(t)
+	m := sharedUnifiedMachine()
+	a, b := sharedPair(t, q, m)
+	machineCheck(t, q, m, a, b)
+	clock.Advance(61 * time.Second)
+	check(t, q, machine("healthy", "fake"), nil)
+	requireState(t, q, a.ID, "queued")
+	requireState(t, q, b.ID, "queued")
+	leaving := m
+	leaving.Leaving = true
+	machineCheck(t, q, leaving, a, b)
+	for _, prior := range []*Job{a, b} {
+		if got := job(t, q, prior.ID); got.State != "queued" {
+			t.Fatal("a leaving worker re-adopted a shared co-tenant", got.ID, got.State)
+		}
+	}
+}
