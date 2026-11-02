@@ -92,10 +92,6 @@ func (q *Queue) sharedHostRoom(m *Machine, room, reserved, growth float64) float
 	for _, other := range q.s.Machines {
 		if hostID(other) == hostID(m) && !other.Gone && !q.unreported[other.ID] && other.Replacement == nil {
 			workers++
-			if reason := q.sharedPressureReason(other); reason != "" {
-				m.SharedHostReason = reason
-				return 0
-			}
 		}
 	}
 	if m.CapabilityProfile != nil && m.CapabilityProfile.OS == "linux" && workers > 1 {
@@ -108,6 +104,12 @@ func (q *Queue) sharedHostRoom(m *Machine, room, reserved, growth float64) float
 	o := m.MemoryObservation
 	if !validHostMemoryObservation(o) || h == nil || h.Week.Samples == 0 {
 		m.SharedHostReason = "shared host requires live and historical external RAM observations"
+		return 0
+	}
+	// Pressure is checked after every structural reason, so qualification can
+	// tell a busy owner (queue and wait) from an unqualified host (#605).
+	if reason := q.hostPressureReason(m); reason != "" {
+		m.SharedHostReason = reason
 		return 0
 	}
 	// This profile requires a measured additional burst reserve. The external

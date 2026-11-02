@@ -282,6 +282,11 @@ func (q *Queue) qualificationCapacity(target *Machine) Machine {
 	copy.Gone, copy.Leaving, copy.Recovering, copy.CheckpointUnavailable = false, false, false, false
 	copy.MemoryError, copy.HostMemoryError, copy.CPUCapacityReason = "", "", ""
 	copy.HostMemoryPolicyMismatch = false
+	// Owner pressure is temporary; busy qualified targets queue (#605).
+	// Structural shared-host reasons are checked first and still refuse.
+	if copy.SharedHostReason != "" && copy.SharedHostReason == q.hostPressureReason(target) {
+		copy.SharedHostReason = ""
+	}
 	policy := q.s.HostMaintenance[hostID(target)]
 	if policy.CPUBudgetCores != nil {
 		copy.CPUBudgetCores = *policy.CPUBudgetCores
