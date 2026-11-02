@@ -4,6 +4,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
@@ -389,6 +390,28 @@ type CurrentHostMemory struct {
 	DeviceGB         *float64 `json:"device_gb,omitempty"`
 	DeviceAgeSeconds float64  `json:"device_age_seconds,omitempty"`
 	deviceSampledAt  time.Time
+	deviceSample     *atomic.Pointer[hostMemorySample]
+}
+
+// Refresh device telemetry independently of the actor snapshot. Log/result I/O
+// can delay the actor while its device sampler continues to make progress.
+// This is an atomic read only: no process inventory or driver I/O on check-in.
+func (s *CurrentHostMemory) aged(now time.Time) *CurrentHostMemory {
+	if s == nil {
+		return nil
+	}
+	sample := *s
+	if s.deviceSample != nil {
+		if device := s.deviceSample.Load(); device != nil {
+			gb := device.gb
+			sample.DeviceGB, sample.deviceSampledAt = &gb, device.at
+		}
+	}
+	sample.AgeSeconds = now.Sub(sample.sampledAt).Seconds()
+	if sample.DeviceGB != nil {
+		sample.DeviceAgeSeconds = now.Sub(sample.deviceSampledAt).Seconds()
+	}
+	return &sample
 }
 
 // Actors refresh every <=100 ms. Five seconds bounds cached credit through a

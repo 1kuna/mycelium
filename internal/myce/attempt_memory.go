@@ -784,7 +784,7 @@ func (a *memoryAttempt) currentHostMemory(clock Clock) *CurrentHostMemory {
 	if err != nil {
 		return nil
 	}
-	sample := &CurrentHostMemory{NonreclaimableGB: float64(min(anon, current)) / (1 << 30), sampledAt: at}
+	sample := &CurrentHostMemory{NonreclaimableGB: float64(min(anon, current)) / (1 << 30), sampledAt: at, deviceSample: &a.device}
 	if device := a.device.Load(); device != nil {
 		gb := device.gb
 		sample.DeviceGB, sample.deviceSampledAt = &gb, device.at

@@ -1044,12 +1044,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			// Age the actor snapshot at send time, including any intervening probes.
 			for i := range reports {
 				reports[i].ApplicationProgress = reports[i].ApplicationProgress.aged(w.Clock.Now())
-				if sample := reports[i].CurrentHostMemory; sample != nil {
-					sample.AgeSeconds = w.Clock.Now().Sub(sample.sampledAt).Seconds()
-					if sample.DeviceGB != nil {
-						sample.DeviceAgeSeconds = w.Clock.Now().Sub(sample.deviceSampledAt).Seconds()
-					}
-				}
+				reports[i].CurrentHostMemory = reports[i].CurrentHostMemory.aged(w.Clock.Now())
 			}
 			w.hostMemorySamples = currentHostMemorySamples(reports, w.Clock.Now())
 			reply, err := w.checkin(ctx, Checkin{Machine: m, Attempts: reports, Recovering: recovering, Fresh: fresh, PreviousSession: root.state.PreviousSession, ModelReports: modelReports})
