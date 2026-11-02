@@ -351,13 +351,19 @@ after a caller restart; do not clear the hold merely because the caller exited.
 
 ```sh
 myce reserve add 'host=compute-a;devices=0' --id driver-check --job JOB_ID --owner validation-agent --reason 'driver qualification' --max-lifetime 2h
-myce reserve add 'host=compute-b' --id host-check --job OTHER_JOB_ID --owner validation-agent --reason 'host validation'
+myce reserve add 'host=compute-b' --whole-host --id host-check --job OTHER_JOB_ID --owner validation-agent --reason 'host validation requires host-wide isolation'
 myce reserve list
 myce reserve release driver-check --if-revision 1 --reason 'validation abandoned; inspect retained execution custody separately'
 ```
 
 `reserve add` binds one existing single batch job/check before enabling admission
-policy. It resolves the same stable physical identities as `exclude`, accepting
+policy. For a GPU extension check, the CLI narrows a host-only selector to the
+check's explicitly selected device. An unselected check requires an explicit
+device selector. Use `--whole-host` with a host-only selector only when the check
+needs host-wide isolation, and explain why in `--reason`. CPU checks and ordinary
+validation jobs retain their authored scope. This CLI default does not edit
+existing reservations or change the API's explicit selector contract.
+It resolves the same stable physical identities as `exclude`, accepting
 one host, its explicit devices, `host=HOST;kind=gpu`, or
 `host=HOST;platform=PLATFORM`. The bound job must fit a selected target and is
 then restricted to that target. Unknown jobs, dependencies/fan-outs, incompatible
@@ -1073,7 +1079,12 @@ Drain/disable admission before installing an upgrade. Matching queue and workers
 must use the current protocol. The installer updates only the selected service,
 enables/starts it and restarts an existing Linux service. It installs no local
 start condition or timer. Linux units retain GPU EnvironmentFile,
-`Restart=on-failure`, `Delegate=memory cpu`, `KillMode=control-group` and bounded stop.
+`Restart=on-failure`, `Delegate=memory cpu`, `KillMode=mixed` and bounded stop.
+TERM goes only to the worker, which records and delivers attempt stops before
+reporting infrastructure interruptions. Installed shutdown also stops
+non-resumable CPU attempts; an interactive `join` still lets those finish.
+After 45 seconds systemd retains a final group-wide KILL, including delegated
+attempt cgroups. Payload failures observed before worker stop remain failures.
 macOS uses the generated launchd service. Configuration and secret files stay
 private. Never run the ordinary binary as root.
 
@@ -1678,7 +1689,7 @@ explicit `--memory-mode unified` and Metal always use this rule.
 
 Linux cgroup v2 workers installed as systemd user services enforce declared
 ceilings. The generated and manual worker units use `Delegate=memory cpu` and retain
-`KillMode=control-group`. At startup the worker moves itself into the service's
+`KillMode=mixed`. At startup the worker moves itself into the service's
 `worker` leaf, then enables the delegated memory controller in the service
 parent. Each native batch attempt and model-server execution gets a unique
 `attempt-<execution-id>` or `engine-<execution-id>` child of that same parent.

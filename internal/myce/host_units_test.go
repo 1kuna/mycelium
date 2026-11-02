@@ -63,7 +63,7 @@ func TestInstallMachineTargetsItsOwnUnit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, setting := range []string{"KillMode=control-group", "SendSIGKILL=yes"} {
+	for _, setting := range []string{"KillMode=mixed", "SendSIGKILL=yes"} {
 		if !strings.Contains(string(text), setting) {
 			t.Fatal(setting, string(text))
 		}
