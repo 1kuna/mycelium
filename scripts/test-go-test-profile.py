@@ -29,6 +29,12 @@ class GoTestProfileTests(unittest.TestCase):
             self.assertEqual((root / 'go-args').read_text(), 'mod download\n')
             self.assertEqual((root / 'gate-args').read_text(), 'full\n')
             self.assertEqual((root / 'gate-result.txt').read_text(), 'gate full: exit=0\n')
+            run = subprocess.run(['bash', str(script), 'quick'], cwd=root,
+                                 env=dict(os.environ, PATH=str(root) + os.pathsep + os.environ['PATH']),
+                                 capture_output=True, text=True)
+            self.assertEqual(run.returncode, 0, run.stderr)
+            self.assertEqual((root / 'gate-args').read_text(), 'quick\n--selection\ngate-selection.tsv\n')
+            self.assertEqual((root / 'gate-result.txt').read_text(), 'gate quick: exit=0\n')
             (root / 'scripts/gate.sh').write_text('#!/bin/sh\nexit 7\n')
             (root / 'gate-result.txt').unlink()
             run = subprocess.run(['bash', str(script)], cwd=root,

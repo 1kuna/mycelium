@@ -1,11 +1,21 @@
 #!/usr/bin/env bash
 # Per change: ./scripts/gate.sh [quick [BASE]]; per batch/deploy: ... full.
+# quick --selection FILE takes gate-related.py output computed elsewhere, for
+# a source archive without Git history (the gate-quick fleet profile).
 set -euo pipefail
 umask 022
 mode=${1:-quick}
 base=${2:-}
+selection=
 budgeted=${MYCE_GATE_BUDGET:-}
-case "$mode" in quick|full) ;; *) echo 'usage: scripts/gate.sh [quick [BASE]|full]' >&2; exit 2;; esac
+case "$mode" in quick|full) ;; *) echo 'usage: scripts/gate.sh [quick [BASE|--selection FILE]|full]' >&2; exit 2;; esac
+if [[ $mode == quick && $base == --selection ]]; then
+  selection=${3:?'usage: scripts/gate.sh quick --selection FILE'}
+  [[ -f $selection ]] || { echo "quick: selection file not found: $selection" >&2; exit 2; }
+  selection=$(cd "$(dirname "$selection")" && pwd)/$(basename "$selection")
+  base=
+  set -- quick --selection "$selection"
+fi
 repo=$(cd "$(dirname "$0")/.." && pwd)
 cd "$repo"
 if [[ $mode == quick && ${MYCE_GATE_BUDGET:-} != 1 ]]; then
@@ -44,7 +54,9 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 143' TERM
 trap 'exit 130' INT
-if [[ $mode == quick ]]; then
+if [[ $mode == quick && -n $selection ]]; then
+  cp "$selection" "$scratch/selection"
+elif [[ $mode == quick ]]; then
   # Compare this branch's changes, excluding later unrelated main merges.
   if [[ -z $base ]]; then base=$(git merge-base HEAD origin/main); fi
   git rev-parse --verify "$base" >/dev/null

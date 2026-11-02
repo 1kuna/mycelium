@@ -1,0 +1,24 @@
+# Quick runs a subset of the full gate's commands at the same concurrency, so
+# gate-full's measured 7 GiB Linux envelope bounds it; see docs/development.md.
+# Submit with --input gate-selection.tsv=FILE from scripts/gate-related.py BASE.
+name: mycelium-gate-quick
+project: mycelium
+class: test
+source:
+  git: HEAD
+run:
+  command: [bash, scripts/gate-profile.sh, quick]
+  env:
+    GOMAXPROCS: '2'
+needs:
+  cpu_cores: 2
+  memory_gb: 7
+  platform: cpu
+targets:
+  - {os: linux, arch: amd64, platform: cpu}
+  - {os: linux, arch: arm64, platform: cpu}
+# Locked CPU tools for every declared target (see env/mycelium-gate/README.md).
+environment: mycelium-gate
+outputs:
+  gate-result.txt: results
+check: [grep, -qx, 'gate quick: exit=0', gate-result.txt]
