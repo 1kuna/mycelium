@@ -173,7 +173,11 @@ func (c *processControl) apply() {
 			if !p.job.Spec.Needs.cpuOnly() {
 				grace = defaultGPUStopGrace
 			}
-			p.stop(now, grace, false)
+			if c.service {
+				p.stopService(now, grace)
+			} else {
+				p.stop(now, grace, false)
+			}
 		}
 		if event, ok := c.pendingEvents[key]; ok {
 			if err := p.recordPriorityStop(nil, event.PriorityStop); err != nil {

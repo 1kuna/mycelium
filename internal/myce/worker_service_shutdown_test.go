@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -16,18 +17,23 @@ import (
 // old control-group unit the payload receives TERM without a Mycelium delivery
 // receipt, reproducing #629's terminal command_exit 143 on CPU experiments.
 func TestWorkerServiceShutdownRequeuesNative(t *testing.T) {
-	for _, grouped := range []bool{false, true} {
+	for _, tc := range []struct {
+		grouped bool
+		exit    int
+	}{{false, 143}, {true, 143}, {false, 0}, {true, 0}} {
+		grouped := tc.grouped
 		name := "command"
 		if grouped {
 			name = "native-group"
 		}
-		t.Run(name, func(t *testing.T) {
+		t.Run(fmt.Sprintf("%s/exit-%d", name, tc.exit), func(t *testing.T) {
 			q, _ := fixture(t)
 			clock := &workerFakeClock{now: q.clock.Now()}
 			q.clock = clock
 			s := cpuSpec(1, 1)
 			s.Resumable = false
-			s.Run.Command = []string{"sh", "-c", `trap 'exit 143' TERM; echo ready; while :; do sleep .01; done`}
+			s.Run.Command = []string{"sh", "-c", `trap 'exit "$EXIT_STATUS"' TERM; echo ready; while :; do sleep .01; done`}
+			s.Run.Env = map[string]string{"EXIT_STATUS": fmt.Sprint(tc.exit)}
 			if grouped {
 				s.Run.MemoryGB = .5
 			}
@@ -110,6 +116,9 @@ func TestWorkerServiceShutdownPreservesPayloadFailure(t *testing.T) {
 			j.Spec.Run.Command = []string{"sh", "-c", "exit 143"}
 			if grouped {
 				j.Spec.Run.MemoryGB = .5
+			}
+			if err := normalizeResources(&j.Spec); err != nil {
+				t.Fatal(err)
 			}
 			p, err := w.start(store, j)
 			if err != nil {

@@ -198,7 +198,7 @@ func (g *nativeGroup) signalLocked(member *nativeMember, signal syscall.Signal) 
 	if signal == syscall.SIGKILL {
 		name = "KILL"
 	}
-	record := deliveredSignal{Signal: name, At: at}
+	record := deliveredSignal{Signal: name, At: at, Shutdown: g.p.shutdown}
 	prior := g.p.outcome.Signals
 	g.p.outcome.Signals = append(append([]deliveredSignal(nil), prior...), record)
 	changed := map[*nativeMember][]deliveredSignal{}

@@ -155,6 +155,7 @@ type process struct {
 	polite     bool
 	stopGroup  bool
 	userCancel bool
+	shutdown   bool // Tags delivered service stops, including checkpoint handlers exiting zero.
 	stopGrace  time.Duration
 	killed     bool
 	// Injected-clock time of the first stop request: teardown evidence (#595).
@@ -201,6 +202,21 @@ func (p *process) recordPriorityStop(s *workerStore, stop *PriorityPreemption) e
 
 func (p *process) stop(now time.Time, grace time.Duration, kill bool) {
 	p.stopDirective(now, grace, kill, false)
+}
+func (p *process) stopService(now time.Time, grace time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.shutdown = true
+	if p.docker != nil {
+		p.docker.mu.Lock()
+		if !p.docker.state.Shutdown {
+			p.docker.state.Shutdown = true
+			p.docker.dirty = true
+		}
+		p.docker.mu.Unlock()
+	}
+	p.stopGroup = !p.job.Spec.Needs.cpuOnly() && !p.userCancel
+	p.stopLocked(now, grace, false)
 }
 func (p *process) stopDirective(now time.Time, grace time.Duration, kill, userCancel bool) {
 	p.mu.Lock()
@@ -321,7 +337,7 @@ func (p *process) signalLocked(signal syscall.Signal) {
 		name = "KILL"
 	}
 	next := p.outcome
-	next.Signals = append(append([]deliveredSignal(nil), next.Signals...), deliveredSignal{Signal: name, At: at})
+	next.Signals = append(append([]deliveredSignal(nil), next.Signals...), deliveredSignal{Signal: name, At: at, Shutdown: p.shutdown})
 	if p.saveOutcome != nil && p.saveOutcome(next) == nil {
 		p.outcome = next
 	}
