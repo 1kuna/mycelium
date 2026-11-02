@@ -982,7 +982,13 @@ and multi-card attempts keep the card to themselves, as does a hint that names
 no device memory (its device figure is only a default), and a newcomer never
 joins a higher tier's attempt. For placement, equal tiers never preempt; a higher tier stops the
 fewest co-tenants whose release frees enough and starts only after that
-release; a multi-card demand stops every co-tenant on its cards. Waiting reasons name `device N shared with K attempts`. CPU attempts
+release; a multi-card demand stops every co-tenant on its cards. On XPU cards,
+a higher tier instead stops every lower-tier co-tenant and waits for each exact
+release even when memory would fit beside them. Five measured lower-tier
+teardowns in one day reset the card's engines, so this prevents a later
+lower-tier teardown beneath a higher-tier payload; the cost is lost mixed-tier
+co-residency on XPU only. Equal-tier XPU packing and other platforms are
+unchanged. Waiting reasons name `device N shared with K attempts`. CPU attempts
 can run alongside GPU work and one another within host resources and caps;
 model engines retain their usual shared-memory admission. `needs.gpu.devices` narrows candidate IDs, not the
 number allocated. CPU work cannot have a GPU selector. Malformed/duplicate IDs,

@@ -283,7 +283,7 @@ func (c Client) CancelSubmission(ctx context.Context, project, key string) (Canc
 
 // Only an exact execution acknowledgement (or the existing fresh-session
 // cleanup protocol) can mark a copy released. Loss and grace expiry never do.
-func (q *Queue) confirmCopyRelease(r Result) {
+func (q *Queue) confirmCopyRelease(r Result, exact bool) {
 	j := q.retainedJob(r.ID)
 	if j == nil {
 		return
@@ -291,6 +291,13 @@ func (q *Queue) confirmCopyRelease(r Result) {
 	for i := range j.Copies {
 		c := &j.Copies[i]
 		if c.Attempt == r.Attempt && c.Machine == r.Machine && c.Session == r.Session {
+			if exact && c.ReleasedAt == nil {
+				now := q.clock.Now()
+				c.ReleasedAt = &now
+				if c.StoppedAt == nil {
+					c.StoppedAt = &now
+				}
+			}
 			if !c.ReleaseConfirmed {
 				if !j.Spec.Run.Docker && c.ProcessID == "" && j.Ledger != nil && !provenPrelaunchRefusal(j, r) {
 					j.Ledger = &JobLedgerInfo{Complete: false, HighWater: len(j.LedgerEntries)}
@@ -387,7 +394,7 @@ func (q *Queue) confirmPreviousCopies(c Checkin) {
 	confirm := func(j *Job) {
 		for _, copy := range j.Copies {
 			if copy.Machine == c.Machine.ID && copy.Session == c.PreviousSession {
-				q.confirmCopyRelease(Result{Execution: Execution{ID: j.ID, Attempt: copy.Attempt}, Machine: copy.Machine, Session: copy.Session})
+				q.confirmCopyRelease(Result{Execution: Execution{ID: j.ID, Attempt: copy.Attempt}, Machine: copy.Machine, Session: copy.Session}, true)
 			}
 		}
 	}

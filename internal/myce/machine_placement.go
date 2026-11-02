@@ -193,7 +193,9 @@ func sharesDevice(j *Job) bool {
 // deviceCoTenants counts the batch attempts on card m that demand may share it
 // with. Every holder and every retained release there must share; memory
 // charges, not this check, decide fit. A joining demand also never slows a
-// higher tier's attempt; recovery re-adopts custody it already held.
+// higher tier's attempt. XPU newcomers require equal tiers because lower-tier
+// teardown can reset the card's engines (#652). Recovery re-adopts custody it
+// already held.
 func (q *Queue) deviceCoTenants(m *Machine, demand *Job, joining bool) (int, bool) {
 	if m.Devices == nil || m.GPU == "cpu" || len(m.groupMembers) > 0 || !sharesDevice(demand) {
 		return 0, false
@@ -203,7 +205,8 @@ func (q *Queue) deviceCoTenants(m *Machine, demand *Job, joining bool) (int, boo
 		if j.ID == demand.ID || !batchOnTarget(j, m) || !batchReservesCapacity(j) {
 			continue
 		}
-		if !sharesDevice(j) || joining && q.comparePriority(j.Spec, demand.Spec) < 0 {
+		tier := q.comparePriority(j.Spec, demand.Spec)
+		if !sharesDevice(j) || joining && (tier < 0 || m.GPU == "xpu" && tier != 0) {
 			return 0, false
 		}
 		n++
@@ -220,11 +223,47 @@ func (q *Queue) deviceCoTenants(m *Machine, demand *Job, joining bool) (int, boo
 }
 
 func (q *Queue) batchSlotFree(m *Machine, demand *Job) bool {
+	if !q.xpuTiersSettled(m, demand, false) {
+		return false
+	}
 	if q.workerBatchIdle(m) {
 		return true
 	}
 	_, ok := q.deviceCoTenants(m, demand, true)
 	return ok && q.cardSettled(m) && !m.Gone && !m.Leaving && !q.unreported[m.ID]
+}
+
+// XPU admission covers both batch and engine custody. An engine demand may
+// reuse its own model, but cannot start beside other different-tier holders.
+func (q *Queue) xpuTiersSettled(m *Machine, demand *Job, engine bool) bool {
+	if m.GPU != "xpu" || demand.Spec.Needs.cpuOnly() {
+		return true
+	}
+	for _, j := range q.liveJobs() {
+		if !j.Spec.Needs.cpuOnly() && batchOnTarget(j, m) && batchReservesCapacity(j) && q.comparePriority(j.Spec, demand.Spec) != 0 {
+			return false
+		}
+	}
+	for _, r := range q.s.HostReleases {
+		if r.CPUOnly || !q.batchReleaseOnTarget(r, m) {
+			continue
+		}
+		if j := q.s.Jobs[r.Job]; j == nil || q.comparePriority(j.Spec, demand.Spec) != 0 {
+			return false
+		}
+	}
+	cards := []*Machine{m}
+	if len(m.groupMembers) > 0 {
+		cards = m.groupMembers
+	}
+	for _, card := range cards {
+		for _, s := range q.s.ModelSlots {
+			if slotOnTarget(s, card) && slotReservesMemory(s) && (!engine || s.Model != demand.Spec.Needs.Model) && q.comparePriority(q.slotSpec(s), demand.Spec) != 0 {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // A newcomer joins only running holders. A stopping holder or a finished one

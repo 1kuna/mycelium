@@ -67,6 +67,46 @@ func (q *Queue) applyPlacement(p *placementPlan, demand *Job) {
 	}
 }
 
+// Existing/loading engines need the same batch-tier release projection as a
+// cold load before a higher-tier call or pin can promote them on XPU.
+func (q *Queue) addXPUTierStops(p *placementPlan, demand *Job) bool {
+	m := p.machine
+	if m.GPU != "xpu" || demand.Spec.Needs.cpuOnly() {
+		return true
+	}
+	for _, r := range q.s.HostReleases {
+		if r.CPUOnly || !q.batchReleaseOnTarget(r, m) {
+			continue
+		}
+		current := q.s.Jobs[r.Job]
+		if current != nil && q.comparePriority(current.Spec, demand.Spec) == 0 {
+			continue
+		}
+		if current == nil || current.Machine != r.Machine || current.Session != r.Session || current.Attempt != r.Attempt || !batchReservesCapacity(current) {
+			return false // No live victim can release this retained custody.
+		}
+	}
+	for _, r := range q.liveJobs() {
+		if r.Spec.Needs.cpuOnly() || !batchOnTarget(r, m) || !batchReservesCapacity(r) || q.comparePriority(r.Spec, demand.Spec) == 0 {
+			continue
+		}
+		if !q.batchPreemptible(r, demand.Spec) {
+			return false
+		}
+		p.addJob(r)
+	}
+	for _, s := range q.s.ModelSlots {
+		if !slotOnTarget(s, m) || !slotReservesMemory(s) || s.Model == demand.Spec.Needs.Model || q.comparePriority(q.slotSpec(s), demand.Spec) == 0 {
+			continue
+		}
+		if !q.slotReclaimableFor(s, demand.Spec) {
+			return false
+		}
+		p.addSlot(s)
+	}
+	return true
+}
+
 // Calls reclaim only the required request slots, preserving the ready engine
 // and pin intent. The slot remains occupied until finishCall acknowledges it.
 func (q *Queue) callSlotPlan(m *Machine, c *ModelCall, s *ModelSlot, limit int) *placementPlan {
@@ -133,6 +173,9 @@ func (q *Queue) roomPlan(j *Job, m *Machine, batch bool) *placementPlan {
 			best = p
 		}
 	}
+	if best != nil && !q.addXPUTierStops(best, j) {
+		return nil
+	}
 	return best
 }
 func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool) *placementPlan {
@@ -178,7 +221,9 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool) 
 	// Only a single-card demand shares; a group keeps every card it takes.
 	shared := false
 	if batch {
-		_, shared = q.deviceCoTenants(m, j, true)
+		// XPU admission forbids mixed tiers; planning still preserves equal-tier
+		// co-tenants while requiring every lower tier's exact release below.
+		_, shared = q.deviceCoTenants(m, j, m.GPU != "xpu")
 	}
 	for _, card := range cards {
 		if !q.cardRoom(j, card, share, batch, releaseBatch, shared, p) {
@@ -318,21 +363,30 @@ func (q *Queue) cardRoom(j *Job, m *Machine, need float64, batch, releaseBatch, 
 		if !batchOnTarget(r, m) || !batchReservesCapacity(r) {
 			continue
 		}
+		isolateTier := m.GPU == "xpu" && !j.Spec.Needs.cpuOnly() && !r.Spec.Needs.cpuOnly() && q.comparePriority(r.Spec, j.Spec) != 0
 		if !q.batchPreemptible(r, j.Spec) {
-			if batch && !shared {
+			if batch && !shared || isolateTier {
 				return false
 			}
 			continue
 		}
-		if shared {
+		if shared && !isolateTier {
 			victims = append(victims, r)
-		} else if releaseBatch {
+		} else if releaseBatch || isolateTier {
 			p.addJob(r)
 			room += deviceShareGB(r)
 		}
 	}
 	var slots []*ModelSlot
 	for _, s := range q.s.ModelSlots {
+		if slotOnTarget(s, m) && slotReservesMemory(s) && m.GPU == "xpu" && !j.Spec.Needs.cpuOnly() && (batch || s.Model != j.Spec.Needs.Model) && q.comparePriority(q.slotSpec(s), j.Spec) != 0 {
+			if !q.slotReclaimableFor(s, j.Spec) {
+				return false
+			}
+			p.addSlot(s)
+			room += q.slotMemory(s)
+			continue
+		}
 		if !slotOnTarget(s, m) || !q.slotReclaimableFor(s, j.Spec) {
 			continue
 		}

@@ -196,8 +196,8 @@ func (q *Queue) retainRelease(j *Job) {
 	}
 	q.s.HostReleases[releaseKey(r)] = r
 }
-func (q *Queue) settleRelease(r Result) bool {
-	q.confirmCopyRelease(r)
+func (q *Queue) settleRelease(r Result, exact bool) bool {
+	q.confirmCopyRelease(r, exact)
 	key := releaseKey(HostRelease{Job: r.ID, Machine: r.Machine, Session: r.Session, Attempt: r.Attempt})
 	_, ok := q.s.HostReleases[key]
 	delete(q.s.HostReleases, key)
@@ -216,7 +216,7 @@ func (q *Queue) reconcileHostReleases(c Checkin) {
 			stopped = r.Session == c.Machine.Session && !q.backgroundPreparing(&c.Machine)
 		}
 		if fresh || stopped {
-			q.confirmCopyRelease(Result{Execution: Execution{ID: r.Job, Attempt: r.Attempt}, Machine: r.Machine, Session: r.Session})
+			q.confirmCopyRelease(Result{Execution: Execution{ID: r.Job, Attempt: r.Attempt}, Machine: r.Machine, Session: r.Session}, fresh)
 			delete(q.s.HostReleases, key)
 		}
 	}
