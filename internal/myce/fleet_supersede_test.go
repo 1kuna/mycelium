@@ -78,6 +78,12 @@ func TestFleetUpgradeRefusalNamesStoppedOperationAndSupersedes(t *testing.T) {
 	if err = client.Call(ctx, "POST", "/api/fleet/upgrade", FleetUpgradeRequest{WaitProductionIdle: true}, &status); err != nil || status.Operation == i.Operation || status.State != "running" {
 		t.Fatalf("new operation refused after supersession: %+v %v", status, err)
 	}
+	// The audit record and the new operation's start time survive a reopen.
+	server.Close()
+	q = reopenQueue(t, q, c)
+	if len(q.s.FleetSuperseded) != 1 || q.s.FleetSuperseded[0].Reason != record.Reason || q.s.FleetUpgrade == nil || q.s.FleetUpgrade.Operation != status.Operation || !q.s.FleetUpgrade.CreatedAt.Equal(c.Now()) {
+		t.Fatalf("supersession state lost on reopen: %+v %+v", q.s.FleetSuperseded, q.s.FleetUpgrade)
+	}
 }
 
 // #600: the worker re-posted a refused failure receipt every poll (~2,600 an
@@ -92,10 +98,16 @@ func TestFleetFailureReceiptSettlesOrBacksOff(t *testing.T) {
 		maxPost int
 	}{
 		{"queue stale 409", stale.ServeHTTP, 1},
-		{"pre-#594 queue 400", func(w http.ResponseWriter, _ *http.Request) {
+		{"typed 400 refusal", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(400)
+			_, _ = w.Write([]byte(`{"error":"request body is invalid","code":"request_invalid"}`))
+		}, 1},
+		// Untyped request_failed is an internal queue failure (for example a
+		// state commit error), so the receipt is retried with backoff.
+		{"untyped 400 request_failed", func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(400)
 			_, _ = w.Write([]byte(`{"error":"request failed","code":"request_failed"}`))
-		}, 1},
+		}, 20},
 		{"unavailable 503", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(503) }, 20},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

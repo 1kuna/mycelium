@@ -177,10 +177,12 @@ type fleetAckRetry struct {
 const fleetAckRetryBase, fleetAckRetryMax = 2 * time.Second, 5 * time.Minute
 
 // A 4xx other than authentication, timeout or rate limiting is a definitive
-// refusal: resending the same body cannot change the queue's answer.
+// refusal: resending the same body cannot change the queue's answer. The queue
+// types every fleet and decode refusal, so its untyped 400 request_failed means
+// an internal failure such as a state commit error, which a retry can clear.
 func fleetAckDefinitive(err error) bool {
 	var rejection *HTTPError
-	if !errors.As(err, &rejection) || rejection.Status < 400 || rejection.Status >= 500 {
+	if !errors.As(err, &rejection) || rejection.Status < 400 || rejection.Status >= 500 || rejection.Code == "request_failed" {
 		return false
 	}
 	return rejection.Status != 401 && rejection.Status != 403 && rejection.Status != 408 && rejection.Status != 429
