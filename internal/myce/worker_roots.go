@@ -141,8 +141,13 @@ func storageRootReason(j *Job, m *Machine) string {
 			needs = len(jobInputFiles(j)) > 0 || len(j.Spec.SharedInputs) > 0 || len(j.Spec.ModelSnapshots) > 0 || j.ResumeFiles != nil
 		case "environment-source":
 			needs = j.Spec.Environment.Key() != "" && !environmentReady(j, m)
+			for _, recipes := range j.SidecarEnvironmentRecipes {
+				if recipe, ok := recipes[m.GPU]; ok && !slices.Contains(m.Environments, recipe.Key) {
+					needs = true
+				}
+			}
 		case "environment":
-			needs = j.Spec.Environment.Key() != "" || len(j.EnvironmentRecipes) > 0 || j.Spec.Extension != "" || len(j.Extensions) > 0
+			needs = j.Spec.Environment.Key() != "" || len(j.EnvironmentRecipes) > 0 || len(j.SidecarEnvironmentRecipes) > 0 || j.Spec.Extension != "" || len(j.Extensions) > 0
 		}
 		if needs {
 			return fmt.Sprintf("%s: %s unavailable", root.Reason, root.Root)

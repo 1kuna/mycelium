@@ -383,3 +383,49 @@ func TestWorkerRootsBatchModelUsesAssignedEnvironmentKey(t *testing.T) {
 		t.Fatal("missing environment cache admitted")
 	}
 }
+
+func TestWorkerRootsSidecarOnlyEnvironment(t *testing.T) {
+	q, _ := fixture(t)
+	recipe := binaryRecipe(t, "fake")
+	if err := q.ConfigureEnvironments(EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"helper-runtime": {"fake": recipe}}}); err != nil {
+		t.Fatal(err)
+	}
+	s := spec("production")
+	s.Resumable = false
+	s.Needs.HostMemoryGB = 2
+	s.Run = RunSpec{}
+	s.Execution = &ExecutionSpec{Main: ExecutionMember{Command: []string{"true"}}, Sidecars: []NativeSidecar{{Name: "helper", Command: []string{"true"}, Environment: "helper-runtime"}}}
+	j := *submit(t, q, s)
+	if len(j.EnvironmentRecipes) != 0 || j.SidecarEnvironmentRecipes["helper"]["fake"].Key != recipe.Key {
+		t.Fatal("expected only a frozen helper environment")
+	}
+	m := machine("worker", "fake")
+	w := Worker{Machine: m, HostMemorySource: func(context.Context) (float64, error) { return 16, nil }}
+	for _, root := range []string{"environment", "environment-source"} {
+		m.UnavailableRoots = []UnavailableRoot{{Root: root, Reason: "configured NAS mount missing"}}
+		w.Machine = m
+		if reason := q.storageRootReason(&j, &m); !strings.Contains(reason, root+" unavailable") {
+			t.Errorf("queue ignored helper %s dependency: %s", root, reason)
+		}
+		if err := localAttemptAdmission(w, nil, j, nil); err == nil || !strings.Contains(err.Error(), root+" unavailable") {
+			t.Errorf("worker ignored helper %s dependency: %v", root, err)
+		}
+		m.Environments = []string{recipe.Key}
+		w.Machine = m
+		if reason := q.storageRootReason(&j, &m); (reason == "") != (root == "environment-source") {
+			t.Errorf("prepared helper %s dependency: %s", root, reason)
+		}
+		if err := localAttemptAdmission(w, nil, j, nil); (err == nil) != (root == "environment-source") {
+			t.Errorf("prepared helper worker %s dependency: %v", root, err)
+		}
+		m.Environments = nil
+	}
+	m.UnavailableRoots = nil
+	w.Machine = m
+	if reason := q.storageRootReason(&j, &m); reason != "" {
+		t.Fatal("helper roots recovery ignored", reason)
+	}
+	if err := localAttemptAdmission(w, nil, j, nil); err != nil {
+		t.Fatal("recovered helper refused locally", err)
+	}
+}
