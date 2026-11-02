@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 	"testing"
@@ -111,6 +112,98 @@ func TestSharedDeviceProductionStopsOneCoTenant(t *testing.T) {
 		t.Fatal("production did not start beside the remaining co-tenant after exact release", got, job(t, q, demand.ID).Reason)
 	}
 	requireState(t, q, b.ID, "running")
+}
+
+func sharedDiscreteMachine(platform string) Machine {
+	m := m3Machine()
+	m.Devices = m.Devices[:1]
+	m.GPU, m.Devices[0].Platform = platform, platform
+	m.CapabilityProfile.Accelerators[0].Type = platform
+	return m
+}
+
+func TestSharedDeviceXPUTierIsolation(t *testing.T) {
+	q, clock := fixture(t)
+	m := sharedDiscreteMachine("xpu")
+	var tenants []*Job
+	for _, gb := range []float64{3, 2} {
+		queued := submit(t, q, sharedSpec("experiment", gb))
+		run := assignedJob(machineCheck(t, q, m, tenants...))
+		if run == nil || run.ID != queued.ID {
+			t.Fatal("experiment did not pack on XPU", run, job(t, q, queued.ID).Reason)
+		}
+		if err := q.Started(result(run, false)); err != nil {
+			t.Fatal(err)
+		}
+		tenants = append(tenants, run)
+	}
+	// All three would fit, but either lower-tier teardown can reset the engine.
+	demand := submit(t, q, sharedSpec("production", 1))
+	reply := machineCheck(t, q, m, tenants...)
+	if got := assignedJob(reply); got != nil {
+		t.Fatal("production joined lower-tier XPU tenants", got.ID)
+	}
+	for _, run := range tenants {
+		requireState(t, q, run.ID, "stopping")
+		if !slices.ContainsFunc(reply.Attempts, func(a AttemptDirective) bool {
+			return a.ID == run.ID && a.Attempt == run.Attempt && a.Stop && a.PriorityStop != nil
+		}) {
+			t.Fatal("missing exact tenant stop directive", run.ID, reply.Attempts)
+		}
+	}
+	clock.Advance(q.gpuStopGrace() + time.Second)
+	if got := assignedJob(machineCheck(t, q, m, tenants...)); got != nil {
+		t.Fatal("elapsed stop grace admitted production without release", got.ID)
+	}
+	stale := result(tenants[0], false)
+	stale.Attempt++
+	stale.Interrupted = true
+	if err := q.Complete(stale); !errors.Is(err, ErrStale) {
+		t.Fatal("inexact tenant release was accepted", err)
+	}
+	finishInterrupted(t, q, tenants[0])
+	if got := assignedJob(machineCheck(t, q, m, tenants[1])); got != nil {
+		t.Fatal("production started before every lower-tier tenant released", got.ID)
+	}
+	finishInterrupted(t, q, tenants[1])
+	got := assignedJob(machineCheck(t, q, m))
+	if got == nil || got.ID != demand.ID || !slices.Equal(got.AllocatedDevices, []string{"0"}) {
+		t.Fatal("production did not start after exact XPU releases", got, job(t, q, demand.ID).Reason)
+	}
+	if err := q.Started(result(got, false)); err != nil {
+		t.Fatal("production start refused after release", err)
+	}
+}
+
+func TestSharedDeviceCUDAHigherTierPacks(t *testing.T) {
+	testSharedDeviceTierPacks(t, "cuda", "production")
+}
+
+func TestSharedDeviceXPUEqualTierPacks(t *testing.T) {
+	testSharedDeviceTierPacks(t, "xpu", "experiment")
+}
+
+func testSharedDeviceTierPacks(t *testing.T, platform, priority string) {
+	t.Helper()
+	q, _ := fixture(t)
+	m := sharedDiscreteMachine(platform)
+	first := submit(t, q, sharedSpec("experiment", 3))
+	run := assignedJob(machineCheck(t, q, m))
+	if run == nil || run.ID != first.ID {
+		t.Fatal("experiment not assigned", run)
+	}
+	if err := q.Started(result(run, false)); err != nil {
+		t.Fatal(err)
+	}
+	newcomer := submit(t, q, sharedSpec(priority, 2))
+	got := assignedJob(machineCheck(t, q, m, run))
+	if got == nil || got.ID != newcomer.ID || !slices.Equal(got.AllocatedDevices, run.AllocatedDevices) {
+		t.Fatal("fitting newcomer did not pack", got, job(t, q, newcomer.ID).Reason)
+	}
+	requireState(t, q, run.ID, "running")
+	if priorityStop(job(t, q, run.ID)) != nil {
+		t.Fatal("packing stopped the existing tenant")
+	}
 }
 
 func TestSharedDeviceModelServerKeepsDeviceExclusive(t *testing.T) {

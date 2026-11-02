@@ -193,7 +193,9 @@ func sharesDevice(j *Job) bool {
 // deviceCoTenants counts the batch attempts on card m that demand may share it
 // with. Every holder and every retained release there must share; memory
 // charges, not this check, decide fit. A joining demand also never slows a
-// higher tier's attempt; recovery re-adopts custody it already held.
+// higher tier's attempt. XPU newcomers require equal tiers because lower-tier
+// teardown can reset the card's engines (#652). Recovery re-adopts custody it
+// already held.
 func (q *Queue) deviceCoTenants(m *Machine, demand *Job, joining bool) (int, bool) {
 	if m.Devices == nil || m.GPU == "cpu" || len(m.groupMembers) > 0 || !sharesDevice(demand) {
 		return 0, false
@@ -203,7 +205,8 @@ func (q *Queue) deviceCoTenants(m *Machine, demand *Job, joining bool) (int, boo
 		if j.ID == demand.ID || !batchOnTarget(j, m) || !batchReservesCapacity(j) {
 			continue
 		}
-		if !sharesDevice(j) || joining && q.comparePriority(j.Spec, demand.Spec) < 0 {
+		tier := q.comparePriority(j.Spec, demand.Spec)
+		if !sharesDevice(j) || joining && (tier < 0 || m.GPU == "xpu" && tier != 0) {
 			return 0, false
 		}
 		n++

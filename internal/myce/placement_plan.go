@@ -178,7 +178,9 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool) 
 	// Only a single-card demand shares; a group keeps every card it takes.
 	shared := false
 	if batch {
-		_, shared = q.deviceCoTenants(m, j, true)
+		// XPU admission forbids mixed tiers; planning still preserves equal-tier
+		// co-tenants while requiring every lower tier's exact release below.
+		_, shared = q.deviceCoTenants(m, j, m.GPU != "xpu")
 	}
 	for _, card := range cards {
 		if !q.cardRoom(j, card, share, batch, releaseBatch, shared, p) {
@@ -318,13 +320,14 @@ func (q *Queue) cardRoom(j *Job, m *Machine, need float64, batch, releaseBatch, 
 		if !batchOnTarget(r, m) || !batchReservesCapacity(r) {
 			continue
 		}
+		isolateTier := batch && m.GPU == "xpu" && q.comparePriority(r.Spec, j.Spec) != 0
 		if !q.batchPreemptible(r, j.Spec) {
-			if batch && !shared {
+			if batch && (!shared || isolateTier) {
 				return false
 			}
 			continue
 		}
-		if shared {
+		if shared && !isolateTier {
 			victims = append(victims, r)
 		} else if releaseBatch {
 			p.addJob(r)
