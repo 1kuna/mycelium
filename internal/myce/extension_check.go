@@ -247,7 +247,7 @@ func checkExtension(ctx context.Context, root string, e Extension, platform, dev
 			}
 		}
 		if final != nil && terminal(final.State) {
-			job, unstarted[i] = final, final.StartedAt == nil
+			job, unstarted[i] = final, !extensionCheckStarted(cleanupCtx, c, final)
 		}
 		cancel()
 		if job != nil && job.StartedAt == nil && strings.HasPrefix(job.Reason, "never started: ") {
@@ -334,6 +334,37 @@ func waitExtensionCheckRelease(ctx context.Context, c Client, key string) (Cance
 			return ack, ctx.Err()
 		case <-tick.C:
 		}
+	}
+}
+
+// extensionCheckStarted reports whether any attempt of a terminal check was
+// authorized to start. A requeue clears StartedAt, so a check lost three times
+// ends failed with none; the ledger's start records decide. An unreadable
+// ledger counts as started.
+func extensionCheckStarted(ctx context.Context, c Client, j *Job) bool {
+	if j.StartedAt != nil {
+		return true
+	}
+	if j.Starts == 0 && j.Attempt == 0 {
+		return false // never assigned, so never authorized to start
+	}
+	for after, highWater := 0, -1; ; {
+		page, err := c.JobLedger(ctx, j.ID, after, highWater, 256)
+		if err != nil {
+			return true
+		}
+		for _, e := range page.Entries {
+			if e.Kind == "started" {
+				return true
+			}
+		}
+		if !page.HasMore {
+			return false
+		}
+		if page.Next <= after {
+			return true
+		}
+		after, highWater = page.Next, page.HighWater
 	}
 }
 

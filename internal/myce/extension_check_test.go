@@ -606,6 +606,12 @@ func TestExtensionCheckExecutionTimeout(t *testing.T) {
 					return response(ack)
 				case strings.HasSuffix(req.URL.Path, "/logs"):
 					return response([]LogChunk{})
+				case req.URL.Path == "/api/jobs/"+submitted.ID+"/ledger":
+					page, err := q.JobLedger(submitted.ID, 0, -1, 256)
+					if err != nil {
+						t.Fatal(err)
+					}
+					return response(page)
 				case req.URL.Path == "/api/jobs/"+submitted.ID:
 					if strings.HasPrefix(mode, "never admitted") {
 						clock.Advance(time.Hour)

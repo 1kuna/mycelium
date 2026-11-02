@@ -16,7 +16,7 @@ import (
 // cancelled by its caller while queued keeps the earlier qualified report,
 // while a check that runs and fails still revokes it.
 func TestExtensionRecheckWithoutVerdictKeepsQualification(t *testing.T) {
-	for _, mode := range []string{"cancelled while queued", "never admitted", "runs and fails"} {
+	for _, mode := range []string{"cancelled while queued", "never admitted", "runs and fails", "lost after starting"} {
 		t.Run(mode, func(t *testing.T) {
 			q, clock := fixture(t)
 			e := compositionExtension(t, false)
@@ -76,6 +76,12 @@ func TestExtensionRecheckWithoutVerdictKeepsQualification(t *testing.T) {
 					return response(ack)
 				case strings.HasSuffix(req.URL.Path, "/logs"):
 					return response([]LogChunk{})
+				case req.URL.Path == "/api/jobs/"+submitted.ID+"/ledger":
+					page, err := q.JobLedger(submitted.ID, 0, -1, 256)
+					if err != nil {
+						t.Fatal(err)
+					}
+					return response(page)
 				case req.URL.Path == "/api/jobs/"+submitted.ID:
 					if got := job(t, q, submitted.ID); !terminal(got.State) {
 						switch mode {
@@ -96,6 +102,24 @@ func TestExtensionRecheckWithoutVerdictKeepsQualification(t *testing.T) {
 								t.Fatal(err)
 							}
 							finish(t, q, running, false)
+						case "lost after starting":
+							// Each requeue clears StartedAt, so the failed
+							// record alone no longer shows the check ran.
+							m.HostAvailableMemoryGB = 32
+							for range 3 {
+								running := check(t, q, m, nil).Job
+								if running == nil {
+									t.Fatalf("check not assigned: %+v", job(t, q, submitted.ID))
+								}
+								if err := q.Started(result(running, true)); err != nil {
+									t.Fatal(err)
+								}
+								lost := result(running, false)
+								lost.Interrupted = true
+								if err := q.Complete(lost); err != nil {
+									t.Fatal(err)
+								}
+							}
 						}
 					}
 					reply, err := q.jobSnapshot(submitted.ID)
@@ -116,6 +140,12 @@ func TestExtensionRecheckWithoutVerdictKeepsQualification(t *testing.T) {
 			saved := readExtensionReports(root, e, "fake")
 			if len(saved) != 1 {
 				t.Fatalf("reports: %+v", saved)
+			}
+			if mode == "lost after starting" {
+				if got.State != "failed" || saved[0].Qualified || !strings.HasPrefix(saved[0].Reason, "check failed") {
+					t.Fatalf("check that started and failed kept qualification: job=%+v report=%+v", got, saved[0])
+				}
+				return
 			}
 			if mode == "runs and fails" {
 				if got.StartedAt == nil || saved[0].Qualified || !strings.HasPrefix(saved[0].Reason, "check failed") {
