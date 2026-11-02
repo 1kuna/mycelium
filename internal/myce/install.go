@@ -271,7 +271,10 @@ func (c ServiceConfig) ServiceText() string {
 	if c.Detection.OS == "linux" {
 		stopSettings := ""
 		if c.Role == "worker" {
-			stopSettings = "EnvironmentFile=" + unitConditionPath(c.GPUEnvironmentFile()) + "\nDelegate=memory cpu\nKillMode=control-group\nSendSIGKILL=yes\nTimeoutStopSec=45s\n"
+			// TERM must go through the worker's recorded stop path. Direct TERM
+			// to payloads races their exit observation and looks like command failure.
+			// mixed retains the bounded final KILL of every delegated descendant.
+			stopSettings = "EnvironmentFile=" + unitConditionPath(c.GPUEnvironmentFile()) + "\nDelegate=memory cpu\nKillMode=mixed\nSendSIGKILL=yes\nTimeoutStopSec=45s\n"
 		}
 		settings := ""
 		if c.IOWeight != 0 {
