@@ -1,6 +1,11 @@
 package myce
 
-import "sort"
+import (
+	"cmp"
+	"slices"
+	"sort"
+	"strings"
+)
 
 // A placement is a read-only release projection. Only the cheapest compatible
 // placement is applied, after all workers have been considered. Pending releases
@@ -170,8 +175,13 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool) 
 	if len(m.groupMembers) > 0 {
 		cards, share = m.groupMembers, need/float64(len(m.groupMembers))
 	}
+	// Only a single-card demand shares; a group keeps every card it takes.
+	shared := false
+	if batch {
+		_, shared = q.deviceCoTenants(m, j, true)
+	}
 	for _, card := range cards {
-		if !q.cardRoom(j, card, share, batch, releaseBatch, p) {
+		if !q.cardRoom(j, card, share, batch, releaseBatch, shared, p) {
 			return nil
 		}
 	}
@@ -248,23 +258,75 @@ func (q *Queue) unifiedOveruseGB(j *Job) float64 {
 }
 func (q *Queue) slotMemory(s *ModelSlot) float64 { model, _ := q.model(s.Model); return model.MemoryGB }
 
+// fewestBatchVictims plans the fewest preemptible co-tenants whose release
+// frees need, preferring ones already stopping, then resumable, lower-tier and
+// smaller ones. If none suffice, all are planned and engines cover the rest.
+func (q *Queue) fewestBatchVictims(victims []*Job, room, need float64, p *placementPlan) float64 {
+	rank := func(b bool) int {
+		if b {
+			return 1
+		}
+		return 0
+	}
+	slices.SortFunc(victims, func(a, b *Job) int {
+		return cmp.Or(rank(a.State != "stopping")-rank(b.State != "stopping"), rank(!a.Spec.Resumable)-rank(!b.Spec.Resumable),
+			q.comparePriority(b.Spec, a.Spec), cmp.Compare(deviceShareGB(a), deviceShareGB(b)), strings.Compare(a.ID, b.ID))
+	})
+	largest := func(skip, n int) float64 {
+		shares := []float64{}
+		for i, v := range victims {
+			if i != skip {
+				shares = append(shares, deviceShareGB(v))
+			}
+		}
+		slices.SortFunc(shares, func(a, b float64) int { return cmp.Compare(b, a) })
+		total := 0.0
+		for _, s := range shares[:min(n, len(shares))] {
+			total += s
+		}
+		return total
+	}
+	for room < need && len(victims) > 0 {
+		count := 1
+		for count < len(victims) && room+largest(-1, count) < need {
+			count++
+		}
+		pick := 0
+		for i, v := range victims {
+			if room+deviceShareGB(v)+largest(i, count-1) >= need {
+				pick = i
+				break
+			}
+		}
+		p.addJob(victims[pick])
+		room += deviceShareGB(victims[pick])
+		victims = slices.Delete(victims, pick, pick+1)
+	}
+	return room
+}
+
 // cardRoom adds the batch and engine releases one card needs to p.
-func (q *Queue) cardRoom(j *Job, m *Machine, need float64, batch, releaseBatch bool, p *placementPlan) bool {
+func (q *Queue) cardRoom(j *Job, m *Machine, need float64, batch, releaseBatch, shared bool, p *placementPlan) bool {
 	room := m.FreeMemoryGB - m.modelReservationDebtGB
 	if r, ok := q.s.BatchReleases[batchReleaseKey(m)]; ok && r.Session == m.Session && q.clock.Now().Before(r.Until) {
 		room += r.MemoryGB
 	}
+	// Co-tenants already hold their charge in room. Only exclusive work needs
+	// every holder released; sharing stops the fewest that free enough.
+	var victims []*Job
 	for _, r := range q.liveJobs() {
 		if !batchOnTarget(r, m) || !batchReservesCapacity(r) {
 			continue
 		}
 		if !q.batchPreemptible(r, j.Spec) {
-			if batch {
+			if batch && !shared {
 				return false
 			}
 			continue
 		}
-		if releaseBatch {
+		if shared {
+			victims = append(victims, r)
+		} else if releaseBatch {
 			p.addJob(r)
 			room += deviceShareGB(r)
 		}
@@ -280,6 +342,7 @@ func (q *Queue) cardRoom(j *Job, m *Machine, need float64, batch, releaseBatch b
 			slots = append(slots, s)
 		}
 	}
+	room = q.fewestBatchVictims(victims, room, need, p)
 	sort.Slice(slots, func(a, b int) bool {
 		if q.slotMemory(slots[a]) != q.slotMemory(slots[b]) {
 			return q.slotMemory(slots[a]) > q.slotMemory(slots[b])

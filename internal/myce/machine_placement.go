@@ -35,6 +35,7 @@ func (q *Queue) machineTargets(m *Machine) []*Machine {
 		for _, j := range q.liveJobs() {
 			if batchReservesCapacity(j) && batchOnTarget(j, &target) {
 				reserved += deviceShareGB(j)
+				target.batchTenants++
 			}
 		}
 		for _, r := range q.s.HostReleases {
@@ -113,11 +114,12 @@ func groupView(members []*Machine) *Machine {
 	g := *members[0]
 	g.group = make([]string, len(members))
 	free, total := math.Inf(1), math.Inf(1)
-	g.modelReservationDebtGB = 0
+	g.modelReservationDebtGB, g.batchTenants = 0, 0
 	for i, m := range members {
 		g.group[i] = m.Device
 		free, total = min(free, m.FreeMemoryGB), min(total, m.TotalMemoryGB)
 		g.modelReservationDebtGB += m.modelReservationDebtGB
+		g.batchTenants += m.batchTenants
 		if g.MemoryError == "" {
 			g.MemoryError = m.MemoryError
 		}
@@ -164,6 +166,69 @@ func batchOnTarget(j *Job, m *Machine) bool {
 	// A bounded legacy copy has no component evidence. Keep its original
 	// machine-wide GPU exclusion until exact cleanup, without inventing a card.
 	return !j.Spec.Needs.cpuOnly() && m.GPU != "cpu" && (len(j.AllocatedDevices) == 0 || slices.ContainsFunc(targetDevices(m), func(id string) bool { return slices.Contains(j.AllocatedDevices, id) }))
+}
+
+// A single-card batch attempt with a declared or learned memory vector may share
+// its card when memory fits (MY-30/31, #538). Model-server, Docker,
+// extension-check, fan-out, exploratory and multi-card work keeps the card, as
+// does a hint naming no device memory: its device figure is only a default.
+func sharesDevice(j *Job) bool {
+	n, e := j.Spec.Needs, j.MemoryEnvelope
+	unstated := e != nil && (e.Basis == "exploratory" || e.Basis == "hint" && (j.MemoryFallback == nil || j.MemoryFallback.MemoryGB <= 0))
+	return !n.cpuOnly() && n.MemoryGB > 0 && n.Model == "" && !j.Spec.Run.Docker && j.Spec.ExtensionCheck == nil && j.Spec.FanOut == nil && len(j.AllocatedDevices) <= 1 && !unstated
+}
+
+// deviceCoTenants counts the batch attempts on card m that demand may share it
+// with. Every holder and every retained release there must share; memory
+// charges, not this check, decide fit. A joining demand also never slows a
+// higher tier's attempt; recovery re-adopts custody it already held.
+func (q *Queue) deviceCoTenants(m *Machine, demand *Job, joining bool) (int, bool) {
+	if m.Devices == nil || m.GPU == "cpu" || len(m.groupMembers) > 0 || !sharesDevice(demand) {
+		return 0, false
+	}
+	n := 0
+	for _, j := range q.liveJobs() {
+		if j.ID == demand.ID || !batchOnTarget(j, m) || !batchReservesCapacity(j) {
+			continue
+		}
+		if !sharesDevice(j) || joining && q.comparePriority(j.Spec, demand.Spec) < 0 {
+			return 0, false
+		}
+		n++
+	}
+	for _, r := range q.s.HostReleases {
+		if !q.batchReleaseOnTarget(r, m) {
+			continue
+		}
+		if j := q.s.Jobs[r.Job]; j == nil || r.Device == "" || len(r.Devices) > 1 || r.Docker || !sharesDevice(j) {
+			return 0, false
+		}
+	}
+	return n, true
+}
+
+func (q *Queue) batchSlotFree(m *Machine, demand *Job) bool {
+	if q.workerBatchIdle(m) {
+		return true
+	}
+	_, ok := q.deviceCoTenants(m, demand, true)
+	return ok && q.cardSettled(m) && !m.Gone && !m.Leaving && !q.unreported[m.ID]
+}
+
+// A newcomer joins only running holders. A stopping holder or a finished one
+// awaiting exact release keeps the card fenced until that release (custody).
+func (q *Queue) cardSettled(m *Machine) bool {
+	for _, j := range q.liveJobs() {
+		if batchOnTarget(j, m) && batchReservesCapacity(j) && j.State != "running" {
+			return false
+		}
+	}
+	for _, r := range q.s.HostReleases {
+		if j := q.s.Jobs[r.Job]; q.batchReleaseOnTarget(r, m) && (j == nil || j.Machine != r.Machine || j.Session != r.Session || j.Attempt != r.Attempt || j.State != "running") {
+			return false
+		}
+	}
+	return true
 }
 
 // Retained custody owns the command slot even after a job becomes terminal or
@@ -275,11 +340,8 @@ func (q *Queue) checkinMachineAttempts(m *Machine, reports []AttemptReport, prog
 	var target *Machine
 	scan := q.placementScan()
 	for _, candidate := range q.placementTargets(m) {
-		if !q.workerBatchIdle(candidate) {
-			continue
-		}
 		j := q.plannedPick(candidate, scan)
-		if j != nil && (best == nil || q.candidates(candidate, scan).before(j, best)) {
+		if j != nil && q.batchSlotFree(candidate, j) && (best == nil || q.candidates(candidate, scan).before(j, best)) {
 			best, target = j, candidate
 		}
 	}
@@ -365,7 +427,9 @@ func (q *Queue) machineRecoveryFits(m *Machine, j *Job, copy Copy) bool {
 	for _, target := range targets {
 		if j.Spec.Needs.cpuOnly() && target.GPU == "cpu" || len(copy.AllocatedDevices) > 0 && target.GPU != "cpu" && slices.Equal(targetDevices(target), copy.AllocatedDevices) {
 			own := HostRelease{Job: j.ID, Machine: m.ID, Session: copy.Session, Attempt: copy.Attempt}
-			return q.workerBatchIdleExcept(target, &own) && target.CPUCapacityReason == "" && target.CPUInUseCores <= target.EffectiveCPUCores && target.hostReservationDebtGB == 0 && target.modelReservationDebtGB == 0 && target.MemoryError == "" && deviceAllowed(j, target)
+			_, shared := q.deviceCoTenants(target, j, false)
+			shared = shared && !target.Gone && !target.Leaving && !q.unreported[target.ID]
+			return (q.workerBatchIdleExcept(target, &own) || shared) && target.CPUCapacityReason == "" && target.CPUInUseCores <= target.EffectiveCPUCores && target.hostReservationDebtGB == 0 && target.modelReservationDebtGB == 0 && target.MemoryError == "" && deviceAllowed(j, target)
 		}
 	}
 	return false

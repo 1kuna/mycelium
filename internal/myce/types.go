@@ -585,6 +585,7 @@ type Machine struct {
 	group        []string
 	groupMembers []*Machine // Per-card views with their own reservations.
 	groupFloorGB float64    // Work this size fits on fewer cards; never spread it.
+	batchTenants int        // Batch attempts holding this card view (#538).
 }
 type Execution struct {
 	Progress int64  `json:"progress,omitempty"`

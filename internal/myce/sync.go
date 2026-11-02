@@ -209,7 +209,7 @@ func (q *Queue) loadSeconds(model string, m *Machine) float64 {
 	return float64(remaining) / speed
 }
 func (q *Queue) workerIdle(m *Machine, demand *Job) bool {
-	if !q.workerBatchIdle(m) || q.untrackedPreparations(m) > 0 {
+	if !q.batchSlotFree(m, demand) || q.untrackedPreparations(m) > 0 {
 		return false
 	}
 	for _, l := range q.s.PreparationPlans {
@@ -282,6 +282,9 @@ func (q *Queue) placementBetterWithTie(j *Job, a, b *Machine, allowTie bool, sca
 	}
 	if j.Spec.Needs.cpuOnly() && (a.GPU == "cpu") != (b.GPU == "cpu") {
 		return a.GPU == "cpu"
+	}
+	if a.batchTenants != b.batchTenants {
+		return a.batchTenants < b.batchTenants // An idle card beats sharing a busy one (#538).
 	}
 	aa, bb := affinity(j, a), affinity(j, b)
 	if aa != bb {

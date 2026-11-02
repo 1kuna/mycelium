@@ -566,7 +566,7 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport)
 		need := localJobHostNeed(w, j)
 		usedRAM += need
 		growth += remainingAllocationGrowth(allocationMachine(&w.Machine, j.AllocatedDevices), j.Spec.Needs.MemoryGB, need, w.hostMemorySamples[jobKey(j)], w.Clock.Now())
-		if !next.Spec.Needs.cpuOnly() && slices.ContainsFunc(attemptCards(next, w.Machine), func(id string) bool { return slices.Contains(j.AllocatedDevices, id) }) {
+		if !next.Spec.Needs.cpuOnly() && slices.ContainsFunc(attemptCards(next, w.Machine), func(id string) bool { return slices.Contains(j.AllocatedDevices, id) }) && !(sharesDevice(&next) && sharesDevice(&j)) {
 			return refuseAdmission("local_device_reservation", "slots", 1, 0, false)
 		}
 	}
@@ -592,6 +592,11 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport)
 			continue
 		}
 		usedGPU := deviceShareGB(&next)
+		for _, j := range jobs {
+			if !j.Spec.Needs.cpuOnly() && slices.Contains(j.AllocatedDevices, id) {
+				usedGPU += deviceShareGB(&j) // A co-tenant sharing this card (#538).
+			}
+		}
 		for _, r := range models {
 			if r.State == "ready" || r.State == "draining" || r.State == "loading" {
 				for _, m := range w.ModelConfig.Models {

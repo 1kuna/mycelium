@@ -543,7 +543,8 @@ func TestM3QueueRestartRetainsMissingDeviceCustody(t *testing.T) {
 	}
 	q.checkpointProbe = func() bool { return true }
 	q.nasAvailable = true
-	third := submit(t, q, m3Spec("experiment", "0", 2, 1))
+	// Only the retained 2 GiB charge keeps this 7 GiB job off the 8 GiB card (#538).
+	third := submit(t, q, m3Spec("experiment", "0", 7, 1))
 	r := machineCheck(t, q, m) // Missing reports redeliver exact old assignments.
 	seen := map[string]bool{}
 	for _, d := range r.Attempts {
