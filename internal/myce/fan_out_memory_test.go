@@ -154,6 +154,9 @@ func TestFanOutAutoMemorySerialQualifiedDevice(t *testing.T) {
 			if run.Machine != m.ID || !slices.Equal(run.AllocatedDevices, []string{"1"}) || run.Batch == nil || run.Batch.Run || run.Batch.Concurrency != 1 {
 				t.Fatalf("wrong serial placement: %+v", run)
 			}
+			if run.MemoryEnvelope == nil {
+				t.Fatalf("child lost its memory envelope: %+v", run)
+			}
 			// Assignment adds the learned comparison (#585); sizing is unchanged.
 			if l := run.MemoryEnvelope.Learned; learned && (l == nil || l.DeviceGB == nil || *l.DeviceGB != want.Spec.Needs.MemoryGB || l.HostGB != want.Spec.Needs.HostMemoryGB) {
 				t.Fatalf("learned comparison differs from the learned sizing: %+v", l)
