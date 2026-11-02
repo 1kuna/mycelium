@@ -277,12 +277,16 @@ func TestSharedDeviceXPUPinnedEngineRetryWaitsForTierRelease(t *testing.T) {
 	if run == nil || run.ID != queued.ID {
 		t.Fatal("no experiment co-tenant", run, job(t, q, queued.ID).Reason)
 	}
-	addModelCall(t, q, "experiment")
+	call := addModelCall(t, q, "experiment")
 	slot := q.s.ModelSlots[slotKey(m.ID, "test", "0")]
 	if slot == nil {
 		t.Fatal("no experiment engine")
 	}
 	if err := q.Pin(ModelPin{Project: "test", Model: "test", Machine: m.ID}); err != nil {
+		t.Fatal(err)
+	}
+	// Only the production pin should demand a retry, not the experiment call.
+	if err := q.finishCall(call.ID); err != nil {
 		t.Fatal(err)
 	}
 	// Reproduce an already-pinned failed engine with a retained batch teardown.
@@ -299,7 +303,7 @@ func TestSharedDeviceXPUPinnedEngineRetryWaitsForTierRelease(t *testing.T) {
 	}
 	requireState(t, q, run.ID, "stopping")
 	if slot.State != "failed" {
-		t.Fatal("pinned retry loaded before exact batch release", slot)
+		t.Fatal("pinned retry loaded before exact batch release", slot.State, slot.Priority)
 	}
 	finishInterrupted(t, q, run)
 	if slot.State != "loading" {
