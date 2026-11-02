@@ -18,7 +18,7 @@ func (q *Queue) storagePressureReason(j *Job, status FileStoreStatus, need uint6
 		return "file_store_capacity: capacity observation unavailable; retry after storage verification" + wait
 	}
 	var holders []string
-	q.collectFileReferences(false, nil, func(_ string, ref FileKeepingReference) {
+	q.collectFileReferences(false, nil, func(_ FileRef, ref FileKeepingReference) {
 		holder := ref.Kind
 		if ref.JobID != "" {
 			holder += "/" + ref.JobID

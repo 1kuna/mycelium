@@ -823,7 +823,7 @@ identity; the queue cannot distinguish their production bytes from experimental
 bytes. The compatibility exception favors production admission and also permits
 unidentified experiments/imports to consume protected capacity. A configured
 reserve therefore does not guarantee isolation from those legacy writers.
-Input-client identity is follow-up work under #464; quotas remain a separate PR.
+Input-client identity is follow-up work under #464; per-project quotas are below.
 
 New workers send `X-Myce-File-Attempt` containing the job ID, attempt, machine and
 session on native/async result and checkpoint uploads. The authenticated queue
@@ -849,6 +849,51 @@ admissions crossing the protected floor **since queue start**. It counts declare
 allocation, including incomplete uploads, not bytes transferred or current usage.
 Preflight, resumable replay and deduplicated reuse do not increment it. It resets
 on queue restart and decreases neither on completion nor on ordinary expiry.
+
+### Per-project file-store quotas (#464)
+
+`file_store.projects` in `myce status` lists each project holding store bytes or
+configured with a limit. `retained_bytes` counts digests protected by the
+project's unexpired jobs, keyed answers, checkpoints and pending outputs, each
+digest once per project; a digest shared by two projects counts toward both but
+once in `used_bytes`. `added_bytes_24h` counts digests first referenced by the
+project in the last 24 hours on the queue clock: inputs at submission, results
+at completion. Releasing or expiring files lowers `retained_bytes` at once but
+does not refund `added_bytes_24h`. `reserved_output_bytes` is the project's share
+of declared async output commitments. Sizes come from job manifests, so the walk
+needs no store I/O.
+
+Two optional project policy fields limit non-production admission; zero or
+absent means no limit, which is the default:
+
+```yaml
+projects:
+  example:
+    weight: 1
+    max_retained_file_bytes: 21474836480   # 20 GiB held at once
+    max_added_file_bytes_24h: 2147483648   # 2 GiB added per rolling 24 h
+```
+
+Set them through `myce policy set` like other project settings. A policy PUT
+without `?file_store_limits=1` (an older CLI, which cannot carry these fields)
+keeps a project's existing limit wherever it sends zero; current CLIs send the
+marker, so removing a limit from the file clears it. A non-production
+submission whose new inputs plus declared `disk.output_bytes` (and the project's
+other declared async outputs) would exceed either limit is refused with
+`project_file_store_quota` and a reason naming the limit, the cleanup command
+and the advice to keep large outputs in project storage. Input preflight and
+upload creation that name the project (`X-Myce-Project`, as the profile CLI
+does) return the same refusal before any bytes upload. Like the reserve, that
+name is a shared-token hint: an upload without one is not checked, and its
+submission is still refused. Accepted completions are never
+refused or dropped: a result that overshoots stays, `refusal` appears on the
+project's status entry, and the project's next non-production submissions are
+refused until a release or retention lowers retained usage, or old additions
+leave the 24-hour window. Production submissions are always admitted; the
+production reserve and store capacity still apply to them. Status builds this
+accounting from a list copied during its existing reference walk and totals it
+after releasing the queue lock; submit and upload checks walk only the limited
+project's jobs.
 
 ### Parked native storage integration (#564)
 

@@ -23,6 +23,10 @@ type ProjectPolicy struct {
 	Weight                   float64             `json:"weight" yaml:"weight"`
 	MaxConcurrentExperiments int                 `json:"max_concurrent_experiments" yaml:"max_concurrent_experiments"`
 	MaxMemoryShare           float64             `json:"max_memory_share" yaml:"max_memory_share"`
+	// Optional queue file-store limits for non-production submissions; zero
+	// means no limit. Production is admitted; the store's reserve still applies.
+	MaxRetainedFileBytes uint64 `json:"max_retained_file_bytes,omitempty" yaml:"max_retained_file_bytes,omitempty"`
+	MaxAddedFileBytes24h uint64 `json:"max_added_file_bytes_24h,omitempty" yaml:"max_added_file_bytes_24h,omitempty"`
 }
 type FairUsage struct {
 	Seconds float64   `json:"seconds"`
