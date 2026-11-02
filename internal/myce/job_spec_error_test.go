@@ -19,7 +19,7 @@ func TestJobSpecInvalidHTTPAndQueueLog(t *testing.T) {
 		prepare            func(*testing.T, *Queue, *Spec)
 	}{
 		{"logs", "job_logs_invalid", "logs", func(_ *testing.T, _ *Queue, s *Spec) { s.Logs = "bad" }},
-		{"memory", "job_memory_invalid", "memory_gb", func(_ *testing.T, _ *Queue, s *Spec) { s.Needs.MemoryGB = 0 }},
+		{"memory", "job_memory_invalid", "memory_gb", func(_ *testing.T, _ *Queue, s *Spec) { s.Needs.MemoryGB = -1 }},
 		{"docker", "job_docker_invalid", "Docker memory", func(_ *testing.T, _ *Queue, s *Spec) {
 			s.Needs.HostMemoryGB = 1
 			s.Run.Docker, s.Run.DockerNetwork, s.Run.DockerMemoryGB = true, "private", 2

@@ -109,7 +109,7 @@ func (q *Queue) recordWorkMemory(sample eligibleMemorySample, old WorkObservatio
 		old.MemoryPeak = &peak
 	}
 	if !memoryIdentityUsable(old) || !old.MemoryRecordedAt.IsZero() && q.clock.Now().Sub(old.MemoryRecordedAt) > workCurveMaxAge {
-		old.MemoryPeak, old.MemoryRange, old.GPUHostRange = nil, nil, nil
+		old.MemoryPeak, old.MemoryRange, old.GPUHostRange, old.MemorySamples = nil, nil, nil, 0
 	}
 	point.MemoryPeak = mergeMemoryPeaks(old.MemoryPeak, r.MemoryPeak)
 	if p := r.MemoryPeak; p.NonreclaimableGB != nil && validRate(*p.NonreclaimableGB) && p.Events != nil && p.Source != processGroupMemorySource {
@@ -123,6 +123,7 @@ func (q *Queue) recordWorkMemory(sample eligibleMemorySample, old WorkObservatio
 		point.GPUHostRange = nil
 	}
 	point.MemoryConfiguration = memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
+	point.MemoryFamily, point.MemorySamples = memoryFamily(j), old.MemorySamples+1
 	point.MemoryLayout = "separate"
 	if owner := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices); owner != nil && owner.UnifiedMemory && !j.Spec.Needs.cpuOnly() {
 		point.MemoryLayout = "unified"

@@ -2017,6 +2017,9 @@
     },
     "JobMemoryEnvelope": {
       "properties": {
+        "basis": {
+          "type": "string"
+        },
         "device": {
           "type": "string"
         },
@@ -2025,6 +2028,9 @@
         },
         "enforcement": {
           "type": "string"
+        },
+        "evidence": {
+          "type": "integer"
         },
         "host_gb": {
           "type": "number"

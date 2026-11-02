@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // Memory needs name accelerator-reachable memory and additional system memory.
@@ -155,12 +156,19 @@ func (q *Queue) retryOOM(j *Job) {
 		return
 	}
 	if j.Spec.Needs.Memory == "auto" {
-		if j.OOMRetries > 0 {
+		// A bounded first run doubles without spending the one retry; at half
+		// the allowance, host-wide exploration and that retry take over.
+		bounded := j.MemoryEnvelope != nil && strings.Contains(j.MemoryEnvelope.Source, boundedFirstRun)
+		if j.OOMRetries > 0 && !bounded {
 			j.State, j.Reason = "failed", "out of memory after one retry above the OOM envelope"
 			return
 		}
-		j.OOMRetries++
-		j.MemoryOOMFloor = &SizeHint{MemoryGB: j.Spec.Needs.MemoryGB, HostMemoryGB: j.Spec.Needs.HostMemoryGB * 1.25}
+		growth := 2.0
+		if !bounded {
+			j.OOMRetries++
+			growth = 1.25
+		}
+		j.MemoryOOMFloor = &SizeHint{MemoryGB: j.Spec.Needs.MemoryGB, HostMemoryGB: j.Spec.Needs.HostMemoryGB * growth}
 		j.OOMCapacity = nil
 		probe := cloneJob(j)
 		probe.State, probe.MemoryEnvelope = "queued", nil

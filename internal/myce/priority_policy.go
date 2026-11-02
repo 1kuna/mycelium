@@ -30,6 +30,9 @@ type PriorityPolicy struct {
 	// Nil hosts stay off the wire and out of exports, so an older queue accepts
 	// the request and a file exported from it never clears holds after upgrade.
 	Hosts map[string]HostPolicy `json:"hosts,omitzero" yaml:"hosts,omitempty"`
+	// LearnedMemory nil means on (MY-31, #585). Like hosts, an omitted field
+	// preserves the saved switch so an older CLI's round trip cannot flip it.
+	LearnedMemory *bool `json:"learned_memory,omitempty" yaml:"learned_memory,omitempty"`
 }
 type PriorityPolicyRecord struct {
 	Revision uint64         `json:"revision" yaml:"revision"`
@@ -225,6 +228,10 @@ func (q *Queue) priorityPolicyRecord() PriorityPolicyRecord {
 		models.Sources = slices.Clone(models.Sources)
 		p.Models = &models
 	}
+	if p.LearnedMemory != nil {
+		learned := *p.LearnedMemory
+		p.LearnedMemory = &learned
+	}
 	p.Projects = map[string]ProjectPolicy{}
 	for name, v := range q.s.Policies {
 		v.AllowedMachines = slices.Clone(v.AllowedMachines)
@@ -280,6 +287,10 @@ func (q *Queue) setPriorityPolicy(expected uint64, p PriorityPolicy, keepFileLim
 		p.Tiers[i].Selectors = slices.Clone(p.Tiers[i].Selectors)
 	}
 	p.Projects, p.Hosts = nil, nil
+	if p.LearnedMemory != nil {
+		learned := *p.LearnedMemory
+		p.LearnedMemory = &learned
+	}
 	err := q.updateRequest(requestCtx, func() error {
 		if expected == ^uint64(0) {
 			return errors.New("policy revision exhausted")
@@ -300,6 +311,9 @@ func (q *Queue) setPriorityPolicy(expected uint64, p PriorityPolicy, keepFileLim
 		}
 		if err := q.validateMachineNames(slices.Collect(maps.Keys(hosts))); err != nil {
 			return err
+		}
+		if p.LearnedMemory == nil {
+			p.LearnedMemory = q.effectivePriorityPolicy().LearnedMemory
 		}
 		q.s.PriorityPolicy = &PriorityPolicyRecord{Revision: expected + 1, Policy: p}
 		if projects != nil {

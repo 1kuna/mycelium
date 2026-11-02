@@ -301,7 +301,7 @@ func TestExtensionCheckAutoLearnsMemoryForComparableWork(t *testing.T) {
 			probe.Needs.Memory = "auto"
 			probe.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:sample", Directory: t.TempDir()}
 			first := startObservation(t, q, m, probe)
-			if first.MemoryEnvelope == nil || first.MemoryEnvelope.Source != "exploratory first run" {
+			if first.MemoryEnvelope == nil || first.MemoryEnvelope.Source != boundedQuarter {
 				t.Fatalf("check did not explore: %+v", first.MemoryEnvelope)
 			}
 			clock.Advance(time.Second)

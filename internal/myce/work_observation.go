@@ -46,10 +46,14 @@ type ObservationKey struct {
 // One bounded aggregate per comparable key, persisted as its own SQLite row.
 // Last execution is provenance, not the duplicate fence: Queue.complete owns it.
 type WorkObservation struct {
-	GPUHostRange              *MemoryPeakRange   `json:"gpu_host_range,omitempty"`
-	MemoryRange               *MemoryPeakRange   `json:"memory_range,omitempty"`
-	MemoryLayout              string             `json:"memory_layout,omitempty"`
-	MemoryConfiguration       string             `json:"memory_configuration,omitempty"`
+	GPUHostRange        *MemoryPeakRange `json:"gpu_host_range,omitempty"`
+	MemoryRange         *MemoryPeakRange `json:"memory_range,omitempty"`
+	MemoryLayout        string           `json:"memory_layout,omitempty"`
+	MemoryConfiguration string           `json:"memory_configuration,omitempty"`
+	// Family and accepted memory sample count since the last invalidation
+	// (#585); zero on rows written before them.
+	MemoryFamily              string             `json:"memory_family,omitempty"`
+	MemorySamples             int                `json:"memory_samples,omitempty"`
 	MemoryRecordedAt          time.Time          `json:"memory_recorded_at,omitempty"`
 	MemoryPeak                *AttemptMemoryPeak `json:"memory_peak,omitempty"`
 	SampleID                  string             `json:"sample_id,omitempty"`
@@ -107,7 +111,7 @@ func (q *Queue) workObservationKey(j *Job) (*ObservationKey, string) {
 		}
 		return key, "declared wave; serial occupancy is not comparable"
 	}
-	if j.Spec.ExtensionCheck != nil && j.Spec.Needs.Memory != "auto" || j.Spec.ExtensionCheck == nil && j.Spec.Workload == nil && !profileMemoryWork(j.Spec) {
+	if j.Spec.ExtensionCheck != nil && j.Spec.Needs.Memory != "auto" || j.Spec.ExtensionCheck == nil && j.Spec.Workload == nil && !plainMemoryWork(j.Spec) {
 		return nil, "workload/reference metadata unavailable"
 	}
 	if j.Spec.Resumable && j.Attempt > 1 {
@@ -140,7 +144,7 @@ func (q *Queue) workObservationKey(j *Job) (*ObservationKey, string) {
 	if a := machineAvailability(m); a != nil && !a.Available {
 		return nil, "owner availability withdrawn"
 	}
-	if profileMemoryWork(j.Spec) {
+	if plainMemoryWork(j.Spec) {
 		key, reason := referenceObservationKey(Extension{}, m, WorkReference{}, profileMemoryIdentity(j), j.Spec.Needs, j.Spec.Args, j.Spec.Program, component, hardware)
 		key.Environment = environmentKey(j, m)
 		return key, reason
@@ -160,8 +164,14 @@ func (q *Queue) workObservationKey(j *Job) (*ObservationKey, string) {
 	return referenceObservationKey(*e, m, ref, j.Spec.workType(), j.Spec.Needs, j.Spec.Args, j.Spec.Program, component, hardware)
 }
 
+// Plain auto-memory commands are comparable by project, name, run, environment
+// and inputs, so an omitted memory figure can be learned (#585).
+func plainMemoryWork(s Spec) bool {
+	return profileMemoryWork(s) || !s.extensionJob() && s.Needs.Memory == "auto" && s.Name != "" && s.Project != ""
+}
+
 // run --profile already supplies its YAML name, project, target requirement and
-// reserved source manifest entry. Ordinary commands have no comparable identity.
+// reserved source manifest entry.
 func profileMemoryWork(s Spec) bool {
 	_, source := s.Files[".myce-source.tar"]
 	return !s.extensionJob() && s.RequireTarget && source && s.Name != "" && s.Project != ""
@@ -220,7 +230,7 @@ func referenceObservationKey(e Extension, m *Machine, ref WorkReference, work st
 }
 
 func (q *Queue) beginWorkTiming(j *Job) {
-	if j.Spec.Workload == nil && !profileMemoryWork(j.Spec) && !(j.Spec.ExtensionCheck != nil && j.Spec.Needs.Memory == "auto") {
+	if j.Spec.Workload == nil && !plainMemoryWork(j.Spec) && !(j.Spec.ExtensionCheck != nil && j.Spec.Needs.Memory == "auto") {
 		return
 	}
 	placement := ""
@@ -348,6 +358,7 @@ func (q *Queue) recordWorkObservation(j *Job, r Result, sample *eligibleMemorySa
 	point.GPUHostRange = old.GPUHostRange
 	point.MemoryRecordedAt = old.MemoryRecordedAt
 	point.MemoryConfiguration, point.MemoryLayout = old.MemoryConfiguration, old.MemoryLayout
+	point.MemoryFamily, point.MemorySamples = old.MemoryFamily, old.MemorySamples
 	if memory {
 		q.recordWorkMemory(*sample, old, &point)
 	}
@@ -361,8 +372,8 @@ func JobTiming(j *Job) string {
 	if j.StorageEnvelope != nil {
 		envelope += "; " + j.StorageEnvelope.Summary()
 	}
-	if j.MemoryEnvelope != nil && j.Spec.Needs.Memory == "auto" {
-		envelope += fmt.Sprintf("; memory %.2f GiB (%s; %s)", j.MemoryEnvelope.HostGB, j.MemoryEnvelope.Source, j.MemoryEnvelope.Enforcement)
+	if j.MemoryEnvelope != nil {
+		envelope += fmt.Sprintf("; memory %.2f GiB (%s; %s)", j.MemoryEnvelope.HostGB, j.MemoryEnvelope.Origin(), j.MemoryEnvelope.Enforcement)
 	}
 	t := j.Timing
 	if t == nil {

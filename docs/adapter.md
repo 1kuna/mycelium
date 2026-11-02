@@ -200,7 +200,8 @@ peak constrained, including capped members and file-backed pressure with low
 resident-only use. Older-worker results and stored pressure samples are excluded
 as well. File-heavy jobs may reserve more memory or explore again. To get a
 measured-need run after hitting the ceiling, submit the same comparable work with
-`memory: auto` and no submitter hint: the next run explores available headroom,
+`memory: auto` and no submitter hint: the next run explores from twice the
+constrained peak (host-wide once that reaches half the allowance, #559),
 labelled `exploratory (previous peak constrained)` when a constrained peak
 invalidated the measurement. A successful unconstrained exploration re-learns the peak. Ceiling pressure
 alone does not retry or change the job's outcome. Ceiling-bound explicit-memory

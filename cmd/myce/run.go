@@ -27,7 +27,7 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 	joining := f.String("joining-file", os.Getenv("MYCE_JOINING_FILE"), "private pinned joining authority")
 	gpu := f.String("gpu", "", "required accelerator: cuda, xpu or metal (default: CPU only)")
 	cpu := f.Int("cpu", 1, "logical CPU cores to reserve")
-	mem := f.String("mem", "1G", "host RAM for CPU jobs; accelerator RAM with --gpu (G/GiB or M/MiB)")
+	mem := f.String("mem", "", "host RAM for CPU jobs; accelerator RAM with --gpu (G/GiB or M/MiB); omit to let Mycelium learn it")
 	hostMem := f.String("host-mem", "1G", "additional host RAM for GPU jobs")
 	project := f.String("project", "default", "project")
 	class := f.String("class", "", "job class (default: experiment)")
@@ -69,11 +69,10 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 	if *profile != "" {
 		return runProfile(ctx, *profile, f.Args(), itemInputs, *key, *notify, *config, *joining, *address, *token, out, errOut)
 	}
-	explicitNotify := false
+	explicitNotify, explicitHostMem := false, false
 	f.Visit(func(v *flag.Flag) {
-		if v.Name == "notify" {
-			explicitNotify = true
-		}
+		explicitNotify = explicitNotify || v.Name == "notify"
+		explicitHostMem = explicitHostMem || v.Name == "host-mem"
 	})
 	if *key != "" || explicitNotify || len(itemInputs) > 0 {
 		return errors.New("--key, --notify and --input require --profile")
@@ -84,9 +83,11 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 	if *cpu <= 0 {
 		return errors.New("cpu must be positive")
 	}
-	memory, err := runMemory(*mem)
-	if err != nil {
-		return err
+	memory, err := 0.0, error(nil) // Omitted: the queue learns it (memory: auto).
+	if *mem != "" {
+		if memory, err = runMemory(*mem); err != nil {
+			return err
+		}
 	}
 	hostMemory, err := runMemory(*hostMem)
 	if err != nil {
@@ -105,7 +106,7 @@ func runCommand(ctx context.Context, args []string, out, errOut io.Writer) (resu
 	s := myce.Spec{Name: *name, Project: *project, Class: *class, Priority: *priority,
 		SubmissionKey: "run-" + rand.Text(), Run: myce.RunSpec{Command: f.Args()},
 		Needs: myce.ResourceNeeds{CPUCores: *cpu, MemoryGB: memory, Platform: myce.Platform{Required: []string{platform}}}}
-	if *gpu != "" {
+	if *gpu != "" && (*mem != "" || explicitHostMem) {
 		s.Needs.HostMemoryGB = hostMemory
 	}
 	if *deadline != "" {

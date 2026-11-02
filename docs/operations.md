@@ -434,6 +434,13 @@ patterns, per-snapshot `max_bytes` and `free_floor_bytes`) for
 [declared model snapshots](files.md#declared-model-snapshots-553). Keep the
 deployment's values there, not in Git.
 
+Learned memory (#585) is on by default: a job with no memory figure is sized
+from accepted peaks, with a bounded first run. To turn it off, add
+`learned_memory: false` at the top level of the exported file and import it.
+Omitted figures are then rejected and cold `memory: auto` runs explore
+host-wide, as before. Set `learned_memory: true` to turn it back on. A file
+without the field keeps the saved setting.
+
 If the revision is stale, export again and reconcile the newer policy before
 retrying. See [owner priority policy](scheduling.md) for the full
 import/export contract, including replacing or clearing project settings.

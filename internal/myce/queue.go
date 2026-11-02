@@ -685,6 +685,9 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		if q.files != store || q.environmentRevision != environmentRevision {
 			return ErrStale
 		}
+		if err := q.defaultMemory(&s); err != nil {
+			return specRejection(err)
+		}
 		submitted := s
 		extensions, e := q.resolveExtensions(&s)
 		if e != nil {

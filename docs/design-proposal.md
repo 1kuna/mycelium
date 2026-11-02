@@ -1546,6 +1546,39 @@ Docker driver and Linux/GPU enforcement qualification are deployment checks,
 separate from laptop proof. Verify each target's Docker driver and kernel XPU
 fdinfo size format (bare bytes, KiB or MiB) before claiming native qualification.
 
+## Amendment: learned memory by default and bounded first runs (#585, #559)
+
+Under MY-31, agents state needs, not memory numbers they would have to guess.
+A plain job with no usable memory figure is accepted as `memory: auto`;
+partial figures stay submitter hints. Explicit figures keep their meaning.
+Plain auto commands get a comparable memory identity from project, name, run,
+environment and inputs, so their accepted peaks teach later runs through the
+existing single eligibility gate.
+
+A cold CPU job with no comparable accepted peak and no hint no longer reserves
+most of the host. Host-wide exploration once took about 89 of a unified host's
+96 GiB for a test suite that peaks near 4.5 GiB, and blocked unrelated deadline
+work. The first run starts from the largest fresh accepted unconstrained CPU
+peak of similar work on the same OS (the same project and name, or the same
+extension and work type, under any configuration) times 2.5. That is the 1.25
+headroom times 2 used for cross-machine estimates. Without such peaks, it
+starts from a quarter of the host allowance. Either figure is then raised to
+twice any retained constrained peak of the same work; constrained peaks only
+ever raise this bound. An OOM on a bounded first run
+doubles its job-local floor without spending the one OOM retry. When the bound
+reaches half the allowance, the host-wide exploration above applies unchanged,
+with its custody fences and its one retry. The cost is one ceiling hit or OOM
+per doubling for work larger than the bound. GPU work keeps its existing
+exploration: its card is already exclusive, and device use on unified hosts is
+not yet sampled.
+
+Job GET `memory_envelope.basis` is `declared`, `learned`, `hint` or
+`exploratory`. `evidence` counts the accepted attempts behind a learned figure
+or a similar-work bound. Status and waiting reasons show both. The local queue
+policy field `learned_memory: false` turns all of this off: omitted figures are
+rejected again, and cold runs explore host-wide. Unset means on. An omitted
+field in a policy update keeps the saved switch.
+
 ## Declared fan-out and batch planning (slice 4, #107; approved 2026-10-24)
 
 The orchestrator approves this slice under Zach's delegated design authority,

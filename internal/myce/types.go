@@ -280,8 +280,10 @@ func (s Spec) Validate() error {
 	if s.Kind == "" && (len(s.Inputs)+len(s.Args) > 0 || (len(s.Outputs) > 0 && !s.Run.Docker && len(s.Files) == 0 && !sharedReaders(s) && s.After == nil && s.OutputDelivery == "" && s.StorageProtocol == "") || s.SizeHint.MemoryGB != 0 || s.SizeHint.HostMemoryGB != 0) {
 		return reject("job_program_invalid", errors.New("inputs, outputs, args and size_hint require a kind/program job"))
 	}
-	if !validMemoryValue(s.Needs.MemoryGB) || (s.Needs.Memory != "auto" && ((!s.Needs.cpuOnly() && s.Needs.MemoryGB <= 0) || (s.Needs.cpuOnly() && s.Needs.HostMemoryGB <= 0))) {
-		return reject("job_memory_invalid", errors.New("declare positive memory_gb (host RAM for CPU work, GPU memory otherwise)"))
+	// A missing figure is the queue's call (learned_memory policy), not a
+	// static error: the CLI cannot see that local policy (#585).
+	if !validMemoryValue(s.Needs.MemoryGB) {
+		return reject("job_memory_invalid", errors.New(declareMemory))
 	}
 	if !validMemoryValue(s.Needs.HostMemoryGB) {
 		return reject("job_memory_invalid", errors.New("needs.host_memory_gb must be finite and nonnegative"))
