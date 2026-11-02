@@ -64,6 +64,7 @@ func (w *Worker) initDeviceFaults(ctx context.Context, root *workerStore) error 
 	// Read from worker start, not the whole boot (#595). Faults while no worker
 	// ran are not replayed; quarantine already recorded persists below.
 	w.faultSince = w.Clock.Now()
+	w.faultTeardowns = map[string][]time.Time{}
 	data, err := os.ReadFile(filepath.Join(root.dir, deviceFaultFile))
 	if err == nil {
 		err = decodeWorkerJSON(data, w.faults)
@@ -163,9 +164,12 @@ func (w *Worker) refreshDeviceFaults(ctx context.Context, root *workerStore) err
 			fault := deviceFault{Reason: reason, Event: key}
 			next.Seen[key], changed = true, true
 			if !line.At.IsZero() && w.control.teardownNear(d.ID, line.At) {
-				next.Teardowns[deviceFaultKey(d)] = fault
-				log.Printf("device fault attributed to teardown: device=%s pci=%s reason=%s fault_event=%s", d.ID, d.pciAddress, reason, key)
-				continue
+				if next.Devices[deviceFaultKey(d)].Reason != "" || !w.repeatedTeardownFault(deviceFaultKey(d), line.At) {
+					next.Teardowns[deviceFaultKey(d)] = fault
+					log.Printf("device fault attributed to teardown: device=%s pci=%s reason=%s fault_event=%s", d.ID, d.pciAddress, reason, key)
+					continue
+				}
+				log.Printf("repeated teardown faults escalated to quarantine: device=%s pci=%s count=%d period=%s", d.ID, d.pciAddress, teardownFaultLimit, teardownFaultPeriod)
 			}
 			next.Devices[deviceFaultKey(d)] = fault
 		}
@@ -310,6 +314,31 @@ const teardownFaultWindow = time.Second
 // Released attempts keep evidence past the five-second scan interval and a late
 // journal read; the cost is a few timestamps per released accelerator attempt.
 const teardownRetention = time.Minute
+
+// The window also matches a card fault that crashes its job within a second, or
+// a card that faults at every exit; repeats on one card escalate to quarantine.
+// Observed teardown faults were days apart per card (#300), so a third incident
+// within an hour is not ordinary teardown. A clear restarts the count.
+const (
+	teardownFaultLimit  = 3
+	teardownFaultPeriod = time.Hour
+)
+
+// Fault lines within teardownFaultWindow of the last counted one are the same
+// incident: an xe fault and its engine resets arrive within milliseconds.
+func (w *Worker) repeatedTeardownFault(device string, at time.Time) bool {
+	recent := slices.DeleteFunc(w.faultTeardowns[device], func(t time.Time) bool { return at.Sub(t) > teardownFaultPeriod })
+	if n := len(recent); n > 0 && at.Sub(recent[n-1]) <= teardownFaultWindow {
+		w.faultTeardowns[device] = recent
+		return false
+	}
+	if recent = append(recent, at); len(recent) >= teardownFaultLimit {
+		delete(w.faultTeardowns, device)
+		return true
+	}
+	w.faultTeardowns[device] = recent
+	return false
+}
 
 type teardownMark struct {
 	devices []string

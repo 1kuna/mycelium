@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http/httptest"
 	"slices"
@@ -258,5 +259,42 @@ func TestDeviceFaultReadFailureReported(t *testing.T) {
 	}
 	if w.Machine.FaultMonitorError != "" || !strings.Contains(journal.String(), "fault monitor recovered") {
 		t.Fatal("recovery not reported", w.Machine.FaultMonitorError)
+	}
+}
+
+// #595 safeguard: a card that faults at every stop, or crashes its own jobs,
+// matches the teardown window each time. The third incident in an hour quarantines.
+func TestDeviceFaultRepeatedTeardownQuarantines(t *testing.T) {
+	clock := &fakeClock{now: time.Date(2026, 11, 2, 4, 0, 0, 0, time.UTC)}
+	m := m3Machine()
+	m.Devices[0].pciAddress = "0000:03:00.0"
+	w := Worker{Machine: m, Clock: clock, DeviceFaultMatchers: map[string]DeviceFaultMatcher{"fake": intelKernelFault}}
+	w.control = &processControl{clock: clock}
+	root := &workerStore{dir: t.TempDir()}
+	var lines []KernelLogLine
+	w.DeviceFaultSource = func(context.Context, time.Time) (KernelLogSnapshot, error) {
+		return KernelLogSnapshot{BootID: "boot", Lines: lines}, nil
+	}
+	if err := w.initDeviceFaults(context.Background(), root); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 3 {
+		clock.Advance(10 * time.Minute)
+		stop := clock.Now()
+		job := Job{ID: fmt.Sprint("job-", i), Attempt: 1, Session: "s", AllocatedDevices: []string{"0"}}
+		w.control.set(&process{job: job, stopRequested: stop})
+		w.control.remove(job)
+		clock.Advance(5 * time.Second)
+		// One incident logs several fault lines milliseconds apart.
+		lines = []KernelLogLine{
+			{ID: fmt.Sprint(2 * i), At: stop.Add(273 * time.Millisecond), Message: "xe 0000:03:00.0: [drm] Fault response: Unsuccessful -ENOENT"},
+			{ID: fmt.Sprint(2*i + 1), At: stop.Add(275 * time.Millisecond), Message: "xe 0000:03:00.0: [drm] Fault response: Unsuccessful -EINVAL"},
+		}
+		if err := w.refreshDeviceFaults(context.Background(), root); err != nil {
+			t.Fatal(err)
+		}
+		if quarantined := w.Machine.Devices[0].Reason == "device_fault_xe"; quarantined != (i == 2) {
+			t.Fatalf("incident %d: quarantined=%v", i+1, quarantined)
+		}
 	}
 }

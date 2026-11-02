@@ -2113,7 +2113,10 @@ device work is in flight can fault the driver (#154). The worker logs
 `device fault attributed to teardown`, records the event in its local quarantine
 state and leaves the device usable. Released attempts' timestamps are kept for one
 minute. A fault seen less than a second after it was logged waits one scan, so an
-exit recorded just after it still counts.
+exit recorded just after it still counts. A card fault that crashes its job also
+falls in that window, so the third teardown incident on one device within an hour
+quarantines it (`repeated teardown faults escalated to quarantine`); fault lines
+within a second of each other count as one incident.
 
 An xe/i915 fault or NVIDIA Xid matched to the device's PCI BDF sets its health
 reason to `device_fault_xe`, `device_fault_i915`, or `device_fault_nvidia_xid` and

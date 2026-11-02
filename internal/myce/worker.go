@@ -43,6 +43,7 @@ type Worker struct {
 	faults              *deviceQuarantine
 	faultSince          time.Time       // Kernel records before worker start are not read (#595).
 	faultPending        []KernelLogLine // Matched faults too recent to rule out teardown.
+	faultTeardowns      map[string][]time.Time
 	InventoryProbe      func(context.Context) ([]MachineDevice, error)
 	CPUIsolationProbe   func(context.Context) error
 	cpuRuntimeProbe     *MachineProbe // Runtime/OS seam; tests still exercise real verification rules.
