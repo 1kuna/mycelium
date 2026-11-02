@@ -15,6 +15,11 @@ func TestDockerSharedDeviceSamplesContainerDescendants(t *testing.T) {
 	j := dockerJob()
 	j.Spec.Needs.HostMemoryGB = 4
 	j.Spec.Run.DockerMemoryGB = 2
+	// The managed attempt starts its sampler concurrently. Configure the
+	// fixture before launch instead of replacing its worker after startup.
+	w.Machine.GPU = "cuda"
+	w.Machine.Device = "GPU-one"
+	w.selectedDevice = nil
 	p, err := startDockerFixture(w, s, j)
 	if err != nil {
 		t.Fatal(err)
@@ -34,11 +39,6 @@ func TestDockerSharedDeviceSamplesContainerDescendants(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	sampler := w
-	sampler.Machine.GPU = "cuda"
-	sampler.Machine.Device = "GPU-one"
-	sampler.selectedDevice = nil
-	p.docker.memoryWorker = &sampler
 	finish := p.docker.observeMemory(j, 20*time.Millisecond)
 	await(t, func() bool {
 		b, _ := os.ReadFile(filepath.Join(dir, "queries"))
