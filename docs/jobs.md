@@ -685,6 +685,36 @@ host pin. Queue host maintenance and consumer cancellation are separate
 contracts, described in [operations](operations.md#queue-maintenance).
 No CPU publication/session lock is implied by a GPU production hold.
 
+### Hold scope
+
+`production_hold_scope` is `host` (the default, described above) or `device`.
+Host scope is exclusive: while production needs the host, every lower tier on
+it stops and waits, even on a free sibling card or the CPU. Keep it where owner
+isolation, driver overlap or preparation interference justifies that.
+
+```yaml
+hosts:
+  example-host:
+    production_hold: true
+    production_hold_scope: device
+```
+
+Device scope keeps the hold's release custody (retained release obligations,
+model recovery after queue restart, prior-session cleanup) but drops the
+host-wide fence. Production then uses ordinary admission and priority
+preemption, as on a host without a hold. Lower tiers keep using the sibling
+cards and the CPU. When production needs more, it stops only the lower-tier
+work that holds the card, memory or preparation it needs. It starts after
+those exact attempts confirm release; elapsed grace still proves nothing.
+Device scope emits no `production_hold` status entry, binds no new
+production job to the host, and does not pause model copies. A queued
+production job that a host-scope hold already bound keeps that host.
+
+The startup file only seeds host policy. Change a live host's scope with
+`myce policy` ([live policy](operations.md#change-live-project-policy)).
+Restarting with the last accepted startup file keeps the live policy; a
+different startup file is still refused.
+
 ## Attempt placement environment
 
 Every command attempt receives worker-owned `MYCE_PLATFORM` (`cuda`, `xpu`,
