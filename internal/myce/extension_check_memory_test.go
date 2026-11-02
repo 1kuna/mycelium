@@ -1,40 +1,64 @@
 package myce
 
 import (
-	"errors"
 	"math"
 	"strings"
 	"testing"
 	"time"
 )
 
-// #645: an identifiable pre-fix XPU aggregate must not prevent the accepted
-// corrected sample that replaces it. Reliable oversized peaks still refuse.
-func TestExtensionCheckMemoryRecoversInflatedLegacyXPU(t *testing.T) {
+// #645: a single CUDA/unified check's total-cgroup peak transfers to XPU
+// with a 2.5 margin, exceeding the allowance despite the measured need fitting.
+func TestExtensionCheckMemoryCrossFamilyRecovery(t *testing.T) {
 	for _, tc := range []struct {
-		name              string
-		hint, resident    float64
-		corrected, refuse bool
+		name        string
+		hint, total float64
+		oom         bool
 	}{
-		{name: "size hint", hint: 12, resident: 10.75},
-		{name: "bounded exploration", resident: 10.75},
-		{name: "oversized corrected peak", hint: 12, resident: 25, corrected: true, refuse: true},
-		{name: "oversized resident peak", hint: 12, resident: 25, refuse: true},
+		{"hint", 12, 10.855361938476562, false},
+		{"no hint", 0, 10.855361938476562, false},
+		{"oversized cgroup despite small RSS", 12, 25, false},
+		{"failed probe cannot repeat", 12, 10.855361938476562, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			q, clock, m, s := gpuHostFixture(t)
-			m.HostMemoryBudgetGB, m.HostAvailableMemoryGB = 48, 52
-			machineCheck(t, q, m)
-			s.Workload = nil
-			s.ExtensionDigest = registeredExtension(t, q, s.Extension).Digest
+			e := registeredExtension(t, q, s.Extension)
+			e.Version = "2"
+			cuda := e.Variants[0]
+			cuda.Target = ExecutionTarget{OS: "linux", Arch: "arm64", Platform: "cuda"}
+			e.Variants = append(e.Variants, cuda)
+			e = freezeComposition(t, e)
+			if err := q.AddExtension(e); err != nil {
+				t.Fatal(err)
+			}
+			source := cloneMachine(&m)
+			source.ID, source.HostID, source.Session = "source", "source", "source-session"
+			source.UnifiedMemory = true
+			source.HostMemoryBudgetGB, source.HostAvailableMemoryGB = 64, 64
+			source.CapabilityProfile.Arch = "arm64"
+			source.CapabilityProfile.SystemMemoryBytes = 64 << 30
+			source.CapabilityProfile.Accelerators = []AcceleratorProfile{{Type: "cuda", MemoryBytes: 31 << 30}}
+			source.Devices = source.Devices[:1]
+			source.Devices[0].Platform, source.Devices[0].MemoryMode = "cuda", "unified"
+			for _, owner := range []*Machine{&source, &m} {
+				for i := range owner.Devices {
+					target := owner.Devices[i].machine(*owner)
+					report := newExtensionReport(e, &target, "extension:sample")
+					report.Setup, report.Qualified, report.CheckID = true, true, "check"
+					owner.Devices[i].ExtensionReports = []ExtensionReport{report}
+				}
+				machineCheck(t, q, *owner)
+			}
+			s.Extension, s.ExtensionDigest, s.Workload = extensionKey(e), e.Digest, nil
 			s.RequireTarget = true
 			s.Needs = ResourceNeeds{Memory: "auto", GPU: &GPUSelection{Devices: []string{"0"}}}
 			s.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:sample", Directory: t.TempDir()}
 			s.SizeHint = SizeHint{MemoryGB: 8, HostMemoryGB: 40}
-			start := func() *Job {
+			s.Targets = []ExecutionTarget{cuda.Target}
+			start := func(owner Machine) *Job {
 				t.Helper()
 				queued := submit(t, q, s)
-				run := assignedJob(machineCheck(t, q, m))
+				run := assignedJob(machineCheck(t, q, owner))
 				if run == nil || run.ID != queued.ID {
 					t.Fatalf("check not assigned: %+v", job(t, q, queued.ID))
 				}
@@ -43,44 +67,48 @@ func TestExtensionCheckMemoryRecoversInflatedLegacyXPU(t *testing.T) {
 				}
 				return run
 			}
-			complete := func(run *Job, peak *AttemptMemoryPeak) {
+			complete := func(run *Job, peak *AttemptMemoryPeak, oom bool) {
 				t.Helper()
 				clock.Advance(time.Second)
-				r := result(run, true)
-				r.MemoryPeak = peak
+				r := result(run, !oom)
+				r.MemoryPeak, r.OutOfMemory = peak, oom
 				if err := q.Complete(r); err != nil {
 					t.Fatal(err)
 				}
 			}
-			outside, device := 11.0, 8.0
-			legacy := &AttemptMemoryPeak{HostGB: &tc.resident, NonreclaimableGB: &tc.resident, CgroupGB: &tc.resident, DeviceGB: &device, Events: &MemoryEventCounts{}, GPUHost: &GPUHostMemory{SiblingAdjusted: tc.corrected, DriverGB: &outside, OutsideGB: &outside, HostDropGB: &tc.resident}}
-			complete(start(), legacy)
-			m.HostMemoryBudgetGB, m.HostAvailableMemoryGB = 24, 28
-			machineCheck(t, q, m)
+			rss, device := 5.0111541748046875, 5.7197265625
+			complete(start(source), &AttemptMemoryPeak{HostGB: &rss, CgroupGB: &tc.total, DeviceGB: &device, Events: &MemoryEventCounts{}}, false)
+			s.Targets = []ExecutionTarget{e.Variants[0].Target}
 			s.SizeHint = SizeHint{HostMemoryGB: tc.hint}
-			if tc.refuse {
-				_, err := q.Submit(s)
-				var refusal *HTTPError
-				if !errors.As(err, &refusal) || refusal.Code != "no_qualified_target" || !strings.Contains(refusal.Message, "exceeds allowance 24 GiB") || !strings.Contains(refusal.Message, memoryCapacityRemedies) {
-					t.Fatalf("reliable oversized peak was not refused actionably: %v", err)
-				}
+			if tc.total > 24 {
+				memoryExplorationRefused(t, q, s)
 				return
 			}
-			run := start()
-			wantBasis, wantHost := "exploratory", 6.0
-			if tc.hint > 0 {
-				wantBasis, wantHost = "hint", tc.hint
-			}
-			if run.MemoryEnvelope.Basis != wantBasis || run.Spec.Needs.HostMemoryGB != wantHost {
-				t.Fatalf("legacy figure still blocks fallback: %+v", run.MemoryEnvelope)
+			run := start(m)
+			if run.MemoryEnvelope.Basis != "exploratory" || run.MemoryEnvelope.Source != boundedGPUExploration || run.Spec.Needs.HostMemoryGB != 23.875 || len(q.s.MemoryExplorations) != 1 {
+				t.Fatalf("single cross-family prior still blocks bounded measurement: %+v", run.MemoryEnvelope)
 			}
 			host, residual := 7.25, .25
-			corrected := &AttemptMemoryPeak{HostGB: &host, NonreclaimableGB: &host, CgroupGB: &host, DeviceGB: &device, Events: &MemoryEventCounts{}, GPUHost: &GPUHostMemory{SiblingAdjusted: true, DriverGB: &residual, OutsideGB: &residual, HostDropGB: &host}}
-			complete(run, corrected)
-			next := start()
-			if next.MemoryEnvelope.Basis != "learned" || next.Spec.Needs.HostMemoryGB != 9.375 {
-				t.Fatalf("next accepted sample did not replace legacy figure: %+v", next.MemoryEnvelope)
+			peak := &AttemptMemoryPeak{HostGB: &host, NonreclaimableGB: &host, CgroupGB: &host, DeviceGB: &device, Events: &MemoryEventCounts{}, GPUHost: &GPUHostMemory{SiblingAdjusted: true, DriverGB: &residual, OutsideGB: &residual, HostDropGB: &host}}
+			complete(run, peak, tc.oom)
+			if tc.oom {
+				if got := job(t, q, run.ID); got.State != "failed" || got.OOMRetries != 0 || !strings.Contains(got.Reason, memoryCapacityRemedies) {
+					t.Fatalf("bounded measurement retried after OOM: %+v", got)
+				}
+				q = memoryFactsRestart(t, q, clock)
+				machineCheck(t, q, source)
+				machineCheck(t, q, m)
+				memoryExplorationRefused(t, q, s)
+				return
 			}
+			next := start(m)
+			if next.MemoryEnvelope.Basis != "learned" || next.Spec.Needs.HostMemoryGB != 9.375 {
+				t.Fatalf("accepted target sample did not replace transferred prior: %+v", next.MemoryEnvelope)
+			}
+			// Once measured on this family, a genuinely oversized peak is binding.
+			host = 25
+			complete(next, peak, false)
+			memoryExplorationRefused(t, q, s)
 		})
 	}
 }

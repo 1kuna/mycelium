@@ -1,12 +1,18 @@
 package myce
 
 const boundedMemoryExploration = "bounded cross-OS exploration"
-const spentMemoryExploration = "foreign-OS prior; bounded exploration already used"
+const boundedGPUExploration = "bounded cross-family GPU exploration"
+const spentMemoryExploration = "transferred prior; bounded exploration already used"
+
+func boundedMemorySource(source string) bool {
+	return source == boundedMemoryExploration || source == boundedGPUExploration
+}
+
 const memoryCapacityRemedies = "no qualified target can fit this job; reduce the workload's memory use, obtain a clean target-platform measurement for auto memory, or have the operator approve a sufficient allowance on a capable host; retrying unchanged cannot fix capacity"
 
-// One durable claim per comparable CPU work/target OS. Unlike diagnostic job
-// history this survives collection. Keeping the prior prevents an OOM from
-// erasing the evidence and reopening the exception. Only accepted same-OS
+// One durable claim per comparable CPU work/target OS or GPU target family.
+// Unlike diagnostic job history this survives collection. Keeping the prior prevents an OOM from
+// erasing the evidence and reopening the exception. Only accepted target-family
 // evidence supersedes it. This is negative evidence, not a successful learner.
 type memoryExploration struct {
 	Execution Execution `json:"execution"`
@@ -18,11 +24,19 @@ func memoryExplorationKey(k ObservationKey, configuration string) string {
 	if k.Check {
 		work = "check:" + work // existing workload claims keep their key
 	}
-	return identityHash(struct {
+	id := identityHash(struct {
 		Work, Extension, OS, Configuration string
 		Reference                          WorkReference
 		Concurrency, BatchSize             int
 	}{work, k.ExtensionDigest, k.Target.OS, configuration, k.Reference, k.Concurrency, k.BatchSize})
+	if k.Target.Platform != "cpu" {
+		// Preserve existing CPU claims; GPU evidence is specific to its backend.
+		return identityHash(struct {
+			Work   string
+			Target ExecutionTarget
+		}{id, k.Target})
+	}
+	return id
 }
 
 func (q *Queue) memoryHistory() *Queue {
@@ -88,7 +102,7 @@ func (q *Queue) sameOSMemoryLowerBound(key ObservationKey, configuration string)
 // Reuse permanent qualification (including platform, recipe, policy and disk)
 // while removing just the prior's memory demand. Busy hosts still qualify;
 // live exploration/launch checks below retain their normal admission fences.
-func (q *Queue) largestMemoryExplorationHost(j *Job, os string, prior float64) (float64, bool) {
+func (q *Queue) largestMemoryExplorationHost(j *Job, targetMachine *Machine, prior float64) (float64, bool) {
 	history := q.memoryHistory()
 	largest, priorFits := 0.0, false
 	for _, owner := range history.s.Machines {
@@ -96,7 +110,8 @@ func (q *Queue) largestMemoryExplorationHost(j *Job, os string, prior float64) (
 			continue
 		}
 		for _, target := range history.machineTargets(owner) {
-			if machineTarget(target).OS != os {
+			wanted, actual := machineTarget(targetMachine), machineTarget(target)
+			if actual.OS != wanted.OS || !j.Spec.Needs.cpuOnly() && (actual != wanted || target.UnifiedMemory != targetMachine.UnifiedMemory) {
 				continue
 			}
 			m := history.qualificationCapacity(target)
@@ -119,7 +134,8 @@ func (q *Queue) boundedMemoryCandidate(j *Job, m *Machine, estimate memoryEstima
 	// Fan-out changes the selected piece/configuration during assignment; it
 	// cannot share this single-attempt claim. An OOM floor is already negative
 	// evidence, never permission to try a smaller exploratory envelope.
-	if !estimate.foreign || estimate.key == nil || j.Batch != nil || j.Spec.FanOut != nil || j.MemoryOOMFloor != nil {
+	crossGPU := !j.Spec.Needs.cpuOnly() && !m.UnifiedMemory && len(m.groupMembers) == 0 && estimate.hostFactor == 2.5 && estimate.samples == 1
+	if (!estimate.foreign && !crossGPU) || estimate.key == nil || j.Batch != nil || j.Spec.FanOut != nil || j.MemoryOOMFloor != nil {
 		return 0, "", false
 	}
 	configuration := memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
@@ -127,22 +143,31 @@ func (q *Queue) boundedMemoryCandidate(j *Job, m *Machine, estimate memoryEstima
 		return 0, "", false
 	}
 	prior := hostMemoryPeakGB(estimate.host) * estimate.hostFactor
-	cap, priorFits := q.largestMemoryExplorationHost(j, estimate.key.Target.OS, prior)
+	cap, priorFits := q.largestMemoryExplorationHost(j, m, prior)
 	if priorFits || cap <= 0 || q.qualificationCapacity(m).FreeHostMemoryGB != cap {
 		return 0, "", false
 	}
 	lower := q.sameOSMemoryLowerBound(*estimate.key, configuration)
+	if crossGPU {
+		// One foreign-family sample is a prior, not a target measurement.
+		// Retain its conservative total-cgroup peak and 25% headroom; only
+		// the extra transfer margin may yield to one bounded measurement.
+		lower = max(hostMemoryPeakGB(estimate.host), estimate.constrainedGB)
+	}
 	budget := cap - m.MemoryCeilingSlackGB - exploratoryDriftMarginGB(m)
 	hint := 0.0
 	if j.MemoryFallback != nil {
-		hint = max(j.MemoryFallback.MemoryGB, j.MemoryFallback.HostMemoryGB)
+		hint = j.MemoryFallback.HostMemoryGB
+		if j.Spec.Needs.cpuOnly() {
+			hint = max(hint, j.MemoryFallback.MemoryGB)
+		}
 	}
 	if lower <= 0 || !validRate(lower*1.25) || lower*1.25 > budget || hint > budget {
 		return 0, "", false
 	}
 	room, why := q.exploratoryMemory(j, m)
 	if why == "" && room < budget {
-		why = "bounded cross-OS exploration needs the largest eligible host allowance free"
+		why = "bounded memory exploration needs the largest eligible host allowance free"
 	}
 	return budget, why, true
 }
@@ -151,7 +176,7 @@ func (q *Queue) boundedMemoryCandidate(j *Job, m *Machine, estimate memoryEstima
 // custody. Even loss/prelaunch refusal spends it: this costs one possible probe
 // but prevents duplicate launches after a lost offer or queue restart.
 func (q *Queue) claimMemoryExploration(j *Job, m *Machine) {
-	if j.MemoryEnvelope == nil || j.MemoryEnvelope.Source != boundedMemoryExploration {
+	if j.MemoryEnvelope == nil || !boundedMemorySource(j.MemoryEnvelope.Source) {
 		return
 	}
 	estimate := q.memoryEstimate(j, m)

@@ -300,8 +300,8 @@ func (q *Queue) recordWorkOOM(j *Job, r Result, oomFailure bool) {
 		configuration := memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
 		for _, id := range slices.Sorted(maps.Keys(q.s.WorkObservations)) {
 			point := q.s.WorkObservations[id]
-			if j.MemoryEnvelope != nil && j.MemoryEnvelope.Source == boundedMemoryExploration && point.Key.Target.OS != k.Target.OS {
-				continue // A target-OS probe cannot disprove the foreign prior.
+			if j.MemoryEnvelope != nil && boundedMemorySource(j.MemoryEnvelope.Source) && (point.Key.Target.OS != k.Target.OS || !j.Spec.Needs.cpuOnly() && point.Key.Target != k.Target) {
+				continue // A target-family probe cannot disprove the transferred prior.
 			}
 			if sameMemoryWork(point, k, configuration) {
 				old := point

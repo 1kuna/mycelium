@@ -297,12 +297,15 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 		estimate := q.memoryEstimate(j, m)
 		if host, why, ok := q.boundedMemoryCandidate(j, m, estimate); ok {
 			estimate.measuredHostGB, estimate.source = host, boundedMemoryExploration
+			if !n.cpuOnly() {
+				estimate.source = boundedGPUExploration
+			}
 			refusal = why
 		}
 		switch {
 		case estimate.host != nil:
 			source, basis, evidence = estimate.source, "learned", estimate.samples
-			if evidence == 0 || estimate.measuredHostGB > 0 && estimate.source == boundedMemoryExploration {
+			if evidence == 0 || estimate.measuredHostGB > 0 && boundedMemorySource(estimate.source) {
 				basis = "exploratory"
 			}
 			host := hostMemoryPeakGB(estimate.host) * estimate.hostFactor
@@ -557,7 +560,6 @@ func (q *Queue) memoryEstimateFor(j *Job, m *Machine, checkSeed bool) memoryEsti
 	completeHostRange := true
 	gpuHost := !j.Spec.Needs.cpuOnly() && key.Target.Platform == "xpu" && !m.UnifiedMemory
 	invalidated := false
-	legacyDiscarded := false
 	configuration := memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
 	layout := "separate"
 	if m.UnifiedMemory && !j.Spec.Needs.cpuOnly() {
@@ -591,26 +593,6 @@ func (q *Queue) memoryEstimateFor(j *Job, m *Machine, checkSeed bool) memoryEsti
 			continue
 		}
 		sameFamily := k.Target == key.Target && point.MemoryLayout != "" && point.MemoryLayout == layout
-		if gpuHost && k.Target.Platform == "xpu" && p.GPUHost != nil && !p.GPUHost.SiblingAdjusted {
-			factor := 2.5
-			if sameFamily {
-				factor = 1.25 * 1.5
-				if sameMemoryHost(k, *key, m) {
-					factor = 1.25
-				}
-			}
-			capacity := q.qualificationCapacity(m)
-			resident := *p
-			resident.GPUHost, resident.CombinedHostGB = nil, nil
-			// Pre-#639 outside peaks include sibling growth and independently
-			// combined runs. They cannot prove that work exceeds capacity when
-			// its resident/total peak fits. Reuse normal hints/exploration to
-			// obtain corrected evidence; never discount a real resident floor.
-			if !hostFits(&capacity, 0, hostMemoryPeakGB(p)*factor) && hostFits(&capacity, 0, hostMemoryPeakGB(&resident)*factor) {
-				legacyDiscarded = true
-				continue
-			}
-		}
 		samples := max(1, point.MemorySamples)
 		if sameFamily && sameMemoryHost(k, *key, m) {
 			sameHost, sameHostN = mergeMemoryPeaks(sameHost, p), sameHostN+samples
@@ -646,13 +628,11 @@ func (q *Queue) memoryEstimateFor(j *Job, m *Machine, checkSeed bool) memoryEsti
 		estimate.foreign = j.Spec.Needs.cpuOnly()
 	case invalidated:
 		estimate.source = "exploratory (previous peak constrained)"
-	case legacyDiscarded:
-		estimate.source = "exploratory (legacy XPU attribution exceeds allowance)"
 	}
 	estimate.host, estimate.hostFactor = estimate.device, estimate.deviceFactor
 	// A spent probe cannot lose its prior through OOM invalidation, history
-	// collection or restart. Only accepted same-OS evidence supersedes it.
-	if j.Spec.Needs.cpuOnly() && exact == nil && family == nil && sameOS == nil {
+	// collection or restart. Only accepted target-family evidence supersedes it.
+	if exact == nil && family == nil && sameOS == nil {
 		if spent, ok := q.s.MemoryExplorations[memoryExplorationKey(*key, configuration)]; ok {
 			prior := spent.PriorGB
 			if estimate.host != nil {
