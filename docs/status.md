@@ -569,7 +569,7 @@ have several holds at once. Do not match English text to choose an action.
 
 | `kind` | `operator_action_required` | `clears_at` | When emitted |
 | --- | --- | --- | --- |
-| `production_hold` | false | omitted | Active production demand, including work between stages. |
+| `production_hold` | false | omitted | Active production demand on a host-scope hold, including work between stages. Device-scope holds emit none. |
 | `production_stopping` | false | omitted | Lower-priority work is within its stop grace. |
 | `production_release_unknown` | conditional | omitted | Production reservation has an unconfirmed release. True only for a gone/missing worker, failed cleanup, or release still unknown at least two minutes after grace. Restart check-in grace suppresses the time-based flag. Draining calls, recovery and the short wait for a kill result are false. |
 | `docker_transition` | false | omitted | Recognized Docker startup/stop operation or final release report in progress. |

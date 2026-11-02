@@ -1033,7 +1033,8 @@ grace/kill releases have credit only before `StopAt + preemptionGrace()` (ten
 seconds by default). Confirmed exits retain credit until fresh inventory or that
 same bound. Neither heartbeats nor completion extend it. Then seek useful
 capacity elsewhere; admission still requires exact cleanup acknowledgements.
-Physical-host production holds fence every device and CPU resources. Maintenance
+Physical-host production holds fence every device and CPU resources; an opt-in
+device scope keeps their release custody and leaves reclamation to this planner. Maintenance
 outranks holds, preparation and Started. Planned maintenance/preemption preserves
 infrastructure counters; independent stage failure remains failure, completion
 wins over stop intent, and cancellation wins over both.
