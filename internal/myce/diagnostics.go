@@ -62,6 +62,8 @@ var rejectionMessages = map[string]string{
 	"job_environment_invalid":               "environment must identify one configured environment or supported lock_file recipe",
 	"job_environment_platform_mismatch":     "job platform and environment recipes have no compatible execution platform",
 	"job_placement_invalid":                 "allowed_machines must satisfy the project's placement policy",
+	"job_profile_invalid":                   "profile_memory requires a profile and SHA-256 identity",
+	"job_diagnostics_invalid":               "diagnostics must name known checks with valid settings",
 	"job_capacity_invalid":                  "needs must fit the project's configured capacity",
 	"request_stale":                         "attempt or input custody is stale; refresh before retrying",
 	"artifact_unknown":                      "accepted artifact not found",

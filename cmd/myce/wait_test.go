@@ -510,3 +510,46 @@ func TestWaitDeadlineGuidance(t *testing.T) {
 		t.Fatal("unchanged guidance repeated", text)
 	}
 }
+
+// #607: a queue that restarts at a new authority mid-wait (worker upgrade
+// replaced the config) and an old connection that never answers must not hang
+// the wait; after the no-progress deadline it logs and reconnects.
+func TestWaitReconnectsAfterQueueRestartWithoutProgress(t *testing.T) {
+	budget := waitReadBudget
+	waitReadBudget = 50 * time.Millisecond
+	t.Cleanup(func() { waitReadBudget = budget })
+	q, clock, db, checkpoints := waitQueue(t)
+	j := waitSubmit(t, q)
+	// The old queue accepted the connection and then stopped answering.
+	stuck := myce.Client{URL: "http://old-queue", HTTP: &http.Client{Transport: waitTransport(func(r *http.Request) (*http.Response, error) {
+		<-r.Context().Done()
+		return nil, r.Context().Err()
+	})}}
+	var restarted *httptest.Server
+	reconnects := 0
+	reconnect := func() (myce.Client, error) {
+		reconnects++
+		return myce.Client{URL: restarted.URL, Token: "test-only"}, nil
+	}
+	var out, diagnostics bytes.Buffer
+	pauses := 0
+	err := waitJobsReconnecting(context.Background(), stuck, reconnect, []string{j.ID}, 0, &out, &diagnostics, clock, func(_ context.Context, d time.Duration) error {
+		clock.advance(d)
+		if pauses++; pauses == 1 {
+			if e := q.Close(); e != nil {
+				t.Fatal(e)
+			}
+			q = waitOpenQueue(t, db, checkpoints, clock)
+			waitFinish(t, q, true)
+			restarted = httptest.NewServer(myce.API{Queue: q, Token: "test-only"}.Handler())
+			t.Cleanup(restarted.Close)
+		}
+		if pauses > 50 {
+			t.Fatalf("wait made no progress: %s", &diagnostics)
+		}
+		return nil
+	})
+	if err != nil || reconnects != 1 || out.String() != j.ID+" succeeded\n" || !strings.Contains(diagnostics.String(), "no progress for 2m") || !strings.Contains(diagnostics.String(), "blocked reading job "+j.ID+" (cause=timeout)") {
+		t.Fatalf("%v reconnects=%d out=%s diagnostics=%s", err, reconnects, &out, &diagnostics)
+	}
+}
