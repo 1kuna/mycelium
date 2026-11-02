@@ -11,14 +11,15 @@ import (
 // with a 2.5 margin, exceeding the allowance despite the measured need fitting.
 func TestExtensionCheckMemoryCrossFamilyRecovery(t *testing.T) {
 	for _, tc := range []struct {
-		name        string
-		hint, total float64
-		oom         bool
+		name               string
+		hint, total        float64
+		oom, missingDevice bool
 	}{
-		{"hint", 12, 10.855361938476562, false},
-		{"no hint", 0, 10.855361938476562, false},
-		{"oversized cgroup despite small RSS", 12, 25, false},
-		{"failed probe cannot repeat", 12, 10.855361938476562, true},
+		{"hint", 12, 10.855361938476562, false, false},
+		{"no hint", 0, 10.855361938476562, false, false},
+		{"oversized cgroup despite small RSS", 12, 25, false, false},
+		{"failed probe cannot repeat", 12, 10.855361938476562, true, false},
+		{"missing device telemetry", 12, 10.855361938476562, true, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			q, clock, m, s := gpuHostFixture(t)
@@ -77,7 +78,11 @@ func TestExtensionCheckMemoryCrossFamilyRecovery(t *testing.T) {
 				}
 			}
 			rss, device := 5.0111541748046875, 5.7197265625
-			complete(start(source), &AttemptMemoryPeak{HostGB: &rss, CgroupGB: &tc.total, DeviceGB: &device, Events: &MemoryEventCounts{}}, false)
+			seed := &AttemptMemoryPeak{HostGB: &rss, CgroupGB: &tc.total, DeviceGB: &device, Events: &MemoryEventCounts{}}
+			if tc.missingDevice {
+				seed.DeviceGB = nil
+			}
+			complete(start(source), seed, false)
 			s.Targets = []ExecutionTarget{e.Variants[0].Target}
 			s.SizeHint = SizeHint{HostMemoryGB: tc.hint}
 			if tc.total > 24 {
@@ -85,7 +90,11 @@ func TestExtensionCheckMemoryCrossFamilyRecovery(t *testing.T) {
 				return
 			}
 			run := start(m)
-			if run.MemoryEnvelope.Basis != "exploratory" || run.MemoryEnvelope.Source != boundedGPUExploration || run.Spec.Needs.HostMemoryGB != 23.875 || len(q.s.MemoryExplorations) != 1 {
+			wantSource := boundedGPUExploration
+			if tc.missingDevice {
+				wantSource += "; GPU recipe default with host estimate floor"
+			}
+			if run.MemoryEnvelope.Basis != "exploratory" || run.MemoryEnvelope.Source != wantSource || run.Spec.Needs.HostMemoryGB != 23.875 || len(q.s.MemoryExplorations) != 1 {
 				t.Fatalf("single cross-family prior still blocks bounded measurement: %+v", run.MemoryEnvelope)
 			}
 			host, residual := 7.25, .25
@@ -96,6 +105,12 @@ func TestExtensionCheckMemoryCrossFamilyRecovery(t *testing.T) {
 					t.Fatalf("bounded measurement retried after OOM: %+v", got)
 				}
 				q = memoryFactsRestart(t, q, clock)
+				machineCheck(t, q, source)
+				machineCheck(t, q, m)
+				memoryExplorationRefused(t, q, s)
+				// The durable refusal remains valid without any live device
+				// estimate after the source observation's normal expiry.
+				clock.Advance(workCurveMaxAge + time.Second)
 				machineCheck(t, q, source)
 				machineCheck(t, q, m)
 				memoryExplorationRefused(t, q, s)

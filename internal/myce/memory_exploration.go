@@ -1,11 +1,14 @@
 package myce
 
+import "strings"
+
 const boundedMemoryExploration = "bounded cross-OS exploration"
 const boundedGPUExploration = "bounded cross-family GPU exploration"
 const spentMemoryExploration = "transferred prior; bounded exploration already used"
 
 func boundedMemorySource(source string) bool {
-	return source == boundedMemoryExploration || source == boundedGPUExploration
+	base, _, _ := strings.Cut(source, ";")
+	return base == boundedMemoryExploration || base == boundedGPUExploration
 }
 
 const memoryCapacityRemedies = "no qualified target can fit this job; reduce the workload's memory use, obtain a clean target-platform measurement for auto memory, or have the operator approve a sufficient allowance on a capable host; retrying unchanged cannot fix capacity"

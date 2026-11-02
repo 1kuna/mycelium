@@ -314,9 +314,9 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 			}
 			if !n.cpuOnly() {
 				peak, factor := estimate.device, estimate.deviceFactor
-				if peak.DeviceGB != nil && validRate(*peak.DeviceGB) && validRate(*peak.DeviceGB*factor) {
+				if peak != nil && peak.DeviceGB != nil && validRate(*peak.DeviceGB) && validRate(*peak.DeviceGB*factor) {
 					n.MemoryGB = *peak.DeviceGB * factor
-				} else if factor > 1.25 {
+				} else if peak != nil && factor > 1.25 {
 					// Unknown device counters cannot become zero reservations.
 					n.MemoryGB = max(n.MemoryGB, hostMemoryPeakGB(peak)*factor)
 					source += "; GPU recipe default with host estimate floor"
