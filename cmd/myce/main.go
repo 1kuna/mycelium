@@ -1034,6 +1034,9 @@ func printStatus(s myce.Snapshot, full bool) {
 		if m.FileTransferError != "" {
 			fmt.Printf("files %s: %s\n", m.ID, m.FileTransferError)
 		}
+		if m.FaultMonitorError != "" {
+			fmt.Printf("fault monitor %s: %s; device quarantine is off\n", m.ID, m.FaultMonitorError)
+		}
 		fmt.Printf("cache %s: %v, %d bytes free %s\n", m.ID, m.CachedModels, m.CacheFreeBytes, m.CacheError)
 	}
 	for _, r := range s.SyncRequests {
