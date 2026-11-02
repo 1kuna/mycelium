@@ -199,6 +199,7 @@ func (c *processControl) remove(j Job) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if p := c.processes[jobKey(j)]; p != nil && !p.job.Spec.Needs.cpuOnly() {
+		c.pruneTeardowns()
 		c.retired = append(c.retired, teardownMark{p.job.AllocatedDevices, p.teardownTimes(), c.clock.Now().Add(teardownRetention)})
 	}
 	delete(c.processes, jobKey(j))

@@ -349,14 +349,19 @@ func (p *process) teardownTimes() []time.Time {
 	return times
 }
 
+// Caller holds c.mu.
+func (c *processControl) pruneTeardowns() {
+	now := c.clock.Now()
+	c.retired = slices.DeleteFunc(c.retired, func(m teardownMark) bool { return now.After(m.until) })
+}
+
 func (c *processControl) teardownNear(device string, at time.Time) bool {
 	if c == nil {
 		return false
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	now := c.clock.Now()
-	c.retired = slices.DeleteFunc(c.retired, func(m teardownMark) bool { return now.After(m.until) })
+	c.pruneTeardowns()
 	marks := slices.Clone(c.retired)
 	for _, p := range c.processes {
 		if !p.job.Spec.Needs.cpuOnly() {
