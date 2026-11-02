@@ -38,7 +38,8 @@ func fitsResourcesChecked(j *Job, m *Machine, memory float64, report *targetFit)
 // Shared target eligibility without the disk check. Storage diagnostics must
 // evaluate a shortage instead of discarding its host because of that shortage.
 func fitsTargetResourcesChecked(j *Job, m *Machine, memory float64, report *targetFit) bool {
-	return report.check(executionTargetMatches(j.Spec, m), "target") &&
+	return report.check(groupFits(j, m), "card group") &&
+		report.check(executionTargetMatches(j.Spec, m), "target") &&
 		report.check(nativeNetworkFits(j, m), "native network isolation") &&
 		report.check(j.MemoryEnvelope == nil || j.MemoryEnvelope.Refusal == "", "memory envelope") &&
 		report.check(!m.Recovering, "recovering") &&
@@ -55,7 +56,6 @@ func fitsTargetResourcesChecked(j *Job, m *Machine, memory float64, report *targ
 		report.check(!m.Gone, "gone") && report.check(!m.Leaving, "leaving") &&
 		report.check(!needsCheckpoint(j) || !m.CheckpointUnavailable, "checkpoint") &&
 		report.check(memory >= j.Spec.Needs.MemoryGB, "GPU memory") &&
-		report.check(groupFits(j, m), "card group") &&
 		report.check(machineAllowed(j.Spec.AllowedMachines, m.ID), "allow-list") &&
 		report.check(j.Spec.Needs.cpuOnly() || len(j.Spec.Needs.Platform.Required) == 0 || slices.Contains(j.Spec.Needs.Platform.Required, m.GPU), "platform") &&
 		report.check(environmentCanRun(j, m), "environment")

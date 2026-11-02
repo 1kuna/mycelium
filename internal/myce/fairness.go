@@ -246,7 +246,7 @@ func (q *Queue) batchCandidateWithResources(j *Job, m *Machine, resources map[ba
 	if j.Spec.FanOut != nil {
 		return q.fanOutCandidateWithResources(j, m, resources)
 	}
-	if j.State != "queued" || !q.placementAllowed(j, m) || !q.checkpointReady(j, m) {
+	if j.State != "queued" || len(m.groupMembers) > 0 && !q.mayNeedCards(j, m) || !q.placementAllowed(j, m) || !q.checkpointReady(j, m) {
 		return nil
 	}
 	for _, candidate := range extensionJobs(j, m, true) {
@@ -263,6 +263,22 @@ func (q *Queue) batchCandidateWithResources(j *Job, m *Machine, resources map[ba
 		}
 	}
 	return nil
+}
+
+// A card group takes only work no single card holds. Decide that before the
+// costly placement checks, which every queued job would otherwise pay again
+// for each multi-card host. A declared plain need is final; learned and
+// extension needs are resolved for this target first.
+func (q *Queue) mayNeedCards(j *Job, m *Machine) bool {
+	if !j.Spec.extensionJob() && j.Spec.Needs.Memory != "auto" {
+		return groupFits(j, m)
+	}
+	for _, c := range q.memoryCandidates(j, m) {
+		if groupFits(c, m) && (c.MemoryEnvelope == nil || c.MemoryEnvelope.Refusal == "") {
+			return true
+		}
+	}
+	return false
 }
 
 // Resource projections depend on the concrete vector and demand identity, not

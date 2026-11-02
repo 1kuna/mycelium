@@ -986,7 +986,7 @@ the most free memory, reserved together with one release record, each charged
 `memory_gb / N`, host RAM and cores once. All are visible to every member
 (`MYCE_GPU_COUNT`, `MYCE_DEVICES`); preemption reclaims them as one attempt, and
 a card stopped for a waiting multi-card demand is withheld from equal and lower
-tiers until it starts. Docker, model-server and extension-check jobs keep one
+tiers until it starts, while the host's usable cards can still hold it. Docker, model-server and extension-check jobs keep one
 card; unmeasured `memory: auto` first runs explore one card, and multi-card
 attempts do not feed per-card memory learning. Extension work needs every card
 qualified; no separate multi-card parity check exists yet. Using more cards for

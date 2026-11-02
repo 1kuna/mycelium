@@ -1,6 +1,10 @@
 package myce
 
-import "slices"
+import (
+	"cmp"
+	"math"
+	"slices"
+)
 
 // A candidate set belongs to one read-only planning pass. Exclusions change
 // which work may win, never which projects compete for fair share. Discard the
@@ -70,12 +74,41 @@ func (q *Queue) groupDemandFence(m *Machine) *Job {
 			if c.PriorityStop == nil || c.Attempt != victim.Attempt || c.Machine != m.ID || !slices.ContainsFunc(targetDevices(m), func(id string) bool { return slices.Contains(c.AllocatedDevices, id) }) {
 				continue
 			}
-			if d := q.s.Jobs[c.PriorityStop.Demand]; d != nil && d.State == "queued" && d.Spec.Needs.MemoryGB > limit && (fence == nil || q.comparePriority(d.Spec, fence.Spec) < 0) {
+			if d := q.s.Jobs[c.PriorityStop.Demand]; d != nil && d.State == "queued" && d.Spec.Needs.MemoryGB > limit && (fence == nil || q.comparePriority(d.Spec, fence.Spec) < 0) && q.cardsCanHold(m, d) {
 				fence = d
 			}
 		}
 	}
 	return fence
+}
+
+// The hold lasts only while this host's usable same-backend cards, including
+// the held ones, can still hold the demand in equal shares. A disabled,
+// quarantined or missing card ends it, so the held card returns to other work.
+func (q *Queue) cardsCanHold(m *Machine, d *Job) bool {
+	held, least, others := targetDevices(m), math.Inf(1), []float64{}
+	found := 0
+	for _, card := range q.machineTargets(q.s.Machines[m.ID]) {
+		if card.GPU != m.GPU || card.UnifiedMemory || card.MemoryError != "" || card.TotalMemoryGB <= 0 || !deviceAllowed(d, card) || !q.placementAllowed(d, card) {
+			continue
+		}
+		if slices.Contains(held, card.Device) {
+			least, found = min(least, card.TotalMemoryGB), found+1
+		} else {
+			others = append(others, card.TotalMemoryGB)
+		}
+	}
+	if found < len(held) {
+		return false
+	}
+	slices.SortFunc(others, func(a, b float64) int { return cmp.Compare(b, a) })
+	for k := 0; float64(found+k)*least < d.Spec.Needs.MemoryGB; k++ {
+		if k == len(others) {
+			return false
+		}
+		least = min(least, others[k])
+	}
+	return true
 }
 
 func (s *candidateSet) score(j *Job, m *Machine) float64 {

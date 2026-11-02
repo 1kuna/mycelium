@@ -269,3 +269,103 @@ func TestMultiCardDevLaunchSeesBothCards(t *testing.T) {
 		t.Fatalf("state=%s devices=%v saw=%q reason=%s", j.State, j.AllocatedDevices, seen, j.Reason)
 	}
 }
+
+// Review regression: a deadline demand (no start deadline) stops both cards,
+// then one card is disabled. The other card must return to other work.
+func TestMultiCardHoldEndsWhenHostCanNoLongerHoldDemand(t *testing.T) {
+	q, clock := fixture(t)
+	m := m3Machine()
+	submit(t, q, spec("experiment"))
+	a := assignedJob(machineCheck(t, q, m))
+	clock.Advance(time.Second)
+	submit(t, q, spec("experiment"))
+	b := assignedJob(machineCheck(t, q, m, a))
+	demand := submit(t, q, bigSpec("deadline", 12))
+	if got := job(t, q, b.ID); got.State != "stopping" || priorityStop(got).Demand != demand.ID {
+		t.Fatal("deadline demand did not stop both cards", got)
+	}
+	ack := result(a, false)
+	ack.ReleaseOnly = true
+	if err := q.Complete(ack); err != nil {
+		t.Fatal(err)
+	}
+	if got := assignedJob(machineCheck(t, q, m, b)); got != nil {
+		t.Fatal("card 0 not held while the demand can still use both cards", got.ID)
+	}
+	rev := uint64(0)
+	if _, err := q.ChangeDeviceMaintenance(hostID(&m), DeviceMaintenanceRequest{Action: "disable", Platform: "fake", Identity: "fake-1", IfRevision: &rev}); err != nil {
+		t.Fatal(err)
+	}
+	ack = result(b, false)
+	ack.ReleaseOnly = true
+	if err := q.Complete(ack); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	got := assignedJob(machineCheck(t, q, m))
+	if got == nil || got.ID != a.ID && got.ID != b.ID || !slices.Equal(got.AllocatedDevices, []string{"0"}) {
+		t.Fatal("card 0 stayed idle after the host could no longer hold the demand", got)
+	}
+	requireState(t, q, demand.ID, "queued")
+}
+
+// Planner cost of card groups (#105): four two-card hosts, every card held by
+// production, 2,000 queued experiments (10% need two cards), nothing placeable.
+func BenchmarkCardGroupCheckin(b *testing.B) {
+	clock := &fakeClock{now: time.Date(2026, 11, 1, 12, 0, 0, 0, time.UTC)}
+	q, err := Open(filepath.Join(b.TempDir(), "queue.db"), b.TempDir(), clock)
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { q.Close() })
+	q.checkpointProbe = func() bool { return true }
+	q.nasAvailable = true
+	hosts := []Machine{}
+	for h := range 4 {
+		m := m3Machine()
+		m.ID, m.HostID, m.Session = fmt.Sprintf("host-%d", h), fmt.Sprintf("host-%d", h), fmt.Sprintf("session-%d", h)
+		for i := range m.Devices {
+			m.Devices[i].Identity = fmt.Sprintf("fake-%d-%d", h, i)
+		}
+		m.LastSeen = clock.Now()
+		q.s.Machines[m.ID] = &m
+		hosts = append(hosts, m)
+		for _, card := range []string{"0", "1"} {
+			id := fmt.Sprintf("held-%d-%s", h, card)
+			q.s.Jobs[id] = &Job{ID: id, Spec: spec("production"), State: "running", Machine: m.ID, Session: m.Session, Attempt: 1, StartedAt: &clock.now, AllocatedDevices: []string{card}}
+		}
+	}
+	for i := range 2000 {
+		id := fmt.Sprintf("queued-%06d", i)
+		s := spec("experiment")
+		s.Project = fmt.Sprintf("project-%d", i%5)
+		if i%10 == 0 {
+			s.Needs.MemoryGB = 12
+		} else {
+			s.Needs.MemoryGB = 4
+		}
+		q.s.Jobs[id] = &Job{ID: id, Spec: s, State: "queued", Queued: clock.Now()}
+	}
+	m := hosts[0]
+	c := Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol}
+	for _, card := range []string{"0", "1"} {
+		c.Attempts = append(c.Attempts, AttemptReport{Execution: Execution{ID: "held-0-" + card, Attempt: 1}, Session: m.Session, Started: true})
+	}
+	checkin := func() {
+		reply, err := q.Checkin(c)
+		if err != nil {
+			b.Fatal(err)
+		}
+		for _, a := range reply.Attempts {
+			if a.Job != nil && a.Job.ID[:4] != "held" {
+				b.Fatal("check-in admitted work", a.Job.ID)
+			}
+		}
+	}
+	checkin()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
+		checkin()
+	}
+}
