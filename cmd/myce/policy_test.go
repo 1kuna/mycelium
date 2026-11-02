@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -116,6 +117,62 @@ func TestPolicyCLIHostHoldScopeTransition(t *testing.T) {
 	d = start()
 	if got := d.Queue.PriorityPolicy().Policy.Hosts["gpu-host"]; got != (myce.HostPolicy{ProductionHold: true, ProductionHoldScope: "device"}) {
 		t.Fatalf("scope lost on restart: %+v", got)
+	}
+}
+
+// Rolling upgrade, CLI first: a policy exported from an older queue sets there
+// unchanged, and re-applying it after the queue upgrade keeps host holds.
+func TestPolicyCLIRollingUpgradeKeepsHostHolds(t *testing.T) {
+	older := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			ExpectedRevision uint64 `json:"expected_revision"`
+			Policy           struct {
+				Version  int                           `json:"version"`
+				Tiers    []myce.PriorityTier           `json:"tiers"`
+				Projects map[string]myce.ProjectPolicy `json:"projects"`
+			} `json:"policy"`
+		}
+		if r.Method == "PUT" {
+			d := json.NewDecoder(r.Body)
+			d.DisallowUnknownFields()
+			if err := d.Decode(&request); err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]any{"revision": 0, "policy": map[string]any{"version": 1, "tiers": []map[string]any{{"name": "shared", "selectors": []string{"*/*"}}}, "projects": map[string]any{}}})
+	}))
+	defer older.Close()
+	t.Setenv("MYCE_QUEUE", older.URL)
+	t.Setenv("MYCE_TOKEN", "owner-test")
+	var out bytes.Buffer
+	if err := policyCommand([]string{"get", "--yaml"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(t.TempDir(), "policy.yaml")
+	if err := os.WriteFile(file, out.Bytes(), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := policyCommand([]string{"set", file, "--if-revision", "0"}, &out); err != nil {
+		t.Fatal("older queue rejected an unchanged export:", err)
+	}
+
+	q, err := myce.Open(filepath.Join(t.TempDir(), "queue.db"), t.TempDir(), &bindClock{now: time.Date(2026, 10, 19, 12, 0, 0, 0, time.UTC)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer q.Close()
+	if err := q.ConfigureHosts(map[string]myce.HostPolicy{"gpu-host": {ProductionHold: true}}); err != nil {
+		t.Fatal(err)
+	}
+	upgraded := httptest.NewServer(myce.API{Queue: q, Token: "owner-test"}.Handler())
+	defer upgraded.Close()
+	t.Setenv("MYCE_QUEUE", upgraded.URL)
+	if err := policyCommand([]string{"set", file, "--if-revision", "0"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if got := q.PriorityPolicy().Policy.Hosts["gpu-host"]; !got.ProductionHold {
+		t.Fatalf("re-applied export cleared the host hold: %+v", q.PriorityPolicy().Policy.Hosts)
 	}
 }
 

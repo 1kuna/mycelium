@@ -80,9 +80,9 @@ type state struct {
 	PreparationPlans map[string]HostLaunch      `json:"preparation_plans,omitempty"`
 	HostMaintenance  map[string]HostMaintenance `json:"host_maintenance,omitempty"`
 
-	// The last accepted startup host file. Null means none was recorded; an
-	// empty map is a recorded empty file, so this field omits omitempty.
-	HostConfig map[string]HostPolicy `json:"host_config"`
+	// The last accepted startup host file; live policy may differ after
+	// `myce policy set`.
+	HostConfig map[string]HostPolicy `json:"host_config,omitempty"`
 
 	Submissions      map[string]*submissionRecord `json:"submissions,omitempty"`
 	ProgramNeeds     map[string]SizeHint          `json:"program_needs,omitempty"`

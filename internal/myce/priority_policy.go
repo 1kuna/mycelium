@@ -24,7 +24,9 @@ type PriorityPolicy struct {
 	Tiers   []PriorityTier `json:"tiers" yaml:"tiers"`
 	// Keep an explicit empty map on the wire: nil preserves settings, {} clears them.
 	Projects map[string]ProjectPolicy `json:"projects" yaml:"projects"`
-	Hosts    map[string]HostPolicy    `json:"hosts" yaml:"hosts"`
+	// Nil hosts stay off the wire and out of exports, so an older queue accepts
+	// the request and a file exported from it never clears holds after upgrade.
+	Hosts map[string]HostPolicy `json:"hosts,omitzero" yaml:"hosts,omitempty"`
 }
 type PriorityPolicyRecord struct {
 	Revision uint64         `json:"revision" yaml:"revision"`
@@ -218,7 +220,9 @@ func (q *Queue) priorityPolicyRecord() PriorityPolicyRecord {
 		v.ProductionParityHosts = cloneProductionParityHosts(v.ProductionParityHosts)
 		p.Projects[name] = v
 	}
-	p.Hosts = q.hostPolicies()
+	if hosts := q.hostPolicies(); len(hosts) > 0 {
+		p.Hosts = hosts
+	}
 	warnings, _ := p.validate()
 	return PriorityPolicyRecord{q.policyRevision(), p, warnings}
 }

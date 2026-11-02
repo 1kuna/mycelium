@@ -138,7 +138,8 @@ func (q *Queue) ConfigureHosts(p map[string]HostPolicy) error {
 		if err := q.validateMachineNames(slices.Collect(maps.Keys(normalized))); err != nil {
 			return err
 		}
-		if len(q.s.Hosts) > 0 || q.s.HostConfig != nil {
+		// With no live or recorded hold, a file only adds holds, so it seeds as before.
+		if len(q.s.Hosts) > 0 || len(q.s.HostConfig) > 0 {
 			switch {
 			case reflect.DeepEqual(q.hostPolicies(), normalized):
 				q.s.HostConfig = normalized
