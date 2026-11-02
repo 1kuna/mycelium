@@ -210,6 +210,43 @@ func TestWorkerRootsCachedModelAndDirectNAS(t *testing.T) {
 	}
 }
 
+func TestWorkerRootsCachedModelKeepsSnapshotSource(t *testing.T) {
+	q, _ := fixture(t)
+	model := Model{Name: "test", Path: "test", Engine: "fake", MemoryGB: 1, Platforms: []string{"fake"}}
+	config := ModelConfig{Wait: time.Second, Idle: time.Minute, Models: []Model{model}}
+	if err := q.ConfigureModels(config); err != nil {
+		t.Fatal(err)
+	}
+	m := machine("worker", "fake")
+	m.CachedModels = []string{model.Name}
+	m.UnavailableRoots = []UnavailableRoot{{Root: "model", Reason: "configured NAS mount missing"}}
+	j := Job{Spec: spec("production")}
+	j.Spec.Resumable = false
+	j.Spec.Needs.Model = model.Name
+	w := Worker{Machine: m, ModelConfig: config}
+	if reason := q.storageRootReason(&j, &m); reason != "" {
+		t.Fatal("cached engine model blocked", reason)
+	}
+	if err := localAttemptAdmission(w, nil, j, nil); err != nil {
+		t.Fatal("cached engine model refused locally", err)
+	}
+	j.Spec.ModelSnapshots = map[string]ModelSnapshot{"base": {Repo: "org/model", Revision: strings.Repeat("a", 40)}}
+	if reason := q.storageRootReason(&j, &m); !strings.Contains(reason, "model unavailable") {
+		t.Fatal("cached engine model hid snapshot source dependency", reason)
+	}
+	if err := localAttemptAdmission(w, nil, j, nil); err == nil || !strings.Contains(err.Error(), "model unavailable") {
+		t.Fatal("snapshot admitted locally without source", err)
+	}
+	m.UnavailableRoots = nil
+	w.Machine = m
+	if reason := q.storageRootReason(&j, &m); reason != "" {
+		t.Fatal("snapshot source recovery ignored", reason)
+	}
+	if err := localAttemptAdmission(w, nil, j, nil); err != nil {
+		t.Fatal("recovered snapshot refused locally", err)
+	}
+}
+
 func TestWorkerRootsDiscoveredCachesReachActorAndModelLaunch(t *testing.T) {
 	ctx := context.Background()
 	cache, makeModel := cacheFixture(t)

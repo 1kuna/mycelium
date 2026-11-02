@@ -156,7 +156,7 @@ func storageRootReasonForModel(j *Job, m *Machine, model Model, recipe *Environm
 	copy.UnavailableRoots = nil
 	localModel := !model.DirectNAS && (model.FileStore || model.LocalSource != "" || slices.Contains(m.CachedModels, model.Name) || slices.Contains(m.Models, model.Name))
 	for _, root := range m.UnavailableRoots {
-		if root.Root == "model" && localModel {
+		if root.Root == "model" && localModel && len(j.Spec.ModelSnapshots) == 0 {
 			continue
 		}
 		if root.Root == "model-cache" && (model.DirectNAS || slices.Contains(m.Models, model.Name)) {
