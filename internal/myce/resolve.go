@@ -65,19 +65,25 @@ func (q *Queue) Resolve(req ResolveRequest) (ResolveReport, error) {
 	if err := view.validateMachineNames(s.AllowedMachines); err != nil {
 		r.Findings = append(r.Findings, ResolveFinding{Field: "allowed_machines", Side: "submitter", Problem: err.Error(), Fix: "Use the current machine name, or omit allowed_machines and declare needs."})
 	}
+	// Extension jobs resolve against the captured registry, as submit does.
+	extensions, err := view.resolveExtensions(&s)
+	if err != nil {
+		r.Findings = append(r.Findings, ResolveFinding{Field: "extension", Side: "queue", Problem: err.Error(), Fix: "Reference exactly one registered extension (name@version or extension_digest); `myce portability --extension NAME@VERSION` shows its targets."})
+	}
 	recipes, sidecars, ok := view.resolveRecipes(s, &r)
 	r.Findings = append(r.Findings, resolvePathFindings(s)...)
-	if !ok {
-		r.Notes = append(r.Notes, "Targets are evaluated once the environment resolves.")
+	if !ok || err != nil {
+		r.Notes = append(r.Notes, "Targets are evaluated once the environment and extension resolve.")
 		return r, nil
 	}
 	job := func(s Spec) *Job {
-		j := &Job{ID: "resolve", State: "queued", Spec: s, EnvironmentRecipes: recipes, SidecarEnvironmentRecipes: sidecars}
+		j := &Job{ID: "resolve", State: "queued", Spec: s, Extensions: extensions, EnvironmentRecipes: recipes, SidecarEnvironmentRecipes: sidecars}
 		_ = normalizeJobClass(&j.Spec)
 		_ = normalizeResources(&j.Spec)
 		if !j.Spec.extensionJob() {
 			_ = lowerExecution(&j.Spec)
 		}
+		view.applyLearnedNeeds(j)
 		return j
 	}
 	j := job(s)

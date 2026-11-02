@@ -197,10 +197,6 @@ func (q *Queue) hasQualifiedTarget(j *Job) bool {
 }
 
 func (q *Queue) qualifiedTarget(j *Job) (bool, string) {
-	// Resolve envelopes with the planner's code, but without temporary
-	// occupancy or release holds. Retain observations for learned needs.
-	capacity := Queue{clock: q.clock, s: q.s, memoryOrigin: q}
-	capacity.s.Jobs, capacity.s.ModelSlots, capacity.s.HostReleases = nil, nil, nil
 	var best *targetFit
 	reason := "no known machine targets"
 	q.evaluateTargets(j, func(fit targetFit, candidate *Job, m *Machine) bool {

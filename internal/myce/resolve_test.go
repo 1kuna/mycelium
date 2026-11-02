@@ -133,3 +133,17 @@ func TestResolveFlagsDataLocalityPin(t *testing.T) {
 		t.Fatalf("authored host requirement flagged: %+v %v", r.Findings, err)
 	}
 }
+
+// Review regression: resolve must resolve a registered extension as submit
+// does, not report every target as lacking a qualified variant.
+func TestResolveRegisteredExtensionJob(t *testing.T) {
+	q, _, _, s := observationFixture(t)
+	r, err := q.Resolve(ResolveRequest{Spec: s})
+	if err != nil || len(r.Targets) != 1 || !r.Targets[0].Eligible {
+		t.Fatalf("qualified extension job not eligible: %+v %v", r, err)
+	}
+	s.RequireTarget = true
+	if _, err := q.Submit(s); err != nil {
+		t.Fatalf("submit disagrees with resolve: %v", err)
+	}
+}
