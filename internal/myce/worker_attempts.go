@@ -564,7 +564,7 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport)
 		need := localJobHostNeed(w, j)
 		usedRAM += need
 		growth += remainingAllocationGrowth(allocationMachine(&w.Machine, j.AllocatedDevices), j.Spec.Needs.MemoryGB, need, w.hostMemorySamples[jobKey(j)], w.Clock.Now())
-		if !next.Spec.Needs.cpuOnly() && slices.Contains(j.AllocatedDevices, firstDevice(next, w.Machine)) {
+		if !next.Spec.Needs.cpuOnly() && slices.ContainsFunc(attemptCards(next, w.Machine), func(id string) bool { return slices.Contains(j.AllocatedDevices, id) }) {
 			return refuseAdmission("local_device_reservation", "slots", 1, 0, false)
 		}
 	}
@@ -583,25 +583,24 @@ func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport)
 			}
 		}
 	}
-	if !next.Spec.Needs.cpuOnly() {
-		id := firstDevice(next, w.Machine)
-		for _, d := range w.Machine.Devices {
-			if d.ID != id {
-				continue
-			}
-			usedGPU := next.Spec.Needs.MemoryGB
-			for _, r := range models {
-				if r.State == "ready" || r.State == "draining" || r.State == "loading" {
-					for _, m := range w.ModelConfig.Models {
-						if m.Name == r.Name && (r.Device == id || r.Device == "" && (m.Device == id || m.Device == "" && id == w.Machine.Device)) {
-							usedGPU += m.MemoryGB
-						}
+	// Each assigned card carries an equal share beside its resident models.
+	for _, d := range w.Machine.Devices {
+		id := d.ID
+		if next.Spec.Needs.cpuOnly() || !slices.Contains(attemptCards(next, w.Machine), id) {
+			continue
+		}
+		usedGPU := deviceShareGB(&next)
+		for _, r := range models {
+			if r.State == "ready" || r.State == "draining" || r.State == "loading" {
+				for _, m := range w.ModelConfig.Models {
+					if m.Name == r.Name && (r.Device == id || r.Device == "" && (m.Device == id || m.Device == "" && id == w.Machine.Device)) {
+						usedGPU += m.MemoryGB
 					}
 				}
 			}
-			if usedGPU > d.BudgetGB {
-				return refuseAdmission("device_budget", "GiB", usedGPU, d.BudgetGB, false)
-			}
+		}
+		if usedGPU > d.BudgetGB {
+			return refuseAdmission("device_budget", "GiB", usedGPU, d.BudgetGB, false)
 		}
 	}
 	if why != "" || usedCores > cores {
@@ -635,6 +634,12 @@ func localJobHostNeed(w Worker, j Job) float64 {
 		}
 	}
 	return hostNeed(&m, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
+}
+func attemptCards(j Job, m Machine) []string {
+	if len(j.AllocatedDevices) > 1 {
+		return j.AllocatedDevices
+	}
+	return []string{firstDevice(j, m)}
 }
 func firstDevice(j Job, m Machine) string {
 	if len(j.AllocatedDevices) > 0 {
@@ -878,7 +883,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				if !d.MemoryMeasured {
 					for _, j := range jobs {
 						if slices.Contains(j.AllocatedDevices, d.ID) {
-							d.FreeMemoryGB = max(0, d.FreeMemoryGB-j.Spec.Needs.MemoryGB)
+							d.FreeMemoryGB = max(0, d.FreeMemoryGB-deviceShareGB(&j))
 						}
 					}
 				}

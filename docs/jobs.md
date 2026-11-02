@@ -719,8 +719,11 @@ different startup file is still refused.
 
 Every command attempt receives worker-owned `MYCE_PLATFORM` (`cuda`, `xpu`,
 `metal`, or `cpu-fake`), `MYCE_DEVICES` (the worker's selected `--device` string,
-empty when no device is selected), and `MYCE_MACHINE` (worker name, not host ID).
-Queue-managed model servers receive the same three variables on every load.
+empty when no device is selected; comma-separated device IDs for a multi-card
+attempt), `MYCE_GPU_COUNT` (visible cards: `0` for CPU work, otherwise `1` or
+more, for example vLLM `--tensor-parallel-size $MYCE_GPU_COUNT`), and
+`MYCE_MACHINE` (worker name, not host ID).
+Queue-managed model servers receive the same variables on every load.
 `run.env` and catalog overrides cannot change them. Existing CUDA/XPU visibility
 selectors still apply; these variables describe placement, not a hardware fence.
 `MYCE_DEVICES` contains physical selectors, not framework-local indices. XPU

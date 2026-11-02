@@ -243,4 +243,32 @@ func WithModelDevice(m Model, platform, device string) (Model, error) {
 	return m, nil
 }
 
+// Several cards are visible together and frameworks renumber them 0..N-1.
+// Every other accelerator family stays select-none.
+func cardsEnvironment(platform string, cards []MachineDevice) (map[string]string, error) {
+	base, err := WithModelDevice(Model{}, "cpu", "")
+	if err != nil {
+		return nil, err
+	}
+	env := base.DeviceEnv
+	selectors, ordinals := []string{}, []string{}
+	for i, d := range cards {
+		if err := singleDeviceMask(d.Selector); err != nil {
+			return nil, err
+		}
+		selectors, ordinals = append(selectors, d.Selector), append(ordinals, strconv.Itoa(i))
+	}
+	switch platform {
+	case "cuda":
+		env["CUDA_VISIBLE_DEVICES"] = strings.Join(selectors, ",")
+	case "xpu":
+		env["ZE_AFFINITY_MASK"] = strings.Join(selectors, ",")
+		env["ONEAPI_DEVICE_SELECTOR"] = "level_zero:" + strings.Join(ordinals, ",")
+	case "fake":
+	default:
+		return nil, errors.New("multi-card attempts need CUDA, XPU or fake cards")
+	}
+	return env, nil
+}
+
 var modelHTTPClient = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}

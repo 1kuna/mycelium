@@ -317,6 +317,9 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 			}
 			host, why := q.exploratoryMemory(j, m)
 			refusal = why
+			if len(m.groupMembers) > 0 && refusal == "" {
+				refusal = "a first run explores one card; work spreads across cards only after evidence shows one card is too small"
+			}
 			if !n.cpuOnly() {
 				n.MemoryGB = q.reclaimableGPUMemory(m, j.Spec.Priority, j.Spec)
 				if m.TotalMemoryGB > 0 {

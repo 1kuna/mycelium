@@ -117,7 +117,15 @@ func targetFitReason(dimension string, j *Job, m *Machine) string {
 		}
 		return fmt.Sprintf("host memory need %g GiB (%g + %g slack) exceeds allowance %g GiB", hostNeed(m, n.MemoryGB, n.HostMemoryGB), base, m.MemoryCeilingSlackGB, m.FreeHostMemoryGB)
 	case "GPU memory":
+		if len(m.groupMembers) > 0 {
+			return fmt.Sprintf("GPU memory need %g GiB exceeds %g GiB across all %d cards of this host; one job runs on one host", n.MemoryGB, m.TotalMemoryGB, len(m.groupMembers))
+		}
 		return fmt.Sprintf("GPU memory need %g GiB exceeds allowance %g GiB", n.MemoryGB, m.TotalMemoryGB)
+	case "card group":
+		if n.MemoryGB <= m.groupFloorGB {
+			return fmt.Sprintf("one card holds %g GiB; work spreads across cards only when no single card can hold it", n.MemoryGB)
+		}
+		return fmt.Sprintf("this host holds %g GiB only across %d cards; Docker, model-server and extension-check jobs run on one card", n.MemoryGB, len(m.groupMembers))
 	case "cores":
 		reason := ""
 		if n.cpuOnly() {
@@ -247,7 +255,7 @@ func (q *Queue) evaluateTargets(j *Job, visit func(fit targetFit, candidate *Job
 			}
 			continue
 		}
-		for _, target := range q.machineTargets(m) {
+		for _, target := range q.placementTargets(m) {
 			copy := q.qualificationCapacity(target)
 			// Observation identity must see the same available target copy,
 			// including when the live owner is temporarily unavailable.
@@ -278,6 +286,7 @@ func (q *Queue) evaluateTargets(j *Job, visit func(fit targetFit, candidate *Job
 // Shared permanent-capacity projection for qualification and bounded exploration.
 func (q *Queue) qualificationCapacity(target *Machine) Machine {
 	copy := cloneMachine(target)
+	copy.group, copy.groupMembers, copy.groupFloorGB = target.group, target.groupMembers, target.groupFloorGB
 	copy.DiskVolumes = diskCapacityVolumes(copy.DiskVolumes)
 	copy.Gone, copy.Leaving, copy.Recovering, copy.CheckpointUnavailable = false, false, false, false
 	copy.MemoryError, copy.HostMemoryError, copy.CPUCapacityReason = "", "", ""

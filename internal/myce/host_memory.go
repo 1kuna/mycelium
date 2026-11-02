@@ -361,7 +361,7 @@ func (q *Queue) reclaimableGPUMemory(m *Machine, priority string, identity ...Sp
 	}
 	for _, j := range q.liveJobs() {
 		if batchOnTarget(j, m) && q.batchPreemptible(j, demand) {
-			room += j.Spec.Needs.MemoryGB
+			room += deviceShareGB(j)
 		}
 	}
 	return room

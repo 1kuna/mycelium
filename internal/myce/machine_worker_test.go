@@ -627,7 +627,7 @@ func TestMachineInventoryAuthorityAllowsIndependentDeviceSlots(t *testing.T) {
 	m.TotalMemoryGB, m.FreeMemoryGB = 1000, 1000
 	m.Devices = []MachineDevice{{ID: "0", Platform: "fake", Identity: "fake-a", Fingerprint: "fixture", Selector: "0", MemoryMode: "fixed", TotalMemoryGB: 8, BudgetGB: 8, FreeMemoryGB: 8}, {ID: "1", Platform: "fake", Identity: "fake-b", Fingerprint: "fixture", Selector: "1", MemoryMode: "fixed", TotalMemoryGB: 8, BudgetGB: 8, FreeMemoryGB: 8}}
 	huge := spec("experiment")
-	huge.Needs.MemoryGB = 9
+	huge.Needs.MemoryGB = 17 // More than both 8 GiB cards together (MY-30 lets 9 GiB span them).
 	oversized := submit(t, q, huge)
 	c := Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol}
 	reply, err := q.Checkin(c)

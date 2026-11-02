@@ -50,6 +50,9 @@ func (p ComponentExclusion) matchesTarget(m *Machine) bool {
 	if m == nil {
 		return false
 	}
+	if len(m.groupMembers) > 0 {
+		return slices.ContainsFunc(m.groupMembers, p.matchesTarget)
+	}
 	for _, d := range m.Devices {
 		if d.ID == m.Device && d.Platform == m.GPU {
 			return p.matchesComponent(hostID(m), d.Platform, d.Identity)
@@ -366,6 +369,10 @@ func (q *Queue) reservationAllows(j *Job, m *Machine) bool {
 	// Existing Started work retains normal recovery/custody and priority rules.
 	if j != nil && j.StartedAt != nil && j.Machine == m.ID && (j.State == "running" || j.State == "stopping") {
 		return true
+	}
+	if len(m.groupMembers) > 0 {
+		// Every card must be free of others' reservations (or bound to this job's).
+		return !slices.ContainsFunc(m.groupMembers, func(card *Machine) bool { return !q.reservationAllows(j, card) })
 	}
 	for _, r := range q.s.Reservations {
 		if !r.active() {

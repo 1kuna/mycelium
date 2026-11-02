@@ -55,10 +55,18 @@ func fitsTargetResourcesChecked(j *Job, m *Machine, memory float64, report *targ
 		report.check(!m.Gone, "gone") && report.check(!m.Leaving, "leaving") &&
 		report.check(!needsCheckpoint(j) || !m.CheckpointUnavailable, "checkpoint") &&
 		report.check(memory >= j.Spec.Needs.MemoryGB, "GPU memory") &&
+		report.check(groupFits(j, m), "card group") &&
 		report.check(machineAllowed(j.Spec.AllowedMachines, m.ID), "allow-list") &&
 		report.check(j.Spec.Needs.cpuOnly() || len(j.Spec.Needs.Platform.Required) == 0 || slices.Contains(j.Spec.Needs.Platform.Required, m.GPU), "platform") &&
 		report.check(environmentCanRun(j, m), "environment")
 }
+
+// Spread across cards only work that no single card of the host can hold.
+// Docker, model-server and extension-check jobs keep one card.
+func groupFits(j *Job, m *Machine) bool {
+	return len(m.groupMembers) == 0 || !j.Spec.Needs.cpuOnly() && j.Spec.Needs.MemoryGB > m.groupFloorGB && j.Spec.Needs.Model == "" && !j.Spec.Run.Docker && j.Spec.ExtensionCheck == nil
+}
+
 func affinity(j *Job, m *Machine) int {
 	n := 0
 	if j.Spec.Needs.Model != "" && slices.Contains(m.Models, j.Spec.Needs.Model) {
@@ -191,7 +199,7 @@ func waitingReason(j *Job, machines map[string]*Machine, jobs map[string]*Job) s
 		}
 	}
 	if !j.Spec.Needs.cpuOnly() {
-		needs = append(needs, fmt.Sprintf("%.1f GB free GPU memory", j.Spec.Needs.MemoryGB))
+		needs = append(needs, fmt.Sprintf("%.1f GB free GPU memory on one host (one card, or several cards of one host)", j.Spec.Needs.MemoryGB))
 	}
 	return "no machine in the fleet can run this right now (" + strings.Join(needs, "; ") + ")"
 }

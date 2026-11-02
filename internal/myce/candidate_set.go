@@ -31,7 +31,11 @@ func (q *Queue) candidates(m *Machine, scans ...*placementScan) *candidateSet {
 func (q *Queue) buildCandidates(m *Machine) *candidateSet {
 	s := &candidateSet{q: q, m: m, scores: map[string]float64{}, actives: map[string]float64{}}
 	s.resources = map[batchResourceKey]batchResourceRoom{}
+	fence := q.groupDemandFence(m)
 	for _, j := range q.liveJobs() {
+		if fence != nil && j.ID != fence.ID && q.comparePriority(j.Spec, fence.Spec) >= 0 {
+			continue
+		}
 		if candidate := q.batchCandidateWithResources(j, m, s.resources); candidate != nil {
 			s.jobs = append(s.jobs, candidate)
 		}
@@ -46,6 +50,32 @@ func (q *Queue) buildCandidates(m *Machine) *candidateSet {
 		s.jobs = append(s.jobs, j)
 	}
 	return s
+}
+
+// A card stopped for a waiting multi-card demand stays withheld from equal and
+// lower tiers until that demand starts. Otherwise the first card freed is
+// backfilled and the demand never sees all its cards free at once.
+func (q *Queue) groupDemandFence(m *Machine) *Job {
+	limit := m.TotalMemoryGB
+	if len(m.groupMembers) > 0 {
+		limit = m.groupFloorGB
+	}
+	var fence *Job
+	for _, victim := range q.liveJobs() {
+		// A requeued victim has left its machine; its latest copy keeps the card.
+		if victim.State != "queued" && victim.State != "stopping" || m.GPU == "cpu" {
+			continue
+		}
+		for _, c := range victim.Copies {
+			if c.PriorityStop == nil || c.Attempt != victim.Attempt || c.Machine != m.ID || !slices.ContainsFunc(targetDevices(m), func(id string) bool { return slices.Contains(c.AllocatedDevices, id) }) {
+				continue
+			}
+			if d := q.s.Jobs[c.PriorityStop.Demand]; d != nil && d.State == "queued" && d.Spec.Needs.MemoryGB > limit && (fence == nil || q.comparePriority(d.Spec, fence.Spec) < 0) {
+				fence = d
+			}
+		}
+	}
+	return fence
 }
 
 func (s *candidateSet) score(j *Job, m *Machine) float64 {

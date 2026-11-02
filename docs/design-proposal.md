@@ -961,8 +961,8 @@ refuses startup. Fixed XPU budgets/reserves stay per device and never substitute
 host RAM or unreliable telemetry. Unified capacity uses measured memory when
 `--memory-gb 0`; a nonzero allowance caps it. Live headroom and reserves still apply.
 
-Assignment atomically reserves host cores/RAM and zero or one GPU/VRAM in SQLite
-before delivery. Preparation, stopping, engines and unconfirmed release remain
+Assignment atomically reserves host cores/RAM and zero, one or several GPUs of
+one host with their VRAM in SQLite before delivery. Preparation, stopping, engines and unconfirmed release remain
 charged exactly once. Discrete VRAM and additional host RAM fit separately;
 unified allocations share one physical pool. Host reserves, launch slack and
 preparation/core hand-back are machine-wide. Lowered allowances expose debt and
@@ -973,11 +973,25 @@ At most one batch attempt occupies a GPU. CPU attempts can run alongside GPU
 work and one another within host resources and caps; model engines retain their
 usual shared-memory admission. `needs.gpu.devices` narrows candidate IDs, not the
 number allocated. CPU work cannot have a GPU selector. Malformed/duplicate IDs,
-empty explicit sets and invalid counts use `gpu_selector_invalid`. Unsupported
-multi-card attempts and model masks use `gpu_count_unsupported`, never partial
-reservation or reduction. Unknown/offline selections remain queued with
-`no_matching_device`. Multi-device attempts/vector fitting remain [#105](https://github.com/1kuna/mycelium/issues/105);
-cross-machine gang execution remains deferred.
+empty explicit sets and invalid counts use `gpu_selector_invalid`. An explicit
+count above one and multi-card model masks use `gpu_count_unsupported`, never
+partial reservation or reduction. Unknown/offline selections remain queued with
+`no_matching_device`.
+
+**Cards per job (MY-30, [#105](https://github.com/1kuna/mycelium/issues/105)).**
+`memory_gb` (declared or learned) decides the cards. Work one card of its host
+can hold gets one card. Work no single card holds, but N same-backend discrete
+cards of one host hold in equal shares, gets the fewest such cards: the N with
+the most free memory, reserved together with one release record, each charged
+`memory_gb / N`, host RAM and cores once. All are visible to every member
+(`MYCE_GPU_COUNT`, `MYCE_DEVICES`); preemption reclaims them as one attempt, and
+a card stopped for a waiting multi-card demand is withheld from equal and lower
+tiers until it starts. Docker, model-server and extension-check jobs keep one
+card; unmeasured `memory: auto` first runs explore one card, and multi-card
+attempts do not feed per-card memory learning. Extension work needs every card
+qualified; no separate multi-card parity check exists yet. Using more cards for
+speed when one fits waits for measured work curves. Cross-machine gang execution
+remains deferred.
 
 ### Attempt fencing and containment
 

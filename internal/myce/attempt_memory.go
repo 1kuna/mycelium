@@ -366,7 +366,7 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 	// The empty-cgroup baseline precedes payload launch, including for plain
 	// commands whose observer is installed just after exec. No baseline means
 	// diagnostic counters only, never permission to shrink a GPU envelope.
-	gpuHost := w.Machine.GPU == "xpu" && !w.Machine.UnifiedMemory && w.selectedDevice != nil && w.selectedDevice.pciAddress != "" && !j.Spec.Needs.cpuOnly()
+	gpuHost := w.Machine.GPU == "xpu" && !w.Machine.UnifiedMemory && w.selectedDevice != nil && w.selectedDevice.pciAddress != "" && !j.Spec.Needs.cpuOnly() && len(w.selectedDevices) == 0
 	completeGPUHost := gpuHost && a.hostBaseline != nil
 	var worstHost gpuHostState
 	pressureKnown := a.hostBaseline != nil && a.pressureBaseline != nil && !a.pressureStart.IsZero()
@@ -578,6 +578,9 @@ const (
 )
 
 func (w Worker) attemptDeviceMemory(ctx context.Context, ids map[int]bool, fs memoryFS) (float64, error) {
+	if len(w.selectedDevices) > 1 {
+		return 0, errAttemptMemoryUnsupported // One card's sample cannot describe a multi-card attempt.
+	}
 	if w.Machine.GPU == "cuda" {
 		selector := w.Machine.Device
 		if w.selectedDevice != nil {

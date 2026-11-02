@@ -46,6 +46,7 @@ type Worker struct {
 	CPUIsolationProbe       func(context.Context) error
 	cpuRuntimeProbe         *MachineProbe // Runtime/OS seam; tests still exercise real verification rules.
 	selectedDevice          *MachineDevice
+	selectedDevices         []MachineDevice // Every card of a multi-card attempt.
 	cpuIsolation            bool
 	inventoryAllowance      []string
 	inventoryReason         string
