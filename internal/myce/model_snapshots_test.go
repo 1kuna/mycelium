@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -123,7 +124,7 @@ func TestModelSnapshotsNativeDevJourney(t *testing.T) {
 	}
 	defer d.Close()
 	t.Cleanup(func() {
-		_ = removeSharedEntry(filepath.Join(state, "workers", "fake-1", "file-cache", "shared-inputs"))
+		_ = removeSharedEntry(filepath.Join(state, "workers", "fake-1", "file-cache", "model-snapshots"))
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -226,8 +227,8 @@ func TestModelSnapshotsDockerMountMatchesNativePath(t *testing.T) {
 	modelRoot := t.TempDir()
 	tinyModel(t, modelRoot)
 	w.ModelRoot = modelRoot
-	w.sharedInputs = &SharedInputCache{cache: EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: w.Clock}}
-	t.Cleanup(func() { _ = removeSharedEntry(w.sharedInputs.cache.Root) })
+	w.modelSnapshots = &SharedInputCache{cache: EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: w.Clock}}
+	t.Cleanup(func() { _ = removeSharedEntry(w.modelSnapshots.cache.Root) })
 	w.Machine.Capabilities = append(w.Machine.Capabilities, dockerFilesCapability)
 	j := dockerJob()
 	j.Checkpoint = filepath.Join(t.TempDir(), "checkpoints")
@@ -272,5 +273,130 @@ func TestModelSnapshotsDockerMountMatchesNativePath(t *testing.T) {
 	j.ModelLimits = nil
 	if _, _, err := w.acquireSharedInputs(context.Background(), j); err == nil || !strings.Contains(runtimeDiagnostic(err).String(), "no admitting local model policy") {
 		t.Fatal("policy-less model accepted", err)
+	}
+}
+
+// snapshotWorker wires the worker's real file-transfer caches: a tiny file
+// cache and the default model-sized snapshot budget.
+func snapshotWorker(t *testing.T, modelRoot string, clock Clock) *Worker {
+	t.Helper()
+	w := &Worker{ModelRoot: modelRoot, FileCacheRoot: filepath.Join(t.TempDir(), "file-cache"), FileCacheLimit: 16, Clock: clock}
+	if err := w.initFileTransfers(context.Background(), &workerStore{dir: t.TempDir()}); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = removeSharedEntry(w.modelSnapshots.cache.Root) })
+	return w
+}
+
+func snapshotJob(repo string) Job {
+	return Job{Spec: Spec{ModelSnapshots: map[string]ModelSnapshot{"base": {Repo: repo, Revision: tinyRevision}}}, ModelLimits: &ModelLimits{}}
+}
+
+func TestModelSnapshotBudgetExceedsFileCache(t *testing.T) {
+	modelRoot := t.TempDir()
+	tinyModel(t, modelRoot)
+	w := snapshotWorker(t, modelRoot, &fakeClock{now: time.Unix(1000, 0)})
+	paths, releases, err := w.acquireModelSnapshots(context.Background(), snapshotJob("org/tiny"))
+	if err != nil {
+		t.Fatal("snapshot larger than the 16-byte file cache was refused:", err)
+	}
+	for _, release := range releases {
+		release()
+	}
+	if data, _ := os.ReadFile(filepath.Join(paths["MYCE_MODEL_BASE"], "model.safetensors")); string(data) != tinyWeights {
+		t.Fatalf("cached view %q", data)
+	}
+}
+
+func TestModelSnapshotSameVolumeClonesAndIgnoresSourceWrites(t *testing.T) {
+	modelRoot := t.TempDir()
+	weights := strings.Repeat("w", 64<<20)
+	repo := hubRepo(t, modelRoot, "org/large", tinyRevision, map[string]string{"model.safetensors": weights})
+	blob, err := filepath.EvalSymlinks(filepath.Join(repo, "snapshots", tinyRevision, "model.safetensors"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w := snapshotWorker(t, modelRoot, &fakeClock{now: time.Unix(1000, 0)})
+	probe, _ := os.Open(blob)
+	clones := cloneSharedFile(probe, filepath.Join(t.TempDir(), "probe"))
+	probe.Close()
+	free := func() int64 {
+		var st syscall.Statfs_t
+		if err := syscall.Statfs(w.modelSnapshots.cache.Root, &st); err != nil {
+			t.Fatal(err)
+		}
+		return int64(st.Bavail) * int64(st.Bsize)
+	}
+	if err := PrepareStateRoots(w.modelSnapshots.cache.Root); err != nil {
+		t.Fatal(err)
+	}
+	before := free()
+	paths, releases, err := w.acquireModelSnapshots(context.Background(), snapshotJob("org/large"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		for _, release := range releases {
+			release()
+		}
+	}()
+	if used := before - free(); clones && used >= int64(len(weights)) {
+		t.Fatalf("same-volume snapshot used %d bytes for a %d-byte clone", used, len(weights))
+	} else if !clones {
+		t.Log("volume cannot clone; the snapshot was copied")
+	}
+	// A download job rewriting the hub blob in place must not reach the view.
+	f, err := os.OpenFile(blob, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteAt([]byte("tampered"), 0); err != nil {
+		t.Fatal(err)
+	}
+	f.Close()
+	cached := filepath.Join(paths["MYCE_MODEL_BASE"], "model.safetensors")
+	if data, _ := os.ReadFile(cached); string(data) != weights {
+		t.Fatal("source write changed the verified snapshot view")
+	}
+	again, more, err := w.acquireModelSnapshots(context.Background(), snapshotJob("org/large"))
+	releases = append(releases, more...)
+	if err != nil || again["MYCE_MODEL_BASE"] != paths["MYCE_MODEL_BASE"] {
+		t.Fatal("verified view not reused", err)
+	}
+}
+
+func TestModelSnapshotRestartSkipsUnchangedRehash(t *testing.T) {
+	modelRoot := t.TempDir()
+	tinyModel(t, modelRoot)
+	clock := &fakeClock{now: time.Unix(1000, 0)}
+	w := snapshotWorker(t, modelRoot, clock)
+	paths, releases, err := w.acquireModelSnapshots(context.Background(), snapshotJob("org/tiny"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	releases[0]()
+	// A restarted worker has a fresh cache object over the same directory.
+	restart := func() int {
+		rehashes := 0
+		w.modelSnapshots = &SharedInputCache{cache: EnvironmentCache{Root: w.modelSnapshots.cache.Root, Limit: w.modelSnapshots.cache.Limit, Clock: clock}, beforeVerify: func() { rehashes++ }}
+		_, releases, err := w.acquireModelSnapshots(context.Background(), snapshotJob("org/tiny"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		releases[0]()
+		return rehashes
+	}
+	if n := restart(); n != 0 {
+		t.Fatalf("restart re-hashed unchanged snapshot %d times", n)
+	}
+	clock.Advance(time.Hour)
+	if err := os.Chtimes(filepath.Join(paths["MYCE_MODEL_BASE"], "config.json"), clock.Now(), clock.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if n := restart(); n != 1 {
+		t.Fatalf("restart after a changed mtime re-hashed %d times, want 1", n)
+	}
+	if n := restart(); n != 0 {
+		t.Fatalf("re-verified snapshot re-hashed %d times after restart", n)
 	}
 }

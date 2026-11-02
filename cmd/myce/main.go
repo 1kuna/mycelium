@@ -262,7 +262,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	f.Var(&nativeReadRoots, "native-read-root", "operator-granted native read-only root (absolute; repeat; empty clears)")
 	f.Var(&nativeExecuteRoots, "native-exec-root", "operator-granted native read/execute root (absolute; repeat; empty clears)")
 	copyParallel := f.Int("model-copy-parallel", 1, "maximum concurrent NAS copies per worker")
-	cacheLimit := f.Int64("model-cache-bytes", 100*1024*1024*1024, "maximum active cache bytes")
+	cacheLimit := f.Int64("model-cache-bytes", 100*1024*1024*1024, "maximum active model cache bytes; also the model snapshot cache budget")
 	productionGrace := f.Duration("preemption-stop-grace", 10*time.Second, "checkpoint grace and repeated-preemption minimum runtime; worker accelerator stop grace (capped at 15s)")
 	f.DurationVar(productionGrace, "production-stop-grace", 10*time.Second, "legacy alias for preemption-stop-grace")
 	heartbeat := f.Duration("heartbeat", time.Second, "worker check-in interval")

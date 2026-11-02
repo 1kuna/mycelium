@@ -47,6 +47,7 @@ const (
 	modelSnapshotsCapability = "model_snapshots_v1"
 	modelHubDirectory        = "hub"
 	dockerModelRoot          = "/myce/models"
+	defaultModelCacheBytes   = 100 << 30
 )
 
 var (
@@ -253,9 +254,10 @@ func modelBlobIdentity(ctx context.Context, source string) (FileRef, error) {
 	return FileRef{SHA256: hex.EncodeToString(content.Sum(nil)), SizeBytes: n}, nil
 }
 
-// acquireModelSnapshots copies each declared snapshot into the shared-input
-// cache, which verifies every byte, makes the copy read-only and holds a use lock
-// until exact attempt cleanup. Paths are keyed by the job's environment names.
+// acquireModelSnapshots copies (or clones, on a copy-on-write volume) each
+// declared snapshot into the model snapshot cache, which verifies every byte,
+// makes the copy read-only and holds a use lock until exact attempt cleanup.
+// Paths are keyed by the job's environment names.
 func (w Worker) acquireModelSnapshots(ctx context.Context, j Job) (map[string]string, []func(), error) {
 	paths := map[string]string{}
 	var releases []func()
@@ -268,8 +270,8 @@ func (w Worker) acquireModelSnapshots(ctx context.Context, j Job) (map[string]st
 	if len(j.Spec.ModelSnapshots) == 0 {
 		return paths, nil, nil
 	}
-	if w.sharedInputs == nil {
-		return fail(errors.New("shared input cache unavailable"))
+	if w.modelSnapshots == nil {
+		return fail(errors.New("model snapshot cache unavailable"))
 	}
 	if j.ModelLimits == nil {
 		return fail(modelSnapshotError("model_snapshot_policy", "permission_denied", nil))
@@ -283,13 +285,13 @@ func (w Worker) acquireModelSnapshots(ctx context.Context, j Job) (map[string]st
 		if limit := j.ModelLimits.MaxBytes; limit > 0 && need > limit {
 			return fail(modelSnapshotError("model_snapshot_too_large", "storage_full", nil))
 		}
-		if _, err := os.Stat(filepath.Join(w.sharedInputs.cache.Root, input.key())); err != nil && j.ModelLimits.FreeFloorBytes > 0 {
-			disk, e := workerDiskProbe(w.sharedInputs.cache.Root)
+		if _, err := os.Stat(filepath.Join(w.modelSnapshots.cache.Root, input.key())); err != nil && j.ModelLimits.FreeFloorBytes > 0 {
+			disk, e := workerDiskProbe(w.modelSnapshots.cache.Root)
 			if e != nil || disk.FreeBytes < uint64(need) || disk.FreeBytes-uint64(need) < uint64(j.ModelLimits.FreeFloorBytes) {
 				return fail(modelSnapshotError("model_snapshot_too_large", "storage_full", e))
 			}
 		}
-		path, done, err := w.sharedInputs.Acquire(ctx, input, repo)
+		path, done, err := w.modelSnapshots.Acquire(ctx, input, repo)
 		if err != nil {
 			if errors.Is(err, errCheckpointIOPending) || ctx.Err() != nil {
 				return fail(err)

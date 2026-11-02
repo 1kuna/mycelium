@@ -508,11 +508,21 @@ The worker resolves the snapshot in the standard hub-cache layout under its
 path. Each snapshot file must be a link into that repository's `blobs/` folder
 or a regular file. Blobs named by SHA-256 (large files) are verified while
 copying; blobs named by Git SHA-1 (small files) are hashed and checked against
-their name. The verified closure is copied into the worker's shared-input cache,
-reused by identical snapshots, protected by use locks until attempt cleanup, and
-evicted only when inactive. It counts against `--file-cache-bytes`, so workers
-serving large models need a larger allowance. Copies are mode read-only, which
-is cooperative for unsandboxed jobs, as for shared inputs.
+their name. The verified closure is copied into the worker's model snapshot
+cache (`model-snapshots` under the file cache folder), reused by identical
+snapshots, protected by use locks until attempt cleanup, and evicted only when
+inactive. That cache has its own budget, `--model-cache-bytes` (default
+100 GiB), plus the usual free-space floor; `--file-cache-bytes` does not apply.
+When the cache folder and the hub share a copy-on-write volume (APFS, or Linux
+Btrfs/XFS with reflinks), each file is cloned instead of copied, so it shares
+blocks with the hub until either side writes. A later write to a hub blob cannot
+change the clone. Hard links are never used, because a link is the same file:
+writing or changing permissions on the hub blob would change the "verified"
+copy. Other volumes, including a NAS, get a full copy. After verification the
+worker records each file's size, mode, modification time, inode and change time
+beside the entry; a restarted worker re-hashes the entry only when that record
+no longer matches. Copies are mode read-only, which is cooperative for
+unsandboxed jobs, as for shared inputs.
 
 Only workers with a model root advertise `model_snapshots_v1`; other workers do
 not receive these jobs. A job withheld before launch fails with one of these
