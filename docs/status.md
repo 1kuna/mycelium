@@ -265,7 +265,7 @@ does not prove every profile will load; a rejected profile fails the attempt.
 A missing capability report from an older worker is not evidence of online support.
 
 Sandboxed native payloads default offline; worker-owned environment/input preparation
-remains network-capable. An online job is eligible only on `native_network`
+remains network-capable. A sandboxed online job is eligible only on `native_network`
 hosts. If none qualifies, submission returns HTTP 409 `no_qualified_target`
 with a protected-outbound capability reason, rather than creating an impossible
 queued job. A launch-time Linux mismatch reports `native_network_unavailable`;
@@ -277,6 +277,17 @@ mode as `general egress unavailable` and fallback as `partial network isolation
 `same-UID pathname SEQPACKET endpoints reachable (partial)`; an absent report says
 `native isolation unreported`. For the threat model and exact
 directory/temp/control/network guarantees, see [native isolation](native-isolation.md).
+
+Unsandboxed native commands (including plain commands under the MY-25 default)
+do not require `native_network`: they have no kernel network confinement to
+qualify. `needs.network: true` still declares outbound intent. This does not
+grant protected egress or change a frozen extension's isolation policy.
+
+From the next release, queued reasons explain network, environment preparation
+and RAM envelope blockers per compatible target. A RAM wait gives the resolved
+envelope and that target's free host memory; an unrelated target's reservation
+cannot explain the wait. Shared-host preparation refusals explicitly say the
+environment is not prepared and that the host never builds environments.
 
 `native_isolation_warning` is the worker's compact startup inventory warning,
 shown as `WARNING` in the CLI machine row. Fallback workers scan listening Unix
@@ -687,6 +698,11 @@ cleanup retains the fence past this lifetime; `text` reports `reserved past max
 lifetime` and the reason. Expiry releases only an absent binding without retained
 execution custody. The release reason remains in status.
 Other reservations, device exclusions and newer operator drains remain intact.
+Device reservations leave CPU placement eligible within the host's CPU/RAM
+allowances. From the next release, a machine worker's CPU environment preparation
+also retains CPU scope, so its offer cannot withdraw the reserved GPU job at
+launch. The bound job's own exact preparation remains excluded from `pending`;
+it waits unassigned while its environment builds and launches after readiness.
 See [operations](operations.md#reserve-a-host-or-its-devices-for-an-existing-validation-job)
 for acquisition, atomic `extension check --reserve`, and conditional release.
 

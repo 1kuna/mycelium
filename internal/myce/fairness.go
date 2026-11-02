@@ -512,9 +512,6 @@ func (q *Queue) waitReason(j *Job) string {
 	if reason := q.hostRetryStorageWaitingReason(j); reason != "" {
 		return reason
 	}
-	if reason := q.reservationWaitReason(j); reason != "" {
-		return reason
-	}
 	if !dependencyReady(j) {
 		if j.Spec.After != nil && j.Spec.After.Piece == "" {
 			return "waiting for upstream fan-out parent success"
@@ -547,6 +544,9 @@ func (q *Queue) waitReason(j *Job) string {
 	}
 	if r := q.holdWaitReason(j); r != "" {
 		return r
+	}
+	if reason := q.targetWaitingReason(j); reason != "" {
+		return reason
 	}
 	machines := map[string]*Machine{}
 	for _, m := range q.plannerMachines() {
