@@ -492,6 +492,7 @@ func TestWaitingReasonAndGiveUp(t *testing.T) {
 			q, c := fixture(t)
 			s := spec("experiment")
 			want := ""
+			reasonPrefix := "no machine in the fleet"
 			switch kind {
 			case "platform":
 				s.Needs.Platform = Platform{Required: []string{"metal"}}
@@ -501,7 +502,9 @@ func TestWaitingReasonAndGiveUp(t *testing.T) {
 				want = "allowed machines: mac"
 			case "environment":
 				s.Environment.Name = "mlx"
-				want = "environment not ready: mlx"
+				// Target resolution reports why this non-builder cannot provide it.
+				reasonPrefix = `environment recipe "mlx" unavailable`
+				want = "installed=false, builder=false"
 			case "memory":
 				s.Needs.MemoryGB = 80
 				want = "80.0 GB"
@@ -511,7 +514,7 @@ func TestWaitingReasonAndGiveUp(t *testing.T) {
 			j := submit(t, q, s)
 			check(t, q, machine("one", "fake"), nil)
 			got := job(t, q, j.ID)
-			if !strings.Contains(got.Reason, "no machine in the fleet") || !strings.Contains(got.Reason, want) {
+			if !strings.Contains(got.Reason, reasonPrefix) || !strings.Contains(got.Reason, want) {
 				t.Fatalf("reason %s", got.Reason)
 			}
 			c.Advance(time.Minute)
