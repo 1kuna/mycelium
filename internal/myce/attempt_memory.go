@@ -336,7 +336,7 @@ func withExitMaxRSS(peak *AttemptMemoryPeak, state *os.ProcessState) *AttemptMem
 // other workloads and cannot serve as job peaks. Sampling is a lower bound.
 // groups names the attempt's process groups for hosts without cgroups.
 func (w Worker) observeAttemptMemory(a *memoryAttempt, j Job, groups func() []int) func() *AttemptMemoryPeak {
-	return w.observeAttemptMemoryEvery(a, j, groups, 5*time.Second)
+	return w.observeAttemptMemoryEvery(a, j, groups, deviceMemorySamplePeriod)
 }
 
 func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func() []int, devicePeriod time.Duration) func() *AttemptMemoryPeak {
@@ -471,6 +471,7 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 						continue
 					}
 					devicePeak = sampledMemoryPeak(devicePeak, &AttemptMemoryPeak{DeviceGB: &gb})
+					a.device.Store(&hostMemorySample{gb: gb, at: clock.Now()})
 				}
 			}
 		}()
@@ -743,5 +744,10 @@ func (a *memoryAttempt) currentHostMemory(clock Clock) *CurrentHostMemory {
 	if err != nil {
 		return nil
 	}
-	return &CurrentHostMemory{NonreclaimableGB: float64(min(anon, current)) / (1 << 30), sampledAt: at}
+	sample := &CurrentHostMemory{NonreclaimableGB: float64(min(anon, current)) / (1 << 30), sampledAt: at}
+	if device := a.device.Load(); device != nil {
+		gb := device.gb
+		sample.DeviceGB, sample.deviceSampledAt = &gb, device.at
+	}
+	return sample
 }

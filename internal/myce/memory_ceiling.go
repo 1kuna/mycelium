@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -45,6 +46,8 @@ type memoryAttempt struct {
 	pressureStart    time.Time
 	pressureBaseline *uint64
 	clock            Clock
+	// Latest per-process device sample, for live planning credit (#596).
+	device atomic.Pointer[hostMemorySample]
 }
 
 var ErrMemoryCeilingsRequired = errors.New("required memory ceilings unavailable")

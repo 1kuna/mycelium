@@ -145,6 +145,7 @@ type process struct {
 	machine    string
 	docker     *dockerAttempt
 	native     *nativeGroup
+	memory     *memoryAttempt // Plain command cgroup; carries live device samples.
 	mu         sync.Mutex
 	job        Job
 	cmd        *exec.Cmd
@@ -801,7 +802,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	if err = w.reportNativeCustody(j, s.state.Session, identity, identity, "started", cmd.Process.Pid); err != nil {
 		return nil, abort(s.startFailure(j, launchRefused, err))
 	}
-	p := &process{job: j, stopGrace: w.AcceleratorStopGrace, cmd: cmd, done: make(chan workerFinish, 1), savePriorityStop: s.priorityStopRecorder()}
+	p := &process{job: j, stopGrace: w.AcceleratorStopGrace, cmd: cmd, done: make(chan workerFinish, 1), savePriorityStop: s.priorityStopRecorder(), memory: memoryAttempt}
 	var savedStopAt *time.Time
 	var savedUserCancel bool
 	p.saveStopIntent = func(deadline *time.Time, userCancel bool) error {
