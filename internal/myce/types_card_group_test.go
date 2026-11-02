@@ -33,6 +33,17 @@ func TestMultiCardJobReservesBindsAndReleasesBothCards(t *testing.T) {
 			t.Fatalf("card %s free %g, want an equal 6 GiB share charged", card.Device, card.FreeMemoryGB)
 		}
 	}
+	snapshot, err := q.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range snapshot.Machines {
+		for _, card := range status.Devices {
+			if status.ID == m.ID && (len(card.Attempts) != 1 || len(card.Releases) != 1 || card.Releases[0].Job != big.ID) {
+				t.Fatal("device status does not show the group's attempt and release on every card", card.ID, card.Attempts, card.Releases)
+			}
+		}
+	}
 	small := submit(t, q, spec("experiment"))
 	if got := assignedJob(machineCheck(t, q, m, a)); got != nil {
 		t.Fatal("a card of the running group admitted another batch", got.ID)
@@ -157,6 +168,26 @@ func TestMultiCardPlacementFollowsMemory(t *testing.T) {
 	var refusal *HTTPError
 	if !errors.As(err, &refusal) || refusal.Code != "no_qualified_target" || !strings.Contains(refusal.Message, "across all 2 cards of this host; one job runs on one host") {
 		t.Fatal("a job larger than any host was not refused clearly", err)
+	}
+}
+
+// With mixed card sizes, work the largest card holds never spreads, even when
+// the smaller cards have the most free memory.
+func TestMultiCardMixedSizesKeepWorkOnOneCardThatHoldsIt(t *testing.T) {
+	cards := []*Machine{
+		{ID: "mixed", GPU: "fake", Device: "0", TotalMemoryGB: 24, FreeMemoryGB: 4},
+		{ID: "mixed", GPU: "fake", Device: "1", TotalMemoryGB: 8, FreeMemoryGB: 8},
+		{ID: "mixed", GPU: "fake", Device: "2", TotalMemoryGB: 8, FreeMemoryGB: 8},
+	}
+	twenty := &Job{Spec: bigSpec("production", 20)}
+	larger := &Job{Spec: bigSpec("production", 25)}
+	for _, g := range groupTargets(cards) {
+		if groupFits(twenty, g) {
+			t.Fatalf("20 GiB job one 24 GiB card holds may spread across %s", g.Device)
+		}
+		if len(g.groupMembers) == 3 && !groupFits(larger, g) {
+			t.Fatal("work no fewer cards hold cannot use all three", g.Device)
+		}
 	}
 }
 

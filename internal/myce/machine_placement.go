@@ -88,13 +88,18 @@ func groupTargets(cards []*Machine) []*Machine {
 	var out []*Machine
 	for _, same := range byPlatform {
 		slices.SortStableFunc(same, func(a, b *Machine) int { return cmp.Compare(b.FreeMemoryGB, a.FreeMemoryGB) })
-		floor := 0.0
-		for _, c := range same {
-			floor = max(floor, c.TotalMemoryGB)
+		// The floor is the most any fewer cards hold in equal shares: k cards
+		// hold k times the k-th largest card, whichever cards are free now.
+		totals := make([]float64, len(same))
+		for i, c := range same {
+			totals[i] = c.TotalMemoryGB
 		}
+		slices.SortFunc(totals, func(a, b float64) int { return cmp.Compare(b, a) })
+		floor := 0.0
 		for n := 2; n <= len(same); n++ {
+			floor = max(floor, float64(n-1)*totals[n-2])
 			g := groupView(same[:n])
-			g.groupFloorGB, floor = floor, g.TotalMemoryGB
+			g.groupFloorGB = floor
 			out = append(out, g)
 		}
 	}
@@ -326,7 +331,7 @@ func (q *Queue) machineDeviceStatus(copy, m *Machine) {
 			}
 		}
 		for _, r := range q.s.HostReleases {
-			if r.Machine == m.ID && r.Device == d.ID {
+			if r.Machine == m.ID && r.onDevice(d.ID) {
 				d.Releases = append(d.Releases, r)
 			}
 		}
