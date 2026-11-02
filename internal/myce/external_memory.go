@@ -11,11 +11,14 @@ const externalBucketWidth = 15 * time.Minute
 const externalBucketCount = 7*24*4 + 1
 
 // HostMemoryObservation is simultaneous best-effort host used RAM and current
-// worker/descendant RSS. It never uses reservations or historical attempt peaks.
+// worker/descendant RSS plus managed Docker cgroup memory. It never uses
+// reservations or historical attempt peaks. Unknown attribution does not
+// invalidate the independent physical-memory measurement.
 type HostMemoryObservation struct {
-	TotalGB    float64 `json:"total_gb"`
-	UsedGB     float64 `json:"used_gb"`
-	MyceliumGB float64 `json:"mycelium_gb"`
+	AttributionUnknown bool    `json:"attribution_unknown,omitempty"`
+	TotalGB            float64 `json:"total_gb"`
+	UsedGB             float64 `json:"used_gb"`
+	MyceliumGB         float64 `json:"mycelium_gb"`
 }
 type externalMemoryBucket struct {
 	Start  time.Time        `json:"start"`
@@ -64,7 +67,7 @@ func externalBinUpper(i int) float64 {
 }
 func (q *Queue) recordExternalMemory(m *Machine) {
 	o := m.MemoryObservation
-	if !validHostMemoryObservation(o) {
+	if !validHostMemoryObservation(o) || o.AttributionUnknown {
 		return
 	}
 	if q.s.ExternalMemory == nil {
