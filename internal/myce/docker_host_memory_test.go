@@ -125,7 +125,17 @@ func TestDockerHostMemoryStaleOrMissingKeepsReservation(t *testing.T) {
 					t.Fatal("unrelated local PID granted credit")
 				}
 			}
-			if _, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{r}}); err != nil {
+			queueReport := r
+			if mode == "wrong-session" {
+				// The protocol rejects a session different from the reporting
+				// machine before admission; it cannot be a successful heartbeat.
+				if _, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{r}}); err == nil {
+					t.Fatal("wrong-session heartbeat accepted")
+				}
+				queueReport.Session = holder.Session
+				queueReport.CurrentHostMemory = nil
+			}
+			if _, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{queueReport}}); err != nil {
 				t.Fatal(err)
 			}
 			if got := q.s.Machines[m.ID].FreeHostMemoryGB; got != 0 {
