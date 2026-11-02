@@ -1525,3 +1525,28 @@ func TestMemoryEnvelopeIncompleteLocalHistoryKeepsTotalPeak(t *testing.T) {
 		t.Fatalf("complete row discounted incomplete local history: %v", got)
 	}
 }
+
+// A host that cannot satisfy the job's target or backend must not appear as a
+// RAM-envelope candidate. Observed: an xpu-only job listed a macOS host.
+func TestMemoryEnvelopeReasonSkipsIneligibleHosts(t *testing.T) {
+	q, _ := fixture(t)
+	xpu := cpuMachine("xpu-host", "xpu-host", "xpu", 8, 15) // Under half of 64 GiB free.
+	mac := cpuMachine("mac-host", "mac-host", "metal", 8, 15)
+	mac.CapabilityProfile.OS, mac.CapabilityProfile.Arch = "darwin", "arm64"
+	s := cpuSpec(2, 0)
+	s.Needs.Memory = "auto"
+	s.Needs.Platform = Platform{Required: []string{"xpu"}}
+	s.Targets = []ExecutionTarget{{OS: "linux", Arch: "amd64", Platform: "xpu"}}
+	j := submit(t, q, s)
+	if check(t, q, mac, nil).Job != nil || check(t, q, xpu, nil).Job != nil {
+		t.Fatal("exploration admitted without headroom or on an ineligible host")
+	}
+	reason := job(t, q, j.ID).Reason
+	if !strings.Contains(reason, "xpu-host") || strings.Contains(reason, "mac-host") {
+		t.Fatalf("reason must name only eligible hosts: %s", reason)
+	}
+	mac.HostAvailableMemoryGB = 64
+	if check(t, q, mac, nil).Job != nil {
+		t.Fatal("xpu job placed on a host without xpu")
+	}
+}
