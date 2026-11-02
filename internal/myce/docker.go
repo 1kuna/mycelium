@@ -149,6 +149,7 @@ type dockerExecution struct {
 	ExitCode             int                     `json:"exit_code"`
 }
 type dockerAttempt struct {
+	hostMemoryProbe checkpointIO[*CurrentHostMemory]
 	memory          *memoryAttempt
 	storageObserver *storageObserver
 	memoryWorker    *Worker

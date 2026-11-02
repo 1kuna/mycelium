@@ -743,7 +743,12 @@ minus running attempts' remaining growth room, and the configured allowance
 minus full reservations (when configured). Remaining growth is
 `max(0, reservation - current nonreclaimable use)` per attempt. The operator
 reserve is already removed from live availability; it is not subtracted again.
-Only fresh exact-attempt cgroup anonymous resident memory reduces growth;
+Only fresh exact-attempt cgroup anonymous resident memory reduces growth,
+including managed Docker containers with per-member caps and no shared parent.
+The worker verifies exact attempt labels and local container cgroup membership,
+then sums disjoint container charges. The unified-CUDA device-growth floor
+remains: host cgroup memory cannot cancel the device reservation.
+Only this current nonreclaimable memory reduces growth;
 reclaimable cache, historical peaks and process RSS do not. Missing or five-second-old
 samples retain the full reservation, as do models and unconfirmed release custody.
 Queue restarts discard current-use credit. macOS uses the conservative fallback
@@ -814,7 +819,11 @@ The worker adds a current observation to its existing heartbeat on macOS and
 Linux. Host used RAM is physical RAM minus reclaimable RAM, undoing the worker's
 admission reserve. Raw reclaimable RAM is retained before the admission clamp,
 including pressure below that reserve. Current worker and descendant RSS (including native jobs and
-model processes) is subtracted; invalid observations are skipped. Custom sources lacking raw
+model processes) is subtracted, together with fresh exact-attempt anonymous
+resident memory from managed Docker containers outside that process tree.
+Missing or stale memory samples for a running Docker attempt skip the
+observation instead of recording its memory as external. Invalid observations
+are skipped. Custom sources lacking raw
 RAM evidence cannot contribute while reserve-clamped.
 Reservations and attempt high-water marks are never subtracted. This is a
 sampled estimate: RSS may count shared pages more than once and miss compressed

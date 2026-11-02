@@ -227,7 +227,11 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 			case p.native != nil:
 				memory = p.native.memory
 			case p.docker != nil:
-				memory = p.docker.envelope()
+				var fs memoryFS = osMemoryFS{}
+				if w.memoryCeilings != nil {
+					fs = w.memoryCeilings.fs
+				}
+				report.CurrentHostMemory = p.docker.currentHostMemory(w.Clock, fs)
 			case p.memory != nil:
 				memory = p.memory
 			case s.state.Cgroup != "":
@@ -237,7 +241,9 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				}
 				memory = &memoryAttempt{fs: fs, path: s.state.Cgroup}
 			}
-			report.CurrentHostMemory = memory.currentHostMemory(w.Clock)
+			if p.docker == nil {
+				report.CurrentHostMemory = memory.currentHostMemory(w.Clock)
+			}
 		}
 		if s.state.Job != nil {
 			report.InputsStagedAt = s.state.Job.InputsStagedAt
@@ -908,6 +914,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				m.HostMemoryError = "host RAM probe failed"
 			}
 			m.MemoryObservation = w.hostMemoryObservation(ctx, m, rawAvailable, err)
+			m.MemoryObservation = creditDockerObservation(m.MemoryObservation, jobs, reports, w.Clock.Now())
 			m.SharedHostPressure = nil
 			if w.Machine.SharedHost != nil {
 				if !w.Clock.Now().Before(nextPressureProbe) {
