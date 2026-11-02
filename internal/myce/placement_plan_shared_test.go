@@ -188,3 +188,51 @@ func TestSharedDeviceFillsIdleCardsFirst(t *testing.T) {
 		t.Fatal("third job did not share one discrete card", running[2].AllocatedDevices)
 	}
 }
+
+// A multi-card demand keeps its cards to itself, so it must stop every
+// co-tenant on them, not only enough to free its per-card share (#538 review).
+func TestSharedDeviceMultiCardDemandStopsEveryCoTenant(t *testing.T) {
+	q, _ := fixture(t)
+	m := m3Machine()
+	var running []*Job
+	for _, gb := range []float64{3, 3, 2, 2} {
+		s := spec("experiment")
+		s.Needs.MemoryGB = gb
+		queued := submit(t, q, s)
+		got := assignedJob(machineCheck(t, q, m, running...))
+		if got == nil || got.ID != queued.ID {
+			t.Fatal("experiment not admitted beside another on an 8 GiB card", gb, job(t, q, queued.ID).Reason)
+		}
+		running = append(running, got)
+	}
+	// Each card holds a 3 GiB and a 2 GiB experiment; stopping the 3 GiB one
+	// alone would free the 6 GiB share a 12 GiB two-card job needs per card.
+	production := submit(t, q, bigSpec("production", 12))
+	machineCheck(t, q, m, running...)
+	for _, r := range running {
+		if got := job(t, q, r.ID); got.State != "stopping" {
+			t.Fatal("two-card production left a co-tenant running on its cards", got.ID, got.State, got.AllocatedDevices, job(t, q, production.ID).Reason)
+		}
+	}
+}
+
+// A host-only hint leaves a unified GPU job's device figure at the 1 GiB
+// default, which no one stated or measured; that job keeps its card.
+func TestSharedDeviceUnifiedDeviceDefaultKeepsCard(t *testing.T) {
+	q, _ := fixture(t)
+	m := sharedUnifiedMachine()
+	s := plainGPUSpec()
+	s.Needs.HostMemoryGB = 4 // `--host-mem 4G` without --mem.
+	first := assignGPU(t, q, m, submit(t, q, s))
+	if e := first.MemoryEnvelope; e == nil || e.Basis != "hint" || e.DeviceGB != 1 {
+		t.Fatalf("fixture no longer charges the unified device default: %+v", e)
+	}
+	if err := q.Started(result(first, false)); err != nil {
+		t.Fatal(err)
+	}
+	small := submit(t, q, sharedSpec("experiment", 13))
+	if got := assignedJob(machineCheck(t, q, m, first)); got != nil {
+		t.Fatal("a job joined a GPU whose holder's device use is unknown", got.ID)
+	}
+	requireState(t, q, small.ID, "queued")
+}

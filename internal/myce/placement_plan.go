@@ -175,8 +175,13 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool) 
 	if len(m.groupMembers) > 0 {
 		cards, share = m.groupMembers, need/float64(len(m.groupMembers))
 	}
+	// Only a single-card demand shares; a group keeps every card it takes.
+	shared := false
+	if batch {
+		_, shared = q.deviceCoTenants(m, j, true)
+	}
 	for _, card := range cards {
-		if !q.cardRoom(j, card, share, batch, releaseBatch, p) {
+		if !q.cardRoom(j, card, share, batch, releaseBatch, shared, p) {
 			return nil
 		}
 	}
@@ -301,17 +306,13 @@ func (q *Queue) fewestBatchVictims(victims []*Job, room, need float64, p *placem
 }
 
 // cardRoom adds the batch and engine releases one card needs to p.
-func (q *Queue) cardRoom(j *Job, m *Machine, need float64, batch, releaseBatch bool, p *placementPlan) bool {
+func (q *Queue) cardRoom(j *Job, m *Machine, need float64, batch, releaseBatch, shared bool, p *placementPlan) bool {
 	room := m.FreeMemoryGB - m.modelReservationDebtGB
 	if r, ok := q.s.BatchReleases[batchReleaseKey(m)]; ok && r.Session == m.Session && q.clock.Now().Before(r.Until) {
 		room += r.MemoryGB
 	}
 	// Co-tenants already hold their charge in room. Only exclusive work needs
 	// every holder released; sharing stops the fewest that free enough.
-	shared := false
-	if batch {
-		_, shared = q.deviceCoTenants(m, j, true)
-	}
 	var victims []*Job
 	for _, r := range q.liveJobs() {
 		if !batchOnTarget(r, m) || !batchReservesCapacity(r) {

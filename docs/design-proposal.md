@@ -975,10 +975,11 @@ newcomer's declared or learned device vector and its host vector must fit the
 card's and host's existing headroom beside every co-tenant's charge, unified
 hosts counting the one pool. A finished co-tenant stays charged until exact
 release. Docker, model-server, extension-check, fan-out, exploratory first-run
-and multi-card attempts keep the card to themselves, and a newcomer never joins
-a higher tier's attempt. Equal tiers never preempt; a higher tier stops the
+and multi-card attempts keep the card to themselves, as does a hint that names
+no device memory (its device figure is only a default), and a newcomer never
+joins a higher tier's attempt. Equal tiers never preempt; a higher tier stops the
 fewest co-tenants whose release frees enough and starts only after that
-release. Waiting reasons name `device N shared with K attempts`. CPU attempts
+release; a multi-card demand stops every co-tenant on its cards. Waiting reasons name `device N shared with K attempts`. CPU attempts
 can run alongside GPU work and one another within host resources and caps;
 model engines retain their usual shared-memory admission. `needs.gpu.devices` narrows candidate IDs, not the
 number allocated. CPU work cannot have a GPU selector. Malformed/duplicate IDs,
