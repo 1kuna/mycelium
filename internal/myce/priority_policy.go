@@ -23,6 +23,8 @@ type PriorityPolicy struct {
 	Tiers   []PriorityTier `json:"tiers" yaml:"tiers"`
 	// Keep an explicit empty map on the wire: nil preserves settings, {} clears them.
 	Projects map[string]ProjectPolicy `json:"projects" yaml:"projects"`
+	// Models is local acquisition policy for declared model snapshots; absent denies them.
+	Models *ModelPolicy `json:"models,omitempty" yaml:"models,omitempty"`
 }
 type PriorityPolicyRecord struct {
 	Revision uint64         `json:"revision" yaml:"revision"`
@@ -122,6 +124,9 @@ func (p PriorityPolicy) validate() ([]string, error) {
 	if !slices.Contains(p.Tiers[len(p.Tiers)-1].Selectors, "*/*") {
 		return nil, errors.New("final tier requires catchall */*")
 	}
+	if err := p.Models.validate(); err != nil {
+		return nil, err
+	}
 	return warnings, nil
 }
 func ReadPriorityPolicy(r io.Reader) (PriorityPolicy, error) {
@@ -209,6 +214,11 @@ func (q *Queue) priorityPolicyRecord() PriorityPolicyRecord {
 	p.Tiers = slices.Clone(p.Tiers)
 	for i := range p.Tiers {
 		p.Tiers[i].Selectors = slices.Clone(p.Tiers[i].Selectors)
+	}
+	if p.Models != nil {
+		models := *p.Models
+		models.Sources = slices.Clone(models.Sources)
+		p.Models = &models
 	}
 	p.Projects = map[string]ProjectPolicy{}
 	for name, v := range q.s.Policies {

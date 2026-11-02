@@ -484,6 +484,70 @@ Input downloads renew their socket deadlines on progress instead of timing out
 a whole file after 30 seconds. The idle budget is at least 60 seconds and scales
 with two hash passes at 100 MiB/s. API control calls keep their normal timeout.
 
+## Declared model snapshots (#553)
+
+A plain native or managed Docker batch can declare an exact Hugging Face model
+snapshot instead of asking for a host bind mount:
+
+```yaml
+model_snapshots:
+  base:
+    repo: OWNER/NAME
+    revision: 0123456789abcdef0123456789abcdef01234567  # full commit, never a branch or tag
+    files: [config.json, model.safetensors]           # optional allow-list
+```
+
+Read `MYCE_MODEL_<UPPERCASE_NAME>`: a read-only directory holding the declared
+files at their snapshot-relative paths. Native jobs receive the worker's verified
+local copy; Docker jobs see the same directory mounted read-only at
+`/myce/models/<name>`. Docker jobs that declare snapshots follow the Docker file
+rules: worker-owned mounts and environment only.
+
+The worker resolves the snapshot in the standard hub-cache layout under its
+`--model-root` (`hub/models--OWNER--NAME/snapshots/REVISION`), never an authored
+path. Each snapshot file must be a link into that repository's `blobs/` folder
+or a regular file. Blobs named by SHA-256 (large files) are verified while
+copying; blobs named by Git SHA-1 (small files) are hashed and checked against
+their name. The verified closure is copied into the worker's shared-input cache,
+reused by identical snapshots, protected by use locks until attempt cleanup, and
+evicted only when inactive. It counts against `--file-cache-bytes`, so workers
+serving large models need a larger allowance. Copies are mode read-only, which
+is cooperative for unsandboxed jobs, as for shared inputs.
+
+Only workers with a model root advertise `model_snapshots_v1`; other workers do
+not receive these jobs. A job withheld before launch fails with one of these
+path-free reasons and never starts its command:
+
+- `model_snapshot_missing`: the repository is not in the shared model root;
+- `model_snapshot_revision`: the repository exists, but not the declared commit;
+- `model_snapshot_mismatch`: a declared file is missing, special, or its bytes do
+  not match its blob identity;
+- `model_snapshot_escape`: a snapshot link points outside the repository's blobs;
+- `model_snapshot_too_large`: the snapshot exceeds the local size limit,
+  free-space floor or cache allowance.
+
+To acquire a missing snapshot, run an ordinary CPU job with
+`needs.network: true` that downloads the exact commit into the shared hub cache,
+for example `hf download OWNER/NAME --revision COMMIT` with `HF_HUB_CACHE` set to
+the model root's `hub` folder recorded in your fleet's local notes, then
+resubmit. Mycelium does not download models during job preparation.
+
+Local queue policy decides which repositories may be declared. Submission refuses
+an unlisted repository with `model_snapshot_not_permitted`; with no `models`
+policy every declaration is refused. The admitting policy revision and its byte
+limits are frozen into the job, and the worker enforces them before copying:
+
+```yaml
+models:
+  sources: ["OWNER/*", "OTHER/EXACT-NAME"]  # repository patterns
+  max_bytes: 0                              # per snapshot; 0 means no extra limit
+  free_floor_bytes: 0                       # free disk to keep after a cold copy
+```
+
+Set it with `myce policy get --yaml`, edit the `models` mapping, then
+`myce policy set FILE --if-revision N`. Values are deployment settings and stay
+in the queue database.
+
 ## Complete from queue storage, deliver to NAS later (#349)
 
 Tasks explicitly select `output_delivery: async_nas`. Other tasks retain their

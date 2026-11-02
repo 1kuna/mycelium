@@ -158,6 +158,9 @@ func validateJobFiles(s Spec) error {
 	if err := validateSharedInputs(s); err != nil {
 		return err
 	}
+	if err := validateModelSnapshots(s); err != nil {
+		return err
+	}
 	if err := s.Files.validate(); err != nil {
 		return err
 	}
