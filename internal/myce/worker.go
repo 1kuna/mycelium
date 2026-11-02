@@ -107,6 +107,7 @@ type Worker struct {
 	NativeExecuteRoots          []string
 	nativeMetricCgroups         []string // Trusted attempt-member cgroups only.
 	nativeSharedInputs          []string // Verified acquired payloads, never authored environment paths.
+	modelMounts                 []dockerFileMount
 	CacheLimit                  int64
 	SecretRoot                  string
 	ModelApprovalRoot           string
@@ -378,9 +379,10 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		}
 		return nil, runtimeErrorFor("input_staging", sharedErr)
 	}
-	if len(j.Spec.SharedInputs) > 0 {
-		s.sharedRelease = sharedRelease
+	if sharedReaders(j.Spec) && !j.Spec.Run.Docker {
+		s.sharedRelease = sharedRelease // Docker releases when its observer exits.
 	}
+	w.modelMounts = dockerModelMounts(j, sharedEnv)
 	w.nativeSharedInputs = nil
 	for _, path := range sharedEnv {
 		w.nativeSharedInputs = append(w.nativeSharedInputs, path)
@@ -393,7 +395,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		}
 	}()
 	executionWorkdir := j.Spec.Run.Workdir
-	if !j.Spec.Run.Docker || dockerFileJob(j.Spec) || j.Spec.extensionJob() || len(jobInputFiles(&j))+len(jobInputPaths(&j))+len(j.Spec.SharedInputs) > 0 {
+	if !j.Spec.Run.Docker || dockerFileJob(j.Spec) || j.Spec.extensionJob() || len(jobInputFiles(&j))+len(jobInputPaths(&j)) > 0 || sharedReaders(j.Spec) {
 		value := j
 		staged, err := s.extensionFiles.runBounded(ctx, attemptCheckpoint(j), func() (stagedInputs, error) {
 			// Keep the slot until the filesystem call really returns, even after
@@ -513,8 +515,14 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		p, e := w.startDocker(s, j, checkpoint, release)
-		environmentStarted = e == nil
+		environmentRelease := release
+		p, e := w.startDocker(s, j, checkpoint, func() {
+			if environmentRelease != nil {
+				environmentRelease()
+			}
+			sharedRelease()
+		})
+		environmentStarted, sharedStarted = e == nil, e == nil
 		return p, e
 	}
 	// Resolve before the supervisor so a nonexistent command remains a clear
@@ -764,7 +772,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	s.state.PID = cmd.Process.Pid
 	s.state.LaunchPending = false
 	custody := workerState{Accelerator: !j.Spec.Needs.cpuOnly(), CustodyID: identity, PID: s.state.PID, Identity: identity, StopGrace: s.state.StopGrace}
-	if len(j.Spec.SharedInputs) > 0 {
+	if sharedReaders(j.Spec) {
 		// Shared readers retain group custody after the main PID exits.
 		birth, e := processBirth(cmd.Process.Pid)
 		if e != nil {

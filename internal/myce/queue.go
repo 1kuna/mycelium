@@ -723,6 +723,10 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		if err := normalizeJobClass(&s); err != nil {
 			return specRejection(err)
 		}
+		modelLimits, err := q.modelLimits(s)
+		if err != nil {
+			return err
+		}
 		if err := normalizeResources(&s); err != nil {
 			return err
 		}
@@ -749,6 +753,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 			id = ID()
 		}
 		j := &Job{PriorityPolicy: q.priorityMatch(s), FileTransport: q.fileCheckpoints, Extensions: extensions, SidecarEnvironmentRecipes: sidecarRecipes, EnvironmentRecipes: recipes, ID: id, Spec: s, State: "queued", Queued: q.clock.Now(), WaitingSince: q.clock.Now(), Checkpoint: filepath.Join(q.root, id)}
+		j.ModelLimits = modelLimits
 		j.PlacementIntent = submissionPlacementIntent(submitted, j)
 		explicitStartBy := s.StartBy != nil
 		j.StartByExplicit = &explicitStartBy

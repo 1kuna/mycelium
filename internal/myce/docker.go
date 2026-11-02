@@ -1070,6 +1070,10 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 		if err != nil {
 			return nil, err
 		}
+		if len(w.modelMounts) != len(j.Spec.ModelSnapshots) {
+			return nil, errors.New("Docker model snapshot mounts unavailable")
+		}
+		d.state.FileMounts = append(d.state.FileMounts, w.modelMounts...)
 	}
 	if j.Spec.Run.DockerNetwork == "private" {
 		d.state.Network = "myce-" + identity
@@ -1134,6 +1138,9 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 				value += ",readonly"
 			}
 			create = append(create, "--mount", value)
+			if name, ok := strings.CutPrefix(mount.Destination, dockerModelRoot+"/"); ok {
+				create = append(create, "--env", "MYCE_MODEL_"+strings.ToUpper(name)+"="+mount.Destination)
+			}
 		}
 		create = append(create, "--user", strconv.Itoa(os.Geteuid())+":"+strconv.Itoa(os.Getegid()), "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--workdir", "/myce/work", "--env", "MYCE_INPUT_DIR=/myce/inputs", "--env", "MYCE_OUTPUT_DIR=/myce/work", "--env", "MYCE_SCRATCH_DIR=/myce/work")
 	}

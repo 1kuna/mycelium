@@ -15,7 +15,7 @@ const dockerFilesCapability = "docker_files_v1"
 var errDockerFileImageVolumes = errors.New("Docker file jobs require images without declared VOLUME mounts")
 
 func dockerFileJob(s Spec) bool {
-	return s.Run.Docker && len(s.Files)+len(s.Outputs) > 0
+	return s.Run.Docker && len(s.Files)+len(s.Outputs)+len(s.ModelSnapshots) > 0
 }
 
 // File jobs have only worker-owned mounts, identity and environment. Parse the

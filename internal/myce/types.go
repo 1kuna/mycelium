@@ -147,6 +147,8 @@ type Spec struct {
 	Isolation         string                 `json:"isolation,omitempty" yaml:"isolation,omitempty"`
 	Reason            string                 `json:"reason,omitempty" yaml:"reason,omitempty"`
 	SharedInputs      map[string]SharedInput `json:"shared_inputs,omitempty" yaml:"shared_inputs,omitempty"`
+	// ModelSnapshots name exact hub snapshots exposed read-only as MYCE_MODEL_<NAME>.
+	ModelSnapshots map[string]ModelSnapshot `json:"model_snapshots,omitempty" yaml:"model_snapshots,omitempty"`
 	// PrepareSource extracts the validated CLI snapshot before member launch,
 	// then stages explicit inputs over it. It is persisted, never an author field.
 	PrepareSource bool `json:"prepare_source,omitempty" yaml:"-"`
@@ -275,7 +277,7 @@ func (s Spec) Validate() error {
 	if s.extensionJob() {
 		return rejectIf("job_program_invalid", validateExtensionJob(s))
 	}
-	if s.Kind == "" && (len(s.Inputs)+len(s.Args) > 0 || (len(s.Outputs) > 0 && !s.Run.Docker && len(s.Files) == 0 && len(s.SharedInputs) == 0 && s.After == nil && s.OutputDelivery == "" && s.StorageProtocol == "") || s.SizeHint.MemoryGB != 0 || s.SizeHint.HostMemoryGB != 0) {
+	if s.Kind == "" && (len(s.Inputs)+len(s.Args) > 0 || (len(s.Outputs) > 0 && !s.Run.Docker && len(s.Files) == 0 && !sharedReaders(s) && s.After == nil && s.OutputDelivery == "" && s.StorageProtocol == "") || s.SizeHint.MemoryGB != 0 || s.SizeHint.HostMemoryGB != 0) {
 		return reject("job_program_invalid", errors.New("inputs, outputs, args and size_hint require a kind/program job"))
 	}
 	if !validMemoryValue(s.Needs.MemoryGB) || (s.Needs.Memory != "auto" && ((!s.Needs.cpuOnly() && s.Needs.MemoryGB <= 0) || (s.Needs.cpuOnly() && s.Needs.HostMemoryGB <= 0))) {
@@ -415,6 +417,7 @@ type Job struct {
 	ProductionBackoff map[string]ProductionBackoff `json:"production_backoff,omitempty"`
 
 	PriorityPolicy   PriorityMatch     `json:"priority_policy"`
+	ModelLimits      *ModelLimits      `json:"model_limits,omitempty"`
 	DeadlineGuidance *DeadlineGuidance `json:"deadline_guidance,omitempty"`
 	ExecutionCause   *RuntimeCause     `json:"execution_cause,omitempty"`
 	CleanupCause     *RuntimeCause     `json:"cleanup_cause,omitempty"`

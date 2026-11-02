@@ -429,6 +429,11 @@ myce policy get --yaml > policy.yaml
 myce policy set policy.yaml --if-revision N
 ```
 
+The same file carries the optional `models` mapping (permitted repository
+patterns, per-snapshot `max_bytes` and `free_floor_bytes`) for
+[declared model snapshots](files.md#declared-model-snapshots-553). Keep the
+deployment's values there, not in Git.
+
 If the revision is stale, export again and reconcile the newer policy before
 retrying. See [owner priority policy](scheduling.md) for the full
 import/export contract, including replacing or clearing project settings.

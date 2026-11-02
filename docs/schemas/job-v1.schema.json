@@ -1749,6 +1749,10 @@
           "$ref": "#/$defs/SizeHint",
           "x-contract": "diagnostic"
         },
+        "model_limits": {
+          "$ref": "#/$defs/ModelLimits",
+          "x-contract": "diagnostic"
+        },
         "oom_capacity": {
           "$ref": "#/$defs/SizeHint",
           "x-contract": "diagnostic"
@@ -2259,6 +2263,47 @@
         "available_floor_gb",
         "swap_budget_gb",
         "host_oom_delta"
+      ],
+      "type": "object"
+    },
+    "ModelLimits": {
+      "properties": {
+        "free_floor_bytes": {
+          "type": "integer"
+        },
+        "max_bytes": {
+          "type": "integer"
+        },
+        "policy_revision": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "policy_revision"
+      ],
+      "type": "object"
+    },
+    "ModelSnapshot": {
+      "properties": {
+        "files": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "repo": {
+          "type": "string"
+        },
+        "revision": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "repo",
+        "revision"
       ],
       "type": "object"
     },
@@ -3295,6 +3340,16 @@
         },
         "logs": {
           "type": "string",
+          "x-contract": "diagnostic"
+        },
+        "model_snapshots": {
+          "additionalProperties": {
+            "$ref": "#/$defs/ModelSnapshot"
+          },
+          "type": [
+            "object",
+            "null"
+          ],
           "x-contract": "diagnostic"
         },
         "name": {
