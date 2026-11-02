@@ -3,6 +3,8 @@ package myce
 import (
 	"context"
 	"errors"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -225,6 +227,21 @@ func TestSharedHostPressureQueuesRequireTarget(t *testing.T) {
 	}
 	if got := job(t, q, j.ID); got.State != "queued" {
 		t.Fatal("pressure did not leave job queued", got.State)
+	}
+	report, err := q.Portability(PortabilityRequest{Spec: &s})
+	if err != nil {
+		t.Fatal(err)
+	}
+	admissions := []string{}
+	for _, target := range report.Targets {
+		for _, h := range target.Hosts {
+			admissions = append(admissions, h.Admission)
+		}
+	}
+	if !slices.ContainsFunc(admissions, func(a string) bool {
+		return strings.HasPrefix(a, "temporarily unavailable: shared host memory pressure")
+	}) {
+		t.Fatal("portability did not call pressure temporary", admissions)
 	}
 	docker := s
 	docker.Run = RunSpec{Docker: true, Command: []string{"docker", "run", "image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}
