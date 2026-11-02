@@ -3,6 +3,8 @@ package myce
 import (
 	"context"
 	"errors"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -202,5 +204,53 @@ func TestSharedHostCPUConcurrencyCap(t *testing.T) {
 	next.Spec.Needs.CPUCores = 1
 	if err := localAttemptAdmission(w, []Job{*run}, next, nil); err != nil {
 		t.Fatal("fitting concurrent work rejected", err)
+	}
+}
+
+// Owner pressure is temporary occupancy: a pinned require_target job queues and
+// waits for hysteresis instead of being refused as unqualified (#605).
+func TestSharedHostPressureQueuesRequireTarget(t *testing.T) {
+	q, _ := fixture(t)
+	m := sharedHostFixture(t, q)
+	m.SharedHost = &SharedHostProfile{InteractiveReserveGB: 4}
+	check(t, q, m, nil)
+	if _, err := q.ChangeHostMaintenance(m.ID, HostMaintenanceRequest{Action: "resume"}); err != nil {
+		t.Fatal(err)
+	}
+	m.SharedHostPressure = &SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 2}
+	check(t, q, m, nil)
+	s := cpuSpec(2, 2)
+	s.AllowedMachines, s.RequireTarget = []string{m.ID}, true
+	j := submit(t, q, s)
+	if r := check(t, q, m, nil); r.Job != nil {
+		t.Fatal("assigned under owner pressure", r.Job)
+	}
+	if got := job(t, q, j.ID); got.State != "queued" {
+		t.Fatal("pressure did not leave job queued", got.State)
+	}
+	report, err := q.Portability(PortabilityRequest{Spec: &s})
+	if err != nil {
+		t.Fatal(err)
+	}
+	admissions := []string{}
+	for _, target := range report.Targets {
+		for _, h := range target.Hosts {
+			admissions = append(admissions, h.Admission)
+		}
+	}
+	if !slices.ContainsFunc(admissions, func(a string) bool {
+		return strings.HasPrefix(a, "temporarily unavailable: shared host memory pressure")
+	}) {
+		t.Fatal("portability did not call pressure temporary", admissions)
+	}
+	docker := s
+	docker.Run = RunSpec{Docker: true, Command: []string{"docker", "run", "image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}
+	var httpErr *HTTPError
+	if _, err := q.Submit(docker); !errors.As(err, &httpErr) || httpErr.Code != "no_qualified_target" {
+		t.Fatal("structural shared-host refusal accepted under pressure", err)
+	}
+	m.SharedHostPressure = &SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 1}
+	if r := check(t, q, m, nil); r.Job == nil || r.Job.ID != j.ID {
+		t.Fatal("not assigned after pressure cleared", r.Job)
 	}
 }

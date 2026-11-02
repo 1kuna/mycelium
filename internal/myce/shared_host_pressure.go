@@ -80,6 +80,20 @@ func (q *Queue) sharedPressureReason(m *Machine) string {
 	return ""
 }
 
+// hostPressureReason is the first owner-pressure reason among m's host
+// workers: the yield latch or unknown/stale pressure evidence. It is
+// temporary occupancy, never a qualification failure (#605).
+func (q *Queue) hostPressureReason(m *Machine) string {
+	for _, other := range q.s.Machines {
+		if hostID(other) == hostID(m) && !other.Gone && !q.unreported[other.ID] && other.Replacement == nil {
+			if reason := q.sharedPressureReason(other); reason != "" {
+				return reason
+			}
+		}
+	}
+	return ""
+}
+
 // Planned stop intent is attached to the exact attempt. Existing delivery facts,
 // checkpoint grace, cancellation precedence and cleanup custody remain in charge.
 func (q *Queue) maintainSharedHosts() {
