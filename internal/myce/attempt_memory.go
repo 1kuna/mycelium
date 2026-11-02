@@ -380,6 +380,11 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 		worstHost = *a.hostBaseline
 	}
 	var hostDropGB, outsideGB float64
+	// Unified CUDA hosts that list processes without per-process memory:
+	// track the host drop outside every Mycelium cgroup, attributable to this
+	// attempt only while nvidia-smi shows no other process on its GPU.
+	unifiedDelta := unifiedCUDA(&w.Machine) && deviceTelemetry && a.hostBaseline != nil && a.rootBaseline != nil
+	unifiedOutsideGB := 0.0
 	sampleHost := func(component *AttemptMemoryPeak) {
 		// Pressure eligibility applies to ordinary learning on every Linux
 		// cgroup attempt, independently of complete DRM/component evidence.
@@ -396,10 +401,17 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 		if err != nil || a.hostBaseline == nil || host.oom < worstHost.oom || host.swapOut < worstHost.swapOut || host.psiTotalUS < worstHost.psiTotalUS {
 			pressureKnown = false
 			unknownReason = "host_pressure_unavailable_or_reset"
-			completeGPUHost = false
+			completeGPUHost, unifiedDelta = false, false
 			return
 		}
 		worstHost.retainPressure(host)
+		if unifiedDelta {
+			root, ok := cgroupResidentGB(a.fs, filepath.Dir(a.path))
+			unifiedDelta = ok
+			// Unclamped: a sibling attempt that exits raises MemAvailable and
+			// shrinks the root by the same pages, leaving the outside drop.
+			unifiedOutsideGB = max(unifiedOutsideGB, a.hostBaseline.available-host.available-(root-*a.rootBaseline))
+		}
 		if !completeGPUHost || component == nil || component.nonreclaimableSampleGB == nil || component.PressureUnavailable {
 			completeGPUHost = false
 			return
@@ -436,17 +448,22 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 			}
 		}
 	}()
-	var device <-chan *AttemptMemoryPeak
+	type deviceResult struct {
+		peak               *AttemptMemoryPeak
+		unreported, shared bool
+	}
+	var device <-chan deviceResult
 	// Attempt facts are independent of learning eligibility. Declared jobs,
 	// extension checks and resumed attempts need device diagnostics too.
 	if deviceTelemetry {
-		result := make(chan *AttemptMemoryPeak, 1)
+		result := make(chan deviceResult, 1)
 		device = result
 		go func() {
 			// Device fdinfo can block in the same driver as host collection.
 			// Own the result locally so a late read cannot change published facts.
 			devicePeak := &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryNoSample}
-			defer func() { result <- devicePeak }()
+			unreported, shared := false, false
+			defer func() { result <- deviceResult{devicePeak, unreported, shared} }()
 			deviceTick := time.NewTicker(devicePeriod)
 			defer deviceTick.Stop()
 			for {
@@ -462,7 +479,12 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 					if len(ids) == 0 {
 						continue
 					}
-					gb, err := w.attemptDeviceMemory(ctx, ids, a.fs)
+					gb, foreign, err := w.attemptDeviceMemory(ctx, ids, a.fs)
+					shared = shared || foreign
+					if errors.Is(err, errDeviceMemoryNotReported) {
+						unreported = true
+						continue
+					}
 					if err != nil {
 						if !errors.Is(err, errAttemptMemoryPending) {
 							devicePeak = sampledMemoryPeak(devicePeak, &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryUnsupported})
@@ -528,8 +550,11 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 			}
 			if device != nil {
 				select {
-				case devicePeak := <-device:
-					record(devicePeak)
+				case r := <-device:
+					record(r.peak)
+					if r.unreported && (r.peak == nil || r.peak.DeviceGB == nil) {
+						record(unifiedDevicePeak(unifiedDelta, r.shared, unifiedOutsideGB))
+					}
 				case <-wait.Done():
 					record(&AttemptMemoryPeak{DeviceUnavailable: deviceMemoryTimeout})
 					completeGPUHost = false
@@ -568,6 +593,7 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 var (
 	errAttemptMemoryPending     = errors.New("attempt GPU memory not available yet")
 	errAttemptMemoryUnsupported = errors.New("attempt GPU memory accounting unsupported")
+	errDeviceMemoryNotReported  = errors.New("attempt GPU processes listed without per-process memory")
 )
 
 const (
@@ -576,11 +602,44 @@ const (
 	deviceMemoryInventory   = "attempt process inventory unavailable"
 	deviceMemoryTimeout     = "device sampler did not finish"
 	deviceMemoryNoCgroup    = "attempt cgroup unavailable"
+	deviceMemoryNotReported = "per-process memory not reported; host delta unavailable"
+	deviceMemoryShared      = "per-process memory not reported; another process used the GPU"
+	// DeviceSource for a unified CUDA figure taken from the host memory drop
+	// outside every Mycelium cgroup. It also counts growth by non-Mycelium
+	// processes, and misses use that coincides with their frees.
+	deviceHostDeltaSource = "host memory drop outside Mycelium cgroups"
 )
 
-func (w Worker) attemptDeviceMemory(ctx context.Context, ids map[int]bool, fs memoryFS) (float64, error) {
+// The fallback for a unified CUDA attempt whose processes nvidia-smi listed
+// without memory. Another process on the GPU makes the drop unattributable.
+func unifiedDevicePeak(complete, shared bool, outsideGB float64) *AttemptMemoryPeak {
+	switch {
+	case shared:
+		return &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryShared}
+	case !complete || !validMemoryValue(outsideGB):
+		return &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryNotReported}
+	}
+	gb := max(0, outsideGB)
+	return &AttemptMemoryPeak{DeviceGB: &gb, DeviceSource: deviceHostDeltaSource}
+}
+
+// Anonymous, kernel and shmem pages charged to one cgroup subtree.
+func cgroupResidentGB(fs memoryFS, path string) (float64, bool) {
+	b, err := fs.ReadFile(filepath.Join(path, "memory.stat"))
+	if err != nil {
+		return 0, false
+	}
+	stats := memoryCounters(b)
+	anon, aok := stats["anon"]
+	kernel, kok := stats["kernel"]
+	shmem, sok := stats["shmem"]
+	return (float64(anon) + float64(kernel) + float64(shmem)) / (1 << 30), aok && kok && sok
+}
+
+// The bool reports another process on the attempt's CUDA device.
+func (w Worker) attemptDeviceMemory(ctx context.Context, ids map[int]bool, fs memoryFS) (float64, bool, error) {
 	if len(w.selectedDevices) > 1 {
-		return 0, errAttemptMemoryUnsupported // One card's sample cannot describe a multi-card attempt.
+		return 0, false, errAttemptMemoryUnsupported // One card's sample cannot describe a multi-card attempt.
 	}
 	if w.Machine.GPU == "cuda" {
 		selector := w.Machine.Device
@@ -588,7 +647,7 @@ func (w Worker) attemptDeviceMemory(ctx context.Context, ids map[int]bool, fs me
 			selector = w.selectedDevice.Selector
 		}
 		if !strings.HasPrefix(selector, "GPU-") {
-			return 0, errAttemptMemoryUnsupported
+			return 0, false, errAttemptMemoryUnsupported
 		}
 		probe, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
@@ -600,10 +659,10 @@ func (w Worker) attemptDeviceMemory(ctx context.Context, ids map[int]bool, fs me
 		b, err := cmd.Output()
 		if err != nil {
 			if errors.Is(err, exec.ErrNotFound) {
-				return 0, errAttemptMemoryUnsupported
+				return 0, false, errAttemptMemoryUnsupported
 			}
 			// Driver startup and query timeouts do not establish lack of support.
-			return 0, errAttemptMemoryPending
+			return 0, false, errAttemptMemoryPending
 		}
 		return cudaAttemptMemory(b, selector, ids)
 	}
@@ -621,7 +680,7 @@ func (w Worker) attemptDeviceMemory(ctx context.Context, ids map[int]bool, fs me
 				}
 				key, gb, err := drmAttemptMemory(b, w.selectedDevice.pciAddress)
 				if errors.Is(err, errAttemptMemoryUnsupported) {
-					return 0, err
+					return 0, false, err
 				}
 				if err == nil {
 					clients[key] = max(clients[key], gb)
@@ -633,44 +692,56 @@ func (w Worker) attemptDeviceMemory(ctx context.Context, ids map[int]bool, fs me
 			total += gb
 		}
 		if len(clients) == 0 {
-			return 0, errAttemptMemoryPending
+			return 0, false, errAttemptMemoryPending
 		}
-		return total, nil
+		return total, false, nil
 	}
-	return 0, errAttemptMemoryUnsupported
+	return 0, false, errAttemptMemoryUnsupported
 }
 
-func cudaAttemptMemory(b []byte, selector string, ids map[int]bool) (float64, error) {
+// N/A rows for the attempt's own processes mean "listed, not reported" (some
+// unified-memory drivers); a partial sum would undercount, so none is used.
+func cudaAttemptMemory(b []byte, selector string, ids map[int]bool) (float64, bool, error) {
 	rows, err := csv.NewReader(strings.NewReader(string(b))).ReadAll()
 	if err != nil {
-		return 0, errAttemptMemoryUnsupported
+		return 0, false, errAttemptMemoryUnsupported
 	}
-	total, found := 0.0, false
+	total, found, unreported, foreign := 0.0, false, false, false
 	for _, row := range rows {
 		if len(row) != 3 {
-			return 0, errAttemptMemoryUnsupported
+			return 0, false, errAttemptMemoryUnsupported
 		}
 		if strings.TrimSpace(row[0]) != selector {
 			continue
 		}
 		pid, err := strconv.Atoi(strings.TrimSpace(row[1]))
 		if err != nil {
-			return 0, errAttemptMemoryUnsupported
+			return 0, false, errAttemptMemoryUnsupported
 		}
 		if !ids[pid] {
+			foreign = true
 			continue
 		}
-		mib, err := strconv.ParseFloat(strings.TrimSpace(row[2]), 64)
+		value := strings.TrimSpace(row[2])
+		switch strings.ToLower(value) {
+		case "n/a", "[n/a]", "not supported", "[not supported]":
+			unreported = true
+			continue
+		}
+		mib, err := strconv.ParseFloat(value, 64)
 		if err != nil || !validMemoryValue(mib) {
-			return 0, errAttemptMemoryUnsupported
+			return 0, false, errAttemptMemoryUnsupported
 		}
 		total += mib / 1024
 		found = true
 	}
-	if !found {
-		return 0, errAttemptMemoryPending
+	switch {
+	case unreported:
+		return 0, foreign, errDeviceMemoryNotReported
+	case !found:
+		return 0, foreign, errAttemptMemoryPending
 	}
-	return total, nil
+	return total, foreign, nil
 }
 
 func drmAttemptMemory(b []byte, pci string) (string, float64, error) {

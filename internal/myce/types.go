@@ -421,8 +421,10 @@ type Job struct {
 	PriorityPolicy   PriorityMatch     `json:"priority_policy"`
 	ModelLimits      *ModelLimits      `json:"model_limits,omitempty"`
 	DeadlineGuidance *DeadlineGuidance `json:"deadline_guidance,omitempty"`
-	ExecutionCause   *RuntimeCause     `json:"execution_cause,omitempty"`
-	CleanupCause     *RuntimeCause     `json:"cleanup_cause,omitempty"`
+	// Job GET projection only: declared, learned and used per dimension.
+	Resources      []ResourceBasis `json:"resources,omitempty"`
+	ExecutionCause *RuntimeCause   `json:"execution_cause,omitempty"`
+	CleanupCause   *RuntimeCause   `json:"cleanup_cause,omitempty"`
 	// Durable cancellation fence, independent of diagnostic reason text.
 	CancelledAt *time.Time `json:"cancelled_at,omitempty"`
 
@@ -713,6 +715,7 @@ type Snapshot struct {
 	FleetUpgrade   *FleetUpgradeStatus  `json:"fleet_upgrade,omitempty"`
 	FileStore      *FileStoreStatus     `json:"file_store,omitempty"`
 	HostStates     map[string]string    `json:"host_states,omitempty"`
+	Admissions     []HostAdmissions     `json:"admissions,omitempty"`
 	WorkCurves     []WorkObservation    `json:"work_curves"`
 	PriorityPolicy PriorityPolicyRecord `json:"priority_policy"`
 	HoldsDetail    []HoldDetail         `json:"holds_detail"`

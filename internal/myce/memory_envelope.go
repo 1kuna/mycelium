@@ -26,6 +26,7 @@ type AttemptMemoryPeak struct {
 	CgroupGB            *float64                `json:"cgroup_gb,omitempty"`
 	DeviceGB            *float64                `json:"device_gb,omitempty"`
 	DeviceUnavailable   string                  `json:"device_unavailable,omitempty"`
+	DeviceSource        string                  `json:"device_source,omitempty"` // Omitted: per-process counters.
 	SwapGB              *float64                `json:"swap_gb,omitempty"`
 	Source              string                  `json:"source,omitempty"`
 	Events              *MemoryEventCounts      `json:"events,omitempty"`
@@ -172,6 +173,16 @@ type JobMemoryEnvelope struct {
 	// accepted attempts behind a learned or bounded figure (#585).
 	Basis    string `json:"basis,omitempty"`
 	Evidence int    `json:"evidence,omitempty"`
+	// What learned sizing would reserve on this target, recorded at
+	// assignment for explicit figures too, so stale numbers show (#585).
+	Learned *LearnedMemory `json:"learned,omitempty"`
+}
+
+type LearnedMemory struct {
+	HostGB   float64  `json:"host_gb"`
+	DeviceGB *float64 `json:"device_gb,omitempty"`
+	Evidence int      `json:"evidence"`
+	Source   string   `json:"source"`
 }
 
 // Snapshot-to-launch telemetry drift needs headroom even with ceiling slack off.
@@ -187,6 +198,12 @@ func mergeMemoryPeaks(old, next *AttemptMemoryPeak) *AttemptMemoryPeak {
 	if old != nil && !old.Constrained {
 		out = *old
 	}
+	if next.DeviceGB != nil && validMemoryValue(*next.DeviceGB) && (out.DeviceGB == nil || *next.DeviceGB > *out.DeviceGB) {
+		out.DeviceSource = ""
+		if next.DeviceSource == deviceHostDeltaSource {
+			out.DeviceSource = next.DeviceSource
+		}
+	}
 	for _, pair := range [][2]**float64{{&out.HostGB, &next.HostGB}, {&out.CgroupGB, &next.CgroupGB}, {&out.DeviceGB, &next.DeviceGB}, {&out.NonreclaimableGB, &next.NonreclaimableGB}, {&out.nonreclaimableSampleGB, &next.nonreclaimableSampleGB}} {
 		if *pair[1] != nil && validMemoryValue(**pair[1]) && (*pair[0] == nil || **pair[1] > **pair[0]) {
 			n := **pair[1]
@@ -201,7 +218,7 @@ func mergeMemoryPeaks(old, next *AttemptMemoryPeak) *AttemptMemoryPeak {
 	} else {
 		// Publish only worker-owned labels, never raw command errors or output.
 		switch next.DeviceUnavailable {
-		case deviceMemoryNoSample, deviceMemoryUnsupported, deviceMemoryInventory, deviceMemoryTimeout, deviceMemoryNoCgroup:
+		case deviceMemoryNoSample, deviceMemoryUnsupported, deviceMemoryInventory, deviceMemoryTimeout, deviceMemoryNoCgroup, deviceMemoryNotReported, deviceMemoryShared:
 			out.DeviceUnavailable = next.DeviceUnavailable
 		}
 	}
