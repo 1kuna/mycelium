@@ -35,6 +35,67 @@ func reservationState(t *testing.T, q *Queue, id, state string) Reservation {
 	return Reservation{}
 }
 
+func TestReservationGPURequalificationDefaultsToDevice(t *testing.T) {
+	for _, wholeHost := range []bool{false, true} {
+		t.Run(map[bool]string{false: "device", true: "whole host"}[wholeHost], func(t *testing.T) {
+			q, clock, m, s := floorFreeFitFixture(t, 24)
+			e := registeredExtension(t, q, s.Extension)
+			sibling := m.Devices[0]
+			sibling.ID, sibling.Selector, sibling.Identity = "1", "1", "synthetic-sibling"
+			target := sibling.machine(m)
+			report := newExtensionReport(e, &target, "extension:sample")
+			report.Setup, report.Qualified = true, true
+			sibling.ExtensionReports = []ExtensionReport{report}
+			m.Devices = append(m.Devices, sibling)
+			machineCheck(t, q, m)
+			s.Workload = nil
+			s.ExtensionDigest, s.RequireTarget = e.Digest, true
+			s.AllowedMachines = []string{m.ID}
+			s.Needs = ResourceNeeds{Memory: "auto", GPU: &GPUSelection{Devices: []string{"0"}}}
+			s.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:sample", Directory: t.TempDir()}
+			bound := submit(t, q, s)
+			selector, err := ValidationReservationSelector("host="+m.HostID, bound.Spec, wholeHost)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := q.CreateReservation(reservationRequest("requalification", selector, bound.ID))
+			if err != nil || !r.CreatedAt.Equal(clock.Now()) || r.Target.wholeHost() != wholeHost {
+				t.Fatal("wrong qualification scope", r, err)
+			}
+			run := assignedJob(machineCheck(t, q, m))
+			if run == nil || run.ID != bound.ID {
+				t.Fatal("bound check not admitted", run)
+			}
+			if err := q.Started(result(run, false)); err != nil {
+				t.Fatal(err)
+			}
+			clock.Advance(time.Second)
+			waiting := submit(t, q, exclusionSpec(m.ID, "0"))
+			siblingSpec := exclusionSpec(m.ID, "1")
+			siblingWork := submit(t, q, siblingSpec)
+			next := assignedJob(machineCheck(t, q, m, run))
+			if wholeHost {
+				if next != nil {
+					t.Fatal("explicit whole-host check admitted unrelated work", next)
+				}
+			} else if next == nil || next.ID != siblingWork.ID {
+				t.Fatal("device check withheld sibling capacity", next, job(t, q, siblingWork.ID).Reason)
+			}
+			requireState(t, q, waiting.ID, "queued")
+			reservationState(t, q, r.ID, "in_use")
+		})
+	}
+	check := Spec{ExtensionCheck: &ExtensionCheckRequest{}, Needs: ResourceNeeds{GPU: &GPUSelection{Devices: []string{"0"}}}}
+	check.Needs.GPU = nil
+	if _, err := ValidationReservationSelector("host=machine", check, false); err == nil {
+		t.Fatal("unselected GPU check silently reserved a host")
+	}
+	check.Needs.Platform = Platform{Required: []string{"cpu"}}
+	if got, err := ValidationReservationSelector("host=machine", check, false); err != nil || got != "host=machine" {
+		t.Fatal("CPU qualification lost host isolation", got, err)
+	}
+}
+
 func TestReservationDrainAdmissionAndRelease(t *testing.T) {
 	for _, selector := range []string{"host=machine;devices=0", "host=machine"} {
 		t.Run(selector, func(t *testing.T) {

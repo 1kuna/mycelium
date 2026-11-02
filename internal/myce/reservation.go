@@ -30,6 +30,30 @@ type ReservationRequest struct {
 	Job string `json:"job"`
 }
 
+// ValidationReservationSelector keeps a single-card qualification from draining
+// unrelated work when the caller names only its host. Whole-host validation is
+// still available explicitly; CPU checks and ordinary validation jobs retain
+// their authored selector. The queue resolves device names to stable identities.
+func ValidationReservationSelector(selector string, spec Spec, wholeHost bool) (string, error) {
+	p, devices, err := parseComponentSelector(selector)
+	if err != nil {
+		return "", err
+	}
+	if wholeHost {
+		if !p.wholeHost() || len(devices) != 0 {
+			return "", reservationRefusal("--whole-host requires a host-only selector")
+		}
+		return selector, nil
+	}
+	if !p.wholeHost() || len(devices) != 0 || spec.ExtensionCheck == nil || spec.Needs.cpuOnly() {
+		return selector, nil
+	}
+	if spec.Needs.GPU == nil || len(spec.Needs.GPU.Devices) != 1 {
+		return "", reservationRefusal("GPU qualification requires an explicit device selector; use --whole-host only for a check that needs the whole host")
+	}
+	return p.Selector + ";devices=" + spec.Needs.GPU.Devices[0], nil
+}
+
 type Reservation struct {
 	ReservationOptions
 	Job           string             `json:"job"`

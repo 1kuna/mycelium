@@ -25,13 +25,14 @@ func reserveCommand(ctx context.Context, args []string, out io.Writer) error {
 	owner := f.String("owner", "", "operator attribution, not a separate authentication identity")
 	reason := f.String("reason", "", "reason for reserving or conditionally releasing")
 	lifetime := f.Duration("max-lifetime", myce.DefaultReservationLifetime, "lost-binding backstop; at most 24h; live jobs and pending cleanup retain the fence")
+	wholeHost := f.Bool("whole-host", false, "isolate the whole host for a GPU check that requires host-wide validation (explain in --reason)")
 	revision := f.Uint64("if-revision", 0, "release only this observed reservation revision")
 	var flags, positional []string
 	for i := 1; i < len(args); i++ {
 		arg := args[i]
 		if strings.HasPrefix(arg, "-") {
 			flags = append(flags, arg)
-			if !strings.Contains(arg, "=") && i+1 < len(args) {
+			if arg != "--whole-host" && arg != "-whole-host" && !strings.Contains(arg, "=") && i+1 < len(args) {
 				i++
 				flags = append(flags, args[i])
 			}
@@ -48,7 +49,7 @@ func reserveCommand(ctx context.Context, args []string, out io.Writer) error {
 	invalid := false
 	f.Visit(func(v *flag.Flag) {
 		switch v.Name {
-		case "id", "job", "owner", "max-lifetime":
+		case "id", "job", "owner", "max-lifetime", "whole-host":
 			invalid = invalid || args[0] != "add"
 		case "if-revision":
 			invalid = invalid || args[0] != "release"
@@ -77,10 +78,18 @@ func reserveCommand(ctx context.Context, args []string, out io.Writer) error {
 	}
 	var record myce.Reservation
 	if args[0] == "add" {
+		bound, err := c.GetJob(ctx, *job)
+		if err != nil {
+			return err
+		}
+		selector, err := myce.ValidationReservationSelector(positional[0], bound.Spec, *wholeHost)
+		if err != nil {
+			return err
+		}
 		if *id == "" {
 			*id = myce.ID()
 		}
-		request := myce.ReservationRequest{ReservationOptions: myce.ReservationOptions{ID: *id, Selector: positional[0], Owner: *owner, Reason: *reason, MaxLifetime: lifetime.String()}, Job: *job}
+		request := myce.ReservationRequest{ReservationOptions: myce.ReservationOptions{ID: *id, Selector: selector, Owner: *owner, Reason: *reason, MaxLifetime: lifetime.String()}, Job: *job}
 		err = c.Call(ctx, "POST", "/api/reservations", request, &record)
 	} else {
 		err = c.Call(ctx, "POST", "/api/reservations/"+url.PathEscape(positional[0])+"/release", map[string]any{"if_revision": *revision, "reason": *reason}, &record)

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -49,5 +50,42 @@ func TestReserveCLI(t *testing.T) {
 		if err := call(args...); err == nil {
 			t.Fatal("invalid CLI accepted", args)
 		}
+	}
+}
+
+func TestReserveCLIGPUCheckScope(t *testing.T) {
+	for _, wholeHost := range []bool{false, true} {
+		t.Run(map[bool]string{false: "device", true: "whole host"}[wholeHost], func(t *testing.T) {
+			var request myce.ReservationRequest
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.Method + " " + r.URL.Path {
+				case "GET /api/jobs/check":
+					json.NewEncoder(w).Encode(myce.Job{ID: "check", State: "queued", Spec: myce.Spec{
+						ExtensionCheck: &myce.ExtensionCheckRequest{},
+						Needs:          myce.ResourceNeeds{GPU: &myce.GPUSelection{Devices: []string{"1"}}},
+					}})
+				case "POST /api/reservations":
+					if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+						t.Error(err)
+					}
+					json.NewEncoder(w).Encode(myce.Reservation{ReservationOptions: request.ReservationOptions, Job: request.Job})
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			args := []string{"add", "host=host", "--job", "check", "--owner", "operator", "--reason", "qualification", "--queue", server.URL, "--token", "fixture"}
+			want := "host=host;devices=1"
+			if wholeHost {
+				args = append(args, "--whole-host")
+				want = "host=host"
+			}
+			if err := reserveCommand(context.Background(), args, &bytes.Buffer{}); err != nil {
+				t.Fatal(err)
+			}
+			if request.Selector != want || request.Job != "check" {
+				t.Fatal("wrong qualification reservation", request)
+			}
+		})
 	}
 }
