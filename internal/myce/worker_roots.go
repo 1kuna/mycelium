@@ -182,6 +182,9 @@ func (q *Queue) storageRootReason(j *Job, m *Machine) string {
 		return ""
 	}
 	if model, ok := q.model(j.Spec.Needs.Model); ok {
+		if j.State != "queued" && j.ModelEnvironmentKey != "" {
+			return storageRootReasonForModel(j, m, model, &EnvironmentRecipe{Key: j.ModelEnvironmentKey})
+		}
 		recipe, ok := q.environments.Environments[model.Environment][m.GPU]
 		if ok {
 			return storageRootReasonForModel(j, m, model, &recipe)
@@ -195,7 +198,11 @@ func (w Worker) storageRootReason(j *Job) string {
 	machine := w.storageMachine()
 	for _, model := range w.ModelConfig.Models {
 		if model.Name == j.Spec.Needs.Model {
-			return storageRootReasonForModel(j, &machine, model, nil)
+			var recipe *EnvironmentRecipe
+			if j.ModelEnvironmentKey != "" {
+				recipe = &EnvironmentRecipe{Key: j.ModelEnvironmentKey}
+			}
+			return storageRootReasonForModel(j, &machine, model, recipe)
 		}
 	}
 	return storageRootReason(j, &machine)

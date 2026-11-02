@@ -434,6 +434,9 @@ type Job struct {
 	EligibleUnknownMachines []string  `json:"eligible_unknown_machines,omitempty"`
 	EligibleUnrestricted    bool      `json:"eligible_unrestricted,omitempty"`
 
+	// ModelEnvironmentKey freezes the selected model runtime recipe for this attempt.
+	ModelEnvironmentKey string `json:"model_environment_key,omitempty"`
+
 	SidecarEnvironmentRecipes map[string]map[string]EnvironmentRecipe `json:"sidecar_environment_recipes,omitempty"`
 
 	FileTransport         bool                         `json:"file_transport,omitempty"`

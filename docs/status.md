@@ -1087,7 +1087,9 @@ placement and the launch fence consume this observation without filesystem I/O
 under the queue lock. Host health is degraded while any root is affected.
 Jobs requiring those roots wait, including non-resumable production inputs and
 models. Prepared local environments and cached shared inputs remain eligible
-when their own roots are healthy. Started attempts retain their exact custody.
+when their own roots are healthy. Started attempts retain their exact custody. Batch assignments freeze the selected
+model environment recipe key so queue placement and worker admission use the
+same prepared-environment identity.
 Restored mounts clear the observation automatically; an explicit operator disable
 still requires an explicit resume. Independently configured network roots are
 remembered after being observed mounted; installed NAS is checked even at cold

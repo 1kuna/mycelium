@@ -1752,6 +1752,10 @@
           "$ref": "#/$defs/SizeHint",
           "x-contract": "diagnostic"
         },
+        "model_environment_key": {
+          "type": "string",
+          "x-contract": "diagnostic"
+        },
         "model_limits": {
           "$ref": "#/$defs/ModelLimits",
           "x-contract": "diagnostic"

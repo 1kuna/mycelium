@@ -2458,6 +2458,10 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	if e := qualifiedExtension(selected, m); e != nil {
 		j.Extension = &ExtensionSelection{Name: e.Name, Version: e.Version, Digest: e.Digest}
 	}
+	j.ModelEnvironmentKey = ""
+	if model, ok := q.model(j.Spec.Needs.Model); ok {
+		j.ModelEnvironmentKey = q.environments.Environments[model.Environment][m.GPU].Key
+	}
 	j.State = "running"
 	j.ExecutionCause, j.CleanupCause = nil, nil
 	j.ReleaseConfirmed = false

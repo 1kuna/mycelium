@@ -271,3 +271,44 @@ func TestWorkerRootsModelEnvironmentPlacement(t *testing.T) {
 		t.Fatal("cold model environment bypassed source mount loss")
 	}
 }
+
+func TestWorkerRootsBatchModelUsesAssignedEnvironmentKey(t *testing.T) {
+	q, _ := fixture(t)
+	recipe := binaryRecipe(t, "fake")
+	if err := q.ConfigureEnvironments(EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"runtime": {"fake": recipe}}}); err != nil {
+		t.Fatal(err)
+	}
+	model := Model{Name: "test", Path: "test", Engine: "fake", Environment: "runtime", MemoryGB: 1, Platforms: []string{"fake"}}
+	config := ModelConfig{Wait: time.Second, Idle: time.Minute, Models: []Model{model}}
+	if err := q.ConfigureModels(config); err != nil {
+		t.Fatal(err)
+	}
+	s := spec("production")
+	s.Resumable = false
+	s.Needs.Model = model.Name
+	submitted := submit(t, q, s)
+	m := cpuMachine("worker", "worker", "fake", 4, 16)
+	m.CachedModels = []string{model.Name}
+	m.Environments = []string{recipe.Key}
+	m.UnavailableRoots = []UnavailableRoot{{Root: "environment-source", Reason: "configured NAS mount missing"}}
+	assignment := check(t, q, m, nil).Job
+	if assignment == nil || assignment.ID != submitted.ID {
+		t.Fatal("queue did not place cached/prepared batch")
+	}
+	if assignment.ModelEnvironmentKey != recipe.Key {
+		t.Fatal("assignment lost frozen model environment key")
+	}
+	w := Worker{Machine: m, ModelConfig: config}
+	if err := localAttemptAdmission(w, nil, *assignment, nil); err != nil {
+		t.Fatal("worker rejected queue-selected prepared model environment", err)
+	}
+	w.Machine.Environments = nil
+	if err := localAttemptAdmission(w, nil, *assignment, nil); err == nil {
+		t.Fatal("cold model environment accepted without source")
+	}
+	w.Machine.Environments = []string{recipe.Key}
+	w.Machine.UnavailableRoots = []UnavailableRoot{{Root: "environment", Reason: "configured NAS mount missing"}}
+	if err := localAttemptAdmission(w, nil, *assignment, nil); err == nil {
+		t.Fatal("missing environment cache admitted")
+	}
+}
