@@ -168,8 +168,15 @@ func TestDockerHostMemoryUnknownAttributionKeepsPhysicalHeadroom(t *testing.T) {
 	m.HostAvailableMemoryGB = 80
 	before := q.externalMemoryStatus(m.HostID).Week.Samples
 	r := AttemptReport{Execution: Execution{ID: holder.ID, Attempt: holder.Attempt}, Session: holder.Session, Started: true}
-	m.MemoryObservation = creditDockerObservation(&HostMemoryObservation{TotalGB: 121, UsedGB: 16, MyceliumGB: 1}, []Job{*holder}, []AttemptReport{r}, clock.Now())
-	if m.MemoryObservation == nil || !m.MemoryObservation.AttributionUnknown {
+	// An earlier fresh sample exceeds current physical usage after a drop.
+	// A later missing sample must not publish partial, invalid attribution.
+	fresh := *holder
+	fresh.ID = "other-docker"
+	freshReport := r
+	freshReport.ID = fresh.ID
+	freshReport.CurrentHostMemory = &CurrentHostMemory{NonreclaimableGB: 40, sampledAt: clock.Now()}
+	m.MemoryObservation = creditDockerObservation(&HostMemoryObservation{TotalGB: 121, UsedGB: 16, MyceliumGB: 1}, []Job{fresh, *holder}, []AttemptReport{freshReport, r}, clock.Now())
+	if !validHostMemoryObservation(m.MemoryObservation) || !m.MemoryObservation.AttributionUnknown {
 		t.Fatal("missing attribution lost physical observation", m.MemoryObservation)
 	}
 	if _, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, Attempts: []AttemptReport{r}}); err != nil {

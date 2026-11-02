@@ -98,6 +98,7 @@ func creditDockerObservation(o *HostMemoryObservation, jobs []Job, reports []Att
 			samples[attemptKey{r.ID, r.Attempt, r.Session}] = r.CurrentHostMemory
 		}
 	}
+	managed := 0.0
 	for _, j := range jobs {
 		if !j.Spec.Run.Docker {
 			continue
@@ -110,9 +111,9 @@ func creditDockerObservation(o *HostMemoryObservation, jobs []Job, reports []Att
 			o.AttributionUnknown = true
 			return o
 		}
-		o.MyceliumGB += s.NonreclaimableGB
+		managed += s.NonreclaimableGB
 	}
 	// Host and cgroup observations are not atomic; bound the sampled estimate.
-	o.MyceliumGB = min(o.MyceliumGB, o.UsedGB)
+	o.MyceliumGB = min(o.MyceliumGB+managed, o.UsedGB)
 	return o
 }
