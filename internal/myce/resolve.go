@@ -72,6 +72,11 @@ func (q *Queue) Resolve(req ResolveRequest) (ResolveReport, error) {
 	}
 	recipes, sidecars, ok := view.resolveRecipes(s, &r)
 	r.Findings = append(r.Findings, resolvePathFindings(s)...)
+	if _, err := view.modelLimits(s); err != nil {
+		r.Findings = append(r.Findings, ResolveFinding{Field: "model_snapshots", Side: "queue", Problem: err.Error(), Fix: "Ask the queue owner to permit the repository in the policy's models.sources, or declare a permitted repository."})
+	} else if len(s.ModelSnapshots) > 0 {
+		r.Notes = append(r.Notes, "Model snapshots are verified by the worker before launch; a missing or changed snapshot fails the attempt with a named model_snapshot reason.")
+	}
 	if !ok || err != nil {
 		r.Notes = append(r.Notes, "Targets are evaluated once the environment and extension resolve.")
 		return r, nil

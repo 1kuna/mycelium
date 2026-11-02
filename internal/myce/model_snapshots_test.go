@@ -140,6 +140,10 @@ printf '%s' "$MYCE_MODEL_BASE" > result`
 	if _, err := c.Submit(ctx, declare("org/tiny", tinyRevision, reads)); err == nil || !strings.Contains(err.Error(), "not permitted by local model policy") {
 		t.Fatal("model accepted without local policy", err)
 	}
+	var resolved ResolveReport
+	if err := c.Call(ctx, "POST", "/api/resolve", ResolveRequest{Spec: declare("org/tiny", tinyRevision, reads)}, &resolved); err != nil || len(resolved.Findings) == 0 || resolved.Findings[0].Field != "model_snapshots" {
+		t.Fatalf("resolve hid the policy refusal: %v %+v", err, resolved.Findings)
+	}
 	setModelPolicy(t, ctx, c, &ModelPolicy{Sources: []string{"org/*"}, MaxBytes: 1 << 20})
 	if _, err := c.Submit(ctx, declare("org/tiny", "main", reads)); err == nil || !strings.Contains(err.Error(), "full 40-character lowercase commit") {
 		t.Fatal("movable revision accepted", err)
