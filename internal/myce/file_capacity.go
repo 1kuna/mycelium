@@ -173,13 +173,25 @@ type fileStoreObservation struct {
 	bundles                   map[string]time.Time
 	now                       time.Time
 	retention                 time.Duration
-	projects                  []ProjectFileStoreUsage
+	projects                  projectFileFacts
 }
 
 // The caller holds q.mu. Reference maps are newly allocated and timestamps are
 // values; the FileStore owns its separate lifecycle/inventory synchronization.
 func (q *Queue) captureFileStoreStatus() fileStoreObservation {
-	expired, keep, referenced := q.fileReferences(true)
+	// One reference walk serves capacity and per-project retained bytes.
+	projects := projectFileFacts{retained: make([]projectFileFact, 0, 4*len(q.s.Jobs))}
+	expired, keep, referenced := q.collectFileReferences(true, nil, projects.retain)
+	q.noteProjectFileAdditions(&projects, q.s.Jobs)
+	q.noteProjectFileAdditions(&projects, q.retiredSubmissionJobs("", nil))
+	for name, p := range q.s.Policies {
+		if p.MaxRetainedFileBytes > 0 || p.MaxAddedFileBytes24h > 0 {
+			if projects.limits == nil {
+				projects.limits = map[string]ProjectPolicy{}
+			}
+			projects.limits[name] = p
+		}
+	}
 	markers := make(map[string]time.Time, len(q.s.JobInputUploads)+len(q.s.AttemptOutputUploads))
 	bundles := make(map[string]time.Time, len(q.s.BundleUploads))
 	for hash, at := range q.jobUploadMarkers() {
@@ -191,7 +203,7 @@ func (q *Queue) captureFileStoreStatus() fileStoreObservation {
 			markers[hash] = at
 		}
 	}
-	return fileStoreObservation{q.files, expired, keep, referenced, markers, bundles, q.clock.Now(), q.fileRetention, q.projectFileStoreUsage()}
+	return fileStoreObservation{q.files, expired, keep, referenced, markers, bundles, q.clock.Now(), q.fileRetention, projects}
 }
 
 func (q *Queue) fileStoreStatus(ctx context.Context) *FileStoreStatus {
@@ -211,7 +223,7 @@ func (v fileStoreObservation) status(ctx context.Context) *FileStoreStatus {
 	store.lifecycle.RLock()
 	defer store.lifecycle.RUnlock()
 	status, payloads, err := store.capacity(ctx)
-	status.Projects = v.projects
+	status.Projects = v.projects.usage(now)
 	if err != nil {
 		status.Error = "file store capacity unavailable"
 		status.Physical = store.physicalStorageStatus(ctx, status, nil, now)
@@ -285,20 +297,10 @@ func (q *Queue) PreflightFileStore(ctx context.Context, files FileManifest) erro
 	}
 	growth := need
 	need = addDiskBytes(need, store.reservedOutputs(payloads))
-	if _, err = store.admit(ctx, status, payloads, files, need, growth); err != nil {
-		return err
-	}
-	// Refuse an over-quota project before it uploads inputs submit would refuse.
-	s, ok := ctx.Value(fileStoreSubmissionKey{}).(Spec)
-	if !ok {
-		return nil
-	}
-	q.mu.RLock()
-	defer q.mu.RUnlock()
-	if s.Class == "" {
-		s.Class = q.s.Policies[s.Project].DefaultCallPriority
-	}
-	return q.fileStoreQuotaRefusal(s, files, 0)
+	// Admission also refuses an over-quota project before it uploads inputs
+	// submit would refuse.
+	_, err = store.admit(ctx, status, payloads, files, need, growth)
+	return err
 }
 
 func (c Client) PreflightFileStore(ctx context.Context, files FileManifest) error {
@@ -421,4 +423,9 @@ func (q *Queue) reclaimInterruptedUploads(requestContexts ...context.Context) er
 // Match public capacity codes without relaying arbitrary upstream bodies.
 func fileCapacityCode(code string) bool {
 	return code == "file_store_capacity" || code == "file_store_unavailable"
+}
+
+// File-store refusals whose code and reason reach HTTP callers intact.
+func fileStoreRefusalCode(code string) bool {
+	return fileCapacityCode(code) || code == "project_file_store_quota"
 }

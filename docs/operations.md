@@ -878,13 +878,19 @@ Set them through `myce policy set` like other project settings. A non-production
 submission whose new inputs plus declared `disk.output_bytes` (and the project's
 other declared async outputs) would exceed either limit is refused with
 `project_file_store_quota` and a reason naming the limit, the cleanup command
-and the advice to keep large outputs in project storage. Profile preflight
-returns the same refusal before uploading inputs. Accepted completions are never
+and the advice to keep large outputs in project storage. Input preflight and
+upload creation that name the project (`X-Myce-Project`, as the profile CLI
+does) return the same refusal before any bytes upload. Like the reserve, that
+name is a shared-token hint: an upload without one is not checked, and its
+submission is still refused. Accepted completions are never
 refused or dropped: a result that overshoots stays, `refusal` appears on the
 project's status entry, and the project's next non-production submissions are
 refused until a release or retention lowers retained usage, or old additions
 leave the 24-hour window. Production submissions are always admitted; the
-production reserve and store capacity still apply to them.
+production reserve and store capacity still apply to them. Status builds this
+accounting from a list copied during its existing reference walk and totals it
+after releasing the queue lock; submit and upload checks walk only the limited
+project's jobs.
 
 ### Parked native storage integration (#564)
 

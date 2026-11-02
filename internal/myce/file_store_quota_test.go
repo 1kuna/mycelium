@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -141,5 +143,38 @@ func TestProjectFileStoreDailyQuotaRollingWindow(t *testing.T) {
 	clock.Advance(time.Second)
 	if err := submitDeclaring(q, "owner", "experiment", 3); err != nil {
 		t.Fatal("addition older than 24h still counted", err)
+	}
+}
+
+// Over HTTP, inputs named for an over-quota project are refused before they
+// upload, at preflight and upload creation, and submit keeps the agent's reason.
+// Production and unnamed uploads pass.
+func TestProjectFileStoreQuotaRefusesInputUploads(t *testing.T) {
+	q, _ := fixture(t)
+	c := retentionClient(t, q)
+	setQuotaPolicy(t, q, "owner", ProjectPolicy{MaxRetainedFileBytes: 10})
+	quotaResult(t, q, c, "owner", "experiment", "abcdefgh")
+	path := filepath.Join(t.TempDir(), "next")
+	if err := os.WriteFile(path, []byte("0123"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := IdentifyFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := FileManifest{"next": ref}
+	owner := WithFileStoreSubmission(context.Background(), Spec{Project: "owner"})
+	assertQuotaRefusal(t, c.PreflightFileStore(owner, files), "retained=12")
+	assertQuotaRefusal(t, c.UploadJobInput(owner, path, ref), "retained=12")
+	over := spec("experiment")
+	over.Project, over.Disk = "owner", &DiskNeeds{OutputBytes: 5}
+	_, err = c.Submit(context.Background(), over)
+	assertQuotaRefusal(t, err, "retained=13", "myce file release plan")
+	production := WithFileStoreSubmission(context.Background(), Spec{Project: "owner", Class: "production"})
+	if err := c.PreflightFileStore(production, files); err != nil {
+		t.Fatal("production preflight refused by project quota", err)
+	}
+	if err := c.UploadJobInput(context.Background(), path, ref); err != nil {
+		t.Fatal("upload without a project refused by project quota", err)
 	}
 }

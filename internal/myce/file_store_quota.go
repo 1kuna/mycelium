@@ -37,9 +37,100 @@ type projectFileLedger struct {
 	reserved uint64
 }
 
-// q.mu held. Metadata only: no store inventory, hashing or other I/O.
-// project=="" builds every project's ledger (status); otherwise only that one.
-func (q *Queue) projectFileLedgers(project string) map[string]*projectFileLedger {
+type projectFileFact struct {
+	project, hash string
+	size          uint64
+	at            time.Time
+}
+
+// Flat facts copied under q.mu: appends only, no maps per digest. Status builds
+// the ledgers after unlocking, so the queue lock pays one reference walk (#80).
+type projectFileFacts struct {
+	retained, added []projectFileFact
+	reserved        map[string]uint64
+	limits          map[string]ProjectPolicy
+}
+
+// Report callback for collectFileReferences. Worker-local custody lives on the
+// worker, not in the queue store.
+func (f *projectFileFacts) retain(ref FileRef, owner FileKeepingReference) {
+	if owner.Project != "" && owner.Kind != "worker_local_custody" {
+		f.retained = append(f.retained, projectFileFact{project: owner.Project, hash: ref.SHA256, size: uint64(ref.SizeBytes)})
+	}
+}
+
+// q.mu held. Inputs count at submission, results at completion.
+func (q *Queue) noteProjectFileAdditions(f *projectFileFacts, jobs map[string]*Job) {
+	now := q.clock.Now()
+	if f.reserved == nil {
+		f.reserved = map[string]uint64{}
+	}
+	f.added = slices.Grow(f.added, 4*len(jobs))
+	note := func(project string, at time.Time, files FileManifest) {
+		for _, ref := range files {
+			f.added = append(f.added, projectFileFact{project: project, hash: ref.SHA256, size: uint64(ref.SizeBytes), at: at})
+		}
+	}
+	for _, j := range jobs {
+		if j == nil || j.Spec.Project == "" {
+			continue
+		}
+		project := j.Spec.Project
+		// submissionFiles without its per-job map; names are irrelevant here.
+		note(project, j.Queued, j.Spec.Files)
+		if len(j.Spec.SharedInputs) > 0 {
+			note(project, j.Queued, sharedStoredFiles(j.Spec))
+		}
+		if j.Dependency != nil {
+			note(project, j.Queued, j.Dependency.Files)
+		}
+		finished := now
+		if j.FinishedAt != nil {
+			finished = *j.FinishedAt
+		}
+		note(project, finished, j.OutputRefs)
+		for _, a := range j.AttemptHistory {
+			if a.Diagnostics != nil {
+				note(project, finished, a.Diagnostics.Files)
+			}
+		}
+		if j.FanOut != nil {
+			for _, r := range j.FanOut.Results {
+				note(project, finished, r.OutputRefs)
+			}
+		}
+		if !terminal(j.State) && !cancelled(j) && !j.OutputAdmissionPending && j.Spec.OutputDelivery == asyncNAS && j.PendingOutputRefs == nil && j.Spec.Disk != nil {
+			f.reserved[project] = addDiskBytes(f.reserved[project], j.Spec.Disk.OutputBytes)
+		}
+	}
+}
+
+// q.mu held. Keyed answers whose job has left the job table.
+func (q *Queue) retiredSubmissionJobs(project string, into map[string]*Job) map[string]*Job {
+	for _, r := range q.s.Submissions {
+		if r.Job != nil && q.s.Jobs[r.Job.ID] == nil && (project == "" || r.Job.Spec.Project == project) {
+			if into == nil {
+				into = map[string]*Job{}
+			}
+			into[r.Job.ID] = r.Job
+		}
+	}
+	return into
+}
+
+// q.mu held. One project's jobs, including its retired keyed answers.
+func (q *Queue) projectFileJobs(project string) map[string]*Job {
+	jobs := map[string]*Job{}
+	for id, j := range q.s.Jobs {
+		if j != nil && j.Spec.Project == project {
+			jobs[id] = j
+		}
+	}
+	return q.retiredSubmissionJobs(project, jobs)
+}
+
+// No lock needed: facts are detached copies.
+func (f projectFileFacts) ledgers() map[string]*projectFileLedger {
 	ledgers := map[string]*projectFileLedger{}
 	ledger := func(name string) *projectFileLedger {
 		if ledgers[name] == nil {
@@ -47,57 +138,18 @@ func (q *Queue) projectFileLedgers(project string) map[string]*projectFileLedger
 		}
 		return ledgers[name]
 	}
-	q.collectFileReferences(false, nil, func(ref FileRef, owner FileKeepingReference) {
-		// Worker-local custody lives on the worker, not in the queue store.
-		if owner.Project == "" || owner.Kind == "worker_local_custody" || project != "" && owner.Project != project {
-			return
-		}
-		ledger(owner.Project).retained[ref.SHA256] = uint64(ref.SizeBytes)
-	})
-	now := q.clock.Now()
-	seen := map[string]bool{}
-	visit := func(j *Job) {
-		if j == nil || seen[j.ID] || project != "" && j.Spec.Project != project {
-			return
-		}
-		seen[j.ID] = true
-		l := ledger(j.Spec.Project)
-		note := func(at time.Time, files FileManifest) {
-			for _, ref := range files {
-				if first, ok := l.first[ref.SHA256]; !ok || at.Before(first) {
-					l.first[ref.SHA256] = at
-				}
-				l.size[ref.SHA256] = uint64(ref.SizeBytes)
-			}
-		}
-		note(j.Queued, submissionFiles(j.Spec))
-		if j.Dependency != nil {
-			note(j.Queued, j.Dependency.Files)
-		}
-		finished := now
-		if j.FinishedAt != nil {
-			finished = *j.FinishedAt
-		}
-		note(finished, j.OutputRefs)
-		for _, a := range j.AttemptHistory {
-			if a.Diagnostics != nil {
-				note(finished, a.Diagnostics.Files)
-			}
-		}
-		if j.FanOut != nil {
-			for _, r := range j.FanOut.Results {
-				note(finished, r.OutputRefs)
-			}
-		}
-		if !terminal(j.State) && !cancelled(j) && !j.OutputAdmissionPending && j.Spec.OutputDelivery == asyncNAS && j.PendingOutputRefs == nil && j.Spec.Disk != nil {
-			l.reserved = addDiskBytes(l.reserved, j.Spec.Disk.OutputBytes)
-		}
+	for _, r := range f.retained {
+		ledger(r.project).retained[r.hash] = r.size
 	}
-	for _, j := range q.s.Jobs {
-		visit(j)
+	for _, a := range f.added {
+		l := ledger(a.project)
+		if first, ok := l.first[a.hash]; !ok || a.at.Before(first) {
+			l.first[a.hash] = a.at
+		}
+		l.size[a.hash] = a.size
 	}
-	for _, record := range q.s.Submissions {
-		visit(record.Job)
+	for name, bytes := range f.reserved {
+		ledger(name).reserved = bytes
 	}
 	return ledgers
 }
@@ -138,41 +190,55 @@ func fileStoreQuotaReason(project string, p ProjectPolicy, retained, added uint6
 	} else {
 		return ""
 	}
-	return fmt.Sprintf("project %s queue file-store quota: %s (including inputs and declared outputs); non-production submissions are refused until usage drops. Write large outputs to your project's own storage inside the job and return small receipts; release collected results with `myce file release plan --project %s JOB...` then `myce file release apply --accept-expiry PLAN.json`; the 24h allowance frees as additions age out", project, over, project)
+	return fmt.Sprintf("project %s queue file-store quota: %s (including inputs and declared outputs); non-production submissions are refused until usage drops. Write large outputs to your project's own storage inside the job and return small receipts; release collected results with `myce file release plan --project %s JOB... > PLAN.json` then `myce file release apply --accept-expiry PLAN.json`; the 24h allowance frees as additions age out", project, over, project)
 }
 
 // q.mu held. Default off: projects without limits and production work skip
 // the metadata walk. Completed results are never refused here; a project that
 // overshot is refused at its next non-production submission instead.
 func (q *Queue) fileStoreQuotaRefusal(s Spec, incoming FileManifest, declared uint64) error {
-	p := q.s.Policies[s.Project]
-	if p.MaxRetainedFileBytes == 0 && p.MaxAddedFileBytes24h == 0 || q.priorityMatch(s).Tier == "production" {
+	if q.priorityMatch(s).Tier == "production" {
 		return nil
 	}
-	l := q.projectFileLedgers(s.Project)[s.Project]
+	return q.projectFileQuotaRefusal(s.Project, incoming, declared)
+}
+
+// q.mu held; the caller has already excluded production.
+func (q *Queue) projectFileQuotaRefusal(project string, incoming FileManifest, declared uint64) error {
+	p := q.s.Policies[project]
+	if p.MaxRetainedFileBytes == 0 && p.MaxAddedFileBytes24h == 0 {
+		return nil
+	}
+	// Walk only this project's jobs: cost follows the project, not the queue.
+	jobs := q.projectFileJobs(project)
+	var facts projectFileFacts
+	q.collectFileReferences(false, nil, facts.retain, jobs)
+	q.noteProjectFileAdditions(&facts, jobs)
+	l := facts.ledgers()[project]
 	if l == nil {
 		l = &projectFileLedger{}
 	}
 	retained, added := l.usage(q.clock.Now().Add(-fileStoreQuotaWindow), incoming)
 	pending := addDiskBytes(l.reserved, declared)
-	if reason := fileStoreQuotaReason(s.Project, p, addDiskBytes(retained, pending), addDiskBytes(added, pending)); reason != "" {
+	if reason := fileStoreQuotaReason(project, p, addDiskBytes(retained, pending), addDiskBytes(added, pending)); reason != "" {
 		return &HTTPError{Status: http.StatusInsufficientStorage, Code: "project_file_store_quota", Message: reason}
 	}
 	return nil
 }
 
-// q.mu held. Status lists projects holding bytes or configured with a limit.
-func (q *Queue) projectFileStoreUsage() []ProjectFileStoreUsage {
-	ledgers := q.projectFileLedgers("")
-	since := q.clock.Now().Add(-fileStoreQuotaWindow)
-	var out []ProjectFileStoreUsage
-	for name, p := range q.s.Policies {
-		if (p.MaxRetainedFileBytes > 0 || p.MaxAddedFileBytes24h > 0) && ledgers[name] == nil {
+// Status lists projects holding bytes or configured with a limit. Runs after
+// q.mu is released, on facts captured with the status reference walk.
+func (f projectFileFacts) usage(now time.Time) []ProjectFileStoreUsage {
+	ledgers := f.ledgers()
+	since := now.Add(-fileStoreQuotaWindow)
+	for name := range f.limits {
+		if ledgers[name] == nil {
 			ledgers[name] = &projectFileLedger{}
 		}
 	}
+	var out []ProjectFileStoreUsage
 	for _, name := range slices.Sorted(maps.Keys(ledgers)) {
-		l, p := ledgers[name], q.s.Policies[name]
+		l, p := ledgers[name], f.limits[name]
 		u := ProjectFileStoreUsage{Project: name, ReservedOutputBytes: l.reserved, MaxRetainedFileBytes: p.MaxRetainedFileBytes, MaxAddedFileBytes24h: p.MaxAddedFileBytes24h}
 		u.RetainedBytes, u.AddedBytes24h = l.usage(since, nil)
 		if u.RetainedBytes == 0 && u.AddedBytes24h == 0 && l.reserved == 0 && p.MaxRetainedFileBytes == 0 && p.MaxAddedFileBytes24h == 0 {
