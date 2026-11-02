@@ -66,6 +66,7 @@ func TestExtensionCheckMemoryCrossFamilyRecovery(t *testing.T) {
 			s.ExtensionCheck = &ExtensionCheckRequest{Work: "extension:sample", Directory: t.TempDir()}
 			s.SizeHint = SizeHint{MemoryGB: 8, HostMemoryGB: 40}
 			s.Targets = []ExecutionTarget{cuda.Target}
+			s.AllowedMachines = []string{source.ID}
 			start := func(owner Machine) *Job {
 				t.Helper()
 				queued := submit(t, q, s)
