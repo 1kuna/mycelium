@@ -351,13 +351,19 @@ after a caller restart; do not clear the hold merely because the caller exited.
 
 ```sh
 myce reserve add 'host=compute-a;devices=0' --id driver-check --job JOB_ID --owner validation-agent --reason 'driver qualification' --max-lifetime 2h
-myce reserve add 'host=compute-b' --id host-check --job OTHER_JOB_ID --owner validation-agent --reason 'host validation'
+myce reserve add 'host=compute-b' --whole-host --id host-check --job OTHER_JOB_ID --owner validation-agent --reason 'host validation requires host-wide isolation'
 myce reserve list
 myce reserve release driver-check --if-revision 1 --reason 'validation abandoned; inspect retained execution custody separately'
 ```
 
 `reserve add` binds one existing single batch job/check before enabling admission
-policy. It resolves the same stable physical identities as `exclude`, accepting
+policy. For a GPU extension check, the CLI narrows a host-only selector to the
+check's explicitly selected device. An unselected check requires an explicit
+device selector. Use `--whole-host` with a host-only selector only when the check
+needs host-wide isolation, and explain why in `--reason`. CPU checks and ordinary
+validation jobs retain their authored scope. This CLI default does not edit
+existing reservations or change the API's explicit selector contract.
+It resolves the same stable physical identities as `exclude`, accepting
 one host, its explicit devices, `host=HOST;kind=gpu`, or
 `host=HOST;platform=PLATFORM`. The bound job must fit a selected target and is
 then restricted to that target. Unknown jobs, dependencies/fan-outs, incompatible
