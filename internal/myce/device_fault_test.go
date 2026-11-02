@@ -25,7 +25,7 @@ func TestDeviceFaultQuarantine(t *testing.T) {
 	root := &workerStore{dir: t.TempDir()}
 	var lines []KernelLogLine
 	boot := "boot-a"
-	w.DeviceFaultSource = func(context.Context) (KernelLogSnapshot, error) {
+	w.DeviceFaultSource = func(context.Context, time.Time) (KernelLogSnapshot, error) {
 		return KernelLogSnapshot{BootID: boot, Lines: lines}, nil
 	}
 	if err := w.initDeviceFaults(context.Background(), root); err != nil {
@@ -146,5 +146,117 @@ func TestDeviceFaultQuarantine(t *testing.T) {
 	}
 	if w.Machine.Devices[0].Reason != "" {
 		t.Fatal("fresh boot retained quarantine")
+	}
+}
+
+// #595/#300: the 2026-11-02 sequence. A fault 273 ms after TERM and 1 ms before
+// exit on the stopped card is teardown; a fault on an idle card still quarantines.
+func TestDeviceFaultTeardownClassification(t *testing.T) {
+	var journal bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&journal)
+	t.Cleanup(func() { log.SetOutput(previous) })
+	clock := &fakeClock{now: time.Date(2026, 11, 2, 4, 0, 56, 942_000_000, time.UTC)}
+	m := m3Machine()
+	m.Devices[0].pciAddress, m.Devices[1].pciAddress = "0000:03:00.0", "0000:07:00.0"
+	w := Worker{Machine: m, Clock: clock, DeviceFaultMatchers: map[string]DeviceFaultMatcher{"fake": intelKernelFault}}
+	w.control = &processControl{clock: clock}
+	root := &workerStore{dir: t.TempDir()}
+	var lines []KernelLogLine
+	w.DeviceFaultSource = func(context.Context, time.Time) (KernelLogSnapshot, error) {
+		return KernelLogSnapshot{BootID: "boot", Lines: lines}, nil
+	}
+	if err := w.initDeviceFaults(context.Background(), root); err != nil {
+		t.Fatal(err)
+	}
+	scan := func(next ...KernelLogLine) {
+		t.Helper()
+		lines = next
+		if err := w.refreshDeviceFaults(context.Background(), root); err != nil {
+			t.Fatal(err)
+		}
+	}
+	term := clock.Now()
+	victim := &process{job: Job{ID: "victim", Attempt: 1, Session: "s", AllocatedDevices: []string{"0"}}}
+	w.control.set(victim)
+	victim.stopRequested = term
+	victim.outcome = memberOutcome{Signals: []deliveredSignal{{Signal: "TERM", At: term}}, Exit: &memberExit{Status: 143, ObservedAt: term.Add(274 * time.Millisecond)}}
+	clock.Advance(808 * time.Millisecond) // Custody released before the next scan.
+	w.control.remove(victim.job)
+	clock.Advance(4 * time.Second)
+	fault := KernelLogLine{ID: "1", At: term.Add(273 * time.Millisecond), Message: "xe 0000:03:00.0: [drm] Fault response: Unsuccessful -ENOENT"}
+	reset := KernelLogLine{ID: "2", At: term.Add(275 * time.Millisecond), Message: "xe 0000:03:00.0: [drm] GT0: Engine reset: engine_class=ccs"}
+	scan(fault, reset)
+	if w.Machine.Devices[0].Reason != "" || w.faults.Teardowns[deviceFaultKey(m.Devices[0])].Reason != "device_fault_xe" {
+		t.Fatalf("teardown fault quarantined card: devices=%+v teardowns=%v", w.Machine.Devices, w.faults.Teardowns)
+	}
+	if !strings.Contains(journal.String(), "device fault attributed to teardown: device=0") {
+		t.Fatal("teardown not recorded", journal.String())
+	}
+	// A natural exit 1 ms after a fault the scan sees first is still teardown.
+	natural := &process{job: Job{ID: "natural", Attempt: 1, Session: "s", AllocatedDevices: []string{"0"}}}
+	w.control.set(natural)
+	at := clock.Now()
+	scan(KernelLogLine{ID: "3", At: at, Message: "xe 0000:03:00.0: [drm] Fault response: Unsuccessful -EINVAL"})
+	natural.mu.Lock()
+	natural.outcome.Exit = &memberExit{ObservedAt: at.Add(time.Millisecond)}
+	natural.mu.Unlock()
+	clock.Advance(5 * time.Second)
+	scan()
+	if w.Machine.Devices[0].Reason != "" {
+		t.Fatal("fault just before exit quarantined card", w.Machine.Devices)
+	}
+	// Device 1 had no stop or exit: unchanged quarantine.
+	scan(KernelLogLine{ID: "4", At: clock.Now().Add(-2 * time.Second), Message: "xe 0000:07:00.0: [drm] GPU HANG"})
+	if w.Machine.Devices[1].Reason != "device_fault_xe" || w.Machine.Devices[0].Reason != "" {
+		t.Fatal("uncorrelated fault did not quarantine its card", w.Machine.Devices)
+	}
+	// Teardown evidence ages out; a later fault on the same card quarantines.
+	clock.Advance(teardownRetention + time.Second)
+	w.control.remove(natural.job)
+	clock.Advance(teardownRetention + time.Second)
+	scan(KernelLogLine{ID: "5", At: clock.Now().Add(-2 * time.Second), Message: "xe 0000:03:00.0: [drm] GPU HANG"})
+	if w.Machine.Devices[0].Reason != "device_fault_xe" {
+		t.Fatal("uncorrelated same-card fault did not quarantine", w.Machine.Devices)
+	}
+}
+
+// #595: a failed kernel-log read is visible in worker and queue status.
+func TestDeviceFaultReadFailureReported(t *testing.T) {
+	var journal bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&journal)
+	t.Cleanup(func() { log.SetOutput(previous) })
+	q, clock := fixture(t)
+	w := Worker{Machine: m3Machine(), Clock: clock}
+	unreadable := errors.New("kernel log not readable")
+	failing := true
+	w.DeviceFaultSource = kernelLogSource(func() ([]byte, error) { return []byte("boot\n"), nil }, func(context.Context, []string) ([]byte, error) {
+		if failing {
+			return nil, errors.New("journal denied")
+		}
+		return nil, nil
+	}, func(context.Context, time.Time) ([]KernelLogLine, error) { return nil, unreadable })
+	root := &workerStore{dir: t.TempDir()}
+	if err := w.initDeviceFaults(context.Background(), root); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.refreshDeviceFaults(context.Background(), root); err != nil {
+		t.Fatal(err)
+	}
+	if w.Machine.FaultMonitorError != "kernel log not readable" || strings.Count(journal.String(), "fault monitor unavailable") != 1 {
+		t.Fatalf("read failure not reported: %q %s", w.Machine.FaultMonitorError, journal.String())
+	}
+	machineCheck(t, q, w.Machine)
+	snapshot, err := q.Snapshot()
+	if err != nil || len(snapshot.Machines) != 1 || snapshot.Machines[0].FaultMonitorError != "kernel log not readable" {
+		t.Fatalf("status lacks fault monitor error: %v %+v", err, snapshot.Machines)
+	}
+	failing = false
+	if err := w.refreshDeviceFaults(context.Background(), root); err != nil {
+		t.Fatal(err)
+	}
+	if w.Machine.FaultMonitorError != "" || !strings.Contains(journal.String(), "fault monitor recovered") {
+		t.Fatal("recovery not reported", w.Machine.FaultMonitorError)
 	}
 }

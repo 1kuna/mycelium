@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -16,13 +17,19 @@ import (
 )
 
 // KernelLogLine has a stable, boot-local identity (kernel monotonic timestamp).
+// At is its wall time, zero when the source has none.
 // Raw messages are inspected locally and never persisted or sent to the queue.
-type KernelLogLine struct{ ID, Message string }
+type KernelLogLine struct {
+	ID, Message string
+	At          time.Time
+}
 type KernelLogSnapshot struct {
 	BootID string
 	Lines  []KernelLogLine
 }
-type DeviceFaultSource func(context.Context) (KernelLogSnapshot, error)
+
+// Without a cursor of its own, a source reads records from since onward.
+type DeviceFaultSource func(ctx context.Context, since time.Time) (KernelLogSnapshot, error)
 type DeviceFaultMatcher func(MachineDevice, string) string
 
 const deviceFaultFile = "device-quarantine.json"
@@ -33,6 +40,8 @@ type deviceQuarantine struct {
 	BootID  string                 `json:"boot_id"`
 	Seen    map[string]bool        `json:"seen"`
 	Devices map[string]deviceFault `json:"devices"`
+	// Last fault per device attributed to teardown rather than quarantined.
+	Teardowns map[string]deviceFault `json:"teardowns,omitempty"`
 }
 
 type deviceFault struct {
@@ -52,6 +61,9 @@ func deviceFaultReason(s string) bool {
 
 func (w *Worker) initDeviceFaults(ctx context.Context, root *workerStore) error {
 	w.faults = &deviceQuarantine{}
+	// Read from worker start, not the whole boot (#595). Faults while no worker
+	// ran are not replayed; quarantine already recorded persists below.
+	w.faultSince = w.Clock.Now()
 	data, err := os.ReadFile(filepath.Join(root.dir, deviceFaultFile))
 	if err == nil {
 		err = decodeWorkerJSON(data, w.faults)
@@ -96,45 +108,66 @@ func (w *Worker) refreshDeviceFaults(ctx context.Context, root *workerStore) err
 	if w.DeviceFaultSource == nil {
 		return nil
 	} // Apple has no cheap qualified source.
-	source := w.DeviceFaultSource
+	source, since := w.DeviceFaultSource, w.faultSince
 	snapshot, err := root.deviceFaults.run("kernel", func() (KernelLogSnapshot, error) {
 		readCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
-		return source(readCtx)
+		return source(readCtx, since)
 	})
 	if errors.Is(err, errCheckpointIOPending) {
 		return nil
 	}
 	if err != nil || snapshot.BootID == "" {
-		if !w.faultMonitorUnavailable {
+		// Status shows the gap; optional observation cannot disable unrelated devices.
+		if w.Machine.FaultMonitorError == "" {
 			log.Print("accelerator fault monitor unavailable: kernel log not readable")
 		}
-		w.faultMonitorUnavailable = true
-		return nil // Optional observation cannot disable unrelated devices.
+		w.Machine.FaultMonitorError = "kernel log not readable"
+		return nil
 	}
-	w.faultMonitorUnavailable = false
-	next := deviceQuarantine{BootID: snapshot.BootID, Seen: map[string]bool{}, Devices: map[string]deviceFault{}}
+	if w.Machine.FaultMonitorError != "" {
+		log.Print("accelerator fault monitor recovered")
+	}
+	w.Machine.FaultMonitorError = ""
+	next := deviceQuarantine{BootID: snapshot.BootID, Seen: map[string]bool{}, Devices: map[string]deviceFault{}, Teardowns: map[string]deviceFault{}}
+	lines := snapshot.Lines
 	if w.faults.BootID == snapshot.BootID {
-		for k, v := range w.faults.Seen {
-			next.Seen[k] = v
-		}
-		for k, v := range w.faults.Devices {
-			next.Devices[k] = v
-		}
+		maps.Copy(next.Seen, w.faults.Seen)
+		maps.Copy(next.Devices, w.faults.Devices)
+		maps.Copy(next.Teardowns, w.faults.Teardowns)
+		lines = append(w.faultPending, lines...)
 	}
+	w.faultPending = nil
 	changed := next.BootID != w.faults.BootID
-	for _, line := range snapshot.Lines {
+	now := w.Clock.Now()
+	for _, line := range lines {
 		sum := sha256.Sum256([]byte(line.ID + "\x00" + line.Message))
 		key := hex.EncodeToString(sum[:])
 		if next.Seen[key] {
 			continue
 		}
 		for _, d := range w.Machine.Devices {
-			if match := w.DeviceFaultMatchers[d.Platform]; match != nil {
-				if reason := match(d, line.Message); reason != "" {
-					next.Devices[deviceFaultKey(d)], next.Seen[key], changed = deviceFault{Reason: reason, Event: key}, true, true
-				}
+			match := w.DeviceFaultMatchers[d.Platform]
+			if match == nil {
+				continue
 			}
+			reason := match(d, line.Message)
+			if reason == "" {
+				continue
+			}
+			// An exit just after the fault may not be recorded yet; decide next scan.
+			if !line.At.IsZero() && now.Sub(line.At) < teardownFaultWindow {
+				w.faultPending = append(w.faultPending, line)
+				break
+			}
+			fault := deviceFault{Reason: reason, Event: key}
+			next.Seen[key], changed = true, true
+			if !line.At.IsZero() && w.control.teardownNear(d.ID, line.At) {
+				next.Teardowns[deviceFaultKey(d)] = fault
+				log.Printf("device fault attributed to teardown: device=%s pci=%s reason=%s fault_event=%s", d.ID, d.pciAddress, reason, key)
+				continue
+			}
+			next.Devices[deviceFaultKey(d)] = fault
 		}
 	}
 	// Consume clear requests only after observing the log. Seen hashes retain
@@ -267,6 +300,80 @@ func cudaKernelFault(d MachineDevice, line string) string {
 		return "device_fault_nvidia_xid"
 	}
 	return ""
+}
+
+// #595: a fault within this window of a same-device stop request, signal or
+// exit is teardown, not a card fault. Observed: 273 ms after TERM and 1 ms
+// before the exit was recorded (#300); a card fault quarantine would cut capacity.
+const teardownFaultWindow = time.Second
+
+// Released attempts keep evidence past the five-second scan interval and a late
+// journal read; the cost is a few timestamps per released accelerator attempt.
+const teardownRetention = time.Minute
+
+type teardownMark struct {
+	devices []string
+	times   []time.Time
+	until   time.Time
+}
+
+// Stop request (injected clock) plus recorded signal and exit wall times.
+func (p *process) teardownTimes() []time.Time {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	var times []time.Time
+	add := func(o memberOutcome) {
+		for _, s := range o.Signals {
+			times = append(times, s.At)
+		}
+		if o.Exit != nil && !o.Exit.ObservedAt.IsZero() {
+			times = append(times, o.Exit.ObservedAt)
+		}
+	}
+	if !p.stopRequested.IsZero() {
+		times = append(times, p.stopRequested)
+	}
+	add(p.outcome)
+	if p.native != nil {
+		for _, m := range p.native.members {
+			add(m.memberOutcome)
+		}
+	}
+	if p.docker != nil {
+		p.docker.mu.Lock()
+		for _, m := range p.docker.state.Containers {
+			add(m.memberOutcome)
+		}
+		p.docker.mu.Unlock()
+	}
+	return times
+}
+
+func (c *processControl) teardownNear(device string, at time.Time) bool {
+	if c == nil {
+		return false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := c.clock.Now()
+	c.retired = slices.DeleteFunc(c.retired, func(m teardownMark) bool { return now.After(m.until) })
+	marks := slices.Clone(c.retired)
+	for _, p := range c.processes {
+		if !p.job.Spec.Needs.cpuOnly() {
+			marks = append(marks, teardownMark{devices: p.job.AllocatedDevices, times: p.teardownTimes()})
+		}
+	}
+	for _, m := range marks {
+		if !slices.Contains(m.devices, device) {
+			continue
+		}
+		for _, t := range m.times {
+			if d := at.Sub(t); d <= teardownFaultWindow && d >= -teardownFaultWindow {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // Called inside Checkin's existing transaction; all kernel I/O stays in workers.

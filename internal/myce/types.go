@@ -521,6 +521,7 @@ type Machine struct {
 	MaxJobs                     int                 `json:"max_jobs,omitempty"`
 	AdmissionReason             string              `json:"admission_reason,omitempty"`
 	FileTransferError           string              `json:"file_transfer_error,omitempty"`
+	FaultMonitorError           string              `json:"fault_monitor_error,omitempty"`
 	CapabilityProfile           *CapabilityProfile  `json:"capability_profile,omitempty"`
 	CPUExtensionFingerprint     string              `json:"cpu_extension_fingerprint,omitempty"`
 	ExtensionFingerprint        string              `json:"extension_fingerprint,omitempty"`
