@@ -453,8 +453,10 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 		busy := !q.workerBatchIdle(live)
 		batchSlotAllocated := busy
 		sharedWith := 0
-		if n, ok := q.deviceCoTenants(live, best, true); busy && ok && q.cardSettled(live) {
-			sharedWith, busy = n, false
+		if busy {
+			if n, ok := q.deviceCoTenants(live, best, true); ok && q.cardSettled(live) {
+				sharedWith, busy = n, false
+			}
 		}
 		if call := q.calls[best.ID]; call != nil {
 			busy = !q.callCanUse(live, call)
