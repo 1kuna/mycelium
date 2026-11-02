@@ -16,23 +16,31 @@ import (
 // GPUHostMemory is complete xe host evidence, separate from device VRAM.
 // DriverGB counts per-client system/GTT objects plus the independently read
 // xe GTT managers, even where they overlap each other or cgroup charges.
-// HostDropGB is the whole-host MemAvailable drop since the empty cgroup was
-// created; it supplies an independent floor for allocations absent from fdinfo.
-// OutsideGB retains max(driver objects, host drop minus synchronized current
-// components, zero) across samples. It is added to the component peak; never
-// subtract independent lifetime peaks. These are observations, not instantaneous
-// allocation bounds. Unrelated host activity can conservatively increase them.
+// HostDropGB is the MemAvailable drop after subtracting sibling Mycelium
+// cgroup growth. OutsideGB retains max(driver objects, adjusted drop minus
+// synchronized current nonreclaimable components, zero) across the attempt.
+// Unexplained activity outside Mycelium remains a conservative residual.
 type GPUHostMemory struct {
-	DriverGB   *float64 `json:"driver_gb"`
-	HostDropGB *float64 `json:"host_drop_gb"`
-	OutsideGB  *float64 `json:"outside_gb"`
+	// Identifies samples collected with sibling subtraction. Legacy evidence
+	// is replaced when a corrected accepted sample arrives, including on reopen.
+	SiblingAdjusted bool     `json:"sibling_adjusted,omitempty"`
+	DriverGB        *float64 `json:"driver_gb"`
+	HostDropGB      *float64 `json:"host_drop_gb"`
+	OutsideGB       *float64 `json:"outside_gb"`
 }
 
 func (p *AttemptMemoryPeak) gpuHostPeakGB() (float64, bool) {
 	if p == nil || p.NonreclaimableGB == nil || !validMemoryValue(*p.NonreclaimableGB) || p.GPUHost == nil || p.GPUHost.DriverGB == nil || p.GPUHost.HostDropGB == nil || p.GPUHost.OutsideGB == nil || !validMemoryValue(*p.GPUHost.DriverGB) || !validMemoryValue(*p.GPUHost.HostDropGB) || !validMemoryValue(*p.GPUHost.OutsideGB) || *p.GPUHost.OutsideGB < *p.GPUHost.DriverGB {
 		return 0, false
 	}
-	return max(*p.NonreclaimableGB+*p.GPUHost.OutsideGB, *p.GPUHost.HostDropGB), true
+	if p.CombinedHostGB != nil && validMemoryValue(*p.CombinedHostGB) {
+		return *p.CombinedHostGB, true
+	}
+	resident := *p.NonreclaimableGB
+	if p.HostGB != nil && validMemoryValue(*p.HostGB) {
+		resident = max(resident, *p.HostGB)
+	}
+	return max(resident+*p.GPUHost.OutsideGB, *p.GPUHost.HostDropGB), true
 }
 
 type gpuHostState struct {

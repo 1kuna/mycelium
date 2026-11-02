@@ -111,7 +111,15 @@ func (q *Queue) recordWorkMemory(sample eligibleMemorySample, old WorkObservatio
 		peak.Constrained = true
 		old.MemoryPeak = &peak
 	}
-	if !memoryIdentityUsable(old) || !old.MemoryRecordedAt.IsZero() && q.clock.Now().Sub(old.MemoryRecordedAt) > workCurveMaxAge {
+	// Corrected accepted attribution replaces the old aggregate rather than
+	// carrying its inflated outside peak/range forward. Rejected attempts never
+	// reach this writer. The accepted-sample ledger records the replacement.
+	corrected := r.MemoryPeak.GPUHost != nil && r.MemoryPeak.GPUHost.SiblingAdjusted
+	oldCorrected := old.MemoryPeak != nil && old.MemoryPeak.GPUHost != nil && old.MemoryPeak.GPUHost.SiblingAdjusted
+	if oldCorrected && r.MemoryPeak.GPUHost != nil && !corrected {
+		return // A result from a pre-upgrade worker cannot poison corrected history.
+	}
+	if corrected && !oldCorrected || !memoryIdentityUsable(old) || !old.MemoryRecordedAt.IsZero() && q.clock.Now().Sub(old.MemoryRecordedAt) > workCurveMaxAge {
 		old.MemoryPeak, old.MemoryRange, old.GPUHostRange, old.MemorySamples = nil, nil, nil, 0
 	}
 	point.MemoryPeak = mergeMemoryPeaks(old.MemoryPeak, r.MemoryPeak)
