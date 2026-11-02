@@ -15,6 +15,7 @@ type targetFit struct {
 	ineligible int
 	shortfall  float64
 	key        string
+	failed     []string
 }
 
 func (f *targetFit) check(ok bool, dimension string) bool {
@@ -22,6 +23,7 @@ func (f *targetFit) check(ok bool, dimension string) bool {
 		return ok
 	}
 	if !ok {
+		f.failed = append(f.failed, dimension)
 		if f.first == "" {
 			f.first = dimension
 		}
@@ -79,7 +81,7 @@ func targetFitReason(dimension string, j *Job, m *Machine) string {
 		if !j.Spec.Needs.Network {
 			return "native_isolation_unavailable: this host has not reported a supported native kernel boundary; upgrade or repair the worker"
 		}
-		return "needs.network: true requires protected native outbound execution; this host only supports offline native jobs or has not reported isolation capability"
+		return "needs.network: true requires native_network for protected native outbound execution; this host only supports offline native jobs or has not reported isolation capability"
 	case "disk headroom":
 		return diskHeadroomReason(j, m)
 	case "shared host profile":

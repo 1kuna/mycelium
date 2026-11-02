@@ -4,6 +4,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNativeNetworkPlacement(t *testing.T) {
@@ -37,6 +38,45 @@ func TestNativeNetworkPlacement(t *testing.T) {
 	second := submit(t, q, s)
 	if second.State != "queued" {
 		t.Fatal("busy online target prevented normal queuing", second.State)
+	}
+}
+
+// General egress on an unsandboxed command is not protected native egress.
+// Keep needs.network as declared intent without requiring a sandbox capability.
+func TestUnsandboxedNetworkJobPreparesAndRunsWithoutNativeNetwork(t *testing.T) {
+	q, clock := fixture(t)
+	m := cpuMachine("linux-egress", "linux-egress", "cpu", 8, 32)
+	m.EnvironmentBuilder = true
+	m.Capabilities = []string{"native_isolation_landlock", "native_network_partial"}
+	recipe := binaryRecipe(t, "cpu")
+	if err := q.ConfigureEnvironments(EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"download": {"cpu": recipe}}}); err != nil {
+		t.Fatal(err)
+	}
+	check(t, q, m, nil)
+	s := cpuSpec(1, 1)
+	s.Needs.Network = true
+	s.Environment.Name = "download"
+	j := submit(t, q, s)
+	reply := check(t, q, m, nil)
+	if reply.Job != nil || len(reply.EnvironmentPlan) != 1 {
+		t.Fatal("unsandboxed network job did not prepare", reply)
+	}
+	launch := *reply.EnvironmentPlan[0].Launch
+	if err := q.AuthorizeLaunch(launch); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	m.EnvironmentReports = []EnvironmentReport{{Key: launch.Key, Attempt: launch.Attempt, State: "ready"}}
+	m.Environments = []string{launch.Key}
+	run := check(t, q, m, nil).Job
+	if run == nil || run.ID != j.ID || !run.Spec.Needs.Network || !nativeUnsandboxed(run) {
+		t.Fatal("unconfined outbound job not assigned", run)
+	}
+	if err := q.AuthorizeLaunch(HostLaunch{Machine: run.Machine, Session: run.Session, Kind: "batch", Key: run.ID, Attempt: "1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Started(result(run, false)); err != nil {
+		t.Fatal(err)
 	}
 }
 

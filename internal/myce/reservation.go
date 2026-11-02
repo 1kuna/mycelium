@@ -303,6 +303,11 @@ func (q *Queue) reservationObligationMatches(r Reservation, p HostObligation) bo
 	device := ""
 	switch {
 	case p.Launch != nil:
+		if p.Launch.Kind == "environment" && p.Launch.Device == "" && m.Devices != nil {
+			// The machine protocol's empty environment device is the CPU
+			// target, not unknown GPU custody. Its RAM/cores remain charged.
+			return false
+		}
 		device = p.Launch.Device
 	case p.Engine != nil:
 		device = p.Engine.Device
@@ -418,19 +423,20 @@ func (q *Queue) reservationAllows(j *Job, m *Machine) bool {
 	return true
 }
 
-func (q *Queue) reservationWaitReason(j *Job) string {
+func (q *Queue) reservationReasonOnTarget(j *Job, m *Machine) string {
 	for _, stored := range q.s.Reservations {
 		if !stored.active() {
+			continue
+		}
+		if stored.Job != j.ID && !stored.Target.matchesTarget(m) {
 			continue
 		}
 		r := q.projectReservation(stored)
 		if r.Job == j.ID && len(r.Pending) > 0 {
 			return r.Text + "; draining existing work or waiting for worker/cleanup evidence"
 		}
-		for _, m := range q.plannerMachines() {
-			if r.Job != j.ID && r.Target.matchesTarget(m) && q.jobAllowsMachine(j, m.ID) && deviceAllowed(j, m) {
-				return r.Text
-			}
+		if r.Job != j.ID {
+			return r.Text
 		}
 	}
 	return ""
