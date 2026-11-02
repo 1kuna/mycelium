@@ -709,8 +709,12 @@ Each check has a separate one-hour window to start, enforced by the existing
 start-deadline mechanism without changing its experiment priority. If that
 window expires, the command exits unsuccessfully and the local report says
 `never started: <admission reason>` (for example, waiting for host RAM), rather
-than `check failed`. It grants no qualification. An execution timeout remains a
-failed check. Both limits are enforced by the queue, including after the CLI
+than `check failed`. It grants no qualification. A check that never started
+(window expired, or cancelled by Ctrl-C or the caller's timeout while queued)
+has no verdict, so a device's earlier report for that work, qualified or not,
+is restored unchanged; only a check that started and failed revokes it. While a
+check is waiting or running, the device's report reads `check required`. An
+execution timeout remains a failed check. Both limits are enforced by the queue, including after the CLI
 disconnects; Ctrl-C still cancels the CLI's own check and confirms release.
 Keep qualification checks and memory guards intact when allowing build time.
 The cache is trusted local code, not a sandbox. Setup/check obtain an exclusive
