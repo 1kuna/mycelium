@@ -42,6 +42,9 @@
         "at": {
           "type": "string",
           "format": "date-time"
+        },
+        "reason": {
+          "type": "string"
         }
       },
       "type": "object",
@@ -142,6 +145,9 @@
         },
         "batch_size": {
           "type": "integer"
+        },
+        "check": {
+          "type": "boolean"
         }
       },
       "type": "object",

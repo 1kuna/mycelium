@@ -2,6 +2,7 @@ package myce
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -297,11 +298,13 @@ func (q *Queue) recordWorkOOM(j *Job, r Result, oomFailure bool) {
 	k := *key
 	if memoryOnly {
 		configuration := memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
-		for id, point := range q.s.WorkObservations {
+		for _, id := range slices.Sorted(maps.Keys(q.s.WorkObservations)) {
+			point := q.s.WorkObservations[id]
 			if j.MemoryEnvelope != nil && j.MemoryEnvelope.Source == boundedMemoryExploration && point.Key.Target.OS != k.Target.OS {
 				continue // A target-OS probe cannot disprove the foreign prior.
 			}
 			if sameMemoryWork(point, k, configuration) {
+				old := point
 				point.MemoryPeak, point.MemoryRecordedAt = nil, time.Time{}
 				point.MemoryRange, point.MemorySamples = nil, 0
 				point.GPUHostRange = nil
@@ -311,6 +314,7 @@ func (q *Queue) recordWorkOOM(j *Job, r Result, oomFailure bool) {
 					point.MemoryPeak = r.MemoryPeak
 				}
 				q.s.WorkObservations[id] = point
+				q.recordMemoryInvalidation(j, old, point)
 			}
 		}
 		return // Memory invalidation does not forbid completion predictions.

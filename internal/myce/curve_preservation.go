@@ -30,11 +30,27 @@ func (q *Queue) recordCurveLearning(j *Job, old WorkObservation, exists bool, po
 	q.appendJobLedger(j, e)
 }
 
+// recordMemoryInvalidation binds a failed attempt's invalidation of comparable
+// memory, on every key it rewrites (other hosts' included), to that attempt
+// (#620). It is not a sample: the release guard accepts it as a zero-sample
+// link in a key's chain, which may reset that key's memory clock.
+func (q *Queue) recordMemoryInvalidation(j *Job, old, point WorkObservation) {
+	before, after := curveMeasurementDigest(old), curveMeasurementDigest(point)
+	if before == after {
+		return
+	}
+	e := ledgerAttempt(j, "work_learning", "memory_invalidated")
+	e.WorkLearning = &WorkLearningChange{Key: point.Key, Before: before, After: after}
+	q.appendJobLedger(j, e)
+}
+
 type CurvePreservationEvidence struct {
 	Job      string    `json:"job"`
 	Attempt  int       `json:"attempt"`
 	Sequence int       `json:"sequence"`
 	At       time.Time `json:"at"`
+	// Reason is the ledger reason when it is not an accepted sample.
+	Reason string `json:"reason,omitempty"`
 }
 
 type CurvePreservationDiff struct {
@@ -106,13 +122,17 @@ func VerifyCurvePreservation(before, after Snapshot, pages []JobLedgerPage) (Cur
 				return fail("duplicate learning evidence")
 			}
 			seen[id] = true
-			if e.Kind != "work_learning" || e.Reason != "accepted_sample" || page.JobID == "" || e.Attempt < 1 || e.Sequence < 1 || e.Machine == "" || e.Session == "" || e.ExecutionID != fmt.Sprintf("%s/%d", page.JobID, e.Attempt) {
+			if e.Kind != "work_learning" || e.Reason != "accepted_sample" && e.Reason != "memory_invalidated" || page.JobID == "" || e.Attempt < 1 || e.Sequence < 1 || e.Machine == "" || e.Session == "" || e.ExecutionID != fmt.Sprintf("%s/%d", page.JobID, e.Attempt) {
 				return fail("incomplete learning provenance")
 			}
 			if !e.At.After(before.Now) || e.At.After(after.Now) {
 				continue
 			}
-			events[e.WorkLearning.Key] = append(events[e.WorkLearning.Key], event{*e.WorkLearning, CurvePreservationEvidence{page.JobID, e.Attempt, e.Sequence, e.At}})
+			evidence := CurvePreservationEvidence{Job: page.JobID, Attempt: e.Attempt, Sequence: e.Sequence, At: e.At}
+			if e.Reason != "accepted_sample" {
+				evidence.Reason = e.Reason
+			}
+			events[e.WorkLearning.Key] = append(events[e.WorkLearning.Key], event{*e.WorkLearning, evidence})
 		}
 	}
 	// Snapshot order is canonical in production; sort here for reproducible receipts.
@@ -124,7 +144,7 @@ func VerifyCurvePreservation(before, after Snapshot, pages []JobLedgerPage) (Cur
 	for _, key := range keys {
 		next := current[key]
 		prev, exists := old[key]
-		if next.Samples < prev.Samples || next.RecordedAt.Before(prev.RecordedAt) || next.MemoryRecordedAt.Before(prev.MemoryRecordedAt) {
+		if next.Samples < prev.Samples || next.RecordedAt.Before(prev.RecordedAt) {
 			return fail("sample count or evidence clock decreased", key)
 		}
 		start := ""
@@ -135,6 +155,7 @@ func VerifyCurvePreservation(before, after Snapshot, pages []JobLedgerPage) (Cur
 		if start == end {
 			continue
 		}
+		clockReset := next.MemoryRecordedAt.Before(prev.MemoryRecordedAt)
 		delta := next.Samples - prev.Samples
 		if !exists && next.Samples == 0 && next.Forbidden {
 			if evidence, ok := failureCurveEvidence(before.Now, after, next); ok {
@@ -143,13 +164,13 @@ func VerifyCurvePreservation(before, after Snapshot, pages []JobLedgerPage) (Cur
 			}
 			return fail("missing exact post-cutover failure-invalidation provenance", key)
 		}
-		if delta <= 0 {
-			return fail("changed measurement without new accepted samples", key)
-		}
+		// Accepted samples each add one sample. A memory invalidation adds
+		// none and may reset the memory clock; it cannot create a key.
 		diff := CurvePreservationDiff{Key: key, SamplesBefore: prev.Samples, SamplesAfter: next.Samples, Evidence: []CurvePreservationEvidence{}}
 		candidates := events[key]
 		lastAt := before.Now
-		for count := 0; count < delta; count++ {
+		accepted, invalidated := 0, false
+		for start != end || accepted < delta {
 			match := -1
 			for i, e := range candidates {
 				if e.change.Before == start {
@@ -160,18 +181,29 @@ func VerifyCurvePreservation(before, after Snapshot, pages []JobLedgerPage) (Cur
 				}
 			}
 			if match < 0 {
+				if delta <= 0 && !invalidated {
+					return fail("changed measurement without new accepted samples", key)
+				}
 				return fail("unexplained measurement change or missing accepted samples", key)
 			}
 			e := candidates[match]
-			if e.evidence.At.Before(lastAt) || e.change.After == "" || e.change.After == start {
+			if e.evidence.At.Before(lastAt) || e.change.After == "" || e.change.After == start || e.evidence.Reason != "" && !exists {
 				return fail("invalid accepted-sample chain", key)
+			}
+			if e.evidence.Reason == "" {
+				accepted++
+			} else {
+				invalidated = true
+			}
+			if accepted > delta {
+				return fail("accepted samples do not explain final measurements", key)
 			}
 			start, lastAt = e.change.After, e.evidence.At
 			diff.Evidence = append(diff.Evidence, e.evidence)
 			candidates = append(candidates[:match], candidates[match+1:]...)
 		}
-		if start != end {
-			return fail("accepted samples do not explain final measurements", key)
+		if clockReset && !invalidated {
+			return fail("sample count or evidence clock decreased", key)
 		}
 		receipt.Changes = append(receipt.Changes, diff)
 	}

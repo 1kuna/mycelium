@@ -709,8 +709,12 @@ Each check has a separate one-hour window to start, enforced by the existing
 start-deadline mechanism without changing its experiment priority. If that
 window expires, the command exits unsuccessfully and the local report says
 `never started: <admission reason>` (for example, waiting for host RAM), rather
-than `check failed`. It grants no qualification. An execution timeout remains a
-failed check. Both limits are enforced by the queue, including after the CLI
+than `check failed`. It grants no qualification. A check that never started
+(window expired, or cancelled by Ctrl-C or the caller's timeout while queued)
+has no verdict, so a device's earlier report for that work, qualified or not,
+is restored unchanged; only a check that started and failed revokes it. While a
+check is waiting or running, the device's report reads `check required`. An
+execution timeout remains a failed check. Both limits are enforced by the queue, including after the CLI
 disconnects; Ctrl-C still cancels the CLI's own check and confirms release.
 Keep qualification checks and memory guards intact when allowing build time.
 The cache is trusted local code, not a sandbox. Setup/check obtain an exclusive
@@ -743,16 +747,19 @@ variants:
 ```
 
 Use the usual pinned environments and native baselines. The standard
-`myce extension check` submits `needs.memory: auto` for this variant. Without
-an accepted comparable peak or a submitter hint, it explores available memory
-under the existing [memory envelope rules](design-proposal.md#amendment-job-memory-envelopes-146):
-measured host memory, a known allowance, sufficient free headroom and no
-protected memory-heavy work. Missing telemetry or headroom leaves it waiting;
-qualification still requires a successful check and matching baseline output.
+`myce extension check` submits `needs.memory: auto` for this variant. A check
+is sized only from earlier accepted checks of the same variant and work, never
+from the workload's peaks, because it runs the small reference fixture. Without
+such a peak, its first run takes the bounded first-run figure, a quarter of the
+host allowance (its card still explores), under the existing
+[memory envelope rules](design-proposal.md#amendment-job-memory-envelopes-146).
+Missing telemetry or headroom leaves it waiting; qualification still requires a
+successful check and matching baseline output.
 
-With an authored `references` entry, a successful solo auto check can teach
-its memory peak for later work with the same frozen variant, work type and
-input shape. Later jobs declare `workload: {input_shape: sample-v1, units: 10}`.
+With an authored `references` entry, a successful solo auto check can seed
+the memory envelope of later work with the same frozen variant, work type and
+input shape until that work has accepted peaks of its own, which then replace
+the seed. Later jobs declare `workload: {input_shape: sample-v1, units: 10}`.
 Checks teach no throughput or timing data, and the peak stays usable for 30
 days from the check even after the point's throughput ages out. Failed or ceiling-constrained peaks
 cannot seed an estimate. The variant's auto mode applies when the caller omits

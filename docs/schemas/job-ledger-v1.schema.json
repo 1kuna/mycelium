@@ -171,6 +171,9 @@
         },
         "batch_size": {
           "type": "integer"
+        },
+        "check": {
+          "type": "boolean"
         }
       },
       "type": "object",
