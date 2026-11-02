@@ -1,6 +1,6 @@
 ---
 name: mycelium
-description: "Use when work needs fleet compute (heavy tests, builds, sims, training, transcodes, model runs), when you submit, check, wait on or fetch a Mycelium job, when a job is waiting, or when someone asks you to hold or yield capacity."
+description: "Use when work needs fleet compute (heavy tests, builds, sims, training, transcodes, model runs), when you submit, check, wait on or fetch a Mycelium job, when a job is waiting, when your work must go first, or when you need to pause your own queued job."
 ---
 
 <!-- Public consumer guide: no host names, fleet layout, private paths or project names. Update with consumer behavior changes; release qualifiers distinguish merged code from the deployed release. -->
@@ -52,12 +52,12 @@ myce file release apply --accept-expiry release-plan.json          # irreversibl
 
 The plan lists each job's files, what still protects them and `reclaimable_bytes` (it can be zero while still expiring your references). Apply rechecks the plan: `file_release_stale` means re-plan and review again, nothing was expired; `file_release_protected` means a selected job is still live, has unresolved custody or lacks a verified delivery, so drop it from the next plan. Success schedules asynchronous collection, so freed space isn't immediate, and the released results then return `result_expired`. Keep the plan and apply response as your audit record. API: `POST /api/files/release/plan` and `/api/files/release/apply`; see [operations](https://github.com/1kuna/mycelium/blob/main/docs/operations.md#project-owner-early-file-release-465).
 
-## Urgency and holds
+## Urgency and pausing
 
 - **Urgency is the class.** When your work must go first, submit it with the class it truly has and read its waiting reason. A message asking another project to stop can't change queue order, and their queued jobs would take the freed slot anyway.
-- **Class is the only urgency lever.** Production class preempts lower tiers, and nothing else reserves machines: there are no customer windows or holds for jobs or deploys. Pins, holds and messages to other projects are not ways to go first.
+- **Class is the only urgency lever.** Production class preempts lower tiers; nothing else reserves machines except a job-bound validation reservation for a qualification check. There are no customer windows or holds. Pins, holds and messages to other projects are not ways to go first.
 - **Isolated checks:** use a job-bound reservation, not a higher class or a chat-negotiated hold. `myce extension check --reserve` reserves its selected device (the whole host for a CPU check); for an existing single validation job, use `myce reserve add SELECTOR --job JOB_ID --owner OWNER --reason TEXT`. Prefer `host=HOST;devices=DEVICE` over `host=HOST` when only one device needs isolation, leaving siblings eligible; quote the selector in the shell. Reservations withhold new conflicting work while started work finishes, and release after the bound job finishes and cleanup is confirmed; they do not guarantee immediate capacity. See [validation reservations](https://github.com/1kuna/mycelium/blob/main/docs/operations.md#reserve-a-host-or-its-devices-for-an-existing-validation-job). Broader policy changes stay with the queue owner.
-- **When asked to hold**, stop submit, retry and callback paths; the hold covers queued jobs too. Leave running jobs alone. `myce pause JOB_ID --reason TEXT` makes a queued job non-runnable (add `--until RFC3339` for an automatic resume time); after clearance, `myce resume JOB_ID` restores it with the same key and queue age. Assigned/running attempts cannot be paused. Don't cancel and resubmit held work.
+- **Pausing your own queued job:** `myce pause JOB_ID --reason TEXT` makes it non-runnable (add `--until RFC3339` for an automatic resume time); `myce resume JOB_ID` restores it with the same key and queue age. Assigned/running attempts cannot be paused; leave running jobs alone. Don't cancel and resubmit paused work.
 - Queue policy (`myce policy`) is shared state: propose a change to the Mycelium thread rather than setting it.
 
 ## When a job waits
