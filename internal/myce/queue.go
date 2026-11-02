@@ -905,7 +905,14 @@ func (q *Queue) stop(j *Job, why string) {
 	if j.State != "running" {
 		return
 	}
-	t := q.clock.Now().Add(StopGrace)
+	now := q.clock.Now()
+	for i := range j.Copies {
+		c := &j.Copies[i]
+		if c.Attempt == j.Attempt && c.Machine == j.Machine && c.Session == j.Session && c.StoppedAt == nil {
+			c.StoppedAt = &now
+		}
+	}
+	t := now.Add(StopGrace)
 	j.StopAt = &t
 	j.State = "stopping"
 	j.Reason = why
@@ -2295,6 +2302,12 @@ func (q *Queue) markStarted(j *Job) {
 	if j.StartedAt == nil {
 		now := q.clock.Now()
 		j.StartedAt = &now
+		for i := range j.Copies {
+			c := &j.Copies[i]
+			if c.Attempt == j.Attempt && c.Machine == j.Machine && c.Session == j.Session && c.StartedAt == nil {
+				c.StartedAt = &now
+			}
+		}
 		if !j.Spec.Run.Docker {
 			q.checkLedgerNativeCoverage(j)
 		}

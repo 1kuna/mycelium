@@ -540,10 +540,22 @@
         "release_reason": {
           "type": "string"
         },
+        "released_at": {
+          "format": "date-time",
+          "type": "string"
+        },
         "session": {
           "type": "string"
         },
+        "started_at": {
+          "format": "date-time",
+          "type": "string"
+        },
         "stop_cause": {
+          "type": "string"
+        },
+        "stopped_at": {
+          "format": "date-time",
           "type": "string"
         }
       },

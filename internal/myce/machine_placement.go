@@ -230,6 +230,28 @@ func (q *Queue) batchSlotFree(m *Machine, demand *Job) bool {
 	return ok && q.cardSettled(m) && !m.Gone && !m.Leaving && !q.unreported[m.ID]
 }
 
+// Model loads use memory admission rather than the batch command-slot gate.
+// XPU still needs every different-tier batch's exact release before loading.
+func (q *Queue) xpuBatchTiersSettled(m *Machine, demand *Job) bool {
+	if m.GPU != "xpu" {
+		return true
+	}
+	for _, j := range q.liveJobs() {
+		if !j.Spec.Needs.cpuOnly() && batchOnTarget(j, m) && batchReservesCapacity(j) && q.comparePriority(j.Spec, demand.Spec) != 0 {
+			return false
+		}
+	}
+	for _, r := range q.s.HostReleases {
+		if r.CPUOnly || !q.batchReleaseOnTarget(r, m) {
+			continue
+		}
+		if j := q.s.Jobs[r.Job]; j == nil || q.comparePriority(j.Spec, demand.Spec) != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 // A newcomer joins only running holders. A stopping holder or a finished one
 // awaiting exact release keeps the card fenced until that release (custody).
 func (q *Queue) cardSettled(m *Machine) bool {

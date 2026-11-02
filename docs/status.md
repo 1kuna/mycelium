@@ -1005,6 +1005,32 @@ These fields are observational and do not change placement or qualification.
 See [the job schema](schemas/job-v1.schema.json) and
 [ledger schema](schemas/job-ledger-v1.schema.json).
 
+## Per-copy execution intervals
+
+Job GET `copies` retains `started_at`, `stopped_at` and `released_at` for each
+exact `(job, attempt, machine, session)`, using the queue's injected clock.
+`started_at` is the first accepted start acknowledgement. `stopped_at` records
+the queue's stop transition, or the exact release receipt if no stop was
+requested; it is not signal-delivery evidence. `released_at` is the first
+accepted exact cleanup acknowledgement. Replays, elapsed grace, loss and an
+omitted heartbeat attempt do not manufacture or move release times. Older
+copies omit unknown timestamps. Copies survive retry and queue restart.
+
+Read `GET /api/jobs/ID` (Python `Client.get(ID)`) for copies, `allocated_devices`
+and the submitted `spec.class`/`spec.priority`. Read assignment time from the
+matching `assigned` ledger entry's `at` or `placement.assigned_at` through
+`myce ledger ID --limit 256` / `GET /api/jobs/ID/ledger`. Follow `has_more` using
+`next` as `after` and the first page's fixed `high_water`.
+
+For an XPU overlap canary, save every relevant job and ledger page before normal
+history expiry, plus the policy revision used to map class to tier. Compare
+each lower-tier card's conservative `[assigned, released_at)` custody interval
+with every production `[started_at, released_at)` interval on that same machine
+and card. Require disjoint intervals; for a preempted lower-tier holder require
+its `released_at <= production.started_at`. Missing assignment, start or exact
+release evidence makes the affected proof incomplete, never a pass. Include
+all attempts rather than only final jobs; keep fleet-specific evidence private.
+
 ## Learned storage evidence
 
 Status JSON includes `storage_observations`, also shown by CLI/HTML status as

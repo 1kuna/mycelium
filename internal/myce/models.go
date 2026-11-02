@@ -564,7 +564,7 @@ func (q *Queue) maintainModels() {
 			}
 			continue
 		}
-		if m.FreeMemoryGB < model.MemoryGB || !cpuAllocationFits(m, 1) || !hostFits(m, model.MemoryGB, model.HostMemoryGB) || q.preparationActive(m) || q.preparationStopping(m) {
+		if !q.xpuBatchTiersSettled(m, callJob(c)) || m.FreeMemoryGB < model.MemoryGB || !cpuAllocationFits(m, 1) || !hostFits(m, model.MemoryGB, model.HostMemoryGB) || q.preparationActive(m) || q.preparationStopping(m) {
 			continue
 		}
 		if s != nil {

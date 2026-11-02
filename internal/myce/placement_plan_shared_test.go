@@ -183,6 +183,53 @@ func TestSharedDeviceXPUEqualTierPacks(t *testing.T) {
 	testSharedDeviceTierPacks(t, "xpu", "experiment")
 }
 
+func TestSharedDeviceXPUModelLoadWaitsForTierRelease(t *testing.T) {
+	for _, kind := range []string{"call", "pin"} {
+		t.Run(kind, func(t *testing.T) {
+			q, clock, m := modelFixture(t)
+			inventory := sharedDiscreteMachine("xpu")
+			m.GPU, m.Devices, m.CapabilityProfile = "xpu", inventory.Devices, inventory.CapabilityProfile
+			m.HostMemoryMeasured, m.HostAvailableMemoryGB = true, 32
+			q.models.Models[0].MemoryGB, q.models.Models[0].Platforms = 1, []string{"xpu"}
+			m.ModelConfigHash = modelConfigHash(q.models)
+			machineCheck(t, q, m)
+			var tenants []*Job
+			for _, gb := range []float64{3, 2} {
+				queued := submit(t, q, sharedSpec("experiment", gb))
+				run := assignedJob(machineCheck(t, q, m, tenants...))
+				if run == nil || run.ID != queued.ID {
+					t.Fatal("experiment did not pack", run, job(t, q, queued.ID).Reason)
+				}
+				if err := q.Started(result(run, false)); err != nil {
+					t.Fatal(err)
+				}
+				tenants = append(tenants, run)
+			}
+			if kind == "call" {
+				addModelCall(t, q, "production")
+			} else if err := q.Pin(ModelPin{Project: "test", Model: "test", Machine: m.ID}); err != nil {
+				t.Fatal(err)
+			}
+			for _, run := range tenants {
+				requireState(t, q, run.ID, "stopping")
+			}
+			clock.Advance(q.gpuStopGrace() + time.Second)
+			if reply := machineCheck(t, q, m, tenants...); len(reply.ModelPlan) != 0 {
+				t.Fatal("model loaded before lower-tier batch release", reply.ModelPlan)
+			}
+			finishInterrupted(t, q, tenants[0])
+			if reply := machineCheck(t, q, m, tenants[1]); len(reply.ModelPlan) != 0 {
+				t.Fatal("model loaded before every lower-tier batch released", reply.ModelPlan)
+			}
+			finishInterrupted(t, q, tenants[1])
+			reply := machineCheck(t, q, m)
+			if len(reply.ModelPlan) != 1 || reply.ModelPlan[0].State != "loading" || reply.ModelPlan[0].Device != "0" {
+				t.Fatal("model did not load after exact batch releases", reply.ModelPlan)
+			}
+		})
+	}
+}
+
 func testSharedDeviceTierPacks(t *testing.T, platform, priority string) {
 	t.Helper()
 	q, _ := fixture(t)

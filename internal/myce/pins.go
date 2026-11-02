@@ -196,7 +196,7 @@ func (q *Queue) maintainPins() {
 			continue
 		}
 		q.applyPlacement(best, demand)
-		if m.FreeMemoryGB < model.MemoryGB || !cpuAllocationFits(m, 1) || !hostFits(m, model.MemoryGB, model.HostMemoryGB) || q.preparationActive(m) || q.preparationStopping(m) {
+		if !q.xpuBatchTiersSettled(m, demand) || m.FreeMemoryGB < model.MemoryGB || !cpuAllocationFits(m, 1) || !hostFits(m, model.MemoryGB, model.HostMemoryGB) || q.preparationActive(m) || q.preparationStopping(m) {
 			continue
 		}
 		q.s.ModelSlots[key] = &ModelSlot{Project: p.Project, Model: p.Model, Device: targetDevice(m), Machine: m.ID, Session: m.Session, State: "loading", LoadUntil: q.engineLoadDeadline(), Attempt: ID(), Priority: "production", LastUsed: now}

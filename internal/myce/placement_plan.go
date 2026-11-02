@@ -320,16 +320,16 @@ func (q *Queue) cardRoom(j *Job, m *Machine, need float64, batch, releaseBatch, 
 		if !batchOnTarget(r, m) || !batchReservesCapacity(r) {
 			continue
 		}
-		isolateTier := batch && m.GPU == "xpu" && q.comparePriority(r.Spec, j.Spec) != 0
+		isolateTier := m.GPU == "xpu" && !r.Spec.Needs.cpuOnly() && q.comparePriority(r.Spec, j.Spec) != 0
 		if !q.batchPreemptible(r, j.Spec) {
-			if batch && (!shared || isolateTier) {
+			if batch && !shared || isolateTier {
 				return false
 			}
 			continue
 		}
 		if shared && !isolateTier {
 			victims = append(victims, r)
-		} else if releaseBatch {
+		} else if releaseBatch || isolateTier {
 			p.addJob(r)
 			room += deviceShareGB(r)
 		}

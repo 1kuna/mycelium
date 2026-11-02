@@ -349,6 +349,9 @@ func legacyRank(p string) int {
 }
 
 type Copy struct {
+	StartedAt        *time.Time          `json:"started_at,omitempty"`
+	StoppedAt        *time.Time          `json:"stopped_at,omitempty"`
+	ReleasedAt       *time.Time          `json:"released_at,omitempty"`
 	ProcessID        string              `json:"process_id,omitempty"`
 	AllocatedDevices []string            `json:"allocated_devices,omitempty"`
 	PriorityStop     *PriorityPreemption `json:"priority_stop,omitempty"`

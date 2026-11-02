@@ -292,6 +292,11 @@ func (q *Queue) confirmCopyRelease(r Result) {
 		c := &j.Copies[i]
 		if c.Attempt == r.Attempt && c.Machine == r.Machine && c.Session == r.Session {
 			if !c.ReleaseConfirmed {
+				now := q.clock.Now()
+				c.ReleasedAt = &now
+				if c.StoppedAt == nil {
+					c.StoppedAt = &now
+				}
 				if !j.Spec.Run.Docker && c.ProcessID == "" && j.Ledger != nil && !provenPrelaunchRefusal(j, r) {
 					j.Ledger = &JobLedgerInfo{Complete: false, HighWater: len(j.LedgerEntries)}
 				}
