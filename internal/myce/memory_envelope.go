@@ -402,6 +402,10 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 			n.MemoryGB = min(n.MemoryGB, m.TotalMemoryGB)
 		}
 	}
+	if !n.cpuOnly() && j.DeviceMemoryFloorGB > 0 {
+		n.MemoryGB = max(n.MemoryGB, j.DeviceMemoryFloorGB)
+		source += "; shared GPU peak × 1.25 floor"
+	}
 	enforcement := m.MemoryEnforcement
 	if enforcement == "" {
 		enforcement = "admission-only"
