@@ -23,7 +23,11 @@ func (q *Queue) targetWaitingReason(j *Job) string {
 			unrelated := false
 			for _, dimension := range fit.failed {
 				switch dimension {
-				case "target", "platform", "device", "extension", "allow-list", "card group":
+				case "native network isolation", "environment", "shared host profile", "memory envelope":
+					// These are actionable blockers to explain below. All other
+					// failures at permanent capacity exclude this target, including
+					// undersized CPUs/devices and unsupported execution runtimes.
+				default:
 					unrelated = true
 				}
 			}
@@ -38,6 +42,9 @@ func (q *Queue) targetWaitingReason(j *Job) string {
 				blocked = append(blocked, why)
 			} else if !environmentCanRun(candidate, m) {
 				blocked = append(blocked, targetFitReason("environment", candidate, m))
+			}
+			if candidate.MemoryEnvelope != nil && candidate.MemoryEnvelope.Refusal != "" {
+				blocked = append(blocked, targetFitReason("memory envelope", candidate, m))
 			}
 			// A reservation cannot explain a job that cannot use this target's
 			// software or network. Preserve those actionable reasons instead.

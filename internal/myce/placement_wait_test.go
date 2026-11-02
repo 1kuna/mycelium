@@ -35,6 +35,30 @@ func TestQueuedReasonIgnoresIneligibleReservation(t *testing.T) {
 	}
 }
 
+func TestQueuedReasonIgnoresReservationOnUndersizedHost(t *testing.T) {
+	q, clock := fixture(t)
+	small := cpuMachine("undersized", "undersized", "cpu", 4, 32)
+	check(t, q, small, nil)
+	boundSpec := cpuSpec(1, 1)
+	boundSpec.AllowedMachines = []string{small.ID}
+	bound := submit(t, q, boundSpec)
+	request := reservationRequest("irrelevant", "host=undersized", bound.ID)
+	request.Reason = "unrelated small-host validation"
+	if _, err := q.CreateReservation(request); err != nil {
+		t.Fatal(err)
+	}
+	eligible := cpuMachine("eligible", "eligible", "cpu", 8, 0.5)
+	check(t, q, eligible, nil)
+	j := submit(t, q, cpuSpec(8, 4))
+	clock.Advance(time.Second)
+	check(t, q, eligible, nil)
+	for _, reason := range []string{job(t, q, j.ID).Reason, q.statusWaitingReason(job(t, q, j.ID))} {
+		if strings.Contains(reason, small.ID) || strings.Contains(reason, request.Reason) || !strings.Contains(reason, "eligible: 4.0 GiB needed, 0.5 GiB available") {
+			t.Fatal("incompatible CPU capacity contributed a reservation reason", reason)
+		}
+	}
+}
+
 func TestQueuedReasonNetworkPreparationAndMemory(t *testing.T) {
 	q, clock := fixture(t)
 	recipe := binaryRecipe(t, "cpu")
