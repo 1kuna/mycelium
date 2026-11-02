@@ -557,6 +557,7 @@ func (q *Queue) memoryEstimateFor(j *Job, m *Machine, checkSeed bool) memoryEsti
 	completeHostRange := true
 	gpuHost := !j.Spec.Needs.cpuOnly() && key.Target.Platform == "xpu" && !m.UnifiedMemory
 	invalidated := false
+	legacyDiscarded := false
 	configuration := memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
 	layout := "separate"
 	if m.UnifiedMemory && !j.Spec.Needs.cpuOnly() {
@@ -590,6 +591,26 @@ func (q *Queue) memoryEstimateFor(j *Job, m *Machine, checkSeed bool) memoryEsti
 			continue
 		}
 		sameFamily := k.Target == key.Target && point.MemoryLayout != "" && point.MemoryLayout == layout
+		if gpuHost && k.Target.Platform == "xpu" && p.GPUHost != nil && !p.GPUHost.SiblingAdjusted {
+			factor := 2.5
+			if sameFamily {
+				factor = 1.25 * 1.5
+				if sameMemoryHost(k, *key, m) {
+					factor = 1.25
+				}
+			}
+			capacity := q.qualificationCapacity(m)
+			resident := *p
+			resident.GPUHost, resident.CombinedHostGB = nil, nil
+			// Pre-#639 outside peaks include sibling growth and independently
+			// combined runs. They cannot prove that work exceeds capacity when
+			// its resident/total peak fits. Reuse normal hints/exploration to
+			// obtain corrected evidence; never discount a real resident floor.
+			if !hostFits(&capacity, 0, hostMemoryPeakGB(p)*factor) && hostFits(&capacity, 0, hostMemoryPeakGB(&resident)*factor) {
+				legacyDiscarded = true
+				continue
+			}
+		}
 		samples := max(1, point.MemorySamples)
 		if sameFamily && sameMemoryHost(k, *key, m) {
 			sameHost, sameHostN = mergeMemoryPeaks(sameHost, p), sameHostN+samples
@@ -625,6 +646,8 @@ func (q *Queue) memoryEstimateFor(j *Job, m *Machine, checkSeed bool) memoryEsti
 		estimate.foreign = j.Spec.Needs.cpuOnly()
 	case invalidated:
 		estimate.source = "exploratory (previous peak constrained)"
+	case legacyDiscarded:
+		estimate.source = "exploratory (legacy XPU attribution exceeds allowance)"
 	}
 	estimate.host, estimate.hostFactor = estimate.device, estimate.deviceFactor
 	// A spent probe cannot lose its prior through OOM invalidation, history
