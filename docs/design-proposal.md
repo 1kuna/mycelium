@@ -977,7 +977,7 @@ hosts counting the one pool. A finished co-tenant stays charged until exact
 release. Docker, model-server, extension-check, fan-out, exploratory first-run
 and multi-card attempts keep the card to themselves, as does a hint that names
 no device memory (its device figure is only a default), and a newcomer never
-joins a higher tier's attempt. Equal tiers never preempt; a higher tier stops the
+joins a higher tier's attempt. For placement, equal tiers never preempt; a higher tier stops the
 fewest co-tenants whose release frees enough and starts only after that
 release; a multi-card demand stops every co-tenant on its cards. Waiting reasons name `device N shared with K attempts`. CPU attempts
 can run alongside GPU work and one another within host resources and caps;
@@ -987,6 +987,18 @@ empty explicit sets and invalid counts use `gpu_selector_invalid`. An explicit
 count above one and multi-card model masks use `gpu_count_unsupported`, never
 partial reservation or reduction. Unknown/offline selections remain queued with
 `no_matching_device`.
+
+Shared-card memory growth (#625) uses fresh per-process device samples from
+check-ins (younger than ten seconds, using the injected clock). If the sum of
+each tenant's larger measured use or reservation, plus resident model charges,
+exceeds the card budget, stop the lowest tier; among equals choose the tenant
+most over its reservation. This safety stop may displace an equal tier. It
+retains normal checkpoint grace and exact-release custody and requeues without
+spending a failure budget. Each grower's measured peak × 1.25 becomes a durable
+device-memory floor for its next placement; running reservations stay fixed.
+Single tenants are unaffected. Missing or stale samples establish no growth,
+and the running job's reason reports unavailable per-process evidence. Host
+memory-drop estimates cannot attribute co-tenants and do not trigger this guard.
 
 **Cards per job (MY-30, [#105](https://github.com/1kuna/mycelium/issues/105)).**
 `memory_gb` (declared or learned) decides the cards. Work one card of its host
