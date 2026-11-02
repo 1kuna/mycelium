@@ -82,7 +82,9 @@
         "native_custody_invalid",
         "file_release_invalid",
         "file_release_stale",
-        "file_release_protected"
+        "file_release_protected",
+        "diagnostics_unknown",
+        "output_delivery_unavailable"
       ]
     },
     "job_id": {
