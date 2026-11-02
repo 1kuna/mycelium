@@ -53,7 +53,7 @@ func TestAPIRejectionDiagnostics(t *testing.T) {
 	server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 	defer server.Close()
 	s := spec("experiment")
-	s.Needs.MemoryGB = 0
+	s.Needs.MemoryGB = -1 // An omitted figure is learned (#585); a negative one is refused.
 	err := (Client{URL: server.URL, Token: "test"}).Call(context.Background(), "POST", "/api/jobs", s, nil)
 	var typed *HTTPError
 	if !errors.As(err, &typed) || typed.Code != "job_memory_invalid" || typed.Message != "declare positive memory_gb (host RAM for CPU work, GPU memory otherwise)" {

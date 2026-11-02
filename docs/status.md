@@ -399,7 +399,10 @@ History never proves release; use the existing exact release evidence.
 `GET /api/jobs/{id}` also returns optional `memory_attempts`, available as Go
 `GetJob(...).MemoryAttempts` and Python `Client.get(id)["memory_attempts"]`.
 Each entry binds `attempt`, `machine`, and `session` to its observed
-`memory_peak` and resolved `memory_envelope`. These facts persist with the job
+`memory_peak` and resolved `memory_envelope`. The envelope's optional `basis`
+(`declared`, `learned`, `hint` or `exploratory`) and `evidence` (accepted
+attempts behind a learned figure or similar-work bound) also appear in status
+and waiting reasons (#585). These facts persist with the job
 independently of learning, including a constrained first run with no comparable
 learned point. Retention is bounded to 32 rows: the first and the most recent
 31. Optional `memory_attempts_dropped` counts evicted rows (omitted zero), so

@@ -58,6 +58,9 @@ func (q *Queue) Resolve(req ResolveRequest) (ResolveReport, error) {
 	if err := s.Validate(); err != nil {
 		return ResolveReport{}, specRejection(err)
 	}
+	if err := view.defaultMemory(&s); err != nil {
+		return ResolveReport{}, specRejection(err)
+	}
 	r := ResolveReport{ObservedAt: view.clock.Now(), Resolved: []string{}, Targets: []ResolveTarget{}, Findings: []ResolveFinding{}, Notes: []string{
 		"Read-only: no job, upload, build, reservation or placement change. Eligibility uses permanent capacity; current load decides when work starts. Submission revalidates everything.",
 	}}

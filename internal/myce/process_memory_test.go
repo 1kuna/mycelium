@@ -116,7 +116,7 @@ func TestProcessMemoryPeakTeachesComparableReruns(t *testing.T) {
 	m.MemoryEnforcement = "memory ceiling not enforced on this host (requires Linux cgroup v2)"
 	s.Needs.Memory = "auto"
 	first := startObservation(t, q, m, s)
-	if first.MemoryEnvelope.Source != "exploratory first run" {
+	if first.MemoryEnvelope.Source != boundedQuarter {
 		t.Fatalf("first darwin auto run must explore: %+v", first.MemoryEnvelope)
 	}
 	clock.Advance(time.Second)

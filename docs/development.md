@@ -142,10 +142,11 @@ all future growth or a Linux-equivalent total-memory measurement. Ordinary launc
 slack is additional on both platforms. Revisit sizing if the suite grows, pressure
 appears or peaks approach the declaration. Linux cgroups enforce the declaration
 plus configured slack; Darwin is admission-only. A confirmed final-attempt OOM
-appears as `failed (out of memory)` in CI. Unhinted `memory: auto` intentionally
-explores available host headroom after unusable constrained evidence, which made
-this repeatedly measured CPU gate reserve scarce accelerator capacity; see
-[#559](https://github.com/1kuna/mycelium/issues/559).
+appears as `failed (out of memory)` in CI. Unhinted `memory: auto` used to
+explore available host headroom after unusable constrained evidence, which made
+this repeatedly measured CPU gate reserve scarce accelerator capacity; CPU
+first runs are now bounded (see
+[#559](https://github.com/1kuna/mycelium/issues/559)).
 
 For ad-hoc suites, `myce run --profile go-test -- -race ./...` defaults to the
 same `-timeout 15m` as the full gate. Arguments after `--` go to `go test`; an

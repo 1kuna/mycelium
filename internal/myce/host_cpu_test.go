@@ -45,7 +45,7 @@ func TestCPUResourceInputAndCanonicalRoundtrip(t *testing.T) {
 	if err := j.Spec.Validate(); err != nil {
 		t.Fatal("canonical revalidation", err)
 	}
-	for _, needs := range []ResourceNeeds{{CPUCores: -1, MemoryGB: 1}, {CPUCores: 1}, {CPUCores: 1, MemoryGB: math.NaN()}, {CPUCores: 1, MemoryGB: math.Inf(1)}, {CPUCores: 1, MemoryGB: 1, HostMemoryGB: -1}} {
+	for _, needs := range []ResourceNeeds{{CPUCores: -1, MemoryGB: 1}, {CPUCores: 1, MemoryGB: -1}, {CPUCores: 1, MemoryGB: math.NaN()}, {CPUCores: 1, MemoryGB: math.Inf(1)}, {CPUCores: 1, MemoryGB: 1, HostMemoryGB: -1}} {
 		bad := cpuSpec(1, 1)
 		bad.Needs = needs
 		if err := bad.Validate(); err == nil {
