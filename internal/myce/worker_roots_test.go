@@ -429,3 +429,48 @@ func TestWorkerRootsSidecarOnlyEnvironment(t *testing.T) {
 		t.Fatal("recovered helper refused locally", err)
 	}
 }
+
+func TestWorkerRootsQueueBackedOutputs(t *testing.T) {
+	q, _ := fixture(t)
+	q.deliveryRoot = t.TempDir()
+	s := asyncDeliverySpec()
+	s.Priority = "production"
+	s.Needs = cpuSpec(1, 1).Needs
+	j := submit(t, q, s)
+	m := cpuMachine("worker", "worker", "cpu", 4, 16)
+	m.UnavailableRoots = []UnavailableRoot{{Root: "job-files", Reason: "configured NAS mount missing"}}
+	assigned := check(t, q, m, nil).Job
+	if assigned == nil || assigned.ID != j.ID {
+		t.Fatal("queue-backed outputs blocked by unused worker root")
+	}
+	w := Worker{Machine: m, HostMemorySource: func(context.Context) (float64, error) { return 16, nil }}
+	if err := localAttemptAdmission(w, nil, *assigned, nil); err != nil {
+		t.Fatal("queue-backed outputs refused locally", err)
+	}
+	if err := w.publishExtensionFiles(*assigned, ""); err != nil {
+		t.Fatal("queue-backed outputs used worker publication root", err)
+	}
+	pathInput := cloneJob(assigned)
+	pathInput.Spec.Inputs = map[string]string{"input": "data/input"}
+	directOutput := cloneJob(assigned)
+	directOutput.Spec.OutputDelivery = ""
+	directOutput.Spec.After = &PieceDependency{}
+	for _, dependent := range []*Job{&pathInput, &directOutput} {
+		if reason := q.storageRootReason(dependent, &m); !strings.Contains(reason, "job-files unavailable") {
+			t.Fatal("NAS-dependent transport bypassed queue fence", reason)
+		}
+		if err := localAttemptAdmission(w, nil, *dependent, nil); err == nil || !strings.Contains(err.Error(), "job-files unavailable") {
+			t.Fatal("NAS-dependent transport bypassed worker fence", err)
+		}
+		healthy := m
+		healthy.UnavailableRoots = nil
+		if reason := q.storageRootReason(dependent, &healthy); reason != "" {
+			t.Fatal("worker root recovery ignored", reason)
+		}
+		healthyWorker := w
+		healthyWorker.Machine = healthy
+		if err := localAttemptAdmission(healthyWorker, nil, *dependent, nil); err != nil {
+			t.Fatal("worker root recovery refused locally", err)
+		}
+	}
+}

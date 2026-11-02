@@ -132,7 +132,7 @@ func storageRootReason(j *Job, m *Machine) string {
 				needs = needs || input.NAS != "" && !slices.Contains(m.CachedSharedInputs, input.key())
 			}
 		case "job-files":
-			needs = len(jobInputPaths(j)) > 0 || len(j.Spec.Outputs) > 0 || len(j.OutputFiles) > 0 || j.Spec.OutputDelivery == asyncNAS
+			needs = len(jobInputPaths(j)) > 0 || j.publishesNASOutputs()
 		case "model":
 			needs = len(j.Spec.ModelSnapshots) > 0 || j.Spec.Needs.Model != ""
 		case "model-cache":
