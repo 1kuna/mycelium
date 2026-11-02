@@ -367,7 +367,7 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 	// commands whose observer is installed just after exec. No baseline means
 	// diagnostic counters only, never permission to shrink a GPU envelope.
 	gpuHost := w.Machine.GPU == "xpu" && !w.Machine.UnifiedMemory && w.selectedDevice != nil && w.selectedDevice.pciAddress != "" && !j.Spec.Needs.cpuOnly() && len(w.selectedDevices) == 0
-	completeGPUHost := gpuHost && a.hostBaseline != nil
+	completeGPUHost := gpuHost && a.hostBaseline != nil && a.rootBaseline != nil
 	var worstHost gpuHostState
 	pressureKnown := a.hostBaseline != nil && a.pressureBaseline != nil && !a.pressureStart.IsZero()
 	unknownReason := "pressure_baseline_unavailable"
@@ -416,10 +416,19 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 			completeGPUHost = false
 			return
 		}
-		hostDropGB = max(hostDropGB, a.hostBaseline.available-host.available)
-		// Host and component reads stay together; DRM I/O never runs on this
-		// sampler. Its independently retained driver floor is added at finish.
-		outsideGB = max(outsideGB, a.hostBaseline.available-host.available-*component.nonreclaimableSampleGB)
+		root, ok := cgroupResidentGB(a.fs, filepath.Dir(a.path))
+		if !ok || component.HostGB == nil {
+			completeGPUHost = false
+			return
+		}
+		// The root includes this attempt's resident counters, so remove only
+		// siblings' growth. Keep negative growth: an exiting sibling raises
+		// MemAvailable and must not hide this attempt's outside allocations.
+		siblingGrowth := root - *a.rootBaseline - *component.HostGB
+		drop := a.hostBaseline.available - host.available - siblingGrowth
+		hostDropGB = max(hostDropGB, drop)
+		// DRM I/O stays off this sampler. Its driver floor is added at finish.
+		outsideGB = max(outsideGB, drop-*component.nonreclaimableSampleGB)
 	}
 	sampleHost(peak)
 	var driver <-chan gpuHostCollection
@@ -576,7 +585,9 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 				peak.NonreclaimableGB = peak.nonreclaimableSampleGB
 				if gpuHost {
 					outsideGB = max(outsideGB, collected.driverGB)
-					peak.GPUHost = &GPUHostMemory{DriverGB: &collected.driverGB, HostDropGB: &hostDropGB, OutsideGB: &outsideGB}
+					peak.GPUHost = &GPUHostMemory{SiblingAdjusted: true, DriverGB: &collected.driverGB, HostDropGB: &hostDropGB, OutsideGB: &outsideGB}
+					combined, _ := peak.gpuHostPeakGB()
+					peak.CombinedHostGB = &combined
 				}
 			}
 			// Counter-only read zeros are diagnostic facts, not a new

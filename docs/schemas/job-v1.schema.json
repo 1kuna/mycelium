@@ -124,6 +124,9 @@
         "cgroup_gb": {
           "type": "number"
         },
+        "combined_host_gb": {
+          "type": "number"
+        },
         "constrained": {
           "description": "Observed constraint evidence; omitted false. Constrained facts are retained even when learning rejects them.",
           "type": "boolean"
@@ -1411,6 +1414,9 @@
         },
         "outside_gb": {
           "type": "number"
+        },
+        "sibling_adjusted": {
+          "type": "boolean"
         }
       },
       "required": [

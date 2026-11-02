@@ -470,6 +470,18 @@ swap peaks. A zero-OOM/swap/max-hit claim requires those readings to be present
 and zero; an absent reading cannot support that claim. These observations do
 not imply acceptance into learning or prove execution release.
 
+Discrete XPU `gpu_host.host_drop_gb` subtracts sibling Mycelium cgroup growth
+from the host's available-memory drop; `outside_gb` subtracts the attempt's
+synchronized nonreclaimable sample and retains the counted driver-object floor.
+`gpu_host.sibling_adjusted` identifies corrected attribution. `combined_host_gb`
+retains the maximum per-attempt resident-plus-outside figure across accepted
+runs, so independent component maxima cannot invent a larger combined run.
+The first corrected accepted sample replaces legacy XPU memory aggregates;
+comparable uncorrected XPU rows no longer dominate sizing. This replacement and
+its accepted-sample provenance survive queue reopen. Real OOM lower bounds and
+pressure/custody gates still apply. Unexplained activity outside Mycelium remains
+a conservative residual; the sample is not proof of exclusive ownership.
+
 CUDA/XPU cgroup attempts sample device use every five seconds, including declared
 jobs, checks and resumed attempts that cannot feed learning. CUDA uses NVIDIA's
 per-process `compute-apps` counters; GPU-wide `memory.used` can be unsupported

@@ -82,6 +82,9 @@ func TestGPUHostMemoryCompleteAttempt(t *testing.T) {
 			clock := &workerFakeClock{now: time.Date(2026, 10, 30, 0, 0, 0, 0, time.UTC)}
 			c := fakeCeilings(t)
 			c.clock = clock
+			if err := os.WriteFile(filepath.Join(c.root, "memory.stat"), []byte("anon 0\nkernel 0\nshmem 0\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
 			a, err := c.create("attempt-xe", 16<<30, 0)
 			if err != nil {
 				t.Fatal(err)
@@ -218,7 +221,10 @@ func TestGPUHostMemoryCompleteAttempt(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			f := &nonreclaimableSamplingFS{memoryFS: a.fs, sampled: make(chan struct{})}
+			if err := os.WriteFile(filepath.Join(c.root, "memory.stat"), []byte("anon 8230000000\nkernel 30000000\nshmem 0\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			f := &xpuAttributionFS{memoryFS: a.fs, attempt: a.path, sampled: make(chan struct{})}
 			a.fs = f
 			if mode == "host PSI reset" {
 				a.hostBaseline.psiTotalUS = 1000
@@ -454,7 +460,7 @@ func (f *blockedGPUHostFS) ReadFile(p string) ([]byte, error) {
 		close(f.blocked)
 		<-f.release
 	}
-	if filepath.Base(p) == "memory.stat" {
+	if filepath.Base(p) == "memory.stat" && filepath.Base(filepath.Dir(p)) == "attempt-blocked-xe" {
 		resident := f.resident.Load()
 		if resident == 16 && f.sawSpike.CompareAndSwap(false, true) {
 			close(f.spike)
@@ -477,7 +483,11 @@ func TestGPUHostMemoryBlockedDriverPreservesResidentSpike(t *testing.T) {
 }
 
 func testGPUHostMemoryBlockedDriver(t *testing.T, blockedAtFinish bool) {
-	a, err := fakeCeilings(t).create("attempt-blocked-xe", 24<<30, 0)
+	c := fakeCeilings(t)
+	if err := os.WriteFile(filepath.Join(c.root, "memory.stat"), []byte("anon 0\nkernel 0\nshmem 0\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	a, err := c.create("attempt-blocked-xe", 24<<30, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -795,6 +805,9 @@ func TestGPUHostMemoryFallbackAndFloors(t *testing.T) {
 			}
 			for id, p := range q.s.WorkObservations {
 				p.GPUHostRange = &MemoryPeakRange{Samples: 2, MinGB: 7.8, MaxGB: 7.9}
+				// These cases rewrite a raw run's counters; discard its derived
+				// combined figure so the altered run is combined afresh.
+				p.MemoryPeak.CombinedHostGB = nil
 				switch mode {
 				case "legacy GPU sample":
 					p.MemoryPeak.GPUHost = nil

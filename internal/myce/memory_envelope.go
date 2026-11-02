@@ -20,6 +20,9 @@ type AttemptMemoryPeak struct {
 	pressureTotalUS        uint64
 	pressureAvg10          float64
 
+	// CombinedHostGB is the maximum per-attempt resident-plus-outside figure.
+	// Component maxima below remain diagnostics and must not be added across runs.
+	CombinedHostGB      *float64                `json:"combined_host_gb,omitempty"`
 	GPUHost             *GPUHostMemory          `json:"gpu_host,omitempty"`
 	NonreclaimableGB    *float64                `json:"nonreclaimable_gb,omitempty"`
 	HostGB              *float64                `json:"host_gb,omitempty"`
@@ -198,6 +201,11 @@ func mergeMemoryPeaks(old, next *AttemptMemoryPeak) *AttemptMemoryPeak {
 	if old != nil && !old.Constrained {
 		out = *old
 	}
+	for _, p := range []*AttemptMemoryPeak{old, next} {
+		if combined, ok := p.gpuHostPeakGB(); ok && !p.Constrained && (out.CombinedHostGB == nil || combined > *out.CombinedHostGB) {
+			out.CombinedHostGB = &combined
+		}
+	}
 	if next.DeviceGB != nil && validMemoryValue(*next.DeviceGB) && (out.DeviceGB == nil || *next.DeviceGB > *out.DeviceGB) {
 		out.DeviceSource = ""
 		if next.DeviceSource == deviceHostDeltaSource {
@@ -227,6 +235,10 @@ func mergeMemoryPeaks(old, next *AttemptMemoryPeak) *AttemptMemoryPeak {
 		p := GPUHostMemory{}
 		if out.GPUHost != nil {
 			p = *out.GPUHost
+		}
+		p.SiblingAdjusted = p.SiblingAdjusted && next.GPUHost.SiblingAdjusted
+		if out.GPUHost == nil {
+			p.SiblingAdjusted = next.GPUHost.SiblingAdjusted
 		}
 		for _, pair := range [][2]**float64{{&p.DriverGB, &next.GPUHost.DriverGB}, {&p.HostDropGB, &next.GPUHost.HostDropGB}, {&p.OutsideGB, &next.GPUHost.OutsideGB}} {
 			if *pair[1] != nil && validMemoryValue(**pair[1]) && (*pair[0] == nil || **pair[1] > **pair[0]) {
@@ -470,10 +482,10 @@ func hostMemoryPeakGB(p *AttemptMemoryPeak) float64 {
 	if p.CgroupGB != nil && validMemoryValue(*p.CgroupGB) {
 		host = max(host, *p.CgroupGB)
 	}
-	if _, complete := p.gpuHostPeakGB(); complete {
+	if combined, complete := p.gpuHostPeakGB(); complete {
 		// Conservative fallback/transfer must retain observed driver memory
 		// too, even when it exceeds the total cgroup high-water mark.
-		host = max(host, max(*p.HostGB, *p.NonreclaimableGB)+*p.GPUHost.OutsideGB, *p.GPUHost.HostDropGB)
+		host = max(host, combined)
 	}
 	return host
 }
@@ -546,8 +558,20 @@ func (q *Queue) memoryEstimateFor(j *Job, m *Machine, checkSeed bool) memoryEsti
 	if m.UnifiedMemory && !j.Spec.Needs.cpuOnly() {
 		layout = "unified"
 	}
+	// Once corrected evidence exists, legacy XPU attribution on another
+	// comparable key (including a sibling card) must not restore the old peak.
+	correctedXPU := false
+	for _, point := range q.s.WorkObservations {
+		if sameMemoryWork(point, *key, configuration) && memoryIdentityUsable(point) && !point.MemoryRecordedAt.IsZero() && point.MemoryPeak != nil && !point.MemoryPeak.constrained() && !point.MemoryPeak.PressureUnavailable && point.MemoryPeak.GPUHost != nil && point.MemoryPeak.GPUHost.SiblingAdjusted {
+			correctedXPU = true
+			break
+		}
+	}
 	for _, point := range q.s.WorkObservations {
 		k, p := point.Key, point.MemoryPeak
+		if correctedXPU && k.Target.Platform == "xpu" && p != nil && p.GPUHost != nil && !p.GPUHost.SiblingAdjusted && !p.constrained() {
+			continue
+		}
 		age := q.clock.Now().Sub(point.MemoryRecordedAt)
 		if sameMemoryWork(point, *key, configuration) && memoryIdentityUsable(point) && p.constrained() {
 			invalidated = true
@@ -629,9 +653,10 @@ func (q *Queue) memoryEstimateFor(j *Job, m *Machine, checkSeed bool) memoryEsti
 				peak = max(peak, *sameHost.NonreclaimableGB)
 			}
 			if gpuHost {
-				// Retain independent component/driver maxima, even if from
-				// different attempts. Never discount an older resident floor.
-				peak = max(peak, max(*sameHost.HostGB, *sameHost.NonreclaimableGB)+*sameHost.GPUHost.OutsideGB, *sameHost.GPUHost.HostDropGB)
+				// The range and combined peak contain per-run totals; adding
+				// independently merged components invents an unobserved run.
+				combined, _ := sameHost.gpuHostPeakGB()
+				peak = max(peak, combined)
 			}
 			estimate.measuredHostGB = peak + max(hostRange.MaxGB-hostRange.MinGB, peak*.25, exploratoryDriftMarginGB(m))
 			estimate.source = "non-reclaimable peak + measured range (25% minimum); CPU only"
