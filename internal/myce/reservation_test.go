@@ -717,3 +717,39 @@ func TestReservationRejectsWaitingProductionModelDemand(t *testing.T) {
 		t.Fatal("rejected reservation mutated production demand")
 	}
 }
+
+// Incident 2026-11-02: a card reservation on a two-card host withdrew every
+// unstarted CPU job there, because the host record keeps card 0's scalar
+// device ID. Each withdrawn CPU copy also held the reservation pending, so
+// the bound check was withdrawn too and both restarted forever.
+func TestDeviceReservationKeepsUnstartedCPUJobOnSameHost(t *testing.T) {
+	// A whole-host reservation must still withdraw the same CPU job.
+	for _, selector := range []string{"host=machine;devices=0", "host=machine"} {
+		t.Run(selector, func(t *testing.T) {
+			q, _ := fixture(t)
+			m := m3Machine()
+			machineCheck(t, q, m)
+			cpu := submit(t, q, cpuSpec(1, 1))
+			a := assignedJob(machineCheck(t, q, m))
+			if a == nil || a.ID != cpu.ID || len(a.AllocatedDevices) != 0 {
+				t.Fatal("missing CPU assignment", a)
+			}
+			bound := submit(t, q, exclusionSpec(m.ID, "0"))
+			r, err := q.CreateReservation(reservationRequest("check", selector, bound.ID))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := q.Tick(); err != nil {
+				t.Fatal(err)
+			}
+			got := job(t, q, cpu.ID)
+			kept := got.State == "running" && got.Attempt == a.Attempt
+			if host := selector == "host=machine"; kept == host {
+				t.Fatal("reservation", selector, "kept unstarted CPU job:", kept, got.State, got.Attempt)
+			}
+			if selector != "host=machine" {
+				reservationState(t, q, r.ID, "ready")
+			}
+		})
+	}
+}
