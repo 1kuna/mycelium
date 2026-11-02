@@ -107,7 +107,8 @@ func creditDockerObservation(o *HostMemoryObservation, jobs []Job, reports []Att
 			continue
 		}
 		if s == nil || s.sampledAt.IsZero() || now.Before(s.sampledAt) || now.Sub(s.sampledAt) >= hostMemorySampleFreshFor || !validMemoryValue(s.NonreclaimableGB) {
-			return nil
+			o.AttributionUnknown = true
+			return o
 		}
 		o.MyceliumGB += s.NonreclaimableGB
 	}

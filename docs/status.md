@@ -822,7 +822,10 @@ including pressure below that reserve. Current worker and descendant RSS (includ
 model processes) is subtracted, together with fresh exact-attempt anonymous
 resident memory from managed Docker containers outside that process tree.
 Missing or stale memory samples for a running Docker attempt skip the
-observation instead of recording its memory as external. Invalid observations
+external-history sample instead of recording its memory as external.
+`memory_observation.attribution_unknown: true` marks this case; its `total_gb`
+and `used_gb` still supply physical-memory admission, with full reservation
+growth when the attempt sample is unavailable. Invalid observations
 are skipped. Custom sources lacking raw
 RAM evidence cannot contribute while reserve-clamped.
 Reservations and attempt high-water marks are never subtracted. This is a
