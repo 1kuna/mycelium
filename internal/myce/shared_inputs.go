@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 )
 
@@ -146,6 +147,13 @@ func (w Worker) acquireSharedInputs(ctx context.Context, j Job) (map[string]stri
 		releases = append(releases, done)
 		env["MYCE_INPUT_"+strings.ToUpper(n)] = path
 	}
+	models, modelReleases, err := w.acquireModelSnapshots(ctx, j)
+	if err != nil {
+		release()
+		return nil, nil, err
+	}
+	releases = append(releases, modelReleases...)
+	maps.Copy(env, models)
 	return env, release, nil
 }
 
@@ -153,5 +161,8 @@ func (w Worker) acquireSharedInputs(ctx context.Context, j Job) (map[string]stri
 func (s Spec) StoredInputFiles() FileManifest { return submissionFiles(s) }
 
 func sharedInputsFit(s Spec, m *Machine) bool {
+	if len(s.ModelSnapshots) > 0 && (m == nil || !contains(m.Capabilities, modelSnapshotsCapability)) {
+		return false
+	}
 	return len(s.SharedInputs) == 0 || m != nil && contains(m.Capabilities, "shared_inputs_v1") && (!s.extensionJob() || contains(m.Capabilities, "extension_shared_inputs_v1"))
 }

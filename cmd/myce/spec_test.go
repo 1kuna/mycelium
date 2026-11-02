@@ -9,6 +9,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"mycelium/internal/myce"
 )
 
 const validJobYAML = `name: offline
@@ -123,5 +126,71 @@ func TestSpecCheckOfflineNoAuthorityNetworkOrUploads(t *testing.T) {
 	got, err := os.ReadFile(path)
 	if err != nil || string(got) != body {
 		t.Fatalf("check changed its input: %v", err)
+	}
+}
+
+// Resolve names the side that cannot see each missing path, through the real
+// dev API: the submitter's input and the queue's inline environment lock.
+// An adapter's source warns when large bundled members defeat deduplication.
+func TestSpecCheckResolveNamesSideAndSourceBundles(t *testing.T) {
+	root := t.TempDir()
+	d, err := myce.StartDev(myce.DevConfig{Workers: 1, GPU: "cpu", Address: "127.0.0.1:0", Database: filepath.Join(root, "queue.db"), Checkpoints: filepath.Join(root, "checkpoints"), Token: "dev-spec-token", Interval: 10 * time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	authority := []string{"--queue", d.URL, "--token", "dev-spec-token"}
+	inputs := filepath.Join(root, "inputs")
+	if err := os.MkdirAll(inputs, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(inputs, "data.txt"), []byte("data"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	job := filepath.Join(root, "job.yaml")
+	body := validJobYAML + "inputs: {data.txt: data.txt, absent.txt: absent.txt}\nenvironment: {lock_file: not-on-queue/uv.lock, python: '3.12'}\n"
+	if err := os.WriteFile(job, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err = specCommand(append(append([]string{"check", "--resolve", "--files-from", inputs}, authority...), job), &out, io.Discard)
+	text := out.String()
+	if exitCode(err) != 1 || !strings.Contains(text, "inputs.absent.txt [submitter]") || !strings.Contains(text, `"absent.txt" (base files-from): missing`) {
+		t.Fatalf("submitter side not named: %v\n%s", err, text)
+	}
+	if !strings.Contains(text, "environment.lock_file [queue]") || !strings.Contains(text, "read on the queue host") || !strings.Contains(text, "environment: NAME") {
+		t.Fatalf("queue side or library fix not named: %s", text)
+	}
+
+	source := filepath.Join(root, "source")
+	if err := os.MkdirAll(source, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(source, "run.sh"), []byte("echo ok > result\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	bundle, err := os.Create(filepath.Join(source, "tools.tar"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bundle.Truncate(17 << 20); err != nil {
+		t.Fatal(err)
+	}
+	bundle.Close()
+	adapter := filepath.Join(root, "adapter.yaml")
+	if err := os.WriteFile(adapter, []byte(cpuAdapterYAML(source)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// The dev worker's first check-in is asynchronous.
+	for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		out.Reset()
+		err = specCommand(append(append([]string{"check", "--resolve"}, authority...), adapter), &out, io.Discard)
+		if err == nil || time.Now().After(deadline) {
+			break
+		}
+	}
+	text = out.String()
+	if !strings.Contains(text, "source [submitter]") || !strings.Contains(text, "tools.tar (17 MiB)") || !strings.Contains(text, "shared_inputs") || !strings.Contains(text, "fake-1") {
+		t.Fatalf("source bundle warning or eligible target missing: %v %s", err, text)
 	}
 }

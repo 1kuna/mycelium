@@ -68,7 +68,7 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) error 
 	used := int64(0)
 	prefix := int64(0)
 	for _, entry := range entries {
-		if entry.Name() == FormatMarker || entry.Name() == "shared-inputs" && entry.IsDir() {
+		if entry.Name() == FormatMarker || (entry.Name() == "shared-inputs" || entry.Name() == "model-snapshots") && entry.IsDir() {
 			continue
 		}
 		info, e := entry.Info()
@@ -156,6 +156,9 @@ func (c *FileCache) copyTo(ctx context.Context, ref FileRef, dest string) error 
 
 func validateJobFiles(s Spec) error {
 	if err := validateSharedInputs(s); err != nil {
+		return err
+	}
+	if err := validateModelSnapshots(s); err != nil {
 		return err
 	}
 	if err := s.Files.validate(); err != nil {

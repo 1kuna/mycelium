@@ -126,9 +126,20 @@ func profileFailure(out io.Writer, r *profileReceipt, code int, reason string) e
 }
 
 func runProfile(ctx context.Context, name string, args []string, itemInputs map[string]string, key, notify, config, joining, address, token string, out, errOut io.Writer) error {
-	cwd, err := os.Getwd()
+	p, root, data, err := readProfile(name)
 	if err != nil {
 		return err
+	}
+	return runPreparedProfile(ctx, root, p, data, args, itemInputs, key, notify, config, joining, address, token, out, errOut)
+}
+
+// readProfile locates, strictly decodes and validates a profile; run and
+// spec check --resolve share it.
+func readProfile(name string) (executionProfile, string, []byte, error) {
+	var p executionProfile
+	cwd, err := os.Getwd()
+	if err != nil {
+		return p, "", nil, err
 	}
 	path := name
 	if !strings.ContainsAny(name, "/\\") && !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml") {
@@ -136,7 +147,7 @@ func runProfile(ctx context.Context, name string, args []string, itemInputs map[
 	}
 	path, err = filepath.Abs(path)
 	if err != nil {
-		return err
+		return p, "", nil, err
 	}
 	root := filepath.Dir(path)
 	if filepath.Base(root) == "profiles" && filepath.Base(filepath.Dir(root)) == ".mycelium" {
@@ -146,31 +157,30 @@ func runProfile(ctx context.Context, name string, args []string, itemInputs map[
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return waitError(64, "profile_invalid: "+myce.PathReadError("profile", "submitter", name, "submitter-working-directory", "", err).Error())
+		return p, "", nil, waitError(64, "profile_invalid: "+myce.PathReadError("profile", "submitter", name, "submitter-working-directory", "", err).Error())
 	}
 	if len(data) > 1<<20 {
-		return waitError(64, "profile_invalid: profile exceeds 1 MiB")
+		return p, "", nil, waitError(64, "profile_invalid: profile exceeds 1 MiB")
 	}
-	var p executionProfile
 	d := yaml.NewDecoder(bytes.NewReader(data))
 	d.KnownFields(true)
 	if err = d.Decode(&p); err != nil {
-		return waitError(64, "profile_invalid: invalid profile YAML")
+		return p, "", nil, waitError(64, "profile_invalid: invalid profile YAML")
 	}
 	var extra any
 	if d.Decode(&extra) != io.EOF {
-		return waitError(64, "profile_invalid: expected one YAML profile")
+		return p, "", nil, waitError(64, "profile_invalid: expected one YAML profile")
 	}
 	if len(p.Check) == 0 || p.Check[0] == "" || len(p.Run.Command) == 0 || p.Project == "" || p.Class == "" || len(p.Targets) == 0 {
-		return waitError(64, "profile_invalid: declare run.command, project, class, targets and check")
+		return p, "", nil, waitError(64, "profile_invalid: declare run.command, project, class, targets and check")
 	}
 	if p.Extension != "" || p.Kind != "" || p.Program != nil || p.Execution != nil || p.Run.Workdir != "" || p.Run.Docker || len(p.Run.Sidecars) > 0 || len(p.Run.DockerSidecars) > 0 || len(p.Files) > 0 || p.SubmissionKey != "" {
-		return waitError(64, "profile_invalid: profile uses plain commands in an isolated source folder")
+		return p, "", nil, waitError(64, "profile_invalid: profile uses plain commands in an isolated source folder")
 	}
 	if p.MemoryClass != "" && p.MemoryClass != "per_item" {
-		return waitError(64, "profile_invalid: memory_class must be per_item or omitted")
+		return p, "", nil, waitError(64, "profile_invalid: memory_class must be per_item or omitted")
 	}
-	return runPreparedProfile(ctx, root, p, data, args, itemInputs, key, notify, config, joining, address, token, out, errOut)
+	return p, root, data, nil
 }
 
 func (p executionProfile) placementAdvisories() []string {

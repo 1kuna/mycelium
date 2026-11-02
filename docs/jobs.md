@@ -103,6 +103,30 @@ Errors identify the file and rejected field or rule. This checks static validity
 only: live eligibility, admission and qualification, registered extensions,
 input availability and current fleet policy still require live checks.
 
+Add `--resolve` for that live check, read-only, before submitting:
+
+```sh
+myce spec check --resolve --files-from ./inputs job.yaml
+myce spec check --resolve .mycelium/profiles/NAME.yaml
+myce spec check --resolve --entry NAME .mycelium/adapter.yaml
+```
+
+The CLI stats local inputs (it never hashes or uploads them) and sends the job
+to `POST /api/resolve`. The queue reads the environment exactly as submit does
+and evaluates every known target with submission's permanent-capacity fit
+checks, so a target's reason is the refusal `require_target` would give. Each
+target is `eligible` (with environment prepared or prepare-needed), blocked
+with its first failed condition, or unknown when its inventory is stale. Each
+finding names the field, the side that cannot see or run it (`submitter`,
+`queue` or `worker`) and a fix. Findings cover missing inputs, inline
+environment paths the queue cannot read, absolute data paths in the command,
+system-Python commands, a host pin that more targets could serve once the data
+is staged, and source archives dominated by large members (16 MiB or more),
+which defeat store deduplication because every source change repacks them.
+`--json` prints the report. Exit status is 0 when some target is eligible, and
+1 when the spec is invalid or no target is. Resolve creates no job, upload,
+build or reservation, and grants nothing: submit revalidates every fence.
+
 | Field | Required / default | Meaning |
 |---|---|---|
 | `name` | Required, nonempty | Human-readable job name; not a deduplication key |
@@ -660,6 +684,36 @@ shared queue and can run on any eligible machine; they do not inherit production
 host pin. Queue host maintenance and consumer cancellation are separate
 contracts, described in [operations](operations.md#queue-maintenance).
 No CPU publication/session lock is implied by a GPU production hold.
+
+### Hold scope
+
+`production_hold_scope` is `host` (the default, described above) or `device`.
+Host scope is exclusive: while production needs the host, every lower tier on
+it stops and waits, even on a free sibling card or the CPU. Keep it where owner
+isolation, driver overlap or preparation interference justifies that.
+
+```yaml
+hosts:
+  example-host:
+    production_hold: true
+    production_hold_scope: device
+```
+
+Device scope keeps the hold's release custody (retained release obligations,
+model recovery after queue restart, prior-session cleanup) but drops the
+host-wide fence. Production then uses ordinary admission and priority
+preemption, as on a host without a hold. Lower tiers keep using the sibling
+cards and the CPU. When production needs more, it stops only the lower-tier
+work that holds the card, memory or preparation it needs. It starts after
+those exact attempts confirm release; elapsed grace still proves nothing.
+Device scope emits no `production_hold` status entry, binds no new
+production job to the host, and does not pause model copies. A queued
+production job that a host-scope hold already bound keeps that host.
+
+The startup file only seeds host policy. Change a live host's scope with
+`myce policy` ([live policy](operations.md#change-live-project-policy)).
+Restarting with the last accepted startup file keeps the live policy; a
+different startup file is still refused.
 
 ## Attempt placement environment
 

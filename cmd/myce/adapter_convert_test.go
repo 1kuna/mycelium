@@ -155,7 +155,7 @@ func TestAdapterConvertNativeStarterAndDogfood(t *testing.T) {
 	}
 	out.Reset()
 	report.Reset()
-	args = []string{"convert", "--profile", ".mycelium/profiles/gate-full.yaml", "--profile", ".mycelium/profiles/go-test.yaml"}
+	args = []string{"convert", "--profile", ".mycelium/profiles/gate-full.yaml", "--profile", ".mycelium/profiles/gate-full-darwin.yaml", "--profile", ".mycelium/profiles/go-test.yaml"}
 	if err := adapterCommand(context.Background(), args, &out, &report); err != nil {
 		t.Fatalf("%v\n%s", err, report.String())
 	}
@@ -168,7 +168,7 @@ func TestAdapterConvertNativeStarterAndDogfood(t *testing.T) {
 	}
 	wantBytes := out.String()
 	out.Reset()
-	args = []string{"convert", "--profile", ".mycelium/profiles/go-test.yaml", "--profile", ".mycelium/profiles/gate-full.yaml"}
+	args = []string{"convert", "--profile", ".mycelium/profiles/go-test.yaml", "--profile", ".mycelium/profiles/gate-full.yaml", "--profile", ".mycelium/profiles/gate-full-darwin.yaml"}
 	if err := adapterCommand(context.Background(), args, &out, &report); err != nil || out.String() != wantBytes {
 		t.Fatalf("source order changed output: %v", err)
 	}

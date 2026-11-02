@@ -1,4 +1,4 @@
-# Measured total peak + observed range, rounded up; see #559 and docs/test-gates.md.
+# Linux total cgroup peak + observed range, rounded up; see docs/development.md.
 # Keep this explicit: constrained auto peaks otherwise explore all host headroom.
 name: mycelium-gate-full
 project: mycelium
@@ -16,7 +16,6 @@ needs:
 targets:
   - {os: linux, arch: amd64, platform: cpu}
   - {os: linux, arch: arm64, platform: cpu}
-  - {os: darwin, arch: arm64, platform: cpu}
 # Locked CPU tools for every declared target (see env/mycelium-gate/README.md).
 environment: mycelium-gate
 outputs:

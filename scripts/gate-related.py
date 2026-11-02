@@ -16,6 +16,10 @@ SUPPLEMENTAL_CONSUMERS = {
                    'gpu_host_memory', 'capability_placement', 'work_observation', 'queue')
 }
 
+# Platform clone helpers are exercised through model snapshot staging.
+for source in ('shared_clone_darwin', 'shared_clone_linux', 'shared_clone_other'):
+    SUPPLEMENTAL_CONSUMERS[f'internal/myce/{source}.go'] = ('model_snapshots_test.go',)
+
 # The monitor's tests predate the source split; it has no matching test filename.
 SUPPLEMENTAL_CONSUMERS['internal/myce/engine_health.go'] = (
     'engine_recovery_test.go', 'engine_recovery_round3_test.go')

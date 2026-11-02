@@ -182,7 +182,8 @@ func (q *Queue) storageKey(j *Job, m *Machine) *StorageKey {
 		Delivery                 string
 		Resumable, FileTransport bool
 		Diagnostics              *DiagnosticSpec
-	}{s.Project, s.Args, s.Program, programSource, memoryConfiguration(s.Needs, nil, nil), s.Run.Env, s.Outputs, s.Inputs, s.SharedInputs, s.StorageProtocol, s.OutputDelivery, s.Resumable, j.FileTransport, s.Diagnostics})
+		Models                   map[string]ModelSnapshot `json:"models,omitempty"`
+	}{s.Project, s.Args, s.Program, programSource, memoryConfiguration(s.Needs, nil, nil), s.Run.Env, s.Outputs, s.Inputs, s.SharedInputs, s.StorageProtocol, s.OutputDelivery, s.Resumable, j.FileTransport, s.Diagnostics, s.ModelSnapshots})
 
 	shape := map[string]int64{}
 	for name, ref := range jobInputFiles(j) {

@@ -429,9 +429,34 @@ myce policy get --yaml > policy.yaml
 myce policy set policy.yaml --if-revision N
 ```
 
+The same file carries the optional `models` mapping (permitted repository
+patterns, per-snapshot `max_bytes` and `free_floor_bytes`) for
+[declared model snapshots](files.md#declared-model-snapshots-553). Keep the
+deployment's values there, not in Git.
+
 If the revision is stale, export again and reconcile the newer policy before
 retrying. See [owner priority policy](scheduling.md) for the full
 import/export contract, including replacing or clearing project settings.
+
+Host production holds use the same export and import. The export's `hosts`
+mapping is the live host policy. For example, to move one host from the
+exclusive host-wide hold to the device-scoped hold
+([hold scope](jobs.md#hold-scope)), add one line under that host and import:
+
+```yaml
+hosts:
+  example-host:
+    production_hold: true
+    production_hold_scope: device
+```
+
+Set `production_hold_scope: host`, or delete the line, to restore the
+exclusive hold. Change one host at a time. The change takes effect on the next
+planning decision. Work that a host-scope hold already stopped still finishes
+stopping, and its exact release is still required. `queue --host-config` only
+seeds host policy. A restart with the last accepted startup file keeps the
+live policy; a different startup file is refused, so edit host policy with
+`myce policy set`, not the file.
 
 ## Queue maintenance
 

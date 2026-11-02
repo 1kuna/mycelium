@@ -1,11 +1,21 @@
 package main
 
 import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"maps"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 	"mycelium/internal/myce"
@@ -32,13 +42,14 @@ func readJobSpec(path string) (myce.Spec, error) {
 }
 
 func specCommand(args []string, out, errOut io.Writer) error {
-	const usage = "usage: myce spec check FILE"
+	const usage = "usage: myce spec check [--resolve [--files-from DIR] [--entry NAME] [--json]] FILE|PROFILE"
 	const scope = "Checks static validity only (YAML or JSON); does not check live eligibility, admission or qualification."
 	help := func() {
 		fmt.Fprintln(errOut, usage)
 		fmt.Fprintln(errOut, scope)
 		fmt.Fprintln(errOut, "Offline: no fleet authority, network requests, uploads or fleet changes.")
-		fmt.Fprintln(errOut, "Exit codes: 0 valid (or help); 1 invalid or unreadable spec; 2 usage error.")
+		fmt.Fprintln(errOut, "--resolve (job spec, profile or adapter): asks the queue, read-only, which targets can run it and names each missing input or environment with its side and fix. Nothing is submitted, uploaded, built or reserved; submit revalidates.")
+		fmt.Fprintln(errOut, "Exit codes: 0 valid (or help; with --resolve, at least one eligible target); 1 invalid, unreadable or no eligible target; 2 usage error.")
 	}
 	if len(args) == 1 && (args[0] == "--help" || args[0] == "-h") {
 		help()
@@ -50,23 +61,249 @@ func specCommand(args []string, out, errOut io.Writer) error {
 	f := flag.NewFlagSet("spec check", flag.ContinueOnError)
 	f.SetOutput(errOut)
 	f.Usage = help
+	resolve := f.Bool("resolve", false, "ask the queue which targets can run this job (read-only)")
+	filesFrom := f.String("files-from", "", "local folder the job's inputs are submitted from")
+	entry := f.String("entry", "", "adapter entry (default: adapter default)")
+	asJSON := f.Bool("json", false, "structured resolve report")
+	authority := installedClientFlags(f)
 	if err := f.Parse(args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
 		return waitError(2, err.Error())
 	}
-	if f.NArg() != 1 {
+	if f.NArg() != 1 || !*resolve && (*entry != "" || *asJSON || *filesFrom != "") {
 		return waitError(2, usage)
 	}
 	path := f.Arg(0)
-	s, err := readJobSpec(path)
+	request, findings, err := resolveInput(path, *filesFrom, *entry, *resolve)
 	if err != nil {
 		return fmt.Errorf("%s: %w", path, err)
 	}
-	if err := s.Validate(); err != nil {
+	if err := request.Spec.Validate(); err != nil {
 		return fmt.Errorf("%s: %w", path, err)
 	}
-	_, err = fmt.Fprintf(out, "%s: valid (static checks only)\n", path)
-	return err
+	if !*resolve {
+		_, err = fmt.Fprintf(out, "%s: valid (static checks only)\n", path)
+		return err
+	}
+	client, err := authority.client()
+	if err != nil {
+		return err
+	}
+	var report myce.ResolveReport
+	if err := client.Call(context.Background(), "POST", "/api/resolve", request, &report); err != nil {
+		var h *myce.HTTPError
+		if errors.As(err, &h) && h.Status == 404 {
+			return errors.New("this queue predates resolve; upgrade it, or use myce portability")
+		}
+		return err
+	}
+	report.Resolved = append(findings.resolved, report.Resolved...)
+	report.Findings = append(findings.findings, report.Findings...)
+	if !*asJSON {
+		fmt.Fprintf(out, "%s: valid (static checks); resolving against the queue\n", path)
+	}
+	if err := myce.WriteResolve(out, report, *asJSON); err != nil {
+		return err
+	}
+	if !slices.ContainsFunc(report.Targets, func(t myce.ResolveTarget) bool { return t.Eligible }) {
+		return waitError(1, path+": no eligible target; see findings")
+	}
+	return nil
+}
+
+type submitterFindings struct {
+	resolved []string
+	findings []myce.ResolveFinding
+}
+
+func (s *submitterFindings) missing(field, problem, fix string, d error) {
+	f := myce.ResolveFinding{Field: field, Side: "submitter", Problem: problem, Fix: fix}
+	if d != nil {
+		f.Problem = d.Error()
+	}
+	s.findings = append(s.findings, f)
+}
+
+// placeholderRef stands in for bytes resolve never uploads or hashes. Only
+// size and a stable fake identity reach the queue; submit computes real ones.
+func placeholderRef(name string, size int64) myce.FileRef {
+	sum := sha256.Sum256([]byte("resolve-placeholder:" + name))
+	return myce.FileRef{SHA256: hex.EncodeToString(sum[:]), SizeBytes: size}
+}
+
+// resolveInput reads a job spec, or for --resolve a profile or adapter entry,
+// and checks every submitter-side path with stat only.
+func resolveInput(path, filesFrom, entry string, live bool) (myce.ResolveRequest, submitterFindings, error) {
+	var found submitterFindings
+	s, err := readJobSpec(path)
+	if err == nil {
+		if filesFrom != "" {
+			lowerInputs(&s, filesFrom, "files-from", &found)
+		} else if live && len(s.Inputs) > 0 && s.Kind == "" && s.Program == nil {
+			found.missing("inputs", "plain-command inputs are uploaded from a local folder, but no --files-from was given", "Pass the same --files-from DIR you will give myce submit.", nil)
+			lowerInputs(&s, "", "files-from", &found)
+		} else if len(s.Inputs) > 0 {
+			found.resolved = append(found.resolved, "inputs: NAS-relative; each worker reads them under its own --checkpoint-root (not checked by resolve)")
+		}
+		return myce.ResolveRequest{Spec: s}, found, nil
+	}
+	if !live {
+		return myce.ResolveRequest{}, found, err
+	}
+	specErr := err
+	p, root, _, err := readProfile(path)
+	if err != nil {
+		data, readErr := os.ReadFile(path)
+		a, adapterErr := decodeAdapter(data)
+		if readErr != nil || adapterErr != nil {
+			return myce.ResolveRequest{}, found, specErr
+		}
+		if p, _, err = adapterProfile(a, entry); err != nil {
+			return myce.ResolveRequest{}, found, err
+		}
+		if p.Native != nil {
+			return myce.ResolveRequest{}, found, errors.New("native adapter entries: use myce portability --adapter")
+		}
+		if root, err = os.Getwd(); err != nil {
+			return myce.ResolveRequest{}, found, err
+		}
+	}
+	lowerInputs(&p.Spec, root, "project-root", &found)
+	for name, input := range p.SharedInputs {
+		if input.Local == "" {
+			continue
+		}
+		local := input.Local
+		if !filepath.IsAbs(local) {
+			local = filepath.Join(root, local)
+		}
+		info, err := os.Stat(local)
+		if err != nil {
+			found.missing("shared_inputs."+name+".local", "", "Create the file, or reference an already imported sha256/size or NAS location.", myce.PathReadError("shared_inputs."+name+".local", "submitter", input.Local, "project-root", "", err))
+			info = nil
+		}
+		if input.SHA256 == "" {
+			size := int64(1)
+			if info != nil {
+				size = info.Size()
+			}
+			ref := placeholderRef(name, size)
+			input.SHA256, input.SizeBytes = ref.SHA256, ref.SizeBytes
+		}
+		input.Local = ""
+		p.SharedInputs[name] = input
+	}
+	finding, size := sourceBundleFinding(root, p.Source)
+	if finding != nil {
+		found.findings = append(found.findings, *finding)
+	}
+	// Profiles always ship their source as the frozen archive submit attaches.
+	if p.Files == nil {
+		p.Files = myce.FileManifest{}
+	}
+	p.Files[".myce-source.tar"] = placeholderRef(".myce-source.tar", max(1, size))
+	p.PrepareSource = p.Adapter
+	return myce.ResolveRequest{Spec: p.Spec, RequirementReasons: p.RequirementReasons}, found, nil
+}
+
+// lowerInputs mirrors submit's inputs-to-files lowering with stat instead of
+// hashing or uploading. An empty root lowers names without checking files.
+func lowerInputs(s *myce.Spec, root, base string, found *submitterFindings) {
+	if len(s.Inputs) == 0 {
+		return
+	}
+	files := myce.FileManifest{}
+	staged := 0
+	for _, name := range slices.Sorted(maps.Keys(s.Inputs)) {
+		source := s.Inputs[name]
+		local := source
+		if root == "" {
+			files[name] = placeholderRef(name, 1)
+			continue
+		}
+		if !filepath.IsAbs(local) {
+			local = filepath.Join(root, local)
+		}
+		info, err := os.Stat(local)
+		if err == nil && !info.Mode().IsRegular() {
+			err = errors.New("input is not a regular file")
+		}
+		if err != nil {
+			fix := "Create the file under " + base + ", or correct the mapping."
+			if os.IsNotExist(err) || os.IsPermission(err) {
+				err = myce.PathReadError("inputs."+name, "submitter", source, base, "", err)
+			}
+			found.missing("inputs."+name, "", fix, err)
+			files[name] = placeholderRef(name, 1)
+			continue
+		}
+		files[name] = placeholderRef(name, info.Size())
+		staged++
+	}
+	if staged > 0 {
+		found.resolved = append(found.resolved, fmt.Sprintf("inputs: %d file(s) readable by the submitter; submit uploads them through the file store, so any worker can stage them", staged))
+	}
+	s.Files, s.Inputs = files, nil
+}
+
+// largeSourceMember is where repacking stops being noise: a source archive is
+// stored whole, so any edit stores every unchanged large member again (#539).
+const largeSourceMember = 16 << 20
+
+// sourceBundleFinding warns when large members dominate a source archive. It
+// lists the existing inventory (directory walk or Git tree) without hashing.
+func sourceBundleFinding(root string, src profileSource) (*myce.ResolveFinding, int64) {
+	type member struct {
+		name string
+		size int64
+	}
+	var members []member
+	var total int64
+	add := func(name string, size int64) {
+		total += size
+		if size >= largeSourceMember {
+			members = append(members, member{name, size})
+		}
+	}
+	switch {
+	case src.Directory != "":
+		_ = walkProfileDirectory(context.Background(), root, src.Directory, func(name, _ string, info os.FileInfo) error {
+			add(name, info.Size())
+			return nil
+		})
+	case src.Git != "":
+		args := append([]string{"-C", root, "--literal-pathspecs", "ls-tree", "-r", "-l", "-z", "--full-tree", src.Git, "--"}, src.Paths...)
+		data, err := exec.Command("git", args...).Output()
+		if err != nil {
+			return nil, 0
+		}
+		for _, row := range bytes.Split(data, []byte{0}) {
+			header, name, ok := strings.Cut(string(row), "\t")
+			fields := strings.Fields(header)
+			if !ok || len(fields) != 4 {
+				continue
+			}
+			size, _ := strconv.ParseInt(fields[3], 10, 64)
+			add(name, size)
+		}
+	}
+	var large int64
+	for _, m := range members {
+		large += m.size
+	}
+	if total == 0 || large*2 < total {
+		return nil, total
+	}
+	slices.SortFunc(members, func(a, b member) int { return int(b.size>>20) - int(a.size>>20) })
+	names := []string{}
+	for i, m := range members {
+		if i == 5 {
+			names = append(names, fmt.Sprintf("%d more", len(members)-5))
+			break
+		}
+		names = append(names, fmt.Sprintf("%s (%d MiB)", m.name, m.size>>20))
+	}
+	return &myce.ResolveFinding{Field: "source", Side: "submitter", Problem: fmt.Sprintf("source is %d MiB and %d%% of it is large members: %s. Each source change repacks them into a new archive, so the store cannot deduplicate them.", total>>20, large*100/total, strings.Join(names, ", ")), Fix: "Move each large unchanging member out of the source into shared_inputs (`myce file put PATH` or a profile `local:` import, then reference its sha256) and read it through $MYCE_INPUT_NAME. A Git source can be narrowed with source.paths; a directory source always archives every regular file in it."}, total
 }

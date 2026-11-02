@@ -65,6 +65,14 @@ func (a API) handler(joiningPin string) http.Handler {
 		report, err := a.Queue.Portability(request)
 		respondOperation(w, report, err, "portability_invalid")
 	})
+	mux.HandleFunc("POST /api/resolve", func(w http.ResponseWriter, r *http.Request) {
+		var request ResolveRequest
+		if !decode(w, r, &request) {
+			return
+		}
+		report, err := a.Queue.Resolve(request)
+		respondOperation(w, report, err, "resolve_invalid")
+	})
 	a.registerInvites(mux, joiningPin)
 	a.registerEnrollmentRelease(mux)
 	a.registerEnrollment(mux)

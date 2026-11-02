@@ -34,7 +34,7 @@ class ActionsFullTest(unittest.TestCase):
                 self.assertNotIn('allowed_machines:', profile)
                 self.assertNotIn('arch: amd64', profile)
                 self.assertIn(f'  - {{os: {platform}, arch: arm64, platform: cpu}}', profile)
-                self.assertIn('  memory_gb: 7\n', profile)
+                self.assertIn(f'  memory_gb: {4 if platform == "darwin" else 7}\n', profile)
                 self.assertNotIn('memory: auto', profile)
                 self.assertIn('check: [grep, -qx,', profile)
                 if submission_failure and platform == 'darwin':

@@ -125,6 +125,14 @@ the same or edited project config does not replace it or advance its revision.
 To deliberately change settings, export the current policy, edit its `projects`
 mapping, and import it with `myce policy set FILE --if-revision N` as below.
 
+The optional `hosts` mapping is the live [production hold](jobs.md#physical-host-production-hold)
+policy, keyed by physical host ID, with the same rules: omitting it preserves
+host policy, supplying it replaces the map, and `hosts: {}` removes every hold.
+Each entry has `production_hold` and an optional `production_hold_scope`
+(`host` by default, or `device`); a scope requires `production_hold: true`.
+`queue --host-config` seeds host policy once; see
+[changing a host's scope](operations.md#change-live-project-policy).
+
 `production_parity_hosts` is an optional per-project mapping from exact work
 identifiers to physical host IDs whose outputs the consumer has approved as
 matching its reference for that work (MY-19).
