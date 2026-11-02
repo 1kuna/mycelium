@@ -223,6 +223,9 @@ func (q *Queue) deviceCoTenants(m *Machine, demand *Job, joining bool) (int, boo
 }
 
 func (q *Queue) batchSlotFree(m *Machine, demand *Job) bool {
+	if !q.xpuTiersSettled(m, demand, false) {
+		return false
+	}
 	if q.workerBatchIdle(m) {
 		return true
 	}
@@ -230,9 +233,9 @@ func (q *Queue) batchSlotFree(m *Machine, demand *Job) bool {
 	return ok && q.cardSettled(m) && !m.Gone && !m.Leaving && !q.unreported[m.ID]
 }
 
-// Model loads use memory admission rather than the batch command-slot gate.
-// XPU still needs every different-tier batch's exact release before loading.
-func (q *Queue) xpuBatchTiersSettled(m *Machine, demand *Job) bool {
+// XPU admission covers both batch and engine custody. An engine demand may
+// reuse its own model, but cannot start beside other different-tier holders.
+func (q *Queue) xpuTiersSettled(m *Machine, demand *Job, engine bool) bool {
 	if m.GPU != "xpu" {
 		return true
 	}
@@ -247,6 +250,17 @@ func (q *Queue) xpuBatchTiersSettled(m *Machine, demand *Job) bool {
 		}
 		if j := q.s.Jobs[r.Job]; j == nil || q.comparePriority(j.Spec, demand.Spec) != 0 {
 			return false
+		}
+	}
+	cards := []*Machine{m}
+	if len(m.groupMembers) > 0 {
+		cards = m.groupMembers
+	}
+	for _, card := range cards {
+		for _, s := range q.s.ModelSlots {
+			if slotOnTarget(s, card) && slotReservesMemory(s) && (!engine || s.Model != demand.Spec.Needs.Model) && q.comparePriority(q.slotSpec(s), demand.Spec) != 0 {
+				return false
+			}
 		}
 	}
 	return true

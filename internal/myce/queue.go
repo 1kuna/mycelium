@@ -1224,7 +1224,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 			for _, j := range q.liveJobs() {
 				if j.Machine == m.ID && j.Session == m.Session && j.State == "stopping" && !j.Spec.Run.Docker && q.held(hostID(old)) {
 					if cancelled(j) {
-						q.settleRelease(Result{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: j.Machine, Session: j.Session})
+						q.settleRelease(Result{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: j.Machine, Session: j.Session}, false)
 						q.finishCancellation(j)
 					} else {
 						q.retry(j, j.Reason)
@@ -1441,7 +1441,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 						return nil
 					}
 					if cancelled(j) {
-						q.settleRelease(Result{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: j.Machine, Session: j.Session})
+						q.settleRelease(Result{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Machine: j.Machine, Session: j.Session}, false)
 						q.finishCancellation(j)
 					} else {
 						q.retry(j, j.Reason)
@@ -1608,7 +1608,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		if r.ReleasePending {
 			return errors.New("release-only acknowledgement cannot be pending")
 		}
-		q.settleRelease(r)
+		q.settleRelease(r, true)
 		if j := q.touchJob(r.ID); j != nil && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
 			q.recordAttemptMemory(j, r)
 			j.ReleaseConfirmed = true
@@ -1635,7 +1635,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 	if operatorMatched {
 		if _, e := q.current(r); e != nil {
 			if !r.ReleasePending {
-				q.settleRelease(r)
+				q.settleRelease(r, true)
 			}
 			q.maintain()
 			return nil
@@ -1644,7 +1644,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 	settled := false
 	pendingTracked := false
 	if !r.ReleasePending {
-		settled = q.settleRelease(r)
+		settled = q.settleRelease(r, true)
 		if j := q.touchJob(r.ID); j != nil && j.Attempt == r.Attempt && j.Machine == r.Machine && j.Session == r.Session {
 			j.ReleaseConfirmed = true
 			if j.LastStopOutcome == "release pending" {

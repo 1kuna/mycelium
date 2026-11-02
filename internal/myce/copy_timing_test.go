@@ -75,34 +75,48 @@ func TestCopyLifecycleTimesSurviveReleaseRetryAndRestart(t *testing.T) {
 	if err != nil || len(page.Entries) == 0 || page.Entries[0].Kind != "assigned" || !page.Entries[0].At.Equal(assignedAt) {
 		t.Fatal("existing ledger lost per-attempt assignment time", page, err)
 	}
-	t.Run("legacy-idle-heartbeat", func(t *testing.T) {
-		q, clock := fixture(t)
-		m := machine("legacy", "xpu")
-		submit(t, q, sharedSpec("experiment", 3))
-		run := check(t, q, m, nil).Job
-		if run == nil {
-			t.Fatal("no legacy attempt")
-		}
-		if err := q.update(func() error {
-			live := q.touchJob(run.ID)
-			q.stop(live, "legacy test stop")
-			q.retainRelease(live)
-			return nil
-		}); err != nil {
-			t.Fatal(err)
-		}
-		clock.Advance(StopGrace + time.Second)
-		check(t, q, m, nil)
-		if copy := job(t, q, run.ID).Copies[0]; !copy.ReleaseConfirmed || copy.ReleasedAt != nil {
-			t.Fatal("legacy idle inference invented an exact release time", copy)
-		}
-		ack := result(run, false)
-		ack.ReleaseOnly = true
-		if err := q.Complete(ack); err != nil {
-			t.Fatal(err)
-		}
-		if copy := job(t, q, run.ID).Copies[0]; copy.ReleasedAt == nil || !copy.ReleasedAt.Equal(clock.Now()) {
-			t.Fatal("later exact receipt did not record its own time", copy)
-		}
-	})
+	for _, kind := range []string{"stop", "cancel", "held-cancel"} {
+		t.Run("legacy-idle-"+kind, func(t *testing.T) {
+			q, clock := fixture(t)
+			m := machine("legacy", "xpu")
+			submit(t, q, sharedSpec("experiment", 3))
+			run := check(t, q, m, nil).Job
+			if run == nil {
+				t.Fatal("no legacy attempt")
+			}
+			if kind != "stop" {
+				if err := q.Cancel(run.ID); err != nil {
+					t.Fatal(err)
+				}
+			} else if err := q.update(func() error {
+				live := q.touchJob(run.ID)
+				q.stop(live, "legacy test stop")
+				q.retainRelease(live)
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if kind == "held-cancel" {
+				if err := q.update(func() error {
+					q.s.Hosts[hostID(&m)] = &HostState{Policy: HostPolicy{ProductionHold: true}, Active: true}
+					return nil
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			clock.Advance(StopGrace + time.Second)
+			check(t, q, m, nil)
+			if copy := job(t, q, run.ID).Copies[0]; !copy.ReleaseConfirmed || copy.ReleasedAt != nil {
+				t.Fatal("legacy idle inference invented an exact release time", copy)
+			}
+			ack := result(run, false)
+			ack.ReleaseOnly = true
+			if err := q.Complete(ack); err != nil {
+				t.Fatal(err)
+			}
+			if copy := job(t, q, run.ID).Copies[0]; copy.ReleasedAt == nil || !copy.ReleasedAt.Equal(clock.Now()) {
+				t.Fatal("later exact receipt did not record its own time", copy)
+			}
+		})
+	}
 }

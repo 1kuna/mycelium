@@ -525,7 +525,7 @@ func (q *Queue) maintainModels() {
 			case s == nil || s.State == "failed" && s.RetryAt != nil && !now.Before(*s.RetryAt):
 				p = q.roomPlan(callJob(c), m, false)
 			}
-			if p != nil && !q.addXPUBatchTierStops(p, callJob(c)) {
+			if p != nil && !q.addXPUTierStops(p, callJob(c)) {
 				p = nil
 			}
 			if p != nil && q.completionPlanBetter(callJob(c), p, best, scan) {
@@ -537,7 +537,7 @@ func (q *Queue) maintainModels() {
 		}
 		q.applyPlacement(best, callJob(c))
 		m := best.machine
-		if !q.xpuBatchTiersSettled(m, callJob(c)) {
+		if !q.xpuTiersSettled(m, callJob(c), true) {
 			continue
 		}
 		s := q.s.ModelSlots[targetSlotKey(m, c.Model)]

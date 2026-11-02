@@ -306,6 +306,59 @@ func TestSharedDeviceXPUPinnedEngineRetryWaitsForTierRelease(t *testing.T) {
 	}
 }
 
+func TestSharedDeviceXPUBatchCannotJoinProductionModel(t *testing.T) {
+	q, _, m := sharedXPUModelFixture(t)
+	high := addModelCall(t, q, "production")
+	slot := q.s.ModelSlots[slotKey(m.ID, "test", "0")]
+	if slot == nil {
+		t.Fatal("no production engine")
+	}
+	if _, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, ModelReports: []ModelReport{{Name: "test", Device: "0", Attempt: slot.Attempt, State: "ready"}}}); err != nil {
+		t.Fatal(err)
+	}
+	low := submit(t, q, sharedSpec("experiment", 3))
+	if got := assignedJob(machineCheck(t, q, m)); got != nil {
+		t.Fatal("lower-tier batch joined production engine", got.ID)
+	}
+	requireState(t, q, low.ID, "queued")
+	if high.Machine != m.ID || slot.PriorityStop != nil {
+		t.Fatal("lower-tier arrival disturbed production", high, slot)
+	}
+	equal := submit(t, q, sharedSpec("production", 3))
+	if got := assignedJob(machineCheck(t, q, m)); got == nil || got.ID != equal.ID {
+		t.Fatal("equal-tier XPU engine/batch packing changed", got)
+	}
+}
+
+func TestSharedDeviceXPUProductionBatchWaitsForEngineRelease(t *testing.T) {
+	q, _, m := sharedXPUModelFixture(t)
+	addModelCall(t, q, "experiment")
+	slot := q.s.ModelSlots[slotKey(m.ID, "test", "0")]
+	if slot == nil {
+		t.Fatal("no experiment engine")
+	}
+	if _, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, ModelReports: []ModelReport{{Name: "test", Device: "0", Attempt: slot.Attempt, State: "ready"}}}); err != nil {
+		t.Fatal(err)
+	}
+	high := submit(t, q, sharedSpec("production", 1))
+	if got := assignedJob(machineCheck(t, q, m)); got != nil || slot.PriorityStop == nil {
+		t.Fatal("production did not stop and wait for lower-tier engine", got, slot)
+	}
+	for _, attempt := range []string{"stale-engine", slot.Attempt} {
+		reply, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, ModelReports: []ModelReport{{Name: "test", Device: "0", Attempt: attempt, State: "unloaded", CallsMeasured: true}}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := assignedJob(reply)
+		if attempt == "stale-engine" && got != nil {
+			t.Fatal("stale engine release admitted production", got)
+		}
+		if attempt != "stale-engine" && (got == nil || got.ID != high.ID) {
+			t.Fatal("production did not start after exact engine release", got, job(t, q, high.ID).Reason)
+		}
+	}
+}
+
 func testSharedDeviceTierPacks(t *testing.T, platform, priority string) {
 	t.Helper()
 	q, _ := fixture(t)

@@ -69,7 +69,7 @@ func (q *Queue) applyPlacement(p *placementPlan, demand *Job) {
 
 // Existing/loading engines need the same batch-tier release projection as a
 // cold load before a higher-tier call or pin can promote them on XPU.
-func (q *Queue) addXPUBatchTierStops(p *placementPlan, demand *Job) bool {
+func (q *Queue) addXPUTierStops(p *placementPlan, demand *Job) bool {
 	m := p.machine
 	if m.GPU != "xpu" {
 		return true
@@ -82,6 +82,15 @@ func (q *Queue) addXPUBatchTierStops(p *placementPlan, demand *Job) bool {
 			return false
 		}
 		p.addJob(r)
+	}
+	for _, s := range q.s.ModelSlots {
+		if !slotOnTarget(s, m) || !slotReservesMemory(s) || s.Model == demand.Spec.Needs.Model || q.comparePriority(q.slotSpec(s), demand.Spec) == 0 {
+			continue
+		}
+		if !q.slotReclaimableFor(s, demand.Spec) {
+			return false
+		}
+		p.addSlot(s)
 	}
 	return true
 }
@@ -355,6 +364,14 @@ func (q *Queue) cardRoom(j *Job, m *Machine, need float64, batch, releaseBatch, 
 	}
 	var slots []*ModelSlot
 	for _, s := range q.s.ModelSlots {
+		if slotOnTarget(s, m) && slotReservesMemory(s) && m.GPU == "xpu" && (batch || s.Model != j.Spec.Needs.Model) && q.comparePriority(q.slotSpec(s), j.Spec) != 0 {
+			if !q.slotReclaimableFor(s, j.Spec) {
+				return false
+			}
+			p.addSlot(s)
+			room += q.slotMemory(s)
+			continue
+		}
 		if !slotOnTarget(s, m) || !q.slotReclaimableFor(s, j.Spec) {
 			continue
 		}
