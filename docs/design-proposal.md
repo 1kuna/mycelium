@@ -969,9 +969,18 @@ preparation/core hand-back are machine-wide. Lowered allowances expose debt and
 withhold new work; they never resize running ceilings. Omission, elapsed grace,
 service exit or missing inventory never refunds custody.
 
-At most one batch attempt occupies a GPU. CPU attempts can run alongside GPU
-work and one another within host resources and caps; model engines retain their
-usual shared-memory admission. `needs.gpu.devices` narrows candidate IDs, not the
+**Shared GPUs (MY-30/31, [#538](https://github.com/1kuna/mycelium/issues/538)).**
+A GPU holds several single-card batch attempts when their memory fits: the
+newcomer's declared or learned device vector and its host vector must fit the
+card's and host's existing headroom beside every co-tenant's charge, unified
+hosts counting the one pool. A finished co-tenant stays charged until exact
+release. Docker, model-server, extension-check, fan-out, exploratory first-run
+and multi-card attempts keep the card to themselves, and a newcomer never joins
+a higher tier's attempt. Equal tiers never preempt; a higher tier stops the
+fewest co-tenants whose release frees enough and starts only after that
+release. Waiting reasons name `device N shared with K attempts`. CPU attempts
+can run alongside GPU work and one another within host resources and caps;
+model engines retain their usual shared-memory admission. `needs.gpu.devices` narrows candidate IDs, not the
 number allocated. CPU work cannot have a GPU selector. Malformed/duplicate IDs,
 empty explicit sets and invalid counts use `gpu_selector_invalid`. An explicit
 count above one and multi-card model masks use `gpu_count_unsupported`, never

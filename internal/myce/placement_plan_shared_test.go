@@ -20,10 +20,10 @@ func sharedUnifiedMachine() Machine {
 }
 
 // The worker's card budget check, without unified CUDA host sampling.
-func sharedWorker(m Machine) Worker {
+func sharedWorker(m Machine, clock Clock) Worker {
 	m.Devices = slices.Clone(m.Devices)
 	m.GPU, m.Devices[0].Platform = "fake", "fake"
-	return Worker{Machine: m, HostMemorySource: func(context.Context) (float64, error) { return 101, nil }}
+	return Worker{Machine: m, Clock: clock, HostMemorySource: func(context.Context) (float64, error) { return 101, nil }}
 }
 
 func sharedSpec(priority string, gb float64) Spec {
@@ -54,14 +54,14 @@ func sharedPair(t *testing.T, q *Queue, m Machine) (*Job, *Job) {
 }
 
 func TestSharedDeviceRunsTwoJobsThatFit(t *testing.T) {
-	q, _ := fixture(t)
+	q, clock := fixture(t)
 	m := sharedUnifiedMachine()
 	a, b := sharedPair(t, q, m)
 	machineCheck(t, q, m, a, b)
 	requireState(t, q, a.ID, "running")
 	requireState(t, q, b.ID, "running")
 	// The worker admits the second attempt on the same card within its budget.
-	w := sharedWorker(m)
+	w := sharedWorker(m, clock)
 	if err := localAttemptAdmission(w, []Job{*job(t, q, a.ID)}, *job(t, q, b.ID), nil); err != nil {
 		t.Fatal("worker refused a co-tenant that fits:", err)
 	}
@@ -112,7 +112,7 @@ func TestSharedDeviceProductionStopsOneCoTenant(t *testing.T) {
 }
 
 func TestSharedDeviceModelServerKeepsDeviceExclusive(t *testing.T) {
-	q, _ := fixture(t)
+	q, clock := fixture(t)
 	m := sharedUnifiedMachine()
 	server := sharedSpec("experiment", 17)
 	server.Needs.Model = "served"
@@ -126,7 +126,7 @@ func TestSharedDeviceModelServerKeepsDeviceExclusive(t *testing.T) {
 		t.Fatal("batch job joined a model-server job's GPU", got.ID)
 	}
 	requireState(t, q, small.ID, "queued")
-	w := sharedWorker(m)
+	w := sharedWorker(m, clock)
 	probe := *job(t, q, small.ID)
 	probe.AllocatedDevices = []string{"0"}
 	if err := localAttemptAdmission(w, []Job{*job(t, q, a.ID)}, probe, nil); err == nil || !strings.Contains(err.Error(), "local_device_reservation") {
