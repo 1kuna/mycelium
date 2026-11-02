@@ -30,6 +30,8 @@ type Worker struct {
 	hostMemorySamples    map[attemptKey]hostMemorySample
 	DiskProbe            func(string) (DiskReading, error)
 	diskSampler          *workerDiskSampler
+	rootMonitor          *workerRootMonitor
+	MountRoots           func(context.Context) ([]string, error)
 	AcceleratorStopGrace time.Duration
 	Enrollment           bool
 	DeviceSettings       []DeviceInstall
@@ -384,6 +386,10 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	}
 	if err := w.checkHostRAM(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB); err != nil {
 		return nil, err
+	}
+	w.Machine.UnavailableRoots = w.sampleStorageRoots(ctx, s.state.CheckpointRoot)
+	if reason := w.storageRootReason(&j); reason != "" {
+		return nil, s.startFailure(j, launchRefused, errors.New(reason))
 	}
 	extensionEnv, extensionRelease, extensionErr := w.prepareExtensionExecution(&j)
 	if extensionErr != nil {
@@ -1021,6 +1027,9 @@ func (w Worker) replay(ctx context.Context, s *workerStore) error {
 	return nil
 }
 func (w Worker) Run(stop context.Context) error {
+	if w.rootMonitor == nil {
+		w.rootMonitor = &workerRootMonitor{expected: map[string]string{}}
+	}
 	if err := ValidateDeviceSettings(w.DeviceSettings); err != nil {
 		return err
 	}

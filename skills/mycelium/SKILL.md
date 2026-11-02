@@ -64,11 +64,13 @@ The plan lists each job's files, what still protects them and `reclaimable_bytes
 
 ## When a job waits
 
-1. Read its waiting reason: `myce status JOB_ID`. Every waiting job has one: missing qualification, memory or resource needs, no available host, software preparation, or work ahead in the queue. GPU batch-slot contention can show up as a memory reason (mycelium#537).
+1. Read its waiting reason: `myce status JOB_ID`. Repeated owner-latency preemptions on a shared host trigger a job-specific cooldown there; other eligible hosts remain available. A missing configured NAS mount names the affected root role and holds only work depending on it; healthy local/cached work can continue, and admission recovers automatically when the mount returns. Every waiting job has one: missing qualification, memory or resource needs, no available host, software preparation, or work ahead in the queue. GPU batch-slot contention can show up as a memory reason (mycelium#537).
 2. Fix what's yours, in order: right-size needs using comparable accepted evidence, add portable targets, make the job resumable, and choose `deadline` plus a real date only when warranted. Submission, status and wait replies include deadline guidance explaining policy precedence, blockers and ETA uncertainty. This is advice, not a deadline guarantee or an edit to accepted job intent; for an existing job's urgency, ask the queue owner rather than cancelling and resubmitting it.
 3. Otherwise it's a hold with a next owner: record it on your ticket and keep other work moving. Running heavy work locally on a shared host instead isn't a fallback.
 4. If the reason looks wrong, or Mycelium itself failed, search the Mycelium issues for a duplicate, then update or file a sanitized one (expected versus observed, version, job and attempt id, minimal command). The repo is public: no secrets, private paths, host details or webhook URLs.
 
 ## Credentials
+
+`myce submit FILE` also uses installed credentials when `MYCE_TOKEN` is unset, including the installed queue address and TLS pin.
 
 Never open, print, copy or pass fleet credentials, and never set the fleet token yourself. Use the installed-authority CLI or `Client.from_installed()`, which resolve credentials internally; prefer the CLI for read-only status and result calls. A missing CLI or failed authority is a setup hold, not a reason to look for the token.

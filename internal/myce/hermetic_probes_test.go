@@ -25,6 +25,7 @@ func syntheticProfileProbe() ProfileProbe {
 }
 
 func installSyntheticWorkerHost() {
+	workerMountRoots = func(context.Context) ([]string, error) { return []string{"/"}, nil }
 	workerCheckpointPrepare = func(j Job) (string, error) {
 		dir := attemptCheckpoint(j)
 		return dir, os.MkdirAll(dir, 0700)

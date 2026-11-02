@@ -264,6 +264,10 @@ func stageJobFilesContext(ctx context.Context, files map[string]string, stage fu
 func outputRelative(j Job, name, prefix string) string {
 	return filepath.Join(prefix, j.ID, strconv.Itoa(j.Attempt), name)
 }
+func (j Job) publishesNASOutputs() bool {
+	return !j.storedFileResults() && (j.Spec.extensionJob() || j.Spec.After != nil) && len(j.Spec.Outputs) > 0
+}
+
 func (w Worker) publishExtensionFiles(j Job, attemptWork string) error {
 	if check := j.Spec.ExtensionCheck; check != nil && !j.Spec.Run.Docker && j.Spec.Run.Env["MYCE_CHECK_OUTPUT"] != "" {
 		// Only the worker publishes the bounded check result into the CLI's
@@ -288,7 +292,7 @@ func (w Worker) publishExtensionFiles(j Job, attemptWork string) error {
 	if err := w.validateExtensionCheckOutput(j); err != nil {
 		return err
 	}
-	if j.storedFileResults() || (!j.Spec.extensionJob() && j.Spec.After == nil) || len(j.Spec.Outputs) == 0 {
+	if !j.publishesNASOutputs() {
 		return nil
 	}
 	if w.JobFileRoot == "" {

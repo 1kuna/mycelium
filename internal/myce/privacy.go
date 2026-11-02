@@ -287,6 +287,8 @@ func statusJobInputs(job *Job) Job {
 		"shared_inputs", "size_hint", "submission_key", "targets",
 	}}
 	j.Extensions = nil
+	j.ModelEnvironmentKey = ""
+	j.ModelEnvironmentNeedsSource = false
 	j.EnvironmentRecipes = nil
 	j.SidecarEnvironmentRecipes = nil
 	j.EnvironmentFailureLog = ""

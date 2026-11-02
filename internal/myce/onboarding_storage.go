@@ -34,7 +34,7 @@ func MountedNASRoots(ctx context.Context, osname string, command func(context.Co
 // Both production command runners dispatch it to the native MNT_NOWAIT table.
 const cachedMountInventoryCommand = "myce:mounts-nowait"
 
-type nasMount struct{ root, fingerprint string }
+type nasMount struct{ root, fingerprint, kind string }
 
 func mountedNASRoots(ctx context.Context, osname string, command func(context.Context, string, ...string) ([]byte, error)) ([]string, error) {
 	mounts, err := mountedNASInventory(ctx, osname, command)
@@ -90,7 +90,7 @@ func mountedNASInventory(ctx context.Context, osname string, command func(contex
 			kind = strings.TrimSuffix(kind, ")")
 		}
 		if networkMountType(kind) && filepath.IsAbs(path) && path != "/" {
-			mounts = append(mounts, nasMount{filepath.Clean(path), nasSourceFingerprint(source, kind)})
+			mounts = append(mounts, nasMount{filepath.Clean(path), nasSourceFingerprint(source, kind), kind})
 		}
 	}
 	return mounts, nil

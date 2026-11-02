@@ -241,6 +241,9 @@ func (q *Queue) placementPolicyWithoutReservation(j *Job, m *Machine, resident b
 	if j.State == "queued" && (j.Spec.Priority == "production" || j.Spec.Class == "production") && q.fleetPausesProduction() {
 		return false
 	}
+	if (j.StartedAt == nil || j.State == "queued") && (q.sharedHostBackoffReason(j, m) != "" || q.storageRootReason(j, m) != "") {
+		return false
+	}
 	if !dependencyReady(j) || m.Recovering || cancelled(j) || !dockerRuntimeFits(j, m) || q.maintenanceBlocked(hostID(m)) || m.HostMemoryPolicyMismatch || !logPolicyFits(j.Spec.Logs, m) {
 		return false
 	}
