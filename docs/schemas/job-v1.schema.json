@@ -1756,6 +1756,10 @@
           "type": "string",
           "x-contract": "diagnostic"
         },
+        "model_environment_needs_source": {
+          "type": "boolean",
+          "x-contract": "diagnostic"
+        },
         "model_limits": {
           "$ref": "#/$defs/ModelLimits",
           "x-contract": "diagnostic"

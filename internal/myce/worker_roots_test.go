@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -366,7 +367,7 @@ func TestWorkerRootsBatchModelUsesAssignedEnvironmentKey(t *testing.T) {
 	if assignment == nil || assignment.ID != submitted.ID {
 		t.Fatal("queue did not place cached/prepared batch")
 	}
-	if assignment.ModelEnvironmentKey != recipe.Key {
+	if assignment.ModelEnvironmentKey != recipe.Key || !assignment.ModelEnvironmentNeedsSource {
 		t.Fatal("assignment lost frozen model environment key")
 	}
 	w := Worker{Machine: m, ModelConfig: config}
@@ -381,6 +382,72 @@ func TestWorkerRootsBatchModelUsesAssignedEnvironmentKey(t *testing.T) {
 	w.Machine.UnavailableRoots = []UnavailableRoot{{Root: "environment", Reason: "configured NAS mount missing"}}
 	if err := localAttemptAdmission(w, nil, *assignment, nil); err == nil {
 		t.Fatal("missing environment cache admitted")
+	}
+}
+
+func TestWorkerRootsFrozenLockNeedsNoSource(t *testing.T) {
+	if _, err := exec.LookPath("uv"); err != nil {
+		t.Skip("uv not installed")
+	}
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("Python not installed")
+	}
+	t.Setenv("UV_OFFLINE", "1")
+	lock := filepath.Join(t.TempDir(), "requirements.txt")
+	if err := os.WriteFile(lock, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	recipe, err := snapshotEnvironment(EnvironmentRecipe{LockFile: lock, Python: python}, "fake")
+	if err != nil {
+		t.Fatal(err)
+	}
+	q, _ := fixture(t)
+	if err := q.ConfigureEnvironments(EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"runtime": {"fake": recipe}}}); err != nil {
+		t.Fatal(err)
+	}
+	s := spec("production")
+	s.Resumable = false
+	s.Environment.Name = "runtime"
+	j := submit(t, q, s)
+	if err := os.Remove(lock); err != nil {
+		t.Fatal(err)
+	}
+	m := machine("builder", "fake")
+	m.EnvironmentBuilder = true
+	m.UnavailableRoots = []UnavailableRoot{{Root: "environment-source", Reason: "configured NAS mount missing"}}
+	w := Worker{Machine: m}
+	if reason := q.storageRootReason(j, &m); reason != "" {
+		t.Fatal("frozen lock environment blocked by unused source", reason)
+	}
+	if err := localAttemptAdmission(w, nil, *j, nil); err != nil {
+		t.Fatal("frozen lock environment refused locally", err)
+	}
+	if reply := check(t, q, m, nil); len(reply.EnvironmentPlan) != 1 || reply.EnvironmentPlan[0].Key != recipe.Key {
+		t.Fatal("unused source blocked preparation")
+	}
+	cache := &EnvironmentCache{Root: t.TempDir(), Limit: 20 << 20, Clock: RealClock{}}
+	path, release, err := cache.Acquire(context.Background(), recipe)
+	if err != nil {
+		t.Fatal("frozen environment could not build without original lockfile", err)
+	}
+	defer release()
+	if output, err := exec.Command(filepath.Join(path, "venv", "bin", "python"), "-c", "print('frozen')").CombinedOutput(); err != nil || strings.TrimSpace(string(output)) != "frozen" {
+		t.Fatalf("frozen environment did not run: %s %v", output, err)
+	}
+	// Helpers and model runtimes use the same recipe classification.
+	helper := Job{Spec: spec("production"), SidecarEnvironmentRecipes: map[string]map[string]EnvironmentRecipe{"helper": {"fake": recipe}}}
+	if reason := storageRootReason(&helper, &m); reason != "" {
+		t.Fatal("frozen helper blocked by unused source", reason)
+	}
+	model := Model{Name: "model", Environment: "runtime"}
+	modelJob := Job{Spec: spec("production"), ModelEnvironmentKey: recipe.Key}
+	if reason := storageRootReasonForModel(&modelJob, &m, model, &recipe); reason != "" {
+		t.Fatal("frozen model environment blocked by unused source", reason)
+	}
+	m.UnavailableRoots[0].Root = "environment"
+	if storageRootReason(j, &m) == "" || storageRootReason(&helper, &m) == "" || storageRootReasonForModel(&modelJob, &m, model, &recipe) == "" {
+		t.Fatal("frozen recipe bypassed missing destination cache")
 	}
 }
 

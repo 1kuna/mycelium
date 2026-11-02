@@ -2459,8 +2459,11 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 		j.Extension = &ExtensionSelection{Name: e.Name, Version: e.Version, Digest: e.Digest}
 	}
 	j.ModelEnvironmentKey = ""
+	j.ModelEnvironmentNeedsSource = false
 	if model, ok := q.model(j.Spec.Needs.Model); ok {
-		j.ModelEnvironmentKey = q.environments.Environments[model.Environment][m.GPU].Key
+		recipe := q.environments.Environments[model.Environment][m.GPU]
+		j.ModelEnvironmentKey = recipe.Key
+		j.ModelEnvironmentNeedsSource = recipe.Binary != "" || recipe.BinaryRelative != ""
 	}
 	j.State = "running"
 	j.ExecutionCause, j.CleanupCause = nil, nil

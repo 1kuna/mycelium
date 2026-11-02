@@ -140,11 +140,12 @@ func storageRootReason(j *Job, m *Machine) string {
 		case "file-cache":
 			needs = len(jobInputFiles(j)) > 0 || len(j.Spec.SharedInputs) > 0 || len(j.Spec.ModelSnapshots) > 0 || j.ResumeFiles != nil
 		case "environment-source":
-			needs = j.Spec.Environment.Key() != "" && !environmentReady(j, m)
+			needs = environmentRecipeNeedsSource(j.EnvironmentRecipes[m.GPU], m)
+			for _, recipe := range extensionEnvironmentRecipes(j, m) {
+				needs = needs || environmentRecipeNeedsSource(recipe, m)
+			}
 			for _, recipes := range j.SidecarEnvironmentRecipes {
-				if recipe, ok := recipes[m.GPU]; ok && !slices.Contains(m.Environments, recipe.Key) {
-					needs = true
-				}
+				needs = needs || environmentRecipeNeedsSource(recipes[m.GPU], m)
 			}
 		case "environment":
 			needs = j.Spec.Environment.Key() != "" || len(j.EnvironmentRecipes) > 0 || len(j.SidecarEnvironmentRecipes) > 0 || j.Spec.Extension != "" || len(j.Extensions) > 0
@@ -154,6 +155,10 @@ func storageRootReason(j *Job, m *Machine) string {
 		}
 	}
 	return ""
+}
+
+func environmentRecipeNeedsSource(recipe EnvironmentRecipe, m *Machine) bool {
+	return (recipe.Binary != "" || recipe.BinaryRelative != "") && !slices.Contains(m.Environments, recipe.Key)
 }
 
 func storageRootReasonForModel(j *Job, m *Machine, model Model, recipe *EnvironmentRecipe) string {
@@ -175,13 +180,17 @@ func storageRootReasonForModel(j *Job, m *Machine, model Model, recipe *Environm
 	if model.Environment == "" {
 		return ""
 	}
-	dependency := *j
-	dependency.Spec.Environment = Environment{Name: model.Environment}
-	dependency.EnvironmentRecipes = nil
+	key, needsSource := j.ModelEnvironmentKey, j.ModelEnvironmentNeedsSource
 	if recipe != nil {
-		dependency.EnvironmentRecipes = map[string]EnvironmentRecipe{m.GPU: *recipe}
+		key = recipe.Key
+		needsSource = needsSource || recipe.Binary != "" || recipe.BinaryRelative != ""
 	}
-	return storageRootReason(&dependency, &copy)
+	for _, root := range copy.UnavailableRoots {
+		if root.Root == "environment" || root.Root == "environment-source" && needsSource && !slices.Contains(m.Environments, key) {
+			return fmt.Sprintf("%s: %s unavailable", root.Reason, root.Root)
+		}
+	}
+	return ""
 }
 
 func (q *Queue) storageRootReason(j *Job, m *Machine) string {

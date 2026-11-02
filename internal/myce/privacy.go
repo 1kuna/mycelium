@@ -288,6 +288,7 @@ func statusJobInputs(job *Job) Job {
 	}}
 	j.Extensions = nil
 	j.ModelEnvironmentKey = ""
+	j.ModelEnvironmentNeedsSource = false
 	j.EnvironmentRecipes = nil
 	j.SidecarEnvironmentRecipes = nil
 	j.EnvironmentFailureLog = ""
