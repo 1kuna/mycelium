@@ -168,14 +168,26 @@ func batchOnTarget(j *Job, m *Machine) bool {
 	return !j.Spec.Needs.cpuOnly() && m.GPU != "cpu" && (len(j.AllocatedDevices) == 0 || slices.ContainsFunc(targetDevices(m), func(id string) bool { return slices.Contains(j.AllocatedDevices, id) }))
 }
 
+func dockerSharesDevice(j *Job) bool {
+	if !j.Spec.Run.Docker {
+		return true
+	}
+	// A host-only learned envelope can retain a recipe's device default.
+	// That is not a measured device figure (#625).
+	if e := j.MemoryEnvelope; e != nil && e.Basis == "learned" && strings.Contains(e.Source, "GPU recipe default") {
+		return false
+	}
+	return j.Spec.Needs.HostMemoryGB > 0
+}
+
 // A single-card batch attempt with a declared or learned memory vector may share
-// its card when memory fits (MY-30/31, #538). Model-server, Docker,
+// its card when memory fits (MY-30/31, #538). Model-server,
 // extension-check, fan-out, exploratory and multi-card work keeps the card, as
 // does a hint naming no device memory: its device figure is only a default.
 func sharesDevice(j *Job) bool {
 	n, e := j.Spec.Needs, j.MemoryEnvelope
 	unstated := e != nil && (e.Basis == "exploratory" || e.Basis == "hint" && (j.MemoryFallback == nil || j.MemoryFallback.MemoryGB <= 0))
-	return !n.cpuOnly() && n.MemoryGB > 0 && n.Model == "" && !j.Spec.Run.Docker && j.Spec.ExtensionCheck == nil && j.Spec.FanOut == nil && len(j.AllocatedDevices) <= 1 && !unstated
+	return !n.cpuOnly() && n.MemoryGB > 0 && n.Model == "" && dockerSharesDevice(j) && j.Spec.ExtensionCheck == nil && j.Spec.FanOut == nil && len(j.AllocatedDevices) <= 1 && !unstated
 }
 
 // deviceCoTenants counts the batch attempts on card m that demand may share it
@@ -200,7 +212,7 @@ func (q *Queue) deviceCoTenants(m *Machine, demand *Job, joining bool) (int, boo
 		if !q.batchReleaseOnTarget(r, m) {
 			continue
 		}
-		if j := q.s.Jobs[r.Job]; j == nil || r.Device == "" || len(r.Devices) > 1 || r.Docker || !sharesDevice(j) {
+		if j := q.s.Jobs[r.Job]; j == nil || r.Device == "" || len(r.Devices) > 1 || !sharesDevice(j) {
 			return 0, false
 		}
 	}

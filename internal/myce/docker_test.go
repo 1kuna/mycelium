@@ -114,6 +114,10 @@ func TestDockerCLIHelper(t *testing.T) {
 		os.Exit(0)
 	}
 	switch args[0] {
+	case "top":
+		pids, _ := os.ReadFile(filepath.Join(root, "pids"))
+		fmt.Printf("PID\n%s\n", pids)
+
 	case "events":
 		if os.Getenv("MYCE_TEST_DOCKER_EVENTS") != "1" {
 			os.Exit(0)

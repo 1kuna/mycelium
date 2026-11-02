@@ -457,55 +457,13 @@ func (w Worker) observeAttemptMemoryEvery(a *memoryAttempt, j Job, groups func()
 			}
 		}
 	}()
-	type deviceResult struct {
-		peak               *AttemptMemoryPeak
-		unreported, shared bool
-	}
-	var device <-chan deviceResult
-	// Attempt facts are independent of learning eligibility. Declared jobs,
-	// extension checks and resumed attempts need device diagnostics too.
+	var device <-chan deviceMemoryResult
 	if deviceTelemetry {
-		result := make(chan deviceResult, 1)
-		device = result
-		go func() {
-			// Device fdinfo can block in the same driver as host collection.
-			// Own the result locally so a late read cannot change published facts.
-			devicePeak := &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryNoSample}
-			unreported, shared := false, false
-			defer func() { result <- deviceResult{devicePeak, unreported, shared} }()
-			deviceTick := time.NewTicker(devicePeriod)
-			defer deviceTick.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-deviceTick.C:
-					ids := map[int]bool{}
-					if a.processIDs(ids) != nil {
-						devicePeak = sampledMemoryPeak(devicePeak, &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryInventory})
-						continue
-					}
-					if len(ids) == 0 {
-						continue
-					}
-					gb, foreign, err := w.attemptDeviceMemory(ctx, ids, a.fs)
-					shared = shared || foreign
-					if errors.Is(err, errDeviceMemoryNotReported) {
-						unreported = true
-						continue
-					}
-					if err != nil {
-						if !errors.Is(err, errAttemptMemoryPending) {
-							devicePeak = sampledMemoryPeak(devicePeak, &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryUnsupported})
-							return
-						}
-						continue
-					}
-					devicePeak = sampledMemoryPeak(devicePeak, &AttemptMemoryPeak{DeviceGB: &gb})
-					a.device.Store(&hostMemorySample{gb: gb, at: clock.Now()})
-				}
-			}
-		}()
+		device = w.observeDeviceMemory(ctx, func() (map[int]bool, map[int]bool, error) {
+			ids := map[int]bool{}
+			err := a.processIDs(ids)
+			return ids, nil, err
+		}, a.fs, devicePeriod, clock, a)
 	}
 	var once sync.Once
 	return func() *AttemptMemoryPeak {
@@ -648,7 +606,7 @@ func cgroupResidentGB(fs memoryFS, path string) (float64, bool) {
 }
 
 // The bool reports another process on the attempt's CUDA device.
-func (w Worker) attemptDeviceMemory(ctx context.Context, ids map[int]bool, fs memoryFS) (float64, bool, error) {
+func (w Worker) attemptDeviceMemory(ctx context.Context, ids map[int]bool, fs memoryFS, known ...map[int]bool) (float64, bool, error) {
 	if len(w.selectedDevices) > 1 {
 		return 0, false, errAttemptMemoryUnsupported // One card's sample cannot describe a multi-card attempt.
 	}
@@ -675,7 +633,7 @@ func (w Worker) attemptDeviceMemory(ctx context.Context, ids map[int]bool, fs me
 			// Driver startup and query timeouts do not establish lack of support.
 			return 0, false, errAttemptMemoryPending
 		}
-		return cudaAttemptMemory(b, selector, ids)
+		return cudaAttemptMemory(b, selector, ids, known...)
 	}
 	if w.Machine.GPU == "xpu" && w.selectedDevice != nil && w.selectedDevice.pciAddress != "" {
 		clients := map[string]float64{}
@@ -712,7 +670,7 @@ func (w Worker) attemptDeviceMemory(ctx context.Context, ids map[int]bool, fs me
 
 // N/A rows for the attempt's own processes mean "listed, not reported" (some
 // unified-memory drivers); a partial sum would undercount, so none is used.
-func cudaAttemptMemory(b []byte, selector string, ids map[int]bool) (float64, bool, error) {
+func cudaAttemptMemory(b []byte, selector string, ids map[int]bool, known ...map[int]bool) (float64, bool, error) {
 	rows, err := csv.NewReader(strings.NewReader(string(b))).ReadAll()
 	if err != nil {
 		return 0, false, errAttemptMemoryUnsupported
@@ -730,7 +688,7 @@ func cudaAttemptMemory(b []byte, selector string, ids map[int]bool) (float64, bo
 			return 0, false, errAttemptMemoryUnsupported
 		}
 		if !ids[pid] {
-			foreign = true
+			foreign = foreign || len(known) == 0 || !known[0][pid]
 			continue
 		}
 		value := strings.TrimSpace(row[2])
@@ -832,4 +790,56 @@ func (a *memoryAttempt) currentHostMemory(clock Clock) *CurrentHostMemory {
 		sample.DeviceGB, sample.deviceSampledAt = &gb, device.at
 	}
 	return sample
+}
+
+type deviceMemoryResult struct {
+	peak               *AttemptMemoryPeak
+	unreported, shared bool
+}
+
+// inventory returns exact attempt PIDs and other known attempts' PIDs. Only
+// the former contribute to the peak. The latter are not foreign workload.
+func (w Worker) observeDeviceMemory(ctx context.Context, inventory func() (map[int]bool, map[int]bool, error), fs memoryFS, period time.Duration, clock Clock, a *memoryAttempt) <-chan deviceMemoryResult {
+	result := make(chan deviceMemoryResult, 1)
+	go func() {
+		peak := &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryNoSample}
+		unreported, shared := false, false
+		defer func() { result <- deviceMemoryResult{peak, unreported, shared} }()
+		tick := time.NewTicker(period)
+		defer tick.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tick.C:
+				ids, known, err := inventory()
+				if err != nil {
+					peak = sampledMemoryPeak(peak, &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryInventory})
+					continue
+				}
+				if len(ids) == 0 {
+					continue
+				}
+				gb, foreign, err := w.attemptDeviceMemory(ctx, ids, fs, known)
+				// Known co-tenants also make a whole-host delta ambiguous.
+				shared = shared || foreign || len(known) > 0
+				if errors.Is(err, errDeviceMemoryNotReported) {
+					unreported = true
+					continue
+				}
+				if err != nil {
+					if !errors.Is(err, errAttemptMemoryPending) {
+						peak = sampledMemoryPeak(peak, &AttemptMemoryPeak{DeviceUnavailable: deviceMemoryUnsupported})
+						return
+					}
+					continue
+				}
+				peak = sampledMemoryPeak(peak, &AttemptMemoryPeak{DeviceGB: &gb})
+				if a != nil {
+					a.device.Store(&hostMemorySample{gb: gb, at: clock.Now()})
+				}
+			}
+		}
+	}()
+	return result
 }

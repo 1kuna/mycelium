@@ -1061,6 +1061,7 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 		d.memory = parent
 		d.memoryWorker = &w
 	}
+	d.memoryWorker = &w
 	d.state.Accelerator = !j.Spec.Needs.cpuOnly()
 	d.state.StopGrace = acceleratorStopGrace(w.AcceleratorStopGrace)
 	d.state.Owner = &Result{Machine: w.Machine.ID, Session: s.state.Session, Execution: Execution{ID: j.ID, Attempt: j.Attempt}}
@@ -1229,10 +1230,7 @@ func (w Worker) startDocker(s *workerStore, j Job, checkpoint string, release fu
 }
 func (d *dockerAttempt) run(p *process, j Job, session string, output *os.File, release func(), launch func() error) {
 	defer close(d.closed)
-	finishMemory := func() *AttemptMemoryPeak { return nil }
-	if d.memoryWorker != nil {
-		finishMemory = d.memoryWorker.observeAttemptMemory(d.envelope(), j, nil)
-	}
+	finishMemory := d.observeMemory(j, deviceMemorySamplePeriod)
 	defer finishMemory()
 	stopEvents := d.observeDockerEvents()
 	defer stopEvents()
