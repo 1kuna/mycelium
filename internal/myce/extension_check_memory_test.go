@@ -42,14 +42,11 @@ func TestExtensionCheckMemoryCrossFamilyRecovery(t *testing.T) {
 			if err := q.AddExtension(e); err != nil {
 				t.Fatal(err)
 			}
-			source := cloneMachine(&m)
+			source := unifiedCUDAAdmissionMachine()
 			source.ID, source.HostID, source.Session = "source", "source", "source-session"
-			source.UnifiedMemory = true
-			source.HostMemoryBudgetGB, source.HostAvailableMemoryGB = 64, 64
 			source.CapabilityProfile.Arch = "arm64"
-			source.CapabilityProfile.SystemMemoryBytes = 64 << 30
 			source.CapabilityProfile.Accelerators = []AcceleratorProfile{{Type: "cuda", MemoryBytes: 31 << 30}}
-			source.Devices = source.Devices[:1]
+			source.Devices = cloneMachine(&m).Devices[:1]
 			source.Devices[0].Platform, source.Devices[0].MemoryMode = "cuda", "unified"
 			source.Devices[0].UnifiedMemory = true
 			for _, owner := range []*Machine{&source, &m} {
