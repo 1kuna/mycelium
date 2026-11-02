@@ -2226,6 +2226,20 @@ services are verified without restarting. If admission was resumed instead,
 the newer operation is refused until the operator explicitly drains or disables
 the host. No receipt or database edits are needed.
 
+A refused `myce fleet upgrade` names the blocking operation (ID, state, flags,
+age and host failure) and every service missing a fresh runtime proof, with the
+next step. To abandon a stopped operation instead of resuming it, run
+`myce fleet supersede --operation ID --reason TEXT`. Only the current stopped
+operation can be superseded. The queue keeps an audit record (operation,
+release, flags, per-host phases and failures, reason and time) in status as
+`fleet_superseded`, and the next `myce fleet upgrade` starts a new operation.
+Supersession never resumes a drain. Hosts the operation drained stay drained and
+are listed as `retained_drains`; resume each with `myce host resume HOST` once
+it is healthy. Its production admission fence is released. A worker settles a
+failure receipt the queue definitively refuses (any 4xx except 401, 403, 408
+and 429). It retries other delivery failures with backoff from 2 s up to 5 min
+and keeps reporting its runtime proof meanwhile.
+
 No automatic rollback, downgrade, forced job stop, SSH, driver, package or OS
 changes occur. Offline or unknown custody stays a visible wait; elapsed time
 never proves release. Native service/signing qualification and the first live

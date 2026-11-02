@@ -21,6 +21,14 @@ func (a API) registerFleetUpgrade(mux *requestMux) {
 		out, err := a.Queue.StartFleetUpgrade(request, r.Context())
 		respond(w, out, err)
 	})
+	mux.HandleFunc("POST /api/fleet/supersede", func(w http.ResponseWriter, r *http.Request) {
+		var request FleetSupersedeRequest
+		if !decode(w, r, &request) {
+			return
+		}
+		out, err := a.Queue.SupersedeFleetUpgrade(request, r.Context())
+		respond(w, out, err)
+	})
 	mux.HandleFunc("GET /api/fleet/publisher", func(w http.ResponseWriter, r *http.Request) {
 		requestUnlock1 := requestReadLock(r.Context(), &a.Queue.mu)
 		key := bytes.Clone(a.Queue.s.EnrollmentReleaseKey)

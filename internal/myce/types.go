@@ -719,6 +719,9 @@ type Snapshot struct {
 	Warning        string               `json:"warning,omitempty"`
 	Jobs           []*Job               `json:"jobs"`
 	Machines       []*Machine           `json:"machines"`
+
+	// Operator-retired fleet operations, oldest first (audit record, #588).
+	FleetSuperseded []FleetSupersession `json:"fleet_superseded,omitempty"`
 }
 
 func terminal(s string) bool { return s == "succeeded" || s == "failed" || s == "cancelled" }
