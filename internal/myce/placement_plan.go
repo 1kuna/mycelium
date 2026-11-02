@@ -116,16 +116,12 @@ func (q *Queue) roomPlan(j *Job, m *Machine, batch bool) *placementPlan {
 		return nil
 	}
 	if batch {
-		_, shared := q.deviceCoTenants(m, j, true)
 		for _, r := range q.s.HostReleases {
 			if !q.batchReleaseOnTarget(r, m) {
 				continue
 			}
 			current := q.s.Jobs[r.Job]
 			if current == nil || current.Machine != r.Machine || current.Session != r.Session || current.Attempt != r.Attempt || (current.State != "running" && current.State != "stopping") {
-				if shared {
-					continue // Its memory stays charged on the card until exact release.
-				}
 				// No live attempt can be preempted to release this slot.
 				return nil
 			}

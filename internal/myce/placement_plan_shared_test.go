@@ -97,7 +97,9 @@ func TestSharedDeviceProductionStopsOneCoTenant(t *testing.T) {
 		t.Fatal("production started before its victim released", got.ID)
 	}
 	// 10 GiB free: only stopping the 17 GiB job frees enough.
-	requireState(t, q, a.ID, "stopping")
+	if got := job(t, q, a.ID); got.State != "stopping" {
+		t.Fatalf("17 GiB co-tenant state=%s; production waits: %s", got.State, job(t, q, demand.ID).Reason)
+	}
 	requireState(t, q, b.ID, "running")
 	if got := assignedJob(machineCheck(t, q, m, a, b)); got != nil {
 		t.Fatal("production started while its victim was still stopping", got.ID)

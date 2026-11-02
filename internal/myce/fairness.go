@@ -452,16 +452,15 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 		}
 		busy := !q.workerBatchIdle(live)
 		batchSlotAllocated := busy
-		sharedWith, shared := 0, false
-		if busy {
-			sharedWith, shared = q.deviceCoTenants(live, best, true)
-			busy = !shared
+		sharedWith := 0
+		if n, ok := q.deviceCoTenants(live, best, true); busy && ok && q.cardSettled(live) {
+			sharedWith, busy = n, false
 		}
 		if call := q.calls[best.ID]; call != nil {
 			busy = !q.callCanUse(live, call)
 		}
 		if busy || !fits(best, live, live.FreeMemoryGB) {
-			base = reservationWaitReason(live, batchSlotAllocated && !shared, sharedWith)
+			base = reservationWaitReason(live, batchSlotAllocated && sharedWith == 0, sharedWith)
 		}
 		if !environmentReady(best, target) {
 			if busy {

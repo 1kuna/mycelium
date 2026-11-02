@@ -198,7 +198,6 @@ func (q *Queue) deviceCoTenants(m *Machine, demand *Job, joining bool) (int, boo
 		if !q.batchReleaseOnTarget(r, m) {
 			continue
 		}
-		// A finished holder stays charged on the card until exact release.
 		if j := q.s.Jobs[r.Job]; j == nil || r.Device == "" || len(r.Devices) > 1 || r.Docker || !sharesDevice(j) {
 			return 0, false
 		}
@@ -211,7 +210,23 @@ func (q *Queue) batchSlotFree(m *Machine, demand *Job) bool {
 		return true
 	}
 	_, ok := q.deviceCoTenants(m, demand, true)
-	return ok && !m.Gone && !m.Leaving && !q.unreported[m.ID]
+	return ok && q.cardSettled(m) && !m.Gone && !m.Leaving && !q.unreported[m.ID]
+}
+
+// A newcomer joins only running holders. A stopping holder or a finished one
+// awaiting exact release keeps the card fenced until that release (custody).
+func (q *Queue) cardSettled(m *Machine) bool {
+	for _, j := range q.liveJobs() {
+		if batchOnTarget(j, m) && batchReservesCapacity(j) && j.State != "running" {
+			return false
+		}
+	}
+	for _, r := range q.s.HostReleases {
+		if j := q.s.Jobs[r.Job]; q.batchReleaseOnTarget(r, m) && (j == nil || j.Machine != r.Machine || j.Session != r.Session || j.Attempt != r.Attempt || j.State != "running") {
+			return false
+		}
+	}
+	return true
 }
 
 // Retained custody owns the command slot even after a job becomes terminal or
