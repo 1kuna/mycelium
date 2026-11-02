@@ -1009,6 +1009,10 @@ Single tenants are unaffected. Every tenant needs fresh per-process evidence
 before the guard acts. Missing or stale samples establish no growth,
 and the running job's reason reports unavailable per-process evidence. Host
 memory-drop estimates cannot attribute co-tenants and do not trigger this guard.
+At check-in send time, workers read the sampler's latest per-attempt device
+counter independently of cached actor reports. Slow actor log/result I/O must
+not hide fresh device evidence. This refresh retains the sensor's original
+timestamp; it cannot make a stalled sensor fresh or renew old host-memory credit.
 
 **Cards per job (MY-30, [#105](https://github.com/1kuna/mycelium/issues/105)).**
 `memory_gb` (declared or learned) decides the cards. Work one card of its host
