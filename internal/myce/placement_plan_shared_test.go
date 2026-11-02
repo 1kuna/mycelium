@@ -359,6 +359,82 @@ func TestSharedDeviceXPUProductionBatchWaitsForEngineRelease(t *testing.T) {
 	}
 }
 
+func TestSharedDeviceXPUModelSkipsRetainedCleanup(t *testing.T) {
+	q, _, m := sharedXPUModelFixture(t)
+	low := addModelCall(t, q, "experiment")
+	slot := q.s.ModelSlots[slotKey(m.ID, "test", "0")]
+	if slot == nil {
+		t.Fatal("no experiment engine")
+	}
+	if _, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, ModelReports: []ModelReport{{Name: "test", Device: "0", Attempt: slot.Attempt, State: "ready"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.finishCall(low.ID); err != nil {
+		t.Fatal(err)
+	}
+	queued := submit(t, q, sharedSpec("experiment", 3))
+	run := assignedJob(machineCheck(t, q, m))
+	if run == nil || run.ID != queued.ID {
+		t.Fatal("no experiment co-tenant", run)
+	}
+	pending := result(run, true)
+	pending.ReleasePending = true
+	if err := q.Complete(pending); err != nil {
+		t.Fatal(err)
+	}
+	requireState(t, q, run.ID, "succeeded")
+	other := m
+	other.ID, other.Session = "two", "session-two"
+	machineCheck(t, q, other)
+	if err := q.Pin(ModelPin{Project: "test", Model: "test", Machine: other.ID}); err != nil {
+		t.Fatal(err)
+	}
+	ready := q.s.ModelSlots[slotKey(other.ID, "test", "0")]
+	if ready == nil {
+		t.Fatal("no alternate engine")
+	}
+	if _, err := q.Checkin(Checkin{Machine: other, AttemptProtocol: keyedAttemptProtocol, ModelReports: []ModelReport{{Name: "test", Device: "0", Attempt: ready.Attempt, State: "ready"}}}); err != nil {
+		t.Fatal(err)
+	}
+	high := addModelCall(t, q, "production")
+	if high.Machine != other.ID {
+		t.Fatal("retained cleanup hid available model target", high)
+	}
+	if copy := job(t, q, run.ID).Copies[0]; copy.ReleaseConfirmed || copy.ReleasedAt != nil {
+		t.Fatal("placement manufactured cleanup evidence", copy)
+	}
+}
+
+func TestLegacyXPUCPUJobPacksBesideModel(t *testing.T) {
+	for _, modelTier := range []string{"production", "experiment"} {
+		t.Run(modelTier, func(t *testing.T) {
+			q, _, m := modelFixture(t)
+			m.GPU = "xpu" // Legacy inventory has no Devices and keeps the GPU on CPU targets.
+			m.CapabilityProfile.Accelerators[0].Type = "xpu"
+			q.models.Models[0].MemoryGB, q.models.Models[0].Platforms = 1, []string{"xpu"}
+			m.ModelConfigHash = modelConfigHash(q.models)
+			machineCheck(t, q, m)
+			call := addModelCall(t, q, modelTier)
+			reportModel(t, q, m, "ready")
+			slot := q.s.ModelSlots[slotKey(m.ID, "test")]
+			cpuTier := "experiment"
+			if modelTier == "experiment" {
+				cpuTier = "production"
+			}
+			s := spec(cpuTier)
+			s.Needs = ResourceNeeds{CPUCores: 1, HostMemoryGB: 1, Platform: Platform{Required: []string{"cpu"}}}
+			cpu := submit(t, q, s)
+			got := assignedJob(machineCheck(t, q, m))
+			if got == nil || got.ID != cpu.ID {
+				t.Fatal("CPU job inherited XPU tier isolation", got, job(t, q, cpu.ID).Reason)
+			}
+			if slot == nil || slot.State != "ready" || slot.PriorityStop != nil || call.Machine != m.ID {
+				t.Fatal("CPU demand disturbed model", slot, call)
+			}
+		})
+	}
+}
+
 func testSharedDeviceTierPacks(t *testing.T, platform, priority string) {
 	t.Helper()
 	q, _ := fixture(t)

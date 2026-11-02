@@ -236,7 +236,7 @@ func (q *Queue) batchSlotFree(m *Machine, demand *Job) bool {
 // XPU admission covers both batch and engine custody. An engine demand may
 // reuse its own model, but cannot start beside other different-tier holders.
 func (q *Queue) xpuTiersSettled(m *Machine, demand *Job, engine bool) bool {
-	if m.GPU != "xpu" {
+	if m.GPU != "xpu" || demand.Spec.Needs.cpuOnly() {
 		return true
 	}
 	for _, j := range q.liveJobs() {

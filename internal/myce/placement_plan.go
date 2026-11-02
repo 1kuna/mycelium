@@ -71,8 +71,20 @@ func (q *Queue) applyPlacement(p *placementPlan, demand *Job) {
 // cold load before a higher-tier call or pin can promote them on XPU.
 func (q *Queue) addXPUTierStops(p *placementPlan, demand *Job) bool {
 	m := p.machine
-	if m.GPU != "xpu" {
+	if m.GPU != "xpu" || demand.Spec.Needs.cpuOnly() {
 		return true
+	}
+	for _, r := range q.s.HostReleases {
+		if r.CPUOnly || !q.batchReleaseOnTarget(r, m) {
+			continue
+		}
+		current := q.s.Jobs[r.Job]
+		if current != nil && q.comparePriority(current.Spec, demand.Spec) == 0 {
+			continue
+		}
+		if current == nil || current.Machine != r.Machine || current.Session != r.Session || current.Attempt != r.Attempt || !batchReservesCapacity(current) {
+			return false // No live victim can release this retained custody.
+		}
 	}
 	for _, r := range q.liveJobs() {
 		if r.Spec.Needs.cpuOnly() || !batchOnTarget(r, m) || !batchReservesCapacity(r) || q.comparePriority(r.Spec, demand.Spec) == 0 {
@@ -160,6 +172,9 @@ func (q *Queue) roomPlan(j *Job, m *Machine, batch bool) *placementPlan {
 		if p := q.roomPlanWithBatch(j, m, false, true); p != nil && p.cheaper(best) {
 			best = p
 		}
+	}
+	if best != nil && !q.addXPUTierStops(best, j) {
+		return nil
 	}
 	return best
 }
@@ -348,7 +363,7 @@ func (q *Queue) cardRoom(j *Job, m *Machine, need float64, batch, releaseBatch, 
 		if !batchOnTarget(r, m) || !batchReservesCapacity(r) {
 			continue
 		}
-		isolateTier := m.GPU == "xpu" && !r.Spec.Needs.cpuOnly() && q.comparePriority(r.Spec, j.Spec) != 0
+		isolateTier := m.GPU == "xpu" && !j.Spec.Needs.cpuOnly() && !r.Spec.Needs.cpuOnly() && q.comparePriority(r.Spec, j.Spec) != 0
 		if !q.batchPreemptible(r, j.Spec) {
 			if batch && !shared || isolateTier {
 				return false
@@ -364,7 +379,7 @@ func (q *Queue) cardRoom(j *Job, m *Machine, need float64, batch, releaseBatch, 
 	}
 	var slots []*ModelSlot
 	for _, s := range q.s.ModelSlots {
-		if slotOnTarget(s, m) && slotReservesMemory(s) && m.GPU == "xpu" && (batch || s.Model != j.Spec.Needs.Model) && q.comparePriority(q.slotSpec(s), j.Spec) != 0 {
+		if slotOnTarget(s, m) && slotReservesMemory(s) && m.GPU == "xpu" && !j.Spec.Needs.cpuOnly() && (batch || s.Model != j.Spec.Needs.Model) && q.comparePriority(q.slotSpec(s), j.Spec) != 0 {
 			if !q.slotReclaimableFor(s, j.Spec) {
 				return false
 			}
