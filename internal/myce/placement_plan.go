@@ -240,7 +240,7 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool) 
 	// Mandatory/local releases already provide RAM as well as GPU memory.
 	// Project both once before asking for additional host-wide releases.
 	projected := q.cpuAfterReleases(m, p.jobs, p.slots, p.preparationCores)
-	projected.FreeHostMemoryGB -= m.hostReservationDebtGB
+	projected.FreeHostMemoryGB -= m.hostReservationDebtGB - q.unifiedReleaseDebtCredit(m, p.jobs)
 	projected.hostReservationDebtGB = 0 // Carry signed room through local releases once.
 	releasedJobs, releasedSlots := map[*Job]bool{}, map[*ModelSlot]bool{}
 	for _, r := range p.jobs {
@@ -263,5 +263,23 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool) 
 		p.addSlot(s)
 	}
 	return p
+}
+
+// A started unified-CUDA job's device allocation is invisible to its cgroup
+// sample, so live headroom already lacks it while growth still reserves the
+// full device vector (#424); that double count surfaces as reservation debt.
+// Releasing the job frees both, so credit its device vector against the debt,
+// never beyond it. Without this, production never planned to stop a deadline
+// holder of most of the host's allowance (#598). Planning only: admission
+// still waits for confirmed release and rechecks live memory.
+func (q *Queue) unifiedReleaseDebtCredit(m *Machine, jobs []*Job) float64 {
+	credit := 0.0
+	for _, j := range jobs {
+		owner := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
+		if owner != nil && unifiedCUDA(owner) && j.StartedAt != nil && !j.ReleaseConfirmed && (j.State == "running" || j.State == "stopping") {
+			credit += j.Spec.Needs.MemoryGB
+		}
+	}
+	return min(credit, m.hostReservationDebtGB)
 }
 func (q *Queue) slotMemory(s *ModelSlot) float64 { model, _ := q.model(s.Model); return model.MemoryGB }
