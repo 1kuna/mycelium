@@ -120,12 +120,13 @@ of the Git diff:
 
 ```sh
 mkdir -p .reports
-python3 scripts/gate-related.py "$(git merge-base HEAD origin/main)" > .reports/gate-selection.tsv
-myce run --profile gate-quick --input gate-selection.tsv=.reports/gate-selection.tsv
+python3 scripts/gate-related.py "$(git merge-base HEAD origin/main)" > .reports/gate-selection.tsv &&
+  myce run --profile gate-quick --input gate-selection.tsv=.reports/gate-selection.tsv
 ```
 
 Commit first: the source is `HEAD`, while the selection also sees uncommitted
-files. A selection error (changed `go.mod`, unmapped code) means run `gate-full`.
+files. A selection error (changed `go.mod`, unmapped code) means run `gate-full`;
+the `&&` keeps a failed selection's empty file from submitting a test-free run.
 Quick runs a subset of the full gate's commands at the same concurrency, so it
 declares the Linux full-gate 7 GiB; the same five-minute budget applies.
 
