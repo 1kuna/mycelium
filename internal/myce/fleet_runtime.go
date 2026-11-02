@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -152,6 +153,7 @@ type workerFleetRuntime struct {
 	failed         *fleetLaunchFailure
 	clock          Clock
 	generation     uint64
+	acks           map[string]fleetAckRetry
 }
 
 type fleetPollResult struct {
@@ -159,6 +161,53 @@ type fleetPollResult struct {
 	proof          *FleetRuntimeProof
 	attempted      string
 	failed         *fleetLaunchFailure
+	acks           map[string]fleetAckRetry
+}
+
+// Delivery state for one acknowledgement body, owned by the worker loop.
+type fleetAckRetry struct {
+	failures int
+	retryAt  time.Time
+	settled  bool
+}
+
+// Bounded exponential retry for undelivered acknowledgements (#600). The 2 s
+// base is about one worker poll, so one transient blip costs one poll; the
+// 5 min cap turns a dead control path into 12 posts an hour, not thousands.
+const fleetAckRetryBase, fleetAckRetryMax = 2 * time.Second, 5 * time.Minute
+
+// A 4xx other than authentication, timeout or rate limiting is a definitive
+// refusal: resending the same body cannot change the queue's answer.
+func fleetAckDefinitive(err error) bool {
+	var rejection *HTTPError
+	if !errors.As(err, &rejection) || rejection.Status < 400 || rejection.Status >= 500 {
+		return false
+	}
+	return rejection.Status != 401 && rejection.Status != 403 && rejection.Status != 408 && rejection.Status != 429
+}
+
+// deliverFleetAck posts ack unless key is settled or still backing off. Success
+// or a definitive refusal settles it; with resend it is instead offered again
+// after the cap. Any other failure backs off exponentially on the injected clock.
+func deliverFleetAck(ctx context.Context, client Client, clock Clock, acks map[string]fleetAckRetry, key string, ack any, resend bool) bool {
+	state := acks[key]
+	if state.settled || clock.Now().Before(state.retryAt) {
+		return state.settled
+	}
+	request, cancel := context.WithTimeout(ctx, 10*time.Second)
+	err := client.Call(request, "POST", "/api/fleet/ack", ack, nil)
+	cancel()
+	if err == nil || fleetAckDefinitive(err) {
+		acks[key] = fleetAckRetry{settled: !resend, retryAt: clock.Now().Add(fleetAckRetryMax)}
+		return true
+	}
+	state.failures++
+	state.retryAt = clock.Now().Add(fleetAckRetryMax)
+	if state.failures <= 8 {
+		state.retryAt = clock.Now().Add(min(fleetAckRetryMax, fleetAckRetryBase<<(state.failures-1)))
+	}
+	acks[key] = state
+	return false
 }
 
 type fleetLaunchFailure struct {
@@ -202,7 +251,7 @@ func (r *workerFleetRuntime) observe(ctx context.Context, m Machine, eligible bo
 		select {
 		case result := <-r.pending:
 			r.proof, r.attempted, r.failed = result.proof, result.attempted, result.failed
-			r.failureReceipt = result.failureReceipt
+			r.failureReceipt, r.acks = result.failureReceipt, result.acks
 			r.generation++
 			r.pending = nil
 		default:
@@ -212,11 +261,14 @@ func (r *workerFleetRuntime) observe(ctx context.Context, m Machine, eligible bo
 		pending := make(chan fleetPollResult, 1)
 		r.pending = pending
 		config, client, collect, launch := r.config, r.client, r.collect, r.launch
-		attempted, failed, failureReceipt := r.attempted, r.failed, r.failureReceipt
+		prior, clock := fleetPollResult{attempted: r.attempted, failed: r.failed, failureReceipt: r.failureReceipt, acks: maps.Clone(r.acks)}, r.clock
+		if clock == nil {
+			clock = RealClock{}
+		}
 		// m is used only for scalar identity, never mutable Machine pointers.
 		host, machine, session := hostID(&m), m.ID, m.Session
 		go func() {
-			pending <- pollFleetRuntime(ctx, config, client, collect, launch, host, machine, session, eligible, attempted, failed, failureReceipt)
+			pending <- pollFleetRuntimeAt(ctx, config, client, collect, launch, host, machine, session, eligible, prior, clock)
 		}()
 	}
 	if r.proof == nil || r.proof.Session != m.Session {
@@ -236,27 +288,35 @@ func (r *workerFleetRuntime) observe(ctx context.Context, m Machine, eligible bo
 }
 
 func pollFleetRuntime(ctx context.Context, config ServiceConfig, client Client, collect func(context.Context, ServiceConfig, string) (*FleetRuntimeProof, error), launch func(context.Context, ServiceConfig, FleetUpdateInstruction) error, host, machine, session string, eligible bool, attempted string, failed *fleetLaunchFailure, handled ...string) fleetPollResult {
-	result := fleetPollResult{attempted: attempted, failed: failed}
+	prior := fleetPollResult{attempted: attempted, failed: failed}
 	if len(handled) > 0 {
-		result.failureReceipt = handled[0]
+		prior.failureReceipt = handled[0]
 	}
-	// A restarted service reports durable helper failure before presenting a
-	// new healthy proof. Keep the local receipt; only deduplicate delivery.
+	return pollFleetRuntimeAt(ctx, config, client, collect, launch, host, machine, session, eligible, prior, RealClock{})
+}
+
+func pollFleetRuntimeAt(ctx context.Context, config ServiceConfig, client Client, collect func(context.Context, ServiceConfig, string) (*FleetRuntimeProof, error), launch func(context.Context, ServiceConfig, FleetUpdateInstruction) error, host, machine, session string, eligible bool, prior fleetPollResult, clock Clock) fleetPollResult {
+	result := prior
+	result.proof = nil
+	if result.acks == nil {
+		result.acks = map[string]fleetAckRetry{}
+	}
+	// A restarted service offers a durable helper failure before its new proof.
+	// Keep the local receipt; only deduplicate and pace delivery. An undelivered
+	// receipt never withholds the proof (#600), but blocks new instructions.
 	receipt, readErr := ReadFleetUpdateFailure(config)
 	if readErr != nil {
 		return result
 	}
+	receiptPending := false
 	if receipt != nil {
 		key := receipt.Operation + "/" + strconv.Itoa(receipt.Revision)
 		if result.failureReceipt != key {
-			request, cancel := context.WithTimeout(ctx, 10*time.Second)
-			err := client.Call(request, "POST", "/api/fleet/ack", receipt, nil)
-			cancel()
-			var rejection *HTTPError
-			if err == nil || errors.As(err, &rejection) && rejection.Status == 409 {
+			if deliverFleetAck(ctx, client, clock, result.acks, "receipt/"+key, receipt, false) {
 				result.failureReceipt = key
+			} else {
+				receiptPending = true
 			}
-			return result
 		}
 	}
 	proof, err := collect(ctx, config, session)
@@ -267,25 +327,23 @@ func pollFleetRuntime(ctx context.Context, config ServiceConfig, client Client, 
 		if receipt, e := readFleetReceipt(filepath.Join(config.State, fleetUpdateReceiptFile)); e == nil {
 			i := receipt.Instruction
 			if i.Host == host && i.Machine == machine {
-				request, cancel := context.WithTimeout(ctx, 10*time.Second)
-				_ = client.Call(request, "POST", "/api/fleet/ack", FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: host, Machine: machine, Session: i.Session, Phase: "failed", Failure: "runner_smoke_failed", Runtime: proof}, nil)
-				cancel()
+				// Resent at most every cap so an operator rerun still stops on it.
+				ack := FleetUpgradeAck{Operation: i.Operation, Revision: i.Revision, Host: host, Machine: machine, Session: i.Session, Phase: "failed", Failure: "runner_smoke_failed", Runtime: proof}
+				deliverFleetAck(ctx, client, clock, result.acks, "smoke/"+fleetInstructionKey(i)+"/"+proof.Session, ack, true)
 			}
 		}
 	}
-	if err != nil || proof == nil || !proof.ServiceHealthy || !eligible || ctx.Err() != nil {
+	if receiptPending || err != nil || proof == nil || !proof.ServiceHealthy || !eligible || ctx.Err() != nil {
 		return result
 	}
 	// Match the existing client's control-request budget even for injected HTTP
 	// clients without a timeout. A stalled control path never stalls heartbeats.
 	request, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	if failed != nil {
-		err := client.Call(request, "POST", "/api/fleet/ack", failed, nil)
-		var rejection *HTTPError
-		// A revision-fenced rejection settles an obsolete acknowledgement. Do
-		// not let its retry conceal a newer explicit recovery instruction.
-		if err == nil || errors.As(err, &rejection) && rejection.Status == 409 {
+	if failed := result.failed; failed != nil {
+		// A definitive (for example revision-fenced) refusal settles an obsolete
+		// acknowledgement, so its retry never conceals a newer recovery.
+		if deliverFleetAck(ctx, client, clock, result.acks, "launch/"+failed.Operation+"/"+strconv.Itoa(failed.Revision), failed, false) {
 			result.failed = nil
 		}
 		return result
@@ -313,7 +371,7 @@ func pollFleetRuntime(ctx context.Context, config ServiceConfig, client Client, 
 	if wrapped.Instruction != nil {
 		instruction = *wrapped.Instruction
 	}
-	if instruction.Operation == "" || instruction.Revision <= 0 || fleetInstructionKey(instruction) == attempted || instruction.Host != host || instruction.Machine != machine || instruction.Session != session || ctx.Err() != nil {
+	if instruction.Operation == "" || instruction.Revision <= 0 || fleetInstructionKey(instruction) == prior.attempted || instruction.Host != host || instruction.Machine != machine || instruction.Session != session || ctx.Err() != nil {
 		return result
 	}
 	result.attempted = fleetInstructionKey(instruction)
@@ -321,7 +379,7 @@ func pollFleetRuntime(ctx context.Context, config ServiceConfig, client Client, 
 	// rotate it. The finite helper independently rechecks this same local key.
 	if !bytes.Equal(key, instruction.PublisherKey) || launch(request, config, instruction) != nil {
 		failure := &fleetLaunchFailure{instruction.Operation, instruction.Revision, host, machine, session, "failed", "helper_launch_failed"}
-		if client.Call(request, "POST", "/api/fleet/ack", failure, nil) != nil {
+		if !deliverFleetAck(ctx, client, clock, result.acks, "launch/"+fleetInstructionKey(instruction), failure, false) {
 			result.failed = failure
 		}
 	}
