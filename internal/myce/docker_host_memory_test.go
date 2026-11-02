@@ -89,7 +89,11 @@ func TestDockerHostMemoryFreshCredit(t *testing.T) {
 		t.Fatalf("headroom %g, want 50 - (56.125 - 40) = 33.875", got)
 	}
 	w := Worker{Machine: m, Clock: clock, HostMemoryReserveGB: 16, HostMemorySource: func(context.Context) (float64, error) { return 59, nil }, hostMemorySamples: currentHostMemorySamples([]AttemptReport{r}, clock.Now())}
-	if err := localAttemptAdmission(w, []Job{*holder}, Job{Spec: cpuSpec(1, 20)}, nil); err != nil {
+	// Worker assignments carry the queue-resolved CPU host vector, not the
+	// authored CPU memory_gb shorthand (memory_envelope.go resolves it).
+	next := Job{Spec: cpuSpec(1, 20)}
+	next.Spec.Needs.MemoryGB, next.Spec.Needs.HostMemoryGB = 0, 20
+	if err := localAttemptAdmission(w, []Job{*holder}, next, nil); err != nil {
 		t.Fatal("worker did not credit current Docker use", err)
 	}
 	// Even a larger host cgroup cannot consume the full device-growth floor.
@@ -142,7 +146,9 @@ func TestDockerHostMemoryStaleOrMissingKeepsReservation(t *testing.T) {
 				t.Fatal("full reservation was not retained", got)
 			}
 			w := Worker{Machine: m, Clock: clock, HostMemoryReserveGB: 16, HostMemorySource: func(context.Context) (float64, error) { return 59, nil }, hostMemorySamples: currentHostMemorySamples([]AttemptReport{r}, clock.Now())}
-			if err := localAttemptAdmission(w, []Job{*holder}, Job{Spec: cpuSpec(1, 1)}, nil); err == nil {
+			next := Job{Spec: cpuSpec(1, 1)}
+			next.Spec.Needs.MemoryGB, next.Spec.Needs.HostMemoryGB = 0, 1
+			if err := localAttemptAdmission(w, []Job{*holder}, next, nil); err == nil {
 				t.Fatal("worker credited unavailable/stale/wrong attempt memory")
 			}
 		})
