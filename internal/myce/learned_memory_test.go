@@ -185,3 +185,100 @@ func TestLearnedMemoryPolicyOffRestoresDeclaredFigures(t *testing.T) {
 		t.Fatalf("switch off did not restore host-wide exploration: %+v", j.MemoryEnvelope)
 	}
 }
+
+// One unified CUDA machine worker (96 GiB allowance; 81 GiB physical room
+// above the 25 GiB floor) owning its card and CPU targets.
+func unifiedGPUFixture(t *testing.T, unified bool) (*Queue, *fakeClock, Machine) {
+	t.Helper()
+	q, clock := fixture(t)
+	m := unifiedCUDAAdmissionMachine()
+	m.ExtensionFingerprint = "cuda-v1"
+	d := MachineDevice{ID: "0", Platform: "cuda", Identity: "synthetic-gb10", Selector: "0", MemoryMode: "unified", BudgetGB: 96, FreeMemoryGB: 96, UnifiedMemory: true, MemoryMeasured: true, ExtensionFingerprint: "cuda-v1"}
+	if !unified {
+		m.UnifiedMemory, m.CapabilityProfile.MemoryLayout = false, "separate"
+		d.MemoryMode, d.UnifiedMemory = "separate", false
+	}
+	m.Devices = []MachineDevice{d}
+	machineCheck(t, q, m)
+	return q, clock, m
+}
+
+// `myce run --gpu cuda -- CMD` with no --mem or --host-mem.
+func plainGPUSpec() Spec {
+	return Spec{Name: "one-off", Project: "gpu-project", Priority: "experiment", Run: RunSpec{Command: []string{"echo", "done"}}, Needs: ResourceNeeds{CPUCores: 1, Platform: Platform{Required: []string{"cuda"}}}}
+}
+
+func assignGPU(t *testing.T, q *Queue, m Machine, want *Job, running ...*Job) *Job {
+	t.Helper()
+	j := assignedJob(machineCheck(t, q, m, running...))
+	if j == nil || j.ID != want.ID {
+		t.Fatalf("not assigned: %s", job(t, q, want.ID).Reason)
+	}
+	return j
+}
+
+func TestLearnedMemoryUnifiedGPUFirstRunIsBounded(t *testing.T) {
+	q, clock, m := unifiedGPUFixture(t, true)
+	j := assignGPU(t, q, m, submit(t, q, plainGPUSpec()))
+	if e := j.MemoryEnvelope; e.DeviceGB != 1 || e.HostGB != 2.125 || e.Basis != "exploratory" || !strings.HasSuffix(e.Source, "(bounded: unified GPU: 1 GiB device default, 1 GiB host default)") {
+		t.Fatalf("unified GPU first run not bounded: %+v", e)
+	}
+	if err := q.Started(result(j, false)); err != nil {
+		t.Fatal(err)
+	}
+	// Production fits beside it without stopping it; host-wide exploration
+	// would have reserved almost all of the 81 GiB physical room.
+	production := cpuSpec(1, 70)
+	production.Name, production.Priority = "production", "production"
+	p := assignGPU(t, q, m, submit(t, q, production), j)
+	if held := job(t, q, j.ID); held.State != "running" || held.StopAt != nil {
+		t.Fatalf("GPU job was stopped for room it never needed: %s %s", held.State, held.Reason)
+	}
+	finish(t, q, p, true)
+	clock.Advance(time.Second)
+	peak := 3.0 // Host side only: unified CUDA reports no device sample.
+	r := result(j, true)
+	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak, CgroupGB: &peak}
+	if err := q.Complete(r); err != nil {
+		t.Fatal(err)
+	}
+
+	// The accepted host peak sizes the next run's host side; the device keeps
+	// its default, since no device sample exists.
+	next := assignGPU(t, q, m, submit(t, q, plainGPUSpec()))
+	if next.Spec.Needs.HostMemoryGB != 7.5 || next.Spec.Needs.MemoryGB != 1 || next.MemoryEnvelope.Evidence != 1 || !strings.Contains(next.MemoryEnvelope.Source, "similar work host peak × 2.5") {
+		t.Fatalf("similar host peak not used: %+v %+v", next.MemoryEnvelope, next.Spec.Needs)
+	}
+	// A classified host OOM doubles the bound without spending the one retry.
+	if err := q.Started(result(next, false)); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	oom := result(next, false)
+	oom.OutOfMemory = true
+	if err := q.Complete(oom); err != nil {
+		t.Fatal(err)
+	}
+	retry := assignGPU(t, q, m, next)
+	if retry.OOMRetries != 0 || retry.Spec.Needs.HostMemoryGB != 15 || retry.Spec.Needs.MemoryGB != 1 {
+		t.Fatalf("host OOM did not double the bound: %+v %+v", retry.MemoryEnvelope, retry.Spec.Needs)
+	}
+}
+
+func TestLearnedMemoryUnifiedGPUHostHintKeepsDeviceFigure(t *testing.T) {
+	q, _, m := unifiedGPUFixture(t, true)
+	s := plainGPUSpec()
+	s.Needs.HostMemoryGB = 4 // `--host-mem 4G` without --mem.
+	j := assignGPU(t, q, m, submit(t, q, s))
+	if e := j.MemoryEnvelope; e.DeviceGB != 1 || e.HostGB != 5.125 || e.Basis != "hint" || !strings.Contains(e.Source, "1 GiB device default, stated host") {
+		t.Fatalf("host-hint-only GPU job charged a 0 GiB device: %+v", e)
+	}
+}
+
+func TestLearnedMemoryDiscreteGPUFirstRunUnchanged(t *testing.T) {
+	q, _, m := unifiedGPUFixture(t, false)
+	j := assignGPU(t, q, m, submit(t, q, plainGPUSpec()))
+	if e := j.MemoryEnvelope; e.Source != "exploratory first run" || e.DeviceGB != 96 || e.HostGB < 48 {
+		t.Fatalf("discrete GPU exploration changed: %+v", e)
+	}
+}

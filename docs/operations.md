@@ -2236,8 +2236,12 @@ rollout remain separate from the laptop acceptance tests.
 Maintenance retires terminal job rows after 168 hours (or longer configured
 result/log retention), once all attempts are released, files have expired and log cleanup is
 complete. Pending file cleanup transfers to durable per-hash ownership. Each tick removes at most 64 jobs. Keyed replay answers remain for
-30 days after removal, followed by permanent expired-key digests; learned work
-curves remain. Expired jobs disappear from listing and ID lookup. See the
+30 days after removal, followed by permanent expired-key digests. Learned
+work-curve, memory and storage observations stay until every one of their
+timestamps is older than 30 days, the age past which no reader uses them
+(#597); each tick then deletes at most 64 of each. Points forbidden after an
+OOM and constrained memory peaks stay at any age, because sweeps and first-run
+bounds still read them. Expired jobs disappear from listing and ID lookup. See the
 [retention contract](design-proposal.md#submission-identity-and-cancellation-80).
 
 Deleted SQLite pages are reused. Retention bounds full history by age, not total

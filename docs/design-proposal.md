@@ -1568,9 +1568,21 @@ ever raise this bound. An OOM on a bounded first run
 doubles its job-local floor without spending the one OOM retry. When the bound
 reaches half the allowance, the host-wide exploration above applies unchanged,
 with its custody fences and its one retry. The cost is one ceiling hit or OOM
-per doubling for work larger than the bound. GPU work keeps its existing
-exploration: its card is already exclusive, and device use on unified hosts is
-not yet sampled.
+per doubling for work larger than the bound. GPU work on a discrete card
+keeps its existing exploration, since the card is already exclusive.
+
+On a unified-memory host, a plain GPU job with no accepted estimate (#596)
+reserves the stated device figure or 1 GiB, the figure `myce run --gpu`
+declared before this amendment. Its host side is the stated host figure, else
+the largest fresh accepted host peak of similar GPU work on unified hosts
+times 2.5, else 1 GiB. Constrained peaks raise it, and an OOM doubles it as
+for CPU work. There, CUDA allocations escape the job's cgroup, and no device
+sample or classified GPU allocation failure exists, so a device bound can be
+neither checked nor grown. Host-wide exploration instead reserved most of the
+machine until an accepted run. The cost: device use above the figure is
+unreserved, as before this amendment, though live host-memory admission still
+sees it. A measured `--mem` avoids that. Extension jobs keep their
+exploration, and at half the allowance the host-wide exploration applies.
 
 Job GET `memory_envelope.basis` is `declared`, `learned`, `hint` or
 `exploratory`. `evidence` counts the accepted attempts behind a learned figure
