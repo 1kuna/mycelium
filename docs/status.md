@@ -501,6 +501,13 @@ sampled lower bound, not a retained allocator maximum. When no usable sample is
 retained, `device_unavailable` explains missing process samples, unsupported or
 invalid accounting, unavailable process inventory/cgroups, or sampler shutdown
 timeout. Older workers may omit both fields; historical peaks cannot be recovered.
+Live check-ins refresh each attempt's device counter from its sampler at send
+time, even if the actor's cached host-memory report predates CUDA initialization
+or is delayed by log/result I/O. Device age still starts at the original sensor
+reading, and the host counter keeps its own older age. A sampler that stops
+producing readings still becomes stale after ten seconds; refreshing the report
+does not renew its evidence. The shared-card guard uses only fresh per-process
+readings from every tenant; host-drop estimates cannot authorize that guard.
 When a unified-memory CUDA host lists the attempt's processes on its GPU but
 reports no per-process memory (`[N/A]`), the worker takes the largest host
 `MemAvailable` drop since launch outside every Mycelium cgroup as `device_gb`,

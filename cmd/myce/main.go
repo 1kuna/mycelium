@@ -57,6 +57,9 @@ func run(args []string) error {
 	}
 	return runWithProbe(args, probe)
 }
+
+const topLevelUsage = "usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|exclude|reserve|run|profile|submit|spec|policy|status|logs|ledger|wait|result|cancel|pause|resume|resolve-native|resolve-docker|reconcile-docker-retention|dev|version|release|file|benchmark|extension|env|portability|sim|detect|service|measure|model|gpu-telemetry-client|usage\n       myce host drain|disable|resume|status|budget|placement HOST\n       myce host device disable|enable HOST DEVICE\nRun myce COMMAND --help for command options."
+
 func runWithProbe(args []string, probe myce.MachineProbe) error {
 	if len(args) > 0 && args[0] == "_native-exec" {
 		return myce.NativeExec(args[1:])
@@ -69,12 +72,16 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 
 	if len(args) == 0 {
-		return errors.New("usage: myce install|uninstall|invite|doctor|queue|join|leave|host|device|exclude|reserve|run|profile|submit|spec|policy|status|logs|ledger|wait|result|cancel|pause|resume|resolve-native|resolve-docker|reconcile-docker-retention|dev|version|release|file|benchmark|extension|env|portability|sim|detect|service|measure|model|gpu-telemetry-client|usage\n       myce host drain|disable|resume|status|budget|placement HOST\n       myce host device disable|enable HOST DEVICE\nRun myce COMMAND --help for command options.")
+		return errors.New(topLevelUsage)
+	}
+	if args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
+		fmt.Fprintln(os.Stdout, topLevelUsage)
+		return nil
 	}
 	if args[0] == "dev" && len(args) > 1 && args[1] == "clock" {
 		return devClockCommand(args[2:], os.Stdout)
 	}
-	if args[0] == "version" {
+	if args[0] == "version" || args[0] == "--version" || args[0] == "-v" {
 		return versionCommand(args[1:])
 	}
 	if args[0] == "gpu-telemetry-client" {
@@ -204,6 +211,11 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	}
 	if args[0] == "model" {
 		return modelCommand(args[1:])
+	}
+	switch args[0] {
+	case "dev", "queue", "join", "submit", "usage", "status", "cancel", "leave", "ledger", "logs":
+	default:
+		return &exitError{2, fmt.Errorf("unknown command %q\n%s", args[0], topLevelUsage)}
 	}
 	f := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	serviceConfigPath := f.String("service-config", "", "saved installed service configuration")
