@@ -164,3 +164,25 @@ func TestSharedDeviceRestartKeepsCustody(t *testing.T) {
 	}
 	requireState(t, q, third.ID, "queued")
 }
+
+func TestSharedDeviceFillsIdleCardsFirst(t *testing.T) {
+	q, _ := fixture(t)
+	m := m3Machine()
+	var running []*Job
+	for i := 0; i < 3; i++ {
+		s := spec("experiment")
+		s.Needs.MemoryGB = 3
+		queued := submit(t, q, s)
+		got := assignedJob(machineCheck(t, q, m, running...))
+		if got == nil || got.ID != queued.ID {
+			t.Fatal("3 GiB job not admitted on an 8 GiB card", i, job(t, q, queued.ID).Reason)
+		}
+		running = append(running, got)
+	}
+	if !slices.Equal(running[0].AllocatedDevices, []string{"0"}) || !slices.Equal(running[1].AllocatedDevices, []string{"1"}) {
+		t.Fatal("second job shared a busy card while another card was idle", running[0].AllocatedDevices, running[1].AllocatedDevices)
+	}
+	if len(running[2].AllocatedDevices) != 1 {
+		t.Fatal("third job did not share one discrete card", running[2].AllocatedDevices)
+	}
+}

@@ -35,6 +35,7 @@ func (q *Queue) machineTargets(m *Machine) []*Machine {
 		for _, j := range q.liveJobs() {
 			if batchReservesCapacity(j) && batchOnTarget(j, &target) {
 				reserved += deviceShareGB(j)
+				target.batchTenants++
 			}
 		}
 		for _, r := range q.s.HostReleases {
@@ -113,11 +114,12 @@ func groupView(members []*Machine) *Machine {
 	g := *members[0]
 	g.group = make([]string, len(members))
 	free, total := math.Inf(1), math.Inf(1)
-	g.modelReservationDebtGB = 0
+	g.modelReservationDebtGB, g.batchTenants = 0, 0
 	for i, m := range members {
 		g.group[i] = m.Device
 		free, total = min(free, m.FreeMemoryGB), min(total, m.TotalMemoryGB)
 		g.modelReservationDebtGB += m.modelReservationDebtGB
+		g.batchTenants += m.batchTenants
 		if g.MemoryError == "" {
 			g.MemoryError = m.MemoryError
 		}

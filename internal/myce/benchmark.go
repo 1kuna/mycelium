@@ -549,6 +549,9 @@ func (q *Queue) capabilityPlacementBetterWithTie(j *Job, a, b *Machine, allowTie
 	if j.Spec.Needs.cpuOnly() && (a.GPU == "cpu") != (b.GPU == "cpu") {
 		return a.GPU == "cpu"
 	}
+	if a.batchTenants != b.batchTenants {
+		return a.batchTenants < b.batchTenants // An idle card beats sharing a busy one (#538).
+	}
 	if better, known := q.completionBetter(j, a, b, allowTie); known {
 		return better
 	}
