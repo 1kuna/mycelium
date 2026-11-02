@@ -27,6 +27,8 @@ func TestDockerPrivateNetworkContract(t *testing.T) {
 		valid  bool
 	}{
 		{`"docker_network":"private"`, true},
+		{`"docker_memory_gb":2`, true},
+		{`"docker_memory_gb":7`, false},
 		{`"docker_network":"host"`, false},
 		{`"docker_network":"private","docker_memory_gb":2,"docker_sidecars":[{"name":"naming","memory_gb":2,"command":["docker","run","image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}]`, true},
 		{`"docker_network":"private","docker_memory_gb":4,"docker_sidecars":[{"name":"naming","memory_gb":4,"command":["docker","run","image@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]}]`, true},

@@ -974,7 +974,9 @@ A GPU holds several single-card batch attempts when their memory fits: the
 newcomer's declared or learned device vector and its host vector must fit the
 card's and host's existing headroom beside every co-tenant's charge, unified
 hosts counting the one pool. A finished co-tenant stays charged until exact
-release. Docker, model-server, extension-check, fan-out, exploratory first-run
+release. Managed Docker batches use the same sharing rules, with enforced
+per-container host caps and declared or learned device memory. Model-server,
+extension-check, fan-out, exploratory first-run
 and multi-card attempts keep the card to themselves, as does a hint that names
 no device memory (its device figure is only a default), and a newcomer never
 joins a higher tier's attempt. Equal tiers never preempt; a higher tier stops the

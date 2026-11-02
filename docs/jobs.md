@@ -879,7 +879,13 @@ Without this field the managed container uses `--network none`.
 `name` (1–63 letters/digits/hyphens; `main` is reserved), direct Docker `command`,
 optional positive `memory_gb`, optional `env`, optional `memory_swap`, and optional
 `readiness: {port, path, timeout}`. Main retains `run.command` and may declare
-`run.docker_memory_gb`. Sidecars require the private network. The worker starts sidecars in order, awaits each configured
+`run.docker_memory_gb`. This explicit main-container cap works with the default
+`--network none`; only sidecars require the private network. Without the explicit
+cap, the worker supplies `--memory` from the resolved host reservation (including
+the device reservation on unified CUDA hosts). The adapter inspects the enforced
+limit before accepting release. With a declared or learned device figure, managed
+Docker batches can share a GPU under the ordinary fit and priority rules
+(available from the next release). The worker starts sidecars in order, awaits each configured
 HTTP GET readiness (2xx), then starts main. DNS aliases are the declared names
 and `main`. Jobs have no Docker socket and cannot launch containers themselves.
 Readiness probes use the inspected container IP from the worker, without proxies

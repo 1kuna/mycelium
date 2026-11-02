@@ -53,8 +53,8 @@ func (s Spec) validateDockerGroup() error {
 	if len(r.DockerSidecars) == 0 && r.DockerMemoryGB == 0 {
 		return nil
 	}
-	if r.DockerNetwork != "private" {
-		return errors.New("Docker sidecars or per-container memory require docker_network: private")
+	if len(r.DockerSidecars) > 0 && r.DockerNetwork != "private" {
+		return errors.New("Docker sidecars require docker_network: private")
 	}
 	deferredEnvelope := s.Needs.Memory == "auto" && s.Needs.HostMemoryGB == 0
 	if !deferredEnvelope && r.DockerMemoryGB > s.Needs.HostMemoryGB {
