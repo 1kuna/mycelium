@@ -76,7 +76,8 @@ func policyCommand(args []string, out io.Writer) error {
 			ExpectedRevision uint64              `json:"expected_revision"`
 			Policy           myce.PriorityPolicy `json:"policy"`
 		}{expected, policy}
-		if err := client.Call(ctx, "PUT", "/api/policy", request, &record); err != nil {
+		// The file is authoritative for file-store limits; an older queue ignores this.
+		if err := client.Call(ctx, "PUT", "/api/policy?file_store_limits=1", request, &record); err != nil {
 			return err
 		}
 	default:

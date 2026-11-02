@@ -169,6 +169,17 @@ func (q *Queue) admitFileUpload(ctx context.Context, status FileStoreStatus, pro
 	production, identified, classErr := q.fileStoreWriteClass(ctx, files, growth)
 	reserved := q.outputReservationsFor(projected, "", true)
 	refusal := q.fileStoreReserveRefusal(status, need, growth, reserved, production)
+	// Input uploads naming a project are checked against its file-store quota
+	// at preflight and tus creation; worker results and bundles never are.
+	// Use the class submit will see, unlike the reserve, so a production
+	// submission is never refused before it can be submitted.
+	if s, ok := ctx.Value(fileStoreSubmissionKey{}).(Spec); ok && refusal == nil && classErr == nil && ctx.Value(fileStoreAttemptKey{}) == nil && ctx.Value(fileStoreOrdinaryKey{}) == nil {
+		if s.Class == "" {
+			s.Class = q.s.Policies[s.Project].DefaultCallPriority
+		}
+		s.Class = jobClass(s)
+		refusal = q.fileStoreQuotaRefusal(s, files, 0)
+	}
 	var ordinary uint64
 	if !identified {
 		available := q.nonProductionFileStoreFree(status, reserved)

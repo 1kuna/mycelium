@@ -224,9 +224,9 @@ func (q *Queue) fileReleaseMetadata(selection FileReleaseSelection) (FileRelease
 		releasing[id] = len(item.Blockers) == 0
 	}
 	refs := map[string][]FileKeepingReference{}
-	pending, keep, _ := q.collectFileReferences(true, releasing, func(hash string, ref FileKeepingReference) {
-		if hashes[hash] {
-			refs[hash] = append(refs[hash], ref)
+	pending, keep, _ := q.collectFileReferences(true, releasing, func(file FileRef, ref FileKeepingReference) {
+		if hashes[file.SHA256] {
+			refs[file.SHA256] = append(refs[file.SHA256], ref)
 		}
 	})
 	for hash := range hashes {
@@ -264,11 +264,22 @@ func (q *Queue) fileReleasePlan(ctx context.Context, selection FileReleaseSelect
 	if store == nil {
 		return plan, metadata, store, errors.New("queue file store is not configured")
 	}
+	// The ID binds custody, references and stored content, including a fresh
+	// publication's mtime. Grace flags and reclaimable bytes are clock-derived and
+	// collection enforces them again, so aging out of grace must not stale a plan.
+	type storedContent struct {
+		SHA256     string
+		Present    bool
+		SizeBytes  int64
+		ModifiedAt time.Time
+	}
+	stored := make([]storedContent, len(plan.Blobs))
 	for i := range plan.Blobs {
 		if err := ctx.Err(); err != nil {
 			return plan, metadata, store, err
 		}
 		b := &plan.Blobs[i]
+		stored[i].SHA256 = b.SHA256
 		st, err := os.Lstat(store.blob(FileRef{SHA256: b.SHA256}))
 		if os.IsNotExist(err) {
 			continue
@@ -277,6 +288,7 @@ func (q *Queue) fileReleasePlan(ctx context.Context, selection FileReleaseSelect
 			return plan, metadata, store, errors.New("cannot inspect release content")
 		}
 		b.Present, b.SizeBytes, b.ModifiedAt = true, st.Size(), st.ModTime()
+		stored[i].Present, stored[i].SizeBytes, stored[i].ModifiedAt = true, st.Size(), st.ModTime()
 		publicationCutoff, orphanCutoff := now.Add(-filePublicationGrace), now.Add(-retention)
 		b.PublicationProtected = st.ModTime().After(publicationCutoff)
 		b.BundleProtected = b.BundleProtected || b.BundleTracked && st.ModTime().After(orphanCutoff)
@@ -285,7 +297,10 @@ func (q *Queue) fileReleasePlan(ctx context.Context, selection FileReleaseSelect
 			plan.ReclaimableBytes += b.SizeBytes
 		}
 	}
-	plan.ID = fileReleaseDigest(plan)
+	plan.ID = fileReleaseDigest(struct {
+		Metadata string
+		Stored   []storedContent
+	}{metadata, stored})
 	plan.GeneratedAt = now
 	return plan, metadata, store, nil
 }

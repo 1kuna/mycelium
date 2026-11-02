@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -244,6 +245,13 @@ func (q *Queue) priorityPolicyRecord() PriorityPolicyRecord {
 	return PriorityPolicyRecord{q.policyRevision(), p, warnings}
 }
 func (q *Queue) SetPriorityPolicy(expected uint64, p PriorityPolicy, requestContexts ...context.Context) (PriorityPolicyRecord, error) {
+	return q.setPriorityPolicy(expected, p, false, requestContexts...)
+}
+
+// keepFileLimits preserves a project's file-store limits that a caller left at
+// zero. An older CLI cannot carry those fields, so its get/set round-trip would
+// otherwise clear them silently. Current CLIs mark their requests instead.
+func (q *Queue) setPriorityPolicy(expected uint64, p PriorityPolicy, keepFileLimits bool, requestContexts ...context.Context) (PriorityPolicyRecord, error) {
 	requestCtx := requestContext(requestContexts)
 
 	var out PriorityPolicyRecord
@@ -290,9 +298,15 @@ func (q *Queue) SetPriorityPolicy(expected uint64, p PriorityPolicy, requestCont
 		if expected != q.policyRevision() {
 			return ErrPolicyRevision
 		}
-		for _, v := range projects {
+		for name, v := range projects {
 			if err := q.validateProductionParityHosts(v.ProductionParityHosts); err != nil {
 				return err
+			}
+			if keepFileLimits {
+				old := q.s.Policies[name]
+				v.MaxRetainedFileBytes = cmp.Or(v.MaxRetainedFileBytes, old.MaxRetainedFileBytes)
+				v.MaxAddedFileBytes24h = cmp.Or(v.MaxAddedFileBytes24h, old.MaxAddedFileBytes24h)
+				projects[name] = v
 			}
 		}
 		if err := q.validateMachineNames(slices.Collect(maps.Keys(hosts))); err != nil {
@@ -313,6 +327,10 @@ func (q *Queue) SetPriorityPolicy(expected uint64, p PriorityPolicy, requestCont
 	}, nil)
 	return out, err
 }
+
+// Marks a policy PUT whose project file-store limits are authoritative.
+const policyFileLimitsParam = "file_store_limits"
+
 func (a API) registerPriorityPolicy(mux *requestMux) {
 	mux.HandleFunc("GET /api/policy", func(w http.ResponseWriter, r *http.Request) { respond(w, a.Queue.PriorityPolicy(r.Context()), nil) })
 	mux.HandleFunc("PUT /api/policy", func(w http.ResponseWriter, r *http.Request) {
@@ -327,7 +345,9 @@ func (a API) registerPriorityPolicy(mux *requestMux) {
 			respond(w, nil, reject("policy_invalid", errors.New("expected_revision required")))
 			return
 		}
-		record, err := a.Queue.SetPriorityPolicy(*request.ExpectedRevision, request.Policy, r.Context())
+		// Older queues ignore this query; older clients omit it (see setPriorityPolicy).
+		keep := r.URL.Query().Get(policyFileLimitsParam) != "1"
+		record, err := a.Queue.setPriorityPolicy(*request.ExpectedRevision, request.Policy, keep, r.Context())
 		if errors.Is(err, ErrPolicyRevision) {
 			revision := a.Queue.PriorityPolicy(r.Context()).Revision
 			respond(w, nil, &HTTPError{Status: http.StatusConflict, Code: "policy_revision_conflict", CurrentRevision: &revision, Message: fmt.Sprintf("policy revision changed; current revision %d; export policy and retry with --if-revision %d", revision, revision)})

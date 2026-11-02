@@ -42,6 +42,12 @@
         "reserved_output_bytes": {
           "type": "integer"
         },
+        "projects": {
+          "items": {
+            "$ref": "#/$defs/ProjectFileStoreUsage"
+          },
+          "type": "array"
+        },
         "store": {
           "type": "string"
         },
@@ -131,6 +137,37 @@
         "control",
         "upload_metadata_bytes",
         "qualification"
+      ]
+    },
+    "ProjectFileStoreUsage": {
+      "properties": {
+        "project": {
+          "type": "string"
+        },
+        "retained_bytes": {
+          "type": "integer"
+        },
+        "added_bytes_24h": {
+          "type": "integer"
+        },
+        "reserved_output_bytes": {
+          "type": "integer"
+        },
+        "max_retained_file_bytes": {
+          "type": "integer"
+        },
+        "max_added_file_bytes_24h": {
+          "type": "integer"
+        },
+        "refusal": {
+          "type": "string"
+        }
+      },
+      "type": "object",
+      "required": [
+        "project",
+        "retained_bytes",
+        "added_bytes_24h"
       ]
     }
   }

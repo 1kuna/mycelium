@@ -417,6 +417,17 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	}
 	return true
 }
+
+// Server-authored typed refusals whose code and reason reach HTTP callers
+// intact. Anything else stays generic so private causes never leave the queue.
+func typedRefusalCode(code string) bool {
+	switch code {
+	case "file_release_stale", "file_release_protected", "job_ledger_cursor_invalid", "job_ledger_unavailable", "native_custody_invalid", "diagnostics_unknown", "output_delivery_unavailable":
+		return true
+	}
+	return strings.HasPrefix(code, "fleet_") // fleetError and maintenance refusals
+}
+
 func respond(w http.ResponseWriter, v any, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	if err != nil {
@@ -434,7 +445,7 @@ func respond(w http.ResponseWriter, v any, err error) {
 		}
 		body := map[string]any{"error": rejectionMessages[code], "code": code}
 		var apiError *HTTPError
-		if errors.As(err, &apiError) && (fileCapacityCode(apiError.Code) || rejectionMessages[apiError.Code] != "" || apiError.Code == "job_spec_invalid" || apiError.Code == "worker_protocol_invalid" || apiError.Code == "submission_key_conflict" || apiError.Code == "submission_key_expired" || apiError.Code == "submission_key_invalid" || apiError.Code == "job_unknown") {
+		if errors.As(err, &apiError) && (fileStoreRefusalCode(apiError.Code) || typedRefusalCode(apiError.Code) || rejectionMessages[apiError.Code] != "" || apiError.Code == "job_spec_invalid" || apiError.Code == "worker_protocol_invalid" || apiError.Code == "submission_key_conflict" || apiError.Code == "submission_key_expired" || apiError.Code == "submission_key_invalid" || apiError.Code == "job_unknown") {
 			status = apiError.Status
 			body = map[string]any{"error": apiError.Message, "code": apiError.Code}
 			if apiError.PathDiagnostic != nil {
@@ -523,7 +534,7 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 			Error           string          `json:"error"`
 			CurrentRevision *uint64         `json:"current_revision"`
 		}
-		if json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&body) == nil && (fileCapacityCode(body.Code) || rejectionMessages[body.Code] != "" || body.Code == "job_spec_invalid" || body.Code == "submission_key_invalid" || body.Code == "worker_protocol_mismatch" || body.Code == "worker_protocol_invalid" || body.Code == "submission_key_conflict" || body.Code == "submission_key_expired" || body.Code == "job_unknown") {
+		if json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&body) == nil && (fileStoreRefusalCode(body.Code) || typedRefusalCode(body.Code) || rejectionMessages[body.Code] != "" || body.Code == "job_spec_invalid" || body.Code == "submission_key_invalid" || body.Code == "worker_protocol_mismatch" || body.Code == "worker_protocol_invalid" || body.Code == "submission_key_conflict" || body.Code == "submission_key_expired" || body.Code == "job_unknown") {
 			e.Code, e.Message = body.Code, body.Error
 			e.PathDiagnostic = body.PathDiagnostic
 			e.CurrentRevision = body.CurrentRevision

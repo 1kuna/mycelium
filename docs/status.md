@@ -130,6 +130,10 @@ host's volume; no paths or raw filesystem IDs are published.
 The [disk-volume schema](schemas/disk-volume-v1.schema.json) describes each entry.
 Old workers without samples retain startup storage figures.
 
+Queue `file_store.projects` reports per-project retained and 24-hour added
+bytes, limits and any quota refusal; see
+[per-project quotas](operations.md#per-project-file-store-quotas-464).
+
 Queue `file_store.physical` is shadow accounting for #506. `disk_free_bytes`
 comes from the physical probe; `remaining_upload_bytes` counts only unwritten
 tus lengths, and `reserved_output_bytes` counts existing output commitments not
