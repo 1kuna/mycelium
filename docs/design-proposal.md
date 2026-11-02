@@ -1558,13 +1558,13 @@ existing single eligibility gate.
 A cold CPU job with no comparable accepted peak and no hint no longer reserves
 most of the host. Host-wide exploration once took about 89 of a unified host's
 96 GiB for a test suite that peaks near 4.5 GiB, and blocked unrelated deadline
-work. The first run is bounded by the largest of three figures. The first is
-fresh accepted unconstrained CPU peaks of similar work on the same OS: the same
-project and name, or the same extension and work type, under any
-configuration, times 2.5. That is the 1.25 headroom times 2 used for
-cross-machine estimates. Without such peaks, it is a quarter of the host
-allowance. The third is any retained constrained peak of the same work, times
-2. Constrained peaks only ever raise this bound. An OOM on a bounded first run
+work. The first run starts from the largest fresh accepted unconstrained CPU
+peak of similar work on the same OS (the same project and name, or the same
+extension and work type, under any configuration) times 2.5. That is the 1.25
+headroom times 2 used for cross-machine estimates. Without such peaks, it
+starts from a quarter of the host allowance. Either figure is then raised to
+twice any retained constrained peak of the same work; constrained peaks only
+ever raise this bound. An OOM on a bounded first run
 doubles its job-local floor without spending the one OOM retry. When the bound
 reaches half the allowance, the host-wide exploration above applies unchanged,
 with its custody fences and its one retry. The cost is one ceiling hit or OOM
