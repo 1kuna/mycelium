@@ -99,15 +99,24 @@ func TestCopyLifecycleTimesSurviveReleaseRetryAndRestart(t *testing.T) {
 			}
 			if kind == "held-cancel" {
 				if err := q.update(func() error {
-					q.s.Hosts[hostID(&m)] = &HostState{Policy: HostPolicy{ProductionHold: true}, Active: true}
+					q.s.Hosts = map[string]*HostState{hostID(&m): {Policy: HostPolicy{ProductionHold: true}, Active: true}}
 					return nil
 				}); err != nil {
 					t.Fatal(err)
 				}
 			}
-			clock.Advance(StopGrace + time.Second)
+			if kind == "stop" {
+				clock.Advance(StopGrace + time.Second)
+			} else {
+				// Exercise idle cancellation before grace maintenance makes it terminal.
+				clock.Advance(time.Second)
+			}
 			check(t, q, m, nil)
-			if copy := job(t, q, run.ID).Copies[0]; !copy.ReleaseConfirmed || copy.ReleasedAt != nil {
+			copy := job(t, q, run.ID).Copies[0]
+			if !copy.ReleaseConfirmed {
+				t.Fatal("legacy idle did not reconcile inferred release", copy)
+			}
+			if copy.ReleasedAt != nil {
 				t.Fatal("legacy idle inference invented an exact release time", copy)
 			}
 			ack := result(run, false)
