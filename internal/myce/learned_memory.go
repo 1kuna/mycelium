@@ -45,7 +45,11 @@ func memoryFamily(j *Job) string {
 		if j.Extension != nil {
 			digest = j.Extension.Digest
 		}
-		return identityHash(struct{ Extension, Work string }{digest, j.Spec.workType()})
+		work := j.Spec.workType()
+		if j.Spec.ExtensionCheck != nil {
+			work = "check:" + work // checks and workloads learn separately (#618)
+		}
+		return identityHash(struct{ Extension, Work string }{digest, work})
 	}
 	return identityHash(struct{ Project, Name string }{j.Spec.Project, j.Spec.Name})
 }
@@ -66,8 +70,13 @@ const (
 	boundedFirstRun     = "(bounded: "
 )
 
+// coldMemoryBound sizes a CPU first run. A qualification check's first run on
+// a card takes the same bound (#618): its reference fixture is small by design,
+// and host-wide exploration, or the workload's peak, held most of a host's RAM
+// for a check that used under 1 GiB. The card itself still explores; on a
+// unified host the bound covers both.
 func (q *Queue) coldMemoryBound(j *Job, m *Machine, estimate memoryEstimate, floor float64) (float64, string, int, bool) {
-	if !j.Spec.Needs.cpuOnly() || !q.learnedMemory() {
+	if !j.Spec.Needs.cpuOnly() && j.Spec.ExtensionCheck == nil || !q.learnedMemory() {
 		return 0, "", 0, false
 	}
 	allowance := m.EffectiveHostMemoryBudgetGB

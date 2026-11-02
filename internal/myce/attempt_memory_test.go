@@ -36,7 +36,7 @@ func TestAttemptMemoryDeviceQueryInheritedPipe(t *testing.T) {
 	})
 	w := Worker{Machine: Machine{GPU: "cuda", Device: "GPU-one"}}
 	start := time.Now()
-	_, err := w.attemptDeviceMemory(context.Background(), map[int]bool{42: true}, nil)
+	_, _, err := w.attemptDeviceMemory(context.Background(), map[int]bool{42: true}, nil)
 	if elapsed := time.Since(start); elapsed >= 4*time.Second {
 		t.Fatalf("inherited pipe stalled device query for %s", elapsed)
 	}
@@ -164,11 +164,11 @@ func TestAttemptMemoryCachePressureAndMemberCaps(t *testing.T) {
 }
 
 func TestAttemptMemoryDeviceAccounting(t *testing.T) {
-	peak, err := cudaAttemptMemory([]byte("GPU-one, 7, 2048\nGPU-one, 9, 4096\nGPU-two, 7, 8192\n"), "GPU-one", map[int]bool{7: true})
-	if err != nil || peak != 2 {
-		t.Fatal("charged another process/device", peak, err)
+	peak, foreign, err := cudaAttemptMemory([]byte("GPU-one, 7, 2048\nGPU-one, 9, 4096\nGPU-two, 7, 8192\n"), "GPU-one", map[int]bool{7: true})
+	if err != nil || peak != 2 || !foreign {
+		t.Fatal("charged another process/device", peak, foreign, err)
 	}
-	if _, err := cudaAttemptMemory([]byte("GPU-one, 7, N/A\n"), "GPU-one", map[int]bool{7: true}); err != errAttemptMemoryUnsupported {
+	if _, _, err := cudaAttemptMemory([]byte("GPU-one, 7, N/A\n"), "GPU-one", map[int]bool{7: true}); err != errDeviceMemoryNotReported {
 		t.Fatal("N/A became zero")
 	}
 	client, peak, err := drmAttemptMemory([]byte("drm-client-id: 7\ndrm-pdev: 0000:03:00.0\ndrm-resident-vram0: 2048 MiB\n"), "0000:03:00.0")
@@ -200,7 +200,7 @@ func TestAttemptMemoryDeviceUnavailable(t *testing.T) {
 	// NVIDIA N/A is unknown, not zero. A reason-only peak survives aggregation,
 	// but a subsequent usable process sample replaces the unavailable label.
 	for _, value := range []string{"N/A", "[N/A]", "Not Supported"} {
-		if _, err := cudaAttemptMemory([]byte("GPU-one, 42, "+value+"\n"), "GPU-one", map[int]bool{42: true}); err != errAttemptMemoryUnsupported {
+		if _, _, err := cudaAttemptMemory([]byte("GPU-one, 42, "+value+"\n"), "GPU-one", map[int]bool{42: true}); err != errDeviceMemoryNotReported {
 			t.Fatalf("%s became a device measurement: %v", value, err)
 		}
 	}

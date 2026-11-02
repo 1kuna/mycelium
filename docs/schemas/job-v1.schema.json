@@ -132,6 +132,9 @@
           "description": "Sampled per-attempt process GPU memory in GiB, not GPU-wide memory.used or an allocator high-water mark. CUDA uses nvidia-smi compute-apps even on unified-memory devices. Sampling is a lower bound; missing means unknown, not zero.",
           "type": "number"
         },
+        "device_source": {
+          "type": "string"
+        },
         "device_unavailable": {
           "description": "Diagnostic reason no usable process GPU sample was retained. New CUDA/XPU cgroup observers report this when device_gb is absent; older workers may omit both. Does not authorize reduced unified-memory accounting.",
           "type": "string"
@@ -1867,6 +1870,16 @@
           "type": "boolean",
           "x-contract": "diagnostic"
         },
+        "resources": {
+          "items": {
+            "$ref": "#/$defs/ResourceBasis"
+          },
+          "type": [
+            "array",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
         "resume_files": {
           "$ref": "#/$defs/FileCheckpoint",
           "x-contract": "diagnostic"
@@ -2035,6 +2048,9 @@
         "host_gb": {
           "type": "number"
         },
+        "learned": {
+          "$ref": "#/$defs/LearnedMemory"
+        },
         "machine": {
           "type": "string"
         },
@@ -2173,6 +2189,28 @@
         "positive_error",
         "multiplier",
         "enforcement"
+      ],
+      "type": "object"
+    },
+    "LearnedMemory": {
+      "properties": {
+        "device_gb": {
+          "type": "number"
+        },
+        "evidence": {
+          "type": "integer"
+        },
+        "host_gb": {
+          "type": "number"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "host_gb",
+        "evidence",
+        "source"
       ],
       "type": "object"
     },
@@ -2377,6 +2415,9 @@
         },
         "batch_size": {
           "type": "integer"
+        },
+        "check": {
+          "type": "boolean"
         },
         "component": {
           "type": "string"
@@ -3081,6 +3122,36 @@
         "owner",
         "reason",
         "max_lifetime"
+      ],
+      "type": "object"
+    },
+    "ResourceBasis": {
+      "properties": {
+        "basis": {
+          "type": "string"
+        },
+        "declared": {
+          "type": "number"
+        },
+        "dimension": {
+          "type": "string"
+        },
+        "evidence": {
+          "type": "integer"
+        },
+        "learned": {
+          "type": "number"
+        },
+        "note": {
+          "type": "string"
+        },
+        "used": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "dimension",
+        "basis"
       ],
       "type": "object"
     },

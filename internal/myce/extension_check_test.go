@@ -12,11 +12,15 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+// Work without its own memory evidence is seeded by its checks' peaks (#186).
+const checkSeededPeak = "accepted peak × 1.25; from qualification checks"
 
 func TestExtensionCheckAutoMemory(t *testing.T) {
 	t.Run("floor-free variant", func(t *testing.T) {
@@ -131,21 +135,16 @@ func TestExtensionCheckAutoPreservesThroughput(t *testing.T) {
 			if err := q.Complete(r); err != nil {
 				t.Fatal(err)
 			}
+			// The check records its own memory point (#618) and leaves the
+			// workload's throughput point untouched.
 			after := q.s.WorkObservations[key]
-			if !after.RecordedAt.Equal(before.RecordedAt) {
-				t.Errorf("auto check refreshed throughput age: before=%v after=%v", before.RecordedAt, after.RecordedAt)
+			if !reflect.DeepEqual(after, before) {
+				t.Errorf("auto check changed the workload's observation: before=%+v after=%+v", before, after)
 			}
-			if after.Job != before.Job || after.Machine != before.Machine || after.Session != before.Session || after.Attempt != before.Attempt || after.Source != before.Source || after.SampleID != before.SampleID || after.Forbidden != before.Forbidden || after.StaleReason != before.StaleReason || after.Key != before.Key {
-				t.Errorf("auto check changed observation provenance or eligibility: before=%+v after=%+v", before, after)
-			}
-			if !after.MemoryRecordedAt.Equal(clock.Now()) {
-				t.Errorf("auto check did not refresh memory age: %v", after.MemoryRecordedAt)
-			}
-			if after.Units != before.Units || after.Seconds != before.Seconds || after.Rate != before.Rate || after.LatencySeconds != before.LatencySeconds {
-				t.Errorf("auto check changed throughput: before=%+v after=%+v", before, after)
-			}
-			if len(q.s.WorkObservations) != 1 || after.Samples != before.Samples+1 || after.MemoryPeak == nil || after.MemoryPeak.HostGB == nil || *after.MemoryPeak.HostGB != host {
-				t.Errorf("auto check did not update the same observation's memory: %+v", q.s.WorkObservations)
+			checkKey := q.s.Jobs[job.ID].Timing.Key
+			own := q.s.WorkObservations[identityHash(checkKey)]
+			if len(q.s.WorkObservations) != 2 || !checkKey.Check || !own.MemoryRecordedAt.Equal(clock.Now()) || own.MemoryPeak == nil || own.MemoryPeak.HostGB == nil || *own.MemoryPeak.HostGB != host || own.Rate != 0 {
+				t.Errorf("auto check did not record its own memory: %+v", q.s.WorkObservations)
 			}
 			timing := q.s.Jobs[job.ID].Timing
 			if timing.ActualSeconds != nil || timing.PredictedSeconds != nil {
@@ -171,8 +170,9 @@ func TestExtensionCheckAutoPreservesThroughput(t *testing.T) {
 				if timing := q.s.Jobs[next.ID].Timing; timing == nil || timing.Key == nil || timing.PredictedSeconds != nil {
 					t.Errorf("expired throughput used for prediction: %+v", timing)
 				}
-				// The day-29 memory evidence is fresh on its own clock.
-				if got := q.s.Jobs[next.ID]; got.MemoryEnvelope == nil || got.MemoryEnvelope.Source != "accepted peak × 1.25" || got.Spec.Needs.HostMemoryGB != 2.5 {
+				// The day-29 check memory is fresh on its own clock and seeds
+				// work that has no memory evidence of its own (#186).
+				if got := q.s.Jobs[next.ID]; got.MemoryEnvelope == nil || got.MemoryEnvelope.Source != checkSeededPeak || got.Spec.Needs.HostMemoryGB != 2.5 {
 					t.Errorf("fresh check peak not reused after throughput expired: %+v", got.MemoryEnvelope)
 				}
 			}
@@ -214,16 +214,16 @@ func TestExtensionCheckAutoMemoryOnBenchmarkPoint(t *testing.T) {
 	if err := q.Complete(r); err != nil {
 		t.Fatal(err)
 	}
-	if len(q.s.WorkObservations) != 1 {
-		t.Fatalf("check did not share the benchmark point: %+v", q.s.WorkObservations)
+	if p := q.s.WorkObservations[identityHash(k)]; len(q.s.WorkObservations) != 2 || p.MemoryPeak != nil || p.SampleID != "benchmark" {
+		t.Fatalf("check memory landed on the benchmark point: %+v", q.s.WorkObservations)
 	}
 	queued := submit(t, q, s)
 	next := check(t, q, m, nil).Job
 	if next == nil || next.ID != queued.ID {
 		t.Fatalf("comparable work not assigned: %+v", next)
 	}
-	if next.MemoryEnvelope == nil || next.MemoryEnvelope.Source != "accepted peak × 1.25" || next.Spec.Needs.HostMemoryGB != 2.5 {
-		t.Fatalf("check peak on a benchmark point not reused: %+v", next.MemoryEnvelope)
+	if next.MemoryEnvelope == nil || next.MemoryEnvelope.Source != checkSeededPeak || next.Spec.Needs.HostMemoryGB != 2.5 {
+		t.Fatalf("check peak beside a benchmark point not reused: %+v", next.MemoryEnvelope)
 	}
 }
 
@@ -265,15 +265,15 @@ func TestExtensionCheckAutoMemorySurvivesOldBenchmarkReport(t *testing.T) {
 	// A distinct, otherwise valid benchmark report whose throughput is 31 days old.
 	old := WorkObservation{Key: *k, Source: "idle reference", SampleID: "old-benchmark", Units: 10, Seconds: 2, Rate: 5, LatencySeconds: 2, RecordedAt: clock.Now().Add(-31 * 24 * time.Hour)}
 	publishCurves(t, q, m, []WorkObservation{old})
-	if p := q.s.WorkObservations[identityHash(k)]; len(q.s.WorkObservations) != 1 || p.SampleID != "old-benchmark" || p.MemoryRecordedAt.IsZero() {
-		t.Fatalf("old benchmark report not accepted onto the check's point: %+v", q.s.WorkObservations)
+	if p := q.s.WorkObservations[identityHash(k)]; len(q.s.WorkObservations) != 2 || p.SampleID != "old-benchmark" {
+		t.Fatalf("old benchmark report not accepted beside the check's point: %+v", q.s.WorkObservations)
 	}
 	queued := submit(t, q, s)
 	next := check(t, q, m, nil).Job
 	if next == nil || next.ID != queued.ID {
 		t.Fatalf("comparable work not assigned: %+v", next)
 	}
-	if next.MemoryEnvelope == nil || next.MemoryEnvelope.Source != "accepted peak × 1.25" || next.Spec.Needs.HostMemoryGB != 2.5 {
+	if next.MemoryEnvelope == nil || next.MemoryEnvelope.Source != checkSeededPeak || next.Spec.Needs.HostMemoryGB != 2.5 {
 		t.Fatalf("old benchmark report expired fresh memory: %+v", next.MemoryEnvelope)
 	}
 }
@@ -337,7 +337,7 @@ func TestExtensionCheckAutoLearnsMemoryForComparableWork(t *testing.T) {
 				t.Fatalf("variant auto was lost: %+v", next.Spec.Needs)
 			}
 			if outcome == "accepted" {
-				if next.MemoryEnvelope.Source != "accepted peak × 1.25" || next.Spec.Needs.HostMemoryGB != 2.5 {
+				if next.MemoryEnvelope.Source != checkSeededPeak || next.Spec.Needs.HostMemoryGB != 2.5 {
 					t.Fatalf("check peak not reused: %+v", next.MemoryEnvelope)
 				}
 			} else if !strings.HasPrefix(next.MemoryEnvelope.Source, "exploratory") {
@@ -476,7 +476,7 @@ func TestExtensionCheckSiblingMemoryCapacity(t *testing.T) {
 			for id, p := range q.s.WorkObservations {
 				delete(q.s.WorkObservations, id)
 				p.Key.Component, p.Key.Hardware = "1", "sibling-card"
-				p.Key.Fingerprint = sibling.ExtensionFingerprint
+				p.Key.Fingerprint, p.Key.Check = sibling.ExtensionFingerprint, true // a sibling card's check
 				p.MemoryPeak.HostGB, p.MemoryPeak.CgroupGB = &peak, &peak
 				q.s.WorkObservations[identityHash(p.Key)] = p
 			}
@@ -606,6 +606,12 @@ func TestExtensionCheckExecutionTimeout(t *testing.T) {
 					return response(ack)
 				case strings.HasSuffix(req.URL.Path, "/logs"):
 					return response([]LogChunk{})
+				case req.URL.Path == "/api/jobs/"+submitted.ID+"/ledger":
+					page, err := q.JobLedger(submitted.ID, 0, -1, 256)
+					if err != nil {
+						t.Fatal(err)
+					}
+					return response(page)
 				case req.URL.Path == "/api/jobs/"+submitted.ID:
 					if strings.HasPrefix(mode, "never admitted") {
 						clock.Advance(time.Hour)

@@ -434,6 +434,14 @@ func publicErrorCode(code string) bool {
 	return true
 }
 
+// knownServerRefusal reports whether a 5xx code is a queue-authored refusal
+// with a fixed public reason (queue_stopping, file_store_unavailable, release
+// unavailability). Any other 5xx is an internal failure whose message may
+// carry private causes, so it stays request_failed (#593 follow-up).
+func knownServerRefusal(code string) bool {
+	return rejectionMessages[code] != "" || fileStoreRefusalCode(code)
+}
+
 func respond(w http.ResponseWriter, v any, err error) {
 	w.Header().Set("Content-Type", "application/json")
 	if err != nil {
@@ -451,7 +459,7 @@ func respond(w http.ResponseWriter, v any, err error) {
 		}
 		body := map[string]any{"error": rejectionMessages[code], "code": code}
 		var apiError *HTTPError
-		if errors.As(err, &apiError) && publicErrorCode(apiError.Code) {
+		if errors.As(err, &apiError) && publicErrorCode(apiError.Code) && (apiError.Status < 500 || knownServerRefusal(apiError.Code)) {
 			if apiError.Status >= 400 {
 				status = apiError.Status
 			}

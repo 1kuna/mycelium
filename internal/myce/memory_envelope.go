@@ -26,6 +26,7 @@ type AttemptMemoryPeak struct {
 	CgroupGB            *float64                `json:"cgroup_gb,omitempty"`
 	DeviceGB            *float64                `json:"device_gb,omitempty"`
 	DeviceUnavailable   string                  `json:"device_unavailable,omitempty"`
+	DeviceSource        string                  `json:"device_source,omitempty"` // Omitted: per-process counters.
 	SwapGB              *float64                `json:"swap_gb,omitempty"`
 	Source              string                  `json:"source,omitempty"`
 	Events              *MemoryEventCounts      `json:"events,omitempty"`
@@ -172,6 +173,16 @@ type JobMemoryEnvelope struct {
 	// accepted attempts behind a learned or bounded figure (#585).
 	Basis    string `json:"basis,omitempty"`
 	Evidence int    `json:"evidence,omitempty"`
+	// What learned sizing would reserve on this target, recorded at
+	// assignment for explicit figures too, so stale numbers show (#585).
+	Learned *LearnedMemory `json:"learned,omitempty"`
+}
+
+type LearnedMemory struct {
+	HostGB   float64  `json:"host_gb"`
+	DeviceGB *float64 `json:"device_gb,omitempty"`
+	Evidence int      `json:"evidence"`
+	Source   string   `json:"source"`
 }
 
 // Snapshot-to-launch telemetry drift needs headroom even with ceiling slack off.
@@ -187,6 +198,12 @@ func mergeMemoryPeaks(old, next *AttemptMemoryPeak) *AttemptMemoryPeak {
 	if old != nil && !old.Constrained {
 		out = *old
 	}
+	if next.DeviceGB != nil && validMemoryValue(*next.DeviceGB) && (out.DeviceGB == nil || *next.DeviceGB > *out.DeviceGB) {
+		out.DeviceSource = ""
+		if next.DeviceSource == deviceHostDeltaSource {
+			out.DeviceSource = next.DeviceSource
+		}
+	}
 	for _, pair := range [][2]**float64{{&out.HostGB, &next.HostGB}, {&out.CgroupGB, &next.CgroupGB}, {&out.DeviceGB, &next.DeviceGB}, {&out.NonreclaimableGB, &next.NonreclaimableGB}, {&out.nonreclaimableSampleGB, &next.nonreclaimableSampleGB}} {
 		if *pair[1] != nil && validMemoryValue(**pair[1]) && (*pair[0] == nil || **pair[1] > **pair[0]) {
 			n := **pair[1]
@@ -201,7 +218,7 @@ func mergeMemoryPeaks(old, next *AttemptMemoryPeak) *AttemptMemoryPeak {
 	} else {
 		// Publish only worker-owned labels, never raw command errors or output.
 		switch next.DeviceUnavailable {
-		case deviceMemoryNoSample, deviceMemoryUnsupported, deviceMemoryInventory, deviceMemoryTimeout, deviceMemoryNoCgroup:
+		case deviceMemoryNoSample, deviceMemoryUnsupported, deviceMemoryInventory, deviceMemoryTimeout, deviceMemoryNoCgroup, deviceMemoryNotReported, deviceMemoryShared:
 			out.DeviceUnavailable = next.DeviceUnavailable
 		}
 	}
@@ -399,7 +416,7 @@ func memoryConfiguration(needs ResourceNeeds, args []string, program *Program) s
 
 func sameMemoryWork(point WorkObservation, key ObservationKey, configuration string) bool {
 	a := point.Key
-	return point.MemoryConfiguration != "" && point.MemoryConfiguration == configuration && a.Work == key.Work && a.ExtensionDigest == key.ExtensionDigest && a.Reference == key.Reference && a.Concurrency == key.Concurrency && a.BatchSize == key.BatchSize
+	return point.MemoryConfiguration != "" && point.MemoryConfiguration == configuration && a.Work == key.Work && a.Check == key.Check && a.ExtensionDigest == key.ExtensionDigest && a.Reference == key.Reference && a.Concurrency == key.Concurrency && a.BatchSize == key.BatchSize
 }
 
 // RAM and VRAM have independent locality: sibling cards share the host pool,
@@ -482,7 +499,25 @@ func sameMemoryHost(k, target ObservationKey, m *Machine) bool {
 
 // Transfer only the same frozen recipe/work/shape. Prefer the same OS/arch/
 // accelerator/layout family; this is not a throughput or input-size model.
+//
+// A qualification check learns only from checks (#618). Work with no accepted
+// evidence of its own is still seeded by its checks' peaks (#186); its own
+// accepted runs then replace that seed, so a check never shrinks it.
 func (q *Queue) memoryEstimate(j *Job, m *Machine) memoryEstimate {
+	estimate := q.memoryEstimateFor(j, m, false)
+	if estimate.host != nil || estimate.source != "" || estimate.key == nil || j.Spec.ExtensionCheck != nil || !j.Spec.extensionJob() {
+		return estimate
+	}
+	seed := q.memoryEstimateFor(j, m, true)
+	if seed.host == nil || seed.source == spentMemoryExploration {
+		return estimate
+	}
+	seed.key, seed.constrainedGB = estimate.key, max(seed.constrainedGB, estimate.constrainedGB)
+	seed.source += "; from qualification checks"
+	return seed
+}
+
+func (q *Queue) memoryEstimateFor(j *Job, m *Machine, checkSeed bool) memoryEstimate {
 	provenance := *j
 	// Resumption excludes recording, not using a prior complete-input estimate.
 	provenance.Attempt = 0
@@ -494,6 +529,11 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) memoryEstimate {
 	key, _ := q.workObservationKey(&provenance)
 	if key == nil {
 		return memoryEstimate{}
+	}
+	if checkSeed {
+		seed := *key
+		seed.Check = true
+		key = &seed
 	}
 	var exact, sameHost, family, sameOS, other *AttemptMemoryPeak
 	var exactN, sameHostN, familyN, sameOSN, otherN, constrainedGB = 0, 0, 0, 0, 0, 0.0

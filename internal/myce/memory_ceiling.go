@@ -45,7 +45,10 @@ type memoryAttempt struct {
 	hostBaseline     *gpuHostState // Captured while the attempt cgroup is still empty.
 	pressureStart    time.Time
 	pressureBaseline *uint64
-	clock            Clock
+	// Resident memory of every attempt under the delegated root, read with
+	// hostBaseline, so host drops outside Mycelium's cgroups are attributable.
+	rootBaseline *float64
+	clock        Clock
 	// Latest per-process device sample, for live planning credit (#596).
 	device atomic.Pointer[hostMemorySample]
 }
@@ -212,6 +215,9 @@ func (c *memoryCeilings) create(id string, bytes, swap int64) (*memoryAttempt, e
 		a.clock = RealClock{}
 	}
 	a.hostBaseline, _ = readGPUHostState(c.fs)
+	if gb, ok := cgroupResidentGB(c.fs, c.root); ok {
+		a.rootBaseline = &gb
+	}
 	if b, err := c.fs.ReadFile(filepath.Join(a.path, "memory.pressure")); err == nil {
 		_, avgErr := sharedMemoryPSI(b)
 		if total, err := memoryPSITotal(b); err == nil && avgErr == nil {

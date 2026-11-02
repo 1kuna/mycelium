@@ -2328,11 +2328,19 @@ the guard shares the runtime's measurement digest and does not reimplement
 EWMA or memory merges. Memory-only samples may advance their sample count and
 memory clock while preserving the old throughput and its provenance.
 
+A failed OOM or ceiling-bound auto attempt invalidates comparable memory on
+every host's key and may keep its constrained peak there as a diagnostic. Each
+key it rewrites gets a `memory_invalidated` record on that failing job's ledger,
+binding the same before/after digests. The guard accepts it as a link that adds
+no sample and may reset the memory clock, so collect ledger pages for failed
+jobs too.
+
 Removed keys, resets, backward clocks, changed measurements without new
-samples, missing/ambiguous provenance and unexplained final values fail closed.
-Older jobs have no such learning ledger proof: an unchanged curve still passes,
-but an unproven change stops the release for investigation. Reference sweep or
-OOM invalidation changes are not accepted job samples and also stop this guard.
+samples or invalidation records, missing/ambiguous provenance and unexplained
+final values fail closed. Older jobs have no such learning ledger proof: an
+unchanged curve still passes, but an unproven change stops the release for
+investigation. Reference sweep changes, and invalidations recorded before this
+ledger record existed, also stop this guard.
 Ledger records follow existing job history retention; collect evidence before
 it expires. No release, install or fleet operation is performed by the guard.
 

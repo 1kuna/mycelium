@@ -157,12 +157,29 @@ func checkExtension(ctx context.Context, root string, e Extension, platform, dev
 	if err = writeExtensionReports(root, e, platform, reports); err != nil {
 		return reports, err
 	}
+	// Only a check that started can revoke qualification (#619). A check
+	// cancelled, expired or refused before its job started has no verdict, so
+	// that work's previous report stands. Unknown start state counts as started.
+	unstarted := make([]bool, len(reports))
+	for i := range unstarted {
+		unstarted[i] = true
+	}
 	defer func() {
 		if err != nil {
 			fmt.Fprintln(commandLog, err)
 			for i := range reports {
+				if unstarted[i] {
+					if old, ok := previousExtensionReport(previous, platform, reports[i]); ok {
+						reports[i] = old
+						continue
+					}
+				}
 				reports[i].Qualified = false
-				if !strings.HasPrefix(reports[i].Reason, "never started: ") {
+				switch {
+				case strings.HasPrefix(reports[i].Reason, "never started: "):
+				case unstarted[i]:
+					reports[i].Reason = "never started: no check verdict; command log: " + commandLog.Name()
+				default:
 					reports[i].Reason = "check failed; command log: " + commandLog.Name()
 				}
 			}
@@ -203,13 +220,35 @@ func checkExtension(ctx context.Context, root string, e Extension, platform, dev
 			}
 			check.Reserve = &options
 		}
+		unstarted[i] = false
 		job, e2 := c.SubmitAndWait(ctx, Spec{Name: "extension-check", Project: "extension-check", SubmissionKey: r.CheckID, RequireTarget: true,
 			Extension: extensionKey(e), ExtensionDigest: e.Digest, AllowedMachines: []string{m.ID},
 			Needs: selection, ExtensionCheck: check})
 		// Fence the exact check key and confirm cleanup, even when a terminal
 		// result reports a failure with release still pending.
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		cleanupErr := waitExtensionCheckRelease(cleanupCtx, c, r.CheckID)
+		ack, cleanupErr := waitExtensionCheckRelease(cleanupCtx, c, r.CheckID)
+		// A terminal job can no longer start, so its final record says whether
+		// this check ran. A cancelled wait re-reads the job after cleanup.
+		final := job
+		if final == nil || !terminal(final.State) {
+			id := ""
+			if final != nil {
+				id = final.ID
+			} else if cleanupErr == nil && ack.JobID != nil {
+				id = *ack.JobID
+			}
+			if id != "" {
+				if read, readErr := c.GetJob(cleanupCtx, id); readErr == nil {
+					final = read
+				}
+			} else if cleanupErr == nil {
+				unstarted[i] = true // the queue never accepted this submission
+			}
+		}
+		if final != nil && terminal(final.State) {
+			job, unstarted[i] = final, !extensionCheckStarted(cleanupCtx, c, final)
+		}
 		cancel()
 		if job != nil && job.StartedAt == nil && strings.HasPrefix(job.Reason, "never started: ") {
 			r.Reason = job.Reason
@@ -279,23 +318,65 @@ func expandExecutionReference(s *Spec, r *strings.Replacer) {
 	}
 }
 
-func waitExtensionCheckRelease(ctx context.Context, c Client, key string) error {
+func waitExtensionCheckRelease(ctx context.Context, c Client, key string) (Cancellation, error) {
 	tick := time.NewTicker(100 * time.Millisecond)
 	defer tick.Stop()
 	for {
 		ack, err := c.CancelSubmission(ctx, "extension-check", key)
 		if err != nil {
-			return err
+			return ack, err
 		}
 		if ack.Release != nil && *ack.Release != "pending" {
-			return nil
+			return ack, nil
 		}
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return ack, ctx.Err()
 		case <-tick.C:
 		}
 	}
+}
+
+// extensionCheckStarted reports whether any attempt of a terminal check was
+// authorized to start. A requeue clears StartedAt, so a check lost three times
+// ends failed with none; the ledger's start records decide. An unreadable
+// ledger counts as started.
+func extensionCheckStarted(ctx context.Context, c Client, j *Job) bool {
+	if j.StartedAt != nil {
+		return true
+	}
+	if j.Starts == 0 && j.Attempt == 0 {
+		return false // never assigned, so never authorized to start
+	}
+	for after, highWater := 0, -1; ; {
+		page, err := c.JobLedger(ctx, j.ID, after, highWater, 256)
+		if err != nil {
+			return true
+		}
+		for _, e := range page.Entries {
+			if e.Kind == "started" {
+				return true
+			}
+		}
+		if !page.HasMore {
+			return false
+		}
+		if page.Next <= after {
+			return true
+		}
+		after, highWater = page.Next, page.HighWater
+	}
+}
+
+// previousExtensionReport is the report this work had on this device before
+// the check began, restored when the check produced no verdict.
+func previousExtensionReport(previous []ExtensionReport, platform string, r ExtensionReport) (ExtensionReport, bool) {
+	for _, old := range previous {
+		if old.Work == r.Work && old.Platform == platform && extensionReportDevice(platform, old.Device) == extensionReportDevice(platform, r.Device) {
+			return old, true
+		}
+	}
+	return ExtensionReport{}, false
 }
 
 // Static authoring checks supplement schema validation without executing code.
