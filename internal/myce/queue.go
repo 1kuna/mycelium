@@ -719,6 +719,13 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		if err := normalizeJobClass(&s); err != nil {
 			return specRejection(err)
 		}
+		var declared uint64
+		if s.Disk != nil {
+			declared = s.Disk.OutputBytes
+		}
+		if err := q.fileStoreQuotaRefusal(s, submissionFiles(s), declared); err != nil {
+			return err
+		}
 		if err := normalizeResources(&s); err != nil {
 			return err
 		}

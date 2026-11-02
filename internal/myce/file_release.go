@@ -224,9 +224,9 @@ func (q *Queue) fileReleaseMetadata(selection FileReleaseSelection) (FileRelease
 		releasing[id] = len(item.Blockers) == 0
 	}
 	refs := map[string][]FileKeepingReference{}
-	pending, keep, _ := q.collectFileReferences(true, releasing, func(hash string, ref FileKeepingReference) {
-		if hashes[hash] {
-			refs[hash] = append(refs[hash], ref)
+	pending, keep, _ := q.collectFileReferences(true, releasing, func(file FileRef, ref FileKeepingReference) {
+		if hashes[file.SHA256] {
+			refs[file.SHA256] = append(refs[file.SHA256], ref)
 		}
 	})
 	for hash := range hashes {

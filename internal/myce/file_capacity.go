@@ -18,19 +18,20 @@ import (
 // for new payloads after declared tus lengths and the physical volume floor.
 // Store is a public role name, never a private filesystem path.
 type FileStoreStatus struct {
-	Physical                         *PhysicalStorageStatus `json:"physical,omitempty"`
-	UnidentifiedWritesMayUseReserve  bool                   `json:"unidentified_writes_may_use_reserve"`
-	UnidentifiedReserveAdmittedBytes uint64                 `json:"unidentified_reserve_admitted_bytes"`
-	ProductionReserveBytes           uint64                 `json:"production_reserve_bytes"`
-	ReservedOutputBytes              uint64                 `json:"reserved_output_bytes,omitempty"`
-	Store                            string                 `json:"store"`
-	UsedBytes                        uint64                 `json:"used_bytes"`
-	FreeBytes                        uint64                 `json:"free_bytes"`
-	ReclaimableBytes                 uint64                 `json:"reclaimable_bytes"`
-	LimitBytes                       uint64                 `json:"limit_bytes"`
-	DiskFreeBytes                    uint64                 `json:"disk_free_bytes"`
-	FloorBytes                       uint64                 `json:"floor_bytes"`
-	Error                            string                 `json:"error,omitempty"`
+	Physical                         *PhysicalStorageStatus  `json:"physical,omitempty"`
+	UnidentifiedWritesMayUseReserve  bool                    `json:"unidentified_writes_may_use_reserve"`
+	UnidentifiedReserveAdmittedBytes uint64                  `json:"unidentified_reserve_admitted_bytes"`
+	ProductionReserveBytes           uint64                  `json:"production_reserve_bytes"`
+	ReservedOutputBytes              uint64                  `json:"reserved_output_bytes,omitempty"`
+	Projects                         []ProjectFileStoreUsage `json:"projects,omitempty"`
+	Store                            string                  `json:"store"`
+	UsedBytes                        uint64                  `json:"used_bytes"`
+	FreeBytes                        uint64                  `json:"free_bytes"`
+	ReclaimableBytes                 uint64                  `json:"reclaimable_bytes"`
+	LimitBytes                       uint64                  `json:"limit_bytes"`
+	DiskFreeBytes                    uint64                  `json:"disk_free_bytes"`
+	FloorBytes                       uint64                  `json:"floor_bytes"`
+	Error                            string                  `json:"error,omitempty"`
 }
 
 type storedPayload struct {
@@ -172,6 +173,7 @@ type fileStoreObservation struct {
 	bundles                   map[string]time.Time
 	now                       time.Time
 	retention                 time.Duration
+	projects                  []ProjectFileStoreUsage
 }
 
 // The caller holds q.mu. Reference maps are newly allocated and timestamps are
@@ -189,7 +191,7 @@ func (q *Queue) captureFileStoreStatus() fileStoreObservation {
 			markers[hash] = at
 		}
 	}
-	return fileStoreObservation{q.files, expired, keep, referenced, markers, bundles, q.clock.Now(), q.fileRetention}
+	return fileStoreObservation{q.files, expired, keep, referenced, markers, bundles, q.clock.Now(), q.fileRetention, q.projectFileStoreUsage()}
 }
 
 func (q *Queue) fileStoreStatus(ctx context.Context) *FileStoreStatus {
@@ -209,6 +211,7 @@ func (v fileStoreObservation) status(ctx context.Context) *FileStoreStatus {
 	store.lifecycle.RLock()
 	defer store.lifecycle.RUnlock()
 	status, payloads, err := store.capacity(ctx)
+	status.Projects = v.projects
 	if err != nil {
 		status.Error = "file store capacity unavailable"
 		status.Physical = store.physicalStorageStatus(ctx, status, nil, now)
@@ -282,8 +285,20 @@ func (q *Queue) PreflightFileStore(ctx context.Context, files FileManifest) erro
 	}
 	growth := need
 	need = addDiskBytes(need, store.reservedOutputs(payloads))
-	_, err = store.admit(ctx, status, payloads, files, need, growth)
-	return err
+	if _, err = store.admit(ctx, status, payloads, files, need, growth); err != nil {
+		return err
+	}
+	// Refuse an over-quota project before it uploads inputs submit would refuse.
+	s, ok := ctx.Value(fileStoreSubmissionKey{}).(Spec)
+	if !ok {
+		return nil
+	}
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	if s.Class == "" {
+		s.Class = q.s.Policies[s.Project].DefaultCallPriority
+	}
+	return q.fileStoreQuotaRefusal(s, files, 0)
 }
 
 func (c Client) PreflightFileStore(ctx context.Context, files FileManifest) error {
