@@ -418,14 +418,20 @@ func decode(w http.ResponseWriter, r *http.Request, v any) bool {
 	return true
 }
 
-// Server-authored typed refusals whose code and reason reach HTTP callers
-// intact. Anything else stays generic so private causes never leave the queue.
-func typedRefusalCode(code string) bool {
-	switch code {
-	case "file_release_stale", "file_release_protected", "job_ledger_cursor_invalid", "job_ledger_unavailable", "native_custody_invalid", "diagnostics_unknown", "output_delivery_unavailable":
-		return true
+// publicErrorCode reports whether a typed HTTPError code reaches callers with
+// its server-written reason. Every HTTPError the queue builds carries its own
+// public message, so any well-formed code passes; untyped internal errors have
+// no HTTPError code and stay request_failed (#593).
+func publicErrorCode(code string) bool {
+	if code == "" || code == "request_failed" || len(code) > 64 {
+		return false
 	}
-	return strings.HasPrefix(code, "fleet_") // fleetError and maintenance refusals
+	for _, r := range code {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 func respond(w http.ResponseWriter, v any, err error) {
@@ -445,9 +451,15 @@ func respond(w http.ResponseWriter, v any, err error) {
 		}
 		body := map[string]any{"error": rejectionMessages[code], "code": code}
 		var apiError *HTTPError
-		if errors.As(err, &apiError) && (fileStoreRefusalCode(apiError.Code) || typedRefusalCode(apiError.Code) || rejectionMessages[apiError.Code] != "" || apiError.Code == "job_spec_invalid" || apiError.Code == "worker_protocol_invalid" || apiError.Code == "submission_key_conflict" || apiError.Code == "submission_key_expired" || apiError.Code == "submission_key_invalid" || apiError.Code == "job_unknown") {
-			status = apiError.Status
-			body = map[string]any{"error": apiError.Message, "code": apiError.Code}
+		if errors.As(err, &apiError) && publicErrorCode(apiError.Code) {
+			if apiError.Status >= 400 {
+				status = apiError.Status
+			}
+			message := apiError.Message
+			if message == "" {
+				message = rejectionMessages[apiError.Code]
+			}
+			body = map[string]any{"error": message, "code": apiError.Code}
 			if apiError.PathDiagnostic != nil {
 				body["path_diagnostic"] = apiError.PathDiagnostic
 			}
@@ -534,7 +546,7 @@ func (c Client) Call(ctx context.Context, method, path string, in, out any) erro
 			Error           string          `json:"error"`
 			CurrentRevision *uint64         `json:"current_revision"`
 		}
-		if json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&body) == nil && (fileStoreRefusalCode(body.Code) || typedRefusalCode(body.Code) || rejectionMessages[body.Code] != "" || body.Code == "job_spec_invalid" || body.Code == "submission_key_invalid" || body.Code == "worker_protocol_mismatch" || body.Code == "worker_protocol_invalid" || body.Code == "submission_key_conflict" || body.Code == "submission_key_expired" || body.Code == "job_unknown") {
+		if json.NewDecoder(io.LimitReader(res.Body, 4096)).Decode(&body) == nil && (publicErrorCode(body.Code) || body.Code == "request_failed") {
 			e.Code, e.Message = body.Code, body.Error
 			e.PathDiagnostic = body.PathDiagnostic
 			e.CurrentRevision = body.CurrentRevision
