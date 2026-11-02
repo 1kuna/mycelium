@@ -28,30 +28,42 @@ func cloneSharedHost(p *SharedHostProfile) *SharedHostProfile {
 
 // Profile admission is deliberately limited to native CPU commands with already
 // prepared environments. Daemon children do not inherit native process priority.
-func sharedHostJobFits(j *Job, m *Machine) bool {
+func sharedHostJobFits(j *Job, m *Machine) bool { return sharedHostRefusal(j, m) == "" }
+
+// sharedHostRefusal names the failed shared-host condition and its fix, so a
+// refusal and resolve explain the same rule (#548). Empty means admitted.
+func sharedHostRefusal(j *Job, m *Machine) string {
 	if m.SharedHostReason != "" {
-		return false
+		return "shared host temporarily unavailable: " + m.SharedHostReason
 	}
 	if m.SharedHost == nil {
-		return true
+		return ""
 	}
 	// Admission and launch also receive the physical worker's accelerator
 	// view. CPU payloads use their prepared CPU recipes on either kind of host.
 	if j.Spec.Needs.cpuOnly() {
 		m = cpuMachineView(m)
 	}
-	if !j.Spec.Needs.cpuOnly() || j.Spec.Run.Docker || j.Spec.extensionJob() || !environmentReady(j, m) {
-		return false
+	const unprepared = " not prepared on this shared host; shared hosts never build environments. Run without a managed environment, or let a dedicated host prepare and run it"
+	switch {
+	case !j.Spec.Needs.cpuOnly():
+		return "shared host admits CPU-only work; this job requests an accelerator"
+	case j.Spec.Run.Docker:
+		return "shared host admits native commands only, not Docker"
+	case j.Spec.extensionJob():
+		return "shared host admits plain commands only, not extension work"
+	case !environmentReady(j, m):
+		return "environment" + unprepared
 	}
 	for _, side := range j.Spec.Run.Sidecars {
 		if side.Environment != "" {
 			r, ok := j.SidecarEnvironmentRecipes[side.Name][m.GPU]
 			if !ok || !slices.Contains(m.Environments, r.Key) {
-				return false
+				return "sidecar " + side.Name + " environment" + unprepared
 			}
 		}
 	}
-	return true
+	return ""
 }
 
 // Only bounded in-memory history is read here. Existing live reserves and static

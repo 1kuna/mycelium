@@ -82,6 +82,8 @@ func targetFitReason(dimension string, j *Job, m *Machine) string {
 		return "needs.network: true requires protected native outbound execution; this host only supports offline native jobs or has not reported isolation capability"
 	case "disk headroom":
 		return diskHeadroomReason(j, m)
+	case "shared host profile":
+		return sharedHostRefusal(j, m)
 	case "target":
 		if !sharedInputsFit(j.Spec, m) {
 			return "shared_inputs_v1 worker capability required"
@@ -201,8 +203,11 @@ func (q *Queue) qualifiedTarget(j *Job) (bool, string) {
 	capacity.s.Jobs, capacity.s.ModelSlots, capacity.s.HostReleases = nil, nil, nil
 	var best *targetFit
 	reason := "no known machine targets"
-	consider := func(fit targetFit, candidate *Job, m *Machine) {
-		fit.key = targetKey(m)
+	q.evaluateTargets(j, func(fit targetFit, candidate *Job, m *Machine) bool {
+		if fit.failures == 0 {
+			best, reason = nil, ""
+			return false
+		}
 		if best == nil || fit.better(*best) {
 			best = &fit
 			reason = targetFitReason(fit.first, candidate, m)
@@ -215,12 +220,32 @@ func (q *Queue) qualifiedTarget(j *Job) (bool, string) {
 			}
 			reason += " on " + m.ID
 		}
+		return true
+	})
+	if reason == "" {
+		return true, ""
 	}
+	if best != nil && (best.first == "host memory" || best.first == "GPU memory" || best.first == "memory envelope") {
+		reason += "; " + memoryCapacityRemedies
+	}
+	return false, reason
+}
+
+// evaluateTargets runs qualification's permanent-capacity fit on every known
+// target, ignoring temporary occupancy and release holds. Submission and
+// resolve share it so their explanations cannot drift. visit returns false to stop.
+func (q *Queue) evaluateTargets(j *Job, visit func(fit targetFit, candidate *Job, m *Machine) bool) {
+	// Resolve envelopes with the planner's code, but without temporary
+	// occupancy or release holds. Retain observations for learned needs.
+	capacity := Queue{clock: q.clock, s: q.s, memoryOrigin: q}
+	capacity.s.Jobs, capacity.s.ModelSlots, capacity.s.HostReleases = nil, nil, nil
 	for _, m := range q.s.Machines {
 		if !q.jobAllowsMachine(j, m.ID) {
-			fit := targetFit{excluded: true}
+			fit := targetFit{excluded: true, key: targetKey(m)}
 			fit.check(false, "allow-list")
-			consider(fit, j, m)
+			if !visit(fit, j, m) {
+				return
+			}
 			continue
 		}
 		for _, target := range q.machineTargets(m) {
@@ -230,28 +255,25 @@ func (q *Queue) qualifiedTarget(j *Job) (bool, string) {
 			capacity.s.Machines = map[string]*Machine{copy.ID: &copy}
 			candidates, refusal := extensionJobsWithRefusal(j, &copy, true)
 			if len(candidates) == 0 {
-				fit := targetFit{}
+				fit := targetFit{key: targetKey(&copy)}
 				fit.check(false, refusal)
-				consider(fit, j, &copy)
+				if !visit(fit, j, &copy) {
+					return
+				}
 			}
 			for _, candidate := range candidates {
 				candidate = capacity.memoryCandidate(candidate, &copy)
-				fit := targetFit{}
+				fit := targetFit{key: targetKey(&copy)}
 				fitsResourcesChecked(candidate, &copy, copy.TotalMemoryGB, &fit)
 				hostFailure := hostFitFailure(&copy, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB)
 				fit.check(hostFailure == "", hostFailure)
-				if fit.failures == 0 {
-					return true, ""
-				}
 				fit.shortfall = resourceShortfall(hostNeed(&copy, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB), copy.FreeHostMemoryGB) + resourceShortfall(candidate.Spec.Needs.MemoryGB, copy.TotalMemoryGB) + resourceShortfall(float64(candidate.Spec.Needs.cores()), float64(copy.EffectiveCPUCores))
-				consider(fit, candidate, &copy)
+				if !visit(fit, candidate, &copy) {
+					return
+				}
 			}
 		}
 	}
-	if best != nil && (best.first == "host memory" || best.first == "GPU memory" || best.first == "memory envelope") {
-		reason += "; " + memoryCapacityRemedies
-	}
-	return false, reason
 }
 
 // Shared permanent-capacity projection for qualification and bounded exploration.
