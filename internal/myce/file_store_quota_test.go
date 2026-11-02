@@ -178,3 +178,30 @@ func TestProjectFileStoreQuotaRefusesInputUploads(t *testing.T) {
 		t.Fatal("upload without a project refused by project quota", err)
 	}
 }
+
+// An older CLI's get/set round-trip cannot carry the limit fields; it must not
+// clear them. A current CLI marks its request, so its file can clear a limit.
+func TestPolicySetFromOlderClientKeepsFileStoreLimits(t *testing.T) {
+	q, _ := fixture(t)
+	c := retentionClient(t, q)
+	setQuotaPolicy(t, q, "owner", ProjectPolicy{MaxRetainedFileBytes: 10, MaxAddedFileBytes24h: 20})
+	put := func(path string) {
+		t.Helper()
+		record := q.PriorityPolicy()
+		owner := record.Policy.Projects["owner"]
+		owner.MaxRetainedFileBytes, owner.MaxAddedFileBytes24h, owner.Weight = 0, 0, 2
+		record.Policy.Projects["owner"] = owner
+		request := map[string]any{"expected_revision": record.Revision, "policy": record.Policy}
+		if err := c.Call(context.Background(), "PUT", path, request, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	put("/api/policy")
+	if p := q.s.Policies["owner"]; p.MaxRetainedFileBytes != 10 || p.MaxAddedFileBytes24h != 20 || p.Weight != 2 {
+		t.Fatalf("older client round-trip changed limits or lost its edit: %+v", p)
+	}
+	put("/api/policy?file_store_limits=1")
+	if p := q.s.Policies["owner"]; p.MaxRetainedFileBytes != 0 || p.MaxAddedFileBytes24h != 0 {
+		t.Fatalf("current client could not clear limits: %+v", p)
+	}
+}

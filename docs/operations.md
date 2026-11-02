@@ -874,7 +874,10 @@ projects:
     max_added_file_bytes_24h: 2147483648   # 2 GiB added per rolling 24 h
 ```
 
-Set them through `myce policy set` like other project settings. A non-production
+Set them through `myce policy set` like other project settings. A policy PUT
+without `?file_store_limits=1` (an older CLI, which cannot carry these fields)
+keeps a project's existing limit wherever it sends zero; current CLIs send the
+marker, so removing a limit from the file clears it. A non-production
 submission whose new inputs plus declared `disk.output_bytes` (and the project's
 other declared async outputs) would exceed either limit is refused with
 `project_file_store_quota` and a reason naming the limit, the cleanup command
