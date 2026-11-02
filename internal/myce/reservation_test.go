@@ -70,8 +70,11 @@ func TestReservationGPURequalificationDefaultsToDevice(t *testing.T) {
 				t.Fatal(err)
 			}
 			clock.Advance(time.Second)
-			waiting := submit(t, q, exclusionSpec(m.ID, "0"))
+			conflictingSpec := exclusionSpec(m.ID, "0")
+			conflictingSpec.Needs.HostMemoryGB = 1
+			waiting := submit(t, q, conflictingSpec)
 			siblingSpec := exclusionSpec(m.ID, "1")
+			siblingSpec.Needs.HostMemoryGB = 1
 			siblingWork := submit(t, q, siblingSpec)
 			next := assignedJob(machineCheck(t, q, m, run))
 			if wholeHost {

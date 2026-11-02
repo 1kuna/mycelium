@@ -14,7 +14,7 @@ import (
 )
 
 func reserveCommand(ctx context.Context, args []string, out io.Writer) error {
-	usage := errors.New("usage: myce reserve add SELECTOR --job ID --owner OWNER --reason TEXT [--id ID] [--max-lifetime 2h] | list | release ID --if-revision N --reason TEXT")
+	usage := errors.New("usage: myce reserve add SELECTOR --job ID --owner OWNER --reason TEXT [--whole-host] [--id ID] [--max-lifetime 2h] | list | release ID --if-revision N --reason TEXT")
 	if len(args) == 0 || args[0] != "add" && args[0] != "list" && args[0] != "release" {
 		return usage
 	}
