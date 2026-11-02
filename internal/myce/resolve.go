@@ -148,8 +148,9 @@ func (q *Queue) resolveRecipes(s Spec, r *ResolveReport) (map[string]Environment
 			if d.ResolutionBase == "queue-working-directory" {
 				f.Problem += "; inline environment paths are read on the queue host, not the submitter"
 			}
-		} else if s.Environment.Name != "" {
-			f.Problem = fmt.Sprintf("environment %q is not in the queue library", s.Environment.Name)
+		} else {
+			f.Problem = err.Error()
+			f.Fix = "Correct the environment declaration to satisfy this validation error, then run `myce spec check --resolve` again."
 		}
 		r.Findings = append(r.Findings, f)
 		return nil, nil, false

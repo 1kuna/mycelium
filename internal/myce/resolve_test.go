@@ -3,12 +3,41 @@ package myce
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestResolveInlineEnvironmentValidationError(t *testing.T) {
+	q, _ := fixture(t)
+	s := cpuResolveSpec()
+	root := t.TempDir()
+	s.Environment = Environment{LockFile: filepath.Join(root, "x-requirements.txt"), Python: "3.12"}
+	if err := os.WriteFile(s.Environment.LockFile, []byte("# locked fixture\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := q.Resolve(ResolveRequest{Spec: s})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := resolveFinding(r, "environment")
+	if f == nil || f.Problem != "lock_file must be uv.lock, pyproject.toml, or requirements.txt" || f.PathDiagnostic != nil || !strings.Contains(f.Fix, "Correct the environment declaration") {
+		t.Fatalf("inline validation error hidden: %+v", r.Findings)
+	}
+	// A missing correctly named file still reports the queue-side path diagnostic.
+	s.Environment.LockFile = filepath.Join(root, "requirements.txt")
+	r, err = q.Resolve(ResolveRequest{Spec: s})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f = resolveFinding(r, "environment.lock_file")
+	if f == nil || f.PathDiagnostic == nil || f.Side != "queue" || f.PathDiagnostic.Path != s.Environment.LockFile || f.PathDiagnostic.ResolutionBase != "queue-working-directory" || !strings.Contains(f.Problem, "not the submitter") {
+		t.Fatalf("queue path diagnostic lost: %+v", r.Findings)
+	}
+}
 
 func cpuResolveSpec() Spec {
 	return Spec{Name: "resolve", Project: "test", Priority: "experiment", Run: RunSpec{Command: []string{"sh", "run.sh"}}, Needs: ResourceNeeds{CPUCores: 1, MemoryGB: 1, Platform: Platform{Required: []string{"cpu"}}}}

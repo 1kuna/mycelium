@@ -298,10 +298,11 @@ func (q *Queue) recordWorkOOM(j *Job, r Result, oomFailure bool) {
 	k := *key
 	if memoryOnly {
 		configuration := memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
+		layout := memoryLayout(j, allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices))
 		for _, id := range slices.Sorted(maps.Keys(q.s.WorkObservations)) {
 			point := q.s.WorkObservations[id]
-			if j.MemoryEnvelope != nil && j.MemoryEnvelope.Source == boundedMemoryExploration && point.Key.Target.OS != k.Target.OS {
-				continue // A target-OS probe cannot disprove the foreign prior.
+			if j.MemoryEnvelope != nil && boundedMemorySource(j.MemoryEnvelope.Source) && (point.Key.Target.OS != k.Target.OS || !j.Spec.Needs.cpuOnly() && !sameMemoryFamily(point, k, layout)) {
+				continue // A target-family probe cannot disprove the transferred prior.
 			}
 			if sameMemoryWork(point, k, configuration) {
 				old := point

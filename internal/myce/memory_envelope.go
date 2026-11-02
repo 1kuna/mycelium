@@ -297,12 +297,15 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 		estimate := q.memoryEstimate(j, m)
 		if host, why, ok := q.boundedMemoryCandidate(j, m, estimate); ok {
 			estimate.measuredHostGB, estimate.source = host, boundedMemoryExploration
+			if !n.cpuOnly() {
+				estimate.source = boundedGPUExploration
+			}
 			refusal = why
 		}
 		switch {
 		case estimate.host != nil:
 			source, basis, evidence = estimate.source, "learned", estimate.samples
-			if evidence == 0 || estimate.measuredHostGB > 0 && estimate.source == boundedMemoryExploration {
+			if evidence == 0 || estimate.measuredHostGB > 0 && boundedMemorySource(estimate.source) {
 				basis = "exploratory"
 			}
 			host := hostMemoryPeakGB(estimate.host) * estimate.hostFactor
@@ -311,9 +314,9 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 			}
 			if !n.cpuOnly() {
 				peak, factor := estimate.device, estimate.deviceFactor
-				if peak.DeviceGB != nil && validRate(*peak.DeviceGB) && validRate(*peak.DeviceGB*factor) {
+				if peak != nil && peak.DeviceGB != nil && validRate(*peak.DeviceGB) && validRate(*peak.DeviceGB*factor) {
 					n.MemoryGB = *peak.DeviceGB * factor
-				} else if factor > 1.25 {
+				} else if peak != nil && factor > 1.25 {
 					// Unknown device counters cannot become zero reservations.
 					n.MemoryGB = max(n.MemoryGB, hostMemoryPeakGB(peak)*factor)
 					source += "; GPU recipe default with host estimate floor"
@@ -428,6 +431,17 @@ func memoryConfiguration(needs ResourceNeeds, args []string, program *Program) s
 		Args    []string
 		Program *Program
 	}{needs, args, program})
+}
+
+func memoryLayout(j *Job, m *Machine) string {
+	if m != nil && m.UnifiedMemory && !j.Spec.Needs.cpuOnly() {
+		return "unified"
+	}
+	return "separate"
+}
+
+func sameMemoryFamily(point WorkObservation, key ObservationKey, layout string) bool {
+	return point.Key.Target == key.Target && point.MemoryLayout != "" && point.MemoryLayout == layout
 }
 
 func sameMemoryWork(point WorkObservation, key ObservationKey, configuration string) bool {
@@ -558,10 +572,7 @@ func (q *Queue) memoryEstimateFor(j *Job, m *Machine, checkSeed bool) memoryEsti
 	gpuHost := !j.Spec.Needs.cpuOnly() && key.Target.Platform == "xpu" && !m.UnifiedMemory
 	invalidated := false
 	configuration := memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
-	layout := "separate"
-	if m.UnifiedMemory && !j.Spec.Needs.cpuOnly() {
-		layout = "unified"
-	}
+	layout := memoryLayout(j, m)
 	// Once corrected evidence exists, legacy XPU attribution on another
 	// comparable key (including a sibling card) must not restore the old peak.
 	correctedXPU := false
@@ -589,7 +600,7 @@ func (q *Queue) memoryEstimateFor(j *Job, m *Machine, checkSeed bool) memoryEsti
 		if m.UnifiedMemory && !j.Spec.Needs.cpuOnly() && (p.DeviceGB == nil || !validRate(*p.DeviceGB)) {
 			continue
 		}
-		sameFamily := k.Target == key.Target && point.MemoryLayout != "" && point.MemoryLayout == layout
+		sameFamily := sameMemoryFamily(point, *key, layout)
 		samples := max(1, point.MemorySamples)
 		if sameFamily && sameMemoryHost(k, *key, m) {
 			sameHost, sameHostN = mergeMemoryPeaks(sameHost, p), sameHostN+samples
@@ -628,9 +639,9 @@ func (q *Queue) memoryEstimateFor(j *Job, m *Machine, checkSeed bool) memoryEsti
 	}
 	estimate.host, estimate.hostFactor = estimate.device, estimate.deviceFactor
 	// A spent probe cannot lose its prior through OOM invalidation, history
-	// collection or restart. Only accepted same-OS evidence supersedes it.
-	if j.Spec.Needs.cpuOnly() && exact == nil && family == nil && sameOS == nil {
-		if spent, ok := q.s.MemoryExplorations[memoryExplorationKey(*key, configuration)]; ok {
+	// collection or restart. Only accepted target-family evidence supersedes it.
+	if exact == nil && family == nil && sameOS == nil {
+		if spent, ok := q.s.MemoryExplorations[memoryExplorationKey(*key, configuration, layout)]; ok {
 			prior := spent.PriorGB
 			if estimate.host != nil {
 				prior = max(prior, hostMemoryPeakGB(estimate.host)*estimate.hostFactor)

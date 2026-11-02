@@ -1400,6 +1400,16 @@ reopen the exception. Successful constrained attempts retain their ordinary job
 outcome. The foreign prior remains available with the capacity-remedy diagnostic.
 Claiming at assignment may spend a probe before launch, preventing duplicate
 launches after a lost offer. Qualification and output parity remain unchanged.
+For a discrete-GPU target with only one accepted sample from another
+target/layout family, the same durable probe applies when the transferred
+host estimate exceeds every eligible allowance in the target family. The
+measured peak plus 25% and any host hint must fit the largest allowance after
+launch slack and drift margin. Keep total-cgroup sizing when complete evidence
+cannot distinguish reclaimable cache; a smaller resident figure alone is not
+enough. Assignment consumes one probe per frozen work/configuration and target
+OS/architecture/backend/layout. Accepted target-family evidence replaces the prior;
+OOM gets no retry and ineligible results cannot reopen it. Unified targets,
+multi-card work and fan-out retain their existing rules.
 Next use an optional submitter hint; a bootstrap declaration is not required and
 recipe defaults do not count as submitter hints. Without either, allow an
 exploratory first run only with measured memory, a known allowance (physical RAM if uncapped), at

@@ -263,6 +263,10 @@ needs:
   platform: {preferred: [cuda]}
 ```
 
+The lock file's basename must be exactly `uv.lock`, `pyproject.toml`, or
+`requirements.txt` (or `pixi.lock` with `backend: pixi`); names such as
+`download-requirements.txt` are rejected.
+
 The queue process must be able to read the input files at submission time,
 using its own filesystem paths and permissions. For `requirements.txt`, only
 that file is read; for `uv.lock` or `pyproject.toml`, both adjacent files are
