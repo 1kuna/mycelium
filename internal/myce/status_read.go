@@ -149,6 +149,7 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 		if minimal {
 			copy := statusJobInputs(selected)
 			copy.Spec.SubmissionKey = selected.Spec.SubmissionKey
+			copy.Resources = jobResources(selected) // Before redaction drops disk and inputs.
 			s = state{PriorityPolicy: q.s.PriorityPolicy, Jobs: map[string]*Job{id: &copy}}
 			if !terminal(selected.State) {
 				s.Policies = map[string]ProjectPolicy{selected.Spec.Project: q.s.Policies[selected.Spec.Project]}
@@ -341,6 +342,9 @@ func (q *Queue) jobSnapshotGeneration(id string, contexts ...context.Context) (*
 		j = v.projectCall(c, nil, reasons)
 	} else {
 		j = v.projectJob(j, nil, reasons, true)
+	}
+	if j.Resources == nil {
+		j.Resources = jobResources(j)
 	}
 	v.projectJobDiagnostics(j, true, true)
 	j.DeadlineGuidance = v.deadlineGuidance(j)

@@ -406,7 +406,19 @@ Each entry binds `attempt`, `machine`, and `session` to its observed
 `memory_peak` and resolved `memory_envelope`. The envelope's optional `basis`
 (`declared`, `learned`, `hint` or `exploratory`) and `evidence` (accepted
 attempts behind a learned figure or similar-work bound) also appear in status
-and waiting reasons (#585). These facts persist with the job
+and waiting reasons (#585). At assignment the envelope's optional `learned`
+(`host_gb`, `device_gb`, `evidence`, `source`) records what learned sizing
+would reserve on that target, for explicit figures too, so a stale number
+shows beside its evidence. Job GET `resources` lists each dimension
+(`host_memory_gb`, `device_memory_gb` for GPU jobs, `cpu_cores`,
+`storage_bytes`) with `declared`, `learned`, `evidence`, `used` and `basis`;
+a missing value means none, not zero. `used` host memory is the charged
+figure, including ceiling slack and, on unified hosts, the device share. CPU
+is not learned yet, and learned storage stays observation only (#504). Status
+`admissions` counts memory admissions per host by basis: `current` over
+running attempts, `recent` over every retained assigned job, and
+`declared_with_evidence` for explicit figures with a learned comparison.
+These facts persist with the job
 independently of learning, including a constrained first run with no comparable
 learned point. Retention is bounded to 32 rows: the first and the most recent
 31. Optional `memory_attempts_dropped` counts evicted rows (omitted zero), so
@@ -466,6 +478,14 @@ sampled lower bound, not a retained allocator maximum. When no usable sample is
 retained, `device_unavailable` explains missing process samples, unsupported or
 invalid accounting, unavailable process inventory/cgroups, or sampler shutdown
 timeout. Older workers may omit both fields; historical peaks cannot be recovered.
+When a unified-memory CUDA host lists the attempt's processes on its GPU but
+reports no per-process memory (`[N/A]`), the worker takes the largest host
+`MemAvailable` drop since launch outside every Mycelium cgroup as `device_gb`,
+labelled by `device_source`. It is used only when no other process appears on
+that GPU during the attempt; otherwise `device_unavailable` says the GPU was
+shared. The figure also counts growth by processes outside Mycelium and can
+miss use that coincides with their frees. It feeds learning like a
+per-process sample, so the device figure can grow from measured use.
 These diagnostics grant no learning eligibility or accounting reduction. Shared
 physical RAM alone does not establish cgroup coverage: GB10 CUDA allocations can
 exceed the job's current cgroup charge. Unified admission retains conservative

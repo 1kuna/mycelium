@@ -1950,6 +1950,7 @@ func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
 		page := q.observationSelection.page
 		out.JobsPage = &page
 	}
+	out.Admissions = q.hostAdmissions()
 	out.ComponentExclusions = q.componentExclusions()
 	out.Reservations = q.reservations()
 	out.PriorityPolicy = q.priorityPolicyRecord()
@@ -2439,6 +2440,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	j = q.touchJob(selected.ID)
 	j.Spec.Needs = selected.Spec.Needs
 	j.MemoryEnvelope, j.MemoryFallback = selected.MemoryEnvelope, selected.MemoryFallback
+	q.recordLearnedMemory(j, m)
 	if selected.Batch != nil {
 		j.Batch = selected.Batch
 	}
