@@ -997,7 +997,8 @@ most over its reservation. This safety stop may displace an equal tier. It
 retains normal checkpoint grace and exact-release custody and requeues without
 spending a failure budget. Each grower's measured peak × 1.25 becomes a durable
 device-memory floor for its next placement; running reservations stay fixed.
-Single tenants are unaffected. Missing or stale samples establish no growth,
+Single tenants are unaffected. Every tenant needs fresh per-process evidence
+before the guard acts. Missing or stale samples establish no growth,
 and the running job's reason reports unavailable per-process evidence. Host
 memory-drop estimates cannot attribute co-tenants and do not trigger this guard.
 

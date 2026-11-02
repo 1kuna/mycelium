@@ -24,10 +24,12 @@ func (q *Queue) guardSharedGPU(m *Machine) {
 		}
 		used, over := 0.0, map[string]float64{}
 		growth := false
+		measured := true
 		var victim *Job
 		for _, j := range tenants {
 			s, now := q.hostMemorySamples[m.ID][jobKey(*j)], q.clock.Now()
 			fresh := !s.deviceAt.IsZero() && !now.Before(s.deviceAt) && now.Sub(s.deviceAt) < deviceMemorySampleFreshFor
+			measured = measured && fresh
 			peak := 0.0 // Stale or missing device samples contribute no growth.
 			if fresh {
 				peak = s.deviceGB
@@ -50,14 +52,14 @@ func (q *Queue) guardSharedGPU(m *Machine) {
 				used += q.slotMemory(slot)
 			}
 		}
-		if !growth || used <= d.BudgetGB {
+		if !measured || !growth || used <= d.BudgetGB {
 			continue
 		}
 		// Retain each grower's lower bound even if a lower tier yields for it.
 		// The existing learning margin (25%) costs packing room but covers
 		// variation beyond this sampled peak. Never resize active custody.
 		for _, j := range tenants {
-			if over[j.ID] > 0 {
+			if over[j.ID] > 0 || j.ID == victim.ID {
 				j.DeviceMemoryFloorGB = max(j.DeviceMemoryFloorGB, (over[j.ID]+deviceShareGB(j))*1.25)
 			}
 		}

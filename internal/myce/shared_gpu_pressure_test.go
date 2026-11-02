@@ -11,7 +11,7 @@ func growthCheck(t *testing.T, q *Queue, m Machine, runs []*Job, used []float64,
 	c := Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol}
 	for i, j := range runs {
 		r := AttemptReport{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Session: j.Session, Started: true}
-		if used != nil {
+		if i < len(used) {
 			r.CurrentHostMemory = &CurrentHostMemory{DeviceGB: &used[i], DeviceAgeSeconds: age}
 		}
 		c.Attempts = append(c.Attempts, r)
@@ -94,6 +94,11 @@ func TestSharedGPUPressureStaleAndUnavailable(t *testing.T) {
 		}
 	}
 	growthCheck(t, q, m, []*Job{a, b}, nil, 0)
+	requireState(t, q, a.ID, "running")
+	requireState(t, q, b.ID, "running")
+	// A fresh grower cannot authorize a stop without per-process evidence
+	// covering its co-tenant too (host-drop fallback cannot attribute sharing).
+	growthCheck(t, q, m, []*Job{a, b}, []float64{30}, 0)
 	requireState(t, q, a.ID, "running")
 	requireState(t, q, b.ID, "running")
 }
