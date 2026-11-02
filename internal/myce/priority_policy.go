@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"math"
 	"net/http"
 	"path"
@@ -23,6 +24,7 @@ type PriorityPolicy struct {
 	Tiers   []PriorityTier `json:"tiers" yaml:"tiers"`
 	// Keep an explicit empty map on the wire: nil preserves settings, {} clears them.
 	Projects map[string]ProjectPolicy `json:"projects" yaml:"projects"`
+	Hosts    map[string]HostPolicy    `json:"hosts" yaml:"hosts"`
 }
 type PriorityPolicyRecord struct {
 	Revision uint64         `json:"revision" yaml:"revision"`
@@ -216,6 +218,7 @@ func (q *Queue) priorityPolicyRecord() PriorityPolicyRecord {
 		v.ProductionParityHosts = cloneProductionParityHosts(v.ProductionParityHosts)
 		p.Projects[name] = v
 	}
+	p.Hosts = q.hostPolicies()
 	warnings, _ := p.validate()
 	return PriorityPolicyRecord{q.policyRevision(), p, warnings}
 }
@@ -243,11 +246,18 @@ func (q *Queue) SetPriorityPolicy(expected uint64, p PriorityPolicy, requestCont
 			return out, err
 		}
 	}
+	hosts := p.Hosts
+	if hosts != nil {
+		var err error
+		if hosts, err = normalizeHostPolicies(hosts); err != nil {
+			return out, err
+		}
+	}
 	p.Tiers = slices.Clone(p.Tiers)
 	for i := range p.Tiers {
 		p.Tiers[i].Selectors = slices.Clone(p.Tiers[i].Selectors)
 	}
-	p.Projects = nil
+	p.Projects, p.Hosts = nil, nil
 	err := q.updateRequest(requestCtx, func() error {
 		if expected == ^uint64(0) {
 			return errors.New("policy revision exhausted")
@@ -260,9 +270,15 @@ func (q *Queue) SetPriorityPolicy(expected uint64, p PriorityPolicy, requestCont
 				return err
 			}
 		}
+		if err := q.validateMachineNames(slices.Collect(maps.Keys(hosts))); err != nil {
+			return err
+		}
 		q.s.PriorityPolicy = &PriorityPolicyRecord{Revision: expected + 1, Policy: p}
 		if projects != nil {
 			q.s.Policies = projects
+		}
+		if hosts != nil {
+			q.replaceHostPolicies(hosts)
 		}
 		out = q.priorityPolicyRecord()
 		return nil // Normal planner reevaluates on its next decision; no bulk stop here.

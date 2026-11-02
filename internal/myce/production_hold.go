@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"os"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -15,9 +17,16 @@ import (
 )
 
 // Policies are keyed by physical host_id (worker name when host_id is unset).
+// The default host scope fences the whole host for production. Device scope
+// keeps the hold's release custody but leaves exclusivity to ordinary
+// per-resource priority preemption, so siblings and the CPU stay usable.
 type HostPolicy struct {
-	ProductionHold bool `json:"production_hold" yaml:"production_hold"`
+	ProductionHold      bool   `json:"production_hold" yaml:"production_hold"`
+	ProductionHoldScope string `json:"production_hold_scope,omitempty" yaml:"production_hold_scope,omitempty"`
 }
+
+func (p HostPolicy) hostWide() bool { return p.ProductionHold && p.ProductionHoldScope == "" }
+
 type HostState struct {
 	Policy HostPolicy `json:"policy"`
 	Active bool       `json:"active,omitempty"`
@@ -66,49 +75,86 @@ func ReadHostPolicies(path string) (policies map[string]HostPolicy, err error) {
 	}
 	return v.Hosts, nil
 }
+
 func validateHostPolicies(p map[string]HostPolicy) error {
-	for host := range p {
-		if strings.TrimSpace(host) == "" {
-			return errors.New("host name is required")
-		}
-	}
-	return nil
+	_, err := normalizeHostPolicies(p)
+	return err
 }
 
+// An explicit host scope is the default, so it compares equal to an omitted one.
+func normalizeHostPolicies(p map[string]HostPolicy) (map[string]HostPolicy, error) {
+	out := map[string]HostPolicy{}
+	for host, v := range p {
+		if strings.TrimSpace(host) == "" {
+			return nil, errors.New("host name is required")
+		}
+		switch v.ProductionHoldScope {
+		case "", "host":
+			v.ProductionHoldScope = ""
+		case "device":
+			if !v.ProductionHold {
+				return nil, fmt.Errorf("host %s: production_hold_scope requires production_hold: true", host)
+			}
+		default:
+			return nil, fmt.Errorf("host %s: production_hold_scope must be host or device", host)
+		}
+		out[host] = v
+	}
+	return out, nil
+}
+
+func (q *Queue) hostPolicies() map[string]HostPolicy {
+	out := map[string]HostPolicy{}
+	for h, s := range q.s.Hosts {
+		out[h] = s.Policy
+	}
+	return out
+}
+
+// Unchanged hosts keep their activation; a changed policy starts inactive and
+// the next maintenance pass re-derives it from live demand. Release custody is
+// keyed by attempt, so it survives the change.
+func (q *Queue) replaceHostPolicies(p map[string]HostPolicy) {
+	next := map[string]*HostState{}
+	for h, v := range p {
+		if old := q.s.Hosts[h]; old != nil && old.Policy == v {
+			next[h] = old
+		} else {
+			next[h] = &HostState{Policy: v}
+		}
+	}
+	q.s.Hosts = next
+}
+
+// The startup file seeds host policy once; afterwards `myce policy set` owns it.
+// Restarting with the last accepted file keeps the live policy. A different
+// file is still refused, so an edit can never silently relax a hold.
 func (q *Queue) ConfigureHosts(p map[string]HostPolicy) error {
-	if err := validateHostPolicies(p); err != nil {
+	normalized, err := normalizeHostPolicies(p)
+	if err != nil {
 		return err
 	}
-	normalized := map[string]HostPolicy{}
-	for host, v := range p {
-		normalized[host] = v
-	}
 	return q.update(func() error {
-		for h := range normalized {
-			if err := q.validateMachineNames([]string{h}); err != nil {
-				return err
-			}
+		if err := q.validateMachineNames(slices.Collect(maps.Keys(normalized))); err != nil {
+			return err
 		}
-		if len(q.s.Hosts) > 0 {
-			saved := map[string]HostPolicy{}
-			for h, s := range q.s.Hosts {
-				saved[h] = s.Policy
-			}
-			if !reflect.DeepEqual(saved, normalized) {
-				return errors.New("host configuration differs from saved policy; refusing to relax or replace it")
+		if len(q.s.Hosts) > 0 || q.s.HostConfig != nil {
+			switch {
+			case reflect.DeepEqual(q.hostPolicies(), normalized):
+				q.s.HostConfig = normalized
+			case !reflect.DeepEqual(q.s.HostConfig, normalized):
+				return errors.New("host configuration differs from saved policy; refusing to relax or replace it; change live host policy with myce policy set")
 			}
 			return nil
 		}
-		q.s.Hosts = map[string]*HostState{}
-		for h, v := range normalized {
-			q.s.Hosts[h] = &HostState{Policy: v}
-		}
+		q.s.HostConfig = normalized
+		q.replaceHostPolicies(normalized)
 		return nil
 	})
 }
 func (q *Queue) held(host string) bool {
 	s := q.s.Hosts[host]
-	return s != nil && s.Policy.ProductionHold && s.Active
+	return s != nil && s.Policy.hostWide() && s.Active
 }
 func releaseKey(r HostRelease) string {
 	return fmt.Sprintf("%s/%s/%s/%d", r.Job, r.Machine, r.Session, r.Attempt)
@@ -520,7 +566,7 @@ func (q *Queue) productionTarget(j *Job, call *ModelCall) string {
 func (q *Queue) maintainHolds() {
 	enabled := false
 	for _, h := range q.s.Hosts {
-		enabled = enabled || h.Policy.ProductionHold
+		enabled = enabled || h.Policy.hostWide()
 	}
 	if !enabled {
 		return
@@ -548,12 +594,12 @@ func (q *Queue) maintainHolds() {
 		}
 		if j.ProductionHost == "" {
 			if m := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices); m != nil {
-				if h := q.s.Hosts[hostID(m)]; h != nil && h.Policy.ProductionHold {
+				if h := q.s.Hosts[hostID(m)]; h != nil && h.Policy.hostWide() {
 					j.ProductionHost = hostID(m)
 				}
 			} else {
 				target := q.productionTarget(j, nil)
-				if h := q.s.Hosts[target]; h != nil && h.Policy.ProductionHold {
+				if h := q.s.Hosts[target]; h != nil && h.Policy.hostWide() {
 					j.ProductionHost = target
 				}
 			}
@@ -569,7 +615,7 @@ func (q *Queue) maintainHolds() {
 				j.Spec.Needs.HostMemoryGB = model.HostMemoryGB
 				j.Spec.Needs.Platform = Platform{Required: model.Platforms}
 				target := q.productionTarget(j, c)
-				if h := q.s.Hosts[target]; h != nil && h.Policy.ProductionHold {
+				if h := q.s.Hosts[target]; h != nil && h.Policy.hostWide() {
 					c.ProductionHost = target
 				}
 			}
@@ -577,7 +623,7 @@ func (q *Queue) maintainHolds() {
 		}
 	}
 	for host, h := range q.s.Hosts {
-		if !h.Policy.ProductionHold {
+		if !h.Policy.hostWide() {
 			continue
 		}
 		if demand[host] {

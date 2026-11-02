@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -66,6 +67,55 @@ func TestPolicyCLI(t *testing.T) {
 	}
 	if _, err := myce.ReadPriorityPolicy(strings.NewReader("version: 1\ntires: []")); err == nil {
 		t.Fatal("unknown YAML accepted")
+	}
+}
+
+// The documented local-policy step: export, change one host's hold scope, set,
+// then restart with the unchanged startup host file.
+func TestPolicyCLIHostHoldScopeTransition(t *testing.T) {
+	dir := t.TempDir()
+	hostFile := filepath.Join(dir, "hosts.yaml")
+	if err := os.WriteFile(hostFile, []byte("hosts:\n  gpu-host: {production_hold: true}\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	start := func() *myce.Dev {
+		t.Helper()
+		hosts, err := myce.ReadHostPolicies(hostFile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		d, err := myce.StartDev(myce.DevConfig{Address: "127.0.0.1:0", Database: filepath.Join(dir, "state", "queue.db"), Checkpoints: filepath.Join(dir, "checkpoints"), Token: "policy-test", Workers: 1, GPU: "cpu", HostPolicies: hosts})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { d.Close() })
+		t.Setenv("MYCE_QUEUE", d.URL)
+		return d
+	}
+	d := start()
+	t.Setenv("MYCE_TOKEN", "policy-test")
+	var out bytes.Buffer
+	if err := policyCommand([]string{"get", "--yaml"}, &out); err != nil {
+		t.Fatal(err)
+	}
+	exported := strings.Replace(out.String(), "production_hold: true", "production_hold: true\n        production_hold_scope: device", 1)
+	if exported == out.String() {
+		t.Fatalf("host hold missing from export:\n%s", out.String())
+	}
+	file := filepath.Join(dir, "policy.yaml")
+	if err := os.WriteFile(file, []byte(exported), 0600); err != nil {
+		t.Fatal(err)
+	}
+	revision := strconv.FormatUint(d.Queue.PriorityPolicy().Revision, 10)
+	if err := policyCommand([]string{"set", file, "--if-revision", revision}, &out); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	d = start()
+	if got := d.Queue.PriorityPolicy().Policy.Hosts["gpu-host"]; got != (myce.HostPolicy{ProductionHold: true, ProductionHoldScope: "device"}) {
+		t.Fatalf("scope lost on restart: %+v", got)
 	}
 }
 
