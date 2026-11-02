@@ -9,13 +9,13 @@ import (
 )
 
 // A unified CUDA host whose one GPU draws from the host pool (#538). The 40 GiB
-// device budget holds a 17 GiB and a 13 GiB job, but not a 25 GiB third beside them.
+// device budget (56 GiB less its 16 GiB reserve) holds a 17 GiB and a 13 GiB job, but not a 25 GiB third beside them.
 func sharedUnifiedMachine() Machine {
 	m := cpuMachine("unified", "unified-host", "cuda", 16, 101)
 	m.CapabilityProfile.Arch, m.CapabilityProfile.MemoryLayout = "arm64", "unified"
 	m.CapabilityProfile.SystemMemoryBytes = 128 << 30
 	m.MemoryObservation = &HostMemoryObservation{TotalGB: 128}
-	m.Devices = []MachineDevice{{ID: "0", Platform: "cuda", Identity: "synthetic-unified", Selector: "0", MemoryMode: "unified", ReserveMemoryGB: 16, TotalMemoryGB: 40, BudgetGB: 40, FreeMemoryGB: 40, UnifiedMemory: true, MemoryMeasured: true}}
+	m.Devices = []MachineDevice{{ID: "0", Platform: "cuda", Identity: "synthetic-unified", Selector: "0", MemoryMode: "unified", ReserveMemoryGB: 16, TotalMemoryGB: 56, BudgetGB: 40, FreeMemoryGB: 40, UnifiedMemory: true, MemoryMeasured: true}}
 	return m
 }
 
