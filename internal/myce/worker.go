@@ -351,10 +351,6 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	if j.Spec.Priority == "production" && j.Spec.StartBy == nil {
 		return nil, errors.New("queue start-gate protocol mismatch: production assignment has no start_by; upgrade queue and workers together")
 	}
-	w.Machine.UnavailableRoots = w.sampleStorageRoots(ctx, s.state.CheckpointRoot)
-	if reason := w.storageRootReason(&j); reason != "" {
-		return nil, s.startFailure(j, launchRefused, errors.New(reason))
-	}
 	if parkedStorage(&j) {
 		return nil, s.startFailure(j, launchRefused, errors.New(parkedStorageReason))
 	}
@@ -374,6 +370,10 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	}
 	if err := w.checkHostRAM(j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB); err != nil {
 		return nil, err
+	}
+	w.Machine.UnavailableRoots = w.sampleStorageRoots(ctx, s.state.CheckpointRoot)
+	if reason := w.storageRootReason(&j); reason != "" {
+		return nil, s.startFailure(j, launchRefused, errors.New(reason))
 	}
 	extensionEnv, extensionRelease, extensionErr := w.prepareExtensionExecution(&j)
 	if extensionErr != nil {
