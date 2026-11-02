@@ -1314,6 +1314,7 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 		q.withdrawUnavailable(&m)
 		q.quarantineDeviceAttempts(&m)
 		q.maintain()
+		q.guardSharedGPU(&m)
 		defer func() {
 			m.AdmissionReason = q.machineLimitReason(&m)
 			if a := machineAvailability(&m); a != nil && !a.Available {

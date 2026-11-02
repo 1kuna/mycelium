@@ -1574,6 +1574,10 @@
           "$ref": "#/$defs/PieceBinding",
           "x-contract": "stable"
         },
+        "device_memory_floor_gb": {
+          "type": "number",
+          "x-contract": "diagnostic"
+        },
         "diagnostic_code": {
           "type": "string",
           "x-contract": "diagnostic"
