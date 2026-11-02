@@ -147,6 +147,10 @@ type Queue struct {
 
 	nextApprovalWarning time.Time
 
+	// Status views carry the admissions summary counted under q.mu, so
+	// dependency jobs need no envelope copy (#585).
+	statusAdmissions *[]HostAdmissions
+
 	// simulation bypasses durable storage only; all scheduling/accounting paths remain shared.
 	checkpointProbe  func() bool // Availability seam; bounded real I/O is the default.
 	simulation       bool
@@ -1950,7 +1954,11 @@ func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
 		page := q.observationSelection.page
 		out.JobsPage = &page
 	}
-	out.Admissions = q.hostAdmissions()
+	if q.statusAdmissions != nil {
+		out.Admissions = *q.statusAdmissions
+	} else {
+		out.Admissions = q.hostAdmissions()
+	}
 	out.ComponentExclusions = q.componentExclusions()
 	out.Reservations = q.reservations()
 	out.PriorityPolicy = q.priorityPolicyRecord()

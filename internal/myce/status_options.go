@@ -129,9 +129,6 @@ func historyBefore(a, b *Job) bool {
 // Cold jobs outside this page still supply dependency identities/state to the
 // planner. Omit their execution/attempt payloads from the locked JSON capture.
 func statusDependencyJob(j *Job) *Job {
-	// The envelope and assignment time feed the per-host admissions summary
-	// over every retained job, not only the selected page.
 	return &Job{ID: j.ID, State: j.State, Queued: j.Queued, ReleaseConfirmed: j.ReleaseConfirmed,
-		FanOut: j.FanOut, Dependency: j.Dependency, Spec: Spec{Project: j.Spec.Project, Class: j.Spec.Class},
-		MemoryEnvelope: j.MemoryEnvelope, AssignedAt: j.AssignedAt}
+		FanOut: j.FanOut, Dependency: j.Dependency, Spec: Spec{Project: j.Spec.Project, Class: j.Spec.Class}}
 }

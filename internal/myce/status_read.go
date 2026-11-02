@@ -182,6 +182,10 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 		}
 		if id == "" {
 			files = q.captureFileStoreStatus()
+			// One allocation-free pass over every retained job; cheaper under
+			// q.mu than copying each envelope into the detached view (#585).
+			admissions := q.hostAdmissions()
+			v.statusAdmissions = &admissions
 		} else {
 			// Receipt diagnostics do not need global usage/event history or
 			// upload and enrollment bookkeeping.
