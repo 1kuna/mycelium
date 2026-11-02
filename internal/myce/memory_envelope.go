@@ -308,14 +308,23 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 			source, basis = "submitter hint", "hint"
 			if !n.cpuOnly() && n.HostMemoryGB == 0 {
 				n.HostMemoryGB = j.Spec.Needs.HostMemoryGB
-				if n.HostMemoryGB == 0 {
-					host, why := q.exploratoryMemory(j, m)
-					if m.UnifiedMemory {
-						host -= n.MemoryGB
-					}
-					n.HostMemoryGB, refusal = max(minimumHostMemoryGB, host), why
-					source = "submitter hint; exploratory host"
+			}
+			// On unified hosts a missing figure becomes neither 0 GiB nor host-wide.
+			bounded := false
+			if !n.cpuOnly() && (n.MemoryGB == 0 || n.HostMemoryGB == 0) {
+				var device, host float64
+				var why string
+				if device, host, why, evidence, bounded = q.unifiedGPUFirstRun(j, m, estimate, n.MemoryGB, n.HostMemoryGB, hostFloor); bounded {
+					n.MemoryGB, n.HostMemoryGB, source = device, host, "submitter hint "+why
 				}
+			}
+			if !bounded && !n.cpuOnly() && n.HostMemoryGB == 0 {
+				host, why := q.exploratoryMemory(j, m)
+				if m.UnifiedMemory {
+					host -= n.MemoryGB
+				}
+				n.HostMemoryGB, refusal = max(minimumHostMemoryGB, host), why
+				source = "submitter hint; exploratory host"
 			}
 		default:
 			source, basis = "exploratory first run", "exploratory"
@@ -323,13 +332,16 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 				source = estimate.source
 			}
 			host, why := 0.0, ""
-			if bound, bounded, similar, ok := q.coldMemoryBound(j, m, estimate, hostFloor); ok {
+			device, unified, bounded, similar, gpuBounded := q.unifiedGPUFirstRun(j, m, estimate, 0, 0, hostFloor)
+			if gpuBounded {
+				n.MemoryGB, host, source, evidence = device, unified, source+" "+bounded, similar
+			} else if bound, bounded, similar, ok := q.coldMemoryBound(j, m, estimate, hostFloor); ok {
 				host, source, evidence = bound, bounded, similar
 			} else {
 				host, why = q.exploratoryMemory(j, m)
 			}
 			refusal = why
-			if !n.cpuOnly() {
+			if !n.cpuOnly() && !gpuBounded {
 				n.MemoryGB = q.reclaimableGPUMemory(m, j.Spec.Priority, j.Spec)
 				if m.TotalMemoryGB > 0 {
 					n.MemoryGB = min(n.MemoryGB, m.TotalMemoryGB)
