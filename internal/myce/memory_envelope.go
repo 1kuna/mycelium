@@ -433,6 +433,17 @@ func memoryConfiguration(needs ResourceNeeds, args []string, program *Program) s
 	}{needs, args, program})
 }
 
+func memoryLayout(j *Job, m *Machine) string {
+	if m != nil && m.UnifiedMemory && !j.Spec.Needs.cpuOnly() {
+		return "unified"
+	}
+	return "separate"
+}
+
+func sameMemoryFamily(point WorkObservation, key ObservationKey, layout string) bool {
+	return point.Key.Target == key.Target && point.MemoryLayout != "" && point.MemoryLayout == layout
+}
+
 func sameMemoryWork(point WorkObservation, key ObservationKey, configuration string) bool {
 	a := point.Key
 	return point.MemoryConfiguration != "" && point.MemoryConfiguration == configuration && a.Work == key.Work && a.Check == key.Check && a.ExtensionDigest == key.ExtensionDigest && a.Reference == key.Reference && a.Concurrency == key.Concurrency && a.BatchSize == key.BatchSize
@@ -561,10 +572,7 @@ func (q *Queue) memoryEstimateFor(j *Job, m *Machine, checkSeed bool) memoryEsti
 	gpuHost := !j.Spec.Needs.cpuOnly() && key.Target.Platform == "xpu" && !m.UnifiedMemory
 	invalidated := false
 	configuration := memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
-	layout := "separate"
-	if m.UnifiedMemory && !j.Spec.Needs.cpuOnly() {
-		layout = "unified"
-	}
+	layout := memoryLayout(j, m)
 	// Once corrected evidence exists, legacy XPU attribution on another
 	// comparable key (including a sibling card) must not restore the old peak.
 	correctedXPU := false
@@ -592,7 +600,7 @@ func (q *Queue) memoryEstimateFor(j *Job, m *Machine, checkSeed bool) memoryEsti
 		if m.UnifiedMemory && !j.Spec.Needs.cpuOnly() && (p.DeviceGB == nil || !validRate(*p.DeviceGB)) {
 			continue
 		}
-		sameFamily := k.Target == key.Target && point.MemoryLayout != "" && point.MemoryLayout == layout
+		sameFamily := sameMemoryFamily(point, *key, layout)
 		samples := max(1, point.MemorySamples)
 		if sameFamily && sameMemoryHost(k, *key, m) {
 			sameHost, sameHostN = mergeMemoryPeaks(sameHost, p), sameHostN+samples
@@ -633,7 +641,7 @@ func (q *Queue) memoryEstimateFor(j *Job, m *Machine, checkSeed bool) memoryEsti
 	// A spent probe cannot lose its prior through OOM invalidation, history
 	// collection or restart. Only accepted target-family evidence supersedes it.
 	if exact == nil && family == nil && sameOS == nil {
-		if spent, ok := q.s.MemoryExplorations[memoryExplorationKey(*key, configuration)]; ok {
+		if spent, ok := q.s.MemoryExplorations[memoryExplorationKey(*key, configuration, layout)]; ok {
 			prior := spent.PriorGB
 			if estimate.host != nil {
 				prior = max(prior, hostMemoryPeakGB(estimate.host)*estimate.hostFactor)

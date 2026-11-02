@@ -11,15 +11,16 @@ import (
 // with a 2.5 margin, exceeding the allowance despite the measured need fitting.
 func TestExtensionCheckMemoryCrossFamilyRecovery(t *testing.T) {
 	for _, tc := range []struct {
-		name               string
-		hint, total        float64
-		oom, missingDevice bool
+		name                           string
+		hint, total                    float64
+		oom, missingDevice, sameTarget bool
 	}{
-		{"hint", 12, 10.855361938476562, false, false},
-		{"no hint", 0, 10.855361938476562, false, false},
-		{"oversized cgroup despite small RSS", 12, 25, false, false},
-		{"failed probe cannot repeat", 12, 10.855361938476562, true, false},
-		{"missing device telemetry", 12, 10.855361938476562, true, true},
+		{"hint", 12, 10.855361938476562, false, false, false},
+		{"no hint", 0, 10.855361938476562, false, false, false},
+		{"oversized cgroup despite small RSS", 12, 25, false, false, false},
+		{"failed probe cannot repeat", 12, 10.855361938476562, true, false, false},
+		{"missing device telemetry", 12, 10.855361938476562, true, true, false},
+		{"same target different layout", 12, 10.855361938476562, true, false, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			q, clock, m, s := gpuHostFixture(t)
@@ -27,7 +28,16 @@ func TestExtensionCheckMemoryCrossFamilyRecovery(t *testing.T) {
 			e.Version = "2"
 			cuda := e.Variants[0]
 			cuda.Target = ExecutionTarget{OS: "linux", Arch: "arm64", Platform: "cuda"}
-			e.Variants = append(e.Variants, cuda)
+			if tc.sameTarget {
+				e.Variants[0] = cuda
+				m.CapabilityProfile.Arch = "arm64"
+				m.CapabilityProfile.Accelerators = []AcceleratorProfile{{Type: "cuda", MemoryBytes: 31 << 30}}
+				for i := range m.Devices {
+					m.Devices[i].Platform, m.Devices[i].MemoryMode = "cuda", "dedicated"
+				}
+			} else {
+				e.Variants = append(e.Variants, cuda)
+			}
 			e = freezeComposition(t, e)
 			if err := q.AddExtension(e); err != nil {
 				t.Fatal(err)
@@ -84,6 +94,7 @@ func TestExtensionCheckMemoryCrossFamilyRecovery(t *testing.T) {
 			}
 			complete(start(source), seed, false)
 			s.Targets = []ExecutionTarget{e.Variants[0].Target}
+			s.AllowedMachines = []string{m.ID}
 			s.SizeHint = SizeHint{HostMemoryGB: tc.hint}
 			if tc.total > 24 {
 				memoryExplorationRefused(t, q, s)
@@ -108,6 +119,17 @@ func TestExtensionCheckMemoryCrossFamilyRecovery(t *testing.T) {
 				machineCheck(t, q, source)
 				machineCheck(t, q, m)
 				memoryExplorationRefused(t, q, s)
+				if tc.sameTarget {
+					// A failed discrete probe cannot erase the accepted unified
+					// observation or replace it with the discrete spent prior.
+					s.AllowedMachines = []string{source.ID}
+					local := start(source)
+					if local.MemoryEnvelope.Basis != "learned" || local.Spec.Needs.HostMemoryGB != tc.total*1.25 {
+						t.Fatalf("probe changed the other layout's accepted need: %+v", local.MemoryEnvelope)
+					}
+					complete(local, seed, false)
+					s.AllowedMachines = []string{m.ID}
+				}
 				// The durable refusal remains valid without any live device
 				// estimate after the source observation's normal expiry.
 				clock.Advance(workCurveMaxAge + time.Second)

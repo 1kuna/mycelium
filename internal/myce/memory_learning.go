@@ -135,10 +135,7 @@ func (q *Queue) recordWorkMemory(sample eligibleMemorySample, old WorkObservatio
 	}
 	point.MemoryConfiguration = memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
 	point.MemoryFamily, point.MemorySamples = memoryFamily(j), old.MemorySamples+1
-	point.MemoryLayout = "separate"
-	if owner := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices); owner != nil && owner.UnifiedMemory && !j.Spec.Needs.cpuOnly() {
-		point.MemoryLayout = "unified"
-	}
+	point.MemoryLayout = memoryLayout(j, allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices))
 	point.MemoryRecordedAt = q.clock.Now()
 	if r.Usage != nil && r.Usage.valid() {
 		point.HostMemoryGB = max(point.HostMemoryGB, r.Usage.HostMemoryGB)

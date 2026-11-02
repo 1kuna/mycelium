@@ -1407,7 +1407,7 @@ measured peak plus 25% and any host hint must fit the largest allowance after
 launch slack and drift margin. Keep total-cgroup sizing when complete evidence
 cannot distinguish reclaimable cache; a smaller resident figure alone is not
 enough. Assignment consumes one probe per frozen work/configuration and target
-OS/architecture/backend. Accepted target-family evidence replaces the prior;
+OS/architecture/backend/layout. Accepted target-family evidence replaces the prior;
 OOM gets no retry and ineligible results cannot reopen it. Unified targets,
 multi-card work and fan-out retain their existing rules.
 Next use an optional submitter hint; a bootstrap declaration is not required and

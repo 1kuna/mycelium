@@ -22,7 +22,7 @@ type memoryExploration struct {
 	PriorGB   float64   `json:"prior_gb"`
 }
 
-func memoryExplorationKey(k ObservationKey, configuration string) string {
+func memoryExplorationKey(k ObservationKey, configuration, layout string) string {
 	work := k.Work
 	if k.Check {
 		work = "check:" + work // existing workload claims keep their key
@@ -33,11 +33,11 @@ func memoryExplorationKey(k ObservationKey, configuration string) string {
 		Concurrency, BatchSize             int
 	}{work, k.ExtensionDigest, k.Target.OS, configuration, k.Reference, k.Concurrency, k.BatchSize})
 	if k.Target.Platform != "cpu" {
-		// Preserve existing CPU claims; GPU evidence is specific to its backend.
+		// Preserve existing CPU claims; GPU claims use the complete memory family.
 		return identityHash(struct {
-			Work   string
-			Target ExecutionTarget
-		}{id, k.Target})
+			Work, Layout string
+			Target       ExecutionTarget
+		}{id, layout, k.Target})
 	}
 	return id
 }
@@ -114,7 +114,7 @@ func (q *Queue) largestMemoryExplorationHost(j *Job, targetMachine *Machine, pri
 		}
 		for _, target := range history.machineTargets(owner) {
 			wanted, actual := machineTarget(targetMachine), machineTarget(target)
-			if actual.OS != wanted.OS || !j.Spec.Needs.cpuOnly() && (actual != wanted || target.UnifiedMemory != targetMachine.UnifiedMemory) {
+			if actual.OS != wanted.OS || !j.Spec.Needs.cpuOnly() && (actual != wanted || memoryLayout(j, target) != memoryLayout(j, targetMachine)) {
 				continue
 			}
 			m := history.qualificationCapacity(target)
@@ -142,7 +142,7 @@ func (q *Queue) boundedMemoryCandidate(j *Job, m *Machine, estimate memoryEstima
 		return 0, "", false
 	}
 	configuration := memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
-	if _, spent := q.s.MemoryExplorations[memoryExplorationKey(*estimate.key, configuration)]; spent {
+	if _, spent := q.s.MemoryExplorations[memoryExplorationKey(*estimate.key, configuration, memoryLayout(j, m))]; spent {
 		return 0, "", false
 	}
 	prior := hostMemoryPeakGB(estimate.host) * estimate.hostFactor
@@ -189,6 +189,6 @@ func (q *Queue) claimMemoryExploration(j *Job, m *Machine) {
 	if q.s.MemoryExplorations == nil {
 		q.s.MemoryExplorations = map[string]memoryExploration{}
 	}
-	id := memoryExplorationKey(*estimate.key, memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program))
+	id := memoryExplorationKey(*estimate.key, memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program), memoryLayout(j, m))
 	q.s.MemoryExplorations[id] = memoryExploration{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, PriorGB: hostMemoryPeakGB(estimate.host) * estimate.hostFactor}
 }
