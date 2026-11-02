@@ -636,6 +636,13 @@ func (q *Queue) memoryWaitingReason(j *Job, machines map[string]*Machine) string
 			}
 			candidate = q.memoryCandidate(candidate, m)
 			n := candidate.Spec.Needs
+			// A host the job can never use (target, backend, environment,
+			// device, allow-list) is not a RAM candidate, so never name it.
+			var eligibility targetFit
+			fitsResourcesChecked(candidate, m, max(m.FreeMemoryGB, m.TotalMemoryGB), &eligibility)
+			if eligibility.ineligible > 0 {
+				continue
+			}
 			if candidate.MemoryEnvelope.Refusal != "" {
 				reasons = append(reasons, m.ID+": "+candidate.MemoryEnvelope.Refusal)
 				continue
