@@ -51,6 +51,7 @@ func TestExtensionCheckMemoryCrossFamilyRecovery(t *testing.T) {
 			source.CapabilityProfile.Accelerators = []AcceleratorProfile{{Type: "cuda", MemoryBytes: 31 << 30}}
 			source.Devices = source.Devices[:1]
 			source.Devices[0].Platform, source.Devices[0].MemoryMode = "cuda", "unified"
+			source.Devices[0].UnifiedMemory = true
 			for _, owner := range []*Machine{&source, &m} {
 				for i := range owner.Devices {
 					target := owner.Devices[i].machine(*owner)
