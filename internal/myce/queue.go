@@ -1616,6 +1616,7 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 				if cancelled(j) {
 					q.finishCancellation(j)
 				} else {
+					q.recordSharedHostLatencyStop(j, r)
 					q.retry(j, j.Reason)
 				}
 			}

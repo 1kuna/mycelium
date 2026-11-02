@@ -15,10 +15,24 @@ func TestSharedHostBackoffLatencyBackoff(t *testing.T) {
 			for n := 0; n < sharedLatencyThreshold; n++ {
 				clock.Advance(time.Minute)
 				m.SharedHostPressure = &SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 1, WakeDelayMS: sharedWakeHighMS}
-				if r := check(t, q, m, run); !r.Kill {
+				directive := check(t, q, m, run)
+				if !directive.Stop || !directive.Kill {
 					t.Fatal("no latency stop")
 				}
-				finishInterrupted(t, q, run)
+				// Native Stop && Kill sends cleanup as a release-only result.
+				released := result(run, false)
+				released.Interrupted, released.Forced, released.ReleaseOnly = true, true, true
+				released.PriorityStop = directive.PriorityStop
+				if err := q.Complete(released); err != nil {
+					t.Fatal(err)
+				}
+				// A lost acknowledgement can replay without counting twice.
+				if err := q.Complete(released); err != nil {
+					t.Fatal(err)
+				}
+				if n < sharedLatencyThreshold-1 && len(job(t, q, id).SharedHostBackoff[hostID(&m)].Stops) != n+1 {
+					t.Fatal("release stop not recorded exactly once")
+				}
 				m.SharedHostPressure = &SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 1}
 				next := check(t, q, m, nil).Job
 				if n < sharedLatencyThreshold-1 {

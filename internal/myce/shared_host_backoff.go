@@ -20,7 +20,7 @@ type SharedHostBackoff struct {
 }
 
 func (q *Queue) recordSharedHostLatencyStop(j *Job, r Result) {
-	if !r.Interrupted || r.Success || j.Reason != "shared host owner scheduling latency" {
+	if !r.Interrupted || r.Success || r.OutOfMemory || j.Reason != "shared host owner scheduling latency" {
 		return
 	}
 	stop := priorityStop(j)
