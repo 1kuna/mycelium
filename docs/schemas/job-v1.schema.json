@@ -2378,6 +2378,9 @@
         "batch_size": {
           "type": "integer"
         },
+        "check": {
+          "type": "boolean"
+        },
         "component": {
           "type": "string"
         },
