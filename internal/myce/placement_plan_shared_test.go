@@ -186,13 +186,7 @@ func TestSharedDeviceXPUEqualTierPacks(t *testing.T) {
 func TestSharedDeviceXPUModelLoadWaitsForTierRelease(t *testing.T) {
 	for _, kind := range []string{"call", "pin"} {
 		t.Run(kind, func(t *testing.T) {
-			q, clock, m := modelFixture(t)
-			inventory := sharedDiscreteMachine("xpu")
-			m.GPU, m.Devices, m.CapabilityProfile = "xpu", inventory.Devices, inventory.CapabilityProfile
-			m.HostMemoryMeasured, m.HostAvailableMemoryGB = true, 32
-			q.models.Models[0].MemoryGB, q.models.Models[0].Platforms = 1, []string{"xpu"}
-			m.ModelConfigHash = modelConfigHash(q.models)
-			machineCheck(t, q, m)
+			q, clock, m := sharedXPUModelFixture(t)
 			var tenants []*Job
 			for _, gb := range []float64{3, 2} {
 				queued := submit(t, q, sharedSpec("experiment", gb))
@@ -227,6 +221,88 @@ func TestSharedDeviceXPUModelLoadWaitsForTierRelease(t *testing.T) {
 				t.Fatal("model did not load after exact batch releases", reply.ModelPlan)
 			}
 		})
+	}
+}
+
+func sharedXPUModelFixture(t *testing.T) (*Queue, *fakeClock, Machine) {
+	t.Helper()
+	q, clock, m := modelFixture(t)
+	inventory := sharedDiscreteMachine("xpu")
+	m.GPU, m.Devices, m.CapabilityProfile = "xpu", inventory.Devices, inventory.CapabilityProfile
+	m.HostMemoryMeasured, m.HostAvailableMemoryGB = true, 32
+	q.models.Models[0].MemoryGB, q.models.Models[0].Platforms = 1, []string{"xpu"}
+	m.ModelConfigHash = modelConfigHash(q.models)
+	machineCheck(t, q, m)
+	return q, clock, m
+}
+
+func TestSharedDeviceXPUEnginePromotionWaitsForTierRelease(t *testing.T) {
+	for _, state := range []string{"ready", "loading"} {
+		t.Run(state, func(t *testing.T) {
+			q, _, m := sharedXPUModelFixture(t)
+			addModelCall(t, q, "experiment")
+			slot := q.s.ModelSlots[slotKey(m.ID, "test", "0")]
+			if slot == nil {
+				t.Fatal("no experiment engine")
+			}
+			if state == "ready" {
+				_, err := q.Checkin(Checkin{Machine: m, AttemptProtocol: keyedAttemptProtocol, ModelReports: []ModelReport{{Name: "test", Device: "0", Attempt: slot.Attempt, State: "ready"}}})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			queued := submit(t, q, sharedSpec("experiment", 3))
+			run := assignedJob(machineCheck(t, q, m))
+			if run == nil || run.ID != queued.ID {
+				t.Fatal("no experiment co-tenant", run)
+			}
+			high := addModelCall(t, q, "production")
+			requireState(t, q, run.ID, "stopping")
+			if high.Machine != "" || slot.Priority == "production" {
+				t.Fatal("existing engine promoted before batch release", high, slot)
+			}
+			finishInterrupted(t, q, run)
+			if slot.Priority != "production" || state == "ready" && high.Machine != m.ID {
+				t.Fatal("existing engine did not promote after exact release", high, slot)
+			}
+		})
+	}
+}
+
+func TestSharedDeviceXPUPinnedEngineRetryWaitsForTierRelease(t *testing.T) {
+	q, clock, m := sharedXPUModelFixture(t)
+	addModelCall(t, q, "experiment")
+	slot := q.s.ModelSlots[slotKey(m.ID, "test", "0")]
+	if slot == nil {
+		t.Fatal("no experiment engine")
+	}
+	queued := submit(t, q, sharedSpec("experiment", 3))
+	run := assignedJob(machineCheck(t, q, m))
+	if run == nil || run.ID != queued.ID {
+		t.Fatal("no experiment co-tenant", run)
+	}
+	if err := q.Pin(ModelPin{Project: "test", Model: "test", Machine: m.ID}); err != nil {
+		t.Fatal(err)
+	}
+	// Reproduce an already-pinned failed engine with a retained batch teardown.
+	if err := q.update(func() error {
+		due := clock.Now()
+		slot.State, slot.RuntimeFailed, slot.RetryAt = "failed", true, &due
+		q.s.Pins[0].Assigned, q.s.Pins[0].AssignedDevice = m.ID, "0"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := q.Tick(); err != nil {
+		t.Fatal(err)
+	}
+	requireState(t, q, run.ID, "stopping")
+	if slot.State != "failed" {
+		t.Fatal("pinned retry loaded before exact batch release", slot)
+	}
+	finishInterrupted(t, q, run)
+	if slot.State != "loading" {
+		t.Fatal("pinned retry did not load after exact batch release", slot)
 	}
 }
 

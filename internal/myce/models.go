@@ -525,6 +525,9 @@ func (q *Queue) maintainModels() {
 			case s == nil || s.State == "failed" && s.RetryAt != nil && !now.Before(*s.RetryAt):
 				p = q.roomPlan(callJob(c), m, false)
 			}
+			if p != nil && !q.addXPUBatchTierStops(p, callJob(c)) {
+				p = nil
+			}
 			if p != nil && q.completionPlanBetter(callJob(c), p, best, scan) {
 				best = p
 			}
@@ -534,6 +537,9 @@ func (q *Queue) maintainModels() {
 		}
 		q.applyPlacement(best, callJob(c))
 		m := best.machine
+		if !q.xpuBatchTiersSettled(m, callJob(c)) {
+			continue
+		}
 		s := q.s.ModelSlots[targetSlotKey(m, c.Model)]
 		if s != nil && s.State == "ready" {
 			limit := q.declaredCallLimit(c, m, model)
@@ -564,7 +570,7 @@ func (q *Queue) maintainModels() {
 			}
 			continue
 		}
-		if !q.xpuBatchTiersSettled(m, callJob(c)) || m.FreeMemoryGB < model.MemoryGB || !cpuAllocationFits(m, 1) || !hostFits(m, model.MemoryGB, model.HostMemoryGB) || q.preparationActive(m) || q.preparationStopping(m) {
+		if m.FreeMemoryGB < model.MemoryGB || !cpuAllocationFits(m, 1) || !hostFits(m, model.MemoryGB, model.HostMemoryGB) || q.preparationActive(m) || q.preparationStopping(m) {
 			continue
 		}
 		if s != nil {

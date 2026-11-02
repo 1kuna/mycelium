@@ -67,6 +67,25 @@ func (q *Queue) applyPlacement(p *placementPlan, demand *Job) {
 	}
 }
 
+// Existing/loading engines need the same batch-tier release projection as a
+// cold load before a higher-tier call or pin can promote them on XPU.
+func (q *Queue) addXPUBatchTierStops(p *placementPlan, demand *Job) bool {
+	m := p.machine
+	if m.GPU != "xpu" {
+		return true
+	}
+	for _, r := range q.liveJobs() {
+		if r.Spec.Needs.cpuOnly() || !batchOnTarget(r, m) || !batchReservesCapacity(r) || q.comparePriority(r.Spec, demand.Spec) == 0 {
+			continue
+		}
+		if !q.batchPreemptible(r, demand.Spec) {
+			return false
+		}
+		p.addJob(r)
+	}
+	return true
+}
+
 // Calls reclaim only the required request slots, preserving the ready engine
 // and pin intent. The slot remains occupied until finishCall acknowledges it.
 func (q *Queue) callSlotPlan(m *Machine, c *ModelCall, s *ModelSlot, limit int) *placementPlan {

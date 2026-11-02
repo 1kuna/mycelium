@@ -171,8 +171,11 @@ func (q *Queue) maintainPins() {
 			key := targetSlotKey(m, p.Model)
 			if s := q.s.ModelSlots[key]; s != nil {
 				if s.State != "draining" && s.State != "unloading" && s.State != "unload_failed" {
-					best = &placementPlan{machine: m}
-					break
+					plan := &placementPlan{machine: m}
+					if q.addXPUBatchTierStops(plan, demand) {
+						best = plan
+						break
+					}
 				}
 				continue
 			}
@@ -191,11 +194,11 @@ func (q *Queue) maintainPins() {
 		}
 		m := best.machine
 		key := targetSlotKey(m, p.Model)
+		q.applyPlacement(best, demand)
 		if q.s.ModelSlots[key] != nil {
 			p.Assigned, p.AssignedDevice = m.ID, targetDevice(m)
 			continue
 		}
-		q.applyPlacement(best, demand)
 		if !q.xpuBatchTiersSettled(m, demand) || m.FreeMemoryGB < model.MemoryGB || !cpuAllocationFits(m, 1) || !hostFits(m, model.MemoryGB, model.HostMemoryGB) || q.preparationActive(m) || q.preparationStopping(m) {
 			continue
 		}

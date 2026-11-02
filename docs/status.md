@@ -1014,7 +1014,9 @@ the queue's stop transition, or the exact release receipt if no stop was
 requested; it is not signal-delivery evidence. `released_at` is the first
 accepted exact cleanup acknowledgement. Replays, elapsed grace, loss and an
 omitted heartbeat attempt do not manufacture or move release times. Older
-copies omit unknown timestamps. Copies survive retry and queue restart.
+copies omit unknown timestamps. Legacy idle-heartbeat release inference keeps
+`released_at` absent; a later exact receipt may fill it. Fresh-session cleanup
+uses the existing verified release protocol. Copies survive retry and queue restart.
 
 Read `GET /api/jobs/ID` (Python `Client.get(ID)`) for copies, `allocated_devices`
 and the submitted `spec.class`/`spec.priority`. Read assignment time from the
