@@ -240,9 +240,14 @@ func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, r
 		}
 		return slotKey(slots[i].Machine, slots[i].Model, slots[i].Device) < slotKey(slots[j].Machine, slots[j].Model, slots[j].Device)
 	})
+	ramDeficit := max(0, need-room)
+	// Fresh unified over-use is freed too, up to the shortfall (#596).
+	freedRAM := func(j *Job) float64 {
+		return hostNeed(allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices), j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) + min(q.unifiedOveruseGB(j), ramDeficit)
+	}
 	// Exclude victims that free neither RAM nor cores, including build hand-back.
 	jobs = slices.DeleteFunc(jobs, func(j *Job) bool {
-		return hostNeed(allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices), j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB) == 0 && freedCPU([]*Job{j}, nil) == 0
+		return freedRAM(j) == 0 && freedCPU([]*Job{j}, nil) == 0
 	})
 	slots = slices.DeleteFunc(slots, func(s *ModelSlot) bool {
 		model, _ := q.model(s.Model)
@@ -251,7 +256,7 @@ func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, r
 	// Reject impossible demands without constructing a partial release plan.
 	allRAM := room
 	for _, j := range jobs {
-		allRAM += hostNeed(allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices), j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
+		allRAM += freedRAM(j)
 	}
 	for _, s := range slots {
 		model, _ := q.model(s.Model)
@@ -266,7 +271,6 @@ func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, r
 	if m.hostBudgetGB > 0 {
 		ramCapacity = min(ramCapacity, m.hostBudgetGB)
 	}
-	ramDeficit := max(0, need-room)
 	coreDeficit := max(0, m.CPUInUseCores+cores-m.EffectiveCPUCores)
 	var bestJobs []*Job
 	var bestSlots []*ModelSlot
@@ -290,7 +294,7 @@ func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, r
 		if j.State == "running" {
 			stops = 1
 		}
-		consider([]*Job{j}, nil, j.Spec, stops, hostNeed(allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices), j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB), "job/"+j.ID)
+		consider([]*Job{j}, nil, j.Spec, stops, freedRAM(j), "job/"+j.ID)
 	}
 	for _, s := range slots {
 		stops := 0
@@ -321,7 +325,7 @@ func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, r
 		if room >= need && cpuOK(chosenJobs, chosenSlots) {
 			break
 		}
-		n := hostNeed(allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices), j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
+		n := freedRAM(j)
 		if room < need && n > 0 || !cpuOK(chosenJobs, chosenSlots) && !j.ReleaseConfirmed {
 			room += n
 			chosenJobs = append(chosenJobs, j)
@@ -331,7 +335,7 @@ func (q *Queue) hostReleasesExcept(m *Machine, gpu, host float64, demand Spec, r
 	// Prune in reverse preference order, retaining the cheaper victims first.
 	for i := len(chosenJobs) - 1; i >= 0; i-- {
 		j := chosenJobs[i]
-		n := hostNeed(allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices), j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB)
+		n := freedRAM(j)
 		remaining := slices.Delete(slices.Clone(chosenJobs), i, i+1)
 		if room-n >= need && cpuOK(remaining, chosenSlots) {
 			room -= n
@@ -379,15 +383,25 @@ type CurrentHostMemory struct {
 	NonreclaimableGB float64 `json:"nonreclaimable_gb"`
 	AgeSeconds       float64 `json:"age_seconds"`
 	sampledAt        time.Time
+	// The attempt's latest per-process device sample. Unified CUDA cgroups
+	// cannot see device allocations, so planning credits use above the
+	// reservation from it (#596).
+	DeviceGB         *float64 `json:"device_gb,omitempty"`
+	DeviceAgeSeconds float64  `json:"device_age_seconds,omitempty"`
+	deviceSampledAt  time.Time
 }
 
 // Actors refresh every <=100 ms. Five seconds bounds cached credit through a
 // delayed heartbeat; losing credit costs utilization, never envelope protection.
 const hostMemorySampleFreshFor = 5 * time.Second
 
+// Device samples arrive every period; one missed sample makes them stale.
+const deviceMemorySamplePeriod = 5 * time.Second
+const deviceMemorySampleFreshFor = 2 * deviceMemorySamplePeriod
+
 type hostMemorySample struct {
-	gb float64
-	at time.Time
+	gb, deviceGB float64
+	at, deviceAt time.Time
 }
 
 func remainingHostGrowth(reservation float64, sample hostMemorySample, now time.Time) float64 {
@@ -400,11 +414,19 @@ func remainingHostGrowth(reservation float64, sample hostMemorySample, now time.
 func currentHostMemorySamples(reports []AttemptReport, now time.Time) map[attemptKey]hostMemorySample {
 	samples := map[attemptKey]hostMemorySample{}
 	for _, r := range reports {
-		sample := r.CurrentHostMemory
-		if !r.Started || sample == nil || !validMemoryValue(sample.NonreclaimableGB) || !validMemoryValue(sample.AgeSeconds) || sample.AgeSeconds >= hostMemorySampleFreshFor.Seconds() {
+		sample, s := r.CurrentHostMemory, hostMemorySample{}
+		if !r.Started || sample == nil {
 			continue
 		}
-		samples[attemptKey{r.ID, r.Attempt, r.Session}] = hostMemorySample{sample.NonreclaimableGB, now.Add(-time.Duration(sample.AgeSeconds * float64(time.Second)))}
+		if validMemoryValue(sample.NonreclaimableGB) && validMemoryValue(sample.AgeSeconds) && sample.AgeSeconds < hostMemorySampleFreshFor.Seconds() {
+			s.gb, s.at = sample.NonreclaimableGB, now.Add(-time.Duration(sample.AgeSeconds*float64(time.Second)))
+		}
+		if d := sample.DeviceGB; d != nil && validMemoryValue(*d) && validMemoryValue(sample.DeviceAgeSeconds) && sample.DeviceAgeSeconds < deviceMemorySampleFreshFor.Seconds() {
+			s.deviceGB, s.deviceAt = *d, now.Add(-time.Duration(sample.DeviceAgeSeconds*float64(time.Second)))
+		}
+		if !s.at.IsZero() || !s.deviceAt.IsZero() {
+			samples[attemptKey{r.ID, r.Attempt, r.Session}] = s
+		}
 	}
 	return samples
 }
