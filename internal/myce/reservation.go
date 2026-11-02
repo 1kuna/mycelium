@@ -366,6 +366,13 @@ func (q *Queue) reservationAllows(j *Job, m *Machine) bool {
 		// admission and recovery gates still own worker availability.
 		return true
 	}
+	if j != nil && j.Spec.Needs.cpuOnly() && m.Devices != nil && m.GPU != "cpu" && len(m.groupMembers) == 0 {
+		// A CPU job runs on the host's CPU view. The host record keeps card 0's
+		// scalar device ID, which must not match a card reservation (2026-11-02).
+		cpu := *m
+		cpu.GPU, cpu.Device = "cpu", ""
+		m = &cpu
+	}
 	// Existing Started work retains normal recovery/custody and priority rules.
 	if j != nil && j.StartedAt != nil && j.Machine == m.ID && (j.State == "running" || j.State == "stopping") {
 		return true

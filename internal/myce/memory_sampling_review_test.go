@@ -128,6 +128,13 @@ printf 'GPU-one, 42, N/A\n'
 	if p.HostGB == nil || *p.HostGB != 8 {
 		t.Fatalf("slow GPU query opened a gap in host sampling: %+v", p)
 	}
+	// Live reports carry the latest sample for unified release planning (#596).
+	if err := os.WriteFile(filepath.Join(a.path, "memory.current"), []byte("2147483648\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if c := a.currentHostMemory(RealClock{}); c == nil || c.DeviceGB == nil || *c.DeviceGB != 18556.0/1024 {
+		t.Fatalf("live report lacks the device sample: %+v", c)
+	}
 }
 
 func TestMemorySamplingOOMInvalidatesAndRelearns(t *testing.T) {

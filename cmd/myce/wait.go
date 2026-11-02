@@ -95,8 +95,16 @@ func waitCommand(ctx context.Context, args []string, out, errOut io.Writer) erro
 	if client.HTTP != nil {
 		defer client.HTTP.CloseIdleConnections()
 	}
-	return waitJobs(ctx, client, ids, *timeout, out, errOut, myce.RealClock{}, waitPause)
+	// Re-resolving installed authority lets a long wait follow a queue restart
+	// or a worker upgrade that replaced the config mid-wait (#607).
+	return waitJobsReconnecting(ctx, client, authority.client, ids, *timeout, out, errOut, myce.RealClock{}, waitPause)
 }
+
+// A wait with no successful status read for waitNoProgress logs its blocking
+// point and reconnects instead of waiting silently (#607). Each read is also
+// bounded by waitReadBudget so a half-open connection after a queue restart
+// cannot block forever when the HTTP client has no timeout of its own.
+var waitNoProgress, waitReadBudget = 2 * time.Minute, 30 * time.Second
 
 func waitPause(ctx context.Context, d time.Duration) error {
 	timer := time.NewTimer(d)
@@ -111,6 +119,10 @@ func waitPause(ctx context.Context, d time.Duration) error {
 
 // Clock and pause are injected so deadlines, backoff, and recovery tests do not sleep.
 func waitJobs(ctx context.Context, c myce.Client, ids []string, timeout time.Duration, out, errOut io.Writer, clock myce.Clock, pause func(context.Context, time.Duration) error) error {
+	return waitJobsReconnecting(ctx, c, nil, ids, timeout, out, errOut, clock, pause)
+}
+
+func waitJobsReconnecting(ctx context.Context, c myce.Client, reconnect func() (myce.Client, error), ids []string, timeout time.Duration, out, errOut io.Writer, clock myce.Clock, pause func(context.Context, time.Duration) error) error {
 	pending := map[string]bool{}
 	completed := map[string]bool{}
 	lastGuidance := map[string]string{}
@@ -122,6 +134,7 @@ func waitJobs(ctx context.Context, c myce.Client, ids []string, timeout time.Dur
 	failed, retrying := false, false
 	var outageSince, nextRetryLog time.Time
 	outageAttempts := 0
+	lastProgress := clock.Now()
 	for len(pending) > 0 {
 		if ctx.Err() != nil {
 			return waitError(4, "wait interrupted; jobs continue")
@@ -141,18 +154,18 @@ func waitJobs(ctx context.Context, c myce.Client, ids []string, timeout time.Dur
 			if timeout > 0 && remaining <= 0 {
 				return waitError(3, "wait timed out; jobs continue")
 			}
-			requestCtx := ctx
-			cancel := func() {}
+			budget := waitReadBudget
 			if timeout > 0 {
-				requestCtx, cancel = context.WithTimeout(ctx, remaining)
+				budget = min(budget, remaining)
 			}
+			requestCtx, cancel := context.WithTimeout(ctx, budget)
 			j, err := c.GetJob(requestCtx, id)
 			deadlineExpired := requestCtx.Err() == context.DeadlineExceeded
 			cancel()
 			if ctx.Err() != nil {
 				return waitError(4, "wait interrupted; jobs continue")
 			}
-			if timeout > 0 && (!clock.Now().Before(deadline) || deadlineExpired) {
+			if timeout > 0 && (!clock.Now().Before(deadline) || deadlineExpired && budget == remaining) {
 				return waitError(3, "wait timed out; jobs continue")
 			}
 			if err != nil {
@@ -166,8 +179,23 @@ func waitJobs(ctx context.Context, c myce.Client, ids []string, timeout time.Dur
 				}
 				unavailable = true
 				readErr = err
+				if stalled := clock.Now().Sub(lastProgress); stalled >= waitNoProgress {
+					fmt.Fprintf(errOut, "wait: no progress for %s; blocked reading job %s (cause=%s); reconnecting\n", stalled.Truncate(time.Second), id, waitReadCause(err))
+					lastProgress = clock.Now()
+					if c.HTTP != nil {
+						c.HTTP.CloseIdleConnections()
+					}
+					if reconnect != nil {
+						if fresh, e := reconnect(); e == nil {
+							c = fresh
+						} else {
+							fmt.Fprintln(errOut, "wait: reconnect could not resolve queue authority; retrying with the previous one")
+						}
+					}
+				}
 				break
 			}
+			lastProgress = clock.Now()
 			if guidance := myce.DeadlineGuidanceText(j); guidance != "" && guidance != lastGuidance[j.ID] {
 				fmt.Fprintf(errOut, "wait: %s %s\n", j.ID, guidance)
 				lastGuidance[j.ID] = guidance

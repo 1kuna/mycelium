@@ -40,6 +40,7 @@
 ```sh
 ./scripts/gate.sh quick BASE   # per change (default); build, vet, targets, related race tests
 ./scripts/gate.sh full         # once per batch before a fleet deploy; dev e2e + one race suite
+myce run --profile gate-quick --input gate-selection.tsv=FILE  # quick on a fleet CPU host, not the T3 Mac; docs/development.md
 ./myce dev # long-running local API and fake workers; Ctrl-C to stop
 ```
 
@@ -52,10 +53,9 @@ duplicate journeys or process self-audits (maintainer, 2026-10-22). Native GPU/d
 from laptop proof; see `docs/development.md`.
 
 Stage explicit paths and commit completed changes; push your own branches.
-Tested fixes deploy to the fleet without a separate task (MY-28): bundle them
-into one release at a time, deploy only while no customer or production job is
-running and outside every consumer project's recorded customer window, and roll
-back if the queue doesn't come back healthy. Fleet hardware changes still need a
+Tested fixes deploy to the fleet without a separate task (MY-28, MY-32): bundle
+them into one release at a time, deploy only while no customer or production job
+is running, and roll back if the queue doesn't come back healthy. Fleet hardware changes still need a
 task that authorizes them.
 
 This repository is public: keep host names, addresses, fleet layout, private

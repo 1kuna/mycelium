@@ -228,6 +228,8 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				memory = p.native.memory
 			case p.docker != nil:
 				memory = p.docker.envelope()
+			case p.memory != nil:
+				memory = p.memory
 			case s.state.Cgroup != "":
 				var fs memoryFS = osMemoryFS{}
 				if w.memoryCeilings != nil {
@@ -1038,6 +1040,9 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				reports[i].ApplicationProgress = reports[i].ApplicationProgress.aged(w.Clock.Now())
 				if sample := reports[i].CurrentHostMemory; sample != nil {
 					sample.AgeSeconds = w.Clock.Now().Sub(sample.sampledAt).Seconds()
+					if sample.DeviceGB != nil {
+						sample.DeviceAgeSeconds = w.Clock.Now().Sub(sample.deviceSampledAt).Seconds()
+					}
 				}
 			}
 			w.hostMemorySamples = currentHostMemorySamples(reports, w.Clock.Now())
