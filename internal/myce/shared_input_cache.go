@@ -31,10 +31,33 @@ type SharedInputCache struct {
 	beforeStage   func(context.Context)
 	resolveNAS    func(root, relative string) (string, error)
 	beforePublish func()
+	beforeVerify  func() // Test hook: a full re-hash of a cached entry starts.
 	hits          uint64
 	misses        uint64
 	nasBytes      uint64
 }
+
+// sharedVerifiedRecord holds the metadata signature (size, mode, mtime, inode
+// and change time of every file) taken after the entry's bytes last verified.
+const sharedVerifiedRecord = "verified.json"
+
+// A unique temporary name lets workers sharing one --file-cache re-verify the
+// same entry at once without one rename failing the other's attempt.
+func recordSharedVerification(root, signature string) error {
+	f, err := os.CreateTemp(root, sharedVerifiedRecord+".*.tmp")
+	if err != nil {
+		return err
+	}
+	_, err = f.WriteString(signature)
+	if err = errors.Join(err, f.Close()); err == nil {
+		err = os.Rename(f.Name(), filepath.Join(root, sharedVerifiedRecord))
+	}
+	if err != nil {
+		_ = os.Remove(f.Name())
+	}
+	return err
+}
+
 type sharedEntry struct {
 	Files FileManifest `json:"files"`
 }
@@ -162,18 +185,30 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 		previous := c.verified[key]
 		c.mu.Unlock()
 		// Another process may legitimately evict and republish this key. Changed
-		// metadata requires full verification, just like first use after restart.
+		// metadata requires full verification. A restart trusts the signature
+		// recorded after the last verification, so unchanged files are not re-hashed.
+		if previous == "" {
+			if b, e := os.ReadFile(filepath.Join(root, sharedVerifiedRecord)); e == nil {
+				previous = string(b)
+			}
+		}
 		if previous != signature {
+			if c.beforeVerify != nil {
+				c.beforeVerify()
+			}
 			if e = verifySharedEntry(ctx, payload, record.Files); e != nil {
 				return "", e
 			}
-			c.mu.Lock()
-			if c.verified == nil {
-				c.verified = map[string]string{}
+			if e = recordSharedVerification(root, signature); e != nil {
+				return "", e
 			}
-			c.verified[key] = signature
-			c.mu.Unlock()
 		}
+		c.mu.Lock()
+		if c.verified == nil {
+			c.verified = map[string]string{}
+		}
+		c.verified[key] = signature
+		c.mu.Unlock()
 		valid = true
 		c.mu.Lock()
 		c.hits++
@@ -244,6 +279,9 @@ func (c *SharedInputCache) ensure(ctx context.Context, s SharedInput, nasRoot st
 		return "", err
 	}
 	signature, err := sharedSignature(payload)
+	if err == nil {
+		err = recordSharedVerification(root, signature)
+	}
 	if err != nil {
 		return "", err
 	}
@@ -431,14 +469,21 @@ func copySharedFile(ctx context.Context, source, target string, ref FileRef) err
 	if err = os.MkdirAll(filepath.Dir(target), 0700); err != nil {
 		return err
 	}
-	out, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600|info.Mode().Perm()&0111)
-	if err != nil {
-		return err
-	}
-	// A changing NAS original cannot consume more than its admitted bytes.
-	_, err = io.CopyN(struct{ io.Writer }{out}, contextReader{ctx, in}, ref.SizeBytes)
-	err = errors.Join(err, out.Sync(), out.Close())
-	if err != nil {
+	// On the same copy-on-write volume, a clone shares blocks until either side
+	// writes, so a later write to the source cannot reach the verified copy.
+	// Hard links would share the inode itself and are never used.
+	if !cloneSharedFile(in, target) {
+		out, err := os.OpenFile(target, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600|info.Mode().Perm()&0111)
+		if err != nil {
+			return err
+		}
+		// A changing NAS original cannot consume more than its admitted bytes.
+		_, err = io.CopyN(struct{ io.Writer }{out}, contextReader{ctx, in}, ref.SizeBytes)
+		err = errors.Join(err, out.Sync(), out.Close())
+		if err != nil {
+			return err
+		}
+	} else if err = sharedInputProgress(ctx); err != nil {
 		return err
 	}
 	if err = os.Chmod(target, 0400|info.Mode().Perm()&0111); err != nil {

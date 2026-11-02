@@ -525,7 +525,7 @@ func startModels(w Worker, dir string) (*modelRuntime, error) {
 	}
 	limit := w.CacheLimit
 	if limit == 0 {
-		limit = 100 * 1024 * 1024 * 1024
+		limit = defaultModelCacheBytes
 	}
 	rt.worker = &w
 	rt.secretRoot = w.SecretRoot

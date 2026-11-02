@@ -22,6 +22,13 @@ func (w *Worker) initFileTransfers(ctx context.Context, s *workerStore) error {
 	}
 	w.fileCache = &FileCache{Root: root, Limit: limit, Clock: w.Clock, Client: w.Client}
 	w.sharedInputs = &SharedInputCache{cache: EnvironmentCache{Root: filepath.Join(root, "shared-inputs"), Limit: limit, Clock: w.Clock}, Client: w.Client}
+	// Model snapshots are tens of gigabytes, so they share the model cache's
+	// size setting rather than the small file cache's.
+	models := w.CacheLimit
+	if models == 0 {
+		models = defaultModelCacheBytes
+	}
+	w.modelSnapshots = &SharedInputCache{cache: EnvironmentCache{Root: filepath.Join(root, "model-snapshots"), Limit: models, Clock: w.Clock}, Client: w.Client}
 	if w.fileCheckpoints {
 		if w.CheckpointRoot != "" {
 			return errors.New("NAS checkpoint-root cannot be combined with queue file-store checkpoints")

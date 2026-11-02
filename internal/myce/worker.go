@@ -65,6 +65,7 @@ type Worker struct {
 	FileCacheLimit          int64
 	fileCache               *FileCache
 	sharedInputs            *SharedInputCache
+	modelSnapshots          *SharedInputCache // Budgeted by CacheLimit, not FileCacheLimit.
 	fileCheckpoints         bool
 	ExtensionRoot           string
 	JobFileRoot             string
