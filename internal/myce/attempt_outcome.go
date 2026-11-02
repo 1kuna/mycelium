@@ -12,8 +12,9 @@ import (
 // Times are wall-clock evidence (not scheduling deadlines). A signal is added
 // only after successful delivery and persistence; exit observation is immutable.
 type deliveredSignal struct {
-	Signal string    `json:"signal"`
-	At     time.Time `json:"at"`
+	Signal   string    `json:"signal"`
+	At       time.Time `json:"at"`
+	Shutdown bool      `json:"shutdown,omitempty"`
 }
 type memberExit struct {
 	Status     int       `json:"status"`
@@ -148,10 +149,18 @@ func classifyAttemptOutcome(result Result, facts attemptCause) Result {
 	if result.OutOfMemory || facts.Exit != nil && facts.Exit.Status != 0 {
 		result.Success = false
 	}
-	// A checkpoint handler can exit zero after TERM. Delivered priority stops
-	// interrupt that partial attempt; intent or a signal after observed exit
+	// A checkpoint handler can exit zero after TERM. Delivered priority/service
+	// stops interrupt that partial attempt; intent or a signal after observed exit
 	// cannot override an already completed payload.
-	if facts.PriorityStop != nil && facts.deliveredBeforeExit() && !result.OutOfMemory && !diskFailure {
+	shutdownDelivered := false
+	if facts.Exit != nil {
+		for _, signal := range facts.Signals {
+			if signal.Shutdown && !signal.At.IsZero() && (signal.Signal == "TERM" || signal.Signal == "KILL") && signal.At.Before(facts.Exit.ObservedAt) {
+				shutdownDelivered = true
+			}
+		}
+	}
+	if (facts.PriorityStop != nil && facts.deliveredBeforeExit() || shutdownDelivered) && !result.OutOfMemory && !diskFailure {
 		result.Success = false
 	}
 	if !result.Success && !result.OutOfMemory && !diskFailure {

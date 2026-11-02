@@ -11,7 +11,7 @@ Restart=on-failure
 RestartSec=3
 UMask=0077
 Delegate=memory cpu
-KillMode=control-group
+KillMode=mixed
 SendSIGKILL=yes
 TimeoutStopSec=45s
 

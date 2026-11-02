@@ -150,6 +150,7 @@ type processControl struct {
 	pendingEvents map[attemptKey]WorkerEvent
 	retired       []teardownMark // Released accelerator attempts' teardown evidence.
 	leaving       bool
+	service       bool // Installed shutdown must release even non-resumable CPU work.
 	wake          chan struct{}
 }
 
@@ -167,12 +168,16 @@ func (c *processControl) apply() {
 			}
 			p.stop(now, grace, false)
 		}
-		if c.leaving && (p.job.Spec.Resumable || !p.job.Spec.Needs.cpuOnly()) {
+		if c.leaving && (c.service || p.job.Spec.Resumable || !p.job.Spec.Needs.cpuOnly()) {
 			grace := StopGrace
 			if !p.job.Spec.Needs.cpuOnly() {
 				grace = defaultGPUStopGrace
 			}
-			p.stop(now, grace, false)
+			if c.service {
+				p.stopService(now, grace)
+			} else {
+				p.stop(now, grace, false)
+			}
 		}
 		if event, ok := c.pendingEvents[key]; ok {
 			if err := p.recordPriorityStop(nil, event.PriorityStop); err != nil {

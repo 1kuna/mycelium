@@ -393,7 +393,8 @@ queue address, NAS, names, Docker endpoint, GPU environment and secret reference
 Matching binaries and service definitions replace each selected installation.
 There is no local start condition, stage-only host gate or timer installation.
 Linux workers start as ordinary-account services with `Restart=on-failure`,
-`Delegate=memory`, `KillMode=control-group` and bounded stop. Installer rollback
+`Delegate=memory`, `KillMode=mixed` and bounded stop. TERM goes through the worker's
+recorded attempt-stop path; the manager retains the final group-wide KILL. Installer rollback
 restores files, modes and actual manager registration/activity, and reports any
 incomplete restoration. Use queue maintenance to keep admission disabled across
 an upgrade. Saved configurations containing removed local-control fields must
@@ -1034,7 +1035,7 @@ Each native attempt has its own control/main/sidecar subtree and verified
 aggregate/member ceilings before exec where supported. Engines have independent
 subtrees. Attempt stop/OOM/cleanup never targets siblings or the worker service.
 Service stop intentionally contains all descendants (`Delegate=memory`,
-`KillMode=control-group`). Unsupported platforms remain admission-only and
+`KillMode=mixed`). Unsupported platforms remain admission-only and
 required ceilings refuse them. Core reservations do not enforce CPU time.
 
 One machine heartbeat uses the shortest active loss timeout: production 5 s,
