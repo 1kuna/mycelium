@@ -27,6 +27,8 @@ func capabilityCapacity(m *Machine) (accelerator, system float64, ok bool) {
 	// Fake resources explicitly use an operator allowance, never a native guess.
 	if m.GPU == "fake" && accelerator == 0 {
 		accelerator = m.TotalMemoryGB
+	} else if len(m.groupMembers) > 0 {
+		accelerator *= float64(len(m.groupMembers))
 	}
 	if p.MemoryLayout == "unified" {
 		accelerator = min(accelerator, system)

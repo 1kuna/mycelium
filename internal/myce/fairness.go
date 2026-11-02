@@ -250,7 +250,7 @@ func (q *Queue) batchCandidateWithResources(j *Job, m *Machine, resources map[ba
 	if j.Spec.FanOut != nil {
 		return q.fanOutCandidateWithResources(j, m, resources)
 	}
-	if j.State != "queued" || !q.placementAllowed(j, m) || !q.checkpointReady(j, m) {
+	if j.State != "queued" || len(m.groupMembers) > 0 && !q.mayNeedCards(j, m) || !q.placementAllowed(j, m) || !q.checkpointReady(j, m) {
 		return nil
 	}
 	for _, candidate := range extensionJobs(j, m, true) {
@@ -267,6 +267,22 @@ func (q *Queue) batchCandidateWithResources(j *Job, m *Machine, resources map[ba
 		}
 	}
 	return nil
+}
+
+// A card group takes only work no single card holds. Decide that before the
+// costly placement checks, which every queued job would otherwise pay again
+// for each multi-card host. A declared plain need is final; learned and
+// extension needs are resolved for this target first.
+func (q *Queue) mayNeedCards(j *Job, m *Machine) bool {
+	if !j.Spec.extensionJob() && j.Spec.Needs.Memory != "auto" {
+		return groupFits(j, m)
+	}
+	for _, c := range q.memoryCandidates(j, m) {
+		if groupFits(c, m) && (c.MemoryEnvelope == nil || c.MemoryEnvelope.Refusal == "") {
+			return true
+		}
+	}
+	return false
 }
 
 // Resource projections depend on the concrete vector and demand identity, not
@@ -316,6 +332,18 @@ func (q *Queue) batchResourceProjection(j *Job, m *Machine) batchResourceRoom {
 		}
 		projected = q.cpuAfterReleases(m, jobs, slots, 0)
 	}
+	return batchResourceRoom{machine: projected, memory: q.batchReclaimableGB(j, m), ok: true, plan: plan}
+}
+
+// A card group offers its smallest card's room once per card.
+func (q *Queue) batchReclaimableGB(j *Job, m *Machine) float64 {
+	if len(m.groupMembers) > 0 {
+		least := math.Inf(1)
+		for _, card := range m.groupMembers {
+			least = min(least, q.batchReclaimableGB(j, card))
+		}
+		return least * float64(len(m.groupMembers))
+	}
 	memory := q.reclaimableGPUMemory(m, j.Spec.Priority, j.Spec)
 	if release, ok := q.s.BatchReleases[batchReleaseKey(m)]; ok && release.Session == m.Session && q.clock.Now().Before(release.Until) {
 		memory += release.MemoryGB
@@ -324,7 +352,7 @@ func (q *Queue) batchResourceProjection(j *Job, m *Machine) batchResourceRoom {
 	if m.TotalMemoryGB > 0 {
 		memory = min(memory, m.TotalMemoryGB)
 	}
-	return batchResourceRoom{machine: projected, memory: memory, ok: true, plan: plan}
+	return memory
 }
 
 // candidate is the device-aware planner for batch dispatch, model admission and
@@ -351,7 +379,7 @@ func (q *Queue) immediateCandidate(best *Job, m *Machine) *Job {
 func (q *Queue) plannerMachines() []*Machine {
 	machines := make([]*Machine, 0, len(q.s.Machines))
 	for _, m := range q.s.Machines {
-		machines = append(machines, q.machineTargets(m)...)
+		machines = append(machines, q.placementTargets(m)...)
 	}
 	slices.SortFunc(machines, func(a, b *Machine) int { return strings.Compare(targetKey(a), targetKey(b)) })
 	return machines
@@ -374,11 +402,21 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 			}
 		}
 		copy := *m // Projection changes only this scalar memory value; inventory stays read-only.
-		for _, r := range q.liveJobs() {
-			if batchOnTarget(r, m) && batchReservesCapacity(r) {
-				copy.FreeMemoryGB += r.Spec.Needs.MemoryGB
-			}
+		cards := m.groupMembers
+		if len(cards) == 0 {
+			cards = []*Machine{m}
 		}
+		least := math.Inf(1)
+		for _, card := range cards {
+			free := card.FreeMemoryGB
+			for _, r := range q.liveJobs() {
+				if batchOnTarget(r, card) && batchReservesCapacity(r) {
+					free += deviceShareGB(r)
+				}
+			}
+			least = min(least, free)
+		}
+		copy.FreeMemoryGB = least * float64(len(cards))
 		// Projection only changes exclusions, never queue state or inventory.
 		// Reuse the same read-only planning pass for every projected position.
 		sets = append(sets, q.buildCandidates(&copy))
@@ -405,7 +443,7 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 		winner := selected.pick(nil)
 		base := "waiting for a worker to pull this job; " + valueReason(q.placementValues(scan)[hostID(target)], target)
 		live := q.s.Machines[target.ID]
-		for _, view := range q.machineTargets(live) {
+		for _, view := range q.placementTargets(live) {
 			if sameTarget(view, target) {
 				live = view
 				break
@@ -618,7 +656,7 @@ func (q *Queue) validateProjectCapacity(j *Job) error {
 		if _, reason := cpuCapacity(m); reason != "" {
 			return nil // Unknown telemetry can return; it is not impossibility.
 		}
-		for _, target := range q.machineTargets(m) {
+		for _, target := range q.placementTargets(m) {
 			copy := *target
 			copy.DiskVolumes = diskCapacityVolumes(copy.DiskVolumes)
 			copy.Gone = false

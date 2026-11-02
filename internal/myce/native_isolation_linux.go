@@ -250,10 +250,17 @@ func (w Worker) nativeLinuxPolicy(cmd *exec.Cmd, spool, work string, env map[str
 		return p, err
 	}
 	p.Devices, err = w.nativeGPUDevices(env)
-	if w.selectedDevice != nil && w.selectedDevice.Platform == "cuda" {
-		pci := w.selectedDevice.pciAddress
-		if w.selectedDevice.pciFact != nil {
-			pci = w.selectedDevice.pciFact.address
+	cards := w.selectedDevices
+	if len(cards) == 0 && w.selectedDevice != nil {
+		cards = []MachineDevice{*w.selectedDevice}
+	}
+	for _, d := range cards {
+		if d.Platform != "cuda" {
+			continue
+		}
+		pci := d.pciAddress
+		if d.pciFact != nil {
+			pci = d.pciFact.address
 		}
 		if pci != "" {
 			p.Read = append(p.Read, filepath.Join("/proc/driver/nvidia/gpus", normalizePCIAddress(pci)))
@@ -267,6 +274,24 @@ func (w Worker) nativeLinuxPolicy(cmd *exec.Cmd, spool, work string, env map[str
 func (w Worker) nativeGPUDevices(env map[string]string) ([]string, error) {
 	if w.nativeGPUDeviceProbe != nil {
 		return w.nativeGPUDeviceProbe(w, env)
+	}
+	if len(w.selectedDevices) > 1 {
+		// Grant exactly the nodes of every assigned card, resolved one by one.
+		nodes := []string{}
+		for _, d := range w.selectedDevices {
+			card := w
+			card.selectedDevices, card.selectedDevice, card.DeviceBinding, card.Machine.Device = nil, &d, d.Selector, d.ID
+			found, err := card.nativeGPUDevices(env)
+			if err != nil {
+				return nil, err
+			}
+			for _, node := range found {
+				if !slices.Contains(nodes, node) {
+					nodes = append(nodes, node)
+				}
+			}
+		}
+		return nodes, nil
 	}
 	if env["CUDA_VISIBLE_DEVICES"] == "" && env["ONEAPI_DEVICE_SELECTOR"] == "!*:*" || w.Machine.GPU == "cpu" || w.Machine.GPU == "fake" || w.Machine.GPU == "" {
 		return nil, nil

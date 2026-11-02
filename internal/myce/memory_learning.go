@@ -38,6 +38,9 @@ func (q *Queue) memoryLearningSample(j *Job, r Result) (*eligibleMemorySample, s
 		return nil, "forced"
 	case r.ID != j.ID || r.Attempt != j.Attempt || r.Machine != j.Machine || r.Session != j.Session:
 		return nil, "attempt_changed"
+	case len(j.AllocatedDevices) > 1:
+		// Per-card evidence from a multi-card attempt cannot size a one-card run.
+		return nil, "multi_card"
 	case r.MemoryPeak == nil:
 		return nil, "peak_unavailable"
 	case r.MemoryPeak.constrained():

@@ -1,7 +1,9 @@
 package myce
 
 import (
+	"cmp"
 	"fmt"
+	"math"
 	"slices"
 	"strings"
 )
@@ -32,11 +34,11 @@ func (q *Queue) machineTargets(m *Machine) []*Machine {
 		reserved := 0.0
 		for _, j := range q.liveJobs() {
 			if batchReservesCapacity(j) && batchOnTarget(j, &target) {
-				reserved += j.Spec.Needs.MemoryGB
+				reserved += deviceShareGB(j)
 			}
 		}
 		for _, r := range q.s.HostReleases {
-			if r.Machine != m.ID || r.Device != d.ID {
+			if r.Machine != m.ID || !r.onDevice(d.ID) {
 				continue
 			}
 			j := q.s.Jobs[r.Job]
@@ -66,6 +68,83 @@ func (q *Queue) machineTargets(m *Machine) []*Machine {
 
 func targetKey(m *Machine) string { return m.ID + "/" + m.Device }
 
+// Placement also offers card groups (MY-30, #105). Other inventory readers,
+// status and qualification plans keep the per-card views.
+func (q *Queue) placementTargets(m *Machine) []*Machine {
+	targets := q.machineTargets(m)
+	return append(targets, groupTargets(targets)...)
+}
+
+// A job uses several cards only when no single card of its host can hold it.
+// Each group is the fewest same-backend discrete cards with the most free
+// memory now; every card carries an equal share of the job's memory_gb.
+func groupTargets(cards []*Machine) []*Machine {
+	byPlatform := map[string][]*Machine{}
+	for _, c := range cards {
+		if c.GPU != "cpu" && c.Device != "" && !c.UnifiedMemory && c.TotalMemoryGB > 0 {
+			byPlatform[c.GPU] = append(byPlatform[c.GPU], c)
+		}
+	}
+	var out []*Machine
+	for _, same := range byPlatform {
+		slices.SortStableFunc(same, func(a, b *Machine) int { return cmp.Compare(b.FreeMemoryGB, a.FreeMemoryGB) })
+		// The floor is the most any fewer cards hold in equal shares: k cards
+		// hold k times the k-th largest card, whichever cards are free now.
+		totals := make([]float64, len(same))
+		for i, c := range same {
+			totals[i] = c.TotalMemoryGB
+		}
+		slices.SortFunc(totals, func(a, b float64) int { return cmp.Compare(b, a) })
+		floor := 0.0
+		for n := 2; n <= len(same); n++ {
+			floor = max(floor, float64(n-1)*totals[n-2])
+			g := groupView(same[:n])
+			g.groupFloorGB = floor
+			out = append(out, g)
+		}
+	}
+	slices.SortFunc(out, func(a, b *Machine) int { return strings.Compare(a.Device, b.Device) })
+	return out
+}
+
+// The group copies its first card's view; capacity is the smallest card's
+// times the count, so an equal share fits on every member.
+func groupView(members []*Machine) *Machine {
+	g := *members[0]
+	g.group = make([]string, len(members))
+	free, total := math.Inf(1), math.Inf(1)
+	g.modelReservationDebtGB = 0
+	for i, m := range members {
+		g.group[i] = m.Device
+		free, total = min(free, m.FreeMemoryGB), min(total, m.TotalMemoryGB)
+		g.modelReservationDebtGB += m.modelReservationDebtGB
+		if g.MemoryError == "" {
+			g.MemoryError = m.MemoryError
+		}
+	}
+	slices.SortFunc(g.group, func(a, b string) int { return cmp.Or(cmp.Compare(len(a), len(b)), strings.Compare(a, b)) })
+	n := float64(len(members))
+	g.groupMembers, g.Device, g.Models = slices.Clone(members), strings.Join(g.group, ","), nil
+	g.FreeMemoryGB, g.TotalMemoryGB = n*free, n*total
+	return &g
+}
+
+func targetDevices(m *Machine) []string {
+	if len(m.group) > 0 {
+		return m.group
+	}
+	return []string{m.Device}
+}
+
+// Each card of an attempt is charged an equal share of its accelerator memory.
+func deviceShareGB(j *Job) float64 {
+	return j.Spec.Needs.MemoryGB / float64(max(1, len(j.AllocatedDevices)))
+}
+
+func (r HostRelease) onDevice(id string) bool {
+	return r.Device == id || slices.Contains(r.Devices, id)
+}
+
 func sameTarget(a, b *Machine) bool { return a.ID == b.ID && a.Device == b.Device }
 
 // The current offer/execution reserves capacity until exact release. A job
@@ -84,7 +163,7 @@ func batchOnTarget(j *Job, m *Machine) bool {
 	}
 	// A bounded legacy copy has no component evidence. Keep its original
 	// machine-wide GPU exclusion until exact cleanup, without inventing a card.
-	return !j.Spec.Needs.cpuOnly() && m.GPU != "cpu" && (len(j.AllocatedDevices) == 0 || slices.Contains(j.AllocatedDevices, m.Device))
+	return !j.Spec.Needs.cpuOnly() && m.GPU != "cpu" && (len(j.AllocatedDevices) == 0 || slices.ContainsFunc(targetDevices(m), func(id string) bool { return slices.Contains(j.AllocatedDevices, id) }))
 }
 
 // Retained custody owns the command slot even after a job becomes terminal or
@@ -105,7 +184,7 @@ func (q *Queue) batchReleaseOnTarget(r HostRelease, m *Machine) bool {
 		return false
 	}
 	if r.Device != "" {
-		return r.Device == m.Device
+		return slices.ContainsFunc(targetDevices(m), r.onDevice)
 	}
 	return true
 }
@@ -115,11 +194,23 @@ func deviceAllowed(j *Job, m *Machine) bool {
 		return m.GPU == "cpu"
 	}
 	g := j.Spec.Needs.GPU
-	return g == nil || g.Devices == nil || slices.Contains(g.Devices, m.Device)
+	return g == nil || g.Devices == nil || !slices.ContainsFunc(targetDevices(m), func(id string) bool { return !slices.Contains(g.Devices, id) })
 }
 
-// Use the component's memory layout when charging the one host pool.
+// Use the component's memory layout when charging the one host pool. Several
+// cards are one group view, so host RAM and cores are charged once.
 func allocationMachine(m *Machine, devices []string) *Machine {
+	if m != nil && m.Devices != nil && len(devices) > 1 {
+		members := []*Machine{}
+		for _, id := range devices {
+			if card := allocationMachine(m, []string{id}); card != m {
+				members = append(members, card)
+			}
+		}
+		if len(members) == len(devices) {
+			return groupView(members)
+		}
+	}
 	if m != nil && m.Devices != nil && len(devices) == 1 {
 		for _, d := range m.Devices {
 			if d.ID == devices[0] {
@@ -183,7 +274,7 @@ func (q *Queue) checkinMachineAttempts(m *Machine, reports []AttemptReport, prog
 	var best *Job
 	var target *Machine
 	scan := q.placementScan()
-	for _, candidate := range q.machineTargets(m) {
+	for _, candidate := range q.placementTargets(m) {
 		if !q.workerBatchIdle(candidate) {
 			continue
 		}
@@ -240,7 +331,7 @@ func (q *Queue) machineDeviceStatus(copy, m *Machine) {
 			}
 		}
 		for _, r := range q.s.HostReleases {
-			if r.Machine == m.ID && r.Device == d.ID {
+			if r.Machine == m.ID && r.onDevice(d.ID) {
 				d.Releases = append(d.Releases, r)
 			}
 		}
@@ -263,8 +354,16 @@ func (q *Queue) machineRecoveryFits(m *Machine, j *Job, copy Copy) bool {
 	if _, retained := q.s.HostReleases[releaseKey(HostRelease{Job: j.ID, Machine: m.ID, Session: copy.Session, Attempt: copy.Attempt})]; !retained {
 		return false
 	}
-	for _, target := range q.machineTargets(m) {
-		if j.Spec.Needs.cpuOnly() && target.GPU == "cpu" || len(copy.AllocatedDevices) == 1 && target.GPU != "cpu" && target.Device == copy.AllocatedDevices[0] {
+	targets := q.machineTargets(m)
+	if len(copy.AllocatedDevices) > 1 {
+		cards := slices.DeleteFunc(slices.Clone(targets), func(t *Machine) bool { return t.GPU == "cpu" || !slices.Contains(copy.AllocatedDevices, t.Device) })
+		if len(cards) != len(copy.AllocatedDevices) {
+			return false
+		}
+		targets = []*Machine{groupView(cards)}
+	}
+	for _, target := range targets {
+		if j.Spec.Needs.cpuOnly() && target.GPU == "cpu" || len(copy.AllocatedDevices) > 0 && target.GPU != "cpu" && slices.Equal(targetDevices(target), copy.AllocatedDevices) {
 			own := HostRelease{Job: j.ID, Machine: m.ID, Session: copy.Session, Attempt: copy.Attempt}
 			return q.workerBatchIdleExcept(target, &own) && target.CPUCapacityReason == "" && target.CPUInUseCores <= target.EffectiveCPUCores && target.hostReservationDebtGB == 0 && target.modelReservationDebtGB == 0 && target.MemoryError == "" && deviceAllowed(j, target)
 		}

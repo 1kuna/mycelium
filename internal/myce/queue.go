@@ -1715,7 +1715,13 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 			if q.s.BatchReleases == nil {
 				q.s.BatchReleases = map[string]batchRelease{}
 			}
-			q.s.BatchReleases[batchReleaseKey(owner)] = batchRelease{Session: j.Session, MemoryGB: j.Spec.Needs.MemoryGB, Until: until}
+			cards := owner.groupMembers
+			if len(cards) == 0 {
+				cards = []*Machine{owner}
+			}
+			for _, card := range cards {
+				q.s.BatchReleases[batchReleaseKey(card)] = batchRelease{Session: j.Session, MemoryGB: deviceShareGB(j), Until: until}
+			}
 		}
 	}
 	if cancelled(j) || j.State == "stopping" && (!r.Success || !plannedPriorityStop(j)) && !oomFailure && !stageFailure && !diskFailure {
@@ -2472,7 +2478,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	j.Machine = m.ID
 	j.AllocatedDevices = nil
 	if m.Devices != nil && !j.Spec.Needs.cpuOnly() {
-		j.AllocatedDevices = []string{m.Device}
+		j.AllocatedDevices = slices.Clone(targetDevices(m))
 	}
 	j.Copies = append(j.Copies, Copy{AllocatedDevices: slices.Clone(j.AllocatedDevices), Machine: m.ID, Session: m.Session, Attempt: j.Attempt, Extension: j.Extension, ReleaseReason: "awaiting_release"})
 	j.Session = m.Session

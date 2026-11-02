@@ -12,11 +12,13 @@ wait guarantee. Advice and estimates are snapshots, never reservations.
 
 Measured curves, completion estimates and declared independent pieces are current
 contracts in the [spec](design-proposal.md) and [jobs reference](jobs.md).
-Automatic same-tier scarce-host yield, arbitrary workflow orchestration and
-multi-device gang execution remain pending in [#324](https://github.com/1kuna/mycelium/issues/324),
-[#107](https://github.com/1kuna/mycelium/issues/107) and
-[#105](https://github.com/1kuna/mycelium/issues/105), respectively. Portability advice
-does not implement migration or qualify new variants.
+Automatic same-tier scarce-host yield and arbitrary workflow orchestration
+remain pending in [#324](https://github.com/1kuna/mycelium/issues/324) and
+[#107](https://github.com/1kuna/mycelium/issues/107). A job no single card holds
+gets several cards of one host from its `memory_gb`
+([cards per job](design-proposal.md#inventory-and-resource-ownership)); cross-machine
+gang execution remains deferred. Portability advice does not implement migration
+or qualify new variants.
 
 ## Placement without hardware requirements (v3)
 

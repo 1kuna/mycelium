@@ -34,7 +34,7 @@ func normalizeResources(s *Spec) error {
 	}
 	if n.GPU != nil && n.GPU.Count != nil {
 		if *n.GPU.Count > 1 {
-			return reject("gpu_count_unsupported", errors.New("multiple GPU devices are deferred to #105"))
+			return reject("gpu_count_unsupported", errors.New("omit needs.gpu.count: state memory_gb, and work no single card holds gets several cards of one host"))
 		}
 		if *n.GPU.Count <= 0 {
 			return reject("gpu_selector_invalid", errors.New("GPU count must be positive"))

@@ -387,6 +387,18 @@ func (q *Queue) resolveExtensions(s *Spec) ([]Extension, error) {
 	return out, nil
 }
 func qualifiedExtension(j *Job, m *Machine) *Extension {
+	if len(m.groupMembers) > 0 {
+		// Every card carries its own qualification for the same extension.
+		var out *Extension
+		for _, card := range m.groupMembers {
+			e := qualifiedExtension(j, card)
+			if e == nil || out != nil && e.Digest != out.Digest {
+				return nil
+			}
+			out = e
+		}
+		return out
+	}
 	for i := range j.Extensions {
 		e := &j.Extensions[i]
 		if (j.State == "running" || j.State == "stopping") && j.Extension != nil && j.Extension.Digest != e.Digest {

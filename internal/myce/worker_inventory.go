@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
 	"slices"
@@ -342,7 +343,7 @@ func (w Worker) forAttempt(j Job) (Worker, error) {
 	}
 	ids := j.AllocatedDevices
 	if len(ids) > 1 {
-		return w, reject("gpu_count_unsupported", errors.New("one GPU per attempt is supported"))
+		return w.forCards(ids)
 	}
 	if len(ids) == 0 {
 		// M2's unchanged one-attempt queue selects its compatibility target.
@@ -376,6 +377,53 @@ func (w Worker) forAttempt(j Job) (Worker, error) {
 		return w, nil
 	}
 	return w, reject("device_identity_mismatch", errors.New("assigned device is not in the machine inventory"))
+}
+
+// A multi-card attempt binds every assigned card: each present, discrete, on
+// one backend and verified against its saved identity before launch.
+func (w Worker) forCards(ids []string) (Worker, error) {
+	cards, sources := []MachineDevice{}, []MemorySource{}
+	measured := true
+	for _, id := range ids {
+		i := slices.IndexFunc(w.Machine.Devices, func(d MachineDevice) bool { return d.ID == id })
+		if i < 0 {
+			return w, reject("device_identity_mismatch", errors.New("assigned device is not in the machine inventory"))
+		}
+		d := w.Machine.Devices[i]
+		if d.UnifiedMemory || len(cards) > 0 && d.Platform != cards[0].Platform {
+			return w, reject("gpu_count_unsupported", errors.New("a multi-card attempt needs discrete cards of one backend"))
+		}
+		probe := w
+		probe.selectedDevice = &d
+		if err := probe.verifyDevice(); err != nil {
+			return w, err
+		}
+		source, err := NewDeviceMemorySource(d.Platform, d.Selector, d.BudgetGB, 0, d.MemoryMode)
+		if err != nil {
+			return w, err
+		}
+		cards, sources, measured = append(cards, d), append(sources, source), measured && d.MemoryMeasured
+	}
+	// Launch admission compares memory_gb with the smallest card's free times
+	// the count: an equal share must fit on every card.
+	w.MemorySource = func(ctx context.Context) (float64, error) {
+		least := math.Inf(1)
+		for _, source := range sources {
+			free, err := source(ctx)
+			if err != nil {
+				return 0, err
+			}
+			least = min(least, free)
+		}
+		return least * float64(len(sources)), nil
+	}
+	w.MemoryMeasured = measured
+	w.selectedDevice, w.selectedDevices = &cards[0], cards
+	w.Machine = cards[0].machine(w.Machine)
+	w.Machine.group = slices.Clone(ids)
+	w.extensionFingerprint = w.Machine.ExtensionFingerprint
+	w.DeviceBinding = cards[0].Selector
+	return w, nil
 }
 
 func (w Worker) localInventory(ctx context.Context) ([]MachineDevice, error) {
@@ -526,6 +574,9 @@ func inventoryTarget(m *Machine) error {
 }
 
 func (w Worker) deviceEnvironment() (map[string]string, error) {
+	if len(w.selectedDevices) > 1 {
+		return cardsEnvironment(w.Machine.GPU, w.selectedDevices)
+	}
 	selector := w.Machine.Device
 	if w.DeviceBinding != "" {
 		selector = w.DeviceBinding

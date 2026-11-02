@@ -115,6 +115,9 @@ func (q *Queue) deviceAdmissionBlocked(m *Machine) bool {
 	if m == nil || m.GPU == "cpu" {
 		return false
 	}
+	if len(m.groupMembers) > 0 {
+		return slices.ContainsFunc(m.groupMembers, q.deviceAdmissionBlocked)
+	}
 	for _, d := range m.Devices {
 		if d.ID == m.Device && d.Platform == m.GPU {
 			return q.s.DeviceMaintenance[hostID(m)][deviceMaintenanceKey(d.Platform, d.Identity)].Disabled || q.componentExcluded(m, d.Platform, d.Identity)

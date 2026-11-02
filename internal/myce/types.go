@@ -577,6 +577,12 @@ type Machine struct {
 
 	// Explicit per-local_source tri-state; omission never authorizes use.
 	ModelApprovalStates map[string]ModelApprovalState `json:"model_approval_states,omitempty"`
+
+	// A card group is one placement view of several cards on this host (#105).
+	// The worker sets group alone: the device IDs bound to one attempt.
+	group        []string
+	groupMembers []*Machine // Per-card views with their own reservations.
+	groupFloorGB float64    // Work this size fits on fewer cards; never spread it.
 }
 type Execution struct {
 	Progress int64  `json:"progress,omitempty"`

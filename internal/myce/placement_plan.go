@@ -165,77 +165,15 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool) 
 			p.cost++
 		}
 	}
-	room := m.FreeMemoryGB - m.modelReservationDebtGB
-	if r, ok := q.s.BatchReleases[batchReleaseKey(m)]; ok && r.Session == m.Session && q.clock.Now().Before(r.Until) {
-		room += r.MemoryGB
+	// A card group needs its equal share free on every card.
+	cards, share := []*Machine{m}, need
+	if len(m.groupMembers) > 0 {
+		cards, share = m.groupMembers, need/float64(len(m.groupMembers))
 	}
-	for _, r := range q.liveJobs() {
-		if !batchOnTarget(r, m) || !batchReservesCapacity(r) {
-			continue
+	for _, card := range cards {
+		if !q.cardRoom(j, card, share, batch, releaseBatch, p) {
+			return nil
 		}
-		if !q.batchPreemptible(r, j.Spec) {
-			if batch {
-				return nil
-			}
-			continue
-		}
-		if releaseBatch {
-			p.addJob(r)
-			room += r.Spec.Needs.MemoryGB
-		}
-	}
-	var slots []*ModelSlot
-	for _, s := range q.s.ModelSlots {
-		if !slotOnTarget(s, m) || !q.slotReclaimableFor(s, j.Spec) {
-			continue
-		}
-		if s.State == "draining" {
-			room += q.slotMemory(s)
-		} else {
-			slots = append(slots, s)
-		}
-	}
-	sort.Slice(slots, func(a, b int) bool {
-		if q.slotMemory(slots[a]) != q.slotMemory(slots[b]) {
-			return q.slotMemory(slots[a]) > q.slotMemory(slots[b])
-		}
-		return slots[a].Model < slots[b].Model
-	})
-	possible, count := room, 0
-	for _, s := range slots {
-		if possible >= need {
-			break
-		}
-		possible += q.slotMemory(s)
-		count++
-	}
-
-	if possible < need {
-		return nil
-	}
-	for count > 0 && room < need {
-		chosen := 0
-		for i, s := range slots {
-			if s.InFlight != 0 {
-				continue
-			}
-			capacity, n := room+q.slotMemory(s), 0
-			for k, other := range slots {
-				if k != i && n < count-1 {
-					capacity += q.slotMemory(other)
-					n++
-				}
-			}
-			if capacity >= need {
-				chosen = i
-				break
-			}
-		}
-		s := slots[chosen]
-		room += q.slotMemory(s)
-		p.addSlot(s)
-		slots = append(slots[:chosen], slots[chosen+1:]...)
-		count--
 	}
 	// Mandatory/local releases already provide RAM as well as GPU memory.
 	// Project both once before asking for additional host-wide releases.
@@ -283,3 +221,80 @@ func (q *Queue) unifiedReleaseDebtCredit(m *Machine, jobs []*Job) float64 {
 	return min(credit, m.hostReservationDebtGB)
 }
 func (q *Queue) slotMemory(s *ModelSlot) float64 { model, _ := q.model(s.Model); return model.MemoryGB }
+
+// cardRoom adds the batch and engine releases one card needs to p.
+func (q *Queue) cardRoom(j *Job, m *Machine, need float64, batch, releaseBatch bool, p *placementPlan) bool {
+	room := m.FreeMemoryGB - m.modelReservationDebtGB
+	if r, ok := q.s.BatchReleases[batchReleaseKey(m)]; ok && r.Session == m.Session && q.clock.Now().Before(r.Until) {
+		room += r.MemoryGB
+	}
+	for _, r := range q.liveJobs() {
+		if !batchOnTarget(r, m) || !batchReservesCapacity(r) {
+			continue
+		}
+		if !q.batchPreemptible(r, j.Spec) {
+			if batch {
+				return false
+			}
+			continue
+		}
+		if releaseBatch {
+			p.addJob(r)
+			room += deviceShareGB(r)
+		}
+	}
+	var slots []*ModelSlot
+	for _, s := range q.s.ModelSlots {
+		if !slotOnTarget(s, m) || !q.slotReclaimableFor(s, j.Spec) {
+			continue
+		}
+		if s.State == "draining" {
+			room += q.slotMemory(s)
+		} else {
+			slots = append(slots, s)
+		}
+	}
+	sort.Slice(slots, func(a, b int) bool {
+		if q.slotMemory(slots[a]) != q.slotMemory(slots[b]) {
+			return q.slotMemory(slots[a]) > q.slotMemory(slots[b])
+		}
+		return slots[a].Model < slots[b].Model
+	})
+	possible, count := room, 0
+	for _, s := range slots {
+		if possible >= need {
+			break
+		}
+		possible += q.slotMemory(s)
+		count++
+	}
+
+	if possible < need {
+		return false
+	}
+	for count > 0 && room < need {
+		chosen := 0
+		for i, s := range slots {
+			if s.InFlight != 0 {
+				continue
+			}
+			capacity, n := room+q.slotMemory(s), 0
+			for k, other := range slots {
+				if k != i && n < count-1 {
+					capacity += q.slotMemory(other)
+					n++
+				}
+			}
+			if capacity >= need {
+				chosen = i
+				break
+			}
+		}
+		s := slots[chosen]
+		room += q.slotMemory(s)
+		p.addSlot(s)
+		slots = append(slots[:chosen], slots[chosen+1:]...)
+		count--
+	}
+	return true
+}
