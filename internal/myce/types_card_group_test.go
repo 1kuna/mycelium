@@ -273,40 +273,52 @@ func TestMultiCardDevLaunchSeesBothCards(t *testing.T) {
 // Review regression: a deadline demand (no start deadline) stops both cards,
 // then one card is disabled. The other card must return to other work.
 func TestMultiCardHoldEndsWhenHostCanNoLongerHoldDemand(t *testing.T) {
-	q, clock := fixture(t)
-	m := m3Machine()
-	submit(t, q, spec("experiment"))
-	a := assignedJob(machineCheck(t, q, m))
-	clock.Advance(time.Second)
-	submit(t, q, spec("experiment"))
-	b := assignedJob(machineCheck(t, q, m, a))
-	demand := submit(t, q, bigSpec("deadline", 12))
-	if got := job(t, q, b.ID); got.State != "stopping" || priorityStop(got).Demand != demand.ID {
-		t.Fatal("deadline demand did not stop both cards", got)
+	for _, loss := range []string{"disabled", "quarantined", "missing"} {
+		t.Run(loss, func(t *testing.T) {
+			q, clock := fixture(t)
+			m := m3Machine()
+			submit(t, q, spec("experiment"))
+			a := assignedJob(machineCheck(t, q, m))
+			clock.Advance(time.Second)
+			submit(t, q, spec("experiment"))
+			b := assignedJob(machineCheck(t, q, m, a))
+			demand := submit(t, q, bigSpec("deadline", 12))
+			if got := job(t, q, b.ID); got.State != "stopping" || priorityStop(got).Demand != demand.ID {
+				t.Fatal("deadline demand did not stop both cards", got)
+			}
+			ack := result(a, false)
+			ack.ReleaseOnly = true
+			if err := q.Complete(ack); err != nil {
+				t.Fatal(err)
+			}
+			if got := assignedJob(machineCheck(t, q, m, b)); got != nil {
+				t.Fatal("card 0 not held while the demand can still use both cards", got.ID)
+			}
+			switch loss {
+			case "disabled":
+				rev := uint64(0)
+				if _, err := q.ChangeDeviceMaintenance(hostID(&m), DeviceMaintenanceRequest{Action: "disable", Platform: "fake", Identity: "fake-1", IfRevision: &rev}); err != nil {
+					t.Fatal(err)
+				}
+			case "quarantined":
+				m.Devices = slices.Clone(m.Devices)
+				m.Devices[1].Reason, m.Devices[1].FreeMemoryGB = "device_fault_xe", 0
+			case "missing":
+				m.Devices = slices.Clone(m.Devices[:1])
+			}
+			ack = result(b, false)
+			ack.ReleaseOnly = true
+			if err := q.Complete(ack); err != nil {
+				t.Fatal(err)
+			}
+			clock.Advance(time.Second)
+			got := assignedJob(machineCheck(t, q, m))
+			if got == nil || got.ID != a.ID && got.ID != b.ID || !slices.Equal(got.AllocatedDevices, []string{"0"}) {
+				t.Fatal("card 0 stayed idle after the host could no longer hold the demand", got)
+			}
+			requireState(t, q, demand.ID, "queued")
+		})
 	}
-	ack := result(a, false)
-	ack.ReleaseOnly = true
-	if err := q.Complete(ack); err != nil {
-		t.Fatal(err)
-	}
-	if got := assignedJob(machineCheck(t, q, m, b)); got != nil {
-		t.Fatal("card 0 not held while the demand can still use both cards", got.ID)
-	}
-	rev := uint64(0)
-	if _, err := q.ChangeDeviceMaintenance(hostID(&m), DeviceMaintenanceRequest{Action: "disable", Platform: "fake", Identity: "fake-1", IfRevision: &rev}); err != nil {
-		t.Fatal(err)
-	}
-	ack = result(b, false)
-	ack.ReleaseOnly = true
-	if err := q.Complete(ack); err != nil {
-		t.Fatal(err)
-	}
-	clock.Advance(time.Second)
-	got := assignedJob(machineCheck(t, q, m))
-	if got == nil || got.ID != a.ID && got.ID != b.ID || !slices.Equal(got.AllocatedDevices, []string{"0"}) {
-		t.Fatal("card 0 stayed idle after the host could no longer hold the demand", got)
-	}
-	requireState(t, q, demand.ID, "queued")
 }
 
 // Planner cost of card groups (#105): four two-card hosts, every card held by
