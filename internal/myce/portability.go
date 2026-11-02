@@ -383,6 +383,9 @@ func (q *Queue) portability(req PortabilityRequest) PortabilityReport {
 						fitsResourcesChecked(candidate, target, target.FreeMemoryGB, &fit)
 						if fit.failures > 0 {
 							h.Admission = "blocked: " + fit.first
+							if fit.first == "shared host profile" && target.SharedHostReason != "" && target.SharedHostReason == q.hostPressureReason(target) {
+								h.Admission = "temporarily unavailable: " + target.SharedHostReason
+							}
 							continue
 						}
 						if !hostFits(target, candidate.Spec.Needs.MemoryGB, candidate.Spec.Needs.HostMemoryGB) {
