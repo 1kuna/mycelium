@@ -374,14 +374,15 @@ type SpecProjection struct {
 }
 
 type Job struct {
-	Pause                  *JobPause             `json:"pause,omitempty"`
-	PauseRevision          uint64                `json:"pause_revision,omitempty"`
-	LocalOutputs           *TaskOutputCustody    `json:"local_outputs,omitempty"`
-	StorageAllocation      *StorageAllocation    `json:"storage_allocation,omitempty"`
-	StorageEnvelope        *JobStorageEnvelope   `json:"storage_envelope,omitempty"`
-	StorageAttempts        []AttemptStorageFacts `json:"storage_attempts,omitempty"`
-	StorageAttemptsDropped int                   `json:"storage_attempts_dropped,omitempty"`
-	SpecProjection         *SpecProjection       `json:"spec_projection,omitempty"`
+	SharedHostBackoff      map[string]SharedHostBackoff `json:"shared_host_backoff,omitempty"`
+	Pause                  *JobPause                    `json:"pause,omitempty"`
+	PauseRevision          uint64                       `json:"pause_revision,omitempty"`
+	LocalOutputs           *TaskOutputCustody           `json:"local_outputs,omitempty"`
+	StorageAllocation      *StorageAllocation           `json:"storage_allocation,omitempty"`
+	StorageEnvelope        *JobStorageEnvelope          `json:"storage_envelope,omitempty"`
+	StorageAttempts        []AttemptStorageFacts        `json:"storage_attempts,omitempty"`
+	StorageAttemptsDropped int                          `json:"storage_attempts_dropped,omitempty"`
+	SpecProjection         *SpecProjection              `json:"spec_projection,omitempty"`
 
 	RecoveredResults    []RecoveredResult    `json:"recovered_results,omitempty"`
 	PlacementIntent     *PlacementIntent     `json:"placement_intent,omitempty"`
@@ -566,6 +567,7 @@ type Machine struct {
 	MemoryMeasured              bool                `json:"memory_measured,omitempty"`
 	ModelConfigHash             string              `json:"model_config_hash,omitempty"`
 	ModelURL                    string              `json:"model_url,omitempty"`
+	UnavailableRoots            []UnavailableRoot   `json:"unavailable_roots,omitempty"`
 	CheckpointUnavailable       bool                `json:"checkpoint_unavailable"`
 	ID                          string              `json:"id"`
 	Session                     string              `json:"session"`

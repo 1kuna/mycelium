@@ -30,6 +30,8 @@ type Worker struct {
 	hostMemorySamples    map[attemptKey]hostMemorySample
 	DiskProbe            func(string) (DiskReading, error)
 	diskSampler          *workerDiskSampler
+	rootMonitor          *workerRootMonitor
+	MountRoots           func(context.Context) ([]string, error)
 	AcceleratorStopGrace time.Duration
 	Enrollment           bool
 	DeviceSettings       []DeviceInstall
@@ -348,6 +350,10 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	}
 	if j.Spec.Priority == "production" && j.Spec.StartBy == nil {
 		return nil, errors.New("queue start-gate protocol mismatch: production assignment has no start_by; upgrade queue and workers together")
+	}
+	w.Machine.UnavailableRoots = w.sampleStorageRoots(ctx, s.state.CheckpointRoot)
+	if reason := w.storageRootReason(&j); reason != "" {
+		return nil, s.startFailure(j, launchRefused, errors.New(reason))
 	}
 	if parkedStorage(&j) {
 		return nil, s.startFailure(j, launchRefused, errors.New(parkedStorageReason))
@@ -1005,6 +1011,9 @@ func (w Worker) replay(ctx context.Context, s *workerStore) error {
 	return nil
 }
 func (w Worker) Run(stop context.Context) error {
+	if w.rootMonitor == nil {
+		w.rootMonitor = &workerRootMonitor{expected: map[string]string{}}
+	}
 	if err := ValidateDeviceSettings(w.DeviceSettings); err != nil {
 		return err
 	}

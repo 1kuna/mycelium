@@ -1894,6 +1894,16 @@
           "type": "string",
           "x-contract": "stable"
         },
+        "shared_host_backoff": {
+          "additionalProperties": {
+            "$ref": "#/$defs/SharedHostBackoff"
+          },
+          "type": [
+            "object",
+            "null"
+          ],
+          "x-contract": "diagnostic"
+        },
         "sidecar_environment_recipes": {
           "additionalProperties": {
             "additionalProperties": {
@@ -3275,6 +3285,28 @@
       "required": [
         "operation",
         "class"
+      ],
+      "type": "object"
+    },
+    "SharedHostBackoff": {
+      "properties": {
+        "stops": {
+          "items": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
+        "until": {
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "until"
       ],
       "type": "object"
     },

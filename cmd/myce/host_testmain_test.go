@@ -87,6 +87,7 @@ func cliTestMain(m *testing.M) int {
 func installSyntheticHost() {
 	myce.SetOnboardingMountCommand(func(context.Context, string, ...string) ([]byte, error) { return nil, nil })
 	myce.SetWorkerProbeDefaults(myce.WorkerProbeDefaults{
+		MountRoots:   func(context.Context) ([]string, error) { return []string{"/"}, nil },
 		DeviceFaults: func() myce.DeviceFaultSource { return nil },
 		Disk: func(string) (myce.DiskReading, error) {
 			return myce.DiskReading{Volume: "synthetic", TotalBytes: 1 << 40, FreeBytes: 1 << 39}, nil

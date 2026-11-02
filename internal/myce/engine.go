@@ -755,7 +755,16 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 		if authorize := rt.authorize; authorize != nil {
 			// Capture the exact plan under rt.mu; heartbeats update rt.session.
 			launch := HostLaunch{Machine: rt.machine, Session: s.Session, Kind: "engine", Key: s.Model, Device: s.Device, Attempt: s.Attempt}
+			rootWorker := rt.worker
 			parent = withLaunchGate(parent, func() error {
+				if rootWorker != nil {
+					probe := *rootWorker
+					probe.Machine.UnavailableRoots = probe.sampleStorageRoots(parent, probe.CheckpointRoot)
+					dependency := &Job{Spec: Spec{Priority: "production", Needs: ResourceNeeds{Model: model.Name}, Environment: Environment{Name: model.Environment}}}
+					if reason := storageRootReasonForModel(dependency, &probe.Machine, model); reason != "" {
+						return errors.New(reason)
+					}
+				}
 				if s.Device == "" && rt.verifyDevice != nil {
 					if err := rt.verifyDevice(); err != nil {
 						return err

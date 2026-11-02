@@ -552,6 +552,9 @@ func newAttemptStore(root *workerStore, j Job) (*workerStore, error) {
 }
 
 func localAttemptAdmission(w Worker, jobs []Job, next Job, models []ModelReport) error {
+	if reason := w.storageRootReason(&next); reason != "" {
+		return errors.New(reason)
+	}
 	if w.Machine.SharedHost != nil && runtime.GOOS == "linux" && !w.sharedCPUDev && w.sharedExecutionCeilings == nil {
 		return refuseAdmission("shared_cpu_controller", "controllers", 1, 0, true)
 	}
@@ -816,6 +819,8 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 			release := CurrentRelease()
 			m.Release = &release
 			m.Fleet = w.fleet.observe(ctx, m, !recovering && !leaving)
+			m.UnavailableRoots = w.sampleStorageRoots(ctx, root.state.CheckpointRoot)
+			w.Machine.UnavailableRoots = slices.Clone(m.UnavailableRoots)
 			m.DiskVolumes = w.sampleDisks(root.dir, root.state.CheckpointRoot)
 			m.DockerCleanup, m.DockerCause = diagnostics.DockerCleanup, diagnostics.DockerCause
 			m.FileTransferError = diagnostics.FileTransferError
@@ -1099,6 +1104,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				// cache discoveries out of the configured environment list.
 				admissionWorker := w
 				admissionWorker.Machine.Environments = m.Environments
+				admissionWorker.Machine.UnavailableRoots = w.sampleStorageRoots(ctx, root.state.CheckpointRoot)
 				for _, d := range reply.Attempts {
 					key := attemptKey{d.ID, d.Attempt, d.Session}
 					if d.Job != nil {

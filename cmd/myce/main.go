@@ -215,7 +215,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 		f.StringVar(&cancelProject, "project", "", "project owning the submission key")
 		f.StringVar(&cancelKey, "key", "", "submission key to cancel (requires --project, no job ID)")
 	}
-	if args[0] == "status" || args[0] == "logs" || args[0] == "ledger" || args[0] == "cancel" {
+	if args[0] == "status" || args[0] == "logs" || args[0] == "ledger" || args[0] == "cancel" || args[0] == "submit" {
 		f.StringVar(&clientConfig, "config", "", "installed config (default: installed worker, then queue)")
 	}
 	joiningFile := f.String("joining-file", env("MYCE_JOINING_FILE", ""), "privately supplied invitation (discovery plus saved address)")
@@ -374,7 +374,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	defer stop()
 	var client myce.Client
 	var invitation *myce.Invitation
-	if args[0] == "status" || args[0] == "logs" || args[0] == "ledger" || args[0] == "cancel" {
+	if args[0] == "status" || args[0] == "logs" || args[0] == "ledger" || args[0] == "cancel" || args[0] == "submit" {
 		// An omitted endpoint must not mask the installed queue address.
 		endpoint := os.Getenv("MYCE_QUEUE")
 		f.Visit(func(v *flag.Flag) {

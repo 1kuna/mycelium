@@ -1076,3 +1076,25 @@ hint, not a completion guarantee or production `start_by`. Deadline demand does
 not preempt non-resumable commands. Blocker duration estimates use comparable
 observations when available; missing estimates and overruns remain explicitly
 unknown. An estimated remaining duration does not assure a queue start time.
+
+## Configured NAS mount availability
+
+Worker `unavailable_roots` lists affected configured root roles and a fixed reason
+when the configured NAS mount is absent or its mount inventory is unavailable.
+Mountpoint directories and local fallback capacity do not establish mount health.
+The worker checks OS mount metadata before check-in and native/batch preparation;
+placement and the launch fence consume this observation without filesystem I/O
+under the queue lock. Host health is degraded while any root is affected.
+Jobs requiring those roots wait, including non-resumable production inputs and
+models. Prepared local environments and cached shared inputs remain eligible
+when their own roots are healthy. Started attempts retain their exact custody.
+Restored mounts clear the observation automatically; an explicit operator disable
+still requires an explicit resume. Independently configured network roots are
+remembered after being observed mounted; installed NAS is checked even at cold
+startup. Root roles, never local paths or mount source addresses, cross the API.
+
+Job `shared_host_backoff` persists per-host latency-stop timestamps and cooldown
+expiry. Three interrupted owner-scheduling-latency attempts within ten minutes
+exclude that job from that host for fifteen minutes, using the queue clock. Other
+eligible hosts can admit it immediately. Status names the latency backoff and its
+expiry; ordinary pressure recovery alone does not erase the cooldown.
