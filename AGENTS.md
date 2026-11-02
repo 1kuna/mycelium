@@ -40,6 +40,7 @@
 ```sh
 ./scripts/gate.sh quick BASE   # per change (default); build, vet, targets, related race tests
 ./scripts/gate.sh full         # once per batch before a fleet deploy; dev e2e + one race suite
+myce run --profile gate-quick --input gate-selection.tsv=FILE  # quick on a fleet CPU host, not the T3 Mac; docs/development.md
 ./myce dev # long-running local API and fake workers; Ctrl-C to stop
 ```
 

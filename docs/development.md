@@ -113,6 +113,22 @@ see [agent offload](adapter.md). Linux runs the Linux builds, vet and full
 race/dev suite. The native Darwin CGO build explicitly skips there and remains
 a separate macOS check; the Linux gate is not proof of that release target.
 
+The `gate-quick` profile runs the quick gate the same way. A submitted source
+archive has no Git history, so compute the related-test selection locally and
+send it as a job input; the job runs `gate.sh quick --selection FILE` in place
+of the Git diff:
+
+```sh
+mkdir -p .reports
+python3 scripts/gate-related.py "$(git merge-base HEAD origin/main)" > .reports/gate-selection.tsv
+myce run --profile gate-quick --input gate-selection.tsv=.reports/gate-selection.tsv
+```
+
+Commit first: the source is `HEAD`, while the selection also sees uncommitted
+files. A selection error (changed `go.mod`, unmapped code) means run `gate-full`.
+Quick runs a subset of the full gate's commands at the same concurrency, so it
+declares the Linux full-gate 7 GiB; the same five-minute budget applies.
+
 Full-gate profiles and their converted adapter entries declare CPU host memory
 per platform: `gate-full` supports Linux at 7 GiB; `gate-full-darwin` supports
 Darwin arm64 at 4 GiB. CI selects the corresponding profile before freezing the
