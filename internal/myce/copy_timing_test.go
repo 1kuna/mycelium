@@ -79,10 +79,11 @@ func TestCopyLifecycleTimesSurviveReleaseRetryAndRestart(t *testing.T) {
 		t.Run("legacy-idle-"+kind, func(t *testing.T) {
 			q, clock := fixture(t)
 			m := machine("legacy", "xpu")
-			submit(t, q, sharedSpec("experiment", 3))
+			m.HostMemoryMeasured, m.HostAvailableMemoryGB = true, 32
+			queued := submit(t, q, sharedSpec("experiment", 3))
 			run := check(t, q, m, nil).Job
 			if run == nil {
-				t.Fatal("no legacy attempt")
+				t.Fatal("no legacy attempt", job(t, q, queued.ID).Reason)
 			}
 			if kind != "stop" {
 				if err := q.Cancel(run.ID); err != nil {

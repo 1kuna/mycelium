@@ -240,6 +240,12 @@ func TestSharedDeviceXPUEnginePromotionWaitsForTierRelease(t *testing.T) {
 	for _, state := range []string{"ready", "loading"} {
 		t.Run(state, func(t *testing.T) {
 			q, _, m := sharedXPUModelFixture(t)
+			// Establish the batch before the pending call takes queue precedence.
+			queued := submit(t, q, sharedSpec("experiment", 3))
+			run := assignedJob(machineCheck(t, q, m))
+			if run == nil || run.ID != queued.ID {
+				t.Fatal("no experiment co-tenant", run, job(t, q, queued.ID).Reason)
+			}
 			addModelCall(t, q, "experiment")
 			slot := q.s.ModelSlots[slotKey(m.ID, "test", "0")]
 			if slot == nil {
@@ -250,11 +256,6 @@ func TestSharedDeviceXPUEnginePromotionWaitsForTierRelease(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-			}
-			queued := submit(t, q, sharedSpec("experiment", 3))
-			run := assignedJob(machineCheck(t, q, m))
-			if run == nil || run.ID != queued.ID {
-				t.Fatal("no experiment co-tenant", run)
 			}
 			high := addModelCall(t, q, "production")
 			requireState(t, q, run.ID, "stopping")
@@ -271,15 +272,15 @@ func TestSharedDeviceXPUEnginePromotionWaitsForTierRelease(t *testing.T) {
 
 func TestSharedDeviceXPUPinnedEngineRetryWaitsForTierRelease(t *testing.T) {
 	q, clock, m := sharedXPUModelFixture(t)
+	queued := submit(t, q, sharedSpec("experiment", 3))
+	run := assignedJob(machineCheck(t, q, m))
+	if run == nil || run.ID != queued.ID {
+		t.Fatal("no experiment co-tenant", run, job(t, q, queued.ID).Reason)
+	}
 	addModelCall(t, q, "experiment")
 	slot := q.s.ModelSlots[slotKey(m.ID, "test", "0")]
 	if slot == nil {
 		t.Fatal("no experiment engine")
-	}
-	queued := submit(t, q, sharedSpec("experiment", 3))
-	run := assignedJob(machineCheck(t, q, m))
-	if run == nil || run.ID != queued.ID {
-		t.Fatal("no experiment co-tenant", run)
 	}
 	if err := q.Pin(ModelPin{Project: "test", Model: "test", Machine: m.ID}); err != nil {
 		t.Fatal(err)
@@ -410,6 +411,7 @@ func TestLegacyXPUCPUJobPacksBesideModel(t *testing.T) {
 		t.Run(modelTier, func(t *testing.T) {
 			q, _, m := modelFixture(t)
 			m.GPU = "xpu" // Legacy inventory has no Devices and keeps the GPU on CPU targets.
+			m.HostMemoryMeasured, m.HostAvailableMemoryGB = true, 32
 			m.CapabilityProfile.Accelerators[0].Type = "xpu"
 			q.models.Models[0].MemoryGB, q.models.Models[0].Platforms = 1, []string{"xpu"}
 			m.ModelConfigHash = modelConfigHash(q.models)
