@@ -759,9 +759,10 @@ func (rt *modelRuntime) sync(plan []ModelSlot) {
 			parent = withLaunchGate(parent, func() error {
 				if rootWorker != nil {
 					probe := *rootWorker
+					probe.Machine = probe.storageMachine()
 					probe.Machine.UnavailableRoots = probe.sampleStorageRoots(parent, probe.CheckpointRoot)
-					dependency := &Job{Spec: Spec{Priority: "production", Needs: ResourceNeeds{Model: model.Name}, Environment: Environment{Name: model.Environment}}}
-					if reason := storageRootReasonForModel(dependency, &probe.Machine, model); reason != "" {
+					dependency := &Job{Spec: Spec{Priority: "production", Needs: ResourceNeeds{Model: model.Name}}}
+					if reason := storageRootReasonForModel(dependency, &probe.Machine, model, s.EnvironmentRecipe); reason != "" {
 						return errors.New(reason)
 					}
 				}

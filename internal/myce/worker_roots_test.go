@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -166,11 +167,107 @@ func TestWorkerRootsCachedModelAndDirectNAS(t *testing.T) {
 	j.Spec.Priority = "production"
 	j.Spec.Needs.Model = "model"
 	model := Model{Name: "model"}
-	if storageRootReasonForModel(&j, &m, model) != "" {
+	if storageRootReasonForModel(&j, &m, model, nil) != "" {
 		t.Fatal("local cached model blocked")
 	}
 	model.DirectNAS = true
-	if storageRootReasonForModel(&j, &m, model) == "" {
+	if storageRootReasonForModel(&j, &m, model, nil) == "" {
 		t.Fatal("direct NAS model bypassed missing mount")
+	}
+}
+
+func TestWorkerRootsDiscoveredCachesReachActorAndModelLaunch(t *testing.T) {
+	ctx := context.Background()
+	cache, makeModel := cacheFixture(t)
+	model := makeModel("cached", "data")
+	model.Environment = "runtime"
+	model.MemoryGB = 1
+	model.Platforms = []string{"fake"}
+	if _, err := cache.Prepare(ctx, model); err != nil {
+		t.Fatal(err)
+	}
+	clock := cache.Clock
+	shared := &SharedInputCache{cache: EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: clock}}
+	input := sharedArchive(t, cache.NASRoot)
+	if _, release, err := shared.Acquire(ctx, input, cache.NASRoot); err != nil {
+		t.Fatal(err)
+	} else {
+		release()
+	}
+	t.Cleanup(func() { _ = removeSharedEntry(shared.cache.Root) })
+	recipe := binaryRecipe(t, "fake")
+	envCache := &EnvironmentCache{Root: t.TempDir(), Limit: 1 << 20, Clock: clock}
+	if _, release, err := envCache.Acquire(ctx, recipe); err != nil {
+		t.Fatal(err)
+	} else {
+		release()
+	}
+	m := machine("worker", "fake")
+	w := Worker{Machine: m, Clock: clock, ModelRoot: cache.NASRoot, CheckpointRoot: cache.NASRoot, EnvironmentSourceRoot: cache.NASRoot, ServiceConfig: &ServiceConfig{NAS: cache.NASRoot}, rootMonitor: &workerRootMonitor{expected: map[string]string{}}, ModelConfig: ModelConfig{Models: []Model{model}}, MountRoots: func(context.Context) ([]string, error) { return nil, nil }}
+	actor, engineWorker := w, w // Both are captured before discovery, just like runtime.
+	observed := m
+	observed.CachedSharedInputs = shared.readyKeys()
+	var err error
+	observed.CachedModels, _, err = cache.report([]Model{model}, nil)
+	if err != nil || len(observed.CachedModels) != 1 || len(observed.CachedSharedInputs) != 1 {
+		t.Fatal("missing real cache discovery", err)
+	}
+	observed.Environments = []string{recipe.Key}
+	w.publishStorageReadiness(observed)
+	// Remove NAS sources; later execution must use verified local bytes.
+	for _, name := range []string{model.Path, input.NAS} {
+		if err := os.Remove(filepath.Join(cache.NASRoot, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	actor.Machine.UnavailableRoots = actor.sampleStorageRoots(ctx, actor.CheckpointRoot)
+	next := Job{Spec: cpuSpec(1, 1)}
+	next.Spec.Priority = "production"
+	next.Spec.SharedInputs = map[string]SharedInput{"input": input}
+	if err := localAttemptAdmission(actor, nil, next, nil); err != nil {
+		t.Fatal("stale actor rejected discovered input", err)
+	}
+	rt := &modelRuntime{models: map[string]*workerModel{}, worker: &engineWorker, session: m.Session, machine: m.ID, platform: "fake", cache: cache, environmentCache: envCache, config: ModelConfig{Wait: time.Second, Models: []Model{model}}, memoryMachine: m, memorySource: func(context.Context) (float64, error) { return 8, nil }, engineFactory: func(Model) Engine { return &FakeEngine{} }, authorize: func(HostLaunch) error { return nil }}
+	rt.sync([]ModelSlot{{Model: model.Name, Session: m.Session, Attempt: "cache-after-mount-loss", State: "loading", EnvironmentRecipe: &recipe}})
+	rt.wg.Wait()
+	loaded := rt.models[model.Name]
+	if loaded == nil || loaded.state != "ready" {
+		t.Fatalf("cached model/prepared recipe failed after mount loss: %+v", loaded)
+	}
+	rt.sync(nil)
+	rt.wg.Wait()
+}
+
+func TestWorkerRootsModelEnvironmentPlacement(t *testing.T) {
+	q, _ := fixture(t)
+	recipe := binaryRecipe(t, "fake")
+	if err := q.ConfigureEnvironments(EnvironmentCatalog{Environments: map[string]map[string]EnvironmentRecipe{"runtime": {"fake": recipe}}}); err != nil {
+		t.Fatal(err)
+	}
+	model := Model{Name: "test", Path: "test", Engine: "fake", Environment: "runtime", MemoryGB: 1, Platforms: []string{"fake"}}
+	if err := q.ConfigureModels(ModelConfig{Wait: time.Second, Idle: time.Minute, Models: []Model{model}}); err != nil {
+		t.Fatal(err)
+	}
+	m := machine("missing-environment", "fake")
+	m.CachedModels = []string{model.Name}
+	m.Environments = []string{recipe.Key}
+	m.UnavailableRoots = []UnavailableRoot{{Root: "environment", Reason: "configured NAS mount missing"}}
+	demand := callJob(&ModelCall{Model: model.Name, Priority: "production"})
+	if q.placementAllowed(demand, &m) {
+		t.Fatal("model placement ignored required environment root")
+	}
+	healthy := m
+	healthy.ID = "healthy"
+	healthy.UnavailableRoots = nil
+	if !q.placementAllowed(demand, &healthy) {
+		t.Fatal("healthy model target excluded")
+	}
+	m.UnavailableRoots = []UnavailableRoot{{Root: "environment-source", Reason: "configured NAS mount missing"}}
+	if !q.placementAllowed(demand, &m) {
+		t.Fatal("prepared model environment treated as missing")
+	}
+	m.Environments = nil
+	if q.placementAllowed(demand, &m) {
+		t.Fatal("cold model environment bypassed source mount loss")
 	}
 }

@@ -1035,6 +1035,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 					m.CacheError = "cache report failed"
 				}
 			}
+			w.publishStorageReadiness(m)
 			rt.mu.Lock()
 			rt.memoryMachine, rt.session = w.Machine, w.Machine.Session
 			rt.batchJobs = slices.Clone(jobs)

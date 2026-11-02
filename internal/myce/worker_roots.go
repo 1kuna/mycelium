@@ -20,8 +20,38 @@ type UnavailableRoot struct {
 }
 
 type workerRootMonitor struct {
-	mu       sync.Mutex
-	expected map[string]string
+	mu        sync.Mutex
+	expected  map[string]string
+	readiness *workerStorageReadiness
+}
+
+// Published after actual cache discovery. Actor/engine Worker values share this
+// monitor, so a startup copy cannot erase newer verified readiness receipts.
+type workerStorageReadiness struct{ sharedInputs, models, environments []string }
+
+func (w Worker) publishStorageReadiness(m Machine) {
+	if w.rootMonitor == nil {
+		return
+	}
+	r := &workerStorageReadiness{sharedInputs: slices.Clone(m.CachedSharedInputs), models: slices.Clone(m.CachedModels), environments: slices.Clone(m.Environments)}
+	w.rootMonitor.mu.Lock()
+	w.rootMonitor.readiness = r
+	w.rootMonitor.mu.Unlock()
+}
+
+func (w Worker) storageMachine() Machine {
+	m := w.Machine
+	if w.rootMonitor != nil {
+		w.rootMonitor.mu.Lock()
+		r := w.rootMonitor.readiness
+		w.rootMonitor.mu.Unlock()
+		if r != nil {
+			m.CachedSharedInputs = r.sharedInputs
+			m.CachedModels = r.models
+			m.Environments = r.environments
+		}
+	}
+	return m
 }
 
 // Inspect cached OS mount metadata, not the NAS filesystem. Installed NAS is an
@@ -119,7 +149,7 @@ func storageRootReason(j *Job, m *Machine) string {
 	return ""
 }
 
-func storageRootReasonForModel(j *Job, m *Machine, model Model) string {
+func storageRootReasonForModel(j *Job, m *Machine, model Model, recipe *EnvironmentRecipe) string {
 	copy := *m
 	copy.UnavailableRoots = nil
 	localModel := !model.DirectNAS && (model.FileStore || model.LocalSource != "" || slices.Contains(m.CachedModels, model.Name) || slices.Contains(m.Models, model.Name))
@@ -132,7 +162,19 @@ func storageRootReasonForModel(j *Job, m *Machine, model Model) string {
 		}
 		copy.UnavailableRoots = append(copy.UnavailableRoots, root)
 	}
-	return storageRootReason(j, &copy)
+	if reason := storageRootReason(j, &copy); reason != "" {
+		return reason
+	}
+	if model.Environment == "" {
+		return ""
+	}
+	dependency := *j
+	dependency.Spec.Environment = Environment{Name: model.Environment}
+	dependency.EnvironmentRecipes = nil
+	if recipe != nil {
+		dependency.EnvironmentRecipes = map[string]EnvironmentRecipe{m.GPU: *recipe}
+	}
+	return storageRootReason(&dependency, &copy)
 }
 
 func (q *Queue) storageRootReason(j *Job, m *Machine) string {
@@ -140,18 +182,23 @@ func (q *Queue) storageRootReason(j *Job, m *Machine) string {
 		return ""
 	}
 	if model, ok := q.model(j.Spec.Needs.Model); ok {
-		return storageRootReasonForModel(j, m, model)
+		recipe, ok := q.environments.Environments[model.Environment][m.GPU]
+		if ok {
+			return storageRootReasonForModel(j, m, model, &recipe)
+		}
+		return storageRootReasonForModel(j, m, model, nil)
 	}
 	return storageRootReason(j, m)
 }
 
 func (w Worker) storageRootReason(j *Job) string {
+	machine := w.storageMachine()
 	for _, model := range w.ModelConfig.Models {
 		if model.Name == j.Spec.Needs.Model {
-			return storageRootReasonForModel(j, &w.Machine, model)
+			return storageRootReasonForModel(j, &machine, model, nil)
 		}
 	}
-	return storageRootReason(j, &w.Machine)
+	return storageRootReason(j, &machine)
 }
 
 var workerMountRoots = localWorkerMountRoots
