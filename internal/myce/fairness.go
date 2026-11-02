@@ -292,6 +292,7 @@ type batchResourceKey struct {
 	project, class, priority string
 	gpu, host                float64
 	cores                    int
+	shares                   bool
 }
 type batchResourceRoom struct {
 	machine Machine
@@ -301,7 +302,7 @@ type batchResourceRoom struct {
 }
 
 func resourceKey(j *Job) batchResourceKey {
-	return batchResourceKey{j.Spec.Project, j.Spec.Class, j.Spec.Priority, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, j.Spec.Needs.cores()}
+	return batchResourceKey{j.Spec.Project, j.Spec.Class, j.Spec.Priority, j.Spec.Needs.MemoryGB, j.Spec.Needs.HostMemoryGB, j.Spec.Needs.cores(), sharesDevice(j)}
 }
 
 func (q *Queue) batchResourcesFit(j *Job, m *Machine) bool {
@@ -451,11 +452,16 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 		}
 		busy := !q.workerBatchIdle(live)
 		batchSlotAllocated := busy
+		sharedWith, shared := 0, false
+		if busy {
+			sharedWith, shared = q.deviceCoTenants(live, best, true)
+			busy = !shared
+		}
 		if call := q.calls[best.ID]; call != nil {
 			busy = !q.callCanUse(live, call)
 		}
 		if busy || !fits(best, live, live.FreeMemoryGB) {
-			base = reservationWaitReason(live, batchSlotAllocated)
+			base = reservationWaitReason(live, batchSlotAllocated && !shared, sharedWith)
 		}
 		if !environmentReady(best, target) {
 			if busy {
@@ -485,10 +491,13 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 
 // Admission reservations do not measure compute load. Keep the selected
 // planner target and its measured RAM evidence visible without claiming busy CPUs.
-func reservationWaitReason(m *Machine, batchSlot bool) string {
+func reservationWaitReason(m *Machine, batchSlot bool, sharedWith int) string {
 	parts := []string{"waiting for reserved capacity on " + m.ID}
 	if batchSlot {
 		parts = append(parts, "batch slot allocated")
+	}
+	if sharedWith > 0 {
+		parts = append(parts, fmt.Sprintf("device %s shared with %d attempts; %.1f GiB device memory free", m.Device, sharedWith, m.FreeMemoryGB))
 	}
 	parts = append(parts, fmt.Sprintf("CPU %d/%d cores reserved; utilization unknown", m.CPUInUseCores, m.EffectiveCPUCores))
 	if m.HostMemoryMeasured && m.HostMemoryError == "" {
