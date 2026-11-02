@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -257,14 +258,16 @@ func TestFileReleaseStalePlanAndPublicationGrace(t *testing.T) {
 		t.Fatal("grace omitted", fresh)
 	}
 	clock.Advance(filePublicationGrace + time.Second)
-	_, err := releaseApply(q, fresh)
-	releaseCode(t, err, "file_release_stale")
+	// Aging out of grace is not a custody or reference change.
 	p := releasePlan(t, q, fresh.Selection)
+	if p.ID != fresh.ID || p.ReclaimableBytes != ref.SizeBytes {
+		t.Fatal("grace aging staled the reviewed plan", p)
+	}
 	other := spec("experiment")
 	other.Project = "other"
 	other.Files = FileManifest{"new": ref}
 	submit(t, q, other)
-	_, err = releaseApply(q, p)
+	_, err := releaseApply(q, p)
 	releaseCode(t, err, "file_release_stale")
 	if job(t, q, j.ID).FilesExpired {
 		t.Fatal("stale plan mutated expiry")
@@ -348,6 +351,48 @@ func TestFileReleaseAPI(t *testing.T) {
 	}
 	if got.PlanID != plan.ID {
 		t.Fatal(got)
+	}
+}
+
+// Video-editor's apply failed as an opaque 400 request_failed: a selected blob
+// left publication grace between plan and apply, which changed the plan ID, and
+// the HTTP writer dropped the typed file_release_stale refusal.
+func TestFileReleaseAPIGraceAgingAndTypedRefusals(t *testing.T) {
+	q, clock := fixture(t)
+	c := retentionClient(t, q)
+	j, _, _ := releaseTerminal(t, q, c, "aging")
+	call := func(path string, in, out any) error { return c.Call(context.Background(), "POST", path, in, out) }
+	var plan FileReleasePlan
+	if err := call("/api/files/release/plan", releaseSelection(j), &plan); err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Blobs[0].PublicationProtected || plan.ReclaimableBytes != 0 {
+		t.Fatalf("content should still be in publication grace: %+v", plan.Blobs)
+	}
+	clock.Advance(filePublicationGrace + time.Second)
+	refusal := func(err error, code string) {
+		t.Helper()
+		var he *HTTPError
+		if !errors.As(err, &he) || he.Status != 409 || he.Code != code || he.Message == "" || he.Message == "request failed" {
+			t.Fatalf("want 409 %s with its reason, got %v", code, err)
+		}
+	}
+	tampered := FileReleaseApply{Selection: plan.Selection, PlanID: strings.Repeat("0", 64), AcceptExpiry: true}
+	refusal(call("/api/files/release/apply", tampered, nil), "file_release_stale")
+	var got FileReleaseResult
+	if err := call("/api/files/release/apply", FileReleaseApply{Selection: plan.Selection, PlanID: plan.ID, AcceptExpiry: true}, &got); err != nil || got.PlanID != plan.ID {
+		t.Fatalf("plan went stale only because content aged out of grace: %v", err)
+	}
+	s := spec("experiment")
+	s.Project = "owner"
+	live := submit(t, q, s)
+	if err := call("/api/files/release/plan", releaseSelection(live), &plan); err != nil {
+		t.Fatal(err)
+	}
+	refusal(call("/api/files/release/apply", FileReleaseApply{Selection: plan.Selection, PlanID: plan.ID, AcceptExpiry: true}, nil), "file_release_protected")
+	var he *HTTPError
+	if err := call("/api/files/release/apply", FileReleaseApply{Selection: plan.Selection, PlanID: plan.ID}, nil); !errors.As(err, &he) || he.Code != "file_release_invalid" || he.Message != rejectionMessages["file_release_invalid"] {
+		t.Fatalf("want typed file_release_invalid, got %v", err)
 	}
 }
 
