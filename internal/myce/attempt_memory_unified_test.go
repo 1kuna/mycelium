@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"bytes"
 	"os"
 	"path/filepath"
 	"testing"
@@ -33,7 +34,10 @@ func TestAttemptMemoryUnifiedCUDAHostDelta(t *testing.T) {
 			dir := t.TempDir()
 			t.Setenv("MYCE_TEST_DEVICE_PROBE", dir)
 			t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-			script := "#!/bin/sh\nprintf '" + tc.rows + "\\n'\n: > \"$MYCE_TEST_DEVICE_PROBE/queried\"\n"
+			// Each query logs its start. A second start proves the first query
+			// returned and was recorded, so finish() cannot cancel it mid-exit
+			// (the marker once raced the probe's exit, #626).
+			script := "#!/bin/sh\necho start >> \"$MYCE_TEST_DEVICE_PROBE/queried\"\nprintf '" + tc.rows + "\\n'\n"
 			if err := os.WriteFile(filepath.Join(dir, "nvidia-smi"), []byte(script), 0700); err != nil {
 				t.Fatal(err)
 			}
@@ -59,7 +63,7 @@ func TestAttemptMemoryUnifiedCUDAHostDelta(t *testing.T) {
 			finish := w.observeAttemptMemoryEvery(a, j, nil, 20*time.Millisecond)
 			deadline := time.After(testWaitTimeout)
 			for {
-				if _, err := os.Stat(filepath.Join(dir, "queried")); err == nil {
+				if b, _ := os.ReadFile(filepath.Join(dir, "queried")); bytes.Count(b, []byte("\n")) >= 2 {
 					break
 				}
 				select {
