@@ -951,8 +951,11 @@ private project or file names. The API equivalents are
 `POST /api/files/release/plan` with `{project, jobs}` and
 `POST /api/files/release/apply` with
 `{selection: {project, jobs}, plan_id, accept_expiry: true}`. A plan is a
-read-only snapshot, not a reservation. Its digest identifies the reviewed state;
-it is not a signature or an authorization token.
+read-only snapshot, not a reservation. Its digest identifies the reviewed
+custody, references and stored content; it is not a signature or an
+authorization token. Content aging out of publication grace raises
+`reclaimable_bytes` in a new plan but leaves the digest unchanged, so a reviewed
+plan stays valid; a new publication or HEAD refresh of selected content does not.
 
 The plan lists each job's state, release/retention state, original expiry deadline,
 input/result/shared-input/dependency/diagnostic/fan-out manifests, and delivery
@@ -974,6 +977,8 @@ for that content unless another pending reclamation owns it.
 Apply requires explicit acceptance and recomputes the reviewed plan, then fences
 custody and reference metadata again in the expiry transaction. HTTP 409
 `file_release_stale` means regenerate and review a new plan; nothing was expired.
+For an active project, apply soon after planning: a new job sharing selected
+content adds a reference and stales the plan.
 HTTP 409 `file_release_protected` means a selected job is live, has unresolved
 physical custody or lacks required verified delivery. Include only eligible jobs
 in the next plan. Other projects' retained references can block physical removal

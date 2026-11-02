@@ -66,6 +66,7 @@ var rejectionMessages = map[string]string{
 	"request_stale":                         "attempt or input custody is stale; refresh before retrying",
 	"artifact_unknown":                      "accepted artifact not found",
 	"request_failed":                        "request failed",
+	"file_release_invalid":                  "release requires a project, explicit job IDs from that project, an accepted reviewed plan and a configured file store",
 	"extension_version_conflict":            "extension version is frozen; bump the version",
 	"extension_invalid":                     "extension folder or schema is invalid; run extension check --static",
 	"extension_unknown":                     "extension digest is not registered",
