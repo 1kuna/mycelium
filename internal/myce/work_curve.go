@@ -303,7 +303,7 @@ func (q *Queue) recordWorkOOM(j *Job, r Result, oomFailure bool) {
 			}
 			if sameMemoryWork(point, k, configuration) {
 				point.MemoryPeak, point.MemoryRecordedAt = nil, time.Time{}
-				point.MemoryRange = nil
+				point.MemoryRange, point.MemorySamples = nil, 0
 				point.GPUHostRange = nil
 				if !oomFailure && r.MemoryPeak != nil && r.MemoryPeak.Constrained {
 					// Keep the existing diagnostic as invalidation provenance,

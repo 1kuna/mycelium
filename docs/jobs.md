@@ -139,9 +139,9 @@ build or reservation, and grants nothing: submit revalidates every fence.
 | `run.workdir` | Absent: managed `{work}` | Native cwd must resolve within the private attempt directory; stage source/data as inputs or a profile |
 | `run.env` | Empty map | String overrides over the worker's safe environment allowlist; attempt/device/temp controls remain worker-owned |
 | `needs.cpu_cores` | Default one | Admitted logical cores for the whole attempt, including sidecars; omit GPU selectors for CPU-only work |
-| `needs.memory_gb` | Finite and positive unless `memory: auto` | Host RAM GiB for CPU-only work; GPU memory for GPU work; optional hint with auto |
+| `needs.memory_gb` | Finite and positive unless `memory: auto`; omitted means auto unless policy `learned_memory: false` (#585) | Host RAM GiB for CPU-only work; GPU memory for GPU work; optional hint with auto |
 | `needs.host_memory_gb` | Absent / `0`: GPU-only admission on uncapped hosts | Additional host RAM in GiB, including runtime/activation peaks; capped hosts require a positive resolved envelope; qualified Linux services enforce it plus worker slack |
-| `needs.memory` | Omitted: declared reservation | `auto`: local accepted peaks, cross-machine estimate, optional hint, or guarded exploratory first run; resolved once per attempt |
+| `needs.memory` | Omitted: declared reservation, or auto when no figure is given | `auto`: local accepted peaks, cross-machine estimate, optional hint, or exploratory first run (bounded for CPU work, #559, and for plain GPU work on unified-memory hosts, #596); resolved once per attempt |
 | `needs.platform` | GPU work: required; CPU input: omitted or `cpu` | `[cuda]` shorthand, `{required: [cuda, xpu]}`, `{preferred: [metal]}`, or `any` / `{any: true}`; exactly one mode |
 | `needs.model` | Absent | Batch affinity hint; does not load a model |
 | `needs.network` | Omitted / `false` | Native payload outbound opt-in. `true` requires a host advertising protected egress or submission is refused; reserved sidecar loopback and preparation need no opt-in. [Platform limits](native-isolation.md) apply, including fallback's partial network isolation. |

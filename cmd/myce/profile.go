@@ -517,7 +517,7 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 	if r.JobID == "" {
 		capacityFailure := func(cause error) error {
 			var h *myce.HTTPError
-			if errors.As(cause, &h) && h.Code == "file_store_capacity" {
+			if errors.As(cause, &h) && (h.Code == "file_store_capacity" || h.Code == "project_file_store_quota") {
 				r.RefusalCode, r.RefusalReason = h.Code, h.Message
 				if err := saveProfileJSON(filepath.Join(dir, "receipt.json"), r); err != nil {
 					return err
@@ -547,6 +547,9 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 		j, e := c.Submit(ctx, r.Spec)
 		if e != nil {
 			var h *myce.HTTPError
+			if errors.As(e, &h) && h.Code == "project_file_store_quota" {
+				return capacityFailure(e)
+			}
 			if errors.As(e, &h) {
 				if h.Code == "no_qualified_target" || h.Code == "job_environment_invalid" && h.PathDiagnostic != nil {
 					r.PathDiagnostic = h.PathDiagnostic

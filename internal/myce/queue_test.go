@@ -602,7 +602,7 @@ func TestValidationAndYAML(t *testing.T) {
 			t.Fatalf("%s: %v", p, err)
 		}
 	}
-	for _, change := range []func(*Spec){func(s *Spec) { s.Needs.MemoryGB = 0 }, func(s *Spec) { s.Priority = "unknown" }, func(s *Spec) { s.Priority = "deadline"; s.Deadline = nil }, func(s *Spec) { s.Needs.Platform = Platform{} }, func(s *Spec) { s.Needs.Platform = Platform{Required: []string{"unknown"}} }, func(s *Spec) { s.Needs.Platform.Required = []string{"cuda"} }, func(s *Spec) { s.Environment = Environment{Name: "a", LockFile: "b"} }, func(s *Spec) { s.Run.Command = nil }} {
+	for _, change := range []func(*Spec){func(s *Spec) { s.Needs.MemoryGB = -1 }, func(s *Spec) { s.Priority = "unknown" }, func(s *Spec) { s.Priority = "deadline"; s.Deadline = nil }, func(s *Spec) { s.Needs.Platform = Platform{} }, func(s *Spec) { s.Needs.Platform = Platform{Required: []string{"unknown"}} }, func(s *Spec) { s.Needs.Platform.Required = []string{"cuda"} }, func(s *Spec) { s.Environment = Environment{Name: "a", LockFile: "b"} }, func(s *Spec) { s.Run.Command = nil }} {
 		s := spec("experiment")
 		change(&s)
 		if s.Validate() == nil {

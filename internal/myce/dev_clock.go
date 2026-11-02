@@ -75,7 +75,7 @@ func (a API) registerDevClock(mux *requestMux) {
 			return err
 		}, nil)
 		if err == nil {
-			err = errors.Join(a.Queue.pruneBatchLogs(r.Context()), a.Queue.reclaimJobFilesContext(r.Context()), a.Queue.pruneJobHistory(r.Context()))
+			err = errors.Join(a.Queue.pruneBatchLogs(r.Context()), a.Queue.reclaimJobFilesContext(r.Context()), a.Queue.pruneJobHistory(r.Context()), a.Queue.pruneObservations(r.Context()))
 		}
 		// A failed transaction cannot rewind a clock other requests observed.
 		respond(w, struct {

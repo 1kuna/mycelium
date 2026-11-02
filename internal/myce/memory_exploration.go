@@ -40,8 +40,11 @@ func (q *Queue) sameOSMemoryLowerBound(key ObservationKey, configuration string)
 		}
 		age := q.clock.Now().Sub(*j.FinishedAt)
 		k := *j.Timing.Key
+		if k.Work != key.Work || age < 0 || age > workCurveMaxAge || k.Target.OS != key.Target.OS {
+			continue // Cheap identity filter before hashing the configuration.
+		}
 		point := WorkObservation{Key: k, MemoryConfiguration: memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)}
-		if age < 0 || age > workCurveMaxAge || k.Target.OS != key.Target.OS || !sameMemoryWork(point, key, configuration) {
+		if !sameMemoryWork(point, key, configuration) {
 			continue
 		}
 		owner := history.s.Machines[j.Timing.Machine]

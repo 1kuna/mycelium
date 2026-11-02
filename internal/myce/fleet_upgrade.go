@@ -37,6 +37,7 @@ type fleetUpgrade struct {
 	PublisherKey       []byte              `json:"publisher_key"`
 	State              string              `json:"state"`
 	Hosts              []*fleetUpgradeHost `json:"hosts"`
+	CreatedAt          time.Time           `json:"created_at,omitempty"`
 }
 type fleetUpgradeHost struct {
 	HealthSince    time.Time `json:"health_since,omitempty"`
@@ -108,7 +109,7 @@ func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest, requestContexts .
 		if previous := q.s.FleetUpgrade; previous != nil {
 			samePolicy := previous.QueueOnly == request.QueueOnly && previous.WaitProductionIdle == request.WaitProductionIdle
 			if !samePolicy && previous.State != "complete" {
-				return fleetError("fleet_upgrade_policy_conflict")
+				return q.fleetOperationRefusal("fleet_upgrade_policy_conflict", request)
 			}
 			if samePolicy && previous.Release.Manifest.Version == approved.Manifest.Version && reflect.DeepEqual(previous.Release.Manifest, approved.Manifest) {
 				// An explicit identical rerun clears only a failure. The exact drain
@@ -143,16 +144,16 @@ func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest, requestContexts .
 				return nil
 			}
 			if previous.State != "complete" && (previous.State != "stopped" || request.Release == "") {
-				return fleetError("fleet_upgrade_target_conflict")
+				return q.fleetOperationRefusal("fleet_upgrade_target_conflict", request)
 			}
 			if err := CheckReleaseUpgrade(approved.Manifest.Version, previous.Release.Manifest.Version, false); err != nil {
 				return fleetError("fleet_downgrade_refused")
 			}
 		}
 		if q.fleetQueue == nil || !q.fleetProofFresh(q.fleetQueue.Proof) {
-			return fleetError("fleet_queue_unmanaged")
+			return q.fleetProofRefusal("fleet_queue_unmanaged", request)
 		}
-		u := &fleetUpgrade{Operation: ID(), Revision: 1, Release: *approved, PublisherKey: bytes.Clone(q.s.EnrollmentReleaseKey), State: "running", QueueOnly: request.QueueOnly, WaitProductionIdle: request.WaitProductionIdle}
+		u := &fleetUpgrade{Operation: ID(), Revision: 1, Release: *approved, PublisherKey: bytes.Clone(q.s.EnrollmentReleaseKey), State: "running", QueueOnly: request.QueueOnly, WaitProductionIdle: request.WaitProductionIdle, CreatedAt: q.clock.Now()}
 		queue := q.fleetQueue
 		a, err := approved.Manifest.Select(queue.OS, queue.Arch)
 		if err != nil {
@@ -168,7 +169,7 @@ func (q *Queue) StartFleetUpgrade(request FleetUpgradeRequest, requestContexts .
 				continue
 			}
 			if !q.fleetProofFresh(m.Fleet) || m.CapabilityProfile == nil {
-				return fleetError("fleet_worker_unmanaged")
+				return q.fleetProofRefusal("fleet_worker_unmanaged", request)
 			}
 			artifact, e := approved.Manifest.Select(m.CapabilityProfile.OS, m.CapabilityProfile.Arch)
 			if e != nil {

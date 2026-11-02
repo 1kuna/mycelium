@@ -10,9 +10,14 @@ import (
 	"mycelium/internal/myce"
 )
 
+const fleetUsage = "usage: myce fleet upgrade [--release VERSION] [--queue-only] [--wait-production-idle]\n       myce fleet supersede --operation ID --reason TEXT"
+
 func fleetCommand(ctx context.Context, args []string, out io.Writer) error {
+	if len(args) > 0 && args[0] == "supersede" {
+		return fleetSupersedeCommand(ctx, args[1:], out)
+	}
 	if len(args) == 0 || args[0] != "upgrade" {
-		return errors.New("usage: myce fleet upgrade [--release VERSION] [--queue-only] [--wait-production-idle]")
+		return errors.New(fleetUsage)
 	}
 	f := flag.NewFlagSet("fleet upgrade", flag.ContinueOnError)
 	authority := installedClientFlags(f)
@@ -23,7 +28,7 @@ func fleetCommand(ctx context.Context, args []string, out io.Writer) error {
 		return err
 	}
 	if f.NArg() != 0 {
-		return errors.New("usage: myce fleet upgrade [--release VERSION] [--queue-only] [--wait-production-idle]")
+		return errors.New(fleetUsage)
 	}
 	client, err := authority.client()
 	if err != nil {
@@ -34,4 +39,27 @@ func fleetCommand(ctx context.Context, args []string, out io.Writer) error {
 		return err
 	}
 	return json.NewEncoder(out).Encode(status)
+}
+
+// Retire a stopped fleet operation with an audit record. Drains stay in place.
+func fleetSupersedeCommand(ctx context.Context, args []string, out io.Writer) error {
+	f := flag.NewFlagSet("fleet supersede", flag.ContinueOnError)
+	authority := installedClientFlags(f)
+	operation := f.String("operation", "", "stopped fleet operation ID shown by myce status")
+	reason := f.String("reason", "", "why the operation is being retired (kept in the audit record)")
+	if err := f.Parse(args); err != nil {
+		return err
+	}
+	if f.NArg() != 0 || *operation == "" || *reason == "" {
+		return errors.New(fleetUsage)
+	}
+	client, err := authority.client()
+	if err != nil {
+		return err
+	}
+	var record myce.FleetSupersession
+	if err = client.Call(ctx, "POST", "/api/fleet/supersede", myce.FleetSupersedeRequest{Operation: *operation, Reason: *reason}, &record); err != nil {
+		return err
+	}
+	return json.NewEncoder(out).Encode(record)
 }

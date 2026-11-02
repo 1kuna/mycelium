@@ -127,7 +127,7 @@ func TestWorkCurveMemoryRecoversAfterQueueRestart(t *testing.T) {
 				if next.MemoryEnvelope.Source != "accepted peak × 1.25" || next.Spec.Needs.HostMemoryGB != 2.5 || next.Timing.Samples != 1 {
 					t.Fatalf("restart lost learned memory or timing: envelope=%+v timing=%+v", next.MemoryEnvelope, next.Timing)
 				}
-			} else if next.MemoryEnvelope.Source != "exploratory first run" {
+			} else if next.MemoryEnvelope.Source != boundedQuarter {
 				t.Fatalf("changed backend reused historical peak: %+v", next.MemoryEnvelope)
 			}
 		})

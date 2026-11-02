@@ -76,6 +76,7 @@ func (q *Queue) publicStatusSnapshot(options *statusOptions, contexts ...context
 			m.Devices[i].Reason = deviceReasonDiagnostic(m.Devices[i].Reason)
 		}
 		m.FileTransferError = diagnostic(m.FileTransferError, "file transfer pending; only published progress is available elsewhere")
+		m.FaultMonitorError = diagnostic(m.FaultMonitorError, "kernel log not readable")
 		m.CacheError = diagnostic(m.CacheError, "cache operation failed")
 		m.DockerCause = safeRuntimeCause(m.DockerCause)
 		m.DockerCleanup = diagnostic(m.DockerCleanup, "Docker cleanup unconfirmed")

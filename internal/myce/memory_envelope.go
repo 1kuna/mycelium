@@ -168,6 +168,10 @@ type JobMemoryEnvelope struct {
 	HostGB      float64 `json:"host_gb"`
 	DeviceGB    float64 `json:"device_gb"`
 	Enforcement string  `json:"enforcement"`
+	// Basis is declared, learned, hint or exploratory; Evidence counts the
+	// accepted attempts behind a learned or bounded figure (#585).
+	Basis    string `json:"basis,omitempty"`
+	Evidence int    `json:"evidence,omitempty"`
 }
 
 // Snapshot-to-launch telemetry drift needs headroom even with ceiling slack off.
@@ -243,7 +247,7 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 	}
 	copy := *j
 	n := &copy.Spec.Needs
-	source, refusal := "declared", ""
+	source, refusal, basis, evidence := "declared", "", "declared", 0
 	if n.Memory == "auto" {
 		// Explicit optional member caps remain declarations to preserve.
 		hostFloor := max(minimumHostMemoryGB, copy.Spec.Run.MemoryGB, copy.Spec.Run.DockerMemoryGB)
@@ -268,7 +272,10 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 		}
 		switch {
 		case estimate.host != nil:
-			source = estimate.source
+			source, basis, evidence = estimate.source, "learned", estimate.samples
+			if evidence == 0 || estimate.measuredHostGB > 0 && estimate.source == boundedMemoryExploration {
+				basis = "exploratory"
+			}
 			host := hostMemoryPeakGB(estimate.host) * estimate.hostFactor
 			if estimate.measuredHostGB > 0 {
 				host = estimate.measuredHostGB
@@ -298,29 +305,46 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 			if !n.cpuOnly() && n.MemoryGB == 0 {
 				n.MemoryGB = j.Spec.Needs.MemoryGB
 			}
-			source = "submitter hint"
+			source, basis = "submitter hint", "hint"
 			if !n.cpuOnly() && n.HostMemoryGB == 0 {
 				n.HostMemoryGB = j.Spec.Needs.HostMemoryGB
-				if n.HostMemoryGB == 0 {
-					host, why := q.exploratoryMemory(j, m)
-					if m.UnifiedMemory {
-						host -= n.MemoryGB
-					}
-					n.HostMemoryGB, refusal = max(minimumHostMemoryGB, host), why
-					source = "submitter hint; exploratory host"
+			}
+			// On unified hosts a missing figure becomes neither 0 GiB nor host-wide.
+			bounded := false
+			if !n.cpuOnly() && (n.MemoryGB == 0 || n.HostMemoryGB == 0) {
+				var device, host float64
+				var why string
+				if device, host, why, evidence, bounded = q.unifiedGPUFirstRun(j, m, estimate, n.MemoryGB, n.HostMemoryGB, hostFloor); bounded {
+					n.MemoryGB, n.HostMemoryGB, source = device, host, "submitter hint "+why
 				}
 			}
+			if !bounded && !n.cpuOnly() && n.HostMemoryGB == 0 {
+				host, why := q.exploratoryMemory(j, m)
+				if m.UnifiedMemory {
+					host -= n.MemoryGB
+				}
+				n.HostMemoryGB, refusal = max(minimumHostMemoryGB, host), why
+				source = "submitter hint; exploratory host"
+			}
 		default:
-			source = "exploratory first run"
+			source, basis = "exploratory first run", "exploratory"
 			if estimate.source != "" {
 				source = estimate.source
 			}
-			host, why := q.exploratoryMemory(j, m)
+			host, why := 0.0, ""
+			device, unified, bounded, similar, gpuBounded := q.unifiedGPUFirstRun(j, m, estimate, 0, 0, hostFloor)
+			if gpuBounded {
+				n.MemoryGB, host, source, evidence = device, unified, source+" "+bounded, similar
+			} else if bound, bounded, similar, ok := q.coldMemoryBound(j, m, estimate, hostFloor); ok {
+				host, source, evidence = bound, bounded, similar
+			} else {
+				host, why = q.exploratoryMemory(j, m)
+			}
 			refusal = why
 			if len(m.groupMembers) > 0 && refusal == "" {
 				refusal = "a first run explores one card; work spreads across cards only after evidence shows one card is too small"
 			}
-			if !n.cpuOnly() {
+			if !n.cpuOnly() && !gpuBounded {
 				n.MemoryGB = q.reclaimableGPUMemory(m, j.Spec.Priority, j.Spec)
 				if m.TotalMemoryGB > 0 {
 					n.MemoryGB = min(n.MemoryGB, m.TotalMemoryGB)
@@ -359,7 +383,7 @@ func (q *Queue) memoryCandidate(j *Job, m *Machine) *Job {
 			enforcement = "Docker shared parent"
 		}
 	}
-	copy.MemoryEnvelope = &JobMemoryEnvelope{Source: source, Refusal: refusal, Machine: m.ID, Device: m.Device, HostGB: hostNeed(m, n.MemoryGB, n.HostMemoryGB), DeviceGB: n.MemoryGB, Enforcement: enforcement}
+	copy.MemoryEnvelope = &JobMemoryEnvelope{Source: source, Refusal: refusal, Machine: m.ID, Device: m.Device, HostGB: hostNeed(m, n.MemoryGB, n.HostMemoryGB), DeviceGB: n.MemoryGB, Enforcement: enforcement, Basis: basis, Evidence: evidence}
 	return &copy
 }
 
@@ -387,6 +411,10 @@ type memoryEstimate struct {
 	host, device             *AttemptMemoryPeak
 	hostFactor, deviceFactor float64
 	source                   string
+	// Accepted attempts behind host, and the largest constrained lower bound
+	// of the same work, which only ever raises a first-run bound.
+	samples       int
+	constrainedGB float64
 }
 
 // Range of complete non-reclaimable attempt peaks, not instantaneous samples
@@ -468,6 +496,7 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) memoryEstimate {
 		return memoryEstimate{}
 	}
 	var exact, sameHost, family, sameOS, other *AttemptMemoryPeak
+	var exactN, sameHostN, familyN, sameOSN, otherN, constrainedGB = 0, 0, 0, 0, 0, 0.0
 	var hostRange *MemoryPeakRange
 	completeHostRange := true
 	gpuHost := !j.Spec.Needs.cpuOnly() && key.Target.Platform == "xpu" && !m.UnifiedMemory
@@ -482,6 +511,9 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) memoryEstimate {
 		age := q.clock.Now().Sub(point.MemoryRecordedAt)
 		if sameMemoryWork(point, *key, configuration) && memoryIdentityUsable(point) && p.constrained() {
 			invalidated = true
+			if p.HostGB != nil && validRate(*p.HostGB) {
+				constrainedGB = max(constrainedGB, hostMemoryPeakGB(p))
+			}
 		}
 		if !sameMemoryWork(point, *key, configuration) || !memoryIdentityUsable(point) || point.MemoryRecordedAt.IsZero() || age < 0 || age > workCurveMaxAge || p == nil || p.constrained() || p.PressureUnavailable || p.HostGB == nil || !validRate(*p.HostGB) || !validRate(*p.HostGB*2.5) || p.CgroupGB != nil && validMemoryValue(*p.CgroupGB) && !validMemoryValue(*p.CgroupGB*2.5) {
 			continue
@@ -490,8 +522,9 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) memoryEstimate {
 			continue
 		}
 		sameFamily := k.Target == key.Target && point.MemoryLayout != "" && point.MemoryLayout == layout
+		samples := max(1, point.MemorySamples)
 		if sameFamily && sameMemoryHost(k, *key, m) {
-			sameHost = mergeMemoryPeaks(sameHost, p)
+			sameHost, sameHostN = mergeMemoryPeaks(sameHost, p), sameHostN+samples
 			rangePeak := point.MemoryRange
 			if gpuHost {
 				rangePeak = point.GPUHostRange
@@ -502,25 +535,25 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) memoryEstimate {
 			completeHostRange = completeHostRange && rangePeak.valid() && rangePeak.Samples >= 2
 		}
 		if sameFamily && k.Host == key.Host && k.Component == key.Component && k.Hardware == key.Hardware && k.Fingerprint == key.Fingerprint && k.Environment == key.Environment {
-			exact = mergeMemoryPeaks(exact, p)
+			exact, exactN = mergeMemoryPeaks(exact, p), exactN+samples
 		} else if sameFamily {
-			family = mergeMemoryPeaks(family, p)
+			family, familyN = mergeMemoryPeaks(family, p), familyN+samples
 		} else if j.Spec.Needs.cpuOnly() && k.Target.OS == key.Target.OS {
-			sameOS = mergeMemoryPeaks(sameOS, p)
+			sameOS, sameOSN = mergeMemoryPeaks(sameOS, p), sameOSN+samples
 		} else {
-			other = mergeMemoryPeaks(other, p)
+			other, otherN = mergeMemoryPeaks(other, p), otherN+samples
 		}
 	}
-	estimate := memoryEstimate{key: key}
+	estimate := memoryEstimate{key: key, constrainedGB: constrainedGB}
 	switch {
 	case exact != nil:
-		estimate.device, estimate.deviceFactor, estimate.source = exact, 1.25, "accepted peak × 1.25"
+		estimate.device, estimate.deviceFactor, estimate.source, estimate.samples = exact, 1.25, "accepted peak × 1.25", exactN
 	case family != nil:
-		estimate.device, estimate.deviceFactor, estimate.source = family, 1.25*1.5, "cross-machine estimate"
+		estimate.device, estimate.deviceFactor, estimate.source, estimate.samples = family, 1.25*1.5, "cross-machine estimate", familyN
 	case sameOS != nil:
-		estimate.device, estimate.deviceFactor, estimate.source = sameOS, 1.25*2, "cross-machine estimate"
+		estimate.device, estimate.deviceFactor, estimate.source, estimate.samples = sameOS, 1.25*2, "cross-machine estimate", sameOSN
 	case other != nil:
-		estimate.device, estimate.deviceFactor, estimate.source = other, 1.25*2, "cross-machine estimate"
+		estimate.device, estimate.deviceFactor, estimate.source, estimate.samples = other, 1.25*2, "cross-machine estimate", otherN
 		estimate.foreign = j.Spec.Needs.cpuOnly()
 	case invalidated:
 		estimate.source = "exploratory (previous peak constrained)"
@@ -535,12 +568,12 @@ func (q *Queue) memoryEstimate(j *Job, m *Machine) memoryEstimate {
 				prior = max(prior, hostMemoryPeakGB(estimate.host)*estimate.hostFactor)
 			}
 			estimate.host = &AttemptMemoryPeak{HostGB: &prior}
-			estimate.hostFactor, estimate.foreign = 1, true
+			estimate.hostFactor, estimate.foreign, estimate.samples = 1, true, 0
 			estimate.source = spentMemoryExploration
 		}
 	}
 	if sameHost != nil {
-		estimate.host, estimate.hostFactor = sameHost, 1.25
+		estimate.host, estimate.hostFactor, estimate.samples = sameHost, 1.25, sameHostN
 		if exact == nil {
 			estimate.source = "same-host RAM peak × 1.25; cross-machine device estimate"
 		} else if hostMemoryPeakGB(sameHost) > hostMemoryPeakGB(exact) {
@@ -639,6 +672,13 @@ func (q *Queue) memoryWaitingReason(j *Job, machines map[string]*Machine) string
 			}
 			candidate = q.memoryCandidate(candidate, m)
 			n := candidate.Spec.Needs
+			// A host the job can never use (target, backend, environment,
+			// device, allow-list) is not a RAM candidate, so never name it.
+			var eligibility targetFit
+			fitsResourcesChecked(candidate, m, max(m.FreeMemoryGB, m.TotalMemoryGB), &eligibility)
+			if eligibility.ineligible > 0 {
+				continue
+			}
 			if candidate.MemoryEnvelope.Refusal != "" {
 				reasons = append(reasons, m.ID+": "+candidate.MemoryEnvelope.Refusal)
 				continue
@@ -649,7 +689,7 @@ func (q *Queue) memoryWaitingReason(j *Job, machines map[string]*Machine) string
 			if hostFits(m, n.MemoryGB, n.HostMemoryGB) {
 				return ""
 			}
-			why := fmt.Sprintf("%s: %.1f GiB needed, %.1f GiB available (live %.1f GiB; reserved %.1f GiB; allowance %.1f GiB; %s)", m.ID, hostNeed(m, n.MemoryGB, n.HostMemoryGB), m.FreeHostMemoryGB, m.HostAvailableMemoryGB, m.HostMemoryInUseGB, m.EffectiveHostMemoryBudgetGB, candidate.MemoryEnvelope.Source)
+			why := fmt.Sprintf("%s: %.1f GiB needed, %.1f GiB available (live %.1f GiB; reserved %.1f GiB; allowance %.1f GiB; %s)", m.ID, hostNeed(m, n.MemoryGB, n.HostMemoryGB), m.FreeHostMemoryGB, m.HostAvailableMemoryGB, m.HostMemoryInUseGB, m.EffectiveHostMemoryBudgetGB, candidate.MemoryEnvelope.Origin())
 			if candidate.MemoryEnvelope.Source == spentMemoryExploration {
 				why += "; " + memoryCapacityRemedies
 			}

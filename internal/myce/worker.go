@@ -38,18 +38,20 @@ type Worker struct {
 	ServiceConfig *ServiceConfig
 	fleet         *workerFleetRuntime
 
-	DeviceFaultSource       DeviceFaultSource
-	DeviceFaultMatchers     map[string]DeviceFaultMatcher
-	faults                  *deviceQuarantine
-	faultMonitorUnavailable bool
-	InventoryProbe          func(context.Context) ([]MachineDevice, error)
-	CPUIsolationProbe       func(context.Context) error
-	cpuRuntimeProbe         *MachineProbe // Runtime/OS seam; tests still exercise real verification rules.
-	selectedDevice          *MachineDevice
-	selectedDevices         []MachineDevice // Every card of a multi-card attempt.
-	cpuIsolation            bool
-	inventoryAllowance      []string
-	inventoryReason         string
+	DeviceFaultSource   DeviceFaultSource
+	DeviceFaultMatchers map[string]DeviceFaultMatcher
+	faults              *deviceQuarantine
+	faultSince          time.Time       // Kernel records before worker start are not read (#595).
+	faultPending        []KernelLogLine // Matched faults too recent to rule out teardown.
+	faultTeardowns      map[string][]time.Time
+	InventoryProbe      func(context.Context) ([]MachineDevice, error)
+	CPUIsolationProbe   func(context.Context) error
+	cpuRuntimeProbe     *MachineProbe // Runtime/OS seam; tests still exercise real verification rules.
+	selectedDevice      *MachineDevice
+	selectedDevices     []MachineDevice // Every card of a multi-card attempt.
+	cpuIsolation        bool
+	inventoryAllowance  []string
+	inventoryReason     string
 	// Synthetic harness seam; nil keeps physical native GPU resolution.
 	nativeGPUDeviceProbe func(Worker, map[string]string) ([]string, error)
 
@@ -154,6 +156,8 @@ type process struct {
 	userCancel bool
 	stopGrace  time.Duration
 	killed     bool
+	// Injected-clock time of the first stop request: teardown evidence (#595).
+	stopRequested time.Time
 }
 
 // Save exact-attempt intent before delivery. Result goroutines read only the
@@ -212,6 +216,9 @@ func (p *process) enforceGrace(now time.Time) {
 	}
 }
 func (p *process) stopLocked(now time.Time, grace time.Duration, kill bool) {
+	if p.stopRequested.IsZero() {
+		p.stopRequested = now
+	}
 	if p.docker != nil {
 		p.docker.mu.Lock()
 		if p.userCancel && !p.docker.state.UserCancel {

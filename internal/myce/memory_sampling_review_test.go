@@ -170,7 +170,7 @@ func TestMemorySamplingOOMInvalidatesAndRelearns(t *testing.T) {
 		t.Fatal(err)
 	}
 	explore := startObservation(t, q, m, s)
-	if explore.MemoryEnvelope.Source != "exploratory first run" {
+	if explore.MemoryEnvelope.Source != boundedQuarter {
 		t.Fatalf("invalidated class did not explore: %+v", explore.MemoryEnvelope)
 	}
 	clock.Advance(time.Second)
@@ -225,6 +225,7 @@ func TestMemorySamplingOOMRetryExceedsCapacity(t *testing.T) {
 	for _, backend := range []string{"cpu", "fake"} {
 		t.Run(backend, func(t *testing.T) {
 			q, clock := fixture(t)
+			setLearnedMemory(t, q, false) // The host-wide first run's one retry.
 			m := cpuMachine("small", "small-host", backend, 8, 8)
 			m.HostMemoryBudgetGB = 8
 			m.TotalMemoryGB, m.FreeMemoryGB = 4, 4

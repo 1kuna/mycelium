@@ -434,6 +434,13 @@ patterns, per-snapshot `max_bytes` and `free_floor_bytes`) for
 [declared model snapshots](files.md#declared-model-snapshots-553). Keep the
 deployment's values there, not in Git.
 
+Learned memory (#585) is on by default: a job with no memory figure is sized
+from accepted peaks, with a bounded first run. To turn it off, add
+`learned_memory: false` at the top level of the exported file and import it.
+Omitted figures are then rejected and cold `memory: auto` runs explore
+host-wide, as before. Set `learned_memory: true` to turn it back on. A file
+without the field keeps the saved setting.
+
 If the revision is stale, export again and reconcile the newer policy before
 retrying. See [owner priority policy](scheduling.md) for the full
 import/export contract, including replacing or clearing project settings.
@@ -823,7 +830,7 @@ identity; the queue cannot distinguish their production bytes from experimental
 bytes. The compatibility exception favors production admission and also permits
 unidentified experiments/imports to consume protected capacity. A configured
 reserve therefore does not guarantee isolation from those legacy writers.
-Input-client identity is follow-up work under #464; quotas remain a separate PR.
+Input-client identity is follow-up work under #464; per-project quotas are below.
 
 New workers send `X-Myce-File-Attempt` containing the job ID, attempt, machine and
 session on native/async result and checkpoint uploads. The authenticated queue
@@ -849,6 +856,51 @@ admissions crossing the protected floor **since queue start**. It counts declare
 allocation, including incomplete uploads, not bytes transferred or current usage.
 Preflight, resumable replay and deduplicated reuse do not increment it. It resets
 on queue restart and decreases neither on completion nor on ordinary expiry.
+
+### Per-project file-store quotas (#464)
+
+`file_store.projects` in `myce status` lists each project holding store bytes or
+configured with a limit. `retained_bytes` counts digests protected by the
+project's unexpired jobs, keyed answers, checkpoints and pending outputs, each
+digest once per project; a digest shared by two projects counts toward both but
+once in `used_bytes`. `added_bytes_24h` counts digests first referenced by the
+project in the last 24 hours on the queue clock: inputs at submission, results
+at completion. Releasing or expiring files lowers `retained_bytes` at once but
+does not refund `added_bytes_24h`. `reserved_output_bytes` is the project's share
+of declared async output commitments. Sizes come from job manifests, so the walk
+needs no store I/O.
+
+Two optional project policy fields limit non-production admission; zero or
+absent means no limit, which is the default:
+
+```yaml
+projects:
+  example:
+    weight: 1
+    max_retained_file_bytes: 21474836480   # 20 GiB held at once
+    max_added_file_bytes_24h: 2147483648   # 2 GiB added per rolling 24 h
+```
+
+Set them through `myce policy set` like other project settings. A policy PUT
+without `?file_store_limits=1` (an older CLI, which cannot carry these fields)
+keeps a project's existing limit wherever it sends zero; current CLIs send the
+marker, so removing a limit from the file clears it. A non-production
+submission whose new inputs plus declared `disk.output_bytes` (and the project's
+other declared async outputs) would exceed either limit is refused with
+`project_file_store_quota` and a reason naming the limit, the cleanup command
+and the advice to keep large outputs in project storage. Input preflight and
+upload creation that name the project (`X-Myce-Project`, as the profile CLI
+does) return the same refusal before any bytes upload. Like the reserve, that
+name is a shared-token hint: an upload without one is not checked, and its
+submission is still refused. Accepted completions are never
+refused or dropped: a result that overshoots stays, `refusal` appears on the
+project's status entry, and the project's next non-production submissions are
+refused until a release or retention lowers retained usage, or old additions
+leave the 24-hour window. Production submissions are always admitted; the
+production reserve and store capacity still apply to them. Status builds this
+accounting from a list copied during its existing reference walk and totals it
+after releasing the queue lock; submit and upload checks walk only the limited
+project's jobs.
 
 ### Parked native storage integration (#564)
 
@@ -906,8 +958,11 @@ private project or file names. The API equivalents are
 `POST /api/files/release/plan` with `{project, jobs}` and
 `POST /api/files/release/apply` with
 `{selection: {project, jobs}, plan_id, accept_expiry: true}`. A plan is a
-read-only snapshot, not a reservation. Its digest identifies the reviewed state;
-it is not a signature or an authorization token.
+read-only snapshot, not a reservation. Its digest identifies the reviewed
+custody, references and stored content; it is not a signature or an
+authorization token. Content aging out of publication grace raises
+`reclaimable_bytes` in a new plan but leaves the digest unchanged, so a reviewed
+plan stays valid; a new publication or HEAD refresh of selected content does not.
 
 The plan lists each job's state, release/retention state, original expiry deadline,
 input/result/shared-input/dependency/diagnostic/fan-out manifests, and delivery
@@ -929,6 +984,8 @@ for that content unless another pending reclamation owns it.
 Apply requires explicit acceptance and recomputes the reviewed plan, then fences
 custody and reference metadata again in the expiry transaction. HTTP 409
 `file_release_stale` means regenerate and review a new plan; nothing was expired.
+For an active project, apply soon after planning: a new job sharing selected
+content adds a reference and stales the plan.
 HTTP 409 `file_release_protected` means a selected job is live, has unresolved
 physical custody or lacks required verified delivery. Include only eligible jobs
 in the next plan. Other projects' retained references can block physical removal
@@ -2037,14 +2094,29 @@ build deadline on a build that continues making progress.
 
 ### Accelerator driver fault quarantine
 
-Linux machine workers inspect the current boot's kernel journal on startup and
-check for new records every five seconds using the injected worker clock.
-`journalctl -k -b` runs as the worker account, without sudo; a readable `/dev/kmsg`
-is the fallback. The account needs ordinary kernel-journal read permission (for
-example, membership in `systemd-journal` where configured). If neither source is
-readable, the worker logs `accelerator fault monitor unavailable`; monitoring
-cannot detect faults in that state. No cheap qualified Apple source is currently
-available, so Apple monitoring is skipped.
+Linux machine workers read the current boot's kernel journal from the worker's
+start time, then follow the journal cursor every five seconds using the injected
+worker clock. They never read the whole boot: a large boot journal can take far
+longer than the two-second read budget. Faults logged while no worker was running
+are not replayed; quarantine recorded before a restart persists. `journalctl -k -b`
+runs as the worker account, without sudo; a readable `/dev/kmsg` is the fallback.
+The account needs ordinary kernel-journal read permission (for example, membership
+in `systemd-journal` where configured). If neither source is readable, the worker
+logs `accelerator fault monitor unavailable` and reports `fault_monitor_error` in
+`myce status` until a read succeeds; monitoring cannot detect faults in that
+state. No cheap qualified Apple source is currently available, so Apple monitoring
+is skipped.
+
+A fault within one second of a stop request, delivered signal or exit of an
+attempt on the same device is teardown, not a card fault. Payloads that exit while
+device work is in flight can fault the driver (#154). The worker logs
+`device fault attributed to teardown`, records the event in its local quarantine
+state and leaves the device usable. Released attempts' timestamps are kept for one
+minute. A fault seen less than a second after it was logged waits one scan, so an
+exit recorded just after it still counts. A card fault that crashes its job also
+falls in that window, so the third teardown incident on one device within an hour
+quarantines it (`repeated teardown faults escalated to quarantine`); fault lines
+within a second of each other count as one incident.
 
 An xe/i915 fault or NVIDIA Xid matched to the device's PCI BDF sets its health
 reason to `device_fault_xe`, `device_fault_i915`, or `device_fault_nvidia_xid` and
@@ -2154,6 +2226,20 @@ services are verified without restarting. If admission was resumed instead,
 the newer operation is refused until the operator explicitly drains or disables
 the host. No receipt or database edits are needed.
 
+A refused `myce fleet upgrade` names the blocking operation (ID, state, flags,
+age and host failure) and every service missing a fresh runtime proof, with the
+next step. To abandon a stopped operation instead of resuming it, run
+`myce fleet supersede --operation ID --reason TEXT`. Only the current stopped
+operation can be superseded. The queue keeps an audit record (operation,
+release, flags, per-host phases and failures, reason and time) in status as
+`fleet_superseded`, and the next `myce fleet upgrade` starts a new operation.
+Supersession never resumes a drain. Hosts the operation drained stay drained and
+are listed as `retained_drains`; resume each with `myce host resume HOST` once
+it is healthy. Its production admission fence is released. A worker settles a
+failure receipt the queue definitively refuses (any 4xx except 401, 403, 408
+and 429). It retries other delivery failures with backoff from 2 s up to 5 min
+and keeps reporting its runtime proof meanwhile.
+
 No automatic rollback, downgrade, forced job stop, SSH, driver, package or OS
 changes occur. Offline or unknown custody stays a visible wait; elapsed time
 never proves release. Native service/signing qualification and the first live
@@ -2164,8 +2250,12 @@ rollout remain separate from the laptop acceptance tests.
 Maintenance retires terminal job rows after 168 hours (or longer configured
 result/log retention), once all attempts are released, files have expired and log cleanup is
 complete. Pending file cleanup transfers to durable per-hash ownership. Each tick removes at most 64 jobs. Keyed replay answers remain for
-30 days after removal, followed by permanent expired-key digests; learned work
-curves remain. Expired jobs disappear from listing and ID lookup. See the
+30 days after removal, followed by permanent expired-key digests. Learned
+work-curve, memory and storage observations stay until every one of their
+timestamps is older than 30 days, the age past which no reader uses them
+(#597); each tick then deletes at most 64 of each. Points forbidden after an
+OOM and constrained memory peaks stay at any age, because sweeps and first-run
+bounds still read them. Expired jobs disappear from listing and ID lookup. See the
 [retention contract](design-proposal.md#submission-identity-and-cancellation-80).
 
 Deleted SQLite pages are reused. Retention bounds full history by age, not total

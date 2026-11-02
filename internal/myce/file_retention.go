@@ -200,7 +200,7 @@ func (q *Queue) fileReferences(pendingOnly bool, subset ...map[string]*Job) (exp
 
 // The release planner uses the collector itself, treating only eligible selected
 // jobs as expired. Explanations therefore follow the same protection decisions.
-func (q *Queue) collectFileReferences(pendingOnly bool, releasing map[string]bool, report func(string, FileKeepingReference), subset ...map[string]*Job) (expired, keep, referenced map[string]bool) {
+func (q *Queue) collectFileReferences(pendingOnly bool, releasing map[string]bool, report func(FileRef, FileKeepingReference), subset ...map[string]*Job) (expired, keep, referenced map[string]bool) {
 	expired, keep, referenced = map[string]bool{}, map[string]bool{}, map[string]bool{}
 	if len(subset) == 0 {
 		for hash := range q.s.RetiredJobFiles {
@@ -214,7 +214,7 @@ func (q *Queue) collectFileReferences(pendingOnly bool, releasing map[string]boo
 			if report != nil {
 				r := owner
 				r.Kind, r.Name = kind, name
-				report(ref.SHA256, r)
+				report(ref, r)
 			}
 		}
 	}

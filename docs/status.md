@@ -130,6 +130,10 @@ host's volume; no paths or raw filesystem IDs are published.
 The [disk-volume schema](schemas/disk-volume-v1.schema.json) describes each entry.
 Old workers without samples retain startup storage figures.
 
+Queue `file_store.projects` reports per-project retained and 24-hour added
+bytes, limits and any quota refusal; see
+[per-project quotas](operations.md#per-project-file-store-quotas-464).
+
 Queue `file_store.physical` is shadow accounting for #506. `disk_free_bytes`
 comes from the physical probe; `remaining_upload_bytes` counts only unwritten
 tus lengths, and `reserved_output_bytes` counts existing output commitments not
@@ -399,7 +403,10 @@ History never proves release; use the existing exact release evidence.
 `GET /api/jobs/{id}` also returns optional `memory_attempts`, available as Go
 `GetJob(...).MemoryAttempts` and Python `Client.get(id)["memory_attempts"]`.
 Each entry binds `attempt`, `machine`, and `session` to its observed
-`memory_peak` and resolved `memory_envelope`. These facts persist with the job
+`memory_peak` and resolved `memory_envelope`. The envelope's optional `basis`
+(`declared`, `learned`, `hint` or `exploratory`) and `evidence` (accepted
+attempts behind a learned figure or similar-work bound) also appear in status
+and waiting reasons (#585). These facts persist with the job
 independently of learning, including a constrained first run with no comparable
 learned point. Retention is bounded to 32 rows: the first and the most recent
 31. Optional `memory_attempts_dropped` counts evicted rows (omitted zero), so

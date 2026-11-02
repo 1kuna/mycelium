@@ -51,6 +51,7 @@ type state struct {
 	AttemptOutputUploads   map[string]time.Time           `json:"attempt_output_uploads,omitempty"`
 	Health                 healthAlerts                   `json:"health_alerts,omitempty"`
 	FleetUpgrade           *fleetUpgrade                  `json:"fleet_upgrade,omitempty"`
+	FleetSuperseded        []FleetSupersession            `json:"fleet_superseded,omitempty"`
 
 	// Positive orphan eligibility, persisted with the existing queue state.
 	// Zero time means an input upload has not finished publication yet.
@@ -685,6 +686,9 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		if q.files != store || q.environmentRevision != environmentRevision {
 			return ErrStale
 		}
+		if err := q.defaultMemory(&s); err != nil {
+			return specRejection(err)
+		}
 		submitted := s
 		extensions, e := q.resolveExtensions(&s)
 		if e != nil {
@@ -722,6 +726,13 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		}
 		if err := normalizeJobClass(&s); err != nil {
 			return specRejection(err)
+		}
+		var declared uint64
+		if s.Disk != nil {
+			declared = s.Disk.OutputBytes
+		}
+		if err := q.fileStoreQuotaRefusal(s, submissionFiles(s), declared); err != nil {
+			return err
 		}
 		modelLimits, err := q.modelLimits(s)
 		if err != nil {
@@ -1050,7 +1061,7 @@ func (q *Queue) TickContext(requestContexts ...context.Context) error {
 	}, nil); err != nil {
 		return err
 	}
-	return errors.Join(q.advanceOutputDelivery(requestCtx), q.pruneBatchLogs(requestCtx), q.reclaimJobFilesContext(requestCtx), q.admitOutputRetries(requestCtx), q.pruneJobHistory(requestCtx))
+	return errors.Join(q.advanceOutputDelivery(requestCtx), q.pruneBatchLogs(requestCtx), q.reclaimJobFilesContext(requestCtx), q.admitOutputRetries(requestCtx), q.pruneJobHistory(requestCtx), q.pruneObservations(requestCtx))
 }
 func (q *Queue) Checkin(c Checkin) (Reply, error) {
 	return q.CheckinContext(context.Background(), c)
@@ -1837,7 +1848,7 @@ func (q *Queue) snapshot(forStatus bool, contexts ...context.Context) (Snapshot,
 
 // Projection runs against either the locked queue or a fully detached read view.
 func (q *Queue) projectSnapshot(forStatus bool) Snapshot {
-	out := Snapshot{HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), QueueRelease: CurrentRelease(), HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
+	out := Snapshot{HealthAlerts: append([]HealthAlert(nil), q.s.Health.Events...), FleetUpgrade: q.fleetUpgradeStatus(), FleetSuperseded: append([]FleetSupersession(nil), q.s.FleetSuperseded...), QueueRelease: CurrentRelease(), HoldsDetail: []HoldDetail{}, SyncRequests: append([]SyncRequest(nil), q.s.SyncRequests...), Pins: append([]ModelPin(nil), q.s.Pins...), Jobs: []*Job{}, Machines: []*Machine{}, LoadedModels: []ModelSlot{}}
 	for _, s := range q.s.ModelSlots {
 		copy := *s
 		model, _ := q.model(s.Model)

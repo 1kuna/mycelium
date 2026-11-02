@@ -270,6 +270,7 @@ func (q *Queue) statusWaitingReason(j *Job) string {
 					if n.cpuOnly() {
 						detail = fmt.Sprintf("%s needs %d logical cores and %.1f GiB host RAM", m.ID, n.cores(), hostNeed(&copy, n.MemoryGB, n.HostMemoryGB))
 					}
+					detail += " (" + candidate.MemoryEnvelope.Origin() + ")"
 					if candidate.MemoryEnvelope.Refusal != "" {
 						detail = m.ID + ": " + candidate.MemoryEnvelope.Refusal
 					}

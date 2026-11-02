@@ -100,9 +100,9 @@ func TestMemoryEnvelopeCeilingBoundThenExploratory(t *testing.T) {
 			}
 			s.Needs.Memory = "auto"
 			next := startObservation(t, q, m, s)
-			wantSource := "exploratory first run"
+			wantSource := boundedQuarter
 			if tc.mode == "auto" {
-				wantSource = "exploratory (previous peak constrained)"
+				wantSource = "exploratory (previous peak constrained) (bounded: 25% of host allowance)"
 			}
 			if tc.success && tc.mode == "auto" {
 				if next.MemoryEnvelope.Source != "accepted peak × 1.25" || next.Spec.Needs.HostMemoryGB != 2.5 {
@@ -163,7 +163,7 @@ func TestMemoryEnvelopeCPUOnGPUHostReusesAndRelearnsPeak(t *testing.T) {
 			t.Fatal("successful solo CPU run did not record a peak")
 		}
 	}
-	first := start("exploratory first run", 0)
+	first := start(boundedQuarter, 0)
 	if owner := q.s.Machines[m.ID]; len(owner.Devices) != 2 || owner.ReservedMemoryGB != 1 {
 		t.Fatalf("missing multi-device GPU reserve: %+v", owner)
 	}
@@ -183,7 +183,7 @@ func TestMemoryEnvelopeCPUOnGPUHostReusesAndRelearnsPeak(t *testing.T) {
 	if err := q.Cancel(next.ID); err != nil {
 		t.Fatal(err)
 	}
-	complete(start("exploratory first run", 0), 8)
+	complete(start(boundedQuarter, 0), 8)
 	start("accepted peak × 1.25", 10)
 }
 
@@ -250,14 +250,17 @@ func TestMemoryEnvelopeProfileIdentityAndLifecycle(t *testing.T) {
 		}
 	}
 	setSource("commit one")
-	first := start("exploratory first run", 0)
+	first := start(boundedQuarter, 0)
+	// #559: a bounded first run leaves room for other work beside it.
 	busy := submit(t, q, s)
-	if busy.State != "queued" || assignedJob(machineCheck(t, q, m, first)) != nil {
-		t.Fatal("busy auto profile must queue without dispatching", busy)
+	beside := assignedJob(machineCheck(t, q, m, first))
+	if beside == nil || beside.ID != busy.ID || beside.MemoryEnvelope.Source != boundedQuarter {
+		t.Fatal("bounded first run blocked a second job", job(t, q, busy.ID).Reason)
 	}
-	if err := q.Cancel(busy.ID); err != nil {
+	if err := q.Started(result(beside, false)); err != nil {
 		t.Fatal(err)
 	}
+	complete(beside, 2)
 	complete(first, 2)
 	complete(start("accepted peak × 1.25", 2.5), 2)
 	setSource("commit two")
@@ -270,9 +273,10 @@ func TestMemoryEnvelopeProfileIdentityAndLifecycle(t *testing.T) {
 	if err := q.Cancel(oom.ID); err != nil {
 		t.Fatal(err)
 	}
-	complete(start("exploratory first run", 0), 4)
+	complete(start(boundedQuarter, 0), 4)
 	complete(start("accepted peak × 1.25", 5), 4)
 	s.Run.Command = []string{"sh", "-ec", "tar -xf .myce-source.tar\nbash scripts/other-suite.sh"}
+	// Similar work's 4 GiB peak × 2.5 exceeds half the allowance: host-wide.
 	complete(start("exploratory first run", 0), 1)
 	for _, point := range q.s.WorkObservations {
 		if point.StaleReason != "" || point.Rate != 0 || point.Seconds != 0 || point.Units != 0 || point.LatencySeconds != 0 {
@@ -340,7 +344,7 @@ func TestMemoryEnvelopeCPUForeignOSPeak(t *testing.T) {
 	complete(first, 3, true)
 	s.Needs.Memory, s.Needs.HostMemoryGB = "auto", 0
 	const linuxPeak = 3.634326934814453
-	complete(start(linux, "exploratory first run", 31.75), linuxPeak, false)
+	complete(start(linux, boundedQuarter, 8), linuxPeak, false)
 	if facts := job(t, q, first.ID).MemoryAttempts; len(facts) != 1 || facts[0].LearningReason != "constrained" || *facts[0].MemoryPeak.HostGB != 3 {
 		t.Fatal("constrained diagnostic was not retained", facts)
 	}
@@ -547,6 +551,7 @@ func TestMemoryEnvelopeSiblingHostBudget(t *testing.T) {
 
 func TestMemoryEnvelopeExploratoryFirstRun(t *testing.T) {
 	q, clock, m, s := observationFixture(t)
+	setLearnedMemory(t, q, false) // Host-wide exploration fences (#585 bounds by default).
 	plain := cpuSpec(1, 0)
 	if err := json.Unmarshal([]byte(`{"memory":"auto"}`), &plain.Needs); err != nil {
 		t.Fatal(err)
@@ -598,6 +603,7 @@ func TestMemoryEnvelopeExploratoryFirstRun(t *testing.T) {
 
 func TestMemoryEnvelopeExploratoryLaunchWithRAMDrift(t *testing.T) {
 	q, clock := fixture(t)
+	setLearnedMemory(t, q, false) // Host-wide exploration fences (#585 bounds by default).
 	m := cpuMachine("drift", "drift-host", "cpu", 8, 32)
 	m.HostMemoryBudgetGB, m.MemoryCeilingSlackGB = 64, .125
 	check(t, q, m, nil)
@@ -1027,7 +1033,7 @@ func TestMemoryEnvelopeExplicitPressureInvalidatesSeed(t *testing.T) {
 	s.Needs.Memory = "auto"
 	s.SizeHint = SizeHint{} // An old declaration must not act as a submitter hint.
 	next := startObservation(t, q, m, s)
-	if next.MemoryEnvelope.Source != "exploratory (previous peak constrained)" {
+	if next.MemoryEnvelope.Source != "exploratory (previous peak constrained) (bounded: 25% of host allowance)" {
 		t.Errorf("constrained explicit attempt left its old seed usable: %+v", next.MemoryEnvelope)
 	}
 	// Subsequent failed auto pressure still invalidates comparable evidence.
@@ -1038,6 +1044,7 @@ func TestMemoryEnvelopeExplicitPressureInvalidatesSeed(t *testing.T) {
 		t.Fatal(err)
 	}
 	third := startObservation(t, q, m, s)
+	// The 16 GiB bound's constrained peak doubles to half the host: host-wide.
 	if third.MemoryEnvelope.Source != "exploratory (previous peak constrained)" {
 		t.Errorf("auto pressure failed to clear the explicit seed: %+v", third.MemoryEnvelope)
 	}
@@ -1150,7 +1157,7 @@ func TestMemoryEnvelopePerItemProfile(t *testing.T) {
 		}
 		expected := "accepted peak × 1.25"
 		if i == 0 {
-			expected = "exploratory first run"
+			expected = boundedQuarter
 		}
 		if j.MemoryEnvelope == nil || j.MemoryEnvelope.Source != expected {
 			t.Fatalf("item %d estimate: %+v", i, j.MemoryEnvelope)
@@ -1172,8 +1179,8 @@ func TestMemoryEnvelopePerItemProfile(t *testing.T) {
 	s.ProfileMemory = strings.Repeat("b", 64) // Changed base configuration or per_item identity.
 	queued := submit(t, q, s)
 	j := assignedJob(machineCheck(t, q, m))
-	if j == nil || j.ID != queued.ID || j.MemoryEnvelope == nil || j.MemoryEnvelope.Source != "exploratory first run" {
-		t.Fatalf("changed profile reused old memory: %+v", j)
+	if j == nil || j.ID != queued.ID || j.MemoryEnvelope == nil || j.MemoryEnvelope.Source != "exploratory first run (bounded: similar work peak × 2.5)" || j.MemoryEnvelope.Basis != "exploratory" {
+		t.Fatalf("changed profile reused old memory: %+v", j.MemoryEnvelope)
 	}
 }
 
@@ -1247,7 +1254,7 @@ func TestMemoryEnvelopeStoredFileBackedPressure(t *testing.T) {
 		q.s.WorkObservations[id] = point
 	}
 	next := startObservation(t, q, m, s)
-	if next.MemoryEnvelope.Source != "exploratory (previous peak constrained)" {
+	if next.MemoryEnvelope.Source != "exploratory (previous peak constrained) (bounded: constrained peak × 2)" {
 		t.Errorf("stored cap-bound curve was reused: %+v", next.MemoryEnvelope)
 	}
 	clock.Advance(time.Second)
@@ -1523,5 +1530,30 @@ func TestMemoryEnvelopeIncompleteLocalHistoryKeepsTotalPeak(t *testing.T) {
 	candidate := extensionJobs(probe, &m, true)[0]
 	if got := q.memoryCandidate(candidate, &m).Spec.Needs.HostMemoryGB; got != 15 {
 		t.Fatalf("complete row discounted incomplete local history: %v", got)
+	}
+}
+
+// A host that cannot satisfy the job's target or backend must not appear as a
+// RAM-envelope candidate. Observed: an xpu-only job listed a macOS host.
+func TestMemoryEnvelopeReasonSkipsIneligibleHosts(t *testing.T) {
+	q, _ := fixture(t)
+	xpu := cpuMachine("xpu-host", "xpu-host", "xpu", 8, 15) // Under half of 64 GiB free.
+	mac := cpuMachine("mac-host", "mac-host", "metal", 8, 15)
+	mac.CapabilityProfile.OS, mac.CapabilityProfile.Arch = "darwin", "arm64"
+	s := cpuSpec(2, 0)
+	s.Needs.Memory = "auto"
+	s.Needs.Platform = Platform{Required: []string{"xpu"}}
+	s.Targets = []ExecutionTarget{{OS: "linux", Arch: "amd64", Platform: "xpu"}}
+	j := submit(t, q, s)
+	if check(t, q, mac, nil).Job != nil || check(t, q, xpu, nil).Job != nil {
+		t.Fatal("exploration admitted without headroom or on an ineligible host")
+	}
+	reason := job(t, q, j.ID).Reason
+	if !strings.Contains(reason, "xpu-host") || strings.Contains(reason, "mac-host") {
+		t.Fatalf("reason must name only eligible hosts: %s", reason)
+	}
+	mac.HostAvailableMemoryGB = 64
+	if check(t, q, mac, nil).Job != nil {
+		t.Fatal("xpu job placed on a host without xpu")
 	}
 }
