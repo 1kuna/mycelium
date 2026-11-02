@@ -41,12 +41,21 @@ type SharedInputCache struct {
 // and change time of every file) taken after the entry's bytes last verified.
 const sharedVerifiedRecord = "verified.json"
 
+// A unique temporary name lets workers sharing one --file-cache re-verify the
+// same entry at once without one rename failing the other's attempt.
 func recordSharedVerification(root, signature string) error {
-	temp := filepath.Join(root, sharedVerifiedRecord+".tmp")
-	if err := os.WriteFile(temp, []byte(signature), 0600); err != nil {
+	f, err := os.CreateTemp(root, sharedVerifiedRecord+".*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(temp, filepath.Join(root, sharedVerifiedRecord))
+	_, err = f.WriteString(signature)
+	if err = errors.Join(err, f.Close()); err == nil {
+		err = os.Rename(f.Name(), filepath.Join(root, sharedVerifiedRecord))
+	}
+	if err != nil {
+		_ = os.Remove(f.Name())
+	}
+	return err
 }
 
 type sharedEntry struct {
