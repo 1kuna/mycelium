@@ -28,6 +28,9 @@ targets and software requirements; Mycelium chooses the host. Document a hard
 host/device exception in `requirement_reasons`. Missing variants are gaps, and
 MY-19 output parity precedes production splits. Static job validation is
 `myce spec check FILE`; it grants no live admission or native qualification.
+`myce spec check --resolve --entry NAME .mycelium/adapter.yaml` asks the queue,
+read-only, which targets can run a command entry and how to stage what they
+cannot see ([resolve](jobs.md)).
 
 ## Project instruction file
 

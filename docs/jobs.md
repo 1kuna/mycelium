@@ -103,6 +103,30 @@ Errors identify the file and rejected field or rule. This checks static validity
 only: live eligibility, admission and qualification, registered extensions,
 input availability and current fleet policy still require live checks.
 
+Add `--resolve` for that live check, read-only, before submitting:
+
+```sh
+myce spec check --resolve --files-from ./inputs job.yaml
+myce spec check --resolve .mycelium/profiles/NAME.yaml
+myce spec check --resolve --entry NAME .mycelium/adapter.yaml
+```
+
+The CLI stats local inputs (it never hashes or uploads them) and sends the job
+to `POST /api/resolve`. The queue reads the environment exactly as submit does
+and evaluates every known target with submission's permanent-capacity fit
+checks, so a target's reason is the refusal `require_target` would give. Each
+target is `eligible` (with environment prepared or prepare-needed), blocked
+with its first failed condition, or unknown when its inventory is stale. Each
+finding names the field, the side that cannot see or run it (`submitter`,
+`queue` or `worker`) and a fix. Findings cover missing inputs, inline
+environment paths the queue cannot read, absolute data paths in the command,
+system-Python commands, a host pin that more targets could serve once the data
+is staged, and source archives dominated by large members (16 MiB or more),
+which defeat store deduplication because every source change repacks them.
+`--json` prints the report. Exit status is 0 when some target is eligible, and
+1 when the spec is invalid or no target is. Resolve creates no job, upload,
+build or reservation, and grants nothing: submit revalidates every fence.
+
 | Field | Required / default | Meaning |
 |---|---|---|
 | `name` | Required, nonempty | Human-readable job name; not a deduplication key |
