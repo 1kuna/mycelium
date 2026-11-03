@@ -1,5 +1,34 @@
 package myce
 
+// Memory pressure during a refused launch or infrastructure stop says nothing
+// about the payload's need. A positively classified OOM still wins a stop race.
+func memoryConstraintResult(started bool, r Result) bool {
+	if r.ReleaseOnly || !started {
+		return false
+	}
+	if c := r.ExecutionCause; c != nil {
+		if c.PrelaunchRefused || c.Predicate == "launch_authorization" {
+			return false
+		}
+		switch c.Operation {
+		case "launch", "start_authorization", "start_handoff", "teardown", "start_deadline":
+			return false
+		}
+	}
+	return r.OutOfMemory || !r.Interrupted && !r.Forced
+}
+
+func memoryConstraintFacts(j *Job, facts AttemptMemoryFacts) bool {
+	for _, outcome := range j.AttemptHistory {
+		if outcome.Attempt == facts.Attempt && outcome.Machine == facts.Machine && outcome.Session == facts.Session {
+			return memoryConstraintResult(facts.LearningReason != "not_started", Result{Interrupted: outcome.Interrupted, OutOfMemory: outcome.OutOfMemory, ExecutionCause: outcome.ExecutionCause})
+		}
+	}
+	// Older diagnostic histories may lack the outcome. Only an explicitly
+	// completed constrained/oom sample can establish a lower bound then.
+	return facts.LearningReason == "constrained" || facts.LearningReason == "oom" || j.State == "succeeded" && j.StartedAt != nil && facts.Attempt == j.Attempt
+}
+
 // eligibleMemorySample is the input to every successful-attempt memory writer.
 // Only memoryLearningSample constructs it, after checking outcome, custody and
 // pressure. gateBuilt rejects zero/field-built values at runtime; the source

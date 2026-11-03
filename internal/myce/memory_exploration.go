@@ -105,7 +105,7 @@ func (q *Queue) sameOSMemoryLowerBoundUncached(key ObservationKey, configuration
 		}
 		for _, facts := range j.MemoryAttempts {
 			p := facts.MemoryPeak
-			if facts.Attempt != j.Timing.Execution.Attempt || j.Timing.Execution.ID != j.ID || facts.Machine != j.Timing.Machine || facts.Session != j.Timing.Session || p == nil || !p.constrained() || p.HostGB == nil || !validRate(*p.HostGB) {
+			if facts.Attempt != j.Timing.Execution.Attempt || j.Timing.Execution.ID != j.ID || facts.Machine != j.Timing.Machine || facts.Session != j.Timing.Session || p == nil || !p.constrained() || p.HostGB == nil || !validRate(*p.HostGB) || !memoryConstraintFacts(j, facts) {
 				continue
 			}
 			lower = max(lower, hostMemoryPeakGB(p))

@@ -140,7 +140,7 @@ func (q *Queue) constrainedMemoryLowerUncached(j *Job, estimate memoryEstimate) 
 		lower = max(lower, q.sameOSMemoryLowerBound(*estimate.key, memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)))
 	}
 	for _, facts := range j.MemoryAttempts {
-		if p := facts.MemoryPeak; p.constrained() && p.HostGB != nil && validRate(*p.HostGB) {
+		if p := facts.MemoryPeak; p.constrained() && p.HostGB != nil && validRate(*p.HostGB) && memoryConstraintFacts(j, facts) {
 			lower = max(lower, hostMemoryPeakGB(p))
 		}
 	}

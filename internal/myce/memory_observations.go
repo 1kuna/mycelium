@@ -31,7 +31,11 @@ func (q *Queue) memoryObservationCatalog() *memoryObservationCatalog {
 	}
 	if index == nil {
 		index = &memoryObservationCatalog{work: map[memoryWorkKey][]*WorkObservation{}, family: map[similarMemoryKey][]*WorkObservation{}}
+		recovered := q.recoveredMemoryObservations()
 		for _, point := range q.s.WorkObservations {
+			if recovery, ok := recovered[point.Key]; ok {
+				point = recovery.point
+			}
 			if point.MemoryConfiguration != "" {
 				key := memoryWorkIdentity(point.Key, point.MemoryConfiguration)
 				index.work[key] = append(index.work[key], &point)
