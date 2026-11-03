@@ -693,6 +693,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		}
 	}
 	var out Job
+	var refusedHealthDemand *Job
 	err = q.updateRequest(ctx, func() error {
 		q.maintainSubmissions()
 		existing, err := q.existingSubmission(s, fingerprint)
@@ -830,6 +831,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		}
 		if s.RequireTarget || nativeNetworkRequired(j) {
 			if ok, reason := q.qualifiedTarget(j); !ok {
+				refusedHealthDemand = j
 				return &HTTPError{Status: 409, Code: "no_qualified_target", Message: reason + "; intent retained locally"}
 			}
 		}
@@ -837,6 +839,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		// do not reclassify temporary holds through the legacy capacity diagnostic.
 		if !s.RequireTarget {
 			if e := q.validateProjectCapacity(j); e != nil {
+				refusedHealthDemand = j
 				return rejectFieldRule("job_capacity_invalid", e)
 			}
 		}
@@ -867,6 +870,17 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 		out = cloneJob(j)
 		return nil
 	}, nil)
+	if err != nil && refusedHealthDemand != nil {
+		// The refused submission rolls back. Record only a rechecked health
+		// observation in its own transaction, never create or admit the job.
+		healthErr := q.update(func() error {
+			q.observeEnvelopeHealth(refusedHealthDemand, true)
+			return nil
+		})
+		if healthErr != nil {
+			return &out, errors.Join(err, healthErr)
+		}
+	}
 	if err == nil {
 		err = store.hydrateJob(&out) // Submit holds the publication fence through delivery.
 	}

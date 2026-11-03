@@ -45,8 +45,9 @@ type deviceQuarantine struct {
 }
 
 type deviceFault struct {
-	Reason string `json:"reason"`
-	Event  string `json:"event"`
+	Reason           string `json:"reason"`
+	Event            string `json:"event"`
+	RepeatedTeardown bool   `json:"repeated_teardown,omitempty"`
 }
 type deviceFaultClear struct {
 	Device string `json:"device"`
@@ -92,6 +93,7 @@ func (w *Worker) applyDeviceQuarantine() {
 	}
 	for i := range w.Machine.Devices {
 		d := &w.Machine.Devices[i]
+		d.RepeatedTeardownFault = w.faults.Devices[deviceFaultKey(*d)].RepeatedTeardown
 		if fault := w.faults.Devices[deviceFaultKey(*d)]; fault.Reason != "" {
 			d.Reason, d.FreeMemoryGB = fault.Reason, 0
 		} else if deviceFaultReason(d.Reason) {
@@ -170,7 +172,10 @@ func (w *Worker) refreshDeviceFaults(ctx context.Context, root *workerStore) err
 					continue
 				}
 				log.Printf("repeated teardown faults escalated to quarantine: device=%s pci=%s count=%d period=%s", d.ID, d.pciAddress, teardownFaultLimit, teardownFaultPeriod)
+				fault.RepeatedTeardown = true
 			}
+			// Further lines from the same reset must retain the escalation fact.
+			fault.RepeatedTeardown = fault.RepeatedTeardown || next.Devices[deviceFaultKey(d)].RepeatedTeardown
 			next.Devices[deviceFaultKey(d)] = fault
 		}
 	}
