@@ -545,6 +545,7 @@ func TestModelSnapshotDockerPreparationRestartReleasesPins(t *testing.T) {
 func TestModelSnapshotPinCleanupPrecedesAttemptRetirement(t *testing.T) {
 	h := &machineHarness{}
 	w := harnessWorker(t, h)
+	w.control = &processControl{}
 	w.Clock = &fakeClock{now: time.Unix(1000, 0)}
 	j := harnessJob(t, "pin-cleanup", "", "true")
 	root := &workerStore{dir: t.TempDir()}
@@ -599,6 +600,7 @@ func TestModelSnapshotPinCleanupPrecedesAttemptRetirement(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	saved = workerState{}
 	if err := decodeWorkerState(data, &saved); err != nil || saved.Job != nil {
 		t.Fatal("owner not retired after unpin", err)
 	}
