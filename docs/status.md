@@ -528,10 +528,10 @@ queue-configurable default limit of 2. Exhaustion reports
 `infrastructure_retries_exhausted`; stage failures do not consume this budget.
 
 For maintenance gates, every nonterminal job in redacted `GET /api/status`
-retains `spec.allowed_machines` (machine names) and reports:
+retains `spec.allowed_machines` and `spec.excluded_machines` (machine names) and reports:
 
 - `eligible_hosts`: sorted, unique host IDs of currently known machines allowed
-  by both the job and project allow-lists. For running and stopping jobs, including
+  by both the job and project allow-lists, excluding `spec.excluded_machines`. For running and stopping jobs, including
   in-flight model calls, this also includes the current machine's host and
   `production_host` when set, even if policy no longer allows them. A restricted
   job with no known eligible or occupied host reports an empty array.
@@ -539,10 +539,17 @@ retains `spec.allowed_machines` (machine names) and reports:
   allow-list that are not currently known machines. The effective list is the intersection
   when both job and project lists are nonempty, or whichever list is nonempty.
   This field is omitted when there are no unknown names. A joining machine
-  resolves its name into a host ID on subsequent status reads.
+  resolves its name into a host ID on subsequent status reads. Excluded names
+  are removed from this list.
 - `eligible_unrestricted: true`: neither allow-list restricts the job. Treat it
   as able to run anywhere, including future hosts. `eligible_hosts` is omitted
   unless the job currently occupies a host; listed hosts never limit this marker.
+  This is an open-ended, conservative maintenance marker: exclusion-only jobs
+  retain it because future non-excluded workers remain eligible. The exact
+  authored exclusions remain in `spec.excluded_machines`. Gates must continue
+  counting this marker for every host, even an excluded machine's host; an
+  exclusion is by machine ID and does not establish that every current or future
+  worker on a physical host is excluded.
 
 These fields cover queued, infra-requeued, running and stopping jobs. They
 express placement policy and current occupancy, not dispatch readiness: busy,

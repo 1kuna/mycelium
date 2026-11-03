@@ -68,6 +68,9 @@ func (q *Queue) Resolve(req ResolveRequest) (ResolveReport, error) {
 	if err := view.validateMachineNames(s.AllowedMachines); err != nil {
 		r.Findings = append(r.Findings, ResolveFinding{Field: "allowed_machines", Side: "submitter", Problem: err.Error(), Fix: "Use the current machine name, or omit allowed_machines and declare needs."})
 	}
+	if err := view.validateJobExclusions(s); err != nil {
+		r.Findings = append(r.Findings, ResolveFinding{Field: "excluded_machines", Side: "submitter", Problem: err.Error(), Fix: "Use current machine names and leave a machine permitted by the project policy."})
+	}
 	// Extension jobs resolve against the captured registry, as submit does.
 	extensions, err := view.resolveExtensions(&s)
 	if err != nil {

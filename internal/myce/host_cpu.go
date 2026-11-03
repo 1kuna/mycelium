@@ -187,7 +187,7 @@ func (q *Queue) cpuAfterReleases(m *Machine, jobs []*Job, slots []*ModelSlot, pr
 func cpuWaitingReason(j *Job, machines map[string]*Machine) string {
 	reasons := []string{}
 	for _, m := range machines {
-		if m.Gone || m.Leaving || !machineAllowed(j.Spec.AllowedMachines, m.ID) || !environmentCanRun(j, m) {
+		if m.Gone || m.Leaving || !j.Spec.allowsMachine(m.ID) || !environmentCanRun(j, m) {
 			continue
 		}
 		if !j.Spec.Needs.cpuOnly() && len(j.Spec.Needs.Platform.Required) > 0 && !slices.Contains(j.Spec.Needs.Platform.Required, m.GPU) {

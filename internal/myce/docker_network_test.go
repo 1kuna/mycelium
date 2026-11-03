@@ -812,3 +812,46 @@ func tableOOM(root, id string) bool {
 	_, err := os.Stat(filepath.Join(root, "table-oom"))
 	return id == "id1" && err == nil
 }
+
+// Memory caps must not change the declared network; the fake daemon exercises
+// the managed adapter and inspect verification without a Docker installation.
+func TestDockerMemoryCapWithoutNetwork(t *testing.T) {
+	w, store, clock, root := dockerFixture(t)
+	j := dockerJob()
+	j.Spec.Needs.HostMemoryGB = 4
+	j.Spec.Run.DockerMemoryGB = 2
+	if err := j.Spec.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	p, err := startDockerFixture(w, store, j)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		p.stop(clock.Now(), 0, true)
+		clock.advance(defaultGPUStopGrace + 5*time.Second)
+		p.docker.waitShutdown(clock)
+		p.docker.close()
+	})
+	await(t, func() bool { _, err := os.Stat(filepath.Join(root, "running")); return err == nil })
+	calls, err := os.ReadFile(filepath.Join(root, "calls"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(calls), "--network none") || !strings.Contains(string(calls), "--memory 2147483648") || strings.Contains(string(calls), "network create") {
+		t.Fatalf("memory changed network contract: %s", calls)
+	}
+}
+
+func TestDockerMemoryCapOfflineInventory(t *testing.T) {
+	q, _ := fixture(t)
+	m := dockerSharedMachine()
+	check(t, q, m, nil)
+	s := dockerJob().Spec
+	s.Needs.HostMemoryGB = 4
+	s.Run.DockerMemoryGB = 2
+	j := submit(t, q, s)
+	if got := check(t, q, m, nil).Job; got == nil || got.ID != j.ID || got.Spec.Run.DockerNetwork != "" {
+		t.Fatal("offline capped Docker job not placed", got)
+	}
+}
