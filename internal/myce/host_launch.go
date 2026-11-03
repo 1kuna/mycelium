@@ -62,13 +62,29 @@ func (q *Queue) AuthorizeLaunch(l HostLaunch) error {
 func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error {
 	timing := newQueueUpdateTiming()
 	var rejected error
+	var batch *Job
 	reject := func(fence string) {
 		log.Printf("event=launch_rejected fence=%s", fence)
+		if fence == "host_launch" || fence == "preparation_stopping" {
+			q.recordStartRefusal(batch, fence)
+		}
 		rejected = ErrStale
 	}
 	err := q.updateRequest(ctx, func() error {
 		q.maintain()
 		q.refreshHostMemory()
+		if l.Kind == "batch" {
+			attempt, err := strconv.Atoi(l.Attempt)
+			if err != nil {
+				reject("attempt_number")
+				return nil
+			}
+			batch, err = q.current(Result{Machine: l.Machine, Session: l.Session, Execution: Execution{ID: l.Key, Attempt: attempt}})
+			if err != nil {
+				reject("attempt_custody")
+				return nil
+			}
+		}
 		if !q.hostLaunchAllowed(q.s.Machines[l.Machine], l.Session) {
 			reject("host_launch")
 			return nil
@@ -82,13 +98,8 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 			return nil
 		}
 		if l.Kind == "batch" {
-			attempt, err := strconv.Atoi(l.Attempt)
-			j, errCurrent := q.current(Result{Machine: l.Machine, Session: l.Session, Execution: Execution{ID: l.Key, Attempt: attempt}})
+			j := batch
 			switch {
-			case err != nil:
-				reject("attempt_number")
-			case errCurrent != nil:
-				reject("attempt_custody")
 			case j.State != "running":
 				reject("job_state")
 			case j.ReleaseConfirmed:
@@ -98,6 +109,7 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 			default:
 				predicate := q.startPlacementRejection(j)
 				if predicate == "" {
+					q.clearStartRefusal(j)
 					break
 				}
 				m := allocationMachine(q.s.Machines[j.Machine], j.AllocatedDevices)
@@ -109,6 +121,7 @@ func (q *Queue) authorizeLaunchContext(ctx context.Context, l HostLaunch) error 
 					}
 				}
 				log.Printf("event=launch_placement_rejected job=%s attempt=%d predicate=%s cpu_fits=%t docker_hold_kind=%q docker_transition=%q", j.ID, j.Attempt, predicate, cpu, kind, transition)
+				q.recordStartRefusal(j, predicate)
 				reject("start_placement")
 			}
 			return nil
