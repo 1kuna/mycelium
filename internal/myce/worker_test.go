@@ -28,7 +28,7 @@ func workerFixture(t *testing.T, q *Queue, prepare ...func(Job) (string, error))
 	run := &workerTestRun{cancel: cancel, done: make(chan struct{}), state: t.TempDir()}
 	// Stop events carry absolute queue deadlines. Use the queue's clock so a
 	// fake deadline cannot appear already expired to the worker.
-	w := Worker{StateDir: run.state, Clock: q.clock, Client: Client{URL: server.URL, Token: "test"}, Machine: machine("worker", "fake", "fixture-worker-host"), Interval: 5 * time.Millisecond}
+	w := Worker{EnvironmentLimit: 1 << 20, StateDir: run.state, Clock: q.clock, Client: Client{URL: server.URL, Token: "test"}, Machine: machine("worker", "fake", "fixture-worker-host"), Interval: 5 * time.Millisecond}
 	if len(prepare) > 0 {
 		w.checkpointPrepare = prepare[0]
 	}

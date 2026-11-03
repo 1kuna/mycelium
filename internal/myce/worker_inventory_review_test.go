@@ -47,6 +47,7 @@ func runInventoryReviewWorker(t *testing.T, q *Queue, w Worker) Client {
 		w.StateDir = newTestStateRoot(t)
 	}
 	w.Clock, w.Interval = RealClock{}, time.Millisecond
+	w.EnvironmentLimit = 1 << 20
 	w.HostMemorySource = func(context.Context) (float64, error) { return 64, nil }
 	w.CPUIsolationProbe = func(context.Context) error { return nil }
 	ctx, cancel := context.WithCancel(context.Background())
