@@ -80,7 +80,7 @@ func (q *Queue) startWaitingReason(j *Job) string {
 	}
 	machines := q.plannerMachines()
 	for _, m := range machines {
-		if !q.projectAllows(j.Spec.Project, m.ID) || len(j.Spec.AllowedMachines) > 0 && !slices.Contains(j.Spec.AllowedMachines, m.ID) || len(j.Spec.Needs.Platform.Required) > 0 && !slices.Contains(j.Spec.Needs.Platform.Required, m.GPU) {
+		if !q.projectAllows(j.Spec.Project, m.ID) || !j.Spec.allowsMachine(m.ID) || len(j.Spec.Needs.Platform.Required) > 0 && !slices.Contains(j.Spec.Needs.Platform.Required, m.GPU) {
 			continue
 		}
 		if j.Machine != "" && j.Machine != m.ID {
@@ -216,7 +216,7 @@ func (q *Queue) allStartHostsDisabled(j *Job) bool {
 	}
 	found := false
 	for _, m := range q.plannerMachines() {
-		if !q.projectAllows(j.Spec.Project, m.ID) || len(j.Spec.AllowedMachines) > 0 && !slices.Contains(j.Spec.AllowedMachines, m.ID) || len(j.Spec.Needs.Platform.Required) > 0 && !slices.Contains(j.Spec.Needs.Platform.Required, m.GPU) {
+		if !q.projectAllows(j.Spec.Project, m.ID) || !j.Spec.allowsMachine(m.ID) || len(j.Spec.Needs.Platform.Required) > 0 && !slices.Contains(j.Spec.Needs.Platform.Required, m.GPU) {
 			continue
 		}
 		capacity := *m

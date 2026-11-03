@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"mycelium/internal/myce"
 )
 
 func TestProfileSharedInputsRetainReferencesWithoutNASUploads(t *testing.T) {
@@ -144,5 +146,74 @@ check: [true]
 	perFile := invoke("second")
 	if perItem.Spec.ProfileMemory == perArgs.Spec.ProfileMemory || perItem.Spec.ProfileMemory == perFile.Spec.ProfileMemory {
 		t.Fatal("per_item must still distinguish arguments and item content with shared inputs")
+	}
+}
+
+func TestProfileLocalSharedInputIdentity(t *testing.T) {
+	root := t.TempDir()
+	for _, dir := range []string{".mycelium/profiles", "source"} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "runtime"), []byte("runtime"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := myce.IdentifyFile(filepath.Join(root, "runtime"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(root, ".mycelium/profiles/test.yaml")
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503) }))
+	defer server.Close()
+	for _, tc := range []struct{ name, hash, size, want string }{
+		{"derive size", ref.SHA256, "", ""},
+		{"hash mismatch", strings.Repeat("0", 64), "", "shared input runtime: sha256 differs"},
+		{"size mismatch", ref.SHA256, ", size_bytes: 99", "shared input runtime: size differs"},
+		{"size mismatch without hash", "", ", size_bytes: 99", "shared input runtime: size differs"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			profile := `name: shared
+project: test
+class: experiment
+source: {directory: source}
+run: {command: [true]}
+needs: {cpu_cores: 1, memory_gb: 1}
+targets: [{os: linux, arch: amd64, platform: cpu}]
+check: [true]
+shared_inputs: {runtime: {local: runtime, sha256: "` + tc.hash + `"` + tc.size + `}}
+`
+			if err := os.WriteFile(path, []byte(profile), 0600); err != nil {
+				t.Fatal(err)
+			}
+			req, findings, err := resolveInput(path, "", "", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.name == "derive size" && (len(findings.findings) != 0 || req.Spec.SharedInputs["runtime"].SizeBytes != ref.SizeBytes) {
+				t.Fatalf("resolve: %+v %+v", req.Spec.SharedInputs, findings)
+			}
+			if tc.want != "" && (len(findings.findings) != 1 || !strings.Contains(findings.findings[0].Problem, tc.want)) {
+				t.Fatalf("resolve: %+v", findings)
+			}
+			var out bytes.Buffer
+			err = runProfile(context.Background(), path, nil, nil, "", "", "", "", server.URL, "test", &out, io.Discard)
+			if tc.want != "" {
+				if err == nil || !strings.Contains(err.Error(), tc.want) {
+					t.Fatalf("got %v", err)
+				}
+				return
+			}
+			if exitCode(err) != 69 {
+				t.Fatalf("prepare: %v", err)
+			}
+			var receipt profileReceipt
+			if err := json.Unmarshal(out.Bytes(), &receipt); err != nil {
+				t.Fatal(err)
+			}
+			if got := receipt.Spec.SharedInputs["runtime"]; got.SHA256 != ref.SHA256 || got.SizeBytes != ref.SizeBytes {
+				t.Fatalf("identity: %+v", got)
+			}
+		})
 	}
 }

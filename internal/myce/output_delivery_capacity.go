@@ -199,7 +199,7 @@ func (q *Queue) admitOutputRetries(ctx context.Context) error {
 		})
 		for _, j := range jobs {
 			need := addDiskBytes(q.outputReservations(payloads, ""), j.Spec.Disk.OutputBytes)
-			if q.fileStoreReserveRefusal(status, need, j.Spec.Disk.OutputBytes, q.outputReservationsFor(payloads, "", true), q.priorityMatch(j.Spec).Tier == "production") != nil {
+			if q.fileStoreAdmissionRefusal(WithFileStoreSubmission(ctx, j.Spec), status, payloads, need, j.Spec.Disk.OutputBytes, q.outputReservationsFor(payloads, "", true), q.priorityMatch(j.Spec).Tier == "production") != nil {
 				continue
 			}
 			j = q.touchJob(j.ID)

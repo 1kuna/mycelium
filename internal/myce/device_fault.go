@@ -291,7 +291,7 @@ func intelKernelFault(d MachineDevice, line string) string {
 	if driver == "" {
 		return ""
 	}
-	for _, fault := range []string{"engine memory cat error", "fault response: unsuccessful", "gpu hang", "gpu fault", "vm fault", "gt reset", "resetting chip", "resetting gt", "resetting engine"} {
+	for _, fault := range []string{"engine memory cat error", "fault response: unsuccessful", "gpu hang", "gpu fault", "vm fault", "gt reset", "resetting chip", "resetting gt", "resetting engine", "engine reset", "schedule disable timeout", "schedule disable failed to respond", "xe device coredump has been created", "trying reset", "reset queued", "reset started", "reset done"} {
 		if strings.Contains(s, fault) {
 			return "device_fault_" + driver
 		}

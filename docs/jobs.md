@@ -111,7 +111,8 @@ myce spec check --resolve .mycelium/profiles/NAME.yaml
 myce spec check --resolve --entry NAME .mycelium/adapter.yaml
 ```
 
-The CLI stats local inputs (it never hashes or uploads them) and sends the job
+The CLI stats local inputs and verifies explicitly declared local shared-input
+hashes (it never uploads them) and sends the job
 to `POST /api/resolve`. The queue reads the environment exactly as submit does
 and evaluates every known target with submission's permanent-capacity fit
 checks, so a target's reason is the refusal `require_target` would give. Each
@@ -126,6 +127,41 @@ which defeat store deduplication because every source change repacks them.
 `--json` prints the report. Exit status is 0 when some target is eligible, and
 1 when the spec is invalid or no target is. Resolve creates no job, upload,
 build or reservation, and grants nothing: submit revalidates every fence.
+
+From the next release, each command target also reports the immutable environment
+key, backend and `ready`, `prepare-needed` or `blocked` state. A cold uv/Pixi
+builder can prepare a locked Python 3.12 environment even when system Python is
+older; use `python3` from the managed PATH, rather than an absolute system
+interpreter. Pixi locks can include media tools such as ffmpeg. Resolve never
+runs the builder. File-store inputs report `ready` only after read-only hash/size verification;
+missing or corrupt bytes and submitter placeholders are `needs-staging`.
+The bounded local observation can return `unknown` if verification is busy or
+incomplete; repeat the check or let submission perform its full validation.
+The check shares submission's single I/O slot, runs outside the queue lock, and
+never performs a publication fsync. Submit verifies hashes and sizes again.
+
+For optional NAS existence evidence, add `--inspect-nas` and repeat after worker
+heartbeats. This authenticated request checks only declared `shared_inputs.nas`
+paths under each worker's checkpoint root, using metadata, with no payload
+execution or byte reads. Per-target `nas_inputs` reports `pending`, `unverified`,
+`present` or `missing`, with queue receipt timestamps adjusted for worker sample
+age. Results expire after one minute. A missing source blocks that resolve row
+unless the worker already reports verified cached bytes. Absent, stale or
+older-worker evidence stays unverified. A present path still has unverified
+bytes; staging and submission retain every fence. The cache is transient and
+bounded to 256 entries per API listener, eight requests per heartbeat and one
+outstanding metadata operation per worker. Saturation stays unverified. No jobs
+or reservations are created. This signal requires the inspection-capable worker
+upgrade; an upgraded CLI/queue alone cannot establish visibility.
+
+Native variant adapter entries now return the existing portability metadata
+alongside resolve, including lock-input gaps, preparation and qualification.
+Only directory-source lock metadata is inspected locally. Git/snapshot lock
+coverage stays explicitly unknown, so excluded or commit-only files cannot be
+replaced by working-tree files. Local authored metadata has no frozen registration; eligibility stays unknown
+until registration and qualification. Resolve never registers a recipe or runs
+a qualification payload. Use `myce portability --extension NAME@VERSION` for
+already registered evidence.
 
 | Field | Required / default | Meaning |
 |---|---|---|
@@ -149,6 +185,7 @@ build or reservation, and grants nothing: submit revalidates every fence.
 | `targets` | Empty: any OS/arch | Exact `{os, arch, platform}` alternatives, enforced at dispatch and launch |
 | `require_target` | `false` | Refuse a new submission without an online qualified target of sufficient total admitted capacity; busy qualified targets may queue |
 | `allowed_machines` | Empty: any eligible worker | Machine-name allow-list |
+| `excluded_machines` | Empty: no exclusions | Machine-name exclusions, intersected with job and project allow-lists; never widens eligibility |
 | `start_by` | Production: submission + effective start window (readiness for dependents); absent for other priorities | Absolute RFC3339 first-start deadline, production batch only; takes precedence over `start_window`; loss recovery gets a fresh original-length window |
 | `start_window` | Production: `150s`; absent for other priorities | Relative Go duration string, `0 < duration <= 1h`, production batch only; inherited by physical fan-out children |
 | `give_up_at` | Absent: wait indefinitely | RFC3339 expiry while queued; not a running-job timeout |
@@ -879,7 +916,7 @@ Without this field the managed container uses `--network none`.
 `name` (1–63 letters/digits/hyphens; `main` is reserved), direct Docker `command`,
 optional positive `memory_gb`, optional `env`, optional `memory_swap`, and optional
 `readiness: {port, path, timeout}`. Main retains `run.command` and may declare
-`run.docker_memory_gb`. This explicit main-container cap works with the default
+`run.docker_memory_gb`. The cap does not select a network. This explicit main-container cap works with the default
 `--network none`; only sidecars require the private network. Without the explicit
 cap, the worker supplies `--memory` from the resolved host reservation (including
 the device reservation on unified CUDA hosts). The adapter inspects the enforced
@@ -1549,3 +1586,17 @@ result = client.wait(render["id"])
 
 Repeat those submissions with a distinct recording identity/key namespace for
 each recording, registering every chain before waiting on the final sink IDs.
+
+### Situational host exclusions
+
+A raw job spec may set `excluded_machines: [worker-a]` for a hardware or locality
+requirement. Names are worker machine IDs, just like `allowed_machines` (not host
+aliases). Unlisted and future workers remain eligible subject to all other needs
+and project policy. Empty means no exclusions. Submission rejects empty or
+whitespace-padded names, retired machine names, and exclusions that exhaust a
+job or project allow-list. Unknown names are retained, as with an allow-list;
+workers may join later. `require_target: true` additionally refuses when no
+compatible known target remains. `myce spec check --resolve` reports excluded
+targets with `excluded_machines` reasons; queued reasons retain the exclusion
+list. Use this optional constraint for a real requirement, not queue safety or
+priority; Mycelium owns ordinary placement.

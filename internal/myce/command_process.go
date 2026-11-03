@@ -50,13 +50,13 @@ func runRecordedCommand(ctx context.Context, argv []string, dir string, env []st
 	args = append(args, environmentCommand(argv, env)...)
 	cmd := exec.CommandContext(ctx, "sh", args...)
 	cmd.Dir = dir
-	cmd.Env = append(env, "MYCE_PROCESS_ID="+identity, "ZE_ENABLE_PCI_ID_DEVICE_ORDER=1")
+	cmd.Env = processSessionEnvironment(append(env, "MYCE_PROCESS_ID="+identity, "ZE_ENABLE_PCI_ID_DEVICE_ORDER=1"))
 	cmd.Stdout = out
 	cmd.Stderr = out
 	if scope.Stderr != nil {
 		cmd.Stderr = scope.Stderr
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = commandProcessAttributes()
 	cmd.Cancel = func() error {
 		stateMu.Lock()
 		defer stateMu.Unlock()
@@ -67,6 +67,12 @@ func runRecordedCommand(ctx context.Context, argv []string, dir string, env []st
 				}); err != nil {
 					return err
 				}
+			}
+			if err := recordWorkerGroup(&state, cmd.Process.Pid); err != nil {
+				return err
+			}
+			if err := saveWorkerJSON(scope.StateDir, record, state); err != nil {
+				return err
 			}
 			return signalWorkerGroup(cmd.Process.Pid, syscall.SIGKILL)
 		}
@@ -89,7 +95,7 @@ func runRecordedCommand(ctx context.Context, argv []string, dir string, env []st
 	e = saveWorkerJSON(scope.StateDir, record, state)
 	stateMu.Unlock()
 	if e != nil {
-		_ = syscall.Kill(-state.PID, syscall.SIGKILL)
+		_ = signalWorkerGroup(state.PID, syscall.SIGKILL)
 		_ = cmd.Wait()
 		return e
 	}
@@ -108,8 +114,11 @@ func runRecordedCommand(ctx context.Context, argv []string, dir string, env []st
 			return errors.Join(e, waitErr, err)
 		}
 	}
-	_ = syscall.Kill(-state.PID, syscall.SIGKILL)
-	groupErr := waitWorkerGroup(state.PID, scope.Clock)
+	custodyErr := recordWorkerGroup(&state, state.PID)
+	if custodyErr == nil {
+		custodyErr = saveWorkerJSON(scope.StateDir, record, state)
+	}
+	groupErr := errors.Join(custodyErr, signalWorkerGroup(state.PID, syscall.SIGKILL), waitWorkerGroup(state.PID, scope.Clock))
 	if groupErr == nil {
 		if err := os.Remove(filepath.Join(scope.StateDir, record)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			groupErr = err

@@ -194,6 +194,7 @@ func validateModels(c ModelConfig) error {
 }
 
 type ModelSlot struct {
+	Interval             *ModelInterval      `json:"interval,omitempty"`
 	Device               string              `json:"device,omitempty"`
 	PreemptionCount      int                 `json:"preemption_count,omitempty"`
 	RunSince             *time.Time          `json:"run_since,omitempty"`
@@ -525,7 +526,7 @@ func (q *Queue) maintainModels() {
 			case s == nil || s.State == "failed" && s.RetryAt != nil && !now.Before(*s.RetryAt):
 				p = q.roomPlan(callJob(c), m, false)
 			}
-			if p != nil && !q.addXPUTierStops(p, callJob(c)) {
+			if p != nil && !q.addDeviceTierStops(p, callJob(c)) {
 				p = nil
 			}
 			if p != nil && q.completionPlanBetter(callJob(c), p, best, scan) {
@@ -537,7 +538,7 @@ func (q *Queue) maintainModels() {
 		}
 		q.applyPlacement(best, callJob(c))
 		m := best.machine
-		if !q.xpuTiersSettled(m, callJob(c), true) {
+		if !q.deviceTiersSettled(m, callJob(c), true) {
 			continue
 		}
 		s := q.s.ModelSlots[targetSlotKey(m, c.Model)]
@@ -581,6 +582,7 @@ func (q *Queue) maintainModels() {
 			q.s.ModelSlots[targetSlotKey(m, c.Model)] = s
 		}
 		q.initEnginePreemption(s)
+		q.recordModelInterval(s, "assigned")
 		m.FreeMemoryGB -= model.MemoryGB
 		q.refreshHostMemory()
 	}

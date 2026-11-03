@@ -21,6 +21,7 @@ func fileCommand(args []string) error {
 	f := flag.NewFlagSet("file "+args[0], flag.ContinueOnError)
 	authority := installedClientFlags(f)
 	size := f.Int64("size-bytes", -1, "expected file byte count for get")
+	project := f.String("project", "", "project attribution for put (required when file-store quotas or reservations are configured)")
 	if err := f.Parse(args[1:]); err != nil {
 		return err
 	}
@@ -32,6 +33,9 @@ func fileCommand(args []string) error {
 		defer c.HTTP.CloseIdleConnections()
 	}
 	ctx := context.Background()
+	if *project != "" {
+		ctx = myce.WithFileStoreSubmission(ctx, myce.Spec{Project: *project})
+	}
 	switch args[0] {
 	case "put":
 		if f.NArg() != 1 {
@@ -78,6 +82,7 @@ func fileCommand(args []string) error {
 // Upload only the explicitly declared input mappings. The transmitted description
 // contains relative job names and content identities, never local source paths.
 func uploadJobInputs(ctx context.Context, c myce.Client, s *myce.Spec, root string) error {
+	ctx = myce.WithFileStoreSubmission(ctx, *s)
 	if len(s.Files) > 0 {
 		return errors.New("files-from cannot be combined with files")
 	}

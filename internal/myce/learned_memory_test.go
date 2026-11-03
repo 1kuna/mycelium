@@ -282,3 +282,47 @@ func TestLearnedMemoryDiscreteGPUFirstRunUnchanged(t *testing.T) {
 		t.Fatalf("discrete GPU exploration changed: %+v", e)
 	}
 }
+
+// #631: accepted samples of the same plain discrete-GPU command must turn
+// its next run into measured work, even when throughput occupancy is unknown.
+func TestLearnedMemoryDiscreteGPUAcceptedIdentity(t *testing.T) {
+	q, clock, m := unifiedGPUFixture(t, false)
+	s := plainGPUSpec()
+	for i := 0; i < 3; i++ {
+		j := assignGPU(t, q, m, submit(t, q, s))
+		if i > 0 && (j.MemoryEnvelope.Basis != "learned" || j.MemoryEnvelope.Evidence != i || j.Spec.Needs.HostMemoryGB != 8.6*1.25) {
+			t.Fatalf("accepted identity stayed exploratory: %+v needs=%+v", j.MemoryEnvelope, j.Spec.Needs)
+		}
+		if err := q.Started(result(j, false)); err != nil {
+			t.Fatal(err)
+		}
+		q.s.Jobs[j.ID].Timing.Reason = "mixed or unknown host occupancy"
+		clock.Advance(time.Second)
+		host, total, device := 5.56, 8.6, 3.0
+		r := result(j, true)
+		r.MemoryPeak = &AttemptMemoryPeak{HostGB: &host, CgroupGB: &total, DeviceGB: &device}
+		if err := q.Complete(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	q = reopenQueue(t, q, clock)
+	machineCheck(t, q, m)
+	j := assignGPU(t, q, m, submit(t, q, s))
+	if e := j.MemoryEnvelope; e.Basis != "learned" || e.Evidence != 3 || j.Spec.Needs.HostMemoryGB != 8.6*1.25 || e.DeviceGB != 3*1.25 {
+		t.Fatalf("restart lost learned envelope: %+v", e)
+	}
+	if err := q.Started(result(j, false)); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(time.Second)
+	if err := q.Complete(result(j, true)); err != nil {
+		t.Fatal(err)
+	}
+	// An arbitrary argument can change input size; it does not inherit the
+	// accepted class just because the executable is the same (#631 decision).
+	s.Run.Command = append(s.Run.Command, "different-input")
+	next := assignGPU(t, q, m, submit(t, q, s))
+	if e := next.MemoryEnvelope; e.Basis != "exploratory" || e.Evidence != 0 {
+		t.Fatalf("different arguments reused exact memory evidence: %+v", e)
+	}
+}

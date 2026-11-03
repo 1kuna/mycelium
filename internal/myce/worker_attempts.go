@@ -338,6 +338,17 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				err = w.Client.Call(ctx, "POST", "/api/workers/complete", s.state.Result, nil)
 			}
 			if s.state.Result != nil && (err == nil || stale(err)) && !s.state.Result.ReleasePending {
+				// Release callbacks are best effort and may race result delivery.
+				// Never retire the durable owner until every cache pin is removed.
+				if e := s.releaseSharedInputPins(); e != nil {
+					s.fileError = "cache pin cleanup pending; attempt custody retained"
+					select {
+					case <-ctx.Done():
+					case <-a.wake:
+					case <-tick.C:
+					}
+					continue
+				}
 				if err == nil {
 					published, e := w.publishedAttemptFiles(ctx, s.state)
 					if e != nil {
@@ -1009,7 +1020,7 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				m.ModelURL = rt.url
 			}
 			m.ModelConfigHash = modelConfigHash(w.ModelConfig)
-			m.Capabilities = append(slices.DeleteFunc(slices.Clone(w.Machine.Capabilities), func(c string) bool { return c == "docker" || c == "docker_envelope" || c == dockerFilesCapability }), "logs_none", "shared_inputs_v1", "extension_shared_inputs_v1")
+			m.Capabilities = append(slices.DeleteFunc(slices.Clone(w.Machine.Capabilities), func(c string) bool { return c == "docker" || c == "docker_envelope" || c == dockerFilesCapability }), "logs_none", "shared_inputs_v1", "extension_shared_inputs_v1", "nas_inspection_v1")
 			if w.ModelRoot != "" && w.modelSnapshots != nil {
 				m.Capabilities = append(m.Capabilities, modelSnapshotsCapability)
 			}
@@ -1054,13 +1065,14 @@ func (w Worker) runAttempts(stop context.Context, root *workerStore, stores []*w
 				reports[i].CurrentHostMemory = reports[i].CurrentHostMemory.aged(w.Clock.Now())
 			}
 			w.hostMemorySamples = currentHostMemorySamples(reports, w.Clock.Now())
-			reply, err := w.checkin(ctx, Checkin{Machine: m, Attempts: reports, Recovering: recovering, Fresh: fresh, PreviousSession: root.state.PreviousSession, ModelReports: modelReports})
+			reply, err := w.checkin(ctx, Checkin{NASPathReports: w.nasPathReports(), Machine: m, Attempts: reports, Recovering: recovering, Fresh: fresh, PreviousSession: root.state.PreviousSession, ModelReports: modelReports})
 			if err == nil {
 				if receiptErr := saveEnrollmentReceipt(root.dir, m); receiptErr != nil {
 					// Enrollment is an observer, never authority to terminate live work.
 					// Retry next successful check-in; no filesystem paths or errors in logs.
 					log.Printf("enrollment receipt unavailable; will retry")
 				}
+				w.inspectNASPaths(reply.NASPathChecks, root.state.CheckpointRoot)
 				if reply.SharedHost != nil {
 					w.Machine.SharedHost = cloneSharedHost(reply.SharedHost)
 					if reply.SharedHost.InteractiveReserveGB == 0 {

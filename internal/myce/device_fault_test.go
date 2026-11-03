@@ -298,3 +298,58 @@ func TestDeviceFaultRepeatedTeardownQuarantines(t *testing.T) {
 		}
 	}
 }
+
+// #595: replay each observed 2026-11-02/03 form independently so a recognized
+// neighbor cannot hide an unrecognized reset-only or schedule-disable incident.
+func TestDeviceFaultObservedXeForms(t *testing.T) {
+	forms := []string{
+		"Engine memory CAT error [18]: class=bcs, logical_mask: 0x1, guc_id=10",
+		"Fault response: Unsuccessful -ENOENT",
+		"Fault response: Unsuccessful -EINVAL",
+		"Engine reset: engine_class=ccs, logical_mask: 0x1, guc_id=6, state=0x289",
+		"Schedule disable timeout",
+		"Schedule disable failed to respond, guc_id=13",
+		"Xe device coredump has been created",
+		"trying reset from guc_exec_queue_timedout_job [xe]",
+		"reset queued", "reset started", "reset done",
+	}
+	for _, form := range forms {
+		t.Run(form, func(t *testing.T) {
+			clock := &fakeClock{now: time.Date(2026, 11, 3, 4, 16, 12, 0, time.UTC)}
+			m := m3Machine()
+			m.Devices[0].pciAddress = "0000:03:00.0"
+			w := Worker{Machine: m, Clock: clock, DeviceFaultMatchers: map[string]DeviceFaultMatcher{"fake": intelKernelFault}}
+			w.control = &processControl{clock: clock}
+			root := &workerStore{dir: t.TempDir()}
+			var lines []KernelLogLine
+			w.DeviceFaultSource = func(context.Context, time.Time) (KernelLogSnapshot, error) {
+				return KernelLogSnapshot{BootID: "boot", Lines: lines}, nil
+			}
+			if err := w.initDeviceFaults(context.Background(), root); err != nil {
+				t.Fatal(err)
+			}
+			for incident := range 3 {
+				stop := clock.Now()
+				j := Job{ID: fmt.Sprint(incident), Attempt: 1, AllocatedDevices: []string{"0"}}
+				w.control.set(&process{job: j, stopRequested: stop})
+				w.control.remove(j)
+				clock.Advance(5 * time.Second)
+				lines = []KernelLogLine{{ID: fmt.Sprint(incident), At: stop.Add(273 * time.Millisecond), Message: "xe 0000:03:00.0: [drm] Tile0: GT0: " + form}}
+				if err := w.refreshDeviceFaults(context.Background(), root); err != nil {
+					t.Fatal(err)
+				}
+				key := deviceFaultKey(m.Devices[0])
+				if incident < 2 && w.faults.Teardowns[key].Reason != "device_fault_xe" {
+					t.Fatal("form missing from teardown classification")
+				}
+				if got := w.Machine.Devices[0].Reason; (got == "device_fault_xe") != (incident == 2) {
+					t.Fatalf("incident %d: quarantine=%q", incident, got)
+				}
+				clock.Advance(10 * time.Minute)
+			}
+			if got := intelKernelFault(MachineDevice{pciAddress: "0000:07:00.0"}, lines[0].Message); got != "" {
+				t.Fatal("cross-device fault", got)
+			}
+		})
+	}
+}

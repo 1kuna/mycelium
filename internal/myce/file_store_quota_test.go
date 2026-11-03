@@ -27,7 +27,9 @@ func setQuotaPolicy(t *testing.T, q *Queue, project string, p ProjectPolicy) {
 // A completed job whose input and result share one stored digest.
 func quotaResult(t *testing.T, q *Queue, c Client, project, class, content string) *Job {
 	t.Helper()
-	_, ref := retentionJobInput(t, c, content)
+	_, ref := retentionUploadFile(t, func(ctx context.Context, path string, ref FileRef) error {
+		return c.UploadJobInput(WithFileStoreSubmission(ctx, Spec{Project: project, Class: class}), path, ref)
+	}, content)
 	s := spec(class)
 	s.Project = project
 	s.Files = FileManifest{"input": ref}
@@ -151,7 +153,7 @@ func TestProjectFileStoreDailyQuotaRollingWindow(t *testing.T) {
 
 // Over HTTP, inputs named for an over-quota project are refused before they
 // upload, at preflight and upload creation, and submit keeps the agent's reason.
-// Production and unnamed uploads pass.
+// Production passes; unnamed writes cannot bypass configured input quotas.
 func TestProjectFileStoreQuotaRefusesInputUploads(t *testing.T) {
 	q, _ := fixture(t)
 	c := retentionClient(t, q)
@@ -177,8 +179,12 @@ func TestProjectFileStoreQuotaRefusesInputUploads(t *testing.T) {
 	if err := c.PreflightFileStore(production, files); err != nil {
 		t.Fatal("production preflight refused by project quota", err)
 	}
-	if err := c.UploadJobInput(context.Background(), path, ref); err != nil {
-		t.Fatal("upload without a project refused by project quota", err)
+	var claimError *HTTPError
+	if err := c.UploadJobInput(context.Background(), path, ref); !errors.As(err, &claimError) || claimError.Code != "file_input_claim_required" {
+		t.Fatal("unnamed upload bypassed attribution", err)
+	}
+	if err := c.UploadJobInput(production, path, ref); err != nil {
+		t.Fatal("production upload refused", err)
 	}
 }
 

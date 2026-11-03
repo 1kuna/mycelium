@@ -1,5 +1,7 @@
 # Generic worker template; provision a versioned config with myce install.
 # Install as the worker with queue admission disabled. Never run this binary as root.
+# For Linux CIFS boot recovery, configure the external mount as described in
+# docs/operations.md and deploy/checkpoint-mount-start-limit.conf.
 [Unit]
 Description=Mycelium worker
 After=network-online.target

@@ -42,7 +42,7 @@ func readJobSpec(path string) (myce.Spec, error) {
 }
 
 func specCommand(args []string, out, errOut io.Writer) error {
-	const usage = "usage: myce spec check [--resolve [--files-from DIR] [--entry NAME] [--json]] FILE|PROFILE"
+	const usage = "usage: myce spec check [--resolve [--files-from DIR] [--inspect-nas] [--entry NAME] [--json]] FILE|PROFILE"
 	const scope = "Checks static validity only (YAML or JSON); does not check live eligibility, admission or qualification."
 	help := func() {
 		fmt.Fprintln(errOut, usage)
@@ -62,6 +62,7 @@ func specCommand(args []string, out, errOut io.Writer) error {
 	f.SetOutput(errOut)
 	f.Usage = help
 	resolve := f.Bool("resolve", false, "ask the queue which targets can run this job (read-only)")
+	inspectNAS := f.Bool("inspect-nas", false, "request cached worker NAS existence checks; repeat after a heartbeat for results")
 	filesFrom := f.String("files-from", "", "local folder the job's inputs are submitted from")
 	entry := f.String("entry", "", "adapter entry (default: adapter default)")
 	asJSON := f.Bool("json", false, "structured resolve report")
@@ -72,7 +73,7 @@ func specCommand(args []string, out, errOut io.Writer) error {
 		}
 		return waitError(2, err.Error())
 	}
-	if f.NArg() != 1 || !*resolve && (*entry != "" || *asJSON || *filesFrom != "") {
+	if f.NArg() != 1 || !*resolve && (*entry != "" || *asJSON || *filesFrom != "" || *inspectNAS) {
 		return waitError(2, usage)
 	}
 	path := f.Arg(0)
@@ -80,8 +81,11 @@ func specCommand(args []string, out, errOut io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("%s: %w", path, err)
 	}
-	if err := request.Spec.Validate(); err != nil {
-		return fmt.Errorf("%s: %w", path, err)
+	request.InspectNAS = *inspectNAS
+	if request.Recipe == nil {
+		if err := request.Spec.Validate(); err != nil {
+			return fmt.Errorf("%s: %w", path, err)
+		}
 	}
 	if !*resolve {
 		_, err = fmt.Fprintf(out, "%s: valid (static checks only)\n", path)
@@ -114,6 +118,7 @@ func specCommand(args []string, out, errOut io.Writer) error {
 }
 
 type submitterFindings struct {
+	unstaged []string
 	resolved []string
 	findings []myce.ResolveFinding
 }
@@ -134,7 +139,7 @@ func placeholderRef(name string, size int64) myce.FileRef {
 }
 
 // resolveInput reads a job spec, or for --resolve a profile or adapter entry,
-// and checks every submitter-side path with stat only.
+// and checks submitter-side paths; declared local shared input hashes are verified.
 func resolveInput(path, filesFrom, entry string, live bool) (myce.ResolveRequest, submitterFindings, error) {
 	var found submitterFindings
 	s, err := readJobSpec(path)
@@ -147,7 +152,7 @@ func resolveInput(path, filesFrom, entry string, live bool) (myce.ResolveRequest
 		} else if len(s.Inputs) > 0 {
 			found.resolved = append(found.resolved, "inputs: NAS-relative; each worker reads them under its own --checkpoint-root (not checked by resolve)")
 		}
-		return myce.ResolveRequest{Spec: s}, found, nil
+		return myce.ResolveRequest{Spec: s, UnstagedInputs: found.unstaged}, found, nil
 	}
 	if !live {
 		return myce.ResolveRequest{}, found, err
@@ -163,18 +168,24 @@ func resolveInput(path, filesFrom, entry string, live bool) (myce.ResolveRequest
 		if p, _, err = adapterProfile(a, entry); err != nil {
 			return myce.ResolveRequest{}, found, err
 		}
-		if p.Native != nil {
-			return myce.ResolveRequest{}, found, errors.New("native adapter entries: use myce portability --adapter")
-		}
 		if root, err = os.Getwd(); err != nil {
 			return myce.ResolveRequest{}, found, err
 		}
+	}
+	if p.Native != nil {
+		sourceUnverified := !bundleNativeMetadata(p.Native, p.Source, root)
+		finding, _ := sourceBundleFinding(root, p.Source)
+		if finding != nil {
+			found.findings = append(found.findings, *finding)
+		}
+		return myce.ResolveRequest{Spec: p.Spec, Recipe: p.Native, SourceUnverified: sourceUnverified, RequirementReasons: p.RequirementReasons}, found, nil
 	}
 	lowerInputs(&p.Spec, root, "project-root", &found)
 	for name, input := range p.SharedInputs {
 		if input.Local == "" {
 			continue
 		}
+		found.unstaged = append(found.unstaged, "shared/"+name)
 		local := input.Local
 		if !filepath.IsAbs(local) {
 			local = filepath.Join(root, local)
@@ -184,6 +195,17 @@ func resolveInput(path, filesFrom, entry string, live bool) (myce.ResolveRequest
 			found.missing("shared_inputs."+name+".local", "", "Create the file, or reference an already imported sha256/size or NAS location.", myce.PathReadError("shared_inputs."+name+".local", "submitter", input.Local, "project-root", "", err))
 			info = nil
 		}
+		if info != nil && input.SizeBytes != 0 && input.SizeBytes != info.Size() {
+			found.missing("shared_inputs."+name+".size_bytes", "shared input "+name+": size differs", "Correct size_bytes to match the local file.", nil)
+		}
+		if info != nil && input.SHA256 != "" {
+			ref, hashErr := myce.IdentifyFile(local)
+			if hashErr != nil {
+				found.missing("shared_inputs."+name+".local", "cannot identify shared input "+name, "Make the local file readable.", nil)
+			} else if input.SHA256 != ref.SHA256 {
+				found.missing("shared_inputs."+name+".sha256", "shared input "+name+": sha256 differs", "Correct sha256 to match the local file.", nil)
+			}
+		}
 		if input.SHA256 == "" {
 			size := int64(1)
 			if info != nil {
@@ -191,6 +213,8 @@ func resolveInput(path, filesFrom, entry string, live bool) (myce.ResolveRequest
 			}
 			ref := placeholderRef(name, size)
 			input.SHA256, input.SizeBytes = ref.SHA256, ref.SizeBytes
+		} else if info != nil && input.SizeBytes == 0 {
+			input.SizeBytes = info.Size()
 		}
 		input.Local = ""
 		p.SharedInputs[name] = input
@@ -203,9 +227,10 @@ func resolveInput(path, filesFrom, entry string, live bool) (myce.ResolveRequest
 	if p.Files == nil {
 		p.Files = myce.FileManifest{}
 	}
+	found.unstaged = append(found.unstaged, "files/.myce-source.tar")
 	p.Files[".myce-source.tar"] = placeholderRef(".myce-source.tar", max(1, size))
 	p.PrepareSource = p.Adapter
-	return myce.ResolveRequest{Spec: p.Spec, RequirementReasons: p.RequirementReasons}, found, nil
+	return myce.ResolveRequest{Spec: p.Spec, RequirementReasons: p.RequirementReasons, UnstagedInputs: found.unstaged}, found, nil
 }
 
 // lowerInputs mirrors submit's inputs-to-files lowering with stat instead of
@@ -217,8 +242,14 @@ func lowerInputs(s *myce.Spec, root, base string, found *submitterFindings) {
 	files := myce.FileManifest{}
 	staged := 0
 	for _, name := range slices.Sorted(maps.Keys(s.Inputs)) {
+		found.unstaged = append(found.unstaged, "files/"+name)
 		source := s.Inputs[name]
 		local := source
+		if base == "files-from" && !profileRelative(source) {
+			found.missing("inputs."+name, "input source must be relative and stay within "+base, "Use a relative input mapping under "+base+".", nil)
+			files[name] = placeholderRef(name, 1)
+			continue
+		}
 		if root == "" {
 			files[name] = placeholderRef(name, 1)
 			continue

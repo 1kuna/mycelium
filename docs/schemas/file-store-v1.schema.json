@@ -159,6 +159,9 @@
         "max_added_file_bytes_24h": {
           "type": "integer"
         },
+        "reserved_file_bytes": {
+          "type": "integer"
+        },
         "refusal": {
           "type": "string"
         }

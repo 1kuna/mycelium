@@ -312,8 +312,11 @@ func runPreparedProfile(ctx context.Context, root string, p executionProfile, da
 				if e != nil {
 					return waitError(64, "profile_input_invalid: cannot identify shared input")
 				}
-				if input.SHA256 != "" && (input.SHA256 != ref.SHA256 || input.SizeBytes != ref.SizeBytes) {
-					return waitError(64, "profile_input_invalid: shared input hash differs")
+				if input.SHA256 != "" && input.SHA256 != ref.SHA256 {
+					return waitError(64, "profile_input_invalid: shared input "+name+": sha256 differs")
+				}
+				if input.SizeBytes != 0 && input.SizeBytes != ref.SizeBytes {
+					return waitError(64, "profile_input_invalid: shared input "+name+": size differs")
 				}
 				input.SHA256, input.SizeBytes = ref.SHA256, ref.SizeBytes
 				p.SharedInputs[name] = input

@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// Bound the lost-binding backstop, never a live job or unconfirmed cleanup.
+// Bound lost bindings and never-ready admission fences, never execution custody.
 const MaxReservationLifetime = 24 * time.Hour
 const DefaultReservationLifetime = 2 * time.Hour
 
@@ -61,6 +61,8 @@ type Reservation struct {
 	Revision      uint64             `json:"revision"`
 	CreatedAt     time.Time          `json:"created_at"`
 	ExpiresAt     time.Time          `json:"expires_at"`
+	ReadyAt       *time.Time         `json:"ready_at,omitempty"`
+	ExpiredAt     *time.Time         `json:"expired_at,omitempty"`
 	ReleasedAt    *time.Time         `json:"released_at,omitempty"`
 	ReleaseReason string             `json:"release_reason,omitempty"`
 	// Projections, never evidence of physical release.
@@ -250,6 +252,16 @@ func (q *Queue) maintainReservations() {
 				}
 			}
 		}
+		if r.ExpiredAt == nil && r.ReadyAt == nil {
+			if !now.Before(r.ExpiresAt) && j != nil && j.State == "queued" && !q.reservationCleanupPending(r, j) {
+				r.ExpiredAt = &now
+				r.Revision++
+				q.s.Reservations[r.ID] = r
+			} else if len(q.reservationPending(r)) == 0 || j != nil && j.StartedAt != nil {
+				r.ReadyAt = &now
+				q.s.Reservations[r.ID] = r
+			}
+		}
 		switch {
 		case j != nil && terminal(j.State) && !q.reservationCleanupPending(r, j):
 			q.releaseReservation(r, "bound job terminal and all attempts and preparations physically released")
@@ -367,7 +379,7 @@ func (q *Queue) reservationPending(r Reservation) []string {
 		for _, target := range q.machineTargets(m) {
 			if r.Target.matchesTarget(target) {
 				present = true
-				if q.deviceAdmissionBlocked(target) {
+				if (bound == nil || !bound.Spec.Needs.cpuOnly()) && q.deviceAdmissionBlocked(target) {
 					pending = append(pending, "independent device maintenance or exclusion")
 				}
 			}
@@ -415,6 +427,12 @@ func (q *Queue) reservationAllows(j *Job, m *Machine) bool {
 			continue
 		}
 		bound := j != nil && j.ID == r.Job
+		if r.ExpiredAt != nil {
+			if bound {
+				return false
+			}
+			continue
+		}
 		matches := r.Target.matchesTarget(m)
 		if bound && (!matches || len(q.reservationPending(r)) > 0) || !bound && matches {
 			return false
@@ -431,7 +449,13 @@ func (q *Queue) reservationReasonOnTarget(j *Job, m *Machine) string {
 		if stored.Job != j.ID && !stored.Target.matchesTarget(m) {
 			continue
 		}
+		if stored.ExpiredAt != nil && stored.Job != j.ID {
+			continue
+		}
 		r := q.projectReservation(stored)
+		if r.ExpiredAt != nil {
+			return r.Text
+		}
 		if r.Job == j.ID && len(r.Pending) > 0 {
 			return r.Text + "; draining existing work or waiting for worker/cleanup evidence"
 		}
@@ -449,6 +473,11 @@ func (q *Queue) projectReservation(r Reservation) Reservation {
 	r.CleanupPending = q.reservationCleanupPending(r, j)
 	if r.ReleasedAt != nil {
 		r.State = "released"
+		return r
+	}
+	if r.ExpiredAt != nil {
+		r.State = "expired"
+		r.Text = "reservation expired before ready; bound job remains queued; release explicitly before reserving again"
 		return r
 	}
 	if !q.clock.Now().Before(r.ExpiresAt) {

@@ -273,6 +273,9 @@ func (q *Queue) persistUsage(timing *queueUpdateTiming) error {
 		}
 	}
 
+	if e = q.persistModelIntervals(tx); e != nil {
+		return e
+	}
 	next, e := q.persistState(tx)
 	if e != nil {
 		return e

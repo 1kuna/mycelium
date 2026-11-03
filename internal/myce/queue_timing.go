@@ -3,6 +3,7 @@ package myce
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"log"
 	"reflect"
 	"runtime"
@@ -33,9 +34,11 @@ func observeRead(observer func(string, time.Duration, time.Duration), id string,
 	observer(kind, locked.Sub(started), time.Since(locked))
 }
 
-func (s *queueHoldSampler) start() time.Time {
+func (s *queueHoldSampler) start() time.Time { return s.startClock(nil) }
+
+func (s *queueHoldSampler) startClock(clock Clock) time.Time {
 	if (s.count.Add(1)-1)%16 == 0 {
-		return time.Now()
+		return holdNow(clock)
 	}
 	return time.Time{}
 }
@@ -49,14 +52,19 @@ func queueHoldDuration(started time.Time) time.Duration {
 
 // Call only after unlocking. fn names a transaction's operation without logging
 // job, host, path or other request data. Resolve its name only for slow holds.
-func logQueueHold(duration time.Duration, operation string, fn func() error) {
+func logQueueHold(duration time.Duration, operation string, fn func() error, phases ...*queueHoldPhases) {
 	if duration < 250*time.Millisecond {
 		return
 	}
 	if fn != nil {
 		operation = runtime.FuncForPC(reflect.ValueOf(fn).Pointer()).Name()
 	}
-	log.Printf("event=slow_queue_mutex_hold operation=%s duration_ms=%.3f sample_every=16", operation, float64(duration)/float64(time.Millisecond))
+	detail := ""
+	if len(phases) != 0 {
+		p := phases[0]
+		detail = fmt.Sprintf(" records_snapshot_ms=%.3f fn_body_ms=%.3f persist_commit_ms=%.3f usage_accounting_ms=%.3f notify_ms=%.3f", holdMS(p.phases[holdRecords]), holdMS(p.phases[holdBody]), holdMS(p.phases[holdPersist]), holdMS(p.phases[holdUsage]), holdMS(p.phases[holdNotify]))
+	}
+	log.Printf("event=slow_queue_mutex_hold operation=%s duration_ms=%.3f sample_every=16%s", operation, holdMS(duration), detail)
 }
 
 // Timing is observational only: queue decisions still use q.clock.
@@ -119,4 +127,48 @@ func (t *queueUpdateTiming) observe(fn func(time.Duration, time.Duration)) {
 	if fn != nil {
 		fn(t.mutexWait, time.Since(t.lockedAt))
 	}
+}
+
+// Sampled timestamps only; queue decisions always use q.clock. The optional
+// telemetry clock permits deterministic slow-update tests without sleeping.
+type queueHoldPhases struct {
+	clock         Clock
+	started, last time.Time
+	active        int
+	phases        [5]time.Duration
+}
+
+func holdNow(clock Clock) time.Time {
+	if clock != nil {
+		return clock.Now()
+	}
+	return time.Now()
+}
+func holdMS(d time.Duration) float64 { return float64(d) / float64(time.Millisecond) }
+
+const (
+	holdRecords = iota
+	holdUsage
+	holdBody
+	holdPersist
+	holdNotify
+)
+
+func newQueueHoldPhases(started time.Time, clock Clock) queueHoldPhases {
+	return queueHoldPhases{started: started, last: started, clock: clock, active: holdRecords}
+}
+func (p *queueHoldPhases) next(active int) {
+	if p.started.IsZero() {
+		return
+	}
+	now := holdNow(p.clock)
+	p.phases[p.active] += now.Sub(p.last)
+	p.last, p.active = now, active
+}
+func (p *queueHoldPhases) finish() time.Duration {
+	if p.started.IsZero() {
+		return 0
+	}
+	p.next(p.active)
+	return p.last.Sub(p.started)
 }

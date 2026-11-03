@@ -148,6 +148,8 @@ func targetFitReason(dimension string, j *Job, m *Machine) string {
 			device = "unknown"
 		}
 		return fmt.Sprintf("device %q does not match required devices %v or CPU select-none target", device, devices)
+	case "excluded_machines":
+		return "excluded by job excluded_machines"
 	case "allow-list":
 		return "machine excluded by job or project allow-list"
 	case "environment":
@@ -251,7 +253,11 @@ func (q *Queue) evaluateTargets(j *Job, visit func(fit targetFit, candidate *Job
 	for _, m := range q.s.Machines {
 		if !q.jobAllowsMachine(j, m.ID) {
 			fit := targetFit{excluded: true, key: targetKey(m)}
-			fit.check(false, "allow-list")
+			if contains(j.Spec.ExcludedMachines, m.ID) {
+				fit.check(false, "excluded_machines")
+			} else {
+				fit.check(false, "allow-list")
+			}
 			if !visit(fit, j, m) {
 				return
 			}

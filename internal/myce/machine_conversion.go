@@ -128,7 +128,8 @@ func (q *Queue) machineConversionPlan(mapping []MachineRename, models ModelConfi
 		if j.State != "queued" && j.State != "paused" && j.State != "waiting" {
 			continue
 		}
-		names := append(slices.Clone(j.Spec.AllowedMachines), j.Machine)
+		names := append(slices.Clone(j.Spec.AllowedMachines), j.Spec.ExcludedMachines...)
+		names = append(names, j.Machine)
 		names = append(names, q.s.Policies[j.Spec.Project].AllowedMachines...)
 		for _, pin := range q.s.Pins {
 			if pin.Project == j.Spec.Project && pin.Model == j.Spec.Needs.Model {
@@ -331,7 +332,7 @@ func (q *Queue) rollbackMachines(dry, publicationPending bool) error {
 				if r.From == r.To {
 					continue
 				}
-				if slices.Contains(j.Spec.AllowedMachines, r.To) {
+				if slices.Contains(j.Spec.AllowedMachines, r.To) || slices.Contains(j.Spec.ExcludedMachines, r.To) {
 					if !slices.Contains(blocked.Jobs, j.ID) {
 						blocked.Jobs = append(blocked.Jobs, j.ID)
 					}
