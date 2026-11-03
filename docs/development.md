@@ -894,6 +894,21 @@ bounded projection work. Optional `-tags placement_cost` with
 `TestValueCheckinCost` measures check-in cost including SQLite; it is not a
 machine-dependent timing gate or native performance promise.
 
+`go test ./internal/myce -run '^$' -bench '^BenchmarkQueueCheckinFleet$' -benchtime=20x`
+measures a real SQLite check-in with 60 queued and 160 retained jobs, five
+workers, two validation reservations and 100 curve rows. Each queued job has
+768 synthetic input references to exercise manifest-dependent memory identity;
+these are invented inputs, not a captured fleet workload. `hold-ns/op` measures
+the update transaction; `all-holds-ns/op` also includes snapshot/report locks.
+All scheduling uses a frozen injected clock. Add `-cpuprofile=checkin.cpu` to
+profile it. The #661 laptop comparison reduced the update mean from 275.5 ms
+to 30.6 ms (maximum 309.0 to 32.6 ms); total lock time fell from 275.5 to
+31.5 ms. Repeated recipe/input identity hashing dominated before the change.
+Plain identities are now computed outside the lock and fenced by the committed
+queue revision and original job pointer; stale snapshots use ordinary planning.
+This is synthetic scale evidence, not attribution of live disk stalls (#527)
+or proof that worker freshness remains stable after deployment.
+
 ## Backed storage admission integration
 
 The unfinished native storage implementation and its original integration/native

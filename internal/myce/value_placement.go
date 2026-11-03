@@ -177,13 +177,15 @@ type placementScan struct {
 	rankingBuilds   int
 	livenessBuilds  int
 	candidateBuilds int
+
+	memoryIdentities map[*Job]string
 }
 
 func (q *Queue) placementScan(scans ...*placementScan) *placementScan {
 	if len(scans) > 0 {
 		return scans[0]
 	}
-	return &placementScan{machines: q.plannerMachines(), sets: map[string]*candidateSet{}}
+	return &placementScan{machines: q.plannerMachines(), sets: map[string]*candidateSet{}, memoryIdentities: q.checkinMemoryIdentities}
 }
 
 func (q *Queue) placementValues(scan *placementScan) map[string]*hostValue {
