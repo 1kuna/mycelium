@@ -14,27 +14,28 @@ import (
 
 // MachineDevice is one accelerator's capacity, never an additional host pool.
 type MachineDevice struct {
-	pciFact              *pciAccelerator    // Physical facts from the shared probe.
-	pciAddress           string             // Local probe fact; never part of the queue protocol.
-	Attempts             []Execution        `json:"attempts,omitempty"`
-	Models               []ModelSlot        `json:"models,omitempty"`
-	Releases             []HostRelease      `json:"releases,omitempty"`
-	ExtensionFingerprint string             `json:"extension_fingerprint,omitempty"`
-	ExtensionReports     []ExtensionReport  `json:"extension_reports,omitempty"`
-	ID                   string             `json:"id"`
-	Platform             string             `json:"platform"`
-	Identity             string             `json:"identity"`
-	Fingerprint          string             `json:"fingerprint"`
-	Selector             string             `json:"selector"`
-	MemoryMode           string             `json:"memory_mode"`
-	TotalMemoryGB        float64            `json:"total_memory_gb"`
-	ReserveMemoryGB      float64            `json:"reserve_memory_gb"`
-	BudgetGB             float64            `json:"budget_gb"`
-	FreeMemoryGB         float64            `json:"free_memory_gb"`
-	MemoryMeasured       bool               `json:"memory_measured,omitempty"`
-	UnifiedMemory        bool               `json:"unified_memory,omitempty"`
-	Reason               string             `json:"reason,omitempty"`
-	CapabilityProfile    *CapabilityProfile `json:"capability_profile,omitempty"`
+	pciFact               *pciAccelerator    // Physical facts from the shared probe.
+	pciAddress            string             // Local probe fact; never part of the queue protocol.
+	Attempts              []Execution        `json:"attempts,omitempty"`
+	Models                []ModelSlot        `json:"models,omitempty"`
+	Releases              []HostRelease      `json:"releases,omitempty"`
+	ExtensionFingerprint  string             `json:"extension_fingerprint,omitempty"`
+	ExtensionReports      []ExtensionReport  `json:"extension_reports,omitempty"`
+	ID                    string             `json:"id"`
+	Platform              string             `json:"platform"`
+	Identity              string             `json:"identity"`
+	Fingerprint           string             `json:"fingerprint"`
+	Selector              string             `json:"selector"`
+	MemoryMode            string             `json:"memory_mode"`
+	TotalMemoryGB         float64            `json:"total_memory_gb"`
+	ReserveMemoryGB       float64            `json:"reserve_memory_gb"`
+	BudgetGB              float64            `json:"budget_gb"`
+	FreeMemoryGB          float64            `json:"free_memory_gb"`
+	MemoryMeasured        bool               `json:"memory_measured,omitempty"`
+	UnifiedMemory         bool               `json:"unified_memory,omitempty"`
+	Reason                string             `json:"reason,omitempty"`
+	RepeatedTeardownFault bool               `json:"repeated_teardown_fault,omitempty"`
+	CapabilityProfile     *CapabilityProfile `json:"capability_profile,omitempty"`
 }
 
 func singleDeviceMask(device string) error {

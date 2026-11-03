@@ -19,22 +19,30 @@ const healthAlertCooldown = 15 * time.Minute
 // HealthAlert contains identities and fixed diagnostic codes, never worker text.
 // Receivers deduplicate DeliveryID, including after an ambiguous hook exit.
 type HealthAlert struct {
-	Project    string    `json:"project,omitempty"`
-	Reason     string    `json:"reason,omitempty"`
-	Recipients []string  `json:"recipients,omitempty"`
-	DeliveryID string    `json:"delivery_id"`
-	Kind       string    `json:"kind"`
-	Store      string    `json:"store,omitempty"`
-	Host       string    `json:"host,omitempty"`
-	JobID      string    `json:"job_id,omitempty"`
-	Attempt    int       `json:"attempt,omitempty"`
-	At         time.Time `json:"at"`
-	Delivered  bool      `json:"delivered"`
+	Project     string    `json:"project,omitempty"`
+	Reason      string    `json:"reason,omitempty"`
+	Recipients  []string  `json:"recipients,omitempty"`
+	DeliveryID  string    `json:"delivery_id"`
+	Kind        string    `json:"kind"`
+	Store       string    `json:"store,omitempty"`
+	Host        string    `json:"host,omitempty"`
+	Device      string    `json:"device,omitempty"`
+	Reservation string    `json:"reservation,omitempty"`
+	JobID       string    `json:"job_id,omitempty"`
+	Attempt     int       `json:"attempt,omitempty"`
+	At          time.Time `json:"at"`
+	Delivered   bool      `json:"delivered"`
 }
 type healthCondition struct {
-	Since     time.Time `json:"since"`
-	LastAlert time.Time `json:"last_alert,omitempty"`
-	Active    bool      `json:"active"`
+	Since       time.Time      `json:"since"`
+	LastAlert   time.Time      `json:"last_alert,omitempty"`
+	Active      bool           `json:"active"`
+	Samples     []healthSample `json:"samples,omitempty"`
+	WasBad      bool           `json:"was_bad,omitempty"`
+	SeenHealthy bool           `json:"seen_healthy,omitempty"`
+	// Only rejected, oversized auto-memory demand needs a retained probe.
+	// Accepted jobs already live in the queue. Drop the probe on recovery.
+	Envelope *Job `json:"envelope,omitempty"`
 }
 type healthAlerts struct {
 	DeliveryConfigured bool                       `json:"delivery_configured,omitempty"`
@@ -119,13 +127,15 @@ func (q *Queue) detectHealth() {
 		}
 		unhealthy := (q.s.HostMaintenance[host].SharedHost != nil && !q.sharedPressureFresh(m)) || len(m.UnavailableRoots) > 0 || m.HostMemoryPolicyMismatch || m.MemoryError != "" || m.HostMemoryError != "" || m.InventoryReason != "" || slices.ContainsFunc(m.Devices, func(d MachineDevice) bool { return d.Reason != "" })
 		q.observeHealth("host/"+m.ID, !intentional && (stale || unhealthy), 0, HealthAlert{Kind: "host_unhealthy_or_stale", Host: host})
-		q.observeHealth("storage/"+m.ID, !intentional && m.CheckpointUnavailable, delay, HealthAlert{Kind: "checkpoint_store_unavailable", Host: host})
+		checkpointRootMissing := slices.ContainsFunc(m.UnavailableRoots, func(r UnavailableRoot) bool { return r.Root == "checkpoint" })
+		q.observeHealth("storage/"+m.ID, !intentional && (m.CheckpointUnavailable || checkpointRootMissing), delay, HealthAlert{Kind: "checkpoint_store_unavailable", Host: host})
 		for _, v := range m.DiskVolumes {
 			v = q.currentDiskVolume(v, m.DiskReceivedAt)
 			bad := v.Error == "" && v.TotalBytes > 0 && v.FreeBytes < diskFreeFloor(v.TotalBytes)
 			q.observeHealth("disk/"+m.ID+"/"+v.ID, !intentional && bad, 0, HealthAlert{Kind: "disk_below_guard", Host: host})
 		}
 	}
+	q.detectIncidentHealth()
 }
 func (q *Queue) alertAttemptLoss(j *Job, outcome AttemptOutcome, quiet bool) {
 	if j.Attempt == 0 || cancelled(j) || plannedStop(j) || historyPlannedStop(j) || j.Spec.Priority != "production" || outcome.PoliteStop || outcome.OperatorStop || outcome.PriorityStop != nil {

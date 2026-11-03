@@ -1233,6 +1233,55 @@ exclude that job from that host for fifteen minutes, using the queue clock. Othe
 eligible hosts can admit it immediately. Status names the latency backoff and its
 expiry; ordinary pressure recovery alone does not erase the cooldown.
 
+## Incident health alerts
+
+`health_alerts` retains diagnostic events delivered by the existing optional
+queue `--health-notify` executable. Detectors run on queue mutations and ticks,
+using the queue clock; no polling service or automatic issue filing is added.
+Each condition has a stable subject key, emits once per episode, and rearms
+after recovery with the existing 15-minute cooldown. Delivery retries keep the
+same `delivery_id`. Clearing a condition retains its diagnostic event; it does
+not send a second notification or change admission, retries, or release custody.
+
+- `checkpoint_store_unavailable`: a worker reports its `checkpoint` NAS root
+  unavailable (or `checkpoint_unavailable`) continuously for five minutes by
+  default. Other missing root roles and shorter outages do not trigger this
+  storage alert. A restored checkpoint root clears it. Planned leave and host
+  maintenance suppress it. The existing queue-store detector remains independent.
+- `repeated_launch_refusals`: three distinct unstarted attempts on one physical
+  host report `launch_authorization` refusals or start-fence admission refusals
+  within ten minutes. Duplicate reports, successful starts, planned stops and
+  transport errors without recorded fence evidence do not count. It clears
+  once fewer than three refusals remain in that window.
+- `worker_stale_flapping`: three fresh-to-stale transitions on one worker within
+  an hour, using the same shortest loss timeout as maintenance freshness. A
+  continuous outage counts once. Cold restart grace, leave and maintenance do
+  not seed flaps. It clears as the transitions age out, or on planned maintenance.
+- `xpu_repeated_teardown_faults`: the worker's existing quarantine classifier
+  reports three distinct same-card teardown faults in an hour. Isolated teardown
+  faults and unrelated quarantines do not trigger this alert. The optional
+  device `repeated_teardown_fault` fact survives worker restart and clears with
+  the exact quarantine clear or new boot. Alert `device` identifies the card;
+  a sibling's recovery cannot clear it. Upgrade the queue before workers that
+  can publish this new optional field.
+- `reservation_never_ready`: a reservation remains unreleased past its maximum
+  lifetime and has never recorded readiness. Normal draining before expiry,
+  ready/in-use reservations and released records are excluded. Readiness or
+  explicit release clears it; the alert itself does not release anything. The
+  event includes the `reservation` identifier and bound `job_id`.
+- `learned_envelope_exceeds_allowances`: current auto-memory demand has a learned
+  envelope exceeding every otherwise eligible target's permanent allowance.
+  Qualification, recipes, platform and other non-memory requirements still
+  apply. Busy but sufficiently large peers, cold/exploratory estimates and
+  oversized declarations are excluded. Refused submissions retain a private
+  demand probe so new allowances or corrected/expired learning can clear the
+  incident without resubmitting; it is discarded on recovery. Accepted queued
+  demand clears when it fits or leaves the queue. Auto sizing inherited from
+  variants is included; explicit member caps are excluded from the learned
+  comparison. Healthy demand creates no condition history, and recovered
+  envelope conditions are discarded after their cooldown. Events carry only project/job
+  identities, never commands, mount paths or worker error text.
+
 ## Durable model interval API
 
 `GET /api/models/intervals` is the supported paginated history for resident model
