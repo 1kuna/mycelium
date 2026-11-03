@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -37,7 +38,7 @@ func TestFixtureWorkerCheckinAfterLowHeadroomSizing(t *testing.T) {
 	if err := resolveEnvironmentCacheSizing(&config, true, lowHeadroom); err != nil {
 		t.Fatal(err)
 	}
-	seen := false
+	var seen atomic.Bool
 	server := workerTestServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
 		if req.URL.Path != "/api/workers/checkin" {
 			http.NotFound(rw, req)
@@ -48,7 +49,7 @@ func TestFixtureWorkerCheckinAfterLowHeadroomSizing(t *testing.T) {
 			t.Error(err)
 			return
 		}
-		seen = true
+		seen.Store(true)
 		if err := json.NewEncoder(rw).Encode(attemptReply(checkin, Reply{Leave: true})); err != nil {
 			t.Error(err)
 		}
@@ -62,7 +63,7 @@ func TestFixtureWorkerCheckinAfterLowHeadroomSizing(t *testing.T) {
 	if err := w.Run(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if !seen {
+	if !seen.Load() {
 		t.Fatal("worker did not check in with explicit fixture limit")
 	}
 }
