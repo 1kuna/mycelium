@@ -280,6 +280,13 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		db.Close()
 		return nil, err
 	}
+	// A previous binary can rewrite away new state fields while retaining this
+	// additive table. Recover allocation before any startup transaction emits an
+	// event; the retained SQLite sequence is authoritative across re-upgrades.
+	if err = db.QueryRow("SELECT COALESCE(MAX(seq),0) FROM model_intervals").Scan(&q.s.ModelIntervalHighWater); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if err = q.loadPersistedState(); err != nil {
 		db.Close()
 		return nil, err

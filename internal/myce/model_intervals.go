@@ -69,8 +69,9 @@ func (q *Queue) recordModelInterval(s *ModelSlot, kind string) {
 			}
 		}
 	}
-	interval.Project, interval.Class, interval.Priority = s.Project, jobClass(Spec{Class: s.Class, Priority: s.Priority}), s.Priority
-	interval.Tier = q.priorityMatch(Spec{Project: s.Project, Class: s.Class, Priority: s.Priority})
+	spec := q.slotSpec(s)
+	interval.Project, interval.Class, interval.Priority = spec.Project, jobClass(spec), spec.Priority
+	interval.Tier = q.priorityMatch(spec)
 	switch kind {
 	case "load_started":
 		if interval.LoadStartedAt != nil {
@@ -112,8 +113,9 @@ func (q *Queue) observeModelIntervals() {
 			q.recordModelInterval(s, "stopped")
 		}
 		interval := s.Interval
-		match := q.priorityMatch(Spec{Project: s.Project, Class: s.Class, Priority: s.Priority})
-		if interval.Project != s.Project || interval.Class != jobClass(Spec{Class: s.Class, Priority: s.Priority}) || interval.Priority != s.Priority || interval.Tier != match {
+		spec := q.slotSpec(s)
+		match := q.priorityMatch(spec)
+		if interval.Project != spec.Project || interval.Class != jobClass(spec) || interval.Priority != spec.Priority || interval.Tier != match {
 			q.recordModelInterval(s, "class_changed")
 		}
 	}

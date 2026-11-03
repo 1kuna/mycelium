@@ -3412,7 +3412,8 @@ launch authorization, not a process-start acknowledgement. Stop records queue
 stop intent, not signal delivery. Exact matching `failed` cleanup or accepted
 `unloaded` receipts record release; stale receipts and missing workers cannot.
 A direct cleanup receipt without prior stop intent sets stop at receipt time.
-Class/tier changes produce another event at their transition time, so a model
+Class/tier changes use the scheduler's effective identity, including active
+production pins, and produce another event at their transition time, so a model
 promoted or demoted in place remains visible to overlap proofs.
 
 Begin with `after=0` and omit `high_water`. Follow `next` as `after`, retaining
@@ -3423,7 +3424,11 @@ with their queue transitions and survive slot removal and queue restarts; they
 are retained without automatic pruning. Reads fetch only a bounded indexed page
 outside the queue lock. Back up the entire queue database as usual.
 
-`coverage_since` is the first ledger-enabled queue transaction. Existing slots
+`coverage_since` starts the current uninterrupted ledger-enabled period. If an
+older binary rewrites state during rollback, re-upgrade recovers sequence
+allocation from retained SQLite events and starts a new coverage period; events
+from before that gap remain readable but do not establish continuous coverage
+through it. Existing slots
 are recorded as `observed` with unknown earlier times; there is no historical
 backfill. Missing assignment, load-start or release evidence cannot pass a
 complete interval proof. Join events by attempt/machine/session/device and use

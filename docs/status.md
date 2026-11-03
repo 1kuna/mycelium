@@ -1187,6 +1187,8 @@ attempts, including engines assigned and removed between status reads. See the
 [interval contract](operations.md#durable-model-engine-interval-history-663).
 Events expose `assigned_at`, first-authorized `load_started_at`, stop-intent
 `stopped_at`, exact-cleanup `released_at`, card identity and class/resolved tier
-with policy revision. `class_changed` events timestamp in-place tier changes.
-`coverage_since` bounds available history; unknown legacy times remain absent.
+with policy revision. `class_changed` events timestamp in-place tier changes,
+including effective production pins. `coverage_since` bounds the current
+uninterrupted coverage period; a rollback through an older binary can create
+a gap even though older events remain readable. Unknown legacy times remain absent.
 A status snapshot's `loaded_models` alone cannot rule out transient arrivals.
