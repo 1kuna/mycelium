@@ -415,8 +415,14 @@ func TestPriorityPolicyChangeReclaimsAssignedAttemptBeforeStarted(t *testing.T) 
 	if got := q.s.Jobs[waiting.ID]; got.State != "queued" {
 		t.Fatalf("higher-tier job should still wait: %+v", got)
 	}
-	// Future placement uses the new policy.
-	next := check(t, q, machine("two", "fake"), nil).Job
+	// The demand keeps the host it selected for preemption (#662), even if
+	// another worker joins before exact release. Future placement on that
+	// selected host must still use the new policy.
+	if next := check(t, q, machine("two", "fake"), nil).Job; next != nil && next.ID == waiting.ID {
+		t.Fatal("demand escaped its selected preemption host")
+	}
+	finishInterrupted(t, q, assigned)
+	next := check(t, q, machine("one", "fake"), nil).Job
 	if next == nil || next.ID != waiting.ID || next.PriorityPolicy.Revision != 2 {
 		t.Fatalf("future placement did not use new policy: %+v", next)
 	}
