@@ -993,14 +993,17 @@ no device memory (its device figure is only a default), and a newcomer never
 joins a higher tier's attempt. For placement, equal tiers never preempt; a higher tier stops the
 fewest co-tenants whose release frees enough on its selected host/cards and
 starts there only after that exact release; a multi-card demand stops every
-co-tenant on its selected cards. On XPU cards,
-a higher tier instead stops every lower-tier co-tenant and waits for each exact
-release even when memory would fit beside them. Five measured lower-tier
-teardowns in one day reset the card's engines, so this prevents a later
-lower-tier teardown beneath a higher-tier payload; the cost is lost mixed-tier
-co-residency on XPU only. Equal-tier XPU packing and other platforms are
-unchanged. Waiting reasons name `device N shared with K attempts`. CPU attempts
-can run alongside GPU work and one another within host resources and caps;
+co-tenant on its selected cards. On XPU and CUDA cards (including unified-memory
+CUDA), a higher tier instead stops every lower-tier co-tenant and waits for each
+exact release even when memory would fit beside them. XPU teardown can reset the
+card's engines ([#652](https://github.com/1kuna/mycelium/issues/652)); CUDA
+co-tenants can grow past their reservations and starve a higher-tier model load
+without reliable fresh per-process growth evidence (#651/#657). The production
+consumer requested CUDA isolation on 2026-11-03
+([#687](https://github.com/1kuna/mycelium/issues/687)). The cost is lost mixed-tier
+co-residency on XPU and CUDA. Equal-tier packing, including experiments packing
+among themselves, and other platforms are unchanged. Waiting reasons name
+`device N shared with K attempts`. CPU attempts can run alongside GPU work and one another within host resources and caps;
 model engines retain their usual shared-memory admission. `needs.gpu.devices` narrows candidate IDs, not the
 number allocated. CPU work cannot have a GPU selector. Malformed/duplicate IDs,
 empty explicit sets and invalid counts use `gpu_selector_invalid`. An explicit

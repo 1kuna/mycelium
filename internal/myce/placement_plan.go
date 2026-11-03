@@ -68,10 +68,10 @@ func (q *Queue) applyPlacement(p *placementPlan, demand *Job) {
 }
 
 // Existing/loading engines need the same batch-tier release projection as a
-// cold load before a higher-tier call or pin can promote them on XPU.
-func (q *Queue) addXPUTierStops(p *placementPlan, demand *Job) bool {
+// cold load before a higher-tier call or pin can promote them on tier-isolated cards.
+func (q *Queue) addDeviceTierStops(p *placementPlan, demand *Job) bool {
 	m := p.machine
-	if m.GPU != "xpu" || demand.Spec.Needs.cpuOnly() {
+	if !isolatesDeviceTiers(m) || demand.Spec.Needs.cpuOnly() {
 		return true
 	}
 	for _, r := range q.s.HostReleases {
@@ -173,7 +173,7 @@ func (q *Queue) roomPlan(j *Job, m *Machine, batch bool) *placementPlan {
 			best = p
 		}
 	}
-	if best != nil && !q.addXPUTierStops(best, j) {
+	if best != nil && !q.addDeviceTierStops(best, j) {
 		return nil
 	}
 	return best
@@ -221,9 +221,9 @@ func (q *Queue) roomPlanWithBatch(j *Job, m *Machine, batch, releaseBatch bool) 
 	// Only a single-card demand shares; a group keeps every card it takes.
 	shared := false
 	if batch {
-		// XPU admission forbids mixed tiers; planning still preserves equal-tier
+		// Tier-isolated cards forbid mixed tiers; planning still preserves equal-tier
 		// co-tenants while requiring every lower tier's exact release below.
-		_, shared = q.deviceCoTenants(m, j, m.GPU != "xpu")
+		_, shared = q.deviceCoTenants(m, j, !isolatesDeviceTiers(m))
 	}
 	for _, card := range cards {
 		if !q.cardRoom(j, card, share, batch, releaseBatch, shared, p) {
@@ -363,7 +363,7 @@ func (q *Queue) cardRoom(j *Job, m *Machine, need float64, batch, releaseBatch, 
 		if !batchOnTarget(r, m) || !batchReservesCapacity(r) {
 			continue
 		}
-		isolateTier := m.GPU == "xpu" && !j.Spec.Needs.cpuOnly() && !r.Spec.Needs.cpuOnly() && q.comparePriority(r.Spec, j.Spec) != 0
+		isolateTier := isolatesDeviceTiers(m) && !j.Spec.Needs.cpuOnly() && !r.Spec.Needs.cpuOnly() && q.comparePriority(r.Spec, j.Spec) != 0
 		if !q.batchPreemptible(r, j.Spec) {
 			if batch && !shared || isolateTier {
 				return false
@@ -379,7 +379,7 @@ func (q *Queue) cardRoom(j *Job, m *Machine, need float64, batch, releaseBatch, 
 	}
 	var slots []*ModelSlot
 	for _, s := range q.s.ModelSlots {
-		if slotOnTarget(s, m) && slotReservesMemory(s) && m.GPU == "xpu" && !j.Spec.Needs.cpuOnly() && (batch || s.Model != j.Spec.Needs.Model) && q.comparePriority(q.slotSpec(s), j.Spec) != 0 {
+		if slotOnTarget(s, m) && slotReservesMemory(s) && isolatesDeviceTiers(m) && !j.Spec.Needs.cpuOnly() && (batch || s.Model != j.Spec.Needs.Model) && q.comparePriority(q.slotSpec(s), j.Spec) != 0 {
 			if !q.slotReclaimableFor(s, j.Spec) {
 				return false
 			}

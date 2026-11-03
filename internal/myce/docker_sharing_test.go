@@ -91,61 +91,70 @@ func TestDockerSharedDeviceRunsTwoJobsThatFit(t *testing.T) {
 	requireState(t, q, b.ID, "running")
 }
 
-func TestDockerSharedDeviceProductionStopsOneContainer(t *testing.T) {
+func TestDockerSharedDeviceProductionStopsAllContainers(t *testing.T) {
 	q, _ := fixture(t)
 	clock := &dockerTestClock{now: q.clock.Now()}
 	q.clock = clock
 	m := dockerSharedMachine()
 	a, b := dockerSharedPair(t, q, m)
-	pa, _, _ := startSharedDocker(t, m, clock, a)
-	_, _, neighbor := startSharedDocker(t, m, clock, b)
+	pa, _, rootA := startSharedDocker(t, m, clock, a)
+	pb, _, rootB := startSharedDocker(t, m, clock, b)
 	demand := submit(t, q, dockerSharedSpec("production", 25))
 	reply := machineCheck(t, q, m, a, b)
 	if assignedJob(reply) != nil {
 		t.Fatal("started before release")
 	}
-	requireState(t, q, a.ID, "stopping")
-	requireState(t, q, b.ID, "running")
-	for _, directive := range reply.Attempts {
-		if directive.Stop {
-			if directive.ID != a.ID {
-				t.Fatal("stopped wrong container", directive)
-			}
-			pa.stop(clock.Now(), StopGrace, false)
+	victims := []struct {
+		job     *Job
+		process *process
+		root    string
+	}{{a, pa, rootA}, {b, pb, rootB}}
+	for _, victim := range victims {
+		requireState(t, q, victim.job.ID, "stopping")
+		if !slices.ContainsFunc(reply.Attempts, func(d AttemptDirective) bool {
+			return d.ID == victim.job.ID && d.Attempt == victim.job.Attempt && d.Stop && d.PriorityStop != nil
+		}) {
+			t.Fatal("missing exact container stop directive", victim.job.ID, reply.Attempts)
 		}
+		victim.process.stop(clock.Now(), StopGrace, false)
 	}
 	if assignedJob(machineCheck(t, q, m, a, b)) != nil {
 		t.Fatal("started during cleanup")
 	}
 	clock.advance(defaultGPUStopGrace + StopGrace)
-	var r Result
-	select {
-	case f := <-pa.done:
-		if f.err != nil {
-			t.Fatal(f.err)
+	for i, victim := range victims {
+		var r Result
+		select {
+		case f := <-victim.process.done:
+			if f.err != nil {
+				t.Fatal(f.err)
+			}
+			r = f.result
+		case <-time.After(testWaitTimeout):
+			t.Fatal("victim cleanup did not finish", victim.job.ID)
 		}
-		r = f.result
-	case <-time.After(testWaitTimeout):
-		t.Fatal("victim cleanup did not finish")
+		if !r.Interrupted {
+			t.Fatal("preemption lost interruption", r)
+		}
+		calls, err := os.ReadFile(filepath.Join(victim.root, "calls"))
+		if err != nil || !strings.Contains(string(calls), "kill --signal=") && !strings.Contains(string(calls), "stop --time") {
+			t.Fatal("container was not signalled", victim.job.ID, string(calls), err)
+		}
+		if _, err := os.Stat(filepath.Join(victim.root, "running")); !os.IsNotExist(err) {
+			t.Fatal("container still running after cleanup", victim.job.ID, err)
+		}
+		if err := q.Complete(r); err != nil {
+			t.Fatal(err)
+		}
+		if i == 0 && assignedJob(machineCheck(t, q, m, b)) != nil {
+			t.Fatal("production started before every exact container release")
+		}
 	}
-	if !r.Interrupted {
-		t.Fatal("preemption lost interruption", r)
-	}
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	got := assignedJob(machineCheck(t, q, m, b))
+	got := assignedJob(machineCheck(t, q, m))
 	if got == nil || got.ID != demand.ID {
-		t.Fatal("production did not start after exact release", job(t, q, demand.ID).Reason)
+		t.Fatal("production did not start after every exact release", job(t, q, demand.ID).Reason)
 	}
 	startSharedDocker(t, m, clock, got)
-	calls, _ := os.ReadFile(filepath.Join(neighbor, "calls"))
-	if strings.Contains(string(calls), "kill --signal=") || strings.Contains(string(calls), "stop --time") {
-		t.Fatal("neighbor signalled", string(calls))
-	}
-	if _, err := os.Stat(filepath.Join(neighbor, "running")); err != nil {
-		t.Fatal("neighbor stopped", err)
-	}
 }
 
 func TestDockerSharedDeviceUnknownMemoryKeepsCard(t *testing.T) {
