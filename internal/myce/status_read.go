@@ -189,12 +189,6 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 	// needed for its eligibility summary. Queued/startup work and calls still
 	// need the active diagnostic context, but never the fleet projection.
 	minimal := selected != nil && q.calls[id] == nil && (terminal(selected.State) || selected.State != "queued" && selected.StartedAt != nil)
-	if !minimal {
-		// The detached diagnostic planner omits completed jobs and their
-		// ledgers. Capture immutable memory evidence before that minimization,
-		// including recovery from interrupted invalidations.
-		v.memoryObservationIndex = q.memoryObservationCatalog()
-	}
 	if err == nil {
 		if minimal {
 			copy := statusJobInputs(selected)

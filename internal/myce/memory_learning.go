@@ -3,6 +3,9 @@ package myce
 // Memory pressure during a refused launch or infrastructure stop says nothing
 // about the payload's need. A positively classified OOM still wins a stop race.
 func memoryConstraintResult(started bool, r Result) bool {
+	if r.OutOfMemory {
+		return true
+	}
 	if r.ReleaseOnly || !started {
 		return false
 	}
@@ -15,18 +18,13 @@ func memoryConstraintResult(started bool, r Result) bool {
 			return false
 		}
 	}
-	return r.OutOfMemory || !r.Interrupted && !r.Forced
+	return !r.Interrupted || r.ExecutionCause != nil && r.ExecutionCause.ExitCode != nil
 }
 
-func memoryConstraintFacts(j *Job, facts AttemptMemoryFacts) bool {
-	for _, outcome := range j.AttemptHistory {
-		if outcome.Attempt == facts.Attempt && outcome.Machine == facts.Machine && outcome.Session == facts.Session {
-			return memoryConstraintResult(facts.LearningReason != "not_started", Result{Interrupted: outcome.Interrupted, OutOfMemory: outcome.OutOfMemory, ExecutionCause: outcome.ExecutionCause})
-		}
-	}
-	// Older diagnostic histories may lack the outcome. Only an explicitly
-	// completed constrained/oom sample can establish a lower bound then.
-	return facts.LearningReason == "constrained" || facts.LearningReason == "oom" || j.State == "succeeded" && j.StartedAt != nil && facts.Attempt == j.Attempt
+func memoryConstraintFacts(facts AttemptMemoryFacts) bool {
+	// Classify once at completion, before retry clears attempt state. Raw event
+	// counters remain diagnostics, even when they imply pressure by themselves.
+	return facts.LearningReason != "infrastructure_interrupted" && facts.LearningReason != "release_only"
 }
 
 // eligibleMemorySample is the input to every successful-attempt memory writer.
@@ -53,6 +51,8 @@ func (q *Queue) memoryLearningSample(j *Job, r Result) (*eligibleMemorySample, s
 		return nil, "release_only"
 	case r.OutOfMemory:
 		return nil, "oom"
+	case !memoryConstraintResult(j.StartedAt != nil, r):
+		return nil, "infrastructure_interrupted"
 	case !r.Success:
 		return nil, "attempt_failed"
 	case j.StartedAt == nil:
