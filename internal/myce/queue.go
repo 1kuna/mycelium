@@ -186,6 +186,8 @@ type Queue struct {
 	usageWrites      []usageSample
 	usageMaintenance bool
 	s                state
+
+	checkinMemoryIdentities map[*Job]string // Fenced, transaction-local planner input.
 }
 
 func ID() string {
@@ -1127,10 +1129,13 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 			})
 		}
 	}
+	identities := q.snapshotCheckinMemoryIdentities(ctx)
 	err = q.updateRequest(ctx, func() error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
+		q.checkinMemoryIdentities = identities.current(q)
+		defer func() { q.checkinMemoryIdentities = nil }()
 		m := cloneMachine(&c.Machine)
 		m.ExternalMemory = nil // Summary is queue-owned, never worker-supplied.
 		// Worker clocks are unrelated to queue time. Translate local proof age
@@ -2294,9 +2299,15 @@ func contains(v []string, s string) bool {
 func cloneJob(j *Job) Job {
 	value := *j
 	value.LedgerEntries = nil // Immutable entries can be shared by undo/assignment snapshots.
+	// FileRef is a value of strings and an integer. Copy the manifest directly
+	// rather than encoding and decoding every input in each transaction undo.
+	value.Spec.Files = nil
 	data, _ := json.Marshal(&value)
 	var out Job
 	_ = json.Unmarshal(data, &out)
+	if len(j.Spec.Files) > 0 {
+		out.Spec.Files = maps.Clone(j.Spec.Files)
+	}
 	out.LedgerEntries = j.LedgerEntries
 	return out
 }
