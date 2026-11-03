@@ -38,7 +38,7 @@ func TestOnboardingSelectsOnlyClusterNAS(t *testing.T) {
 				}
 				return []byte(inventory), nil
 			}}
-			args := []string{"install", "worker", "--gpu", "cpu", "--joining-file", path, "--dry-run"}
+			args := []string{"install", "worker", "--gpu", "cpu", "--joining-file", path, "--dry-run", "--environment-cache-bytes", "1048576"}
 			if mode == "override" {
 				args = append(args, "--nas", second)
 			}
