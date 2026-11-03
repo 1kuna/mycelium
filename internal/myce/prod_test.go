@@ -376,23 +376,41 @@ func TestProductionPreemptionAcknowledgementDoesNotStopSecondCard(t *testing.T) 
 }
 
 func TestProductionPreemptionTwoJobsStopTwoCards(t *testing.T) {
-	q, _ := fixture(t)
-	a, b := machine("a", "fake"), machine("b", "fake")
-	submit(t, q, spec("experiment"))
-	first := check(t, q, a, nil).Job
-	submit(t, q, spec("experiment"))
-	second := check(t, q, b, nil).Job
-	p1 := submit(t, q, spec("production"))
-	p2 := submit(t, q, spec("production"))
-	if !check(t, q, a, first).Stop || !check(t, q, b, second).Stop {
-		t.Fatal("two production jobs need two experiment releases")
-	}
-	finishInterrupted(t, q, first)
-	finishInterrupted(t, q, second)
-	one, two := check(t, q, a, nil).Job, check(t, q, b, nil).Job
-	if one == nil || two == nil || one.ID == two.ID ||
-		(one.ID != p1.ID && one.ID != p2.ID) || (two.ID != p1.ID && two.ID != p2.ID) {
-		t.Fatal("both production jobs must start on free reports", one, two)
+	for _, newcomerFirst := range []bool{false, true} {
+		t.Run(map[bool]string{false: "selected demand first", true: "new demand first"}[newcomerFirst], func(t *testing.T) {
+			q, c := fixture(t)
+			a, b := machine("a", "fake"), machine("b", "fake")
+			submit(t, q, spec("experiment"))
+			first := check(t, q, a, nil).Job
+			submit(t, q, spec("experiment"))
+			second := check(t, q, b, nil).Job
+			p1 := submit(t, q, spec("production"))
+			c.Advance(time.Second)
+			s := spec("production")
+			if newcomerFirst {
+				// A same-tier newcomer would normally win through its deadline. It
+				// must not borrow the release already committed to the first demand.
+				due := c.Now().Add(time.Hour)
+				s.Deadline = &due
+			}
+			p2 := submit(t, q, s)
+			if !check(t, q, a, first).Stop || !check(t, q, b, second).Stop {
+				t.Fatal("two production jobs need two experiment releases")
+			}
+			if a, b := job(t, q, p1.ID).PreemptionPlacement, job(t, q, p2.ID).PreemptionPlacement; a == nil || b == nil || a.Machine == b.Machine {
+				t.Fatal("production demands must retain separate targets", a, b)
+			}
+			finishInterrupted(t, q, first)
+			finishInterrupted(t, q, second)
+			one, two := check(t, q, a, nil).Job, check(t, q, b, nil).Job
+			if one == nil || two == nil || one.ID == two.ID ||
+				(one.ID != p1.ID && one.ID != p2.ID) || (two.ID != p1.ID && two.ID != p2.ID) {
+				t.Fatal("both production jobs must start on free reports", one, two)
+			}
+			if one.ID != p1.ID || two.ID != p2.ID {
+				t.Fatal("production demands did not use their selected targets", one.ID, two.ID)
+			}
+		})
 	}
 }
 
@@ -409,7 +427,7 @@ func TestProductionPreemptionReleaseGrace(t *testing.T) {
 			first := check(t, q, a, nil).Job
 			submit(t, q, spec("experiment"))
 			second := check(t, q, b, nil).Job
-			submit(t, q, spec("production"))
+			prod := submit(t, q, spec("production"))
 			if !check(t, q, a, first).Stop {
 				t.Fatal("first card must stop")
 			}
@@ -430,9 +448,37 @@ func TestProductionPreemptionReleaseGrace(t *testing.T) {
 			if err := q.Tick(); err != nil {
 				t.Fatal(err)
 			}
-			if !check(t, q, b, second).Stop {
-				t.Fatal("second card must stop when first release grace expires")
+			if q.roomPlan(job(t, q, prod.ID), q.s.Machines[a.ID], true) != nil {
+				t.Fatal("expired release credit still supplies a placement plan")
 			}
+			// #662 retains the selected host even when planning credit expires.
+			// Grace authorizes killing the selected victim, never another stop
+			// on a host this demand will not use, nor admission without release.
+			if check(t, q, b, second).Stop {
+				t.Fatal("release grace redirected demand to an unrelated card")
+			}
+			if !acknowledged {
+				reply := check(t, q, a, first)
+				if !reply.Kill || reply.Job != nil {
+					t.Fatal("expired grace must kill without admitting replacement", reply)
+				}
+				requireState(t, q, prod.ID, "queued")
+				finishInterrupted(t, q, first)
+			}
+			a.FreeMemoryGB = 0
+			if next := check(t, q, a, nil).Job; next != nil {
+				t.Fatal("exact release without free memory admitted work", next)
+			}
+			requireState(t, q, prod.ID, "queued")
+			a.FreeMemoryGB = 8
+			next := check(t, q, a, nil).Job
+			if next == nil || next.ID != prod.ID || next.Machine != first.Machine {
+				t.Fatal("production did not start on its selected released host", next)
+			}
+			if err := q.Started(result(next, false)); err != nil {
+				t.Fatal(err)
+			}
+			requireState(t, q, second.ID, "running")
 		})
 	}
 }
@@ -444,14 +490,29 @@ func TestProductionPreemptionFullReportSupersedesReleaseCredit(t *testing.T) {
 	first := check(t, q, a, nil).Job
 	submit(t, q, spec("experiment"))
 	second := check(t, q, b, nil).Job
-	submit(t, q, spec("production"))
+	prod := submit(t, q, spec("production"))
 	c.Advance(time.Second)
 	finishInterrupted(t, q, first)
 	a.FreeMemoryGB = 0 // The command exited, but the memory remains unavailable.
 	if check(t, q, a, nil).Job != nil {
 		t.Fatal("release credit cannot admit work")
 	}
-	if !check(t, q, b, second).Stop {
-		t.Fatal("full memory report must allow another victim")
+	if q.roomPlan(job(t, q, prod.ID), q.s.Machines[a.ID], true) != nil {
+		t.Fatal("full memory report retained speculative release credit")
 	}
+	// #662 forbids redirecting the demand after it caused this release.
+	// A full report supersedes credit, but cannot authorize an unrelated stop.
+	if check(t, q, b, second).Stop {
+		t.Fatal("unavailable-memory report redirected demand to another victim")
+	}
+	requireState(t, q, prod.ID, "queued")
+	a.FreeMemoryGB = 8
+	next := check(t, q, a, nil).Job
+	if next == nil || next.ID != prod.ID || next.Machine != first.Machine {
+		t.Fatal("production did not use its selected host after memory recovered", next)
+	}
+	if err := q.Started(result(next, false)); err != nil {
+		t.Fatal(err)
+	}
+	requireState(t, q, second.ID, "running")
 }
