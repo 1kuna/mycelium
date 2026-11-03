@@ -49,7 +49,9 @@ func (q *Queue) claimFileInput(ctx context.Context, s Spec, ref FileRef) (FileIn
 		return out, err
 	}
 	if s.Class == "" {
-		q.mu.RLock()
+		if err := lockUploadContext(ctx, q.mu.RLock, q.mu.RUnlock); err != nil {
+			return out, err
+		}
 		s.Class = q.s.Policies[s.Project].DefaultCallPriority
 		q.mu.RUnlock()
 	}
@@ -57,7 +59,9 @@ func (q *Queue) claimFileInput(ctx context.Context, s Spec, ref FileRef) (FileIn
 		return out, err
 	}
 	// Failed creation can leave only a claim. Inventory remains outside q.mu.
-	q.mu.RLock()
+	if err := lockUploadContext(ctx, q.mu.RLock, q.mu.RUnlock); err != nil {
+		return out, err
+	}
 	store := q.files
 	stale := map[string]FileInputClaim{}
 	for id, claim := range q.s.FileInputClaims {
@@ -66,26 +70,26 @@ func (q *Queue) claimFileInput(ctx context.Context, s Spec, ref FileRef) (FileIn
 		}
 	}
 	q.mu.RUnlock()
-	missing := map[string]FileInputClaim{}
+	var view *fileCapacitySnapshot
 	if len(stale) > 0 && store != nil {
 		store.lifecycle.RLock()
 		defer store.lifecycle.RUnlock()
-		store.mu.Lock()
-		defer store.mu.Unlock()
-		payloads, err := store.inventory(ctx)
-		if err != nil {
-			return out, err
-		}
-		for id, claim := range stale {
-			if _, exists := payloads[claim.File.SHA256]; !exists || !claim.SettledAt.IsZero() {
-				missing[id] = claim
-			}
-		}
+		view = store.snapshotCapacity(ctx)
+		defer view.release()
 	}
-	err := q.updateRequest(ctx, func() error {
-		for id, claim := range missing {
-			if q.s.FileInputClaims[id] == claim {
-				delete(q.s.FileInputClaims, id)
+	err := q.updateUploadRequest(ctx, func() error {
+		if view != nil {
+			store.mu.Lock()
+			status, payloads := view.current()
+			store.mu.Unlock()
+			if status.Error != "" {
+				return errors.New(status.Error)
+			}
+			for id, claim := range stale {
+				_, exists := payloads[claim.File.SHA256]
+				if (!exists || !claim.SettledAt.IsZero()) && q.s.FileInputClaims[id] == claim {
+					delete(q.s.FileInputClaims, id)
+				}
 			}
 		}
 		for _, claim := range q.s.FileInputClaims {
@@ -123,7 +127,9 @@ func (q *Queue) forgetFileInputClaims(hash string, before time.Time) {
 // controls quota attribution and resume. Call before opening a transfer.
 func (q *Queue) inputClaimContext(ctx context.Context, ref FileRef, allocate bool) (context.Context, error) {
 	id, _ := ctx.Value(fileInputClaimKey{}).(string)
-	q.mu.RLock()
+	if err := lockUploadContext(ctx, q.mu.RLock, q.mu.RUnlock); err != nil {
+		return ctx, err
+	}
 	claim, found := q.s.FileInputClaims[id]
 	required := q.inputClaimsRequired()
 	if _, ok := ctx.Value(fileStoreAttemptKey{}).(fileStoreAttempt); ok {
@@ -166,7 +172,7 @@ func (q *Queue) inputClaimContext(ctx context.Context, ref FileRef, allocate boo
 		return ctx, inputClaimError()
 	}
 	if allocate && !claim.Allocated {
-		if err := q.updateRequest(ctx, func() error {
+		if err := q.updateUploadRequest(ctx, func() error {
 			current, ok := q.s.FileInputClaims[id]
 			if ok && current.valid(q.clock.Now()) && (current.Allocated || !current.SettledAt.IsZero()) {
 				return nil
