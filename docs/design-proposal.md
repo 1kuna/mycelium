@@ -72,6 +72,8 @@ unrelated capacity becoming free does not settle those obligations. A newly idle
 or sibling card does not redirect demand after it has caused a stop. Loss of the
 selected worker/session clears the commitment durably and permits replanning
 without releasing cleanup custody.
+A demand with a selected release precedes uncommitted same-tier demand, so each
+waiting batch plans its own target instead of borrowing another demand's release.
 This includes non-resumable commands, native
 sidecar groups, model calls/loads, pinned engines and environment builds. Idle
 unpinned same-tier model cache may be evicted; active same-tier work is never

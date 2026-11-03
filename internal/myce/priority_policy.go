@@ -194,6 +194,12 @@ func (q *Queue) beforeWithFair(a, b *Job, m *Machine, score func(*Job, *Machine)
 	if n := q.comparePriority(a.Spec, b.Spec); n != 0 {
 		return n < 0
 	}
+	// Settle an already selected release before another same-tier demand can
+	// borrow it. Its target is retained, so borrowing strands both demands on
+	// one target instead of planning a separate release for the newcomer.
+	if (a.PreemptionPlacement != nil) != (b.PreemptionPlacement != nil) {
+		return a.PreemptionPlacement != nil
+	}
 	// CPU commands backfill accelerator workers after same-tier GPU demand.
 	if m.GPU != "cpu" && a.Spec.Needs.cpuOnly() != b.Spec.Needs.cpuOnly() {
 		return !a.Spec.Needs.cpuOnly()
