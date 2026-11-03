@@ -71,7 +71,7 @@ func (q *Queue) recordStorageWritePressure(ctx context.Context, status FileStore
 	if demand == nil || err != nil || !production || !identified || !bad && !active {
 		return
 	}
-	_ = q.updateRequest(ctx, func() error {
+	_ = q.updateUploadRequest(ctx, func() error {
 		demand := q.storageWriteDemand(ctx)
 		production, identified, err := q.fileStoreWriteClass(ctx, files, growth)
 		if demand == nil || err != nil || !production || !identified {

@@ -436,3 +436,62 @@ func TestUploadCreationDuringClaimSweep(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestUploadCreationCancelledPressureClear(t *testing.T) {
+	q, s := creationStore(t, 9)
+	q.deliveryRoot = q.root
+	spec := asyncDeliverySpec()
+	spec.Class = "production"
+	spec.Priority = "production"
+	spec.Disk.OutputBytes = 1
+	j := submit(t, q, spec)
+	assigned := check(t, q, machine("writer", "fake"), nil).Job
+	if assigned == nil || assigned.ID != j.ID {
+		t.Fatal("missing production assignment")
+	}
+	// The real result-reservation refusal creates the job pressure condition.
+	output := creationRef("0123456789")
+	result := result(assigned, true)
+	result.OutputRefs = FileManifest{"out.txt": output}
+	if err := q.reserveDeliveryResult(context.Background(), result); err == nil {
+		t.Fatal("expected capacity refusal")
+	}
+	if !q.s.Health.Conditions["storage-write/job/"+j.ID].Active {
+		t.Fatal("missing real pressure condition")
+	}
+	entered := make(chan struct{})
+	q.checkpointProbe = func() bool { q.mu.Lock(); close(entered); return true }
+	ctx, cancel := context.WithCancel(withFileStoreAttempt(context.Background(), *assigned))
+	defer cancel()
+	done := make(chan struct{})
+	ref := creationRef("12345678")
+	go func() {
+		defer close(done)
+		r := creationRequest(ctx, ref)
+		fileStoreSubmissionHeaders(ctx, r)
+		s.serveUpload(httptest.NewRecorder(), r)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		t.Fatal("pressure transaction not reached")
+	}
+	cancel()
+	select {
+	case <-done:
+		q.mu.Unlock()
+	case <-time.After(100 * time.Millisecond):
+		s.mu.Lock()
+		held := s.creations[ref.SHA256].length
+		s.mu.Unlock()
+		q.mu.Unlock()
+		<-done
+		t.Fatalf("cancelled POST remained blocked on pressure-clear updateRequest with %d bytes reserved", held)
+	}
+	s.mu.Lock()
+	_, held := s.creations[ref.SHA256]
+	s.mu.Unlock()
+	if held {
+		t.Fatal("cancelled pressure-clear POST retained its reservation")
+	}
+}
