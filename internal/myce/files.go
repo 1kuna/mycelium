@@ -325,16 +325,26 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 	defer s.lifecycle.RUnlock()
 	id := strings.TrimPrefix(r.URL.Path, "/api/files/uploads/")
 	if id != "" {
-		claimCtx, err := s.inputClaim(r.Context(), FileRef{SHA256: id, SizeBytes: -1}, false)
+		if err := (FileRef{SHA256: id}).validate(); err != nil {
+			http.Error(w, "invalid upload", 400)
+			return
+		}
+		upload, err := filestore.New(filepath.Join(s.root, "uploads")).GetUpload(r.Context(), id)
+		if err != nil {
+			s.handler.ServeHTTP(w, r)
+			return
+		}
+		info, err := upload.GetInfo(r.Context())
+		if err != nil {
+			http.Error(w, "upload metadata unavailable", 503)
+			return
+		}
+		claimCtx, err := s.inputClaim(r.Context(), FileRef{SHA256: id, SizeBytes: info.Size}, true)
 		if err != nil {
 			respond(w, nil, err)
 			return
 		}
 		r = r.WithContext(claimCtx)
-		if err := (FileRef{SHA256: id}).validate(); err != nil {
-			http.Error(w, "invalid upload", 400)
-			return
-		}
 		response := &uploadResponse{ResponseWriter: w}
 		s.handler.ServeHTTP(response, r)
 		if response.status >= 400 {
@@ -401,7 +411,21 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if st, e := os.Stat(filepath.Join(s.root, "uploads", hash+".info")); e == nil && st.Mode().IsRegular() {
-		// A repeated create (including a lost response) addresses the same tus upload.
+		// A repeated create must match the immutable stored upload length.
+		upload, e := filestore.New(filepath.Join(s.root, "uploads")).GetUpload(r.Context(), hash)
+		if e != nil {
+			http.Error(w, "upload metadata unavailable", 503)
+			return
+		}
+		info, e := upload.GetInfo(r.Context())
+		if e != nil {
+			http.Error(w, "upload metadata unavailable", 503)
+			return
+		}
+		if info.Size != length {
+			respond(w, nil, inputClaimError())
+			return
+		}
 		if _, err := s.inputClaim(r.Context(), ref, true); err != nil {
 			respond(w, nil, err)
 			return

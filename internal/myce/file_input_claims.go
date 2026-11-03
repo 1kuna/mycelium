@@ -18,6 +18,14 @@ type FileInputClaim struct {
 	File      FileRef   `json:"file"`
 	At        time.Time `json:"at"`
 	Allocated bool      `json:"allocated,omitempty"`
+	SettledAt time.Time `json:"settled_at,omitempty"`
+}
+
+func (c FileInputClaim) valid(now time.Time) bool {
+	if !c.SettledAt.IsZero() {
+		return c.SettledAt.Add(filePublicationGrace).After(now)
+	}
+	return c.Allocated || c.At.Add(filePublicationGrace).After(now)
 }
 
 type fileInputClaimKey struct{}
@@ -53,7 +61,7 @@ func (q *Queue) claimFileInput(ctx context.Context, s Spec, ref FileRef) (FileIn
 	store := q.files
 	stale := map[string]FileInputClaim{}
 	for id, claim := range q.s.FileInputClaims {
-		if !claim.At.Add(filePublicationGrace).After(q.clock.Now()) {
+		if !claim.At.Add(filePublicationGrace).After(q.clock.Now()) && (claim.SettledAt.IsZero() || !claim.valid(q.clock.Now())) {
 			stale[id] = claim
 		}
 	}
@@ -69,7 +77,7 @@ func (q *Queue) claimFileInput(ctx context.Context, s Spec, ref FileRef) (FileIn
 			return out, err
 		}
 		for id, claim := range stale {
-			if _, exists := payloads[claim.File.SHA256]; !exists {
+			if _, exists := payloads[claim.File.SHA256]; !exists || !claim.SettledAt.IsZero() {
 				missing[id] = claim
 			}
 		}
@@ -81,7 +89,7 @@ func (q *Queue) claimFileInput(ctx context.Context, s Spec, ref FileRef) (FileIn
 			}
 		}
 		for _, claim := range q.s.FileInputClaims {
-			if claim.Project == s.Project && claim.Class == s.Class && claim.File == ref && (claim.Allocated || claim.At.Add(filePublicationGrace).After(q.clock.Now())) {
+			if claim.Project == s.Project && claim.Class == s.Class && claim.File == ref && claim.valid(q.clock.Now()) {
 				out = claim
 				return nil
 			}
@@ -121,7 +129,7 @@ func (q *Queue) inputClaimContext(ctx context.Context, ref FileRef, allocate boo
 	if _, ok := ctx.Value(fileStoreAttemptKey{}).(fileStoreAttempt); ok {
 		required = false
 	}
-	valid := found && (ref.SHA256 == "" || claim.File == ref || ref.SizeBytes == -1 && claim.File.SHA256 == ref.SHA256) && (claim.Allocated || claim.At.Add(filePublicationGrace).After(q.clock.Now()))
+	valid := found && (ref.SHA256 == "" || claim.File == ref || ref.SizeBytes == -1 && claim.File.SHA256 == ref.SHA256) && claim.valid(q.clock.Now())
 	declaredOutput := false
 	if ctx.Value(fileStoreOrdinaryKey{}) != nil {
 		required = false
@@ -160,10 +168,10 @@ func (q *Queue) inputClaimContext(ctx context.Context, ref FileRef, allocate boo
 	if allocate && !claim.Allocated {
 		if err := q.updateRequest(ctx, func() error {
 			current, ok := q.s.FileInputClaims[id]
-			if ok && current.Allocated {
+			if ok && current.valid(q.clock.Now()) && (current.Allocated || !current.SettledAt.IsZero()) {
 				return nil
 			}
-			if !ok || current != claim {
+			if !ok || current != claim || !current.valid(q.clock.Now()) {
 				return inputClaimError()
 			}
 			current.Allocated = true
@@ -181,7 +189,7 @@ func (q *Queue) noteInputClaimFacts(f *projectFileFacts, project string) {
 		if project != "" && claim.Project != project {
 			continue
 		}
-		if !claim.Allocated && !claim.At.Add(filePublicationGrace).After(q.clock.Now()) {
+		if !claim.SettledAt.IsZero() || !claim.valid(q.clock.Now()) {
 			continue
 		}
 		fact := projectFileFact{project: claim.Project, hash: claim.File.SHA256, size: uint64(claim.File.SizeBytes), at: claim.At}
@@ -196,7 +204,8 @@ func (q *Queue) settleFileInputClaims(s Spec) {
 	for _, ref := range submissionFiles(s) {
 		for id, claim := range q.s.FileInputClaims {
 			if claim.Project == s.Project && claim.File == ref {
-				delete(q.s.FileInputClaims, id)
+				claim.SettledAt = q.clock.Now()
+				q.s.FileInputClaims[id] = claim
 			}
 		}
 	}
@@ -222,14 +231,28 @@ func (q *Queue) projectFileReservationRefusal(ctx context.Context, status FileSt
 		q.collectFileReferences(false, nil, facts.retain, jobs)
 		q.noteProjectFileAdditions(&facts, jobs)
 		q.noteInputClaimFacts(&facts, project)
+		covered := map[string]uint64{}
 		used := uint64(0)
 		if l := facts.ledgers()[project]; l != nil {
 			for hash, size := range l.retained {
 				if p, ok := payloads[hash]; ok {
-					used = addDiskBytes(used, min(size, p.length))
+					covered[hash] = min(size, p.length)
 				}
 			}
 			used = addDiskBytes(used, l.reserved)
+		}
+		// Exact missing output identities already consume the global need.
+		// Count them against their owner's entitlement even before allocation.
+		for _, j := range jobs {
+			if terminal(j.State) || cancelled(j) || j.OutputAdmissionPending || j.Spec.OutputDelivery != asyncNAS {
+				continue
+			}
+			for _, ref := range j.PendingOutputRefs {
+				covered[ref.SHA256] = max(covered[ref.SHA256], uint64(ref.SizeBytes))
+			}
+		}
+		for _, size := range covered {
+			used = addDiskBytes(used, size)
 		}
 		withheld = addDiskBytes(withheld, policy.ReservedFileBytes-min(policy.ReservedFileBytes, used))
 	}

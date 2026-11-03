@@ -36,7 +36,7 @@ func TestProjectFileStoreClaimBindsResumeAcrossRestart(t *testing.T) {
 			t.Fatal(err)
 		}
 		var he *HTTPError
-		if err := fileResponse(res, 200); !errors.As(err, &he) || he.Code != "file_input_claim_required" {
+		if err := fileResponse(res, 200); !errors.As(err, &he) || he.Status != 409 {
 			t.Fatal("resume escaped claim binding", err)
 		}
 	}
@@ -162,4 +162,208 @@ func TestProjectFileStoreDeclaredOutputKeepsPublicationExemption(t *testing.T) {
 	if err := c.HasFile(context.Background(), ref); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestProjectFileStoreResumeUsesStoredLengthAndKeepsCustody(t *testing.T) {
+	q, clock := fixture(t)
+	c := retentionClient(t, q)
+	setQuotaPolicy(t, q, "small", ProjectPolicy{MaxRetainedFileBytes: 1})
+	_, ref := policyInput(t, "data")
+	owner, err := q.claimFileInput(context.Background(), Spec{Project: "owner"}, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.WithValue(context.Background(), fileInputClaimKey{}, owner.ID)
+	headers := map[string]string{"Tus-Resumable": "1.0.0", "Upload-Length": "4", "Upload-Metadata": "sha256 " + base64.StdEncoding.EncodeToString([]byte(ref.SHA256))}
+	res, err := c.fileRequest(ctx, "POST", "/api/files/uploads/", nil, headers, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = fileResponse(res, 201); err != nil {
+		t.Fatal(err)
+	}
+	smallRef := ref
+	smallRef.SizeBytes = 1
+	small, err := q.claimFileInput(context.Background(), Spec{Project: "small"}, smallRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	smallCtx := context.WithValue(context.Background(), fileInputClaimKey{}, small.ID)
+	for _, method := range []string{"HEAD", "PATCH"} {
+		res, err = c.fileRequest(smallCtx, method, "/api/files/uploads/"+ref.SHA256, nil, map[string]string{"Tus-Resumable": "1.0.0", "Content-Type": "application/offset+octet-stream", "Upload-Offset": "0"}, 1)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if res.StatusCode != 409 {
+			t.Fatal("short claim authorized larger upload", method, res.StatusCode)
+		}
+		res.Body.Close()
+	}
+	headers["Upload-Length"] = "1"
+	res, err = c.fileRequest(smallCtx, "POST", "/api/files/uploads/", nil, headers, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = fileResponse(res, 409); err != nil {
+		t.Fatal(err)
+	}
+	attached, err := q.claimFileInput(context.Background(), Spec{Project: "attached"}, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachedCtx := context.WithValue(context.Background(), fileInputClaimKey{}, attached.ID)
+	res, err = c.fileRequest(attachedCtx, "HEAD", "/api/files/uploads/"+ref.SHA256, nil, map[string]string{"Tus-Resumable": "1.0.0"}, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = fileResponse(res, 200); err != nil {
+		t.Fatal(err)
+	}
+	clock.Advance(filePublicationGrace + time.Second)
+	if u := projectUsage(t, q, "attached"); u.RetainedBytes != 4 {
+		t.Fatal("resumed allocation expired", u)
+	}
+}
+
+func TestProjectFileStoreSettlementKeepsConcurrentClaimValid(t *testing.T) {
+	q, clock := fixture(t)
+	c := retentionClient(t, q)
+	setQuotaPolicy(t, q, "owner", ProjectPolicy{MaxRetainedFileBytes: 4})
+	path, ref := policyInput(t, "data")
+	owner := WithFileStoreSubmission(context.Background(), Spec{Project: "owner"})
+	claim, err := q.claimFileInput(owner, Spec{Project: "owner"}, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = c.UploadJobInput(owner, path, ref); err != nil {
+		t.Fatal(err)
+	}
+	s := spec("experiment")
+	s.Project = "owner"
+	s.Files = FileManifest{"input": ref}
+	submit(t, q, s)
+	ctx := context.WithValue(owner, fileInputClaimKey{}, claim.ID)
+	if err = c.hasFile(ctx, ref, jobInputUploadPurpose); err != nil {
+		t.Fatal("sibling submission invalidated transfer", err)
+	}
+	if u := projectUsage(t, q, "owner"); u.RetainedBytes != 4 {
+		t.Fatal("settlement double charged", u)
+	}
+	clock.Advance(filePublicationGrace + time.Second)
+	if _, err = q.inputClaimContext(ctx, ref, false); err == nil {
+		t.Fatal("settled validation receipt never expired")
+	}
+}
+
+func TestProjectFileStoreOutputReservationAdmission(t *testing.T) {
+	for _, productionReserve := range []int64{0, 8} {
+		t.Run(strconv.FormatInt(productionReserve, 10), func(t *testing.T) {
+			q, clock := fixture(t)
+			q.deliveryRoot = q.root
+			q.files.limit = 12 + productionReserve
+			q.fileStoreProductionReserve = productionReserve
+			setQuotaPolicy(t, q, "neighbor", ProjectPolicy{ReservedFileBytes: 8})
+			s := asyncDeliverySpec()
+			s.Project = "other"
+			s.Disk.OutputBytes = 8
+			if _, err := q.Submit(s); err == nil {
+				t.Fatal("submission overlapped reserve pools")
+			}
+			s.Disk.OutputBytes = 4
+			j := submit(t, q, s)
+			if err := q.update(func() error {
+				j := q.touchJob(j.ID)
+				j.Spec.Disk.OutputBytes = 8
+				j.OutputAdmissionPending = true
+				return nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			clock.Advance(time.Second)
+			if err := q.admitOutputRetries(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if !job(t, q, j.ID).OutputAdmissionPending {
+				t.Fatal("retry consumed neighbor reservation")
+			}
+			setQuotaPolicy(t, q, "neighbor", ProjectPolicy{})
+			if err := q.admitOutputRetries(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if job(t, q, j.ID).OutputAdmissionPending {
+				t.Fatal("retry failed to reacquire after relief")
+			}
+		})
+	}
+}
+
+func TestProjectFileStorePendingIdentityUsesOwnerReservation(t *testing.T) {
+	q, _ := fixture(t)
+	c := retentionClient(t, q)
+	q.deliveryRoot = q.root
+	q.files.limit = 12
+	setQuotaPolicy(t, q, "neighbor", ProjectPolicy{ReservedFileBytes: 8})
+	s := asyncDeliverySpec()
+	s.Project = "neighbor"
+	s.Disk.OutputBytes = 8
+	j := submit(t, q, s)
+	_, ref := policyInput(t, "12345678")
+	if err := q.update(func() error { q.touchJob(j.ID).PendingOutputRefs = FileManifest{"out.txt": ref}; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	path, ref := policyInput(t, "data")
+	if err := c.UploadJobInput(WithFileStoreSubmission(context.Background(), Spec{Project: "other"}), path, ref); err != nil {
+		t.Fatal("pending identity double charged entitlement", err)
+	}
+}
+
+func TestProjectFileStoreRecoveryAndFailureDiagnosticsRemainPublishable(t *testing.T) {
+	t.Run("recovery", func(t *testing.T) {
+		q, _, c, p := recoveryFixture(t)
+		setQuotaPolicy(t, q, job(t, q, p.ID).Spec.Project, ProjectPolicy{MaxRetainedFileBytes: 1})
+		setQuotaPolicy(t, q, "neighbor", ProjectPolicy{ReservedFileBytes: 1 << 20})
+		path, ref := policyInput(t, "new recovered bytes")
+		plan := RecoveryPlan{Execution: p.Execution, Machine: p.Machine, Session: p.Session}
+		ctx := WithFileStoreRecovery(context.Background(), plan)
+		if err := c.PreflightFileStore(ctx, FileManifest{"out.txt": ref}); err != nil {
+			t.Fatal(err)
+		}
+		if err := c.UploadJobInput(ctx, path, ref); err != nil {
+			t.Fatal("recovery refused", err)
+		}
+		p.Files = FileManifest{"out.txt": ref}
+		if _, err := c.RecoverResult(ctx, p); err != nil {
+			t.Fatal(err)
+		}
+		plan.Attempt++
+		if err := c.UploadJobInput(WithFileStoreRecovery(context.Background(), plan), path, ref); err == nil {
+			t.Fatal("stale recovery upload accepted")
+		}
+	})
+	t.Run("diagnostics", func(t *testing.T) {
+		q, _ := fixture(t)
+		c := retentionClient(t, q)
+		m := machine("worker", "fake")
+		check(t, q, m, nil)
+		s := spec("experiment")
+		s.Resumable = false
+		s.Diagnostics = &DiagnosticSpec{}
+		submit(t, q, s)
+		j := check(t, q, m, nil).Job
+		if j == nil {
+			t.Fatal("missing assignment")
+		}
+		setQuotaPolicy(t, q, s.Project, ProjectPolicy{MaxRetainedFileBytes: 1})
+		setQuotaPolicy(t, q, "neighbor", ProjectPolicy{ReservedFileBytes: 1 << 20})
+		r, err := (Worker{Client: c}).finishFailureDiagnostics(*j, result(j, false), t.TempDir(), "")
+		if err != nil || r.Diagnostics == nil {
+			t.Fatal("failed diagnostics stranded", err)
+		}
+		if err = q.Complete(r); err != nil {
+			t.Fatal(err)
+		}
+		if job(t, q, j.ID).State != "failed" {
+			t.Fatal("diagnostic publication did not finish")
+		}
+	})
 }

@@ -190,7 +190,9 @@ blob HEAD. A claim commits the file's full declared length against the project's
 quota before any bytes arrive. Concurrent claims are checked in one SQLite
 transaction. Each digest counts once per project, including unfinished and
 abandoned inputs, and once in global physical usage. Submission transfers the
-claim into ordinary job attribution; owner release then works as before.
+claim into ordinary job attribution; a settled validation receipt remains valid
+for the six-hour publication grace so concurrent deduplicated transfers finish.
+The receipt adds no quota charge or retention; owner release works as before.
 Unused, unallocated claims expire after the existing six-hour publication grace;
 allocated inputs retain attribution until submission or ordinary file collection.
 Claims without bytes are reconciled after that grace. No claim deletes bytes.
@@ -208,7 +210,10 @@ reasons. Quota refusal is `project_file_store_quota`; a protected pool reports
 When any such local policy is enabled, unidentified input uploads and resumes
 return `file_input_claim_required`; upgrade the client or obtain a claim. Exact
 worker attempts and legacy declared async output identities keep their existing
-output route. Production is exempt from project quotas and project reservations;
+output route. Failed-attempt diagnostics carry the exact execution identity.
+Go/CLI and Python result recovery upload with the captured failed-execution fence
+(`WithFileStoreRecovery` / `upload_file(..., recovery=plan)`); a changed attempt
+is refused. Production is exempt from project quotas and project reservations;
 completed output transfers receive no new refusal. Physical capacity still
 applies. Existing retained bytes, registry assets and checkpoints are preserved;
 this does not activate the parked storage backend or shorten retention.

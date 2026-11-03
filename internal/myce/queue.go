@@ -738,10 +738,7 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 			if store == nil {
 				return &HTTPError{Status: 503, Code: "file_store_unavailable", Message: "queue-file-store is not configured"}
 			}
-			if err := q.fileStoreReserveRefusal(resultCapacity, addDiskBytes(q.outputReservations(resultPayloads, ""), s.Disk.OutputBytes), s.Disk.OutputBytes, q.outputReservationsFor(resultPayloads, "", true), q.priorityMatch(s).Tier == "production"); err != nil {
-				return err
-			}
-			if err := q.projectFileReservationRefusal(WithFileStoreSubmission(ctx, s), resultCapacity, resultPayloads, addDiskBytes(q.outputReservations(resultPayloads, ""), s.Disk.OutputBytes), s.Disk.OutputBytes); err != nil {
+			if err := q.fileStoreAdmissionRefusal(WithFileStoreSubmission(ctx, s), resultCapacity, resultPayloads, addDiskBytes(q.outputReservations(resultPayloads, ""), s.Disk.OutputBytes), s.Disk.OutputBytes, q.outputReservationsFor(resultPayloads, "", true), q.priorityMatch(s).Tier == "production"); err != nil {
 				return err
 			}
 		}

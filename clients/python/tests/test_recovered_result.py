@@ -22,7 +22,8 @@ class RecoveredResultTests(unittest.TestCase):
             order.append("plan")
             return plan
 
-        def upload(path):
+        def upload(path, *, recovery):
+            self.assertEqual(recovery, plan)
             order.append("upload")
             return ref
 
