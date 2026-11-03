@@ -89,7 +89,7 @@ func TestSharedDeviceEqualTierWaits(t *testing.T) {
 	}
 }
 
-func TestSharedDeviceProductionStopsOneCoTenant(t *testing.T) {
+func TestSharedDeviceProductionStopsAllCUDACoTenants(t *testing.T) {
 	q, _ := fixture(t)
 	m := sharedUnifiedMachine()
 	a, b := sharedPair(t, q, m)
@@ -97,21 +97,27 @@ func TestSharedDeviceProductionStopsOneCoTenant(t *testing.T) {
 	if got := assignedJob(machineCheck(t, q, m, a, b)); got != nil {
 		t.Fatal("production started before its victim released", got.ID)
 	}
-	// 10 GiB free: only stopping the 17 GiB job frees enough.
+	// Although one release frees enough memory, CUDA requires both lower tiers to stop.
 	if got := job(t, q, a.ID); got.State != "stopping" {
 		t.Fatalf("17 GiB co-tenant state=%s; production waits: %s", got.State, job(t, q, demand.ID).Reason)
 	}
-	requireState(t, q, b.ID, "running")
+	requireState(t, q, b.ID, "stopping")
 	if got := assignedJob(machineCheck(t, q, m, a, b)); got != nil {
 		t.Fatal("production started while its victim was still stopping", got.ID)
 	}
-	requireState(t, q, b.ID, "running")
+	requireState(t, q, b.ID, "stopping")
 	finishInterrupted(t, q, a)
-	got := assignedJob(machineCheck(t, q, m, b))
-	if got == nil || got.ID != demand.ID || !slices.Equal(got.AllocatedDevices, []string{"0"}) {
-		t.Fatal("production did not start beside the remaining co-tenant after exact release", got, job(t, q, demand.ID).Reason)
+	if got := assignedJob(machineCheck(t, q, m, b)); got != nil {
+		t.Fatal("production started before the remaining co-tenant released", got.ID)
 	}
-	requireState(t, q, b.ID, "running")
+	finishInterrupted(t, q, b)
+	got := assignedJob(machineCheck(t, q, m))
+	if got == nil || got.ID != demand.ID || !slices.Equal(got.AllocatedDevices, []string{"0"}) {
+		t.Fatal("production did not start after every exact release", got, job(t, q, demand.ID).Reason)
+	}
+	if err := q.Started(result(got, false)); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func sharedDiscreteMachine(platform string) Machine {
@@ -175,8 +181,8 @@ func TestSharedDeviceXPUTierIsolation(t *testing.T) {
 	}
 }
 
-func TestSharedDeviceCUDAHigherTierPacks(t *testing.T) {
-	testSharedDeviceTierPacks(t, "cuda", "production")
+func TestSharedDeviceMetalHigherTierPacks(t *testing.T) {
+	testSharedDeviceTierPacks(t, "metal", "production")
 }
 
 func TestSharedDeviceXPUEqualTierPacks(t *testing.T) {

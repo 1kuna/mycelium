@@ -220,12 +220,18 @@ func sharesDevice(j *Job) bool {
 	return !n.cpuOnly() && n.MemoryGB > 0 && n.Model == "" && dockerSharesDevice(j) && j.Spec.ExtensionCheck == nil && j.Spec.FanOut == nil && len(j.AllocatedDevices) <= 1 && !unstated
 }
 
+// XPU teardown can reset shared engines (#652). CUDA co-tenants can grow past
+// reservations without fresh per-process evidence (#687). Both require every
+// lower-tier holder to release before higher-tier admission.
+func isolatesDeviceTiers(m *Machine) bool {
+	return m.GPU == "xpu" || m.GPU == "cuda"
+}
+
 // deviceCoTenants counts the batch attempts on card m that demand may share it
 // with. Every holder and every retained release there must share; memory
 // charges, not this check, decide fit. A joining demand also never slows a
-// higher tier's attempt. XPU newcomers require equal tiers because lower-tier
-// teardown can reset the card's engines (#652). Recovery re-adopts custody it
-// already held.
+// higher tier's attempt. Tier-isolated newcomers require equal tiers. Recovery
+// re-adopts custody it already held.
 func (q *Queue) deviceCoTenants(m *Machine, demand *Job, joining bool) (int, bool) {
 	if m.Devices == nil || m.GPU == "cpu" || len(m.groupMembers) > 0 || !sharesDevice(demand) {
 		return 0, false
@@ -236,7 +242,7 @@ func (q *Queue) deviceCoTenants(m *Machine, demand *Job, joining bool) (int, boo
 			continue
 		}
 		tier := q.comparePriority(j.Spec, demand.Spec)
-		if !sharesDevice(j) || joining && (tier < 0 || m.GPU == "xpu" && tier != 0) {
+		if !sharesDevice(j) || joining && (tier < 0 || isolatesDeviceTiers(m) && tier != 0) {
 			return 0, false
 		}
 		n++
@@ -253,7 +259,7 @@ func (q *Queue) deviceCoTenants(m *Machine, demand *Job, joining bool) (int, boo
 }
 
 func (q *Queue) batchSlotFree(m *Machine, demand *Job) bool {
-	if !q.xpuTiersSettled(m, demand, false) {
+	if !q.deviceTiersSettled(m, demand, false) {
 		return false
 	}
 	if q.workerBatchIdle(m) {
@@ -263,10 +269,10 @@ func (q *Queue) batchSlotFree(m *Machine, demand *Job) bool {
 	return ok && q.cardSettled(m) && !m.Gone && !m.Leaving && !q.unreported[m.ID]
 }
 
-// XPU admission covers both batch and engine custody. An engine demand may
+// Tier isolation covers both batch and engine custody. An engine demand may
 // reuse its own model, but cannot start beside other different-tier holders.
-func (q *Queue) xpuTiersSettled(m *Machine, demand *Job, engine bool) bool {
-	if m.GPU != "xpu" || demand.Spec.Needs.cpuOnly() {
+func (q *Queue) deviceTiersSettled(m *Machine, demand *Job, engine bool) bool {
+	if !isolatesDeviceTiers(m) || demand.Spec.Needs.cpuOnly() {
 		return true
 	}
 	for _, j := range q.liveJobs() {

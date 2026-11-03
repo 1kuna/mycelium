@@ -243,7 +243,7 @@ func (q *Queue) maintainEngineRetry(key string, s *ModelSlot, m *Machine, model 
 		return
 	}
 	q.applyPlacement(plan, job)
-	if !q.xpuTiersSettled(m, job, true) || room.FreeMemoryGB < model.MemoryGB || !hostFits(&room, model.MemoryGB, model.HostMemoryGB) || q.preparationActive(m) || q.preparationStopping(m) {
+	if !q.deviceTiersSettled(m, job, true) || room.FreeMemoryGB < model.MemoryGB || !hostFits(&room, model.MemoryGB, model.HostMemoryGB) || q.preparationActive(m) || q.preparationStopping(m) {
 		return
 	}
 
