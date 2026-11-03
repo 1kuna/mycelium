@@ -694,6 +694,56 @@ unlocking, without request identifiers. Sampling can miss an isolated slow hold;
 absence of a line does not rule out contention. These measurements also use
 diagnostic wall time, never the scheduling clock.
 
+Update holds also report `records_snapshot_ms` (undo records and in-memory
+snapshots), `usage_accounting_ms`, `fn_body_ms` (mutation plus health/maintenance),
+`persist_commit_ms` (usage writes, state serialization and SQLite commit), and
+`notify_ms` (wake notification and final commit/rollback bookkeeping). These
+non-overlapping phases cover the sampled hold, including failed updates.
+
+### Opt-in live queue profiling
+
+Start the queue with `--debug-listen 127.0.0.1:7332` to enable a separate
+`net/http/pprof` listener. It is **off by default** and accepts only literal
+loopback IP addresses (IPv4 or IPv6); wildcard, hostname and non-loopback binds
+are rejected. Neither the fleet API nor its joining listener serves profiling.
+Once enabled at startup, operators can profile the running queue without a
+restart. An already running queue without this flag needs a future authorized
+release/restart before profiling is available; there is no remote enable switch.
+
+The debug listener has no fleet authentication. Local users can access it;
+profiles and `/debug/pprof/cmdline` can contain sensitive process information.
+Keep profiles private, restrict local access to the queue host, and never publish
+raw profiles. Access from an operator machine through SSH forwarding, using your
+configured SSH alias for the queue host:
+
+```sh
+ssh -N -L 127.0.0.1:17332:127.0.0.1:7332 QUEUE_SSH_ALIAS
+```
+
+In another terminal on the operator machine, capture one short CPU profile and
+one heap profile. These commands write profiles locally, with private permissions,
+without writing queue state or copying credentials:
+
+```sh
+umask 077
+curl --fail --max-time 45 -o queue-cpu.pprof 'http://127.0.0.1:17332/debug/pprof/profile?seconds=10'
+curl --fail --max-time 45 -o queue-heap.pprof 'http://127.0.0.1:17332/debug/pprof/heap'
+curl --fail 'http://127.0.0.1:17332/debug/runtime'
+go tool pprof -top /path/to/matching/myce queue-cpu.pprof
+go tool pprof -top -inuse_space /path/to/matching/myce queue-heap.pprof
+```
+
+For capture directly on the queue host, use port `7332` instead of `17332` and a
+private operator-owned output directory. Use the exact queue binary for symbols.
+Profiling adds CPU, memory and response latency load: take a short capture during
+the observed slowdown, one at a time, and compare queue timing logs before and
+after. Heap capture above does not force GC; avoid `gc=1` during a latency incident
+because it forces a collection. Stop the SSH tunnel when finished.
+`/debug/runtime` reports cumulative `gc_pause_total_ns`, `gc_cycles`, current
+`heap_alloc_bytes`, `heap_inuse_bytes`, `heap_sys_bytes` and goroutine count.
+Reading these runtime statistics can itself briefly pause the process; they are
+collected only on a debug request, never under the queue mutex.
+
 ### Stored job file retention
 
 Frozen extension bundle bytes and their snapshotted environment files live in

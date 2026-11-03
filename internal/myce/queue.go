@@ -170,6 +170,7 @@ type Queue struct {
 	stopping         bool // q.mu; inhibit mutations before either API listener closes.
 	contactMu        sync.Mutex
 	contacts         map[string]*workerContact
+	holdClock        Clock // Optional observational clock; never used for queue decisions.
 	updateHolds      queueHoldSampler
 	statusHolds      queueHoldSampler
 	logCleanupHolds  queueHoldSampler
@@ -503,20 +504,22 @@ func (q *Queue) updateRequest(ctx context.Context, fn func() error, timing *queu
 		timing = &queueUpdateTiming{}
 	}
 	timing.lock(&q.mu)
-	hold := q.updateHolds.start()
+	hold := newQueueHoldPhases(q.updateHolds.startClock(q.holdClock), q.holdClock)
 	q.nasAvailable = available
 	defer func() {
-		duration := queueHoldDuration(hold)
+		duration := hold.finish()
 		timing.observe(q.observeUpdate)
 		unlockTimedRequest(ctx, &q.mu, timing)
-		logQueueHold(duration, "update", fn)
+		logQueueHold(duration, "update", fn, &hold)
 	}()
 	if q.stopping {
 		return &HTTPError{Status: 503, Code: "queue_stopping", Message: "queue is shutting down; retry the request"}
 	}
 	if q.simulation {
+		hold.next(holdUsage)
 		q.usageWrites = nil
 		q.accountUsage(q.clock.Now())
+		hold.next(holdBody)
 		return fn() // Simulation aborts on any error; it never resumes a failed mutation.
 	}
 	q.memoryObservationIndex = nil
@@ -537,9 +540,11 @@ func (q *Queue) updateRequest(ctx context.Context, fn func() error, timing *queu
 	oldQuiet := q.networkQuiet
 	oldModels, oldEnvironments := q.models, q.environments
 	oldEnvironmentRevision := q.environmentRevision
+	hold.next(holdUsage)
 	q.usageWrites = nil
 	q.modelIntervalWrites = nil
 	q.accountUsage(q.clock.Now())
+	hold.next(holdBody)
 	err = fn()
 	if err == nil {
 		q.observeModelIntervals()
@@ -552,11 +557,13 @@ func (q *Queue) updateRequest(ctx context.Context, fn func() error, timing *queu
 	if err == nil {
 		q.maintainSubmissions()
 		q.releaseFileUploadMarkers()
+		hold.next(holdPersist)
 		err = q.persistUsage(timing)
 	}
 	if err == nil {
 		q.fileReferenceRevision++
 	}
+	hold.next(holdNotify)
 	if err == nil && q.wake != nil {
 		close(q.wake)
 		q.wake = make(chan struct{})

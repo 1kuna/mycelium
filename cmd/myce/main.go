@@ -245,6 +245,7 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 	token := f.String("token", env("MYCE_TOKEN", ""), "shared fleet token (prefer MYCE_TOKEN)")
 	// DefValue is only help text; keep the actual environment default private.
 	f.Lookup("token").DefValue = ""
+	debugListen := f.String("debug-listen", "", "optional loopback-only queue profiling address (disabled by default)")
 	address := f.String("listen", "127.0.0.1:7331", "queue listen address")
 	db := f.String("db", "myce-state/myce.db", "SQLite database file")
 	uploadSpoolDir := f.String("upload-spool-dir", "", "queue model-upload directory (default private directory beside DB)")
@@ -484,6 +485,14 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			return errors.Join(err, d.Close())
 		}
 	case "queue":
+		debugListener, debugServer, err := queueDebugListener(*debugListen)
+		if err != nil {
+			return err
+		}
+		if debugListener != nil {
+			defer debugListener.Close()
+			defer debugServer.Close()
+		}
 		if f.NArg() != 0 {
 			return errors.New("queue accepts flags only")
 		}
@@ -633,7 +642,11 @@ func runWithProbe(args []string, probe myce.MachineProbe) error {
 			fmt.Printf("Mycelium joining: https://%s\n", tlsListener.Addr())
 		}
 		server := &http.Server{Handler: myce.API{Queue: q, Token: *token}.Handler(), ReadHeaderTimeout: 5 * time.Second}
-		errs := make(chan error, 2)
+		errs := make(chan error, 3)
+		if debugListener != nil {
+			go func() { errs <- debugServer.Serve(debugListener) }()
+			fmt.Printf("Mycelium queue debug: http://%s\n", debugListener.Addr())
+		}
 		go func() { errs <- server.Serve(listener) }()
 		go func() { errs <- q.Run(ctx) }()
 		fmt.Printf("Mycelium queue: http://%s\n", listener.Addr())
