@@ -400,3 +400,217 @@ func TestModelSnapshotRestartSkipsUnchangedRehash(t *testing.T) {
 		t.Fatalf("re-verified snapshot re-hashed %d times after restart", n)
 	}
 }
+
+func TestModelSnapshotActiveCustodySurvivesRestart(t *testing.T) {
+	if root := os.Getenv("MYCE_SNAPSHOT_CUSTODY_HELPER"); root != "" {
+		clock := &fakeClock{now: time.Unix(1000, 0)}
+		cache := &SharedInputCache{cache: EnvironmentCache{Root: filepath.Join(root, "cache"), Limit: 1 << 20, Clock: clock}}
+		w := Worker{ModelRoot: filepath.Join(root, "models"), modelSnapshots: cache}
+		owner, err := newAttemptStore(&workerStore{dir: filepath.Join(root, "attempt")}, Job{ID: "active", Attempt: 1, Session: "session"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _, err = w.acquireModelSnapshots(context.WithValue(context.Background(), sharedInputOwnerKey{}, owner), snapshotJob("org/tiny"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Exit without releasing: the OS drops every flock, as on worker death.
+		os.Exit(0)
+	}
+	root := t.TempDir()
+	t.Cleanup(func() { _ = removeSharedEntry(root) })
+	modelRoot := filepath.Join(root, "models")
+	tinyModel(t, modelRoot)
+	if err := os.Mkdir(filepath.Join(root, "attempt"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	helper := exec.Command(os.Args[0], "-test.run=^TestModelSnapshotActiveCustodySurvivesRestart$")
+	helper.Env = append(os.Environ(), "MYCE_SNAPSHOT_CUSTODY_HELPER="+root)
+	if b, err := helper.CombinedOutput(); err != nil {
+		t.Fatalf("snapshot helper: %v: %s", err, b)
+	}
+	clock := &fakeClock{now: time.Unix(1000, 0)}
+	clock.Advance(time.Hour)
+	rehashes := 0
+	cache := &SharedInputCache{cache: EnvironmentCache{Root: filepath.Join(root, "cache"), Limit: 1, Clock: clock}, beforeVerify: func() { rehashes++ }}
+	if err := cache.cache.init(); err != nil {
+		t.Fatal(err)
+	}
+	input, repo, err := resolveModelSnapshot(context.Background(), modelRoot, snapshotJob("org/tiny").Spec.ModelSnapshots["base"])
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(cache.cache.Root, input.key(), "data", "config.json")
+	if err := cache.admit(context.Background(), "other", 10); err == nil {
+		t.Fatal("restart evicted an active snapshot")
+	}
+	if err := os.Chtimes(path, clock.Now(), clock.Now()); err != nil {
+		t.Fatal("active snapshot removed", err)
+	}
+	if _, release, err := cache.Acquire(context.Background(), input, repo); err == nil {
+		release()
+		t.Fatal("changed active snapshot accepted")
+	}
+	if rehashes != 0 {
+		t.Fatal("active snapshot reverified after restart")
+	}
+	// Another attempt in the real shared spool cannot release the active owner.
+	sibling, err := newAttemptStore(&workerStore{dir: filepath.Join(root, "attempt")}, Job{ID: "sibling", Attempt: 1, Session: "session"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sibling.pinSharedInput(cache.cache.Root, input.key()); err != nil {
+		t.Fatal(err)
+	}
+	// Recover the interrupted atomic publication used by older pin writers too.
+	temporary := sharedInputPin(cache.cache.Root, input.key(), sibling.sharedInputOwnerID()) + ".tmp"
+	if err := os.WriteFile(temporary, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := sibling.cleanupOrphan(clock); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(temporary); !os.IsNotExist(err) {
+		t.Fatal("interrupted owner pin leaked", err)
+	}
+	if pinned, err := sharedInputPinned(cache.cache.Root, input.key()); err != nil || !pinned {
+		t.Fatal("sibling cleanup lost active pin", err)
+	}
+	states, err := filepath.Glob(filepath.Join(root, "attempt", "state-attempt-*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var activeName string
+	for _, state := range states {
+		b, err := os.ReadFile(state)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var saved workerState
+		if err := decodeWorkerState(b, &saved); err != nil {
+			t.Fatal(err)
+		}
+		if saved.Job.ID == "active" {
+			activeName = filepath.Base(state)
+		}
+	}
+	if activeName == "" {
+		t.Fatal("active attempt missing")
+	}
+	// Exact cleanup failure retains the pin; successful cleanup removes it.
+	cgroup := filepath.Join(root, "attempt-snapshot")
+	if err := (fakeMemoryFS{}).Mkdir(cgroup); err != nil {
+		t.Fatal(err)
+	}
+	owner := &workerStore{dir: filepath.Join(root, "attempt"), stateName: activeName, state: workerState{Identity: "snapshot", Cgroup: cgroup, Job: &Job{}, PID: 1}}
+	// Group custody avoids signalling any real process in this small fixture.
+	if err := saveWorkerJSON(owner.dir, "attempt-snapshot.json", workerState{Identity: "snapshot", PID: 1, Cgroup: cgroup}); err != nil {
+		t.Fatal(err)
+	}
+	if err := owner.cleanupOrphan(clock, sharedCleanupDeniedFS{}); err == nil {
+		t.Fatal("cleanup failure ignored")
+	}
+	if pinned, err := sharedInputPinned(cache.cache.Root, input.key()); err != nil || !pinned {
+		t.Fatal("cleanup failure lost pin", err)
+	}
+	if err := owner.cleanupOrphan(clock, fakeMemoryFS{}); err != nil {
+		t.Fatal(err)
+	}
+	_ = cache.admit(context.Background(), "other", 10)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("cleaned snapshot not evicted", err)
+	}
+}
+
+func TestModelSnapshotDockerPreparationRestartReleasesPins(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(1000, 0)}
+	root := &workerStore{dir: t.TempDir()}
+	j := Job{ID: "docker-preparation", Attempt: 1, Session: "session", Spec: Spec{Run: RunSpec{Docker: true}}}
+	owner, err := newAttemptStore(root, j)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cacheRoot, key := t.TempDir(), strings.Repeat("a", 64)
+	if _, err := owner.pinSharedInput(cacheRoot, key); err != nil {
+		t.Fatal(err)
+	}
+	// Reload the persisted pre-dispatch identity instead of retaining callbacks.
+	data, err := os.ReadFile(filepath.Join(root.dir, owner.stateName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	restarted := &workerStore{dir: root.dir, stateName: owner.stateName}
+	if err := decodeWorkerState(data, &restarted.state); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (Worker{Clock: clock}).recoverAttempt(restarted); err != nil {
+		t.Fatal(err)
+	}
+	if pinned, err := sharedInputPinned(cacheRoot, key); err != nil || pinned {
+		t.Fatal("pre-launch Docker pin leaked", err)
+	}
+}
+
+func TestModelSnapshotPinCleanupPrecedesAttemptRetirement(t *testing.T) {
+	h := &machineHarness{}
+	w := harnessWorker(t, h)
+	w.control = &processControl{}
+	w.Clock = &fakeClock{now: time.Unix(1000, 0)}
+	j := harnessJob(t, "pin-cleanup", "", "true")
+	root := &workerStore{dir: t.TempDir()}
+	s, err := newAttemptStore(root, j)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cacheRoot, key := t.TempDir(), strings.Repeat("a", 64)
+	if _, err := s.pinSharedInput(cacheRoot, key); err != nil {
+		t.Fatal(err)
+	}
+	pin := sharedInputPin(cacheRoot, key, s.sharedInputOwnerID())
+	if err := os.Remove(pin); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(pin, 0700); err != nil {
+		t.Fatal(err)
+	}
+	block := filepath.Join(pin, "blocked")
+	if err := os.WriteFile(block, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	s.state.Result = &Result{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Success: true}
+	if err := s.save(); err != nil {
+		t.Fatal(err)
+	}
+	a := &attemptSupervisor{store: s, job: j, worker: w, connected: true, wake: make(chan struct{}, 1), done: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go a.run(ctx)
+	await(t, func() bool {
+		_, d, _, _ := a.snapshot()
+		return strings.Contains(d.FileTransferError, "cache pin cleanup pending")
+	})
+	data, err := os.ReadFile(filepath.Join(s.dir, s.stateName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved workerState
+	if err := decodeWorkerState(data, &saved); err != nil || saved.Job == nil {
+		t.Fatal("owner retired before unpin", err)
+	}
+	if err := os.Remove(block); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-a.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("unpin did not retry")
+	}
+	data, err = os.ReadFile(filepath.Join(s.dir, s.stateName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	saved = workerState{}
+	if err := decodeWorkerState(data, &saved); err != nil || saved.Job != nil {
+		t.Fatal("owner not retired after unpin", err)
+	}
+}

@@ -338,6 +338,17 @@ func (a *attemptSupervisor) run(ctx context.Context) {
 				err = w.Client.Call(ctx, "POST", "/api/workers/complete", s.state.Result, nil)
 			}
 			if s.state.Result != nil && (err == nil || stale(err)) && !s.state.Result.ReleasePending {
+				// Release callbacks are best effort and may race result delivery.
+				// Never retire the durable owner until every cache pin is removed.
+				if e := s.releaseSharedInputPins(); e != nil {
+					s.fileError = "cache pin cleanup pending; attempt custody retained"
+					select {
+					case <-ctx.Done():
+					case <-a.wake:
+					case <-tick.C:
+					}
+					continue
+				}
 				if err == nil {
 					published, e := w.publishedAttemptFiles(ctx, s.state)
 					if e != nil {

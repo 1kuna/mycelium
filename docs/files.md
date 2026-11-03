@@ -577,7 +577,8 @@ or a regular file. Blobs named by SHA-256 (large files) are verified while
 copying; blobs named by Git SHA-1 (small files) are hashed and checked against
 their name. The verified closure is copied into the worker's model snapshot
 cache (`model-snapshots` under the file cache folder), reused by identical
-snapshots, protected by use locks until attempt cleanup, and evicted only when
+snapshots, protected by use locks and durable attempt pins until exact process
+or container cleanup, and evicted only when
 inactive. That cache has its own budget, `--model-cache-bytes` (default
 100 GiB), plus the usual free-space floor; `--file-cache-bytes` does not apply.
 When the cache folder and the hub share a copy-on-write volume (APFS, or Linux
@@ -588,7 +589,10 @@ writing or changing permissions on the hub blob would change the "verified"
 copy. Other volumes, including a NAS, get a full copy. After verification the
 worker records each file's size, mode, modification time, inode and change time
 beside the entry; a restarted worker re-hashes the entry only when that record
-no longer matches. Copies are mode read-only, which is cooperative for
+no longer matches and no attempt still owns a durable pin. Pins survive worker
+death independently of process-held locks; restart cleanup reads the saved
+attempt receipt before releasing them. A changed pinned entry is refused without
+rehashing or replacing the active snapshot. Copies are mode read-only, which is cooperative for
 unsandboxed jobs, as for shared inputs.
 
 Only workers with a model root advertise `model_snapshots_v1`; other workers do
