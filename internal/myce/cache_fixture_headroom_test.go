@@ -1,6 +1,12 @@
 package myce
 
-import "testing"
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"testing"
+	"time"
+)
 
 func TestExplicitFixtureCacheLimitUnderLowHeadroom(t *testing.T) {
 	lowHeadroom := func(string) (int64, error) { return environmentCacheSize(23 << 30) }
@@ -15,5 +21,48 @@ func TestExplicitFixtureCacheLimitUnderLowHeadroom(t *testing.T) {
 	config := ServiceConfig{Role: "worker", EnvironmentCache: t.TempDir(), EnvironmentCacheBytes: 1 << 20}
 	if err := resolveEnvironmentCacheSizing(&config, true, lowHeadroom); err != nil || config.EnvironmentCacheBytes != 1<<20 {
 		t.Fatalf("explicit installer fixture limit was not preserved: %+v, %v", config, err)
+	}
+}
+
+// Exercise the installer sizing seam and pass its explicit fixture limit to a
+// real worker check-in. The worker's cache init uses the same explicit-limit
+// branch checked above; the test does not alter the host filesystem.
+func TestFixtureWorkerCheckinAfterLowHeadroomSizing(t *testing.T) {
+	lowHeadroom := func(string) (int64, error) { return environmentCacheSize(23 << 30) }
+	config := ServiceConfig{Role: "worker", EnvironmentCache: t.TempDir()}
+	if err := resolveEnvironmentCacheSizing(&config, false, lowHeadroom); err == nil {
+		t.Fatal("automatic installer sizing accepted low headroom")
+	}
+	config.EnvironmentCacheBytes = 1 << 20
+	if err := resolveEnvironmentCacheSizing(&config, true, lowHeadroom); err != nil {
+		t.Fatal(err)
+	}
+	seen := false
+	server := workerTestServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		if req.URL.Path != "/api/workers/checkin" {
+			http.NotFound(rw, req)
+			return
+		}
+		var checkin Checkin
+		if err := json.NewDecoder(req.Body).Decode(&checkin); err != nil {
+			t.Error(err)
+			return
+		}
+		seen = true
+		if err := json.NewEncoder(rw).Encode(attemptReply(checkin, Reply{Leave: true})); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer server.Close()
+	w := recoveryWorker(t)
+	w.EnvironmentRoot, w.EnvironmentLimit = config.EnvironmentCache, config.EnvironmentCacheBytes
+	w.Client = Client{URL: server.URL, Token: "test"}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := w.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !seen {
+		t.Fatal("worker did not check in with explicit fixture limit")
 	}
 }
