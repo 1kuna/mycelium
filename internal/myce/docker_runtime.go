@@ -12,7 +12,7 @@ func dockerRuntimeWaitingReason(j *Job, machines map[string]*Machine) string {
 	}
 	enabled := false
 	for _, m := range machines {
-		if m.Gone || m.Leaving || !machineAllowed(j.Spec.AllowedMachines, m.ID) {
+		if m.Gone || m.Leaving || !j.Spec.allowsMachine(m.ID) {
 			continue
 		}
 		if contains(m.Capabilities, "docker") {

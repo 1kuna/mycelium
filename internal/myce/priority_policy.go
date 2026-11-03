@@ -384,7 +384,7 @@ func (q *Queue) slotSpec(s *ModelSlot) Spec {
 		}
 	}
 	for _, p := range q.s.Pins {
-		if p.Model == s.Model && p.Assigned == s.Machine && p.active(q.clock.Now()) {
+		if p.Model == s.Model && p.Assigned == s.Machine && p.AssignedDevice == s.Device && p.active(q.clock.Now()) {
 			candidate := Spec{Project: p.Project, Priority: "production"}
 			if !found || q.comparePriority(candidate, best) < 0 {
 				best = candidate

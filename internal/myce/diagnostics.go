@@ -208,7 +208,10 @@ func runtimeErrorFor(operation string, err error) error {
 	var syntax *json.SyntaxError
 	var mismatch *json.UnmarshalTypeError
 	var rejection *rejectionError
+	var response *HTTPError
 	switch {
+	case (c.Operation == "start_authorization" || c.Operation == "start_handoff") && errors.As(err, &response) && response.Status == 409 && response.Code == "request_stale":
+		c.Class = "admission_changed"
 	case errors.As(err, &rejection) && rejection.code == cpuIsolationUnavailable:
 		c.Class = cpuIsolationUnavailable
 	case errors.Is(err, context.DeadlineExceeded), errors.Is(err, errFileTransferStalled):

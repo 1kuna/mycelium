@@ -398,18 +398,29 @@ never proves cleanup. Status
 distinguishes `draining`, `ready`, `in_use`, `waiting_for_release` and `released`,
 and shows `reserved for OWNER: REASON` plus pending work/evidence.
 
-The maximum lifetime is a lost-binding backstop, not a deadline for live work.
-Its cost is retaining reserved capacity beyond the lifetime while a queued,
-preparing or running bound job exists, or any exact cleanup is unconfirmed.
-Status then reports `reserved past max lifetime` with the blocking reason;
-expiry never cancels work or confirms physical release. Only an absent job
-binding with no retained execution custody can expire with the visible release
-reason `maximum lifetime elapsed`. A terminal bound job releases after all
-attempts physically release, whether before or after the lifetime. Independent
-drains and exclusions still apply. Conditional operator
-release has the same admission-only meaning and requires an observed revision
-and reason. Use indefinite `exclude`/host maintenance for an operator-controlled
-hardware hold instead.
+Whole-host reservations for CPU validation wait for host work and physical
+cleanup, but do not wait for GPU admission to become enabled. A shared interactive
+host's profile deliberately excludes GPUs; that does not prevent its native CPU
+validation from becoming ready. Ordinary CPU, environment and owner-pressure
+admission checks still apply.
+
+The maximum lifetime bounds a never-ready admission fence as well as lost
+bindings. If a reservation has never been ready and its bound job is still
+queued with no retained execution or preparation custody, expiry marks it
+`expired`: other jobs regain admission, while the bound job remains queued.
+Explicitly release that record before reserving the validation again. Same-ID
+replay never renews it. `ready_at` records the first observed ready transition;
+`expired_at` records admission expiry, **not physical release**.
+
+Once ready, preparing or running bound work and unconfirmed cleanup retain the
+reservation beyond its lifetime. Status reports `reserved past max lifetime`
+with the blocking reason; expiry never cancels work or confirms physical release.
+An absent binding with no retained execution custody releases with the visible
+reason `maximum lifetime elapsed`. A terminal bound job releases after every
+attempt physically releases. Independent drains and exclusions still apply.
+Conditional operator release changes only the reservation's admission fence and
+requires its observed revision and a reason. Use indefinite `exclude`/host
+maintenance for an operator-controlled hardware hold instead.
 
 Laptop proof uses the real API and command runner with fake inventory. Start
 `myce dev --workers 1 --devices 2` and use its printed queue settings; add a local
@@ -2440,6 +2451,37 @@ NFS/SMB, autofs (including autofs-managed NFS) and the known network FUSE types
 `fuse.sshfs`, `fuse.rclone`, `fuse.smbnetfs` are eligible; generic/local FUSE is
 not. Mycelium does not mount a share or fall back to local storage.
 
+### Linux CIFS boot recovery
+
+The host operator owns the system CIFS mount and its credentials; the worker
+installer creates a user service and does not configure system mounts. For an
+fstab-managed share use `_netdev,nofail,x-systemd.automount` and a bounded
+`x-systemd.mount-timeout=30s`, together with the site's existing CIFS and
+credential options. Enable the network manager's appropriate wait-online service
+and verify that it actually waits for the interface needed by the share;
+`network-online.target` ordering alone does not establish connectivity.
+
+The mount can still fail while the network is down. Add the provided
+`deploy/checkpoint-mount-start-limit.conf` as a systemd **mount unit** drop-in
+(`systemctl edit MOUNT.mount`), then reload systemd and qualify it at the next
+authorized boot. `StartLimitIntervalSec=0` disables the mount's start-rate
+limit: otherwise repeated failed accesses can put the automount in
+`mount-start-limit-hit` and remove it permanently. This permits another mount
+attempt on subsequent worker probes, at the cost of repeated connection attempts
+while the share is down. The bounded background probes and checkpoint admission
+fences remain in effect. Do not put this setting on the worker user service or
+the automount unit. Confirm the effective mount-unit setting and automount state
+with `systemctl show` before qualification.
+
+If an automount is already failed, after the network is restored an authorized
+operator can inspect the exact mount and automount units, reset their failed
+state and start that automount only. Do not restart the worker or queue; check
+that active work is unaffected. After deployment, qualify on a Linux test host:
+boot with its network unavailable, observe checkpoint-dependent work held and
+heartbeats continuing, restore the network, and verify the share mounts and the
+held work is admitted without restarting either service. This native boot check
+is separate from the laptop fixture and requires an authorized test window.
+
 On Linux, missing-runtime refusal applies to NVIDIA display controllers and
 Intel discrete PCIe display endpoints (Intel vendor ID and positive
 [`current_link_width`](https://github.com/torvalds/linux/blob/master/Documentation/ABI/testing/sysfs-bus-pci)
@@ -3388,3 +3430,40 @@ The unchanged ten-second check-in deadline must hold under representative
 production bursts, without false quiet losses. Collect every workload failure,
 retain a compact receipt and remove disposable payloads after process release.
 Native Linux proof and #527's measured-protection acceptance remain open.
+
+## Durable model-engine interval history (#663)
+
+Authenticated `GET /api/models/intervals?limit=100` returns immutable transition
+`entries` with `sequence`, `at`, `kind`, model/attempt, machine/session, physical
+host, device ordinal/stable identity/platform, project/class/priority and the
+resolved `tier` (name, index, selector and policy revision). Events retain the
+interval's known `assigned_at`, `load_started_at`, `stopped_at`, `released_at`.
+Assignment records queue custody; load start records the first accepted engine
+launch authorization, not a process-start acknowledgement. Stop records queue
+stop intent, not signal delivery. Exact matching `failed` cleanup or accepted
+`unloaded` receipts record release. A fresh replacement check-in also records
+release for slots in its exact attested `previous_session`, before old slots are
+discarded. Stale receipts and unverified worker loss cannot establish release.
+A direct cleanup receipt without prior stop intent sets stop at receipt time.
+Class/tier changes use the scheduler's effective identity, including active
+production pins, and produce another event at their transition time, so a model
+promoted or demoted in place remains visible to overlap proofs.
+
+Begin with `after=0` and omit `high_water`. Follow `next` as `after`, retaining
+the first page's `high_water`, until `has_more=false`. `limit` is 1..256. Start
+a later snapshot at the previous high water to collect new arrivals. Even an
+empty snapshot's high water is a valid fixed bound. Events persist in SQLite
+with their queue transitions and survive slot removal and queue restarts; they
+are retained without automatic pruning. Reads fetch only a bounded indexed page
+outside the queue lock. Back up the entire queue database as usual.
+
+`coverage_since` starts the current uninterrupted ledger-enabled period. If an
+older binary rewrites state during rollback, re-upgrade recovers sequence
+allocation from retained SQLite events and starts a new coverage period; events
+from before that gap remain readable but do not establish continuous coverage
+through it. Existing slots
+are recorded as `observed` with unknown earlier times; there is no historical
+backfill. Missing assignment, load-start or release evidence cannot pass a
+complete interval proof. Join events by attempt/machine/session/device and use
+class-change event times to split tier occupancy. For batch copies, continue to
+use job GET times and the paginated job ledger described in [status](status.md).

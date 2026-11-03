@@ -40,6 +40,8 @@ type batchRelease struct {
 }
 
 type state struct {
+	ModelIntervalSince     *time.Time `json:"model_interval_since,omitempty"`
+	ModelIntervalHighWater int        `json:"model_interval_high_water,omitempty"`
 	// Read-only parked policy. Preserve retained DB records; these fields no
 	// longer activate admission or replace the configured file-store guards.
 	StorageMigration       json.RawMessage                `json:"storage_migration,omitempty"`
@@ -108,6 +110,7 @@ type state struct {
 	Front        int64                 `json:"front"`
 }
 type Queue struct {
+	modelIntervalWrites []ModelIntervalEvent
 	// Qualification removes occupancy, but retains diagnostic history/inventory.
 	memoryOrigin *Queue
 	// Only detached observation views set this page selection.
@@ -262,7 +265,7 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 			return nil, err
 		}
 	}
-	if _, err = db.Exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS enrollment_tickets (digest TEXT PRIMARY KEY, pin TEXT NOT NULL, expires INTEGER NOT NULL, used INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS queue_state (key TEXT PRIMARY KEY, data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS queue (id INTEGER PRIMARY KEY CHECK(id=1), data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS logs (seq INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL, attempt INTEGER NOT NULL, text TEXT NOT NULL); CREATE TABLE IF NOT EXISTS log_offsets (job TEXT, attempt INTEGER, offset INTEGER, PRIMARY KEY(job,attempt,offset)); CREATE TABLE IF NOT EXISTS environment_log_offsets (job TEXT, machine TEXT, session TEXT, key TEXT, offset INTEGER, PRIMARY KEY(job,machine,session,key,offset)); CREATE TABLE IF NOT EXISTS environment_build_logs (machine TEXT, session TEXT, key TEXT, offset INTEGER, text TEXT, PRIMARY KEY(machine,session,key,offset)); CREATE INDEX IF NOT EXISTS logs_job ON logs(job,seq); CREATE TABLE IF NOT EXISTS usage_samples (at INTEGER NOT NULL, span INTEGER NOT NULL, machine TEXT NOT NULL, device TEXT NOT NULL, project TEXT NOT NULL, job TEXT NOT NULL, model TEXT NOT NULL, busy REAL NOT NULL, idle REAL NOT NULL, pinned REAL NOT NULL, memory_seconds REAL NOT NULL, observed REAL NOT NULL, PRIMARY KEY(at,span,machine,device,project,job,model));`); err != nil {
+	if _, err = db.Exec(`PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA busy_timeout=5000; CREATE TABLE IF NOT EXISTS model_intervals (seq INTEGER PRIMARY KEY, data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS enrollment_tickets (digest TEXT PRIMARY KEY, pin TEXT NOT NULL, expires INTEGER NOT NULL, used INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS queue_state (key TEXT PRIMARY KEY, data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS queue (id INTEGER PRIMARY KEY CHECK(id=1), data BLOB NOT NULL); CREATE TABLE IF NOT EXISTS logs (seq INTEGER PRIMARY KEY AUTOINCREMENT, job TEXT NOT NULL, attempt INTEGER NOT NULL, text TEXT NOT NULL); CREATE TABLE IF NOT EXISTS log_offsets (job TEXT, attempt INTEGER, offset INTEGER, PRIMARY KEY(job,attempt,offset)); CREATE TABLE IF NOT EXISTS environment_log_offsets (job TEXT, machine TEXT, session TEXT, key TEXT, offset INTEGER, PRIMARY KEY(job,machine,session,key,offset)); CREATE TABLE IF NOT EXISTS environment_build_logs (machine TEXT, session TEXT, key TEXT, offset INTEGER, text TEXT, PRIMARY KEY(machine,session,key,offset)); CREATE INDEX IF NOT EXISTS logs_job ON logs(job,seq); CREATE TABLE IF NOT EXISTS usage_samples (at INTEGER NOT NULL, span INTEGER NOT NULL, machine TEXT NOT NULL, device TEXT NOT NULL, project TEXT NOT NULL, job TEXT NOT NULL, model TEXT NOT NULL, busy REAL NOT NULL, idle REAL NOT NULL, pinned REAL NOT NULL, memory_seconds REAL NOT NULL, observed REAL NOT NULL, PRIMARY KEY(at,span,machine,device,project,job,model));`); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -275,6 +278,13 @@ func Open(path, root string, clock Clock, options ...QueueOption) (*Queue, error
 		}
 	}
 	if err != nil && err != sql.ErrNoRows {
+		db.Close()
+		return nil, err
+	}
+	// A previous binary can rewrite away new state fields while retaining this
+	// additive table. Recover allocation before any startup transaction emits an
+	// event; the retained SQLite sequence is authoritative across re-upgrades.
+	if err = db.QueryRow("SELECT COALESCE(MAX(seq),0) FROM model_intervals").Scan(&q.s.ModelIntervalHighWater); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -528,8 +538,12 @@ func (q *Queue) updateRequest(ctx context.Context, fn func() error, timing *queu
 	oldModels, oldEnvironments := q.models, q.environments
 	oldEnvironmentRevision := q.environmentRevision
 	q.usageWrites = nil
+	q.modelIntervalWrites = nil
 	q.accountUsage(q.clock.Now())
 	err = fn()
+	if err == nil {
+		q.observeModelIntervals()
+	}
 	if err == nil {
 		q.detectHealth()
 		q.invalidateWorkTimings()
@@ -729,6 +743,9 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 			if err := q.fileStoreReserveRefusal(resultCapacity, addDiskBytes(q.outputReservations(resultPayloads, ""), s.Disk.OutputBytes), s.Disk.OutputBytes, q.outputReservationsFor(resultPayloads, "", true), q.priorityMatch(s).Tier == "production"); err != nil {
 				return err
 			}
+		}
+		if e := q.validateJobExclusions(s); e != nil {
+			return rejectFieldRule("job_placement_invalid", e)
 		}
 		if e := q.validateProjectPlacement(s.Project, s.AllowedMachines); e != nil {
 			return rejectFieldRule("job_placement_invalid", e)
@@ -1290,6 +1307,16 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 		if old != nil && (old.Gone || old.Session != m.Session) {
 			q.clearPreemptionPlacements(old.ID, old.Session)
 		}
+		// Fresh workers attest cleanup only for their exact previous session.
+		// Record that accepted evidence before reconciliation discards old slots
+		// and before replacing the old inventory used to identify their cards.
+		if c.Fresh && c.PreviousSession != "" && c.PreviousSession != m.Session {
+			for _, slot := range q.s.ModelSlots {
+				if slot.Machine == m.ID && slot.Session == c.PreviousSession {
+					q.recordModelInterval(slot, "released")
+				}
+			}
+		}
 		q.s.Machines[m.ID] = &m
 		q.recordExternalMemory(&m)
 		for _, report := range reports {
@@ -1772,10 +1799,10 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 		// A changed disk sample can withdraw an offer before exec. This is the
 		// same temporary hold as dispatch, including for production stage failures.
 		q.requeue(j, q.diskHeadroomReason(j, q.s.Machines[j.Machine]), false)
-	} else if !r.Success && !oomFailure && j.StartedAt == nil && j.ExecutionCause != nil && (j.ExecutionCause.Operation == "start_authorization" || j.ExecutionCause.Operation == "start_handoff") && q.startPlacementRejection(j) != "" {
+	} else if !r.Success && !oomFailure && j.StartedAt == nil && j.ExecutionCause != nil && (j.ExecutionCause.Operation == "start_authorization" || j.ExecutionCause.Operation == "start_handoff") && recordedStartRefusal(j) != "" {
 		// The start fence withdrew placement before exec; like launch_refused,
 		// this is a temporary hold, not lost work or an infrastructure retry.
-		q.requeue(j, "requeued: start placement refused ("+q.startPlacementRejection(j)+")", false)
+		q.requeue(j, "requeued: start placement refused ("+recordedStartRefusal(j)+")", false)
 	} else if oomFailure && j.Spec.Needs.Memory == "auto" {
 		q.retryOOM(j)
 	} else if (j.Spec.Priority == "production" || plannedPriorityStop(j)) && (stageFailure || oomFailure) {

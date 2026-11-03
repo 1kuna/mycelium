@@ -466,6 +466,9 @@ func (q *Queue) queueProjection() (map[string]int, map[string]string) {
 		}
 		if busy || !fits(best, live, live.FreeMemoryGB) {
 			base = reservationWaitReason(live, batchSlotAllocated && sharedWith == 0, sharedWith)
+			if why := q.cardWaitingReason(best, live); why != "" {
+				base = why
+			}
 		}
 		if !environmentReady(best, target) {
 			if busy {
@@ -620,8 +623,31 @@ func machineAllowed(allowed []string, machine string) bool {
 	return len(allowed) == 0 || contains(allowed, machine)
 }
 
+func (s Spec) allowsMachine(machine string) bool {
+	return machineAllowed(s.AllowedMachines, machine) && !contains(s.ExcludedMachines, machine)
+}
+
+func (q *Queue) validateJobExclusions(s Spec) error {
+	if len(s.ExcludedMachines) == 0 {
+		return nil
+	}
+	if err := q.validateMachineNames(s.ExcludedMachines); err != nil {
+		return fmt.Errorf("excluded_machines: %w", err)
+	}
+	allowed := q.s.Policies[s.Project].AllowedMachines
+	if len(allowed) > 0 {
+		for _, name := range allowed {
+			if s.allowsMachine(name) {
+				return nil
+			}
+		}
+		return errors.New("excluded_machines leaves no overlap with project allowed_machines")
+	}
+	return nil
+}
+
 func (q *Queue) jobAllowsMachine(j *Job, machine string) bool {
-	return machineAllowed(j.Spec.AllowedMachines, machine) && q.projectAllows(j.Spec.Project, machine)
+	return j.Spec.allowsMachine(machine) && q.projectAllows(j.Spec.Project, machine)
 }
 
 func (q *Queue) projectAllows(project, machine string) bool {
@@ -662,7 +688,7 @@ func (q *Queue) validateProjectCapacity(j *Job) error {
 		return nil
 	}
 	for _, name := range allowed {
-		if len(j.Spec.AllowedMachines) > 0 && !contains(j.Spec.AllowedMachines, name) {
+		if !j.Spec.allowsMachine(name) {
 			continue
 		}
 		m := q.s.Machines[name]

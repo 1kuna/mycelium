@@ -1,6 +1,7 @@
 package myce
 
 import (
+	"errors"
 	"reflect"
 	"testing"
 	"time"
@@ -23,5 +24,39 @@ func TestM4QueuePreservesPausedJob(t *testing.T) {
 	}
 	if resumed, err := q.ResumeJob(j.ID, paused.PauseRevision); err != nil || resumed.State != "queued" {
 		t.Fatal("converted job cannot resume", resumed, err)
+	}
+}
+
+func TestMachineConversionFencesQueuedExclusions(t *testing.T) {
+	q, _, mapping := m4Queue(t)
+	s := spec("experiment")
+	s.ExcludedMachines = []string{"host-gpu1"}
+	j := submit(t, q, s)
+	for _, dry := range []bool{true, false} {
+		_, err := q.ConvertMachines(mapping, ModelConfig{}, dry)
+		var blocked *QueuedRetiredMachinesError
+		if !errors.As(err, &blocked) || !reflect.DeepEqual(blocked.Jobs, []string{j.ID}) {
+			t.Fatal("conversion lost exclusion", err)
+		}
+	}
+	if q.s.Machines["host-gpu1"].Replacement != nil {
+		t.Fatal("refused conversion retired excluded machine")
+	}
+}
+
+func TestMachineRollbackFencesQueuedExclusions(t *testing.T) {
+	q, _, mapping := m4Queue(t)
+	if _, err := q.ConvertMachines(mapping, ModelConfig{}, false); err != nil {
+		t.Fatal(err)
+	}
+	s := spec("experiment")
+	s.ExcludedMachines = []string{"host"}
+	j := submit(t, q, s)
+	for _, dry := range []bool{true, false} {
+		err := q.RollbackMachines(dry)
+		var blocked *QueuedRetiredMachinesError
+		if !errors.As(err, &blocked) || !reflect.DeepEqual(blocked.Jobs, []string{j.ID}) {
+			t.Fatal("rollback lost exclusion", err)
+		}
 	}
 }

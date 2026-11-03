@@ -135,6 +135,9 @@ func (q *Queue) statusEligibility(j *Job) {
 	if len(allowed) == 0 {
 		allowed = q.s.Policies[j.Spec.Project].AllowedMachines
 	}
+	// This marker is open-ended eligibility for maintenance gates, not proof
+	// that each machine passes every authored constraint. Exclusions must not
+	// hide future non-excluded workers from older fail-closed gates.
 	j.EligibleUnrestricted = len(allowed) == 0
 	hosts := []string{}
 	seen := map[string]bool{}
@@ -265,7 +268,7 @@ func statusJobInputs(job *Job) Job {
 		j.Ledger = &JobLedgerInfo{}
 	}
 	j.Isolation = jobNativeIsolationStatus(job)
-	spec := Spec{Logs: j.Spec.Logs, AllowedMachines: j.Spec.AllowedMachines, Name: j.Spec.Name, Project: j.Spec.Project, Priority: j.Spec.Priority, Class: j.Spec.Class, Kind: j.Spec.Kind, Resumable: j.Spec.Resumable, Deadline: j.Spec.Deadline, StartBy: j.Spec.StartBy, StartWindow: j.Spec.StartWindow}
+	spec := Spec{Logs: j.Spec.Logs, AllowedMachines: j.Spec.AllowedMachines, ExcludedMachines: j.Spec.ExcludedMachines, Name: j.Spec.Name, Project: j.Spec.Project, Priority: j.Spec.Priority, Class: j.Spec.Class, Kind: j.Spec.Kind, Resumable: j.Spec.Resumable, Deadline: j.Spec.Deadline, StartBy: j.Spec.StartBy, StartWindow: j.Spec.StartWindow}
 	if j.Spec.Program != nil {
 		spec.Program = &Program{Type: j.Spec.Program.Type}
 	}

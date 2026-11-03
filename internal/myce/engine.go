@@ -159,9 +159,9 @@ func (l *LlamaEngine) Load(ctx context.Context, m Model) error {
 	shell := []string{"-c", `read gate || exit 125; exec "$@"`, "myce-supervisor-" + l.identity}
 	shell = append(shell, argv...)
 	l.cmd = exec.Command("sh", shell...)
-	l.cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	l.cmd.SysProcAttr = commandProcessAttributes()
 	l.cmd.Env = env
-	l.cmd.Env = append(l.cmd.Env, "MYCE_PROCESS_ID="+l.identity)
+	l.cmd.Env = processSessionEnvironment(append(l.cmd.Env, "MYCE_PROCESS_ID="+l.identity))
 	l.log, e = openCommandOutput(l.Dir, name+".log", m.Logs, os.O_EXCL)
 	if e != nil {
 		return e
@@ -309,7 +309,7 @@ func (l *LlamaEngine) Unload() error {
 			return errors.Join(stopErr, err)
 		}
 	} else {
-		_ = syscall.Kill(-l.cmd.Process.Pid, syscall.SIGTERM)
+		_ = signalWorkerGroup(l.cmd.Process.Pid, syscall.SIGTERM)
 	}
 	if l.exited != nil && !l.custody.Accelerator {
 		select {
@@ -343,7 +343,7 @@ func (l *LlamaEngine) runStopCommand(grace context.Context) error {
 		name := "engine-stop-" + identity
 		argv := append([]string{"-c", `read gate || exit 125; exec "$@"`, "myce-supervisor-" + identity}, l.stopCommand...)
 		cmd := exec.CommandContext(grace, "sh", argv...)
-		cmd.Env = append(append([]string{}, l.env...), "MYCE_PROCESS_ID="+identity)
+		cmd.Env = processSessionEnvironment(append(append([]string{}, l.env...), "MYCE_PROCESS_ID="+identity))
 		reader, writer, pipeErr := os.Pipe()
 		if pipeErr != nil {
 			return pipeErr
@@ -353,8 +353,8 @@ func (l *LlamaEngine) runStopCommand(grace context.Context) error {
 		cmd.Stdin = reader
 		cmd.Stdout = l.log
 		cmd.Stderr = l.log
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+		cmd.SysProcAttr = commandProcessAttributes()
+		cmd.Cancel = func() error { return signalWorkerGroup(cmd.Process.Pid, syscall.SIGKILL) }
 		cmd.WaitDelay = time.Second
 		if err := saveWorkerJSON(l.Dir, name+".json", workerState{Identity: identity}); err != nil {
 			return err
@@ -369,12 +369,12 @@ func (l *LlamaEngine) runStopCommand(grace context.Context) error {
 			return err
 		}
 		if err := saveWorkerJSON(l.Dir, name+".json", workerState{Identity: identity, PID: cmd.Process.Pid}); err != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			_ = signalWorkerGroup(cmd.Process.Pid, syscall.SIGKILL)
 			_ = cmd.Wait()
 			return err
 		}
 		if err := l.memoryAttempt.attach(cmd.Process.Pid); err != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			_ = signalWorkerGroup(cmd.Process.Pid, syscall.SIGKILL)
 			_ = cmd.Wait()
 			return fmt.Errorf("stop helper memory ceiling attach: %w", err)
 		}
@@ -385,7 +385,7 @@ func (l *LlamaEngine) runStopCommand(grace context.Context) error {
 			gateErr = nil
 		}
 		if gateErr != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			_ = signalWorkerGroup(cmd.Process.Pid, syscall.SIGKILL)
 		}
 		_ = cmd.Wait()
 		if l.custody.Accelerator {

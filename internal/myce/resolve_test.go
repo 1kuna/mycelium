@@ -43,6 +43,30 @@ func cpuResolveSpec() Spec {
 	return Spec{Name: "resolve", Project: "test", Priority: "experiment", Run: RunSpec{Command: []string{"sh", "run.sh"}}, Needs: ResourceNeeds{CPUCores: 1, MemoryGB: 1, Platform: Platform{Required: []string{"cpu"}}}}
 }
 
+func TestResolveAutoMemoryIdentityHint(t *testing.T) {
+	q, _, _ := learnedMemoryFixture(t)
+	s := cpuResolveSpec()
+	s.Needs.MemoryGB = 0
+	r, err := q.Resolve(ResolveRequest{Spec: s})
+	if err != nil || len(r.Findings) != 0 || len(r.Targets) != 1 || !r.Targets[0].Eligible {
+		t.Fatalf("memory hint became a refusal: %+v %v", r, err)
+	}
+	notes := strings.Join(r.Notes, " ")
+	for _, want := range []string{"same identity", "exact command", "stable name/base command", "--input", "memory_class omitted", "memory_class: per_item"} {
+		if !strings.Contains(notes, want) {
+			t.Errorf("missing %q in %s", want, notes)
+		}
+	}
+	if len(q.s.Jobs) != 0 {
+		t.Fatal("resolve submitted work")
+	}
+	s.Needs.MemoryGB = 1
+	r, err = q.Resolve(ResolveRequest{Spec: s})
+	if err != nil || strings.Contains(strings.Join(r.Notes, " "), "memory_class") {
+		t.Fatalf("declared memory got auto-memory guidance: %+v %v", r, err)
+	}
+}
+
 func TestResolveNASSharedInputReadsRemainUnverified(t *testing.T) {
 	q, _ := fixture(t)
 	s := cpuResolveSpec()
