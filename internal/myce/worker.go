@@ -279,8 +279,7 @@ func (p *process) stopLocked(now time.Time, grace time.Duration, kill bool) {
 	}
 	if kill {
 		if !p.killed {
-			p.signalLocked(syscall.SIGKILL)
-			p.killed = true
+			p.killed = p.signalLocked(syscall.SIGKILL)
 		}
 		return
 	}
@@ -289,7 +288,9 @@ func (p *process) stopLocked(now time.Time, grace time.Duration, kill bool) {
 		p.stopAt = &deadline
 	}
 	if !p.stopped {
-		p.signalLocked(syscall.SIGTERM)
+		if !p.signalLocked(syscall.SIGTERM) {
+			return
+		}
 		deadline := now.Add(grace)
 		p.stopAt = &deadline
 		p.stopped = true
@@ -323,21 +324,21 @@ func (p *process) waitStopGrace(clock Clock, group, anchor int) {
 
 // p.mu serializes delivery/persistence with exit observation. Capture the
 // observation timestamp immediately after Wait, before acquiring this lock.
-func (p *process) signalLocked(signal syscall.Signal) {
+func (p *process) signalLocked(signal syscall.Signal) bool {
 	exited := p.outcome.Exit != nil
 	if exited && !p.stopGroup {
-		return
+		return true
 	}
 	if p.saveCustody != nil {
 		if err := p.saveCustody(); err != nil {
-			return
+			return false
 		}
 	}
 	if err := signalWorkerGroup(p.cmd.Process.Pid, signal); err != nil {
-		return
+		return false
 	}
 	if exited {
-		return
+		return true
 	} // A descendant signal cannot rewrite the main's exit facts.
 	at := time.Now().UTC()
 	name := "TERM"
@@ -349,6 +350,7 @@ func (p *process) signalLocked(signal syscall.Signal) {
 	if p.saveOutcome != nil && p.saveOutcome(next) == nil {
 		p.outcome = next
 	}
+	return true
 }
 
 var errWorkerMemory = errors.New("free memory unavailable or insufficient")
@@ -707,6 +709,9 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 			w.storageObserver.finish()
 		}
 	}()
+	if os.Getenv(processSessionVariable) != "" {
+		env[processSessionVariable] = "1"
+	}
 	if len(j.Spec.Run.Sidecars) > 0 || j.Spec.Run.MemoryGB > 0 {
 		p, e := w.startNativeGroup(s, j, identity, memoryAttempt, env, environmentPath, extensionRelease, release)
 		if e == nil {
@@ -714,6 +719,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		}
 		return p, e
 	}
+	env[processSessionVariable] = "1"
 	keys := make([]string, 0, len(env))
 	for k := range env {
 		keys = append(keys, k)
@@ -722,7 +728,6 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	for _, k := range keys {
 		cmd.Env = append(cmd.Env, k+"="+env[k])
 	}
-	cmd.Env = processSessionEnvironment(cmd.Env)
 	cmd.Args = append(slices.Clone(cmd.Args[:4]), sharedHostCommand(environmentCommand(cmd.Args[4:], cmd.Env), w.Machine.SharedHost)...)
 	if err := w.isolateNativeAttempt(&j, nil, cmd, s.dir, executionWork, env, nil, true); err != nil {
 		return nil, s.startFailure(j, launchRefused, reject("native_isolation", err))
