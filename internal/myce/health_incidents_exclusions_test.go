@@ -23,6 +23,24 @@ func incidentAllowance(t *testing.T, q *Queue, m *Machine, gb float64) {
 	}
 }
 
+func incidentPeer(t *testing.T, q *Queue, m *Machine, id string) Machine {
+	t.Helper()
+	peer := cloneMachine(m)
+	peer.ID, peer.HostID, peer.Session = id, id, "session-"+id
+	// Qualification is host-bound; copying another host's verdict does not
+	// make this peer an eligible alternative, even with identical hardware.
+	for i, old := range peer.ExtensionReports {
+		e, err := q.extensionByDigest(old.Digest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := newExtensionReport(e, &peer, old.Work)
+		r.Setup, r.Qualified, r.CheckID = true, true, "peer-check"
+		peer.ExtensionReports[i] = r
+	}
+	return peer
+}
+
 func incidentVariantFixture(t *testing.T, capGB float64) (*Queue, *fakeClock, Machine, Spec) {
 	t.Helper()
 	q, clock := fixture(t)
@@ -137,8 +155,7 @@ func TestHealthIncidentOfflineUndersizedPeerDoesNotSuppress(t *testing.T) {
 		t.Fatal(err)
 	}
 	incidentAllowance(t, q, &m, 24)
-	peer := cloneMachine(&m)
-	peer.ID, peer.HostID, peer.Session = "offline-peer", "offline-peer", "offline-session"
+	peer := incidentPeer(t, q, &m, "offline-peer")
 	check(t, q, peer, nil)
 	// Reproduce the queue's loss observation without making the fitting
 	// worker stale too. Qualification ignores this temporary availability.
@@ -171,8 +188,7 @@ func TestHealthIncidentLearnedEnvelopeHealthyExclusions(t *testing.T) {
 			incidentAllowance(t, q, &m, 24)
 			s.Needs.Memory, s.RequireTarget = "auto", true
 			if history == "fitting peer" {
-				peer := cloneMachine(&m)
-				peer.ID, peer.HostID, peer.Session = "peer", "peer", "session-peer"
+				peer := incidentPeer(t, q, &m, "peer")
 				peer.HostMemoryBudgetGB, peer.HostAvailableMemoryGB = 64, 64
 				peer.CapabilityProfile.SystemMemoryBytes = 64 << 30
 				check(t, q, peer, nil)
