@@ -173,12 +173,12 @@ func resolveInput(path, filesFrom, entry string, live bool) (myce.ResolveRequest
 		}
 	}
 	if p.Native != nil {
-		bundleNativeMetadata(p.Native, p.Source, root)
+		sourceUnverified := !bundleNativeMetadata(p.Native, p.Source, root)
 		finding, _ := sourceBundleFinding(root, p.Source)
 		if finding != nil {
 			found.findings = append(found.findings, *finding)
 		}
-		return myce.ResolveRequest{Spec: p.Spec, Recipe: p.Native, RequirementReasons: p.RequirementReasons}, found, nil
+		return myce.ResolveRequest{Spec: p.Spec, Recipe: p.Native, SourceUnverified: sourceUnverified, RequirementReasons: p.RequirementReasons}, found, nil
 	}
 	lowerInputs(&p.Spec, root, "project-root", &found)
 	for name, input := range p.SharedInputs {

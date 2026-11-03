@@ -61,7 +61,7 @@ func portabilityCommand(ctx context.Context, args []string, out io.Writer) error
 			if err != nil {
 				return err
 			}
-			bundleNativeMetadata(p.Native, p.Source, root)
+			request.SourceUnverified = !bundleNativeMetadata(p.Native, p.Source, root)
 		} else {
 			request.Spec = &p.Spec
 		}
@@ -84,7 +84,14 @@ func portabilityCommand(ctx context.Context, args []string, out io.Writer) error
 	return myce.WritePortability(out, report, *asJSON)
 }
 
-func bundleNativeMetadata(recipe *myce.Extension, source profileSource, root string) {
+func bundleNativeMetadata(recipe *myce.Extension, source profileSource, root string) bool {
+	// Working-tree files are evidence only for a declared directory source.
+	// Git path selection and snapshot contents need their own archive reader;
+	// until then, never substitute unrelated working-tree bytes.
+	if source.Directory == "" {
+		recipe.Files = nil
+		return false
+	}
 	if source.Directory != "" {
 		if filepath.IsAbs(source.Directory) {
 			root = source.Directory
@@ -142,4 +149,5 @@ func bundleNativeMetadata(recipe *myce.Extension, source profileSource, root str
 			}
 		}
 	}
+	return true
 }

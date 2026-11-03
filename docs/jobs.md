@@ -156,7 +156,9 @@ upgrade; an upgraded CLI/queue alone cannot establish visibility.
 
 Native variant adapter entries now return the existing portability metadata
 alongside resolve, including lock-input gaps, preparation and qualification.
-Local authored metadata has no frozen registration; eligibility stays unknown
+Only directory-source lock metadata is inspected locally. Git/snapshot lock
+coverage stays explicitly unknown, so excluded or commit-only files cannot be
+replaced by working-tree files. Local authored metadata has no frozen registration; eligibility stays unknown
 until registration and qualification. Resolve never registers a recipe or runs
 a qualification payload. Use `myce portability --extension NAME@VERSION` for
 already registered evidence.

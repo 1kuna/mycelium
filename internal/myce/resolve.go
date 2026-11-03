@@ -14,6 +14,7 @@ import (
 // ResolveRequest asks which targets could run a job as authored. Resolve is
 // explanation only: no job, upload, build, reservation or execution permit.
 type ResolveRequest struct {
+	SourceUnverified   bool              `json:"source_unverified,omitempty"`
 	UnstagedInputs     []string          `json:"unstaged_inputs,omitempty"`
 	InspectNAS         bool              `json:"inspect_nas,omitempty"`
 	Recipe             *Extension        `json:"recipe,omitempty"`
