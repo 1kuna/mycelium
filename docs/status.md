@@ -967,7 +967,9 @@ requests arrive. A worker that stops reporting loses this credit; a stuck probe
 keeps aging and a completed probe failure reports no sample.
 
 Host maintenance `healthy`/`state` and fleet `host_states` use the same pressure
-and bounded contact facts. Detached fleet snapshots freeze contact at snapshot
+and bounded contact facts. Normal owner-pressure yield remains temporary
+occupancy, without an infrastructure-failure alert; missing/stale evidence is
+unhealthy even with a yield latch set. Detached fleet snapshots freeze contact at snapshot
 `now`; the ordinary one-second status cache can still show an older observation
 than a subsequent host-status request. Missing or stale pressure makes a shared
 host unhealthy and withholds new work; it does not itself stop running work.

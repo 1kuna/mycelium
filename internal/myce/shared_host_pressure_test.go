@@ -392,3 +392,24 @@ func TestSharedHostPressureRefreshIndependentOfCheckins(t *testing.T) {
 		t.Fatal("pending probe renewed old evidence")
 	}
 }
+
+// Expected owner yield must not consume an infrastructure-failure alert's
+// episode/cooldown; otherwise a later missing probe would be suppressed.
+func TestSharedHostPressureOwnerYieldDoesNotConsumeHealthAlert(t *testing.T) {
+	q, clock, m, run := sharedRunning(t, false)
+	clock.Advance(healthAlertCooldown)
+	check(t, q, m, run)
+	before := len(alertsOf(q, "host_unhealthy_or_stale"))
+	m.SharedHostPressure = &SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 2}
+	check(t, q, m, run)
+	if len(alertsOf(q, "host_unhealthy_or_stale")) != before {
+		t.Fatal("normal owner-pressure yield emitted an infrastructure-failure alert")
+	}
+	assertSharedPressureHealth(t, q, m.ID, "healthy")
+	m.SharedHostPressure = nil
+	check(t, q, m, run)
+	if len(alertsOf(q, "host_unhealthy_or_stale")) != before+1 {
+		t.Fatal("owner yield suppressed a subsequent real pressure-signal failure")
+	}
+	assertSharedPressureHealth(t, q, m.ID, "unhealthy")
+}

@@ -43,9 +43,12 @@ All queue freshness decisions use Clock, with no sensor or bulk I/O under q.mu.
 
 ## Health agreement
 
-Host maintenance health includes pressure for shared-profile hosts and uses the
+Host maintenance health includes pressure freshness for shared-profile hosts and uses the
 same bounded session contact as worker-loss detection. Fleet status copies those
 contact facts into its detached observation and uses the same host classifier.
+Expected owner-pressure yield is temporary occupancy and does not itself emit
+an infrastructure-failure alert or mark the host unhealthy. Missing/stale sensor
+evidence still does, including when a previous pressure latch remains set.
 This fixes a host-status response being healthy despite unknown/stale pressure,
 and a fleet snapshot losing in-flight contact and interpreting queue delay as
 silence. The ordinary one-second public status cache remains an older snapshot;

@@ -74,22 +74,26 @@ func (q *Queue) sharedPressureReason(m *Machine) string {
 	if m.SharedHostYieldReason != "" {
 		return m.SharedHostYieldReason
 	}
-	p := m.SharedHostPressure
-	now := q.clock.Now()
-	// A valid report stays usable while its next check-in is delayed in the
-	// queue. Reuse the existing bounded session contact, but never let successive
-	// pending requests extend one observation beyond that contact budget.
-	stale := p == nil
-	if p != nil {
-		reportAt := p.ReceivedAt.Add(time.Duration(p.AgeSeconds * float64(time.Second)))
-		contact := maxTime(reportAt, q.lastContact(m, now))
-		stale = now.Sub(contact)+time.Duration(p.AgeSeconds*float64(time.Second)) >= signalMaxAge ||
-			now.Sub(p.ReceivedAt) >= signalMaxAge+pendingCheckinContactLimit
-	}
-	if !validSharedPressure(p) || p.ReceivedAt.After(now) || stale {
+	if !q.sharedPressureFresh(m) {
 		return "shared host pressure observation unknown or stale"
 	}
 	return ""
+}
+
+// Expected owner yield is temporary occupancy, not an infrastructure failure.
+// Health and alerts distinguish it from missing/stale sensor evidence.
+func (q *Queue) sharedPressureFresh(m *Machine) bool {
+	p := m.SharedHostPressure
+	now := q.clock.Now()
+	if !validSharedPressure(p) || p.ReceivedAt.After(now) {
+		return false
+	}
+	// Reuse bounded matching-session contact during queue delay. Successive
+	// pending requests must never extend one observation beyond that budget.
+	reportAt := p.ReceivedAt.Add(time.Duration(p.AgeSeconds * float64(time.Second)))
+	contact := maxTime(reportAt, q.lastContact(m, now))
+	return now.Sub(contact)+time.Duration(p.AgeSeconds*float64(time.Second)) < signalMaxAge &&
+		now.Sub(p.ReceivedAt) < signalMaxAge+pendingCheckinContactLimit
 }
 
 // hostPressureReason is the first owner-pressure reason among m's host
