@@ -541,3 +541,65 @@ func TestModelSnapshotDockerPreparationRestartReleasesPins(t *testing.T) {
 		t.Fatal("pre-launch Docker pin leaked", err)
 	}
 }
+
+func TestModelSnapshotPinCleanupPrecedesAttemptRetirement(t *testing.T) {
+	h := &machineHarness{}
+	w := harnessWorker(t, h)
+	w.Clock = &fakeClock{now: time.Unix(1000, 0)}
+	j := harnessJob(t, "pin-cleanup", "", "true")
+	root := &workerStore{dir: t.TempDir()}
+	s, err := newAttemptStore(root, j)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cacheRoot, key := t.TempDir(), strings.Repeat("a", 64)
+	if _, err := s.pinSharedInput(cacheRoot, key); err != nil {
+		t.Fatal(err)
+	}
+	pin := sharedInputPin(cacheRoot, key, s.sharedInputOwnerID())
+	if err := os.Remove(pin); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(pin, 0700); err != nil {
+		t.Fatal(err)
+	}
+	block := filepath.Join(pin, "blocked")
+	if err := os.WriteFile(block, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	s.state.Result = &Result{Execution: Execution{ID: j.ID, Attempt: j.Attempt}, Success: true}
+	if err := s.save(); err != nil {
+		t.Fatal(err)
+	}
+	a := &attemptSupervisor{store: s, job: j, worker: w, connected: true, wake: make(chan struct{}, 1), done: make(chan struct{})}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go a.run(ctx)
+	await(t, func() bool {
+		_, d, _, _ := a.snapshot()
+		return strings.Contains(d.FileTransferError, "cache pin cleanup pending")
+	})
+	data, err := os.ReadFile(filepath.Join(s.dir, s.stateName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var saved workerState
+	if err := decodeWorkerState(data, &saved); err != nil || saved.Job == nil {
+		t.Fatal("owner retired before unpin", err)
+	}
+	if err := os.Remove(block); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-a.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("unpin did not retry")
+	}
+	data, err = os.ReadFile(filepath.Join(s.dir, s.stateName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := decodeWorkerState(data, &saved); err != nil || saved.Job != nil {
+		t.Fatal("owner not retired after unpin", err)
+	}
+}
