@@ -91,3 +91,53 @@ func TestCurvePreservationAcceptsMemoryInvalidationWithProvenance(t *testing.T) 
 		t.Fatal("unprovenanced peak change accepted")
 	}
 }
+
+// #620's remaining question: a memory-only success increments its own sample
+// count/clock, leaves a sibling host's stored peak alone, and requires its key's
+// accepted-sample ledger entry. Snapshot reads and restart cannot rewrite peaks.
+func TestCurvePreservationMemoryOnlyLearningKeepsSiblingUnchanged(t *testing.T) {
+	q, clock, a := learnedMemoryFixture(t)
+	b := cpuMachine("worker-b", "worker-b-host", "cpu", 8, 32)
+	b.HostMemoryBudgetGB, b.ExtensionFingerprint = 32, "cpu-v1"
+	check(t, q, b, nil)
+	s := cpuSpec(1, 0)
+	s.AllowedMachines = []string{a.ID}
+	onB := s
+	onB.AllowedMachines = []string{b.ID}
+	runMemory(t, q, clock, a, s, 2, nil)
+	runMemory(t, q, clock, b, onB, 2, nil)
+	before := preservationSnapshot(t, q)
+	learned := runMemory(t, q, clock, a, s, 3, nil)
+	after := preservationSnapshot(t, q)
+	for _, old := range before.WorkCurves {
+		for _, next := range after.WorkCurves {
+			if next.Key != old.Key {
+				continue
+			}
+			if next.Key.Host == hostID(&b) {
+				if curveMeasurementDigest(next) != curveMeasurementDigest(old) {
+					t.Fatal("another host's peak changed without evidence")
+				}
+			} else if next.Samples != old.Samples+1 || next.MemorySamples != old.MemorySamples+1 || !next.MemoryRecordedAt.After(old.MemoryRecordedAt) || !next.RecordedAt.Equal(old.RecordedAt) || *next.MemoryPeak.HostGB != 3 {
+				t.Fatalf("memory-only update lost its count/clock: before=%+v after=%+v", old, next)
+			}
+		}
+	}
+	page, err := q.JobLedger(learned.ID, 0, -1, 256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = VerifyCurvePreservation(before, after, nil); err == nil {
+		t.Fatal("memory-only change accepted without evidence")
+	}
+	if receipt, err := VerifyCurvePreservation(before, after, []JobLedgerPage{page}); err != nil || len(receipt.Changes) != 1 {
+		t.Fatalf("memory-only learning failed guard: %+v %v", receipt, err)
+	}
+	q = reopenQueue(t, q, clock)
+	check(t, q, a, nil)
+	check(t, q, b, nil)
+	restored := preservationSnapshot(t, q)
+	if receipt, err := VerifyCurvePreservation(after, restored, nil); err != nil || len(receipt.Changes) != 0 {
+		t.Fatalf("read/restart changed stored peaks: %+v %v", receipt, err)
+	}
+}
