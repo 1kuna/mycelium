@@ -1,9 +1,13 @@
 package myce
 
 import (
+	"context"
+	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // The directory appears when the simulated external automount becomes usable.
@@ -37,5 +41,49 @@ func TestCheckpointAdmissionAfterLateMount(t *testing.T) {
 	}
 	if got := check(t, q, m, nil).Job; got == nil || got.ID != j.ID {
 		t.Fatal("checkpoint-dependent work did not become eligible after mount arrival")
+	}
+}
+
+func TestWorkerHeartbeatAfterLateCheckpointMount(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "late-mount", "checkpoints")
+	w := recoveryWorker(t)
+	w.EnvironmentLimit, w.CheckpointRoot = 1<<20, root
+	heartbeats := 0
+	recovered := false
+	server := workerTestServer(http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
+		if req.URL.Path != "/api/workers/checkin" {
+			http.NotFound(rw, req)
+			return
+		}
+		var c Checkin
+		if err := json.NewDecoder(req.Body).Decode(&c); err != nil {
+			t.Error(err)
+			return
+		}
+		heartbeats++
+		if heartbeats <= 2 && !c.Machine.CheckpointUnavailable {
+			t.Error("worker admitted missing checkpoint root")
+		}
+		if heartbeats == 2 {
+			if err := os.MkdirAll(root, 0700); err != nil {
+				t.Error(err)
+			}
+		}
+		if heartbeats > 2 && !c.Machine.CheckpointUnavailable {
+			recovered = true
+		}
+		if err := json.NewEncoder(rw).Encode(attemptReply(c, Reply{Leave: recovered})); err != nil {
+			t.Error(err)
+		}
+	}))
+	defer server.Close()
+	w.Client = Client{URL: server.URL, Token: "test"}
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	if err := w.Run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !recovered || heartbeats < 3 {
+		t.Fatal("same worker did not heartbeat through mount recovery")
 	}
 }
