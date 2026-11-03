@@ -155,7 +155,8 @@ func (q *Queue) NativeCustody(r NativeCustodyReport, requestContexts ...context.
 	if r.CustodyID == "" || len(r.CustodyID) > 128 || r.ProcessID == "" || len(r.ProcessID) > 128 || !slices.Contains([]string{"reserved", "started", "released"}, r.Phase) {
 		return &HTTPError{Status: 400, Code: "native_custody_invalid", Message: "invalid native custody identity or phase"}
 	}
-	return q.updateRequest(requestCtx, func() error {
+	var refused error
+	err := q.updateRequest(requestCtx, func() error {
 		j, err := q.current(Result{Execution: r.Execution, Machine: r.Machine, Session: r.Session})
 		if err != nil {
 			return err
@@ -177,9 +178,19 @@ func (q *Queue) NativeCustody(r NativeCustodyReport, requestContexts ...context.
 		}
 		if r.Phase != "released" {
 			q.maintainStartDeadlines()
-			if j.State != "running" || cancelled(j) || !q.hostLaunchAllowed(q.s.Machines[r.Machine], r.Session) || !q.startPlacementAllowed(j) {
+			if j.State != "running" || cancelled(j) {
 				return ErrStale
 			}
+			predicate := "host_launch"
+			if q.hostLaunchAllowed(q.s.Machines[r.Machine], r.Session) {
+				predicate = q.startPlacementRejection(j)
+			}
+			if predicate != "" {
+				q.recordStartRefusal(j, predicate)
+				refused = ErrStale
+				return nil // Commit the refusal before returning HTTP 409.
+			}
+			q.clearStartRefusal(j)
 		}
 		if old != nil && old.Kind == kind {
 			return nil
@@ -214,6 +225,10 @@ func (q *Queue) NativeCustody(r NativeCustodyReport, requestContexts ...context.
 		q.appendJobLedger(j, e)
 		return nil
 	}, nil)
+	if err != nil {
+		return err
+	}
+	return refused
 }
 
 func (w Worker) reportNativeCustody(j Job, session, execution, custody, phase string, supervisors ...int) error {
