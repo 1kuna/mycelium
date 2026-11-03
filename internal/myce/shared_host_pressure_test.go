@@ -210,7 +210,7 @@ func TestSharedHostCPUConcurrencyCap(t *testing.T) {
 // Owner pressure is temporary occupancy: a pinned require_target job queues and
 // waits for hysteresis instead of being refused as unqualified (#605).
 func TestSharedHostPressureQueuesRequireTarget(t *testing.T) {
-	q, _ := fixture(t)
+	q, clock := fixture(t)
 	m := sharedHostFixture(t, q)
 	m.SharedHost = &SharedHostProfile{InteractiveReserveGB: 4}
 	check(t, q, m, nil)
@@ -227,6 +227,18 @@ func TestSharedHostPressureQueuesRequireTarget(t *testing.T) {
 	}
 	if got := job(t, q, j.ID); got.State != "queued" {
 		t.Fatal("pressure did not leave job queued", got.State)
+	}
+	if reason := job(t, q, j.ID).Reason; !strings.Contains(reason, "shared host temporarily unavailable: shared host memory pressure") {
+		t.Fatal("pressure wait is not visible", reason)
+	}
+	resolved, err := q.Resolve(ResolveRequest{Spec: s})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(resolved.Targets, func(target ResolveTarget) bool {
+		return target.Machine == m.ID && target.Eligible
+	}) {
+		t.Fatal("pressure made resolve unqualified", resolved.Targets)
 	}
 	report, err := q.Portability(PortabilityRequest{Spec: &s})
 	if err != nil {
@@ -248,6 +260,16 @@ func TestSharedHostPressureQueuesRequireTarget(t *testing.T) {
 	var httpErr *HTTPError
 	if _, err := q.Submit(docker); !errors.As(err, &httpErr) || httpErr.Code != "no_qualified_target" {
 		t.Fatal("structural shared-host refusal accepted under pressure", err)
+	}
+	tooLarge := s
+	tooLarge.Needs.HostMemoryGB = 1000
+	if _, err := q.Submit(tooLarge); !errors.As(err, &httpErr) || httpErr.Code != "no_qualified_target" {
+		t.Fatal("impossible shared-host capacity accepted under pressure", err)
+	}
+	clock.Advance(time.Second)
+	m.SharedHostPressure = &SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 1, WakeDelayMS: (sharedWakeHighMS + sharedWakeLowMS) / 2}
+	if r := check(t, q, m, nil); r.Job != nil {
+		t.Fatal("assigned before pressure hysteresis cleared", r.Job)
 	}
 	m.SharedHostPressure = &SharedHostPressure{MemoryKnown: true, WakeKnown: true, MemoryLevel: 1}
 	if r := check(t, q, m, nil); r.Job == nil || r.Job.ID != j.ID {

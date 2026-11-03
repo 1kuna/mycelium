@@ -291,11 +291,21 @@ do not require `native_network`: they have no kernel network confinement to
 qualify. `needs.network: true` still declares outbound intent. This does not
 grant protected egress or change a frozen extension's isolation policy.
 
-From the next release, queued reasons explain network, environment preparation
-and RAM envelope blockers per compatible target. A RAM wait gives the resolved
+From the next release, queued reasons explain network, environment preparation,
+GPU card contention and RAM envelope blockers per compatible target. Card waits
+say `device N shared with K attempts` or `card busy: waiting for GPU batch slot`,
+and name the holding jobs and tiers (or retained custody awaiting exact release).
+A RAM figure on another target cannot hide that card contention. A RAM wait gives the resolved
 envelope and that target's free host memory; an unrelated target's reservation
 cannot explain the wait. Shared-host preparation refusals explicitly say the
 environment is not prepared and that the host never builds environments.
+
+Owner pressure on a shared interactive host is temporary: an otherwise qualified
+`require_target` job is accepted and waits with `shared host temporarily
+unavailable: shared host memory pressure` (or the current pressure observation
+reason). Resolve retains eligibility and portability calls the admission block
+temporary. Dispatch and launch remain blocked until pressure hysteresis clears;
+structural shared-host restrictions and impossible capacity still refuse.
 
 `native_isolation_warning` is the worker's compact startup inventory warning,
 shown as `WARNING` in the CLI machine row. Fallback workers scan listening Unix
