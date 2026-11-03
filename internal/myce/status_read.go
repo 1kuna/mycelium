@@ -121,6 +121,17 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 	unlockRequest := requestLock(requestContext(contexts), &q.mu)
 	locked := readWallStart(q.observeRead)
 	hold := q.statusHolds.start()
+	return q.captureStatusInputs(id, options, func() {
+		duration := queueHoldDuration(hold)
+		unlockRequest()
+		observeRead(q.observeRead, id, started, locked)
+		logQueueHold(duration, "captureObservation", nil)
+	})
+}
+
+// The source is either protected by q.mu or an immutable committed generation.
+// Only detached outputs are ever passed to diagnostic planners.
+func (q *Queue) captureStatusInputs(id string, options *statusOptions, captured func()) (*Queue, fileStoreObservation, error) {
 	var files fileStoreObservation
 	v := &Queue{clock: observationClock{q.clock.Now()}, nasAvailable: q.nasAvailable,
 		simulation: q.simulation, productionGrace: q.productionGrace, lossTimeouts: q.lossTimeouts,
@@ -256,10 +267,9 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 	if err == nil {
 		detached = copyObservation(inputs)
 	}
-	duration := queueHoldDuration(hold)
-	unlockRequest()
-	observeRead(q.observeRead, id, started, locked)
-	logQueueHold(duration, "captureObservation", nil)
+	if captured != nil {
+		captured() // Release the live queue before detached custody projection.
+	}
 	if err != nil {
 		return nil, files, err
 	}
@@ -329,7 +339,7 @@ func (q *Queue) jobSnapshot(id string, contexts ...context.Context) (*Job, error
 }
 
 func (q *Queue) jobSnapshotGeneration(id string, contexts ...context.Context) (*Job, error) {
-	v, _, err := q.captureObservation(id, contexts...)
+	v, _, err := q.captureCommittedObservation(id, nil, contexts...)
 	if err != nil {
 		return nil, err
 	}
@@ -373,7 +383,7 @@ func (q *Queue) statusSnapshotOptions(options *statusOptions, contexts ...contex
 }
 
 func (q *Queue) statusSnapshotGeneration(options *statusOptions, contexts ...context.Context) (Snapshot, error) {
-	v, files, err := q.captureStatusObservation("", options, contexts...)
+	v, files, err := q.captureCommittedObservation("", options, contexts...)
 	if err != nil {
 		return Snapshot{}, err
 	}

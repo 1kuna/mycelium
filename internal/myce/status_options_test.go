@@ -40,6 +40,7 @@ func TestStatusOptionsBoundedHistoryAndPaging(t *testing.T) {
 	q.s.Jobs["cleanup"] = &Job{ID: "cleanup", State: "failed", Attempt: 1, Queued: c.Now().Add(-time.Hour)}
 	q.s.Jobs["active"] = &Job{ID: "active", State: "running", Spec: Spec{Project: "active"}}
 	q.s.WorkObservations = map[string]WorkObservation{"point": {Job: "history-0000"}}
+	commitStatusFixture(t, q)
 	s := readStatusOptions(t, q, "")
 	if len(s.Jobs) != defaultStatusJobs+2 || s.JobsPage.Total != history+2 || len(s.WorkCurves) != 1 || s.WorkCurves[0].Job != "history-0000" {
 		t.Fatalf("unbounded summary: %+v", s.JobsPage)
@@ -53,6 +54,7 @@ func TestStatusOptionsBoundedHistoryAndPaging(t *testing.T) {
 		id := fmt.Sprintf("history-%05d", i)
 		q.s.Jobs[id] = &Job{ID: id, State: "succeeded", Queued: c.Now().Add(-24 * time.Hour), Spec: Spec{Project: "history"}}
 	}
+	commitStatusFixture(t, q)
 	c.Advance(statusCacheLifetime)
 	larger := readStatusOptions(t, q, "")
 	more, _ := json.Marshal(larger)
@@ -86,6 +88,7 @@ func TestStatusOptionsPaging(t *testing.T) {
 			Queued: c.Now().Add(-time.Duration(i) * time.Second), Spec: Spec{Project: "history"}}
 	}
 	q.s.Jobs["other"] = &Job{ID: "other", State: "succeeded", ReleaseConfirmed: true, Queued: c.Now(), Spec: Spec{Project: "other"}}
+	commitStatusFixture(t, q)
 	// Walk a project-filtered page set, with a timestamp filter and no duplicates.
 	seen := map[string]bool{}
 	query := "?jobs=all&project=history&limit=3&since=" + url.QueryEscape(c.Now().Add(-6500*time.Millisecond).Format(time.RFC3339Nano))
@@ -206,5 +209,14 @@ func BenchmarkStatusOptionsSnapshot(b *testing.B) {
 			b.ReportMetric(float64(bytes), "reply-bytes/op")
 			b.ReportMetric(float64(hold.Nanoseconds())/float64(b.N), "lock-ns/op")
 		})
+	}
+}
+
+// Imported fixture records must pass the same commit boundary as API writes.
+// Uncommitted memory edits are deliberately invisible to observational GETs.
+func commitStatusFixture(t testing.TB, q *Queue) {
+	t.Helper()
+	if err := q.update(func() error { return nil }); err != nil {
+		t.Fatal(err)
 	}
 }

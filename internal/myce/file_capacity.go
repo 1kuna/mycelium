@@ -174,6 +174,7 @@ type fileStoreObservation struct {
 	now                       time.Time
 	retention                 time.Duration
 	projects                  projectFileFacts
+	reservedOutputs           func(map[string]storedPayload) uint64
 }
 
 // The caller holds q.mu. Reference maps are newly allocated and timestamps are
@@ -203,7 +204,7 @@ func (q *Queue) captureFileStoreStatus() fileStoreObservation {
 			markers[hash] = at
 		}
 	}
-	return fileStoreObservation{q.files, expired, keep, referenced, markers, bundles, q.clock.Now(), q.fileRetention, projects}
+	return fileStoreObservation{q.files, expired, keep, referenced, markers, bundles, q.clock.Now(), q.fileRetention, projects, nil}
 }
 
 func (q *Queue) fileStoreStatus(ctx context.Context) *FileStoreStatus {
@@ -244,7 +245,11 @@ func (v fileStoreObservation) status(ctx context.Context) *FileStoreStatus {
 			status.ReclaimableBytes = addDiskBytes(status.ReclaimableBytes, p.size)
 		}
 	}
-	status.ReservedOutputBytes = store.reservedOutputs(payloads)
+	if v.reservedOutputs != nil {
+		status.ReservedOutputBytes = v.reservedOutputs(payloads)
+	} else {
+		status.ReservedOutputBytes = store.reservedOutputs(payloads)
+	}
 	status.FreeBytes -= min(status.FreeBytes, status.ReservedOutputBytes)
 	status.Physical = store.physicalStorageStatus(ctx, status, payloads, now)
 	return &status
