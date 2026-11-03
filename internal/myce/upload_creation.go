@@ -2,6 +2,7 @@ package myce
 
 import (
 	"context"
+	"maps"
 	"net/http"
 	"sync"
 
@@ -84,7 +85,8 @@ func (s *FileStore) beginCreation(ctx context.Context, hash string) (func(), err
 // particular, tus's purpose callback runs before this lock, outside admission.
 type creationDataStore struct {
 	tus.DataStore
-	mu *sync.RWMutex
+	mu    *sync.RWMutex
+	store *FileStore
 }
 
 func (s creationDataStore) NewUpload(ctx context.Context, info tus.FileInfo) (tus.Upload, error) {
@@ -93,7 +95,11 @@ func (s creationDataStore) NewUpload(ctx context.Context, info tus.FileInfo) (tu
 		return nil, err
 	}
 	defer s.mu.Unlock()
-	return s.DataStore.NewUpload(ctx, info)
+	upload, err := s.DataStore.NewUpload(ctx, info)
+	if err == nil {
+		s.store.noteAllocation(info.ID, uint64(info.Size))
+	}
+	return upload, err
 }
 
 func uploadCancelled(w http.ResponseWriter, ctx context.Context) bool {
@@ -104,27 +110,88 @@ func uploadCancelled(w http.ResponseWriter, ctx context.Context) bool {
 	return true
 }
 
-// Keep future queue output commitments visible to uploads while their queue
-// transaction waits. The transaction checks its original (pre-reservation)
-// snapshot against current queue commitments; concurrent provisional budgets
-// can conservatively reduce space until their transactions settle.
-type capacityReservation struct{ bytes uint64 }
+// Disk work precedes queue acquisition. Keep allocations published since
+// this snapshot in memory until its final admission check has consumed them.
+type completedAllocation struct{ generation, length uint64 }
+type fileCapacitySnapshot struct {
+	store      *FileStore
+	generation uint64
+	status     FileStoreStatus
+	payloads   map[string]storedPayload
+}
 
-func (s *FileStore) reserveCapacity(ctx context.Context, bytes func(map[string]storedPayload) uint64) (FileStoreStatus, map[string]storedPayload, func(), error) {
-	if err := lockUploadContext(ctx, s.admissionMu.Lock, s.admissionMu.Unlock); err != nil {
-		return FileStoreStatus{}, nil, nil, err
-	}
-	defer s.admissionMu.Unlock()
-	status, payloads, err := s.capacity(ctx)
-	if err != nil {
-		status.Error = "file store capacity unavailable"
-	}
-	reservation := &capacityReservation{bytes: bytes(payloads)}
+func (s *FileStore) snapshotCapacity(ctx context.Context) *fileCapacitySnapshot {
+	view := &fileCapacitySnapshot{store: s}
 	s.mu.Lock()
-	if s.capacityReservations == nil {
-		s.capacityReservations = map[*capacityReservation]bool{}
+	view.generation = s.allocationGeneration
+	if s.capacitySnapshots == nil {
+		s.capacitySnapshots = map[*fileCapacitySnapshot]bool{}
 	}
-	s.capacityReservations[reservation] = true
+	s.capacitySnapshots[view] = true
 	s.mu.Unlock()
-	return status, payloads, func() { s.mu.Lock(); delete(s.capacityReservations, reservation); s.mu.Unlock() }, nil
+	var err error
+	view.status, view.payloads, err = s.diskCapacity(ctx)
+	if err != nil {
+		view.status.Error = "file store capacity unavailable"
+	}
+	return view
+}
+func (s *FileStore) noteAllocation(hash string, length uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.allocationGeneration++
+	if s.completedAllocations == nil {
+		s.completedAllocations = map[string]completedAllocation{}
+	}
+	s.completedAllocations[hash] = completedAllocation{s.allocationGeneration, length}
+}
+func (v *fileCapacitySnapshot) release() {
+	s := v.store
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.capacitySnapshots, v)
+	oldest := s.allocationGeneration
+	for view := range s.capacitySnapshots {
+		oldest = min(oldest, view.generation)
+	}
+	for hash, allocation := range s.completedAllocations {
+		if allocation.generation <= oldest {
+			delete(s.completedAllocations, hash)
+		}
+	}
+}
+
+// Caller holds s.mu; queue admission also holds q.mu. This is memory only.
+func (v *fileCapacitySnapshot) current() (FileStoreStatus, map[string]storedPayload) {
+	s := v.store
+	status := v.status
+	payloads := maps.Clone(v.payloads)
+	if payloads == nil {
+		payloads = map[string]storedPayload{}
+	}
+	include := func(hash string, length uint64) {
+		p := payloads[hash]
+		p.length = max(p.length, length)
+		payloads[hash] = p
+	}
+	for hash, allocation := range s.completedAllocations {
+		if allocation.generation > v.generation {
+			include(hash, allocation.length)
+		}
+	}
+	for hash, creation := range s.creations {
+		if creation.length > 0 {
+			include(hash, creation.length)
+		}
+	}
+	var allocated, remaining uint64
+	status.UsedBytes = 0
+	for _, p := range payloads {
+		status.UsedBytes = addDiskBytes(status.UsedBytes, p.size)
+		allocated = addDiskBytes(allocated, p.length)
+		remaining = addDiskBytes(remaining, p.length-p.size)
+	}
+	unavailable := addDiskBytes(status.FloorBytes, remaining)
+	status.FreeBytes = min(status.LimitBytes-min(status.LimitBytes, allocated), status.DiskFreeBytes-min(status.DiskFreeBytes, unavailable))
+	return status, payloads
 }

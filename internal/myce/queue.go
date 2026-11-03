@@ -660,22 +660,19 @@ func (q *Queue) SubmitContext(ctx context.Context, s Spec) (_ *Job, err error) {
 	}
 	var resultCapacity FileStoreStatus
 	var resultPayloads map[string]storedPayload
+	var resultView *fileCapacitySnapshot
 	if s.OutputDelivery == asyncNAS && !replay && store != nil {
-		// Reserve the prospective estimate before waiting for the queue.
-		var finish func()
-		resultCapacity, resultPayloads, finish, err = store.reserveCapacity(ctx, func(map[string]storedPayload) uint64 {
-			if s.Disk != nil {
-				return s.Disk.OutputBytes
-			}
-			return 0
-		})
-		if err != nil {
-			return nil, err
-		}
-		defer finish()
+		resultView = store.snapshotCapacity(ctx)
+		defer resultView.release()
 	}
+
 	var out Job
 	err = q.updateRequest(ctx, func() error {
+		if resultView != nil {
+			store.mu.Lock()
+			resultCapacity, resultPayloads = resultView.current()
+			store.mu.Unlock()
+		}
 		q.maintainSubmissions()
 		existing, err := q.existingSubmission(s, fingerprint)
 		if err != nil {

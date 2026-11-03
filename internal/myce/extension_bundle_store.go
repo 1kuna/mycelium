@@ -57,26 +57,11 @@ func (s *FileStore) freezeFiles(files *map[string][]byte, ref **FileRef, digest 
 	err = s.verify(context.Background(), next)
 	missing := os.IsNotExist(err)
 	if err != nil {
-		ctx := requestContext(contexts)
-		if e := lockUploadContext(ctx, s.admissionMu.Lock, s.admissionMu.Unlock); e != nil {
-			return e
-		}
-		status, payloads, e := s.capacity(ctx)
+		ctx := context.WithValue(requestContext(contexts), fileStoreOrdinaryKey{}, true)
+		view := s.snapshotCapacity(ctx)
+		_, e := s.admitCreation(ctx, view, next)
+		view.release()
 		if e != nil {
-			status.Error = "file store capacity unavailable"
-		}
-		if payloads == nil {
-			payloads = map[string]storedPayload{}
-		}
-		// Replacement of corrupt bytes can grow an existing allocation too.
-		growth := uint64(next.SizeBytes) - min(uint64(next.SizeBytes), payloads[next.SHA256].length)
-		s.mu.Lock()
-		s.creations[next.SHA256].length = uint64(next.SizeBytes)
-		s.mu.Unlock()
-		s.admissionMu.Unlock()
-		payloads[next.SHA256] = storedPayload{length: uint64(next.SizeBytes)}
-		need := addDiskBytes(growth, s.reservedOutputs(payloads, ctx))
-		if _, e = s.admit(context.WithValue(requestContext(contexts), fileStoreOrdinaryKey{}, true), status, payloads, FileManifest{"bundle": next}, need, growth); e != nil {
 			return e
 		}
 	}
@@ -109,6 +94,7 @@ func (s *FileStore) freezeFiles(files *map[string][]byte, ref **FileRef, digest 
 				return e
 			}
 		}
+		s.noteAllocation(next.SHA256, uint64(next.SizeBytes))
 	}
 	if err = s.verify(context.Background(), next); err != nil {
 		return err

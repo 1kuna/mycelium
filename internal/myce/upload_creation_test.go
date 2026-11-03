@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -243,5 +244,78 @@ func TestUploadCancelledLaunchTiming(t *testing.T) {
 		if err := <-done; err != context.Canceled {
 			t.Fatalf("cancelled launch: %v", err)
 		}
+	}
+}
+
+func TestUploadCreationResultReservationHandoff(t *testing.T) {
+	for _, cancelCreation := range []bool{false, true} {
+		t.Run(fmt.Sprint(cancelCreation), func(t *testing.T) {
+			q, s := creationStore(t, 100)
+			q.deliveryRoot = q.root
+			m := machine("publisher", "fake")
+			check(t, q, m, nil)
+			spec := asyncDeliverySpec()
+			spec.Disk.OutputBytes = 40
+			if cancelCreation {
+				spec.Disk.OutputBytes = 10
+			}
+			j := submit(t, q, spec)
+			assigned := check(t, q, m, nil).Job
+			if assigned == nil || assigned.ID != j.ID {
+				t.Fatal("missing assignment")
+			}
+			output := creationRef(strings.Repeat("x", 40))
+			if cancelCreation {
+				output = creationRef(strings.Repeat("x", 80))
+			}
+			var cancel context.CancelFunc
+			var creationDone chan struct{}
+			if cancelCreation {
+				ctx, stop := context.WithCancel(context.Background())
+				cancel = stop
+				defer cancel()
+				entered := make(chan struct{})
+				record := s.recordUpload
+				s.recordUpload = func(hash, purpose string, created bool, contexts ...context.Context) error {
+					if hash == output.SHA256 {
+						close(entered)
+						<-ctx.Done()
+						return ctx.Err()
+					}
+					return record(hash, purpose, created, contexts...)
+				}
+				creationDone = make(chan struct{})
+				go func() { defer close(creationDone); s.serveUpload(httptest.NewRecorder(), creationRequest(ctx, output)) }()
+				<-entered
+			}
+			entered, release := make(chan struct{}), make(chan struct{})
+			q.checkpointProbe = func() bool { close(entered); <-release; return true }
+			r := result(assigned, true)
+			r.OutputRefs = FileManifest{"out.txt": output}
+			reservationDone := make(chan error, 1)
+			go func() { reservationDone <- q.reserveDeliveryResult(context.Background(), r) }()
+			<-entered
+			if cancelCreation {
+				cancel()
+				<-creationDone
+			}
+			otherSize := 30
+			if cancelCreation {
+				otherSize = 90
+			}
+			w := httptest.NewRecorder()
+			s.serveUpload(w, creationRequest(context.Background(), creationRef(strings.Repeat("y", otherSize))))
+			if w.Code != 201 {
+				t.Errorf("unrelated upload was double-counted: %d %s", w.Code, w.Body.String())
+			}
+			close(release)
+			err := <-reservationDone
+			if cancelCreation && err == nil {
+				t.Fatal("result admitted against cancelled backing allocation")
+			}
+			if !cancelCreation && err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }

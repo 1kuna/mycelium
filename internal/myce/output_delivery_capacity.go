@@ -83,22 +83,12 @@ func (q *Queue) reserveDeliveryResult(ctx context.Context, r Result) (err error)
 	if store == nil {
 		return errors.New("file store unavailable")
 	}
-	status, payloads, finish, err := store.reserveCapacity(ctx, func(payloads map[string]storedPayload) uint64 {
-		var bytes uint64
-		seen := map[string]bool{}
-		for _, ref := range r.OutputRefs {
-			if !seen[ref.SHA256] && payloads[ref.SHA256].length != uint64(ref.SizeBytes) {
-				bytes = addDiskBytes(bytes, uint64(ref.SizeBytes))
-			}
-			seen[ref.SHA256] = true
-		}
-		return bytes
-	})
-	if err != nil {
-		return err
-	}
-	defer finish()
+	view := store.snapshotCapacity(ctx)
+	defer view.release()
 	return q.updateRequest(ctx, func() error {
+		store.mu.Lock()
+		status, payloads := view.current()
+		store.mu.Unlock()
 		j, err := q.current(r)
 		m := q.s.Machines[r.Machine]
 		if err != nil || j.State != "running" || cancelled(j) || j.Spec.OutputDelivery != asyncNAS || m == nil || m.Session != r.Session || q.files != store {
@@ -176,23 +166,21 @@ func (q *Queue) admitOutputRetries(ctx context.Context) error {
 	q.mu.RLock()
 	store := q.files
 	pending := false
-	var retryBytes uint64
 	for _, j := range q.liveJobs() {
 		if j.State == "queued" && j.OutputAdmissionPending {
 			pending = true
-			retryBytes = addDiskBytes(retryBytes, j.Spec.Disk.OutputBytes)
 		}
 	}
 	q.mu.RUnlock()
 	if !pending || store == nil {
 		return nil
 	}
-	status, payloads, finish, err := store.reserveCapacity(ctx, func(map[string]storedPayload) uint64 { return retryBytes })
-	if err != nil {
-		return err
-	}
-	defer finish()
+	view := store.snapshotCapacity(ctx)
+	defer view.release()
 	return q.updateRequest(ctx, func() error {
+		store.mu.Lock()
+		status, payloads := view.current()
+		store.mu.Unlock()
 		if store != q.files {
 			return ErrStale
 		}

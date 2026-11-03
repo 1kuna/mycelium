@@ -132,10 +132,12 @@ type FileStore struct {
 	root                        string
 	limit                       int64
 	mu                          sync.Mutex // In-memory creations only.
-	admissionMu                 sync.Mutex
 	uploadFilesMu               sync.RWMutex
 	creations                   map[string]*uploadCreation
-	capacityReservations        map[*capacityReservation]bool
+	allocationGeneration        uint64
+	completedAllocations        map[string]completedAllocation
+	capacitySnapshots           map[*fileCapacitySnapshot]bool
+	admitCreation               func(context.Context, *fileCapacitySnapshot, FileRef) (uint64, error)
 	handler                     http.Handler
 	uploadLocker                tus.Locker
 	syncDir                     func(string) error // Durability failure injection.
@@ -196,7 +198,7 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 			return err
 		}
 	}
-	s := &FileStore{checkAttempt: q.checkFileStoreAttempt, productionReserve: uint64(q.fileStoreProductionReserve), admit: q.admitFileUpload, reservedOutputs: q.reservedOutputBytes, root: root, limit: limit, syncDir: syncWorkerDir, expired: q.expiredBlob, lifecycle: &q.fileLifecycle, clock: q.clock, recordUpload: q.recordFileUpload, publishUpload: q.publishFileUpload, recordBundle: q.recordBundleUpload}
+	s := &FileStore{checkAttempt: q.checkFileStoreAttempt, productionReserve: uint64(q.fileStoreProductionReserve), admit: q.admitFileUpload, admitCreation: q.admitFileCreation, reservedOutputs: q.reservedOutputBytes, root: root, limit: limit, syncDir: syncWorkerDir, expired: q.expiredBlob, lifecycle: &q.fileLifecycle, clock: q.clock, recordUpload: q.recordFileUpload, publishUpload: q.publishFileUpload, recordBundle: q.recordBundleUpload}
 	if q.lock != nil {
 		database := strings.TrimSuffix(q.lock.Name(), ".lock")
 		s.controlFiles = controlStorageFiles{database: database, wal: database + "-wal", shared: database + "-shm"}
@@ -206,7 +208,7 @@ func (q *Queue) ConfigureFileStore(root string, limit int64, checkpoints bool) e
 	fs.FileModePerm = 0600
 	composer := tus.NewStoreComposer()
 	fs.UseIn(composer)
-	composer.UseCore(creationDataStore{DataStore: fs, mu: &s.uploadFilesMu})
+	composer.UseCore(creationDataStore{DataStore: fs, mu: &s.uploadFilesMu, store: s})
 	locker := filelocker.New(fs.Path)
 	s.uploadLocker = locker
 	locker.UseIn(composer)
@@ -424,37 +426,11 @@ func (s *FileStore) serveUpload(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(201)
 		return
 	}
-	// Serialize only the disk snapshot and reservation. All queue waits and
-	// persistence happen after this gate is released. Other admission paths
-	// include these reservations in capacity(), including before tus writes .info.
-	if err := lockUploadContext(r.Context(), s.admissionMu.Lock, s.admissionMu.Unlock); err != nil {
-		uploadCancelled(w, r.Context())
-		return
-	}
-	status, payloads, e := s.capacity(r.Context())
-	if e != nil {
-		status.Error = "file store capacity unavailable"
-	}
-	if e := fileStoreRefusal(status, uint64(length)); e != nil {
-		s.admissionMu.Unlock()
-		respond(w, nil, e)
-		return
-	}
-	s.mu.Lock()
-	s.creations[hash].length = uint64(length)
-	s.mu.Unlock()
-	s.admissionMu.Unlock()
-	if uploadCancelled(w, r.Context()) {
-		return
-	}
-	// A declared output becomes allocated in this creation. Preserve every
-	// other estimate/identity reservation before admitting these bytes.
-	if payloads == nil {
-		payloads = map[string]storedPayload{}
-	}
-	payloads[hash] = storedPayload{length: uint64(length)}
-	need := addDiskBytes(uint64(length), s.reservedOutputs(payloads, r.Context()))
-	unidentified, err := s.admit(r.Context(), status, payloads, FileManifest{"upload": ref}, need, uint64(length))
+	// Disk work happens before queue acquisition. The queue admission checks
+	// current in-memory allocations and commits this reservation atomically.
+	view := s.snapshotCapacity(r.Context())
+	defer view.release()
+	unidentified, err := s.admitCreation(r.Context(), view, ref)
 	if err != nil {
 		respond(w, nil, err)
 		return

@@ -127,31 +127,11 @@ func (s *FileStore) inventory(ctx context.Context) (map[string]storedPayload, er
 	return out, nil
 }
 
-func (s *FileStore) capacity(ctx context.Context) (FileStoreStatus, map[string]storedPayload, error) {
+func (s *FileStore) diskCapacity(ctx context.Context) (FileStoreStatus, map[string]storedPayload, error) {
 	status := FileStoreStatus{Store: "queue-file-store", LimitBytes: uint64(s.limit), ProductionReserveBytes: s.productionReserve, UnidentifiedWritesMayUseReserve: s.productionReserve > 0, UnidentifiedReserveAdmittedBytes: s.unidentifiedReserveAdmitted.Load()}
-	// Snapshot reservations before disk: a creation may complete and release
-	// its reservation while inventory is in progress. Admission callers hold
-	// admissionMu, so new lengths cannot be reserved during this snapshot.
-	s.mu.Lock()
-	reservations := make(map[string]uint64, len(s.creations))
-	for hash, creation := range s.creations {
-		reservations[hash] = creation.length
-	}
-	var pendingBudget uint64
-	for reservation := range s.capacityReservations {
-		pendingBudget = addDiskBytes(pendingBudget, reservation.bytes)
-	}
-	s.mu.Unlock()
 	payloads, err := s.inventory(ctx)
 	if err != nil {
 		return status, nil, err
-	}
-	for hash, length := range reservations {
-		p := payloads[hash]
-		if length > p.length {
-			p.length = length
-			payloads[hash] = p
-		}
 	}
 	var allocated, remaining uint64
 	for _, p := range payloads {
@@ -174,7 +154,18 @@ func (s *FileStore) capacity(ctx context.Context) (FileStoreStatus, map[string]s
 	storeFree := status.LimitBytes - min(status.LimitBytes, allocated)
 	unavailable := addDiskBytes(status.FloorBytes, remaining)
 	status.FreeBytes = min(storeFree, disk.FreeBytes-min(disk.FreeBytes, unavailable))
-	status.FreeBytes -= min(status.FreeBytes, pendingBudget)
+	return status, payloads, nil
+}
+
+func (s *FileStore) capacity(ctx context.Context) (FileStoreStatus, map[string]storedPayload, error) {
+	view := s.snapshotCapacity(ctx)
+	defer view.release()
+	s.mu.Lock()
+	status, payloads := view.current()
+	s.mu.Unlock()
+	if status.Error != "" {
+		return status, payloads, errors.New(status.Error)
+	}
 	return status, payloads, nil
 }
 

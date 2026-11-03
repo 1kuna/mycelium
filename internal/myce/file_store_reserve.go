@@ -165,11 +165,19 @@ func (q *Queue) fileStoreWriteClass(ctx context.Context, files FileManifest, gro
 // can claim its tier, and unidentified legacy writes can also use the reserve.
 // Attempt checks fence stale executions; they do not bind bytes to their owner.
 func (q *Queue) admitFileUpload(ctx context.Context, status FileStoreStatus, projected map[string]storedPayload, files FileManifest, need, growth uint64) (uint64, error) {
-	// Most uploads need no queue mutation. Keep ordinary preflight/creation on
-	// the existing read path; journal only an actual commitment yield.
 	if err := lockUploadContext(ctx, q.mu.RLock, q.mu.RUnlock); err != nil {
 		return 0, err
 	}
+	ordinary, err := q.fileUploadAdmission(ctx, status, projected, files, need, growth)
+	q.mu.RUnlock()
+	if err == nil {
+		q.recordStorageWritePressure(ctx, status, projected, files, growth, false, "")
+	}
+	return ordinary, err
+}
+
+// Caller holds q.mu; all work here is queue metadata and in-memory accounting.
+func (q *Queue) fileUploadAdmission(ctx context.Context, status FileStoreStatus, projected map[string]storedPayload, files FileManifest, need, growth uint64) (uint64, error) {
 	production, identified, classErr := q.fileStoreWriteClass(ctx, files, growth)
 	reserved := q.outputReservationsFor(projected, "", true)
 	refusal := q.fileStoreReserveRefusal(status, need, growth, reserved, production)
@@ -189,13 +197,31 @@ func (q *Queue) admitFileUpload(ctx context.Context, status FileStoreStatus, pro
 		available := q.nonProductionFileStoreFree(status, reserved)
 		ordinary = min(growth, need-min(need, available))
 	}
-	q.mu.RUnlock()
 	if classErr != nil {
 		return 0, classErr
 	}
-	if refusal == nil {
-		q.recordStorageWritePressure(ctx, status, projected, files, growth, false, "")
-		return ordinary, nil
+	return ordinary, refusal
+}
+
+func (q *Queue) admitFileCreation(ctx context.Context, view *fileCapacitySnapshot, ref FileRef) (uint64, error) {
+	if err := lockUploadContext(ctx, q.mu.RLock, q.mu.RUnlock); err != nil {
+		return 0, err
 	}
-	return 0, refusal
+	s := view.store
+	s.mu.Lock()
+	status, payloads := view.current()
+	growth := uint64(ref.SizeBytes) - min(uint64(ref.SizeBytes), payloads[ref.SHA256].length)
+	payloads[ref.SHA256] = storedPayload{length: uint64(ref.SizeBytes)}
+	need := addDiskBytes(growth, q.outputReservations(payloads, ""))
+	files := FileManifest{"upload": ref}
+	ordinary, err := q.fileUploadAdmission(ctx, status, payloads, files, need, growth)
+	if err == nil {
+		s.creations[ref.SHA256].length = uint64(ref.SizeBytes)
+	}
+	s.mu.Unlock()
+	q.mu.RUnlock()
+	if err == nil {
+		q.recordStorageWritePressure(ctx, status, payloads, files, growth, false, "")
+	}
+	return ordinary, err
 }
