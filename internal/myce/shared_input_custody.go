@@ -74,9 +74,15 @@ func (s *workerStore) pinSharedInput(root, key string) (func(), error) {
 	}
 	pin := sharedInputPin(root, key, s.sharedInputOwnerID())
 	if err = os.MkdirAll(filepath.Dir(pin), 0700); err == nil {
-		err = saveWorkerJSON(filepath.Dir(pin), filepath.Base(pin), struct{}{})
+		// An empty pin has no partial representation: writing the final name
+		// directly avoids orphaned atomic-write temporary files after a crash.
+		var f *os.File
+		f, err = os.OpenFile(pin, os.O_CREATE|os.O_WRONLY, 0600)
+		if err == nil {
+			err = errors.Join(f.Sync(), f.Close(), syncWorkerDir(filepath.Dir(pin)))
+		}
 	}
-	return func() { _ = os.Remove(pin) }, err
+	return func() { _ = removeSharedInputPin(pin) }, err
 }
 
 func sharedInputPinned(root, key string) (bool, error) {
@@ -94,7 +100,16 @@ func (s *workerStore) releaseSharedInputPins() error {
 	}
 	for _, use := range uses {
 		pin := sharedInputPin(use.Root, use.Key, s.sharedInputOwnerID())
-		if err := os.Remove(pin); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if err := removeSharedInputPin(pin); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func removeSharedInputPin(pin string) error {
+	for _, path := range []string{pin, pin + ".tmp"} {
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}

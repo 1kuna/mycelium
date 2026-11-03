@@ -461,8 +461,16 @@ func TestModelSnapshotActiveCustodySurvivesRestart(t *testing.T) {
 	if _, err := sibling.pinSharedInput(cache.cache.Root, input.key()); err != nil {
 		t.Fatal(err)
 	}
+	// Recover the interrupted atomic publication used by older pin writers too.
+	temporary := sharedInputPin(cache.cache.Root, input.key(), sibling.sharedInputOwnerID()) + ".tmp"
+	if err := os.WriteFile(temporary, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
 	if err := sibling.cleanupOrphan(clock); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := os.Stat(temporary); !os.IsNotExist(err) {
+		t.Fatal("interrupted owner pin leaked", err)
 	}
 	if pinned, err := sharedInputPinned(cache.cache.Root, input.key()); err != nil || !pinned {
 		t.Fatal("sibling cleanup lost active pin", err)
