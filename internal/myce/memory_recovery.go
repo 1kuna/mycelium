@@ -48,6 +48,36 @@ func (q *Queue) recoveredMemoryObservations() map[ObservationKey]memoryRecovery 
 		return a.Before(*b)
 	})
 	for _, j := range jobs {
+		checked := map[memoryWorkKey]bool{}
+		vetoRealFailures := func(base WorkObservation) {
+			work := memoryWorkIdentity(base.Key, base.MemoryConfiguration)
+			if checked[work] {
+				return
+			}
+			checked[work] = true
+			// An identical constrained peak can invalidate without changing the
+			// aggregate, hence without emitting a learning-mutation entry. These
+			// outcomes only veto recovery; they never establish learned peaks.
+			for _, outcome := range j.AttemptHistory {
+				if outcome.State == "succeeded" {
+					continue
+				}
+				constrained := false
+				for _, facts := range j.MemoryAttempts {
+					if facts.Attempt == outcome.Attempt && facts.Machine == outcome.Machine && facts.Session == outcome.Session && facts.MemoryPeak.constrained() && facts.MemoryPeak.Source != processGroupMemorySource {
+						constrained = true
+					}
+				}
+				r := Result{Interrupted: outcome.Interrupted, OutOfMemory: outcome.OutOfMemory, ExecutionCause: outcome.ExecutionCause}
+				if outcome.OutOfMemory || constrained && memoryConstraintResult(true, r) {
+					f := failed[work]
+					if outcome.EndedAt.After(f.constrainedAt) {
+						f.constrainedAt = outcome.EndedAt
+					}
+					failed[work] = f
+				}
+			}
+		}
 		// Invalidation entries keep the rewritten key and execution after retry
 		// replaces Timing. Pair only with that execution's retained outcome.
 		for _, entry := range j.LedgerEntries {
@@ -59,6 +89,7 @@ func (q *Queue) recoveredMemoryObservations() map[ObservationKey]memoryRecovery 
 				continue
 			}
 			work := memoryWorkIdentity(base.Key, base.MemoryConfiguration)
+			vetoRealFailures(base)
 			matched := false
 			for _, outcome := range j.AttemptHistory {
 				if outcome.Attempt != entry.Attempt || outcome.Machine != entry.Machine || outcome.Session != entry.Session || outcome.State == "succeeded" {
@@ -86,6 +117,9 @@ func (q *Queue) recoveredMemoryObservations() map[ObservationKey]memoryRecovery 
 		}
 		k := *j.Timing.Key
 		configuration := memoryConfiguration(j.Spec.Needs, j.Spec.Args, j.Spec.Program)
+		if base, ok := wanted[k]; ok && base.MemoryConfiguration == configuration {
+			vetoRealFailures(base)
+		}
 		for _, facts := range j.MemoryAttempts {
 			if facts.Attempt != j.Timing.Execution.Attempt || facts.Machine != j.Timing.Machine || facts.Session != j.Timing.Session || j.Timing.Execution.ID != j.ID {
 				continue

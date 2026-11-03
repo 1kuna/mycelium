@@ -128,51 +128,61 @@ func legacyInterruptedMemoryInvalidation(t *testing.T, q *Queue, r Result) {
 }
 
 func TestMemoryEnvelopeInterruptedRecoveryReassignmentAndOOM(t *testing.T) {
-	q, clock, m, s := observationFixture(t)
-	s.Needs.Memory = "auto"
-	first := startObservation(t, q, m, s)
-	clock.Advance(time.Second)
-	peak := 2.0
-	r := result(&first, true)
-	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak}
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	run := startObservation(t, q, m, s)
-	clock.Advance(time.Second)
-	r = result(&run, false)
-	r.Interrupted = true
-	r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak, Constrained: true}
-	r.ExecutionCause = &RuntimeCause{Operation: "start_authorization", Class: "timeout"}
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	legacyInterruptedMemoryInvalidation(t, q, r)
-	q = memoryFactsRestart(t, q, clock)
-	retry := assignedJob(machineCheck(t, q, m))
-	if retry == nil || retry.ID != run.ID || retry.Attempt != run.Attempt+1 {
-		t.Fatal("retry not reassigned", retry)
-	}
-	candidate := first
-	candidate.State = "queued"
-	if got := q.memoryCandidate(&candidate, q.s.Machines[m.ID]); got.MemoryEnvelope.HostGB != 2.5 {
-		t.Fatalf("reassignment erased recovery: %+v", got.MemoryEnvelope)
-	}
-	if err := q.Started(result(retry, false)); err != nil {
-		t.Fatal(err)
-	}
-	clock.Advance(time.Second)
-	r = result(retry, false)
-	r.OutOfMemory = true // A real OOM, with no final peak, supersedes interruption.
-	if err := q.Complete(r); err != nil {
-		t.Fatal(err)
-	}
-	if err := q.Cancel(retry.ID); err != nil {
-		t.Fatal(err)
-	}
-	got := q.memoryCandidate(&candidate, q.s.Machines[m.ID])
-	if got.MemoryEnvelope.Source != boundedQuarter || got.MemoryEnvelope.HostGB != 16 {
-		t.Fatalf("recovery weakened real OOM exploration: %+v", got.MemoryEnvelope)
+	for _, ending := range []string{"OOM without peak", "identical constrained peak"} {
+		t.Run(ending, func(t *testing.T) {
+			q, clock, m, s := observationFixture(t)
+			s.Needs.Memory = "auto"
+			first := startObservation(t, q, m, s)
+			clock.Advance(time.Second)
+			peak := 2.0
+			r := result(&first, true)
+			r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak}
+			if err := q.Complete(r); err != nil {
+				t.Fatal(err)
+			}
+			run := startObservation(t, q, m, s)
+			clock.Advance(time.Second)
+			r = result(&run, false)
+			r.Interrupted = true
+			r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak, Constrained: true}
+			r.ExecutionCause = &RuntimeCause{Operation: "start_authorization", Class: "timeout"}
+			if err := q.Complete(r); err != nil {
+				t.Fatal(err)
+			}
+			legacyInterruptedMemoryInvalidation(t, q, r)
+			q = memoryFactsRestart(t, q, clock)
+			retry := assignedJob(machineCheck(t, q, m))
+			if retry == nil || retry.ID != run.ID || retry.Attempt != run.Attempt+1 {
+				t.Fatal("retry not reassigned", retry)
+			}
+			candidate := first
+			candidate.State = "queued"
+			if got := q.memoryCandidate(&candidate, q.s.Machines[m.ID]); got.MemoryEnvelope.HostGB != 2.5 {
+				t.Fatalf("reassignment erased recovery: %+v", got.MemoryEnvelope)
+			}
+			if err := q.Started(result(retry, false)); err != nil {
+				t.Fatal(err)
+			}
+			clock.Advance(time.Second)
+			r = result(retry, false)
+			wantSource := boundedQuarter
+			if ending == "OOM without peak" {
+				r.OutOfMemory = true // A real OOM, with no final peak, supersedes interruption.
+			} else {
+				r.MemoryPeak = &AttemptMemoryPeak{HostGB: &peak, Constrained: true}
+				wantSource = "exploratory (previous peak constrained) (bounded: 25% of host allowance)"
+			}
+			if err := q.Complete(r); err != nil {
+				t.Fatal(err)
+			}
+			if err := q.Cancel(retry.ID); err != nil {
+				t.Fatal(err)
+			}
+			got := q.memoryCandidate(&candidate, q.s.Machines[m.ID])
+			if got.MemoryEnvelope.Source != wantSource || got.MemoryEnvelope.HostGB != 16 {
+				t.Fatalf("recovery weakened real OOM exploration: %+v", got.MemoryEnvelope)
+			}
+		})
 	}
 }
 
