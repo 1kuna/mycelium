@@ -183,16 +183,20 @@ func (g *nativeGroup) signalLocked(member *nativeMember, signal syscall.Signal) 
 	if member != nil && member.Exit != nil {
 		return
 	}
-	pid := -g.supervisor.Process.Pid
-	var err error
 	if member != nil {
-		err = member.signal(signal)
-	} else {
-		err = signalWorkerGroup(-pid, signal)
-	}
-	if err != nil {
+		if member.signal(signal) == nil {
+			g.recordSignalLocked(member, signal)
+		}
 		return
 	}
+	// Persist delivery before the session sweep can observe/reap a stopped
+	// member. A later descendant error must not erase successful group delivery.
+	_ = signalWorkerSession(g.supervisor.Process.Pid, signal, func() {
+		g.recordSignalLocked(nil, signal)
+	})
+}
+
+func (g *nativeGroup) recordSignalLocked(member *nativeMember, signal syscall.Signal) {
 	at := time.Now().UTC()
 	name := "TERM"
 	if signal == syscall.SIGKILL {

@@ -16,6 +16,7 @@ import (
 // PortabilityRequest is advice input, never a registration or submission.
 // Extension metadata may be incomplete: missing build inputs are reportable gaps.
 type PortabilityRequest struct {
+	SourceUnverified   bool              `json:"source_unverified,omitempty"`
 	Project            string            `json:"project,omitempty"`
 	Extension          string            `json:"extension,omitempty"`
 	Recipe             *Extension        `json:"recipe,omitempty"`
@@ -194,7 +195,12 @@ func (q *Queue) portability(req PortabilityRequest) PortabilityReport {
 			needs := portabilityResources(v.Needs)
 			r.Needs = &needs
 			for _, name := range sortedPortabilityKeys(v.Environments) {
-				r.Environments = append(r.Environments, portabilityEnvironment(name, v.Environments[name], e.Files, v.Target))
+				environment := portabilityEnvironment(name, v.Environments[name], e.Files, v.Target)
+				if req.SourceUnverified && e.Digest == "" {
+					environment.Inputs, environment.LockCoverage = "unknown: selected source not inspected", "unknown: selected source not inspected"
+					environment.MissingInputs = nil
+				}
+				r.Environments = append(r.Environments, environment)
 			}
 		}
 	}
@@ -448,7 +454,9 @@ func (q *Queue) portability(req PortabilityRequest) PortabilityReport {
 		}
 		r.Actions = append(r.Actions, "Cover "+platform+" with uv.lock + pyproject.toml or pixi.lock + pixi.toml; reuse a multi-target lock when valid, otherwise split recipes. Verify frozen installation on this target; never solve on workers.")
 		for _, env := range r.Environments {
-			if env.Inputs != "present" {
+			if env.Inputs == "unknown: selected source not inspected" {
+				r.Actions = append(r.Actions, "Inspect the selected Git/snapshot source or query a registered frozen extension; working-tree lock files do not establish selected-source coverage.")
+			} else if env.Inputs != "present" {
 				r.Actions = append(r.Actions, "Supply missing manifest/lock/build inputs for environment "+env.Name+"; lock coverage is "+env.LockCoverage+".")
 			}
 		}

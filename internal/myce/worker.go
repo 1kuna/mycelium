@@ -26,6 +26,7 @@ var workerCheckpointPrepare = prepareCheckpoint
 // StateDir holds the worker lock, execution identity, logs and pending results.
 // An empty StateDir uses the current user's cache, keyed by queue and machine.
 type Worker struct {
+	nasInspection        *workerNASInspection
 	storageObserver      *storageObserver
 	hostMemorySamples    map[attemptKey]hostMemorySample
 	DiskProbe            func(string) (DiskReading, error)
@@ -334,12 +335,15 @@ func (p *process) signalLocked(signal syscall.Signal) bool {
 			return false
 		}
 	}
-	if err := signalWorkerGroup(p.cmd.Process.Pid, signal); err != nil {
-		return false
-	}
-	if exited {
-		return true
-	} // A descendant signal cannot rewrite the main's exit facts.
+	err := signalWorkerSession(p.cmd.Process.Pid, signal, func() {
+		if !exited {
+			p.recordSignalLocked(signal)
+		}
+	})
+	return err == nil
+}
+
+func (p *process) recordSignalLocked(signal syscall.Signal) {
 	at := time.Now().UTC()
 	name := "TERM"
 	if signal == syscall.SIGKILL {
@@ -350,7 +354,6 @@ func (p *process) signalLocked(signal syscall.Signal) bool {
 	if p.saveOutcome != nil && p.saveOutcome(next) == nil {
 		p.outcome = next
 	}
-	return true
 }
 
 var errWorkerMemory = errors.New("free memory unavailable or insufficient")

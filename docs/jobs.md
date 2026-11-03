@@ -111,7 +111,8 @@ myce spec check --resolve .mycelium/profiles/NAME.yaml
 myce spec check --resolve --entry NAME .mycelium/adapter.yaml
 ```
 
-The CLI stats local inputs (it never hashes or uploads them) and sends the job
+The CLI stats local inputs and verifies explicitly declared local shared-input
+hashes (it never uploads them) and sends the job
 to `POST /api/resolve`. The queue reads the environment exactly as submit does
 and evaluates every known target with submission's permanent-capacity fit
 checks, so a target's reason is the refusal `require_target` would give. Each
@@ -126,6 +127,41 @@ which defeat store deduplication because every source change repacks them.
 `--json` prints the report. Exit status is 0 when some target is eligible, and
 1 when the spec is invalid or no target is. Resolve creates no job, upload,
 build or reservation, and grants nothing: submit revalidates every fence.
+
+From the next release, each command target also reports the immutable environment
+key, backend and `ready`, `prepare-needed` or `blocked` state. A cold uv/Pixi
+builder can prepare a locked Python 3.12 environment even when system Python is
+older; use `python3` from the managed PATH, rather than an absolute system
+interpreter. Pixi locks can include media tools such as ffmpeg. Resolve never
+runs the builder. File-store inputs report `ready` only after read-only hash/size verification;
+missing or corrupt bytes and submitter placeholders are `needs-staging`.
+The bounded local observation can return `unknown` if verification is busy or
+incomplete; repeat the check or let submission perform its full validation.
+The check shares submission's single I/O slot, runs outside the queue lock, and
+never performs a publication fsync. Submit verifies hashes and sizes again.
+
+For optional NAS existence evidence, add `--inspect-nas` and repeat after worker
+heartbeats. This authenticated request checks only declared `shared_inputs.nas`
+paths under each worker's checkpoint root, using metadata, with no payload
+execution or byte reads. Per-target `nas_inputs` reports `pending`, `unverified`,
+`present` or `missing`, with queue receipt timestamps adjusted for worker sample
+age. Results expire after one minute. A missing source blocks that resolve row
+unless the worker already reports verified cached bytes. Absent, stale or
+older-worker evidence stays unverified. A present path still has unverified
+bytes; staging and submission retain every fence. The cache is transient and
+bounded to 256 entries per API listener, eight requests per heartbeat and one
+outstanding metadata operation per worker. Saturation stays unverified. No jobs
+or reservations are created. This signal requires the inspection-capable worker
+upgrade; an upgraded CLI/queue alone cannot establish visibility.
+
+Native variant adapter entries now return the existing portability metadata
+alongside resolve, including lock-input gaps, preparation and qualification.
+Only directory-source lock metadata is inspected locally. Git/snapshot lock
+coverage stays explicitly unknown, so excluded or commit-only files cannot be
+replaced by working-tree files. Local authored metadata has no frozen registration; eligibility stays unknown
+until registration and qualification. Resolve never registers a recipe or runs
+a qualification payload. Use `myce portability --extension NAME@VERSION` for
+already registered evidence.
 
 | Field | Required / default | Meaning |
 |---|---|---|
