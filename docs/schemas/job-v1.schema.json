@@ -2960,6 +2960,15 @@
         "machine": {
           "type": "string"
         },
+        "releases": {
+          "items": {
+            "type": "string"
+          },
+          "type": [
+            "array",
+            "null"
+          ]
+        },
         "session": {
           "type": "string"
         }

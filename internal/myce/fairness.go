@@ -374,7 +374,7 @@ func (q *Queue) plannedPick(m *Machine, scan *placementScan) *Job {
 }
 
 func (q *Queue) immediateCandidate(best *Job, m *Machine) *Job {
-	if best != nil && (q.preparationActive(m) || q.preparationStopping(m) || q.calls[best.ID] != nil || !fits(best, m, m.FreeMemoryGB) || !environmentReady(best, m)) {
+	if best != nil && (q.preemptionReleasesPending(best) || q.preparationActive(m) || q.preparationStopping(m) || q.calls[best.ID] != nil || !fits(best, m, m.FreeMemoryGB) || !environmentReady(best, m)) {
 		return nil
 	}
 	return best

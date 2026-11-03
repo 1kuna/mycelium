@@ -154,3 +154,142 @@ func TestGPUPreemptionKeepsSelectedCards(t *testing.T) {
 		})
 	}
 }
+
+func TestCPUPreemptionWaitsForSelectedVictim(t *testing.T) {
+	q, _ := fixture(t)
+	m := m3Machine()
+	m.CapabilityProfile.LogicalCPUs = 16
+	low := sharedSpec("experiment", 8)
+	low.Needs.CPUCores = 8
+	victim := submit(t, q, low)
+	run := assignedJob(machineCheck(t, q, m))
+	if run == nil || run.ID != victim.ID {
+		t.Fatal("missing victim", run)
+	}
+	if err := q.Started(result(run, false)); err != nil {
+		t.Fatal(err)
+	}
+	high := cpuSpec(8, 1)
+	high.Priority = "production"
+	blocker := submit(t, q, high)
+	busy := assignedJob(machineCheck(t, q, m, run))
+	if busy == nil || busy.ID != blocker.ID {
+		t.Fatal("missing production blocker", busy)
+	}
+	if err := q.Started(result(busy, false)); err != nil {
+		t.Fatal(err)
+	}
+	demand := submit(t, q, high)
+	if stop := priorityStop(job(t, q, victim.ID)); stop == nil || stop.Demand != demand.ID {
+		t.Fatal("missing stop", stop)
+	}
+	finish(t, q, busy, true)
+	if next := assignedJob(machineCheck(t, q, m, run)); next != nil && next.ID == demand.ID {
+		t.Fatal("unrelated release admitted demand before selected victim released")
+	}
+	finishInterrupted(t, q, run)
+	next := assignedJob(machineCheck(t, q, m))
+	if next == nil || next.ID != demand.ID {
+		t.Fatal("selected release did not admit demand", next)
+	}
+	if err := q.Started(result(next, false)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestPreemptionPlacementDoesNotReviveAfterLoss(t *testing.T) {
+	q, clock := fixture(t)
+	a := m3Machine()
+	low := sharedSpec("experiment", 8)
+	low.Needs.CPUCores = 8
+	victim := submit(t, q, low)
+	run := assignedJob(machineCheck(t, q, a))
+	if run == nil || run.ID != victim.ID {
+		t.Fatal("missing victim", run)
+	}
+	if err := q.Started(result(run, false)); err != nil {
+		t.Fatal(err)
+	}
+	b := cpuMachine("other", "other-host", "cpu", 8, 32)
+	b.Devices = []MachineDevice{}
+	high := cpuSpec(8, 1)
+	high.Priority = "production"
+	high.AllowedMachines = []string{b.ID}
+	blocker := submit(t, q, high)
+	busy := assignedJob(machineCheck(t, q, b))
+	if busy == nil || busy.ID != blocker.ID {
+		t.Fatal("missing blocker", busy)
+	}
+	if err := q.Started(result(busy, false)); err != nil {
+		t.Fatal(err)
+	}
+	high.AllowedMachines = nil
+	demand := submit(t, q, high)
+	if stop := priorityStop(job(t, q, victim.ID)); stop == nil || stop.Demand != demand.ID {
+		t.Fatal("missing stop", stop)
+	}
+	clock.Advance(LossAfter + time.Second)
+	machineCheck(t, q, b, busy)
+	if !q.s.Machines[a.ID].Gone {
+		t.Fatal("victim host not declared lost")
+	}
+	finish(t, q, busy, true)
+	machineCheck(t, q, a, run)
+	next := assignedJob(machineCheck(t, q, b))
+	if next == nil || next.ID != demand.ID {
+		t.Fatal("same-session reconnect revived invalidated placement", next, job(t, q, demand.ID).Reason)
+	}
+}
+
+func TestFanOutPreemptionUsesCommittedComponents(t *testing.T) {
+	q, clock, a, s := fanOutFixture(t, 1)
+	b := cloneMachine(&a)
+	b.ID, b.HostID, b.Session = "faster", "faster-host", "faster-session"
+	b.ExtensionFingerprint = "faster-cpu"
+	e := q.s.Extensions[s.Extension]
+	report := newExtensionReport(e, &b, s.workType())
+	report.Setup, report.Qualified, report.CheckID = true, true, "faster-check"
+	b.ExtensionReports = []ExtensionReport{report}
+	check(t, q, b, nil)
+	key, why := curveKey(e, q.s.Machines[b.ID], s.workType())
+	if key == nil {
+		t.Fatal(why)
+	}
+	for _, count := range []int{1, 2, 4, 8} {
+		k := *key
+		k.Concurrency = count
+		q.s.WorkObservations[identityHash(k)] = WorkObservation{Key: k, Rate: float64(count) * 10000, HostMemoryGB: float64(count), Samples: 1, RecordedAt: clock.Now()}
+	}
+	low := cpuSpec(8, 1)
+	low.AllowedMachines = []string{a.ID}
+	victim := submit(t, q, low)
+	run := check(t, q, a, nil).Job
+	if run == nil || run.ID != victim.ID {
+		t.Fatal("missing victim", run)
+	}
+	if err := q.Started(result(run, false)); err != nil {
+		t.Fatal(err)
+	}
+	high := cpuSpec(8, 1)
+	high.Priority = "production"
+	high.AllowedMachines = []string{b.ID}
+	blocker := submit(t, q, high)
+	busy := check(t, q, b, nil).Job
+	if busy == nil || busy.ID != blocker.ID {
+		t.Fatal("missing blocker", busy)
+	}
+	if err := q.Started(result(busy, false)); err != nil {
+		t.Fatal(err)
+	}
+	s.Priority = "production"
+	demand := submit(t, q, s)
+	if stop := priorityStop(job(t, q, victim.ID)); stop == nil || stop.Demand != demand.ID {
+		t.Fatal("missing fan-out stop", stop)
+	}
+	finishInterrupted(t, q, run)
+	finish(t, q, busy, true)
+	next := check(t, q, a, nil).Job
+	if next == nil || next.Batch == nil || next.Batch.Parent != demand.ID || next.Machine != a.ID {
+		t.Fatal("measured fan-out abandoned committed component", next, job(t, q, demand.ID).Reason)
+	}
+}

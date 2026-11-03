@@ -979,6 +979,7 @@ func (q *Queue) maintain() {
 		restartExpired := unreported && !grace
 		if !m.Gone && !grace && (restartExpired || (!q.networkQuiet && now.Sub(q.lastContact(m, now)) >= q.machineLossTimeout(m.ID))) {
 			m.Gone = true
+			q.clearPreemptionPlacements(m.ID, m.Session)
 			delete(q.unreported, m.ID)
 			m.Models = nil
 			for _, j := range q.liveJobs() {
@@ -1278,6 +1279,9 @@ func (q *Queue) CheckinContext(ctx context.Context, c Checkin) (Reply, error) {
 		}
 		q.acceptExtensionQualifications(&m)
 		q.acceptSharedPressure(&m, old)
+		if old != nil && (old.Gone || old.Session != m.Session) {
+			q.clearPreemptionPlacements(old.ID, old.Session)
+		}
 		q.s.Machines[m.ID] = &m
 		q.recordExternalMemory(&m)
 		for _, report := range reports {
@@ -2462,8 +2466,8 @@ func (q *Queue) workerHasOtherAttempt(machine, session, job string, attempt int)
 // assign persists the exact target before delivering it through either wire form.
 func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	values := q.placementValues(q.placementScan(scans...))
-	q.touchJob(j.ID).PreemptionPlacement = nil
 	if j.Spec.FanOut != nil {
+		q.touchJob(j.ID).PreemptionPlacement = nil
 		j = q.assignFanOut(j, m)
 	}
 	estimate, measured := q.estimateCompletion(j, m)
@@ -2471,6 +2475,7 @@ func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	// reservation on the live attempt before charging any resources.
 	selected := j
 	j = q.touchJob(selected.ID)
+	j.PreemptionPlacement = nil
 	j.Spec.Needs = selected.Spec.Needs
 	j.MemoryEnvelope, j.MemoryFallback = selected.MemoryEnvelope, selected.MemoryFallback
 	q.recordLearnedMemory(j, m)

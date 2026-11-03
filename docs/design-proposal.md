@@ -66,9 +66,12 @@ When a worker asks for work, the queue picks, from the jobs that fit this machin
 check-in through the shared planner. Prefer compatible free capacity across all
 eligible hosts; when one fits idle, preempt nothing elsewhere. Otherwise choose
 one host and card set before stopping useful lower-tier work, and keep that
-placement for the demand through exact release and admission. A newly idle host
+placement for the demand through exact release and admission, including a
+fan-out parent's next wave. Admission waits for every selected release obligation;
+unrelated capacity becoming free does not settle those obligations. A newly idle host
 or sibling card does not redirect demand after it has caused a stop. Loss of the
-selected worker/session permits replanning without releasing cleanup custody.
+selected worker/session clears the commitment durably and permits replanning
+without releasing cleanup custody.
 This includes non-resumable commands, native
 sidecar groups, model calls/loads, pinned engines and environment builds. Idle
 unpinned same-tier model cache may be evicted; active same-tier work is never
