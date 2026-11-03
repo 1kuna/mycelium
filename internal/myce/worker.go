@@ -143,6 +143,7 @@ type process struct {
 	priorityStop     *PriorityPreemption
 	outcome          memberOutcome
 	saveOutcome      func(memberOutcome) error
+	saveCustody      func() error
 
 	machine    string
 	docker     *dockerAttempt
@@ -327,7 +328,12 @@ func (p *process) signalLocked(signal syscall.Signal) {
 	if exited && !p.stopGroup {
 		return
 	}
-	if err := syscall.Kill(-p.cmd.Process.Pid, signal); err != nil {
+	if p.saveCustody != nil {
+		if err := p.saveCustody(); err != nil {
+			return
+		}
+	}
+	if err := signalWorkerGroup(p.cmd.Process.Pid, signal); err != nil {
 		return
 	}
 	if exited {
@@ -716,11 +722,12 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	for _, k := range keys {
 		cmd.Env = append(cmd.Env, k+"="+env[k])
 	}
+	cmd.Env = processSessionEnvironment(cmd.Env)
 	cmd.Args = append(slices.Clone(cmd.Args[:4]), sharedHostCommand(environmentCommand(cmd.Args[4:], cmd.Env), w.Machine.SharedHost)...)
 	if err := w.isolateNativeAttempt(&j, nil, cmd, s.dir, executionWork, env, nil, true); err != nil {
 		return nil, s.startFailure(j, launchRefused, reject("native_isolation", err))
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = commandProcessAttributes()
 	logName := identity + ".log"
 	output, err := openCommandOutput(s.dir, logName, j.Spec.Logs, os.O_EXCL)
 	if err != nil {
@@ -787,7 +794,7 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 				return errors.Join(cause, fmt.Errorf("%w: %v", errWorkerReleasePending, stopErr))
 			}
 		}
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = signalWorkerGroup(cmd.Process.Pid, syscall.SIGKILL)
 		_ = cmd.Wait()
 		output.Close()
 		if releaseErr := waitWorkerGroup(cmd.Process.Pid, w.Clock); releaseErr != nil {
@@ -804,8 +811,8 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 	s.state.PID = cmd.Process.Pid
 	s.state.LaunchPending = false
 	custody := workerState{Accelerator: !j.Spec.Needs.cpuOnly(), CustodyID: identity, PID: s.state.PID, Identity: identity, StopGrace: s.state.StopGrace}
-	if sharedReaders(j.Spec) {
-		// Shared readers retain group custody after the main PID exits.
+	{
+		// Birth custody also covers session members after their leader exits (#579).
 		birth, e := processBirth(cmd.Process.Pid)
 		if e != nil {
 			return nil, abort(e)
@@ -837,6 +844,12 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		at := *deadline
 		savedStopAt, savedUserCancel = &at, userCancel
 		return nil
+	}
+	p.saveCustody = func() error {
+		if err := recordWorkerGroup(&custody, cmd.Process.Pid); err != nil {
+			return err
+		}
+		return saveWorkerJSON(s.dir, "attempt-"+identity+".json", custody)
 	}
 	p.saveOutcome = func(facts memberOutcome) error { return saveWorkerJSON(s.dir, identity+".outcome.json", facts) }
 	if w.control != nil {
@@ -911,8 +924,10 @@ func (w Worker) startContext(ctx context.Context, s *workerStore, j Job) (_ *pro
 		result.Forced = p.killed
 		p.mu.Unlock()
 		// Descendants must not outlive the command or append to delivered output.
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		groupErr := waitWorkerGroup(cmd.Process.Pid, w.Clock)
+		p.mu.Lock()
+		custodyErr := p.saveCustody()
+		p.mu.Unlock()
+		groupErr := errors.Join(custodyErr, signalWorkerGroup(cmd.Process.Pid, syscall.SIGKILL), waitWorkerGroup(cmd.Process.Pid, w.Clock))
 		peak := withExitMaxRSS(finishMemory(), cmd.ProcessState)
 		oomErr := memoryAttempt.failure()
 		groupErr = errors.Join(groupErr, memoryAttempt.cleanup(w.Clock))

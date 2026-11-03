@@ -188,7 +188,7 @@ func (g *nativeGroup) signalLocked(member *nativeMember, signal syscall.Signal) 
 	if member != nil {
 		err = member.signal(signal)
 	} else {
-		err = syscall.Kill(pid, signal)
+		err = signalWorkerGroup(-pid, signal)
 	}
 	if err != nil {
 		return
@@ -427,7 +427,7 @@ func (g *nativeGroup) startSupervisor(s *workerStore, env map[string]string) (*o
 	defer reader.Close()
 	cmd := exec.Command("/bin/sh", "-c", `trap '' TERM; while read line; do :; done`, "myce-supervisor-"+g.identity)
 	cmd.Stdin = reader
-	cmd.Env = environmentList(jobBaseEnvironment())
+	cmd.Env = inheritedProcessSessionEnvironment(environmentList(jobBaseEnvironment()))
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	work := filepath.Join(g.dir, "job-files", g.p.job.ID, strconv.Itoa(g.p.job.Attempt))
 	g.namespace = nil
@@ -693,7 +693,7 @@ func (g *nativeGroup) launch(m *nativeMember, argv []string, env map[string]stri
 	if m.memory != nil {
 		env["MYCE_MEMORY_LIMIT_BYTES"] = strconv.FormatInt(m.memory.bytes, 10)
 	}
-	cmd.Env = environmentList(env)
+	cmd.Env = inheritedProcessSessionEnvironment(environmentList(env))
 	cmd.Args = append(slices.Clone(cmd.Args[:4]), sharedHostCommand(environmentCommand(cmd.Args[4:], cmd.Env), g.worker.Machine.SharedHost)...)
 	if err := g.metricWorker().isolateNativeAttempt(&g.p.job, g.namespace, cmd, g.dir, work, env, g.isolationPorts, m.Name == "main"); err != nil {
 		return err
