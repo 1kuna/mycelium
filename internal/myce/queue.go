@@ -1690,6 +1690,12 @@ func (q *Queue) complete(r Result, filesVerified bool) error {
 	if err != nil {
 		return err
 	}
+	r.ExecutionCause = safeJobRuntimeCause(j.Spec, r.ExecutionCause)
+	if r.ExecutionCause != nil && r.ExecutionCause.Operation == "input_staging" {
+		// Keep the durable reason as safe as the structured cause; Error may
+		// contain the original worker-supplied diagnostic name or private text.
+		r.Error = r.ExecutionCause.String()
+	}
 	retainInputsStagedAt(j, r.InputsStagedAt)
 	if m := q.s.Machines[r.Machine]; m != nil {
 		m.LastSeen = q.clock.Now()

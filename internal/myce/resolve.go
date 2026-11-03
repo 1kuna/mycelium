@@ -75,6 +75,16 @@ func (q *Queue) Resolve(req ResolveRequest) (ResolveReport, error) {
 	}
 	recipes, sidecars, ok := view.resolveRecipes(s, &r)
 	r.Findings = append(r.Findings, resolvePathFindings(s)...)
+	var nasInputs []string
+	for name, input := range s.SharedInputs {
+		if input.NAS != "" {
+			nasInputs = append(nasInputs, "shared_inputs."+name+".nas")
+		}
+	}
+	if len(nasInputs) > 0 {
+		slices.Sort(nasInputs)
+		r.Notes = append(r.Notes, strings.Join(nasInputs, ", ")+": worker NAS reads are unverified. Paths are relative to each worker's --checkpoint-root; resolve does not check their existence or bytes. For data elsewhere, use profile local: or myce file put PATH and a shared input with sha256 and size_bytes, without nas.")
+	}
 	if _, err := view.modelLimits(s); err != nil {
 		r.Findings = append(r.Findings, ResolveFinding{Field: "model_snapshots", Side: "queue", Problem: err.Error(), Fix: "Ask the queue owner to permit the repository in the policy's models.sources, or declare a permitted repository."})
 	} else if len(s.ModelSnapshots) > 0 {

@@ -43,6 +43,25 @@ func cpuResolveSpec() Spec {
 	return Spec{Name: "resolve", Project: "test", Priority: "experiment", Run: RunSpec{Command: []string{"sh", "run.sh"}}, Needs: ResourceNeeds{CPUCores: 1, MemoryGB: 1, Platform: Platform{Required: []string{"cpu"}}}}
 }
 
+func TestResolveNASSharedInputReadsRemainUnverified(t *testing.T) {
+	q, _ := fixture(t)
+	s := cpuResolveSpec()
+	s.SharedInputs = map[string]SharedInput{"movie": {NAS: "media/movie", SHA256: strings.Repeat("a", 64), SizeBytes: 10}}
+	r, err := q.Resolve(ResolveRequest{Spec: s})
+	if err != nil {
+		t.Fatal(err)
+	}
+	notes := strings.Join(r.Notes, " ")
+	for _, want := range []string{"shared_inputs.movie.nas", "worker NAS reads are unverified", "--checkpoint-root", "does not check their existence or bytes", "profile local:", "myce file put"} {
+		if !strings.Contains(notes, want) {
+			t.Fatalf("resolve omitted %q: %s", want, notes)
+		}
+	}
+	if len(r.Findings) != 0 {
+		t.Fatalf("unknown NAS visibility became a proven missing input: %+v", r.Findings)
+	}
+}
+
 func resolveFinding(r ResolveReport, field string) *ResolveFinding {
 	for i := range r.Findings {
 		if r.Findings[i].Field == field {

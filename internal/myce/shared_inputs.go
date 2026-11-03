@@ -142,6 +142,10 @@ func (w Worker) acquireSharedInputs(ctx context.Context, j Job) (map[string]stri
 		path, done, err := w.sharedInputs.Acquire(ctx, input, w.CheckpointRoot)
 		if err != nil {
 			release()
+			if d := pathDiagnostic(err); d != nil && d.Field == "shared_inputs" {
+				d.Field = "shared_inputs." + n + ".nas"
+				err = &pathReadError{diagnostic: *d, cause: err}
+			}
 			return nil, nil, err
 		}
 		releases = append(releases, done)

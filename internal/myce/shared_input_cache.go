@@ -67,10 +67,11 @@ func (c *SharedInputCache) nasPathContext(ctx context.Context, root, relative st
 		return "", err
 	}
 	path, err := c.nasPath(root, relative)
-	if err == nil {
-		err = sharedInputProgress(ctx)
+	if err != nil {
+		// Keep the source boundary, never the expanded worker mount path.
+		return "", PathReadError("shared_inputs", "worker", "input", "worker-checkpoint-root", "", err)
 	}
-	return path, err
+	return path, sharedInputProgress(ctx)
 }
 
 func (c *SharedInputCache) nasPath(root, relative string) (string, error) {

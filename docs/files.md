@@ -448,6 +448,20 @@ paths, for example `python "$MYCE_INPUT_RUNTIME/run.py" "$MYCE_INPUT_ORIGINAL"`.
 Extension commands receive the same environment variables; their NAS output and
 checkpoint contracts are unchanged. Extension execution must be native.
 
+`spec check --resolve` evaluates target eligibility but cannot check a worker's
+NAS file existence or bytes. A path relative to the NAS mount can therefore
+resolve successfully and still be missing beneath `--checkpoint-root`. Import
+such a file with profile `local:` or `myce file put`, then omit `nas` and use its
+verified hash and size. This needs no worker root change or cache clearing.
+
+On the next release, resolve explicitly labels NAS reads as unverified. A
+missing NAS source still fails before launch with `input_staging: not_found`;
+`execution_cause.path_diagnostic` identifies the shared-input field (for example
+`shared_inputs.movie.nas`), the worker side, and logical base
+`worker-checkpoint-root`. The expanded mount path and underlying syscall text
+stay private. Present file-store inputs remain readable immediately after a
+queue restart; a deferred retention pass does not hide them.
+
 Workers report verified cache identities for placement. Their shared input
 evidence counts successful cache hits and cold stages, plus the declared NAS
 source sizes for completed cold stages; it is not a network traffic measurement.
