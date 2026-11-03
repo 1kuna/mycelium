@@ -4,6 +4,26 @@ import "time"
 
 const priorityPreemptionCause = "priority_preemption"
 
+// A batch that paid for release keeps that exact target until assignment.
+// A lost worker/session ends the commitment; cleanup custody remains separate.
+type PreemptionPlacement struct {
+	Machine string `json:"machine"`
+	Session string `json:"session"`
+	Device  string `json:"device"`
+}
+
+func (q *Queue) preemptionPlacementAllows(j *Job, m *Machine) bool {
+	p := j.PreemptionPlacement
+	if p == nil || j.State != "queued" {
+		return true
+	}
+	owner := q.s.Machines[p.Machine]
+	if owner == nil || owner.Gone || owner.Session != p.Session {
+		return true
+	}
+	return m.ID == p.Machine && m.Session == p.Session && m.Device == p.Device
+}
+
 // PriorityPreemption is planned intent, not proof of delivery or release. D5's
 // member facts still decide whether the command completed or was interrupted.
 type PriorityPreemption struct {

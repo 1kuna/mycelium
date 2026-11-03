@@ -2462,6 +2462,7 @@ func (q *Queue) workerHasOtherAttempt(machine, session, job string, attempt int)
 // assign persists the exact target before delivering it through either wire form.
 func (q *Queue) assign(j *Job, m *Machine, scans ...*placementScan) Job {
 	values := q.placementValues(q.placementScan(scans...))
+	q.touchJob(j.ID).PreemptionPlacement = nil
 	if j.Spec.FanOut != nil {
 		j = q.assignFanOut(j, m)
 	}

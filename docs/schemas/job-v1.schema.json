@@ -1840,6 +1840,10 @@
           "type": "integer",
           "x-contract": "diagnostic"
         },
+        "preemption_placement": {
+          "$ref": "#/$defs/PreemptionPlacement",
+          "x-contract": "diagnostic"
+        },
         "priority_policy": {
           "$ref": "#/$defs/PriorityMatch",
           "x-contract": "diagnostic"
@@ -2946,6 +2950,25 @@
           ]
         }
       },
+      "type": "object"
+    },
+    "PreemptionPlacement": {
+      "properties": {
+        "device": {
+          "type": "string"
+        },
+        "machine": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "machine",
+        "session",
+        "device"
+      ],
       "type": "object"
     },
     "PriorityMatch": {

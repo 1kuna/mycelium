@@ -247,6 +247,9 @@ func (q *Queue) capReasonFor(j *Job, target *Machine) string {
 }
 
 func (q *Queue) batchCandidateWithResources(j *Job, m *Machine, resources map[batchResourceKey]batchResourceRoom) *Job {
+	if !q.preemptionPlacementAllows(j, m) {
+		return nil
+	}
 	if j.Spec.FanOut != nil {
 		return q.fanOutCandidateWithResources(j, m, resources)
 	}

@@ -465,6 +465,7 @@ type Job struct {
 	RequeuedByOperator    bool                         `json:"requeued_by_operator,omitempty"`
 	LastStopOutcome       string                       `json:"last_stop_outcome,omitempty"`
 	ProductionHost        string                       `json:"production_host,omitempty"`
+	PreemptionPlacement   *PreemptionPlacement         `json:"preemption_placement,omitempty"`
 	WaitingSince          time.Time                    `json:"waiting_since,omitempty"`
 	AssignedAt            *time.Time                   `json:"assigned_at,omitempty"`
 	InputsStagedAt        *time.Time                   `json:"inputs_staged_at,omitempty"` // Worker clock; diagnostic only, scoped to this attempt.

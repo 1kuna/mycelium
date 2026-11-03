@@ -63,8 +63,13 @@ When a worker asks for work, the queue picks, from the jobs that fit this machin
 4. then the earliest deadline and the job that has waited longest.
 
 **Making room.** The highest fitting owner tier is checked on submission and
-check-in through the shared planner. Prefer compatible free capacity; otherwise
-stop only useful lower-tier work, including non-resumable commands, native
+check-in through the shared planner. Prefer compatible free capacity across all
+eligible hosts; when one fits idle, preempt nothing elsewhere. Otherwise choose
+one host and card set before stopping useful lower-tier work, and keep that
+placement for the demand through exact release and admission. A newly idle host
+or sibling card does not redirect demand after it has caused a stop. Loss of the
+selected worker/session permits replanning without releasing cleanup custody.
+This includes non-resumable commands, native
 sidecar groups, model calls/loads, pinned engines and environment builds. Idle
 unpinned same-tier model cache may be evicted; active same-tier work is never
 preempted. Production preempts lower-tier work. Accelerator work, including
@@ -981,8 +986,9 @@ extension-check, fan-out, exploratory first-run
 and multi-card attempts keep the card to themselves, as does a hint that names
 no device memory (its device figure is only a default), and a newcomer never
 joins a higher tier's attempt. For placement, equal tiers never preempt; a higher tier stops the
-fewest co-tenants whose release frees enough and starts only after that
-release; a multi-card demand stops every co-tenant on its cards. On XPU cards,
+fewest co-tenants whose release frees enough on its selected host/cards and
+starts there only after that exact release; a multi-card demand stops every
+co-tenant on its selected cards. On XPU cards,
 a higher tier instead stops every lower-tier co-tenant and waits for each exact
 release even when memory would fit beside them. Five measured lower-tier
 teardowns in one day reset the card's engines, so this prevents a later

@@ -1228,6 +1228,10 @@ func (q *Queue) makeBatchRoom(j *Job, planned, handled map[string]bool, candidat
 	if best == nil {
 		return ""
 	}
+	if best.stops > 0 {
+		live := q.touchJob(j.ID)
+		live.PreemptionPlacement = &PreemptionPlacement{Machine: best.machine.ID, Session: best.machine.Session, Device: best.machine.Device}
+	}
 	q.applyPlacement(best, selected)
 	return targetKey(best.machine)
 }
