@@ -176,6 +176,7 @@ type Queue struct {
 	statusHolds      queueHoldSampler
 	logCleanupHolds  queueHoldSampler
 	statusCache      statusCache
+	jobSnapshots     map[string]*jobSnapshotCache // q.mu; entries serialize their own refreshes.
 	observeRead      func(string, time.Duration, time.Duration)
 	usageReader      *sql.DB
 	db               *sql.DB
@@ -579,6 +580,7 @@ func (q *Queue) updateRequest(ctx context.Context, fn func() error, timing *queu
 	}
 
 	if err == nil {
+		q.invalidateCallSnapshots(oldCalls)
 		q.invalidateTerminalStatus()
 		q.commitRecords()
 	}

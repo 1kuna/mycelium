@@ -7,6 +7,7 @@ import (
 	"maps"
 	"net/url"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -14,6 +15,49 @@ import (
 )
 
 const statusCacheLifetime = time.Second
+
+// At four polls/second this bounds diagnostic work to one in eight reads.
+// Job commits invalidate immediately; fleet-dependent diagnostics and elapsed
+// times can lag by at most this window, measured from the start of capture.
+const jobSnapshotLifetime = 2 * time.Second
+
+type jobSnapshotCache struct {
+	mu            sync.Mutex // Never acquired by a queue writer.
+	data          string     // Immutable public JSON; each caller decodes its own copy.
+	expires       time.Time
+	dependsOnJobs bool // q.mu; queued guidance and descendant custody use other jobs.
+}
+
+// Calls are ephemeral rather than persisted job records. Match their existing
+// transaction rollback boundary, and invalidate only committed changes.
+func (q *Queue) invalidateCallSnapshots(old map[string]*ModelCall) {
+	changed := false
+	for id, before := range old {
+		if !reflect.DeepEqual(before, q.calls[id]) {
+			delete(q.jobSnapshots, id)
+			changed = true
+		}
+	}
+	for id := range q.calls {
+		if old[id] == nil {
+			delete(q.jobSnapshots, id)
+			changed = true
+		}
+	}
+	if changed {
+		q.invalidateDependentSnapshots()
+	}
+}
+
+// q.mu is held. Both calls and batch jobs contribute to project caps and
+// pending receipts; unchanged transactions leave their cached views intact.
+func (q *Queue) invalidateDependentSnapshots() {
+	for id, entry := range q.jobSnapshots {
+		if entry.dependsOnJobs {
+			delete(q.jobSnapshots, id)
+		}
+	}
+}
 
 func (c Client) inspectionSnapshot(ctx context.Context) (Snapshot, error) {
 	var out Snapshot
@@ -317,14 +361,64 @@ func (q *Queue) findObservationJob(id string) (*Job, error) {
 
 func (q *Queue) jobSnapshot(id string, contexts ...context.Context) (*Job, error) {
 	for {
-		revision := q.statusCache.terminalRevision.Load()
-		out, err := q.jobSnapshotGeneration(id, contexts...)
-		if err != nil || q.statusCache.terminalRevision.Load() == revision {
-			return out, err
-		}
 		if err := requestContext(contexts).Err(); err != nil {
 			return nil, err
 		}
+		unlock := requestLock(requestContext(contexts), &q.mu)
+		job, err := q.findObservationJob(id)
+		if err != nil {
+			unlock()
+			return nil, err
+		}
+		key := job.ID
+		if q.jobSnapshots == nil {
+			q.jobSnapshots = map[string]*jobSnapshotCache{}
+		}
+		entry := q.jobSnapshots[key]
+		if entry == nil {
+			call := q.calls[key]
+			pendingCall := call != nil && call.Machine == "" && call.Error == ""
+			entry = &jobSnapshotCache{dependsOnJobs: pendingCall || job.State == "queued" || job.FanOut != nil || job.CancelledAt != nil}
+			q.jobSnapshots[key] = entry
+		}
+		unlock()
+		entry.mu.Lock()
+		unlock = requestLock(requestContext(contexts), &q.mu)
+		valid := q.jobSnapshots[key] == entry
+		now := q.clock.Now()
+		data := entry.data
+		hit := valid && data != "" && now.Before(entry.expires)
+		unlock()
+		if !valid {
+			entry.mu.Unlock()
+			continue
+		}
+		if !hit {
+			out, captureErr := q.jobSnapshotGeneration(key, contexts...)
+			var encoded []byte
+			if captureErr == nil {
+				encoded, captureErr = json.Marshal(out)
+			}
+			unlock = requestLock(requestContext(contexts), &q.mu)
+			valid = q.jobSnapshots[key] == entry
+			if valid && captureErr == nil {
+				data = string(encoded)
+				entry.data, entry.expires = data, now.Add(jobSnapshotLifetime)
+			}
+			unlock()
+			entry.mu.Unlock()
+			if !valid {
+				continue
+			}
+			if captureErr != nil {
+				return nil, captureErr
+			}
+		} else {
+			entry.mu.Unlock()
+		}
+		var out Job
+		err = json.Unmarshal([]byte(data), &out)
+		return &out, err
 	}
 }
 

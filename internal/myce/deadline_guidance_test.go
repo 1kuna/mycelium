@@ -106,7 +106,13 @@ func TestDeadlineGuidanceNonResumableAndOverrun(t *testing.T) {
 	assertBlocker("ETA unknown")
 	// Synthetic comparable timing evidence; clocks advance without wall sleeps.
 	predicted := 10.0
-	q.s.Jobs[running.ID].Timing = &WorkTiming{PredictedSeconds: &predicted}
+	// Publish synthetic evidence through the commit boundary used by GET.
+	if err := q.update(func() error {
+		q.touchJob(running.ID).Timing = &WorkTiming{PredictedSeconds: &predicted}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 	assertBlocker("10s remaining")
 	clock.Advance(11 * time.Second)
 	assertBlocker("overrun")
