@@ -527,11 +527,7 @@ func (q *Queue) updateRequest(ctx context.Context, fn func() error, timing *queu
 		q.usageWrites = nil
 		q.accountUsage(q.clock.Now())
 		hold.next(holdBody)
-		err := fn() // Simulation aborts on any error; it never resumes a failed mutation.
-		if err == nil {
-			q.publishCommittedRead()
-		}
-		return err
+		return fn() // Simulation aborts on any error; it never resumes a failed mutation.
 	}
 	q.memoryObservationIndex = nil
 	defer func() { q.memoryObservationIndex = nil }()

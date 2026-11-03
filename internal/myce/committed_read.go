@@ -10,6 +10,9 @@ import (
 // Copy changed jobs only: retained history and large ledgers must not become
 // per-heartbeat work. The map shells are private to each generation.
 func (q *Queue) publishCommittedRead() {
+	if q.simulation {
+		return // Offline simulation has no serving readers or durable commits.
+	}
 	base := q.s
 	base.Jobs, base.Submissions = nil, nil
 	inputs := copyObservation(observationState{State: base, Models: q.models,
@@ -44,6 +47,7 @@ func (q *Queue) publishCommittedRead() {
 		copy := *j
 		copy.LedgerEntries = nil // Never an observation input.
 		if !mutableJob(j) {
+			copy.Isolation = jobNativeIsolationStatus(j)
 			copy.Extensions = nil // Frozen payloads are not diagnostic inputs.
 		}
 		out := copyObservation(observationState{State: state{Jobs: map[string]*Job{j.ID: &copy}}}).State.Jobs[j.ID]
@@ -86,7 +90,7 @@ func (q *Queue) captureCommittedObservation(id string, options *statusOptions, c
 		// Serving queues always publish during Open, before accepting requests.
 		return q.captureStatusObservation(id, options, contexts...)
 	}
-	out, files, err := v.captureStatusInputs(id, options)
+	out, files, err := v.captureStatusInputs(id, options, nil)
 	files.reservedOutputs = func(payloads map[string]storedPayload) uint64 {
 		return v.outputReservations(payloads, "")
 	}

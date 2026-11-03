@@ -121,17 +121,17 @@ func (q *Queue) captureStatusObservation(id string, options *statusOptions, cont
 	unlockRequest := requestLock(requestContext(contexts), &q.mu)
 	locked := readWallStart(q.observeRead)
 	hold := q.statusHolds.start()
-	v, files, err := q.captureStatusInputs(id, options)
-	duration := queueHoldDuration(hold)
-	unlockRequest()
-	observeRead(q.observeRead, id, started, locked)
-	logQueueHold(duration, "captureObservation", nil)
-	return v, files, err
+	return q.captureStatusInputs(id, options, func() {
+		duration := queueHoldDuration(hold)
+		unlockRequest()
+		observeRead(q.observeRead, id, started, locked)
+		logQueueHold(duration, "captureObservation", nil)
+	})
 }
 
 // The source is either protected by q.mu or an immutable committed generation.
 // Only detached outputs are ever passed to diagnostic planners.
-func (q *Queue) captureStatusInputs(id string, options *statusOptions) (*Queue, fileStoreObservation, error) {
+func (q *Queue) captureStatusInputs(id string, options *statusOptions, captured func()) (*Queue, fileStoreObservation, error) {
 	var files fileStoreObservation
 	v := &Queue{clock: observationClock{q.clock.Now()}, nasAvailable: q.nasAvailable,
 		simulation: q.simulation, productionGrace: q.productionGrace, lossTimeouts: q.lossTimeouts,
@@ -266,6 +266,9 @@ func (q *Queue) captureStatusInputs(id string, options *statusOptions) (*Queue, 
 	var detached observationState
 	if err == nil {
 		detached = copyObservation(inputs)
+	}
+	if captured != nil {
+		captured() // Release the live queue before detached custody projection.
 	}
 	if err != nil {
 		return nil, files, err
