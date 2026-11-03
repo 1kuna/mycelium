@@ -40,7 +40,7 @@ func TestWorkerServiceShutdownRequeuesNative(t *testing.T) {
 			j := submit(t, q, s)
 			server := httptest.NewServer(API{Queue: q, Token: "test"}.Handler())
 			defer server.Close()
-			w := Worker{StateDir: t.TempDir(), Clock: clock, Interval: time.Millisecond,
+			w := Worker{EnvironmentLimit: 1 << 20, StateDir: t.TempDir(), Clock: clock, Interval: time.Millisecond,
 				Machine: machine("service", "fake"), Client: Client{URL: server.URL, Token: "test"},
 				ServiceConfig: &ServiceConfig{Role: "worker"}, memoryCeilings: fakeCeilings(t)}
 			ctx, cancel := context.WithCancel(context.Background())

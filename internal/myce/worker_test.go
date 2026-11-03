@@ -100,7 +100,7 @@ func TestWorkerCancelledBeforeJoining(t *testing.T) {
 	defer server.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	w := Worker{StateDir: newTestStateRoot(t), Client: Client{URL: server.URL, Token: "test"}, Machine: machine("worker", "fake"), Interval: time.Millisecond}
+	w := Worker{EnvironmentLimit: 1 << 20, StateDir: newTestStateRoot(t), Client: Client{URL: server.URL, Token: "test"}, Machine: machine("worker", "fake"), Interval: time.Millisecond}
 	if err := w.Run(ctx); err != nil {
 		t.Fatal(err)
 	}

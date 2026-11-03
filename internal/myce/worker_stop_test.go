@@ -62,7 +62,7 @@ func testWorkerBlockedNetworkStop(t *testing.T, blockCheckin bool) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	stateDir := t.TempDir()
-	w := Worker{StateDir: stateDir, Clock: clock, Interval: time.Millisecond, Machine: machine("one", "fake"), Client: Client{URL: server.URL, Token: "test"}}
+	w := Worker{EnvironmentLimit: 1 << 20, StateDir: stateDir, Clock: clock, Interval: time.Millisecond, Machine: machine("one", "fake"), Client: Client{URL: server.URL, Token: "test"}}
 	go func() { done <- w.Run(ctx) }()
 	defer func() {
 		data, _ := readSingleAttemptState(filepath.Join(stateDir, "state.json"))
